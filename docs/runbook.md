@@ -359,6 +359,66 @@ bazel run //charts/aether:aether.install
 > do **not** use `--reuse-values` (it keeps the stale digest-pinned image). Bump
 > the chart's `version:` on any change to its templates/values (CI enforces this).
 
+### Pre-flight: node headroom before a roll (#812)
+
+Do this **before** any `helm upgrade` that rolls the DaemonSets. A roll is a
+scheduling event, and on a node that is already tight the scheduler — not the
+code — decides whether it succeeds.
+
+Two distinct exposures, and only one of them is fixed in the chart:
+
+- **Edge (Deployment).** Fixed by default since #812: with `replicaCount >= 2`
+  the strategy is surge-free (`maxSurge: 0, maxUnavailable: 1`), so no extra
+  400m pod has to be placed and the scheduler is out of the rollout path. If you
+  override `edge.rollingUpdate` back to a surging strategy, this pre-flight is
+  mandatory — on rev214 that surge pod was preempted on a node at 84 % CPU
+  requests and wedged the roll.
+- **The DaemonSets (`aether-agent`, `aether-proxy`, `aether-mesh-dns`).** Not
+  fixed and not fixable by a strategy: a DaemonSet pod must land on *its* node
+  or not at all. The replacement needs the departing pod's request back, and if
+  anything on that node is stuck `Terminating` it is still holding its CPU
+  request — at which point the scheduler will not even preempt (`preemption: not
+  eligible due to a terminating pod on the nominated node`). That is #796.
+
+```bash
+# 1) Rank nodes by CPU requests. Anything at/above ~85 % is where a roll stalls.
+#    Sort on the percentage as a NUMBER: a lexical sort puts "(100%)" below
+#    "(58%)" and hides the one node you are looking for.
+kubectl get nodes -o name | sed 's|node/||' | while read -r n; do
+  kubectl describe node "$n" \
+    | sed -n '/Allocated resources/,/Events/p' \
+    | awk -v n="$n" '/^  cpu /{pct=$3; gsub(/[()%]/,"",pct); printf "%6.1f  %-14s %s %s\n", pct, n, $2, $3}'
+done | sort -rn
+
+# 2) On any node above the line, name what is actually holding the requests, so
+#    the decision is "move this tenant" rather than "hope it lands elsewhere".
+#    QUOTE the -o argument: the unquoted [*] is a glob and zsh fails the
+#    command outright ("no matches found") before kubectl ever runs.
+kubectl get pods -A --field-selector spec.nodeName=<node> \
+  -o 'custom-columns=NS:.metadata.namespace,NAME:.metadata.name,CPU:.spec.containers[*].resources.requests.cpu,PRIO:.spec.priorityClassName' \
+  | sort -k3 -hr | head -20
+#    A multi-container pod prints its requests comma-joined (`500m,10m`, the
+#    proxy), so read that column rather than trusting its sort position.
+
+# 3) Nothing may be stuck Terminating anywhere — one of these makes its whole
+#    node unrollable regardless of headroom.
+kubectl get pods -A --field-selector status.phase!=Running,status.phase!=Succeeded \
+  -o wide | grep -i terminating
+```
+
+**Verdict.** All nodes comfortably under the line and nothing `Terminating` →
+roll. A node over it → either move the tenant workload off first (the platform
+did exactly this on 2026-09-19, spreading the o11y stack and taking w01 from
+88 % to 66 %), or accept that that node's DaemonSet pods may sit `Pending` and
+watch them specifically. A pod stuck `Terminating` → resolve it first via
+§8 "A pod is stuck `Terminating`"; do not start a roll on top of it.
+
+**Load generators must not be the victim.** The priority-0 k6 runner was picked
+as the preemption victim twice on a dense node and cost a soak its data; it runs
+under the `aether-soak-loader` PriorityClass since #811. Any new load or probe
+workload needs a PriorityClass for the same reason — an evicted generator looks
+exactly like a passing test.
+
 ### Version-ordering constraint: issue #815 (per-source client certificates)
 
 **You may not upgrade a cluster from a chart/agent older than `0.92.27` (the
