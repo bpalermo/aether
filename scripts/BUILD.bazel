@@ -1,0 +1,18 @@
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+
+# The #848 coverage guard, declared as a Bazel target so the shellcheck aspect
+# in //bazel/lint:linters.bzl lints it too. A gate that is itself unlinted is
+# the same bug one level up.
+#
+# It is the only script here for now. The rest of this directory — and
+# e2e/**, bazel/*.sh — are equally invisible to `make lint`, because until this
+# change the repository declared no sh_* target at all and the shellcheck aspect
+# had nothing anywhere to visit. Widening `srcs` to glob(["*.sh"]) is a two-word
+# edit, but three of those scripts have live SC2155/SC2034 warnings and fixing
+# them is a different change from #848, so it is #853 rather than something
+# smuggled in here.
+sh_library(
+    name = "check_proxy_shell_lint",
+    srcs = ["check-proxy-shell-lint.sh"],
+    visibility = ["//visibility:private"],
+)

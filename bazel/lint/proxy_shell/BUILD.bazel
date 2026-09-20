@@ -1,0 +1,46 @@
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+
+# The //proxy workspace's shell scripts, brought into range of the root
+# workspace's shellcheck aspect (#848).
+#
+# The problem: `proxy` is listed in //.bazelignore, so root tooling never
+# descends into it and `make lint` could not see a single line of its shell.
+# `proxy/bazel/image_metadata.sh` (#845) was shellcheck'd by hand once, which
+# does not survive the next edit.
+#
+# The ignore is NOT the thing to remove: //proxy is a separate bzlmod workspace
+# pinned to its own Bazel version whose //:image is a multi-hour Envoy compile,
+# and a root build that descended into it would try to analyse all of that.
+#
+# So the scripts are reached the same way //website:staged/proxy-README.md
+# reaches proxy/README.md (see the comment on //:website_docs): a source symlink
+# in a NON-ignored directory. A label under an ignored directory resolves but is
+# never staged into the sandbox; a symlink to it is an ordinary source file of
+# THIS package, and Bazel stages its contents. Nothing here depends on anything
+# in the proxy workspace's build graph — sh_library over four source files pulls
+# in no toolchain, no C++ and no Envoy.
+#
+# `sh_library` and not a filegroup because that is what
+# lint_shellcheck_aspect visits (rule_kinds = sh_binary/sh_library/sh_test, see
+# //bazel/lint:linters.bzl). The aspect lints every src regardless of extension,
+# which is why `get_workspace_status` is covered despite having none.
+#
+# Adding a script to //proxy and forgetting the symlink here would silently
+# un-cover it again, so scripts/check-proxy-shell-lint.sh asserts the two sets
+# agree; the `proxy` workflow runs it (and this target) on every proxy change.
+#
+# Scope note: the root workspace's OWN shell (scripts/, e2e/, bazel/) is not
+# covered either — before this package the repo declared no sh_* target at all,
+# so the shellcheck aspect had nothing to visit anywhere. That is #853,
+# deliberately not fixed here: three of those scripts have live warnings and
+# fixing them is not #848.
+sh_library(
+    name = "proxy_shell",
+    srcs = [
+        "bazel/get_workspace_status",
+        "bazel/image_metadata.sh",
+        "integration/check_build_id.sh",
+        "integration/check_symtab.sh",
+    ],
+    visibility = ["//visibility:private"],
+)

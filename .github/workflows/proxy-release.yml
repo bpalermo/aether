@@ -166,13 +166,131 @@ jobs:
           path: digests
 
       # Combine the two per-arch images (by digest) into one multi-arch manifest,
-      # tagged with the commit SHA.
+      # tagged with the commit SHA, and annotate the INDEX with the same
+      # provenance the per-platform descriptors carry (#847).
+      #
+      # Why the index needs its own copy: the seven Bazel-built images get their
+      # annotations from rules_img at index level AND on each per-platform
+      # descriptor, so `crane manifest <index> | jq .annotations` answers
+      # straight away. aether-proxy's index is assembled here, by buildx, and
+      # carried NOTHING — verified on the published artifact for the currently
+      # pinned tag, whose index JSON has no `annotations` key at all. The answer
+      # existed one hop down and the obvious query did not return it, which is
+      # the same failure shape as #837 itself.
+      #
+      # The set is DERIVED from the two per-platform manifests, never restated
+      # here. A literal list in this file would be a second source of truth for
+      # the same facts and would rot the first time //proxy's `image_metadata`
+      # gained or dropped a key — and an index whose provenance disagrees with
+      # its platforms is worse than an index with none.
+      #
+      # Only keys PRESENT AND EQUAL on both arches are promoted: an index
+      # annotation is a claim about the whole index, so a key that differs per
+      # platform (a base image's per-arch `source`, say) must stay where it is
+      # true. Everything aether sets — the aether commit, the Envoy pin, the
+      # bazel-registry commit — is identical across arches by construction.
+      #
+      # Ordering, which is the one thing that could actually hurt: adding
+      # annotations CHANGES THE INDEX DIGEST, and `bump-chart` pins the chart to
+      # `index_digest`. The annotations therefore go on the same
+      # `imagetools create` that publishes the index, and the read-back below is
+      # unchanged and still the last thing that happens. There is deliberately
+      # no second "annotate the index afterwards" pass: that would republish a
+      # different index under the same tag and leave the chart pinned to a
+      # digest nothing serves any more.
       - name: Assemble multi-arch manifest
         id: manifest
+        env:
+          # Guard value only — the annotation's value still comes from the
+          # manifest. See the `source` check in the jq below.
+          SOURCE_URL: https://github.com/bpalermo/aether
         run: |
           amd64="$(cat digests/digest-amd64/digest.txt)"
           arm64="$(cat digests/digest-arm64/digest.txt)"
-          docker buildx imagetools create \
+
+          # --- derive the index annotations (#847) -------------------------
+          # Every step below is best-effort by design: this whole block can
+          # only ever ADD `--annotation` arguments to the create. If anything
+          # is unreadable, unsupported or unexpected it leaves `annotate`
+          # empty and the create is byte-for-byte the command that ran before
+          # this change. A release cannot regress on account of provenance.
+          annotate=()
+          amd_json="$RUNNER_TEMP/manifest-amd64.json"
+          arm_json="$RUNNER_TEMP/manifest-arm64.json"
+          wanted="$RUNNER_TEMP/index-annotations.txt"
+          if docker buildx imagetools inspect --raw "${IMAGE}@${amd64}" > "$amd_json" &&
+             docker buildx imagetools inspect --raw "${IMAGE}@${arm64}" > "$arm_json"; then
+            # Present and equal on both manifests; a sane key shape; a value
+            # that is non-empty and free of control characters (it becomes one
+            # argv element, so embedded spaces are fine but a newline would
+            # break this line-oriented handoff).
+            #
+            # The `source` clause is the one non-derivation rule, and it exists
+            # because distroless/cc's own manifest carries
+            # `org.opencontainers.image.source = .../GoogleContainerTools/distroless`
+            # and rules_oci MERGES base annotations. #845 overrides it with
+            # ours; until an image built after #845 is what we are indexing,
+            # the inherited value is still there — and promoting *that* to the
+            # index would take #837's confidently-wrong answer and put it on
+            # the descriptor tools read first. A foreign `source` is dropped,
+            # which is the honest absence this repository already had.
+            jq -r -n --slurpfile a "$amd_json" --slurpfile b "$arm_json" --arg src "$SOURCE_URL" '
+              ($a[0].annotations // {}) as $A |
+              ($b[0].annotations // {}) as $B |
+              [ $A | to_entries[]
+                   | select($B[.key] == .value)
+                   | select(.key   | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+                   | select(.value | length > 0)
+                   | select(.value | test("^[^[:cntrl:]]*$"))
+                   | select(.key != "org.opencontainers.image.source" or .value == $src)
+                   | "\(.key)=\(.value)" ] | sort | .[]
+            ' > "$wanted" || true
+
+            # Report what did NOT make it, so a dropped key is visible in the
+            # run rather than being silently absent from the index.
+            jq -r -n --slurpfile a "$amd_json" --slurpfile b "$arm_json" \
+              '(($a[0].annotations // {}) + ($b[0].annotations // {})) | keys[]' |
+              sort -u > "$RUNNER_TEMP/all-keys.txt"
+            cut -d= -f1 "$wanted" | sort -u > "$RUNNER_TEMP/promoted-keys.txt"
+            while IFS= read -r key; do
+              [ -n "$key" ] || continue
+              echo "::warning::not promoting '$key' to the index — it differs between arches, is malformed, or is a foreign image.source (#847)"
+            done < <(comm -23 "$RUNNER_TEMP/all-keys.txt" "$RUNNER_TEMP/promoted-keys.txt")
+
+            while IFS= read -r kv; do
+              [ -n "$kv" ] && annotate+=(--annotation "index:$kv")
+            done < "$wanted"
+          else
+            echo "::warning::could not read the per-platform manifests — publishing the index without annotations (#847)"
+          fi
+
+          # Prove the flags work BEFORE publishing anything. `--dry-run` builds
+          # the index and prints it instead of pushing, so a buildx that does
+          # not support `--annotation` on `imagetools create`, or silently drops
+          # one, is caught here and costs us the annotations rather than the
+          # release.
+          if [ "${#annotate[@]}" -gt 0 ]; then
+            if docker buildx imagetools create --dry-run "${annotate[@]}" \
+                 -t "${IMAGE}:${{ github.sha }}" \
+                 "${IMAGE}@${amd64}" "${IMAGE}@${arm64}" \
+                 > "$RUNNER_TEMP/index-dryrun.json" 2> "$RUNNER_TEMP/index-dryrun.err"; then
+              jq -r '.annotations // {} | to_entries[] | "\(.key)=\(.value)"' \
+                "$RUNNER_TEMP/index-dryrun.json" | sort > "$RUNNER_TEMP/index-dryrun.txt"
+              missing="$(comm -23 <(sort "$wanted") "$RUNNER_TEMP/index-dryrun.txt" || true)"
+              if [ -n "$missing" ]; then
+                echo "::warning::the dry-run index is missing requested annotations, publishing without them (#847):"
+                echo "$missing"
+                annotate=()
+              fi
+            else
+              echo "::warning::imagetools create --annotation is not usable here, publishing without index annotations (#847):"
+              cat "$RUNNER_TEMP/index-dryrun.err"
+              annotate=()
+            fi
+          fi
+
+          # --- publish the index -------------------------------------------
+          docker buildx imagetools create "${annotate[@]}" \
             -t "${IMAGE}:${{ github.sha }}" \
             "${IMAGE}@${amd64}" \
             "${IMAGE}@${arm64}"
@@ -180,6 +298,10 @@ jobs:
           # `imagetools inspect --raw` locally: that is the digest of whatever
           # bytes the CLI chose to print, not necessarily the descriptor the
           # registry stores.
+          #
+          # This runs AFTER the create above, which is the create that carries
+          # the annotations, so what bump-chart pins is the annotated index. Do
+          # not move any annotation work below this line.
           index="$(docker buildx imagetools inspect \
             --format '{{.Manifest.Digest}}' "${IMAGE}:${{ github.sha }}")"
           case "$index" in
@@ -188,6 +310,32 @@ jobs:
           esac
           echo "index_digest=$index" >> "$GITHUB_OUTPUT"
           echo "index: $index"
+
+          # Confirm, by digest, that the thing the chart is about to pin is the
+          # annotated one. A warning and not a failure: the index is published
+          # and the pin is correct either way, so failing here would cost the
+          # chart pin (and a manual re-run) to report a missing convenience.
+          docker buildx imagetools inspect --raw "${IMAGE}@${index}" \
+            > "$RUNNER_TEMP/index-published.json" || true
+          {
+            echo "## \`aether-proxy:${{ github.sha }}\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| index digest | \`${index}\` |"
+            echo
+            echo "Index annotations (#847):"
+            echo
+            echo '```json'
+            jq '.annotations // {}' "$RUNNER_TEMP/index-published.json" 2>/dev/null || echo '{}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          published="$(jq -r '.annotations // {} | to_entries[] | "\(.key)=\(.value)"' \
+            "$RUNNER_TEMP/index-published.json" 2>/dev/null | sort || true)"
+          if [ "${#annotate[@]}" -gt 0 ] &&
+             [ -n "$(comm -23 <(sort "$wanted") <(printf '%s\n' "$published"))" ]; then
+            echo "::warning::the published index at ${index} does not carry every annotation that was requested (#847)"
+          fi
 
   # Pin the aether chart to the just-published image (commit-SHA tag) and, when a
   # release token is available, open the pin PR and hand the merge to GitHub
