@@ -1713,11 +1713,18 @@ certificate per connection:
 
 ```
 envoy.tls.certificate_selectors.on_demand_secret
-  config_source:      the agent's ADS stream
+  config_source:      its OWN gRPC SDS stream to agent_xds  <-- NOT `ads: {}`
   certificate_mapper: envoy.tls.upstream_certificate_mappers.filter_state_override
                         default_value: <the node SVID>
   prefetch_secret_names: [<the node SVID>]
 ```
+
+> ⚠ **THE SELECTOR MUST NOT FETCH OVER `ads: {}`. THIS IS WHAT TOOK THE MESH
+> DOWN.** It shipped that way as rev228 on 2026-09-20 and every mesh upstream
+> mTLS connection on the fleet stopped completing within seconds of the new
+> proxies taking the config. Full account below under **"The rev228 outage"**.
+> If you are reading this because you are about to "tidy up" the one SDS
+> reference on this proxy that is not `ads: {}` — don't. Read that section.
 
 The mapper reads the filter-state object named — exactly, and not
 configurably — `envoy.tls.certificate_mappers.on_demand_secret` off
@@ -1757,6 +1764,130 @@ Two things follow, and they are the point of the change:
 > session is keyed without reference to which on-demand certificate produced it,
 > so a resumed one would carry a certificate the selector did not choose. #834
 > already set it to 0 for #829; it is now load-bearing for two reasons.
+> Note the upstream factory does **not** enforce this the way the downstream one
+> does — Envoy will accept a non-zero value here without complaint.
+
+#### The rev228 outage: why the selector gets its own SDS stream
+
+**Symptom.** Every mesh **upstream** mTLS connection stops completing, at the
+instant the proxies take the config. Inbound is fine, the local data path is
+fine, same-node upstreams fail too. Requests **pause**; they do not fail:
+
+| what you would normally check | what it said |
+|---|---|
+| `envoy_cluster_ssl_connection_error_total` | no new series |
+| `envoy_cluster_ssl_fail_verify_san_total` | 0 series |
+| access log `upstream_transport_failure_reason != "-"` | **0** records |
+| access log, source reporter | `upstream_host` SELECTED, `upstream_peer_uri_san="-"`, `response_flags=DC`, `duration_ms≈1980` |
+
+**A green "no handshake errors" dashboard is not evidence of health here.** The
+only signals that move are end-to-end ones, and the two that name the mechanism:
+
+- `envoy_cluster_on_demand_secret_cert_requested_total` climbing while
+  **`envoy_cluster_on_demand_secret_cert_updated_total` stays absent**. Absent
+  means zero: Envoy does not export a counter that never incremented.
+  `cert_updated` is bumped only by the completion callback of the selector's
+  `setContext`, which is reachable only from a secret actually arriving. Zero
+  therefore proves **no SDS payload ever reached the selector**.
+- `envoy_sds_spiffe_<mangled name>_init_fetch_timeout_total` climbing, for the
+  node SVID and for workload SVIDs. That is the 15 s `initial_fetch_timeout`
+  on a subscription that never got an answer.
+
+**`cert_requested == cert_active` is NOT a health signal.** `cert_active`
+counts live secret *subscriptions*, not applied certificates, and it is
+incremented on the same line as `cert_requested`. Equality just means nothing
+has been removed. On the fleet it read equal on four of five nodes while the
+mesh was entirely down. `cert_updated` is the only success signal the selector
+has.
+
+**Mechanism.** Envoy keys a secret provider on
+`hash(ConfigSource) + "." + name + warm` (`secret_manager_impl.h`). The
+on-demand selector always asks with `warm=false`; every statically named SDS
+reference asks with `warm=true`. So **one secret name gets two independent
+`SdsApi` objects with two independent watches** — and on a node proxy that is
+the normal case, not an edge case:
+
+- every local pod's SVID is already named statically by that pod's own inbound
+  listener (`DownstreamTransportSocket`), and
+- the node SVID — the selector's `default_value` *and* its
+  `prefetch_secret_names` — is already named statically by every
+  `inboundready_<pod>` probe cluster.
+
+The selector is therefore always the **second** subscriber. On the delta-ADS
+mux, Envoy's `WatchMap` deduplicates subscription interest per (type_url,
+resource name) across watches, so the second watch contributes nothing to
+`resource_names_subscribe`. No request goes out. A delta control plane —
+correctly — sends only what changed, which is nothing. The second watch never
+receives the resource.
+
+And nothing recovers it: `SdsApi::onConfigUpdateFailed` only calls
+`init_target_.ready()`. It does **not** notify the parked certificate-selection
+callback. So `doSelectTlsContext`'s `Pending` is never resolved and the
+handshake stays suspended until the cluster's `connect_timeout` — or, sooner,
+until the downstream client gives up (`DC`).
+
+**Fix.** The selector gets its own `api_config_source` to the `agent_xds`
+cluster, which means its own mux and its own watch map, so its subscription can
+no longer be deduplicated against a static one. It is state-of-the-world rather
+than delta on purpose: a SotW response carries every requested resource and
+`GrpcMuxImpl::addWatch` queues a request unconditionally, so the failure is
+structurally impossible on that stream even if a static reference ever lands on
+it. The agent already serves `SecretDiscoveryService` on the same socket as ADS
+(`common/xds/xds.go`), so there is no new bootstrap cluster.
+
+**What it costs.** Envoy builds a mux per non-ADS subscription, so this is one
+gRPC stream **per secret name the selector resolves** — per identity actually
+originating traffic on the node, appearing lazily on first use — each carrying
+exactly one resource. `max_concurrent_streams: 10` on the chart's `agent_xds`
+cluster does **not** cap them: on an upstream cluster that field is what Envoy
+advertises for *peer*-initiated streams. The governing limit is the agent's
+`grpc.MaxConcurrentStreams(1000)`.
+
+> ⚠ **Perturbing the ConfigSource hash is NOT a fix.** Adding an
+> `initial_fetch_timeout` to `ads: {}` gives you a different provider key while
+> leaving the mux — and therefore the watch map that does the deduplication —
+> shared. The *stream* has to be separate.
+
+> ⚠ **Never point a statically named secret at the selector's stream.** That
+> puts a `warm=true` and a `warm=false` provider for one name back on one mux
+> and resumes the starvation, silently.
+> `TestMeshCertSelectorSDSSourceIsNotSharedWithAnyStaticSecret`
+> (`agent/internal/xds/proxy`) fails the build if any builder does.
+
+**The gate.** `//test/mtlspool`'s
+`TestOnDemandCertificateResolvesWhenAlreadyStaticallyReferenced` runs the pinned
+proxy against a real delta-ADS control plane with the source identity referenced
+*both* ways, and asserts the request **completes within a bound**. It was red
+against the shipped configuration for exactly this reason. The earlier harness
+could not have caught it: it rewrote every SDS config source to a bespoke
+`api_config_source` because it had no control plane, which accidentally *was*
+the fix.
+
+**Diagnosing it again, in order:** `cert_updated` flat while `cert_requested`
+climbs → `sds.<name>.init_fetch_timeout` → `/config_dump?resource=dynamic_warming_secrets`
+(the starved names sit there with `version_info: "uninitialized"`).
+
+⚠ **`cert_requested` and `cert_active` cannot be compared across a hot restart.**
+Two live Envoy epochs both export; when the parent's series goes away the summed
+GAUGE (`cert_active`) drops to the child's alone while the COUNTER
+(`cert_requested`) keeps the merged total, because StatMerger transfers gauges
+absolute and counters as deltas. On rev228 that produced a w05 reading of
+`requested=55, active=28` that looked like 27 secret removals and was not.
+Check `envoy_server_live` and `envoy_server_hot_restart_epoch` before reading
+anything into the pair.
+
+**Rotation.** An SVID rotation re-resolves a secret the selector already holds,
+and it must arrive on the selector's own stream. New upstream connections then
+present the new certificate; connections already established keep the one they
+handshook with, which is correct. SPIRE rotates on a ~4 h TTL, so a 60–75 minute
+deploy validation crosses no rotation while an 8 h soak crosses about two — i.e.
+a rotation defect would first appear as a soak going quiet several hours in,
+with no error anywhere. `//test/mtlspool`'s
+`TestRotatedSVIDIsPickedUpOverTheSelectorStream` is the build-time gate for it:
+it republishes every SVID under a new snapshot version and requires the
+destination to verify a different certificate SERIAL for the same SPIFFE ID
+within a bound, with `cert_updated` moving and every request completing
+throughout.
 
 #### THE ALERT THIS BREAKS — cross-repo
 

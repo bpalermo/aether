@@ -90,7 +90,10 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	var onDemand on_demand_secretv3.Config
 	require.NoError(t, sel.GetTypedConfig().UnmarshalTo(&onDemand))
 	assert.Equal(t, filterStateCertMapperName, onDemand.GetCertificateMapper().GetName())
-	require.NotNil(t, onDemand.GetConfigSource().GetAds(), "secrets come over the agent's ADS stream")
+	// NOT `ads: {}`. See meshCertSelectorSDSSource: the selector must not share
+	// a mux with the statically named SDS references, or its subscription is
+	// deduplicated away and the handshake pauses forever (the rev228 outage).
+	assertCertSelectorSDSSource(t, onDemand.GetConfigSource())
 	assert.Equal(t, []string{node}, onDemand.GetPrefetchSecretNames(),
 		"only the default is prefetched; prefetching workload identities would put the node's identity set back into the cluster's bytes")
 
@@ -581,4 +584,109 @@ func TestClusterNamesStrict(t *testing.T) {
 	got, ok := ServiceFromClusterName(fqdn, meshDomain)
 	require.True(t, ok)
 	assert.Equal(t, key, got, "FQDN must round-trip back to the <ns>/<svc> key")
+}
+
+// assertCertSelectorSDSSource pins the certificate selector's SDS transport:
+// an explicit gRPC api_config_source to the bootstrap's agent_xds cluster, and
+// emphatically NOT the shared `ads: {}` stream.
+//
+// This is the whole of the #842 rev228 fix, and it is a shape a reader will be
+// tempted to "simplify" — every other SDS reference on this proxy is `ads: {}`,
+// and this one looks gratuitously different. It is not. See
+// meshCertSelectorSDSSource for why, and //test/mtlspool's
+// TestOnDemandCertificateResolvesWhenAlreadyStaticallyReferenced for the
+// runtime proof against a real Envoy.
+func assertCertSelectorSDSSource(t *testing.T, src *corev3.ConfigSource) {
+	t.Helper()
+
+	require.NotNil(t, src, "the selector must name a config source")
+	require.Nil(t, src.GetAds(),
+		"the certificate selector must NOT fetch over the shared ADS stream: Envoy's delta "+
+			"WatchMap deduplicates subscription interest per (type_url, resource name) across "+
+			"watches, and every secret the selector asks for is ALREADY subscribed there by a "+
+			"static reference (each pod's inbound listener; the node SVID via inboundready_<pod>). "+
+			"The selector's watch then never sends a request, never receives the secret, and the "+
+			"upstream handshake pauses with no error and no stat (issue #842, rev228)")
+
+	api := src.GetApiConfigSource()
+	require.NotNil(t, api, "the selector needs its OWN api_config_source, i.e. its own mux")
+	assert.Equal(t, corev3.ApiConfigSource_GRPC, api.GetApiType(),
+		"state-of-the-world: a SotW response carries every requested resource and "+
+			"GrpcMuxImpl::addWatch always queues a request, so the deduplication failure above is "+
+			"structurally impossible on this stream even if a static reference ever lands on it")
+	require.Len(t, api.GetGrpcServices(), 1)
+	assert.Equal(t, AgentXDSClusterName, api.GetGrpcServices()[0].GetEnvoyGrpc().GetClusterName(),
+		"the agent serves SecretDiscoveryService on the same socket as ADS (common/xds/xds.go), "+
+			"so this needs no new bootstrap cluster")
+}
+
+// TestMeshCertSelectorSDSSourceIsNotSharedWithAnyStaticSecret is the invariant
+// that keeps the #842 fix working, stated over the builders rather than over
+// one cluster.
+//
+// The failure it guards is not "the selector is misconfigured" but "somebody
+// pointed a STATICALLY named secret at the selector's stream". That would put a
+// warm=true and a warm=false provider for the same name back on one mux, and
+// Envoy would resume starving one of them -- silently, with the same
+// no-error-no-stat pause. So the property is a separation, and it has to be
+// checked from both ends.
+func TestMeshCertSelectorSDSSourceIsNotSharedWithAnyStaticSecret(t *testing.T) {
+	selectorSource := meshCertSelectorSDSSource()
+	assertCertSelectorSDSSource(t, selectorSource)
+
+	// Every builder that names a secret STATICALLY, with the source it uses.
+	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
+	pod := "spiffe://example.org/ns/demo/sa/app"
+	bundle := "spiffe://example.org"
+
+	mesh := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil)
+	InjectUpstreamMTLS(mesh, node, bundle, nil, "8080", "")
+
+	for name, ts := range map[string]*corev3.TransportSocket{
+		"DownstreamTransportSocket":        DownstreamTransportSocket(pod, bundle, "example.org"),
+		"UpstreamTransportSocket":          UpstreamTransportSocket(node, bundle, []string{pod}, "8080"),
+		"UpstreamTCPTransportSocket":       UpstreamTCPTransportSocket(node, bundle, []string{pod}, "8080"),
+		"InboundReadyProbeTransportSocket": InboundReadyProbeTransportSocket(node, bundle, pod),
+		"MeshUpstreamTransportSocket":      mesh.GetTransportSocket(),
+	} {
+		for _, src := range staticSecretSources(t, ts) {
+			assert.Falsef(t, proto.Equal(src, selectorSource),
+				"%s names a secret statically over the certificate selector's own SDS stream. "+
+					"Two providers (warm=true and warm=false) for one resource name on one mux is "+
+					"exactly the rev228 starvation (issue #842) -- keep static references on `ads: {}`",
+				name)
+		}
+	}
+}
+
+// staticSecretSources returns the config source of every STATICALLY named SDS
+// secret in a transport socket, in both directions, including the validation
+// context's. The certificate selector's own source is deliberately excluded --
+// it is the one reference that is allowed there.
+func staticSecretSources(t *testing.T, ts *corev3.TransportSocket) []*corev3.ConfigSource {
+	t.Helper()
+	require.NotNil(t, ts)
+
+	var common *tlsv3.CommonTlsContext
+	var up tlsv3.UpstreamTlsContext
+	if err := ts.GetTypedConfig().UnmarshalTo(&up); err == nil {
+		common = up.GetCommonTlsContext()
+	} else {
+		var down tlsv3.DownstreamTlsContext
+		require.NoError(t, ts.GetTypedConfig().UnmarshalTo(&down))
+		common = down.GetCommonTlsContext()
+	}
+	require.NotNil(t, common)
+
+	sources := make([]*corev3.ConfigSource, 0, 3)
+	for _, sc := range common.GetTlsCertificateSdsSecretConfigs() {
+		sources = append(sources, sc.GetSdsConfig())
+	}
+	if sc := common.GetValidationContextSdsSecretConfig(); sc != nil {
+		sources = append(sources, sc.GetSdsConfig())
+	}
+	if c := common.GetCombinedValidationContext(); c != nil {
+		sources = append(sources, c.GetValidationContextSdsSecretConfig().GetSdsConfig())
+	}
+	return sources
 }
