@@ -101,7 +101,7 @@ func BuildCaptureTCPRouteFilterChain(svc CaptureTCPService, rules []L4ServiceRou
 				{AddressPrefix: svc.ClusterIP, PrefixLen: wrapperspb.UInt32(32)},
 			},
 		},
-		Filters: append(buildSourceFilterStates(sourceSpiffeID), tcpProxy),
+		Filters: append(BuildSourceFilterStates(sourceSpiffeID), tcpProxy),
 	}
 }
 
@@ -144,7 +144,7 @@ func BuildCaptureTLSRouteFilterChains(svc CaptureTCPService, rules []L4ServiceRo
 				},
 				ServerNames: rule.SNIHostnames,
 			},
-			Filters: append(buildSourceFilterStates(sourceSpiffeID), tcpProxy),
+			Filters: append(BuildSourceFilterStates(sourceSpiffeID), tcpProxy),
 		})
 	}
 	return chains
