@@ -518,6 +518,13 @@ edge:
   # Empty = chart default: a soft hostname spread across the gateway replicas
   # (maxSkew 1, ScheduleAnyway). Set to replace the default entirely.
   topologySpreadConstraints: []
+  # Empty = chart default, which depends on replicaCount (#812): with >= 2
+  # replicas, `maxSurge: 0, maxUnavailable: 1` — no surge pod to be preempted on
+  # a dense node, and the spread above keeps a replica serving behind the LB.
+  # With exactly 1 replica, `maxSurge: 1, maxUnavailable: 0`, since a single
+  # replica cannot roll without either a surge or an outage. Set to replace the
+  # default entirely, e.g. to restore surging on a cluster with spare headroom.
+  rollingUpdate: {}
   # The edge reuses the agent image (run as `agent edge`) and the proxy image
   # (plain Envoy entrypoint). Override agent.image / proxy.image to mirror.
   # Ports the edge's public-facing listeners bind (north-south). Privileged ports

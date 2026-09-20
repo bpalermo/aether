@@ -17,8 +17,26 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
+      {{- if .Values.edge.rollingUpdate }}
+      {{- toYaml .Values.edge.rollingUpdate | nindent 6 }}
+      {{- else if gt (int .Values.edge.replicaCount) 1 }}
+      # Surge-free by default when there is more than one replica (#812). A
+      # surging roll needs room for an extra 400m pod, and on rev214 that pod was
+      # preempted by the proxy DaemonSet on a node at 84 % CPU requests, which
+      # wedged the roll outright — later rolls only escaped it because the surge
+      # pod happened to land elsewhere. Trading surge for one unavailable replica
+      # removes the scheduler from the rollout path entirely: with >= 2 replicas
+      # and the soft hostname spread below, at least one replica is always
+      # serving behind the LB, and a degraded window beats a stuck roll.
+      maxSurge: 0
+      maxUnavailable: 1
+      {{- else }}
+      # Single replica: there is no non-disruptive roll without a surge, so keep
+      # it and accept the scheduling dependency. This is the kind/e2e shape, not
+      # a production one.
       maxSurge: 1
       maxUnavailable: 0
+      {{- end }}
   template:
     metadata:
       annotations:
