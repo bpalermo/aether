@@ -1,0 +1,10 @@
+schemaVersion: 2.0.0
+metadataTest:
+  entrypoint: ["/l4echo"]
+  user: 65532 # nonroot
+fileExistenceTests:
+  - name: 'l4echo'
+    path: '/l4echo'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'

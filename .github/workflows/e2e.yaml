@@ -1,4 +1,5 @@
-# Nightly e2e — conformance (GATEWAY-HTTP + MESH-HTTP), waypoint, replicator, uds.
+# Nightly e2e — conformance (GATEWAY-HTTP + MESH-HTTP), waypoint, replicator, uds,
+# l4-routes.
 #
 # Consolidates the former conformance.yaml, waypoint-e2e.yaml, and
 # replicator-e2e.yaml into ONE workflow: a single bazel `build` job builds the
@@ -29,7 +30,7 @@ on:
         description: "Run a single job (debugging)"
         type: choice
         default: all
-        options: [all, gateway-http, mesh-http, waypoint, replicator, uds]
+        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, l4-routes]
   schedule:
     # Nightly at 04:17 UTC (off the hour to avoid contention).
     - cron: "17 4 * * *"
@@ -44,9 +45,9 @@ env:
 jobs:
   # --- The ONLY bazel job: build the aether images once, ship as artifact.
   # The custom aether-proxy is a published image (pulled by kind), not built here.
-  # //e2e/udsecho is a TEST workload (a Go server that binds only a Unix socket),
-  # built here so the `uds` job stays bazel-free like its siblings; it is never
-  # pushed to a registry.
+  # //e2e/udsecho and //e2e/l4echo are TEST workloads (a Go server that binds only
+  # a Unix socket; a Go L4 echo backend), built here so the `uds` and `l4-routes`
+  # jobs stay bazel-free like their siblings; neither is pushed to a registry.
   # Wrapped in a retry: bazel repository fetches from GitHub releases (gazelle,
   # rules_multitool tools) intermittently 502 on the CDN — transient.
   build:
@@ -67,7 +68,8 @@ jobs:
           for t in //agent/cmd/agent:image_load //agent/cmd/mesh-dns:image_load \
                    //agent/cmd/proxy-supervisor:image_load \
                    //cni/cmd/cni-install:image_load //registrar/cmd/registrar:image_load \
-                   //controller/cmd/controller:image_load //e2e/udsecho:image_load; do
+                   //controller/cmd/controller:image_load //e2e/udsecho:image_load \
+                   //e2e/l4echo:image_load; do
             retry bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} "$t"
           done
 
@@ -81,6 +83,7 @@ jobs:
             "${IMAGE_REGISTRY}/registrar:latest" \
             "${IMAGE_REGISTRY}/controller:latest" \
             "${IMAGE_REGISTRY}/udsecho:latest" \
+            "${IMAGE_REGISTRY}/l4echo:latest" \
             -o /tmp/aether-images.tar
 
       - name: Upload images artifact
@@ -580,6 +583,73 @@ jobs:
         if: always()
         run: ./e2e/uds.sh down || true
 
+  # --- Gateway API L4 routes on the mesh capture path (proposal 018 Phase 3b).
+  #
+  # TCPRoute leg only for now (issue #868): a weighted 75/25 split, `weight: 0`
+  # as DRAIN asserted exactly and in both directions (the #492 regression, which
+  # no upstream conformance profile covers), and three `floor` negative controls
+  # so the suite re-proves its own discriminating power on every run rather than
+  # once at review time. TLSRoute and UDPRoute legs follow.
+  #
+  # Unlike `uds` and the conformance jobs this one installs SPIRE: with
+  # --spire-enabled=false the mesh has no TCP path at all (no node SVID => no
+  # "tcp:" clusters on the source, and the cleartext inbound listener has no TCP
+  # floor chain on the destination), so an L4 suite without mTLS would be testing
+  # nothing. That is also why the timeout is larger than uds's 45m.
+  l4-routes:
+    needs: build
+    if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'l4-routes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download images artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: aether-images
+          path: /tmp
+
+      - name: Load images into docker
+        run: docker load -i /tmp/aether-images.tar
+
+      - name: Bring up the L4-routes environment
+        env:
+          L4_SKIP_BUILD: "1"
+        run: ./e2e/l4routes.sh up
+
+      - name: Verify TCPRoute split, weight-0 drain, floor fallback
+        id: verify
+        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
+        run: ./e2e/l4routes.sh verify
+
+      - name: Collect diagnostics on failure
+        if: failure() || steps.verify.outcome == 'failure'
+        run: |
+          mkdir -p /tmp/l4-logs
+          kubectl --context kind-l4routes get pods -A -o wide 2>&1 | tee /tmp/l4-logs/pods.txt || true
+          kind export logs /tmp/l4-logs/kind --name l4routes || true
+          kubectl --context kind-l4routes get tcproutes -A -o yaml > /tmp/l4-logs/tcproutes.yaml 2>&1 || true
+          kubectl --context kind-l4routes -n aether-test get deploy,pods,svc -o wide > /tmp/l4-logs/workloads.txt 2>&1 || true
+          kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=400 > /tmp/l4-logs/agent.log 2>&1 || true
+          kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=300 > /tmp/l4-logs/proxy.log 2>&1 || true
+          kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/l4-logs/mesh-dns.log 2>&1 || true
+          kubectl --context kind-l4routes -n spire-mgmt logs -l app.kubernetes.io/name=agent --all-containers --tail=200 > /tmp/l4-logs/spire-agent.log 2>&1 || true
+          kubectl --context kind-l4routes -n aether-test logs -l app=l4-front --tail=100 > /tmp/l4-logs/l4-front.log 2>&1 || true
+
+      - name: Upload diagnostics
+        if: failure() || steps.verify.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: l4-routes-e2e-logs
+          path: /tmp/l4-logs
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: ./e2e/l4routes.sh down || true
+
   # --- Auto-file when the NIGHTLY run fails.
   #
   # This suite sat red for three consecutive nights (07-23..07-25) before anyone
@@ -592,7 +662,7 @@ jobs:
   # rather than filing per night — three duplicate issues is how people learn to
   # ignore them, which is the very failure mode this exists to prevent.
   report-failure:
-    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds]
+    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, l4-routes]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -620,6 +690,7 @@ jobs:
             waypoint=${{ needs.waypoint.result }}
             replicator=${{ needs.replicator.result }}
             uds=${{ needs.uds.result }}
+            l4-routes=${{ needs.l4-routes.result }}
         run: |
           set -euo pipefail
           title="Nightly e2e failing"

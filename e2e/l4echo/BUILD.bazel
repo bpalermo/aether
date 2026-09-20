@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+
+go_library(
+    name = "l4echo_lib",
+    srcs = ["main.go"],
+    importpath = "aethermesh.dev/e2e/l4echo",
+    visibility = ["//visibility:private"],
+)
+
+go_binary(
+    name = "l4echo",
+    embed = [":l4echo_lib"],
+    visibility = ["//visibility:public"],
+)
+
+# Test-only image: the L4 backend the proposal 018 Phase 3b e2e harness
+# (e2e/l4routes.sh) deploys as the TCPRoute parent and its backends. Same
+# multi-arch/distroless macro as the shipped binaries so the nightly `build` job
+# can produce it alongside them and ship it in the one aether-images artifact;
+# it is never pushed to a registry (no release wiring references :image_push).
+go_multi_arch_image(
+    name = "l4echo_image",
+    binary = ":l4echo",
+    repository = "bpalermo/aether/l4echo",
+)
