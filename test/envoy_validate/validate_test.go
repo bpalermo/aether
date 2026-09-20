@@ -20,6 +20,7 @@ package envoy_validate
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,8 +29,14 @@ import (
 	"testing"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+	udp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/udp/udp_proxy/v3"
 	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
 	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
@@ -143,6 +150,9 @@ func TestEnvoyValidate(t *testing.T) {
 		{"capture_bootstrap.json", CaptureBootstrapJSON},
 		{"capture_route_target_bootstrap.json", CaptureRouteTargetBootstrapJSON},
 		{"outbound_zero_vhost_route_bootstrap.json", OutboundZeroVhostRouteBootstrapJSON},
+		{"capture_tcproute_bootstrap.json", CaptureTCPRouteBootstrapJSON},
+		{"capture_tlsroute_bootstrap.json", CaptureTLSRouteBootstrapJSON},
+		{"capture_udp_bootstrap.json", CaptureUDPBootstrapJSON},
 		{"edge_bootstrap.json", EdgeBootstrapJSON},
 	}
 
@@ -358,4 +368,451 @@ func staticClusterNames(bs *bootstrapv3.Bootstrap) map[string]bool {
 		names[c.GetName()] = true
 	}
 	return names
+}
+
+// ---------------------------------------------------------------------------
+// L4 routes: TCPRoute / TLSRoute / UDPRoute (proposal 018 Phase 3b, issue #868)
+// ---------------------------------------------------------------------------
+//
+// `envoy --mode validate` above already runs over the three L4 bootstraps, and
+// that is not nothing — it is the only thing that certifies a connection-less
+// UDP listener's shape, and the only thing that certifies two SNI chains and a
+// floor chain matching the same /32 are not ambiguous to a real Envoy.
+//
+// But validation is fail-open about everything it does not have an opinion on,
+// and it is entirely satisfied by a fixture that stopped emitting the thing
+// under test. So each leg gets a structural assertion over the SERIALISED
+// bytes, for the same reason TestNodeBootstrapCarriesPerConnectionCertSelector
+// does: a gate that cannot distinguish "correct" from "absent" is the shape
+// aether#853 already shipped once.
+
+// tcpProxyByChain returns every filter chain's tcp_proxy config in a listener,
+// keyed by chain name, alongside the chains themselves.
+//
+// Matched on the typed config's TYPE URL rather than the filter name: the same
+// reason TestNodeBootstrapEgressRDSInitialFetchTimeout gives for the HCM.
+func tcpProxyByChain(t *testing.T, l *listenerv3.Listener) map[string]*tcp_proxyv3.TcpProxy {
+	t.Helper()
+	out := make(map[string]*tcp_proxyv3.TcpProxy)
+	for _, fc := range l.GetFilterChains() {
+		for _, f := range fc.GetFilters() {
+			tp := &tcp_proxyv3.TcpProxy{}
+			if err := f.GetTypedConfig().UnmarshalTo(tp); err != nil {
+				continue
+			}
+			out[fc.GetName()] = tp
+		}
+	}
+	return out
+}
+
+// singleListener unmarshals a bootstrap and returns its one static listener.
+func singleListener(t *testing.T, data []byte) *listenerv3.Listener {
+	t.Helper()
+	bs := &bootstrapv3.Bootstrap{}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	ls := bs.GetStaticResources().GetListeners()
+	if len(ls) != 1 {
+		t.Fatalf("bootstrap has %d static listeners, want exactly 1", len(ls))
+	}
+	return ls[0]
+}
+
+// chainByName returns a listener's filter chain with the given name.
+func chainByName(l *listenerv3.Listener, name string) *listenerv3.FilterChain {
+	for _, fc := range l.GetFilterChains() {
+		if fc.GetName() == name {
+			return fc
+		}
+	}
+	return nil
+}
+
+// TestCaptureTCPRouteWeightedFloorChain asserts the TCPRoute fixture's floor
+// chain really carries a WEIGHTED tcp_proxy over both backends at the weights
+// the route asked for.
+//
+// Why this and not just `--mode validate`: Envoy accepts a single-cluster
+// tcp_proxy just as happily as a weighted one, so validation passing says
+// nothing about whether the weighting survived. And weighting is exactly where
+// this area has shipped bugs — #492 turned an explicit `weight: 0` (DRAIN,
+// per Gateway API) into an equal share by normalising it to 1, which every
+// structural check of the day accepted.
+func TestCaptureTCPRouteWeightedFloorChain(t *testing.T) {
+	data, err := CaptureTCPRouteBootstrapJSON()
+	if err != nil {
+		t.Fatalf("CaptureTCPRouteBootstrapJSON: %v", err)
+	}
+	l := singleListener(t, data)
+
+	proxies := tcpProxyByChain(t, l)
+	var floor *tcp_proxyv3.TcpProxy
+	var floorName string
+	for name, tp := range proxies {
+		if strings.HasPrefix(name, "cap_tcp_") {
+			floor, floorName = tp, name
+		}
+	}
+	if floor == nil {
+		t.Fatalf("no cap_tcp_* filter chain in listener %q: chains %v", l.GetName(), chainNames(l))
+	}
+
+	wc := floor.GetWeightedClusters()
+	if wc == nil {
+		t.Fatalf("chain %q: tcp_proxy has cluster_specifier %T, want weighted_clusters — "+
+			"a TCPRoute with two live backends must not collapse to a single cluster",
+			floorName, floor.GetClusterSpecifier())
+	}
+	got := make(map[string]uint32, len(wc.GetClusters()))
+	for _, c := range wc.GetClusters() {
+		got[c.GetName()] = c.GetWeight()
+	}
+	// The expected weights are LITERALS, not the L4TCPWeight* constants the
+	// fixture is built from. Reading the expectation back out of the same
+	// constant that produced it is a gate that cannot fail: measured on
+	// 2026-09-20, editing L4TCPWeightA from 75 to 50 left this test GREEN
+	// until these two numbers were spelled out here. That is the aether#853
+	// shape in miniature, inside the test written to avoid it.
+	want := map[string]uint32{
+		L4TCPBackendClusterA(): 75,
+		L4TCPBackendClusterB(): 25,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("chain %q: weighted_clusters = %v, want %v", floorName, got, want)
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("chain %q: cluster %q weight = %d, want %d (weighted_clusters: %v)",
+				floorName, name, got[name], w, got)
+		}
+	}
+
+	// Every weighted cluster must be defined by this bootstrap. A weighted
+	// reference to a cluster nobody emits is the failure mode the plan calls
+	// out for the e2e harness (there is no ODCDS for tcp_proxy: the chain
+	// matches and the cluster is simply missing), and `--mode validate` does
+	// NOT catch it — tcp_proxy resolves its cluster at connection time.
+	bs := &bootstrapv3.Bootstrap{}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	defined := staticClusterNames(bs)
+	for name := range got {
+		if !defined[name] {
+			t.Errorf("chain %q routes to cluster %q, which the bootstrap does not define — "+
+				"tcp_proxy has no on-demand CDS, so this chain matches and then has nowhere to send the connection",
+				floorName, name)
+		}
+	}
+}
+
+// TestCaptureTCPRouteDrainCollapsesToSingleCluster asserts the shape a DRAIN
+// produces: with one backend at weight 0 the weighted set has one member left,
+// and buildWeightedTCPProxy emits the simpler single-cluster form.
+//
+// This is the #492 property at the config layer. The drained backend must be
+// ABSENT, not present at weight 0 and not normalised to 1; asserting the
+// collapsed form is stronger than asserting "two entries, one of them zero",
+// because the zero-weight entry is precisely what the pre-#492 code could not
+// produce either.
+//
+// It calls the builder directly rather than going through a bootstrap: the
+// interesting output is one filter chain, and a fourth bootstrap would add an
+// Envoy process to the test for no extra coverage.
+func TestCaptureTCPRouteDrainCollapsesToSingleCluster(t *testing.T) {
+	svc := proxy.CaptureTCPService{
+		ClusterName: "tcp:l4-front.default.mesh.local",
+		ClusterIP:   L4TCPParentClusterIP,
+	}
+	rules := []proxy.L4ServiceRoute{{
+		Backends: []proxy.L4Backend{
+			{Service: "default/l4-a", Cluster: L4TCPBackendClusterA(), Weight: 100},
+			// Explicit 0 = DRAIN. The reconciler defaults an UNSET weight to 1,
+			// so a 0 arriving here is always deliberate.
+			{Service: "default/l4-b", Cluster: L4TCPBackendClusterB(), Weight: 0},
+		},
+	}}
+
+	fc := proxy.BuildCaptureTCPRouteFilterChain(svc, rules, "spiffe://aether.internal/ns/default/sa/default")
+	if fc == nil {
+		t.Fatal("BuildCaptureTCPRouteFilterChain returned nil for a route with one live backend")
+	}
+
+	var tp *tcp_proxyv3.TcpProxy
+	for _, f := range fc.GetFilters() {
+		c := &tcp_proxyv3.TcpProxy{}
+		if err := f.GetTypedConfig().UnmarshalTo(c); err == nil {
+			tp = c
+		}
+	}
+	if tp == nil {
+		t.Fatalf("chain %q carries no tcp_proxy filter", fc.GetName())
+	}
+
+	if wc := tp.GetWeightedClusters(); wc != nil {
+		names := make([]string, 0, len(wc.GetClusters()))
+		for _, c := range wc.GetClusters() {
+			names = append(names, fmt.Sprintf("%s=%d", c.GetName(), c.GetWeight()))
+		}
+		t.Fatalf("one backend drained (weight 0) but tcp_proxy still carries weighted_clusters %v; "+
+			"weight 0 means DRAIN, not an equal share (#492)", names)
+	}
+	if got, want := tp.GetCluster(), L4TCPBackendClusterA(); got != want {
+		t.Errorf("tcp_proxy cluster = %q, want %q — the surviving backend", got, want)
+	}
+}
+
+// TestCaptureTLSRouteSNIChainsCoexistWithFloor asserts the TLSRoute listener's
+// three-chain shape, which is what makes the fall-through in #868 a designed
+// outcome rather than an accident:
+//
+//   - each cap_tls_*_<i> chain matches prefix_ranges <ClusterIP>/32 AND
+//     server_names — the /32 is what stops a TLSRoute for service A claiming
+//     service B's connections, since a client can set any SNI it likes;
+//   - the cap_tcp_* floor chain matches the SAME /32 with NO server_names, so a
+//     connection whose SNI matches nothing lands there.
+//
+// The second half is the one worth stating out loud. #868 was first written as
+// "a non-matching SNI does not fall through to a default", which is the
+// opposite of what the code does; asserting that would have pinned a bug. Envoy
+// selects filter chains by specificity, so an unconstrained-SNI chain is the
+// deliberate default. This test asserts the fall-through POSITIVELY: the floor
+// chain exists, shares the /32, sets no server_names, and routes to the
+// PARENT's own cluster rather than to either TLSRoute backend.
+func TestCaptureTLSRouteSNIChainsCoexistWithFloor(t *testing.T) {
+	data, err := CaptureTLSRouteBootstrapJSON()
+	if err != nil {
+		t.Fatalf("CaptureTLSRouteBootstrapJSON: %v", err)
+	}
+	l := singleListener(t, data)
+	proxies := tcpProxyByChain(t, l)
+
+	// The SNI chains, by the hostname each one claims.
+	backendBySNI := map[string]string{}
+	var floorName string
+	for _, fc := range l.GetFilterChains() {
+		m := fc.GetFilterChainMatch()
+		switch {
+		case strings.HasPrefix(fc.GetName(), "cap_tls_"):
+			if len(m.GetServerNames()) != 1 {
+				t.Errorf("chain %q: server_names = %v, want exactly one hostname", fc.GetName(), m.GetServerNames())
+				continue
+			}
+			assertMatchesParentIP(t, fc, L4TLSParentClusterIP,
+				"without the /32 an SNI chain would claim any service's connection carrying that hostname")
+			backendBySNI[m.GetServerNames()[0]] = proxies[fc.GetName()].GetCluster()
+		case strings.HasPrefix(fc.GetName(), "cap_tcp_"):
+			floorName = fc.GetName()
+			if len(m.GetServerNames()) != 0 {
+				t.Errorf("floor chain %q constrains server_names to %v; it must not, or a "+
+					"connection whose SNI matches no TLSRoute has nowhere to land",
+					fc.GetName(), m.GetServerNames())
+			}
+			assertMatchesParentIP(t, fc, L4TLSParentClusterIP,
+				"the floor chain is the fall-through for this service's VIP")
+		}
+	}
+
+	// Both SNIs are routed, and to DIFFERENT backends. Asserting only one SNI
+	// would pass just as well if server_names were ignored and chain 0 always
+	// won, which is the mirror-assertion point #868 makes for the e2e probes.
+	want := map[string]string{
+		L4SNIAlpha: L4TLSBackendClusterA(),
+		L4SNIBravo: L4TLSBackendClusterB(),
+	}
+	if len(backendBySNI) != len(want) {
+		t.Fatalf("SNI chains = %v, want one chain per hostname %v", backendBySNI, want)
+	}
+	for sni, cluster := range want {
+		if backendBySNI[sni] != cluster {
+			t.Errorf("SNI %q routes to %q, want %q", sni, backendBySNI[sni], cluster)
+		}
+	}
+
+	// The fall-through target, positively: the floor goes to the parent's own
+	// cluster, which is neither TLSRoute backend.
+	if floorName == "" {
+		t.Fatalf("no cap_tcp_* floor chain beside the SNI chains: chains %v", chainNames(l))
+	}
+	floorCluster := proxies[floorName].GetCluster()
+	if floorCluster != L4TLSParentFloorCluster() {
+		t.Errorf("floor chain %q routes to %q, want the parent's own cluster %q",
+			floorName, floorCluster, L4TLSParentFloorCluster())
+	}
+	for sni, backend := range want {
+		if floorCluster == backend {
+			t.Errorf("floor chain routes to %q, the backend of SNI %q — a non-matching SNI would "+
+				"reach a TLSRoute backend", backend, sni)
+		}
+	}
+}
+
+// assertMatchesParentIP checks a chain's filter_chain_match pins the parent
+// Service's ClusterIP as a /32.
+func assertMatchesParentIP(t *testing.T, fc *listenerv3.FilterChain, ip, why string) {
+	t.Helper()
+	ranges := fc.GetFilterChainMatch().GetPrefixRanges()
+	if len(ranges) != 1 || ranges[0].GetAddressPrefix() != ip || ranges[0].GetPrefixLen().GetValue() != 32 {
+		t.Errorf("chain %q: prefix_ranges = %v, want exactly %s/32 — %s", fc.GetName(), ranges, ip, why)
+	}
+}
+
+// chainNames lists a listener's filter chain names, for failure messages.
+func chainNames(l *listenerv3.Listener) []string {
+	out := make([]string, 0, len(l.GetFilterChains()))
+	for _, fc := range l.GetFilterChains() {
+		out = append(out, fc.GetName())
+	}
+	return out
+}
+
+// TestCaptureUDPListenerIsConnectionless asserts the two properties that make a
+// UDPRoute listener work at all, neither of which any other test covers.
+//
+//  1. NO filter_chains. Envoy rejects a connection-less UDP listener that has
+//     any ("N filter chain(s) specified for connection-less UDP listener"), so
+//     the udp_proxy config must ride listener_filters instead. l4route.go
+//     records that rule in a comment; until now nothing enforced it, and the
+//     `--mode validate` run beside this test is what turns a regression here
+//     into a failure rather than a surprise on a node.
+//  2. The listener binds UDP, in the pod netns, on the capture port.
+//
+// SCOPE: delivery only. udp_proxy's route specifier is a bare Cluster taken
+// from the first backend of the lexicographically first service, so backend
+// selection and weights are not expressible (#873). There is deliberately no
+// assertion that UDP picks between backends — it would fail by design.
+func TestCaptureUDPListenerIsConnectionless(t *testing.T) {
+	data, err := CaptureUDPBootstrapJSON()
+	if err != nil {
+		t.Fatalf("CaptureUDPBootstrapJSON: %v", err)
+	}
+	l := singleListener(t, data)
+
+	if n := len(l.GetFilterChains()); n != 0 {
+		t.Errorf("UDP listener %q carries %d filter_chains; a connection-less UDP listener must carry none "+
+			"(Envoy: \"%d filter chain(s) specified for connection-less UDP listener\")", l.GetName(), n, n)
+	}
+	if l.GetDefaultFilterChain() != nil {
+		t.Errorf("UDP listener %q carries a default_filter_chain; same rule as filter_chains", l.GetName())
+	}
+
+	sa := l.GetAddress().GetSocketAddress()
+	if sa.GetProtocol() != corev3.SocketAddress_UDP {
+		t.Errorf("UDP listener %q binds protocol %v, want UDP", l.GetName(), sa.GetProtocol())
+	}
+	// 18001 as a literal, on purpose: this is a CROSS-TREE pin, not a
+	// restatement of the fixture. The CNI's scoped UDP redirect rule sends
+	// ClusterIP:18081/udp to this port and nothing else is captured, so the
+	// agent and the CNI plugin have to agree on the number. Comparing the
+	// listener against the same meshconst the fixture passed in would be a
+	// check that cannot fail (see the note on the TCPRoute weights).
+	if got := sa.GetPortValue(); got != 18001 || meshconst.ProxyCapturePort != 18001 {
+		t.Errorf("UDP listener %q binds port %d (meshconst.ProxyCapturePort = %d), want 18001 — "+
+			"the CNI's UDP REDIRECT targets that port and nothing else is captured",
+			l.GetName(), got, meshconst.ProxyCapturePort)
+	}
+	if sa.GetNetworkNamespaceFilepath() == "" {
+		t.Errorf("UDP listener %q has no network_namespace_filepath; it would bind in the agent's netns, not the pod's", l.GetName())
+	}
+
+	// The udp_proxy config lives in listener_filters and names a cluster this
+	// bootstrap defines.
+	var cfg *udp_proxyv3.UdpProxyConfig
+	for _, lf := range l.GetListenerFilters() {
+		c := &udp_proxyv3.UdpProxyConfig{}
+		if err := lf.GetTypedConfig().UnmarshalTo(c); err == nil {
+			cfg = c
+		}
+	}
+	if cfg == nil {
+		t.Fatalf("UDP listener %q has no udp_proxy listener filter: the listener would receive datagrams and drop them", l.GetName())
+	}
+	if got, want := cfg.GetCluster(), L4UDPBackendCluster(); got != want {
+		t.Errorf("udp_proxy routes to cluster %q, want %q", got, want)
+	}
+
+	bs := &bootstrapv3.Bootstrap{}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	if !staticClusterNames(bs)[cfg.GetCluster()] {
+		t.Fatalf("udp_proxy names cluster %q, which the bootstrap does not define", cfg.GetCluster())
+	}
+}
+
+// TestCaptureUDPClusterIsPlaintextAtTheAppPort asserts the concrete shape of
+// "UDP rides the mesh in plaintext" (#868), which is otherwise only a comment.
+//
+// mTLS is a TCP/TLS construct and DTLS is not implemented, so the UDP floor has
+// no inbound mesh hop: udp_proxy dials the backend pod's APPLICATION UDP port
+// directly, over a STATIC cluster with an inline load assignment and NO
+// transport socket. Each of those three is load-bearing:
+//
+//   - a transport socket appearing here would be a silent claim of encryption
+//     the data path does not provide;
+//   - an endpoint left on the mesh inbound port (:18008) would send datagrams
+//     at a TCP mTLS listener, which would drop them;
+//   - TCP-protocol endpoints would not carry UDP at all.
+//
+// This is the structural assertion the e2e harness deliberately does NOT
+// duplicate at the wire level (a packet capture proving "not TLS" would be
+// decoration); the plan puts it here on purpose.
+func TestCaptureUDPClusterIsPlaintextAtTheAppPort(t *testing.T) {
+	data, err := CaptureUDPBootstrapJSON()
+	if err != nil {
+		t.Fatalf("CaptureUDPBootstrapJSON: %v", err)
+	}
+	bs := &bootstrapv3.Bootstrap{}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+
+	var udp *clusterv3.Cluster
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if c.GetName() == L4UDPBackendCluster() {
+			udp = c
+		}
+	}
+	if udp == nil {
+		t.Fatalf("bootstrap defines no %q cluster", L4UDPBackendCluster())
+	}
+
+	if ts := udp.GetTransportSocket(); ts != nil {
+		t.Errorf("cluster %q carries transport_socket %q; the UDP floor is PLAINTEXT — mesh mTLS is a "+
+			"TCP/TLS construct and DTLS is not implemented, so a socket here would claim protection "+
+			"the data path does not provide", udp.GetName(), ts.GetName())
+	}
+	if len(udp.GetTransportSocketMatches()) != 0 {
+		t.Errorf("cluster %q carries transport_socket_matches; same reason", udp.GetName())
+	}
+	if got := udp.GetType(); got != clusterv3.Cluster_STATIC {
+		t.Errorf("cluster %q type = %v, want STATIC with an inline load assignment: the shared bare-name "+
+			"EDS resource carries mesh INBOUND endpoints, which is the wrong port for UDP", udp.GetName(), got)
+	}
+
+	var endpoints int
+	for _, lle := range udp.GetLoadAssignment().GetEndpoints() {
+		for _, lb := range lle.GetLbEndpoints() {
+			sa := lb.GetEndpoint().GetAddress().GetSocketAddress()
+			if sa == nil {
+				t.Errorf("cluster %q: endpoint has no socket address", udp.GetName())
+				continue
+			}
+			endpoints++
+			if sa.GetProtocol() != corev3.SocketAddress_UDP {
+				t.Errorf("cluster %q: endpoint %s protocol = %v, want UDP",
+					udp.GetName(), sa.GetAddress(), sa.GetProtocol())
+			}
+			if got, want := sa.GetPortValue(), uint32(L4UDPBackendPort); got != want {
+				t.Errorf("cluster %q: endpoint %s port = %d, want the backend's APPLICATION port %d — "+
+					"the UDP floor has no inbound mTLS hop to dial",
+					udp.GetName(), sa.GetAddress(), got, want)
+			}
+		}
+	}
+	if endpoints == 0 {
+		t.Fatalf("cluster %q has no endpoints: the assertions above checked nothing", udp.GetName())
+	}
 }
