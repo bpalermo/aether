@@ -79,8 +79,13 @@ func TCPClusterName(serviceName, meshDomain string) string {
 // the "tcp:" prefix is what keeps a per-port TCP cluster out of the h2 cluster
 // namespace even when the numbers match.
 func TCPPortClusterName(tcpClusterName string, port uint32) string {
-	if tcpClusterName == "" || port == 0 {
+	if tcpClusterName == "" {
 		return ""
+	}
+	// Port 0 means the caller named no port: the service's default floor
+	// cluster is the answer, which is what every pre-037 L4 route resolves to.
+	if port == 0 {
+		return tcpClusterName
 	}
 	return fmt.Sprintf("%s:%d", tcpClusterName, port)
 }

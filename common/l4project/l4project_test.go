@@ -1,6 +1,7 @@
 package l4project
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,11 +16,23 @@ func ptr[T any](v T) *T { return &v }
 // tcpCluster / udpCluster mirror proxy.TCPClusterName / proxy.UDPClusterName without
 // importing agent internals (common must not): "<proto>:<svc>.<ns>.<domain>".
 func tcpCluster(domain string) ClusterNameFunc {
-	return func(key string) string { return "tcp:" + fqdn(key, domain) }
+	return func(key string, port uint32) string {
+		base := "tcp:" + fqdn(key, domain)
+		if port == 0 {
+			return base
+		}
+		return fmt.Sprintf("%s:%d", base, port)
+	}
 }
 
 func udpCluster(domain string) ClusterNameFunc {
-	return func(key string) string { return "udp:" + fqdn(key, domain) }
+	return func(key string, port uint32) string {
+		base := "udp:" + fqdn(key, domain)
+		if port == 0 {
+			return base
+		}
+		return fmt.Sprintf("%s:%d", base, port)
+	}
 }
 
 func fqdn(key, domain string) string {
@@ -277,4 +290,57 @@ func TestDerefBackendNamespace(t *testing.T) {
 	ns := gatewayv1.Namespace("other")
 	assert.Equal(t, "", derefBackendNamespace(nil))
 	assert.Equal(t, "other", derefBackendNamespace(&ns))
+}
+
+// TestBackends_PortQualified covers proposal 037 Phase 3: a backendRef's port
+// selects that port's cluster.
+//
+// Before Phase 3 the port was ignored, because the TCP floor addressed one port
+// per service and there was nothing to select. Now that a service can carry
+// several raw-TCP ports, ignoring it would silently send a route for :5432 to
+// whatever the floor forwards to — a misroute with no error anywhere.
+func TestBackends_PortQualified(t *testing.T) {
+	port := func(p int32) *gatewayv1.PortNumber {
+		pn := gatewayv1.PortNumber(p)
+		return &pn
+	}
+
+	tests := []struct {
+		name string
+		refs []gatewayv1.BackendRef
+		want string
+	}{
+		{
+			name: "no port: the service's default floor cluster (every pre-037 route)",
+			refs: []gatewayv1.BackendRef{{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "echo"}}},
+			want: "tcp:echo.default.aether.internal",
+		},
+		{
+			name: "an explicit port selects that port's cluster",
+			refs: []gatewayv1.BackendRef{{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "echo", Port: port(5432)}}},
+			want: "tcp:echo.default.aether.internal:5432",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Backends(tt.refs, "default", "TCPRoute", nil, tcpCluster("aether.internal"))
+			require.Len(t, got, 1)
+			assert.Equal(t, tt.want, got[0].Cluster)
+		})
+	}
+}
+
+// TestBackends_UDPIgnoresPort: UDP is deliberately not port-qualified. The UDP
+// floor already addresses backends by their registered application port
+// (proposal 018 Phase 3b), and proposal 037 is a TCP/HTTP change.
+func TestBackends_UDPIgnoresPort(t *testing.T) {
+	pn := gatewayv1.PortNumber(5353)
+	got := Backends(
+		[]gatewayv1.BackendRef{{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "dns", Port: &pn}}},
+		"default", "UDPRoute", nil, udpCluster("aether.internal"),
+	)
+	require.Len(t, got, 1)
+	assert.Equal(t, "udp:dns.default.aether.internal:5353", got[0].Cluster,
+		"the shared test namer qualifies; the AGENT's UDP namer ignores the port — see buildUDPL4Backends")
 }
