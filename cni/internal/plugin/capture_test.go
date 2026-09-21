@@ -343,3 +343,32 @@ func TestExcludePortAcceptExprs(t *testing.T) {
 	require.IsType(t, &expr.Verdict{}, exprs[4])
 	assert.Equal(t, expr.VerdictAccept, exprs[4].(*expr.Verdict).Kind)
 }
+
+// TestCaptureRedirectExprs_TCPMeshPort pins the mesh's well-known TCP spelling
+// (proposal 037) into the scoped redirect.
+//
+// This is what makes <svc>:18082 reachable WITHOUT redirect-all: scoped capture
+// redirects it alongside ProxyOutboundPort. A dial to a service's own
+// application port has no such rule and is captured only under redirect-all.
+//
+// Asserting the encoded dport rather than just "a rule exists" is the point — a
+// rule built for the wrong port installs cleanly, captures nothing, and looks
+// exactly like a working one.
+func TestCaptureRedirectExprs_TCPMeshPort(t *testing.T) {
+	tcpMesh := uint16(meshconst.ProxyTCPOutboundPort) // 18082
+	capPort := uint16(meshconst.ProxyCapturePort)
+	exprs := captureRedirectExprs(unix.IPPROTO_TCP, tcpMesh, capPort)
+	require.Len(t, exprs, 9)
+
+	// tcp dport == 18082, big-endian.
+	require.IsType(t, &expr.Cmp{}, exprs[6])
+	assert.Equal(t, expr.CmpOpEq, exprs[6].(*expr.Cmp).Op)
+	assert.Equal(t, []byte{0x46, 0xa2}, exprs[6].(*expr.Cmp).Data,
+		"18082 big-endian; a wrong constant here captures nothing and looks identical")
+
+	// ...and it is a DIFFERENT port from the HTTP spelling, which is the whole
+	// point of having two.
+	httpMesh := captureRedirectExprs(unix.IPPROTO_TCP, uint16(meshconst.ProxyOutboundPort), capPort)
+	assert.NotEqual(t, httpMesh[6].(*expr.Cmp).Data, exprs[6].(*expr.Cmp).Data,
+		"the HTTP and TCP mesh spellings must not collide")
+}
