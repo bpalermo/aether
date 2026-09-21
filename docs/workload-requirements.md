@@ -41,7 +41,9 @@ spec:
 
 | Annotation | Default | Meaning |
 |---|---|---|
-| `endpoint.aether.io/port` | `8080` | Application port the mesh routes to |
+| `endpoint.aether.io/port` | `8080` | Primary application port — what a portless authority resolves to |
+| `endpoint.aether.io/ports` | `<port>` | Every port the app serves, comma-separated, each optionally suffixed `=h1`, `=h2` or `=tcp` (e.g. `8080,9090=h2,9000=tcp`). A port with no suffix takes `endpoint.aether.io/protocol` |
+| `endpoint.aether.io/protocol` | `http` | The **default** L4 class for ports with no suffix. `http` or `tcp`; a raw-TCP service rides the transparent-capture TCP floor as an mTLS passthrough |
 | `endpoint.aether.io/weight` | `1024` | Load-balancing weight |
 | `endpoint.aether.io/health-path` | `/` | Path the node-local agent health-checks (delegated liveness) |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds`: node-local agent vets the endpoint once and publishes health over EDS (endpoints enter clients pre-warmed). `active`: every client proxy probes the endpoint itself |
@@ -159,13 +161,51 @@ workload identities; the callee sees the caller's SPIFFE ID in
 agent `--mesh-domain` / chart `meshDomain`; proposal 020) is the accepted
 mesh form — it is simultaneously the vhost domain, the data-plane cluster
 name, and the on-demand (ODCDS) lookup key, declared or not. The capture path
-also honors the standard `<service>.<namespace>.svc.cluster.local` name. A
-`:port` on the authority is stripped before routing. Anything else — bare
-names (`Host: my-svc`), foreign domains, nested labels — matches no route and
-404s immediately; only authorities under the mesh domain can reach the cold
-path. The SPIFFE trust domain is resolved from each component's own SVID and
+also honors the standard `<service>.<namespace>.svc.cluster.local` name.
+Anything else — bare names (`Host: my-svc`), foreign domains, nested labels —
+matches no route and 404s immediately; only authorities under the mesh domain
+can reach the cold path.
+
+**The authority's port is NOT stripped — it is part of the match.** This
+document previously said the opposite (#883). `strip_any_host_port` is off, and
+deliberately so: the portless FQDN and `<fqdn>:<primary port>` both reach the
+service's primary cluster, while `<fqdn>:<port>` reaches that port's own
+cluster. If the port were stripped, per-port routing (proposal 005) could not
+work at all. See `BuildOutboundClusterVirtualHost` in
+`agent/internal/xds/proxy/route.go`. The SPIFFE trust domain is resolved from each component's own SVID and
 matches the mesh domain by design, so addressing and identity share one
 domain.
+
+### How a spelling resolves (proposal 037)
+
+Every way of addressing a mesh service resolves to a `(port, protocol)` pair.
+The **URL scheme types the address**, which is why a portless HTTP URL is not
+ambiguous and raw TCP needs a port:
+
+| Client dials | Reaches |
+|---|---|
+| `http://<svc>.<ns>.<domain>/` | the primary port, over HTTP |
+| `https://<svc>.<ns>.<domain>/` | the primary port, app-terminated TLS |
+| `<svc>.<ns>.<domain>:18081` | the primary port, over HTTP (the explicit HTTP spelling) |
+| `<svc>.<ns>.<domain>:18082` | the primary port, as raw TCP (the explicit TCP spelling) |
+| `<svc>.<ns>.<domain>:<p>` | port `p`, in whatever class `p` declares |
+
+HTTP demuxes on the **authority header**, which carries its own port as a
+string — so `http://<svc>/` is unambiguous without one. Raw TCP has no
+authority; its only demux key is the 5-tuple. That asymmetry is intrinsic to
+the protocols, not to this mesh, and it is why TCP gets a well-known port of
+its own (`18082`) rather than the bare name changing meaning depending on
+which protocol a service's primary port happens to be.
+
+**`:18082` does not require redirect-all.** The scoped capture rule redirects
+it alongside `:18081`, and the generated mesh Service exposes it. A dial to a
+service's **own** application port (`<svc>:9000`) is captured only under
+redirect-all, which is the managed-pod default — the same property per-port
+HTTP already has.
+
+**A port nobody registered** is refused rather than silently forwarded: the
+generated mesh Service exposes only its known ports, and kube-proxy REJECTs the
+rest, so the caller gets `ECONNREFUSED` instead of a hang.
 
 **Traffic shaping** (canary weights, header routing, timeouts, gRPC method
 routing, L4 splits/SNI) is standard Gateway API routes parented to the
@@ -191,7 +231,7 @@ metadata:
   ~one node-local xDS round-trip while the cluster is fetched on demand
   (ODCDS), then stays warm while used (1h idle TTL). Cold-path calls use the
   same FQDN authority as everything else. Requests to nonexistent services
-  *under the mesh domain* fail after the 5s on-demand timeout; anything
+  *under the mesh domain* fail after the on-demand timeout (`onDemandClusterTimeout`, 2s — `agent/internal/xds/proxy/httpfilter.go`); anything
   outside the domain 404s immediately at the route table.
 - Every miss increments `aether.agent.upstreams.miss` (and is logged with the
   service name) — the signal to promote an undeclared dependency to the
