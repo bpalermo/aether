@@ -4,6 +4,7 @@ go_library(
     name = "server",
     srcs = [
         "config.go",
+        "dualregistration.go",
         "ghostsweep.go",
         "healthclient.go",
         "liveness.go",
@@ -56,6 +57,7 @@ go_library(
 go_test(
     name = "server_test",
     srcs = [
+        "dualregistration_test.go",
         "ghostsweep_lock_test.go",
         "ghostsweep_test.go",
         "ghostsweep_unsubscribe_test.go",

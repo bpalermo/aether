@@ -392,14 +392,14 @@ func (s *CNIServer) applyPodLiveness(ctx context.Context, state *livenessState, 
 		return held
 	}
 
-	serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, pod)
+	serviceName, protocols, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, pod)
 	if err != nil {
 		s.log.DebugContext(ctx, "liveness: failed to build endpoint", "pod", pod.GetName(), "error", err)
 		return held
 	}
 	endpoint.Health = want
 
-	s.registerHealthTransition(ctx, state, pod, key, prev, want, servedBefore, serviceName, protocol, endpoint)
+	s.registerHealthTransition(ctx, state, pod, key, prev, want, servedBefore, serviceName, protocols, endpoint)
 	return held
 }
 
@@ -473,7 +473,7 @@ func (s *CNIServer) registerHealthTransition(
 	prev, want registryv1.ServiceEndpoint_Health,
 	servedBefore bool,
 	serviceName string,
-	protocol registryv1.Service_Protocol,
+	protocols []registryv1.Service_Protocol,
 	endpoint *registryv1.ServiceEndpoint,
 ) {
 	// Health transitions are rare and meaningful, so each gets its own trace
@@ -504,8 +504,19 @@ func (s *CNIServer) registerHealthTransition(
 	// unbounded one lets a hung registrar serialise every CNI ADD/DEL behind a
 	// liveness tick. The update is best-effort — the next tick retries the same
 	// transition — so the cap costs a retry at worst.
+	// Promote under EVERY key the pod holds (proposal 037, Risk 5). Promoting
+	// under one and not the other leaves that listing's endpoint UNHEALTHY
+	// forever: no error is raised anywhere, the cluster is simply empty of
+	// healthy hosts, and the next tick sees prev == want and does not retry.
+	// That is why a partial failure below must be reported as a FAILURE --
+	// recording the transition on a partial success is what would make it
+	// permanent.
+	//
+	// One deadline for the whole loop, not one per key: these calls run with
+	// lifecycleMu held (S20, #772), and a per-key timeout would let a
+	// dual-protocol pod double the worst-case hold that bound exists to cap.
 	callCtx, cancel := context.WithTimeout(spanCtx, lifecycleRegistryTimeout)
-	err := s.registry.RegisterEndpoint(callCtx, serviceName, protocol, endpoint)
+	err := s.registerUnderAll(callCtx, serviceName, protocols, endpoint)
 	cancel()
 	s.lifecycleMu.Unlock()
 	telemetry.EndSpan(span, err)
