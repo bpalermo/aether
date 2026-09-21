@@ -538,7 +538,18 @@ func endpointSubsetKeys(endpoints []*registryv1.ServiceEndpoint, nodeSubsetKeys 
 func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[string]struct{}, tcpServiceEndpoints map[string][]*registryv1.ServiceEndpoint, localRegion, localZone string, waypoint proxy.WaypointRewrite) {
 	// TCP service entries: bare-name EDS load assignment + SAN/sni only. The
 	// capture TCP floor's "tcp:<svc>" cluster (captureTCPClusters) references
-	// this EDS resource (by bare name) and pins peer identity from sanNamespaces.
+	// that EDS resource (by bare name) and pins peer identity from sanNamespaces.
+	//
+	// Keyed by the entry's own Envoy cluster name, "tcp:<fqdn>", NOT by the bare
+	// service name (proposal 037 design (a)). The HTTP pass above writes
+	// c.clusters[serviceName]; keying TCP entries there too made the two passes
+	// collide, and the later TCP write CLOBBERED the service's h2 cluster,
+	// outbound vhost and GAMMA cap_http vhost. That was invisible while a
+	// service could only be one protocol, and became reachable the moment a
+	// ServiceAccount could have pods declaring different protocols — which is
+	// true on etcd (the CNI registers each pod under its own protocol key) and,
+	// since #878, on the kubernetes backend too. Per-port and alias entries were
+	// already keyed by cluster name; this brings TCP entries in line.
 	for serviceName, endpoints := range tcpServiceEndpoints {
 		if _, inScope := deps[serviceName]; !inScope {
 			continue
@@ -548,15 +559,9 @@ func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[str
 		}
 		sanNamespaces := endpointSANNamespaces(endpoints)
 		defaultPort := endpoints[0].GetPort()
-		cla := proxy.NewClusterLoadAssignment(serviceName)
-		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
-		for _, endpoint := range endpoints {
-			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone, waypoint)
-			cla.Endpoints = append(cla.Endpoints, lbEp)
-			epMap[endpoint.GetIp()] = lbEp
-		}
-		proxy.SortLocalityLbEndpoints(cla.Endpoints)
-		c.clusters[serviceName] = clusterEntry{
+		cla, epMap := c.buildTCPEndpointsLocked(serviceName, endpoints, localRegion, localZone, waypoint)
+
+		c.clusters[proxy.TCPClusterName(serviceName, c.meshDomain)] = clusterEntry{
 			loadAssignment: cla,
 			endpoints:      epMap,
 			sanNamespaces:  sanNamespaces,
@@ -565,6 +570,67 @@ func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[str
 			tcp:            true,
 		}
 	}
+}
+
+// buildTCPEndpointsLocked builds a TCP service's endpoint map and, when this
+// entry owns it, its bare-name load assignment. Caller must hold clusterMu.
+//
+// Bare-name CLA ownership: both an HTTP default entry and a TCP floor entry for
+// the same service reference a load assignment named <serviceName>, and two EDS
+// resources with one name is a snapshot-consistency error in go-control-plane
+// (or a silent last-writer-wins). The HTTP entry owns it when the service has
+// one; the TCP entry then references it by name and carries no load assignment
+// of its own, exactly as the :<port> aliases do — clustersEndpointsAndVhosts
+// already guards on loadAssignment != nil.
+//
+// An HTTP entry with no CLA of its own (the retained-absent alias shape) does
+// not own one either, so the TCP entry takes ownership rather than leave the
+// bare EDS name unpublished: the floor cluster resolves through it, and
+// tcp_proxy has no ODCDS cold path to recover from a missing one.
+func (c *SnapshotCache) buildTCPEndpointsLocked(
+	serviceName string,
+	endpoints []*registryv1.ServiceEndpoint,
+	localRegion, localZone string,
+	waypoint proxy.WaypointRewrite,
+) (*endpointv3.ClusterLoadAssignment, map[string]*endpointv3.LocalityLbEndpoints) {
+	httpEntry, httpOwnsCLA := c.clusters[serviceName]
+	owns := !httpOwnsCLA || httpEntry.loadAssignment == nil
+
+	var cla *endpointv3.ClusterLoadAssignment
+	if owns {
+		cla = proxy.NewClusterLoadAssignment(serviceName)
+	}
+	epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
+	for _, endpoint := range endpoints {
+		lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone, waypoint)
+		if cla != nil {
+			cla.Endpoints = append(cla.Endpoints, lbEp)
+		}
+		epMap[endpoint.GetIp()] = lbEp
+	}
+	if cla != nil {
+		proxy.SortLocalityLbEndpoints(cla.Endpoints)
+	}
+	return cla, epMap
+}
+
+// tcpEntryLocked returns the TCP floor entry for a bare service name, which since
+// proposal 037 design (a) is keyed by the entry's Envoy cluster name rather than
+// by the service. Caller must hold clusterMu.
+func (c *SnapshotCache) tcpEntryLocked(serviceName string) (clusterEntry, bool) {
+	entry, ok := c.clusters[proxy.TCPClusterName(serviceName, c.meshDomain)]
+	return entry, ok
+}
+
+// serviceEntryLocked returns the entry carrying a service's service-level facts
+// (sni, sanURIs, the bare-name load assignment) for callers that do not care
+// which protocol classified it: the HTTP default entry when the service has one,
+// else its TCP floor entry. Caller must hold clusterMu.
+func (c *SnapshotCache) serviceEntryLocked(serviceName string) (clusterEntry, bool) {
+	if entry, ok := c.clusters[serviceName]; ok {
+		return entry, true
+	}
+	return c.tcpEntryLocked(serviceName)
 }
 
 // retainAbsentClustersLocked re-inserts entries from prev that are no longer in
@@ -600,7 +666,14 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 			// one here would emit an orphan CLA under the alias name that nothing
 			// references.
 			if entry.loadAssignment != nil {
-				entry.loadAssignment = proxy.NewClusterLoadAssignment(name)
+				// Name the replacement after the load assignment it replaces, NOT
+				// after the map key. They coincide for HTTP and per-port entries,
+				// but a TCP floor entry is keyed "tcp:<fqdn>" while publishing the
+				// BARE-name EDS resource its floor cluster resolves through
+				// (NewTCPServiceCluster's EdsClusterConfig.ServiceName). Keying off
+				// `name` there would retain an empty CLA under a name nothing
+				// references and leave the real one unpublished.
+				entry.loadAssignment = proxy.NewClusterLoadAssignment(entry.loadAssignment.GetClusterName())
 				entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
 			}
 			c.log.InfoContext(ctx, "service disappeared from registry; retaining empty cluster/vhost for grace period",

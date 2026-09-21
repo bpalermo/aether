@@ -870,8 +870,19 @@ than inherit the etcd assumption.
 ### Phase 1 — key the cache by cluster identity
 
 Design (a). TCP entries keyed `tcp:<fqdn>`; the three readers follow; the
-bare-name CLA has one owner. `RequireProtocolDisjoint` is retired in the same
-PR and replaced by the per-protocol honesty contract. Behaviour change: a
+bare-name CLA has one owner.
+
+**Deviation, recorded during implementation:** `RequireProtocolDisjoint` is
+*not* retired here. The replacement this proposal specifies asserts that the
+two listings' `port_protocols` agree, and that field does not exist until
+Phase 2 — so retiring in Phase 1 would drop a working cross-backend guard and
+put nothing in its place, while no test exercises the mixed case at registry
+level. It is annotated in place as a convention rather than an invariant, with
+the swap deferred to Phase 2. Likewise `envoy_validate` gains no case: Phase 1
+changes no Envoy resource *shape*, and the risk it introduces — two EDS
+resources published under one name — is a snapshot-consistency error that
+`envoy --mode validate` cannot see, because it does not resolve dynamic
+cluster references. The cache unit test is the gate that can actually fail. Behaviour change: a
 service whose pods split across protocols now gets **both** an h2 cluster +
 vhost and a `tcp:` floor cluster, instead of the TCP set clobbering the HTTP
 one. That is the *service-level* multi-protocol milestone, and it is what a
