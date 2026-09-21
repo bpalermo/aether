@@ -66,6 +66,25 @@ func TCPClusterName(serviceName, meshDomain string) string {
 	return "tcp:" + base
 }
 
+// TCPPortClusterName returns the cluster name for ONE non-primary raw-TCP port
+// of a service: "tcp:<fqdn>:<port>" (proposal 037).
+//
+// It takes the service's ALREADY-QUALIFIED floor cluster name (what
+// TCPClusterName returns, and what CaptureTCPService.ClusterName carries)
+// rather than the bare service, so the two cannot disagree about the mesh
+// domain.
+//
+// Distinct from PortClusterName, which names the HTTP per-port cluster
+// "<fqdn>:<port>". A port is one or the other, so the two never collide -- and
+// the "tcp:" prefix is what keeps a per-port TCP cluster out of the h2 cluster
+// namespace even when the numbers match.
+func TCPPortClusterName(tcpClusterName string, port uint32) string {
+	if tcpClusterName == "" || port == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d", tcpClusterName, port)
+}
+
 // UDPClusterName returns the data-plane name of a service's UDP-floor cluster:
 // "udp:<svc>.<ns>.<meshDomain>". This cluster carries the same backend endpoints
 // as the HTTP cluster but is a plain EDS cluster with no transport socket (UDP

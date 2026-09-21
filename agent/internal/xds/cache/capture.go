@@ -16,6 +16,7 @@ import (
 	"aethermesh.dev/agent/internal/meshdns"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
@@ -94,6 +95,7 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 			// resource (same endpoint set) but use no ALPN on the transport socket so
 			// the destination inbound demuxes to the TCP floor DEFAULT chain.
 			ClusterName: proxy.TCPClusterName(e.serviceName, c.meshDomain),
+			TCPPorts:    e.tcpPorts,
 			ClusterIP:   e.clusterIP,
 			// L4 route rules (Phase 3b): override the passthrough floor chain when
 			// a TCPRoute or TLSRoute is attached to this service.
@@ -857,12 +859,25 @@ func equalTCPEntries(a, b []captureTCPEntry) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	ma := make(map[string]string, len(a))
+	ma := make(map[string]captureTCPEntry, len(a))
 	for _, e := range a {
-		ma[e.serviceName] = e.clusterIP
+		ma[e.serviceName] = e
 	}
 	for _, e := range b {
-		if ma[e.serviceName] != e.clusterIP {
+		prev, ok := ma[e.serviceName]
+		if !ok || prev.clusterIP != e.clusterIP {
+			return false
+		}
+		// The derived TCP port set is part of the identity: a change to it
+		// changes the chains, so it must trigger a regeneration. Both sides are
+		// sorted at derivation, so ordinary endpoint churn -- pods coming and
+		// going with the SAME declared ports -- produces an identical slice and
+		// compares equal.
+		//
+		// That is the whole of Risk 4's mitigation: regenerating a per-pod
+		// capture listener drains its connections, so this comparison has to be
+		// over the DERIVED set and not over the reload event.
+		if !slices.Equal(prev.tcpPorts, e.tcpPorts) {
 			return false
 		}
 	}
@@ -951,4 +966,99 @@ func (c *SnapshotCache) podExtensionHTTPFilters(cniPod *cniv1.CNIPod, shared []*
 		return append([]*http_connection_managerv3.HttpFilter{proxy.SourceMetadataHTTPFilter(cniPod, c.currentTrustDomain())}, shared...)
 	}
 	return shared
+}
+
+// deriveTCPPorts returns each service's NON-PRIMARY raw-TCP ports, from the
+// port_protocols its endpoints declare (proposal 037).
+//
+// The primary port is excluded on purpose: it is what the portless floor chain
+// already reaches, so a chain for it would add nothing and would need the same
+// cluster the floor already uses. Everything returned here is a port that has
+// no data path today.
+//
+// Classification comes from the ENDPOINTS rather than from the mesh Service's
+// aether.io/app-protocol annotation. That annotation is the registrar's
+// projection of a per-pod fact, one hop removed from its source, and #878 is
+// what happens when the two copies disagree. Deriving here means the chain and
+// the cluster that serves it are built from one map in one snapshot
+// generation, which is also the structural half of #877 — a chain whose
+// cluster was never built kills connections silently, and tcp_proxy has no
+// ODCDS cold path to recover.
+//
+// The result is sorted so that two derivations over the same declared ports
+// compare equal regardless of map iteration order. equalTCPEntries depends on
+// that: endpoint churn must not read as a change, or every pod ADD/DEL would
+// regenerate per-pod capture listeners and drain their connections (Risk 4).
+func deriveTCPPorts(endpointsByService map[string][]*registryv1.ServiceEndpoint) map[string][]uint32 {
+	out := make(map[string][]uint32, len(endpointsByService))
+	for service, endpoints := range endpointsByService {
+		if ports := nonPrimaryTCPPorts(endpoints); len(ports) > 0 {
+			out[service] = ports
+		}
+	}
+	return out
+}
+
+// nonPrimaryTCPPorts returns one service's raw-TCP ports excluding its primary,
+// sorted and de-duplicated across its endpoints. Empty when the service has
+// none — which is every service that existed before proposal 037, since a pod
+// with one declared protocol has exactly one class and its primary carries it.
+func nonPrimaryTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
+	if len(endpoints) == 0 {
+		return nil
+	}
+	// Endpoints of one service share a primary port (proposal 005), so the
+	// first is representative.
+	primary := endpoints[0].GetPort()
+	seen := map[uint32]struct{}{}
+	for _, ep := range endpoints {
+		for port, proto := range ep.GetPortProtocols() {
+			if proto == registryv1.PortProtocol_PORT_PROTOCOL_TCP &&
+				port != primary && port > 0 && port <= 65535 {
+				seen[port] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	ports := make([]uint32, 0, len(seen))
+	for p := range seen {
+		ports = append(ports, p)
+	}
+	slices.Sort(ports)
+	return ports
+}
+
+// refreshCaptureTCPPorts updates each capture-TCP service's derived per-port
+// set and, ONLY if any of them changed, rebuilds the per-pod capture listeners
+// so the new destination_port chains reach Envoy (proposal 037).
+//
+// It reuses SetCaptureTCPServices' entry list and its change detection rather
+// than adding a second regeneration trigger: one comparison, over the derived
+// state, is the whole of Risk 4's mitigation. Regenerating a per-pod capture
+// listener drains that listener's connections, and a registry reload happens on
+// every pod ADD/DEL anywhere on the node — so a trigger keyed on "a reload
+// occurred" rather than "the derived set changed" would turn ordinary churn
+// into dropped connections.
+func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string][]uint32) {
+	c.captureMu.Lock()
+	next := make([]captureTCPEntry, 0, len(c.captureTCPServices))
+	for _, e := range c.captureTCPServices {
+		e.tcpPorts = derived[e.serviceName]
+		next = append(next, e)
+	}
+	changed := !equalTCPEntries(c.captureTCPServices, next)
+	c.captureTCPServices = next
+	c.captureMu.Unlock()
+
+	if !changed || !c.captureEnabled {
+		return
+	}
+	// Same rebuild path SetCaptureTCPServices uses: per-pod capture listeners
+	// embed the TCP chains, so they all have to be regenerated.
+	shared := c.extensionHTTPFilters()
+	c.listenerMu.Lock()
+	c.rebuildPodListenersLocked("derived TCP port set change", shared)
+	c.listenerMu.Unlock()
 }

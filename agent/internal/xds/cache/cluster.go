@@ -236,6 +236,22 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	c.subsetHeaderKeys = proxy.SortSubsetKeys(nodeSubsetKeys)
 	c.subsetMu.Unlock()
 
+	// Refresh each capture-TCP service's derived per-port set (proposal 037).
+	// Derived from BOTH listings: a service whose pods split across protocols
+	// appears in each, and either carries the full port_protocols map.
+	//
+	// This is a no-op unless a declared port set actually changed — endpoint
+	// churn yields the same sorted slice — which is what keeps per-pod capture
+	// listeners from being regenerated, and their connections drained, on every
+	// pod ADD/DEL (Risk 4).
+	derived := deriveTCPPorts(tcpServiceEndpoints)
+	for svc, ports := range deriveTCPPorts(serviceEndpoints) {
+		if _, have := derived[svc]; !have {
+			derived[svc] = ports
+		}
+	}
+	c.refreshCaptureTCPPorts(derived)
+
 	c.log.DebugContext(ctx, "loaded clusters from registry", "count", len(c.clusters))
 
 	return c.generateClusterSnapshot(ctx)

@@ -44,6 +44,11 @@ import (
 type captureTCPEntry struct {
 	serviceName string // bare service name (for cluster name derivation)
 	clusterIP   string // k8s Service ClusterIP (filter-chain prefix_ranges match)
+	// tcpPorts are the service's NON-PRIMARY raw-TCP ports, derived from its
+	// endpoints' port_protocols at registry-load time (proposal 037). Sorted,
+	// so two derivations of the same set compare equal and endpoint churn does
+	// not look like a change -- see equalTCPEntries and Risk 4.
+	tcpPorts []uint32
 }
 
 // SnapshotCache wraps go-control-plane's SnapshotCache and manages Envoy

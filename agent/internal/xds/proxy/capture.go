@@ -50,6 +50,16 @@ type CaptureTCPService struct {
 	// When non-empty, per-SNI filter chains (server_names match) are inserted
 	// BEFORE the per-ClusterIP TCP floor chain on the capture listener.
 	TLSRouteRules []L4ServiceRoute
+	// TCPPorts are the service's NON-PRIMARY raw-TCP application ports, derived
+	// from its endpoints' port_protocols (proposal 037). Each gets its own
+	// destination_port-qualified chain, so a client dialing <VIP>:<p> reaches
+	// that port rather than whatever the portless floor forwards to.
+	//
+	// The primary port is deliberately absent: it is what the portless floor
+	// chain already reaches, and duplicating it would add a chain that changes
+	// nothing. Empty for every service that serves one TCP port, which is every
+	// TCP service that existed before proposal 037.
+	TCPPorts []uint32
 }
 
 // CaptureListenerName returns the per-pod transparent-capture listener name.
@@ -108,6 +118,15 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		// TLSRoute SNI chains (if any) go before the TCP floor chain.
 		tlsChains := BuildCaptureTLSRouteFilterChains(svc, svc.TLSRouteRules, sourceSpiffeID)
 		chains = append(chains, tlsChains...)
+		// Per-port chains for the service's non-primary TCP ports (proposal
+		// 037). Listed before the portless floor for readability only —
+		// Envoy orders by match specificity, not by position, and
+		// destination_port is its first tier.
+		for _, p := range svc.TCPPorts {
+			if pc := buildCaptureTCPPortFilterChain(svc, p, sourceSpiffeID); pc != nil {
+				chains = append(chains, pc)
+			}
+		}
 		// TCP floor chain: passthrough or TCPRoute-weighted.
 		tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules, sourceSpiffeID)
 		if tc != nil {
@@ -178,6 +197,43 @@ func buildCaptureListenerFilters() []*listenerv3.ListenerFilter {
 		listenerFilter(listenerFilterOriginalDstName, &original_dstv3.OriginalDst{}),
 		listenerFilter(listenerFilterHTTPInspectorName, &http_inspectorv3.HttpInspector{}),
 		tlsInspector(),
+	}
+}
+
+// buildCaptureTCPPortFilterChain builds a destination_port-qualified TCP chain
+// for ONE of a service's non-primary raw-TCP ports (proposal 037).
+//
+// Envoy evaluates destination_port ahead of prefix_ranges, and the capture
+// listener already sets use_original_dst, so the port this matches is the
+// pre-REDIRECT one the client actually dialed. That ordering is what lets a
+// per-port TCP chain coexist with the HCM catch-all on the same VIP: a chain
+// matching only the ClusterIP would outrank the HCM's application_protocols
+// match and swallow the service's HTTP traffic, which is precisely why a
+// service could not be both protocols before.
+//
+// The chain targets the port's own cluster, tcp:<fqdn>:<port>, not the floor
+// cluster: the floor forwards to the pod's PRIMARY port, so routing a
+// non-primary port through it would deliver :9000 traffic to :8080.
+func buildCaptureTCPPortFilterChain(svc CaptureTCPService, port uint32, sourceSpiffeID string) *listenerv3.FilterChain {
+	if svc.ClusterIP == "" || svc.ClusterName == "" || port == 0 || port > 65535 {
+		return nil
+	}
+	if net.ParseIP(svc.ClusterIP) == nil {
+		return nil
+	}
+	name := fmt.Sprintf("cap_tcp_%s_%d", svc.ClusterName, port)
+	return &listenerv3.FilterChain{
+		Name: name,
+		FilterChainMatch: &listenerv3.FilterChainMatch{
+			PrefixRanges: []*corev3.CidrRange{
+				{AddressPrefix: svc.ClusterIP, PrefixLen: wrapperspb.UInt32(32)},
+			},
+			DestinationPort: wrapperspb.UInt32(port),
+		},
+		Filters: append(
+			BuildSourceFilterStates(sourceSpiffeID),
+			buildTCPProxyNetworkFilter(name, TCPPortClusterName(svc.ClusterName, port)),
+		),
 	}
 }
 

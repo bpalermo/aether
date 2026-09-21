@@ -104,6 +104,7 @@ go_test(
         "accesslog_test.go",
         "authz_test.go",
         "capture_test.go",
+        "captureport_test.go",
         "cluster_test.go",
         "edge_test.go",
         "edgeconfig_test.go",
