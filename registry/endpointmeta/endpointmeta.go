@@ -139,3 +139,125 @@ func Metadata(annotations map[string]string) map[string]string {
 //     applies only to the write-based backends, so it must not claim EDS.
 //
 // Unifying them would silently flip one backend's default. Keep them apart.
+
+// PortProtocols returns the L4 class of every port the pod advertises
+// (proposal 037).
+//
+// The grammar is the existing endpoint.aether.io/ports suffix, extended:
+//
+//	endpoint.aether.io/ports:    "8080,9090=h2,9000=tcp,5432=tcp"
+//	endpoint.aether.io/protocol: "http"   # the DEFAULT for unsuffixed ports
+//
+// A port with no suffix takes the pod-level endpoint.aether.io/protocol value,
+// which is why that annotation is KEPT rather than deprecated: it becomes the
+// default for the port set, and every manifest written before this proposal
+// means exactly what it meant before. A pod with `protocol: tcp` and
+// `ports: "9000,8080=h1"` has a TCP primary and an HTTP secondary.
+//
+// Suffix vocabulary, and what each one says:
+//
+//	h1, http1, (none)  HTTP -- the loopback hop speaks HTTP/1.1
+//	h2, http2          HTTP -- the loopback hop speaks h2c
+//	tcp                TCP  -- raw mTLS passthrough through the capture floor
+//
+// h1 and h2 differ only in the agent-local loopback codec, which the registry
+// does not carry (AppPortProtocols reads it from the same annotation on the
+// agent side). Both are PORT_PROTOCOL_HTTP here.
+//
+// `grpc` is deliberately NOT accepted. gRPC is h2 on the wire and the mesh does
+// nothing gRPC-specific at L4, so accepting it would advertise a distinction
+// the data plane does not make. Add it when something consumes it.
+//
+// An unrecognised suffix is an ERROR, not a default. The alternative — treating
+// it as HTTP, which is what the agent-side AppPortProtocols does today with an
+// unknown suffix — is how a typo becomes a port silently served over the wrong
+// protocol, which is the failure this whole proposal exists to remove.
+func PortProtocols(annotations map[string]string) (map[uint32]registryv1.PortProtocol, error) {
+	defaultProto, err := Protocol(annotations)
+	if err != nil {
+		return nil, err
+	}
+	fallback := PortProtocolFromService(defaultProto)
+
+	primary, err := Port(annotations)
+	if err != nil {
+		return nil, err
+	}
+
+	out := map[uint32]registryv1.PortProtocol{uint32(primary): fallback}
+
+	raw := annotations[aetherannotations.AnnotationEndpointPorts]
+	if raw == "" {
+		return out, nil
+	}
+	for _, part := range strings.Split(raw, ",") {
+		t := strings.TrimSpace(part)
+		if t == "" {
+			continue
+		}
+		portStr, suffix := t, ""
+		if i := strings.IndexByte(t, '='); i >= 0 {
+			portStr = strings.TrimSpace(t[:i])
+			suffix = strings.ToLower(strings.TrimSpace(t[i+1:]))
+		}
+		p, err := strconv.ParseUint(portStr, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ports annotation entry %q", t)
+		}
+		proto, err := portProtocolFromSuffix(suffix, fallback)
+		if err != nil {
+			return nil, fmt.Errorf("port %d: %w", p, err)
+		}
+		out[uint32(p)] = proto
+	}
+	return out, nil
+}
+
+// portProtocolFromSuffix maps one "=proto" suffix to its L4 class. An empty
+// suffix takes fallback (the pod-level protocol).
+func portProtocolFromSuffix(suffix string, fallback registryv1.PortProtocol) (registryv1.PortProtocol, error) {
+	switch suffix {
+	case "":
+		return fallback, nil
+	case "h1", "http1", "http/1.1":
+		return registryv1.PortProtocol_PORT_PROTOCOL_HTTP, nil
+	case "h2", "http2":
+		return registryv1.PortProtocol_PORT_PROTOCOL_HTTP, nil
+	case aetherannotations.ProtocolTCP:
+		return registryv1.PortProtocol_PORT_PROTOCOL_TCP, nil
+	default:
+		return registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED,
+			fmt.Errorf("unknown port protocol suffix %q (want h1, h2 or tcp)", suffix)
+	}
+}
+
+// PortProtocolFromService converts a service-level protocol to the per-port
+// enum. The two vocabularies are numerically identical and
+// TestPortProtocolMatchesServiceProtocol pins that; this function exists so the
+// conversion is named and searchable rather than an unexplained cast.
+func PortProtocolFromService(p registryv1.Service_Protocol) registryv1.PortProtocol {
+	return registryv1.PortProtocol(p)
+}
+
+// ServiceProtocolFromPort is the inverse of PortProtocolFromService.
+func ServiceProtocolFromPort(p registryv1.PortProtocol) registryv1.Service_Protocol {
+	return registryv1.Service_Protocol(p)
+}
+
+// ProtocolsServed returns the distinct L4 classes a pod serves across all its
+// advertised ports, which is the set of registry keys it must be registered
+// under (proposal 037: a pod serving both an HTTP and a raw-TCP port is
+// registered once per protocol, with both registrations carrying the same full
+// port_protocols map).
+func ProtocolsServed(portProtocols map[uint32]registryv1.PortProtocol) []registryv1.Service_Protocol {
+	seen := map[registryv1.Service_Protocol]struct{}{}
+	for _, pp := range portProtocols {
+		seen[ServiceProtocolFromPort(pp)] = struct{}{}
+	}
+	out := make([]registryv1.Service_Protocol, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}

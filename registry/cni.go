@@ -41,11 +41,21 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegio
 		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
 	}
 
+	// Per-port L4 class (proposal 037). Carried on the endpoint rather than in
+	// the key: the key protocol stays what it always was, and a reader that
+	// predates this field treats its absence as "every port is the protocol of
+	// my key", which is exactly the pre-037 meaning.
+	portProtocols, err := endpointmeta.PortProtocols(cniPod.GetAnnotations())
+	if err != nil {
+		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
+	}
+
 	endpoint := &registryv1.ServiceEndpoint{
 		Ip:              cniPod.GetIps()[0],
 		ClusterName:     clusterName,
 		Port:            uint32(port),
 		Ports:           ports,
+		PortProtocols:   portProtocols,
 		Weight:          weight,
 		Metadata:        endpointmeta.Metadata(cniPod.GetAnnotations()),
 		HealthCheckMode: HealthCheckModeFromAnnotations(cniPod.GetAnnotations()),

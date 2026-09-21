@@ -375,13 +375,21 @@ func (r *KubernetesRegistry) podToEndpoint(pod *corev1.Pod, nodeLocalities map[s
 		return nil, fmt.Errorf("pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 
+	// Per-port L4 class (proposal 037), from the same shared parser the CNI
+	// registration path uses — the two backends must not drift again (#878).
+	portProtocols, err := endpointmeta.PortProtocols(pod.Annotations)
+	if err != nil {
+		return nil, fmt.Errorf("pod %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+
 	ep := &registryv1.ServiceEndpoint{
-		Ip:          pod.Status.PodIP,
-		ClusterName: r.clusterName,
-		Port:        uint32(port),
-		Ports:       ports,
-		Weight:      weight,
-		Metadata:    endpointmeta.Metadata(pod.Annotations),
+		Ip:            pod.Status.PodIP,
+		ClusterName:   r.clusterName,
+		Port:          uint32(port),
+		Ports:         ports,
+		PortProtocols: portProtocols,
+		Weight:        weight,
+		Metadata:      endpointmeta.Metadata(pod.Annotations),
 		KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
 			Namespace: pod.Namespace,
 			PodName:   pod.Name,
