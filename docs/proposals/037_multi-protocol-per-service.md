@@ -897,10 +897,19 @@ the cache, not yet a usable mixed service.
 
 Two chart releases. **Release A, control plane:** `ProxyTCPOutboundPort`
 constant; both generators expose `mesh-tcp` 18082 plus the name-only `http` 80
-and `https` 443 ports and converge `Spec.Ports`; the webhook guard on `=tcp`;
-the `port-protocols` annotation; the CNI rule for `dport 18082` (the CNI ships
-in the agent chart but is inert without the chain, and the REJECT floor makes
-the interim safe). **Release B, agent:**
+and `https` 443 ports and converge `Spec.Ports`; the CNI rule for `dport 18082`
+(the CNI ships in the agent chart but is inert without the chain, and the
+REJECT floor makes the interim safe).
+
+**Shipped as #890.** Two items named here moved or were dropped: the `=tcp`
+webhook guard is **dropped** (Risk 6 records why), and the `port-protocols`
+annotation moves to Release B, because it needs per-port data that only arrives
+with the proto field — stamping a primary-port-only form in Release A would
+advertise a feature that does not work yet. Release A also had to fix a
+migration gap not anticipated here: the generator's apply path compared
+annotations alone and returned early, so a mesh Service created before 037
+would have kept its single `mesh` port forever and the new spellings would have
+appeared only on a fresh install. **Release B, agent:**
 design (b)–(e) — the `=tcp` suffix, `port_protocols` on the proto, dual
 registration and dual promotion, typed buckets, the SNI rule, per-port
 `tcp:<fqdn>:<p>` clusters, `destination_port`-qualified capture chains from the
@@ -1058,10 +1067,35 @@ decoration (#853).
    and asserts both listings report HEALTHY. What makes it fail: promoting under
    the key protocol only (which is the pre-change code).
 6. **Old agent, new annotation** (silent downgrade to HTTP on the pod's own
-   node). Mitigation is the webhook guard plus the documented skew rule. Gate:
-   the webhook test rejects `=tcp` when the chart's agent version is below the
-   floor. What makes it fail: nothing on the agent side — this is a *process*
-   gate, and it is stated as such rather than pretended to be a data-plane one.
+   node).
+
+   **DECIDED during Release A: the webhook guard is dropped.** The mitigation is
+   the documented skew rule — *roll the agent DaemonSet before annotating* —
+   plus a loud WARN from the new agent when it parses a `=tcp` suffix, so the
+   supported case is visible in logs and the unsupported case is a known
+   ordering constraint rather than a surprise.
+
+   The guard was specified as "the pod-mutating webhook rejects `=tcp` until the
+   chart's agent version supports it". Two things make it unable to do that job:
+
+   - There is no pod **validating** webhook. The controller's `/validate`
+     dispatches by Kind (`MeshConfig`, `HTTPFilter`, `EdgeConfig`,
+     `EndpointPolicy`, `HTTPRoute`); pods reach only `/mutate`. A mutating
+     webhook *can* deny, but that is an odd shape for a pure admission check.
+   - It must know the agent's version, and the only non-drifting source is a
+     chart value set by the same release that ships the agent. That is sound as
+     far as it goes — the chart is the unit of deployment — but within a single
+     `helm upgrade` the controller rolls **before** the agents, so a pod
+     annotated `=tcp` in that window still registers as HTTP on an old agent's
+     node. The guard narrows the window it exists for without closing it.
+
+   A gate that cannot fail in the case it was built for is decoration (#853).
+   Preferring an honest ordering constraint to a partial gate is the same call
+   made about `envoy_validate` in Phase 1: state the limit, do not dress it up.
+
+   What would reopen this: evidence that the skew window is actually being hit —
+   an agent WARN for `=tcp` arriving from a node whose agent predates support,
+   which the WARN itself makes visible.
 7. **Per-app-port TCP under scoped capture.** `:18082` works in both capture
    modes (the CNI rule is extended); `:<p>` for a TCP app port is not captured
    under scoped mode, the same "configured, accepted, inert" shape per-app-port
