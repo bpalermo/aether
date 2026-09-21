@@ -115,7 +115,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		// keep storage/xDS for drain, but never (re-)register the endpoint.
 		log.DebugContext(ctx, "pod is terminating; skipping endpoint registration")
 	} else {
-		serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cniPod)
+		serviceName, protocols, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cniPod)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to build endpoint: %v", err)
 		}
@@ -131,10 +131,17 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		// failed ADD fails the sandbox): the pod is already stored, so the
 		// reconciliation sweep registers it as soon as the registry answers.
 		regCtx, regSpan := startStepSpan(ctx, "cni_server.register_endpoint", cniPod)
-		err = s.registry.RegisterEndpoint(regCtx, serviceName, protocol, sEndpoint)
+		// One registration per L4 class the pod's ports declare (proposal 037).
+		// A single-protocol pod -- every pod written before that proposal --
+		// loops once, so this is the pre-037 path unchanged. A pod serving both
+		// must appear under both keys; a partial registration leaves one
+		// listing without it, which surfaces as a cluster with no hosts rather
+		// than as an error.
+		err = s.registerUnderAll(regCtx, serviceName, protocols, sEndpoint)
 		telemetry.EndSpan(regSpan, err)
 		if err != nil {
-			log.ErrorContext(ctx, "failed to register endpoint; reconciliation sweep will retry", "error", err, "service", serviceName)
+			log.ErrorContext(ctx, "failed to register endpoint; reconciliation sweep will retry",
+				"error", err, "service", serviceName)
 		}
 	}
 

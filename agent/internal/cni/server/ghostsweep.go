@@ -1228,7 +1228,7 @@ func (s *CNIServer) registerMissingEndpoint(ctx context.Context, m plannedMissin
 		return false
 	}
 
-	serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cur)
+	serviceName, protocols, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cur)
 	if err != nil {
 		s.log.DebugContext(ctx, "ghost sweep: failed to build endpoint for missing pod", "pod", cur.GetName(), "error", err)
 		return false
@@ -1239,7 +1239,10 @@ func (s *CNIServer) registerMissingEndpoint(ctx context.Context, m plannedMissin
 
 	callCtx, cancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
 	defer cancel()
-	if err := s.registry.RegisterEndpoint(callCtx, serviceName, protocol, endpoint); err != nil {
+	// Every key the pod holds (proposal 037): a sweep that restores only one
+	// leaves the other listing short an endpoint, which is exactly the ghost
+	// this sweep exists to remove.
+	if err := s.registerUnderAll(callCtx, serviceName, protocols, endpoint); err != nil {
 		s.log.ErrorContext(ctx, "ghost sweep: failed to register missing endpoint", "error", err,
 			"service", serviceName, "ip", m.ip, "pod", cur.GetName())
 		return false
