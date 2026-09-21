@@ -18,6 +18,7 @@ import (
 	"aethermesh.dev/common/constants"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/registry/endpointmeta"
 	"aethermesh.dev/registry/registrytest"
 )
 
@@ -99,6 +100,7 @@ func TestRegisterEndpoint(t *testing.T) {
 				Ip:          "10.0.0.1",
 				ClusterName: "test-cluster",
 				Port:        8080,
+				Ports:       []uint32{8080},
 				Weight:      1024,
 			},
 			wantErr: false,
@@ -238,6 +240,7 @@ func TestListEndpoints(t *testing.T) {
 					Ip:          "10.0.0.1",
 					ClusterName: "test-cluster",
 					Port:        uint32(constants.DefaultEndpointPort),
+					Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 					Weight:      constants.DefaultEndpointWeight,
 					Metadata:    map[string]string{},
 					KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -271,6 +274,7 @@ func TestListEndpoints(t *testing.T) {
 					Ip:          "10.0.0.1",
 					ClusterName: "test-cluster",
 					Port:        uint32(constants.DefaultEndpointPort),
+					Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 					Weight:      constants.DefaultEndpointWeight,
 					Metadata:    map[string]string{},
 					KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -361,6 +365,7 @@ func TestListEndpoints(t *testing.T) {
 					Ip:          "10.0.0.1",
 					ClusterName: "test-cluster",
 					Port:        9090,
+					Ports:       []uint32{9090},
 					Weight:      constants.DefaultEndpointWeight,
 					Metadata:    map[string]string{},
 					KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -394,6 +399,7 @@ func TestListEndpoints(t *testing.T) {
 					Ip:          "10.0.0.1",
 					ClusterName: "test-cluster",
 					Port:        uint32(constants.DefaultEndpointPort),
+					Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 					Weight:      512,
 					Metadata:    map[string]string{},
 					KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -428,6 +434,7 @@ func TestListEndpoints(t *testing.T) {
 					Ip:          "10.0.0.1",
 					ClusterName: "test-cluster",
 					Port:        uint32(constants.DefaultEndpointPort),
+					Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 					Weight:      constants.DefaultEndpointWeight,
 					Metadata: map[string]string{
 						"version": "v2",
@@ -464,6 +471,7 @@ func TestListEndpoints(t *testing.T) {
 					Ip:          "10.0.0.1",
 					ClusterName: "test-cluster",
 					Port:        uint32(constants.DefaultEndpointPort),
+					Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 					Weight:      constants.DefaultEndpointWeight,
 					Metadata:    map[string]string{},
 					KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -545,6 +553,7 @@ func TestListEndpoints(t *testing.T) {
 					Ip:          "10.0.0.1",
 					ClusterName: "test-cluster",
 					Port:        uint32(constants.DefaultEndpointPort),
+					Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 					Weight:      constants.DefaultEndpointWeight,
 					Metadata:    map[string]string{},
 					KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -576,6 +585,7 @@ func TestListEndpoints(t *testing.T) {
 					Ip:          "10.0.0.1",
 					ClusterName: "prod-cluster",
 					Port:        uint32(constants.DefaultEndpointPort),
+					Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 					Weight:      constants.DefaultEndpointWeight,
 					Metadata:    map[string]string{},
 					KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -592,6 +602,7 @@ func TestListEndpoints(t *testing.T) {
 					Ip:          "10.0.0.2",
 					ClusterName: "prod-cluster",
 					Port:        uint32(constants.DefaultEndpointPort),
+					Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 					Weight:      constants.DefaultEndpointWeight,
 					Metadata:    map[string]string{},
 					KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -657,6 +668,7 @@ func TestListAllEndpoints(t *testing.T) {
 						Ip:          "10.0.0.1",
 						ClusterName: "test-cluster",
 						Port:        uint32(constants.DefaultEndpointPort),
+						Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 						Weight:      constants.DefaultEndpointWeight,
 						Metadata:    map[string]string{},
 						KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -689,6 +701,7 @@ func TestListAllEndpoints(t *testing.T) {
 						Ip:          "10.0.0.1",
 						ClusterName: "test-cluster",
 						Port:        uint32(constants.DefaultEndpointPort),
+						Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 						Weight:      constants.DefaultEndpointWeight,
 						Metadata:    map[string]string{},
 						KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -705,6 +718,7 @@ func TestListAllEndpoints(t *testing.T) {
 						Ip:          "10.0.0.3",
 						ClusterName: "test-cluster",
 						Port:        uint32(constants.DefaultEndpointPort),
+						Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 						Weight:      constants.DefaultEndpointWeight,
 						Metadata:    map[string]string{},
 						KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -723,6 +737,7 @@ func TestListAllEndpoints(t *testing.T) {
 						Ip:          "10.0.0.2",
 						ClusterName: "test-cluster",
 						Port:        uint32(constants.DefaultEndpointPort),
+						Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 						Weight:      constants.DefaultEndpointWeight,
 						Metadata:    map[string]string{},
 						KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -820,6 +835,7 @@ func TestListAllEndpoints(t *testing.T) {
 						Ip:          "10.0.0.1",
 						ClusterName: "test-cluster",
 						Port:        uint32(constants.DefaultEndpointPort),
+						Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 						Weight:      constants.DefaultEndpointWeight,
 						Metadata:    map[string]string{},
 						KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -836,6 +852,7 @@ func TestListAllEndpoints(t *testing.T) {
 						Ip:          "10.0.0.2",
 						ClusterName: "test-cluster",
 						Port:        uint32(constants.DefaultEndpointPort),
+						Ports:       []uint32{uint32(constants.DefaultEndpointPort)},
 						Weight:      constants.DefaultEndpointWeight,
 						Metadata:    map[string]string{},
 						KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
@@ -900,15 +917,18 @@ func TestListAllEndpoints_SameSANamespaceIsolation(t *testing.T) {
 	assert.Equal(t, "10.0.0.1", epsA[0].GetIp())
 }
 
-// TestKubernetesRegistry_TCPProtocolReturnsEmpty is the regression guard for the
-// MESH-HTTP RequestHeaderModifier/MeshFrontend 503 bug: the Kubernetes registry
-// derives every endpoint from a managed pod's mesh-inbound (HTTP/h2) listener and
-// has no per-pod TCP service. Returning the same pods for a PROTOCOL_TCP query made
-// the agent's LoadClustersFromRegistry overwrite each service's HTTP cluster+vhost
-// with a vhost-less tcp:true entry, so the CDS cluster and GAMMA cap_http vhost
-// disappeared and captured requests 503'd. A TCP query must yield no endpoints;
-// HTTP and UNSPECIFIED return the managed-pod endpoints.
-func TestKubernetesRegistry_TCPProtocolReturnsEmpty(t *testing.T) {
+// TestKubernetesRegistry_HTTPPodIsNotReturnedForTCP is the regression guard for
+// the MESH-HTTP RequestHeaderModifier/MeshFrontend 503 bug (#430): answering a
+// PROTOCOL_TCP query with pods that serve HTTP made the agent's
+// LoadClustersFromRegistry overwrite each service's HTTP cluster+vhost with a
+// vhost-less tcp:true entry, so the CDS cluster and GAMMA cap_http vhost
+// disappeared and captured requests 503'd.
+//
+// The pod below declares no protocol, so it is an HTTP pod, and a TCP query must
+// still yield nothing for it. Note what this does NOT say any more: since #878 a
+// TCP query is not empty in general — a pod that declares endpoint.aether.io/
+// protocol: tcp is returned by it. See TestListEndpointsFiltersByPodProtocol.
+func TestKubernetesRegistry_HTTPPodIsNotReturnedForTCP(t *testing.T) {
 	r := newTestRegistry(
 		"c",
 		managedPod("echo-a", "team-a", "echo-v1", "10.0.0.1", "node-1"),
@@ -933,6 +953,9 @@ func TestKubernetesRegistry_TCPProtocolReturnsEmpty(t *testing.T) {
 	require.Empty(t, tcpAll)
 
 	// Shared cross-backend contract: a service serves HTTP xor TCP, never both.
+	// Vacuous here on its own (tcpAll is empty, so the loop body never runs) —
+	// TestListAllEndpointsFiltersByPodProtocol calls it with BOTH maps populated,
+	// which is where it can actually fail.
 	registrytest.RequireProtocolDisjoint(t, httpAll, tcpAll)
 
 	// Single-service TCP read is empty as well.
@@ -1171,7 +1194,7 @@ func TestGetPortFromAnnotations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := getPortFromAnnotations(tt.annotations)
+			got, err := endpointmeta.Port(tt.annotations)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -1235,7 +1258,7 @@ func TestGetWeightFromAnnotations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := getWeightFromAnnotations(tt.annotations)
+			got, err := endpointmeta.Weight(tt.annotations)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -1314,8 +1337,202 @@ func TestGetEndpointMetadataFromAnnotations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := getEndpointMetadataFromAnnotations(tt.annotations)
+			got := endpointmeta.Metadata(tt.annotations)
 			assert.Equal(t, tt.expected, got)
 		})
 	}
+}
+
+// ─── #878: per-pod protocol filtering ────────────────────────────────────────
+
+// withAnnotations returns pod with kv merged into its annotations.
+func withAnnotations(pod *corev1.Pod, kv map[string]string) *corev1.Pod {
+	for k, v := range kv {
+		pod.Annotations[k] = v
+	}
+	return pod
+}
+
+// ips extracts the endpoint IPs, which is all these tests assert on: the full
+// endpoint shape is covered by TestListEndpoints, and membership is the question
+// here.
+func ips(eps []*registryv1.ServiceEndpoint) []string {
+	out := make([]string, 0, len(eps))
+	for _, ep := range eps {
+		out = append(out, ep.GetIp())
+	}
+	return out
+}
+
+// TestListEndpointsFiltersByPodProtocol is the regression test for #878.
+//
+// Before the fix this backend returned nil for every TCP query, so a pod
+// declaring endpoint.aether.io/protocol: tcp was accepted at registration and
+// then silently dropped on read — the operator saw Accepted=True on their
+// TCPRoute and no endpoints. The "tcp pod is returned for a TCP query" case
+// below is the one that was broken; it fails against the pre-fix code.
+//
+// The mirror cases matter just as much: an HTTP pod must not appear under TCP
+// (that is what made every mesh service collapse to a TCP-only entry), and a TCP
+// pod must not appear under HTTP (which would put a raw-TCP pod behind an h2
+// cluster).
+func TestListEndpointsFiltersByPodProtocol(t *testing.T) {
+	tcpPod := withAnnotations(
+		managedPod("pod-tcp", "default", "my-service", "10.0.0.1", "node-1"),
+		map[string]string{aetherannotations.AnnotationEndpointProtocol: aetherannotations.ProtocolTCP},
+	)
+	httpPod := withAnnotations(
+		managedPod("pod-http", "default", "my-service", "10.0.0.2", "node-1"),
+		map[string]string{aetherannotations.AnnotationEndpointProtocol: aetherannotations.ProtocolHTTP},
+	)
+	// No protocol annotation at all: the annotation defaults to HTTP, so this pod
+	// must behave exactly like httpPod. This is the case the whole existing fleet
+	// is in, and it is why the change is safe to land.
+	unannotatedPod := managedPod("pod-plain", "default", "my-service", "10.0.0.3", "node-1")
+
+	tests := []struct {
+		name     string
+		objects  []any
+		protocol registryv1.Service_Protocol
+		wantIPs  []string
+	}{
+		{
+			name:     "tcp pod is returned for a TCP query",
+			objects:  []any{tcpPod.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a")},
+			protocol: registryv1.Service_PROTOCOL_TCP,
+			wantIPs:  []string{"10.0.0.1"},
+		},
+		{
+			name:     "tcp pod is NOT returned for an HTTP query",
+			objects:  []any{tcpPod.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a")},
+			protocol: registryv1.Service_PROTOCOL_HTTP,
+			wantIPs:  []string{},
+		},
+		{
+			name:     "http pod is NOT returned for a TCP query",
+			objects:  []any{httpPod.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a")},
+			protocol: registryv1.Service_PROTOCOL_TCP,
+			wantIPs:  []string{},
+		},
+		{
+			name:     "unannotated pod is HTTP",
+			objects:  []any{unannotatedPod.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a")},
+			protocol: registryv1.Service_PROTOCOL_HTTP,
+			wantIPs:  []string{"10.0.0.3"},
+		},
+		{
+			name:     "unannotated pod is not TCP",
+			objects:  []any{unannotatedPod.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a")},
+			protocol: registryv1.Service_PROTOCOL_TCP,
+			wantIPs:  []string{},
+		},
+		{
+			name:     "UNSPECIFIED is treated as HTTP",
+			objects:  []any{httpPod.DeepCopy(), tcpPod.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a")},
+			protocol: registryv1.Service_PROTOCOL_UNSPECIFIED,
+			wantIPs:  []string{"10.0.0.2"},
+		},
+		{
+			name:     "mixed pods split cleanly: HTTP side",
+			objects:  []any{httpPod.DeepCopy(), tcpPod.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a")},
+			protocol: registryv1.Service_PROTOCOL_HTTP,
+			wantIPs:  []string{"10.0.0.2"},
+		},
+		{
+			name:     "mixed pods split cleanly: TCP side",
+			objects:  []any{httpPod.DeepCopy(), tcpPod.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a")},
+			protocol: registryv1.Service_PROTOCOL_TCP,
+			wantIPs:  []string{"10.0.0.1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestRegistry("test-cluster", tt.objects...)
+			got, err := r.ListEndpoints(context.Background(), "default/my-service", tt.protocol)
+			require.NoError(t, err)
+			assert.ElementsMatch(t, tt.wantIPs, ips(got))
+		})
+	}
+}
+
+// TestListEndpointsExcludesInvalidProtocolAnnotation: a pod whose protocol
+// annotation does not parse is excluded from BOTH listings rather than being
+// defaulted to HTTP.
+//
+// Defaulting would be the silent-downgrade failure this change removes, one
+// typo removed. The listing itself must still succeed — one malformed pod must
+// not take down discovery for every other pod behind the same ServiceAccount.
+func TestListEndpointsExcludesInvalidProtocolAnnotation(t *testing.T) {
+	bad := withAnnotations(
+		managedPod("pod-bad", "default", "my-service", "10.0.0.9", "node-1"),
+		map[string]string{aetherannotations.AnnotationEndpointProtocol: "HTTP/2"},
+	)
+	good := managedPod("pod-good", "default", "my-service", "10.0.0.2", "node-1")
+
+	for _, protocol := range []registryv1.Service_Protocol{
+		registryv1.Service_PROTOCOL_HTTP,
+		registryv1.Service_PROTOCOL_TCP,
+	} {
+		r := newTestRegistry("test-cluster", bad.DeepCopy(), good.DeepCopy(),
+			topologyNode("node-1", "us-east-1", "us-east-1a"))
+		got, err := r.ListEndpoints(context.Background(), "default/my-service", protocol)
+		require.NoError(t, err, "a malformed pod must not fail the whole listing")
+		assert.NotContains(t, ips(got), "10.0.0.9", "protocol=%v", protocol)
+	}
+}
+
+// TestListAllEndpointsFiltersByPodProtocol is the ListAllEndpoints half of #878.
+// A service with no pod serving the requested protocol is ABSENT from the map,
+// not present with an empty slice — the agent's cluster passes key off presence.
+func TestListAllEndpointsFiltersByPodProtocol(t *testing.T) {
+	tcpPod := withAnnotations(
+		managedPod("pod-tcp", "default", "tcp-service", "10.0.0.1", "node-1"),
+		map[string]string{aetherannotations.AnnotationEndpointProtocol: aetherannotations.ProtocolTCP},
+	)
+	httpPod := managedPod("pod-http", "default", "http-service", "10.0.0.2", "node-1")
+	objects := []any{tcpPod.DeepCopy(), httpPod.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a")}
+
+	r := newTestRegistry("test-cluster", objects...)
+
+	httpAll, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.2"}, ips(httpAll["default/http-service"]))
+	assert.NotContains(t, httpAll, "default/tcp-service", "a TCP service must not appear in the HTTP listing")
+
+	tcpAll, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_TCP)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.1"}, ips(tcpAll["default/tcp-service"]))
+	assert.NotContains(t, tcpAll, "default/http-service", "an HTTP service must not appear in the TCP listing")
+
+	// The shared cross-backend contract, with BOTH maps non-empty — the only
+	// shape in which it can fail. Elsewhere it is called with an empty TCP map
+	// and its loop body never executes.
+	require.NotEmpty(t, httpAll)
+	require.NotEmpty(t, tcpAll)
+	registrytest.RequireProtocolDisjoint(t, httpAll, tcpAll)
+}
+
+// TestPodToEndpointPopulatesPorts covers the second half of the missing-parser
+// bug found with #878: this backend never read endpoint.aether.io/ports, so
+// Ports was nil on every endpoint and proposal 005's per-port EDS membership
+// silently did nothing here while working on the write-based backends.
+func TestPodToEndpointPopulatesPorts(t *testing.T) {
+	pod := withAnnotations(
+		managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1"),
+		map[string]string{
+			aetherannotations.AnnotationEndpointPort:  "8080",
+			aetherannotations.AnnotationEndpointPorts: "9090=h2,8080,7070",
+		},
+	)
+	r := newTestRegistry("test-cluster", pod.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a"))
+
+	got, err := r.ListEndpoints(context.Background(), "default/my-service", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+
+	// Sorted, de-duplicated, primary port included, and the "=h2" loopback-codec
+	// suffix stripped — the registry carries only the numeric set.
+	assert.Equal(t, []uint32{7070, 8080, 9090}, got[0].GetPorts())
+	assert.Equal(t, uint32(8080), got[0].GetPort())
 }
