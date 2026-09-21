@@ -120,7 +120,7 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 	// DRAINING hosts from new selections but lets established connections
 	// finish through the grace period — less connection-pool churn than
 	// outright removal. CNI DEL performs the final removal.
-	serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cur)
+	serviceName, protocols, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cur)
 	if err != nil {
 		log.ErrorContext(ctx, "termination: failed to build endpoint", "error", err)
 		return
@@ -133,7 +133,11 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 	// costs nothing the pipeline does not already recover.
 	drainCtx, drainCancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
 	defer drainCancel()
-	if err := s.registry.RegisterEndpoint(drainCtx, serviceName, protocol, endpoint); err != nil {
+	// Mark DRAINING under every key the pod holds (proposal 037). Missing one
+	// leaves that listing advertising the pod as healthy for the whole grace
+	// period. All calls share drainCtx, so the worst-case hold under
+	// lifecycleMu is the SAME bound as before, not one timeout per key.
+	if err := s.registerUnderAll(drainCtx, serviceName, protocols, endpoint); err != nil {
 		s.deregisterAfterFailedDrainMark(ctx, log, cur, serviceName, err)
 		return
 	}
@@ -143,7 +147,7 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 	// close_connections_on_host_health_failure shuts the by-then-idle pools
 	// while the app is still alive (preStop window) — pre-empting the app-exit
 	// GOAWAY race without cutting the streams phase 1 let finish.
-	go s.schedulePoolClose(ctx, s.drainDelayForPod(pod), cur.GetContainerId(), serviceName, protocol, endpoint, log)
+	go s.schedulePoolClose(ctx, s.drainDelayForPod(pod), cur.GetContainerId(), serviceName, protocols, endpoint, log)
 }
 
 // drainPoolCloseDelay is the phase-2 floor: long enough for phase 1's
@@ -194,7 +198,7 @@ func (s *CNIServer) drainDelayForPod(pod *corev1.Pod) time.Duration {
 // schedulePoolClose re-registers the endpoint UNHEALTHY after the given drain
 // delay, unless CNI DEL has already removed the pod — never resurrect a
 // deregistered endpoint.
-func (s *CNIServer) schedulePoolClose(ctx context.Context, delay time.Duration, containerID, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint, log *slog.Logger) {
+func (s *CNIServer) schedulePoolClose(ctx context.Context, delay time.Duration, containerID, serviceName string, protocols []registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint, log *slog.Logger) {
 	select {
 	case <-ctx.Done():
 		return
@@ -215,7 +219,9 @@ func (s *CNIServer) schedulePoolClose(ctx context.Context, delay time.Duration, 
 	// Bounded for the same reason as phase 1 (S20, #772): lifecycleMu is held.
 	callCtx, cancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
 	defer cancel()
-	if err := s.registry.RegisterEndpoint(callCtx, serviceName, protocol, endpoint); err != nil {
+	// Every key the pod holds, sharing one deadline so the worst-case
+	// lifecycleMu hold is unchanged (proposal 037).
+	if err = s.registerUnderAll(callCtx, serviceName, protocols, endpoint); err != nil {
 		log.ErrorContext(ctx, "termination: failed to mark draining endpoint unhealthy; pools close at app exit instead", "error", err)
 		return
 	}
