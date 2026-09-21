@@ -432,6 +432,16 @@ type SnapshotCache struct {
 	// name, that need per-ClusterIP TCP-proxy floor chains on the capture listener.
 	// A nil/empty slice means all captured traffic goes through the HCM chain.
 	captureTCPServices []captureTCPEntry
+	// tcpFloorWarnMu/tcpFloorWarnedAt rate-limit the #877 warning: TCP mesh
+	// services configured while the node has no identity. That is also the
+	// normal startup state for a few seconds, and the listener build runs per
+	// pod, so an unthrottled log would be one line per pod per rebuild.
+	tcpFloorWarnMu   sync.Mutex
+	tcpFloorWarnedAt time.Time
+	// tcpFloorIdentitySeen is the identity readiness the capture listeners were
+	// last built against (#877). Compared on every snapshot push so a change
+	// rebuilds them; see reconcileCaptureTCPChains.
+	tcpFloorIdentitySeen bool
 
 	// meshDNSSnapshotPath is the host-persistent file the capture reconciler writes
 	// the mesh service->IP record table to (proposal 018, mesh-global FQDN; issue

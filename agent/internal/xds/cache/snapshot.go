@@ -58,6 +58,10 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// mutators is what makes "the gate is silently absent forever" unreachable —
 	// see recomputeInboundReadyClusters.
 	c.recomputeInboundReadyClusters()
+	// Same discipline for the TCP floor's capture chains: they are gated on the
+	// node identity (#877), which arrives asynchronously, so a readiness change
+	// has to rebuild the listeners that were built without it.
+	c.reconcileCaptureTCPChains()
 
 	listeners := c.Listeners()
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()

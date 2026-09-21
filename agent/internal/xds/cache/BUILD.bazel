@@ -99,6 +99,7 @@ go_test(
         "snapshot_test.go",
         "stalenetns_test.go",
         "tcp_service_test.go",
+        "tcpfloor_identity_test.go",
         "tcpports_test.go",
         "trustdomain_test.go",
         "uds_test.go",

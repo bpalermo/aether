@@ -85,12 +85,37 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 	if !c.captureEnabled {
 		return nil, nil
 	}
+	// #877: the TCP floor is mTLS-only. captureTCPClusters returns nothing
+	// without a node SVID and a validation context, so emitting cap_tcp_* chains
+	// here regardless produced a listener that ACCEPTED connections with no
+	// cluster behind them -- and tcp_proxy has no ODCDS cold path, so those
+	// connections died silently. A mesh with SPIRE disabled looked configured
+	// and swallowed every raw-TCP connection to a mesh service.
+	//
+	// Gate the chains on the same condition as the clusters, and say so. Failing
+	// CLOSED is deliberate: building a plaintext TCP floor when identity is
+	// unavailable would be a silent authentication downgrade, the #832/#843
+	// class. Suppressing the chains instead lets the connection fall to the
+	// passthrough and be REJECTed by kube-proxy at the mesh Service port -- an
+	// immediate ECONNREFUSED the caller can act on.
+	//
+	// This is a startup state as well as a misconfiguration: identity arrives
+	// asynchronously, and both SetNodeIdentity and a trust-domain change rebuild
+	// every pod listener, so the chains appear as soon as it does.
+	identityReady := c.tcpFloorIdentityReady()
+
 	c.captureMu.RLock()
 	tcpRoutes := c.tcpServiceRoutesSnapshot()
 	tlsRoutes := c.tlsServiceRoutesSnapshot()
-	tcpServices := make([]proxy.CaptureTCPService, len(c.captureTCPServices))
-	for i, e := range c.captureTCPServices {
-		tcpServices[i] = proxy.CaptureTCPService{
+	if !identityReady && len(c.captureTCPServices) > 0 {
+		c.warnTCPFloorWithoutIdentity(len(c.captureTCPServices))
+	}
+	var tcpServices []proxy.CaptureTCPService
+	for _, e := range c.captureTCPServices {
+		if !identityReady {
+			break
+		}
+		tcpServices = append(tcpServices, proxy.CaptureTCPService{
 			// TCP clusters are separate from HTTP clusters: they share the same EDS
 			// resource (same endpoint set) but use no ALPN on the transport socket so
 			// the destination inbound demuxes to the TCP floor DEFAULT chain.
@@ -101,7 +126,7 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 			// a TCPRoute or TLSRoute is attached to this service.
 			TCPRouteRules: tcpRoutes[e.serviceName],
 			TLSRouteRules: tlsRoutes[e.serviceName],
-		}
+		})
 	}
 	c.captureMu.RUnlock()
 
@@ -1086,5 +1111,71 @@ func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string][]uint32) {
 	shared := c.extensionHTTPFilters()
 	c.listenerMu.Lock()
 	c.rebuildPodListenersLocked("derived TCP port set change", shared)
+	c.listenerMu.Unlock()
+}
+
+// tcpFloorIdentityReady reports whether the node has what the TCP floor's
+// upstream mTLS needs: a node SVID and a validation context. It is exactly the
+// condition captureTCPClusters gates on, factored out so the CHAINS and the
+// CLUSTERS cannot drift apart again (#877).
+func (c *SnapshotCache) tcpFloorIdentityReady() bool {
+	c.localMu.RLock()
+	nodeSpiffeID := c.nodeSpiffeID
+	c.localMu.RUnlock()
+	return nodeSpiffeID != "" && c.validationContextName() != ""
+}
+
+// warnTCPFloorWithoutIdentity logs, at most once a minute, that TCP mesh
+// services are configured but unroutable for want of identity (#877).
+//
+// Rate-limited because this is also the normal startup state for a few seconds,
+// and a per-listener-build log would be one line per pod per rebuild. It is a
+// WARN rather than an INFO because the steady state is a real outage: with
+// SPIRE off, every raw-TCP mesh service silently refuses.
+func (c *SnapshotCache) warnTCPFloorWithoutIdentity(services int) {
+	c.tcpFloorWarnMu.Lock()
+	defer c.tcpFloorWarnMu.Unlock()
+	if time.Since(c.tcpFloorWarnedAt) < time.Minute {
+		return
+	}
+	c.tcpFloorWarnedAt = time.Now()
+	c.log.Warn("TCP mesh services are configured but have no capture chains: the node has no SVID or no trust domain yet, and the TCP floor is mTLS-only",
+		"services", services,
+		"effect", "raw-TCP connections to these services fall to passthrough and are refused",
+		"issue", "aether#877")
+}
+
+// reconcileCaptureTCPChains rebuilds the per-pod capture listeners when the TCP
+// floor's identity readiness has CHANGED since they were last built (#877).
+//
+// The chains are gated on a node SVID and a validation context, which arrive
+// asynchronously — so a listener built before identity lands carries none, and
+// something has to rebuild it afterwards or the gate becomes a permanent
+// outage. This is the same reason recomputeInboundReadyClusters runs from
+// generateSnapshot rather than from its mutators: SetNodeIdentity is called
+// exactly once ever by the SPIRE bridge (`if firstServe`), so a trigger hanging
+// off it can be missed permanently — which is how main-worker-05 ran a whole
+// agent lifetime with no probe clusters at all on 2026-09-19.
+//
+// A comparison and an early return in the steady state; nothing is rebuilt
+// unless readiness actually flipped.
+func (c *SnapshotCache) reconcileCaptureTCPChains() {
+	if !c.captureEnabled {
+		return
+	}
+	ready := c.tcpFloorIdentityReady()
+
+	c.captureMu.Lock()
+	changed := c.tcpFloorIdentitySeen != ready
+	c.tcpFloorIdentitySeen = ready
+	hasTCP := len(c.captureTCPServices) > 0
+	c.captureMu.Unlock()
+
+	if !changed || !hasTCP {
+		return
+	}
+	shared := c.extensionHTTPFilters()
+	c.listenerMu.Lock()
+	c.rebuildPodListenersLocked("TCP floor identity change", shared)
 	c.listenerMu.Unlock()
 }
