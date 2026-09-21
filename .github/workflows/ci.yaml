@@ -384,6 +384,14 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
+          # Cache the external repository downloads too, not just bazelisk.
+          # Without it these jobs re-fetch every release asset (protoc, buf,
+          # buildifier, rules_kotlin, ...) from github.com on EVERY run, so a
+          # GitHub release-download blip fails the build with a 504 that has
+          # nothing to do with the change under test. On 2026-09-21 that took
+          # out `test` and `race` repeatedly while `diff`, `deps-audit` and
+          # `shell` -- the three jobs that already had this -- rode it out.
+          repository-cache: true
       - name: Download impacted target lists
         uses: actions/download-artifact@v8
         with:
@@ -447,6 +455,14 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
+          # Cache the external repository downloads too, not just bazelisk.
+          # Without it these jobs re-fetch every release asset (protoc, buf,
+          # buildifier, rules_kotlin, ...) from github.com on EVERY run, so a
+          # GitHub release-download blip fails the build with a 504 that has
+          # nothing to do with the change under test. On 2026-09-21 that took
+          # out `test` and `race` repeatedly while `diff`, `deps-audit` and
+          # `shell` -- the three jobs that already had this -- rode it out.
+          repository-cache: true
       - name: Download impacted target lists
         uses: actions/download-artifact@v8
         with:
@@ -545,6 +561,14 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
+          # Cache the external repository downloads too, not just bazelisk.
+          # Without it these jobs re-fetch every release asset (protoc, buf,
+          # buildifier, rules_kotlin, ...) from github.com on EVERY run, so a
+          # GitHub release-download blip fails the build with a 504 that has
+          # nothing to do with the change under test. On 2026-09-21 that took
+          # out `test` and `race` repeatedly while `diff`, `deps-audit` and
+          # `shell` -- the three jobs that already had this -- rode it out.
+          repository-cache: true
       - name: Download impacted target lists
         uses: actions/download-artifact@v8
         with:
@@ -567,6 +591,9 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
+          # See the note on the `test` job: without this the external release
+          # assets are re-fetched from github.com on every run.
+          repository-cache: true
       - name: Build and load container images
         run: |
           bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //agent/cmd/agent:image_load
