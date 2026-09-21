@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//api/aether/registry/v1:registry",
         "//common/constants/labels",
+        "//common/constants/mesh",
         "//common/log",
         "//common/serviceref",
         "//registrar/internal/server",

@@ -68,6 +68,7 @@ func installCaptureRedirect(netnsPath string, excludePorts []uint16, excludeRang
 // destination).
 func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
 	meshPort := uint16(meshconst.ProxyOutboundPort)
+	tcpMeshPort := uint16(meshconst.ProxyTCPOutboundPort)
 	capturePort := uint16(meshconst.ProxyCapturePort)
 
 	c, err := nftables.New()
@@ -98,7 +99,27 @@ func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix,
 		Chain: chain,
 		Exprs: captureRedirectExprs(unix.IPPROTO_TCP, meshPort, capturePort),
 	})
+	// TCP: outbound TCP to ClusterIP:tcpMeshPort → capturePort (proposal 037).
+	//
+	// The mesh's well-known TCP spelling. Scoped capture redirects it alongside
+	// ProxyOutboundPort, which is what makes <svc>:18082 work WITHOUT
+	// redirect-all — unlike a dial to a service's own application port, which
+	// only redirect-all captures.
+	//
+	// Inert until the agent builds a chain matching destination_port 18082
+	// (Release B): a redirected connection with no matching filter chain falls
+	// to the capture listener's passthrough, which forwards it to the original
+	// destination — the generated mesh Service's "mesh-tcp" port, which has no
+	// endpoints, so kube-proxy REJECTs it. The interim failure is an immediate
+	// ECONNREFUSED, not a hang or a silent blackhole.
+	c.AddRule(&nftables.Rule{
+		Table: table,
+		Chain: chain,
+		Exprs: captureRedirectExprs(unix.IPPROTO_TCP, tcpMeshPort, capturePort),
+	})
 	// UDP: outbound UDP to ClusterIP:meshPort → capturePort (Phase 3b).
+	// NOT redirected for tcpMeshPort: 18082 is a TCP spelling, and the UDP floor
+	// addresses backends by their application port (proposal 018 Phase 3b).
 	// Datagrams arriving at ProxyCapturePort:UDP are handled by the udp_proxy
 	// capture listener generated for each pod when UDPRoute backends are present.
 	// The TCP and UDP listeners coexist on :18001 via independent protocol sockets.
@@ -114,6 +135,7 @@ func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix,
 	}
 	logger.Info("installed transparent-capture redirect",
 		zap.Uint16("mesh_port", meshPort),
+		zap.Uint16("tcp_mesh_port", tcpMeshPort),
 		zap.Uint16("capture_port", capturePort))
 	return nil
 }

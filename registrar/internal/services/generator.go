@@ -14,6 +14,7 @@ import (
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/common/constants/mesh"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/serviceref"
 	"aethermesh.dev/registrar/internal/server"
@@ -139,6 +140,51 @@ func (g *Generator) pruneServices(ctx context.Context, managed corev1.ServiceLis
 	}
 }
 
+// meshServicePorts is the port set every generated mesh Service exposes
+// (proposal 037).
+//
+//   - "mesh" (18081) and "mesh-tcp" (18082) are the mesh's two well-known
+//     spellings: HTTP and raw TCP respectively. The capture listener matches
+//     both on destination_port, and the scoped CNI rule redirects both, so
+//     neither needs redirect-all.
+//   - "http" (80) and "https" (443) exist so a scheme-default dial has a REAL
+//     Service port to land on. These Services are selectorless and hold no
+//     endpoints, so kube-proxy REJECTs a connection to an unclaimed port: an
+//     uncaptured `https://<svc>/` fails immediately with ECONNREFUSED instead
+//     of hanging in a CNI-dependent way. They carry no data path of their own.
+//
+// All four are TCP at the Kubernetes level; the mesh protocol is a separate
+// axis carried by the aether.io/app-protocol annotation.
+func meshServicePorts(meshPort int32) []corev1.ServicePort {
+	return []corev1.ServicePort{
+		{Name: "mesh", Port: meshPort, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(meshPort)},
+		{Name: "mesh-tcp", Port: mesh.ProxyTCPOutboundPort, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(mesh.ProxyTCPOutboundPort)},
+		{Name: "http", Port: 80, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(80)},
+		{Name: "https", Port: 443, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(443)},
+	}
+}
+
+// samePorts reports whether an existing Service already carries exactly want,
+// comparing name/port/protocol. Order-insensitive: the API server may return
+// them in any order and a reorder must not count as drift (#135 is the same
+// mechanism on the route table).
+func samePorts(got, want []corev1.ServicePort) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	index := make(map[string]corev1.ServicePort, len(got))
+	for _, p := range got {
+		index[p.Name] = p
+	}
+	for _, w := range want {
+		g, ok := index[w.Name]
+		if !ok || g.Port != w.Port || g.Protocol != w.Protocol {
+			return false
+		}
+	}
+	return true
+}
+
 // AppProtocolHTTP / AppProtocolTCP are the AnnotationMeshAppProtocol values the
 // generator writes (and the agent reads to decide TCP-floor chain emission).
 const (
@@ -163,13 +209,22 @@ func (g *Generator) apply(ctx context.Context, d desiredService) {
 			g.Log.WarnContext(ctx, "a non-aether Service owns this name; skipping mesh VIP", "service", key.String())
 			return
 		}
+		// Spec.Ports is part of what must converge, not just the annotations.
+		// This path used to compare annotations alone and return early, so a
+		// Service created before proposal 037 would have kept its single "mesh"
+		// port forever and the new spellings would never have appeared on an
+		// existing cluster — the feature would have worked only on a fresh
+		// install, which is the worst way to find out.
+		wantPorts := meshServicePorts(g.MeshPort)
 		if existing.Annotations[aetherlabels.AnnotationMeshPort] == port &&
-			existing.Annotations[aetherlabels.AnnotationMeshAppProtocol] == appProto {
+			existing.Annotations[aetherlabels.AnnotationMeshAppProtocol] == appProto &&
+			samePorts(existing.Spec.Ports, wantPorts) {
 			return // converged
 		}
 		existing.Annotations[aetherlabels.AnnotationMeshService] = d.service
 		existing.Annotations[aetherlabels.AnnotationMeshPort] = port
 		existing.Annotations[aetherlabels.AnnotationMeshAppProtocol] = appProto
+		existing.Spec.Ports = wantPorts
 		if err := g.Update(ctx, existing); err != nil {
 			g.Log.ErrorContext(ctx, "update mesh Service failed", "service", key.String(), "error", err)
 		}
@@ -194,12 +249,7 @@ func (g *Generator) apply(ctx context.Context, d desiredService) {
 			Type: corev1.ServiceTypeClusterIP,
 			// Selectorless: a pure VIP + cluster.local name handle. Endpoints stay in
 			// the aether registry; the agent maps this ClusterIP -> the EDS cluster.
-			Ports: []corev1.ServicePort{{
-				Name:       "mesh",
-				Port:       g.MeshPort,
-				Protocol:   corev1.ProtocolTCP,
-				TargetPort: intstr.FromInt32(g.MeshPort),
-			}},
+			Ports: meshServicePorts(g.MeshPort),
 		},
 	}
 	if err := g.Create(ctx, svc); err != nil && !apierrors.IsAlreadyExists(err) {
