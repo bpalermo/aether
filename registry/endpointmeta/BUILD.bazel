@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "endpointmeta",
@@ -9,5 +9,20 @@ go_library(
         "//api/aether/registry/v1:registry",
         "//common/constants",
         "//common/constants/annotations",
+    ],
+)
+
+go_test(
+    name = "endpointmeta_test",
+    srcs = [
+        "portprotocol_test.go",
+        "portprotocols_test.go",
+    ],
+    embed = [":endpointmeta"],
+    deps = [
+        "//api/aether/registry/v1:registry",
+        "//common/constants/annotations",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ],
 )

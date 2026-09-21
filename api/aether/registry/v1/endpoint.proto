@@ -93,4 +93,47 @@ message ServiceEndpoint {
   }
 
   HealthCheckMode health_check_mode = 10;
+
+  // port_protocols is the wire protocol of each advertised port (proposal 037).
+  //
+  // A port present in `ports` but ABSENT here takes the protocol the endpoint
+  // was registered under — RegisterEndpointRequest.protocol, the etcd key
+  // segment — which is the pre-037 whole-pod classification kept as the
+  // per-port default. Writers populate it for every port they advertise;
+  // readers MUST tolerate its absence, because an endpoint written by an older
+  // agent has none and means "all my ports are the protocol of my key".
+  //
+  // The map is a property of the endpoint, not of the registry key: a pod that
+  // serves both an HTTP and a raw-TCP port is registered once per distinct
+  // protocol, and BOTH registrations carry the same full map. That keeps the
+  // key layout, the etcd paths, the registrar snapshot key and every watch
+  // consumer unchanged — a pod appears under two keys rather than the schema
+  // growing a port dimension.
+  //
+  // The codec (h1 vs h2c) is deliberately not represented. It is an
+  // agent-local inbound concern carried by the `=h2` suffix on
+  // endpoint.aether.io/ports, stripped before registration; the registry
+  // records only the L4 class the mesh hop has to know about.
+  map<uint32, PortProtocol> port_protocols = 12;
+}
+
+// PortProtocol is the L4 class of ONE advertised port (proposal 037).
+//
+// Values are numerically identical to Service.Protocol, and
+// TestPortProtocolMatchesServiceProtocol pins that correspondence so the two
+// cannot drift. They are separate declarations only because service.proto
+// already imports this file — a Service carries its endpoints — so referencing
+// Service.Protocol from here would be a circular import. The proposal specified
+// `map<uint32, Service.Protocol>` without noticing that cycle.
+//
+// Unifying them means moving Protocol out of Service into a file both import,
+// which renames registryv1.Service_Protocol at 441 call sites across 47 files.
+// That is a mechanical change worth doing on its own, not folded into a feature
+// diff where it would hide the feature.
+enum PortProtocol {
+  PORT_PROTOCOL_UNSPECIFIED = 0;
+  PORT_PROTOCOL_HTTP = 1;
+  // PORT_PROTOCOL_TCP marks a port reached through the transparent-capture TCP
+  // floor as a raw mTLS passthrough, not the HTTP HCM path.
+  PORT_PROTOCOL_TCP = 2;
 }

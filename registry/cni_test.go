@@ -76,3 +76,78 @@ func TestNewServiceEndpointFromCNIPod_Protocol(t *testing.T) {
 		})
 	}
 }
+
+// TestNewServiceEndpointFromCNIPod_PortProtocols covers the per-port L4 class
+// the CNI registration path now carries (proposal 037).
+//
+// The field is on the ENDPOINT, not in the registry key: the key protocol is
+// unchanged, and a reader that predates the field treats its absence as "every
+// port is the protocol of my key" — the pre-037 meaning, which is why this is
+// additive rather than a migration.
+func TestNewServiceEndpointFromCNIPod_PortProtocols(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		wantKey     registryv1.Service_Protocol
+		wantPorts   map[uint32]registryv1.PortProtocol
+		wantErr     string
+	}{
+		{
+			name:        "no port annotations: the default port, HTTP",
+			annotations: nil,
+			wantKey:     registryv1.Service_PROTOCOL_HTTP,
+			wantPorts: map[uint32]registryv1.PortProtocol{
+				8080: registryv1.PortProtocol_PORT_PROTOCOL_HTTP,
+			},
+		},
+		{
+			name: "a mixed pod: HTTP primary, raw TCP secondary",
+			annotations: map[string]string{
+				aetherannotations.AnnotationEndpointPort:  "8080",
+				aetherannotations.AnnotationEndpointPorts: "8080,9000=tcp",
+			},
+			// The KEY stays the pod-level protocol. Registering such a pod under
+			// both keys is a separate change; this one only carries the fact.
+			wantKey: registryv1.Service_PROTOCOL_HTTP,
+			wantPorts: map[uint32]registryv1.PortProtocol{
+				8080: registryv1.PortProtocol_PORT_PROTOCOL_HTTP,
+				9000: registryv1.PortProtocol_PORT_PROTOCOL_TCP,
+			},
+		},
+		{
+			name: "the =h2 codec suffix is still HTTP at L4",
+			annotations: map[string]string{
+				aetherannotations.AnnotationEndpointPort:  "8080",
+				aetherannotations.AnnotationEndpointPorts: "8080,9090=h2",
+			},
+			wantKey: registryv1.Service_PROTOCOL_HTTP,
+			wantPorts: map[uint32]registryv1.PortProtocol{
+				8080: registryv1.PortProtocol_PORT_PROTOCOL_HTTP,
+				9090: registryv1.PortProtocol_PORT_PROTOCOL_HTTP,
+			},
+		},
+		{
+			name: "an unknown suffix fails the registration rather than defaulting",
+			annotations: map[string]string{
+				aetherannotations.AnnotationEndpointPorts: "9000=quic",
+			},
+			wantErr: "unknown port protocol suffix",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, protocol, ep, err := NewServiceEndpointFromCNIPod(
+				"cluster-a", "node-1", "region-1", "zone-a", "192.168.0.10", testCNIPod(tt.annotations),
+			)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantKey, protocol)
+			assert.Equal(t, tt.wantPorts, ep.GetPortProtocols())
+		})
+	}
+}
