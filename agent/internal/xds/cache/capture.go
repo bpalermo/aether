@@ -318,21 +318,25 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		return nil
 	}
 
-	// For TCP services, retrieve their SAN namespaces from the cluster map (the HTTP
-	// cluster for the same service is guaranteed to exist if the service is in scope).
+	// SAN namespaces come from the service's TCP floor entry, which since
+	// proposal 037 design (a) is keyed "tcp:<fqdn>" rather than by the bare
+	// service name. Taking them from the TCP entry rather than whatever sits
+	// under the bare key also pins against the right endpoint set: for a service
+	// whose pods split across protocols the two entries have DIFFERENT endpoints,
+	// and the floor must pin the namespaces of the pods it actually reaches.
 	c.clusterMu.RLock()
 	resources := make([]types.Resource, 0, len(entries))
 	for _, e := range entries {
-		httpEntry, ok := c.clusters[e.serviceName]
+		tcpEntry, ok := c.tcpEntryLocked(e.serviceName)
 		if !ok {
-			// Service not yet in scope; skip until cluster map has it.
+			// Service not yet in scope as a TCP service; skip until it is.
 			continue
 		}
 		// The service's expected server SPIFFE IDs are precomputed on the entry
 		// (refreshEntryMTLSLocked, issue #537) from its endpoints' namespaces
 		// and the BARE service name for the sa/ segment — the same pinning the
 		// HTTP cluster path uses.
-		sanURIs := httpEntry.sanURIs
+		sanURIs := tcpEntry.sanURIs
 		tcpName := proxy.TCPClusterName(e.serviceName, c.meshDomain)
 		cl := proxy.NewTCPServiceCluster(tcpName, e.serviceName, e.serviceName)
 		// NO SNI for the TCP floor: the egress floor connection must NOT carry the
@@ -374,7 +378,8 @@ func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
 	c.clusterMu.RLock()
 	resources := make([]types.Resource, 0, len(services))
 	for _, svc := range services {
-		entry, ok := c.clusters[svc]
+		// The TCP floor entry, keyed "tcp:<fqdn>" (proposal 037 design (a)).
+		entry, ok := c.tcpEntryLocked(svc)
 		if !ok {
 			continue // not yet in scope; will appear when registry delivers endpoints
 		}
@@ -458,7 +463,10 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 	resources := make([]types.Resource, 0, len(services))
 	// Sorted: services is a set built from the UDPRoute backends (a map).
 	for _, svc := range slices.Sorted(maps.Keys(services)) {
-		entry, ok := c.clusters[svc]
+		// A UDPRoute backend may be classified either way, and this needs only
+		// service-level facts (the app port in entry.sni and the bare-name EDS),
+		// so take whichever entry carries them.
+		entry, ok := c.serviceEntryLocked(svc)
 		if !ok || entry.loadAssignment == nil {
 			// Backend service not in scope yet; skip until its cluster/EDS exists.
 			continue

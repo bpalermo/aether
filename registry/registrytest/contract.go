@@ -44,7 +44,23 @@ func RequireNamespaceQualifiedKeys(t testing.TB, services map[string][]*registry
 
 // RequireProtocolDisjoint asserts the second cross-backend invariant: a service
 // serves exactly ONE protocol, so the HTTP and TCP ListAllEndpoints maps must not
-// share a service key. The agent's LoadClustersFromRegistry relies on this — it
+// share a service key.
+//
+// STATUS (proposal 037): this is now a CONVENTION, not an invariant. The registry
+// key is <ns>/<serviceAccount> and the protocol is a per-POD annotation, so a
+// ServiceAccount whose pods disagree legitimately appears under both protocols —
+// on etcd because the CNI registers each pod under its own protocol key, and on
+// the kubernetes backend since #878. The agent no longer breaks in that case
+// (037 Phase 1 keys TCP cache entries by their Envoy cluster name, so the two
+// passes stop colliding), which is exactly why this assertion is no longer
+// load-bearing.
+//
+// It is kept rather than deleted because the replacement 037 specifies — every
+// endpoint returned under protocol P advertises at least one P port, and the two
+// listings' port_protocols agree for the same (service, ip) — needs the
+// ServiceEndpoint.port_protocols field that Phase 2 adds. Retiring it now would
+// drop a working cross-backend guard and put nothing in its place. Swap it in
+// Phase 2, not before. The agent's LoadClustersFromRegistry relies on this — it
 // builds a service's HTTP cluster + GAMMA cap_http vhost from the HTTP listing,
 // then OVERWRITES the same map key with a vhost-less tcp:true entry from the TCP
 // listing (cluster.go: "HTTP or TCP, never both"). A backend that returns a service
