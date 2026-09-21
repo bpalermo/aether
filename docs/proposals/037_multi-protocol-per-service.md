@@ -1,6 +1,6 @@
 # Proposal 037: Multi-Protocol Ports on One Mesh Service
 
-**Status:** Draft — not yet accepted.
+**Status:** Accepted. Phase 0 shipped (#888, merged 2026-09-21); Phase 1 next.
 **Author:** Bruno Palermo
 **Date:** 2026-09-20
 **History:** first draft resolved the bare-name spelling to "the primary port,
@@ -829,7 +829,7 @@ a deprecation release with a hit counter).
 
 ## Phasing
 
-### Phase 0 — #878, on the existing invariant (prior art, ships first)
+### Phase 0 — #878, on the existing invariant (SHIPPED, #888)
 
 `podToEndpoint` honours `endpoint.aether.io/protocol` (and populates `Ports`
 from `endpoint.aether.io/ports`, closing the 005 gap on this backend);
@@ -843,7 +843,29 @@ shared parser (`registry.PortProtocols`, still with only the pod-level
 annotation feeding it) lands here so the two backends stop drifting. A
 mixed-annotation ServiceAccount — pods of one service disagreeing — now
 collapses to TCP on this backend exactly as it already does on etcd; Phase 1
-fixes that for both. Independent of the rest; can merge this week.
+fixes that for both. Independent of the rest.
+
+**Shipped in #888.** Two deviations from the text above, both found in the
+writing:
+
+- The shared parser landed as a leaf package `//registry/endpointmeta`
+  (following the `//registry/export` precedent) rather than as a
+  `registry.PortProtocols` helper, because `//registry/internal/k8s` importing
+  its parent interface package would have been the wrong direction.
+- The health-check-mode parser was deliberately **excluded** from the sharing.
+  The two backends' readings differ on the UNSET case and the difference is
+  load-bearing: the CNI path defaults to EDS (delegated liveness is its
+  default) while the Kubernetes backend must default to UNSPECIFIED, because it
+  derives endpoints from the API server and the delegated active-HC path
+  applies only to the write-based backends. Unifying them — which a tidy-minded
+  dedup does by reflex — would have silently flipped the CNI registration path
+  in production. Both sites now carry a note against it.
+
+A third fact worth carrying into Phase 2: **only `e2e/uds.sh` runs on the
+chart-default `kubernetes` backend.** Every other suite, `e2e/l4routes.sh`
+included, sets `registrar.registryBackend=etcd` — which is #878's complaint in
+harness form. Phase 2 should make the L4 harness run on both backends rather
+than inherit the etcd assumption.
 
 ### Phase 1 — key the cache by cluster identity
 
