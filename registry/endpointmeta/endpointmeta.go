@@ -1,0 +1,141 @@
+// Package endpointmeta parses the endpoint.aether.io/* pod annotations into the
+// ServiceEndpoint fields every registry backend needs.
+//
+// It is a leaf package, shared with the backends the same way registry/export
+// is, so both the CNI registration path (//registry, which builds an endpoint
+// from a cniv1.CNIPod) and the Kubernetes backend (//registry/internal/k8s,
+// which builds one from a corev1.Pod) read the same annotations through the
+// same code.
+//
+// That sharing is the point. The two paths previously carried their own copies,
+// and the copies drifted by OMISSION rather than by disagreement: the
+// Kubernetes backend never grew a reader for endpoint.aether.io/protocol or
+// endpoint.aether.io/ports, so a pod declaring either was silently registered
+// as if it had not (#878, and the per-port EDS membership of proposal 005 never
+// worked on that backend at all). A missing parser is invisible in a way a
+// wrong one is not: nothing fails, the field is simply zero.
+//
+// Every function here takes a plain map[string]string so it is indifferent to
+// whether the annotations came from a CNI ADD or the API server.
+package endpointmeta
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/constants"
+	aetherannotations "aethermesh.dev/common/constants/annotations"
+)
+
+// Protocol returns the mesh protocol the pod serves, from
+// endpoint.aether.io/protocol. Absent or "http" is HTTP; "tcp" registers a
+// non-HTTP TCP-over-mTLS service.
+//
+// An unrecognised value is an error rather than a default, so a typo can never
+// silently register a service under the wrong protocol — which, on a backend
+// that keys by protocol, means registering it where nothing will look for it.
+func Protocol(annotations map[string]string) (registryv1.Service_Protocol, error) {
+	switch annotations[aetherannotations.AnnotationEndpointProtocol] {
+	case "", aetherannotations.ProtocolHTTP:
+		return registryv1.Service_PROTOCOL_HTTP, nil
+	case aetherannotations.ProtocolTCP:
+		return registryv1.Service_PROTOCOL_TCP, nil
+	default:
+		return registryv1.Service_PROTOCOL_UNSPECIFIED, fmt.Errorf("invalid protocol annotation %q (want %q or %q)",
+			annotations[aetherannotations.AnnotationEndpointProtocol], aetherannotations.ProtocolHTTP, aetherannotations.ProtocolTCP)
+	}
+}
+
+// Port returns the endpoint's primary port from endpoint.aether.io/port,
+// defaulting to constants.DefaultEndpointPort.
+func Port(annotations map[string]string) (uint16, error) {
+	s, ok := annotations[aetherannotations.AnnotationEndpointPort]
+	if !ok {
+		return constants.DefaultEndpointPort, nil
+	}
+	port, err := strconv.ParseUint(s, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("invalid port annotation %q: %w", s, err)
+	}
+	return uint16(port), nil
+}
+
+// Ports returns the full served-port set from endpoint.aether.io/ports
+// (comma-separated), sorted and de-duplicated. defaultPort is always a member,
+// so the result is never empty and a pod with no annotation yields exactly
+// {defaultPort}.
+//
+// An entry may carry an optional "=proto" suffix (e.g. "9090=h2"). It is
+// stripped here: that suffix selects the agent-local loopback codec (h1 vs
+// h2c) and the registry carries only the numeric set, which is what per-port
+// EDS membership is keyed on (proposal 005).
+func Ports(annotations map[string]string, defaultPort uint16) ([]uint32, error) {
+	set := map[uint32]struct{}{uint32(defaultPort): {}}
+	if raw, ok := annotations[aetherannotations.AnnotationEndpointPorts]; ok && raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			t := strings.TrimSpace(part)
+			if t == "" {
+				continue
+			}
+			if i := strings.IndexByte(t, '='); i >= 0 {
+				t = strings.TrimSpace(t[:i])
+			}
+			p, err := strconv.ParseUint(t, 10, 16)
+			if err != nil {
+				return nil, fmt.Errorf("invalid ports annotation entry %q", t)
+			}
+			set[uint32(p)] = struct{}{}
+		}
+	}
+	ports := make([]uint32, 0, len(set))
+	for p := range set {
+		ports = append(ports, p)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	return ports, nil
+}
+
+// Weight returns the endpoint's load-balancing weight from
+// endpoint.aether.io/weight, defaulting to constants.DefaultEndpointWeight.
+func Weight(annotations map[string]string) (uint32, error) {
+	s, ok := annotations[aetherannotations.AnnotationEndpointWeight]
+	if !ok {
+		return constants.DefaultEndpointWeight, nil
+	}
+	weight, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid weight annotation %q: %w", s, err)
+	}
+	return uint32(weight), nil
+}
+
+// Metadata returns the endpoint metadata carried by annotations under the
+// endpoint-metadata prefix, with the prefix removed from each key.
+func Metadata(annotations map[string]string) map[string]string {
+	metadata := map[string]string{}
+	prefix := aetherannotations.AnnotationAetherEndpointMetadataPrefix
+	for key, value := range annotations {
+		if after, ok := strings.CutPrefix(key, prefix); ok && after != "" {
+			metadata[after] = value
+		}
+	}
+	return metadata
+}
+
+// The health-check mode is deliberately NOT here, even though both backends
+// parse the same annotation, because the two readings genuinely differ on the
+// UNSET case and the difference is load-bearing:
+//
+//   - //registry (the CNI registration path) defaults to EDS. Delegated
+//     liveness is the default there: the node-local agent vets each endpoint
+//     once and publishes its health over EDS, so new endpoints enter every
+//     client pre-warmed.
+//   - //registry/internal/k8s defaults to UNSPECIFIED, which consumers treat
+//     as active. That backend derives endpoints from the API server rather
+//     than receiving agent registrations, and the delegated active-HC path
+//     applies only to the write-based backends, so it must not claim EDS.
+//
+// Unifying them would silently flip one backend's default. Keep them apart.
