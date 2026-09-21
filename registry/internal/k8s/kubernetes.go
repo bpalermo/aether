@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
@@ -16,11 +15,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
-	"aethermesh.dev/common/constants"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/serviceref"
+	"aethermesh.dev/registry/endpointmeta"
 )
 
 // Config holds the configuration for the Kubernetes registry backend.
@@ -99,23 +98,30 @@ func (r *KubernetesRegistry) UnregisterEndpoints(_ context.Context, _ string, _ 
 // ListEndpoints returns all endpoints for a service by listing managed pods whose ServiceAccount
 // matches the given service name. Node topology labels are used for locality information.
 //
-// The Kubernetes registry derives endpoints from managed pods, every one of which is a
-// mesh-inbound (HTTP/h2 over :18008, proposal 030) endpoint by construction — it has
-// no notion of a per-pod TCP-only service. A TCP query must therefore return NOTHING, not the same
-// HTTP endpoint set: the agent's LoadClustersFromRegistry builds a service's HTTP
-// cluster (with its outbound/cap_http vhost) from the HTTP listing, then in a second
-// pass OVERWRITES the same map key with a vhost-less tcp:true entry from the TCP
-// listing ("a service is HTTP or TCP, never both" — true for etcd, which keys by
-// protocol). Returning the pods for TCP too violated that invariant: every mesh
-// service collapsed to a TCP-only entry, its CDS cluster + GAMMA cap_http vhost
-// vanished, and captured requests routing to it 503'd (no_healthy_upstream). Treat
-// HTTP/UNSPECIFIED as the served protocol; TCP yields no endpoints.
+// Endpoints are filtered by the protocol each POD declares in
+// endpoint.aether.io/protocol, so a query for P returns exactly the pods serving P
+// (#878).
+//
+// This backend used to return nothing at all for a TCP query. That was a workaround,
+// not a property of Kubernetes: podToEndpoint ignored the protocol annotation, so
+// every managed pod looked like an HTTP endpoint, and answering a TCP query with
+// that same set made every mesh service collapse to a TCP-only entry — the agent's
+// LoadClustersFromRegistry builds a service's HTTP cluster (with its outbound and
+// cap_http vhosts) from the HTTP listing, then OVERWRITES the same map key with a
+// vhost-less tcp:true entry from the TCP listing. The CDS cluster and GAMMA vhost
+// vanished and captured requests 503'd with no_healthy_upstream.
+//
+// Reading the annotation removes the need for the workaround: a pod declaring "tcp"
+// appears only in the TCP listing and a pod declaring "http" only in the HTTP one,
+// so the two listings are disjoint and the agent's second pass has nothing to
+// clobber. The "a service is HTTP or TCP, never both" invariant still holds, because
+// every pod behind one ServiceAccount carries the same annotation.
+//
+// Filtering runs in BOTH directions on purpose. Returning HTTP-declaring pods under
+// TCP is the bug above; returning TCP-declaring pods under HTTP is the same bug
+// mirrored, and would put a raw-TCP pod behind an h2 cluster.
 func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	r.log.DebugContext(ctx, "listing endpoints", "service", service)
-
-	if protocol == registryv1.Service_PROTOCOL_TCP {
-		return nil, nil
-	}
 
 	pods, err := r.listManagedPods(ctx)
 	if err != nil {
@@ -144,6 +150,9 @@ func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, 
 		if serviceref.New(pod.Namespace, pod.Spec.ServiceAccountName).Key() != service {
 			continue
 		}
+		if !r.podServesProtocol(ctx, pod, protocol) {
+			continue
+		}
 		ep, err := r.podToEndpoint(pod, nodeLocalities)
 		if err != nil {
 			r.log.ErrorContext(ctx, "failed to convert pod to endpoint", "error", err, "pod", pod.Name, "namespace", pod.Namespace)
@@ -159,16 +168,13 @@ func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, 
 // ListAllEndpoints returns all endpoints for all services, grouped by service name (ServiceAccount).
 // It lists all managed pods, resolves node localities, and converts each pod to a ServiceEndpoint.
 //
-// Every managed-pod endpoint is a mesh-inbound HTTP/h2 endpoint (see ListEndpoints).
-// A TCP query returns an empty map so the agent's TCP cluster pass does not clobber
-// the HTTP cluster/vhost entries built from the HTTP listing (HTTP/UNSPECIFIED is the
-// served protocol).
+// Pods are filtered by the protocol each declares in endpoint.aether.io/protocol,
+// exactly as in ListEndpoints — see there for why this backend used to return an
+// empty map for TCP and why it no longer has to (#878). A service with no pod
+// serving the requested protocol is absent from the result rather than present and
+// empty, so the agent's cluster passes see only the services they should build.
 func (r *KubernetesRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	r.log.DebugContext(ctx, "listing all endpoints")
-
-	if protocol == registryv1.Service_PROTOCOL_TCP {
-		return map[string][]*registryv1.ServiceEndpoint{}, nil
-	}
 
 	pods, err := r.listManagedPods(ctx)
 	if err != nil {
@@ -193,6 +199,10 @@ func (r *KubernetesRegistry) ListAllEndpoints(ctx context.Context, protocol regi
 		// conformance namespaces merged into one entry, whose endpoint set then
 		// oscillated and churned the agent's xDS snapshot.
 		serviceName := serviceref.New(pod.Namespace, pod.Spec.ServiceAccountName).Key()
+
+		if !r.podServesProtocol(ctx, pod, protocol) {
+			continue
+		}
 
 		ep, err := r.podToEndpoint(pod, nodeLocalities)
 		if err != nil {
@@ -320,14 +330,47 @@ func nodeCacheContainsAll(cache map[string]locality, names map[string]struct{}) 
 	return true
 }
 
+// podServesProtocol reports whether pod serves want, per its
+// endpoint.aether.io/protocol annotation. UNSPECIFIED matches HTTP, which is what
+// the annotation itself defaults to, so a caller that does not care still gets the
+// mesh-inbound endpoints it always did.
+//
+// A pod whose annotation does not parse is EXCLUDED from every listing, and says so
+// at WARN. The alternative — treating it as HTTP — is how a typo becomes a pod
+// quietly serving the wrong protocol, which is the failure this whole change exists
+// to remove. Excluding it makes the pod visibly absent instead, and the registering
+// agent rejects the same value outright (endpointmeta.Protocol), so a pod in this
+// state could only have been annotated after registration.
+func (r *KubernetesRegistry) podServesProtocol(ctx context.Context, pod *corev1.Pod, want registryv1.Service_Protocol) bool {
+	got, err := endpointmeta.Protocol(pod.Annotations)
+	if err != nil {
+		r.log.WarnContext(ctx, "pod has an invalid protocol annotation; excluding it from endpoint listings",
+			"error", err, "pod", pod.Name, "namespace", pod.Namespace)
+		return false
+	}
+	if want == registryv1.Service_PROTOCOL_UNSPECIFIED {
+		want = registryv1.Service_PROTOCOL_HTTP
+	}
+	return got == want
+}
+
 // podToEndpoint converts a Kubernetes Pod to a ServiceEndpoint.
 func (r *KubernetesRegistry) podToEndpoint(pod *corev1.Pod, nodeLocalities map[string]locality) (*registryv1.ServiceEndpoint, error) {
-	port, err := getPortFromAnnotations(pod.Annotations)
+	port, err := endpointmeta.Port(pod.Annotations)
 	if err != nil {
 		return nil, fmt.Errorf("pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 
-	weight, err := getWeightFromAnnotations(pod.Annotations)
+	weight, err := endpointmeta.Weight(pod.Annotations)
+	if err != nil {
+		return nil, fmt.Errorf("pod %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+
+	// The served-port set (proposal 005 per-port EDS membership). This backend
+	// never read endpoint.aether.io/ports, so Ports was nil on every endpoint it
+	// returned and per-port clusters came out empty here while working on the
+	// write-based backends. Found alongside #878; the same missing-parser cause.
+	ports, err := endpointmeta.Ports(pod.Annotations, port)
 	if err != nil {
 		return nil, fmt.Errorf("pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
@@ -336,8 +379,9 @@ func (r *KubernetesRegistry) podToEndpoint(pod *corev1.Pod, nodeLocalities map[s
 		Ip:          pod.Status.PodIP,
 		ClusterName: r.clusterName,
 		Port:        uint32(port),
+		Ports:       ports,
 		Weight:      weight,
-		Metadata:    getEndpointMetadataFromAnnotations(pod.Annotations),
+		Metadata:    endpointmeta.Metadata(pod.Annotations),
 		KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
 			Namespace: pod.Namespace,
 			PodName:   pod.Name,
@@ -379,6 +423,13 @@ func podHealth(pod *corev1.Pod) registryv1.ServiceEndpoint_Health {
 // annotation to the ServiceEndpoint health-check mode. "eds" yields EDS; "active"
 // yields ACTIVE; unset yields UNSPECIFIED, which consumers treat as active (the
 // default).
+//
+// Deliberately NOT shared with //registry/endpointmeta, although the other
+// annotation parsers now are. The CNI registration path defaults an UNSET
+// annotation to EDS (delegated liveness is its default); this backend must
+// default to UNSPECIFIED, because it derives endpoints from the API server and
+// the delegated active-HC path applies only to the write-based backends.
+// Unifying the two would silently flip one of them.
 func healthCheckModeFromAnnotations(annotations map[string]string) registryv1.ServiceEndpoint_HealthCheckMode {
 	switch annotations[aetherannotations.AnnotationEndpointHealthCheckMode] {
 	case aetherannotations.HealthCheckModeEDS:
@@ -388,42 +439,4 @@ func healthCheckModeFromAnnotations(annotations map[string]string) registryv1.Se
 	default:
 		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_UNSPECIFIED
 	}
-}
-
-// getPortFromAnnotations extracts the endpoint port from pod annotations.
-func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
-	s, ok := annotations[aetherannotations.AnnotationEndpointPort]
-	if !ok {
-		return constants.DefaultEndpointPort, nil
-	}
-	port, err := strconv.ParseUint(s, 10, 16)
-	if err != nil {
-		return 0, fmt.Errorf("invalid port annotation: %w", err)
-	}
-	return uint16(port), nil
-}
-
-// getWeightFromAnnotations extracts the endpoint weight from pod annotations.
-func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
-	s, ok := annotations[aetherannotations.AnnotationEndpointWeight]
-	if !ok {
-		return constants.DefaultEndpointWeight, nil
-	}
-	weight, err := strconv.ParseUint(s, 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("invalid weight annotation: %w", err)
-	}
-	return uint32(weight), nil
-}
-
-// getEndpointMetadataFromAnnotations extracts endpoint metadata from pod annotations.
-func getEndpointMetadataFromAnnotations(annotations map[string]string) map[string]string {
-	metadata := map[string]string{}
-	prefix := aetherannotations.AnnotationAetherEndpointMetadataPrefix
-	for key, value := range annotations {
-		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
-			metadata[key[len(prefix):]] = value
-		}
-	}
-	return metadata
 }
