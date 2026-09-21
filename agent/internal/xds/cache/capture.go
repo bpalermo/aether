@@ -349,6 +349,32 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		// fall through to the inbound default floor chain (tcp_proxy to the app).
 		proxy.InjectUpstreamTCPMTLS(cl, nodeSpiffeID, validationContextName, sanURIs, "")
 		resources = append(resources, cl)
+
+		// One cluster per NON-PRIMARY TCP port, matching the
+		// destination_port-qualified capture chains (proposal 037). Built from
+		// the same derived port set as those chains, in the same snapshot
+		// generation: a chain naming a cluster that is not in the snapshot is
+		// killed silently, because tcp_proxy has no ODCDS cold path (Risk 1).
+		for _, port := range e.tcpPorts {
+			portEntry, ok := c.clusters[proxy.TCPPortClusterName(tcpName, port)]
+			if !ok || portEntry.loadAssignment == nil {
+				continue
+			}
+			pc := proxy.NewTCPServiceCluster(
+				proxy.TCPPortClusterName(tcpName, port),
+				portEntry.loadAssignment.GetClusterName(),
+				e.serviceName,
+			)
+			// SNI IS set here, unlike the floor above. The floor must carry none
+			// (#306) so it lands on the destination's DEFAULT inbound chain,
+			// which forwards to the pod's primary port. A non-primary port has
+			// no such default to fall back on: the SNI is how the destination
+			// demuxes to the right loopback port, and it is safe precisely
+			// because only a post-037 agent advertises such a port — the same
+			// agent that builds the matching inbound chain.
+			proxy.InjectUpstreamTCPMTLS(pc, nodeSpiffeID, validationContextName, portEntry.sanURIs, strconv.Itoa(int(port)))
+			resources = append(resources, pc)
+		}
 	}
 	c.clusterMu.RUnlock()
 
