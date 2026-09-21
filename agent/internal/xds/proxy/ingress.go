@@ -5,6 +5,8 @@ import (
 	"strconv"
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/registry/endpointmeta"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -177,8 +179,19 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 	// No-SNI HCM chain: matches application_protocols ["h2"] (the mesh HTTP/2
 	// transport) on the primary port. Per-port SNI chains follow.
 	chains = append(chains, buildInboundFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
-	// One chain per served port, SNI-matched on the port number.
+	// One chain per served port, SNI-matched on the port number -- an HCM chain
+	// for an HTTP port, a tcp_proxy chain for a raw-TCP one (proposal 037).
+	//
+	// Exactly one of the two per port: two chains matching the same server_names
+	// is a listener Envoy cannot disambiguate, and it rejects the whole LDS
+	// update rather than the offending chain, leaving the pod on its previous
+	// listener -- or, for a new pod, unreachable.
+	tcpPorts := appTCPPorts(cniPod)
 	for _, port := range ports {
+		if _, isTCP := tcpPorts[port]; isTCP {
+			chains = append(chains, buildInboundTCPPortFilterChain(cniPod, port, tlsCertificateSecretName, validationContextName, trustDomain))
+			continue
+		}
 		chains = append(chains, buildInboundFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
 	}
 	return chains
@@ -196,6 +209,33 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 // the ONLY thing standing between a non-workload certificate in the trust
 // bundle and the pod's application port. That makes it more load-bearing here,
 // not less.
+// buildInboundTCPPortFilterChain builds the destination-side chain for ONE of
+// the pod's raw-TCP ports (proposal 037): the floor chain's shape, but matched
+// on the port as SNI and forwarding to that port's own app cluster.
+//
+// The source sets SNI on a non-primary TCP port's upstream socket precisely so
+// this chain can exist. The floor deliberately carries NO SNI (#306) and lands
+// on the default chain, which forwards to the pod's PRIMARY port; a non-primary
+// port has no such default to fall back on.
+//
+// Critically this REPLACES the HCM chain for that port rather than joining it.
+// Envoy rejects a listener whose filter chains it cannot disambiguate, and two
+// chains matching the same server_names is exactly that -- so a port is either
+// HCM or tcp_proxy, never both.
+func buildInboundTCPPortFilterChain(cniPod *cniv1.CNIPod, port uint16, tlsCertificateSecretName, validationContextName, trustDomain string) *listenerv3.FilterChain {
+	appCluster := AppClusterName(cniPod, port)
+	return &listenerv3.FilterChain{
+		Name: fmt.Sprintf("in_tcp_%s_%d", cniPod.GetName(), port),
+		FilterChainMatch: &listenerv3.FilterChainMatch{
+			ServerNames: []string{strconv.Itoa(int(port))},
+		},
+		TransportSocket: DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain),
+		Filters: []*listenerv3.Filter{
+			buildTCPProxyNetworkFilter(fmt.Sprintf("%s_%s_%d", inboundTCPFloorStatPrefix, cniPod.GetName(), port), appCluster),
+		},
+	}
+}
+
 func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string) *listenerv3.FilterChain {
 	appCluster := AppClusterName(cniPod, defaultPort)
 	return &listenerv3.FilterChain{
@@ -340,4 +380,31 @@ func applyInboundFilter(rc *routev3.RouteConfiguration, inboundFilter *Extension
 	for _, vh := range rc.GetVirtualHosts() {
 		ApplyServiceChainFilter(vh, inboundFilter)
 	}
+}
+
+// appTCPPorts returns the pod's ports declared raw-TCP via the `=tcp` suffix on
+// endpoint.aether.io/ports, EXCLUDING the primary (proposal 037).
+//
+// The primary is excluded because the inbound default floor chain already
+// serves it: a no-SNI mesh connection lands there and is forwarded to it. Only
+// a non-primary port needs an SNI-matched chain of its own.
+//
+// A malformed annotation yields no TCP ports rather than a guess, so the pod
+// keeps its pre-037 HCM chains. That is the conservative direction: the
+// registration path rejects the same value outright (endpointmeta.PortProtocols),
+// so a pod can only reach here in that state by being annotated after
+// registration, and serving it as HTTP is what it did yesterday.
+func appTCPPorts(cniPod *cniv1.CNIPod) map[uint16]struct{} {
+	out := map[uint16]struct{}{}
+	pp, err := endpointmeta.PortProtocols(cniPod.GetAnnotations())
+	if err != nil {
+		return out
+	}
+	primary := uint32(AppPortFromPod(cniPod))
+	for port, proto := range pp {
+		if proto == registryv1.PortProtocol_PORT_PROTOCOL_TCP && port != primary && port > 0 && port <= 65535 {
+			out[uint16(port)] = struct{}{}
+		}
+	}
+	return out
 }

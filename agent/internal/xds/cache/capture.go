@@ -16,6 +16,7 @@ import (
 	"aethermesh.dev/agent/internal/meshdns"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
@@ -84,22 +85,48 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 	if !c.captureEnabled {
 		return nil, nil
 	}
+	// #877: the TCP floor is mTLS-only. captureTCPClusters returns nothing
+	// without a node SVID and a validation context, so emitting cap_tcp_* chains
+	// here regardless produced a listener that ACCEPTED connections with no
+	// cluster behind them -- and tcp_proxy has no ODCDS cold path, so those
+	// connections died silently. A mesh with SPIRE disabled looked configured
+	// and swallowed every raw-TCP connection to a mesh service.
+	//
+	// Gate the chains on the same condition as the clusters, and say so. Failing
+	// CLOSED is deliberate: building a plaintext TCP floor when identity is
+	// unavailable would be a silent authentication downgrade, the #832/#843
+	// class. Suppressing the chains instead lets the connection fall to the
+	// passthrough and be REJECTed by kube-proxy at the mesh Service port -- an
+	// immediate ECONNREFUSED the caller can act on.
+	//
+	// This is a startup state as well as a misconfiguration: identity arrives
+	// asynchronously, and both SetNodeIdentity and a trust-domain change rebuild
+	// every pod listener, so the chains appear as soon as it does.
+	identityReady := c.tcpFloorIdentityReady()
+
 	c.captureMu.RLock()
 	tcpRoutes := c.tcpServiceRoutesSnapshot()
 	tlsRoutes := c.tlsServiceRoutesSnapshot()
-	tcpServices := make([]proxy.CaptureTCPService, len(c.captureTCPServices))
-	for i, e := range c.captureTCPServices {
-		tcpServices[i] = proxy.CaptureTCPService{
+	if !identityReady && len(c.captureTCPServices) > 0 {
+		c.warnTCPFloorWithoutIdentity(len(c.captureTCPServices))
+	}
+	var tcpServices []proxy.CaptureTCPService
+	for _, e := range c.captureTCPServices {
+		if !identityReady {
+			break
+		}
+		tcpServices = append(tcpServices, proxy.CaptureTCPService{
 			// TCP clusters are separate from HTTP clusters: they share the same EDS
 			// resource (same endpoint set) but use no ALPN on the transport socket so
 			// the destination inbound demuxes to the TCP floor DEFAULT chain.
 			ClusterName: proxy.TCPClusterName(e.serviceName, c.meshDomain),
+			TCPPorts:    e.tcpPorts,
 			ClusterIP:   e.clusterIP,
 			// L4 route rules (Phase 3b): override the passthrough floor chain when
 			// a TCPRoute or TLSRoute is attached to this service.
 			TCPRouteRules: tcpRoutes[e.serviceName],
 			TLSRouteRules: tlsRoutes[e.serviceName],
-		}
+		})
 	}
 	c.captureMu.RUnlock()
 
@@ -347,6 +374,32 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		// fall through to the inbound default floor chain (tcp_proxy to the app).
 		proxy.InjectUpstreamTCPMTLS(cl, nodeSpiffeID, validationContextName, sanURIs, "")
 		resources = append(resources, cl)
+
+		// One cluster per NON-PRIMARY TCP port, matching the
+		// destination_port-qualified capture chains (proposal 037). Built from
+		// the same derived port set as those chains, in the same snapshot
+		// generation: a chain naming a cluster that is not in the snapshot is
+		// killed silently, because tcp_proxy has no ODCDS cold path (Risk 1).
+		for _, port := range e.tcpPorts {
+			portEntry, ok := c.clusters[proxy.TCPPortClusterName(tcpName, port)]
+			if !ok || portEntry.loadAssignment == nil {
+				continue
+			}
+			pc := proxy.NewTCPServiceCluster(
+				proxy.TCPPortClusterName(tcpName, port),
+				portEntry.loadAssignment.GetClusterName(),
+				e.serviceName,
+			)
+			// SNI IS set here, unlike the floor above. The floor must carry none
+			// (#306) so it lands on the destination's DEFAULT inbound chain,
+			// which forwards to the pod's primary port. A non-primary port has
+			// no such default to fall back on: the SNI is how the destination
+			// demuxes to the right loopback port, and it is safe precisely
+			// because only a post-037 agent advertises such a port — the same
+			// agent that builds the matching inbound chain.
+			proxy.InjectUpstreamTCPMTLS(pc, nodeSpiffeID, validationContextName, portEntry.sanURIs, strconv.Itoa(int(port)))
+			resources = append(resources, pc)
+		}
 	}
 	c.clusterMu.RUnlock()
 
@@ -857,12 +910,25 @@ func equalTCPEntries(a, b []captureTCPEntry) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	ma := make(map[string]string, len(a))
+	ma := make(map[string]captureTCPEntry, len(a))
 	for _, e := range a {
-		ma[e.serviceName] = e.clusterIP
+		ma[e.serviceName] = e
 	}
 	for _, e := range b {
-		if ma[e.serviceName] != e.clusterIP {
+		prev, ok := ma[e.serviceName]
+		if !ok || prev.clusterIP != e.clusterIP {
+			return false
+		}
+		// The derived TCP port set is part of the identity: a change to it
+		// changes the chains, so it must trigger a regeneration. Both sides are
+		// sorted at derivation, so ordinary endpoint churn -- pods coming and
+		// going with the SAME declared ports -- produces an identical slice and
+		// compares equal.
+		//
+		// That is the whole of Risk 4's mitigation: regenerating a per-pod
+		// capture listener drains its connections, so this comparison has to be
+		// over the DERIVED set and not over the reload event.
+		if !slices.Equal(prev.tcpPorts, e.tcpPorts) {
 			return false
 		}
 	}
@@ -951,4 +1017,165 @@ func (c *SnapshotCache) podExtensionHTTPFilters(cniPod *cniv1.CNIPod, shared []*
 		return append([]*http_connection_managerv3.HttpFilter{proxy.SourceMetadataHTTPFilter(cniPod, c.currentTrustDomain())}, shared...)
 	}
 	return shared
+}
+
+// deriveTCPPorts returns each service's NON-PRIMARY raw-TCP ports, from the
+// port_protocols its endpoints declare (proposal 037).
+//
+// The primary port is excluded on purpose: it is what the portless floor chain
+// already reaches, so a chain for it would add nothing and would need the same
+// cluster the floor already uses. Everything returned here is a port that has
+// no data path today.
+//
+// Classification comes from the ENDPOINTS rather than from the mesh Service's
+// aether.io/app-protocol annotation. That annotation is the registrar's
+// projection of a per-pod fact, one hop removed from its source, and #878 is
+// what happens when the two copies disagree. Deriving here means the chain and
+// the cluster that serves it are built from one map in one snapshot
+// generation, which is also the structural half of #877 — a chain whose
+// cluster was never built kills connections silently, and tcp_proxy has no
+// ODCDS cold path to recover.
+//
+// The result is sorted so that two derivations over the same declared ports
+// compare equal regardless of map iteration order. equalTCPEntries depends on
+// that: endpoint churn must not read as a change, or every pod ADD/DEL would
+// regenerate per-pod capture listeners and drain their connections (Risk 4).
+func deriveTCPPorts(endpointsByService map[string][]*registryv1.ServiceEndpoint) map[string][]uint32 {
+	out := make(map[string][]uint32, len(endpointsByService))
+	for service, endpoints := range endpointsByService {
+		if ports := nonPrimaryTCPPorts(endpoints); len(ports) > 0 {
+			out[service] = ports
+		}
+	}
+	return out
+}
+
+// nonPrimaryTCPPorts returns one service's raw-TCP ports excluding its primary,
+// sorted and de-duplicated across its endpoints. Empty when the service has
+// none — which is every service that existed before proposal 037, since a pod
+// with one declared protocol has exactly one class and its primary carries it.
+func nonPrimaryTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
+	if len(endpoints) == 0 {
+		return nil
+	}
+	// Endpoints of one service share a primary port (proposal 005), so the
+	// first is representative.
+	primary := endpoints[0].GetPort()
+	seen := map[uint32]struct{}{}
+	for _, ep := range endpoints {
+		for port, proto := range ep.GetPortProtocols() {
+			if proto == registryv1.PortProtocol_PORT_PROTOCOL_TCP &&
+				port != primary && port > 0 && port <= 65535 {
+				seen[port] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	ports := make([]uint32, 0, len(seen))
+	for p := range seen {
+		ports = append(ports, p)
+	}
+	slices.Sort(ports)
+	return ports
+}
+
+// refreshCaptureTCPPorts updates each capture-TCP service's derived per-port
+// set and, ONLY if any of them changed, rebuilds the per-pod capture listeners
+// so the new destination_port chains reach Envoy (proposal 037).
+//
+// It reuses SetCaptureTCPServices' entry list and its change detection rather
+// than adding a second regeneration trigger: one comparison, over the derived
+// state, is the whole of Risk 4's mitigation. Regenerating a per-pod capture
+// listener drains that listener's connections, and a registry reload happens on
+// every pod ADD/DEL anywhere on the node — so a trigger keyed on "a reload
+// occurred" rather than "the derived set changed" would turn ordinary churn
+// into dropped connections.
+func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string][]uint32) {
+	c.captureMu.Lock()
+	next := make([]captureTCPEntry, 0, len(c.captureTCPServices))
+	for _, e := range c.captureTCPServices {
+		e.tcpPorts = derived[e.serviceName]
+		next = append(next, e)
+	}
+	changed := !equalTCPEntries(c.captureTCPServices, next)
+	c.captureTCPServices = next
+	c.captureMu.Unlock()
+
+	if !changed || !c.captureEnabled {
+		return
+	}
+	// Same rebuild path SetCaptureTCPServices uses: per-pod capture listeners
+	// embed the TCP chains, so they all have to be regenerated.
+	shared := c.extensionHTTPFilters()
+	c.listenerMu.Lock()
+	c.rebuildPodListenersLocked("derived TCP port set change", shared)
+	c.listenerMu.Unlock()
+}
+
+// tcpFloorIdentityReady reports whether the node has what the TCP floor's
+// upstream mTLS needs: a node SVID and a validation context. It is exactly the
+// condition captureTCPClusters gates on, factored out so the CHAINS and the
+// CLUSTERS cannot drift apart again (#877).
+func (c *SnapshotCache) tcpFloorIdentityReady() bool {
+	c.localMu.RLock()
+	nodeSpiffeID := c.nodeSpiffeID
+	c.localMu.RUnlock()
+	return nodeSpiffeID != "" && c.validationContextName() != ""
+}
+
+// warnTCPFloorWithoutIdentity logs, at most once a minute, that TCP mesh
+// services are configured but unroutable for want of identity (#877).
+//
+// Rate-limited because this is also the normal startup state for a few seconds,
+// and a per-listener-build log would be one line per pod per rebuild. It is a
+// WARN rather than an INFO because the steady state is a real outage: with
+// SPIRE off, every raw-TCP mesh service silently refuses.
+func (c *SnapshotCache) warnTCPFloorWithoutIdentity(services int) {
+	c.tcpFloorWarnMu.Lock()
+	defer c.tcpFloorWarnMu.Unlock()
+	if time.Since(c.tcpFloorWarnedAt) < time.Minute {
+		return
+	}
+	c.tcpFloorWarnedAt = time.Now()
+	c.log.Warn("TCP mesh services are configured but have no capture chains: the node has no SVID or no trust domain yet, and the TCP floor is mTLS-only",
+		"services", services,
+		"effect", "raw-TCP connections to these services fall to passthrough and are refused",
+		"issue", "aether#877")
+}
+
+// reconcileCaptureTCPChains rebuilds the per-pod capture listeners when the TCP
+// floor's identity readiness has CHANGED since they were last built (#877).
+//
+// The chains are gated on a node SVID and a validation context, which arrive
+// asynchronously — so a listener built before identity lands carries none, and
+// something has to rebuild it afterwards or the gate becomes a permanent
+// outage. This is the same reason recomputeInboundReadyClusters runs from
+// generateSnapshot rather than from its mutators: SetNodeIdentity is called
+// exactly once ever by the SPIRE bridge (`if firstServe`), so a trigger hanging
+// off it can be missed permanently — which is how main-worker-05 ran a whole
+// agent lifetime with no probe clusters at all on 2026-09-19.
+//
+// A comparison and an early return in the steady state; nothing is rebuilt
+// unless readiness actually flipped.
+func (c *SnapshotCache) reconcileCaptureTCPChains() {
+	if !c.captureEnabled {
+		return
+	}
+	ready := c.tcpFloorIdentityReady()
+
+	c.captureMu.Lock()
+	changed := c.tcpFloorIdentitySeen != ready
+	c.tcpFloorIdentitySeen = ready
+	hasTCP := len(c.captureTCPServices) > 0
+	c.captureMu.Unlock()
+
+	if !changed || !hasTCP {
+		return
+	}
+	shared := c.extensionHTTPFilters()
+	c.listenerMu.Lock()
+	c.rebuildPodListenersLocked("TCP floor identity change", shared)
+	c.listenerMu.Unlock()
 }

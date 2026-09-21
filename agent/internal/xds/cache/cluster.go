@@ -236,6 +236,22 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	c.subsetHeaderKeys = proxy.SortSubsetKeys(nodeSubsetKeys)
 	c.subsetMu.Unlock()
 
+	// Refresh each capture-TCP service's derived per-port set (proposal 037).
+	// Derived from BOTH listings: a service whose pods split across protocols
+	// appears in each, and either carries the full port_protocols map.
+	//
+	// This is a no-op unless a declared port set actually changed — endpoint
+	// churn yields the same sorted slice — which is what keeps per-pod capture
+	// listeners from being regenerated, and their connections drained, on every
+	// pod ADD/DEL (Risk 4).
+	derived := deriveTCPPorts(tcpServiceEndpoints)
+	for svc, ports := range deriveTCPPorts(serviceEndpoints) {
+		if _, have := derived[svc]; !have {
+			derived[svc] = ports
+		}
+	}
+	c.refreshCaptureTCPPorts(derived)
+
 	c.log.DebugContext(ctx, "loaded clusters from registry", "count", len(c.clusters))
 
 	return c.generateClusterSnapshot(ctx)
@@ -561,12 +577,80 @@ func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[str
 		defaultPort := endpoints[0].GetPort()
 		cla, epMap := c.buildTCPEndpointsLocked(serviceName, endpoints, localRegion, localZone, waypoint)
 
-		c.clusters[proxy.TCPClusterName(serviceName, c.meshDomain)] = clusterEntry{
+		tcpName := proxy.TCPClusterName(serviceName, c.meshDomain)
+		c.clusters[tcpName] = clusterEntry{
 			loadAssignment: cla,
 			endpoints:      epMap,
 			sanNamespaces:  sanNamespaces,
 			service:        serviceName,
 			sni:            strconv.Itoa(int(defaultPort)),
+			tcp:            true,
+		}
+
+		c.buildTCPPortEntriesLocked(serviceName, tcpName, endpoints, defaultPort, sanNamespaces, localRegion, localZone, waypoint)
+	}
+}
+
+// buildTCPPortEntriesLocked adds one entry per NON-PRIMARY raw-TCP port the
+// service advertises (proposal 037). Caller must hold clusterMu.
+//
+// These exist because the capture listener emits a destination_port-qualified
+// chain per such port, and that chain names tcp:<fqdn>:<port>. A chain whose
+// cluster is absent from the snapshot does not fail loudly: tcp_proxy has no
+// ODCDS cold path, so the connection is simply killed. Chain and cluster
+// therefore have to be produced from the same derived facts in the same
+// snapshot generation — proposal 037 Risk 1, and the same shape as #877.
+//
+// Each carries its OWN load assignment, named <fqdn>:<port> and filtered to the
+// endpoints that advertise that port AS TCP. Sharing the bare-name EDS would
+// put every pod of the service in the pool, including ones that do not serve
+// the port at all — the per-port membership filter is what makes adding a port
+// to a rolling Deployment safe, exactly as it already is for HTTP (proposal
+// 005).
+//
+// entry.sni is the port, which refreshEntryMTLSLocked renders onto the upstream
+// mTLS socket so the destination inbound can demux to the right loopback port.
+// The primary port deliberately has no entry here: it is what the floor cluster
+// already reaches, and the floor carries NO SNI on purpose (#306) so it lands on
+// the destination's default inbound chain.
+func (c *SnapshotCache) buildTCPPortEntriesLocked(
+	serviceName, tcpName string,
+	endpoints []*registryv1.ServiceEndpoint,
+	defaultPort uint32,
+	sanNamespaces []string,
+	localRegion, localZone string,
+	waypoint proxy.WaypointRewrite,
+) {
+	for _, port := range nonPrimaryTCPPorts(endpoints) {
+		if port == defaultPort {
+			continue
+		}
+		members := make([]*registryv1.ServiceEndpoint, 0, len(endpoints))
+		for _, ep := range endpoints {
+			if ep.GetPortProtocols()[port] == registryv1.PortProtocol_PORT_PROTOCOL_TCP {
+				members = append(members, ep)
+			}
+		}
+		if len(members) == 0 {
+			continue
+		}
+
+		claName := proxy.PortClusterName(serviceName, c.meshDomain, port)
+		portCla := proxy.NewClusterLoadAssignment(claName)
+		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(members))
+		for _, ep := range members {
+			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(ep, localRegion, localZone, waypoint)
+			portCla.Endpoints = append(portCla.Endpoints, lbEp)
+			epMap[ep.GetIp()] = lbEp
+		}
+		proxy.SortLocalityLbEndpoints(portCla.Endpoints)
+
+		c.clusters[proxy.TCPPortClusterName(tcpName, port)] = clusterEntry{
+			loadAssignment: portCla,
+			endpoints:      epMap,
+			sanNamespaces:  sanNamespaces,
+			service:        serviceName,
+			sni:            strconv.Itoa(int(port)),
 			tcp:            true,
 		}
 	}

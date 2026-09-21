@@ -44,6 +44,11 @@ import (
 type captureTCPEntry struct {
 	serviceName string // bare service name (for cluster name derivation)
 	clusterIP   string // k8s Service ClusterIP (filter-chain prefix_ranges match)
+	// tcpPorts are the service's NON-PRIMARY raw-TCP ports, derived from its
+	// endpoints' port_protocols at registry-load time (proposal 037). Sorted,
+	// so two derivations of the same set compare equal and endpoint churn does
+	// not look like a change -- see equalTCPEntries and Risk 4.
+	tcpPorts []uint32
 }
 
 // SnapshotCache wraps go-control-plane's SnapshotCache and manages Envoy
@@ -427,6 +432,16 @@ type SnapshotCache struct {
 	// name, that need per-ClusterIP TCP-proxy floor chains on the capture listener.
 	// A nil/empty slice means all captured traffic goes through the HCM chain.
 	captureTCPServices []captureTCPEntry
+	// tcpFloorWarnMu/tcpFloorWarnedAt rate-limit the #877 warning: TCP mesh
+	// services configured while the node has no identity. That is also the
+	// normal startup state for a few seconds, and the listener build runs per
+	// pod, so an unthrottled log would be one line per pod per rebuild.
+	tcpFloorWarnMu   sync.Mutex
+	tcpFloorWarnedAt time.Time
+	// tcpFloorIdentitySeen is the identity readiness the capture listeners were
+	// last built against (#877). Compared on every snapshot push so a change
+	// rebuilds them; see reconcileCaptureTCPChains.
+	tcpFloorIdentitySeen bool
 
 	// meshDNSSnapshotPath is the host-persistent file the capture reconciler writes
 	// the mesh service->IP record table to (proposal 018, mesh-global FQDN; issue
