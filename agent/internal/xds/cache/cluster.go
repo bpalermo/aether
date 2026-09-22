@@ -250,7 +250,13 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			derived[svc] = ports
 		}
 	}
-	c.refreshCaptureTCPPorts(derived)
+	primary := make(map[string]uint32, len(tcpServiceEndpoints))
+	for svc, eps := range tcpServiceEndpoints {
+		if len(eps) > 0 {
+			primary[svc] = eps[0].GetPort()
+		}
+	}
+	c.refreshCaptureTCPPorts(derived, primary)
 
 	c.log.DebugContext(ctx, "loaded clusters from registry", "count", len(c.clusters))
 

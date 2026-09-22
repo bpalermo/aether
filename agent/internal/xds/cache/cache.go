@@ -51,6 +51,11 @@ type captureTCPEntry struct {
 	tcpPorts []uint32
 	// primaryIsTCP gates the portless /32 floor chain (proposal 037 design (d)).
 	primaryIsTCP bool
+	// primaryPort is the service's primary application port, derived from its
+	// TCP floor entry. It gives the TCP-primary floor a
+	// destination_port-qualified spelling of its own, so that spelling survives
+	// the any-port shim's removal in Phase 4.
+	primaryPort uint32
 }
 
 // SnapshotCache wraps go-control-plane's SnapshotCache and manages Envoy

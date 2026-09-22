@@ -82,11 +82,19 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
 	require.NoError(t, err)
 
-	// 2 TCP floor chains + 1 HCM catch-all + the scoped-mode blackhole.
-	// +1 for cap_tcp_blackhole: scoped mode catches raw TCP to the TCP mesh
-	// port that no service chain claimed, before the HCM fabricates a 400 for
-	// it (proposal 037).
-	require.Len(t, l.GetFilterChains(), 4, "one chain per TCP service, the HCM catch-all, and the blackhole")
+	// Each TCP-primary service now yields TWO chains (proposal 037): the
+	// well-known :18082 spelling, and the portless any-port deprecation shim
+	// whose own stat prefix is what Phase 4's removal is gated on. Plus the HCM
+	// catch-all and the scoped-mode blackhole.
+	names := map[string]bool{}
+	for _, fc := range l.GetFilterChains() {
+		names[fc.GetName()] = true
+	}
+	assert.True(t, names["cap_tcp_tcp:svc-a.aether.internal_18082"], "the :18082 spelling")
+	assert.True(t, names["cap_tcp_anyport_tcp:svc-a.aether.internal"], "the any-port shim, counted separately")
+	assert.True(t, names["cap_tcp_blackhole"])
+	assert.True(t, names["capture_p1"])
+	require.Len(t, l.GetFilterChains(), 6, "2 per TCP service + HCM catch-all + blackhole")
 
 	// Collect chains by match type.
 	var tcpChains []*listenerv3.FilterChain
@@ -98,7 +106,8 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 			hcmChain = fc
 		}
 	}
-	require.Len(t, tcpChains, 2)
+	// Four: the :18082 spelling and the any-port shim, per service.
+	require.Len(t, tcpChains, 4)
 	require.NotNil(t, hcmChain)
 
 	// TCP chains: keyed by /32 prefix_range, single tcp_proxy filter.
@@ -131,11 +140,9 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
 	require.NoError(t, err)
 
-	// Only the valid service should produce a chain; 1 TCP + 1 HCM + blackhole.
-	// +1 for cap_tcp_blackhole: scoped mode catches raw TCP to the TCP mesh
-	// port that no service chain claimed, before the HCM fabricates a 400 for
-	// it (proposal 037).
-	require.Len(t, l.GetFilterChains(), 3)
+	// Only the valid service produces chains: its :18082 spelling and the
+	// any-port shim, plus the HCM catch-all and the scoped-mode blackhole.
+	require.Len(t, l.GetFilterChains(), 4)
 }
 
 // TestGenerateCaptureListener_WithPassthrough verifies that withPassthrough=true adds
@@ -186,8 +193,10 @@ func TestGenerateCaptureListener_WithPassthroughAndTCPServices(t *testing.T) {
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, true, nil)
 	require.NoError(t, err)
 
-	// Named chains: 1 TCP floor + 1 HCM.
-	require.Len(t, l.GetFilterChains(), 2)
+	// Named chains: the service's :18082 spelling, its any-port shim, and the
+	// HCM. No blackhole here — redirect-all uses passthrough -> kube-proxy
+	// REJECT, which is already attributable (proposal 037).
+	require.Len(t, l.GetFilterChains(), 3)
 	// DefaultFilterChain carries the passthrough.
 	require.NotNil(t, l.GetDefaultFilterChain())
 	assert.Equal(t, "cap_passthrough", l.GetDefaultFilterChain().GetName())

@@ -5,6 +5,10 @@ import (
 	"net"
 	"time"
 
+	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
+
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"aethermesh.dev/agent/internal/xds/config"
@@ -73,6 +77,11 @@ type CaptureTCPService struct {
 	// destination_port-qualified chains instead, which Envoy evaluates ahead of
 	// prefix_ranges and therefore leave HTTP alone.
 	PrimaryIsTCP bool
+	// PrimaryPort is the service's primary application port, used to give the
+	// TCP-primary floor a destination_port-qualified spelling of its own
+	// (proposal 037). Zero when unknown, in which case that spelling is
+	// omitted and the any-port shim still serves it.
+	PrimaryPort uint32
 }
 
 // CaptureListenerName returns the per-pod transparent-capture listener name.
@@ -140,14 +149,14 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 				chains = append(chains, pc)
 			}
 		}
-		// The PORTLESS /32 floor chain -- passthrough or TCPRoute-weighted --
-		// ONLY for a service whose primary port is raw TCP. For an HTTP-primary
-		// service it would intercept the VIP's HTTP traffic before the HCM
-		// chain could see it (proposal 037 design (d)).
+		// A TCP-primary service's floor, in three parts (proposal 037).
+		//
+		// An HTTP-primary service gets NONE of these: a portless /32 chain
+		// would intercept the VIP's HTTP traffic before the HCM chain could see
+		// it (design (d)). Its raw-TCP ports are served by the
+		// destination_port-qualified chains above.
 		if svc.PrimaryIsTCP {
-			if tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules, sourceSpiffeID); tc != nil {
-				chains = append(chains, tc)
-			}
+			chains = append(chains, tcpPrimaryFloorChains(svc, sourceSpiffeID)...)
 		}
 	}
 	// Scoped mode only: catch raw TCP to the TCP mesh port that no service
@@ -452,4 +461,66 @@ func BuildCaptureTCPBlackholeFilterChain(sourceSpiffeID string) *listenerv3.Filt
 			buildTCPProxyNetworkFilter("cap_tcp_blackhole", BlackholeClusterName),
 		),
 	}
+}
+
+// qualifyChainByPort returns a copy of src renamed, and matched additionally on
+// destination_port when port is non-zero (proposal 037).
+//
+// Cloning rather than mutating: the caller builds one chain and derives several
+// spellings from it, and the TCPRoute-weighted and passthrough shapes must stay
+// identical across them. Sharing the proto would make a later edit to one
+// spelling silently change the others.
+func qualifyChainByPort(src *listenerv3.FilterChain, port uint32, name string) *listenerv3.FilterChain {
+	out, _ := proto.Clone(src).(*listenerv3.FilterChain)
+	out.Name = name
+	if out.FilterChainMatch == nil {
+		out.FilterChainMatch = &listenerv3.FilterChainMatch{}
+	}
+	if port != 0 {
+		out.FilterChainMatch.DestinationPort = wrapperspb.UInt32(port)
+	}
+	// The tcp_proxy stat prefix follows the chain name, so each spelling is
+	// counted separately -- which is what makes the shim's usage measurable.
+	for _, f := range out.GetFilters() {
+		tc := &tcp_proxyv3.TcpProxy{}
+		if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(tc) != nil {
+			continue
+		}
+		tc.StatPrefix = name
+		if any, err := anypb.New(tc); err == nil {
+			f.ConfigType = &listenerv3.Filter_TypedConfig{TypedConfig: any}
+		}
+	}
+	return out
+}
+
+// tcpPrimaryFloorChains returns a TCP-primary service's floor chains: the
+// supported destination_port spellings, and the portless any-port deprecation
+// shim (proposal 037).
+//
+// The spellings that survive Phase 4 are the well-known TCP mesh port and the
+// service's own primary port. Each is a copy of the same floor chain --
+// passthrough or TCPRoute-weighted -- so they cannot drift from one another.
+//
+// The shim is last and portless: any OTHER port to this VIP still reaches the
+// floor, which is what a pure-TCP service does today. Being the least specific
+// chain, it catches only what no destination_port chain claimed -- exactly the
+// traffic Phase 4 proposes to stop serving.
+//
+// Its own stat prefix is the whole point. Phase 4 is gated on
+// tcp.cap_tcp_anyport_<svc>.downstream_cx_total reading zero across a full
+// release; sharing a prefix with the supported spellings would make that
+// evidence unobtainable and the removal a guess.
+func tcpPrimaryFloorChains(svc CaptureTCPService, sourceSpiffeID string) []*listenerv3.FilterChain {
+	tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules, sourceSpiffeID)
+	if tc == nil {
+		return nil
+	}
+	var out []*listenerv3.FilterChain
+	for _, p := range []uint32{meshconst.ProxyTCPOutboundPort, svc.PrimaryPort} {
+		if p != 0 {
+			out = append(out, qualifyChainByPort(tc, p, fmt.Sprintf("cap_tcp_%s_%d", svc.ClusterName, p)))
+		}
+	}
+	return append(out, qualifyChainByPort(tc, 0, "cap_tcp_anyport_"+svc.ClusterName))
 }
