@@ -10,6 +10,7 @@ Three components run together:
 | **External prober** (`//prober`, DaemonSet, already deployed) | the availability SLI — **authoritative for PASS/FAIL** |
 | **k6 runners** (`k6-runner.yaml`) | mesh load by NAME (~300/s) so DNS + cross-node paths are exercised |
 | **Churn driver** (`churn.sh`) | 31 rolling restarts incl. mesh-dns/agent/proxy/edge + a concurrent triple, then a 90-minute no-roll window and a demand-set shrink |
+| **Multi-protocol leg** (`multiprotocol.yaml`) | proposal 037's per-port TCP chains under load, and the evidence for its Phase 4 gate |
 
 The prober is external **on purpose**: the mesh's own self-reported metrics are blind to
 the very churn being tested. Never grade a soak on mesh self-SLI alone.
@@ -23,6 +24,19 @@ the very churn being tested. Never grade a soak on mesh self-SLI alone.
 #    node instead of the mesh. See the gotcha below.
 kubectl apply -n aether-test -f e2e/soak/echo.yaml
 kubectl -n aether-test get pods -l app=echo -o wide   # expect 3, on 3 different nodes
+
+# 0b. The proposal-037 leg: a multi-protocol workload (HTTP :8080 primary + raw
+#     TCP :9000) plus the per-node dialer that keeps its new chains busy. Same
+#     "only needed once" status as echo.yaml, and the same reason to CHECK it:
+#     without it the whole 037 data path sits idle for eight hours.
+kubectl apply -n aether-test -f e2e/soak/multiprotocol.yaml
+kubectl -n aether-test get pods -l app=mixed-svc -o wide     # expect 3, spread
+kubectl -n aether-test logs -l app.kubernetes.io/name=mp-dialer --tail=1 | grep AETHER_METRIC
+
+# 0c. ONCE, before the run: prove the any-port shim's counter can move. See
+#     "The Phase 4 evidence clock" below -- a zero from a counter that was never
+#     driven is not evidence, and this is the step that makes it evidence.
+bash e2e/soak/anyport-probe.sh
 
 # 1. Load the k6 script as a ConfigMap (source of truth is the .js file here).
 #    RE-RUN THIS after any edit to k6-mesh-soak.js -- the pod mounts the
@@ -247,6 +261,51 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
   step that deletes a `spire-agent` pod is NOT a rotation cycle — exclude that node's
   restart minute when counting cycles.
 
+### The Phase 4 evidence clock (proposal 037)
+
+Phase 4 removes the portless TCP floor chain once `cap_tcp_anyport_<svc>` reads zero
+across a full release. Read these at T0 and at the end, from the RAW counters:
+
+```promql
+# Every capture TCP chain at once, by pattern. Match these by PATTERN rather than
+# by an assembled name: the stat prefix carries the Envoy CLUSTER name, so
+# tcp-echo's chains read `cap_tcp_TCP_tcp_echo_…` with a doubled `tcp_` that a
+# name derived from the service FQDN quietly drops -- and the resulting "no data"
+# is indistinguishable from a legitimate zero.
+sum by (__name__) ({__name__=~"envoy_tcp_cap_tcp_.*_downstream_cx_total"})
+```
+
+Expect exactly these, all non-zero and still climbing at the end of the run:
+
+| series | what it proves |
+|---|---|
+| `…cap_tcp_tcp_mixed_svc_…_9000_…` | the 037 per-port path: a raw-TCP port on an **HTTP-primary** service |
+| `…cap_tcp_tcp_tcp_echo_…_18082_…` | the well-known TCP mesh port |
+| `…cap_tcp_tcp_tcp_echo_…_9000_…` | the primary-port spelling |
+| `…cap_tcp_anyport_tcp_tcp_echo_…` | **the gate** — must stay FLAT at its post-probe value |
+
+**The first three are what make the fourth mean anything.** Envoy omits a counter it
+never increments, so an absent `anyport` series and a healthy one look identical from
+the gate's side. Before this leg existed the talos fleet had *no* raw-TCP client at all:
+over seven days the only `envoy_tcp_cap_tcp_*` series that had ever existed came from a
+manual e2e run, and `tcp-echo`'s own floor chain — which predates 037 — had never carried
+one connection. A zero read in that state says nothing about whether any client still
+uses the portless spelling, which is the only question Phase 4 asks.
+
+So the reading is a conjunction: the neighbouring chains carried traffic for the whole
+run **and** `anyport` did not move. Either half alone is not evidence. If `anyport` did
+move, that is the finding — some client is still using an unsanctioned spelling, and
+Phase 4 waits.
+
+Grade the dialer's own tallies separately from the prober SLI; it is a supplementary
+signal for the 037 chains, never authoritative for PASS/FAIL.
+
+```bash
+for p in $(kubectl -n aether-test get pods -o name | grep mp-dialer); do
+  kubectl -n aether-test logs --tail=1 "$p" | grep AETHER_METRIC
+done
+```
+
 ## Hard-won gotchas
 
 Each of these invalidated a real run:
@@ -290,6 +349,16 @@ Each of these invalidated a real run:
    the very state a defect needs to age) is worth looking for whenever a bug is only
    ever seen *between* soaks.
 
+9. **A workload set can make a whole feature untestable.** Proposal 037 shipped in
+   rev234 and the soak, as configured, would not have touched one line of it: every
+   pre-037 service declares a single protocol, so no per-port chain is ever built,
+   and the one TCP-primary service had no client. The run would have reported PASS
+   without exercising the feature it was meant to validate, and — worse — would have
+   produced a zero on the Phase 4 gate that looked like evidence. This is gotcha 8's
+   shape one level up: there, a churn step reset the state a defect needed to age;
+   here, the workload set never created that state at all. When a release adds a data
+   path, check that something in `aether-test` actually walks it before starting.
+
 ## Files
 
 - `echo.yaml` — the mesh_dns SLI target (3 replicas, soft hostname spread). Apply before
@@ -315,3 +384,11 @@ Each of these invalidated a real run:
   shrink; takes a build label for the log header.
 - `sample-proxy-rss.sh` — age-matched `aether-proxy` working-set sampler for #628.
   Standalone, and queued automatically by `churn.sh` after each proxy roll.
+- `multiprotocol.yaml` — the proposal-037 leg: `mixed-svc` (HTTP :8080 primary + raw
+  TCP :9000 on one pod, one ServiceAccount) and the `mp-dialer` DaemonSet that drives
+  the three SANCTIONED raw-TCP spellings on every node. It deliberately never dials an
+  unsanctioned port; that is the shim's territory and driving it would destroy the
+  Phase 4 measurement.
+- `anyport-probe.sh` — the one-shot negative control for that gate: dials a TCP-primary
+  service at an unsanctioned port so `cap_tcp_anyport_*` is *shown* to move before the
+  run relies on it not moving.

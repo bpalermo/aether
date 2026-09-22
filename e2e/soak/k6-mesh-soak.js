@@ -23,6 +23,20 @@ const targets = [
   'http://svc-3.aether-test.aether.internal:18081/',
   'http://svc-4.aether-test.aether.internal:18081/',
   'http://echo.aether-test.aether.internal:18081/',
+  // A MULTI-PROTOCOL service (proposal 037): HTTP primary on :8080, raw TCP on
+  // :9000, one pod, one ServiceAccount. It is here to hold the HTTP half of that
+  // shape under load while e2e/soak/multiprotocol.yaml's dialer drives the TCP
+  // half, because the interesting failure is not either protocol on its own --
+  // it is the destination_port chain for :9000 shadowing the VIP's HTTP traffic.
+  // Envoy evaluates destination_port BEFORE prefix_ranges, server_names and
+  // application_protocols, so a mistake there does not degrade the TCP port; it
+  // silently swallows every HTTP request to this authority. This target is what
+  // would notice.
+  //
+  // Adding a sixth target leaves the TOTAL arrival rate untouched -- the
+  // executor is constant-arrival-rate -- so fleet CPU stays comparable with the
+  // rev231 run. Only the per-target share moves, 20% to 16.7%.
+  'http://mixed-svc.aether-test.aether.internal:18081/',
 ];
 
 // Per-failure-class counters (#846).

@@ -1,0 +1,237 @@
+# The soak's proposal-037 leg: a multi-protocol workload plus the raw-TCP dialer
+# that keeps its new chains under load for the whole run.
+#
+#   kubectl apply -n aether-test -f e2e/soak/multiprotocol.yaml
+#
+# Why this exists (2026-09-22). Proposal 037 shipped in rev234 and the talos
+# workload set did not exercise one line of it. Every pre-037 service declares a
+# single protocol, so `nonPrimaryTCPPorts` returns nil for all fourteen of them
+# and no per-port chain is ever built; the one TCP-primary service (`tcp-echo`)
+# had no client at all. Prometheus is unambiguous about this: over SEVEN DAYS the
+# only `envoy_tcp_cap_tcp_*` series that has ever existed came from a manual e2e
+# run, and `cap_tcp_<tcp-echo>` — a chain that predates 037 — has never had a
+# single connection. Envoy omits a counter it never increments, so the TCP floor
+# on this cluster is not "healthy", it is UNMEASURED.
+#
+# That matters most for proposal 037's Phase 4, which deletes the portless floor
+# chain once `cap_tcp_anyport_*` reads zero across a full release. Without a
+# client, zero is what that counter reads whether the shim is load-bearing or
+# dead — the aether#853 shape, a gate that cannot fail. Eight hours of evidence
+# that could not have come out any other way is worse than no evidence, because
+# it invites acting on it.
+#
+# So this file drives the three SANCTIONED spellings continuously and leaves the
+# any-port spelling alone. A zero on `cap_tcp_anyport_*` after this run is a
+# measurement: the chains around it demonstrably carried traffic the whole time.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mixed-svc
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mp-dialer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mixed-svc
+  labels:
+    app: mixed-svc
+spec:
+  # THREE replicas, spread, for the same reason echo.yaml carries that comment:
+  # the point is the cross-node data path. With one replica every dialer on every
+  # other node would take the identical route and a per-node chain defect would
+  # hide behind the one node that works.
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: mixed-svc
+  template:
+    metadata:
+      labels:
+        app: mixed-svc
+        # Without this the CNI installs no capture redirect and the pod is
+        # invisible to the mesh — gotcha 1 in README.md.
+        aether.io/managed: "true"
+      annotations:
+        # The declaration the whole proposal turns on: an HTTP primary and a raw
+        # TCP secondary on ONE pod under ONE ServiceAccount. `port` names the
+        # primary; `ports` enumerates every port with its protocol, and the
+        # `=tcp` suffix is what puts 9000 in the derived TCP port set.
+        endpoint.aether.io/port: "8080"
+        endpoint.aether.io/ports: "8080,9000=tcp"
+    spec:
+      serviceAccountName: mixed-svc
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          # ScheduleAnyway, per echo.yaml: a DoNotSchedule constraint would leave
+          # replicas Pending on a cordoned node and take the target down, which
+          # is worse than an uneven spread.
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: mixed-svc
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        # The HTTP primary: reached as mixed-svc.<ns>.aether.internal:18081 and
+        # portlessly, through the capture HCM, exactly like any other service.
+        - name: http
+          image: hashicorp/http-echo:1.0
+          args: ["-text=served-by-http-8080", "-listen=:8080"]
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+        # The raw-TCP secondary. Before 037 this port had NO chain on an
+        # HTTP-primary service: a /32 floor chain would have outranked the HCM
+        # catch-all and swallowed the VIP's HTTP traffic, so the only safe answer
+        # was to serve neither. It is now reached by a destination_port-qualified
+        # chain, which Envoy evaluates ahead of prefix_ranges and which therefore
+        # leaves :18081 and the portless HTTP spelling untouched.
+        - name: tcp
+          image: istio/tcp-echo-server:1.3
+          args: ["9000", "served-by-tcp-9000"]
+          ports:
+            - containerPort: 9000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mp-dialer
+  namespace: aether-test
+  labels:
+    app.kubernetes.io/name: mp-dialer
+    app.kubernetes.io/component: load-generator
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mp-dialer
+  template:
+    metadata:
+      labels:
+        aether.io/managed: "true"
+        app.kubernetes.io/name: mp-dialer
+        app.kubernetes.io/component: load-generator
+      annotations:
+        # Pre-warm both upstreams' clusters. This matters more here than for k6:
+        # tcp_proxy has NO ODCDS cold path (proposal 037, Risk 1), so a TCP chain
+        # naming a cluster absent from the snapshot does not stall and recover —
+        # it accepts the connection and drops it with no error anywhere.
+        config.aether.io/upstreams: "mixed-svc,tcp-echo"
+    spec:
+      # Same rationale as the k6 runner: a DaemonSet pod cannot move, so without
+      # a priority it is the scheduler's preferred preemption victim when a proxy
+      # pod surges, and it is the one pod whose loss is silent.
+      priorityClassName: aether-soak-loader
+      serviceAccountName: mp-dialer
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dialer
+          # curlimages/curl carries busybox nc, and it is already resident on
+          # every node — a soak is a bad place to discover an image pull.
+          image: curlimages/curl:8.22.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -u
+              D=aether-test.aether.internal
+              MIXED="mixed-svc.$D"
+              TCPECHO="tcp-echo.$D"
+
+              # A dial writes one line, waits a beat for the echo, and closes.
+              # stdin EOF is what makes busybox nc exit, and the outer timeout is
+              # the backstop for a chain that accepts and never forwards — the
+              # #877 failure mode, which presents as a hang rather than a reset.
+              dial() { # host port expect
+                out=$( (echo "soak-$(date -u +%s)"; sleep 1) | timeout 5 nc "$1" "$2" 2>/dev/null || true )
+                case "$out" in (*"$3"*) return 0 ;; (*) return 1 ;; esac
+              }
+
+              ok_port=0; f_port=0     # mixed-svc:9000  -> the 037 per-port chain
+              ok_mesh=0; f_mesh=0     # tcp-echo:18082  -> the TCP mesh port
+              ok_prim=0; f_prim=0     # tcp-echo:9000   -> the primary-port spelling
+              n=0
+
+              while :; do
+                # 1. The headline path: a raw-TCP port on an HTTP-PRIMARY service.
+                #    destination_port chain -> per-port cluster with SNI "9000"
+                #    -> the destination's server_names:[9000] inbound chain.
+                if dial "$MIXED" 9000 served-by-tcp-9000; then ok_port=$((ok_port+1)); else f_port=$((f_port+1)); fi
+
+                # 2. The well-known TCP mesh port. Raw TCP has no authority
+                #    header, so unlike HTTP it cannot carry its own port — which
+                #    is why 037 gave it 18082 rather than letting a bare name
+                #    change meaning with the service's primary protocol.
+                if dial "$TCPECHO" 18082 hello; then ok_mesh=$((ok_mesh+1)); else f_mesh=$((f_mesh+1)); fi
+
+                # 3. The service's own primary port, qualified. Same floor, its
+                #    own destination_port spelling.
+                if dial "$TCPECHO" 9000 hello; then ok_prim=$((ok_prim+1)); else f_prim=$((f_prim+1)); fi
+
+                # DELIBERATELY ABSENT: any dial at an unsanctioned port. That is
+                # the any-port shim's territory, and its counter reading zero
+                # across this run is proposal 037 Phase 4's evidence. Driving it
+                # here would destroy the very measurement the run exists to take.
+
+                n=$((n+1))
+                if [ $((n % 20)) -eq 0 ]; then
+                  echo "AETHER_METRIC mp_dialer={\"cycles\":$n,\"port_ok\":$ok_port,\"port_fail\":$f_port,\"mesh_ok\":$ok_mesh,\"mesh_fail\":$f_mesh,\"prim_ok\":$ok_prim,\"prim_fail\":$f_prim}"
+                fi
+                sleep 3
+              done
+          resources:
+            requests:
+              cpu: 20m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      restartPolicy: Always
