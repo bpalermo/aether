@@ -91,9 +91,28 @@ func TestReconcile_ProjectsTCPServices(t *testing.T) {
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)
 
-	require.Len(t, sink.tcpServices, 1, "only the non-headless TCP service should produce a TCP floor entry")
-	assert.Equal(t, "aether-test/svc-tcp", sink.tcpServices[0].ServiceName)
-	assert.Equal(t, "10.96.0.99", sink.tcpServices[0].ClusterIP)
+	// Proposal 037 design (d): EVERY mesh Service with a routable VIP is
+	// delivered, not only the non-HTTP ones, because an HTTP-primary service
+	// can still serve raw-TCP ports that need chains. The headless one is still
+	// skipped — there is no VIP to match on.
+	byName := map[string]CaptureTCPService{}
+	for _, s := range sink.tcpServices {
+		byName[s.ServiceName] = s
+	}
+	require.Len(t, sink.tcpServices, 2, "both VIP-bearing services are delivered; the headless one is not")
+	require.Contains(t, byName, "aether-test/svc-tcp")
+	require.Contains(t, byName, "aether-test/svc-http")
+	assert.NotContains(t, byName, "aether-test/svc-headless")
+
+	assert.Equal(t, "10.96.0.99", byName["aether-test/svc-tcp"].ClusterIP)
+
+	// PrimaryIsTCP is what gates the PORTLESS /32 floor chain. Getting this
+	// wrong for the HTTP service is not a cosmetic error: a per-IP chain
+	// outranks the HCM catch-all's application_protocols match, so it would
+	// swallow every HTTP request to that VIP.
+	assert.True(t, byName["aether-test/svc-tcp"].PrimaryIsTCP)
+	assert.False(t, byName["aether-test/svc-http"].PrimaryIsTCP,
+		"an HTTP-primary service must never get the portless floor chain")
 }
 
 func TestReconcile_ProjectsAuthoritiesAndDNSRecords(t *testing.T) {

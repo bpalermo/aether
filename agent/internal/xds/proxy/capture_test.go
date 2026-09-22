@@ -64,8 +64,8 @@ func TestGenerateCaptureListener_RequiresNetns(t *testing.T) {
 func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 	tcpSvcs := []CaptureTCPService{
-		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10"},
-		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20"},
+		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", PrimaryIsTCP: true},
+		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20", PrimaryIsTCP: true},
 	}
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
 	require.NoError(t, err)
@@ -108,10 +108,10 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 	tcpSvcs := []CaptureTCPService{
-		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: ""},           // missing IP
-		{ClusterName: "", ClusterIP: "10.96.1.10"},                          // missing name
-		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "not-an-ip"},  // bad IP
-		{ClusterName: "tcp:svc-c.aether.internal", ClusterIP: "10.96.1.30"}, // valid
+		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "", PrimaryIsTCP: true},           // missing IP
+		{ClusterName: "", ClusterIP: "10.96.1.10", PrimaryIsTCP: true},                          // missing name
+		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "not-an-ip", PrimaryIsTCP: true},  // bad IP
+		{ClusterName: "tcp:svc-c.aether.internal", ClusterIP: "10.96.1.30", PrimaryIsTCP: true}, // valid
 	}
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
 	require.NoError(t, err)
@@ -163,7 +163,7 @@ func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
 func TestGenerateCaptureListener_WithPassthroughAndTCPServices(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 	tcpSvcs := []CaptureTCPService{
-		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10"},
+		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", PrimaryIsTCP: true},
 	}
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, true, nil)
 	require.NoError(t, err)

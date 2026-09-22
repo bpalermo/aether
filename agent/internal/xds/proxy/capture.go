@@ -60,6 +60,18 @@ type CaptureTCPService struct {
 	// nothing. Empty for every service that serves one TCP port, which is every
 	// TCP service that existed before proposal 037.
 	TCPPorts []uint32
+	// PrimaryIsTCP reports whether the service's PRIMARY port is raw TCP. It
+	// gates the PORTLESS /32 floor chain and nothing else (proposal 037 design
+	// (d)).
+	//
+	// Every mesh Service with a routable VIP is delivered here now, not only
+	// the non-HTTP ones, because an HTTP-primary service can still serve
+	// raw-TCP ports. But it must NOT get the portless chain: a per-IP match
+	// outranks the HCM catch-all's application_protocols match and would
+	// swallow the VIP's HTTP traffic. Its TCP ports get
+	// destination_port-qualified chains instead, which Envoy evaluates ahead of
+	// prefix_ranges and therefore leave HTTP alone.
+	PrimaryIsTCP bool
 }
 
 // CaptureListenerName returns the per-pod transparent-capture listener name.
@@ -127,10 +139,14 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 				chains = append(chains, pc)
 			}
 		}
-		// TCP floor chain: passthrough or TCPRoute-weighted.
-		tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules, sourceSpiffeID)
-		if tc != nil {
-			chains = append(chains, tc)
+		// The PORTLESS /32 floor chain -- passthrough or TCPRoute-weighted --
+		// ONLY for a service whose primary port is raw TCP. For an HTTP-primary
+		// service it would intercept the VIP's HTTP traffic before the HCM
+		// chain could see it (proposal 037 design (d)).
+		if svc.PrimaryIsTCP {
+			if tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules, sourceSpiffeID); tc != nil {
+				chains = append(chains, tc)
+			}
 		}
 	}
 	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, withPassthrough, extensionFilters))

@@ -116,7 +116,7 @@ func TestDependencySetMemo_EveryMutatorInvalidates(t *testing.T) {
 	t.Run("SetCaptureTCPServices", func(t *testing.T) {
 		c := newTestCache("node-1")
 		_ = c.DependencySet() // prime
-		c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "default/tcp-svc", ClusterIP: "10.96.0.9"}})
+		c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "default/tcp-svc", ClusterIP: "10.96.0.9", PrimaryIsTCP: true}})
 		assert.Contains(t, c.DependencySet(), "default/tcp-svc")
 		c.SetCaptureTCPServices(nil)
 		assert.NotContains(t, c.DependencySet(), "default/tcp-svc")

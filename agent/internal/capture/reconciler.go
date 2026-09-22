@@ -35,6 +35,15 @@ type CaptureTCPService struct {
 	// matches on (original-dst recovered via SO_ORIGINAL_DST). Must be a valid
 	// non-None IP address (headless/unallocated Services are skipped).
 	ClusterIP string
+	// PrimaryIsTCP reports whether the service's PRIMARY port is raw TCP, from
+	// the registrar-stamped aether.io/app-protocol annotation.
+	//
+	// It gates the PORTLESS /32 floor chain and nothing else (proposal 037
+	// design (d)). An HTTP-primary service must not have one — a per-IP chain
+	// outranks the HCM's application-protocol match and would swallow the VIP's
+	// HTTP traffic — but it may still serve raw-TCP ports, which get
+	// destination_port-qualified chains that do not.
+	PrimaryIsTCP bool
 }
 
 // AuthoritySink receives the projections from the generated mesh Services:
@@ -111,16 +120,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		if ip != "" && ip != corev1.ClusterIPNone {
 			records[svc] = ip
 		}
-		// Non-HTTP services need a per-ClusterIP TCP-proxy floor chain on the
-		// capture listener. HTTP services are handled by the global HCM chain and
-		// do not need — and must not have — a per-IP chain (filter-chain match
-		// precedence: destination-IP wins over application-protocol, so a per-IP
-		// chain would intercept HTTP to that VIP before the HCM chain could).
-		appProto := s.Annotations[aetherlabels.AnnotationMeshAppProtocol]
-		if !isHTTPAppProtocol(appProto) && ip != "" && ip != corev1.ClusterIPNone {
+		// EVERY mesh Service with a routable VIP is delivered (proposal 037
+		// design (d)), not only the non-HTTP ones, because an HTTP-primary
+		// service can still serve raw-TCP ports and those need chains too.
+		//
+		// PrimaryIsTCP is what the consumer keys the PORTLESS /32 floor chain
+		// on. An HTTP-primary service must NOT get one: filter-chain match
+		// precedence puts destination-IP above application-protocol, so a per-IP
+		// chain would intercept HTTP to that VIP before the HCM chain could.
+		// Its raw-TCP ports get destination_port-qualified chains instead, which
+		// Envoy evaluates ahead of prefix_ranges and which therefore do not
+		// disturb the VIP's HTTP traffic.
+		//
+		// The annotation is still the primary's protocol -- the registrar stamps
+		// it from the primary port -- but it is no longer the gate on delivery.
+		// Which PORTS are raw TCP is derived by the cache from the endpoints it
+		// already holds, one hop closer to the source than this annotation, and
+		// #878 is what happened when the two copies disagreed.
+		if ip != "" && ip != corev1.ClusterIPNone {
+			appProto := s.Annotations[aetherlabels.AnnotationMeshAppProtocol]
 			tcpServices = append(tcpServices, CaptureTCPService{
-				ServiceName: svc,
-				ClusterIP:   ip,
+				ServiceName:  svc,
+				ClusterIP:    ip,
+				PrimaryIsTCP: !isHTTPAppProtocol(appProto),
 			})
 		}
 	}

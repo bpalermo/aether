@@ -349,6 +349,9 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	tcpSvc := proxy.CaptureTCPService{
 		ClusterName: "redis." + meshDomain,
 		ClusterIP:   "10.96.1.10",
+		// TCP-primary: these fixtures exercise the TCP floor, which since
+		// proposal 037 design (d) is emitted only for a TCP-primary service.
+		PrimaryIsTCP: true,
 	}
 	captureListener, err := proxy.GenerateCaptureListener(
 		pod,
@@ -488,6 +491,9 @@ func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		// listener the agent never emits.
 		ClusterName: proxy.TCPClusterName(l4TCPParent, meshDomain),
 		ClusterIP:   L4TCPParentClusterIP,
+		// TCP-primary: these fixtures exercise the TCP floor, which since
+		// proposal 037 design (d) is emitted only for a TCP-primary service.
+		PrimaryIsTCP: true,
 		TCPRouteRules: []proxy.L4ServiceRoute{{
 			Backends: []proxy.L4Backend{
 				{Service: l4TCPBackendA, Cluster: L4TCPBackendClusterA(), Weight: L4TCPWeightA},
@@ -547,6 +553,9 @@ func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 	svc := proxy.CaptureTCPService{
 		ClusterName: proxy.TCPClusterName(l4TLSParent, meshDomain),
 		ClusterIP:   L4TLSParentClusterIP,
+		// TCP-primary: these fixtures exercise the TCP floor, which since
+		// proposal 037 design (d) is emitted only for a TCP-primary service.
+		PrimaryIsTCP: true,
 		// No TCPRouteRules on purpose: the parent keeps its plain passthrough
 		// floor chain, which is the chain a non-matching SNI is DESIGNED to
 		// reach. Adding a TCPRoute here would hide that half of the shape.

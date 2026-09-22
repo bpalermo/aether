@@ -60,7 +60,7 @@ func TestCaptureChainsResolveAgainstCDS(t *testing.T) {
 			return map[string][]*registryv1.ServiceEndpoint{}, nil
 		},
 	}
-	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/multi", ClusterIP: "10.96.0.80"}})
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/multi", ClusterIP: "10.96.0.80", PrimaryIsTCP: true}})
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
 	snap, err := c.GetSnapshot("node-1")
