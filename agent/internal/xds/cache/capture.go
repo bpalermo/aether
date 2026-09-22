@@ -122,6 +122,7 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 			ClusterName:  proxy.TCPClusterName(e.serviceName, c.meshDomain),
 			TCPPorts:     e.tcpPorts,
 			PrimaryIsTCP: e.primaryIsTCP,
+			PrimaryPort:  e.primaryPort,
 			ClusterIP:    e.clusterIP,
 			// L4 route rules (Phase 3b): override the passthrough floor chain when
 			// a TCPRoute or TLSRoute is attached to this service.
@@ -931,7 +932,9 @@ func equalTCPEntries(a, b []captureTCPEntry) bool {
 		// That is the whole of Risk 4's mitigation: regenerating a per-pod
 		// capture listener drains its connections, so this comparison has to be
 		// over the DERIVED set and not over the reload event.
-		if !slices.Equal(prev.tcpPorts, e.tcpPorts) || prev.primaryIsTCP != e.primaryIsTCP {
+		if !slices.Equal(prev.tcpPorts, e.tcpPorts) ||
+			prev.primaryIsTCP != e.primaryIsTCP ||
+			prev.primaryPort != e.primaryPort {
 			return false
 		}
 	}
@@ -1095,11 +1098,12 @@ func nonPrimaryTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
 // every pod ADD/DEL anywhere on the node — so a trigger keyed on "a reload
 // occurred" rather than "the derived set changed" would turn ordinary churn
 // into dropped connections.
-func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string][]uint32) {
+func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string][]uint32, primary map[string]uint32) {
 	c.captureMu.Lock()
 	next := make([]captureTCPEntry, 0, len(c.captureTCPServices))
 	for _, e := range c.captureTCPServices {
 		e.tcpPorts = derived[e.serviceName]
+		e.primaryPort = primary[e.serviceName]
 		next = append(next, e)
 	}
 	changed := !equalTCPEntries(c.captureTCPServices, next)

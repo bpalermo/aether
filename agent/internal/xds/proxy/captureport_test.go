@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -135,4 +136,49 @@ func TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, portless, "a TCP-primary service keeps its portless floor chain")
+}
+
+// TestAnyPortShimIsCountedSeparately is the gate Phase 4 depends on.
+//
+// Phase 4 proposes deleting the portless floor chain — the only step in
+// proposal 037 that changes what an existing client observes — and it is gated
+// on evidence that no client observes it: the shim's own counter reading zero
+// across a full release on talos.
+//
+// That evidence is only obtainable if the shim has a stat prefix of its own. If
+// it shared one with the supported spellings (:18082 and the primary port), the
+// counter could never distinguish "someone relies on the deprecated behaviour"
+// from "someone used a supported spelling", and the removal would be a guess.
+func TestAnyPortShimIsCountedSeparately(t *testing.T) {
+	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
+	svcs := []CaptureTCPService{{
+		ClusterName:  "tcp:echo-tcp.aether-test.aether.internal",
+		ClusterIP:    "10.96.1.50",
+		PrimaryIsTCP: true,
+		PrimaryPort:  9000,
+	}}
+
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
+		15001, "aether.internal", false, svcs, true, nil)
+	require.NoError(t, err)
+
+	prefixes := map[string]uint32{} // stat prefix -> destination_port (0 = portless)
+	for _, fc := range l.GetFilterChains() {
+		for _, f := range fc.GetFilters() {
+			tc := &tcp_proxyv3.TcpProxy{}
+			if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(tc) != nil {
+				continue
+			}
+			prefixes[tc.GetStatPrefix()] = fc.GetFilterChainMatch().GetDestinationPort().GetValue()
+		}
+	}
+
+	shim := "cap_tcp_anyport_tcp:echo-tcp.aether-test.aether.internal"
+	require.Contains(t, prefixes, shim, "the shim must have its own stat prefix, or Phase 4 has no evidence to act on")
+	assert.Zero(t, prefixes[shim], "the shim is PORTLESS: it catches what no destination_port chain claimed")
+
+	// The two spellings that survive Phase 4 are counted apart from it.
+	assert.Equal(t, uint32(18082), prefixes["cap_tcp_tcp:echo-tcp.aether-test.aether.internal_18082"])
+	assert.Equal(t, uint32(9000), prefixes["cap_tcp_tcp:echo-tcp.aether-test.aether.internal_9000"],
+		"the service's own primary port keeps working after the shim is removed")
 }
