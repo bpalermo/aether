@@ -89,6 +89,7 @@ go_test(
         "meshdns_snapshot_test.go",
         "mtls_cache_test.go",
         "multi_protocol_test.go",
+        "nohttpport_test.go",
         "observedstore_test.go",
         "odcds_test.go",
         "outbound_mtls_test.go",

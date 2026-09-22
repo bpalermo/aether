@@ -520,3 +520,33 @@ func NewInboundReadyProbeCluster(name, netns, nodeSpiffeID, validationContextNam
 		},
 	}
 }
+
+// BlackholeClusterName is the static, endpoint-less cluster the scoped-mode TCP
+// blackhole chain forwards to (proposal 037).
+const BlackholeClusterName = "blackhole"
+
+// NewBlackholeCluster builds a STATIC cluster with no endpoints.
+//
+// A connection routed here is closed immediately and counted in
+// cluster.blackhole.upstream_cx_none_healthy — a deliberate, attributable
+// close rather than a fake HTTP response.
+//
+// It exists for scoped capture only. The CNI redirects :18082 unconditionally
+// there (it cannot know which VIPs have TCP ports), and the scoped HCM chain is
+// a catch-all with no match criteria — so raw TCP to :18082 on a service with
+// no TCP port would hit the HCM and get a fabricated `HTTP/1.1 400`, which is
+// the #460 shape: an error that describes the proxy's confusion rather than the
+// caller's mistake.
+func NewBlackholeCluster() *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name:           BlackholeClusterName,
+		ConnectTimeout: durationpb.New(time.Second),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_STATIC,
+		},
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			ClusterName: BlackholeClusterName,
+			// No endpoints, deliberately.
+		},
+	}
+}

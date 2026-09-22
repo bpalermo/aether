@@ -64,6 +64,13 @@ func TestCaptureTCPChainsGatedOnIdentity(t *testing.T) {
 		require.False(t, c.tcpFloorIdentityReady())
 
 		for _, name := range captureChainNames(t, c, "node-1") {
+			// cap_tcp_blackhole is deliberately NOT identity-gated: it carries
+			// no transport socket and terminates connections rather than
+			// forwarding them, so it needs no SVID, and its cluster is emitted
+			// on the same ungated path (proposal 037).
+			if name == "cap_tcp_blackhole" {
+				continue
+			}
 			assert.NotContains(t, name, "cap_tcp_",
 				"a TCP floor chain without its cluster accepts connections and kills them silently (#877)")
 		}
