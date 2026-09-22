@@ -247,6 +247,18 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
 - **mesh_dns** tier (resolves a real FQDN) — DNS + cross-node SLI. Target: `dns_error`,
   `dns_nxdomain`, `dns_timeout` **all zero**. A residual `http_error` (~0.02%) is the
   known cross-node drain path, tracked separately.
+
+  **Report these as "no series emitted", not as "verified zero".** The prober creates a
+  series only on a class's FIRST occurrence, so `sum(aether_probe_requests_total{result=~"dns_.*"})`
+  legitimately returns *no data* on a clean run — which is indistinguishable from the
+  metric having been renamed away. A 2026-09-22 grading pass read that empty result as
+  "the dns_* classes do not exist" and proposed dropping them from the grade. They do
+  exist (`prober/internal/prober/prober.go:59-61`, returned by `classifyErr`), and
+  dropping them would have retired the signal #726 was fixed to restore: the comment
+  above `classifyErr` records **three separate investigations** that read "dns_* is zero"
+  as "DNS is healthy" when it only ever meant "DNS never failed FAST". Confirm the
+  classes are still reachable in the source when they read empty; do not infer their
+  absence from an empty query.
 - **#682 episodes during the no-roll window or SHRINK are the harness working, not a
   regression** — attribute via the agent log line
   `expired observed upstreams from node dependency set`.
