@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -781,5 +782,55 @@ func applyURLRewrite(ra *routev3.RouteAction, rw *GammaURLRewrite, matchPrefix s
 			Pattern:      &matcherv3.RegexMatcher{Regex: ".*"},
 			Substitution: rw.PathValue,
 		}
+	}
+}
+
+// NoHTTPPortErrorHeader is the response header naming why a mesh HTTP request
+// was refused: the authority resolves to a service that serves no HTTP port.
+const NoHTTPPortErrorHeader = "x-aether-error"
+
+// BuildNoHTTPPortVirtualHost returns a cap_http virtual host whose every route
+// answers 421 Misdirected Request, for a service in scope that serves NO HTTP
+// port (proposal 037).
+//
+// Without it the request gets a 503 with cluster_not_found in
+// %RESPONSE_CODE_DETAILS%: deterministic, but indistinguishable from a cluster
+// that vanished mid-reload, and it never reaches ODCDS so the coordinator's
+// expected 404 does not occur either. The caller asked for HTTP on a service
+// that serves none, and nothing said so.
+//
+// 421 is the status whose definition is "the server is not able to produce a
+// response for the combination of scheme and authority" — precisely this case.
+// It is also a status no application behind the mesh produces, so it cannot be
+// confused with an app's own 404 or 503. And it is immediate: no 2s ODCDS wait
+// for a lookup that was never going to succeed.
+//
+// Exact-domain vhosts outrank the wildcard catch-all, so this cannot be
+// shadowed by the ODCDS vhost (route.go's "spike-verified" note on
+// exact-domain precedence covers exactly this).
+func BuildNoHTTPPortVirtualHost(name string, domains []string, tcpSpellings string) *routev3.VirtualHost {
+	body := fmt.Sprintf(
+		"aether: %s serves no HTTP port. Reach it over TCP instead: %s\n",
+		name, tcpSpellings)
+	return &routev3.VirtualHost{
+		Name:    name,
+		Domains: domains,
+		Routes: []*routev3.Route{{
+			Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+			Action: &routev3.Route_DirectResponse{
+				DirectResponse: &routev3.DirectResponseAction{
+					Status: 421,
+					Body: &corev3.DataSource{
+						Specifier: &corev3.DataSource_InlineString{InlineString: body},
+					},
+				},
+			},
+			ResponseHeadersToAdd: []*corev3.HeaderValueOption{{
+				Header: &corev3.HeaderValue{
+					Key:   NoHTTPPortErrorHeader,
+					Value: "no-http-port",
+				},
+			}},
+		}},
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/config"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -148,6 +149,13 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 				chains = append(chains, tc)
 			}
 		}
+	}
+	// Scoped mode only: catch raw TCP to the TCP mesh port that no service
+	// chain claimed, before the HCM catch-all fabricates an HTTP 400 for it
+	// (proposal 037; the #460 shape). Redirect-all has the passthrough ->
+	// kube-proxy REJECT path instead, which is already attributable.
+	if !withPassthrough {
+		chains = append(chains, BuildCaptureTCPBlackholeFilterChain(sourceSpiffeID))
 	}
 	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, withPassthrough, extensionFilters))
 
@@ -417,5 +425,31 @@ func BuildCaptureRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain st
 	return &routev3.RouteConfiguration{
 		Name:         CaptureHTTPRouteName,
 		VirtualHosts: all,
+	}
+}
+
+// BuildCaptureTCPBlackholeFilterChain returns the scoped-mode chain that
+// catches raw TCP to the TCP mesh port on a VIP that claims no TCP port
+// (proposal 037).
+//
+// It matches destination_port alone — no prefix_ranges — which makes it LESS
+// specific than every "/32 + destination_port" service chain, so Envoy picks it
+// only for what none of those claimed. Order in the chain list is irrelevant;
+// Envoy selects by specificity.
+//
+// Emitted in scoped capture only. In redirect-all mode the passthrough chain
+// forwards to the original destination, the generated mesh Service has no
+// backing endpoint for that port, and kube-proxy REJECTs — already deterministic
+// and already attributable, so a blackhole there would only hide it.
+func BuildCaptureTCPBlackholeFilterChain(sourceSpiffeID string) *listenerv3.FilterChain {
+	return &listenerv3.FilterChain{
+		Name: "cap_tcp_blackhole",
+		FilterChainMatch: &listenerv3.FilterChainMatch{
+			DestinationPort: wrapperspb.UInt32(meshconst.ProxyTCPOutboundPort),
+		},
+		Filters: append(
+			BuildSourceFilterStates(sourceSpiffeID),
+			buildTCPProxyNetworkFilter("cap_tcp_blackhole", BlackholeClusterName),
+		),
 	}
 }

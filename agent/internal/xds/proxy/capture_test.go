@@ -44,10 +44,22 @@ func TestGenerateCaptureListener(t *testing.T) {
 	assert.Equal(t, listenerFilterHTTPInspectorName, l.GetListenerFilters()[1].GetName())
 	assert.Equal(t, listenerFilterTLSInspectorName, l.GetListenerFilters()[2].GetName())
 
-	// no TCP services → single HCM filter chain; no DefaultFilterChain (withPassthrough=false).
-	require.Len(t, l.GetFilterChains(), 1)
+	// no TCP services → HCM filter chain; no DefaultFilterChain (withPassthrough=false).
+	// +1 for cap_tcp_blackhole: scoped mode catches raw TCP to the TCP mesh
+	// port that no service chain claimed, before the HCM fabricates a 400 for
+	// it (proposal 037).
+	require.Len(t, l.GetFilterChains(), 2)
 	assert.Nil(t, l.GetDefaultFilterChain(), "no DefaultFilterChain when withPassthrough=false")
-	filters := l.GetFilterChains()[0].GetFilters()
+	// Find the HCM chain by NAME rather than by index: the chain list now also
+	// carries cap_tcp_blackhole, and an index-based lookup silently asserts on
+	// whichever chain happens to be first.
+	var filters []*listenerv3.Filter
+	for _, fc := range l.GetFilterChains() {
+		if fc.GetName() != "cap_tcp_blackhole" {
+			filters = fc.GetFilters()
+		}
+	}
+	require.NotEmpty(t, filters, "the HCM catch-all chain must be present")
 	hcmFilter := filters[len(filters)-1]
 	var hcm http_connection_managerv3.HttpConnectionManager
 	require.NoError(t, hcmFilter.GetTypedConfig().UnmarshalTo(&hcm))
@@ -70,8 +82,11 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
 	require.NoError(t, err)
 
-	// 2 TCP floor chains + 1 HCM catch-all.
-	require.Len(t, l.GetFilterChains(), 3, "one chain per TCP service plus the HCM catch-all")
+	// 2 TCP floor chains + 1 HCM catch-all + the scoped-mode blackhole.
+	// +1 for cap_tcp_blackhole: scoped mode catches raw TCP to the TCP mesh
+	// port that no service chain claimed, before the HCM fabricates a 400 for
+	// it (proposal 037).
+	require.Len(t, l.GetFilterChains(), 4, "one chain per TCP service, the HCM catch-all, and the blackhole")
 
 	// Collect chains by match type.
 	var tcpChains []*listenerv3.FilterChain
@@ -116,8 +131,11 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
 	require.NoError(t, err)
 
-	// Only the valid service should produce a chain; 1 TCP + 1 HCM.
-	require.Len(t, l.GetFilterChains(), 2)
+	// Only the valid service should produce a chain; 1 TCP + 1 HCM + blackhole.
+	// +1 for cap_tcp_blackhole: scoped mode catches raw TCP to the TCP mesh
+	// port that no service chain claimed, before the HCM fabricates a 400 for
+	// it (proposal 037).
+	require.Len(t, l.GetFilterChains(), 3)
 }
 
 // TestGenerateCaptureListener_WithPassthrough verifies that withPassthrough=true adds

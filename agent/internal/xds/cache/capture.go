@@ -340,11 +340,22 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 	nodeSpiffeID := c.nodeSpiffeID
 	c.localMu.RUnlock()
 
+	// The blackhole cluster backs the scoped-mode cap_tcp_blackhole chain, and
+	// is emitted BEFORE the identity gate below: it carries no transport
+	// socket and terminates connections rather than forwarding them, so it
+	// needs no SVID. Its chain is likewise ungated, so gating the cluster would
+	// leave that chain naming something absent — the Risk 1 shape.
+	var blackhole []types.Resource
+	if !c.captureRedirectAll {
+		blackhole = append(blackhole, proxy.NewBlackholeCluster())
+	}
+
 	validationContextName := c.validationContextName()
 	if nodeSpiffeID == "" || validationContextName == "" {
-		// Node SVID or trust domain not yet available; skip TCP clusters until
-		// both are (an empty trust domain renders `spiffe://`, #815).
-		return nil
+		// Node SVID or trust domain not yet available; skip the per-service TCP
+		// clusters until both are (an empty trust domain renders `spiffe://`,
+		// #815). The blackhole still goes out — see above.
+		return blackhole
 	}
 
 	// SAN namespaces come from the service's TCP floor entry, which since
@@ -354,7 +365,8 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 	// whose pods split across protocols the two entries have DIFFERENT endpoints,
 	// and the floor must pin the namespaces of the pods it actually reaches.
 	c.clusterMu.RLock()
-	resources := make([]types.Resource, 0, len(entries))
+	resources := make([]types.Resource, 0, len(entries)+len(blackhole))
+	resources = append(resources, blackhole...)
 	for _, e := range entries {
 		tcpEntry, ok := c.tcpEntryLocked(e.serviceName)
 		if !ok {
@@ -559,6 +571,18 @@ func (c *SnapshotCache) appendSABackedCaptureVhosts(vhosts []*routev3.VirtualHos
 		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
 		rules := gammaRoutes[svc]
 		domains := c.captureVhostDomains(svc, fqdn, mesh, rules, routeDomains)
+
+		// A service in scope that serves NO HTTP port gets a 421 vhost instead
+		// of the ordinary one (proposal 037). Emitting the ordinary vhost would
+		// point at an h2 cluster the cache never builds for such a service, and
+		// the caller would get a 503 with cluster_not_found —
+		// indistinguishable from a cluster that vanished mid-reload, and never
+		// reaching ODCDS so even the coordinator's 404 does not occur.
+		if spellings := c.tcpSpellingsIfNoHTTPPortLocked(svc); spellings != "" {
+			vhosts = append(vhosts, proxy.BuildNoHTTPPortVirtualHost(mesh, domains, spellings))
+			continue
+		}
+
 		vh := proxy.BuildOutboundServiceVirtualHost(mesh, domains, rules)
 		applyChainFilter(vh, chainFilters, svc)
 		vhosts = append(vhosts, vh)
@@ -1225,4 +1249,35 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 		out = append(out, pc)
 	}
 	return out
+}
+
+// tcpSpellingsIfNoHTTPPortLocked returns the TCP spellings a caller should use
+// for a service that serves NO HTTP port, or "" when the service has one (and
+// therefore gets an ordinary vhost). Caller must hold clusterMu or be on a path
+// that does.
+//
+// "No HTTP port" is read from the CACHE, not from the app-protocol annotation:
+// a service has an HTTP port exactly when the HTTP pass built it a default
+// entry under the bare service key. That is the same fact the vhost would point
+// at, so the two cannot disagree — which is the failure #878 was.
+//
+// Returns "" for a service the cache knows nothing about yet, so a service
+// mid-warm gets the ordinary cold path rather than a 421 it would have to
+// retry past.
+func (c *SnapshotCache) tcpSpellingsIfNoHTTPPortLocked(svc string) string {
+	c.clusterMu.RLock()
+	_, hasHTTP := c.clusters[svc]
+	tcpEntry, hasTCP := c.clusters[proxy.TCPClusterName(svc, c.meshDomain)]
+	c.clusterMu.RUnlock()
+
+	if hasHTTP || !hasTCP {
+		return ""
+	}
+
+	fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
+	spellings := fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyTCPOutboundPort)
+	if p := primaryPortOf(tcpEntry); p != 0 {
+		spellings += fmt.Sprintf(" or %s:%d", fqdn, p)
+	}
+	return spellings
 }
