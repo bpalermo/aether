@@ -49,6 +49,8 @@ type captureTCPEntry struct {
 	// so two derivations of the same set compare equal and endpoint churn does
 	// not look like a change -- see equalTCPEntries and Risk 4.
 	tcpPorts []uint32
+	// primaryIsTCP gates the portless /32 floor chain (proposal 037 design (d)).
+	primaryIsTCP bool
 }
 
 // SnapshotCache wraps go-control-plane's SnapshotCache and manages Envoy

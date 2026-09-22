@@ -61,7 +61,7 @@ func TestLoadClustersFromRegistry_ServiceUnderBothProtocols(t *testing.T) {
 			}, nil
 		},
 	}
-	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/mixed", ClusterIP: "10.96.0.60"}})
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/mixed", ClusterIP: "10.96.0.60", PrimaryIsTCP: true}})
 
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
@@ -150,7 +150,7 @@ func TestLoadClustersFromRegistry_TCPOnlyServiceOwnsBareCLA(t *testing.T) {
 			return map[string][]*registryv1.ServiceEndpoint{}, nil
 		},
 	}
-	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/tcponly", ClusterIP: "10.96.0.70"}})
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/tcponly", ClusterIP: "10.96.0.70", PrimaryIsTCP: true}})
 
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 

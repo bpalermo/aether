@@ -119,9 +119,10 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 			// TCP clusters are separate from HTTP clusters: they share the same EDS
 			// resource (same endpoint set) but use no ALPN on the transport socket so
 			// the destination inbound demuxes to the TCP floor DEFAULT chain.
-			ClusterName: proxy.TCPClusterName(e.serviceName, c.meshDomain),
-			TCPPorts:    e.tcpPorts,
-			ClusterIP:   e.clusterIP,
+			ClusterName:  proxy.TCPClusterName(e.serviceName, c.meshDomain),
+			TCPPorts:     e.tcpPorts,
+			PrimaryIsTCP: e.primaryIsTCP,
+			ClusterIP:    e.clusterIP,
 			// L4 route rules (Phase 3b): override the passthrough floor chain when
 			// a TCPRoute or TLSRoute is attached to this service.
 			TCPRouteRules: tcpRoutes[e.serviceName],
@@ -252,8 +253,9 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	for _, s := range services {
 		if s.ServiceName != "" && s.ClusterIP != "" {
 			entries = append(entries, captureTCPEntry{
-				serviceName: s.ServiceName,
-				clusterIP:   s.ClusterIP,
+				serviceName:  s.ServiceName,
+				clusterIP:    s.ClusterIP,
+				primaryIsTCP: s.PrimaryIsTCP,
 			})
 		}
 	}
@@ -905,7 +907,7 @@ func equalTCPEntries(a, b []captureTCPEntry) bool {
 		// That is the whole of Risk 4's mitigation: regenerating a per-pod
 		// capture listener drains its connections, so this comparison has to be
 		// over the DERIVED set and not over the reload event.
-		if !slices.Equal(prev.tcpPorts, e.tcpPorts) {
+		if !slices.Equal(prev.tcpPorts, e.tcpPorts) || prev.primaryIsTCP != e.primaryIsTCP {
 			return false
 		}
 	}

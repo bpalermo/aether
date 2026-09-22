@@ -53,7 +53,7 @@ func TestCaptureTCPChainsGatedOnIdentity(t *testing.T) {
 		}
 		require.NoError(t, c.AddPod(context.Background(), pod, "aether.internal"))
 		c.SetCaptureTCPServices([]capture.CaptureTCPService{
-			{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.0.50"},
+			{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.0.50", PrimaryIsTCP: true},
 		})
 		return c, pod
 	}

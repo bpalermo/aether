@@ -3,6 +3,8 @@ package proxy
 import (
 	"testing"
 
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,7 +21,7 @@ import (
 func TestBuildCaptureTCPPortFilterChain(t *testing.T) {
 	svc := CaptureTCPService{
 		ClusterName: "tcp:mixed.aether-test.aether.internal",
-		ClusterIP:   "10.96.0.60",
+		ClusterIP:   "10.96.0.60", PrimaryIsTCP: true,
 	}
 
 	fc := buildCaptureTCPPortFilterChain(svc, 9000, "spiffe://example.org/ns/default/sa/client")
@@ -43,7 +45,7 @@ func TestBuildCaptureTCPPortFilterChain(t *testing.T) {
 }
 
 func TestBuildCaptureTCPPortFilterChain_Rejects(t *testing.T) {
-	good := CaptureTCPService{ClusterName: "tcp:svc.ns.aether.internal", ClusterIP: "10.96.0.60"}
+	good := CaptureTCPService{ClusterName: "tcp:svc.ns.aether.internal", ClusterIP: "10.96.0.60", PrimaryIsTCP: true}
 	tests := []struct {
 		name string
 		svc  CaptureTCPService
@@ -51,7 +53,7 @@ func TestBuildCaptureTCPPortFilterChain_Rejects(t *testing.T) {
 	}{
 		{name: "no ClusterIP", svc: CaptureTCPService{ClusterName: good.ClusterName}, port: 9000},
 		{name: "no ClusterName", svc: CaptureTCPService{ClusterIP: good.ClusterIP}, port: 9000},
-		{name: "unparseable ClusterIP", svc: CaptureTCPService{ClusterName: good.ClusterName, ClusterIP: "not-an-ip"}, port: 9000},
+		{name: "unparseable ClusterIP", svc: CaptureTCPService{ClusterName: good.ClusterName, ClusterIP: "not-an-ip", PrimaryIsTCP: true}, port: 9000},
 		{name: "port zero", svc: good, port: 0},
 		{name: "port out of range", svc: good, port: 70000},
 	}
@@ -61,4 +63,76 @@ func TestBuildCaptureTCPPortFilterChain_Rejects(t *testing.T) {
 				"a malformed input must yield no chain rather than a chain that matches nothing")
 		})
 	}
+}
+
+// TestGenerateCaptureListener_HTTPPrimaryGetsNoPortlessChain is proposal 037
+// design (d).
+//
+// Every mesh Service with a VIP is now delivered to the capture listener, not
+// only the non-HTTP ones — an HTTP-primary service can still serve raw-TCP
+// ports, and those need chains. But it must NOT get the PORTLESS /32 floor
+// chain: filter-chain match precedence puts destination-IP above
+// application-protocol, so that chain would intercept every HTTP request to the
+// VIP before the HCM catch-all could see it.
+//
+// Its TCP ports get destination_port-qualified chains instead, which Envoy
+// evaluates ahead of prefix_ranges and which therefore leave HTTP alone. That
+// distinction is the whole reason a service can now be both protocols.
+func TestGenerateCaptureListener_HTTPPrimaryGetsNoPortlessChain(t *testing.T) {
+	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
+
+	svcs := []CaptureTCPService{{
+		ClusterName:  "tcp:mixed.aether-test.aether.internal",
+		ClusterIP:    "10.96.1.30",
+		TCPPorts:     []uint32{9000},
+		PrimaryIsTCP: false, // HTTP primary
+	}}
+
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
+		15001, "aether.internal", false, svcs, true, nil)
+	require.NoError(t, err)
+
+	var portless, perPort int
+	for _, fc := range l.GetFilterChains() {
+		m := fc.GetFilterChainMatch()
+		if len(m.GetPrefixRanges()) == 0 {
+			continue // the HCM catch-all
+		}
+		if m.GetDestinationPort() == nil {
+			portless++
+			continue
+		}
+		perPort++
+	}
+
+	assert.Zero(t, portless,
+		"an HTTP-primary service must get NO portless /32 chain — it would swallow the VIP's HTTP traffic")
+	assert.Equal(t, 1, perPort,
+		"but its raw-TCP port must still get a destination_port-qualified chain")
+}
+
+// TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain: the other side of
+// the same gate. A TCP-primary service keeps the portless floor, which is what
+// makes any port to its VIP reach the floor — today's behaviour, unchanged.
+func TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain(t *testing.T) {
+	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
+
+	svcs := []CaptureTCPService{{
+		ClusterName:  "tcp:echo-tcp.aether-test.aether.internal",
+		ClusterIP:    "10.96.1.40",
+		PrimaryIsTCP: true,
+	}}
+
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
+		15001, "aether.internal", false, svcs, true, nil)
+	require.NoError(t, err)
+
+	var portless int
+	for _, fc := range l.GetFilterChains() {
+		m := fc.GetFilterChainMatch()
+		if len(m.GetPrefixRanges()) > 0 && m.GetDestinationPort() == nil {
+			portless++
+		}
+	}
+	assert.Equal(t, 1, portless, "a TCP-primary service keeps its portless floor chain")
 }

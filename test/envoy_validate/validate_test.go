@@ -525,6 +525,9 @@ func TestCaptureTCPRouteDrainCollapsesToSingleCluster(t *testing.T) {
 	svc := proxy.CaptureTCPService{
 		ClusterName: "tcp:l4-front.default.mesh.local",
 		ClusterIP:   L4TCPParentClusterIP,
+		// TCP-primary: these fixtures exercise the TCP floor, which since
+		// proposal 037 design (d) is emitted only for a TCP-primary service.
+		PrimaryIsTCP: true,
 	}
 	rules := []proxy.L4ServiceRoute{{
 		Backends: []proxy.L4Backend{
