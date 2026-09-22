@@ -38,7 +38,11 @@ type Backend struct {
 
 // ClusterNameFunc resolves a backend's namespace-qualified "<ns>/<svc>" serviceref
 // key into the data-plane cluster name the proxy should route to.
-type ClusterNameFunc func(serviceKey string) string
+//
+// port is the backendRef's port, or 0 when the ref names none. A namer must
+// treat 0 as "the service's default cluster"; every route written before
+// proposal 037 Phase 3 is in that case.
+type ClusterNameFunc func(serviceKey string, port uint32) string
 
 // Backends converts a backendRef slice into the data-plane backend list.
 //
@@ -50,9 +54,15 @@ type ClusterNameFunc func(serviceKey string) string
 //     (RefNotPermitted: dropped from the data plane, mirroring the route's
 //     ResolvedRefs status, which the reconcilers compute separately).
 //
-// Backends are NOT port-qualified: L4 routes reach a service's TCP/UDP cluster,
-// whose EDS endpoints already carry the port (unlike the L7 path, where
-// backendRef.port selects a per-port cluster).
+// Backends ARE port-qualified since proposal 037 Phase 3: a backendRef.port is
+// passed to the ClusterNameFunc, which resolves it to that port's cluster. A
+// ref with no port yields 0 and the namer returns the service's default
+// cluster, which is the pre-037 behaviour and what every existing route gets.
+//
+// This was previously impossible: the TCP floor addressed one port per service,
+// so a port on an L4 backendRef had nothing to select. Now that a service can
+// carry several raw-TCP ports, ignoring the port would silently send a route
+// for :5432 to whatever the floor forwards to.
 //
 // routeNamespace is the referring route's namespace and routeKind its kind
 // (TCPRoute/TLSRoute/UDPRoute), both needed for the ReferenceGrant "from" match.
@@ -86,9 +96,13 @@ func Backends(
 		// route's). A split to a different backend service therefore resolves the
 		// right registry cluster.
 		key := backendServiceKey(b.Namespace, routeNamespace, name)
+		var port uint32
+		if b.Port != nil {
+			port = uint32(*b.Port)
+		}
 		backends = append(backends, Backend{
 			Service: key,
-			Cluster: clusterName(key),
+			Cluster: clusterName(key, port),
 			Weight:  weight,
 		})
 	}

@@ -945,8 +945,18 @@ func (r *Reconciler) resolveDialPort(ctx context.Context, namespace, service str
 // are the namespace-qualified "<ns>/<svc>" serviceref key (020 Part 1): the
 // backendRef's own namespace when set, else the route's namespace.
 func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
-	return l4project.Backends(refs, routeNamespace, routeKind, grants, func(key string) string {
-		return proxy.TCPClusterName(key, r.MeshDomain)
+	return l4project.Backends(refs, routeNamespace, routeKind, grants, func(key string, port uint32) string {
+		// Port-qualified since proposal 037 Phase 3: a backendRef naming a
+		// specific raw-TCP port resolves to that port's own cluster. A ref with
+		// no port yields 0 and the service's default floor cluster -- what every
+		// route written before Phase 3 gets.
+		//
+		// The cache publishes tcp:<fqdn>:<port> for EVERY TCP port including the
+		// primary (an alias sharing the floor's EDS), so a port-qualified name
+		// always resolves; naming a port the service does not serve as TCP is
+		// what does not, and that is caught by the chain-to-CDS gate rather than
+		// silently routed somewhere else.
+		return proxy.TCPPortClusterName(proxy.TCPClusterName(key, r.MeshDomain), port)
 	})
 }
 

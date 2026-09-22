@@ -621,6 +621,27 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 	localRegion, localZone string,
 	waypoint proxy.WaypointRewrite,
 ) {
+	// The PRIMARY port gets an alias entry: same cluster name shape
+	// (tcp:<fqdn>:<port>) so that a port-qualified reference resolves for EVERY
+	// TCP port, not only the non-primary ones (proposal 037 Phase 3).
+	//
+	// Without it, a TCPRoute whose backendRef.port names the primary would
+	// resolve to a cluster that does not exist, and tcp_proxy would kill those
+	// connections silently — the same Risk 1 shape as a chain without a cluster.
+	//
+	// It carries NO load assignment of its own: it shares the floor's bare-name
+	// EDS, exactly as the HTTP :<port> aliases share their default cluster's
+	// (buildPortAliasesLocked). And its sni stays EMPTY, because it addresses
+	// the primary port — the destination's default inbound floor chain is what
+	// serves it, and a non-empty SNI would route it to a per-port chain that
+	// does not exist (#306).
+	c.clusters[proxy.TCPPortClusterName(tcpName, defaultPort)] = clusterEntry{
+		sanNamespaces: sanNamespaces,
+		service:       serviceName,
+		sni:           "",
+		tcp:           true,
+	}
+
 	for _, port := range nonPrimaryTCPPorts(endpoints) {
 		if port == defaultPort {
 			continue

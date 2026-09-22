@@ -375,31 +375,8 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		proxy.InjectUpstreamTCPMTLS(cl, nodeSpiffeID, validationContextName, sanURIs, "")
 		resources = append(resources, cl)
 
-		// One cluster per NON-PRIMARY TCP port, matching the
-		// destination_port-qualified capture chains (proposal 037). Built from
-		// the same derived port set as those chains, in the same snapshot
-		// generation: a chain naming a cluster that is not in the snapshot is
-		// killed silently, because tcp_proxy has no ODCDS cold path (Risk 1).
-		for _, port := range e.tcpPorts {
-			portEntry, ok := c.clusters[proxy.TCPPortClusterName(tcpName, port)]
-			if !ok || portEntry.loadAssignment == nil {
-				continue
-			}
-			pc := proxy.NewTCPServiceCluster(
-				proxy.TCPPortClusterName(tcpName, port),
-				portEntry.loadAssignment.GetClusterName(),
-				e.serviceName,
-			)
-			// SNI IS set here, unlike the floor above. The floor must carry none
-			// (#306) so it lands on the destination's DEFAULT inbound chain,
-			// which forwards to the pod's primary port. A non-primary port has
-			// no such default to fall back on: the SNI is how the destination
-			// demuxes to the right loopback port, and it is safe precisely
-			// because only a post-037 agent advertises such a port — the same
-			// agent that builds the matching inbound chain.
-			proxy.InjectUpstreamTCPMTLS(pc, nodeSpiffeID, validationContextName, portEntry.sanURIs, strconv.Itoa(int(port)))
-			resources = append(resources, pc)
-		}
+		resources = append(resources, c.tcpPortClustersLocked(
+			e, tcpEntry, tcpName, sanURIs, nodeSpiffeID, validationContextName)...)
 	}
 	c.clusterMu.RUnlock()
 
@@ -1178,4 +1155,72 @@ func (c *SnapshotCache) reconcileCaptureTCPChains() {
 	c.listenerMu.Lock()
 	c.rebuildPodListenersLocked("TCP floor identity change", shared)
 	c.listenerMu.Unlock()
+}
+
+// primaryPortOf returns the primary application port a TCP floor entry
+// addresses, from its sni field (which buildTCPClustersLocked sets to the
+// service's default port). Zero when unset or unparseable, which callers treat
+// as "no alias".
+func primaryPortOf(entry clusterEntry) uint32 {
+	if entry.sni == "" {
+		return 0
+	}
+	p, err := strconv.Atoi(entry.sni)
+	if err != nil || p <= 0 || p > 65535 {
+		return 0
+	}
+	return uint32(p)
+}
+
+// tcpPortClustersLocked returns a TCP service's port-qualified clusters:
+// tcp:<fqdn>:<port> for every port it serves as raw TCP (proposal 037).
+// Caller must hold clusterMu.
+//
+// Two shapes, and the difference is the SNI:
+//
+//   - The PRIMARY port is an alias. Same EDS as the floor and NO SNI, because
+//     the destination's default inbound chain is what serves it and a non-empty
+//     SNI would route it to a per-port chain that does not exist (#306). It
+//     exists so a port-qualified reference resolves for every TCP port and not
+//     only the non-primary ones — without it a TCPRoute naming the primary port
+//     would point at a cluster that is not there.
+//   - Every NON-PRIMARY port carries its own load assignment and DOES set SNI,
+//     which is how the destination demuxes to the right loopback port. Safe
+//     because only a post-037 agent advertises such a port, and that is the
+//     same agent that builds the matching inbound chain.
+//
+// Built from the same derived port set as the capture chains, in the same
+// snapshot generation: a chain naming a cluster that is not in the snapshot is
+// killed silently, because tcp_proxy has no ODCDS cold path (Risk 1).
+func (c *SnapshotCache) tcpPortClustersLocked(
+	e captureTCPEntry,
+	tcpEntry clusterEntry,
+	tcpName string,
+	sanURIs []string,
+	nodeSpiffeID, validationContextName string,
+) []types.Resource {
+	var out []types.Resource
+
+	if aliasName := proxy.TCPPortClusterName(tcpName, primaryPortOf(tcpEntry)); aliasName != "" {
+		if _, ok := c.clusters[aliasName]; ok {
+			ac := proxy.NewTCPServiceCluster(aliasName, e.serviceName, e.serviceName)
+			proxy.InjectUpstreamTCPMTLS(ac, nodeSpiffeID, validationContextName, sanURIs, "")
+			out = append(out, ac)
+		}
+	}
+
+	for _, port := range e.tcpPorts {
+		portEntry, ok := c.clusters[proxy.TCPPortClusterName(tcpName, port)]
+		if !ok || portEntry.loadAssignment == nil {
+			continue
+		}
+		pc := proxy.NewTCPServiceCluster(
+			proxy.TCPPortClusterName(tcpName, port),
+			portEntry.loadAssignment.GetClusterName(),
+			e.serviceName,
+		)
+		proxy.InjectUpstreamTCPMTLS(pc, nodeSpiffeID, validationContextName, portEntry.sanURIs, strconv.Itoa(int(port)))
+		out = append(out, pc)
+	}
+	return out
 }
