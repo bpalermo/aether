@@ -173,7 +173,7 @@ func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 			// The counter is the staleness alarm.
 			b.metrics.eventDropped(context.Background(), event.GetType().String())
 			b.log.Info("event overflowed slow watcher; forcing resync",
-				"id", id, "eventType", event.GetType())
+				"id", id, "eventType", event.GetType().String())
 			dropped = append(dropped, droppedWatcher{id: id, w: w})
 		}
 	}

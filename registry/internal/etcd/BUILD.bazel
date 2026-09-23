@@ -18,7 +18,10 @@ go_library(
 go_test(
     name = "etcd_test",
     size = "medium",
-    srcs = ["etcd_test.go"],
+    srcs = [
+        "etcd_test.go",
+        "logattr_test.go",
+    ],
     tags = [
         "integration",
         "no-remote-exec",  # testcontainers needs local Docker, not a remote executor
@@ -29,5 +32,8 @@ go_test(
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@com_github_testcontainers_testcontainers_go_modules_etcd//:etcd",
+        "@io_opentelemetry_go_contrib_bridges_otelslog//:otelslog",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_sdk_log//:log",
     ],
 )

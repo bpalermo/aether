@@ -303,7 +303,7 @@ func streamEvents(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsRe
 
 // ListAllEndpoints returns all endpoints from the local snapshot.
 func (s *RegistrarServer) ListAllEndpoints(ctx context.Context, req *registrarv1.ListAllEndpointsRequest) (*registrarv1.ListAllEndpointsResponse, error) {
-	s.log.DebugContext(ctx, "ListAllEndpoints", "protocol", req.GetProtocol())
+	s.log.DebugContext(ctx, "ListAllEndpoints", "protocol", req.GetProtocol().String())
 
 	// Never serve a snapshot before the first sync has populated it (agents
 	// fall back to this RPC at startup when their watch cache is empty).

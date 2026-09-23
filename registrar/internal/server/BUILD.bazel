@@ -33,6 +33,7 @@ go_test(
     name = "server_test",
     srcs = [
         "broadcaster_test.go",
+        "logattr_test.go",
         "metrics_test.go",
         "server_test.go",
         "snapshot_test.go",
@@ -47,6 +48,9 @@ go_test(
         "//registry",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_opentelemetry_go_contrib_bridges_otelslog//:otelslog",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_sdk_log//:log",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
         "@org_golang_google_grpc//:grpc",
