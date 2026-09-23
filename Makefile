@@ -133,6 +133,20 @@ check-build-id:
 	@bazel build //tools/buildid:release_build_ids
 	@cat bazel-bin/tools/buildid/release_build_ids.txt
 
+# Did a commit on main actually publish? Read-only registry query — no
+# credentials needed for our public packages, and it cannot push anything.
+#
+#   make check-published                  # the last day of main
+#   make check-published COMMIT=<sha>     # one commit (any commit-ish; git
+#                                         # expands it to the full 40 chars)
+#
+# Answers the question `gh run list` cannot: a superseded publish run ends
+# `cancelled`, not `failure`, so "the workflow was fine" and "nothing was
+# pushed for this commit" look identical from GitHub's side (#880).
+.PHONY: check-published
+check-published:
+	@scripts/verify-published-artifacts.sh $(if $(COMMIT),$(COMMIT),--recent)
+
 # NOTE: there is deliberately no `publish` target. Releases are published by
 # .github/workflows/publish.yaml, which is serialised (#692) and pushes the
 # charts that actually exist. The old target named //charts/agent and
