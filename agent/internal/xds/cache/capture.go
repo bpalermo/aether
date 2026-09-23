@@ -30,15 +30,22 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 	if !c.captureEnabled {
 		return nil, nil
 	}
-	udpRoutes := c.udpServiceRoutesSnapshot()
+	// Offer the generator only the backends whose udp: cluster THIS snapshot
+	// generation publishes (#873, the same hazard as proposal 037 Risk 1 and
+	// #877). udp_proxy has no ODCDS cold path: a listener naming a cluster the
+	// snapshot does not carry accepts datagrams and drops them, with no NACK,
+	// no log and no stat to distinguish it from a backend that is down.
+	// captureUDPClusters SKIPS a backend service the cluster cache does not
+	// hold, so without this the generator could bind exactly that name.
+	udpRoutes, unroutable := c.routableUDPRoutes(c.udpServiceRoutesSnapshot())
 
-	// Say out loud what the UDP path is about to throw away (#873). The listener
-	// carries ONE cluster, so extra backends, a second UDPRoute-backed service
-	// and a weight-0 drain are all silently dropped -- with no NACK and no stat,
-	// the first symptom would be datagrams arriving somewhere unintended. This
-	// does not change what is generated; it makes the gap discoverable without
-	// reading the generator.
-	if reasons := proxy.UnsupportedUDPRouteShapes(udpRoutes); len(reasons) > 0 {
+	// Say out loud what the UDP path throws away (#873). The listener carries
+	// ONE cluster, so a traffic split and a second UDPRoute-backed service are
+	// both discarded -- with no NACK and no stat, the first symptom would be
+	// datagrams arriving somewhere unintended. This does not change what is
+	// generated; it makes the gap discoverable without reading the generator.
+	reasons := append(unroutable, proxy.UnsupportedUDPRouteShapes(udpRoutes)...)
+	if len(reasons) > 0 {
 		c.metrics.UDPRouteUnsupported(context.Background(), int64(len(reasons)))
 		for _, reason := range reasons {
 			c.log.Warn("UDPRoute input discarded: the per-pod UDP capture listener cannot represent it",
@@ -476,6 +483,105 @@ func (c *SnapshotCache) collectEdgeTCPServices() []string {
 	return services
 }
 
+// reconcileUDPCaptureListeners rebuilds the per-pod UDP capture listeners when
+// the cluster they can bind has changed (#873).
+//
+// Which backend is bindable is a function of the CLUSTER cache, not only of the
+// UDPRoute: routableUDPRoutes refuses to name a cluster this snapshot does not
+// publish, because udp_proxy has no on-demand cluster path and would accept the
+// datagrams and drop them. The cluster cache is filled asynchronously by the
+// registry, so a UDPRoute that lands before its backend registers produces no
+// listener, and SetUDPServiceRoutes — the only other trigger — will not fire
+// again. Running here, on every snapshot push, is the same discipline
+// reconcileCaptureTCPChains follows for the TCP floor's identity gate, and for
+// the same reason: it makes "the listener is silently absent forever"
+// unreachable.
+//
+// Steady state is one map walk and a string compare; nothing is rebuilt (and
+// nothing is re-warned) unless the bound cluster actually moved.
+func (c *SnapshotCache) reconcileUDPCaptureListeners() {
+	if !c.captureEnabled {
+		return
+	}
+	routable, _ := c.routableUDPRoutes(c.udpServiceRoutesSnapshot())
+	bound := proxy.SelectedUDPCluster(routable)
+
+	c.captureMu.Lock()
+	changed := c.udpBoundClusterSeen != bound
+	c.udpBoundClusterSeen = bound
+	c.captureMu.Unlock()
+
+	if !changed {
+		return
+	}
+	c.regenerateAllUDPCaptureListeners()
+}
+
+// routableUDPRoutes blanks the cluster name of every UDPRoute backend whose
+// udp: cluster captureUDPClusters will NOT publish in this generation, and
+// returns one reason per blanked backend.
+//
+// Blanking rather than removing is deliberate: the generator already treats an
+// unnamed cluster as unbindable, and keeping the backend in the list means a
+// service left with nothing still reports itself (an accepted UDPRoute with no
+// data path) instead of going quiet.
+//
+// Lock order: this takes clusterMu for reading, and one of its callers
+// (generateUDPCaptureListener) already holds listenerMu. That direction is how
+// the listener path already reads depMu and captureMu, and no clusterMu writer
+// takes listenerMu, so it closes no cycle.
+func (c *SnapshotCache) routableUDPRoutes(udpRoutes map[string][]proxy.L4Backend) (map[string][]proxy.L4Backend, []string) {
+	if len(udpRoutes) == 0 {
+		return udpRoutes, nil
+	}
+	out := make(map[string][]proxy.L4Backend, len(udpRoutes))
+	var reasons []string
+
+	c.clusterMu.RLock()
+	defer c.clusterMu.RUnlock()
+	// Sorted: udpRoutes is a map, and an unsorted walk would emit the reasons
+	// (and the WARN lines) in a fresh random order every rebuild (#135).
+	for _, svc := range slices.Sorted(maps.Keys(udpRoutes)) {
+		backends := udpRoutes[svc]
+		kept := make([]proxy.L4Backend, 0, len(backends))
+		for _, b := range backends {
+			if b.Cluster != "" && c.udpClusterForLocked(b.Service) == b.Cluster {
+				kept = append(kept, b)
+				continue
+			}
+			reasons = append(reasons, fmt.Sprintf(
+				"service %q backend %q is not routable: this snapshot publishes no %q cluster (the backend service is not in the cluster cache, or has no registered port), and udp_proxy has no on-demand cluster path — naming it would accept datagrams and drop them in silence",
+				svc, b.Service, b.Cluster))
+			// Keep the backend, minus its cluster: unbindable, but still counted
+			// when the service turns out to have nothing left.
+			b.Cluster = ""
+			kept = append(kept, b)
+		}
+		out[svc] = kept
+	}
+	return out, reasons
+}
+
+// udpClusterForLocked returns the udp: cluster name captureUDPClusters will
+// publish for a backend service, or "" when it will skip it. It is the SAME
+// predicate captureUDPClusters applies, so the listener and CDS cannot disagree.
+// Caller holds clusterMu.
+func (c *SnapshotCache) udpClusterForLocked(svc string) string {
+	if svc == "" {
+		return ""
+	}
+	entry, ok := c.serviceEntryLocked(svc)
+	if !ok || entry.loadAssignment == nil {
+		return ""
+	}
+	// entry.sni carries the backend's registered application port.
+	port, err := strconv.Atoi(entry.sni)
+	if err != nil || port <= 0 || port > 65535 {
+		return ""
+	}
+	return proxy.UDPClusterName(svc, c.meshDomain)
+}
+
 // captureUDPClusters returns the UDP floor clusters for services with UDPRoute
 // backends as a resource slice. Each in-scope service that has at least one UDP
 // backend emits a "udp:<svc>.<domain>" EDS cluster — a plain EDS cluster with
@@ -508,23 +614,24 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 	resources := make([]types.Resource, 0, len(services))
 	// Sorted: services is a set built from the UDPRoute backends (a map).
 	for _, svc := range slices.Sorted(maps.Keys(services)) {
+		// udpClusterForLocked is the single skip predicate: the UDP capture
+		// listener consults the SAME one before it binds a backend, so a chain
+		// naming a cluster this loop skipped is unrepresentable (#873).
+		udpName := c.udpClusterForLocked(svc)
+		if udpName == "" {
+			// Backend service not in scope yet, or no registered port; skip
+			// until its cluster/EDS exists.
+			continue
+		}
 		// A UDPRoute backend may be classified either way, and this needs only
 		// service-level facts (the app port in entry.sni and the bare-name EDS),
 		// so take whichever entry carries them.
-		entry, ok := c.serviceEntryLocked(svc)
-		if !ok || entry.loadAssignment == nil {
-			// Backend service not in scope yet; skip until its cluster/EDS exists.
-			continue
-		}
+		entry, _ := c.serviceEntryLocked(svc)
 		// entry.sni carries the backend's registered application port. The UDP floor
 		// has no inbound mTLS hop, so udp_proxy must reach that app port directly (not
 		// the mesh inbound :18008 the shared bare-name EDS carries) — build an inline
 		// app-port UDP load assignment from the service's endpoints.
-		port, err := strconv.Atoi(entry.sni)
-		if err != nil || port <= 0 || port > 65535 {
-			continue
-		}
-		udpName := proxy.UDPClusterName(svc, c.meshDomain)
+		port, _ := strconv.Atoi(entry.sni)
 		la := proxy.UDPLoadAssignment(entry.loadAssignment, udpName, uint32(port))
 		cl := proxy.NewUDPServiceCluster(udpName, svc, la)
 		resources = append(resources, cl)

@@ -158,7 +158,7 @@ func CaptureUDPListenerName(podName string) string {
 
 // GenerateUDPCaptureListener builds a per-pod UDP capture listener for UDPRoute
 // routing (proposal 018, Phase 3b). It binds to captureUDPPort inside the pod
-// netns and routes via udp_proxy to the service's backends.
+// netns and routes via udp_proxy to the selected backend cluster.
 //
 // The CNI installs a matching nftables REDIRECT rule (programCaptureRedirect in
 // cni/internal/plugin/capture.go) that steers outbound UDP destined for a mesh
@@ -166,65 +166,36 @@ func CaptureUDPListenerName(podName string) string {
 // --l4-routes flag was retired by proposal 031); the listener below exists only
 // when UDPRoute backends do.
 //
+// WHAT udp_proxy CAN AND CANNOT EXPRESS (#873). udp_proxy's route_specifier is
+// a oneof of `cluster` (a single name) and `matcher`, whose only terminal action
+// is envoy.extensions.filters.udp.udp_proxy.v3.Route -- a message with exactly
+// one field, `cluster`. The action registry is keyed on udp_proxy's private
+// RouteActionContext and holds exactly that one action, so tcp_proxy's
+// weighted_clusters has no udp_proxy counterpart and a UDPRoute traffic split
+// cannot be represented by any route specifier. (Two things CAN produce a split
+// and are deliberately not done here: weighting the ENDPOINTS of a single merged
+// cluster, which would collapse the per-backend `udp:` clusters the dependency
+// set, the EDS rewrite and every cluster stat are keyed on; and a sticky
+// xxHash bucket via an envoy.matching.matchers.runtime_fraction predicate, which
+// needs the `matcher` specifier — still work_in_progress in 1.39 — and splits
+// per source socket rather than per datagram. Both are follow-ups to #873, not
+// drive-bys.)
+//
+// So the listener binds ONE cluster, and selectUDPRoute decides which. What it
+// CAN honour, and now does:
+//   - weight 0 is an explicit DRAIN (Gateway API, #492): a drained backend is
+//     never bound, and a service whose every backend is drained contributes
+//     nothing rather than receiving all of the traffic;
+//   - among the rest, the HEAVIEST backend wins, not the first one written.
+//     Binding backends[0] made a 10/90 split written canary-first send 100% to
+//     the canary, purely because of backendRef order.
+//
+// Returns nil (no listener) when nothing is left to route to.
+//
 // SECURITY NOTE: datagrams forwarded via this listener are NOT protected by
 // mesh mTLS. mTLS is a TCP/TLS construct; DTLS is not implemented. Backend
-// clusters are plain EDS with no transport socket. This is a known limitation
-// of the UDP floor (proposal 018 Phase 3b).
-//
-// UnsupportedUDPRouteShapes reports the UDPRoute inputs that
-// GenerateUDPCaptureListener will silently discard, as human-readable reasons.
-// Empty means everything in udpRoutes is faithfully represented.
-//
-// It exists because the discard is otherwise invisible from both ends (#873):
-// the UDPRoute is accepted by the API, common/l4project resolves and weights its
-// backends correctly, and then the UDP path keeps ONE cluster and drops the
-// rest. There is no NACK, no warning and no stat, so the first symptom is
-// datagrams arriving somewhere unintended.
-//
-// It mirrors GenerateUDPCaptureListener's selection EXACTLY -- first non-empty
-// service over a sorted key list, then backends[0] -- so the two cannot drift
-// apart silently. Three shapes are unrepresentable today:
-//
-//  1. more than one backend on the chosen service: udp_proxy carries a single
-//     Cluster route specifier, so weights are discarded;
-//  2. a second UDPRoute-backed service on the same pod: there is one UDP
-//     listener per pod and it is already bound to the first;
-//  3. weight 0 on the chosen backend: for TCP and TLS that means DRAIN (#492),
-//     and UDP forwards to it anyway.
-//
-// This is a pure function by design: the proxy package builds config and does
-// not log. The caller decides what to do with the reasons.
-func UnsupportedUDPRouteShapes(udpRoutes map[string][]L4Backend) []string {
-	var chosenSvc, chosenCluster string
-	var reasons []string
-
-	for _, svc := range slices.Sorted(maps.Keys(udpRoutes)) {
-		backends := udpRoutes[svc]
-		if len(backends) == 0 {
-			continue
-		}
-		if chosenSvc == "" {
-			chosenSvc, chosenCluster = svc, backends[0].Cluster
-			if len(backends) > 1 {
-				reasons = append(reasons, fmt.Sprintf(
-					"service %q has %d backends but udp_proxy carries a single cluster: only %q is used and the backend weights are discarded",
-					svc, len(backends), chosenCluster))
-			}
-			if backends[0].Weight == 0 {
-				reasons = append(reasons, fmt.Sprintf(
-					"service %q backend %q has weight 0 (drain) but UDP forwards to it anyway: weight 0 is honoured for TCP and TLS, not UDP",
-					svc, chosenCluster))
-			}
-			continue
-		}
-		reasons = append(reasons, fmt.Sprintf(
-			"service %q is dropped entirely: the pod has ONE UDP capture listener and it is already bound to %q (service %q)",
-			svc, chosenCluster, chosenSvc))
-	}
-	return reasons
-}
-
-// Returns nil if udpRoutes is empty (no listener generated until there are routes).
+// clusters are plain, with no transport socket. This is a known limitation of
+// the UDP floor (proposal 018 Phase 3b).
 func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, udpRoutes map[string][]L4Backend) (*listenerv3.Listener, error) {
 	if podName == "" {
 		return nil, fmt.Errorf("pod name is required")
@@ -236,25 +207,11 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 		return nil, nil
 	}
 
-	// UDP proxy does not support weighted_clusters directly in all Envoy versions;
-	// use a single cluster (first backend, or the VIP cluster) as the primary.
-	// For proper weighted UDP support, a future revision can use the udp_proxy's
-	// cluster_specifier with weighted_clusters once it reaches stable.
-	// For now, collect all backends into a single primary cluster (the first
-	// non-empty service cluster). This is the minimal viable control-plane shape.
-	// udpRoutes is a map, so "the first non-empty service" must be taken over a
-	// sorted key list: Go randomises map iteration, and with two or more
-	// UDPRoute-backed services an unsorted pick sends the pod's UDP capture
-	// listener to a DIFFERENT backend cluster on each rebuild of identical
-	// input (and re-hashes the listener every time). See cache/ordering.go.
-	var primaryCluster string
-	for _, svc := range slices.Sorted(maps.Keys(udpRoutes)) {
-		if backends := udpRoutes[svc]; len(backends) > 0 {
-			primaryCluster = backends[0].Cluster
-			break
-		}
-	}
-	if primaryCluster == "" {
+	selection := selectUDPRoute(udpRoutes)
+	if selection.Cluster == "" {
+		// Nothing routable: no backends, or every backend drained. A listener
+		// naming no cluster is worse than no listener — udp_proxy requires a
+		// non-empty cluster, so Envoy would NACK the push.
 		return nil, nil
 	}
 
@@ -265,7 +222,7 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 	udpProxyConfig := config.TypedConfig(&udp_proxyv3.UdpProxyConfig{
 		StatPrefix: fmt.Sprintf("capture_udp_%s", podName),
 		RouteSpecifier: &udp_proxyv3.UdpProxyConfig_Cluster{
-			Cluster: primaryCluster,
+			Cluster: selection.Cluster,
 		},
 	})
 
@@ -292,6 +249,148 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 			},
 		},
 	}, nil
+}
+
+// UnsupportedUDPRouteShapes reports the UDPRoute inputs that
+// GenerateUDPCaptureListener discards, as human-readable reasons. Empty means
+// everything in udpRoutes is faithfully represented.
+//
+// It exists because the discard is otherwise invisible from both ends (#873):
+// the UDPRoute is accepted by the API, common/l4project resolves and weights its
+// backends correctly, and then the UDP path keeps ONE cluster. There is no NACK
+// and no stat, so the first symptom is datagrams arriving somewhere unintended.
+//
+// It reads the SAME selection the generator uses — one call to selectUDPRoute,
+// not a second copy of the rules. #874 shipped it as a deliberate duplicate
+// pinned by a test, because a drifted detector confidently names the wrong
+// cluster and is worse than no warning at all; sharing the decision makes that
+// drift unrepresentable rather than merely tested for.
+//
+// This is a pure function by design: the proxy package builds config and does
+// not log. The caller decides what to do with the reasons.
+func UnsupportedUDPRouteShapes(udpRoutes map[string][]L4Backend) []string {
+	return selectUDPRoute(udpRoutes).Reasons
+}
+
+// SelectedUDPCluster returns the cluster GenerateUDPCaptureListener would bind
+// for these routes, or "" when it would generate no listener at all.
+//
+// It exists so a caller can tell whether a rebuild would change anything
+// WITHOUT building the listener (and without re-emitting the warnings that come
+// with it). The bound cluster is node-global, so one string answers it for every
+// pod on the node.
+func SelectedUDPCluster(udpRoutes map[string][]L4Backend) string {
+	return selectUDPRoute(udpRoutes).Cluster
+}
+
+// udpRouteSelection is the single route a per-pod UDP capture listener can
+// carry, plus what had to be discarded to get down to one.
+type udpRouteSelection struct {
+	// Service is the "<ns>/<svc>" UDPRoute parent whose backend was bound, or
+	// "" when nothing is routable.
+	Service string
+	// Cluster is the bound backend cluster, or "" when nothing is routable.
+	Cluster string
+	// Reasons are the human-readable discards (see UnsupportedUDPRouteShapes).
+	Reasons []string
+}
+
+// selectUDPRoute picks the one backend cluster the pod's UDP capture listener
+// binds, and records everything it could not represent.
+//
+// Ordering is over a SORTED key list: udpRoutes is a map, and Go randomises map
+// iteration, so an unsorted pick would send the listener to a different cluster
+// on each rebuild of identical input and re-hash the listener on every push
+// (#135 — determinism is protocol-visible here). See cache/ordering.go.
+//
+// WHY ONLY ONE SERVICE, and why a matcher would not help. There is one UDP
+// capture listener per pod, and it cannot tell which service a datagram was
+// addressed to. Verified against Envoy v1.39.0:
+//
+//   - the CNI captures UDP with an nftables `redirect`, which for locally
+//     generated packets rewrites the destination to 127.0.0.1 before delivery;
+//   - a datagram listener's only addressing cmsg is IP_PKTINFO
+//     (listener_impl.cc buildIpPacketInfoOptions), so the matcher's
+//     DestinationIPInput reads the POST-DNAT header — the ClusterIP is gone.
+//     Envoy never reads IP_ORIGDSTADDR anywhere, and original_dst is
+//     structurally TCP-only (OriginalDstFilter implements Network::ListenerFilter,
+//     not UdpListenerFilter, and LDS rejects it on a UDP listener);
+//   - DestinationPortInput is not packet-derived at all: the port is stamped
+//     from the listening socket's own port (self_port), so it is the constant
+//     ProxyCapturePort no matter what was dialled.
+//
+// A udp_proxy matcher therefore has nothing to discriminate on. Per-service
+// selection needs either TPROXY capture or a listener per service on its own
+// port — a CNI change, not a control-plane one.
+func selectUDPRoute(udpRoutes map[string][]L4Backend) udpRouteSelection {
+	var sel udpRouteSelection
+	for _, svc := range slices.Sorted(maps.Keys(udpRoutes)) {
+		live := liveUDPBackends(udpRoutes[svc])
+		if len(live) == 0 {
+			if reason := drainedServiceReason(svc, udpRoutes[svc]); reason != "" {
+				sel.Reasons = append(sel.Reasons, reason)
+			}
+			continue
+		}
+		if sel.Cluster != "" {
+			sel.Reasons = append(sel.Reasons, fmt.Sprintf(
+				"service %q is dropped entirely: the pod has ONE UDP capture listener and it is already bound to %q (service %q)",
+				svc, sel.Cluster, sel.Service))
+			continue
+		}
+		chosen := heaviestUDPBackend(live)
+		sel.Service, sel.Cluster = svc, chosen.Cluster
+		if len(live) > 1 {
+			sel.Reasons = append(sel.Reasons, fmt.Sprintf(
+				"service %q has %d routable backends but udp_proxy carries a single cluster: only %q (the heaviest, weight %d) is used and the backend weights are discarded",
+				svc, len(live), chosen.Cluster, chosen.Weight))
+		}
+	}
+	return sel
+}
+
+// liveUDPBackends keeps the backends that can actually be bound: a named
+// cluster, and a non-zero weight. An explicit weight 0 is a Gateway API DRAIN
+// (#492) — the reconciler already defaulted an UNSET weight to 1, so a 0 here
+// is always intentional and must not be normalised back to 1. This is the same
+// rule l4RulesToWeightedClusters and l4BackendsToWeightedClusters apply on the
+// TCP and TLS paths.
+func liveUDPBackends(backends []L4Backend) []L4Backend {
+	live := make([]L4Backend, 0, len(backends))
+	for _, b := range backends {
+		if b.Cluster == "" || b.Weight == 0 {
+			continue
+		}
+		live = append(live, b)
+	}
+	return live
+}
+
+// heaviestUDPBackend returns the backend with the largest weight, ties broken by
+// cluster name so the choice does not depend on backendRef order (#135). live
+// must be non-empty.
+func heaviestUDPBackend(live []L4Backend) L4Backend {
+	best := live[0]
+	for _, b := range live[1:] {
+		if b.Weight > best.Weight || (b.Weight == best.Weight && b.Cluster < best.Cluster) {
+			best = b
+		}
+	}
+	return best
+}
+
+// drainedServiceReason explains a service that contributes no routable backend.
+// A service with no backends at all is silent — there is nothing to report and
+// nothing was discarded. A service whose backends were ALL dropped is reported:
+// the route was accepted and produces no data path, which is worth saying out
+// loud even though the drain itself is being honoured correctly.
+func drainedServiceReason(svc string, backends []L4Backend) string {
+	if len(backends) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"service %q contributes no UDP route: every one of its %d backends has weight 0 (drain) or no cluster, so the listener binds nothing for it",
+		svc, len(backends))
 }
 
 // buildWeightedTCPProxy builds a tcp_proxy network filter routing to one or more

@@ -21,7 +21,7 @@ release since (chart 0.92.x at the time of writing); the conformance jobs in
 | `GRPCRoute` (GAMMA) | Supported | method match → `/<service>/<method>`; service-only → prefix; header matches; weighted backends |
 | `TCPRoute` (edge, parentRef=Gateway) | Supported | raw TCP through the edge LB → backend over the TCP floor; e2e-validated |
 | `TLSRoute` (edge) | Supported | TLS **passthrough** — `tls_inspector` reads SNI for routing, the edge does NOT terminate TLS (validated: client sees the backend's cert); per-SNI `server_names` filter chains |
-| `UDPRoute` (east-west, parentRef=Service) | Supported | `udp_proxy` floor to the backend's app UDP port. NOTE: UDP is plaintext — mesh mTLS does not cover the UDP floor (DTLS not implemented) |
+| `UDPRoute` (east-west, parentRef=Service) | Supported, with limits | `udp_proxy` floor to the backend's app UDP port. NOTE: UDP is plaintext — mesh mTLS does not cover the UDP floor (DTLS not implemented). **No traffic splitting**: `udp_proxy`'s only route action carries a single cluster (there is no weighted-cluster equivalent of `tcp_proxy`'s), so a multi-backend `UDPRoute` binds the HEAVIEST backend and the split is discarded. **One UDPRoute-backed service per pod**: the capture `redirect` destroys the destination ClusterIP, so the per-pod UDP listener cannot tell services apart. An explicit `weight: 0` IS honoured as a drain. Every discard is logged and counted on `aether.agent.l4route.udp_unsupported` — see #873 |
 
 ## Routing vocabulary (HTTP/gRPC)
 
