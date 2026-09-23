@@ -1,0 +1,150 @@
+# Did the commit actually publish? (#880)
+#
+# THE HOLE THIS CLOSES
+#
+# `publish.yaml` serialises on `concurrency: { group: publish-main,
+# cancel-in-progress: false }` (#692). That keeps a RUNNING publish from being
+# killed mid-push, which is right and must stay. What it does not do — and what
+# its comment used to imply — is make the queue a queue: GitHub holds at most
+# ONE pending run per concurrency group, so a second merge inside a publish
+# window cancels the first merge's pending run. The superseded run ends
+# `cancelled`, starts zero jobs, pushes nothing, and shows up in the Actions UI
+# as a grey circle rather than a red X. On 2026-09-20 f332061 (#875) was lost
+# exactly that way and nobody noticed until someone went looking at GHCR.
+#
+# This workflow makes that loud. It does NOT check that a workflow exited 0 — a
+# run that exits 0 having pushed nothing, a run that was cancelled at queue time
+# and a run that never existed all have to be caught, and only one question
+# separates them: are the artifacts for this commit in the registry?
+# `scripts/verify-published-artifacts.sh` asks GHCR that question directly.
+#
+# It does not touch publish.yaml's serialisation: it is a separate workflow, in
+# a separate concurrency group, and it never pushes anything (the release
+# workflow is the only publisher, always).
+#
+# TWO TRIGGERS, ON PURPOSE
+#
+#   workflow_run  — the primary detector. Fires the moment a publish run reaches
+#     a conclusion, whatever that conclusion is, and verifies THAT run's commit.
+#     There is no race to lose: a run that ended `cancelled` is never going to
+#     push anything later, so a missing artifact at that point is final.
+#
+#   schedule      — the backstop, and it exists because the primary detector
+#     rests on an assumption: that `workflow_run: [completed]` really does fire
+#     for a run cancelled before it started a job. If that assumption is ever
+#     wrong, or the event is dropped, or this workflow itself fails to start,
+#     the sweep re-checks the last day of main every two hours and the gap still
+#     surfaces — a few hours late instead of immediately.
+#
+# Both paths end in the same place: a red run plus a rolling GitHub issue naming
+# the commit and the exact registry coordinates that are missing.
+name: publish-verify
+
+on:
+  workflow_run:
+    workflows: [publish]
+    types: [completed]
+  schedule:
+    # Every two hours, off the hour.
+    - cron: "23 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit to verify (default: the last day of main)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# NOT `publish-main` — joining that group would serialise this check behind the
+# publishes it is watching. And keyed per commit rather than per workflow,
+# because a single shared group is the very defect being fixed here: two
+# verifications queued at once would supersede each other and the second commit
+# would go unchecked.
+concurrency:
+  group: publish-verify-${{ github.event.workflow_run.head_sha || github.event.inputs.commit || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # For the rolling failure issue below.
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Full history: the check reads each charts/*/Chart.yaml AS OF the
+          # commit being verified (a commit that bumped a chart publishes under
+          # the bumped version), and resolves every abbreviation to a full
+          # 40-char sha with git rather than trusting a typed one.
+          fetch-depth: 0
+
+      - name: Verify the artifacts for this commit exist in GHCR
+        id: verify
+        env:
+          # A publish run's head commit, a manually named commit, or --recent.
+          TARGET: ${{ github.event.workflow_run.head_sha || github.event.inputs.commit }}
+          TRIGGERING_RUN: ${{ github.event.workflow_run.html_url }}
+          TRIGGERING_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          # The packages are public, so an anonymous pull token would do; using
+          # the run's token keeps the check working if one is ever made private.
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${TARGET}" ]; then
+            echo "verifying ${TARGET} (publish run ${TRIGGERING_RUN:-n/a}, conclusion ${TRIGGERING_CONCLUSION:-n/a})"
+            # A publish dispatched from a branch has a head commit that the
+            # default-branch checkout does not contain. Fetch it rather than
+            # failing: "I could not find that commit" and "that commit was never
+            # published" must not produce the same alert.
+            git rev-parse --verify --quiet "${TARGET}^{commit}" >/dev/null ||
+              git fetch --no-tags --depth=1 origin "${TARGET}"
+            ./scripts/verify-published-artifacts.sh "${TARGET}" | tee verify.log
+          else
+            ./scripts/verify-published-artifacts.sh --recent | tee verify.log
+          fi
+
+      # A failure here is invisible unless it is written down somewhere a person
+      # reads: this workflow is attached to no PR, and the nightly e2e suite sat
+      # red for three nights before anyone noticed a scheduled failure (see the
+      # `report-failure` job in e2e.yaml, whose shape this copies). ONE rolling
+      # issue, reused for consecutive gaps — duplicate issues are how people
+      # learn to ignore them, which is the failure mode this exists to prevent.
+      #
+      # Gated on the verify step specifically: an infrastructure failure (no
+      # network, bad checkout) must not file "nothing was published".
+      - name: Open or update the missing-artifacts issue
+        if: failure() && steps.verify.conclusion == 'failure' && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # `gh` infers the repository from git remotes; this job has a checkout,
+          # but naming it explicitly is what #858 had to fix in e2e.yaml and it
+          # costs nothing to do here.
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGERING_RUN: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          title="publish: artifacts missing for a commit on main"
+          missing="$(sed -nE 's/^[[:space:]]*MISSING[[:space:]]+/MISSING /p' verify.log || true)"
+          [ -n "$missing" ] || missing="(see the run log)"
+
+          body=$(printf '%s\n\n```\n%s\n```\n\n%s\n%s\n\n%s\n' \
+            "A commit on \`main\` is missing artifacts in ghcr.io — never published, or published only in part. A deploy pinned to it will 404, and \`helm upgrade\` against its commit-suffixed chart tag cannot work." \
+            "$missing" \
+            "Verification run: ${RUN_URL}" \
+            "Publish run: ${TRIGGERING_RUN:-n/a}" \
+            "_Filed automatically by \`publish-verify\`; this issue is reused for consecutive gaps. To republish: re-run the cancelled publish run (\`gh run rerun <id>\`), which re-runs at that same commit. Never push images or charts by hand — the release workflow is the only publisher. See docs/runbook.md, \"Pre-flight: did that commit actually publish?\"._")
+
+          num=$(gh issue list --state open --search "in:title \"${title}\"" -L 1 --json number -q '.[0].number // empty')
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --body "$body"
+            echo "commented on #$num"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
