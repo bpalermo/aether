@@ -449,6 +449,14 @@ type SnapshotCache struct {
 	// last built against (#877). Compared on every snapshot push so a change
 	// rebuilds them; see reconcileCaptureTCPChains.
 	tcpFloorIdentitySeen bool
+	// udpBoundClusterSeen is the udp: cluster the per-pod UDP capture listeners
+	// were last built against (#873). Which backend is bindable depends on the
+	// CLUSTER cache — a backend whose cluster this snapshot does not publish
+	// must not be named — and that arrives asynchronously from the UDPRoute, so
+	// a listener built before the backend registered would otherwise stay absent
+	// until the next UDPRoute event. Compared on every snapshot push; see
+	// reconcileUDPCaptureListeners.
+	udpBoundClusterSeen string
 
 	// meshDNSSnapshotPath is the host-persistent file the capture reconciler writes
 	// the mesh service->IP record table to (proposal 018, mesh-global FQDN; issue
