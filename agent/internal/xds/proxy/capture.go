@@ -123,23 +123,25 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		return nil, fmt.Errorf("network namespace is required")
 	}
 
-	// Build filter chains. Order matters for Envoy's filter-chain matching:
-	//   1. TLS SNI chains (TLSRoute, proposal 018 Phase 3b): server_names + prefix_ranges.
-	//      The tls_inspector reads SNI before chain selection; more specific than
-	//      destination-IP-only chains.
-	//   2. Per-ClusterIP TCP floor chains (TCPRoute or passthrough, Phase 3a/3b):
-	//      destination-IP match only (prefix_ranges=/32).
-	//   3. Global HCM catch-all: no match criteria (catches all HTTP/gRPC traffic).
-	//   4. (withPassthrough only) DefaultFilterChain: routes everything else to the
-	//      ORIGINAL_DST passthrough cluster — non-mesh egress in plain TCP.
+	// Build the filter chains. ORDER IS NOT WHAT SELECTS THEM — Envoy matches by
+	// specificity, in fixed tiers:
 	//
-	// TLS SNI chains are inserted first so Envoy evaluates server_names+IP before
-	// the destination-IP-only TCP floor chain (more specific wins).
+	//   1. destination_port   2. prefix_ranges   3. server_names
+	//   4. transport_protocol 5. application_protocols   6. source_*
+	//
+	// The list below is ordered for readability only. The previous version of
+	// this comment claimed the TLS chains were "inserted first so Envoy
+	// evaluates server_names+IP before the destination-IP-only floor chain",
+	// which was true in outcome but wrong in mechanism — and when proposal 037
+	// gave the floor chains a destination_port, that wrong mechanism stopped
+	// predicting the outcome. TLSRoute silently lost both mesh spellings and
+	// nothing failed (#911). Reason in tiers, never in list position.
 	chains := make([]*listenerv3.FilterChain, 0, len(tcpServices)*2+1)
 	for _, svc := range tcpServices {
-		// TLSRoute SNI chains (if any) go before the TCP floor chain.
+		// TLSRoute SNI chains, qualified onto every port something else
+		// claims (#911) so they win on tier 3 instead of losing on tier 1.
 		tlsChains := BuildCaptureTLSRouteFilterChains(svc, svc.TLSRouteRules, sourceSpiffeID)
-		chains = append(chains, tlsChains...)
+		chains = append(chains, qualifyTLSChainsByClaimedPorts(svc, tlsChains)...)
 		// Per-port chains for the service's non-primary TCP ports (proposal
 		// 037). Listed before the portless floor for readability only —
 		// Envoy orders by match specificity, not by position, and
@@ -511,6 +513,68 @@ func qualifyChainByPort(src *listenerv3.FilterChain, port uint32, name string) *
 // tcp.cap_tcp_anyport_<svc>.downstream_cx_total reading zero across a full
 // release; sharing a prefix with the supported spellings would make that
 // evidence unobtainable and the removal a guess.
+// claimedTCPPorts returns every port for which this service emits a
+// destination_port-qualified filter chain, i.e. every port on which an
+// unqualified chain for the same ClusterIP would lose (proposal 037).
+//
+// Both producers are represented: buildCaptureTCPPortFilterChain covers the
+// non-primary raw-TCP ports of ANY service (design (d) delivers every mesh
+// Service here, not just the TCP-primary ones), and tcpPrimaryFloorChains adds
+// the TCP mesh port and the primary port for a TCP-primary service.
+func claimedTCPPorts(svc CaptureTCPService) []uint32 {
+	seen := make(map[uint32]struct{}, len(svc.TCPPorts)+2)
+	ports := make([]uint32, 0, len(svc.TCPPorts)+2)
+	add := func(p uint32) {
+		if p == 0 {
+			return
+		}
+		if _, dup := seen[p]; dup {
+			return
+		}
+		seen[p] = struct{}{}
+		ports = append(ports, p)
+	}
+	for _, p := range svc.TCPPorts {
+		add(p)
+	}
+	if svc.PrimaryIsTCP {
+		add(meshconst.ProxyTCPOutboundPort)
+		add(svc.PrimaryPort)
+	}
+	return ports
+}
+
+// qualifyTLSChainsByClaimedPorts gives each SNI chain a destination_port-matched
+// twin for every port a floor or per-port chain claims (#911).
+//
+// Envoy resolves destination_port FIRST and server_names third. An SNI chain
+// matching only prefix_ranges + server_names therefore loses outright to a
+// port-qualified floor chain — it never reaches the tier where its SNI would
+// win. Proposal 037 introduced those qualified chains and, from that moment, a
+// TLSRoute on a TCP-primary service was Accepted, generated correct-looking
+// config, and was inert on both :18082 and the primary port.
+//
+// Qualifying the SNI chain onto the same port makes the two tie on tiers 1 and
+// 2, so tier 3 decides and the chain carrying server_names wins. No ordering
+// hack and no special case: the fix is to let Envoy's own precedence apply.
+//
+// The unqualified chains are RETAINED — they still serve every port nothing
+// claims, which is the only spelling that worked before this fix.
+func qualifyTLSChainsByClaimedPorts(svc CaptureTCPService, tlsChains []*listenerv3.FilterChain) []*listenerv3.FilterChain {
+	ports := claimedTCPPorts(svc)
+	if len(tlsChains) == 0 || len(ports) == 0 {
+		return tlsChains
+	}
+	out := make([]*listenerv3.FilterChain, 0, len(tlsChains)*(len(ports)+1))
+	out = append(out, tlsChains...)
+	for _, p := range ports {
+		for _, c := range tlsChains {
+			out = append(out, qualifyChainByPort(c, p, fmt.Sprintf("%s_p%d", c.GetName(), p)))
+		}
+	}
+	return out
+}
+
 func tcpPrimaryFloorChains(svc CaptureTCPService, sourceSpiffeID string) []*listenerv3.FilterChain {
 	tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules, sourceSpiffeID)
 	if tc == nil {

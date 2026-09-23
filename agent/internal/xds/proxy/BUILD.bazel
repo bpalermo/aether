@@ -133,6 +133,7 @@ go_test(
         "spiffe_test.go",
         "stats_filter_test.go",
         "subset_test.go",
+        "tlsroute_port_shadow_test.go",
         "tracing_test.go",
         "transportsocket_test.go",
         "transportsocketmatch_test.go",
