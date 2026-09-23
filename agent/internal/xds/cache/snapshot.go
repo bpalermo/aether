@@ -62,6 +62,9 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// node identity (#877), which arrives asynchronously, so a readiness change
 	// has to rebuild the listeners that were built without it.
 	c.reconcileCaptureTCPChains()
+	// And for the UDP capture listener, whose bindable backend depends on the
+	// cluster cache the registry fills asynchronously (#873).
+	c.reconcileUDPCaptureListeners()
 
 	listeners := c.Listeners()
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
