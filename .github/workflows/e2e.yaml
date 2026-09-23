@@ -585,11 +585,17 @@ jobs:
 
   # --- Gateway API L4 routes on the mesh capture path (proposal 018 Phase 3b).
   #
-  # TCPRoute leg only for now (issue #868): a weighted 75/25 split, `weight: 0`
-  # as DRAIN asserted exactly and in both directions (the #492 regression, which
-  # no upstream conformance profile covers), and three `floor` negative controls
-  # so the suite re-proves its own discriminating power on every run rather than
-  # once at review time. TLSRoute and UDPRoute legs follow.
+  # All three route types (issue #868). TCPRoute: a weighted 75/25 split and
+  # `weight: 0` as DRAIN asserted exactly and in both directions (the #492
+  # regression, which no upstream conformance profile covers). TLSRoute: SNI
+  # selecting each of two backends, plus the unmatched-SNI fall-through to the
+  # TCP floor asserted POSITIVELY. UDPRoute: plaintext delivery with a weight-0
+  # backend drained — delivery only, since backend SELECTION is #873 and would
+  # fail by design today.
+  #
+  # Every leg carries `floor` / `unanswered` negative controls so the suite
+  # re-proves its own discriminating power on every run rather than once at
+  # review time.
   #
   # Unlike `uds` and the conformance jobs this one installs SPIRE: with
   # --spire-enabled=false the mesh has no TCP path at all (no node SVID => no
@@ -619,7 +625,7 @@ jobs:
           L4_SKIP_BUILD: "1"
         run: ./e2e/l4routes.sh up
 
-      - name: Verify TCPRoute split, weight-0 drain, floor fallback
+      - name: Verify TCPRoute split/drain/floor, TLSRoute SNI + fall-through, UDPRoute delivery
         id: verify
         continue-on-error: ${{ github.event.inputs.soft == 'true' }}
         run: ./e2e/l4routes.sh verify
@@ -631,12 +637,19 @@ jobs:
           kubectl --context kind-l4routes get pods -A -o wide 2>&1 | tee /tmp/l4-logs/pods.txt || true
           kind export logs /tmp/l4-logs/kind --name l4routes || true
           kubectl --context kind-l4routes get tcproutes -A -o yaml > /tmp/l4-logs/tcproutes.yaml 2>&1 || true
+          kubectl --context kind-l4routes get tlsroutes -A -o yaml > /tmp/l4-logs/tlsroutes.yaml 2>&1 || true
+          kubectl --context kind-l4routes get udproutes -A -o yaml > /tmp/l4-logs/udproutes.yaml 2>&1 || true
           kubectl --context kind-l4routes -n aether-test get deploy,pods,svc -o wide > /tmp/l4-logs/workloads.txt 2>&1 || true
           kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=400 > /tmp/l4-logs/agent.log 2>&1 || true
           kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=300 > /tmp/l4-logs/proxy.log 2>&1 || true
           kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/l4-logs/mesh-dns.log 2>&1 || true
           kubectl --context kind-l4routes -n spire-mgmt logs -l app.kubernetes.io/name=agent --all-containers --tail=200 > /tmp/l4-logs/spire-agent.log 2>&1 || true
           kubectl --context kind-l4routes -n aether-test logs -l app=l4-front --tail=100 > /tmp/l4-logs/l4-front.log 2>&1 || true
+          kubectl --context kind-l4routes -n aether-test logs -l app=l4tls-front --tail=100 > /tmp/l4-logs/l4tls-front.log 2>&1 || true
+          kubectl --context kind-l4routes -n aether-test logs -l app=l4udp-front --tail=100 > /tmp/l4-logs/l4udp-front.log 2>&1 || true
+          # The UDP leg's only voice when a backend is discarded rather than the
+          # data path being broken (#873/#874).
+          grep -i "UDPRoute input discarded" /tmp/l4-logs/agent.log > /tmp/l4-logs/udp-discards.log 2>&1 || true
 
       - name: Upload diagnostics
         if: failure() || steps.verify.outcome == 'failure'

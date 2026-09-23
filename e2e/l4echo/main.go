@@ -15,10 +15,10 @@
 //	                     every request answers "<text>\n".
 //	--mode=udp  (:9001)  reply "<text> <datagram>" to the sender.
 //
-// Only --mode=tcp is exercised today (the TCPRoute leg, PR2 of #868); the tls
-// and udp modes exist so the flag surface does not churn when the TLSRoute and
-// UDPRoute legs land. They are deliberately implemented rather than stubbed so
-// the later legs are a harness change only.
+// All three modes are exercised: --mode=tcp by the TCPRoute leg, --mode=tls by
+// the TLSRoute leg (which needs the PARENT to speak TLS too, so that an
+// unmatched SNI falling through to the floor can be asserted positively rather
+// than as an absence), and --mode=udp by the UDPRoute leg.
 //
 // Closing after the echo is deliberate and is the whole reason this is not
 // istio/tcp-echo-server: that image holds the connection open, so a probe can
