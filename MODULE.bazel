@@ -66,6 +66,11 @@ go_sdk.download(version = "1.27.1")
 # bzlmod module by MVS, so our go.mod's `golang.org/x/tools v0.49.0` is what
 # TOOLS_NOGO's `@org_golang_x_tools//...` analyzers are built from. Do not let
 # that requirement regress below v0.48.0 while the SDK is 1.27.x.
+#
+# That last sentence is enforced, not just asserted: `scripts/go-deps-audit.sh`
+# (the required `deps-audit` CI job) carries a TOOLCHAIN_FLOORS table keyed on
+# the `go_sdk.download` version above and fails if the *resolved* x/tools drops
+# below the floor. Move the SDK past 1.27 and that table needs a new row (#886).
 go_sdk.nogo(nogo = "//:nogo")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
