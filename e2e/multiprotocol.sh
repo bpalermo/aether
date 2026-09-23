@@ -26,17 +26,23 @@ KEEP=0
 
 k() { kubectl --context "$CTX" -n "$NS" "$@"; }
 
-log()  { printf '\n==> %s\n' "$*"; }
-ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
-bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAILED=1; }
+log() { printf '\n==> %s\n' "$*"; }
+ok() { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
+bad() {
+	printf '  \033[31mFAIL\033[0m %s\n' "$*"
+	FAILED=1
+}
 FAILED=0
 
 cleanup() {
-  [ "$KEEP" = "1" ] && { log "--keep: leaving mixed-svc and mp-client in place"; return; }
-  log "cleanup"
-  k delete job mp-client --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete deployment mixed-svc --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete serviceaccount mixed-svc mp-client --ignore-not-found >/dev/null 2>&1 || true
+	[ "$KEEP" = "1" ] && {
+		log "--keep: leaving mixed-svc and mp-client in place"
+		return
+	}
+	log "cleanup"
+	k delete job mp-client --ignore-not-found --wait=false >/dev/null 2>&1 || true
+	k delete deployment mixed-svc --ignore-not-found --wait=false >/dev/null 2>&1 || true
+	k delete serviceaccount mixed-svc mp-client --ignore-not-found >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -161,26 +167,29 @@ k wait --for=condition=complete job/mp-client --timeout=180s >/dev/null 2>&1 || 
 
 log "results"
 OUT="$(k logs job/mp-client 2>/dev/null || true)"
-echo "$OUT" | grep '^RESULT' || { bad "client produced no results"; echo "$OUT" | tail -20; }
+echo "$OUT" | grep '^RESULT' || {
+	bad "client produced no results"
+	echo "$OUT" | tail -20
+}
 
 for check in http_18081 http_portless tcp_9000; do
-  if echo "$OUT" | grep -q "^RESULT $check PASS"; then
-    ok "$check"
-  else
-    bad "$check — $(echo "$OUT" | grep "^RESULT $check" || echo 'no result line')"
-  fi
+	if echo "$OUT" | grep -q "^RESULT $check PASS"; then
+		ok "$check"
+	else
+		bad "$check — $(echo "$OUT" | grep "^RESULT $check" || echo 'no result line')"
+	fi
 done
 
 log "registry: the pod must appear under BOTH protocol keys (037 dual registration)"
 if k get pods -l app=mixed-svc -o jsonpath='{.items[0].metadata.annotations}' 2>/dev/null | grep -q '9000=tcp'; then
-  ok "pod carries ports=8080,9000=tcp"
+	ok "pod carries ports=8080,9000=tcp"
 else
-  bad "pod annotation missing the =tcp suffix"
+	bad "pod annotation missing the =tcp suffix"
 fi
 
 if [ "$FAILED" = "0" ]; then
-  printf '\n\033[32mmulti-protocol e2e: PASS\033[0m\n'
+	printf '\n\033[32mmulti-protocol e2e: PASS\033[0m\n'
 else
-  printf '\n\033[31mmulti-protocol e2e: FAIL\033[0m\n'
-  exit 1
+	printf '\n\033[31mmulti-protocol e2e: FAIL\033[0m\n'
+	exit 1
 fi
