@@ -162,25 +162,34 @@ func New(meter metric.Meter) (*Metrics, error) {
 	}
 	if m.udpRouteUnsupported, err = meter.Int64Counter("aether.agent.l4route.udp_unsupported",
 		metric.WithDescription("UDPRoute inputs discarded because the UDP capture listener cannot represent them (#873)")); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("udp route unsupported: %w", err)
 	}
 	if m.clusterUnpinned, err = meter.Int64Counter("aether.agent.identity.cluster_unpinned",
 		metric.WithDescription("Mesh clusters published with no server-identity SAN pin (handshake proves trust-domain membership only)")); err != nil {
 		return nil, fmt.Errorf("cluster unpinned: %w", err)
 	}
 
-	// Seed the two #638 discriminator counters, the #717 stale-netns counter and
-	// the #832 unpinned-cluster counter at zero. The OTel SDK exports a counter
-	// only after its first Add, so a counter that is never incremented (the
-	// healthy case for all four) never appears in Prometheus at all — and "no
-	// series" is indistinguishable from "zero" to a grading query. Seeding makes
-	// a live zero visible and lets increase()/rate() work from process start.
-	// Observed on talos-main rev200: neither #638 series existed.
+	// Seed every anomaly counter at zero: the two #638 discriminator counters,
+	// the #717/#796 stale-netns counter, the #832 unpinned-cluster counter and
+	// the #873 UDPRoute-discard counter. The OTel SDK exports a counter only
+	// after its first Add, so a counter that is never incremented (the healthy
+	// case for all five) never appears in Prometheus at all — and "no series" is
+	// indistinguishable from "zero" to a grading query. Seeding makes a live zero
+	// visible and lets increase()/rate() work from process start.
+	//
+	// This list has now been forgotten twice: observed on talos-main rev200,
+	// neither #638 series existed; observed again on rev231 (#882), the #873
+	// counter was registered here without being seeded and so had no series at
+	// all while the log half of #874 worked fine.
+	// TestEveryRegisteredCounterDeclaresItsSeedPolicy derives the registered set
+	// from this file's source, so the NEXT counter added here fails the test
+	// until its seeding — or a written reason not to seed it — exists.
 	ctx := context.Background()
 	m.bindingMismatch.Add(ctx, 0)
 	m.inboundBindingMismatch.Add(ctx, 0)
 	m.staleNetnsSkipped.Add(ctx, 0)
 	m.clusterUnpinned.Add(ctx, 0)
+	m.udpRouteUnsupported.Add(ctx, 0)
 
 	return m, nil
 }
@@ -220,14 +229,11 @@ func (m *Metrics) ClusterUnpinned(ctx context.Context, n int64) {
 	m.clusterUnpinned.Add(ctx, n)
 }
 
-// StaleNetnsSkipped counts n per-pod listener entries excluded from ONE
-// snapshot generation because their network namespace no longer exists
-// (#796/#717). Pod names are deliberately NOT attributes (unbounded
-// cardinality); the skip logs the pod at WARN, once per pod. A no-op for
-// n <= 0, so the healthy case rides on the zero seeded at registration.
 // UDPRouteUnsupported counts n UDPRoute inputs discarded by ONE snapshot
 // generation because the per-pod UDP capture listener cannot represent them
-// (#873). Non-zero means a UDPRoute on this node is not doing what it says.
+// (#873). Non-zero means a UDPRoute on this node is not doing what it says. A
+// no-op for n <= 0, so the healthy case rides on the zero seeded at
+// registration — an unseeded zero reads as a false zero (#882).
 func (m *Metrics) UDPRouteUnsupported(ctx context.Context, n int64) {
 	if m == nil || n <= 0 {
 		return
@@ -235,6 +241,11 @@ func (m *Metrics) UDPRouteUnsupported(ctx context.Context, n int64) {
 	m.udpRouteUnsupported.Add(ctx, n)
 }
 
+// StaleNetnsSkipped counts n per-pod listener entries excluded from ONE
+// snapshot generation because their network namespace no longer exists
+// (#796/#717). Pod names are deliberately NOT attributes (unbounded
+// cardinality); the skip logs the pod at WARN, once per pod. A no-op for
+// n <= 0, so the healthy case rides on the zero seeded at registration.
 func (m *Metrics) StaleNetnsSkipped(ctx context.Context, n int64) {
 	if m == nil || n <= 0 {
 		return
