@@ -1,26 +1,90 @@
 #!/usr/bin/env bash
 # Single-cluster kind e2e for proposal 018 Phase 3b (Gateway API L4 routes on the
-# mesh capture path). THIS FILE COVERS THE TCPRoute LEG ONLY; the TLSRoute and
-# UDPRoute legs land as follow-ups to issue #868.
+# mesh capture path). It covers ALL THREE route types — TCPRoute, TLSRoute and
+# UDPRoute — which is the whole of issue #868's acceptance.
 #
 # What it proves, on a real data path (kind + the real chart + the real
 # aether-proxy + the CNI's transparent capture):
 #
-#   T1.0  control      no TCPRoute            -> every probe reaches the FLOOR
+#   T1.0  control      no TCPRoute             -> every probe reaches the FLOOR
 #   T1.1  split        75 / 25 over 200 probes -> a band, never `floor`
 #   T1.2  drain        weight 0 is DRAIN, asserted EXACTLY and in BOTH directions
 #   T1.3  all drained  every weight 0          -> back to the FLOOR
 #   T1.4  delete       no TCPRoute again       -> back to the FLOOR
 #
-# The three `floor` states are assertions, not setup. A suite that only ever
-# observes one outcome cannot distinguish "passing" from "not looking" (#853), so
-# T1.0 / T1.3 / T1.4 re-demonstrate the probe's discriminating power on EVERY
-# run: the same probe, the same client, a different named answer.
+#   T2.0  control      no TLSRoute             -> every SNI reaches the FLOOR
+#   T2.1  sni A        SNI alpha               -> backend A, never B, never floor
+#   T2.2  sni B        SNI bravo               -> backend B, never A, never floor
+#   T2.3  fall-through a THIRD, unmatched SNI  -> the FLOOR, never A or B
+#   T2.4  delete       no TLSRoute again       -> every SNI back to the FLOOR
 #
-# The workload is e2e/l4echo (ghcr.io/bpalermo/aether/l4echo:latest) in
-# --mode=tcp: it reads one line, writes "<marker> <line>" and CLOSES. The marker
-# is the assertion vehicle — no Envoy admin access, and it survives a proxy hot
-# restart, which raw counters do not.
+#   T3.0  control      no UDPRoute             -> no datagram is answered at all
+#   T3.1  delivery     UDPRoute 100 / 0        -> every datagram answered by A
+#   T3.2  delete       no UDPRoute again       -> no datagram is answered again
+#
+# The `floor` / `no answer` states are assertions, not setup. A suite that only
+# ever observes one outcome cannot distinguish "passing" from "not looking"
+# (#853), so T1.0 / T1.3 / T1.4, T2.0 / T2.3 / T2.4 and T3.0 / T3.2
+# re-demonstrate each probe's discriminating power on EVERY run: the same probe,
+# the same client, a different named answer.
+#
+# The workload is e2e/l4echo (ghcr.io/bpalermo/aether/l4echo:latest), one process
+# per mode:
+#
+#   --mode=tcp  reads one line, writes "<marker> <line>" and CLOSES.
+#   --mode=tls  terminates TLS with a self-signed cert and answers "<marker>".
+#   --mode=udp  replies "<marker> <datagram>" to the sender.
+#
+# The marker is the assertion vehicle — no Envoy admin access, and it survives a
+# proxy hot restart, which raw counters do not.
+#
+# -----------------------------------------------------------------------------
+# THE TLS LEG DIALS A PORT NO FILTER CHAIN CLAIMS, AND THAT IS NOT COSMETIC.
+#
+# BuildCaptureTLSRouteFilterChains (agent/internal/xds/proxy/l4route.go) matches
+# `prefix_ranges: <ClusterIP>/32` + `server_names` and NO destination_port.
+# Proposal 037 then gave every TCP-primary service destination_port-qualified
+# floor chains (:18082 and the service's own primary port) plus a portless
+# any-port shim. Envoy resolves destination_port FIRST and only consults the
+# portless bucket when no chain claims the exact port — so a TLS dial to the
+# service's primary port, or to :18082, lands on the port-qualified FLOOR chain
+# and the SNI chains are never even considered.
+#
+# So this leg dials $TLS_DIAL_PORT, which no chain claims, and the surviving
+# candidates are exactly the portless ones: the SNI chains and the any-port
+# shim. That is what makes T2.1/T2.2 (SNI wins) and T2.3 (no SNI match falls to
+# the floor) a real comparison — same client, same port, three SNIs.
+#
+# Two consequences worth stating rather than discovering later: TLSRoute is
+# reachable today only through the 037 any-port shim, which 037 Phase 4 proposes
+# to REMOVE; and if a future change port-qualifies the SNI chains, T2's dial port
+# has to move with it. Filed as #911 rather than worked around here.
+#
+# THE UDP LEG DIALS :18081, AND ONLY :18081.
+#
+# The CNI's UDP redirect (programCaptureRedirect, cni/internal/plugin/capture.go)
+# matches ClusterIP + dport == ProxyOutboundPort. redirect-all is TCP-ONLY, so
+# unlike the TCP leg there is no any-port UDP capture: a datagram to any other
+# port leaves the pod unredirected and is never seen by the mesh.
+#
+# UDP RIDES THE MESH IN PLAINTEXT. mTLS is a TCP/TLS construct and there is no
+# DTLS; the "udp:" clusters carry no transport socket at all (asserted in
+# //test/envoy_validate, #876). Nothing here expects or asserts mTLS on the UDP
+# leg, and a passing T3 is NOT evidence of an authenticated UDP path.
+#
+# T3 asserts DELIVERY, not selection — deliberately, per #868's scope note. The
+# per-pod udp_proxy carries a bare single-cluster RouteSpecifier, so backend
+# weights are discarded and a second UDPRoute-backed service on the node is
+# dropped entirely (#873, surfaced as a log line and the udp_route_unsupported
+# counter by #874/#882). A "UDPRoute picks the right backend" assertion would
+# therefore fail by DESIGN rather than find a bug, and belongs to #873's fix.
+#
+# The 100 / 0 shape T3.1 uses is the one shape both implementations must agree
+# on: today's path takes backends[0] (backendRef order is preserved by
+# common/l4project, which keeps weight-0 entries), and a weighted path must
+# DRAIN the weight-0 backend (#492). So `bravo` appearing is a failure under
+# either, and T3.1 does not have to be rewritten when #873 lands. The MIRROR
+# (0 / 100) is deliberately absent: it is the #873 case itself.
 #
 # -----------------------------------------------------------------------------
 # SPIRE IS **ON** IN THIS HARNESS, AND THAT IS NOT OPTIONAL.
@@ -81,6 +145,27 @@ TRUST_DOMAIN="aether.internal"
 # backendRef port is ignored by design — an L4 backend's "tcp:" cluster carries
 # its endpoints' own port — so this one value is both ends of the path.
 APP_PORT="9000"
+# The TLS leg. TLS_PORT is what the l4echo --mode=tls workloads bind and what
+# they register as endpoint.aether.io/port, so it is also the port the backends'
+# "tcp:" clusters dial. TLS_DIAL_PORT is what the PROBE dials, and it must be a
+# port NO capture filter chain claims — see the TLS block in the header. It is
+# never bound by anything; the capture listener sees it only as the original
+# destination port recovered by use_original_dst.
+TLS_PORT="9443"
+TLS_DIAL_PORT="8443"
+# The three SNIs. Two are routed by a TLSRoute; the third matches nothing and
+# must reach the floor (#868's corrected fall-through criterion).
+SNI_ALPHA="alpha.l4tls.test"
+SNI_BRAVO="bravo.l4tls.test"
+SNI_NOMATCH="nomatch.l4tls.test"
+# The TLS parent's ClusterIP, resolved once by verify_tls and read by
+# tls_probe_batch. Declared here so `set -u` cannot trip over it.
+TLS_VIP=""
+# The UDP leg. UDP_PORT is what the l4echo --mode=udp workloads bind and
+# register; MESH_UDP_PORT is meshconst.ProxyOutboundPort, the ONLY UDP
+# destination port the CNI redirects into the capture listener.
+UDP_PORT="9001"
+MESH_UDP_PORT="18081"
 GWAPI_VERSION="v1.6.2"
 # TCPRoute/TLSRoute/UDPRoute are EXPERIMENTAL-channel in gateway-api v1.6.2 (the
 # standard channel stops at GRPCRoute), so the standard bundle uds.sh installs is
@@ -123,11 +208,17 @@ dump_state() {
 	kubectl config get-contexts "$CTX" >/dev/null 2>&1 || return 0
 	printf '\033[1;33m  -- pods --\033[0m\n' >&2
 	kc get pods -A -o wide 2>&1 | sed 's/^/    /' >&2 || true
-	printf '\033[1;33m  -- tcproutes (spec + our RouteParentStatus) --\033[0m\n' >&2
-	kc get tcproutes -A -o yaml 2>&1 | sed 's/^/    /' >&2 || true
+	printf '\033[1;33m  -- tcproutes / tlsroutes / udproutes (spec + our RouteParentStatus) --\033[0m\n' >&2
+	kc get tcproutes,tlsroutes,udproutes -A -o yaml 2>&1 | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- mesh services (mesh-DNS answers their ClusterIPs; app-protocol picks the L4 path) --\033[0m\n' >&2
 	kc -n "$TEST_NS" get svc -o custom-columns=NAME:.metadata.name,CLUSTERIP:.spec.clusterIP,PROTO:.metadata.annotations.aether\\.io/app-protocol 2>&1 |
 		sed 's/^/    /' >&2 || true
+	# The UDP path's only voice: #874 logs every UDPRoute input the single-cluster
+	# udp_proxy throws away. If T3 is red because a backend was discarded rather
+	# than because the data path is broken, it says so here.
+	printf '\033[1;33m  -- agent log: UDPRoute inputs discarded (#873/#874) --\033[0m\n' >&2
+	kc -n "$NS" logs -l app.kubernetes.io/component=agent --all-containers --tail=400 --prefix 2>&1 |
+		grep -i "UDPRoute input discarded" | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- agent log (L4 projection + snapshot pushes) --\033[0m\n' >&2
 	kc -n "$NS" logs -l app.kubernetes.io/component=agent --all-containers --tail=120 --prefix 2>&1 |
 		sed 's/^/    /' >&2 || true
@@ -237,14 +328,36 @@ install_gwapi_crds() {
 	kc apply --server-side --force-conflicts -f \
 		"https://github.com/kubernetes-sigs/gateway-api/releases/download/${GWAPI_VERSION}/${GWAPI_CHANNEL}" >/dev/null ||
 		die "Gateway API CRD install failed"
-	kc wait --for=condition=Established crd/tcproutes.gateway.networking.k8s.io --timeout=60s >/dev/null ||
-		die "the TCPRoute CRD never became Established"
-	# v1 specifically: the agent looks TCPRoute up at v1 and disables the type
-	# (with a warning, not an error) if only v1alpha2 is served.
-	kc get crd tcproutes.gateway.networking.k8s.io \
+	# All three types, and all three at v1 specifically: the agent looks each one
+	# up at v1 (crdcheck.Present, no v1alpha2 fallback) and DISABLES the type with
+	# a warning rather than an error if it is missing. A leg whose CRD never
+	# arrived would then measure a mesh that was never watching for the route, so
+	# this is a hard gate before anything else runs.
+	#
+	# It is a gate and not a "skip cleanly if absent": `up` installs these, so
+	# their absence is a broken environment, and a leg that skips itself green is
+	# the #853 defect this suite exists to avoid.
+	local kind
+	for kind in tcproutes tlsroutes udproutes; do
+		kc wait --for=condition=Established "crd/$kind.gateway.networking.k8s.io" --timeout=60s >/dev/null ||
+			die "the ${kind%s} CRD never became Established"
+		kc get crd "$kind.gateway.networking.k8s.io" \
+			-o jsonpath='{.status.storedVersions}' 2>/dev/null | grep -q v1 ||
+			die "the ${kind%s} CRD does not serve v1 — the agent's crdcheck is v1-only and would disable that route type silently"
+	done
+	ok "Gateway API CRDs installed (TCPRoute, TLSRoute, UDPRoute at v1)"
+}
+
+# require_crd KIND PLURAL — fail loudly if a route type's CRD is not served at
+# v1 by the time its leg runs. install_gwapi_crds already guarantees this, so a
+# failure here means something removed the CRD mid-run, or `verify` is being run
+# against a cluster that `up` did not build. Either way the leg cannot mean
+# anything, and saying so beats reporting green.
+require_crd() {
+	local kind="$1" plural="$2"
+	kc get crd "$plural.gateway.networking.k8s.io" \
 		-o jsonpath='{.status.storedVersions}' 2>/dev/null | grep -q v1 ||
-		die "the TCPRoute CRD does not serve v1 — the agent's crdcheck is v1-only and would disable TCPRoute silently"
-	ok "Gateway API CRDs installed (TCPRoute at v1)"
+		die "$kind is not served at v1 in this cluster, so the agent never watched it — run '$0 up' first (it installs the gateway-api $GWAPI_VERSION experimental bundle); this leg is NOT skipped, because a leg that skips itself green cannot fail (#853)"
 }
 
 # SPIRE, single cluster, self-signed (no upstream CA: nothing has to cross a
@@ -364,15 +477,16 @@ install_aether() {
 # chain exists at all; without it on a BACKEND, captureTCPClusters() never emits
 # that backend's "tcp:" cluster and the weighted set points at a name Envoy does
 # not have.
-deploy_workloads() {
-	log "deploying the TCPRoute parent (l4-front), its backends (l4-a, l4-b), and the client"
-	kc create ns "$TEST_NS" >/dev/null 2>&1 || true
-
-	local name text
-	for entry in "l4-front:floor" "l4-a:alpha" "l4-b:bravo"; do
-		name="${entry%%:*}"
-		text="${entry##*:}"
-		kc apply -f - >/dev/null <<YAML || die "workload $name apply failed"
+#
+# The TLS and UDP workloads register endpoint.aether.io/protocol: "tcp" as well
+# — "http" and "tcp" are the only accepted values (there is no "udp"), and what
+# the UDP path actually needs from the registry is the service's EDS plus its
+# application port, which the TCP classification supplies. captureUDPClusters
+# reads that port off the service entry and builds an app-port load assignment
+# for the plaintext "udp:" cluster.
+deploy_l4echo_workload() {
+	local name="$1" text="$2" mode="$3" port="$4" extra="$5"
+	kc apply -f - >/dev/null <<YAML || die "workload $name apply failed"
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: $name, namespace: $TEST_NS}
@@ -387,17 +501,68 @@ spec:
     metadata:
       labels: {app: $name, aether.io/managed: "true"}
       annotations:
-        endpoint.aether.io/port: "$APP_PORT"
+        endpoint.aether.io/port: "$port"
         endpoint.aether.io/protocol: "tcp"
     spec:
       serviceAccountName: $name
+      # l4echo is distroless/static and runs as uid 65532 already (asserted by
+      # //e2e/l4echo's container test); this states it rather than relying on it,
+      # and the read-only root is free — the binary writes nothing to disk, the
+      # TLS cert is minted in memory at start-up.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: app
           image: ghcr.io/bpalermo/aether/l4echo:latest
           imagePullPolicy: Never
-          args: ["--mode=tcp", "--listen=:$APP_PORT", "--text=$text"]
-          ports: [{containerPort: $APP_PORT}]
+          args: ["--mode=$mode", "--listen=:$port", "--text=$text"$extra]
+          ports: [{containerPort: $port}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
 YAML
+}
+
+deploy_workloads() {
+	log "deploying the L4 parents, their backends, and the client"
+	kc create ns "$TEST_NS" >/dev/null 2>&1 || true
+
+	# TCPRoute leg: the parent (whose floor chain a TCPRoute replaces) and two
+	# weighted backends.
+	local name text
+	for entry in "l4-front:floor" "l4-a:alpha" "l4-b:bravo"; do
+		name="${entry%%:*}"
+		text="${entry##*:}"
+		deploy_l4echo_workload "$name" "$text" tcp "$APP_PORT" ""
+	done
+
+	# TLSRoute leg. Every workload speaks TLS, INCLUDING the parent: #868's
+	# fall-through criterion is a positive assertion ("an unmatched SNI reaches
+	# the floor backend"), which is only observable if the floor backend can
+	# complete the handshake the probe started.
+	#
+	# The cert covers all three SNIs so a strict client would work too; the probe
+	# itself passes -k, because this leg is about which BACKEND answered, not
+	# about the identity on the cert.
+	for entry in "l4tls-front:tlsfloor" "l4tls-a:tlsalpha" "l4tls-b:tlsbravo"; do
+		name="${entry%%:*}"
+		text="${entry##*:}"
+		deploy_l4echo_workload "$name" "$text" tls "$TLS_PORT" \
+			", \"--tls-sans=$SNI_ALPHA,$SNI_BRAVO,$SNI_NOMATCH\""
+	done
+
+	# UDPRoute leg. l4udp-front is the parentRef — the VIP whose :18081 the CNI
+	# redirects — and l4udp-a / l4udp-b are its backends. Its own "udpfloor"
+	# marker is unreachable by construction today: there is no UDP floor, so with
+	# no UDPRoute there is no listener at all. Seeing it would itself be a
+	# finding, which is why the counts below are exhaustive rather than
+	# "at least N".
+	for entry in "l4udp-front:udpfloor" "l4udp-a:udpalpha" "l4udp-b:udpbravo"; do
+		name="${entry%%:*}"
+		text="${entry##*:}"
+		deploy_l4echo_workload "$name" "$text" udp "$UDP_PORT" ""
 	done
 
 	# The upstreams annotation is NOT an optimisation here: there is no ODCDS for
@@ -418,21 +583,24 @@ spec:
     metadata:
       labels: {app: client, aether.io/managed: "true"}
       annotations:
-        config.aether.io/upstreams: "l4-front.$TEST_NS,l4-a.$TEST_NS,l4-b.$TEST_NS"
+        config.aether.io/upstreams: "l4-front.$TEST_NS,l4-a.$TEST_NS,l4-b.$TEST_NS,l4tls-front.$TEST_NS,l4tls-a.$TEST_NS,l4tls-b.$TEST_NS,l4udp-front.$TEST_NS,l4udp-a.$TEST_NS,l4udp-b.$TEST_NS"
     spec:
       serviceAccountName: client
       containers:
         - name: curl
           image: curlimages/curl:8.22.0
           command: ["sleep", "infinity"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
 YAML
 
 	local d
-	for d in l4-front l4-a l4-b client; do
+	for d in l4-front l4-a l4-b l4tls-front l4tls-a l4tls-b l4udp-front l4udp-a l4udp-b client; do
 		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null ||
 			die "workload '$d' never became Ready"
 	done
-	ok "workloads deployed (l4-front=floor, l4-a=alpha, l4-b=bravo, client)"
+	ok "workloads deployed (tcp: floor/alpha/bravo, tls: tlsfloor/tlsalpha/tlsbravo, udp: udpfloor/udpalpha/udpbravo, client)"
 }
 
 # --- data-path probes -------------------------------------------------------
@@ -462,6 +630,62 @@ probe_batch() {
 	' sh "$svc.$TEST_NS.$MESH_DOMAIN:$APP_PORT" "$n" 2>/dev/null
 }
 
+# tls_probe_batch SNI N — run N TLS probes from inside the client pod and print
+# N lines, each the FIRST TOKEN of the body ("tlsfloor"/"tlsalpha"/"tlsbravo") or
+# "NOREPLY".
+#
+# --resolve pins the connection to the PARENT's VIP while the SNI (and the Host)
+# stay whatever we are testing. That separation is the point: filter-chain
+# selection here is (original destination IP) x (SNI), and only --resolve lets
+# one vary while the other is held.
+#
+# $TLS_VIP is the parent's ClusterIP, read once by verify_tls. -k because the
+# self-signed cert is about completing the handshake, not identity; the marker in
+# the body is what is asserted.
+tls_probe_batch() {
+	local sni="$1" n="$2"
+	# shellcheck disable=SC2016  # evaluated by the POD's shell; see probe_batch
+	kc -n "$TEST_NS" exec deploy/client -c curl -- sh -c '
+		sni="$1"; vip="$2"; port="$3"; n="$4"; i=1
+		while [ "$i" -le "$n" ]; do
+			body=$(curl -s -k --max-time 5 --resolve "$sni:$port:$vip" "https://$sni:$port/" 2>/dev/null | head -1 | tr -d "\r")
+			printf "%s\n" "${body:-NOREPLY}"
+			i=$((i + 1))
+		done
+	' sh "$sni" "$TLS_VIP" "$TLS_DIAL_PORT" "$n" 2>/dev/null
+}
+
+# udp_probe_batch SERVICE N — send N datagrams to SERVICE's mesh name on
+# :$MESH_UDP_PORT and print N lines, each the first token of the reply or
+# "NOREPLY".
+#
+# busybox nc's -w is an IDLE timeout, so a probe that IS answered still costs a
+# second; `timeout` bounds the pathological case where nc neither reads nor
+# exits. Both are cheap compared with a wedged batch.
+#
+# NOREPLY is the expected answer whenever no UDPRoute exists, and it is expected
+# for two different reasons that this probe cannot tell apart: the CNI redirect
+# sends the datagram to :18001/udp where nothing is bound, and without the
+# redirect the generated mesh Service has no UDP port for kube-proxy to serve.
+# That is stated rather than hidden — T3.0 is a weaker control than T1.0, which
+# is why T3.1 does not rest on it alone.
+udp_probe_batch() {
+	local svc="$1" n="$2"
+	# shellcheck disable=SC2016  # evaluated by the POD's shell; see probe_batch
+	kc -n "$TEST_NS" exec deploy/client -c curl -- sh -c '
+		target="$1"; port="$2"; n="$3"; i=1
+		while [ "$i" -le "$n" ]; do
+			reply=$(printf "probe-%s\n" "$i" | timeout 4 nc -u -w 1 "$target" "$port" 2>/dev/null | head -1 | tr -d "\r")
+			printf "%s\n" "${reply:-NOREPLY}"
+			i=$((i + 1))
+		done
+	' sh "$svc.$TEST_NS.$MESH_DOMAIN" "$MESH_UDP_PORT" "$n" 2>/dev/null
+}
+
+# svc_vip NAME — the ClusterIP of a registrar-generated mesh Service. Declared
+# and assigned separately (SC2155) so `set -e` can see a failed kubectl.
+svc_vip() { kc -n "$TEST_NS" get svc "$1" -o jsonpath='{.spec.clusterIP}' 2>/dev/null; }
+
 # count_token REPLIES TOKEN — how many replies start with TOKEN.
 count_token() {
 	printf '%s\n' "$1" | awk -v want="$2" '$1 == want { n++ } END { print n + 0 }'
@@ -478,11 +702,15 @@ histogram() {
 # filter-chain swap), and measuring across the transition would mix two
 # configurations into one exact assertion. Failing here is itself an assertion —
 # "the data plane never reached the expected state" — and says what it saw.
-await_all() {
-	local svc="$1" want="$2" timeout="$3" replies deadline probes=10
+#
+# await_probe takes the batch function by name so the TCP, TLS and UDP legs share
+# one convergence gate rather than three that can drift; await_all is the TCP
+# spelling and keeps its original signature.
+await_probe() {
+	local fn="$1" target="$2" want="$3" timeout="$4" replies deadline probes=10
 	deadline=$((SECONDS + timeout))
 	while true; do
-		replies="$(probe_batch "$svc" "$probes")"
+		replies="$("$fn" "$target" "$probes")"
 		if [ "$(count_token "$replies" "$want")" -eq "$probes" ]; then
 			return 0
 		fi
@@ -493,6 +721,8 @@ await_all() {
 		sleep 5
 	done
 }
+
+await_all() { await_probe probe_batch "$1" "$2" "$3"; }
 
 # await_mixed SERVICE A B TIMEOUT — poll small batches until BOTH A and B appear
 # and nothing else does. The convergence gate for the weighted-split phase, where
@@ -523,14 +753,17 @@ await_mixed() {
 # It is a GATE, not an assertion: ResolvedRefs here does not check that the
 # backend Services exist (backendsResolve does not look them up), so status
 # alone never proves the data path.
+# Takes the route KIND first so the TLSRoute and UDPRoute legs get the same gate
+# (their reconciler writes the same RouteParentStatus under the same
+# controllerName).
 await_route_observed() {
-	local name="$1" timeout="$2" gen observed status deadline
+	local kind="$1" name="$2" timeout="$3" gen observed status deadline
 	deadline=$((SECONDS + timeout))
 	while true; do
-		gen="$(kc -n "$TEST_NS" get tcproute "$name" -o jsonpath='{.metadata.generation}' 2>/dev/null || true)"
-		status="$(kc -n "$TEST_NS" get tcproute "$name" \
+		gen="$(kc -n "$TEST_NS" get "$kind" "$name" -o jsonpath='{.metadata.generation}' 2>/dev/null || true)"
+		status="$(kc -n "$TEST_NS" get "$kind" "$name" \
 			-o jsonpath="{range .status.parents[?(@.controllerName=='$MESH_CONTROLLER')]}{range .conditions[?(@.type=='Accepted')]}{.status}{'\n'}{end}{end}" 2>/dev/null || true)"
-		observed="$(kc -n "$TEST_NS" get tcproute "$name" \
+		observed="$(kc -n "$TEST_NS" get "$kind" "$name" \
 			-o jsonpath="{range .status.parents[?(@.controllerName=='$MESH_CONTROLLER')]}{range .conditions[?(@.type=='Accepted')]}{.observedGeneration}{'\n'}{end}{end}" 2>/dev/null || true)"
 		if [ "$status" = "True" ] && [ -n "$gen" ] && [ "$observed" = "$gen" ]; then
 			return 0
@@ -569,8 +802,77 @@ spec:
         - {group: "", kind: Service, name: l4-a, port: $APP_PORT, weight: $wa}
         - {group: "", kind: Service, name: l4-b, port: $APP_PORT, weight: $wb}
 YAML
-	await_route_observed l4-split 90 ||
-		die "the agent never published Accepted=True for this generation of TCPRoute l4-split (weights $wa/$wb): $(await_route_observed l4-split 1)"
+	await_route_observed tcproute l4-split 90 ||
+		die "the agent never published Accepted=True for this generation of TCPRoute l4-split (weights $wa/$wb): $(await_route_observed tcproute l4-split 1)"
+}
+
+# apply_tls_routes — one TLSRoute per SNI, both parented to l4tls-front.
+#
+# Two objects rather than one: TLSRoute carries its hostnames at SPEC level, not
+# per rule, so "SNI alpha to backend A and SNI bravo to backend B" cannot be
+# expressed in a single route. The reconciler appends every Service-parented
+# TLSRoute's rules to the same per-service list, which becomes one filter chain
+# per rule (cap_tls_<svc>_<i>), each with its own server_names.
+apply_tls_routes() {
+	kc apply -f - >/dev/null <<YAML || die "TLSRoute apply failed"
+apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata: {name: l4tls-alpha, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - group: ""
+      kind: Service
+      name: l4tls-front
+  hostnames: ["$SNI_ALPHA"]
+  rules:
+    - backendRefs:
+        - {group: "", kind: Service, name: l4tls-a, port: $TLS_PORT, weight: 1}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata: {name: l4tls-bravo, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - group: ""
+      kind: Service
+      name: l4tls-front
+  hostnames: ["$SNI_BRAVO"]
+  rules:
+    - backendRefs:
+        - {group: "", kind: Service, name: l4tls-b, port: $TLS_PORT, weight: 1}
+YAML
+	local r
+	for r in l4tls-alpha l4tls-bravo; do
+		await_route_observed tlsroute "$r" 90 ||
+			die "the agent never published Accepted=True for this generation of TLSRoute $r: $(await_route_observed tlsroute "$r" 1)"
+	done
+}
+
+# apply_udp_route WEIGHT_A WEIGHT_B — the UDPRoute for l4udp-front.
+#
+# backendRef ORDER is load-bearing for this leg and not only aesthetic: the
+# single-cluster udp_proxy takes backends[0], and common/l4project preserves
+# backendRef order (it defaults weights and keeps weight-0 entries rather than
+# dropping them). l4udp-a is first so today's "backends[0]" and a future
+# weight-honouring path name the same backend — see the UDP block in the header.
+apply_udp_route() {
+	local wa="$1" wb="$2"
+	kc apply -f - >/dev/null <<YAML || die "UDPRoute apply failed (weights $wa/$wb)"
+apiVersion: gateway.networking.k8s.io/v1
+kind: UDPRoute
+metadata: {name: l4udp-split, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - group: ""
+      kind: Service
+      name: l4udp-front
+  rules:
+    - backendRefs:
+        - {group: "", kind: Service, name: l4udp-a, port: $UDP_PORT, weight: $wa}
+        - {group: "", kind: Service, name: l4udp-b, port: $UDP_PORT, weight: $wb}
+YAML
+	await_route_observed udproute l4udp-split 90 ||
+		die "the agent never published Accepted=True for this generation of UDPRoute l4udp-split (weights $wa/$wb): $(await_route_observed udproute l4udp-split 1)"
 }
 
 # --- assertions -------------------------------------------------------------
@@ -729,6 +1031,190 @@ verify_delete() {
 	ok "20/20 probes back on the floor: the route, not the fixture, was doing the routing"
 }
 
+# --- T2: TLSRoute ------------------------------------------------------------
+
+# tls_assert PHASE SNI WANT N — N TLS probes with SNI, all of which must answer
+# WANT and nothing else. Exhaustive rather than "at least one": SNI selection is
+# deterministic (a filter-chain match, not a load-balancing draw), so a single
+# stray answer is a real defect and not sampling noise.
+tls_assert() {
+	local phase="$1" sni="$2" want="$3" n="$4" replies got
+	replies="$(tls_probe_batch "$sni" "$n")"
+	got="$(count_token "$replies" "$want")"
+	[ "$got" -eq "$n" ] ||
+		die "$phase: expected $n/$n '$want' for SNI $sni, got $(histogram "$replies")"
+}
+
+# T2.0 — the TLS negative control, and it runs FIRST, exactly as T1.0 does.
+#
+# With no TLSRoute the only portless chain on the parent's VIP is the floor, so
+# every SNI must reach the parent itself. This is what establishes that the probe
+# can distinguish the parent from its backends BEFORE any routing is asserted; if
+# it could not, every count below would be meaningless and still green.
+verify_tls_control() {
+	log "T2.0 control: no TLSRoute — every SNI must reach the TLS FLOOR (l4tls-front itself)"
+	require_crd TLSRoute tlsroutes
+	# `|| true` so a missing Service produces the die below rather than `set -e`
+	# aborting the run with no explanation (an assignment takes the substitution's
+	# exit status).
+	TLS_VIP="$(svc_vip l4tls-front || true)"
+	[ -n "$TLS_VIP" ] ||
+		die "the registrar never generated a mesh Service for l4tls-front, so there is no VIP to dial — the TLS workloads did not register"
+	ok "l4tls-front VIP is $TLS_VIP (dialled on :$TLS_DIAL_PORT, which no filter chain claims)"
+
+	await_probe tls_probe_batch "$SNI_ALPHA" tlsfloor 240 ||
+		die "l4tls-front never answered 'tlsfloor' with no TLSRoute applied: $(await_probe tls_probe_batch "$SNI_ALPHA" tlsfloor 1) — either the TLS floor is not carrying traffic or the handshake never completed, and nothing below this line could mean anything"
+	local sni
+	for sni in "$SNI_ALPHA" "$SNI_BRAVO" "$SNI_NOMATCH"; do
+		tls_assert "T2.0" "$sni" tlsfloor 20
+	done
+	ok "60/60 probes across three SNIs reached the TLS floor: SNI does not route until a TLSRoute says so"
+}
+
+# T2.1 / T2.2 — SNI selects the backend, asserted in BOTH directions.
+#
+# Both directions because a one-way assertion is nearly free to pass by accident:
+# if the SNI chains were ignored entirely and chain 0 always won, "alpha answers
+# tlsalpha" would be green while nothing about SNI worked. Each SNI proving it
+# reaches a DIFFERENT backend is what makes the match, rather than the ordering,
+# the thing being measured (#868's own correction).
+verify_tls_sni() {
+	log "T2.1/T2.2 SNI selection: $SNI_ALPHA -> l4tls-a, $SNI_BRAVO -> l4tls-b"
+	apply_tls_routes
+	await_probe tls_probe_batch "$SNI_ALPHA" tlsalpha 180 ||
+		die "the TLSRoute for $SNI_ALPHA never took effect: $(await_probe tls_probe_batch "$SNI_ALPHA" tlsalpha 1) — 'tlsfloor' here means the route was accepted but its SNI chain never won the match, which is what happens when a destination_port-qualified chain claims the dialled port (see the header)"
+	tls_assert "T2.1" "$SNI_ALPHA" tlsalpha 20
+	ok "20/20 on SNI $SNI_ALPHA reached l4tls-a"
+
+	await_probe tls_probe_batch "$SNI_BRAVO" tlsbravo 180 ||
+		die "the TLSRoute for $SNI_BRAVO never took effect: $(await_probe tls_probe_batch "$SNI_BRAVO" tlsbravo 1)"
+	tls_assert "T2.2" "$SNI_BRAVO" tlsbravo 20
+	ok "20/20 on SNI $SNI_BRAVO reached l4tls-b — the SNI, not the chain order, selects the backend"
+}
+
+# T2.3 — an unmatched SNI falls through to the TCP floor, asserted POSITIVELY.
+#
+# This is the designed behaviour, not a gap: the SNI chains match
+# ClusterIP/32 + server_names and sit alongside a chain matching the same /32
+# with no server_names, so a connection whose SNI matches no rule selects the
+# less specific chain. The /32 is what stops a TLSRoute for one service from
+# hijacking another's connections carrying the same SNI, since a client can set
+# any SNI it likes.
+#
+# Asserted as "reaches the floor backend", never as "does not reach A or B": an
+# absence would also be satisfied by the connection being dropped, which is a
+# different outcome entirely.
+verify_tls_fallthrough() {
+	log "T2.3 fall-through: SNI $SNI_NOMATCH matches no rule — it must reach the TLS FLOOR"
+	await_probe tls_probe_batch "$SNI_NOMATCH" tlsfloor 180 ||
+		die "an unmatched SNI did not reach the floor: $(await_probe tls_probe_batch "$SNI_NOMATCH" tlsfloor 1) — 'tlsalpha'/'tlsbravo' means an SNI chain matched a name it does not carry; 'NOREPLY' means the connection was dropped instead of falling through"
+	tls_assert "T2.3" "$SNI_NOMATCH" tlsfloor 20
+	# Re-assert the two routed SNIs in the SAME phase. Without this, a run in
+	# which both TLSRoutes had silently stopped matching would read as a passing
+	# fall-through: everything reaches the floor, which is exactly what T2.0
+	# already showed. The three answers have to be different AT THE SAME TIME for
+	# the fall-through to mean anything.
+	tls_assert "T2.3" "$SNI_ALPHA" tlsalpha 10
+	tls_assert "T2.3" "$SNI_BRAVO" tlsbravo 10
+	ok "20/20 on an unmatched SNI reached the floor while the other two SNIs still reached their own backends"
+}
+
+# T2.4 — delete both TLSRoutes: every SNI returns to the floor.
+#
+# The third TLS negative control, and the one that proves the ROUTES rather than
+# the fixture were doing the work.
+verify_tls_delete() {
+	log "T2.4 delete: remove both TLSRoutes — every SNI must return to the FLOOR"
+	kc -n "$TEST_NS" delete tlsroute l4tls-alpha l4tls-bravo >/dev/null ||
+		die "could not delete the TLSRoutes"
+	await_probe tls_probe_batch "$SNI_ALPHA" tlsfloor 180 ||
+		die "SNI $SNI_ALPHA did not return to the floor after its TLSRoute was deleted: $(await_probe tls_probe_batch "$SNI_ALPHA" tlsfloor 1)"
+	local sni
+	for sni in "$SNI_ALPHA" "$SNI_BRAVO"; do
+		tls_assert "T2.4" "$sni" tlsfloor 20
+	done
+	ok "40/40 back on the TLS floor: the routes, not the fixture, were doing the routing"
+}
+
+# --- T3: UDPRoute ------------------------------------------------------------
+
+# T3.0 — the UDP negative control: with no UDPRoute there is no UDP capture
+# listener at all (GenerateUDPCaptureListener returns nil for an empty route
+# set), so nothing answers.
+#
+# It is a weaker control than T1.0 — see udp_probe_batch for why NOREPLY has two
+# possible causes — but it is a real assertion: an ANSWER here means either a
+# listener outlived its routes or something outside the mesh is serving the VIP,
+# and both are findings.
+verify_udp_control() {
+	log "T3.0 control: no UDPRoute — no datagram to l4udp-front:$MESH_UDP_PORT may be answered"
+	require_crd UDPRoute udproutes
+	local replies none
+	replies="$(udp_probe_batch l4udp-front 10)"
+	none="$(count_token "$replies" NOREPLY)"
+	[ "$none" -eq 10 ] ||
+		die "T3.0: expected 10/10 'NOREPLY' before any UDPRoute exists, got $(histogram "$replies") — something is answering UDP on the mesh VIP with no route to justify a listener"
+	ok "10/10 datagrams unanswered: the UDP listener does not exist until a UDPRoute does"
+}
+
+# T3.1 — delivery over the plaintext UDP path, with the one weight shape both
+# the current and the fixed implementation must agree on.
+#
+# 40 datagrams, ALL of which must be answered by l4udp-a and none by l4udp-b. It
+# is exhaustive rather than a band because this is not a per-datagram draw under
+# either implementation: today udp_proxy carries a single cluster, and under a
+# weight-honouring one weight 0 means DRAIN, not a share (#492). A single
+# 'udpbravo' therefore fails under both, which is what lets this assertion
+# survive #873's fix unchanged.
+#
+# What it does NOT assert, deliberately: that UDP selects BETWEEN backends or
+# between services. That is #873, and asserting it today would fail by design.
+verify_udp_delivery() {
+	log "T3.1 delivery: UDPRoute l4udp-a weight 100 / l4udp-b weight 0 — 40 datagrams, all to l4udp-a"
+	apply_udp_route 100 0
+	await_probe udp_probe_batch l4udp-front udpalpha 180 ||
+		die "the UDPRoute never carried a datagram: $(await_probe udp_probe_batch l4udp-front udpalpha 1) — 'NOREPLY' is the UDP path failing at one of three places that nothing else here distinguishes: the CNI's nftables UDP REDIRECT inside the pod netns, udp_proxy receiving on the redirected socket, or conntrack un-DNATing the reply back to VIP:$MESH_UDP_PORT so the client's connected socket accepts it. Check the agent log for 'UDPRoute input discarded' first — a discarded backend is a different failure from a broken data path"
+
+	local replies alpha bravo none other
+	replies="$(udp_probe_batch l4udp-front 40)"
+	alpha="$(count_token "$replies" udpalpha)"
+	bravo="$(count_token "$replies" udpbravo)"
+	none="$(count_token "$replies" NOREPLY)"
+	other=$((40 - alpha - bravo - none))
+
+	[ "$none" -eq 0 ] ||
+		die "T3.1: $none/40 datagrams went unanswered — the UDP path is lossy, not absent: $(histogram "$replies")"
+	[ "$other" -eq 0 ] ||
+		die "T3.1: $other/40 datagrams were answered by something that is neither backend: $(histogram "$replies")"
+	[ "$bravo" -eq 0 ] ||
+		die "T3.1: l4udp-b answered $bravo/40 datagrams at weight 0 — weight 0 is DRAIN (#492), and today's single-cluster udp_proxy should not reach it either: $(histogram "$replies")"
+	[ "$alpha" -eq 40 ] ||
+		die "T3.1: expected 40/40 'udpalpha', got $(histogram "$replies")"
+	ok "40/40 datagrams answered by l4udp-a, 0 by the weight-0 backend (plaintext — no mTLS on this leg, by design)"
+}
+
+# T3.2 — delete the UDPRoute: the listener goes away and nothing answers again.
+#
+# The second UDP negative control, reached from the opposite direction to T3.0,
+# and the one that proves the ROUTE rather than the fixture was carrying the
+# datagrams.
+verify_udp_delete() {
+	log "T3.2 delete: remove the UDPRoute — datagrams must go unanswered again"
+	kc -n "$TEST_NS" delete udproute l4udp-split >/dev/null || die "could not delete UDPRoute l4udp-split"
+	local replies none deadline=$((SECONDS + 180))
+	while true; do
+		replies="$(udp_probe_batch l4udp-front 10)"
+		none="$(count_token "$replies" NOREPLY)"
+		if [ "$none" -eq 10 ]; then
+			break
+		fi
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "T3.2: datagrams are still answered after the UDPRoute was deleted: $(histogram "$replies") — the UDP capture listener outlived its route"
+		sleep 5
+	done
+	ok "10/10 datagrams unanswered again: the route, not the fixture, was carrying them"
+}
+
 verify() {
 	verify_control
 	verify_split
@@ -736,6 +1222,17 @@ verify() {
 	verify_all_drained
 	verify_delete
 	log "all TCPRoute assertions passed (control, 75/25 band, mirrored weight-0 drain, all-drained floor, delete)"
+
+	verify_tls_control
+	verify_tls_sni
+	verify_tls_fallthrough
+	verify_tls_delete
+	log "all TLSRoute assertions passed (control, SNI both directions, positive fall-through, delete)"
+
+	verify_udp_control
+	verify_udp_delivery
+	verify_udp_delete
+	log "all UDPRoute assertions passed (control, plaintext delivery with a weight-0 backend drained, delete)"
 }
 
 down() {
