@@ -50,14 +50,22 @@
 # service's primary port, or to :18082, lands on the port-qualified FLOOR chain
 # and the SNI chains are never even considered.
 #
-# So this leg dials $TLS_DIAL_PORT, which no chain claims, and the surviving
-# candidates are exactly the portless ones: the SNI chains and the any-port
-# shim. That is what makes T2.1/T2.2 (SNI wins) and T2.3 (no SNI match falls to
-# the floor) a real comparison — same client, same port, three SNIs.
+# THAT WAS #911, AND IT IS NOW FIXED. The SNI chains are qualified onto every
+# port a floor or per-port chain claims, so they tie the floor chain on tiers 1
+# and 2 and win on tier 3 (server_names). TLSRoute works on both mesh spellings
+# again and no longer depends on the 037 any-port shim — which matters twice
+# over, because Phase 4 proposes to REMOVE that shim, and because TLSRoute
+# traffic was incrementing the very counter Phase 4 is gated on.
 #
-# Two consequences worth stating rather than discovering later: TLSRoute is
-# reachable today only through the 037 any-port shim, which 037 Phase 4 proposes
-# to REMOVE; and if a future change port-qualifies the SNI chains, T2's dial port
+# So this leg now dials the service's PRIMARY port, which the floor chain also
+# claims. That is deliberate: dialling a port nothing claims would still pass
+# whether or not the fix is present, and a check that cannot distinguish those
+# two states is not a check. T2.1/T2.2 (SNI wins) and T2.3 (unmatched SNI falls
+# through to the floor) are a real comparison at this port — same client, same
+# port, three SNIs — and T2.3 now falls to the port-qualified floor chain rather
+# than to the shim.
+#
+# One consequence worth stating rather than discovering later: if the SNI chains
 # has to move with it. Filed as #911 rather than worked around here.
 #
 # THE UDP LEG DIALS :18081, AND ONLY :18081.
@@ -147,12 +155,15 @@ TRUST_DOMAIN="aether.internal"
 APP_PORT="9000"
 # The TLS leg. TLS_PORT is what the l4echo --mode=tls workloads bind and what
 # they register as endpoint.aether.io/port, so it is also the port the backends'
-# "tcp:" clusters dial. TLS_DIAL_PORT is what the PROBE dials, and it must be a
-# port NO capture filter chain claims — see the TLS block in the header. It is
-# never bound by anything; the capture listener sees it only as the original
-# destination port recovered by use_original_dst.
+# "tcp:" clusters dial, AND the service's primary port.
+#
+# TLS_DIAL_PORT is what the PROBE dials. It is deliberately the primary port —
+# a port the 037 floor chain also claims — so this leg exercises the #911 fix.
+# It was 8443 (claimed by nothing) while TLSRoute was shadowed there; dialling
+# an unclaimed port passes with or without the fix and so proves nothing about
+# it. See the TLS block in the header.
 TLS_PORT="9443"
-TLS_DIAL_PORT="8443"
+TLS_DIAL_PORT="9443"
 # The three SNIs. Two are routed by a TLSRoute; the third matches nothing and
 # must reach the floor (#868's corrected fall-through criterion).
 SNI_ALPHA="alpha.l4tls.test"
