@@ -216,6 +216,54 @@ jobs:
             --@aspect_rules_lint//lint:fail_on_violation \
             "${targets[@]}"
 
+  # Formatting was configured but never enforced. `make format-check` exists in
+  # the Makefile, gofumpt/buildifier/shfmt/buf are wired up in
+  # bazel/format/BUILD.bazel, CLAUDE.md documents the target — and no job ran it,
+  # so `e2e/multiprotocol.sh` merged in #901 with two-space indentation against
+  # shfmt's tabs, green, and sat unformatted on main (#906).
+  #
+  # Note what made that easy to miss: the `shell` job above DID shellcheck that
+  # exact file. Lint coverage was real; format coverage was absent. A green
+  # shell job is not evidence the file was formatted.
+  format:
+    needs: changes
+    if: needs.changes.outputs.control_plane == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      # The formatter prints one "Formatted <language>" line per configured
+      # language and its exit code says nothing about how much it inspected. So
+      # assert the set of languages it actually ran, not just the status: a
+      # language dropped from bazel/format/BUILD.bazel would otherwise leave this
+      # job green while checking less than it claims — the #853 shape the shell
+      # job guards against with its empty-query tripwire.
+      - name: Check formatting
+        run: |
+          set +e
+          out="$(bazel run //:format.check 2>&1)"
+          rc=$?
+          printf '%s\n' "$out"
+          missing=()
+          for lang in Starlark Go Shell "Protocol Buffer"; do
+            grep -qF "Formatted $lang in" <<<"$out" || missing+=("$lang")
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            printf '::error::the formatter never ran for: %s — refusing to pass a format gate that checked less than it claims (#853)\n' "${missing[*]}"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::formatting violations — run 'make format' and commit the result"
+            exit 1
+          fi
+          echo "formatter ran for all 4 configured languages"
+
   envoy-api-parity:
     needs: changes
     # The agent's xDS bindings (go.mod: go-control-plane/envoy) must track the
@@ -652,7 +700,7 @@ jobs:
   # (and often `integration`) skip for an empty impact set.
   ci:
     if: always()
-    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, shell, test, race, integration, e2e]
+    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, shell, format, test, race, integration, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any control-plane job failed or was cancelled
