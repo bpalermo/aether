@@ -371,6 +371,21 @@ Each of these invalidated a real run:
    here, the workload set never created that state at all. When a release adds a data
    path, check that something in `aether-test` actually walks it before starting.
 
+10. **A classifier can be confidently wrong, and it looks exactly like a quiet
+    instrument.** From #846 until #887, `classify()` tested the HTTP status only
+    inside an `error_code === 0` branch — but k6 sets a *non-zero* `error_code` for
+    an HTTP error response (a 504 arrives as 1504, i.e. `1000 + status`). The status
+    tests were therefore unreachable for every response they were written for:
+    `http_4xx` and `http_5xx` could never be incremented at all, 4xx was swallowed by
+    the `1400–1499` range test and filed as `proto`, and 5xx fell off the end into
+    `other`. Both the rev231 and rev234 residuals were reported as unattributable
+    `other`; the rev234 33 were later reconciled 33-of-33 against the source proxies'
+    access logs as plain 504/UT responses. Two lessons: a "0" in a class is only
+    evidence if that class has been *shown* to be reachable (cf. aether#853), and an
+    enum-like mapping onto another tool's numbering needs its constants checked
+    against that tool, not against the docs' prose. The ranges here were verified by
+    running k6 against fixed-status targets — see the red-state recipe in #887.
+
 ## Files
 
 - `echo.yaml` — the mesh_dns SLI target (3 replicas, soft hostname spread). Apply before
@@ -382,15 +397,44 @@ Each of these invalidated a real run:
   every transport failure look alike — which is why the rev226 soak's ~510
   failures could never be attributed. Collect it from the runner logs:
 
+  Since #887 the summary also breaks every non-zero class down **by target** and
+  **by reason** (the exact k6 `error_code` / HTTP status pair), and every failure
+  is logged verbatim as it happens, so a residual no longer needs a re-run to
+  attribute. Collect it from the runner logs:
+
   ```bash
-  kubectl -n aether-test logs <k6-runner-pod> | grep -A12 'failure classes'
-  # machine-readable, one line:
+  kubectl -n aether-test logs <k6-runner-pod> | grep -A30 'failure classes'
+  # machine-readable, one line (now also carries byEndpoint/byReason/attributed):
   kubectl -n aether-test logs <k6-runner-pod> | grep AETHER_METRIC
+  # the verbatim per-failure sample, capped at 10 per class per VU:
+  kubectl -n aether-test logs <k6-runner-pod> | grep AETHER_FAIL
   ```
 
-  Read `classified=N of http_req_failed≈M` first: **N < M means a failure mode
-  `classify()` does not recognise**, and that gap is itself the finding. A
-  non-zero `other` means the same thing one level down.
+  Read the two reconciliation lines first, in order:
+
+  - `classified=N of http_req_failed≈M` — **N < M means a failure mode
+    `classify()` does not recognise**, and that gap is itself the finding. A
+    non-zero `other` means the same thing one level down.
+  - `attributed=A of classified=N` — **A < N means a code/status pair the
+    script never declared**, so it is missing from the *by reason* table. The
+    summary prints a `GAP:` line when this happens; the `AETHER_FAIL` sample
+    lines name the pair verbatim, and the fix is to add it to `HTTP_STATUSES`
+    or `transportCodes()`.
+
+  The `AETHER_FAIL` lines carry a timestamp, which is what lines a burst of
+  failures up against a specific proxy roll — the only instrument that can see
+  the #823 egress blip, since the external prober rides one keep-alive
+  connection and is structurally blind to it (#846).
+
+  > **Why a breakdown and not just raw output.** k6's `handleSummary` data
+  > contains no per-tag submetrics: a counter tagged with `endpoint`/`code`/
+  > `status` arrives as a single number aggregated across every tag value. The
+  > only way to make a tag split visible is to declare each combination as a
+  > threshold submetric up front (metrics cannot be created outside the init
+  > context), and that costs real CPU and RSS on a container this repo has
+  > already OOM-killed mid-soak. Hence the small declared key space plus the
+  > bounded verbatim sample. Verified on k6 v2.3.0; see the comment block in
+  > `k6-mesh-soak.js`.
 - `k6-runner.yaml` — the 5-node runner DaemonSet.
 - `churn.sh` — the 31-roll churn driver plus the no-roll window and the demand-set
   shrink; takes a build label for the log header.
