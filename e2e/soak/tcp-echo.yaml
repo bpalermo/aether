@@ -1,0 +1,98 @@
+# The soak harness's TCP-primary target.
+#
+#   kubectl apply -n aether-test -f e2e/soak/tcp-echo.yaml
+#
+# Why it is here (2026-09-23, #903). `tcp-echo` is the only TCP-PRIMARY service
+# on the cluster, which makes it the sole carrier of two things the soak now
+# grades: the two sanctioned raw-TCP spellings (<fqdn>:18082 and <fqdn>:9000),
+# and the any-port shim whose counter is proposal 037 Phase 4's evidence.
+#
+# It ran for 82 days with no repo-owned definition at all, no resource requests,
+# and no spread — and both replicas had drifted onto main-worker-01. That is the
+# identical shape that made the 2026-09-02 soak ungradeable: `echo` was a single
+# replica pinned by chance to the node hosting the whole o11y stack, with a 10m
+# request, and when that node saturated the mesh_dns tier reported ~30% errors
+# fleet-wide while the mesh was fine. Nothing in either repo defined it, so there
+# was nowhere to fix it. `echo.yaml` exists for that reason; this file is the
+# same lesson applied to the service that carries the TCP legs.
+#
+# The concrete harm here is subtler than a starved target: with both replicas on
+# one node, four of the five `mp-dialer` pods take a cross-node route to
+# `tcp-echo` while reaching `mixed-svc` (properly spread) node-locally. The two
+# TCP legs are then not placement-matched, and a per-leg difference in failure
+# rate reads as a protocol-path difference when it is partly just topology.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tcp-echo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tcp-echo
+  labels:
+    app: tcp-echo
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: tcp-echo
+  template:
+    metadata:
+      labels:
+        app: tcp-echo
+        # Without this the CNI installs no capture redirect and the pod is
+        # invisible to the mesh — gotcha 1 in README.md.
+        aether.io/managed: "true"
+      annotations:
+        # TCP-primary: this is what gives the service the portless floor chain
+        # and, since proposal 037, the 18082 and :9000 qualified spellings.
+        endpoint.aether.io/port: "9000"
+        endpoint.aether.io/protocol: tcp
+    spec:
+      serviceAccountName: tcp-echo
+      # The #903 fix. SOFT (ScheduleAnyway) for the same reason echo.yaml gives:
+      # a DoNotSchedule constraint would leave a replica Pending on a cordoned
+      # node and take the target down entirely, which is worse than an uneven
+      # spread. Soft is enough here — the scheduler honours it in the ordinary
+      # case, and the ordinary case is what drifted.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: tcp-echo
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tcp-echo
+          image: istio/tcp-echo-server:1.3
+          args: ["9000", "hello"]
+          ports:
+            - containerPort: 9000
+              protocol: TCP
+          # The live Deployment carried NO requests at all. echo.yaml already
+          # records why that is not free: an unrequested pod looks like zero cost
+          # to the scheduler and is starved first on a busy node. Sized from the
+          # dialer's actual load (~0.8 connections/s fleet-wide), not copied.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
