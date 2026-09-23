@@ -86,17 +86,6 @@ ghcr_manifest_digest() {
 # with the same token — so the tag scheme is not a preference, it is the only
 # scheme that works on this registry. Both the signer and the verifier therefore
 # have to agree on this exact string.
-#
-# THE `.sig` SUFFIX IS NOT FREE ANY MORE. cosign v3 defaults `sign` to
-# `--new-bundle-format=true`, which writes an OCI 1.1 referring artifact rather
-# than this tag; on a registry that 404s /referrers, go-containerregistry lands
-# it under the referrers FALLBACK tag `sha256-<hex>` — an image index, with NO
-# `.sig` suffix — and this function would then resolve a tag that never gets
-# written, so every signature below would read as MISSING. The signer holds the
-# old layout with an explicit `--new-bundle-format=false`
-# (.github/workflows/publish.yaml), which is what keeps this string correct.
-# That flag is deprecated upstream: when it goes, this function and the signer
-# have to change in the SAME commit.
 ghcr_signature_tag() {
 	printf '%s.sig\n' "${1/:/-}"
 }
