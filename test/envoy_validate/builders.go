@@ -608,10 +608,12 @@ func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 // the plaintext "udp:" cluster it routes to (proposal 018 Phase 3b).
 //
 // SCOPE, deliberately narrow: this models DELIVERY only. udp_proxy's route
-// specifier here is a bare Cluster taken from the first backend of the
-// lexicographically first service, so backend SELECTION is not expressible and
-// weights are discarded — issue #873. An assertion that UDP picks between
-// backends would fail by design, so there is none.
+// specifier is a single Cluster — its only route action carries one cluster
+// name, so a traffic SPLIT is not expressible at all (#873). What the generator
+// chooses among the backends (drained ones skipped, then the heaviest) is
+// covered by unit tests in agent/internal/xds/proxy; there is nothing for an
+// Envoy config-validation fixture to add, so this builds the single-backend
+// shape and checks Envoy accepts the listener.
 func CaptureUDPBootstrapJSON() ([]byte, error) {
 	bs, err := buildCaptureUDPBootstrap()
 	if err != nil {

@@ -530,7 +530,13 @@ the explicit listener (so callers need no changes):
 - **`TLSRoute`** — SNI-based passthrough routing.
 - **`UDPRoute`** — a `udp_proxy` floor to the backend's app UDP port. Note that
   UDP rides the mesh **in plaintext**: mTLS is a TCP/TLS construct and DTLS is
-  not implemented.
+  not implemented. Two limits worth knowing before you write one (#873): a
+  **split is not expressible** — `udp_proxy` carries a single cluster, so a
+  multi-backend `UDPRoute` binds the heaviest backend and discards the split
+  (`weight: 0` *is* honoured as a drain) — and a pod serves **one
+  UDPRoute-backed service**, because the capture redirect destroys the
+  destination ClusterIP before Envoy sees the datagram. Both are logged and
+  counted on `aether.agent.l4route.udp_unsupported`.
 - **Cross-namespace backends** need a standard `ReferenceGrant`.
 - The parent must be a **registry-backed mesh Service** (one with live
   endpoints) — a selectorless "anchor" Service won't survive reconciliation.

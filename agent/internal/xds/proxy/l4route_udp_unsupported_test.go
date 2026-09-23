@@ -53,7 +53,12 @@ func TestUnsupportedUDPRouteShapes(t *testing.T) {
 			contain: "dropped entirely",
 		},
 		{
-			name: "weight 0 drain is not honoured for UDP",
+			// #873 changed what this reports, not whether it reports. The drain
+			// is now HONOURED (the listener no longer forwards to a drained
+			// backend), and because it was this service's only backend the
+			// service ends up contributing no data path at all — still worth
+			// saying out loud, since the UDPRoute was accepted.
+			name: "weight 0 drain leaves the service with nothing to route to",
 			routes: map[string][]L4Backend{
 				"ns/a": {{Cluster: "udp:a.mesh", Weight: 0}},
 			},
@@ -69,6 +74,12 @@ func TestUnsupportedUDPRouteShapes(t *testing.T) {
 			want: 0,
 		},
 		{
+			// #873: this case USED to report 3 (weights discarded + drain not
+			// honoured + second service dropped). Two of those three were bugs,
+			// not limits: the drain on udp:a1.mesh is now honoured, which leaves
+			// ns/a with exactly ONE routable backend, so nothing about ns/a is
+			// discarded any more. The one real limit — a second UDPRoute-backed
+			// service on the same pod — still reports.
 			name: "every shape at once",
 			routes: map[string][]L4Backend{
 				"ns/a": {
@@ -77,7 +88,34 @@ func TestUnsupportedUDPRouteShapes(t *testing.T) {
 				},
 				"ns/b": {{Cluster: "udp:b.mesh", Weight: 1}},
 			},
-			want: 3,
+			want:    1,
+			contain: "dropped entirely",
+		},
+		{
+			// The drain is honoured, so the SURVIVING count is what decides
+			// whether weights were discarded: three backends, one drained, two
+			// left to split between and no way to express the split.
+			name: "weights are still discarded among the backends that survive the drain",
+			routes: map[string][]L4Backend{
+				"ns/a": {
+					{Cluster: "udp:a1.mesh", Weight: 0},
+					{Cluster: "udp:a2.mesh", Weight: 5},
+					{Cluster: "udp:a3.mesh", Weight: 95},
+				},
+			},
+			want:    1,
+			contain: "the backend weights are discarded",
+		},
+		{
+			// A backend with no resolved cluster cannot be bound either, and a
+			// service left with none of them is in the same place as a fully
+			// drained one: the route is accepted and produces no data path.
+			name: "a service with no resolvable backend reports",
+			routes: map[string][]L4Backend{
+				"ns/a": {{Cluster: "", Weight: 7}},
+			},
+			want:    1,
+			contain: "contributes no UDP route",
 		},
 	}
 
@@ -97,11 +135,14 @@ func TestUnsupportedUDPRouteShapes(t *testing.T) {
 	}
 }
 
-// TestUnsupportedUDPRouteShapesTracksTheGenerator is the anti-drift check. The
-// detector duplicates GenerateUDPCaptureListener's selection (first non-empty
-// service over SORTED keys, then backends[0]); if the generator's choice ever
-// changes and the detector's does not, the warning would name the wrong cluster
-// while the listener silently used another — worse than no warning.
+// TestUnsupportedUDPRouteShapesTracksTheGenerator is the anti-drift check.
+//
+// #874 shipped the detector as a deliberate DUPLICATE of the generator's
+// selection, pinned by this test, because a detector that drifts confidently
+// names the wrong cluster and is worse than no warning at all. #873 removed the
+// duplicate: both now call selectUDPRoute, so the drift is unrepresentable
+// rather than merely tested for. The test stays as the end-to-end pin — it is
+// what would catch a future refactor that gives either side its own copy again.
 func TestUnsupportedUDPRouteShapesTracksTheGenerator(t *testing.T) {
 	// "ns/a" sorts before "ns/z", so the generator binds to a1 and the detector
 	// must say z is the one dropped, not a.
