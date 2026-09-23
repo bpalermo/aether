@@ -249,7 +249,7 @@ func (r *EtcdRegistry) RegisterEndpoint(ctx context.Context, serviceName string,
 		ctx,
 		"registering endpoint",
 		"service", serviceName,
-		"protocol", protocol,
+		"protocol", protocol.String(),
 		"cluster", endpoint.GetClusterName(),
 		"ip", ip,
 	)
@@ -352,7 +352,7 @@ func (r *EtcdRegistry) UnregisterEndpoints(ctx context.Context, serviceName stri
 // directly. An index would add write-amplification to every register for a rarely
 // taken read; revisit only if a hot direct-to-etcd consumer appears.
 func (r *EtcdRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
-	r.log.DebugContext(ctx, "listing endpoints", "service", service, "protocol", protocol)
+	r.log.DebugContext(ctx, "listing endpoints", "service", service, "protocol", protocol.String())
 
 	resp, err := r.client.Get(ctx, r.keyPrefix, clientv3.WithPrefix())
 	if err != nil {
@@ -374,19 +374,19 @@ func (r *EtcdRegistry) ListEndpoints(ctx context.Context, service string, protoc
 		endpoints = append(endpoints, &endpoint)
 	}
 
-	r.log.DebugContext(ctx, "listed endpoints", "service", service, "protocol", protocol, "count", len(endpoints))
+	r.log.DebugContext(ctx, "listed endpoints", "service", service, "protocol", protocol.String(), "count", len(endpoints))
 	return endpoints, nil
 }
 
 // ListAllEndpoints retrieves all endpoints for the given protocol across all services from etcd.
 // Endpoints are organized by service name in the returned map.
 func (r *EtcdRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-	r.log.DebugContext(ctx, "listing all endpoints for protocol", "protocol", protocol)
+	r.log.DebugContext(ctx, "listing all endpoints for protocol", "protocol", protocol.String())
 
 	// Get all keys under the prefix
 	resp, err := r.client.Get(ctx, r.keyPrefix, clientv3.WithPrefix())
 	if err != nil {
-		r.log.ErrorContext(ctx, "failed to list all endpoints", "error", err, "protocol", protocol)
+		r.log.ErrorContext(ctx, "failed to list all endpoints", "error", err, "protocol", protocol.String())
 		return nil, fmt.Errorf("failed to list all endpoints: %w", err)
 	}
 
@@ -417,7 +417,7 @@ func (r *EtcdRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1
 		endpointsByService[serviceName] = append(endpointsByService[serviceName], &endpoint)
 	}
 
-	r.log.DebugContext(ctx, "listed all endpoints", "protocol", protocol, "services", len(endpointsByService))
+	r.log.DebugContext(ctx, "listed all endpoints", "protocol", protocol.String(), "services", len(endpointsByService))
 	return endpointsByService, nil
 }
 
