@@ -106,8 +106,35 @@ jobs:
           # bundle like prober; the chart pins the image digest at package time.
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/udsecho:udsecho.push
 
+      # Pinned to a COMMIT, not a tag, and deliberately unlike the rest of this
+      # repo's actions. This job holds `packages: write` AND `id-token: write`:
+      # whoever controls the action installed here can push to our repositories
+      # and sign with our OIDC identity, and `cosign verify` below would PASS,
+      # because the Fulcio certificate really would be this workflow's. A moved
+      # tag is enough to do that; the signature does not protect against a
+      # swapped signer, only the pin does.
+      #
+      # NO `cosign-release:` ON PURPOSE. Left unset, the action installs the
+      # version it was released with by downloading the binary and comparing it
+      # against a SHA-256 **hardcoded in this pinned commit** -- so the pin above
+      # fixes the cosign binary too, with no trust in a release asset or in
+      # raw.githubusercontent.com. Naming a version instead takes the action's
+      # other branch, which fetches the release public key over the network and
+      # verifies the download against it. That branch is sound in v4 (the key's
+      # digest is pinned too), but it is strictly more moving parts for no gain,
+      # and a `cosign-release:` we forget to bump silently outlives the pin.
+      #
+      # v4.1.2 (6f9f177, "Bump cosign to 3.0.6") installs cosign **v3.0.6**,
+      # sha256 c956e5df…3f4c74. The 3.x installer line is abandoned -- its last
+      # release was 2025-10-16 and it still bootstraps cosign v2.6.1 -- so 4.x
+      # is the line to be on. cosign's own latest is v3.1.3; no installer
+      # release ships it yet. v3.1.3 fixes GHSA-fx35-mq7g-6g98, which is a
+      # `verify-blob`/`verify-blob-attestation` bypass with LEGACY JSON bundles
+      # and explicitly does not affect OCI container image verification -- the
+      # only cosign flow this repo uses. Revisit when an installer release
+      # bootstraps 3.1.x.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3.7.0
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # Sign every published image, keyless.
       #
@@ -127,6 +154,38 @@ jobs:
       # `.sig` tags on ghcr today. It is also why rules_img's own signing support
       # (signing_config + rules_img_signer_cosign) cannot be used for this repo --
       # it attaches signatures ONLY as referrers, with no fallback.
+      #
+      # WHY --new-bundle-format=false. cosign v3 defaults that flag to TRUE for
+      # `sign`, and it moves the signature: the true path writes an OCI 1.1
+      # referring artifact instead, which on a registry with no Referrers API
+      # (ghcr, see above) go-containerregistry lands under the referrers
+      # FALLBACK TAG `sha256-<digest>` -- an image index, no `.sig` suffix.
+      # Measured on a local registry that 404s /referrers exactly as ghcr does:
+      #
+      #   cosign 3.0.6 sign (defaults)             -> tag sha256-2293b3….
+      #   cosign 3.0.6 sign --new-bundle-format=false -> tag sha256-2293b3….sig
+      #
+      # Two things break silently if we take the new default. (1) The #880
+      # verifier -- scripts/verify-published-artifacts.sh, and every other
+      # consumer of ghcr_signature_tag() -- resolves `sha256-<digest>.sig` and
+      # would report eight MISSING signatures per commit. (2) Worse: a **cosign
+      # v2 client cannot read a v3-format signature at all**. It does not fail
+      # closed with a bad-signature error, it reports `Error: no signatures
+      # found` (exit 10) -- byte-identical to "this image was never signed".
+      # Anything still pinned to cosign 2.x therefore sees every aether image as
+      # unsigned, and NOTHING in CI catches it, because the verify step below
+      # runs the v3 binary that just did the signing and v3 reads both formats
+      # happily. A green publish and a fleet of blind verifiers is exactly the
+      # #853/#882/#906 shape: a check that cannot fail.
+      #
+      # So the binary is upgraded and the on-registry layout is held fixed. Every
+      # artefact ever published by this repo is the legacy layout; keeping it
+      # means there is no flag day and no split history to teach the verifier
+      # about. `--new-bundle-format` is marked deprecated upstream ("this will be
+      # the only supported format in future versions"), so this is a deliberate
+      # stay of execution, not a permanent answer: when the flag goes, the signer
+      # here and ghcr_signature_tag() in scripts/ghcr-lib.sh must move together,
+      # in one change, or the verifier goes blind.
       #
       # --recursive signs the index AND every child manifest. Our images are
       # multi-arch (amd64/arm64), so signing only the index would leave anyone who
@@ -191,7 +250,7 @@ jobs:
             fi
 
             echo "signing ghcr.io/${repo}@${digest} (from ${tag})"
-            cosign sign --recursive "ghcr.io/${repo}@${digest}"
+            cosign sign --recursive --new-bundle-format=false "ghcr.io/${repo}@${digest}"
             # Hand the EXACT reference to the verify step. It must not re-resolve
             # the list itself: a second copy of the repo list can drift from this
             # one, and re-resolving a tag would let verify pass against something
@@ -218,6 +277,16 @@ jobs:
       # It verifies the exact digests the sign step recorded -- not a re-derived
       # list and not a tag -- so it cannot pass against a different artefact than
       # the one that was signed.
+      #
+      # --new-bundle-format=false here is an ASSERTION, not a compatibility flag.
+      # cosign v3 `verify` auto-detects the layout (it looks for a Sigstore
+      # bundle and silently falls back to the tag scheme when there is none), so
+      # left to itself it passes against EITHER format -- which would make this
+      # step blind to the signer above changing where signatures land, the exact
+      # failure it exists to catch. Pinned, it fails closed: measured against a
+      # v3-format signature it exits 10, `no signatures found`, while the
+      # auto-detecting default exits 0. Same flag as the sign step on purpose;
+      # they move together or not at all.
       - name: Verify the signatures
         run: |
           set -euo pipefail
@@ -233,6 +302,7 @@ jobs:
           while read -r ref; do
             [ -n "$ref" ] || continue
             cosign verify \
+              --new-bundle-format=false \
               --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               "$ref" >/dev/null
