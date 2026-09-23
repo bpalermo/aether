@@ -25,6 +25,20 @@ permissions:
 # `cancel-in-progress: false` because a publish is not a redundant check to be
 # superseded: cancelling one mid-push would leave the images pushed and the chart
 # not (or the chart pushed against a half-published image set).
+#
+# WHAT THIS DOES NOT GIVE YOU (#880). It protects the RUNNING publish. It does
+# NOT make the queue a queue: GitHub holds at most ONE pending run per
+# concurrency group, so a merge that lands while a publish is running is queued,
+# and the NEXT merge cancels it before it starts a single job. That run ends
+# `cancelled` — grey, not red — having pushed nothing, and the commit-suffixed
+# chart tag below simply does not exist for that commit. f332061 (#875) was lost
+# that way on 2026-09-20.
+#
+# Widening the group (e.g. per-sha) would drop the mid-push protection above,
+# which is the older and worse bug. So the serialisation stays as it is and the
+# supersession is made LOUD instead: `.github/workflows/publish-verify.yaml`
+# asks the registry, after every publish run reaches a conclusion and on a
+# schedule, whether this commit's artifacts are actually there.
 concurrency:
   group: publish-main
   cancel-in-progress: false
@@ -130,70 +144,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Every image this workflow publishes. Keep in sync with the
-          # go_multi_arch_image() repositories; a missing entry silently ships an
-          # UNSIGNED image, so the verify step below re-reads this same list.
-          repos=(
-            bpalermo/aether/agent
-            bpalermo/aether/mesh-dns
-            bpalermo/aether/proxy-supervisor
-            bpalermo/aether/cni-install
-            bpalermo/aether/registrar
-            bpalermo/aether/controller
-            bpalermo/aether/prober
-            bpalermo/aether/udsecho
-          )
+          # The registry-read helpers and, crucially, the list of published image
+          # repositories live in ONE place, shared with the #880 verifier that
+          # later asserts these same artifacts landed. Two copies of the repo
+          # list could drift, and a verifier missing a repo would pass while that
+          # image was never published at all.
+          #
+          # ghcr_all_tags() paginates. It was written after this step failed on
+          # e3b58e6 by reading 100 of 667 tags (#875) -- the tag existed and the
+          # lookup could not see it, so a correct step reported the images
+          # unpublished. See scripts/ghcr-lib.sh for the full story.
+          GHCR_TOKEN="${GH_TOKEN}"
+          export GHCR_TOKEN
+          # shellcheck source=scripts/ghcr-lib.sh
+          . ./scripts/ghcr-lib.sh
 
-          # Resolve each image's INDEX DIGEST rather than signing a tag. Signing a
-          # tag re-resolves it inside cosign, which is a TOCTOU window against a
-          # mutable tag; the digest is what was actually published.
-          registry_token() {
-            curl -fsS -u "x:${GH_TOKEN}" \
-              "https://ghcr.io/token?scope=repository:$1:pull&service=ghcr.io" |
-              python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])'
-          }
-
-          # List EVERY tag in a repo, following the registry's pagination.
-          #
-          # /v2/<repo>/tags/list returns ONE PAGE -- 100 tags on ghcr -- and
-          # signals the rest with an RFC5988 `Link: <...>; rel="next"` header.
-          # Tags come back in ascending order, so the tag we just pushed sorts
-          # LAST and is in the final page, never the first. The agent repo has
-          # 667 tags today; a single unpaginated call sees 100 of them and the
-          # commit is not among them.
-          #
-          # That is exactly how this step failed on e3b58e6: the tag
-          # `dev-e3b58e6...` existed in the registry and the lookup could not
-          # see it, so a correct sign step reported the images unpublished.
-          # A lookup that silently examines 15% of its input is the #853 shape.
-          #
-          # `last=` is the cursor; ghcr's own next-URL carries `n=0`, so re-state
-          # a real page size rather than following that URL verbatim.
-          all_tags() {
-            local repo="$1" tok="$2" last="" hdr body url
-            hdr="$(mktemp)"
-            while :; do
-              url="https://ghcr.io/v2/${repo}/tags/list?n=1000"
-              [ -n "$last" ] && url="${url}&last=${last}"
-              body="$(curl -fsS -D "$hdr" -H "Authorization: Bearer $tok" "$url")"
-              printf '%s' "$body" |
-                python3 -c 'import sys,json;[print(t) for t in (json.load(sys.stdin).get("tags") or [])]'
-              # No rel="next" means this was the final page.
-              grep -qi '^link:.*rel="next"' "$hdr" || break
-              last="$(printf '%s' "$body" |
-                python3 -c 'import sys,json;ts=json.load(sys.stdin).get("tags") or [];print(ts[-1] if ts else "")')"
-              [ -n "$last" ] || break
-            done
-            rm -f "$hdr"
-          }
+          # A missing entry in GHCR_IMAGE_REPOS silently ships an UNSIGNED image,
+          # so the verify step below re-reads this same list.
+          repos=("${GHCR_IMAGE_REPOS[@]}")
 
           signed=0
           for repo in "${repos[@]}"; do
-            tok="$(registry_token "$repo")"
+            tok="$(ghcr_registry_token "$repo")"
 
             # The commit-suffixed tag (`<tag>-<full sha>`) is the only immutable
             # one -- `dev` is rewritten by every publish (#692).
-            tags="$(all_tags "$repo" "$tok")"
+            tags="$(ghcr_all_tags "$repo" "$tok")"
             n_tags="$(printf '%s\n' "$tags" | grep -c . || true)"
             tag="$(printf '%s\n' "$tags" | grep -E -- "-${COMMIT}$" | head -1)"
             if [ -z "$tag" ]; then
@@ -205,10 +181,10 @@ jobs:
             fi
             echo "resolved ${repo}: ${tag} (scanned ${n_tags} tags)"
 
-            digest="$(curl -fsSI -H "Authorization: Bearer $tok" \
-              -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json' \
-              "https://ghcr.io/v2/${repo}/manifests/${tag}" |
-              tr -d '\r' | sed -nE 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*//p' | head -1)"
+            # Resolve each image's INDEX DIGEST rather than signing a tag. Signing
+            # a tag re-resolves it inside cosign, which is a TOCTOU window against
+            # a mutable tag; the digest is what was actually published.
+            digest="$(ghcr_manifest_digest "$repo" "$tag" "$tok")"
             if [ -z "$digest" ]; then
               echo "::error::could not resolve a digest for ghcr.io/${repo}:${tag}"
               exit 1

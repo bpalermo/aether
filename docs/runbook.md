@@ -359,6 +359,39 @@ bazel run //charts/aether:aether.install
 > do **not** use `--reuse-values` (it keeps the stale digest-pinned image). Bump
 > the chart's `version:` on any change to its templates/values (CI enforces this).
 
+### Pre-flight: did that commit actually publish? (#880)
+
+Before pinning a deploy to a commit, check that the commit has artifacts:
+
+```bash
+make check-published COMMIT=<any commit-ish>   # one commit
+make check-published                           # the last day of main
+```
+
+Read-only, no credentials needed (the packages are public), and it cannot push
+anything. It prints every coordinate it checked — four commit-tagged charts,
+eight images, eight cosign signatures — and exits non-zero naming each one that
+is missing.
+
+**Do not use `gh run list` for this.** A commit whose publish was superseded has
+a run whose conclusion is `cancelled`, not `failure`: green-ish in the Actions
+UI, nothing pushed. `.github/workflows/publish.yaml` serialises on one
+concurrency group (#692), and GitHub keeps at most **one** pending run per
+group, so a merge landing while a publish runs is cancelled by the *next* merge
+before it starts a job. f332061 (#875) was lost that way on 2026-09-20. Two more
+traps: `gh run list --commit=<sha>` matches only the **full 40 characters** and
+answers an abbreviation with an empty list — which reads exactly like "no
+publish ever ran" — and a run that *did* exit 0 still tells you nothing about
+what reached the registry. Only the registry answers that question.
+
+`publish-verify` runs the same check automatically after every publish run
+reaches a conclusion and every two hours over the last day of `main`, and files
+(or comments on) the rolling **publish: artifacts missing for a commit on main**
+issue. If you see that issue: re-run the cancelled publish run — `gh run rerun
+<id>`, which re-runs at that same commit — or, if the commit is not the one you
+need, deploy a later commit that did publish. Never push images or charts by
+hand: the release workflow is the only publisher.
+
 ### Pre-flight: node headroom before a roll (#812)
 
 Do this **before** any `helm upgrade` that rolls the DaemonSets. A roll is a
