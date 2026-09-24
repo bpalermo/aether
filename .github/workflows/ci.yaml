@@ -198,6 +198,15 @@ jobs:
       - name: Every root-workspace shell script is covered by an sh_* target
         run: scripts/check-shell-lint.sh
 
+      # The verifier accepts two cosign signature-tag layouts (cosign 2's
+      # `.sig` and cosign 3's bare fallback index) so artifacts published
+      # before the v3 migration stay verifiable. "Accept either" is one grep
+      # away from "accept anything", and the state that matters is BOTH tags
+      # present — a half-finished migration, which presence-only checking
+      # reports as healthy. No registry access; the tag lists are literals.
+      - name: Signature layout resolution is exact
+        run: scripts/check-signature-layout.sh
+
       # Then: lint them. The target list comes from a query rather than being
       # written out here, so a new package's sh_library is covered the moment the
       # check above starts demanding one. The empty test is a query-failure

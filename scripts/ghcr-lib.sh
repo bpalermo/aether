@@ -79,15 +79,48 @@ ghcr_manifest_digest() {
 		tr -d '\r' | sed -nE 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*//p' | head -1
 }
 
-# cosign's signature tag for a digest: `sha256:abc…` -> `sha256-abc….sig`.
+# cosign's signature tag for a digest. There are TWO shapes, and which one you
+# get depends on the cosign major that signed:
+#
+#   cosign 2.x            `sha256-abc….sig`   a plain signature manifest
+#   cosign 3.x (default)  `sha256-abc…`       an OCI 1.1 referrers FALLBACK index
 #
 # ghcr.io does NOT implement the OCI 1.1 Referrers API — GET
 # /v2/<repo>/referrers/<digest> 404s there while tags/list and manifests/ succeed
-# with the same token — so the tag scheme is not a preference, it is the only
-# scheme that works on this registry. Both the signer and the verifier therefore
-# have to agree on this exact string.
-ghcr_signature_tag() {
+# with the same token. That is why cosign 3 writes the fallback TAG rather than a
+# real referrer, and it is why the tag scheme is not a preference here: it is the
+# only scheme that works on this registry, in both majors.
+#
+# Everything published before 2026-09-24 carries the legacy shape and must stay
+# verifiable, so the verifier accepts either — but EXACTLY one. Both present for
+# the same digest means a double-write or a half-finished migration, which
+# presence-only checking reads as healthy. See ghcr_signature_layout().
+ghcr_signature_tag_legacy() {
 	printf '%s.sig\n' "${1/:/-}"
+}
+
+ghcr_signature_tag_bundle() {
+	printf '%s\n' "${1/:/-}"
+}
+
+# Which layout is published for $1 (a digest), given $2 (the repo's tag list).
+#
+# Echoes `legacy`, `bundle`, `none`, or `both`. The caller decides what to do; the
+# point of naming `both` separately is that it is a DIFFERENT defect from `none`
+# and must not be reported as a healthy signature.
+ghcr_signature_layout() {
+	local digest="$1" tags="$2" has_legacy=0 has_bundle=0
+	printf '%s\n' "$tags" | grep -qxF -- "$(ghcr_signature_tag_legacy "$digest")" && has_legacy=1
+	printf '%s\n' "$tags" | grep -qxF -- "$(ghcr_signature_tag_bundle "$digest")" && has_bundle=1
+	if [ "$has_legacy" = 1 ] && [ "$has_bundle" = 1 ]; then
+		printf 'both\n'
+	elif [ "$has_legacy" = 1 ]; then
+		printf 'legacy\n'
+	elif [ "$has_bundle" = 1 ]; then
+		printf 'bundle\n'
+	else
+		printf 'none\n'
+	fi
 }
 
 # Every image repository the publish workflow pushes AND signs.

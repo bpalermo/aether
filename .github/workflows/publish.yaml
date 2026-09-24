@@ -107,7 +107,19 @@ jobs:
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/udsecho:udsecho.push
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3.7.0
+        # Pinned by SHA, not tag. This job holds `packages: write` and
+        # `id-token: write`, so a retagged action could push and sign under this
+        # repository's genuine identity -- and `cosign verify` would PASS, because
+        # the certificate really would be ours. The signature does not protect
+        # against a swapped action; the pin does.
+        #
+        # No `cosign-release:` on purpose. Unset, the binary's SHA-256 is hardcoded
+        # in this pinned commit, so pinning the action pins the binary too.
+        #
+        # v4.1.2 bootstraps cosign v3.0.6. The 3.x line is abandoned and bootstraps
+        # v2.4.1 -- which is what this repo ran until 2026-09-24, two majors behind
+        # unnoticed, because the installer version is not the cosign version.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # Sign every published image, keyless.
       #
@@ -118,15 +130,38 @@ jobs:
       # application/vnd.dev.cosign.simplesigning.v1+json, with the signature,
       # certificate and Rekor bundle in its annotations.
       #
-      # This is deliberately NOT the OCI 1.1 referrers scheme, and that choice is
-      # forced: **ghcr.io does not implement the Referrers API.** Verified against
-      # four repositories including our own and oras-project/oras -- GET
+      # **ghcr.io does not implement the Referrers API.** Verified against four
+      # repositories including our own and oras-project/oras -- GET
       # /v2/<repo>/referrers/<digest> returns 404 on all of them while
-      # /v2/<repo>/tags/list and /manifests/ succeed with the same token. The tag
-      # scheme demonstrably works there: fluxcd/source-controller carries 18 live
-      # `.sig` tags on ghcr today. It is also why rules_img's own signing support
-      # (signing_config + rules_img_signer_cosign) cannot be used for this repo --
-      # it attaches signatures ONLY as referrers, with no fallback.
+      # /v2/<repo>/tags/list and /manifests/ succeed with the same token.
+      #
+      # So the signature lands in a TAG either way, and which tag depends on the
+      # cosign major:
+      #
+      #   cosign 2.x            `sha256-<digest>.sig`   plain signature manifest
+      #   cosign 3.x (default)  `sha256-<digest>`       OCI 1.1 fallback index
+      #
+      # We ran cosign 2 until 2026-09-24, so everything published before then carries
+      # the legacy shape. scripts/ghcr-lib.sh accepts EITHER and rejects BOTH --
+      # see ghcr_signature_layout().
+      #
+      # An earlier attempt (#924) tried to KEEP the legacy shape with
+      # `--new-bundle-format=false` and failed in CI: cosign 3's keyless path rejects
+      # it outright ("must provide --new-bundle-format or --bundle where applicable
+      # with --signing-config"). Holding the layout is not a reachable state on v3
+      # keyless. Do not re-add that flag.
+      #
+      # DO NOT pin --new-bundle-format on the verify below expecting it to assert the
+      # layout. Measured: `=false` fails closed against a v3 signature (exit 10), but
+      # `=true` still ACCEPTS a legacy `.sig` (exit 0) -- it asserts nothing. The
+      # layout assertion lives in publish-verify.yaml, which asks the REGISTRY rather
+      # than asking the same binary that just wrote the signature whether it likes it.
+      #
+      # On rules_img's own signing (signing_config + rules_img_signer_cosign):
+      # rules_img 0.3.21's signing_config docstring says "The signature is then pushed
+      # to the image's repository as an OCI referrer" -- that much is SOURCED. Whether
+      # it falls back to a tag on a registry that 404s /referrers is NOT: that push is
+      # in a prebuilt Go binary absent from the archive. Unverified either way.
       #
       # --recursive signs the index AND every child manifest. Our images are
       # multi-arch (amd64/arm64), so signing only the index would leave anyone who

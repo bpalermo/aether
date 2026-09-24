@@ -173,7 +173,7 @@ chart_commit_tag() {
 
 verify_commit() {
 	local ref="$1"
-	local sha chart chart_repo chart_tag repo tok tags tag digest sig want
+	local sha chart chart_repo chart_tag repo tok tags tag digest
 	local before="$checks_total"
 
 	if ! sha="$(git rev-parse --verify --quiet "${ref}^{commit}")"; then
@@ -235,13 +235,28 @@ verify_commit() {
 			echo "::error::could not resolve a digest for ghcr.io/${repo}:${tag}" >&2
 			exit 2
 		fi
-		sig="$(ghcr_signature_tag "$digest")"
-		want="ghcr.io/${repo}:${sig} (signature of ${digest})"
-		if printf '%s\n' "$tags" | grep -qxF -- "$sig"; then
-			present "$want"
-		else
-			absent "$want"
-		fi
+		# A signature counts as published in EITHER layout — cosign 2's
+		# `sha256-<digest>.sig` or cosign 3's `sha256-<digest>` fallback index —
+		# because everything published before the v3 migration carries the former
+		# and must stay verifiable.
+		#
+		# But exactly ONE must be present. Accepting "either" without rejecting
+		# "both" would read a double-write or a half-finished migration as healthy,
+		# and that is the state a format migration actually fails into.
+		case "$(ghcr_signature_layout "$digest" "$tags")" in
+		legacy)
+			present "ghcr.io/${repo}:$(ghcr_signature_tag_legacy "$digest") (signature of ${digest}, cosign 2 layout)"
+			;;
+		bundle)
+			present "ghcr.io/${repo}:$(ghcr_signature_tag_bundle "$digest") (signature of ${digest}, cosign 3 layout)"
+			;;
+		both)
+			absent "ghcr.io/${repo} signature for ${digest} — BOTH layouts present; a double-write or half-finished migration, not a healthy signature"
+			;;
+		*)
+			absent "ghcr.io/${repo} signature for ${digest} (neither ${digest//:/-}.sig nor ${digest//:/-})"
+			;;
+		esac
 	done
 
 	# 4 charts + 8 images + 8 signatures. If the loops ever stop iterating, this
