@@ -24,7 +24,7 @@ func testCNIPod(annotations map[string]string) *cniv1.CNIPod {
 
 // TestNewServiceEndpointFromCNIPod_Protocol verifies the service protocol is
 // chosen from the endpoint.aether.io/protocol annotation: default HTTP, explicit
-// "http", explicit "tcp", and a rejected unknown value.
+// "http", explicit "tcp", explicit "udp", and a rejected unknown value.
 func TestNewServiceEndpointFromCNIPod_Protocol(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -52,8 +52,18 @@ func TestNewServiceEndpointFromCNIPod_Protocol(t *testing.T) {
 			want:       []registryv1.Service_Protocol{registryv1.Service_PROTOCOL_TCP},
 		},
 		{
-			name:       "unknown value is rejected",
+			name:       "udp annotation selects PROTOCOL_UDP",
 			annotation: map[string]string{aetherannotations.AnnotationEndpointProtocol: "udp"},
+			want:       []registryv1.Service_Protocol{registryv1.Service_PROTOCOL_UDP},
+		},
+		{
+			// "udp" used to be this case's unknown value. It is a real protocol
+			// now (#931), so the rejection needs a value that is still unknown
+			// -- the assertion is "an unrecognised annotation yields no registry
+			// keys at all", and it has to keep being tested against something
+			// the vocabulary really does not contain.
+			name:       "unknown value is rejected",
+			annotation: map[string]string{aetherannotations.AnnotationEndpointProtocol: "sctp"},
 			wantErr:    true,
 		},
 	}

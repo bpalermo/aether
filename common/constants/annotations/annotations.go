@@ -85,14 +85,21 @@ const (
 	// or "http" (default) registers the workload as a PROTOCOL_HTTP service
 	// reached via the HCM path; "tcp" registers it as a PROTOCOL_TCP service
 	// reached as a raw mTLS passthrough through the transparent-capture TCP
-	// floor (proposal 018, Phase 3a). Distinct from aether.io/app-protocol
-	// (AnnotationMeshAppProtocol), which the registrar STAMPS on the generated
-	// mesh Service for the agent's capture reconciler to read.
+	// floor (proposal 018, Phase 3a); "udp" registers it as a PROTOCOL_UDP
+	// service reached through the UDP floor (Phase 3b) in PLAINTEXT. Distinct
+	// from aether.io/app-protocol (AnnotationMeshAppProtocol), which the
+	// registrar STAMPS on the generated mesh Service for the agent's capture
+	// reconciler to read.
 	AnnotationEndpointProtocol = annotationAetherEndpointPrefix + "protocol"
-	// ProtocolHTTP / ProtocolTCP are the accepted AnnotationEndpointProtocol
-	// values.
+	// ProtocolHTTP / ProtocolTCP / ProtocolUDP are the accepted
+	// AnnotationEndpointProtocol values.
+	//
+	// "udp" exists because a UDP-only workload previously had to register as
+	// "tcp" to be registered at all, which made aether TCP-probe its UDP port,
+	// fail forever, and blackhole every datagram to it (#931).
 	ProtocolHTTP = "http"
 	ProtocolTCP  = "tcp"
+	ProtocolUDP  = "udp"
 
 	// AnnotationAetherEndpointMetadataPrefix is the prefix for endpoint metadata annotations
 	AnnotationAetherEndpointMetadataPrefix = "metadata." + annotationAetherEndpointPrefix

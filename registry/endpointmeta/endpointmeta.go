@@ -43,9 +43,12 @@ func Protocol(annotations map[string]string) (registryv1.Service_Protocol, error
 		return registryv1.Service_PROTOCOL_HTTP, nil
 	case aetherannotations.ProtocolTCP:
 		return registryv1.Service_PROTOCOL_TCP, nil
+	case aetherannotations.ProtocolUDP:
+		return registryv1.Service_PROTOCOL_UDP, nil
 	default:
-		return registryv1.Service_PROTOCOL_UNSPECIFIED, fmt.Errorf("invalid protocol annotation %q (want %q or %q)",
-			annotations[aetherannotations.AnnotationEndpointProtocol], aetherannotations.ProtocolHTTP, aetherannotations.ProtocolTCP)
+		return registryv1.Service_PROTOCOL_UNSPECIFIED, fmt.Errorf("invalid protocol annotation %q (want %q, %q or %q)",
+			annotations[aetherannotations.AnnotationEndpointProtocol],
+			aetherannotations.ProtocolHTTP, aetherannotations.ProtocolTCP, aetherannotations.ProtocolUDP)
 	}
 }
 
@@ -159,6 +162,7 @@ func Metadata(annotations map[string]string) map[string]string {
 //	h1, http1, (none)  HTTP -- the loopback hop speaks HTTP/1.1
 //	h2, http2          HTTP -- the loopback hop speaks h2c
 //	tcp                TCP  -- raw mTLS passthrough through the capture floor
+//	udp                UDP  -- datagrams through the UDP floor, in PLAINTEXT
 //
 // h1 and h2 differ only in the agent-local loopback codec, which the registry
 // does not carry (AppPortProtocols reads it from the same annotation on the
@@ -225,9 +229,11 @@ func portProtocolFromSuffix(suffix string, fallback registryv1.PortProtocol) (re
 		return registryv1.PortProtocol_PORT_PROTOCOL_HTTP, nil
 	case aetherannotations.ProtocolTCP:
 		return registryv1.PortProtocol_PORT_PROTOCOL_TCP, nil
+	case aetherannotations.ProtocolUDP:
+		return registryv1.PortProtocol_PORT_PROTOCOL_UDP, nil
 	default:
 		return registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED,
-			fmt.Errorf("unknown port protocol suffix %q (want h1, h2 or tcp)", suffix)
+			fmt.Errorf("unknown port protocol suffix %q (want h1, h2, tcp or udp)", suffix)
 	}
 }
 

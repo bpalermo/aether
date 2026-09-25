@@ -20,6 +20,7 @@ func anno(kv ...string) map[string]string {
 const (
 	http = registryv1.PortProtocol_PORT_PROTOCOL_HTTP
 	tcp  = registryv1.PortProtocol_PORT_PROTOCOL_TCP
+	udp  = registryv1.PortProtocol_PORT_PROTOCOL_UDP
 )
 
 func TestPortProtocols(t *testing.T) {
@@ -77,6 +78,43 @@ func TestPortProtocols(t *testing.T) {
 				aetherannotations.AnnotationEndpointPort, "8080",
 				aetherannotations.AnnotationEndpointPorts, "9000=tcp"),
 			want: map[uint32]registryv1.PortProtocol{8080: http, 9000: tcp},
+		},
+		{
+			name: "pod-level udp applies to the primary",
+			annotations: anno(
+				aetherannotations.AnnotationEndpointProtocol, "udp",
+				aetherannotations.AnnotationEndpointPort, "9001"),
+			want: map[uint32]registryv1.PortProtocol{9001: udp},
+		},
+		{
+			// The shape #931 could not express: a workload serving datagrams on
+			// its own port alongside an HTTP port. Before "udp" existed, the
+			// UDP port had to be declared "tcp", which made aether TCP-probe it
+			// and mark the whole endpoint permanently UNHEALTHY.
+			name: "a mixed pod: HTTP primary, datagram secondary",
+			annotations: anno(
+				aetherannotations.AnnotationEndpointPort, "8080",
+				aetherannotations.AnnotationEndpointPorts, "8080,9001=udp"),
+			want: map[uint32]registryv1.PortProtocol{8080: http, 9001: udp},
+		},
+		{
+			name: "all three classes on one pod",
+			annotations: anno(
+				aetherannotations.AnnotationEndpointPort, "8080",
+				aetherannotations.AnnotationEndpointPorts, "8080,9000=tcp,9001=udp"),
+			want: map[uint32]registryv1.PortProtocol{8080: http, 9000: tcp, 9001: udp},
+		},
+		{
+			// TCP and UDP are separate socket families, so the same port number
+			// can legitimately carry both. The registry key is
+			// (service, protocol), not (service, port) — so this is two
+			// registrations, not a collision. The map cannot represent it:
+			// last-suffix-wins, and that is a known limit, not a silent one.
+			name: "the same port number declared twice: the later suffix wins",
+			annotations: anno(
+				aetherannotations.AnnotationEndpointPort, "8080",
+				aetherannotations.AnnotationEndpointPorts, "9001=tcp,9001=udp"),
+			want: map[uint32]registryv1.PortProtocol{8080: http, 9001: udp},
 		},
 		{
 			name: "an unknown suffix is an error, never a default",

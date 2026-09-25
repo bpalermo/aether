@@ -22,6 +22,7 @@ func TestPortProtocolMatchesServiceProtocol(t *testing.T) {
 	assert.EqualValues(t, registryv1.Service_PROTOCOL_UNSPECIFIED, registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED)
 	assert.EqualValues(t, registryv1.Service_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_HTTP)
 	assert.EqualValues(t, registryv1.Service_PROTOCOL_TCP, registryv1.PortProtocol_PORT_PROTOCOL_TCP)
+	assert.EqualValues(t, registryv1.Service_PROTOCOL_UDP, registryv1.PortProtocol_PORT_PROTOCOL_UDP)
 
 	// And the same number of values, so a new one cannot be added to only one
 	// side without this failing.
