@@ -136,4 +136,8 @@ enum PortProtocol {
   // PORT_PROTOCOL_TCP marks a port reached through the transparent-capture TCP
   // floor as a raw mTLS passthrough, not the HTTP HCM path.
   PORT_PROTOCOL_TCP = 2;
+  // PORT_PROTOCOL_UDP marks a datagram port reached through the UDP floor.
+  // Plaintext — see Service.Protocol.PROTOCOL_UDP for the security note and for
+  // why these ports are health-checked differently.
+  PORT_PROTOCOL_UDP = 3;
 }

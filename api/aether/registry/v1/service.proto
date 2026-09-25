@@ -20,6 +20,23 @@ message Service {
     // endpoints are reached through the transparent-capture TCP floor as a raw
     // mTLS passthrough (proposal 018, Phase 3a), not the HTTP HCM path.
     PROTOCOL_TCP = 2;
+    // PROTOCOL_UDP marks a datagram mesh service, reached through the UDP floor
+    // (proposal 018, Phase 3b): a udp_proxy capture listener forwarding to the
+    // backend's application UDP port.
+    //
+    // SECURITY NOTE: the UDP floor carries datagrams in PLAINTEXT. mTLS is a
+    // TCP/TLS construct and there is no DTLS, so a PROTOCOL_UDP service gets
+    // neither encryption nor peer authentication on the mesh hop. This is the
+    // one protocol for which that is true.
+    //
+    // It also means a UDP service's endpoints cannot be liveness-probed at
+    // their application port the way the other two are: a TCP connect to a UDP
+    // port always fails. Health for these endpoints comes from the mesh inbound
+    // hop instead — see NewAppHealthProbeCluster. Registering a UDP-only
+    // workload as PROTOCOL_TCP to get past that gap is what made every such
+    // backend permanently UNHEALTHY, and every datagram to it silently
+    // discarded (#931).
+    PROTOCOL_UDP = 3;
   }
 
   Protocol protocol = 2 [(buf.validate.field).enum.defined_only = true];
