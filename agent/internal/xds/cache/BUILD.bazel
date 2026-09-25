@@ -103,6 +103,7 @@ go_test(
         "tcpfloor_identity_test.go",
         "tcpports_test.go",
         "trustdomain_test.go",
+        "udp_service_test.go",
         "udproute_cds_test.go",
         "uds_test.go",
         "udspolicy_test.go",
