@@ -3,6 +3,8 @@ package proxy
 import (
 	"testing"
 
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -52,7 +54,7 @@ func TestNewAppCluster_PipeDeliveryHTTP2(t *testing.T) {
 // Host/path machinery (HTTP/1.1 over a pipe upstream), and the TCP variant stays
 // connect-only — on a pipe that degrades to "the socket exists and accepts".
 func TestNewAppHealthProbeCluster_PipeDelivery(t *testing.T) {
-	httpC := NewAppHealthProbeCluster("health_p", AppAddress{Pipe: testSocketPath}, 8080, "/healthz", false)
+	httpC := NewAppHealthProbeCluster("health_p", AppAddress{Pipe: testSocketPath}, 8080, "/healthz", registryv1.Service_PROTOCOL_HTTP)
 	ep := httpC.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress()
 	require.NotNil(t, ep.GetPipe())
 	assert.Equal(t, testSocketPath, ep.GetPipe().GetPath())
@@ -64,7 +66,7 @@ func TestNewAppHealthProbeCluster_PipeDelivery(t *testing.T) {
 	assert.Equal(t, "/healthz", hhc.GetPath())
 	assert.Empty(t, httpC.GetAltStatName(), "the probe cluster's stats stay per-pod")
 
-	tcpC := NewAppHealthProbeCluster("health_p", AppAddress{Pipe: testSocketPath}, 9000, "/healthz", true)
+	tcpC := NewAppHealthProbeCluster("health_p", AppAddress{Pipe: testSocketPath}, 9000, "/healthz", registryv1.Service_PROTOCOL_TCP)
 	require.NotNil(t, tcpC.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetPipe())
 	assert.Nil(t, tcpC.GetUpstreamBindConfig())
 	require.Len(t, tcpC.GetHealthChecks(), 1)

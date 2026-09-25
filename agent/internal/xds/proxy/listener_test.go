@@ -3,6 +3,8 @@ package proxy
 import (
 	"testing"
 
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	"github.com/stretchr/testify/assert"
@@ -79,13 +81,13 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 // raw TCP connect for TCP-floor services and an HTTP GET otherwise (proposal 018
 // Phase 3b TCP liveness).
 func TestNewAppHealthProbeCluster_CheckerType(t *testing.T) {
-	httpC := NewAppHealthProbeCluster("health_p", AppAddress{Netns: "/var/run/netns/x"}, 8080, "/-/-/ready", false)
+	httpC := NewAppHealthProbeCluster("health_p", AppAddress{Netns: "/var/run/netns/x"}, 8080, "/-/-/ready", registryv1.Service_PROTOCOL_HTTP)
 	require.Len(t, httpC.GetHealthChecks(), 1)
 	require.NotNil(t, httpC.GetHealthChecks()[0].GetHttpHealthCheck(), "HTTP service: HTTP health check")
 	assert.Nil(t, httpC.GetHealthChecks()[0].GetTcpHealthCheck())
 	assert.Equal(t, "/-/-/ready", httpC.GetHealthChecks()[0].GetHttpHealthCheck().GetPath())
 
-	tcpC := NewAppHealthProbeCluster("health_p", AppAddress{Netns: "/var/run/netns/x"}, 9000, "/-/-/ready", true)
+	tcpC := NewAppHealthProbeCluster("health_p", AppAddress{Netns: "/var/run/netns/x"}, 9000, "/-/-/ready", registryv1.Service_PROTOCOL_TCP)
 	require.Len(t, tcpC.GetHealthChecks(), 1)
 	require.NotNil(t, tcpC.GetHealthChecks()[0].GetTcpHealthCheck(), "TCP service: connect-only TCP health check")
 	assert.Nil(t, tcpC.GetHealthChecks()[0].GetHttpHealthCheck())
