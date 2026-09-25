@@ -596,11 +596,20 @@ type clusterEntry struct {
 	// server goroutines marshal it without holding clusterMu. Invalidation
 	// paths REPLACE it with a freshly built clone.
 	mtlsCluster *clusterv3.Cluster
-	// tcp marks a PROTOCOL_TCP service entry. Such entries hold only the
-	// bare-name EDS load assignment (+ sanNamespaces/sni) for the transparent-
-	// capture TCP floor's "tcp:<svc>" cluster to reference; no HTTP (h2) cluster
-	// or outbound vhost is emitted for them (clustersEndpointsAndVhosts skips it).
-	tcp bool
+	// l4Floor marks an L4 floor service entry -- PROTOCOL_TCP or PROTOCOL_UDP.
+	// Such entries hold only the bare-name EDS load assignment (+
+	// sanNamespaces/sni) for the floor cluster that references it: the
+	// transparent-capture TCP floor's "tcp:<svc>", or the UDP floor's
+	// "udp:<svc>". No HTTP (h2) cluster or outbound vhost is emitted for them
+	// (clustersEndpointsAndVhosts skips it), and no upstream mTLS is injected
+	// (refreshEntryMTLSLocked skips it) -- for TCP because the floor cluster
+	// carries its own transport socket, for UDP because there is none: the UDP
+	// floor is plaintext and mTLS has no DTLS counterpart.
+	//
+	// Named for the property both sites actually test rather than for TCP: both
+	// were already protocol-agnostic in behaviour, so UDP needed no new branch
+	// at either, only a name that did not claim otherwise.
+	l4Floor bool
 	// absentSince is non-zero while the service is missing from the registry
 	// listing. Such entries are retained (with empty endpoints) for
 	// serviceRetentionGrace before being pruned: during pod churn a service

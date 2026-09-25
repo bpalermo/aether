@@ -95,7 +95,7 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 		// path is the transparent-capture TCP floor's "tcp:<svc>" cluster (built
 		// in captureTCPClusters), which shares this entry's bare-name EDS load
 		// assignment. Emit only the load assignment so that EDS resolves.
-		if entry.tcp {
+		if entry.l4Floor {
 			if entry.loadAssignment != nil {
 				clas = append(clas, entry.loadAssignment)
 			}
@@ -206,8 +206,21 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	}
 	coldFillTCPEndpoints(ctx, c.log, reg, deps, serviceEndpoints, tcpServiceEndpoints)
 
+	// UDP (datagram) services: the SAME pods, reached in PLAINTEXT at their
+	// application UDP port by the udp_proxy capture listener. captureUDPClusters
+	// builds the "udp:<svc>" cluster by rewriting the load assignment published
+	// here, and udpClusterForLocked refuses to name a cluster the snapshot does
+	// not carry -- so without this listing a UDP-only service has no entry, no
+	// cluster, and therefore no listener at all.
+	udpServiceEndpoints, err := reg.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_UDP)
+	if err != nil {
+		return fmt.Errorf("failed to list UDP endpoints from registry: %w", err)
+	}
+	coldFillUDPEndpoints(ctx, c.log, reg, deps, serviceEndpoints, tcpServiceEndpoints, udpServiceEndpoints)
+
 	c.log.DebugContext(ctx, "found service endpoints in registry",
-		"count", len(serviceEndpoints), "tcpCount", len(tcpServiceEndpoints), "dependencySet", len(deps))
+		"count", len(serviceEndpoints), "tcpCount", len(tcpServiceEndpoints),
+		"udpCount", len(udpServiceEndpoints), "dependencySet", len(deps))
 
 	c.clusterMu.Lock()
 	// Rebuild the cluster set so this method is idempotent and safe to call
@@ -223,6 +236,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	nodeSubsetKeys := make(map[string]struct{})
 	c.buildHTTPClustersLocked(ctx, deps, serviceEndpoints, gammaRoutes, chainFilters, localRegion, localZone, waypoint, nodeSubsetKeys)
 	c.buildTCPClustersLocked(ctx, deps, tcpServiceEndpoints, localRegion, localZone, waypoint)
+	c.buildUDPClustersLocked(ctx, deps, udpServiceEndpoints, localRegion, localZone, waypoint)
 	c.retainAbsentClustersLocked(ctx, prev, deps)
 	// Precompute each entry's mTLS-injected cluster + SAN URIs (issue #537) so
 	// snapshot generation only reads the cached protos. Covers the freshly
@@ -590,7 +604,7 @@ func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[str
 			sanNamespaces:  sanNamespaces,
 			service:        serviceName,
 			sni:            strconv.Itoa(int(defaultPort)),
-			tcp:            true,
+			l4Floor:        true,
 		}
 
 		c.buildTCPPortEntriesLocked(serviceName, tcpName, endpoints, defaultPort, sanNamespaces, localRegion, localZone, waypoint)
@@ -645,7 +659,7 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 		sanNamespaces: sanNamespaces,
 		service:       serviceName,
 		sni:           "",
-		tcp:           true,
+		l4Floor:       true,
 	}
 
 	for _, port := range nonPrimaryTCPPorts(endpoints) {
@@ -678,7 +692,7 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 			sanNamespaces:  sanNamespaces,
 			service:        serviceName,
 			sni:            strconv.Itoa(int(port)),
-			tcp:            true,
+			l4Floor:        true,
 		}
 	}
 }
@@ -725,6 +739,42 @@ func (c *SnapshotCache) buildTCPEndpointsLocked(
 	return cla, epMap
 }
 
+// buildUDPClustersLocked adds the cluster entries for PROTOCOL_UDP services.
+// Caller must hold clusterMu.
+//
+// The UDP arm of buildTCPClustersLocked, and deliberately thinner. A UDP entry
+// carries only the bare-name EDS load assignment and the service's default
+// application port (in sni, the same overload the TCP floor uses) because that
+// is all captureUDPClusters needs: it rewrites the load assignment to the app
+// port with SocketAddress_UDP and wraps it in a STATIC, transport-socket-less
+// cluster.
+//
+// No sanNamespaces, and no per-port entries. Both would be lies: the UDP floor
+// is plaintext, so there is no peer identity to pin, and it has no
+// destination_port-qualified chains to name a per-port cluster from -- a
+// connection-less UDP listener carries no filter chains at all.
+func (c *SnapshotCache) buildUDPClustersLocked(ctx context.Context, deps map[string]struct{}, udpServiceEndpoints map[string][]*registryv1.ServiceEndpoint, localRegion, localZone string, waypoint proxy.WaypointRewrite) {
+	for serviceName, endpoints := range udpServiceEndpoints {
+		if _, inScope := deps[serviceName]; !inScope {
+			continue
+		}
+		if len(endpoints) == 0 {
+			continue
+		}
+		cla, epMap := c.buildTCPEndpointsLocked(serviceName, endpoints, localRegion, localZone, waypoint)
+
+		udpName := proxy.UDPClusterName(serviceName, c.meshDomain)
+		c.clusters[udpName] = clusterEntry{
+			loadAssignment: cla,
+			endpoints:      epMap,
+			service:        serviceName,
+			sni:            strconv.Itoa(int(endpoints[0].GetPort())),
+			l4Floor:        true,
+		}
+		c.log.DebugContext(ctx, "built UDP floor cluster entry", "service", serviceName, "cluster", udpName)
+	}
+}
+
 // tcpEntryLocked returns the TCP floor entry for a bare service name, which since
 // proposal 037 design (a) is keyed by the entry's Envoy cluster name rather than
 // by the service. Caller must hold clusterMu.
@@ -733,15 +783,67 @@ func (c *SnapshotCache) tcpEntryLocked(serviceName string) (clusterEntry, bool) 
 	return entry, ok
 }
 
+// udpEntryLocked returns the UDP floor entry for a bare service name, keyed by
+// the entry's Envoy cluster name like the TCP one. Caller must hold clusterMu.
+func (c *SnapshotCache) udpEntryLocked(serviceName string) (clusterEntry, bool) {
+	entry, ok := c.clusters[proxy.UDPClusterName(serviceName, c.meshDomain)]
+	return entry, ok
+}
+
+// coldFillUDPEndpoints performs the RPC-fill cold path for UDP services: a
+// dependency that is in neither the HTTP nor the TCP listing and not yet in the
+// UDP one is fetched directly, so the FIRST reload after an observation can
+// build the cluster instead of waiting a watch round-trip.
+func coldFillUDPEndpoints(ctx context.Context, log interface {
+	InfoContext(context.Context, string, ...any)
+}, reg registry.Registry, deps map[string]struct{}, serviceEndpoints, tcpServiceEndpoints, udpServiceEndpoints map[string][]*registryv1.ServiceEndpoint,
+) {
+	cat, ok := reg.(registry.ServiceCatalog)
+	if !ok {
+		return
+	}
+	for svc := range deps {
+		if _, have := udpServiceEndpoints[svc]; have {
+			continue
+		}
+		if _, have := serviceEndpoints[svc]; have {
+			continue // already an HTTP dependency
+		}
+		if _, have := tcpServiceEndpoints[svc]; have {
+			continue // already a TCP dependency
+		}
+		if !cat.HasService(svc) {
+			continue
+		}
+		eps, err := reg.ListEndpoints(ctx, svc, registryv1.Service_PROTOCOL_UDP)
+		if err != nil {
+			log.InfoContext(ctx, "cold-path UDP endpoint fetch failed; watch catch-up will fill in", "service", svc, "error", err.Error())
+			continue
+		}
+		if len(eps) > 0 {
+			udpServiceEndpoints[svc] = eps
+		}
+	}
+}
+
 // serviceEntryLocked returns the entry carrying a service's service-level facts
 // (sni, sanURIs, the bare-name load assignment) for callers that do not care
 // which protocol classified it: the HTTP default entry when the service has one,
-// else its TCP floor entry. Caller must hold clusterMu.
+// else its TCP floor entry, else its UDP one. Caller must hold clusterMu.
+//
+// The order is a preference, not a priority: a service registered under several
+// protocols has the SAME endpoints under each, and only one entry owns the
+// bare-name load assignment (see buildTCPEndpointsLocked's `owns`). The UDP
+// fallback exists for the service registered ONLY as PROTOCOL_UDP, which before
+// #931 could not be expressed at all.
 func (c *SnapshotCache) serviceEntryLocked(serviceName string) (clusterEntry, bool) {
 	if entry, ok := c.clusters[serviceName]; ok {
 		return entry, true
 	}
-	return c.tcpEntryLocked(serviceName)
+	if entry, ok := c.tcpEntryLocked(serviceName); ok {
+		return entry, true
+	}
+	return c.udpEntryLocked(serviceName)
 }
 
 // retainAbsentClustersLocked re-inserts entries from prev that are no longer in

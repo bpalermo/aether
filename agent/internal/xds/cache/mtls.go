@@ -128,7 +128,7 @@ func (c *SnapshotCache) refreshEntryMTLSLocked(entry *clusterEntry, st localMTLS
 	// sanURIs), and before the node SVID is served the bare cluster is emitted
 	// without the matcher — both leave mtlsCluster nil.
 	entry.mtlsCluster = nil
-	if entry.tcp || entry.cluster == nil || st.nodeSpiffeID == "" || st.trustDomain == "" {
+	if entry.l4Floor || entry.cluster == nil || st.nodeSpiffeID == "" || st.trustDomain == "" {
 		return
 	}
 
