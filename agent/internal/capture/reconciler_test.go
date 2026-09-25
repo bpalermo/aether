@@ -136,3 +136,74 @@ func TestReconcile_ProjectsAuthoritiesAndDNSRecords(t *testing.T) {
 	assert.Equal(t, map[string]string{"aether-test/svc-1": "svc-1.aether-test.svc.cluster.local"}, sink.got)
 	assert.Equal(t, map[string]string{"aether-test/svc-1": "10.96.0.42"}, sink.records, "ClusterIP -> the <svc>.<meshDomain> A record")
 }
+
+// TestIsUDPAppProtocol pins the carve-out that keeps a datagram service off the
+// TCP floor. Note the asymmetry with isHTTPAppProtocol: an unrecognised value is
+// still TCP (the conservative default), so this predicate is deliberately narrow
+// -- it is not "everything that is not HTTP".
+func TestIsUDPAppProtocol(t *testing.T) {
+	cases := []struct {
+		proto string
+		want  bool
+	}{
+		{"udp", true},
+		{"UDP", true},
+		{"Udp", true},
+		{"tcp", false},
+		{"http", false},
+		{"", false},
+		{"ws", false},      // unrecognised stays TCP, not UDP
+		{"quic", false},    // not a protocol the mesh knows
+		{"udplite", false}, // prefix match would be wrong
+	}
+	for _, c := range cases {
+		t.Run(c.proto, func(t *testing.T) {
+			assert.Equal(t, c.want, isUDPAppProtocol(c.proto))
+		})
+	}
+}
+
+// TestReconcile_UDPServiceGetsNoTCPFloor is the projection-level consequence.
+//
+// A UDP service is still DELIVERED (it has a routable VIP, so it needs a
+// mesh-DNS record and a capture authority), but it must not be marked
+// PrimaryIsTCP: the portless /32 floor chain that flag gates would put a
+// tcp_proxy in front of the VIP naming a tcp: cluster that need not exist.
+// Before the carve-out, "udp" fell through isHTTPAppProtocol's default branch
+// and got exactly that.
+func TestReconcile_UDPServiceGetsNoTCPFloor(t *testing.T) {
+	udpSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc-udp", Namespace: "aether-test",
+			Labels: map[string]string{aetherlabels.LabelMeshService: "true"},
+			Annotations: map[string]string{
+				aetherlabels.AnnotationMeshService:     "svc-udp",
+				aetherlabels.AnnotationMeshPort:        "9001",
+				aetherlabels.AnnotationMeshAppProtocol: "udp",
+			},
+		},
+		Spec: corev1.ServiceSpec{ClusterIP: "10.96.0.77"},
+	}
+
+	c := fake.NewClientBuilder().WithObjects(udpSvc).Build()
+	sink := &fakeSink{}
+	r := &Reconciler{Client: c, Sink: sink, Log: slog.New(slog.DiscardHandler)}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	byName := map[string]CaptureTCPService{}
+	for _, s := range sink.tcpServices {
+		byName[s.ServiceName] = s
+	}
+
+	got, ok := byName["aether-test/svc-udp"]
+	require.True(t, ok, "a UDP service with a routable VIP is still delivered")
+	assert.Equal(t, "10.96.0.77", got.ClusterIP)
+	assert.False(t, got.PrimaryIsTCP,
+		"a UDP service must not get the portless TCP floor chain")
+
+	// And it keeps the things every VIP-bearing mesh Service gets.
+	assert.Equal(t, "10.96.0.77", sink.records["aether-test/svc-udp"],
+		"mesh-DNS must still resolve a UDP service's name")
+}

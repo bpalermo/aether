@@ -10,6 +10,7 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	"aethermesh.dev/registrar/internal/server"
+	"aethermesh.dev/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -203,4 +204,45 @@ func TestGenerator_DoesNotClobberUserService(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"app": "svc-1"}, got.Spec.Selector, "a user's Service of the same name is left untouched")
 	assert.NotEqual(t, "true", got.Labels[aetherlabels.LabelMeshService])
+}
+
+// TestGenerator_EmitsUDPMeshService is the UDP arm of TestGenerator_EmitsTCPMeshService.
+//
+// Before #931 this could not happen at all: PROTOCOL_UDP did not exist, and the
+// protocol loop enumerated only HTTP and TCP, so a UDP service produced NO mesh
+// Service — no ClusterIP, no mesh-DNS record, and therefore nothing for the
+// capture path to match. That failure was silent; the service simply was not
+// there.
+func TestGenerator_EmitsUDPMeshService(t *testing.T) {
+	g, c := newGen(seedProtocol("udp-svc", "aether-test", 9001, registryv1.Service_PROTOCOL_UDP))
+	g.reconcile(context.Background())
+
+	svc, err := get(t, c, "aether-test", "udp-svc")
+	require.NoError(t, err)
+	assert.Equal(t, "true", svc.Labels[aetherlabels.LabelMeshService])
+	assert.Equal(t, "udp-svc", svc.Annotations[aetherlabels.AnnotationMeshService])
+	assert.Equal(t, "9001", svc.Annotations[aetherlabels.AnnotationMeshPort])
+	assert.Equal(t, AppProtocolUDP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol],
+		"PROTOCOL_UDP services must be annotated as udp, not coerced to http")
+
+	// The ServicePorts stay TCP at the Kubernetes level on purpose: the UDP floor
+	// reaches backends at their application port through the pod-local nftables
+	// redirect, never through kube-proxy. A "mesh-udp" ServicePort would imply a
+	// kube-proxy UDP path that does not exist.
+	for _, p := range svc.Spec.Ports {
+		assert.Equal(t, corev1.ProtocolTCP, p.Protocol,
+			"port %q: the mesh protocol is an annotation axis, not a ServicePort protocol", p.Name)
+	}
+}
+
+// TestProtocolAppProtocolIsTotal guards the map the generator uses to label each
+// mesh Service. A missing entry does not fail — it yields "", which apply()
+// coerces to AppProtocolHTTP — so a protocol added to the enum but not here
+// would silently label its services HTTP and route them down the HCM path.
+func TestProtocolAppProtocolIsTotal(t *testing.T) {
+	for _, p := range registry.ServedProtocols {
+		got, ok := protocolAppProtocol[p]
+		assert.True(t, ok, "%v has no app-protocol mapping; its Services would be mislabelled http", p)
+		assert.NotEmpty(t, got, "%v maps to the empty string, which apply() coerces to http", p)
+	}
 }

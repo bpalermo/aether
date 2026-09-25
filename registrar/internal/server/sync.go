@@ -19,13 +19,15 @@ import (
 const tracerName = "aether/registrar"
 
 // syncedProtocols are the registry protocols the syncer reflects into the
-// snapshot each cycle. HTTP services ride the HCM path; TCP services ride the
-// transparent-capture TCP floor. Each cycle lists every protocol so both flow
-// through the snapshot, the agent watch stream, and name resolution.
-var syncedProtocols = []registryv1.Service_Protocol{
-	registryv1.Service_PROTOCOL_HTTP,
-	registryv1.Service_PROTOCOL_TCP,
-}
+// snapshot each cycle. HTTP services ride the HCM path, TCP services the
+// transparent-capture TCP floor, UDP services the plaintext UDP floor. Each
+// cycle lists every protocol so all of them flow through the snapshot, the
+// agent watch stream, and name resolution.
+//
+// Shared with the four other enumerators (registry.ServedProtocols) because a
+// protocol missing from this one does not error -- its services simply never
+// reach any agent.
+var syncedProtocols = registry.ServedProtocols
 
 // Syncer periodically polls an external registry, computes a diff against the
 // local snapshot, and broadcasts changes to all watching agents. It implements
