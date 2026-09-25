@@ -165,13 +165,12 @@ const (
 // eviction path so their sum stays PDB-friendly and gradual.
 type evictionBudget struct{ remaining int }
 
-// sweptProtocols are the registry protocols the ghost sweep reconciles. Both
-// HTTP and TCP services are owned per node, so a missed deregistration of either
-// must be caught.
-var sweptProtocols = []registryv1.Service_Protocol{
-	registryv1.Service_PROTOCOL_HTTP,
-	registryv1.Service_PROTOCOL_TCP,
-}
+// sweptProtocols are the registry protocols the ghost sweep reconciles. Every
+// protocol's services are owned per node, so a missed deregistration under any
+// of them must be caught -- an unlisted protocol leaks its registrations into
+// etcd permanently, with nothing to notice. Shared for that reason
+// (registry.ServedProtocols).
+var sweptProtocols = registry.ServedProtocols
 
 // netnsExists reports whether a pod's network-namespace path is still present.
 // Overridable in tests (which use synthetic netns paths). A stored pod whose

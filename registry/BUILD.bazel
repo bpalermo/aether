@@ -4,6 +4,7 @@ go_library(
     name = "registry",
     srcs = [
         "cni.go",
+        "protocols.go",
         "registry.go",
     ],
     importpath = "aethermesh.dev/registry",
@@ -20,7 +21,10 @@ go_library(
 
 go_test(
     name = "registry_test",
-    srcs = ["cni_test.go"],
+    srcs = [
+        "cni_test.go",
+        "protocols_test.go",
+    ],
     embed = [":registry"],
     deps = [
         "//api/aether/cni/v1:cni",

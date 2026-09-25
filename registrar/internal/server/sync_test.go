@@ -267,26 +267,34 @@ func TestSyncer_Start_RegistryErrorDoesNotCrash(t *testing.T) {
 // registry error on a periodic (non-initial) sync is handled gracefully, with
 // the snapshot retaining its last known good state.
 func TestSyncer_Start_RegistryErrorOnSubsequentSyncDoesNotCrash(t *testing.T) {
-	// Each sync cycle now lists every protocol (HTTP then TCP). Count cycles by
-	// the HTTP call so the first cycle succeeds (HTTP data + empty TCP) and every
-	// subsequent cycle fails transiently. Atomic because the test goroutine reads
-	// it to decide when enough cycles have run.
+	// Each sync cycle lists EVERY protocol in registry.ServedProtocols. Count
+	// cycles by the HTTP call so the first cycle succeeds (HTTP data, every other
+	// protocol empty) and every subsequent cycle fails transiently. Atomic
+	// because the test goroutine reads it to decide when enough cycles have run.
+	//
+	// Switch on the protocol explicitly rather than treating "not TCP" as HTTP:
+	// that shape silently folded the new UDP call into the HTTP cycle counter,
+	// which failed the FIRST cycle and made this read as "initial sync did not
+	// complete". Enumerating the protocols keeps the next addition loud instead.
 	var httpCalls atomic.Int64
 
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-			if protocol == registryv1.Service_PROTOCOL_TCP {
+			switch protocol {
+			case registryv1.Service_PROTOCOL_HTTP:
+				if httpCalls.Add(1) == 1 {
+					return map[string][]*registryv1.ServiceEndpoint{
+						"svc": {{Ip: "10.0.2.1", Port: 8080, Weight: 100}},
+					}, nil
+				}
+				return nil, errors.New("transient registry error")
+			default:
+				// TCP and UDP: empty on the first cycle, transiently failing after.
 				if httpCalls.Load() <= 1 {
 					return map[string][]*registryv1.ServiceEndpoint{}, nil
 				}
 				return nil, errors.New("transient registry error")
 			}
-			if httpCalls.Add(1) == 1 {
-				return map[string][]*registryv1.ServiceEndpoint{
-					"svc": {{Ip: "10.0.2.1", Port: 8080, Weight: 100}},
-				}, nil
-			}
-			return nil, errors.New("transient registry error")
 		},
 	}
 

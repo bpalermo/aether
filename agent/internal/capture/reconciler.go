@@ -13,6 +13,7 @@ import (
 
 	"aethermesh.dev/common/serviceref"
 
+	aetherannotations "aethermesh.dev/common/constants/annotations"
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	commonlog "aethermesh.dev/common/log"
 	corev1 "k8s.io/api/core/v1"
@@ -93,6 +94,24 @@ func isHTTPAppProtocol(proto string) bool {
 	}
 }
 
+// isUDPAppProtocol reports whether the service's primary port speaks datagrams.
+//
+// This is NOT the complement of isHTTPAppProtocol, and the difference matters: a
+// UDP service must get neither an HCM chain nor a portless /32 TCP floor chain.
+// Its data path is the udp_proxy capture listener, which is a separate,
+// connection-less listener on the same port and shares no filter chain with the
+// TCP side.
+//
+// Without this carve-out "udp" fell to isHTTPAppProtocol's default branch and
+// was classified TCP-primary, so a UDP service's VIP acquired a portless TCP
+// floor chain naming a tcp: cluster that may not exist. An unrecognised value
+// still classifies as TCP -- that conservative default is deliberate and
+// unchanged; only a protocol the mesh actually knows is datagram-only is carved
+// out of it.
+func isUDPAppProtocol(proto string) bool {
+	return strings.EqualFold(proto, aetherannotations.ProtocolUDP)
+}
+
 // Reconcile re-lists the mesh Services and projects their cluster.local authorities,
 // DNS records, and TCP-floor service set.
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
@@ -140,9 +159,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		if ip != "" && ip != corev1.ClusterIPNone {
 			appProto := s.Annotations[aetherlabels.AnnotationMeshAppProtocol]
 			tcpServices = append(tcpServices, CaptureTCPService{
-				ServiceName:  svc,
-				ClusterIP:    ip,
-				PrimaryIsTCP: !isHTTPAppProtocol(appProto),
+				ServiceName: svc,
+				ClusterIP:   ip,
+				// Three-valued, not two: HTTP gets the HCM chain, UDP gets
+				// neither chain (its path is the udp_proxy listener), and
+				// everything else gets the portless TCP floor.
+				PrimaryIsTCP: !isHTTPAppProtocol(appProto) && !isUDPAppProtocol(appProto),
 			})
 		}
 	}

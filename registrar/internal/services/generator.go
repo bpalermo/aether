@@ -18,6 +18,7 @@ import (
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/serviceref"
 	"aethermesh.dev/registrar/internal/server"
+	"aethermesh.dev/registry"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,15 +60,21 @@ type desiredService struct {
 	service     string
 	namespace   string
 	port        uint32
-	appProtocol string // "http" (PROTOCOL_HTTP) or "tcp" (PROTOCOL_TCP)
+	appProtocol string // "http", "tcp" or "udp" -- see protocolAppProtocol
 }
 
 // protocolAppProtocol maps a registry service protocol to the AnnotationMeshAppProtocol
 // value the generator stamps on the mesh Service (the agent's capture reconciler reads
-// it to decide HCM vs. TCP-floor chain emission).
+// it to decide HCM vs. TCP-floor vs. UDP-floor chain emission).
+//
+// A protocol missing from this map yields "", which apply() coerces to
+// AppProtocolHTTP -- so an omission here does not fail, it mislabels the service
+// as HTTP and sends its traffic down the HCM path. Keep it total over
+// registry.ServedProtocols; TestProtocolAppProtocolIsTotal enforces that.
 var protocolAppProtocol = map[registryv1.Service_Protocol]string{
 	registryv1.Service_PROTOCOL_HTTP: AppProtocolHTTP,
 	registryv1.Service_PROTOCOL_TCP:  AppProtocolTCP,
+	registryv1.Service_PROTOCOL_UDP:  AppProtocolUDP,
 }
 
 // reconcile makes the managed Services equal the snapshot catalog: create missing,
@@ -87,15 +94,19 @@ func (g *Generator) reconcile(ctx context.Context) {
 }
 
 // buildDesiredServices iterates all protocols in the snapshot and builds the
-// desired map of mesh VIP Services. Ordered (HTTP before TCP) for determinism.
+// desired map of mesh VIP Services. Ordered (registry.ServedProtocols) for
+// determinism.
 func (g *Generator) buildDesiredServices(ctx context.Context) map[client.ObjectKey]desiredService {
 	desired := map[client.ObjectKey]desiredService{}
-	// A service is registered under exactly one protocol (the registry key is
-	// name+protocol; the pod annotation picks it). Iterate every protocol so an
-	// HTTP service gets an "http" mesh Service and a TCP service a "tcp" one.
-	// Iteration is ordered (HTTP before TCP) so the no-clobber convergence is
-	// deterministic if a name ever appeared under both.
-	for _, protocol := range []registryv1.Service_Protocol{registryv1.Service_PROTOCOL_HTTP, registryv1.Service_PROTOCOL_TCP} {
+	// A service may be registered under MORE than one protocol since proposal
+	// 037: a pod advertising an HTTP port and a raw TCP port is written under
+	// both keys. Iterate every protocol so each service gets a mesh Service
+	// labelled with the app-protocol its primary port speaks.
+	//
+	// Iteration order is registry.ServedProtocols' order (HTTP, TCP, UDP), which
+	// makes the no-clobber convergence below deterministic when a name appears
+	// under several: the first protocol iterated wins.
+	for _, protocol := range registry.ServedProtocols {
 		appProto := protocolAppProtocol[protocol]
 		for svcKey, eps := range g.Snapshot.GetAll(protocol) {
 			// The registry key is namespace-qualified "<ns>/<svc>" (020 Part 1):
@@ -185,11 +196,13 @@ func samePorts(got, want []corev1.ServicePort) bool {
 	return true
 }
 
-// AppProtocolHTTP / AppProtocolTCP are the AnnotationMeshAppProtocol values the
-// generator writes (and the agent reads to decide TCP-floor chain emission).
+// AppProtocolHTTP / AppProtocolTCP / AppProtocolUDP are the
+// AnnotationMeshAppProtocol values the generator writes (and the agent reads to
+// decide HCM vs. TCP-floor vs. UDP-floor chain emission).
 const (
 	AppProtocolHTTP = "http"
 	AppProtocolTCP  = "tcp"
+	AppProtocolUDP  = "udp"
 )
 
 // apply creates or updates the VIP Service for one mesh service. It NEVER touches a
