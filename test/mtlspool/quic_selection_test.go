@@ -72,7 +72,19 @@ type destinationH3 struct {
 
 func startDestinationH3(t *testing.T, p *pki) *destinationH3 {
 	t.Helper()
-	certPath, keyPath := p.leafDNS(t, "echo-h3", spiffeDest, []string{quicDestFQDN, "*." + quicDestFQDN})
+	return startDestinationH3With(t, p, defaultQUICOptions())
+}
+
+// startDestinationH3With is startDestinationH3 with the leaf's shape taken
+// from o.uriOnlyLeaf.
+func startDestinationH3With(t *testing.T, p *pki, o quicOptions) *destinationH3 {
+	t.Helper()
+	var certPath, keyPath string
+	if o.uriOnlyLeaf {
+		certPath, keyPath = p.leaf(t, "echo-h3", spiffeDest, true)
+	} else {
+		certPath, keyPath = p.leafDNS(t, "echo-h3", spiffeDest, []string{quicDestFQDN, "*." + quicDestFQDN})
+	}
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	require.NoError(t, err)
 	pool := x509.NewCertPool()
@@ -118,12 +130,18 @@ func startDestinationH3(t *testing.T, p *pki) *destinationH3 {
 // harness, with its SDS sources pointed at the harness SDS server.
 func quicTwin(t *testing.T, name, sourceSpiffeID, destAddr string) *clusterv3.Cluster {
 	t.Helper()
+	return quicTwinWith(t, name, sourceSpiffeID, destAddr, defaultQUICOptions())
+}
+
+// quicTwinWith is quicTwin with the SNI and the server SAN pin taken from o.
+func quicTwinWith(t *testing.T, name, sourceSpiffeID, destAddr string, o quicOptions) *clusterv3.Cluster {
+	t.Helper()
 	base := proxy.NewServiceCluster(meshClusterName, meshClusterName, meshClusterName, nil)
 	base.ClusterDiscoveryType = &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC}
 	base.EdsClusterConfig = nil
 	base.LbSubsetConfig = nil
 	base.LoadAssignment = staticEndpoint(name, destAddr)
-	cl := proxy.QUICClusterFrom(base, name, sourceSpiffeID, validationContextName, []string{spiffeDest}, quicSNI)
+	cl := proxy.QUICClusterFrom(base, name, sourceSpiffeID, validationContextName, o.sanPin, o.sni)
 	rewriteQUICSDSToHarness(t, cl.GetTransportSocket())
 	return cl
 }
@@ -166,6 +184,13 @@ func selectingSourceListener(t *testing.T, name, spiffeID string, port int, arms
 // identity through arms.
 func startEnvoyQUIC(t *testing.T, p *pki, h2Addr, h3Addr string, arms map[string]string) *proxyHandle {
 	t.Helper()
+	return startEnvoyQUICWith(t, p, h2Addr, h3Addr, arms, defaultQUICOptions())
+}
+
+// startEnvoyQUICWith is startEnvoyQUIC with the twins, the runtime and the
+// log plumbing taken from o.
+func startEnvoyQUICWith(t *testing.T, p *pki, h2Addr, h3Addr string, arms map[string]string, o quicOptions) *proxyHandle {
+	t.Helper()
 	bin, err := envoybin.Path()
 	if err != nil {
 		t.Skipf("locate envoy: %v", err)
@@ -177,23 +202,25 @@ func startEnvoyQUIC(t *testing.T, p *pki, h2Addr, h3Addr string, arms map[string
 		StaticResources: &bootstrapv3.Bootstrap_StaticResources{
 			Clusters: []*clusterv3.Cluster{
 				meshCluster(t, h2Addr), sdsCluster(sdsAddr),
-				quicTwin(t, quicTwinA, spiffeSourceA, h3Addr),
-				quicTwin(t, quicTwinB, spiffeSourceB, h3Addr),
+				quicTwinWith(t, quicTwinA, spiffeSourceA, h3Addr, o),
+				quicTwinWith(t, quicTwinB, spiffeSourceB, h3Addr, o),
 			},
 			Listeners: []*listenerv3.Listener{
 				selectingSourceListener(t, "source_a", spiffeSourceA, portA, arms),
 				selectingSourceListener(t, "source_b", spiffeSourceB, portB, arms),
 			},
 		},
+		LayeredRuntime: o.layeredRuntime(),
 	}
 	data, err := protojson.MarshalOptions{Multiline: true, Indent: "  ", UseProtoNames: true}.Marshal(bs)
 	require.NoError(t, err)
 	path := filepath.Join(t.TempDir(), "bootstrap-quic.json")
 	writeFile(t, path, data)
 	t.Logf("bootstrap: %s", path)
-	cmd := exec.Command(bin, "-c", path, "--concurrency", "1", "--use-dynamic-base-id", "--log-level", "warn")
-	cmd.Stdout = &testWriter{t: t, prefix: "envoy"}
-	cmd.Stderr = &testWriter{t: t, prefix: "envoy"}
+	args := append([]string{"-c", path, "--concurrency", "1", "--use-dynamic-base-id", "--log-level", "warn"}, o.extraArgs...)
+	cmd := exec.Command(bin, args...)
+	cmd.Stdout = o.output(t)
+	cmd.Stderr = o.output(t)
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
