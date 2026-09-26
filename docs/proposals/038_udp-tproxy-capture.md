@@ -1,7 +1,8 @@
 # Proposal 038: TPROXY Capture for UDP
 
-**Status:** Draft. P0 spike run (2026-09-23) — three of four premises verified by
-experiment; one remains, and it must be settled on a node before Phase 1 starts.
+**Status:** Accepted. All four premises verified by experiment. Phase 0 was
+settled on a node on 2026-09-25 (see *Phase 0: settled*); **Phase 1 is
+unblocked**.
 **Author:** Bruno Palermo
 **Date:** 2026-09-23
 **History:** grew out of #873, whose stated fix direction turned out to be wrong
@@ -120,7 +121,48 @@ confirmed 20 sockets bound with it. Failure is loud, not silent: a missing
 capability throws at bind and the listener is rejected. `NET_ADMIN` is already
 granted on the proxy container.
 
-### The premise that is NOT yet established
+### Phase 0: settled (2026-09-25, `main-worker-04`, kernel 6.18.34-talos)
+
+**A transparent socket created inside a pod netns via `setns` and read from
+another netns DOES observe the pre-TPROXY destination.** Phase 1 is unblocked.
+
+The rig tests the kernel half directly, on the socket Envoy would use, rather
+than standing up Envoy: `transparent: true` applying to a datagram socket and
+Envoy reading `ipi_addr` via `addressFromMessage` were already established above,
+so the only open question was the `setns` interaction — and isolating it removes
+Envoy's config surface as a confound.
+
+It binds the **service** port, not the capture port, because nftables `tproxy` is
+prerouting-only: locally-originated pod egress uses mark-and-divert, which does
+not rewrite the destination port. That is the same constraint as the third row of
+the table above, arrived at independently.
+
+| case | `ipi_addr` | |
+|---|---|---|
+| **C1** socket created *and* read in-netns, mark-and-divert | `10.250.0.7` | the VIP — the rig can produce a positive |
+| **C2** REDIRECT, read in-netns | `127.0.0.1` | rewritten — `ipi_addr` tracks the REAL header |
+| **C3** no capture rule | *nothing delivered* | delivery depends on the rule |
+| **MAIN** created in-netns via `setns`, read from **outside** | `10.250.0.7` | **the VIP survives** |
+
+C2 is the load-bearing control and it is the reason to believe MAIN. The
+2026-09-23 attempt failed precisely because its control agreed with its negative
+result, making both unusable; C3 alone is not a substitute, since it shows only
+that a rule is needed, not that the measurement reflects the header.
+
+The first run of this spike ALSO lost C2, and quietly: `redirect` is terminal in
+nftables, so a trailing `counter` invalidated the rule, no rule installed, and C2
+became an accidental duplicate of C3 — while still satisfying an assertion
+written as "C2 must not report the VIP", which `None` trivially passes. The rig
+now raises on a failed rule, verifies the ruleset with `nft list ruleset` before
+measuring, and treats *no delivery* in C2 as a broken rig rather than a pass.
+
+Reproducer: a Job in `aether-system` (which already enforces PodSecurity
+`privileged`), image `nicolaka/netshoot`, `runAsUser: 0` with `NET_ADMIN` and
+`SYS_ADMIN` and **no host namespaces and no `privileged: true`** — the pod's own
+netns is the outer one. `SYS_ADMIN` is the single reason the rootless workstation
+rig could not host this.
+
+### Why the workstation rig could not establish it
 
 aether's real shape is not the spike's shape. The proxy DaemonSet is
 `hostNetwork: true` and binds capture listeners **into each pod's netns** via
@@ -137,18 +179,16 @@ A rootless user namespace cannot host this test: `setns()` back to the original
 netns needs `CAP_SYS_ADMIN` in that namespace's user namespace, and under
 `unshare -r` the original netns is the host's.
 
-**Phase 0 exists to settle exactly this, on a node, and nothing downstream starts
-until it does.**
+**Phase 0 settled this on a node on 2026-09-25 — see above. Phase 1 may start.**
 
 ## Phases
 
 Each phase is independently revertable, following 037's pattern.
 
-**Phase 0 — node spike.** Answer one question: does a `transparent` listener bound
-via `network_namespace_filepath` into a pod netns observe the pre-TPROXY
-destination? Proving it needs real root, which the workstation rig cannot supply.
-If the answer is no, this proposal stops here and #916 stands as a documented
-limit — that is a legitimate outcome and cheaper than discovering it in Phase 2.
+**Phase 0 — node spike. DONE (2026-09-25): the answer is YES.** A transparent
+socket created inside a pod netns via `setns` and read from another netns observes
+the pre-TPROXY destination, with a REDIRECT control confirming the measurement
+tracks the real header. See *Phase 0: settled*.
 
 **Phase 1 — CNI, behind a flag, off by default.** UDP TPROXY rules in the pod
 netns alongside the existing TCP REDIRECT, plus the `ip rule` / `ip route local`

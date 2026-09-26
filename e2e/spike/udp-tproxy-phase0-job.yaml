@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tproxy-phase0
+  namespace: aether-system
+  labels: {aether.io/spike: "038-phase0"}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      labels: {aether.io/spike: "038-phase0"}
+    spec:
+      restartPolicy: Never
+      # No hostNetwork and no hostPID: the pod's OWN netns is the "outer" one and
+      # the spike creates "inner" itself, which is the same two-netns shape the
+      # proxy has (event loop in one netns, listener socket created in another).
+      # Host namespaces added nothing to the experiment.
+      volumes:
+        - name: script
+          configMap: {name: tproxy-phase0}
+      containers:
+        - name: spike
+          image: nicolaka/netshoot:latest
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # NET_ADMIN: nftables + ip rule/route inside the netns.
+              # SYS_ADMIN: netns creation and setns -- the single reason the
+              # rootless workstation rig could not host this test.
+              add: ["NET_ADMIN", "SYS_ADMIN"]
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          volumeMounts:
+            - {name: script, mountPath: /spike}
+          command: ["python3", "/spike/phase0.py"]
