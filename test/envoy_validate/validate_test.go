@@ -38,10 +38,12 @@ import (
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	udp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/udp/udp_proxy/v3"
 	network_inputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
+	quicv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v3"
 	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
 	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // envoyBinary returns the path to the Envoy binary from the Bazel runfiles tree.
@@ -193,6 +195,17 @@ func TestEnvoyValidate(t *testing.T) {
 		if len(unpinnedIn) > 0 {
 			t.Errorf("%s: mTLS-terminating filter chains with no client match_typed_subject_alt_names: %v\n"+
 				"require_client_certificate alone accepts any certificate the trust bundle signs, including non-workload identities", b.name, unpinnedIn)
+		}
+		// Proposal 038 R4: every mTLS QUIC chain must EXPLICITLY disable
+		// session resumption and 0-RTT. Envoy accepts the unset form and, at
+		// this pin, resumes without re-verifying the client certificate.
+		noR4, err := QUICChainsWithoutR4(data)
+		if err != nil {
+			t.Fatalf("R4 check %s: %v", b.name, err)
+		}
+		if len(noR4) > 0 {
+			t.Errorf("%s: mTLS QUIC chains without explicit enable_resumption:false + enable_early_data:false: %v\n"+
+				"a resumed or 0-RTT QUIC session carries a peer identity the destination never verified (038 R4)", b.name, noR4)
 		}
 	}
 
@@ -854,5 +867,117 @@ func TestCaptureUDPClusterIsPlaintextAtTheAppPort(t *testing.T) {
 	}
 	if endpoints == 0 {
 		t.Fatalf("cluster %q has no endpoints: the assertions above checked nothing", udp.GetName())
+	}
+}
+
+// TestNodeBootstrapCarriesTheQUICInbound is the anti-vacuity half of the R4
+// and inbound-pin checks above: the node bootstrap must contain the pod's
+// HTTP/3 inbound (inbound_<pod>_h3), on UDP, on the TCP inbound's port, with
+// a QuicDownstreamTransport that requires a client certificate -- otherwise
+// QUICChainsWithoutR4 and the QUIC branch of downstreamTLSPinned are checking
+// nothing when they pass.
+func TestNodeBootstrapCarriesTheQUICInbound(t *testing.T) {
+	data, err := NodeBootstrapJSON()
+	if err != nil {
+		t.Fatalf("NodeBootstrapJSON: %v", err)
+	}
+	bs := &bootstrapv3.Bootstrap{}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	var tcpPort uint32
+	var quic *listenerv3.Listener
+	for _, l := range bs.GetStaticResources().GetListeners() {
+		switch {
+		case strings.HasSuffix(l.GetName(), "_h3") && strings.HasPrefix(l.GetName(), "inbound_"):
+			quic = l
+		case strings.HasPrefix(l.GetName(), "inbound_"):
+			tcpPort = l.GetAddress().GetSocketAddress().GetPortValue()
+		}
+	}
+	if quic == nil {
+		t.Fatal("the node bootstrap has no inbound_<pod>_h3 listener: the QUIC checks above are vacuous")
+	}
+	sa := quic.GetAddress().GetSocketAddress()
+	if sa.GetProtocol() != corev3.SocketAddress_UDP {
+		t.Errorf("QUIC inbound binds %v, want UDP", sa.GetProtocol())
+	}
+	// 18008 as a literal on purpose: a CROSS-TREE pin (038 R3), not a
+	// restatement of whatever the builder used -- the source side dials the
+	// number the TCP inbound advertises, and QUIC must be reachable at exactly
+	// that number or a second port gets allocated by accident.
+	if sa.GetPortValue() != 18008 || tcpPort != 18008 {
+		t.Errorf("QUIC inbound on %d, TCP inbound on %d, want both on 18008 (038 R3: the inbound port number is shared across transports)", sa.GetPortValue(), tcpPort)
+	}
+	if !quic.GetEnableReusePort().GetValue() {
+		t.Errorf("QUIC inbound lacks enable_reuse_port; a QUIC listener needs it for per-worker sockets")
+	}
+	if quic.GetUdpListenerConfig().GetQuicOptions() == nil {
+		t.Errorf("QUIC inbound has no udp_listener_config.quic_options; without it this is a plain UDP listener")
+	}
+	var mtlsChains int
+	for _, fc := range quic.GetFilterChains() {
+		ctx, err := downstreamTLSContextOf(fc.GetTransportSocket())
+		if err != nil {
+			t.Fatalf("chain %s: %v", fc.GetName(), err)
+		}
+		if ctx == nil {
+			t.Errorf("chain %s carries no DownstreamTlsContext inside its transport socket", fc.GetName())
+			continue
+		}
+		if !ctx.GetRequireClientCertificate().GetValue() {
+			t.Errorf("chain %s does not require a client certificate: the QUIC inbound would accept anonymous callers", fc.GetName())
+		}
+		if alpn := ctx.GetCommonTlsContext().GetAlpnProtocols(); len(alpn) != 1 || alpn[0] != "h3" {
+			t.Errorf("chain %s ALPN = %v, want exactly [h3]: any other ALPN fails an h3 client with alert 120", fc.GetName(), alpn)
+		}
+		mtlsChains++
+	}
+	if mtlsChains == 0 {
+		t.Fatal("the QUIC inbound has no filter chains")
+	}
+}
+
+// TestUnpinnedInboundChainsSeesThroughQUIC proves the QUIC unwrap in
+// downstreamTLSPinned is not decorative: a hand-built bootstrap with ONE
+// chain whose QuicDownstreamTransport requires a client certificate and pins
+// nothing must be reported. Before the unwrap this passed vacuously (the typed
+// config was "not a DownstreamTlsContext"), which is the fail-open direction.
+func TestUnpinnedInboundChainsSeesThroughQUIC(t *testing.T) {
+	unpinned := &tlsv3.DownstreamTlsContext{
+		RequireClientCertificate: wrapperspb.Bool(true),
+		CommonTlsContext:         &tlsv3.CommonTlsContext{},
+	}
+	l := &listenerv3.Listener{
+		Name: "inbound_probe_h3",
+		Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
+			Protocol: corev3.SocketAddress_UDP, Address: "0.0.0.0", PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: 18008},
+		}}},
+		FilterChains: []*listenerv3.FilterChain{{
+			Name: "in_h3_probe",
+			TransportSocket: &corev3.TransportSocket{
+				Name:       "envoy.transport_sockets.quic",
+				ConfigType: &corev3.TransportSocket_TypedConfig{TypedConfig: mustAny(&quicv3.QuicDownstreamTransport{DownstreamTlsContext: unpinned})},
+			},
+		}},
+	}
+	data, err := marshalBootstrap(newBootstrap([]*clusterv3.Cluster{xdsCluster()}, []*listenerv3.Listener{l}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, err := UnpinnedInboundChains(data)
+	if err != nil {
+		t.Fatalf("UnpinnedInboundChains: %v", err)
+	}
+	if len(got) != 1 || got[0] != "inbound_probe_h3/in_h3_probe" {
+		t.Fatalf("an unpinned mTLS QUIC chain was not reported (got %v): the QUIC unwrap is vacuous", got)
+	}
+	// And the R4 check sees the same chain, for the same reason (nothing set).
+	noR4, err := QUICChainsWithoutR4(data)
+	if err != nil {
+		t.Fatalf("QUICChainsWithoutR4: %v", err)
+	}
+	if len(noR4) != 1 {
+		t.Fatalf("a QUIC chain with resumption/early-data UNSET was not reported by the R4 check (got %v)", noR4)
 	}
 }

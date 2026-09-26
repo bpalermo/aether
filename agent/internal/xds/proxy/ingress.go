@@ -255,6 +255,34 @@ func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, t
 // is the default (no match criteria). chainPort selects both the app cluster
 // and the chain name suffix.
 func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *listenerv3.FilterChain {
+	hcm := buildInboundHCM(cniPod, chainPort, emitStatsPod, extensionFilters, inboundFilter)
+
+	name := fmt.Sprintf("in_%s", cniPod.GetName())
+	// The no-SNI HCM chain matches application_protocols:["h2"] (the mesh's HTTP/2
+	// transport) so a no-ALPN mTLS connection — the TCP floor — falls through to the
+	// floor's default chain instead. Per-port chains match the port SNI (more
+	// specific than application_protocols, so they win for HTTP regardless of ALPN).
+	match := &listenerv3.FilterChainMatch{ApplicationProtocols: []string{"h2"}}
+	if sni != "" {
+		name = fmt.Sprintf("in_%s_%s", cniPod.GetName(), sni)
+		match = &listenerv3.FilterChainMatch{ServerNames: []string{sni}}
+	}
+
+	return &listenerv3.FilterChain{
+		Name:             name,
+		FilterChainMatch: match,
+		Filters:          []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
+		TransportSocket:  DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain),
+	}
+}
+
+// buildInboundHCM builds the mTLS inbound HCM for ONE served port: the local
+// liveness/readiness answers, the destination-reported stats edge, the
+// escape-hatch extension entries, the router, and XFCC stamped SANITIZE_SET
+// from the verified peer. Shared by the TCP inbound chain (h2 codec, AUTO) and
+// the QUIC inbound chain (HTTP/3 codec) so the two transports carry the SAME
+// filter set and the same XFCC contract; only the codec differs.
+func buildInboundHCM(cniPod *cniv1.CNIPod, chainPort uint16, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *http_connection_managerv3.HttpConnectionManager {
 	rc := buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort))
 	applyInboundFilter(rc, inboundFilter)
 	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc)
@@ -279,23 +307,130 @@ func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16,
 		Subject: wrapperspb.Bool(true),
 		Uri:     true,
 	}
+	return hcm
+}
 
-	name := fmt.Sprintf("in_%s", cniPod.GetName())
-	// The no-SNI HCM chain matches application_protocols:["h2"] (the mesh's HTTP/2
-	// transport) so a no-ALPN mTLS connection — the TCP floor — falls through to the
-	// floor's default chain instead. Per-port chains match the port SNI (more
-	// specific than application_protocols, so they win for HTTP regardless of ALPN).
-	match := &listenerv3.FilterChainMatch{ApplicationProtocols: []string{"h2"}}
-	if sni != "" {
-		name = fmt.Sprintf("in_%s_%s", cniPod.GetName(), sni)
-		match = &listenerv3.FilterChainMatch{ServerNames: []string{sni}}
+// InboundQUICListenerName returns the name of a pod's HTTP/3 inbound listener.
+// The "_h3" suffix is the edge's convention (EdgeGatewayH3ListenerName): the
+// UDP listener shares the TCP inbound's port NUMBER, never its name.
+func InboundQUICListenerName(cniPod *cniv1.CNIPod) string {
+	return fmt.Sprintf("inbound_%s_h3", cniPod.GetName())
+}
+
+// NewInboundQUICListener builds a pod's HTTP/3 inbound listener (proposal 038
+// Phase 4, R2/R3): UDP on the SAME port as the TCP inbound (defaultInboundPort,
+// 18008 -- R3, the shared-port rule the port-role gate pins), bound into the
+// pod's netns, terminating mTLS over QUIC with the pod's own SVID and the same
+// client-certificate requirement and workload SAN pin as the TCP inbound
+// (InboundQUICTransportSocket wraps the same bare context), and routing to the
+// same app_<pod>_<port> clusters through the same inbound route. Callers that
+// reach it are the per-source `quic:` clusters of Phase 4b; until those exist
+// it is inert -- one UDP socket per pod, no client -- which is why it ships
+// unconditionally rather than behind a flag: it soaks under ordinary churn from
+// the first deploy that carries it.
+//
+// Chains, and why they differ from the TCP inbound's:
+//   - QUIC carries HTTP/3 ONLY, so there is no tcp_proxy floor and no chain for
+//     a port declared raw TCP (proposal 037); those stay TCP-inbound-only.
+//   - The PRIMARY port is the DEFAULT chain (no match): there is no "h2" ALPN
+//     to key on, and every QUIC connection is HTTP/3.
+//   - Every other HTTP port is a server_names chain on the port number, as on
+//     the TCP inbound. That match works on a QUIC listener because Envoy's
+//     QUIC proof source passes the CHLO's hostname into the filter-chain lookup
+//     (source/common/quic/envoy_quic_proof_source.cc, verified at the pinned
+//     commit), so the source side sets SNI = "<port>" exactly as it does for
+//     an h2 non-primary port.
+//
+// No inbound divert is involved: a QUIC datagram from another node's proxy
+// arrives on the pod's eth0 addressed to the pod IP and is delivered to this
+// socket by ordinary routing. The CNI's mark-and-divert is for the pod's OWN
+// outbound only, and outbound QUIC originates from the proxy in the host netns.
+//
+// Returns (nil, nil) when cleartext (SPIRE off): QUIC mandates TLS, there is
+// no SVID to present, and the TCP inbound's cleartext chain keeps the mesh hop
+// routable on its own. Returns ErrNoTrustDomain in the same case the TCP
+// inbound does, for the same reason.
+func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) (*listenerv3.Listener, error) {
+	if cniPod == nil {
+		return nil, fmt.Errorf("pod is required")
+	}
+	if cniPod.GetNetworkNamespace() == "" {
+		return nil, fmt.Errorf("network namespace is required")
+	}
+	if cleartext {
+		return nil, nil
+	}
+	if trustDomain == "" {
+		return nil, fmt.Errorf("inbound QUIC listener for pod %s/%s: %w", cniPod.GetNamespace(), cniPod.GetName(), ErrNoTrustDomain)
 	}
 
+	tlsCertificateSecretName := SpiffeIDFromPod(cniPod, trustDomain)
+	validationContextName := ValidationContextName(trustDomain)
+	defaultPort := AppPortFromPod(cniPod)
+	tcpPorts := appTCPPorts(cniPod)
+
+	var chains []*listenerv3.FilterChain
+	chains = append(chains, buildInboundQUICFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
+	for _, port := range AppPortsFromPod(cniPod) {
+		if port == defaultPort {
+			continue
+		}
+		if _, isTCP := tcpPorts[port]; isTCP {
+			continue
+		}
+		chains = append(chains, buildInboundQUICFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
+	}
+
+	return &listenerv3.Listener{
+		Name: InboundQUICListenerName(cniPod),
+		Address: &corev3.Address{
+			Address: &corev3.Address_SocketAddress{
+				SocketAddress: &corev3.SocketAddress{
+					Protocol: corev3.SocketAddress_UDP,
+					Address:  defaultInboundAddress,
+					PortSpecifier: &corev3.SocketAddress_PortValue{
+						PortValue: defaultInboundPort,
+					},
+					NetworkNamespaceFilepath: cniPod.GetNetworkNamespace(),
+				},
+			},
+		},
+		// QUIC listeners require reuse_port: Envoy runs one UDP socket per worker
+		// and steers a connection ID to its worker via the BPF program that
+		// reuse_port groups enable (the edge's H3 listener has the same setting).
+		EnableReusePort: wrapperspb.Bool(true),
+		UdpListenerConfig: &listenerv3.UdpListenerConfig{
+			QuicOptions: &listenerv3.QuicProtocolOptions{},
+		},
+		// Same per-pod stats shape as the TCP inbound, with the _h3 suffix the
+		// aether.pod stats_tag ignores, so listener.inbound.* is labelled by pod
+		// for both transports.
+		StatPrefix:       fmt.Sprintf("inbound_%s_h3", cniPod.GetName()),
+		TrafficDirection: corev3.TrafficDirection_INBOUND,
+		FilterChains:     chains,
+	}, nil
+}
+
+// buildInboundQUICFilterChain is buildInboundFilterChain for the HTTP/3
+// inbound: the same HCM (buildInboundHCM) with the HTTP3 codec, behind the QUIC
+// transport socket. sni == "" is the default chain (the primary port); a
+// non-empty sni is a server_names chain on that port number.
+func buildInboundQUICFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *listenerv3.FilterChain {
+	hcm := buildInboundHCM(cniPod, chainPort, emitStatsPod, extensionFilters, inboundFilter)
+	hcm.CodecType = http_connection_managerv3.HttpConnectionManager_HTTP3
+	hcm.Http3ProtocolOptions = &corev3.Http3ProtocolOptions{}
+
+	name := fmt.Sprintf("in_h3_%s", cniPod.GetName())
+	var match *listenerv3.FilterChainMatch
+	if sni != "" {
+		name = fmt.Sprintf("in_h3_%s_%s", cniPod.GetName(), sni)
+		match = &listenerv3.FilterChainMatch{ServerNames: []string{sni}}
+	}
 	return &listenerv3.FilterChain{
 		Name:             name,
 		FilterChainMatch: match,
 		Filters:          []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
-		TransportSocket:  DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain),
+		TransportSocket:  InboundQUICTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain),
 	}
 }
 

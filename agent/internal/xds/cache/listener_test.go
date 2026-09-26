@@ -111,14 +111,14 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 			wantLen:   0,
 		},
 		{
-			name: "single pod yields two resources (inbound + outbound)",
+			name: "single pod yields three resources (inbound + inbound QUIC + outbound)",
 			setupFunc: func(c *SnapshotCache) {
 				seedListeners(c, makeCNIPod("pod-a", "default", "/proc/100/ns/net"))
 			},
-			wantLen: 2,
+			wantLen: 3,
 		},
 		{
-			name: "two pods yield four resources",
+			name: "two pods yield six resources",
 			setupFunc: func(c *SnapshotCache) {
 				seedListeners(
 					c,
@@ -126,10 +126,10 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 					makeCNIPod("pod-b", "default", "/proc/200/ns/net"),
 				)
 			},
-			wantLen: 4,
+			wantLen: 6,
 		},
 		{
-			name: "three pods yield six resources",
+			name: "three pods yield nine resources",
 			setupFunc: func(c *SnapshotCache) {
 				seedListeners(
 					c,
@@ -138,7 +138,7 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 					makeCNIPod("pod-c", "ns-c", "/proc/300/ns/net"),
 				)
 			},
-			wantLen: 6,
+			wantLen: 9,
 		},
 		{
 			name: "direct map injection yields two resources per entry",
@@ -367,7 +367,7 @@ func TestLoadListenersFromStorage_ValidPodsMapPopulation(t *testing.T) {
 			assert.Len(t, c.listeners, tt.wantEntries)
 			// Each entry contributes an inbound and an outbound listener resource,
 			// plus the always-present health gateway listener.
-			assert.Len(t, c.Listeners(), tt.wantEntries*2+1)
+			assert.Len(t, c.Listeners(), tt.wantEntries*3+1) // inbound + inbound QUIC + outbound per pod, + the health gateway
 		})
 	}
 }
@@ -634,7 +634,7 @@ func TestSnapshotCache_Listeners_ResultIsIndependentSlice(t *testing.T) {
 	seedListeners(c, makeCNIPod("pod-a", "default", "/proc/100/ns/net"))
 
 	first := c.Listeners()
-	require.Len(t, first, 3) // inbound + outbound + health gateway
+	require.Len(t, first, 4) // inbound + inbound QUIC + outbound + health gateway
 
 	// Zero out the returned slice.
 	for i := range first {
@@ -643,5 +643,5 @@ func TestSnapshotCache_Listeners_ResultIsIndependentSlice(t *testing.T) {
 
 	// A second call must still return the original resources.
 	second := c.Listeners()
-	assert.Len(t, second, 3)
+	assert.Len(t, second, 4) // inbound + inbound QUIC + outbound + health gateway
 }
