@@ -506,6 +506,72 @@ for the full install + onboarding walkthrough.
 > [`observability/profiling-symbols.md`](./observability/profiling-symbols.md) for the
 > path table that has to be updated alongside it.
 
+### East-west QUIC (proposal 038 Phase 4): enabling, verifying, rolling back
+
+Since #953 every mesh pod has an HTTP/3 inbound on UDP:18008 beside the TCP one
+(same SVID, same client-certificate requirement, same SAN pin); it is inert until a
+source proxy dials it. #956 adds the dialling side, **opt-in per destination**:
+
+```bash
+# one entry per destination; the h2 path is untouched for everything else
+--set agent.eastWestQuicServices[0]=aether-test/svc-1
+```
+
+Before listing anything, the workloads' `ClusterSPIFFEID` must issue two DNS SANs
+per SVID — `<sa>.<ns>.<meshDomain>` and `*.<sa>.<ns>.<meshDomain>`. Envoy's QUIC
+client verifies the SNI (`<port>.<sa>.<ns>.<meshDomain>`) against the leaf's DNS
+SANs *after* the SPIFFE pin succeeds and nothing but `accept_untrusted` skips it
+(aether#957); without the SANs every HTTP/3 handshake to a listed service fails
+closed (503 at the source, `QUIC_TLS_CERTIFICATE_UNKNOWN` in the proxy log) while
+h2 keeps working. On the spiffe/spire chart:
+
+```yaml
+spire-server:
+  controllerManager:
+    identities:
+      clusterSPIFFEIDs:
+        default:
+          dnsNameTemplates:
+            - "{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.<meshDomain>"
+            - "*.{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.<meshDomain>"
+```
+
+Changing the entry re-issues every workload SVID on the agents' next fetch; no pod
+roll. Order of operations on a live cluster: SPIRE first, wait for the agents'
+`envoy_sds_*_version` to move on every node, then the allow-list.
+
+**What to expect once a destination is listed.** The agent logs
+`east-west QUIC fan-out quic_clusters=N local_identities=I allow_listed_services=S`
+with `N = I × S` on every node that hosts a caller; the proxy admin (`127.0.0.1:9901`
+on the node) lists one `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster per local
+ServiceAccount. Requests from a caller take its own twin (a matcher cluster
+specifier keyed on the connection's `aether.source.spiffe_id` filter state); a
+caller with no twin — or a connection stamped before the trust domain was known —
+takes the h2 cluster. A GAMMA (HTTPRoute) rule whose single backendRef is the
+parent rides QUIC too; a weighted split stays h2 (#961).
+
+**Verifying.** Per twin, the admin `/clusters` host rows (`<cluster>::<ip:port>::
+rq_total::N`) are the ground truth. In Prometheus the twins carry their own stats
+key `<ns>/<svc>@<ns>/<sa>` (#960):
+
+```promql
+# HTTP/3 requests per (destination, source ServiceAccount)
+sum by (aether_cluster) (rate(envoy_cluster_upstream_rq_total{aether_cluster=~".*@.*"}[5m]))
+# h2 + h3 together for one destination
+sum(rate(envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-1(@.*)?"}[5m]))
+# a twin that cannot connect: the #957 DNS-SAN shape, or UDP:18008 blocked between nodes
+increase(envoy_cluster_upstream_cx_connect_fail{aether_cluster=~".*@.*"}[5m])
+```
+
+On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
+(admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
+kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5).
+
+**Rolling back.** Remove the entries (or `--set agent.eastWestQuicServices=null`):
+the twins and the selection disappear on the next push and every caller is back on
+the h2 route it had before, byte-for-byte. The inbound listener and the DNS SANs are
+harmless to leave in place. Nothing here needs a proxy roll.
+
 ## 8. Troubleshooting
 
 ### Forwarded DNS keeps failing after a kube-dns roll
