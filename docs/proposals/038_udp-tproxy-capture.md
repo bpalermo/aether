@@ -491,7 +491,10 @@ over a tested path. The full assessment is on #916.
   validated chain lives on the session), but does the *source* proxy's
   per-source binding — keyed by source SPIFFE ID since #822 — survive a path
   change that alters the 5-tuple? Expected yes, since the key is the identity,
-  not the tuple; verify in Phase 4's e2e.
+  not the tuple; verify in Phase 4's e2e. `e2e/eastwest-quic.sh` E5 covers the
+  in-cluster approximation (a source pod re-created on a new IP keeps its own
+  identity and its own twin); true path migration is not exercisable in kind,
+  because the QUIC client is the node proxy, not the pod.
 - **Q4.** When the Envoy pin can move. **Answered 2026-09-26:** the registry
   published `1.40.0-dev.20260926.726d7ac.envoy` that morning and the proxy pin
   moved to it the same day. It carries #47219 (resumption default off) and
