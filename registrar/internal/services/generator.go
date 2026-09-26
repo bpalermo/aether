@@ -169,7 +169,7 @@ func (g *Generator) pruneServices(ctx context.Context, managed corev1.ServiceLis
 func meshServicePorts(meshPort int32) []corev1.ServicePort {
 	return []corev1.ServicePort{
 		{Name: "mesh", Port: meshPort, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(meshPort)},
-		{Name: "mesh-tcp", Port: mesh.ProxyTCPOutboundPort, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(mesh.ProxyTCPOutboundPort)},
+		{Name: "mesh-tcp", Port: mesh.ProxyL4OutboundPort, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(mesh.ProxyL4OutboundPort)},
 		{Name: "http", Port: 80, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(80)},
 		{Name: "https", Port: 443, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(443)},
 	}

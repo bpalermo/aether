@@ -1,8 +1,26 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "mesh",
     srcs = ["mesh.go"],
     importpath = "aethermesh.dev/common/constants/mesh",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "mesh_test",
+    srcs = [
+        "l4port_test.go",
+        "marks_test.go",
+    ],
+    embed = [":mesh"],
+    embedsrcs = [
+        "l4port_test.go",
+        "marks_test.go",
+        "mesh.go",
+    ],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )

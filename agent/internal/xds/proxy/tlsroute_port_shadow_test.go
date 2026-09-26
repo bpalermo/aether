@@ -72,7 +72,7 @@ func TestTLSRouteChainsSurvivePortQualifiedFloor(t *testing.T) {
 	// The two sanctioned raw-TCP spellings for a TCP-primary service. Before the
 	// fix BOTH of these were claimed by cap_tcp_* floor chains and the SNI chain
 	// was unreachable on them.
-	for _, port := range []uint32{meshconst.ProxyTCPOutboundPort, primary} {
+	for _, port := range []uint32{meshconst.ProxyL4OutboundPort, primary} {
 		assert.True(t, hasSNIChainAt(got, port),
 			"no server_names chain at :%d — a port-qualified floor chain outranks the SNI chain "+
 				"on Envoy's first tier, so the TLSRoute is inert on that spelling (#911)", port)
@@ -97,7 +97,7 @@ func TestTLSRouteChainsSurvivePortQualifiedFloor(t *testing.T) {
 func TestClaimedTCPPortsCoversBothProducers(t *testing.T) {
 	t.Run("tcp-primary: mesh port and primary are claimed", func(t *testing.T) {
 		got := claimedTCPPorts(CaptureTCPService{PrimaryIsTCP: true, PrimaryPort: 9000})
-		assert.ElementsMatch(t, []uint32{meshconst.ProxyTCPOutboundPort, 9000}, got)
+		assert.ElementsMatch(t, []uint32{meshconst.ProxyL4OutboundPort, 9000}, got)
 	})
 
 	t.Run("http-primary: its raw-TCP ports are claimed, the floor ports are not", func(t *testing.T) {
@@ -110,16 +110,16 @@ func TestClaimedTCPPortsCoversBothProducers(t *testing.T) {
 	t.Run("no duplicate when a declared TCP port collides with the mesh port", func(t *testing.T) {
 		got := claimedTCPPorts(CaptureTCPService{
 			PrimaryIsTCP: true,
-			PrimaryPort:  meshconst.ProxyTCPOutboundPort,
-			TCPPorts:     []uint32{meshconst.ProxyTCPOutboundPort},
+			PrimaryPort:  meshconst.ProxyL4OutboundPort,
+			TCPPorts:     []uint32{meshconst.ProxyL4OutboundPort},
 		})
-		assert.Equal(t, []uint32{meshconst.ProxyTCPOutboundPort}, got,
+		assert.Equal(t, []uint32{meshconst.ProxyL4OutboundPort}, got,
 			"a duplicated port yields two chains with the same name and Envoy rejects the listener")
 	})
 
 	t.Run("zero ports are never claimed", func(t *testing.T) {
 		got := claimedTCPPorts(CaptureTCPService{PrimaryIsTCP: true, PrimaryPort: 0})
-		assert.Equal(t, []uint32{meshconst.ProxyTCPOutboundPort}, got)
+		assert.Equal(t, []uint32{meshconst.ProxyL4OutboundPort}, got)
 		assert.NotContains(t, got, uint32(0), "port 0 would collide with the portless spelling")
 	})
 }

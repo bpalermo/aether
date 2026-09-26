@@ -355,7 +355,7 @@ func TestExcludePortAcceptExprs(t *testing.T) {
 // rule built for the wrong port installs cleanly, captures nothing, and looks
 // exactly like a working one.
 func TestCaptureRedirectExprs_TCPMeshPort(t *testing.T) {
-	tcpMesh := uint16(meshconst.ProxyTCPOutboundPort) // 18082
+	tcpMesh := uint16(meshconst.ProxyL4OutboundPort) // 18082
 	capPort := uint16(meshconst.ProxyCapturePort)
 	exprs := captureRedirectExprs(unix.IPPROTO_TCP, tcpMesh, capPort)
 	require.Len(t, exprs, 9)
