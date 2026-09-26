@@ -2,10 +2,16 @@ package proxy
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
+
+	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
+	xdsmatcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
+	network_inputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
+	matcher_cluster_specifierv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/router/cluster_specifiers/matcher/v3"
 
 	"aethermesh.dev/agent/internal/xds/config"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -833,4 +839,114 @@ func BuildNoHTTPPortVirtualHost(name string, domains []string, tcpSpellings stri
 			}},
 		}},
 	}
+}
+
+const (
+	// quicClusterSpecifierPluginName is Envoy's matcher-based cluster specifier
+	// (envoy.router.cluster_specifier_plugin.matcher), compiled into the proxy.
+	quicClusterSpecifierPluginName = "envoy.router.cluster_specifier_plugin.matcher"
+	// quicSourceIdentityInputName / quicClusterActionName are cosmetic names for
+	// the matcher's input and action extensions; only the typed configs matter.
+	quicSourceIdentityInputName = "source-identity"
+	quicClusterActionName       = "cluster"
+)
+
+// ApplyQUICClusterSelection rewrites, in place, every route on vh that sends
+// traffic to h2Cluster so that it selects per SOURCE identity between that
+// cluster and the source's own `quic:` cluster (proposal 038 Phase 4b). It
+// returns how many routes it rewrote.
+//
+// The mechanism is a route-level matcher cluster specifier keyed on the
+// aether.source.spiffe_id filter state -- the plain-string stamp every
+// mesh-originating chain already carries (BuildSourceFilterStates). Nothing
+// else would work here: the route tables are node-shared (one cap_http /
+// out_http per snapshot), so a route cannot NAME a per-source cluster; and a
+// header written by request_headers_to_add is applied AFTER route matching,
+// so cluster_header cannot read it. The filter-state input is evaluated at
+// match time on the stream's filter state, whose parent is the connection's,
+// where set_filter_state put the identity.
+//
+// arms maps a local source SPIFFE ID to its quic: cluster name; a request
+// from an identity with no arm (or with no stamp at all -- a chain built
+// before the trust domain was known) takes on_no_match, the h2 cluster, which
+// is byte-for-byte the route it had before. Routes that already choose by
+// weight (a GAMMA split, WeightedClusters) are left alone: GAMMA-routed
+// destinations stay h2 in this cut, by design.
+func ApplyQUICClusterSelection(vh *routev3.VirtualHost, h2Cluster string, arms map[string]string) int {
+	if vh == nil || len(arms) == 0 {
+		return 0
+	}
+	m := map[string]*xdsmatcherv3.Matcher_OnMatch{}
+	for _, id := range slices.Sorted(maps.Keys(arms)) {
+		m[id] = quicClusterOnMatch(arms[id])
+	}
+	rewritten := 0
+	for _, r := range vh.GetRoutes() {
+		ra := r.GetRoute()
+		if ra == nil || ra.GetCluster() != h2Cluster {
+			continue
+		}
+		ra.ClusterSpecifier = &routev3.RouteAction_InlineClusterSpecifierPlugin{
+			InlineClusterSpecifierPlugin: &routev3.ClusterSpecifierPlugin{
+				Extension: &corev3.TypedExtensionConfig{
+					Name: quicClusterSpecifierPluginName,
+					TypedConfig: config.TypedConfig(&matcher_cluster_specifierv3.MatcherClusterSpecifier{
+						ClusterMatcher: &xdsmatcherv3.Matcher{
+							MatcherType: &xdsmatcherv3.Matcher_MatcherTree_{
+								MatcherTree: &xdsmatcherv3.Matcher_MatcherTree{
+									Input: &xdscorev3.TypedExtensionConfig{
+										Name:        quicSourceIdentityInputName,
+										TypedConfig: config.TypedConfig(&network_inputsv3.FilterStateInput{Key: SourceIdentityFilterStateKey}),
+									},
+									TreeType: &xdsmatcherv3.Matcher_MatcherTree_ExactMatchMap{
+										ExactMatchMap: &xdsmatcherv3.Matcher_MatcherTree_MatchMap{Map: m},
+									},
+								},
+							},
+							OnNoMatch: quicClusterOnMatch(h2Cluster),
+						},
+					}),
+				},
+			},
+		}
+		rewritten++
+	}
+	return rewritten
+}
+
+// quicClusterOnMatch is a matcher leaf selecting one cluster.
+func quicClusterOnMatch(cluster string) *xdsmatcherv3.Matcher_OnMatch {
+	return &xdsmatcherv3.Matcher_OnMatch{
+		OnMatch: &xdsmatcherv3.Matcher_OnMatch_Action{
+			Action: &xdscorev3.TypedExtensionConfig{
+				Name:        quicClusterActionName,
+				TypedConfig: config.TypedConfig(&matcher_cluster_specifierv3.ClusterAction{Cluster: cluster}),
+			},
+		},
+	}
+}
+
+// QUICSelectionArms reads back the (source SPIFFE ID -> cluster) arms and the
+// on_no_match cluster of a route rewritten by ApplyQUICClusterSelection, or
+// ok=false when the route carries no such plugin. Test and gate helper.
+func QUICSelectionArms(r *routev3.Route) (arms map[string]string, noMatch string, ok bool) {
+	p := r.GetRoute().GetInlineClusterSpecifierPlugin().GetExtension()
+	if p == nil || p.GetName() != quicClusterSpecifierPluginName {
+		return nil, "", false
+	}
+	spec := &matcher_cluster_specifierv3.MatcherClusterSpecifier{}
+	if err := p.GetTypedConfig().UnmarshalTo(spec); err != nil {
+		return nil, "", false
+	}
+	tree := spec.GetClusterMatcher().GetMatcherTree()
+	arms = map[string]string{}
+	for id, om := range tree.GetExactMatchMap().GetMap() {
+		a := &matcher_cluster_specifierv3.ClusterAction{}
+		if err := om.GetAction().GetTypedConfig().UnmarshalTo(a); err == nil {
+			arms[id] = a.GetCluster()
+		}
+	}
+	nm := &matcher_cluster_specifierv3.ClusterAction{}
+	_ = spec.GetClusterMatcher().GetOnNoMatch().GetAction().GetTypedConfig().UnmarshalTo(nm)
+	return arms, nm.GetCluster(), true
 }

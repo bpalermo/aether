@@ -54,6 +54,26 @@ func Http2ProtocolOptions() *httpv3.HttpProtocolOptions {
 	}
 }
 
+// Http3ProtocolOptions is the HTTP/3 twin of Http2ProtocolOptions for a QUIC
+// upstream (proposal 038 Phase 4b): explicit HTTP/3, same idle timeout. Envoy
+// requires the explicit_http_config form for an h3 upstream and rejects a
+// cluster that carries it without a QUIC transport socket, which is what makes
+// the pairing in proxy.QUICClusterFrom checkable by `envoy --mode validate`.
+func Http3ProtocolOptions() *httpv3.HttpProtocolOptions {
+	return &httpv3.HttpProtocolOptions{
+		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{
+			IdleTimeout: durationpb.New(UpstreamIdleTimeout),
+		},
+		UpstreamProtocolOptions: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_{
+			ExplicitHttpConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig{
+				ProtocolConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_Http3ProtocolOptions{
+					Http3ProtocolOptions: &corev3.Http3ProtocolOptions{},
+				},
+			},
+		},
+	}
+}
+
 // UseDownstreamProtocolOptions creates HTTP protocol options that make the
 // upstream connection MIRROR the downstream protocol (Envoy's
 // USE_DOWNSTREAM_PROTOCOL semantics): an HTTP/1.1 downstream dials HTTP/1.1

@@ -731,10 +731,16 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 	// Service-wide always-on extension filters (025 M4 CHAIN scope), vhost-enabled.
 	chainFilters := c.serviceChainFiltersSnapshot()
 
+	// East-west QUIC selection arms per allow-listed service (proposal 038
+	// Phase 4b), computed under clusterMu BEFORE captureMu so the two never
+	// nest; the same predicate that publishes the quic: twins, so a cap_http
+	// route can never name a twin the snapshot does not carry.
+	quicArms := c.quicArmsByService()
+
 	c.captureMu.RLock()
 	defer c.captureMu.RUnlock()
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.captureAuthorities)+len(gammaRoutes))
-	vhosts = c.appendSABackedCaptureVhosts(vhosts, deps, gammaRoutes, routeDomains, chainFilters)
+	vhosts = c.appendSABackedCaptureVhosts(vhosts, deps, gammaRoutes, routeDomains, chainFilters, quicArms)
 	vhosts = c.appendRouteOnlyCaptureVhosts(vhosts, deps, gammaRoutes, routeDomains, chainFilters)
 	// Both appenders range maps (captureAuthorities, gammaRoutes), so without
 	// this the cap_http RouteConfiguration's repeated virtual_hosts field is in
@@ -746,7 +752,7 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 
 // appendSABackedCaptureVhosts appends cap_http virtual hosts for services that have
 // SA-backed mesh authorities (captureAuthorities). Caller must hold captureMu.
-func (c *SnapshotCache) appendSABackedCaptureVhosts(vhosts []*routev3.VirtualHost, deps map[string]struct{}, gammaRoutes map[string][]proxy.GammaRoute, routeDomains map[string][]string, chainFilters map[string]proxy.ExtensionFilter) []*routev3.VirtualHost {
+func (c *SnapshotCache) appendSABackedCaptureVhosts(vhosts []*routev3.VirtualHost, deps map[string]struct{}, gammaRoutes map[string][]proxy.GammaRoute, routeDomains map[string][]string, chainFilters map[string]proxy.ExtensionFilter, quicArms map[string]map[string]string) []*routev3.VirtualHost {
 	for svc, fqdn := range c.captureAuthorities {
 		if _, ok := deps[svc]; !ok {
 			continue
@@ -768,6 +774,11 @@ func (c *SnapshotCache) appendSABackedCaptureVhosts(vhosts []*routev3.VirtualHos
 
 		vh := proxy.BuildOutboundServiceVirtualHost(mesh, domains, rules)
 		applyChainFilter(vh, chainFilters, svc)
+		// The captured path is the default client path (mesh-DNS), so the
+		// per-source HTTP/3 selection applies here exactly as on out_http.
+		if arms := quicArms[svc]; len(arms) > 0 {
+			proxy.ApplyQUICClusterSelection(vh, mesh, arms)
+		}
 		vhosts = append(vhosts, vh)
 	}
 	return vhosts

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"aethermesh.dev/agent/internal/xds/proxy"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
@@ -84,23 +86,28 @@ func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) e
 // node SVID is served mtlsCluster is nil and the base cluster is emitted
 // without the matcher.
 func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.Resource, []*routev3.VirtualHost) {
+	// The east-west QUIC fan-out inputs, snapshotted BEFORE clusterMu; their
+	// own locks (depMu, localMu) never nest inside it (see mtls.go's lock order).
+	quic := c.quicFanoutSnapshot()
+
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
 
 	clusters := make([]types.Resource, 0, len(c.clusters))
 	clas := make([]types.Resource, 0, len(c.clusters))
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.clusters))
-	for _, entry := range c.clusters {
-		// TCP services carry no HTTP (h2) cluster or outbound vhost: their data
-		// path is the transparent-capture TCP floor's "tcp:<svc>" cluster (built
-		// in captureTCPClusters), which shares this entry's bare-name EDS load
-		// assignment. Emit only the load assignment so that EDS resolves.
+	quicClusters := 0
+	for key, entry := range c.clusters {
 		if entry.l4Floor {
+			// TCP/UDP floor entries publish their load assignment only; their
+			// clusters are rendered by captureTCPClusters / captureUDPClusters.
 			if entry.loadAssignment != nil {
 				clas = append(clas, entry.loadAssignment)
 			}
 			continue
 		}
+		// Precomputed mTLS-injected cluster when the node SVID is available
+		// (refreshEntryMTLSLocked); the bare cluster otherwise.
 		var cluster types.Resource = entry.cluster
 		if entry.mtlsCluster != nil {
 			cluster = entry.mtlsCluster
@@ -109,15 +116,14 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 		if entry.loadAssignment != nil {
 			clas = append(clas, entry.loadAssignment)
 		}
-		if entry.vhost != nil {
-			vhosts = append(vhosts, entry.vhost)
+		twins, vhost := quic.entryTwinsAndVhost(key, entry, c.meshDomain)
+		clusters = append(clusters, twins...)
+		quicClusters += len(twins)
+		if vhost != nil {
+			vhosts = append(vhosts, vhost)
 		}
 	}
-	// c.clusters is a map, so the three slices above come out in a different
-	// order on every call. vhosts is the protocol-visible one — it becomes the
-	// aether_outbound RouteConfiguration's repeated virtual_hosts field, which
-	// re-hashes (and makes Envoy rebuild the whole route table) on every push
-	// unless the order is stable. See ordering.go.
+	c.noteQUICFanout(quicClusters, len(quic.identities), len(quic.services))
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)
 	sortVirtualHostsByName(vhosts)
@@ -967,4 +973,102 @@ func outboundPortVhostWithChainFilter(portName string, chainFilters map[string]p
 		proxy.ApplyServiceChainFilter(vh, &ef)
 	}
 	return vh
+}
+
+// quicFanout is the per-snapshot input to the east-west QUIC fan-out: the
+// allow-list, the local workload identities (sorted) and the mTLS state the
+// twins are rendered from.
+type quicFanout struct {
+	services   map[string]struct{}
+	identities []string
+	mtls       localMTLSState
+}
+
+func (c *SnapshotCache) quicFanoutSnapshot() quicFanout {
+	if c.edge {
+		return quicFanout{}
+	}
+	f := quicFanout{services: c.quicServicesSnapshot()}
+	if len(f.services) == 0 {
+		return f
+	}
+	f.identities = c.localWorkloadIdentities()
+	f.mtls = c.localMTLSSnapshot()
+	return f
+}
+
+// twinsFor returns the per-source HTTP/3 clusters for one cluster-cache entry
+// and the (source SPIFFE ID -> twin name) arms for its vhost, or nothing when
+// the entry is not an allow-listed service's default, identity-ready entry.
+func (q quicFanout) twinsFor(key string, entry clusterEntry, meshDomain string) ([]types.Resource, map[string]string) {
+	if len(q.services) == 0 || len(q.identities) == 0 || key != entry.service || entry.mtlsCluster == nil || entry.cluster == nil {
+		return nil, nil
+	}
+	if _, ok := q.services[entry.service]; !ok {
+		return nil, nil
+	}
+	// The default entry's sni is its primary port; QUIC needs the hostname
+	// form "<port>.<authority>" (aether#957, proxy.QUICServerName).
+	sni := proxy.QUICServerName(entry.sni, proxy.ServiceClusterName(entry.service, meshDomain))
+	twins := make([]types.Resource, 0, len(q.identities))
+	arms := make(map[string]string, len(q.identities))
+	for _, id := range q.identities {
+		name := proxy.QUICClusterName(entry.service, meshDomain, proxy.SourceSAKeyFromSpiffeID(id))
+		twins = append(twins, proxy.QUICClusterFrom(entry.cluster, name, id, q.mtls.validationContextName, entry.sanURIs, sni))
+		arms[id] = name
+	}
+	return twins, arms
+}
+
+// entryTwinsAndVhost returns an entry's HTTP/3 twins (proposal 038 Phase 4b)
+// and the vhost to publish for it: the entry's own vhost, or -- when twins
+// exist -- a clone whose route to the h2 cluster selects per source identity.
+//
+// An allow-listed service's DEFAULT entry (the one keyed by the bare service
+// name; per-port and alias entries are deliberately excluded, they would
+// multiply the fan-out) gets one twin per local ServiceAccount, only once the
+// node identity is served (mtlsCluster != nil): before that the h2 cluster is
+// unpinned too.
+func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomain string) ([]types.Resource, *routev3.VirtualHost) {
+	twins, arms := q.twinsFor(key, entry, meshDomain)
+	if len(twins) == 0 || entry.vhost == nil {
+		return twins, entry.vhost
+	}
+	vhost, _ := proto.Clone(entry.vhost).(*routev3.VirtualHost)
+	proxy.ApplyQUICClusterSelection(vhost, entry.cluster.GetName(), arms)
+	return twins, vhost
+}
+
+// noteQUICFanout logs the cluster budget the QUIC allow-list costs whenever it
+// changes: local ServiceAccounts x listed services twins. INFO because the
+// number is the thing an operator sizing the allow-list needs to see.
+func (c *SnapshotCache) noteQUICFanout(twins, identities, services int) {
+	c.quicBudgetMu.Lock()
+	changed := c.quicBudgetSeen != twins
+	c.quicBudgetSeen = twins
+	c.quicBudgetMu.Unlock()
+	if changed {
+		c.log.Info("east-west QUIC fan-out", "quic_clusters", twins, "local_identities", identities, "allow_listed_services", services)
+	}
+}
+
+// quicArmsByService returns, for every allow-listed service whose default entry
+// is identity-ready, the (source SPIFFE ID -> quic: twin) arms its vhosts
+// select with -- the same predicate twinsFor applies when the twins are
+// published, so no route can name a twin that is not in the snapshot. Takes
+// clusterMu for reading; callers must not hold it.
+func (c *SnapshotCache) quicArmsByService() map[string]map[string]string {
+	quic := c.quicFanoutSnapshot()
+	if len(quic.services) == 0 || len(quic.identities) == 0 {
+		return nil
+	}
+	c.clusterMu.RLock()
+	defer c.clusterMu.RUnlock()
+	out := map[string]map[string]string{}
+	for key, entry := range c.clusters {
+		if twins, arms := quic.twinsFor(key, entry, c.meshDomain); len(twins) > 0 {
+			out[entry.service] = arms
+		}
+	}
+	return out
 }

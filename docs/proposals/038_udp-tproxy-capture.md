@@ -502,6 +502,23 @@ over a tested path. The full assessment is on #916.
   bundle is not, so Phase 4a was impossible on the old pin. R4's explicit gate
   stays regardless of #47219's default: an absent field is a default, and
   defaults move.
+- **Q5.** *Found 2026-09-26 by the mtlspool QUIC arm (aether#957).* Envoy's
+  QUIC client runs a **hostname check** the TCP client does not:
+  `EnvoyQuicProofVerifier` verifies the leaf's DNS SANs against the SNI after
+  *any* configured validator (default or SPIFFE) succeeds, and only
+  `accept_untrusted` skips it. The h2 path's bare-port SNI (`"8080"`) matches
+  no DNS SAN, so every mTLS HTTP/3 handshake failed with a fully verified
+  peer. Two fixes, both taken: **upstream** (in flight — skip the hostname
+  check when an explicit identity check such as SAN matchers is configured;
+  design on #957), and **the workaround this phase ships**: the QUIC SNI is
+  `<port>.<svc>.<ns>.<mesh domain>` (`proxy.QUICServerName`, matched by the
+  inbound's `server_names`; the primary port's name lands on the default
+  chain), and every workload SVID carries two DNS SANs —
+  `<sa>.<ns>.<mesh domain>` and `*.<sa>.<ns>.<mesh domain>` — from
+  `dnsNameTemplates` on the workloads' `ClusterSPIFFEID` (SPIRE accepts a
+  single leading-label wildcard). Identity is still the URI-SAN pin; the DNS
+  SANs only satisfy the QUIC client's check. Once the upstream fix lands the
+  DNS SANs become optional, the SNI shape stays.
 
 ## Plan
 

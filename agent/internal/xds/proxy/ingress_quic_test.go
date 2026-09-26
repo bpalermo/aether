@@ -48,12 +48,12 @@ func hcmOf(t *testing.T, fc *listenerv3.FilterChain) *http_connection_managerv3.
 // TestNewInboundQUICListener pins the shape of the per-pod HTTP/3 inbound
 // (proposal 038 Phase 4, R2/R3/R4): UDP on the TCP inbound's port in the pod
 // netns, reuse_port + quic_options, one default chain for the primary port and
-// a server_names chain per non-primary HTTP port, NO chain for a raw-TCP port,
+// a server_names chain ("<port>.<authority>") per non-primary HTTP port, NO chain for a raw-TCP port,
 // HTTP3 codec, and a QUIC transport that requires the client certificate,
 // offers only h3, and explicitly disables resumption and 0-RTT.
 func TestNewInboundQUICListener(t *testing.T) {
 	pod := quicTestPod()
-	l, err := NewInboundQUICListener(pod, "example.org", false, false, nil, nil)
+	l, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, false, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, l)
 
@@ -78,7 +78,8 @@ func TestNewInboundQUICListener(t *testing.T) {
 	assert.Nil(t, def.GetFilterChainMatch(), "the primary port is the DEFAULT chain (no h2 ALPN to key on)")
 	port8081, ok := names["in_h3_web-0_8081"]
 	require.True(t, ok)
-	assert.Equal(t, []string{"8081"}, port8081.GetFilterChainMatch().GetServerNames())
+	assert.Equal(t, []string{"8081.web.shop.mesh.local"}, port8081.GetFilterChainMatch().GetServerNames(),
+		"a QUIC non-primary chain matches QUICServerName(port, authority), never the bare port (aether#957)")
 	_, tcpChain := names["in_h3_web-0_9000"]
 	assert.False(t, tcpChain, "a raw-TCP port must have no QUIC chain: QUIC carries HTTP/3 only")
 
@@ -114,7 +115,7 @@ func TestInboundQUICSharesTheTCPInboundTLSContext(t *testing.T) {
 	pod := quicTestPod()
 	tcp, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
 	require.NoError(t, err)
-	quic, err := NewInboundQUICListener(pod, "example.org", false, false, nil, nil)
+	quic, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, false, nil, nil)
 	require.NoError(t, err)
 
 	var tcpCtx *tlsv3.DownstreamTlsContext
@@ -140,13 +141,16 @@ func TestInboundQUICSharesTheTCPInboundTLSContext(t *testing.T) {
 // same identity refusal as the TCP inbound when there is no trust domain.
 func TestNewInboundQUICListener_Nil(t *testing.T) {
 	pod := quicTestPod()
-	l, err := NewInboundQUICListener(pod, "example.org", false, true, nil, nil)
+	l, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, true, nil, nil)
 	require.NoError(t, err)
 	assert.Nil(t, l, "cleartext (SPIRE off) has no SVID to present; QUIC mandates TLS")
 
-	_, err = NewInboundQUICListener(pod, "", false, false, nil, nil)
+	_, err = NewInboundQUICListener(pod, "", "mesh.local", false, false, nil, nil)
 	require.ErrorIs(t, err, ErrNoTrustDomain)
 
-	_, err = NewInboundQUICListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", false, false, nil, nil)
+	_, err = NewInboundQUICListener(pod, "example.org", "", false, false, nil, nil)
+	require.Error(t, err, "no mesh domain, no authority for the server_names chains")
+
+	_, err = NewInboundQUICListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", "mesh.local", false, false, nil, nil)
 	require.Error(t, err)
 }

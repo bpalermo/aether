@@ -748,7 +748,7 @@ func (c *SnapshotCache) generateListenerSnapshot(ctx context.Context) error {
 // non-nil types.Resource would defeat appendListener's guard and reach LDS as
 // an empty listener, which Envoy NACKs whole ("address is necessary").
 func (c *SnapshotCache) generateInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain string, extensionFilters []*http_connection_managerv3.HttpFilter) (types.Resource, error) {
-	l, err := proxy.NewInboundQUICListener(cniPod, trustDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(cniPod))
+	l, err := proxy.NewInboundQUICListener(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(cniPod))
 	if err != nil {
 		return nil, err
 	}

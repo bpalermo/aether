@@ -609,6 +609,16 @@ spec:
   `x-geo-*` request headers (proposal 028).
 - The edge gets its own SVID straight from SPIRE; with `spire.enabled` the chart
   can create its `ClusterSPIFFEID` (`edge.spire.clusterSpiffeID`).
+- **East-west QUIC (`agent.eastWestQuicServices`, proposal 038):** the workloads'
+  `ClusterSPIFFEID` must also issue two DNS SANs per SVID,
+  `<sa>.<ns>.<mesh domain>` and `*.<sa>.<ns>.<mesh domain>` (`dnsNameTemplates:
+  ["{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.<mesh domain>",
+  "*.{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.<mesh domain>"]`;
+  on the spiffe/spire chart:
+  `spire-server.controllerManager.identities.clusterSPIFFEIDs.default.dnsNameTemplates`).
+  Envoy's QUIC client checks the SNI against the leaf's DNS SANs after the
+  SPIFFE pin (aether#957); without them every HTTP/3 handshake to a listed
+  service fails and the h2 path is unaffected. `e2e/l4routes.sh` shows the shape.
 
 ---
 
