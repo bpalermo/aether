@@ -414,7 +414,17 @@ const (
 	l4TLSBackendA = "default/l4-tls-a"
 	l4TLSBackendB = "default/l4-tls-b"
 
-	l4UDPBackend = "default/l4-udp-a"
+	// The UDPRoute fixture has TWO parents on the same pod, each with its own
+	// backend, because the thing the transparent listener adds over the old
+	// single-cluster one is exactly that (proposal 038): the udp_proxy matcher
+	// keys on the dialled VIP.
+	l4UDPParentA  = "default/l4-udp-front-a"
+	l4UDPParentB  = "default/l4-udp-front-b"
+	l4UDPBackendA = "default/l4-udp-a"
+	l4UDPBackendB = "default/l4-udp-b"
+	// L4UDPParentClusterIPA/B are the UDPRoute parents' VIPs: the matcher keys.
+	L4UDPParentClusterIPA = "10.96.2.40"
+	L4UDPParentClusterIPB = "10.96.2.41"
 
 	// L4TCPParentClusterIP and L4TLSParentClusterIP are the parent Services'
 	// ClusterIPs: the /32 every chain of that leg matches on.
@@ -463,8 +473,11 @@ func L4TLSBackendClusterB() string { return proxy.TCPClusterName(l4TLSBackendB, 
 // connection whose SNI matches no TLSRoute deliberately lands.
 func L4TLSParentFloorCluster() string { return proxy.TCPClusterName(l4TLSParent, meshDomain) }
 
-// L4UDPBackendCluster is the UDPRoute backend's plaintext UDP cluster.
-func L4UDPBackendCluster() string { return proxy.UDPClusterName(l4UDPBackend, meshDomain) }
+// L4UDPBackendClusterA is parent A's backend's plaintext UDP cluster.
+func L4UDPBackendClusterA() string { return proxy.UDPClusterName(l4UDPBackendA, meshDomain) }
+
+// L4UDPBackendClusterB is parent B's backend's plaintext UDP cluster.
+func L4UDPBackendClusterB() string { return proxy.UDPClusterName(l4UDPBackendB, meshDomain) }
 
 // CaptureTCPRouteBootstrapJSON builds a capture bootstrap whose per-ClusterIP
 // floor chain is a TCPRoute-weighted tcp_proxy (proposal 018 Phase 3b) over two
@@ -604,16 +617,16 @@ func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 	), nil
 }
 
-// CaptureUDPBootstrapJSON builds the connection-less UDP capture listener plus
-// the plaintext "udp:" cluster it routes to (proposal 018 Phase 3b).
+// CaptureUDPBootstrapJSON builds the transparent, connection-less UDP capture
+// listener on the L4 mesh port plus the plaintext "udp:" clusters it routes to
+// (proposal 018 Phase 3b, transparent capture per proposal 038).
 //
-// SCOPE, deliberately narrow: this models DELIVERY only. udp_proxy's route
-// specifier is a single Cluster — its only route action carries one cluster
-// name, so a traffic SPLIT is not expressible at all (#873). What the generator
-// chooses among the backends (drained ones skipped, then the heaviest) is
-// covered by unit tests in agent/internal/xds/proxy; there is nothing for an
-// Envoy config-validation fixture to add, so this builds the single-backend
-// shape and checks Envoy accepts the listener.
+// SCOPE: delivery AND selection. Two UDPRoute parents, two VIPs, two backends:
+// the listener must carry one matcher arm per parent, keyed on the dialled VIP
+// (DestinationIPInput reads the ORIGINAL destination because the CNI divert
+// leaves the header intact). What the generator chooses AMONG a parent's
+// backends (drained ones skipped, then the heaviest) is covered by unit tests
+// in agent/internal/xds/proxy; a traffic SPLIT is not expressible (#873).
 func CaptureUDPBootstrapJSON() ([]byte, error) {
 	bs, err := buildCaptureUDPBootstrap()
 	if err != nil {
@@ -625,13 +638,18 @@ func CaptureUDPBootstrapJSON() ([]byte, error) {
 func buildCaptureUDPBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
 
-	udpCluster := L4UDPBackendCluster()
+	clusterA, clusterB := L4UDPBackendClusterA(), L4UDPBackendClusterB()
 	listener, err := proxy.GenerateUDPCaptureListener(
 		pod.GetName(),
 		pod.GetNetworkNamespace(),
-		meshconst.ProxyCapturePort,
+		meshconst.ProxyL4OutboundPort,
 		map[string][]proxy.L4Backend{
-			l4UDPBackend: {{Service: l4UDPBackend, Cluster: udpCluster, Weight: 1}},
+			l4UDPParentA: {{Service: l4UDPBackendA, Cluster: clusterA, Weight: 1}},
+			l4UDPParentB: {{Service: l4UDPBackendB, Cluster: clusterB, Weight: 1}},
+		},
+		map[string]string{
+			l4UDPParentA: L4UDPParentClusterIPA,
+			l4UDPParentB: L4UDPParentClusterIPB,
 		},
 	)
 	if err != nil {
@@ -645,15 +663,17 @@ func buildCaptureUDPBootstrap() (*bootstrapv3.Bootstrap, error) {
 	// :18008) load assignment, rewritten by proxy.UDPLoadAssignment onto the
 	// backend's application UDP port. Model it the same way round so the
 	// rewrite is what produces the fixture, not a hand-written UDP endpoint.
-	la := proxy.UDPLoadAssignment(meshInboundLoadAssignment(l4UDPBackend), udpCluster, L4UDPBackendPort)
-	if la == nil {
+	laA := proxy.UDPLoadAssignment(meshInboundLoadAssignment(l4UDPBackendA), clusterA, L4UDPBackendPort)
+	laB := proxy.UDPLoadAssignment(meshInboundLoadAssignment(l4UDPBackendB), clusterB, L4UDPBackendPort)
+	if laA == nil || laB == nil {
 		return nil, fmt.Errorf("UDPLoadAssignment returned nil")
 	}
 
 	return newBootstrap(
 		[]*clusterv3.Cluster{
 			xdsCluster(),
-			proxy.NewUDPServiceCluster(udpCluster, l4UDPBackend, la),
+			proxy.NewUDPServiceCluster(clusterA, l4UDPBackendA, laA),
+			proxy.NewUDPServiceCluster(clusterB, l4UDPBackendB, laB),
 		},
 		[]*listenerv3.Listener{listener},
 	), nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"aethermesh.dev/agent/internal/capture"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
@@ -34,8 +35,16 @@ func udpProxyClustersNamed(t *testing.T, listeners map[string]any) map[string]st
 			if lf.GetTypedConfig() == nil || lf.GetTypedConfig().UnmarshalTo(cfg) != nil {
 				continue
 			}
-			if c := cfg.GetCluster(); c != "" {
-				named[c] = l.GetName()
+			// 038: the route specifier is a matcher keyed on the dialled VIP,
+			// one arm per UDPRoute parent. Walk every arm; the deprecated bare
+			// `cluster` form must not come back.
+			require.Empty(t, cfg.GetCluster(), "listener %q uses the deprecated single-cluster specifier", l.GetName())
+			for vip, om := range cfg.GetMatcher().GetMatcherTree().GetExactMatchMap().GetMap() {
+				r := &udp_proxyv3.Route{}
+				require.NoError(t, om.GetAction().GetTypedConfig().UnmarshalTo(r), "listener %q arm %s", l.GetName(), vip)
+				if c := r.GetCluster(); c != "" {
+					named[c] = l.GetName()
+				}
 			}
 		}
 	}
@@ -81,6 +90,11 @@ func TestUDPCaptureListenerResolvesAgainstCDS(t *testing.T) {
 			{Service: "aether-test/udp-a", Cluster: liveCluster, Weight: 10},
 		},
 	})
+
+	// The matcher keys on the parent's ClusterIP, which reaches the cache on
+	// the capture reconciler's Service watch (the same source the TCP floor
+	// chains match on). Without it there is no arm at all.
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/udp-a", ClusterIP: "10.96.0.44"}})
 
 	declareDeps(c, "aether-test/udp-a")
 	reg := &mockRegistry{

@@ -4,7 +4,8 @@
 //
 // TCPRoute: weighted backends replace the passthrough TCP floor chain for a service.
 // TLSRoute: per-SNI filter chains (server_names match) route to weighted backends.
-// UDPRoute: UDP capture listener + udp_proxy backends, with a matching CNI UDP redirect.
+// UDPRoute: transparent UDP capture listener + udp_proxy backends, one matcher arm per
+// parent VIP, with the CNI's mark-and-divert delivering the intact datagram (proposal 038).
 //
 // All three route types are CRD-detected (proposal 031) and watched at v1:
 // TLSRoute graduated in gateway-api v1.5, TCPRoute/UDPRoute in v1.6 (proposal

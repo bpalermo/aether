@@ -233,7 +233,7 @@ func TestBuildCaptureTLSRouteFilterChains_EmptyRuleSkipped(t *testing.T) {
 
 // TestGenerateUDPCaptureListener_NoRoutes returns nil when udpRoutes is empty.
 func TestGenerateUDPCaptureListener_NoRoutes(t *testing.T) {
-	l, err := GenerateUDPCaptureListener("pod-1", "/proc/1/ns/net", 18082, nil)
+	l, err := GenerateUDPCaptureListener("pod-1", "/proc/1/ns/net", 18082, nil, nil)
 	require.NoError(t, err)
 	assert.Nil(t, l, "should return nil when no routes are provided")
 }
@@ -244,7 +244,7 @@ func TestGenerateUDPCaptureListener_WithRoutes(t *testing.T) {
 	routes := map[string][]L4Backend{
 		"svc-f": {{Service: "svc-f", Cluster: "tcp:svc-f.aether.internal", Weight: 1}},
 	}
-	l, err := GenerateUDPCaptureListener("pod-2", "/proc/2/ns/net", 18082, routes)
+	l, err := GenerateUDPCaptureListener("pod-2", "/proc/2/ns/net", 18082, routes, map[string]string{"svc-f": "10.96.0.6"})
 	require.NoError(t, err)
 	require.NotNil(t, l)
 	assert.Equal(t, "capture_udp_pod-2", l.Name)
@@ -253,6 +253,7 @@ func TestGenerateUDPCaptureListener_WithRoutes(t *testing.T) {
 	require.NotNil(t, sa)
 	assert.Equal(t, corev3.SocketAddress_UDP, sa.Protocol)
 	assert.Equal(t, uint32(18082), sa.GetPortValue())
+	assert.True(t, l.GetTransparent().GetValue(), "the divert delivers to a non-local VIP; only an IP_TRANSPARENT socket receives it (038)")
 	// A connection-less UDP listener carries NO filter chains; udp_proxy is a
 	// listener filter (Envoy rejects filter_chains on a UDP listener).
 	assert.Empty(t, l.FilterChains, "UDP listener must have no filter chains")

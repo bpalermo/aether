@@ -1,26 +1,76 @@
 package proxy
 
 import (
+	"fmt"
 	"testing"
 
 	udp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/udp/udp_proxy/v3"
+	network_inputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// udpProxyClusterOf extracts the cluster the generated UDP capture listener
-// actually routes to. udp_proxy is a LISTENER filter on a connection-less UDP
-// listener (no filter chains), so the config lives in listener_filters.
+// udpProxyClusterOf extracts the ONE cluster the generated UDP capture listener
+// routes to, for a route set with a single parent. udp_proxy is a LISTENER
+// filter on a connection-less UDP listener (no filter chains), so the config
+// lives in listener_filters; under 038 it is a matcher keyed on the dialled VIP,
+// so every parent is given a synthetic VIP and the single arm's cluster is
+// returned. See udpArmsOf for the multi-parent shape.
 func udpProxyClusterOf(t *testing.T, podName string, routes map[string][]L4Backend) string {
 	t.Helper()
-	l, err := GenerateUDPCaptureListener(podName, "/var/run/netns/x", 18001, routes)
+	arms := udpArmsOf(t, podName, routes)
+	require.Len(t, arms, 1, "this helper is for single-arm route sets; got %v", arms)
+	for _, c := range arms {
+		return c
+	}
+	return ""
+}
+
+// udpArmsOf returns VIP -> cluster for every matcher arm of the generated
+// listener, with parent "<key>" given the VIP syntheticVIP(key).
+func udpArmsOf(t *testing.T, podName string, routes map[string][]L4Backend) map[string]string {
+	t.Helper()
+	vips := map[string]string{}
+	for svc := range routes {
+		vips[svc] = syntheticVIP(svc)
+	}
+	l, err := GenerateUDPCaptureListener(podName, "/var/run/netns/x", 18082, routes, vips)
 	require.NoError(t, err)
 	require.NotNil(t, l, "expected a UDP capture listener")
 	require.Len(t, l.GetListenerFilters(), 1)
 
 	cfg := &udp_proxyv3.UdpProxyConfig{}
 	require.NoError(t, l.GetListenerFilters()[0].GetTypedConfig().UnmarshalTo(cfg))
-	return cfg.GetCluster()
+	return udpMatcherArms(t, cfg)
+}
+
+// udpMatcherArms walks a udp_proxy matcher's exact-match map and returns
+// VIP -> cluster. It fails on any other shape: the deprecated bare `cluster`
+// specifier, a non-tree matcher, or an arm whose action is not a Route.
+func udpMatcherArms(t *testing.T, cfg *udp_proxyv3.UdpProxyConfig) map[string]string {
+	t.Helper()
+	require.Empty(t, cfg.GetCluster(), "udp_proxy must use the matcher specifier, not the deprecated single cluster")
+	tree := cfg.GetMatcher().GetMatcherTree()
+	require.NotNil(t, tree, "udp_proxy matcher must be a matcher_tree keyed on the destination IP")
+	require.Equal(t, "destination-ip", tree.GetInput().GetName())
+	in := &network_inputsv3.DestinationIPInput{}
+	require.NoError(t, tree.GetInput().GetTypedConfig().UnmarshalTo(in), "matcher input must be DestinationIPInput")
+	out := map[string]string{}
+	for vip, om := range tree.GetExactMatchMap().GetMap() {
+		r := &udp_proxyv3.Route{}
+		require.NoError(t, om.GetAction().GetTypedConfig().UnmarshalTo(r), "arm %s action must be a udp_proxy Route", vip)
+		out[vip] = r.GetCluster()
+	}
+	return out
+}
+
+// syntheticVIP gives a parent key a deterministic, distinct ClusterIP.
+func syntheticVIP(svc string) string {
+	h := uint32(7)
+	for _, b := range []byte(svc) {
+		h = h*31 + uint32(b)
+	}
+	return fmt.Sprintf("10.96.%d.%d", (h>>8)&0xff, h&0xff)
 }
 
 // TestUDPCaptureListenerHonoursWeightZeroDrain is #873, the #492 half.
@@ -61,10 +111,11 @@ func TestUDPCaptureListenerFullyDrainedServiceIsNotChosen(t *testing.T) {
 // honouring the drains there is no cluster to bind, and a listener that names
 // no cluster is worse than no listener (udp_proxy validates cluster non-empty).
 func TestUDPCaptureListenerAllDrainedProducesNoListener(t *testing.T) {
-	l, err := GenerateUDPCaptureListener("pod-all-drained", "/var/run/netns/x", 18001,
+	l, err := GenerateUDPCaptureListener("pod-all-drained", "/var/run/netns/x", 18082,
 		map[string][]L4Backend{
 			"ns/a": {{Service: "ns/a1", Cluster: "udp:a1.mesh", Weight: 0}},
-		})
+		},
+		map[string]string{"ns/a": "10.96.0.1"})
 	require.NoError(t, err)
 	assert.Nil(t, l, "every backend drained means no UDP route at all")
 }

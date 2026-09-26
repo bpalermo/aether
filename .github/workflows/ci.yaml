@@ -607,6 +607,69 @@ jobs:
             --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
             --target_pattern_file=${{ runner.temp }}/race_hot.txt
 
+  # Proposal 038: the CNI's transparent-capture divert against a REAL kernel.
+  # cni/internal/plugin:capture_netns_test creates network namespaces, programs
+  # the nft table + policy route, and drives sockets through it -- including
+  # deleting the `ct direction reply accept` rule mid-test to prove it is the
+  # rule that keeps every pod's inbound connections alive. That needs root and
+  # nft_tproxy, which the Bazel sandbox has neither of, so the test SKIPS as a
+  # normal user and this job builds the binary and runs it under sudo. The
+  # binary never skips as root: a kernel without tproxy fails, because the same
+  # kernel would ship uncaptured pods.
+  netns:
+    needs: [changes, diff]
+    if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_unit == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          # See the note on the `test` job: without this the external release
+          # assets are re-fetched from github.com on every run.
+          repository-cache: true
+      - name: Download impacted target lists
+        uses: actions/download-artifact@v8
+        with:
+          name: impacted-targets
+          path: ${{ runner.temp }}/impacted
+      - name: Is the netns gate impacted
+        id: impacted
+        run: |
+          if grep -qxF '//cni/internal/plugin:capture_netns_test' "${{ runner.temp }}/impacted/impacted_unit.txt"; then
+            echo "run=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            echo ">> //cni/internal/plugin:capture_netns_test not impacted by this change; nothing to run"
+          fi
+      - name: Build the netns test binary
+        if: steps.impacted.outputs.run == 'true'
+        run: |
+          bazel build --config=ci \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
+            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            //cni/internal/plugin:capture_netns_test
+          bazel cquery --config=ci --output=files \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            //cni/internal/plugin:capture_netns_test >"$RUNNER_TEMP/netns_test_bin"
+          test -x "$(cat "$RUNNER_TEMP/netns_test_bin")"
+      - name: Run it as root against the runner kernel
+        if: steps.impacted.outputs.run == 'true'
+        run: |
+          sudo modprobe nf_tables nft_tproxy
+          bin="$(cat "$RUNNER_TEMP/netns_test_bin")"
+          sudo "$bin" -test.v 2>&1 | tee "$RUNNER_TEMP/netns_test.log"
+          # Anti-vacuity: a skip (non-root, or a wrong binary) prints no PASS
+          # line for the gate. The job is green only if the test actually ran.
+          grep -q -- '--- PASS: TestCaptureDivertInNetns' "$RUNNER_TEMP/netns_test.log" || {
+            echo "::error::TestCaptureDivertInNetns did not run to a PASS (skipped?) -- the kernel gate is vacuous"
+            exit 1
+          }
+
   integration:
     needs: [changes, diff, test]
     if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_integration == 'true'
@@ -709,7 +772,7 @@ jobs:
   # (and often `integration`) skip for an empty impact set.
   ci:
     if: always()
-    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, shell, format, test, race, integration, e2e]
+    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, shell, format, test, race, netns, integration, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any control-plane job failed or was cancelled

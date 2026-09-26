@@ -126,6 +126,7 @@ use_repo(
     "com_github_testcontainers_testcontainers_go",
     "com_github_testcontainers_testcontainers_go_modules_etcd",
     "com_github_uudashr_gocognit",
+    "com_github_vishvananda_netlink",
     "in_gopkg_natefinch_lumberjack_v2",
     "io_etcd_go_etcd_api_v3",
     "io_etcd_go_etcd_client_v3",
