@@ -69,3 +69,76 @@ the original netns needs `CAP_SYS_ADMIN` in that namespace's user namespace.
 
 Exit codes: `0` answered yes, `1` answered no (038 stops, #916 stands as a
 documented limit), `2` rig broken — do not read the result.
+
+---
+
+# Phase 0b — the full TPROXY ruleset, both transports (`tproxy-phase0b.py`)
+
+Settled 2026-09-26 on `main-worker-04` (kernel 6.18.34-talos), first run, exit 0.
+This is the gate for the CNI change: PR 3 of the TPROXY plan is written against
+**this exact ruleset**, which has now run on a Talos kernel.
+
+## What Phase 0 had not established
+
+Phase 0 proved that a transparent UDP socket created inside a pod netns via
+`setns` and read from outside sees the pre-divert destination. It never
+installed a prerouting `tproxy` rule (so it never proved `nft_tproxy` loads on
+this kernel), never ran TCP, never sent a reply, and never exercised the one
+rule that keeps the design from breaking every pod.
+
+## The result
+
+```
+T1  TCP -> VIP:8080, ONE transparent listener on 18001
+      accepted, getsockname() = 10.250.0.7:8080, client got the reply
+      SO_ORIGINAL_DST on that socket = 10.250.0.7:8080
+T2  TCP -> VIP:53          not captured; client timed out          (correct)
+U1  UDP -> VIP:18082       ipi_addr = 10.250.0.7; reply sent FROM VIP:18082
+                           reached a CONNECTED client
+S1  inbound over a veth, redirect-all ON
+      with    ct direction reply accept   ECHO=inbound   SERVED
+      without ct direction reply accept   client TimeoutError, server TimeoutError
+```
+
+## Why S1 is the arm that matters
+
+A `type route` chain sees **every** locally-generated packet. Under redirect-all
+that includes the pod's own server replies to inbound clients — a SYN-ACK whose
+`dport` is the client's ephemeral port. Without `ct direction reply accept` that
+packet is marked, looped to `lo`, `tproxy`'d to the 18001 LISTEN socket, and
+answered with a reset: every inbound connection to every redirect-all pod dies.
+`ct state established,related accept` is **not** a substitute — in a route chain
+it would also exempt the 2nd+ packets of the pod's *own* captured outbound flows,
+sending them out `eth0` mid-connection. `direction reply` exempts exactly the
+replies and nothing else.
+
+S1 is run twice so the rule's absence is *seen* to break something. A run where
+S1 passes without the rule is reported as a broken rig (exit 2), not a pass.
+
+## Two facts worth keeping from T1
+
+- **TCP keeps one listener.** `tproxy to :18001` looks the socket up by the
+  target port while leaving the header intact, so the accepted socket's local
+  endpoint is `VIP:8080` and the reply is correct with no conntrack NAT.
+  Delivery-port rewrite is fine for TCP; it is not fine for UDP, whose reply
+  source port is the socket's bound port — which is why U1 binds the dialed port.
+- **`SO_ORIGINAL_DST` succeeds on a diverted flow.** The flow is conntrack-tracked
+  but not NATed, so `getorigdst` finds the reply tuple and returns the original
+  destination — the same answer `getsockname` gives. Envoy's `original_dst`
+  filter therefore takes its normal branch; the `IP_TRANSPARENT` → `getsockname`
+  fallback is a backstop, not the main path.
+
+## Running it
+
+```sh
+kubectl -n aether-system create configmap tproxy-phase0b \
+  --from-file=tproxy-phase0b.py=e2e/spike/tproxy-phase0b.py --dry-run=client -o yaml |
+  kubectl apply -f -
+kubectl apply -f e2e/spike/tproxy-phase0b-job.yaml
+kubectl -n aether-system logs -l aether.io/spike=tproxy-phase0b
+```
+
+Same Job shape as Phase 0: `aether-system` (already PodSecurity `privileged`),
+`NET_ADMIN` + `SYS_ADMIN`, **no host namespaces, no `privileged: true`**. Exit
+`0` = every arm as designed including S1's red state; `1` = the design fails on
+this kernel; `2` = rig broken.
