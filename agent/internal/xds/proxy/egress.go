@@ -109,6 +109,52 @@ func UDPClusterName(serviceName, meshDomain string) string {
 // key (proposal 020 Part 1). ok is false when the name is not under the mesh
 // domain or the remainder is not exactly two DNS labels (<svc>.<ns> — service
 // names are ServiceAccount names and namespaces are both single lowercase
+// QUICClusterName returns the per-source HTTP/3 cluster for a destination
+// service as dialled by ONE local ServiceAccount (proposal 038 Phase 4b):
+// "quic:<svc>.<meshDomain>@<ns>/<sa>". The "@<source>" suffix is what makes
+// the name unique per source identity; the prefix keeps it out of every
+// ODCDS/authority namespace (a client can never dial a "quic:" authority).
+func QUICClusterName(serviceName, meshDomain, sourceSAKey string) string {
+	return "quic:" + ServiceClusterName(serviceName, meshDomain) + "@" + sourceSAKey
+}
+
+// SourceSAKeyFromSpiffeID reduces a workload SPIFFE ID
+// (spiffe://<td>/ns/<ns>/sa/<sa>) to the "<ns>/<sa>" key QUICClusterName
+// takes; "" for anything else (a node identity, an edge identity, garbage).
+func SourceSAKeyFromSpiffeID(spiffeID string) string {
+	i := strings.Index(spiffeID, "/ns/")
+	if i < 0 {
+		return ""
+	}
+	rest := spiffeID[i+len("/ns/"):]
+	ns, sa, ok := strings.Cut(rest, "/sa/")
+	if !ok || ns == "" || sa == "" || strings.Contains(sa, "/") {
+		return ""
+	}
+	return ns + "/" + sa
+}
+
+// QUICClusterFrom derives a source's HTTP/3 cluster from the destination's h2
+// service cluster: the same EDS resource (so the same endpoints, the same
+// subset selectors, the same outlier detection and circuit breakers -- a
+// clone), renamed, with HTTP/3 protocol options and the QUIC upstream socket
+// presenting clientSpiffeID. base is the entry's BARE cluster (no transport
+// socket); the caller passes the same sanURIs and sni it would give
+// InjectUpstreamMTLS for the h2 twin, so the two transports pin the same
+// server identity and demux to the same inbound chain.
+func QUICClusterFrom(base *clusterv3.Cluster, name, clientSpiffeID, validationContextName string, sanURIs []string, sni string) *clusterv3.Cluster {
+	cl, _ := proto.Clone(base).(*clusterv3.Cluster)
+	cl.Name = name
+	if cl.TypedExtensionProtocolOptions == nil {
+		cl.TypedExtensionProtocolOptions = map[string]*anypb.Any{}
+	}
+	cl.TypedExtensionProtocolOptions[config.UpstreamHTTPProtocolOptionsKey] = config.TypedConfig(config.Http3ProtocolOptions())
+	cl.TransportSocketMatches = nil
+	cl.TransportSocketMatcher = nil
+	cl.TransportSocket = QUICUpstreamTransportSocket(clientSpiffeID, validationContextName, sanURIs, sni)
+	return cl
+}
+
 // labels), so nested or foreign authorities are rejected deterministically.
 func ServiceFromClusterName(clusterName, meshDomain string) (string, bool) {
 	// Strip an optional :port (multi-port authority <svc>.<ns>.<domain>:<port>).

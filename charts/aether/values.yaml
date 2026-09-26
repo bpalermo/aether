@@ -179,6 +179,14 @@ agent:
   # visibility (shared etcd) and a shared SPIRE trust domain across clusters.
   # Default off.
   eastWestWaypoint: false
+  # East-west QUIC allow-list (proposal 038 Phase 4b): namespace-qualified
+  # "<ns>/<svc>" destinations that every local ServiceAccount dials over
+  # HTTP/3 (mTLS over QUIC) instead of HTTP/2. Opt-in per destination because
+  # the cost is one per-source cluster per listed service on every node
+  # (local ServiceAccounts x listed services); the agent logs the count as
+  # "east-west QUIC fan-out". The per-pod HTTP/3 inbound is unconditional and
+  # inert until a destination is listed here. Default: none.
+  eastWestQuicServices: []
   # M2-default flip (proposal 022, Step 4): make redirect-all the DEFAULT for
   # managed pods (Istio-style "capture what the app sends", zero per-pod config).
   # Every non-system pod on the node is redirect-all'd UNLESS it carries the

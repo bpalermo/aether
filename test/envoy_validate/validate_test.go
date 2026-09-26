@@ -157,6 +157,7 @@ func TestEnvoyValidate(t *testing.T) {
 		{"capture_tlsroute_bootstrap.json", CaptureTLSRouteBootstrapJSON},
 		{"capture_udp_bootstrap.json", CaptureUDPBootstrapJSON},
 		{"edge_bootstrap.json", EdgeBootstrapJSON},
+		{"quic_outbound_bootstrap.json", QUICOutboundBootstrapJSON},
 	}
 
 	// Write all bootstrap files.
@@ -206,6 +207,15 @@ func TestEnvoyValidate(t *testing.T) {
 		if len(noR4) > 0 {
 			t.Errorf("%s: mTLS QUIC chains without explicit enable_resumption:false + enable_early_data:false: %v\n"+
 				"a resumed or 0-RTT QUIC session carries a peer identity the destination never verified (038 R4)", b.name, noR4)
+		}
+		// R4, client side: every QUIC upstream must explicitly disable the
+		// client session cache (max_session_keys: 0).
+		cached, err := QUICUpstreamsWithSessionCache(data)
+		if err != nil {
+			t.Fatalf("QUIC upstream R4 check %s: %v", b.name, err)
+		}
+		if len(cached) > 0 {
+			t.Errorf("%s: QUIC upstream clusters without explicit max_session_keys:0: %v (038 R4)", b.name, cached)
 		}
 	}
 
@@ -979,5 +989,103 @@ func TestUnpinnedInboundChainsSeesThroughQUIC(t *testing.T) {
 	}
 	if len(noR4) != 1 {
 		t.Fatalf("a QUIC chain with resumption/early-data UNSET was not reported by the R4 check (got %v)", noR4)
+	}
+}
+
+// TestQUICOutboundFixtureCarriesTheSelection is the anti-vacuity half of the
+// QUIC upstream checks: the fixture must contain both `quic:` twins with a
+// QuicUpstreamTransport, and a route whose matcher arms map each source
+// identity to its own twin with the h2 cluster as on_no_match -- otherwise
+// the validate run and the R4/pin checks above are exercising nothing.
+func TestQUICOutboundFixtureCarriesTheSelection(t *testing.T) {
+	data, err := QUICOutboundBootstrapJSON()
+	if err != nil {
+		t.Fatalf("QUICOutboundBootstrapJSON: %v", err)
+	}
+	bs := &bootstrapv3.Bootstrap{}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	want := QUICOutboundArms()
+	h2 := want[""]
+	delete(want, "")
+	quicClusters := map[string]bool{}
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if c.GetTransportSocket().GetTypedConfig() != nil && c.GetTransportSocket().GetTypedConfig().MessageIs(&quicv3.QuicUpstreamTransport{}) {
+			quicClusters[c.GetName()] = true
+		}
+	}
+	for id, name := range want {
+		if !quicClusters[name] {
+			t.Errorf("source %s: twin %q is not a QUIC-transport cluster in the fixture", id, name)
+		}
+	}
+	var routes int
+	for _, l := range bs.GetStaticResources().GetListeners() {
+		for _, fc := range l.GetFilterChains() {
+			for _, f := range fc.GetFilters() {
+				hcm := &http_connection_managerv3.HttpConnectionManager{}
+				if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(hcm) != nil {
+					continue
+				}
+				for _, vh := range hcm.GetRouteConfig().GetVirtualHosts() {
+					for _, r := range vh.GetRoutes() {
+						arms, noMatch, ok := proxy.QUICSelectionArms(r)
+						if !ok {
+							continue
+						}
+						routes++
+						if noMatch != h2 {
+							t.Errorf("on_no_match = %q, want the h2 cluster %q", noMatch, h2)
+						}
+						for id, name := range want {
+							if arms[id] != name {
+								t.Errorf("arm %s = %q, want %q", id, arms[id], name)
+							}
+						}
+						if r.GetRoute().GetEarlyDataPolicy() != nil {
+							t.Errorf("route to a quic: cluster sets early_data_policy (038 R4)")
+						}
+					}
+				}
+			}
+		}
+	}
+	if routes != 1 {
+		t.Fatalf("%d routes carry the QUIC selection plugin, want 1: the validate run is not exercising it", routes)
+	}
+}
+
+// TestUnpinnedMeshClustersSeesThroughQUIC proves the QUIC unwrap in
+// upstreamTLSPinned is load-bearing: a `quic:` cluster whose inner context
+// pins nothing must be reported (before the unwrap it passed vacuously).
+func TestUnpinnedMeshClustersSeesThroughQUIC(t *testing.T) {
+	c := &clusterv3.Cluster{
+		Name:                 "quic:probe",
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},
+		TransportSocket: &corev3.TransportSocket{
+			Name: "envoy.transport_sockets.quic",
+			ConfigType: &corev3.TransportSocket_TypedConfig{TypedConfig: mustAny(&quicv3.QuicUpstreamTransport{
+				UpstreamTlsContext: &tlsv3.UpstreamTlsContext{CommonTlsContext: &tlsv3.CommonTlsContext{}},
+			})},
+		},
+	}
+	data, err := marshalBootstrap(newBootstrap([]*clusterv3.Cluster{xdsCluster(), c}, nil))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, err := UnpinnedMeshClusters(data)
+	if err != nil {
+		t.Fatalf("UnpinnedMeshClusters: %v", err)
+	}
+	if len(got) != 1 || got[0] != "quic:probe" {
+		t.Fatalf("an unpinned QUIC upstream was not reported (got %v): the QUIC unwrap is vacuous", got)
+	}
+	cached, err := QUICUpstreamsWithSessionCache(data)
+	if err != nil {
+		t.Fatalf("QUICUpstreamsWithSessionCache: %v", err)
+	}
+	if len(cached) != 1 {
+		t.Fatalf("a QUIC upstream with max_session_keys UNSET was not reported (got %v)", cached)
 	}
 }

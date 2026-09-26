@@ -138,6 +138,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.AuthzSidecarFailureModeAllow, "authz-sidecar-failure-mode-allow", false, "Fail-open: allow requests when the authz sidecar is unreachable (default fail-closed: deny)")
 	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, imported config is trusted ONLY from this origin; empty = federated (trust any peer)")
 	rootCmd.Flags().BoolVar(&cfg.EastWestWaypoint, "east-west-waypoint", false, "Enable the split-horizon east/west waypoint (proposal 019): dial cross-cluster endpoints at their node's routable IP + the fixed tunnel port (18009) instead of their pod IP, and SNI-forward to the local pod. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared SPIRE trust domain.")
+	rootCmd.Flags().StringSliceVar(&cfg.EastWestQUICServices, "east-west-quic-services", nil, "East-west QUIC allow-list (proposal 038 Phase 4b): namespace-qualified <ns>/<svc> destinations every local ServiceAccount dials over HTTP/3 (mTLS over QUIC, one per-source quic: cluster each) instead of HTTP/2. Repeatable / comma-separated. Empty (default) keeps every destination on HTTP/2; the per-pod HTTP/3 inbound exists regardless")
 	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services (proposal 018, mesh-global FQDN); the mesh-dns daemon (agent/cmd/mesh-dns) owns upstream forwarding")
 	rootCmd.Flags().StringVar(&cfg.MeshDNSSnapshotPath, "mesh-dns-snapshot-path", cfg.MeshDNSSnapshotPath, "Host-persistent file the in-process mesh-DNS resolver persists its last-known record table to and warm-loads at boot, closing the agent-roll cold window (proposal 018, mesh-global FQDN). Defaults under the CNI registry hostPath so it survives a rolling restart; empty disables persistence")
 }
@@ -486,6 +487,11 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache.SetCaptureEnabled(true)
 	snapshotCache.SetCaptureRedirectAll(true)
 	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
+	// East-west QUIC (proposal 038 Phase 4b): opt-in per destination. The
+	// listed services are forced into the dependency set and each gets one
+	// HTTP/3 twin per local ServiceAccount, selected per request by the source
+	// identity; unlisted destinations are byte-identical to before.
+	snapshotCache.SetEastWestQUICServices(cfg.EastWestQUICServices)
 	// Persist the OBSERVED half of the demand set beside the CNI pod records
 	// and restore it now, before the first snapshot, so a full agent+proxy
 	// replacement (every Helm upgrade) starts warm instead of paying one cold

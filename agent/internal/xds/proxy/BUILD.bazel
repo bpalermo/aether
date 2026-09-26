@@ -85,6 +85,7 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/matching/common_inputs/network/v3:network",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/matching/common_inputs/transport_socket/v3:transport_socket",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/retry/host/previous_hosts/v3:previous_hosts",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/router/cluster_specifiers/matcher/v3:matcher",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/quic/v3:quic",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3:filter_state_override",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3:on_demand_secret",
@@ -133,6 +134,7 @@ go_test(
         "listenerfilter_test.go",
         "networkfilter_test.go",
         "projection_test.go",
+        "quic_outbound_test.go",
         "route_test.go",
         "sourceidentity_test.go",
         "spiffe_test.go",
@@ -219,6 +221,7 @@ go_test(
         "l4route_udp_matcher_test.go",
         "inbound_port_test.go",
         "ingress_quic_test.go",
+        "quic_outbound_test.go",
     ],
     deps = [
         "//agent/internal/xds/config",

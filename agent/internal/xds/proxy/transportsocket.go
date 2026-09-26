@@ -282,6 +282,52 @@ func InboundQUICTransportSocket(tlsCertificateSecretName, validationContextName,
 	}
 }
 
+// QUICUpstreamTransportSocket is the upstream side of proposal 038 Phase 4b: the
+// envoy.transport_sockets.quic socket a per-source `quic:` cluster carries.
+//
+// It names ONE client certificate statically -- clientSpiffeID, the source
+// ServiceAccount's SVID over ADS-served SDS -- because
+// QuicClientTransportSocketFactory::create REJECTS a certificate selector
+// (quic_client_transport_socket_factory.cc, verified at the pin): the
+// per-connection selection the TCP path uses since #842 does not exist for
+// QUIC, so the per-source identity has to be the cluster's own. That is why
+// there is one such cluster per (destination, local ServiceAccount) and why
+// the route selects between them by the source's filter-state identity.
+//
+// The rest is the TCP upstream's contract, kept on purpose: the server SAN
+// pin (sanURIs), the destination port as SNI, and MaxSessionKeys: 0. R4 on
+// the CLIENT side is that last field: QuicUpstreamTransport carries only an
+// UpstreamTlsContext (no enable_resumption), and MaxSessionKeys: 0 is what
+// disables client-side session resumption -- the same precondition the TCP
+// cert selector already had. ALPN is h3 only.
+func QUICUpstreamTransportSocket(clientSpiffeID, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
+	common := &transport_sockets_v3.CommonTlsContext{
+		AlpnProtocols: []string{"h3"},
+		TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
+			sdsSecretConfig(clientSpiffeID),
+		},
+	}
+	if len(sanURIs) == 0 {
+		common.ValidationContextType = &transport_sockets_v3.CommonTlsContext_ValidationContextSdsSecretConfig{
+			ValidationContextSdsSecretConfig: sdsSecretConfig(validationContextName),
+		}
+	} else {
+		common.ValidationContextType = combinedValidationContext(validationContextName, sanURIs, config.XDSConfigSourceADS())
+	}
+	return &corev3.TransportSocket{
+		Name: quicTransportSocketName,
+		ConfigType: &corev3.TransportSocket_TypedConfig{
+			TypedConfig: config.TypedConfig(&quicv3.QuicUpstreamTransport{
+				UpstreamTlsContext: &transport_sockets_v3.UpstreamTlsContext{
+					CommonTlsContext: common,
+					Sni:              sni,
+					MaxSessionKeys:   wrapperspb.UInt32(0),
+				},
+			}),
+		},
+	}
+}
+
 // UpstreamTransportSocket creates a TLS transport socket for upstream (outbound) connections.
 // It uses mTLS with both a client certificate and validation context fetched via
 // ADS-served SDS. sanURIs, when non-empty, pins the SERVER identity: the
