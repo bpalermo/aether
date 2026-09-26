@@ -1,0 +1,193 @@
+diff --git a/source/common/quic/envoy_quic_proof_verifier.cc b/source/common/quic/envoy_quic_proof_verifier.cc
+index 95dd7f41f534b..1fd890c8cad93 100644
+--- a/source/common/quic/envoy_quic_proof_verifier.cc
++++ b/source/common/quic/envoy_quic_proof_verifier.cc
+@@ -37,9 +37,9 @@ class QuicValidateResultCallback : public Ssl::ValidateResultCallback {
+   QuicValidateResultCallback(Event::Dispatcher& dispatcher,
+                              std::unique_ptr<quic::ProofVerifierCallback>&& quic_callback,
+                              const std::string& hostname, absl::string_view leaf_cert,
+-                             bool accept_untrusted)
++                             bool verify_hostname)
+       : dispatcher_(dispatcher), quic_callback_(std::move(quic_callback)), hostname_(hostname),
+-        leaf_cert_(leaf_cert), accept_untrusted_(accept_untrusted) {}
++        leaf_cert_(leaf_cert), verify_hostname_(verify_hostname) {}
+ 
+   Event::Dispatcher& dispatcher() override { return dispatcher_; }
+ 
+@@ -48,7 +48,7 @@ class QuicValidateResultCallback : public Ssl::ValidateResultCallback {
+     std::string error;
+     if (!succeeded) {
+       error = error_details;
+-    } else if (!accept_untrusted_) {
++    } else if (verify_hostname_) {
+       std::unique_ptr<quic::CertificateView> cert_view =
+           quic::CertificateView::ParseSingleCertificate(leaf_cert_);
+       succeeded = verifyLeafCertMatchesHostname(*cert_view, hostname_, &error);
+@@ -64,11 +64,24 @@ class QuicValidateResultCallback : public Ssl::ValidateResultCallback {
+   const std::string hostname_;
+   // Leaf cert needs to be retained in case of asynchronous validation.
+   std::string leaf_cert_;
+-  const bool accept_untrusted_;
++  // Whether the leaf certificate must carry a DNS SAN matching the hostname once the chain has
++  // been validated.
++  const bool verify_hostname_;
+ };
+ 
+ } // namespace
+ 
++bool EnvoyQuicProofVerifier::hasExplicitIdentityCheck(
++    const Envoy::Ssl::CertificateValidationContextConfig* validation_context) {
++  if (validation_context == nullptr || validation_context->autoSniSanMatch()) {
++    return false;
++  }
++  return !validation_context->subjectAltNameMatchers().empty() ||
++         !validation_context->verifyCertificateHashList().empty() ||
++         !validation_context->verifyCertificateSpkiList().empty() ||
++         validation_context->customValidatorConfig().has_value();
++}
++
+ quic::QuicAsyncStatus EnvoyQuicProofVerifier::VerifyCertChain(
+     const std::string& hostname, const uint16_t /*port*/,
+     const std::vector<absl::string_view>& certs, const std::string& /*ocsp_response*/,
+@@ -103,9 +116,23 @@ quic::QuicAsyncStatus EnvoyQuicProofVerifier::VerifyCertChain(
+     return quic::QUIC_FAILURE;
+   }
+ 
++  // Once the chain is validated the leaf certificate must carry a DNS SAN matching the hostname
++  // (the SNI), unless untrusted certificates are accepted, or the operator configured an explicit
++  // identity check (SAN matchers, certificate pins or a custom validator, either in the validation
++  // context or as a per-connection SAN override) which replaces the SNI-derived check the same way
++  // it does for the TLS client on TCP.
++  const bool explicit_identity_check =
++      explicit_identity_check_ ||
++      (verify_context->transportSocketOptions() != nullptr &&
++       !verify_context->transportSocketOptions()->verifySubjectAltNameListOverride().empty());
++  const bool verify_hostname =
++      !accept_untrusted_ &&
++      !(explicit_identity_check &&
++        Runtime::runtimeFeatureEnabled(
++            "envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match"));
+   auto envoy_callback = std::make_unique<QuicValidateResultCallback>(
+       verify_context->dispatcher(), std::move(callback), hostname, std::string(certs[0]),
+-      accept_untrusted_);
++      verify_hostname);
+   ASSERT(dynamic_cast<Extensions::TransportSockets::Tls::ClientContextImpl*>(context_.get()) !=
+          nullptr);
+   // We down cast rather than add customVerifyCertChainForQuic to Envoy::Ssl::Context because
+@@ -121,7 +148,7 @@ quic::QuicAsyncStatus EnvoyQuicProofVerifier::VerifyCertChain(
+     return quic::QUIC_PENDING;
+   }
+   if (result.status == ValidationResults::ValidationStatus::Successful) {
+-    if (verifyLeafCertMatchesHostname(*cert_view, hostname, error_details)) {
++    if (!verify_hostname || verifyLeafCertMatchesHostname(*cert_view, hostname, error_details)) {
+       // Hand the verifier-built chain (not the peer-sent list) to the details so the connection
+       // info can report the validated issuer.
+       *details = std::make_unique<CertVerifyResult>(true, std::move(result.validated_chain));
+diff --git a/source/common/quic/envoy_quic_proof_verifier.h b/source/common/quic/envoy_quic_proof_verifier.h
+index 506f088cebc0c..2a7e5fcea891d 100644
+--- a/source/common/quic/envoy_quic_proof_verifier.h
++++ b/source/common/quic/envoy_quic_proof_verifier.h
+@@ -3,6 +3,8 @@
+ #include <memory>
+ #include <vector>
+ 
++#include "envoy/ssl/certificate_validation_context_config.h"
++
+ #include "source/common/quic/envoy_quic_proof_verifier_base.h"
+ #include "source/common/quic/quic_ssl_connection_info.h"
+ #include "source/common/tls/context_impl.h"
+@@ -56,11 +58,25 @@ using EnvoyQuicProofVerifyContextPtr = std::unique_ptr<EnvoyQuicProofVerifyConte
+ class EnvoyQuicProofVerifier : public EnvoyQuicProofVerifierBase {
+ public:
+   explicit EnvoyQuicProofVerifier(Envoy::Ssl::ClientContextSharedPtr&& context,
+-                                  bool accept_untrusted = false)
+-      : context_(std::move(context)), accept_untrusted_(accept_untrusted) {
++                                  bool accept_untrusted = false,
++                                  bool explicit_identity_check = false)
++      : context_(std::move(context)), accept_untrusted_(accept_untrusted),
++        explicit_identity_check_(explicit_identity_check) {
+     ASSERT(context_.get());
+   }
+ 
++  /**
++   * Returns true when the validation context configures an explicit peer identity check, i.e.
++   * subject alternative name matchers, certificate hash or SPKI pins, or a custom validator, and
++   * does not request the SNI to be matched against a DNS SAN. For such contexts the verifier does
++   * not additionally require the leaf certificate to carry a DNS SAN matching the SNI, mirroring
++   * the TLS client on TCP which only matches the SNI against SANs when ``auto_sni_san_validation``
++   * is set. See the runtime guard
++   * ``envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match``.
++   */
++  static bool hasExplicitIdentityCheck(
++      const Envoy::Ssl::CertificateValidationContextConfig* validation_context);
++
+   // EnvoyQuicProofVerifierBase
+   quic::QuicAsyncStatus
+   VerifyCertChain(const std::string& hostname, const uint16_t port,
+@@ -75,6 +91,9 @@ class EnvoyQuicProofVerifier : public EnvoyQuicProofVerifierBase {
+   // True if the verifier should accept untrusted certs (see documentation for
+   // envoy::extensions::transport_sockets::tls::v3::CertificateValidationContext::ACCEPT_UNTRUSTED)
+   bool accept_untrusted_;
++  // True if the validation context configures an explicit peer identity check; see
++  // hasExplicitIdentityCheck().
++  bool explicit_identity_check_;
+ };
+ 
+ } // namespace Quic
+diff --git a/source/common/quic/quic_client_transport_socket_factory.cc b/source/common/quic/quic_client_transport_socket_factory.cc
+index a64098617ce19..cf12754129cd9 100644
+--- a/source/common/quic/quic_client_transport_socket_factory.cc
++++ b/source/common/quic/quic_client_transport_socket_factory.cc
+@@ -169,15 +169,19 @@ std::shared_ptr<quic::QuicCryptoClientConfig> QuicClientTransportSocketFactory::
+   ThreadLocalQuicConfig& tls_config = *tls_slot_;
+ 
+   if (tls_config.client_context_ != context) {
+-    bool accept_untrusted =
+-        clientContextConfig() && clientContextConfig()->certificateValidationContext() &&
+-        clientContextConfig()->certificateValidationContext()->trustChainVerification() ==
+-            envoy::extensions::transport_sockets::tls::v3::CertificateValidationContext::
+-                ACCEPT_UNTRUSTED;
++    const Ssl::CertificateValidationContextConfig* validation_context =
++        clientContextConfig() ? clientContextConfig()->certificateValidationContext() : nullptr;
++    const bool accept_untrusted =
++        validation_context != nullptr && validation_context->trustChainVerification() ==
++                                             envoy::extensions::transport_sockets::tls::v3::
++                                                 CertificateValidationContext::ACCEPT_UNTRUSTED;
++    const bool explicit_identity_check =
++        Quic::EnvoyQuicProofVerifier::hasExplicitIdentityCheck(validation_context);
+     // If the context has been updated, update the crypto config.
+     tls_config.client_context_ = context;
+     tls_config.crypto_config_ = std::make_shared<quic::QuicCryptoClientConfig>(
+-        std::make_unique<Quic::EnvoyQuicProofVerifier>(std::move(context), accept_untrusted),
++        std::make_unique<Quic::EnvoyQuicProofVerifier>(std::move(context), accept_untrusted,
++                                                       explicit_identity_check),
+         std::make_unique<quic::QuicClientSessionCache>());
+ 
+     registerCertCompression(tls_config.crypto_config_->ssl_ctx());
+diff --git a/source/common/runtime/runtime_features.cc b/source/common/runtime/runtime_features.cc
+index 080f346dd8a5a..add618e72452f 100644
+--- a/source/common/runtime/runtime_features.cc
++++ b/source/common/runtime/runtime_features.cc
+@@ -136,6 +136,7 @@ RUNTIME_GUARD(envoy_reloadable_features_proxy_protocol_allow_duplicate_tlvs);
+ RUNTIME_GUARD(envoy_reloadable_features_proxy_protocol_remove_too_long_tlvs);
+ // TODO(panting): Default to true after ssl fix.
+ FALSE_RUNTIME_GUARD(envoy_reloadable_features_quic_enable_reset_ssl_after_handshake);
++RUNTIME_GUARD(envoy_reloadable_features_quic_hostname_check_deferred_to_explicit_san_match);
+ RUNTIME_GUARD(envoy_reloadable_features_quic_mtls_resumption_disabled_by_default);
+ RUNTIME_GUARD(envoy_reloadable_features_quic_mtls_server_enabled);
+ // Ignore the automated "remove this flag" issue: we should keep this for 1 year. Confirm with
+diff --git a/source/extensions/transport_sockets/tls/cert_validator/spiffe/BUILD b/source/extensions/transport_sockets/tls/cert_validator/spiffe/BUILD
+index 7472c819da657..e12c3716497de 100644
+--- a/source/extensions/transport_sockets/tls/cert_validator/spiffe/BUILD
++++ b/source/extensions/transport_sockets/tls/cert_validator/spiffe/BUILD
+@@ -17,6 +17,10 @@ envoy_cc_extension(
+         "spiffe_validator.h",
+     ],
+     external_deps = ["ssl"],
++    # Ensure this could be used in integration tests.
++    extra_visibility = [
++        "//test/integration:__subpackages__",
++    ],
+     deps = [
+         "//envoy/router:string_accessor_interface",
+         "//envoy/ssl:context_config_interface",

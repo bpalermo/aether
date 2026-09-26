@@ -30,12 +30,24 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 #   child keys its forwarding registry on both, so N per-netns listeners on the
 #   same ip:port (every pod's capture_udp_* on 0.0.0.0:18082) stop collapsing
 #   onto the first-registered one (aether#967). Test cases, docs and changelog hunks dropped; test/mocks/network/mocks.h is kept because aether_stats_test compiles it against the new ConnectionHandler overload.
-#   Drop this override when the pin moves past the merged PR.
+#   envoyproxy/envoy#47740 "quic: defer the upstream hostname check to explicit
+#   SAN matchers" (67af4c692c + 01c09223bd on top of 726d7ac): the QUIC client no
+#   longer requires the server leaf's DNS SAN to match the SNI when an explicit
+#   identity check (match_typed_subject_alt_names, pins, custom validator) is
+#   configured and auto_sni_san_validation is off — the aether#957 root cause.
+#   Behind envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match
+#   (default true; the runtime_features.cc hunk registers it). Source + the
+#   SPIFFE validator BUILD visibility line; api/ doc comment (a separate module),
+#   tests and changelog dropped. Applied AFTER 47743 (patches apply in order).
+#   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
     version = "1.40.0-dev.20260926.726d7ac.envoy",
     patch_strip = 1,
-    patches = ["//bazel/patches:envoy-47743-udp-hot-restart-forwarding-netns.patch"],
+    patches = [
+        "//bazel/patches:envoy-47743-udp-hot-restart-forwarding-netns.patch",
+        "//bazel/patches:envoy-47740-quic-hostname-check-explicit-san.patch",
+    ],
 )
 
 ####################################################################################
