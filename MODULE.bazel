@@ -120,6 +120,7 @@ use_repo(
     "com_github_miekg_dns",
     "com_github_pseudomuto_protoc_gen_doc",
     "com_github_pseudomuto_protokit",
+    "com_github_quic_go_quic_go",
     "com_github_spf13_cobra",
     "com_github_spiffe_go_spiffe_v2",
     "com_github_stretchr_testify",
