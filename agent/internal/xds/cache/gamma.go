@@ -489,9 +489,16 @@ func (c *SnapshotCache) rebuildPodListenersLocked(reason string, shared []*http_
 			continue
 		}
 		c.applyWaypointInboundServerNames(newInbound, entry.cniPod)
+		newInboundQUIC, err := c.generateInboundQUICListener(entry.cniPod, trustDomain, extensionFilters)
+		if err != nil {
+			c.log.Warn("skipping inbound QUIC listener regeneration for pod",
+				"reason", reason, "netns", netns, "pod", entry.cniPod.GetName(), "error", err)
+			continue
+		}
 		entry.capture = newCapture
 		entry.outbound = newOutbound
 		entry.inbound = newInbound
+		entry.inboundQUIC = newInboundQUIC
 		c.listeners[netns] = entry
 	}
 }

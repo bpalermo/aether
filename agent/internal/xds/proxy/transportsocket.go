@@ -3,6 +3,7 @@ package proxy
 import (
 	"aethermesh.dev/agent/internal/xds/config"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	quicv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v3"
 	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
 	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	transport_sockets_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
@@ -210,6 +211,17 @@ func sdsSecretConfigFrom(secretName string, source *corev3.ConfigSource) *transp
 // shape over the generated bootstrap bytes so a future caller that bypasses
 // that guard fails the build instead of shipping an unpinned inbound.
 func DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain string) *corev3.TransportSocket {
+	return transportSocket(downstreamTLSContext(tlsCertificateSecretName, validationContextName, trustDomain))
+}
+
+// downstreamTLSContext is the bare mTLS-terminating context every inbound chain
+// carries: this pod's SVID over SDS, the caller's certificate REQUIRED and
+// pinned to the workload SPIFFE shape (#843). It is shared, by construction, by
+// the TCP inbound (DownstreamTransportSocket wraps it in a TLS transport
+// socket) and the QUIC inbound (InboundQUICTransportSocket wraps it in a
+// QuicDownstreamTransport) so the two transports cannot drift in what they
+// accept: one builder, two wrappers.
+func downstreamTLSContext(tlsCertificateSecretName, validationContextName, trustDomain string) *transport_sockets_v3.DownstreamTlsContext {
 	common := &transport_sockets_v3.CommonTlsContext{
 		TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
 			sdsSecretConfig(tlsCertificateSecretName),
@@ -228,10 +240,46 @@ func DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, 
 		)
 	}
 
-	return transportSocket(&transport_sockets_v3.DownstreamTlsContext{
+	return &transport_sockets_v3.DownstreamTlsContext{
 		RequireClientCertificate: wrapperspb.Bool(true),
 		CommonTlsContext:         common,
-	})
+	}
+}
+
+// InboundQUICTransportSocket is the QUIC twin of DownstreamTransportSocket for
+// the per-pod HTTP/3 inbound (proposal 038 Phase 4, R2/R4): the SAME bare
+// DownstreamTlsContext -- this pod's SVID, client certificate required, the
+// workload SAN pin -- wrapped in envoy.transport_sockets.quic, with three
+// QUIC-specific settings that are each load-bearing:
+//
+//   - ALPN ["h3"] and nothing else. QUIC carries HTTP/3 only; offering "h2"
+//     here makes an h3 client's handshake fail with TLS alert 120
+//     no_application_protocol (found by the edge in 029 M4).
+//   - enable_resumption: false, EXPLICITLY. QUIC never re-verifies the client
+//     certificate on a resumed session, so a resumed session would carry a
+//     peer identity the destination never checked -- the #829/#831 shape, on
+//     a transport with no cx-level re-handshake. envoyproxy/envoy#47219 made
+//     off the default and the pin now carries it; explicit anyway, because an
+//     absent field is whatever the current default is, and defaults move. R4.
+//   - enable_early_data: false, EXPLICITLY. 0-RTT data arrives before the
+//     client certificate is validated at all. R4.
+//
+// //test/envoy_validate asserts both falses are PRESENT on every QUIC chain
+// that requires a client certificate; an absent field is Envoy's default, and
+// a default is not a contract.
+func InboundQUICTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain string) *corev3.TransportSocket {
+	ctx := downstreamTLSContext(tlsCertificateSecretName, validationContextName, trustDomain)
+	ctx.CommonTlsContext.AlpnProtocols = []string{"h3"}
+	return &corev3.TransportSocket{
+		Name: quicTransportSocketName,
+		ConfigType: &corev3.TransportSocket_TypedConfig{
+			TypedConfig: config.TypedConfig(&quicv3.QuicDownstreamTransport{
+				DownstreamTlsContext: ctx,
+				EnableResumption:     wrapperspb.Bool(false),
+				EnableEarlyData:      wrapperspb.Bool(false),
+			}),
+		},
+	}
 }
 
 // UpstreamTransportSocket creates a TLS transport socket for upstream (outbound) connections.

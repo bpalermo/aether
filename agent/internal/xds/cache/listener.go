@@ -15,6 +15,7 @@ import (
 	"aethermesh.dev/common/udspath"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
@@ -326,6 +327,10 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		return err
 	}
 	c.applyWaypointInboundServerNames(inbound, cniPod)
+	inboundQUIC, err := c.generateInboundQUICListener(cniPod, trustDomain, extensionFilters)
+	if err != nil {
+		return err
+	}
 	capture, err := c.generateCaptureListener(cniPod, trustDomain, extensionFilters)
 	if err != nil {
 		return err
@@ -347,6 +352,7 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	}
 	c.listeners[netns] = listenerEntry{
 		inbound:              inbound,
+		inboundQUIC:          inboundQUIC,
 		outbound:             outbound,
 		capture:              capture,
 		udpCapture:           udpCapture,
@@ -489,6 +495,7 @@ func (c *SnapshotCache) meshListeners() []types.Resource {
 		// Envoy NACK the entire LDS push ("address is necessary"), which would drop
 		// every good listener in the same delta and wedge a pod added in the window.
 		resources = appendListener(resources, entry.inbound)
+		resources = appendListener(resources, entry.inboundQUIC)
 		resources = appendListener(resources, entry.outbound)
 		resources = appendListener(resources, entry.capture)
 		resources = appendListener(resources, entry.udpCapture)
@@ -663,6 +670,12 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			continue
 		}
 		c.applyWaypointInboundServerNames(inbound, pod)
+		inboundQUIC, quicErr := c.generateInboundQUICListener(pod, trustDomain, extensionFilters)
+		if quicErr != nil {
+			c.log.ErrorContext(ctx, "failed to generate inbound QUIC listener for pod", "error", quicErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
+			errs = append(errs, quicErr)
+			continue
+		}
 		capture, captureErr := c.generateCaptureListener(pod, trustDomain, extensionFilters)
 		if captureErr != nil {
 			c.log.ErrorContext(ctx, "failed to generate capture listener for pod", "error", captureErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
@@ -677,6 +690,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		}
 		c.listeners[netns] = listenerEntry{
 			inbound:       inbound,
+			inboundQUIC:   inboundQUIC,
 			outbound:      outbound,
 			capture:       capture,
 			udpCapture:    udpCapture,
@@ -726,4 +740,20 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 // resource types so listener updates do not clobber clusters, routes or secrets.
 func (c *SnapshotCache) generateListenerSnapshot(ctx context.Context) error {
 	return c.generateSnapshot(ctx)
+}
+
+// generateInboundQUICListener builds the pod's HTTP/3 inbound listener
+// (proposal 038 Phase 4), or returns an untyped nil when there is none
+// (SPIRE off). The untyped nil matters: a typed-nil *Listener inside a
+// non-nil types.Resource would defeat appendListener's guard and reach LDS as
+// an empty listener, which Envoy NACKs whole ("address is necessary").
+func (c *SnapshotCache) generateInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain string, extensionFilters []*http_connection_managerv3.HttpFilter) (types.Resource, error) {
+	l, err := proxy.NewInboundQUICListener(cniPod, trustDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(cniPod))
+	if err != nil {
+		return nil, err
+	}
+	if l == nil {
+		return nil, nil
+	}
+	return l, nil
 }

@@ -496,6 +496,11 @@ type SnapshotCache struct {
 type listenerEntry struct {
 	inbound  types.Resource
 	outbound types.Resource
+	// inboundQUIC is the pod's HTTP/3 inbound listener (proposal 038 Phase 4):
+	// UDP on the TCP inbound's port, same identity, same chains minus the TCP
+	// floor. nil when SPIRE is off (QUIC mandates TLS). Inert until a source
+	// dials it over a per-source quic: cluster.
+	inboundQUIC types.Resource
 	// capture is the per-pod transparent-capture listener (proposal 018, Phase 3a):
 	// nil unless transparent capture is enabled. Bound to the capture port in the
 	// pod netns; routes CNI-redirected ClusterIP:18081 traffic by cluster.local

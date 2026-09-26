@@ -39,9 +39,9 @@ func TestConcurrentMutationsFinalSnapshotComplete(t *testing.T) {
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
 	listeners := snap.GetResources(resourcev3.ListenerType)
-	// Two listeners (inbound + outbound) per pod plus the health gateway; a
-	// lost update would leave fewer.
-	assert.Len(t, listeners, 2*pods+1, "final snapshot must reflect every concurrent AddPod")
+	// Three listeners (inbound + inbound QUIC + outbound) per pod plus the
+	// health gateway; a lost update would leave fewer.
+	assert.Len(t, listeners, 3*pods+1, "final snapshot must reflect every concurrent AddPod")
 }
 
 // TestLoadListenersFromStorageMergesLocalWorkloads is the R3 regression test
