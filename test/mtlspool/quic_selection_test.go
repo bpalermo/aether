@@ -55,8 +55,11 @@ const (
 	// dials with SNI "<port>.<fqdn>" so the port demux survives Envoy's QUIC
 	// client hostname check (verifyLeafCertMatchesHostname: DNS SANs only).
 	quicDestFQDN = "echo.demo.svc"
-	quicSNI      = upstreamSNI + "." + quicDestFQDN
 )
+
+// quicSNI is the production shape (proxy.QUICServerName), so this harness
+// proves the SNI the agent actually programs.
+var quicSNI = proxy.QUICServerName(upstreamSNI, quicDestFQDN)
 
 // destinationH3 is an HTTP/3 server that requires and verifies the client
 // certificate and reports, per request, the URI SAN it verified, the QUIC
