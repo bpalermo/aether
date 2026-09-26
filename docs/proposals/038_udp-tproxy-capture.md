@@ -2,8 +2,19 @@
 
 **Status:** Accepted; **revised 2026-09-26** to fold east-west QUIC in as a
 requirement rather than a deferred question. All four premises verified by
-experiment; Phase 0 settled on a node 2026-09-25. Phase 1 is unblocked, pending
-two decisions listed under *Decisions required before Phase 1*.
+experiment; Phase 0 settled on a node 2026-09-25.
+**Superseded in part (2026-09-26):** Phases 1, 2 and 5 below were replaced by the
+*TPROXY for both transports* plan and shipped as one breaking change with no
+mode flag, no `redirect` fallback and no REDIRECT kept for a release — #944
+(Phase 0b spike: the full ruleset incl. `tproxy` proven on a node), #945
+(constants), #946 (transparent TCP listener, landed *before* the CNI change on
+purpose), #947 (CNI mark-and-divert for TCP **and** UDP, the per-VIP UDP
+listener on 18082, the root-only kernel gate in CI), #948 (e2e selection
+assertion), and the chart bump + soak in the PR that carries this note. The
+decision that made Phase 5's "written analysis" moot: the `0xae7e` passthrough
+mark never matched in the pod netns to begin with (the proxy is hostNetwork), so
+there is nothing for the divert mark to compose with. Phase 3 (e2e) and Phase 4
+(QUIC) stand as written; the shared-port table and D1/D2 are unchanged.
 **Author:** Bruno Palermo
 **Date:** 2026-09-23 (revised 2026-09-26)
 **History:** grew out of #873, whose stated fix direction turned out to be wrong
@@ -491,6 +502,9 @@ Each PR is independently revertable and merges on green (`ci` + `proxy`,
 squash). Talos validation where a PR changes what every pod does; a soak after
 each phase's default flips. Sizes are relative: S = one sitting, M = a day,
 L = several with a spike.
+
+> **Phases 1, 2 and 5 are superseded** — see the status note at the top. They are
+> kept below as the record of what was planned; what shipped is #944–#948.
 
 ### Phase 1 — CNI (three PRs, all behind `--capture-udp-mode`, default `redirect`)
 
