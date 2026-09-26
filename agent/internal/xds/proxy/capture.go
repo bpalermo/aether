@@ -203,11 +203,31 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		// Found via the tcp-echo probes: payloads p1..p99 (<6B) failed, p100+ worked.
 		ListenerFiltersTimeout:           durationpb.New(time.Second),
 		ContinueOnListenerFiltersTimeout: true,
-		UseOriginalDst:                   wrapperspb.Bool(true),
-		PerConnectionBufferLimitBytes:    wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		StatPrefix:                       fmt.Sprintf("capture_%s", cniPod.GetName()),
-		TrafficDirection:                 corev3.TrafficDirection_OUTBOUND,
-		FilterChains:                     chains,
+		// transparent: IP_TRANSPARENT on every worker socket, applied at PREBIND
+		// inside the pod netns (proposal 038). It is what lets the CNI's
+		// prerouting `tproxy to :18001` assign a diverted packet to this socket
+		// -- without it tproxy is a no-op and the packet finds no socket -- and
+		// what lets the accepted socket carry the ORIGINAL destination as its
+		// local endpoint, so the filter chains keep matching on VIP:port with no
+		// port rewrite and no conntrack NAT. Under today's REDIRECT it is
+		// harmless: original_dst still reads SO_ORIGINAL_DST first (utility.cc
+		// tries it before the IP_TRANSPARENT fallback), so this lands BEFORE the
+		// CNI rules change and bakes under REDIRECT; flipping it restarts every
+		// capture listener (new sockets, old drained), which must not coincide
+		// with the rule switch. Needs CAP_NET_ADMIN in the userns owning the pod
+		// netns -- the init userns here -- which the proxy container grants
+		// (pinned by //charts/aether:aether_proxy_net_admin_test).
+		Transparent: wrapperspb.Bool(true),
+		// use_original_dst stays: original_dst is what sets localAddressRestored(),
+		// which the ORIGINAL_DST passthrough cluster requires (Envoy
+		// original_dst_cluster.cc). On a diverted flow SO_ORIGINAL_DST succeeds --
+		// the flow is conntrack-tracked, just not NATed -- and returns the same
+		// VIP:port getsockname would (proven in e2e/spike/tproxy-phase0b.py T1).
+		UseOriginalDst:                wrapperspb.Bool(true),
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
+		StatPrefix:                    fmt.Sprintf("capture_%s", cniPod.GetName()),
+		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
+		FilterChains:                  chains,
 	}
 
 	// SPIKE/M2a passthrough: the DefaultFilterChain is Envoy's true "no named chain

@@ -29,6 +29,11 @@ func TestGenerateCaptureListener(t *testing.T) {
 	assert.Equal(t, uint32(15001), sa.GetPortValue())
 	assert.Equal(t, "/var/run/netns/p1", sa.GetNetworkNamespaceFilepath())
 	assert.True(t, l.GetUseOriginalDst().GetValue(), "use_original_dst set")
+	// proposal 038: the capture socket must be transparent so the CNI's
+	// prerouting tproxy can assign a diverted packet to it. Pinned beside
+	// use_original_dst because the two are a PAIR -- transparent for delivery,
+	// original_dst for localAddressRestored() on the passthrough cluster.
+	assert.True(t, l.GetTransparent().GetValue(), "transparent set (038)")
 
 	// Inspector stall guard: inconclusive first writes (<6B raw TCP, server-first
 	// protocols) must CONTINUE to chain matching after 1s instead of being closed at

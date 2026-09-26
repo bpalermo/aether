@@ -61,6 +61,23 @@ helm_template_test(
     chart = ":aether",
 )
 
+# Proposal 038: the capture listeners bind with IP_TRANSPARENT, which the kernel
+# checks as CAP_NET_ADMIN in the user namespace owning the pod netns -- the init
+# userns here -- and Envoy's supportsIpTransparent() probe runs once in the HOST
+# netns with the same requirement. Both fail SILENTLY without the capability: a
+# missing grant means tproxy never assigns a packet to the socket and the probe
+# quietly disables the original_dst fallback. So pin the grant against the
+# packaged chart rather than trust the securityContext by eye.
+helm_template_test(
+    name = "aether_proxy_net_admin_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- NET_ADMIN",
+        ],
+    },
+)
+
 # #772 phase B2: the aether-proxy pod must run the carved-out supervisor image,
 # not the 65MiB agent binary. Both halves are individually easy to half-change —
 # the initContainer's image and the proxy container's command — and neither
