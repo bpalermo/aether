@@ -118,6 +118,26 @@ func QUICClusterName(serviceName, meshDomain, sourceSAKey string) string {
 	return "quic:" + ServiceClusterName(serviceName, meshDomain) + "@" + sourceSAKey
 }
 
+// QUICServerName is the SNI a `quic:` cluster presents and the server_names
+// the destination's HTTP/3 inbound matches for a non-primary port:
+// "<port>.<svc>.<ns>.<meshDomain>" -- the h2 path's bare "<port>" SNI with
+// the destination's mesh authority appended (aether#957).
+//
+// Why not the bare port, as on TCP: Envoy's QUIC client verifies the leaf
+// against the SNI as a DNS hostname AFTER any configured validator succeeds
+// (source/common/quic/envoy_quic_proof_verifier.cc, verified at the pin), and
+// nothing but accept_untrusted skips it; a bare "8080" matches no DNS SAN, so
+// every HTTP/3 handshake would fail with a verified peer. The SVID SPIRE
+// issues to a mesh workload therefore carries two DNS SANs -- "<sa>.<ns>.<mesh
+// domain>" and "*.<sa>.<ns>.<meshDomain>" (dnsNameTemplates on the
+// workloads' ClusterSPIFFEID; mesh Service names ARE ServiceAccount names) --
+// and this shape lands on the wildcard for every port. The SPIFFE URI SAN pin
+// (sanURIs) stays the identity check; the DNS match is only what the QUIC
+// client insists on.
+func QUICServerName(port, fqdn string) string {
+	return port + "." + fqdn
+}
+
 // SourceSAKeyFromSpiffeID reduces a workload SPIFFE ID
 // (spiffe://<td>/ns/<ns>/sa/<sa>) to the "<ns>/<sa>" key QUICClusterName
 // takes; "" for anything else (a node identity, an edge identity, garbage).
@@ -139,9 +159,10 @@ func SourceSAKeyFromSpiffeID(spiffeID string) string {
 // subset selectors, the same outlier detection and circuit breakers -- a
 // clone), renamed, with HTTP/3 protocol options and the QUIC upstream socket
 // presenting clientSpiffeID. base is the entry's BARE cluster (no transport
-// socket); the caller passes the same sanURIs and sni it would give
-// InjectUpstreamMTLS for the h2 twin, so the two transports pin the same
-// server identity and demux to the same inbound chain.
+// socket); the caller passes the same sanURIs it would give InjectUpstreamMTLS
+// for the h2 twin, so the two transports pin the same server identity, and
+// sni = QUICServerName(<the h2 twin's port SNI>, <authority>), so the
+// destination demuxes to the same inbound chain.
 func QUICClusterFrom(base *clusterv3.Cluster, name, clientSpiffeID, validationContextName string, sanURIs []string, sni string) *clusterv3.Cluster {
 	cl, _ := proto.Clone(base).(*clusterv3.Cluster)
 	cl.Name = name

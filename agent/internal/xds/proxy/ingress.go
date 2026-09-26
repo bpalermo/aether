@@ -6,6 +6,7 @@ import (
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/serviceref"
 	"aethermesh.dev/registry/endpointmeta"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -334,12 +335,15 @@ func InboundQUICListenerName(cniPod *cniv1.CNIPod) string {
 //     a port declared raw TCP (proposal 037); those stay TCP-inbound-only.
 //   - The PRIMARY port is the DEFAULT chain (no match): there is no "h2" ALPN
 //     to key on, and every QUIC connection is HTTP/3.
-//   - Every other HTTP port is a server_names chain on the port number, as on
-//     the TCP inbound. That match works on a QUIC listener because Envoy's
-//     QUIC proof source passes the CHLO's hostname into the filter-chain lookup
-//     (source/common/quic/envoy_quic_proof_source.cc, verified at the pinned
-//     commit), so the source side sets SNI = "<port>" exactly as it does for
-//     an h2 non-primary port.
+//   - Every other HTTP port is a server_names chain on QUICServerName(port,
+//     <pod's mesh authority>) = "<port>.<sa>.<ns>.<meshDomain>" -- NOT the bare
+//     port the TCP inbound matches, because the QUIC client insists on a DNS
+//     hostname SNI (aether#957; see QUICServerName). The match works on a QUIC
+//     listener because Envoy's QUIC proof source passes the CHLO's hostname
+//     into the filter-chain lookup (source/common/quic/envoy_quic_proof_source.cc,
+//     verified at the pinned commit). The primary port's clients send
+//     "<primary>.<authority>", which no chain names, so they land on the
+//     default chain exactly as an h2 primary-port client does.
 //
 // No inbound divert is involved: a QUIC datagram from another node's proxy
 // arrives on the pod's eth0 addressed to the pod IP and is delivered to this
@@ -350,7 +354,7 @@ func InboundQUICListenerName(cniPod *cniv1.CNIPod) string {
 // no SVID to present, and the TCP inbound's cleartext chain keeps the mesh hop
 // routable on its own. Returns ErrNoTrustDomain in the same case the TCP
 // inbound does, for the same reason.
-func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) (*listenerv3.Listener, error) {
+func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain, meshDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -363,11 +367,16 @@ func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsP
 	if trustDomain == "" {
 		return nil, fmt.Errorf("inbound QUIC listener for pod %s/%s: %w", cniPod.GetNamespace(), cniPod.GetName(), ErrNoTrustDomain)
 	}
+	if meshDomain == "" {
+		return nil, fmt.Errorf("inbound QUIC listener for pod %s/%s: mesh domain is required for the server_names chains", cniPod.GetNamespace(), cniPod.GetName())
+	}
 
 	tlsCertificateSecretName := SpiffeIDFromPod(cniPod, trustDomain)
 	validationContextName := ValidationContextName(trustDomain)
 	defaultPort := AppPortFromPod(cniPod)
 	tcpPorts := appTCPPorts(cniPod)
+	// The pod's mesh authority: its Service name is its ServiceAccount name.
+	authority := ServiceClusterName(serviceref.New(cniPod.GetNamespace(), cniPod.GetServiceAccount()).Key(), meshDomain)
 
 	var chains []*listenerv3.FilterChain
 	chains = append(chains, buildInboundQUICFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
@@ -378,7 +387,7 @@ func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsP
 		if _, isTCP := tcpPorts[port]; isTCP {
 			continue
 		}
-		chains = append(chains, buildInboundQUICFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
+		chains = append(chains, buildInboundQUICFilterChain(cniPod, QUICServerName(strconv.Itoa(int(port)), authority), port, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
 	}
 
 	return &listenerv3.Listener{
@@ -423,7 +432,10 @@ func buildInboundQUICFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uin
 	name := fmt.Sprintf("in_h3_%s", cniPod.GetName())
 	var match *listenerv3.FilterChainMatch
 	if sni != "" {
-		name = fmt.Sprintf("in_h3_%s_%s", cniPod.GetName(), sni)
+		// Named by PORT (as the TCP inbound's chains are), not by the SNI:
+		// the SNI is a hostname since aether#957 and the chain name is a
+		// stats/log key that must stay short and dot-free.
+		name = fmt.Sprintf("in_h3_%s_%d", cniPod.GetName(), chainPort)
 		match = &listenerv3.FilterChainMatch{ServerNames: []string{sni}}
 	}
 	return &listenerv3.FilterChain{

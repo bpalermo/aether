@@ -370,6 +370,14 @@ metadata:
 spec:
   className: $SPIRE_CLASS
   spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  # The workload's mesh authority and every "<port>." prefix of it, as DNS SANs:
+  # Envoy's QUIC client verifies the leaf against the SNI as a hostname after
+  # the SPIFFE SAN pin (aether#957), and the east-west QUIC SNI is
+  # "<port>.<sa>.<ns>.<mesh domain>" (proxy.QUICServerName). Identity is still
+  # the URI SAN; these only satisfy the QUIC client's hostname check.
+  dnsNameTemplates:
+    - "{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.$MESH_DOMAIN"
+    - "*.{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.$MESH_DOMAIN"
   podSelector:
     matchLabels:
       aether.io/managed: "true"

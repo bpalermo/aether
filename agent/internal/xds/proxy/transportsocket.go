@@ -295,7 +295,8 @@ func InboundQUICTransportSocket(tlsCertificateSecretName, validationContextName,
 // the route selects between them by the source's filter-state identity.
 //
 // The rest is the TCP upstream's contract, kept on purpose: the server SAN
-// pin (sanURIs), the destination port as SNI, and MaxSessionKeys: 0. R4 on
+// pin (sanURIs), the SNI (in QUICServerName's hostname form, never the bare
+// port: aether#957) and MaxSessionKeys: 0. R4 on
 // the CLIENT side is that last field: QuicUpstreamTransport carries only an
 // UpstreamTlsContext (no enable_resumption), and MaxSessionKeys: 0 is what
 // disables client-side session resumption -- the same precondition the TCP

@@ -992,6 +992,28 @@ func TestUnpinnedInboundChainsSeesThroughQUIC(t *testing.T) {
 	}
 }
 
+// TestQUICUpstreamSNIIsAHostname: every `quic:` cluster's SNI must be
+// "<port>.<authority>" (proxy.QUICServerName), because the QUIC client's
+// hostname check runs after the SAN pin and a bare-port SNI matches no DNS SAN
+// (aether#957). Runs over the generated fixture bytes.
+func TestQUICUpstreamSNIIsAHostname(t *testing.T) {
+	data, err := QUICOutboundBootstrapJSON()
+	if err != nil {
+		t.Fatalf("QUICOutboundBootstrapJSON: %v", err)
+	}
+	bad, err := QUICUpstreamsWithPortSNI(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) > 0 {
+		t.Errorf("quic: clusters whose SNI is not <port>.<authority> under the mesh domain: %v", bad)
+	}
+	// Anti-vacuity: the fixture must carry QUIC upstreams for this to test anything.
+	if n := len(QUICOutboundArms()) - 1; n < 2 {
+		t.Fatalf("fixture carries %d quic: twins, want >= 2", n)
+	}
+}
+
 // TestQUICOutboundFixtureCarriesTheSelection is the anti-vacuity half of the
 // QUIC upstream checks: the fixture must contain both `quic:` twins with a
 // QuicUpstreamTransport, and a route whose matcher arms map each source

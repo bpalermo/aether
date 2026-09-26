@@ -1007,11 +1007,14 @@ func (q quicFanout) twinsFor(key string, entry clusterEntry, meshDomain string) 
 	if _, ok := q.services[entry.service]; !ok {
 		return nil, nil
 	}
+	// The default entry's sni is its primary port; QUIC needs the hostname
+	// form "<port>.<authority>" (aether#957, proxy.QUICServerName).
+	sni := proxy.QUICServerName(entry.sni, proxy.ServiceClusterName(entry.service, meshDomain))
 	twins := make([]types.Resource, 0, len(q.identities))
 	arms := make(map[string]string, len(q.identities))
 	for _, id := range q.identities {
 		name := proxy.QUICClusterName(entry.service, meshDomain, proxy.SourceSAKeyFromSpiffeID(id))
-		twins = append(twins, proxy.QUICClusterFrom(entry.cluster, name, id, q.mtls.validationContextName, entry.sanURIs, entry.sni))
+		twins = append(twins, proxy.QUICClusterFrom(entry.cluster, name, id, q.mtls.validationContextName, entry.sanURIs, sni))
 		arms[id] = name
 	}
 	return twins, arms

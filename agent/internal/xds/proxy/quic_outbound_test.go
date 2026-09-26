@@ -25,16 +25,24 @@ func TestQUICClusterName(t *testing.T) {
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", QUICClusterName("demo/echo", "aether.internal", "demo/source-a"))
 }
 
+// TestQUICServerName pins the SNI/server_names contract both ends share: the
+// port as the first label of the destination's mesh authority, so the name
+// falls under the "*.<sa>.<ns>.<meshDomain>" DNS SAN SPIRE issues (aether#957).
+func TestQUICServerName(t *testing.T) {
+	assert.Equal(t, "8080.echo.demo.aether.internal", QUICServerName("8080", "echo.demo.aether.internal"))
+	assert.Equal(t, "8081.echo.demo.aether.internal", QUICServerName("8081", ServiceClusterName("demo/echo", "aether.internal")))
+}
+
 // TestQUICClusterFrom pins the per-source HTTP/3 cluster's shape (038 Phase 4b):
 // a clone of the h2 base (same EDS resource, subsets, outlier detection),
 // renamed, HTTP/3 protocol options, and a QuicUpstreamTransport that names the
-// SOURCE's SVID statically, pins the destination SAN, carries the port SNI,
+// SOURCE's SVID statically, pins the destination SAN, carries the SNI it is given,
 // offers only h3 and sets MaxSessionKeys: 0 (R4 on the client side).
 func TestQUICClusterFrom(t *testing.T) {
 	base := NewServiceCluster("echo.demo.aether.internal", "demo/echo", "demo/echo", []string{"zone"})
 	q := QUICClusterFrom(base, "quic:echo.demo.aether.internal@demo/source-a",
 		"spiffe://aether.internal/ns/demo/sa/source-a", "spiffe://aether.internal",
-		[]string{"spiffe://aether.internal/ns/demo/sa/echo"}, "8080")
+		[]string{"spiffe://aether.internal/ns/demo/sa/echo"}, QUICServerName("8080", "echo.demo.aether.internal"))
 
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", q.GetName())
 	assert.Equal(t, "demo/echo", q.GetEdsClusterConfig().GetServiceName(), "the same EDS resource as the h2 twin: no second load assignment")
@@ -53,7 +61,7 @@ func TestQUICClusterFrom(t *testing.T) {
 	qt := &quicv3.QuicUpstreamTransport{}
 	require.NoError(t, q.GetTransportSocket().GetTypedConfig().UnmarshalTo(qt))
 	ctx := qt.GetUpstreamTlsContext()
-	assert.Equal(t, "8080", ctx.GetSni())
+	assert.Equal(t, "8080.echo.demo.aether.internal", ctx.GetSni(), "the hostname-form SNI the QUIC client can verify (aether#957)")
 	require.NotNil(t, ctx.MaxSessionKeys, "R4 client side: MaxSessionKeys must be EXPLICIT")
 	assert.Equal(t, uint32(0), ctx.GetMaxSessionKeys().GetValue())
 	assert.Equal(t, []string{"h3"}, ctx.GetCommonTlsContext().GetAlpnProtocols())
