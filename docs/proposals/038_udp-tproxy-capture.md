@@ -410,16 +410,38 @@ over a tested path. The full assessment is on #916.
   listener count scale with distinct ports; the shared spelling makes both
   constant. Dialling an application port directly is uncaptured for UDP, which
   is the same non-goal as for raw TCP without redirect-all.
-- **D2 — the divert mark.** A single well-known mark value, disjoint from
-  `0xae7e`, reserved in `common/constants/mesh` beside it.
+- **D2 — the divert mark. DECIDED 2026-09-26: `0xae71`**, reserved as
+  `CaptureDivertFwMark` in `common/constants/mesh` beside
+  `CapturePassthroughFwMark = 0xae7e`. Same `0xae7x` family so the two read as
+  related in `nft list ruleset`; a distinct value so the passthrough RETURN rule
+  (`meta mark 0xae7e accept`) never matches a diverted datagram and the divert
+  rule never re-marks a passthrough. Disjoint from kube-proxy's masquerade/drop
+  marks (`0x4000`, `0x8000`, masked) and from Istio's `1337`. Phase 1 pins both
+  constants in one test that asserts they differ and that neither is a bitmask
+  superset of the other.
 
 ## Open questions
 
 - **Q1.** *Dissolved by D1.* The CNI captures three constant ports and needs no
   declared-port-set plumbing.
-- **Q2.** Does `transport_socket_matches` select a QUIC upstream transport socket
-  the way it selects a TLS one? Determines whether Phase 4's outbound is one
-  cluster or one per source.
+- **Q2.** *Restated 2026-09-26 — the first phrasing named the wrong mechanism.*
+  aether's per-source identity on the TCP path is NOT `transport_socket_matches`
+  (that shape was retired in #842). It is one upstream TLS socket whose
+  `custom_tls_certificate_selector` — the `filter_state_override` cert mapper,
+  `envoy.tls.certificate_mappers.on_demand_secret` — resolves the client
+  certificate per connection from a HASHABLE filter-state key the originating
+  listener stamps, and `CommonUpstreamTransportSocketFactory::hashKey` folds
+  that key into the pool hash so pools partition per (host, source identity).
+  That pairing is what keeps source B from getting source A's pooled connection
+  (#831, which fails *open*). So, for `QuicUpstreamTransport`:
+  **Q2a** does it honour the cert mapper, choosing the handshake cert per
+  connection from filter state? **Q2b** does the HTTP/3 pool fold the hashable
+  key into its hash, partitioning QUIC connections per source identity?
+  Q2a=no → Phase 4 outbound is one cluster per source ServiceAccount (the
+  pre-#842 shape, with its re-push-on-identity-change cost). Q2b=no → the #831
+  leak class on QUIC even with Q2a=yes, and Phase 4 is blocked until it is
+  fixed upstream. Asked of the Envoy tree on 2026-09-26; the plan below carries
+  both branches.
 - **Q3.** Migration: a QUIC connection that migrates keeps its identity (the
   validated chain lives on the session), but does the *source* proxy's
   per-source binding — keyed by source SPIFFE ID since #822 — survive a path
@@ -428,6 +450,67 @@ over a tested path. The full assessment is on #916.
 - **Q4.** When the Envoy pin can move. The registry publishes exactly one
   snapshot (`1.40.0-dev.20260904.13144fb`) and #47219/#47341 postdate it. R4's
   explicit gate carries the security model until then.
+
+## Plan
+
+Each PR is independently revertable and merges on green (`ci` + `proxy`,
+squash). Talos validation where a PR changes what every pod does; a soak after
+each phase's default flips. Sizes are relative: S = one sitting, M = a day,
+L = several with a spike.
+
+### Phase 1 — CNI (three PRs, all behind `--capture-udp-mode`, default `redirect`)
+
+| PR | scope | size | gate |
+|---|---|---|---|
+| 1a | `CaptureDivertFwMark = 0xae71` beside `0xae7e`; test that the two differ and neither masks the other. Extend the port-role gate (#942) to cover 18082 as an L4 spelling for both transports. Correct the CNI comment "18082 is a TCP spelling"; rename `ProxyTCPOutboundPort` → `ProxyL4OutboundPort` (mechanical, call sites only). | S | unit |
+| 1b | Capture-mode parameter on the rule builder (R6): `captureRedirectExprs` grows a mode; `tproxy` emits mark-and-divert (`type route hook output`, `meta mark set 0xae71`) plus the `ip rule fwmark → table` / `ip route local default dev lo table` pair. Adds the route/rule capability and its dependency. The three UDP ports are literals: 18082, 18008, 18009. | M | unit + a netns integration test in the shape of `e2e/spike/udp-tproxy-phase0.py`, gated on `NET_ADMIN`/`SYS_ADMIN` and skipped without them — never silently green |
+| 1c | Keep `udp dport 18081 → :18001` REDIRECT for one release, routed to the plaintext class, so the old spelling keeps working through the flip. Chart: the flag, default off. | S | e2e unchanged (T3 still passes on REDIRECT) |
+
+Datagrams diverted to 18008/18009 before Phase 4's listeners exist are dropped
+at the socket — the same "no listener = discard" behaviour today's 18081 rule has
+before a UDPRoute exists, and equally deliberate.
+
+### Phase 2 — agent (two PRs, inert until the mode is `tproxy`)
+
+| PR | scope | size | gate |
+|---|---|---|---|
+| 2a | `GenerateUDPCaptureListener` becomes ONE transparent listener on UDP:18082 (`transparent: true`), `udp_proxy` `matcher` on `DestinationIPInput` with one arm per UDPRoute-backed service → its `udp:` cluster; `on_no_match` → the existing single-cluster behaviour while the mode is `redirect`, a blackhole cluster once it is `tproxy`. Adopting `matcher` lights `server.wip_protos`; document it and pin the count. | M | `//test/envoy_validate` accepts it; **extend `TestUDPCaptureListenerResolvesAgainstCDS`** by hand — the #895 chain→CDS gate structurally cannot see a connection-less listener |
+| 2b | Retire the single-service discard in `selectUDPRoute`; keep the weight-discard reason and `udp_unsupported` for #873, which TPROXY does not fix. `udp_no_healthy_backend` (#937) applies per arm unchanged. | S | unit |
+
+### Phase 3 — e2e, then flip (two PRs)
+
+| PR | scope | size | gate |
+|---|---|---|---|
+| 3a | `e2e/l4routes.sh` T3 grows a second UDPRoute-backed service on the same node and asserts **selection**: each service's datagrams reach its own backend. Run first with the mode `redirect` and **seen red** (second service dropped, as today), then with `tproxy` green. | M | red-then-green on kind |
+| 3b | Flip `--capture-udp-mode` to `tproxy`. Chart bump. Deploy to talos-main; 8h soak with the UDP workload in the churn set. Then delete the 18081/udp REDIRECT one release later. | S + soak | soak PASS |
+
+### Phase 4 — east-west QUIC (behind `--east-west-quic`, default off)
+
+| PR | scope | size | gate |
+|---|---|---|---|
+| 4a | Inbound: a QUIC listener bound into each pod's netns on **UDP:18008**, `envoy.transport_sockets.quic` wrapping the SAME `DownstreamTlsContext` (SDS server cert, validation context with SPIFFE SAN pinning) as the TCP inbound; `require_client_certificate: true`; `enable_resumption: false`, `enable_early_data: false` (R4). Routes to the same per-port app clusters. Extend the port-role gate to 18008. | M | `//test/envoy_validate` asserts the two `false`s on every mTLS QUIC chain — a chain without them must FAIL validation, and the test must be seen red |
+| 4b | Outbound — **contingent on Q2**. *Q2a=yes ∧ Q2b=yes:* the per-source mesh cluster gains an HTTP/3 variant with the same cert mapper on `QuicUpstreamTransport`; one cluster, invariant under the identity set, as today. *Q2a=no:* one QUIC cluster per source ServiceAccount, with the identity-set re-push cost #842 removed coming back for QUIC only — size L, and worth a spike before commit. *Q2b=no:* blocked; file upstream. Either way `//test/mtlspool` gains a QUIC arm asserting source B never rides source A's connection. | M / L | mtlspool negative control red-then-green |
+| 4c | Selection: explicit allow-list flag first; then "destination advertises UDP:18008" via the registry once the inbound has soaked. | S | e2e |
+| 4d | East-west gateway: UDP:18009 beside TCP:18009, same SNI-forwarding role; cross-cluster last. | M | 019's cross-cluster e2e over QUIC |
+
+Then a soak with `--east-west-quic` on for the whole 8h, graded on the same
+prober SLI, before any default flips.
+
+### Phase 5 — TCP capture to TPROXY
+
+One written analysis first: the `0xae7e` passthrough RETURN under a
+mark-and-divert TCP path — whether Envoy's `SO_MARK` on `passthrough_original_dst`
+still short-circuits the divert, or whether the two marks need to compose. Only
+then one PR flipping the TCP mode, gated on Phase 4 having soaked. R6 makes the
+PR itself small; the analysis is the work.
+
+### Order and what each unlocks
+
+1 → 2 → 3 delivers R1 and closes #916. 4 delivers R2 and is the first
+identity-bearing UDP in the mesh. 5 removes the mixed-mechanism state. Nothing in
+4 depends on 3's default flip — Phase 4 can proceed on a `tproxy`-mode cluster
+before the flip — but 4 should not merge before 3a's selection assertion exists,
+or the two traffic classes share a path with no e2e proving they stay apart (R5).
 
 ## Dependencies
 
