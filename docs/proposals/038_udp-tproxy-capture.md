@@ -67,13 +67,22 @@ have different security properties and the design has to keep them apart.
   identity reaches XFCC, RBAC and the access log, and SDS/SPIRE deliver the
   certificates. QUIC is a transport under that invariant, not a replacement for
   it.
-- **R3 — one port number per role, both transports.** The per-pod inbound
-  (`defaultInboundPort`, 18008) and the east-west gateway
-  (`DefaultEastWestTunnelPort`, 18009) each bind UDP on the same number as TCP,
-  the way the edge's HTTP/3 listener already shares `internalPort` with the TCP
-  HTTPS listener. A second number means a second CNI rule, a second Service
-  port, a second cross-cluster agreement and a second capture path. Pinned for
-  18009 by `TestEastWestPortIsSharedAcrossTransports`; extend to 18008 in Phase 4.
+- **R3 — one port number per role, both transports.** Three roles, three
+  numbers, each serving TCP and UDP on the same value, the way the edge's HTTP/3
+  listener already shares `internalPort` with the TCP HTTPS listener:
+
+  | role | number | TCP today | UDP under this proposal |
+  |---|---|---|---|
+  | L4 mesh spelling | 18082 (`ProxyTCPOutboundPort`) | raw TCP floor (037) | **plaintext UDP services** |
+  | per-pod inbound | 18008 (`defaultInboundPort`) | mTLS H2 | QUIC, mTLS |
+  | east-west gateway | 18009 (`DefaultEastWestTunnelPort`) | mTLS SNI tunnel | QUIC, mTLS |
+
+  A second number for any role means a second CNI rule, a second Service port, a
+  second cross-cluster agreement and a second capture path. Pinned for 18009 by
+  `TestEastWestPortIsSharedAcrossTransports`; Phase 1 extends the gate to 18082
+  and Phase 4 to 18008. `ProxyTCPOutboundPort`'s name and the CNI comment "18082
+  is a TCP spelling" both become stale under this rule; Phase 1 corrects the
+  comment and may rename the constant to `ProxyL4OutboundPort`.
 - **R4 — no resumption, no early data on an mTLS QUIC chain.** QUIC never
   re-verifies the client certificate on a resumed session. #47219 makes the safe
   default automatic but is not in any resolvable snapshot, so every mTLS QUIC
@@ -119,16 +128,23 @@ port is real. That is the discriminator (R5):
 | destination port | class | listener | security |
 |---|---|---|---|
 | 18008 (inbound) or 18009 (east-west gw) | **mesh transport** | QUIC listener with `require_client_certificate`, same `validation_context` as the TCP inbound | mTLS, identity-bearing |
-| a declared UDP service port (`PORT_PROTOCOL_UDP`) | **plaintext service** | `udp_proxy`, `matcher` on `DestinationIPInput` → per-service `udp:` cluster | plaintext, no identity, as today |
+| 18082 (L4 mesh spelling) | **plaintext service** | ONE `udp_proxy` listener, `matcher` on `DestinationIPInput` → per-service `udp:` cluster, which forwards to the backend's application port | plaintext, no identity, as today |
 | anything else | not captured | — | — |
 
 The classes cannot bleed into each other because they are separated at the
 port, before any matcher runs: a datagram for 18008 is never offered to the
-plaintext `udp_proxy`, and a datagram for a service port is never offered to the
-QUIC transport socket. The mesh ports are constants; the service ports come from
-the registry, which since #933/#934 carries a per-port `PORT_PROTOCOL_UDP` and
-the `=udp` suffix on `endpoint.aether.io/ports` — so the CNI's rule set is
-derived from declared facts, not guessed.
+plaintext `udp_proxy`, and a datagram for 18082 is never offered to the QUIC
+transport socket. All three are constants. The CNI needs no knowledge of which
+application ports UDP services bind — that is the `udp:` cluster's business,
+exactly as `tcp:` clusters already reach a raw-TCP backend's application port
+from the shared `:18082` spelling.
+
+This is the same shape as the TCP floor under 037, transport for transport: a
+client dials `<svc>.<ns>.<mesh-domain>:18082`, the CNI captures that one port,
+the capture listener matches the destination IP to a service, and the service's
+cluster carries the application port. The per-port `PORT_PROTOCOL_UDP` the
+registry gained in #933/#934 is what lets `UDPLoadAssignment` know which
+application port to rewrite to; it is not consulted by the CNI.
 
 TPROXY does not rewrite the packet. It steers delivery to a local socket while
 leaving the IP header intact, so `IP_PKTINFO`'s `ipi_addr` — which Linux fills
@@ -148,12 +164,14 @@ drops anything else — so a port-rewriting TPROXY yields *matching that works a
 traffic that silently fails one way*.
 
 So the rule must preserve the original destination port, and the listener must
-bind it. That makes the shape **one transparent listener per distinct UDP service
-port**, with `destination_ip` disambiguating the services that share a port. A
-mesh's distinct UDP port set is small (53, 161, 514, 8125…), so per-service
-fan-out stays in the matcher rather than in listeners — materially cheaper than
-the listener-per-service alternative, which was the obvious fallback and which
-would also have been disqualified by QUIC (below).
+bind it. Under R3 there is exactly one dialed port for plaintext UDP — the L4
+mesh spelling, 18082 — so the shape is **one transparent listener on UDP:18082**,
+with `destination_ip` disambiguating every service behind it. Per-service fan-out
+lives entirely in the matcher; the listener count does not scale with services
+or with ports. (The 2026-09-23 draft said "one listener per distinct UDP service
+port" and reasoned that a mesh's distinct UDP port set is small; folding the
+shared-port rule in makes that set exactly one, which is smaller still, and it
+retires the question of how the CNI would learn the set at all.)
 
 ### What the spike established
 
@@ -252,8 +270,11 @@ tracks the real header. See *Phase 0: settled*.
 
 **Phase 1 — CNI, behind a flag, off by default.** Mark-and-divert rules in the
 pod netns alongside the existing TCP REDIRECT, plus the `ip rule` / `ip route
-local` pair, for exactly two port sets: the mesh UDP ports (18008, 18009) and
-the declared UDP service ports. Two things make this smaller than it first
+local` pair, for exactly three constant UDP destination ports: 18082 (plaintext
+services), 18008 and 18009 (QUIC transport). No declared-port-set plumbing —
+the rule set is three literals. The existing `udp dport 18081 → :18001` REDIRECT
+stays for one release, routed to the plaintext class, so a client still dialling
+the old UDP spelling keeps working until D1's deprecation window closes. Two things make this smaller than it first
 appeared: the rules live in the **pod** netns, created at pod setup and dying
 with it, so Talos machine config never touches them and there is no persistence
 question; and the `tproxy` nftables statement is prerouting-only, so
@@ -275,9 +296,10 @@ via `google/nftables`), so this phase adds one, and a dependency.
 The mixed TCP-REDIRECT + UDP-TPROXY ruleset is the risky part of this phase and
 deserves review on its own terms. It also has an expiry date now — see Phase 5.
 
-**Phase 2 — agent.** One transparent listener per distinct UDP service port;
+**Phase 2 — agent.** One transparent listener on UDP:18082 per pod;
 `matcher` on `DestinationIPInput`, `ip_range_matcher` where a CIDR is cleaner than
-enumerating ClusterIPs. Note `UdpProxyConfig.matcher` is annotated
+enumerating ClusterIPs. Each arm names the service's `udp:` cluster, whose load
+assignment already carries the application port (`UDPLoadAssignment`). Note `UdpProxyConfig.matcher` is annotated
 `work_in_progress`: a warning plus a `server.wip_protos` counter increment, not a
 reject. aether currently uses the deprecated single-`cluster` specifier, so
 adopting `matcher` newly lights that counter.
@@ -378,24 +400,23 @@ over a tested path. The full assessment is on #916.
 
 ## Decisions required before Phase 1
 
-- **D1 — the plaintext UDP dial spelling.** Today a client dials
-  `<svc>.<ns>.<mesh-domain>:18081` and the CNI captures UDP for 18081 only. The
-  per-service-port design implies clients dial the service's **application**
-  port instead, with `:18081` for UDP retired over a deprecation window.
-  *Recommendation:* adopt the application port — it is what the registry now
-  declares, it is what makes "the distinct UDP port set is small" true, and it
-  removes the one-port bottleneck that made the single-service limit look
-  natural. Keep `:18081` captured and routed to the plaintext class for one
-  release so nothing dialling it breaks on the flip.
+- **D1 — the plaintext UDP dial spelling. DECIDED 2026-09-26: `:18082`, the
+  L4 mesh spelling, shared with raw TCP (R3).** A client dials
+  `<svc>.<ns>.<mesh-domain>:18082` for a UDP service exactly as it does for a
+  raw-TCP one; the transport is the only difference. `:18081/udp` — today's
+  spelling — is kept captured and routed to the plaintext class for one release,
+  then retired. The alternative considered was the service's *application* port,
+  which would have made the CNI rule set depend on registry state and the
+  listener count scale with distinct ports; the shared spelling makes both
+  constant. Dialling an application port directly is uncaptured for UDP, which
+  is the same non-goal as for raw TCP without redirect-all.
 - **D2 — the divert mark.** A single well-known mark value, disjoint from
   `0xae7e`, reserved in `common/constants/mesh` beside it.
 
 ## Open questions
 
-- **Q1.** How does the CNI learn the declared UDP service port set at pod ADD?
-  It programs per-pod rules and today knows only the mesh ports. The registry
-  has the facts; the plumbing (agent → CNI, or a node-local snapshot the CNI
-  reads) is Phase 1 design.
+- **Q1.** *Dissolved by D1.* The CNI captures three constant ports and needs no
+  declared-port-set plumbing.
 - **Q2.** Does `transport_socket_matches` select a QUIC upstream transport socket
   the way it selects a TLS one? Determines whether Phase 4's outbound is one
   cluster or one per source.
@@ -413,7 +434,9 @@ over a tested path. The full assessment is on #916.
 - Envoy pin: #45980 and #47076 present; #47219 (safe resumption default) and
   #47341 (optional mTLS) absent and not resolvable as of 2026-09-26.
 - CNI: route/rule capability, new dependency (Phase 1).
-- Registry: `PORT_PROTOCOL_UDP` and the `=udp` suffix (#933, #934) — present.
+- Registry: `PORT_PROTOCOL_UDP` and the `=udp` suffix (#933, #934) — present;
+  consumed by `UDPLoadAssignment` for the application-port rewrite, not by the
+  CNI.
 - UDP delivery working at all (#931 series, #936) — present since 2026-09-25.
 
 ## Alternatives considered
