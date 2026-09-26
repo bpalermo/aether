@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tproxy-phase0b
+  namespace: aether-system
+  labels: {aether.io/spike: "tproxy-phase0b"}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      labels: {aether.io/spike: "tproxy-phase0b"}
+    spec:
+      restartPolicy: Never
+      # No hostNetwork, no hostPID, no privileged: the pod's OWN netns is the
+      # "outer" side and the spike creates `inner` and `peer` itself. Same
+      # shape as udp-tproxy-phase0-job.yaml; NET_ADMIN for nft + ip rule/route
+      # + IP_TRANSPARENT, SYS_ADMIN for netns creation and setns.
+      volumes:
+        - name: script
+          configMap: {name: tproxy-phase0b}
+      containers:
+        - name: spike
+          image: nicolaka/netshoot:latest
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_ADMIN", "SYS_ADMIN"]
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          volumeMounts:
+            - {name: script, mountPath: /spike}
+          command: ["python3", "/spike/tproxy-phase0b.py"]
