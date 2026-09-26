@@ -12,7 +12,6 @@ AETHER_EXTENSIONS = [
 
 envoy_cc_binary(
     name = "envoy",
-    repository = "@envoy",
     # NOTE: deliberately NOT `stamped = True`, and deliberately no `linkopts`
     # here. See the `--build-id=sha1` --linkopt in .bazelrc.
     #

@@ -1309,7 +1309,7 @@ max_over_time(envoy_listener_manager_listener_create_failure[1h])
 **Why the stale entry is no longer dangerous.** It used to be: Envoy 1.38 dereferenced a
 nullptr when a dial (or a cold-start health checker) opened a netns that had vanished, so
 one stale entry could make the node proxy unbootable — the whole reason CNI DEL blocked
-on the agent's ACK. The pinned proxy snapshot (`1.40.0-dev.20260904.13144fb`) carries
+on the agent's ACK. The pinned proxy snapshot (`1.40.0-dev.20260926.726d7ac`, and every pin since `20260904.13144fb`) carries
 envoyproxy/envoy#45975 (the pool dial returns a clean `LocalConnectionFailure`, a `UF` for
 that request) and #46503 (the active TCP/HTTP/gRPC health checkers record a `NETWORK`
 failure instead of crashing). A stale per-pod cluster now costs at most one failed request
