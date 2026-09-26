@@ -6,6 +6,7 @@ go_library(
         "cniconfig.go",
         "config.go",
         "install.go",
+        "otlpendpoint.go",
     ],
     importpath = "aethermesh.dev/cni/internal/install",
     visibility = ["//cni:__subpackages__"],
@@ -22,7 +23,10 @@ go_library(
 
 go_test(
     name = "install_test",
-    srcs = ["cniconfig_test.go"],
+    srcs = [
+        "cniconfig_test.go",
+        "otlpendpoint_test.go",
+    ],
     embed = [":install"],
     deps = [
         "//cni/conflist",

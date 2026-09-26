@@ -368,6 +368,16 @@ non-zero here is a pod that started UNCAPTURED (the table was rejected), and the
 mesh silently does nothing for it. It is a per-pod-ADD counter, so any increase
 during a roll is a real event, not a rate artefact.
 
+Before reading it, prove the CNI exports at all: `aether_cni_operations_total{operation="add"}`
+must have at least one series (every pod ADD increments it). An EMPTY result is a broken
+export, never "zero errors" — that was talos-main until #950, where the plugin (which runs
+under the host's resolver) could not resolve `otel-collector.o11y.svc.cluster.local` and no
+`aether_cni_*` series existed at all. Since #950 cni-install pins the name to the
+Service's ClusterIP; confirm on a node with
+`talosctl -n <node> read /etc/cni/net.d/10-flannel.conflist | grep otlp_endpoint` (an IP, not
+the name). If it still shows the name, the collector Service did not resolve when that
+node's agent started — roll the agent.
+
 ### The QUIC leg (proposal 038 Phase 4)
 
 East-west QUIC is behind a per-destination allow-list (`agent.eastWestQuicServices`)

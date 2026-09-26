@@ -129,6 +129,8 @@ decision every cycle — see `charts/prober/values.yaml`.
 |---|---|---|
 | `cniInstall.image.*` | repo+digest placeholders, `pullPolicy: Always` | Digest-pinned image. |
 | `cniInstall.resources.{requests,limits}` | cpu `100m`, mem `32Mi` | |
+| `cniInstall.otlpEndpoint` | `""` (= `otel.endpoint`) | OTLP gRPC `host:port` the CNI **plugin binary** exports `aether_cni_*` to. Overrides `otel.endpoint` for the CNI alone. |
+| `cniInstall.pinOTLPEndpoint` | `true` | cni-install resolves the endpoint's host through cluster DNS and writes the **address** into the netconf. The plugin runs under the host's resolver, which cannot resolve `*.svc.cluster.local` (#950: on Talos and kind every export failed with `produced zero addresses`). An unresolvable name is written unchanged. A collector Service created/recreated after the agent started is picked up on the next agent roll; use a ClusterIP Service, not a headless one. |
 
 ### `registrar`
 

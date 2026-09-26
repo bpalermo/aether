@@ -42,12 +42,16 @@ spec:
           imagePullPolicy: {{ .Values.cniInstall.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
-            {{- with .Values.otel.endpoint }}
+            {{- with (.Values.cniInstall.otlpEndpoint | default .Values.otel.endpoint) }}
             # Written into the netconf: the CNI plugin binary runs under the
             # container runtime, so the endpoint cannot reach it via pod env.
             # This is the Envoy/CNI plumbing endpoint (template-time), distinct
             # from the agent's runtime OTLP in the MeshConfig CR.
             - "--otlp-endpoint={{ . }}"
+            # The plugin resolves names with the HOST's resolver, which cannot
+            # resolve cluster Service names (#950), so cni-install resolves the
+            # host here (cluster DNS) and writes the address into the netconf.
+            - "--otlp-pin-endpoint={{ $.Values.cniInstall.pinOTLPEndpoint }}"
             {{- end }}
             # Capture is unconditional (proposal 031, netconf gate retired in
             # round 2); redirect-all-default is the remaining node-wide capture
