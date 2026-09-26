@@ -1014,6 +1014,24 @@ func TestQUICUpstreamSNIIsAHostname(t *testing.T) {
 	}
 }
 
+// TestQUICUpstreamsHaveTheirOwnStatsKey: no `quic:` twin may report into another
+// cluster's stats tree (aether#960). Over the generated fixture bytes; the
+// fixture's twins are clones of the h2 cluster, which is exactly the shape
+// that used to share the key.
+func TestQUICUpstreamsHaveTheirOwnStatsKey(t *testing.T) {
+	data, err := QUICOutboundBootstrapJSON()
+	if err != nil {
+		t.Fatalf("QUICOutboundBootstrapJSON: %v", err)
+	}
+	bad, err := QUICUpstreamsSharingStatsKey(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) > 0 {
+		t.Errorf("quic: clusters sharing a stats key with another cluster: %v", bad)
+	}
+}
+
 // TestQUICOutboundFixtureCarriesTheSelection is the anti-vacuity half of the
 // QUIC upstream checks: the fixture must contain both `quic:` twins with a
 // QuicUpstreamTransport, and a route whose matcher arms map each source

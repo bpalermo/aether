@@ -34,11 +34,11 @@
 #
 #   source side      /clusters HOST rows, `<cluster>::<ip:port>::rq_total::N`.
 #                    Host counters live on each cluster's own host objects, so
-#                    they are per-cluster even though the quic: twins share their
-#                    STAT namespace with the h2 cluster: QUICClusterFrom clones
-#                    the h2 cluster including alt_stat_name (= "<ns>/<svc>"), so
-#                    `cluster.<...>.upstream_rq_total` cannot tell twin from h2
-#                    and is deliberately NOT used as evidence here.
+#                    they are per cluster object regardless of stats naming
+#                    (since aether#960 each twin also has its own stats key,
+#                    "<ns>/<svc>@<ns>/<sa>"; the host rows were the evidence
+#                    before that and stay the evidence, so this suite does not
+#                    depend on the stats-key shape).
 #   destination side `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx` —
 #                    the per-listener HCM counter of the pod's QUIC listener
 #                    (proxy.NewInboundQUICListener: stat_prefix inbound_<pod>_h3;

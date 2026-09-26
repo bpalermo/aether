@@ -1414,6 +1414,34 @@ func QUICUpstreamsWithPortSNI(bootstrapJSON []byte) ([]string, error) {
 	return bad, nil
 }
 
+// QUICUpstreamsSharingStatsKey returns the name of every `quic:` cluster whose
+// stats key (alt_stat_name, or the name when unset) equals another cluster's
+// stats key in the same bootstrap (aether#960): a twin that reports into the
+// h2 cluster's tree makes HTTP/3 -- and a wrong-arm selection -- invisible.
+func QUICUpstreamsSharingStatsKey(bootstrapJSON []byte) ([]string, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	statsKey := func(c *clusterv3.Cluster) string {
+		if c.GetAltStatName() != "" {
+			return c.GetAltStatName()
+		}
+		return c.GetName()
+	}
+	owners := map[string][]string{}
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		owners[statsKey(c)] = append(owners[statsKey(c)], c.GetName())
+	}
+	var bad []string
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if strings.HasPrefix(c.GetName(), "quic:") && len(owners[statsKey(c)]) > 1 {
+			bad = append(bad, c.GetName())
+		}
+	}
+	return bad, nil
+}
+
 // marshalBootstrap serialises a Bootstrap proto to protojson, stripping
 // custom extensions that require the proxy-workspace Envoy binary.
 func marshalBootstrap(bs *bootstrapv3.Bootstrap) ([]byte, error) {
