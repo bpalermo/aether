@@ -187,7 +187,8 @@ ambiguous and raw TCP needs a port:
 | `http://<svc>.<ns>.<domain>/` | the primary port, over HTTP |
 | `https://<svc>.<ns>.<domain>/` | the primary port, app-terminated TLS |
 | `<svc>.<ns>.<domain>:18081` | the primary port, over HTTP (the explicit HTTP spelling) |
-| `<svc>.<ns>.<domain>:18082` | the primary port, as raw TCP (the explicit TCP spelling) |
+| `<svc>.<ns>.<domain>:18082` | the primary port, as raw TCP (the explicit L4 spelling) |
+| `<svc>.<ns>.<domain>:18082/udp` | the primary port, as plaintext UDP (the same L4 spelling; needs a `UDPRoute`) |
 | `<svc>.<ns>.<domain>:<p>` | port `p`, in whatever class `p` declares |
 
 HTTP demuxes on the **authority header**, which carries its own port as a
@@ -197,11 +198,12 @@ the protocols, not to this mesh, and it is why TCP gets a well-known port of
 its own (`18082`) rather than the bare name changing meaning depending on
 which protocol a service's primary port happens to be.
 
-**`:18082` does not require redirect-all.** The scoped capture rule redirects
-it alongside `:18081`, and the generated mesh Service exposes it. A dial to a
-service's **own** application port (`<svc>:9000`) is captured only under
-redirect-all, which is the managed-pod default — the same property per-port
-HTTP already has.
+**`:18082` does not require redirect-all.** The scoped capture rule diverts
+it alongside `:18081` — on both transports — and the generated mesh Service
+exposes it. A dial to a service's **own** application port (`<svc>:9000`) is
+captured only under redirect-all, which is the managed-pod default and TCP-only
+— the same property per-port HTTP already has. UDP is captured on `:18082`
+only; there is no any-port UDP capture.
 
 **A port nobody registered** is refused rather than silently forwarded: the
 generated mesh Service exposes only its known ports, and kube-proxy REJECTs the

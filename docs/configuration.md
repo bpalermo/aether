@@ -571,7 +571,7 @@ Defined in [`common/constants/`](../common/constants). Prefixes:
 | Annotation | Meaning |
 |---|---|
 | `capture.aether.io/redirect-all` | `"true"` force redirect-all, `"false"` opt out, else node default. |
-| `capture.aether.io/exclude-outbound-ports` | Comma-separated outbound TCP ports to carve out of capture. |
+| `capture.aether.io/exclude-outbound-ports` | Comma-separated outbound ports to carve out of capture (TCP+UDP). |
 | `capture.aether.io/exclude-outbound-ip-ranges` | Comma-separated IPv4 CIDRs to carve out (TCP+UDP). |
 
 ### Gateway / other
