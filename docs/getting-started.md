@@ -618,7 +618,9 @@ spec:
   `spire-server.controllerManager.identities.clusterSPIFFEIDs.default.dnsNameTemplates`).
   Envoy's QUIC client checks the SNI against the leaf's DNS SANs after the
   SPIFFE pin (aether#957); without them every HTTP/3 handshake to a listed
-  service fails and the h2 path is unaffected. `e2e/l4routes.sh` shows the shape.
+  service fails and the h2 path is unaffected. `e2e/l4routes.sh` shows the shape;
+  `e2e/eastwest-quic.sh` is the end-to-end proof (per-source HTTP/3 with the
+  caller's own identity in XFCC, unlisted and GAMMA-routed services staying h2).
 
 ---
 

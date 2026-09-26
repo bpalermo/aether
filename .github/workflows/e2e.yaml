@@ -1,5 +1,5 @@
 # Nightly e2e — conformance (GATEWAY-HTTP + MESH-HTTP), waypoint, replicator, uds,
-# l4-routes.
+# l4-routes, eastwest-quic.
 #
 # Consolidates the former conformance.yaml, waypoint-e2e.yaml, and
 # replicator-e2e.yaml into ONE workflow: a single bazel `build` job builds the
@@ -30,7 +30,7 @@ on:
         description: "Run a single job (debugging)"
         type: choice
         default: all
-        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, l4-routes]
+        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, l4-routes, eastwest-quic]
   schedule:
     # Nightly at 04:17 UTC (off the hour to avoid contention).
     - cron: "17 4 * * *"
@@ -663,6 +663,79 @@ jobs:
         if: always()
         run: ./e2e/l4routes.sh down || true
 
+  # --- East-west QUIC (proposal 038 Phase 4): the per-pod HTTP/3 inbound on
+  # UDP:18008 and the per-source quic: clusters, allow-listed per destination.
+  #
+  # Two sources with different ServiceAccounts call two allow-listed
+  # destinations: every request must ride the CALLER'S OWN quic: twin (node
+  # proxy admin /clusters host rq_total) and land on the destination's HTTP/3
+  # inbound (listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx), and the
+  # destination must see the caller's own SPIFFE ID in XFCC. An h2-only
+  # destination and a GAMMA weighted-route destination must stay on h2, and a
+  # source pod re-created on a new IP must keep its own identity (Q3).
+  #
+  # SPIRE is on (QUIC mandates TLS), with the aether#957 DNS SANs on the
+  # workloads' ClusterSPIFFEID. The red half of the suite's red-then-green is
+  # `EASTWEST_QUIC=off ./e2e/eastwest-quic.sh up`, which is NOT run here — this
+  # job is the green half; the header of e2e/eastwest-quic.sh has both commands.
+  eastwest-quic:
+    needs: build
+    if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'eastwest-quic'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download images artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: aether-images
+          path: /tmp
+
+      - name: Load images into docker
+        run: docker load -i /tmp/aether-images.tar
+
+      - name: Bring up the east-west QUIC environment
+        env:
+          EWQ_SKIP_BUILD: "1"
+        run: ./e2e/eastwest-quic.sh up
+
+      - name: Verify per-source HTTP/3 + XFCC identity, h2-only and GAMMA stay h2, identity across a client address change
+        id: verify
+        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
+        run: ./e2e/eastwest-quic.sh verify
+
+      - name: Collect diagnostics on failure
+        if: failure() || steps.verify.outcome == 'failure'
+        run: |
+          mkdir -p /tmp/ewq-logs
+          kubectl --context kind-eastwest-quic get pods -A -o wide 2>&1 | tee /tmp/ewq-logs/pods.txt || true
+          kind export logs /tmp/ewq-logs/kind --name eastwest-quic || true
+          kubectl --context kind-eastwest-quic get httproutes -A -o yaml > /tmp/ewq-logs/httproutes.yaml 2>&1 || true
+          kubectl --context kind-eastwest-quic -n aether-test get deploy,pods,svc -o wide > /tmp/ewq-logs/workloads.txt 2>&1 || true
+          kubectl --context kind-eastwest-quic -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=600 > /tmp/ewq-logs/agent.log 2>&1 || true
+          kubectl --context kind-eastwest-quic -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=400 > /tmp/ewq-logs/proxy.log 2>&1 || true
+          kubectl --context kind-eastwest-quic -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/ewq-logs/mesh-dns.log 2>&1 || true
+          kubectl --context kind-eastwest-quic -n spire-mgmt logs -l app.kubernetes.io/name=agent --all-containers --tail=200 > /tmp/ewq-logs/spire-agent.log 2>&1 || true
+          # The node proxy's admin (hostNetwork; see the script header): the
+          # quic: twins with their host counters, and the listeners.
+          docker exec eastwest-quic-control-plane curl -s --max-time 5 http://127.0.0.1:9901/clusters > /tmp/ewq-logs/envoy-clusters.txt 2>&1 || true
+          docker exec eastwest-quic-control-plane curl -s --max-time 5 http://127.0.0.1:9901/listeners > /tmp/ewq-logs/envoy-listeners.txt 2>&1 || true
+          grep -i "east-west QUIC" /tmp/ewq-logs/agent.log > /tmp/ewq-logs/quic-fanout.log 2>&1 || true
+
+      - name: Upload diagnostics
+        if: failure() || steps.verify.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: eastwest-quic-e2e-logs
+          path: /tmp/ewq-logs
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: ./e2e/eastwest-quic.sh down || true
+
   # --- Auto-file when the NIGHTLY run fails.
   #
   # This suite sat red for three consecutive nights (07-23..07-25) before anyone
@@ -675,7 +748,7 @@ jobs:
   # rather than filing per night — three duplicate issues is how people learn to
   # ignore them, which is the very failure mode this exists to prevent.
   report-failure:
-    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, l4-routes]
+    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, l4-routes, eastwest-quic]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -704,6 +777,7 @@ jobs:
             replicator=${{ needs.replicator.result }}
             uds=${{ needs.uds.result }}
             l4-routes=${{ needs.l4-routes.result }}
+            eastwest-quic=${{ needs.eastwest-quic.result }}
         run: |
           set -euo pipefail
           title="Nightly e2e failing"
