@@ -80,6 +80,16 @@
 # //test/envoy_validate, #876). Nothing here expects or asserts mTLS on the UDP
 # leg, and a passing T3 is NOT evidence of an authenticated UDP path.
 #
+# T3 ASSERTS DELIVERY, AND UNTIL #931 THAT DID NOT WORK AT ALL.
+#
+# The leg was red for three runs (two nightlies plus a local kind reproduction)
+# and the cause was not the data path: a --mode=udp workload had to register
+# endpoint.aether.io/protocol: "tcp" because "udp" was not an accepted value, so
+# aether TCP-probed its UDP application port, failed forever, marked the endpoint
+# UNHEALTHY, cloned that verdict into the plaintext "udp:" cluster, and dropped
+# every datagram for want of a healthy host. The workloads below now register
+# "udp"; if that regresses, this leg returns to NOREPLY=10.
+#
 # T3 asserts DELIVERY, not selection — deliberately, per #868's scope note. The
 # per-pod udp_proxy carries a bare single-cluster RouteSpecifier, so backend
 # weights are discarded and a second UDPRoute-backed service on the node is
@@ -230,6 +240,21 @@ dump_state() {
 	printf '\033[1;33m  -- agent log: UDPRoute inputs discarded (#873/#874) --\033[0m\n' >&2
 	kc -n "$NS" logs -l app.kubernetes.io/component=agent --all-containers --tail=400 --prefix 2>&1 |
 		grep -i "UDPRoute input discarded" | sed 's/^/    /' >&2 || true
+	# Did the datagram reach the backend at all? l4echo --mode=udp logs every
+	# receipt, so a line here means the CNI redirect, udp_proxy and the upstream
+	# hop all worked and only the REPLY was lost; silence here means the datagram
+	# never got past the redirect or was dropped for want of a healthy host.
+	# NOREPLY at the client cannot tell those apart -- this can, and it is what
+	# located #931.
+	printf '\033[1;33m  -- udp backends: datagrams received (l4echo rx) --\033[0m\n' >&2
+	kc -n "$TEST_NS" logs -l 'app in (l4udp-front,l4udp-a,l4udp-b)' --tail=40 --prefix 2>&1 |
+		grep -i "udp rx" | sed 's/^/    /' >&2 || true
+	# #931's own signal: a published udp: cluster in which no endpoint is
+	# routable. Silent everywhere else -- valid config, no NACK, and udp_proxy's
+	# rx counter is per-session so it does not move without a host.
+	printf '\033[1;33m  -- agent log: udp: clusters with no routable endpoint (#931) --\033[0m\n' >&2
+	kc -n "$NS" logs -l app.kubernetes.io/component=agent --all-containers --tail=400 --prefix 2>&1 |
+		grep -i "no routable endpoint" | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- agent log (L4 projection + snapshot pushes) --\033[0m\n' >&2
 	kc -n "$NS" logs -l app.kubernetes.io/component=agent --all-containers --tail=120 --prefix 2>&1 |
 		sed 's/^/    /' >&2 || true
@@ -239,14 +264,17 @@ dump_state() {
 	printf '\033[1;33m  -- mesh-dns --\033[0m\n' >&2
 	kc -n "$NS" logs -l app.kubernetes.io/component=mesh-dns --tail=15 --prefix 2>&1 |
 		sed 's/^/    /' >&2 || true
-	# The registry backend is load-bearing here (a service only exists under a
-	# PROTOCOL_TCP key on etcd), so show what the registrar actually holds.
+	# The registry backend is load-bearing here (an L4 service only exists under a
+	# PROTOCOL_TCP or PROTOCOL_UDP key on etcd), so show what the registrar holds.
 	printf '\033[1;33m  -- registrar --\033[0m\n' >&2
 	kc -n "$NS" logs -l app.kubernetes.io/component=registrar --tail=40 --prefix 2>&1 |
 		sed 's/^/    /' >&2 || true
-	printf '\033[1;33m  -- etcd tcp service keys --\033[0m\n' >&2
+	# Both protocols: a UDP workload registered under the TCP key instead of the
+	# UDP one is exactly the #931 misconfiguration, and it is visible here and
+	# almost nowhere else.
+	printf '\033[1;33m  -- etcd L4 service keys (tcp + udp) --\033[0m\n' >&2
 	docker exec "$ETCD_NAME" etcdctl get --prefix / --keys-only 2>/dev/null |
-		grep -i tcp | sed 's/^/    /' >&2 || true
+		grep -iE "PROTOCOL_(TCP|UDP)" | sed 's/^/    /' >&2 || true
 }
 
 raise_inotify() {
@@ -481,22 +509,37 @@ install_aether() {
 # a non-aether Service already owns — hand-writing one here would suppress the
 # VIP and break resolution. The registry service name is the pod's ServiceAccount.
 #
-# endpoint.aether.io/protocol: "tcp" is load-bearing on EVERY workload here, not
-# just the parent. It is what makes the registrar stamp aether.io/app-protocol:
-# tcp on the generated Service, which is what the capture reconciler classifies
-# on. Without it on the PARENT there is no TCP floor chain to replace, so no L4
-# chain exists at all; without it on a BACKEND, captureTCPClusters() never emits
-# that backend's "tcp:" cluster and the weighted set points at a name Envoy does
-# not have.
+# endpoint.aether.io/protocol is load-bearing on EVERY workload here, not just
+# the parent. It is what makes the registrar stamp aether.io/app-protocol on the
+# generated Service, which is what the capture reconciler classifies on. For the
+# TCP legs: without "tcp" on the PARENT there is no TCP floor chain to replace,
+# so no L4 chain exists at all; without it on a BACKEND, captureTCPClusters()
+# never emits that backend's "tcp:" cluster and the weighted set points at a name
+# Envoy does not have.
 #
-# The TLS and UDP workloads register endpoint.aether.io/protocol: "tcp" as well
-# — "http" and "tcp" are the only accepted values (there is no "udp"), and what
-# the UDP path actually needs from the registry is the service's EDS plus its
-# application port, which the TCP classification supplies. captureUDPClusters
-# reads that port off the service entry and builds an app-port load assignment
-# for the plaintext "udp:" cluster.
+# The TLS workloads register endpoint.aether.io/protocol: "tcp" -- TLS rides TCP,
+# and the SNI routing happens in the capture listener's filter chains, not in the
+# registry.
+#
+# The UDP workloads register "udp", and that is load-bearing rather than
+# cosmetic. They used to register "tcp" because "udp" was not an accepted value,
+# and that lie is what #931 turned out to be: registering as TCP made aether
+# build the pod's liveness probe as a bare TCP connect to its APPLICATION port,
+# which for a --mode=udp workload nothing is listening on. The probe failed
+# forever, the endpoint went UNHEALTHY, that verdict was cloned into the
+# plaintext "udp:" cluster (whose HealthyPanicThreshold is 0), and udp_proxy
+# dropped every datagram with no log, no NACK and no stat. A UDP pod is now
+# probed at the mesh inbound port instead.
+#
+# So this annotation is what T3 actually exercises end to end: get it wrong and
+# the leg goes back to NOREPLY=10.
 deploy_l4echo_workload() {
 	local name="$1" text="$2" mode="$3" port="$4" extra="$5"
+	# The registry protocol follows the listener mode rather than being a sixth
+	# parameter: every --mode=udp workload must register "udp" and every other
+	# mode must not, so deriving it makes the two impossible to get out of step.
+	local protocol="tcp"
+	[ "$mode" = "udp" ] && protocol="udp"
 	kc apply -f - >/dev/null <<YAML || die "workload $name apply failed"
 apiVersion: v1
 kind: ServiceAccount
@@ -513,7 +556,7 @@ spec:
       labels: {app: $name, aether.io/managed: "true"}
       annotations:
         endpoint.aether.io/port: "$port"
-        endpoint.aether.io/protocol: "tcp"
+        endpoint.aether.io/protocol: "$protocol"
     spec:
       serviceAccountName: $name
       # l4echo is distroless/static and runs as uid 65532 already (asserted by

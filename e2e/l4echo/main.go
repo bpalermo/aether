@@ -253,6 +253,13 @@ func serveUDP(addr, text string, stop <-chan os.Signal) error {
 			}
 			return fmt.Errorf("read: %w", err)
 		}
+		// Log every receipt. Without this the UDP leg cannot tell "the datagram
+		// never arrived" from "it arrived and the reply was lost coming back" --
+		// both read as NOREPLY at the client, and they are different bugs in
+		// different layers. This is the line that located #931: it stayed silent
+		// while the CNI redirect and Envoy's socket were both demonstrably fine,
+		// which is what pointed at the upstream hop.
+		log.Printf("l4echo: udp rx %d bytes from %s", n, from)
 		reply := fmt.Sprintf("%s %s\n", text, strings.TrimRight(string(buf[:n]), "\r\n"))
 		if _, err := conn.WriteToUDP([]byte(reply), from); err != nil {
 			log.Printf("l4echo: reply to %s failed: %v", from, err)
