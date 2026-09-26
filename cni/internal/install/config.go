@@ -26,6 +26,17 @@ type InstallerConfig struct {
 	// plugin binary pushes traces and metrics to this OTLP gRPC collector.
 	// Empty leaves plugin telemetry disabled.
 	OTLPEndpoint string
+	// PinOTLPEndpoint resolves OTLPEndpoint's host HERE, in the init container
+	// (which resolves cluster Service names through the pod's DNS), and writes
+	// the resulting address into the netconf instead of the name. The plugin
+	// binary runs under the container runtime with the HOST's resolver, which
+	// cannot resolve cluster.local names on Talos or kind, so an unpinned
+	// Service name exports nothing (issue #950). A name that does not resolve
+	// is written unchanged, which is exactly the pre-#950 behaviour.
+	PinOTLPEndpoint bool
+	// lookupHost overrides the resolver PinOTLPEndpoint uses (tests); nil is
+	// net.DefaultResolver.LookupHost.
+	lookupHost hostLookup
 	// CaptureRedirectAllDefault writes capture_redirect_all_default into the netconf
 	// so the CNI plugin makes redirect-all the default for managed pods (proposal
 	// 022, M2-default Step 4), opt-out via the capture.aether.io/redirect-all="false"
