@@ -356,6 +356,12 @@ envoy_udp_capture_udp_.*_downstream_sess_tx_datagrams
 aether_agent_l4route_udp_no_healthy_backend_total
 ```
 
+Both agent counters (`udp_no_healthy_backend_total`, `udp_unsupported_total`) are
+**per process**: every agent roll resets them and the new process re-seeds them while it
+regenerates each pod's listener (the 09-26 run: 110 → 164 → 108 across three agent
+generations). "Must stay flat" means flat *within one agent generation*; the raw sum
+across the run is not flat and that is only the reset, not a finding.
+
 And one CNI-side counter that must stay at zero for the whole run:
 `aether_cni_operations_total{operation="capture_divert",result="error"}` — a
 non-zero here is a pod that started UNCAPTURED (the table was rejected), and the
