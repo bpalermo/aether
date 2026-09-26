@@ -32,6 +32,15 @@ if [ -z "${BUILD_SCM_STATUS}" ]; then
   fi
 fi
 
+# The year @envoy_toolshed//certs stamps Envoy's generated TEST certificates
+# with (envoyproxy/envoy#47255, in the 20260926.726d7ac snapshot): they are
+# valid from Jan 1 of this year, so they never age out. Upstream's own
+# bazel/get_workspace_status emits the same key; without it every target that
+# links Envoy's test utilities (//source/extensions/filters/http/aether_stats:
+# aether_stats_integration_test) fails in the certs genrule with
+# "missing 'STABLE_CERT_EPOCH_YEAR' in bazel-out/stable-status.txt".
+echo "STABLE_CERT_EPOCH_YEAR $(date -u +%Y)"
+
 echo "BUILD_SCM_REVISION ${BUILD_SCM_REVISION}"
 echo "BUILD_SCM_STATUS ${BUILD_SCM_STATUS}"
 echo "BUILD_CONFIG ${BUILD_CONFIG:-default}"
