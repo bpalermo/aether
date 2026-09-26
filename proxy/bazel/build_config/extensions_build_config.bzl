@@ -28,9 +28,9 @@ load(
 )
 
 # Substrings matched against the extension NAME (not the target label). At the
-# pinned 1.40.0-dev.20260904.13144fb snapshot: 338 upstream extensions
-# - 29 dropped = 309 compiled in. (At v1.39.0 it was 330 - 27 = 303, against the
-# 317 the stale verbatim copy carried.)
+# pinned 1.40.0-dev.20260926.726d7ac snapshot: 345 upstream extensions
+# - 32 dropped = 313 compiled in. (At 20260904.13144fb it was 338 - 29 = 309; at
+# v1.39.0, 330 - 27 = 303, against the 317 the stale verbatim copy carried.)
 _DROPPED = [
     # wasm: aether emits no wasm filter/runtime/access-logger/stat-sink anywhere
     # (no `wasm` in charts/, agent/, common/ or api/). .bazelrc also sets

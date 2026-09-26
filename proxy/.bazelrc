@@ -17,28 +17,23 @@
 
 common --enable_bzlmod
 common --noenable_workspace
-common --@envoy//bazel:enable_bzlmod=True
 
 # The registry commit and the envoy/envoy_api versions in MODULE.bazel are ONE
 # pin. The envoy bazel-registry keeps a single rolling dev snapshot per module and
 # DELETES the previous version directory on every bump, so an unpinned registry
-# breaks the build the next time upstream publishes. bed06c78 is the newest commit
-# at which envoy@1.40.0-dev.20260904.13144fb.envoy and its full transitive
-# .envoy-suffixed closure all resolve. See README.md "Envoy version bumps" for the
-# recipe that finds the next such commit.
+# breaks the build the next time upstream publishes. 263a259e is the commit at
+# which envoy@1.40.0-dev.20260926.726d7ac.envoy, envoy_api at the same snapshot,
+# and the full transitive .envoy-suffixed closure all resolve (registry #197/#198,
+# 2026-09-26). See README.md "Envoy version bumps" for the recipe.
 #
-# Re-verified 2026-09-19 against registry main @8818c934: still the newest
-# resolvable commit, and STILL THE ONLY one. The registry has published no new
-# `envoy` module version since 2026-09-04 (modules/envoy/metadata.json lists
-# exactly 1.40.0-dev.20260904.13144fb.envoy), while five modules the closure still
-# requests have been bumped out from under it and their old directories deleted:
-# quiche 260824→260831 (d558744), protoc-gen-validate 1.3.0→1.3.3
-# (a0c0ce7), thrift 0.22.0→0.24.0 (72b6bb0), envoy_toolshed 0.4.13→0.4.14→0.4.15
-# (dd48349/c806347) and proto-converter (8818c93). Every commit after bed06c78 is
-# therefore unresolvable until upstream publishes a matching envoy snapshot — the
-# next bump is gated on THAT, not on picking a newer commit here.
+# Why this bump (2026-09-26): envoyproxy/envoy#47623 "quic: make it support SDS
+# for mTLS" (77d1a4a48e, 2026-09-25) is in 726d7ac and NOT in 13144fb. Without
+# it a QUIC downstream that requires a client certificate is rejected at load
+# unless the trust anchor is a static trusted_ca -- and the mesh's inbound
+# validates callers against the SDS-served trust bundle, so the per-pod HTTP/3
+# inbound (proposal 038 Phase 4) could not exist on the old pin.
 common --registry=https://bcr.bazel.build/
-common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/bed06c78cb1ea901164f4d248c3e5167f720e068
+common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/263a259ec7498fe90ad0308edd3592992243560e
 
 #############################################################################
 # UPSTREAM: global
@@ -83,33 +78,33 @@ test --test_verbose_timeout_warnings
 test --experimental_ui_max_stdouterr_bytes=11712829 #default 1048576
 
 #############################################################################
-# UPSTREAM: module wiring that WORKSPACE macros used to do
+# UPSTREAM: module wiring (Envoy's own .bazelrc at the pinned snapshot)
+#
+# Envoy removed WORKSPACE at 726d7ac (envoyproxy/envoy#47217) and with it the
+# `--@quiche//:*_impl_lib`, `--@grpc//third_party:*`, `--@googleurl//...` and
+# `--@protobuf//:zlib` flag lines that WORKSPACE macros used to need: the
+# registry modules now carry those wirings themselves. What is left below is
+# exactly the set upstream's root .bazelrc still sets at 726d7ac, plus the one
+# aether-specific line (the wasm engine).
 #############################################################################
 
-build --@googleurl//build_config:system_icu=0
+# Refuse deprecated `repo = ...` args in Envoy's own macros (upstream default).
+common --@envoy//bazel:deprecated_repo_arg_allowed=false
 
-# Protobuf
-common --@protobuf//bazel/flags:prefer_prebuilt_protoc=true
-common --incompatible_enable_proto_toolchain_resolution
+# Protobuf: use the prebuilt protoc, and make compiling one a LOUD failure --
+# upstream's guard against a toolchain that silently falls back to a
+# from-source protoc build.
+common --@protobuf//bazel/toolchains:prefer_prebuilt_protoc
+common --per_file_copt=bazel-out/.*/bin/external/protobuf.*/protoc@--THIS_CC_TOOLCHAIN_IS_BROKEN
 
 # No wasm engine — see bazel/build_config/extensions_build_config.bzl, which drops
 # every wasm extension. The two MUST agree.
 common --@proxy-wasm-cpp-host//bazel:engine=disabled
 
-build --@quiche//:quic_base_impl_lib=@envoy//source/common/quic/platform:quic_base_impl_lib
-build --@quiche//:quiche_export_impl_lib=@envoy//source/common/quic/platform:quiche_export_impl_lib
-build --@quiche//:quiche_flags_impl_lib=@envoy//source/common/quic/platform:quiche_flags_impl_lib
-build --@quiche//:quiche_logging_impl_lib=@envoy//source/common/quic/platform:quiche_logging_impl_lib
-build --@quiche//:quiche_lower_case_string_impl_lib=@envoy//source/common/quic/platform:quiche_lower_case_string_impl_lib
-build --@quiche//:quiche_mem_slice_impl_lib=@envoy//source/common/quic/platform:quiche_mem_slice_impl_lib
-build --@quiche//:quiche_platform_iovec_impl_lib=@envoy//source/common/quic/platform:quiche_platform_iovec_impl_lib
-build --@quiche//:quiche_stack_trace_impl_lib=@envoy//source/common/quic/platform:quiche_stack_trace_impl_lib
-build --@quiche//:quiche_time_utils_impl_lib=@envoy//source/common/quic/platform:quiche_time_utils_impl_lib
-
 common --@rules_python//python/config_settings:bootstrap_impl=script
-build --incompatible_default_to_explicit_init_py
 
-build --@rules_rust//rust/settings:extra_exec_rustc_flags=-Clink-self-contained=no
+common --@rules_rust//rust/settings:skip_fission_for_rust=true
+build --@rules_rust//rust/settings:rustfmt.toml=@envoy//:rustfmt.toml
 
 #############################################################################
 # UPSTREAM: linux codegen (from Envoy's own .bazelrc `build:linux` block — NOT in

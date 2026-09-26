@@ -20,7 +20,6 @@ envoy_cc_library(
     name = "aether_stats_lib",
     srcs = ["aether_stats.cc"],
     hdrs = ["aether_stats.h"],
-    repository = "@envoy",
     deps = [
         ":pkg_cc_proto",
         "@abseil-cpp//absl/strings",
@@ -38,7 +37,6 @@ envoy_cc_library(
     name = "config",
     srcs = ["config.cc"],
     hdrs = ["config.h"],
-    repository = "@envoy",
     deps = [
         ":aether_stats_lib",
         ":pkg_cc_proto",
@@ -50,7 +48,6 @@ envoy_cc_library(
 envoy_cc_test(
     name = "aether_stats_test",
     srcs = ["aether_stats_test.cc"],
-    repository = "@envoy",
     deps = [
         ":aether_stats_lib",
         ":pkg_cc_proto",
@@ -70,7 +67,6 @@ envoy_cc_test(
 envoy_cc_test(
     name = "tag_extraction_test",
     srcs = ["tag_extraction_test.cc"],
-    repository = "@envoy",
     deps = [
         ":aether_stats_lib",
         ":pkg_cc_proto",
@@ -97,7 +93,6 @@ envoy_cc_test(
 envoy_cc_test(
     name = "aether_stats_integration_test",
     srcs = ["aether_stats_integration_test.cc"],
-    repository = "@envoy",
     deps = [
         ":config",
         "@abseil-cpp//absl/strings",

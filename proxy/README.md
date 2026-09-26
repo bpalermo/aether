@@ -165,7 +165,7 @@ envoy_server_version = 3121738 = 0x2FA24A -> aether commit 2fa24a8
 
 That is a genuinely useful fact — it tells you which aether tree cut the proxy —
 but it is only 24 bits of it, and it is *not* the Envoy revision. `13144f`, the
-first six digits of the pinned `1.40.0-dev.20260904.13144fb.envoy`, is what you
+first six digits of the pinned `1.40.0-dev.20260926.726d7ac.envoy`, is what you
 would be looking for and it is nowhere in the process.
 
 ### Where the Envoy revision actually is: the image labels
@@ -178,8 +178,8 @@ config) and **annotations** (manifest):
 |---|---|
 | `org.opencontainers.image.source` | `https://github.com/bpalermo/aether` — **overrides** the `GoogleContainerTools/distroless` value inherited from the base, which used to be the image's only annotation |
 | `org.opencontainers.image.revision` | the aether commit; the same sha the gauge reports the first six digits of |
-| `dev.aethermesh.envoy.module-version` | e.g. `1.40.0-dev.20260904.13144fb.envoy` |
-| `dev.aethermesh.envoy.revision` | e.g. `13144fb` — the upstream Envoy commit |
+| `dev.aethermesh.envoy.module-version` | e.g. `1.40.0-dev.20260926.726d7ac.envoy` |
+| `dev.aethermesh.envoy.revision` | e.g. `726d7ac` — the upstream Envoy commit |
 | `dev.aethermesh.envoy.bazel-registry` | the `envoyproxy/bazel-registry` commit; the other half of the pin (see "Envoy version bumps") |
 
 To read them off a published image, without pulling it:
@@ -277,7 +277,7 @@ Then, in one commit:
 
 When a stable release publishes a `1.40.0.envoy` (etc.) module, move to it. As of
 2026-09-19 no such module exists — `modules/envoy/metadata.json` still lists only
-the `1.40.0-dev.20260904.13144fb.envoy` snapshot.
+the `1.40.0-dev.20260926.726d7ac.envoy` snapshot.
 
 Nothing in the root workspace needs re-pinning alongside it any more. The root
 `MODULE.bazel` used to carry `@envoy_binary_linux_*`, a stock Envoy release asset

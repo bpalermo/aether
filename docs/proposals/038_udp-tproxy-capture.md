@@ -492,9 +492,16 @@ over a tested path. The full assessment is on #916.
   per-source binding — keyed by source SPIFFE ID since #822 — survive a path
   change that alters the 5-tuple? Expected yes, since the key is the identity,
   not the tuple; verify in Phase 4's e2e.
-- **Q4.** When the Envoy pin can move. The registry publishes exactly one
-  snapshot (`1.40.0-dev.20260904.13144fb`) and #47219/#47341 postdate it. R4's
-  explicit gate carries the security model until then.
+- **Q4.** When the Envoy pin can move. **Answered 2026-09-26:** the registry
+  published `1.40.0-dev.20260926.726d7ac.envoy` that morning and the proxy pin
+  moved to it the same day. It carries #47219 (resumption default off) and
+  #47341 (optional client certificates), and — the one that mattered —
+  envoyproxy/envoy#47623 "quic: make it support SDS for mTLS": at `13144fb` a
+  QUIC downstream requiring a client certificate was rejected at load unless
+  its trust anchor was a static `trusted_ca`, which the mesh's SDS-served
+  bundle is not, so Phase 4a was impossible on the old pin. R4's explicit gate
+  stays regardless of #47219's default: an absent field is a default, and
+  defaults move.
 
 ## Plan
 

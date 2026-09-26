@@ -28,7 +28,7 @@ die() {
 	exit 1
 }
 
-# The Envoy bazel module version, e.g. 1.40.0-dev.20260904.13144fb.envoy.
+# The Envoy bazel module version, e.g. 1.40.0-dev.20260926.726d7ac.envoy.
 envoy_version="$(sed -n -E 's/^bazel_dep\(name = "envoy", version = "([^"]+)"\).*$/\1/p' <"$module_bazel" | head -1)"
 [ -n "$envoy_version" ] || die "no \`bazel_dep(name = \"envoy\", version = ...)\` in $module_bazel"
 
