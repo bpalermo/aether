@@ -20,6 +20,7 @@
 #
 #   T3.0  control      no UDPRoute             -> no datagram is answered at all
 #   T3.1  delivery     UDPRoute 100 / 0        -> every datagram answered by A
+#   T3.3  selection    a 2nd parent + UDPRoute -> each VIP answered by ITS backend
 #   T3.2  delete       no UDPRoute again       -> no datagram is answered again
 #
 # The `floor` / `no answer` states are assertions, not setup. A suite that only
@@ -68,12 +69,16 @@
 # One consequence worth stating rather than discovering later: if the SNI chains
 # has to move with it. Filed as #911 rather than worked around here.
 #
-# THE UDP LEG DIALS :18081, AND ONLY :18081.
+# THE UDP LEG DIALS :18082, AND ONLY :18082.
 #
-# The CNI's UDP redirect (programCaptureRedirect, cni/internal/plugin/capture.go)
-# matches ClusterIP + dport == ProxyOutboundPort. redirect-all is TCP-ONLY, so
-# unlike the TCP leg there is no any-port UDP capture: a datagram to any other
-# port leaves the pod unredirected and is never seen by the mesh.
+# Plaintext UDP dials the L4 mesh spelling, the SAME number as raw TCP
+# (meshconst.ProxyL4OutboundPort; proposal 038 D1). The CNI's transparent
+# capture (programCaptureDivert, cni/internal/plugin/capture.go) marks
+# `udp dport 18082` and diverts it, header intact, to the pod's own transparent
+# UDP listener bound on 18082 -- no port rewrite, because Envoy replies from the
+# socket's bound port and a connected client drops a reply from any other.
+# There is no any-port UDP capture: a datagram to any other port leaves the pod
+# undiverted and is never seen by the mesh.
 #
 # UDP RIDES THE MESH IN PLAINTEXT. mTLS is a TCP/TLS construct and there is no
 # DTLS; the "udp:" clusters carry no transport socket at all (asserted in
@@ -90,19 +95,24 @@
 # every datagram for want of a healthy host. The workloads below now register
 # "udp"; if that regresses, this leg returns to NOREPLY=10.
 #
-# T3 asserts DELIVERY, not selection — deliberately, per #868's scope note. The
-# per-pod udp_proxy carries a bare single-cluster RouteSpecifier, so backend
-# weights are discarded and a second UDPRoute-backed service on the node is
-# dropped entirely (#873, surfaced as a log line and the udp_route_unsupported
-# counter by #874/#882). A "UDPRoute picks the right backend" assertion would
-# therefore fail by DESIGN rather than find a bug, and belongs to #873's fix.
+# T3 ALSO ASSERTS SELECTION BETWEEN SERVICES (T3.3), SINCE PROPOSAL 038.
 #
-# The 100 / 0 shape T3.1 uses is the one shape both implementations must agree
-# on: today's path takes backends[0] (backendRef order is preserved by
-# common/l4project, which keeps weight-0 entries), and a weighted path must
-# DRAIN the weight-0 backend (#492). So `bravo` appearing is a failure under
-# either, and T3.1 does not have to be rewritten when #873 lands. The MIRROR
-# (0 / 100) is deliberately absent: it is the #873 case itself.
+# Under the nat REDIRECT this leg used to ride, the destination ClusterIP was
+# rewritten before Envoy saw the datagram, so the per-pod udp_proxy could carry
+# ONE cluster for the whole node and a second UDPRoute-backed service was
+# dropped entirely (#873). Transparent capture leaves the header intact, and
+# the listener now carries a matcher keyed on the dialled VIP, one arm per
+# UDPRoute parent. T3.3 deploys a SECOND parent (l4udp-front2 -> l4udp-c) next
+# to the first and requires each VIP to be answered by its own backend: front2
+# going unanswered is the pre-038 "dropped entirely" shape, and front2 answered
+# by alpha is a matcher keyed on the wrong thing. Both are failures.
+#
+# What T3 still does NOT assert: a split BETWEEN backends of one service. That
+# is the half of #873 Envoy cannot express -- udp_proxy's only route action
+# carries one cluster -- and is unchanged by 038. The 100 / 0 shape T3.1 uses
+# is the one both the heaviest-wins path and a weight-honouring path must agree
+# on (weight 0 is DRAIN, #492), so `bravo` appearing is a failure under either.
+# The MIRROR (0 / 100) is deliberately absent: it is the #873 case itself.
 #
 # -----------------------------------------------------------------------------
 # SPIRE IS **ON** IN THIS HARNESS, AND THAT IS NOT OPTIONAL.
@@ -183,10 +193,11 @@ SNI_NOMATCH="nomatch.l4tls.test"
 # tls_probe_batch. Declared here so `set -u` cannot trip over it.
 TLS_VIP=""
 # The UDP leg. UDP_PORT is what the l4echo --mode=udp workloads bind and
-# register; MESH_UDP_PORT is meshconst.ProxyOutboundPort, the ONLY UDP
-# destination port the CNI redirects into the capture listener.
+# register; MESH_UDP_PORT is meshconst.ProxyL4OutboundPort -- the L4 mesh
+# spelling plaintext UDP shares with raw TCP (038 D1) and the ONLY UDP
+# destination port the CNI diverts into the pod's transparent capture listener.
 UDP_PORT="9001"
-MESH_UDP_PORT="18081"
+MESH_UDP_PORT="18082"
 GWAPI_VERSION="v1.6.2"
 # TCPRoute/TLSRoute/UDPRoute are EXPERIMENTAL-channel in gateway-api v1.6.2 (the
 # standard channel stops at GRPCRoute), so the standard bundle uds.sh installs is
@@ -247,7 +258,7 @@ dump_state() {
 	# NOREPLY at the client cannot tell those apart -- this can, and it is what
 	# located #931.
 	printf '\033[1;33m  -- udp backends: datagrams received (l4echo rx) --\033[0m\n' >&2
-	kc -n "$TEST_NS" logs -l 'app in (l4udp-front,l4udp-a,l4udp-b)' --tail=40 --prefix 2>&1 |
+	kc -n "$TEST_NS" logs -l 'app in (l4udp-front,l4udp-front2,l4udp-a,l4udp-b,l4udp-c)' --tail=40 --prefix 2>&1 |
 		grep -i "udp rx" | sed 's/^/    /' >&2 || true
 	# #931's own signal: a published udp: cluster in which no endpoint is
 	# routable. Silent everywhere else -- valid config, no NACK, and udp_proxy's
@@ -607,13 +618,15 @@ deploy_workloads() {
 			", \"--tls-sans=$SNI_ALPHA,$SNI_BRAVO,$SNI_NOMATCH\""
 	done
 
-	# UDPRoute leg. l4udp-front is the parentRef — the VIP whose :18081 the CNI
-	# redirects — and l4udp-a / l4udp-b are its backends. Its own "udpfloor"
-	# marker is unreachable by construction today: there is no UDP floor, so with
-	# no UDPRoute there is no listener at all. Seeing it would itself be a
-	# finding, which is why the counts below are exhaustive rather than
-	# "at least N".
-	for entry in "l4udp-front:udpfloor" "l4udp-a:udpalpha" "l4udp-b:udpbravo"; do
+	# UDPRoute leg. l4udp-front is the parentRef — the VIP whose :18082 the CNI
+	# diverts — and l4udp-a / l4udp-b are its backends. l4udp-front2 is a SECOND
+	# parent with its own backend l4udp-c: T3.3's selection assertion (038),
+	# and the shape #873 used to drop. The parents' own "udpfloor*" markers are
+	# unreachable by construction: there is no UDP floor, so with no UDPRoute
+	# there is no listener arm at all. Seeing one would itself be a finding,
+	# which is why the counts below are exhaustive rather than "at least N".
+	for entry in "l4udp-front:udpfloor" "l4udp-a:udpalpha" "l4udp-b:udpbravo" \
+		"l4udp-front2:udpfloor2" "l4udp-c:udpcharlie"; do
 		name="${entry%%:*}"
 		text="${entry##*:}"
 		deploy_l4echo_workload "$name" "$text" udp "$UDP_PORT" ""
@@ -637,7 +650,7 @@ spec:
     metadata:
       labels: {app: client, aether.io/managed: "true"}
       annotations:
-        config.aether.io/upstreams: "l4-front.$TEST_NS,l4-a.$TEST_NS,l4-b.$TEST_NS,l4tls-front.$TEST_NS,l4tls-a.$TEST_NS,l4tls-b.$TEST_NS,l4udp-front.$TEST_NS,l4udp-a.$TEST_NS,l4udp-b.$TEST_NS"
+        config.aether.io/upstreams: "l4-front.$TEST_NS,l4-a.$TEST_NS,l4-b.$TEST_NS,l4tls-front.$TEST_NS,l4tls-a.$TEST_NS,l4tls-b.$TEST_NS,l4udp-front.$TEST_NS,l4udp-a.$TEST_NS,l4udp-b.$TEST_NS,l4udp-front2.$TEST_NS,l4udp-c.$TEST_NS"
     spec:
       serviceAccountName: client
       containers:
@@ -650,11 +663,11 @@ spec:
 YAML
 
 	local d
-	for d in l4-front l4-a l4-b l4tls-front l4tls-a l4tls-b l4udp-front l4udp-a l4udp-b client; do
+	for d in l4-front l4-a l4-b l4tls-front l4tls-a l4tls-b l4udp-front l4udp-a l4udp-b l4udp-front2 l4udp-c client; do
 		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null ||
 			die "workload '$d' never became Ready"
 	done
-	ok "workloads deployed (tcp: floor/alpha/bravo, tls: tlsfloor/tlsalpha/tlsbravo, udp: udpfloor/udpalpha/udpbravo, client)"
+	ok "workloads deployed (tcp: floor/alpha/bravo, tls: tlsfloor/tlsalpha/tlsbravo, udp: udpfloor/udpalpha/udpbravo + udpfloor2/udpcharlie, client)"
 }
 
 # --- data-path probes -------------------------------------------------------
@@ -929,6 +942,26 @@ YAML
 		die "the agent never published Accepted=True for this generation of UDPRoute l4udp-split (weights $wa/$wb): $(await_route_observed udproute l4udp-split 1)"
 }
 
+# apply_udp_route_charlie — the SECOND parent's route: l4udp-front2 -> l4udp-c,
+# one backend, weight 1. Exists only for T3.3.
+apply_udp_route_charlie() {
+	kc apply -f - >/dev/null <<YAML || die "UDPRoute l4udp-charlie apply failed"
+apiVersion: gateway.networking.k8s.io/v1
+kind: UDPRoute
+metadata: {name: l4udp-charlie, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - group: ""
+      kind: Service
+      name: l4udp-front2
+  rules:
+    - backendRefs:
+        - {group: "", kind: Service, name: l4udp-c, port: $UDP_PORT, weight: 1}
+YAML
+	await_route_observed udproute l4udp-charlie 90 ||
+		die "the agent never published Accepted=True for UDPRoute l4udp-charlie: $(await_route_observed udproute l4udp-charlie 1)"
+}
+
 # --- assertions -------------------------------------------------------------
 
 # T1.0 — the permanent built-in negative control, and it runs FIRST.
@@ -1201,14 +1234,16 @@ verify_tls_delete() {
 # listener outlived its routes or something outside the mesh is serving the VIP,
 # and both are findings.
 verify_udp_control() {
-	log "T3.0 control: no UDPRoute — no datagram to l4udp-front:$MESH_UDP_PORT may be answered"
+	log "T3.0 control: no UDPRoute — no datagram to l4udp-front:$MESH_UDP_PORT or l4udp-front2:$MESH_UDP_PORT may be answered"
 	require_crd UDPRoute udproutes
-	local replies none
-	replies="$(udp_probe_batch l4udp-front 10)"
-	none="$(count_token "$replies" NOREPLY)"
-	[ "$none" -eq 10 ] ||
-		die "T3.0: expected 10/10 'NOREPLY' before any UDPRoute exists, got $(histogram "$replies") — something is answering UDP on the mesh VIP with no route to justify a listener"
-	ok "10/10 datagrams unanswered: the UDP listener does not exist until a UDPRoute does"
+	local svc replies none
+	for svc in l4udp-front l4udp-front2; do
+		replies="$(udp_probe_batch "$svc" 10)"
+		none="$(count_token "$replies" NOREPLY)"
+		[ "$none" -eq 10 ] ||
+			die "T3.0: expected 10/10 'NOREPLY' to $svc before any UDPRoute exists, got $(histogram "$replies") — something is answering UDP on the mesh VIP with no route to justify a listener arm"
+	done
+	ok "20/20 datagrams unanswered: the UDP listener does not exist until a UDPRoute does"
 }
 
 # T3.1 — delivery over the plaintext UDP path, with the one weight shape both
@@ -1227,7 +1262,7 @@ verify_udp_delivery() {
 	log "T3.1 delivery: UDPRoute l4udp-a weight 100 / l4udp-b weight 0 — 40 datagrams, all to l4udp-a"
 	apply_udp_route 100 0
 	await_probe udp_probe_batch l4udp-front udpalpha 180 ||
-		die "the UDPRoute never carried a datagram: $(await_probe udp_probe_batch l4udp-front udpalpha 1) — 'NOREPLY' is the UDP path failing at one of three places that nothing else here distinguishes: the CNI's nftables UDP REDIRECT inside the pod netns, udp_proxy receiving on the redirected socket, or conntrack un-DNATing the reply back to VIP:$MESH_UDP_PORT so the client's connected socket accepts it. Check the agent log for 'UDPRoute input discarded' first — a discarded backend is a different failure from a broken data path"
+		die "the UDPRoute never carried a datagram: $(await_probe udp_probe_batch l4udp-front udpalpha 1) — 'NOREPLY' is the UDP path failing at one of three places that nothing else here distinguishes: the CNI's mark-and-divert inside the pod netns (udp dport $MESH_UDP_PORT -> lo), udp_proxy's transparent socket on :$MESH_UDP_PORT receiving it with the VIP intact, or the reply leaving FROM VIP:$MESH_UDP_PORT so the client's connected socket accepts it. Check the agent log for 'UDPRoute input discarded' first — a discarded backend (or a parent whose ClusterIP the agent has not seen) is a different failure from a broken data path"
 
 	local replies alpha bravo none other
 	replies="$(udp_probe_batch l4udp-front 40)"
@@ -1247,26 +1282,61 @@ verify_udp_delivery() {
 	ok "40/40 datagrams answered by l4udp-a, 0 by the weight-0 backend (plaintext — no mTLS on this leg, by design)"
 }
 
-# T3.2 — delete the UDPRoute: the listener goes away and nothing answers again.
+# T3.3 — selection between services (proposal 038): with a SECOND parent and
+# its own UDPRoute on the same client pod, each VIP is answered by its own
+# backend. 20 datagrams per VIP, exhaustive.
+#
+# Two failure shapes, both named so the die line says which:
+#   - front2 unanswered while front is: the pre-038 shape -- one cluster per
+#     node, second service dropped (#873's "dropped entirely");
+#   - front2 answered by alpha (or front by charlie): the matcher exists but is
+#     keyed on the wrong thing, and datagrams cross services.
+verify_udp_selection() {
+	log "T3.3 selection: add UDPRoute l4udp-front2 -> l4udp-c beside l4udp-front -> l4udp-a; each VIP answered by ITS backend"
+	apply_udp_route_charlie
+	await_probe udp_probe_batch l4udp-front2 udpcharlie 180 ||
+		die "T3.3: l4udp-front2 was never answered by l4udp-c: $(await_probe udp_probe_batch l4udp-front2 udpcharlie 1) — with l4udp-front's route already live, NOREPLY here is the pre-038 shape (one cluster per node, the second UDPRoute-backed service dropped, #873); check the agent log for 'UDPRoute input discarded'"
+
+	local svc want replies hit none other
+	for svc in l4udp-front:udpalpha l4udp-front2:udpcharlie; do
+		want="${svc##*:}"
+		svc="${svc%%:*}"
+		replies="$(udp_probe_batch "$svc" 20)"
+		hit="$(count_token "$replies" "$want")"
+		none="$(count_token "$replies" NOREPLY)"
+		other=$((20 - hit - none))
+		[ "$none" -eq 0 ] ||
+			die "T3.3: $none/20 datagrams to $svc went unanswered with both routes live: $(histogram "$replies")"
+		[ "$other" -eq 0 ] ||
+			die "T3.3: $other/20 datagrams to $svc were answered by the OTHER service's backend — the udp_proxy matcher is not keyed on the dialled ClusterIP: $(histogram "$replies")"
+		[ "$hit" -eq 20 ] ||
+			die "T3.3: expected 20/20 '$want' from $svc, got $(histogram "$replies")"
+	done
+	ok "20/20 to l4udp-front answered by l4udp-a AND 20/20 to l4udp-front2 answered by l4udp-c: one listener, one arm per dialled VIP"
+}
+
+# T3.2 — delete BOTH UDPRoutes: the arms go away and nothing answers again.
 #
 # The second UDP negative control, reached from the opposite direction to T3.0,
-# and the one that proves the ROUTE rather than the fixture was carrying the
+# and the one that proves the ROUTES rather than the fixture were carrying the
 # datagrams.
 verify_udp_delete() {
-	log "T3.2 delete: remove the UDPRoute — datagrams must go unanswered again"
-	kc -n "$TEST_NS" delete udproute l4udp-split >/dev/null || die "could not delete UDPRoute l4udp-split"
-	local replies none deadline=$((SECONDS + 180))
-	while true; do
-		replies="$(udp_probe_batch l4udp-front 10)"
-		none="$(count_token "$replies" NOREPLY)"
-		if [ "$none" -eq 10 ]; then
-			break
-		fi
-		[ "$SECONDS" -lt "$deadline" ] ||
-			die "T3.2: datagrams are still answered after the UDPRoute was deleted: $(histogram "$replies") — the UDP capture listener outlived its route"
-		sleep 5
+	log "T3.2 delete: remove both UDPRoutes — datagrams to either VIP must go unanswered again"
+	kc -n "$TEST_NS" delete udproute l4udp-split l4udp-charlie >/dev/null || die "could not delete the UDPRoutes"
+	local svc replies none deadline=$((SECONDS + 180))
+	for svc in l4udp-front l4udp-front2; do
+		while true; do
+			replies="$(udp_probe_batch "$svc" 10)"
+			none="$(count_token "$replies" NOREPLY)"
+			if [ "$none" -eq 10 ]; then
+				break
+			fi
+			[ "$SECONDS" -lt "$deadline" ] ||
+				die "T3.2: datagrams to $svc are still answered after its UDPRoute was deleted: $(histogram "$replies") — a UDP capture arm outlived its route"
+			sleep 5
+		done
 	done
-	ok "10/10 datagrams unanswered again: the route, not the fixture, was carrying them"
+	ok "20/20 datagrams unanswered again: the routes, not the fixture, were carrying them"
 }
 
 verify() {
@@ -1285,8 +1355,9 @@ verify() {
 
 	verify_udp_control
 	verify_udp_delivery
+	verify_udp_selection
 	verify_udp_delete
-	log "all UDPRoute assertions passed (control, plaintext delivery with a weight-0 backend drained, delete)"
+	log "all UDPRoute assertions passed (control, plaintext delivery with a weight-0 backend drained, per-VIP selection between two services, delete)"
 }
 
 down() {
