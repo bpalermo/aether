@@ -137,6 +137,7 @@ go_test(
         "tracing_test.go",
         "transportsocket_test.go",
         "transportsocketmatch_test.go",
+        "udp_health_test.go",
         "upstreams_test.go",
         "waypoint_test.go",
     ],

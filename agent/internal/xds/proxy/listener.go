@@ -4,8 +4,9 @@ import (
 	"fmt"
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
-	aetherannotations "aethermesh.dev/common/constants/annotations"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
+	"aethermesh.dev/registry/endpointmeta"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -98,10 +99,22 @@ func NewAppDeliveryClusters(cniPod *cniv1.CNIPod, udsSocketPath string) (appClus
 	// liveness) on the primary port; keeping the HC off app_<pod> avoids gating
 	// the delivery path. Liveness stays pod-level (primary port), not per-port.
 	primary := AppPortFromPod(cniPod)
-	// TCP-floor (non-HTTP) services have no HTTP readiness surface: the probe is a
-	// raw TCP connect to the app port instead of an HTTP GET.
-	isTCP := cniPod.GetAnnotations()[aetherannotations.AnnotationEndpointProtocol] == aetherannotations.ProtocolTCP
-	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), appAddr, primary, AppHealthPathFromPod(cniPod), isTCP)
+	// The probe shape follows the pod's declared mesh protocol: HTTP GET for
+	// HTTP/gRPC, a raw TCP connect for the TCP floor (no HTTP readiness
+	// surface), and for UDP a connect to the mesh inbound port, because a UDP
+	// app port answers no TCP connect at all (#931).
+	//
+	// Read through endpointmeta.Protocol rather than comparing the annotation
+	// here. That function is the registry's own parser -- the one that decides
+	// which key the pod is registered under -- so the probe and the
+	// registration cannot disagree about what the pod is. An unparseable value
+	// degrades to HTTP, which is what the previous equality check did with any
+	// value other than "tcp"; registration rejects it separately and loudly.
+	protocol, err := endpointmeta.Protocol(cniPod.GetAnnotations())
+	if err != nil {
+		protocol = registryv1.Service_PROTOCOL_HTTP
+	}
+	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), appAddr, primary, AppHealthPathFromPod(cniPod), protocol)
 
 	return appClusters, healthCluster
 }

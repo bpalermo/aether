@@ -14,6 +14,7 @@ import (
 	"aethermesh.dev/agent/internal/xds/config"
 	xdsconst "aethermesh.dev/agent/internal/xds/xdsconst"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"aethermesh.dev/common/constants"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
 	meshconst "aethermesh.dev/common/constants/mesh"
@@ -352,7 +353,7 @@ func NewPassthroughOriginalDstCluster() *clusterv3.Cluster {
 // separate cluster, not on app_<pod>: an active HC removes failing/pending hosts
 // from load balancing, which would gate (break) the real delivery path through
 // app_<pod> at startup and whenever the probe fails.
-func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthPath string, tcp bool) *clusterv3.Cluster {
+func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthPath string, protocol registryv1.Service_Protocol) *clusterv3.Cluster {
 	// The active health check probes the app's readiness (delegated liveness):
 	// HTTP/1.1 GET <healthPath> for HTTP/gRPC services, or a raw TCP connect for
 	// non-HTTP (TCP floor) services, which have no HTTP readiness surface. h2 app
@@ -360,7 +361,31 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 	// Both probes work unchanged over a pipe upstream: the HTTP check keeps its
 	// Host: localhost (HTTP/1.1 requires a Host regardless of transport), and the
 	// connect-only variant degrades to "the socket exists and accepts".
-	c := NewAppCluster(name, addr, port, false)
+	//
+	// A UDP service has NEITHER surface at its application port. A TCP connect to
+	// a UDP port cannot succeed, so probing it there marked every UDP-only
+	// workload permanently UNHEALTHY -- and because that verdict is cloned into
+	// the plaintext udp: cluster, whose HealthyPanicThreshold is 0, udp_proxy
+	// then had no healthy host and dropped every datagram with no log, no NACK
+	// and no stat (#931).
+	//
+	// So a UDP pod is probed at the mesh INBOUND port instead. What that asserts
+	// is weaker and worth being precise about: it means the pod is up and its
+	// proxy is serving, NOT that the application is reading datagrams. The UDP
+	// floor deliberately bypasses the inbound hop (see UDPLoadAssignment), so a
+	// wedged UDP listener on a live pod still reads healthy here.
+	//
+	// It is chosen because it is the only thing about a UDP workload we can
+	// actually check: a datagram probe would need a per-service request payload
+	// and a per-service notion of a valid reply, and there is no sensible
+	// default for an arbitrary UDP protocol. The strong per-pod assertion still
+	// happens separately, on the pod's own inbound-readiness path
+	// (NewInboundReadyProbeCluster), which is TLS and SAN-pinned.
+	probePort := port
+	if protocol == registryv1.Service_PROTOCOL_UDP {
+		probePort = defaultInboundPort
+	}
+	c := NewAppCluster(name, addr, probePort, false)
 	// MUST stay per-pod (clear the inherited collapse): the health_check
 	// filter answers per-pod readiness by reading THIS cluster's
 	// membership_healthy/membership_total gauges (see the 2026-06-11 stats
@@ -383,10 +408,12 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 		NoTrafficInterval:        durationpb.New(5 * time.Second),
 		NoTrafficHealthyInterval: durationpb.New(5 * time.Second),
 	}
-	if tcp {
-		// Connect-only (empty send/receive): a successful TCP connect to the app
-		// port = healthy. This replaces the inapplicable HTTP probe for TCP-floor
-		// services so they get real liveness instead of being assumed healthy.
+	if protocol == registryv1.Service_PROTOCOL_TCP || protocol == registryv1.Service_PROTOCOL_UDP {
+		// Connect-only (empty send/receive): a successful TCP connect = healthy.
+		// For a TCP-floor service that is its app port, replacing the
+		// inapplicable HTTP probe so it gets real liveness instead of being
+		// assumed healthy. For a UDP service it is the mesh inbound port
+		// (probePort above), because its app port answers no TCP connect at all.
 		hc.HealthChecker = &corev3.HealthCheck_TcpHealthCheck_{
 			TcpHealthCheck: &corev3.HealthCheck_TcpHealthCheck{},
 		}
