@@ -22,6 +22,22 @@ module(
 bazel_dep(name = "envoy", version = "1.40.0-dev.20260926.726d7ac.envoy")
 bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 
+# Carried upstream fix, applied to the registry module at fetch time
+# (README "Customizing": a patch is the exception, not the mechanism).
+#   envoyproxy/envoy#47743 "hot restart: forward UDP packets by listener address
+#   and network namespace" (e92e96dc7a on top of 726d7ac): the hot-restart parent
+#   forwards each UDP datagram with the listener's bind address + netns and the
+#   child keys its forwarding registry on both, so N per-netns listeners on the
+#   same ip:port (every pod's capture_udp_* on 0.0.0.0:18082) stop collapsing
+#   onto the first-registered one (aether#967). Test cases, docs and changelog hunks dropped; test/mocks/network/mocks.h is kept because aether_stats_test compiles it against the new ConnectionHandler overload.
+#   Drop this override when the pin moves past the merged PR.
+single_version_override(
+    module_name = "envoy",
+    version = "1.40.0-dev.20260926.726d7ac.envoy",
+    patch_strip = 1,
+    patches = ["//bazel/patches:envoy-47743-udp-hot-restart-forwarding-netns.patch"],
+)
+
 ####################################################################################
 # Direct deps of //:BUILD.bazel, //integration and //source/...
 ####################################################################################
