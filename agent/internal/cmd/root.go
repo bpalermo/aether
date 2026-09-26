@@ -809,7 +809,8 @@ func wireL4Routes(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	// UDPRoutes parented to a Service and project weighted TCP floor chains /
 	// per-SNI TLS chains onto the capture listener. Unconditional since proposal
 	// 031: the reconciler CRD-detects each type and degrades when absent.
-	// NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.
+	// UDPRoute is served: the CNI diverts udp dport 18082 into the pod's
+	// transparent capture listener (proposal 038).
 	// v1 (all route types since gateway-api 1.6) + v1beta1 (ReferenceGrant).
 	if err := gatewayv1.Install(m.GetScheme()); err != nil {
 		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)

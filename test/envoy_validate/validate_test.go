@@ -37,6 +37,7 @@ import (
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	udp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/udp/udp_proxy/v3"
+	network_inputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
 	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
 	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
@@ -671,21 +672,21 @@ func chainNames(l *listenerv3.Listener) []string {
 	return out
 }
 
-// TestCaptureUDPListenerIsConnectionless asserts the two properties that make a
-// UDPRoute listener work at all, neither of which any other test covers.
+// TestCaptureUDPListenerIsConnectionless asserts the properties that make a
+// UDPRoute listener work at all, none of which any other test covers.
 //
 //  1. NO filter_chains. Envoy rejects a connection-less UDP listener that has
 //     any ("N filter chain(s) specified for connection-less UDP listener"), so
 //     the udp_proxy config must ride listener_filters instead. l4route.go
-//     records that rule in a comment; until now nothing enforced it, and the
-//     `--mode validate` run beside this test is what turns a regression here
-//     into a failure rather than a surprise on a node.
-//  2. The listener binds UDP, in the pod netns, on the capture port.
-//
-// SCOPE: delivery only. udp_proxy's route specifier is a bare Cluster taken
-// from the first backend of the lexicographically first service, so backend
-// selection and weights are not expressible (#873). There is deliberately no
-// assertion that UDP picks between backends — it would fail by design.
+//     records that rule in a comment; the `--mode validate` run beside this
+//     test is what turns a regression here into a failure rather than a
+//     surprise on a node.
+//  2. The listener binds UDP, in the pod netns, on the L4 MESH port, and is
+//     transparent (proposal 038).
+//  3. SELECTION: the udp_proxy route specifier is a matcher on the dialled
+//     destination IP with one arm per UDPRoute parent, each naming a cluster
+//     the bootstrap defines. Before 038 the listener carried one cluster for
+//     the whole node and there was, by design, no selection assertion here.
 func TestCaptureUDPListenerIsConnectionless(t *testing.T) {
 	data, err := CaptureUDPBootstrapJSON()
 	if err != nil {
@@ -705,23 +706,28 @@ func TestCaptureUDPListenerIsConnectionless(t *testing.T) {
 	if sa.GetProtocol() != corev3.SocketAddress_UDP {
 		t.Errorf("UDP listener %q binds protocol %v, want UDP", l.GetName(), sa.GetProtocol())
 	}
-	// 18001 as a literal, on purpose: this is a CROSS-TREE pin, not a
-	// restatement of the fixture. The CNI's scoped UDP redirect rule sends
-	// ClusterIP:18081/udp to this port and nothing else is captured, so the
+	// 18082 as a literal, on purpose: this is a CROSS-TREE pin, not a
+	// restatement of the fixture. The CNI's divert marks udp dport 18082 with
+	// NO port rewrite (a datagram reply's source port is the socket's bound
+	// port, so the listener must bind the port the client dialled), so the
 	// agent and the CNI plugin have to agree on the number. Comparing the
 	// listener against the same meshconst the fixture passed in would be a
 	// check that cannot fail (see the note on the TCPRoute weights).
-	if got := sa.GetPortValue(); got != 18001 || meshconst.ProxyCapturePort != 18001 {
-		t.Errorf("UDP listener %q binds port %d (meshconst.ProxyCapturePort = %d), want 18001 — "+
-			"the CNI's UDP REDIRECT targets that port and nothing else is captured",
-			l.GetName(), got, meshconst.ProxyCapturePort)
+	if got := sa.GetPortValue(); got != 18082 || meshconst.ProxyL4OutboundPort != 18082 {
+		t.Errorf("UDP listener %q binds port %d (meshconst.ProxyL4OutboundPort = %d), want 18082 — "+
+			"the CNI diverts that port with no rewrite and Envoy replies from the bound port",
+			l.GetName(), got, meshconst.ProxyL4OutboundPort)
+	}
+	if !l.GetTransparent().GetValue() {
+		t.Errorf("UDP listener %q is not transparent: the divert delivers a datagram addressed to a non-local VIP, "+
+			"which only an IP_TRANSPARENT socket receives, and the reply must leave from that VIP", l.GetName())
 	}
 	if sa.GetNetworkNamespaceFilepath() == "" {
 		t.Errorf("UDP listener %q has no network_namespace_filepath; it would bind in the agent's netns, not the pod's", l.GetName())
 	}
 
-	// The udp_proxy config lives in listener_filters and names a cluster this
-	// bootstrap defines.
+	// The udp_proxy config lives in listener_filters and is a matcher on the
+	// destination IP with one arm per parent.
 	var cfg *udp_proxyv3.UdpProxyConfig
 	for _, lf := range l.GetListenerFilters() {
 		c := &udp_proxyv3.UdpProxyConfig{}
@@ -732,16 +738,47 @@ func TestCaptureUDPListenerIsConnectionless(t *testing.T) {
 	if cfg == nil {
 		t.Fatalf("UDP listener %q has no udp_proxy listener filter: the listener would receive datagrams and drop them", l.GetName())
 	}
-	if got, want := cfg.GetCluster(), L4UDPBackendCluster(); got != want {
-		t.Errorf("udp_proxy routes to cluster %q, want %q", got, want)
+	if cfg.GetCluster() != "" {
+		t.Errorf("udp_proxy uses the deprecated single `cluster` specifier (%q); 038 keys a matcher on the dialled VIP", cfg.GetCluster())
+	}
+	tree := cfg.GetMatcher().GetMatcherTree()
+	if tree == nil {
+		t.Fatalf("udp_proxy has no matcher_tree; without it every parent but one is dropped (#873)")
+	}
+	in := &network_inputsv3.DestinationIPInput{}
+	if err := tree.GetInput().GetTypedConfig().UnmarshalTo(in); err != nil {
+		t.Fatalf("matcher input is not DestinationIPInput: %v — the only thing that distinguishes two parents is the VIP the pod dialled", err)
+	}
+	arms := map[string]string{}
+	for vip, om := range tree.GetExactMatchMap().GetMap() {
+		r := &udp_proxyv3.Route{}
+		if err := om.GetAction().GetTypedConfig().UnmarshalTo(r); err != nil {
+			t.Fatalf("arm %s: action is not a udp_proxy Route: %v", vip, err)
+		}
+		arms[vip] = r.GetCluster()
+	}
+	want := map[string]string{
+		L4UDPParentClusterIPA: L4UDPBackendClusterA(),
+		L4UDPParentClusterIPB: L4UDPBackendClusterB(),
+	}
+	if len(arms) != len(want) {
+		t.Fatalf("udp_proxy carries %d arm(s), want %d: %v", len(arms), len(want), arms)
+	}
+	for vip, cluster := range want {
+		if got := arms[vip]; got != cluster {
+			t.Errorf("datagrams to %s route to %q, want %q: the wrong parent's backend would receive them", vip, got, cluster)
+		}
 	}
 
 	bs := &bootstrapv3.Bootstrap{}
 	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(data, bs); err != nil {
 		t.Fatalf("unmarshal bootstrap: %v", err)
 	}
-	if !staticClusterNames(bs)[cfg.GetCluster()] {
-		t.Fatalf("udp_proxy names cluster %q, which the bootstrap does not define", cfg.GetCluster())
+	defined := staticClusterNames(bs)
+	for vip, cluster := range arms {
+		if !defined[cluster] {
+			t.Fatalf("arm %s names cluster %q, which the bootstrap does not define", vip, cluster)
+		}
 	}
 }
 
@@ -774,12 +811,12 @@ func TestCaptureUDPClusterIsPlaintextAtTheAppPort(t *testing.T) {
 
 	var udp *clusterv3.Cluster
 	for _, c := range bs.GetStaticResources().GetClusters() {
-		if c.GetName() == L4UDPBackendCluster() {
+		if c.GetName() == L4UDPBackendClusterA() {
 			udp = c
 		}
 	}
 	if udp == nil {
-		t.Fatalf("bootstrap defines no %q cluster", L4UDPBackendCluster())
+		t.Fatalf("bootstrap defines no %q cluster", L4UDPBackendClusterA())
 	}
 
 	if ts := udp.GetTransportSocket(); ts != nil {

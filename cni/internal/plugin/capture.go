@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -9,67 +10,117 @@ import (
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
+	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
 
-// captureTableName is the nft table the redirect rule lives in, inside the pod netns.
+// captureTableName is the nftables table holding the pod's transparent-capture
+// rules (proposal 038). ONE table, two chains, both transports.
 const captureTableName = "aether_capture"
 
-// captureRedirectAllTableName is the nft table for the redirect-all mode (spike/M2a).
-const captureRedirectAllTableName = "aether_capture_all"
+// ctDirReply is the kernel's IP_CT_DIR_REPLY (enum ip_conntrack_dir: ORIGINAL
+// = 0, REPLY = 1), the byte `ct direction` loads into a register. x/sys/unix
+// does not export it.
+const ctDirReply byte = 1
 
-// builtinRedirectAllExcludedRanges are destination ranges always carved out of the
-// broad redirect-all capture (proposal 022 M2-default), in addition to the /8
-// loopback mask baked into redirectAllTCPExprs:
-//   - 169.254.0.0/16 link-local — the cloud instance metadata service
-//     (169.254.169.254) and other link-local endpoints must be reached directly.
-//   - 224.0.0.0/4 multicast — never a unicast mesh destination.
-//
-// These do not apply to the scoped rule, which only captures ClusterIP:18081.
-var builtinRedirectAllExcludedRanges = []netip.Prefix{
+// builtinDivertExcludedRanges are always carved out of capture, independent of
+// per-pod annotations (proposal 022 M2-default). Link-local carries the cloud
+// instance metadata service (169.254.169.254) and must be reached directly;
+// multicast is never a unicast mesh destination.
+var builtinDivertExcludedRanges = []netip.Prefix{
 	netip.MustParsePrefix("169.254.0.0/16"),
 	netip.MustParsePrefix("224.0.0.0/4"),
 }
 
-// installCaptureRedirect programs, inside the pod's network namespace, an nftables
-// REDIRECT of outbound TCP destined for a mesh ClusterIP:<meshPort> to the pod-local
-// transparent-capture listener on <capturePort> (proposal 018, Phase 3a).
+// installCaptureDivert programs TPROXY-style capture (proposal 038) in the pod's
+// netns, for BOTH transports, replacing the nat REDIRECT of proposals 018/022.
 //
-// The rule lives in the POD netns nat/output chain, so it fires before the packet
-// egresses to the host (independent of host kube-proxy/flannel). The loopback
-// exclusion (ip daddr != 127.0.0.0/8) leaves the explicit 127.0.0.1:<meshPort>
-// fast-lane untouched — only ClusterIP traffic is captured. nftables is programmed
-// over netlink (no iptables binary), so it works in the minimal CNI exec environment.
-// The rule dies with the netns on pod teardown; no DEL cleanup is needed.
+// Everything lives in the netns and dies with it on pod teardown: the nft table,
+// the policy-routing rule and the local route. No DEL cleanup is needed.
 //
-// It enters the netns by setns on a locked OS thread (matching netnsDialContext): the
-// netlink socket nftables opens then lives in the pod netns. A failed restore leaves
-// the thread locked so the Go runtime destroys it rather than reusing a poisoned one.
-func installCaptureRedirect(netnsPath string, excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
-	return withPodNetns(netnsPath, func() error { return programCaptureRedirect(excludePorts, excludeRanges, logger) })
+// It enters the netns by setns on a locked OS thread (withPodNetns): the
+// nftables netlink socket AND the rtnetlink sockets vishvananda/netlink opens
+// then live in the pod netns. That library's package-level calls open a fresh
+// socket per call in the calling thread's current netns, which is exactly the
+// property this depends on; a package-level handle created at init would have
+// programmed the HOST's routing table.
+//
+// HOW IT WORKS. nft `tproxy` is prerouting-only, so locally-originated pod
+// egress cannot be tproxy'd where it is generated. Instead:
+//
+//  1. OUTPUT (type route, priority mangle): a captured packet gets
+//     CaptureDivertFwMark. `type route` re-runs the routing decision after the
+//     mark changes, which is what makes step 2 apply.
+//  2. `ip rule fwmark <mark> lookup <table>` + `ip route local default dev lo
+//     table <table>`: the marked packet is delivered locally via lo, with its
+//     IP header INTACT -- destination VIP and port preserved.
+//  3. PREROUTING on lo (type filter, priority mangle): `tproxy` hands the packet
+//     to the transparent capture socket. For TCP that is ONE listener on
+//     ProxyCapturePort (the socket lookup is by the tproxy target port; the
+//     accepted socket still carries the original destination, so replies are
+//     correct with no conntrack NAT). For UDP there is no port rewrite -- a
+//     datagram reply's source port is the socket's bound port, so the UDP
+//     listener binds the port the client dialed (ProxyL4OutboundPort) and the
+//     divert alone delivers to it.
+//
+// Every fact above was measured on a Talos node before this was written:
+// e2e/spike/tproxy-phase0b.py.
+func installCaptureDivert(netnsPath string, redirectAll bool, excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
+	return withPodNetns(netnsPath, func() error {
+		if err := programCaptureDivert(redirectAll, excludePorts, excludeRanges, logger); err != nil {
+			return err
+		}
+		return programDivertRouting(logger)
+	})
 }
 
-// programCaptureRedirect adds the nat/output REDIRECT rules in the CURRENT netns:
-// one for outbound TCP and one for outbound UDP, both destined for the mesh
-// port (ProxyOutboundPort). Both protocols redirect to ProxyCapturePort — the
-// TCP and UDP listeners bind the SAME port number on independent sockets (TCP
-// and UDP are separate socket families; the kernel routes by (protocol, port),
-// so there is no collision). Both rules share the loopback exclusion so the
-// pod-local explicit fast-lane (127.x:meshPort) is never intercepted.
+// programCaptureDivert adds the nft table in the CURRENT netns.
 //
-// NOTE: the UDP redirect only takes effect once a UDPRoute exists (the agent
-// only generates the UDP capture listener when UDPRoute backends exist; L4
-// routing itself is unconditional since proposal 031). The nft rule is always
-// installed when capture is on — the absence of a bound UDP socket on
-// ProxyCapturePort means redirected packets are silently dropped until the
-// agent creates the listener, which is correct behaviour (no UDPRoute = no
-// listener = datagrams discarded rather than sent to an unexpected
-// destination).
-func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
-	meshPort := uint16(meshconst.ProxyOutboundPort)
-	l4MeshPort := uint16(meshconst.ProxyL4OutboundPort)
+// RULE ORDER IS LOAD-BEARING, and the test that pins it (TestDivertRuleOrder)
+// exists because the one rule that keeps this from breaking every pod is an
+// early `accept`, not a mark:
+//
+//	output (type route, hook output, priority mangle)
+//	  meta mark 0xae7e accept                 passthrough egress; defensive
+//	  ct direction reply accept               THE load-bearing rule -- see below
+//	  ip daddr 127.0.0.0/8 accept             pod-local fast lane, app clusters
+//	  ip daddr 169.254.0.0/16 accept          metadata service
+//	  ip daddr 224.0.0.0/4 accept             multicast
+//	  tcp dport 53 accept / udp dport 53      the DNS DNAT runs later, at nat
+//	  [exclude-outbound-ports, BOTH transports]
+//	  [exclude-outbound-ip-ranges]
+//	  udp dport 18082 mark set 0xae71         plaintext UDP, the L4 spelling
+//	  tcp dport {18081,18082} mark set 0xae71 scoped TCP
+//	  meta l4proto tcp mark set 0xae71        redirect-all only: any port
+//	divert (type filter, hook prerouting, priority mangle)
+//	  iif lo meta mark 0xae71 l4proto tcp tproxy to :18001 accept
+//	  iif lo meta mark 0xae71 l4proto udp accept
+//
+// `ct direction reply accept`: a route chain sees EVERY locally-generated
+// packet -- unlike the nat chain it replaces, which saw only a flow's first.
+// That includes the pod's own server replies to inbound clients (a SYN-ACK
+// whose dport is the client's ephemeral port) and Envoy's own replies on
+// captured flows. Under redirect-all the any-port rule would mark them, they
+// would loop to lo, tproxy's established lookup would miss, the listener lookup
+// would hit the 18001 LISTEN socket, and a SYN-ACK arriving at a LISTEN socket
+// is answered with a reset: every inbound connection to every redirect-all pod
+// dies. Both are the REPLY direction of a tracked flow, so this rule exempts
+// exactly them. `ct state established,related accept` is NOT a substitute: in
+// a route chain it would also exempt the 2nd+ packets of the pod's own
+// captured outbound flows, sending them out eth0 mid-connection. Measured:
+// spike arm S1 connects with this rule and both ends time out without it.
+//
+// The :53 accepts sit ahead of the marks because aether_dns_capture DNATs :53
+// at nat priority, AFTER this chain; a marked :53 packet would be diverted to
+// lo before the DNAT could see it. Incidentally this makes TCP :53 under
+// redirect-all deterministic -- it was previously contested by two nat chains
+// at equal priority.
+func programCaptureDivert(redirectAll bool, excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
+	mark := uint32(meshconst.CaptureDivertFwMark)
 	capturePort := uint16(meshconst.ProxyCapturePort)
+	httpMeshPort := uint16(meshconst.ProxyOutboundPort)
+	l4MeshPort := uint16(meshconst.ProxyL4OutboundPort)
 
 	c, err := nftables.New()
 	if err != nil {
@@ -77,364 +128,302 @@ func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix,
 	}
 
 	table := c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: captureTableName})
-	chain := c.AddChain(&nftables.Chain{
+	output := c.AddChain(&nftables.Chain{
 		Name:     "output",
 		Table:    table,
-		Type:     nftables.ChainTypeNAT,
+		Type:     nftables.ChainTypeRoute,
 		Hooknum:  nftables.ChainHookOutput,
-		Priority: nftables.ChainPriorityNATDest,
+		Priority: nftables.ChainPriorityMangle,
 	})
-	// Excluded ports / IP ranges (proposal 022 M2-default): accept (RETURN) ahead of
-	// the redirect so connections to these dports / destination ranges bypass capture
-	// entirely. Ranges are destination-based, so they carve out both TCP and UDP.
-	for _, port := range excludePorts {
-		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludePortAcceptExprs(port)})
-	}
-	for _, r := range excludeRanges {
-		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludeIPRangeAcceptExprs(r)})
-	}
-	// TCP: outbound TCP to ClusterIP:meshPort → capturePort (Phase 3a).
-	c.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: chain,
-		Exprs: captureRedirectExprs(unix.IPPROTO_TCP, meshPort, capturePort),
-	})
-	// TCP: outbound TCP to ClusterIP:l4MeshPort → capturePort (proposal 037).
-	//
-	// The mesh's well-known TCP spelling. Scoped capture redirects it alongside
-	// ProxyOutboundPort, which is what makes <svc>:18082 work WITHOUT
-	// redirect-all — unlike a dial to a service's own application port, which
-	// only redirect-all captures.
-	//
-	// Inert until the agent builds a chain matching destination_port 18082
-	// (Release B): a redirected connection with no matching filter chain falls
-	// to the capture listener's passthrough, which forwards it to the original
-	// destination — the generated mesh Service's "mesh-tcp" port, which has no
-	// endpoints, so kube-proxy REJECTs it. The interim failure is an immediate
-	// ECONNREFUSED, not a hang or a silent blackhole.
-	c.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: chain,
-		Exprs: captureRedirectExprs(unix.IPPROTO_TCP, l4MeshPort, capturePort),
-	})
-	// UDP: outbound UDP to ClusterIP:meshPort → capturePort (Phase 3b).
-	//
-	// STALE BY DESIGN, replaced by proposal 038: under TPROXY capture UDP dials
-	// the L4 spelling (l4MeshPort, 18082 — one number for both transports, D1)
-	// and is DIVERTED with its header intact to a transparent listener bound on
-	// that same port, because a datagram reply's source port is the socket's
-	// bound port and cannot be rewritten. This REDIRECT of 18081 to 18001 is the
-	// pre-038 shape and is removed, not migrated, when the divert rules land.
-	// Datagrams arriving at ProxyCapturePort:UDP are handled by the udp_proxy
-	// capture listener generated for each pod when UDPRoute backends are present.
-	// The TCP and UDP listeners coexist on :18001 via independent protocol sockets.
-	// No mesh mTLS — UDP is forwarded in plaintext (known limitation; no DTLS).
-	c.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: chain,
-		Exprs: captureRedirectExprs(unix.IPPROTO_UDP, meshPort, capturePort),
+	divert := c.AddChain(&nftables.Chain{
+		Name:     "divert",
+		Table:    table,
+		Type:     nftables.ChainTypeFilter,
+		Hooknum:  nftables.ChainHookPrerouting,
+		Priority: nftables.ChainPriorityMangle,
 	})
 
-	if err := c.Flush(); err != nil {
-		return fmt.Errorf("apply capture redirect (nft flush): %w", err)
+	for _, exprs := range divertOutputRules(redirectAll, excludePorts, excludeRanges, mark, httpMeshPort, l4MeshPort) {
+		c.AddRule(&nftables.Rule{Table: table, Chain: output, Exprs: exprs})
 	}
-	logger.Info("installed transparent-capture redirect",
-		zap.Uint16("mesh_port", meshPort),
-		zap.Uint16("tcp_mesh_port", l4MeshPort),
-		zap.Uint16("capture_port", capturePort))
+	for _, exprs := range divertPreroutingRules(mark, capturePort) {
+		c.AddRule(&nftables.Rule{Table: table, Chain: divert, Exprs: exprs})
+	}
+
+	if err := c.Flush(); err != nil {
+		// A rejected table is total: nothing of it is installed, the pod runs
+		// UNCAPTURED, and CmdAdd treats this as a warning. Say so loudly and name
+		// the likeliest cause, because the symptom downstream is "the mesh
+		// silently does nothing for this pod".
+		return fmt.Errorf("apply capture divert (nft flush; if this names tproxy, the nft_tproxy module may be unavailable on this kernel): %w", err)
+	}
+	logger.Info("installed transparent-capture divert (038)",
+		zap.Bool("redirect_all", redirectAll),
+		zap.Uint16("tcp_capture_port", capturePort),
+		zap.Uint16("udp_capture_port", l4MeshPort),
+		zap.Uint32("mark", mark))
 	return nil
 }
 
-// captureRedirectExprs builds the rule:
+// divertOutputRules returns the OUTPUT chain's rules in order. Split out of
+// programCaptureDivert so the ORDER is a testable value rather than a side
+// effect of nft calls.
+func divertOutputRules(redirectAll bool, excludePorts []uint16, excludeRanges []netip.Prefix, mark uint32, httpMeshPort, l4MeshPort uint16) [][]expr.Any {
+	rules := [][]expr.Any{
+		passthroughMarkAcceptExprs(meshconst.CapturePassthroughFwMark),
+		ctDirectionReplyAcceptExprs(),
+		excludeIPRangeAcceptExprs(netip.MustParsePrefix("127.0.0.0/8")),
+	}
+	for _, r := range builtinDivertExcludedRanges {
+		rules = append(rules, excludeIPRangeAcceptExprs(r))
+	}
+	rules = append(rules,
+		dportAcceptExprs(unix.IPPROTO_TCP, 53),
+		dportAcceptExprs(unix.IPPROTO_UDP, 53),
+	)
+	// Per-pod exclusions cover BOTH transports now that UDP is captured (they
+	// were TCP-only under REDIRECT, invisibly, because redirect-all never
+	// captured UDP).
+	for _, port := range excludePorts {
+		rules = append(rules, dportAcceptExprs(unix.IPPROTO_TCP, port), dportAcceptExprs(unix.IPPROTO_UDP, port))
+	}
+	for _, r := range excludeRanges {
+		rules = append(rules, excludeIPRangeAcceptExprs(r))
+	}
+	rules = append(rules,
+		markSetDportExprs(unix.IPPROTO_UDP, l4MeshPort, mark),
+		markSetDportExprs(unix.IPPROTO_TCP, httpMeshPort, mark),
+		markSetDportExprs(unix.IPPROTO_TCP, l4MeshPort, mark),
+	)
+	if redirectAll {
+		rules = append(rules, markSetAnyTCPExprs(mark))
+	}
+	return rules
+}
+
+// divertPreroutingRules returns the prerouting chain's rules in order.
+func divertPreroutingRules(mark uint32, tcpCapturePort uint16) [][]expr.Any {
+	return [][]expr.Any{
+		tproxyTCPExprs(mark, tcpCapturePort),
+		divertUDPAcceptExprs(mark),
+	}
+}
+
+// programDivertRouting installs the policy-routing pair in the CURRENT netns:
 //
-//	meta l4proto <proto>                         (tcp or udp)
-//	ip daddr & 255.0.0.0 != 127.0.0.0           (skip the loopback fast-lane)
-//	<proto> dport <meshPort>                     (transport dport, offset 2)
-//	redirect to :<capturePort>
+//	ip rule add fwmark <CaptureDivertFwMark> lookup <CaptureDivertRouteTable>
+//	ip route add local 0.0.0.0/0 dev lo table <CaptureDivertRouteTable>
 //
-// The transport dest port is at the same offset (2, len 2) for both TCP and UDP,
-// so the same expression shape applies to both protocols — matching the approach
-// used in dns.go for the mesh-DNS DNAT. The proto byte controls which L4 traffic
-// is matched (unix.IPPROTO_TCP or unix.IPPROTO_UDP).
-func captureRedirectExprs(proto byte, meshPort, capturePort uint16) []expr.Any {
+// Two zero-value traps in vishvananda/netlink are avoided on purpose. A Rule
+// built as a struct literal sends FRA_SUPPRESS_PREFIXLEN=0, which suppresses
+// the default route in the target table -- the divert then silently does
+// nothing -- and Goto 0; netlink.NewRule() sets the sentinels. A Route with a
+// nil Dst is rejected outright. Both add calls use exclusive-create flags, so a
+// re-run (a CNI ADD replayed for the same netns) tolerates EEXIST on the rule
+// and replaces the route.
+func programDivertRouting(logger *zap.Logger) error {
+	lo, err := netlink.LinkByName("lo")
+	if err != nil {
+		return fmt.Errorf("find lo in the pod netns: %w", err)
+	}
+
+	rule := netlink.NewRule()
+	rule.Family = unix.AF_INET
+	rule.Mark = uint32(meshconst.CaptureDivertFwMark)
+	rule.Table = meshconst.CaptureDivertRouteTable
+	if err := netlink.RuleAdd(rule); err != nil && !errors.Is(err, unix.EEXIST) {
+		return fmt.Errorf("add fwmark rule: %w", err)
+	}
+
+	_, all, _ := net.ParseCIDR("0.0.0.0/0")
+	route := &netlink.Route{
+		Dst:       all,
+		Type:      unix.RTN_LOCAL,
+		Scope:     unix.RT_SCOPE_HOST,
+		LinkIndex: lo.Attrs().Index,
+		Table:     meshconst.CaptureDivertRouteTable,
+	}
+	if err := netlink.RouteReplace(route); err != nil {
+		return fmt.Errorf("add local route in table %d: %w", meshconst.CaptureDivertRouteTable, err)
+	}
+	logger.Info("installed divert policy routing",
+		zap.Uint32("mark", uint32(meshconst.CaptureDivertFwMark)),
+		zap.Int("table", meshconst.CaptureDivertRouteTable))
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// expression builders
+// ---------------------------------------------------------------------------
+
+// ctDirectionReplyAcceptExprs builds:
+//
+//	ct direction reply accept
+//
+// The rule that keeps the divert from capturing the pod's own replies (see
+// programCaptureDivert). nftables encodes ct direction as a one-byte value:
+// 0 = original, 1 = reply (IP_CT_DIR_REPLY).
+func ctDirectionReplyAcceptExprs() []expr.Any {
+	return []expr.Any{
+		&expr.Ct{Register: 1, SourceRegister: false, Key: expr.CtKeyDIRECTION},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{ctDirReply}},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// dportAcceptExprs builds:
+//
+//	meta l4proto <proto> · th dport <port> · accept
+//
+// Used for the :53 carve-outs (the DNS DNAT runs after this chain) and for the
+// per-pod exclude-outbound-ports annotation, on both transports. The transport
+// dport sits at offset 2 for TCP and UDP alike, so one builder serves both.
+func dportAcceptExprs(proto byte, port uint16) []expr.Any {
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
-		// ip daddr (IPv4 dest = offset 16, len 4), masked to /8, != 127.0.0.0
-		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
-		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: []byte{0xff, 0x00, 0x00, 0x00}, Xor: []byte{0x00, 0x00, 0x00, 0x00}},
-		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{127, 0, 0, 0}},
-		// <proto> dport == meshPort (transport dest = offset 2, len 2, big-endian;
-		// this offset is identical for TCP and UDP headers).
-		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(meshPort)},
-		// redirect to capturePort
-		&expr.Immediate{Register: 1, Data: beUint16(capturePort)},
-		&expr.Redir{RegisterProtoMin: 1},
-	}
-}
-
-func beUint16(v uint16) []byte {
-	b := make([]byte, 2)
-	binary.BigEndian.PutUint16(b, v)
-	return b
-}
-
-// installCaptureRedirectAll programs, inside the pod's network namespace, an
-// nftables REDIRECT of ALL outbound non-local TCP into the capture listener
-// (:ProxyCapturePort) — proposal 022 "redirect-all + ORIGINAL_DST passthrough".
-// Non-mesh destinations are forwarded in plain TCP by the Envoy
-// passthrough_original_dst cluster (the capture listener unconditionally
-// carries the passthrough fallback chain since proposal 031); mesh destinations
-// continue to route through the per-source mTLS path as with Phase 3a.
-//
-// Exclusions to prevent loops and proxy self-traffic:
-//   - loopback (127.0.0.0/8): the 127.x fast-lane and the proxy's own loopback
-//     conns are never intercepted.
-//   - capture port (:ProxyCapturePort TCP): if Envoy itself originates a TCP
-//     connection on the capture port (health checks dialing app clusters bound in
-//     the pod netns come from 127.x, but belt-and-suspenders), we must not
-//     re-redirect it — that would loop back into the capture listener.
-//   - established / related connections: conntrack prevents mid-flow re-direction.
-//     Without this exclusion, the response path of an already-established
-//     connection would be RE-redirected to :18001 on each packet, breaking the
-//     connection. Conntrack tracks established TCP state; ESTABLISHED skips the
-//     redirect for them.
-//
-// The rule lives in a SEPARATE nft table (aether_capture_all) from the scoped
-// rule (aether_capture) so both can be installed independently. The scoped rule
-// is always installed for managed pods; with redirect-all on, both tables exist
-// and the redirect-all subsumes the scoped rule (all traffic is already
-// captured).
-func installCaptureRedirectAll(netnsPath string, excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
-	return withPodNetns(netnsPath, func() error { return programCaptureRedirectAll(excludePorts, excludeRanges, logger) })
-}
-
-// programCaptureRedirectAll adds the redirect-all nat/output rule in the CURRENT
-// netns. Two rules are added in priority order:
-//  1. ACCEPT established/related connections (conntrack bypass — avoids looping
-//     the response path of outbound connections back into the capture listener).
-//  2. REDIRECT all outbound TCP, excluding loopback and the capture port itself,
-//     to ProxyCapturePort.
-//
-// The conntrack ACCEPT must come BEFORE the redirect in the same chain. We put
-// it in a separate higher-priority "conntrack" chain to avoid coupling to
-// rule position, but for a single-table approach both rules go in "output" with
-// the conntrack rule first (lower rule index wins in nft).
-func programCaptureRedirectAll(excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
-	capturePort := uint16(meshconst.ProxyCapturePort)
-
-	c, err := nftables.New()
-	if err != nil {
-		return fmt.Errorf("open nftables netlink: %w", err)
-	}
-
-	table := c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: captureRedirectAllTableName})
-	chain := c.AddChain(&nftables.Chain{
-		Name:     "output",
-		Table:    table,
-		Type:     nftables.ChainTypeNAT,
-		Hooknum:  nftables.ChainHookOutput,
-		Priority: nftables.ChainPriorityNATDest,
-	})
-
-	// Rule 0a: skip the proxy's OWN forwarded egress (proposal 022 M2-default).
-	// Envoy SO_MARKs the passthrough_original_dst cluster's upstream sockets with
-	// CapturePassthroughFwMark; accepting it here, ahead of the redirect, prevents
-	// the proxy's passthrough connection from being re-captured into a loop — the
-	// "breaks all egress" failure mode. SO_MARK (not a UID match) because the proxy
-	// runs as root. Harmless if the passthrough egresses proxy-side (never matches).
-	c.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: chain,
-		Exprs: passthroughMarkAcceptExprs(meshconst.CapturePassthroughFwMark),
-	})
-
-	// Rule 0b: excluded ports / IP ranges (proposal 022 M2-default) — accept ahead of
-	// the broad redirect so connections to these dports / destination ranges bypass
-	// the mesh. This is where exclusions matter most: redirect-all otherwise captures
-	// every port. Ranges are destination-based (no L4 proto match).
-	for _, port := range excludePorts {
-		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludePortAcceptExprs(port)})
-	}
-	for _, r := range excludeRanges {
-		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludeIPRangeAcceptExprs(r)})
-	}
-
-	// Rule 0c: built-in special-range exclusions (proposal 022 M2-default). The
-	// scoped rule only ever captured ClusterIP:18081, so these never mattered; the
-	// broad redirect-all captures EVERY non-loopback TCP dest, which the /8 loopback
-	// mask alone does not carve out. Link-local (169.254.0.0/16) carries the cloud
-	// instance metadata service (169.254.169.254) and must reach it directly, not via
-	// an Envoy passthrough hop; multicast (224.0.0.0/4) is never a unicast mesh
-	// destination. Always excluded, independent of the per-pod annotations.
-	for _, r := range builtinRedirectAllExcludedRanges {
-		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludeIPRangeAcceptExprs(r)})
-	}
-
-	// Rule 1: skip established/related connections (conntrack).
-	// ct state {established, related} -> accept
-	// This must come before the redirect rule so that response traffic for
-	// outbound connections (e.g. curl responding) is not re-redirected.
-	c.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: chain,
-		Exprs: conntrackEstablishedAcceptExprs(),
-	})
-
-	// Rule 2: skip capture port itself to prevent re-entry loops.
-	// tcp dport capturePort -> accept
-	c.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: chain,
-		Exprs: skipCaptureSelfExprs(capturePort),
-	})
-
-	// Rule 3: redirect all other outbound TCP (non-loopback) to capturePort.
-	// meta l4proto tcp · ip daddr & /8 != 127.0.0.0 → redirect to capturePort
-	c.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: chain,
-		Exprs: redirectAllTCPExprs(capturePort),
-	})
-
-	if err := c.Flush(); err != nil {
-		return fmt.Errorf("apply redirect-all capture (nft flush): %w", err)
-	}
-	logger.Info("installed redirect-all transparent-capture (spike/M2a)",
-		zap.Uint16("capture_port", capturePort))
-	return nil
-}
-
-// conntrackEstablishedAcceptExprs builds the nft rule:
-//
-//	ct state established,related accept
-//
-// This prevents the nat/output hook from seeing response packets for existing
-// outbound connections — without it, the redirect rule would try to re-redirect
-// ACK/data packets of an already-NATted connection, corrupting the flow.
-//
-// nftables conntrack state is expressed via CtStateBitMask:
-//
-//	established = 0x2 (NFT_CT_STATE_ESTABLISHED)
-//	related     = 0x4 (NFT_CT_STATE_RELATED)
-func conntrackEstablishedAcceptExprs() []expr.Any {
-	return []expr.Any{
-		// load ct state into reg1
-		&expr.Ct{Register: 1, SourceRegister: false, Key: expr.CtKeySTATE},
-		// reg1 & (established|related = 0x06) != 0  (bitwise AND then NEQ 0)
-		&expr.Bitwise{
-			SourceRegister: 1,
-			DestRegister:   1,
-			Len:            4,
-			Mask:           []byte{0x06, 0x00, 0x00, 0x00},
-			Xor:            []byte{0x00, 0x00, 0x00, 0x00},
-		},
-		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{0x00, 0x00, 0x00, 0x00}},
-		// ACCEPT
-		&expr.Verdict{Kind: expr.VerdictAccept},
-	}
-}
-
-// skipCaptureSelfExprs builds the nft rule:
-//
-//	meta l4proto tcp tcp dport capturePort accept
-//
-// This prevents Envoy (or the pod itself) from re-redirecting a connection that
-// is already destined for the capture listener. Without this, a loopback
-// connection to :capturePort in the pod netns would be redirected to itself,
-// forming a redirect loop.
-func skipCaptureSelfExprs(capturePort uint16) []expr.Any {
-	return []expr.Any{
-		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
-		// tcp dport == capturePort
-		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(capturePort)},
-		&expr.Verdict{Kind: expr.VerdictAccept},
-	}
-}
-
-// excludePortAcceptExprs builds the rule:
-//
-//	meta l4proto tcp · tcp dport <port> · accept
-//
-// Placed ahead of the redirect, it carves a single outbound TCP destination port
-// OUT of capture (proposal 022 M2-default, the exclude-outbound-ports annotation):
-// connections to <port> bypass the mesh and reach their real destination directly.
-func excludePortAcceptExprs(port uint16) []expr.Any {
-	return []expr.Any{
-		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
-		// tcp dport == port
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(port)},
 		&expr.Verdict{Kind: expr.VerdictAccept},
 	}
 }
 
-// excludeIPRangeAcceptExprs builds the rule:
+// excludePortAcceptExprs is dportAcceptExprs for TCP, kept under its historical
+// name for the tests and call sites that predate UDP capture.
+func excludePortAcceptExprs(port uint16) []expr.Any {
+	return dportAcceptExprs(unix.IPPROTO_TCP, port)
+}
+
+// excludeIPRangeAcceptExprs builds:
 //
 //	ip daddr & <netmask> == <network> · accept
 //
-// Placed ahead of the redirect, it carves an outbound destination IP range OUT of
-// capture (proposal 022 M2-default, the exclude-outbound-ip-ranges annotation):
-// connections to any address in the prefix bypass the mesh and reach their real
-// destination directly. Unlike excludePortAcceptExprs it matches no L4 protocol —
-// the carve-out is destination-based, so it applies to both the TCP and UDP
-// capture rules. The prefix is IPv4 (the capture table is TableFamilyIPv4).
+// Destination-based, so it carves out both transports. Also used for the
+// loopback /8 (the pod-local fast lane and Envoy's own app-cluster dials) and
+// the built-in special ranges. IPv4 only (the table is TableFamilyIPv4).
 func excludeIPRangeAcceptExprs(prefix netip.Prefix) []expr.Any {
 	network := prefix.Masked().Addr().As4()
 	mask := net.CIDRMask(prefix.Bits(), 32)
 	return []expr.Any{
-		// ip daddr (IPv4 dest = offset 16, len 4)
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
-		// reg1 &= netmask
 		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: mask, Xor: []byte{0x00, 0x00, 0x00, 0x00}},
-		// reg1 == network -> accept
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: network[:]},
 		&expr.Verdict{Kind: expr.VerdictAccept},
 	}
 }
 
-// passthroughMarkAcceptExprs builds the rule:
+// passthroughMarkAcceptExprs builds:
 //
 //	meta mark <fwmark> accept
 //
-// It matches the netfilter fwmark Envoy stamps (via SO_MARK) on the
-// passthrough_original_dst cluster's upstream sockets and accepts ahead of the
-// redirect, so the proxy's own forwarded egress is not re-captured (proposal 022
-// M2-default). The mark is a u32 loaded into the register in host (little-endian)
-// byte order, matching the conntrack-state encoding used above.
+// Accepts the proxy's own forwarded egress (SO_MARK'd by the
+// passthrough_original_dst cluster) ahead of the marks. In practice it never
+// matches -- the proxy's sockets live in the host netns -- and it is kept as a
+// defensive first rule (proposal 022). The mark is a u32 loaded into the
+// register in host byte order.
 func passthroughMarkAcceptExprs(fwmark uint32) []expr.Any {
-	mark := make([]byte, 4)
-	binary.LittleEndian.PutUint32(mark, fwmark)
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: mark},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: leUint32(fwmark)},
 		&expr.Verdict{Kind: expr.VerdictAccept},
 	}
 }
 
-// redirectAllTCPExprs builds the broad-redirect rule:
+// markSetDportExprs builds:
 //
-//	meta l4proto tcp · ip daddr & 255.0.0.0 != 127.0.0.0 → redirect to capturePort
+//	meta l4proto <proto> · th dport <port> · meta mark set <mark>
 //
-// Unlike captureRedirectExprs, there is no dport match: ALL non-loopback outbound
-// TCP is redirected. The loopback exclusion is identical to the scoped rule so
-// the pod-local fast-lane (127.x:18081 → proxy) and Envoy's own app-cluster
-// connections (127.x:appPort inside netns) are never re-captured.
-func redirectAllTCPExprs(capturePort uint16) []expr.Any {
+// The scoped capture rules. No loopback carve-out is needed here: 127.0.0.0/8
+// is accepted earlier in the chain.
+func markSetDportExprs(proto byte, port uint16, mark uint32) []expr.Any {
 	return []expr.Any{
-		// meta l4proto == tcp
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(port)},
+		&expr.Immediate{Register: 1, Data: leUint32(mark)},
+		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1, SourceRegister: true},
+	}
+}
+
+// markSetAnyTCPExprs builds the redirect-all rule:
+//
+//	meta l4proto tcp · meta mark set <mark>
+//
+// ALL outbound TCP not accepted earlier. Its safety rests entirely on the
+// accepts above it -- `ct direction reply` most of all.
+func markSetAnyTCPExprs(mark uint32) []expr.Any {
+	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
-		// ip daddr (IPv4 dest = offset 16, len 4), masked to /8, != 127.0.0.0
-		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
-		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: []byte{0xff, 0x00, 0x00, 0x00}, Xor: []byte{0x00, 0x00, 0x00, 0x00}},
-		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{127, 0, 0, 0}},
-		// redirect to capturePort (no dport constraint)
-		&expr.Immediate{Register: 1, Data: beUint16(capturePort)},
-		&expr.Redir{RegisterProtoMin: 1},
+		&expr.Immediate{Register: 1, Data: leUint32(mark)},
+		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1, SourceRegister: true},
 	}
+}
+
+// tproxyTCPExprs builds the prerouting rule:
+//
+//	iif lo · meta mark <mark> · meta l4proto tcp · tproxy to :<port> · accept
+//
+// Socket lookup by the target port with the IP header untouched: the single TCP
+// capture listener on ProxyCapturePort receives connections to every captured
+// destination and sees the original destination as the accepted socket's local
+// endpoint. tproxy assigns only to a socket with IP_TRANSPARENT (the capture
+// listener sets `transparent: true`, PR 2).
+func tproxyTCPExprs(mark uint32, port uint16) []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifname("lo")},
+		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: leUint32(mark)},
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+		&expr.Immediate{Register: 1, Data: beUint16(port)},
+		&expr.TProxy{Family: unix.NFPROTO_IPV4, TableFamily: unix.NFPROTO_IPV4, RegPort: 1},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// divertUDPAcceptExprs builds the prerouting rule:
+//
+//	iif lo · meta mark <mark> · meta l4proto udp · accept
+//
+// No tproxy statement: the UDP capture listener binds the port the client
+// dialed, so plain local delivery of the intact packet reaches it. A port
+// rewrite here would be a no-op at best and, if the port differed, would break
+// the reply (the reply's source port is the socket's bound port and a
+// connected client drops a mismatch).
+func divertUDPAcceptExprs(mark uint32) []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifname("lo")},
+		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: leUint32(mark)},
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_UDP}},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// beUint16 encodes a port for a transport-header comparison (network order).
+func beUint16(v uint16) []byte {
+	b := make([]byte, 2)
+	binary.BigEndian.PutUint16(b, v)
+	return b
+}
+
+// leUint32 encodes a mark for a meta register (host order; nftables registers
+// hold meta values in host byte order, as the passthrough accept always has).
+func leUint32(v uint32) []byte {
+	b := make([]byte, 4)
+	binary.LittleEndian.PutUint32(b, v)
+	return b
+}
+
+// ifname encodes an interface name for an IIFNAME comparison: the kernel
+// compares a fixed IFNAMSIZ (16) byte buffer, NUL-padded.
+func ifname(name string) []byte {
+	b := make([]byte, unix.IFNAMSIZ)
+	copy(b, name)
+	return b
 }

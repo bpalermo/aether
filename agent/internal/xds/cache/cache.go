@@ -295,7 +295,7 @@ type SnapshotCache struct {
 	// proposal 018 Phase 3b). Guarded by depMu.
 	tlsServiceRoutes map[string][]proxy.L4ServiceRoute
 	// udpServiceRoutes holds the UDPRoute backends (parentRef=Service, proposal 018
-	// Phase 3b). Control-plane only until the CNI UDP redirect lands. Guarded by depMu.
+	// Phase 3b; transparent capture per proposal 038). Guarded by depMu.
 	udpServiceRoutes map[string][]proxy.L4Backend
 	// observedTTL overrides defaultObservedTTL when > 0 (test hook).
 	observedTTL time.Duration
@@ -449,14 +449,15 @@ type SnapshotCache struct {
 	// last built against (#877). Compared on every snapshot push so a change
 	// rebuilds them; see reconcileCaptureTCPChains.
 	tcpFloorIdentitySeen bool
-	// udpBoundClusterSeen is the udp: cluster the per-pod UDP capture listeners
-	// were last built against (#873). Which backend is bindable depends on the
-	// CLUSTER cache — a backend whose cluster this snapshot does not publish
-	// must not be named — and that arrives asynchronously from the UDPRoute, so
-	// a listener built before the backend registered would otherwise stay absent
-	// until the next UDPRoute event. Compared on every snapshot push; see
-	// reconcileUDPCaptureListeners.
-	udpBoundClusterSeen string
+	// udpCaptureArmsSeen is the canonical arm set (proxy.UDPCaptureArmsKey) the
+	// per-pod UDP capture listeners were last built against (#873, proposal
+	// 038). Which arms exist depends on the CLUSTER cache — a backend whose
+	// cluster this snapshot does not publish must not be named — and on the
+	// parents' ClusterIPs, both of which arrive asynchronously from the
+	// UDPRoute, so a listener built before either landed would otherwise stay
+	// absent until the next UDPRoute event. Compared on every snapshot push;
+	// see reconcileUDPCaptureListeners.
+	udpCaptureArmsSeen string
 
 	// meshDNSSnapshotPath is the host-persistent file the capture reconciler writes
 	// the mesh service->IP record table to (proposal 018, mesh-global FQDN; issue
@@ -502,10 +503,12 @@ type listenerEntry struct {
 	capture types.Resource
 	// udpCapture is the per-pod UDP capture listener (proposal 018, Phase 3b):
 	// nil unless capture is enabled AND there are UDPRoute backends for this pod's
-	// upstream services. Bound to ProxyCapturePort (UDP socket, same port as the
-	// TCP capture listener) inside the pod netns; the CNI installs a UDP REDIRECT
-	// rule that steers outbound UDP to a mesh ClusterIP into this listener.
-	// No mTLS — UDP datagrams are forwarded in plaintext.
+	// upstream services. Bound to ProxyL4OutboundPort (UDP socket, the port the
+	// client dialled — Envoy replies from the bound port) inside the pod netns,
+	// IP_TRANSPARENT; the CNI's mark-and-divert delivers outbound UDP to that
+	// port with the header intact and a udp_proxy matcher selects the backend by
+	// the dialled ClusterIP (proposal 038). No mTLS — UDP datagrams are
+	// forwarded in plaintext.
 	udpCapture types.Resource
 	// cniPod is the original CNIPod proto used to build this entry. Stored so
 	// the capture listener can be regenerated in-place when the TCP service set

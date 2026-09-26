@@ -1,5 +1,12 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# capture_netns_test.go is a ROOT-ONLY integration test (proposal 038): it
+# creates network namespaces and programs a real kernel. It is its own target,
+# hand-written, so the `netns` CI job can build exactly it and run the binary
+# under sudo, and so `bazel test //...` (which skips it as non-root) keeps the
+# unit target's runtime. Gazelle must not fold it back into :plugin_test.
+# gazelle:exclude capture_netns_test.go
+
 go_library(
     name = "plugin",
     srcs = [
@@ -29,6 +36,7 @@ go_library(
         "@com_github_containernetworking_cni//pkg/types/100",
         "@com_github_google_nftables//:nftables",
         "@com_github_google_nftables//expr",
+        "@com_github_vishvananda_netlink//:netlink",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel_trace//:trace",
         "@org_golang_google_grpc//:grpc",
@@ -70,6 +78,33 @@ go_test(
         "@org_golang_google_grpc//status",
         "@org_golang_google_grpc//test/bufconn",
         "@org_golang_google_protobuf//types/known/wrapperspb",
+        "@org_golang_x_sys//unix",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+# The 038 kernel gate. Skips when not root, FAILS as root on a kernel without
+# nft_tproxy. Run under sudo by the `netns` job in .github/workflows/ci.yaml:
+#   bazel build //cni/internal/plugin:capture_netns_test
+#   sudo "$(bazel cquery --output=files //cni/internal/plugin:capture_netns_test)" -test.v
+# Locally, without sudo, a user namespace is root enough (the kernel autoloads
+# nft_tproxy on first use; the test's own netnses are owned by the userns):
+#   unshare -Urn --map-root-user "$(bazel cquery --output=files //cni/internal/plugin:capture_netns_test)" -test.v
+go_test(
+    name = "capture_netns_test",
+    size = "small",
+    srcs = ["capture_netns_test.go"],
+    embed = [":plugin"],
+    tags = [
+        "no-remote-exec",
+        "requires-root",
+    ],
+    deps = [
+        "//common/constants/mesh",
+        "@com_github_google_nftables//:nftables",
+        "@com_github_google_nftables//expr",
+        "@com_github_stretchr_testify//require",
+        "@com_github_vishvananda_netlink//:netlink",
         "@org_golang_x_sys//unix",
         "@org_uber_go_zap//:zap",
     ],

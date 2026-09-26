@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	"aethermesh.dev/cni/config"
@@ -123,36 +124,35 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		return types.PrintResult(prevResult, netConf.CNIVersion)
 	}
 
-	// Transparent capture (proposal 018, Phase 3a): redirect outbound ClusterIP:18081
-	// to the pod-local capture listener. Unconditional for managed pods (proposal
-	// 031) — the Envoy side always carries the capture listener. Best-effort — a
-	// failure leaves the explicit fast-lane working, so it must not fail the pod's
-	// networking. Uses the runtime netns path (the rule lives in the kernel netns,
-	// not the bind-mount pin).
-	// Ports the pod excludes from capture (proposal 022, M2-default; Istio parity):
-	// connections to these dports bypass the mesh via an nft RETURN ahead of the
-	// redirect, in whichever capture path is active.
+	// Transparent capture (proposal 038): TPROXY-style mark-and-divert for BOTH
+	// transports, replacing the nat REDIRECT of 018/022. Unconditional for
+	// managed pods (proposal 031) -- the Envoy side always carries the capture
+	// listeners. Best-effort -- a failure leaves the explicit fast-lane working,
+	// so it must not fail the pod's networking; but a rejected table means the
+	// pod runs UNCAPTURED, so the warning names it loudly. Uses the runtime
+	// netns path (the rules live in the kernel netns, not the bind-mount pin).
+	//
+	// Ports / ranges the pod excludes from capture (proposal 022 M2-default;
+	// Istio parity) are accepted ahead of the marks, on both transports.
+	// podRedirectAll resolves precedence: an explicit per-pod annotation (opt-in
+	// "true" / opt-out "false") wins, otherwise the node default
+	// (CaptureRedirectAllDefault) applies; with it, ALL outbound TCP not
+	// otherwise excluded is captured, and non-mesh egress passes through via
+	// ORIGINAL_DST on the capture listener's fallback chain.
 	excludePorts := podExcludedOutboundPorts(netConf)
 	excludeRanges := podExcludedOutboundIPRanges(netConf)
 
-	if err := installCaptureRedirect(args.Netns, excludePorts, excludeRanges, p.logger); err != nil {
-		p.logger.Warn("failed to install transparent-capture redirect; continuing without capture",
-			zap.String("netns", args.Netns), zap.Error(err))
-	}
-
-	// Redirect-all capture (proposal 022): redirect ALL outbound non-local TCP into
-	// the capture listener; non-mesh egress passes through via ORIGINAL_DST (the
-	// capture listener unconditionally carries the passthrough fallback chain).
-	// Best-effort: failure leaves the scoped redirect in place.
-	//
-	// podRedirectAll resolves precedence: an explicit per-pod annotation (opt-in
-	// "true" / opt-out "false") wins, otherwise the node default
-	// (CaptureRedirectAllDefault — the M2-default flip for managed pods) applies.
-	if podRedirectAll(netConf) {
-		if err := installCaptureRedirectAll(args.Netns, excludePorts, excludeRanges, p.logger); err != nil {
-			p.logger.Warn("failed to install redirect-all capture (spike/M2a); continuing without redirect-all",
-				zap.String("netns", args.Netns), zap.Error(err))
-		}
+	divertStart := time.Now()
+	divertErr := installCaptureDivert(args.Netns, podRedirectAll(netConf), excludePorts, excludeRanges, p.logger)
+	// Counted as its own operation (aether.cni.operations{operation="capture_divert"})
+	// so an uncaptured node is visible from Prometheus, not only from a log line
+	// the pod's owner never reads: a rejected table (nft_tproxy missing, a
+	// kernel without a route-type chain) leaves the pod running UNCAPTURED and
+	// the mesh silently doing nothing for it.
+	telemetry.RecordOperation("capture_divert", time.Since(divertStart), divertErr)
+	if divertErr != nil {
+		p.logger.Warn("failed to install transparent-capture divert; POD IS RUNNING UNCAPTURED (mesh does nothing for it)",
+			zap.String("netns", args.Netns), zap.Bool("redirect_all", podRedirectAll(netConf)), zap.Error(divertErr))
 	}
 
 	// Mesh DNS (proposal 018, mesh-global FQDN): redirect the pod's :53 to the

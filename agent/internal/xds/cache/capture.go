@@ -26,8 +26,9 @@ import (
 )
 
 // generateUDPCaptureListener builds a pod's per-pod UDP capture listener, or
-// returns nil when capture is disabled or no UDPRoute backends are in scope.
-// The listener is generated from the current udpServiceRoutes snapshot.
+// returns nil when capture is disabled or no UDPRoute arm can be built.
+// The listener is generated from the current udpServiceRoutes snapshot joined
+// with the parents' ClusterIPs.
 func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.Resource, error) {
 	if !c.captureEnabled {
 		return nil, nil
@@ -40,13 +41,14 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 	// captureUDPClusters SKIPS a backend service the cluster cache does not
 	// hold, so without this the generator could bind exactly that name.
 	udpRoutes, unroutable := c.routableUDPRoutes(c.udpServiceRoutesSnapshot())
+	clusterIPs := c.udpParentClusterIPs()
 
-	// Say out loud what the UDP path throws away (#873). The listener carries
-	// ONE cluster, so a traffic split and a second UDPRoute-backed service are
-	// both discarded -- with no NACK and no stat, the first symptom would be
-	// datagrams arriving somewhere unintended. This does not change what is
+	// Say out loud what the UDP path throws away (#873). Each arm carries ONE
+	// cluster, so a traffic split is discarded, and a parent whose VIP is not
+	// known yet has no arm -- with no NACK and no stat, the first symptom would
+	// be datagrams arriving somewhere unintended. This does not change what is
 	// generated; it makes the gap discoverable without reading the generator.
-	reasons := append(unroutable, proxy.UnsupportedUDPRouteShapes(udpRoutes)...)
+	reasons := append(unroutable, proxy.UnsupportedUDPRouteShapes(udpRoutes, clusterIPs)...)
 	if len(reasons) > 0 {
 		c.metrics.UDPRouteUnsupported(context.Background(), int64(len(reasons)))
 		for _, reason := range reasons {
@@ -60,14 +62,15 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 	l, err := proxy.GenerateUDPCaptureListener(
 		cniPod.GetName(),
 		cniPod.GetNetworkNamespace(),
-		meshconst.ProxyCapturePort,
+		meshconst.ProxyL4OutboundPort,
 		udpRoutes,
+		clusterIPs,
 	)
 	if err != nil {
 		return nil, err
 	}
 	if l == nil {
-		// No UDPRoute backends in scope: GenerateUDPCaptureListener returns a nil
+		// No UDPRoute arm in scope: GenerateUDPCaptureListener returns a nil
 		// *Listener. Return an untyped nil interface — NOT the typed-nil pointer.
 		// Returning the *listenerv3.Listener directly would wrap a nil pointer in a
 		// non-nil types.Resource interface, defeating the `!= nil` guard in
@@ -76,6 +79,24 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 		return nil, nil
 	}
 	return l, nil
+}
+
+// udpParentClusterIPs returns "<ns>/<svc>" -> ClusterIP for every mesh Service
+// the capture reconciler has reported, the join the UDP capture matcher keys
+// on (proposal 038). It is the SAME source the TCP floor chains match their
+// /32 on (SetCaptureTCPServices), so a VIP the TCP floor knows the UDP path
+// knows too, and neither can see a Service the other cannot.
+//
+// Lock order: captureMu for reading; callers hold listenerMu, the direction
+// SetCaptureTCPServices' own listener rebuild already establishes.
+func (c *SnapshotCache) udpParentClusterIPs() map[string]string {
+	c.captureMu.RLock()
+	defer c.captureMu.RUnlock()
+	out := make(map[string]string, len(c.captureTCPServices))
+	for _, e := range c.captureTCPServices {
+		out[e.serviceName] = e.clusterIP
+	}
+	return out
 }
 
 // generateCaptureListener builds a pod's transparent-capture listener, or returns
@@ -486,31 +507,36 @@ func (c *SnapshotCache) collectEdgeTCPServices() []string {
 }
 
 // reconcileUDPCaptureListeners rebuilds the per-pod UDP capture listeners when
-// the cluster they can bind has changed (#873).
+// the arm set they can carry has changed (#873, proposal 038).
 //
-// Which backend is bindable is a function of the CLUSTER cache, not only of the
-// UDPRoute: routableUDPRoutes refuses to name a cluster this snapshot does not
-// publish, because udp_proxy has no on-demand cluster path and would accept the
-// datagrams and drop them. The cluster cache is filled asynchronously by the
-// registry, so a UDPRoute that lands before its backend registers produces no
-// listener, and SetUDPServiceRoutes — the only other trigger — will not fire
-// again. Running here, on every snapshot push, is the same discipline
+// Which arms exist is a function of the CLUSTER cache and of the capture
+// reconciler's Service list, not only of the UDPRoute: routableUDPRoutes refuses
+// to name a cluster this snapshot does not publish, because udp_proxy has no
+// on-demand cluster path and would accept the datagrams and drop them; and an
+// arm needs its parent's ClusterIP, which arrives on its own watch. Both are
+// filled asynchronously, so a UDPRoute that lands before its backend registers
+// or before its parent Service is observed produces no arm, and
+// SetUDPServiceRoutes — the only other trigger — will not fire again. Running
+// here, on every snapshot push, is the same discipline
 // reconcileCaptureTCPChains follows for the TCP floor's identity gate, and for
 // the same reason: it makes "the listener is silently absent forever"
 // unreachable.
 //
-// Steady state is one map walk and a string compare; nothing is rebuilt (and
-// nothing is re-warned) unless the bound cluster actually moved.
+// The comparison is over the CANONICAL ARM SET (UDPCaptureArmsKey), not one
+// string: the pre-038 compare held the single bound cluster, so a second
+// service gaining an arm, or a VIP arriving late for one of several, was
+// invisible to it. Steady state is one map walk and a string compare; nothing
+// is rebuilt (and nothing is re-warned) unless an arm actually moved.
 func (c *SnapshotCache) reconcileUDPCaptureListeners() {
 	if !c.captureEnabled {
 		return
 	}
 	routable, _ := c.routableUDPRoutes(c.udpServiceRoutesSnapshot())
-	bound := proxy.SelectedUDPCluster(routable)
+	key := proxy.UDPCaptureArmsKey(proxy.UDPCaptureArms(routable, c.udpParentClusterIPs()))
 
 	c.captureMu.Lock()
-	changed := c.udpBoundClusterSeen != bound
-	c.udpBoundClusterSeen = bound
+	changed := c.udpCaptureArmsSeen != key
+	c.udpCaptureArmsSeen = key
 	c.captureMu.Unlock()
 
 	if !changed {
