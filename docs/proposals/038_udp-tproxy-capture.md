@@ -410,6 +410,15 @@ over a tested path. The full assessment is on #916.
   listener count scale with distinct ports; the shared spelling makes both
   constant. Dialling an application port directly is uncaptured for UDP, which
   is the same non-goal as for raw TCP without redirect-all.
+- **D3 — pursue a per-connection client-certificate selector for QUIC
+  upstream in Envoy?** Q2a is an Envoy limitation, not a design constraint: the
+  selector would have to run before the chain is installed on a per-connection
+  `SSL` instead of the shared `SSL_CTX`. That is a new envoyproxy/envoy change,
+  unsized. If landed, Phase 4b collapses back to one cluster and the #842
+  invariance returns for QUIC too. **Bruno's call**; the plan does not depend on
+  it, and per-source clusters are correct in the meantime. Recorded so the
+  per-source-cluster shape is read as a workaround with a known exit, not a
+  design.
 - **D2 — the divert mark. DECIDED 2026-09-26: `0xae71`**, reserved as
   `CaptureDivertFwMark` in `common/constants/mesh` beside
   `CapturePassthroughFwMark = 0xae7e`. Same `0xae7x` family so the two read as
@@ -437,11 +446,36 @@ over a tested path. The full assessment is on #916.
   **Q2a** does it honour the cert mapper, choosing the handshake cert per
   connection from filter state? **Q2b** does the HTTP/3 pool fold the hashable
   key into its hash, partitioning QUIC connections per source identity?
-  Q2a=no → Phase 4 outbound is one cluster per source ServiceAccount (the
-  pre-#842 shape, with its re-push-on-identity-change cost). Q2b=no → the #831
-  leak class on QUIC even with Q2a=yes, and Phase 4 is blocked until it is
-  fixed upstream. Asked of the Envoy tree on 2026-09-26; the plan below carries
-  both branches.
+  **Answered 2026-09-26 from source at `13144fb`, unchanged on main: Q2a = no,
+  Q2b = yes.**
+
+  *Q2a.* `QuicClientTransportSocketFactory::create` rejects a certificate
+  selector at config load —
+  `source/common/quic/quic_client_transport_socket_factory.cc:93-94`:
+  `if (config->tlsCertificateSelectorFactory()) return
+  absl::UnimplementedError("Client certificate selector not supported on QUIC")`.
+  Loud, not silent: a `QuicUpstreamTransport` carrying the mapper fails cluster
+  load. The client cert is installed **once per crypto config**, not per
+  connection — `configureQuicClientCertChain` (line 38) pulls cert and key from
+  the context's `SSL_CTX` and installs them with `SSL_CTX_set_chain_and_key`
+  (line 80) on the QUICHE client `SSL_CTX`, because the QUICHE handshaker needs
+  direct access to the private key. It changes only when SDS rotates the
+  context.
+
+  *Q2b.* The HTTP pool key is built in one protocol-agnostic place
+  (`cluster_manager_impl.cc`, `ClusterEntry::httpConnPool`), which calls
+  `transportSocketFactory().hashKey(...)`; `QuicClientTransportSocketFactory`
+  derives from `CommonUpstreamTransportSocketFactory` and does not override
+  `hashKey`, so it inherits the fold over hashable
+  `downstreamSharedFilterStateObjects()` the TCP path relies on. HTTP/3 pools
+  partition per (host, source identity) exactly as h2 pools do.
+
+  *Net for Phase 4.* Pooling does not reopen #831 — two identities never share
+  a QUIC connection. But partitioning alone does not give per-source identity,
+  because the certificate presented is the cluster's regardless of partition.
+  So **Phase 4's outbound is one QUIC cluster per source ServiceAccount** — the
+  pre-#842 shape, for QUIC only — until QUIC gains a per-connection selector
+  upstream (D3).
 - **Q3.** Migration: a QUIC connection that migrates keeps its identity (the
   validated chain lives on the session), but does the *source* proxy's
   per-source binding — keyed by source SPIFFE ID since #822 — survive a path
@@ -489,7 +523,7 @@ before a UDPRoute exists, and equally deliberate.
 | PR | scope | size | gate |
 |---|---|---|---|
 | 4a | Inbound: a QUIC listener bound into each pod's netns on **UDP:18008**, `envoy.transport_sockets.quic` wrapping the SAME `DownstreamTlsContext` (SDS server cert, validation context with SPIFFE SAN pinning) as the TCP inbound; `require_client_certificate: true`; `enable_resumption: false`, `enable_early_data: false` (R4). Routes to the same per-port app clusters. Extend the port-role gate to 18008. | M | `//test/envoy_validate` asserts the two `false`s on every mTLS QUIC chain — a chain without them must FAIL validation, and the test must be seen red |
-| 4b | Outbound — **contingent on Q2**. *Q2a=yes ∧ Q2b=yes:* the per-source mesh cluster gains an HTTP/3 variant with the same cert mapper on `QuicUpstreamTransport`; one cluster, invariant under the identity set, as today. *Q2a=no:* one QUIC cluster per source ServiceAccount, with the identity-set re-push cost #842 removed coming back for QUIC only — size L, and worth a spike before commit. *Q2b=no:* blocked; file upstream. Either way `//test/mtlspool` gains a QUIC arm asserting source B never rides source A's connection. | M / L | mtlspool negative control red-then-green |
+| 4b | Outbound — **Q2 answered: one QUIC cluster per source ServiceAccount.** `QuicUpstreamTransport` rejects the cert mapper at load (Q2a=no), so the per-source identity has to be the cluster's own `UpstreamTlsContext`, one per local ServiceAccount, named `quic:<svc>@<source-sa>` and selected by the source's filter-state identity at the route. The identity-set re-push cost #842 removed returns for these clusters only: the first pod of a new ServiceAccount on a node adds a QUIC cluster, the last one leaving removes it, and each add re-warms only that cluster — bounded by local ServiceAccounts, not by mesh services, and never touching the TCP clusters. Pooling still partitions per identity (Q2b=yes), so `//test/mtlspool` gains a QUIC arm asserting source B never rides source A's connection — the pooling guarantee is real even though the certificate is per cluster. | L | mtlspool QUIC negative control red-then-green; a cluster-count budget stated before commit (local SAs × QUIC-enabled destinations) |
 | 4c | Selection: explicit allow-list flag first; then "destination advertises UDP:18008" via the registry once the inbound has soaked. | S | e2e |
 | 4d | East-west gateway: UDP:18009 beside TCP:18009, same SNI-forwarding role; cross-cluster last. | M | 019's cross-cluster e2e over QUIC |
 
@@ -515,7 +549,13 @@ or the two traffic classes share a path with no e2e proving they stay apart (R5)
 ## Dependencies
 
 - Envoy pin: #45980 and #47076 present; #47219 (safe resumption default) and
-  #47341 (optional mTLS) absent and not resolvable as of 2026-09-26.
+  #47341 (optional mTLS) absent and not resolvable as of 2026-09-26. Presenting
+  a client cert on a QUIC upstream at all is behind
+  `envoy.reloadable_features.quic_upstream_client_certificates` (default on);
+  `//test/envoy_validate` should assert it is not disabled by any runtime layer
+  aether ships.
+- No per-connection certificate selector on QUIC upstream (Q2a). Phase 4b's
+  per-source clusters are the workaround; D3 is the exit.
 - CNI: route/rule capability, new dependency (Phase 1).
 - Registry: `PORT_PROTOCOL_UDP` and the `=udp` suffix (#933, #934) — present;
   consumed by `UDPLoadAssignment` for the application-port rewrite, not by the
