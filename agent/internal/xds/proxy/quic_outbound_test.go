@@ -25,6 +25,13 @@ func TestQUICClusterName(t *testing.T) {
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", QUICClusterName("demo/echo", "aether.internal", "demo/source-a"))
 }
 
+// TestQUICAltStatName pins the per-source stats key (aether#960).
+func TestQUICAltStatName(t *testing.T) {
+	assert.Equal(t, "demo/echo@demo/source-a", QUICAltStatName("demo/echo", "demo/source-a"))
+	assert.Equal(t, "", QUICAltStatName("", "demo/source-a"), "no h2 key: Envoy keys by the twin's own name")
+	assert.Equal(t, "", QUICAltStatName("demo/echo", ""), "no source key: never fall back to the SHARED h2 key")
+}
+
 // TestQUICServerName pins the SNI/server_names contract both ends share: the
 // port as the first label of the destination's mesh authority, so the name
 // falls under the "*.<sa>.<ns>.<meshDomain>" DNS SAN SPIRE issues (aether#957).
@@ -45,6 +52,8 @@ func TestQUICClusterFrom(t *testing.T) {
 		[]string{"spiffe://aether.internal/ns/demo/sa/echo"}, QUICServerName("8080", "echo.demo.aether.internal"))
 
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", q.GetName())
+	assert.Equal(t, "demo/echo@demo/source-a", q.GetAltStatName(), "a twin must NOT share the h2 cluster's stat tree (aether#960)")
+	assert.Equal(t, "demo/echo", base.GetAltStatName(), "the base keeps its own")
 	assert.Equal(t, "demo/echo", q.GetEdsClusterConfig().GetServiceName(), "the same EDS resource as the h2 twin: no second load assignment")
 	assert.Equal(t, clusterv3.Cluster_EDS, q.GetType())
 	assert.NotNil(t, q.GetLbSubsetConfig(), "subset config cloned")

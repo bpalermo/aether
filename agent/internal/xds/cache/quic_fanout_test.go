@@ -69,6 +69,7 @@ func TestQUICFanoutPublishesPerSourceTwins(t *testing.T) {
 		quicTwins++
 		ts := res.(*clusterv3.Cluster).GetTransportSocket()
 		require.True(t, ts.GetTypedConfig().MessageIs(&quicv3.QuicUpstreamTransport{}), "%s must carry a QUIC upstream transport", name)
+		assert.Equal(t, "demo/echo@"+strings.TrimPrefix(name, "quic:"+echo+"@"), res.(*clusterv3.Cluster).GetAltStatName(), "%s: per-source stats key (aether#960)", name)
 		qt := &quicv3.QuicUpstreamTransport{}
 		require.NoError(t, ts.GetTypedConfig().UnmarshalTo(qt))
 		assert.Equal(t, "8080."+echo, qt.GetUpstreamTlsContext().GetSni(), "%s: SNI is <port>.<authority>, never the bare port (aether#957)", name)
