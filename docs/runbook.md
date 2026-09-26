@@ -510,7 +510,11 @@ for the full install + onboarding walkthrough.
 
 Since #953 every mesh pod has an HTTP/3 inbound on UDP:18008 beside the TCP one
 (same SVID, same client-certificate requirement, same SAN pin); it is inert until a
-source proxy dials it. #956 adds the dialling side, **opt-in per destination**:
+source proxy dials it. #956 adds the dialling side, behind a per-destination allow-list **that is a proving
+gate, not the product surface** (decision 2026-09-26: no opt-in for QUIC — once the
+first QUIC soak on a real cluster passes, the list is removed and every mesh
+destination is dialled over HTTP/3 by every caller, exactly as the inbound is
+unconditional today). Until then:
 
 ```bash
 # one entry per destination; the h2 path is untouched for everything else

@@ -364,10 +364,12 @@ during a roll is a real event, not a rate artefact.
 
 ### The QUIC leg (proposal 038 Phase 4)
 
-East-west QUIC is opt-in per destination (`agent.eastWestQuicServices`), so a soak
-only exercises it when the build under test lists a service the churn rolls. List a
-churned target so a QUIC destination's pods and its callers' twins are rebuilt under
-load:
+East-west QUIC is behind a per-destination allow-list (`agent.eastWestQuicServices`)
+**only until this leg passes once**: the decision (2026-09-26) is no opt-in for QUIC —
+a passing QUIC soak is the proof that removes the flag, after which every mesh
+destination is dialled over HTTP/3 and the leg grades every service. For that first
+proving run, list a churned target so a QUIC destination's pods and its callers'
+twins are rebuilt under load:
 
 ```bash
 # prerequisite ON TALOS: the SPIRE default ClusterSPIFFEID must already issue the
