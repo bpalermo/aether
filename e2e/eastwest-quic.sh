@@ -22,7 +22,11 @@
 #                   with the caller's identity, and its HTTP/3 inbound stays idle
 #   E4  GAMMA       gamma-a (allow-listed) with a weighted HTTPRoute canary to
 #                   gamma-a / gamma-b (both allow-listed, twins present) stays on
-#                   h2 — #956 leaves WeightedClusters routes alone by design
+#                   h2 — the matcher action names ONE cluster, so a weighted
+#                   split has no per-source form (#961)
+#   E4b GAMMA       a single-backendRef HTTPRoute rule to the parent (gamma-a)
+#                   renders as `cluster:` and IS selected: it rides the caller's
+#                   own quic: twin over HTTP/3 like the default route (#961)
 #   E5  Q3          client-a's pod is deleted and comes back with a NEW pod IP;
 #                   its requests still carry client-a's identity over HTTP/3, and
 #                   client-b's still carry client-b's
@@ -679,10 +683,10 @@ verify_h2only() {
 
 # A weighted canary parented to gamma-a (both backends allow-listed). #956
 # rewrites only routes whose action is `cluster: <this service's h2 cluster>`;
-# a WeightedClusters action is left alone, so GAMMA traffic stays h2 in this
-# cut. Note what this does NOT cover, by design: a single-backend GAMMA rule
-# whose backend is the parent itself renders as `cluster:` and WOULD be
-# rewritten to QUIC — the weighted shape is the one #956 promises stays h2.
+# a WeightedClusters action is left alone because the matcher plugin's action
+# names ONE cluster (#961) -- so a GAMMA split stays h2. E4b below covers the
+# other GAMMA shape: a single-backendRef rule to the parent renders as
+# `cluster:` and IS selected (rides QUIC), which is the documented behaviour.
 apply_gamma_route() {
 	kc apply -f - >/dev/null <<YAML || die "HTTPRoute apply failed"
 apiVersion: gateway.networking.k8s.io/v1
@@ -721,6 +725,50 @@ verify_gamma() {
 	ok "HTTPRoute removed (verify is re-runnable)"
 }
 
+# --- E4b: a single-backendRef GAMMA rule to the parent rides QUIC (#961) -------
+
+# The rule adds a request header so its liveness is observable on the DATA
+# (agnhost /header echoes it): the backend is the parent itself, so /hostname
+# cannot tell "the rule took effect" from "the default route answered".
+apply_gamma_single_route() {
+	kc apply -f - >/dev/null <<YAML || die "HTTPRoute apply failed"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: gamma-single, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - {group: "", kind: Service, name: ${GAMMA_DSTS[0]}}
+  rules:
+    - filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            add:
+              - {name: x-gamma-single, value: "1"}
+      backendRefs:
+        - {group: "", kind: Service, name: ${GAMMA_DSTS[0]}, port: $APP_PORT}
+YAML
+}
+
+verify_gamma_single() {
+	log "E4b GAMMA: single-backendRef HTTPRoute on ${GAMMA_DSTS[0]} to itself — selected, rides HTTP/3 (#961)"
+	apply_gamma_single_route
+	local deadline=$((SECONDS + 180)) replies
+	while true; do
+		replies="$(req_batch "${SOURCES[0]}" "${GAMMA_DSTS[0]}" "/header?key=X-Gamma-Single" 5)"
+		printf '%s\n' "$replies" | awk '$1 == "200" && $2 == "1" { f = 1 } END { exit !f }' && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "E4b: the HTTPRoute never took effect — no request to ${GAMMA_DSTS[0]} carried x-gamma-single in 180s: $(summarize "$replies")"
+		sleep 5
+	done
+	ok "the single-backend route is live (x-gamma-single reaches ${GAMMA_DSTS[0]})"
+	local s
+	for s in "${SOURCES[@]}"; do
+		assert_quic E4b "$s" "${GAMMA_DSTS[0]}"
+	done
+	kc -n "$TEST_NS" delete httproute gamma-single --ignore-not-found >/dev/null || die "could not delete the HTTPRoute"
+	ok "HTTPRoute removed (verify is re-runnable)"
+}
+
 # --- E5: Q3 — identity survives a client address change ----------------------
 
 verify_q3() {
@@ -755,6 +803,7 @@ verify() {
 	verify_quic
 	verify_h2only
 	verify_gamma
+	verify_gamma_single
 	verify_q3
 	log "all east-west QUIC assertions passed (fan-out, per-source HTTP/3 + XFCC, h2-only untouched, GAMMA stays h2, identity across a client address change)"
 }
