@@ -476,7 +476,7 @@ func BuildCaptureTCPBlackholeFilterChain(sourceSpiffeID string) *listenerv3.Filt
 	return &listenerv3.FilterChain{
 		Name: "cap_tcp_blackhole",
 		FilterChainMatch: &listenerv3.FilterChainMatch{
-			DestinationPort: wrapperspb.UInt32(meshconst.ProxyTCPOutboundPort),
+			DestinationPort: wrapperspb.UInt32(meshconst.ProxyL4OutboundPort),
 		},
 		Filters: append(
 			BuildSourceFilterStates(sourceSpiffeID),
@@ -558,7 +558,7 @@ func claimedTCPPorts(svc CaptureTCPService) []uint32 {
 		add(p)
 	}
 	if svc.PrimaryIsTCP {
-		add(meshconst.ProxyTCPOutboundPort)
+		add(meshconst.ProxyL4OutboundPort)
 		add(svc.PrimaryPort)
 	}
 	return ports
@@ -601,7 +601,7 @@ func tcpPrimaryFloorChains(svc CaptureTCPService, sourceSpiffeID string) []*list
 		return nil
 	}
 	var out []*listenerv3.FilterChain
-	for _, p := range []uint32{meshconst.ProxyTCPOutboundPort, svc.PrimaryPort} {
+	for _, p := range []uint32{meshconst.ProxyL4OutboundPort, svc.PrimaryPort} {
 		if p != 0 {
 			out = append(out, qualifyChainByPort(tc, p, fmt.Sprintf("cap_tcp_%s_%d", svc.ClusterName, p)))
 		}

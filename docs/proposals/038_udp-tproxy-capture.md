@@ -73,7 +73,7 @@ have different security properties and the design has to keep them apart.
 
   | role | number | TCP today | UDP under this proposal |
   |---|---|---|---|
-  | L4 mesh spelling | 18082 (`ProxyTCPOutboundPort`) | raw TCP floor (037) | **plaintext UDP services** |
+  | L4 mesh spelling | 18082 (`ProxyL4OutboundPort`, renamed from `ProxyTCPOutboundPort`) | raw TCP floor (037) | **plaintext UDP services** |
   | per-pod inbound | 18008 (`defaultInboundPort`) | mTLS H2 | QUIC, mTLS |
   | east-west gateway | 18009 (`DefaultEastWestTunnelPort`) | mTLS SNI tunnel | QUIC, mTLS |
 

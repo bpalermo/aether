@@ -7,39 +7,44 @@ const (
 	// binds inside each pod's network namespace. The CNI plugin probes this
 	// address (from within the netns) to confirm the data plane is serving.
 	ProxyOutboundPort = 18081
-	// ProxyTCPOutboundPort is the mesh's well-known TCP spelling: a client dials
-	// <svc>.<ns>.<mesh-domain>:18082 to reach the service's default TCP port
-	// (proposal 037). It is the L4 counterpart of ProxyOutboundPort.
+	// ProxyL4OutboundPort is the mesh's well-known L4 spelling, for BOTH
+	// transports: a client dials <svc>.<ns>.<mesh-domain>:18082 to reach the
+	// service's default raw-TCP port (proposal 037) or, since proposal 038 D1,
+	// its plaintext UDP port. It is the L4 counterpart of ProxyOutboundPort.
 	//
 	// Why a second port rather than resolving the bare name by the service's
 	// protocol: HTTP demuxes on the authority header, which carries its own port
-	// as a string, so `http://<svc>/` is unambiguous without one. Raw TCP has no
-	// authority — its only demux key is the 5-tuple — so it needs a port, and
-	// without a well-known one the meaning of the bare name would depend on
-	// whichever protocol the service's PRIMARY port happened to be. That made a
-	// client's spelling change meaning when a service was re-annotated.
+	// as a string, so `http://<svc>/` is unambiguous without one. Raw TCP and UDP
+	// have no authority — their only demux key is the 5-tuple — so they need a
+	// port, and without a well-known one the meaning of the bare name would
+	// depend on whichever protocol the service's PRIMARY port happened to be.
 	//
-	// The capture listener matches it with `destination_port 18082` on top of the
-	// ClusterIP /32, which Envoy evaluates ahead of prefix_ranges and which
-	// use_original_dst already recovers. Unlike a per-app-port TCP dial, this one
-	// does NOT require redirect-all: the scoped CNI rule redirects it alongside
-	// ProxyOutboundPort, and the generated mesh Service exposes it, so it also
-	// resolves through kube-proxy rather than hanging.
+	// ONE NUMBER, BOTH TRANSPORTS. TCP and UDP are independent socket families,
+	// so a TCP listener and a UDP listener each bind 18082 on their own socket,
+	// the way HTTP/3 runs TCP+QUIC on :443 and the way the inbound (18008) and
+	// east-west gateway (18009) ports are shared. A second number for UDP would
+	// mean a second CNI rule, a second Service port and a second capture path.
+	// Pinned by TestL4OutboundPortIsSharedAcrossTransports: a distinct
+	// UDP/QUIC outbound port constant in this package fails the build.
 	//
-	// 18082 was free tree-wide when chosen; in-use 18xxx are 18001, 18008, 18009,
-	// 18021, 18054, 18080 (e2e fixtures) and 18081.
-	ProxyTCPOutboundPort = 18082
-	// ProxyCapturePort is the port both the per-pod TCP and UDP capture listeners
-	// bind inside the pod netns (proposal 018, Phase 3a/3b). TCP and UDP are
-	// independent at the socket layer — a UDP socket and a TCP socket can both
-	// bind the same port number — so a single port serves both protocols (like
-	// HTTP/3 running TCP+QUIC on :443). The same one-number-both-transports rule
-	// binds the east-west tunnel port (proxy.DefaultEastWestTunnelPort, 18009):
-	// east-west QUIC shares it rather than taking a new one. The CNI redirects outbound TCP to a mesh
-	// ClusterIP:ProxyOutboundPort to this port (Phase 3a, TCP listener); it also
-	// redirects outbound UDP to this same port (Phase 3b, UDP listener). Default
-	// off. In aether's 18xxx range (with ProxyOutboundPort) to avoid colliding
-	// with Istio's 15001 outbound-capture port if both meshes share a node.
+	// (Renamed from ProxyL4OutboundPort when UDP joined it; the value is
+	// unchanged.) 18082 was free tree-wide when chosen; in-use 18xxx are 18001,
+	// 18008, 18009, 18021, 18054, 18080 (e2e fixtures) and 18081.
+	ProxyL4OutboundPort = 18082
+	// ProxyCapturePort is the port the per-pod TCP capture listener binds inside
+	// the pod netns (proposal 018, Phase 3a). Under TPROXY capture (proposal 038)
+	// the CNI diverts captured TCP to it with `tproxy to :18001` while leaving
+	// the IP header intact, so ONE listener here serves every captured port —
+	// 18081, 18082 and, under redirect-all, any port — and the accepted socket's
+	// local endpoint is still the original destination. In aether's 18xxx range
+	// (with ProxyOutboundPort) to avoid colliding with Istio's 15001
+	// outbound-capture port if both meshes share a node.
+	//
+	// UDP does NOT bind this port. A datagram listener's reply source port is
+	// always its bound port, so the UDP capture listener must bind the port the
+	// client dialed — ProxyL4OutboundPort, 18082 — and no port rewrite is
+	// possible for it. (Before 038 both transports bound 18001 via REDIRECT;
+	// that is the design #916 retired.)
 	//
 	// SECURITY NOTE: UDP datagrams routed via the UDP capture listener are NOT
 	// protected by mesh mTLS. mTLS is a TCP/TLS construct; DTLS is not
@@ -50,13 +55,36 @@ const (
 	// CapturePassthroughFwMark is the netfilter fwmark Envoy stamps (via SO_MARK on
 	// the passthrough_original_dst cluster's upstream sockets) on connections it
 	// forwards out of the redirect-all capture (proposal 022, M2-default). The CNI
-	// matches this mark with a `meta mark → RETURN` rule ahead of the redirect, so
-	// the proxy's OWN forwarded egress is never re-captured into a loop. SO_MARK
-	// (not a UID match) is used because the proxy runs as root — a UID rule would
-	// wrongly exempt any root-running app pod. Distinct from Istio's 1337 so the two
-	// meshes' marks don't collide if they share a node. Requires CAP_NET_ADMIN
-	// (the agent/proxy container has it).
+	// accepts this mark ahead of the capture rules so the proxy's OWN forwarded
+	// egress is never re-captured into a loop. SO_MARK (not a UID match) is used
+	// because the proxy runs as root — a UID rule would wrongly exempt any
+	// root-running app pod. Distinct from Istio's 1337 so the two meshes' marks
+	// don't collide if they share a node. Requires CAP_NET_ADMIN.
+	//
+	// In practice this never matches: the proxy is hostNetwork, so its upstream
+	// sockets live in the HOST netns while the capture rules live in each POD
+	// netns. It is kept as a defensive first rule (proposal 022: "harmless if the
+	// passthrough egresses proxy-side").
 	CapturePassthroughFwMark = 0xae7e
+	// CaptureDivertFwMark is the fwmark the CNI's OUTPUT rule sets on a captured
+	// packet under TPROXY capture (proposal 038). A policy-routing rule
+	// (fwmark → CaptureDivertRouteTable, whose only route is `local default dev
+	// lo`) then delivers the packet locally with its IP header INTACT, and a
+	// prerouting `tproxy` rule hands it to the transparent capture socket. This
+	// replaces the nat REDIRECT, which rewrote the destination and so lost it.
+	//
+	// Same 0xae7x family as the passthrough mark so the two read as related in
+	// `nft list ruleset`; a DISTINCT value, and neither is a bitmask superset of
+	// the other, so the passthrough accept can never match a diverted packet and
+	// the divert rule can never re-mark a passthrough. Disjoint from kube-proxy's
+	// masked 0x4000/0x8000 marks. A marked packet is always routed to lo and
+	// never leaves the pod netns (crossing a veth scrubs skb->mark regardless).
+	// Pinned by TestCaptureMarksAreDisjoint.
+	CaptureDivertFwMark = 0xae71
+	// CaptureDivertRouteTable is the policy-routing table the divert rule looks
+	// up. Any fixed id above the main table works; 100 matches the kernel TPROXY
+	// documentation's own example and the Phase 0/0b spikes.
+	CaptureDivertRouteTable = 100
 	// ProxyDNSResolverPort is the host port the node agent's in-process mesh-DNS
 	// resolver listens on (UDP+TCP) at HOST_IP (proposal 018, mesh-global FQDN). The
 	// CNI DNATs each pod's outbound :53 straight to HOST_IP:ProxyDNSResolverPort. In

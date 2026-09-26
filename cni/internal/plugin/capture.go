@@ -68,7 +68,7 @@ func installCaptureRedirect(netnsPath string, excludePorts []uint16, excludeRang
 // destination).
 func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
 	meshPort := uint16(meshconst.ProxyOutboundPort)
-	tcpMeshPort := uint16(meshconst.ProxyTCPOutboundPort)
+	l4MeshPort := uint16(meshconst.ProxyL4OutboundPort)
 	capturePort := uint16(meshconst.ProxyCapturePort)
 
 	c, err := nftables.New()
@@ -99,7 +99,7 @@ func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix,
 		Chain: chain,
 		Exprs: captureRedirectExprs(unix.IPPROTO_TCP, meshPort, capturePort),
 	})
-	// TCP: outbound TCP to ClusterIP:tcpMeshPort → capturePort (proposal 037).
+	// TCP: outbound TCP to ClusterIP:l4MeshPort → capturePort (proposal 037).
 	//
 	// The mesh's well-known TCP spelling. Scoped capture redirects it alongside
 	// ProxyOutboundPort, which is what makes <svc>:18082 work WITHOUT
@@ -115,11 +115,16 @@ func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix,
 	c.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
-		Exprs: captureRedirectExprs(unix.IPPROTO_TCP, tcpMeshPort, capturePort),
+		Exprs: captureRedirectExprs(unix.IPPROTO_TCP, l4MeshPort, capturePort),
 	})
 	// UDP: outbound UDP to ClusterIP:meshPort → capturePort (Phase 3b).
-	// NOT redirected for tcpMeshPort: 18082 is a TCP spelling, and the UDP floor
-	// addresses backends by their application port (proposal 018 Phase 3b).
+	//
+	// STALE BY DESIGN, replaced by proposal 038: under TPROXY capture UDP dials
+	// the L4 spelling (l4MeshPort, 18082 — one number for both transports, D1)
+	// and is DIVERTED with its header intact to a transparent listener bound on
+	// that same port, because a datagram reply's source port is the socket's
+	// bound port and cannot be rewritten. This REDIRECT of 18081 to 18001 is the
+	// pre-038 shape and is removed, not migrated, when the divert rules land.
 	// Datagrams arriving at ProxyCapturePort:UDP are handled by the udp_proxy
 	// capture listener generated for each pod when UDPRoute backends are present.
 	// The TCP and UDP listeners coexist on :18001 via independent protocol sockets.
@@ -135,7 +140,7 @@ func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix,
 	}
 	logger.Info("installed transparent-capture redirect",
 		zap.Uint16("mesh_port", meshPort),
-		zap.Uint16("tcp_mesh_port", tcpMeshPort),
+		zap.Uint16("tcp_mesh_port", l4MeshPort),
 		zap.Uint16("capture_port", capturePort))
 	return nil
 }

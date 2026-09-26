@@ -1435,7 +1435,7 @@ func (c *SnapshotCache) tcpSpellingsIfNoHTTPPortLocked(svc string) string {
 	}
 
 	fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
-	spellings := fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyTCPOutboundPort)
+	spellings := fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyL4OutboundPort)
 	if p := primaryPortOf(tcpEntry); p != 0 {
 		spellings += fmt.Sprintf(" or %s:%d", fqdn, p)
 	}
