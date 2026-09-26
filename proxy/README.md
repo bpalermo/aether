@@ -114,7 +114,10 @@ symbol upload is keyed by (#653).
   patch is an upstream PR that has not reached a pin yet, and it goes away with
   the next pin bump that contains it. Carried today: envoyproxy/envoy#47743
   (UDP hot-restart forwarding keyed by listener address + network namespace,
-  aether#967; test cases, docs and changelog dropped, `test/mocks/network/mocks.h` kept for our test build).
+  aether#967; test cases, docs and changelog dropped, `test/mocks/network/mocks.h` kept for our test build)
+  and envoyproxy/envoy#47740 (QUIC client hostname check deferred to explicit SAN
+  matchers, aether#957; behind
+  `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`).
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)
 
