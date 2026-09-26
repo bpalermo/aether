@@ -11,6 +11,7 @@ Three components run together:
 | **k6 runners** (`k6-runner.yaml`) | mesh load by NAME (~300/s) so DNS + cross-node paths are exercised |
 | **Churn driver** (`churn.sh`) | 31 rolling restarts incl. mesh-dns/agent/proxy/edge + a concurrent triple, then a 90-minute no-roll window and a demand-set shrink |
 | **Multi-protocol leg** (`multiprotocol.yaml`) | proposal 037's per-port TCP chains under load, and the evidence for its Phase 4 gate |
+| **UDP leg** (`udp.yaml`) | proposal 038's transparent UDP capture under load: the divert, the transparent socket, and the VIP-sourced reply, through every roll |
 
 The prober is external **on purpose**: the mesh's own self-reported metrics are blind to
 the very churn being tested. Never grade a soak on mesh self-SLI alone.
@@ -32,6 +33,16 @@ kubectl -n aether-test get pods -l app=echo -o wide   # expect 3, on 3 different
 kubectl apply -n aether-test -f e2e/soak/multiprotocol.yaml
 kubectl -n aether-test get pods -l app=mixed-svc -o wide     # expect 3, spread
 kubectl -n aether-test logs -l app.kubernetes.io/name=mp-dialer --tail=1 | grep AETHER_METRIC
+
+# 0b2. The proposal-038 leg: a UDP-primary workload behind a UDPRoute plus the
+#      per-node dialer that keeps the transparent UDP capture busy. Same "only
+#      needed once" status and the same reason to CHECK it: without it the UDP
+#      half of #947 sits idle for eight hours. The dialer must already be
+#      reporting fail=0 before T0 -- a leg that is failing at T0 measures nothing
+#      about churn.
+kubectl apply -n aether-test -f e2e/soak/udp.yaml
+kubectl -n aether-test get pods -l app=udp-echo -o wide         # expect 3, spread
+kubectl -n aether-test logs -l app.kubernetes.io/name=udp-dialer --tail=1 | grep AETHER_METRIC
 
 # 0c. ONCE, before the run: prove the any-port shim's counter can move. See
 #     "The Phase 4 evidence clock" below -- a zero from a counter that was never
@@ -318,6 +329,39 @@ for p in $(kubectl -n aether-test get pods -o name | grep mp-dialer); do
 done
 ```
 
+### The UDP leg (proposal 038)
+
+Since #947 the CNI captures UDP with the same mark-and-divert as TCP, and the UDP
+capture listener is a transparent socket on :18082 with one `udp_proxy` matcher arm
+per dialled ClusterIP. `udp.yaml` is the only continuous UDP client on the cluster,
+so its tallies are the only evidence that path survives churn. Read them the same
+way as the 037 dialer's — supplementary, never authoritative:
+
+```bash
+for p in $(kubectl -n aether-test get pods -o name | grep udp-dialer); do
+  kubectl -n aether-test logs --tail=1 "$p" | grep AETHER_METRIC
+done
+```
+
+A `fail` that climbs only in the minute bracketing a `udp-echo` or proxy roll is the
+known shape (the arm is rebuilt on the next push; udp_proxy sessions on the old proxy
+drain); one that climbs in the no-roll window is a finding. Two proxy-side series say
+which half broke:
+
+```promql
+# datagrams the transparent listener received and replied to, per pod (RAW counters)
+envoy_udp_capture_udp_.*_downstream_sess_rx_datagrams
+envoy_udp_capture_udp_.*_downstream_sess_tx_datagrams
+# an arm whose every backend is unroutable (#937) -- must stay flat
+aether_agent_l4route_udp_no_healthy_backend_total
+```
+
+And one CNI-side counter that must stay at zero for the whole run:
+`aether_cni_operations_total{operation="capture_divert",result="error"}` — a
+non-zero here is a pod that started UNCAPTURED (the table was rejected), and the
+mesh silently does nothing for it. It is a per-pod-ADD counter, so any increase
+during a roll is a real event, not a rate artefact.
+
 ## Hard-won gotchas
 
 Each of these invalidated a real run:
@@ -445,6 +489,10 @@ Each of these invalidated a real run:
   the three SANCTIONED raw-TCP spellings on every node. It deliberately never dials an
   unsanctioned port; that is the shim's territory and driving it would destroy the
   Phase 4 measurement.
+- `udp.yaml` — the proposal-038 leg: `udp-echo` (UDP-primary, 3 replicas spread, a
+  self-parented `UDPRoute`) and the `udp-dialer` DaemonSet that dials
+  `udp-echo.<ns>.aether.internal:18082` from every node with a unique token per
+  datagram. Plaintext by design; delivery under churn is the question it asks.
 - `anyport-probe.sh` — the one-shot negative control for that gate: dials a TCP-primary
   service at an unsanctioned port so `cap_tcp_anyport_*` is *shown* to move before the
   run relies on it not moving.

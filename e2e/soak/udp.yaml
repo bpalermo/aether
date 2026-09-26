@@ -1,0 +1,220 @@
+# The soak's proposal-038 leg: a UDP-primary workload, the UDPRoute that gives it
+# a data path, and the per-node dialer that keeps the transparent UDP capture
+# under load for the whole run.
+#
+#   kubectl apply -n aether-test -f e2e/soak/udp.yaml
+#
+# Why this exists (2026-09-26). #947 replaced the nat REDIRECT with mark-and-
+# divert for BOTH transports and gave UDP a per-VIP matcher on a transparent
+# listener bound to :18082. Until then nothing on this cluster spoke UDP through
+# the mesh at all: `e2e/l4routes.sh` on kind was the only UDP client in the
+# repo, and it runs nightly, not for eight hours under churn. A soak that cannot
+# grade UDP would grade the TCP half of a change whose whole point was to move
+# both transports onto one mechanism.
+#
+# Three things this leg exercises that nothing else on the cluster does:
+#   - the CNI divert on udp dport 18082, with the header intact, into a socket
+#     Envoy bound INSIDE the pod netns with IP_TRANSPARENT;
+#   - udp_proxy's reply leaving FROM the VIP the pod dialled, which is the one
+#     property a connected client cannot forgive (the kernel drops a reply from
+#     any other source before nc ever sees it);
+#   - the arm set surviving churn: a UDPRoute-backed service being rolled while
+#     its parent's ClusterIP stays put, so the per-push reconcile keeps the arm.
+#
+# The parent and the backend are the SAME Service, on purpose: the matcher arm
+# is VIP(udp-echo) -> udp:udp-echo, so one spread Deployment is the whole
+# fixture. l4routes.sh keeps them apart because it asserts SELECTION between two
+# parents; here the question is delivery under churn, and the smallest fixture
+# that asks it is the right one.
+#
+# UDP RIDES THE MESH IN PLAINTEXT (mTLS is a TCP/TLS construct; no DTLS). Nothing
+# here expects or asserts an authenticated UDP path.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: udp-echo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: udp-dialer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: udp-echo
+  labels:
+    app: udp-echo
+spec:
+  # THREE replicas, spread, for the same reason echo.yaml and multiprotocol.yaml
+  # carry that comment: the point is the cross-node data path, and with one
+  # replica every dialer but one would take the identical route.
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: udp-echo
+  template:
+    metadata:
+      labels:
+        app: udp-echo
+        # Without this the CNI installs no capture rules and the pod is
+        # invisible to the mesh — gotcha 1 in README.md.
+        aether.io/managed: "true"
+      annotations:
+        # The registration the whole leg turns on. "udp" is what makes aether
+        # health-probe the mesh inbound port instead of TCP-dialling a port that
+        # only speaks datagrams (#931): get this wrong and every endpoint is
+        # UNHEALTHY forever, the udp: cluster clones the verdict, and udp_proxy
+        # drops every datagram with no stat.
+        endpoint.aether.io/port: "9001"
+        endpoint.aether.io/protocol: udp
+    spec:
+      serviceAccountName: udp-echo
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          # ScheduleAnyway, per echo.yaml: a DoNotSchedule constraint would leave
+          # replicas Pending on a cordoned node and take the target down.
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: udp-echo
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        # A verbatim UDP echo: RECVFROM answers each datagram through the socket
+        # it arrived on, so the reply's source is the port the client dialled.
+        # The dialer sends a unique token and expects it back, which is a
+        # delivery proof only the echo can produce.
+        - name: echo
+          image: alpine/socat:1.8.0.3
+          args: ["-T", "5", "UDP4-RECVFROM:9001,fork", "PIPE"]
+          ports:
+            - containerPort: 9001
+              protocol: UDP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: UDPRoute
+metadata:
+  name: udp-echo
+spec:
+  parentRefs:
+    - group: ""
+      kind: Service
+      name: udp-echo
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: udp-echo
+          port: 9001
+          weight: 1
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: udp-dialer
+  labels:
+    app.kubernetes.io/name: udp-dialer
+    app.kubernetes.io/component: load-generator
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: udp-dialer
+  template:
+    metadata:
+      labels:
+        aether.io/managed: "true"
+        app.kubernetes.io/name: udp-dialer
+        app.kubernetes.io/component: load-generator
+      annotations:
+        # Pre-warm the upstream. udp_proxy has no ODCDS cold path any more than
+        # tcp_proxy does: an arm naming a cluster the snapshot does not carry
+        # accepts datagrams and drops them with no error anywhere (#873/#877).
+        config.aether.io/upstreams: "udp-echo"
+    spec:
+      # Same rationale as the k6 runner and mp-dialer: a DaemonSet pod cannot
+      # move, so without a priority it is the scheduler's preferred preemption
+      # victim when a proxy pod surges, and its loss is silent.
+      priorityClassName: aether-soak-loader
+      serviceAccountName: udp-dialer
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dialer
+          # curlimages/curl carries busybox nc (with -u), and it is already
+          # resident on every node — a soak is a bad place to discover a pull.
+          image: curlimages/curl:8.22.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -u
+              D=aether-test.aether.internal
+              UDP="udp-echo.$D"
+
+              # One datagram, one reply, CONNECTED: nc -u connects, so a reply
+              # not sourced from exactly VIP:18082 is dropped by the kernel
+              # before nc sees it. NOREPLY therefore covers the divert, the
+              # transparent socket AND the reply's source address at once; the
+              # token proves the echo (and nothing else) answered.
+              dial() { # expect the token back
+                tok="soak-$(date -u +%s)-$1"
+                out=$(printf '%s\n' "$tok" | timeout 4 nc -u -w 1 "$UDP" 18082 2>/dev/null | head -1 || true)
+                case "$out" in (*"$tok"*) return 0 ;; (*) return 1 ;; esac
+              }
+
+              ok=0; fail=0; n=0
+              while :; do
+                # The ONE sanctioned UDP spelling: <fqdn>:18082, the L4 mesh
+                # port plaintext UDP shares with raw TCP (038 D1). There is no
+                # any-port UDP capture and nothing here pretends otherwise.
+                if dial "$n"; then ok=$((ok+1)); else fail=$((fail+1)); fi
+                n=$((n+1))
+                if [ $((n % 20)) -eq 0 ]; then
+                  echo "AETHER_METRIC udp_dialer={\"cycles\":$n,\"ok\":$ok,\"fail\":$fail}"
+                fi
+                sleep 3
+              done
+          resources:
+            requests:
+              cpu: 20m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      restartPolicy: Always
