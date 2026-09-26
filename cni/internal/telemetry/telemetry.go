@@ -113,17 +113,21 @@ func setup(ctx context.Context, logger *zap.Logger, endpoint string) {
 
 // Flush exports any buffered spans and metrics and stops the providers. Must
 // run before the process exits on every path; a no-op when Init never ran.
+//
+// A failed flush is logged at WARN: it means every aether_cni_* series from
+// this operation is lost, and at DEBUG it went unnoticed for as long as the
+// plugin could not resolve the collector (issue #950).
 func Flush(logger *zap.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), flushTimeout)
 	defer cancel()
 	if traceProvider != nil {
 		if err := traceProvider.Shutdown(ctx); err != nil {
-			logger.Debug("failed to flush traces", zap.Error(err))
+			logger.Warn("failed to flush traces", zap.Error(err))
 		}
 	}
 	if meterProvider != nil {
 		if err := meterProvider.Shutdown(ctx); err != nil {
-			logger.Debug("failed to flush metrics", zap.Error(err))
+			logger.Warn("failed to flush metrics", zap.Error(err))
 		}
 	}
 }
