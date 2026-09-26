@@ -621,7 +621,10 @@ verify_cni_telemetry() {
 	kc -n "$TEST_NS" delete pod cni-telemetry-probe --wait=true --timeout=60s >/dev/null || true
 
 	local deadline=$((SECONDS + 60))
-	until kc -n "$COLLECTOR_NS" logs "deploy/$COLLECTOR_SVC" 2>/dev/null | grep -q 'aether\.cni\.operations'; do
+	# NOT `logs | grep -q`: under pipefail, grep -q's early exit SIGPIPEs kubectl
+	# and the pipeline reports failure even when the metric IS in the log
+	# (seen 2026-09-26: the export worked, the gate stayed red for 60s).
+	until grep -q 'aether\.cni\.operations' <<<"$(kc -n "$COLLECTOR_NS" logs "deploy/$COLLECTOR_SVC" 2>/dev/null)"; do
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "no aether.cni.operations metric reached the collector within 60s of a pod ADD — the plugin's OTLP export is broken"
 		sleep 2
