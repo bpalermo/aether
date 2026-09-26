@@ -231,16 +231,45 @@ binds the gateway address directly as a north-south terminator, so it never
 traverses the capture path and never needed the original destination. East-west
 QUIC would.
 
-But east-west QUIC also needs a security-model decision that this proposal
-deliberately does not make. UDP rides the mesh in **plaintext** today, because
-mTLS is a TCP/TLS construct and there is no DTLS. QUIC brings its own TLS 1.3,
-which is a different model from the per-source mTLS H2 invariant proposal 031
-settled on. That is an architecture question, not plumbing, and it should not
-arrive as a side effect of a CNI change.
+**Reassessed 2026-09-26.** The original text here deferred east-west QUIC on a
+security-model objection: QUIC brings its own TLS 1.3, a different model from the
+per-source mTLS H2 invariant proposal 031 settled on, and that decision should
+not arrive as a side effect of a CNI change. That objection has since been
+resolved upstream, in the direction that **preserves** the invariant.
 
-So: this proposal unblocks the option and is worth doing on #916's merits alone.
-It does not deliver QUIC, and Phase 0 passing should not be read as QUIC being
-approved.
+Envoy's QUIC TLS 1.3 handshake carries client certificates since envoyproxy/envoy
+#47076 (merged 2026-09-03), validated through the **same `CertValidator` as TCP**
+— `trusted_ca`, `match_typed_subject_alt_names`, the SPIFFE validator — with the
+identity reaching XFCC, RBAC and access logs. #45980 (2026-07-28) is the upstream
+half. Both are in aether's pinned snapshot (`1.40.0-dev.20260904.13144fb`). SDS
+works through the same `onSecretUpdated` path, so SPIRE-delivered certs carry
+over; connection migration does not re-handshake, so identity persists across a
+path change the way a TCP connection keeps its identity.
+
+So QUIC can carry per-source mTLS identity rather than replacing it, and
+east-west QUIC becomes a **planned requirement** instead of a deferred question.
+It is still its own proposal — a UDP inbound listener with a QUIC transport
+socket and the SAN-pinning machinery reproduced against it — and this proposal
+still does not deliver it. But Phase 0 passing now IS the foundation for it, not
+merely an option.
+
+One hard requirement at the current pin: QUIC never re-verifies the client cert
+on a resumed session. #47219 (2026-09-09) defaults resumption and early data off
+when a client cert is required, but the registry publishes exactly one snapshot
+and it predates that PR. Until the pin moves, **every mTLS QUIC filter chain must
+set `enable_resumption: false` and `enable_early_data: false` explicitly**, gated
+in `//test/envoy_validate`; otherwise an SVID revocation would not reach resumed
+sessions — the silent-identity-drift class of #829. Optional mTLS (#47341) is
+likewise not yet available.
+
+This also settles the direction of a question Phase 0 raised: whether TCP capture
+should move to TPROXY too. Not now — REDIRECT loses nothing for TCP, which has
+`original_dst`, and the `CapturePassthroughFwMark` loop-prevention RETURN is a
+mark-space collision that must be analysed before any TCP move. But TCP and QUIC
+sharing a port with two capture mechanisms underneath is the exact split that
+produced #916, so the mixed state has an expiry date. Phase 1 should build the
+rule set with a capture-*mode* parameter so the eventual switch is a flag flip
+over a tested path. The full assessment is on #916.
 
 ## Alternatives considered
 
