@@ -17,12 +17,14 @@ require (
 	github.com/miekg/dns v1.1.73
 	github.com/pseudomuto/protoc-gen-doc v1.5.1 // build tooling: imported by //bazel/protodoc only
 	github.com/pseudomuto/protokit v0.3.0 // build tooling: imported by //bazel/protodoc only
+	github.com/quic-go/quic-go v0.63.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spiffe/go-spiffe/v2 v2.8.1
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/etcd v0.44.0
 	github.com/uudashr/gocognit v1.2.1 // bazel-only: referenced from BUILD/.bzl, no Go import
+	github.com/vishvananda/netlink v1.3.0
 	go.etcd.io/etcd/api/v3 v3.7.1
 	go.etcd.io/etcd/client/v3 v3.7.1
 	go.opentelemetry.io/contrib/bridges/otelslog v0.20.1
@@ -146,12 +148,12 @@ require (
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/otlptranslator v1.0.0 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/shirou/gopsutil/v4 v4.26.6 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
-	github.com/vishvananda/netlink v1.3.0
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/vladimirvivien/gexe v0.5.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
