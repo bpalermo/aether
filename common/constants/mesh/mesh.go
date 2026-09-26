@@ -33,7 +33,9 @@ const (
 	// bind inside the pod netns (proposal 018, Phase 3a/3b). TCP and UDP are
 	// independent at the socket layer — a UDP socket and a TCP socket can both
 	// bind the same port number — so a single port serves both protocols (like
-	// HTTP/3 running TCP+QUIC on :443). The CNI redirects outbound TCP to a mesh
+	// HTTP/3 running TCP+QUIC on :443). The same one-number-both-transports rule
+	// binds the east-west tunnel port (proxy.DefaultEastWestTunnelPort, 18009):
+	// east-west QUIC shares it rather than taking a new one. The CNI redirects outbound TCP to a mesh
 	// ClusterIP:ProxyOutboundPort to this port (Phase 3a, TCP listener); it also
 	// redirects outbound UDP to this same port (Phase 3b, UDP listener). Default
 	// off. In aether's 18xxx range (with ProxyOutboundPort) to avoid colliding

@@ -71,6 +71,23 @@ const (
 	// endpoints are dialed at (proposal 019). Host-network, so the proxy binds
 	// the node address directly. Must match across the clusterset. In aether's
 	// 18xxx range, out of Istio's reserved 15000-15090 band (proposal 030).
+	//
+	// ONE PORT NUMBER FOR BOTH TRANSPORTS. When east-west QUIC lands (038's
+	// follow-on; client certs in QUIC's handshake are in the pinned Envoy since
+	// envoyproxy/envoy#47076), it binds UDP on THIS number beside the TCP
+	// tunnel -- not a new port. TCP and UDP are independent socket families, so
+	// the two listeners coexist the way HTTP/3 runs TCP+QUIC on :443, and the
+	// way the edge already does it: BuildEdgeGatewayHTTP3Listener binds UDP on
+	// the same internalPort as the TCP HTTPS listener (http3.go), and alt-svc
+	// advertises that one port (gatewayH3ExternalPort). The same principle is
+	// stated for the capture port in common/constants/mesh (ProxyCapturePort).
+	//
+	// Why it is a constraint and not a preference: a second number would need a
+	// second CNI rule, a second Service port, a second cross-cluster "must match"
+	// agreement, and a second capture path -- and TCP and QUIC on DIFFERENT
+	// capture mechanisms is the exact split that produced #916. Pinned by
+	// TestEastWestPortIsSharedAcrossTransports, which fails the moment a
+	// distinct QUIC/H3/UDP east-west port constant appears in this package.
 	DefaultEastWestTunnelPort = 18009
 
 	// defaultEdgeAddress binds the edge listener on all interfaces (it fronts
