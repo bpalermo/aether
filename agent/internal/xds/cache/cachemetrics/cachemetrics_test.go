@@ -159,6 +159,13 @@ var seededCounters = []string{
 	// one shipped unseeded and had NO Prometheus series on talos-main rev231,
 	// so a dashboard or alert built on it could never fire.
 	"aether.agent.l4route.udp_unsupported",
+	// #931: a published udp: cluster in which NO endpoint is routable, so
+	// udp_proxy discards every datagram for that service. Its healthy value is
+	// zero forever, and it is the only signal for that state — the config is
+	// valid so there is no NACK, nothing was discarded at projection so
+	// udp_unsupported stays quiet, and udp_proxy's own rx counter is per-session
+	// and a session needs a host, so it does not move either.
+	"aether.agent.l4route.udp_no_healthy_backend",
 }
 
 // countersDeliberatelyNotSeeded are the registered counters that are NOT seeded

@@ -90,6 +90,7 @@ type Metrics struct {
 	// the data plane quietly ignores it -- so this counter is the only signal
 	// that a UDPRoute is not doing what its author wrote.
 	udpRouteUnsupported metric.Int64Counter
+	udpNoHealthyBackend metric.Int64Counter
 }
 
 // snapshotDurationBuckets are the explicit boundaries, in SECONDS, for
@@ -102,78 +103,114 @@ var snapshotDurationBuckets = []float64{
 }
 
 // New registers the snapshot instruments on the given meter.
+// New registers every instrument and returns them, or the first registration
+// error.
+//
+// Split into grouped registrars rather than one flat run of `if ... err != nil`
+// blocks: each block costs cognitive complexity, and the flat version sat one
+// registration below the limit -- so the next counter anyone added would fail
+// the lint rather than the author's intent. The groups also match the seeding
+// distinction below: anomaly counters are seeded, activity instruments are not.
 func New(meter metric.Meter) (*Metrics, error) {
 	m := &Metrics{}
+	if err := m.registerActivityInstruments(meter); err != nil {
+		return nil, err
+	}
+	if err := m.registerAnomalyCounters(meter); err != nil {
+		return nil, err
+	}
+	m.seedAnomalyCounters()
+	return m, nil
+}
+
+// registerActivityInstruments registers the instruments that measure ordinary
+// activity: snapshot generations and the dependency-set gauges. None is seeded
+// -- see countersDeliberatelyNotSeeded in the test for the reason per counter.
+func (m *Metrics) registerActivityInstruments(meter metric.Meter) error {
 	var err error
 
 	if m.builds, err = meter.Int64Counter("aether.agent.snapshot.builds",
 		metric.WithDescription("xDS snapshot generations set on the cache")); err != nil {
-		return nil, fmt.Errorf("builds: %w", err)
+		return fmt.Errorf("builds: %w", err)
 	}
 	if m.errors, err = meter.Int64Counter("aether.agent.snapshot.errors",
 		metric.WithDescription("Failed xDS snapshot generations (Envoy left on the previous version)")); err != nil {
-		return nil, fmt.Errorf("errors: %w", err)
+		return fmt.Errorf("errors: %w", err)
 	}
 	if m.duration, err = meter.Float64Histogram("aether.agent.snapshot.duration",
 		metric.WithDescription("Duration of an xDS snapshot generation"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(snapshotDurationBuckets...)); err != nil {
-		return nil, fmt.Errorf("duration: %w", err)
+		return fmt.Errorf("duration: %w", err)
 	}
 	if m.version, err = meter.Int64Gauge("aether.agent.snapshot.version",
 		metric.WithDescription("Counter component of the current xDS snapshot version")); err != nil {
-		return nil, fmt.Errorf("version: %w", err)
+		return fmt.Errorf("version: %w", err)
 	}
 	if m.clusters, err = meter.Int64Gauge("aether.agent.snapshot.clusters",
 		metric.WithDescription("Clusters in the node's current xDS snapshot (demand-scoped set + per-pod clusters)")); err != nil {
-		return nil, fmt.Errorf("clusters: %w", err)
+		return fmt.Errorf("clusters: %w", err)
 	}
 	if m.upstreamsDeclared, err = meter.Int64Gauge("aether.agent.upstreams.declared",
 		metric.WithDescription("Distinct upstream services declared by local pods (config.aether.io/upstreams union)")); err != nil {
-		return nil, fmt.Errorf("upstreams declared: %w", err)
+		return fmt.Errorf("upstreams declared: %w", err)
 	}
 	if m.upstreamsObserved, err = meter.Int64Gauge("aether.agent.upstreams.observed",
 		metric.WithDescription("Live ODCDS-observed dependencies in the node dependency set")); err != nil {
-		return nil, fmt.Errorf("upstreams observed: %w", err)
+		return fmt.Errorf("upstreams observed: %w", err)
 	}
 	if m.upstreamsMiss, err = meter.Int64Counter("aether.agent.upstreams.miss",
 		metric.WithDescription("ODCDS requests for services outside the node dependency set (undeclared upstreams; promote to annotations)")); err != nil {
-		return nil, fmt.Errorf("upstreams miss: %w", err)
+		return fmt.Errorf("upstreams miss: %w", err)
 	}
 	if m.upstreamsTTLRefreshed, err = meter.Int64Counter("aether.agent.upstreams.ttl_refreshed",
 		metric.WithDescription("Observed dependencies past the idle TTL kept in the node dependency set because the proxy still holds a live on-demand subscription")); err != nil {
-		return nil, fmt.Errorf("upstreams ttl refreshed: %w", err)
+		return fmt.Errorf("upstreams ttl refreshed: %w", err)
 	}
 	if m.upstreamsRestored, err = meter.Int64Counter("aether.agent.upstreams.restored",
 		metric.WithDescription("Observed dependencies restored from the agent's local storage at start (a replaced agent starting warm)")); err != nil {
-		return nil, fmt.Errorf("upstreams restored: %w", err)
+		return fmt.Errorf("upstreams restored: %w", err)
 	}
+	return nil
+}
+
+// registerAnomalyCounters registers the counters whose healthy value is zero
+// forever. Every one of them is seeded by seedAnomalyCounters.
+func (m *Metrics) registerAnomalyCounters(meter metric.Meter) error {
+	var err error
 	if m.bindingMismatch, err = meter.Int64Counter("aether.agent.identity.outbound_binding_mismatch",
 		metric.WithDescription("Local source pods whose outbound clusters are bound to another workload's SDS client-certificate secret")); err != nil {
-		return nil, fmt.Errorf("outbound binding mismatch: %w", err)
+		return fmt.Errorf("outbound binding mismatch: %w", err)
 	}
 	if m.staleNetnsSkipped, err = meter.Int64Counter("aether.agent.snapshot.stale_netns_skipped",
 		metric.WithDescription("Per-pod listener entries excluded from a snapshot generation because the pod's network namespace is gone")); err != nil {
-		return nil, fmt.Errorf("stale netns skipped: %w", err)
+		return fmt.Errorf("stale netns skipped: %w", err)
 	}
 	if m.inboundBindingMismatch, err = meter.Int64Counter("aether.agent.identity.inbound_binding_mismatch",
 		metric.WithDescription("Inbound filter chains bound to another workload's SDS server-certificate secret")); err != nil {
-		return nil, fmt.Errorf("inbound binding mismatch: %w", err)
+		return fmt.Errorf("inbound binding mismatch: %w", err)
 	}
 	if m.udpRouteUnsupported, err = meter.Int64Counter("aether.agent.l4route.udp_unsupported",
 		metric.WithDescription("UDPRoute inputs discarded because the UDP capture listener cannot represent them (#873)")); err != nil {
-		return nil, fmt.Errorf("udp route unsupported: %w", err)
+		return fmt.Errorf("udp route unsupported: %w", err)
+	}
+	if m.udpNoHealthyBackend, err = meter.Int64Counter("aether.agent.l4route.udp_no_healthy_backend",
+		metric.WithDescription("Endpoints in a published udp: cluster that Envoy will not load balance to, when NONE of them is routable: udp_proxy silently discards every datagram for that service (#931)")); err != nil {
+		return fmt.Errorf("udp no healthy backend: %w", err)
 	}
 	if m.clusterUnpinned, err = meter.Int64Counter("aether.agent.identity.cluster_unpinned",
 		metric.WithDescription("Mesh clusters published with no server-identity SAN pin (handshake proves trust-domain membership only)")); err != nil {
-		return nil, fmt.Errorf("cluster unpinned: %w", err)
+		return fmt.Errorf("cluster unpinned: %w", err)
 	}
 
-	// Seed every anomaly counter at zero: the two #638 discriminator counters,
-	// the #717/#796 stale-netns counter, the #832 unpinned-cluster counter and
-	// the #873 UDPRoute-discard counter. The OTel SDK exports a counter only
+	return nil
+}
+
+// seedAnomalyCounters exports a zero for every anomaly counter.
+func (m *Metrics) seedAnomalyCounters() {
+	// The OTel SDK exports a counter only
 	// after its first Add, so a counter that is never incremented (the healthy
-	// case for all five) never appears in Prometheus at all — and "no series" is
+	// case for every one of them) never appears in Prometheus at all — and "no series" is
 	// indistinguishable from "zero" to a grading query. Seeding makes a live zero
 	// visible and lets increase()/rate() work from process start.
 	//
@@ -190,8 +227,7 @@ func New(meter metric.Meter) (*Metrics, error) {
 	m.staleNetnsSkipped.Add(ctx, 0)
 	m.clusterUnpinned.Add(ctx, 0)
 	m.udpRouteUnsupported.Add(ctx, 0)
-
-	return m, nil
+	m.udpNoHealthyBackend.Add(ctx, 0)
 }
 
 // OutboundBindingMismatch counts n source pods found bound to a foreign
@@ -239,6 +275,26 @@ func (m *Metrics) UDPRouteUnsupported(ctx context.Context, n int64) {
 		return
 	}
 	m.udpRouteUnsupported.Add(ctx, n)
+}
+
+// UDPNoHealthyBackend counts the n endpoints of a published udp: cluster that
+// Envoy will not load balance to, reported only when NONE of them is routable
+// (#931).
+//
+// Non-zero means a UDPRoute on this node is accepting datagrams and discarding
+// every one of them. Nothing else in the system says so: the config is valid so
+// there is no NACK, nothing was dropped at projection so the #874 path is quiet,
+// and udp_proxy's downstream_sess_rx_datagrams counts per SESSION -- and a
+// session needs a host -- so it does not move either.
+//
+// Per-service attributes are deliberately omitted (unbounded cardinality); the
+// service and cluster are logged at WARN instead. A no-op for n <= 0, so the
+// healthy case rides on the zero seeded at registration (#882).
+func (m *Metrics) UDPNoHealthyBackend(ctx context.Context, n int64) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.udpNoHealthyBackend.Add(ctx, n)
 }
 
 // StaleNetnsSkipped counts n per-pod listener entries excluded from ONE

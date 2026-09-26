@@ -18,6 +18,8 @@ import (
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -633,10 +635,57 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 		// app-port UDP load assignment from the service's endpoints.
 		port, _ := strconv.Atoi(entry.sni)
 		la := proxy.UDPLoadAssignment(entry.loadAssignment, udpName, uint32(port))
+		// A published UDP cluster with no routable endpoint is a SILENT
+		// blackhole, and it is the shape #931 shipped in: udp_proxy takes the
+		// datagram, finds an empty healthy set (NewUDPServiceCluster sets
+		// HealthyPanicThreshold: 0, so it will not spray to unhealthy hosts),
+		// and discards it.
+		//
+		// Nothing else reports it. There is no NACK -- the config is valid. The
+		// agent log is clean -- nothing was discarded at projection time, so the
+		// #874 path stays quiet. And udp_proxy's own
+		// downstream_sess_rx_datagrams does not move either, because it counts
+		// per SESSION and a session needs a host: on a live cluster it read 1
+		// after four datagrams had reached the socket.
+		//
+		// So this is the only place the condition can be named. It is reported
+		// rather than skipped: skipping would remove the listener and turn a
+		// blackhole into a different blackhole, while the cluster staying
+		// published means the service recovers on its own the moment an endpoint
+		// goes healthy.
+		if n := unroutableUDPEndpoints(la); n > 0 {
+			c.metrics.UDPNoHealthyBackend(context.Background(), int64(n))
+			c.log.Warn("UDP cluster published with no routable endpoint: udp_proxy will discard datagrams for it, silently",
+				"service", svc, "cluster", udpName, "endpoints", n, "issue", "931")
+		}
 		cl := proxy.NewUDPServiceCluster(udpName, svc, la)
 		resources = append(resources, cl)
 	}
 	return resources
+}
+
+// unroutableUDPEndpoints reports how many endpoints a UDP load assignment holds
+// when NONE of them is routable, and 0 otherwise.
+//
+// "Routable" is Envoy's own reading, not ours: HEALTHY and UNKNOWN are both load
+// balanced (UNKNOWN is the default for an endpoint nobody has said anything
+// about), while UNHEALTHY, DRAINING and TIMEOUT are not. Returning the COUNT
+// rather than a bool makes the warning say how much was lost, and returning 0
+// for an empty assignment keeps this quiet for a service that simply has no
+// endpoints yet -- that is a cold start, not a blackhole.
+func unroutableUDPEndpoints(la *endpointv3.ClusterLoadAssignment) int {
+	total := 0
+	for _, lle := range la.GetEndpoints() {
+		for _, lb := range lle.GetLbEndpoints() {
+			switch lb.GetHealthStatus() {
+			case corev3.HealthStatus_HEALTHY, corev3.HealthStatus_UNKNOWN:
+				return 0
+			default:
+				total++
+			}
+		}
+	}
+	return total
 }
 
 // captureVhosts builds the cap_http virtual hosts: each in-scope service that has a
