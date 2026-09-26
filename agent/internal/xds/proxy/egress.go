@@ -425,16 +425,58 @@ func UDPLoadAssignment(src *endpointv3.ClusterLoadAssignment, clusterName string
 	la, _ := proto.Clone(src).(*endpointv3.ClusterLoadAssignment)
 	la.ClusterName = clusterName
 	for _, lle := range la.GetEndpoints() {
+		kept := make([]*endpointv3.LbEndpoint, 0, len(lle.GetLbEndpoints()))
 		for _, lb := range lle.GetLbEndpoints() {
 			sa := lb.GetEndpoint().GetAddress().GetSocketAddress()
 			if sa == nil {
 				continue
 			}
+			// DROP a waypointed endpoint rather than rewrite it (#932). src is the
+			// service's shared bare-name assignment, and for a remote-cluster
+			// endpoint that address is the destination NODE's IP plus the
+			// east/west tunnel port -- not the pod. Rewriting only the port would
+			// leave the node IP in place and send the datagram to a host that was
+			// never the backend.
+			//
+			// There is no correct UDP address to substitute: the tunnel is a TCP
+			// mTLS SNI forwarder with no datagram counterpart, so a waypointed
+			// backend is genuinely unreachable over the UDP floor. Dropping makes
+			// that legible -- the service ends up with no routable endpoint, which
+			// is exactly what udp_no_healthy_backend counts and logs (#931) --
+			// instead of silently delivering to the wrong machine.
+			if isWaypointEndpoint(lb) {
+				continue
+			}
 			sa.Protocol = corev3.SocketAddress_UDP
 			sa.PortSpecifier = &corev3.SocketAddress_PortValue{PortValue: port}
+			// Strip what the clone carried but the UDP floor cannot honour. The
+			// udp: cluster sets no LbSubsetConfig, so the envoy.lb metadata is
+			// inert rather than harmful -- but carrying a subset key for a cluster
+			// that does no subset LB invites someone to believe it is load
+			// bearing. HealthCheckConfig goes for a stronger reason: it opts an
+			// endpoint out of an ACTIVE health check, and this cluster has none,
+			// so it describes a mechanism that does not exist here.
+			lb.Metadata = nil
+			if ep := lb.GetEndpoint(); ep != nil {
+				ep.HealthCheckConfig = nil
+			}
+			kept = append(kept, lb)
 		}
+		lle.LbEndpoints = kept
+		// Priority is meaningless without the locality-priority set the HTTP path
+		// builds: a lone endpoint left at a non-zero priority is a cluster whose
+		// only host sits in an empty fallback tier, which Envoy will not use.
+		lle.Priority = 0
 	}
 	return la
+}
+
+// isWaypointEndpoint reports whether an endpoint was rewritten to dial a remote
+// cluster through the per-node east/west waypoint tunnel (proposal 019), which
+// the subset metadata marks.
+func isWaypointEndpoint(lb *endpointv3.LbEndpoint) bool {
+	fields := lb.GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields()
+	return fields[subsetWaypointKey].GetStringValue() == subsetWaypointValue
 }
 
 // InjectUpstreamTCPMTLS is InjectUpstreamMTLS for TCP floor clusters: the same
