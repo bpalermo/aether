@@ -254,7 +254,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 	// the source usually holds neither yet (issue #740); runIdentityRefresh serves
 	// them the moment they land, so the failures below are announcements.
 	if b.source != nil {
-		b.refreshIdentity(ctx, true)
+		b.refreshIdentity(ctx, true, false)
 		go b.runIdentityRefresh(ctx)
 	}
 
@@ -773,21 +773,26 @@ func (b *Bridge) runIdentityRefresh(ctx context.Context) {
 	}
 
 	for {
+		delivered := false
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		case <-updated:
+			delivered = true
 		}
-		b.refreshIdentity(ctx, false)
+		b.refreshIdentity(ctx, false, delivered)
 	}
 }
 
 // refreshIdentity re-serves both halves of the agent's own identity. announce
 // selects the log level for a miss: at Start a missing identity is expected and
-// logged at INFO, afterwards it is routine churn and logged at DEBUG.
-func (b *Bridge) refreshIdentity(ctx context.Context, announce bool) {
-	if err := b.refreshNodeSVID(ctx); err != nil {
+// logged at INFO, afterwards it is routine churn and logged at DEBUG. delivered
+// says the source announced a Workload API update (go-spiffe fires Updated on
+// every X509-SVID response, changed or not) rather than this being the periodic
+// backstop poll; see refreshNodeSVID for why that matters to the metric.
+func (b *Bridge) refreshIdentity(ctx context.Context, announce, delivered bool) {
+	if err := b.refreshNodeSVID(ctx, delivered); err != nil {
 		if announce {
 			// Not an error at boot: while SPIRE is still coming up the source
 			// holds no SVID yet (issue #740). runIdentityRefresh serves it the
@@ -809,7 +814,15 @@ func (b *Bridge) refreshIdentity(ctx context.Context, announce bool) {
 // refreshNodeSVID reads the current node SVID from the Workload API source and,
 // if it changed, updates the cached secret and pushes it. It is a no-op when the
 // source is unset.
-func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
+//
+// Every read is classified the way the pod path classifies a Broker response
+// (issue #993): the first serve is initial, a chain+key different from the one
+// served is rotated, and the same chain+key is unchanged — still no snapshot
+// bump. unchanged is counted only when delivered is true, i.e. SPIRE actually
+// re-sent the SVID (the Workload API redelivers the same bytes fleet-wide, e.g.
+// at a JWT-key prepare); the 30s backstop tick re-reads a cached value and is not
+// a delivery, so counting it would make unchanged a clock rather than a signal.
+func (b *Bridge) refreshNodeSVID(ctx context.Context, delivered bool) error {
 	if b.source == nil {
 		return nil
 	}
@@ -827,7 +840,13 @@ func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
 	b.mu.Lock()
 	if existing, ok := b.secrets[secret.GetName()]; ok && secretsEqual(existing, secret) {
 		b.mu.Unlock()
-		return nil // unchanged; avoid a no-op snapshot bump
+		// Unchanged: no snapshot bump, but a redelivery is counted so the
+		// node/unchanged series can actually move (before #993 it was seeded at
+		// zero and unreachable, so a zero there proved nothing).
+		if delivered {
+			b.metrics.svidUpdated(ctx, identityNode, updateUnchanged)
+		}
+		return nil
 	}
 	b.secrets[secret.GetName()] = secret
 	b.bumpGenLocked()
@@ -890,7 +909,10 @@ func (b *Bridge) refreshWorkloadBundle(ctx context.Context) error {
 	b.mu.Lock()
 	if existing, ok := b.ownBundles[td.IDString()]; ok && bytes.Equal(existing, der) {
 		b.mu.Unlock()
-		return nil // unchanged; avoid a no-op snapshot bump
+		// Unchanged; avoid a no-op snapshot bump. Nothing to count:
+		// bundle_updates has no unchanged series (only initial/rotated are
+		// seeded, for own and federated alike), so no zero here can be vacuous.
+		return nil
 	}
 	firstBundle := len(b.ownBundles) == 0
 	b.ownBundles = map[string][]byte{td.IDString(): der}
