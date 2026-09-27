@@ -501,7 +501,7 @@ verify_commit() {
 				absent "ghcr.io/${PROXY_REPO} signature for pinned ${pin} (no image to sign)"
 			else
 				present "ghcr.io/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH})"
-				check_signature "$PROXY_REPO" "$pin" "$tags" "proxy index"
+				check_signature "$PROXY_REPO" "$pin" "$tok" "proxy index"
 				if ! children="$(ghcr_index_children "$PROXY_REPO" "$pin" "$tok")" || [ -z "$children" ]; then
 					echo "::error::could not enumerate the child manifests of ghcr.io/${PROXY_REPO}@${pin}" >&2
 					exit 2
@@ -509,7 +509,7 @@ verify_commit() {
 				proxy_expected=2
 				while read -r child; do
 					proxy_expected=$((proxy_expected + 1))
-					check_signature "$PROXY_REPO" "$child" "$tags" "proxy child"
+					check_signature "$PROXY_REPO" "$child" "$tok" "proxy child"
 				done <<<"$children"
 				if [ -n "${PROXY_SIGNED_REFS_OUT:-}" ]; then
 					printf 'ghcr.io/%s@%s\n' "$PROXY_REPO" "$pin" >>"$PROXY_SIGNED_REFS_OUT"
