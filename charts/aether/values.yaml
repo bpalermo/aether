@@ -368,10 +368,10 @@ proxy:
   # commit SHA. Mirror by overriding `repository`.
   image:
     repository: ghcr.io/bpalermo/aether/aether-proxy
-    tag: e28acc25620488fc59c135bdbf3365f27283e0db
+    tag: 7142af4e7a380f9732111e46cf3d8de8819e55bf
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
-    # helper prefers digest over tag. Multi-arch index for e28acc25620488fc59c135bdbf3365f27283e0db.
-    digest: "sha256:06d91dafea6d4f8666e9a2f9b6c1b559ea156c25d6d87a83bad63f362716ce2d"
+    # helper prefers digest over tag. Multi-arch index for 7142af4e7a380f9732111e46cf3d8de8819e55bf.
+    digest: "sha256:938c5a577995153b6cf5669b50e6469a266697bd86eae464fb1fb416f1687019"
     pullPolicy: Always
   # The Envoy hot-restart supervisor (#772): its own binary and its own image
   # since it stopped being an `agent` subcommand. The initContainer runs it to
