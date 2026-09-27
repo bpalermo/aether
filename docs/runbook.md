@@ -100,6 +100,59 @@ And a clean run is not evidence of absence: the detector only reports
 interleavings a test actually produced, so a race between two goroutines no test
 runs concurrently stays invisible no matter how often you run it.
 
+### CI: external repository fetches (#1001)
+
+BuildBuddy caches **actions**, not **repository fetches**. Every external
+repository a CI job needs — each Go module behind `gazelle++go_deps+…`
+(`fetch_repo` → `proxy.golang.org`), every release asset from github.com — comes
+from Bazel's repository cache on the runner or from the network. Two mechanisms
+keep a flaky upstream from turning a job red:
+
+- **A persisted repository cache.** `bazel-contrib/setup-bazel` restores
+  `~/.cache/bazel-repo` (Bazel 9 also keeps its repo *contents* cache under it,
+  `contents/`, which is what makes a `go_repository` a local hit instead of a
+  `fetch_repo` run). The key hashes `MODULE.bazel`, `MODULE.bazel.lock`, `go.mod`
+  and `go.sum`, so a Go dependency bump gets a new key and the newest older entry
+  is restored as the fallback. The root and `//proxy` workspaces are in separate
+  namespaces (`cache-version: root-1` / `proxy-1`). **Exactly one job per
+  workflow saves** — `diff` in `ci.yaml` and `main.yaml` (the `main` entry is the
+  one every PR falls back to), the `test`/`build-push` matrix per arch for the
+  proxy — because its warm-up fetches for all of `//...`; every other job sets
+  `cache-save: false`. The first job to finish used to save, so a job that
+  fetched a handful of repositories (or, before the namespaces, a *proxy* job)
+  could write the entry every later job restored as an exact hit and never
+  re-saved. That is how the 2026-09-27 `netns` failure fetched
+  `googleapis/api` from the network with a 1.9 GB cache freshly restored.
+- **A retried warm-up.** Each Bazel job's first Bazel step is
+  `scripts/ci-bazel-warmup.sh <flags> <targets>`: `bazel build --nobuild`
+  (loading + analysis, which is where the fetches happen), retried up to 3 times
+  with a 20 s / 40 s backoff **only when the output shows a repository-fetch
+  error**. A broken BUILD file fails on the first attempt. The warm-up clears the
+  remote executor, cache and BES backend, so it needs no BuildBuddy key and never
+  shows up as an invocation; the real steps keep `--config=ci` / `--config=remote`
+  unchanged. `scripts/check-ci-bazel-warmup.sh` (in the `shell` job) pins that
+  contract with a stub bazel.
+
+Reading a red job:
+
+| The log shows | What it means | Do |
+|---|---|---|
+| `::warning::bazel warm-up attempt 1/3 hit a repository-fetch error`, then success | the retry absorbed a blip | nothing |
+| `::error::bazel warm-up: repository fetch failed on all 3 attempts` | the upstream was down for the whole ~1 min of backoff | **re-run the job** once the upstream answers (`gh run rerun <id> --failed`); a re-run restores the same cache, so it only re-fetches what failed |
+| a `fetch_repo` / `Error downloading` failure in a step **after** the warm-up | that step needed a repository the warm-up's targets did not cover (e.g. a `bazel run` of a tool, `bazel-diff` at the base revision, which falls back to a full run on failure) | re-run; if it repeats, add the target to that job's warm-up |
+| `bazel warm-up failed (exit N) with no repository-fetch error` | a real analysis failure | fix the change; a re-run will not help |
+
+A plain re-run is still the answer for anything the warm-up does not cover: the
+Go tool's own downloads in `deps-audit` (`go list -m all` talks to
+`proxy.golang.org` directly, outside Bazel), docker/kind image pulls in the e2e
+jobs, and a cold namespace (the first run after a `cache-version` bump, or after
+GitHub evicted the entry: the repository has a 10 GB cache budget and each entry
+is ~2 GB).
+
+To check what a job restored, open its **Setup Bazel** step: `Cache hit for:
+setup-bazel-root-1-linux-x64-repository-<hash>` is an exact hit;
+`Successfully restored cache from …` with a different hash is the fallback.
+
 ---
 
 ## 4. Format & lint
