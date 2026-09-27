@@ -59,11 +59,36 @@ registry_token_url() {
 # all. For private ones: REGISTRY_USERNAME + REGISTRY_PASSWORD (a Quay robot
 # account, say), or GHCR_TOKEN (a GITHUB_TOKEN or a PAT with read:packages),
 # which is only ever sent to ghcr.io.
+#
+# THE CREDENTIALS ARE BOUND TO ONE HOST. REGISTRY_USERNAME/REGISTRY_PASSWORD
+# were issued by one registry -- REGISTRY_CREDENTIAL_HOST, default the
+# IMAGE_REGISTRY_HOST the workflows export from scripts/image-registry.sh (or,
+# unset, the setting's host) -- and are sent to that host's token endpoint and
+# NO other. A token request to any other host goes anonymous, with one stderr
+# line saying so. The split sweep (proposal 040) reads pre-cut-over heads on
+# ghcr.io in the same run that may hold the quay robot, and nothing that ever
+# points REGISTRY_HOST at a third registry may hand it that password.
+registry__credential_host() {
+	if [ -n "${REGISTRY_CREDENTIAL_HOST:-}" ]; then
+		printf '%s\n' "$REGISTRY_CREDENTIAL_HOST"
+	elif [ -n "${IMAGE_REGISTRY_HOST:-}" ]; then
+		printf '%s\n' "$IMAGE_REGISTRY_HOST"
+	else
+		"${registry__here}/image-registry.sh" host 2>/dev/null
+	fi
+}
+
 registry_registry_token() {
-	local repo="$1" url
+	local repo="$1" url cred_host=""
 	registry__host_ok || return 2
 	url="$(registry_token_url "$repo")"
 	if [ -n "${REGISTRY_PASSWORD:-}" ]; then
+		cred_host="$(registry__credential_host)" || cred_host=""
+		if [ -z "$cred_host" ] || [ "$REGISTRY_HOST" != "$cred_host" ]; then
+			echo "registry-lib: credentials are for ${cred_host:-an unknown host}; reading ${REGISTRY_HOST} anonymously" >&2
+		fi
+	fi
+	if [ -n "${REGISTRY_PASSWORD:-}" ] && [ -n "$cred_host" ] && [ "$REGISTRY_HOST" = "$cred_host" ]; then
 		curl -fsS -u "${REGISTRY_USERNAME:-x}:${REGISTRY_PASSWORD}" "$url" | registry__json_str token
 	elif [ -n "${GHCR_TOKEN:-}" ] && [ "$REGISTRY_HOST" = ghcr.io ]; then
 		curl -fsS -u "x:${GHCR_TOKEN}" "$url" | registry__json_str token

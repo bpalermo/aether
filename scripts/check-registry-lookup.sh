@@ -40,6 +40,11 @@
 # any bearer value let the verifier pass the proxy repo's TAG LIST as the token
 # (#999) through this harness green; the proxy-pin case below drives that path.
 #
+# THE CREDENTIAL (proposal 040). The robot's REGISTRY_USERNAME/PASSWORD are
+# bound to REGISTRY_CREDENTIAL_HOST (default: the exported IMAGE_REGISTRY_HOST):
+# section 5b pins that a token request to that host carries them and one to any
+# other host carries none (the fake records every `-u` it is handed).
+#
 # THE SPLIT (proposal 040 phase 2). The verifier reads bazel/img/registry.bzl AS
 # OF EACH COMMIT it checks, so section 6 runs it against a throwaway git history
 # of two commits: PRE, whose registry.bzl is the pre-cut-over setting (ghcr.io,
@@ -104,6 +109,8 @@ mkdir -p "$FAKE"
 #   codes        `<tag> <http code>` overrides (000 = no connection)
 #   accept       the Accept header of the last manifest request
 #   token_urls   every token URL asked for, one per line
+#   basic_auth   every token request that carried `-u` credentials:
+#                `<host> <user>` (the user only; the fake keeps no secret)
 #   unauthorized every request refused for its bearer token: `<url> <header>`
 #   referrers    referrers mode: 404 (default) | index | 503 | paged | garbage
 #                (valid JSON that is not an index)
@@ -111,14 +118,15 @@ mkdir -p "$FAKE"
 #                (an empty index when absent); in `paged` mode, page 2
 fake_curl='
 curl() {
-	local url="" hdr_out="" out="" wfmt="" head=0 fail=0 accept="" auth="" a
+	local url="" hdr_out="" out="" wfmt="" head=0 fail=0 accept="" auth="" basic="" a
 	while [ "$#" -gt 0 ]; do
 		a="$1"
 		shift
 		case "$a" in
 		-D) hdr_out="$1"; shift ;;
 		-o) out="$1"; shift ;;
-		-u | --retry) shift ;;
+		-u) basic="$1"; shift ;;
+		--retry) shift ;;
 		-w) wfmt="$1"; shift ;;
 		-H)
 			case "$1" in
@@ -156,6 +164,7 @@ curl() {
 	case "$url" in
 	*/token\?* | */v2/auth\?*)
 		printf "%s\n" "$url" >>"$FAKE/token_urls"
+		[ -n "$basic" ] && printf "%s %s\n" "$host" "${basic%%:*}" >>"$FAKE/basic_auth"
 		local want_path=/token
 		[ "$host" = quay.io ] && want_path=/v2/auth
 		case "$url" in
@@ -456,6 +465,40 @@ quay_layout rc2 garbage "referrers 200 whose JSON is not an index" other
 quay_layout referrer paged "sign bundle on referrers page 2 (Link: rel=next)" other
 quay_layout both index "a sign referrer AND a .sig tag" sha256-abc123.sig
 
+# --- 5b. the robot credential is bound to ONE host ---------------------------
+# REGISTRY_USERNAME/REGISTRY_PASSWORD go only to REGISTRY_CREDENTIAL_HOST
+# (default: the exported IMAGE_REGISTRY_HOST, else the setting's host); a token
+# request anywhere else is anonymous and says so on stderr.
+# cred_case <name> <REGISTRY_HOST> <want: sent|anonymous> [VAR=value...]
+cred_case() {
+	local name="$1" host="$2" want="$3" tok err rc=0
+	shift 3
+	reset_registry
+	err="$tmp/cred.err"
+	tok="$(env -u IMAGE_REGISTRY_HOST -u REGISTRY_CREDENTIAL_HOST REGISTRY_USERNAME='aethermesh+robot' REGISTRY_PASSWORD='not-a-real-secret' \
+		REGISTRY_HOST="$host" "$@" bash -c 'eval "$1"; . scripts/registry-lib.sh; registry_registry_token some/repo' \
+		_ "$fake_curl" 2>"$err")" || rc=$?
+	local recorded
+	recorded="$(cat "$FAKE/basic_auth" 2>/dev/null)"
+	if [ "$want" = sent ] && [ "$rc" = 0 ] && [ "$tok" = fake ] &&
+		[ "$recorded" = "${host} aethermesh+robot" ] && ! grep -q anonymously "$err"; then
+		ok "${name}: the credential goes to ${host}"
+	elif [ "$want" = anonymous ] && [ "$rc" = 0 ] && [ "$tok" = fake ] && [ -z "$recorded" ] &&
+		grep -qxF "registry-lib: credentials are for $(sed -nE 's/.*credentials are for ([^;]+);.*/\1/p' "$err"); reading ${host} anonymously" "$err"; then
+		ok "${name}: NO credential reaches ${host} ($(cat "$err"))"
+	else
+		bad "${name}: want ${want} to ${host}; token '${tok}' rc ${rc}, recorded [${recorded}], stderr [$(cat "$err")]"
+	fi
+}
+setting_host="$(scripts/image-registry.sh host)"
+other_host=ghcr.io
+[ "$setting_host" = ghcr.io ] && other_host=quay.io
+cred_case "default (the setting's host)" "$setting_host" sent
+cred_case "default, another host" "$other_host" anonymous
+cred_case "IMAGE_REGISTRY_HOST exported by the workflow" "$other_host" sent IMAGE_REGISTRY_HOST="$other_host"
+cred_case "REGISTRY_CREDENTIAL_HOST override, its host" "$other_host" sent REGISTRY_CREDENTIAL_HOST="$other_host"
+cred_case "REGISTRY_CREDENTIAL_HOST override, the setting's host" "$setting_host" anonymous REGISTRY_CREDENTIAL_HOST="$other_host"
+
 # The shim: ghcr-lib.sh still sources the library and the old names still work.
 # A fresh bash, so nothing this file defined can stand in for the shim's.
 reset_registry
@@ -751,8 +794,8 @@ else
 	fi
 fi
 
-if [ "$n" -ne 35 ]; then
-	echo "::error::ran ${n} cases, expected 35 -- a gate that checks nothing passes" >&2
+if [ "$n" -ne 40 ]; then
+	echo "::error::ran ${n} cases, expected 40 -- a gate that checks nothing passes" >&2
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then
