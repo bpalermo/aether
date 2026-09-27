@@ -223,6 +223,16 @@ jobs:
       - name: Push-head selection is exact
         run: scripts/check-push-head-selection.sh
 
+      # publish-verify runs an expected-red control before its gate (#930): a
+      # never-published commit must make the verifier exit 1 with every
+      # artifact MISSING. This drives the REAL verifier against a fake registry
+      # (no network), and shows the control rejects every wrong red — a
+      # verifier that stopped counting MISSING, an empty tag listing, a MISSING
+      # line for another commit, a stray `ok` — so the control cannot go
+      # vacuous either.
+      - name: publish-verify expected-red control is exact
+        run: scripts/check-publish-verify-control.sh
+
       # Then: lint them. The target list comes from a query rather than being
       # written out here, so a new package's sh_library is covered the moment the
       # check above starts demanding one. The empty test is a query-failure

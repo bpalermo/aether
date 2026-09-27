@@ -89,16 +89,48 @@ jobs:
       issues: write
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v7
         with:
+          # ALWAYS the trusted default branch, never the triggering run's head:
+          # the scripts this job executes come from main; the commit under
+          # verification (TARGET below) is data the scripts read from git
+          # history, not code they run (CodeQL actions/untrusted-checkout).
+          ref: main
           # Full history: the check reads each charts/*/Chart.yaml AS OF the
           # commit being verified (a commit that bumped a chart publishes under
           # the bumped version), and resolves every abbreviation to a full
           # 40-char sha with git rather than trusting a typed one.
           fetch-depth: 0
 
-      - name: Verify the artifacts for this commit exist in GHCR
+      # EXPECTED-RED CONTROL, then the GATE (#930). Two steps so the log never
+      # mixes them: the control's MISSING lines are the point of the control and
+      # must never be read as a publish failure — it writes neither verify.log
+      # nor the job summary.
+      #
+      # The gate's only demonstrated red used to be a real defect (1e31e3a,
+      # #929), and it aged out of the sweep window with nothing fixed, leaving a
+      # gate whose failure path was asserted rather than shown (#853). So every
+      # run first hands the verifier a commit that can never have artifacts —
+      # built here with `git commit-tree` on origin/main's tree, never pushed,
+      # so it exists on every run and can never age out — and asserts it goes
+      # red for the right reason: exit exactly 1, one MISSING line per
+      # coordinate (20) all naming that sha, no `ok` line, and every registry
+      # tag listing non-empty. A green for that commit, or a red for another
+      # reason, fails the run; exit 2 (GHCR unreadable) is inconclusive and
+      # fails it too. See scripts/publish-verify-control.sh; its offline check
+      # runs in ci.yaml.
+      - name: Expected-red control (must fail on a never-published commit)
+        id: control
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: ./scripts/publish-verify-control.sh
+
+      # The gate runs whatever the control concluded: a broken control must not
+      # also cost the real check. Only a failed checkout stops it.
+      - name: Gate (verify the artifacts for this commit exist in GHCR)
         id: verify
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         env:
           # A publish run's head commit, a manually named commit, or --recent.
           TARGET: ${{ github.event.workflow_run.head_sha || github.event.inputs.commit }}
@@ -201,6 +233,32 @@ jobs:
             "Publish run: ${TRIGGERING_RUN:-n/a}" \
             "_Filed automatically by \`publish-verify\`; this issue is reused for consecutive gaps. To republish: re-run the cancelled publish run (\`gh run rerun <id>\`), which re-runs at that same commit. Never push images or charts by hand — the release workflow is the only publisher. See docs/runbook.md, \"Pre-flight: did that commit actually publish?\"._")
 
+          num=$(gh issue list --state open --search "in:title \"${title}\"" -L 1 --json number -q '.[0].number // empty')
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --body "$body"
+            echo "commented on #$num"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+
+      # A failed control is a different defect from a missing artifact: the gate
+      # itself can no longer be trusted to go red. It gets its own rolling issue
+      # so it is never folded into, or mistaken for, "artifacts missing". An
+      # inconclusive control (exit 2, registry unreadable) lands here too; the
+      # run log says which.
+      - name: Open or update the vacuous-gate issue
+        if: ${{ !cancelled() && steps.control.conclusion == 'failure' && github.event_name != 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="publish-verify: the expected-red control did not go red"
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            "publish-verify's expected-red control handed the verifier a commit that was never published and did not get back exit 1 with every artifact MISSING for that commit — or could not read the registry at all. Until this is fixed a green publish-verify run proves nothing (#930, #853)." \
+            "Run: ${RUN_URL}" \
+            "_Filed automatically by \`publish-verify\`; reused for consecutive failures. Reproduce with \`scripts/publish-verify-control.sh\`; the offline check is \`scripts/check-publish-verify-control.sh\`._")
           num=$(gh issue list --state open --search "in:title \"${title}\"" -L 1 --json number -q '.[0].number // empty')
           if [ -n "$num" ]; then
             gh issue comment "$num" --body "$body"
