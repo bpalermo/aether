@@ -9,7 +9,7 @@ Three components run together:
 |---|---|
 | **External prober** (`//prober`, DaemonSet, already deployed) | the availability SLI — **authoritative for PASS/FAIL** |
 | **k6 runners** (`k6-runner.yaml`) | mesh load by NAME (~300/s) so DNS + cross-node paths are exercised |
-| **Churn driver** (`churn.sh`) | 31 rolling restarts incl. mesh-dns/agent/proxy/edge + a concurrent triple, then a 90-minute no-roll window and a demand-set shrink |
+| **Churn driver** (`churn.sh`) | 31 rolling restarts incl. mesh-dns/agent/proxy/edge + a concurrent triple, two mid-run pods under a brand-new ServiceAccount (#1014), then a 90-minute no-roll window and a demand-set shrink |
 | **Multi-protocol leg** (`multiprotocol.yaml`) | proposal 037's per-port TCP chains under load, and the evidence for its Phase 4 gate |
 | **UDP leg** (`udp.yaml`) | proposal 038's transparent UDP capture under load: the divert, the transparent socket, and the VIP-sourced reply, through every roll |
 
@@ -48,6 +48,15 @@ kubectl -n aether-test logs -l app.kubernetes.io/name=udp-dialer --tail=1 | grep
 #     "The Phase 4 evidence clock" below -- a zero from a counter that was never
 #     driven is not evidence, and this is the step that makes it evidence.
 bash e2e/soak/anyport-probe.sh
+
+# 0d. ONCE, before the run: one new-ServiceAccount step, now, so the two the
+#     driver runs mid-soak are known to work on this cluster (image resident,
+#     objects creatable, tally readable). Its own log; exits 1 on a hole. Expect a
+#     single `ROLLED newsa/...` line with non2xx=0 and connerr=0 on every
+#     destination. See "The new-ServiceAccount step" below.
+SOAK_CHURN_LOG=/tmp/soak-newsa-preflight.log \
+  bash "$PWD/e2e/soak/churn.sh" --context talos-main --new-sa-once &&
+  grep -E 'ROLLED|FAILED' /tmp/soak-newsa-preflight.log
 
 # 1. Load the k6 script as a ConfigMap (source of truth is the .js file here).
 #    RE-RUN THIS after any edit to k6-mesh-soak.js -- the pod mounts the
@@ -99,7 +108,9 @@ head -2 /tmp/soak-churn.log
 # Fail fast: the FIRST `FAILED` roll (or a SHRINK that cannot scale) ends the
 # driver with `CHURN ABORTED ...` and exit 1, restoring the SHRINK target first.
 # It no longer carries on with holes in the schedule. An ABORTED line means stop,
-# fix, relaunch with a fresh T0 -- that run is not gradeable.
+# fix, relaunch with a fresh T0 -- that run is not gradeable. The one exception
+# is `FAILED newsa/...` with a tally and no ABORTED after it: that is the
+# new-ServiceAccount gate reading red (a finding), not a hole -- the run goes on.
 grep -E "FAILED|CHURN ABORTED" /tmp/soak-churn.log   # expect nothing
 
 # 4. Age-matched proxy RSS baseline at T0+30m (churn.sh takes the rest itself,
@@ -118,16 +129,18 @@ kubectl delete -f e2e/soak/k6-runner.yaml
 # Count ROLLED in the CURRENT log only. churn.sh archives the previous run as
 # /tmp/soak-churn.log.<ts>.prev, and older runs left /tmp/soak-churn-*.log
 # behind, so `grep -c ROLLED /tmp/soak-churn*` inflates the tally across runs.
-grep -c ROLLED /tmp/soak-churn.log      # expect 31 -- this exact path, no glob
+grep -c ROLLED /tmp/soak-churn.log      # expect 33 (31 rolls + 2 new-SA steps) -- this exact path, no glob
+grep -E "newsa/" /tmp/soak-churn.log    # expect 2 ROLLED, 0 FAILED -- see "The new-ServiceAccount step"
 grep -E "no-roll window|SHRINK" /tmp/soak-churn.log
 column -t /tmp/soak-proxy-rss.tsv       # the #628 age-matched series
 ```
 
 ## The churn schedule
 
-29 schedule entries; the TRIPLE fires three rolls at once, so `grep -c ROLLED` is
-**31** (6 proxy, 2 agent, 3 mesh-dns, 2 edge, 18 svc). The older footer said 30 — it
-forgot the TRIPLE's proxy. The set of rolls has not changed, only the tally.
+29 roll entries; the TRIPLE fires three rolls at once, so the rolls are **31** (6
+proxy, 2 agent, 3 mesh-dns, 2 edge, 18 svc). The older footer said 30 — it forgot the
+TRIPLE's proxy. The two new-ServiceAccount steps (#1014) each log one `ROLLED newsa/…`
+line too, so `grep -c ROLLED` is **33** by default.
 
 | T0+ (min) | Roll | | T0+ (min) | Roll |
 |---|---|---|---|---|
@@ -136,13 +149,15 @@ forgot the TRIPLE's proxy. The set of rolls has not changed, only the tally.
 | 60 | **proxy** \* — the first one, a full hour after T0 (see below) | | 72 | **agent** |
 | 84 | svc-5 | | 96 | **proxy** \* |
 | 108 | svc-1 | | 120 | edge |
+| 126 | **NEW-SA** #1 — a pod under a brand-new ServiceAccount, 2 min of traffic (#1014) | | | |
 | 132 | svc-2 | | 144 | mesh-dns |
 | 156 | svc-3 | | 168 | svc-4 |
 | 180 | svc-5 | | 192 | svc-1 |
 | 204 | edge | | 216 | **proxy** \* |
 | 228 | svc-2 | | 240 | svc-4 |
 | 252 | **proxy** \* | | 264 | svc-3 |
-| 276 | svc-1 | | 300 | **TRIPLE** \* — agent + proxy + svc-3, the stress peak **and the last agent roll** |
+| 276 | svc-1 | | 288 | **NEW-SA** #2 (#1014) |
+| 300 | **TRIPLE** \* — agent + proxy + svc-3, the stress peak **and the last agent roll** | | | |
 | 312 | mesh-dns | | 324 | svc-4 |
 | 336 | **proxy** \* | | 348 | svc-2 |
 | 360 | svc-1 — the last roll of any kind | | | |
@@ -202,6 +217,116 @@ the proxy log.
 
 Opt out with `SOAK_SHRINK=0` (default on); `SOAK_SHRINK_TARGET` / `SOAK_SHRINK_SECONDS`
 retarget it.
+
+### The new-ServiceAccount step (#1008/#1014)
+
+**Why.** Every other step rolls a workload whose ServiceAccount the node has already
+seen, so the run never makes a node proxy build clusters for an identity that is *new
+to it*. That is exactly where #1008 lived: an east-west QUIC twin
+(`<ns>/<svc>@<ns>/<sa>`) added *after* its h2 base was subscribed shared the base's EDS
+resource name, Envoy's delta `WatchMap` deduplicated the subscription, and the twin sat
+warming for its full 15 s `initial_fetch_timeout` while every request from that
+identity to a QUIC destination got **503/NC**. On rev242 that was **1,060** k6 failures
+in 11 s, visible only because the k6 loaders happened to start (as a new identity,
+`aether-test/default`, on every node) 58 s before T0 — the 8 h of churn after it showed
+nothing, because nothing in it introduced a new identity. Fixed in #1012 (each twin
+gets its own EDS resource name); this step is what lets a soak see a regression of it.
+Gotcha 8's shape again: the schedule never created the state the defect needed.
+
+**What it does.** At T0+126 and T0+288 (`SOAK_NEWSA_OFFSETS`, minutes; nudged off the
+T0+120 edge roll and the T0+300 TRIPLE so neither confounds the other) the driver:
+
+1. creates, together, a ServiceAccount, a ConfigMap (`newsa-client.sh`) and a
+   1-replica Deployment, all named `sa-new-<epoch>`, in `aether-test`, pinned with a
+   `kubernetes.io/hostname` nodeSelector to one Ready worker, round-robin across steps
+   (offset by T0, so successive runs start elsewhere);
+2. the pod (`curlimages/curl:8.22.0`, already resident for the UDP dialer, so no pull)
+   drives **~20 rps** from its first instant for **120 s**, split across
+   `svc-1.aether-test.aether.internal:18081` (QUIC-enabled on the proving run) and
+   `svc-3…:18081` (h2), with user agent **`aether-soak-newsa/sa-new-<epoch>`**, and
+   prints a per-destination `ok` / `non2xx` / `connerr` tally every 10 s
+   (`AETHER_NEWSA …`), then `AETHER_NEWSA_FINAL …` and
+   `AETHER_METRIC newsa_tally={…}`;
+3. copies those lines into the churn log, deletes all three objects together, and logs
+
+   ```
+   ROLLED newsa/sa-new-<epoch> <node> ready=<s>s svc-1:ok=1300,non2xx=0,connerr=0,codes=- svc-3:ok=1300,…
+   ```
+
+   or `FAILED newsa/…` with the same tally when any destination saw a non-2xx or a
+   connect error, or no 2xx at all.
+
+A `FAILED newsa/` line **without** a following `CHURN ABORTED` is a gate finding, not
+a hole in the schedule: the driver carries on and the run stays gradeable. A step
+that produced no tally at all (apply refused, pod not Ready in 180 s, no final line)
+is a hole and aborts the run like a failed roll. The step's name is the join key
+everywhere: it is the SA, the user agent's suffix and the twin's stats key
+(`aether-test/svc-1@aether-test/sa-new-<epoch>`).
+
+Knobs: `SOAK_NEWSA=0` (opt out), `SOAK_NEWSA_OFFSETS`, `SOAK_NEWSA_SECONDS`,
+`SOAK_NEWSA_RPS`, `SOAK_NEWSA_TARGETS` (`name=url …`), `SOAK_NEWSA_UPSTREAMS`,
+`SOAK_NEWSA_IMAGE`. `churn.sh --new-sa-once` runs one step now and exits (step 0d).
+
+**Gate.** Both must hold, at T0+8h:
+
+```promql
+# 1. no twin ever waited out its initial fetch (the #1008 signature)
+sum(increase(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}[8h])) == 0
+# ... AND, because increase() reads 0 for a series BORN at 1 -- which is exactly how
+#     the rev242 series appeared (first sample 1, at 09:54:44Z) -- the raw form must
+#     be empty too:
+max_over_time(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}[8h]) > 0
+```
+
+```logsql
+# 2. zero 503/NC for the new identities (VictoriaLogs, not Loki)
+log_name:aether_access_logs AND reporter:source AND user_agent:~"aether-soak-newsa" AND response_flags:NC
+  | stats by (node_name, authority) count()
+```
+
+plus the driver's own reading: `grep 'newsa/' /tmp/soak-churn.log` shows two `ROLLED`
+lines with `non2xx=0,connerr=0` on both destinations.
+
+**Negative control — the gate can fail.** rev242 (pre-#1012) *is* the red reading:
+`envoy_cluster_init_fetch_timeout_total{aether_cluster="aether-test/svc-{1,2}@aether-test/default"}`
+= 1 on all five nodes (and `…@aether-test/anyport-probe` = 1 on w02, the day's other
+new identity), and the access logs held **1,060 × 503/NC** from `aether-test/default`
+(svc-1 521, svc-2 539), every node, 09:54:32–43Z. Both halves moved; the step exists so
+that a run whose T0 comes after every workload already exists can still move them.
+
+**Neither zero is evidence on its own** (see "Zero-reading gates" below). Before
+grading, confirm each step actually built its twins and sent traffic:
+
+```promql
+# one series per (QUIC destination x step), on the step's node, non-zero
+envoy_cluster_upstream_rq_total{aether_cluster=~".*@aether-test/sa-new-.*"}
+```
+
+```logsql
+log_name:aether_access_logs AND reporter:source AND user_agent:~"aether-soak-newsa"
+  | stats by (user_agent, authority, response_flags) count()
+```
+
+If `svc-1` is not QUIC-enabled on the build under test there is no twin and the
+`@` half of the gate is vacuous — say so in the grade rather than reading it as a
+pass. (Once #979 drops the allow-list, every destination has twins.)
+
+**What a FAIL reads like.** The #1008 class looks like this, all on one node, in the
+first ~15 s of one step:
+
+- churn log: `FAILED newsa/sa-new-<epoch> <node> ready=…s svc-1:ok=…,non2xx=~150,connerr=0,codes=503x~150 svc-3:ok=…,non2xx=0,…`
+  — only the QUIC destination, ~15 s × 10 rps, and the pod's `AETHER_NEWSA` lines
+  show `non2xx` climbing in the first two 10-second windows and then flat;
+- `envoy_cluster_init_fetch_timeout_total{aether_cluster="aether-test/svc-1@aether-test/sa-new-<epoch>"}`
+  = 1 on that node, and the proxy log's `initial fetch timed out for
+  …ClusterLoadAssignment` ~15 s after the CDS add;
+- the LogsQL above returns `503/NC` rows for `authority` svc-1 on that `node_name`.
+
+Troubleshoot it with the runbook, "QUIC twin never leaves warming / 503 NC on a new
+ServiceAccount (#1008)". Other shapes are other classes and are findings in their own
+right: non-2xx on the **h2** destination too (a new identity's SVID or inbound secret
+not ready — not a twin), or `connerr` with `codes=err6`/`err7` (the new pod's mesh DNS
+or capture, i.e. the CNI ADD path, not the proxy).
 
 **Authorization:** rolling these shared `talos-main` workloads for soak validation is
 standing-authorized, and scaling `svc-5` down and back up for 90s is the same class of
@@ -300,6 +425,8 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
 - **The first proxy roll and the SHRINK are graded as their own episodes.** Attribute every non-success to its bracketing step from the RAW counter
   series at 30–60s resolution: `x - x offset 8h` silently drops an error series that did
   not exist at the offset, and the unseeded ones are exactly the ones that matter.
+- **The new-ServiceAccount gate (#1014)** — `init_fetch_timeout` on `@` clusters and
+  zero `503/NC` for `user_agent:aether-soak-newsa`. See "The new-ServiceAccount step".
 - **SVID rotation** is a bar since the SPIFFE Broker API (proposal 036): with the default
   4h TTL a pod rotates every ~2h, so an 8h run sees four cycles.
   The rotation signal is the agent's counter, summed per node (a restarted agent
@@ -331,6 +458,20 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
   same `sds.<name>.version` gauge. It cannot be split without renaming the resources,
   so it is documented rather than changed; the gauges remain usable only as "this
   node's Envoy has received *a* secret push", never as a rotation count.
+
+### Zero-reading gates: seeded or vacuous?
+
+Several gates pass on a zero, and a zero from a series that was never created reads
+exactly like a zero from a healthy system (aether#853, gotcha 10). Before grading on
+one, know which kind it is and what proves it can move:
+
+| gate | series on a clean run | what proves it can move |
+|---|---|---|
+| prober `dns_*` classes | **no series** (created on first occurrence) | source: `classifyErr` in `prober/internal/prober/prober.go` |
+| `cap_tcp_anyport_*` | seeded by `anyport-probe.sh` before T0 | the probe's own +N, and the neighbouring `cap_tcp_*` chains climbing |
+| `aether_cni_operations_total{operation="capture_divert",result="error"}` | **no series** | `…{operation="add"}` must exist (the export works) |
+| `envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}` (#1014) | **no series**; a failure is BORN at 1, so `increase()` alone reads 0 — use `max_over_time` too | rev242's red reading (above), and each step's own `@…/sa-new-*` twin series existing with traffic |
+| `503/NC` for `user_agent:aether-soak-newsa` | no rows | the same query without `response_flags:NC` returns the step's requests |
 
 ### The Phase 4 evidence clock (proposal 037)
 
@@ -601,8 +742,10 @@ Each of these invalidated a real run:
   > bounded verbatim sample. Verified on k6 v2.3.0; see the comment block in
   > `k6-mesh-soak.js`.
 - `k6-runner.yaml` — the 5-node runner DaemonSet.
-- `churn.sh` — the 31-roll churn driver plus the no-roll window and the demand-set
-  shrink; takes a build label for the log header.
+- `churn.sh` — the 31-roll churn driver plus the two new-ServiceAccount steps, the
+  no-roll window and the demand-set shrink; takes a build label for the log header.
+- `newsa-client.sh` — the new-SA step's workload (busybox `sh` + `curl` in the pod,
+  shipped per step as a ConfigMap); never run on the workstation.
 - `sample-proxy-rss.sh` — age-matched `aether-proxy` working-set sampler for #628.
   Standalone, and queued automatically by `churn.sh` after each proxy roll.
 - `multiprotocol.yaml` — the proposal-037 leg: `mixed-svc` (HTTP :8080 primary + raw
