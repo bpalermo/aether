@@ -146,6 +146,9 @@ jobs:
           # Each resolved `ghcr.io/<repo>@<index digest>`, for the cosign pass
           # below to verify (index + every child, #925).
           SIGNED_REFS_OUT: signed-refs.txt
+          # The aether-proxy index each commit's chart pins (#984), for the same
+          # pass under proxy-release.yml's identity.
+          PROXY_SIGNED_REFS_OUT: proxy-signed-refs.txt
         run: |
           set -euo pipefail
           if [ -n "${TARGET}" ]; then
@@ -193,9 +196,27 @@ jobs:
             echo "::error::the artifact check passed but recorded no image digests to verify"
             exit 1
           fi
+          rc=0
           CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
           CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-            ./scripts/verify-image-signatures.sh --file signed-refs.txt | tee cosign.log
+            ./scripts/verify-image-signatures.sh --file signed-refs.txt | tee cosign.log || rc=$?
+
+          # aether-proxy (#984): the digest each checked commit's chart PINS,
+          # signed by proxy-release.yml -- a different workflow, so a different
+          # certificate identity, and on main only. Deduplicated: consecutive
+          # commits usually ship the same pin. An empty file is legitimate here
+          # and only here: every pin in the window predates proxy signing and was
+          # printed as `skip` by the step above (scripts/proxy-pin-lib.sh). A
+          # post-cut-over pin is never skipped, so it is always in this file.
+          if [ -s proxy-signed-refs.txt ]; then
+            sort -u proxy-signed-refs.txt > proxy-signed-refs.uniq
+            CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/proxy-release\\.yml@refs/heads/main\$" \
+            CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
+              ./scripts/verify-image-signatures.sh --file proxy-signed-refs.uniq | tee -a cosign.log || rc=$?
+          else
+            echo "aether-proxy: no pin in this window is past the signing cut-over (see the skip lines above)"
+          fi
+          exit "$rc"
 
       # A failure here is invisible unless it is written down somewhere a person
       # reads: this workflow is attached to no PR, and the nightly e2e suite sat
