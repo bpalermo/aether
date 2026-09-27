@@ -13,7 +13,12 @@ n=0
 fail=0
 while read -r cmd a b; do
 	[ -n "$cmd" ] || continue
-	if [ -z "$b" ]; then
+	if [ "$cmd" = proxy-pin-refs ]; then
+		# The one list-valued answer: one reference per line from the script,
+		# ","-joined by BUILD.bazel.
+		want="$a" got="$("$script" "$cmd" | paste -sd, -)"
+		label="$cmd"
+	elif [ -z "$b" ]; then
 		want="$a" got="$("$script" "$cmd")"
 		label="$cmd"
 	else
@@ -30,7 +35,7 @@ while read -r cmd a b; do
 done <"$expected"
 
 # A comparison over nothing is not agreement (#853).
-if [ "$n" -lt 20 ]; then
+if [ "$n" -lt 30 ]; then
 	echo "only ${n} comparisons — the expected file is not what BUILD.bazel writes" >&2
 	exit 2
 fi

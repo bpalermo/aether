@@ -75,9 +75,11 @@ jobs:
             runner: ubuntu-24.04-arm
             bazel_config: rbe-buildbuddy-arm64
     runs-on: ${{ matrix.runner }}
+    # Pushes to the registry: the robot's credentials live in `release` only
+    # (deployment-branch policy: main), like every pushing job (proposal 040).
+    environment: release
     permissions:
       contents: read
-      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -91,12 +93,15 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
+      # The Quay robot account (proposal 040): QUAY_USERNAME / QUAY_TOKEN are
+      # secrets of the `release` environment only, so this job declares it. The
+      # host is the registry setting, never a literal.
       - name: Log in to the image registry
         uses: docker/login-action@v4
         with:
           registry: ${{ env.IMAGE_REGISTRY_HOST }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
 
       # aether #651/#653 acceptance gate, run BEFORE the push so a proxy with the
       # wrong GNU build-ID can never reach the registry. Two cheap assertions
@@ -155,9 +160,10 @@ jobs:
   manifest:
     needs: build-push
     runs-on: ubuntu-latest
+    # Pushes the index: robot credentials, `release` only (proposal 040).
+    environment: release
     permissions:
       contents: read
-      packages: write
     outputs:
       # Index (multi-arch manifest list) digest — what bump-chart pins the chart
       # to. Read back from the registry rather than computed locally: the chart's
@@ -176,12 +182,15 @@ jobs:
       - name: Image registry (bazel/img/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
+      # The Quay robot account (proposal 040): QUAY_USERNAME / QUAY_TOKEN are
+      # secrets of the `release` environment only, so this job declares it. The
+      # host is the registry setting, never a literal.
       - name: Log in to the image registry
         uses: docker/login-action@v4
         with:
           registry: ${{ env.IMAGE_REGISTRY_HOST }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
 
       - name: Download digests
         uses: actions/download-artifact@v8
@@ -370,10 +379,11 @@ jobs:
   # form): the Bazel-pinned cosign (`bazel run //tools/cosign`, the
   # rules_img_signer_cosign bazel_dep's release binary, sha256 in its lock;
   # v3.1.2), run LOCALLY on this runner, keyless via this job's OIDC token, `--recursive` so the index
-  # AND each per-arch child are signed, and cosign 3's default bundle layout
-  # (the `sha256-<hex>` fallback tag; ghcr.io has no Referrers API). No
-  # `--new-bundle-format` flag, exactly as publish.yaml: `=false` is rejected on
-  # the v3 keyless path and `=true` is the default.
+  # AND each per-arch child are signed, and cosign 3's default bundle format --
+  # which on quay.io (SIGNATURE_LAYOUT = "referrer", bazel/img/registry.bzl)
+  # lands as an OCI 1.1 referrer with no tag. No `--new-bundle-format` flag,
+  # exactly as publish.yaml: `=false` is rejected on the v3 keyless path and
+  # `=true` is the default.
   #
   # THE IDENTITY IS THIS FILE, not publish.yaml. Fulcio binds the certificate
   # to the workflow that requested the token, so these signatures carry
@@ -388,11 +398,11 @@ jobs:
   sign:
     needs: manifest
     runs-on: ubuntu-latest
+    # Pushes the signature (an OCI 1.1 referrer on quay.io) with the robot's
+    # credentials, which live in `release` only (proposal 040).
+    environment: release
     permissions:
       contents: read
-      # Push the signature (tags on ghcr.io; a referrer on a registry with the
-      # Referrers API) into the aether-proxy repository.
-      packages: write
       # Keyless: exchanged with Fulcio for a short-lived certificate bound to
       # this workflow. Without it signing fails closed.
       id-token: write
@@ -418,12 +428,15 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
+      # The Quay robot account (proposal 040): QUAY_USERNAME / QUAY_TOKEN are
+      # secrets of the `release` environment only, so this job declares it. The
+      # host is the registry setting, never a literal.
       - name: Log in to the image registry
         uses: docker/login-action@v4
         with:
           registry: ${{ env.IMAGE_REGISTRY_HOST }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
 
       - name: Build cosign (Bazel-pinned, local)
         # Replaces the SHA-pinned sigstore/cosign-installer: the binary's pin is
@@ -461,7 +474,10 @@ jobs:
       # signature from any other ref is not one of ours.
       - name: Verify the signatures (index and every child)
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Registry reads (the child walk) with the robot, not anonymously, so a
+          # repository that is not public yet cannot make this step lie.
+          REGISTRY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
           SIGNED_DIGEST: ${{ steps.sign.outputs.signed_digest }}
         run: |
           set -euo pipefail
@@ -619,18 +635,22 @@ jobs:
           # therefore changes NOTHING that gets deployed — both lines must move.
           # (This was a real bug: the chart stayed pinned to the Envoy v1.39.0
           # index across every proxy release.)
-          # The block is found by `repository: $PROXY_IMAGE` (the registry
-          # setting); its dots are escaped for the sed address. image-registry.sh
-          # only ever prints [a-z0-9./_-], so nothing else needs escaping.
+          #
+          # And the REPOSITORY moves with them (proposal 040): the block is the
+          # one whose `repository:` names any of proxy_pin_references() — so the
+          # first release after the Quay cut-over finds the ghcr.io pin — and it
+          # is rewritten to $PROXY_IMAGE, where this run just pushed and signed.
+          # proxy_pin_rewrite fails (file unchanged) unless it found exactly one
+          # such block and moved its tag AND digest: a pin it cannot find is a
+          # red run, never a silent "nothing to do" (scripts/check-proxy-pin.sh
+          # pins both halves).
           test -n "$PROXY_IMAGE"
-          pin_re="repository: ${PROXY_IMAGE//./\\.}"
-          sed -i -E '\|'"$pin_re"'|{n;s|^(\s*tag: ).*|\1'"${{ github.sha }}"'|}' \
-            charts/aether/values.yaml
-          sed -i -E '\|'"$pin_re"'|,+4{s|^(\s*digest: ).*|\1"'"$INDEX_DIGEST"'"|}' \
-            charts/aether/values.yaml
-          # Keep the adjacent provenance comment honest too.
-          sed -i -E '\|'"$pin_re"'|,+4{s|helper prefers digest over tag\..*|helper prefers digest over tag. Multi-arch index for '"${{ github.sha }}"'.|}' \
-            charts/aether/values.yaml
+          # shellcheck source=scripts/proxy-pin-lib.sh
+          . ./scripts/proxy-pin-lib.sh
+          if ! proxy_pin_rewrite charts/aether/values.yaml "$PROXY_IMAGE" "$SHA" "$INDEX_DIGEST"; then
+            echo "::error::could not rewrite the aether-proxy pin in charts/aether/values.yaml (no single block naming one of: ${PROXY_PIN_REFS[*]})"
+            exit 1
+          fi
           grep -A5 "repository: ${PROXY_IMAGE}" charts/aether/values.yaml
           # A re-run of an already-pinned sha (or a release whose proxy bits did
           # not change the published index) leaves no diff: skip the branch, the

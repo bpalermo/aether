@@ -284,13 +284,13 @@ CRDS_VERSION=<X.Y.Z>-$COMMIT
 AETHER_VERSION=<X.Y.Z>-$COMMIT
 
 # 1) CRDs first
-helm upgrade --install aether-crds oci://ghcr.io/bpalermo/aether/charts/crds \
+helm upgrade --install aether-crds oci://quay.io/aethermesh/chart-crds \
   --version "$CRDS_VERSION"
 
 # 2) then the system. Prefer this commit-pinned chart tag over the bare
 #    `--version <X.Y.Z>`: the bare tag is mutable and re-pushed by every publish,
 #    the commit tag never is (#692).
-helm upgrade --install aether oci://ghcr.io/bpalermo/aether/charts/aether \
+helm upgrade --install aether oci://quay.io/aethermesh/chart-aether \
   --version "$AETHER_VERSION" -n aether-system --create-namespace \
   --set clusterName=my-cluster --set meshDomain=aether.internal
 
@@ -430,12 +430,14 @@ log. A control's `MISSING` lines are expected and never reach `verify.log` or
 the job summary. If the control fails, the gate still runs, and the run files
 (or comments on) its own rolling issue, **publish-verify: the expected-red
 control did not go red**. Until that issue is fixed, a green gate proves
-nothing. Exit 2 (GHCR unreadable) is inconclusive, and it fails the run too.
+nothing. Exit 2 (registry unreadable) is inconclusive, and it fails the run too.
 Reproduce with `scripts/publish-verify-control.sh [<base>]`. The offline check,
 `scripts/check-publish-verify-control.sh`, runs in `ci`'s `shell` job. It drives
 the real verifier against a fake registry and shows the control rejects a
 verifier that stopped counting `MISSING`, an absence with no witness, a `MISSING` line
-naming another commit, and a stray `ok`. Its fake registry, like `scripts/check-registry-lookup.sh`'s, accepts only the
+naming another commit, a stray `ok`, and a red reported against the wrong
+registry (every `MISSING` line must name the registry the control's tree names —
+proposal 040). Its fake registry, like `scripts/check-registry-lookup.sh`'s, accepts only the
 bearer token it issued and answers any other with a 401, so a verifier that
 sends the wrong value as the token goes red offline (#999).
 
@@ -447,25 +449,98 @@ and from nowhere else:
 
 | reader | how |
 |---|---|
-| image pushes, chart pushes, chart template tests, e2e go_test defaults | `load("//bazel/img:registry.bzl", ...)` — `image_repository()`, `image_reference()`, `chart_registry_url()` |
+| image pushes, chart pushes, chart template tests, e2e go_test defaults | `load("//bazel/img:registry.bzl", ...)` — `image_repository()`, `image_reference()`, `chart_registry_url(<chart>)` |
 | the `//proxy` workspace (`oci_push`) | its byte-identical copy `proxy/bazel/registry.bzl` (it cannot load from the root module) |
-| `//bazel/proxy_pin` (the Envoy the validate gate runs) | `image_reference("proxy")` + `registry_token_url()` |
-| workflows | `scripts/image-registry.sh >> "$GITHUB_ENV"` after checkout → `IMAGE_REGISTRY_HOST`, `IMAGE_NAMESPACE`, `IMAGE_REGISTRY` (host/namespace), `PROXY_IMAGE` |
-| verifiers, e2e scripts | `scripts/image-registry.sh {prefix,host,repo <c>,ref <c>,chart-repo <c>}`; `scripts/registry-lib.sh` resolves its repository lists through it |
+| `//bazel/proxy_pin` (the Envoy the validate gate runs) | `proxy_pin_references()` + `registry_token_url()` |
+| workflows | `scripts/image-registry.sh >> "$GITHUB_ENV"` after checkout → `IMAGE_REGISTRY_HOST`, `IMAGE_NAMESPACE`, `IMAGE_REGISTRY` (host/namespace), `PROXY_IMAGE`, `IMAGE_SIGNATURE_LAYOUT` |
+| verifiers, e2e scripts | `scripts/image-registry.sh {prefix,host,repo <c>,ref <c>,chart-repo <c>,chart-ref <c>,signature-layout,proxy-pin-refs}`; `scripts/registry-lib.sh` resolves its repository lists through it |
 
-Today it says `ghcr.io` / `bpalermo/aether` (images `ghcr.io/bpalermo/aether/<component>`,
-the proxy `…/aether-proxy`, charts `…/charts/<chart>`). **Phase 2 of proposal 040
-flips it to `quay.io` / `aethermesh`** — images `quay.io/aethermesh/<component>`
-(the proxy becomes plain `proxy`), charts `quay.io/aethermesh/chart-<chart>` — by
-editing that one file (and its proxy copy), not the workflows. The install
-commands in this runbook and in `charts/README.md` name the ghcr coordinates on
-purpose and change in the same PR as the flip.
+It says **`quay.io` / `aethermesh`** since the phase-2 cut-over (proposal 040):
+images `quay.io/aethermesh/<component>` (the proxy is plain `proxy`), charts
+`quay.io/aethermesh/chart-<chart>`, signatures as OCI 1.1 referrers
+(`SIGNATURE_LAYOUT = "referrer"`). Before it: `ghcr.io/bpalermo/aether/<component>`,
+the proxy `…/aether-proxy`, charts `…/charts/<chart>`, signatures as cosign tags.
+The cut-over commit is the phase-2 PR's merge commit — the first whose
+`registry.bzl` says quay.io.
+
+**Charts are pushed with oras, not `helm push`.** `helm push` appends the
+chart's `name:` to its base and cannot name a flat `chart-<name>` repository;
+Quay has no nested repositories (and bare `prober` / `udsecho` would collide
+with those images). `chart_push` (`//bazel/helm:defs.bzl`) writes exactly the
+artifact `helm push` writes — the packaged `.tgz` as the
+`application/vnd.cncf.helm.chart.content.v1.tar+gzip` layer, `Chart.yaml` as the
+`application/vnd.cncf.helm.config.v1+json` config (`//tools/chartconfig`) — with
+the pinned oras (`//tools/oras`, v1.3.4, `version_test`) to
+`chart_registry_url(<chart>)`, tagged with the packaged version. publish.yaml
+runs `<chart>.push_images`, then `<chart>.chart_push` (and
+`aether_commit.chart_push` for the commit-suffixed tag). `helm pull
+oci://quay.io/aethermesh/chart-aether --version <v>` reads it like any
+helm-pushed chart (proved against a local registry: same layer digest, same
+config, `helm template` renders).
+
+**Credentials.** Every job that pushes or signs (`publish.yaml`'s `publish`,
+`proxy-release.yml`'s `build-push`, `manifest`, `sign`) declares
+`environment: release` and logs in to `$IMAGE_REGISTRY_HOST` with the Quay robot
+(`QUAY_USERNAME` / `QUAY_TOKEN`, secrets of the `release` environment only;
+deployment-branch policy `main`). `GITHUB_TOKEN` is no longer a registry
+credential; it stays for GitHub API calls (PRs, issues). The repositories are
+pre-created public in the org — the robot **cannot create repositories** (the
+quay-smoke gate), so a new component needs its repository created (public, robot
+write) before its first publish.
+
+**The sweep across the cut-over (the split rule).** `verify-published-artifacts.sh`
+reads `bazel/img/registry.bzl` **as of each push head it checks** (`git show
+<sha>:bazel/img/registry.bzl`), exactly as it reads each chart's version and the
+release-tag prefix: heads before the cut-over are checked on ghcr.io (charts
+`charts/<name>`, the `aether-proxy` override, a signature TAG), heads at or after
+it on quay.io (`chart-<name>`, flat names, a signature REFERRER — and nothing
+else: a fallback tag there, or a referrer plus a tag, is `MISSING`). No sha or
+date is typed anywhere; a commit older than `registry.bzl` itself (before #998)
+uses the file's first version, which phase 1 introduced with no behaviour change.
+A post-cut-over head whose artifacts exist only on ghcr.io is `MISSING`, never
+borrowed from the old registry. Each `commit` block of the output starts with a
+`registry <host>/<namespace>, signatures as <layout>` line saying which setting
+it used. The aether-proxy pin is looked up where **the pin** says (it moves with
+the next proxy release, not with the flip), in the layout of the newest
+`registry.bzl` under which that reference was `image_reference("proxy")`.
+
+**The aether-proxy pin during the cut-over.** The flip could not move the pin
+(it is data only `proxy-release.yml`'s bump-chart job writes), so right after the
+cut-over `charts/aether/values.yaml` still names the ghcr.io image. Every pin
+reader accepts `proxy_pin_references()` — `image_reference("proxy")` plus
+`PROXY_PIN_LEGACY_REFERENCES` — and the bump-chart rewrite
+(`proxy_pin_rewrite`, `scripts/proxy-pin-lib.sh`) finds the block by any of them
+and moves `repository:` together with `tag:` and `digest:`. The phase-2 merge
+itself triggers a proxy release (it touches `proxy-release.yml` and
+`proxy/bazel/registry.bzl`), whose bump-chart PR re-pins to
+`quay.io/aethermesh/proxy`.
+
+**Migrating a chart consumer.** Every chart took a **major** bump (aether
+`1.0.0`, and crds / prober / udsecho to `1.0.0`) because the default image
+repositories moved. Upgrade from the new coordinates with the values you run
+today — `helm get values <release> -n <ns> -o yaml > values.yaml`, then
+`helm upgrade <release> oci://quay.io/aethermesh/chart-<name> --version <v> -f
+values.yaml`; **never `--reuse-values`**, which pins the old chart's defaults.
+Anyone mirroring images and overriding `repository` by prefix must now mirror
+from `quay.io/aethermesh/<component>` and override each image's `repository`
+individually. Releases published before the cut-over stay on ghcr.io, untouched.
+
+**TODO — decommission ghcr (proposal 040 phase 4).** Once no supported release
+and no cluster references a ghcr.io coordinate: delete the sweep's ghcr branch
+(the first-version fallback and the `tag` default for a `registry.bzl` without
+`SIGNATURE_LAYOUT`), empty `PROXY_PIN_LEGACY_REFERENCES`, drop `GHCR_TOKEN` from
+`publish-verify.yaml` and `registry-lib.sh`, and shrink
+`check-registry-config.sh`'s legacy allow-list. Leave the ghcr.io packages in
+place, read-only: deleting them would break every historical pin.
 
 `scripts/check-registry-config.sh` (in `ci`'s and `proxy`'s `shell` jobs)
 keeps it one setting: the file parses, the proxy copy is identical, the
-aether-proxy pin in `charts/aether/values.yaml` names `image_reference("proxy")`,
-and no file outside its written-down allow-list (docs, the website, the two
-READMEs, the setting itself, the pin) spells the registry out.
+aether-proxy pin in `charts/aether/values.yaml` names one of
+`proxy_pin_references()` (a pre-cut-over one is reported as a notice), no file
+outside its written-down allow-list (docs, the website, the two READMEs, the
+setting itself, the pin) spells the current registry out, and no file outside
+its **legacy** allow-list (the setting's history note, the pin, proposals, this
+runbook's records, observability notes) spells a pre-cut-over coordinate out.
 `//bazel/img:registry_test` pins `image-registry.sh` against the Starlark helpers.
 
 **Registry library.** `scripts/registry-lib.sh` (was `ghcr-lib.sh`, which is now a
@@ -478,8 +553,12 @@ fetches the anonymous pull token from the registry's own endpoint (ghcr.io
 (`GET /v2/<repo>/referrers/<digest>`): quay.io serves it, ghcr.io answers 404 —
 which the library reads as "no referrers API", never as "no signatures".
 
-**Quay smoke (the phase-2 gate).** Before the flip, prove push + keyless sign +
-verify on quay.io with one throwaway image:
+**Quay smoke (the phase-2 gate).** Proves push + keyless sign + verify on
+quay.io with one throwaway image. It gated the flip (green: run 36345331611 — the
+robot pushes to a pre-created repository but cannot create one; cosign v3.1.2
+writes the signature as a referrer, no tag, on the index and every child;
+`verify_image_signatures` passes), and stays dispatchable for re-checking quay
+after a cosign or robot change:
 
 ```bash
 gh workflow run quay-smoke.yaml --ref main    # main only: the `release` environment holds the robot secrets
@@ -505,7 +584,7 @@ fallback tags) and leaves the repository. The run summary is a table:
 | signature layout (index) / (index + children) | `referrer`, `bundle` (`sha256-<hex>` fallback tag), `legacy` (`.sig`), or `both` (a referrer AND a tag — the sweep's double-write defect), from `registry_signature_layout_direct`. `mixed` in the second row = the children disagree with the index. This answers where cosign v3.1.2 puts a signature on quay and decides phase 2's verify path |
 | referrer artifactTypes | what the referrers API lists for the index (`application/vnd.dev.sigstore.bundle.v0.3+json` expected) |
 | verify (index + every child) | `verify_image_signatures` with identity `^https://github\.com/<repo>/\.github/workflows/quay-smoke\.yaml@refs/heads/main$` |
-| certificate SAN | `.optional.Subject` from `cosign verify` — the workflow ref, NOT the OIDC `sub` |
+| certificate SAN | the X.509 SAN URI of the signing certificate — the workflow ref, NOT the OIDC `sub` — read from the sigstore bundle `cosign download signature` returns (`verificationMaterial.certificate.rawBytes`, or the chain's leaf), decoded with openssl. cosign v3's `verify` JSON has no `optional` block, so there is nothing to read there. A SAN that cannot be read, or that does not match the verify identity, **fails the summary** |
 | OIDC token | the Actions token's `sub` (with `environment: release`: `repo:<owner>/<repo>:environment:release`) and `job_workflow_ref`; the token itself is masked and never printed |
 | cleanup | tags deleted with a robot `pull,push` token (`DELETE /v2/<repo>/manifests/<tag>`); a failure is a warning, not a red |
 
@@ -535,24 +614,28 @@ was `sigstore/cosign-installer` pinned by SHA (v4.1.2 → cosign v3.0.6).
 
 **Why only the module's CLI, not its signer plugin.** `rules_img_signer_cosign`
 also ships `sign-oci-artifact`, a signer plugin for rules_img's
-`signing_config` / `img deploy`. It stores signatures as **OCI 1.1 referrers**,
-and ghcr.io has no Referrers API (below) — everything here (sign, verify, the
-`publish-verify` sweep) reads cosign's `sha256-<hex>` tag. Signing stays an
-explicit `cosign sign` step after the pushes.
+`signing_config` / `img deploy`. Signing stays an explicit `cosign sign
+--recursive` step after the pushes, by digest, with the same cosign every
+verifier runs: that path is the one the quay-smoke gate measured on quay.io
+(referrer, no tag), and the plugin's layout there is unmeasured.
 
-**Layout.** ghcr.io does not implement the OCI Referrers API, so the signature
-lands in a tag in the image's own repository: cosign 3 writes the OCI 1.1
-fallback index `sha256-<hex>` (the bundle format — keyless v3 *requires*
-`--new-bundle-format`; `=false` is rejected), cosign 2 wrote `sha256-<hex>.sig`.
-Everything published before 2026-09-24 carries the legacy `.sig`. On a registry
-that **does** serve the Referrers API (quay.io, after the proposal 040 cut-over)
-cosign 3 attaches the bundle as a real **referrer** (artifactType
+**Layout.** quay.io serves the OCI 1.1 Referrers API, so cosign 3 attaches the
+sigstore bundle as a real **referrer** of the signed manifest (artifactType
 `application/vnd.dev.sigstore.bundle.v0.3+json`, annotation
 `dev.sigstore.bundle.predicateType: https://sigstore.dev/cosign/sign/v1`) and
-writes no tag — observed on `quay.io/argoproj/argocd` and `quay.io/cilium/cilium`.
-Exactly one of the three layouts must exist per digest (`scripts/registry-lib.sh`,
-`registry_signature_layout`; a bundle referrer with any other predicateType is an
-attestation, not a signature). `cosign verify` finds all three itself.
+writes no tag — measured by the quay-smoke gate on our own index and children,
+and observed on `quay.io/argoproj/argocd` and `quay.io/cilium/cilium`.
+`bazel/img/registry.bzl` records that as `SIGNATURE_LAYOUT = "referrer"`, and
+the sweep holds every post-cut-over commit to it: a fallback tag on quay.io, or a
+referrer plus a tag, is `MISSING`. Before the cut-over, on ghcr.io (no Referrers
+API), the signature landed in a tag in the image's own repository: cosign 3's
+OCI 1.1 fallback index `sha256-<hex>` (the bundle format — keyless v3 *requires*
+`--new-bundle-format`; `=false` is rejected), and before 2026-09-24 cosign 2's
+`sha256-<hex>.sig`; a `registry.bzl` without `SIGNATURE_LAYOUT` promises that
+`tag` layout. Exactly one of the three layouts may exist per digest
+(`scripts/registry-lib.sh`, `registry_signature_layout`; a bundle referrer with
+any other predicateType is an attestation, not a signature). `cosign verify`
+finds all three itself.
 Do not pass `--new-bundle-format` to `cosign verify` expecting it to assert the
 layout: `=true` still accepts a legacy `.sig`.
 
@@ -564,10 +647,10 @@ child with the same identity and issuer:
 
 ```bash
 # Read-only; no credentials. The target sets COSIGN to the pinned cosign.
-bazel run //tools/cosign:verify_image_signatures -- ghcr.io/bpalermo/aether/agent@sha256:<index digest>
-#   verified index ghcr.io/bpalermo/aether/agent@sha256:…
-#   verified child ghcr.io/bpalermo/aether/agent@sha256:…   (linux/amd64)
-#   verified child ghcr.io/bpalermo/aether/agent@sha256:…   (linux/arm64)
+bazel run //tools/cosign:verify_image_signatures -- quay.io/aethermesh/agent@sha256:<index digest>
+#   verified index quay.io/aethermesh/agent@sha256:…
+#   verified child quay.io/aethermesh/agent@sha256:…   (linux/amd64)
+#   verified child quay.io/aethermesh/agent@sha256:…   (linux/arm64)
 ```
 
 Identity is `^https://github\.com/bpalermo/aether/\.github/workflows/publish\.yaml@`,
@@ -580,9 +663,11 @@ working directory. Standalone, `COSIGN=/path/to/cosign
 scripts/verify-image-signatures.sh …` still works with any cosign — the version
 is then yours to vouch for.
 
-cosign v3.1.2 verifies both layouts: a pre-2026-09-24 legacy `.sig`
-(`agent@sha256:14949387…`, commit 5b0c199) and a v3 bundle
-(`agent@sha256:066267b6…`, commit 7f8f825) both pass, index and children.
+cosign v3.1.2 verifies every layout: a pre-2026-09-24 legacy `.sig`
+(`agent@sha256:14949387…`, commit 5b0c199) and a v3 fallback-tag bundle
+(`agent@sha256:066267b6…`, commit 7f8f825) on ghcr.io both pass, index and
+children, and so does a referrer on quay.io (the quay-smoke gate). Images
+published before the cut-over are verified at their ghcr.io coordinates.
 
 Not signed by this pipeline: any `agent`-family image published before f332061
 (#875, 2026-09-20) — those verify as `no signatures found`. The proxy is signed
@@ -590,7 +675,9 @@ by its own workflow; see the next section.
 
 ### Verifying the aether-proxy signature (#984)
 
-`ghcr.io/bpalermo/aether/aether-proxy` is built by `proxy-release.yml`, not
+The proxy image (`quay.io/aethermesh/proxy` since the cut-over; before it, and
+in the chart until the first proxy release after it re-pins,
+`ghcr.io/bpalermo/aether/aether-proxy`) is built by `proxy-release.yml`, not
 `publish.yaml`, and is versioned by the commit that changed `proxy/`, not by the
 aether commit — the chart carries its **digest** in
 `charts/aether/values.yaml` (`proxy.image.digest`). Since #984 that workflow's
@@ -610,9 +697,10 @@ https://github.com/bpalermo/aether/.github/workflows/proxy-release.yml@refs/head
 rejects them, and vice versa. By hand, for whatever digest a chart pins:
 
 ```bash
-digest="$(sed -nE '/aether-proxy$/,+4 s/^[[:space:]]*digest:[[:space:]]*"(sha256:[0-9a-f]{64})"$/\1/p' charts/aether/values.yaml)"
+# The pin names its own registry: read repository AND digest from the chart.
+pinned="$(bash -c '. scripts/proxy-pin-lib.sh && proxy_pinned_ref' < charts/aether/values.yaml)"   # "<repository> <digest>"
 CERT_IDENTITY_REGEXP='^https://github\.com/bpalermo/aether/\.github/workflows/proxy-release\.yml@refs/heads/main$' \
-  bazel run //tools/cosign:verify_image_signatures -- "ghcr.io/bpalermo/aether/aether-proxy@${digest}"
+  bazel run //tools/cosign:verify_image_signatures -- "${pinned% *}@${pinned#* }"
 ```
 
 **Pins older than signing are unsigned, permanently.** Every proxy image
@@ -785,11 +873,8 @@ spire-server:
 ```
 
 Changing the entry re-issues every workload SVID on the agents' next fetch; no pod
-roll. Order of operations on a live cluster: SPIRE first, wait for
-`aether_agent_spire_svid_updates_total{aether_spire_identity="pod",aether_spire_update="rotated"}`
-to move on every node (see "Is rotation happening?" below), then the allow-list. Do
-not gate on `envoy_sds_*_version`: for originating-client identities it moves on
-every svc roll whether or not a new certificate was issued (#992).
+roll. Order of operations on a live cluster: SPIRE first, wait for the agents'
+`envoy_sds_*_version` to move on every node, then the allow-list.
 
 **What to expect once a destination is listed.** The agent logs
 `east-west QUIC fan-out quic_clusters=N local_identities=I allow_listed_services=S`
@@ -1215,25 +1300,13 @@ path has its own pair, also seeded at zero per attribute set:
 # half-life (2h at the default 4h TTL). `initial` is every pod after an AETHER
 # agent restart (a new process has served nothing yet). `unchanged` is the same
 # certificate redelivered: a stream that dropped and re-subscribed while the
-# SPIRE agent stayed up, or SPIRE re-sending every SVID unchanged (it does so
-# fleet-wide at a JWT-key prepare).
+# SPIRE agent stayed up.
 sum by (k8s_node_name) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod", aether_spire_update="rotated"}[3h]))
-# the agent's own SVID (identity="node"): same three values. node/unchanged is a
-# Workload API response that carried the SVID already served (no snapshot bump);
-# the agent's 30s backstop re-read is not a delivery and never counts. Before
-# #993 node/unchanged could not increment at all. And the trust-bundle inputs:
+# the agent's own SVID (identity="node"), and the trust-bundle inputs:
 # bundle="own", update="rotated" is a trust-ROOT change — SPIRE's 24h signing-CA
 # rotation does not move it, because the bundle is the upstream root.
 sum by (k8s_node_name, aether_spire_bundle, aether_spire_update) (increase(aether_agent_spire_bundle_updates_total[24h]))
 ```
-
-**A zero series is only evidence once the code path can increment it.** Every
-series above is seeded at zero (#717), so it exists whether or not anything can
-ever move it. `node/unchanged` read zero on every node until #993 because the node
-path returned early on an equal SVID without counting; a gate that asserted it
-was zero was vacuous. Before grading on a zero, check the source (or a test)
-shows the path increments it, and prefer a reading from a window in which the
-companion series moved (here: `pod/unchanged` stepping at the same minute).
 
 **`rotated` is "the certificate changed", not "the TTL ran down".** A restarted
 SPIRE agent re-attests and mints fresh SVIDs for every pod on its node, so a
@@ -1249,22 +1322,6 @@ neighbours rotate is holding a certificate that will expire; the agent also logs
 `pod SVID rotated` / `node SVID rotated` at INFO. Before these existed a rotation
 could only be inferred from Envoy's `envoy_sds_*_version` gauges, with every
 proxy-roll minute excluded by hand (a new Envoy changes every gauge once).
-
-**Those gauges are not a rotation signal any more — use the counter (#992).** Since
-the per-connection certificate selector got its own SotW SDS stream (#865, the #842
-fix), the secret of every identity that ORIGINATES mesh connections (`aether_agent`,
-`prober`, `mp_dialer`, `default`, `authz_canary`, `uds_client` on talos) is fetched
-twice: once by the static ADS subscription and once by the selector, which re-serves
-it on every snapshot bump. Envoy keys SDS stats by secret NAME, so both subscriptions
-bump the same `envoy_sds_spiffe_<td>_ns_<ns>_sa_<sa>_version` gauge: over an 8 h soak
-an originator's gauge changed 258–283 times per node, in bursts of ~12 at every svc
-roll, while every other identity's moved 5–18 times (real rotations plus one per proxy
-roll) — a ~50× over-read on exactly the identities a gate is most likely to pick. The
-stat cannot be split without renaming the resources, so the code is unchanged; count
-`rotated` above (it matched the `pod SVID rotated` log lines exactly on 2026-09-19 and
-2026-09-27). `unchanged` additionally fires once per subscribed pod at SPIRE's daily
-JWT-key prepare (~16:05Z) — a redelivery, not a rotation. The SDS
-`init_fetch_timeout` counters are unaffected and keep their meaning below.
 
 Trust bundles do **not** come from the broker (its bundle RPC also needs a
 workload reference, which a node with no managed pods does not have). They are
@@ -1539,7 +1596,7 @@ umbrella that could not close.
 | CNI DEL `agent unreachable` WARN, the `<pin>.delfail` give-up path, the pin unlink (#796) | same — the agent comes back too fast | unit-tested |
 | supervisor `drain_fallback` (#797) | the normal drain path always wins | `aether_supervisor_shutdown_branch_total{branch="drain_fallback"}` has never been non-zero anywhere |
 | edge xDS "registry unreachable … while this workload waits for its first SVID" (#807) | both edge pods reach the registrar in ~3 s | unit-tested only |
-| `svid_updates{update="unchanged"}` via a dropped Broker stream (#806) | a SPIRE agent restart re-mints, so it counts `rotated` | would need a Broker stream that drops while the SPIRE agent stays up. The series itself is not unexercised: SPIRE re-sends every SVID at a JWT-key prepare, which moved `pod/unchanged` fleet-wide (61 at once, 2026-09-26); `node/unchanged` counts the same redelivery since #993 |
+| `svid_updates{update="unchanged"}` (#806) | a SPIRE agent restart re-mints, so it counts `rotated` | would need a Broker stream that drops while the SPIRE agent stays up |
 | orphan prune → SVID unsubscribe (#804) | **not forceable from a harness** — the runtime re-issues CNI DEL at sandbox removal and a restarted agent serves it before the first sweep pass (measured 2026-09-19) | proven once in production (2026-09-18); the deterministic check is the in-process test from #805 |
 
 Two cautions when tempted to "test" one of these:

@@ -257,16 +257,21 @@ jobs:
       # drives the real verifier end to end. It also plays quay.io (proposal
       # 040): the /v2/auth token endpoint, and the OCI 1.1 Referrers API — a
       # sign-bundle referrer is a signature, a referrers 404 falls back to the
-      # tag layouts, a 5xx is inconclusive — and runs the verifier against the
-      # phase-2 setting with referrer-only signatures. No network.
+      # tag layouts, a 5xx is inconclusive — and runs the verifier across the
+      # cut-over on a throwaway two-commit history (a pre-cut-over head on the
+      # fake ghcr.io with tag signatures, a post-cut-over head on the fake
+      # quay.io with referrers), plus the reds: a post-cut-over head published
+      # only to ghcr.io, a fallback tag where a referrer is promised, and a
+      # double-write. No network.
       - name: Registry direct lookup survives a concurrent publish (ghcr.io + quay.io)
         run: scripts/check-registry-lookup.sh
 
       # The registry is ONE setting (bazel/img/registry.bzl, proposal 040), so
-      # the Quay cut-over is a one-file flip. This asserts the setting parses,
-      # the //proxy workspace's copy is identical, the aether-proxy pin agrees
-      # with it, and no file outside a written-down allow-list spells the
-      # registry out. No network, no Bazel.
+      # the Quay cut-over was a one-file flip. This asserts the setting parses,
+      # the //proxy workspace's copy is identical, the aether-proxy pin names
+      # one of proxy_pin_references(), no file outside a written-down allow-list
+      # spells the registry out, and no file outside the legacy allow-list
+      # spells a pre-cut-over (ghcr.io) coordinate. No network, no Bazel.
       - name: The image registry is one setting
         run: scripts/check-registry-config.sh
 
@@ -380,10 +385,14 @@ jobs:
 
           # Parse exactly the way bazel/proxy_pin/extensions.bzl does, so the two
           # can never disagree about what the pin is: the first `repository:`
-          # that is exactly image_reference("proxy") — $PROXY_IMAGE, from the one
-          # registry setting (proposal 040) — then `tag:` / `digest:`
+          # that is exactly one of proxy_pin_references() — image_reference("proxy")
+          # ($PROXY_IMAGE), or a PROXY_PIN_LEGACY_REFERENCES entry, the ghcr.io
+          # image the pin names until the first proxy release after the Quay
+          # cut-over re-pins it (proposal 040) — then `tag:` / `digest:`
           # inside that same mapping — indentation >= the repository key's, with
-          # blank and comment-only lines not ending the block.
+          # blank and comment-only lines not ending the block. The registry the
+          # tag is resolved against below is whatever the pin names.
+          accepted="$(scripts/image-registry.sh proxy-pin-refs)"
           scalar() {
             raw="${1%%#*}"
             raw="$(printf '%s' "$raw" | sed -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')"
@@ -406,7 +415,7 @@ jobs:
               case "$stripped" in
                 repository:*)
                   candidate="$(scalar "${stripped#repository:}")"
-                  if [ "$candidate" = "$PROXY_IMAGE" ]; then
+                  if [ -n "$candidate" ] && grep -qxF -- "$candidate" <<<"$accepted"; then
                     repository="$candidate"
                     key_indent="$indent"
                     in_block=1
@@ -435,7 +444,7 @@ jobs:
 
           fail=0
           if [ -z "$repository" ]; then
-            echo "::error file=${values}::no aether-proxy image pin found. Expected a line \`repository: ${PROXY_IMAGE}\` (image_reference(\"proxy\"), bazel/img/registry.bzl) — the same contract bazel/proxy_pin/extensions.bzl parses."
+            echo "::error file=${values}::no aether-proxy image pin found. Expected a line \`repository: <ref>\` with <ref> one of: $(paste -sd, - <<<"$accepted") (proxy_pin_references(), bazel/img/registry.bzl) — the same contract bazel/proxy_pin/extensions.bzl parses."
             fail=1
           fi
           if [ -z "$tag" ]; then

@@ -371,6 +371,40 @@ registry_signature_layout_direct() {
 	registry__layout "$has_legacy" "$has_bundle" "$has_ref"
 }
 
+# The layout a registry setting PROMISES, per commit (proposal 040 phase 2):
+# SIGNATURE_LAYOUT in the given bazel/img/registry.bzl -- `referrer` (quay.io)
+# or `tag` -- or `tag` for a file from before that line existed, which is every
+# commit published to ghcr.io. A present but unparseable line is rc 2, never a
+# default.
+#
+# Usage: registry_setting_signature_layout <registry.bzl>   -> referrer | tag
+registry_setting_signature_layout() {
+	local bzl="$1"
+	[ -r "$bzl" ] || return 2
+	if grep -qE '^SIGNATURE_LAYOUT[[:space:]]*=' "$bzl"; then
+		IMAGE_REGISTRY_BZL="$bzl" "${registry__here}/image-registry.sh" signature-layout || return 2
+	else
+		printf 'tag\n'
+	fi
+}
+
+# Does a signature found in <layout> (registry_signature_layout*) satisfy the
+# <expected> layout a commit's setting promises?
+#
+#   0  yes: `referrer` for referrer; `legacy` or `bundle` for tag
+#   1  no:  present in the OTHER shape (a fallback tag where a referrer is
+#           promised, a referrer where a tag is), or `both` / `none`
+#   2  <expected> is neither `referrer` nor `tag`
+#
+# Usage: registry_layout_satisfies <layout> <expected>
+registry_layout_satisfies() {
+	case "$2" in
+	referrer) [ "$1" = referrer ] ;;
+	tag) [ "$1" = legacy ] || [ "$1" = bundle ] ;;
+	*) return 2 ;;
+	esac
+}
+
 # The image components the publish workflow pushes AND signs.
 #
 # ONE list, shared by the signer and the verifier. It used to be two: the sign

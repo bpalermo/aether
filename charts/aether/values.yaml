@@ -364,8 +364,17 @@ cniInstall:
 # one release), so a `helm rollback` is safe.
 proxy:
   enabled: true
-  # External image (built by the //proxy workspace), tag-pinned to the publishing
-  # commit SHA. Mirror by overriding `repository`.
+  # External image (built by the //proxy workspace), pinned by proxy-release.yml's
+  # bump-chart PR to the publishing commit SHA + index digest. Mirror by
+  # overriding `repository`.
+  #
+  # The pin names whatever registry the proxy release that wrote it pushed to.
+  # Until the first proxy release after the Quay cut-over (proposal 040 phase 2)
+  # re-pins it, that is the pre-cut-over ghcr.io image; that release's bump-chart
+  # PR moves it to image_reference("proxy") on quay.io, rewriting `repository:`
+  # together with `tag:` and `digest:` (scripts/proxy-pin-lib.sh,
+  # proxy_pin_rewrite). Every pin reader accepts exactly proxy_pin_references()
+  # (bazel/img/registry.bzl).
   image:
     repository: ghcr.io/bpalermo/aether/aether-proxy
     tag: 717a3609cff42d0e1008379f3fb5ea8bc51d081b

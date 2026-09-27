@@ -170,21 +170,35 @@ can be upgraded independently), then the system chart.
 # `<X.Y.Z>-<full git sha>` — use it, not the `aether` chart's bare `<X.Y.Z>` tag,
 # which is mutable and re-pushed by every release (#692).
 COMMIT=<full 40-char git sha>
-VERSION=0.x.0-$COMMIT
+VERSION=<X.Y.Z>-$COMMIT   # each chart's Chart.yaml version at that commit
 
 # 1) CRDs (MeshConfig, HTTPFilter, EdgeConfig, EndpointPolicy) — install/upgrade first.
 helm upgrade --install aether-crds \
-  oci://ghcr.io/bpalermo/aether/charts/crds \
+  oci://quay.io/aethermesh/chart-crds \
   --version "$VERSION"
 
 # 2) The system: agent + proxy + mesh-dns + registrar + controller.
 helm upgrade --install aether \
-  oci://ghcr.io/bpalermo/aether/charts/aether \
+  oci://quay.io/aethermesh/chart-aether \
   --version "$VERSION" \
   --namespace aether-system --create-namespace \
   --set clusterName=my-cluster \
   --set meshDomain=aether.internal
 ```
+
+Charts and images are published to the `aethermesh` organisation on quay.io:
+charts as `quay.io/aethermesh/chart-<name>`, images as
+`quay.io/aethermesh/<component>` (proposal 040).
+
+> **Upgrading from a 0.x chart (published to ghcr.io).** Every chart jumped to
+> **1.0.0** with the move to quay.io, because the default image repositories
+> changed. Point `helm upgrade` at the `oci://quay.io/aethermesh/chart-<name>`
+> coordinates above with your existing values (`helm get values <release> -n
+> <ns> -o yaml > values.yaml`, then `-f values.yaml` — not `--reuse-values`,
+> which would carry the old chart's defaults along). If you mirror images and
+> override `repository` by prefix, mirror from `quay.io/aethermesh/<component>`
+> and override each image's `repository` individually. Releases published
+> before the move stay on ghcr.io.
 
 Resource names derive from the **release** name — installing as `aether` yields
 `aether-agent`, `aether-proxy`, `aether-mesh-dns`, `aether-registrar`,
@@ -567,7 +581,7 @@ in the cluster.
 Enable it:
 
 ```bash
-helm upgrade --install aether oci://ghcr.io/bpalermo/aether/charts/aether \
+helm upgrade --install aether oci://quay.io/aethermesh/chart-aether \
   --version "$VERSION" -n aether-system \
   --set edge.enabled=true
   # ... plus your other values

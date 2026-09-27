@@ -19,10 +19,11 @@
 # the real thing; l4echo itself is never released.
 #
 # THE REGISTRY. quay.io explicitly (SMOKE_REGISTRY / SMOKE_ORG), NOT the
-# single setting in bazel/img/registry.bzl: this runs before the flip, while the
-# setting still says ghcr.io. Host and org are separate variables on purpose —
-# after the flip `<host>/<org>` IS the setting, and scripts/check-registry-config.sh
-# forbids spelling it out anywhere else.
+# single setting in bazel/img/registry.bzl: the smoke ran before the flip, while
+# the setting still said ghcr.io, and it targets the throwaway `smoke`
+# repository, not a published one. Host and org are separate variables on
+# purpose — `<host>/<org>` IS the setting now, and
+# scripts/check-registry-config.sh forbids spelling it out anywhere else.
 #
 # SUBCOMMANDS (each one a workflow step; state is carried between them in
 # $QUAY_SMOKE_STATE, KEY=VALUE lines):
@@ -32,7 +33,8 @@
 #   sign       cosign sign --recursive by digest; signature layout of the index
 #              and every child, read from the registry (referrers + both tags)
 #   verify     //tools/cosign:verify_image_signatures (index AND children) with
-#              this workflow's identity; the certificate SAN cosign reports
+#              this workflow's identity; the signing certificate's SAN, read
+#              from the sigstore bundle (`cosign download signature` + openssl)
 #   cleanup    delete the run's tag and any cosign fallback tags it produced;
 #              the repository itself stays
 #   summary    Markdown table to $GITHUB_STEP_SUMMARY (or stdout); exit 1 unless
@@ -334,25 +336,82 @@ cmd_verify() {
 		put SMOKE_VERIFY ok
 	fi
 
-	# The SAN cosign reports (Fulcio puts the workflow ref there, not the OIDC
-	# `sub`): verify the index once more and read .optional.Subject.
-	out="$(mktemp)"
-	if (cd "$repo_root" && "$bazel" run //tools/cosign -- verify \
-		--certificate-identity-regexp "$identity" \
-		--certificate-oidc-issuer https://token.actions.githubusercontent.com \
-		"$ref") >"$out" 2>/dev/null; then
-		san="$(python3 -c '
-import json, sys
-o = json.load(open(sys.argv[1]))[0].get("optional", {})
-print("%s (trigger=%s)" % (o.get("Subject", "?"), o.get("githubWorkflowTrigger", "?")))
-' "$out")" || san="(unparseable cosign output)"
-	else
-		san="(cosign verify failed)"
+	# The SAN of the signing certificate (Fulcio puts the workflow ref there,
+	# not the OIDC `sub`). cosign v3's `verify` JSON is `[{"critical": ...}]`
+	# only -- no `optional` block, so no Subject to read there (it printed `?`
+	# for this row until the fix). The certificate is in the sigstore bundle
+	# the signature IS: `cosign download signature` prints one bundle per
+	# signature, and its leaf certificate's SAN URI is what `verify` matched.
+	local dl
+	dl="$(mktemp)"
+	san=""
+	if (cd "$repo_root" && "$bazel" run //tools/cosign -- download signature "$ref") >"$dl" 2>/dev/null; then
+		san="$(bundle_sans "$dl")" || san=""
 	fi
-	rm -f "$out"
-	echo "certificate SAN: ${san}"
-	put SMOKE_SAN "$san"
+	rm -f "$dl"
+	if [ -z "$san" ]; then
+		put SMOKE_SAN "(unreadable: no certificate SAN in the downloaded signature bundle)"
+		put SMOKE_SAN_OK no
+		err "could not read the signing certificate's SAN for ${ref}"
+		rc=1
+	elif printf '%s\n' "${san//, /$'\n'}" | grep -qE -- "$identity"; then
+		echo "certificate SAN: ${san}"
+		put SMOKE_SAN "$san"
+		put SMOKE_SAN_OK yes
+	else
+		put SMOKE_SAN "${san} (does NOT match ${identity})"
+		put SMOKE_SAN_OK no
+		err "the signing certificate's SAN (${san}) does not match ${identity}"
+		rc=1
+	fi
 	[ "$rc" -eq 0 ] || exit 1
+}
+
+# The SAN URI(s) of the signing certificate(s) in `cosign download signature`
+# output (<file>: one sigstore bundle per line), ", "-joined. Reads the leaf
+# from `verificationMaterial.certificate.rawBytes` (bundle v0.3) or the first of
+# `verificationMaterial.x509CertificateChain.certificates` (v0.1/v0.2), DER,
+# base64. Fails (nothing printed) when no certificate or no URI SAN is found:
+# the summary must never show a vacuous `?`.
+bundle_sans() {
+	local dl="$1" dir f uri sans=""
+	dir="$(mktemp -d)"
+	if ! python3 - "$dl" "$dir" <<'PY'
+import base64, json, sys
+src, out = sys.argv[1], sys.argv[2]
+n = 0
+for line in open(src):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        doc = json.loads(line)
+    except ValueError:
+        continue
+    vm = doc.get("verificationMaterial") or {} if isinstance(doc, dict) else {}
+    raw = (vm.get("certificate") or {}).get("rawBytes")
+    if not raw:
+        chain = (vm.get("x509CertificateChain") or {}).get("certificates") or []
+        raw = chain[0].get("rawBytes") if chain else None
+    if raw:
+        n += 1
+        with open("%s/%d.der" % (out, n), "wb") as fh:
+            fh.write(base64.b64decode(raw))
+sys.exit(0 if n else 1)
+PY
+	then
+		rm -rf "$dir"
+		return 1
+	fi
+	for f in "$dir"/*.der; do
+		uri="$(openssl x509 -inform DER -noout -ext subjectAltName -in "$f" 2>/dev/null |
+			sed -nE 's/^[[:space:]]*URI:([^,]+).*$/\1/p' | head -1)"
+		[ -n "$uri" ] || continue
+		case ", ${sans}, " in *", ${uri}, "*) ;; *) sans="${sans:+${sans}, }${uri}" ;; esac
+	done
+	rm -rf "$dir"
+	[ -n "$sans" ] || return 1
+	printf '%s\n' "$sans"
 }
 
 cmd_cleanup() {
@@ -418,7 +477,7 @@ cmd_summary() {
 		echo "| signature layout (index + children) | ${SMOKE_LAYOUT_CHILDREN:-?} |"
 		echo "| referrer artifactTypes | ${SMOKE_REFERRER_TYPES:-?} |"
 		echo "| verify (index + every child) | ${SMOKE_VERIFY:-not run} |"
-		echo "| certificate SAN | ${SMOKE_SAN:-?} |"
+		echo "| certificate SAN | ${SMOKE_SAN:-(not read — verify did not run)} |"
 		echo "| OIDC token | ${SMOKE_OIDC:-?} |"
 		echo "| cleanup | ${SMOKE_CLEANUP:-not run} |"
 	} >>"$out"
@@ -426,9 +485,12 @@ cmd_summary() {
 	[ "${SMOKE_PUBLIC:-}" = yes ] || ok=0
 	[ "${SMOKE_SIGN:-}" = ok ] || ok=0
 	[ "${SMOKE_VERIFY:-}" = ok ] || ok=0
+	# The SAN row must be READ, not assumed: an unreadable or mismatched
+	# certificate SAN fails the smoke (it used to print `?` and pass).
+	[ "${SMOKE_SAN_OK:-}" = yes ] || ok=0
 	case "${SMOKE_LAYOUT:-}" in referrer | bundle | legacy | both) ;; *) ok=0 ;; esac
 	if [ "$ok" -ne 1 ]; then
-		err "Quay smoke FAILED: push=${SMOKE_PUSH:-?} public=${SMOKE_PUBLIC:-?} sign=${SMOKE_SIGN:-?} layout=${SMOKE_LAYOUT:-?} verify=${SMOKE_VERIFY:-?}"
+		err "Quay smoke FAILED: push=${SMOKE_PUSH:-?} public=${SMOKE_PUBLIC:-?} sign=${SMOKE_SIGN:-?} layout=${SMOKE_LAYOUT:-?} verify=${SMOKE_VERIFY:-?} san=${SMOKE_SAN_OK:-unread}"
 		exit 1
 	fi
 	echo "Quay smoke PASSED: layout=${SMOKE_LAYOUT}"

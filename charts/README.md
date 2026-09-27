@@ -54,7 +54,7 @@ The `{...}` placeholders in `Chart.yaml` are filled from the workspace status
 
 ```bash
 bazel build --stamp //charts/aether   # embed git version
-bazel run   --stamp //charts/aether:aether.push   # publish a stamped chart
+bazel run   --stamp //charts/aether:aether.chart_push   # publish a stamped chart
 ```
 
 Without `--stamp` the braces are stripped (e.g. `0.4.0-GIT_COMMIT`) so the chart
@@ -81,8 +81,9 @@ bazel run //charts/aether:aether.install
 # Counterparts: .upgrade, .uninstall
 ```
 
-From the published OCI registry (use the semver `+`/`-` form for `--version`;
-helm maps it to the dash-separated tag).
+From the published OCI registry, `quay.io/aethermesh` (use the semver `+`/`-`
+form for `--version`; helm maps it to the dash-separated tag). Each chart lives in
+its own `chart-<name>` repository.
 
 Do **not** copy a version out of this file — the charts are republished on nearly
 every merge. Take `<crds-version>` / `<aether-version>` from the corresponding
@@ -90,13 +91,23 @@ every merge. Take `<crds-version>` / `<aether-version>` from the corresponding
 workflow prints for that run):
 
 ```bash
-helm install aether-crds oci://ghcr.io/bpalermo/aether/charts/crds \
+helm install aether-crds oci://quay.io/aethermesh/chart-crds \
   --version <crds-version>-<git-commit>
 # Prefer the commit-pinned tag; the bare `--version <aether-version>` also
 # resolves, but that tag is mutable and re-pushed by every release.
-helm install aether oci://ghcr.io/bpalermo/aether/charts/aether \
+helm install aether oci://quay.io/aethermesh/chart-aether \
   --version <aether-version>-<git-commit> -n aether-system --create-namespace
 ```
+
+> **Moving from ghcr.io (chart 1.0.0, proposal 040).** Until the 1.x charts,
+> everything was published to GitHub Container Registry under a different path
+> (`charts/<name>` for charts, `aether-proxy` for the proxy image). Every chart
+> took a **major** version bump with the move because the default image
+> repositories changed: re-point `helm` at the `oci://quay.io/aethermesh/chart-<name>`
+> coordinates above, and if you override an image `repository:` by prefix (a
+> mirror), mirror from `quay.io/aethermesh/<component>` now — override each
+> image's `repository` individually. Releases published before the move stay
+> where they were; nothing is deleted.
 
 ## Multiple instances & labels
 
@@ -115,41 +126,54 @@ All objects carry the [recommended `app.kubernetes.io/*` labels](https://kuberne
 `helm.sh/chart`. Workload selectors use the immutable subset (`name` + `instance`
 + `component`).
 
-## Publish to GitHub Container Registry (OCI)
+## Publish to Quay (OCI)
 
-Charts and images both publish to GitHub Container Registry under the `aether/`
-path namespace:
+Charts and images both publish to the `aethermesh` organisation on quay.io — the
+one setting in `bazel/img/registry.bzl` (proposal 040); every coordinate below is
+derived from it:
 
 | Artifact | Reference |
 | --- | --- |
-| crds chart | `ghcr.io/bpalermo/aether/charts/crds` |
-| aether chart | `ghcr.io/bpalermo/aether/charts/aether` |
-| agent image | `ghcr.io/bpalermo/aether/agent` |
-| mesh-dns image | `ghcr.io/bpalermo/aether/mesh-dns` |
-| registrar image | `ghcr.io/bpalermo/aether/registrar` |
-| controller image | `ghcr.io/bpalermo/aether/controller` |
-| cni-install image | `ghcr.io/bpalermo/aether/cni-install` |
-| prober image | `ghcr.io/bpalermo/aether/prober` |
-| proxy image | `ghcr.io/bpalermo/aether/aether-proxy` (built by the `//proxy` workspace, published by `.github/workflows/proxy-release.yml`) |
+| crds chart | `quay.io/aethermesh/chart-crds` |
+| aether chart | `quay.io/aethermesh/chart-aether` |
+| prober chart | `quay.io/aethermesh/chart-prober` |
+| udsecho chart | `quay.io/aethermesh/chart-udsecho` |
+| agent image | `quay.io/aethermesh/agent` |
+| mesh-dns image | `quay.io/aethermesh/mesh-dns` |
+| proxy-supervisor image | `quay.io/aethermesh/proxy-supervisor` |
+| registrar image | `quay.io/aethermesh/registrar` |
+| controller image | `quay.io/aethermesh/controller` |
+| cni-install image | `quay.io/aethermesh/cni-install` |
+| prober image | `quay.io/aethermesh/prober` |
+| udsecho image | `quay.io/aethermesh/udsecho` |
+| proxy image | `quay.io/aethermesh/proxy` (built by the `//proxy` workspace, published by `.github/workflows/proxy-release.yml`; the chart's pin moves there with the first proxy release after the cut-over) |
+
+Images and charts are pushed separately, images first. A chart is NOT pushed
+with `helm push`: helm appends the chart's `name:` to its base, so it can only
+write `<base>/aether`, and Quay has no nested repositories to hold
+`charts/aether` (and a bare `prober` / `udsecho` would collide with those
+images). `chart_push` (`//bazel/helm:defs.bzl`) writes the identical artifact —
+the packaged `.tgz` as the helm chart-content layer, `Chart.yaml` as the helm
+config — with the pinned `oras` (`//tools/oras`) to the repository it names, so
+`helm pull oci://quay.io/aethermesh/chart-aether --version <v>` reads it like any
+helm-pushed chart.
 
 ```bash
-export HELM_REGISTRY_USERNAME=<github-user>
-export HELM_REGISTRY_PASSWORD=<github-pat>   # PAT with write:packages, or HELM_REGISTRY_PASSWORD_FILE
+docker login quay.io        # image_push and oras both read the Docker config
 
-# Push the chart together with the images it references:
-bazel run //charts/aether:aether.push
+# The images a chart references (by digest, plus the latest / dev-<sha> tags):
+bazel run --stamp //charts/aether:aether.push_images
 
-# Push only the chart (skip images):
-bazel run //charts/aether:aether.push_registry
+# The chart, under its packaged version:
+bazel run --stamp //charts/aether:aether.chart_push
 
-# Push the same chart again under `<version>-<git-commit>` (chart only — the
-# images are already up as digests). CI does both (#692).
-bazel run //charts/aether:aether_commit.push_registry
+# The same chart again under `<version>-<git-commit>` (chart only — the images
+# are already up as digests). CI does both (#692).
+bazel run --stamp //charts/aether:aether_commit.chart_push
 ```
 
-The push target performs `helm registry login` automatically when the
-`HELM_REGISTRY_USERNAME` / `HELM_REGISTRY_PASSWORD` environment variables are set.
-In CI, authenticate to GHCR with the built-in `GITHUB_TOKEN` (`username: ${{ github.actor }}`,
-`password: ${{ secrets.GITHUB_TOKEN }}`) and grant the job `packages: write`.
-Adjust the `registry_url` / `login_url` in each chart's `BUILD.bazel` to target a
-different namespace or registry.
+In CI, `.github/workflows/publish.yaml` does exactly this, logged in with the
+Quay robot account (secrets `QUAY_USERNAME` / `QUAY_TOKEN` of the `release`
+environment, which only runs on `main`). Never push by hand: the release
+workflow is the only publisher. To target a different registry, change
+`bazel/img/registry.bzl` — nothing else spells the registry out.
