@@ -185,6 +185,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Full history: the publish-verify control harness drives the REAL
+          # verifier, whose aether-proxy pin check walks charts/aether/values.yaml
+          # history to find the commit that introduced a pin (#984). A shallow
+          # checkout makes that lookup fail closed (exit 2) and the control red.
+          fetch-depth: 0
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
