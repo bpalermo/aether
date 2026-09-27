@@ -476,6 +476,37 @@ fetches the anonymous pull token from the registry's own endpoint (ghcr.io
 (`GET /v2/<repo>/referrers/<digest>`): quay.io serves it, ghcr.io answers 404 —
 which the library reads as "no referrers API", never as "no signatures".
 
+**Quay smoke (the phase-2 gate).** Before the flip, prove push + keyless sign +
+verify on quay.io with one throwaway image:
+
+```bash
+gh workflow run quay-smoke.yaml --ref main    # main only: the `release` environment holds the robot secrets
+gh run watch "$(gh run list --workflow quay-smoke.yaml --limit 1 --json databaseId -q '.[0].databaseId')"
+```
+
+`.github/workflows/quay-smoke.yaml` (dispatch-only, every step is
+`scripts/quay-smoke.sh <subcommand>`) pushes `//e2e/l4echo:smoke_push` — the
+l4echo test image's rules_img amd64+arm64 index, built and pushed by the same
+rules_img path as the released images — to `quay.io/aethermesh/smoke:<run id>-<attempt>`
+with the robot account, signs it `cosign sign --recursive` by digest as
+`…/quay-smoke.yaml@refs/heads/main`, verifies the index and every child with
+`//tools/cosign:verify_image_signatures`, then deletes the tag (and any cosign
+fallback tags) and leaves the repository. The run summary is a table:
+
+| row | meaning |
+|---|---|
+| repository existed before / created by this push | robot `tags/list` before the push. `no` then a successful push = the robot **can create** repositories in the org (open question "Repository auto-creation") |
+| push | `denied` fails the step: pre-create the repository public and give the robot write, or give the robot the org **creator** role |
+| public (anonymous pull) | Quay API `is_public` (anonymous) AND an anonymous pull of the tag. Anything but `yes` **fails the job**: make it public (repository settings), or set the org's default visibility before the robot creates repositories |
+| digest | the index digest the registry holds under the tag (cross-checked against what Bazel pushed) |
+| signed before this run | the digest is deterministic per commit, so a re-run at the same commit finds the earlier run's signature; the layout rows then include it |
+| signature layout (index) / (index + children) | `referrer`, `bundle` (`sha256-<hex>` fallback tag), `legacy` (`.sig`), or `both` (a referrer AND a tag — the sweep's double-write defect), from `registry_signature_layout_direct`. `mixed` in the second row = the children disagree with the index. This answers where cosign v3.1.2 puts a signature on quay and decides phase 2's verify path |
+| referrer artifactTypes | what the referrers API lists for the index (`application/vnd.dev.sigstore.bundle.v0.3+json` expected) |
+| verify (index + every child) | `verify_image_signatures` with identity `^https://github\.com/<repo>/\.github/workflows/quay-smoke\.yaml@refs/heads/main$` |
+| certificate SAN | `.optional.Subject` from `cosign verify` — the workflow ref, NOT the OIDC `sub` |
+| OIDC token | the Actions token's `sub` (with `environment: release`: `repo:<owner>/<repo>:environment:release`) and `job_workflow_ref`; the token itself is masked and never printed |
+| cleanup | tags deleted with a robot `pull,push` token (`DELETE /v2/<repo>/manifests/<tag>`); a failure is a warning, not a red |
+
 ### Verifying image signatures (cosign v3, #925)
 
 `publish.yaml` signs every published image keyless with `cosign sign

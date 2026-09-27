@@ -1,0 +1,101 @@
+name: quay-smoke
+
+# The proposal 040 phase-2 gate: push + keyless sign + verify ONE throwaway image
+# on quay.io before the real cut-over. Dispatch by hand, from main only (the
+# `release` environment's branch policy, and the only ref whose runs can read
+# its secrets):
+#
+#   gh workflow run quay-smoke.yaml --ref main
+#
+# It answers what phase 2 cannot assume — can the robot create a repository, is
+# a created repository public, and where does cosign v3.1.2 put a signature on a
+# registry that serves the OCI 1.1 Referrers API (referrer / fallback tag /
+# both) — and writes the answers as a table to the run summary. Every step is
+# scripts/quay-smoke.sh, so the shell is linted like the rest of //scripts. See
+# docs/runbook.md, "Quay smoke", for what each row means.
+#
+# It targets quay.io EXPLICITLY (SMOKE_REGISTRY / SMOKE_ORG below), not the
+# single setting in bazel/img/registry.bzl, which still says ghcr.io until the
+# flip. Host and org are separate on purpose: after the flip `<host>/<org>` is
+# the setting, and scripts/check-registry-config.sh forbids spelling it out.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  # Keyless cosign: the Actions OIDC token is exchanged with Fulcio for a
+  # certificate bound to THIS workflow (SAN .../quay-smoke.yaml@refs/heads/main).
+  id-token: write
+
+concurrency:
+  group: quay-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      SMOKE_REGISTRY: quay.io
+      SMOKE_ORG: aethermesh
+      SMOKE_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
+      # The robot account. GitHub masks secret values in logs; the script also
+      # masks every bearer token it derives from them and never echoes either.
+      REGISTRY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      # For the helpers only (scripts/registry-lib.sh reads it at source time);
+      # the smoke itself targets SMOKE_REGISTRY above.
+      - name: Image registry (bazel/img/registry.bzl)
+        run: scripts/image-registry.sh >> "$GITHUB_ENV"
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Log in to quay.io (robot)
+        uses: docker/login-action@v4
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Preflight (robot token, repository before, OIDC subject)
+        run: scripts/quay-smoke.sh preflight
+
+      # //e2e/l4echo:smoke_push: the l4echo test image's rules_img multi-arch
+      # index, pushed by rules_img to SMOKE_REGISTRY/SMOKE_ORG/smoke:SMOKE_TAG.
+      # A denied push FAILS here, naming the fix; a private repository is
+      # recorded and fails the summary step (sign/verify still run, so the run
+      # answers every question at once).
+      - name: Push
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
+        run: scripts/quay-smoke.sh push
+
+      - name: Build cosign (Bazel-pinned, local)
+        run: bazel build //tools/cosign
+
+      # cosign sign --recursive by digest, then the signature layout of the
+      # index and every child read back from the registry (referrers API + both
+      # cosign tag shapes, scripts/registry-lib.sh).
+      - name: Sign (keyless) and read the signature layout
+        run: scripts/quay-smoke.sh sign
+
+      # //tools/cosign:verify_image_signatures on the index AND every child, as
+      # ^https://github.com/<repo>/.github/workflows/quay-smoke.yaml@refs/heads/main$,
+      # then the certificate SAN cosign reports.
+      - name: Verify
+        run: scripts/quay-smoke.sh verify
+
+      # Delete the run's tag (and any cosign fallback tags) so the repository
+      # does not accumulate; the repository itself stays.
+      - name: Clean up
+        if: always()
+        run: scripts/quay-smoke.sh cleanup
+
+      - name: Summary
+        if: always()
+        run: scripts/quay-smoke.sh summary

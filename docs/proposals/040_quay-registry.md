@@ -113,6 +113,14 @@ and falls back to the tags; any other non-200 is inconclusive.
    verifier can read the setting as of each commit, the way it already reads
    chart versions and the release tag). The pinned aether-proxy digest moves with
    the first proxy release after the flip.
+   **Gate before the flip:** a green `quay-smoke` run
+   (`gh workflow run quay-smoke.yaml --ref main`; `.github/workflows/quay-smoke.yaml`,
+   runbook "Quay smoke") — rules_img push of a throwaway index to
+   `quay.io/aethermesh/smoke` with the robot, keyless `cosign sign --recursive`,
+   `verify_image_signatures` on the index and every child. Its summary answers
+   the auto-creation and visibility open questions and records the signature
+   layout cosign v3.1.2 writes on quay (`referrer` / `bundle` / `legacy` /
+   `both`), which fixes phase 2's verify path.
 3. **talos rollout.** `helm upgrade` on talos-main from the quay coordinates
    (values from `helm get values -o yaml`, never `--reuse-values`), then an 8h
    soak graded as usual.
