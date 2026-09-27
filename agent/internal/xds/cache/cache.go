@@ -729,7 +729,8 @@ func (c *SnapshotCache) MeshDomain() string {
 // by the source identity. Everything else stays h2, byte-identical.
 //
 // The fan-out is the cost to watch: local ServiceAccounts x listed services
-// clusters, each an EDS clone of the h2 entry (no second load assignment).
+// clusters, each a clone of the h2 entry on its OWN EDS resource name, with the
+// h2 entry's load assignment republished under that name (aether#1008).
 // The count is logged at INFO whenever it changes.
 func (c *SnapshotCache) SetEastWestQUICServices(services []string) {
 	set := make(map[string]struct{}, len(services))

@@ -116,8 +116,9 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 		if entry.loadAssignment != nil {
 			clas = append(clas, entry.loadAssignment)
 		}
-		twins, vhost := quic.entryTwinsAndVhost(key, entry, c.meshDomain)
+		twins, twinCLAs, vhost := quic.entryTwinsAndVhost(key, entry, c.meshDomain)
 		clusters = append(clusters, twins...)
+		clas = append(clas, twinCLAs...)
 		quicClusters += len(twins)
 		if vhost != nil {
 			vhosts = append(vhosts, vhost)
@@ -1020,23 +1021,42 @@ func (q quicFanout) twinsFor(key string, entry clusterEntry, meshDomain string) 
 	return twins, arms
 }
 
-// entryTwinsAndVhost returns an entry's HTTP/3 twins (proposal 038 Phase 4b)
-// and the vhost to publish for it: the entry's own vhost, or -- when twins
-// exist -- a clone whose route to the h2 cluster selects per source identity.
+// entryTwinsAndVhost returns an entry's HTTP/3 twins (proposal 038 Phase 4b),
+// their load assignments, and the vhost to publish for it: the entry's own
+// vhost, or -- when twins exist -- a clone whose route to the h2 cluster
+// selects per source identity.
+//
+// Each twin subscribes to its OWN EDS resource (named after the twin, see
+// proxy.QUICClusterFrom), so the base's load assignment is published again
+// under every twin's name in the SAME snapshot that introduces the twin. A
+// twin sharing the base's EDS name is deduplicated away by Envoy's delta-ADS
+// WatchMap when it arrives after its base, and warms for the full
+// initial_fetch_timeout (aether#1008). The copies follow twinsFor's order
+// (sorted identities) and are re-sorted with every other CLA by the caller.
 //
 // An allow-listed service's DEFAULT entry (the one keyed by the bare service
 // name; per-port and alias entries are deliberately excluded, they would
 // multiply the fan-out) gets one twin per local ServiceAccount, only once the
 // node identity is served (mtlsCluster != nil): before that the h2 cluster is
 // unpinned too.
-func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomain string) ([]types.Resource, *routev3.VirtualHost) {
+func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomain string) ([]types.Resource, []types.Resource, *routev3.VirtualHost) {
 	twins, arms := q.twinsFor(key, entry, meshDomain)
-	if len(twins) == 0 || entry.vhost == nil {
-		return twins, entry.vhost
+	if len(twins) == 0 {
+		return nil, nil, entry.vhost
+	}
+	var clas []types.Resource
+	if entry.loadAssignment != nil {
+		clas = make([]types.Resource, 0, len(twins))
+		for _, id := range q.identities {
+			clas = append(clas, proxy.QUICLoadAssignmentFrom(entry.loadAssignment, arms[id]))
+		}
+	}
+	if entry.vhost == nil {
+		return twins, clas, nil
 	}
 	vhost, _ := proto.Clone(entry.vhost).(*routev3.VirtualHost)
 	proxy.ApplyQUICClusterSelection(vhost, entry.cluster.GetName(), arms)
-	return twins, vhost
+	return twins, clas, vhost
 }
 
 // noteQUICFanout logs the cluster budget the QUIC allow-list costs whenever it

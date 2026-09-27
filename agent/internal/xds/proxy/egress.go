@@ -173,17 +173,31 @@ func SourceSAKeyFromSpiffeID(spiffeID string) string {
 }
 
 // QUICClusterFrom derives a source's HTTP/3 cluster from the destination's h2
-// service cluster: the same EDS resource (so the same endpoints, the same
-// subset selectors, the same outlier detection and circuit breakers -- a
-// clone), renamed, with HTTP/3 protocol options and the QUIC upstream socket
-// presenting clientSpiffeID. base is the entry's BARE cluster (no transport
-// socket); the caller passes the same sanURIs it would give InjectUpstreamMTLS
-// for the h2 twin, so the two transports pin the same server identity, and
-// sni = QUICServerName(<the h2 twin's port SNI>, <authority>), so the
-// destination demuxes to the same inbound chain.
+// service cluster: the same endpoints, the same subset selectors, the same
+// outlier detection and circuit breakers -- a clone -- renamed, with HTTP/3
+// protocol options and the QUIC upstream socket presenting clientSpiffeID.
+// base is the entry's BARE cluster (no transport socket); the caller passes the
+// same sanURIs it would give InjectUpstreamMTLS for the h2 twin, so the two
+// transports pin the same server identity, and sni = QUICServerName(<the h2
+// twin's port SNI>, <authority>), so the destination demuxes to the same
+// inbound chain.
+//
+// The twin subscribes to its OWN EDS resource, named after the twin (the
+// control plane publishes the base's load assignment under that name too:
+// QUICLoadAssignmentFrom). It must not share the base's EDS name (aether#1008).
+// Envoy's delta-ADS WatchMap deduplicates subscription interest per (type_url,
+// resource name): a twin added AFTER its base is subscribed -- a new
+// ServiceAccount's first pod on the node -- adds nothing to
+// resource_names_subscribe, no request goes out, the control plane has no
+// reason to answer (the resource did not change), and the twin sits in warming
+// until its 15 s initial_fetch_timeout while every request from that source is
+// 503/NC. The same mechanism as the SDS outage of #842.
 func QUICClusterFrom(base *clusterv3.Cluster, name, clientSpiffeID, validationContextName string, sanURIs []string, sni string) *clusterv3.Cluster {
 	cl, _ := proto.Clone(base).(*clusterv3.Cluster)
 	cl.Name = name
+	if cl.EdsClusterConfig != nil {
+		cl.EdsClusterConfig.ServiceName = name
+	}
 	cl.AltStatName = QUICAltStatName(base.GetAltStatName(), SourceSAKeyFromSpiffeID(clientSpiffeID))
 	if cl.TypedExtensionProtocolOptions == nil {
 		cl.TypedExtensionProtocolOptions = map[string]*anypb.Any{}
