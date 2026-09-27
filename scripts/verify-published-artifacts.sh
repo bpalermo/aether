@@ -457,7 +457,21 @@ verify_commit() {
 	done
 
 	# 5. the aether-proxy image this commit's chart pins (#984).
+	#
+	# PROXY_PIN_CHECK=0 skips this step. Only the expected-red control sets it
+	# (scripts/publish-verify-control.sh): the control proves that the
+	# PER-COMMIT artifact gate goes red for a never-published commit, and a
+	# constructed commit still pins whatever proxy digest main's chart pins —
+	# which, once that digest is signed, is legitimately PRESENT and would add
+	# `ok` lines (or, in the offline harness's fake registry, spurious MISSING
+	# lines) to a red that must otherwise be exactly the 20 per-commit
+	# coordinates. The proxy pin has its own gate and its own seen-red
+	# (scripts/check-proxy-pin.sh, the cut-over cases). The real sweep and the
+	# workflow_run path never set this.
 	local proxy_expected=0 values pin verdict got
+	if [ "${PROXY_PIN_CHECK:-1}" = 0 ]; then
+		say "  skip    ghcr.io/${PROXY_REPO} pin check (PROXY_PIN_CHECK=0: the expected-red control covers the per-commit coordinates only)"
+	else
 	if ! values="$(git show "${sha}:${PROXY_VALUES_PATH}")" ||
 		! pin="$(printf '%s\n' "$values" | proxy_pinned_digest)"; then
 		echo "::error::could not read the aether-proxy digest pinned in ${PROXY_VALUES_PATH} at ${sha}" >&2
@@ -507,6 +521,7 @@ verify_commit() {
 		exit 2
 		;;
 	esac
+	fi
 
 	# 4 charts + 8 images + 8 index signatures + one signature per child, plus
 	# the proxy pin's checks. If the loops ever stop iterating, this says so
