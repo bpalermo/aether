@@ -1,4 +1,6 @@
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_img//img:push.bzl", "image_push")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
 load("//bazel/img:registry.bzl", "image_repository")
 
@@ -25,4 +27,50 @@ go_multi_arch_image(
     name = "l4echo_image",
     binary = ":l4echo",
     repository = image_repository("l4echo"),
+)
+
+# A throwaway push of the same multi-arch index to a destination the CALLER
+# names, for the Quay smoke (.github/workflows/quay-smoke.yaml via
+# scripts/quay-smoke.sh; proposal 040 phase 2). It proves rules_img push +
+# keyless sign + verify on the target registry with an index shaped exactly like
+# the released ones (rules_img, amd64 + arm64 children) before any real artifact
+# moves there.
+#
+# The destination is three flags with EMPTY defaults, so nothing here spells a
+# registry (scripts/check-registry-config.sh) and the target is `manual`, so
+# `bazel build //...` never builds a push for it:
+#
+#   bazel run //e2e/l4echo:smoke_push \
+#     --//e2e/l4echo:smoke_registry=<host> \
+#     --//e2e/l4echo:smoke_repository=<org>/smoke \
+#     --//e2e/l4echo:smoke_tag=<tag>
+#
+# Still not a release artifact: no chart, publish step or verifier references it.
+string_flag(
+    name = "smoke_registry",
+    build_setting_default = "",
+)
+
+string_flag(
+    name = "smoke_repository",
+    build_setting_default = "",
+)
+
+string_flag(
+    name = "smoke_tag",
+    build_setting_default = "",
+)
+
+image_push(
+    name = "smoke_push",
+    build_settings = {
+        "registry": ":smoke_registry",
+        "repository": ":smoke_repository",
+        "tag": ":smoke_tag",
+    },
+    image = ":image_index",
+    registry = "{{.registry}}",
+    repository = "{{.repository}}",
+    tag = "{{.tag}}",
+    tags = ["manual"],
 )
