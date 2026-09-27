@@ -96,6 +96,7 @@ go_test(
         "outboundroute_test.go",
         "podchurn_cds_test.go",
         "quic_fanout_test.go",
+        "quic_twin_eds_test.go",
         "races_test.go",
         "route_memo_test.go",
         "snapshot_test.go",
