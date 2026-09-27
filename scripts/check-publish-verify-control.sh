@@ -13,16 +13,19 @@
 #   - the control REJECTS every wrong red and every green:
 #       * a mutated verifier that still prints MISSING but no longer counts it
 #         (so exits 0) — the vacuous gate;
-#       * the real verifier on a registry whose tag lists come back EMPTY —
-#         red, but because nothing was read;
+#       * a red whose absences carry no witness (#985) — a 404 never shown to
+#         come from a lookup that can answer "present";
 #       * a verifier with a MISSING line naming some other commit;
 #       * a verifier that reports one artifact present;
 #       * a verifier that prints a perfect red but exits 0;
 #       * a verifier that could not complete (exit 2) -> inconclusive, 2.
 #     A hand-written CORRECT red is accepted, so each rejection above is for its
 #     own defect and not because every stub is rejected.
+#   - the real verifier on unreadable repositories, or behind a lookup that
+#     404s every tag, never goes red at all: it exits 2 and the control reports
+#     inconclusive — a red that proves nothing is not available to accept.
 #
-# The fake registry is scripts/ghcr-lib.sh with its three network functions
+# The fake registry is scripts/ghcr-lib.sh with its network functions
 # overridden, placed next to UNMODIFIED copies of the verifier and
 # push-heads-lib.sh in a temp dir (the verifier sources its libraries from its
 # own directory). The control commit is written to this checkout's object store
@@ -47,8 +50,12 @@ cat >>"$reg/ghcr-lib.sh" <<'FAKE'
 
 # --- test overrides: no network ---------------------------------------------
 # A registry that has published ONE other commit, completely: every repository
-# lists tags, so a missing control tag is a real absence in a non-empty listing.
-# FAKE_EMPTY=1 makes every listing empty instead.
+# holds tags, so a missing control tag is a real absence beside a witness that
+# answers 200 (#985: the verifier looks tags up by name, ghcr_tag_exists, and
+# backs each 404 with ghcr_any_tag).
+# FAKE_EMPTY=1: every repository lists nothing (unreadable).
+# FAKE_BROKEN=1: the lookup answers 404 for EVERY tag, even listed ones — the
+# shape of a manifest HEAD whose Accept the registry does not like.
 fake_other=0123456789abcdef0123456789abcdef01234567
 ghcr_registry_token() { printf 'fake-token\n'; }
 ghcr_all_tags() {
@@ -57,6 +64,11 @@ ghcr_all_tags() {
 	*/charts/*) printf '0.1.0-%s\n' "$fake_other" ;;
 	*) printf 'dev-%s\nsha256-%064d.sig\n' "$fake_other" 0 ;;
 	esac
+}
+ghcr_any_tag() { ghcr_all_tags "$1" | head -1; }
+ghcr_tag_exists() {
+	[ "${FAKE_BROKEN:-0}" = 1 ] && return 1
+	ghcr_all_tags "$1" | grep -qxF -- "$2"
 }
 ghcr_manifest_digest() { printf 'sha256:%064d\n' 0; }
 FAKE
@@ -74,31 +86,36 @@ fi
 
 # Hand-written verifiers for shapes the real one cannot easily be driven into.
 # Each takes the control sha as $1, like the real one. Every shape keeps the
-# counts right (20 lines, 12 scans) so exactly ONE defect is under test.
+# counts right (20 lines, 12 witnesses) so exactly ONE defect is under test.
 stub() {
 	local name="$1" body="$2"
 	printf '#!/usr/bin/env bash\nsha="$1"\n%s\n' "$body" >"$tmp/$name"
 	chmod +x "$tmp/$name"
 }
 sigs='for i in $(seq 1 8); do echo "  MISSING ghcr.io/r$i signature for *-${sha} (no image to sign)"; done'
-stub right-red 'for i in $(seq 1 12); do echo "  MISSING ghcr.io/r$i:*-${sha} (scanned 5 tags)"; done
+stub right-red 'for i in $(seq 1 12); do echo "  MISSING ghcr.io/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
 '"$sigs"'
 echo ""
 echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
-stub other-sha 'for i in $(seq 1 11); do echo "  MISSING ghcr.io/r$i:*-${sha} (scanned 5 tags)"; done
-echo "  MISSING ghcr.io/r12:*-ffffffffffffffffffffffffffffffffffffffff (scanned 5 tags)"
+stub other-sha 'for i in $(seq 1 11); do echo "  MISSING ghcr.io/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+echo "  MISSING ghcr.io/r12:*-ffffffffffffffffffffffffffffffffffffffff (looked up directly: 404; witness dev: 200)"
 '"$sigs"'
 echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
-stub one-present 'for i in $(seq 1 11); do echo "  MISSING ghcr.io/r$i:*-${sha} (scanned 5 tags)"; done
+stub one-present 'for i in $(seq 1 11); do echo "  MISSING ghcr.io/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
 echo "  ok      ghcr.io/r12:dev-${sha}"
 '"$sigs"'
-echo "  MISSING ghcr.io/r12 extra (scanned 5 tags)"
+echo "  MISSING ghcr.io/r12 extra (looked up directly: 404; witness dev: 200)"
 echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
 # Prints a perfect red and exits 0: only the exit-code assertion can catch it.
-stub exit-zero 'for i in $(seq 1 12); do echo "  MISSING ghcr.io/r$i:*-${sha} (scanned 5 tags)"; done
+stub exit-zero 'for i in $(seq 1 12); do echo "  MISSING ghcr.io/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
 '"$sigs"'
 echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 0'
 stub inconclusive 'echo "::error::could not list tags for x" >&2; exit 2'
+# A perfect red whose absences carry no witness (the pre-#985 line shape): the
+# 404s were never shown to come from a lookup that can answer "present".
+stub no-witness 'for i in $(seq 1 12); do echo "  MISSING ghcr.io/r$i:*-${sha} (scanned 5 tags)"; done
+'"$sigs"'
+echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
 
 # --- cases -------------------------------------------------------------------
 control=scripts/publish-verify-control.sh
@@ -147,10 +164,17 @@ fi
 # 3. The vacuous gate: prints MISSING, exits 0.
 expect_rc "mutated verifier that no longer counts MISSING: control rejects" 1 \
 	env VERIFIER="$mut/verify-published-artifacts.sh" "$control" HEAD
-# 4. Red because nothing was read.
-expect_rc "real verifier on EMPTY tag lists: control rejects" 1 \
+# 4-5. Nothing readable, or a lookup that 404s everything: the real verifier
+#      refuses to call that red (no witness -> exit 2), so the control is
+#      inconclusive rather than accepting a red that proves nothing (#985).
+expect_rc "real verifier on UNREADABLE repositories: never a red, control inconclusive" 2 \
 	env FAKE_EMPTY=1 VERIFIER="$reg/verify-published-artifacts.sh" "$control" HEAD
-# 5-9. Wrong reds, a green, an inconclusive run, and the correct red.
+expect_rc "real verifier whose lookup 404s EVERY tag: never a red, control inconclusive" 2 \
+	env FAKE_BROKEN=1 VERIFIER="$reg/verify-published-artifacts.sh" "$control" HEAD
+# 6. The same red, printed with no witness behind its absences.
+expect_rc "absences without a witness: control rejects" 1 \
+	env VERIFIER="$tmp/no-witness" "$control" HEAD
+# 7-11. Wrong reds, a green, an inconclusive run, and the correct red.
 expect_rc "a MISSING line names another commit: control rejects" 1 \
 	env VERIFIER="$tmp/other-sha" "$control" HEAD
 expect_rc "one artifact reported present: control rejects" 1 \
@@ -162,8 +186,8 @@ expect_rc "verifier could not complete: control is inconclusive" 2 \
 expect_rc "hand-written correct red: control accepts" 0 \
 	env VERIFIER="$tmp/right-red" "$control" HEAD
 
-if [ "$n" -ne 10 ]; then
-	echo "::error::ran ${n} cases, expected 10 -- a gate that checks nothing passes" >&2
+if [ "$n" -ne 12 ]; then
+	echo "::error::ran ${n} cases, expected 12 -- a gate that checks nothing passes" >&2
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then
