@@ -110,7 +110,11 @@ trap 'rm -f "$log"' EXIT
 # The control's red must not land in the job summary as a publish failure, and
 # nothing it prints may be mistaken for the gate's own verify.log.
 rc=0
-env -u GITHUB_STEP_SUMMARY "$verifier" "$control" >"$log" 2>&1 || rc=$?
+# PROXY_PIN_CHECK=0: the control asserts EXACTLY the 20 per-commit coordinates;
+# the constructed commit pins main's (signed, present) aether-proxy digest,
+# which is not what this control is about — see verify-published-artifacts.sh
+# step 5 and scripts/check-proxy-pin.sh for the proxy pin's own red.
+env -u GITHUB_STEP_SUMMARY PROXY_PIN_CHECK=0 "$verifier" "$control" >"$log" 2>&1 || rc=$?
 sed 's/^/  | /' "$log"
 
 bad=0
