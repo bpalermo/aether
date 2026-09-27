@@ -114,8 +114,27 @@ Formatting uses [gofumpt](https://github.com/mvdan/gofumpt), [buildifier](https:
 
 ```bash
 make load-all              # Load all images into local Docker
-make push-all              # Push all images to registry
+make push-all              # Push all images to the registry (bazel/img/registry.bzl)
 ```
+
+### Published artifacts
+
+Every image and chart is published by CI to the `aethermesh` organisation on
+[quay.io](https://quay.io/organization/aethermesh) (proposal 040): images as
+`quay.io/aethermesh/<component>` (`agent`, `mesh-dns`, `proxy-supervisor`,
+`cni-install`, `registrar`, `controller`, `prober`, `udsecho`, `proxy`), charts as
+`oci://quay.io/aethermesh/chart-<name>` (`crds`, `aether`, `prober`, `udsecho`),
+each signed keyless with cosign (the signature is an OCI 1.1 referrer):
+
+```bash
+helm upgrade --install aether-crds oci://quay.io/aethermesh/chart-crds --version <X.Y.Z>-<full git sha>
+helm upgrade --install aether oci://quay.io/aethermesh/chart-aether --version <X.Y.Z>-<full git sha> \
+  -n aether-system --create-namespace
+```
+
+The charts moved from ghcr.io at **1.0.0** — a major bump, because the default
+image repositories changed; see [Getting started](docs/getting-started.md) for the
+upgrade. Releases published before the move stay on ghcr.io.
 
 ### Adding Go Dependencies
 

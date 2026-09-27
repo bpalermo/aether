@@ -1,1 +1,22 @@
-# Helm test helpers. See defs.bzl; the rule itself is loaded from //charts/*.
+# Helm helpers. See defs.bzl; the rules themselves are loaded from //charts/*.
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel/img:registry.bzl", "chart_registry_url")
+
+# chart_push hands oras exactly what `helm push` writes, at the repository and
+# tag it names (proposal 040). No network: oras is replaced by a recorder.
+sh_test(
+    name = "chart_push_test",
+    size = "small",
+    srcs = ["chart_push_test.sh"],
+    args = [
+        "$(rootpath //bazel/helm/testdata/pushtest:pushtest.chart_push)",
+        "$(rootpath //bazel/helm/testdata/pushtest:pushtest)",
+        "$(rootpath //bazel/helm/testdata/pushtest:wrong_name.chart_push)",
+        chart_registry_url("pushtest"),
+    ],
+    data = [
+        "//bazel/helm/testdata/pushtest",
+        "//bazel/helm/testdata/pushtest:pushtest.chart_push",
+        "//bazel/helm/testdata/pushtest:wrong_name.chart_push",
+    ],
+)

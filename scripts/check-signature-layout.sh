@@ -22,6 +22,18 @@
 #     attestation (or buildx's own attestation manifests, which quay.io lists as
 #     referrers of keycloak's children today) must read as `none`.
 #
+# THE PER-COMMIT EXPECTATION (proposal 040 phase 2). Presence is not the whole
+# answer any more: each commit's bazel/img/registry.bzl promises a layout
+# (SIGNATURE_LAYOUT: `referrer` on quay.io; a registry.bzl from before the line
+# existed promises `tag`, which is every ghcr.io publish), and the sweep holds
+# each commit to its own. So the second half pins registry_setting_signature_
+# layout (which layout a setting promises, including the pre-cut-over file that
+# has no such line, and a malformed line refused rather than defaulted) and
+# registry_layout_satisfies over every (found, promised) pair -- in particular
+# that a cosign fallback TAG on quay.io does NOT satisfy `referrer` (the signer
+# silently writing the ghcr.io shape on the new registry would read as healthy)
+# and a referrer does not satisfy `tag`.
+#
 # No registry access: the tag lists and referrers indexes are literals, the
 # referrer entries shaped exactly like quay.io's answer for argoproj/argocd
 # (2026-09-27).
@@ -94,8 +106,67 @@ check both "$legacy"
 check both "$bundle"
 REFS="" REFS_NAME=""
 
-if [ "$n" -ne 13 ]; then
-	echo "::error::ran ${n} cases, expected 13 -- a gate that checks nothing passes" >&2
+# --- the per-commit expectation (proposal 040 phase 2) ----------------------
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+post_bzl=bazel/img/registry.bzl
+pre_bzl="$tmp/pre.bzl"
+bad_bzl="$tmp/bad.bzl"
+# The pre-cut-over file had no SIGNATURE_LAYOUT line at all.
+sed -E -e 's|^IMAGE_REGISTRY = .*|IMAGE_REGISTRY = "ghcr.io"|' -e '/^SIGNATURE_LAYOUT = /d' "$post_bzl" >"$pre_bzl"
+sed -E -e 's|^SIGNATURE_LAYOUT = .*|SIGNATURE_LAYOUT = "both"|' "$post_bzl" >"$bad_bzl"
+
+promise() {
+	local name="$1" want="$2" bzl="$3" got rc=0
+	got="$(registry_setting_signature_layout "$bzl" 2>/dev/null)" || rc=$?
+	n=$((n + 1))
+	if [ "$want" = rc2 ]; then
+		if [ "$rc" = 2 ] && [ -z "$got" ]; then
+			printf '  ok    promise: %s -> refused (rc 2)\n' "$name"
+		else
+			printf '  FAIL  promise: %s: want rc 2, got [%s] rc %s\n' "$name" "$got" "$rc"
+			fail=1
+		fi
+	elif [ "$rc" = 0 ] && [ "$got" = "$want" ]; then
+		printf '  ok    promise: %s -> %s\n' "$name" "$got"
+	else
+		printf '  FAIL  promise: %s: want %s, got [%s] rc %s\n' "$name" "$want" "$got" "$rc"
+		fail=1
+	fi
+}
+echo "promised layout, per commit:"
+promise "this checkout's registry.bzl ($(scripts/image-registry.sh host))" \
+	"$(sed -nE 's/^SIGNATURE_LAYOUT = "([a-z]+)"$/\1/p' "$post_bzl")" "$post_bzl"
+promise "a pre-cut-over registry.bzl (no SIGNATURE_LAYOUT line)" tag "$pre_bzl"
+promise "a malformed SIGNATURE_LAYOUT line" rc2 "$bad_bzl"
+promise "no registry.bzl at all" rc2 "$tmp/absent.bzl"
+
+satisfies() {
+	local layout="$1" expected="$2" want="$3" rc=0
+	registry_layout_satisfies "$layout" "$expected" || rc=$?
+	n=$((n + 1))
+	if [ "$rc" = "$want" ]; then
+		printf '  ok    found %-8s promised %-8s -> rc %s\n' "$layout" "$expected" "$rc"
+	else
+		printf '  FAIL  found %-8s promised %-8s -> rc %s, want %s\n' "$layout" "$expected" "$rc" "$want"
+		fail=1
+	fi
+}
+echo "found vs promised:"
+satisfies referrer referrer 0
+satisfies bundle referrer 1 # cosign's fallback TAG on quay.io: the wrong shape
+satisfies legacy referrer 1
+satisfies both referrer 1
+satisfies none referrer 1
+satisfies bundle tag 0
+satisfies legacy tag 0
+satisfies referrer tag 1 # a referrer where the setting promised a tag
+satisfies both tag 1
+satisfies none tag 1
+satisfies referrer bogus 2
+
+if [ "$n" -ne 28 ]; then
+	echo "::error::ran ${n} cases, expected 28 -- a gate that checks nothing passes" >&2
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then

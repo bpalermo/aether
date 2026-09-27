@@ -24,13 +24,23 @@
 #   - the real verifier on unreadable repositories, or behind a lookup that
 #     404s every tag, never goes red at all: it exits 2 and the control reports
 #     inconclusive — a red that proves nothing is not available to accept.
+#   - THE SPLIT (proposal 040 phase 2): the verifier reads bazel/img/registry.bzl
+#     AS OF the control commit, so a control built on a PRE-cut-over tree goes
+#     red on the old registry (ghcr.io, charts/<name>) and one built on a
+#     POST-cut-over tree on the new one (quay.io, chart-<name>), and the control
+#     accepts each only when every MISSING line names its tree's registry. A
+#     perfect red printed against the OTHER registry is rejected, and a POST
+#     tree whose registry is unreadable while the old one answers is
+#     inconclusive — never a red borrowed from the old registry.
 #
 # The fake registry is scripts/registry-lib.sh with its network functions
 # overridden, placed next to UNMODIFIED copies of the verifier,
 # push-heads-lib.sh, proxy-pin-lib.sh and image-registry.sh in a temp dir (the
 # verifier sources its libraries from its own directory; IMAGE_REGISTRY_BZL
-# points image-registry.sh back at this checkout's bazel/img/registry.bzl). The control commit is written to this checkout's object store
-# by the control itself; no ref ever points at it.
+# points image-registry.sh back at this checkout's bazel/img/registry.bzl for the
+# source-time lists; the verifier reads each commit's own). The control commit is
+# written to this checkout's object store by the control itself; no ref ever
+# points at it, and neither does any PRE/POST base built below.
 #
 # SC2016 is off for the whole file on purpose: every single-quoted `$…` here is
 # the text of a sed pattern or of a generated stub script, which must reach its
@@ -60,6 +70,9 @@ cat >>"$reg/registry-lib.sh" <<'FAKE'
 # FAKE_EMPTY=1: every repository lists nothing (unreadable).
 # FAKE_BROKEN=1: the lookup answers 404 for EVERY tag, even listed ones — the
 # shape of a manifest HEAD whose Accept the registry does not like.
+# FAKE_ONLY_HOST=<host>: only that registry's repositories are readable; every
+# other host lists nothing (the split: the old registry answering, the new one
+# not).
 # Every lookup must present the token the fake issued, `fake-token`; any other
 # value is a 401, which the library reports as inconclusive (#999: a fake that
 # took any token let a tag list passed as the token through green).
@@ -73,8 +86,9 @@ fake_authorized() {
 registry_all_tags() {
 	fake_authorized "$2" || return 2
 	[ "${FAKE_EMPTY:-0}" = 1 ] && return 0
+	[ -n "${FAKE_ONLY_HOST:-}" ] && [ "$REGISTRY_HOST" != "$FAKE_ONLY_HOST" ] && return 0
 	case "$1" in
-	*/charts/*) printf '0.1.0-%s\n' "$fake_other" ;;
+	*/charts/* | */chart-*) printf '0.1.0-%s\n' "$fake_other" ;;
 	*) printf 'dev-%s\nsha256-%064d.sig\n' "$fake_other" 0 ;;
 	esac
 }
@@ -102,6 +116,48 @@ if cmp -s "$reg/verify-published-artifacts.sh" "$mut/verify-published-artifacts.
 	exit 2
 fi
 
+# The registry HEAD's own tree names (what the control, built on HEAD, expects
+# every MISSING line to point at), and the other one of the cut-over pair.
+head_bzl="$tmp/head-registry.bzl"
+git show HEAD:bazel/img/registry.bzl >"$head_bzl"
+pre_bzl="$tmp/pre-registry.bzl"
+sed -E \
+	-e 's|^IMAGE_REGISTRY = .*|IMAGE_REGISTRY = "ghcr.io"|' \
+	-e 's|^IMAGE_NAMESPACE = .*|IMAGE_NAMESPACE = "bpalermo/aether"|' \
+	-e 's|^IMAGE_NAME_OVERRIDES = .*|IMAGE_NAME_OVERRIDES = {"proxy": "aether-proxy"}|' \
+	-e 's|^CHART_REPOSITORY_PREFIX = .*|CHART_REPOSITORY_PREFIX = "charts/"|' \
+	-e '/^SIGNATURE_LAYOUT = /d' \
+	-e '/^PROXY_PIN_LEGACY_REFERENCES = /d' \
+	bazel/img/registry.bzl >"$pre_bzl"
+post_bzl="$PWD/bazel/img/registry.bzl"
+prefix_of() { IMAGE_REGISTRY_BZL="$1" scripts/image-registry.sh prefix; }
+head_prefix="$(prefix_of "$head_bzl")"
+pre_prefix="$(prefix_of "$pre_bzl")"
+post_prefix="$(prefix_of "$post_bzl")"
+if [ "$pre_prefix" = "$post_prefix" ]; then
+	echo "::error::the split cases need two different registries; both settings say ${pre_prefix}" >&2
+	exit 2
+fi
+other_prefix="$pre_prefix"
+[ "$head_prefix" = "$pre_prefix" ] && other_prefix="$post_prefix"
+export STUB_PREFIX="$head_prefix" STUB_OTHER_PREFIX="$other_prefix"
+
+# base_with <registry.bzl> <message> -> a commit (never referenced) whose tree is
+# HEAD's with that registry.bzl: a PRE or POST base for the control.
+base_with() {
+	local blob tree
+	blob="$(git hash-object -w "$1")"
+	export GIT_INDEX_FILE="$tmp/index"
+	git read-tree HEAD
+	git update-index --cacheinfo "100644,${blob},bazel/img/registry.bzl"
+	tree="$(git write-tree)"
+	unset GIT_INDEX_FILE
+	GIT_AUTHOR_NAME=c GIT_AUTHOR_EMAIL=c@invalid GIT_COMMITTER_NAME=c GIT_COMMITTER_EMAIL=c@invalid \
+		git commit-tree "$tree" -p HEAD -m "harness: $2"
+}
+pre_base="$(base_with "$pre_bzl" "a tree from before the Quay cut-over")"
+post_base="$(base_with "$post_bzl" "a tree from after the Quay cut-over")"
+
 # Hand-written verifiers for shapes the real one cannot easily be driven into.
 # Each takes the control sha as $1, like the real one. Every shape keeps the
 # counts right (20 lines, 12 witnesses) so exactly ONE defect is under test.
@@ -110,28 +166,34 @@ stub() {
 	printf '#!/usr/bin/env bash\nsha="$1"\n%s\n' "$body" >"$tmp/$name"
 	chmod +x "$tmp/$name"
 }
-sigs='for i in $(seq 1 8); do echo "  MISSING ghcr.io/r$i signature for *-${sha} (no image to sign)"; done'
-stub right-red 'for i in $(seq 1 12); do echo "  MISSING ghcr.io/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+sigs='for i in $(seq 1 8); do echo "  MISSING ${STUB_PREFIX}/r$i signature for *-${sha} (no image to sign)"; done'
+stub right-red 'for i in $(seq 1 12); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
 '"$sigs"'
 echo ""
 echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
-stub other-sha 'for i in $(seq 1 11); do echo "  MISSING ghcr.io/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
-echo "  MISSING ghcr.io/r12:*-ffffffffffffffffffffffffffffffffffffffff (looked up directly: 404; witness dev: 200)"
+stub other-sha 'for i in $(seq 1 11); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+echo "  MISSING ${STUB_PREFIX}/r12:*-ffffffffffffffffffffffffffffffffffffffff (looked up directly: 404; witness dev: 200)"
 '"$sigs"'
 echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
-stub one-present 'for i in $(seq 1 11); do echo "  MISSING ghcr.io/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
-echo "  ok      ghcr.io/r12:dev-${sha}"
+stub one-present 'for i in $(seq 1 11); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+echo "  ok      ${STUB_PREFIX}/r12:dev-${sha}"
 '"$sigs"'
-echo "  MISSING ghcr.io/r12 extra (looked up directly: 404; witness dev: 200)"
+echo "  MISSING ${STUB_PREFIX}/r12 extra (looked up directly: 404; witness dev: 200)"
 echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
 # Prints a perfect red and exits 0: only the exit-code assertion can catch it.
-stub exit-zero 'for i in $(seq 1 12); do echo "  MISSING ghcr.io/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+stub exit-zero 'for i in $(seq 1 12); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
 '"$sigs"'
 echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 0'
 stub inconclusive 'echo "::error::could not list tags for x" >&2; exit 2'
+# A perfect red — right sha, right count, every absence witnessed — reported
+# against the OTHER registry of the cut-over pair: the gate would be checking
+# where the commit never published.
+stub wrong-registry 'for i in $(seq 1 12); do echo "  MISSING ${STUB_OTHER_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+for i in $(seq 1 8); do echo "  MISSING ${STUB_OTHER_PREFIX}/r$i signature for *-${sha} (no image to sign)"; done
+echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
 # A perfect red whose absences carry no witness (the pre-#985 line shape): the
 # 404s were never shown to come from a lookup that can answer "present".
-stub no-witness 'for i in $(seq 1 12); do echo "  MISSING ghcr.io/r$i:*-${sha} (scanned 5 tags)"; done
+stub no-witness 'for i in $(seq 1 12); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (scanned 5 tags)"; done
 '"$sigs"'
 echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
 
@@ -203,9 +265,35 @@ expect_rc "verifier could not complete: control is inconclusive" 2 \
 	env VERIFIER="$tmp/inconclusive" "$control" HEAD
 expect_rc "hand-written correct red: control accepts" 0 \
 	env VERIFIER="$tmp/right-red" "$control" HEAD
+expect_rc "a perfect red on the OTHER registry (${other_prefix}): control rejects" 1 \
+	env VERIFIER="$tmp/wrong-registry" "$control" HEAD
 
-if [ "$n" -ne 12 ]; then
-	echo "::error::ran ${n} cases, expected 12 -- a gate that checks nothing passes" >&2
+# 12-15. The split, with the REAL verifier (proposal 040). A control on a PRE
+#        tree is red on the old registry, one on a POST tree on the new one —
+#        each MISSING line naming its tree's registry (the control asserts it)
+#        — and a POST tree whose registry is unreadable while the old one
+#        answers is inconclusive, never a red borrowed from the old registry.
+split_case() {
+	local name="$1" base="$2" want_prefix="$3" n_on
+	shift 3
+	expect_rc "$name" 0 env "$@" VERIFIER="$reg/verify-published-artifacts.sh" "$control" "$base"
+	n=$((n + 1))
+	n_on="$(grep -cE "^  \| +MISSING ${want_prefix//./\\.}/" "$tmp/out" || true)"
+	if [ "$n_on" = 20 ]; then
+		printf '  ok    …all 20 MISSING lines on %s/\n' "$want_prefix"
+	else
+		printf '  FAIL  …%s of 20 MISSING lines on %s/\n' "$n_on" "$want_prefix"
+		sed 's/^/        | /' "$tmp/out" | tail -8
+		fail=1
+	fi
+}
+split_case "real verifier, control on a PRE-cut-over tree: red on ${pre_prefix}, control accepts" "$pre_base" "$pre_prefix"
+split_case "real verifier, control on a POST-cut-over tree: red on ${post_prefix}, control accepts" "$post_base" "$post_prefix"
+expect_rc "real verifier, POST tree, only ${pre_prefix%%/*} readable: inconclusive, never a red from the old registry" 2 \
+	env FAKE_ONLY_HOST="${pre_prefix%%/*}" VERIFIER="$reg/verify-published-artifacts.sh" "$control" "$post_base"
+
+if [ "$n" -ne 18 ]; then
+	echo "::error::ran ${n} cases, expected 18 -- a gate that checks nothing passes" >&2
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then
@@ -221,6 +309,9 @@ fi
 #    pin MISSING too, which is exactly the red the bot's first signed pin PR
 #    (#988) hit in CI.
 fake_pin="sha256:$(printf 'f%.0s' $(seq 1 64))"
+# The registry the PIN names (it moves with the next proxy release, not with the
+# registry flip): the pinned-proxy MISSING line must name it.
+pin_ref="$(sed -nE '/^proxy:/,/^[[:space:]]*repository:/ s/^[[:space:]]*repository:[[:space:]]*"?([^"[:space:]]+)"?[[:space:]]*$/\1/p' charts/aether/values.yaml | head -1)"
 values_blob="$(git show HEAD:charts/aether/values.yaml | sed -E "s|(aether-proxy@)?sha256:[0-9a-f]{64}|${fake_pin}|" | git hash-object -w --stdin)"
 export GIT_INDEX_FILE="$tmp/index"
 git read-tree HEAD
@@ -239,7 +330,7 @@ if [ -n "$ctl_sha" ] && env PROXY_PIN_CHECK=1 PROXY_SIGNING_CUTOVER=HEAD~1 "$reg
 elif [ -z "$ctl_sha" ]; then
 	printf '  FAIL  could not learn the control sha from the previous case\n'
 	fail=1
-elif grep -qF "MISSING $(scripts/image-registry.sh ref proxy)@" "$tmp/out2"; then
+elif grep -qF "MISSING ${pin_ref}@" "$tmp/out2"; then
 	printf '  ok    with the pin check ON the same commit is red for the proxy pin too (the switch is load-bearing)\n'
 else
 	printf '  FAIL  with the pin check ON the proxy pin was not reported MISSING:\n'

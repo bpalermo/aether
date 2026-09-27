@@ -1,6 +1,6 @@
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load(":registry.bzl", "IMAGE_NAMESPACE", "IMAGE_REGISTRY", "chart_repository", "image_reference", "image_repository")
+load(":registry.bzl", "IMAGE_NAMESPACE", "IMAGE_REGISTRY", "SIGNATURE_LAYOUT", "chart_registry_url", "chart_repository", "image_reference", "image_repository", "proxy_pin_references")
 
 # The registry is ONE setting, registry.bzl (proposal 040), read two ways: Bazel
 # loads it, and scripts/image-registry.sh parses it for everything that is not
@@ -11,7 +11,7 @@ load(":registry.bzl", "IMAGE_NAMESPACE", "IMAGE_REGISTRY", "chart_repository", "
 # questions against the same file.
 #
 # The components are every image the build knows how to push (plus `proxy`,
-# the one with a name override on GHCR); the charts are the four published.
+# which the //proxy workspace pushes); the charts are the four published.
 _COMPONENTS = [
     "agent",
     "mesh-dns",
@@ -36,6 +36,9 @@ _CHARTS = [
 _EXPECTED = [
     "host " + IMAGE_REGISTRY,
     "prefix " + IMAGE_REGISTRY + "/" + IMAGE_NAMESPACE,
+    "signature-layout " + SIGNATURE_LAYOUT,
+    # A list: registry_test.sh joins the script's lines with "," to compare.
+    "proxy-pin-refs " + ",".join(proxy_pin_references()),
 ]
 
 _EXPECTED += ["repo {} {}".format(
@@ -51,6 +54,11 @@ _EXPECTED += ["ref {} {}".format(
 _EXPECTED += ["chart-repo {} {}".format(
     c,
     chart_repository(c),
+) for c in _CHARTS]
+
+_EXPECTED += ["chart-ref {} {}".format(
+    c,
+    chart_registry_url(c),
 ) for c in _CHARTS]
 
 write_file(

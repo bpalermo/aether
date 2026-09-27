@@ -1,22 +1,31 @@
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/img:registry.bzl", "IMAGE_REGISTRY", "chart_registry_url")
+load("//bazel/helm:defs.bzl", "chart_push")
+load("//bazel/img:registry.bzl", "chart_registry_url")
 
-# prober Helm chart (published as chart_repository("prober") under IMAGE_REGISTRY; see //bazel/img:registry.bzl).
+# prober Helm chart (published to chart_registry_url("prober"); see //bazel/img:registry.bzl).
 #
-# Publish targets (OCI; registry from //bazel/img:registry.bzl):
-#   bazel run //charts/prober:prober.push           # chart + image
-#   bazel run //charts/prober:prober.push_registry  # chart only
-# Authenticate first via HELM_REGISTRY_USERNAME / HELM_REGISTRY_PASSWORD.
+# Publish targets (OCI; registry from //bazel/img:registry.bzl), images first:
+#   bazel run --stamp //charts/prober:prober.push_images   # the image, by digest
+#   bazel run --stamp //charts/prober:prober.chart_push    # the chart
+# Credentials: `docker login <registry>` (image_push and oras both read the
+# Docker config).
 helm_chart(
     name = "prober",
     chart = "Chart.yaml",
     images = [
         "//prober/cmd/prober:image_push",
     ],
-    login_url = IMAGE_REGISTRY,
-    registry_url = chart_registry_url(),
     values = "values.yaml",
     visibility = ["//visibility:public"],
+)
+
+# `helm push` cannot name the flat `chart-prober` repository (proposal 040), so
+# the chart is pushed by chart_push, under its packaged `X.Y.Z-<full sha>`.
+chart_push(
+    name = "prober.chart_push",
+    chart_name = "prober",
+    package = ":prober",
+    repository = chart_registry_url("prober"),
 )
 
 helm_lint_test(

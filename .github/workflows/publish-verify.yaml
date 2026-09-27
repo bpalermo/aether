@@ -10,13 +10,17 @@
 # window cancels the first merge's pending run. The superseded run ends
 # `cancelled`, starts zero jobs, pushes nothing, and shows up in the Actions UI
 # as a grey circle rather than a red X. On 2026-09-20 f332061 (#875) was lost
-# exactly that way and nobody noticed until someone went looking at GHCR.
+# exactly that way and nobody noticed until someone went looking at the registry.
 #
 # This workflow makes that loud. It does NOT check that a workflow exited 0 — a
 # run that exits 0 having pushed nothing, a run that was cancelled at queue time
 # and a run that never existed all have to be caught, and only one question
 # separates them: are the artifacts for this commit in the registry?
-# `scripts/verify-published-artifacts.sh` asks GHCR that question directly.
+# `scripts/verify-published-artifacts.sh` asks the registry that question
+# directly — the registry that commit's own bazel/img/registry.bzl names (the
+# proposal 040 split: push heads before the Quay cut-over are checked on ghcr.io
+# with signature tags, heads at or after it on quay.io with signature
+# referrers; the file is read AS OF each head, like the chart versions).
 #
 # It does not touch publish.yaml's serialisation: it is a separate workflow, in
 # a separate concurrency group, and it never pushes anything (the release
@@ -119,13 +123,16 @@ jobs:
       # red for the right reason: exit exactly 1, one MISSING line per
       # coordinate (20) all naming that sha, no `ok` line, and every chart and
       # image absence backed by a witness (a tag the same repository lists,
-      # answering 200 to the same lookup — #985). A green for that commit, or a red for another
-      # reason, fails the run; exit 2 (GHCR unreadable) is inconclusive and
-      # fails it too. See scripts/publish-verify-control.sh; its offline check
+      # answering 200 to the same lookup — #985) and every line naming the
+      # registry the control's tree names. A green for that commit, or a red for
+      # another reason, fails the run; exit 2 (registry unreadable) is
+      # inconclusive and fails it too. See scripts/publish-verify-control.sh; its offline check
       # runs in ci.yaml.
       - name: Expected-red control (must fail on a never-published commit)
         id: control
         env:
+          # Only ever sent to ghcr.io (scripts/registry-lib.sh), which the sweep
+          # still reads for heads from before the Quay cut-over (until phase 4).
           GHCR_TOKEN: ${{ github.token }}
         run: ./scripts/publish-verify-control.sh
 

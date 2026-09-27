@@ -1,0 +1,79 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# oras from the official release archives pinned in MODULE.bazel (sha256 from the
+# release's checksums file), the ONLY oras this repository pushes charts with --
+# chart_push in //bazel/helm:defs.bzl, run by publish.yaml -- and what
+# `bazel run //tools/oras -- <args>` gives a workstation. Bumping oras is editing
+# those four http_archive entries; //tools/oras:version_test fails until
+# EXPECTED below moves with them.
+#
+# Hand-written: Gazelle manages Go only.
+
+config_setting(
+    name = "linux_amd64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+config_setting(
+    name = "darwin_amd64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "darwin_arm64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+# The release binary for the platform being built for (`bazel run` builds for
+# the host, which is also where it runs).
+alias(
+    name = "oras_bin",
+    actual = select(
+        {
+            ":darwin_amd64": "@oras_cli_darwin_amd64//:oras",
+            ":darwin_arm64": "@oras_cli_darwin_arm64//:oras",
+            ":linux_amd64": "@oras_cli_linux_amd64//:oras",
+            ":linux_arm64": "@oras_cli_linux_arm64//:oras",
+        },
+        no_match_error = "//tools/oras: no pinned oras release for this platform (linux/darwin x amd64/arm64 only; see MODULE.bazel)",
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# bazel run //tools/oras -- <args>
+sh_binary(
+    name = "oras",
+    srcs = ["oras.sh"],
+    data = [":oras_bin"],
+    env = {"ORAS_RLOCATIONPATH": "$(rlocationpath :oras_bin)"},
+    visibility = ["//visibility:public"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# Network-free: `oras version` must print the version MODULE.bazel pins.
+sh_test(
+    name = "version_test",
+    size = "small",
+    srcs = ["version_test.sh"],
+    data = [":oras_bin"],
+    env = {"ORAS_RLOCATIONPATH": "$(rlocationpath :oras_bin)"},
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
