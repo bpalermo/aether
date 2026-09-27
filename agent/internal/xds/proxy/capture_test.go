@@ -28,11 +28,18 @@ func TestGenerateCaptureListener(t *testing.T) {
 	assert.Equal(t, "0.0.0.0", sa.GetAddress())
 	assert.Equal(t, uint32(15001), sa.GetPortValue())
 	assert.Equal(t, "/var/run/netns/p1", sa.GetNetworkNamespaceFilepath())
-	assert.True(t, l.GetUseOriginalDst().GetValue(), "use_original_dst set")
+	// #1007: use_original_dst must be OFF. The field adds only the
+	// restored-destination handoff, which looks the target listener up by
+	// address string with no netns, so a diverted connection to
+	// <endpoint>:18008 ran through whichever pod's inbound listener bound
+	// 0.0.0.0:18008 last. The original_dst LISTENER FILTER (asserted first in
+	// the list below) is what restores the destination.
+	require.NotNil(t, l.GetUseOriginalDst(), "use_original_dst must be set explicitly")
+	assert.False(t, l.GetUseOriginalDst().GetValue(), "use_original_dst must be false (#1007)")
 	// proposal 038: the capture socket must be transparent so the CNI's
-	// prerouting tproxy can assign a diverted packet to it. Pinned beside
-	// use_original_dst because the two are a PAIR -- transparent for delivery,
-	// original_dst for localAddressRestored() on the passthrough cluster.
+	// prerouting tproxy can assign a diverted packet to it. It pairs with the
+	// original_dst listener filter -- transparent for delivery, original_dst
+	// for localAddressRestored() on the passthrough cluster.
 	assert.True(t, l.GetTransparent().GetValue(), "transparent set (038)")
 
 	// Inspector stall guard: inconclusive first writes (<6B raw TCP, server-first
