@@ -146,8 +146,8 @@ ghcr_manifest_digest() {
 # Every child manifest digest of a multi-arch INDEX (#925).
 #
 # publish.yaml signs with `cosign sign --recursive`, which signs the index AND
-# each child it lists. `cosign verify` has no `--recursive` (not in v2.4.1, not
-# in v3.0.6), so a verifier that checks only the index digest never looks at the
+# each child it lists. `cosign verify` has no `--recursive` (not in v2.4.1,
+# v3.0.6 or v3.1.2), so a verifier that checks only the index digest never looks at the
 # per-architecture manifests — which are exactly what a node pulls. Anything that
 # checks signatures walks the children with this and checks each one.
 #
