@@ -13,7 +13,8 @@
 # it failed on e3b58e6 by reading 100 of 667 tags (#875); a second, subtly
 # different copy in the verifier would be free to regress the same way while the
 # original stayed correct — and a verifier that cannot see a tag reports a
-# publish that happened as missing.
+# publish that happened as missing. (The verifier no longer lists at all: it
+# asks for each tag it expects by name, ghcr_tag_exists — #985.)
 #
 # Everything here is GET/HEAD only. Nothing in this file can push, tag, delete or
 # otherwise mutate the registry: publishing is the release workflow's job alone.
@@ -49,6 +50,11 @@ ghcr_registry_token() {
 # `last=` is the cursor; ghcr's own next-URL carries `n=0`, so re-state a real
 # page size rather than following that URL verbatim.
 #
+# Even a complete walk is not a consistent snapshot: tags written while the
+# pages are read can shift a page boundary past an existing tag (#985). Use this
+# only to DISCOVER tags whose names you do not know; to ask whether a known tag
+# exists, use ghcr_tag_exists below.
+#
 # Usage: ghcr_all_tags <repo> <token>   -> one tag per line on stdout
 ghcr_all_tags() {
 	local repo="$1" tok="$2" last="" hdr body url
@@ -64,6 +70,62 @@ ghcr_all_tags() {
 		[ -n "$last" ] || break
 	done
 	rm -f "$hdr"
+}
+
+# The manifest media types a published coordinate can carry: a multi-arch index
+# (OCI or Docker) or a single manifest (OCI or Docker) — which covers a Helm
+# chart, a cosign 2 `.sig` and a cosign 3 fallback index alike. A HEAD whose
+# Accept matches none of them may be refused for a manifest that exists.
+GHCR_MANIFEST_ACCEPT='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
+
+# Does ONE tag exist? `HEAD /v2/<repo>/manifests/<tag>` (#985).
+#
+# Anything that knows the tag it expects looks it up this way — never by listing
+# every tag and grepping. A listing is paged, and a publish writing tags while
+# the pages are read can move the page boundary so an existing tag falls
+# between two pages and is never seen: the 2026-09-27 sweep reported
+# cni-install's d526bf2 signature MISSING while it was there, and a re-run
+# minutes later passed (#985). A direct lookup has no pages to fall between, and
+# costs O(expected tags) instead of O(every tag the repository ever had).
+#
+# Three answers, never two:
+#   0  present  (200)
+#   1  absent   (404: the registry's own answer — no such manifest)
+#   2  unknown  (anything else: 401/403/429/5xx, a timeout, no connection; the
+#               code goes to stderr). An unanswered lookup is NEVER "absent" —
+#               that turns a registry hiccup into a false alarm — and never
+#               "present", which turns an outage into a pass.
+#
+# Usage: ghcr_tag_exists <repo> <tag> <token>
+ghcr_tag_exists() {
+	local repo="$1" tag="$2" tok="$3" code
+	code="$(curl -sS --retry 2 -o /dev/null -w '%{http_code}' -I \
+		-H "Authorization: Bearer $tok" -H "Accept: ${GHCR_MANIFEST_ACCEPT}" \
+		"https://ghcr.io/v2/${repo}/manifests/${tag}")" || true
+	case "$code" in
+	200) return 0 ;;
+	404) return 1 ;;
+	*)
+		echo "ghcr_tag_exists: HEAD ghcr.io/v2/${repo}/manifests/${tag} answered '${code:-nothing}'" >&2
+		return 2
+		;;
+	esac
+}
+
+# ONE tag that exists in <repo>: the first entry of a single listing page. Never
+# used to decide whether an expected tag is there — that is ghcr_tag_exists'
+# job — but as the WITNESS behind a 404 (#985): if a tag this listing just named
+# also answers 200 to ghcr_tag_exists, the repository is readable and the lookup
+# can say "present", so the 404 beside it is a real absence. Without it, a lookup
+# that 404s everything (ghcr does exactly that to a manifest HEAD whose Accept it
+# does not like) would report a complete publish as MISSING. Prints nothing when
+# the repository cannot be listed or lists no tags.
+#
+# Usage: ghcr_any_tag <repo> <token>  -> one tag on stdout
+ghcr_any_tag() {
+	local repo="$1" tok="$2"
+	curl -fsS -H "Authorization: Bearer $tok" \
+		"https://ghcr.io/v2/${repo}/tags/list?n=1" | ghcr__json_tags | head -1
 }
 
 # Resolve a tag to the digest the registry itself reports for it.
@@ -141,15 +203,26 @@ ghcr_signature_layout() {
 	local digest="$1" tags="$2" has_legacy=0 has_bundle=0
 	printf '%s\n' "$tags" | grep -qxF -- "$(ghcr_signature_tag_legacy "$digest")" && has_legacy=1
 	printf '%s\n' "$tags" | grep -qxF -- "$(ghcr_signature_tag_bundle "$digest")" && has_bundle=1
-	if [ "$has_legacy" = 1 ] && [ "$has_bundle" = 1 ]; then
-		printf 'both\n'
-	elif [ "$has_legacy" = 1 ]; then
-		printf 'legacy\n'
-	elif [ "$has_bundle" = 1 ]; then
-		printf 'bundle\n'
-	else
-		printf 'none\n'
-	fi
+	ghcr__layout "$has_legacy" "$has_bundle"
+}
+
+# The same answer from two direct lookups instead of a tag list (#985). BOTH
+# tags are asked for by name — not "stop at the first hit" — so `both` is still
+# seen.
+#
+# Returns 2 with nothing on stdout when either lookup goes unanswered: a layout
+# decided on one answer out of two could call `both` `legacy`.
+#
+# Usage: ghcr_signature_layout_direct <repo> <digest> <token>
+ghcr_signature_layout_direct() {
+	local repo="$1" digest="$2" tok="$3" has_legacy has_bundle rc
+	rc=0
+	ghcr_tag_exists "$repo" "$(ghcr_signature_tag_legacy "$digest")" "$tok" || rc=$?
+	case "$rc" in 0) has_legacy=1 ;; 1) has_legacy=0 ;; *) return 2 ;; esac
+	rc=0
+	ghcr_tag_exists "$repo" "$(ghcr_signature_tag_bundle "$digest")" "$tok" || rc=$?
+	case "$rc" in 0) has_bundle=1 ;; 1) has_bundle=0 ;; *) return 2 ;; esac
+	ghcr__layout "$has_legacy" "$has_bundle"
 }
 
 # Every image repository the publish workflow pushes AND signs.
@@ -162,7 +235,8 @@ ghcr_signature_layout() {
 # Keep in sync with the go_multi_arch_image() repositories that //charts/*:*.push
 # publishes. //e2e/l4echo builds an image too and is deliberately absent: it is
 # never pushed to a registry. A name that is wrong rather than missing fails
-# loudly — the verifier hard-fails on a repo whose tag list it cannot read.
+# loudly — the verifier hard-fails on a repo it cannot find a readable tag in
+# (the witness behind every absence, ghcr_any_tag).
 # shellcheck disable=SC2034  # consumed by whoever sources this file.
 GHCR_IMAGE_REPOS=(
 	bpalermo/aether/agent
@@ -195,6 +269,19 @@ GHCR_CHARTS=(
 GHCR_CHART_REPO_PREFIX=bpalermo/aether/charts
 
 # --- internals -------------------------------------------------------------
+
+# legacy | bundle | both | none, from two 0/1 presence flags.
+ghcr__layout() {
+	if [ "$1" = 1 ] && [ "$2" = 1 ]; then
+		printf 'both\n'
+	elif [ "$1" = 1 ]; then
+		printf 'legacy\n'
+	elif [ "$2" = 1 ]; then
+		printf 'bundle\n'
+	else
+		printf 'none\n'
+	fi
+}
 
 ghcr__json_str() {
 	python3 -c 'import sys,json;print(json.load(sys.stdin)[sys.argv[1]])' "$1"

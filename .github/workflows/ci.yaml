@@ -247,6 +247,16 @@ jobs:
       - name: aether-proxy pin extraction and signing cut-over are exact
         run: scripts/check-proxy-pin.sh
 
+      # publish-verify looks each expected tag up by name (HEAD
+      # /v2/<repo>/manifests/<tag>) instead of paging through every tag (#985):
+      # a publish writing tags mid-walk shifted a page boundary past a present
+      # signature and the sweep reported it MISSING. This reproduces that race
+      # on a fake registry (the old walk must lose the tag, the direct lookup
+      # must find it), pins 200/404/other as present/absent/inconclusive, and
+      # drives the real verifier end to end. No network.
+      - name: GHCR direct tag lookup survives a concurrent publish
+        run: scripts/check-ghcr-lookup.sh
+
       # Then: lint them. The target list comes from a query rather than being
       # written out here, so a new package's sh_library is covered the moment the
       # check above starts demanding one. The empty test is a query-failure
