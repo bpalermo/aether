@@ -28,8 +28,11 @@
 #      //charts/aether:aether_commit (#692). The version is read from Chart.yaml
 #      AS OF that commit, so a commit that bumped a chart is checked against the
 #      version it actually published under.
-#   2. A tag ending in `-<full sha>` in each of the eight published image
-#      repositories (GHCR_IMAGE_REPOS in scripts/ghcr-lib.sh).
+#   2. The image tag `<release tag>-<full sha>` (`dev-<sha>` today) in each of
+#      the eight published image repositories (GHCR_IMAGE_REPOS in
+#      scripts/ghcr-lib.sh). The prefix is read from the `release_tag` flag's
+#      default in bazel/img/go_multi_arch_image.bzl AS OF that commit, like the
+#      chart versions.
 #   3. A cosign signature for each of those images: the index digest resolved
 #      from (2), present in the same repository as exactly one of
 #      `sha256-<hex>.sig` (cosign 2) or `sha256-<hex>` (cosign 3 bundle).
@@ -59,6 +62,19 @@
 # That is every artefact the `Push charts + images` step publishes, bar the bare
 # mutable `charts/*:<X.Y.Z>` tags, which carry no commit coordinate and which no
 # query can attribute to a commit.
+#
+# HOW IT LOOKS (#985)
+#
+# Every coordinate above has a name this script can compute, so each one is
+# asked for BY NAME — `HEAD /v2/<repo>/manifests/<tag>` (ghcr_tag_exists) —
+# and no tag list is ever read. It used to page through every tag of every
+# repository and grep; a publish writing tags mid-walk can shift a page
+# boundary past an existing tag, and the 2026-09-27 sweep reported a present
+# signature MISSING that way. 200 is present, 404 is MISSING, and any other
+# answer is exit 2: an unanswered lookup is never reported as either. A 404 is
+# only reported with a witness — a tag the same repository lists, looked up the
+# same way, answering 200 (`witness <tag>: 200` on the MISSING line) — so a
+# lookup that can no longer say "present" is exit 2, not a wall of MISSING.
 #
 # READ-ONLY. Every request below is a GET or a HEAD. This script cannot push,
 # retag or delete anything: the release workflow is the only publisher.
@@ -100,8 +116,9 @@
 # EXIT CODES
 #   0  every artifact for every commit is present
 #   1  at least one artifact is MISSING
-#   2  the check could not be performed (bad usage, unresolvable commit,
-#      unreadable repository) — never conflated with "present"
+#   2  the check could not be performed (bad usage, unresolvable commit, a
+#      lookup the registry did not answer with 200 or 404) — never conflated
+#      with "present" or with "missing"
 
 set -euo pipefail
 
@@ -208,6 +225,7 @@ fi
 
 missing_total=0
 checks_total=0
+lookups_total=0
 report=""
 
 say() { printf '%s\n' "$*"; }
@@ -248,6 +266,79 @@ chart_commit_tag() {
 	esac
 }
 
+# The tag an image publishes under FOR ONE COMMIT: `<release tag>-<full sha>`,
+# the second entry of go_multi_arch_image()'s image_push tag_list, where the
+# release tag is the `release_tag` string_flag's default (publish.yaml does not
+# override it). Read as of that commit, so a change of prefix is checked against
+# what that commit actually published — and an unreadable one is exit 2, never a
+# guess.
+image_commit_tag() {
+	local sha="$1" prefix
+	prefix="$(git show "${sha}:bazel/img/go_multi_arch_image.bzl" |
+		awk '/name = "release_tag"/ { f = 1 } f && /build_setting_default/ { print; exit }' |
+		sed -nE 's/.*build_setting_default[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p')"
+	if [ -z "$prefix" ]; then
+		echo "::error::could not read the release_tag default from bazel/img/go_multi_arch_image.bzl at ${sha}" >&2
+		exit 2
+	fi
+	printf '%s-%s\n' "$prefix" "$sha"
+}
+
+# Look ONE expected tag up by name (#985). Returns 0 present, 1 absent; exits 2
+# on any answer that is neither, naming the coordinate.
+lookup() {
+	local repo="$1" tag="$2" tok="$3" rc=0
+	lookups_total=$((lookups_total + 1))
+	ghcr_tag_exists "$repo" "$tag" "$tok" || rc=$?
+	case "$rc" in
+	0 | 1) return "$rc" ;;
+	*)
+		echo "::error::inconclusive: ghcr.io/${repo}:${tag} could not be looked up (neither 200 nor 404)" >&2
+		exit 2
+		;;
+	esac
+}
+
+# The evidence behind a 404, printed as `witness <tag>: 200` (#985). A 404 only
+# means MISSING if the same lookup, in the same repository, can answer 200: take
+# one tag the repository itself lists and look it up. A repository that lists
+# nothing (unreadable, misnamed) or a lookup that 404s a tag the registry just
+# listed (a broken Accept, say) makes every absence in it meaningless — exit 2,
+# never MISSING. This is the direct-lookup form of the old "scanned N tags",
+# which could not tell a real absence from an unread listing either.
+#
+# Called in $(...), so an `exit` here only ends the subshell: callers must check.
+absence_witness() {
+	local repo="$1" tok="$2" anchor rc=0
+	anchor="$(ghcr_any_tag "$repo" "$tok")" || true
+	if [ -z "$anchor" ]; then
+		echo "::error::inconclusive: ghcr.io/${repo} lists no tags — an unreadable or misnamed repository, not a missing artifact" >&2
+		return 2
+	fi
+	ghcr_tag_exists "$repo" "$anchor" "$tok" || rc=$?
+	case "$rc" in
+	0) printf 'witness %s: 200\n' "$anchor" ;;
+	1)
+		echo "::error::inconclusive: ghcr.io/${repo} lists ${anchor} but the lookup answers 404 for it — the lookup is broken, so its 404s prove nothing" >&2
+		return 2
+		;;
+	*)
+		echo "::error::inconclusive: ghcr.io/${repo}:${anchor} (the witness) could not be looked up" >&2
+		return 2
+		;;
+	esac
+}
+
+# absent_direct <repo> <tag> <tok>: record <repo>:<tag> MISSING with its
+# witness, or exit 2 when there is none.
+absent_direct() {
+	local repo="$1" tag="$2" tok="$3" w
+	if ! w="$(absence_witness "$repo" "$tok")"; then
+		exit 2
+	fi
+	absent "ghcr.io/${repo}:${tag} (looked up directly: 404; ${w})"
+}
+
 # One signature, for one digest (an index or one of its children), in exactly
 # one layout.
 #
@@ -259,9 +350,17 @@ chart_commit_tag() {
 # But exactly ONE must be present. Accepting "either" without rejecting "both"
 # would read a double-write or a half-finished migration as healthy, and that is
 # the state a format migration actually fails into.
+#
+# Both tag shapes are looked up by name, every time (two HEADs), so `both` is
+# seen; either lookup going unanswered is exit 2.
 check_signature() {
-	local repo="$1" digest="$2" tags="$3" what="$4"
-	case "$(ghcr_signature_layout "$digest" "$tags")" in
+	local repo="$1" digest="$2" tok="$3" what="$4" layout
+	lookups_total=$((lookups_total + 2))
+	if ! layout="$(ghcr_signature_layout_direct "$repo" "$digest" "$tok")"; then
+		echo "::error::inconclusive: could not look up the signature tags of ghcr.io/${repo}@${digest}" >&2
+		exit 2
+	fi
+	case "$layout" in
 	legacy)
 		present "ghcr.io/${repo}:$(ghcr_signature_tag_legacy "$digest") (signature of ${what} ${digest}, cosign 2 layout)"
 		;;
@@ -271,16 +370,20 @@ check_signature() {
 	both)
 		absent "ghcr.io/${repo} signature for ${what} ${digest} — BOTH layouts present; a double-write or half-finished migration, not a healthy signature"
 		;;
+	none)
+		absent "ghcr.io/${repo} signature for ${what} ${digest} (neither ${digest//:/-}.sig nor ${digest//:/-}; both looked up directly, both 404; the image in this repository answered 200)"
+		;;
 	*)
-		absent "ghcr.io/${repo} signature for ${what} ${digest} (neither ${digest//:/-}.sig nor ${digest//:/-})"
+		echo "::error::internal: unexpected signature layout '${layout}' for ghcr.io/${repo}@${digest}" >&2
+		exit 2
 		;;
 	esac
 }
 
 verify_commit() {
 	local ref="$1"
-	local sha chart chart_repo chart_tag repo tok tags tag digest children child
-	local before="$checks_total" expected_children=0
+	local sha chart chart_repo chart_tag repo tok tag digest children child
+	local before="$checks_total" lookups_before="$lookups_total" expected_children=0
 
 	if ! sha="$(git rev-parse --verify --quiet "${ref}^{commit}")"; then
 		echo "::error::not a commit in this repository: ${ref}" >&2
@@ -297,41 +400,28 @@ verify_commit() {
 			echo "::error::could not obtain a pull token for ${chart_repo}" >&2
 			exit 2
 		fi
-		if ! tags="$(ghcr_all_tags "$chart_repo" "$tok")"; then
-			echo "::error::could not list tags for ${chart_repo}" >&2
-			exit 2
-		fi
-		if printf '%s\n' "$tags" | grep -qxF -- "$chart_tag"; then
+		if lookup "$chart_repo" "$chart_tag" "$tok"; then
 			present "ghcr.io/${chart_repo}:${chart_tag}"
 		else
-			absent "ghcr.io/${chart_repo}:${chart_tag} (scanned $(printf '%s\n' "$tags" | grep -c . || true) tags)"
+			absent_direct "$chart_repo" "$chart_tag" "$tok"
 		fi
 	done
 
 	# 2 + 3. every published image, and its signature.
+	tag="$(image_commit_tag "$sha")"
 	for repo in "${GHCR_IMAGE_REPOS[@]}"; do
 		# A repository we cannot read is an inconclusive check, not a passing one.
 		if ! tok="$(ghcr_registry_token "$repo")" || [ -z "$tok" ]; then
 			echo "::error::could not obtain a pull token for ${repo}" >&2
 			exit 2
 		fi
-		if ! tags="$(ghcr_all_tags "$repo" "$tok")"; then
-			echo "::error::could not list tags for ${repo}" >&2
-			exit 2
-		fi
 
-		# The image tag is `<stamped tag>-<full sha>` (`dev-<sha>` today). Match on
-		# the sha suffix so a change to the stamped prefix does not turn this into a
-		# check that can never pass.
-		tag="$(printf '%s\n' "$tags" | grep -E -- "-${sha}\$" | head -1 || true)"
-		if [ -z "$tag" ]; then
-			# Report the scan size: "not found in 732" is a real absence, "not found
-			# in 100" is a pagination regression, and the two must not look alike.
-			absent "ghcr.io/${repo}:*-${sha} (scanned $(printf '%s\n' "$tags" | grep -c . || true) tags)"
+		if ! lookup "$repo" "$tag" "$tok"; then
+			absent_direct "$repo" "$tag" "$tok"
 			# No image means no digest to look a signature up by. Count the signature
 			# as missing too rather than skipping it — a skipped check is a check that
 			# cannot fail.
-			absent "ghcr.io/${repo} signature for *-${sha} (no image to sign)"
+			absent "ghcr.io/${repo} signature for ${tag} (no image to sign)"
 			continue
 		fi
 		present "ghcr.io/${repo}:${tag}"
@@ -341,7 +431,7 @@ verify_commit() {
 			echo "::error::could not resolve a digest for ghcr.io/${repo}:${tag}" >&2
 			exit 2
 		fi
-		check_signature "$repo" "$digest" "$tags" "index"
+		check_signature "$repo" "$digest" "$tok" "index"
 
 		# 4. every CHILD manifest's signature (#925). `cosign sign --recursive`
 		# signs the per-architecture manifests too, and those are what a node
@@ -354,7 +444,7 @@ verify_commit() {
 		fi
 		while read -r child; do
 			expected_children=$((expected_children + 1))
-			check_signature "$repo" "$child" "$tags" "child"
+			check_signature "$repo" "$child" "$tok" "child"
 		done <<<"$children"
 
 		# Hand the exact index reference to the cosign pass, when asked for
@@ -427,6 +517,10 @@ verify_commit() {
 		echo "::error::internal: ran ${did} checks for ${sha}, expected ${expected}" >&2
 		exit 2
 	fi
+	# What was actually asked of the registry: one HEAD per chart and image tag,
+	# two per signature (both layouts). No tag list was read, so there is no
+	# "scanned N tags" to report — a lookup count of 0 would be the vacuous run.
+	say "  checked $((lookups_total - lookups_before)) expected tags directly (HEAD /v2/<repo>/manifests/<tag>; no tag listing)"
 }
 
 for ref in "$@"; do

@@ -44,10 +44,12 @@
 #      `ok` line. A partial red would mean part of the gate can no longer fail.
 #   3. EVERY MISSING line names the control sha. A MISSING line about some other
 #      commit is a red for the wrong reason.
-#   4. every tag-list scan the verifier reports read at least one tag. "Not
-#      found in 0 tags" is an unreadable or empty listing — exactly the failure
-#      that makes a real gate report a present artifact as missing, or (with a
-#      listing bug the other way) a missing one as present.
+#   4. every chart and image absence carries a witness: `witness <tag>: 200`,
+#      a tag the same repository lists, looked up the same way, answering
+#      present (#985 — the verifier looks tags up by name and no longer scans
+#      a listing). A 404 with no witness could be an unreadable repository or
+#      a lookup that 404s everything — exactly the failure that makes a real
+#      gate report a present artifact as missing.
 #   5. the summary line reads `FAIL: <expected> of <expected> artifact(s)
 #      missing across 1 commit(s)`.
 #
@@ -100,7 +102,7 @@ expected=$((${#GHCR_CHARTS[@]} + 2 * ${#GHCR_IMAGE_REPOS[@]}))
 
 echo "expected-red control: commit ${control}"
 echo "  built from ${base_sha} (${base}); never pushed, so nothing can have published it"
-echo "  expecting: exit 1, ${expected} MISSING lines naming ${control}, every tag scan non-empty"
+echo "  expecting: exit 1, ${expected} MISSING lines naming ${control}, every absence witnessed"
 
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
@@ -144,15 +146,13 @@ if grep -qE '^[[:space:]]*ok[[:space:]]' "$log"; then
 	fail "the verifier reported an artifact PRESENT for a commit that was never published:"
 	grep -E '^[[:space:]]*ok[[:space:]]' "$log" | head -3 >&2
 fi
-# One scan per chart and per image repository (a signature line reuses its
-# image's scan). Fewer means some absence was never backed by a listing.
-scans="$(printf '%s\n' "$missing_lines" | grep -oE 'scanned [0-9]+ tags' || true)"
-n_scans="$(printf '%s\n' "$scans" | grep -c . || true)"
-want_scans=$((${#GHCR_CHARTS[@]} + ${#GHCR_IMAGE_REPOS[@]}))
-if [ "$n_scans" -ne "$want_scans" ]; then
-	fail "${n_scans} tag-list scan(s) reported, expected ${want_scans} — cannot tell a real absence from an unread registry"
-elif printf '%s\n' "$scans" | grep -qx 'scanned 0 tags'; then
-	fail "a tag list came back EMPTY — the absence is an unread registry, not a missing artifact"
+# One witness per chart and per image absence (a "no image to sign" line rides
+# on its image's). Fewer means some absence was never shown to be one: the
+# lookup behind it was never seen to answer "present" in that repository.
+n_witness="$(printf '%s\n' "$missing_lines" | grep -cE '; witness [^ ]+: 200\)$' || true)"
+want_witness=$((${#GHCR_CHARTS[@]} + ${#GHCR_IMAGE_REPOS[@]}))
+if [ "$n_witness" -ne "$want_witness" ]; then
+	fail "${n_witness} witnessed absence(s), expected ${want_witness} — cannot tell a real absence from an unread registry or a lookup that 404s everything"
 fi
 if ! grep -qxF "FAIL: ${expected} of ${expected} artifact(s) missing across 1 commit(s)" "$log"; then
 	fail "no 'FAIL: ${expected} of ${expected} artifact(s) missing across 1 commit(s)' summary line"

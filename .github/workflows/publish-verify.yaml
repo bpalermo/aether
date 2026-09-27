@@ -82,7 +82,9 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Direct manifest lookups (#985) cost ~23 s per commit against ~13 s for
+    # the old tag listing; a busy day's --recent sweep (14 heads) took 5m23s.
+    timeout-minutes: 30
     permissions:
       contents: read
       # For the rolling failure issue below.
@@ -115,8 +117,9 @@ jobs:
       # built here with `git commit-tree` on origin/main's tree, never pushed,
       # so it exists on every run and can never age out — and asserts it goes
       # red for the right reason: exit exactly 1, one MISSING line per
-      # coordinate (20) all naming that sha, no `ok` line, and every registry
-      # tag listing non-empty. A green for that commit, or a red for another
+      # coordinate (20) all naming that sha, no `ok` line, and every chart and
+      # image absence backed by a witness (a tag the same repository lists,
+      # answering 200 to the same lookup — #985). A green for that commit, or a red for another
       # reason, fails the run; exit 2 (GHCR unreadable) is inconclusive and
       # fails it too. See scripts/publish-verify-control.sh; its offline check
       # runs in ci.yaml.
