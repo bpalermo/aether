@@ -56,6 +56,12 @@ func (s *Supervisor) initStartEpoch(ctx context.Context) {
 	for {
 		epoch, hb, ok := s.readState()
 		if !ok || time.Since(hb) >= predecessorStale {
+			// A retry that falls back to a fresh start has no successor epoch
+			// to re-anchor; drop any earlier attempt's so a later in-pod epoch
+			// that happens to reuse the number is never gated.
+			s.mu.Lock()
+			s.gatedEpoch = -1
+			s.mu.Unlock()
 			s.log.InfoContext(ctx, "no live predecessor; starting fresh at epoch 0", "statePresent", ok)
 			s.metrics.predecessorFound(false)
 			return
@@ -70,10 +76,13 @@ func (s *Supervisor) initStartEpoch(ctx context.Context) {
 			s.mu.Lock()
 			s.nextEpoch = epoch + 1
 			s.readyGate = s.successorReadyGate()
+			s.gatedEpoch = epoch + 1
+			gate := s.readyGate
 			s.mu.Unlock()
 			s.metrics.predecessorFound(true)
 			s.log.InfoContext(ctx, "live predecessor confirmed; starting cross-pod hot restart",
-				"predecessorEpoch", epoch, "startEpoch", epoch+1, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String())
+				"predecessorEpoch", epoch, "startEpoch", epoch+1, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String(),
+				"readyGateIn", gate.Sub(s.now()).Round(time.Millisecond).String(), "readyGateAnchor", "fork")
 			return
 		}
 		s.log.DebugContext(ctx, "fresh heartbeat but admin not confirming predecessor; re-probing",
@@ -188,7 +197,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			if reachable {
 				unreachableSince = time.Time{}
 			} else if unreachableSince.IsZero() {
-				unreachableSince = time.Now()
+				unreachableSince = s.now()
 			}
 			if live {
 				everLive = true
@@ -208,7 +217,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			// coincided with pod churn (e2e 2026-06-11). The wedge watchdogs below
 			// still run: a successor stuck pre-LIVE or an unreachable admin ends
 			// the hold via container restart, and the child exiting ends it here.
-			ready, holding = s.onNotLiveEpoch(ctx, epoch, ready, reachable, holding)
+			ready, holding = s.onNotLiveEpoch(ctx, epoch, ready, reachable, holding, unreachableSince)
 			if s.checkWedgeWatchdogs(ctx, epoch, everLive, reachable, unreachableSince) {
 				return
 			}
@@ -220,17 +229,30 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 // records handoff completion, publishes the heartbeat, and gates readiness.
 // Returns the updated ready state.
 func (s *Supervisor) onLiveEpoch(ctx context.Context, epoch int, ready bool) bool {
+	now := s.now()
 	if launched, wasLive := s.epochProgress(); !wasLive {
 		// First LIVE confirmation for this epoch: the handoff (or
 		// initial start, epoch 0) completed.
-		s.metrics.handoffCompleted(time.Since(launched).Seconds())
+		s.metrics.handoffCompleted(now.Sub(launched).Seconds())
+		// Envoy's parent-shutdown timer starts here (startWorkers), not at
+		// the fork: re-anchor a cross-pod successor's gate on this moment so
+		// the pod cannot go Ready while the predecessor is still serving
+		// (issue #991).
+		if gate, anchor, changed := s.liveAnchoredReadyGate(epoch, now); changed && !ready {
+			s.log.InfoContext(ctx, "successor ready gate anchored",
+				"epoch", epoch, "anchor", anchor,
+				"sinceFork", now.Sub(launched).Round(time.Millisecond).String(),
+				"readyGateIn", gate.Sub(now).Round(time.Millisecond).String(),
+				"readyGateAfterFork", gate.Sub(launched).Round(time.Millisecond).String(),
+				"parentShutdownTime", s.cfg.ParentShutdownTime.String())
+		}
 	}
 	s.markEpochLive()
 	s.writeState(epoch) // LIVE-gated heartbeat
 	// Hold readiness until the cross-pod handoff is fully complete (the
 	// predecessor has been terminated by this Envoy's parent-shutdown), so
 	// the DaemonSet doesn't delete the old pod while we still need it.
-	if !ready && !time.Now().Before(s.readyGateTime()) {
+	if !ready && !now.Before(s.readyGateTime()) {
 		s.setReady()
 		ready = true
 		s.metrics.readyTransition(true)
@@ -241,16 +263,38 @@ func (s *Supervisor) onLiveEpoch(ctx context.Context, epoch int, ready bool) boo
 
 // onNotLiveEpoch handles a tick where admin does not report LIVE at the current
 // epoch: manages the readiness-hold logic for the mid-handoff parent state.
-// Returns the updated ready and holding states.
-func (s *Supervisor) onNotLiveEpoch(ctx context.Context, epoch int, ready, reachable, holding bool) (bool, bool) {
+// unreachableSince is when the current streak of unreachable admin probes began
+// (zero while reachable). Returns the updated ready and holding states.
+func (s *Supervisor) onNotLiveEpoch(ctx context.Context, epoch int, ready, reachable, holding bool, unreachableSince time.Time) (bool, bool) {
 	// anyChildTracked, not childTracked(epoch): during a bind-collision retry
 	// currentEpoch() names a rewound epoch that never had a child while an
 	// earlier one is still tracked and still serving the node. See
 	// anyChildTracked.
-	hold := ready && reachable && s.anyChildTracked()
+	//
+	// An unreachable admin does not end the hold on its own (issue #991).
+	// Mid-handoff the shared admin port belongs to the SUCCESSOR, whose main
+	// thread is busy applying its first LDS/SDS batch before startWorkers; a
+	// single /server_info over readyPollInterval then reads as unreachable, and
+	// dropping the marker on it let the DaemonSet delete this pod 5-6s later,
+	// before the successor had taken over. The hold is carried through the
+	// unreachable streak for exactly the admin watchdog's bound
+	// (adminUnresponsiveDeadline): a genuinely wedged admin still ends it, at
+	// the same moment checkWedgeWatchdogs restarts the container.
+	adminAnswering := reachable ||
+		(!unreachableSince.IsZero() && s.now().Sub(unreachableSince) < s.adminUnresponsiveDeadline())
+	hold := ready && adminAnswering && s.anyChildTracked()
 	if hold && !holding {
 		holding = true
 		s.log.InfoContext(ctx, "holding readiness: serving as hot-restart parent mid-handoff", "epoch", epoch)
+	}
+	switch {
+	case hold && !reachable && !s.holdingUnreachable:
+		s.holdingUnreachable = true
+		s.log.InfoContext(ctx, "holding readiness through unreachable admin: successor likely initializing",
+			"epoch", epoch, "unreachableFor", s.now().Sub(unreachableSince).Round(time.Millisecond).String(),
+			"holdBound", s.adminUnresponsiveDeadline().String())
+	case reachable || !hold:
+		s.holdingUnreachable = false
 	}
 	if ready && !hold {
 		s.clearReady()
@@ -267,7 +311,7 @@ func (s *Supervisor) onNotLiveEpoch(ctx context.Context, epoch int, ready, reach
 // (watchdog fired).
 func (s *Supervisor) checkWedgeWatchdogs(ctx context.Context, epoch int, everLive, reachable bool, unreachableSince time.Time) bool {
 	launched, wasLive := s.epochProgress()
-	if epoch > 0 && !wasLive && s.childTracked(epoch) && time.Since(launched) > s.handoffDeadline() {
+	if epoch > 0 && !wasLive && s.childTracked(epoch) && s.now().Sub(launched) > s.handoffDeadline() {
 		s.metrics.wedged(wedgeHandoffTimeout)
 		s.fireWatchdog(fmt.Errorf(
 			"hot-restart handoff watchdog: epoch %d not LIVE within %s of launch (parent likely died mid-handoff)",
@@ -275,7 +319,7 @@ func (s *Supervisor) checkWedgeWatchdogs(ctx context.Context, epoch int, everLiv
 		))
 		return true
 	}
-	if everLive && !reachable && s.childTracked(epoch) && time.Since(unreachableSince) > s.adminUnresponsiveDeadline() {
+	if everLive && !reachable && s.childTracked(epoch) && s.now().Sub(unreachableSince) > s.adminUnresponsiveDeadline() {
 		s.metrics.wedged(wedgeAdminUnresponsive)
 		s.fireWatchdog(fmt.Errorf(
 			"admin watchdog: envoy admin %s unresponsive for %s with child alive at epoch %d",
