@@ -404,6 +404,28 @@ issue. If you see that issue: re-run the cancelled publish run — `gh run rerun
 need, deploy a later commit that did publish. Never push images or charts by
 hand: the release workflow is the only publisher.
 
+**Every run proves the gate can fail first (#930).** Before the gate step,
+`publish-verify` runs an *expected-red control*: `scripts/publish-verify-control.sh`
+builds a commit with `git commit-tree` on `origin/main`'s tree (fixed identity
+and dates, so the same base always gives the same sha). No ref points at that
+commit and it is never pushed, so no publish can ever have produced it. The
+control then asserts that the verifier goes red for the right reason: exit
+exactly 1, 20 `MISSING` lines that all name that sha, no `ok` line, and every
+registry tag listing non-empty. A constructed commit, rather than a pinned one
+like `ef44437` or `1e31e3a`, because a pinned red input ages out of the window
+it is looked up through. That is how the gate lost its only demonstrated red
+state (#929). The two steps read **Expected-red control** and **Gate** in the
+log. A control's `MISSING` lines are expected and never reach `verify.log` or
+the job summary. If the control fails, the gate still runs, and the run files
+(or comments on) its own rolling issue, **publish-verify: the expected-red
+control did not go red**. Until that issue is fixed, a green gate proves
+nothing. Exit 2 (GHCR unreadable) is inconclusive, and it fails the run too.
+Reproduce with `scripts/publish-verify-control.sh [<base>]`. The offline check,
+`scripts/check-publish-verify-control.sh`, runs in `ci`'s `shell` job. It drives
+the real verifier against a fake registry and shows the control rejects a
+verifier that stopped counting `MISSING`, an empty tag listing, a `MISSING` line
+naming another commit, and a stray `ok`.
+
 ### Verifying image signatures (cosign v3, #925)
 
 `publish.yaml` signs every published image keyless with `cosign sign
