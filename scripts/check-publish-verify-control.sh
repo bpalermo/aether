@@ -60,22 +60,35 @@ cat >>"$reg/registry-lib.sh" <<'FAKE'
 # FAKE_EMPTY=1: every repository lists nothing (unreadable).
 # FAKE_BROKEN=1: the lookup answers 404 for EVERY tag, even listed ones — the
 # shape of a manifest HEAD whose Accept the registry does not like.
+# Every lookup must present the token the fake issued, `fake-token`; any other
+# value is a 401, which the library reports as inconclusive (#999: a fake that
+# took any token let a tag list passed as the token through green).
 fake_other=0123456789abcdef0123456789abcdef01234567
 registry_registry_token() { printf 'fake-token\n'; }
+fake_authorized() {
+	[ "$1" = fake-token ] && return 0
+	echo "fake registry: 401 for bearer '${1:0:40}'" >&2
+	return 2
+}
 registry_all_tags() {
+	fake_authorized "$2" || return 2
 	[ "${FAKE_EMPTY:-0}" = 1 ] && return 0
 	case "$1" in
 	*/charts/*) printf '0.1.0-%s\n' "$fake_other" ;;
 	*) printf 'dev-%s\nsha256-%064d.sig\n' "$fake_other" 0 ;;
 	esac
 }
-registry_any_tag() { registry_all_tags "$1" | head -1; }
+registry_any_tag() { registry_all_tags "$1" "$2" | head -1; }
 registry_tag_exists() {
+	fake_authorized "$3" || return 2
 	[ "${FAKE_BROKEN:-0}" = 1 ] && return 1
-	registry_all_tags "$1" | grep -qxF -- "$2"
+	registry_all_tags "$1" "$3" | grep -qxF -- "$2"
 }
-registry_manifest_digest() { printf 'sha256:%064d\n' 0; }
-registry_referrers() { return 1; }
+registry_manifest_digest() { fake_authorized "$3" && printf 'sha256:%064d\n' 0; }
+registry_referrers() {
+	fake_authorized "$3" || return 2
+	return 1
+}
 FAKE
 
 # The vacuous gate: the same verifier with absent() no longer counting. It still

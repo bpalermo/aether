@@ -435,7 +435,9 @@ Reproduce with `scripts/publish-verify-control.sh [<base>]`. The offline check,
 `scripts/check-publish-verify-control.sh`, runs in `ci`'s `shell` job. It drives
 the real verifier against a fake registry and shows the control rejects a
 verifier that stopped counting `MISSING`, an absence with no witness, a `MISSING` line
-naming another commit, and a stray `ok`.
+naming another commit, and a stray `ok`. Its fake registry, like `scripts/check-registry-lookup.sh`'s, accepts only the
+bearer token it issued and answers any other with a 401, so a verifier that
+sends the wrong value as the token goes red offline (#999).
 
 ### Where images and charts are published: one setting (proposal 040)
 
