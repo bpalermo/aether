@@ -268,9 +268,15 @@ n_images=${#GHCR_IMAGE_REPOS[@]}
 want_checks=$((n_charts + n_images + 3 * n_images))
 want_lookups=$((n_charts + n_images + 2 * 3 * n_images))
 
+# PROXY_PIN_CHECK=0: these cases exercise the per-commit lookup path against a
+# fake registry that knows nothing about the aether-proxy digest HEAD's chart
+# pins. Once that pin is a post-cut-over signed one (#988), the #984 pin step
+# would look it up here, find no signature, and add MISSING lines to cases that
+# count exactly the per-commit coordinates. The pin step has its own harness
+# (scripts/check-proxy-pin.sh); the control excludes it the same way (#989).
 verify() {
 	local rc=0
-	env -u GITHUB_STEP_SUMMARY "$lib/verify-published-artifacts.sh" HEAD >"$tmp/out" 2>&1 || rc=$?
+	env -u GITHUB_STEP_SUMMARY PROXY_PIN_CHECK=0 "$lib/verify-published-artifacts.sh" HEAD >"$tmp/out" 2>&1 || rc=$?
 	echo "$rc"
 }
 
