@@ -1,0 +1,241 @@
+diff --git a/envoy/network/connection_handler.h b/envoy/network/connection_handler.h
+index a0618d4f2540b..aa891788e5293 100644
+--- a/envoy/network/connection_handler.h
++++ b/envoy/network/connection_handler.h
+@@ -26,7 +26,16 @@ namespace Network {
+ class NonDispatchedUdpPacketHandler {
+ public:
+   virtual ~NonDispatchedUdpPacketHandler() = default;
+-  virtual void handle(uint32_t worker_index, const Network::UdpRecvData& packet) PURE;
++
++  /**
++   * @param worker_index the worker the packet was received on.
++   * @param listener_address the address the receiving listener is bound to, including its network
++   *        namespace if any. This may differ from the packet's local address, e.g. on transparent
++   *        sockets, and identifies the listener the packet belongs to.
++   * @param packet the received packet.
++   */
++  virtual void handle(uint32_t worker_index, const Network::Address::Instance& listener_address,
++                      const Network::UdpRecvData& packet) PURE;
+ };
+ 
+ // Additional options for ConnectionHandler::ActiveListener::shutdownListener.
+diff --git a/source/common/quic/active_quic_listener.cc b/source/common/quic/active_quic_listener.cc
+index 7741da2debbe8..f9ac52ae072a1 100644
+--- a/source/common/quic/active_quic_listener.cc
++++ b/source/common/quic/active_quic_listener.cc
+@@ -198,7 +198,8 @@ void ActiveQuicListener::onDataWorker(Network::UdpRecvData&& data) {
+                                   getQuicEcnCodepointFromTosByte(data.tos_));
+   if (!quic_dispatcher_->processPacket(self_address, peer_address, packet)) {
+     if (non_dispatched_udp_packet_handler_.has_value()) {
+-      non_dispatched_udp_packet_handler_->handle(worker_index_, std::move(data));
++      non_dispatched_udp_packet_handler_->handle(
++          worker_index_, *listen_socket_.connectionInfoProvider().localAddress(), std::move(data));
+     }
+   }
+ 
+diff --git a/source/server/active_udp_listener.cc b/source/server/active_udp_listener.cc
+index 0188e283d01a9..6612ca67a17f5 100644
+--- a/source/server/active_udp_listener.cc
++++ b/source/server/active_udp_listener.cc
+@@ -125,7 +125,8 @@ void ActiveRawUdpListener::onDataWorker(Network::UdpRecvData&& data) {
+   if (non_dispatched_udp_packet_handler_.has_value() &&
+       !active_sessions_.contains(data.addresses_)) {
+     // Draining for hot restart: this session isn't ours, hand it to the child instance.
+-    non_dispatched_udp_packet_handler_->handle(worker_index_, std::move(data));
++    non_dispatched_udp_packet_handler_->handle(
++        worker_index_, *listen_socket_.connectionInfoProvider().localAddress(), std::move(data));
+     return;
+   }
+ 
+diff --git a/source/server/hot_restart.proto b/source/server/hot_restart.proto
+index ebff77250b212..9b699eb784f09 100644
+--- a/source/server/hot_restart.proto
++++ b/source/server/hot_restart.proto
+@@ -26,6 +26,11 @@ message HotRestartMessage {
+       uint64 receive_time_epoch_microseconds = 3;
+       bytes payload = 4;
+       uint32 worker_index = 5;
++      // The address the forwarding listener is bound to, which may differ from local_addr for
++      // transparent sockets, and its network namespace if it has one. The child resolves the
++      // target listener from these when present, and from local_addr otherwise.
++      string listener_addr = 6;
++      string network_namespace = 7;
+     }
+     message TestConnection {
+     }
+diff --git a/source/server/hot_restarting_child.cc b/source/server/hot_restarting_child.cc
+index 23c0e1244178d..095481f879974 100644
+--- a/source/server/hot_restarting_child.cc
++++ b/source/server/hot_restarting_child.cc
+@@ -10,18 +10,27 @@ namespace Server {
+ 
+ using HotRestartMessage = envoy::HotRestartMessage;
+ 
++std::string HotRestartingChild::UdpForwardingContext::key(absl::string_view network_namespace,
++                                                          absl::string_view address) {
++  return absl::StrCat(network_namespace, "|", address);
++}
++
+ void HotRestartingChild::UdpForwardingContext::registerListener(
+     Network::Address::InstanceConstSharedPtr address,
+     std::shared_ptr<Network::UdpListenerConfig> listener_config) {
+   const bool inserted =
+-      listener_map_.try_emplace(address->asString(), ForwardEntry{address, listener_config}).second;
++      listener_map_
++          .try_emplace(key(address->networkNamespace().value_or(""), address->asString()),
++                       ForwardEntry{address, listener_config})
++          .second;
+   ASSERT(inserted, "Two udp listeners on the same address shouldn't be possible");
+ }
+ 
+ std::optional<HotRestartingChild::UdpForwardingContext::ForwardEntry>
+ HotRestartingChild::UdpForwardingContext::getListenerForDestination(
+     const Network::Address::Instance& address) {
+-  auto it = listener_map_.find(address.asString());
++  const std::string ns = address.networkNamespace().value_or("");
++  auto it = listener_map_.find(key(ns, address.asString()));
+   if (it == listener_map_.end()) {
+     // If no listener on the specific address was found, check for a default route.
+     // If the address is IPv6, check default route IPv6 only, otherwise check default
+@@ -29,11 +38,11 @@ HotRestartingChild::UdpForwardingContext::getListenerForDestination(
+     // packet.
+     uint32_t port = address.ip()->port();
+     if (address.ip()->version() == Network::Address::IpVersion::v6) {
+-      it = listener_map_.find(absl::StrCat("[::]:", port));
++      it = listener_map_.find(key(ns, absl::StrCat("[::]:", port)));
+     } else {
+-      it = listener_map_.find(absl::StrCat("0.0.0.0:", port));
++      it = listener_map_.find(key(ns, absl::StrCat("0.0.0.0:", port)));
+       if (it == listener_map_.end()) {
+-        it = listener_map_.find(absl::StrCat("[::]:", port));
++        it = listener_map_.find(key(ns, absl::StrCat("[::]:", port)));
+         if (it != listener_map_.end() && it->second.first->ip()->ipv6()->v6only()) {
+           // If there is a default IPv6 route but it's set v6only, don't use it.
+           it = listener_map_.end();
+@@ -100,9 +109,10 @@ void HotRestartingChild::initialize(Event::Dispatcher& dispatcher) {
+ 
+ void HotRestartingChild::shutdown() { socket_event_udp_forwarding_.reset(); }
+ 
+-void HotRestartingChild::onForwardedUdpPacket(uint32_t worker_index, Network::UdpRecvData&& data) {
+-  auto addr_and_listener =
+-      udp_forwarding_context_.getListenerForDestination(*data.addresses_.local_);
++void HotRestartingChild::onForwardedUdpPacket(uint32_t worker_index,
++                                              const Network::Address::Instance& listener_address,
++                                              Network::UdpRecvData&& data) {
++  auto addr_and_listener = udp_forwarding_context_.getListenerForDestination(listener_address);
+   if (addr_and_listener.has_value()) {
+     auto [addr, listener_config] = *addr_and_listener;
+     // We send to the worker index from the parent instance.
+@@ -327,7 +337,17 @@ absl::Status HotRestartingChild::onSocketEventUdpForwarding() {
+       packet.receive_time_ =
+           MonotonicTime(std::chrono::microseconds{req.receive_time_epoch_microseconds()});
+       packet.buffer_ = std::make_unique<Buffer::OwnedImpl>(req.payload());
+-      onForwardedUdpPacket(req.worker_index(), std::move(packet));
++      // Parents that predate the listener address fields only send the packet's destination.
++      Network::Address::InstanceConstSharedPtr listener_address = packet.addresses_.local_;
++      if (!req.listener_addr().empty()) {
++        auto listener_or_error = Network::Utility::resolveUrl(req.listener_addr());
++        RETURN_IF_NOT_OK(listener_or_error.status());
++        listener_address = *listener_or_error;
++        if (!req.network_namespace().empty() && listener_address->ip() != nullptr) {
++          listener_address = listener_address->withNetworkNamespace(req.network_namespace());
++        }
++      }
++      onForwardedUdpPacket(req.worker_index(), *listener_address, std::move(packet));
+       break;
+     }
+     default: {
+diff --git a/source/server/hot_restarting_child.h b/source/server/hot_restarting_child.h
+index a47ea7a78c73b..e5d1b8df20e7e 100644
+--- a/source/server/hot_restarting_child.h
++++ b/source/server/hot_restarting_child.h
+@@ -24,9 +24,10 @@ class HotRestartingChild : public HotRestartingBase,
+     using ForwardEntry = std::pair<Network::Address::InstanceConstSharedPtr,
+                                    std::shared_ptr<Network::UdpListenerConfig>>;
+ 
+-    // Returns the address and UdpListenerConfig associated with the given address.
+-    // The addresses are not necessarily identical, as e.g. the listener might be listening on
+-    // 0.0.0.0.
++    // Returns the address and UdpListenerConfig associated with the given address, within the
++    // address's network namespace (listeners without one are only matched by addresses without
++    // one). The addresses are not necessarily identical, as e.g. the listener might be listening
++    // on 0.0.0.0.
+     // This is called from the thread to which the hot restart Event::Dispatcher
+     // dispatches, which is expected to be the same main thread as registerListener
+     // is called from.
+@@ -40,7 +41,11 @@ class HotRestartingChild : public HotRestartingBase,
+                           std::shared_ptr<Network::UdpListenerConfig> listener_config);
+ 
+   private:
+-    // Map keyed on address as a string, because Network::Address::Instance isn't hashable.
++    // Builds the map key for an address string within a network namespace.
++    static std::string key(absl::string_view network_namespace, absl::string_view address);
++
++    // Map keyed on network namespace and address as a string, because
++    // Network::Address::Instance isn't hashable.
+     absl::flat_hash_map<std::string, ForwardEntry> listener_map_;
+   };
+ 
+@@ -69,7 +74,11 @@ class HotRestartingChild : public HotRestartingBase,
+ 
+ protected:
+   absl::Status onSocketEventUdpForwarding();
+-  void onForwardedUdpPacket(uint32_t worker_index, Network::UdpRecvData&& data);
++  // Delivers a packet forwarded by the parent to the listener bound to `listener_address`, or to
++  // the listener for the packet's destination when the parent did not send the listener address.
++  void onForwardedUdpPacket(uint32_t worker_index,
++                            const Network::Address::Instance& listener_address,
++                            Network::UdpRecvData&& data);
+   // When call to terminate parent is sent, or parent is already terminated,
+   void allDrainsImplicitlyComplete();
+ 
+diff --git a/source/server/hot_restarting_parent.cc b/source/server/hot_restarting_parent.cc
+index f57df831fbd42..095ff955aba6a 100644
+--- a/source/server/hot_restarting_parent.cc
++++ b/source/server/hot_restarting_parent.cc
+@@ -66,10 +66,15 @@ void HotRestartingParent::sendHotRestartMessage(envoy::HotRestartMessage&& msg)
+ 
+ // Network::NonDispatchedUdpPacketHandler
+ void HotRestartingParent::Internal::handle(uint32_t worker_index,
++                                           const Network::Address::Instance& listener_address,
+                                            const Network::UdpRecvData& packet) {
+   envoy::HotRestartMessage msg;
+   auto* packet_msg = msg.mutable_request()->mutable_forwarded_udp_packet();
+   packet_msg->set_local_addr(Network::Utility::urlFromDatagramAddress(*packet.addresses_.local_));
++  packet_msg->set_listener_addr(Network::Utility::urlFromDatagramAddress(listener_address));
++  if (listener_address.networkNamespace().has_value()) {
++    packet_msg->set_network_namespace(*listener_address.networkNamespace());
++  }
+   packet_msg->set_peer_addr(Network::Utility::urlFromDatagramAddress(*packet.addresses_.peer_));
+   packet_msg->set_receive_time_epoch_microseconds(
+       std::chrono::duration_cast<std::chrono::microseconds>(packet.receive_time_.time_since_epoch())
+diff --git a/source/server/hot_restarting_parent.h b/source/server/hot_restarting_parent.h
+index 4b4d96404aa1f..07da3bbeb28f9 100644
+--- a/source/server/hot_restarting_parent.h
++++ b/source/server/hot_restarting_parent.h
+@@ -44,7 +44,8 @@ class HotRestartingParent : public HotRestartingBase, public HotRestartMessageSe
+     void drainListeners();
+ 
+     // Network::NonDispatchedUdpPacketHandler
+-    void handle(uint32_t worker_index, const Network::UdpRecvData& packet) override;
++    void handle(uint32_t worker_index, const Network::Address::Instance& listener_address,
++                const Network::UdpRecvData& packet) override;
+ 
+   private:
+     Server::Instance* const server_{};
+diff --git a/test/mocks/network/mocks.h b/test/mocks/network/mocks.h
+index 66627f8f37cd6..5baa213050636 100644
+--- a/test/mocks/network/mocks.h
++++ b/test/mocks/network/mocks.h
+@@ -610,7 +610,9 @@ class MockNonDispatchedUdpPacketHandler : public NonDispatchedUdpPacketHandler {
+ public:
+   ~MockNonDispatchedUdpPacketHandler() override;
+ 
+-  MOCK_METHOD(void, handle, (uint32_t worker_index, const UdpRecvData& packet));
++  MOCK_METHOD(void, handle,
++              (uint32_t worker_index, const Address::Instance& listener_address,
++               const UdpRecvData& packet));
+ };
+ 
+ class MockIp : public Address::Ip {

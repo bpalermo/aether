@@ -1,0 +1,3 @@
+# Source patches applied to the registry-fetched @envoy module (single_version_override
+# in MODULE.bazel). Each one is an upstream PR carried until it lands in a pin.
+exports_files(glob(["*.patch"]))

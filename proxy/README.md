@@ -108,10 +108,16 @@ symbol upload is keyed by (#653).
   `bazel/build_config/extensions_build_config.bzl`. It filters Envoy's own
   default dict, so an Envoy bump picks up new upstream extensions for free.
   Today we drop `wasm` and `dynamic_module`.
-- **Source patches:** there are none, and adding one is not free any more —
-  `@envoy` is a registry module, so a patch needs a
-  `single_version_override(patches = [...])` in `MODULE.bazel`. Prefer
-  upstreaming.
+- **Source patches:** the exception, not the mechanism — `@envoy` is a registry
+  module, so a patch needs a `single_version_override(patches = [...])` in
+  `MODULE.bazel` (the `bazel/patches/` directory). Prefer upstreaming; a carried
+  patch is an upstream PR that has not reached a pin yet, and it goes away with
+  the next pin bump that contains it. Carried today: envoyproxy/envoy#47743
+  (UDP hot-restart forwarding keyed by listener address + network namespace,
+  aether#967; test cases, docs and changelog dropped, `test/mocks/network/mocks.h` kept for our test build)
+  and envoyproxy/envoy#47740 (QUIC client hostname check deferred to explicit SAN
+  matchers, aether#957; behind
+  `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`).
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)
 

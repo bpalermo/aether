@@ -138,6 +138,24 @@ func QUICServerName(port, fqdn string) string {
 	return port + "." + fqdn
 }
 
+// QUICAltStatName is the stats name of a per-source HTTP/3 twin:
+// "<h2 alt_stat_name>@<ns>/<sa>" -- the h2 cluster's stat key with the same
+// "@<source>" suffix QUICClusterName carries (aether#960). A plain clone kept
+// the h2 cluster's alt_stat_name, so every twin and the h2 cluster reported
+// into ONE cluster.<ns>/<svc>.* tree and nothing in Prometheus could tell
+// HTTP/3 from HTTP/2, or one source's twin from another's -- a wrong-arm
+// selection (#831's shape) was invisible in stats. The suffix has no dots, so
+// the cluster_name tag extraction still captures the whole key, and the h2
+// series keep their exact name: dashboards that want both match
+// `aether_cluster=~"<ns>/<svc>(@.*)?"`. An empty h2 alt_stat_name yields ""
+// (Envoy then keys stats by the twin's own, already unique, name).
+func QUICAltStatName(h2AltStatName, sourceSAKey string) string {
+	if h2AltStatName == "" || sourceSAKey == "" {
+		return ""
+	}
+	return h2AltStatName + "@" + sourceSAKey
+}
+
 // SourceSAKeyFromSpiffeID reduces a workload SPIFFE ID
 // (spiffe://<td>/ns/<ns>/sa/<sa>) to the "<ns>/<sa>" key QUICClusterName
 // takes; "" for anything else (a node identity, an edge identity, garbage).
@@ -166,6 +184,7 @@ func SourceSAKeyFromSpiffeID(spiffeID string) string {
 func QUICClusterFrom(base *clusterv3.Cluster, name, clientSpiffeID, validationContextName string, sanURIs []string, sni string) *clusterv3.Cluster {
 	cl, _ := proto.Clone(base).(*clusterv3.Cluster)
 	cl.Name = name
+	cl.AltStatName = QUICAltStatName(base.GetAltStatName(), SourceSAKeyFromSpiffeID(clientSpiffeID))
 	if cl.TypedExtensionProtocolOptions == nil {
 		cl.TypedExtensionProtocolOptions = map[string]*anypb.Any{}
 	}

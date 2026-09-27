@@ -38,6 +38,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.CNIBinTargetDir, "cni-bin-target-dir", constants.DefaultHostCNIBinDir, "Directory into which to copy the CNI binaries")
 	rootCmd.Flags().StringVar(&cfg.MountedCNINetDir, "mounted-cni-net-dir", constants.DefaultHostCNINetDir, "Directory where CNI network configuration files are located")
 	rootCmd.Flags().StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint written into the netconf so the CNI plugin pushes traces and metrics (e.g. collector:4317); empty disables plugin telemetry")
+	rootCmd.Flags().BoolVar(&cfg.PinOTLPEndpoint, "otlp-pin-endpoint", true, "Resolve --otlp-endpoint's host name here (through cluster DNS) and write the resulting address into the netconf: the plugin runs under the host's resolver, which cannot resolve cluster Service names (issue #950). A name that does not resolve is written unchanged")
 	rootCmd.Flags().BoolVar(&cfg.CaptureRedirectAllDefault, "capture-redirect-all-default", false, "Write capture_redirect_all_default into the netconf so redirect-all is the default for managed pods (proposal 022, M2-default), opt-out via capture.aether.io/redirect-all=false")
 	rootCmd.Flags().BoolVar(&cfg.MeshDNSEnabled, "mesh-dns", false, "Write mesh_dns_enabled into the netconf so the CNI plugin installs the per-pod :53 DNAT (proposal 018, mesh-global FQDN)")
 	rootCmd.Flags().StringVar(&cfg.HostIP, "host-ip", "", "Node IP written into the netconf as the mesh-DNS DNAT target (the agent's host-local resolver)")

@@ -136,7 +136,8 @@ check-build-id:
 # Did a commit on main actually publish? Read-only registry query — no
 # credentials needed for our public packages, and it cannot push anything.
 #
-#   make check-published                  # the last day of main
+#   make check-published                  # the last day of main's push heads
+#                                         # (needs `gh auth`; #975)
 #   make check-published COMMIT=<sha>     # one commit (any commit-ish; git
 #                                         # expands it to the full 40 chars)
 #

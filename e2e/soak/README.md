@@ -76,11 +76,35 @@ kubectl apply -f e2e/soak/k6-runner.yaml
 # interleave their schedules into ~62 rolls instead of 31, which does not fail
 # the run -- it silently invalidates it. Match on the ABSOLUTE path, never on
 # "soak/churn.sh": see "Stopping the churn driver" below for why.
-pgrep -f "bash $PWD/e2e/soak/churn.sh" && echo "a driver is already running" || \
-  nohup setsid bash "$PWD/e2e/soak/churn.sh" "rev192/0.92.0" >/dev/null 2>&1 &
+#
+# Pass the context EXPLICITLY (#951). churn.sh never uses the kubeconfig's
+# current-context, which `kind delete cluster` clears when it pointed at the kind
+# cluster: on 2026-09-26 that made every roll hit localhost:8080 for 58 minutes
+# while the soak looked healthy. The foreground --preflight run is the loud one:
+# it checks /readyz, that every DaemonSet/Deployment the schedule rolls (and the
+# SHRINK target) exists, and that the context may patch them, and exits non-zero
+# with the reason on stderr. The detached launch pre-flights again, but its stderr
+# goes to /dev/null -- so never skip the foreground run. A failed pre-flight
+# writes NOTHING: /tmp/soak-churn.log is neither archived nor truncated, and no T0
+# line exists.
+if pgrep -f "bash $PWD/e2e/soak/churn.sh"; then
+  echo "a driver is already running"
+elif bash "$PWD/e2e/soak/churn.sh" --context talos-main --preflight; then
+  nohup setsid bash "$PWD/e2e/soak/churn.sh" --context talos-main "rev192/0.92.0" >/dev/null 2>&1 &
+fi
+# Confirm the launch: the first line must be TODAY's start line, the second the
+# context. A stale T0 means the detached run refused to start.
+head -2 /tmp/soak-churn.log
+#
+# Fail fast: the FIRST `FAILED` roll (or a SHRINK that cannot scale) ends the
+# driver with `CHURN ABORTED ...` and exit 1, restoring the SHRINK target first.
+# It no longer carries on with holes in the schedule. An ABORTED line means stop,
+# fix, relaunch with a fresh T0 -- that run is not gradeable.
+grep -E "FAILED|CHURN ABORTED" /tmp/soak-churn.log   # expect nothing
 
-# 4. Age-matched proxy RSS baseline at T0+30m (churn.sh takes the rest itself).
-bash e2e/soak/sample-proxy-rss.sh --at-age 1800
+# 4. Age-matched proxy RSS baseline at T0+30m (churn.sh takes the rest itself,
+#    passing its own --context through).
+bash e2e/soak/sample-proxy-rss.sh --context talos-main --at-age 1800
 
 # 5. Teardown AFTER k6 has exited on its own (~T0+8h26m), never at T0+8h sharp:
 #    k6 publishes no metrics to Prometheus here, so `http_req_failed` exists only
@@ -343,9 +367,13 @@ for p in $(kubectl -n aether-test get pods -o name | grep udp-dialer); do
 done
 ```
 
-A `fail` that climbs only in the minute bracketing a `udp-echo` or proxy roll is the
-known shape (the arm is rebuilt on the next push; udp_proxy sessions on the old proxy
-drain); one that climbs in the no-roll window is a finding. Two proxy-side series say
+**A `fail` that climbs at a proxy roll is a finding since #967.** Until 2026-09-26 every
+proxy hot restart cost 2–3 cycles per node (the child's forwarding registry was
+namespace-blind, envoyproxy/envoy#47742); the fix (#47743, carried in the proxy build by
+#970) was validated on talos-main with three measured rolls — a mixed unpatched→patched
+control lost 3 per node, two patched→patched rolls lost **0**. Grade the leg at 0 per
+proxy roll; the only remaining known shape is a `udp-echo` roll (the arm is rebuilt on
+the next push). A climb in the no-roll window is a finding too. Two proxy-side series say
 which half broke:
 
 ```promql
@@ -356,11 +384,77 @@ envoy_udp_capture_udp_.*_downstream_sess_tx_datagrams
 aether_agent_l4route_udp_no_healthy_backend_total
 ```
 
+Both agent counters (`udp_no_healthy_backend_total`, `udp_unsupported_total`) are
+**per process**: every agent roll resets them and the new process re-seeds them while it
+regenerates each pod's listener (the 09-26 run: 110 → 164 → 108 across three agent
+generations). "Must stay flat" means flat *within one agent generation*; the raw sum
+across the run is not flat and that is only the reset, not a finding.
+
 And one CNI-side counter that must stay at zero for the whole run:
 `aether_cni_operations_total{operation="capture_divert",result="error"}` — a
 non-zero here is a pod that started UNCAPTURED (the table was rejected), and the
 mesh silently does nothing for it. It is a per-pod-ADD counter, so any increase
 during a roll is a real event, not a rate artefact.
+
+Before reading it, prove the CNI exports at all: `aether_cni_operations_total{operation="add"}`
+must have at least one series (every pod ADD increments it). An EMPTY result is a broken
+export, never "zero errors" — that was talos-main until #950, where the plugin (which runs
+under the host's resolver) could not resolve `otel-collector.o11y.svc.cluster.local` and no
+`aether_cni_*` series existed at all. Since #950 cni-install pins the name to the
+Service's ClusterIP; confirm on a node with
+`talosctl -n <node> read /etc/cni/net.d/10-flannel.conflist | grep otlp_endpoint` (an IP, not
+the name). If it still shows the name, the collector Service did not resolve when that
+node's agent started — roll the agent.
+
+### The QUIC leg (proposal 038 Phase 4)
+
+East-west QUIC is behind a per-destination allow-list (`agent.eastWestQuicServices`)
+**only until this leg passes once**: the decision (2026-09-26) is no opt-in for QUIC —
+a passing QUIC soak is the proof that removes the flag, after which every mesh
+destination is dialled over HTTP/3 and the leg grades every service. For that first
+proving run, list a churned target so a QUIC destination's pods and its callers'
+twins are rebuilt under load:
+
+```bash
+# prerequisite ON TALOS: the SPIRE default ClusterSPIFFEID must already issue the
+# <sa>.<ns>.aether.internal + *.<sa>.<ns>.aether.internal DNS SANs (GitOps,
+# spire-server.controllerManager.identities.clusterSPIFFEIDs.default.dnsNameTemplates)
+# and every node's envoy_sds_*_version must have moved since — otherwise every
+# HTTP/3 handshake fails closed (#957) and the leg grades the wrong thing.
+helm upgrade aether ... -f <saved values> \
+  --set 'agent.eastWestQuicServices[0]=aether-test/svc-1' \
+  --set 'agent.eastWestQuicServices[1]=aether-test/svc-2'
+```
+
+The agent logs `east-west QUIC fan-out quic_clusters=N local_identities=I
+allow_listed_services=S` on every node with a caller; `N = I × S` is the budget the
+run is paying for. Since #962 the twins have their own stats key
+`<ns>/<svc>@<ns>/<sa>`, so the leg grades from Prometheus (the admin is loopback-only
+on talos and `kubectl exec` is denied):
+
+```promql
+# HTTP/3 requests per (destination, caller ServiceAccount) -- must be non-zero for
+# every listed destination x k6 loader SA, and must RESUME after each roll of the
+# destination and of the proxy (RAW counters across a roll, never increase())
+envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-[12]@.*"}
+# the same requests must not have fallen back to h2: the h2 series of a listed
+# destination stays FLAT while its twins move (a moving h2 series = on_no_match)
+envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-[12]"}
+# every twin connection is HTTP/3 (must climb with the twins, never the h1/h2 kin)
+envoy_cluster_upstream_cx_http3_total{aether_cluster=~".*@.*"}
+# a twin that cannot connect: 0 outside roll brackets; a step in the no-roll window
+# is a finding (the #957 DNS-SAN shape, or UDP:18008 blocked between nodes)
+envoy_cluster_upstream_cx_connect_fail{aether_cluster=~".*@.*"}
+envoy_cluster_upstream_rq_5xx{aether_cluster=~".*@.*"}
+```
+
+The prober and k6 SLIs grade the run exactly as before: a QUIC destination that
+fails still counts against the same error budget, so the leg cannot pass on the
+twins' own counters alone. What the twins' counters add is attribution — whether an
+error episode on a listed destination was the QUIC path (its twin's `connect_fail`
+/ `rq_5xx` moved) or the h2 path (they did not). Not gradeable from Prometheus: the
+destination's per-pod `listener.inbound_<pod>_h3.*` counter (admin only; the kind
+harness `e2e/eastwest-quic.sh` reads it).
 
 ## Hard-won gotchas
 

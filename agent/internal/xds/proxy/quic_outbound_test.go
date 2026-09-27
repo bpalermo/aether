@@ -25,6 +25,13 @@ func TestQUICClusterName(t *testing.T) {
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", QUICClusterName("demo/echo", "aether.internal", "demo/source-a"))
 }
 
+// TestQUICAltStatName pins the per-source stats key (aether#960).
+func TestQUICAltStatName(t *testing.T) {
+	assert.Equal(t, "demo/echo@demo/source-a", QUICAltStatName("demo/echo", "demo/source-a"))
+	assert.Equal(t, "", QUICAltStatName("", "demo/source-a"), "no h2 key: Envoy keys by the twin's own name")
+	assert.Equal(t, "", QUICAltStatName("demo/echo", ""), "no source key: never fall back to the SHARED h2 key")
+}
+
 // TestQUICServerName pins the SNI/server_names contract both ends share: the
 // port as the first label of the destination's mesh authority, so the name
 // falls under the "*.<sa>.<ns>.<meshDomain>" DNS SAN SPIRE issues (aether#957).
@@ -45,6 +52,8 @@ func TestQUICClusterFrom(t *testing.T) {
 		[]string{"spiffe://aether.internal/ns/demo/sa/echo"}, QUICServerName("8080", "echo.demo.aether.internal"))
 
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", q.GetName())
+	assert.Equal(t, "demo/echo@demo/source-a", q.GetAltStatName(), "a twin must NOT share the h2 cluster's stat tree (aether#960)")
+	assert.Equal(t, "demo/echo", base.GetAltStatName(), "the base keeps its own")
 	assert.Equal(t, "demo/echo", q.GetEdsClusterConfig().GetServiceName(), "the same EDS resource as the h2 twin: no second load assignment")
 	assert.Equal(t, clusterv3.Cluster_EDS, q.GetType())
 	assert.NotNil(t, q.GetLbSubsetConfig(), "subset config cloned")
@@ -101,8 +110,8 @@ func TestApplyQUICClusterSelection(t *testing.T) {
 	}
 	require.True(t, found, "no route carries the selection plugin")
 
-	// A GAMMA split (weighted clusters) is not rewritten: GAMMA-routed
-	// destinations stay h2 in this cut.
+	// A GAMMA split (weighted clusters) is not rewritten: the matcher action
+	// names one cluster, so a per-source weighted split has no representation.
 	wvh := &routev3.VirtualHost{Name: h2, Routes: []*routev3.Route{{
 		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
 		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_WeightedClusters{
@@ -110,4 +119,24 @@ func TestApplyQUICClusterSelection(t *testing.T) {
 		}}},
 	}}}
 	assert.Equal(t, 0, ApplyQUICClusterSelection(wvh, h2, arms))
+
+	// aether#961: a GAMMA rule whose single backendRef is the parent renders as
+	// `cluster: <h2>` and IS selected -- it rides QUIC like the default route;
+	// a single-cluster rule to ANOTHER service's cluster is not this vhost's
+	// h2 cluster and is left alone.
+	other := "other.demo.aether.internal"
+	gvh := &routev3.VirtualHost{Name: h2, Routes: []*routev3.Route{
+		{
+			Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/api"}},
+			Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: h2}}},
+		},
+		{
+			Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/elsewhere"}},
+			Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: other}}},
+		},
+	}}
+	assert.Equal(t, 1, ApplyQUICClusterSelection(gvh, h2, arms), "the single-backend GAMMA rule to the parent is selected, the rule to another service is not")
+	_, _, sel := QUICSelectionArms(gvh.GetRoutes()[0])
+	assert.True(t, sel, "/api (single backendRef = parent) must carry the selection")
+	assert.Equal(t, other, gvh.GetRoutes()[1].GetRoute().GetCluster(), "/elsewhere keeps its own cluster")
 }

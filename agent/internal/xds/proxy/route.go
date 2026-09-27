@@ -869,9 +869,16 @@ const (
 // arms maps a local source SPIFFE ID to its quic: cluster name; a request
 // from an identity with no arm (or with no stamp at all -- a chain built
 // before the trust domain was known) takes on_no_match, the h2 cluster, which
-// is byte-for-byte the route it had before. Routes that already choose by
-// weight (a GAMMA split, WeightedClusters) are left alone: GAMMA-routed
-// destinations stay h2 in this cut, by design.
+// is byte-for-byte the route it had before.
+//
+// Which routes this reaches (aether#961): EVERY route on the vhost whose
+// action names the h2 cluster -- the default route, and a GAMMA (HTTPRoute)
+// rule whose single backendRef is the parent Service itself, since it renders
+// as the same `cluster:` action. Such a rule rides QUIC with the caller's own
+// twin exactly like the default route; nothing is lost. What stays h2 is a
+// WeightedClusters action (a GAMMA split, or a rule to another Service's
+// cluster): the matcher plugin's action names ONE cluster, so a per-source
+// weighted split has no representation here -- not a policy choice.
 func ApplyQUICClusterSelection(vh *routev3.VirtualHost, h2Cluster string, arms map[string]string) int {
 	if vh == nil || len(arms) == 0 {
 		return 0

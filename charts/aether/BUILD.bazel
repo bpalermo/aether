@@ -140,6 +140,46 @@ helm_template_test(
     },
 )
 
+# #950: the CNI plugin binary resolves its OTLP endpoint with the HOST's
+# resolver, which cannot resolve a cluster Service name, so cni-install pins the
+# name to its ClusterIP before writing the netconf. The chart must hand
+# cni-install the pin flag, and cniInstall.otlpEndpoint must override the
+# fleet-wide otel.endpoint for the CNI alone. The flag's existence and default
+# are pinned in //cni/internal/cmd:TestOTLPPinDefaultsOn.
+helm_template_test(
+    name = "aether_cni_otlp_pin_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "otel.endpoint=otel-collector.o11y.svc.cluster.local:4317",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "--otlp-endpoint=otel-collector.o11y.svc.cluster.local:4317",
+            "--otlp-pin-endpoint=true",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "aether_cni_otlp_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "otel.endpoint=otel-collector.o11y.svc.cluster.local:4317",
+        "--set",
+        "cniInstall.otlpEndpoint=10.96.0.42:4317",
+        "--set",
+        "cniInstall.pinOTLPEndpoint=false",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "--otlp-endpoint=10.96.0.42:4317",
+            "--otlp-pin-endpoint=false",
+        ],
+    },
+)
+
 helm_template_fail_test(
     name = "aether_authz_failure_mode_invalid_test",
     chart = ":aether",
