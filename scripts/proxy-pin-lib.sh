@@ -179,11 +179,15 @@ proxy_pin_rewrite() {
 # newest commit reachable from <sha> that changed the digest's occurrence count
 # AND leaves it present (an ADD, not a removal). Prints nothing when <sha> does
 # not pin <digest> at all.
+# `grep -c`, never `grep -q`, after a pipe: under a caller's pipefail (the
+# verifier sets it) `grep -q` exits on the first match, the writer can take a
+# SIGPIPE, and the pipeline reports a HIT as a miss -- seen as "no commit
+# introduced <digest>" on a merge-commit HEAD.
 proxy_pin_introduced_by() {
 	local sha="$1" digest="$2" c
-	git show "${sha}:${PROXY_VALUES_PATH}" 2>/dev/null | grep -qF -- "$digest" || return 0
+	git show "${sha}:${PROXY_VALUES_PATH}" 2>/dev/null | grep -cF -- "$digest" >/dev/null || return 0
 	while read -r c; do
-		if git show "${c}:${PROXY_VALUES_PATH}" 2>/dev/null | grep -qF -- "$digest"; then
+		if git show "${c}:${PROXY_VALUES_PATH}" 2>/dev/null | grep -cF -- "$digest" >/dev/null; then
 			printf '%s\n' "$c"
 			return 0
 		fi
