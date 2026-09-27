@@ -306,7 +306,10 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
   the prober delta in each rotation minute must be zero. `rotated` also counts the
   fresh SVIDs a restarted SPIRE agent mints (a whole node's pods at once), so a churn
   step that deletes a `spire-agent` pod is NOT a rotation cycle — exclude that node's
-  restart minute when counting cycles.
+  restart minute when counting cycles. `aether_spire_update="unchanged"` is SPIRE
+  re-sending the same bytes (fleet-wide at a JWT-key prepare), for `pod` and — since
+  #993 — for `node` too; before #993 `node/unchanged` could not move, so a zero there
+  from an older build is no evidence of anything.
 
 ### The Phase 4 evidence clock (proposal 037)
 
