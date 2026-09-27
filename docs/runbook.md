@@ -1076,9 +1076,10 @@ you look. The branch counter is **seeded at zero for all four values** (#717), s
 empty result means the metric never arrived, not that nothing happened:
 
 ```promql
-# Which branch each node's last terminating supervisor took. Anything other than
-# handoff/successor_wait during a rolling upgrade means the surge replacement
-# never arrived.
+# Which branch each node's last terminating supervisor took. drain_fallback or
+# child_dead during a rolling upgrade means the surge replacement never arrived;
+# handoff during a rolling upgrade means the old pod was deleted mid-handoff
+# (#991, see the next section) -- expected ~0 per roll.
 sum by (k8s_node_name, aether_supervisor_shutdown_branch) (
   increase(aether_supervisor_shutdown_branch_total[30m]))
 
@@ -1092,6 +1093,71 @@ histogram_quantile(0.95,
 > SIGKILLed at the grace period flushes nothing, so a *missing* branch sample on a node is
 > itself the finding. Use `increase()`/`max_over_time`, never an instant read: like the
 > mesh-DNS lame-duck series, these age out with the generation that wrote them.
+
+### How a proxy roll hands the node over: the successor's ready gate and the parent's hold (#991)
+
+A rolling upgrade (`maxSurge: 1`, `maxUnavailable: 0`) is safe only if the **old** pod
+stays until the new pod's Envoy has taken over — the #132/#795 invariant. The DaemonSet
+deletes the old pod about 1 s after the new one turns Ready, and at once if the old one
+turns NotReady while a surge pod exists. Two supervisor rules decide both moments.
+
+**1. The successor's ready gate is anchored on its first LIVE, not only on its fork.**
+Envoy arms `--parent-shutdown-time-s` in `startWorkers()`, the step that also turns its
+admin LIVE. The predecessor Envoy therefore exits at *workers + ParentShutdownTime*
+(measured 14.93–15.00 s after `starting workers`, then 0.4–0.9 s to exit), not at
+*fork + ParentShutdownTime*. The successor's supervisor goes Ready at
+
+```
+max(fork + ParentShutdownTime + 3s,  firstLiveObserved + ParentShutdownTime + 2s)
+```
+
+`ParentShutdownTime` is the chart's `proxy.hotRestart.parentShutdownTime` (15 s), the
+value the supervisor passes to Envoy, not a literal. The fork anchor used to be the only
+one. Under soak load on rev242 the successor took 3.2–6.0 s from fork to workers, so the
+old Envoy was still serving at fork + 18 s, and the old pod was deleted mid-handoff in 13
+of 30 rolls. Cost: Ready moves from fork + 18 s to roughly fork + 19.5–23 s under load,
+1.5–5 s per node-roll. An unloaded successor that is LIVE within ~1 s keeps the fork gate.
+
+**2. The old pod keeps its readiness through a busy successor's admin.** While the old
+supervisor's Envoy is still tracked, it holds its ready marker whenever the admin answers
+at another epoch (#132). During the handoff that admin port belongs to the **successor**,
+whose main thread is busy loading its first listener batch before `starting workers`, so
+a `/server_info` probe can miss its 1 s timeout. The hold used to drop on the first
+miss, and three failed exec probes (2 s period) later the DaemonSet deleted the pod. That
+happened in 9 of 30 rolls on rev242, 5.0–6.3 s after `pod not ready`. The hold now lasts
+through an unreachable admin for up to the admin watchdog's existing bound
+(`--admin-unresponsive-deadline`, 30 s default). A genuinely wedged admin still ends it at
+that bound, on the same tick the admin watchdog restarts the container. With no Envoy of
+ours tracked, an unreachable admin never holds.
+
+Lines to grep in the `aether-proxy` container logs, per roll:
+
+```
+# successor pod: which anchor set its gate, and where the gate landed
+live predecessor confirmed; starting cross-pod hot restart  ... readyGateIn=18s readyGateAnchor=fork
+successor ready gate anchored   epoch=N anchor=live sinceFork=4.9s readyGateIn=17s readyGateAfterFork=21.9s parentShutdownTime=15s
+pod ready: envoy live at newest epoch                       epoch=N
+
+# old pod: the hold carried through the successor's busy init (once per unreachable streak)
+holding readiness: serving as hot-restart parent mid-handoff              epoch=N-1
+holding readiness through unreachable admin: successor likely initializing  epoch=N-1 unreachableFor=0s holdBound=30s
+newest epoch terminated cleanly by successor; awaiting pod deletion        epoch=N-1
+```
+
+`anchor=fork` on the second line means the successor went LIVE fast enough that the fork
+gate was already the later one. On a healthy roll the old pod logs **no**
+`termination requested mid-handoff`. Its Envoy is terminated by the successor's
+parent-shutdown first, the pod turns NotReady because nothing of its own is left
+running, and the DaemonSet deletes an idle pod. So during a rolling upgrade:
+
+- `aether_supervisor_shutdown_branch_total{branch="handoff"}` is **≈ 0 per roll**. The
+  fleet gate for a soak is the per-node `increase()` over the roll window. A non-zero
+  count means an old pod was deleted while its Envoy was still the serving parent, which
+  is a finding again, not background. On rev242, before this fix, it was 1 per node on
+  22 of 30 rolls.
+- `termination requested mid-handoff` lines are **0**. One that comes 5–6 s after the same
+  pod's `pod not ready` is rule 2 failing. One at about fork + 19 s, after the successor's
+  `pod ready`, is rule 1 failing.
 
 ### The agent reports an unrepairable conflist
 

@@ -194,11 +194,27 @@ type Supervisor struct {
 	// Guarded by mu: bind-collision retries re-run epoch detection (and re-gate)
 	// while watchLiveness is already polling.
 	readyGate time.Time
+	// gatedEpoch is the cross-pod successor epoch readyGate was armed for (-1:
+	// none). Its first observed LIVE re-anchors the gate (see
+	// liveAnchoredReadyGate). Guarded by mu, written with readyGate.
+	gatedEpoch int
+
+	// now is the supervisor's clock for the readiness gate, the readiness hold
+	// and the wedge watchdogs. time.Now outside tests; unit tests swap in a
+	// fake clock to drive the coordination state machine deterministically.
+	now func() time.Time
+
+	// holdingUnreachable records that the current readiness hold is being
+	// carried through an unreachable admin (issue #991), so the transition is
+	// logged once per streak rather than every tick. Owned by the watchLiveness
+	// goroutine; not guarded.
+	holdingUnreachable bool
 }
 
 // readyGateTime guards readyGate for concurrent access between Run
-// (bind-collision retries) and watchLiveness. It is only ever written by
-// initStartEpoch, under the same lock acquisition that publishes nextEpoch.
+// (bind-collision retries) and watchLiveness. It is armed by initStartEpoch,
+// under the same lock acquisition that publishes nextEpoch, and only ever moved
+// later by liveAnchoredReadyGate on the gated epoch's first observed LIVE.
 func (s *Supervisor) readyGateTime() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,8 +222,22 @@ func (s *Supervisor) readyGateTime() time.Time {
 }
 
 // readyGateBuffer is added to ParentShutdownTime when gating a cross-pod
-// successor's readiness, to ensure the predecessor is fully gone first.
+// successor's readiness from its FORK, to ensure the predecessor is fully gone
+// first. It is only the floor: see liveGateBuffer.
 const readyGateBuffer = 3 * time.Second
+
+// liveGateBuffer is added to ParentShutdownTime when re-anchoring a cross-pod
+// successor's ready gate on its first observed LIVE (issue #991).
+//
+// Envoy arms its parent-shutdown timer in startWorkers(), the same init-complete
+// step that flips admin to LIVE — not at the fork. Measured on talos
+// (2026-09-26/27, 60 handoffs): "shutting down parent after drain" minus
+// "starting workers" was 14.93-15.00s against a 15s ParentShutdownTime, and the
+// old Envoy was gone 0.4-0.9s after that. The observed LIVE is never earlier
+// than the real one (it is sampled every readyPollInterval), so the parent is
+// gone by firstLiveObserved + ParentShutdownTime + ~0.9s; 2s covers it with
+// margin.
+const liveGateBuffer = 2 * time.Second
 
 // successorReadyGate is the gate value for a supervisor that has just selected a
 // cross-pod successor epoch: the predecessor must be terminated by this Envoy's
@@ -221,8 +251,41 @@ const readyGateBuffer = 3 * time.Second
 // pod's Envoy had even been forked — #132's hazard re-entering through the
 // bind-collision retry path, where retries can run 4.5 minutes against a 15s
 // parent-shutdown-time so the old gate is certainly stale.
+//
+// It is anchored on the fork, which is only a floor. Envoy's parent-shutdown
+// timer runs from the successor's startWorkers(), so a successor slower than
+// readyGateBuffer from fork to workers outlives this gate (issue #991): its first
+// observed LIVE pushes the gate out via liveAnchoredReadyGate.
 func (s *Supervisor) successorReadyGate() time.Time {
-	return time.Now().Add(s.cfg.ParentShutdownTime + readyGateBuffer)
+	return s.now().Add(s.cfg.ParentShutdownTime + readyGateBuffer)
+}
+
+// liveAnchoredReadyGate re-anchors a cross-pod successor's ready gate on its
+// first observed LIVE (issue #991): the gate becomes
+//
+//	max(fork + ParentShutdownTime + readyGateBuffer,
+//	    firstLiveObserved + ParentShutdownTime + liveGateBuffer)
+//
+// ParentShutdownTime is the very value passed to Envoy as
+// --parent-shutdown-time-s (see buildEnvoyCmd), so the gate tracks the chart's
+// setting rather than a literal. It only moves the gate out, never in, and only
+// for the epoch initStartEpoch gated, so an in-pod hot restart (no predecessor
+// pod to protect) and a fresh epoch-0 start are unaffected.
+//
+// Returns the gate in force after the call and which anchor chose it ("fork" or
+// "live"); changed is false when the epoch was not a gated successor.
+func (s *Supervisor) liveAnchoredReadyGate(epoch int, liveObserved time.Time) (gate time.Time, anchor string, changed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readyGate.IsZero() || epoch != s.gatedEpoch {
+		return s.readyGate, "", false
+	}
+	anchor = "fork"
+	if live := liveObserved.Add(s.cfg.ParentShutdownTime + liveGateBuffer); live.After(s.readyGate) {
+		s.readyGate = live
+		anchor = "live"
+	}
+	return s.readyGate, anchor, true
 }
 
 // New creates a Supervisor. metrics may be nil to disable instrumentation.
@@ -235,6 +298,8 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 		adminAuthoritative: authoritative,
 		adminFast:          fast,
 		children:           make(map[int]*exec.Cmd),
+		gatedEpoch:         -1,
+		now:                time.Now,
 		childExited:        make(chan childExit, 8),
 		done:               make(chan struct{}),
 		watchdogFired:      make(chan error, 1),
@@ -742,7 +807,7 @@ func (s *Supervisor) hotRestart() error {
 	s.mu.Lock()
 	s.children[epoch] = cmd
 	s.nextEpoch = epoch + 1
-	s.epochLaunched = time.Now()
+	s.epochLaunched = s.now()
 	s.epochLive = false
 	s.mu.Unlock()
 	s.metrics.epochStarted(epoch)

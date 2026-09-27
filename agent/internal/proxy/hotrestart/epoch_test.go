@@ -164,7 +164,7 @@ func TestReadinessHeldWhileAnEarlierEpochStillServes(t *testing.T) {
 	s.resetEpochForRetry()
 	require.Equal(t, -1, s.currentEpoch())
 
-	ready, holding := s.onNotLiveEpoch(context.Background(), s.currentEpoch(), true, true, false)
+	ready, holding := s.onNotLiveEpoch(context.Background(), s.currentEpoch(), true, true, false, time.Time{})
 	assert.True(t, ready, "readiness must be held while an earlier epoch's envoy still serves the node")
 	assert.True(t, holding)
 	_, err := os.Stat(marker)
@@ -182,7 +182,7 @@ func TestReadinessHeldWhileAnEarlierEpochStillServes(t *testing.T) {
 		}
 	}, 10*time.Second, 10*time.Millisecond, "stub did not exit on SIGTERM")
 
-	ready, holding = s.onNotLiveEpoch(context.Background(), s.currentEpoch(), true, true, true)
+	ready, holding = s.onNotLiveEpoch(context.Background(), s.currentEpoch(), true, true, true, time.Time{})
 	assert.False(t, ready, "with no child left tracked, readiness must clear")
 	assert.False(t, holding)
 	_, err = os.Stat(marker)
