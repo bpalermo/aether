@@ -36,6 +36,19 @@
 #     the sweep re-checks the last day of main every two hours and the gap still
 #     surfaces — a few hours late instead of immediately.
 #
+#     The sweep checks every PUSH HEAD in that window, not every commit (#975).
+#     publish runs once per push, for its head; an atomic stack merge (gh-stack
+#     #963 put five squash commits on main in one push headed by 4930733) leaves
+#     intermediates that no publish run ever built, so they have no artifacts by
+#     construction and nobody can pin them. The heads come from GitHub's
+#     activity log for refs/heads/main — the record of the push itself, NOT the
+#     list of publish runs, so a push whose publish run was cancelled or never
+#     created is still a head and still goes red. Skipped commits are printed by
+#     name. See scripts/push-heads-lib.sh.
+#
+#     The workflow_run path needs no such filter: the commit it verifies is the
+#     head of the publish run that just finished, a push head by definition.
+#
 # Both paths end in the same place: a red run plus a rolling GitHub issue naming
 # the commit and the exact registry coordinates that are missing.
 name: publish-verify
@@ -94,6 +107,10 @@ jobs:
           # The packages are public, so an anonymous pull token would do; using
           # the run's token keeps the check working if one is ever made private.
           GHCR_TOKEN: ${{ github.token }}
+          # `--recent` reads main's push heads from the repository activity log
+          # (#975); that endpoint needs only the metadata read every token has.
+          # The repository is the runner's own GITHUB_REPOSITORY.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ -n "${TARGET}" ]; then
