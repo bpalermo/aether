@@ -98,14 +98,15 @@ robot_token() {
 	local scope="$1" url tok
 	url="https://${SMOKE_REGISTRY}/v2/auth?service=${SMOKE_REGISTRY}&scope=repository:${smoke_repo}:${scope}"
 	tok="$(curl -fsS -u "${REGISTRY_USERNAME}:${REGISTRY_PASSWORD}" "$url" | registry__json_str token)" || return 2
-	mask "$tok"
+	# NOT masked here: this function's stdout is what the caller captures, so a
+	# ::add-mask:: line printed from inside it becomes part of the token value
+	# (the 2026-09-27 first dispatch: curl 43 on every request). Callers mask.
 	printf '%s\n' "$tok"
 }
 
 anon_token() {
 	local tok
 	tok="$(curl -fsS "$(registry_token_url "$smoke_repo")" | registry__json_str token)" || return 2
-	mask "$tok"
 	printf '%s\n' "$tok"
 }
 
@@ -128,6 +129,7 @@ cmd_preflight() {
 		err "the robot account could not get a pull token from ${SMOKE_REGISTRY}/v2/auth — wrong QUAY_USERNAME (it is '<org>+<robot>') or QUAY_TOKEN"
 		exit 2
 	fi
+	mask "$tok"
 	code="$(tags_code "$tok")"
 	case "$code" in
 	200) existed=yes ;;
@@ -188,6 +190,7 @@ cmd_push() {
 		err "no robot pull token after the push"
 		exit 2
 	}
+	mask "$tok"
 	digest="$(registry_manifest_digest "$smoke_repo" "$SMOKE_TAG" "$tok")" || digest=""
 	if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
 		err "could not resolve ${SMOKE_REGISTRY}/${smoke_repo}:${SMOKE_TAG} to a digest after the push (got '${digest}')"
@@ -259,6 +262,7 @@ cmd_sign() {
 	}
 	local ref="${SMOKE_REGISTRY}/${smoke_repo}@${SMOKE_DIGEST}" tok before children child line lay types all=""
 	tok="$(robot_token pull)" || exit 2
+	mask "$tok"
 
 	# The index digest is deterministic per commit, so a re-run at the same
 	# commit signs a digest that may already carry an earlier run's signature.
@@ -364,6 +368,7 @@ cmd_cleanup() {
 		put SMOKE_CLEANUP "failed (no push token)"
 		return 0
 	}
+	mask "$tok"
 	# cosign fallback tags this run may have written (index and children).
 	if [ -n "${SMOKE_DIGEST:-}" ]; then
 		digests=("$SMOKE_DIGEST")
