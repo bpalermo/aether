@@ -343,9 +343,13 @@ for p in $(kubectl -n aether-test get pods -o name | grep udp-dialer); do
 done
 ```
 
-A `fail` that climbs only in the minute bracketing a `udp-echo` or proxy roll is the
-known shape (the arm is rebuilt on the next push; udp_proxy sessions on the old proxy
-drain); one that climbs in the no-roll window is a finding. Two proxy-side series say
+**A `fail` that climbs at a proxy roll is a finding since #967.** Until 2026-09-26 every
+proxy hot restart cost 2–3 cycles per node (the child's forwarding registry was
+namespace-blind, envoyproxy/envoy#47742); the fix (#47743, carried in the proxy build by
+#970) was validated on talos-main with three measured rolls — a mixed unpatched→patched
+control lost 3 per node, two patched→patched rolls lost **0**. Grade the leg at 0 per
+proxy roll; the only remaining known shape is a `udp-echo` roll (the arm is rebuilt on
+the next push). A climb in the no-roll window is a finding too. Two proxy-side series say
 which half broke:
 
 ```promql
