@@ -258,6 +258,9 @@ func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 	fqdn := proxy.ServiceClusterName(quicDestSvc, meshDomain)
 	h2 := newPerSourceServiceCluster(fqdn, trustDomain, "demo", "echo")
 	// The bare base the cache clones: NewServiceCluster before mTLS injection.
+	// Each twin QUICClusterFrom derives subscribes to its OWN EDS resource
+	// (its cluster name), never the base's (aether#1008); the agent publishes
+	// the base's load assignment under every twin's name.
 	base := proxy.NewServiceCluster(fqdn, quicDestSvc, quicDestSvc, nil)
 	arms := QUICOutboundArms()
 	delete(arms, "")
@@ -1436,6 +1439,41 @@ func QUICUpstreamsSharingStatsKey(bootstrapJSON []byte) ([]string, error) {
 	var bad []string
 	for _, c := range bs.GetStaticResources().GetClusters() {
 		if strings.HasPrefix(c.GetName(), "quic:") && len(owners[statsKey(c)]) > 1 {
+			bad = append(bad, c.GetName())
+		}
+	}
+	return bad, nil
+}
+
+// QUICUpstreamsSharingEDSName returns the name of every `quic:` cluster whose
+// EDS resource name (eds_cluster_config.service_name, or the cluster name when
+// unset) equals another cluster's in the same bootstrap (aether#1008). Envoy's
+// delta-ADS WatchMap deduplicates subscriptions per resource name, so a twin
+// that shares its base's EDS name and arrives after the base is subscribed
+// never sends a subscribe and warms for the full initial_fetch_timeout. A
+// twin must subscribe to its own name (proxy.QUICClusterFrom) and the agent
+// publishes the base's load assignment under it (proxy.QUICLoadAssignmentFrom).
+func QUICUpstreamsSharingEDSName(bootstrapJSON []byte) ([]string, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	edsName := func(c *clusterv3.Cluster) string {
+		if n := c.GetEdsClusterConfig().GetServiceName(); n != "" {
+			return n
+		}
+		return c.GetName()
+	}
+	owners := map[string][]string{}
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if c.GetType() != clusterv3.Cluster_EDS {
+			continue
+		}
+		owners[edsName(c)] = append(owners[edsName(c)], c.GetName())
+	}
+	var bad []string
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if c.GetType() == clusterv3.Cluster_EDS && strings.HasPrefix(c.GetName(), "quic:") && len(owners[edsName(c)]) > 1 {
 			bad = append(bad, c.GetName())
 		}
 	}

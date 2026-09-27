@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"slices"
 	"sort"
 
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -33,6 +34,31 @@ func NewClusterLoadAssignment(serviceName string) *endpointv3.ClusterLoadAssignm
 	return &endpointv3.ClusterLoadAssignment{
 		ClusterName: serviceName,
 		Endpoints:   []*endpointv3.LocalityLbEndpoints{},
+	}
+}
+
+// QUICLoadAssignmentFrom returns base's load assignment re-published under a
+// QUIC twin's own EDS resource name (QUICClusterFrom points the twin's
+// eds_cluster_config.service_name at its cluster name, aether#1008). Endpoints,
+// named endpoints and policy are the base's -- including the health status the
+// agent writes itself and every locality/metadata field -- so the twin sees
+// exactly the membership the h2 cluster does.
+//
+// The endpoint slice elements and the policy are SHARED with base, not cloned:
+// load assignments are never mutated after they are built (a changed endpoint
+// set builds a new one, see SnapshotCache.RemoveEndpoint), and the twin copy is
+// rebuilt from the base on every snapshot, so identical inputs marshal to
+// identical bytes. Every ClusterLoadAssignment field is carried; the proxy
+// tests pin the field set so a new upstream field cannot be dropped silently.
+func QUICLoadAssignmentFrom(base *endpointv3.ClusterLoadAssignment, twinName string) *endpointv3.ClusterLoadAssignment {
+	if base == nil {
+		return nil
+	}
+	return &endpointv3.ClusterLoadAssignment{
+		ClusterName:    twinName,
+		Endpoints:      slices.Clone(base.GetEndpoints()),
+		NamedEndpoints: base.GetNamedEndpoints(),
+		Policy:         base.GetPolicy(),
 	}
 }
 

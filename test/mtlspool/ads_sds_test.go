@@ -201,7 +201,11 @@ func startADSControlPlane(t *testing.T, resources map[resourcev3.Type][]types.Re
 // no request was ever sent, which no amount of control-plane logging would have
 // shown.
 func xdsTrace(t *testing.T) serverv3.Callbacks {
-	secretsOnly := func(typeURL string) bool { return strings.HasSuffix(typeURL, "v3.Secret") }
+	// Secrets (#842) and load assignments (#1008): the two resource types a
+	// delta WatchMap has been caught deduplicating away.
+	secretsOnly := func(typeURL string) bool {
+		return strings.HasSuffix(typeURL, "v3.Secret") || strings.HasSuffix(typeURL, "v3.ClusterLoadAssignment")
+	}
 	return &serverv3.CallbackFuncs{
 		StreamDeltaRequestFunc: func(_ int64, req *discoverygrpc.DeltaDiscoveryRequest) error {
 			if secretsOnly(req.GetTypeUrl()) {
@@ -337,6 +341,29 @@ func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, opts adsOptions) *
 		resourcev3.SecretType:   secretResources(t, p, []string{spiffeSourceA, spiffeSourceB, spiffeNode}),
 	})
 
+	launchEnvoyOverADS(t, bin, cp, adminPort)
+
+	h := &adsProxyHandle{
+		proxyHandle: &proxyHandle{
+			addrA: fmt.Sprintf("127.0.0.1:%d", portA),
+			addrB: fmt.Sprintf("127.0.0.1:%d", portB),
+		},
+		adminAddr: fmt.Sprintf("127.0.0.1:%d", adminPort),
+		cp:        cp,
+	}
+	// The listeners arrive over LDS, so this also proves the stream is up.
+	waitListening(t, h.addrA)
+	waitListening(t, h.addrB)
+	return h
+}
+
+// launchEnvoyOverADS runs the pinned proxy against a production-shaped
+// bootstrap: nothing but the ADS cluster in static_resources, CDS and LDS over
+// one delta-ADS stream to cp, admin on 127.0.0.1:adminPort. The process is
+// killed at test cleanup.
+func launchEnvoyOverADS(t *testing.T, bin string, cp *adsControlPlane, adminPort int) {
+	t.Helper()
+
 	bs := &bootstrapv3.Bootstrap{
 		Node:  &corev3.Node{Id: envoyNodeID, Cluster: "aether"},
 		Admin: &bootstrapv3.Admin{Address: socketAddress("127.0.0.1", adminPort)},
@@ -379,19 +406,6 @@ func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, opts adsOptions) *
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-
-	h := &adsProxyHandle{
-		proxyHandle: &proxyHandle{
-			addrA: fmt.Sprintf("127.0.0.1:%d", portA),
-			addrB: fmt.Sprintf("127.0.0.1:%d", portB),
-		},
-		adminAddr: fmt.Sprintf("127.0.0.1:%d", adminPort),
-		cp:        cp,
-	}
-	// The listeners arrive over LDS, so this also proves the stream is up.
-	waitListening(t, h.addrA)
-	waitListening(t, h.addrB)
-	return h
 }
 
 // setMaxRequestsPerConnection sets the cluster's upstream

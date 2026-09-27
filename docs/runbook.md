@@ -812,7 +812,16 @@ sum by (aether_cluster) (rate(envoy_cluster_upstream_rq_total{aether_cluster=~".
 sum(rate(envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-1(@.*)?"}[5m]))
 # a twin that cannot connect: the #957 DNS-SAN shape, or UDP:18008 blocked between nodes
 increase(envoy_cluster_upstream_cx_connect_fail{aether_cluster=~".*@.*"}[5m])
+# a twin whose endpoints never arrived (#1008): MUST be 0, fleet-wide, always
+sum(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"})
 ```
+
+Each twin subscribes to its **own** EDS resource, named after the twin cluster
+(`quic:<svc>.<ns>.<domain>@<ns>/<sa>`), and the agent publishes the h2 cluster's
+load assignment under that name too. In `/config_dump` a twin's
+`eds_cluster_config.service_name` equals its own cluster name, never the bare
+`<ns>/<svc>` the h2 cluster uses; if it ever does again, see "QUIC twin never
+leaves warming" below.
 
 On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
@@ -824,6 +833,50 @@ the h2 route it had before, byte-for-byte. The inbound listener and the DNS SANs
 harmless to leave in place. Nothing here needs a proxy roll.
 
 ## 8. Troubleshooting
+
+### QUIC twin never leaves warming / 503 NC on a new ServiceAccount (#1008)
+
+**Symptom.** The first pod of a ServiceAccount that is new on a node gets
+`503` with response flag `NC` (no cluster) for ~15 s on every request to every
+QUIC-enabled destination, then recovers on its own. Other callers on the node
+are unaffected; h2 destinations are unaffected. On talos (rev242) it was 1,060
+client-visible 503/NC in 11 s when the k6 loaders started.
+
+**Read.**
+
+```promql
+# the twin sat in warming (1) from its CDS add until the timeout
+envoy_cluster_warming_state{aether_cluster=~".*@.*"}
+envoy_cluster_manager_warming_clusters
+# and gave up waiting for its endpoints: 1 per affected twin per proxy
+envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}
+```
+
+In the proxy log: `cds: response indicates N added/updated cluster(s)`, then
+~15 s later `gRPC config: initial fetch timed out for
+type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment`, one per
+late twin. The agent is idle through the gap: nothing on the control-plane side
+is pending.
+
+**Cause.** A twin that shares its h2 base's EDS resource name. Envoy's delta-ADS
+`WatchMap` deduplicates subscription interest per (type_url, resource name):
+when the twin arrives *after* the base is subscribed, its watch adds nothing to
+`resource_names_subscribe`, no request is sent, the control plane (correctly)
+sends nothing because the resource did not change, and the twin waits out its
+15 s `initial_fetch_timeout`. At agent start base and twins arrive in one CDS
+response, so only a *late* twin — a new local ServiceAccount — is hit. Fixed in
+#1008: `proxy.QUICClusterFrom` points the twin at its own EDS name and the cache
+publishes the base's `ClusterLoadAssignment` under it
+(`proxy.QUICLoadAssignmentFrom`). Seeing this again means that pairing broke;
+`//test/mtlspool`'s `TestLateQUICTwin*` pair reproduces it against the pinned
+proxy (the negative control times out at ~15 s by design).
+
+**Invariant.** A delta-ADS subscriber must never share a resource name with an
+already-subscribed sibling. It has now bitten twice: SDS (#842, the on-demand
+certificate selector behind every static SVID reference) and EDS (#1008, QUIC
+twins behind their base). Any new cluster, secret or config that is a clone or
+second consumer of an existing resource needs either its own resource name or
+its own `api_config_source`.
 
 ### Forwarded DNS keeps failing after a kube-dns roll
 
