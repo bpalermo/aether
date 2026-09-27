@@ -34,15 +34,16 @@
 # that re-pins an old unsigned digest after the cut-over counts as a new pin and
 # goes red, rather than inheriting the old pin's exemption.
 #
-# PROXY_SIGNING_CUTOVER is the main commit this change was based on (origin/main
-# when #984's PR was cut). Any pin introduced after it came from a proxy-release
-# run that had the sign job. Once the first signed pin lands, it may be moved
-# forward to that pin commit; it must never move backwards.
+# PROXY_SIGNING_CUTOVER is the commit that pinned the FIRST signed aether-proxy
+# image: #988 (2026-09-27), index sha256:574d5211…, signed by proxy-release.yml
+# and hand-verified (index + both children) under the proxy-release identity.
+# Every pin introduced after it came from a proxy-release run that had the sign
+# job. Pins at or before it with no signature are history and are skipped (see
+# proxy_pin_verdict). It moved forward once, from #986's base 8422b46 to this
+# pin's merge commit; it must never move backwards.
 #
 # shellcheck disable=SC2034  # consumed by whoever sources this file.
-PROXY_SIGNING_CUTOVER="${PROXY_SIGNING_CUTOVER:-8422b46ff3144a9f8438007909dc1b355460a7a5}"
-
-# shellcheck disable=SC2034  # consumed by whoever sources this file.
+PROXY_SIGNING_CUTOVER="${PROXY_SIGNING_CUTOVER:-857e65988acda3c84ec33ae2e8eace2fdbf0407a}"
 PROXY_REPO=bpalermo/aether/aether-proxy
 
 # The chart values file whose pin is checked. The path is the bump-chart job's.
