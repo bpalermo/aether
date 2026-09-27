@@ -1,0 +1,367 @@
+diff --git a/test/common/network/BUILD b/test/common/network/BUILD
+index a4fcae8ea0..a70a727849 100644
+--- a/test/common/network/BUILD
++++ b/test/common/network/BUILD
+@@ -443,6 +443,19 @@ envoy_cc_test(
+     ],
+ )
+ 
++envoy_cc_test(
++    name = "exec_in_netns_thread_test",
++    srcs = ["exec_in_netns_thread_test.cc"],
++    rbe_pool = "linux_x64_small",
++    deps = [
++        "//source/common/network:utility_lib",
++        "//test/mocks/api:api_mocks",
++        "//test/test_common:status_utility_lib",
++        "//test/test_common:threadsafe_singleton_injector_lib",
++        "@abseil-cpp//absl/synchronization",
++    ],
++)
++
+ envoy_cc_test(
+     name = "ip_address_parsing_test",
+     srcs = ["ip_address_parsing_test.cc"],
+diff --git a/test/common/network/exec_in_netns_thread_test.cc b/test/common/network/exec_in_netns_thread_test.cc
+new file mode 100644
+index 0000000000..dee6431dee
+--- /dev/null
++++ b/test/common/network/exec_in_netns_thread_test.cc
+@@ -0,0 +1,337 @@
++// Tests that Utility::execInNetworkNamespace returns the CALLING THREAD to its own network
++// namespace, not to the namespace of the thread-group leader (the main thread).
++//
++// setns(CLONE_NEWNET) is per thread. "/proc/self/ns/net" resolves to the thread-group leader's
++// namespace; "/proc/thread-self/ns/net" (or "/proc/self/task/<tid>/ns/net") to the calling
++// thread's. A worker that records the former while the main thread is itself inside another
++// namespace "restores" itself into that namespace and stays there.
++
++#include <fcntl.h>
++#include <sched.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <sys/types.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <cstdio>
++#include <cstdlib>
++#include <map>
++#include <string>
++#include <thread>
++#include <utility>
++#include <vector>
++
++#include "source/common/network/utility.h"
++
++#include "test/mocks/api/mocks.h"
++#include "test/test_common/status_utility.h"
++#include "test/test_common/threadsafe_singleton_injector.h"
++
++#include "absl/synchronization/mutex.h"
++#include "gmock/gmock.h"
++#include "gtest/gtest.h"
++
++namespace Envoy {
++namespace Network {
++namespace {
++
++#if defined(__linux__)
++
++using ::Envoy::StatusHelpers::IsOkAndHolds;
++using testing::_;
++using testing::ElementsAre;
++using testing::Eq;
++using testing::Invoke;
++using testing::Pair;
++
++pid_t currentTid() { return static_cast<pid_t>(::syscall(SYS_gettid)); }
++
++constexpr char kHostNetns[] = "host";
++constexpr char kPodA[] = "/var/run/netns/pod-a";
++constexpr char kPodB[] = "/var/run/netns/pod-b";
++
++// A model of the kernel's per-THREAD network namespace state, driven through the mocked open(),
++// close() and setns() syscalls. It resolves the /proc paths the way the kernel does:
++//   /proc/self/ns/net             -> the thread-group leader's (main thread's) namespace
++//   /proc/thread-self/ns/net      -> the calling thread's namespace (ENOENT if disabled)
++//   /proc/self/task/<tid>/ns/net  -> thread <tid>'s namespace
++//   anything else                 -> the namespace the path names (a pod's netns file)
++// and setns() moves only the calling thread. A helper that records the wrong namespace to return
++// to is therefore caught by WHERE THE CALLING THREAD ENDS UP, not by how the path it opened is
++// spelled: with a mock that handed every open() an opaque fd (as ExecInNetnsTest.Basic does), any
++// path would restore "correctly" and the test could not fail.
++class PerThreadNetnsModel {
++public:
++  explicit PerThreadNetnsModel(bool thread_self_exists) : thread_self_exists_(thread_self_exists) {}
++
++  void setNetns(pid_t tid, std::string netns) {
++    absl::MutexLock lock(&mu_);
++    netns_[tid] = std::move(netns);
++  }
++
++  std::string netnsOf(pid_t tid) {
++    absl::MutexLock lock(&mu_);
++    return netnsOfLocked(tid);
++  }
++
++  // (tid, path) of every open() in call order.
++  std::vector<std::pair<pid_t, std::string>> opens() {
++    absl::MutexLock lock(&mu_);
++    return opens_;
++  }
++
++  Api::SysCallIntResult open(const char* pathname) {
++    absl::MutexLock lock(&mu_);
++    const pid_t tid = currentTid();
++    const std::string path(pathname);
++    opens_.emplace_back(tid, path);
++
++    std::string netns;
++    const std::string task_prefix = "/proc/self/task/";
++    const std::string ns_suffix = "/ns/net";
++    if (path == "/proc/self/ns/net") {
++      netns = netnsOfLocked(::getpid());
++    } else if (path == "/proc/thread-self/ns/net") {
++      if (!thread_self_exists_) {
++        return {-1, ENOENT};
++      }
++      netns = netnsOfLocked(tid);
++    } else if (path.rfind(task_prefix, 0) == 0 &&
++               path.size() > task_prefix.size() + ns_suffix.size() &&
++               path.compare(path.size() - ns_suffix.size(), ns_suffix.size(), ns_suffix) == 0) {
++      const std::string tid_str =
++          path.substr(task_prefix.size(), path.size() - task_prefix.size() - ns_suffix.size());
++      netns = netnsOfLocked(static_cast<pid_t>(std::strtol(tid_str.c_str(), nullptr, 10)));
++    } else {
++      netns = path;
++    }
++    const int fd = next_fd_++;
++    fds_[fd] = netns;
++    return {fd, 0};
++  }
++
++  Api::SysCallIntResult close(int fd) {
++    absl::MutexLock lock(&mu_);
++    EXPECT_EQ(1u, fds_.erase(fd)) << "close() of an fd the model never opened: " << fd;
++    return {0, 0};
++  }
++
++  Api::SysCallIntResult setns(int fd) {
++    absl::MutexLock lock(&mu_);
++    auto it = fds_.find(fd);
++    EXPECT_NE(it, fds_.end()) << "setns() on an fd the model never opened: " << fd;
++    if (it == fds_.end()) {
++      return {-1, EBADF};
++    }
++    netns_[currentTid()] = it->second;
++    return {0, 0};
++  }
++
++private:
++  std::string netnsOfLocked(pid_t tid) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
++    auto it = netns_.find(tid);
++    return it == netns_.end() ? kHostNetns : it->second;
++  }
++
++  const bool thread_self_exists_;
++  absl::Mutex mu_;
++  std::map<pid_t, std::string> netns_ ABSL_GUARDED_BY(mu_);
++  std::map<int, std::string> fds_ ABSL_GUARDED_BY(mu_);
++  std::vector<std::pair<pid_t, std::string>> opens_ ABSL_GUARDED_BY(mu_);
++  int next_fd_ ABSL_GUARDED_BY(mu_){100};
++};
++
++class ExecInNetnsThreadTest : public testing::Test {
++protected:
++  struct WorkerRun {
++    pid_t tid{0};
++    std::string netns_before;
++    absl::StatusOr<std::string> result{absl::UnknownError("not run")};
++    std::string netns_after;
++    // Guards that the model distinguishes the two /proc views from this worker, so the test
++    // cannot pass vacuously (see PerThreadNetnsModel).
++    std::string model_self_view;
++    std::string model_thread_self_view;
++  };
++
++  // Runs execInNetworkNamespace(f, kPodB) on a NON-main thread while the thread-group leader sits
++  // in kPodA (as the main thread does, briefly, for every health-check connect or listener socket
++  // it creates in a pod's namespace), and reports where the worker was before and after.
++  WorkerRun runOnWorkerWhileMainIsInPodA(bool thread_self_exists) {
++    PerThreadNetnsModel model(thread_self_exists);
++    testing::StrictMock<Api::MockLinuxOsSysCalls> linux_os_syscalls;
++    testing::StrictMock<Api::MockOsSysCalls> os_syscalls;
++    TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> os_calls(&os_syscalls);
++    TestThreadsafeSingletonInjector<Api::LinuxOsSysCallsImpl> linux_os_calls(&linux_os_syscalls);
++
++    EXPECT_CALL(os_syscalls, open(_, O_RDONLY))
++        .WillRepeatedly(Invoke([&model](const char* pathname, int) -> Api::SysCallIntResult {
++          return model.open(pathname);
++        }));
++    EXPECT_CALL(os_syscalls, close(_))
++        .WillRepeatedly(
++            Invoke([&model](int fd) -> Api::SysCallIntResult { return model.close(fd); }));
++    EXPECT_CALL(linux_os_syscalls, setns(_, Eq(CLONE_NEWNET)))
++        .WillRepeatedly(
++            Invoke([&model](int fd, int) -> Api::SysCallIntResult { return model.setns(fd); }));
++
++    // The thread-group leader is inside a pod's namespace at this instant.
++    model.setNetns(::getpid(), kPodA);
++
++    WorkerRun run;
++    std::thread worker([&]() {
++      run.tid = currentTid();
++      run.netns_before = model.netnsOf(run.tid);
++      run.result = Utility::execInNetworkNamespace(
++          [&]() -> std::string { return model.netnsOf(currentTid()); }, kPodB);
++      run.netns_after = model.netnsOf(run.tid);
++    });
++    worker.join();
++
++    // Non-vacuity guards, evaluated after the helper so they do not perturb its open() sequence.
++    std::thread probe([&]() {
++      PerThreadNetnsModel probe_model(/*thread_self_exists=*/true);
++      probe_model.setNetns(::getpid(), kPodA);
++      auto self_fd = probe_model.open("/proc/self/ns/net");
++      auto thread_self_fd = probe_model.open("/proc/thread-self/ns/net");
++      probe_model.setns(self_fd.return_value_);
++      run.model_self_view = probe_model.netnsOf(currentTid());
++      probe_model.setns(thread_self_fd.return_value_);
++      run.model_thread_self_view = probe_model.netnsOf(currentTid());
++      probe_model.close(self_fd.return_value_);
++      probe_model.close(thread_self_fd.return_value_);
++    });
++    probe.join();
++
++    EXPECT_EQ(model.netnsOf(::getpid()), kPodA) << "the helper must not move the main thread";
++    opens_ = model.opens();
++    return run;
++  }
++
++  std::vector<std::pair<pid_t, std::string>> opens_;
++};
++
++// The worker must come back to ITS OWN namespace (the host's), not to the main thread's pod netns.
++TEST_F(ExecInNetnsThreadTest, WorkerReturnsToItsOwnNetnsWhileMainThreadIsInAnother) {
++  const WorkerRun run = runOnWorkerWhileMainIsInPodA(/*thread_self_exists=*/true);
++
++  ASSERT_NE(run.tid, ::getpid()) << "the helper must run on a non-main thread";
++  // The model tells the two /proc views apart for a non-main thread, so this test can fail.
++  ASSERT_EQ(run.model_self_view, kPodA);
++  ASSERT_EQ(run.model_thread_self_view, kHostNetns);
++
++  EXPECT_EQ(run.netns_before, kHostNetns);
++  EXPECT_THAT(run.result, IsOkAndHolds(std::string(kPodB)));
++  EXPECT_EQ(run.netns_after, kHostNetns)
++      << "the worker was restored into the main thread's namespace";
++  // The namespace to return to is recorded from the calling thread's own /proc entry.
++  EXPECT_THAT(opens_, ElementsAre(Pair(run.tid, "/proc/thread-self/ns/net"),
++                                  Pair(run.tid, std::string(kPodB))));
++}
++
++// On kernels without /proc/thread-self (< 3.17) the helper falls back to /proc/self/task/<tid>.
++TEST_F(ExecInNetnsThreadTest, FallsBackToTaskTidWhenThreadSelfIsAbsent) {
++  const WorkerRun run = runOnWorkerWhileMainIsInPodA(/*thread_self_exists=*/false);
++
++  ASSERT_NE(run.tid, ::getpid());
++  EXPECT_EQ(run.netns_before, kHostNetns);
++  EXPECT_THAT(run.result, IsOkAndHolds(std::string(kPodB)));
++  EXPECT_EQ(run.netns_after, kHostNetns)
++      << "the worker was restored into the main thread's namespace";
++  EXPECT_THAT(opens_,
++              ElementsAre(Pair(run.tid, "/proc/thread-self/ns/net"),
++                          Pair(run.tid, "/proc/self/task/" + std::to_string(run.tid) + "/ns/net"),
++                          Pair(run.tid, std::string(kPodB))));
++}
++
++// The same scenario against the REAL kernel, compared by namespace inode. Needs CAP_SYS_ADMIN over
++// a network namespace, which an unprivileged test gets only through an unprivileged user
++// namespace; where neither is available (e.g. a sandbox that forbids user namespaces) it SKIPS,
++// and the two model tests above are the gate.
++//
++// Runs in a forked child: the user and network namespaces it creates must not leak into the rest
++// of the test binary. Exit codes: 0 pass, 77 skip, anything else a failure described on stderr.
++TEST_F(ExecInNetnsThreadTest, RealKernelWorkerReturnsToItsOwnNetns) {
++  const pid_t child = ::fork();
++  ASSERT_GE(child, 0);
++  if (child == 0) {
++    auto ino = [](const char* path) -> ino_t {
++      struct stat st;
++      return ::stat(path, &st) == 0 ? st.st_ino : 0;
++    };
++    auto open_self_ns = []() { return ::open("/proc/thread-self/ns/net", O_RDONLY | O_CLOEXEC); };
++    if (::unshare(CLONE_NEWNET) != 0) {
++      // No CAP_SYS_ADMIN: try an unprivileged user namespace (the child is single-threaded).
++      if (::unshare(CLONE_NEWUSER) != 0 || ::unshare(CLONE_NEWNET) != 0) {
++        ::_exit(77);
++      }
++    }
++    // Three namespaces: n1 the worker's own, n2 the main thread's "pod" namespace, n3 the target.
++    const int n1 = open_self_ns();
++    if (::unshare(CLONE_NEWNET) != 0) {
++      ::_exit(77);
++    }
++    const int n2 = open_self_ns();
++    if (::unshare(CLONE_NEWNET) != 0) {
++      ::_exit(77);
++    }
++    const int n3 = open_self_ns();
++    if (n1 < 0 || n2 < 0 || n3 < 0 || ::setns(n2, CLONE_NEWNET) != 0) {
++      ::_exit(77);
++    }
++    const std::string n3_path = "/proc/self/fd/" + std::to_string(n3);
++    const ino_t n1_ino = ino(("/proc/self/fd/" + std::to_string(n1)).c_str());
++    const ino_t n2_ino = ino(("/proc/self/fd/" + std::to_string(n2)).c_str());
++    const ino_t n3_ino = ino(n3_path.c_str());
++    if (n1_ino == 0 || n1_ino == n2_ino || n1_ino == n3_ino || n2_ino == n3_ino) {
++      ::_exit(77);
++    }
++
++    int code = 0;
++    std::thread worker([&]() {
++      if (::setns(n1, CLONE_NEWNET) != 0) {
++        code = 77;
++        return;
++      }
++      const ino_t before = ino("/proc/thread-self/ns/net");
++      auto result = Utility::execInNetworkNamespace(
++          [&]() -> ino_t { return ino("/proc/thread-self/ns/net"); }, n3_path.c_str());
++      const ino_t after = ino("/proc/thread-self/ns/net");
++      if (before != n1_ino) {
++        code = 77;
++      } else if (!result.ok() || *result != n3_ino) {
++        ::fprintf(stderr, "f() did not run in the target namespace\n");
++        code = 2;
++      } else if (after != n1_ino) {
++        ::fprintf(stderr,
++                  "worker restored into netns inode %lu (main thread's is %lu), expected its own "
++                  "%lu\n",
++                  static_cast<unsigned long>(after), static_cast<unsigned long>(n2_ino),
++                  static_cast<unsigned long>(n1_ino));
++        code = 1;
++      }
++    });
++    worker.join();
++    if (code == 0 && ino("/proc/thread-self/ns/net") != n2_ino) {
++      ::fprintf(stderr, "the helper moved the main thread\n");
++      code = 3;
++    }
++    ::_exit(code);
++  }
++
++  int status = 0;
++  ASSERT_EQ(child, ::waitpid(child, &status, 0));
++  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally, status " << status;
++  if (WEXITSTATUS(status) == 77) {
++    GTEST_SKIP() << "cannot create network namespaces here (no CAP_SYS_ADMIN, no user namespaces)";
++  }
++  EXPECT_EQ(0, WEXITSTATUS(status));
++}
++
++#endif
++
++} // namespace
++} // namespace Network
++} // namespace Envoy

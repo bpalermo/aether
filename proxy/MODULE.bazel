@@ -39,6 +39,16 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 #   (default true; the runtime_features.cc hunk registers it). Source + the
 #   SPIFFE validator BUILD visibility line; api/ doc comment (a separate module),
 #   tests and changelog dropped. Applied AFTER 47743 (patches apply in order).
+#   aether#1022 (not proposed upstream from automation; the maintainer's call):
+#   Network::Utility::execInNetworkNamespace records the namespace to return to
+#   from /proc/thread-self/ns/net (fallback /proc/self/task/<tid>/ns/net) instead
+#   of /proc/self/ns/net, which is the MAIN thread's namespace. setns() is per
+#   thread, so a worker calling it while the main thread was briefly inside a pod
+#   netns (health-check connects, listener creation) "restored" itself INTO that
+#   pod's netns and created its later upstream sockets there, where the pod's
+#   redirect-all capture diverted them (the #1007 cross-pod L4 landings). Carries
+#   its own test (test/common/network:exec_in_netns_thread_test), run by
+#   //bazel/patches:carried_patch_tests.
 #   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
@@ -47,6 +57,7 @@ single_version_override(
     patches = [
         "//bazel/patches:envoy-47743-udp-hot-restart-forwarding-netns.patch",
         "//bazel/patches:envoy-47740-quic-hostname-check-explicit-san.patch",
+        "//bazel/patches:envoy-aether1022-exec-in-netns-thread-self.patch",
     ],
 )
 
