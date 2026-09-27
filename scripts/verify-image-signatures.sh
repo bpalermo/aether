@@ -6,7 +6,7 @@
 #
 # publish.yaml signs with `cosign sign --recursive`, which signs a multi-arch
 # index and each per-architecture manifest under it. `cosign verify` has no
-# `--recursive` — not in v2.4.1, not in v3.0.6 — so the verify step used to
+# `--recursive` — not in v2.4.1, v3.0.6 or v3.1.2 — so the verify step used to
 # check the eight index digests and nothing else. The per-arch manifests are
 # what a node actually pulls, and they were signed and never checked: a green
 # verify covered less than it read as. This walks the children the way the
@@ -14,8 +14,16 @@
 #
 # USAGE
 #
-#   scripts/verify-image-signatures.sh <ref> [<ref>...]
-#   scripts/verify-image-signatures.sh --file <file of refs, one per line>
+#   bazel run //tools/cosign:verify_image_signatures -- <ref> [<ref>...]
+#   bazel run //tools/cosign:verify_image_signatures -- --file <refs, one per line>
+#
+# That is how CI runs it and how to run it by hand: the target exports COSIGN as
+# the Bazel-pinned cosign (the rules_img_signer_cosign bazel_dep's release
+# binary, sha256-pinned in its lock; `bazel run //tools/cosign -- version`), so
+# every verify uses the same cosign as the signer. Relative paths resolve
+# against your working directory. The script still runs standalone:
+#
+#   COSIGN=/path/to/cosign scripts/verify-image-signatures.sh <ref>...
 #
 # Each ref is `ghcr.io/<repo>@sha256:<index digest>` — a DIGEST, never a tag, so
 # nothing here can re-resolve to a different artefact than the caller named.
@@ -25,7 +33,9 @@
 #
 # ENVIRONMENT
 #
-#   COSIGN               cosign binary (default: `cosign` on PATH). v3.0.6 in CI.
+#   COSIGN               cosign binary (default: `cosign` on PATH). Set by
+#                        //tools/cosign:verify_image_signatures to the pinned
+#                        v3.1.2; a standalone run uses whatever you point it at.
 #   CERT_IDENTITY_REGEXP certificate identity; default is publish.yaml on
 #                        ${GITHUB_REPOSITORY:-bpalermo/aether}, any ref.
 #   CERT_OIDC_ISSUER     default https://token.actions.githubusercontent.com

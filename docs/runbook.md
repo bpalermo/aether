@@ -441,8 +441,32 @@ naming another commit, and a stray `ok`.
 
 `publish.yaml` signs every published image keyless with `cosign sign
 --recursive` — the multi-arch **index and each per-architecture child
-manifest**. The installer is `sigstore/cosign-installer` pinned by SHA (v4.1.2,
-which bootstraps **cosign v3.0.6**); the pin also fixes the binary's SHA-256.
+manifest**.
+
+**Getting cosign: `bazel run //tools/cosign`.** There is one cosign for this
+repository, in CI and on a workstation: the official release binary that the
+`rules_img_signer_cosign` bazel_dep (`MODULE.bazel`) downloads for the current
+platform, sha256-pinned in that module's `cli/cosign_cli.lock.json` —
+**cosign v3.1.2** at module 0.0.1. `publish.yaml`, `proxy-release.yml` and
+`publish-verify.yaml` all sign and verify through `//tools/cosign`, run
+locally on the runner (never on RBE), so the three cannot drift apart.
+
+```bash
+bazel run //tools/cosign -- version            # GitVersion: v3.1.2
+bazel run //tools/cosign -- verify …           # any cosign subcommand
+```
+
+The version is the module's lock, so **bumping cosign is bumping the
+`bazel_dep`**; `//tools/cosign:version_test` (network-free) fails until its
+`EXPECTED` moves too, so a new cosign never lands unread. Until 2026-09-27 this
+was `sigstore/cosign-installer` pinned by SHA (v4.1.2 → cosign v3.0.6).
+
+**Why only the module's CLI, not its signer plugin.** `rules_img_signer_cosign`
+also ships `sign-oci-artifact`, a signer plugin for rules_img's
+`signing_config` / `img deploy`. It stores signatures as **OCI 1.1 referrers**,
+and ghcr.io has no Referrers API (below) — everything here (sign, verify, the
+`publish-verify` sweep) reads cosign's `sha256-<hex>` tag. Signing stays an
+explicit `cosign sign` step after the pushes.
 
 **Layout.** ghcr.io does not implement the OCI Referrers API, so the signature
 lands in a tag in the image's own repository: cosign 3 writes the OCI 1.1
@@ -454,14 +478,14 @@ Do not pass `--new-bundle-format` to `cosign verify` expecting it to assert the
 layout: `=true` still accepts a legacy `.sig`.
 
 **Children are not verified unless you walk them.** `cosign verify` has **no
-`--recursive`** (not v2.4.1, not v3.0.6). Verifying the index digest says
+`--recursive`** (not v2.4.1, v3.0.6 or v3.1.2). Verifying the index digest says
 nothing about the per-arch manifests a node actually pulls. Use the script,
 which walks the index's `.manifests[]` from the registry and verifies every
 child with the same identity and issuer:
 
 ```bash
-# cosign v3.0.6 on PATH (or COSIGN=/path/to/cosign). Read-only; no credentials.
-scripts/verify-image-signatures.sh ghcr.io/bpalermo/aether/agent@sha256:<index digest>
+# Read-only; no credentials. The target sets COSIGN to the pinned cosign.
+bazel run //tools/cosign:verify_image_signatures -- ghcr.io/bpalermo/aether/agent@sha256:<index digest>
 #   verified index ghcr.io/bpalermo/aether/agent@sha256:…
 #   verified child ghcr.io/bpalermo/aether/agent@sha256:…   (linux/amd64)
 #   verified child ghcr.io/bpalermo/aether/agent@sha256:…   (linux/arm64)
@@ -471,7 +495,15 @@ Identity is `^https://github\.com/bpalermo/aether/\.github/workflows/publish\.ya
 issuer `https://token.actions.githubusercontent.com`. Exit 1 names every index
 or child that did not verify; exit 2 means it could not check (e.g. the digest
 is not an index, or lists no children — a walk over nothing is never a pass).
-The same script runs in `publish.yaml`'s verify step and in `publish-verify`.
+The same target runs in `publish.yaml`'s verify step and in `publish-verify`.
+`--file <refs>` takes one ref per line; relative paths resolve against your
+working directory. Standalone, `COSIGN=/path/to/cosign
+scripts/verify-image-signatures.sh …` still works with any cosign — the version
+is then yours to vouch for.
+
+cosign v3.1.2 verifies both layouts: a pre-2026-09-24 legacy `.sig`
+(`agent@sha256:14949387…`, commit 5b0c199) and a v3 bundle
+(`agent@sha256:066267b6…`, commit 7f8f825) both pass, index and children.
 
 Not signed by this pipeline: any `agent`-family image published before f332061
 (#875, 2026-09-20) — those verify as `no signatures found`. The proxy is signed
@@ -484,7 +516,7 @@ by its own workflow; see the next section.
 aether commit — the chart carries its **digest** in
 `charts/aether/values.yaml` (`proxy.image.digest`). Since #984 that workflow's
 `sign` job runs `cosign sign --recursive` on the index right after the manifest
-job publishes it (same pinned installer, cosign v3.0.6, keyless, v3 bundle
+job publishes it (same Bazel-pinned `//tools/cosign`, keyless, v3 bundle
 layout), verifies the index and every child, and only then lets `bump-chart`
 open the pin PR. A proxy index that does not verify is never pinned.
 
@@ -501,7 +533,7 @@ rejects them, and vice versa. By hand, for whatever digest a chart pins:
 ```bash
 digest="$(sed -nE '/aether-proxy$/,+4 s/^[[:space:]]*digest:[[:space:]]*"(sha256:[0-9a-f]{64})"$/\1/p' charts/aether/values.yaml)"
 CERT_IDENTITY_REGEXP='^https://github\.com/bpalermo/aether/\.github/workflows/proxy-release\.yml@refs/heads/main$' \
-  scripts/verify-image-signatures.sh "ghcr.io/bpalermo/aether/aether-proxy@${digest}"
+  bazel run //tools/cosign:verify_image_signatures -- "ghcr.io/bpalermo/aether/aether-proxy@${digest}"
 ```
 
 **Pins older than signing are unsigned, permanently.** Every proxy image
@@ -510,7 +542,9 @@ that includes the digest pinned when #984 merged
 (`sha256:938c5a57…`, children `bb53bed6…` amd64 / `4a90a7fb…` arm64). The
 hand check above fails on it with `no signatures found` ×3 — that is the
 expected answer, not a regression. The first signed digest is whatever the
-proxy-release run triggered by #984's merge pins.
+proxy-release run triggered by #984's merge pins; the first one verified by hand
+(2026-09-27, cosign v3.1.2 under the identity above) is `sha256:574d5211…`,
+index plus both children (`4d7b967b…`, `1505e36b…`).
 
 **The sweep.** `make check-published` / `publish-verify` check, for every
 commit, the proxy digest that commit's `values.yaml` pins: it must exist, and

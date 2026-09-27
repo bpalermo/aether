@@ -33,6 +33,16 @@ bazel_dep(name = "rules_buf", version = "0.5.4")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
 bazel_dep(name = "rules_helm", version = "0.32.0")
 
+# The cosign CLI -- ONLY the CLI. @rules_img_signer_cosign//cosign is the official
+# prebuilt release binary, selected per exec platform, with its sha256 pinned in
+# the module's cli/cosign_cli.lock.json (v3.1.2 at 0.0.1). //tools/cosign wraps it
+# so CI and a workstation run the same checksummed cosign; bumping cosign is
+# bumping this bazel_dep. The module's other half, the `sign-oci-artifact` signer
+# plugin for `img deploy`, is NOT used: it attaches signatures as OCI 1.1
+# referrers, and ghcr.io has no Referrers API -- our sign/verify/sweep layout is
+# cosign's `sha256-<hex>` fallback tag (docs/runbook.md, "Image signing").
+bazel_dep(name = "rules_img_signer_cosign", version = "0.0.1")
+
 # sh_library, for //bazel/lint/proxy_shell (#848) — the only thing in this
 # workspace that declares shell as a Bazel target, and the reason the shellcheck
 # aspect in //bazel/lint:linters.bzl has anything to visit at all. Bazel 9 no

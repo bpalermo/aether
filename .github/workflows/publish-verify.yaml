@@ -174,11 +174,18 @@ jobs:
       # it (#925: `cosign verify` has no --recursive, so the children must be
       # walked explicitly or they are never checked).
       #
-      # Same pinned installer as publish.yaml (v4.1.2 -> cosign v3.0.6, binary
-      # SHA-256 hardcoded in the pinned commit). Keep the two pins in step.
-      - name: Install cosign
+      # Same cosign as publish.yaml and proxy-release.yml: `bazel run
+      # //tools/cosign...`, the rules_img_signer_cosign bazel_dep's release
+      # binary (sha256 in MODULE.bazel.lock, v3.1.2), fetched and run LOCALLY --
+      # no BuildBuddy key, no --config. One pin for all three workflows, by
+      # construction. Note the checkout above is `main`, so this is main's
+      # cosign whatever commit is under verification.
+      - name: Setup Bazel
         if: success() || steps.verify.conclusion == 'failure'
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
 
       - name: Verify the signatures (every index and every child manifest)
         id: cosign
@@ -202,7 +209,7 @@ jobs:
           rc=0
           CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
           CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-            ./scripts/verify-image-signatures.sh --file signed-refs.txt | tee cosign.log || rc=$?
+            bazel run //tools/cosign:verify_image_signatures -- --file signed-refs.txt | tee cosign.log || rc=$?
 
           # aether-proxy (#984): the digest each checked commit's chart PINS,
           # signed by proxy-release.yml -- a different workflow, so a different
@@ -215,7 +222,7 @@ jobs:
             sort -u proxy-signed-refs.txt > proxy-signed-refs.uniq
             CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/proxy-release\\.yml@refs/heads/main\$" \
             CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-              ./scripts/verify-image-signatures.sh --file proxy-signed-refs.uniq | tee -a cosign.log || rc=$?
+              bazel run //tools/cosign:verify_image_signatures -- --file proxy-signed-refs.uniq | tee -a cosign.log || rc=$?
           else
             echo "aether-proxy: no pin in this window is past the signing cut-over (see the skip lines above)"
           fi

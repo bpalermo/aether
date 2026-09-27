@@ -29,3 +29,13 @@ sh_library(
     srcs = glob(["*.sh"]),
     visibility = ["//visibility:private"],
 )
+
+# The verifier and the helper it sources, for //tools/cosign:verify_image_signatures,
+# which runs it with COSIGN set to the Bazel-pinned cosign binary.
+exports_files(
+    [
+        "ghcr-lib.sh",
+        "verify-image-signatures.sh",
+    ],
+    visibility = ["//tools/cosign:__pkg__"],
+)
