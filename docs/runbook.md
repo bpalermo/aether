@@ -488,7 +488,9 @@ Reproduce with `scripts/publish-verify-control.sh [<base>]`. The offline check,
 `scripts/check-publish-verify-control.sh`, runs in `ci`'s `shell` job. It drives
 the real verifier against a fake registry and shows the control rejects a
 verifier that stopped counting `MISSING`, an absence with no witness, a `MISSING` line
-naming another commit, and a stray `ok`.
+naming another commit, and a stray `ok`. Its fake registry, like `scripts/check-registry-lookup.sh`'s, accepts only the
+bearer token it issued and answers any other with a 401, so a verifier that
+sends the wrong value as the token goes red offline (#999).
 
 ### Where images and charts are published: one setting (proposal 040)
 
@@ -836,8 +838,11 @@ spire-server:
 ```
 
 Changing the entry re-issues every workload SVID on the agents' next fetch; no pod
-roll. Order of operations on a live cluster: SPIRE first, wait for the agents'
-`envoy_sds_*_version` to move on every node, then the allow-list.
+roll. Order of operations on a live cluster: SPIRE first, wait for
+`aether_agent_spire_svid_updates_total{aether_spire_identity="pod",aether_spire_update="rotated"}`
+to move on every node (see "Is rotation happening?" below), then the allow-list. Do
+not gate on `envoy_sds_*_version`: for originating-client identities it moves on
+every svc roll whether or not a new certificate was issued (#992).
 
 **What to expect once a destination is listed.** The agent logs
 `east-west QUIC fan-out quic_clusters=N local_identities=I allow_listed_services=S`
@@ -860,7 +865,16 @@ sum by (aether_cluster) (rate(envoy_cluster_upstream_rq_total{aether_cluster=~".
 sum(rate(envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-1(@.*)?"}[5m]))
 # a twin that cannot connect: the #957 DNS-SAN shape, or UDP:18008 blocked between nodes
 increase(envoy_cluster_upstream_cx_connect_fail{aether_cluster=~".*@.*"}[5m])
+# a twin whose endpoints never arrived (#1008): MUST be 0, fleet-wide, always
+sum(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"})
 ```
+
+Each twin subscribes to its **own** EDS resource, named after the twin cluster
+(`quic:<svc>.<ns>.<domain>@<ns>/<sa>`), and the agent publishes the h2 cluster's
+load assignment under that name too. In `/config_dump` a twin's
+`eds_cluster_config.service_name` equals its own cluster name, never the bare
+`<ns>/<svc>` the h2 cluster uses; if it ever does again, see "QUIC twin never
+leaves warming" below.
 
 On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
@@ -872,6 +886,50 @@ the h2 route it had before, byte-for-byte. The inbound listener and the DNS SANs
 harmless to leave in place. Nothing here needs a proxy roll.
 
 ## 8. Troubleshooting
+
+### QUIC twin never leaves warming / 503 NC on a new ServiceAccount (#1008)
+
+**Symptom.** The first pod of a ServiceAccount that is new on a node gets
+`503` with response flag `NC` (no cluster) for ~15 s on every request to every
+QUIC-enabled destination, then recovers on its own. Other callers on the node
+are unaffected; h2 destinations are unaffected. On talos (rev242) it was 1,060
+client-visible 503/NC in 11 s when the k6 loaders started.
+
+**Read.**
+
+```promql
+# the twin sat in warming (1) from its CDS add until the timeout
+envoy_cluster_warming_state{aether_cluster=~".*@.*"}
+envoy_cluster_manager_warming_clusters
+# and gave up waiting for its endpoints: 1 per affected twin per proxy
+envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}
+```
+
+In the proxy log: `cds: response indicates N added/updated cluster(s)`, then
+~15 s later `gRPC config: initial fetch timed out for
+type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment`, one per
+late twin. The agent is idle through the gap: nothing on the control-plane side
+is pending.
+
+**Cause.** A twin that shares its h2 base's EDS resource name. Envoy's delta-ADS
+`WatchMap` deduplicates subscription interest per (type_url, resource name):
+when the twin arrives *after* the base is subscribed, its watch adds nothing to
+`resource_names_subscribe`, no request is sent, the control plane (correctly)
+sends nothing because the resource did not change, and the twin waits out its
+15 s `initial_fetch_timeout`. At agent start base and twins arrive in one CDS
+response, so only a *late* twin — a new local ServiceAccount — is hit. Fixed in
+#1008: `proxy.QUICClusterFrom` points the twin at its own EDS name and the cache
+publishes the base's `ClusterLoadAssignment` under it
+(`proxy.QUICLoadAssignmentFrom`). Seeing this again means that pairing broke;
+`//test/mtlspool`'s `TestLateQUICTwin*` pair reproduces it against the pinned
+proxy (the negative control times out at ~15 s by design).
+
+**Invariant.** A delta-ADS subscriber must never share a resource name with an
+already-subscribed sibling. It has now bitten twice: SDS (#842, the on-demand
+certificate selector behind every static SVID reference) and EDS (#1008, QUIC
+twins behind their base). Any new cluster, secret or config that is a clone or
+second consumer of an existing resource needs either its own resource name or
+its own `api_config_source`.
 
 ### Forwarded DNS keeps failing after a kube-dns roll
 
@@ -1263,13 +1321,25 @@ path has its own pair, also seeded at zero per attribute set:
 # half-life (2h at the default 4h TTL). `initial` is every pod after an AETHER
 # agent restart (a new process has served nothing yet). `unchanged` is the same
 # certificate redelivered: a stream that dropped and re-subscribed while the
-# SPIRE agent stayed up.
+# SPIRE agent stayed up, or SPIRE re-sending every SVID unchanged (it does so
+# fleet-wide at a JWT-key prepare).
 sum by (k8s_node_name) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod", aether_spire_update="rotated"}[3h]))
-# the agent's own SVID (identity="node"), and the trust-bundle inputs:
+# the agent's own SVID (identity="node"): same three values. node/unchanged is a
+# Workload API response that carried the SVID already served (no snapshot bump);
+# the agent's 30s backstop re-read is not a delivery and never counts. Before
+# #993 node/unchanged could not increment at all. And the trust-bundle inputs:
 # bundle="own", update="rotated" is a trust-ROOT change — SPIRE's 24h signing-CA
 # rotation does not move it, because the bundle is the upstream root.
 sum by (k8s_node_name, aether_spire_bundle, aether_spire_update) (increase(aether_agent_spire_bundle_updates_total[24h]))
 ```
+
+**A zero series is only evidence once the code path can increment it.** Every
+series above is seeded at zero (#717), so it exists whether or not anything can
+ever move it. `node/unchanged` read zero on every node until #993 because the node
+path returned early on an equal SVID without counting; a gate that asserted it
+was zero was vacuous. Before grading on a zero, check the source (or a test)
+shows the path increments it, and prefer a reading from a window in which the
+companion series moved (here: `pod/unchanged` stepping at the same minute).
 
 **`rotated` is "the certificate changed", not "the TTL ran down".** A restarted
 SPIRE agent re-attests and mints fresh SVIDs for every pod on its node, so a
@@ -1285,6 +1355,22 @@ neighbours rotate is holding a certificate that will expire; the agent also logs
 `pod SVID rotated` / `node SVID rotated` at INFO. Before these existed a rotation
 could only be inferred from Envoy's `envoy_sds_*_version` gauges, with every
 proxy-roll minute excluded by hand (a new Envoy changes every gauge once).
+
+**Those gauges are not a rotation signal any more — use the counter (#992).** Since
+the per-connection certificate selector got its own SotW SDS stream (#865, the #842
+fix), the secret of every identity that ORIGINATES mesh connections (`aether_agent`,
+`prober`, `mp_dialer`, `default`, `authz_canary`, `uds_client` on talos) is fetched
+twice: once by the static ADS subscription and once by the selector, which re-serves
+it on every snapshot bump. Envoy keys SDS stats by secret NAME, so both subscriptions
+bump the same `envoy_sds_spiffe_<td>_ns_<ns>_sa_<sa>_version` gauge: over an 8 h soak
+an originator's gauge changed 258–283 times per node, in bursts of ~12 at every svc
+roll, while every other identity's moved 5–18 times (real rotations plus one per proxy
+roll) — a ~50× over-read on exactly the identities a gate is most likely to pick. The
+stat cannot be split without renaming the resources, so the code is unchanged; count
+`rotated` above (it matched the `pod SVID rotated` log lines exactly on 2026-09-19 and
+2026-09-27). `unchanged` additionally fires once per subscribed pod at SPIRE's daily
+JWT-key prepare (~16:05Z) — a redelivery, not a rotation. The SDS
+`init_fetch_timeout` counters are unaffected and keep their meaning below.
 
 Trust bundles do **not** come from the broker (its bundle RPC also needs a
 workload reference, which a node with no managed pods does not have). They are
@@ -1559,7 +1645,7 @@ umbrella that could not close.
 | CNI DEL `agent unreachable` WARN, the `<pin>.delfail` give-up path, the pin unlink (#796) | same — the agent comes back too fast | unit-tested |
 | supervisor `drain_fallback` (#797) | the normal drain path always wins | `aether_supervisor_shutdown_branch_total{branch="drain_fallback"}` has never been non-zero anywhere |
 | edge xDS "registry unreachable … while this workload waits for its first SVID" (#807) | both edge pods reach the registrar in ~3 s | unit-tested only |
-| `svid_updates{update="unchanged"}` (#806) | a SPIRE agent restart re-mints, so it counts `rotated` | would need a Broker stream that drops while the SPIRE agent stays up |
+| `svid_updates{update="unchanged"}` via a dropped Broker stream (#806) | a SPIRE agent restart re-mints, so it counts `rotated` | would need a Broker stream that drops while the SPIRE agent stays up. The series itself is not unexercised: SPIRE re-sends every SVID at a JWT-key prepare, which moved `pod/unchanged` fleet-wide (61 at once, 2026-09-26); `node/unchanged` counts the same redelivery since #993 |
 | orphan prune → SVID unsubscribe (#804) | **not forceable from a harness** — the runtime re-issues CNI DEL at sandbox removal and a restarted agent serves it before the first sweep pass (measured 2026-09-19) | proven once in production (2026-09-18); the deterministic check is the in-process test from #805 |
 
 Two cautions when tempted to "test" one of these:

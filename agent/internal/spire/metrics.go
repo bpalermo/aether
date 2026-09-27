@@ -34,7 +34,9 @@ const (
 	// updateInitial is the first credential served for a subject in this agent
 	// process (every subject after an agent restart); updateRotated replaced a
 	// different one already served; updateUnchanged is a redelivery of the same
-	// bytes, which is what a re-subscribe after a stream failure produces.
+	// bytes, which is what a re-subscribe after a stream failure produces, and what
+	// SPIRE sends when it re-pushes every SVID unchanged. For the node identity it
+	// counts Workload API deliveries only, not the backstop re-read (issue #993).
 	updateInitial   = "initial"
 	updateRotated   = "rotated"
 	updateUnchanged = "unchanged"
@@ -108,7 +110,7 @@ func newBridgeMetrics(meter metric.Meter) (*bridgeMetrics, error) {
 	}
 
 	if m.svidUpdates, err = meter.Int64Counter("aether.agent.spire.svid_updates",
-		metric.WithDescription("X.509-SVIDs the bridge received and served, by identity (pod: a Broker API stream response; node: the agent's own Workload API SVID) and update (initial: first for that subject in this agent process; rotated: replaced a different one; unchanged: same bytes redelivered after a re-subscribe). rotated is the rotation signal: about one per subject per SVID half-life")); err != nil {
+		metric.WithDescription("X.509-SVIDs the bridge received and served, by identity (pod: a Broker API stream response; node: the agent's own Workload API SVID) and update (initial: first for that subject in this agent process; rotated: replaced a different one; unchanged: same bytes redelivered — a pod re-subscribe, or SPIRE re-sending an unchanged SVID; for node, a Workload API delivery only, never the 30s backstop re-read). rotated is the rotation signal: about one per subject per SVID half-life")); err != nil {
 		return nil, fmt.Errorf("svid updates: %w", err)
 	}
 	if m.bundleUpdates, err = meter.Int64Counter("aether.agent.spire.bundle_updates",

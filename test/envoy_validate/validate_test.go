@@ -1032,6 +1032,56 @@ func TestQUICUpstreamsHaveTheirOwnStatsKey(t *testing.T) {
 	}
 }
 
+// TestQUICUpstreamsHaveTheirOwnEDSName: no `quic:` twin may subscribe to
+// another cluster's EDS resource (aether#1008). Over the generated fixture
+// bytes; the fixture carries the h2 base on the bare-service EDS name, which
+// is exactly the name the twins used to share. The anti-vacuity half checks
+// the helper DOES flag that shape.
+func TestQUICUpstreamsHaveTheirOwnEDSName(t *testing.T) {
+	data, err := QUICOutboundBootstrapJSON()
+	if err != nil {
+		t.Fatalf("QUICOutboundBootstrapJSON: %v", err)
+	}
+	bad, err := QUICUpstreamsSharingEDSName(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) > 0 {
+		t.Errorf("quic: clusters sharing an EDS resource name with another cluster: %v", bad)
+	}
+
+	// Anti-vacuity: rewrite every twin back to the base's EDS name (the
+	// pre-#1008 shape) and require the helper to report each one.
+	bs := &bootstrapv3.Bootstrap{}
+	if err := protojson.Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	var twins int
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if strings.HasPrefix(c.GetName(), "quic:") {
+			twins++
+			if c.GetEdsClusterConfig() == nil {
+				t.Fatalf("twin %s has no eds_cluster_config", c.GetName())
+			}
+			c.EdsClusterConfig.ServiceName = quicDestSvc
+		}
+	}
+	if twins < 2 {
+		t.Fatalf("fixture carries %d quic: twins, want >= 2", twins)
+	}
+	shared, err := protojson.Marshal(bs)
+	if err != nil {
+		t.Fatalf("marshal rewritten bootstrap: %v", err)
+	}
+	flagged, err := QUICUpstreamsSharingEDSName(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flagged) != twins {
+		t.Errorf("the shared-EDS-name shape was not reported for every twin: flagged %v of %d", flagged, twins)
+	}
+}
+
 // TestQUICOutboundFixtureCarriesTheSelection is the anti-vacuity half of the
 // QUIC upstream checks: the fixture must contain both `quic:` twins with a
 // QuicUpstreamTransport, and a route whose matcher arms map each source

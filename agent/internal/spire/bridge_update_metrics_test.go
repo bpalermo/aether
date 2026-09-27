@@ -105,8 +105,9 @@ func TestPodSVIDUpdateClassification(t *testing.T) {
 }
 
 // TestNodeIdentityUpdateClassification: the agent's own SVID and trust bundle are
-// initial once, silent while unchanged (the refresher polls), and rotated when
-// SPIRE hands the agent a new certificate or a new root.
+// initial once and rotated when SPIRE hands the agent a new certificate or a new
+// root. An equal node SVID is unchanged only when SPIRE redelivered it (issue
+// #993); the backstop tick re-reads a cached value and stays silent.
 func TestNodeIdentityUpdateClassification(t *testing.T) {
 	ca := spiretest.NewCA(t)
 	td := spiffeid.RequireTrustDomainFromString(spiretest.TrustDomain)
@@ -124,19 +125,25 @@ func TestNodeIdentityUpdateClassification(t *testing.T) {
 	}
 
 	for range 3 {
-		require.NoError(t, b.refreshNodeSVID(ctx))
+		require.NoError(t, b.refreshNodeSVID(ctx, false))
 		require.NoError(t, b.refreshWorkloadBundle(ctx))
 	}
 	require.Equal(t, int64(1), svidUpdates(t, reader, identityNode, updateInitial))
 	require.Zero(t, svidUpdates(t, reader, identityNode, updateRotated))
+	require.Zero(t, svidUpdates(t, reader, identityNode, updateUnchanged), "a backstop tick is not a delivery")
+
+	// SPIRE redelivers the same bytes: unchanged, once per delivery.
+	require.NoError(t, b.refreshNodeSVID(ctx, true))
+	require.Equal(t, int64(1), svidUpdates(t, reader, identityNode, updateUnchanged))
 	require.Equal(t, int64(1), ownBundle(updateInitial))
 	require.Zero(t, ownBundle(updateRotated))
 
 	// A rotated SVID under the same root: the SVID counts, the bundle does not.
 	identity.Arrive(ca.SVID(t, testAgentID), ca.Bundle(td))
-	require.NoError(t, b.refreshNodeSVID(ctx))
+	require.NoError(t, b.refreshNodeSVID(ctx, true))
 	require.NoError(t, b.refreshWorkloadBundle(ctx))
 	require.Equal(t, int64(1), svidUpdates(t, reader, identityNode, updateRotated))
+	require.Equal(t, int64(1), svidUpdates(t, reader, identityNode, updateUnchanged))
 	require.Zero(t, ownBundle(updateRotated))
 
 	// A new root.
