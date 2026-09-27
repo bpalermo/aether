@@ -15,6 +15,10 @@
 #   e2e/soak/sample-proxy-rss.sh --at-age 1800   # wait until the YOUNGEST proxy pod
 #                                                # is 1800s old, then sample once
 #
+# --context NAME (or SOAK_CONTEXT) picks the kubeconfig context; default talos-main.
+# Every kubectl call passes it, so an empty current-context (kind delete clears it)
+# cannot silently point the sampler at nothing (#951).
+#
 # --at-age polls every 15s for at most 20 minutes. If the deadline passes it samples
 # anyway and warns on stderr -- a row with an honest age_seconds beats no row at all.
 #
@@ -33,11 +37,12 @@ CONTAINER="${SOAK_PROXY_CONTAINER:-proxy}"
 OUT="${SOAK_PROXY_RSS_TSV:-/tmp/soak-proxy-rss.tsv}"
 POLL_SECONDS="${SOAK_PROXY_RSS_POLL:-15}"
 MAX_WAIT_SECONDS="${SOAK_PROXY_RSS_MAX_WAIT:-1200}"
+CTX="${SOAK_CONTEXT:-talos-main}"
 
 AT_AGE=""
 
 usage() {
-	sed -n '2,30p' "$0"
+	sed -n '2,31p' "$0"
 	exit "${1:-0}"
 }
 
@@ -51,6 +56,18 @@ while [ $# -gt 0 ]; do
 		fi
 		shift 2
 		;;
+	--context)
+		CTX="${2:-}"
+		if [ -z "$CTX" ]; then
+			echo "sample-proxy-rss: --context needs a kubeconfig context name" >&2
+			exit 2
+		fi
+		shift 2
+		;;
+	--context=*)
+		CTX="${1#--context=}"
+		shift
+		;;
 	-h | --help) usage 0 ;;
 	*)
 		echo "sample-proxy-rss: unknown argument '$1'" >&2
@@ -62,7 +79,7 @@ done
 # "<pod> <node> <startTime>" per Running proxy pod. startTime is the incarnation's
 # birth, which is what makes a reading age-matched rather than node-matched.
 pod_table() {
-	kubectl get pods -n "$NS" -l "$SELECTOR" \
+	kubectl --context "$CTX" get pods -n "$NS" -l "$SELECTOR" \
 		--field-selector=status.phase=Running \
 		-o go-template='{{range .items}}{{.metadata.name}} {{.spec.nodeName}} {{.status.startTime}}{{"\n"}}{{end}}' \
 		2>/dev/null | grep -v '<no value>'
@@ -85,7 +102,7 @@ youngest_age() {
 # --containers` prints POD NAME CPU MEMORY; the proxy pod also runs an `authz`
 # container, so filtering on the container name is mandatory.
 mem_table() {
-	kubectl top pods -n "$NS" -l "$SELECTOR" --containers --no-headers 2>/dev/null |
+	kubectl --context "$CTX" top pods -n "$NS" -l "$SELECTOR" --containers --no-headers 2>/dev/null |
 		awk -v c="$CONTAINER" '$2 == c { print $1, $4 }'
 }
 
@@ -109,7 +126,7 @@ sample_once() {
 	local mems
 	mems=$(mem_table)
 	if [ -z "$mems" ]; then
-		echo "sample-proxy-rss: no '$CONTAINER' rows from 'kubectl top pods -n $NS -l $SELECTOR --containers'" >&2
+		echo "sample-proxy-rss: no '$CONTAINER' rows from 'kubectl --context $CTX top pods -n $NS -l $SELECTOR --containers'" >&2
 	fi
 
 	if [ ! -s "$OUT" ]; then

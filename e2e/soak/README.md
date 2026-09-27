@@ -76,11 +76,35 @@ kubectl apply -f e2e/soak/k6-runner.yaml
 # interleave their schedules into ~62 rolls instead of 31, which does not fail
 # the run -- it silently invalidates it. Match on the ABSOLUTE path, never on
 # "soak/churn.sh": see "Stopping the churn driver" below for why.
-pgrep -f "bash $PWD/e2e/soak/churn.sh" && echo "a driver is already running" || \
-  nohup setsid bash "$PWD/e2e/soak/churn.sh" "rev192/0.92.0" >/dev/null 2>&1 &
+#
+# Pass the context EXPLICITLY (#951). churn.sh never uses the kubeconfig's
+# current-context, which `kind delete cluster` clears when it pointed at the kind
+# cluster: on 2026-09-26 that made every roll hit localhost:8080 for 58 minutes
+# while the soak looked healthy. The foreground --preflight run is the loud one:
+# it checks /readyz, that every DaemonSet/Deployment the schedule rolls (and the
+# SHRINK target) exists, and that the context may patch them, and exits non-zero
+# with the reason on stderr. The detached launch pre-flights again, but its stderr
+# goes to /dev/null -- so never skip the foreground run. A failed pre-flight
+# writes NOTHING: /tmp/soak-churn.log is neither archived nor truncated, and no T0
+# line exists.
+if pgrep -f "bash $PWD/e2e/soak/churn.sh"; then
+  echo "a driver is already running"
+elif bash "$PWD/e2e/soak/churn.sh" --context talos-main --preflight; then
+  nohup setsid bash "$PWD/e2e/soak/churn.sh" --context talos-main "rev192/0.92.0" >/dev/null 2>&1 &
+fi
+# Confirm the launch: the first line must be TODAY's start line, the second the
+# context. A stale T0 means the detached run refused to start.
+head -2 /tmp/soak-churn.log
+#
+# Fail fast: the FIRST `FAILED` roll (or a SHRINK that cannot scale) ends the
+# driver with `CHURN ABORTED ...` and exit 1, restoring the SHRINK target first.
+# It no longer carries on with holes in the schedule. An ABORTED line means stop,
+# fix, relaunch with a fresh T0 -- that run is not gradeable.
+grep -E "FAILED|CHURN ABORTED" /tmp/soak-churn.log   # expect nothing
 
-# 4. Age-matched proxy RSS baseline at T0+30m (churn.sh takes the rest itself).
-bash e2e/soak/sample-proxy-rss.sh --at-age 1800
+# 4. Age-matched proxy RSS baseline at T0+30m (churn.sh takes the rest itself,
+#    passing its own --context through).
+bash e2e/soak/sample-proxy-rss.sh --context talos-main --at-age 1800
 
 # 5. Teardown AFTER k6 has exited on its own (~T0+8h26m), never at T0+8h sharp:
 #    k6 publishes no metrics to Prometheus here, so `http_req_failed` exists only
