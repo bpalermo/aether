@@ -1,6 +1,8 @@
 # Proposal 039: A CSI Driver as the UDS Carrier
 
-**Status:** Draft. Recommends building it, **after Phase 0 settles one question**.
+**Status:** Draft. Recommends building it, **after Phase 0 settles one question**,
+as a **breaking cut-over with no carrier coexistence** (decision 2026-09-27: a release
+of dual paths is dearer than migrating the two known UDS workloads in the same upgrade).
 Phase 0 has to confirm or refute a symlink confused-deputy in the shipped 034 design
 (see *The finding that decides it*). If the attack is confirmed, this proposal is the
 structural fix and goes ahead. If it is refuted, the remaining benefits do not justify
@@ -414,9 +416,12 @@ unmounted directory fails `ENOENT` exactly like a dead app.)
    and the talos soak's echo. A CSI driver, a registrar sidecar image, a CSIDriver
    object, a new CNIPod field, a migration, and a deprecation window is a lot of
    machinery for that. It is justified by fixing a security class, not by features.
-3. **Two carriers coexist for at least one release.** That means dual paths in the
-   resolver, the webhook, docs, and e2e. Removing `emptyDir` later is a breaking chart
-   change (the proxy mount goes) for any workload that did not migrate.
+3. **It is a breaking change for today's UDS workloads** (decision 2026-09-27: no
+   coexistence — the CSI volume becomes the only carrier in the release that ships
+   it). The known UDS workloads are two (the e2e `udsecho` and the soak's echo), both
+   ours, and each migrates by changing one volume source. That is cheaper than a
+   release of dual paths in the resolver, the webhook, docs and e2e, and it removes
+   the proxy's kubelet-pods mount in the same step rather than one release later.
 
 ## Alternatives
 
@@ -463,15 +468,15 @@ unmounted directory fails `ENOENT` exactly like a dead app.)
 |---|---|---|---|
 | **0 — settle the finding** | 0a (issue + kind repro); 0b (interim) | 0a: `e2e/uds.sh` gains a `hostile` leg, where a `udsecho` variant swaps `app.sock` for a symlink to `/run/aether/cni.sock` (and, SPIRE on, to the workload socket) and calls itself with `protocol: grpc`. The assertion is that the gRPC reaches the agent. The leg must be seen **failing** (attack works) before any fix, so it is not a vacuous gate. 0b, only if 0a confirms: supervisor `mount_setattr(AT_RECURSIVE, NOSYMFOLLOW)` on its kubelet-pods view, the agent refuses `medium: Memory` UDS volumes, and `udsWorkloads.enabled` defaults to `false` (chart bump, release note). The 0a leg then asserts `ELOOP`/no delivery. | 0a result decides the proposal's fate (see Status) |
 | **1 — the driver** | 1a, 1b | 1a: `agent/cmd/uds-csi` + `agent/internal/udscsi/` (Identity/Node services, per-pod tmpfs + bind, idempotency, unit tests against a fake mounter, and a root-only mount test in the kernel-gate CI lane the TPROXY work added). 1b: chart (`uds-csi-daemonset.yaml`, `CSIDriver`, values, Chart.yaml bump), image, `deps_test`. Inert until a pod declares the volume. | driver registers on kind; `FailedMount` on bad requests |
-| **2 — the agent learns the CSI kind** | 2 | `CNIPod.uds_csi_volume = 12` via `enhanceCNIPod`; `udspath.ResolveCSI`; `--uds-csi-root`; `resolve_failures{reason}` counter (seeded at 0 so it is never "no series"); `EndpointPolicy` webhook computes the 54-byte CSI budget when the pod's volume is CSI (for a policy the webhook cannot see the pod, so it keeps the conservative legacy budget and the agent stays fail-closed, as today) | `e2e/uds.sh` runs every existing leg against **both** carriers; the hostile leg passes on the CSI carrier with `udsWorkloads.enabled: false` (no kubelet-pods mount on the proxy at all) |
-| **3 — talos** | — | Deploy; migrate the soak's UDS echo to the CSI carrier; validate across an **agent roll, a uds-csi roll, a proxy roll and a node reboot**: mounts persist across a plugin roll, republish is idempotent after reboot, Terminating pods drain while the plugin rolls. One 8 h soak with the UDS leg on the CSI carrier. | soak grade |
-| **4 — default and deprecate** | 4 | `workload-requirements.md` leads with the CSI carrier; `emptyDir` documented as deprecated; podmutate warns (admission warning, not a rejection) on an `emptyDir` carrier. | one release |
-| **5 — remove `emptyDir`** | 5 | Drop the `kubernetes.io~empty-dir` resolver, `--kubelet-pods-dir`, the proxy's `/var/lib/kubelet/pods` mount and `proxy.udsWorkloads` (chart major bump); 034 Phase 2 is built on the CSI carrier only. | Breaking; release note |
+| **2 — the CSI volume becomes the only carrier (BREAKING)** | 2 | `CNIPod.uds_csi_volume = 12` via `enhanceCNIPod`; `udspath.ResolveCSI` **replaces** the `kubernetes.io~empty-dir` resolver (the emptyDir shape, `--kubelet-pods-dir`, the proxy's `/var/lib/kubelet/pods` mount and `proxy.udsWorkloads` are deleted in the same PR — chart major bump, release note); `--uds-csi-root`; `resolve_failures{reason}` counter (seeded at 0 so it is never "no series"); the `EndpointPolicy` webhook computes the 54-byte CSI budget (for a policy the webhook cannot see the pod, so it keeps a conservative budget and the agent stays fail-closed, as today); podmutate **rejects** an `emptyDir` carrier with a message naming the CSI volume; `e2e/udsecho` and `e2e/soak/udsecho` switch their volume source in the same PR. | `e2e/uds.sh` runs every existing leg on the CSI carrier; the hostile leg passes with no kubelet-pods mount on the proxy at all; an `emptyDir` carrier is rejected at admission (seen red on the old build) |
+| **3 — talos** | — | Migrate the soak's UDS echo to the CSI volume in the same `helm upgrade` (the old carrier stops resolving the moment the agent rolls, so the workload and the chart move together); validate across an **agent roll, a uds-csi roll, a proxy roll and a node reboot**: mounts persist across a plugin roll, republish is idempotent after reboot, Terminating pods drain while the plugin rolls. One 8 h soak with the UDS leg on the CSI carrier. 034 Phase 2 is built on the CSI carrier only. | soak grade |
 
-Coexistence during 1–4 is per pod and needs no flag. The carrier is whatever the
-volume named by the annotation or policy *is*, so migrating a workload means changing
-one volume source and rolling it. Callers see nothing, exactly as in 034: endpoints
-stay `pod_ip:18008`, and multi-cluster, E/W waypoint, and delegated liveness are all
+No coexistence phase and no deprecation window (decision 2026-09-27): a UDS workload
+that does not switch its volume source in the upgrade that ships Phase 2 stops being
+delivered — loudly, at admission for new pods and as `resolve_failures{reason="emptydir"}`
+for running ones — which is the same "breaking change, no compatibility flags" rule the
+TPROXY cut-over used. Callers see nothing, exactly as in 034: endpoints stay
+`pod_ip:18008`, and multi-cluster, E/W waypoint, and delegated liveness are all
 unaffected.
 
 ## Open questions
