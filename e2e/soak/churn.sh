@@ -5,10 +5,31 @@
 # instant) as the stress peak -- followed by a deliberate 90-minute NO-ROLL WINDOW
 # and a demand-set SHRINK.
 #
-# Run detached -- it sleeps between rolls for ~7h32m:
-#   nohup setsid bash e2e/soak/churn.sh "rev192/0.92.0" >/dev/null 2>&1 &
+# Pre-flight in the foreground first (loud, exits non-zero on any problem), then
+# run detached -- it sleeps between rolls for ~7h32m:
+#   bash "$PWD/e2e/soak/churn.sh" --context talos-main --preflight &&
+#     nohup setsid bash "$PWD/e2e/soak/churn.sh" --context talos-main "rev192/0.92.0" >/dev/null 2>&1 &
 #
 # Progress is appended to $LOG with UTC timestamps; grep ROLLED to count.
+#
+# ------------------------------------------------- context, pre-flight, abort (#951)
+#
+#   --context NAME   kubeconfig context for EVERY kubectl call (also SOAK_CONTEXT;
+#                    default talos-main). Never the kubeconfig's current-context:
+#                    `kind delete cluster` clears it, and on 2026-09-26 the driver
+#                    then ran 58 minutes with zero rolls -- every `rollout restart`
+#                    hit localhost:8080, logged FAILED, and the schedule carried on
+#                    while k6 and the prober made the soak look healthy.
+#   --preflight      run the pre-flight only, print the result, exit.
+#
+# Pre-flight runs BEFORE the log is touched and before T0: the API server must answer
+# /readyz, every workload the schedule rolls (and the SHRINK target) must exist, and
+# the context must be allowed to patch them. Any failure prints to stderr and exits 2
+# with $LOG untouched -- a bad launch leaves no half-run log behind.
+#
+# The first FAILED roll (or a SHRINK that cannot scale) logs `CHURN ABORTED` and exits
+# 1, after restoring the shrink target. A schedule with holes is not a soak: stop,
+# fix, relaunch with a fresh T0.
 #
 # ---------------------------------------------------------------- the schedule
 #
@@ -77,9 +98,46 @@
 # Both steps are opt-out (default ON):  SOAK_NO_ROLL_WINDOW=0   SOAK_SHRINK=0
 set -uo pipefail
 
-BUILD_LABEL="${1:-unspecified-build}"
+CTX="${SOAK_CONTEXT:-talos-main}"
+PREFLIGHT_ONLY=0
+BUILD_LABEL=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--context)
+		CTX="${2:-}"
+		shift 2 || shift
+		;;
+	--context=*)
+		CTX="${1#--context=}"
+		shift
+		;;
+	--preflight)
+		PREFLIGHT_ONLY=1
+		shift
+		;;
+	-*)
+		echo "churn.sh: unknown flag '$1' (usage: churn.sh [--context NAME] [--preflight] [BUILD_LABEL])" >&2
+		exit 2
+		;;
+	*)
+		if [ -n "$BUILD_LABEL" ]; then
+			echo "churn.sh: more than one BUILD_LABEL ('$BUILD_LABEL', '$1')" >&2
+			exit 2
+		fi
+		BUILD_LABEL="$1"
+		shift
+		;;
+	esac
+done
+BUILD_LABEL="${BUILD_LABEL:-unspecified-build}"
+if [ -z "$CTX" ]; then
+	echo "churn.sh: --context needs a kubeconfig context name" >&2
+	exit 2
+fi
 LOG="${SOAK_CHURN_LOG:-/tmp/soak-churn.log}"
-T0=$(date +%s)
+
+# Every kubectl call in this script goes through k: the context is never implicit.
+k() { kubectl --context "$CTX" "$@"; }
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SAMPLER="${SOAK_PROXY_RSS_SAMPLER:-$HERE/sample-proxy-rss.sh}"
@@ -100,6 +158,52 @@ SHRINK_TARGET="${SOAK_SHRINK_TARGET:-deployment/svc-5}"
 SHRINK_SECONDS="${SOAK_SHRINK_SECONDS:-90}"
 SHRINK_PREV=""
 
+# Pre-flight (#951). Writes to stderr only -- never to $LOG -- and runs before T0.
+# "<namespace> <kind>/<name>" for every workload the schedule or the SHRINK touches.
+PREFLIGHT_TARGETS=(
+	"aether-system daemonset/aether-agent"
+	"aether-system daemonset/aether-proxy"
+	"aether-system daemonset/aether-mesh-dns"
+	"aether-ingress deployment/aether-edge"
+	"aether-test deployment/svc-1"
+	"aether-test deployment/svc-2"
+	"aether-test deployment/svc-3"
+	"aether-test deployment/svc-4"
+	"aether-test deployment/svc-5"
+	"$SHRINK_NS $SHRINK_TARGET"
+)
+preflight() {
+	local out fail=0 ns obj t
+	if ! out=$(k --request-timeout=15s get --raw /readyz 2>&1); then
+		echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' cannot reach a ready API server:" >&2
+		printf '  %s\n' "$out" >&2
+		echo "churn.sh: refusing to start; $LOG untouched, no T0 written. Check \`kubectl config get-contexts\` and pass --context." >&2
+		return 1
+	fi
+	for t in "${PREFLIGHT_TARGETS[@]}"; do
+		read -r ns obj <<<"$t"
+		if ! out=$(k --request-timeout=15s -n "$ns" get "$obj" -o name 2>&1); then
+			echo "churn.sh: PRE-FLIGHT FAILED: $ns/$obj not found on context '$CTX': $out" >&2
+			fail=1
+			continue
+		fi
+		if ! out=$(k --request-timeout=15s -n "$ns" auth can-i patch "$obj" 2>&1); then
+			echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' may not patch $ns/$obj ($out)" >&2
+			fail=1
+		fi
+	done
+	if [ "$fail" -ne 0 ]; then
+		echo "churn.sh: refusing to start; $LOG untouched, no T0 written." >&2
+		return 1
+	fi
+	echo "churn.sh: pre-flight OK on context '$CTX' (API ready; ${#PREFLIGHT_TARGETS[@]} targets present and patchable)" >&2
+}
+
+if ! preflight; then exit 2; fi
+if [ "$PREFLIGHT_ONLY" = "1" ]; then exit 0; fi
+
+T0=$(date +%s)
+
 # Start a FRESH log, archiving any previous run alongside it. Without this the driver
 # appends to the last soak's file, and `grep -c ROLLED` -- which teardown uses to confirm
 # 31 rolls -- silently double-counts, so a run looks complete when it is not.
@@ -115,12 +219,23 @@ restore_shrink() {
 	if [ -n "$SHRINK_PREV" ]; then
 		local prev="$SHRINK_PREV"
 		SHRINK_PREV=""
-		if kubectl -n "$SHRINK_NS" scale "$SHRINK_TARGET" --replicas="$prev" >>"$LOG" 2>&1; then
+		if k -n "$SHRINK_NS" scale "$SHRINK_TARGET" --replicas="$prev" >>"$LOG" 2>&1; then
 			log "SHRINK done $SHRINK_NS/$SHRINK_TARGET restored to replicas=$prev"
 		else
 			log "SHRINK FAILED to restore $SHRINK_NS/$SHRINK_TARGET to replicas=$prev -- RESTORE BY HAND"
+			return 1
 		fi
 	fi
+}
+
+# Fail fast (#951): the first failure ends the run, loudly. Queued RSS samplers are
+# killed so nothing appends to the log after the ABORTED line; the EXIT trap restores
+# a SHRINK in progress.
+abort() {
+	log "CHURN ABORTED: $* -- stop, fix, relaunch with a fresh T0 (context=$CTX)"
+	local j
+	for j in $(jobs -p); do kill "$j" 2>/dev/null; done
+	exit 1
 }
 # Split on purpose (#835). `trap restore_shrink EXIT INT TERM` made `kill -TERM`
 # do the OPPOSITE of stopping the driver: restore_shrink RETURNS rather than
@@ -146,11 +261,14 @@ waituntil() {
 	if [ "$delta" -gt 0 ]; then sleep "$delta"; fi
 }
 
+# Returns non-zero on failure; the caller aborts (a roll inside the TRIPLE runs in
+# a subshell, where exiting would only end the subshell).
 roll() {
-	if kubectl rollout restart "$2" -n "$1" >>"$LOG" 2>&1; then
+	if k rollout restart "$2" -n "$1" >>"$LOG" 2>&1; then
 		log "ROLLED $1/$2"
 	else
 		log "FAILED $1/$2"
+		return 1
 	fi
 }
 
@@ -164,34 +282,35 @@ schedule_rss_sample() {
 	fi
 	(
 		sleep "$PROXY_RSS_DELAY"
-		bash "$SAMPLER" --at-age "$PROXY_RSS_AGE"
+		bash "$SAMPLER" --context "$CTX" --at-age "$PROXY_RSS_AGE"
 	) >>"$LOG" 2>&1 &
 	log "RSS SAMPLE queued for T+${PROXY_RSS_AGE}s after this aether-proxy roll (#628)"
 }
 
 roll_proxy() {
-	roll aether-system daemonset/aether-proxy
+	roll aether-system daemonset/aether-proxy || abort "roll failed: aether-system/daemonset/aether-proxy"
 	schedule_rss_sample
 }
 
 shrink() {
 	local prev
-	prev=$(kubectl -n "$SHRINK_NS" get "$SHRINK_TARGET" -o jsonpath='{.spec.replicas}' 2>>"$LOG")
+	prev=$(k -n "$SHRINK_NS" get "$SHRINK_TARGET" -o jsonpath='{.spec.replicas}' 2>>"$LOG")
 	if ! [[ "$prev" =~ ^[0-9]+$ ]] || [ "$prev" -eq 0 ]; then
 		log "SHRINK skipped: cannot read a non-zero .spec.replicas from $SHRINK_NS/$SHRINK_TARGET (got '${prev}')"
-		return
+		abort "SHRINK could not read $SHRINK_NS/$SHRINK_TARGET"
 	fi
 	log "SHRINK begin $SHRINK_NS/$SHRINK_TARGET replicas=$prev -> 0 for ${SHRINK_SECONDS}s (demand-set shrink, #682)"
-	if ! kubectl -n "$SHRINK_NS" scale "$SHRINK_TARGET" --replicas=0 >>"$LOG" 2>&1; then
+	if ! k -n "$SHRINK_NS" scale "$SHRINK_TARGET" --replicas=0 >>"$LOG" 2>&1; then
 		log "SHRINK FAILED to scale $SHRINK_NS/$SHRINK_TARGET down; leaving it at $prev"
-		return
+		abort "SHRINK could not scale $SHRINK_NS/$SHRINK_TARGET down"
 	fi
 	SHRINK_PREV="$prev"
 	sleep "$SHRINK_SECONDS"
-	restore_shrink
+	restore_shrink || abort "SHRINK could not restore $SHRINK_NS/$SHRINK_TARGET"
 }
 
 log "churn driver start T0=$(date -u +%FT%TZ) build=$BUILD_LABEL"
+log "churn driver context=$CTX (pre-flight passed)"
 
 # "<offset-minutes> <kind> [name]"
 SCHED=(
@@ -207,11 +326,11 @@ for entry in "${SCHED[@]}"; do
 	read -r off kind name <<<"$entry"
 	waituntil "$off"
 	case "$kind" in
-	svc) roll aether-test "deployment/$name" ;;
+	svc) roll aether-test "deployment/$name" || abort "roll failed: aether-test/deployment/$name" ;;
 	proxy) roll_proxy ;;
-	agent) roll aether-system daemonset/aether-agent ;;
-	meshdns) roll aether-system daemonset/aether-mesh-dns ;;
-	edge) roll aether-ingress deployment/aether-edge ;;
+	agent) roll aether-system daemonset/aether-agent || abort "roll failed: aether-system/daemonset/aether-agent" ;;
+	meshdns) roll aether-system daemonset/aether-mesh-dns || abort "roll failed: aether-system/daemonset/aether-mesh-dns" ;;
+	edge) roll aether-ingress deployment/aether-edge || abort "roll failed: aether-ingress/deployment/aether-edge" ;;
 	TRIPLE)
 		log "CONCURRENT triple begin"
 		# Wait on these three PIDs specifically: a bare `wait` would also block on
@@ -222,13 +341,19 @@ for entry in "${SCHED[@]}"; do
 		t_proxy=$!
 		roll aether-test deployment/svc-3 &
 		t_svc=$!
-		wait "$t_agent" "$t_proxy" "$t_svc"
+		# Wait on each PID separately: `wait a b c` returns only the LAST status, and
+		# every one of the three must have rolled.
+		t_fail=""
+		wait "$t_agent" || t_fail="$t_fail agent"
+		wait "$t_proxy" || t_fail="$t_fail proxy"
+		wait "$t_svc" || t_fail="$t_fail svc-3"
+		if [ -n "$t_fail" ]; then abort "CONCURRENT triple roll failed:$t_fail"; fi
 		log "CONCURRENT triple done"
 		# The TRIPLE-fresh proxy incarnation is #628's worst observed data point
 		# (316Mi in 9 minutes on 08-03), so age-match it too.
 		schedule_rss_sample
 		;;
-	*) log "UNKNOWN kind $kind" ;;
+	*) abort "UNKNOWN kind $kind" ;;
 	esac
 done
 
