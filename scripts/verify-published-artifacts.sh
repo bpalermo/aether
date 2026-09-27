@@ -41,9 +41,20 @@
 #      would look at them. An index whose children cannot be enumerated (or
 #      which has none) is exit 2, never a pass.
 #
-# (3) and (4) ask whether a signature is THERE. Whether it VERIFIES is
+#   5. The aether-proxy image the commit DEPLOYS (#984): the index digest
+#      pinned in that commit's charts/aether/values.yaml — not a `*-<sha>` tag,
+#      because proxy-release.yml versions the proxy by the commit that changed
+#      proxy/, and every later commit ships the same pin. The digest must exist,
+#      and the index and every child must carry a signature. Pins introduced
+#      before proxy signing existed, whose digest has no signature tag, are
+#      printed as `skip` and not counted — see scripts/proxy-pin-lib.sh for the
+#      cut-over; a pin introduced after it with no signature is MISSING.
+#
+# (3), (4) and (5) ask whether a signature is THERE. Whether it VERIFIES is
 # scripts/verify-image-signatures.sh's job; set SIGNED_REFS_OUT=<file> and this
 # script appends each resolved `ghcr.io/<repo>@<index digest>` for it to read.
+# The proxy is signed by a DIFFERENT workflow (proxy-release.yml, so a different
+# certificate identity); its refs go to PROXY_SIGNED_REFS_OUT=<file> instead.
 #
 # That is every artefact the `Push charts + images` step publishes, bar the bare
 # mutable `charts/*:<X.Y.Z>` tags, which carry no commit coordinate and which no
@@ -99,6 +110,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${here}/ghcr-lib.sh"
 # shellcheck source=scripts/push-heads-lib.sh
 . "${here}/push-heads-lib.sh"
+# shellcheck source=scripts/proxy-pin-lib.sh
+. "${here}/proxy-pin-lib.sh"
 
 if [ "$#" -eq 0 ]; then
 	echo "usage: $(basename "$0") {--recent | <commit-ish> [<commit-ish>...]}" >&2
@@ -353,10 +366,62 @@ verify_commit() {
 		fi
 	done
 
-	# 4 charts + 8 images + 8 index signatures + one signature per child. If the
-	# loops ever stop iterating, this says so instead of reporting a clean run
-	# over nothing.
-	local expected=$((${#GHCR_CHARTS[@]} + 2 * ${#GHCR_IMAGE_REPOS[@]} + expected_children))
+	# 5. the aether-proxy image this commit's chart pins (#984).
+	local proxy_expected=0 values pin verdict got
+	if ! values="$(git show "${sha}:${PROXY_VALUES_PATH}")" ||
+		! pin="$(printf '%s\n' "$values" | proxy_pinned_digest)"; then
+		echo "::error::could not read the aether-proxy digest pinned in ${PROXY_VALUES_PATH} at ${sha}" >&2
+		exit 2
+	fi
+	if ! tok="$(ghcr_registry_token "$PROXY_REPO")" || [ -z "$tok" ]; then
+		echo "::error::could not obtain a pull token for ${PROXY_REPO}" >&2
+		exit 2
+	fi
+	if ! tags="$(ghcr_all_tags "$PROXY_REPO" "$tok")"; then
+		echo "::error::could not list tags for ${PROXY_REPO}" >&2
+		exit 2
+	fi
+	if ! verdict="$(proxy_pin_verdict "$sha" "$pin" "$tags")"; then
+		exit 2
+	fi
+	case "$verdict" in
+	"skip "*)
+		# Printed, never silent, and never counted: a skipped check is not a pass.
+		say "  skip    ghcr.io/${PROXY_REPO}@${pin} (pinned by ${verdict#skip }, before proxy signing existed — cut-over ${PROXY_SIGNING_CUTOVER:0:12}; unsigned by history, #984)"
+		;;
+	check)
+		got="$(ghcr_manifest_digest "$PROXY_REPO" "$pin" "$tok")" || got=""
+		if [ "$got" != "$pin" ]; then
+			proxy_expected=2
+			absent "ghcr.io/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH}; the registry does not serve it)"
+			absent "ghcr.io/${PROXY_REPO} signature for pinned ${pin} (no image to sign)"
+		else
+			present "ghcr.io/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH})"
+			check_signature "$PROXY_REPO" "$pin" "$tags" "proxy index"
+			if ! children="$(ghcr_index_children "$PROXY_REPO" "$pin" "$tok")" || [ -z "$children" ]; then
+				echo "::error::could not enumerate the child manifests of ghcr.io/${PROXY_REPO}@${pin}" >&2
+				exit 2
+			fi
+			proxy_expected=2
+			while read -r child; do
+				proxy_expected=$((proxy_expected + 1))
+				check_signature "$PROXY_REPO" "$child" "$tags" "proxy child"
+			done <<<"$children"
+			if [ -n "${PROXY_SIGNED_REFS_OUT:-}" ]; then
+				printf 'ghcr.io/%s@%s\n' "$PROXY_REPO" "$pin" >>"$PROXY_SIGNED_REFS_OUT"
+			fi
+		fi
+		;;
+	*)
+		echo "::error::internal: unexpected proxy pin verdict '${verdict}'" >&2
+		exit 2
+		;;
+	esac
+
+	# 4 charts + 8 images + 8 index signatures + one signature per child, plus
+	# the proxy pin's checks. If the loops ever stop iterating, this says so
+	# instead of reporting a clean run over nothing.
+	local expected=$((${#GHCR_CHARTS[@]} + 2 * ${#GHCR_IMAGE_REPOS[@]} + expected_children + proxy_expected))
 	local did=$((checks_total - before))
 	if [ "$did" -ne "$expected" ]; then
 		echo "::error::internal: ran ${did} checks for ${sha}, expected ${expected}" >&2

@@ -3,7 +3,8 @@ name: proxy-release
 # Post-merge release for the custom Envoy (//proxy): build per arch — both legs
 # offload the Envoy compile to BuildBuddy RBE (amd64 = x64 pool, arm64 = arm64
 # pool, driven from a native arm64 runner). Push each arch by DIGEST (no per-arch tags),
-# then assemble one multi-arch manifest tagged with the commit SHA.
+# then assemble one multi-arch manifest tagged with the commit SHA, sign it
+# keyless (index + children, #984), and only then pin it into the chart.
 # `bazel run //:push` runs the pusher locally, so the arm64 leg keeps a native
 # ubuntu-24.04-arm runner (RBE compiles the binary, runner executes the pusher).
 on:
@@ -16,6 +17,12 @@ on:
     # later negative wins, hence it must follow "proxy/**". `proxy/**/*.md`
     # matches proxy/README.md as well as nested ones ("**/" matches zero
     # directories).
+    #
+    # This file is in the list on purpose: a change to how the proxy is released
+    # (e.g. #984, which added signing) must itself produce a release, so the
+    # merge publishes the first image built and signed by the new workflow and
+    # the bot pins it. Otherwise the change would sit unexercised until the next
+    # unrelated proxy/ edit.
     paths:
       - "proxy/**"
       - "!proxy/**/*.md"
@@ -337,6 +344,97 @@ jobs:
             echo "::warning::the published index at ${index} does not carry every annotation that was requested (#847)"
           fi
 
+  # Sign the index the chart is about to pin, keyless, and prove it verifies
+  # (#984). Until this job existed the aether-proxy image -- the data-plane
+  # binary every node runs -- was the one image in the release that carried no
+  # signature at all: 0 signature tags in the repository, `no signatures found`
+  # on the pinned index and both children.
+  #
+  # Same scheme as publish.yaml's sign step (read its comment for the long
+  # form): the SHA-pinned installer (v4.1.2 -> cosign v3.0.6, binary hash fixed
+  # by the pin), keyless via this job's OIDC token, `--recursive` so the index
+  # AND each per-arch child are signed, and cosign 3's default bundle layout
+  # (the `sha256-<hex>` fallback tag; ghcr.io has no Referrers API). No
+  # `--new-bundle-format` flag, exactly as publish.yaml: `=false` is rejected on
+  # the v3 keyless path and `=true` is the default.
+  #
+  # THE IDENTITY IS THIS FILE, not publish.yaml. Fulcio binds the certificate
+  # to the workflow that requested the token, so these signatures carry
+  #   https://github.com/bpalermo/aether/.github/workflows/proxy-release.yml@refs/heads/main
+  # and anything verifying the proxy must ask for that identity; publish.yaml's
+  # identity would (correctly) reject them.
+  #
+  # A separate job, and bump-chart depends on it: an index that is not signed,
+  # or whose signature does not verify, fails HERE and the chart is never pinned
+  # to it. The image stays pushed (by digest and under its commit tag) -- a
+  # re-run of this workflow signs the same digest again.
+  sign:
+    needs: manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Push the signature tags into ghcr.io/bpalermo/aether/aether-proxy.
+      packages: write
+      # Keyless: exchanged with Fulcio for a short-lived certificate bound to
+      # this workflow. Without it signing fails closed.
+      id-token: write
+    outputs:
+      # What was signed and verified. bump-chart re-asserts it equals the digest
+      # it pins, so the two can never drift apart silently.
+      signed_digest: ${{ steps.sign.outputs.signed_digest }}
+    steps:
+      - name: Checkout
+        # For scripts/verify-image-signatures.sh + scripts/ghcr-lib.sh only.
+        uses: actions/checkout@v7
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        # Same pin as publish.yaml and publish-verify.yaml -- keep all three in
+        # step. Pinned by SHA because this job holds `packages: write` and
+        # `id-token: write`: a retagged action could sign under our genuine
+        # identity and every verify would pass.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign the index and every child (keyless, --recursive)
+        id: sign
+        env:
+          COSIGN_YES: "true"
+          INDEX_DIGEST: ${{ needs.manifest.outputs.index_digest }}
+        run: |
+          set -euo pipefail
+          # The digest the manifest job read back from the registry -- never a
+          # tag, so nothing here can re-resolve to a different artefact than the
+          # one bump-chart will pin.
+          if ! [[ "$INDEX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::manifest job produced no usable index digest ('${INDEX_DIGEST}')"
+            exit 1
+          fi
+          cosign sign --recursive "${IMAGE}@${INDEX_DIGEST}"
+          echo "signed_digest=${INDEX_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "signed ${IMAGE}@${INDEX_DIGEST} (index + children)"
+
+      # `cosign verify` has no --recursive, so the script walks the index's
+      # children from the registry and verifies each (#925); an index it cannot
+      # enumerate, or one with no children, is a failure, never a pass over
+      # nothing. Pinned to refs/heads/main (not "any ref" as publish.yaml's
+      # verify is): this workflow only ever runs on a push to main, so a proxy
+      # signature from any other ref is not one of ours.
+      - name: Verify the signatures (index and every child)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SIGNED_DIGEST: ${{ steps.sign.outputs.signed_digest }}
+        run: |
+          set -euo pipefail
+          CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/proxy-release\\.yml@refs/heads/main\$" \
+          CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
+            ./scripts/verify-image-signatures.sh "${IMAGE}@${SIGNED_DIGEST}"
+
   # Pin the aether chart to the just-published image (commit-SHA tag) and, when a
   # release token is available, open the pin PR and hand the merge to GitHub
   # (#727). Two modes, decided per run by the "Resolve release token" step:
@@ -376,8 +474,11 @@ jobs:
   # one rolling branch: in manual mode a later `GITHUB_TOKEN` push onto a branch
   # that already has an open PR fires no `pull_request: synchronize` either, so the
   # new head would carry no checks and the PR would be stuck.
+  #
+  # `sign` is a hard prerequisite (#984): the chart is never pinned to an index
+  # whose signatures (index + every child) did not verify.
   bump-chart:
-    needs: manifest
+    needs: [manifest, sign]
     runs-on: ubuntu-latest
     # Scopes `RELEASE_PAT` (an environment secret) to runs on `main` — see above.
     environment: release
@@ -466,9 +567,15 @@ jobs:
         id: pin
         env:
           INDEX_DIGEST: ${{ needs.manifest.outputs.index_digest }}
+          SIGNED_DIGEST: ${{ needs.sign.outputs.signed_digest }}
           SHA: ${{ github.sha }}
         run: |
           test -n "$INDEX_DIGEST"
+          # Pin only what the sign job signed and verified (#984).
+          if [ "$INDEX_DIGEST" != "$SIGNED_DIGEST" ]; then
+            echo "::error::refusing to pin ${INDEX_DIGEST}: the verified signature is for '${SIGNED_DIGEST}'"
+            exit 1
+          fi
           # charts/aether/values.yaml carries `repository:` + `tag:` + `digest:`
           # for the proxy image, and `aether.image` (_helpers.tpl) returns
           # `repository@digest` whenever `digest:` is set. A tag-only bump

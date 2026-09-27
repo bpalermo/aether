@@ -371,7 +371,7 @@ make check-published                           # the last day of main
 Read-only, no credentials needed (the packages are public), and it cannot push
 anything. It prints every coordinate it checked — four commit-tagged charts,
 eight images, a cosign signature for each image's index **and for every child
-manifest it lists** (36 coordinates today) — and exits non-zero naming each one
+manifest it lists** (36 coordinates today), plus the aether-proxy digest the commit's chart pins (see "Verifying the aether-proxy signature") — and exits non-zero naming each one
 that is missing. It checks that a signature *exists*; to check that it
 *verifies*, see "Verifying image signatures" below.
 
@@ -462,9 +462,55 @@ or child that did not verify; exit 2 means it could not check (e.g. the digest
 is not an index, or lists no children — a walk over nothing is never a pass).
 The same script runs in `publish.yaml`'s verify step and in `publish-verify`.
 
-Not signed by this pipeline: `ghcr.io/bpalermo/aether/aether-proxy` (built by
-`//proxy` / `proxy-release.yml`) and any `agent`-family image published before
-f332061 (#875, 2026-09-20). Both verify as `no signatures found`.
+Not signed by this pipeline: any `agent`-family image published before f332061
+(#875, 2026-09-20) — those verify as `no signatures found`. The proxy is signed
+by its own workflow; see the next section.
+
+### Verifying the aether-proxy signature (#984)
+
+`ghcr.io/bpalermo/aether/aether-proxy` is built by `proxy-release.yml`, not
+`publish.yaml`, and is versioned by the commit that changed `proxy/`, not by the
+aether commit — the chart carries its **digest** in
+`charts/aether/values.yaml` (`proxy.image.digest`). Since #984 that workflow's
+`sign` job runs `cosign sign --recursive` on the index right after the manifest
+job publishes it (same pinned installer, cosign v3.0.6, keyless, v3 bundle
+layout), verifies the index and every child, and only then lets `bump-chart`
+open the pin PR. A proxy index that does not verify is never pinned.
+
+**The identity is different.** Fulcio binds the certificate to the workflow
+that signed, so proxy signatures carry
+
+```
+https://github.com/bpalermo/aether/.github/workflows/proxy-release.yml@refs/heads/main
+```
+
+(issuer `https://token.actions.githubusercontent.com`). The publish identity
+rejects them, and vice versa. By hand, for whatever digest a chart pins:
+
+```bash
+digest="$(sed -nE '/aether-proxy$/,+4 s/^[[:space:]]*digest:[[:space:]]*"(sha256:[0-9a-f]{64})"$/\1/p' charts/aether/values.yaml)"
+CERT_IDENTITY_REGEXP='^https://github\.com/bpalermo/aether/\.github/workflows/proxy-release\.yml@refs/heads/main$' \
+  scripts/verify-image-signatures.sh "ghcr.io/bpalermo/aether/aether-proxy@${digest}"
+```
+
+**Pins older than signing are unsigned, permanently.** Every proxy image
+published before #984 has no signature (0 signature tags in the repository), and
+that includes the digest pinned when #984 merged
+(`sha256:938c5a57…`, children `bb53bed6…` amd64 / `4a90a7fb…` arm64). The
+hand check above fails on it with `no signatures found` ×3 — that is the
+expected answer, not a regression. The first signed digest is whatever the
+proxy-release run triggered by #984's merge pins.
+
+**The sweep.** `make check-published` / `publish-verify` check, for every
+commit, the proxy digest that commit's `values.yaml` pins: it must exist, and
+the index and every child must carry a signature (the cosign pass then verifies
+them under the proxy identity above). A pin whose introducing commit is at or
+before `PROXY_SIGNING_CUTOVER` (`scripts/proxy-pin-lib.sh`) **and** whose digest
+has no signature tag is printed as `skip … unsigned by history` and not counted.
+Any pin introduced after the cut-over is always checked — including a revert
+to an old unsigned digest, which counts as a new pin — so an unsigned proxy pin
+goes red. The cut-over may move forward (to the first signed pin commit), never
+backwards.
 
 ### Pre-flight: node headroom before a roll (#812)
 
