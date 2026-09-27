@@ -33,6 +33,11 @@
 # and two pages joined by a `Link: rel="next"`. The cases pin: a sign-bundle
 # referrer is layout `referrer`; a referrers 404 falls back to the tag layouts;
 # a referrers 5xx is inconclusive, never `none`; a bundle on page 2 is found.
+# THE TOKEN (#999). The fake issues ONE pull token, `fake`, from its token
+# endpoint, and every other request must present exactly `Authorization:
+# Bearer fake` or it gets a 401 — as the real registries do. A fake that took
+# any bearer value let the verifier pass the proxy repo's TAG LIST as the token
+# (#999) through this harness green; the proxy-pin case below drives that path.
 # Last, the real verifier runs against a registry.bzl flipped to quay.io/
 # aethermesh (a temp copy, the phase-2 edit exactly) whose signatures are
 # referrers only, and passes — so the flip is a one-file change for the sweep.
@@ -76,13 +81,14 @@ mkdir -p "$FAKE"
 #   codes        `<tag> <http code>` overrides (000 = no connection)
 #   accept       the Accept header of the last manifest request
 #   token_urls   every token URL asked for, one per line
+#   unauthorized every request refused for its bearer token: `<url> <header>`
 #   referrers    referrers mode: 404 (default) | index | 503 | paged | garbage
 #                (valid JSON that is not an index)
 #   refs_<dg>    the referrers index served for digest <dg> in `index` mode
 #                (an empty index when absent); in `paged` mode, page 2
 fake_curl='
 curl() {
-	local url="" hdr_out="" out="" wfmt="" head=0 fail=0 accept="" a
+	local url="" hdr_out="" out="" wfmt="" head=0 fail=0 accept="" auth="" a
 	while [ "$#" -gt 0 ]; do
 		a="$1"
 		shift
@@ -92,7 +98,10 @@ curl() {
 		-u | --retry) shift ;;
 		-w) wfmt="$1"; shift ;;
 		-H)
-			case "$1" in [Aa]ccept:*) accept="${1#*: }" ;; esac
+			case "$1" in
+			[Aa]ccept:*) accept="${1#*: }" ;;
+			[Aa]uthorization:*) auth="${1#*: }" ;;
+			esac
 			shift
 			;;
 		-I) head=1 ;;
@@ -102,6 +111,25 @@ curl() {
 	done
 	local host="${url#https://}"
 	host="${host%%/*}"
+	# Only the token this fake issued opens anything but the token endpoint.
+	case "$url" in
+	*/token\?* | */v2/auth\?*) ;;
+	*)
+		if [ "$auth" != "Bearer fake" ]; then
+			printf "%s %s\n" "$url" "${auth:-<no Authorization>}" | tr "\n" " " >>"$FAKE/unauthorized"
+			echo >>"$FAKE/unauthorized"
+			[ -n "$hdr_out" ] && : >"$hdr_out"
+			[ -n "$out" ] && printf "{\"errors\":[{\"code\":\"UNAUTHORIZED\"}]}" >"$out"
+			if [ -n "$wfmt" ]; then
+				printf "401"
+				return 0
+			fi
+			[ "$fail" = 1 ] && return 22
+			printf "{\"errors\":[{\"code\":\"UNAUTHORIZED\"}]}"
+			return 0
+		fi
+		;;
+	esac
 	case "$url" in
 	*/token\?* | */v2/auth\?*)
 		printf "%s\n" "$url" >>"$FAKE/token_urls"
@@ -196,7 +224,10 @@ curl() {
 			return 0
 		fi
 		[ "$code" != 200 ] && [ "$fail" = 1 ] && return 22
-		if [ "$head" = 1 ]; then
+		if [ "$head" = 1 ] && [[ "$ref" == sha256:* ]]; then
+			# By digest (the proxy pin): the registry echoes the digest asked for.
+			printf "HTTP/2 %s\r\ndocker-content-digest: %s\r\n\r\n" "$code" "$ref"
+		elif [ "$head" = 1 ]; then
 			printf "HTTP/2 %s\r\ndocker-content-digest: sha256:%064d\r\n\r\n" "$code" 1
 		else
 			printf "{\"manifests\":[{\"digest\":\"sha256:%064d\"},{\"digest\":\"sha256:%064d\"}]}\n" 2 3
@@ -529,8 +560,60 @@ else
 	tail -5 "$tmp/out" | sed 's/^/        | /'
 fi
 
-if [ "$n" -ne 30 ]; then
-	echo "::error::ran ${n} cases, expected 30 -- a gate that checks nothing passes" >&2
+# Step 5, the aether-proxy pin (#984), through the token-enforcing fake (#999).
+# HEAD's pinned digest, with the cut-over placed just before the commit that
+# introduced it, so the pin is always a post-cut-over one and is CHECKED, never
+# skipped: the pinned index, its signature and both children's signatures, each
+# looked up with the pull token. Then the #999 bug re-injected into a copy of
+# the verifier (the tag list passed where check_signature takes the token): the
+# fake must answer 401 and the run must be exit 2, not green. Both halves, so
+# the case cannot pass on a fake that stopped checking the token.
+# shellcheck source=scripts/proxy-pin-lib.sh
+. scripts/proxy-pin-lib.sh
+pin="$(git show "HEAD:${PROXY_VALUES_PATH}" | proxy_pinned_digest)" || pin=""
+pin_intro=""
+[ -n "$pin" ] && pin_intro="$(proxy_pin_introduced_by HEAD "$pin")"
+buggy="$tmp/buggy"
+mkdir -p "$buggy"
+cp "$lib"/* "$buggy/"
+sed -i -E 's/(check_signature "\$PROXY_REPO" "\$(pin|child)" )"\$tok"/\1"$tags"/' "$buggy/verify-published-artifacts.sh"
+# verify_pin <verifier dir> -> exit status; output in $tmp/out, refusals in $FAKE/unauthorized
+verify_pin() {
+	local rc=0
+	reset_registry
+	touch "$FAKE/everything"
+	printf '%s\n' dev >"$FAKE/tags"
+	env -u GITHUB_STEP_SUMMARY -u REGISTRY_HOST PROXY_PIN_CHECK=1 PROXY_SIGNING_CUTOVER="${pin_intro}~1" \
+		"$1/verify-published-artifacts.sh" HEAD >"$tmp/out" 2>&1 || rc=$?
+	echo "$rc"
+}
+proxy_ref="$(scripts/image-registry.sh ref proxy)"
+if [ -z "$pin" ] || [ -z "$pin_intro" ]; then
+	bad "verifier proxy pin: could not read HEAD's pinned digest or the commit that introduced it"
+elif [ "$(grep -cF '"$tags" "proxy ' "$buggy/verify-published-artifacts.sh")" != 2 ]; then
+	bad "verifier proxy pin: the #999 mutation did not apply to both call sites -- the red half would test nothing"
+else
+	rc="$(verify_pin "$lib")"
+	good_out="$(cat "$tmp/out")"
+	good_refused="$(cat "$FAKE/unauthorized" 2>/dev/null)"
+	n_sig="$(grep -cE "^  ok      ${proxy_ref//./\\.}:sha256-[0-9a-f]{64} \(signature of proxy (index|child) " "$tmp/out" || true)"
+	rc_bug="$(verify_pin "$buggy")"
+	if [ "$rc" = 0 ] && [ "$n_sig" = 3 ] && [ -z "$good_refused" ] &&
+		grep -qxF "  ok      ${proxy_ref}@${pin} (pinned in ${PROXY_VALUES_PATH})" <<<"$good_out" &&
+		grep -qxF "PASS: $((want_checks + 4)) artifact(s) present across 1 commit(s)" <<<"$good_out" &&
+		[ "$rc_bug" = 2 ] && [ -s "$FAKE/unauthorized" ] &&
+		grep -qF "::error::inconclusive: could not look up the signature tags of ${proxy_ref}@${pin}" "$tmp/out"; then
+		ok "verifier: a signed post-cut-over proxy pin passes on the issued token ($((want_checks + 4)) artifacts, 3 proxy signatures); #999's tag list as the token is refused 401, exit 2"
+	else
+		bad "verifier proxy pin: fixed rc ${rc} (${n_sig}/3 proxy signatures, $(grep -c . <<<"$good_refused") request(s) refused 401), #999-mutated rc ${rc_bug} (want 0 and 2)"
+		printf '%s\n' "$good_out" | tail -5 | sed 's/^/        fixed | /'
+		[ -n "$good_refused" ] && printf '        fixed | fake registry: 401 <- %.160s...\n' "$(head -1 <<<"$good_refused")"
+		tail -5 "$tmp/out" | sed 's/^/        buggy | /'
+	fi
+fi
+
+if [ "$n" -ne 31 ]; then
+	echo "::error::ran ${n} cases, expected 31 -- a gate that checks nothing passes" >&2
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then
