@@ -158,11 +158,6 @@ type AgentConfig struct {
 	// remaining capture knobs are the per-pod capture.aether.io/* annotations
 	// and the CNI's --capture-redirect-all-default.
 	EastWestWaypoint bool
-	// EastWestQUICServices is the east-west QUIC allow-list (proposal 038 Phase
-	// 4b): "<ns>/<svc>" destinations dialled over HTTP/3 from every local
-	// ServiceAccount. Empty = no QUIC upstreams (the inbound listener is always
-	// on; it is inert without these).
-	EastWestQUICServices []string
 
 	// MeshDNS enables the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
 	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs.

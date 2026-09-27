@@ -57,6 +57,16 @@ access-log/tracing policy via the MeshConfig CR.
 | `spire.brokerSocket.socketName` | `broker.sock` | Broker socket filename. |
 | `spire.waitWarnAfter` | `2m` | How long a component may wait for its first SVID before the waiting log line escalates from INFO to WARN (`--spire-wait-warn-after` on agent, registrar, controller and edge). On the **agent** it is also the dwell before the `spire-svid` readiness check reports NotReady — which arms the node taint, so it must not fire on a brief SPIRE hiccup (#740). The Deployments take no dwell: they go NotReady the instant they are known to lack an identity, which just removes one replica from one endpoint set. |
 
+**Workload SVID DNS SANs (mesh-wide, required by east-west QUIC).** East-west QUIC
+(038 Phase 4b) is unconditional — there is no value or flag for it — so every
+workload SVID must carry the DNS SANs `<sa>.<ns>.<meshDomain>` and
+`*.<sa>.<ns>.<meshDomain>` (`dnsNameTemplates` on the workloads' `ClusterSPIFFEID`).
+Envoy's QUIC client checks the SNI `<port>.<sa>.<ns>.<meshDomain>` against them after
+the SPIFFE pin (aether#957); the requirement stands until envoyproxy/envoy#47740 is in
+a plain proxy pin (today's pin carries it as a patch, #972). This is SPIRE
+configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
+§ *East-west QUIC* for the spiffe/spire snippet, the rollout order and the budget.
+
 ### `meshConfig` — proxy MeshConfig seeding
 
 | Key | Default | Purpose |
@@ -72,7 +82,6 @@ access-log/tracing policy via the MeshConfig CR.
 | `agent.cniConflistReassert` | `true` | Keep aether chained in the node's active CNI conflist (#645): the agent watches `/etc/cni/net.d` (read-write mount) and re-appends the `aether-cni` entry whenever a competing writer strips it — kube-flannel `cp -f`s its ConfigMap template over `10-flannel.conflist` on every flannel pod recreation, which a Talos bootstrap-manifest re-sync triggers, silently unmeshing every pod started afterwards. Never creates a conflist of its own; `false` is a kill switch. |
 | `agent.importConfig` | `false` | Cross-cluster config import (026): poll the registrar for peer-exported GAMMA projections and materialize them (merged with local; local wins). Pairs with `registrar.registryBackend=etcd`. |
 | `agent.eastWestWaypoint` | `false` | East/west waypoint (019): dial **cross-cluster** endpoints at their node's routable IP + the fixed tunnel port `18009` instead of the (unroutable) pod IP; this node's host-network proxy SNI-forwards inbound tunnel traffic to local pods. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared or replicated etcd) + a shared SPIRE trust domain. |
-| `agent.eastWestQuicServices` | `[]` | **Transitional (decision 2026-09-26): a proving gate for the first QUIC soak on a real cluster; once that soak passes, east-west QUIC becomes unconditional for every mesh destination and this value is removed.** East-west QUIC allow-list (038 Phase 4b): namespace-qualified `<ns>/<svc>` destinations every local ServiceAccount dials over HTTP/3 (mTLS over QUIC) instead of HTTP/2. Opt-in per destination: the cost is one `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster per (listed service × local ServiceAccount), logged by the agent as "east-west QUIC fan-out". **Prerequisite:** the workloads' `ClusterSPIFFEID` must issue the DNS SANs `<sa>.<ns>.<meshDomain>` and `*.<sa>.<ns>.<meshDomain>` (`dnsNameTemplates`; Envoy's QUIC client checks the SNI `<port>.<sa>.<ns>.<meshDomain>` against them after the SPIFFE pin, aether#957). The per-pod HTTP/3 inbound on UDP:18008 is unconditional and inert until a destination is listed. |
 | `agent.captureRedirectAllDefault` | `true` | Redirect-all as the DEFAULT for managed pods (022 Step 4); opt out per-pod with `capture.aether.io/redirect-all="false"`. `false` = per-pod opt-in via the same annotation set to `"true"`. (Transparent capture itself and the passthrough chain are unconditional since proposal 031.) |
 | `agent.meshDns` | `true` | Per-pod mesh DNS (018). Gates BOTH halves: the agent's in-process resolver (which writes the record snapshot) and the separate `aether-mesh-dns` DaemonSet that serves pods from it. |
 | `agent.meshDnsUpstream` | `[]` | Upstream resolver(s) for non-mesh queries, passed to the **mesh-dns daemon** (`--mesh-dns-upstream`), not the agent. Empty = the daemon's own resolv.conf (kube-dns). |
@@ -281,7 +290,6 @@ Node-agent-specific:
 | `--import-config` | `false` | Enable cross-cluster config import (026). |
 | `--control-cluster` | `""` | Trust imported config ONLY from this origin (026 EM3). Empty = federated. |
 | `--east-west-waypoint` | `false` | Per-node east/west waypoint for cross-cluster traffic (019); tunnel port is the fixed constant 18009. |
-| `--east-west-quic-services` | `[]` | **Transitional — removed once the first QUIC soak passes (QUIC then applies to every destination).** Repeatable `<ns>/<svc>`: build per-source HTTP/3 (`quic:`) clusters for this destination and select them by the caller's SPIFFE ID (038 Phase 4b). A listed service is forced into the node's dependency set. See `agent.eastWestQuicServices` above for the SPIRE prerequisite. |
 | `--mesh-dns` | `false` | Per-pod mesh DNS (018): answer `<svc>.<ns>.<mesh-domain>` from the generated mesh Services. Upstream forwarding belongs to the `mesh-dns` daemon, not the agent. |
 | `--mesh-dns-snapshot-path` | `/host/var/lib/aether/registry/mesh-dns/records.json` | Host-persistent record table the in-process resolver writes and warm-loads at boot (and the `mesh-dns` daemon watches). Under the CNI registry hostPath so it survives a rolling restart; empty disables persistence. |
 | `--authz-sidecar` | `false` | Node-local ext_authz sidecar entry (027). |

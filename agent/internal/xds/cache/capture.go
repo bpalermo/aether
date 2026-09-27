@@ -731,7 +731,7 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 	// Service-wide always-on extension filters (025 M4 CHAIN scope), vhost-enabled.
 	chainFilters := c.serviceChainFiltersSnapshot()
 
-	// East-west QUIC selection arms per allow-listed service (proposal 038
+	// East-west QUIC selection arms per eligible service (proposal 038
 	// Phase 4b), computed under clusterMu BEFORE captureMu so the two never
 	// nest; the same predicate that publishes the quic: twins, so a cap_http
 	// route can never name a twin the snapshot does not carry.

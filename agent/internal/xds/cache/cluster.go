@@ -123,7 +123,7 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 			vhosts = append(vhosts, vhost)
 		}
 	}
-	c.noteQUICFanout(quicClusters, len(quic.identities), len(quic.services))
+	c.noteQUICFanout(quicClusters, len(quic.identities))
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)
 	sortVirtualHostsByName(vhosts)
@@ -976,35 +976,41 @@ func outboundPortVhostWithChainFilter(portName string, chainFilters map[string]p
 }
 
 // quicFanout is the per-snapshot input to the east-west QUIC fan-out: the
-// allow-list, the local workload identities (sorted) and the mTLS state the
-// twins are rendered from.
+// local workload identities (sorted), the mTLS state the twins are rendered
+// from, and whether the waypoint split is on. East-west QUIC is unconditional
+// (decision 2026-09-26, after the proving soak): every eligible destination
+// gets its twins, there is no allow-list.
 type quicFanout struct {
-	services   map[string]struct{}
 	identities []string
 	mtls       localMTLSState
+	waypoint   bool
 }
 
 func (c *SnapshotCache) quicFanoutSnapshot() quicFanout {
 	if c.edge {
 		return quicFanout{}
 	}
-	f := quicFanout{services: c.quicServicesSnapshot()}
-	if len(f.services) == 0 {
+	f := quicFanout{identities: c.localWorkloadIdentities(), waypoint: c.waypointEnabled}
+	if len(f.identities) == 0 {
 		return f
 	}
-	f.identities = c.localWorkloadIdentities()
 	f.mtls = c.localMTLSSnapshot()
 	return f
 }
 
 // twinsFor returns the per-source HTTP/3 clusters for one cluster-cache entry
 // and the (source SPIFFE ID -> twin name) arms for its vhost, or nothing when
-// the entry is not an allow-listed service's default, identity-ready entry.
+// the entry is not an eligible destination: a service's DEFAULT entry (keyed
+// by the bare service, so never a per-port or alias entry), identity-ready
+// (mtlsCluster != nil), with no endpoint dialed through a remote cluster's
+// waypoint tunnel (proxy.HasWaypointEndpoint -- that path has no QUIC leg).
+// Every service in the node's dependency set that passes gets one twin per
+// local ServiceAccount.
 func (q quicFanout) twinsFor(key string, entry clusterEntry, meshDomain string) ([]types.Resource, map[string]string) {
-	if len(q.services) == 0 || len(q.identities) == 0 || key != entry.service || entry.mtlsCluster == nil || entry.cluster == nil {
+	if len(q.identities) == 0 || key != entry.service || entry.mtlsCluster == nil || entry.cluster == nil {
 		return nil, nil
 	}
-	if _, ok := q.services[entry.service]; !ok {
+	if q.waypoint && proxy.HasWaypointEndpoint(entry.loadAssignment) {
 		return nil, nil
 	}
 	// The default entry's sni is its primary port; QUIC needs the hostname
@@ -1024,11 +1030,10 @@ func (q quicFanout) twinsFor(key string, entry clusterEntry, meshDomain string) 
 // and the vhost to publish for it: the entry's own vhost, or -- when twins
 // exist -- a clone whose route to the h2 cluster selects per source identity.
 //
-// An allow-listed service's DEFAULT entry (the one keyed by the bare service
-// name; per-port and alias entries are deliberately excluded, they would
-// multiply the fan-out) gets one twin per local ServiceAccount, only once the
-// node identity is served (mtlsCluster != nil): before that the h2 cluster is
-// unpinned too.
+// A service's DEFAULT entry (the one keyed by the bare service name; per-port
+// and alias entries are deliberately excluded, they would multiply the
+// fan-out) gets one twin per local ServiceAccount, only once the node identity
+// is served (mtlsCluster != nil): before that the h2 cluster is unpinned too.
 func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomain string) ([]types.Resource, *routev3.VirtualHost) {
 	twins, arms := q.twinsFor(key, entry, meshDomain)
 	if len(twins) == 0 || entry.vhost == nil {
@@ -1039,27 +1044,27 @@ func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomai
 	return twins, vhost
 }
 
-// noteQUICFanout logs the cluster budget the QUIC allow-list costs whenever it
-// changes: local ServiceAccounts x listed services twins. INFO because the
-// number is the thing an operator sizing the allow-list needs to see.
-func (c *SnapshotCache) noteQUICFanout(twins, identities, services int) {
+// noteQUICFanout logs the cluster budget east-west QUIC costs whenever it
+// changes: local ServiceAccounts x eligible services in the node's dependency
+// set. INFO because the number is the thing an operator sizing a node needs
+// to see (quic_clusters / local_identities = the services that got twins).
+func (c *SnapshotCache) noteQUICFanout(twins, identities int) {
 	c.quicBudgetMu.Lock()
 	changed := c.quicBudgetSeen != twins
 	c.quicBudgetSeen = twins
 	c.quicBudgetMu.Unlock()
 	if changed {
-		c.log.Info("east-west QUIC fan-out", "quic_clusters", twins, "local_identities", identities, "allow_listed_services", services)
+		c.log.Info("east-west QUIC fan-out", "quic_clusters", twins, "local_identities", identities)
 	}
 }
 
-// quicArmsByService returns, for every allow-listed service whose default entry
-// is identity-ready, the (source SPIFFE ID -> quic: twin) arms its vhosts
+// quicArmsByService returns, for every eligible service (see twinsFor), the (source SPIFFE ID -> quic: twin) arms its vhosts
 // select with -- the same predicate twinsFor applies when the twins are
 // published, so no route can name a twin that is not in the snapshot. Takes
 // clusterMu for reading; callers must not hold it.
 func (c *SnapshotCache) quicArmsByService() map[string]map[string]string {
 	quic := c.quicFanoutSnapshot()
-	if len(quic.services) == 0 || len(quic.identities) == 0 {
+	if len(quic.identities) == 0 {
 		return nil
 	}
 	c.clusterMu.RLock()

@@ -748,28 +748,29 @@ for the full install + onboarding walkthrough.
 > [`observability/profiling-symbols.md`](./observability/profiling-symbols.md) for the
 > path table that has to be updated alongside it.
 
-### East-west QUIC (proposal 038 Phase 4): enabling, verifying, rolling back
+### East-west QUIC (proposal 038 Phase 4): prerequisites, verifying, escape hatch
 
-Since #953 every mesh pod has an HTTP/3 inbound on UDP:18008 beside the TCP one
-(same SVID, same client-certificate requirement, same SAN pin); it is inert until a
-source proxy dials it. #956 adds the dialling side, behind a per-destination allow-list **that is a proving
-gate, not the product surface** (decision 2026-09-26: no opt-in for QUIC — once the
-first QUIC soak on a real cluster passes, the list is removed and every mesh
-destination is dialled over HTTP/3 by every caller, exactly as the inbound is
-unconditional today). Until then:
+East-west QUIC is **unconditional**. Every mesh pod has an HTTP/3 inbound on
+UDP:18008 beside the TCP one (#953: same SVID, same client-certificate
+requirement, same SAN pin), and every node proxy dials every service in its
+dependency set over HTTP/3 from every local ServiceAccount (#956). There is no
+value or flag for it: the per-destination allow-list (a chart value + agent flag)
+was a proving gate for the first QUIC soak on a real
+cluster and was removed once that soak passed (decision 2026-09-26: no opt-in for
+QUIC). The one exception is a service with any endpoint behind the east/west
+waypoint (019): it stays h2, because the waypoint tunnel has no QUIC leg.
 
-```bash
-# one entry per destination; the h2 path is untouched for everything else
---set agent.eastWestQuicServices[0]=aether-test/svc-1
-```
-
-Before listing anything, the workloads' `ClusterSPIFFEID` must issue two DNS SANs
-per SVID — `<sa>.<ns>.<meshDomain>` and `*.<sa>.<ns>.<meshDomain>`. Envoy's QUIC
-client verifies the SNI (`<port>.<sa>.<ns>.<meshDomain>`) against the leaf's DNS
-SANs *after* the SPIFFE pin succeeds and nothing but `accept_untrusted` skips it
-(aether#957); without the SANs every HTTP/3 handshake to a listed service fails
-closed (503 at the source, `QUIC_TLS_CERTIFICATE_UNKNOWN` in the proxy log) while
-h2 keeps working. On the spiffe/spire chart:
+**Mesh-wide SPIRE prerequisite.** Every workload SVID must carry two DNS SANs —
+`<sa>.<ns>.<meshDomain>` and `*.<sa>.<ns>.<meshDomain>` — until
+envoyproxy/envoy#47740 is in a *plain* proxy pin. Envoy's QUIC client verifies the
+SNI (`<port>.<sa>.<ns>.<meshDomain>`) against the leaf's DNS SANs *after* the SPIFFE
+pin succeeds (aether#957); without the SANs every HTTP/3 handshake fails closed
+(503 at the source, `Leaf certificate doesn't match hostname` /
+`QUIC_TLS_CERTIFICATE_UNKNOWN` in the proxy log at `quic:info`). The proxy pin since
+chart 0.95.3 carries #47740 as a patch (#972), which defers that check to the SAN
+pin, so today a missing SAN does not fail — but the carry is transitional and a pin
+bump can drop it, so the SANs stay required until upstream ships it. On the
+spiffe/spire chart:
 
 ```yaml
 spire-server:
@@ -783,18 +784,29 @@ spire-server:
 ```
 
 Changing the entry re-issues every workload SVID on the agents' next fetch; no pod
-roll. Order of operations on a live cluster: SPIRE first, wait for the agents'
-`envoy_sds_*_version` to move on every node, then the allow-list.
+roll. **Order of operations on a live cluster upgrading from a chart that still
+had the allow-list: SPIRE first, wait for the agents' `envoy_sds_*_version` to move
+on every node, then the chart** — the upgrade turns QUIC on for every destination
+at once.
 
-**What to expect once a destination is listed.** The agent logs
-`east-west QUIC fan-out quic_clusters=N local_identities=I allow_listed_services=S`
-with `N = I × S` on every node that hosts a caller; the proxy admin (`127.0.0.1:9901`
-on the node) lists one `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster per local
-ServiceAccount. Requests from a caller take its own twin (a matcher cluster
+**Network prerequisite.** UDP:18008 must be open wherever TCP:18008 is: from every
+node (the source proxy is host-network) to every mesh pod IP. A NetworkPolicy or
+host firewall that allows only TCP:18008 breaks every mesh request, not just a few.
+
+**What to expect.** The agent logs
+`east-west QUIC fan-out quic_clusters=N local_identities=I` whenever the count
+changes, with `N = I × S` where S is the number of services in the node's
+dependency set that got twins (the line no longer carries a listed-service count).
+Budget: local ServiceAccounts × dependency-set services per node — on talos-main
+8–14 SAs × ~19 services ≈ 150–270 extra clusters per node, each an EDS clone of
+the h2 cluster (no second load assignment). The proxy admin (`127.0.0.1:9901` on
+the node) lists one `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster per (service,
+local ServiceAccount). Requests from a caller take its own twin (a matcher cluster
 specifier keyed on the connection's `aether.source.spiffe_id` filter state); a
 caller with no twin — or a connection stamped before the trust domain was known —
 takes the h2 cluster. A GAMMA (HTTPRoute) rule whose single backendRef is the
-parent rides QUIC too; a weighted split stays h2 (#961).
+parent rides QUIC too; a weighted split stays h2 (#961). Twins appear only once
+the node identity is served.
 
 **Verifying.** Per twin, the admin `/clusters` host rows (`<cluster>::<ip:port>::
 rq_total::N`) are the ground truth. In Prometheus the twins carry their own stats
@@ -811,12 +823,25 @@ increase(envoy_cluster_upstream_cx_connect_fail{aether_cluster=~".*@.*"}[5m])
 
 On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
-kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5).
+kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), and
+its `QUIC_DNS_SANS=off` negative control reproduces the missing-SAN failure.
 
-**Rolling back.** Remove the entries (or `--set agent.eastWestQuicServices=null`):
-the twins and the selection disappear on the next push and every caller is back on
-the h2 route it had before, byte-for-byte. The inbound listener and the DNS SANs are
-harmless to leave in place. Nothing here needs a proxy roll.
+**If UDP:18008 is blocked, or HTTP/3 fails mesh-wide.** Symptom: twins'
+`cx_connect_fail` climbing, 503s from every caller, h2 clusters idle. There is no
+per-destination or per-node off switch any more, by design, and none should be
+added. In order:
+
+1. **Fix the path** — open UDP:18008 (NetworkPolicy, host firewall, cloud security
+   group) or, for handshake failures, re-issue the SVIDs with the DNS SANs above.
+   Both converge without a pod or proxy roll.
+2. **Roll the chart back** to the last release that still had the allow-list
+   (≤ 0.95.3): its default (an empty list) is h2 for every destination, and the
+   twins and selection disappear on the next push with no proxy roll. Take the
+   values from `helm get values -o yaml` and pass them with `-f`; never
+   `--reuse-values`. This is the escape hatch; there is no other.
+
+`spire.enabled=false` also removes QUIC (no TLS, no QUIC) but turns off mTLS
+mesh-wide — it is not an escape hatch.
 
 ## 8. Troubleshooting
 

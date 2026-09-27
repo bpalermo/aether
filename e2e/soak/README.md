@@ -408,38 +408,40 @@ node's agent started — roll the agent.
 
 ### The QUIC leg (proposal 038 Phase 4)
 
-East-west QUIC is behind a per-destination allow-list (`agent.eastWestQuicServices`)
-**only until this leg passes once**: the decision (2026-09-26) is no opt-in for QUIC —
-a passing QUIC soak is the proof that removes the flag, after which every mesh
-destination is dialled over HTTP/3 and the leg grades every service. For that first
-proving run, list a churned target so a QUIC destination's pods and its callers'
-twins are rebuilt under load:
+East-west QUIC is unconditional: every service in a node's dependency set is dialled
+over HTTP/3 by every local ServiceAccount, so this leg grades **every** service the
+k6 loaders and the prober call — no `--set` is needed and there is nothing to list.
+(The per-destination allow-list was a proving gate:
+the first QUIC soak ran with `aether-test/svc-1` and `svc-2` listed, its PASS removed
+it, decision 2026-09-26.)
 
 ```bash
 # prerequisite ON TALOS: the SPIRE default ClusterSPIFFEID must already issue the
 # <sa>.<ns>.aether.internal + *.<sa>.<ns>.aether.internal DNS SANs (GitOps,
 # spire-server.controllerManager.identities.clusterSPIFFEIDs.default.dnsNameTemplates)
-# and every node's envoy_sds_*_version must have moved since — otherwise every
-# HTTP/3 handshake fails closed (#957) and the leg grades the wrong thing.
-helm upgrade aether ... -f <saved values> \
-  --set 'agent.eastWestQuicServices[0]=aether-test/svc-1' \
-  --set 'agent.eastWestQuicServices[1]=aether-test/svc-2'
+# and every node's envoy_sds_*_version must have moved since — otherwise, on a
+# proxy pin without envoyproxy/envoy#47740, every HTTP/3 handshake fails closed
+# (#957) and the leg grades the wrong thing. Then a plain upgrade:
+helm upgrade aether ... -f <saved values>
 ```
 
-The agent logs `east-west QUIC fan-out quic_clusters=N local_identities=I
-allow_listed_services=S` on every node with a caller; `N = I × S` is the budget the
-run is paying for. Since #962 the twins have their own stats key
-`<ns>/<svc>@<ns>/<sa>`, so the leg grades from Prometheus (the admin is loopback-only
-on talos and `kubectl exec` is denied):
+The agent logs `east-west QUIC fan-out quic_clusters=N local_identities=I` on every
+node whenever the count changes; `N = I × S`, S = the services in that node's
+dependency set with twins (on talos-main 8–14 SAs × ~19 services ≈ 150–270 per
+node) — that is the budget the run is paying for, and it must be flat outside roll
+brackets. Since #962 the twins have their own stats key `<ns>/<svc>@<ns>/<sa>`, so
+the leg grades from Prometheus (the admin is loopback-only on talos and
+`kubectl exec` is denied):
 
 ```promql
 # HTTP/3 requests per (destination, caller ServiceAccount) -- must be non-zero for
-# every listed destination x k6 loader SA, and must RESUME after each roll of the
+# every called destination x caller SA, and must RESUME after each roll of the
 # destination and of the proxy (RAW counters across a roll, never increase())
-envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-[12]@.*"}
-# the same requests must not have fallen back to h2: the h2 series of a listed
-# destination stays FLAT while its twins move (a moving h2 series = on_no_match)
-envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-[12]"}
+envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/.*@.*"}
+# the same requests must not have fallen back to h2: the h2 series of a destination
+# stays FLAT while its twins move (a moving h2 series = on_no_match), except for
+# destinations reached through a GAMMA weighted split (h2 by design, #961)
+envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/[^@]*"}
 # every twin connection is HTTP/3 (must climb with the twins, never the h1/h2 kin)
 envoy_cluster_upstream_cx_http3_total{aether_cluster=~".*@.*"}
 # a twin that cannot connect: 0 outside roll brackets; a step in the no-roll window
@@ -451,7 +453,7 @@ envoy_cluster_upstream_rq_5xx{aether_cluster=~".*@.*"}
 The prober and k6 SLIs grade the run exactly as before: a QUIC destination that
 fails still counts against the same error budget, so the leg cannot pass on the
 twins' own counters alone. What the twins' counters add is attribution — whether an
-error episode on a listed destination was the QUIC path (its twin's `connect_fail`
+error episode on a destination was the QUIC path (its twin's `connect_fail`
 / `rq_5xx` moved) or the h2 path (they did not). Not gradeable from Prometheus: the
 destination's per-pod `listener.inbound_<pod>_h3.*` counter (admin only; the kind
 harness `e2e/eastwest-quic.sh` reads it).

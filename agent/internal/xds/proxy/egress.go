@@ -565,6 +565,25 @@ func isWaypointEndpoint(lb *endpointv3.LbEndpoint) bool {
 	return fields[subsetWaypointKey].GetStringValue() == subsetWaypointValue
 }
 
+// HasWaypointEndpoint reports whether any endpoint of the load assignment is
+// dialed through a remote cluster's east/west waypoint tunnel (proposal 019).
+// The east-west QUIC fan-out (proposal 038 Phase 4b) uses it to keep such a
+// service on h2: a `quic:` twin shares the h2 cluster's EDS resource but
+// carries ONE QUIC socket and no transport-socket matcher, so it would dial
+// the waypoint's tunnel address over UDP with the direct-path SNI -- and the
+// waypoint tunnel has no QUIC leg (cross-cluster QUIC is the last step of
+// 038 Phase 4, not built).
+func HasWaypointEndpoint(cla *endpointv3.ClusterLoadAssignment) bool {
+	for _, lle := range cla.GetEndpoints() {
+		for _, lb := range lle.GetLbEndpoints() {
+			if isWaypointEndpoint(lb) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // InjectUpstreamTCPMTLS is InjectUpstreamMTLS for TCP floor clusters: the same
 // per-connection certificate selection, on a socket that advertises no ALPN so
 // the destination inbound demuxes it to the TCP floor's default chain.

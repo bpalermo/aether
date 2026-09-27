@@ -676,20 +676,23 @@ jobs:
         run: ./e2e/l4routes.sh down || true
 
   # --- East-west QUIC (proposal 038 Phase 4): the per-pod HTTP/3 inbound on
-  # UDP:18008 and the per-source quic: clusters, allow-listed per destination.
+  # UDP:18008 and the per-source quic: clusters — unconditional, every
+  # destination in the node's dependency set (the proving allow-list is gone).
   #
-  # Two sources with different ServiceAccounts call two allow-listed
-  # destinations: every request must ride the CALLER'S OWN quic: twin (node
-  # proxy admin /clusters host rq_total) and land on the destination's HTTP/3
-  # inbound (listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx), and the
-  # destination must see the caller's own SPIFFE ID in XFCC. An h2-only
-  # destination and a GAMMA weighted-route destination must stay on h2, and a
+  # Two sources with different ServiceAccounts call two destinations: every
+  # request must ride the CALLER'S OWN quic: twin (node proxy admin /clusters
+  # host rq_total) and land on the destination's HTTP/3 inbound
+  # (listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx), and the
+  # destination must see the caller's own SPIFFE ID in XFCC. A GAMMA weighted
+  # route must stay on h2 while a single-backendRef rule rides HTTP/3, and a
   # source pod re-created on a new IP must keep its own identity (Q3).
   #
   # SPIRE is on (QUIC mandates TLS), with the aether#957 DNS SANs on the
   # workloads' ClusterSPIFFEID. The red half of the suite's red-then-green is
-  # `EASTWEST_QUIC=off ./e2e/eastwest-quic.sh up`, which is NOT run here — this
-  # job is the green half; the header of e2e/eastwest-quic.sh has both commands.
+  # the negative control `QUIC_DNS_SANS=off ./e2e/eastwest-quic.sh up` (SVIDs
+  # without the DNS SANs + the envoy#47740 guard off, so the QUIC client's
+  # hostname check fails closed at E2), which is NOT run here — this job is the
+  # green half; the header of e2e/eastwest-quic.sh has both commands.
   eastwest-quic:
     needs: build
     if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'eastwest-quic'
@@ -713,7 +716,7 @@ jobs:
           EWQ_SKIP_BUILD: "1"
         run: ./e2e/eastwest-quic.sh up
 
-      - name: Verify per-source HTTP/3 + XFCC identity, h2-only and GAMMA stay h2, identity across a client address change
+      - name: Verify the unconditional fan-out, per-source HTTP/3 + XFCC identity, GAMMA weighted stays h2, identity across a client address change
         id: verify
         continue-on-error: ${{ github.event.inputs.soft == 'true' }}
         run: ./e2e/eastwest-quic.sh verify

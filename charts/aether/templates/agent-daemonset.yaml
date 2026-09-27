@@ -120,9 +120,6 @@ spec:
             {{- if .Values.agent.eastWestWaypoint }}
             - "--east-west-waypoint"
             {{- end }}
-            {{- range .Values.agent.eastWestQuicServices }}
-            - "--east-west-quic-services={{ . }}"
-            {{- end }}
             {{- if .Values.agent.meshDns }}
             # Gates the agent's PERSIST path only (issue #578): the agent writes the
             # mesh record snapshot but no longer serves DNS — the standalone
