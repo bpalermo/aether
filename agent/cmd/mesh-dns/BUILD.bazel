@@ -1,5 +1,6 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+load("//bazel/img:registry.bzl", "image_repository")
 
 go_library(
     name = "mesh-dns_lib",
@@ -35,7 +36,7 @@ go_binary(
 go_multi_arch_image(
     name = "mesh-dns_image",
     binary = ":mesh-dns",
-    repository = "bpalermo/aether/mesh-dns",
+    repository = image_repository("mesh-dns"),
     # The DaemonSet's exec readiness probe (#683). It ships as an extra layer in
     # THIS image — the one the DaemonSet already runs on every node — so there is
     # no second pull, and no chart/image skew is possible: the probe binary and

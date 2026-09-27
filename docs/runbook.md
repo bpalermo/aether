@@ -437,6 +437,45 @@ the real verifier against a fake registry and shows the control rejects a
 verifier that stopped counting `MISSING`, an absence with no witness, a `MISSING` line
 naming another commit, and a stray `ok`.
 
+### Where images and charts are published: one setting (proposal 040)
+
+Every published coordinate derives from **`bazel/img/registry.bzl`** — registry
+host, namespace, per-component name overrides and the chart-repository prefix —
+and from nowhere else:
+
+| reader | how |
+|---|---|
+| image pushes, chart pushes, chart template tests, e2e go_test defaults | `load("//bazel/img:registry.bzl", ...)` — `image_repository()`, `image_reference()`, `chart_registry_url()` |
+| the `//proxy` workspace (`oci_push`) | its byte-identical copy `proxy/bazel/registry.bzl` (it cannot load from the root module) |
+| `//bazel/proxy_pin` (the Envoy the validate gate runs) | `image_reference("proxy")` + `registry_token_url()` |
+| workflows | `scripts/image-registry.sh >> "$GITHUB_ENV"` after checkout → `IMAGE_REGISTRY_HOST`, `IMAGE_NAMESPACE`, `IMAGE_REGISTRY` (host/namespace), `PROXY_IMAGE` |
+| verifiers, e2e scripts | `scripts/image-registry.sh {prefix,host,repo <c>,ref <c>,chart-repo <c>}`; `scripts/registry-lib.sh` resolves its repository lists through it |
+
+Today it says `ghcr.io` / `bpalermo/aether` (images `ghcr.io/bpalermo/aether/<component>`,
+the proxy `…/aether-proxy`, charts `…/charts/<chart>`). **Phase 2 of proposal 040
+flips it to `quay.io` / `aethermesh`** — images `quay.io/aethermesh/<component>`
+(the proxy becomes plain `proxy`), charts `quay.io/aethermesh/chart-<chart>` — by
+editing that one file (and its proxy copy), not the workflows. The install
+commands in this runbook and in `charts/README.md` name the ghcr coordinates on
+purpose and change in the same PR as the flip.
+
+`scripts/check-registry-config.sh` (in `ci`'s and `proxy`'s `shell` jobs)
+keeps it one setting: the file parses, the proxy copy is identical, the
+aether-proxy pin in `charts/aether/values.yaml` names `image_reference("proxy")`,
+and no file outside its written-down allow-list (docs, the website, the two
+READMEs, the setting itself, the pin) spells the registry out.
+`//bazel/img:registry_test` pins `image-registry.sh` against the Starlark helpers.
+
+**Registry library.** `scripts/registry-lib.sh` (was `ghcr-lib.sh`, which is now a
+one-line shim; every `ghcr_*` name still works) is registry-neutral: it speaks the
+OCI distribution API against `REGISTRY_HOST` (default: the setting's host),
+fetches the anonymous pull token from the registry's own endpoint (ghcr.io
+`/token`, quay.io `/v2/auth`), and for private repositories takes
+`REGISTRY_USERNAME` + `REGISTRY_PASSWORD` (a Quay robot account) or `GHCR_TOKEN`
+(sent only to ghcr.io). `registry_referrers` reads the OCI 1.1 Referrers API
+(`GET /v2/<repo>/referrers/<digest>`): quay.io serves it, ghcr.io answers 404 —
+which the library reads as "no referrers API", never as "no signatures".
+
 ### Verifying image signatures (cosign v3, #925)
 
 `publish.yaml` signs every published image keyless with `cosign sign
@@ -472,8 +511,15 @@ explicit `cosign sign` step after the pushes.
 lands in a tag in the image's own repository: cosign 3 writes the OCI 1.1
 fallback index `sha256-<hex>` (the bundle format — keyless v3 *requires*
 `--new-bundle-format`; `=false` is rejected), cosign 2 wrote `sha256-<hex>.sig`.
-Everything published before 2026-09-24 carries the legacy `.sig`; exactly one of
-the two must exist per digest (`scripts/ghcr-lib.sh`, `ghcr_signature_layout`).
+Everything published before 2026-09-24 carries the legacy `.sig`. On a registry
+that **does** serve the Referrers API (quay.io, after the proposal 040 cut-over)
+cosign 3 attaches the bundle as a real **referrer** (artifactType
+`application/vnd.dev.sigstore.bundle.v0.3+json`, annotation
+`dev.sigstore.bundle.predicateType: https://sigstore.dev/cosign/sign/v1`) and
+writes no tag — observed on `quay.io/argoproj/argocd` and `quay.io/cilium/cilium`.
+Exactly one of the three layouts must exist per digest (`scripts/registry-lib.sh`,
+`registry_signature_layout`; a bundle referrer with any other predicateType is an
+attestation, not a signature). `cosign verify` finds all three itself.
 Do not pass `--new-bundle-format` to `cosign verify` expecting it to assert the
 layout: `=true` still accepts a legacy `.sig`.
 

@@ -30,6 +30,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# <registry>/<namespace> every aether image is tagged under, from the single
+# setting in bazel/img/registry.bzl (proposal 040) -- never a literal.
+IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
 CLUSTER_A="${CLUSTER_A:-a}"
 CLUSTER_B="${CLUSTER_B:-b}"
 ETCD_IMAGE="${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.16}"
@@ -239,7 +242,7 @@ raise_inotify() {
 build_images() {
 	# CI builds the images itself (bazel image_load via RBE) and sets
 	# REPLICATOR_SKIP_BUILD=1 so this step is a no-op — the images are already in
-	# the local docker daemon under ghcr.io/bpalermo/aether/<img>:latest.
+	# the local docker daemon under <IMAGE_REGISTRY>/<img>:latest.
 	if [ "${REPLICATOR_SKIP_BUILD:-0}" = "1" ]; then
 		ok "skipping image build (REPLICATOR_SKIP_BUILD=1; images pre-built)"
 		return
@@ -298,7 +301,7 @@ load_images() {
 	log "loading images into both clusters"
 	for c in "$CLUSTER_A" "$CLUSTER_B"; do
 		for img in "${IMAGES[@]}"; do
-			kind load docker-image "ghcr.io/bpalermo/aether/${img}:latest" --name "$c" >/dev/null 2>&1
+			kind load docker-image "${IMAGE_REGISTRY}/${img}:latest" --name "$c" >/dev/null 2>&1
 		done
 	done
 	ok "images loaded"
@@ -405,7 +408,7 @@ install_aether() {
 	local charts
 	charts="$(chart_dir)"
 	local img
-	img() { echo "--set $1.image.repository=ghcr.io/bpalermo/aether/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
 	local peer
 	for c in "$CLUSTER_A" "$CLUSTER_B"; do
 		[ "$c" = "$CLUSTER_A" ] && peer="$CLUSTER_B" || peer="$CLUSTER_A"

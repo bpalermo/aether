@@ -1,5 +1,6 @@
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
 load("//bazel/helm:defs.bzl", "helm_template_fail_test")
+load("//bazel/img:registry.bzl", "IMAGE_REGISTRY", "chart_registry_url", "image_reference")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
@@ -27,7 +28,7 @@ AETHER_IMAGES = [
     "//controller/cmd/controller:image_push",
 ]
 
-# aether Helm chart (published as ghcr.io/bpalermo/aether/charts/aether).
+# aether Helm chart (published as chart_repository("aether") under IMAGE_REGISTRY; see //bazel/img:registry.bzl).
 #
 # The whole system in one chart: agent + cni-install + per-node proxy, registrar,
 # and the mesh-config controller. The MeshConfig CRD ships in //charts/crds
@@ -37,7 +38,7 @@ AETHER_IMAGES = [
 # placeholders in values.yaml are digest-pinned at package time and published with
 # the chart.
 #
-# Publish targets (GitHub Container Registry, OCI):
+# Publish targets (OCI; registry from //bazel/img:registry.bzl):
 #   bazel run //charts/aether:aether.push           # chart + images
 #   bazel run //charts/aether:aether.push_registry  # chart only
 # Authenticate first via HELM_REGISTRY_USERNAME / HELM_REGISTRY_PASSWORD.
@@ -45,8 +46,8 @@ helm_chart(
     name = "aether",
     chart = "Chart.yaml",
     images = AETHER_IMAGES,
-    login_url = "ghcr.io",
-    registry_url = "oci://ghcr.io/bpalermo/aether/charts",
+    login_url = IMAGE_REGISTRY,
+    registry_url = chart_registry_url(),
     values = "values.yaml",
     visibility = ["//visibility:public"],
 )
@@ -88,7 +89,7 @@ helm_template_test(
     chart = ":aether",
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
-            "aether/proxy-supervisor@sha256:",
+            image_reference("proxy-supervisor") + "@sha256:",
             "--install-path=/opt/aether/supervisor",
             "--install-readiness-path=/opt/aether/proxy-ready",
         ],
@@ -224,8 +225,8 @@ helm_chart(
     name = "aether_commit",
     chart = ":Chart.commit.yaml",
     images = AETHER_IMAGES,
-    login_url = "ghcr.io",
-    registry_url = "oci://ghcr.io/bpalermo/aether/charts",
+    login_url = IMAGE_REGISTRY,
+    registry_url = chart_registry_url(),
     values = "values.yaml",
     visibility = ["//visibility:public"],
 )

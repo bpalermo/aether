@@ -27,9 +27,18 @@ var (
 	kindClusterName = "aether-e2e"
 	namespace       = "aether-system"
 
-	agentImage      = envOrDefault("AETHER_AGENT_IMAGE", "ghcr.io/bpalermo/aether/agent:latest")
-	cniInstallImage = envOrDefault("AETHER_CNI_INSTALL_IMAGE", "ghcr.io/bpalermo/aether/cni-install:latest")
-	registrarImage  = envOrDefault("AETHER_REGISTRAR_IMAGE", "ghcr.io/bpalermo/aether/registrar:latest")
+	agentImage      = envOrDefault("AETHER_AGENT_IMAGE", defaultAgentImage)
+	cniInstallImage = envOrDefault("AETHER_CNI_INSTALL_IMAGE", defaultCNIInstallImage)
+	registrarImage  = envOrDefault("AETHER_REGISTRAR_IMAGE", defaultRegistrarImage)
+)
+
+// The default image references, stamped at link time by the go_test's x_defs
+// from bazel/img/registry.bzl (proposal 040), so the registry is spelled out in
+// exactly one place. Empty outside Bazel: set the AETHER_*_IMAGE variables then.
+var (
+	defaultAgentImage      string
+	defaultCNIInstallImage string
+	defaultRegistrarImage  string
 )
 
 func envOrDefault(key, fallback string) string {
@@ -40,6 +49,17 @@ func envOrDefault(key, fallback string) string {
 }
 
 func TestMain(m *testing.M) {
+	for name, ref := range map[string]string{
+		"AETHER_AGENT_IMAGE":       agentImage,
+		"AETHER_CNI_INSTALL_IMAGE": cniInstallImage,
+		"AETHER_REGISTRAR_IMAGE":   registrarImage,
+	} {
+		if ref == "" {
+			fmt.Fprintf(os.Stderr, "no image for %s: run under Bazel (x_defs from bazel/img/registry.bzl) or set it\n", name)
+			os.Exit(2)
+		}
+	}
+
 	testenv = env.New()
 
 	kindProvider := kind.NewProvider()

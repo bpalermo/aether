@@ -24,8 +24,10 @@ it and there is no second pin to keep in sync.
 Parsing contract (deliberately strict — it fails the build rather than silently
 validating against the wrong binary):
 
-  * Find the first line of the form `repository: <ref>` whose `<ref>` names the
-    `aether-proxy` image (last path segment is exactly `aether-proxy`).
+  * Find the first line of the form `repository: <ref>` whose `<ref>` is
+    exactly `image_reference("proxy")` from //bazel/img:registry.bzl — the one
+    registry setting (proposal 040) — so a pin into any other registry is not
+    silently accepted.
   * Starting from the line after it, scan forward while still inside that
     mapping (indentation >= the `repository:` key's indentation; blank lines and
     comment-only lines do not end the block) for a line `digest: "sha256:<64
@@ -35,12 +37,15 @@ validating against the wrong binary):
 
 Registry access
 ---------------
-`ghcr.io/bpalermo/aether/aether-proxy` is a public package: an anonymous GHCR
-bearer token is enough, and neither CI nor a local `bazel test` needs
-credentials. If it is ever made private, `docker login ghcr.io` locally and a
-`docker/login-action@v3` step in the CI `test` job would be required; the
-`_bearer_token` failure path says so.
+The aether-proxy image is a public package: an anonymous bearer token (from
+the registry's own token endpoint, registry_token_url() — GHCR `/token`, Quay
+`/v2/auth`) is enough, and neither CI nor a local `bazel test` needs
+credentials. If it is ever made private, `docker login <registry>` locally and a
+`docker/login-action` step in the CI `test` job would be required; the
+`_fetch_manifest` failure path says so.
 """
+
+load("//bazel/img:registry.bzl", "image_reference", "registry_token_url")
 
 _ENVOY_PATH_IN_IMAGE = "usr/local/bin/envoy"
 
@@ -96,7 +101,7 @@ def _parse_proxy_pin(mctx):
         if not stripped.startswith("repository:"):
             continue
         candidate = _scalar(stripped[len("repository:"):])
-        if candidate.split("/")[-1] != "aether-proxy":
+        if candidate != image_reference("proxy"):
             continue
 
         repository = candidate
@@ -116,10 +121,10 @@ def _parse_proxy_pin(mctx):
     if repository == None:
         fail((
             "{label}: could not find the aether-proxy image pin. Expected a line " +
-            "`repository: <registry>/<path>/aether-proxy`. //test/envoy_validate " +
-            "validates against the Envoy inside that image, so the pin cannot be " +
-            "guessed (aether #709)."
-        ).format(label = _VALUES_LABEL))
+            "`repository: {want}` (image_reference(\"proxy\") in " +
+            "//bazel/img:registry.bzl). //test/envoy_validate validates against " +
+            "the Envoy inside that image, so the pin cannot be guessed (aether #709)."
+        ).format(label = _VALUES_LABEL, want = image_reference("proxy")))
     if digest == None:
         fail((
             "{label}: found `repository: {repo}` but no `digest:` key inside the " +
@@ -154,10 +159,7 @@ def _repository_of(ref):
 
 def _bearer_token(rctx):
     """Fetches an anonymous pull token; None when the registry needs no auth."""
-    url = "https://{registry}/token?service={registry}&scope=repository:{repo}:pull".format(
-        registry = rctx.attr.registry,
-        repo = rctx.attr.repository,
-    )
+    url = registry_token_url(rctx.attr.registry, rctx.attr.repository)
     result = rctx.download(url = url, output = "token.json", allow_fail = True)
     if not result.success:
         return None
@@ -192,8 +194,8 @@ def _fetch_manifest(rctx, token, digest, what):
         fail((
             "could not fetch the {what} for {registry}/{repo}@{digest}.\n" +
             "If that package is private, authenticate first:\n" +
-            "  locally:  docker login ghcr.io\n" +
-            "  in CI:    a docker/login-action@v3 step with `packages: read`\n" +
+            "  locally:  docker login {registry}\n" +
+            "  in CI:    a docker/login-action step with read access\n" +
             "The pin comes from {label} (aether #709)."
         ).format(
             what = what,

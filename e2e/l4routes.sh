@@ -29,7 +29,7 @@
 # re-demonstrate each probe's discriminating power on EVERY run: the same probe,
 # the same client, a different named answer.
 #
-# The workload is e2e/l4echo (ghcr.io/bpalermo/aether/l4echo:latest), one process
+# The workload is e2e/l4echo (<IMAGE_REGISTRY>/l4echo:latest), one process
 # per mode:
 #
 #   --mode=tcp  reads one line, writes "<marker> <line>" and CLOSES.
@@ -160,6 +160,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# <registry>/<namespace> every aether image is tagged under, from the single
+# setting in bazel/img/registry.bzl (proposal 040) -- never a literal.
+IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
 CLUSTER="${L4_CLUSTER:-l4routes}"
 CTX="kind-$CLUSTER"
 NS="aether-system"
@@ -300,7 +303,7 @@ raise_inotify() {
 build_images() {
 	# CI builds the images itself (bazel image_load via RBE) and sets
 	# L4_SKIP_BUILD=1 so this is a no-op — they are already in the local docker
-	# daemon under ghcr.io/bpalermo/aether/<img>:latest.
+	# daemon under <IMAGE_REGISTRY>/<img>:latest.
 	if [ "${L4_SKIP_BUILD:-0}" = "1" ]; then
 		ok "skipping image build (L4_SKIP_BUILD=1; images pre-built)"
 		return
@@ -360,8 +363,8 @@ load_images() {
 	log "loading images into '$CLUSTER'"
 	local img
 	for img in "${IMAGES[@]}"; do
-		kind load docker-image "ghcr.io/bpalermo/aether/${img}:latest" --name "$CLUSTER" >/dev/null 2>&1 ||
-			die "could not load ghcr.io/bpalermo/aether/${img}:latest into kind (was it built?)"
+		kind load docker-image "${IMAGE_REGISTRY}/${img}:latest" --name "$CLUSTER" >/dev/null 2>&1 ||
+			die "could not load ${IMAGE_REGISTRY}/${img}:latest into kind (was it built?)"
 	done
 	ok "images loaded"
 }
@@ -481,7 +484,7 @@ install_aether() {
 	local charts etcd
 	charts="$(chart_dir)"
 	etcd="http://$(etcd_ip):2379"
-	img() { echo "--set $1.image.repository=ghcr.io/bpalermo/aether/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
 	log "installing the aether CRDs (MeshConfig, HTTPFilter, EdgeConfig, EndpointPolicy)"
 	helm --kube-context "$CTX" upgrade --install aether-crds "$charts/crds" \
 		-n "$NS" --create-namespace --wait --timeout 2m >/dev/null || die "crds chart install failed"
@@ -587,7 +590,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: app
-          image: ghcr.io/bpalermo/aether/l4echo:latest
+          image: ${IMAGE_REGISTRY}/l4echo:latest
           imagePullPolicy: Never
           args: ["--mode=$mode", "--listen=:$port", "--text=$text"$extra]
           ports: [{containerPort: $port}]

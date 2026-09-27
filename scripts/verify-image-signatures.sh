@@ -25,8 +25,17 @@
 #
 #   COSIGN=/path/to/cosign scripts/verify-image-signatures.sh <ref>...
 #
-# Each ref is `ghcr.io/<repo>@sha256:<index digest>` — a DIGEST, never a tag, so
-# nothing here can re-resolve to a different artefact than the caller named.
+# Each ref is `<registry>/<repo>@sha256:<index digest>` — a DIGEST, never a tag,
+# so nothing here can re-resolve to a different artefact than the caller named.
+# The registry is taken from each ref (REGISTRY_HOST is set per ref for the
+# child walk), so one run can verify refs on ghcr.io and on quay.io alike — the
+# phase-2 sweep of proposal 040 does exactly that.
+#
+# REGISTRY-NEUTRAL. `cosign verify` finds the signature itself in every layout
+# we publish: the cosign 2 `.sig` tag, cosign 3's referrers fallback tag on a
+# registry without the Referrers API (ghcr.io), and — on quay.io, which serves
+# the API — the bundle attached as an OCI 1.1 referrer, which cosign 3
+# discovers through /v2/<repo>/referrers/<digest> with no tag at all.
 #
 # Every ref and every child is checked even after a failure, so one run names
 # every unsigned manifest rather than the first.
@@ -39,7 +48,9 @@
 #   CERT_IDENTITY_REGEXP certificate identity; default is publish.yaml on
 #                        ${GITHUB_REPOSITORY:-bpalermo/aether}, any ref.
 #   CERT_OIDC_ISSUER     default https://token.actions.githubusercontent.com
-#   GHCR_TOKEN           optional; public packages read anonymously.
+#   GHCR_TOKEN           optional (ghcr.io only); public packages read
+#                        anonymously. REGISTRY_USERNAME + REGISTRY_PASSWORD for
+#                        any registry (scripts/registry-lib.sh).
 #
 # READ-ONLY. cosign verify and registry GETs only; nothing here can sign, push
 # or delete.
@@ -55,8 +66,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ghcr-lib.sh
-. "${here}/ghcr-lib.sh"
+# shellcheck source=scripts/registry-lib.sh
+. "${here}/registry-lib.sh"
 
 cosign_bin="${COSIGN:-cosign}"
 identity="${CERT_IDENTITY_REGEXP:-^https://github\.com/${GITHUB_REPOSITORY:-bpalermo/aether}/\.github/workflows/publish\.yaml@}"
@@ -107,27 +118,28 @@ verify_one() {
 }
 
 for ref in "${refs[@]}"; do
-	if ! [[ "$ref" =~ ^ghcr\.io/([^@]+)@(sha256:[0-9a-f]{64})$ ]]; then
-		echo "::error::not a ghcr.io digest reference: ${ref}" >&2
+	if ! [[ "$ref" =~ ^([a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?)/([^@]+)@(sha256:[0-9a-f]{64})$ ]]; then
+		echo "::error::not a <registry>/<repo>@sha256:<digest> reference: ${ref}" >&2
 		exit 2
 	fi
-	repo="${BASH_REMATCH[1]}"
-	digest="${BASH_REMATCH[2]}"
+	REGISTRY_HOST="${BASH_REMATCH[1]}"
+	repo="${BASH_REMATCH[4]}"
+	digest="${BASH_REMATCH[5]}"
 
 	echo "${ref}"
 	verify_one index "$ref"
 
-	if ! tok="$(ghcr_registry_token "$repo")" || [ -z "$tok" ]; then
+	if ! tok="$(registry_registry_token "$repo")" || [ -z "$tok" ]; then
 		echo "::error::could not obtain a pull token for ${repo}" >&2
 		exit 2
 	fi
-	if ! children="$(ghcr_index_children "$repo" "$digest" "$tok")" || [ -z "$children" ]; then
+	if ! children="$(registry_index_children "$repo" "$digest" "$tok")" || [ -z "$children" ]; then
 		echo "::error::could not enumerate the child manifests of ${ref} (not an index, or no children)" >&2
 		exit 2
 	fi
 	n_children=0
 	while read -r child; do
-		verify_one child "ghcr.io/${repo}@${child}"
+		verify_one child "${REGISTRY_HOST}/${repo}@${child}"
 		n_children=$((n_children + 1))
 	done <<<"$children"
 	echo "  ${n_children} child manifest(s) walked"

@@ -1,0 +1,75 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(":registry.bzl", "IMAGE_NAMESPACE", "IMAGE_REGISTRY", "chart_repository", "image_reference", "image_repository")
+
+# The registry is ONE setting, registry.bzl (proposal 040), read two ways: Bazel
+# loads it, and scripts/image-registry.sh parses it for everything that is not
+# Bazel (workflows, verifiers, e2e scripts). Two readers of one file can still
+# disagree — a parse that drops an override, a helper that formats differently —
+# so this pins them against each other: the Starlark helpers' answers are
+# written out at LOADING time, and the test asks the shell script the same
+# questions against the same file.
+#
+# The components are every image the build knows how to push (plus `proxy`,
+# the one with a name override on GHCR); the charts are the four published.
+_COMPONENTS = [
+    "agent",
+    "mesh-dns",
+    "proxy-supervisor",
+    "cni-install",
+    "registrar",
+    "controller",
+    "prober",
+    "udsecho",
+    "l4echo",
+    "proxy",
+]
+
+_CHARTS = [
+    "aether",
+    "crds",
+    "prober",
+    "udsecho",
+]
+
+# `<subcommand> [<arg>] <answer>` per line: what the Starlark helpers say.
+_EXPECTED = [
+    "host " + IMAGE_REGISTRY,
+    "prefix " + IMAGE_REGISTRY + "/" + IMAGE_NAMESPACE,
+]
+
+_EXPECTED += ["repo {} {}".format(
+    c,
+    image_repository(c),
+) for c in _COMPONENTS]
+
+_EXPECTED += ["ref {} {}".format(
+    c,
+    image_reference(c),
+) for c in _COMPONENTS]
+
+_EXPECTED += ["chart-repo {} {}".format(
+    c,
+    chart_repository(c),
+) for c in _CHARTS]
+
+write_file(
+    name = "registry_expected",
+    out = "registry_expected.txt",
+    content = _EXPECTED + [""],
+)
+
+sh_test(
+    name = "registry_test",
+    srcs = ["registry_test.sh"],
+    args = [
+        "$(rootpath :registry_expected)",
+        "$(rootpath //scripts:image-registry.sh)",
+        "$(rootpath :registry.bzl)",
+    ],
+    data = [
+        ":registry.bzl",
+        ":registry_expected",
+        "//scripts:image-registry.sh",
+    ],
+)

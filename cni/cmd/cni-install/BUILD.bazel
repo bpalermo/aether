@@ -1,5 +1,6 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+load("//bazel/img:registry.bzl", "image_repository")
 
 go_library(
     name = "cni-install_lib",
@@ -21,7 +22,7 @@ go_binary(
 go_multi_arch_image(
     name = "cni-install_image",
     binary = ":cni-install",
-    repository = "bpalermo/aether/cni-install",
+    repository = image_repository("cni-install"),
     tars_layer = {
         "/opt/cni/bin/aether-cni": "//cni/cmd/cni:cni",
     },

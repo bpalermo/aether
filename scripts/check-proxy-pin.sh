@@ -18,7 +18,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 # shellcheck disable=SC1091
-. scripts/ghcr-lib.sh
+. scripts/registry-lib.sh
 unset PROXY_SIGNING_CUTOVER # read the COMMITTED value, not an override
 # shellcheck disable=SC1091
 . scripts/proxy-pin-lib.sh
@@ -47,7 +47,7 @@ agent:
     digest: "{@//agent/cmd/agent:image_push.digest}"
 proxy:
   image:
-    repository: ghcr.io/bpalermo/aether/aether-proxy
+    repository: ${PROXY_IMAGE}
     tag: 0123456789abcdef0123456789abcdef01234567
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
     # helper prefers digest over tag. Multi-arch index for 0123456.
@@ -132,8 +132,8 @@ c3="$(rev 1)"
 c4="$(rev 0)"
 
 unsigned=(dev-0123 other)
-signed_d1="$(ghcr_signature_tag_bundle "$d1")"
-signed_d2="$(ghcr_signature_tag_legacy "$d2")"
+signed_d1="$(registry_signature_tag_bundle "$d1")"
+signed_d2="$(registry_signature_tag_legacy "$d2")"
 
 # want_verdict <name> <expected> <sha> <digest> <tags...>
 want_verdict() {

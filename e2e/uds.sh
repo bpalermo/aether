@@ -6,7 +6,7 @@
 # through both ways of declaring the socket, and that a mis-declared socket
 # degrades the one affected service and nothing else.
 #
-# The workload is e2e/udsecho (built here as ghcr.io/bpalermo/aether/udsecho:latest):
+# The workload is e2e/udsecho (built here as <IMAGE_REGISTRY>/udsecho:latest):
 # it listens on a socket in an emptyDir and never calls listen(2) on a TCP port.
 # That is what makes every 200 below load-bearing — a delivery that fell back to
 # TCP loopback would find nothing listening, fail the delegated-liveness probe,
@@ -38,6 +38,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# <registry>/<namespace> every aether image is tagged under, from the single
+# setting in bazel/img/registry.bzl (proposal 040) -- never a literal.
+IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
 CLUSTER="${UDS_CLUSTER:-uds}"
 CTX="kind-$CLUSTER"
 NS="aether-system"
@@ -110,7 +113,7 @@ raise_inotify() {
 build_images() {
 	# CI builds the images itself (bazel image_load via RBE) and sets
 	# UDS_SKIP_BUILD=1 so this is a no-op — they are already in the local docker
-	# daemon under ghcr.io/bpalermo/aether/<img>:latest.
+	# daemon under <IMAGE_REGISTRY>/<img>:latest.
 	if [ "${UDS_SKIP_BUILD:-0}" = "1" ]; then
 		ok "skipping image build (UDS_SKIP_BUILD=1; images pre-built)"
 		return
@@ -146,8 +149,8 @@ load_images() {
 	log "loading images into '$CLUSTER'"
 	local img
 	for img in "${IMAGES[@]}"; do
-		kind load docker-image "ghcr.io/bpalermo/aether/${img}:latest" --name "$CLUSTER" >/dev/null 2>&1 ||
-			die "could not load ghcr.io/bpalermo/aether/${img}:latest into kind (was it built?)"
+		kind load docker-image "${IMAGE_REGISTRY}/${img}:latest" --name "$CLUSTER" >/dev/null 2>&1 ||
+			die "could not load ${IMAGE_REGISTRY}/${img}:latest into kind (was it built?)"
 	done
 	ok "images loaded"
 }
@@ -230,7 +233,7 @@ chart_dir() {
 install_aether() {
 	local charts
 	charts="$(chart_dir)"
-	img() { echo "--set $1.image.repository=ghcr.io/bpalermo/aether/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
 	# The crds chart FIRST: the agent's EndpointPolicy reconciler is CRD-presence
 	# gated at manager setup, so a CRD installed later would need an agent restart.
 	log "installing the aether CRDs (MeshConfig, HTTPFilter, EdgeConfig, EndpointPolicy)"
@@ -304,7 +307,7 @@ spec:
       securityContext: {fsGroup: 65532}
       containers:
         - name: app
-          image: ghcr.io/bpalermo/aether/udsecho:latest
+          image: ${IMAGE_REGISTRY}/udsecho:latest
           imagePullPolicy: Never
           args: ["--socket=/s/a.sock", "--text=served-by-uds-echo"]
           volumeMounts: [{name: s, mountPath: /s}]
@@ -334,7 +337,7 @@ spec:
       securityContext: {fsGroup: 65532}
       containers:
         - name: app
-          image: ghcr.io/bpalermo/aether/udsecho:latest
+          image: ${IMAGE_REGISTRY}/udsecho:latest
           imagePullPolicy: Never
           args: ["--socket=/s/a.sock", "--text=served-by-uds-cr-echo"]
           volumeMounts: [{name: s, mountPath: /s}]

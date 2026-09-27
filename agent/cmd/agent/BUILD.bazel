@@ -1,5 +1,6 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+load("//bazel/img:registry.bzl", "image_repository")
 
 go_library(
     name = "agent_lib",
@@ -24,7 +25,7 @@ go_binary(
 go_multi_arch_image(
     name = "agent_image",
     binary = ":agent",
-    repository = "bpalermo/aether/agent",
+    repository = image_repository("agent"),
     # The aether-proxy pod's exec readiness probe (#673).
     #
     # Since #772 the supported path stages it out of

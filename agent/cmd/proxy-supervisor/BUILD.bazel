@@ -1,5 +1,6 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+load("//bazel/img:registry.bzl", "image_repository")
 
 # deps_test.go is hand-wired below into its own :deps_test target (it needs the
 # linked binary as data and has to be nameable on its own), so keep gazelle from
@@ -39,7 +40,7 @@ go_binary(
 go_multi_arch_image(
     name = "proxy-supervisor_image",
     binary = ":proxy-supervisor",
-    repository = "bpalermo/aether/proxy-supervisor",
+    repository = image_repository("proxy-supervisor"),
     # The proxy pod's exec readiness probe (#673). It ships as an extra layer in
     # THIS image — the one the initContainer already runs — so there is no second
     # pull, and the probe and the supervisor that writes the marker it reads are

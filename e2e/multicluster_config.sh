@@ -24,6 +24,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# <registry>/<namespace> every aether image is tagged under, from the single
+# setting in bazel/img/registry.bzl (proposal 040) -- never a literal.
+IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
 CLUSTER_A="${CLUSTER_A:-a}"
 CLUSTER_B="${CLUSTER_B:-b}"
 ETCD_NAME="${ETCD_NAME:-aether-shared-etcd}"
@@ -101,7 +104,7 @@ load_images() {
 	log "loading images into both clusters"
 	for c in "$CLUSTER_A" "$CLUSTER_B"; do
 		for img in "${IMAGES[@]}"; do
-			kind load docker-image "ghcr.io/bpalermo/aether/${img}:latest" --name "$c" >/dev/null 2>&1
+			kind load docker-image "${IMAGE_REGISTRY}/${img}:latest" --name "$c" >/dev/null 2>&1
 		done
 	done
 	ok "images loaded into '$CLUSTER_A' and '$CLUSTER_B'"
@@ -138,7 +141,7 @@ install_aether() {
 	etcd="http://$(etcd_ip):2379"
 	charts="$(chart_dir)"
 	local img
-	img() { echo "--set $1.image.repository=ghcr.io/bpalermo/aether/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
 	# cluster a EXPORTS (registrar config-export controller); cluster b IMPORTS (agent --import-config).
 	for c in "$CLUSTER_A" "$CLUSTER_B"; do
 		local import="false"

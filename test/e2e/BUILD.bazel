@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("//bazel/img:registry.bzl", "image_reference")
 
 go_test(
     name = "e2e_test",
@@ -23,6 +24,13 @@ go_test(
         "e2e",
         "manual",
     ],
+    # The default image references (main_test.go), from the single registry
+    # setting (proposal 040). AETHER_*_IMAGE still overrides them at run time.
+    x_defs = {
+        "defaultAgentImage": image_reference("agent") + ":latest",
+        "defaultCNIInstallImage": image_reference("cni-install") + ":latest",
+        "defaultRegistrarImage": image_reference("registrar") + ":latest",
+    },
     deps = [
         "@io_k8s_api//apps/v1:apps",
         "@io_k8s_api//core/v1:core",

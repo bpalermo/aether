@@ -35,7 +35,15 @@ sh_library(
 exports_files(
     [
         "ghcr-lib.sh",
+        "registry-lib.sh",
         "verify-image-signatures.sh",
     ],
     visibility = ["//tools/cosign:__pkg__"],
+)
+
+# The registry setting reader (proposal 040), for //bazel/img:registry_test,
+# which pins it against the Starlark helpers in bazel/img/registry.bzl.
+exports_files(
+    ["image-registry.sh"],
+    visibility = ["//bazel/img:__pkg__"],
 )

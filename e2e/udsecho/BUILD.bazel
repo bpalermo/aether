@@ -1,5 +1,6 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+load("//bazel/img:registry.bzl", "image_repository")
 
 go_library(
     name = "udsecho_lib",
@@ -22,5 +23,5 @@ go_binary(
 go_multi_arch_image(
     name = "udsecho_image",
     binary = ":udsecho",
-    repository = "bpalermo/aether/udsecho",
+    repository = image_repository("udsecho"),
 )

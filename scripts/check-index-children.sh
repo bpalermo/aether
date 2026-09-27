@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise the child-manifest walk (ghcr__json_children) over every shape it
+# Exercise the child-manifest walk (registry__json_children) over every shape it
 # must accept or refuse (#925).
 #
 # The walk is what extends signature checking from a multi-arch index to the
@@ -9,13 +9,13 @@
 # down (#853). So every shape that is not "an index with well-formed children"
 # must fail, not print nothing and succeed.
 #
-# No registry access: the documents are literals, shaped like what ghcr.io
+# No registry access: the documents are literals, shaped like what an OCI registry
 # returns for our rules_img indexes (and a buildx one, whose attestation
 # manifests must be walked too, not filtered out).
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 # shellcheck disable=SC1091
-. scripts/ghcr-lib.sh
+. scripts/registry-lib.sh
 
 a="sha256:$(printf 'a%.0s' {1..64})"
 b="sha256:$(printf 'b%.0s' {1..64})"
@@ -27,7 +27,7 @@ n=0
 want_children() {
 	local name="$1" want="$2" doc="$3" got
 	n=$((n + 1))
-	if got="$(printf '%s' "$doc" | ghcr__json_children)" && [ "$got" = "$want" ]; then
+	if got="$(printf '%s' "$doc" | registry__json_children)" && [ "$got" = "$want" ]; then
 		printf '  ok    %s\n' "$name"
 	else
 		printf '  FAIL  %s: want [%s] got [%s]\n' "$name" "$want" "$got"
@@ -39,7 +39,7 @@ want_children() {
 want_refused() {
 	local name="$1" doc="$2" got
 	n=$((n + 1))
-	if got="$(printf '%s' "$doc" | ghcr__json_children 2>/dev/null)"; then
+	if got="$(printf '%s' "$doc" | registry__json_children 2>/dev/null)"; then
 		printf '  FAIL  %s: accepted, printed [%s]\n' "$name" "$got"
 		fail=1
 	else

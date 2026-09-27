@@ -5,6 +5,7 @@ load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
 load("@rules_img//img:load.bzl", "image_load")
 load("@rules_img//img:push.bzl", "image_push")
 load("//tools/buildid:defs.bzl", "content_build_id")
+load(":registry.bzl", "IMAGE_REGISTRY")
 
 # OCI provenance, on the config (labels) AND on the descriptors (annotations).
 #
@@ -29,7 +30,7 @@ _PROVENANCE = {
     "org.opencontainers.image.revision": "{{.STABLE_GIT_COMMIT}}",
 }
 
-def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "@distroless_static", container_test_configs = ["testdata/container_test.yaml"], tars_layer = None, extra_labels = {}):
+def go_multi_arch_image(name, binary, repository, registry = IMAGE_REGISTRY, base = "@distroless_static", container_test_configs = ["testdata/container_test.yaml"], tars_layer = None, extra_labels = {}):
     """
     Creates a containerized binary from Go sources.
 
@@ -43,8 +44,9 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
     Parameters:
         name:  name of the image
         binary:  go binary
-        repository: image repository
-        registry: image registry
+        repository: image repository, from registry.bzl's image_repository()
+        registry: image registry host (registry.bzl's IMAGE_REGISTRY; proposal
+          040 -- do not pass a literal)
         base: base image
         tars: additional image layers
         extra_labels: image-specific OCI config labels merged on top of the
@@ -151,7 +153,7 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
         name = "image_load",
         image = ":image_index",
         # Registry-qualified tag so the locally loaded image matches its pushed
-        # reference (e.g. ghcr.io/bpalermo/aether/agent:latest) — the e2e suite
+        # reference (<IMAGE_REGISTRY>/<image_repository(...)>:latest) — the e2e suite
         # kind-loads images by that full ref.
         tag = "{}/{}:{}".format(registry, repository, "latest"),
     )

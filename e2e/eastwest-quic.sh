@@ -104,6 +104,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# <registry>/<namespace> every aether image is tagged under, from the single
+# setting in bazel/img/registry.bzl (proposal 040) -- never a literal.
+IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
 CLUSTER="${EWQ_CLUSTER:-eastwest-quic}"
 CTX="kind-$CLUSTER"
 NODE="$CLUSTER-control-plane"
@@ -243,8 +246,8 @@ load_images() {
 	log "loading images into '$CLUSTER'"
 	local img
 	for img in "${IMAGES[@]}"; do
-		kind load docker-image "ghcr.io/bpalermo/aether/${img}:latest" --name "$CLUSTER" >/dev/null 2>&1 ||
-			die "could not load ghcr.io/bpalermo/aether/${img}:latest into kind (was it built?)"
+		kind load docker-image "${IMAGE_REGISTRY}/${img}:latest" --name "$CLUSTER" >/dev/null 2>&1 ||
+			die "could not load ${IMAGE_REGISTRY}/${img}:latest into kind (was it built?)"
 	done
 	ok "images loaded"
 }
@@ -325,7 +328,7 @@ chart_dir() {
 install_aether() {
 	local charts
 	charts="$(chart_dir)"
-	img() { echo "--set $1.image.repository=ghcr.io/bpalermo/aether/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
 	# The allow-list: both QUIC destinations AND both GAMMA destinations (E4
 	# needs twins present for the GAMMA backends, so that "stays h2" is a choice
 	# the route makes, not an absence). h2only is deliberately NOT listed. Each
