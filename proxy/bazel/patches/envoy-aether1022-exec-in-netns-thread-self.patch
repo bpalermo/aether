@@ -1,3 +1,45 @@
+diff --git a/source/common/network/utility.h b/source/common/network/utility.h
+index 40cd3b9704..112535edee 100644
+--- a/source/common/network/utility.h
++++ b/source/common/network/utility.h
+@@ -14,6 +14,11 @@
+ #include "source/common/common/statusor.h"
+ 
+ #if defined(__linux__)
++#include <sys/syscall.h>
++#include <unistd.h>
++
++#include <cerrno>
++
+ #include "source/common/api/os_sys_calls_impl_linux.h"
+ #endif
+ 
+@@ -379,9 +384,22 @@ public:
+       -> absl::StatusOr<typename std::invoke_result_t<Func>> {
+     Api::OsSysCalls& posix = Api::OsSysCallsSingleton().get();
+ 
+-    // Open the original netns fd, so that we can return to it.
+-    constexpr auto curr_netns_file = "/proc/self/ns/net";
+-    auto og_netns_fd_result = posix.open(curr_netns_file, O_RDONLY);
++    // Open the calling thread's original netns fd, so that we can return to it.
++    //
++    // This must name the calling THREAD's namespace, not the process's: setns(CLONE_NEWNET) moves
++    // only the calling thread, and "/proc/self" resolves to the thread-group leader (the main
++    // thread). A worker that recorded "/proc/self/ns/net" while the main thread was itself inside
++    // another namespace (e.g. mid-way through its own execInNetworkNamespace call) would "restore"
++    // itself into that namespace and stay there, creating every later socket in it.
++    // "/proc/thread-self" (Linux >= 3.17) names the calling thread; fall back to
++    // "/proc/self/task/<tid>" where it does not exist.
++    std::string curr_netns_file = "/proc/thread-self/ns/net";
++    auto og_netns_fd_result = posix.open(curr_netns_file.c_str(), O_RDONLY);
++    if (og_netns_fd_result.return_value_ < 0 && og_netns_fd_result.errno_ == ENOENT) {
++      curr_netns_file =
++          fmt::format("/proc/self/task/{}/ns/net", static_cast<long>(::syscall(SYS_gettid)));
++      og_netns_fd_result = posix.open(curr_netns_file.c_str(), O_RDONLY);
++    }
+     int og_netns_fd = og_netns_fd_result.return_value_;
+     if (og_netns_fd_result.errno_ != 0) {
+       return absl::InternalError(fmt::format("failed to open netns file {}: {}", curr_netns_file,
 diff --git a/test/common/network/BUILD b/test/common/network/BUILD
 index a4fcae8ea0..a70a727849 100644
 --- a/test/common/network/BUILD
@@ -365,3 +407,28 @@ index 0000000000..dee6431dee
 +} // namespace
 +} // namespace Network
 +} // namespace Envoy
+diff --git a/test/common/network/utility_test.cc b/test/common/network/utility_test.cc
+index eb4d31e6bf..91b396d708 100644
+--- a/test/common/network/utility_test.cc
++++ b/test/common/network/utility_test.cc
+@@ -965,16 +965,16 @@ TEST_F(ExecInNetnsTest, Basic) {
+   EXPECT_THAT(result, IsOkAndHolds("ns1"));
+ 
+   // Make sure the netns reverted back to the netns the execInNetworkNamespace function was called
+-  // from. When the netns was noted before making the jump, it used the fd of "/proc/self/ns/net"
+-  // and that is what would show up for the test.
+-  EXPECT_EQ(getCurrentNetns(), "/proc/self/ns/net");
++  // from. When the netns was noted before making the jump, it used the fd of the calling thread's
++  // "/proc/thread-self/ns/net" and that is what would show up for the test.
++  EXPECT_EQ(getCurrentNetns(), "/proc/thread-self/ns/net");
+ 
+   // Try another netns.
+   result = Utility::execInNetworkNamespace(func, "ns2");
+   EXPECT_THAT(result, IsOkAndHolds("ns2"));
+ 
+   // Make sure the netns reverted back.
+-  EXPECT_EQ(getCurrentNetns(), "/proc/self/ns/net");
++  EXPECT_EQ(getCurrentNetns(), "/proc/thread-self/ns/net");
+ }
+ 
+ TEST_F(ExecInNetnsTest, OpenFail) {
