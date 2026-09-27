@@ -96,7 +96,16 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. THIS job is
+          # the workflow's one saver: the warm-up below fetches for all of
+          # //... under --config=ci, so what it saves is a superset of every
+          # other job's fetches, which only restore (docs/runbook.md, "CI:
+          # external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+      - name: Warm the Bazel repository cache (fetch + analysis of //..., retried)
+        run: scripts/ci-bazel-warmup.sh --config=ci //...
       - name: Download bazel-diff
         run: |
           curl -fsSL -o "$RUNNER_TEMP/bazel-diff.jar" \
@@ -155,7 +164,15 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # `diff` is the one job that saves it (docs/runbook.md, "CI:
+          # external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh @rules_go//go
       - name: Audit the Go dependency surface
         run: scripts/go-deps-audit.sh
 
@@ -196,7 +213,15 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # `diff` is the one job that saves it (docs/runbook.md, "CI:
+          # external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh --config=lint --@aspect_rules_lint//lint:fail_on_violation //scripts:all
 
       # First: is every script actually reachable by the aspect? The srcs are
       # per-package globs and a glob cannot cross a package boundary, so a script
@@ -204,6 +229,13 @@ jobs:
       # by simply not being in it — the vacuous-gate failure mode one level down.
       - name: Every root-workspace shell script is covered by an sh_* target
         run: scripts/check-shell-lint.sh
+
+      # scripts/ci-bazel-warmup.sh (#1001) retries a repository-fetch failure
+      # 3x with backoff and any other failure not at all. A stub bazel pins
+      # both, so a refactor cannot quietly drop the retry or start masking a
+      # broken BUILD file behind a minute of backoff.
+      - name: CI warm-up retry contract is exact
+        run: scripts/check-ci-bazel-warmup.sh
 
       # The verifier accepts two cosign signature-tag layouts (cosign 2's
       # `.sig` and cosign 3's bare fallback index) so artifacts published
@@ -308,7 +340,15 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # `diff` is the one job that saves it (docs/runbook.md, "CI:
+          # external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh //:format.check
 
       # The formatter prints one "Formatted <language>" line per configured
       # language and its exit code says nothing about how much it inspected. So
@@ -515,12 +555,20 @@ jobs:
           # nothing to do with the change under test. On 2026-09-21 that took
           # out `test` and `race` repeatedly while `diff`, `deps-audit` and
           # `shell` -- the three jobs that already had this -- rode it out.
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # `diff` is the one job that saves it (docs/runbook.md, "CI:
+          # external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
       - name: Download impacted target lists
         uses: actions/download-artifact@v8
         with:
           name: impacted-targets
           path: ${{ runner.temp }}/impacted
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh --config=ci --target_pattern_file=${{ runner.temp }}/impacted/impacted_build.txt
       - name: Build impacted targets
         run: |
           bazel build --config=ci \
@@ -586,12 +634,20 @@ jobs:
           # nothing to do with the change under test. On 2026-09-21 that took
           # out `test` and `race` repeatedly while `diff`, `deps-audit` and
           # `shell` -- the three jobs that already had this -- rode it out.
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # `diff` is the one job that saves it (docs/runbook.md, "CI:
+          # external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
       - name: Download impacted target lists
         uses: actions/download-artifact@v8
         with:
           name: impacted-targets
           path: ${{ runner.temp }}/impacted
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh --config=ci --target_pattern_file=${{ runner.temp }}/impacted/impacted_build.txt
       # The 19 concurrency-heavy packages from the 2026-09-15 races review get
       # three runs each: the one production race the detector has ever caught
       # (etcd Close vs. watchLoop, #772/R1) reproduced 2 of 3 runs and was
@@ -696,7 +752,13 @@ jobs:
           bazelisk-cache: true
           # See the note on the `test` job: without this the external release
           # assets are re-fetched from github.com on every run.
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # `diff` is the one job that saves it (docs/runbook.md, "CI:
+          # external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
       - name: Download impacted target lists
         uses: actions/download-artifact@v8
         with:
@@ -711,6 +773,9 @@ jobs:
             echo "run=false" >>"$GITHUB_OUTPUT"
             echo ">> //cni/internal/plugin:capture_netns_test not impacted by this change; nothing to run"
           fi
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        if: steps.impacted.outputs.run == 'true'
+        run: scripts/ci-bazel-warmup.sh --config=ci //cni/internal/plugin:capture_netns_test
       - name: Build the netns test binary
         if: steps.impacted.outputs.run == 'true'
         run: |
@@ -755,12 +820,20 @@ jobs:
           # nothing to do with the change under test. On 2026-09-21 that took
           # out `test` and `race` repeatedly while `diff`, `deps-audit` and
           # `shell` -- the three jobs that already had this -- rode it out.
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # `diff` is the one job that saves it (docs/runbook.md, "CI:
+          # external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
       - name: Download impacted target lists
         uses: actions/download-artifact@v8
         with:
           name: impacted-targets
           path: ${{ runner.temp }}/impacted
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh --config=ci --target_pattern_file=${{ runner.temp }}/impacted/impacted_integration.txt
       - name: Integration tests
         run: |
           bazel test --config=ci \
@@ -780,7 +853,15 @@ jobs:
           bazelisk-cache: true
           # See the note on the `test` job: without this the external release
           # assets are re-fetched from github.com on every run.
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # `diff` is the one job that saves it (docs/runbook.md, "CI:
+          # external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh --config=ci //agent/cmd/agent:image_load //cni/cmd/cni-install:image_load //registrar/cmd/registrar:image_load //test/e2e:e2e_test
       - name: Build and load container images
         run: |
           bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //agent/cmd/agent:image_load
