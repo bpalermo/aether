@@ -523,7 +523,7 @@ over a tested path. The full assessment is on #916.
   SANs only satisfy the QUIC client's check. Once the upstream fix lands the
   DNS SANs become optional, the SNI shape stays. The upstream fix is
   envoyproxy/envoy#47740, carried as a patch on the proxy pin since #972; with
-  the allow-list removed after the proving soak (4c, #PRNUM) every workload
+  the allow-list removed after the proving soak (4c, #979) every workload
   talks QUIC, so the SANs are a **mesh-wide** SPIRE requirement until #47740 is
   in a plain pin. `e2e/eastwest-quic.sh`'s negative control
   (`QUIC_DNS_SANS=off`: no SANs, #47740's runtime guard off) is this failure.
@@ -564,19 +564,19 @@ before a UDPRoute exists, and equally deliberate.
 | 3a | `e2e/l4routes.sh` T3 grows a second UDPRoute-backed service on the same node and asserts **selection**: each service's datagrams reach its own backend. Run first with the mode `redirect` and **seen red** (second service dropped, as today), then with `tproxy` green. | M | red-then-green on kind |
 | 3b | Flip `--capture-udp-mode` to `tproxy`. Chart bump. Deploy to talos-main; 8h soak with the UDP workload in the churn set. Then delete the 18081/udp REDIRECT one release later. | S + soak | soak PASS |
 
-### Phase 4 — east-west QUIC (planned behind a flag; unconditional since the proving soak, #PRNUM)
+### Phase 4 — east-west QUIC (planned behind a flag; unconditional since the proving soak, #979)
 
 | PR | scope | size | gate |
 |---|---|---|---|
 | 4a **(shipped, unconditional — no flag; no 18008 divert, inbound QUIC arrives on eth0 and needs none)** | Inbound: a QUIC listener bound into each pod's netns on **UDP:18008**, `envoy.transport_sockets.quic` wrapping the SAME `DownstreamTlsContext` (SDS server cert, validation context with SPIFFE SAN pinning) as the TCP inbound; `require_client_certificate: true`; `enable_resumption: false`, `enable_early_data: false` (R4). Routes to the same per-port app clusters. Extend the port-role gate to 18008. | M | `//test/envoy_validate` asserts the two `false`s on every mTLS QUIC chain — a chain without them must FAIL validation, and the test must be seen red |
-| 4b **(shipped 2026-09-26: #956 outbound + selection, #958 mtlspool HTTP/3 arm, #962 per-source stats key; e2e #959; the #957 hostname-check workaround is Q5. Unconditional since #PRNUM: twins for every service in the node's dependency set — default entry only, identity-ready, never a service with a waypointed endpoint — so the budget is local SAs × dependency-set services, ≈ 150–270 per node on talos-main)** | Outbound — **Q2 answered: one QUIC cluster per source ServiceAccount.** `QuicUpstreamTransport` rejects the cert mapper at load (Q2a=no), so the per-source identity has to be the cluster's own `UpstreamTlsContext`, one per local ServiceAccount, named `quic:<svc>@<source-sa>` and selected by the source's filter-state identity at the route. The identity-set re-push cost #842 removed returns for these clusters only: the first pod of a new ServiceAccount on a node adds a QUIC cluster, the last one leaving removes it, and each add re-warms only that cluster — bounded by local ServiceAccounts, not by mesh services, and never touching the TCP clusters. Pooling still partitions per identity (Q2b=yes), so `//test/mtlspool` gains a QUIC arm asserting source B never rides source A's connection — the pooling guarantee is real even though the certificate is per cluster. | L | mtlspool QUIC negative control red-then-green; a cluster-count budget stated before commit (local SAs × QUIC-enabled destinations) |
-| 4c **(decision 2026-09-26: NO opt-in for QUIC. The allow-list #956 shipped was a proving gate for the first QUIC soak; #PRNUM removed it after that soak passed — `--east-west-quic-services` / `agent.eastWestQuicServices` are gone and QUIC applies to every destination; the registry-advertised opt-in is dropped, not deferred)** | Selection: explicit allow-list flag first; then "destination advertises UDP:18008" via the registry once the inbound has soaked. | S | e2e |
+| 4b **(shipped 2026-09-26: #956 outbound + selection, #958 mtlspool HTTP/3 arm, #962 per-source stats key; e2e #959; the #957 hostname-check workaround is Q5. Unconditional since #979: twins for every service in the node's dependency set — default entry only, identity-ready, never a service with a waypointed endpoint — so the budget is local SAs × dependency-set services, ≈ 150–270 per node on talos-main)** | Outbound — **Q2 answered: one QUIC cluster per source ServiceAccount.** `QuicUpstreamTransport` rejects the cert mapper at load (Q2a=no), so the per-source identity has to be the cluster's own `UpstreamTlsContext`, one per local ServiceAccount, named `quic:<svc>@<source-sa>` and selected by the source's filter-state identity at the route. The identity-set re-push cost #842 removed returns for these clusters only: the first pod of a new ServiceAccount on a node adds a QUIC cluster, the last one leaving removes it, and each add re-warms only that cluster — bounded by local ServiceAccounts, not by mesh services, and never touching the TCP clusters. Pooling still partitions per identity (Q2b=yes), so `//test/mtlspool` gains a QUIC arm asserting source B never rides source A's connection — the pooling guarantee is real even though the certificate is per cluster. | L | mtlspool QUIC negative control red-then-green; a cluster-count budget stated before commit (local SAs × QUIC-enabled destinations) |
+| 4c **(decision 2026-09-26: NO opt-in for QUIC. The allow-list #956 shipped was a proving gate for the first QUIC soak; #979 removed it after that soak passed — `--east-west-quic-services` / `agent.eastWestQuicServices` are gone and QUIC applies to every destination; the registry-advertised opt-in is dropped, not deferred)** | Selection: explicit allow-list flag first; then "destination advertises UDP:18008" via the registry once the inbound has soaked. | S | e2e |
 | 4d | East-west gateway: UDP:18009 beside TCP:18009, same SNI-forwarding role; cross-cluster last. | M | 019's cross-cluster e2e over QUIC |
 
 Then a soak with `--east-west-quic` on for the whole 8h, graded on the same
 prober SLI, before any default flips. (Done as the proving soak with
 `aether-test/svc-1` and `svc-2` allow-listed, 2026-09-27; its PASS is what
-removed the allow-list in #PRNUM.)
+removed the allow-list in #979.)
 
 ### Phase 5 — TCP capture to TPROXY
 
