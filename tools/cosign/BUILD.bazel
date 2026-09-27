@@ -1,0 +1,51 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# cosign from the rules_img_signer_cosign module (MODULE.bazel), the ONLY cosign
+# this repository signs or verifies with -- in CI (publish.yaml, proxy-release.yml,
+# publish-verify.yaml) and by hand. The version and its sha256 live in that
+# module's lock; bumping cosign is bumping the bazel_dep. See docs/runbook.md,
+# "Verifying image signatures".
+#
+# Hand-written: Gazelle manages Go only. The module's `sign-oci-artifact` signer
+# plugin (rules_img signing_config) is deliberately NOT wired: it stores
+# signatures as OCI 1.1 referrers, and ghcr.io has no Referrers API.
+
+_COSIGN = "@rules_img_signer_cosign//cosign"
+
+# bazel run //tools/cosign -- <args>
+sh_binary(
+    name = "cosign",
+    srcs = ["cosign.sh"],
+    data = [_COSIGN],
+    env = {"COSIGN_RLOCATIONPATH": "$(rlocationpath %s)" % _COSIGN},
+    visibility = ["//visibility:public"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# bazel run //tools/cosign:verify_image_signatures -- <ghcr ref@digest>... | --file <refs>
+sh_binary(
+    name = "verify_image_signatures",
+    srcs = ["verify_image_signatures.sh"],
+    data = [
+        _COSIGN,
+        "//scripts:ghcr-lib.sh",
+        "//scripts:verify-image-signatures.sh",
+    ],
+    env = {
+        "COSIGN_RLOCATIONPATH": "$(rlocationpath %s)" % _COSIGN,
+        "VERIFY_SCRIPT_RLOCATIONPATH": "$(rlocationpath //scripts:verify-image-signatures.sh)",
+    },
+    visibility = ["//visibility:public"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# Network-free: `cosign version` must print the version the docs name.
+sh_test(
+    name = "version_test",
+    size = "small",
+    srcs = ["version_test.sh"],
+    data = [_COSIGN],
+    env = {"COSIGN_RLOCATIONPATH": "$(rlocationpath %s)" % _COSIGN},
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)

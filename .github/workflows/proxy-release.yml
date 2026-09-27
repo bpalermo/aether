@@ -351,8 +351,9 @@ jobs:
   # on the pinned index and both children.
   #
   # Same scheme as publish.yaml's sign step (read its comment for the long
-  # form): the SHA-pinned installer (v4.1.2 -> cosign v3.0.6, binary hash fixed
-  # by the pin), keyless via this job's OIDC token, `--recursive` so the index
+  # form): the Bazel-pinned cosign (`bazel run //tools/cosign`, the
+  # rules_img_signer_cosign bazel_dep's release binary, sha256 in its lock;
+  # v3.1.2), run LOCALLY on this runner, keyless via this job's OIDC token, `--recursive` so the index
   # AND each per-arch child are signed, and cosign 3's default bundle layout
   # (the `sha256-<hex>` fallback tag; ghcr.io has no Referrers API). No
   # `--new-bundle-format` flag, exactly as publish.yaml: `=false` is rejected on
@@ -384,8 +385,17 @@ jobs:
       signed_digest: ${{ steps.sign.outputs.signed_digest }}
     steps:
       - name: Checkout
-        # For scripts/verify-image-signatures.sh + scripts/ghcr-lib.sh only.
+        # For //tools/cosign (MODULE.bazel pins cosign) and the verifier scripts.
         uses: actions/checkout@v7
+
+      # Plain setup, as ci.yaml's `shell` job: no BuildBuddy key, no --config.
+      # The only targets this job builds are //tools/cosign's, fetched and run on
+      # this runner.
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -394,12 +404,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install cosign
-        # Same pin as publish.yaml and publish-verify.yaml -- keep all three in
-        # step. Pinned by SHA because this job holds `packages: write` and
-        # `id-token: write`: a retagged action could sign under our genuine
-        # identity and every verify would pass.
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Build cosign (Bazel-pinned, local)
+        # Replaces the SHA-pinned sigstore/cosign-installer: the binary's pin is
+        # now the rules_img_signer_cosign entry in MODULE.bazel.lock, shared with
+        # publish.yaml and publish-verify.yaml by construction rather than by
+        # keeping three action pins in step. `bazel run` execs cosign with the
+        # step's own environment, so the OIDC request variables `id-token: write`
+        # provides reach it (strict_action_env / --action_env shape build
+        # actions, not the run). See publish.yaml's "Build cosign" step.
+        run: bazel build //tools/cosign
 
       - name: Sign the index and every child (keyless, --recursive)
         id: sign
@@ -415,7 +428,7 @@ jobs:
             echo "::error::manifest job produced no usable index digest ('${INDEX_DIGEST}')"
             exit 1
           fi
-          cosign sign --recursive "${IMAGE}@${INDEX_DIGEST}"
+          bazel run //tools/cosign -- sign --yes --recursive "${IMAGE}@${INDEX_DIGEST}"
           echo "signed_digest=${INDEX_DIGEST}" >> "$GITHUB_OUTPUT"
           echo "signed ${IMAGE}@${INDEX_DIGEST} (index + children)"
 
@@ -433,7 +446,7 @@ jobs:
           set -euo pipefail
           CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/proxy-release\\.yml@refs/heads/main\$" \
           CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-            ./scripts/verify-image-signatures.sh "${IMAGE}@${SIGNED_DIGEST}"
+            bazel run //tools/cosign:verify_image_signatures -- "${IMAGE}@${SIGNED_DIGEST}"
 
   # Pin the aether chart to the just-published image (commit-SHA tag) and, when a
   # release token is available, open the pin PR and hand the merge to GitHub

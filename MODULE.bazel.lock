@@ -282,6 +282,8 @@
     "https://bcr.bazel.build/modules/rules_helm/0.32.0/source.json": "2e3265454a2c7c44e4f564f0228851fa8f0379b50ea05c9d2f01e728d46f2a34",
     "https://bcr.bazel.build/modules/rules_img/0.3.21/MODULE.bazel": "8a25e720e9b9dcc68154166131565252561c759981111e75701576fe12693b44",
     "https://bcr.bazel.build/modules/rules_img/0.3.21/source.json": "e0d055ab4e35d46f3f4e8e6b9a765c708d5f4fb9757f12eb288eaf984f257156",
+    "https://bcr.bazel.build/modules/rules_img_signer_cosign/0.0.1/MODULE.bazel": "525ad72b4b1919c77d0de943148dde90860e2e25d2dc2c49be036d68a9c58cc9",
+    "https://bcr.bazel.build/modules/rules_img_signer_cosign/0.0.1/source.json": "d95dd70db8b98f53898bf733f52b54004cf26a63e22cdacdcba1f9507e1308dc",
     "https://bcr.bazel.build/modules/rules_java/4.0.0/MODULE.bazel": "5a78a7ae82cd1a33cef56dc578c7d2a46ed0dca12643ee45edbb8417899e6f74",
     "https://bcr.bazel.build/modules/rules_java/5.1.0/MODULE.bazel": "324b6478b0343a3ce7a9add8586ad75d24076d6d43d2f622990b9c1cfd8a1b15",
     "https://bcr.bazel.build/modules/rules_java/5.3.5/MODULE.bazel": "a4ec4f2db570171e3e5eb753276ee4b389bae16b96207e9d3230895c99644b86",

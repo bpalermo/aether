@@ -106,20 +106,26 @@ jobs:
           # bundle like prober; the chart pins the image digest at package time.
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/udsecho:udsecho.push
 
-      - name: Install cosign
-        # Pinned by SHA, not tag. This job holds `packages: write` and
-        # `id-token: write`, so a retagged action could push and sign under this
-        # repository's genuine identity -- and `cosign verify` would PASS, because
-        # the certificate really would be ours. The signature does not protect
-        # against a swapped action; the pin does.
+      - name: Build cosign (Bazel-pinned, local)
+        # cosign comes from the rules_img_signer_cosign bazel_dep (MODULE.bazel):
+        # the official release binary for this runner, sha256-pinned in that
+        # module's lock (v3.1.2 at 0.0.1). //tools/cosign runs it. This replaces
+        # sigstore/cosign-installer, whose action pin also pinned the binary --
+        # here the pin is the MODULE.bazel.lock entry, reviewed like any other
+        # dependency bump, and the same binary signs here, verifies below and in
+        # publish-verify.yaml, and is what `bazel run //tools/cosign` gives a
+        # workstation. Bumping cosign is bumping that bazel_dep.
         #
-        # No `cosign-release:` on purpose. Unset, the binary's SHA-256 is hardcoded
-        # in this pinned commit, so pinning the action pins the binary too.
-        #
-        # v4.1.2 bootstraps cosign v3.0.6. The 3.x line is abandoned and bootstraps
-        # v2.4.1 -- which is what this repo ran until 2026-09-24, two majors behind
-        # unnoticed, because the installer version is not the cosign version.
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        # LOCAL, deliberately: no --config=remote on these invocations, so the
+        # binary is fetched and exec'd on this runner and nothing about signing
+        # touches the RBE executor. `bazel run` execs the binary with THIS
+        # step's environment (the Bazel client's), so the GitHub OIDC variables
+        # keyless signing reads -- ACTIONS_ID_TOKEN_REQUEST_URL/_TOKEN, present
+        # because of `id-token: write` -- reach cosign unchanged;
+        # --incompatible_strict_action_env and --action_env only shape BUILD
+        # actions, never the run. Built once here so a fetch failure is its own
+        # red step rather than a mid-loop one.
+        run: bazel build //tools/cosign
 
       # Sign every published image, keyless.
       #
@@ -157,11 +163,19 @@ jobs:
       # layout assertion lives in publish-verify.yaml, which asks the REGISTRY rather
       # than asking the same binary that just wrote the signature whether it likes it.
       #
-      # On rules_img's own signing (signing_config + rules_img_signer_cosign):
-      # rules_img 0.3.21's signing_config docstring says "The signature is then pushed
-      # to the image's repository as an OCI referrer" -- that much is SOURCED. Whether
-      # it falls back to a tag on a registry that 404s /referrers is NOT: that push is
-      # in a prebuilt Go binary absent from the archive. Unverified either way.
+      # On rules_img's own signing (signing_config + the rules_img_signer_cosign
+      # `sign-oci-artifact` plugin): NOT used, even though that same module now
+      # supplies our cosign CLI. rules_img 0.3.21's signing_config docstring says
+      # "The signature is then pushed to the image's repository as an OCI
+      # referrer", and ghcr.io has no Referrers API (above); our whole sign /
+      # verify / sweep layout is cosign's `sha256-<hex>` tag. We take the module's
+      # CLI only, and sign here with it exactly as before.
+      #
+      # cosign v3.1.2 (from v3.0.6) hides --new-bundle-format from --help as
+      # deprecated-for-v4; the bundle format is the default either way, and this
+      # step passes no bundle flag. Whether v3.1.2 still writes the `sha256-<hex>`
+      # fallback tag on ghcr.io is asserted after every publish by publish-verify's
+      # registry-side layout check, not assumed here.
       #
       # --recursive signs the index AND every child manifest. Our images are
       # multi-arch (amd64/arm64), so signing only the index would leave anyone who
@@ -228,7 +242,7 @@ jobs:
             fi
 
             echo "signing ghcr.io/${repo}@${digest} (from ${tag})"
-            cosign sign --recursive "ghcr.io/${repo}@${digest}"
+            bazel run //tools/cosign -- sign --yes --recursive "ghcr.io/${repo}@${digest}"
             # Hand the EXACT reference to the verify step. It must not re-resolve
             # the list itself: a second copy of the repo list can drift from this
             # one, and re-resolving a tag would let verify pass against something
@@ -258,7 +272,7 @@ jobs:
       #
       # AND every child manifest of each of them (#925). `cosign sign --recursive`
       # above signs the per-arch manifests, but `cosign verify` has no
-      # `--recursive` (not v2.4.1, not v3.0.6): verifying the recorded index
+      # `--recursive` (not v2.4.1, v3.0.6 or v3.1.2): verifying the recorded index
       # digests alone checked eight signatures and left the sixteen per-arch ones
       # -- the manifests a node actually pulls -- signed and never checked. The
       # script walks each index's `.manifests[]` from the registry and verifies
@@ -282,4 +296,4 @@ jobs:
           # reads without opening the script.
           CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
           CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-            ./scripts/verify-image-signatures.sh --file signed-images.txt
+            bazel run //tools/cosign:verify_image_signatures -- --file signed-images.txt
