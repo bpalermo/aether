@@ -52,11 +52,26 @@
 # list, and a fabricated one has already cost this project a failed deploy.
 # (The same trap bites `gh run list --commit=<sha>`, which matches only the full
 # 40 characters and answers an abbreviation with an empty list — indistinguish-
-# able from "no publish ever ran". This check never asks GitHub anything.)
+# able from "no publish ever ran". This check never asks GitHub whether a
+# workflow ran; `--recent` asks it only which commits were pushed, below.)
 #
-# `--recent` selects the commits itself: everything on main from the last day
-# that is old enough to have published, newest-first. Used by the scheduled
+# `--recent` selects the commits itself: every PUSH HEAD on main from the last
+# day that is old enough to have published, newest-first. Used by the scheduled
 # sweep in .github/workflows/publish-verify.yaml.
+#
+# Push heads, not every commit (#975): publish runs once per push, for its head.
+# An atomic stack merge puts several commits on main in one push, and only the
+# last of them is ever built — the others have no artifacts by construction and
+# nothing can pin them. Commits in the window that were not a push head are
+# printed as `skip <sha> (not a push head ...)` so the narrowing is never silent.
+# The push heads come from GitHub's activity log for refs/heads/main (see
+# scripts/push-heads-lib.sh for why that and not the list of publish runs); that
+# needs `gh` with a token (GH_TOKEN in Actions, `gh auth` locally), or
+# PUSH_HEADS_FILE naming a file of full shas to use instead.
+#
+# An explicitly named commit is always checked, push head or not: the caller
+# asked about that commit, and "no artifacts" is the true answer for a stack
+# intermediate.
 #
 # Reads public packages anonymously. Set GHCR_TOKEN for private ones.
 #
@@ -71,6 +86,8 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/ghcr-lib.sh
 . "${here}/ghcr-lib.sh"
+# shellcheck source=scripts/push-heads-lib.sh
+. "${here}/push-heads-lib.sh"
 
 if [ "$#" -eq 0 ]; then
 	echo "usage: $(basename "$0") {--recent | <commit-ish> [<commit-ish>...]}" >&2
@@ -105,19 +122,55 @@ if [ "$1" = "--recent" ]; then
 		echo "::error::--recent: no origin/main, main or HEAD to read commits from" >&2
 		exit 2
 	fi
-	mapfile -t recent < <(git log "$main_ref" \
-		--since="$RECENT_WINDOW" --before="$RECENT_GRACE" --format=%H)
-	# An empty window is a quiet day, not a pass. Fall back to the newest commit
-	# old enough to have published so a scheduled run ALWAYS checks something real
-	# and is always capable of failing (#853).
-	if [ "${#recent[@]}" -eq 0 ]; then
-		mapfile -t recent < <(git log "$main_ref" -1 --before="$RECENT_GRACE" --format=%H)
-	fi
-	if [ "${#recent[@]}" -eq 0 ]; then
-		echo "::error::--recent: ${main_ref} has no commit older than '${RECENT_GRACE}'" >&2
+	# The push heads publish was obliged to publish (#975). Read once, into a
+	# file, so a failed or empty read is caught here rather than turning into
+	# "every commit skipped".
+	heads_file="$(mktemp)"
+	trap 'rm -f "$heads_file"' EXIT
+	if ! github_push_heads >"$heads_file"; then
+		echo "::error::--recent: could not read the push heads of main (GitHub activity log)" >&2
 		exit 2
 	fi
-	echo "--recent: ${#recent[@]} commit(s) on ${main_ref} since '${RECENT_WINDOW}', older than '${RECENT_GRACE}'"
+
+	mapfile -t window < <(git log "$main_ref" \
+		--since="$RECENT_WINDOW" --before="$RECENT_GRACE" --format=%H)
+	recent=()
+	skipped=0
+	if [ "${#window[@]}" -gt 0 ]; then
+		if ! selection="$(printf '%s\n' "${window[@]}" | select_push_heads "$heads_file")"; then
+			exit 2
+		fi
+		while read -r verdict sha; do
+			case "$verdict" in
+			check) recent+=("$sha") ;;
+			skip)
+				skipped=$((skipped + 1))
+				echo "skip ${sha} (not a push head: publish never ran for it — $(git log -1 --format=%s "$sha"))"
+				;;
+			*)
+				echo "::error::internal: unexpected selection line '${verdict} ${sha}'" >&2
+				exit 2
+				;;
+			esac
+		done <<<"$selection"
+	fi
+	# An empty window — or one holding only stack intermediates — is a quiet day,
+	# not a pass. Fall back to the newest PUSH HEAD old enough to have published
+	# so a scheduled run ALWAYS checks something real and is always capable of
+	# failing (#853).
+	if [ "${#recent[@]}" -eq 0 ]; then
+		if ! selection="$(git log "$main_ref" --before="$RECENT_GRACE" --format=%H -n 500 |
+			select_push_heads "$heads_file")"; then
+			exit 2
+		fi
+		fallback="$(printf '%s\n' "$selection" | sed -n 's/^check //p' | head -1)"
+		[ -z "$fallback" ] || recent=("$fallback")
+	fi
+	if [ "${#recent[@]}" -eq 0 ]; then
+		echo "::error::--recent: ${main_ref} has no push head older than '${RECENT_GRACE}' in the activity log" >&2
+		exit 2
+	fi
+	echo "--recent: ${#recent[@]} push head(s) on ${main_ref} since '${RECENT_WINDOW}', older than '${RECENT_GRACE}' (${skipped} non-head commit(s) skipped)"
 	set -- "${recent[@]}"
 fi
 

@@ -384,8 +384,18 @@ answers an abbreviation with an empty list — which reads exactly like "no
 publish ever ran" — and a run that *did* exit 0 still tells you nothing about
 what reached the registry. Only the registry answers that question.
 
+**Only push heads are published (#975).** `publish` runs once per push to
+`main`, for the push's head commit. An atomic stack merge lands several squash
+commits in one push, and only the last is ever built: the others have no
+artifacts by construction and cannot be deployed — pin the stack's head instead.
+`make check-published COMMIT=<intermediate>` correctly reports them MISSING;
+the `--recent` sweep skips them, printing `skip <sha> (not a push head …)`. It
+learns the heads from GitHub's activity log for `refs/heads/main`, so it needs
+`gh` authenticated (or `PUSH_HEADS_FILE=<file of full shas>`); a push whose
+publish run was cancelled or never started is still a head and still fails.
+
 `publish-verify` runs the same check automatically after every publish run
-reaches a conclusion and every two hours over the last day of `main`, and files
+reaches a conclusion and every two hours over the push heads of the last day of `main`, and files
 (or comments on) the rolling **publish: artifacts missing for a commit on main**
 issue. If you see that issue: re-run the cancelled publish run — `gh run rerun
 <id>`, which re-runs at that same commit — or, if the commit is not the one you
