@@ -21,8 +21,13 @@ const (
 	storeTestService2 = "aether-test/svc-2"
 	restoredCtr       = "aether.agent.upstreams.restored"
 	missCtr           = "aether.agent.upstreams.miss"
-	eventuallyWait    = 2 * time.Second
 	eventuallyTick    = 5 * time.Millisecond
+	// flushFireWait bounds only how long the debounce timer's goroutine may
+	// take to be scheduled and take its snapshot — no I/O runs inside it. The
+	// write itself (two fsyncs via file.WriteFileAtomic, unbounded on a loaded
+	// disk) is waited for on observedWriteMu with no deadline of its own; see
+	// waitObservedFlush (issue #955).
+	flushFireWait = 30 * time.Second
 )
 
 // storePath returns the persisted observed-set file under a test storage dir,
@@ -58,8 +63,8 @@ func readStore(t *testing.T, path string) *agentv1.ObservedUpstreams {
 }
 
 // storedServices returns the service keys persisted at path, in file order.
-// A polling probe for Eventually: a missing or (still) undecodable file is nil,
-// never a failure — the strict read is readStore.
+// A missing or undecodable file is nil, never a failure (the NoFileExists /
+// Empty assertions rely on that) — the strict read is readStore.
 func storedServices(t *testing.T, path string) []string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -75,6 +80,36 @@ func storedServices(t *testing.T, path string) []string {
 		out = append(out, e.GetService())
 	}
 	return out
+}
+
+// waitObservedFlush blocks until the debounced write armed by the last change
+// to the observed set has COMPLETED, then returns — so the caller can read the
+// file strictly instead of polling it against a fixed deadline.
+//
+// Issue #955: the tests used to poll the file for up to 2s. The debounce is
+// 10ms here, but the write behind it is file.WriteFileAtomic, which fsyncs the
+// temp file and then the directory; on a loaded workstation disk those two
+// fsyncs alone can exceed 2s, and the tests went red 6/6 while passing in CI.
+//
+// This waits on the store's own completion order instead. flushObservedUpstreams
+// holds observedWriteMu across takeObservedSnapshot AND the write, and
+// takeObservedSnapshot is what disarms the timer and clears the dirty bit. So:
+//  1. once the timer is disarmed and nothing is dirty, the pending change has
+//     been taken by a flush that still holds observedWriteMu (or has finished);
+//  2. acquiring observedWriteMu therefore returns only after that write landed.
+//
+// Step 1 is the only bounded wait, and it bounds goroutine scheduling of a
+// 10ms timer, not I/O. Call it only after a change that marks the set dirty.
+func waitObservedFlush(t *testing.T, c *SnapshotCache) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		c.depMu.RLock()
+		defer c.depMu.RUnlock()
+		return c.observedFlushTimer == nil && !c.observedDirty
+	}, flushFireWait, eventuallyTick, "the debounced flush never took the pending change")
+	// An empty critical section on purpose: it waits out the in-flight write.
+	c.observedWriteMu.Lock()
+	c.observedWriteMu.Unlock()
 }
 
 // newStoreTestCache builds a cache with captured logs and metrics, a short
@@ -97,7 +132,8 @@ func TestObservedUpstreamsStore_PersistsOnMiss(t *testing.T) {
 
 	before := time.Now()
 	require.True(t, c.ObserveDependency(context.Background(), storeTestService))
-	require.Eventually(t, func() bool { return len(storedServices(t, path)) == 1 }, eventuallyWait, eventuallyTick)
+	waitObservedFlush(t, c)
+	require.Len(t, readStore(t, path).GetUpstreams(), 1)
 
 	entry := readStore(t, path).GetUpstreams()[0]
 	assert.Equal(t, storeTestService, entry.GetService())
@@ -147,9 +183,8 @@ func TestObservedUpstreamsStore_RestoreCarriesTheDeadlineOver(t *testing.T) {
 	assert.Contains(t, lines[0].attrs["services"], storeTestService)
 
 	// The dead entries were skipped, so the file is rewritten without them.
-	require.Eventually(t, func() bool {
-		return assert.ObjectsAreEqual([]string{storeTestService}, storedServices(t, path))
-	}, eventuallyWait, eventuallyTick)
+	waitObservedFlush(t, c)
+	assert.Equal(t, []string{storeTestService}, storedServices(t, path))
 }
 
 // TestObservedUpstreamsStore_RestoreLogsCountOnlyPastTheCap: more than 50 keys
@@ -186,9 +221,8 @@ func TestObservedUpstreamsStore_CorruptFileStartsCold(t *testing.T) {
 	assert.Equal(t, slog.LevelWarn, warns[0].level)
 
 	require.True(t, c.ObserveDependency(context.Background(), storeTestService))
-	require.Eventually(t, func() bool {
-		return assert.ObjectsAreEqual([]string{storeTestService}, storedServices(t, path))
-	}, eventuallyWait, eventuallyTick, "the corrupt file is overwritten by the next change")
+	waitObservedFlush(t, c)
+	assert.Equal(t, []string{storeTestService}, storedServices(t, path), "the corrupt file is overwritten by the next change")
 }
 
 // TestObservedUpstreamsStore_ShrinkRemovesTheEntry: an entry that ages out
@@ -199,13 +233,14 @@ func TestObservedUpstreamsStore_ShrinkRemovesTheEntry(t *testing.T) {
 	c.observedTTL = 30 * time.Millisecond
 
 	require.True(t, c.ObserveDependency(context.Background(), storeTestService))
-	require.Eventually(t, func() bool { return len(storedServices(t, path)) == 1 }, eventuallyWait, eventuallyTick)
+	waitObservedFlush(t, c)
+	require.Equal(t, []string{storeTestService}, storedServices(t, path))
 
 	time.Sleep(40 * time.Millisecond)
 	c.PruneObservedDependencies()
 	assert.NotContains(t, c.DependencySet(), storeTestService)
-	require.Eventually(t, func() bool { return len(storedServices(t, path)) == 0 }, eventuallyWait, eventuallyTick,
-		"the expired entry is gone from the file")
+	waitObservedFlush(t, c)
+	assert.Empty(t, storedServices(t, path), "the expired entry is gone from the file")
 }
 
 // TestObservedUpstreamsStore_UnionsWithResumeHeldClusters: the file and the
@@ -224,9 +259,9 @@ func TestObservedUpstreamsStore_UnionsWithResumeHeldClusters(t *testing.T) {
 	assert.Contains(t, set, storeTestService)
 	assert.Contains(t, set, storeTestService2)
 	assert.EqualValues(t, 0, counterValue(t, reader, missCtr))
-	require.Eventually(t, func() bool {
-		return assert.ObjectsAreEqual([]string{storeTestService, storeTestService2}, storedServices(t, path))
-	}, eventuallyWait, eventuallyTick, "both sources are persisted, in key order")
+	waitObservedFlush(t, c)
+	assert.Equal(t, []string{storeTestService, storeTestService2}, storedServices(t, path),
+		"both sources are persisted, in key order")
 }
 
 // TestObservedUpstreamsStore_FlushShortCircuitsTheDebounce: the shutdown flush
