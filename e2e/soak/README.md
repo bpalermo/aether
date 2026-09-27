@@ -316,6 +316,9 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
   rotation cycle — exclude that node's restart minute when counting cycles. Its
   sibling `{aether_spire_update="unchanged"}` fires once per subscribed pod at the
   daily JWT-key prepare (~16:05Z): same certificate redelivered, not a rotation.
+  That holds for `aether_spire_identity="node"` (the agent's own SVID) only since
+  #993: before it, `node/unchanged` could not move at all, so a zero there from an
+  older build is no evidence of anything.
 
   **Do NOT count `changes()` on `envoy_sds_spiffe_*_version` (#992).** For the
   identities that ORIGINATE mesh connections — `aether_agent`, `prober`, `mp_dialer`,

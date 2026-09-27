@@ -36,6 +36,7 @@ go_test(
     srcs = [
         "bridge_broker_test.go",
         "bridge_late_identity_test.go",
+        "bridge_node_unchanged_test.go",
         "bridge_push_ordering_test.go",
         "bridge_reconnect_test.go",
         "bridge_test.go",

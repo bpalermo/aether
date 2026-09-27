@@ -1215,13 +1215,25 @@ path has its own pair, also seeded at zero per attribute set:
 # half-life (2h at the default 4h TTL). `initial` is every pod after an AETHER
 # agent restart (a new process has served nothing yet). `unchanged` is the same
 # certificate redelivered: a stream that dropped and re-subscribed while the
-# SPIRE agent stayed up.
+# SPIRE agent stayed up, or SPIRE re-sending every SVID unchanged (it does so
+# fleet-wide at a JWT-key prepare).
 sum by (k8s_node_name) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod", aether_spire_update="rotated"}[3h]))
-# the agent's own SVID (identity="node"), and the trust-bundle inputs:
+# the agent's own SVID (identity="node"): same three values. node/unchanged is a
+# Workload API response that carried the SVID already served (no snapshot bump);
+# the agent's 30s backstop re-read is not a delivery and never counts. Before
+# #993 node/unchanged could not increment at all. And the trust-bundle inputs:
 # bundle="own", update="rotated" is a trust-ROOT change — SPIRE's 24h signing-CA
 # rotation does not move it, because the bundle is the upstream root.
 sum by (k8s_node_name, aether_spire_bundle, aether_spire_update) (increase(aether_agent_spire_bundle_updates_total[24h]))
 ```
+
+**A zero series is only evidence once the code path can increment it.** Every
+series above is seeded at zero (#717), so it exists whether or not anything can
+ever move it. `node/unchanged` read zero on every node until #993 because the node
+path returned early on an equal SVID without counting; a gate that asserted it
+was zero was vacuous. Before grading on a zero, check the source (or a test)
+shows the path increments it, and prefer a reading from a window in which the
+companion series moved (here: `pod/unchanged` stepping at the same minute).
 
 **`rotated` is "the certificate changed", not "the TTL ran down".** A restarted
 SPIRE agent re-attests and mints fresh SVIDs for every pod on its node, so a
@@ -1527,7 +1539,7 @@ umbrella that could not close.
 | CNI DEL `agent unreachable` WARN, the `<pin>.delfail` give-up path, the pin unlink (#796) | same — the agent comes back too fast | unit-tested |
 | supervisor `drain_fallback` (#797) | the normal drain path always wins | `aether_supervisor_shutdown_branch_total{branch="drain_fallback"}` has never been non-zero anywhere |
 | edge xDS "registry unreachable … while this workload waits for its first SVID" (#807) | both edge pods reach the registrar in ~3 s | unit-tested only |
-| `svid_updates{update="unchanged"}` (#806) | a SPIRE agent restart re-mints, so it counts `rotated` | would need a Broker stream that drops while the SPIRE agent stays up |
+| `svid_updates{update="unchanged"}` via a dropped Broker stream (#806) | a SPIRE agent restart re-mints, so it counts `rotated` | would need a Broker stream that drops while the SPIRE agent stays up. The series itself is not unexercised: SPIRE re-sends every SVID at a JWT-key prepare, which moved `pod/unchanged` fleet-wide (61 at once, 2026-09-26); `node/unchanged` counts the same redelivery since #993 |
 | orphan prune → SVID unsubscribe (#804) | **not forceable from a harness** — the runtime re-issues CNI DEL at sandbox removal and a restarted agent serves it before the first sweep pass (measured 2026-09-19) | proven once in production (2026-09-18); the deterministic check is the in-process test from #805 |
 
 Two cautions when tempted to "test" one of these:
