@@ -192,7 +192,17 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # main.yaml's `diff` is the one job that saves it (docs/runbook.md,
+          # "CI: external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
+
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        if: success() || steps.verify.conclusion == 'failure'
+        run: scripts/ci-bazel-warmup.sh //tools/cosign:verify_image_signatures
 
       - name: Verify the signatures (every index and every child manifest)
         id: cosign

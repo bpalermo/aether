@@ -43,6 +43,15 @@ func TestNodeSVIDRedeliveryCountsUnchanged(t *testing.T) {
 		defer b.mu.Unlock()
 		return b.gen
 	}
+	// served reports whether the store holds the bridge's current generation,
+	// i.e. the last push has actually reached it. publishedGen is written only
+	// after SetSecrets returns, under pushMu.
+	served := func() bool {
+		want := gen()
+		b.pushMu.Lock()
+		defer b.pushMu.Unlock()
+		return b.publishedGen == want
+	}
 
 	svid := ca.SVID(t, testAgentID)
 	identity.Arrive(svid, ca.Bundle(td))
@@ -55,6 +64,12 @@ func TestNodeSVIDRedeliveryCountsUnchanged(t *testing.T) {
 		v, _ := counterPoint(t, reader, "aether.agent.spire.bundle_updates", attrBundle.String(bundleOwn), attrUpdate.String(updateInitial))
 		return v == 1
 	}, wait, tick)
+	// ...and for its PUSH, not just its metric: refreshWorkloadBundle records
+	// bundle_updates before it calls pushSecrets, so the counter reaching 1 does
+	// not mean the initial wake's second push has landed. Snapshotting the push
+	// count in that window read 1, the bundle push then arrived as a 2nd, and the
+	// "must not push" assertion below blamed it on the redelivery (issue #1018).
+	require.Eventually(t, served, wait, tick, "the initial wake's pushes must reach the store before the baseline is taken")
 	genBefore, pushesBefore := gen(), len(store.snapshot())
 
 	// SPIRE re-sends the very same SVID and bundle.

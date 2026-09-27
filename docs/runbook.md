@@ -100,6 +100,59 @@ And a clean run is not evidence of absence: the detector only reports
 interleavings a test actually produced, so a race between two goroutines no test
 runs concurrently stays invisible no matter how often you run it.
 
+### CI: external repository fetches (#1001)
+
+BuildBuddy caches **actions**, not **repository fetches**. Every external
+repository a CI job needs — each Go module behind `gazelle++go_deps+…`
+(`fetch_repo` → `proxy.golang.org`), every release asset from github.com — comes
+from Bazel's repository cache on the runner or from the network. Two mechanisms
+keep a flaky upstream from turning a job red:
+
+- **A persisted repository cache.** `bazel-contrib/setup-bazel` restores
+  `~/.cache/bazel-repo` (Bazel 9 also keeps its repo *contents* cache under it,
+  `contents/`, which is what makes a `go_repository` a local hit instead of a
+  `fetch_repo` run). The key hashes `MODULE.bazel`, `MODULE.bazel.lock`, `go.mod`
+  and `go.sum`, so a Go dependency bump gets a new key and the newest older entry
+  is restored as the fallback. The root and `//proxy` workspaces are in separate
+  namespaces (`cache-version: root-1` / `proxy-1`). **Exactly one job per
+  workflow saves** — `diff` in `ci.yaml` and `main.yaml` (the `main` entry is the
+  one every PR falls back to), the `test`/`build-push` matrix per arch for the
+  proxy — because its warm-up fetches for all of `//...`; every other job sets
+  `cache-save: false`. The first job to finish used to save, so a job that
+  fetched a handful of repositories (or, before the namespaces, a *proxy* job)
+  could write the entry every later job restored as an exact hit and never
+  re-saved. That is how the 2026-09-27 `netns` failure fetched
+  `googleapis/api` from the network with a 1.9 GB cache freshly restored.
+- **A retried warm-up.** Each Bazel job's first Bazel step is
+  `scripts/ci-bazel-warmup.sh <flags> <targets>`: `bazel build --nobuild`
+  (loading + analysis, which is where the fetches happen), retried up to 3 times
+  with a 20 s / 40 s backoff **only when the output shows a repository-fetch
+  error**. A broken BUILD file fails on the first attempt. The warm-up clears the
+  remote executor, cache and BES backend, so it needs no BuildBuddy key and never
+  shows up as an invocation; the real steps keep `--config=ci` / `--config=remote`
+  unchanged. `scripts/check-ci-bazel-warmup.sh` (in the `shell` job) pins that
+  contract with a stub bazel.
+
+Reading a red job:
+
+| The log shows | What it means | Do |
+|---|---|---|
+| `::warning::bazel warm-up attempt 1/3 hit a repository-fetch error`, then success | the retry absorbed a blip | nothing |
+| `::error::bazel warm-up: repository fetch failed on all 3 attempts` | the upstream was down for the whole ~1 min of backoff | **re-run the job** once the upstream answers (`gh run rerun <id> --failed`); a re-run restores the same cache, so it only re-fetches what failed |
+| a `fetch_repo` / `Error downloading` failure in a step **after** the warm-up | that step needed a repository the warm-up's targets did not cover (e.g. a `bazel run` of a tool, `bazel-diff` at the base revision, which falls back to a full run on failure) | re-run; if it repeats, add the target to that job's warm-up |
+| `bazel warm-up failed (exit N) with no repository-fetch error` | a real analysis failure | fix the change; a re-run will not help |
+
+A plain re-run is still the answer for anything the warm-up does not cover: the
+Go tool's own downloads in `deps-audit` (`go list -m all` talks to
+`proxy.golang.org` directly, outside Bazel), docker/kind image pulls in the e2e
+jobs, and a cold namespace (the first run after a `cache-version` bump, or after
+GitHub evicted the entry: the repository has a 10 GB cache budget and each entry
+is ~2 GB).
+
+To check what a job restored, open its **Setup Bazel** step: `Cache hit for:
+setup-bazel-root-1-linux-x64-repository-<hash>` is an exact hit;
+`Successfully restored cache from …` with a different hash is the fallback.
+
 ---
 
 ## 4. Format & lint
@@ -897,7 +950,16 @@ sum by (aether_cluster) (rate(envoy_cluster_upstream_rq_total{aether_cluster=~".
 sum(rate(envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-1(@.*)?"}[5m]))
 # a twin that cannot connect: the #957 DNS-SAN shape, or UDP:18008 blocked between nodes
 increase(envoy_cluster_upstream_cx_connect_fail{aether_cluster=~".*@.*"}[5m])
+# a twin whose endpoints never arrived (#1008): MUST be 0, fleet-wide, always
+sum(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"})
 ```
+
+Each twin subscribes to its **own** EDS resource, named after the twin cluster
+(`quic:<svc>.<ns>.<domain>@<ns>/<sa>`), and the agent publishes the h2 cluster's
+load assignment under that name too. In `/config_dump` a twin's
+`eds_cluster_config.service_name` equals its own cluster name, never the bare
+`<ns>/<svc>` the h2 cluster uses; if it ever does again, see "QUIC twin never
+leaves warming" below.
 
 On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
@@ -909,6 +971,50 @@ the h2 route it had before, byte-for-byte. The inbound listener and the DNS SANs
 harmless to leave in place. Nothing here needs a proxy roll.
 
 ## 8. Troubleshooting
+
+### QUIC twin never leaves warming / 503 NC on a new ServiceAccount (#1008)
+
+**Symptom.** The first pod of a ServiceAccount that is new on a node gets
+`503` with response flag `NC` (no cluster) for ~15 s on every request to every
+QUIC-enabled destination, then recovers on its own. Other callers on the node
+are unaffected; h2 destinations are unaffected. On talos (rev242) it was 1,060
+client-visible 503/NC in 11 s when the k6 loaders started.
+
+**Read.**
+
+```promql
+# the twin sat in warming (1) from its CDS add until the timeout
+envoy_cluster_warming_state{aether_cluster=~".*@.*"}
+envoy_cluster_manager_warming_clusters
+# and gave up waiting for its endpoints: 1 per affected twin per proxy
+envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}
+```
+
+In the proxy log: `cds: response indicates N added/updated cluster(s)`, then
+~15 s later `gRPC config: initial fetch timed out for
+type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment`, one per
+late twin. The agent is idle through the gap: nothing on the control-plane side
+is pending.
+
+**Cause.** A twin that shares its h2 base's EDS resource name. Envoy's delta-ADS
+`WatchMap` deduplicates subscription interest per (type_url, resource name):
+when the twin arrives *after* the base is subscribed, its watch adds nothing to
+`resource_names_subscribe`, no request is sent, the control plane (correctly)
+sends nothing because the resource did not change, and the twin waits out its
+15 s `initial_fetch_timeout`. At agent start base and twins arrive in one CDS
+response, so only a *late* twin — a new local ServiceAccount — is hit. Fixed in
+#1008: `proxy.QUICClusterFrom` points the twin at its own EDS name and the cache
+publishes the base's `ClusterLoadAssignment` under it
+(`proxy.QUICLoadAssignmentFrom`). Seeing this again means that pairing broke;
+`//test/mtlspool`'s `TestLateQUICTwin*` pair reproduces it against the pinned
+proxy (the negative control times out at ~15 s by design).
+
+**Invariant.** A delta-ADS subscriber must never share a resource name with an
+already-subscribed sibling. It has now bitten twice: SDS (#842, the on-demand
+certificate selector behind every static SVID reference) and EDS (#1008, QUIC
+twins behind their base). Any new cluster, secret or config that is a clone or
+second consumer of an existing resource needs either its own resource name or
+its own `api_config_source`.
 
 ### Forwarded DNS keeps failing after a kube-dns roll
 
