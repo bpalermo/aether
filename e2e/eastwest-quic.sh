@@ -538,13 +538,27 @@ summarize() {
 verify_preflight() {
 	log "E0 preflight: node proxy admin reachable; every destination pod has its HTTP/3 inbound and a readable h3 counter"
 	admin /ready >/dev/null 2>&1 || die "E0: the node proxy admin is not reachable via 'docker exec $NODE curl 127.0.0.1:9901' — is this the cluster '$0 up' built?"
-	local listeners d pod v
-	listeners="$(admin /listeners)"
+	# Converge, like every other phase: `up` returns when the pods are Ready, but
+	# the proxy acks each pod's LDS push a little later (the 2026-09-27 nightly
+	# died here on a slow runner while the agent still logged "envoy did not ack
+	# listener" for every pod; the re-run passed). A listener that never shows up
+	# within the deadline is still the real failure this phase exists to catch.
+	local deadline=$((SECONDS + 180)) listeners d pod v missing
+	while true; do
+		listeners="$(admin /listeners)"
+		missing=""
+		for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}" "$H2_DST"; do
+			pod="$(pod_of "$d")"
+			[ -n "$pod" ] || die "E0: no Running pod for destination $d"
+			printf '%s\n' "$listeners" | awk -F'::' -v l="inbound_${pod}_h3" '$1 == l { f = 1 } END { exit !f }' || missing="$missing inbound_${pod}_h3"
+		done
+		[ -z "$missing" ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "E0: HTTP/3 inbound listener(s) still absent after 180s:$missing — #953's inbound is unconditional with SPIRE on, so this is the inbound (or the pod's SVID) missing, not the allow-list and not timing"
+		sleep 5
+	done
 	for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}" "$H2_DST"; do
 		pod="$(pod_of "$d")"
-		[ -n "$pod" ] || die "E0: no Running pod for destination $d"
-		printf '%s\n' "$listeners" | awk -F'::' -v l="inbound_${pod}_h3" '$1 == l { f = 1 } END { exit !f }' ||
-			die "E0: the HTTP/3 inbound listener inbound_${pod}_h3 does not exist — #953's inbound is unconditional with SPIRE on, so this is the inbound (or the pod's SVID) missing, not the allow-list"
 		v="$(h3_rq "$pod")"
 		[ -n "$v" ] ||
 			die "E0: $(h3_stat "$pod") is not in /stats — every 'h3 delta == 0' below would be reading an absent stat; fix the stat name before trusting this suite (#853)"
