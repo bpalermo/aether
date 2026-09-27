@@ -138,7 +138,7 @@ jobs:
 
       # The gate runs whatever the control concluded: a broken control must not
       # also cost the real check. Only a failed checkout stops it.
-      - name: Gate (verify the artifacts for this commit exist in its registry)
+      - name: Gate (verify the artifacts for this commit exist in GHCR)
         id: verify
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         env:
@@ -146,9 +146,8 @@ jobs:
           TARGET: ${{ github.event.workflow_run.head_sha || github.event.inputs.commit }}
           TRIGGERING_RUN: ${{ github.event.workflow_run.html_url }}
           TRIGGERING_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-          # The packages are public, so anonymous pull tokens do. GHCR_TOKEN is
-          # sent only to ghcr.io (pre-cut-over heads); quay.io is read
-          # anonymously.
+          # The packages are public, so an anonymous pull token would do; using
+          # the run's token keeps the check working if one is ever made private.
           GHCR_TOKEN: ${{ github.token }}
           # `--recent` reads main's push heads from the repository activity log
           # (#975); that endpoint needs only the metadata read every token has.
