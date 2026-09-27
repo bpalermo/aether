@@ -41,7 +41,7 @@ trap 'rm -rf "$tmp"' EXIT
 # --- the fake registry -------------------------------------------------------
 reg="$tmp/registry"
 mkdir -p "$reg"
-cp scripts/verify-published-artifacts.sh scripts/push-heads-lib.sh "$reg/"
+cp scripts/verify-published-artifacts.sh scripts/push-heads-lib.sh scripts/proxy-pin-lib.sh "$reg/"
 cp scripts/ghcr-lib.sh "$reg/ghcr-lib.sh"
 cat >>"$reg/ghcr-lib.sh" <<'FAKE'
 
