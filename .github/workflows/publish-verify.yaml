@@ -111,6 +111,9 @@ jobs:
           # (#975); that endpoint needs only the metadata read every token has.
           # The repository is the runner's own GITHUB_REPOSITORY.
           GH_TOKEN: ${{ github.token }}
+          # Each resolved `ghcr.io/<repo>@<index digest>`, for the cosign pass
+          # below to verify (index + every child, #925).
+          SIGNED_REFS_OUT: signed-refs.txt
         run: |
           set -euo pipefail
           if [ -n "${TARGET}" ]; then
@@ -126,6 +129,42 @@ jobs:
             ./scripts/verify-published-artifacts.sh --recent | tee verify.log
           fi
 
+      # The step above asks the registry whether a signature TAG exists for each
+      # index and each child manifest. This one asks whether those signatures
+      # VERIFY — same identity and issuer publish.yaml's own verify step uses —
+      # for every index the step above resolved AND every child manifest under
+      # it (#925: `cosign verify` has no --recursive, so the children must be
+      # walked explicitly or they are never checked).
+      #
+      # Same pinned installer as publish.yaml (v4.1.2 -> cosign v3.0.6, binary
+      # SHA-256 hardcoded in the pinned commit). Keep the two pins in step.
+      - name: Install cosign
+        if: success() || steps.verify.conclusion == 'failure'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Verify the signatures (every index and every child manifest)
+        id: cosign
+        if: success() || steps.verify.conclusion == 'failure'
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          set -euo pipefail
+          if [ ! -s signed-refs.txt ]; then
+            # A failed artifact check can legitimately resolve no image (nothing
+            # was published); that failure is already red and already reported.
+            # A PASSING one that resolved nothing is a vacuous gate (#853).
+            if [ "${VERIFY_OUTCOME}" = "failure" ]; then
+              echo "no published images resolved; the artifact check above already failed"
+              exit 0
+            fi
+            echo "::error::the artifact check passed but recorded no image digests to verify"
+            exit 1
+          fi
+          CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
+          CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
+            ./scripts/verify-image-signatures.sh --file signed-refs.txt | tee cosign.log
+
       # A failure here is invisible unless it is written down somewhere a person
       # reads: this workflow is attached to no PR, and the nightly e2e suite sat
       # red for three nights before anyone noticed a scheduled failure (see the
@@ -136,7 +175,7 @@ jobs:
       # Gated on the verify step specifically: an infrastructure failure (no
       # network, bad checkout) must not file "nothing was published".
       - name: Open or update the missing-artifacts issue
-        if: failure() && steps.verify.conclusion == 'failure' && github.event_name != 'workflow_dispatch'
+        if: failure() && (steps.verify.conclusion == 'failure' || steps.cosign.conclusion == 'failure') && github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
           # `gh` infers the repository from git remotes; this job has a checkout,
@@ -148,7 +187,11 @@ jobs:
         run: |
           set -euo pipefail
           title="publish: artifacts missing for a commit on main"
-          missing="$(sed -nE 's/^[[:space:]]*MISSING[[:space:]]+/MISSING /p' verify.log || true)"
+          missing="$(sed -nE 's/^[[:space:]]*MISSING[[:space:]]+/MISSING /p' verify.log 2>/dev/null || true)"
+          # Signatures that exist but do not verify (wrong identity, unsigned
+          # child) come from the cosign step (#925).
+          unverified="$(sed -nE 's/^[[:space:]]*FAILED[[:space:]]+/UNVERIFIED /p' cosign.log 2>/dev/null || true)"
+          missing="$(printf '%s\n%s\n' "$missing" "$unverified" | grep . || true)"
           [ -n "$missing" ] || missing="(see the run log)"
 
           body=$(printf '%s\n\n```\n%s\n```\n\n%s\n%s\n\n%s\n' \

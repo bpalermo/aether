@@ -207,6 +207,14 @@ jobs:
       - name: Signature layout resolution is exact
         run: scripts/check-signature-layout.sh
 
+      # Signature checks walk every child manifest of each multi-arch index
+      # (#925: `cosign verify` has no --recursive). A walk that yields zero
+      # children turns "verify every child" into a loop over nothing, so every
+      # shape that is not an index with well-formed children must be refused.
+      # No registry access; the documents are literals.
+      - name: Child-manifest enumeration refuses empty walks
+        run: scripts/check-index-children.sh
+
       # publish-verify's sweep checks only commits that were the HEAD of a push
       # to main (#975: a stack merge lands several commits in one push and
       # publish runs only for the last). A narrowing is where a gate goes
