@@ -259,7 +259,7 @@ fi
 # --- 5. the real verifier, end to end ---------------------------------------
 lib="$tmp/lib"
 mkdir -p "$lib"
-cp scripts/verify-published-artifacts.sh scripts/push-heads-lib.sh scripts/ghcr-lib.sh "$lib/"
+cp scripts/verify-published-artifacts.sh scripts/push-heads-lib.sh scripts/proxy-pin-lib.sh scripts/ghcr-lib.sh "$lib/"
 printf '\n# --- test override: no network ---\n%s\n' "$fake_curl" >>"$lib/ghcr-lib.sh"
 
 n_charts=${#GHCR_CHARTS[@]}
