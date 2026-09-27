@@ -89,7 +89,18 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          repository-cache: true
+          # Repository cache (#1001): the proxy workspace's own key and
+          # namespace — it used to hash the ROOT MODULE.bazel and share the
+          # root's key, so an Envoy-only cache could be restored into a root
+          # job (and vice versa).
+          cache-version: proxy-1
+          repository-cache: '["proxy/MODULE.bazel", "proxy/MODULE.bazel.lock"]'
+          # One saver per arch: the warm-up below fetches for all of //...,
+          # a superset of what every proxy job builds.
+
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        working-directory: proxy
+        run: ../scripts/ci-bazel-warmup.sh --config=ci --config=${{ matrix.bazel_config }} //...
 
       - name: Log in to the image registry
         uses: docker/login-action@v4
@@ -416,7 +427,16 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # main.yaml's `diff` is the one job that saves it (docs/runbook.md,
+          # "CI: external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
+
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh //tools/cosign //tools/cosign:verify_image_signatures
 
       - name: Log in to the image registry
         uses: docker/login-action@v4
