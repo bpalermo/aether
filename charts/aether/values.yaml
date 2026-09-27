@@ -377,10 +377,10 @@ proxy:
   # (bazel/img/registry.bzl).
   image:
     repository: ghcr.io/bpalermo/aether/aether-proxy
-    tag: 717a3609cff42d0e1008379f3fb5ea8bc51d081b
+    tag: a43a20b837512105d96f99a3dfdb62fc4960832c
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
-    # helper prefers digest over tag. Multi-arch index for 717a3609cff42d0e1008379f3fb5ea8bc51d081b.
-    digest: "sha256:0722f675b05d14cccf4e9d94aa48011fae06ef342cd73bc475b9ca95efd5dc5e"
+    # helper prefers digest over tag. Multi-arch index for a43a20b837512105d96f99a3dfdb62fc4960832c.
+    digest: "sha256:e8e7ce7248811f9de4f616901872034179bb43fa13e5a8764b15dd256b0dc5d9"
     pullPolicy: Always
   # The Envoy hot-restart supervisor (#772): its own binary and its own image
   # since it stopped being an `agent` subcommand. The initContainer runs it to
