@@ -1005,16 +1005,70 @@ sends nothing because the resource did not change, and the twin waits out its
 response, so only a *late* twin — a new local ServiceAccount — is hit. Fixed in
 #1008: `proxy.QUICClusterFrom` points the twin at its own EDS name and the cache
 publishes the base's `ClusterLoadAssignment` under it
-(`proxy.QUICLoadAssignmentFrom`). Seeing this again means that pairing broke;
+(`proxy.LoadAssignmentAlias`). Seeing this again means that pairing broke;
 `//test/mtlspool`'s `TestLateQUICTwin*` pair reproduces it against the pinned
 proxy (the negative control times out at ~15 s by design).
 
 **Invariant.** A delta-ADS subscriber must never share a resource name with an
-already-subscribed sibling. It has now bitten twice: SDS (#842, the on-demand
-certificate selector behind every static SVID reference) and EDS (#1008, QUIC
-twins behind their base). Any new cluster, secret or config that is a clone or
-second consumer of an existing resource needs either its own resource name or
-its own `api_config_source`.
+already-subscribed sibling. It has bitten twice and was found latent a third
+time:
+
+- **SDS (#842):** the on-demand certificate selector behind every static SVID
+  reference. Fixed in #865 with its own SotW stream.
+- **EDS, QUIC twins (#1008):** a twin behind its h2 base.
+- **EDS, port aliases and TCP floors (#1013):** the `<fqdn>:<port>` alias
+  clusters (the ODCDS cold-path authorities, e.g. `:18081`) and the TCP floor
+  `tcp:<fqdn>` with its primary-port alias `tcp:<fqdn>:<port>` all subscribed to
+  the bare `<ns>/<svc>` name that the default cluster holds. They usually arrived
+  in the same CDS response as the default cluster, so nothing showed. A *later*
+  one would warm for 15 s: a Service gaining a port after the node depends on
+  it, or a service joining the capture TCP set (a TCPRoute attached) after it
+  is in the dependency set. For a floor that means every captured TCP
+  connection to the service is closed, because `tcp_proxy` has no cold path.
+
+The fix is the same for every EDS case. The cluster's
+`eds_cluster_config.service_name` is its own cluster name, and the agent
+republishes the bare `ClusterLoadAssignment` under that name in the same
+snapshot pass that emits the cluster (`proxy.LoadAssignmentAlias`, the one
+helper for twins, aliases and floors). The TCP per-port clusters
+`tcp:<fqdn>:<port>` keep their own port-filtered membership, now named after
+the cluster rather than the HTTP spelling `<fqdn>:<port>`. In `/config_dump`,
+only a service's default cluster `<svc>.<ns>.<domain>` may carry
+`service_name: <ns>/<svc>`. Every other EDS cluster's `service_name` equals its
+own name.
+
+Three gates keep it that way:
+
+- `//agent/internal/xds/cache` `TestNoNonDefaultClusterSharesTheBareServiceEDSName`
+  and `TestLate{PortAlias,TCPFloor}SubscribesToItsOwnEDSResource`.
+- `//test/envoy_validate` `ClustersSharingServiceEDSName`, over every fixture.
+- `//test/mtlspool` `TestLate{PortAlias,TCPFloor,QUICTwin}*`, against the
+  pinned proxy, each with a shared-name negative control that must time out at
+  ~15 s.
+
+Any new cluster, secret or config that is a clone or second consumer of an
+existing resource needs either its own resource name or its own
+`api_config_source`.
+
+**Fleet gate.** Port aliases, TCP floors and per-port clusters keep the default
+cluster's `alt_stat_name` (the bare `<ns>/<svc>`). Their stats therefore land in
+the default cluster's `cluster.<ns>/<svc>.*` tree. There is no `tcp:…` or
+`…:<port>` value of `aether_cluster` to match: the live harness read the late
+alias's and the late floor's timeout at `cluster.demo/echo.init_fetch_timeout`.
+Only a twin has its own key (`<ns>/<svc>@<ns>/<sa>`, #960). A mesh EDS cluster
+that follows the invariant never times out, so the gate is zero on the whole
+family, twins included, across a soak:
+
+```promql
+# #1013 (aliases, floors, per-port and default clusters: all report as <ns>/<svc>)
+sum(increase(envoy_cluster_init_fetch_timeout_total{aether_cluster=~"[^@]+/[^@]+"}[8h]))   # MUST be 0
+# #1008 (QUIC twins)
+sum(increase(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".+@.+"}[8h]))         # MUST be 0
+```
+
+A non-zero first line says *which service*, not which of its clusters. Tell them
+apart with `/config_dump`, as above, and the proxy log line
+`initial fetch timed out for …ClusterLoadAssignment`.
 
 ### Forwarded DNS keeps failing after a kube-dns roll
 

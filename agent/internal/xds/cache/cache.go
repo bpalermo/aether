@@ -619,9 +619,10 @@ type clusterEntry struct {
 	mtlsCluster *clusterv3.Cluster
 	// l4Floor marks an L4 floor service entry -- PROTOCOL_TCP or PROTOCOL_UDP.
 	// Such entries hold only the bare-name EDS load assignment (+
-	// sanNamespaces/sni) for the floor cluster that references it: the
-	// transparent-capture TCP floor's "tcp:<svc>", or the UDP floor's
-	// "udp:<svc>". No HTTP (h2) cluster or outbound vhost is emitted for them
+	// sanNamespaces/sni) the floor cluster is built from: the
+	// transparent-capture TCP floor's "tcp:<svc>" (which subscribes to its own
+	// EDS name, the bare one republished under it -- aether#1013), or the UDP
+	// floor's "udp:<svc>" (STATIC, the load assignment inlined). No HTTP (h2) cluster or outbound vhost is emitted for them
 	// (clustersEndpointsAndVhosts skips it), and no upstream mTLS is injected
 	// (refreshEntryMTLSLocked skips it) -- for TCP because the floor cluster
 	// carries its own transport socket, for UDP because there is none: the UDP
@@ -631,6 +632,13 @@ type clusterEntry struct {
 	// were already protocol-agnostic in behaviour, so UDP needed no new branch
 	// at either, only a name that did not claim otherwise.
 	l4Floor bool
+	// bareEDSAlias marks an HTTP port-alias entry ("<fqdn>:<port>",
+	// buildPortAliasesLocked). Its cluster subscribes to its OWN EDS resource
+	// name (the alias name) and it carries no load assignment of its own:
+	// clustersEndpointsAndVhosts republishes whatever the bare service name
+	// resolves to (bareServiceCLALocked) under the alias name, in the same pass
+	// that emits the cluster (proxy.LoadAssignmentAlias, aether#1013).
+	bareEDSAlias bool
 	// absentSince is non-zero while the service is missing from the registry
 	// listing. Such entries are retained (with empty endpoints) for
 	// serviceRetentionGrace before being pruned: during pod churn a service

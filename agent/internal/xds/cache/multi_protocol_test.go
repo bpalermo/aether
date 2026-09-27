@@ -80,8 +80,8 @@ func TestLoadClustersFromRegistry_ServiceUnderBothProtocols(t *testing.T) {
 	// 2. The TCP floor cluster is there too.
 	tcpCluster, ok := clusters["tcp:"+fqdn].(*clusterv3.Cluster)
 	require.True(t, ok, "the tcp floor cluster must be built for the TCP listing")
-	assert.Equal(t, "aether-test/mixed", tcpCluster.GetEdsClusterConfig().GetServiceName(),
-		"both clusters resolve the same bare-name EDS resource")
+	assert.Equal(t, "tcp:"+fqdn, tcpCluster.GetEdsClusterConfig().GetServiceName(),
+		"the floor subscribes to its OWN EDS name: sharing the h2 cluster's bare name gets a later-added floor deduplicated into 15 s of warming (aether#1013)")
 
 	// 3. The outbound vhost survives. Losing it is what turned client traffic
 	//    into route-table misses (404) rather than retriable 503s.
@@ -106,8 +106,8 @@ func TestLoadClustersFromRegistry_ServiceUnderBothProtocols(t *testing.T) {
 	assert.Equal(t, "aether-test/mixed", cla.GetClusterName())
 
 	// The owner is the HTTP entry, so the published CLA carries the HTTP
-	// endpoints. The TCP floor resolves through the same resource — which is the
-	// pre-existing shared-EDS behaviour this phase does not change.
+	// endpoints. The TCP floor has the same membership, republished under its
+	// own EDS name (aether#1013) rather than subscribing to this resource.
 	c.clusterMu.RLock()
 	tcpEntry, hasTCP := c.clusters[proxy.TCPClusterName("aether-test/mixed", c.meshDomain)]
 	httpEntry, hasHTTP := c.clusters["aether-test/mixed"]
