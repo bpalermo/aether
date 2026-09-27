@@ -302,14 +302,35 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
   not exist at the offset, and the unseeded ones are exactly the ones that matter.
 - **SVID rotation** is a bar since the SPIFFE Broker API (proposal 036): with the default
   4h TTL a pod rotates every ~2h, so an 8h run sees four cycles.
-  `aether_agent_spire_svid_updates_total{aether_spire_update="rotated"}` counts them;
-  the prober delta in each rotation minute must be zero. `rotated` also counts the
-  fresh SVIDs a restarted SPIRE agent mints (a whole node's pods at once), so a churn
-  step that deletes a `spire-agent` pod is NOT a rotation cycle — exclude that node's
-  restart minute when counting cycles. `aether_spire_update="unchanged"` is SPIRE
-  re-sending the same bytes (fleet-wide at a JWT-key prepare), for `pod` and — since
-  #993 — for `node` too; before #993 `node/unchanged` could not move, so a zero there
-  from an older build is no evidence of anything.
+  The rotation signal is the agent's counter, summed per node (a restarted agent
+  starts a new series, so sum across its generations — `increase()` does this):
+
+  ```promql
+  sum by (k8s_node_name) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod",aether_spire_update="rotated"}[8h]))
+  ```
+
+  It matched the agent's `pod SVID rotated` log lines exactly on 2026-09-19 and again
+  on 2026-09-27 (240/240 and 89/89). The prober delta in each rotation minute must be
+  zero. `rotated` also counts the fresh SVIDs a restarted SPIRE agent mints (a whole
+  node's pods at once), so a churn step that deletes a `spire-agent` pod is NOT a
+  rotation cycle — exclude that node's restart minute when counting cycles. Its
+  sibling `{aether_spire_update="unchanged"}` fires once per subscribed pod at the
+  daily JWT-key prepare (~16:05Z): same certificate redelivered, not a rotation.
+  That holds for `aether_spire_identity="node"` (the agent's own SVID) only since
+  #993: before it, `node/unchanged` could not move at all, so a zero there from an
+  older build is no evidence of anything.
+
+  **Do NOT count `changes()` on `envoy_sds_spiffe_*_version` (#992).** For the
+  identities that ORIGINATE mesh connections — `aether_agent`, `prober`, `mp_dialer`,
+  `default`, `authz_canary`, `uds_client` — those gauges over-read by ~50×: 258–283
+  changes per node over 8 h, in bursts of ~12 at every svc roll, against 5–18 for
+  every other identity (its real rotations plus one per proxy roll). The per-connection
+  cert selector fetches an originator's secret over its own SotW SDS stream (#865), and
+  that stream re-serves the secret on every snapshot bump. Envoy keys SDS stats by
+  secret NAME, so the static ADS subscription and the selector's subscription bump the
+  same `sds.<name>.version` gauge. It cannot be split without renaming the resources,
+  so it is documented rather than changed; the gauges remain usable only as "this
+  node's Envoy has received *a* secret push", never as a rotation count.
 
 ### The Phase 4 evidence clock (proposal 037)
 
@@ -422,8 +443,11 @@ twins are rebuilt under load:
 # prerequisite ON TALOS: the SPIRE default ClusterSPIFFEID must already issue the
 # <sa>.<ns>.aether.internal + *.<sa>.<ns>.aether.internal DNS SANs (GitOps,
 # spire-server.controllerManager.identities.clusterSPIFFEIDs.default.dnsNameTemplates)
-# and every node's envoy_sds_*_version must have moved since — otherwise every
-# HTTP/3 handshake fails closed (#957) and the leg grades the wrong thing.
+# and every node's pods must have ROTATED since (aether_agent_spire_svid_updates_total
+# {aether_spire_identity="pod",aether_spire_update="rotated"} moved on every node --
+# NOT envoy_sds_*_version, which moves on every svc roll for originator identities,
+# #992) -- otherwise every HTTP/3 handshake fails closed (#957) and the leg grades
+# the wrong thing.
 helm upgrade aether ... -f <saved values> \
   --set 'agent.eastWestQuicServices[0]=aether-test/svc-1' \
   --set 'agent.eastWestQuicServices[1]=aether-test/svc-2'

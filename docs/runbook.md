@@ -783,8 +783,11 @@ spire-server:
 ```
 
 Changing the entry re-issues every workload SVID on the agents' next fetch; no pod
-roll. Order of operations on a live cluster: SPIRE first, wait for the agents'
-`envoy_sds_*_version` to move on every node, then the allow-list.
+roll. Order of operations on a live cluster: SPIRE first, wait for
+`aether_agent_spire_svid_updates_total{aether_spire_identity="pod",aether_spire_update="rotated"}`
+to move on every node (see "Is rotation happening?" below), then the allow-list. Do
+not gate on `envoy_sds_*_version`: for originating-client identities it moves on
+every svc roll whether or not a new certificate was issued (#992).
 
 **What to expect once a destination is listed.** The agent logs
 `east-west QUIC fan-out quic_clusters=N local_identities=I allow_listed_services=S`
@@ -1244,6 +1247,22 @@ neighbours rotate is holding a certificate that will expire; the agent also logs
 `pod SVID rotated` / `node SVID rotated` at INFO. Before these existed a rotation
 could only be inferred from Envoy's `envoy_sds_*_version` gauges, with every
 proxy-roll minute excluded by hand (a new Envoy changes every gauge once).
+
+**Those gauges are not a rotation signal any more — use the counter (#992).** Since
+the per-connection certificate selector got its own SotW SDS stream (#865, the #842
+fix), the secret of every identity that ORIGINATES mesh connections (`aether_agent`,
+`prober`, `mp_dialer`, `default`, `authz_canary`, `uds_client` on talos) is fetched
+twice: once by the static ADS subscription and once by the selector, which re-serves
+it on every snapshot bump. Envoy keys SDS stats by secret NAME, so both subscriptions
+bump the same `envoy_sds_spiffe_<td>_ns_<ns>_sa_<sa>_version` gauge: over an 8 h soak
+an originator's gauge changed 258–283 times per node, in bursts of ~12 at every svc
+roll, while every other identity's moved 5–18 times (real rotations plus one per proxy
+roll) — a ~50× over-read on exactly the identities a gate is most likely to pick. The
+stat cannot be split without renaming the resources, so the code is unchanged; count
+`rotated` above (it matched the `pod SVID rotated` log lines exactly on 2026-09-19 and
+2026-09-27). `unchanged` additionally fires once per subscribed pod at SPIRE's daily
+JWT-key prepare (~16:05Z) — a redelivery, not a rotation. The SDS
+`init_fetch_timeout` counters are unaffected and keep their meaning below.
 
 Trust bundles do **not** come from the broker (its bundle RPC also needs a
 workload reference, which a node with no managed pods does not have). They are
