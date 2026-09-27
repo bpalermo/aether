@@ -14,7 +14,7 @@ configuration its own pods actually use.
 [Get started →](docs/getting-started.md){ .md-button .aether-button }
 [Architecture](architecture.md){ .md-button .aether-button }
 
-Apache-2.0 · pre-1.0 · images and charts on GHCR
+Apache-2.0 · images and charts on quay.io/aethermesh
 { .aether-fineprint }
 
 </div>
@@ -95,17 +95,17 @@ Two charts: the CRDs first, so they can be upgraded independently, then the
 system.
 
 ```bash
-# Pick the published version (chart version == git commit of the release).
-VERSION=0.x.0-<commit>
+# Pick the published version: <X.Y.Z>-<full git sha of the release>.
+VERSION=<X.Y.Z>-<commit>
 
 # 1) CRDs (MeshConfig, HTTPFilter, EdgeConfig, EndpointPolicy) — install/upgrade first.
 helm upgrade --install aether-crds \
-  oci://ghcr.io/bpalermo/aether/charts/crds \
+  oci://quay.io/aethermesh/chart-crds \
   --version "$VERSION"
 
 # 2) The system: agent + proxy + mesh-dns + registrar + controller.
 helm upgrade --install aether \
-  oci://ghcr.io/bpalermo/aether/charts/aether \
+  oci://quay.io/aethermesh/chart-aether \
   --version "$VERSION" \
   --namespace aether-system --create-namespace \
   --set clusterName=my-cluster \

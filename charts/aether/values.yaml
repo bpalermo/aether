@@ -364,14 +364,23 @@ cniInstall:
 # one release), so a `helm rollback` is safe.
 proxy:
   enabled: true
-  # External image (built by the //proxy workspace), tag-pinned to the publishing
-  # commit SHA. Mirror by overriding `repository`.
+  # External image (built by the //proxy workspace), pinned by proxy-release.yml's
+  # bump-chart PR to the publishing commit SHA + index digest. Mirror by
+  # overriding `repository`.
+  #
+  # The pin names whatever registry the proxy release that wrote it pushed to.
+  # Until the first proxy release after the Quay cut-over (proposal 040 phase 2)
+  # re-pins it, that is the pre-cut-over ghcr.io image; that release's bump-chart
+  # PR moves it to image_reference("proxy") on quay.io, rewriting `repository:`
+  # together with `tag:` and `digest:` (scripts/proxy-pin-lib.sh,
+  # proxy_pin_rewrite). Every pin reader accepts exactly proxy_pin_references()
+  # (bazel/img/registry.bzl).
   image:
-    repository: ghcr.io/bpalermo/aether/aether-proxy
-    tag: a43a20b837512105d96f99a3dfdb62fc4960832c
+    repository: quay.io/aethermesh/proxy
+    tag: 516d79eada331ec5c91d9e8634556bafaade0652
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
-    # helper prefers digest over tag. Multi-arch index for a43a20b837512105d96f99a3dfdb62fc4960832c.
-    digest: "sha256:e8e7ce7248811f9de4f616901872034179bb43fa13e5a8764b15dd256b0dc5d9"
+    # helper prefers digest over tag. Multi-arch index for 516d79eada331ec5c91d9e8634556bafaade0652.
+    digest: "sha256:62fe96b3fdb11454a34f57bfea4ff4a0669c0c1d3ea20482b8b57d1f913aaa4e"
     pullPolicy: Always
   # The Envoy hot-restart supervisor (#772): its own binary and its own image
   # since it stopped being an `agent` subcommand. The initContainer runs it to

@@ -1,47 +1,76 @@
 """Where aether's images and charts are published: ONE setting (proposal 040).
 
 Every published coordinate is derived from the constants below: the image_push
-targets (//bazel/img:go_multi_arch_image.bzl), the chart pushes (//charts/*),
-the proxy's oci_push (the //proxy workspace carries a byte-identical copy of
-this file at proxy/bazel/registry.bzl, since it cannot load from this module),
-the aether-proxy pin parser (//bazel/proxy_pin), the e2e go_test's default image
-references, and -- through scripts/image-registry.sh, which parses THIS file --
-every workflow, verifier and e2e script. Nothing else may spell the registry
-out: scripts/check-registry-config.sh fails CI on a literal anywhere outside its
+targets (//bazel/img:go_multi_arch_image.bzl), the chart pushes (//charts/*,
+chart_push in //bazel/helm:defs.bzl), the proxy's oci_push (the //proxy
+workspace carries a byte-identical copy of this file at proxy/bazel/registry.bzl,
+since it cannot load from this module), the aether-proxy pin parser
+(//bazel/proxy_pin), the e2e go_test's default image references, and -- through
+scripts/image-registry.sh, which parses THIS file -- every workflow, verifier
+and e2e script. Nothing else may spell the registry out:
+scripts/check-registry-config.sh fails CI on a literal anywhere outside its
 allow-list.
 
-The phase-2 cut-over to Quay (proposal 040) is this edit:
+History. Until the phase-2 cut-over (proposal 040) this file said
 
-    IMAGE_REGISTRY = "quay.io"
-    IMAGE_NAMESPACE = "aethermesh"
-    IMAGE_NAME_OVERRIDES = {}
-    CHART_REPOSITORY_PREFIX = "chart-"
+    IMAGE_REGISTRY = "ghcr.io"
+    IMAGE_NAMESPACE = "bpalermo/aether"
+    IMAGE_NAME_OVERRIDES = {"proxy": "aether-proxy"}
+    CHART_REPOSITORY_PREFIX = "charts/"
 
-plus the same text in proxy/bazel/registry.bzl, and the data the check then
-names (the aether-proxy pin in charts/aether/values.yaml, a chart major bump).
+and had no SIGNATURE_LAYOUT. Commits published before the cut-over live on
+ghcr.io under those names and stay there: the publish-verify sweep reads THIS
+FILE AS OF EACH PUSH HEAD (`git show <sha>:bazel/img/registry.bzl`), so an old
+head is checked on ghcr.io and a new one on quay.io, with no date or sha typed
+anywhere (scripts/verify-published-artifacts.sh).
 
-scripts/image-registry.sh reads the four assignments below with a strict,
+scripts/image-registry.sh reads the assignments below with a strict,
 line-anchored grep: keep each on ONE line, exactly `NAME = "value"` (the
-overrides as a one-line dict of string pairs). Anything it cannot parse is a
-hard failure, never a fallback.
+overrides as a one-line dict of string pairs, the legacy references as a
+one-line list of strings). Anything it cannot parse is a hard failure, never a
+fallback.
 """
 
 # Registry host.
-IMAGE_REGISTRY = "ghcr.io"
+IMAGE_REGISTRY = "quay.io"
 
 # Namespace (org / path) under the host that every image and chart lives in.
-IMAGE_NAMESPACE = "bpalermo/aether"
+IMAGE_NAMESPACE = "aethermesh"
 
-# component -> repository basename, where the two differ. GHCR history: the
-# proxy image predates the flat names and is `aether-proxy`; on Quay it is plain
-# `proxy` like every other component, so phase 2 empties this.
-IMAGE_NAME_OVERRIDES = {"proxy": "aether-proxy"}
+# component -> repository basename, where the two differ. Empty on Quay: every
+# component, the proxy included, is published under its own name
+# (`<registry>/<namespace>/proxy`; on ghcr.io it was `aether-proxy`).
+IMAGE_NAME_OVERRIDES = {}
 
 # Prepended to a chart's name to form its repository under IMAGE_NAMESPACE.
-# Ending in "/" makes it a path segment (GHCR: `bpalermo/aether/charts/aether`);
-# otherwise it is a flat-name prefix (Quay: `aethermesh/chart-aether`), which
-# keeps the chart called `aether` off the org's most natural repository name.
-CHART_REPOSITORY_PREFIX = "charts/"
+# Ending in "/" makes it a path segment (ghcr.io was `.../charts/aether`);
+# otherwise it is a flat-name prefix (Quay: `<namespace>/chart-aether`), which
+# keeps the chart called `aether` off the org's most natural repository name and
+# the prober/udsecho charts off their images' repositories. Quay has no nested
+# repositories, so a flat prefix is the only shape it can hold, and `helm push`
+# cannot name such a repository: charts are pushed by chart_push
+# (//bazel/helm:defs.bzl, oras) to chart_registry_url(<chart>).
+CHART_REPOSITORY_PREFIX = "chart-"
+
+# Where cosign's keyless signature lands on IMAGE_REGISTRY, which the
+# publish-verify sweep ASSERTS for every commit published under this setting:
+# "referrer" (an OCI 1.1 referrer and no tag -- a registry that serves the
+# Referrers API; quay.io, measured by the quay-smoke gate, run 36345331611) or
+# "tag" (cosign 3's `sha256-<hex>` fallback tag, or cosign 2's `.sig` -- a
+# registry without the API, as ghcr.io). A commit whose registry.bzl predates
+# this line was published under "tag".
+SIGNATURE_LAYOUT = "referrer"
+
+# aether-proxy references the chart's proxy pin (charts/aether/values.yaml) may
+# name besides image_reference("proxy"). The pin is DATA that only
+# proxy-release.yml's bump-chart job writes, so the flip cannot move it: it
+# keeps naming the ghcr.io image until the first proxy release after the
+# cut-over re-pins it to image_reference("proxy"). Every pin reader accepts
+# exactly proxy_pin_references() (//bazel/proxy_pin, scripts/proxy-pin-lib.sh,
+# ci.yaml's proxy-pin job, the bump-chart rewrite,
+# scripts/check-registry-config.sh). Empty this (phase 4, "decommission ghcr")
+# once no supported chart pins the old coordinate.
+PROXY_PIN_LEGACY_REFERENCES = ["ghcr.io/bpalermo/aether/aether-proxy"]
 
 def image_repository(component):
     """Repository path (no host) of a component's image.
@@ -50,7 +79,7 @@ def image_repository(component):
       component: the component name, e.g. "agent" or "proxy".
 
     Returns:
-      e.g. "bpalermo/aether/agent".
+      e.g. "aethermesh/agent".
     """
     return "{}/{}".format(IMAGE_NAMESPACE, IMAGE_NAME_OVERRIDES.get(component, component))
 
@@ -61,7 +90,7 @@ def image_reference(component):
       component: the component name, e.g. "agent".
 
     Returns:
-      e.g. "ghcr.io/bpalermo/aether/agent".
+      e.g. "quay.io/aethermesh/agent".
     """
     return "{}/{}".format(IMAGE_REGISTRY, image_repository(component))
 
@@ -72,25 +101,36 @@ def chart_repository(chart):
       chart: the chart directory / Chart.yaml name, e.g. "aether".
 
     Returns:
-      e.g. "bpalermo/aether/charts/aether".
+      e.g. "aethermesh/chart-aether".
     """
     return "{}/{}{}".format(IMAGE_NAMESPACE, CHART_REPOSITORY_PREFIX, chart)
 
-def chart_registry_url():
-    """The `oci://` base that `helm push` appends a chart's name to.
+def chart_registry_url(chart):
+    """The host-qualified OCI repository a chart is pushed to (no scheme, no tag).
 
-    helm derives the last path segment from Chart.yaml's `name:` and nothing
-    else, so this works only while CHART_REPOSITORY_PREFIX is a path segment. A
-    flat prefix (`chart-`) needs a push that can name the repository -- a phase-2
-    open question in proposal 040 -- and fails loudly here until then, rather
-    than publishing charts under names the verifiers do not expect.
+    chart_push (//bazel/helm:defs.bzl) publishes `<this>:<chart version>` with
+    oras, naming the repository outright. `helm push` cannot: it appends
+    Chart.yaml's `name:` to whatever base it is handed, so a flat prefix
+    (`chart-`) is unreachable with it, and Quay has no nested repositories to
+    hold `charts/<name>`. Consumers pull the very same coordinate with
+    `helm pull oci://<this> --version <X.Y.Z>`.
+
+    Args:
+      chart: the chart directory / Chart.yaml name, e.g. "aether".
 
     Returns:
-      e.g. "oci://ghcr.io/bpalermo/aether/charts".
+      e.g. "quay.io/aethermesh/chart-aether".
     """
-    if not CHART_REPOSITORY_PREFIX.endswith("/"):
-        fail("CHART_REPOSITORY_PREFIX \"%s\" is a flat-name prefix: `helm push` cannot publish chart <name> as <namespace>/%s<name>. See docs/proposals/040_quay-registry.md (phase 2)." % (CHART_REPOSITORY_PREFIX, CHART_REPOSITORY_PREFIX))
-    return "oci://{}/{}/{}".format(IMAGE_REGISTRY, IMAGE_NAMESPACE, CHART_REPOSITORY_PREFIX.rstrip("/"))
+    return "{}/{}".format(IMAGE_REGISTRY, chart_repository(chart))
+
+def proxy_pin_references():
+    """Every aether-proxy reference the chart's proxy pin may name.
+
+    Returns:
+      image_reference("proxy") first, then PROXY_PIN_LEGACY_REFERENCES.
+    """
+    current = image_reference("proxy")
+    return [current] + [r for r in PROXY_PIN_LEGACY_REFERENCES if r != current]
 
 def registry_token_url(registry, repository):
     """The anonymous pull-token endpoint for <registry>/<repository>.
@@ -100,8 +140,8 @@ def registry_token_url(registry, repository):
     a token URL behind. scripts/registry-lib.sh has the shell twin.
 
     Args:
-      registry: registry host, e.g. "ghcr.io".
-      repository: repository path, e.g. "bpalermo/aether/aether-proxy".
+      registry: registry host, e.g. "quay.io".
+      repository: repository path, e.g. "aethermesh/proxy".
 
     Returns:
       The token URL, scoped to pull on that repository.

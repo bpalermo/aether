@@ -91,7 +91,7 @@ access-log/tracing policy via the MeshConfig CR.
 | Key | Default | Purpose |
 |---|---|---|
 | `proxy.enabled` | `true` | Deploy the per-node Envoy. Disable to run only the agent. |
-| `proxy.image.repository` | `ghcr.io/bpalermo/aether/aether-proxy` | External image built by the `//proxy` workspace, tag-pinned. |
+| `proxy.image.repository` | `quay.io/aethermesh/proxy` | External image built by the `//proxy` workspace, digest-pinned by the proxy release's bump-chart PR. A chart published before the first proxy release after the Quay cut-over (proposal 040) still pins the pre-cut-over ghcr.io image; that release moves `repository` with the tag and digest. |
 | `proxy.image.tag` | (commit SHA) | The publishing commit. |
 | `proxy.logLevel` | `info` | Envoy log level. |
 | `proxy.jsonLogs` | `true` | Envoy application logs as one JSON object per line. |
@@ -312,7 +312,7 @@ until #772: as a subcommand it made the proxy pod stage and run the whole 65MiB
 agent binary — controller-runtime, client-go, go-control-plane, SPIRE, Gateway
 API, miekg/dns — to fork a child process. It is now its own binary
 (`//agent/cmd/proxy-supervisor`, 15MiB / 24 modules) in its own image
-(`ghcr.io/bpalermo/aether/proxy-supervisor`), which also means the proxy
+(`quay.io/aethermesh/proxy-supervisor`), which also means the proxy
 DaemonSet no longer depends on the agent image at all. `agent proxy-supervisor`
 remains as a deprecated alias for one release so a chart predating #772 still
 has a working initContainer against a newer agent image.

@@ -27,7 +27,7 @@ bazel build //:envoy
 # --config=release bakes the optimized Envoy (plain builds are fastbuild/dev).
 # The Makefile `load-proxy-image` target does this for you.
 bazel build --config=release //:image
-bazel run --config=release //:load   # ghcr.io/bpalermo/aether/aether-proxy:latest
+bazel run --config=release //:load   # quay.io/aethermesh/proxy:latest
 
 # Image smoke test (container-structure-test).
 bazel test //:image_test
@@ -191,8 +191,8 @@ config) and **annotations** (manifest):
 To read them off a published image, without pulling it:
 
 ```bash
-crane config ghcr.io/bpalermo/aether/aether-proxy@sha256:… | jq .config.Labels
-crane manifest ghcr.io/bpalermo/aether/aether-proxy@sha256:… | jq .annotations
+crane config quay.io/aethermesh/proxy@sha256:… | jq .config.Labels
+crane manifest quay.io/aethermesh/proxy@sha256:… | jq .annotations
 ```
 
 None of this costs reproducibility: the labels are fixed strings, `created`

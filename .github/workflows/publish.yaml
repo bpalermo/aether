@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
   # Keyless cosign signing (#873 is unrelated; see the Sign step below). The
   # signer exchanges this OIDC token with Fulcio for a short-lived certificate
   # bound to this workflow's identity, so NO private key exists to store or
@@ -44,15 +43,21 @@ concurrency:
   cancel-in-progress: false
 
 # The registry (host, namespace, naming) is ONE setting, bazel/img/registry.bzl
-# (proposal 040). Bazel reads it directly; the steps below read it through
-# scripts/image-registry.sh, which each job appends to $GITHUB_ENV right after
-# checkout — never a literal here.
+# (proposal 040: the Quay org since the phase-2 cut-over). Bazel reads it
+# directly; the steps below read it through scripts/image-registry.sh, which each
+# job appends to $GITHUB_ENV right after checkout — never a literal here.
+#
+# Credentials: the Quay robot account, secrets QUAY_USERNAME / QUAY_TOKEN, which
+# exist ONLY in the `release` environment (deployment-branch policy: main). A
+# job that pushes or signs declares `environment: release`, so a run from any
+# other ref cannot read them. GITHUB_TOKEN is not a registry credential here
+# any more.
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     environment:
-      name: main
+      name: release
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -71,12 +76,15 @@ jobs:
           cache-save: false
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh --stamp --config=remote //...
+      # One login covers everything below: image_push (rules_img) and chart_push
+      # (oras) both read the Docker config this writes, and cosign pushes its
+      # referrer with it too.
       - name: Log in to the image registry
         uses: docker/login-action@v4
         with:
           registry: ${{ env.IMAGE_REGISTRY_HOST }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
       - name: Build
         # BuildBuddy RBE (see .bazelrc `--config=remote`) — runs the build on the
         # hosted executor pool and reuses the cache warmed by PR `ci` builds.
@@ -95,28 +103,43 @@ jobs:
             //tools/buildid:release_build_ids
           echo "per-binary GNU build-IDs (content-derived, pairwise distinct):"
           cat bazel-bin/tools/buildid/release_build_ids.txt
-      # `*.push` publishes each chart together with the images it references
-      # (aether.push -> agent + mesh-dns + cni-install + registrar + controller
-      # images + the aether chart; crds.push -> the MeshConfig CRD chart;
-      # prober.push -> prober chart + image), so a single GHCR login covers images
-      # and charts. Adding an image to a chart's `images` attr is all that is needed
-      # to get it published — no separate push step (mesh-dns, #583).
-      - name: Push charts + images
-        env:
-          HELM_REGISTRY_USERNAME: ${{ github.actor }}
-          HELM_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      # Images first, then the charts that reference them by digest.
+      #
+      # `<chart>.push_images` (rules_helm) pushes every image a chart's `images`
+      # attr names, by digest plus the `latest` / `dev-<full sha>` tags
+      # (aether -> agent + mesh-dns + proxy-supervisor + cni-install +
+      # registrar + controller; prober -> prober; udsecho -> udsecho). Adding an
+      # image to a chart's `images` is all it takes to get it published (#583).
+      #
+      # `<chart>.chart_push` (//bazel/helm:defs.bzl) pushes the packaged chart
+      # with oras to chart_registry_url(<chart>) = `<registry>/<namespace>/chart-
+      # <name>`, under its packaged version. NOT `helm push`: it appends the
+      # chart's name to its base, so it cannot address the flat `chart-<name>`
+      # repositories quay.io requires (no nested repositories there, and bare
+      # `prober` / `udsecho` would collide with the images). The artifact is
+      # byte-for-byte what `helm push` writes (same layer, same config media
+      # type), so `helm pull oci://.../chart-aether --version X.Y.Z` works.
+      - name: Push images + charts
         run: |
-          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/crds:crds.push
-          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/aether:aether.push
-          # …and the same chart again under `charts/aether:<version>-<full sha>`
-          # (#692). The bare `<version>` tag above does not change per commit, so
-          # it alone cannot tell you which commit is deployed; this one can never
-          # be reused. Chart only — the images were just pushed by digest above.
-          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/aether:aether_commit.push_registry
-          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/prober:prober.push
+          set -euo pipefail
+          bazel_run() {
+            bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} "$@"
+          }
+          bazel_run //charts/aether:aether.push_images
+          bazel_run //charts/prober:prober.push_images
           # udsecho: UDS validation workloads (proposal 034 PR 3b) — chart + image
           # bundle like prober; the chart pins the image digest at package time.
-          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/udsecho:udsecho.push
+          bazel_run //charts/udsecho:udsecho.push_images
+
+          bazel_run //charts/crds:crds.chart_push
+          bazel_run //charts/aether:aether.chart_push
+          # …and the same chart again under `<version>-<full sha>` (#692). The
+          # bare `<version>` tag above does not change per commit, so it alone
+          # cannot tell you which commit is deployed; this one can never be
+          # reused. Chart only — the images were pushed by digest above.
+          bazel_run //charts/aether:aether_commit.chart_push
+          bazel_run //charts/prober:prober.chart_push
+          bazel_run //charts/udsecho:udsecho.chart_push
 
       - name: Build cosign (Bazel-pinned, local)
         # cosign comes from the rules_img_signer_cosign bazel_dep (MODULE.bazel):
@@ -141,35 +164,27 @@ jobs:
 
       # Sign every published image, keyless.
       #
-      # WHERE THE SIGNATURE GOES: cosign's tag scheme puts it in the SAME
-      # repository as the image, under a tag derived from the image digest --
-      # `sha256:abc…` becomes the tag `sha256-abc….sig`. It is an ordinary OCI
-      # image manifest whose layer is
-      # application/vnd.dev.cosign.simplesigning.v1+json, with the signature,
-      # certificate and Rekor bundle in its annotations.
+      # WHERE THE SIGNATURE GOES depends on the registry, and the registry
+      # setting says which (SIGNATURE_LAYOUT in bazel/img/registry.bzl):
       #
-      # **ghcr.io does not implement the Referrers API.** Verified against four
-      # repositories including our own and oras-project/oras -- GET
-      # /v2/<repo>/referrers/<digest> returns 404 on all of them while
-      # /v2/<repo>/tags/list and /manifests/ succeed with the same token.
+      #   quay.io   serves the OCI 1.1 Referrers API, so cosign 3 attaches the
+      #             sigstore bundle as a REFERRER of the signed manifest
+      #             (artifactType application/vnd.dev.sigstore.bundle.v0.3+json)
+      #             and writes NO tag. Measured by the quay-smoke gate (run
+      #             36345331611) on the index and every child: layout `referrer`.
+      #   ghcr.io   (before the proposal 040 cut-over) has no Referrers API, so
+      #             cosign 3 wrote the `sha256-<digest>` fallback-index tag, and
+      #             cosign 2 (until 2026-09-24) `sha256-<digest>.sig`.
       #
-      # So the signature lands in a TAG either way, and which tag depends on the
-      # cosign major:
-      #
-      #   cosign 2.x            `sha256-<digest>.sig`   plain signature manifest
-      #   cosign 3.x (default)  `sha256-<digest>`       OCI 1.1 fallback index
-      #
-      # We ran cosign 2 until 2026-09-24, so everything published before then carries
-      # the legacy shape. scripts/registry-lib.sh accepts EITHER and rejects BOTH --
-      # see registry_signature_layout(). On a registry that DOES serve the
-      # Referrers API (quay.io, proposal 040 phase 2) cosign 3 attaches the bundle
-      # as a real referrer and writes no tag; the library reads that layout too.
+      # scripts/registry-lib.sh reads all three layouts and names two-at-once
+      # `both`; publish-verify then ASSERTS the layout each commit's registry.bzl
+      # promises (referrer on quay, a tag on ghcr), so a double-write -- a
+      # referrer AND a fallback tag -- is a red, not a healthy signature.
       #
       # An earlier attempt (#924) tried to KEEP the legacy shape with
       # `--new-bundle-format=false` and failed in CI: cosign 3's keyless path rejects
       # it outright ("must provide --new-bundle-format or --bundle where applicable
-      # with --signing-config"). Holding the layout is not a reachable state on v3
-      # keyless. Do not re-add that flag.
+      # with --signing-config"). Do not re-add that flag.
       #
       # DO NOT pin --new-bundle-format on the verify below expecting it to assert the
       # layout. Measured: `=false` fails closed against a v3 signature (exit 10), but
@@ -178,18 +193,11 @@ jobs:
       # than asking the same binary that just wrote the signature whether it likes it.
       #
       # On rules_img's own signing (signing_config + the rules_img_signer_cosign
-      # `sign-oci-artifact` plugin): NOT used, even though that same module now
-      # supplies our cosign CLI. rules_img 0.3.21's signing_config docstring says
-      # "The signature is then pushed to the image's repository as an OCI
-      # referrer", and ghcr.io has no Referrers API (above); our whole sign /
-      # verify / sweep layout is cosign's `sha256-<hex>` tag. We take the module's
-      # CLI only, and sign here with it exactly as before.
-      #
-      # cosign v3.1.2 (from v3.0.6) hides --new-bundle-format from --help as
-      # deprecated-for-v4; the bundle format is the default either way, and this
-      # step passes no bundle flag. Whether v3.1.2 still writes the `sha256-<hex>`
-      # fallback tag on ghcr.io is asserted after every publish by publish-verify's
-      # registry-side layout check, not assumed here.
+      # `sign-oci-artifact` plugin): NOT used. It would sign inside `img deploy`,
+      # but this step already signs exactly what was pushed, by digest, with the
+      # same cosign the verifiers run, and the quay-smoke gate proved this path
+      # on quay.io; the plugin's layout on quay is unmeasured. We take the
+      # module's CLI only.
       #
       # --recursive signs the index AND every child manifest. Our images are
       # multi-arch (amd64/arm64), so signing only the index would leave anyone who
@@ -204,8 +212,12 @@ jobs:
       - name: Sign published images (keyless)
         env:
           COSIGN_YES: "true"
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT: ${{ github.sha }}
+          # Registry READS (tag lookups, digests) with the robot rather than
+          # anonymously, so a repository that is not public yet cannot make this
+          # step lie; cosign's own push uses the Docker login above.
+          REGISTRY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -219,8 +231,6 @@ jobs:
           # on e3b58e6 by reading 100 of 667 tags (#875) -- the tag existed and
           # the lookup could not see it, so a correct step reported the images
           # unpublished. See scripts/registry-lib.sh for the full story.
-          GHCR_TOKEN="${GH_TOKEN}"
-          export GHCR_TOKEN
           # shellcheck source=scripts/registry-lib.sh
           . ./scripts/registry-lib.sh
 
@@ -299,7 +309,8 @@ jobs:
       # walk over nothing.
       - name: Verify the signatures (every index and every child manifest)
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
         run: |
           set -euo pipefail
 

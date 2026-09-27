@@ -1,9 +1,10 @@
 name: quay-smoke
 
 # The proposal 040 phase-2 gate: push + keyless sign + verify ONE throwaway image
-# on quay.io before the real cut-over. Dispatch by hand, from main only (the
-# `release` environment's branch policy, and the only ref whose runs can read
-# its secrets):
+# on quay.io. It gated the cut-over (green: run 36345331611) and stays
+# dispatchable to re-check quay after a cosign, rules_img or robot change.
+# Dispatch by hand, from main only (the `release` environment's branch policy,
+# and the only ref whose runs can read its secrets):
 #
 #   gh workflow run quay-smoke.yaml --ref main
 #
@@ -14,10 +15,11 @@ name: quay-smoke
 # scripts/quay-smoke.sh, so the shell is linted like the rest of //scripts. See
 # docs/runbook.md, "Quay smoke", for what each row means.
 #
-# It targets quay.io EXPLICITLY (SMOKE_REGISTRY / SMOKE_ORG below), not the
-# single setting in bazel/img/registry.bzl, which still says ghcr.io until the
-# flip. Host and org are separate on purpose: after the flip `<host>/<org>` is
-# the setting, and scripts/check-registry-config.sh forbids spelling it out.
+# It targets quay.io EXPLICITLY (SMOKE_REGISTRY / SMOKE_ORG below) and the
+# throwaway `smoke` repository, not the single setting in bazel/img/registry.bzl
+# (it ran before the flip). Host and org are separate on purpose: `<host>/<org>`
+# IS the setting now, and scripts/check-registry-config.sh forbids spelling it
+# out.
 on:
   workflow_dispatch: {}
 
@@ -94,7 +96,9 @@ jobs:
 
       # //tools/cosign:verify_image_signatures on the index AND every child, as
       # ^https://github.com/<repo>/.github/workflows/quay-smoke.yaml@refs/heads/main$,
-      # then the certificate SAN cosign reports.
+      # then the signing certificate's SAN, read from the sigstore bundle
+      # (`cosign download signature` + openssl; cosign v3's verify JSON has no
+      # Subject). An unreadable or mismatched SAN fails the summary.
       - name: Verify
         run: scripts/quay-smoke.sh verify
 

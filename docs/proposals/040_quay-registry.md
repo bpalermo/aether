@@ -1,7 +1,8 @@
 # Proposal 040: Publish to Quay (`quay.io/aethermesh`)
 
-**Status:** Accepted 2026-09-27. Phase 1 (the abstraction) is the PR that adds
-this file; phases 2–4 follow.
+**Status:** Accepted 2026-09-27. Phase 1 (the abstraction, #998) and phase 2
+(the cut-over) are done; phases 3 (talos rollout) and 4 (decommission ghcr)
+follow.
 **Author:** Bruno Palermo
 **Date:** 2026-09-27
 **Related:** #875 / #880 / #925 / #984 / #985 (signing and the publish-verify
@@ -35,9 +36,15 @@ organisation **`aethermesh`**, for four reasons:
   provider). That closes the window between "pushed" and "signed" that today's
   separate `cosign sign` step leaves open, and it writes the signature as a
   referrer.
-- **Credentials.** Pushes use a Quay **robot account** (`aethermesh+publisher`),
-  held as two repository secrets (`QUAY_USERNAME`, `QUAY_PASSWORD`) — no
-  long-lived personal token, and nothing to rotate when a maintainer changes.
+- **Credentials.** Pushes use a Quay **robot account**, held as two secrets of
+  the `release` environment (`QUAY_USERNAME`, `QUAY_TOKEN`; deployment-branch
+  policy `main`) — no long-lived personal token, nothing to rotate when a
+  maintainer changes, and no run from any other ref can read them.
+
+(As built, phase 2 kept today's `image_push` + a separate keyless `cosign sign
+--recursive` step rather than signing inside `img deploy`: that is the path the
+quay-smoke gate measured on quay.io, and it already writes the signature as a
+referrer there. See "Phases".)
 
 ## Mapping
 
@@ -52,7 +59,7 @@ organisation **`aethermesh`**, for four reasons:
 | prober image | `ghcr.io/bpalermo/aether/prober` | `quay.io/aethermesh/prober` |
 | udsecho image (validation workload) | `ghcr.io/bpalermo/aether/udsecho` | `quay.io/aethermesh/udsecho` |
 | proxy image (`proxy-release.yml`) | `ghcr.io/bpalermo/aether/aether-proxy` | `quay.io/aethermesh/proxy` |
-| aether chart | `ghcr.io/bpalermo/aether/charts/aether` | `quay.io/aethermesh/chart-aether` |
+| aether chart | `ghcr.io/bpalermo/aether/charts/aether` | `quay.io/aethermesh/chart-aether` (1.0.0 onward) |
 | crds chart | `ghcr.io/bpalermo/aether/charts/crds` | `quay.io/aethermesh/chart-crds` |
 | prober chart | `ghcr.io/bpalermo/aether/charts/prober` | `quay.io/aethermesh/chart-prober` |
 | udsecho chart | `ghcr.io/bpalermo/aether/charts/udsecho` | `quay.io/aethermesh/chart-udsecho` |
@@ -66,15 +73,17 @@ agent and mesh-dns images rather than images of their own.
 `bazel/img/registry.bzl` holds the whole decision:
 
 ```python
-IMAGE_REGISTRY = "ghcr.io"                        # phase 2: "quay.io"
-IMAGE_NAMESPACE = "bpalermo/aether"               # phase 2: "aethermesh"
-IMAGE_NAME_OVERRIDES = {"proxy": "aether-proxy"}  # phase 2: {}
-CHART_REPOSITORY_PREFIX = "charts/"               # phase 2: "chart-"
+IMAGE_REGISTRY = "quay.io"                   # phase 1: "ghcr.io"
+IMAGE_NAMESPACE = "aethermesh"               # phase 1: "bpalermo/aether"
+IMAGE_NAME_OVERRIDES = {}                    # phase 1: {"proxy": "aether-proxy"}
+CHART_REPOSITORY_PREFIX = "chart-"           # phase 1: "charts/"
+SIGNATURE_LAYOUT = "referrer"                # phase 2; absent before = "tag"
+PROXY_PIN_LEGACY_REFERENCES = ["ghcr.io/bpalermo/aether/aether-proxy"]  # phase 2; [] in phase 4
 ```
 
 with `image_repository(component)`, `image_reference(component)`,
-`chart_repository(chart)`, `chart_registry_url()` and
-`registry_token_url(registry, repo)`. Bazel reads it directly (every
+`chart_repository(chart)`, `chart_registry_url(chart)`,
+`proxy_pin_references()` and `registry_token_url(registry, repo)`. Bazel reads it directly (every
 `go_multi_arch_image` call site, the chart pushes and template tests, the e2e
 `go_test`'s `x_defs`, `//bazel/proxy_pin`). The `//proxy` workspace is a separate
 Bazel module that cannot load from the root, so it carries a byte-identical copy
@@ -100,28 +109,55 @@ and falls back to the tags; any other non-200 is inconclusive.
    referrer, a referrers 404 falling back to tags, a 5xx inconclusive, a paged
    referrers answer, and the verifier end to end against the phase-2 setting with
    referrer-only signatures). Real read-only proofs against ghcr.io and quay.io.
-2. **Cut-over.** Flip `registry.bzl` (and its proxy copy); **major-bump every
-   chart** (the default image repositories move, which is a breaking change for
-   anyone overriding `repository` by prefix); `publish.yaml` and
-   `proxy-release.yml` log in to quay.io with the robot account and push there.
-   Images move from `image_push` + a separate `cosign sign` step to `img deploy`
-   with a `signing_config` using the `@rules_img_signer_cosign` plugin and
-   `$SIGSTORE_ID_TOKEN` from the Actions OIDC provider. The charts need a push
-   that can name the repository (`chart_registry_url()` fails loudly on a flat
-   prefix until then — see open questions). publish-verify sweeps **quay.io for
-   commits at or after the cut-over and ghcr.io for older push heads** (the
-   verifier can read the setting as of each commit, the way it already reads
-   chart versions and the release tag). The pinned aether-proxy digest moves with
-   the first proxy release after the flip.
-   **Gate before the flip:** a green `quay-smoke` run
-   (`gh workflow run quay-smoke.yaml --ref main`; `.github/workflows/quay-smoke.yaml`,
-   runbook "Quay smoke") — rules_img push of a throwaway index to
-   `quay.io/aethermesh/smoke` with the robot, keyless `cosign sign --recursive`,
-   `verify_image_signatures` on the index and every child. Its summary answers
-   the auto-creation and visibility open questions and records the signature
-   layout cosign v3.1.2 writes on quay (`referrer` / `bundle` / `legacy` /
-   `both`), which fixes phase 2's verify path.
-3. **talos rollout.** `helm upgrade` on talos-main from the quay coordinates
+2. **Cut-over — DONE.** The gate went green first (`quay-smoke`, run
+   36345331611: the robot pushes to a pre-created repository but cannot create
+   one; cosign v3.1.2 keyless `sign --recursive` writes the signature as a
+   `referrer`, no tag, on the index and every child; `verify_image_signatures`
+   passes on quay). Then, in one PR:
+   - **The flip.** `registry.bzl` (and its byte-identical proxy copy) says
+     `quay.io` / `aethermesh` / no overrides / `chart-`, plus two new lines:
+     `SIGNATURE_LAYOUT = "referrer"` (what the sweep asserts for every commit
+     published under this setting) and `PROXY_PIN_LEGACY_REFERENCES` (below).
+   - **Every chart major-bumped** (aether 0.95.x → `1.0.0`; crds, prober,
+     udsecho → `1.0.0`): the default image repositories moved, which breaks
+     anyone overriding `repository` by prefix. Consumers re-point at
+     `oci://quay.io/aethermesh/chart-<name>` and upgrade with `helm get values
+     -o yaml` → `-f` (never `--reuse-values`).
+   - **Charts pushed with oras.** `helm push` cannot name the repository (it
+     appends Chart.yaml's `name:`), Quay has no nested repositories, and a bare
+     `prober` / `udsecho` would collide with those images. `chart_push`
+     (`//bazel/helm:defs.bzl`) writes what `helm push` writes — the `.tgz` as
+     the helm chart-content layer, Chart.yaml as JSON under the helm config
+     media type (`//tools/chartconfig`) — with the pinned oras (`//tools/oras`,
+     1.3.4, sha256-pinned archives in MODULE.bazel) to
+     `chart_registry_url(<chart>)` = `quay.io/aethermesh/chart-<name>`, tagged
+     with the packaged version; both tag shapes are kept (`<version>` and
+     `<version>-<full sha>` for aether). Proved against a local registry:
+     identical layer digest and config content to a real `helm push` of the
+     same package, and `helm pull` / `helm template oci://…` work unchanged.
+   - **Pushes and signing** run in jobs that declare `environment: release`
+     and log in to the setting's host with the robot (`publish.yaml`, and
+     `proxy-release.yml`'s `build-push`, `manifest` and `sign`). Images keep
+     `image_push` + a separate `cosign sign --recursive` by digest (NOT the
+     rules_img signer plugin: the smoke measured this path, and it already
+     writes referrers on quay).
+   - **The split sweep.** `verify-published-artifacts.sh` reads
+     `bazel/img/registry.bzl` AS OF EACH PUSH HEAD — host, namespace,
+     overrides, chart prefix, and the signature layout it must find there
+     (`referrer` on quay; a file without the line promises `tag`) — so heads
+     before the cut-over are checked on ghcr.io and heads at or after it on
+     quay.io, with no sha or date written down: the cut-over commit is simply
+     this PR's merge commit, the first whose file says quay.io. A post-flip head
+     whose artifacts are only on ghcr.io is MISSING; a fallback tag on quay.io
+     (or a referrer plus a tag) is MISSING. Commits older than the file (before
+     #998) use its first version, which phase 1 introduced with no behaviour
+     change.
+   - **The proxy pin** is data, so the flip cannot move it: it names the ghcr.io
+     image until the first proxy release after the flip — this PR's own merge
+     triggers one — whose bump-chart PR rewrites `repository:` with `tag:` and
+     `digest:`. Every pin reader accepts `proxy_pin_references()`, and the sweep
+     looks a pin up on the registry the pin names.
+3. **talos rollout.**3. **talos rollout.** `helm upgrade` on talos-main from the quay coordinates
    (values from `helm get values -o yaml`, never `--reuse-values`), then an 8h
    soak graded as usual.
 4. **Decommission ghcr.** Once no supported release and no cluster references a
@@ -129,25 +165,23 @@ and falls back to the tags; any other non-200 is inconclusive.
    ghcr packages in place read-only (deleting them would break every historical
    pin).
 
-## Open questions
+## Open questions (answered in phase 2)
 
-- **Does `img deploy` on quay write the signature as a referrer only?** rules_img
-  0.3.21's `signing_config` docstring says the signature is "pushed to the
-  image's repository as an OCI referrer"; whether it also writes a fallback tag
-  on a registry that serves the API is in a prebuilt Go binary and unverified. A
-  tag *and* a referrer would read as `both` (the double-write defect) in the
-  sweep. `cosign verify` (v3) discovers a referrer by itself either way. Confirm
-  on the first publish: `registry_referrers` + both tag lookups on one digest.
-- **Chart repository names.** `helm push` derives the last path segment from
-  `Chart.yaml`'s `name:`, so `oci://quay.io/aethermesh` publishes chart `aether`
-  as `aethermesh/aether`, not `chart-aether`. Options: rename the charts
-  (`name: chart-aether` changes `.Chart.Name` in every template), or push the
-  packaged `.tgz` with a tool that names the target (`oras push`/`crane`), or a
-  rules_helm change. Decide before the flip.
-- **Repository auto-creation.** Can the robot account create a repository on
-  first push, or must each of the 13 repositories be pre-created (and made
-  public) in the org? Pre-creating is safer: a first push that auto-creates a
-  *private* repository fails every anonymous pull and the sweep's witness check.
+- **Where does the signature land on quay?** `referrer`, and only a referrer:
+  the quay-smoke gate (run 36345331611) measured cosign v3.1.2 keyless `sign
+  --recursive` on our own index and every child — no fallback tag. Phase 2 kept
+  that path (`image_push` + `cosign sign`), so the `img deploy` signer plugin's
+  behaviour never needed measuring. `SIGNATURE_LAYOUT = "referrer"` makes it an
+  assertion: a tag, or a tag plus a referrer, is MISSING in the sweep. Still to
+  confirm by eye on the first real publish: `registry_referrers` lists the sign
+  bundle and both tag lookups 404 on one digest (the double-write check).
+- **Chart repository names.** `chart-<name>`, pushed with **oras** (not a chart
+  rename, which would change `.Chart.Name` in every template, and not a rules_helm
+  change): `chart_push` in `//bazel/helm:defs.bzl`, see phase 2.
+- **Repository auto-creation.** **No**: the robot cannot create repositories.
+  All 13 were pre-created public, with robot write. A new component needs its
+  repository created the same way before its first publish.
 - **Pull-rate limits.** Anonymous quay.io pulls are rate-limited per IP; the
   sweep's direct lookups (≈60 HEADs + 27 referrers GETs per commit) and CI's
-  proxy-pin extraction must stay well under that. Measure on the first sweep.
+  proxy-pin extraction must stay well under that. Still open: measure on the
+  first sweep.

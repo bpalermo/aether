@@ -8,8 +8,9 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 # "Verifying image signatures".
 #
 # Hand-written: Gazelle manages Go only. The module's `sign-oci-artifact` signer
-# plugin (rules_img signing_config) is deliberately NOT wired: it stores
-# signatures as OCI 1.1 referrers, and ghcr.io has no Referrers API.
+# plugin (rules_img signing_config) is deliberately NOT wired: publish.yaml and
+# proxy-release.yml sign with this CLI after the pushes, by digest -- the path
+# the quay-smoke gate measured on quay.io (a referrer, no tag; proposal 040).
 
 _COSIGN = "@rules_img_signer_cosign//cosign"
 
