@@ -30,6 +30,7 @@ sh_binary(
     data = [
         _COSIGN,
         "//scripts:ghcr-lib.sh",
+        "//scripts:registry-lib.sh",
         "//scripts:verify-image-signatures.sh",
     ],
     env = {

@@ -1,5 +1,6 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+load("//bazel/img:registry.bzl", "image_repository")
 
 go_library(
     name = "prober_lib",
@@ -24,5 +25,5 @@ go_binary(
 go_multi_arch_image(
     name = "prober_image",
     binary = ":prober",
-    repository = "bpalermo/aether/prober",
+    repository = image_repository("prober"),
 )

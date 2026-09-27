@@ -26,6 +26,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# <registry>/<namespace> every aether image is tagged under, from the single
+# setting in bazel/img/registry.bzl (proposal 040) -- never a literal.
+IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
 CLUSTER_A="${CLUSTER_A:-a}"
 CLUSTER_B="${CLUSTER_B:-b}"
 ETCD_NAME="${ETCD_NAME:-aether-shared-etcd}"
@@ -111,7 +114,7 @@ raise_inotify() {
 build_images() {
 	# CI builds the images itself (bazel image_load via RBE) and sets
 	# WAYPOINT_SKIP_BUILD=1 so this step is a no-op — the images are already in the
-	# local docker daemon under ghcr.io/bpalermo/aether/<img>:latest.
+	# local docker daemon under <IMAGE_REGISTRY>/<img>:latest.
 	if [ "${WAYPOINT_SKIP_BUILD:-0}" = "1" ]; then
 		ok "skipping image build (WAYPOINT_SKIP_BUILD=1; images pre-built)"
 		return
@@ -158,7 +161,7 @@ load_images() {
 	log "loading images into both clusters"
 	for c in "$CLUSTER_A" "$CLUSTER_B"; do
 		for img in "${IMAGES[@]}"; do
-			kind load docker-image "ghcr.io/bpalermo/aether/${img}:latest" --name "$c" >/dev/null 2>&1
+			kind load docker-image "${IMAGE_REGISTRY}/${img}:latest" --name "$c" >/dev/null 2>&1
 		done
 	done
 	ok "images loaded"
@@ -270,7 +273,7 @@ install_aether() {
 	etcd="http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ETCD_NAME"):2379"
 	charts="$(chart_dir)"
 	local img
-	img() { echo "--set $1.image.repository=ghcr.io/bpalermo/aether/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
 	for c in "$CLUSTER_A" "$CLUSTER_B"; do
 		log "installing aether on '$c' (waypoint ON, spire ON, shared etcd)"
 		helm --kube-context "kind-$c" upgrade --install aether-crds "$charts/crds" -n "$NS" --create-namespace --wait --timeout 2m >/dev/null

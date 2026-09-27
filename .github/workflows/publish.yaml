@@ -43,8 +43,10 @@ concurrency:
   group: publish-main
   cancel-in-progress: false
 
-env:
-  IMAGE_REGISTRY: ghcr.io/bpalermo/aether
+# The registry (host, namespace, naming) is ONE setting, bazel/img/registry.bzl
+# (proposal 040). Bazel reads it directly; the steps below read it through
+# scripts/image-registry.sh, which each job appends to $GITHUB_ENV right after
+# checkout — never a literal here.
 
 jobs:
   publish:
@@ -54,15 +56,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      - name: Image registry (bazel/img/registry.bzl)
+        run: scripts/image-registry.sh >> "$GITHUB_ENV"
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
           repository-cache: true
-      - name: Log in to GHCR
+      - name: Log in to the image registry
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
+          registry: ${{ env.IMAGE_REGISTRY_HOST }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build
@@ -148,8 +152,10 @@ jobs:
       #   cosign 3.x (default)  `sha256-<digest>`       OCI 1.1 fallback index
       #
       # We ran cosign 2 until 2026-09-24, so everything published before then carries
-      # the legacy shape. scripts/ghcr-lib.sh accepts EITHER and rejects BOTH --
-      # see ghcr_signature_layout().
+      # the legacy shape. scripts/registry-lib.sh accepts EITHER and rejects BOTH --
+      # see registry_signature_layout(). On a registry that DOES serve the
+      # Referrers API (quay.io, proposal 040 phase 2) cosign 3 attaches the bundle
+      # as a real referrer and writes no tag; the library reads that layout too.
       #
       # An earlier attempt (#924) tried to KEEP the legacy shape with
       # `--new-bundle-format=false` and failed in CI: cosign 3's keyless path rejects
@@ -201,26 +207,30 @@ jobs:
           # list could drift, and a verifier missing a repo would pass while that
           # image was never published at all.
           #
-          # ghcr_all_tags() paginates. It was written after this step failed on
-          # e3b58e6 by reading 100 of 667 tags (#875) -- the tag existed and the
-          # lookup could not see it, so a correct step reported the images
-          # unpublished. See scripts/ghcr-lib.sh for the full story.
+          # registry_all_tags() paginates. It was written after this step failed
+          # on e3b58e6 by reading 100 of 667 tags (#875) -- the tag existed and
+          # the lookup could not see it, so a correct step reported the images
+          # unpublished. See scripts/registry-lib.sh for the full story.
           GHCR_TOKEN="${GH_TOKEN}"
           export GHCR_TOKEN
-          # shellcheck source=scripts/ghcr-lib.sh
-          . ./scripts/ghcr-lib.sh
+          # shellcheck source=scripts/registry-lib.sh
+          . ./scripts/registry-lib.sh
 
-          # A missing entry in GHCR_IMAGE_REPOS silently ships an UNSIGNED image,
-          # so the verify step below re-reads this same list.
-          repos=("${GHCR_IMAGE_REPOS[@]}")
+          # A missing entry in REGISTRY_IMAGE_REPOS silently ships an UNSIGNED
+          # image, so the verify step below re-reads this same list.
+          repos=("${REGISTRY_IMAGE_REPOS[@]}")
+          if [ "${#repos[@]}" -eq 0 ]; then
+            echo "::error::no image repositories (scripts/image-registry.sh could not read bazel/img/registry.bzl)"
+            exit 1
+          fi
 
           signed=0
           for repo in "${repos[@]}"; do
-            tok="$(ghcr_registry_token "$repo")"
+            tok="$(registry_registry_token "$repo")"
 
             # The commit-suffixed tag (`<tag>-<full sha>`) is the only immutable
             # one -- `dev` is rewritten by every publish (#692).
-            tags="$(ghcr_all_tags "$repo" "$tok")"
+            tags="$(registry_all_tags "$repo" "$tok")"
             n_tags="$(printf '%s\n' "$tags" | grep -c . || true)"
             tag="$(printf '%s\n' "$tags" | grep -E -- "-${COMMIT}$" | head -1)"
             if [ -z "$tag" ]; then
@@ -235,19 +245,19 @@ jobs:
             # Resolve each image's INDEX DIGEST rather than signing a tag. Signing
             # a tag re-resolves it inside cosign, which is a TOCTOU window against
             # a mutable tag; the digest is what was actually published.
-            digest="$(ghcr_manifest_digest "$repo" "$tag" "$tok")"
+            digest="$(registry_manifest_digest "$repo" "$tag" "$tok")"
             if [ -z "$digest" ]; then
-              echo "::error::could not resolve a digest for ghcr.io/${repo}:${tag}"
+              echo "::error::could not resolve a digest for ${REGISTRY_HOST}/${repo}:${tag}"
               exit 1
             fi
 
-            echo "signing ghcr.io/${repo}@${digest} (from ${tag})"
-            bazel run //tools/cosign -- sign --yes --recursive "ghcr.io/${repo}@${digest}"
+            echo "signing ${REGISTRY_HOST}/${repo}@${digest} (from ${tag})"
+            bazel run //tools/cosign -- sign --yes --recursive "${REGISTRY_HOST}/${repo}@${digest}"
             # Hand the EXACT reference to the verify step. It must not re-resolve
             # the list itself: a second copy of the repo list can drift from this
             # one, and re-resolving a tag would let verify pass against something
             # other than what was signed.
-            echo "ghcr.io/${repo}@${digest}" >> signed-images.txt
+            echo "${REGISTRY_HOST}/${repo}@${digest}" >> signed-images.txt
             signed=$((signed + 1))
           done
 

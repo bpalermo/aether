@@ -51,8 +51,10 @@ concurrency:
 # the `crate` module extension is only evaluated when something in the build
 # graph needs a repo from it, and //bazel/build_config compiles in no
 # dynamic-modules extension, so nothing does.
-env:
-  IMAGE: ghcr.io/bpalermo/aether/aether-proxy
+# The image (PROXY_IMAGE = image_reference("proxy")) is NOT a literal here: the
+# registry is ONE setting, bazel/img/registry.bzl (proposal 040; the //proxy
+# workspace's oci_push reads its copy, proxy/bazel/registry.bzl). Every job that
+# needs it appends scripts/image-registry.sh's output to $GITHUB_ENV first.
 
 jobs:
   build-push:
@@ -80,16 +82,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Image registry (bazel/img/registry.bzl)
+        run: scripts/image-registry.sh >> "$GITHUB_ENV"
+
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
           repository-cache: true
 
-      - name: Log in to GHCR
+      - name: Log in to the image registry
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
+          registry: ${{ env.IMAGE_REGISTRY_HOST }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -160,10 +165,21 @@ jobs:
       # what actually gets deployed.
       index_digest: ${{ steps.manifest.outputs.index_digest }}
     steps:
-      - name: Log in to GHCR
+      - name: Checkout (the registry setting only)
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            bazel/img/registry.bzl
+            scripts/image-registry.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Image registry (bazel/img/registry.bzl)
+        run: scripts/image-registry.sh >> "$GITHUB_ENV"
+
+      - name: Log in to the image registry
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
+          registry: ${{ env.IMAGE_REGISTRY_HOST }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -225,8 +241,8 @@ jobs:
           amd_json="$RUNNER_TEMP/manifest-amd64.json"
           arm_json="$RUNNER_TEMP/manifest-arm64.json"
           wanted="$RUNNER_TEMP/index-annotations.txt"
-          if docker buildx imagetools inspect --raw "${IMAGE}@${amd64}" > "$amd_json" &&
-             docker buildx imagetools inspect --raw "${IMAGE}@${arm64}" > "$arm_json"; then
+          if docker buildx imagetools inspect --raw "${PROXY_IMAGE}@${amd64}" > "$amd_json" &&
+             docker buildx imagetools inspect --raw "${PROXY_IMAGE}@${arm64}" > "$arm_json"; then
             # Present and equal on both manifests; a sane key shape; a value
             # that is non-empty and free of control characters (it becomes one
             # argv element, so embedded spaces are fine but a newline would
@@ -278,8 +294,8 @@ jobs:
           # release.
           if [ "${#annotate[@]}" -gt 0 ]; then
             if docker buildx imagetools create --dry-run "${annotate[@]}" \
-                 -t "${IMAGE}:${{ github.sha }}" \
-                 "${IMAGE}@${amd64}" "${IMAGE}@${arm64}" \
+                 -t "${PROXY_IMAGE}:${{ github.sha }}" \
+                 "${PROXY_IMAGE}@${amd64}" "${PROXY_IMAGE}@${arm64}" \
                  > "$RUNNER_TEMP/index-dryrun.json" 2> "$RUNNER_TEMP/index-dryrun.err"; then
               jq -r '.annotations // {} | to_entries[] | "\(.key)=\(.value)"' \
                 "$RUNNER_TEMP/index-dryrun.json" | sort > "$RUNNER_TEMP/index-dryrun.txt"
@@ -298,9 +314,9 @@ jobs:
 
           # --- publish the index -------------------------------------------
           docker buildx imagetools create "${annotate[@]}" \
-            -t "${IMAGE}:${{ github.sha }}" \
-            "${IMAGE}@${amd64}" \
-            "${IMAGE}@${arm64}"
+            -t "${PROXY_IMAGE}:${{ github.sha }}" \
+            "${PROXY_IMAGE}@${amd64}" \
+            "${PROXY_IMAGE}@${arm64}"
           # Read the index digest back from the registry. Do NOT sha256sum
           # `imagetools inspect --raw` locally: that is the digest of whatever
           # bytes the CLI chose to print, not necessarily the descriptor the
@@ -310,7 +326,7 @@ jobs:
           # the annotations, so what bump-chart pins is the annotated index. Do
           # not move any annotation work below this line.
           index="$(docker buildx imagetools inspect \
-            --format '{{.Manifest.Digest}}' "${IMAGE}:${{ github.sha }}")"
+            --format '{{.Manifest.Digest}}' "${PROXY_IMAGE}:${{ github.sha }}")"
           case "$index" in
             sha256:*) ;;
             *) echo "::error::unexpected index digest '$index'"; exit 1 ;;
@@ -322,7 +338,7 @@ jobs:
           # annotated one. A warning and not a failure: the index is published
           # and the pin is correct either way, so failing here would cost the
           # chart pin (and a manual re-run) to report a missing convenience.
-          docker buildx imagetools inspect --raw "${IMAGE}@${index}" \
+          docker buildx imagetools inspect --raw "${PROXY_IMAGE}@${index}" \
             > "$RUNNER_TEMP/index-published.json" || true
           {
             echo "## \`aether-proxy:${{ github.sha }}\`"
@@ -374,7 +390,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Push the signature tags into ghcr.io/bpalermo/aether/aether-proxy.
+      # Push the signature (tags on ghcr.io; a referrer on a registry with the
+      # Referrers API) into the aether-proxy repository.
       packages: write
       # Keyless: exchanged with Fulcio for a short-lived certificate bound to
       # this workflow. Without it signing fails closed.
@@ -385,8 +402,12 @@ jobs:
       signed_digest: ${{ steps.sign.outputs.signed_digest }}
     steps:
       - name: Checkout
-        # For //tools/cosign (MODULE.bazel pins cosign) and the verifier scripts.
+        # For //tools/cosign (MODULE.bazel pins cosign), the verifier scripts and
+        # the registry setting.
         uses: actions/checkout@v7
+
+      - name: Image registry (bazel/img/registry.bzl)
+        run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
       # Plain setup, as ci.yaml's `shell` job: no BuildBuddy key, no --config.
       # The only targets this job builds are //tools/cosign's, fetched and run on
@@ -397,10 +418,10 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      - name: Log in to GHCR
+      - name: Log in to the image registry
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
+          registry: ${{ env.IMAGE_REGISTRY_HOST }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -428,9 +449,9 @@ jobs:
             echo "::error::manifest job produced no usable index digest ('${INDEX_DIGEST}')"
             exit 1
           fi
-          bazel run //tools/cosign -- sign --yes --recursive "${IMAGE}@${INDEX_DIGEST}"
+          bazel run //tools/cosign -- sign --yes --recursive "${PROXY_IMAGE}@${INDEX_DIGEST}"
           echo "signed_digest=${INDEX_DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "signed ${IMAGE}@${INDEX_DIGEST} (index + children)"
+          echo "signed ${PROXY_IMAGE}@${INDEX_DIGEST} (index + children)"
 
       # `cosign verify` has no --recursive, so the script walks the index's
       # children from the registry and verifies each (#925); an index it cannot
@@ -446,7 +467,7 @@ jobs:
           set -euo pipefail
           CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/proxy-release\\.yml@refs/heads/main\$" \
           CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-            bazel run //tools/cosign:verify_image_signatures -- "${IMAGE}@${SIGNED_DIGEST}"
+            bazel run //tools/cosign:verify_image_signatures -- "${PROXY_IMAGE}@${SIGNED_DIGEST}"
 
   # Pin the aether chart to the just-published image (commit-SHA tag) and, when a
   # release token is available, open the pin PR and hand the merge to GitHub
@@ -576,6 +597,9 @@ jobs:
         with:
           ref: main
 
+      - name: Image registry (bazel/img/registry.bzl)
+        run: scripts/image-registry.sh >> "$GITHUB_ENV"
+
       - name: Pin aether chart to aether-proxy:${{ github.sha }}
         id: pin
         env:
@@ -595,14 +619,19 @@ jobs:
           # therefore changes NOTHING that gets deployed — both lines must move.
           # (This was a real bug: the chart stayed pinned to the Envoy v1.39.0
           # index across every proxy release.)
-          sed -i -E '\|repository: ghcr\.io/bpalermo/aether/aether-proxy|{n;s|^(\s*tag: ).*|\1'"${{ github.sha }}"'|}' \
+          # The block is found by `repository: $PROXY_IMAGE` (the registry
+          # setting); its dots are escaped for the sed address. image-registry.sh
+          # only ever prints [a-z0-9./_-], so nothing else needs escaping.
+          test -n "$PROXY_IMAGE"
+          pin_re="repository: ${PROXY_IMAGE//./\\.}"
+          sed -i -E '\|'"$pin_re"'|{n;s|^(\s*tag: ).*|\1'"${{ github.sha }}"'|}' \
             charts/aether/values.yaml
-          sed -i -E '\|repository: ghcr\.io/bpalermo/aether/aether-proxy|,+4{s|^(\s*digest: ).*|\1"'"$INDEX_DIGEST"'"|}' \
+          sed -i -E '\|'"$pin_re"'|,+4{s|^(\s*digest: ).*|\1"'"$INDEX_DIGEST"'"|}' \
             charts/aether/values.yaml
           # Keep the adjacent provenance comment honest too.
-          sed -i -E '\|repository: ghcr\.io/bpalermo/aether/aether-proxy|,+4{s|helper prefers digest over tag\..*|helper prefers digest over tag. Multi-arch index for '"${{ github.sha }}"'.|}' \
+          sed -i -E '\|'"$pin_re"'|,+4{s|helper prefers digest over tag\..*|helper prefers digest over tag. Multi-arch index for '"${{ github.sha }}"'.|}' \
             charts/aether/values.yaml
-          grep -A5 'repository: ghcr.io/bpalermo/aether/aether-proxy' charts/aether/values.yaml
+          grep -A5 "repository: ${PROXY_IMAGE}" charts/aether/values.yaml
           # A re-run of an already-pinned sha (or a release whose proxy bits did
           # not change the published index) leaves no diff: skip the branch, the
           # chart bump and the hand-off rather than pushing an empty commit.
@@ -701,7 +730,7 @@ jobs:
 
           | | |
           |---|---|
-          | image | `ghcr.io/bpalermo/aether/aether-proxy:__SHA__` |
+          | image | `__IMAGE__:__SHA__` |
           | index digest | `__DIGEST__` |
           | chart version | `__CHART_FROM__` -> `__CHART_TO__` |
 
@@ -742,6 +771,7 @@ jobs:
             "$body" > "$body.tmp"
           mv "$body.tmp" "$body"
           sed -i \
+            -e "s|__IMAGE__|${PROXY_IMAGE}|g" \
             -e "s|__SHA__|${SHA}|g" \
             -e "s|__DIGEST__|${INDEX_DIGEST}|g" \
             -e "s|__CHART_FROM__|${CHART_FROM}|g" \
@@ -842,7 +872,7 @@ jobs:
             echo
             echo "| | |"
             echo "|---|---|"
-            echo "| image | \`ghcr.io/bpalermo/aether/aether-proxy:${SHA}\` |"
+            echo "| image | \`${PROXY_IMAGE}:${SHA}\` |"
             echo "| index digest | \`${INDEX_DIGEST}\` |"
             echo "| chart version | \`${CHART_FROM}\` -> \`${CHART_TO}\` |"
             echo "| branch | \`${BRANCH}\` |"
@@ -899,7 +929,7 @@ jobs:
             echo
             echo "| | |"
             echo "|---|---|"
-            echo "| image | \`ghcr.io/bpalermo/aether/aether-proxy:${SHA}\` |"
+            echo "| image | \`${PROXY_IMAGE}:${SHA}\` |"
             echo "| index digest | \`${INDEX_DIGEST}\` |"
             echo "| chart version | \`${CHART_FROM}\` -> \`${CHART_TO}\` |"
             echo "| branch | \`${BRANCH}\` |"

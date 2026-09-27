@@ -88,6 +88,12 @@ jobs:
       - name: Every proxy shell script is mirrored into the lint target
         run: scripts/check-proxy-shell-lint.sh
 
+      # proxy/bazel/registry.bzl is the //proxy workspace's copy of the one
+      # registry setting (bazel/img/registry.bzl, proposal 040). A proxy-only PR
+      # skips the `ci` workflow, so the copy's drift must be caught here too.
+      - name: The image registry is one setting
+        run: scripts/check-registry-config.sh
+
       # Then: lint them. `--config=lint` plus fail_on_violation, NOT
       # `--config=ci` — that pulls in `--config=remote` and would need the
       # BuildBuddy key for a job that has no compile to offload.

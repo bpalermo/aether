@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Assert that the artifacts for a commit on `main` actually exist in GHCR (#880).
+# Assert that the artifacts for a commit on `main` actually exist in the image
+# registry (#880) -- the one bazel/img/registry.bzl names (proposal 040).
 #
 # WHY THIS EXISTS
 #
@@ -29,13 +30,15 @@
 #      AS OF that commit, so a commit that bumped a chart is checked against the
 #      version it actually published under.
 #   2. The image tag `<release tag>-<full sha>` (`dev-<sha>` today) in each of
-#      the eight published image repositories (GHCR_IMAGE_REPOS in
-#      scripts/ghcr-lib.sh). The prefix is read from the `release_tag` flag's
+#      the eight published image repositories (REGISTRY_IMAGE_REPOS in
+#      scripts/registry-lib.sh). The prefix is read from the `release_tag` flag's
 #      default in bazel/img/go_multi_arch_image.bzl AS OF that commit, like the
 #      chart versions.
 #   3. A cosign signature for each of those images: the index digest resolved
 #      from (2), present in the same repository as exactly one of
-#      `sha256-<hex>.sig` (cosign 2) or `sha256-<hex>` (cosign 3 bundle).
+#      `sha256-<hex>.sig` (cosign 2), `sha256-<hex>` (cosign 3 bundle, the
+#      referrers fallback tag) or an OCI 1.1 signature referrer (cosign 3 on a
+#      registry with the Referrers API -- quay.io, not ghcr.io; proposal 040).
 #      "Published but unsigned" is its own silent failure (#875) and reads
 #      identically to "never published" unless someone asks the registry.
 #   4. The same, for EVERY child manifest the index lists (#925). The signer
@@ -55,7 +58,7 @@
 #
 # (3), (4) and (5) ask whether a signature is THERE. Whether it VERIFIES is
 # scripts/verify-image-signatures.sh's job; set SIGNED_REFS_OUT=<file> and this
-# script appends each resolved `ghcr.io/<repo>@<index digest>` for it to read.
+# script appends each resolved `<registry>/<repo>@<index digest>` for it to read.
 # The proxy is signed by a DIFFERENT workflow (proxy-release.yml, so a different
 # certificate identity); its refs go to PROXY_SIGNED_REFS_OUT=<file> instead.
 #
@@ -66,7 +69,7 @@
 # HOW IT LOOKS (#985)
 #
 # Every coordinate above has a name this script can compute, so each one is
-# asked for BY NAME — `HEAD /v2/<repo>/manifests/<tag>` (ghcr_tag_exists) —
+# asked for BY NAME — `HEAD /v2/<repo>/manifests/<tag>` (registry_tag_exists) —
 # and no tag list is ever read. It used to page through every tag of every
 # repository and grep; a publish writing tags mid-walk can shift a page
 # boundary past an existing tag, and the 2026-09-27 sweep reported a present
@@ -111,7 +114,8 @@
 # asked about that commit, and "no artifacts" is the true answer for a stack
 # intermediate.
 #
-# Reads public packages anonymously. Set GHCR_TOKEN for private ones.
+# Reads public packages anonymously. For private ones set REGISTRY_USERNAME +
+# REGISTRY_PASSWORD, or GHCR_TOKEN on ghcr.io (scripts/registry-lib.sh).
 #
 # EXIT CODES
 #   0  every artifact for every commit is present
@@ -123,8 +127,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ghcr-lib.sh
-. "${here}/ghcr-lib.sh"
+# shellcheck source=scripts/registry-lib.sh
+. "${here}/registry-lib.sh"
 # shellcheck source=scripts/push-heads-lib.sh
 . "${here}/push-heads-lib.sh"
 # shellcheck source=scripts/proxy-pin-lib.sh
@@ -218,8 +222,8 @@ fi
 # A gate with nothing to check is not a passing gate (#853). The repo list is
 # shared with the signer, so an empty one would mean the signer signs nothing
 # too — refuse rather than report eight-for-eight on zero repositories.
-if [ "${#GHCR_IMAGE_REPOS[@]}" -eq 0 ] || [ "${#GHCR_CHARTS[@]}" -eq 0 ]; then
-	echo "::error::GHCR_IMAGE_REPOS or GHCR_CHARTS is empty — there is nothing to verify" >&2
+if [ "${#REGISTRY_IMAGE_REPOS[@]}" -eq 0 ] || [ "${#REGISTRY_CHARTS[@]}" -eq 0 ]; then
+	echo "::error::REGISTRY_IMAGE_REPOS or REGISTRY_CHARTS is empty — there is nothing to verify" >&2
 	exit 2
 fi
 
@@ -289,11 +293,11 @@ image_commit_tag() {
 lookup() {
 	local repo="$1" tag="$2" tok="$3" rc=0
 	lookups_total=$((lookups_total + 1))
-	ghcr_tag_exists "$repo" "$tag" "$tok" || rc=$?
+	registry_tag_exists "$repo" "$tag" "$tok" || rc=$?
 	case "$rc" in
 	0 | 1) return "$rc" ;;
 	*)
-		echo "::error::inconclusive: ghcr.io/${repo}:${tag} could not be looked up (neither 200 nor 404)" >&2
+		echo "::error::inconclusive: ${REGISTRY_HOST}/${repo}:${tag} could not be looked up (neither 200 nor 404)" >&2
 		exit 2
 		;;
 	esac
@@ -310,20 +314,20 @@ lookup() {
 # Called in $(...), so an `exit` here only ends the subshell: callers must check.
 absence_witness() {
 	local repo="$1" tok="$2" anchor rc=0
-	anchor="$(ghcr_any_tag "$repo" "$tok")" || true
+	anchor="$(registry_any_tag "$repo" "$tok")" || true
 	if [ -z "$anchor" ]; then
-		echo "::error::inconclusive: ghcr.io/${repo} lists no tags — an unreadable or misnamed repository, not a missing artifact" >&2
+		echo "::error::inconclusive: ${REGISTRY_HOST}/${repo} lists no tags — an unreadable or misnamed repository, not a missing artifact" >&2
 		return 2
 	fi
-	ghcr_tag_exists "$repo" "$anchor" "$tok" || rc=$?
+	registry_tag_exists "$repo" "$anchor" "$tok" || rc=$?
 	case "$rc" in
 	0) printf 'witness %s: 200\n' "$anchor" ;;
 	1)
-		echo "::error::inconclusive: ghcr.io/${repo} lists ${anchor} but the lookup answers 404 for it — the lookup is broken, so its 404s prove nothing" >&2
+		echo "::error::inconclusive: ${REGISTRY_HOST}/${repo} lists ${anchor} but the lookup answers 404 for it — the lookup is broken, so its 404s prove nothing" >&2
 		return 2
 		;;
 	*)
-		echo "::error::inconclusive: ghcr.io/${repo}:${anchor} (the witness) could not be looked up" >&2
+		echo "::error::inconclusive: ${REGISTRY_HOST}/${repo}:${anchor} (the witness) could not be looked up" >&2
 		return 2
 		;;
 	esac
@@ -336,7 +340,7 @@ absent_direct() {
 	if ! w="$(absence_witness "$repo" "$tok")"; then
 		exit 2
 	fi
-	absent "ghcr.io/${repo}:${tag} (looked up directly: 404; ${w})"
+	absent "${REGISTRY_HOST}/${repo}:${tag} (looked up directly: 404; ${w})"
 }
 
 # One signature, for one digest (an index or one of its children), in exactly
@@ -351,30 +355,35 @@ absent_direct() {
 # would read a double-write or a half-finished migration as healthy, and that is
 # the state a format migration actually fails into.
 #
-# Both tag shapes are looked up by name, every time (two HEADs), so `both` is
-# seen; either lookup going unanswered is exit 2.
+# Both tag shapes are looked up by name, every time (two HEADs), and the
+# Referrers API is asked too (a 404 there is "no API", as on ghcr.io), so `both`
+# is seen; any lookup going unanswered is exit 2. The referrers GET is not a tag
+# lookup and is not counted in `checked N expected tags`.
 check_signature() {
 	local repo="$1" digest="$2" tok="$3" what="$4" layout
 	lookups_total=$((lookups_total + 2))
-	if ! layout="$(ghcr_signature_layout_direct "$repo" "$digest" "$tok")"; then
-		echo "::error::inconclusive: could not look up the signature tags of ghcr.io/${repo}@${digest}" >&2
+	if ! layout="$(registry_signature_layout_direct "$repo" "$digest" "$tok")"; then
+		echo "::error::inconclusive: could not look up the signature tags of ${REGISTRY_HOST}/${repo}@${digest}" >&2
 		exit 2
 	fi
 	case "$layout" in
 	legacy)
-		present "ghcr.io/${repo}:$(ghcr_signature_tag_legacy "$digest") (signature of ${what} ${digest}, cosign 2 layout)"
+		present "${REGISTRY_HOST}/${repo}:$(registry_signature_tag_legacy "$digest") (signature of ${what} ${digest}, cosign 2 layout)"
 		;;
 	bundle)
-		present "ghcr.io/${repo}:$(ghcr_signature_tag_bundle "$digest") (signature of ${what} ${digest}, cosign 3 layout)"
+		present "${REGISTRY_HOST}/${repo}:$(registry_signature_tag_bundle "$digest") (signature of ${what} ${digest}, cosign 3 layout)"
+		;;
+	referrer)
+		present "${REGISTRY_HOST}/${repo}@${digest} <- OCI 1.1 referrer (signature of ${what} ${digest}, cosign 3 referrers layout)"
 		;;
 	both)
-		absent "ghcr.io/${repo} signature for ${what} ${digest} — BOTH layouts present; a double-write or half-finished migration, not a healthy signature"
+		absent "${REGISTRY_HOST}/${repo} signature for ${what} ${digest} — MORE THAN ONE layout present; a double-write or half-finished migration, not a healthy signature"
 		;;
 	none)
-		absent "ghcr.io/${repo} signature for ${what} ${digest} (neither ${digest//:/-}.sig nor ${digest//:/-}; both looked up directly, both 404; the image in this repository answered 200)"
+		absent "${REGISTRY_HOST}/${repo} signature for ${what} ${digest} (neither ${digest//:/-}.sig nor ${digest//:/-}; both looked up directly, both 404; no signature referrer; the image in this repository answered 200)"
 		;;
 	*)
-		echo "::error::internal: unexpected signature layout '${layout}' for ghcr.io/${repo}@${digest}" >&2
+		echo "::error::internal: unexpected signature layout '${layout}' for ${REGISTRY_HOST}/${repo}@${digest}" >&2
 		exit 2
 		;;
 	esac
@@ -393,15 +402,17 @@ verify_commit() {
 	say "commit ${sha} ($(git log -1 --format='%cI %s' "$sha"))"
 
 	# 1. every chart, under the tag that belongs to this commit alone (#692).
-	for chart in "${GHCR_CHARTS[@]}"; do
-		chart_repo="${GHCR_CHART_REPO_PREFIX}/${chart}"
+	for chart in "${REGISTRY_CHARTS[@]}"; do
+		if ! chart_repo="$(registry_chart_repo "$chart")"; then
+			exit 2
+		fi
 		chart_tag="$(chart_commit_tag "$sha" "$chart")"
-		if ! tok="$(ghcr_registry_token "$chart_repo")" || [ -z "$tok" ]; then
+		if ! tok="$(registry_registry_token "$chart_repo")" || [ -z "$tok" ]; then
 			echo "::error::could not obtain a pull token for ${chart_repo}" >&2
 			exit 2
 		fi
 		if lookup "$chart_repo" "$chart_tag" "$tok"; then
-			present "ghcr.io/${chart_repo}:${chart_tag}"
+			present "${REGISTRY_HOST}/${chart_repo}:${chart_tag}"
 		else
 			absent_direct "$chart_repo" "$chart_tag" "$tok"
 		fi
@@ -409,9 +420,9 @@ verify_commit() {
 
 	# 2 + 3. every published image, and its signature.
 	tag="$(image_commit_tag "$sha")"
-	for repo in "${GHCR_IMAGE_REPOS[@]}"; do
+	for repo in "${REGISTRY_IMAGE_REPOS[@]}"; do
 		# A repository we cannot read is an inconclusive check, not a passing one.
-		if ! tok="$(ghcr_registry_token "$repo")" || [ -z "$tok" ]; then
+		if ! tok="$(registry_registry_token "$repo")" || [ -z "$tok" ]; then
 			echo "::error::could not obtain a pull token for ${repo}" >&2
 			exit 2
 		fi
@@ -421,14 +432,14 @@ verify_commit() {
 			# No image means no digest to look a signature up by. Count the signature
 			# as missing too rather than skipping it — a skipped check is a check that
 			# cannot fail.
-			absent "ghcr.io/${repo} signature for ${tag} (no image to sign)"
+			absent "${REGISTRY_HOST}/${repo} signature for ${tag} (no image to sign)"
 			continue
 		fi
-		present "ghcr.io/${repo}:${tag}"
+		present "${REGISTRY_HOST}/${repo}:${tag}"
 
-		digest="$(ghcr_manifest_digest "$repo" "$tag" "$tok")"
+		digest="$(registry_manifest_digest "$repo" "$tag" "$tok")"
 		if [ -z "$digest" ]; then
-			echo "::error::could not resolve a digest for ghcr.io/${repo}:${tag}" >&2
+			echo "::error::could not resolve a digest for ${REGISTRY_HOST}/${repo}:${tag}" >&2
 			exit 2
 		fi
 		check_signature "$repo" "$digest" "$tok" "index"
@@ -438,8 +449,8 @@ verify_commit() {
 		# actually pulls — checking the index alone would leave them unchecked.
 		# The walk must yield at least one child: an index with none, or one we
 		# cannot read, is an inconclusive check, never a vacuous pass.
-		if ! children="$(ghcr_index_children "$repo" "$digest" "$tok")" || [ -z "$children" ]; then
-			echo "::error::could not enumerate the child manifests of ghcr.io/${repo}@${digest}" >&2
+		if ! children="$(registry_index_children "$repo" "$digest" "$tok")" || [ -z "$children" ]; then
+			echo "::error::could not enumerate the child manifests of ${REGISTRY_HOST}/${repo}@${digest}" >&2
 			exit 2
 		fi
 		while read -r child; do
@@ -452,7 +463,7 @@ verify_commit() {
 		# can see without cosign; whether that signature VERIFIES is the job of
 		# scripts/verify-image-signatures.sh, over these same digests.
 		if [ -n "${SIGNED_REFS_OUT:-}" ]; then
-			printf 'ghcr.io/%s@%s\n' "$repo" "$digest" >>"$SIGNED_REFS_OUT"
+			printf '%s/%s@%s\n' "$REGISTRY_HOST" "$repo" "$digest" >>"$SIGNED_REFS_OUT"
 		fi
 	done
 
@@ -470,18 +481,18 @@ verify_commit() {
 	# workflow_run path never set this.
 	local proxy_expected=0 values pin verdict got
 	if [ "${PROXY_PIN_CHECK:-1}" = 0 ]; then
-		say "  skip    ghcr.io/${PROXY_REPO} pin check (PROXY_PIN_CHECK=0: the expected-red control covers the per-commit coordinates only)"
+		say "  skip    ${REGISTRY_HOST}/${PROXY_REPO} pin check (PROXY_PIN_CHECK=0: the expected-red control covers the per-commit coordinates only)"
 	else
 		if ! values="$(git show "${sha}:${PROXY_VALUES_PATH}")" ||
 			! pin="$(printf '%s\n' "$values" | proxy_pinned_digest)"; then
 			echo "::error::could not read the aether-proxy digest pinned in ${PROXY_VALUES_PATH} at ${sha}" >&2
 			exit 2
 		fi
-		if ! tok="$(ghcr_registry_token "$PROXY_REPO")" || [ -z "$tok" ]; then
+		if ! tok="$(registry_registry_token "$PROXY_REPO")" || [ -z "$tok" ]; then
 			echo "::error::could not obtain a pull token for ${PROXY_REPO}" >&2
 			exit 2
 		fi
-		if ! tags="$(ghcr_all_tags "$PROXY_REPO" "$tok")"; then
+		if ! tags="$(registry_all_tags "$PROXY_REPO" "$tok")"; then
 			echo "::error::could not list tags for ${PROXY_REPO}" >&2
 			exit 2
 		fi
@@ -491,19 +502,19 @@ verify_commit() {
 		case "$verdict" in
 		"skip "*)
 			# Printed, never silent, and never counted: a skipped check is not a pass.
-			say "  skip    ghcr.io/${PROXY_REPO}@${pin} (pinned by ${verdict#skip }, before proxy signing existed — cut-over ${PROXY_SIGNING_CUTOVER:0:12}; unsigned by history, #984)"
+			say "  skip    ${REGISTRY_HOST}/${PROXY_REPO}@${pin} (pinned by ${verdict#skip }, before proxy signing existed — cut-over ${PROXY_SIGNING_CUTOVER:0:12}; unsigned by history, #984)"
 			;;
 		check)
-			got="$(ghcr_manifest_digest "$PROXY_REPO" "$pin" "$tok")" || got=""
+			got="$(registry_manifest_digest "$PROXY_REPO" "$pin" "$tok")" || got=""
 			if [ "$got" != "$pin" ]; then
 				proxy_expected=2
-				absent "ghcr.io/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH}; the registry does not serve it)"
-				absent "ghcr.io/${PROXY_REPO} signature for pinned ${pin} (no image to sign)"
+				absent "${REGISTRY_HOST}/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH}; the registry does not serve it)"
+				absent "${REGISTRY_HOST}/${PROXY_REPO} signature for pinned ${pin} (no image to sign)"
 			else
-				present "ghcr.io/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH})"
+				present "${REGISTRY_HOST}/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH})"
 				check_signature "$PROXY_REPO" "$pin" "$tok" "proxy index"
-				if ! children="$(ghcr_index_children "$PROXY_REPO" "$pin" "$tok")" || [ -z "$children" ]; then
-					echo "::error::could not enumerate the child manifests of ghcr.io/${PROXY_REPO}@${pin}" >&2
+				if ! children="$(registry_index_children "$PROXY_REPO" "$pin" "$tok")" || [ -z "$children" ]; then
+					echo "::error::could not enumerate the child manifests of ${REGISTRY_HOST}/${PROXY_REPO}@${pin}" >&2
 					exit 2
 				fi
 				proxy_expected=2
@@ -512,7 +523,7 @@ verify_commit() {
 					check_signature "$PROXY_REPO" "$child" "$tok" "proxy child"
 				done <<<"$children"
 				if [ -n "${PROXY_SIGNED_REFS_OUT:-}" ]; then
-					printf 'ghcr.io/%s@%s\n' "$PROXY_REPO" "$pin" >>"$PROXY_SIGNED_REFS_OUT"
+					printf '%s/%s@%s\n' "$REGISTRY_HOST" "$PROXY_REPO" "$pin" >>"$PROXY_SIGNED_REFS_OUT"
 				fi
 			fi
 			;;
@@ -526,7 +537,7 @@ verify_commit() {
 	# 4 charts + 8 images + 8 index signatures + one signature per child, plus
 	# the proxy pin's checks. If the loops ever stop iterating, this says so
 	# instead of reporting a clean run over nothing.
-	local expected=$((${#GHCR_CHARTS[@]} + 2 * ${#GHCR_IMAGE_REPOS[@]} + expected_children + proxy_expected))
+	local expected=$((${#REGISTRY_CHARTS[@]} + 2 * ${#REGISTRY_IMAGE_REPOS[@]} + expected_children + proxy_expected))
 	local did=$((checks_total - before))
 	if [ "$did" -ne "$expected" ]; then
 		echo "::error::internal: ran ${did} checks for ${sha}, expected ${expected}" >&2
@@ -549,7 +560,7 @@ if [ "$missing_total" -gt 0 ]; then
 		cat >>"$GITHUB_STEP_SUMMARY" <<EOF
 ### publish verification FAILED
 
-${missing_total} of ${checks_total} artifacts are missing from ghcr.io.
+${missing_total} of ${checks_total} artifacts are missing from ${REGISTRY_HOST}.
 
 \`\`\`
 ${report}\`\`\`

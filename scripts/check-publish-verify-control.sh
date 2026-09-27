@@ -25,10 +25,11 @@
 #     404s every tag, never goes red at all: it exits 2 and the control reports
 #     inconclusive — a red that proves nothing is not available to accept.
 #
-# The fake registry is scripts/ghcr-lib.sh with its network functions
-# overridden, placed next to UNMODIFIED copies of the verifier and
-# push-heads-lib.sh in a temp dir (the verifier sources its libraries from its
-# own directory). The control commit is written to this checkout's object store
+# The fake registry is scripts/registry-lib.sh with its network functions
+# overridden, placed next to UNMODIFIED copies of the verifier,
+# push-heads-lib.sh, proxy-pin-lib.sh and image-registry.sh in a temp dir (the
+# verifier sources its libraries from its own directory; IMAGE_REGISTRY_BZL
+# points image-registry.sh back at this checkout's bazel/img/registry.bzl). The control commit is written to this checkout's object store
 # by the control itself; no ref ever points at it.
 #
 # SC2016 is off for the whole file on purpose: every single-quoted `$…` here is
@@ -44,33 +45,37 @@ trap 'rm -rf "$tmp"' EXIT
 # --- the fake registry -------------------------------------------------------
 reg="$tmp/registry"
 mkdir -p "$reg"
-cp scripts/verify-published-artifacts.sh scripts/push-heads-lib.sh scripts/proxy-pin-lib.sh "$reg/"
-cp scripts/ghcr-lib.sh "$reg/ghcr-lib.sh"
-cat >>"$reg/ghcr-lib.sh" <<'FAKE'
+cp scripts/verify-published-artifacts.sh scripts/push-heads-lib.sh scripts/proxy-pin-lib.sh scripts/image-registry.sh "$reg/"
+cp scripts/registry-lib.sh "$reg/registry-lib.sh"
+IMAGE_REGISTRY_BZL="$PWD/bazel/img/registry.bzl"
+export IMAGE_REGISTRY_BZL
+cat >>"$reg/registry-lib.sh" <<'FAKE'
 
 # --- test overrides: no network ---------------------------------------------
 # A registry that has published ONE other commit, completely: every repository
 # holds tags, so a missing control tag is a real absence beside a witness that
-# answers 200 (#985: the verifier looks tags up by name, ghcr_tag_exists, and
-# backs each 404 with ghcr_any_tag).
+# answers 200 (#985: the verifier looks tags up by name, registry_tag_exists,
+# and backs each 404 with registry_any_tag). No Referrers API (a 404, as on
+# ghcr.io), so the tag layouts decide every signature.
 # FAKE_EMPTY=1: every repository lists nothing (unreadable).
 # FAKE_BROKEN=1: the lookup answers 404 for EVERY tag, even listed ones — the
 # shape of a manifest HEAD whose Accept the registry does not like.
 fake_other=0123456789abcdef0123456789abcdef01234567
-ghcr_registry_token() { printf 'fake-token\n'; }
-ghcr_all_tags() {
+registry_registry_token() { printf 'fake-token\n'; }
+registry_all_tags() {
 	[ "${FAKE_EMPTY:-0}" = 1 ] && return 0
 	case "$1" in
 	*/charts/*) printf '0.1.0-%s\n' "$fake_other" ;;
 	*) printf 'dev-%s\nsha256-%064d.sig\n' "$fake_other" 0 ;;
 	esac
 }
-ghcr_any_tag() { ghcr_all_tags "$1" | head -1; }
-ghcr_tag_exists() {
+registry_any_tag() { registry_all_tags "$1" | head -1; }
+registry_tag_exists() {
 	[ "${FAKE_BROKEN:-0}" = 1 ] && return 1
-	ghcr_all_tags "$1" | grep -qxF -- "$2"
+	registry_all_tags "$1" | grep -qxF -- "$2"
 }
-ghcr_manifest_digest() { printf 'sha256:%064d\n' 0; }
+registry_manifest_digest() { printf 'sha256:%064d\n' 0; }
+registry_referrers() { return 1; }
 FAKE
 
 # The vacuous gate: the same verifier with absent() no longer counting. It still
@@ -221,7 +226,7 @@ if [ -n "$ctl_sha" ] && env PROXY_PIN_CHECK=1 PROXY_SIGNING_CUTOVER=HEAD~1 "$reg
 elif [ -z "$ctl_sha" ]; then
 	printf '  FAIL  could not learn the control sha from the previous case\n'
 	fail=1
-elif grep -q "MISSING ghcr.io/bpalermo/aether/aether-proxy" "$tmp/out2"; then
+elif grep -qF "MISSING $(scripts/image-registry.sh ref proxy)@" "$tmp/out2"; then
 	printf '  ok    with the pin check ON the same commit is red for the proxy pin too (the switch is load-bearing)\n'
 else
 	printf '  FAIL  with the pin check ON the proxy pin was not reported MISSING:\n'

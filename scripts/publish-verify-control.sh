@@ -40,7 +40,7 @@
 #      red because GHCR was down proves nothing about detection, so it is
 #      reported as inconclusive (exit 2), not as a passing control.
 #   2. it printed exactly <expected> MISSING lines — 4 charts + 8 images + 8
-#      signatures, derived from scripts/ghcr-lib.sh, not typed here — and no
+#      signatures, derived from scripts/registry-lib.sh, not typed here — and no
 #      `ok` line. A partial red would mean part of the gate can no longer fail.
 #   3. EVERY MISSING line names the control sha. A MISSING line about some other
 #      commit is a red for the wrong reason.
@@ -68,8 +68,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ghcr-lib.sh
-. "${here}/ghcr-lib.sh"
+# shellcheck source=scripts/registry-lib.sh
+. "${here}/registry-lib.sh"
 verifier="${VERIFIER:-${here}/verify-published-artifacts.sh}"
 
 base="${1:-}"
@@ -98,7 +98,7 @@ control="$(
 		-m "publish-verify expected-red control (#930): never pushed, never published"
 )"
 
-expected=$((${#GHCR_CHARTS[@]} + 2 * ${#GHCR_IMAGE_REPOS[@]}))
+expected=$((${#REGISTRY_CHARTS[@]} + 2 * ${#REGISTRY_IMAGE_REPOS[@]}))
 
 echo "expected-red control: commit ${control}"
 echo "  built from ${base_sha} (${base}); never pushed, so nothing can have published it"
@@ -154,7 +154,7 @@ fi
 # on its image's). Fewer means some absence was never shown to be one: the
 # lookup behind it was never seen to answer "present" in that repository.
 n_witness="$(printf '%s\n' "$missing_lines" | grep -cE '; witness [^ ]+: 200\)$' || true)"
-want_witness=$((${#GHCR_CHARTS[@]} + ${#GHCR_IMAGE_REPOS[@]}))
+want_witness=$((${#REGISTRY_CHARTS[@]} + ${#REGISTRY_IMAGE_REPOS[@]}))
 if [ "$n_witness" -ne "$want_witness" ]; then
 	fail "${n_witness} witnessed absence(s), expected ${want_witness} — cannot tell a real absence from an unread registry or a lookup that 404s everything"
 fi

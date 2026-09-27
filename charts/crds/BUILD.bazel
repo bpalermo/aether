@@ -1,19 +1,20 @@
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
+load("//bazel/img:registry.bzl", "IMAGE_REGISTRY", "chart_registry_url")
 
-# crds Helm chart (published as ghcr.io/bpalermo/aether/charts/crds).
+# crds Helm chart (published as chart_repository("crds") under IMAGE_REGISTRY; see //bazel/img:registry.bzl).
 #
 # Standalone CRD chart so the CRDs can be installed/upgraded ahead of the
 # controllers. See docs/proposals/015_mesh-config.md.
 #
-# Publish targets (GitHub Container Registry, OCI):
+# Publish targets (OCI; registry from //bazel/img:registry.bzl):
 #   bazel run //charts/crds:crds.push           # chart
 #   bazel run //charts/crds:crds.push_registry  # chart only
 # Authenticate first via HELM_REGISTRY_USERNAME / HELM_REGISTRY_PASSWORD.
 helm_chart(
     name = "crds",
     chart = "Chart.yaml",
-    login_url = "ghcr.io",
-    registry_url = "oci://ghcr.io/bpalermo/aether/charts",
+    login_url = IMAGE_REGISTRY,
+    registry_url = chart_registry_url(),
     values = "values.yaml",
     visibility = ["//visibility:public"],
 )
