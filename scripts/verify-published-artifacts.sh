@@ -457,56 +457,71 @@ verify_commit() {
 	done
 
 	# 5. the aether-proxy image this commit's chart pins (#984).
+	#
+	# PROXY_PIN_CHECK=0 skips this step. Only the expected-red control sets it
+	# (scripts/publish-verify-control.sh): the control proves that the
+	# PER-COMMIT artifact gate goes red for a never-published commit, and a
+	# constructed commit still pins whatever proxy digest main's chart pins —
+	# which, once that digest is signed, is legitimately PRESENT and would add
+	# `ok` lines (or, in the offline harness's fake registry, spurious MISSING
+	# lines) to a red that must otherwise be exactly the 20 per-commit
+	# coordinates. The proxy pin has its own gate and its own seen-red
+	# (scripts/check-proxy-pin.sh, the cut-over cases). The real sweep and the
+	# workflow_run path never set this.
 	local proxy_expected=0 values pin verdict got
-	if ! values="$(git show "${sha}:${PROXY_VALUES_PATH}")" ||
-		! pin="$(printf '%s\n' "$values" | proxy_pinned_digest)"; then
-		echo "::error::could not read the aether-proxy digest pinned in ${PROXY_VALUES_PATH} at ${sha}" >&2
-		exit 2
-	fi
-	if ! tok="$(ghcr_registry_token "$PROXY_REPO")" || [ -z "$tok" ]; then
-		echo "::error::could not obtain a pull token for ${PROXY_REPO}" >&2
-		exit 2
-	fi
-	if ! tags="$(ghcr_all_tags "$PROXY_REPO" "$tok")"; then
-		echo "::error::could not list tags for ${PROXY_REPO}" >&2
-		exit 2
-	fi
-	if ! verdict="$(proxy_pin_verdict "$sha" "$pin" "$tags")"; then
-		exit 2
-	fi
-	case "$verdict" in
-	"skip "*)
-		# Printed, never silent, and never counted: a skipped check is not a pass.
-		say "  skip    ghcr.io/${PROXY_REPO}@${pin} (pinned by ${verdict#skip }, before proxy signing existed — cut-over ${PROXY_SIGNING_CUTOVER:0:12}; unsigned by history, #984)"
-		;;
-	check)
-		got="$(ghcr_manifest_digest "$PROXY_REPO" "$pin" "$tok")" || got=""
-		if [ "$got" != "$pin" ]; then
-			proxy_expected=2
-			absent "ghcr.io/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH}; the registry does not serve it)"
-			absent "ghcr.io/${PROXY_REPO} signature for pinned ${pin} (no image to sign)"
-		else
-			present "ghcr.io/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH})"
-			check_signature "$PROXY_REPO" "$pin" "$tags" "proxy index"
-			if ! children="$(ghcr_index_children "$PROXY_REPO" "$pin" "$tok")" || [ -z "$children" ]; then
-				echo "::error::could not enumerate the child manifests of ghcr.io/${PROXY_REPO}@${pin}" >&2
-				exit 2
-			fi
-			proxy_expected=2
-			while read -r child; do
-				proxy_expected=$((proxy_expected + 1))
-				check_signature "$PROXY_REPO" "$child" "$tags" "proxy child"
-			done <<<"$children"
-			if [ -n "${PROXY_SIGNED_REFS_OUT:-}" ]; then
-				printf 'ghcr.io/%s@%s\n' "$PROXY_REPO" "$pin" >>"$PROXY_SIGNED_REFS_OUT"
-			fi
+	if [ "${PROXY_PIN_CHECK:-1}" = 0 ]; then
+		say "  skip    ghcr.io/${PROXY_REPO} pin check (PROXY_PIN_CHECK=0: the expected-red control covers the per-commit coordinates only)"
+	else
+		if ! values="$(git show "${sha}:${PROXY_VALUES_PATH}")" ||
+			! pin="$(printf '%s\n' "$values" | proxy_pinned_digest)"; then
+			echo "::error::could not read the aether-proxy digest pinned in ${PROXY_VALUES_PATH} at ${sha}" >&2
+			exit 2
 		fi
-		;;
-	*)
-		echo "::error::internal: unexpected proxy pin verdict '${verdict}'" >&2
-		exit 2
-		;;
-	esac
+		if ! tok="$(ghcr_registry_token "$PROXY_REPO")" || [ -z "$tok" ]; then
+			echo "::error::could not obtain a pull token for ${PROXY_REPO}" >&2
+			exit 2
+		fi
+		if ! tags="$(ghcr_all_tags "$PROXY_REPO" "$tok")"; then
+			echo "::error::could not list tags for ${PROXY_REPO}" >&2
+			exit 2
+		fi
+		if ! verdict="$(proxy_pin_verdict "$sha" "$pin" "$tags")"; then
+			exit 2
+		fi
+		case "$verdict" in
+		"skip "*)
+			# Printed, never silent, and never counted: a skipped check is not a pass.
+			say "  skip    ghcr.io/${PROXY_REPO}@${pin} (pinned by ${verdict#skip }, before proxy signing existed — cut-over ${PROXY_SIGNING_CUTOVER:0:12}; unsigned by history, #984)"
+			;;
+		check)
+			got="$(ghcr_manifest_digest "$PROXY_REPO" "$pin" "$tok")" || got=""
+			if [ "$got" != "$pin" ]; then
+				proxy_expected=2
+				absent "ghcr.io/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH}; the registry does not serve it)"
+				absent "ghcr.io/${PROXY_REPO} signature for pinned ${pin} (no image to sign)"
+			else
+				present "ghcr.io/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH})"
+				check_signature "$PROXY_REPO" "$pin" "$tags" "proxy index"
+				if ! children="$(ghcr_index_children "$PROXY_REPO" "$pin" "$tok")" || [ -z "$children" ]; then
+					echo "::error::could not enumerate the child manifests of ghcr.io/${PROXY_REPO}@${pin}" >&2
+					exit 2
+				fi
+				proxy_expected=2
+				while read -r child; do
+					proxy_expected=$((proxy_expected + 1))
+					check_signature "$PROXY_REPO" "$child" "$tags" "proxy child"
+				done <<<"$children"
+				if [ -n "${PROXY_SIGNED_REFS_OUT:-}" ]; then
+					printf 'ghcr.io/%s@%s\n' "$PROXY_REPO" "$pin" >>"$PROXY_SIGNED_REFS_OUT"
+				fi
+			fi
+			;;
+		*)
+			echo "::error::internal: unexpected proxy pin verdict '${verdict}'" >&2
+			exit 2
+			;;
+		esac
+	fi
 
 	# 4 charts + 8 images + 8 index signatures + one signature per child, plus
 	# the proxy pin's checks. If the loops ever stop iterating, this says so

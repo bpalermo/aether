@@ -414,7 +414,7 @@ a repository with no witness, is exit 2 (inconclusive), never `MISSING`. A
 `MISSING` line from this check is a real absence, so don't re-run it hoping it
 goes away.
 
-**Every run proves the gate can fail first (#930).** Before the gate step,
+**Every run proves the gate can fail first (#930).** (The control covers the per-commit coordinates only: it runs the verifier with `PROXY_PIN_CHECK=0`, because the constructed commit pins main's signed aether-proxy digest, which is legitimately present; the proxy pin's own red lives in `scripts/check-proxy-pin.sh`.) Before the gate step,
 `publish-verify` runs an *expected-red control*: `scripts/publish-verify-control.sh`
 builds a commit with `git commit-tree` on `origin/main`'s tree (fixed identity
 and dates, so the same base always gives the same sha). No ref points at that
