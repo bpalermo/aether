@@ -370,8 +370,10 @@ make check-published                           # the last day of main
 
 Read-only, no credentials needed (the packages are public), and it cannot push
 anything. It prints every coordinate it checked — four commit-tagged charts,
-eight images, eight cosign signatures — and exits non-zero naming each one that
-is missing.
+eight images, a cosign signature for each image's index **and for every child
+manifest it lists** (36 coordinates today) — and exits non-zero naming each one
+that is missing. It checks that a signature *exists*; to check that it
+*verifies*, see "Verifying image signatures" below.
 
 **Do not use `gh run list` for this.** A commit whose publish was superseded has
 a run whose conclusion is `cancelled`, not `failure`: green-ish in the Actions
@@ -401,6 +403,46 @@ issue. If you see that issue: re-run the cancelled publish run — `gh run rerun
 <id>`, which re-runs at that same commit — or, if the commit is not the one you
 need, deploy a later commit that did publish. Never push images or charts by
 hand: the release workflow is the only publisher.
+
+### Verifying image signatures (cosign v3, #925)
+
+`publish.yaml` signs every published image keyless with `cosign sign
+--recursive` — the multi-arch **index and each per-architecture child
+manifest**. The installer is `sigstore/cosign-installer` pinned by SHA (v4.1.2,
+which bootstraps **cosign v3.0.6**); the pin also fixes the binary's SHA-256.
+
+**Layout.** ghcr.io does not implement the OCI Referrers API, so the signature
+lands in a tag in the image's own repository: cosign 3 writes the OCI 1.1
+fallback index `sha256-<hex>` (the bundle format — keyless v3 *requires*
+`--new-bundle-format`; `=false` is rejected), cosign 2 wrote `sha256-<hex>.sig`.
+Everything published before 2026-09-24 carries the legacy `.sig`; exactly one of
+the two must exist per digest (`scripts/ghcr-lib.sh`, `ghcr_signature_layout`).
+Do not pass `--new-bundle-format` to `cosign verify` expecting it to assert the
+layout: `=true` still accepts a legacy `.sig`.
+
+**Children are not verified unless you walk them.** `cosign verify` has **no
+`--recursive`** (not v2.4.1, not v3.0.6). Verifying the index digest says
+nothing about the per-arch manifests a node actually pulls. Use the script,
+which walks the index's `.manifests[]` from the registry and verifies every
+child with the same identity and issuer:
+
+```bash
+# cosign v3.0.6 on PATH (or COSIGN=/path/to/cosign). Read-only; no credentials.
+scripts/verify-image-signatures.sh ghcr.io/bpalermo/aether/agent@sha256:<index digest>
+#   verified index ghcr.io/bpalermo/aether/agent@sha256:…
+#   verified child ghcr.io/bpalermo/aether/agent@sha256:…   (linux/amd64)
+#   verified child ghcr.io/bpalermo/aether/agent@sha256:…   (linux/arm64)
+```
+
+Identity is `^https://github\.com/bpalermo/aether/\.github/workflows/publish\.yaml@`,
+issuer `https://token.actions.githubusercontent.com`. Exit 1 names every index
+or child that did not verify; exit 2 means it could not check (e.g. the digest
+is not an index, or lists no children — a walk over nothing is never a pass).
+The same script runs in `publish.yaml`'s verify step and in `publish-verify`.
+
+Not signed by this pipeline: `ghcr.io/bpalermo/aether/aether-proxy` (built by
+`//proxy` / `proxy-release.yml`) and any `agent`-family image published before
+f332061 (#875, 2026-09-20). Both verify as `no signatures found`.
 
 ### Pre-flight: node headroom before a roll (#812)
 

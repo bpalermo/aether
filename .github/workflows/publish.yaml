@@ -165,7 +165,9 @@ jobs:
       #
       # --recursive signs the index AND every child manifest. Our images are
       # multi-arch (amd64/arm64), so signing only the index would leave anyone who
-      # pulls by per-arch digest with an unsigned manifest.
+      # pulls by per-arch digest with an unsigned manifest. The same reasoning
+      # applies to VERIFYING, and `cosign verify` has no --recursive: the verify
+      # step below walks the children itself (#925).
       #
       # Signing is a separate step AFTER the pushes rather than part of them: a
       # signature that fails to attach must not leave the images unpublished, and
@@ -253,7 +255,19 @@ jobs:
       # It verifies the exact digests the sign step recorded -- not a re-derived
       # list and not a tag -- so it cannot pass against a different artefact than
       # the one that was signed.
-      - name: Verify the signatures
+      #
+      # AND every child manifest of each of them (#925). `cosign sign --recursive`
+      # above signs the per-arch manifests, but `cosign verify` has no
+      # `--recursive` (not v2.4.1, not v3.0.6): verifying the recorded index
+      # digests alone checked eight signatures and left the sixteen per-arch ones
+      # -- the manifests a node actually pulls -- signed and never checked. The
+      # script walks each index's `.manifests[]` from the registry and verifies
+      # every child with the same identity and issuer; an index it cannot
+      # enumerate, or one with no children, fails the step rather than passing a
+      # walk over nothing.
+      - name: Verify the signatures (every index and every child manifest)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -263,15 +277,9 @@ jobs:
             echo "::error::no signed images were recorded -- the sign step signed nothing"
             exit 1
           fi
-
-          n=0
-          while read -r ref; do
-            [ -n "$ref" ] || continue
-            cosign verify \
-              --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              "$ref" >/dev/null
-            echo "verified ${ref}"
-            n=$((n + 1))
-          done < signed-images.txt
-          echo "verified ${n} signature(s)"
+          # Identity: publish.yaml on this repository, any ref. Issuer: GitHub
+          # Actions OIDC. Both are the script's defaults; spelled out so this step
+          # reads without opening the script.
+          CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
+          CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
+            ./scripts/verify-image-signatures.sh --file signed-images.txt

@@ -6,6 +6,8 @@
 #     it is about to sign)
 #   - scripts/verify-published-artifacts.sh  (#880, which asserts those artifacts
 #     actually landed)
+#   - scripts/verify-image-signatures.sh  (#925, which cosign-verifies each index
+#     AND every child manifest it lists)
 #
 # One copy on purpose. The pagination below was written for the sign step after
 # it failed on e3b58e6 by reading 100 of 667 tags (#875); a second, subtly
@@ -77,6 +79,33 @@ ghcr_manifest_digest() {
 		-H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json' \
 		"https://ghcr.io/v2/${repo}/manifests/${tag}" |
 		tr -d '\r' | sed -nE 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*//p' | head -1
+}
+
+# Every child manifest digest of a multi-arch INDEX (#925).
+#
+# publish.yaml signs with `cosign sign --recursive`, which signs the index AND
+# each child it lists. `cosign verify` has no `--recursive` (not in v2.4.1, not
+# in v3.0.6), so a verifier that checks only the index digest never looks at the
+# per-architecture manifests — which are exactly what a node pulls. Anything that
+# checks signatures walks the children with this and checks each one.
+#
+# Prints EVERY entry of `.manifests[]`, not only the ones with a real platform.
+# rules_img indexes carry just linux/amd64 + linux/arm64 today; a buildx index
+# would also list `unknown/unknown` attestation manifests, and `--recursive`
+# signs those too, so they are held to the same bar rather than filtered out.
+#
+# Fails (non-zero, nothing printed) when the digest is not an index or lists no
+# children. A walk that silently yields zero children is the index-only gap one
+# level down (#853), so "no children" must never be readable as "all children
+# verified".
+#
+# Usage: ghcr_index_children <repo> <index digest> <token>  -> one digest per line
+ghcr_index_children() {
+	local repo="$1" digest="$2" tok="$3" body
+	body="$(curl -fsS -H "Authorization: Bearer $tok" \
+		-H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+		"https://ghcr.io/v2/${repo}/manifests/${digest}")" || return 1
+	printf '%s' "$body" | ghcr__json_children
 }
 
 # cosign's signature tag for a digest. There are TWO shapes, and which one you
@@ -173,4 +202,21 @@ ghcr__json_str() {
 
 ghcr__json_tags() {
 	python3 -c 'import sys,json;[print(t) for t in (json.load(sys.stdin).get("tags") or [])]'
+}
+
+# Child digests of an index document on stdin. Exits 1 on anything that is not
+# an index with at least one well-formed `sha256:` child: a manifest (no
+# `manifests` key), an empty list, or an entry without a digest.
+ghcr__json_children() {
+	python3 -c '
+import json, re, sys
+doc = json.load(sys.stdin)
+kids = doc.get("manifests")
+if not isinstance(kids, list) or not kids:
+    sys.exit(1)
+digests = [k.get("digest", "") if isinstance(k, dict) else "" for k in kids]
+if not all(re.fullmatch(r"sha256:[0-9a-f]{64}", d) for d in digests):
+    sys.exit(1)
+print("\n".join(digests))
+'
 }

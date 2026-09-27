@@ -18,7 +18,8 @@
 # success but pushed nothing, a run that was cancelled at queue time, and a run
 # that never existed are all the same answer here: MISSING.
 #
-# WHAT IT CHECKS, per commit — 20 registry coordinates
+# WHAT IT CHECKS, per commit — 20 registry coordinates plus one per child
+# manifest (36 today: every image is a two-platform index)
 #
 #   1. All FOUR charts under their commit-addressable tag:
 #      charts/{aether,crds,prober,udsecho}:<X.Y.Z>-<full 40-char sha>. crds,
@@ -30,9 +31,19 @@
 #   2. A tag ending in `-<full sha>` in each of the eight published image
 #      repositories (GHCR_IMAGE_REPOS in scripts/ghcr-lib.sh).
 #   3. A cosign signature for each of those images: the index digest resolved
-#      from (2), present as the tag `sha256-<hex>.sig` in the same repository.
+#      from (2), present in the same repository as exactly one of
+#      `sha256-<hex>.sig` (cosign 2) or `sha256-<hex>` (cosign 3 bundle).
 #      "Published but unsigned" is its own silent failure (#875) and reads
 #      identically to "never published" unless someone asks the registry.
+#   4. The same, for EVERY child manifest the index lists (#925). The signer
+#      uses `cosign sign --recursive`, and the per-architecture manifests are
+#      what a node pulls; `cosign verify` has no `--recursive`, so nothing else
+#      would look at them. An index whose children cannot be enumerated (or
+#      which has none) is exit 2, never a pass.
+#
+# (3) and (4) ask whether a signature is THERE. Whether it VERIFIES is
+# scripts/verify-image-signatures.sh's job; set SIGNED_REFS_OUT=<file> and this
+# script appends each resolved `ghcr.io/<repo>@<index digest>` for it to read.
 #
 # That is every artefact the `Push charts + images` step publishes, bar the bare
 # mutable `charts/*:<X.Y.Z>` tags, which carry no commit coordinate and which no
@@ -224,10 +235,39 @@ chart_commit_tag() {
 	esac
 }
 
+# One signature, for one digest (an index or one of its children), in exactly
+# one layout.
+#
+# A signature counts as published in EITHER layout — cosign 2's
+# `sha256-<digest>.sig` or cosign 3's `sha256-<digest>` fallback index — because
+# everything published before the v3 migration carries the former and must stay
+# verifiable.
+#
+# But exactly ONE must be present. Accepting "either" without rejecting "both"
+# would read a double-write or a half-finished migration as healthy, and that is
+# the state a format migration actually fails into.
+check_signature() {
+	local repo="$1" digest="$2" tags="$3" what="$4"
+	case "$(ghcr_signature_layout "$digest" "$tags")" in
+	legacy)
+		present "ghcr.io/${repo}:$(ghcr_signature_tag_legacy "$digest") (signature of ${what} ${digest}, cosign 2 layout)"
+		;;
+	bundle)
+		present "ghcr.io/${repo}:$(ghcr_signature_tag_bundle "$digest") (signature of ${what} ${digest}, cosign 3 layout)"
+		;;
+	both)
+		absent "ghcr.io/${repo} signature for ${what} ${digest} — BOTH layouts present; a double-write or half-finished migration, not a healthy signature"
+		;;
+	*)
+		absent "ghcr.io/${repo} signature for ${what} ${digest} (neither ${digest//:/-}.sig nor ${digest//:/-})"
+		;;
+	esac
+}
+
 verify_commit() {
 	local ref="$1"
-	local sha chart chart_repo chart_tag repo tok tags tag digest
-	local before="$checks_total"
+	local sha chart chart_repo chart_tag repo tok tags tag digest children child
+	local before="$checks_total" expected_children=0
 
 	if ! sha="$(git rev-parse --verify --quiet "${ref}^{commit}")"; then
 		echo "::error::not a commit in this repository: ${ref}" >&2
@@ -288,33 +328,35 @@ verify_commit() {
 			echo "::error::could not resolve a digest for ghcr.io/${repo}:${tag}" >&2
 			exit 2
 		fi
-		# A signature counts as published in EITHER layout — cosign 2's
-		# `sha256-<digest>.sig` or cosign 3's `sha256-<digest>` fallback index —
-		# because everything published before the v3 migration carries the former
-		# and must stay verifiable.
-		#
-		# But exactly ONE must be present. Accepting "either" without rejecting
-		# "both" would read a double-write or a half-finished migration as healthy,
-		# and that is the state a format migration actually fails into.
-		case "$(ghcr_signature_layout "$digest" "$tags")" in
-		legacy)
-			present "ghcr.io/${repo}:$(ghcr_signature_tag_legacy "$digest") (signature of ${digest}, cosign 2 layout)"
-			;;
-		bundle)
-			present "ghcr.io/${repo}:$(ghcr_signature_tag_bundle "$digest") (signature of ${digest}, cosign 3 layout)"
-			;;
-		both)
-			absent "ghcr.io/${repo} signature for ${digest} — BOTH layouts present; a double-write or half-finished migration, not a healthy signature"
-			;;
-		*)
-			absent "ghcr.io/${repo} signature for ${digest} (neither ${digest//:/-}.sig nor ${digest//:/-})"
-			;;
-		esac
+		check_signature "$repo" "$digest" "$tags" "index"
+
+		# 4. every CHILD manifest's signature (#925). `cosign sign --recursive`
+		# signs the per-architecture manifests too, and those are what a node
+		# actually pulls — checking the index alone would leave them unchecked.
+		# The walk must yield at least one child: an index with none, or one we
+		# cannot read, is an inconclusive check, never a vacuous pass.
+		if ! children="$(ghcr_index_children "$repo" "$digest" "$tok")" || [ -z "$children" ]; then
+			echo "::error::could not enumerate the child manifests of ghcr.io/${repo}@${digest}" >&2
+			exit 2
+		fi
+		while read -r child; do
+			expected_children=$((expected_children + 1))
+			check_signature "$repo" "$child" "$tags" "child"
+		done <<<"$children"
+
+		# Hand the exact index reference to the cosign pass, when asked for
+		# (publish-verify.yaml). Presence of a signature TAG is what this script
+		# can see without cosign; whether that signature VERIFIES is the job of
+		# scripts/verify-image-signatures.sh, over these same digests.
+		if [ -n "${SIGNED_REFS_OUT:-}" ]; then
+			printf 'ghcr.io/%s@%s\n' "$repo" "$digest" >>"$SIGNED_REFS_OUT"
+		fi
 	done
 
-	# 4 charts + 8 images + 8 signatures. If the loops ever stop iterating, this
-	# says so instead of reporting a clean run over nothing.
-	local expected=$((${#GHCR_CHARTS[@]} + 2 * ${#GHCR_IMAGE_REPOS[@]}))
+	# 4 charts + 8 images + 8 index signatures + one signature per child. If the
+	# loops ever stop iterating, this says so instead of reporting a clean run
+	# over nothing.
+	local expected=$((${#GHCR_CHARTS[@]} + 2 * ${#GHCR_IMAGE_REPOS[@]} + expected_children))
 	local did=$((checks_total - before))
 	if [ "$did" -ne "$expected" ]; then
 		echo "::error::internal: ran ${did} checks for ${sha}, expected ${expected}" >&2
