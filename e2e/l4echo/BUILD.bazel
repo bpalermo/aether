@@ -46,19 +46,24 @@ go_multi_arch_image(
 #     --//e2e/l4echo:smoke_tag=<tag>
 #
 # Still not a release artifact: no chart, publish step or verifier references it.
+# Placeholder defaults, never a real registry: rules_img renders the push
+# metadata at BUILD time and rejects an empty registry, and CI's impacted-target
+# build (bazel-diff) builds labels explicitly, so `manual` does not keep this
+# target out of it. `invalid.` is reserved (RFC 2606) and resolves nowhere; the
+# workflow overrides all three flags on `bazel run`.
 string_flag(
     name = "smoke_registry",
-    build_setting_default = "",
+    build_setting_default = "unset.invalid",
 )
 
 string_flag(
     name = "smoke_repository",
-    build_setting_default = "",
+    build_setting_default = "unset/smoke",
 )
 
 string_flag(
     name = "smoke_tag",
-    build_setting_default = "",
+    build_setting_default = "unset",
 )
 
 image_push(
