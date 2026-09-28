@@ -173,6 +173,121 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 	}}
 }
 
+// L4AccessLogName is the log_name of the connection-level L4 access log
+// (aether#1023): its own VictoriaLogs stream, `log_name=aether_l4_access_logs`,
+// beside the HTTP stream `aether_access_logs`.
+//
+// A separate stream because the field shapes differ: an L4 record has no
+// method, path, authority, response code or request id, and every one of those
+// would render "-" in the HTTP stream. And it deliberately carries NO `reporter`
+// attribute: the collector's identity connectors (k8s-talos-main
+// otel-collector values, aether#863/#842) key on `reporter` -- log_name is a
+// RESOURCE attribute the transform cannot see -- so an L4 record carrying it
+// would enter the HTTP request counters and their denominator. The L4 record
+// is always the SOURCE side (the capture listener), which is what
+// filter_chain_name and pod_name already say.
+const L4AccessLogName = "aether_l4_access_logs"
+
+// buildL4AccessLog returns the OTel access logger for a capture-listener
+// tcp_proxy (aether#1023), or nil when access logging is disabled -- the same
+// switch as the HTTP log (MeshConfig access_logs_enabled), the same sink
+// (the proxy bootstrap's otel_collector cluster) and the same success sample.
+//
+// Connection-level, by construction: tcp_proxy with no access_log_options
+// writes one record when the downstream connection CLOSES, never per read or
+// per flush, and the UDP capture path carries no logger at all (a per-datagram
+// log would be unbounded). The filter keeps every connection that carries a
+// response flag (UF/UH/UO/NR/DC..., which is where a SAN rejection or a
+// blackholed flow lands) plus SuccessSampleRate% of the clean ones.
+//
+// podName/podNamespace are the SOURCE pod: the capture listener is per pod,
+// so the literal is baked in the way the HTTP log's pod_name is. The node is
+// the OTel resource attribute node_name Envoy's logger adds itself.
+func buildL4AccessLog(podName, podNamespace string) []*accesslogv3.AccessLog {
+	if !accessLogConfig.Enabled {
+		return nil
+	}
+	cluster := accessLogConfig.CollectorCluster
+	if cluster == "" {
+		cluster = defaultCollectorName
+	}
+
+	otelCfg := &otelaccesslogv3.OpenTelemetryAccessLogConfig{
+		LogName: L4AccessLogName,
+		GrpcService: &corev3.GrpcService{
+			TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
+				EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{ClusterName: cluster},
+			},
+		},
+		Body: stringValue("%RESPONSE_FLAGS% %FILTER_CHAIN_NAME% %DOWNSTREAM_LOCAL_ADDRESS% -> %UPSTREAM_CLUSTER% %UPSTREAM_HOST% %DURATION%ms"),
+		Attributes: &otlpcommonv1.KeyValueList{Values: []*otlpcommonv1.KeyValue{
+			// Source: the capturing pod, its netns and the identity the chain
+			// stamped (the certificate the upstream mTLS presents, #842).
+			kv("pod_name", podName),
+			kv("pod_namespace", podNamespace),
+			kv("source_netns", "%FILTER_STATE(aether.network.network_namespace:PLAIN)%"),
+			kv("source_spiffe_id", "%FILTER_STATE("+SourceIdentityFilterStateKey+":PLAIN)%"),
+			// Which capture chain took the connection: cap_tcp_* (floor, per-port,
+			// TCPRoute-weighted, the any-port shim), cap_tls_* (a TLSRoute SNI
+			// chain) or cap_tcp_blackhole. The chain kind the stat key cannot
+			// carry, since TLS chains report under their backends' tcp: keys.
+			kv("filter_chain_name", "%FILTER_CHAIN_NAME%"),
+			// Destination as dialled (the restored original destination: VIP:port)
+			// and as reached (the endpoint, <pod IP>:18008).
+			kv("downstream_local_address", "%DOWNSTREAM_LOCAL_ADDRESS%"),
+			kv("downstream_remote_address", "%DOWNSTREAM_REMOTE_ADDRESS%"),
+			kv("upstream_cluster", "%UPSTREAM_CLUSTER%"),
+			kv("upstream_host", "%UPSTREAM_HOST%"),
+			kv("upstream_local_address", "%UPSTREAM_LOCAL_ADDRESS%"),
+			kv("requested_server_name", "%REQUESTED_SERVER_NAME%"),
+			// The verified server identity on success; on a SAN rejection the
+			// handshake never completes, this renders "-", and the presented SANs
+			// are in upstream_transport_failure_reason instead.
+			kv("upstream_peer_uri_san", "%UPSTREAM_PEER_URI_SAN%"),
+			kv("response_flags", "%RESPONSE_FLAGS%"),
+			kv("upstream_transport_failure_reason", "%UPSTREAM_TRANSPORT_FAILURE_REASON%"),
+			kv("connection_termination_details", "%CONNECTION_TERMINATION_DETAILS%"),
+			kv("start_time", "%START_TIME%"),
+			kv("duration_ms", "%DURATION%"),
+			kv("bytes_received", "%BYTES_RECEIVED%"),
+			kv("bytes_sent", "%BYTES_SENT%"),
+		}},
+	}
+
+	return []*accesslogv3.AccessLog{{
+		Name:       "envoy.access_loggers.open_telemetry",
+		Filter:     l4LogWorthyFilter(),
+		ConfigType: &accesslogv3.AccessLog_TypedConfig{TypedConfig: config.TypedConfig(otelCfg)},
+	}}
+}
+
+// l4LogWorthyFilter is logWorthyFilter without the HTTP status arm: every
+// connection with a response flag, plus the success sample (same runtime key,
+// so one override moves both logs).
+func l4LogWorthyFilter() *accesslogv3.AccessLogFilter {
+	return &accesslogv3.AccessLogFilter{
+		FilterSpecifier: &accesslogv3.AccessLogFilter_OrFilter{
+			OrFilter: &accesslogv3.OrFilter{
+				Filters: []*accesslogv3.AccessLogFilter{
+					{FilterSpecifier: &accesslogv3.AccessLogFilter_ResponseFlagFilter{
+						ResponseFlagFilter: &accesslogv3.ResponseFlagFilter{},
+					}},
+					{FilterSpecifier: &accesslogv3.AccessLogFilter_RuntimeFilter{
+						RuntimeFilter: &accesslogv3.RuntimeFilter{
+							RuntimeKey: accessLogSampleKey,
+							PercentSampled: &typev3.FractionalPercent{
+								Numerator:   accessLogConfig.SuccessSampleRate,
+								Denominator: typev3.FractionalPercent_HUNDRED,
+							},
+							UseIndependentRandomness: true,
+						},
+					}},
+				},
+			},
+		},
+	}
+}
+
 // peerIdentityFields returns the VERIFIED mTLS peer identity for this hop — the
 // URI SAN of the certificate the other end actually presented and this proxy
 // validated, which is the only identity in an access-log line that a workload

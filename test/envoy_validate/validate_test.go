@@ -228,6 +228,26 @@ func TestEnvoyValidate(t *testing.T) {
 		if len(cached) > 0 {
 			t.Errorf("%s: QUIC upstream clusters without explicit max_session_keys:0: %v (038 R4)", b.name, cached)
 		}
+		// aether#1023: every L4 cluster reports under its OWN kind-prefixed
+		// stat key, shared with no other cluster. Envoy accepts any
+		// alt_stat_name, so only the bytes can say.
+		badKeys, _, err := L4StatKeyViolations(data)
+		if err != nil {
+			t.Fatalf("L4 stat-key check %s: %v", b.name, err)
+		}
+		if len(badKeys) > 0 {
+			t.Errorf("%s: L4 clusters not reporting under their own tcp_/udp_ key: %v\n"+
+				"a shared key merges L4 kinds (and the HTTP cluster) into one aether_cluster series, and a verify_san tick can no longer be attributed (#1007)", b.name, badKeys)
+		}
+		// aether#1023: every tcp_proxy chain on a capture listener carries the
+		// connection-level L4 access log.
+		unlogged, _, err := CaptureTCPChainsWithoutL4AccessLog(data)
+		if err != nil {
+			t.Fatalf("L4 access-log check %s: %v", b.name, err)
+		}
+		if len(unlogged) > 0 {
+			t.Errorf("%s: capture L4 chains without the %s access log: %v", b.name, proxy.L4AccessLogName, unlogged)
+		}
 	}
 
 	// Validate each bootstrap with Envoy.
@@ -1202,6 +1222,11 @@ func TestNoNonDefaultClusterSharesTheServiceEDSName(t *testing.T) {
 					continue
 				}
 				bare, _, _ := strings.Cut(c.GetAltStatName(), "@")
+				// An L4 cluster's stat key carries its kind (aether#1023):
+				// tcp_<ns>/<svc>[_<port>]. The bare service key is between.
+				if rest, ok := strings.CutPrefix(bare, proxy.L4StatKeyTCPPrefix); ok {
+					bare, _, _ = strings.Cut(rest, "_")
+				}
 				if bare == "" || c.GetEdsClusterConfig() == nil {
 					t.Fatalf("%s %s has no bare alt_stat_name or no eds_cluster_config", kind, c.GetName())
 				}

@@ -9,10 +9,15 @@ load("//bazel/img:registry.bzl", "chart_registry_url", "image_reference")
 # argv the supervisor is handed, and //agent/internal/supervisorcmd asserts every
 # flag in it exists on the command (#772). A rename there would otherwise only
 # surface as every proxy pod failing to start at rollout time.
+# agent-proxy-configmap.yaml is exported so //test/envoy_validate can run its
+# aether.cluster stats-tag regex over the per-kind L4 stat keys (#1023): a
+# regex edit that cut "tcp:<ns>/<svc>:<port>" short would silently merge L4
+# series again.
 exports_files([
     "values.yaml",
     "templates/agent-daemonset.yaml",
     "templates/agent-proxy-daemonset.yaml",
+    "templates/agent-proxy-configmap.yaml",
 ])
 
 # Shared by both packagings below (see :aether_commit). `images` is what makes the

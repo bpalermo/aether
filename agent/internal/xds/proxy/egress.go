@@ -104,6 +104,76 @@ func UDPClusterName(serviceName, meshDomain string) string {
 	return "udp:" + base
 }
 
+// L4 stat keys (aether#1023). Every L4 cluster reports under its OWN
+// alt_stat_name, which the chart's aether.cluster stats tag lifts into the
+// aether_cluster label:
+//
+//	tcp_<ns>/<svc>          the TCP floor            tcp:<fqdn>
+//	tcp_<ns>/<svc>_<port>   a TCP per-port or primary-port alias cluster
+//	                                                 tcp:<fqdn>:<port>
+//	udp_<ns>/<svc>          the UDP floor            udp:<fqdn>
+//
+// Until #1023 all of them passed the bare "<ns>/<svc>" service key, so the
+// floor, the primary-port alias and every per-port cluster reported into ONE
+// cluster.<ns>/<svc>.* tree -- and for a service with an HTTP port that tree
+// was also the HTTP cluster's. A tick could not be assigned to a cluster kind:
+// the #1007 attribution had to rule the HTTP side out from access logs.
+//
+// The separator is "_", not the ":" the cluster NAMES use, on purpose: Envoy
+// sanitizes every stat name and tag value (Stats::Utility::sanitizeStatsName
+// rewrites ":" to "_"), so a "tcp:<ns>/<svc>:<port>" alt_stat_name would
+// surface as aether_cluster="tcp_<ns>/<svc>_<port>" anyway, and a gate written
+// against the "tcp:" spelling would match nothing, forever. Writing the
+// sanitized form keeps the config and the label identical. It is unambiguous:
+// namespaces and service names are DNS labels and cannot contain "_".
+//
+// There is no "tls_" key: a TLSRoute SNI chain routes to its backends' tcp:
+// floor clusters (L4Backend.Cluster is a TCPClusterName), so its connections
+// report under those clusters' tcp_ keys. The chain itself is told apart by
+// the L4 access log's filter_chain_name (cap_tls_*).
+//
+// Cardinality: one key per CLUSTER, never per endpoint or per source --
+// bounded by services x raw-TCP ports, the same set the cluster names already
+// are. The keys carry no dot, so the chart's tag regex `^cluster\.(([^.]+)\.)`
+// captures each one whole (pinned by //test/envoy_validate against the chart's
+// own regex, after Envoy's sanitization). The HTTP keys ("<ns>/<svc>",
+// "<ns>/<svc>@<ns>/<sa>") are untouched, and a query selecting an HTTP
+// service by exact key or by `<ns>/<svc>(@.*)?` cannot match an L4 key.
+//
+// Each returns "" for an empty service key (Envoy then keys stats by the
+// cluster's own, already unique, name).
+const (
+	L4StatKeyTCPPrefix = "tcp_"
+	L4StatKeyUDPPrefix = "udp_"
+)
+
+// TCPStatKey is the alt_stat_name of a service's TCP floor cluster.
+func TCPStatKey(serviceKey string) string {
+	if serviceKey == "" {
+		return ""
+	}
+	return L4StatKeyTCPPrefix + serviceKey
+}
+
+// TCPPortStatKey is the alt_stat_name of a service's port-qualified TCP
+// cluster (per-port, or the primary-port alias). Port 0 is the floor,
+// mirroring TCPPortClusterName.
+func TCPPortStatKey(serviceKey string, port uint32) string {
+	base := TCPStatKey(serviceKey)
+	if base == "" || port == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s_%d", base, port)
+}
+
+// UDPStatKey is the alt_stat_name of a service's UDP floor cluster.
+func UDPStatKey(serviceKey string) string {
+	if serviceKey == "" {
+		return ""
+	}
+	return L4StatKeyUDPPrefix + serviceKey
+}
+
 // ServiceFromClusterName maps a data-plane cluster name (a mesh authority,
 // <svc>.<ns>.<meshDomain>) back to the namespace-qualified "<ns>/<svc>" service
 // key (proposal 020 Part 1). ok is false when the name is not under the mesh
