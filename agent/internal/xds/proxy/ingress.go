@@ -407,10 +407,8 @@ func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain, meshDomain string
 		// QUIC listeners require reuse_port: Envoy runs one UDP socket per worker
 		// and steers a connection ID to its worker via the BPF program that
 		// reuse_port groups enable (the edge's H3 listener has the same setting).
-		EnableReusePort: wrapperspb.Bool(true),
-		UdpListenerConfig: &listenerv3.UdpListenerConfig{
-			QuicOptions: &listenerv3.QuicProtocolOptions{},
-		},
+		EnableReusePort:   wrapperspb.Bool(true),
+		UdpListenerConfig: InboundQUICUDPListenerConfig(),
 		// Same per-pod stats shape as the TCP inbound, with the _h3 suffix the
 		// aether.pod stats_tag ignores, so listener.inbound.* is labelled by pod
 		// for both transports.
@@ -418,6 +416,41 @@ func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain, meshDomain string
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		FilterChains:     chains,
 	}, nil
+}
+
+// InboundQUICUDPListenerConfig is the udp_listener_config of the per-pod
+// HTTP/3 inbound (aether#1021): QUIC with default transport options, UDP GRO
+// on the receive path, and Envoy's automatic GSO writer on the send path.
+//
+// RECEIVE: downstream_socket_config.prefer_gro = true. Envoy defaults GRO OFF
+// for listener sockets (UdpListenerImpl, "Default prefer_gro to false for
+// downstream server traffic"), while its QUIC CLIENT sockets always ask for it
+// (envoy_quic_utils.cc createConnectionSocket), so before this the upstream
+// half of every mesh HTTP/3 connection read with GRO and the inbound half did
+// not. //test/mtlspool TestQUICRequestCPU, 10k paced requests x 2 repetitions
+// against the pinned proxy: destination-side CPU per request 0.757 -> 0.675 ms
+// (-11 %), both proxies 1.692 -> 1.602 ms (-5 %). Falls back to non-GRO reads
+// where the kernel lacks UDP_GRO (Linux < 5.0), with a warning.
+//
+// SEND: udp_packet_packet_writer_config stays UNSET on purpose. For a QUIC
+// listener Envoy already installs UdpGsoBatchWriterFactory when the kernel
+// supports UDP_SEGMENT and the plain sendmsg writer when it does not
+// (listener_impl.cc); naming envoy.udp_packet_writer.gso explicitly would drop
+// that runtime check. The same harness measured the automatic writer, an
+// explicit GSO writer and the explicit non-GSO default writer at 1.696 / 1.686
+// / 1.717 ms per request -- within noise of each other: a mesh RPC's response
+// is one or two packets, and GSO only pays when a flush carries several.
+//
+// The upstream half has no knob to turn: QUIC client sockets already read with
+// GRO, and the only client packet writer at the pin
+// (envoy.quic.packet_writer.default) has no GSO.
+func InboundQUICUDPListenerConfig() *listenerv3.UdpListenerConfig {
+	return &listenerv3.UdpListenerConfig{
+		QuicOptions: &listenerv3.QuicProtocolOptions{},
+		DownstreamSocketConfig: &corev3.UdpSocketConfig{
+			PreferGro: wrapperspb.Bool(true),
+		},
+	}
 }
 
 // buildInboundQUICFilterChain is buildInboundFilterChain for the HTTP/3

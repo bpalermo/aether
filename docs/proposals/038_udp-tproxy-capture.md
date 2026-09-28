@@ -413,6 +413,57 @@ identity-bearing class (R2):
   longer holds it, or a new proxy generation after a hot restart, which holds no
   ODCDS subscriptions. The fetch-window prune never applies to a dormant pair.
 
+  **Per-request cost (#1021).** On the rev242 proving soak an HTTP/3 mesh request
+  cost ~3.3× the proxy CPU of an h2 one (~11 ms vs ~3.3 ms across both proxies,
+  #1006), with ~128 QUIC connections carrying 100 rps. Two things were checked
+  and one changed:
+
+  - *Why so many connections.* Not `connection_pool_per_downstream_connection`:
+    #842 took it off the h2 base a twin is cloned from, and `QUICClusterFrom`
+    now pins it off on the twin as well, because a twin carries exactly one
+    identity (its source ServiceAccount's SVID), so the option would buy no
+    isolation and only turn every app→proxy connection into its own QUIC
+    connection. `//test/mtlspool` `TestQUICTwinUpstreamConnections` measures it
+    at the pin: 12 downstream connections from one source to one destination
+    open **1** QUIC connection with one worker, **4** with four workers, and
+    **12** with the option forced on. Envoy's pool key
+    (`ClusterManagerImpl::…::httpConnPoolImpl`) is (worker, host, protocol,
+    socket options, transport-socket hash — which for a twin folds the hashable
+    source identity); the downstream connection enters it only through that
+    option. So a twin opens one connection **per worker that the source's
+    downstream connections land on, per destination endpoint**, the same shape
+    as the h2 path (whose svc-3/4 also had 128 connections in #1006). Pods of
+    the same ServiceAccount share a twin's connections. That is the identity
+    model (identity = ServiceAccount), and the h2 pool key has partitioned the
+    same way since #842; `//test/mtlspool`'s QUIC selection negative control
+    still shows each source's own SPIFFE ID at the destination.
+  - *UDP offload.* The inbound QUIC listener now sets
+    `udp_listener_config.downstream_socket_config.prefer_gro: true`. Envoy
+    defaults GRO off for listener sockets and on for QUIC client sockets. In the
+    `TestQUICRequestCPU` harness (10k paced requests, two repetitions, pinned
+    binary) it cut the destination's CPU per request by 11 % (0.757 → 0.675 ms)
+    and both proxies' by 5 %. At a sparse pace (25 rps on one connection, a
+    40 ms gap that outlasts the 25 ms delayed-ACK timer), the destination saved
+    9 % (0.870 → 0.795 ms) and both proxies 5 %. The same harness puts h3 at
+    ~1.9× h2 on loopback, at either pace. GSO needs nothing: for a QUIC listener Envoy
+    already installs the GSO batch writer when the kernel has `UDP_SEGMENT`
+    (talos 6.18 does), and the automatic, explicit-GSO and explicit-non-GSO
+    writers measured within 1.5 % of each other. A mesh RPC's response is one
+    or two packets, so there is nothing to batch. The upstream side has no knob:
+    client sockets already read with GRO, and the pin's only client packet
+    writer (`envoy.quic.packet_writer.default`) has no GSO.
+  - *ACK and idle settings: no change.* `QuicProtocolOptions` exposes no
+    `max_ack_delay` or ack-frequency field, only QUICHE connection-option tags,
+    and nothing measured supports a particular tag. The twin's HTTP idle timeout
+    (30 s, `UpstreamIdleTimeout`) already closes idle connections well before
+    QUICHE's 600 s `idle_network_timeout`, and the stream and connection windows
+    bound buffering rather than CPU.
+
+  The gate for dropping the allow-list (#979) is **QUIC per-request proxy CPU
+  ≤ 1.5× h2**, measured on a soak with the #1006 method
+  (`e2e/soak/README.md`, "The QUIC per-request cost gate"). The baseline is the
+  rev242 reading: 3.3×, with 2.88 fleet envoy cores.
+
 Required mode only until the pin passes #47341; the extra peer-cert fields of
 #45978 are not needed by anything today.
 
@@ -628,7 +679,7 @@ before a UDPRoute exists, and equally deliberate.
 | PR | scope | size | gate |
 |---|---|---|---|
 | 4a **(shipped, unconditional — no flag; no 18008 divert, inbound QUIC arrives on eth0 and needs none)** | Inbound: a QUIC listener bound into each pod's netns on **UDP:18008**, `envoy.transport_sockets.quic` wrapping the SAME `DownstreamTlsContext` (SDS server cert, validation context with SPIFFE SAN pinning) as the TCP inbound; `require_client_certificate: true`; `enable_resumption: false`, `enable_early_data: false` (R4). Routes to the same per-port app clusters. Extend the port-role gate to 18008. | M | `//test/envoy_validate` asserts the two `false`s on every mTLS QUIC chain — a chain without them must FAIL validation, and the test must be seen red |
-| 4b **(shipped 2026-09-26: #956 outbound + selection, #958 mtlspool HTTP/3 arm, #962 per-source stats key; e2e #959; the #957 hostname-check workaround is Q5)** | Outbound — **Q2 answered: one QUIC cluster per source ServiceAccount.** `QuicUpstreamTransport` rejects the cert mapper at load (Q2a=no), so the per-source identity has to be the cluster's own `UpstreamTlsContext`, one per local ServiceAccount, named `quic:<svc>@<source-sa>` and selected by the source's filter-state identity at the route. The identity-set re-push cost #842 removed returns for these clusters only: the first pod of a new ServiceAccount on a node adds a QUIC cluster, the last one leaving removes it, and each add re-warms only that cluster — bounded by local ServiceAccounts, not by mesh services, and never touching the TCP clusters. Pooling still partitions per identity (Q2b=yes), so `//test/mtlspool` gains a QUIC arm asserting source B never rides source A's connection — the pooling guarantee is real even though the certificate is per cluster. **Each twin carries its own EDS resource name** (its cluster name; the agent publishes the h2 cluster's load assignment under it too) rather than sharing the h2 cluster's bare-service name: Envoy's delta-ADS `WatchMap` deduplicates EDS interest per resource name, so a twin added after its base was subscribed — exactly the new-ServiceAccount case above — sent no subscribe and warmed for the full 15 s `initial_fetch_timeout`, `503/NC` for that source to every QUIC destination (#1008, found by the rev242 proving soak; #842's mechanism on EDS). A separate `api_config_source` for the twins was rejected: one mux per twin set and a SotW/delta split for endpoints, where a distinct name costs one extra CLA copy per twin on the existing stream. **Demand-scoped since #1020:** the routes keep one selection arm per local ServiceAccount, but a twin is built only for a (source SA, destination) pair that has dialled. The first request of a new pair fetches its twin over ODCDS (the arm names it; the `on_demand` filter asks for it; the agent validates, persists the pair in `ObservedUpstreams.quic_pairs`, and publishes twin + load assignment together). That makes every twin a late twin, so the own-EDS-name rule above is load-bearing for all of them. Pairs are pruned on source-leaves-node or destination-leaves-allow-list/dependency-set only, with no idle TTL. The budget is observed pairs, not local SAs × QUIC destinations: 118 → ~10 on rev242's fleet. | L | mtlspool QUIC negative control red-then-green; a cluster-count budget stated before commit (local SAs × QUIC-enabled destinations) |
+| 4b **(shipped 2026-09-26: #956 outbound + selection, #958 mtlspool HTTP/3 arm, #962 per-source stats key; e2e #959; the #957 hostname-check workaround is Q5)** | Outbound — **Q2 answered: one QUIC cluster per source ServiceAccount.** `QuicUpstreamTransport` rejects the cert mapper at load (Q2a=no), so the per-source identity has to be the cluster's own `UpstreamTlsContext`, one per local ServiceAccount, named `quic:<svc>@<source-sa>` and selected by the source's filter-state identity at the route. The identity-set re-push cost #842 removed returns for these clusters only: the first pod of a new ServiceAccount on a node adds a QUIC cluster, the last one leaving removes it, and each add re-warms only that cluster — bounded by local ServiceAccounts, not by mesh services, and never touching the TCP clusters. Pooling still partitions per identity (Q2b=yes), so `//test/mtlspool` gains a QUIC arm asserting source B never rides source A's connection — the pooling guarantee is real even though the certificate is per cluster. **Each twin carries its own EDS resource name** (its cluster name; the agent publishes the h2 cluster's load assignment under it too) rather than sharing the h2 cluster's bare-service name: Envoy's delta-ADS `WatchMap` deduplicates EDS interest per resource name, so a twin added after its base was subscribed — exactly the new-ServiceAccount case above — sent no subscribe and warmed for the full 15 s `initial_fetch_timeout`, `503/NC` for that source to every QUIC destination (#1008, found by the rev242 proving soak; #842's mechanism on EDS). A separate `api_config_source` for the twins was rejected: one mux per twin set and a SotW/delta split for endpoints, where a distinct name costs one extra CLA copy per twin on the existing stream. **Demand-scoped since #1020:** the routes keep one selection arm per local ServiceAccount, but a twin is built only for a (source SA, destination) pair that has dialled. The first request of a new pair fetches its twin over ODCDS (the arm names it; the `on_demand` filter asks for it; the agent validates, persists the pair in `ObservedUpstreams.quic_pairs`, and publishes twin + load assignment together). That makes every twin a late twin, so the own-EDS-name rule above is load-bearing for all of them. Pairs are pruned on source-leaves-node or destination-leaves-allow-list/dependency-set only, with no idle TTL. The budget is observed pairs, not local SAs × QUIC destinations: 118 → ~10 on rev242's fleet. **Per-request cost (#1021):** twins never pool per downstream connection (pinned off in `QUICClusterFrom`; measured 1 vs 12 QUIC connections for 12 app connections), and the inbound QUIC listener reads with GRO (−11 % destination CPU per request); the flag drop gates on h3 ≤ 1.5× h2 per request (baseline 3.3×). | L | mtlspool QUIC negative control red-then-green; a cluster-count budget stated before commit (local SAs × QUIC-enabled destinations) |
 | 4c **(decision 2026-09-26: NO opt-in for QUIC. The allow-list #956 shipped is a proving gate for the first QUIC soak and is removed once it passes — QUIC then applies to every destination; the registry-advertised opt-in is dropped, not deferred)** | Selection: explicit allow-list flag first; then "destination advertises UDP:18008" via the registry once the inbound has soaked. | S | e2e |
 | 4d | East-west gateway: UDP:18009 beside TCP:18009, same SNI-forwarding role; cross-cluster last. | M | 019's cross-cluster e2e over QUIC |
 

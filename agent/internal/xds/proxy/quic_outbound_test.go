@@ -95,6 +95,11 @@ func TestQUICClusterFrom(t *testing.T) {
 	assert.NotNil(t, q.GetOutlierDetection(), "outlier detection cloned")
 	assert.Equal(t, "echo.demo.aether.internal", base.GetName(), "the base must not be mutated")
 	assert.Nil(t, base.GetTransportSocket())
+	assert.False(t, q.GetConnectionPoolPerDownstreamConnection(), "a twin carries one identity: per-downstream pools only multiply QUIC connections (aether#1021)")
+	pooled := proto.Clone(base).(*clusterv3.Cluster)
+	pooled.ConnectionPoolPerDownstreamConnection = true
+	assert.False(t, QUICClusterFrom(pooled, "quic:x@demo/source-a", "spiffe://aether.internal/ns/demo/sa/source-a", "spiffe://aether.internal", nil, "8080.x").GetConnectionPoolPerDownstreamConnection(),
+		"the twin forces the option off even if the h2 base ever sets it again")
 
 	po := &httpv3.HttpProtocolOptions{}
 	require.NoError(t, q.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey].UnmarshalTo(po))

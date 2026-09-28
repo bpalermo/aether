@@ -936,6 +936,18 @@ func TestNodeBootstrapCarriesTheQUICInbound(t *testing.T) {
 	if quic.GetUdpListenerConfig().GetQuicOptions() == nil {
 		t.Errorf("QUIC inbound has no udp_listener_config.quic_options; without it this is a plain UDP listener")
 	}
+	// aether#1021: GRO on the receive path (Envoy defaults it OFF for listener
+	// sockets; measured -11 % destination CPU per request), and the send path
+	// left to Envoy's automatic writer, which is the GSO batch writer wherever
+	// the kernel supports UDP_SEGMENT. A writer named here would either drop
+	// GSO (the default writer) or drop the kernel-support check (the explicit
+	// GSO writer).
+	if !quic.GetUdpListenerConfig().GetDownstreamSocketConfig().GetPreferGro().GetValue() {
+		t.Errorf("QUIC inbound does not set udp_listener_config.downstream_socket_config.prefer_gro: true (aether#1021)")
+	}
+	if w := quic.GetUdpListenerConfig().GetUdpPacketPacketWriterConfig(); w != nil {
+		t.Errorf("QUIC inbound pins udp_packet_packet_writer_config %q; leave it unset so Envoy picks GSO when the kernel supports it (aether#1021)", w.GetName())
+	}
 	var mtlsChains int
 	for _, fc := range quic.GetFilterChains() {
 		ctx, err := downstreamTLSContextOf(fc.GetTransportSocket())
@@ -1022,6 +1034,50 @@ func TestQUICUpstreamSNIIsAHostname(t *testing.T) {
 	// Anti-vacuity: the fixture must carry QUIC upstreams for this to test anything.
 	if n := len(QUICOutboundArms()) - 1; n < 2 {
 		t.Fatalf("fixture carries %d quic: twins, want >= 2", n)
+	}
+}
+
+// TestQUICUpstreamsDoNotPoolPerDownstreamConnection: no `quic:` twin may set
+// connection_pool_per_downstream_connection (aether#1021). Over the generated
+// fixture bytes; the anti-vacuity half turns it on for every twin and requires
+// each one to be flagged.
+func TestQUICUpstreamsDoNotPoolPerDownstreamConnection(t *testing.T) {
+	data, err := QUICOutboundBootstrapJSON()
+	if err != nil {
+		t.Fatalf("QUICOutboundBootstrapJSON: %v", err)
+	}
+	bad, err := QUICUpstreamsPoolingPerDownstream(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) > 0 {
+		t.Errorf("quic: clusters pooling per downstream connection (one QUIC connection per app connection, aether#1021): %v", bad)
+	}
+
+	bs := &bootstrapv3.Bootstrap{}
+	if err := protojson.Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	var twins int
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if strings.HasPrefix(c.GetName(), "quic:") {
+			twins++
+			c.ConnectionPoolPerDownstreamConnection = true
+		}
+	}
+	if twins < 2 {
+		t.Fatalf("fixture carries %d quic: twins, want >= 2", twins)
+	}
+	flipped, err := protojson.Marshal(bs)
+	if err != nil {
+		t.Fatalf("marshal rewritten bootstrap: %v", err)
+	}
+	flagged, err := QUICUpstreamsPoolingPerDownstream(flipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flagged) != twins {
+		t.Errorf("per-downstream pooling was not reported for every twin: flagged %v of %d", flagged, twins)
 	}
 }
 
