@@ -23,7 +23,7 @@
 // DELTA ADS stream (ads_sds_test.go's control plane and bootstrap), with the
 // clusters and their load assignments delivered over it. The twin is built by
 // production's proxy.QUICClusterFrom and its load assignment by
-// proxy.QUICLoadAssignmentFrom; only the TRANSPORT is swapped for the base's
+// proxy.LoadAssignmentAlias; only the TRANSPORT is swapped for the base's
 // cleartext h2, because the transport is not under test and a QUIC destination
 // would add a certificate dimension this defect does not have. The EDS shape --
 // the thing under test -- is production's, byte for byte.
@@ -170,7 +170,7 @@ func (f *twinFixture) twin(t *testing.T, sourceID string) (*clusterv3.Cluster, t
 		return cl, nil
 	}
 	require.Equal(t, name, cl.GetEdsClusterConfig().GetServiceName(), "production's twin must carry its own EDS name")
-	return cl, proxy.QUICLoadAssignmentFrom(f.baseCLA, name)
+	return cl, proxy.LoadAssignmentAlias(f.baseCLA, name)
 }
 
 // resources is the snapshot content for the base plus one twin per identity.

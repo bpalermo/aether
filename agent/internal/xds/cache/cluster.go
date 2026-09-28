@@ -14,6 +14,7 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/registry"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -101,9 +102,7 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 		if entry.l4Floor {
 			// TCP/UDP floor entries publish their load assignment only; their
 			// clusters are rendered by captureTCPClusters / captureUDPClusters.
-			if entry.loadAssignment != nil {
-				clas = append(clas, entry.loadAssignment)
-			}
+			clas = c.appendEntryCLAsLocked(clas, entry)
 			continue
 		}
 		// Precomputed mTLS-injected cluster when the node SVID is available
@@ -113,9 +112,7 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 			cluster = entry.mtlsCluster
 		}
 		clusters = append(clusters, cluster)
-		if entry.loadAssignment != nil {
-			clas = append(clas, entry.loadAssignment)
-		}
+		clas = c.appendEntryCLAsLocked(clas, entry)
 		twins, twinCLAs, vhost := quic.entryTwinsAndVhost(key, entry, c.meshDomain)
 		clusters = append(clusters, twins...)
 		clas = append(clas, twinCLAs...)
@@ -129,6 +126,53 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 	sortResourcesByName(clas)
 	sortVirtualHostsByName(vhosts)
 	return clusters, clas, vhosts
+}
+
+// appendEntryCLAsLocked appends the load assignment(s) one cluster-cache entry
+// publishes: its own, if it holds one, and -- for a port alias, which
+// subscribes to its own EDS name -- the bare service's load assignment
+// republished under that name, in THIS snapshot (aether#1013). Caller must
+// hold clusterMu.
+func (c *SnapshotCache) appendEntryCLAsLocked(clas []types.Resource, entry clusterEntry) []types.Resource {
+	if entry.loadAssignment != nil {
+		clas = append(clas, entry.loadAssignment)
+	}
+	if entry.bareEDSAlias && entry.cluster != nil {
+		if cla := proxy.LoadAssignmentAlias(c.bareServiceCLALocked(entry.service), edsServiceName(entry.cluster)); cla != nil {
+			clas = append(clas, cla)
+		}
+	}
+	return clas
+}
+
+// bareServiceCLALocked returns the load assignment published under a service's
+// BARE EDS resource name (the default HTTP cluster's subscription): the HTTP
+// default entry's when it owns one, otherwise the L4 floor entry's, which takes
+// ownership when the service has no HTTP entry (buildTCPEndpointsLocked). Nil
+// when nothing publishes it. The clusters that must see the same membership
+// without sharing the subscription -- port aliases and TCP floors -- republish
+// it under their own names (proxy.LoadAssignmentAlias, aether#1013). Caller
+// must hold clusterMu.
+func (c *SnapshotCache) bareServiceCLALocked(serviceName string) *endpointv3.ClusterLoadAssignment {
+	if e, ok := c.clusters[serviceName]; ok && e.loadAssignment != nil {
+		return e.loadAssignment
+	}
+	if e, ok := c.tcpEntryLocked(serviceName); ok && e.loadAssignment != nil {
+		return e.loadAssignment
+	}
+	if e, ok := c.udpEntryLocked(serviceName); ok && e.loadAssignment != nil {
+		return e.loadAssignment
+	}
+	return nil
+}
+
+// edsServiceName is the EDS resource name a cluster subscribes to: its
+// eds_cluster_config.service_name, or the cluster name when that is unset.
+func edsServiceName(cl *clusterv3.Cluster) string {
+	if n := cl.GetEdsClusterConfig().GetServiceName(); n != "" {
+		return n
+	}
+	return cl.GetName()
 }
 
 // Endpoints returns the pre-built load assignment (cluster endpoints) for the given
@@ -441,8 +485,16 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 // its vhost disappears, no ODCDS request ever reaches the agent again: every
 // request to that authority fails until the ADS stream resets.
 //
-// An alias shares the default cluster's bare-service EDS (same endpoints, same
-// SAN pinning, same SNI) and carries NO vhost of its own: the default entry's
+// An alias has the default cluster's membership (same endpoints, same SAN
+// pinning, same SNI) but NOT its EDS subscription: it subscribes to its own
+// name, and clustersEndpointsAndVhosts republishes the bare service's load
+// assignment under it in the same snapshot (aether#1013). Sharing the bare name
+// was only accidentally safe: Envoy's delta-ADS WatchMap deduplicates
+// subscription interest per resource name, so an alias added in a LATER CDS
+// update than the default cluster (a Service gaining a port after the node
+// depends on it) sent no subscribe, got no EDS, and warmed for the full 15 s
+// initial_fetch_timeout -- the #1008 mechanism. An alias carries NO vhost of
+// its own: the default entry's
 // vhost already claims the "<fqdn>:<defaultPort>" domain and the capture route
 // domains already claim the mesh-port spelling, and a second vhost with either
 // domain would be a duplicate-domain RDS reject. A port that has a real per-port
@@ -460,13 +512,15 @@ func (c *SnapshotCache) buildPortAliasesLocked(serviceName, fqdn string, default
 			continue
 		}
 		c.clusters[alias] = clusterEntry{
-			// EDS resource name is the BARE service (not the alias): the alias is the
-			// same endpoint set as the default cluster, so it must not publish a
-			// second, duplicate load assignment.
-			cluster:       proxy.NewServiceCluster(alias, serviceName, serviceName, sortedKeys),
+			// EDS resource name is the ALIAS, never the bare service: the load
+			// assignment under it is derived from the bare one at snapshot time
+			// (bareEDSAlias), so the alias tracks every endpoint change of the
+			// default cluster without a second copy to keep in sync here.
+			cluster:       proxy.NewServiceCluster(alias, alias, serviceName, sortedKeys),
 			sanNamespaces: sanNamespaces,
 			service:       serviceName,
 			sni:           strconv.Itoa(int(port)),
+			bareEDSAlias:  true,
 		}
 	}
 }
@@ -580,8 +634,9 @@ func endpointSubsetKeys(endpoints []*registryv1.ServiceEndpoint, nodeSubsetKeys 
 // must hold clusterMu.
 func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[string]struct{}, tcpServiceEndpoints map[string][]*registryv1.ServiceEndpoint, localRegion, localZone string, waypoint proxy.WaypointRewrite) {
 	// TCP service entries: bare-name EDS load assignment + SAN/sni only. The
-	// capture TCP floor's "tcp:<svc>" cluster (captureTCPClusters) references
-	// that EDS resource (by bare name) and pins peer identity from sanNamespaces.
+	// capture TCP floor's "tcp:<svc>" cluster (captureTCPClusters) republishes
+	// that load assignment under its OWN EDS name (aether#1013) and pins peer
+	// identity from sanNamespaces.
 	//
 	// Keyed by the entry's own Envoy cluster name, "tcp:<fqdn>", NOT by the bare
 	// service name (proposal 037 design (a)). The HTTP pass above writes
@@ -628,8 +683,12 @@ func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[str
 // therefore have to be produced from the same derived facts in the same
 // snapshot generation — proposal 037 Risk 1, and the same shape as #877.
 //
-// Each carries its OWN load assignment, named <fqdn>:<port> and filtered to the
-// endpoints that advertise that port AS TCP. Sharing the bare-name EDS would
+// Each carries its OWN load assignment, named after its own cluster
+// (tcp:<fqdn>:<port>) and filtered to the endpoints that advertise that port AS
+// TCP. The name is the cluster's, not the HTTP per-port spelling <fqdn>:<port>:
+// that one belongs to the HTTP per-port and :<port> alias clusters, and two
+// load assignments (or two subscribers) under one EDS name is exactly the
+// sharing aether#1013 removes. Mirroring the bare-name EDS instead would
 // put every pod of the service in the pool, including ones that do not serve
 // the port at all — the per-port membership filter is what makes adding a port
 // to a rolling Deployment safe, exactly as it already is for HTTP (proposal
@@ -656,9 +715,10 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 	// resolve to a cluster that does not exist, and tcp_proxy would kill those
 	// connections silently — the same Risk 1 shape as a chain without a cluster.
 	//
-	// It carries NO load assignment of its own: it shares the floor's bare-name
-	// EDS, exactly as the HTTP :<port> aliases share their default cluster's
-	// (buildPortAliasesLocked). And its sni stays EMPTY, because it addresses
+	// It carries NO load assignment of its own: its cluster subscribes to its
+	// own EDS name and captureTCPClusters republishes the bare service's load
+	// assignment under it, exactly as the HTTP :<port> aliases do
+	// (buildPortAliasesLocked, aether#1013). And its sni stays EMPTY, because it addresses
 	// the primary port — the destination's default inbound floor chain is what
 	// serves it, and a non-empty SNI would route it to a per-port chain that
 	// does not exist (#306).
@@ -683,7 +743,7 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 			continue
 		}
 
-		claName := proxy.PortClusterName(serviceName, c.meshDomain, port)
+		claName := proxy.TCPPortClusterName(tcpName, port)
 		portCla := proxy.NewClusterLoadAssignment(claName)
 		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(members))
 		for _, ep := range members {
@@ -711,9 +771,11 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 // the same service reference a load assignment named <serviceName>, and two EDS
 // resources with one name is a snapshot-consistency error in go-control-plane
 // (or a silent last-writer-wins). The HTTP entry owns it when the service has
-// one; the TCP entry then references it by name and carries no load assignment
-// of its own, exactly as the :<port> aliases do — clustersEndpointsAndVhosts
-// already guards on loadAssignment != nil.
+// one; the TCP entry then carries no load assignment of its own —
+// clustersEndpointsAndVhosts already guards on loadAssignment != nil. The TCP
+// floor cluster itself never subscribes to the bare name: captureTCPClusters
+// republishes it under the floor's own name (bareServiceCLALocked,
+// aether#1013).
 //
 // An HTTP entry with no CLA of its own (the retained-absent alias shape) does
 // not own one either, so the TCP entry takes ownership rather than leave the
@@ -881,18 +943,19 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 		}
 		if entry.absentSince.IsZero() {
 			entry.absentSince = now
-			// The default-port alias publishes no load assignment of its own (it
-			// shares the default cluster's bare-service EDS); synthesizing an empty
-			// one here would emit an orphan CLA under the alias name that nothing
-			// references.
+			// A port alias holds no load assignment of its own (its EDS copy is
+			// derived from the bare one at snapshot time, so a retained, emptied
+			// default entry empties it too); synthesizing one here would publish
+			// a second CLA under the alias name.
 			if entry.loadAssignment != nil {
 				// Name the replacement after the load assignment it replaces, NOT
 				// after the map key. They coincide for HTTP and per-port entries,
 				// but a TCP floor entry is keyed "tcp:<fqdn>" while publishing the
-				// BARE-name EDS resource its floor cluster resolves through
-				// (NewTCPServiceCluster's EdsClusterConfig.ServiceName). Keying off
-				// `name` there would retain an empty CLA under a name nothing
-				// references and leave the real one unpublished.
+				// BARE-name EDS resource (when no HTTP entry owns it) that its floor
+				// cluster's own-name copy is derived from (bareServiceCLALocked).
+				// Keying off `name` there would retain an empty CLA under a name
+				// that collides with the floor's copy and leave the bare one
+				// unpublished.
 				entry.loadAssignment = proxy.NewClusterLoadAssignment(entry.loadAssignment.GetClusterName())
 				entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
 			}
@@ -1048,7 +1111,7 @@ func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomai
 	if entry.loadAssignment != nil {
 		clas = make([]types.Resource, 0, len(twins))
 		for _, id := range q.identities {
-			clas = append(clas, proxy.QUICLoadAssignmentFrom(entry.loadAssignment, arms[id]))
+			clas = append(clas, proxy.LoadAssignmentAlias(entry.loadAssignment, arms[id]))
 		}
 	}
 	if entry.vhost == nil {

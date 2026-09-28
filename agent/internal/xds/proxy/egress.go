@@ -184,7 +184,7 @@ func SourceSAKeyFromSpiffeID(spiffeID string) string {
 //
 // The twin subscribes to its OWN EDS resource, named after the twin (the
 // control plane publishes the base's load assignment under that name too:
-// QUICLoadAssignmentFrom). It must not share the base's EDS name (aether#1008).
+// LoadAssignmentAlias). It must not share the base's EDS name (aether#1008).
 // Envoy's delta-ADS WatchMap deduplicates subscription interest per (type_url,
 // resource name): a twin added AFTER its base is subscribed -- a new
 // ServiceAccount's first pod on the node -- adds nothing to
@@ -355,10 +355,15 @@ func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []st
 		},
 		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
 			EdsConfig: config.XDSConfigSourceADS(),
-			// EDS resource name: the default cluster shares the bare-service EDS
-			// (all endpoints); a per-port cluster uses its own name so its EDS
-			// membership is filtered to pods advertising that port (safe new-port
-			// rollout). The cache keys load assignments by this name.
+			// EDS resource name: the default cluster subscribes to the
+			// bare-service EDS (all endpoints); a per-port cluster uses its own
+			// name so its EDS membership is filtered to pods advertising that
+			// port (safe new-port rollout). A port alias also uses its own name,
+			// with the bare membership republished under it
+			// (LoadAssignmentAlias): NO cluster but the default may subscribe
+			// to the bare name, or a later-added one is deduplicated by the
+			// delta-ADS WatchMap into 15 s of warming (aether#1013). The cache
+			// keys load assignments by this name.
 			ServiceName: edsServiceName,
 		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{

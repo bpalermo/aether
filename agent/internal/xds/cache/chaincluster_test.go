@@ -117,6 +117,6 @@ func TestCaptureChainsResolveAgainstCDS(t *testing.T) {
 	// destination demuxes to the right loopback port. The floor must NOT (#306).
 	pc, ok := snap.GetResources(resourcev3.ClusterType)["tcp:multi.aether-test.aether.internal:5432"].(*clusterv3.Cluster)
 	require.True(t, ok)
-	assert.Equal(t, "multi.aether-test.aether.internal:5432", pc.GetEdsClusterConfig().GetServiceName(),
-		"the per-port cluster resolves its OWN load assignment, filtered to pods advertising that port as TCP")
+	assert.Equal(t, "tcp:multi.aether-test.aether.internal:5432", pc.GetEdsClusterConfig().GetServiceName(),
+		"the per-port cluster resolves its OWN load assignment, named after itself and filtered to pods advertising that port as TCP")
 }

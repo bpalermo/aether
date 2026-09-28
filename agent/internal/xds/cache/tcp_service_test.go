@@ -64,8 +64,11 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 	// The TCP floor cluster is present, named tcp:<svc>.<ns>.<domain>.
 	tcpCluster, ok := clusters["tcp:echo-tcp.aether-test.aether.internal"].(*clusterv3.Cluster)
 	require.True(t, ok, "tcp floor cluster must be present")
-	assert.Equal(t, "aether-test/echo-tcp", tcpCluster.GetEdsClusterConfig().GetServiceName(),
-		"tcp cluster EDS resource is the namespace-qualified service key")
+	assert.Equal(t, "tcp:echo-tcp.aether-test.aether.internal", tcpCluster.GetEdsClusterConfig().GetServiceName(),
+		"tcp cluster subscribes to its own EDS name (aether#1013)")
+	floorCLA, ok := snap.GetResources(resourcev3.EndpointType)["tcp:echo-tcp.aether-test.aether.internal"].(*endpointv3.ClusterLoadAssignment)
+	require.True(t, ok, "the floor's load assignment rides the same snapshot as the floor")
+	require.Len(t, floorCLA.GetEndpoints(), 1, "the floor's EDS is the bare service's membership")
 	// Per-source mTLS is one socket with a per-connection certificate selector
 	// (#842); the per-identity matcher and socket list are gone. The TCP floor
 	// follows the HTTP path exactly — it differs only in ALPN and SNI.
