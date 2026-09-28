@@ -16,8 +16,10 @@ go_test(
     size = "medium",
     srcs = [
         "ads_sds_test.go",
+        "alias_floor_eds_test.go",
         "harness_test.go",
         "pool_identity_test.go",
+        "quic_odcds_test.go",
         "quic_path_a_test.go",
         "quic_selection_test.go",
         "quic_twin_eds_test.go",
@@ -33,6 +35,7 @@ go_test(
     deps = [
         "//agent/internal/xds/config",
         "//agent/internal/xds/proxy",
+        "//common/constants/mesh",
         "//test/envoybin",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
@@ -47,6 +50,7 @@ go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/router/v3:router",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/set_filter_state/v3:set_filter_state",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/tcp_proxy/v3:tcp_proxy",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/quic/v3:quic",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3:on_demand_secret",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",

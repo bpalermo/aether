@@ -233,6 +233,14 @@ nothing, because nothing in it introduced a new identity. Fixed in #1012 (each t
 gets its own EDS resource name); this step is what lets a soak see a regression of it.
 Gotcha 8's shape again: the schedule never created the state the defect needed.
 
+**Since #1020 it also proves the on-demand path.** Twins are demand-scoped: a new
+identity has a selection arm on svc-1's route but no twin until it dials. Its **first**
+request to svc-1 resolves to the missing twin. The proxy fetches it over ODCDS, and
+the agent admits the pair and publishes the twin together with its load assignment.
+That request, and every one after it, must be **200 with no `NC`**. An `NC` in the
+step's first ~2 s is the on-demand fetch failing, and ~15 s of them is #1008 back (every
+on-demand twin is a late twin). Either way, it is a gate failure.
+
 **What it does.** At T0+126 and T0+288 (`SOAK_NEWSA_OFFSETS`, minutes; nudged off the
 T0+120 edge roll and the T0+300 TRIPLE so neither confounds the other) the driver:
 
@@ -267,7 +275,7 @@ Knobs: `SOAK_NEWSA=0` (opt out), `SOAK_NEWSA_OFFSETS`, `SOAK_NEWSA_SECONDS`,
 `SOAK_NEWSA_RPS`, `SOAK_NEWSA_TARGETS` (`name=url …`), `SOAK_NEWSA_UPSTREAMS`,
 `SOAK_NEWSA_IMAGE`. `churn.sh --new-sa-once` runs one step now and exits (step 0d).
 
-**Gate.** Both must hold, at T0+8h:
+**Gate.** Both must hold, at T0+8h (and gate 3 below):
 
 ```promql
 # 1. no twin ever waited out its initial fetch (the #1008 signature)
@@ -286,6 +294,28 @@ log_name:aether_access_logs AND reporter:source AND user_agent:~"aether-soak-new
 
 plus the driver's own reading: `grep 'newsa/' /tmp/soak-churn.log` shows two `ROLLED`
 lines with `non2xx=0,connerr=0` on both destinations.
+
+**Gate 3 (#1020): twin count = observed pairs.** Every `quic:` twin on a node must be
+a (source ServiceAccount, destination) pair that sent traffic, and
+`envoy_cluster_manager_active_clusters` must be flat across the run except for +1 per
+new pair (each new-SA step adds one on its node when it first dials svc-1, and removes
+it when the step's pod is deleted). A step that tracks pod churn rather than new callers
+is the pre-#1020 SA × destination fan-out.
+
+```promql
+# twins per node == pairs with traffic (k6 loaders + prober + the new-SA steps)
+count by (node) (envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"})
+count by (node) (increase(envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"}[8h]) > 0)
+# flat, but for the new-SA steps' +1/-1 and the drift of the rolls
+envoy_cluster_manager_active_clusters
+# no on-demand fetch timed out; no pair refused by the agent
+sum(increase(envoy_cluster_manager_odcds_init_fetch_timeout_total[8h])) == 0
+sum(increase(aether_agent_quic_twin_refused_total[8h])) == 0
+```
+
+rev242's 118 twins (59 local SAs × 2 destinations) with 2 carrying traffic is the red
+reading for the first line. The agent's `east-west QUIC fan-out quic_clusters=N
+observed_pairs=P` log line gives the same number per node.
 
 **Negative control — the gate can fail.** rev242 (pre-#1012) *is* the red reading:
 `envoy_cluster_init_fetch_timeout_total{aether_cluster="aether-test/svc-{1,2}@aether-test/default"}`
@@ -309,7 +339,7 @@ log_name:aether_access_logs AND reporter:source AND user_agent:~"aether-soak-new
 
 If `svc-1` is not QUIC-enabled on the build under test there is no twin and the
 `@` half of the gate is vacuous — say so in the grade rather than reading it as a
-pass. (Once #979 drops the allow-list, every destination has twins.)
+pass. (Once #979 drops the allow-list, every destination is QUIC-enabled; its twins still exist only for the pairs that dial it, #1020.)
 
 **What a FAIL reads like.** The #1008 class looks like this, all on one node, in the
 first ~15 s of one step:
@@ -472,6 +502,7 @@ one, know which kind it is and what proves it can move:
 | `aether_cni_operations_total{operation="capture_divert",result="error"}` | **no series** | `…{operation="add"}` must exist (the export works) |
 | `envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}` (#1014) | **no series**; a failure is BORN at 1, so `increase()` alone reads 0 — use `max_over_time` too | rev242's red reading (above), and each step's own `@…/sa-new-*` twin series existing with traffic |
 | `503/NC` for `user_agent:aether-soak-newsa` | no rows | the same query without `response_flags:NC` returns the step's requests |
+| stray TCP-floor landings `envoy_tcp_in_tcp_<pod>_downstream_cx_total` on pods with no raw-TCP primary port (#1007/#1022; query in `docs/runbook.md`, "Cross-pod L4 landings") | **no series** once every proxy runs the #1022 thread-self patch | rev242 is the negative control: non-zero on svc-1..5, prober, k6-soak-loader and udp-dialer, with matching `ssl_fail_verify_san` ticks on `aether-test/tcp-echo`/`mixed-svc`; and `tcp-echo`'s own `in_tcp_*` and the `*_9000` per-port chains climbing (the chain family is exported) |
 
 ### The Phase 4 evidence clock (proposal 037)
 
@@ -594,9 +625,10 @@ helm upgrade aether ... -f <saved values> \
   --set 'agent.eastWestQuicServices[1]=aether-test/svc-2'
 ```
 
-The agent logs `east-west QUIC fan-out quic_clusters=N local_identities=I
-allow_listed_services=S` on every node with a caller; `N = I × S` is the budget the
-run is paying for. Since #962 the twins have their own stats key
+The agent logs `east-west QUIC fan-out quic_clusters=N observed_pairs=P
+local_identities=I allow_listed_services=S` on every node with a caller. Since #1020
+`N` is the number of (source SA, destination) pairs that have dialled, not `I × S`. That
+is the budget the run is paying for, and on talos it is ~10 instead of 118. Since #962 the twins have their own stats key
 `<ns>/<svc>@<ns>/<sa>`, so the leg grades from Prometheus (the admin is loopback-only
 on talos and `kubectl exec` is denied):
 

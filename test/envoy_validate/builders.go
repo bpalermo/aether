@@ -20,6 +20,7 @@ package envoy_validate
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -235,8 +236,12 @@ func QUICOutboundBootstrapJSON() ([]byte, error) {
 }
 
 const (
-	quicSourceA   = "spiffe://" + trustDomain + "/ns/demo/sa/source-a"
-	quicSourceB   = "spiffe://" + trustDomain + "/ns/demo/sa/source-b"
+	quicSourceA = "spiffe://" + trustDomain + "/ns/demo/sa/source-a"
+	quicSourceB = "spiffe://" + trustDomain + "/ns/demo/sa/source-b"
+	// quicSourceC is a local ServiceAccount that has NOT dialled the
+	// destination (aether#1020): its arm is on the route, its twin is not
+	// built -- the on_demand filter fetches it on first use.
+	quicSourceC   = "spiffe://" + trustDomain + "/ns/demo/sa/source-c"
 	quicDestSvc   = "demo/echo"
 	quicDestSA    = "spiffe://" + trustDomain + "/ns/demo/sa/echo"
 	quicDestPort  = "8080"
@@ -251,6 +256,15 @@ func QUICOutboundArms() map[string]string {
 		quicSourceA: proxy.QUICClusterName(quicDestSvc, meshDomain, proxy.SourceSAKeyFromSpiffeID(quicSourceA)),
 		quicSourceB: proxy.QUICClusterName(quicDestSvc, meshDomain, proxy.SourceSAKeyFromSpiffeID(quicSourceB)),
 		"":          fqdn, // on_no_match: the h2 cluster
+	}
+}
+
+// QUICOutboundUnobservedArms is the arm the fixture route carries for a
+// local source whose (source, destination) pair has not been observed
+// (aether#1020): it names a twin the fixture deliberately does NOT build.
+func QUICOutboundUnobservedArms() map[string]string {
+	return map[string]string{
+		quicSourceC: proxy.QUICClusterName(quicDestSvc, meshDomain, proxy.SourceSAKeyFromSpiffeID(quicSourceC)),
 	}
 }
 
@@ -269,8 +283,14 @@ func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 		twins = append(twins, proxy.QUICClusterFrom(base, arms[id], id, "spiffe://"+trustDomain, []string{quicDestSA}, proxy.QUICServerName(quicDestPort, fqdn)))
 	}
 
+	// Demand-scoped twins (aether#1020): the route carries an arm for EVERY
+	// local source, the snapshot a twin only for the observed pairs (a, b).
+	// Source c's arm names a cluster that is not here, which is how its first
+	// request reaches ODCDS; validation must accept that shape.
+	selection := maps.Clone(arms)
+	maps.Copy(selection, QUICOutboundUnobservedArms())
 	vh := proxy.BuildOutboundClusterVirtualHost(fqdn, []string{fqdn})
-	if n := proxy.ApplyQUICClusterSelection(vh, fqdn, arms); n != 1 {
+	if n := proxy.ApplyQUICClusterSelection(vh, fqdn, selection); n != 1 {
 		return nil, fmt.Errorf("ApplyQUICClusterSelection rewrote %d routes, want 1", n)
 	}
 	rc := &routev3.RouteConfiguration{Name: quicRouteName, VirtualHosts: []*routev3.VirtualHost{vh}}
@@ -278,7 +298,10 @@ func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 	hcm := &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix:     "quic_out",
 		RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{RouteConfig: rc},
-		HttpFilters: []*http_connection_managerv3.HttpFilter{{
+		// Production's on_demand filter ahead of the router, as on every
+		// node-proxy HCM: it is what turns an arm naming an unbuilt twin into
+		// an ODCDS request instead of a 503 (aether#1020).
+		HttpFilters: []*http_connection_managerv3.HttpFilter{proxy.OnDemandHTTPFilter(), {
 			Name:       "envoy.filters.http.router",
 			ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{TypedConfig: mustAny(&routerv3.Router{})},
 		}},
@@ -296,7 +319,15 @@ func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 		}}},
 		FilterChains: []*listenerv3.FilterChain{chain},
 	}
-	clusters := []*clusterv3.Cluster{xdsCluster(), h2}
+	// The service's mesh-port alias ("<fqdn>:18081", the ODCDS cold-path
+	// authority), as the cache builds it (buildPortAliasesLocked): the default
+	// cluster's membership on its OWN EDS name (aether#1013), with the same
+	// per-source mTLS and the port as SNI.
+	aliasName := proxy.PortClusterName(quicDestSvc, meshDomain, meshconst.ProxyOutboundPort)
+	alias := proxy.NewServiceCluster(aliasName, aliasName, quicDestSvc, nil)
+	proxy.InjectUpstreamMTLS(alias, fmt.Sprintf(nodeSpiffeIDFmt, trustDomain), "spiffe://"+trustDomain,
+		[]string{quicDestSA}, strconv.Itoa(int(meshconst.ProxyOutboundPort)), "")
+	clusters := []*clusterv3.Cluster{xdsCluster(), h2, alias}
 	clusters = append(clusters, twins...)
 	return newBootstrap(clusters, []*listenerv3.Listener{l}), nil
 }
@@ -784,12 +815,15 @@ func buildCaptureUDPBootstrap() (*bootstrapv3.Bootstrap, error) {
 }
 
 // newTCPFloorCluster builds a service's "tcp:" floor cluster exactly as
-// SnapshotCache.captureTCPClusters does: NewTCPServiceCluster plus the
-// per-connection mesh mTLS socket, SAN-pinned to the backend's workload
-// identity. saName is the bare service name the SPIFFE ID's sa/ segment
-// carries (refreshEntryMTLSLocked uses the bare name, not the key).
+// SnapshotCache.captureTCPClusters does: NewTCPServiceCluster on its OWN EDS
+// name (the agent republishes the bare service's load assignment under it,
+// aether#1013) plus the per-connection mesh mTLS socket, SAN-pinned to the
+// backend's workload identity. saName is the bare service name the SPIFFE
+// ID's sa/ segment carries (refreshEntryMTLSLocked uses the bare name, not the
+// key).
 func newTCPFloorCluster(serviceKey, saName string) *clusterv3.Cluster {
-	c := proxy.NewTCPServiceCluster(proxy.TCPClusterName(serviceKey, meshDomain), serviceKey, serviceKey)
+	name := proxy.TCPClusterName(serviceKey, meshDomain)
+	c := proxy.NewTCPServiceCluster(name, name, serviceKey)
 	proxy.InjectUpstreamTCPMTLS(
 		c,
 		fmt.Sprintf(nodeSpiffeIDFmt, trustDomain),
@@ -1452,7 +1486,7 @@ func QUICUpstreamsSharingStatsKey(bootstrapJSON []byte) ([]string, error) {
 // that shares its base's EDS name and arrives after the base is subscribed
 // never sends a subscribe and warms for the full initial_fetch_timeout. A
 // twin must subscribe to its own name (proxy.QUICClusterFrom) and the agent
-// publishes the base's load assignment under it (proxy.QUICLoadAssignmentFrom).
+// publishes the base's load assignment under it (proxy.LoadAssignmentAlias).
 func QUICUpstreamsSharingEDSName(bootstrapJSON []byte) ([]string, error) {
 	var bs bootstrapv3.Bootstrap
 	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
@@ -1474,6 +1508,54 @@ func QUICUpstreamsSharingEDSName(bootstrapJSON []byte) ([]string, error) {
 	var bad []string
 	for _, c := range bs.GetStaticResources().GetClusters() {
 		if c.GetType() == clusterv3.Cluster_EDS && strings.HasPrefix(c.GetName(), "quic:") && len(owners[edsName(c)]) > 1 {
+			bad = append(bad, c.GetName())
+		}
+	}
+	return bad, nil
+}
+
+// ClustersSharingServiceEDSName returns the name of every EDS cluster that does
+// not subscribe to an EDS resource of its own (aether#842 SDS, #1008 QUIC
+// twins, #1013 port aliases and TCP floors). Envoy's delta-ADS WatchMap
+// deduplicates subscription interest per (type_url, resource name), so a
+// cluster that shares a name with an already-subscribed sibling and arrives in
+// a LATER CDS update sends no subscribe and warms for the full
+// initial_fetch_timeout.
+//
+// The one cluster allowed to subscribe to a name other than its own is a
+// service's DEFAULT cluster: <svc>.<ns>.<domain> on the bare "<ns>/<svc>" key
+// (proxy.ServiceClusterName). Every other kind -- per-port, port alias
+// "<fqdn>:<port>", TCP floor "tcp:<fqdn>" and its per-port/primary-alias
+// "tcp:<fqdn>:<port>", QUIC twin "quic:..." -- must subscribe to its own
+// cluster name, and the agent publishes the matching load assignment under it
+// (proxy.LoadAssignmentAlias for the ones that mirror the bare membership).
+// A name with more than one subscriber is reported for every subscriber.
+func ClustersSharingServiceEDSName(bootstrapJSON []byte) ([]string, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	edsName := func(c *clusterv3.Cluster) string {
+		if n := c.GetEdsClusterConfig().GetServiceName(); n != "" {
+			return n
+		}
+		return c.GetName()
+	}
+	owners := map[string]int{}
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if c.GetType() == clusterv3.Cluster_EDS {
+			owners[edsName(c)]++
+		}
+	}
+	var bad []string
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if c.GetType() != clusterv3.Cluster_EDS {
+			continue
+		}
+		eds := edsName(c)
+		ownName := eds == c.GetName()
+		defaultOfService := proxy.ServiceClusterName(eds, meshDomain) == c.GetName()
+		if (!ownName && !defaultOfService) || owners[eds] > 1 {
 			bad = append(bad, c.GetName())
 		}
 	}

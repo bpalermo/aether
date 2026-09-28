@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -177,6 +178,16 @@ func TestEnvoyValidate(t *testing.T) {
 		unpinned, err := UnpinnedMeshClusters(data)
 		if err != nil {
 			t.Fatalf("SAN-pin check %s: %v", b.name, err)
+		}
+		// No cluster but a service's default may subscribe to an EDS name that
+		// is not its own (aether#842/#1008/#1013): a later-added sharer is
+		// deduplicated by the delta-ADS WatchMap into 15 s of warming.
+		sharing, err := ClustersSharingServiceEDSName(data)
+		if err != nil {
+			t.Fatalf("EDS-name check %s: %v", b.name, err)
+		}
+		if len(sharing) > 0 {
+			t.Errorf("%s: clusters not subscribed to an EDS name of their own: %v", b.name, sharing)
 		}
 		if len(unpinned) > 0 {
 			t.Errorf("%s: upstream TLS contexts with no match_typed_subject_alt_names: %v\n"+
@@ -1082,6 +1093,88 @@ func TestQUICUpstreamsHaveTheirOwnEDSName(t *testing.T) {
 	}
 }
 
+// TestNoNonDefaultClusterSharesTheServiceEDSName is the aether#1013 gate over
+// the fixtures that carry the cluster kinds that used to share the default
+// cluster's bare-service EDS name: the port alias (quic_outbound, next to the
+// default cluster and the twins) and the TCP floors (capture_tcproute,
+// capture_tlsroute). The fixtures must pass ClustersSharingServiceEDSName; the
+// anti-vacuity half rewrites every alias, floor and twin back to the bare
+// service name (its alt_stat_name, which is the bare key for all three --
+// with the twin's "@<ns>/<sa>" suffix stripped) and requires each one to be
+// flagged.
+func TestNoNonDefaultClusterSharesTheServiceEDSName(t *testing.T) {
+	for _, b := range []struct {
+		name string
+		fn   func() ([]byte, error)
+		// kinds is the minimum count of each rewritten kind the fixture must
+		// carry, so the check is not vacuous.
+		kinds map[string]int
+	}{
+		{"quic_outbound_bootstrap.json", QUICOutboundBootstrapJSON, map[string]int{"alias": 1, "quic": 2}},
+		{"capture_tcproute_bootstrap.json", CaptureTCPRouteBootstrapJSON, map[string]int{"tcp": 2}},
+		{"capture_tlsroute_bootstrap.json", CaptureTLSRouteBootstrapJSON, map[string]int{"tcp": 3}},
+	} {
+		t.Run(b.name, func(t *testing.T) {
+			data, err := b.fn()
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			bad, err := ClustersSharingServiceEDSName(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bad) > 0 {
+				t.Errorf("clusters not subscribed to an EDS name of their own: %v", bad)
+			}
+
+			bs := &bootstrapv3.Bootstrap{}
+			if err := protojson.Unmarshal(data, bs); err != nil {
+				t.Fatalf("unmarshal bootstrap: %v", err)
+			}
+			seen := map[string]int{}
+			var rewritten []string
+			for _, c := range bs.GetStaticResources().GetClusters() {
+				var kind string
+				switch {
+				case strings.HasPrefix(c.GetName(), "quic:"):
+					kind = "quic"
+				case strings.HasPrefix(c.GetName(), "tcp:"):
+					kind = "tcp"
+				case c.GetType() == clusterv3.Cluster_EDS && strings.Contains(c.GetName(), ":"):
+					kind = "alias"
+				default:
+					continue
+				}
+				bare, _, _ := strings.Cut(c.GetAltStatName(), "@")
+				if bare == "" || c.GetEdsClusterConfig() == nil {
+					t.Fatalf("%s %s has no bare alt_stat_name or no eds_cluster_config", kind, c.GetName())
+				}
+				seen[kind]++
+				c.EdsClusterConfig.ServiceName = bare
+				rewritten = append(rewritten, c.GetName())
+			}
+			for kind, want := range b.kinds {
+				if seen[kind] < want {
+					t.Fatalf("fixture carries %d %s clusters, want >= %d: the check would be vacuous", seen[kind], kind, want)
+				}
+			}
+			shared, err := protojson.Marshal(bs)
+			if err != nil {
+				t.Fatalf("marshal rewritten bootstrap: %v", err)
+			}
+			flagged, err := ClustersSharingServiceEDSName(shared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range rewritten {
+				if !slices.Contains(flagged, name) {
+					t.Errorf("the bare-service-EDS shape of %s was not reported (flagged %v)", name, flagged)
+				}
+			}
+		})
+	}
+}
+
 // TestQUICOutboundFixtureCarriesTheSelection is the anti-vacuity half of the
 // QUIC upstream checks: the fixture must contain both `quic:` twins with a
 // QuicUpstreamTransport, and a route whose matcher arms map each source
@@ -1132,6 +1225,19 @@ func TestQUICOutboundFixtureCarriesTheSelection(t *testing.T) {
 							if arms[id] != name {
 								t.Errorf("arm %s = %q, want %q", id, arms[id], name)
 							}
+						}
+						// Demand-scoped twins (aether#1020): an unobserved
+						// source keeps its arm, and its twin is NOT built.
+						for id, name := range QUICOutboundUnobservedArms() {
+							if arms[id] != name {
+								t.Errorf("unobserved arm %s = %q, want %q", id, arms[id], name)
+							}
+							if quicClusters[name] {
+								t.Errorf("twin %q for an unobserved pair is built; it must be fetched on demand", name)
+							}
+						}
+						if n := len(hcm.GetHttpFilters()); n < 2 || hcm.GetHttpFilters()[0].GetName() != "envoy.filters.http.on_demand" {
+							t.Errorf("the selecting HCM must run the on_demand filter first (an arm to an unbuilt twin 503s without it): %v", hcm.GetHttpFilters())
 						}
 						if r.GetRoute().GetEarlyDataPolicy() != nil {
 							t.Errorf("route to a quic: cluster sets early_data_policy (038 R4)")

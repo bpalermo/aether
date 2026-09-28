@@ -55,6 +55,8 @@ func TestQUICTwinsSubscribeToTheirOwnEDSResource(t *testing.T) {
 		},
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	// Twins are demand-scoped (aether#1020): both sources have dialled echo.
+	observeQUIC(t, c, "demo/echo", "demo/source-a", "demo/source-b")
 
 	echo := proxy.ServiceClusterName("demo/echo", c.meshDomain)
 	twin := func(sa string) string { return proxy.QUICClusterName("demo/echo", c.meshDomain, "demo/"+sa) }
@@ -96,16 +98,20 @@ func TestQUICTwinsSubscribeToTheirOwnEDSResource(t *testing.T) {
 
 	check(t, "source-a", "source-b")
 
-	// (c) A new ServiceAccount's first pod on the node: the twin and its load
-	// assignment must arrive in the SAME snapshot.
-	before, err := c.GetSnapshot("node-1")
-	require.NoError(t, err)
-	edsVersionBefore := before.GetVersion(resourcev3.EndpointType)
+	// (c) A new ServiceAccount's first pod on the node, and then its first
+	// request to echo (the on-demand observation, aether#1020): the twin and
+	// its load assignment must arrive in the SAME snapshot.
 	require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
 		Name: "c-0", Namespace: "demo", ServiceAccount: "source-c",
 		NetworkNamespace: "/var/run/netns/cni-c-0",
 	}, td))
 	require.NoError(t, c.generateSnapshot(ctx))
+	before, err := c.GetSnapshot("node-1")
+	require.NoError(t, err)
+	_, earlyTwin := before.GetResources(resourcev3.ClusterType)[twin("source-c")]
+	require.False(t, earlyTwin, "a pod alone must not build a twin: source-c has not dialled echo yet (aether#1020)")
+	edsVersionBefore := before.GetVersion(resourcev3.EndpointType)
+	observeQUIC(t, c, "demo/echo", "demo/source-c")
 	after, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
 	_, hasTwin := after.GetResources(resourcev3.ClusterType)[twin("source-c")]

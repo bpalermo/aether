@@ -929,15 +929,70 @@ Changing the entry re-issues every workload SVID on the agents' next fetch; no p
 roll. Order of operations on a live cluster: SPIRE first, wait for the agents'
 `envoy_sds_*_version` to move on every node, then the allow-list.
 
-**What to expect once a destination is listed.** The agent logs
-`east-west QUIC fan-out quic_clusters=N local_identities=I allow_listed_services=S`
-with `N = I × S` on every node that hosts a caller; the proxy admin (`127.0.0.1:9901`
-on the node) lists one `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster per local
-ServiceAccount. Requests from a caller take its own twin (a matcher cluster
-specifier keyed on the connection's `aether.source.spiffe_id` filter state); a
-caller with no twin — or a connection stamped before the trust domain was known —
-takes the h2 cluster. A GAMMA (HTTPRoute) rule whose single backendRef is the
-parent rides QUIC too; a weighted split stays h2 (#961).
+**What to expect once a destination is listed.** Twins are **demand-scoped**
+(#1020): a node builds a `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster only for a
+(source ServiceAccount, destination) pair that has actually dialled. The route to a
+listed destination carries one selection arm per local ServiceAccount (a matcher
+cluster specifier keyed on the connection's `aether.source.spiffe_id` filter
+state), each naming that source's twin, built or not. A source's **first** request
+resolves to a twin the proxy does not have yet; the HCM's `on_demand` filter asks
+the agent for it by name over ODCDS; the agent checks the name (destination listed
+and in the dependency set, source a ServiceAccount with a pod on the node), records
+the pair and publishes the twin with its own load assignment; the paused request
+resumes on it, over HTTP/3. That costs one local round trip. It was 17–24 ms in
+`//test/mtlspool`'s `TestOnDemandQUICTwinPerPair`, and every later request from
+the pair skips it. A connection with no identity stamp (stamped before the trust
+domain was known) takes `on_no_match`, the h2 cluster. A GAMMA (HTTPRoute) rule
+whose single backendRef is the parent rides QUIC too; a weighted split stays h2
+(#961) and never fetches a twin.
+
+The agent logs `east-west QUIC fan-out quic_clusters=N observed_pairs=P
+local_identities=I allow_listed_services=S` whenever `N` changes, and for each
+new pair `observed east-west QUIC pair (ODCDS); building its twin cluster=…`.
+`N` is the number of observed pairs whose source is still local, so it is at most
+`I × S` and on a real fleet much less (rev242: 118 possible, 2 used).
+
+**Reading twin count against pairs.** On one node, the `quic:` clusters in the
+proxy admin (`/clusters`) must be exactly the pairs with traffic. Pairs are
+persisted beside the observed upstreams (`state/observed-upstreams.json`,
+`quic_pairs`), so they survive an agent or agent+proxy roll. There is **no idle
+expiry**: nothing in xDS tells the agent that a twin stopped carrying traffic. A
+pair is pruned when its source ServiceAccount has no pod left on the node, or when
+its destination leaves the allow-list or the dependency set. A pair that did
+receive traffic therefore keeps its twin while both ends stay put, even if it goes
+quiet. `envoy_cluster_manager_active_clusters` rises by one when a pair first
+dials, falls when a pair is pruned, and is otherwise **flat**. A step that tracks
+pod churn rather than new callers is the pre-#1020 fan-out and a regression.
+
+```promql
+# twins per node, then the pairs among them that carried traffic in the last hour.
+# Under steady load the two are equal; the difference is pairs that went quiet
+# (kept by design, see above), never pairs that did not dial.
+count by (node) (envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"})
+count by (node) (increase(envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"}[1h]) > 0)
+envoy_cluster_manager_active_clusters
+```
+
+**The failure mode of the first request.** A twin the agent refuses, or one that
+takes longer than the `on_demand` timeout (2 s, `onDemandClusterTimeout`, the same
+bound the mesh catch-all's cold path uses), fails that request with **503 `NC`**.
+Envoy's API has no per-route fallback from an on-demand miss to the h2 cluster: the
+matcher's action names one cluster and nothing else. Refusals are counted by the
+agent as `aether_agent_quic_twin_refused_total{reason}`, and each one is a request
+that 503'd. `source_not_local` and `destination_not_quic_enabled` are races with a
+pod leaving or the allow-list changing. `malformed_name` means a route and the
+agent disagree on the naming. On the proxy, watch the ODCDS subscription:
+
+```promql
+# on-demand CDS fetches that timed out (a 503 NC per paused request): MUST stay 0
+sum(increase(envoy_cluster_manager_odcds_init_fetch_timeout_total[1h]))
+# agent refusals, by reason
+sum by (reason) (increase(aether_agent_quic_twin_refused_total[1h]))
+```
+
+The one gap that remains by design is an agent that is down while a new pair
+dials. That is the same exposure the capture catch-all already has (#682): the
+paused request 503s at the timeout, and the next request retries the fetch.
 
 **Verifying.** Per twin, the admin `/clusters` host rows (`<cluster>::<ip:port>::
 rq_total::N`) are the ground truth. In Prometheus the twins carry their own stats
@@ -963,7 +1018,7 @@ leaves warming" below.
 
 On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
-kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5).
+kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), including E4c: the node's `quic:` cluster count equals the (source, destination) pairs the suite drove.
 
 **Rolling back.** Remove the entries (or `--set agent.eastWestQuicServices=null`):
 the twins and the selection disappear on the next push and every caller is back on
@@ -979,6 +1034,12 @@ harmless to leave in place. Nothing here needs a proxy roll.
 QUIC-enabled destination, then recovers on its own. Other callers on the node
 are unaffected; h2 destinations are unaffected. On talos (rev242) it was 1,060
 client-visible 503/NC in 11 s when the k6 loaders started.
+
+Since #1020 every twin is a late twin, because it is built on the pair's first
+request. A regression of this fix would therefore hit **every** new (source,
+destination) pair, not only a new ServiceAccount. A 503 `NC` that ends after
+**~2 s** is a different failure: the on-demand fetch itself timed out or was
+refused. See "The failure mode of the first request" above.
 
 **Read.**
 
@@ -1005,16 +1066,70 @@ sends nothing because the resource did not change, and the twin waits out its
 response, so only a *late* twin — a new local ServiceAccount — is hit. Fixed in
 #1008: `proxy.QUICClusterFrom` points the twin at its own EDS name and the cache
 publishes the base's `ClusterLoadAssignment` under it
-(`proxy.QUICLoadAssignmentFrom`). Seeing this again means that pairing broke;
+(`proxy.LoadAssignmentAlias`). Seeing this again means that pairing broke;
 `//test/mtlspool`'s `TestLateQUICTwin*` pair reproduces it against the pinned
 proxy (the negative control times out at ~15 s by design).
 
 **Invariant.** A delta-ADS subscriber must never share a resource name with an
-already-subscribed sibling. It has now bitten twice: SDS (#842, the on-demand
-certificate selector behind every static SVID reference) and EDS (#1008, QUIC
-twins behind their base). Any new cluster, secret or config that is a clone or
-second consumer of an existing resource needs either its own resource name or
-its own `api_config_source`.
+already-subscribed sibling. It has bitten twice and was found latent a third
+time:
+
+- **SDS (#842):** the on-demand certificate selector behind every static SVID
+  reference. Fixed in #865 with its own SotW stream.
+- **EDS, QUIC twins (#1008):** a twin behind its h2 base.
+- **EDS, port aliases and TCP floors (#1013):** the `<fqdn>:<port>` alias
+  clusters (the ODCDS cold-path authorities, e.g. `:18081`) and the TCP floor
+  `tcp:<fqdn>` with its primary-port alias `tcp:<fqdn>:<port>` all subscribed to
+  the bare `<ns>/<svc>` name that the default cluster holds. They usually arrived
+  in the same CDS response as the default cluster, so nothing showed. A *later*
+  one would warm for 15 s: a Service gaining a port after the node depends on
+  it, or a service joining the capture TCP set (a TCPRoute attached) after it
+  is in the dependency set. For a floor that means every captured TCP
+  connection to the service is closed, because `tcp_proxy` has no cold path.
+
+The fix is the same for every EDS case. The cluster's
+`eds_cluster_config.service_name` is its own cluster name, and the agent
+republishes the bare `ClusterLoadAssignment` under that name in the same
+snapshot pass that emits the cluster (`proxy.LoadAssignmentAlias`, the one
+helper for twins, aliases and floors). The TCP per-port clusters
+`tcp:<fqdn>:<port>` keep their own port-filtered membership, now named after
+the cluster rather than the HTTP spelling `<fqdn>:<port>`. In `/config_dump`,
+only a service's default cluster `<svc>.<ns>.<domain>` may carry
+`service_name: <ns>/<svc>`. Every other EDS cluster's `service_name` equals its
+own name.
+
+Three gates keep it that way:
+
+- `//agent/internal/xds/cache` `TestNoNonDefaultClusterSharesTheBareServiceEDSName`
+  and `TestLate{PortAlias,TCPFloor}SubscribesToItsOwnEDSResource`.
+- `//test/envoy_validate` `ClustersSharingServiceEDSName`, over every fixture.
+- `//test/mtlspool` `TestLate{PortAlias,TCPFloor,QUICTwin}*`, against the
+  pinned proxy, each with a shared-name negative control that must time out at
+  ~15 s.
+
+Any new cluster, secret or config that is a clone or second consumer of an
+existing resource needs either its own resource name or its own
+`api_config_source`.
+
+**Fleet gate.** Port aliases, TCP floors and per-port clusters keep the default
+cluster's `alt_stat_name` (the bare `<ns>/<svc>`). Their stats therefore land in
+the default cluster's `cluster.<ns>/<svc>.*` tree. There is no `tcp:…` or
+`…:<port>` value of `aether_cluster` to match: the live harness read the late
+alias's and the late floor's timeout at `cluster.demo/echo.init_fetch_timeout`.
+Only a twin has its own key (`<ns>/<svc>@<ns>/<sa>`, #960). A mesh EDS cluster
+that follows the invariant never times out, so the gate is zero on the whole
+family, twins included, across a soak:
+
+```promql
+# #1013 (aliases, floors, per-port and default clusters: all report as <ns>/<svc>)
+sum(increase(envoy_cluster_init_fetch_timeout_total{aether_cluster=~"[^@]+/[^@]+"}[8h]))   # MUST be 0
+# #1008 (QUIC twins)
+sum(increase(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".+@.+"}[8h]))         # MUST be 0
+```
+
+A non-zero first line says *which service*, not which of its clusters. Tell them
+apart with `/config_dump`, as above, and the proxy log line
+`initial fetch timed out for …ClusterLoadAssignment`.
 
 ### Forwarded DNS keeps failing after a kube-dns roll
 
@@ -1754,6 +1869,70 @@ proxy **served** it, then compared with the node whose proxy was restarting.
    - Terminating nodes **scattered across many nodes** for one presented identity → the
      identity was not bound per-server, and `upstream_host` is not the TLS-terminating
      peer; record it and re-open the transport path.
+
+### Cross-pod L4 landings (#1007/#1022)
+
+**Symptom.** A node proxy's outbound L4 connection to `tcp-echo` or `mixed-svc` is
+rejected with `ssl_fail_verify_san`: it reached the inbound `:18008` listener of an
+**unrelated pod on the same node** (always the node's newest mesh pod), which presented
+its own SVID. The soak's `mp-dialer` shows it as one failure on every L4 leg at once.
+
+**Two defects, one proof order.**
+
+- **(b) #1022, Envoy.** `Network::Utility::execInNetworkNamespace` recorded the
+  namespace to return to from `/proc/self/ns/net`, which is the **main thread's**
+  namespace. `setns()` is per thread, so a worker calling it while the main thread was
+  briefly inside a pod netns (health-check connects every 5 s per pod, listener socket
+  creation) "restored" itself **into** that pod's netns and stayed there, creating its
+  later upstream sockets inside the pod where redirect-all capture diverted them. The
+  proxy carries `proxy/bazel/patches/envoy-aether1022-exec-in-netns-thread-self.patch`
+  (`/proc/thread-self/ns/net`, fallback `/proc/self/task/<tid>/ns/net`).
+- **(a) #1007, aether.** The capture listener's `use_original_dst: true` hands a
+  diverted connection to "the listener bound to its original address", looked up by the
+  address string only (`0.0.0.0:18008`, no netns), so the most recently added pod's
+  inbound listener wins.
+
+Fixing (a) alone **hides** (b): the leaked connection would then leave through the
+right endpoint's ORIGINAL_DST from a pod IP and succeed silently, and this counter would
+go quiet for the wrong reason. So (b) is proven on talos first, with (a) still in place.
+
+**The proof signal: TCP-floor connections on pods that serve no raw-TCP port.** The
+inbound listener's DEFAULT chain is the TCP floor (`in_tcp_<pod>`, stat prefix
+`inboundTCPFloorStatPrefix` in `agent/internal/xds/proxy/ingress.go`). Only a pod whose
+primary port is raw TCP can legitimately receive a connection there; per-port raw-TCP
+chains are `in_tcp_<pod>_<port>` and are excluded. The pod name is part of the METRIC
+NAME, so select by `__name__` pattern and read the RAW counters (a series is born on the
+first stray connection):
+
+```promql
+# Stray landings: default floor chain of every pod except tcp-echo (TCP-primary);
+# the per-port chains (…_<port>_downstream_cx_total) are legitimate and excluded.
+sum by (__name__) ({__name__=~"envoy_tcp_in_tcp_.*_downstream_cx_total",
+                    __name__!~"envoy_tcp_in_tcp_tcp_echo_.*|envoy_tcp_in_tcp_.*_[0-9]+_downstream_cx_total"})
+
+# The client side: the L4 clusters' SAN rejections, per node (never an instant query)
+max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"aether-test/(tcp-echo|mixed-svc)"}[8h])
+
+# The landing pod's inbound sees the client abort after its SAN check
+max_over_time(envoy_listener_inbound_ssl_connection_error_total[8h]) > 0   # by aether_pod, node
+```
+
+Attribute a tick by joining the three on node and minute: the `verify_san` +1 on node N,
+a new or incremented `in_tcp_<pod>` series for a pod on N, and that pod's
+`inbound_ssl_connection_error` climbing in the same minute (the 2026-09-27 16:37Z w04
+event in #1007 is the worked example).
+
+**Reading it.**
+
+| build | expected |
+|---|---|
+| rev242 and earlier (no thread-self patch) — the negative control | non-zero on svc-1..5, prober, k6-soak-loader, udp-dialer (and echo, uds-cr-echo, udp-echo); ~1 burst per node per hour; `verify_san` ticks on `tcp-echo`/`mixed-svc` |
+| first proxy with the #1022 patch, #1007 still unfixed | **no new series and no increments** after every node's proxy has rolled onto it (series from older generations age out with them) |
+
+A landing that persists on the patched proxy **refutes** #1022 as the (only) cause:
+something else moves node-proxy sockets into pod netns — keep #1007 unmerged and
+re-open the attribution. Only once the patched proxy reads zero for a full soak does
+the #1007 capture fix merge; after it, this counter no longer discriminates (b).
 
 ### Known-unexercised code paths
 

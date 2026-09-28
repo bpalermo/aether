@@ -440,14 +440,16 @@ func TestLoadClustersFromRegistry_MultiPort(t *testing.T) {
 
 	// The DEFAULT port also gets a cluster — the cold-path alias (#682). It owns
 	// no vhost (the default entry's vhost already claims the ":8080" domain) and
-	// no load assignment of its own (it shares the bare-service EDS), it exists
+	// holds no load assignment of its own (the bare service's is republished
+	// under the alias's OWN EDS name at snapshot time, aether#1013); it exists
 	// purely so the ODCDS catch-all's cluster_header ":authority" resolves for a
 	// client dialing the service on its default port.
 	alias, hasAlias := c.clusters["svc-mp.ns.aether.internal:8080"]
 	require.True(t, hasAlias, "default-port authority must resolve to a cluster (ODCDS cold path)")
 	assert.Equal(t, "svc-mp.ns.aether.internal:8080", alias.cluster.GetName())
-	assert.Equal(t, "ns/svc-mp", alias.cluster.GetEdsClusterConfig().GetServiceName(),
-		"the alias shares the default cluster's bare-service EDS")
+	assert.Equal(t, "svc-mp.ns.aether.internal:8080", alias.cluster.GetEdsClusterConfig().GetServiceName(),
+		"the alias subscribes to its own EDS name, never the bare service's (aether#1013)")
+	assert.True(t, alias.bareEDSAlias, "the alias republishes the bare load assignment at snapshot time")
 	assert.Nil(t, alias.vhost, "the default entry's vhost already owns the :8080 domain")
 	assert.Nil(t, alias.loadAssignment, "the alias publishes no second load assignment")
 	assert.Equal(t, "ns/svc-mp", alias.service, "the alias maps back to the service key (SAN/retention)")
@@ -461,8 +463,8 @@ func TestLoadClustersFromRegistry_MultiPort(t *testing.T) {
 	// application ports), so it must come from the mesh constant.
 	meshAlias, hasMeshAlias := c.clusters[fmt.Sprintf("svc-mp.ns.aether.internal:%d", meshconst.ProxyOutboundPort)]
 	require.True(t, hasMeshAlias, "the mesh Service port authority must resolve to a cluster (ODCDS cold path)")
-	assert.Equal(t, "ns/svc-mp", meshAlias.cluster.GetEdsClusterConfig().GetServiceName(),
-		"the mesh-port alias shares the default cluster's bare-service EDS")
+	assert.Equal(t, fmt.Sprintf("svc-mp.ns.aether.internal:%d", meshconst.ProxyOutboundPort), meshAlias.cluster.GetEdsClusterConfig().GetServiceName(),
+		"the mesh-port alias subscribes to its own EDS name, never the bare service's (aether#1013)")
 	assert.Nil(t, meshAlias.vhost, "the cap_http route domains already own the :18081 spelling")
 	assert.Nil(t, meshAlias.loadAssignment, "the alias publishes no second load assignment")
 	assert.Equal(t, "ns/svc-mp", meshAlias.service)

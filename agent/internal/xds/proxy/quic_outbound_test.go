@@ -28,6 +28,34 @@ func TestQUICClusterName(t *testing.T) {
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", QUICClusterName("demo/echo", "aether.internal", "demo/source-a"))
 }
 
+// TestParseQUICClusterName pins the inverse the on-demand twin path validates
+// with (issue #1020): it accepts exactly what QUICClusterName produces.
+func TestParseQUICClusterName(t *testing.T) {
+	name := QUICClusterName("demo/echo", "aether.internal", "demo/source-a")
+	svc, src, ok := ParseQUICClusterName(name, "aether.internal")
+	require.True(t, ok)
+	assert.Equal(t, "demo/echo", svc)
+	assert.Equal(t, "demo/source-a", src)
+	assert.True(t, IsQUICClusterName(name))
+	assert.False(t, IsQUICClusterName("echo.demo.aether.internal"))
+
+	for _, bad := range []string{
+		"echo.demo.aether.internal@demo/source-a",           // no prefix
+		"quic:echo.demo.aether.internal",                    // no source
+		"quic:echo.demo.aether.internal:8080@demo/source-a", // a port: never produced
+		"quic:echo.demo.example.com@demo/source-a",          // foreign domain
+		"quic:a.echo.demo.aether.internal@demo/source-a",    // extra label
+		"quic:echo.demo.aether.internal@source-a",           // source not <ns>/<sa>
+		"quic:echo.demo.aether.internal@demo/",              // empty sa
+		"quic:echo.demo.aether.internal@/source-a",          // empty ns
+		"quic:echo.demo.aether.internal@demo/source-a/x",    // extra segment
+		"quic:echo.demo.aether.internal@demo/a@b",           // a second @
+	} {
+		_, _, ok := ParseQUICClusterName(bad, "aether.internal")
+		assert.False(t, ok, bad)
+	}
+}
+
 // TestQUICAltStatName pins the per-source stats key (aether#960).
 func TestQUICAltStatName(t *testing.T) {
 	assert.Equal(t, "demo/echo@demo/source-a", QUICAltStatName("demo/echo", "demo/source-a"))
@@ -148,12 +176,12 @@ func TestApplyQUICClusterSelection(t *testing.T) {
 	assert.Equal(t, other, gvh.GetRoutes()[1].GetRoute().GetCluster(), "/elsewhere keeps its own cluster")
 }
 
-// TestQUICLoadAssignmentFrom pins the twin's load assignment (aether#1008): the
+// TestLoadAssignmentAlias pins the twin's load assignment (aether#1008): the
 // base's, byte for byte, under the twin's name. Every field of the base is
 // populated so a field the copy forgets shows up as a difference, and the
 // descriptor's field set is pinned so a NEW upstream field fails here instead
 // of silently vanishing from every twin.
-func TestQUICLoadAssignmentFrom(t *testing.T) {
+func TestLoadAssignmentAlias(t *testing.T) {
 	base := &endpointv3.ClusterLoadAssignment{
 		ClusterName: "demo/echo",
 		Endpoints: []*endpointv3.LocalityLbEndpoints{{
@@ -172,16 +200,16 @@ func TestQUICLoadAssignmentFrom(t *testing.T) {
 	}
 	const twin = "quic:echo.demo.aether.internal@demo/source-a"
 
-	got := QUICLoadAssignmentFrom(base, twin)
+	got := LoadAssignmentAlias(base, twin)
 	require.Equal(t, twin, got.GetClusterName())
 	assert.Equal(t, "demo/echo", base.GetClusterName(), "the base must not be renamed")
 	renamed, _ := proto.Clone(got).(*endpointv3.ClusterLoadAssignment)
 	renamed.ClusterName = base.GetClusterName()
 	assert.True(t, proto.Equal(base, renamed), "the twin's CLA is the base's in every field but the name")
 
-	a, err := proto.MarshalOptions{Deterministic: true}.Marshal(QUICLoadAssignmentFrom(base, twin))
+	a, err := proto.MarshalOptions{Deterministic: true}.Marshal(LoadAssignmentAlias(base, twin))
 	require.NoError(t, err)
-	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(QUICLoadAssignmentFrom(base, twin))
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(LoadAssignmentAlias(base, twin))
 	require.NoError(t, err)
 	assert.Equal(t, a, b, "identical inputs must marshal to identical bytes (delta-xDS hashing)")
 
@@ -191,6 +219,6 @@ func TestQUICLoadAssignmentFrom(t *testing.T) {
 		fields = append(fields, string(fds.Get(i).Name()))
 	}
 	assert.ElementsMatch(t, []string{"cluster_name", "endpoints", "named_endpoints", "policy"}, fields,
-		"ClusterLoadAssignment grew a field: QUICLoadAssignmentFrom must carry it")
-	assert.Nil(t, QUICLoadAssignmentFrom(nil, twin))
+		"ClusterLoadAssignment grew a field: LoadAssignmentAlias must carry it")
+	assert.Nil(t, LoadAssignmentAlias(nil, twin))
 }

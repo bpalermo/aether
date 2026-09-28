@@ -269,12 +269,24 @@ type SnapshotCache struct {
 	// per service. Guarded by depMu.
 	udsServicePolicies map[string]string
 	// quicServices is the east-west QUIC allow-list (proposal 038 Phase 4b,
-	// --east-west-quic-services): "<ns>/<svc>" destinations that get one
-	// per-source `quic:` cluster per local ServiceAccount and a source-selecting
-	// route. Guarded by depMu; a listed service is forced into the dependency
+	// --east-west-quic-services): "<ns>/<svc>" destinations whose routes select
+	// a per-source `quic:` cluster, built for each observed pair (quicPairs).
+	// Guarded by depMu; a listed service is forced into the dependency
 	// set (populateStaticDepsLocked) because the QUIC clusters clone the h2
 	// entry and a destination outside the set has no entry to clone.
 	quicServices map[string]struct{}
+	// quicPairs is the OBSERVED east-west QUIC demand (issue #1020): the
+	// (destination, source ServiceAccount) pairs whose `quic:` twin the node
+	// proxy asked for on demand, valued with when each was first recorded. A
+	// twin is built only for these. No idle TTL (the proxy never says a twin
+	// went idle); pruned when the source leaves the node or the destination
+	// leaves the allow-list / dependency set (pruneQUICPairsLocked). Guarded
+	// by depMu; persisted with observedDeps.
+	quicPairs map[quicPair]time.Time
+	// localPodsSynced is set once LoadListenersFromStorage has merged the
+	// node's pod records: only then is "no local pod of this ServiceAccount"
+	// evidence that a persisted QUIC pair's source left. Guarded by depMu.
+	localPodsSynced bool
 	// quicBudgetSeen/quicBudgetMu: the QUIC twin count last logged, so the
 	// fan-out is announced on change rather than on every snapshot.
 	quicBudgetMu   sync.Mutex
@@ -619,9 +631,10 @@ type clusterEntry struct {
 	mtlsCluster *clusterv3.Cluster
 	// l4Floor marks an L4 floor service entry -- PROTOCOL_TCP or PROTOCOL_UDP.
 	// Such entries hold only the bare-name EDS load assignment (+
-	// sanNamespaces/sni) for the floor cluster that references it: the
-	// transparent-capture TCP floor's "tcp:<svc>", or the UDP floor's
-	// "udp:<svc>". No HTTP (h2) cluster or outbound vhost is emitted for them
+	// sanNamespaces/sni) the floor cluster is built from: the
+	// transparent-capture TCP floor's "tcp:<svc>" (which subscribes to its own
+	// EDS name, the bare one republished under it -- aether#1013), or the UDP
+	// floor's "udp:<svc>" (STATIC, the load assignment inlined). No HTTP (h2) cluster or outbound vhost is emitted for them
 	// (clustersEndpointsAndVhosts skips it), and no upstream mTLS is injected
 	// (refreshEntryMTLSLocked skips it) -- for TCP because the floor cluster
 	// carries its own transport socket, for UDP because there is none: the UDP
@@ -631,6 +644,13 @@ type clusterEntry struct {
 	// were already protocol-agnostic in behaviour, so UDP needed no new branch
 	// at either, only a name that did not claim otherwise.
 	l4Floor bool
+	// bareEDSAlias marks an HTTP port-alias entry ("<fqdn>:<port>",
+	// buildPortAliasesLocked). Its cluster subscribes to its OWN EDS resource
+	// name (the alias name) and it carries no load assignment of its own:
+	// clustersEndpointsAndVhosts republishes whatever the bare service name
+	// resolves to (bareServiceCLALocked) under the alias name, in the same pass
+	// that emits the cluster (proxy.LoadAssignmentAlias, aether#1013).
+	bareEDSAlias bool
 	// absentSince is non-zero while the service is missing from the registry
 	// listing. Such entries are retained (with empty endpoints) for
 	// serviceRetentionGrace before being pruned: during pod churn a service
@@ -669,6 +689,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		localWorkloads:     make(map[string]string),
 		podDeps:            make(map[string]podDependencies),
 		observedDeps:       make(map[string]time.Time),
+		quicPairs:          make(map[quicPair]time.Time),
 		onDemandSubs:       make(map[int64]map[string]string),
 		staticDeps:         make(map[string]struct{}),
 		serviceRoutes:      make(map[string][]proxy.GammaRoute),
@@ -724,14 +745,16 @@ func (c *SnapshotCache) MeshDomain() string {
 // endpoints. Off by default; must be called before the manager starts (read
 // without locking on every cluster build).
 // SetEastWestQUICServices replaces the east-west QUIC allow-list (proposal 038
-// Phase 4b): the "<ns>/<svc>" destinations whose default cluster gets a
-// per-source HTTP/3 twin for every local ServiceAccount, selected per request
-// by the source identity. Everything else stays h2, byte-identical.
+// Phase 4b): the "<ns>/<svc>" destinations whose routes select a per-source
+// HTTP/3 twin by the source identity. Everything else stays h2, byte-identical.
 //
-// The fan-out is the cost to watch: local ServiceAccounts x listed services
-// clusters, each a clone of the h2 entry on its OWN EDS resource name, with the
-// h2 entry's load assignment republished under that name (aether#1008).
-// The count is logged at INFO whenever it changes.
+// Twins are demand-scoped (issue #1020): one per (source ServiceAccount,
+// listed destination) pair that has dialled, fetched on its first request
+// over ODCDS (ObserveQUICTwin) -- not local ServiceAccounts x listed services
+// up front. Each is a clone of the h2 entry on its OWN EDS resource name, with
+// the h2 entry's load assignment republished under that name (aether#1008).
+// The count is logged at INFO whenever it changes. Delisting a destination
+// prunes its pairs.
 func (c *SnapshotCache) SetEastWestQUICServices(services []string) {
 	set := make(map[string]struct{}, len(services))
 	for _, svc := range services {

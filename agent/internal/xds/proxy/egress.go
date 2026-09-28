@@ -115,7 +115,42 @@ func UDPClusterName(serviceName, meshDomain string) string {
 // the name unique per source identity; the prefix keeps it out of every
 // ODCDS/authority namespace (a client can never dial a "quic:" authority).
 func QUICClusterName(serviceName, meshDomain, sourceSAKey string) string {
-	return "quic:" + ServiceClusterName(serviceName, meshDomain) + "@" + sourceSAKey
+	return quicClusterPrefix + ServiceClusterName(serviceName, meshDomain) + "@" + sourceSAKey
+}
+
+// quicClusterPrefix is the prefix every `quic:` twin name carries.
+const quicClusterPrefix = "quic:"
+
+// IsQUICClusterName reports whether name is shaped like a `quic:` twin name.
+// It does not validate the name; ParseQUICClusterName does.
+func IsQUICClusterName(name string) bool {
+	return strings.HasPrefix(name, quicClusterPrefix)
+}
+
+// ParseQUICClusterName is the inverse of QUICClusterName: it splits a twin name
+// into the destination's "<ns>/<svc>" service key and the source's "<ns>/<sa>"
+// key. ok is false unless name is exactly what QUICClusterName produces for
+// them. The on-demand CDS path (issue #1020) validates a requested name with
+// it before building a twin, so a name with a port, a foreign domain, an extra
+// label or an extra path segment is refused.
+func ParseQUICClusterName(name, meshDomain string) (service, sourceSAKey string, ok bool) {
+	rest, found := strings.CutPrefix(name, quicClusterPrefix)
+	if !found {
+		return "", "", false
+	}
+	authority, source, found := strings.Cut(rest, "@")
+	if !found {
+		return "", "", false
+	}
+	service, ok = ServiceFromClusterName(authority, meshDomain)
+	if !ok || ServiceClusterName(service, meshDomain) != authority {
+		return "", "", false
+	}
+	ns, sa, found := strings.Cut(source, "/")
+	if !found || ns == "" || sa == "" || strings.ContainsAny(sa, "/@") || strings.Contains(ns, "@") {
+		return "", "", false
+	}
+	return service, source, true
 }
 
 // QUICServerName is the SNI a `quic:` cluster presents and the server_names
@@ -184,7 +219,7 @@ func SourceSAKeyFromSpiffeID(spiffeID string) string {
 //
 // The twin subscribes to its OWN EDS resource, named after the twin (the
 // control plane publishes the base's load assignment under that name too:
-// QUICLoadAssignmentFrom). It must not share the base's EDS name (aether#1008).
+// LoadAssignmentAlias). It must not share the base's EDS name (aether#1008).
 // Envoy's delta-ADS WatchMap deduplicates subscription interest per (type_url,
 // resource name): a twin added AFTER its base is subscribed -- a new
 // ServiceAccount's first pod on the node -- adds nothing to
@@ -355,10 +390,15 @@ func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []st
 		},
 		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
 			EdsConfig: config.XDSConfigSourceADS(),
-			// EDS resource name: the default cluster shares the bare-service EDS
-			// (all endpoints); a per-port cluster uses its own name so its EDS
-			// membership is filtered to pods advertising that port (safe new-port
-			// rollout). The cache keys load assignments by this name.
+			// EDS resource name: the default cluster subscribes to the
+			// bare-service EDS (all endpoints); a per-port cluster uses its own
+			// name so its EDS membership is filtered to pods advertising that
+			// port (safe new-port rollout). A port alias also uses its own name,
+			// with the bare membership republished under it
+			// (LoadAssignmentAlias): NO cluster but the default may subscribe
+			// to the bare name, or a later-added one is deduplicated by the
+			// delta-ADS WatchMap into 15 s of warming (aether#1013). The cache
+			// keys load assignments by this name.
 			ServiceName: edsServiceName,
 		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{

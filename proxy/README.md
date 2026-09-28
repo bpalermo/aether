@@ -117,7 +117,11 @@ symbol upload is keyed by (#653).
   aether#967; test cases, docs and changelog dropped, `test/mocks/network/mocks.h` kept for our test build)
   and envoyproxy/envoy#47740 (QUIC client hostname check deferred to explicit SAN
   matchers, aether#957; behind
-  `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`).
+  `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`),
+  and aether#1022 (`execInNetworkNamespace` restores the calling THREAD's netns via
+  `/proc/thread-self/ns/net`, not the main thread's `/proc/self/ns/net`; not yet
+  proposed upstream). A carried patch's own Envoy tests run from
+  `//bazel/patches:carried_patch_tests`, since `//...` does not reach `@envoy` tests.
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)
 

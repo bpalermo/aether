@@ -18,7 +18,8 @@ import (
 
 // TestQUICFanoutPublishesPerSourceTwins is proposal 038 Phase 4b end to end
 // in the cache: with "demo/echo" allow-listed and two local pods of two
-// ServiceAccounts, the snapshot carries one `quic:` twin per SA (QUIC
+// ServiceAccounts that have both dialled it (aether#1020 builds twins only for
+// observed pairs), the snapshot carries one `quic:` twin per SA (QUIC
 // transport, HTTP/3), BOTH route tables' echo vhost selects between them by
 // source identity with the h2 cluster as on_no_match, an unlisted service
 // gets nothing, and clearing the allow-list removes it all.
@@ -49,6 +50,8 @@ func TestQUICFanoutPublishesPerSourceTwins(t *testing.T) {
 		},
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	// Twins are demand-scoped (aether#1020): both sources have dialled echo.
+	observeQUIC(t, c, "demo/echo", "demo/source-a", "demo/source-b")
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
 
@@ -117,6 +120,19 @@ func TestQUICFanoutPublishesPerSourceTwins(t *testing.T) {
 			}
 		}
 	}
+	assert.Empty(t, c.QUICPairs(), "clearing the allow-list must prune the observed pairs too (aether#1020)")
+}
+
+// observeQUIC records that each source ("<ns>/<sa>") has dialled service over
+// QUIC -- what an admitted on-demand request does -- and regenerates the
+// snapshot synchronously.
+func observeQUIC(t *testing.T, c *SnapshotCache, service string, sources ...string) {
+	t.Helper()
+	for _, src := range sources {
+		d, reason := c.recordQUICPair(proxy.QUICClusterName(service, c.meshDomain, src))
+		require.NotEqual(t, QUICTwinRefused, d, "pair %s <- %s refused: %s", service, src, reason)
+	}
+	require.NoError(t, c.generateSnapshot(context.Background()))
 }
 
 func keysOf[V any](m map[string]V) []string {
