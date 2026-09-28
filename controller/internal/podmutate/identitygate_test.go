@@ -24,7 +24,7 @@ const testSocket = "/run/secrets/workload-spiffe-uds/socket"
 
 func testGate() *IdentityGate {
 	return &IdentityGate{
-		Image:          "quay.io/aethermesh/agent@sha256:abc",
+		Image:          "registry.example/agent@sha256:abc",
 		PullPolicy:     corev1.PullIfNotPresent,
 		WorkloadSocket: testSocket,
 		Resources: corev1.ResourceRequirements{

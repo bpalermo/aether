@@ -22,7 +22,7 @@ func TestIdentityGate_OffByDefaultInTheBinary(t *testing.T) {
 func TestIdentityGate_FromDefaults(t *testing.T) {
 	c := NewControllerConfig()
 	c.IdentityGate = true
-	c.IdentityGateImage = "quay.io/aethermesh/agent@sha256:abc"
+	c.IdentityGateImage = "registry.example/agent@sha256:abc"
 	g, err := identityGate(c)
 	require.NoError(t, err)
 	require.NotNil(t, g)
