@@ -120,7 +120,10 @@ symbol upload is keyed by (#653).
   `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`),
   and aether#1022 (`execInNetworkNamespace` restores the calling THREAD's netns via
   `/proc/thread-self/ns/net`, not the main thread's `/proc/self/ns/net`; not yet
-  proposed upstream). A carried patch's own Envoy tests run from
+  proposed upstream), and aether#1050 (the hot-restart main-thread deadlock:
+  parent UDP/QUIC forwarding to the child no longer blocks the parent's main
+  thread, and the child keeps servicing forwarded packets while it waits, with a
+  bound, for the parent's replies; not yet proposed upstream). A carried patch's own Envoy tests run from
   `//bazel/patches:carried_patch_tests`, since `//...` does not reach `@envoy` tests.
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)

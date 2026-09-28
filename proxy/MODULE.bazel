@@ -49,6 +49,21 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 #   redirect-all capture diverted them (the #1007 cross-pod L4 landings). Carries
 #   its own test (test/common/network:exec_in_netns_thread_test), run by
 #   //bazel/patches:carried_patch_tests.
+#   aether#1050 (not yet proposed upstream; the maintainer's call): the hot-restart
+#   main-thread deadlock. The parent forwards undispatchable UDP/QUIC packets to
+#   the child from its main thread with a BLOCKING sendmsg(); the child's main
+#   thread waits for the parent's replies (stats merge every flush, listen socket
+#   hand-offs) with a BLOCKING recvmsg() and reads no forwarded packets meanwhile.
+#   Once the child's socket fills, both main threads wait on each other for good.
+#   The patch makes parent forwarding a bounded non-blocking queue (retried on a
+#   2ms timer, dropped when full or when the child is gone), makes the child keep
+#   servicing forwarded packets while it waits for a reply, probe the parent for
+#   liveness and give up after a bounded deadline, and gives the domain sockets
+#   send/receive timeouts so no blocking call can hang. Applied AFTER 47743 (it
+#   touches the same hot-restart files) and carries its tests
+#   (test/server:hot_restarting_{base,child,parent}_test, hot_restart_impl_test),
+#   run by //bazel/patches:carried_patch_tests; it also brings the 47743 test hunks
+#   those files need to compile against the 47743 source.
 #   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
@@ -58,6 +73,7 @@ single_version_override(
         "//bazel/patches:envoy-47743-udp-hot-restart-forwarding-netns.patch",
         "//bazel/patches:envoy-47740-quic-hostname-check-explicit-san.patch",
         "//bazel/patches:envoy-aether1022-exec-in-netns-thread-self.patch",
+        "//bazel/patches:envoy-aether1050-hotrestart-nonblocking-forward.patch",
     ],
 )
 

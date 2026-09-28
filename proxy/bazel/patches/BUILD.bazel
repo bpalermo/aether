@@ -13,5 +13,13 @@ test_suite(
         # execInNetworkNamespace restores the CALLING THREAD's netns.
         "@envoy//test/common/network:exec_in_netns_thread_test",
         "@envoy//test/common/network:utility_test",
+        # envoy-aether1050-hotrestart-nonblocking-forward.patch (aether#1050):
+        # non-blocking parent UDP forwarding, child keeps servicing it while waiting
+        # for a reply, bounded waits. The child test's
+        # ServicesUdpForwardingWhileWaitingForParentStats is the deadlock interleaving.
+        "@envoy//test/server:hot_restart_impl_test",
+        "@envoy//test/server:hot_restarting_base_test",
+        "@envoy//test/server:hot_restarting_child_test",
+        "@envoy//test/server:hot_restarting_parent_test",
     ],
 )
