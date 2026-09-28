@@ -375,6 +375,26 @@ identity-bearing class (R2):
   (59 SAs × 2 destinations), and unconditional QUIC (#979) would have built
   about 650.
 
+  **A pair is admitted only on evidence that a request routed to its twin
+  (#1033).** The first talos deploy of #1032 (rev245) showed
+  `observed_pairs == local_identities × 2` on every node: the running proxy
+  re-stated the twins the previous agent had built up front, in the fresh
+  stream's `initial_resource_versions`, and the agent admitted and persisted each
+  one. Now the twins a fresh stream re-states are split by what the proxy holds.
+  A twin that is only *held* (delivered by the wildcard) admits nothing; unless
+  its pair is persisted it is answered absent in `removed_resources`, the proxy
+  drops it, and the next request that routes to it opens an on-demand fetch,
+  which is first use. A twin the proxy *re-subscribes* by name holds a live ODCDS
+  subscription that a routed request opened, so its pair is admitted. It cannot
+  be answered absent: Envoy's ODCDS manager keeps one subscription per name for
+  the life of the process and skips every later request for it, so the pair
+  would 503 at the `on_demand` timeout until the proxy restarts (shown live in
+  `//test/mtlspool`). Persisted pairs are the carry-over across agent restarts,
+  and a persisted pair with neither an on-demand fetch nor a re-subscription
+  within `--east-west-quic-pair-fetch-window` (default 1 h) of the agent starting
+  is pruned with its twin. That is the migration off rev245's persisted fan-out;
+  a wrongly pruned live pair costs one ODCDS round trip on its next request.
+
   **Per-request cost (#1021).** On the rev242 proving soak an HTTP/3 mesh request
   cost ~3.3× the proxy CPU of an h2 one (~11 ms vs ~3.3 ms across both proxies,
   #1006), with ~128 QUIC connections carrying 100 rps. Two things were checked

@@ -291,3 +291,70 @@ func TestQUICDemandRefusesWhatItCannotBuild(t *testing.T) {
 	assert.Empty(t, st.twins)
 	assert.ElementsMatch(t, before, keysOf(st.snap.GetResources(resourcev3.ClusterType)), "a refusal must not change CDS")
 }
+
+// (f) The #1033 migration: a PERSISTED pair that has no on-demand fetch within
+// the window after the agent starts is pruned with its twin, one log line per
+// node; a persisted pair that IS fetched in the window is kept. This is what
+// drains the SAs x destinations fan-out the first #1032 deploy persisted on
+// every talos node (observed_pairs == local_identities x 2).
+//
+// Red before #1033: no such prune existed, and both pairs survived for as
+// long as their source had a pod on the node.
+func TestQUICDemandPrunesPersistedPairsNotFetchedWithinTheWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ObservedUpstreamsFile)
+	c := newQUICDemandCache(t, path)
+	observeQUIC(t, c, "demo/echo", "demo/source-a", "demo/source-b", "demo/source-c")
+	c.FlushObservedUpstreams()
+	require.Len(t, readStore(t, path).GetQuicPairs(), 3)
+
+	restarted := newQUICDemandCache(t, path)
+	ctx := context.Background()
+	twinA, twinB, twinC := echoTwin(restarted, "source-a"), echoTwin(restarted, "source-b"), echoTwin(restarted, "source-c")
+	all := []string{twinA, twinB, twinC}
+	require.ElementsMatch(t, all, readQUICState(t, restarted).twins, "every restored twin is served from the first snapshot")
+
+	// source-b's twin is fetched on demand in this process; source-c's is
+	// re-subscribed on the proxy's fresh stream (a live on-demand
+	// subscription: pruning it would strand it); source-a's is neither.
+	decision, _ := restarted.ObserveQUICTwin(ctx, twinB)
+	require.Equal(t, QUICTwinKnown, decision)
+	require.Zero(t, restarted.ResumeQUICSubscriptions(ctx, []string{twinC}), "already restored: nothing new")
+
+	window := DefaultQUICPairFetchWindow
+	restarted.pruneUnfetchedQUICPairs(restarted.quicStart.Add(window - time.Second))
+	assert.ElementsMatch(t, all, restarted.QUICPairs(), "inside the window nothing is pruned")
+
+	restarted.pruneUnfetchedQUICPairs(restarted.quicStart.Add(window))
+	assert.Equal(t, []string{twinB, twinC}, restarted.QUICPairs(), "the unfetched persisted pair is pruned; the fetched and subscribed ones kept")
+	require.NoError(t, restarted.generateSnapshot(ctx))
+	st := readQUICState(t, restarted)
+	assert.ElementsMatch(t, []string{twinB, twinC}, st.twins, "the pruned pair's twin leaves CDS")
+	assert.ElementsMatch(t, []string{twinB, twinC}, st.twinCLAs)
+	requireSelections(t, restarted, st, allArms(restarted, quicDemandSAs...))
+	restarted.FlushObservedUpstreams()
+	stored := readStore(t, path).GetQuicPairs()
+	require.Len(t, stored, 2, "the pruned pair leaves the persisted set")
+	assert.Equal(t, "demo/source-b", stored[0].GetSource())
+	assert.Equal(t, "demo/source-c", stored[1].GetSource())
+
+	// A pruned pair that still has traffic is re-fetched: real first use.
+	decision, _ = restarted.ObserveQUICTwin(ctx, twinA)
+	assert.Equal(t, QUICTwinAdded, decision)
+
+	// Pairs first used in this process are never pruned by the window.
+	restarted.pruneUnfetchedQUICPairs(restarted.quicStart.Add(10 * window))
+	assert.ElementsMatch(t, all, restarted.QUICPairs())
+}
+
+// A zero window disables the prune.
+func TestQUICDemandFetchWindowZeroDisablesThePrune(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ObservedUpstreamsFile)
+	c := newQUICDemandCache(t, path)
+	observeQUIC(t, c, "demo/echo", "demo/source-a")
+	c.FlushObservedUpstreams()
+
+	restarted := newQUICDemandCache(t, path)
+	restarted.SetQUICPairFetchWindow(0)
+	restarted.pruneUnfetchedQUICPairs(restarted.quicStart.Add(24 * time.Hour))
+	assert.Equal(t, []string{echoTwin(restarted, "source-a")}, restarted.QUICPairs())
+}

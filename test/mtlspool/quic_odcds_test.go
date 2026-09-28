@@ -23,10 +23,23 @@ package mtlspool
 // proxy.ApplyQUICClusterSelection for the route, proxy.OnDemandHTTPFilter for
 // the ODCDS filter, proxy.BuildSourceFilterStates for the identity stamp, and
 // proxy.ParseQUICClusterName for the name check. The control plane's delta
-// request hook plays the node agent's on-demand observer: it sees the named
-// CDS subscription, and -- when told to admit it -- republishes the snapshot
-// with the twin. The destination is a real HTTP/3 server that requires the
-// client certificate and reports the SAN it verified.
+// request hook plays the node agent's on-demand observer, classifying each
+// request with the agent's own quicdemand.Requests (issue #1033: first use,
+// a fresh stream's re-subscription, or a twin merely held), and -- when told
+// to admit -- republishes the snapshot with the twin. The destination is a
+// real HTTP/3 server that requires the client certificate and reports the SAN
+// it verified.
+//
+// # Agent restarts (issue #1033)
+//
+// restartAgent stops the control plane and starts a fresh one on the same
+// socket with an empty demand set; the proxy keeps running and reconnects.
+// Two facts about the pinned proxy decide what the agent may do with the twins
+// it re-states on the fresh stream, and both are asserted here: a twin held
+// only through the wildcard is dropped when answered absent and re-fetched on
+// demand by the next request that routes to it; a twin fetched on demand holds
+// an ODCDS subscription Envoy never re-sends, so answering it absent strands
+// it (503 at the on_demand timeout).
 //
 // The negative control (TestOnDemandQUICTwinRefusedFails) refuses every
 // name: the first request must fail with 503, which proves the harness can
@@ -35,6 +48,8 @@ package mtlspool
 import (
 	"context"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -44,6 +59,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/quicdemand"
 	"aethermesh.dev/test/envoybin"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -83,31 +99,52 @@ type odcdsAgent struct {
 	mu        sync.Mutex
 	version   int
 	resources map[resourcev3.Type][]types.Resource
-	// requests is every `quic:` name the proxy subscribed to, in order, once
-	// per subscribe (a repeat subscribe is a repeat entry).
+	// twinRequests is the AGENT's classifier (agent/internal/xds/quicdemand,
+	// issue #1033). One per control plane process, as in the agent.
+	twinRequests *quicdemand.Requests
+	// ignoreResubscribed is the strand control: it answers a fresh stream's
+	// re-subscribed twins absent instead of serving them.
+	ignoreResubscribed bool
+	// requests is every first-use `quic:` name the proxy subscribed to, in
+	// order, once per subscribe (a repeat subscribe is a repeat entry).
 	requests []string
+	// resubscribed / heldOnly are the twins a fresh stream's first CDS
+	// request re-stated: with a live on-demand subscription, or merely held.
+	resubscribed []string
+	heldOnly     []string
 	// published is the twins added to the snapshot.
 	published []string
 }
 
-// onDelta is the control plane's request hook: the agent's onDeltaRequest.
-func (a *odcdsAgent) onDelta(_ int64, req *discoverygrpc.DeltaDiscoveryRequest) {
-	if req.GetTypeUrl() != resourcev3.ClusterType {
+// onDelta is the control plane's request hook: the agent's onDeltaRequest,
+// admitting what the agent admits -- first-use twins, and the twins the proxy
+// re-subscribes on a fresh stream -- and nothing the proxy merely holds.
+func (a *odcdsAgent) onDelta(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest) {
+	a.mu.Lock()
+	cls := a.twinRequests.Classify(streamID, req)
+	a.resubscribed = append(a.resubscribed, cls.Resubscribed...)
+	a.heldOnly = append(a.heldOnly, cls.HeldOnly...)
+	a.requests = append(a.requests, cls.FirstUse...)
+	ignoreResubscribed := a.ignoreResubscribed
+	a.mu.Unlock()
+	if len(cls.Resubscribed)+len(cls.HeldOnly) > 0 {
+		a.t.Logf("[odcds] fresh stream %d re-stated: resubscribed=%v held_only=%v (held-only admits nothing; ignore_resubscribed=%v)",
+			streamID, cls.Resubscribed, cls.HeldOnly, ignoreResubscribed)
+	}
+	admit := slices.Clone(cls.FirstUse)
+	if !ignoreResubscribed {
+		admit = append(admit, cls.Resubscribed...)
+	}
+	for _, name := range cls.FirstUse {
+		a.t.Logf("[odcds] CDS subscribe %s (admit=%v)", name, a.admit)
+	}
+	if !a.admit {
 		return
 	}
-	for _, name := range req.GetResourceNamesSubscribe() {
-		if !proxy.IsQUICClusterName(name) {
-			continue
-		}
-		a.mu.Lock()
-		a.requests = append(a.requests, name)
-		a.mu.Unlock()
-		a.t.Logf("[odcds] CDS subscribe %s (admit=%v)", name, a.admit)
-		if a.admit {
-			// Off the stream goroutine, as the agent does: publishing from
-			// inside the request callback could block on this very stream.
-			go a.publishTwin(name)
-		}
+	for _, name := range admit {
+		// Off the stream goroutine, as the agent does: publishing from
+		// inside the request callback could block on this very stream.
+		go a.publishTwin(name)
 	}
 }
 
@@ -195,6 +232,10 @@ type odcdsRun struct {
 	a, b  *sourceClient
 	twinA string
 	twinB string
+	// adminAddr is the proxy's admin listener; initial is the snapshot a
+	// fresh agent serves (base + listeners + secrets, no twin).
+	adminAddr string
+	initial   map[resourcev3.Type][]types.Resource
 }
 
 func startODCDS(t *testing.T, admit bool) *odcdsRun {
@@ -215,7 +256,7 @@ func startODCDS(t *testing.T, admit bool) *odcdsRun {
 
 	portA, portB, adminPort := freePort(t), freePort(t), freePort(t)
 	baseCLA := staticEndpoint(odcdsDestSvc, h3.addr)
-	agent := &odcdsAgent{t: t, admit: admit, destAddr: h3.addr, baseCLA: baseCLA, version: 1}
+	agent := &odcdsAgent{t: t, admit: admit, destAddr: h3.addr, baseCLA: baseCLA, version: 1, twinRequests: quicdemand.NewRequests()}
 	agent.resources = map[resourcev3.Type][]types.Resource{
 		// Nothing observed: the base and its load assignment, no twin.
 		resourcev3.ClusterType:  {odcdsBase()},
@@ -233,12 +274,63 @@ func startODCDS(t *testing.T, admit bool) *odcdsRun {
 	waitListening(t, addrA)
 	waitListening(t, addrB)
 	return &odcdsRun{
-		agent: agent,
-		a:     newSourceClient("source-a", addrA),
-		b:     newSourceClient("source-b", addrB),
-		twinA: twinA,
-		twinB: twinB,
+		agent:     agent,
+		a:         newSourceClient("source-a", addrA),
+		b:         newSourceClient("source-b", addrB),
+		twinA:     twinA,
+		twinB:     twinB,
+		adminAddr: fmt.Sprintf("127.0.0.1:%d", adminPort),
+		initial:   maps.Clone(agent.resources),
 	}
+}
+
+// restartAgent is an agent restart as the proxy sees it: the control plane is
+// stopped, so the proxy's ADS stream drops, and a new one is started on the
+// same socket with a FRESH process's state -- the base resources only, an
+// empty demand set (nothing persisted) and a new classifier. The proxy keeps
+// running with every cluster it held.
+func (r *odcdsRun) restartAgent(t *testing.T) {
+	t.Helper()
+	a := r.agent
+	a.mu.Lock()
+	old := a.cp
+	a.mu.Unlock()
+	old.stop()
+
+	a.mu.Lock()
+	a.resources = maps.Clone(r.initial)
+	a.published = nil
+	a.requests = nil
+	a.resubscribed = nil
+	a.heldOnly = nil
+	a.twinRequests = quicdemand.NewRequests()
+	a.version = 1
+	a.mu.Unlock()
+	cp := startADSControlPlaneOn(t, old.socketPath, r.initial, a.onDelta)
+	a.mu.Lock()
+	a.cp = cp
+	a.mu.Unlock()
+	t.Logf("[odcds] control plane restarted on %s with an empty demand set", old.socketPath)
+}
+
+// quicClusters is the proxy's `quic:` clusters, read from its admin
+// /clusters listing -- what the proxy actually holds, independent of what the
+// control plane believes it served.
+func (r *odcdsRun) quicClusters(t *testing.T) []string {
+	t.Helper()
+	resp, err := http.Get("http://" + r.adminAddr + "/clusters")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	seen := map[string]struct{}{}
+	for line := range strings.Lines(string(body)) {
+		name, _, ok := strings.Cut(line, "::")
+		if ok && proxy.IsQUICClusterName(name) {
+			seen[name] = struct{}{}
+		}
+	}
+	return slices.Sorted(maps.Keys(seen))
 }
 
 // timedCallOnce sends one request (no retry) and times it.
@@ -293,6 +385,146 @@ func TestOnDemandQUICTwinPerPair(t *testing.T) {
 	assert.Equal(t, spiffeSourceA, at.san)
 	requests, _ = r.agent.snapshotState()
 	assert.Equal(t, []string{r.twinA, r.twinB}, requests, "a pair whose twin exists must not ask again")
+}
+
+// waitRestated waits for the proxy to reconnect to a restarted control plane
+// and re-state its twins, and returns what it re-stated.
+func (r *odcdsRun) waitRestated(t *testing.T) (resubscribed, heldOnly []string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		r.agent.mu.Lock()
+		defer r.agent.mu.Unlock()
+		return len(r.agent.resubscribed)+len(r.agent.heldOnly) > 0
+	}, 30*time.Second, 50*time.Millisecond, "the proxy never reconnected to the restarted control plane")
+	r.agent.mu.Lock()
+	defer r.agent.mu.Unlock()
+	return slices.Clone(r.agent.resubscribed), slices.Clone(r.agent.heldOnly)
+}
+
+// TestOnDemandQUICHeldTwinsNotReadmittedAfterAgentRestart is the live #1033
+// gate, in the talos shape.
+//
+// The proxy holds twins A and B that the previous agent generation built UP
+// FRONT (the pre-#1020 SAs x destinations rule) and delivered through the
+// wildcard: no request routed to either, and the proxy holds no on-demand
+// subscription for them. The control plane is restarted with an EMPTY demand
+// set, as a replaced agent with nothing persisted. On the fresh stream the
+// proxy re-states both in initial_resource_versions. Neither is demand, so
+// neither may be re-created: both are answered absent and the proxy drops
+// them. Then A's next request routes to A's missing twin, the on_demand filter
+// opens a subscription and fetches it -- real first use -- and it succeeds over
+// HTTP/3 with no 503. B's twin stays absent.
+//
+// Red on #1032's rule (a held twin re-admits its pair): both twins are
+// re-created at stream start.
+func TestOnDemandQUICHeldTwinsNotReadmittedAfterAgentRestart(t *testing.T) {
+	r := startODCDS(t, true)
+	// The previous agent generation: both twins built up front.
+	r.agent.publishTwin(r.twinA)
+	r.agent.publishTwin(r.twinB)
+	require.Eventually(t, func() bool {
+		return slices.Equal([]string{r.twinA, r.twinB}, r.quicClusters(t))
+	}, 10*time.Second, 50*time.Millisecond, "precondition: the proxy holds both up-front twins")
+	requests, _ := r.agent.snapshotState()
+	require.Empty(t, requests, "precondition: no request ever routed to a twin")
+
+	r.restartAgent(t)
+	resubscribed, heldOnly := r.waitRestated(t)
+	t.Logf("fresh stream re-stated: resubscribed=%v held_only=%v", resubscribed, heldOnly)
+	assert.Empty(t, resubscribed, "the proxy holds no on-demand subscription for an up-front twin")
+	assert.ElementsMatch(t, []string{r.twinA, r.twinB}, heldOnly, "the proxy re-states both held twins")
+
+	var held []string
+	require.Eventually(t, func() bool {
+		held = r.quicClusters(t)
+		return len(held) == 0
+	}, 10*time.Second, 50*time.Millisecond, "twins re-created at stream start (issue #1033)")
+	// Give a wrong re-admission time to land before asserting it did not.
+	time.Sleep(500 * time.Millisecond)
+	held = r.quicClusters(t)
+	requests, published := r.agent.snapshotState()
+	t.Logf("after the restart, before any request: proxy holds %v, published %v", held, published)
+	assert.Empty(t, held, "no twin re-created before a request routes to one")
+	assert.Empty(t, requests)
+	assert.Empty(t, published)
+
+	// A request routes to A's twin: fetched on demand, 200 over HTTP/3.
+	at, took := timedCallOnce(t, r.a)
+	t.Logf("source-a first request after the restart: %s in %s", at, took)
+	require.NoError(t, at.err)
+	require.Equal(t, http.StatusOK, at.status, "real first use after a restart must not fail: %s", at)
+	assert.Equal(t, "HTTP/3.0", at.proto, "it must ride the fetched twin")
+	assert.Equal(t, spiffeSourceA, at.san)
+	assert.Less(t, took, firstRequestODCDSBudget, "one ODCDS round trip, not a timeout")
+
+	requests, published = r.agent.snapshotState()
+	assert.Equal(t, []string{r.twinA}, requests, "exactly one first-use request, for A's twin")
+	assert.Equal(t, []string{r.twinA}, published)
+	assert.Equal(t, []string{r.twinA}, r.quicClusters(t), "only A's twin exists; B's stays absent")
+}
+
+// TestOnDemandQUICSubscribedTwinsServedAfterAgentRestart: twins the proxy
+// fetched ON DEMAND hold a live ODCDS subscription, which Envoy keeps for the
+// life of the process and never re-sends (its ODCDS manager answers every
+// later request for the name "already subscribed, skipping"). After an agent
+// restart with an empty demand set the proxy re-subscribes both by name on
+// the fresh stream; the agent must serve them, and A's next request succeeds
+// over HTTP/3 with no 503.
+//
+// The strand control (ignoreResubscribed) answers them absent instead, which
+// is what the issue's first draft of the fix asked for: A's next request then
+// 503s at the on_demand timeout, because Envoy does not re-request a name it
+// is subscribed to. That is why re-subscriptions are served.
+func TestOnDemandQUICSubscribedTwinsServedAfterAgentRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		ignoreResubscribed bool
+	}{
+		{name: "served"},
+		{name: "strand_control", ignoreResubscribed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := startODCDS(t, true)
+			for _, c := range []*sourceClient{r.a, r.b} {
+				at, took := timedCallOnce(t, c)
+				t.Logf("%s before the restart: %s in %s", c.name, at, took)
+				require.Equal(t, http.StatusOK, at.status, "%s", at)
+				require.Equal(t, "HTTP/3.0", at.proto)
+			}
+			requests, _ := r.agent.snapshotState()
+			require.Equal(t, []string{r.twinA, r.twinB}, requests, "precondition: both twins were fetched on demand")
+
+			r.agent.mu.Lock()
+			r.agent.ignoreResubscribed = tc.ignoreResubscribed
+			r.agent.mu.Unlock()
+			r.restartAgent(t)
+			resubscribed, heldOnly := r.waitRestated(t)
+			t.Logf("fresh stream re-stated: resubscribed=%v held_only=%v", resubscribed, heldOnly)
+			assert.ElementsMatch(t, []string{r.twinA, r.twinB}, resubscribed, "the proxy re-subscribes both on-demand twins")
+			assert.Empty(t, heldOnly)
+
+			if tc.ignoreResubscribed {
+				require.Eventually(t, func() bool { return len(r.quicClusters(t)) == 0 }, 10*time.Second, 50*time.Millisecond)
+				at, took := timedCallOnce(t, r.a)
+				t.Logf("source-a after the restart, re-subscriptions answered absent: %s in %s", at, took)
+				assert.Equal(t, http.StatusServiceUnavailable, at.status, "an answered-absent subscribed twin is stranded: %s", at)
+				requests, _ = r.agent.snapshotState()
+				assert.Empty(t, requests, "Envoy never re-requests a name it is subscribed to")
+				return
+			}
+
+			require.Eventually(t, func() bool {
+				return slices.Equal([]string{r.twinA, r.twinB}, r.quicClusters(t))
+			}, 10*time.Second, 50*time.Millisecond, "the re-subscribed twins must be served")
+			at, took := timedCallOnce(t, r.a)
+			t.Logf("source-a after the restart: %s in %s", at, took)
+			require.NoError(t, at.err)
+			require.Equal(t, http.StatusOK, at.status, "%s", at)
+			assert.Equal(t, "HTTP/3.0", at.proto)
+			assert.Equal(t, spiffeSourceA, at.san)
+			assert.Less(t, took, firstRequestODCDSBudget)
+		})
+	}
 }
 
 // TestOnDemandQUICTwinRefusedFails is the negative control: a control plane

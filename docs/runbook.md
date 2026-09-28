@@ -952,17 +952,66 @@ new pair `observed east-west QUIC pair (ODCDS); building its twin cluster=…`.
 `N` is the number of observed pairs whose source is still local, so it is at most
 `I × S` and on a real fleet much less (rev242: 118 possible, 2 used).
 
+**What a healthy node reads.** `observed_pairs` ≈ the (source ServiceAccount,
+destination) pairs that carry traffic on that node: on talos the k6 loaders, the
+prober and the dialers, so **single digits per node**, and `quic_clusters` equal to
+it. `observed_pairs == local_identities × allow_listed_services` on every node is the
+#1033 red reading (rev245, 2026-09-28: 24/24/12, 18/18/9, 28/28/14, 20/20/10,
+20/20/10), not a busy fleet.
+
 **Reading twin count against pairs.** On one node, the `quic:` clusters in the
 proxy admin (`/clusters`) must be exactly the pairs with traffic. Pairs are
 persisted beside the observed upstreams (`state/observed-upstreams.json`,
 `quic_pairs`), so they survive an agent or agent+proxy roll. There is **no idle
 expiry**: nothing in xDS tells the agent that a twin stopped carrying traffic. A
 pair is pruned when its source ServiceAccount has no pod left on the node, or when
-its destination leaves the allow-list or the dependency set. A pair that did
-receive traffic therefore keeps its twin while both ends stay put, even if it goes
-quiet. `envoy_cluster_manager_active_clusters` rises by one when a pair first
-dials, falls when a pair is pruned, and is otherwise **flat**. A step that tracks
-pod churn rather than new callers is the pre-#1020 fan-out and a regression.
+its destination leaves the allow-list or the dependency set, or by the post-start
+prune below. A pair that did receive traffic therefore keeps its twin while both
+ends stay put, even if it goes quiet. `envoy_cluster_manager_active_clusters` rises
+by one when a pair first dials, falls when a pair is pruned, and is otherwise
+**flat**. A step that tracks pod churn rather than new callers is the pre-#1020
+fan-out and a regression.
+
+**Agent restarts (#1033).** A restarted agent opens a fresh xDS stream, and the
+running proxy re-states its twins in the stream's first CDS request. Only the
+persisted pairs carry over; the re-statement is read two ways:
+
+- A twin the proxy merely **holds** (`initial_resource_versions`, delivered by the
+  wildcard, e.g. built up front by an older agent) admits nothing. If its pair is
+  not persisted it is answered absent (`removed_resources`) and the proxy drops
+  it; the next request that routes to it opens an on-demand fetch, one ~20 ms round
+  trip, no 503. The #1032 agent re-admitted these, which is how rev245 persisted the
+  whole SAs × destinations fan-out on every node.
+- A twin the proxy **re-subscribes** by name holds a live on-demand subscription: a
+  request routed to it at some point in this proxy's life. Its pair is admitted.
+  This is not optional. Envoy's ODCDS manager keeps one subscription per name for
+  the life of the process and answers every later request for the name "already
+  subscribed, skipping", so a subscribed twin answered absent is **stranded**: every
+  request from that pair 503s `NC` at the 2 s `on_demand` timeout until the proxy
+  restarts. `//test/mtlspool`'s `TestOnDemandQUICSubscribedTwinsServedAfterAgentRestart/strand_control`
+  shows it.
+
+The agent logs one line per fresh stream: `fresh xDS stream re-stated QUIC twins:
+held-only twins admit nothing, live on-demand subscriptions are served
+resubscribed=R resumed_pairs=P held_only=H held_served=S answered_absent=A`.
+
+**Post-start prune of unfetched pairs (`--east-west-quic-pair-fetch-window`, default
+`1h`).** A persisted pair that has had no on-demand fetch since the agent started,
+and whose twin the proxy did not re-subscribe, is dropped with its twin once the
+window has elapsed (checked on the one-minute prune tick). A pair first used in this
+process, or re-subscribed by the proxy, is kept. This is the migration off the
+fan-out rev245 persisted, and it bounds anything else a restart carries over without
+evidence of use. The agent has no traffic signal of its own (no admin calls, and a
+served twin is never fetched again), so a pruned pair that is still in use pays one
+ODCDS round trip on its next request and is re-admitted; that is the whole cost of a
+wrong prune, once per agent start. It logs one line per node:
+
+```
+pruned persisted east-west QUIC pairs with no on-demand fetch since agent start count=N remaining=M window=1h0m0s pairs=[…]
+```
+
+followed by a `east-west QUIC fan-out` line with the new, smaller `quic_clusters`.
+`0` disables the prune.
 
 ```promql
 # twins per node, then the pairs among them that carried traffic in the last hour.

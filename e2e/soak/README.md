@@ -315,7 +315,28 @@ sum(increase(aether_agent_quic_twin_refused_total[8h])) == 0
 
 rev242's 118 twins (59 local SAs × 2 destinations) with 2 carrying traffic is the red
 reading for the first line. The agent's `east-west QUIC fan-out quic_clusters=N
-observed_pairs=P` log line gives the same number per node.
+observed_pairs=P local_identities=I allow_listed_services=S` log line gives the same
+numbers per node, and must read **`N == P`** and **`P ≪ I × S`**: `P` is the pairs
+with traffic (single digits per node on talos), not every local ServiceAccount times
+every listed destination.
+
+**Red reading for `P ≪ I × S` (#1033).** rev245 (1.0.2-6ad804b, the first deploy of
+#1032, 2026-09-28 03:00Z) logged `observed_pairs == local_identities × 2` on all five
+nodes — `quic_clusters=24 observed_pairs=24 local_identities=12`, 18/18/9, 28/28/14,
+20/20/10, 20/20/10 — because the fresh agent admitted every twin the proxy still held
+from the up-front fan-out. On a node carried over from that state, `P` falls to the
+traffic pairs one `--east-west-quic-pair-fetch-window` (1 h) after the new agent
+starts, with one `pruned persisted east-west QUIC pairs with no on-demand fetch since
+agent start count=N` line per node; grade gate 3 after that line, not before.
+
+```bash
+# per agent pod, the latest fan-out line (N == P and P << I*S) and the prune line
+for p in $(kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent -o name); do
+  echo "$p"
+  kubectl -n aether logs "$p" -c agent | grep 'east-west QUIC fan-out' | tail -1
+  kubectl -n aether logs "$p" -c agent | grep 'no on-demand fetch since agent start'
+done
+```
 
 **Negative control — the gate can fail.** rev242 (pre-#1012) *is* the red reading:
 `envoy_cluster_init_fetch_timeout_total{aether_cluster="aether-test/svc-{1,2}@aether-test/default"}`

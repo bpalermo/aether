@@ -9,6 +9,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/cache"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/quicdemand"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/registry"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -37,6 +38,9 @@ type onDemandObserver struct {
 	// (issue #1020), by reason. Each one is a request that 503s at the
 	// on_demand timeout.
 	quicRefused metric.Int64Counter
+	// twinRequests tells a `quic:` twin's first use apart from the proxy
+	// re-stating the twins it already had on a fresh stream (issue #1033).
+	twinRequests *quicdemand.Requests
 }
 
 // newOnDemandObserver creates an onDemandObserver over the snapshot cache.
@@ -44,9 +48,10 @@ type onDemandObserver struct {
 // to reject nonexistent services before they pollute the dependency set.
 func newOnDemandObserver(snapshotCache *cache.SnapshotCache, reg registry.Registry, log *slog.Logger) *onDemandObserver {
 	o := &onDemandObserver{
-		cache:    snapshotCache,
-		registry: reg,
-		log:      commonlog.Named(log, "odcds"),
+		cache:        snapshotCache,
+		registry:     reg,
+		log:          commonlog.Named(log, "odcds"),
+		twinRequests: quicdemand.NewRequests(),
 	}
 	var err error
 	if o.rejected, err = otel.Meter("aether/agent-odcds").Int64Counter("aether.agent.upstreams.rejected",
@@ -76,6 +81,7 @@ func (o *onDemandObserver) Callbacks() serverv3.Callbacks {
 // asks for again ages out on the observed-dependency idle TTL.
 func (o *onDemandObserver) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 	o.cache.CloseOnDemandStream(streamID)
+	o.twinRequests.Close(streamID)
 }
 
 // onDeltaRequest inspects delta CDS subscriptions for on-demand cluster
@@ -97,12 +103,13 @@ func (o *onDemandObserver) onDeltaRequest(streamID int64, req *discoveryv3.Delta
 	for _, name := range req.GetResourceNamesUnsubscribe() {
 		o.cache.UntrackOnDemandCluster(streamID, name)
 	}
+	twins := o.twinRequests.Classify(streamID, req)
+	for _, name := range twins.FirstUse {
+		o.observeQUICTwin(name)
+	}
+	o.restateTwins(streamID, twins)
 	for _, name := range req.GetResourceNamesSubscribe() {
-		if name == "*" || name == "" || proxy.IsPerPodClusterName(name) {
-			continue
-		}
-		if proxy.IsQUICClusterName(name) {
-			o.observeQUICTwin(name)
+		if name == "*" || name == "" || proxy.IsPerPodClusterName(name) || proxy.IsQUICClusterName(name) {
 			continue
 		}
 		o.observeSubscription(streamID, name)
@@ -110,11 +117,46 @@ func (o *onDemandObserver) onDeltaRequest(streamID int64, req *discoveryv3.Delta
 	return nil
 }
 
+// restateTwins handles the `quic:` twins a fresh stream's first CDS request
+// re-stated (issue #1033; quicdemand documents the protocol facts).
+//
+//   - A twin the proxy merely HOLDS (delivered by the wildcard, e.g. built up
+//     front by an older agent) is not demand and admits nothing. Unless its
+//     pair is already known (persisted), it is answered absent --
+//     go-control-plane puts a held cluster missing from the snapshot in
+//     removed_resources -- and Envoy drops it; the next request that routes to
+//     it opens an on-demand subscription, which is real first use. #1032
+//     admitted these, which is how rev245 persisted SAs x destinations pairs.
+//   - A twin the proxy re-SUBSCRIBES holds a live on-demand subscription that
+//     a routed request opened and Envoy will never re-send: answering it absent
+//     strands the pair (503 at the on_demand timeout, forever). Its pair is
+//     admitted if valid, and marked fetched.
+//
+// One line per fresh stream that re-states any twin.
+func (o *onDemandObserver) restateTwins(streamID int64, twins quicdemand.Classification) {
+	if len(twins.Resubscribed) == 0 && len(twins.HeldOnly) == 0 {
+		return
+	}
+	resumed := o.cache.ResumeQUICSubscriptions(context.Background(), twins.Resubscribed)
+	servedHeld := 0
+	for _, name := range twins.HeldOnly {
+		if o.cache.HasQUICPair(name) {
+			servedHeld++
+		}
+	}
+	o.log.Info("fresh xDS stream re-stated QUIC twins: held-only twins admit nothing, live on-demand subscriptions are served",
+		"stream", streamID,
+		"resubscribed", len(twins.Resubscribed), "resumed_pairs", resumed,
+		"held_only", len(twins.HeldOnly), "held_served", servedHeld, "answered_absent", len(twins.HeldOnly)-servedHeld)
+}
+
 // observeQUICTwin handles an on-demand request for a `quic:` twin (issue
 // #1020): a local ServiceAccount's first request to a QUIC-enabled
 // destination, routed by its selection arm to a twin the snapshot does not
-// carry yet. The cache validates the name and, when it admits it, publishes
-// the twin with its load assignment, which answers this subscription. A
+// carry yet. Only names quicdemand classifies as first use reach it; a fresh
+// stream's re-stated twins go to restateTwins (issue #1033). The cache validates
+// the name and, when it admits it, publishes the twin with its load
+// assignment, which answers this subscription. A
 // refused name is counted: the proxy's paused request 503s (NC) at the
 // on_demand timeout, so a non-zero rate here is client-visible.
 //
@@ -178,13 +220,11 @@ func (o *onDemandObserver) resumeHeldClusters(streamID int64, held map[string]st
 }
 
 // restoreHeldCluster re-admits one held cluster's demand and reports whether it
-// was new to this process: a mesh service cluster re-seeds the dependency set,
-// and a held `quic:` twin re-admits its (source, destination) pair (issue
-// #1020), so an agent-only restart without the persisted file keeps the twin.
+// was new to this process: a mesh service cluster re-seeds the dependency set.
+// A held `quic:` twin restores nothing here (issue #1033): the proxy holds
+// whatever the previous agent generation built, which on rev245 was every
+// SAs x destinations twin. restateTwins handles twins on a fresh stream.
 func (o *onDemandObserver) restoreHeldCluster(ctx context.Context, name string) bool {
-	if proxy.IsQUICClusterName(name) {
-		return o.cache.RestoreQUICTwin(name)
-	}
 	service, ok := o.meshServiceKey(name)
 	if !ok {
 		return false
