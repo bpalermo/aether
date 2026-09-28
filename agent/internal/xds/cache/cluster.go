@@ -121,7 +121,7 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 			vhosts = append(vhosts, vhost)
 		}
 	}
-	c.noteQUICFanout(quicClusters, len(quic.pairs), len(quic.identities), len(quic.services))
+	c.noteQUICFanout(quicClusters, len(quic.pairs), len(quic.identities), len(quic.awaitingCert), len(quic.services))
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)
 	sortVirtualHostsByName(vhosts)
@@ -1040,14 +1040,27 @@ func outboundPortVhostWithChainFilter(portName string, chainFilters map[string]p
 }
 
 // quicFanout is the per-snapshot input to the east-west QUIC fan-out: the
-// allow-list, the local workload identities (sorted), the OBSERVED
-// (destination, source) pairs (issue #1020) and the mTLS state the twins are
-// rendered from.
+// allow-list, the local workload identities whose client certificate the
+// snapshot carries (sorted), the OBSERVED (destination, source) pairs (issue
+// #1020) and the mTLS state the twins are rendered from.
+//
+// identities is deliberately NOT every local identity (issue #1049). A twin
+// names its source's SVID statically in its transport socket, so a twin
+// published before that secret is in the snapshot warms on SDS until SPIRE
+// delivers it -- 6.9-7.4 s after the CNI ADD of a new pod on talos (rev248) --
+// and every request its arm routes there meanwhile 503s NC at the 2 s
+// on_demand timeout. An identity still waiting for its certificate
+// (awaitingCert) gets neither an arm nor a twin, so its requests ride the h2
+// cluster: that one is already warm, and its client certificate is fetched on
+// demand per connection (the #842 selector), so no route points at a cluster
+// that cannot exist yet. The snapshot that carries the certificate carries the
+// arm and the twin with it.
 type quicFanout struct {
-	services   map[string]struct{}
-	identities []string
-	pairs      map[quicPair]struct{}
-	mtls       localMTLSState
+	services     map[string]struct{}
+	identities   []string
+	awaitingCert []string
+	pairs        map[quicPair]struct{}
+	mtls         localMTLSState
 }
 
 // quicFanoutSnapshot takes the fan-out inputs for one snapshot. It also
@@ -1065,7 +1078,7 @@ func (c *SnapshotCache) quicFanoutSnapshot() quicFanout {
 	if len(f.services) == 0 {
 		return f
 	}
-	f.identities = identities
+	f.identities, f.awaitingCert = c.splitByClientCertificate(identities)
 	f.mtls = c.localMTLSSnapshot()
 	return f
 }
@@ -1158,14 +1171,19 @@ func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomai
 // changes: one twin per OBSERVED (destination, source) pair (issue #1020), out
 // of local ServiceAccounts x allow-listed services possible ones. INFO because
 // the number is the thing an operator sizing QUIC needs to see; it must equal
-// the proxy's `quic:` cluster count.
-func (c *SnapshotCache) noteQUICFanout(twins, pairs, identities, services int) {
+// the proxy's `quic:` cluster count. awaitingCert is how many local identities
+// are held out of the fan-out -- no arm, no twin -- until SPIRE delivers their
+// certificate (issue #1049); a value that never returns to 0 is a stuck SVID,
+// not a QUIC fault.
+func (c *SnapshotCache) noteQUICFanout(twins, pairs, identities, awaitingCert, services int) {
 	c.quicBudgetMu.Lock()
-	changed := c.quicBudgetSeen != twins
+	changed := c.quicBudgetSeen != twins || c.quicAwaitingSeen != awaitingCert
 	c.quicBudgetSeen = twins
+	c.quicAwaitingSeen = awaitingCert
 	c.quicBudgetMu.Unlock()
 	if changed {
-		c.log.Info("east-west QUIC fan-out", "quic_clusters", twins, "observed_pairs", pairs, "local_identities", identities, "allow_listed_services", services)
+		c.log.Info("east-west QUIC fan-out", "quic_clusters", twins, "observed_pairs", pairs, "local_identities", identities,
+			"awaiting_client_cert", awaitingCert, "allow_listed_services", services)
 	}
 }
 

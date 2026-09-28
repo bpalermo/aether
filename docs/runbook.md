@@ -1114,6 +1114,40 @@ The one gap that remains by design is an agent that is down while a new pair
 dials. That is the same exposure the capture catch-all already has (#682): the
 paused request 503s at the timeout, and the next request retries the fetch.
 
+**The fast path, and why a twin waits for its source's certificate (#1049).** The
+agent side of a first use is not the slow part. It publishes the twin 2-10 ms after
+the ODCDS request (a dormant pair returning is republished by the CNI ADD's own
+snapshot), with no debounce and no wait on a registry reload. What used to lose to
+the 2 s timeout was Envoy warming the twin. A twin names its source ServiceAccount's
+SVID statically in its transport socket, so a twin published before that secret is
+in the snapshot warms on SDS until SPIRE delivers it. On rev248 (2026-09-28
+15:44Z, the k6 loaders' first pods on every node right after an agent roll) that
+took 6.9-7.4 s from the CNI ADD, and 428 requests failed 503 `NC`. Two rules close
+it:
+
+- **An identity whose certificate is not in the snapshot yet gets no selection arm
+  and no twin.** Its requests ride the warm h2 cluster, whose certificate is fetched
+  per connection. The snapshot that carries the certificate carries the arm, the
+  twin and the twin's load assignment together. The fan-out line shows the wait:
+  `east-west QUIC fan-out … awaiting_client_cert=N`. `N` above 0 for more than a few
+  seconds is a stuck SVID (see the SPIRE sections), not a QUIC fault. Before SPIRE
+  serves any secret at all, nothing is held back.
+- **A named subscribe for a twin is always answered.** Envoy's ODCDS manager
+  subscribes to a twin by name whenever a request routes to it while it is not
+  active, including when the wildcard already delivered it. go-control-plane stays
+  silent on an unchanged resource. The per-name subscription then waited out its 15 s
+  initial-fetch timeout and Envoy logged `cm odcds: cluster quic:… not found during
+  on-demand discovery`, which fails any request still waiting on the name. That was
+  main-worker-03 at 15:45:04.7, 15 s after its loader's first request. The agent now
+  re-sends a subscribed twin it already sent (`cache.SnapshotCache.CreateDeltaWatch`).
+
+The invariant, with #1035/#1036: for a well-formed twin name of a QUIC-enabled
+destination, the agent answers with the twin or holds the subscription open. It
+never answers such a name absent while the pair is servable. A twin leaves the
+snapshot only in two cases. Its source or destination has gone, and then the pair
+is dormant and republished on return (#1036). Or the proxy holds the twin through
+the wildcard alone, with no subscription (#1035).
+
 **Verifying.** Per twin, the admin `/clusters` host rows (`<cluster>::<ip:port>::
 rq_total::N`) are the ground truth. In Prometheus the twins carry their own stats
 key `<ns>/<svc>@<ns>/<sa>` (#960):
