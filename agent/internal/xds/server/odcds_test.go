@@ -221,7 +221,8 @@ func TestOnDemandObserver_ResumeIsIdempotentAndFirstRequestOnly(t *testing.T) {
 // `quic:` twin (issue #1020) is a QUIC pair observation, never a mesh
 // dependency. A local source dialling an allow-listed destination is
 // admitted; a foreign source is refused; neither pollutes the dependency set.
-// A twin the proxy HOLDS on a fresh stream re-admits its pair.
+// A twin the proxy only HOLDS on a fresh stream admits nothing (issue #1033);
+// a later request for it does.
 func TestOnDemandObserver_QUICTwinRequests(t *testing.T) {
 	newCache := func(t *testing.T) *cache.SnapshotCache {
 		t.Helper()
@@ -239,6 +240,13 @@ func TestOnDemandObserver_QUICTwinRequests(t *testing.T) {
 	c := newCache(t)
 	before := c.DependencySet()
 	o := newOnDemandObserver(c, &mockRegistry{}, slog.New(slog.DiscardHandler))
+	// The stream's first CDS request is the wildcard subscription; on-demand
+	// requests come after it (issue #1033: names in the first request are the
+	// proxy re-stating its inventory, not demand).
+	require.NoError(t, o.onDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl:                resourcev3.ClusterType,
+		ResourceNamesSubscribe: []string{"*"},
+	}))
 	require.NoError(t, o.onDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                resourcev3.ClusterType,
 		ResourceNamesSubscribe: []string{twinA, stranger},
@@ -247,12 +255,24 @@ func TestOnDemandObserver_QUICTwinRequests(t *testing.T) {
 	assert.Equal(t, before, c.DependencySet(), "a twin request is not a mesh dependency")
 	assert.Empty(t, c.OnDemandServices(), "a twin request is not an idle-TTL pin either")
 
-	// Agent-only restart: the proxy reports the twin it holds.
+	// Agent-only restart: the proxy re-states on the fresh stream the twins it
+	// HOLDS through the wildcard. That is not demand (issue #1033): the proxy
+	// holds whatever the previous agent generation built. Persisted pairs are
+	// the carry-over, and there are none here.
 	restarted := newCache(t)
 	o = newOnDemandObserver(restarted, &mockRegistry{}, slog.New(slog.DiscardHandler))
-	require.NoError(t, o.Callbacks().OnStreamDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
+	require.NoError(t, o.Callbacks().OnStreamDeltaRequest(2, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                 resourcev3.ClusterType,
+		ResourceNamesSubscribe:  []string{"*"},
 		InitialResourceVersions: map[string]string{twinA: "v1", stranger: "v1"},
 	}))
-	assert.Equal(t, []string{twinA}, restarted.QUICPairs(), "a held twin re-admits its pair; a held stranger does not")
+	assert.Empty(t, restarted.QUICPairs(), "a held twin admits nothing")
+
+	// A later request of the same stream naming the twin is the on_demand
+	// filter: real first use.
+	require.NoError(t, o.Callbacks().OnStreamDeltaRequest(2, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl:                resourcev3.ClusterType,
+		ResourceNamesSubscribe: []string{twinA},
+	}))
+	assert.Equal(t, []string{twinA}, restarted.QUICPairs(), "a request after the stream's first admits its pair")
 }

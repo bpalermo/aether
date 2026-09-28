@@ -283,6 +283,16 @@ type SnapshotCache struct {
 	// leaves the allow-list / dependency set (pruneQUICPairsLocked). Guarded
 	// by depMu; persisted with observedDeps.
 	quicPairs map[quicPair]time.Time
+	// quicFetched is the pairs fetched on demand (ObserveQUICTwin) in THIS
+	// process. A pair restored from the persisted set and not in here by
+	// quicStart+quicFetchWindow is pruned (PruneUnfetchedQUICPairs, issue
+	// #1033). Guarded by depMu.
+	quicFetched map[quicPair]struct{}
+	// quicStart is when this agent process started (the cache was built);
+	// quicFetchWindow is the unfetched-pair prune window (<= 0 disables it).
+	// Guarded by depMu.
+	quicStart       time.Time
+	quicFetchWindow time.Duration
 	// localPodsSynced is set once LoadListenersFromStorage has merged the
 	// node's pod records: only then is "no local pod of this ServiceAccount"
 	// evidence that a persisted QUIC pair's source left. Guarded by depMu.
@@ -690,6 +700,9 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		podDeps:            make(map[string]podDependencies),
 		observedDeps:       make(map[string]time.Time),
 		quicPairs:          make(map[quicPair]time.Time),
+		quicFetched:        make(map[quicPair]struct{}),
+		quicStart:          time.Now(),
+		quicFetchWindow:    DefaultQUICPairFetchWindow,
 		onDemandSubs:       make(map[int64]map[string]string),
 		staticDeps:         make(map[string]struct{}),
 		serviceRoutes:      make(map[string][]proxy.GammaRoute),

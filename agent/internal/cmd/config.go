@@ -163,6 +163,10 @@ type AgentConfig struct {
 	// ServiceAccount. Empty = no QUIC upstreams (the inbound listener is always
 	// on; it is inert without these).
 	EastWestQUICServices []string
+	// EastWestQUICPairFetchWindow bounds how long a PERSISTED QUIC pair may go
+	// without an on-demand fetch of its twin after the agent starts before it
+	// is pruned (issue #1033). <= 0 disables the prune.
+	EastWestQUICPairFetchWindow time.Duration
 
 	// MeshDNS enables the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
 	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs.

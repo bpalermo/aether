@@ -90,23 +90,58 @@ func (c *SnapshotCache) ObserveQUICTwin(ctx context.Context, name string) (QUICT
 	return decision, reason
 }
 
-// RestoreQUICTwin re-admits a pair whose twin the node proxy reports it
-// already HOLDS on a fresh xDS stream (initial_resource_versions), the QUIC
-// sibling of RestoreDependency. Same validation as an on-demand request, but
-// silent on refusal: a stale held twin is not a client asking for anything.
-// Returns true when the pair is new to this process, and then signals a
-// dependency change so the refresher republishes with the twin, exactly as
-// RestoreDependency does.
-func (c *SnapshotCache) RestoreQUICTwin(name string) bool {
-	decision, _ := c.recordQUICPair(name)
-	if decision != QUICTwinAdded {
-		return false
+// ResumeQUICSubscriptions admits the pairs behind twins the node proxy
+// re-subscribed by name on a fresh xDS stream (issue #1033): names it holds a
+// live on-demand subscription for, each opened by a request that routed to the
+// twin. Envoy's ODCDS manager keeps such a subscription for the life of the
+// process and never re-sends it, so a valid pair that is not served here is
+// stranded -- every request 503s at the on_demand timeout -- rather than
+// re-fetched. Same validation as ObserveQUICTwin, silent on refusal; admitted
+// and known pairs are marked fetched, so the unfetched-pair prune keeps them.
+// Returns how many pairs were new; those are published with one regeneration,
+// off the caller's goroutine (see ObserveQUICTwin).
+//
+// A twin the proxy merely HOLDS (initial_resource_versions without a
+// subscription) admits nothing: it is whatever an older agent generation
+// built. #1032 admitted those too (RestoreQUICTwin), which on the first talos
+// deploy (rev245) persisted every SAs x destinations twin as a pair.
+func (c *SnapshotCache) ResumeQUICSubscriptions(ctx context.Context, names []string) int {
+	added := 0
+	for _, name := range names {
+		if d, _ := c.recordQUICPair(name); d == QUICTwinAdded {
+			added++
+		}
 	}
-	c.signalDependencyChange()
-	return true
+	if added > 0 {
+		c.log.InfoContext(ctx, "resumed east-west QUIC pairs the proxy holds a live on-demand subscription for", "count", added)
+		go func() {
+			if err := c.generateSnapshot(context.WithoutCancel(ctx)); err != nil {
+				c.log.Error("failed to publish the snapshot for resumed QUIC pairs", "error", err)
+			}
+		}()
+	}
+	return added
 }
 
-// recordQUICPair validates a twin name and records its pair.
+// HasQUICPair reports whether the pair behind a `quic:` twin name is in the
+// observed set, i.e. whether the agent serves that twin. It records nothing.
+func (c *SnapshotCache) HasQUICPair(name string) bool {
+	service, source, ok := proxy.ParseQUICClusterName(name, c.meshDomain)
+	if !ok {
+		return false
+	}
+	c.depMu.RLock()
+	defer c.depMu.RUnlock()
+	_, known := c.quicPairs[quicPair{service: service, source: source}]
+	return known
+}
+
+// recordQUICPair validates a twin name and records its pair. It is reached
+// only on evidence that a request routed to the twin -- an on-demand fetch
+// (ObserveQUICTwin) or a live on-demand subscription re-stated on a fresh
+// stream (ResumeQUICSubscriptions) -- so an admitted or already-known pair is
+// also marked fetched in this process, which exempts it from the
+// unfetched-pair prune (pruneUnfetchedQUICPairs).
 func (c *SnapshotCache) recordQUICPair(name string) (QUICTwinDecision, string) {
 	service, source, ok := proxy.ParseQUICClusterName(name, c.meshDomain)
 	if !ok {
@@ -127,6 +162,7 @@ func (c *SnapshotCache) recordQUICPair(name string) (QUICTwinDecision, string) {
 		return QUICTwinRefused, QUICRefusedNotInDependency
 	}
 	p := quicPair{service: service, source: source}
+	c.quicFetched[p] = struct{}{}
 	if _, known := c.quicPairs[p]; known {
 		return QUICTwinKnown, ""
 	}
@@ -195,7 +231,9 @@ func (c *SnapshotCache) quicDemandSnapshot(identities []string) (map[string]stru
 // ServiceAccount has no pod on this node. There is deliberately NO idle
 // expiry: nothing in the xDS protocol tells the agent a twin stopped
 // carrying traffic, and a wrongly pruned pair costs its next request one
-// ODCDS round trip, so the rule prunes only on removal evidence. Returns the
+// ODCDS round trip, so the rule prunes only on removal evidence. (The one
+// time-based rule is the bounded post-start prune of persisted pairs that are
+// never fetched, PruneUnfetchedQUICPairs, issue #1033.) Returns the
 // pruned pairs as "<svc> <- <source>" strings. Caller must hold depMu for
 // writing.
 func (c *SnapshotCache) pruneQUICPairsLocked(local map[string]struct{}) []string {
@@ -217,6 +255,7 @@ func (c *SnapshotCache) pruneQUICPairsLocked(local map[string]struct{}) []string
 			continue
 		}
 		delete(c.quicPairs, p)
+		delete(c.quicFetched, p)
 		pruned = append(pruned, p.service+" <- "+p.source+" ("+reason+")")
 	}
 	if len(pruned) > 0 {
@@ -225,6 +264,76 @@ func (c *SnapshotCache) pruneQUICPairsLocked(local map[string]struct{}) []string
 	}
 	slices.Sort(pruned)
 	return pruned
+}
+
+// DefaultQUICPairFetchWindow is how long after an agent start a persisted QUIC
+// pair may go without an on-demand fetch before it is pruned (issue #1033;
+// --east-west-quic-pair-fetch-window).
+const DefaultQUICPairFetchWindow = time.Hour
+
+// SetQUICPairFetchWindow sets the unfetched-pair prune window (issue #1033).
+// d <= 0 disables the prune. Boot-time, before the manager starts.
+func (c *SnapshotCache) SetQUICPairFetchWindow(d time.Duration) {
+	c.depMu.Lock()
+	defer c.depMu.Unlock()
+	c.quicFetchWindow = d
+}
+
+// PruneUnfetchedQUICPairs drops the persisted QUIC pairs that have had no
+// on-demand fetch since this agent started, once the fetch window has elapsed
+// (issue #1033). Called from the refresher's prune tick.
+//
+// Why it exists: the #1032 agent admitted a pair for every twin the proxy
+// re-stated on a fresh stream, so the first talos deploy persisted the whole
+// SAs x destinations fan-out on every node, and pairs prune otherwise only on
+// removal evidence (source left the node, destination delisted). The agent has
+// no traffic signal of its own -- it makes no admin calls, and a served twin
+// is never fetched again -- so "fetched on demand since start" is the only
+// evidence of use it can see. A pair first used in this process is marked
+// fetched and kept, and so is one whose twin the proxy re-subscribed on this
+// agent's stream (ResumeQUICSubscriptions): removing a twin Envoy holds an
+// on-demand subscription for would strand it, because Envoy never re-requests
+// a subscribed name. What is left -- a restored pair whose twin the proxy
+// holds only through the wildcard, or not at all -- is kept for the window,
+// then pruned with its twin. Envoy drops that cluster outright (it has no
+// subscription for it), so a pruned pair that still carries traffic opens one
+// on its next request: one ODCDS round trip (~20 ms), no 503, re-admitted as
+// real first use. The cost of a wrong prune is bounded and once per agent start.
+//
+// Logs one line per node with the count when it prunes anything.
+func (c *SnapshotCache) PruneUnfetchedQUICPairs() {
+	c.pruneUnfetchedQUICPairs(time.Now())
+}
+
+func (c *SnapshotCache) pruneUnfetchedQUICPairs(now time.Time) {
+	c.depMu.Lock()
+	window := c.quicFetchWindow
+	if window <= 0 || now.Sub(c.quicStart) < window || len(c.quicPairs) == 0 {
+		c.depMu.Unlock()
+		return
+	}
+	var pruned []string
+	for p := range c.quicPairs {
+		if _, fetched := c.quicFetched[p]; fetched {
+			continue
+		}
+		delete(c.quicPairs, p)
+		pruned = append(pruned, p.service+" <- "+p.source)
+	}
+	if len(pruned) > 0 {
+		c.bumpDepGenLocked()
+		c.markObservedDirtyLocked()
+	}
+	remaining := len(c.quicPairs)
+	c.depMu.Unlock()
+
+	if len(pruned) == 0 {
+		return
+	}
+	slices.Sort(pruned)
+	c.log.Info("pruned persisted east-west QUIC pairs with no on-demand fetch since agent start",
+		"count", len(pruned), "remaining", remaining, "window", window, "pairs", capStrings(pruned, quicPairsLogCap))
+	c.signalDependencyChange()
 }
 
 func has(set map[string]struct{}, k string) bool {

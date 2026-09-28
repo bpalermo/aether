@@ -35,6 +35,7 @@ go_test(
     deps = [
         "//agent/internal/xds/config",
         "//agent/internal/xds/proxy",
+        "//agent/internal/xds/quicdemand",
         "//common/constants/mesh",
         "//test/envoybin",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",

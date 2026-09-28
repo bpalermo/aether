@@ -113,6 +113,9 @@ type adsControlPlane struct {
 	// resources is the snapshot currently served, kept so a rotation can
 	// replace ONE resource type and leave the rest alone.
 	resources map[resourcev3.Type][]types.Resource
+	// stop tears the gRPC server down (closing every stream and unlinking the
+	// socket); also registered as a test cleanup.
+	stop func()
 }
 
 // rotateSecrets republishes the snapshot with a new generation of secrets and
@@ -163,6 +166,24 @@ func startADSControlPlane(t *testing.T, resources map[resourcev3.Type][]types.Re
 func startADSControlPlaneWithHook(t *testing.T, resources map[resourcev3.Type][]types.Resource, onDelta func(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest)) *adsControlPlane {
 	t.Helper()
 
+	// A short path: AF_UNIX addresses are capped at 107 bytes and a Bazel test
+	// tmpdir is long enough to matter.
+	dir, err := os.MkdirTemp("", "aetherads")
+	if err != nil {
+		t.Fatalf("temp dir for xds socket: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return startADSControlPlaneOn(t, filepath.Join(dir, "xds.sock"), resources, onDelta)
+}
+
+// startADSControlPlaneOn is startADSControlPlaneWithHook on a given socket
+// path, so a test can stop the control plane (adsControlPlane.stop) and start
+// a NEW one where the proxy's bootstrap already points -- an agent restart as
+// the proxy sees it: its ADS stream drops, and it reconnects to a server with
+// a fresh process's state.
+func startADSControlPlaneOn(t *testing.T, socketPath string, resources map[resourcev3.Type][]types.Resource, onDelta func(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest)) *adsControlPlane {
+	t.Helper()
+
 	snapshot, err := cachev3.NewSnapshot("1", resources)
 	if err != nil {
 		t.Fatalf("build ADS snapshot: %v", err)
@@ -172,15 +193,6 @@ func startADSControlPlaneWithHook(t *testing.T, resources map[resourcev3.Type][]
 	if err := cache.SetSnapshot(context.Background(), envoyNodeID, snapshot); err != nil {
 		t.Fatalf("set ADS snapshot: %v", err)
 	}
-
-	// A short path: AF_UNIX addresses are capped at 107 bytes and a Bazel test
-	// tmpdir is long enough to matter.
-	dir, err := os.MkdirTemp("", "aetherads")
-	if err != nil {
-		t.Fatalf("temp dir for xds socket: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	socketPath := filepath.Join(dir, "xds.sock")
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -197,7 +209,7 @@ func startADSControlPlaneWithHook(t *testing.T, resources map[resourcev3.Type][]
 	go func() { _ = gs.Serve(ln) }()
 	t.Cleanup(gs.Stop)
 
-	return &adsControlPlane{socketPath: socketPath, cache: cache, resources: resources}
+	return &adsControlPlane{socketPath: socketPath, cache: cache, resources: resources, stop: gs.Stop}
 }
 
 // xdsTrace logs what the proxy asks for and what the control plane answers
