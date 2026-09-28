@@ -100,6 +100,11 @@ func (c *SnapshotCache) restoreObservedUpstreams(ctx context.Context, path strin
 	if pairs, badPairs := c.admitStoredQUICPairs(stored.GetQuicPairs()); pairs > 0 || badPairs > 0 {
 		c.log.InfoContext(ctx, "restored observed east-west QUIC pairs from local storage", "count", pairs, "skipped", badPairs, "path", path)
 	}
+	// So do the dormant ones (issue #1036): pairs whose twin the proxy holds an
+	// on-demand subscription for while their source or destination is away.
+	if dormant, badDormant := c.admitStoredDormantQUICPairs(stored.GetDormantQuicPairs()); dormant > 0 || badDormant > 0 {
+		c.log.InfoContext(ctx, "restored dormant east-west QUIC pairs from local storage", "count", dormant, "skipped", badDormant, "path", path)
+	}
 	if skipped > 0 {
 		c.log.InfoContext(ctx, "skipped expired or malformed persisted observed upstreams", "count", skipped, "path", path)
 	}
@@ -231,7 +236,7 @@ func (c *SnapshotCache) observedUpstreamsLocked(ttl time.Duration) *agentv1.Obse
 			ExpiresAt:  timestamppb.New(last.Add(ttl)),
 		}.Build())
 	}
-	return agentv1.ObservedUpstreams_builder{Upstreams: entries, QuicPairs: c.quicPairsLocked()}.Build()
+	return agentv1.ObservedUpstreams_builder{Upstreams: entries, QuicPairs: c.quicPairsLocked(), DormantQuicPairs: c.dormantQUICPairsLocked()}.Build()
 }
 
 // writeObservedUpstreams encodes and atomically writes the set. A failure is a

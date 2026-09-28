@@ -275,7 +275,7 @@ Knobs: `SOAK_NEWSA=0` (opt out), `SOAK_NEWSA_OFFSETS`, `SOAK_NEWSA_SECONDS`,
 `SOAK_NEWSA_RPS`, `SOAK_NEWSA_TARGETS` (`name=url …`), `SOAK_NEWSA_UPSTREAMS`,
 `SOAK_NEWSA_IMAGE`. `churn.sh --new-sa-once` runs one step now and exits (step 0d).
 
-**Gate.** Both must hold, at T0+8h (and gate 3 below):
+**Gate.** Both must hold, at T0+8h (and gates 3 and 4 below):
 
 ```promql
 # 1. no twin ever waited out its initial fetch (the #1008 signature)
@@ -337,6 +337,46 @@ for p in $(kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent -o 
   kubectl -n aether logs "$p" -c agent | grep 'no on-demand fetch since agent start'
 done
 ```
+
+**Gate 4 (#1036): no stranded twin after a roll.** A svc roll, or a new-SA step's
+pod deletion, can take a source ServiceAccount's last pod off a node. The pair's
+twin then leaves the snapshot. Envoy keeps its ODCDS subscription for that name for
+the life of the process and never re-requests it. So if the agent *forgot* the pair,
+the next pod of that ServiceAccount on the node would 503 `NC` at the 2 s
+`on_demand` timeout on every request to the QUIC destination, until the proxy
+restarts. Since #1036 the agent keeps the pair dormant and republishes the twin the
+moment a pod of that ServiceAccount is back. The 18 svc rolls, and the churn of the
+two new-SA steps, exercise this every run. After each svc roll there must be **no
+`503/NC` on a QUIC destination** from the rolled workload's pods:
+
+```logsql
+# the stranded-twin signature: 503/NC after the 2 s on_demand timeout, on a QUIC
+# destination (svc-1 on the proving run). upstream_cluster is "-" on an NC line,
+# so scope by authority. MUST be empty over T0..T0+8h.
+log_name:aether_access_logs AND reporter:source AND authority:~"svc-1" AND response_flags:NC AND duration_ms:>=1900
+  | stats by (node_name, pod_namespace, pod_name) count()
+```
+
+Also read the agent's side of each roll: a `pruned east-west QUIC pairs … (source_left_node,
+dormant)` line when the last pod leaves, and a `republished dormant east-west QUIC pairs`
+line when the new pod lands on the same node. The pair only goes dormant if its old
+pod was the ServiceAccount's last on the node. With a surge rollout the new pod often
+lands first, and then neither line appears, which is fine.
+
+```bash
+for p in $(kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent -o name); do
+  echo "$p"
+  kubectl -n aether logs "$p" -c agent | grep -E 'dormant east-west QUIC pairs|, dormant\)'
+done
+```
+
+A stranded-twin hit reads as a burst of `NC` rows for one `pod_name` that does not
+stop until that node's proxy is rolled. Each row has `duration_ms` ≈ 2000, and there
+is no `observed east-west QUIC pair` or refusal line on the agent for that twin. The
+live red reading is `//test/mtlspool`
+`TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control`: `status=503
+… in 2.000099268s`, with no CDS request reaching the control plane. Troubleshoot it
+with the runbook, "Stranded twin: 503 NC at 2 s for a source that came back (#1036)".
 
 **Negative control — the gate can fail.** rev242 (pre-#1012) *is* the red reading:
 `envoy_cluster_init_fetch_timeout_total{aether_cluster="aether-test/svc-{1,2}@aether-test/default"}`

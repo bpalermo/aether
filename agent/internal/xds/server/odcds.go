@@ -132,12 +132,25 @@ func (o *onDemandObserver) onDeltaRequest(streamID int64, req *discoveryv3.Delta
 //     strands the pair (503 at the on_demand timeout, forever). Its pair is
 //     admitted if valid, and marked fetched.
 //
+// The re-subscribed set is also the proxy's complete set of on-demand
+// subscriptions (issue #1036), so it is handed to the cache on EVERY fresh
+// stream, empty or not: a dormant pair it does not name has no subscription
+// left and is pruned. A hot-restart child's stream is the case where it is
+// empty -- a new generation holds no ODCDS subscriptions.
+//
 // One line per fresh stream that re-states any twin.
 func (o *onDemandObserver) restateTwins(streamID int64, twins quicdemand.Classification) {
+	ctx := context.Background()
+	if !twins.Fresh {
+		// A later request that re-subscribes a twin it holds: same handling,
+		// but it says nothing about the proxy's other subscriptions.
+		o.cache.ResumeQUICSubscriptions(ctx, twins.Resubscribed)
+		return
+	}
+	resumed := o.cache.RestateQUICSubscriptions(ctx, twins.Resubscribed)
 	if len(twins.Resubscribed) == 0 && len(twins.HeldOnly) == 0 {
 		return
 	}
-	resumed := o.cache.ResumeQUICSubscriptions(context.Background(), twins.Resubscribed)
 	servedHeld := 0
 	for _, name := range twins.HeldOnly {
 		if o.cache.HasQUICPair(name) {

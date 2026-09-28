@@ -181,3 +181,42 @@ func recvDelta(t *testing.T, stream discoveryv3.AggregatedDiscoveryService_Delta
 		return nil
 	}
 }
+
+// TestOnDemandObserver_FreshStreamRestatesSubscriptionsForDormantPairs (issue
+// #1036): a dormant pair -- one whose twin the proxy subscribed to but the
+// agent cannot serve right now -- is kept only while the proxy holds the
+// subscription, and the agent learns that on every fresh stream: one that
+// re-subscribes the twin keeps it; one that does not (a hot-restart child
+// holds no ODCDS subscriptions) prunes it. The observer must hand the cache
+// every fresh stream's re-statement, including an empty one.
+func TestOnDemandObserver_FreshStreamRestatesSubscriptionsForDormantPairs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c, _ := newRestateNode(ctx, t)
+	o := newOnDemandObserver(c, &mockRegistry{}, slog.New(slog.DiscardHandler))
+	cb := o.Callbacks()
+	away := proxy.QUICClusterName("demo/echo", restateDomain, "demo/away")
+
+	// Stream 1: its first CDS request, then a first use for a source that is
+	// not on the node. Refused (503), but Envoy keeps the subscription open.
+	require.NoError(t, cb.OnStreamDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl: resourcev3.ClusterType, ResourceNamesSubscribe: []string{"*"},
+	}))
+	require.NoError(t, cb.OnStreamDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl: resourcev3.ClusterType, ResourceNamesSubscribe: []string{away},
+	}))
+	require.Equal(t, []string{away}, c.DormantQUICPairs(), "a subscribed, unservable twin is kept dormant")
+
+	// Stream 2 (agent restart, same proxy): re-subscribes it. Kept.
+	require.NoError(t, cb.OnStreamDeltaRequest(2, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl: resourcev3.ClusterType, ResourceNamesSubscribe: []string{"*", away},
+	}))
+	assert.Equal(t, []string{away}, c.DormantQUICPairs(), "the proxy still subscribes to it: kept")
+	assert.Empty(t, c.QUICPairs())
+
+	// Stream 3 (a new proxy generation): names nothing. Pruned.
+	require.NoError(t, cb.OnStreamDeltaRequest(3, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl: resourcev3.ClusterType, ResourceNamesSubscribe: []string{"*"},
+	}))
+	assert.Empty(t, c.DormantQUICPairs(), "a fresh stream that does not subscribe to it: pruned")
+}

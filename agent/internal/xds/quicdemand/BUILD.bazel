@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "quicdemand",
-    srcs = ["requests.go"],
+    srcs = [
+        "ledger.go",
+        "requests.go",
+    ],
     importpath = "aethermesh.dev/agent/internal/xds/quicdemand",
     visibility = [
         "//agent:__subpackages__",
@@ -17,7 +20,10 @@ go_library(
 
 go_test(
     name = "quicdemand_test",
-    srcs = ["requests_test.go"],
+    srcs = [
+        "ledger_test.go",
+        "requests_test.go",
+    ],
     embed = [":quicdemand"],
     deps = [
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",

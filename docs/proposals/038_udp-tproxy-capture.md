@@ -395,6 +395,24 @@ identity-bearing class (R2):
   is pruned with its twin. That is the migration off rev245's persisted fan-out;
   a wrongly pruned live pair costs one ODCDS round trip on its next request.
 
+  **A pair whose twin the proxy subscribed to is never forgotten (#1036).** The
+  same Envoy behaviour applies to removal-evidence pruning. A pair whose source
+  ServiceAccount left the node, or whose destination was delisted, used to be
+  dropped with its twin. When a pod of that ServiceAccount came back (every
+  Deployment roll can do this), its request routed to a name Envoy would not
+  re-request, and the pair 503'd `NC` at the 2 s timeout until the proxy
+  restarted. The agent now tracks which twins the proxy holds an ODCDS
+  subscription for: names it asked for, and names it re-subscribed on a fresh
+  stream. On removal evidence such a pair goes **dormant**. Its twin leaves the
+  snapshot as before, but the pair stays in the persisted state
+  (`dormant_quic_pairs`). When the source returns or the destination is re-listed,
+  the same snapshot republishes the twin with no request. The subscription never
+  closed, so Envoy takes the pushed cluster, and the next request is 200 over
+  HTTP/3 in milliseconds. A dormant pair is pruned only when a fresh stream's first
+  CDS request does not re-subscribe it: an agent restart against a proxy that no
+  longer holds it, or a new proxy generation after a hot restart, which holds no
+  ODCDS subscriptions. The fetch-window prune never applies to a dormant pair.
+
 Required mode only until the pin passes #47341; the extra peer-cert fields of
 #45978 are not needed by anything today.
 
