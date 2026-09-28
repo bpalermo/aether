@@ -14,8 +14,8 @@ import (
 // (proposal 037).
 //
 // The destination_port match is the whole mechanism: Envoy evaluates it ahead
-// of prefix_ranges, and use_original_dst (already set on the capture listener)
-// makes it the port the client actually dialed before the REDIRECT. A chain
+// of prefix_ranges, and the capture listener's original_dst listener filter
+// makes it the port the client actually dialed. A chain
 // matching only the ClusterIP would outrank the HCM catch-all's
 // application_protocols match and swallow the service's HTTP traffic — which
 // is exactly why a service could not be both protocols before.
