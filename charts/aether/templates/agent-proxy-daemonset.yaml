@@ -126,6 +126,11 @@ spec:
             - "--envoy-arg=$(NODE_NAME)"
             - "--envoy-arg=--service-zone"
             - "--envoy-arg=$(ZONE)"
+            {{- if .Values.proxy.hotRestart.skipParentStats }}
+            # #1050: the child must never block on the draining parent's main
+            # thread for stats — see proxy.hotRestart.skipParentStats.
+            - "--envoy-arg=--skip-hot-restart-parent-stats"
+            {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:
