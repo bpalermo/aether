@@ -725,6 +725,10 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	// generateSnapshot itself, so they need no trigger here.
 	c.recomputeMTLSClusters()
 
+	// The local pod set is now known, so a persisted QUIC pair whose source
+	// ServiceAccount has no pod here any more can be pruned (issue #1020).
+	c.markLocalPodsSynced()
+
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

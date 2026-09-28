@@ -929,15 +929,70 @@ Changing the entry re-issues every workload SVID on the agents' next fetch; no p
 roll. Order of operations on a live cluster: SPIRE first, wait for the agents'
 `envoy_sds_*_version` to move on every node, then the allow-list.
 
-**What to expect once a destination is listed.** The agent logs
-`east-west QUIC fan-out quic_clusters=N local_identities=I allow_listed_services=S`
-with `N = I × S` on every node that hosts a caller; the proxy admin (`127.0.0.1:9901`
-on the node) lists one `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster per local
-ServiceAccount. Requests from a caller take its own twin (a matcher cluster
-specifier keyed on the connection's `aether.source.spiffe_id` filter state); a
-caller with no twin — or a connection stamped before the trust domain was known —
-takes the h2 cluster. A GAMMA (HTTPRoute) rule whose single backendRef is the
-parent rides QUIC too; a weighted split stays h2 (#961).
+**What to expect once a destination is listed.** Twins are **demand-scoped**
+(#1020): a node builds a `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster only for a
+(source ServiceAccount, destination) pair that has actually dialled. The route to a
+listed destination carries one selection arm per local ServiceAccount (a matcher
+cluster specifier keyed on the connection's `aether.source.spiffe_id` filter
+state), each naming that source's twin, built or not. A source's **first** request
+resolves to a twin the proxy does not have yet; the HCM's `on_demand` filter asks
+the agent for it by name over ODCDS; the agent checks the name (destination listed
+and in the dependency set, source a ServiceAccount with a pod on the node), records
+the pair and publishes the twin with its own load assignment; the paused request
+resumes on it, over HTTP/3. That costs one local round trip. It was 17–24 ms in
+`//test/mtlspool`'s `TestOnDemandQUICTwinPerPair`, and every later request from
+the pair skips it. A connection with no identity stamp (stamped before the trust
+domain was known) takes `on_no_match`, the h2 cluster. A GAMMA (HTTPRoute) rule
+whose single backendRef is the parent rides QUIC too; a weighted split stays h2
+(#961) and never fetches a twin.
+
+The agent logs `east-west QUIC fan-out quic_clusters=N observed_pairs=P
+local_identities=I allow_listed_services=S` whenever `N` changes, and for each
+new pair `observed east-west QUIC pair (ODCDS); building its twin cluster=…`.
+`N` is the number of observed pairs whose source is still local, so it is at most
+`I × S` and on a real fleet much less (rev242: 118 possible, 2 used).
+
+**Reading twin count against pairs.** On one node, the `quic:` clusters in the
+proxy admin (`/clusters`) must be exactly the pairs with traffic. Pairs are
+persisted beside the observed upstreams (`state/observed-upstreams.json`,
+`quic_pairs`), so they survive an agent or agent+proxy roll. There is **no idle
+expiry**: nothing in xDS tells the agent that a twin stopped carrying traffic. A
+pair is pruned when its source ServiceAccount has no pod left on the node, or when
+its destination leaves the allow-list or the dependency set. A pair that did
+receive traffic therefore keeps its twin while both ends stay put, even if it goes
+quiet. `envoy_cluster_manager_active_clusters` rises by one when a pair first
+dials, falls when a pair is pruned, and is otherwise **flat**. A step that tracks
+pod churn rather than new callers is the pre-#1020 fan-out and a regression.
+
+```promql
+# twins per node, then the pairs among them that carried traffic in the last hour.
+# Under steady load the two are equal; the difference is pairs that went quiet
+# (kept by design, see above), never pairs that did not dial.
+count by (node) (envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"})
+count by (node) (increase(envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"}[1h]) > 0)
+envoy_cluster_manager_active_clusters
+```
+
+**The failure mode of the first request.** A twin the agent refuses, or one that
+takes longer than the `on_demand` timeout (2 s, `onDemandClusterTimeout`, the same
+bound the mesh catch-all's cold path uses), fails that request with **503 `NC`**.
+Envoy's API has no per-route fallback from an on-demand miss to the h2 cluster: the
+matcher's action names one cluster and nothing else. Refusals are counted by the
+agent as `aether_agent_quic_twin_refused_total{reason}`, and each one is a request
+that 503'd. `source_not_local` and `destination_not_quic_enabled` are races with a
+pod leaving or the allow-list changing. `malformed_name` means a route and the
+agent disagree on the naming. On the proxy, watch the ODCDS subscription:
+
+```promql
+# on-demand CDS fetches that timed out (a 503 NC per paused request): MUST stay 0
+sum(increase(envoy_cluster_manager_odcds_init_fetch_timeout_total[1h]))
+# agent refusals, by reason
+sum by (reason) (increase(aether_agent_quic_twin_refused_total[1h]))
+```
+
+The one gap that remains by design is an agent that is down while a new pair
+dials. That is the same exposure the capture catch-all already has (#682): the
+paused request 503s at the timeout, and the next request retries the fetch.
 
 **Verifying.** Per twin, the admin `/clusters` host rows (`<cluster>::<ip:port>::
 rq_total::N`) are the ground truth. In Prometheus the twins carry their own stats
@@ -963,7 +1018,7 @@ leaves warming" below.
 
 On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
-kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5).
+kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), including E4c: the node's `quic:` cluster count equals the (source, destination) pairs the suite drove.
 
 **Rolling back.** Remove the entries (or `--set agent.eastWestQuicServices=null`):
 the twins and the selection disappear on the next push and every caller is back on
@@ -979,6 +1034,12 @@ harmless to leave in place. Nothing here needs a proxy roll.
 QUIC-enabled destination, then recovers on its own. Other callers on the node
 are unaffected; h2 destinations are unaffected. On talos (rev242) it was 1,060
 client-visible 503/NC in 11 s when the k6 loaders started.
+
+Since #1020 every twin is a late twin, because it is built on the pair's first
+request. A regression of this fix would therefore hit **every** new (source,
+destination) pair, not only a new ServiceAccount. A 503 `NC` that ends after
+**~2 s** is a different failure: the on-demand fetch itself timed out or was
+refused. See "The failure mode of the first request" above.
 
 **Read.**
 

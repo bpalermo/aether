@@ -44,6 +44,15 @@ func routerHttpFilter() *http_connection_managerv3.HttpFilter {
 // the cluster on demand; the agent observes the miss, adds the service to the
 // node dependency set (TTL'd), and serves it from the registrar snapshot.
 func onDemandHttpFilter() *http_connection_managerv3.HttpFilter {
+	return OnDemandHTTPFilter()
+}
+
+// OnDemandHTTPFilter is production's on_demand HTTP filter (ODCDS over ADS,
+// bounded by onDemandClusterTimeout), exported so the live harnesses in //test
+// run the exact filter every node-proxy HCM carries. The east-west QUIC
+// selection depends on it (issue #1020): a matcher arm that names a `quic:`
+// twin the snapshot does not carry yet is fetched by this filter on first use.
+func OnDemandHTTPFilter() *http_connection_managerv3.HttpFilter {
 	return httpFilter(httpOnDemandFilterName, &on_demandv3.OnDemand{
 		Odcds: &on_demandv3.OnDemandCds{
 			Source:  config.XDSConfigSourceADS(),

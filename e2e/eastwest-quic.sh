@@ -11,8 +11,9 @@
 #                   (inbound_<pod>_h3) and the per-listener request counter this
 #                   suite reads exists — so every "== 0" below is a reading, not
 #                   an absent stat (#853)
-#   E1  fan-out     a quic: twin exists for every (allow-listed destination x
-#                   source ServiceAccount), and NONE for the h2-only destination
+#   E1  fan-out     twins are DEMAND-SCOPED (aether#1020): before any request
+#                   no pair has dialled, so no quic: twin exists (on a fresh
+#                   cluster: zero), and none ever for the h2-only destination
 #   E2  h3 + id     client-a and client-b (DIFFERENT ServiceAccounts) each call
 #                   quic-a and quic-b: every request answers 200, the destination
 #                   sees the CALLER'S OWN SPIFFE ID in x-forwarded-client-cert,
@@ -21,12 +22,18 @@
 #   E3  h2-only     h2only is not allow-listed: no quic: twin, requests succeed
 #                   with the caller's identity, and its HTTP/3 inbound stays idle
 #   E4  GAMMA       gamma-a (allow-listed) with a weighted HTTPRoute canary to
-#                   gamma-a / gamma-b (both allow-listed, twins present) stays on
-#                   h2 — the matcher action names ONE cluster, so a weighted
-#                   split has no per-source form (#961)
+#                   gamma-a / gamma-b (both allow-listed) stays on h2 — the
+#                   matcher action names ONE cluster, so a weighted split has no
+#                   per-source form (#961) — and so never fetches a twin
 #   E4b GAMMA       a single-backendRef HTTPRoute rule to the parent (gamma-a)
 #                   renders as `cluster:` and IS selected: it rides the caller's
 #                   own quic: twin over HTTP/3 like the default route (#961)
+#   E4c pairs       the node's quic: cluster count EQUALS the (source,
+#                   destination) pairs this suite drove over a selecting route
+#                   (E2 + E4b = 2 sources x 3 destinations = 6), and the set is
+#                   exactly those pairs: a twin is built only for a pair that has
+#                   dialled (aether#1020; the pre-#1020 agent built every local
+#                   SA x allow-listed destination: 7 x 4 = 28 on this node)
 #   E5  Q3          client-a's pod is deleted and comes back with a NEW pod IP;
 #                   its requests still carry client-a's identity over HTTP/3, and
 #                   client-b's still carry client-b's
@@ -67,17 +74,22 @@
 # SEEN RED WITH THE FEATURE OFF. `up` takes EASTWEST_QUIC (default on). With
 # EASTWEST_QUIC=off the chart is installed with NO allow-list — everything else
 # identical, including the unconditional HTTP/3 inbound and the DNS SANs — and
-# `verify` goes red at E1 because nothing is allow-listed, so no quic: cluster
-# exists at all. That is the honest name of the failure: it is not a broken
+# `verify` goes red at E2: nothing is allow-listed, so no route selects a twin,
+# the caller's first request never fetches one, and every request rides h2.
+# (E1 passes: since aether#1020 "no twin before any request" is the expected
+# state either way.) That is the honest name of the failure: it is not a broken
 # data path, it is the feature not being asked for. The red-then-green:
 #
-#   EASTWEST_QUIC=off e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh verify  # RED at E1
+#   EASTWEST_QUIC=off e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh verify  # RED at E2
 #   e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh verify                    # GREEN
 #
 # (`up` is re-runnable: the second one only `helm upgrade`s aether with the
 # allow-list, which rolls the agent. Never --reuse-values: the allow-list must
-# come from THIS invocation.) If E1 is forced past, E2 is red too: no twin moves
-# and the h3 listener stays at zero.
+# come from THIS invocation.)
+#
+# E4c's pair count is seen red by asserting the pre-#1020 count against a
+# #1020 agent: EWQ_EXPECT_TWINS=28 e2e/eastwest-quic.sh verify goes red at E4c
+# with 6 twins present (the override exists only for that red run).
 #
 # Q3 LIMITATION, STATED RATHER THAN DISCOVERED. True QUIC connection migration
 # (one connection surviving a client 5-tuple change) cannot be exercised here:
@@ -569,26 +581,52 @@ verify_preflight() {
 	ok "HTTP/3 inbound listeners + counters present for every destination (they exist whether or not anything is allow-listed)"
 }
 
-verify_fanout() {
-	log "E1 fan-out: a quic: twin for every (allow-listed destination x source SA), none for $H2_DST"
-	local deadline=$((SECONDS + 180)) dump missing d s
-	while true; do
-		dump="$(admin /clusters)"
-		missing=""
-		for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}"; do
-			for s in "${SOURCES[@]}"; do
-				has_cluster "$dump" "$(twin "$d" "$s")" || missing="$missing $(twin "$d" "$s")"
-			done
+# quic_twins DUMP — the distinct quic: cluster names in a /clusters dump, sorted.
+quic_twins() { printf '%s\n' "$1" | awk -F'::' 'index($1, "quic:") == 1 { print $1 }' | sort -u; }
+
+# driven_pairs — the twins E2 + E4b dial over a SELECTING route, sorted: every
+# source x (each QUIC destination + the GAMMA parent's single-backend rule).
+# E4's weighted split never selects, so gamma-b is never a pair.
+driven_pairs() {
+	local s d
+	for s in "${SOURCES[@]}"; do
+		for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[0]}"; do
+			twin "$d" "$s"
+			printf '\n'
 		done
-		[ -z "$missing" ] && break
+	done | sort -u
+}
+
+verify_fanout() {
+	log "E1 fan-out: twins are demand-scoped (aether#1020) — before any request, none outside the pairs this suite drives; never one for $H2_DST"
+	local dump present strays
+	dump="$(admin /clusters)"
+	present="$(quic_twins "$dump")"
+	# A re-run of verify finds the previous run's pairs (they are persisted
+	# in the agent's observed set, by design); anything OUTSIDE the driven set
+	# was built for a pair that never dialled.
+	strays="$(comm -23 <(printf '%s\n' "$present" | sed '/^$/d') <(driven_pairs))"
+	[ -z "$strays" ] ||
+		die "E1: quic: twins exist for pairs that never dialled: $strays — the agent is building twins up front (the pre-#1020 fan-out: every local SA x allow-listed destination)"
+	printf '%s\n' "$present" | grep -q "^quic:$(fqdn "$H2_DST")@" && die "E1: the NOT allow-listed $H2_DST has a quic: twin"
+	ok "$(printf '%s\n' "$present" | sed '/^$/d' | wc -l | tr -d ' ') quic: twins before any request in this run (0 on a fresh cluster); none for a pair that never dialled; none for $H2_DST"
+}
+
+# verify_pairs — E4c: the node's twin set IS the set of pairs driven so far.
+verify_pairs() {
+	local want present n expect deadline=$((SECONDS + 60))
+	want="$(driven_pairs)"
+	expect="${EWQ_EXPECT_TWINS:-$(printf '%s\n' "$want" | wc -l | tr -d ' ')}"
+	log "E4c pairs: the node's quic: cluster count must equal the $expect (source, destination) pairs E2 + E4b drove"
+	while true; do
+		present="$(quic_twins "$(admin /clusters)")"
+		n="$(printf '%s\n' "$present" | sed '/^$/d' | wc -l | tr -d ' ')"
+		[ "$n" -eq "$expect" ] && [ "$present" = "$want" ] && break
 		[ "$SECONDS" -lt "$deadline" ] ||
-			die "E1: quic: twins missing after 180s:$missing — agent allow-list: [$(agent_quic_args | tr '\n' ' ')]. With EASTWEST_QUIC=off this is the EXPECTED red: nothing is allow-listed, so no destination gets a quic: cluster (the header's red-then-green). With it on, read the agent's 'east-west QUIC fan-out' log line: twins exist only once the node identity is served"
+			die "E4c: $n quic: clusters on the node, want $expect = the driven pairs [$(printf '%s\n' "$want" | tr '\n' ' ')]; present: [$(printf '%s\n' "$present" | tr '\n' ' ')]. More than the pairs = a twin built for a pair that never dialled (the pre-#1020 SA x destination fan-out); fewer = a pair that dialled lost its twin"
 		sleep 5
 	done
-	local strays
-	strays="$(printf '%s\n' "$dump" | awk -F'::' -v p="quic:$(fqdn "$H2_DST")@" 'index($1, p) == 1 { print $1 }' | sort -u)"
-	[ -z "$strays" ] || die "E1: the NOT allow-listed $H2_DST has quic: twins: $strays"
-	ok "$((${#QUIC_DSTS[@]} * ${#SOURCES[@]} + ${#GAMMA_DSTS[@]} * ${#SOURCES[@]})) twins present (e.g. $(twin "${QUIC_DSTS[0]}" "${SOURCES[0]}")); none for $H2_DST"
+	ok "E4c: $n quic: clusters = $expect driven pairs, exactly [$(printf '%s\n' "$present" | tr '\n' ' ')]"
 }
 
 # --- E2 / E5: per-source HTTP/3 with the caller's own identity ---------------
@@ -821,8 +859,9 @@ verify() {
 	verify_h2only
 	verify_gamma
 	verify_gamma_single
+	verify_pairs
 	verify_q3
-	log "all east-west QUIC assertions passed (fan-out, per-source HTTP/3 + XFCC, h2-only untouched, GAMMA stays h2, identity across a client address change)"
+	log "all east-west QUIC assertions passed (demand-scoped twins, per-source HTTP/3 + XFCC, h2-only untouched, GAMMA stays h2, twins = driven pairs, identity across a client address change)"
 }
 
 down() {

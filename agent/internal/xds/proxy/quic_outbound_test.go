@@ -28,6 +28,34 @@ func TestQUICClusterName(t *testing.T) {
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", QUICClusterName("demo/echo", "aether.internal", "demo/source-a"))
 }
 
+// TestParseQUICClusterName pins the inverse the on-demand twin path validates
+// with (issue #1020): it accepts exactly what QUICClusterName produces.
+func TestParseQUICClusterName(t *testing.T) {
+	name := QUICClusterName("demo/echo", "aether.internal", "demo/source-a")
+	svc, src, ok := ParseQUICClusterName(name, "aether.internal")
+	require.True(t, ok)
+	assert.Equal(t, "demo/echo", svc)
+	assert.Equal(t, "demo/source-a", src)
+	assert.True(t, IsQUICClusterName(name))
+	assert.False(t, IsQUICClusterName("echo.demo.aether.internal"))
+
+	for _, bad := range []string{
+		"echo.demo.aether.internal@demo/source-a",           // no prefix
+		"quic:echo.demo.aether.internal",                    // no source
+		"quic:echo.demo.aether.internal:8080@demo/source-a", // a port: never produced
+		"quic:echo.demo.example.com@demo/source-a",          // foreign domain
+		"quic:a.echo.demo.aether.internal@demo/source-a",    // extra label
+		"quic:echo.demo.aether.internal@source-a",           // source not <ns>/<sa>
+		"quic:echo.demo.aether.internal@demo/",              // empty sa
+		"quic:echo.demo.aether.internal@/source-a",          // empty ns
+		"quic:echo.demo.aether.internal@demo/source-a/x",    // extra segment
+		"quic:echo.demo.aether.internal@demo/a@b",           // a second @
+	} {
+		_, _, ok := ParseQUICClusterName(bad, "aether.internal")
+		assert.False(t, ok, bad)
+	}
+}
+
 // TestQUICAltStatName pins the per-source stats key (aether#960).
 func TestQUICAltStatName(t *testing.T) {
 	assert.Equal(t, "demo/echo@demo/source-a", QUICAltStatName("demo/echo", "demo/source-a"))

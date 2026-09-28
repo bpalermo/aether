@@ -23,6 +23,11 @@ option go_package = "aethermesh.dev/api/aether/agent/v1;agentv1";
 message ObservedUpstreams {
   // upstreams are the observed entries, one per service, in service-key order.
   repeated ObservedUpstream upstreams = 1;
+
+  // quic_pairs are the (destination, source ServiceAccount) pairs that have
+  // dialled over east-west QUIC (issue #1020, proposal 038 Phase 4b): the agent
+  // builds a `quic:` twin only for these. In (service, source) order.
+  repeated ObservedQUICPair quic_pairs = 2;
 }
 
 // ObservedUpstream is one observed dependency-set entry.
@@ -39,4 +44,20 @@ message ObservedUpstream {
   // restored entry keeps THIS deadline — the TTL is never reset on restore, so
   // a stale set cannot outlive its hour by riding across restarts.
   google.protobuf.Timestamp expires_at = 3;
+}
+
+// ObservedQUICPair is one (destination, source) pair whose `quic:` twin the
+// node proxy asked for on demand (issue #1020). A pair carries no idle TTL:
+// Envoy does not tell the agent when a twin stops carrying traffic, so a pair
+// is pruned only when its source ServiceAccount leaves the node or its
+// destination leaves the QUIC allow-list / the dependency set.
+message ObservedQUICPair {
+  // service is the destination's dependency-set key, "<namespace>/<service>".
+  string service = 1;
+
+  // source is the dialling ServiceAccount, "<namespace>/<serviceaccount>".
+  string source = 2;
+
+  // observed_at is when the pair was first recorded. Informational.
+  google.protobuf.Timestamp observed_at = 3;
 }
