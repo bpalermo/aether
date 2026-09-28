@@ -2057,7 +2057,7 @@ connections of the same chains must come back. Each line is the whole join:
 | `node_name` (resource attribute), `pod_name`, `pod_namespace`, `source_netns`, `source_spiffe_id` | **source**: which pod dialled, from which netns, presenting which identity |
 | `filter_chain_name` | which capture chain took it: `cap_tcp_*` (floor, per-port, any-port shim), `cap_tls_*` (TLSRoute SNI), `cap_tcp_blackhole` |
 | `downstream_local_address` | what the client **dialled** (the restored VIP:port) |
-| `upstream_cluster` | which L4 cluster was chosen (`tcp:<fqdn>[:<port>]`); its stat key is the `aether_cluster` the tick landed on |
+| `upstream_cluster` | which L4 cluster was chosen, as its **stat key** (`tcp_<ns>/<svc>[_<port>]`, the `aether_cluster` the tick landed on): Envoy's `%UPSTREAM_CLUSTER%` renders the cluster's `alt_stat_name`, not its config name `tcp:<fqdn>[:<port>]` |
 | `upstream_host` | the **intended destination** endpoint, `<pod IP>:18008` → pod → node as in step 2 above |
 | `requested_server_name` | SNI (`-` on the floor; the port on a per-port cluster; the hostname on a TLSRoute chain) |
 | `upstream_transport_failure_reason` | the rejection, with the **presented** SAN where the pinned proxy prints it (`certificate SANs are [...]`) |
@@ -2149,7 +2149,8 @@ TCPRoute-weighted chains, the any-port shim, TLSRoute SNI chains and the scoped-
 # Every failed L4 connection
 _stream:{service.name="aether-proxy"} AND log_name:aether_l4_access_logs AND response_flags:!"-"
 # One service's L4 traffic
-log_name:aether_l4_access_logs AND upstream_cluster:~"^tcp:tcp-echo[.]aether-test[.]"
+# (upstream_cluster is the stat key, tcp_<ns>/<svc>[_<port>], never the tcp:<fqdn> config name)
+log_name:aether_l4_access_logs AND upstream_cluster:~"^tcp_aether-test/tcp-echo(_[0-9]+)?$"
 # TLSRoute chains only
 log_name:aether_l4_access_logs AND filter_chain_name:~"^cap_tls_"
 ```

@@ -609,7 +609,7 @@ max by (node, pod) (max_over_time((label_replace(
 
 A landing is not a roll artifact, so (b) is graded over the whole window, rolls
 included. Attribute any hit of either gate from the L4 access log, which puts the
-source pod, the dialled VIP:port, the chosen `tcp:` cluster, the intended endpoint and
+source pod, the dialled VIP:port, the chosen L4 cluster (by its `tcp_` stat key), the intended endpoint and
 the rejection on one line:
 
 ```
