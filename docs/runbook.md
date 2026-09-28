@@ -1272,24 +1272,26 @@ Any new cluster, secret or config that is a clone or second consumer of an
 existing resource needs either its own resource name or its own
 `api_config_source`.
 
-**Fleet gate.** Port aliases, TCP floors and per-port clusters keep the default
-cluster's `alt_stat_name` (the bare `<ns>/<svc>`). Their stats therefore land in
-the default cluster's `cluster.<ns>/<svc>.*` tree. There is no `tcp:…` or
-`…:<port>` value of `aether_cluster` to match: the live harness read the late
-alias's and the late floor's timeout at `cluster.demo/echo.init_fetch_timeout`.
-Only a twin has its own key (`<ns>/<svc>@<ns>/<sa>`, #960). A mesh EDS cluster
-that follows the invariant never times out, so the gate is zero on the whole
-family, twins included, across a soak:
+**Fleet gate.** HTTP port aliases and per-port HTTP clusters keep the default
+cluster's `alt_stat_name` (the bare `<ns>/<svc>`), so their stats land in the
+default cluster's `cluster.<ns>/<svc>.*` tree. L4 clusters no longer do (#1023):
+the TCP floor reports as `tcp_<ns>/<svc>`, a TCP per-port or primary-port alias
+cluster as `tcp_<ns>/<svc>_<port>`, a UDP floor as `udp_<ns>/<svc>` (see "L4 stat
+keys and the L4 access log"). A twin has its own key (`<ns>/<svc>@<ns>/<sa>`,
+#960). A mesh EDS cluster that follows the invariant never times out, so the gate
+is zero on the whole family, twins included, across a soak:
 
 ```promql
-# #1013 (aliases, floors, per-port and default clusters: all report as <ns>/<svc>)
+# #1013 (HTTP aliases, per-port and default clusters as <ns>/<svc>; L4 clusters as
+# tcp_<ns>/<svc>[_<port>] -- the selector matches both, as it did before #1023)
 sum(increase(envoy_cluster_init_fetch_timeout_total{aether_cluster=~"[^@]+/[^@]+"}[8h]))   # MUST be 0
 # #1008 (QUIC twins)
 sum(increase(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".+@.+"}[8h]))         # MUST be 0
 ```
 
-A non-zero first line says *which service*, not which of its clusters. Tell them
-apart with `/config_dump`, as above, and the proxy log line
+A non-zero first line says which service and, since #1023, whether it was an L4
+cluster (and which port) or the HTTP family. Tell the HTTP clusters apart with
+`/config_dump`, as above, and the proxy log line
 `initial fetch timed out for …ClusterLoadAssignment`.
 
 ### Forwarded DNS keeps failing after a kube-dns roll
@@ -2031,6 +2033,127 @@ proxy **served** it, then compared with the node whose proxy was restarting.
      identity was not bound per-server, and `upstream_host` is not the TLS-terminating
      peer; record it and re-open the transport path.
 
+#### L4 hops: the source / destination / SAN join from the L4 access log (#1023)
+
+The ledger above reads the HTTP access log, which has no record of an L4 hop: until
+#1023 an L4 `ssl_fail_verify_san` tick had no source, no destination and no SAN on
+record, and the #1007 event had to be inferred from per-pod connection counters and the
+chain config. Every capture TCP/TLS chain now writes one record per connection on the
+`aether_l4_access_logs` stream (see "L4 stat keys and the L4 access log" below), and a
+SAN rejection is a connection with a response flag, so it is always logged, never
+sampled away:
+
+```
+_stream:{service.name="aether-proxy"}
+  AND log_name:aether_l4_access_logs
+  AND upstream_transport_failure_reason:~"CERTIFICATE_VERIFY_FAILED"
+```
+
+Control-test the negative the same way: drop the reason field and the clean
+connections of the same chains must come back. Each line is the whole join:
+
+| field | answers |
+|---|---|
+| `node_name` (resource attribute), `pod_name`, `pod_namespace`, `source_netns`, `source_spiffe_id` | **source**: which pod dialled, from which netns, presenting which identity |
+| `filter_chain_name` | which capture chain took it: `cap_tcp_*` (floor, per-port, any-port shim), `cap_tls_*` (TLSRoute SNI), `cap_tcp_blackhole` |
+| `downstream_local_address` | what the client **dialled** (the restored VIP:port) |
+| `upstream_cluster` | which L4 cluster was chosen (`tcp:<fqdn>[:<port>]`); its stat key is the `aether_cluster` the tick landed on |
+| `upstream_host` | the **intended destination** endpoint, `<pod IP>:18008` → pod → node as in step 2 above |
+| `requested_server_name` | SNI (`-` on the floor; the port on a per-port cluster; the hostname on a TLSRoute chain) |
+| `upstream_transport_failure_reason` | the rejection, with the **presented** SAN where the pinned proxy prints it (`certificate SANs are [...]`) |
+| `upstream_peer_uri_san` | the verified server identity on a **successful** connection (`-` on a rejection: the handshake never completed) |
+
+Verdict, per line:
+
+- Presented SAN **is** the identity of the pod at `upstream_host` → the connection reached
+  the endpoint it dialled and the **pin** is wrong (check `sanURIs`, `cache/mtls.go`).
+- Presented SAN is **another** workload's, and that workload has a pod on the **source's
+  node** → a local pod's inbound terminated the connection, not `upstream_host`: the
+  cross-pod landing below (#1007/#1022). The node's newest mesh pod at that minute is
+  the usual suspect; its `in_tcp_<pod>` counter confirms it.
+- Presented SAN is another workload's on a **different** node → `upstream_host` was not
+  the terminating peer; record it and re-open the transport path, as for HTTP.
+
+### L4 stat keys and the L4 access log (#1023)
+
+**Stat keys.** Every L4 cluster reports under its own `alt_stat_name`, which the proxy
+bootstrap's `aether.cluster` stats tag turns into the `aether_cluster` label:
+
+| cluster (config_dump name) | `aether_cluster` |
+|---|---|
+| HTTP default `<svc>.<ns>.<domain>`, its port aliases and per-port clusters | `<ns>/<svc>` (unchanged) |
+| QUIC twin `quic:<fqdn>@<ns>/<sa>` | `<ns>/<svc>@<ns>/<sa>` (unchanged, #960) |
+| TCP floor `tcp:<fqdn>` | `tcp_<ns>/<svc>` |
+| TCP per-port or primary-port alias `tcp:<fqdn>:<port>` | `tcp_<ns>/<svc>_<port>` |
+| UDP floor `udp:<fqdn>` | `udp_<ns>/<svc>` |
+
+Before #1023 every L4 row reported as `<ns>/<svc>`, so
+`aether_cluster="aether-test/mixed-svc"` mixed the HTTP cluster with the `:9000` TCP
+cluster, and a tick could not be assigned to a cluster kind (#1007).
+
+- **`_`, not `:`.** Envoy sanitizes every stat name and tag value
+  (`Stats::Utility::sanitizeStatsName` rewrites `:` to `_`), so a `tcp:…:9000` key would
+  be exported as `tcp_…_9000` anyway, and a selector written as `tcp:.*` would match
+  nothing, forever. The key aether writes is the label you query. Namespaces and service
+  names are DNS labels, so `_` is unambiguous.
+- **No `tls_` key.** A TLSRoute SNI chain routes to its backends' `tcp:` floor clusters,
+  so its connections count under those clusters' `tcp_` keys. The chain itself is told
+  apart in the L4 access log (`filter_chain_name` = `cap_tls_*`).
+- **Cardinality** is one key per cluster (services × raw-TCP ports), never per endpoint
+  or per source.
+- **HTTP queries are unaffected**: an exact `<ns>/<svc>` or `<ns>/<svc>(@.*)?` selector
+  cannot match an L4 key. `//test/envoy_validate` runs the chart's own tag regex over the
+  keys, after Envoy's sanitization, and pins that.
+
+```promql
+# L4 only, every kind
+sum by (node, aether_cluster) (rate(envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_.*|udp_.*"}[5m]))
+# One service's L4 clusters: the floor and every port
+sum by (aether_cluster) (rate(envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_aether-test/mixed-svc(_[0-9]+)?"}[5m]))
+# Client-side SAN rejections on L4 clusters (the soak gate; never an instant query)
+max by (node, aether_cluster) (max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}[8h]))
+```
+
+A dashboard or alert that selected an L4 service by its bare key
+(`aether_cluster="aether-test/tcp-echo"`) reads **no series** from a #1023 proxy onward.
+Move it to the `tcp_` key.
+
+**The L4 access log.** Every `tcp_proxy` chain on a capture listener carries an OTel
+access logger on the stream **`log_name=aether_l4_access_logs`**, next to the HTTP stream
+`aether_access_logs`. That covers the TCP floor and its port spellings, per-port chains,
+TCPRoute-weighted chains, the any-port shim, TLSRoute SNI chains and the scoped-mode
+`cap_tcp_blackhole`.
+
+- **Same switch, same sink.** It is on exactly when the HTTP log is (MeshConfig
+  `accessLogsEnabled`; no new flag) and ships to the same `otel_collector` cluster.
+- **Connection-level.** One record when the downstream connection **closes** (no
+  `access_log_options` flush interval). Logged: every connection with a response flag
+  (`UF`, `UH`, `UO`, `NR`, …, which is where a SAN rejection or a blackholed flow lands)
+  plus the HTTP log's success sample (`aether.access_log.sample`, the same runtime key).
+- **Not logged:** the redirect-all passthrough `DefaultFilterChain` (all non-mesh egress),
+  the UDP capture listener (no per-datagram log), and the inbound side.
+- **A separate stream** because the shapes differ: no method, path, authority, status or
+  request id. It deliberately carries **no `reporter`** attribute. The collector's
+  identity counters (`aether_access_log_*`, k8s-talos-main otel-collector values) select
+  on `reporter`, because `log_name` is a resource attribute their transform cannot see,
+  and an L4 record must not enter the HTTP request counters.
+- **Fields:** `pod_name`, `pod_namespace`, `source_netns`, `source_spiffe_id` (the source),
+  `filter_chain_name`, `downstream_local_address` (the dialled VIP:port),
+  `downstream_remote_address`, `upstream_cluster`, `upstream_host`,
+  `upstream_local_address`, `requested_server_name` (SNI), `upstream_peer_uri_san`,
+  `response_flags`, `upstream_transport_failure_reason`,
+  `connection_termination_details`, `start_time`, `duration_ms`, `bytes_received`,
+  `bytes_sent`. The node is Envoy's resource attribute `node_name`.
+
+```
+# Every failed L4 connection
+_stream:{service.name="aether-proxy"} AND log_name:aether_l4_access_logs AND response_flags:!"-"
+# One service's L4 traffic
+log_name:aether_l4_access_logs AND upstream_cluster:~"^tcp:tcp-echo[.]aether-test[.]"
+# TLSRoute chains only
+log_name:aether_l4_access_logs AND filter_chain_name:~"^cap_tls_"
+```
+
 ### Cross-pod L4 landings (#1007/#1022)
 
 **Symptom.** A node proxy's outbound L4 connection to `tcp-echo` or `mixed-svc` is
@@ -2071,23 +2194,45 @@ first stray connection):
 sum by (__name__) ({__name__=~"envoy_tcp_in_tcp_.*_downstream_cx_total",
                     __name__!~"envoy_tcp_in_tcp_tcp_echo_.*|envoy_tcp_in_tcp_.*_[0-9]+_downstream_cx_total"})
 
-# The client side: the L4 clusters' SAN rejections, per node (never an instant query)
+# The same over a window, with the pod lifted into a label (the soak gate, #1023).
+# max_over_time drops __name__, so the label is taken first, inside a subquery.
+max by (node, pod) (max_over_time((label_replace(
+  {__name__=~"envoy_tcp_in_tcp_.+_downstream_cx_total",
+   __name__!~"envoy_tcp_in_tcp_(tcp_echo_.+|.+_[0-9]+)_downstream_cx_total"},
+  "pod", "$1", "__name__", "envoy_tcp_in_tcp_(.+)_downstream_cx_total"))[8h:1m]))
+
+# The client side: SAN rejections on the L4 clusters, per node and per L4 cluster
+# (never an instant query). From #1023 on, the tcp_ keys hold ONLY L4 clusters, and
+# aether_cluster names the floor or the port the misdirected connection was dialled on.
+max by (node, aether_cluster) (max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}[8h]))
+# ...on a pre-#1023 proxy the same ticks read under the bare keys, mixed with HTTP:
 max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"aether-test/(tcp-echo|mixed-svc)"}[8h])
 
 # The landing pod's inbound sees the client abort after its SAN check
 max_over_time(envoy_listener_inbound_ssl_connection_error_total[8h]) > 0   # by aether_pod, node
 ```
 
-Attribute a tick by joining the three on node and minute: the `verify_san` +1 on node N,
-a new or incremented `in_tcp_<pod>` series for a pod on N, and that pod's
-`inbound_ssl_connection_error` climbing in the same minute (the 2026-09-27 16:37Z w04
-event in #1007 is the worked example).
+The exclusion list is the soak's: `tcp-echo` is its only TCP-primary workload. The
+stat keys cannot derive it (an HTTP-primary service with a raw-TCP port, like
+`mixed-svc`, has a `tcp_` floor key too), so a cluster with another TCP-primary
+workload adds it to the `__name__!~` alternation. A pod whose 5-character hash suffix
+happens to be all digits is excluded along with the per-port chains; that is rare
+(about 0.1% of pods) and errs toward a missed landing, not a false one.
+
+Attribute a tick by joining on node and minute. Since #1023 the L4 access log carries the
+whole join in one record (see "L4 hops" above): the source pod, the dialled VIP:port,
+the chosen `tcp:` cluster, the intended `upstream_host` and the rejection. Before it,
+the join was three counters: the `verify_san` +1 on node N, a new or incremented
+`in_tcp_<pod>` series for a pod on N, and that pod's `inbound_ssl_connection_error`
+climbing in the same minute (the 2026-09-27 16:37Z w04 event in #1007 is the worked
+example).
 
 **Reading it.**
 
 | build | expected |
 |---|---|
-| rev242 and earlier (no thread-self patch) — the negative control | non-zero on svc-1..5, prober, k6-soak-loader, udp-dialer (and echo, uds-cr-echo, udp-echo); ~1 burst per node per hour; `verify_san` ticks on `tcp-echo`/`mixed-svc` |
+| rev242 and earlier (no thread-self patch) — the negative control | non-zero on svc-1..5, prober, k6-soak-loader, udp-dialer (and echo, uds-cr-echo, udp-echo); ~1 burst per node per hour; `verify_san` ticks on `tcp-echo`/`mixed-svc` (23 over the rev242 soak) |
+| rev243 (unpatched, 1h47m generation, 2026-09-27 22:53Z–09-28 00:39Z) | 6 stray floor connections, all on `prober` pods (w05 2, w03 3, w04 1), and 1 `verify_san` on w03 `tcp-echo` |
 | first proxy with the #1022 patch, #1007 still unfixed | **no new series and no increments** after every node's proxy has rolled onto it (series from older generations age out with them) |
 
 A landing that persists on the patched proxy **refutes** #1022 as the (only) cause:

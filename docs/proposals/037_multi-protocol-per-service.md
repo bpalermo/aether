@@ -603,6 +603,16 @@ Per-port TCP clusters are `NewTCPServiceCluster(tcp:<fqdn>:<p>, <fqdn>:<p>,
 default cluster: `entry.sanURIs` is computed for every entry, TCP included.
 Cluster stats stay keyed by the bare service (`AltStatName`).
 
+> **Superseded by #1023.** Keying every L4 cluster by the bare service put the
+> floor, the primary-port alias, every per-port TCP cluster and — for a service
+> with an HTTP port — the HTTP cluster into one `aether_cluster` series, and a
+> `ssl_fail_verify_san` tick could not be assigned to a cluster (#1007). Each
+> L4 cluster now has its own key: `tcp_<ns>/<svc>` (floor),
+> `tcp_<ns>/<svc>_<port>` (per-port and primary-port alias), `udp_<ns>/<svc>`
+> (UDP floor); the HTTP clusters keep `<ns>/<svc>`. `_`, not `:`, because
+> Envoy's stat-name sanitizer rewrites `:` to `_` — see `proxy.TCPStatKey` and
+> the runbook's "L4 stat keys and the L4 access log".
+
 **The SNI rule for TCP clusters:** `InjectUpstreamTCPMTLS(cl, …, sanURIs, sni)`
 with `sni = ""` when the target port is the pod's primary port, else
 `sni = strconv.Itoa(port)`. Empty-SNI lands on the destination's default floor

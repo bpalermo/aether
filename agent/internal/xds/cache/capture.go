@@ -423,7 +423,10 @@ func (c *SnapshotCache) captureTCPClusters() ([]types.Resource, []types.Resource
 		sanURIs := tcpEntry.sanURIs
 		tcpName := proxy.TCPClusterName(e.serviceName, c.meshDomain)
 		bare := c.bareServiceCLALocked(e.serviceName)
-		cl := proxy.NewTCPServiceCluster(tcpName, tcpName, e.serviceName)
+		// Its own stat key, tcp_<ns>/<svc>: never the bare service key the HTTP
+		// cluster reports under (aether#1023, proxy.TCPStatKey). The alias and
+		// per-port clusters below carry tcp_<ns>/<svc>_<port>.
+		cl := proxy.NewTCPServiceCluster(tcpName, tcpName, proxy.TCPStatKey(e.serviceName))
 		// NO SNI for the TCP floor: the egress floor connection must NOT carry the
 		// destination port as SNI, or the peer's inbound per-port HCM chain
 		// (server_names:[port]) would win over the inbound TCP floor's default chain
@@ -485,7 +488,7 @@ func (c *SnapshotCache) edgeTCPClusters() ([]types.Resource, []types.Resource) {
 		// #537); see the node-proxy TCP variant above.
 		sanURIs := entry.sanURIs
 		tcpName := proxy.TCPClusterName(svc, c.meshDomain)
-		cl := proxy.NewTCPServiceCluster(tcpName, tcpName, svc)
+		cl := proxy.NewTCPServiceCluster(tcpName, tcpName, proxy.TCPStatKey(svc))
 		// Edge variant: fetch SVID/bundle from spire_agent (not ADS), no ALPN, no SNI (TCP floor).
 		cl.TransportSocket = proxy.EdgeUpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs)
 		resources = append(resources, cl)
@@ -710,7 +713,7 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 			c.log.Warn("UDP cluster published with no routable endpoint: udp_proxy will discard datagrams for it, silently",
 				"service", svc, "cluster", udpName, "endpoints", n, "issue", "931")
 		}
-		cl := proxy.NewUDPServiceCluster(udpName, svc, la)
+		cl := proxy.NewUDPServiceCluster(udpName, proxy.UDPStatKey(svc), la)
 		resources = append(resources, cl)
 	}
 	return resources
@@ -1455,7 +1458,7 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 
 	if aliasName := proxy.TCPPortClusterName(tcpName, primaryPortOf(tcpEntry)); aliasName != "" {
 		if _, ok := c.clusters[aliasName]; ok {
-			ac := proxy.NewTCPServiceCluster(aliasName, aliasName, e.serviceName)
+			ac := proxy.NewTCPServiceCluster(aliasName, aliasName, proxy.TCPPortStatKey(e.serviceName, primaryPortOf(tcpEntry)))
 			proxy.InjectUpstreamTCPMTLS(ac, nodeSpiffeID, validationContextName, sanURIs, "")
 			out = append(out, ac)
 			if cla := proxy.LoadAssignmentAlias(bare, aliasName); cla != nil {
@@ -1472,7 +1475,7 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 		pc := proxy.NewTCPServiceCluster(
 			proxy.TCPPortClusterName(tcpName, port),
 			portEntry.loadAssignment.GetClusterName(),
-			e.serviceName,
+			proxy.TCPPortStatKey(e.serviceName, port),
 		)
 		proxy.InjectUpstreamTCPMTLS(pc, nodeSpiffeID, validationContextName, portEntry.sanURIs, strconv.Itoa(int(port)))
 		out = append(out, pc)

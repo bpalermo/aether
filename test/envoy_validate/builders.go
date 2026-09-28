@@ -38,9 +38,11 @@ import (
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	otelaccesslogv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/open_telemetry/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	quicv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
@@ -480,6 +482,11 @@ func buildNodeUDSBootstrap() (*bootstrapv3.Bootstrap, error) {
 // buildCaptureBootstrap builds the transparent-capture bootstrap config.
 func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
+	// Access logging ON: the L4 access log every capture tcp_proxy chain
+	// carries (aether#1023) is then parsed by the real proxy, and the chain
+	// gate has something to find. Its collector cluster is in the bootstrap.
+	proxy.SetAccessLogConfig(proxy.AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+	defer proxy.SetAccessLogConfig(proxy.AccessLogConfig{})
 
 	tcpSvc := proxy.CaptureTCPService{
 		ClusterName: "redis." + meshDomain,
@@ -507,7 +514,7 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	tcpSvc2 := newServiceCluster("redis."+meshDomain, trustDomain, "default", "redis")
 
 	return newBootstrap(
-		[]*clusterv3.Cluster{xdsCluster(), passthrough, httpSvc, tcpSvc2},
+		[]*clusterv3.Cluster{xdsCluster(), passthrough, httpSvc, tcpSvc2, accessLogCluster()},
 		[]*listenerv3.Listener{captureListener},
 	), nil
 }
@@ -572,6 +579,10 @@ const (
 	L4TCPWeightA = 75
 	L4TCPWeightB = 25
 
+	// L4TCPBackendPort is a raw-TCP port backend A serves beside its floor,
+	// giving the fixture a port-qualified tcp: cluster (aether#1023 stat keys).
+	L4TCPBackendPort = 9000
+
 	// L4SNIAlpha and L4SNIBravo are the TLSRoute fixture's two hostnames — one
 	// TLSRoute object each, because TLSRoute.Spec.Hostnames is route-level.
 	L4SNIAlpha = "a.l4.test"
@@ -631,6 +642,9 @@ func CaptureTCPRouteBootstrapJSON() ([]byte, error) {
 
 func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
+	// Access logging ON (aether#1023): see buildCaptureBootstrap.
+	proxy.SetAccessLogConfig(proxy.AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+	defer proxy.SetAccessLogConfig(proxy.AccessLogConfig{})
 
 	svc := proxy.CaptureTCPService{
 		// The production ClusterName is the "tcp:"-prefixed floor cluster, not
@@ -671,9 +685,16 @@ func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 			// over its own api_config_source naming agent_xds (#842), so the
 			// bootstrap has to define it or the reference dangles.
 			agentXDSCluster(),
+			accessLogCluster(),
 			proxy.NewPassthroughOriginalDstCluster(),
 			newTCPFloorCluster(l4TCPBackendA, "l4-a"),
 			newTCPFloorCluster(l4TCPBackendB, "l4-b"),
+			// Backend A also serves a raw-TCP port and an HTTP port, so this
+			// bootstrap carries every kind that used to collapse onto the one
+			// "<ns>/<svc>" stat key (aether#1023): the floor, a port-qualified
+			// TCP cluster and the HTTP default cluster.
+			newTCPPortCluster(l4TCPBackendA, "l4-a", L4TCPBackendPort),
+			newHTTPDefaultCluster(l4TCPBackendA, "l4-a"),
 		},
 		[]*listenerv3.Listener{listener},
 	), nil
@@ -697,6 +718,9 @@ func CaptureTLSRouteBootstrapJSON() ([]byte, error) {
 
 func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
+	// Access logging ON (aether#1023): see buildCaptureBootstrap.
+	proxy.SetAccessLogConfig(proxy.AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+	defer proxy.SetAccessLogConfig(proxy.AccessLogConfig{})
 
 	svc := proxy.CaptureTCPService{
 		ClusterName: proxy.TCPClusterName(l4TLSParent, meshDomain),
@@ -741,6 +765,7 @@ func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		[]*clusterv3.Cluster{
 			xdsCluster(),
 			agentXDSCluster(),
+			accessLogCluster(),
 			proxy.NewPassthroughOriginalDstCluster(),
 			// The floor chain routes to the PARENT's own TCP cluster; the SNI
 			// chains route to the backends'.
@@ -807,8 +832,8 @@ func buildCaptureUDPBootstrap() (*bootstrapv3.Bootstrap, error) {
 	return newBootstrap(
 		[]*clusterv3.Cluster{
 			xdsCluster(),
-			proxy.NewUDPServiceCluster(clusterA, l4UDPBackendA, laA),
-			proxy.NewUDPServiceCluster(clusterB, l4UDPBackendB, laB),
+			proxy.NewUDPServiceCluster(clusterA, proxy.UDPStatKey(l4UDPBackendA), laA),
+			proxy.NewUDPServiceCluster(clusterB, proxy.UDPStatKey(l4UDPBackendB), laB),
 		},
 		[]*listenerv3.Listener{listener},
 	), nil
@@ -823,7 +848,7 @@ func buildCaptureUDPBootstrap() (*bootstrapv3.Bootstrap, error) {
 // key).
 func newTCPFloorCluster(serviceKey, saName string) *clusterv3.Cluster {
 	name := proxy.TCPClusterName(serviceKey, meshDomain)
-	c := proxy.NewTCPServiceCluster(name, name, serviceKey)
+	c := proxy.NewTCPServiceCluster(name, name, proxy.TCPStatKey(serviceKey))
 	proxy.InjectUpstreamTCPMTLS(
 		c,
 		fmt.Sprintf(nodeSpiffeIDFmt, trustDomain),
@@ -831,6 +856,35 @@ func newTCPFloorCluster(serviceKey, saName string) *clusterv3.Cluster {
 		[]string{fmt.Sprintf("spiffe://%s/ns/default/sa/%s", trustDomain, saName)},
 		"", // no SNI on the floor: the peer must demux to its inbound default chain
 	)
+	return c
+}
+
+// newTCPPortCluster builds a service's port-qualified TCP cluster
+// "tcp:<fqdn>:<port>" exactly as SnapshotCache.tcpPortClustersLocked does for
+// a non-primary raw-TCP port: its own EDS name, the per-kind stat key
+// tcp_<ns>/<svc>_<port> (aether#1023), and the port as SNI so the destination
+// demuxes to its per-port inbound chain.
+func newTCPPortCluster(serviceKey, saName string, port uint32) *clusterv3.Cluster {
+	name := proxy.TCPPortClusterName(proxy.TCPClusterName(serviceKey, meshDomain), port)
+	c := proxy.NewTCPServiceCluster(name, name, proxy.TCPPortStatKey(serviceKey, port))
+	proxy.InjectUpstreamTCPMTLS(
+		c,
+		fmt.Sprintf(nodeSpiffeIDFmt, trustDomain),
+		fmt.Sprintf("spiffe://%s", trustDomain),
+		[]string{fmt.Sprintf("spiffe://%s/ns/default/sa/%s", trustDomain, saName)},
+		fmt.Sprintf("%d", port),
+	)
+	return c
+}
+
+// newHTTPDefaultCluster builds a service's DEFAULT h2 cluster the way the
+// agent's HTTP pass does (cache/cluster.go): named by the FQDN, subscribed to
+// the bare "<ns>/<svc>" EDS name, and reporting under the bare service key --
+// the aether_cluster value every HTTP query selects on.
+func newHTTPDefaultCluster(serviceKey, saName string) *clusterv3.Cluster {
+	c := newServiceCluster(proxy.ServiceClusterName(serviceKey, meshDomain), trustDomain, "default", saName)
+	c.AltStatName = serviceKey
+	c.EdsClusterConfig.ServiceName = serviceKey
 	return c
 }
 
@@ -1497,6 +1551,151 @@ func QUICUpstreamsSharingStatsKey(bootstrapJSON []byte) ([]string, error) {
 		}
 	}
 	return bad, nil
+}
+
+// L4StatKeyViolations returns every L4 cluster ("tcp:"/"udp:") whose stats key
+// is not its own kind-prefixed key (aether#1023) -- tcp_<ns>/<svc> for a TCP
+// floor, tcp_<ns>/<svc>_<port> for a port-qualified TCP cluster,
+// udp_<ns>/<svc> for a UDP floor -- or is shared with any other cluster in the
+// bootstrap, plus how many L4 clusters it examined so a caller can refuse a
+// vacuous pass.
+//
+// The expected key is derived from the cluster NAME, not from the builder
+// that set it, so a builder that collapses a cluster back onto the bare
+// service key (the pre-#1023 shape, which merged every L4 kind with the HTTP
+// cluster's aether_cluster series) is reported however it got there.
+func L4StatKeyViolations(bootstrapJSON []byte) ([]string, int, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, 0, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	owners := map[string][]string{}
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		owners[clusterStatsKey(c)] = append(owners[clusterStatsKey(c)], c.GetName())
+	}
+	var bad []string
+	n := 0
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		msg, isL4 := l4StatKeyViolation(c, owners)
+		if isL4 {
+			n++
+		}
+		if msg != "" {
+			bad = append(bad, msg)
+		}
+	}
+	return bad, n, nil
+}
+
+// clusterStatsKey is the name a cluster's stats are keyed by: its
+// alt_stat_name, or its name when unset.
+func clusterStatsKey(c *clusterv3.Cluster) string {
+	if c.GetAltStatName() != "" {
+		return c.GetAltStatName()
+	}
+	return c.GetName()
+}
+
+// l4StatKeyViolation checks one cluster. isL4 reports whether it is an L4
+// cluster at all; msg is non-empty when its stat key is wrong or shared.
+func l4StatKeyViolation(c *clusterv3.Cluster, owners map[string][]string) (msg string, isL4 bool) {
+	name := c.GetName()
+	namePrefix, keyPrefix, isL4 := l4Kind(name)
+	if !isL4 {
+		return "", false
+	}
+	want, ok := expectedL4StatKey(keyPrefix, strings.TrimPrefix(name, namePrefix))
+	switch {
+	case !ok:
+		return fmt.Sprintf("%s: not a mesh L4 cluster name", name), true
+	case c.GetAltStatName() != want:
+		return fmt.Sprintf("%s: alt_stat_name %q, want %q", name, c.GetAltStatName(), want), true
+	case len(owners[want]) > 1:
+		return fmt.Sprintf("%s: stat key %q shared by %v", name, want, owners[want]), true
+	}
+	return "", true
+}
+
+// l4Kind maps an L4 cluster name's kind prefix ("tcp:"/"udp:") to its stat
+// key prefix; ok is false for any other cluster.
+func l4Kind(name string) (namePrefix, keyPrefix string, ok bool) {
+	switch {
+	case strings.HasPrefix(name, "tcp:"):
+		return "tcp:", proxy.L4StatKeyTCPPrefix, true
+	case strings.HasPrefix(name, "udp:"):
+		return "udp:", proxy.L4StatKeyUDPPrefix, true
+	}
+	return "", "", false
+}
+
+// expectedL4StatKey maps an L4 cluster name, minus its kind prefix
+// ("<svc>.<ns>.<domain>[:<port>]"), to the stat key it must report under.
+func expectedL4StatKey(prefix, rest string) (string, bool) {
+	fqdn, port := rest, ""
+	if i := strings.LastIndexByte(rest, ':'); i >= 0 {
+		fqdn, port = rest[:i], rest[i+1:]
+	}
+	svc, ok := proxy.ServiceFromClusterName(fqdn, meshDomain)
+	if !ok {
+		return "", false
+	}
+	if port != "" {
+		return prefix + svc + "_" + port, true
+	}
+	return prefix + svc, true
+}
+
+// CaptureTCPChainsWithoutL4AccessLog returns every filter chain on a capture
+// listener ("capture_*") whose tcp_proxy carries no access logger on the
+// L4 stream (proxy.L4AccessLogName, aether#1023), plus how many such chains
+// it examined. The passthrough default_filter_chain is deliberately not
+// examined: it is all non-mesh egress and is not logged.
+func CaptureTCPChainsWithoutL4AccessLog(bootstrapJSON []byte) ([]string, int, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, 0, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	var missing []string
+	checked := 0
+	for _, l := range bs.GetStaticResources().GetListeners() {
+		if !strings.HasPrefix(l.GetName(), "capture_") {
+			continue
+		}
+		for _, fc := range l.GetFilterChains() {
+			for _, tc := range chainTCPProxies(fc) {
+				checked++
+				if !hasL4AccessLog(tc) {
+					missing = append(missing, l.GetName()+"/"+fc.GetName())
+				}
+			}
+		}
+	}
+	return missing, checked, nil
+}
+
+// chainTCPProxies returns every tcp_proxy config on a filter chain.
+func chainTCPProxies(fc *listenerv3.FilterChain) []*tcp_proxyv3.TcpProxy {
+	var out []*tcp_proxyv3.TcpProxy
+	for _, f := range fc.GetFilters() {
+		tc := &tcp_proxyv3.TcpProxy{}
+		if f.GetTypedConfig() != nil && f.GetTypedConfig().UnmarshalTo(tc) == nil {
+			out = append(out, tc)
+		}
+	}
+	return out
+}
+
+func hasL4AccessLog(tc *tcp_proxyv3.TcpProxy) bool {
+	for _, al := range tc.GetAccessLog() {
+		cfg := &otelaccesslogv3.OpenTelemetryAccessLogConfig{}
+		if al.GetTypedConfig() == nil || al.GetTypedConfig().UnmarshalTo(cfg) != nil {
+			continue
+		}
+		if cfg.GetLogName() == proxy.L4AccessLogName {
+			return true
+		}
+	}
+	return false
 }
 
 // QUICUpstreamsSharingEDSName returns the name of every `quic:` cluster whose

@@ -168,6 +168,14 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 	if !withPassthrough {
 		chains = append(chains, BuildCaptureTCPBlackholeFilterChain(sourceSpiffeID))
 	}
+	// The connection-level L4 access log (aether#1023) on every tcp_proxy chain
+	// built above: floor, per-port, TCPRoute-weighted, the any-port shim, the
+	// TLSRoute SNI chains and the scoped-mode blackhole. Applied here, over the
+	// finished list, rather than in each builder, so a new L4 chain kind cannot
+	// be added without one. The passthrough DefaultFilterChain is attached
+	// below and is NOT logged: it is every non-mesh egress connection, the
+	// volume the log must not carry.
+	attachL4AccessLog(chains, cniPod.GetName(), cniPod.GetNamespace())
 	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, withPassthrough, extensionFilters))
 
 	l := &listenerv3.Listener{
@@ -624,4 +632,24 @@ func tcpPrimaryFloorChains(svc CaptureTCPService, sourceSpiffeID string) []*list
 		}
 	}
 	return append(out, qualifyChainByPort(tc, 0, "cap_tcp_anyport_"+svc.ClusterName))
+}
+
+// attachL4AccessLog sets the L4 access log (buildL4AccessLog) on every
+// tcp_proxy in chains (aether#1023). A no-op when access logging is off, so a
+// disabled mesh's capture listener is byte-identical to before.
+func attachL4AccessLog(chains []*listenerv3.FilterChain, podName, podNamespace string) {
+	al := buildL4AccessLog(podName, podNamespace)
+	if al == nil {
+		return
+	}
+	for _, fc := range chains {
+		for _, f := range fc.GetFilters() {
+			tc := &tcp_proxyv3.TcpProxy{}
+			if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(tc) != nil {
+				continue
+			}
+			tc.AccessLog = al
+			f.ConfigType = &listenerv3.Filter_TypedConfig{TypedConfig: config.TypedConfig(tc)}
+		}
+	}
 }

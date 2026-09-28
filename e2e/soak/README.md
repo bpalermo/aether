@@ -518,6 +518,9 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
   not exist at the offset, and the unseeded ones are exactly the ones that matter.
 - **The new-ServiceAccount gate (#1014)** — `init_fetch_timeout` on `@` clusters and
   zero `503/NC` for `user_agent:aether-soak-newsa`. See "The new-ServiceAccount step".
+- **The L4 gates (#1023)** — `ssl_fail_verify_san` on the `tcp_` keys is zero outside
+  rolls, and no pod without a raw-TCP primary port takes a TCP-floor connection. See
+  "The L4 gates".
 - **The QUIC per-request cost gate (#1021)**, on any run with twins carrying load —
   h3 per-request envoy CPU ≤ 1.5× h2, matched no-roll windows, against the 3.3× /
   2.88-core baseline. See "The QUIC per-request cost gate".
@@ -566,7 +569,55 @@ one, know which kind it is and what proves it can move:
 | `aether_cni_operations_total{operation="capture_divert",result="error"}` | **no series** | `…{operation="add"}` must exist (the export works) |
 | `envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}` (#1014) | **no series**; a failure is BORN at 1, so `increase()` alone reads 0 — use `max_over_time` too | rev242's red reading (above), and each step's own `@…/sa-new-*` twin series existing with traffic |
 | `503/NC` for `user_agent:aether-soak-newsa` | no rows | the same query without `response_flags:NC` returns the step's requests |
-| stray TCP-floor landings `envoy_tcp_in_tcp_<pod>_downstream_cx_total` on pods with no raw-TCP primary port (#1007/#1022; query in `docs/runbook.md`, "Cross-pod L4 landings") | **no series** once every proxy runs the #1022 thread-self patch | rev242 is the negative control: non-zero on svc-1..5, prober, k6-soak-loader and udp-dialer, with matching `ssl_fail_verify_san` ticks on `aether-test/tcp-echo`/`mixed-svc`; and `tcp-echo`'s own `in_tcp_*` and the `*_9000` per-port chains climbing (the chain family is exported) |
+| **L4 (a)** `envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}` outside roll brackets (#1023; see "The L4 gates") | **no series** (born at 1 on the first rejection — read `max_over_time`, not only `increase`) | rev242: **23** ticks over its soak, and rev243: 1 in 1h47m — both read under the pre-#1023 keys `aether-test/(tcp-echo\|mixed-svc)`, since a pre-#1023 proxy exports no `tcp_` key at all; on a #1023 build, `envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_.*"}` must EXIST and climb with the mp-dialer legs (the keys are exported and the selector is spelled right) |
+| **L4 (b)** stray TCP-floor landings `envoy_tcp_in_tcp_<pod>_downstream_cx_total` on pods that serve no raw-TCP primary port (#1007/#1022/#1023; see "The L4 gates") | **no series** once every proxy runs the #1022 thread-self patch | rev243 is the negative control: **6** stray landings in its 1h47m generation, all on `prober` pods (w05 2, w03 3, w04 1); rev242 non-zero on svc-1..5, prober, k6-soak-loader and udp-dialer. On any build, `tcp-echo`'s own `in_tcp_*` and the `*_9000` per-port chains climbing proves the chain family is exported |
+
+### The L4 gates (#1023)
+
+Two zero-reading gates on the L4 data path. Both are **seeded as vacuous** in the table
+above until a #1023 build has been seen red, and on every run they need the existence
+proof in its last column before a zero means anything.
+
+**(a) No client-side SAN rejection on an L4 cluster outside a roll.** Since #1023 each
+L4 cluster has its own `aether_cluster` key (`tcp_<ns>/<svc>` for the floor,
+`tcp_<ns>/<svc>_<port>` per port; `docs/runbook.md`, "L4 stat keys and the L4 access
+log"), so this counts L4 clusters only. Before it, `aether-test/mixed-svc` also carried
+the HTTP cluster's rejections. `udp_` keys carry no TLS and are left out. There is no
+`tls_` key: TLSRoute chains count under their backends' `tcp_` keys.
+
+```promql
+# Per minute. A non-zero minute outside a proxy/agent roll bracket is a FAIL.
+sum by (node, aether_cluster) (increase(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}[1m]))
+# The born-at-1 half: a series whose first sample is already 1 reads 0 above.
+max by (node, aether_cluster) (max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}[8h]))
+# Existence proof: the keys are exported and the selector matches them.
+sum by (aether_cluster) (increase(envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_.*"}[8h])) > 0
+```
+
+**(b) No TCP-floor connection on a pod that serves no raw-TCP primary port.** The
+inbound DEFAULT chain (`in_tcp_<pod>`) is where a misdirected L4 connection lands
+(#1007). Only `tcp-echo` is TCP-primary in this harness, and per-port chains
+(`in_tcp_<pod>_<port>`) are legitimate:
+
+```promql
+# One series per landing pod over the window; MUST return no series (or 0).
+max by (node, pod) (max_over_time((label_replace(
+  {__name__=~"envoy_tcp_in_tcp_.+_downstream_cx_total",
+   __name__!~"envoy_tcp_in_tcp_(tcp_echo_.+|.+_[0-9]+)_downstream_cx_total"},
+  "pod", "$1", "__name__", "envoy_tcp_in_tcp_(.+)_downstream_cx_total"))[8h:1m]))
+```
+
+A landing is not a roll artifact, so (b) is graded over the whole window, rolls
+included. Attribute any hit of either gate from the L4 access log, which puts the
+source pod, the dialled VIP:port, the chosen `tcp:` cluster, the intended endpoint and
+the rejection on one line:
+
+```
+_stream:{service.name="aether-proxy"} AND log_name:aether_l4_access_logs AND response_flags:!"-"
+```
+
+`docs/runbook.md`, "Attributing an `ssl_fail_verify_san` event … L4 hops", has the
+verdict table.
 
 ### The Phase 4 evidence clock (proposal 037)
 
