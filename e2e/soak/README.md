@@ -472,6 +472,7 @@ one, know which kind it is and what proves it can move:
 | `aether_cni_operations_total{operation="capture_divert",result="error"}` | **no series** | `…{operation="add"}` must exist (the export works) |
 | `envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}` (#1014) | **no series**; a failure is BORN at 1, so `increase()` alone reads 0 — use `max_over_time` too | rev242's red reading (above), and each step's own `@…/sa-new-*` twin series existing with traffic |
 | `503/NC` for `user_agent:aether-soak-newsa` | no rows | the same query without `response_flags:NC` returns the step's requests |
+| stray TCP-floor landings `envoy_tcp_in_tcp_<pod>_downstream_cx_total` on pods with no raw-TCP primary port (#1007/#1022; query in `docs/runbook.md`, "Cross-pod L4 landings") | **no series** once every proxy runs the #1022 thread-self patch | rev242 is the negative control: non-zero on svc-1..5, prober, k6-soak-loader and udp-dialer, with matching `ssl_fail_verify_san` ticks on `aether-test/tcp-echo`/`mixed-svc`; and `tcp-echo`'s own `in_tcp_*` and the `*_9000` per-port chains climbing (the chain family is exported) |
 
 ### The Phase 4 evidence clock (proposal 037)
 

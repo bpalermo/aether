@@ -1809,6 +1809,70 @@ proxy **served** it, then compared with the node whose proxy was restarting.
      identity was not bound per-server, and `upstream_host` is not the TLS-terminating
      peer; record it and re-open the transport path.
 
+### Cross-pod L4 landings (#1007/#1022)
+
+**Symptom.** A node proxy's outbound L4 connection to `tcp-echo` or `mixed-svc` is
+rejected with `ssl_fail_verify_san`: it reached the inbound `:18008` listener of an
+**unrelated pod on the same node** (always the node's newest mesh pod), which presented
+its own SVID. The soak's `mp-dialer` shows it as one failure on every L4 leg at once.
+
+**Two defects, one proof order.**
+
+- **(b) #1022, Envoy.** `Network::Utility::execInNetworkNamespace` recorded the
+  namespace to return to from `/proc/self/ns/net`, which is the **main thread's**
+  namespace. `setns()` is per thread, so a worker calling it while the main thread was
+  briefly inside a pod netns (health-check connects every 5 s per pod, listener socket
+  creation) "restored" itself **into** that pod's netns and stayed there, creating its
+  later upstream sockets inside the pod where redirect-all capture diverted them. The
+  proxy carries `proxy/bazel/patches/envoy-aether1022-exec-in-netns-thread-self.patch`
+  (`/proc/thread-self/ns/net`, fallback `/proc/self/task/<tid>/ns/net`).
+- **(a) #1007, aether.** The capture listener's `use_original_dst: true` hands a
+  diverted connection to "the listener bound to its original address", looked up by the
+  address string only (`0.0.0.0:18008`, no netns), so the most recently added pod's
+  inbound listener wins.
+
+Fixing (a) alone **hides** (b): the leaked connection would then leave through the
+right endpoint's ORIGINAL_DST from a pod IP and succeed silently, and this counter would
+go quiet for the wrong reason. So (b) is proven on talos first, with (a) still in place.
+
+**The proof signal: TCP-floor connections on pods that serve no raw-TCP port.** The
+inbound listener's DEFAULT chain is the TCP floor (`in_tcp_<pod>`, stat prefix
+`inboundTCPFloorStatPrefix` in `agent/internal/xds/proxy/ingress.go`). Only a pod whose
+primary port is raw TCP can legitimately receive a connection there; per-port raw-TCP
+chains are `in_tcp_<pod>_<port>` and are excluded. The pod name is part of the METRIC
+NAME, so select by `__name__` pattern and read the RAW counters (a series is born on the
+first stray connection):
+
+```promql
+# Stray landings: default floor chain of every pod except tcp-echo (TCP-primary);
+# the per-port chains (…_<port>_downstream_cx_total) are legitimate and excluded.
+sum by (__name__) ({__name__=~"envoy_tcp_in_tcp_.*_downstream_cx_total",
+                    __name__!~"envoy_tcp_in_tcp_tcp_echo_.*|envoy_tcp_in_tcp_.*_[0-9]+_downstream_cx_total"})
+
+# The client side: the L4 clusters' SAN rejections, per node (never an instant query)
+max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"aether-test/(tcp-echo|mixed-svc)"}[8h])
+
+# The landing pod's inbound sees the client abort after its SAN check
+max_over_time(envoy_listener_inbound_ssl_connection_error_total[8h]) > 0   # by aether_pod, node
+```
+
+Attribute a tick by joining the three on node and minute: the `verify_san` +1 on node N,
+a new or incremented `in_tcp_<pod>` series for a pod on N, and that pod's
+`inbound_ssl_connection_error` climbing in the same minute (the 2026-09-27 16:37Z w04
+event in #1007 is the worked example).
+
+**Reading it.**
+
+| build | expected |
+|---|---|
+| rev242 and earlier (no thread-self patch) — the negative control | non-zero on svc-1..5, prober, k6-soak-loader, udp-dialer (and echo, uds-cr-echo, udp-echo); ~1 burst per node per hour; `verify_san` ticks on `tcp-echo`/`mixed-svc` |
+| first proxy with the #1022 patch, #1007 still unfixed | **no new series and no increments** after every node's proxy has rolled onto it (series from older generations age out with them) |
+
+A landing that persists on the patched proxy **refutes** #1022 as the (only) cause:
+something else moves node-proxy sockets into pod netns — keep #1007 unmerged and
+re-open the attribution. Only once the patched proxy reads zero for a full soak does
+the #1007 capture fix merge; after it, this counter no longer discriminates (b).
+
 ### Known-unexercised code paths
 
 Recovery branches that have never run in production. **This is the system working, not a
