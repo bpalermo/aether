@@ -1311,7 +1311,7 @@ talos collector's `transform/promote` set `node` from `host.name` before it look
 `k8s.node.name`. A pod that had since been rolled away could not be placed on a node
 (#1040). Two changes fix this: the prober no longer sets `host.name`, and the
 collector now prefers `k8s.node.name`
-(bpalermo/k8s-talos-main PR `fix/otel-node-label-precedence`). Series from before the
+(bpalermo/k8s-talos-main#128). Series from before the
 fix still show a pod name in `node`. For any window that spans the change, group by
 `pod`, which exists only on series from after the fix, or translate the old values with
 `kubectl -n aether-test get pods -o wide` while those pods still exist.
