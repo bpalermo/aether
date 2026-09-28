@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Kind leg for aether#1050: a hot-restart successor whose main thread goes silent
+# Kind leg for aether#1050: the hot-restart main-thread deadlock, and proof that
+# the chart's mitigation (proxy.hotRestart.skipParentStats, which passes Envoy
+# --skip-hot-restart-parent-stats) removes it.
+#
+# The production symptom: a hot-restart successor whose main thread goes silent
 # right after `starting workers` while the draining parent goes silent right
 # after `closing and draining listeners`, until the supervisor's 30 s liveness
-# watchdog kills both epochs.
+# watchdog kills both epochs (~1 in 60 proxy rolls on talos, h3 inbound on).
 #
-# The suspected mechanism (read from the pinned Envoy 726d7ac + carried patches):
-# a cross-process deadlock on the two hot-restart domain sockets.
+# The mechanism (pinned Envoy 726d7ac + carried patches; confirmed with the
+# per-thread kernel stacks and gdb backtraces this leg captures): a
+# cross-process deadlock on the two hot-restart domain sockets.
 #   * From the parent's drainListeners (the child's DrainListeners RPC, sent from
 #     the startWorkers completion) every QUIC/UDP datagram the PARENT's workers
 #     read that no parent session owns is posted to the parent MAIN thread and
@@ -23,6 +28,16 @@
 #     running (existing connections serve), admin (main thread) is dead, and
 #     SIGTERM (a main-dispatcher signal event) is ignored by both processes.
 #
+# What it proves (the red-then-green check; e2e/soak/README.md, #1050):
+#   red    WEDGE_SKIP_PARENT_STATS=false WEDGE_FREEZE_S=6 -> WEDGES > 0: the
+#          forced fault reproduces the production wedge without the flag
+#   green  WEDGE_SKIP_PARENT_STATS=true  WEDGE_FREEZE_S=6 -> WEDGES = 0: the
+#          same fault with the chart default no longer wedges, because the
+#          child never makes the blocking getParentStats call
+# Unforced (WEDGE_FREEZE_S=0) the race is rare on kind (0/30 at ~1,900 rps).
+# The knob is applied at `up` (a re-run of `up` on a live cluster only upgrades
+# the aether release), and `run` reports what the live Envoy was started with.
+#
 # What this leg does, on the eastwest-quic bring-up (single kind node, SIGHUP =
 # same-pod hot restart, the same Envoy protocol as a cross-pod roll):
 #   W0  scale the h3 destinations to WEDGE_REPLICAS pods each (one h3 inbound
@@ -39,7 +54,8 @@
 #
 # Usage: e2e/hotrestart-wedge.sh {up|run|down}   (up = the eastwest-quic-hotrestart
 #        bring-up; run needs it; bare = up + run)
-# Env: WEDGE_RESTARTS (30), WEDGE_GAP (24), WEDGE_REPLICAS (6), WEDGE_LOOPS (24),
+# Env: WEDGE_SKIP_PARENT_STATS (true: the chart default; read at `up`),
+#      WEDGE_RESTARTS (30), WEDGE_GAP (24), WEDGE_REPLICAS (6), WEDGE_LOOPS (24),
 #      WEDGE_RATE (20), WEDGE_SILENT_S (5), WEDGE_OUT (mktemp -d),
 #      WEDGE_STOP_ON_FIRST (1), WEDGE_HAMMER (0: N parallel admin /stats readers,
 #      which lengthen the main thread's busy periods the way a big prod stat set,
@@ -69,6 +85,7 @@ WEDGE_OUT="${WEDGE_OUT:-$(mktemp -d)}"
 WEDGE_STOP_ON_FIRST="${WEDGE_STOP_ON_FIRST:-1}"
 WEDGE_HAMMER="${WEDGE_HAMMER:-0}"
 WEDGE_FREEZE_S="${WEDGE_FREEZE_S:-0}"
+WEDGE_SKIP_PARENT_STATS="${WEDGE_SKIP_PARENT_STATS:-true}"
 WEDGE_PATH="/echo?msg=$(printf 'x%.0s' $(seq 1 700))"
 
 # node_sh CMD — run CMD as root in the kind node (shares the proxy's host netns
@@ -96,6 +113,21 @@ supervisor_pid() {
 			a0=$(tr "\0" "\n" <"$p/cmdline" 2>/dev/null | head -n 1)
 			if [ "$a0" = /opt/aether/supervisor ]; then echo "${p#/proc/}"; fi
 		done; exit 0' | head -n 1
+}
+
+# skip_parent_stats — "yes" iff a live envoy was started with
+# --skip-hot-restart-parent-stats (what the chart knob actually rendered).
+skip_parent_stats() {
+	# shellcheck disable=SC2016  # evaluated by the node's shell
+	if node_sh '
+		for p in /proc/[0-9]*; do
+			tr "\0" " " <"$p/cmdline" 2>/dev/null |
+				grep -q -- "--restart-epoch.*--skip-hot-restart-parent-stats" && exit 0
+		done; exit 1'; then
+		echo yes
+	else
+		echo no
+	fi
 }
 
 epoch_now() {
@@ -190,6 +222,9 @@ wedge_run() {
 	for s in "${SOURCES[@]}"; do for d in "${QUIC_DSTS[@]}"; do req_batch "$s" "$d" "$WEDGE_PATH" 3 >/dev/null || true; done; done
 	echo "  h3 inbound listeners: $(admin /listeners | grep -c '_h3::' || true)"
 	echo "  forensics dir: $WEDGE_OUT"
+	local skip
+	skip="$(skip_parent_stats)"
+	echo "  envoy --skip-hot-restart-parent-stats: $skip"
 
 	log "W1 load: $WEDGE_LOOPS loops x ${WEDGE_RATE}/s per (source, h3 destination)"
 	local pids=()
@@ -211,7 +246,10 @@ wedge_run() {
 	local i before pid verdict wedges=0 f
 	for i in $(seq 1 "$WEDGE_RESTARTS"); do
 		before="$(epoch_now)"
-		[ -n "$before" ] || { sleep 5; before="$(epoch_now)"; }
+		[ -n "$before" ] || {
+			sleep 5
+			before="$(epoch_now)"
+		}
 		pid="$(supervisor_pid)"
 		[ -n "$pid" ] || die "no supervisor"
 		node_sh "kill -HUP $pid"
@@ -246,13 +284,13 @@ wedge_run() {
 	kill "${pids[@]}" 2>/dev/null || true
 	wait 2>/dev/null || true
 	for f in "$WEDGE_OUT"/load-*.txt; do echo "  $(basename "$f"): $(tr '\n' ' ' <"$f")"; done
-	echo "WEDGES=$wedges RESTARTS=$i"
+	echo "WEDGES=$wedges RESTARTS=$i FREEZE_S=$WEDGE_FREEZE_S SKIP_PARENT_STATS=$skip"
 }
 
 case "${1:-}" in
-up) "$HERE/eastwest-quic-hotrestart.sh" up ;;
+up) HR_SKIP_PARENT_STATS="$WEDGE_SKIP_PARENT_STATS" "$HERE/eastwest-quic-hotrestart.sh" up ;;
 run) wedge_run ;;
 down) down ;;
-"") "$HERE/eastwest-quic-hotrestart.sh" up && wedge_run ;;
+"") HR_SKIP_PARENT_STATS="$WEDGE_SKIP_PARENT_STATS" "$HERE/eastwest-quic-hotrestart.sh" up && wedge_run ;;
 *) die "usage: $0 {up|run|down}" ;;
 esac

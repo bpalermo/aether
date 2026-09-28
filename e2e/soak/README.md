@@ -942,6 +942,70 @@ harness form of the same comparison is `//test/mtlspool` `TestQUICRequestCPU`
 (`--test_env=AETHER_QUIC_COST=1`), which prints loaded-minus-idle CPU per request
 for h2 and for each inbound UDP option.
 
+### The hot-restart wedge gates (#1050)
+
+On rev248 one proxy roll in ~60 wedged: the successor's last line was `all
+dependencies initialized. starting workers`, the draining parent's last was `closing
+and draining listeners`, both main threads then sat in blocking hot-restart socket
+calls on each other (parent `sendmsg` forwarding QUIC/UDP to the child, child
+`recvmsg` waiting for the parent's stats) until the supervisor's liveness watchdog
+killed both epochs 38 s later. Every new connection to or from that node was dead for
+the whole window, and the prober took 56 errors on it. Mechanism:
+[#1050](https://github.com/bpalermo/aether/issues/1050#issuecomment-5875727632). The
+chart now passes Envoy `--skip-hot-restart-parent-stats`
+(`proxy.hotRestart.skipParentStats`, default true), which removes the child's half of
+the deadlock. These gates are what show it stayed removed. Grade them **per roll**,
+over the proxy DaemonSet's roll windows from `/tmp/soak-churn.log`.
+
+**(a) No watchdog kill.** Zero of each, per roll, fleet-wide:
+
+```
+_stream:{service.name="aether-proxy"} AND _msg:"liveness watchdog fired"
+_stream:{service.name="aether-proxy"} AND _msg:"drain deadline elapsed, killing envoy epoch"
+```
+
+The second line is only a finding when the epoch it kills still had a live child,
+i.e. when it follows a watchdog line in the same pod. A pod that is deleted with no
+successor (see the runbook, "What the proxy supervisor does on SIGTERM") can log it
+on its own. Control-test the zero: `_msg:"starting workers"` over the same window must
+return one line per node per roll. If it does not, the container logs did not reach
+VictoriaLogs and the zero is vacuous.
+
+**(b) No QUIC blackhole toward the rolling node.** Per roll, count the source-side
+QUIC failures whose upstream is on the node being rolled:
+
+```
+_stream:{service.name="aether-proxy"} AND log_name:aether_access_logs AND reporter:source
+  AND response_flags:UC
+  AND response_code_details:~"QUIC_TOO_MANY_RTOS|Network_blackhole_detected"
+```
+
+Resolve `upstream_host` to its node as in the runbook ("upstream_host → pod → node").
+The baseline is the count on the rolls that did not wedge: 0 on rolls 1–3 of the
+rev248 run. The wedged roll logged ~550 in two minutes. A handful of
+`QUIC_PUBLIC_RESET|FROM_PEER|Received_stateless_reset` at a roll is the milder,
+separate case (a parent-owned QUIC connection's packets reaching the child after the
+parent exited, 2 on roll 4). Report it, but it is not this gate.
+
+**(c) The successor keeps talking after `starting workers`.** A healthy successor logs
+its next line (listener warming, xDS updates, the supervisor's `pod ready`) within a few
+seconds of `all dependencies initialized. starting workers`. A child that is silent for
+**10 s** after that line is the wedge signature, whether or not the watchdog later
+fires. Grade it from the same stream, per pod, by the gap between `starting workers` and
+the next line from that pod. No metric carries it yet.
+
+**The kind form.** `e2e/hotrestart-wedge.sh` forces the same deadlock by freezing the
+child inside the parent's forwarding window. It is the red-then-green check for any
+change that touches hot restart or the Envoy pin:
+
+```bash
+WEDGE_SKIP_PARENT_STATS=false WEDGE_FREEZE_S=6 WEDGE_RESTARTS=3 WEDGE_STOP_ON_FIRST=0 \
+  e2e/hotrestart-wedge.sh            # red:   WEDGES=3 RESTARTS=3
+WEDGE_FREEZE_S=6 WEDGE_RESTARTS=5 e2e/hotrestart-wedge.sh up && \
+  WEDGE_FREEZE_S=6 WEDGE_RESTARTS=5 e2e/hotrestart-wedge.sh run   # green: WEDGES=0
+e2e/hotrestart-wedge.sh down
+```
+
 ## Hard-won gotchas
 
 Each of these invalidated a real run:
