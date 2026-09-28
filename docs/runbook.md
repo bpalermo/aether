@@ -1020,6 +1020,49 @@ On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
 kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), including E4c: the node's `quic:` cluster count equals the (source, destination) pairs the suite drove.
 
+**HTTP/3 per-request cost and connection counts (#1021).** On the rev242 proving
+soak an HTTP/3 mesh request cost ~11 ms of proxy CPU across both proxies against
+~3.3 ms for h2 (3.3×). The flag drop (#979) waits on ≤ 1.5×. Grade it only with the
+matched-window method in `e2e/soak/README.md` ("The QUIC per-request cost gate"):
+envoy-only Pyroscope cores over the T0+6h05m→T0+7h25m no-roll window of a QUIC run
+and of an h2 reference run with matched per-destination rps, loaded minus idle, per
+request. Fleet CPU alone says nothing, because the QUIC share of the load changes
+between runs.
+
+Expected upstream QUIC connections to one destination are **one per (source node,
+source ServiceAccount that dialled it, Envoy worker that SA's app connections landed
+on, destination endpoint)**. They are NOT one per app connection. A twin does not
+pool per downstream connection (`QUICClusterFrom` pins
+`connection_pool_per_downstream_connection` off), so a k6 runner's 60 keep-alive
+connections share its node's per-worker pools. Pods of one ServiceAccount share a
+twin's connections, because the SA is the identity. The upper bound per destination
+is `Σ_nodes (dialling SAs × workers × endpoints)`:
+
+```promql
+# live QUIC connections per twin, and the node's worker count (the per-endpoint multiplier's ceiling)
+sum by (node, aether_cluster) (envoy_cluster_upstream_cx_active{aether_cluster=~".*@.*"})
+max by (node) (envoy_server_concurrency)
+# endpoints per destination
+max by (aether_cluster) (envoy_cluster_membership_total{aether_cluster=~".*@.*"})
+# density: QUIC rps per live QUIC connection (#1006: ~0.8, i.e. every request is its own flight)
+sum(rate(envoy_cluster_upstream_rq_total{aether_cluster=~".*@.*"}[5m]))
+  / sum(envoy_cluster_upstream_cx_active{aether_cluster=~".*@.*"})
+```
+
+A connection count that grows with app connections (k6 VUs, a client's pool size)
+rather than with SAs × workers × endpoints means a twin started pooling per
+downstream connection again. `//test/mtlspool` `TestQUICTwinUpstreamConnections`
+reproduces both shapes: 12 app connections open 1 QUIC connection (one worker), 4
+(four workers), or 12 (option forced on). The same counts hold on the h2 path, whose
+pool key has carried the source identity instead of the downstream connection since
+#842.
+
+The inbound QUIC listener reads with UDP GRO (`prefer_gro: true`, off by Envoy default
+for listeners). It writes with Envoy's automatic GSO batch writer, which is used when
+the kernel has `UDP_SEGMENT` (Linux ≥ 4.18; talos 6.18). A kernel without UDP GRO
+logs `GRO requested but not supported by the OS` once per listener and reads without
+it. That warning costs performance, never correctness.
+
 **Rolling back.** Remove the entries (or `--set agent.eastWestQuicServices=null`):
 the twins and the selection disappear on the next push and every caller is back on
 the h2 route it had before, byte-for-byte. The inbound listener and the DNS SANs are

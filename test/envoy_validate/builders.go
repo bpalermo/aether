@@ -1417,6 +1417,26 @@ func QUICUpstreamsWithSessionCache(bootstrapJSON []byte) ([]string, error) {
 	return bad, nil
 }
 
+// QUICUpstreamsPoolingPerDownstream returns the name of every `quic:` cluster
+// that sets connection_pool_per_downstream_connection (aether#1021). A twin
+// carries ONE identity, so the option buys no isolation and only multiplies
+// upstream QUIC connections by the number of downstream (app -> proxy)
+// connections: //test/mtlspool's TestQUICTwinUpstreamConnections measured 12
+// QUIC connections for 12 downstream connections with it on, 1 with it off.
+func QUICUpstreamsPoolingPerDownstream(bootstrapJSON []byte) ([]string, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	var bad []string
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if strings.HasPrefix(c.GetName(), "quic:") && c.GetConnectionPoolPerDownstreamConnection() {
+			bad = append(bad, c.GetName())
+		}
+	}
+	return bad, nil
+}
+
 // QUICUpstreamsWithPortSNI returns the name of every cluster whose
 // QuicUpstreamTransport carries an SNI that is not a hostname under the mesh
 // domain (a bare port, empty, or foreign). Envoy's QUIC client verifies the
