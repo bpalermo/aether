@@ -39,7 +39,15 @@ go_multi_arch_image(
     #
     # The whole point of the binary is what it does NOT link — see
     # //agent/cmd/proxy-ready:deps_test.
+    #
+    # /identity-ready is the egress identity gate (#1053): the controller's
+    # pod-mutating webhook injects it as the first init container of every
+    # mesh-managed pod, running THIS image — the one the agent DaemonSet already
+    # keeps on every node, so the gate costs no extra pull and cannot skew from
+    # the agent it fronts. See //agent/cmd/identity-ready:deps_test for what it
+    # may link.
     tars_layer = {
+        "/identity-ready": "//agent/cmd/identity-ready:identity-ready",
         "/proxy-ready": "//agent/cmd/proxy-ready:proxy-ready",
     },
 )

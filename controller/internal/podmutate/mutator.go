@@ -24,6 +24,12 @@
 //     datagram in flight to it is discarded, and the client eats 5s). A 1s
 //     retransmit against a node-local resolver is generous, and 3 attempts leave a
 //     3s worst case against the 10s the defaults allow.
+//   - Egress identity gate (#1053, see identitygate.go): the aether-identity-ready
+//     init container, placed first, which holds the pod's app containers until
+//     SPIRE has issued the pod's SVID — so the app cannot send before the node
+//     proxy has a client certificate for it. Opt out per pod with
+//     aether.io/identity-gate=false; the chart turns it off mesh-wide with
+//     controller.webhook.identityGate.enabled=false.
 //
 // The webhook is wired with two rules: an objectSelector (aether.io/managed=true
 // pods, in any namespace) and a namespaceSelector (pods in aether.io/managed=true
@@ -62,7 +68,9 @@ const (
 // behavior.
 type Mutator struct {
 	NDots string
-	Log   *slog.Logger
+	// Gate is the egress identity gate; nil disables it.
+	Gate *IdentityGate
+	Log  *slog.Logger
 }
 
 // NewMutator builds the pod-ndots mutator.
@@ -70,11 +78,18 @@ func NewMutator(ndots string, log *slog.Logger) *Mutator {
 	return &Mutator{NDots: ndots, Log: commonlog.Named(log, "pod-ndots")}
 }
 
+// WithIdentityGate enables the egress identity gate (#1053); nil disables it.
+func (m *Mutator) WithIdentityGate(g *IdentityGate) *Mutator {
+	m.Gate = g
+	return m
+}
+
 // Handle reaches here for a pod matched either by the managed-pod objectSelector
 // or the managed-namespace namespaceSelector. It (1) ensures the aether.io/managed
 // label so the CNI meshes the pod — unless the pod explicitly opts out with
 // aether.io/managed=false — and (2) injects the mesh resolv.conf options into
-// managed pods. A pod that opts out is left entirely untouched. Idempotent:
+// managed pods, and (3) injects the egress identity gate unless disabled or opted
+// out. A pod that opts out is left entirely untouched. Idempotent:
 // re-admission (or a pod that already carries the label / the options) produces no
 // spurious patch.
 func (m *Mutator) Handle(ctx context.Context, req admission.Request) admission.Response {
@@ -103,6 +118,15 @@ func (m *Mutator) Handle(ctx context.Context, req admission.Request) admission.R
 		}
 	}
 
+	namespace := req.Namespace
+	if namespace == "" {
+		namespace = pod.Namespace
+	}
+	gated, gateSkip := m.Gate.inject(pod, namespace)
+	if gated {
+		changed = true
+	}
+
 	if !changed {
 		return admission.Allowed("pod already managed with mesh DNS options")
 	}
@@ -112,7 +136,8 @@ func (m *Mutator) Handle(ctx context.Context, req admission.Request) admission.R
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 	m.Log.DebugContext(ctx, "mesh-injected pod (managed label + DNS options)", "namespace", req.Namespace,
-		"ndots", m.NDots, "timeout", resolverTimeout, "attempts", resolverAttempts)
+		"ndots", m.NDots, "timeout", resolverTimeout, "attempts", resolverAttempts,
+		"identityGate", gated, "identityGateSkipped", gateSkip)
 	return admission.PatchResponseFromRaw(req.Object.Raw, marshaled)
 }
 

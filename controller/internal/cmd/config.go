@@ -52,6 +52,29 @@ type ControllerConfig struct {
 	// cluster.local search list. Deriving replaces the old --pod-ndots flag,
 	// which could drift from the domain it described.
 	MeshDomain string
+
+	// IdentityGate* configure the egress identity gate (#1053): the
+	// pod-mutating webhook injects an identity-ready init container into every
+	// mesh-managed pod that holds the app containers until SPIRE has issued the
+	// pod's SVID. Off unless IdentityGate is set (the chart sets it by default).
+	IdentityGate bool
+	// IdentityGateImage is the image the init container runs /identity-ready
+	// from — the agent image (it carries the binary as an extra layer).
+	IdentityGateImage string
+	// IdentityGateImagePullPolicy is the init container's imagePullPolicy.
+	IdentityGateImagePullPolicy string
+	// IdentityGateWorkloadSocket is the SPIRE Workload API socket path inside
+	// the init container; the csi.spiffe.io volume is mounted at its directory.
+	IdentityGateWorkloadSocket string
+	// IdentityGateTimeout, when non-zero, makes the gate give up after that long
+	// (the init container exits 1). Zero waits forever: fail closed.
+	IdentityGateTimeout time.Duration
+	// IdentityGate{CPU,Memory}{Request,Limit} are the init container's
+	// resources; empty leaves that entry unset.
+	IdentityGateCPURequest    string
+	IdentityGateMemoryRequest string
+	IdentityGateCPULimit      string
+	IdentityGateMemoryLimit   string
 }
 
 // DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
@@ -71,5 +94,11 @@ func NewControllerConfig() *ControllerConfig {
 		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
 		SpireWaitWarnAfter:      spire.DefaultWaitWarnAfter,
 		MeshDomain:              meshconst.DefaultMeshDomain,
+
+		IdentityGateImagePullPolicy: "IfNotPresent",
+		IdentityGateWorkloadSocket:  DefaultSpireWorkloadSocketPath,
+		IdentityGateCPURequest:      "5m",
+		IdentityGateMemoryRequest:   "16Mi",
+		IdentityGateMemoryLimit:     "64Mi",
 	}
 }

@@ -50,6 +50,39 @@ spec:
 | `metadata.endpoint.aether.io/<key>` | — | Free-form endpoint metadata (subset keys) |
 | `endpoint.aether.io/uds-socket` | — | Deliver to a Unix socket instead of a TCP port (see "Serving on a Unix domain socket"); overrides an `EndpointPolicy` on the service |
 | `config.aether.io/upstreams` | — | Comma-separated services this pod **calls** (see "Declaring upstreams") |
+| `aether.io/identity-gate` | — | `"false"` opts this pod out of the egress identity gate (see "Identity before the first request") |
+
+### Identity before the first request
+
+Every connection a mesh pod makes is mTLS with **the pod's own SVID** as the
+client certificate — and SPIRE issues that SVID a few seconds after the pod is
+created (its registration entry has to be created and synced to the node's
+SPIRE agent: ~7.5 s measured on talos-main). An app that sends in that window
+used to get `503 UF` (`connection_timeout`): the source proxy had no certificate
+to present yet (#1053).
+
+So the controller's pod-mutating webhook injects an init container,
+**`aether-identity-ready`**, first in line in every mesh pod it admits. It asks
+the SPIRE Workload API (a `csi.spiffe.io` volume mounted into that init
+container only — your app containers are not given the socket) for the pod's
+X.509 SVID and exits 0 the moment SPIRE has issued it. Your containers start
+after that, so the app's first request already has an identity. Cost: pod
+start waits for the SVID (what the first request would have waited for anyway,
+or failed on); nothing afterwards.
+
+- **Default ON**, chart-wide knob `controller.webhook.identityGate.enabled`.
+  Never injected when `spire.enabled=false`.
+- **Opt one pod out** with the annotation `aether.io/identity-gate: "false"`
+  (its first requests may then fail until the SVID lands).
+- Not injected into `hostNetwork` pods or pods in mesh-ignored namespaces.
+- **A pod stuck in `Init:0/N`** with `aether-identity-ready` running means SPIRE
+  has not issued the pod's SVID: its log says so every 10 s and names the
+  socket and the last error. Usual causes: no registration entry matches the
+  pod (e.g. a `ClusterSPIFFEID` whose `podSelector` misses it, or an entry keyed
+  on a `k8s:container-name` selector — the init container has its own name),
+  spire-agent down on the node, or the SPIFFE CSI driver missing. It fails
+  closed on purpose: a pod without an identity cannot talk to the mesh anyway.
+  See docs/runbook.md, "Pod held in Init by aether-identity-ready".
 
 ## Serving on a Unix domain socket
 

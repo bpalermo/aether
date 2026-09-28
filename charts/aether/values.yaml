@@ -790,6 +790,46 @@ controller:
       # "spire-mgmt-spire"). REQUIRED when create=true; if empty the resource is
       # not rendered (manage the ClusterSPIFFEID yourself).
       className: ""
+    # Egress identity gate (#1053). The pod-mutating webhook injects an
+    # `aether-identity-ready` init container — FIRST, ahead of the pod's own init
+    # containers — into every mesh-managed pod it admits. It asks the SPIRE
+    # Workload API (a csi.spiffe.io volume mounted into that init container only)
+    # for the pod's X.509 SVID and exits 0 once SPIRE has issued it, so the app
+    # cannot send before the node proxy has a client certificate for it. Without
+    # it, a pod that sends in its first seconds (SPIRE's entry sync; ~7.5 s on
+    # talos-main) gets 503 UF connection_timeout until its SVID lands. The egress
+    # twin of the inbound-readiness promotion gate.
+    #
+    # Fail closed: a pod whose SVID never comes stays in Init, and the init
+    # container's log / termination message says what it is waiting for (see
+    # docs/runbook.md, "Pod held in Init by aether-identity-ready"). Opt a single
+    # pod out with the annotation `aether.io/identity-gate: "false"`.
+    #
+    # Rides the pod-mutating webhook: inert unless namespaceInjection or
+    # injectPodNdots is on, and never rendered with spire.enabled=false (no SVID
+    # would ever come). Default ON.
+    identityGate:
+      enabled: true
+      # Empty repository = the agent image (agent.image), which carries
+      # /identity-ready as an extra layer and is already on every node. Set to
+      # run it from a mirror.
+      image:
+        repository: ""
+        digest: ""
+        tag: ""
+      # IfNotPresent: the agent image is digest-pinned, and the agent DaemonSet
+      # has already pulled it onto the node, so a pod start never waits on a pull.
+      pullPolicy: IfNotPresent
+      # Give up after this long without an SVID (Go duration; the init container
+      # exits 1 and the kubelet retries it with backoff). Empty = wait forever.
+      timeout: ""
+      resources:
+        requests:
+          cpu: 5m
+          memory: 16Mi
+        limits:
+          cpu: ""
+          memory: 64Mi
   resources:
     requests:
       cpu: 50m

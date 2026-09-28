@@ -18,6 +18,14 @@ fileExistenceTests:
     shouldExist: true
     permissions: '-rwxr-xr-x'
     isExecutableBy: 'other'
+  # The egress identity gate (#1053): the pod-mutating webhook injects this
+  # image with command ["/identity-ready"] as every mesh pod's first init
+  # container, so it must be here and executable by the nonroot user.
+  - name: 'identity-ready'
+    path: '/identity-ready'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'
   # The slim mesh-DNS daemon now has its OWN image
   # (//agent/cmd/mesh-dns:mesh-dns_image, #583 option B). It was only ever bundled
   # here to avoid standing up a second publish pipeline; assert it is gone so the

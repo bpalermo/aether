@@ -2762,6 +2762,66 @@ A node-wide demotion wave aligned with a proxy roll is therefore a bug, not a
 tuning problem — capture `aether_agent_liveness_health_transitions_total` and
 the agent log and reopen #815.
 
+### Pod held in Init by aether-identity-ready (#1053)
+
+The section above is the **inbound** half of "no traffic before identity": an
+endpoint is not advertised until an mTLS handshake with the pod's own inbound
+listener proves its SVID is loaded. Since #1053 the **egress** half is
+symmetric: the controller's pod-mutating webhook injects the
+`aether-identity-ready` init container, first in line, into every mesh pod it
+admits (`controller.webhook.identityGate.enabled`, default on; never with
+`spire.enabled=false`). It asks the SPIRE Workload API — a `csi.spiffe.io`
+volume mounted into the init container only — for the pod's X.509 SVID and
+exits 0 once SPIRE has issued it. Until then the app containers do not start,
+so the app cannot send before the node proxy has a client certificate for it.
+
+Without it, a pod that sends in its first seconds gets `503 UF`
+`upstream_reset_before_response_started{connection_timeout}` (and `UO`/`URX`
+once the pending queue overflows): the Broker API subscription is open, but
+SPIRE delivers the initial SVID only after its registration entry is created
+and synced to the node's spire-agent — `processed SVID update svids=0` twice,
+then `svids=1 update=initial` 7.46 s after the subscribe on talos-main
+(2026-09-28, #1053). Why not block the CNI ADD instead: that makes SPIRE a hard
+dependency of sandbox creation, and the ADD races SPIRE's own pod-list
+attestation. Gating the app container keeps the sandbox SPIRE-independent.
+
+Symptom of a gate that does not release: `kubectl get pod` shows
+`Init:0/N` (N counts the gate) and the pod never starts.
+
+```bash
+# What it is waiting for — one WARN line every 10s, with the socket and the last error
+kubectl -n <ns> logs <pod> -c aether-identity-ready
+#   level=WARN msg="still waiting for SPIRE to issue this pod's SVID; ..." socket=/run/secrets/workload-spiffe-uds/socket elapsed=40s attempts=78 last_error="rpc error: code = PermissionDenied desc = no identity issued"
+
+# On release (normal: a few seconds after pod creation)
+#   level=INFO msg="identity ready: SPIRE issued this pod's SVID; releasing the pod's containers" spiffe_id=spiffe://aether.internal/ns/<ns>/sa/<sa> elapsed=6.9s
+```
+
+Read `last_error`:
+
+| `last_error` | Meaning | Fix |
+|---|---|---|
+| `PermissionDenied … no identity issued` | spire-agent is up and attested the pod, but **no registration entry matches it** | Check the `ClusterSPIFFEID` `podSelector`/`namespaceSelector` covers the pod (`kubectl get clusterspiffeid -o yaml`); an entry keyed on `k8s:container-name`/`k8s:container-image` never matches the init container. Nothing matching also means the node agent's Broker API subscription gets nothing: the pod could not have spoken mTLS anyway |
+| `Unavailable … connect: no such file or directory` / `connection refused` | No Workload API on the node | spire-agent not running on this node, or the SPIFFE CSI driver is not (`kubectl get pods -A -o wide | grep -E "spire-agent|spiffe-csi"`); a `FailedMount … csi.spiffe.io` event on the pod means the driver is missing entirely |
+| `DeadlineExceeded` | The spire-agent accepted the call but did not answer within 15 s | spire-agent overloaded or wedged; check its log |
+
+It fails **closed** on purpose (no default timeout): a pod whose identity never
+comes cannot talk to the mesh, and `Init` with a reason is a better failure than
+Running with 503s. Escape hatches, narrowest first: annotate the pod
+`aether.io/identity-gate: "false"` (the webhook skips it; its first requests may
+fail until the SVID lands), set `controller.webhook.identityGate.timeout` (the
+init container exits 1 after that long and the kubelet retries it with backoff —
+or fails the pod if its `restartPolicy` is `Never`), or disable the gate
+chart-wide. The webhook is `failurePolicy: Ignore`, so pods admitted while no
+controller replica answers get no gate (and no mesh label) at all.
+
+The Workload API answers as soon as the node's spire-agent holds the pod's
+entry; the node agent's Broker API stream receives the same entry from the same
+spire-agent cache. The proxy fetches the client certificate on demand at connect
+time (#842/#843), so a connect in the sub-second gap before the node agent
+publishes the SVID waits for it (within `connect_timeout`) rather than failing: the gate has no settle
+delay.
+
 ### #815 release two: every pod event used to re-warm every cluster on the node
 
 > ⚠ **SUPERSEDED BY #842 — see "per-connection certificate selection" below.**

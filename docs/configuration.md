@@ -155,6 +155,11 @@ decision every cycle — see `charts/prober/values.yaml`.
 | `controller.webhook.spire` | `false` | Webhook serving cert source — decoupled from mesh SPIRE. `false` = Helm self-signed cert (works out of the box). `true` = serve with the controller's SPIRE SVID + inject the trust bundle. |
 | `controller.webhook.clusterSpiffeID.create` | `true` | When `spire=true`, create the controller's `ClusterSPIFFEID` with the webhook Service DNS SANs. |
 | `controller.webhook.clusterSpiffeID.className` | `""` | spire-controller-manager class name; REQUIRED when `create=true`. |
+| `controller.webhook.identityGate.enabled` | `true` | Egress identity gate (#1053): the pod-mutating webhook injects the `aether-identity-ready` init container (first in line) into every mesh pod it admits; it holds the app containers until SPIRE has issued the pod's X.509 SVID, so no request leaves before the pod has a client certificate (otherwise `503 UF` for the first seconds). Asks the Workload API over a `csi.spiffe.io` volume mounted into the init container only. Never rendered with `spire.enabled=false`; rides the `/mutate` webhook, so inert unless `namespaceInjection` or `injectPodNdots` is on. Opt a pod out with `aether.io/identity-gate: "false"`. |
+| `controller.webhook.identityGate.image.*` | empty = `agent.image` | Image running `/identity-ready` (an extra layer of the agent image, already on every node). |
+| `controller.webhook.identityGate.pullPolicy` | `IfNotPresent` | The agent image is digest-pinned and already pulled by the agent DaemonSet. |
+| `controller.webhook.identityGate.timeout` | `""` (wait forever) | Go duration after which the init container gives up (exit 1; the kubelet retries with backoff). Empty = fail closed: the pod stays in `Init` until the SVID exists. |
+| `controller.webhook.identityGate.resources` | req cpu `5m` mem `16Mi`, limit mem `64Mi` | Init container resources; an empty value leaves that entry unset. |
 | `controller.image.*` / `controller.resources.*` | placeholders / cpu `50m`, mem `64Mi` | |
 
 ### `edge` — north-south ingress gateway (proposals 003/018/021/028)
@@ -561,6 +566,12 @@ Defined in [`common/constants/`](../common/constants). Prefixes:
 |---|---|---|
 | `aether.io/managed` | `"true"` | Opt a pod (or, with `controller.namespaceInjection`, a namespace) into the mesh. |
 | `aether.io/agent-not-ready` | (taint) | Startup taint keeping pods off a node until the agent's CNI serves. |
+
+### Pod annotations (`aether.io/*`)
+
+| Annotation | Value | Meaning |
+|---|---|---|
+| `aether.io/identity-gate` | `"false"` | Skip the egress identity gate for this pod: no `aether-identity-ready` init container, so the app may start (and send) before its SVID exists. Any other value, or absent, leaves `controller.webhook.identityGate.enabled` in charge. |
 
 ### Endpoint annotations (`endpoint.aether.io/*`)
 

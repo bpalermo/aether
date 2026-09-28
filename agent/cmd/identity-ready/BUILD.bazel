@@ -1,0 +1,53 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+# deps_test.go is hand-wired below into its own :deps_test target (it needs the
+# linked binary as data and has to be nameable on its own), so keep gazelle from
+# folding it into :identity-ready_test.
+# gazelle:exclude deps_test.go
+
+go_library(
+    name = "identity-ready_lib",
+    srcs = ["main.go"],
+    importpath = "aethermesh.dev/agent/cmd/identity-ready",
+    visibility = ["//visibility:private"],
+    deps = [
+        "@com_github_spiffe_go_spiffe_v2//proto/spiffe/workload",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
+        "@org_golang_google_grpc//metadata",
+    ],
+)
+
+go_binary(
+    name = "identity-ready",
+    embed = [":identity-ready_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "identity-ready_test",
+    srcs = ["main_test.go"],
+    embed = [":identity-ready_lib"],
+    deps = [
+        "//common/spire/spiretest",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# Linkage guard (#1053). identity-ready runs as an init container in EVERY
+# mesh-managed pod, so what it links is paid on every pod start. It needs gRPC
+# and the generated Workload API client — it cannot be stdlib-only like
+# proxy-ready — but nothing past that: the test asserts an explicit allow-list
+# of modules against the linked ELF that actually ships.
+go_test(
+    name = "deps_test",
+    size = "small",
+    srcs = ["deps_test.go"],
+    data = [":identity-ready"],
+    embed = [":identity-ready_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
