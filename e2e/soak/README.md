@@ -492,7 +492,25 @@ Compute prober deltas over the churn window and compare against the last known-g
 
 ```promql
 sum by (tier, result) (increase(aether_probe_requests_total[8h]))
+# where: `node` is the Kubernetes node since #1041 (before it, the prober POD name);
+# `pod` is the prober pod, and a proxy/prober roll starts a new `pod` series on the same node
+sum by (node, tier, result) (increase(aether_probe_requests_total{result!="success"}[8h]))
 ```
+
+Attribute every non-success burst from the prober's own `AETHER_PROBE_FAIL` lines
+(#1040). There is one per failed probe, capped at 20 per `(tier, result)` per minute plus
+a `suppressed` summary, and each carries the client-side `t`, `err`, `elapsed_ms`, `pod`
+and `node`. Pull them from VictoriaLogs for the graded window:
+
+```
+_stream:{k8s.namespace.name="aether-test"} AND "k8s.container.name":prober AND "AETHER_PROBE_FAIL"
+```
+
+Put each burst's `t` and `node` next to that node's proxy parent-exit and mesh-dns
+handoff times. `elapsed_ms` of about 2000 means the probe used its whole budget
+(`timeout`), and a few ms means a fast refusal (`connection_error`). Runs graded before
+#1041 carry the pod name in `node`. Translate it with `kubectl get pods -o wide` while
+the pod exists, and after that it cannot be placed.
 
 - **liveness** tier (local, no DNS) — data-path SLI. Target **0.000%**.
 - **mesh_dns** tier (resolves a real FQDN) — DNS + cross-node SLI. Target: `dns_error`,
