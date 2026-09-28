@@ -37,25 +37,42 @@ func NewClusterLoadAssignment(serviceName string) *endpointv3.ClusterLoadAssignm
 	}
 }
 
-// QUICLoadAssignmentFrom returns base's load assignment re-published under a
-// QUIC twin's own EDS resource name (QUICClusterFrom points the twin's
-// eds_cluster_config.service_name at its cluster name, aether#1008). Endpoints,
-// named endpoints and policy are the base's -- including the health status the
-// agent writes itself and every locality/metadata field -- so the twin sees
-// exactly the membership the h2 cluster does.
+// LoadAssignmentAlias returns base's load assignment re-published under name:
+// the EDS resource of a cluster that has the SAME membership as base but must
+// not subscribe to base's resource name. Every such cluster points its
+// eds_cluster_config.service_name at its own cluster name and the cache
+// publishes this copy in the same snapshot pass that emits the cluster:
+//
+//   - the QUIC twins (QUICClusterFrom, aether#1008);
+//   - the HTTP port-alias clusters "<fqdn>:<port>" (aether#1013);
+//   - the TCP floor "tcp:<fqdn>" and its primary-port alias
+//     "tcp:<fqdn>:<port>" (aether#1013).
+//
+// Why a copy instead of a shared name: Envoy's delta-ADS WatchMap deduplicates
+// subscription interest per (type_url, resource name). A cluster added in a
+// LATER CDS update than a sibling already subscribed to the same EDS name adds
+// nothing to resource_names_subscribe, no request goes out, the control plane
+// has nothing to answer (the resource did not change), and the new cluster
+// warms for the full initial_fetch_timeout (15 s). The same mechanism as the
+// SDS outage of #842. A delta-ADS subscriber must never share a resource name
+// with an already-subscribed sibling.
+//
+// Endpoints, named endpoints and policy are the base's -- including the health
+// status the agent writes itself and every locality/metadata field -- so the
+// alias sees exactly the membership the base cluster does.
 //
 // The endpoint slice elements and the policy are SHARED with base, not cloned:
 // load assignments are never mutated after they are built (a changed endpoint
-// set builds a new one, see SnapshotCache.RemoveEndpoint), and the twin copy is
+// set builds a new one, see SnapshotCache.RemoveEndpoint), and the copy is
 // rebuilt from the base on every snapshot, so identical inputs marshal to
 // identical bytes. Every ClusterLoadAssignment field is carried; the proxy
 // tests pin the field set so a new upstream field cannot be dropped silently.
-func QUICLoadAssignmentFrom(base *endpointv3.ClusterLoadAssignment, twinName string) *endpointv3.ClusterLoadAssignment {
+func LoadAssignmentAlias(base *endpointv3.ClusterLoadAssignment, name string) *endpointv3.ClusterLoadAssignment {
 	if base == nil {
 		return nil
 	}
 	return &endpointv3.ClusterLoadAssignment{
-		ClusterName:    twinName,
+		ClusterName:    name,
 		Endpoints:      slices.Clone(base.GetEndpoints()),
 		NamedEndpoints: base.GetNamedEndpoints(),
 		Policy:         base.GetPolicy(),

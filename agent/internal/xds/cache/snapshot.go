@@ -83,13 +83,21 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// capture TCP set. These are separate EDS clusters using ALPN "aether-tcp" that
 	// share endpoints with the corresponding HTTP clusters. Only emitted when capture
 	// is enabled and there are non-HTTP services.
-	clusters = append(clusters, c.captureTCPClusters()...)
+	//
+	// Each floor cluster subscribes to its OWN EDS name and its load assignment
+	// comes back from the same call, so the two always ride this snapshot
+	// together (aether#1013).
+	tcpClusters, tcpCLAs := c.captureTCPClusters()
+	clusters = append(clusters, tcpClusters...)
+	endpoints = append(endpoints, tcpCLAs...)
 
 	// Edge L4 TCP clusters (proposal 018, Phase 3b north-south): one per service
 	// referenced by an edge TCPRoute or TLSRoute. Like capture TCP clusters but use
 	// the edge SPIRE identity and fetch SDS from spire_agent directly.
 	if c.edge {
-		clusters = append(clusters, c.edgeTCPClusters()...)
+		edgeTCP, edgeTCPCLAs := c.edgeTCPClusters()
+		clusters = append(clusters, edgeTCP...)
+		endpoints = append(endpoints, edgeTCPCLAs...)
 		// Cleartext k8s-Service clusters: one per unique non-mesh HTTPRoute backend
 		// (BackendNamespace, service, port). STRICT_DNS, no transport socket — the
 		// backend is a plain k8s Service, not a mesh-registered endpoint.
@@ -107,6 +115,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	if pt := c.capturePassthroughCluster(); pt != nil {
 		clusters = append(clusters, pt)
 	}
+
+	// The floor load assignments were appended after clustersEndpointsAndVhosts
+	// sorted its own: re-sort so identical inputs produce byte-identical EDS
+	// (the delta/determinism contract, see config/common.go).
+	sortResourcesByName(endpoints)
 
 	c.secretMu.RLock()
 	secrets := make([]types.Resource, 0, len(c.secrets))
