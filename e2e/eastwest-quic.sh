@@ -151,6 +151,10 @@ SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.30.2}"
 SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.6.1}"
 SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller)
+# Extra `helm upgrade aether` arguments for a harness that sources this file
+# (e2e/eastwest-quic-hotrestart.sh adds the OTLP collector and access logs).
+# Empty for this suite's own runs.
+EWQ_EXTRA_HELM_ARGS=("${EWQ_EXTRA_HELM_ARGS[@]+"${EWQ_EXTRA_HELM_ARGS[@]}"}")
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 ok() { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
@@ -375,6 +379,7 @@ install_aether() {
 		--set spire.enabled=true \
 		--set edge.enabled=false \
 		"${quic[@]}" \
+		"${EWQ_EXTRA_HELM_ARGS[@]+"${EWQ_EXTRA_HELM_ARGS[@]}"}" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
 		$(img registrar registrar) $(img controller controller) \
@@ -880,6 +885,12 @@ up() {
 	install_aether
 	deploy_workloads
 }
+
+# Sourced (e2e/eastwest-quic-hotrestart.sh reuses the bring-up and readings):
+# define everything, run nothing.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+	return 0
+fi
 
 case "${1:-}" in
 up) up ;;

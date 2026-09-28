@@ -99,6 +99,27 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 			kv("bytes_received", "%BYTES_RECEIVED%"),
 			kv("bytes_sent", "%BYTES_SENT%"),
 			kv("duration_ms", "%DURATION%"),
+			// Upstream-response timing, both anchored at the first upstream
+			// response byte (US_RX_BEG), so a DC line says WHERE the stream was
+			// when the downstream closed (#1009):
+			//
+			//   - upstream_rx_ms: first -> last upstream response byte. Set only
+			//     once the router decoded the upstream end_stream
+			//     (maybeEndDecode); "-" = the upstream FIN never landed.
+			//   - downstream_tx_end_ms: first upstream byte -> the downstream
+			//     codec finished encoding the response (onCodecEncodeComplete);
+			//     "-" = the response was never completed downstream.
+			//
+			// Envoy's CommonDurationFormatter renders "-" whenever either time
+			// point is unset, never a bogus 0. The benign QUIC-twin hot-restart
+			// race (the HTTP/1.1 client read the full Content-Length body under
+			// the draining parent's `Connection: close` and closed before the h3
+			// FIN was decoded) is a DC line with a full bytes_sent and
+			// upstream_rx_ms "-": resetAllStreams destroyed and logged the stream
+			// before the end_stream arrived. A clean line carries both numbers.
+			// See e2e/soak/README.md "Benign DC" for the grading rule.
+			kv("upstream_rx_ms", "%COMMON_DURATION(US_RX_BEG:US_RX_END:ms)%"),
+			kv("downstream_tx_end_ms", "%COMMON_DURATION(US_RX_BEG:DS_TX_END:ms)%"),
 			kv("upstream_service_time", "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"),
 			kv("x_forwarded_for", "%REQ(X-FORWARDED-FOR)%"),
 			kv("user_agent", "%REQ(USER-AGENT)%"),
