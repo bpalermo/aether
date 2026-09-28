@@ -111,6 +111,38 @@ helm_template_test(
     },
 )
 
+# #1050: the hot-restart child must not block on the draining parent's main
+# thread for stats. Envoy's periodic getParentStats is a timeout-less blocking
+# recvmsg, and the parent's UDP forward to the child is a timeout-less blocking
+# sendmsg; together they deadlock both epochs' main threads. The chart passes
+# --skip-hot-restart-parent-stats by default (proxy.hotRestart.skipParentStats).
+helm_template_test(
+    name = "aether_proxy_skip_parent_stats_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--envoy-arg=--skip-hot-restart-parent-stats\"",
+        ],
+    },
+)
+
+# ...and the knob really turns it off. rules_helm can only assert presence, so
+# this pins absence positionally: with the knob false the last Envoy arg
+# (--service-zone's value) is followed directly by the container's `env:`.
+helm_template_test(
+    name = "aether_proxy_skip_parent_stats_off_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.hotRestart.skipParentStats=false",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--envoy-arg=\\$\\(ZONE\\)\"\\n\\s+env:\\n",
+        ],
+    },
+)
+
 # Proposal 036: the agent brokers per-pod SVIDs over the SPIRE agent's SPIFFE
 # Broker Endpoint, not the Delegated Identity API's admin socket. Three things
 # have to agree — the flag, the hostPath the SPIRE chart puts the socket
