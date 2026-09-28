@@ -1682,9 +1682,9 @@ it to false only to reproduce the wedge.
   parent as gone. Not filed from here.
 
 Reproduce it on kind with `e2e/hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
-WEDGE_FREEZE_S=6` wedges every restart, and the chart default does not (see the header
-of the script). The per-roll soak gates are in `e2e/soak/README.md`, "The hot-restart
-wedge gates (#1050)".
+WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 and the chart default 0 of 6
+(see the header of the script). The per-roll soak gates are in `e2e/soak/README.md`,
+"The hot-restart wedge gates (#1050)".
 
 ### The agent reports an unrepairable conflist
 

@@ -29,9 +29,9 @@
 #     SIGTERM (a main-dispatcher signal event) is ignored by both processes.
 #
 # What it proves (the red-then-green check; e2e/soak/README.md, #1050):
-#   red    WEDGE_SKIP_PARENT_STATS=false WEDGE_FREEZE_S=6 -> WEDGES > 0: the
+#   red    WEDGE_SKIP_PARENT_STATS=false WEDGE_FREEZE_S=6 -> WEDGES > 0 (4/4): the
 #          forced fault reproduces the production wedge without the flag
-#   green  WEDGE_SKIP_PARENT_STATS=true  WEDGE_FREEZE_S=6 -> WEDGES = 0: the
+#   green  WEDGE_SKIP_PARENT_STATS=true  WEDGE_FREEZE_S=6 -> WEDGES = 0 (0/6): the
 #          same fault with the chart default no longer wedges, because the
 #          child never makes the blocking getParentStats call
 # Unforced (WEDGE_FREEZE_S=0) the race is rare on kind (0/30 at ~1,900 rps).
@@ -92,14 +92,19 @@ WEDGE_PATH="/echo?msg=$(printf 'x%.0s' $(seq 1 700))"
 # and sees its processes).
 node_sh() { docker exec "$NODE" sh -c "$1"; }
 
+# ENVOY_ARGV0 is the proxy image's Envoy path. Every process match below anchors
+# on it as argv[0]: the node-side `sh -c` running the match has the pattern in
+# its OWN argv, so an unanchored `*envoy*` glob matches itself.
+ENVOY_ARGV0="/usr/local/bin/envoy"
+
 # envoy_pids — "<pid> <restart-epoch>" per live envoy process on the node.
 envoy_pids() {
 	# shellcheck disable=SC2016  # evaluated by the node's shell
 	node_sh '
 		for p in /proc/[0-9]*; do
-			c=$(tr "\0" " " <"$p/cmdline" 2>/dev/null) || continue
+			c=$({ tr "\0" " " <"$p/cmdline"; } 2>/dev/null) || continue
 			case "$c" in
-			*envoy*--restart-epoch*)
+			"'"$ENVOY_ARGV0"' "*--restart-epoch*)
 				e=$(printf "%s\n" "$c" | sed -n "s/.*--restart-epoch \([0-9]*\).*/\1/p")
 				echo "${p#/proc/} $e" ;;
 			esac
@@ -110,7 +115,7 @@ supervisor_pid() {
 	# shellcheck disable=SC2016
 	node_sh '
 		for p in /proc/[0-9]*; do
-			a0=$(tr "\0" "\n" <"$p/cmdline" 2>/dev/null | head -n 1)
+			a0=$({ tr "\0" "\n" <"$p/cmdline"; } 2>/dev/null | head -n 1)
 			if [ "$a0" = /opt/aether/supervisor ]; then echo "${p#/proc/}"; fi
 		done; exit 0' | head -n 1
 }
@@ -121,8 +126,10 @@ skip_parent_stats() {
 	# shellcheck disable=SC2016  # evaluated by the node's shell
 	if node_sh '
 		for p in /proc/[0-9]*; do
-			tr "\0" " " <"$p/cmdline" 2>/dev/null |
-				grep -q -- "--restart-epoch.*--skip-hot-restart-parent-stats" && exit 0
+			c=$({ tr "\0" " " <"$p/cmdline"; } 2>/dev/null) || continue
+			case "$c" in
+			"'"$ENVOY_ARGV0"' "*--skip-hot-restart-parent-stats*) exit 0 ;;
+			esac
 		done; exit 1'; then
 		echo yes
 	else
@@ -132,7 +139,21 @@ skip_parent_stats() {
 
 epoch_now() {
 	docker exec "$NODE" curl -s --max-time 1 http://127.0.0.1:9901/server_info 2>/dev/null |
-		tr -d ' \n' | { grep -o '"restart_epoch":[0-9]*' || true; } | cut -d: -f2
+		tr -d ' \n' | { grep -o '"restart_epoch":[0-9]*' || true; } | cut -d: -f2 || true
+}
+
+# wait_recovered — block until a supervisor runs and its Envoy admin answers
+# (up to 5 min).
+wait_recovered() {
+	local i
+	for i in $(seq 1 150); do
+		if [ -n "$(supervisor_pid)" ] && [ -n "$(epoch_now)" ]; then
+			echo "  recovered after ~$((i * 2))s (epoch $(epoch_now))"
+			return 0
+		fi
+		sleep 2
+	done
+	die "the proxy did not recover within 5 min of a wedge"
 }
 
 # forensics TAG — per-thread state of every envoy process into $WEDGE_OUT/TAG.
@@ -145,8 +166,8 @@ forensics() {
 		# shellcheck disable=SC2016
 		node_sh '
 			for p in /proc/[0-9]*; do
-				c=$(tr "\0" " " <"$p/cmdline" 2>/dev/null) || continue
-				case "$c" in *envoy*--restart-epoch*) ;; *) continue ;; esac
+				c=$({ tr "\0" " " <"$p/cmdline"; } 2>/dev/null) || continue
+				case "$c" in "'"$ENVOY_ARGV0"' "*--restart-epoch*) ;; *) continue ;; esac
 				echo "### pid ${p#/proc/}: $c"
 				for t in "$p"/task/*; do
 					printf "tid=%s comm=%s wchan=%s syscall=%s\n" "${t##*/}" "$(cat "$t/comm")" \
@@ -214,6 +235,7 @@ load_loop() {
 
 wedge_run() {
 	node_sh 'rm -f /tmp/wedge-stop' || true
+	wait_recovered
 	log "W0 scaling ${QUIC_DSTS[*]} to $WEDGE_REPLICAS replicas; warming twins"
 	local d s
 	for d in "${QUIC_DSTS[@]}"; do kc -n "$TEST_NS" scale "deploy/$d" --replicas="$WEDGE_REPLICAS" >/dev/null; done
@@ -265,15 +287,18 @@ wedge_run() {
 			wedges=$((wedges + 1))
 			f="$(forensics "wedge-$i")"
 			printf '\033[1;31m  ✗ restart %s (epoch %s -> ?): WEDGE — forensics %s\033[0m\n' "$i" "$before" "$f"
-			sed -n '1,200p' "$f" | grep -E '^(##|###|tid=[0-9]+ comm=envoy )|sendmsg|recvmsg|unix' | head -40
+			sed -n '1,200p' "$f" | grep -aE '^(##|###|tid=[0-9]+ comm=envoy )|sendmsg|recvmsg|unix' | head -40
 			kc -n "$NS" logs -l app.kubernetes.io/component=proxy -c proxy --tail=200 --prefix >"$WEDGE_OUT/wedge-$i-proxy.log" 2>&1 || true
 			if [ "$WEDGE_STOP_ON_FIRST" = 1 ]; then
 				sleep 3
 				forensics "wedge-$i-b" >/dev/null
 				break
 			fi
-			# Let the watchdog (30 s) + drain kill (15 s) recover the pod.
-			sleep 60
+			# Let the watchdog (30 s) + drain kill (15 s) recover the pod. Each
+			# recovery is a container restart, so kubelet's crash-loop backoff
+			# grows with every wedge: wait for a live admin, not a fixed time.
+			wait_recovered
+			sleep 10
 		else
 			ok "restart $i: epoch $before -> $(epoch_now) responsive ($(date -u +%H:%M:%SZ))"
 			sleep "$((WEDGE_GAP - 20))"

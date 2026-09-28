@@ -999,12 +999,20 @@ child inside the parent's forwarding window. It is the red-then-green check for 
 change that touches hot restart or the Envoy pin:
 
 ```bash
-WEDGE_SKIP_PARENT_STATS=false WEDGE_FREEZE_S=6 WEDGE_RESTARTS=3 WEDGE_STOP_ON_FIRST=0 \
-  e2e/hotrestart-wedge.sh            # red:   WEDGES=3 RESTARTS=3
-WEDGE_FREEZE_S=6 WEDGE_RESTARTS=5 e2e/hotrestart-wedge.sh up && \
-  WEDGE_FREEZE_S=6 WEDGE_RESTARTS=5 e2e/hotrestart-wedge.sh run   # green: WEDGES=0
+# red: the knob off. Each wedge costs a container restart, and kubelet's
+# crash-loop backoff grows with each one (~2-4 min apiece by the third).
+WEDGE_SKIP_PARENT_STATS=false e2e/hotrestart-wedge.sh up
+WEDGE_FREEZE_S=6 WEDGE_RESTARTS=4 WEDGE_STOP_ON_FIRST=0 e2e/hotrestart-wedge.sh run
+#   -> WEDGES=4 RESTARTS=4 FREEZE_S=6 SKIP_PARENT_STATS=no     (2026-09-28)
+# green: the chart default. `up` again only upgrades the release (rolls the proxy).
+EWQ_SKIP_BUILD=1 e2e/hotrestart-wedge.sh up
+WEDGE_FREEZE_S=6 WEDGE_RESTARTS=6 WEDGE_STOP_ON_FIRST=0 e2e/hotrestart-wedge.sh run
+#   -> WEDGES=0 RESTARTS=6 FREEZE_S=6 SKIP_PARENT_STATS=yes    (2026-09-28)
 e2e/hotrestart-wedge.sh down
 ```
+
+The `SKIP_PARENT_STATS=` field is read from the live Envoy's argv, not from the
+setting, so a red run that says `yes` was not a red run.
 
 ## Hard-won gotchas
 
