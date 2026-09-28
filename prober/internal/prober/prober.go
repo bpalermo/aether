@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -132,6 +133,14 @@ type Prober struct {
 	counter   metric.Int64Counter
 	duration  metric.Float64Histogram
 	targets   []target
+	// pod and node are this prober's identity, read from the OTel resource
+	// (OTEL_RESOURCE_ATTRIBUTES k8s.pod.name / k8s.node.name, set by the chart from
+	// the downward API). pod rides every datapoint as the `pod` attribute; both are
+	// stamped on every AETHER_PROBE_FAIL line (#1041, #1040).
+	pod  string
+	node string
+	// fails emits the bounded per-failure AETHER_PROBE_FAIL lines (#1040).
+	fails *failLog
 }
 
 // newClient builds a probe client. Redirects are never followed: a probe measures the
@@ -157,10 +166,23 @@ func newClient(keepAlive bool) *http.Client {
 
 // New builds a Prober.
 func New(ctx context.Context, cfg Config, log *slog.Logger, version string) (*Prober, error) {
-	meter, provider, err := newMeter(ctx, cfg.OTLPEndpoint, version)
+	res, err := newResource(ctx, version)
 	if err != nil {
 		return nil, err
 	}
+	meter, provider, err := newMeter(ctx, cfg.OTLPEndpoint, res)
+	if err != nil {
+		return nil, err
+	}
+	return newProber(cfg, log, res, meter, provider, os.Stdout)
+}
+
+// newProber wires a Prober around an already-built resource and meter. It is split out
+// of New so a test can hand it a ManualReader-backed meter and a buffer for the
+// AETHER_PROBE_FAIL lines, and assert on what actually leaves the process.
+func newProber(cfg Config, log *slog.Logger, res *resource.Resource, meter metric.Meter,
+	provider *sdkmetric.MeterProvider, failOut io.Writer,
+) (*Prober, error) {
 	counter, err := meter.Int64Counter("aether_probe_requests_total",
 		metric.WithDescription("Synthetic mesh probe results by tier/target/result."))
 	if err != nil {
@@ -175,7 +197,10 @@ func New(ctx context.Context, cfg Config, log *slog.Logger, version string) (*Pr
 		cfg: cfg, log: log, counter: counter, duration: duration, provider: provider,
 		client:    newClient(true),
 		dnsClient: newClient(false),
+		pod:       resourceString(res, semconv.K8SPodNameKey),
+		node:      resourceString(res, semconv.K8SNodeNameKey),
 	}
+	p.fails = newFailLog(failOut, p.pod, p.node, failLogCap, failLogWindow)
 
 	// Liveness tier (always): hit the proxy's egress local-reply route. No upstream
 	// is involved, so this needs no config.aether.io/upstreams authorization.
@@ -230,23 +255,49 @@ func withDefaultPort(authority, port string) string {
 	return authority + ":" + port
 }
 
-func newMeter(ctx context.Context, endpoint, version string) (metric.Meter, *sdkmetric.MeterProvider, error) {
-	if endpoint == "" {
-		return noop.NewMeterProvider().Meter(telemetryServiceName), nil, nil
-	}
+// newResource builds the prober's OTel resource. It is built even when telemetry is
+// disabled, because the prober's own identity (k8s.pod.name, k8s.node.name) is read
+// from it for the `pod` datapoint attribute and the AETHER_PROBE_FAIL lines.
+//
+// There is deliberately NO resource.WithHost() (#1041). The prober is not hostNetwork, so
+// host.name is its POD name, and the talos collector's transform/promote set the metric
+// `node` label from host.name ahead of k8s.node.name: every series said
+// node="prober-h2mzs" instead of the Kubernetes node, which left #1040's burst
+// unplaceable once that pod was rolled away. Node identity comes only from k8s.node.name
+// (OTEL_RESOURCE_ATTRIBUTES, downward API spec.nodeName); the pod rides its own `pod`
+// datapoint attribute.
+func newResource(ctx context.Context, version string) (*resource.Resource, error) {
 	res, err := resource.New(
 		ctx,
 		resource.WithAttributes(
 			semconv.ServiceName(telemetryServiceName),
 			semconv.ServiceVersion(version),
 		),
-		resource.WithFromEnv(), // picks up OTEL_RESOURCE_ATTRIBUTES (k8s.node.name)
+		resource.WithFromEnv(), // OTEL_RESOURCE_ATTRIBUTES: k8s.node.name, k8s.pod.name, k8s.namespace.name
 		resource.WithTelemetrySDK(),
 		resource.WithProcess(),
-		resource.WithHost(),
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create resource: %w", err)
+		return nil, fmt.Errorf("create resource: %w", err)
+	}
+	return res, nil
+}
+
+// resourceString returns the string value of key on res, or "" when it is absent.
+func resourceString(res *resource.Resource, key attribute.Key) string {
+	if res == nil {
+		return ""
+	}
+	v, ok := res.Set().Value(key)
+	if !ok {
+		return ""
+	}
+	return v.AsString()
+}
+
+func newMeter(ctx context.Context, endpoint string, res *resource.Resource) (metric.Meter, *sdkmetric.MeterProvider, error) {
+	if endpoint == "" {
+		return noop.NewMeterProvider().Meter(telemetryServiceName), nil, nil
 	}
 	exporter, err := otlpmetricgrpc.New(
 		ctx,
@@ -275,7 +326,23 @@ func (p *Prober) Run(ctx context.Context) error {
 			p.runTarget(ctx, t)
 		}(t)
 	}
+	// Emit the per-window suppression summaries even once failures stop, so the tail
+	// of a burst is counted rather than left pending until the next failure.
+	wg.Go(func() {
+		tick := time.NewTicker(failLogWindow)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-tick.C:
+				p.fails.flush(now)
+			}
+		}
+	})
 	wg.Wait()
+	// Final summary for anything still suppressed when the prober stops.
+	p.fails.flush(time.Now().Add(failLogWindow))
 	if p.provider != nil {
 		sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
@@ -307,7 +374,7 @@ func (p *Prober) runTarget(ctx context.Context, t target) {
 					p.probe(ctx, t)
 				}()
 			default:
-				p.record(t, resultSaturated, 0)
+				p.record(t, resultSaturated, 0, errSaturated)
 			}
 		}
 	}
@@ -318,7 +385,7 @@ func (p *Prober) probe(ctx context.Context, t target) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, t.url, nil)
 	if err != nil {
-		p.record(t, resultConnectionError, 0)
+		p.record(t, resultConnectionError, 0, err)
 		return
 	}
 	// mesh_dns targets carry no authority: leaving req.Host unset preserves the
@@ -338,15 +405,15 @@ func (p *Prober) probe(ctx context.Context, t target) {
 	resp, err := t.client.Do(req)
 	elapsed := time.Since(start).Seconds()
 	if err != nil {
-		p.record(t, classifyErr(rctx, err), elapsed)
+		p.record(t, classifyErr(rctx, err), elapsed, err)
 		return
 	}
 	drainBody(resp.Body)
 	if resp.StatusCode == http.StatusOK {
-		p.record(t, resultSuccess, elapsed)
+		p.record(t, resultSuccess, elapsed, nil)
 		return
 	}
-	p.record(t, resultHTTPError, elapsed)
+	p.record(t, resultHTTPError, elapsed, fmt.Errorf("HTTP %d", resp.StatusCode))
 }
 
 // drainBody reads the rest of the response body before closing it. Closing a body that
@@ -423,14 +490,26 @@ func classifyErr(ctx context.Context, err error) string {
 	return resultConnectionError
 }
 
-func (p *Prober) record(t target, result string, elapsed float64) {
-	attrs := metric.WithAttributes(
+// record counts one probe outcome and, for anything but success, emits the bounded
+// AETHER_PROBE_FAIL line. err is the failure's cause (nil on success).
+func (p *Prober) record(t target, result string, elapsed float64, err error) {
+	kvs := []attribute.KeyValue{
 		attribute.String("tier", t.tier),
 		attribute.String("target", t.name),
 		attribute.String("result", result),
-	)
+	}
+	// pod (#1041): the metric `node` label is the Kubernetes node, so the pod is its
+	// own attribute. Per-pod anomalies stay distinguishable, and two prober
+	// generations on one node never write the same series.
+	if p.pod != "" {
+		kvs = append(kvs, attribute.String("pod", p.pod))
+	}
+	attrs := metric.WithAttributes(kvs...)
 	p.counter.Add(context.Background(), 1, attrs)
 	if elapsed > 0 {
 		p.duration.Record(context.Background(), elapsed, attrs)
+	}
+	if result != resultSuccess {
+		p.fails.log(time.Now(), t, result, elapsed, err)
 	}
 }
