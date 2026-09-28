@@ -1041,6 +1041,8 @@ then routed to a name Envoy would never ask for again. `//test/mtlspool`
 `TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control` reproduces
 it: `status=503 … in 2.000099268s`, and no CDS request reaches the control plane.
 
+**`DC` 200s on a QUIC destination at a source-proxy roll (#1009)** are benign when the line is `DC` + `downstream_remote_disconnect` + 200 + the clean-line `bytes_sent`: the HTTP/1.1 client closed after a complete body before the h3 FIN was decoded. `upstream_rx_ms` and `downstream_tx_end_ms` read `-` on such a line. The rule and its LogsQL are in `e2e/soak/README.md`, "Benign `DC` at a source-proxy hot restart"; any other `DC` is a real failure.
+
 **Why the agent never forgets a subscribed pair.** The agent tracks which twins the
 proxy holds an ODCDS subscription for: those it asked for by name, and those it
 re-subscribes on a fresh stream. When such a pair loses its source or its

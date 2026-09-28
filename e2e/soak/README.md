@@ -539,6 +539,10 @@ the pod exists, and after that it cannot be placed.
 - **The L4 gates (#1023)** — `ssl_fail_verify_san` on the `tcp_` keys is zero outside
   rolls, and no pod without a raw-TCP primary port takes a TCP-floor connection. See
   "The L4 gates".
+- **Benign `DC` on QUIC destinations (#1009)** — at a source-node proxy roll, `DC` +
+  `downstream_remote_disconnect` + 200 + the clean-line `bytes_sent` is the hot-restart
+  FIN race, not a failure; every other `DC` is. See "Benign `DC` at a source-proxy hot
+  restart".
 - **The QUIC per-request cost gate (#1021)**, on any run with twins carrying load —
   h3 per-request envoy CPU ≤ 1.5× h2, matched no-roll windows, against the 3.3× /
   2.88-core baseline. See "The QUIC per-request cost gate".
@@ -789,6 +793,84 @@ error episode on a listed destination was the QUIC path (its twin's `connect_fai
 / `rq_5xx` moved) or the h2 path (they did not). Not gradeable from Prometheus: the
 destination's per-pod `listener.inbound_<pod>_h3.*` counter (admin only; the kind
 harness `e2e/eastwest-quic.sh` reads it).
+
+### Benign `DC` at a source-proxy hot restart (#1009)
+
+A QUIC run leaves a few source-reporter `DC` lines on the QUIC destinations at each
+**source-node** proxy roll (74 over the rev242 run, all 200s). They are not failures.
+The draining parent stamps `Connection: close` on the 200; the HTTP/1.1 client (k6)
+reads the full Content-Length body and closes; the h3 upstream FIN is decoded a moment
+later, so `ConnectionManagerImpl::onEvent(RemoteClose)` → `resetAllStreams` flags the
+still-open stream `DC` with `response_code_details=downstream_remote_disconnect`. The
+client has every byte and k6 counts the request a success. h2 has no such window
+(nghttp2 hands DATA and END_STREAM over from one TCP read), so the h2 path never logs it.
+No Envoy setting ends a stream on a satisfied Content-Length. Mechanism, read from the
+pinned Envoy:
+[#1009](https://github.com/bpalermo/aether/issues/1009#issuecomment-5869601110).
+
+**The rule.** A `DC` line is **benign** iff all four hold:
+
+- `response_flags` is exactly `DC` (no other flag beside it),
+- `response_code_details` is `downstream_remote_disconnect`,
+- `response_code` is `200`,
+- `bytes_sent` equals the clean-line body size **for that target**. That is 791 for the
+  soak's `svc-1`/`svc-2` twins on rev242; read it fresh with the first query below,
+  and it must be ONE value per authority.
+
+Anything else stays a failure: `downstream_local_disconnect(...)` (the proxy closed on
+the client), a short `bytes_sent` (the body was cut), a non-200, or `DC` beside another
+flag. Benign lines are also **excluded from the k6 reconciliation**: k6 counted them as
+successes, so they have no k6 failure to match.
+
+```logsql
+# 1. the clean-line body size per QUIC destination: exactly one bytes_sent per authority
+log_name:aether_access_logs AND reporter:source AND authority:~"svc-[12]" AND response_code:200 AND response_flags:="-"
+  | stats by (authority, bytes_sent) count()
+
+# 2. benign DC, per node and minute, inside one roll bracket (the roll's start/end
+#    from /tmp/soak-churn.log). One authority per query: <clean_bytes> is per target.
+log_name:aether_access_logs AND reporter:source AND _time:[<roll_start>, <roll_end>]
+  AND authority:~"svc-1" AND response_flags:="DC" AND response_code:200
+  AND response_code_details:="downstream_remote_disconnect" AND bytes_sent:="<clean_bytes>"
+  | stats by (_time:1m, node_name) count() benign
+
+# 3. NON-benign DC in the same bracket. MUST be empty. Drop the time filter to get
+#    the whole run; every row that comes back is a failure to attribute.
+log_name:aether_access_logs AND reporter:source AND _time:[<roll_start>, <roll_end>]
+  AND authority:~"svc-1" AND response_flags:~"DC"
+  AND NOT (response_flags:="DC" AND response_code:200
+           AND response_code_details:="downstream_remote_disconnect" AND bytes_sent:="<clean_bytes>")
+  | stats by (node_name, response_code, response_flags, response_code_details, bytes_sent) count()
+```
+
+Control-test a zero from query 3 by dropping its `NOT (...)` clause: the benign lines
+from query 2 must come back. Benign lines belong to the rolled node: their `node_name`
+is the source node whose proxy was restarting. The same shape on a node whose proxy
+was *not* rolling is not this mechanism, and needs its own attribution.
+
+**The timing fields (#1009).** Since #1009 every HTTP access-log line carries two
+durations, both measured from the first upstream response byte:
+
+- `upstream_rx_ms`: `%COMMON_DURATION(US_RX_BEG:US_RX_END:ms)%`, ending when the router
+  decoded the upstream end-of-stream.
+- `downstream_tx_end_ms`: `%COMMON_DURATION(US_RX_BEG:DS_TX_END:ms)%`, ending when the
+  downstream codec finished encoding the response.
+
+`-` means that end point never happened; a clean line carries two numbers (often `0`,
+at millisecond precision). The benign race reads **`upstream_rx_ms:"-"` and
+`downstream_tx_end_ms:"-"`** alongside a full `bytes_sent`, because the FIN had not been
+decoded when `resetAllStreams` destroyed and logged the stream. A `DC` line with
+`upstream_rx_ms` set but `downstream_tx_end_ms` `-` is a different case: the upstream
+had finished and the response stalled on its way out. Attribute it; it is not the
+race. The fields are a cross-check, not a condition of the rule, because lines from
+builds before #1009 do not have them.
+
+The kind reproduction attempt is `e2e/eastwest-quic-hotrestart.sh`. It runs HTTP/1.1
+keep-alive loops through supervisor hot restarts (SIGHUP) to two h3 twins and an h2
+control, then grades the collector stand-in's records with this rule. On a single-node
+kind cluster the race did not reproduce: 0 `DC` lines in about 100 drain-closed
+connections per h3 destination. That run passes H2 vacuously and says so, and
+`HR_REQUIRE_DC=1` turns a zero into a failure.
 
 ### The QUIC per-request cost gate (#1021)
 
