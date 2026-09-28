@@ -64,6 +64,8 @@ func TestNewInboundQUICListener(t *testing.T) {
 	assert.Equal(t, pod.GetNetworkNamespace(), sa.GetNetworkNamespaceFilepath())
 	assert.True(t, l.GetEnableReusePort().GetValue())
 	assert.NotNil(t, l.GetUdpListenerConfig().GetQuicOptions())
+	assert.True(t, l.GetUdpListenerConfig().GetDownstreamSocketConfig().GetPreferGro().GetValue(), "aether#1021: GRO on the inbound's receive path")
+	assert.Nil(t, l.GetUdpListenerConfig().GetUdpPacketPacketWriterConfig(), "aether#1021: Envoy's automatic writer (GSO where the kernel supports it)")
 	assert.Equal(t, corev3.TrafficDirection_INBOUND, l.GetTrafficDirection())
 	assert.Empty(t, l.GetListenerFilters(), "no tls_inspector on a QUIC listener; SNI comes from the CHLO")
 

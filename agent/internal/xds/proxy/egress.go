@@ -241,6 +241,20 @@ func QUICClusterFrom(base *clusterv3.Cluster, name, clientSpiffeID, validationCo
 	cl.TransportSocketMatches = nil
 	cl.TransportSocketMatcher = nil
 	cl.TransportSocket = QUICUpstreamTransportSocket(clientSpiffeID, validationContextName, sanURIs, sni)
+	// A twin never pools per downstream connection, whatever the base says
+	// (aether#1021). The option exists to keep one source's upstream connection
+	// -- and so its certificate -- from serving another source; a twin carries
+	// exactly ONE identity (its source ServiceAccount's SVID, named statically
+	// in the transport socket above), so every downstream connection routed
+	// here is already the same identity and the option could only multiply
+	// QUIC connections by the number of app->proxy connections. The #842 h2
+	// base does not set it either (the source identity is in its pool key);
+	// this line pins the twin's half so a future base change cannot turn every
+	// k6/app keep-alive connection into its own QUIC connection.
+	// Pods of the SAME ServiceAccount share a twin's connection; that is the
+	// mesh's identity model (identity = ServiceAccount), the same partition
+	// the h2 pool key has had since #842.
+	cl.ConnectionPoolPerDownstreamConnection = false
 	return cl
 }
 

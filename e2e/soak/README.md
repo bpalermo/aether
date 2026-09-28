@@ -457,6 +457,9 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
   not exist at the offset, and the unseeded ones are exactly the ones that matter.
 - **The new-ServiceAccount gate (#1014)** — `init_fetch_timeout` on `@` clusters and
   zero `503/NC` for `user_agent:aether-soak-newsa`. See "The new-ServiceAccount step".
+- **The QUIC per-request cost gate (#1021)**, on any run with twins carrying load —
+  h3 per-request envoy CPU ≤ 1.5× h2, matched no-roll windows, against the 3.3× /
+  2.88-core baseline. See "The QUIC per-request cost gate".
 - **SVID rotation** is a bar since the SPIFFE Broker API (proposal 036): with the default
   4h TTL a pod rotates every ~2h, so an 8h run sees four cycles.
   The rotation signal is the agent's counter, summed per node (a restarted agent
@@ -655,6 +658,64 @@ error episode on a listed destination was the QUIC path (its twin's `connect_fai
 / `rq_5xx` moved) or the h2 path (they did not). Not gradeable from Prometheus: the
 destination's per-pod `listener.inbound_<pod>_h3.*` counter (admin only; the kind
 harness `e2e/eastwest-quic.sh` reads it).
+
+### The QUIC per-request cost gate (#1021)
+
+**Acceptance for dropping the allow-list (#979): an HTTP/3 mesh request costs at
+most 1.5× the proxy CPU of an h2 mesh request, at the soak's load shape.** The
+prober and k6 SLIs cannot see this: a QUIC run can be error-free and still cost 2.3×
+the fleet's proxy CPU once every destination is on it (#1006's projection).
+
+**Baseline (grade the next QUIC soak against these):**
+
+| | run | window | envoy cores (fleet) | mesh rps | per request |
+|---|---|---|---|---|---|
+| h2 reference | rev239, no QUIC | 2026-09-26 19:20:42–20:40:42Z | 2.092 (idle 0.923) | 350 | **3.3 ms** = (2.092 − 0.923) / 350 |
+| QUIC | rev242, svc-1/2 on QUIC (100 of 350 rps) | 2026-09-27 16:00–17:20Z | **2.872** | 350 | h3 = 3.3 + (2.872 − 2.092) / 100 = **11.1 ms → 3.3×** |
+
+The 7 h figures (2.165 / **2.879**) reproduce the window within 1 %; **2.88 fleet
+cores** is the QUIC baseline. Since then the inbound QUIC listener reads with GRO
+(#1021: −11 % destination CPU per request in `//test/mtlspool`), which by itself is
+nowhere near enough to close 3.3× → 1.5×. Treat the gate as open.
+
+**Method (#1006, reproduce it exactly or the numbers do not compare):**
+
+1. **Windows.** The T0-matched no-roll window, 80 min, the same churn offset in
+   both runs: **T0 + 6h05m → T0 + 7h25m**. No proxy, agent or service roll may
+   fall inside it (check `/tmp/soak-churn.log`). Drop the first point of each
+   window; Pyroscope points are end-labelled.
+2. **Load matched.** Per mesh destination, `increase(envoy_cluster_upstream_rq_total
+   {aether_cluster=~"aether-test/<svc>(@.*)?"}[80m]) / 4800` must agree between the
+   two runs to within ~2 % (rev239 vs rev242: echo 100.1/99.9, mixed-svc 50.8/50.8,
+   svc-1..4 49.9–50.1). The QUIC share is the same query over `@` series only.
+3. **CPU.** Pyroscope `process_cpu`, `service_name="aether-proxy"`, split by
+   `process_executable_name`; grade on **`envoy`** only (the supervisor moved
+   −0.036 cores between these runs for reasons unrelated to QUIC). Average cores
+   over the window, fleet sum.
+4. **Idle reference.** Envoy cores with no k6 load but the same background traffic
+   (~150 rps of prober and dialers), on the same build: 0.923 on rev239.
+5. **Arithmetic.** `per_h2 = (envoy_ref_loaded − envoy_ref_idle) / mesh_rps` on a
+   run with no QUIC; `per_h3 = per_h2 + (envoy_quic − envoy_ref_loaded) / quic_rps`
+   on a run where `quic_rps` of the same load rides twins. **Gate: `per_h3 / per_h2
+   ≤ 1.5`.** An unconditional-QUIC run (no reference half) grades as
+   `envoy_quic_loaded − envoy_idle` over mesh rps against the latest h2 reference.
+6. **Build drift.** If the Envoy pin moved between the reference and the QUIC run,
+   say so and bound it with the idle reading (rev240 vs rev239: −1.3 %); it is not
+   separable at load.
+
+Attribute a miss with the frames #1006 used (source-side
+`EnvoyQuicClientConnection` read events, `UdpListenerImpl::handleReadCallback`,
+`quic::QuicConnection::OnAckAlarm`, `ScopedPacketFlusher`, kernel `udp_sendmsg` /
+`udp_recvmsg`) and the connection density: `sum(envoy_cluster_upstream_cx_active
+{aether_cluster=~".*@.*"})` against the QUIC rps. Connections are **one per (source
+node, source ServiceAccount, Envoy worker the SA's app connections landed on,
+destination endpoint)**, not one per app connection (see the runbook, "HTTP/3
+per-request cost"); a count that tracks k6 VUs is a regression of #1021.
+
+Do **not** measure this against talos-main with synthetic load outside a soak: the
+harness form of the same comparison is `//test/mtlspool` `TestQUICRequestCPU`
+(`--test_env=AETHER_QUIC_COST=1`), which prints loaded-minus-idle CPU per request
+for h2 and for each inbound UDP option.
 
 ## Hard-won gotchas
 
