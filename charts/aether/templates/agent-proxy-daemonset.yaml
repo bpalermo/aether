@@ -126,9 +126,14 @@ spec:
             - "--envoy-arg=$(NODE_NAME)"
             - "--envoy-arg=--service-zone"
             - "--envoy-arg=$(ZONE)"
+            # #1054: GOAWAY on every response once a drain starts, so a source's
+            # h3 pool leaves the hot-restart parent before it exits — see
+            # proxy.hotRestart.drainStrategy.
+            - "--envoy-arg=--drain-strategy"
+            - "--envoy-arg={{ include "aether.proxy.drainStrategy" . }}"
             {{- if .Values.proxy.hotRestart.skipParentStats }}
-            # #1050: the child must never block on the draining parent's main
-            # thread for stats — see proxy.hotRestart.skipParentStats.
+            # #1050 emergency switch: the child never asks the draining parent
+            # for stats — see proxy.hotRestart.skipParentStats.
             - "--envoy-arg=--skip-hot-restart-parent-stats"
             {{- end }}
           env:

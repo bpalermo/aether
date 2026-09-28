@@ -135,6 +135,15 @@
 #
 # Prereqs: kind, docker, kubectl, helm, bazel (for the image build; CI sets
 # EWQ_SKIP_BUILD=1 and pre-loads the images from the nightly build artifact).
+# EWQ_LOCAL_PROXY=1 runs the proxy image already in the local Docker daemon
+# (`make load-proxy-image`: <registry>/proxy:latest, e.g. a carried-patch build)
+# instead of the chart's digest-pinned release; read at `up`. Never built here.
+# EWQ_WORKER=1 (read at `up`) adds a kind worker node, pins every destination to
+# it and every source to the control-plane node, so a destination's proxy can
+# hot-restart while the sources' proxy keeps running: the cross-node shape of
+# aether#1054 (e2e/eastwest-quic-hotrestart.sh HR_MODE=sparse). This suite's own
+# `verify` reads destination-side counters from $NODE and needs the default
+# single node.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -144,6 +153,9 @@ IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
 CLUSTER="${EWQ_CLUSTER:-eastwest-quic}"
 CTX="kind-$CLUSTER"
 NODE="$CLUSTER-control-plane"
+# The node the destinations run on: $NODE, or the worker with EWQ_WORKER=1.
+DST_NODE="$NODE"
+if [ "${EWQ_WORKER:-0}" = "1" ]; then DST_NODE="$CLUSTER-worker"; fi
 NS="aether-system"
 TEST_NS="aether-test"
 MESH_DOMAIN="aether.internal"
@@ -176,6 +188,7 @@ SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.30.2}"
 SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.6.1}"
 SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller)
+if [ "${EWQ_LOCAL_PROXY:-0}" = "1" ]; then IMAGES+=(proxy); fi
 # Extra `helm upgrade aether` arguments for a harness that sources this file
 # (e2e/eastwest-quic-hotrestart.sh adds the OTLP collector and access logs).
 # Empty for this suite's own runs.
@@ -278,8 +291,15 @@ create_cluster() {
 		-e "s#POD_SUBNET#10.30.0.0/16#g" \
 		-e "s#SVC_SUBNET#10.130.0.0/16#g" \
 		"$REPO_ROOT/e2e/kind-cluster.yaml" >"$cfg"
+	if [ "${EWQ_WORKER:-0}" = "1" ]; then
+		printf '  - role: worker\n    labels:\n      topology.kubernetes.io/region: local\n      topology.kubernetes.io/zone: %s\n' "$CLUSTER" >>"$cfg"
+	fi
 	kind create cluster --config "$cfg" --wait 60s >/dev/null
 	rm -f "$cfg"
+	if [ "${EWQ_WORKER:-0}" = "1" ]; then
+		# kind taints the control plane once a worker exists; the sources run there.
+		kc taint nodes "$NODE" node-role.kubernetes.io/control-plane:NoSchedule- >/dev/null 2>&1 || true
+	fi
 	ok "cluster '$CLUSTER' ready"
 }
 
@@ -416,6 +436,7 @@ install_aether() {
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
 		$(img registrar registrar) $(img controller controller) \
 		--set proxy.image.pullPolicy=IfNotPresent \
+		$([ "${EWQ_LOCAL_PROXY:-0}" = "1" ] && img proxy proxy) \
 		--timeout 6m >/dev/null || die "aether install failed"
 	rm -rf "$(dirname "$charts")"
 
@@ -424,6 +445,14 @@ install_aether() {
 	kc -n "$NS" rollout status deploy/aether-registrar --timeout=180s >/dev/null || die "the registrar never became Ready"
 	kc -n "$NS" rollout status deploy/aether-controller --timeout=180s >/dev/null || die "the controller never became Ready"
 	ok "aether up (allow-list: $(agent_quic_args | tr '\n' ' '))"
+}
+
+# node_pin NODE — a pod-spec nodeSelector line pinning to NODE with
+# EWQ_WORKER=1, and an empty line otherwise (one node: nothing to pin).
+node_pin() {
+	if [ "${EWQ_WORKER:-0}" = "1" ]; then
+		printf 'nodeSelector: {kubernetes.io/hostname: %s}' "$1"
+	fi
 }
 
 # A destination: agnhost netexec on :$APP_PORT, its own ServiceAccount (= its
@@ -449,6 +478,7 @@ spec:
         endpoint.aether.io/port: "$APP_PORT"
     spec:
       serviceAccountName: $name
+      $(node_pin "$DST_NODE")
       containers:
         - name: app
           image: $AGNHOST_IMAGE
@@ -483,6 +513,7 @@ spec:
         config.aether.io/upstreams: "$ups"
     spec:
       serviceAccountName: $name
+      $(node_pin "$NODE")
       containers:
         - name: curl
           image: $CURL_IMAGE

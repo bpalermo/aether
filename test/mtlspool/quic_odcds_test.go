@@ -195,7 +195,7 @@ func (a *odcdsAgent) publishTwin(name string) {
 	ns, sa, _ := strings.Cut(source, "/")
 	sourceID := "spiffe://" + trustDomain + "/ns/" + ns + "/sa/" + sa
 	base := odcdsBase()
-	twin := proxy.QUICClusterFrom(base, name, sourceID, validationContextName, []string{spiffeDest}, quicSNI)
+	twin := proxy.QUICClusterFrom(base, name, sourceID, validationContextName, []string{spiffeDest}, quicSNI, 0)
 	cla := proxy.LoadAssignmentAlias(a.baseCLA, name)
 
 	a.mu.Lock()

@@ -158,7 +158,7 @@ func (f *twinFixture) twin(t *testing.T, sourceID string) (*clusterv3.Cluster, t
 	fqdn := f.base.GetName()
 	name := proxy.QUICClusterName(twinDestSvc, twinDomain, proxy.SourceSAKeyFromSpiffeID(sourceID))
 	cl := proxy.QUICClusterFrom(f.base, name, sourceID, "spiffe://"+twinDomain,
-		[]string{"spiffe://" + twinDomain + "/ns/demo/sa/echo"}, proxy.QUICServerName("8080", fqdn))
+		[]string{"spiffe://" + twinDomain + "/ns/demo/sa/echo"}, proxy.QUICServerName("8080", fqdn), 0)
 	// Transport swap only: cleartext h2, like the base. The EDS config is
 	// untouched from QUICClusterFrom's output.
 	cl.TransportSocket = nil

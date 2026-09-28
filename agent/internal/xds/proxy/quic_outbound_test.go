@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"testing"
+	"time"
 
 	"aethermesh.dev/agent/internal/xds/config"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -81,7 +82,7 @@ func TestQUICClusterFrom(t *testing.T) {
 	base := NewServiceCluster("echo.demo.aether.internal", "demo/echo", "demo/echo", []string{"zone"})
 	q := QUICClusterFrom(base, "quic:echo.demo.aether.internal@demo/source-a",
 		"spiffe://aether.internal/ns/demo/sa/source-a", "spiffe://aether.internal",
-		[]string{"spiffe://aether.internal/ns/demo/sa/echo"}, QUICServerName("8080", "echo.demo.aether.internal"))
+		[]string{"spiffe://aether.internal/ns/demo/sa/echo"}, QUICServerName("8080", "echo.demo.aether.internal"), 0)
 
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", q.GetName())
 	assert.Equal(t, "demo/echo@demo/source-a", q.GetAltStatName(), "a twin must NOT share the h2 cluster's stat tree (aether#960)")
@@ -98,12 +99,18 @@ func TestQUICClusterFrom(t *testing.T) {
 	assert.False(t, q.GetConnectionPoolPerDownstreamConnection(), "a twin carries one identity: per-downstream pools only multiply QUIC connections (aether#1021)")
 	pooled := proto.Clone(base).(*clusterv3.Cluster)
 	pooled.ConnectionPoolPerDownstreamConnection = true
-	assert.False(t, QUICClusterFrom(pooled, "quic:x@demo/source-a", "spiffe://aether.internal/ns/demo/sa/source-a", "spiffe://aether.internal", nil, "8080.x").GetConnectionPoolPerDownstreamConnection(),
+	assert.False(t, QUICClusterFrom(pooled, "quic:x@demo/source-a", "spiffe://aether.internal/ns/demo/sa/source-a", "spiffe://aether.internal", nil, "8080.x", 0).GetConnectionPoolPerDownstreamConnection(),
 		"the twin forces the option off even if the h2 base ever sets it again")
 
 	po := &httpv3.HttpProtocolOptions{}
 	require.NoError(t, q.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey].UnmarshalTo(po))
 	assert.NotNil(t, po.GetExplicitHttpConfig().GetHttp3ProtocolOptions(), "explicit HTTP/3")
+	assert.Equal(t, config.DefaultQUICTwinIdleTimeout, po.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration(),
+		"a zero idle timeout means the twin default, not the h2 30 s (aether#1054)")
+	custom := QUICClusterFrom(base, "quic:y@demo/source-a", "spiffe://aether.internal/ns/demo/sa/source-a", "spiffe://aether.internal", nil, "8080.y", 5*time.Second)
+	cpo := &httpv3.HttpProtocolOptions{}
+	require.NoError(t, custom.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey].UnmarshalTo(cpo))
+	assert.Equal(t, 5*time.Second, cpo.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration(), "the caller's idle timeout reaches the twin")
 
 	require.Equal(t, "envoy.transport_sockets.quic", q.GetTransportSocket().GetName())
 	assert.Nil(t, q.GetTransportSocketMatcher(), "no per-connection selection on QUIC: the identity is the cluster's")

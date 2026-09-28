@@ -1061,6 +1061,8 @@ type quicFanout struct {
 	awaitingCert []string
 	pairs        map[quicPair]struct{}
 	mtls         localMTLSState
+	// idleTimeout is every twin's pool idle timeout (aether#1054).
+	idleTimeout time.Duration
 }
 
 // quicFanoutSnapshot takes the fan-out inputs for one snapshot. It also
@@ -1074,7 +1076,7 @@ func (c *SnapshotCache) quicFanoutSnapshot() quicFanout {
 	}
 	identities := c.localWorkloadIdentities()
 	services, pairs := c.quicDemandSnapshot(identities)
-	f := quicFanout{services: services, pairs: pairs}
+	f := quicFanout{services: services, pairs: pairs, idleTimeout: time.Duration(c.quicIdleTimeout.Load())}
 	if len(f.services) == 0 {
 		return f
 	}
@@ -1121,7 +1123,7 @@ func (q quicFanout) twinsFor(entry clusterEntry, arms map[string]string, meshDom
 		if _, observed := q.pairs[quicPair{service: entry.service, source: proxy.SourceSAKeyFromSpiffeID(id)}]; !observed {
 			continue
 		}
-		twins = append(twins, proxy.QUICClusterFrom(entry.cluster, arms[id], id, q.mtls.validationContextName, entry.sanURIs, sni))
+		twins = append(twins, proxy.QUICClusterFrom(entry.cluster, arms[id], id, q.mtls.validationContextName, entry.sanURIs, sni, q.idleTimeout))
 		names = append(names, arms[id])
 	}
 	return twins, names

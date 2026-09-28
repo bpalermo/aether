@@ -20,6 +20,20 @@ import (
 // re-established on the next request.
 const UpstreamIdleTimeout = 30 * time.Second
 
+// DefaultQUICTwinIdleTimeout is the idle timeout of an HTTP/3 twin's pool (the
+// agent's --east-west-quic-idle-timeout; aether#1054). It is shorter than
+// UpstreamIdleTimeout because a source h3 connection must not outlive the
+// destination proxy's hot-restart parent. Once the parent stops reading its
+// UDP sockets, a packet on a connection it owned reaches the child, which
+// answers with a stateless reset the source accepts (the token is derived from
+// the connection ID alone, so both epochs mint the same one). A connection the
+// draining parent answered with GOAWAY (--drain-strategy immediate) leaves the
+// source's pool on its own; an IDLE one receives no GOAWAY, and only this
+// timeout retires it. The chart enforces idle + 5s < parentShutdownTime, so a
+// connection that is idle when the drain starts is closed by the source before
+// the parent exits. h1/h2 pools keep UpstreamIdleTimeout.
+const DefaultQUICTwinIdleTimeout = 8 * time.Second
+
 // Http1ProtocolOptions creates HTTP/1.1 protocol options for upstream clusters.
 // This is used to configure Envoy to communicate with services that only support HTTP/1.1.
 func Http1ProtocolOptions() *httpv3.HttpProtocolOptions {
@@ -55,14 +69,19 @@ func Http2ProtocolOptions() *httpv3.HttpProtocolOptions {
 }
 
 // Http3ProtocolOptions is the HTTP/3 twin of Http2ProtocolOptions for a QUIC
-// upstream (proposal 038 Phase 4b): explicit HTTP/3, same idle timeout. Envoy
+// upstream (proposal 038 Phase 4b): explicit HTTP/3 and the twin idle timeout
+// (idle <= 0 means DefaultQUICTwinIdleTimeout, which says why it is not
+// UpstreamIdleTimeout; aether#1054). Envoy
 // requires the explicit_http_config form for an h3 upstream and rejects a
 // cluster that carries it without a QUIC transport socket, which is what makes
 // the pairing in proxy.QUICClusterFrom checkable by `envoy --mode validate`.
-func Http3ProtocolOptions() *httpv3.HttpProtocolOptions {
+func Http3ProtocolOptions(idle time.Duration) *httpv3.HttpProtocolOptions {
+	if idle <= 0 {
+		idle = DefaultQUICTwinIdleTimeout
+	}
 	return &httpv3.HttpProtocolOptions{
 		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{
-			IdleTimeout: durationpb.New(UpstreamIdleTimeout),
+			IdleTimeout: durationpb.New(idle),
 		},
 		UpstreamProtocolOptions: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_{
 			ExplicitHttpConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig{

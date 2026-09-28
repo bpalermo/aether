@@ -405,6 +405,14 @@ func (c *SnapshotCache) SetQUICPairFetchWindow(d time.Duration) {
 	c.quicFetchWindow = d
 }
 
+// SetQUICIdleTimeout sets the `quic:` twins' pool idle timeout
+// (--east-west-quic-idle-timeout, aether#1054); d <= 0 means
+// config.DefaultQUICTwinIdleTimeout. Boot-time, before the manager starts.
+// h1/h2 clusters keep config.UpstreamIdleTimeout whatever this is.
+func (c *SnapshotCache) SetQUICIdleTimeout(d time.Duration) {
+	c.quicIdleTimeout.Store(int64(d))
+}
+
 // PruneUnfetchedQUICPairs drops the persisted QUIC pairs that have had no
 // on-demand fetch since this agent started, once the fetch window has elapsed
 // (issue #1033). Called from the refresher's prune tick.

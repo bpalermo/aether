@@ -123,6 +123,10 @@ spec:
             {{- range .Values.agent.eastWestQuicServices }}
             - "--east-west-quic-services={{ . }}"
             {{- end }}
+            # #1054: no idle h3 twin connection may outlive a destination's
+            # hot-restart parent; the helper fails the render unless it is 5s
+            # shorter than proxy.hotRestart.parentShutdownTime.
+            - "--east-west-quic-idle-timeout={{ include "aether.agent.eastWestQuicIdleTimeout" . }}"
             {{- if .Values.agent.meshDns }}
             # Gates the agent's PERSIST path only (issue #578): the agent writes the
             # mesh record snapshot but no longer serves DNS — the standalone

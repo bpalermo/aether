@@ -111,14 +111,29 @@ helm_template_test(
     },
 )
 
-# #1050: the hot-restart child must not block on the draining parent's main
-# thread for stats. Envoy's periodic getParentStats is a timeout-less blocking
-# recvmsg, and the parent's UDP forward to the child is a timeout-less blocking
-# sendmsg; together they deadlock both epochs' main threads. The chart passes
-# --skip-hot-restart-parent-stats by default (proxy.hotRestart.skipParentStats).
+# #1050: --skip-hot-restart-parent-stats was the workaround for the hot-restart
+# main-thread deadlock. The carried Envoy patch (#1060) fixes the deadlock, so
+# the chart default is OFF again. rules_helm can only assert presence, so the
+# default pins absence positionally: the last Envoy arg (--drain-strategy's
+# value) is followed directly by the container's `env:`.
+helm_template_test(
+    name = "aether_proxy_skip_parent_stats_off_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--envoy-arg=immediate\"\\n\\s+env:\\n",
+        ],
+    },
+)
+
+# ...and the emergency switch still renders it.
 helm_template_test(
     name = "aether_proxy_skip_parent_stats_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.hotRestart.skipParentStats=true",
+    ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
             "- \"--envoy-arg=--skip-hot-restart-parent-stats\"",
@@ -126,21 +141,102 @@ helm_template_test(
     },
 )
 
-# ...and the knob really turns it off. rules_helm can only assert presence, so
-# this pins absence positionally: with the knob false the last Envoy arg
-# (--service-zone's value) is followed directly by the container's `env:`.
+# #1054: the proxy drains with --drain-strategy immediate by default, so every
+# response after a drain starts carries GOAWAY and a source's h3 pool leaves
+# the hot-restart parent before it exits.
 helm_template_test(
-    name = "aether_proxy_skip_parent_stats_off_test",
+    name = "aether_proxy_drain_strategy_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--envoy-arg=--drain-strategy\"\\n\\s+- \"--envoy-arg=immediate\"",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "aether_proxy_drain_strategy_gradual_test",
     chart = ":aether",
     opts = [
         "--set",
-        "proxy.hotRestart.skipParentStats=false",
+        "proxy.hotRestart.drainStrategy=gradual",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
-            "- \"--envoy-arg=\\$\\(ZONE\\)\"\\n\\s+env:\\n",
+            "- \"--envoy-arg=--drain-strategy\"\\n\\s+- \"--envoy-arg=gradual\"",
         ],
     },
+)
+
+helm_template_fail_test(
+    name = "aether_proxy_drain_strategy_invalid_test",
+    chart = ":aether",
+    expected_message = "proxy.hotRestart.drainStrategy must be immediate or gradual",
+    opts = [
+        "--set",
+        "proxy.hotRestart.drainStrategy=Immediate",
+    ],
+)
+
+# #1054: the h3 twin idle timeout reaches the agent (default 8s)...
+helm_template_test(
+    name = "aether_agent_quic_idle_timeout_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--east-west-quic-idle-timeout=8s\"",
+        ],
+    },
+)
+
+# ...an override is passed through when it still fits...
+helm_template_test(
+    name = "aether_agent_quic_idle_timeout_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "agent.eastWestQuicIdleTimeout=20s",
+        "--set",
+        "proxy.hotRestart.parentShutdownTime=1m",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--east-west-quic-idle-timeout=20s\"",
+        ],
+    },
+)
+
+# ...and the chart refuses idle + 5s >= parentShutdownTime: an idle h3
+# connection would outlive the hot-restart parent (10s + 5s == 15s fails).
+helm_template_fail_test(
+    name = "aether_agent_quic_idle_timeout_too_long_test",
+    chart = ":aether",
+    expected_message = "agent.eastWestQuicIdleTimeout (10s) + 5s must be below proxy.hotRestart.parentShutdownTime (15s)",
+    opts = [
+        "--set",
+        "agent.eastWestQuicIdleTimeout=10s",
+    ],
+)
+
+# The same check holds when the parent-shutdown time is the one that moves.
+helm_template_fail_test(
+    name = "aether_agent_quic_idle_timeout_short_parent_test",
+    chart = ":aether",
+    expected_message = "must be below proxy.hotRestart.parentShutdownTime (12s)",
+    opts = [
+        "--set",
+        "proxy.hotRestart.parentShutdownTime=12s",
+    ],
+)
+
+helm_template_fail_test(
+    name = "aether_agent_quic_idle_timeout_malformed_test",
+    chart = ":aether",
+    expected_message = "agent.eastWestQuicIdleTimeout must be a duration",
+    opts = [
+        "--set",
+        "agent.eastWestQuicIdleTimeout=8",
+    ],
 )
 
 # Proposal 036: the agent brokers per-pod SVIDs over the SPIRE agent's SPIFFE

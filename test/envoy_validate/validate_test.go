@@ -29,6 +29,7 @@ import (
 	"strings"
 	"testing"
 
+	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
@@ -43,6 +44,7 @@ import (
 	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
 	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -1098,6 +1100,53 @@ func TestQUICUpstreamsDoNotPoolPerDownstreamConnection(t *testing.T) {
 	}
 	if len(flagged) != twins {
 		t.Errorf("per-downstream pooling was not reported for every twin: flagged %v of %d", flagged, twins)
+	}
+}
+
+// TestQUICUpstreamsIdleOutBeforeAHotRestartParentExits (aether#1054): every
+// `quic:` twin carries the h3 idle timeout (config.DefaultQUICTwinIdleTimeout,
+// 8s) so an idle source h3 connection is closed before the destination's
+// hot-restart parent exits and its packets start drawing stateless resets;
+// every other cluster that carries HTTP protocol options keeps the 30s
+// config.UpstreamIdleTimeout. Over the generated fixture bytes that Envoy
+// validates, so the value checked is the value Envoy accepted.
+func TestQUICUpstreamsIdleOutBeforeAHotRestartParentExits(t *testing.T) {
+	data, err := QUICOutboundBootstrapJSON()
+	if err != nil {
+		t.Fatalf("QUICOutboundBootstrapJSON: %v", err)
+	}
+	bs := &bootstrapv3.Bootstrap{}
+	if err := protojson.Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	var twins, others int
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		raw, ok := c.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey]
+		if !ok {
+			continue
+		}
+		po := &httpv3.HttpProtocolOptions{}
+		if err := raw.UnmarshalTo(po); err != nil {
+			t.Fatalf("%s: unmarshal protocol options: %v", c.GetName(), err)
+		}
+		idle := po.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration()
+		if strings.HasPrefix(c.GetName(), "quic:") {
+			twins++
+			if idle != config.DefaultQUICTwinIdleTimeout {
+				t.Errorf("%s: h3 twin idle timeout = %v, want %v", c.GetName(), idle, config.DefaultQUICTwinIdleTimeout)
+			}
+			continue
+		}
+		others++
+		if idle != config.UpstreamIdleTimeout {
+			t.Errorf("%s: idle timeout = %v, want %v (only quic: twins are shortened)", c.GetName(), idle, config.UpstreamIdleTimeout)
+		}
+	}
+	if twins < 2 {
+		t.Fatalf("fixture carries %d quic: twins, want >= 2", twins)
+	}
+	if others < 1 {
+		t.Fatalf("fixture carries no non-twin cluster with HTTP protocol options: the 30s half is vacuous")
 	}
 }
 

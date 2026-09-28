@@ -303,7 +303,13 @@ func SourceSAKeyFromSpiffeID(spiffeID string) string {
 // reason to answer (the resource did not change), and the twin sits in warming
 // until its 15 s initial_fetch_timeout while every request from that source is
 // 503/NC. The same mechanism as the SDS outage of #842.
-func QUICClusterFrom(base *clusterv3.Cluster, name, clientSpiffeID, validationContextName string, sanURIs []string, sni string) *clusterv3.Cluster {
+//
+// idleTimeout is the twin pool's idle timeout (the agent's
+// --east-west-quic-idle-timeout; <= 0 means config.DefaultQUICTwinIdleTimeout).
+// It is deliberately shorter than the h2 base's config.UpstreamIdleTimeout so
+// no idle h3 connection outlives a destination's hot-restart parent
+// (aether#1054).
+func QUICClusterFrom(base *clusterv3.Cluster, name, clientSpiffeID, validationContextName string, sanURIs []string, sni string, idleTimeout time.Duration) *clusterv3.Cluster {
 	cl, _ := proto.Clone(base).(*clusterv3.Cluster)
 	cl.Name = name
 	if cl.EdsClusterConfig != nil {
@@ -313,7 +319,7 @@ func QUICClusterFrom(base *clusterv3.Cluster, name, clientSpiffeID, validationCo
 	if cl.TypedExtensionProtocolOptions == nil {
 		cl.TypedExtensionProtocolOptions = map[string]*anypb.Any{}
 	}
-	cl.TypedExtensionProtocolOptions[config.UpstreamHTTPProtocolOptionsKey] = config.TypedConfig(config.Http3ProtocolOptions())
+	cl.TypedExtensionProtocolOptions[config.UpstreamHTTPProtocolOptionsKey] = config.TypedConfig(config.Http3ProtocolOptions(idleTimeout))
 	cl.TransportSocketMatches = nil
 	cl.TransportSocketMatcher = nil
 	cl.TransportSocket = QUICUpstreamTransportSocket(clientSpiffeID, validationContextName, sanURIs, sni)

@@ -952,10 +952,12 @@ calls on each other (parent `sendmsg` forwarding QUIC/UDP to the child, child
 killed both epochs 38 s later. Every new connection to or from that node was dead for
 the whole window, and the prober took 56 errors on it. Mechanism:
 [#1050](https://github.com/bpalermo/aether/issues/1050#issuecomment-5875727632). The
-chart now passes Envoy `--skip-hot-restart-parent-stats`
-(`proxy.hotRestart.skipParentStats`, default true), which removes the child's half of
-the deadlock. These gates are what show it stayed removed. Grade them **per roll**,
-over the proxy DaemonSet's roll windows from `/tmp/soak-churn.log`.
+carried Envoy patch in the aether-proxy image (#1060) removes the deadlock, so the
+chart's workaround, Envoy `--skip-hot-restart-parent-stats`
+(`proxy.hotRestart.skipParentStats`), is off by default again and stays as an emergency
+switch. These gates are what show the deadlock stayed removed with the child merging
+the parent's stats again. Grade them **per roll**, over the proxy DaemonSet's roll
+windows from `/tmp/soak-churn.log`.
 
 **(a) No watchdog kill.** Zero of each, per roll, fleet-wide:
 
@@ -1012,7 +1014,67 @@ e2e/hotrestart-wedge.sh down
 ```
 
 The `SKIP_PARENT_STATS=` field is read from the live Envoy's argv, not from the
-setting, so a red run that says `yes` was not a red run.
+setting, so a red run that says `yes` was not a red run. The red run above predates the
+carried patch: against the chart's current proxy pin, `WEDGE_SKIP_PARENT_STATS=false`
+(now the default) is the green arm.
+
+### The h3 stateless-reset gate (#1054)
+
+A source h3 connection that outlives the destination proxy's hot-restart parent dies on
+a QUIC stateless reset when the parent exits (mechanism in the runbook, "Source h3
+requests die on a stateless reset at a destination's roll"). The chart's
+`proxy.hotRestart.drainStrategy: immediate` and the 8 s `agent.eastWestQuicIdleTimeout`
+on the `quic:` twins remove it. Grade **per proxy roll**, source side, toward the
+rolling node (resolve `upstream_host` as in (b) above):
+
+```
+_stream:{service.name="aether-proxy"} AND log_name:aether_access_logs AND reporter:source
+  AND response_code_details:~"Received_stateless_reset"
+```
+
+must be **0**, and so must the QUIC `503 UC` lines toward the rolling node:
+
+```
+_stream:{service.name="aether-proxy"} AND log_name:aether_access_logs AND reporter:source
+  AND response_code:503 AND response_flags:UC AND upstream_cluster:~"^quic:"
+```
+
+Also report the same query with `PEER_GOING_AWAY` in place of `Received_stateless_reset`:
+a change that only turns one failure into another must not read as a pass.
+
+Do **not** gate on the destination's `quic.dispatcher.stateless_reset_packets_sent`.
+The draining parent also forwards its own time-wait connection IDs to the child, which
+answers them with stateless resets that no live source connection ever sees, so the
+counter is non-zero on a clean roll.
+
+The kind form is `e2e/eastwest-quic-hotrestart.sh` in `HR_MODE=sparse` on two nodes.
+Busy loops never reproduce it (every connection keeps drawing responses and so, sooner
+or later, a GOAWAY); the sparse leg ends its loops at the SIGHUP, sends one request at
+T+2, and bursts at the parent's `shutting down due to child request`:
+
+```bash
+# red: the pre-#1054 settings (HR_QUIC_IDLE is patched past the chart's check)
+EWQ_WORKER=1 HR_DRAIN_STRATEGY=gradual HR_QUIC_IDLE=30s e2e/eastwest-quic-hotrestart.sh up
+EWQ_WORKER=1 HR_MODE=sparse HR_REQUIRE_RESET=1 HR_FREEZE_PARENT_S=4 HR_FREEZE_AT=14 \
+  e2e/eastwest-quic-hotrestart.sh verify
+#   -> STATELESS_RESET=1 over 10 restarts (2026-09-28); unforced: 0 over 10
+# green: the chart defaults. `up` again only upgrades the release.
+EWQ_WORKER=1 EWQ_SKIP_BUILD=1 e2e/eastwest-quic-hotrestart.sh up
+EWQ_WORKER=1 HR_MODE=sparse e2e/eastwest-quic-hotrestart.sh verify
+#   -> STATELESS_RESET=0 PEER_GOING_AWAY=0 CLIENT_NON200=0 over 10
+EWQ_WORKER=1 HR_MODE=sparse HR_FREEZE_PARENT_S=4 HR_FREEZE_AT=14 e2e/eastwest-quic-hotrestart.sh verify
+#   -> STATELESS_RESET=0 PEER_GOING_AWAY=0 HUNG=0 over 10 (4 freeze handshake timeouts each)
+e2e/eastwest-quic-hotrestart.sh down
+```
+
+Kind reproduces the race weakly. Unforced, the window is the few milliseconds between
+the child unpausing its inherited UDP listeners and the parent's workers stopping, and
+the red arm saw no reset in 10 restarts. `HR_FREEZE_PARENT_S` holds that window open
+by stopping the parent just before the child's parent-shutdown timer fires; even then
+the red arm produced 1 reset in 10. Its `503 URX,UF … QUIC_NETWORK_IDLE_TIMEOUT` lines
+are new handshakes that cannot complete while the parent is stopped and the child is
+still paused: an artifact of the freeze, present in both arms, and not gated. The
+soak gate above is the real evidence.
 
 ## Hard-won gotchas
 
