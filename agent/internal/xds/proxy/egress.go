@@ -127,10 +127,16 @@ func UDPClusterName(serviceName, meshDomain string) string {
 // sanitized form keeps the config and the label identical. It is unambiguous:
 // namespaces and service names are DNS labels and cannot contain "_".
 //
-// There is no "tls_" key: a TLSRoute SNI chain routes to its backends' tcp:
-// floor clusters (L4Backend.Cluster is a TCPClusterName), so its connections
-// report under those clusters' tcp_ keys. The chain itself is told apart by
-// the L4 access log's filter_chain_name (cap_tls_*).
+// There is no "tls_" key: a TLSRoute SNI chain routes to its backends'
+// PORT-QUALIFIED tcp: clusters, "tcp:<fqdn>:<port>" -- the per-port cluster, or
+// the primary-port alias when the backendRef names the primary port -- because
+// l4route resolves every backendRef through TCPPortClusterName, and Gateway
+// API's CRD validation requires a port on a Service backendRef ("Must have
+// port for Service reference"). So its connections report under
+// tcp_<ns>/<svc>_<port>, not the floor's tcp_<ns>/<svc> (aether#1044; kind:
+// upstream_cluster=tcp_aether-test/l4tls-a_9443). Only a portless ref, which
+// that validation rejects, would fall back to the floor. The chain itself is
+// told apart by the L4 access log's filter_chain_name (cap_tls_*).
 //
 // Cardinality: one key per CLUSTER, never per endpoint or per source --
 // bounded by services x raw-TCP ports, the same set the cluster names already

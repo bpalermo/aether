@@ -794,8 +794,77 @@ else
 	fi
 fi
 
-if [ "$n" -ne 40 ]; then
-	echo "::error::ran ${n} cases, expected 40 -- a gate that checks nothing passes" >&2
+# --- 7. the sign step's commit-tag lookup (#1046) ----------------------------
+# The sign step in .github/workflows/publish.yaml resolves `<tag>-<sha>` with
+# registry_commit_tag under `set -euo pipefail`. Case 7a pins the defect it
+# replaced: the inline `grep | head` ended the step with NO output on a miss, so
+# its own error line was unreachable (publish run 36417203322). If 7a ever stops
+# reproducing, 7b could pass vacuously. 7b: a miss prints the ::error:: line with
+# the scan size and exits 1. 7c: a tag the listing only shows on the second
+# read (the push lagging the listing) is found by the retry.
+REGISTRY_HOST=ghcr.io
+commit="$(printf 'c%.0s' {1..40})"
+sign_step() { # the step's shape, in a fresh errexit shell
+	(
+		set -euo pipefail
+		if ! tag="$(registry_commit_tag "$repo" fake "$commit")"; then
+			exit 1
+		fi
+		echo "TAG=${tag}"
+	)
+}
+
+reset_registry
+echo 10 >"$FAKE/pagesize"
+printf '%s\n' dev dev-aaaa dev-bbbb >"$FAKE/tags"
+out="$( (
+	set -euo pipefail
+	tags="$(registry_all_tags "$repo" fake)"
+	tag="$(printf '%s\n' "$tags" | grep -E -- "-${commit}$" | head -1)"
+	if [ -z "$tag" ]; then
+		echo "::error::no tag ending in -${commit}"
+		exit 1
+	fi
+) 2>&1)"
+rc=$?
+if [ "$rc" = 1 ] && [ -z "$out" ]; then
+	ok "OLD sign-step lookup (grep | head under set -euo pipefail) exits 1 with NO output on a miss — its error line is unreachable (#1046)"
+else
+	bad "OLD sign-step lookup: rc ${rc}, output '${out}' — the fake no longer reproduces #1046's silent exit, so 7b could pass vacuously"
+fi
+
+reset_registry
+echo 10 >"$FAKE/pagesize"
+printf '%s\n' dev dev-aaaa dev-bbbb >"$FAKE/tags"
+out="$(REGISTRY_COMMIT_TAG_ATTEMPTS=3 REGISTRY_COMMIT_TAG_INTERVAL=0 sign_step 2>&1)"
+rc=$?
+n_miss="$(grep -cF "no tag ending in -${commit} in ${repo} yet (scanned 3 tags" <<<"$out" || true)"
+if [ "$rc" = 1 ] && [ "$n_miss" = 2 ] &&
+	grep -qxF "::error::no tag ending in -${commit} in ${repo} (scanned 3 tags); still absent after 3 listing(s) 0s apart -- refusing to sign a tag that is not this commit" <<<"$out" &&
+	! grep -q '^TAG=' <<<"$out"; then
+	ok "NEW sign-step lookup: no matching tag -> every miss printed with its scan size, then the ::error:: line and exit 1 (not silent)"
+else
+	bad "NEW sign-step lookup on a miss: rc ${rc} (want 1), ${n_miss} progress line(s) (want 2), output:"
+	printf '%s\n' "$out" | sed 's/^/        | /'
+fi
+
+reset_registry
+echo 10 >"$FAKE/pagesize"
+printf '%s\n' dev dev-aaaa dev-bbbb >"$FAKE/tags"
+printf '%s\n' dev dev-aaaa dev-bbbb "dev-${commit}" >"$FAKE/after_page1"
+out="$(REGISTRY_COMMIT_TAG_ATTEMPTS=3 REGISTRY_COMMIT_TAG_INTERVAL=0 sign_step 2>&1)"
+rc=$?
+if [ "$rc" = 0 ] && grep -qxF "TAG=dev-${commit}" <<<"$out" &&
+	grep -qF "yet (scanned 3 tags, listing 1/3)" <<<"$out" &&
+	grep -qxF "resolved ${repo}: dev-${commit} (scanned 4 tags, listing 2/3)" <<<"$out"; then
+	ok "NEW sign-step lookup: a tag the listing shows only on the second read (lagging the push) is found by the retry"
+else
+	bad "NEW sign-step lookup with a lagging listing: rc ${rc} (want 0), output:"
+	printf '%s\n' "$out" | sed 's/^/        | /'
+fi
+
+if [ "$n" -ne 43 ]; then
+	echo "::error::ran ${n} cases, expected 43 -- a gate that checks nothing passes" >&2
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then

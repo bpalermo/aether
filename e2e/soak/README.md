@@ -601,7 +601,8 @@ L4 cluster has its own `aether_cluster` key (`tcp_<ns>/<svc>` for the floor,
 `tcp_<ns>/<svc>_<port>` per port; `docs/runbook.md`, "L4 stat keys and the L4 access
 log"), so this counts L4 clusters only. Before it, `aether-test/mixed-svc` also carried
 the HTTP cluster's rejections. `udp_` keys carry no TLS and are left out. There is no
-`tls_` key: TLSRoute chains count under their backends' `tcp_` keys.
+`tls_` key: TLSRoute chains count under their backends' per-port
+`tcp_<ns>/<svc>_<port>` keys, never the floor's (#1044).
 
 ```promql
 # Per minute. A non-zero minute outside a proxy/agent roll bracket is a FAIL.

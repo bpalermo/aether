@@ -248,22 +248,26 @@ jobs:
 
             # The commit-suffixed tag (`<tag>-<full sha>`) is the only immutable
             # one -- `dev` is rewritten by every publish (#692).
-            tags="$(registry_all_tags "$repo" "$tok")"
-            n_tags="$(printf '%s\n' "$tags" | grep -c . || true)"
-            tag="$(printf '%s\n' "$tags" | grep -E -- "-${COMMIT}$" | head -1)"
-            if [ -z "$tag" ]; then
-              # Report the scan size. "not found in 667" is a real absence;
-              # "not found in 100" means the pagination regressed, and the two
-              # must never look the same again.
-              echo "::error::no tag ending in -${COMMIT} in ${repo} (scanned ${n_tags} tags); refusing to sign a tag that is not this commit"
+            #
+            # registry_commit_tag re-lists for ~60 s, since this job pushed the
+            # tag seconds ago and the listing can lag the push, and prints every
+            # miss with its scan size. On a final miss it prints the
+            # "::error::no tag ending in -<sha> in <repo> (scanned N tags)" line
+            # and returns 1. It replaced an inline `grep | head` that, under
+            # `set -euo pipefail`, ended this step with NO output when nothing
+            # matched -- before the error line meant to explain it (#1046).
+            if ! tag="$(registry_commit_tag "$repo" "$tok" "$COMMIT")"; then
               exit 1
             fi
-            echo "resolved ${repo}: ${tag} (scanned ${n_tags} tags)"
 
             # Resolve each image's INDEX DIGEST rather than signing a tag. Signing
             # a tag re-resolves it inside cosign, which is a TOCTOU window against
             # a mutable tag; the digest is what was actually published.
-            digest="$(registry_manifest_digest "$repo" "$tag" "$tok")"
+            #
+            # `|| true`: the helper is a `curl -f | tr | sed | head` pipeline, so
+            # under pipefail a failed HEAD would end the step here, before the
+            # error line below that names the reference (#1046).
+            digest="$(registry_manifest_digest "$repo" "$tag" "$tok" || true)"
             if [ -z "$digest" ]; then
               echo "::error::could not resolve a digest for ${REGISTRY_HOST}/${repo}:${tag}"
               exit 1
