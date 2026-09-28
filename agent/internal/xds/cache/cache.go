@@ -269,12 +269,24 @@ type SnapshotCache struct {
 	// per service. Guarded by depMu.
 	udsServicePolicies map[string]string
 	// quicServices is the east-west QUIC allow-list (proposal 038 Phase 4b,
-	// --east-west-quic-services): "<ns>/<svc>" destinations that get one
-	// per-source `quic:` cluster per local ServiceAccount and a source-selecting
-	// route. Guarded by depMu; a listed service is forced into the dependency
+	// --east-west-quic-services): "<ns>/<svc>" destinations whose routes select
+	// a per-source `quic:` cluster, built for each observed pair (quicPairs).
+	// Guarded by depMu; a listed service is forced into the dependency
 	// set (populateStaticDepsLocked) because the QUIC clusters clone the h2
 	// entry and a destination outside the set has no entry to clone.
 	quicServices map[string]struct{}
+	// quicPairs is the OBSERVED east-west QUIC demand (issue #1020): the
+	// (destination, source ServiceAccount) pairs whose `quic:` twin the node
+	// proxy asked for on demand, valued with when each was first recorded. A
+	// twin is built only for these. No idle TTL (the proxy never says a twin
+	// went idle); pruned when the source leaves the node or the destination
+	// leaves the allow-list / dependency set (pruneQUICPairsLocked). Guarded
+	// by depMu; persisted with observedDeps.
+	quicPairs map[quicPair]time.Time
+	// localPodsSynced is set once LoadListenersFromStorage has merged the
+	// node's pod records: only then is "no local pod of this ServiceAccount"
+	// evidence that a persisted QUIC pair's source left. Guarded by depMu.
+	localPodsSynced bool
 	// quicBudgetSeen/quicBudgetMu: the QUIC twin count last logged, so the
 	// fan-out is announced on change rather than on every snapshot.
 	quicBudgetMu   sync.Mutex
@@ -677,6 +689,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		localWorkloads:     make(map[string]string),
 		podDeps:            make(map[string]podDependencies),
 		observedDeps:       make(map[string]time.Time),
+		quicPairs:          make(map[quicPair]time.Time),
 		onDemandSubs:       make(map[int64]map[string]string),
 		staticDeps:         make(map[string]struct{}),
 		serviceRoutes:      make(map[string][]proxy.GammaRoute),
@@ -732,14 +745,16 @@ func (c *SnapshotCache) MeshDomain() string {
 // endpoints. Off by default; must be called before the manager starts (read
 // without locking on every cluster build).
 // SetEastWestQUICServices replaces the east-west QUIC allow-list (proposal 038
-// Phase 4b): the "<ns>/<svc>" destinations whose default cluster gets a
-// per-source HTTP/3 twin for every local ServiceAccount, selected per request
-// by the source identity. Everything else stays h2, byte-identical.
+// Phase 4b): the "<ns>/<svc>" destinations whose routes select a per-source
+// HTTP/3 twin by the source identity. Everything else stays h2, byte-identical.
 //
-// The fan-out is the cost to watch: local ServiceAccounts x listed services
-// clusters, each a clone of the h2 entry on its OWN EDS resource name, with the
-// h2 entry's load assignment republished under that name (aether#1008).
-// The count is logged at INFO whenever it changes.
+// Twins are demand-scoped (issue #1020): one per (source ServiceAccount,
+// listed destination) pair that has dialled, fetched on its first request
+// over ODCDS (ObserveQUICTwin) -- not local ServiceAccounts x listed services
+// up front. Each is a clone of the h2 entry on its OWN EDS resource name, with
+// the h2 entry's load assignment republished under that name (aether#1008).
+// The count is logged at INFO whenever it changes. Delisting a destination
+// prunes its pairs.
 func (c *SnapshotCache) SetEastWestQUICServices(services []string) {
 	set := make(map[string]struct{}, len(services))
 	for _, svc := range services {

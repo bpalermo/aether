@@ -488,9 +488,10 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache.SetCaptureRedirectAll(true)
 	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
 	// East-west QUIC (proposal 038 Phase 4b): opt-in per destination. The
-	// listed services are forced into the dependency set and each gets one
-	// HTTP/3 twin per local ServiceAccount, selected per request by the source
-	// identity; unlisted destinations are byte-identical to before.
+	// listed services are forced into the dependency set and each gets an
+	// HTTP/3 twin per (local ServiceAccount) that has dialled it -- fetched on
+	// the pair's first request over ODCDS (#1020) -- selected per request by
+	// the source identity; unlisted destinations are byte-identical to before.
 	snapshotCache.SetEastWestQUICServices(cfg.EastWestQUICServices)
 	// Persist the OBSERVED half of the demand set beside the CNI pod records
 	// and restore it now, before the first snapshot, so a full agent+proxy

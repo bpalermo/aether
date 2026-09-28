@@ -153,6 +153,15 @@ func (cp *adsControlPlane) rotateSecrets(t *testing.T, version string, secrets [
 // this shape shows it.
 func startADSControlPlane(t *testing.T, resources map[resourcev3.Type][]types.Resource) *adsControlPlane {
 	t.Helper()
+	return startADSControlPlaneWithHook(t, resources, nil)
+}
+
+// startADSControlPlaneWithHook is startADSControlPlane plus onDelta, called
+// with every delta request BEFORE the server processes it -- where the node
+// agent's on-demand observer sits (agent/internal/xds/server/odcds.go). nil
+// is no hook.
+func startADSControlPlaneWithHook(t *testing.T, resources map[resourcev3.Type][]types.Resource, onDelta func(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest)) *adsControlPlane {
+	t.Helper()
 
 	snapshot, err := cachev3.NewSnapshot("1", resources)
 	if err != nil {
@@ -178,7 +187,7 @@ func startADSControlPlane(t *testing.T, resources map[resourcev3.Type][]types.Re
 		t.Fatalf("listen on %s: %v", socketPath, err)
 	}
 	gs := grpc.NewServer()
-	srv := serverv3.NewServer(context.Background(), cache, xdsTrace(t))
+	srv := serverv3.NewServer(context.Background(), cache, xdsTrace(t, onDelta))
 	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(gs, srv)
 	// The node agent registers the per-type services alongside ADS on the same
 	// socket (common/xds/xds.go), and the certificate selector's own
@@ -200,14 +209,17 @@ func startADSControlPlane(t *testing.T, resources map[resourcev3.Type][]types.Re
 // outage was the first: the subscription was deduplicated away inside Envoy and
 // no request was ever sent, which no amount of control-plane logging would have
 // shown.
-func xdsTrace(t *testing.T) serverv3.Callbacks {
+func xdsTrace(t *testing.T, onDelta func(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest)) serverv3.Callbacks {
 	// Secrets (#842) and load assignments (#1008): the two resource types a
 	// delta WatchMap has been caught deduplicating away.
 	secretsOnly := func(typeURL string) bool {
 		return strings.HasSuffix(typeURL, "v3.Secret") || strings.HasSuffix(typeURL, "v3.ClusterLoadAssignment")
 	}
 	return &serverv3.CallbackFuncs{
-		StreamDeltaRequestFunc: func(_ int64, req *discoverygrpc.DeltaDiscoveryRequest) error {
+		StreamDeltaRequestFunc: func(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest) error {
+			if onDelta != nil {
+				onDelta(streamID, req)
+			}
 			if secretsOnly(req.GetTypeUrl()) {
 				t.Logf("[ads-delta]  SUBSCRIBE add=%v remove=%v nonce=%q",
 					req.GetResourceNamesSubscribe(), req.GetResourceNamesUnsubscribe(), req.GetResponseNonce())

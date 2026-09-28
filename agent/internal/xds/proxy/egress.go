@@ -115,7 +115,42 @@ func UDPClusterName(serviceName, meshDomain string) string {
 // the name unique per source identity; the prefix keeps it out of every
 // ODCDS/authority namespace (a client can never dial a "quic:" authority).
 func QUICClusterName(serviceName, meshDomain, sourceSAKey string) string {
-	return "quic:" + ServiceClusterName(serviceName, meshDomain) + "@" + sourceSAKey
+	return quicClusterPrefix + ServiceClusterName(serviceName, meshDomain) + "@" + sourceSAKey
+}
+
+// quicClusterPrefix is the prefix every `quic:` twin name carries.
+const quicClusterPrefix = "quic:"
+
+// IsQUICClusterName reports whether name is shaped like a `quic:` twin name.
+// It does not validate the name; ParseQUICClusterName does.
+func IsQUICClusterName(name string) bool {
+	return strings.HasPrefix(name, quicClusterPrefix)
+}
+
+// ParseQUICClusterName is the inverse of QUICClusterName: it splits a twin name
+// into the destination's "<ns>/<svc>" service key and the source's "<ns>/<sa>"
+// key. ok is false unless name is exactly what QUICClusterName produces for
+// them. The on-demand CDS path (issue #1020) validates a requested name with
+// it before building a twin, so a name with a port, a foreign domain, an extra
+// label or an extra path segment is refused.
+func ParseQUICClusterName(name, meshDomain string) (service, sourceSAKey string, ok bool) {
+	rest, found := strings.CutPrefix(name, quicClusterPrefix)
+	if !found {
+		return "", "", false
+	}
+	authority, source, found := strings.Cut(rest, "@")
+	if !found {
+		return "", "", false
+	}
+	service, ok = ServiceFromClusterName(authority, meshDomain)
+	if !ok || ServiceClusterName(service, meshDomain) != authority {
+		return "", "", false
+	}
+	ns, sa, found := strings.Cut(source, "/")
+	if !found || ns == "" || sa == "" || strings.ContainsAny(sa, "/@") || strings.Contains(ns, "@") {
+		return "", "", false
+	}
+	return service, source, true
 }
 
 // QUICServerName is the SNI a `quic:` cluster presents and the server_names

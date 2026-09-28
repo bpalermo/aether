@@ -20,6 +20,7 @@ package envoy_validate
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -235,8 +236,12 @@ func QUICOutboundBootstrapJSON() ([]byte, error) {
 }
 
 const (
-	quicSourceA   = "spiffe://" + trustDomain + "/ns/demo/sa/source-a"
-	quicSourceB   = "spiffe://" + trustDomain + "/ns/demo/sa/source-b"
+	quicSourceA = "spiffe://" + trustDomain + "/ns/demo/sa/source-a"
+	quicSourceB = "spiffe://" + trustDomain + "/ns/demo/sa/source-b"
+	// quicSourceC is a local ServiceAccount that has NOT dialled the
+	// destination (aether#1020): its arm is on the route, its twin is not
+	// built -- the on_demand filter fetches it on first use.
+	quicSourceC   = "spiffe://" + trustDomain + "/ns/demo/sa/source-c"
 	quicDestSvc   = "demo/echo"
 	quicDestSA    = "spiffe://" + trustDomain + "/ns/demo/sa/echo"
 	quicDestPort  = "8080"
@@ -251,6 +256,15 @@ func QUICOutboundArms() map[string]string {
 		quicSourceA: proxy.QUICClusterName(quicDestSvc, meshDomain, proxy.SourceSAKeyFromSpiffeID(quicSourceA)),
 		quicSourceB: proxy.QUICClusterName(quicDestSvc, meshDomain, proxy.SourceSAKeyFromSpiffeID(quicSourceB)),
 		"":          fqdn, // on_no_match: the h2 cluster
+	}
+}
+
+// QUICOutboundUnobservedArms is the arm the fixture route carries for a
+// local source whose (source, destination) pair has not been observed
+// (aether#1020): it names a twin the fixture deliberately does NOT build.
+func QUICOutboundUnobservedArms() map[string]string {
+	return map[string]string{
+		quicSourceC: proxy.QUICClusterName(quicDestSvc, meshDomain, proxy.SourceSAKeyFromSpiffeID(quicSourceC)),
 	}
 }
 
@@ -269,8 +283,14 @@ func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 		twins = append(twins, proxy.QUICClusterFrom(base, arms[id], id, "spiffe://"+trustDomain, []string{quicDestSA}, proxy.QUICServerName(quicDestPort, fqdn)))
 	}
 
+	// Demand-scoped twins (aether#1020): the route carries an arm for EVERY
+	// local source, the snapshot a twin only for the observed pairs (a, b).
+	// Source c's arm names a cluster that is not here, which is how its first
+	// request reaches ODCDS; validation must accept that shape.
+	selection := maps.Clone(arms)
+	maps.Copy(selection, QUICOutboundUnobservedArms())
 	vh := proxy.BuildOutboundClusterVirtualHost(fqdn, []string{fqdn})
-	if n := proxy.ApplyQUICClusterSelection(vh, fqdn, arms); n != 1 {
+	if n := proxy.ApplyQUICClusterSelection(vh, fqdn, selection); n != 1 {
 		return nil, fmt.Errorf("ApplyQUICClusterSelection rewrote %d routes, want 1", n)
 	}
 	rc := &routev3.RouteConfiguration{Name: quicRouteName, VirtualHosts: []*routev3.VirtualHost{vh}}
@@ -278,7 +298,10 @@ func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 	hcm := &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix:     "quic_out",
 		RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{RouteConfig: rc},
-		HttpFilters: []*http_connection_managerv3.HttpFilter{{
+		// Production's on_demand filter ahead of the router, as on every
+		// node-proxy HCM: it is what turns an arm naming an unbuilt twin into
+		// an ODCDS request instead of a 503 (aether#1020).
+		HttpFilters: []*http_connection_managerv3.HttpFilter{proxy.OnDemandHTTPFilter(), {
 			Name:       "envoy.filters.http.router",
 			ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{TypedConfig: mustAny(&routerv3.Router{})},
 		}},

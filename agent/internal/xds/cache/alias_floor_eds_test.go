@@ -249,6 +249,8 @@ func TestNoNonDefaultClusterSharesTheBareServiceEDSName(t *testing.T) {
 		},
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	// Twins are demand-scoped (aether#1020): both sources have dialled echo.
+	observeQUIC(t, c, "demo/echo", "demo/source-a", "demo/source-b")
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
 

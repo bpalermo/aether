@@ -1226,6 +1226,19 @@ func TestQUICOutboundFixtureCarriesTheSelection(t *testing.T) {
 								t.Errorf("arm %s = %q, want %q", id, arms[id], name)
 							}
 						}
+						// Demand-scoped twins (aether#1020): an unobserved
+						// source keeps its arm, and its twin is NOT built.
+						for id, name := range QUICOutboundUnobservedArms() {
+							if arms[id] != name {
+								t.Errorf("unobserved arm %s = %q, want %q", id, arms[id], name)
+							}
+							if quicClusters[name] {
+								t.Errorf("twin %q for an unobserved pair is built; it must be fetched on demand", name)
+							}
+						}
+						if n := len(hcm.GetHttpFilters()); n < 2 || hcm.GetHttpFilters()[0].GetName() != "envoy.filters.http.on_demand" {
+							t.Errorf("the selecting HCM must run the on_demand filter first (an arm to an unbuilt twin 503s without it): %v", hcm.GetHttpFilters())
+						}
 						if r.GetRoute().GetEarlyDataPolicy() != nil {
 							t.Errorf("route to a quic: cluster sets early_data_policy (038 R4)")
 						}
