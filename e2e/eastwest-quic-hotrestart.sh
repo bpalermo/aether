@@ -30,14 +30,74 @@
 # A run that saw zero DC lines passes H2 vacuously and says so: the race is
 # timing-dependent. HR_REQUIRE_DC=1 turns that into a failure.
 #
+# HR_MODE=sparse is a different leg, for aether#1054: a SOURCE h3 connection
+# that outlives the DESTINATION proxy's hot-restart parent. When the parent
+# exits, the connection's next packet reaches the child, which answers with a
+# QUIC stateless reset the source accepts (the token is derived from the
+# connection ID alone), and the request in flight fails `503 UC ...
+# Received_stateless_reset`. Busy loops do not reproduce it: every connection
+# keeps drawing responses and so, sooner or later in the drain, a GOAWAY. The
+# sparse shape leaves a connection that is open but quiet when the parent
+# exits:
+#
+#   S0  the chart as rendered: the live Envoy's --drain-strategy (destination
+#       node) and the idle_timeout on the source's quic: twins (config_dump)
+#   S1  per restart (HR_RESTARTS, default 10): HR_PRE s of light loops from
+#       both sources to the h3 destinations, which END at the SIGHUP (so every
+#       pair has a live h3 connection to the parent); SIGHUP the DESTINATION
+#       node's supervisor; ONE request per (source, h3 destination) at T+2;
+#       wait for the parent's `shutting down due to child request` log line;
+#       then a burst of HR_BURST requests per source at concurrency
+#       HR_BURST_C, spanning the parent's exit
+#   S2  per restart, count the SOURCE-reporter access-log lines of that
+#       restart whose response_code_details carry Received_stateless_reset,
+#       and those carrying PEER_GOING_AWAY (so a fix that only changes the
+#       error's flavour cannot pass), plus client-side non-200s
+#
+# Unforced, the window is the few milliseconds between the child unpausing its
+# inherited UDP listeners (just before it sends Terminate) and the parent's
+# workers stopping, and after drainTime a gradual drain GOAWAYs every response,
+# so only the FIRST request on a connection left idle since T+2 can land in it.
+# HR_FREEZE_PARENT_S=N (a forced-fault probe, like hotrestart-wedge.sh's
+# WEDGE_FREEZE_S) holds that window open: SIGSTOP the parent at T+HR_FREEZE_AT
+# (default 13, before the child's parent-shutdown timer), burst into the
+# freeze, SIGCONT after N s. The burst's packets on connections the parent
+# still owns are then read by the child, exactly the production race.
+#
+# It needs EWQ_WORKER=1 at `up` (destinations on a worker node, sources on the
+# control plane): on one node the source and destination are the same Envoy,
+# whose client connections die with the parent, so the stateless reset cannot
+# happen there. Green is 0 of each on every restart; HR_REQUIRE_RESET=1 makes a
+# run that saw no stateless reset fail instead (the red arm's assertion).
+#
+# Red/green (#1054, e2e/soak/README.md):
+#   red    HR_DRAIN_STRATEGY=gradual HR_QUIC_IDLE=30s EWQ_WORKER=1 ... up
+#          HR_MODE=sparse HR_REQUIRE_RESET=1 HR_FREEZE_PARENT_S=4 HR_FREEZE_AT=14 ... verify
+#   green  EWQ_WORKER=1 ... up          (chart defaults: immediate, 8s)
+#          HR_MODE=sparse ... verify    (and again with the freeze)
+# On kind (2026-09-28) red saw 0 resets in 10 restarts unforced and 1 in 10
+# forced; green saw 0 in 10 both ways. The race is real but rare on two
+# kind nodes; the soak gate is the evidence that counts.
+#
 # Usage: e2e/eastwest-quic-hotrestart.sh {up|verify|down}   (bare = up + verify)
-# Env: HR_RESTARTS (default 6), HR_SECONDS (loop length, default covers the
-#      restarts), HR_RATE (per-loop requests/s, default 5), HR_LOOPS (loops per
-#      destination, default 16), HR_SAMPLE (success sample %, default 2; set at
-#      `up` only), HR_SKIP_PARENT_STATS (proxy.hotRestart.skipParentStats,
-#      default true; set at `up` only), plus everything e2e/eastwest-quic.sh
-#      reads.
+# Env: HR_MODE (dc: the #1009 leg above, the default; sparse: #1054),
+#      HR_RESTARTS (default 6; 10 in sparse mode), HR_SECONDS (loop length,
+#      default covers the restarts), HR_RATE (per-loop requests/s, default 5),
+#      HR_LOOPS (loops per destination, default 16), HR_PRE (sparse pre-roll
+#      seconds, default 6), HR_BURST (sparse burst requests per source, default
+#      200), HR_BURST_C (sparse burst concurrency, default 20),
+#      HR_FREEZE_PARENT_S / HR_FREEZE_AT (sparse forced fault, default off / 13);
+#      HR_TRACE=1 (set -x); set at `up`
+#      only: HR_SAMPLE (success sample %, default 2), HR_SKIP_PARENT_STATS
+#      (proxy.hotRestart.skipParentStats, default false: the chart default
+#      since #1060), HR_DRAIN_STRATEGY (proxy.hotRestart.drainStrategy; unset =
+#      the chart default), HR_QUIC_IDLE (the agent's
+#      --east-west-quic-idle-timeout, patched onto the DaemonSet AFTER the
+#      install, so it bypasses the chart's idle + 5s < parentShutdownTime
+#      check: the red arm's pre-#1054 30s only), plus everything
+#      e2e/eastwest-quic.sh reads.
 set -euo pipefail
+if [ -n "${HR_TRACE:-}" ]; then set -x; fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export EWQ_CLUSTER="${EWQ_CLUSTER:-eastwest-quic-hr}"
@@ -59,15 +119,26 @@ EWQ_EXTRA_HELM_ARGS=(
 	--set "cniInstall.otlpEndpoint=$COLLECTOR_ENDPOINT"
 	--set meshConfig.proxy.accessLogsEnabled=true
 	--set "meshConfig.proxy.accessLogSuccessSampleRate=${HR_SAMPLE:-2}"
-	# The #1050 mitigation (Envoy --skip-hot-restart-parent-stats). Chart default
-	# is true; e2e/hotrestart-wedge.sh sets false for its red arm.
-	--set "proxy.hotRestart.skipParentStats=${HR_SKIP_PARENT_STATS:-true}"
+	# The #1050 workaround (Envoy --skip-hot-restart-parent-stats). Chart default
+	# is false since the carried Envoy patch (#1060) fixed the deadlock.
+	--set "proxy.hotRestart.skipParentStats=${HR_SKIP_PARENT_STATS:-false}"
 )
+# #1054's red arm: the pre-fix drain strategy.
+if [ -n "${HR_DRAIN_STRATEGY:-}" ]; then
+	EWQ_EXTRA_HELM_ARGS+=(--set "proxy.hotRestart.drainStrategy=$HR_DRAIN_STRATEGY")
+fi
 
 # shellcheck source=e2e/eastwest-quic.sh
 . "$HERE/eastwest-quic.sh"
 
+HR_MODE="${HR_MODE:-dc}"
+if [ "$HR_MODE" = sparse ]; then HR_RESTARTS="${HR_RESTARTS:-10}"; fi
 HR_RESTARTS="${HR_RESTARTS:-6}"
+HR_PRE="${HR_PRE:-6}"
+HR_BURST="${HR_BURST:-200}"
+HR_BURST_C="${HR_BURST_C:-20}"
+HR_FREEZE_PARENT_S="${HR_FREEZE_PARENT_S:-0}"
+HR_FREEZE_AT="${HR_FREEZE_AT:-13}"
 # Long enough for every restart: 10 s lead-in, 24 s per restart, 10 s tail.
 HR_SECONDS="${HR_SECONDS:-$((20 + HR_RESTARTS * 24))}"
 HR_RATE="${HR_RATE:-5}"
@@ -134,32 +205,36 @@ YAML
 	ok "collector up"
 }
 
-# supervisor_pid — the aether-proxy supervisor's PID as the kind node sees it.
-# Matched on argv[0] EXACTLY, so the scanning shell (argv[0] "sh") never matches
-# itself.
+# supervisor_pid [NODE] — the aether-proxy supervisor's PID as the kind node
+# sees it (default $NODE). Matched on argv[0] EXACTLY, so the scanning shell
+# (argv[0] "sh") never matches itself.
 supervisor_pid() {
 	# shellcheck disable=SC2016  # evaluated by the node's shell
-	docker exec "$NODE" sh -c '
+	docker exec "${1:-$NODE}" sh -c '
 		for p in /proc/[0-9]*; do
-			a0=$(tr "\0" "\n" <"$p/cmdline" 2>/dev/null | head -n 1)
+			a0=$({ tr "\0" "\n" <"$p/cmdline"; } 2>/dev/null | head -n 1)
 			if [ "$a0" = /opt/aether/supervisor ]; then echo "${p#/proc/}"; fi
 		done; exit 0' | head -n 1
 }
 
+# admin_on NODE PATH — admin() against a given kind node's proxy.
+admin_on() { docker exec "$1" curl -s --max-time 5 "http://127.0.0.1:9901$2"; }
+
 restart_epoch() {
-	admin /server_info 2>/dev/null | tr -d ' \n' | { grep -o '"restart_epoch":[0-9]*' || true; } | cut -d: -f2
+	admin_on "${1:-$NODE}" /server_info 2>/dev/null | tr -d ' \n' | { grep -o '"restart_epoch":[0-9]*' || true; } | cut -d: -f2
 }
 
-# hot_restart — ask the supervisor for a hot restart the way it is asked in
-# production (SIGHUP == a watched-config change) and wait for the new epoch.
+# hot_restart [NODE] — ask NODE's supervisor (default $NODE) for a hot restart
+# the way it is asked in production (SIGHUP == a watched-config change) and
+# wait for the new epoch.
 hot_restart() {
-	local pid before after i
-	pid="$(supervisor_pid)"
-	[ -n "$pid" ] || die "no /opt/aether/supervisor process on $NODE"
-	before="$(restart_epoch)"
-	docker exec "$NODE" kill -HUP "$pid" || die "could not SIGHUP the supervisor (pid $pid)"
+	local node="${1:-$NODE}" pid before after i
+	pid="$(supervisor_pid "$node")"
+	[ -n "$pid" ] || die "no /opt/aether/supervisor process on $node"
+	before="$(restart_epoch "$node")"
+	docker exec "$node" kill -HUP "$pid" || die "could not SIGHUP the supervisor (pid $pid)"
 	for i in $(seq 1 60); do
-		after="$(restart_epoch)"
+		after="$(restart_epoch "$node")"
 		if [ -n "$after" ] && [ -n "$before" ] && [ "$after" -gt "$before" ]; then
 			ok "hot restart: epoch $before -> $after ($(date -u +%H:%M:%SZ))"
 			return 0
@@ -193,16 +268,16 @@ loop_on() {
 }
 
 # records — the collector's access-log records as TSV, source reporter and this
-# leg's loops only (user agent aether-hr-<dst>-<n>):
+# leg's loops only (user agent aether-hr-<dst>-<n>, or aether-hr-sparse-<i>-...):
 # authority, response_code, response_flags, response_code_details, bytes_sent,
-# upstream_rx_ms, downstream_tx_end_ms, protocol, start_time.
+# upstream_rx_ms, downstream_tx_end_ms, protocol, start_time, user_agent.
 records() {
 	kc -n "$COLLECTOR_NS" logs "deploy/$COLLECTOR_SVC" --tail=-1 2>/dev/null | awk '
 		function flush() {
 			if (a["reporter"] == "source" && index(a["user_agent"], "aether-hr-") == 1)
-				printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a["authority"], a["response_code"],
+				printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a["authority"], a["response_code"],
 					a["response_flags"], a["response_code_details"], a["bytes_sent"],
-					a["upstream_rx_ms"], a["downstream_tx_end_ms"], a["protocol"], a["start_time"]
+					a["upstream_rx_ms"], a["downstream_tx_end_ms"], a["protocol"], a["start_time"], a["user_agent"]
 			delete a
 		}
 		/^LogRecord #/ { flush(); next }
@@ -310,6 +385,258 @@ verify_hotrestart() {
 	log "hot-restart DC attribution leg passed"
 }
 
+# --- HR_MODE=sparse (aether#1054) -------------------------------------------
+
+# proxy_pod_on NODE — the aether-proxy pod scheduled on NODE.
+proxy_pod_on() {
+	kc -n "$NS" get pod -l app.kubernetes.io/component=proxy --field-selector "spec.nodeName=$1" \
+		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+}
+
+# drain_strategy_on NODE — the --drain-strategy a live Envoy on NODE was started
+# with ("gradual" when absent: Envoy's default), read from its argv rather than
+# from the chart setting. Anchored on argv[0], so the scanning shell never
+# matches itself.
+drain_strategy_on() {
+	# shellcheck disable=SC2016  # evaluated by the node's shell
+	docker exec "$1" sh -c '
+		for p in /proc/[0-9]*; do
+			c=$({ tr "\0" " " <"$p/cmdline"; } 2>/dev/null) || continue
+			case "$c" in
+			"/usr/local/bin/envoy "*--restart-epoch*)
+				s=$(printf "%s\n" "$c" | sed -n "s/.*--drain-strategy \([a-z]*\).*/\1/p")
+				echo "${s:-gradual}"; exit 0 ;;
+			esac
+		done; echo none'
+}
+
+# envoy_pid_of_epoch NODE EPOCH — the PID of NODE's Envoy started with
+# --restart-epoch EPOCH. Anchored on argv[0], so the scanning shell never
+# matches itself.
+envoy_pid_of_epoch() {
+	# shellcheck disable=SC2016  # evaluated by the node's shell
+	docker exec "$1" sh -c '
+		for p in /proc/[0-9]*; do
+			c=$({ tr "\0" " " <"$p/cmdline"; } 2>/dev/null) || continue
+			case "$c" in
+			"/usr/local/bin/envoy "*"--restart-epoch $1 "*) echo "${p#/proc/}"; exit 0 ;;
+			esac
+		done; exit 0' sh "$2"
+}
+
+# twin_idle — the idle_timeout(s) the source node's Envoy holds, split into
+# quic: twins and every other cluster ("<count> <kind> <value>" per distinct
+# pair). A cluster's name is the first "name" after its Cluster @type line.
+twin_idle() {
+	admin '/config_dump?resource=dynamic_active_clusters' 2>/dev/null | awk '
+		/"@type": "type.googleapis.com\/envoy.config.cluster.v3.Cluster"/ { want = 1; next }
+		want && /"name": "/ { n = $0; sub(/.*"name": "/, "", n); sub(/".*/, "", n); cur = n; want = 0 }
+		/"idle_timeout": / {
+			v = $0; sub(/.*"idle_timeout": "/, "", v); sub(/".*/, "", v)
+			print (index(cur, "quic:") == 1 ? "quic" : "other"), v
+		}' | sort | uniq -c | tr -s ' \n' ' ' || true
+}
+
+# patch_quic_idle D — replace the agent's --east-west-quic-idle-timeout with D
+# on the live DaemonSet (HR_QUIC_IDLE; the red arm's pre-#1054 30s, which the
+# chart refuses to render) and wait for the roll.
+patch_quic_idle() {
+	local d="$1" names args idx=-1 cidx=-1 i=0 n
+	names="$(kc -n "$NS" get ds aether-agent -o jsonpath='{.spec.template.spec.containers[*].name}')"
+	for n in $names; do
+		if [ "$n" = agent ]; then cidx=$i; fi
+		i=$((i + 1))
+	done
+	[ "$cidx" -ge 0 ] || die "no agent container in ds/aether-agent"
+	args="$(kc -n "$NS" get ds aether-agent -o jsonpath="{range .spec.template.spec.containers[$cidx].args[*]}{@}{\"\\n\"}{end}")"
+	idx="$(awk '/^--east-west-quic-idle-timeout=/ { print NR - 1; exit }' <<<"$args")"
+	[ -n "$idx" ] || die "the agent has no --east-west-quic-idle-timeout arg to patch"
+	kc -n "$NS" patch ds aether-agent --type=json \
+		-p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/$cidx/args/$idx\",\"value\":\"--east-west-quic-idle-timeout=$d\"}]" >/dev/null ||
+		die "could not patch the agent's idle timeout"
+	kc -n "$NS" rollout status ds/aether-agent --timeout=300s >/dev/null || die "the agent never rolled"
+	ok "agent --east-west-quic-idle-timeout=$d (patched past the chart's check: red arm only)"
+}
+
+# sparse_loops SRC TAG SECONDS — light keep-alive loops from SRC to each h3
+# destination for SECONDS, then return: they end at the SIGHUP.
+sparse_loops() {
+	local src="$1" tag="$2" secs="$3" pod d
+	pod="$(pod_of "$src")"
+	for d in "${QUIC_DSTS[@]}"; do
+		# shellcheck disable=SC2016  # evaluated by the POD's shell
+		kc -n "$TEST_NS" exec "$pod" -c curl -- sh -c '
+			url="$1"; n="$2"; ua="$3"; cfg=/tmp/sp-$$.cfg; : >"$cfg"; i=0
+			while [ "$i" -lt "$n" ]; do printf "url = \"%s\"\noutput = \"/dev/null\"\n" "$url" >>"$cfg"; i=$((i + 1)); done
+			curl -s --max-time 5 --rate 5/s -A "$ua" -K "$cfg" -w "%{http_code}\n"; rm -f "$cfg"
+		' sh "http://$(fqdn "$d"):$OUTBOUND_PORT$HR_PATH" "$((secs * 5))" "$tag-pre-$src-$d" 2>/dev/null &
+	done
+	wait
+}
+
+# sparse_one SRC TAG — ONE request per h3 destination.
+sparse_one() {
+	local src="$1" tag="$2" pod d
+	pod="$(pod_of "$src")"
+	for d in "${QUIC_DSTS[@]}"; do
+		kc -n "$TEST_NS" exec "$pod" -c curl -- curl -s -o /dev/null --max-time 5 -A "$tag-t2-$src-$d" \
+			-w "%{http_code}\n" "http://$(fqdn "$d"):$OUTBOUND_PORT$HR_PATH" 2>/dev/null || echo 000
+	done
+}
+
+# sparse_burst SRC TAG — HR_BURST requests at concurrency HR_BURST_C,
+# alternating over the h3 destinations; one status code per line.
+sparse_burst() {
+	local src="$1" tag="$2" pod d
+	local urls=()
+	pod="$(pod_of "$src")"
+	for d in "${QUIC_DSTS[@]}"; do urls+=("http://$(fqdn "$d"):$OUTBOUND_PORT$HR_PATH"); done
+	# shellcheck disable=SC2016  # evaluated by the POD's shell
+	kc -n "$TEST_NS" exec "$pod" -c curl -- sh -c '
+		n="$1"; c="$2"; ua="$3"; shift 3
+		cfg=/tmp/sb-$$.cfg; : >"$cfg"; i=0
+		while [ "$i" -lt "$n" ]; do
+			for u in "$@"; do
+				[ "$i" -lt "$n" ] || break
+				printf "url = \"%s\"\noutput = \"/dev/null\"\n" "$u" >>"$cfg"; i=$((i + 1))
+			done
+		done
+		curl -s --max-time 20 --parallel --parallel-max "$c" -A "$ua" -K "$cfg" -w "%{http_code}\n"; rm -f "$cfg"
+	' sh "$HR_BURST" "$HR_BURST_C" "$tag-burst-$src" "${urls[@]}" 2>/dev/null || true
+}
+
+verify_sparse() {
+	[ "$DST_NODE" != "$NODE" ] ||
+		die "HR_MODE=sparse needs EWQ_WORKER=1 at \`up\` (and now): on one node the source and destination are the same Envoy, so the stateless reset cannot happen"
+	local ppod pdrain idle s d
+	log "S0 the rendered fix: drain strategy on $DST_NODE, idle timeout on the source's quic: twins"
+	for s in "${SOURCES[@]}"; do for d in "${QUIC_DSTS[@]}"; do req_batch "$s" "$d" "$HR_PATH" 3 >/dev/null; done; done
+	pdrain="$(drain_strategy_on "$DST_NODE")"
+	idle="$(twin_idle)"
+	grep -q ' quic ' <<<" $idle" || die "S0: no quic: twin on the source node ($NODE) carries an idle_timeout — are the pairs warm? ($idle)"
+	echo "  destination envoy --drain-strategy: $pdrain"
+	echo "  source cluster idle_timeout (count kind value):$idle"
+	echo "  agent: $(kc -n "$NS" get ds aether-agent -o jsonpath='{.spec.template.spec.containers[*].args}' | tr ',' '\n' | grep -o 'east-west-quic-idle-timeout=[^"]*' || echo '(flag absent)')"
+	# A fresh collector, so the records read in S2 are this run's only.
+	kc -n "$COLLECTOR_NS" rollout restart "deploy/$COLLECTOR_SVC" >/dev/null
+	kc -n "$COLLECTOR_NS" rollout status "deploy/$COLLECTOR_SVC" --timeout=120s >/dev/null ||
+		die "the collector did not come back"
+	sleep 5
+
+	log "S1 $HR_RESTARTS destination hot restarts on $DST_NODE: ${HR_PRE}s loops ending at SIGHUP, 1 request at T+2, a ${HR_BURST}-request burst (c=$HR_BURST_C) per source at the parent's exit"
+	local out i tag follow fpid t0 found t_exit spid before after ppid
+	local jobs=()
+	out="$(mktemp -d)"
+	for i in $(seq 1 "$HR_RESTARTS"); do
+		tag="aether-hr-sparse-$i"
+		ppod="$(proxy_pod_on "$DST_NODE")"
+		[ -n "$ppod" ] || die "no proxy pod on $DST_NODE"
+		spid="$(supervisor_pid "$DST_NODE")"
+		[ -n "$spid" ] || die "no /opt/aether/supervisor process on $DST_NODE"
+		before="$(restart_epoch "$DST_NODE")"
+		follow="$out/proxy-$i.log"
+		kc -n "$NS" logs -f "$ppod" -c proxy --since=1s >"$follow" 2>&1 &
+		fpid=$!
+		jobs=()
+		for s in "${SOURCES[@]}"; do
+			sparse_loops "$s" "$tag" "$HR_PRE" >>"$out/pre-$i.txt" &
+			jobs+=("$!")
+		done
+		wait "${jobs[@]}"
+		# The loops have ended: SIGHUP now, one request at T+2.
+		t0=$SECONDS
+		docker exec "$DST_NODE" kill -HUP "$spid" || die "could not SIGHUP the supervisor (pid $spid)"
+		sleep 2
+		for s in "${SOURCES[@]}"; do sparse_one "$s" "$tag" >>"$out/t2-$i.txt"; done
+		jobs=()
+		if [ "$HR_FREEZE_PARENT_S" -gt 0 ]; then
+			# Forced fault: stop the parent's workers reading BEFORE the child
+			# unpauses its inherited UDP listeners, and burst into the freeze.
+			# The burst's packets on parent-owned connections queue on the shared
+			# sockets; the child reads them once it completes the drains and sends
+			# Terminate, i.e. the production window held open.
+			sleep "$((t0 + HR_FREEZE_AT > SECONDS ? t0 + HR_FREEZE_AT - SECONDS : 0))"
+			ppid="$(envoy_pid_of_epoch "$DST_NODE" "${before:-0}")"
+			[ -n "$ppid" ] || die "S1 restart $i: no parent envoy (epoch ${before:-0}) on $DST_NODE to freeze"
+			docker exec "$DST_NODE" kill -STOP "$ppid"
+			for s in "${SOURCES[@]}"; do
+				sparse_burst "$s" "$tag" >"$out/burst-$i-$s.txt" &
+				jobs+=("$!")
+			done
+			sleep "$HR_FREEZE_PARENT_S"
+			docker exec "$DST_NODE" kill -CONT "$ppid" || true
+		fi
+		found=0
+		while [ $((SECONDS - t0)) -lt 60 ]; do
+			if grep -q 'shutting down due to child request' "$follow"; then
+				found=1
+				break
+			fi
+			sleep 0.1
+		done
+		[ "$found" = 1 ] || die "S1 restart $i: the parent never logged 'shutting down due to child request' within 60s (log: $follow)"
+		t_exit=$((SECONDS - t0))
+		if [ "$HR_FREEZE_PARENT_S" -eq 0 ]; then
+			for s in "${SOURCES[@]}"; do
+				sparse_burst "$s" "$tag" >"$out/burst-$i-$s.txt" &
+				jobs+=("$!")
+			done
+		fi
+		wait "${jobs[@]}"
+		kill "$fpid" 2>/dev/null || true
+		wait "$fpid" 2>/dev/null || true
+		after="$(restart_epoch "$DST_NODE")"
+		echo "  restart $i: epoch ${before:-?} -> ${after:-?}; parent exit at ~T+${t_exit}s; burst codes: $(cat "$out"/burst-"$i"-*.txt | sort | uniq -c | tr '\n' ' ')"
+		# Let the parent finish exiting before the next pre-roll.
+		sleep 5
+	done
+
+	log "S2 per-restart source-side stateless resets and PEER_GOING_AWAY"
+	sleep 10 # the OTLP logger batches; let the last flush land
+	local recs total_reset=0 total_goaway=0 total_bad=0 total_hs=0 total_hung=0 r g b hs hung nrec
+	recs="$(records)"
+	[ -n "$recs" ] || die "S2: the collector holds no source-reporter access-log records"
+	for i in $(seq 1 "$HR_RESTARTS"); do
+		tag="aether-hr-sparse-$i-"
+		nrec="$(awk -F'\t' -v t="$tag" 'index($10, t) == 1' <<<"$recs" | wc -l)"
+		r="$(awk -F'\t' -v t="$tag" 'index($10, t) == 1 && $4 ~ /Received_stateless_reset/' <<<"$recs" | wc -l)"
+		g="$(awk -F'\t' -v t="$tag" 'index($10, t) == 1 && $4 ~ /PEER_GOING_AWAY/' <<<"$recs" | wc -l)"
+		# A NEW connection opened during a forced freeze cannot finish its
+		# handshake (parent stopped, child still paused): a freeze artifact.
+		hs="$(awk -F'\t' -v t="$tag" 'index($10, t) == 1 && $4 ~ /local_connection_failure\|QUIC_NETWORK_IDLE_TIMEOUT/' <<<"$recs" | wc -l)"
+		b="$(cat "$out/pre-$i.txt" "$out/t2-$i.txt" "$out"/burst-"$i"-*.txt | awk '$1 != "200"' | wc -l)"
+		hung="$(cat "$out"/burst-"$i"-*.txt | awk '$1 == "000"' | wc -l)"
+		echo "  restart $i: stateless_reset=$r peer_going_away=$g client_non200=$b (hung=$hung handshake_timeout=$hs; records=$nrec)"
+		total_reset=$((total_reset + r))
+		total_goaway=$((total_goaway + g))
+		total_bad=$((total_bad + b))
+		total_hs=$((total_hs + hs))
+		total_hung=$((total_hung + hung))
+	done
+	local details
+	details="$(awk -F'\t' '$3 != "-" { print $2 " " $3 " " $4 }' <<<"$recs" | sort | uniq -c | sort -rn | head -10 | awk '{ print "     " $0 }')"
+	[ -z "$details" ] || printf '  failure details (count code flags details):\n%s\n' "$details"
+	rm -rf "$out"
+	echo "SPARSE RESTARTS=$HR_RESTARTS FREEZE_S=$HR_FREEZE_PARENT_S STATELESS_RESET=$total_reset PEER_GOING_AWAY=$total_goaway CLIENT_NON200=$total_bad HUNG=$total_hung HANDSHAKE_TIMEOUT=$total_hs DRAIN_STRATEGY=$pdrain TWIN_IDLE=[$idle]"
+	if [ "${HR_REQUIRE_RESET:-0}" = 1 ]; then
+		[ "$total_reset" -gt 0 ] || die "S2: HR_REQUIRE_RESET=1 but no source saw a stateless reset: the red arm did not reproduce"
+		ok "red arm reproduced: $total_reset stateless resets"
+		return 0
+	fi
+	[ "$total_reset" -eq 0 ] || die "S2: $total_reset source requests died on a stateless reset"
+	[ "$total_goaway" -eq 0 ] || die "S2: $total_goaway source requests died on PEER_GOING_AWAY"
+	[ "$total_hung" -eq 0 ] || die "S2: $total_hung burst requests hung for 20s (a stale connection the source still uses)"
+	if [ "$HR_FREEZE_PARENT_S" -gt 0 ]; then
+		# The freeze itself fails new handshakes; only those may be non-200.
+		[ "$((total_bad - total_hs))" -le 0 ] ||
+			die "S2: $total_bad client-side non-200s, of which only $total_hs are the freeze's handshake timeouts"
+		ok "no source request died on a stale connection across ${HR_RESTARTS} frozen restarts ($total_hs freeze handshake timeouts, not gated)"
+		return 0
+	fi
+	[ "$total_bad" -eq 0 ] || die "S2: $total_bad client-side non-200s"
+	ok "no source request died on a destination hot restart (${HR_RESTARTS} restarts)"
+}
+
 hr_up() {
 	raise_inotify
 	build_images
@@ -319,13 +646,22 @@ hr_up() {
 	install_gwapi_crds
 	install_spire
 	install_aether
+	if [ -n "${HR_QUIC_IDLE:-}" ]; then patch_quic_idle "$HR_QUIC_IDLE"; fi
 	deploy_workloads
+}
+
+hr_verify() {
+	case "$HR_MODE" in
+	dc) verify_hotrestart ;;
+	sparse) verify_sparse ;;
+	*) die "HR_MODE must be dc or sparse, got '$HR_MODE'" ;;
+	esac
 }
 
 case "${1:-}" in
 up) hr_up ;;
-verify) verify_hotrestart ;;
+verify) hr_verify ;;
 down) down ;;
-"") hr_up && verify_hotrestart ;;
+"") hr_up && hr_verify ;;
 *) die "usage: $0 {up|verify|down}" ;;
 esac

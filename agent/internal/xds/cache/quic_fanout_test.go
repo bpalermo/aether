@@ -4,13 +4,16 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	quicv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -141,4 +144,64 @@ func keysOf[V any](m map[string]V) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestQUICTwinsCarryTheirOwnIdleTimeout (aether#1054): every `quic:` twin's
+// pool carries the configured h3 idle timeout (default 8s), while the h2 base
+// and every other cluster keep the 30s UpstreamIdleTimeout.
+func TestQUICTwinsCarryTheirOwnIdleTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  time.Duration
+		want time.Duration
+	}{
+		{"default", 0, config.DefaultQUICTwinIdleTimeout},
+		{"configured", 5 * time.Second, 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestCache("node-1")
+			ctx := context.Background()
+			const td = "aether.internal"
+			require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
+				Name: "a-0", Namespace: "demo", ServiceAccount: "source-a",
+				NetworkNamespace: "/var/run/netns/cni-a-0",
+			}, td))
+			require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+			if tc.set != 0 {
+				c.SetQUICIdleTimeout(tc.set)
+			}
+			c.SetEastWestQUICServices([]string{"demo/echo"})
+			reg := &mockRegistry{
+				listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+					return map[string][]*registryv1.ServiceEndpoint{
+						"demo/echo": {makeEndpoint("10.0.3.1", "cluster-1", "node-2", 8080)},
+					}, nil
+				},
+			}
+			require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+			observeQUIC(t, c, "demo/echo", "demo/source-a")
+			snap, err := c.GetSnapshot("node-1")
+			require.NoError(t, err)
+
+			var twins, others int
+			for name, res := range snap.GetResources(resourcev3.ClusterType) {
+				raw, ok := res.(*clusterv3.Cluster).GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey]
+				if !ok {
+					continue
+				}
+				po := &httpv3.HttpProtocolOptions{}
+				require.NoError(t, raw.UnmarshalTo(po))
+				idle := po.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration()
+				if strings.HasPrefix(name, "quic:") {
+					twins++
+					assert.Equal(t, tc.want, idle, "%s: h3 twin idle timeout", name)
+					continue
+				}
+				others++
+				assert.Equal(t, config.UpstreamIdleTimeout, idle, "%s: non-twin clusters keep the 30s idle timeout", name)
+			}
+			assert.Equal(t, 1, twins, "one twin for the one observed pair")
+			assert.Positive(t, others, "the h2 base must be checked too")
+		})
+	}
 }

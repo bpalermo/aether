@@ -29,11 +29,13 @@
 #     SIGTERM (a main-dispatcher signal event) is ignored by both processes.
 #
 # What it proves (the red-then-green check; e2e/soak/README.md, #1050):
-#   red    WEDGE_SKIP_PARENT_STATS=false WEDGE_FREEZE_S=6 -> WEDGES > 0 (4/4): the
-#          forced fault reproduces the production wedge without the flag
-#   green  WEDGE_SKIP_PARENT_STATS=true  WEDGE_FREEZE_S=6 -> WEDGES = 0 (0/6): the
-#          same fault with the chart default no longer wedges, because the
-#          child never makes the blocking getParentStats call
+#   red    WEDGE_SKIP_PARENT_STATS=false WEDGE_FREEZE_S=6 on a proxy image
+#          WITHOUT the carried #1060 patch -> WEDGES > 0 (4/4 on 2026-09-28):
+#          the forced fault reproduces the production wedge
+#   green  the same on the patched image (the chart's pin since #1061; the
+#          chart default is WEDGE_SKIP_PARENT_STATS=false again) -> WEDGES = 0
+#          (0/8), and WEDGE_SKIP_PARENT_STATS=true (the emergency switch) -> 0
+#          (0/6), because the child never makes the blocking getParentStats call
 # Unforced (WEDGE_FREEZE_S=0) the race is rare on kind (0/30 at ~1,900 rps).
 # The knob is applied at `up` (a re-run of `up` on a live cluster only upgrades
 # the aether release), and `run` reports what the live Envoy was started with.
@@ -54,7 +56,7 @@
 #
 # Usage: e2e/hotrestart-wedge.sh {up|run|down}   (up = the eastwest-quic-hotrestart
 #        bring-up; run needs it; bare = up + run)
-# Env: WEDGE_SKIP_PARENT_STATS (true: the chart default; read at `up`),
+# Env: WEDGE_SKIP_PARENT_STATS (false: the chart default; read at `up`),
 #      WEDGE_RESTARTS (30), WEDGE_GAP (24), WEDGE_REPLICAS (6), WEDGE_LOOPS (24),
 #      WEDGE_RATE (20), WEDGE_SILENT_S (5), WEDGE_OUT (mktemp -d),
 #      WEDGE_STOP_ON_FIRST (1), WEDGE_HAMMER (0: N parallel admin /stats readers,
@@ -85,7 +87,7 @@ WEDGE_OUT="${WEDGE_OUT:-$(mktemp -d)}"
 WEDGE_STOP_ON_FIRST="${WEDGE_STOP_ON_FIRST:-1}"
 WEDGE_HAMMER="${WEDGE_HAMMER:-0}"
 WEDGE_FREEZE_S="${WEDGE_FREEZE_S:-0}"
-WEDGE_SKIP_PARENT_STATS="${WEDGE_SKIP_PARENT_STATS:-true}"
+WEDGE_SKIP_PARENT_STATS="${WEDGE_SKIP_PARENT_STATS:-false}"
 WEDGE_PATH="/echo?msg=$(printf 'x%.0s' $(seq 1 700))"
 
 # node_sh CMD — run CMD as root in the kind node (shares the proxy's host netns
@@ -306,6 +308,11 @@ wedge_run() {
 	done
 	echo "  wedges: $wedges / $i restarts"
 	node_sh 'touch /tmp/wedge-stop' || true
+	# The loops outlive the restarts and are killed below, so their own summary
+	# never prints: read each source pod's per-request status files first.
+	for s in "${SOURCES[@]}"; do
+		echo "  codes from $s: $(kc -n "$TEST_NS" exec "$(pod_of "$s")" -c curl -- sh -c 'cat /tmp/w-*.cfg.* 2>/dev/null | sort | uniq -c' | tr '\n' ' ')"
+	done
 	kill "${pids[@]}" 2>/dev/null || true
 	wait 2>/dev/null || true
 	for f in "$WEDGE_OUT"/load-*.txt; do echo "  $(basename "$f"): $(tr '\n' ' ' <"$f")"; done

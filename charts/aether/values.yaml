@@ -191,6 +191,17 @@ agent:
   # checks the SNI "<port>.<sa>.<ns>.<meshDomain>" against them after the
   # SPIFFE pin (aether#957); see docs/getting-started.md. Default: none.
   eastWestQuicServices: []
+  # Idle timeout of every east-west QUIC twin's upstream connection pool
+  # (#1054); h1/h2 pools keep 30s. An idle source h3 connection receives no
+  # GOAWAY when the destination proxy hot-restarts, so it must close on its
+  # own before the destination's parent exits: once the parent is gone, the
+  # connection's next packet reaches the child and draws a stateless reset
+  # (the source's request fails `503 UC ... Received_stateless_reset`). The
+  # chart REFUSES to render unless this + 5s < proxy.hotRestart.parentShutdownTime
+  # (the agent cannot check it: it never sees the proxy DaemonSet's value).
+  # Cost: a (source, destination) pair idle between this and 30s pays a fresh
+  # QUIC handshake on its next request.
+  eastWestQuicIdleTimeout: 8s
   # M2-default flip (proposal 022, Step 4): make redirect-all the DEFAULT for
   # managed pods (Istio-style "capture what the app sends", zero per-pod config).
   # Every non-system pod on the node is redirect-all'd UNLESS it carries the
@@ -412,19 +423,39 @@ proxy:
     handoffDeadline: 0
     adminUnresponsiveDeadline: 0
     shmHostPath: /run/aether/shm
-    # Pass Envoy --skip-hot-restart-parent-stats (#1050). Without it the child
-    # asks the draining parent for its stats on every 5s flush with a blocking,
-    # timeout-less recvmsg over the hot-restart socket, while the parent's main
-    # thread forwards every unowned QUIC/UDP datagram to the child with a
-    # blocking, timeout-less sendmsg on the other socket. Once ~24 forwarded
-    # datagrams fill the child's receive queue during a stats request, each main
-    # thread waits on the other forever: admin, xDS and timers die on BOTH
-    # epochs, SIGTERM cannot land, and the supervisor's liveness watchdog kills
-    # both (~1 in 60 rolls on talos with h3 inbound listeners). The flag removes
-    # the only periodic child->parent blocking call. Cost: the parent's gauges
-    # and its last <=5s of counter deltas are not merged into the child —
-    # counters are per-generation already (#708). Leave it on.
-    skipParentStats: true
+    # Envoy --drain-strategy for the hot-restart parent (and every other drain:
+    # LDS listener removal, the pod-termination drain). One of immediate or
+    # gradual (Envoy's own default).
+    #
+    # immediate (#1054): from the moment the drain starts, EVERY response on a
+    # draining HTTP connection carries GOAWAY (h2) / an HTTP/3 GOAWAY, so a
+    # source's h3 pool stops sending new requests to the parent and moves to
+    # the child. Under gradual the GOAWAY is a coin flip per response weighted
+    # by elapsed/drainTime, so a busy connection can lose every flip and still
+    # be open when the parent exits at parentShutdownTime; its next packet then
+    # reaches the child, which answers with a QUIC stateless reset the source
+    # accepts, and the in-flight request fails (source `503 UC ...
+    # Received_stateless_reset`). An IDLE connection gets no GOAWAY under
+    # either strategy — agent.eastWestQuicIdleTimeout closes those first.
+    #
+    # Cost: reconnections bunch at the start of the drain instead of spreading
+    # over drainTime (a burst of TLS/QUIC handshakes against the child), and it
+    # is server-wide: h2 connections, LDS listener drains and the
+    # pod-termination drain all switch too.
+    drainStrategy: immediate
+    # Pass Envoy --skip-hot-restart-parent-stats (#1050). This was the
+    # workaround for a hot-restart deadlock: the child asked the draining parent
+    # for its stats on every 5s flush with a blocking, timeout-less recvmsg
+    # while the parent's main thread forwarded QUIC/UDP datagrams to the child
+    # with a blocking, timeout-less sendmsg, and each main thread could end up
+    # waiting on the other forever (both epochs dead until the supervisor's
+    # watchdog killed them). The carried Envoy patch in the aether-proxy image
+    # (#1060: non-blocking forwarding, bounded child receives) removes the
+    # deadlock itself, so the default is off again and the child merges the
+    # parent's stats as upstream intends. Kept as an emergency switch: turning
+    # it on only costs the parent's gauges and its last <=5s of counter deltas
+    # in the child (counters are per-generation already, #708).
+    skipParentStats: false
   # Pod terminationGracePeriodSeconds, and the same value passed to the supervisor
   # as --termination-grace. The deleted pod must keep its Envoy alive as the
   # successor's hot-restart parent until the successor's (xDS-gated, unbounded)

@@ -303,6 +303,11 @@ type SnapshotCache struct {
 	// Guarded by depMu.
 	quicStart       time.Time
 	quicFetchWindow time.Duration
+	// quicIdleTimeout is the `quic:` twins' pool idle timeout, as a
+	// time.Duration (--east-west-quic-idle-timeout, aether#1054). Atomic
+	// rather than under depMu: it is read while building every snapshot's
+	// fan-out and written once at boot.
+	quicIdleTimeout atomic.Int64
 	// localPodsSynced is set once LoadListenersFromStorage has merged the
 	// node's pod records: only then is "no local pod of this ServiceAccount"
 	// evidence that a persisted QUIC pair's source left. Guarded by depMu.

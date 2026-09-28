@@ -282,7 +282,7 @@ func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 	delete(arms, "")
 	var twins []*clusterv3.Cluster
 	for _, id := range []string{quicSourceA, quicSourceB} {
-		twins = append(twins, proxy.QUICClusterFrom(base, arms[id], id, "spiffe://"+trustDomain, []string{quicDestSA}, proxy.QUICServerName(quicDestPort, fqdn)))
+		twins = append(twins, proxy.QUICClusterFrom(base, arms[id], id, "spiffe://"+trustDomain, []string{quicDestSA}, proxy.QUICServerName(quicDestPort, fqdn), config.DefaultQUICTwinIdleTimeout))
 	}
 
 	// Demand-scoped twins (aether#1020): the route carries an arm for EVERY

@@ -151,6 +151,61 @@ guessing a failure mode on the operator's behalf.
 {{- $mode -}}
 {{- end -}}
 
+{{/*
+aether.durationMillis: a Go duration string made of whole-number ms/s/m/h
+components ("15s", "1m30s", "500ms") in milliseconds. Fails the render on
+anything else, naming the value, rather than guessing. Takes
+(dict "name" <values path> "value" <string>).
+*/}}
+{{- define "aether.durationMillis" -}}
+{{- $s := trim (toString .value) -}}
+{{- $parts := regexFindAll "[0-9]+(ms|s|m|h)" $s -1 -}}
+{{- if or (not $parts) (ne (join "" $parts) $s) -}}
+{{- fail (printf "%s must be a duration of whole ms/s/m/h components like 15s, 1m30s or 500ms, got %q" .name $s) -}}
+{{- end -}}
+{{- $unit := dict "ms" 1 "s" 1000 "m" 60000 "h" 3600000 -}}
+{{- $total := 0 -}}
+{{- range $parts -}}
+{{- $total = add $total (mul (atoi (regexFind "^[0-9]+" .)) (get $unit (regexReplaceAll "^[0-9]+" . ""))) -}}
+{{- end -}}
+{{- $total -}}
+{{- end -}}
+
+{{/*
+proxy.hotRestart.drainStrategy, validated (#1054): Envoy's --drain-strategy
+accepts immediate or gradual and aborts on anything else, which would
+crash-loop every proxy pod at rollout time instead of failing here.
+*/}}
+{{- define "aether.proxy.drainStrategy" -}}
+{{- $s := trim (toString .Values.proxy.hotRestart.drainStrategy) -}}
+{{- if not (has $s (list "immediate" "gradual")) -}}
+{{- fail (printf "proxy.hotRestart.drainStrategy must be immediate or gradual, got %q" $s) -}}
+{{- end -}}
+{{- $s -}}
+{{- end -}}
+
+{{/*
+agent.eastWestQuicIdleTimeout, validated against the proxy's parent-shutdown
+time (#1054). A source h3 connection that is idle when a destination proxy's
+hot-restart drain starts gets no GOAWAY; it must be closed by this idle timeout
+before the parent exits (parentShutdownTime after the fork), or its next packet
+reaches the child and draws a stateless reset. The 5s margin covers the
+child's startup before the drain begins and a request that re-arms the timer
+just after it. Checked here because the agent never sees the proxy
+DaemonSet's value.
+*/}}
+{{- define "aether.agent.eastWestQuicIdleTimeout" -}}
+{{- $idle := include "aether.durationMillis" (dict "name" "agent.eastWestQuicIdleTimeout" "value" .Values.agent.eastWestQuicIdleTimeout) | atoi -}}
+{{- $pst := include "aether.durationMillis" (dict "name" "proxy.hotRestart.parentShutdownTime" "value" .Values.proxy.hotRestart.parentShutdownTime) | atoi -}}
+{{- if le $idle 0 -}}
+{{- fail (printf "agent.eastWestQuicIdleTimeout must be > 0, got %q" (toString .Values.agent.eastWestQuicIdleTimeout)) -}}
+{{- end -}}
+{{- if ge (add $idle 5000) $pst -}}
+{{- fail (printf "agent.eastWestQuicIdleTimeout (%s) + 5s must be below proxy.hotRestart.parentShutdownTime (%s): an idle h3 connection must close before a destination's hot-restart parent exits (#1054)" (toString .Values.agent.eastWestQuicIdleTimeout) (toString .Values.proxy.hotRestart.parentShutdownTime)) -}}
+{{- end -}}
+{{- trim (toString .Values.agent.eastWestQuicIdleTimeout) -}}
+{{- end -}}
+
 {{- define "aether.proxy.labels" -}}
 helm.sh/chart: {{ include "aether.chart" . }}
 {{ include "aether.proxy.selectorLabels" . }}

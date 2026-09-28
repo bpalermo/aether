@@ -1659,32 +1659,65 @@ the child's queue as it enters that `recvmsg`, the parent is parked in `sendmsg`
 never reads the stats request. Signals are handled on the main dispatcher, so neither
 process honours SIGTERM, which is why the supervisor ends up killing both.
 
-**The mitigation** is the chart knob `proxy.hotRestart.skipParentStats` (default
-**true**), which passes Envoy `--skip-hot-restart-parent-stats`: the child never makes
-the stats call, so its half of the deadlock is gone. The cost is that the parent's gauges
-and its last ≤5 s of counter deltas are not merged into the child. Counters are already
-per generation (#708), so dashboards built on `increase()`/`rate()` do not change. Set
-it to false only to reproduce the wedge.
+**The fix** is the carried Envoy patch in the aether-proxy image (#1060,
+`proxy/bazel/patches/envoy-aether1050-hotrestart-nonblocking-forward.patch`): the
+parent forwards UDP to the child with a non-blocking `sendmsg` behind a bounded queue,
+and every child wait for a parent reply (stats, listen-socket hand-off, admin shutdown)
+keeps draining the forwarded datagrams and is bounded, so neither main thread can park
+on the other. It also covers the `duplicateParentListenSocket` (LDS add inside the
+window) case the stats-only workaround could not. On kind the forced fault wedged 0 of 8
+restarts with it; talos rev252 ran the e2e with the workaround off.
 
-**What remains:**
-
-- The child's `duplicateParentListenSocket` (asking the parent for a listen socket when
-  LDS **adds** a listener) is the same blocking, timeout-less call. An LDS add that lands
-  inside the parent's forwarding window can still wedge the child's main thread the same
-  way. It is rarer (listener adds, not a 5 s timer). A shorter
-  `proxy.hotRestart.parentShutdownTime` shrinks the window, at the cost of the #991
-  ready-gate margin described above.
-- The parent's main thread can still stall on the blocking forward without deadlocking
-  (a slow child), which shows up as a briefly unresponsive admin during the handoff.
-- The fix belongs upstream in Envoy: forward UDP to the child with a non-blocking
-  `sendmsg` and drop on `EAGAIN` (UDP is lossy anyway, and it avoids toggling the socket
-  into blocking mode), and give the child's blocking receives a timeout that treats the
-  parent as gone. Not filed from here.
+**The workaround**, `proxy.hotRestart.skipParentStats`, is now **off** by default (it was
+on from #1056 until the patch landed). It passes Envoy `--skip-hot-restart-parent-stats`,
+so the child never makes the stats call. Keep it as an emergency switch: if a roll wedges
+again with the signature above, set it true and roll. The cost is that the parent's
+gauges and its last ≤5 s of counter deltas are not merged into the child. Counters are
+already per generation (#708), so dashboards built on `increase()`/`rate()` do not
+change.
 
 Reproduce it on kind with `e2e/hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
-WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 and the chart default 0 of 6
-(see the header of the script). The per-roll soak gates are in `e2e/soak/README.md`,
-"The hot-restart wedge gates (#1050)".
+WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 against the unpatched image, and
+0 against the patched one (see the header of the script). The per-roll soak gates are in
+`e2e/soak/README.md`, "The hot-restart wedge gates (#1050)".
+
+### Source h3 requests die on a stateless reset at a destination's roll (#1054)
+
+Symptom, per roll of a node's proxy: **source** proxies on other nodes log a few
+`503 UC` lines toward the rolling node's pods with `response_code_details` containing
+`QUIC_PUBLIC_RESET|FROM_PEER|Received_stateless_reset`, clustered at the moment the
+draining parent exits (about `parentShutdownTime` after the successor started).
+
+The cause ([mechanism](https://github.com/bpalermo/aether/issues/1054)): a source's h3
+connection to the draining parent was still open when the parent exited. Its next packet
+reached the child, which does not own the connection ID and answers with a QUIC stateless
+reset; the source accepts it because the token is derived from the connection ID alone,
+so parent and child mint the same one. The request in flight fails, and the source's
+retry policy does not cover it (the request was already sent). Two things kept such a
+connection alive past the parent: under Envoy's default `gradual` drain strategy the
+GOAWAY is a coin flip per response, so a busy connection can dodge it for the whole drain,
+and an idle connection gets no GOAWAY at all while the h3 pool's 30 s idle timeout
+outlasts the 15 s parent-shutdown window.
+
+**The fix** is two chart values:
+
+- `proxy.hotRestart.drainStrategy: immediate` (the default) passes Envoy
+  `--drain-strategy immediate`: from the start of the drain every response carries a
+  GOAWAY, so a source's h3 pool stops using the parent on its next response. The cost is
+  server-wide: reconnections (h2 and h3) bunch at the start of the drain instead of
+  spreading over `drainTime`, and LDS listener drains and the pod-termination drain
+  switch too. Setting `gradual` brings #1054 back.
+- `agent.eastWestQuicIdleTimeout: 8s` (the agent's `--east-west-quic-idle-timeout`) is
+  the idle timeout on the `quic:` twins only; h1/h2 keep 30 s. It closes the connections
+  that were idle when the drain started, before the parent exits. The chart refuses to
+  render unless `eastWestQuicIdleTimeout + 5s < proxy.hotRestart.parentShutdownTime`, so
+  lowering the parent-shutdown time needs the idle timeout lowered with it. The cost is
+  one extra QUIC handshake for a (source, destination) pair that sits idle between 8 s
+  and 30 s.
+
+A request in flight at the parent's exit still dies, as it does on h2. The soak gate is
+in `e2e/soak/README.md`, "The h3 stateless-reset gate (#1054)"; the kind leg is
+`e2e/eastwest-quic-hotrestart.sh` with `HR_MODE=sparse` (two nodes, `EWQ_WORKER=1`).
 
 ### The agent reports an unrepairable conflist
 
