@@ -1,3 +1,17 @@
 # Source patches applied to the registry-fetched @envoy module (single_version_override
-# in MODULE.bazel). Each one is an upstream PR carried until it lands in a pin.
+# in MODULE.bazel). Each one is an upstream PR (or an aether fix not yet proposed
+# upstream) carried until it lands in a pin.
 exports_files(glob(["*.patch"]))
+
+# The carried patches' own Envoy tests, run by the proxy workspace's `bazel test //...`
+# (tests under @envoy are not part of //... otherwise). Add a patch's test targets here
+# when the patch adds or changes one; drop them with the patch.
+test_suite(
+    name = "carried_patch_tests",
+    tests = [
+        # envoy-aether1022-exec-in-netns-thread-self.patch (aether#1022):
+        # execInNetworkNamespace restores the CALLING THREAD's netns.
+        "@envoy//test/common/network:exec_in_netns_thread_test",
+        "@envoy//test/common/network:utility_test",
+    ],
+)
