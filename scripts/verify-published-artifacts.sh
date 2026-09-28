@@ -567,7 +567,11 @@ verify_commit() {
 		fi
 		present "${REGISTRY_HOST}/${repo}:${tag}"
 
-		digest="$(registry_manifest_digest "$repo" "$tag" "$tok")"
+		# `|| true`: the helper is a `curl -f | ... | head` pipeline, so under
+		# pipefail a failed HEAD would end the script here with curl's status
+		# (22, say) instead of the inconclusive 2 below that names the reference
+		# (#1046).
+		digest="$(registry_manifest_digest "$repo" "$tag" "$tok" || true)"
 		if [ -z "$digest" ]; then
 			echo "::error::could not resolve a digest for ${REGISTRY_HOST}/${repo}:${tag}" >&2
 			exit 2

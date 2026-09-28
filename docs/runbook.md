@@ -2173,9 +2173,14 @@ cluster, and a tick could not be assigned to a cluster kind (#1007).
   be exported as `tcp_…_9000` anyway, and a selector written as `tcp:.*` would match
   nothing, forever. The key aether writes is the label you query. Namespaces and service
   names are DNS labels, so `_` is unambiguous.
-- **No `tls_` key.** A TLSRoute SNI chain routes to its backends' `tcp:` floor clusters,
-  so its connections count under those clusters' `tcp_` keys. The chain itself is told
-  apart in the L4 access log (`filter_chain_name` = `cap_tls_*`).
+- **No `tls_` key.** A TLSRoute SNI chain routes to its backends' **per-port**
+  `tcp:<fqdn>:<port>` clusters (the primary-port alias when the backendRef names the
+  primary port), never the floor: every backendRef is resolved by its port, and Gateway
+  API requires a port on a Service backendRef. So its connections count under
+  `tcp_<ns>/<svc>_<port>`, and a selector anchored on the floor key
+  (`^tcp_<ns>/<svc>$`) reads **nothing** for a TLSRoute backend (#1044; on kind,
+  `upstream_cluster=tcp_aether-test/l4tls-a_9443`). The chain itself is told apart in the
+  L4 access log (`filter_chain_name` = `cap_tls_*`).
 - **Cardinality** is one key per cluster (services × raw-TCP ports), never per endpoint
   or per source.
 - **HTTP queries are unaffected**: an exact `<ns>/<svc>` or `<ns>/<svc>(@.*)?` selector
@@ -2187,6 +2192,8 @@ cluster, and a tick could not be assigned to a cluster kind (#1007).
 sum by (node, aether_cluster) (rate(envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_.*|udp_.*"}[5m]))
 # One service's L4 clusters: the floor and every port
 sum by (aether_cluster) (rate(envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_aether-test/mixed-svc(_[0-9]+)?"}[5m]))
+# A TLSRoute backend: always port-qualified (the _<port> suffix is required)
+sum by (aether_cluster) (rate(envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_aether-test/l4tls-a_[0-9]+"}[5m]))
 # Client-side SAN rejections on L4 clusters (the soak gate; never an instant query)
 max by (node, aether_cluster) (max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}[8h]))
 ```
@@ -2230,6 +2237,8 @@ _stream:{service.name="aether-proxy"} AND log_name:aether_l4_access_logs AND res
 log_name:aether_l4_access_logs AND upstream_cluster:~"^tcp_aether-test/tcp-echo(_[0-9]+)?$"
 # TLSRoute chains only
 log_name:aether_l4_access_logs AND filter_chain_name:~"^cap_tls_"
+# One TLSRoute backend (per-port key: tcp_<ns>/<svc>_<port>, never the bare floor key)
+log_name:aether_l4_access_logs AND filter_chain_name:~"^cap_tls_" AND upstream_cluster:~"^tcp_aether-test/l4tls-a_[0-9]+$"
 ```
 
 ### Cross-pod L4 landings (#1007/#1022)

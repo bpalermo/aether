@@ -136,6 +136,57 @@ registry_all_tags() {
 	rm -f "$hdr"
 }
 
+# Resolve the commit-suffixed tag (`<tag>-<full sha>`) a publish JUST pushed,
+# for the sign step in .github/workflows/publish.yaml. That tag is the only
+# immutable one (`dev` is rewritten by every publish, #692); the step signs the
+# digest it points at. Its prefix is not known here, so it is found by listing.
+#
+# Two things this function exists for (#1046):
+#
+#   - A MISS MUST BE LOUD. The step used to run
+#       tag="$(printf '%s\n' "$tags" | grep -E -- "-${COMMIT}$" | head -1)"
+#     under `set -euo pipefail`: when nothing matched, grep exited 1, pipefail
+#     failed the substitution, and `set -e` ended the step BEFORE the
+#     `if [ -z "$tag" ]` written to explain the miss. Publish run 36417203322
+#     died that way with zero output. The grep below cannot fail its pipeline,
+#     and nothing here relies on `set -e` (bash clears it inside a command
+#     substitution anyway): every outcome is an explicit return.
+#   - THE LISTING LAGS THE PUSH. The same job pushed the tag seconds earlier,
+#     and a registry's `tags/list` need not show it yet, so re-list up to
+#     REGISTRY_COMMIT_TAG_ATTEMPTS times (default 13), REGISTRY_COMMIT_TAG_INTERVAL
+#     seconds apart (default 5): about 60 s. Every miss is printed with the
+#     number of tags it scanned -- "not found in 667" is a real absence, "not
+#     found in 100" is the pagination regressing (#875), and the two must never
+#     look the same.
+#
+# Progress and the final ::error:: go to stderr; only the tag goes to stdout.
+#
+# Usage: registry_commit_tag <repo> <token> <commit>  -> the tag on stdout
+#   0  found   1  still absent after every listing
+registry_commit_tag() {
+	local repo="$1" tok="$2" commit="$3"
+	local attempts="${REGISTRY_COMMIT_TAG_ATTEMPTS:-13}"
+	local interval="${REGISTRY_COMMIT_TAG_INTERVAL:-5}"
+	local i=1 tags n_tags tag
+	while :; do
+		tags="$(registry_all_tags "$repo" "$tok")"
+		n_tags="$(printf '%s\n' "$tags" | grep -c . || true)"
+		tag="$(printf '%s\n' "$tags" | { grep -E -- "-${commit}$" || true; } | head -1)"
+		if [ -n "$tag" ]; then
+			echo "resolved ${repo}: ${tag} (scanned ${n_tags} tags, listing ${i}/${attempts})" >&2
+			printf '%s\n' "$tag"
+			return 0
+		fi
+		if [ "$i" -ge "$attempts" ]; then
+			echo "::error::no tag ending in -${commit} in ${repo} (scanned ${n_tags} tags); still absent after ${attempts} listing(s) ${interval}s apart -- refusing to sign a tag that is not this commit" >&2
+			return 1
+		fi
+		echo "no tag ending in -${commit} in ${repo} yet (scanned ${n_tags} tags, listing ${i}/${attempts}); the listing can lag the push, re-listing in ${interval}s" >&2
+		sleep "$interval"
+		i=$((i + 1))
+	done
+}
+
 # The manifest media types a published coordinate can carry: a multi-arch index
 # (OCI or Docker) or a single manifest (OCI or Docker) — which covers a Helm
 # chart, a cosign 2 `.sig` and a cosign 3 fallback index alike. A HEAD whose

@@ -159,17 +159,25 @@ n_missing="$(printf '%s\n' "$missing_lines" | grep -c . || true)"
 if [ "$n_missing" -ne "$expected" ]; then
 	fail "${n_missing} MISSING line(s), expected ${expected} — part of the gate cannot fail"
 fi
-if printf '%s\n' "$missing_lines" | grep . | grep -qvF -- "$control"; then
+# Each offending set is collected ONCE, with `|| true` on the whole pipeline,
+# and tested with `[ -n ]` (#1046). Not `if producer | grep -q`: under pipefail
+# an early-exiting `grep -q` can SIGPIPE its producer and read a match as a
+# miss, skipping the fail(). And the first three are shown with `sed -n 1,3p`,
+# which reads all of its input, not `head -3`: a producer killed by head's early
+# exit fails its pipeline, and `set -e` would end this script mid-report.
+wrong_sha="$(printf '%s\n' "$missing_lines" | grep . | grep -vF -- "$control" || true)"
+if [ -n "$wrong_sha" ]; then
 	fail "a MISSING line does not name the control sha — red for the wrong reason:"
-	printf '%s\n' "$missing_lines" | grep . | grep -vF -- "$control" | head -3 >&2
+	printf '%s\n' "$wrong_sha" | sed -n 1,3p >&2
 fi
-if printf '%s\n' "$missing_lines" | grep . | grep -qvF -- "MISSING ${want_prefix}/"; then
+wrong_registry="$(printf '%s\n' "$missing_lines" | grep . | grep -vF -- "MISSING ${want_prefix}/" || true)"
+if [ -n "$wrong_registry" ]; then
 	fail "a MISSING line names a registry other than ${want_prefix}/ (bazel/img/registry.bzl as of the control's tree) — red for the wrong reason:"
-	printf '%s\n' "$missing_lines" | grep . | grep -vF -- "MISSING ${want_prefix}/" | head -3 >&2
+	printf '%s\n' "$wrong_registry" | sed -n 1,3p >&2
 fi
 if grep -qE '^[[:space:]]*ok[[:space:]]' "$log"; then
 	fail "the verifier reported an artifact PRESENT for a commit that was never published:"
-	grep -E '^[[:space:]]*ok[[:space:]]' "$log" | head -3 >&2
+	grep -E '^[[:space:]]*ok[[:space:]]' "$log" | sed -n 1,3p >&2
 fi
 # One witness per chart and per image absence (a "no image to sign" line rides
 # on its image's). Fewer means some absence was never shown to be one: the
