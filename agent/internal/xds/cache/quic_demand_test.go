@@ -53,6 +53,10 @@ func newQUICDemandCacheWith(t *testing.T, storePath string, localSAs ...string) 
 	c.SetEastWestQUICServices([]string{"demo/echo"})
 	if storePath != "" {
 		c.EnableObservedUpstreamsStore(ctx, storePath)
+		// Drain the debounced write before t.TempDir's cleanup removes the
+		// directory (cleanups run LIFO; this one is registered after it), or a
+		// late flush races RemoveAll ("directory not empty").
+		t.Cleanup(c.FlushObservedUpstreams)
 	}
 	for _, sa := range localSAs {
 		require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
