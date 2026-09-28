@@ -37,6 +37,12 @@
 #   E5  Q3          client-a's pod is deleted and comes back with a NEW pod IP;
 #                   its requests still carry client-a's identity over HTTP/3, and
 #                   client-b's still carry client-b's
+#   E6  id gate     a pod under a ServiceAccount that did not exist a second
+#                   earlier sends its FIRST request the instant its container
+#                   starts (#1053). The webhook-injected aether-identity-ready
+#                   init container ran and exited 0 BEFORE the app started, and
+#                   that first request answers 200 carrying the new SA's own
+#                   SPIFFE ID
 #
 # HOW "OVER HTTP/3" IS PROVEN. The application behind the inbound only ever sees
 # the proxy's loopback hop, so nothing the app can report distinguishes h2 from
@@ -87,6 +93,22 @@
 # allow-list, which rolls the agent. Never --reuse-values: the allow-list must
 # come from THIS invocation.)
 #
+# E6 WITH THE GATE OFF (IDENTITY_GATE=off installs the chart with
+# controller.webhook.identityGate.enabled=false) is a report, not a red: no init
+# container is injected and the app's t=0 request races SPIRE's entry sync. On
+# kind (2026-09-28) SPIRE issued the SVID 3.9-5.9 s after the agent's subscribe
+# (two svids=0 updates first, the talos-main shape) and the first request
+# STALLED 3.4-5.4 s waiting for the pod's client certificate before answering
+# 200; with the gate on it answered in 12-14 ms after the gate held the pod
+# 3.6-4.1 s. On talos-main the same window is ~7.5 s, which crosses the mesh
+# cluster connect_timeout and becomes 503 UF (#1053). E6 prints the first
+# request's status and latency either way and asserts only the gate-on
+# contract (init container injected first, exited 0, first request 200 as the
+# new ServiceAccount).
+#
+#   IDENTITY_GATE=off e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh idgate  # the stall
+#   e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh idgate                    # GREEN
+#
 # E4c's pair count is seen red by asserting the pre-#1020 count against a
 # #1020 agent: EWQ_EXPECT_TWINS=28 e2e/eastwest-quic.sh verify goes red at E4c
 # with 6 twins present (the override exists only for that red run).
@@ -109,7 +131,7 @@
 # HTTP/3 handshake fails the QUIC client's hostname check and E2 goes red with
 # the twins present (that shape is the one to look for in the proxy log).
 #
-# Usage: e2e/eastwest-quic.sh {up|test|verify|down}   (bare = up + verify)
+# Usage: e2e/eastwest-quic.sh {up|test|verify|idgate|down}   (bare = up + verify)
 #
 # Prereqs: kind, docker, kubectl, helm, bazel (for the image build; CI sets
 # EWQ_SKIP_BUILD=1 and pre-loads the images from the nightly build artifact).
@@ -129,6 +151,9 @@ TRUST_DOMAIN="aether.internal"
 # on (default) = the allow-list below is installed; off = the same install with
 # NO allow-list, for the red half of red-then-green (see the header).
 EASTWEST_QUIC="${EASTWEST_QUIC:-on}"
+# on (default) = the chart's default egress identity gate (#1053); off = the
+# same install with controller.webhook.identityGate.enabled=false (E6's red arm).
+IDENTITY_GATE="${IDENTITY_GATE:-on}"
 # The mesh VIP Service port every client dials through mesh DNS
 # (meshconst.ProxyOutboundPort); the capture route claims "<fqdn>:18081".
 OUTBOUND_PORT="18081"
@@ -361,6 +386,12 @@ install_aether() {
 	off) ;;
 	*) die "EASTWEST_QUIC must be 'on' or 'off', got '$EASTWEST_QUIC'" ;;
 	esac
+	local gate=()
+	case "$IDENTITY_GATE" in
+	on) ;;
+	off) gate=(--set controller.webhook.identityGate.enabled=false) ;;
+	*) die "IDENTITY_GATE must be 'on' or 'off', got '$IDENTITY_GATE'" ;;
+	esac
 
 	log "installing the aether CRDs"
 	helm --kube-context "$CTX" upgrade --install aether-crds "$charts/crds" \
@@ -370,7 +401,7 @@ install_aether() {
 	# registry backend, capture + mesh DNS, GAMMA on). No --reuse-values: the
 	# allow-list must be exactly what THIS invocation says, so on -> off -> on
 	# re-runs of `up` really toggle it.
-	log "installing aether (SPIRE ON; EASTWEST_QUIC=$EASTWEST_QUIC)"
+	log "installing aether (SPIRE ON; EASTWEST_QUIC=$EASTWEST_QUIC; IDENTITY_GATE=$IDENTITY_GATE)"
 	# shellcheck disable=SC2046
 	helm --kube-context "$CTX" upgrade --install aether "$charts/aether" \
 		-n "$NS" --create-namespace \
@@ -379,6 +410,7 @@ install_aether() {
 		--set spire.enabled=true \
 		--set edge.enabled=false \
 		"${quic[@]}" \
+		"${gate[@]+"${gate[@]}"}" \
 		"${EWQ_EXTRA_HELM_ARGS[@]+"${EWQ_EXTRA_HELM_ARGS[@]}"}" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
@@ -857,6 +889,88 @@ verify_q3() {
 	done
 }
 
+# --- E6: the egress identity gate (#1053) ------------------------------------
+
+# verify_identity_gate — a client under a brand-new ServiceAccount whose app
+# sends at t=0. The pod is a bare Pod (restartPolicy Never) so it runs exactly
+# once: a restart would send a second "first" request under an identity that is
+# no longer new.
+verify_identity_gate() {
+	local sa pod want first init_exit init_ran started
+	sa="idgate-$(date +%s)"
+	pod="$sa"
+	want="$(spiffe_id "$sa")"
+	log "E6 identity gate (IDENTITY_GATE=$IDENTITY_GATE): new ServiceAccount $sa; the app's first request leaves at container start"
+	kc apply -f - >/dev/null <<YAML || die "E6: client apply failed"
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: $sa, namespace: $TEST_NS}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $pod
+  namespace: $TEST_NS
+  labels: {app: $sa, aether.io/managed: "true"}
+  annotations:
+    config.aether.io/upstreams: "$H2_DST.$TEST_NS"
+spec:
+  serviceAccountName: $sa
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: $CURL_IMAGE
+      command: ["sh", "-c"]
+      args:
+        - |
+          out=\$(curl -s --max-time 30 -w '\\n%{http_code} %{time_total}' "http://$(fqdn "$H2_DST"):$OUTBOUND_PORT/header?key=X-Forwarded-Client-Cert")
+          last=\$(printf '%s\\n' "\$out" | tail -n 1)
+          body=\$(printf '%s\\n' "\$out" | sed '\$d' | head -n 1)
+          echo "AETHER_IDGATE_FIRST code=\${last%% *} took=\${last#* }s xfcc=\$body"
+          exec sleep 3600
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+YAML
+	# The first request has a 30s ceiling of its own; wait for its line.
+	local deadline=$((SECONDS + 180))
+	first=""
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		first="$(kc -n "$TEST_NS" logs "$pod" -c curl 2>/dev/null | grep '^AETHER_IDGATE_FIRST' || true)"
+		[ -n "$first" ] && break
+		sleep 2
+	done
+	init_ran="$(kc -n "$TEST_NS" get pod "$pod" -o jsonpath='{.spec.initContainers[*].name}' 2>/dev/null || true)"
+	init_exit="$(kc -n "$TEST_NS" get pod "$pod" \
+		-o jsonpath='{.status.initContainerStatuses[?(@.name=="aether-identity-ready")].state.terminated.exitCode}' 2>/dev/null || true)"
+	started="$(kc -n "$TEST_NS" get pod "$pod" \
+		-o jsonpath='{.status.initContainerStatuses[?(@.name=="aether-identity-ready")].state.terminated.startedAt}..{.status.initContainerStatuses[?(@.name=="aether-identity-ready")].state.terminated.finishedAt}' 2>/dev/null || true)"
+	printf '    init containers: [%s]  aether-identity-ready exit=%s (%s)\n' "${init_ran:-none}" "${init_exit:-n/a}" "${started:-n/a}"
+	printf '    gate log: %s\n' "$(kc -n "$TEST_NS" logs "$pod" -c aether-identity-ready 2>/dev/null | tail -n 1 || echo n/a)"
+	printf '    %s\n' "${first:-AETHER_IDGATE_FIRST (none within 180s)}"
+
+	[ -n "$first" ] || die "E6: the client never reported its first request"
+	if [ "$IDENTITY_GATE" = "off" ]; then
+		case "$init_ran" in *aether-identity-ready*) die "E6: IDENTITY_GATE=off but the gate was injected" ;; esac
+		ok "E6 (gate OFF): first request, with no gate holding the app: ${first#AETHER_IDGATE_FIRST }"
+		return
+	fi
+	case "$init_ran" in
+	aether-identity-ready*) ;;
+	*) die "E6: the webhook did not inject aether-identity-ready FIRST (init containers: [${init_ran:-none}])" ;;
+	esac
+	[ "$init_exit" = "0" ] || die "E6: aether-identity-ready did not exit 0 (exit=${init_exit:-still running})"
+	case "$first" in
+	*"code=200 "*) ;;
+	*) die "E6: the pod's FIRST request did not answer 200 with the gate on: $first" ;;
+	esac
+	case "$first" in
+	*"URI=$want"*) ;;
+	*) die "E6: the first request did not carry the new ServiceAccount's own identity ($want): $first" ;;
+	esac
+	ok "E6: aether-identity-ready held the app until the SVID existed; its t=0 request answered 200 as $want"
+}
+
 verify() {
 	verify_preflight
 	verify_fanout
@@ -866,7 +980,8 @@ verify() {
 	verify_gamma_single
 	verify_pairs
 	verify_q3
-	log "all east-west QUIC assertions passed (demand-scoped twins, per-source HTTP/3 + XFCC, h2-only untouched, GAMMA stays h2, twins = driven pairs, identity across a client address change)"
+	verify_identity_gate
+	log "all east-west QUIC assertions passed (demand-scoped twins, per-source HTTP/3 + XFCC, h2-only untouched, GAMMA stays h2, twins = driven pairs, identity across a client address change, the identity gate holds a new pod until its SVID exists)"
 }
 
 down() {
@@ -896,7 +1011,8 @@ case "${1:-}" in
 up) up ;;
 test) verify ;;
 verify) verify ;;
+idgate) verify_identity_gate ;;
 down) down ;;
 "") up && verify ;;
-*) die "usage: $0 {up|test|verify|down}" ;;
+*) die "usage: $0 {up|test|verify|idgate|down}" ;;
 esac

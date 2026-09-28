@@ -101,6 +101,16 @@ const (
 	ProtocolTCP  = "tcp"
 	ProtocolUDP  = "udp"
 
+	// AnnotationIdentityGate opts a single mesh-managed pod OUT of the egress
+	// identity gate (#1053): the identity-ready init container the controller's
+	// pod-mutating webhook injects so a pod's app containers do not start
+	// before SPIRE has issued the pod's SVID. "false" skips the injection; any
+	// other value (or absent) leaves the chart-wide setting in charge
+	// (controller.webhook.identityGate.enabled). A pod that opts out can send
+	// before its identity exists, and those first requests fail 503 UF until
+	// it does — the window the gate closes.
+	AnnotationIdentityGate = annotationAetherPrefix + "identity-gate"
+
 	// AnnotationAetherEndpointMetadataPrefix is the prefix for endpoint metadata annotations
 	AnnotationAetherEndpointMetadataPrefix = "metadata." + annotationAetherEndpointPrefix
 

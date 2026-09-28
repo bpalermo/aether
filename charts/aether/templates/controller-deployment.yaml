@@ -84,6 +84,29 @@ spec:
             # domain's label count (musl mesh-FQDN fix; the old --pod-ndots flag
             # could drift from the domain).
             - "--mesh-domain={{ .Values.meshDomain }}"
+            # Egress identity gate (#1053): the /mutate webhook injects the
+            # identity-ready init container. Never with spire.enabled=false —
+            # no SVID would ever come, and every mesh pod would sit in Init.
+            {{- $gate := .Values.controller.webhook.identityGate }}
+            {{- if and .Values.spire.enabled $gate.enabled }}
+            {{- $gateImage := .Values.agent.image }}
+            {{- if $gate.image.repository }}
+            {{- $gateImage = $gate.image }}
+            {{- end }}
+            - "--identity-gate=true"
+            - "--identity-gate-image={{ include "aether.image" $gateImage }}"
+            - "--identity-gate-image-pull-policy={{ $gate.pullPolicy }}"
+            - "--identity-gate-workload-socket={{ .Values.spire.workloadSocketPath }}"
+            {{- with $gate.timeout }}
+            - "--identity-gate-timeout={{ . }}"
+            {{- end }}
+            - "--identity-gate-cpu-request={{ $gate.resources.requests.cpu | default "" }}"
+            - "--identity-gate-memory-request={{ $gate.resources.requests.memory | default "" }}"
+            - "--identity-gate-cpu-limit={{ $gate.resources.limits.cpu | default "" }}"
+            - "--identity-gate-memory-limit={{ $gate.resources.limits.memory | default "" }}"
+            {{- else }}
+            - "--identity-gate=false"
+            {{- end }}
             {{- if .Values.controller.webhook.spire }}
             - "--spire-enabled=true"
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"

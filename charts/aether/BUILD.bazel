@@ -130,6 +130,77 @@ helm_template_test(
     },
 )
 
+# #1053: the egress identity gate is default ON. The controller must be told to
+# inject it, from the AGENT image (the one carrying /identity-ready as an extra
+# layer, already on every node), against the same Workload API socket path every
+# aether component mounts from csi.spiffe.io. The flags' existence is pinned by
+# //controller/internal/cmd:TestIdentityGate_FlagsRegistered.
+helm_template_test(
+    name = "aether_identity_gate_default_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "--identity-gate=true",
+            "--identity-gate-image=" + image_reference("agent") + "@sha256:",
+            "--identity-gate-image-pull-policy=IfNotPresent",
+            "--identity-gate-workload-socket=/run/secrets/workload-spiffe-uds/socket",
+            "--identity-gate-memory-request=16Mi",
+            "--identity-gate-memory-limit=64Mi",
+        ],
+    },
+)
+
+# The chart knob turns it off...
+helm_template_test(
+    name = "aether_identity_gate_disabled_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.identityGate.enabled=false",
+    ],
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "--identity-gate=false",
+        ],
+    },
+)
+
+# ...and so does a mesh without SPIRE, whatever the knob says: no SVID would ever
+# come, and every mesh pod would be held in Init forever.
+helm_template_test(
+    name = "aether_identity_gate_no_spire_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "spire.enabled=false",
+    ],
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "--identity-gate=false",
+        ],
+    },
+)
+
+# A timeout and an image override reach the controller verbatim.
+helm_template_test(
+    name = "aether_identity_gate_overrides_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.identityGate.timeout=5m",
+        "--set",
+        "controller.webhook.identityGate.image.repository=mirror.example/aether/agent",
+        "--set",
+        "controller.webhook.identityGate.image.tag=v1",
+    ],
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "--identity-gate-timeout=5m",
+            "--identity-gate-image=mirror.example/aether/agent:v1",
+        ],
+    },
+)
+
 # #770: proxy.authzSidecar.failureMode is an authorization control, and the
 # template used to compare it raw against "ALLOW". Every spelling that is not
 # exactly "ALLOW" — including `allow` — therefore selected fail-CLOSED with no
