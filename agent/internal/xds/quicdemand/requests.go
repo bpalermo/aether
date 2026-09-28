@@ -65,6 +65,10 @@ type Classification struct {
 	// an older agent. Never demand; answered absent unless the pair is already
 	// known.
 	HeldOnly []string
+	// Fresh is set on the stream's first CDS request: the proxy's on-demand
+	// subscriptions are exactly Resubscribed (Ledger.Restate, issue #1036).
+	// A hot-restart child's first request is fresh and names none.
+	Fresh bool
 }
 
 // Requests tracks, per xDS stream, whether the stream's first CDS request has
@@ -93,7 +97,7 @@ func (r *Requests) Classify(streamID int64, req *discoveryv3.DeltaDiscoveryReque
 
 	held := req.GetInitialResourceVersions()
 	subscribed := map[string]struct{}{}
-	var out Classification
+	out := Classification{Fresh: first}
 	for _, name := range req.GetResourceNamesSubscribe() {
 		if !proxy.IsQUICClusterName(name) {
 			continue

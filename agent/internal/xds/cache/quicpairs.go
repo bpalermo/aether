@@ -90,27 +90,66 @@ func (c *SnapshotCache) ObserveQUICTwin(ctx context.Context, name string) (QUICT
 	return decision, reason
 }
 
+// RestateQUICSubscriptions is a fresh xDS stream's first CDS request (issue
+// #1036): names -- quicdemand's Resubscribed, possibly empty -- is then exactly
+// the set of on-demand subscriptions the proxy holds, and replaces the
+// ledger's. A dormant pair it does not name has no subscription left -- the
+// proxy restarted, or this stream belongs to a new proxy generation after a
+// hot restart, whose child holds no ODCDS subscriptions -- and is pruned: the
+// next request that routes to its twin opens a subscription, real first use.
+// The named twins are then resumed (ResumeQUICSubscriptions), which keeps a
+// named pair that is not servable right now dormant. Called on EVERY fresh
+// stream. Returns how many pairs were new.
+func (c *SnapshotCache) RestateQUICSubscriptions(ctx context.Context, names []string) int {
+	pairs := make([]quicPair, 0, len(names))
+	for _, name := range names {
+		if service, source, ok := proxy.ParseQUICClusterName(name, c.meshDomain); ok {
+			pairs = append(pairs, quicPair{service: service, source: source})
+		}
+	}
+	c.depMu.Lock()
+	pruned := c.quicLedger.Restate(pairs)
+	if len(pruned) > 0 {
+		c.markObservedDirtyLocked()
+	}
+	dormantLeft := len(c.quicLedger.Dormant())
+	c.depMu.Unlock()
+	if len(pruned) > 0 {
+		c.log.InfoContext(ctx, "pruned dormant east-west QUIC pairs: the proxy's fresh stream holds no on-demand subscription for their twins",
+			"count", len(pruned), "dormant", dormantLeft, "pairs", capStrings(pairStrings(pruned), quicPairsLogCap))
+	}
+	return c.ResumeQUICSubscriptions(ctx, names)
+}
+
 // ResumeQUICSubscriptions admits the pairs behind twins the node proxy
-// re-subscribed by name on a fresh xDS stream (issue #1033): names it holds a
-// live on-demand subscription for, each opened by a request that routed to the
-// twin. Envoy's ODCDS manager keeps such a subscription for the life of the
-// process and never re-sends it, so a valid pair that is not served here is
-// stranded -- every request 503s at the on_demand timeout -- rather than
-// re-fetched. Same validation as ObserveQUICTwin, silent on refusal; admitted
-// and known pairs are marked fetched, so the unfetched-pair prune keeps them.
-// Returns how many pairs were new; those are published with one regeneration,
-// off the caller's goroutine (see ObserveQUICTwin).
+// re-subscribed by name (issue #1033): names it holds a live on-demand
+// subscription for, each opened by a request that routed to the twin. Envoy's
+// ODCDS manager keeps such a subscription for the life of the process and never
+// re-sends it, so a valid pair that is not served here is stranded -- every
+// request 503s at the on_demand timeout -- rather than re-fetched. Same
+// validation as ObserveQUICTwin, silent on refusal; admitted and known pairs
+// are marked fetched, so the unfetched-pair prune keeps them, and a refused
+// well-formed name is kept dormant (issue #1036) so it is republished when it
+// becomes valid. Returns how many pairs were new; those are published with one
+// regeneration, off the caller's goroutine (see ObserveQUICTwin).
 //
 // A twin the proxy merely HOLDS (initial_resource_versions without a
 // subscription) admits nothing: it is whatever an older agent generation
 // built. #1032 admitted those too (RestoreQUICTwin), which on the first talos
 // deploy (rev245) persisted every SAs x destinations twin as a pair.
 func (c *SnapshotCache) ResumeQUICSubscriptions(ctx context.Context, names []string) int {
-	added := 0
+	added, parked := 0, 0
 	for _, name := range names {
-		if d, _ := c.recordQUICPair(name); d == QUICTwinAdded {
+		switch d, reason := c.recordQUICPair(name); {
+		case d == QUICTwinAdded:
 			added++
+		case d == QUICTwinRefused && reason != QUICRefusedMalformed:
+			parked++
 		}
+	}
+	if parked > 0 {
+		c.log.InfoContext(ctx, "kept east-west QUIC pairs dormant: the proxy subscribes to their twins but the pair is not servable now; republished when it is",
+			"count", parked)
 	}
 	if added > 0 {
 		c.log.InfoContext(ctx, "resumed east-west QUIC pairs the proxy holds a live on-demand subscription for", "count", added)
@@ -142,6 +181,12 @@ func (c *SnapshotCache) HasQUICPair(name string) bool {
 // stream (ResumeQUICSubscriptions) -- so an admitted or already-known pair is
 // also marked fetched in this process, which exempts it from the
 // unfetched-pair prune (pruneUnfetchedQUICPairs).
+//
+// Either way the proxy now holds an on-demand subscription for the name, and
+// keeps it for the life of the process (issue #1036), so the ledger records it
+// even when the pair is refused: a well-formed name that is not servable right
+// now is parked dormant and republished when it becomes valid -- its paused
+// request still 503s, but the ones after it do not.
 func (c *SnapshotCache) recordQUICPair(name string) (QUICTwinDecision, string) {
 	service, source, ok := proxy.ParseQUICClusterName(name, c.meshDomain)
 	if !ok {
@@ -149,24 +194,36 @@ func (c *SnapshotCache) recordQUICPair(name string) (QUICTwinDecision, string) {
 	}
 	// Local identities first, under localMu alone: localMu and depMu never nest.
 	local := c.localSourceSAKeys()
-	if _, ok := local[source]; !ok {
-		return QUICTwinRefused, QUICRefusedSourceNotOnNode
-	}
 
 	c.depMu.Lock()
 	defer c.depMu.Unlock()
-	if _, ok := c.quicServices[service]; !ok {
-		return QUICTwinRefused, QUICRefusedNotQUICService
-	}
-	if _, ok := c.dependencySetLocked()[service]; !ok {
-		return QUICTwinRefused, QUICRefusedNotInDependency
-	}
 	p := quicPair{service: service, source: source}
+	c.quicLedger.Subscribe(p)
+	reason := ""
+	switch {
+	case !has(local, source):
+		reason = QUICRefusedSourceNotOnNode
+	case !has(c.quicServices, service):
+		reason = QUICRefusedNotQUICService
+	case !has(c.dependencySetLocked(), service):
+		reason = QUICRefusedNotInDependency
+	}
+	if reason != "" {
+		if _, active := c.quicPairs[p]; !active && !c.quicLedger.IsDormant(p) {
+			c.quicLedger.Park(p, time.Now())
+			c.markObservedDirtyLocked()
+		}
+		return QUICTwinRefused, reason
+	}
 	c.quicFetched[p] = struct{}{}
 	if _, known := c.quicPairs[p]; known {
 		return QUICTwinKnown, ""
 	}
-	c.quicPairs[p] = time.Now()
+	at := time.Now()
+	if dormantAt, wasDormant := c.quicLedger.Wake(p); wasDormant {
+		at = dormantAt
+	}
+	c.quicPairs[p] = at
 	c.bumpDepGenLocked()
 	c.markObservedDirtyLocked()
 	return QUICTwinAdded, ""
@@ -209,6 +266,7 @@ func (c *SnapshotCache) quicDemandSnapshot(identities []string) (map[string]stru
 
 	c.depMu.Lock()
 	pruned := c.pruneQUICPairsLocked(local)
+	revived := c.reviveDormantQUICPairsLocked(local)
 	services := maps.Clone(c.quicServices)
 	var pairs map[quicPair]struct{}
 	if len(c.quicPairs) > 0 {
@@ -222,7 +280,41 @@ func (c *SnapshotCache) quicDemandSnapshot(identities []string) (map[string]stru
 	if len(pruned) > 0 {
 		c.log.Info("pruned east-west QUIC pairs", "count", len(pruned), "pairs", capStrings(pruned, quicPairsLogCap))
 	}
+	if len(revived) > 0 {
+		c.log.Info("republished dormant east-west QUIC pairs: the proxy still holds their on-demand subscriptions, so the twin is pushed with no request",
+			"count", len(revived), "pairs", capStrings(revived, quicPairsLogCap))
+	}
 	return services, pairs
+}
+
+// reviveDormantQUICPairsLocked moves every dormant pair that is servable again
+// -- its destination QUIC-enabled and in the dependency set, and its source
+// ServiceAccount back on the node (judged only once the pod set is known) --
+// into the observed set, so the snapshot being built republishes its twin
+// (issue #1036). The proxy's on-demand subscription for the name never closed,
+// so it receives the twin with no request; a pair forgotten instead would be
+// stranded. Returns the revived pairs as "<svc> <- <source>" strings. Caller
+// must hold depMu for writing.
+func (c *SnapshotCache) reviveDormantQUICPairsLocked(local map[string]struct{}) []string {
+	if !c.localPodsSynced {
+		return nil
+	}
+	deps := c.dependencySetLocked()
+	woken := c.quicLedger.Revive(func(p quicPair) bool {
+		return has(c.quicServices, p.service) && has(deps, p.service) && has(local, p.source)
+	})
+	if len(woken) == 0 {
+		return nil
+	}
+	revived := make([]string, 0, len(woken))
+	for p, at := range woken {
+		c.quicPairs[p] = at
+		revived = append(revived, p.service+" <- "+p.source)
+	}
+	c.bumpDepGenLocked()
+	c.markObservedDirtyLocked()
+	slices.Sort(revived)
+	return revived
 }
 
 // pruneQUICPairsLocked drops the pairs whose twin can no longer be built or
@@ -233,9 +325,12 @@ func (c *SnapshotCache) quicDemandSnapshot(identities []string) (map[string]stru
 // carrying traffic, and a wrongly pruned pair costs its next request one
 // ODCDS round trip, so the rule prunes only on removal evidence. (The one
 // time-based rule is the bounded post-start prune of persisted pairs that are
-// never fetched, PruneUnfetchedQUICPairs, issue #1033.) Returns the
-// pruned pairs as "<svc> <- <source>" strings. Caller must hold depMu for
-// writing.
+// never fetched, PruneUnfetchedQUICPairs, issue #1033.) A pruned pair whose
+// twin the proxy holds an on-demand subscription for is kept DORMANT rather
+// than forgotten (issue #1036): its twin leaves the snapshot all the same, and
+// reviveDormantQUICPairsLocked republishes it when the pair is valid again.
+// Returns the pruned pairs as "<svc> <- <source>" strings. Caller must hold
+// depMu for writing.
 func (c *SnapshotCache) pruneQUICPairsLocked(local map[string]struct{}) []string {
 	if len(c.quicPairs) == 0 {
 		return nil
@@ -253,6 +348,9 @@ func (c *SnapshotCache) pruneQUICPairsLocked(local map[string]struct{}) []string
 			reason = quicPairPruneReasonSource
 		default:
 			continue
+		}
+		if c.quicLedger.Retire(p, c.quicPairs[p]) {
+			reason += ", dormant"
 		}
 		delete(c.quicPairs, p)
 		delete(c.quicFetched, p)
@@ -314,7 +412,7 @@ func (c *SnapshotCache) pruneUnfetchedQUICPairs(now time.Time) {
 	}
 	var pruned []string
 	for p := range c.quicPairs {
-		if _, fetched := c.quicFetched[p]; fetched {
+		if _, fetched := c.quicFetched[p]; fetched || c.quicLedger.Subscribed(p) {
 			continue
 		}
 		delete(c.quicPairs, p)
@@ -366,17 +464,53 @@ func (c *SnapshotCache) QUICPairs() []string {
 // quicPairsLocked encodes the observed pairs in (service, source) order for
 // persistence. Caller must hold depMu.
 func (c *SnapshotCache) quicPairsLocked() []*agentv1.ObservedQUICPair {
-	pairs := slices.SortedFunc(maps.Keys(c.quicPairs), func(a, b quicPair) int {
-		return cmp.Or(cmp.Compare(a.service, b.service), cmp.Compare(a.source, b.source))
-	})
+	return encodeQUICPairs(c.quicPairs)
+}
+
+// dormantQUICPairsLocked encodes the dormant pairs (issue #1036) the same way.
+// Caller must hold depMu.
+func (c *SnapshotCache) dormantQUICPairsLocked() []*agentv1.ObservedQUICPair {
+	return encodeQUICPairs(c.quicLedger.Dormant())
+}
+
+func encodeQUICPairs(set map[quicPair]time.Time) []*agentv1.ObservedQUICPair {
+	pairs := slices.SortedFunc(maps.Keys(set), compareQUICPairs)
 	out := make([]*agentv1.ObservedQUICPair, 0, len(pairs))
 	for _, p := range pairs {
 		out = append(out, agentv1.ObservedQUICPair_builder{
 			Service:    p.service,
 			Source:     p.source,
-			ObservedAt: timestamppb.New(c.quicPairs[p]),
+			ObservedAt: timestamppb.New(set[p]),
 		}.Build())
 	}
+	return out
+}
+
+func compareQUICPairs(a, b quicPair) int {
+	return cmp.Or(cmp.Compare(a.service, b.service), cmp.Compare(a.source, b.source))
+}
+
+// pairStrings renders pairs as sorted "<svc> <- <source>" strings for a log line.
+func pairStrings(pairs []quicPair) []string {
+	slices.SortFunc(pairs, compareQUICPairs)
+	out := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		out = append(out, p.service+" <- "+p.source)
+	}
+	return out
+}
+
+// DormantQUICPairs returns the dormant pairs (issue #1036) as sorted twin
+// names. For tests and debugging.
+func (c *SnapshotCache) DormantQUICPairs() []string {
+	c.depMu.RLock()
+	defer c.depMu.RUnlock()
+	dormant := c.quicLedger.Dormant()
+	out := make([]string, 0, len(dormant))
+	for p := range dormant {
+		out = append(out, proxy.QUICClusterName(p.service, c.meshDomain, p.source))
+	}
+	slices.Sort(out)
 	return out
 }
 
@@ -404,6 +538,44 @@ func (c *SnapshotCache) admitStoredQUICPairs(entries []*agentv1.ObservedQUICPair
 			at = ts.AsTime()
 		}
 		c.quicPairs[p] = at
+		admitted++
+	}
+	if admitted > 0 {
+		c.bumpDepGenLocked()
+	}
+	if skipped > 0 {
+		c.markObservedDirtyLocked()
+	}
+	return admitted, skipped
+}
+
+// admitStoredDormantQUICPairs restores persisted dormant pairs (issue #1036)
+// into the ledger. A pair that is also an observed pair stays observed; a
+// malformed entry is skipped. A restored dormant pair whose source is on the
+// node once the pod records are loaded is republished by the first snapshot
+// after that (reviveDormantQUICPairsLocked), before any request; one whose
+// source is still away stays dormant until the proxy's fresh stream either
+// re-subscribes it (kept) or does not (pruned). Returns how many were admitted
+// and skipped.
+func (c *SnapshotCache) admitStoredDormantQUICPairs(entries []*agentv1.ObservedQUICPair) (admitted, skipped int) {
+	c.depMu.Lock()
+	defer c.depMu.Unlock()
+	for _, e := range entries {
+		name := proxy.QUICClusterName(e.GetService(), c.meshDomain, e.GetSource())
+		svc, src, ok := proxy.ParseQUICClusterName(name, c.meshDomain)
+		if !ok || svc != e.GetService() || src != e.GetSource() {
+			skipped++
+			continue
+		}
+		p := quicPair{service: svc, source: src}
+		if _, active := c.quicPairs[p]; active || c.quicLedger.IsDormant(p) {
+			continue
+		}
+		at := time.Now()
+		if ts := e.GetObservedAt(); ts != nil {
+			at = ts.AsTime()
+		}
+		c.quicLedger.Park(p, at)
 		admitted++
 	}
 	if admitted > 0 {

@@ -26,6 +26,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/quicdemand"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/registry"
@@ -288,6 +289,15 @@ type SnapshotCache struct {
 	// quicStart+quicFetchWindow is pruned (PruneUnfetchedQUICPairs, issue
 	// #1033). Guarded by depMu.
 	quicFetched map[quicPair]struct{}
+	// quicLedger remembers which twins the node proxy holds an on-demand
+	// (ODCDS) subscription for, and keeps a pair whose twin had to leave the
+	// snapshot DORMANT rather than forgetting it (issue #1036): Envoy never
+	// re-requests a name it is subscribed to, so a forgotten pair whose source
+	// returns is stranded (503 NC at the on_demand timeout, forever). A
+	// dormant pair is republished the moment it is valid again, and pruned only
+	// when a fresh stream shows the subscription is gone. Guarded by depMu;
+	// dormant pairs are persisted with observedDeps.
+	quicLedger *quicdemand.Ledger[quicPair]
 	// quicStart is when this agent process started (the cache was built);
 	// quicFetchWindow is the unfetched-pair prune window (<= 0 disables it).
 	// Guarded by depMu.
@@ -701,6 +711,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		observedDeps:       make(map[string]time.Time),
 		quicPairs:          make(map[quicPair]time.Time),
 		quicFetched:        make(map[quicPair]struct{}),
+		quicLedger:         quicdemand.NewLedger[quicPair](),
 		quicStart:          time.Now(),
 		quicFetchWindow:    DefaultQUICPairFetchWindow,
 		onDemandSubs:       make(map[int64]map[string]string),

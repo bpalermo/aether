@@ -966,7 +966,9 @@ persisted beside the observed upstreams (`state/observed-upstreams.json`,
 expiry**: nothing in xDS tells the agent that a twin stopped carrying traffic. A
 pair is pruned when its source ServiceAccount has no pod left on the node, or when
 its destination leaves the allow-list or the dependency set, or by the post-start
-prune below. A pair that did receive traffic therefore keeps its twin while both
+prune below. In the first two cases, a pair whose twin the proxy fetched on demand
+loses its twin but is kept **dormant** and republished when it is valid again (#1036,
+"Stranded twin" below). A pair that did receive traffic therefore keeps its twin while both
 ends stay put, even if it goes quiet. `envoy_cluster_manager_active_clusters` rises
 by one when a pair first dials, falls when a pair is pruned, and is otherwise
 **flat**. A step that tracks pod churn rather than new callers is the pre-#1020
@@ -1012,6 +1014,73 @@ pruned persisted east-west QUIC pairs with no on-demand fetch since agent start 
 
 followed by a `east-west QUIC fan-out` line with the new, smaller `quic_clusters`.
 `0` disables the prune.
+
+**Stranded twin: 503 `NC` at 2 s for a source that came back (#1036).** Envoy's
+ODCDS manager keeps **one subscription per cluster name for the life of the
+process**. When the agent removes a twin the proxy fetched on demand, Envoy drops
+the *cluster* and keeps the *subscription*. Every later on-demand request for that
+name is skipped inside the proxy and never reaches the agent. The pair is then
+**stranded** until the proxy restarts. The failure signature:
+
+- **Access log.** `reporter:source`, `response_code:503`, `response_flags:NC`,
+  `duration_ms` ≈ `2000` (the `on_demand` timeout) on every request from one source
+  ServiceAccount to one QUIC-enabled destination, starting when a pod of that
+  ServiceAccount came back to the node. `upstream_cluster` is `-` on an `NC` line, so
+  scope by `authority` and the source pod.
+- **Proxy debug log.** `ODCDS-manager: resource quic:<svc>.<ns>.<domain>@<ns>/<sa> is
+  already subscribed to, skipping` for each of those requests.
+- **Agent.** Nothing for that name: no `observed east-west QUIC pair (ODCDS)` line, no
+  refusal, and `aether_agent_quic_twin_refused_total` flat, because no request arrives.
+  `envoy_cluster_manager_odcds_init_fetch_timeout_total` does not move either. The
+  timeout is the HCM `on_demand` filter's, not the subscription's.
+
+Until #1036 this was reachable on every Deployment roll. A pair was *forgotten* when
+its source ServiceAccount's last pod left the node, or when its destination left the
+allow-list or the dependency set. The next pod of that ServiceAccount on the node
+then routed to a name Envoy would never ask for again. `//test/mtlspool`
+`TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control` reproduces
+it: `status=503 … in 2.000099268s`, and no CDS request reaches the control plane.
+
+**Why the agent never forgets a subscribed pair.** The agent tracks which twins the
+proxy holds an ODCDS subscription for: those it asked for by name, and those it
+re-subscribes on a fresh stream. When such a pair loses its source or its
+destination, it goes **dormant**:
+
+- **Leaving.** The twin still leaves the snapshot, exactly as before. The pair moves
+  to `dormant_quic_pairs` in `state/observed-upstreams.json`, and the prune line reads
+  `pruned east-west QUIC pairs … (source_left_node, dormant)`.
+- **Returning.** The pair is valid again when a pod of the ServiceAccount is back on
+  the node, or the destination is re-listed. The **same snapshot** then republishes
+  the twin and its load assignment, with no request. The subscription never closed, so
+  its delta watch is still on the stream and Envoy takes the pushed cluster. The agent
+  logs `republished dormant east-west QUIC pairs: the proxy still holds their on-demand
+  subscriptions, so the twin is pushed with no request count=N pairs=[…]`. The
+  returning source's first request is 200 over HTTP/3 in milliseconds (6.7 ms in the
+  gate above).
+- **Pruning.** A dormant pair is dropped only when the proxy no longer holds the
+  subscription. The agent learns this from a fresh xDS stream whose first CDS request
+  does not name the pair: after an agent restart, or on a new proxy generation after a
+  hot restart, whose child holds no ODCDS subscriptions. The agent logs `pruned dormant
+  east-west QUIC pairs: the proxy's fresh stream holds no on-demand subscription for
+  their twins count=N dormant=M pairs=[…]`. After that the name is free, and the next
+  request that routes to it is an ordinary first use.
+- **Refusals.** A first-use request the agent has to refuse opens a subscription too:
+  a `source_not_local` race, say, with a pod whose records are not loaded yet. So the
+  pair is parked dormant as well, and only the refused request 503s. A re-subscribed
+  pair that is not servable on a fresh stream logs `kept east-west QUIC pairs dormant
+  … count=N`.
+- **The fetch-window prune.** It never touches a dormant pair, because a dormant pair
+  is not a served pair. It also never touches a served pair the proxy holds a
+  subscription for.
+
+A dormant pair costs a few bytes in the state file and nothing in the proxy. It is
+bounded by the names the proxy has subscribed to since its last restart.
+
+**If you see the signature anyway:** restart the node's proxy (a hot restart,
+`kubectl -n aether delete pod <aether-proxy pod>`). The new generation holds no
+subscription, so the next request fetches the twin (~20 ms). Then file it. The
+agent's `republished dormant` / `pruned dormant` lines around the source's return say
+which half failed.
 
 ```promql
 # twins per node, then the pairs among them that carried traffic in the last hour.

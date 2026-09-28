@@ -41,6 +41,12 @@ package mtlspool
 // an ODCDS subscription Envoy never re-sends, so answering it absent strands
 // it (503 at the on_demand timeout).
 //
+// # Sources and destinations that come back (issue #1036)
+//
+// quic_dormant_test.go: a twin fetched on demand whose pair loses its source
+// or destination is kept dormant by the agent's quicdemand.Ledger and pushed
+// again, with no request, when the pair is valid again.
+//
 // The negative control (TestOnDemandQUICTwinRefusedFails) refuses every
 // name: the first request must fail with 503, which proves the harness can
 // see the failure mode the green arm claims to avoid.
@@ -114,6 +120,23 @@ type odcdsAgent struct {
 	heldOnly     []string
 	// published is the twins added to the snapshot.
 	published []string
+
+	// ledger is the AGENT's subscription ledger (quicdemand.Ledger, issue
+	// #1036): which twins the proxy holds an ODCDS subscription for, and the
+	// dormant pairs whose twin was removed while it does. One per control
+	// plane process, as in the agent.
+	ledger *quicdemand.Ledger[string]
+	// forget is the #1036 control: today's #1035 rule, which forgets a pair on
+	// removal evidence instead of keeping it dormant.
+	forget bool
+	// awaySources / delisted are the pair validity the agent judges: a source
+	// ServiceAccount with no pod on the node, a destination off the allow-list.
+	awaySources map[string]bool
+	delisted    bool
+	// unsubscribed is every resource name, of any type, the proxy has
+	// unsubscribed from: how the gate sees a removed twin fully torn down (its
+	// EDS name and its certificate's SDS name released).
+	unsubscribed map[string]bool
 }
 
 // onDelta is the control plane's request hook: the agent's onDeltaRequest,
@@ -121,7 +144,20 @@ type odcdsAgent struct {
 // re-subscribes on a fresh stream -- and nothing the proxy merely holds.
 func (a *odcdsAgent) onDelta(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest) {
 	a.mu.Lock()
+	for _, name := range req.GetResourceNamesUnsubscribe() {
+		a.unsubscribed[name] = true
+	}
 	cls := a.twinRequests.Classify(streamID, req)
+	// The agent's ledger (issue #1036): a fresh stream re-states the proxy's
+	// subscriptions; every name it asks for is one it now holds.
+	if cls.Fresh {
+		for _, name := range a.ledger.Restate(cls.Resubscribed) {
+			a.t.Logf("[odcds] fresh stream %d: pruned dormant %s (no subscription left)", streamID, name)
+		}
+	}
+	for _, name := range append(slices.Clone(cls.FirstUse), cls.Resubscribed...) {
+		a.ledger.Subscribe(name)
+	}
 	a.resubscribed = append(a.resubscribed, cls.Resubscribed...)
 	a.heldOnly = append(a.heldOnly, cls.HeldOnly...)
 	a.requests = append(a.requests, cls.FirstUse...)
@@ -256,7 +292,11 @@ func startODCDS(t *testing.T, admit bool) *odcdsRun {
 
 	portA, portB, adminPort := freePort(t), freePort(t), freePort(t)
 	baseCLA := staticEndpoint(odcdsDestSvc, h3.addr)
-	agent := &odcdsAgent{t: t, admit: admit, destAddr: h3.addr, baseCLA: baseCLA, version: 1, twinRequests: quicdemand.NewRequests()}
+	agent := &odcdsAgent{
+		t: t, admit: admit, destAddr: h3.addr, baseCLA: baseCLA, version: 1,
+		twinRequests: quicdemand.NewRequests(), ledger: quicdemand.NewLedger[string](),
+		awaySources: map[string]bool{}, unsubscribed: map[string]bool{},
+	}
 	agent.resources = map[resourcev3.Type][]types.Resource{
 		// Nothing observed: the base and its load assignment, no twin.
 		resourcev3.ClusterType:  {odcdsBase()},
@@ -304,6 +344,7 @@ func (r *odcdsRun) restartAgent(t *testing.T) {
 	a.resubscribed = nil
 	a.heldOnly = nil
 	a.twinRequests = quicdemand.NewRequests()
+	a.ledger = quicdemand.NewLedger[string]()
 	a.version = 1
 	a.mu.Unlock()
 	cp := startADSControlPlaneOn(t, old.socketPath, r.initial, a.onDelta)

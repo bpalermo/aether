@@ -20,6 +20,7 @@ go_test(
         "harness_test.go",
         "pool_identity_test.go",
         "quic_cost_test.go",
+        "quic_dormant_test.go",
         "quic_odcds_test.go",
         "quic_path_a_test.go",
         "quic_selection_test.go",

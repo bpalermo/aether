@@ -39,6 +39,13 @@ var quicDemandSAs = []string{"source-a", "source-b", "source-c"}
 // the first snapshot, as the agent does at boot.
 func newQUICDemandCache(t *testing.T, storePath string) *SnapshotCache {
 	t.Helper()
+	return newQUICDemandCacheWith(t, storePath, quicDemandSAs...)
+}
+
+// newQUICDemandCacheWith is newQUICDemandCache with only the given local
+// ServiceAccounts on the node at load.
+func newQUICDemandCacheWith(t *testing.T, storePath string, localSAs ...string) *SnapshotCache {
+	t.Helper()
 	c := newTestCache("node-1")
 	c.SetCaptureEnabled(true)
 	c.observedFlushDebounce = time.Millisecond
@@ -46,8 +53,12 @@ func newQUICDemandCache(t *testing.T, storePath string) *SnapshotCache {
 	c.SetEastWestQUICServices([]string{"demo/echo"})
 	if storePath != "" {
 		c.EnableObservedUpstreamsStore(ctx, storePath)
+		// Drain the debounced write before t.TempDir's cleanup removes the
+		// directory (cleanups run LIFO; this one is registered after it), or a
+		// late flush races RemoveAll ("directory not empty").
+		t.Cleanup(c.FlushObservedUpstreams)
 	}
-	for _, sa := range quicDemandSAs {
+	for _, sa := range localSAs {
 		require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
 			Name: sa + "-0", Namespace: "demo", ServiceAccount: sa,
 			NetworkNamespace: "/var/run/netns/cni-" + sa,
