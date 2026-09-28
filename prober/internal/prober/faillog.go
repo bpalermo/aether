@@ -179,9 +179,7 @@ func (f *failLog) write(v any) {
 	if err != nil {
 		return // the structs above hold only strings and numbers; cannot fail
 	}
-	line := make([]byte, 0, len(failLinePrefix)+len(b)+1)
-	line = append(line, failLinePrefix...)
-	line = append(line, b...)
+	line := append([]byte(failLinePrefix), b...)
 	line = append(line, '\n')
 	_, _ = f.out.Write(line)
 }
