@@ -34,7 +34,9 @@
 # Env: HR_RESTARTS (default 6), HR_SECONDS (loop length, default covers the
 #      restarts), HR_RATE (per-loop requests/s, default 5), HR_LOOPS (loops per
 #      destination, default 16), HR_SAMPLE (success sample %, default 2; set at
-#      `up` only), plus everything e2e/eastwest-quic.sh reads.
+#      `up` only), HR_SKIP_PARENT_STATS (proxy.hotRestart.skipParentStats,
+#      default true; set at `up` only), plus everything e2e/eastwest-quic.sh
+#      reads.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +59,9 @@ EWQ_EXTRA_HELM_ARGS=(
 	--set "cniInstall.otlpEndpoint=$COLLECTOR_ENDPOINT"
 	--set meshConfig.proxy.accessLogsEnabled=true
 	--set "meshConfig.proxy.accessLogSuccessSampleRate=${HR_SAMPLE:-2}"
+	# The #1050 mitigation (Envoy --skip-hot-restart-parent-stats). Chart default
+	# is true; e2e/hotrestart-wedge.sh sets false for its red arm.
+	--set "proxy.hotRestart.skipParentStats=${HR_SKIP_PARENT_STATS:-true}"
 )
 
 # shellcheck source=e2e/eastwest-quic.sh

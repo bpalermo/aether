@@ -1635,6 +1635,57 @@ running, and the DaemonSet deletes an idle pod. So during a rolling upgrade:
   pod's `pod not ready` is rule 2 failing. One at about fork + 19 s, after the successor's
   `pod ready`, is rule 1 failing.
 
+### A roll wedges both epochs after `starting workers` (#1050)
+
+Symptom, per roll: the successor's last Envoy line is `all dependencies initialized.
+starting workers`, the draining parent's last is `closing and draining listeners`, the
+admin on 127.0.0.1:9901 stops answering, and about 30 s later the supervisor logs
+`liveness watchdog fired; terminating for container restart` for **both** epochs and,
+15 s after that, `drain deadline elapsed, killing envoy epoch` for both. Existing
+connections keep serving (worker threads are fine); every new connection to or from the
+node fails until the fresh epoch 0 comes up, and source nodes log `503 UC
+…QUIC_TOO_MANY_RTOS` / `Network_blackhole_detected` toward the node's QUIC twins.
+
+The cause is a deadlock between the two Envoys' **main threads** over the hot-restart
+domain sockets
+([analysis](https://github.com/bpalermo/aether/issues/1050#issuecomment-5875727632)).
+Once the child asks the parent to drain, the parent forwards every QUIC/UDP datagram
+that no parent session owns to the child, from its main thread, with a blocking
+`sendmsg` with no timeout; the child's UDP listeners stay paused until the parent exits,
+so for the whole `parentShutdownTime` every packet of every new QUIC connection takes
+that path. Meanwhile the child asks the parent for its stats on every 5 s stats flush
+with a blocking `recvmsg`, also with no timeout. When about 24 forwarded datagrams fill
+the child's queue as it enters that `recvmsg`, the parent is parked in `sendmsg` and
+never reads the stats request. Signals are handled on the main dispatcher, so neither
+process honours SIGTERM, which is why the supervisor ends up killing both.
+
+**The mitigation** is the chart knob `proxy.hotRestart.skipParentStats` (default
+**true**), which passes Envoy `--skip-hot-restart-parent-stats`: the child never makes
+the stats call, so its half of the deadlock is gone. The cost is that the parent's gauges
+and its last ≤5 s of counter deltas are not merged into the child. Counters are already
+per generation (#708), so dashboards built on `increase()`/`rate()` do not change. Set
+it to false only to reproduce the wedge.
+
+**What remains:**
+
+- The child's `duplicateParentListenSocket` (asking the parent for a listen socket when
+  LDS **adds** a listener) is the same blocking, timeout-less call. An LDS add that lands
+  inside the parent's forwarding window can still wedge the child's main thread the same
+  way. It is rarer (listener adds, not a 5 s timer). A shorter
+  `proxy.hotRestart.parentShutdownTime` shrinks the window, at the cost of the #991
+  ready-gate margin described above.
+- The parent's main thread can still stall on the blocking forward without deadlocking
+  (a slow child), which shows up as a briefly unresponsive admin during the handoff.
+- The fix belongs upstream in Envoy: forward UDP to the child with a non-blocking
+  `sendmsg` and drop on `EAGAIN` (UDP is lossy anyway, and it avoids toggling the socket
+  into blocking mode), and give the child's blocking receives a timeout that treats the
+  parent as gone. Not filed from here.
+
+Reproduce it on kind with `e2e/hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
+WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 and the chart default 0 of 6
+(see the header of the script). The per-roll soak gates are in `e2e/soak/README.md`,
+"The hot-restart wedge gates (#1050)".
+
 ### The agent reports an unrepairable conflist
 
 Symptom: `AetherCNIConflistUnchained` fires for a node, the agent there is NotReady and
