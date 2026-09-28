@@ -512,7 +512,8 @@ is its whole flag set.
 | `--otlp-endpoint` | `""` | OTLP gRPC collector `host:port` (insecure). Empty disables telemetry — the prober still runs but emits nothing. |
 
 **Metrics.** Two instruments, both carrying `tier` (`liveness`, `reachability`,
-`mesh_dns`), `target` (the probed name) and `result`:
+`mesh_dns`), `target` (the probed name), `result` and `pod` (the prober pod, from the
+resource's `k8s.pod.name`; #1041):
 
 | Metric | Type | Notes |
 |---|---|---|
@@ -522,7 +523,16 @@ is its whole flag set.
 Per-node identity is a **resource** attribute, not a metric label: the chart sets
 `OTEL_RESOURCE_ATTRIBUTES=k8s.node.name=$(NODE_NAME),…` and the prober's resource
 builder reads it from the environment, so the series de-collapse per node once
-the collector promotes it (#210).
+the collector promotes it to `node` (#210). The prober deliberately sets **no**
+`host.name`. On a pod without hostNetwork that is the pod name, and a collector that
+promotes `host.name` ahead of `k8s.node.name` would export `node="prober-xxxxx"`, which
+is what happened until #1041.
+
+**Failure log.** Every non-success probe prints one bounded
+`AETHER_PROBE_FAIL {t, tier, target, result, err, elapsed_ms, pod, node, n, truncated}`
+line to stdout: at most 20 per `(tier, result)` per minute, then one summary line with
+the `suppressed` count (#1040). See [`runbook.md`](./runbook.md), "Attributing a prober
+failure".
 
 **Deployment.** The chart renders a DaemonSet + ServiceAccount into a namespace
 that must already be mesh-managed — the probe only works if the CNI has plumbed

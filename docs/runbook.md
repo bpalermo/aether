@@ -1292,6 +1292,83 @@ A non-zero first line says *which service*, not which of its clusters. Tell them
 apart with `/config_dump`, as above, and the proxy log line
 `initial fetch timed out for …ClusterLoadAssignment`.
 
+### Attributing a prober failure: its labels and the `AETHER_PROBE_FAIL` line (#1040, #1041)
+
+**Labels.** `aether_probe_requests_total` and `aether_probe_request_duration_seconds`
+carry:
+
+| label | value | set by |
+|---|---|---|
+| `node` | the **Kubernetes node** (`main-worker-03`) | the collector, from the resource's `k8s.node.name` (chart env `OTEL_RESOURCE_ATTRIBUTES`, downward API `spec.nodeName`) |
+| `pod` | the prober pod (`prober-h2mzs`) | the prober, as a datapoint attribute |
+| `tier` | `liveness`, `reachability`, `mesh_dns` | the prober |
+| `target` | the probed name (`egress`, `echo.aether-test.aether.internal:18081`, …) | the prober |
+| `result` | `success`, `http_error`, `connection_error`, `timeout`, `saturated`, `dns_error`, `dns_nxdomain`, `dns_timeout` | the prober (`classifyErr`) |
+
+**Until #1041, `node` held the POD name** (`node="prober-h2mzs"`). The prober's resource
+carried `host.name`, and for a pod that is not hostNetwork that is the pod name. The
+talos collector's `transform/promote` set `node` from `host.name` before it looked at
+`k8s.node.name`. A pod that had since been rolled away could not be placed on a node
+(#1040). Two changes fix this: the prober no longer sets `host.name`, and the
+collector now prefers `k8s.node.name`
+(bpalermo/k8s-talos-main PR `fix/otel-node-label-precedence`). Series from before the
+fix still show a pod name in `node`. For any window that spans the change, group by
+`pod`, which exists only on series from after the fix, or translate the old values with
+`kubectl -n aether-test get pods -o wide` while those pods still exist.
+
+Group per node with `by (node)`, and per prober generation with `by (node, pod)`. A
+DaemonSet roll starts a new `pod` series on the same `node`, so only a `by (node)`
+aggregate spans the roll:
+
+```promql
+# per node, across prober generations
+sum by (node, tier, result) (increase(aether_probe_requests_total{result!="success"}[10m]))
+# per prober pod: a new generation starts a new series
+sum by (node, pod, tier, result) (increase(aether_probe_requests_total{result!="success"}[10m]))
+```
+
+Any rule that guarded against dead prober generations with
+`and on (node) max by (node) (present_over_time(...[3m]))` (#47) relied on `node` being
+the pod. Now that `node` is the node, a new pod on the same node satisfies that guard
+for a dead pod's frozen burst. Guard `on (node, pod)` instead.
+
+**The failure line.** Every probe that does not succeed prints one line to the prober's
+stdout. It follows the soak's k6 `AETHER_FAIL` convention: a fixed marker, then one
+JSON object:
+
+```
+AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"pod":"prober-h2mzs","node":"main-worker-01","n":1,"truncated":false}
+```
+
+- `t` is the client-side timestamp. Line it up against the proxy's hot-restart
+  parent-exit time and the mesh-dns handoff on `node`.
+- `elapsed_ms` separates a probe that used its whole budget (`timeout` at about 2000 ms,
+  meaning the request went out and nothing came back) from a fast `connection_error`
+  (a refusal or reset in a few ms, meaning nothing was listening).
+- `err` is the Go error string. For `http_error` it is `HTTP <status>`. For `saturated`
+  the probe was never sent because `--max-concurrent` probes were already in flight.
+
+It is **bounded**: at most 20 detail lines per `(tier, result)` per minute (`n` counts
+them, and `truncated:true` marks the 20th). Later failures in that minute are only
+counted, and when the minute closes they produce ONE summary line under the same marker:
+
+```
+AETHER_PROBE_FAIL {"t":"…","tier":"mesh_dns","result":"timeout","suppressed":122,"window_s":60,"pod":"prober-h2mzs","node":"main-worker-01"}
+```
+
+A 30 s burst of about 142 timeouts therefore prints 20 lines plus one summary, not 142
+lines. The budget renews every minute, so the next burst is still attributable.
+
+Pull the lines from VictoriaLogs (the logs are not in Loki):
+
+```
+_stream:{k8s.namespace.name="aether-test"} AND "k8s.container.name":prober AND "AETHER_PROBE_FAIL"
+```
+
+To see one pod or one class, add `AND "prober-h2mzs"` or `AND "\"result\":\"timeout\""`.
+To read them straight from a live pod:
+`kubectl -n aether-test logs <prober-pod> | grep AETHER_PROBE_FAIL`.
+
 ### Forwarded DNS keeps failing after a kube-dns roll
 
 The mesh-DNS forward path keeps a small pool of **connected** UDP sockets per upstream
