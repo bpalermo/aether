@@ -246,6 +246,34 @@ func sourceSAKeys(identities []string) map[string]struct{} {
 	return out
 }
 
+// splitByClientCertificate splits local workload identities into those whose
+// client certificate -- the SDS secret a `quic:` twin names, keyed by the
+// SPIFFE ID -- the cache holds, and those still waiting for SPIRE to deliver it
+// (issue #1049). Only the first get QUIC selection arms and twins; see
+// quicFanout. Takes secretMu alone (never nested in another lock here).
+//
+// With no secrets at all the SDS source is not serving yet, and every mTLS
+// cluster on the node is equally blocked on it; nothing is held back then, so
+// the fan-out keeps its pre-#1049 shape (and so do fixtures that do not model
+// SDS). The gate is for the case that matters: SPIRE serving the node while a
+// NEW identity's certificate is still in flight.
+func (c *SnapshotCache) splitByClientCertificate(identities []string) (ready, awaiting []string) {
+	c.secretMu.RLock()
+	defer c.secretMu.RUnlock()
+	if len(c.secrets) == 0 {
+		return identities, nil
+	}
+	ready = make([]string, 0, len(identities))
+	for _, id := range identities {
+		if _, ok := c.secrets[id]; ok {
+			ready = append(ready, id)
+		} else {
+			awaiting = append(awaiting, id)
+		}
+	}
+	return ready, awaiting
+}
+
 // markLocalPodsSynced records that the node's pod records have been loaded, so
 // a missing local ServiceAccount is now evidence its pairs' source has left.
 func (c *SnapshotCache) markLocalPodsSynced() {

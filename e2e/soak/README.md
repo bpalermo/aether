@@ -292,6 +292,18 @@ log_name:aether_access_logs AND reporter:source AND user_agent:~"aether-soak-new
   | stats by (node_name, authority) count()
 ```
 
+**The hard case is an agent restart immediately before the step (#1049).** On rev248,
+the first pods of a ServiceAccount started right after an agent roll waited
+6.9-7.4 s for their SVID. A twin published before its source's certificate warms on
+SDS for all of that time, so the step's first requests 503 `NC` at the 2 s
+`on_demand` timeout (428 k6 failures fleet-wide). To test it, roll the agent
+DaemonSet and start `churn.sh --new-sa-once` as soon as the roll finishes. The step
+must still read `non2xx=0`. On the step's node the agent logs `east-west QUIC fan-out
+… awaiting_client_cert=1`, then `awaiting_client_cert=0` when the SVID lands. Only
+after that does the pod's first svc-1 request fetch its twin.
+Neither the step's node nor any other may log `not found during on-demand discovery`
+for a `quic:` name.
+
 plus the driver's own reading: `grep 'newsa/' /tmp/soak-churn.log` shows two `ROLLED`
 lines with `non2xx=0,connerr=0` on both destinations.
 

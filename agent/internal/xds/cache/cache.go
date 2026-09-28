@@ -307,10 +307,12 @@ type SnapshotCache struct {
 	// node's pod records: only then is "no local pod of this ServiceAccount"
 	// evidence that a persisted QUIC pair's source left. Guarded by depMu.
 	localPodsSynced bool
-	// quicBudgetSeen/quicBudgetMu: the QUIC twin count last logged, so the
+	// quicBudgetSeen/quicAwaitingSeen/quicBudgetMu: the QUIC twin count and
+	// the count of identities awaiting their certificate last logged, so the
 	// fan-out is announced on change rather than on every snapshot.
-	quicBudgetMu   sync.Mutex
-	quicBudgetSeen int
+	quicBudgetMu     sync.Mutex
+	quicBudgetSeen   int
+	quicAwaitingSeen int
 	// edgeGeo configures the edge geoip filter (proposal 028); nil = no geoip
 	// (the x-geo-* strip is emitted regardless on edge chains). Boot-time.
 	edgeGeo            *proxy.GeoipConfig
