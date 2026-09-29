@@ -101,6 +101,7 @@ type SupervisorMetrics struct {
 	readyTransitions    metric.Int64Counter
 	adminProbes         metric.Int64Counter
 	shutdownBranches    metric.Int64Counter
+	childSilent         metric.Int64Counter
 }
 
 // NewSupervisorMetrics registers the supervisor instruments on the given meter.
@@ -156,6 +157,14 @@ func NewSupervisorMetrics(meter metric.Meter) (*SupervisorMetrics, error) {
 		metric.WithDescription("SIGTERM outcomes, by which arm of the shutdown decision table was taken. handoff and successor_wait are the hitless ones; a drain_fallback during a rolling upgrade means the surge replacement never arrived (#795)")); err != nil {
 		return nil, fmt.Errorf("shutdown branches: %w", err)
 	}
+	if m.childSilent, err = meter.Int64Counter("aether.supervisor.child_silent",
+		metric.WithDescription("Hot-restart children whose admin stopped answering for 10s after they went LIVE, inside the parent-shutdown window: the #1050 wedge signature, counted once per epoch and well before the liveness watchdog fires (#1058). Expected 0 per roll")); err != nil {
+		return nil, fmt.Errorf("child silent: %w", err)
+	}
+	// Seeded at zero for the same reason as the shutdown branches below: the
+	// soak gate is "0 per roll", and an unseeded counter cannot tell 0 from
+	// "never exported".
+	m.childSilent.Add(context.Background(), 0)
 	// Seed every branch at zero. A supervisor records exactly ONE shutdown
 	// branch, once, at the very end of its life, and the OTel SDK exports a
 	// counter only after its first Add — so without this, "the fleet never took
@@ -245,6 +254,15 @@ func (m *SupervisorMetrics) shutdownBranchTaken(branch string) {
 		return
 	}
 	m.shutdownBranches.Add(context.Background(), 1, metric.WithAttributes(attrShutdownBranch.String(branch)))
+}
+
+// childSilentDetected counts one silent hot-restart child (see
+// checkChildSilent).
+func (m *SupervisorMetrics) childSilentDetected() {
+	if m == nil {
+		return
+	}
+	m.childSilent.Add(context.Background(), 1)
 }
 
 func (m *SupervisorMetrics) adminProbed(endpoint, result string) {

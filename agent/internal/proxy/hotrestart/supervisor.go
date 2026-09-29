@@ -178,13 +178,29 @@ type Supervisor struct {
 	// admin has confirmed LIVE at that epoch at least once.
 	epochLaunched time.Time
 	epochLive     bool
+	// epochLiveAt is when the newest epoch's first LIVE was observed (zero until
+	// then). It anchors the child-silent check (see checkChildSilent).
+	epochLiveAt time.Time
+
+	// adminHeard records, per restart epoch, the last time the node's admin
+	// answered AS that epoch; adminHeardLatest is the epoch of the most recent
+	// such answer (-1: none). They are the evidence the watchdog kill uses to
+	// tell "both epochs of the handoff are silent" from "one is" (see
+	// handoffSilence, issue #1058). Guarded by mu.
+	adminHeard       map[int]time.Time
+	adminHeardLatest int
+	// handoffPeer is the predecessor epoch of an in-flight cross-pod handoff
+	// (-1: none): set with gatedEpoch when a live predecessor is confirmed,
+	// cleared once this pod goes Ready (the predecessor is gone by then).
+	// Guarded by mu.
+	handoffPeer int
 
 	childExited chan childExit
 	done        chan struct{}
 	// watchdogFired carries a fatal diagnosis from watchLiveness to Run: the
 	// newest Envoy is wedged (handoff never LIVE, or admin unresponsive) and the
 	// container must exit non-zero so Kubernetes recreates the pod.
-	watchdogFired chan error
+	watchdogFired chan watchdogFire
 
 	// readyGate delays the pod's readiness until after a cross-pod handoff is fully
 	// complete: the successor Envoy terminates the predecessor itself via
@@ -209,6 +225,19 @@ type Supervisor struct {
 	// logged once per streak rather than every tick. Owned by the watchLiveness
 	// goroutine; not guarded.
 	holdingUnreachable bool
+
+	// childSilentEpoch is the last epoch counted as a silent hot-restart child
+	// (-1: none), so the signal fires at most once per epoch. Owned by the
+	// watchLiveness goroutine; not guarded.
+	childSilentEpoch int
+}
+
+// watchdogFire is a fatal wedge diagnosis delivered from watchLiveness to Run.
+type watchdogFire struct {
+	err error
+	// silence is the handoff-pair verdict taken on the tick the watchdog fired;
+	// allSilent selects SIGKILL-now over SIGTERM + drain grace (issue #1058).
+	silence handoffSilence
 }
 
 // readyGateTime guards readyGate for concurrent access between Run
@@ -299,10 +328,14 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 		adminFast:          fast,
 		children:           make(map[int]*exec.Cmd),
 		gatedEpoch:         -1,
+		adminHeard:         make(map[int]time.Time),
+		adminHeardLatest:   -1,
+		handoffPeer:        -1,
+		childSilentEpoch:   -1,
 		now:                time.Now,
 		childExited:        make(chan childExit, 8),
 		done:               make(chan struct{}),
-		watchdogFired:      make(chan error, 1),
+		watchdogFired:      make(chan watchdogFire, 1),
 	}
 }
 
@@ -381,13 +414,20 @@ func (lp *restartLoop) run(sigCh <-chan os.Signal, trigger <-chan struct{}) erro
 				return err
 			}
 
-		case err := <-lp.s.watchdogFired:
-			// The newest Envoy is wedged (see watchLiveness): kill everything and
-			// exit non-zero. Kubernetes recreates the pod; the fresh supervisor
-			// re-probes the (now dead) predecessor and recovers at epoch 0.
-			lp.s.log.ErrorContext(lp.ctx, "liveness watchdog fired; terminating for container restart", "error", err)
-			lp.s.shutdown()
-			return err
+		case fire := <-lp.s.watchdogFired:
+			// The newest Envoy is wedged (see watchLiveness): stop every epoch
+			// and exit non-zero. Run's error reaches main as os.Exit(1), so
+			// the kubelet restarts the proxy container IN PLACE (DaemonSet pods
+			// are restartPolicy Always): restartCount +1, same pod, and the
+			// fresh supervisor re-probes the (now dead) predecessor and
+			// recovers at epoch 0. There is no in-process re-exec. The only
+			// way this exit does not bump restartCount is a pod that is
+			// already terminating, whose containers the kubelet does not
+			// restart (see docs/runbook.md, #1058).
+			lp.s.log.ErrorContext(lp.ctx, "liveness watchdog fired; terminating for container restart",
+				"error", fire.err, "exitCode", 1)
+			lp.s.stopWedged(lp.ctx, fire.silence)
+			return fire.err
 
 		case exit := <-lp.s.childExited:
 			retErr, done := lp.handleChildExit(exit)
@@ -809,6 +849,7 @@ func (s *Supervisor) hotRestart() error {
 	s.nextEpoch = epoch + 1
 	s.epochLaunched = s.now()
 	s.epochLive = false
+	s.epochLiveAt = time.Time{}
 	s.mu.Unlock()
 	s.metrics.epochStarted(epoch)
 
@@ -948,14 +989,31 @@ func (s *Supervisor) quickNonLiveExit() bool {
 func (s *Supervisor) resetEpochForRetry() {
 	s.mu.Lock()
 	s.nextEpoch = 0
+	// Epoch numbering restarts, so admin answers recorded against the old
+	// numbering must not be read as a successor of the relaunch (see
+	// handoffSilence).
+	clear(s.adminHeard)
+	s.adminHeardLatest = -1
 	s.mu.Unlock()
 }
 
-// markEpochLive records that the newest epoch has been confirmed LIVE.
+// markEpochLive records that the newest epoch has been confirmed LIVE, and
+// when that was first observed.
 func (s *Supervisor) markEpochLive() {
 	s.mu.Lock()
+	if !s.epochLive {
+		s.epochLiveAt = s.now()
+	}
 	s.epochLive = true
 	s.mu.Unlock()
+}
+
+// epochFirstLive returns when the newest epoch's first LIVE was observed, or
+// the zero time if it has not been LIVE yet.
+func (s *Supervisor) epochFirstLive() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.epochLiveAt
 }
 
 // childTracked reports whether the child for the given epoch is still tracked
@@ -1001,10 +1059,11 @@ func (s *Supervisor) adminUnresponsiveDeadline() time.Duration {
 }
 
 // fireWatchdog delivers a fatal wedge diagnosis to Run (at most one is ever
-// consumed; extra fires are dropped).
+// consumed; extra fires are dropped), together with the handoff-pair silence
+// verdict taken at the same instant.
 func (s *Supervisor) fireWatchdog(err error) {
 	select {
-	case s.watchdogFired <- err:
+	case s.watchdogFired <- watchdogFire{err: err, silence: s.handoffSilence(s.now())}:
 	default:
 	}
 }
