@@ -73,7 +73,7 @@
 # Red/green (#1054, e2e/soak/README.md):
 #   red    HR_DRAIN_STRATEGY=gradual HR_QUIC_IDLE=30s EWQ_WORKER=1 ... up
 #          HR_MODE=sparse HR_REQUIRE_RESET=1 HR_FREEZE_PARENT_S=4 HR_FREEZE_AT=14 ... verify
-#   green  EWQ_WORKER=1 ... up          (chart defaults: immediate, 8s)
+#   green  EWQ_WORKER=1 ... up          (chart defaults: gradual, 8s; patched proxy)
 #          HR_MODE=sparse ... verify    (and again with the freeze)
 # On kind (2026-09-28) red saw 0 resets in 10 restarts unforced and 1 in 10
 # forced; green saw 0 in 10 both ways. The race is real but rare on two
