@@ -129,7 +129,10 @@ symbol upload is keyed by (#653).
   not yet proposed upstream), and a second aether#1054 patch (a draining hot-restart
   parent answers packets for its own recently closed QUIC connections from its
   time-wait list instead of forwarding them to the child, which stateless-reset
-  them; not yet proposed upstream). A carried patch's own Envoy tests run from
+  them; not yet proposed upstream), and a third aether#1054 patch (a paused
+  hot-restart child UDP listener no longer reads the parent's socket when the
+  QUIC listener injects a read to process forwarded handshakes; an upstream bug,
+  to be proposed upstream). A carried patch's own Envoy tests run from
   `//bazel/patches:carried_patch_tests`, since `//...` does not reach `@envoy` tests.
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)

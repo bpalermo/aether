@@ -89,6 +89,17 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 #   true). Parent-side, so it takes effect from the second roll on. Its test
 #   (test/common/quic:envoy_quic_dispatcher_test) only builds in the Envoy workspace
 #   (quiche test tooling), so it is not in //bazel/patches:carried_patch_tests.
+#   aether#1054, third patch (an upstream bug; to be proposed upstream), applied
+#   AFTER aether1054b: a paused hot-restart child UDP listener (inherited socket,
+#   read events disabled until the parent is gone) still READ the shared socket
+#   whenever the QUIC listener injected a read activation to process handshakes
+#   buffered from forwarded packets (injected activations bypass the enabled-event
+#   mask); the packets it dequeued belonged to the parent's connections and the
+#   child's dispatcher stateless-reset each one (the drain-start resets left after
+#   #1064/#1066). UdpListenerImpl::handleReadCallback now runs onReadReady() and
+#   returns without reading while paused. Child-side: effective from the first roll.
+#   Carries its test (test/common/network:udp_listener_impl_test), run by
+#   //bazel/patches:carried_patch_tests.
 #   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
@@ -101,6 +112,7 @@ single_version_override(
         "//bazel/patches:envoy-aether1050-hotrestart-nonblocking-forward.patch",
         "//bazel/patches:envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch",
         "//bazel/patches:envoy-aether1054b-quic-time-wait-before-forward.patch",
+        "//bazel/patches:envoy-aether1054c-paused-udp-listener-no-read.patch",
     ],
 )
 

@@ -1,0 +1,84 @@
+diff --git a/source/common/network/udp_listener_impl.cc b/source/common/network/udp_listener_impl.cc
+index 0fd869d459..09e3f0bb1b 100644
+--- a/source/common/network/udp_listener_impl.cc
++++ b/source/common/network/udp_listener_impl.cc
+@@ -104,6 +104,15 @@ void UdpListenerImpl::onSocketEvent(short flags) {
+ void UdpListenerImpl::handleReadCallback() {
+   ENVOY_UDP_LOG(trace, "handleReadCallback");
+   cb_.onReadReady();
++  if (paused()) {
++    // The socket is inherited from a hot restart parent that is still serving it, and this
++    // listener must not read it until the parent is gone: the parent forwards the packets that are
++    // ours, and whatever we would dequeue here belongs to the parent's connections (a QUIC
++    // listener would answer each with a stateless reset). Read events are not enabled while
++    // paused, so this one was injected (activateRead()) to run onReadReady() above, e.g. to
++    // process the handshakes buffered from forwarded packets; it is not a signal to read.
++    return;
++  }
+   const Api::IoErrorPtr result = Utility::readPacketsFromSocket(
+       socket_->ioHandle(), *socket_->connectionInfoProvider().localAddress(), *this, time_source_,
+       config_.prefer_gro_, /*allow_mmsg=*/true, packets_dropped_);
+diff --git a/test/common/network/udp_listener_impl_test.cc b/test/common/network/udp_listener_impl_test.cc
+index fe605f6a43..7004961900 100644
+--- a/test/common/network/udp_listener_impl_test.cc
++++ b/test/common/network/udp_listener_impl_test.cc
+@@ -26,6 +26,7 @@ using testing::AtLeast;
+ using testing::Invoke;
+ using testing::Return;
+ using testing::ReturnRef;
++using testing::SaveArg;
+ 
+ namespace Envoy {
+ namespace Network {
+@@ -457,8 +458,9 @@ public:
+   }
+   void setup() {
+     io_handle_ = &useHotRestartSocket(registrar_);
+-    // File event should be created listening to no events (i.e. disabled).
+-    EXPECT_CALL(*io_handle_, createFileEvent_(_, _, _, 0));
++    // File event should be created listening to no events (i.e. disabled). Keep its callback so a
++    // test can inject an event on the paused listener.
++    EXPECT_CALL(*io_handle_, createFileEvent_(_, _, _, 0)).WillOnce(SaveArg<1>(&file_event_cb_));
+     // Parent drained callback should be registered when the listener is created.
+     // We capture the callback so we can simulate "drain complete".
+     EXPECT_CALL(registrar_, registerParentDrainedCallback(_, _))
+@@ -474,6 +476,7 @@ protected:
+   MockParentDrainedCallbackRegistrar registrar_;
+   MockIoHandle* io_handle_;
+   absl::AnyInvocable<void()> parent_drained_callback_;
++  Event::FileReadyCb file_event_cb_;
+ };
+ 
+ INSTANTIATE_TEST_SUITE_P(IpVersions, HotRestartedUdpListenerImplTest,
+@@ -537,6 +540,31 @@ TEST_P(HotRestartedUdpListenerImplTest, EndingParentDrainedWhileDisabledShouldNo
+   testing::Mock::VerifyAndClearExpectations(io_handle_);
+ }
+ 
++/**
++ * A read event injected on the paused listener (activateRead(), which the QUIC listener uses to
++ * process the handshakes it buffered from packets the parent forwarded) runs the read-ready
++ * callback but must not read the socket: the socket is the parent's to read until the parent is
++ * gone, and anything dequeued here would belong to the parent's connections.
++ */
++TEST_P(HotRestartedUdpListenerImplTest, InjectedReadWhilePausedDoesNotReadTheSocket) {
++  setup();
++  ASSERT_TRUE(file_event_cb_ != nullptr);
++  EXPECT_CALL(listener_callbacks_, onReadReady());
++  // No read of any kind, and no re-arming of the read event.
++  EXPECT_CALL(*io_handle_, supportsMmsg()).Times(0);
++  EXPECT_CALL(*io_handle_, activateFileEvents(_)).Times(0);
++  EXPECT_TRUE(file_event_cb_(Event::FileReadyType::Read).ok());
++  testing::Mock::VerifyAndClearExpectations(io_handle_);
++  testing::Mock::VerifyAndClearExpectations(&listener_callbacks_);
++
++  // Once the parent is gone the listener starts reading as usual.
++  EXPECT_CALL(*io_handle_,
++              enableFileEvents(Event::FileReadyType::Read | Event::FileReadyType::Write));
++  EXPECT_CALL(*io_handle_, activateFileEvents(Event::FileReadyType::Read));
++  std::move(parent_drained_callback_)();
++  dispatcher_->run(Event::Dispatcher::RunType::Block);
++}
++
+ TEST_P(HotRestartedUdpListenerImplTest,
+        ParentDrainedCallbackAfterListenerDestroyedShouldDoNothing) {
+   setup();
