@@ -32,7 +32,7 @@ import (
 //
 // These drive the agent's real observer and real snapshot cache through
 // go-control-plane's delta server over an in-memory gRPC connection: 12 local
-// ServiceAccounts x 2 QUIC-enabled destinations = 24 twins, and an EMPTY
+// ServiceAccounts x 2 QUIC-eligible destinations = 24 twins, and an EMPTY
 // persisted demand set.
 
 const (
@@ -40,13 +40,15 @@ const (
 	restateDomain = "aether.internal"
 )
 
-// newRestateNode is a node with 12 local ServiceAccounts and 2 QUIC-enabled
-// destinations, nothing observed; it returns the 24 twin names.
+// newRestateNode is a node with 12 local ServiceAccounts and 2 destinations in
+// its dependency set (so QUIC-eligible, #979), nothing observed; it returns the 24 twin names.
 func newRestateNode(ctx context.Context, t *testing.T) (*cache.SnapshotCache, []string) {
 	t.Helper()
 	c := cache.NewSnapshotCache(restateNode, slog.New(slog.DiscardHandler))
 	destinations := []string{"demo/echo", "demo/other"}
-	c.SetEastWestQUICServices(destinations)
+	for _, dst := range destinations {
+		c.RestoreDependency(ctx, dst)
+	}
 	var twins []string
 	for i := range 12 {
 		sa := fmt.Sprintf("sa-%02d", i)

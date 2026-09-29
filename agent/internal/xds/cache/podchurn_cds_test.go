@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
@@ -324,6 +325,9 @@ func TestNoNetnsPathInServiceClusterBytes(t *testing.T) {
 		ServiceAccount:   "svc-5",
 		NetworkNamespace: "/var/run/netns/cni-c",
 	}, "aether.internal"))
+	// svc-5 has dialled svc-2, so the snapshot carries its quic: twin
+	// (demand-scoped, aether#1020) -- the one sanctioned exception below.
+	observeQUIC(t, c, "aether-test/svc-2", "aether-test/svc-5")
 
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
@@ -335,7 +339,7 @@ func TestNoNetnsPathInServiceClusterBytes(t *testing.T) {
 		"/var/run/netns/cni-a", "/var/run/netns/cni-c", "/var/run/netns/",
 		"spiffe://aether.internal/ns/aether-test/sa/svc-5",
 	}
-	selectors := 0
+	selectors, twins := 0, 0
 	for name, r := range snap.GetResources(resourcev3.ClusterType) {
 		if !isServiceClusterName(name) {
 			// Per-pod app_/health_/inboundready_ clusters legitimately dial
@@ -352,7 +356,20 @@ func TestNoNetnsPathInServiceClusterBytes(t *testing.T) {
 		}
 		b, err := cachev3.MarshalResource(r)
 		require.NoError(t, err)
+		// The one sanctioned exception: an east-west QUIC twin
+		// (quic:<authority>@<ns>/<sa>, proposal 038 Phase 4b) presents ITS OWN
+		// source's SVID statically -- QuicUpstreamTransport rejects a
+		// certificate selector (Q2a), so the identity is the cluster's. Twins
+		// exist for every eligible service (#979) once a pair has dialled; each may
+		// name exactly the source in its own name and nothing else (no netns,
+		// no other workload).
+		_, ownSource, isTwin := strings.Cut(name, "@")
+		isTwin = isTwin && strings.HasPrefix(name, "quic:")
 		for _, needle := range needles {
+			if isTwin && proxy.SourceSAKeyFromSpiffeID(needle) == ownSource {
+				twins++
+				continue
+			}
 			require.NotContainsf(t, string(b), needle,
 				"service cluster %s still embeds per-node state (%q): certificate "+
 					"selection is per CONNECTION since #842, so nothing about the node's "+
@@ -361,6 +378,7 @@ func TestNoNetnsPathInServiceClusterBytes(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, selectors, 3,
 		"the fixture must emit service clusters that actually carry the certificate selector")
+	require.Positive(t, twins, "the fixture must emit svc-5 quic: twins, or the exception above is vacuous")
 }
 
 // isServiceClusterName reports whether a cluster name is a registry-derived mesh

@@ -121,7 +121,7 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 			vhosts = append(vhosts, vhost)
 		}
 	}
-	c.noteQUICFanout(quicClusters, len(quic.pairs), len(quic.identities), len(quic.awaitingCert), len(quic.services))
+	c.noteQUICFanout(quicClusters, len(quic.pairs), len(quic.identities), len(quic.awaitingCert))
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)
 	sortVirtualHostsByName(vhosts)
@@ -1040,9 +1040,11 @@ func outboundPortVhostWithChainFilter(portName string, chainFilters map[string]p
 }
 
 // quicFanout is the per-snapshot input to the east-west QUIC fan-out: the
-// allow-list, the local workload identities whose client certificate the
-// snapshot carries (sorted), the OBSERVED (destination, source) pairs (issue
-// #1020) and the mTLS state the twins are rendered from.
+// local workload identities whose client certificate the snapshot carries
+// (sorted), the OBSERVED (destination, source) pairs (issue #1020), the mTLS
+// state the twins are rendered from, and whether the waypoint split is on.
+// East-west QUIC is unconditional (decision 2026-09-26, #979): every eligible
+// destination (see armsFor) gets selection arms, there is no allow-list.
 //
 // identities is deliberately NOT every local identity (issue #1049). A twin
 // names its source's SVID statically in its transport socket, so a twin
@@ -1056,18 +1058,20 @@ func outboundPortVhostWithChainFilter(portName string, chainFilters map[string]p
 // that cannot exist yet. The snapshot that carries the certificate carries the
 // arm and the twin with it.
 type quicFanout struct {
-	services     map[string]struct{}
+	// deps is the node's dependency set: the destinations eligible for arms.
+	deps         map[string]struct{}
 	identities   []string
 	awaitingCert []string
 	pairs        map[quicPair]struct{}
 	mtls         localMTLSState
+	waypoint     bool
 	// idleTimeout is every twin's pool idle timeout (aether#1054).
 	idleTimeout time.Duration
 }
 
 // quicFanoutSnapshot takes the fan-out inputs for one snapshot. It also
 // prunes the observed pairs whose source left the node or whose destination
-// left the allow-list / dependency set, so a pruned pair's twin leaves in the
+// left the dependency set, so a pruned pair's twin leaves in the
 // same snapshot. localMu and depMu are taken one after the other, never
 // nested, and neither inside clusterMu.
 func (c *SnapshotCache) quicFanoutSnapshot() quicFanout {
@@ -1075,9 +1079,9 @@ func (c *SnapshotCache) quicFanoutSnapshot() quicFanout {
 		return quicFanout{}
 	}
 	identities := c.localWorkloadIdentities()
-	services, pairs := c.quicDemandSnapshot(identities)
-	f := quicFanout{services: services, pairs: pairs, idleTimeout: time.Duration(c.quicIdleTimeout.Load())}
-	if len(f.services) == 0 {
+	deps, pairs := c.quicDemandSnapshot(identities)
+	f := quicFanout{deps: deps, pairs: pairs, waypoint: c.waypointEnabled, idleTimeout: time.Duration(c.quicIdleTimeout.Load())}
+	if len(identities) == 0 {
 		return f
 	}
 	f.identities, f.awaitingCert = c.splitByClientCertificate(identities)
@@ -1086,18 +1090,27 @@ func (c *SnapshotCache) quicFanoutSnapshot() quicFanout {
 }
 
 // armsFor returns the (source SPIFFE ID -> twin name) selection arms for one
-// cluster-cache entry -- one per local ServiceAccount, whether or not its twin
-// has been built -- or nil when the entry is not an allow-listed service's
-// default, identity-ready entry.
+// cluster-cache entry -- one per local ServiceAccount whose certificate is
+// served, whether or not its twin has been built -- or nil when the entry is
+// not an eligible destination: a service in the node's dependency set (an
+// entry can outlive its membership until the scoped reload drops it, and
+// recordQUICPair refuses such a pair), its DEFAULT entry (keyed by the bare
+// service, so never a per-port or alias entry), identity-ready (mtlsCluster !=
+// nil), with no endpoint dialed through a remote cluster's waypoint tunnel
+// (proxy.HasWaypointEndpoint -- that path has no QUIC leg). Every service in
+// the node's dependency set that passes is eligible; there is no allow-list.
 //
 // An arm whose twin is not in the snapshot is how a new pair is observed
 // (issue #1020): the source's first request routes to the missing name, the
 // on_demand filter asks for it over ODCDS, and ObserveQUICTwin builds it.
 func (q quicFanout) armsFor(key string, entry clusterEntry, meshDomain string) map[string]string {
-	if len(q.services) == 0 || len(q.identities) == 0 || key != entry.service || entry.mtlsCluster == nil || entry.cluster == nil {
+	if len(q.identities) == 0 || key != entry.service || entry.mtlsCluster == nil || entry.cluster == nil {
 		return nil
 	}
-	if _, ok := q.services[entry.service]; !ok {
+	if !has(q.deps, entry.service) {
+		return nil
+	}
+	if q.waypoint && proxy.HasWaypointEndpoint(entry.loadAssignment) {
 		return nil
 	}
 	arms := make(map[string]string, len(q.identities))
@@ -1131,7 +1144,7 @@ func (q quicFanout) twinsFor(entry clusterEntry, arms map[string]string, meshDom
 
 // entryTwinsAndVhost returns an entry's HTTP/3 twins (proposal 038 Phase 4b),
 // their load assignments, and the vhost to publish for it: the entry's own
-// vhost, or -- for an allow-listed, identity-ready default entry -- a clone
+// vhost, or -- for an eligible, identity-ready default entry -- a clone
 // whose route to the h2 cluster selects per source identity.
 //
 // Twins are demand-scoped (issue #1020): the vhost carries an arm for every
@@ -1171,13 +1184,13 @@ func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomai
 
 // noteQUICFanout logs the cluster budget east-west QUIC costs whenever it
 // changes: one twin per OBSERVED (destination, source) pair (issue #1020), out
-// of local ServiceAccounts x allow-listed services possible ones. INFO because
-// the number is the thing an operator sizing QUIC needs to see; it must equal
-// the proxy's `quic:` cluster count. awaitingCert is how many local identities
-// are held out of the fan-out -- no arm, no twin -- until SPIRE delivers their
-// certificate (issue #1049); a value that never returns to 0 is a stuck SVID,
-// not a QUIC fault.
-func (c *SnapshotCache) noteQUICFanout(twins, pairs, identities, awaitingCert, services int) {
+// of local ServiceAccounts x eligible services in the node's dependency set
+// possible ones. INFO because the number is the thing an operator sizing a
+// node needs to see; it must equal the proxy's `quic:` cluster count.
+// awaitingCert is how many local identities are held out of the fan-out -- no
+// arm, no twin -- until SPIRE delivers their certificate (issue #1049); a value
+// that never returns to 0 is a stuck SVID, not a QUIC fault.
+func (c *SnapshotCache) noteQUICFanout(twins, pairs, identities, awaitingCert int) {
 	c.quicBudgetMu.Lock()
 	changed := c.quicBudgetSeen != twins || c.quicAwaitingSeen != awaitingCert
 	c.quicBudgetSeen = twins
@@ -1185,19 +1198,18 @@ func (c *SnapshotCache) noteQUICFanout(twins, pairs, identities, awaitingCert, s
 	c.quicBudgetMu.Unlock()
 	if changed {
 		c.log.Info("east-west QUIC fan-out", "quic_clusters", twins, "observed_pairs", pairs, "local_identities", identities,
-			"awaiting_client_cert", awaitingCert, "allow_listed_services", services)
+			"awaiting_client_cert", awaitingCert)
 	}
 }
 
-// quicArmsByService returns, for every allow-listed service whose default entry
-// is identity-ready, the (source SPIFFE ID -> quic: twin) arms its vhosts
-// select with -- the same predicate armsFor applies on out_http, so both route
-// tables select identically. An arm may name a twin that is not built yet;
-// see entryTwinsAndVhost. Takes clusterMu for reading; callers must not hold
-// it.
+// quicArmsByService returns, for every eligible service (see armsFor), the
+// (source SPIFFE ID -> quic: twin) arms its vhosts select with -- the same
+// predicate armsFor applies on out_http, so both route tables select
+// identically. An arm may name a twin that is not built yet; see
+// entryTwinsAndVhost. Takes clusterMu for reading; callers must not hold it.
 func (c *SnapshotCache) quicArmsByService() map[string]map[string]string {
 	quic := c.quicFanoutSnapshot()
-	if len(quic.services) == 0 || len(quic.identities) == 0 {
+	if len(quic.identities) == 0 {
 		return nil
 	}
 	c.clusterMu.RLock()

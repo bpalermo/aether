@@ -25,13 +25,13 @@ import (
 // stream and restarts the agent once more on the same store: no dormant pair
 // may survive that no live generation holds a subscription for.
 
-// newGenerationNode is a node with two local ServiceAccounts, "demo/echo"
-// QUIC-enabled, persisting its observed set at path (enabled before any pod
+// newGenerationNode is a node with two local ServiceAccounts, "demo/echo" in
+// its dependency set (so QUIC-eligible, #979), persisting its observed set at path (enabled before any pod
 // lands, as the agent does at boot).
 func newGenerationNode(ctx context.Context, t *testing.T, path string) *cache.SnapshotCache {
 	t.Helper()
 	c := cache.NewSnapshotCache(restateNode, slog.New(slog.DiscardHandler))
-	c.SetEastWestQUICServices([]string{"demo/echo"})
+	c.RestoreDependency(ctx, "demo/echo")
 	c.EnableObservedUpstreamsStore(ctx, path)
 	t.Cleanup(c.FlushObservedUpstreams)
 	for i := range 2 {

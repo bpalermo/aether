@@ -6,7 +6,7 @@ package mtlspool
 // Envoy's ODCDS manager keeps ONE subscription per cluster name for the life
 // of the process. When the agent removes a twin the proxy fetched on demand --
 // its source ServiceAccount's last pod left the node, or its destination left
-// the allow-list -- Envoy drops the cluster and keeps the subscription. When a
+// the node's dependency set -- Envoy drops the cluster and keeps the subscription. When a
 // pod of that ServiceAccount comes back (every Deployment roll), its request
 // routes to the twin name again, Envoy logs "already subscribed, skipping",
 // sends nothing, and the request 503s NC at the 2 s on_demand timeout -- and
@@ -36,14 +36,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// validLocked is the agent's pair validity: the destination is allow-listed
-// and the source has a pod on the node. Caller holds a.mu.
+// validLocked is the agent's pair validity: the destination is in the node's
+// dependency set (every such destination is QUIC-eligible since #979) and the
+// source has a pod on the node. Caller holds a.mu.
 func (a *odcdsAgent) validLocked(name string) bool {
 	svc, source, ok := proxy.ParseQUICClusterName(name, trustDomain)
-	return ok && svc == odcdsDestSvc && !a.delisted && !a.awaySources[source]
+	return ok && svc == odcdsDestSvc && !a.destGone && !a.awaySources[source]
 }
 
-// setSourceAway / setDelisted change the pair validity, then reconcile.
+// setSourceAway / setDestinationGone change the pair validity, then reconcile.
 func (a *odcdsAgent) setSourceAway(source string, away bool) {
 	a.mu.Lock()
 	a.awaySources[source] = away
@@ -51,9 +52,9 @@ func (a *odcdsAgent) setSourceAway(source string, away bool) {
 	a.reconcile()
 }
 
-func (a *odcdsAgent) setDelisted(delisted bool) {
+func (a *odcdsAgent) setDestinationGone(gone bool) {
 	a.mu.Lock()
-	a.delisted = delisted
+	a.destGone = gone
 	a.mu.Unlock()
 	a.reconcile()
 }
@@ -139,8 +140,8 @@ func dormantRun(t *testing.T, forget bool, leave, ret func(r *odcdsRun)) {
 	leave(r)
 	require.Eventually(t, func() bool { return len(r.quicClusters(t)) == 0 }, 10*time.Second, 50*time.Millisecond,
 		"the invalid pair's twin must leave the proxy")
-	// A real return (a new pod of the ServiceAccount, a re-listed destination)
-	// comes seconds later, after Envoy has torn the removed twin down: wait for
+	// A real return (a new pod of the ServiceAccount, a destination back in the
+	// dependency set) comes seconds later, after Envoy has torn the removed twin down: wait for
 	// it to release the twin's EDS name and its certificate's SDS name.
 	// Returning inside that teardown races go-control-plane's delta server,
 	// which can record a response for a name the proxy is unsubscribing in the
@@ -202,17 +203,17 @@ func TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns(t *testing.T) {
 	}
 }
 
-// TestOnDemandQUICDormantTwinRepublishedWhenDestinationIsRelisted: the
-// destination leaves the QUIC allow-list and is listed again.
-func TestOnDemandQUICDormantTwinRepublishedWhenDestinationIsRelisted(t *testing.T) {
+// TestOnDemandQUICDormantTwinRepublishedWhenDestinationReturns: the
+// destination leaves the node's dependency set and comes back.
+func TestOnDemandQUICDormantTwinRepublishedWhenDestinationReturns(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		forget bool
 	}{{name: "dormant"}, {name: "forget_control", forget: true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			dormantRun(t, tc.forget,
-				func(r *odcdsRun) { r.agent.setDelisted(true) },
-				func(r *odcdsRun) { r.agent.setDelisted(false) })
+				func(r *odcdsRun) { r.agent.setDestinationGone(true) },
+				func(r *odcdsRun) { r.agent.setDestinationGone(false) })
 		})
 	}
 }

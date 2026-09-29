@@ -269,19 +269,12 @@ type SnapshotCache struct {
 	// annotation of its own. Fed by the endpointpolicy reconciler; at most one
 	// per service. Guarded by depMu.
 	udsServicePolicies map[string]string
-	// quicServices is the east-west QUIC allow-list (proposal 038 Phase 4b,
-	// --east-west-quic-services): "<ns>/<svc>" destinations whose routes select
-	// a per-source `quic:` cluster, built for each observed pair (quicPairs).
-	// Guarded by depMu; a listed service is forced into the dependency
-	// set (populateStaticDepsLocked) because the QUIC clusters clone the h2
-	// entry and a destination outside the set has no entry to clone.
-	quicServices map[string]struct{}
 	// quicPairs is the OBSERVED east-west QUIC demand (issue #1020): the
 	// (destination, source ServiceAccount) pairs whose `quic:` twin the node
 	// proxy asked for on demand, valued with when each was first recorded. A
 	// twin is built only for these. No idle TTL (the proxy never says a twin
 	// went idle); pruned when the source leaves the node or the destination
-	// leaves the allow-list / dependency set (pruneQUICPairsLocked). Guarded
+	// leaves the dependency set (pruneQUICPairsLocked). Guarded
 	// by depMu; persisted with observedDeps.
 	quicPairs map[quicPair]time.Time
 	// quicFetched is the pairs fetched on demand (ObserveQUICTwin) in THIS
@@ -772,47 +765,6 @@ func (c *SnapshotCache) MeshDomain() string {
 	return c.meshDomain
 }
 
-// SetWaypointConfig enables the split-horizon east/west waypoint rewrite
-// (proposal 019) and sets the node tunnel port dialed for cross-cluster
-// endpoints. Off by default; must be called before the manager starts (read
-// without locking on every cluster build).
-// SetEastWestQUICServices replaces the east-west QUIC allow-list (proposal 038
-// Phase 4b): the "<ns>/<svc>" destinations whose routes select a per-source
-// HTTP/3 twin by the source identity. Everything else stays h2, byte-identical.
-//
-// Twins are demand-scoped (issue #1020): one per (source ServiceAccount,
-// listed destination) pair that has dialled, fetched on its first request
-// over ODCDS (ObserveQUICTwin) -- not local ServiceAccounts x listed services
-// up front. Each is a clone of the h2 entry on its OWN EDS resource name, with
-// the h2 entry's load assignment republished under that name (aether#1008).
-// The count is logged at INFO whenever it changes. Delisting a destination
-// prunes its pairs.
-func (c *SnapshotCache) SetEastWestQUICServices(services []string) {
-	set := make(map[string]struct{}, len(services))
-	for _, svc := range services {
-		if svc != "" {
-			set[svc] = struct{}{}
-		}
-	}
-	c.depMu.Lock()
-	changed := !maps.Equal(c.quicServices, set)
-	c.quicServices = set
-	c.bumpDepGenLocked()
-	c.depMu.Unlock()
-	if !changed {
-		return
-	}
-	c.log.Info("east-west QUIC allow-list updated", "services", len(set))
-	c.signalDependencyChange()
-}
-
-// quicServicesSnapshot copies the allow-list under depMu.
-func (c *SnapshotCache) quicServicesSnapshot() map[string]struct{} {
-	c.depMu.RLock()
-	defer c.depMu.RUnlock()
-	return maps.Clone(c.quicServices)
-}
-
 // localWorkloadIdentities returns the sorted, de-duplicated SPIFFE IDs of the
 // pods on this node whose identity is a workload one (ns/sa), under localMu.
 // These are the QUIC selection arms: one per local ServiceAccount.
@@ -829,6 +781,10 @@ func (c *SnapshotCache) localWorkloadIdentities() []string {
 	return slices.Sorted(maps.Keys(seen))
 }
 
+// SetWaypointConfig enables the split-horizon east/west waypoint rewrite
+// (proposal 019) and sets the node tunnel port dialed for cross-cluster
+// endpoints. Off by default; must be called before the manager starts (read
+// without locking on every cluster build).
 func (c *SnapshotCache) SetWaypointConfig(enabled bool, tunnelPort uint32) {
 	c.waypointEnabled = enabled
 	c.waypointTunnelPort = tunnelPort

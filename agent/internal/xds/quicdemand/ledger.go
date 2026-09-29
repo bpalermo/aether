@@ -15,7 +15,7 @@ import (
 // and keeps the SUBSCRIPTION; every later on-demand request for the name is
 // "already subscribed, skipping" and 503s NC at the on_demand timeout, until
 // the proxy restarts. So a pair whose source ServiceAccount left the node (or
-// whose destination was delisted) cannot simply be forgotten: when the source
+// whose destination left the dependency set) cannot simply be forgotten: when the source
 // comes back -- a Deployment roll does this constantly -- nothing will ever
 // ask for the twin again. The same open subscription is also the cure: its
 // delta watch is still on the stream, so the control plane can push the twin
@@ -146,7 +146,7 @@ func (l *Ledger[K]) pruneUnheld() (pruned []K) {
 }
 
 // Retire is called when k's twin must leave the snapshot (its source left the
-// node, its destination was delisted or left the dependency set). If the proxy
+// node, or its destination left the dependency set). If the proxy
 // holds a subscription for it, k is kept dormant (with at, its first-observed
 // time, for persistence) and Retire reports true; otherwise it is forgotten:
 // the proxy drops a cluster it holds without a subscription outright, and its

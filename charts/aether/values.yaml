@@ -179,18 +179,19 @@ agent:
   # visibility (shared etcd) and a shared SPIRE trust domain across clusters.
   # Default off.
   eastWestWaypoint: false
-  # East-west QUIC allow-list (proposal 038 Phase 4b): namespace-qualified
-  # "<ns>/<svc>" destinations that every local ServiceAccount dials over
-  # HTTP/3 (mTLS over QUIC) instead of HTTP/2. Opt-in per destination because
-  # the cost is one per-source cluster per listed service on every node
-  # (local ServiceAccounts x listed services); the agent logs the count as
-  # "east-west QUIC fan-out". The per-pod HTTP/3 inbound is unconditional and
-  # inert until a destination is listed here. PREREQUISITE: the workloads'
-  # ClusterSPIFFEID must issue the DNS SANs "<sa>.<ns>.<meshDomain>" and
-  # "*.<sa>.<ns>.<meshDomain>" (dnsNameTemplates) -- Envoy's QUIC client
-  # checks the SNI "<port>.<sa>.<ns>.<meshDomain>" against them after the
-  # SPIFFE pin (aether#957); see docs/getting-started.md. Default: none.
-  eastWestQuicServices: []
+  # East-west QUIC (proposal 038 Phase 4b) has NO on/off value: it is
+  # unconditional (#979). Every service in a node's dependency set is dialled
+  # over HTTP/3 (mTLS over QUIC, UDP 18008) instead of HTTP/2 by each local
+  # ServiceAccount that has dialled it, through one per-source `quic:` cluster
+  # per (ServiceAccount, destination) pair -- built on the pair's first request
+  # (on-demand CDS, #1020), so the cost is the pairs actually used, bounded by
+  # local ServiceAccounts x dependency-set services per node; the agent logs it
+  # as "east-west QUIC fan-out". Services with endpoints behind the east/west
+  # waypoint stay h2. MESH-WIDE PREREQUISITE (until envoyproxy/envoy#47740 is in
+  # a plain proxy pin): every workload SVID must carry the DNS SANs
+  # "<sa>.<ns>.<meshDomain>" and "*.<sa>.<ns>.<meshDomain>" (dnsNameTemplates on
+  # the workloads' ClusterSPIFFEID) -- see docs/configuration.md, "SPIRE", and
+  # docs/runbook.md, "East-west QUIC".
   # Idle timeout of every east-west QUIC twin's upstream connection pool
   # (#1054); h1/h2 pools keep 30s. An idle source h3 connection receives no
   # GOAWAY when the destination proxy hot-restarts, so it must close on its

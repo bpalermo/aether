@@ -129,10 +129,11 @@ type odcdsAgent struct {
 	// forget is the #1036 control: today's #1035 rule, which forgets a pair on
 	// removal evidence instead of keeping it dormant.
 	forget bool
-	// awaySources / delisted are the pair validity the agent judges: a source
-	// ServiceAccount with no pod on the node, a destination off the allow-list.
+	// awaySources / destGone are the pair validity the agent judges: a source
+	// ServiceAccount with no pod on the node, a destination out of the node's
+	// dependency set.
 	awaySources map[string]bool
-	delisted    bool
+	destGone    bool
 	// unsubscribed is every resource name, of any type, the proxy has
 	// unsubscribed from: how the gate sees a removed twin fully torn down (its
 	// EDS name and its certificate's SDS name released).

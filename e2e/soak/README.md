@@ -251,7 +251,8 @@ T0+120 edge roll and the T0+300 TRIPLE so neither confounds the other) the drive
 2. the pod (`curlimages/curl:8.22.0`, already resident for the UDP dialer, so no pull)
    drives **~20 rps** from its first instant for **120 s**, split across
    `svc-1.aether-test.aether.internal:18081` (QUIC-enabled on the proving run) and
-   `svc-3…:18081` (h2), with user agent **`aether-soak-newsa/sa-new-<epoch>`**, and
+   `svc-3…:18081` (h2 on the proving run; since #979 both are QUIC-eligible, so
+   each is a first-use twin fetch for the new ServiceAccount), with user agent **`aether-soak-newsa/sa-new-<epoch>`**, and
    prints a per-destination `ok` / `non2xx` / `connerr` tally every 10 s
    (`AETHER_NEWSA …`), then `AETHER_NEWSA_FINAL …` and
    `AETHER_METRIC newsa_tally={…}`;
@@ -327,10 +328,13 @@ sum(increase(aether_agent_quic_twin_refused_total[8h])) == 0
 
 rev242's 118 twins (59 local SAs × 2 destinations) with 2 carrying traffic is the red
 reading for the first line. The agent's `east-west QUIC fan-out quic_clusters=N
-observed_pairs=P local_identities=I allow_listed_services=S` log line gives the same
+observed_pairs=P local_identities=I awaiting_client_cert=W` log line gives the same
 numbers per node, and must read **`N == P`** and **`P ≪ I × S`**: `P` is the pairs
-with traffic (single digits per node on talos), not every local ServiceAccount times
-every listed destination.
+with traffic, not every local ServiceAccount times every destination (`S` = the
+eligible services in the node's dependency set; the line stopped carrying a service
+count when #979 dropped the allow-list). On the two-destination proving runs `P` was
+single digits per node; with every destination on QUIC it is roughly one per
+(caller SA, destination it calls) on the node.
 
 **Red reading for `P ≪ I × S` (#1033).** rev245 (1.0.2-6ad804b, the first deploy of
 #1032, 2026-09-28 03:00Z) logged `observed_pairs == local_identities × 2` on all five
@@ -410,9 +414,11 @@ log_name:aether_access_logs AND reporter:source AND user_agent:~"aether-soak-new
   | stats by (user_agent, authority, response_flags) count()
 ```
 
-If `svc-1` is not QUIC-enabled on the build under test there is no twin and the
-`@` half of the gate is vacuous — say so in the grade rather than reading it as a
-pass. (Once #979 drops the allow-list, every destination is QUIC-enabled; its twins still exist only for the pairs that dial it, #1020.)
+Since #979 every destination in the node's dependency set is QUIC-eligible, and its
+twins exist only for the pairs that dial it (#1020). If `svc-1` has no twin anyway —
+a build before #979 without it allow-listed, or an endpoint behind the east/west
+waypoint — the `@` half of the gate is vacuous: say so in the grade rather than
+reading it as a pass.
 
 **What a FAIL reads like.** The #1008 class looks like this, all on one node, in the
 first ~15 s of one step:
@@ -556,8 +562,8 @@ the pod exists, and after that it cannot be placed.
   FIN race, not a failure; every other `DC` is. See "Benign `DC` at a source-proxy hot
   restart".
 - **The QUIC per-request cost gate (#1021)**, on any run with twins carrying load —
-  h3 per-request envoy CPU ≤ 1.5× h2, matched no-roll windows, against the 3.3× /
-  2.88-core baseline. See "The QUIC per-request cost gate".
+  h3 per-request envoy CPU ≤ 1.5× h2, matched no-roll windows, against the
+  same-build 1.18× baseline (rev247, 2026-09-28). See "The QUIC per-request cost gate".
 - **SVID rotation** is a bar since the SPIFFE Broker API (proposal 036): with the default
   4h TTL a pod rotates every ~2h, so an 8h run sees four cycles.
   The rotation signal is the agent's counter, summed per node (a restarted agent
@@ -754,12 +760,14 @@ node's agent started — roll the agent.
 
 ### The QUIC leg (proposal 038 Phase 4)
 
-East-west QUIC is behind a per-destination allow-list (`agent.eastWestQuicServices`)
-**only until this leg passes once**: the decision (2026-09-26) is no opt-in for QUIC —
-a passing QUIC soak is the proof that removes the flag, after which every mesh
-destination is dialled over HTTP/3 and the leg grades every service. For that first
-proving run, list a churned target so a QUIC destination's pods and its callers'
-twins are rebuilt under load:
+East-west QUIC is unconditional: every service in a node's dependency set is dialled
+over HTTP/3 by every local ServiceAccount that calls it, so this leg grades **every** service the
+k6 loaders and the prober call — no `--set` is needed and there is nothing to list.
+(The per-destination allow-list was a proving gate, decision 2026-09-26. The first
+proving soak ran on 2026-09-27 with `aether-test/svc-1` and `svc-2` listed and did
+**not** pass: prober green, k6 1,154 errors, 1,060 of them 503 NC at first use
+(#1008). #979 drops the allow-list; that is gated on the NEXT proving soak, result
+pending.)
 
 ```bash
 # prerequisite ON TALOS: the SPIRE default ClusterSPIFFEID must already issue the
@@ -768,28 +776,33 @@ twins are rebuilt under load:
 # and every node's pods must have ROTATED since (aether_agent_spire_svid_updates_total
 # {aether_spire_identity="pod",aether_spire_update="rotated"} moved on every node --
 # NOT envoy_sds_*_version, which moves on every svc roll for originator identities,
-# #992) -- otherwise every HTTP/3 handshake fails closed (#957) and the leg grades
-# the wrong thing.
-helm upgrade aether ... -f <saved values> \
-  --set 'agent.eastWestQuicServices[0]=aether-test/svc-1' \
-  --set 'agent.eastWestQuicServices[1]=aether-test/svc-2'
+# #992) -- otherwise, on a proxy pin without envoyproxy/envoy#47740, every HTTP/3
+# handshake fails closed (#957) and the leg grades the wrong thing. Then a plain
+# upgrade (QUIC is unconditional since #979; there is nothing to --set):
+helm upgrade aether ... -f <saved values>
 ```
 
 The agent logs `east-west QUIC fan-out quic_clusters=N observed_pairs=P
-local_identities=I allow_listed_services=S` on every node with a caller. Since #1020
-`N` is the number of (source SA, destination) pairs that have dialled, not `I × S`. That
-is the budget the run is paying for, and on talos it is ~10 instead of 118. Since #962 the twins have their own stats key
-`<ns>/<svc>@<ns>/<sa>`, so the leg grades from Prometheus (the admin is loopback-only
-on talos and `kubectl exec` is denied):
+local_identities=I awaiting_client_cert=W` on every node with a caller. Since #1020
+`N` is the number of (source SA, destination) pairs that have dialled, not `I × S`
+(S = the eligible services in that node's dependency set; on talos-main the ceiling
+without the allow-list is 8–14 SAs × ~19 services ≈ 150–270 per node). That is the
+budget the run is paying for: the pairs the k6 loaders, the prober and the dialers
+actually use -- with every destination now QUIC, expect it to grow from the ~10 of
+the two-destination proving runs to roughly one per (caller SA, destination it
+calls) per node, and to be flat outside roll brackets. Since #962 the twins have
+their own stats key `<ns>/<svc>@<ns>/<sa>`, so the leg grades from Prometheus (the
+admin is loopback-only on talos and `kubectl exec` is denied):
 
 ```promql
 # HTTP/3 requests per (destination, caller ServiceAccount) -- must be non-zero for
-# every listed destination x k6 loader SA, and must RESUME after each roll of the
+# every called destination x caller SA, and must RESUME after each roll of the
 # destination and of the proxy (RAW counters across a roll, never increase())
-envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-[12]@.*"}
-# the same requests must not have fallen back to h2: the h2 series of a listed
-# destination stays FLAT while its twins move (a moving h2 series = on_no_match)
-envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-[12]"}
+envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/.*@.*"}
+# the same requests must not have fallen back to h2: the h2 series of a destination
+# stays FLAT while its twins move (a moving h2 series = on_no_match), except for
+# destinations reached through a GAMMA weighted split (h2 by design, #961)
+envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/[^@]*"}
 # every twin connection is HTTP/3 (must climb with the twins, never the h1/h2 kin)
 envoy_cluster_upstream_cx_http3_total{aether_cluster=~".*@.*"}
 # a twin that cannot connect: 0 outside roll brackets; a step in the no-roll window
@@ -801,7 +814,7 @@ envoy_cluster_upstream_rq_5xx{aether_cluster=~".*@.*"}
 The prober and k6 SLIs grade the run exactly as before: a QUIC destination that
 fails still counts against the same error budget, so the leg cannot pass on the
 twins' own counters alone. What the twins' counters add is attribution — whether an
-error episode on a listed destination was the QUIC path (its twin's `connect_fail`
+error episode on a destination was the QUIC path (its twin's `connect_fail`
 / `rq_5xx` moved) or the h2 path (they did not). Not gradeable from Prometheus: the
 destination's per-pod `listener.inbound_<pod>_h3.*` counter (admin only; the kind
 harness `e2e/eastwest-quic.sh` reads it).
@@ -888,20 +901,25 @@ connections per h3 destination. That run passes H2 vacuously and says so, and
 
 **Acceptance for dropping the allow-list (#979): an HTTP/3 mesh request costs at
 most 1.5× the proxy CPU of an h2 mesh request, at the soak's load shape.** The
-prober and k6 SLIs cannot see this: a QUIC run can be error-free and still cost 2.3×
-the fleet's proxy CPU once every destination is on it (#1006's projection).
+prober and k6 SLIs cannot see this: a QUIC run can be error-free and still cost far
+more proxy CPU once every destination is on it (#1006 projected 2.3× the fleet's,
+from the since-superseded cross-revision 3.3× reading).
 
-**Baseline (grade the next QUIC soak against these):**
+**Baseline (grade the next QUIC soak against this): h3/h2 = 1.18× per request —
+the gate is passed.** A same-build A/B on 2026-09-28 (rev247, 300 rps, matched
+80-min no-roll windows, Pyroscope fleet envoy cores) measured **8.9 ms** per h2
+request against **10.5 ms** per h3 request: [#1021, "Same-revision measurement,
+2026-09-28"](https://github.com/bpalermo/aether/issues/1021). A QUIC run that grades above 1.5× against it is a
+regression.
+
+The earlier reading below is **superseded**: it compared two different revisions
+(rev239 h2 vs rev242 QUIC), so build drift and the QUIC path were not separable.
+Kept for the record only:
 
 | | run | window | envoy cores (fleet) | mesh rps | per request |
 |---|---|---|---|---|---|
-| h2 reference | rev239, no QUIC | 2026-09-26 19:20:42–20:40:42Z | 2.092 (idle 0.923) | 350 | **3.3 ms** = (2.092 − 0.923) / 350 |
-| QUIC | rev242, svc-1/2 on QUIC (100 of 350 rps) | 2026-09-27 16:00–17:20Z | **2.872** | 350 | h3 = 3.3 + (2.872 − 2.092) / 100 = **11.1 ms → 3.3×** |
-
-The 7 h figures (2.165 / **2.879**) reproduce the window within 1 %; **2.88 fleet
-cores** is the QUIC baseline. Since then the inbound QUIC listener reads with GRO
-(#1021: −11 % destination CPU per request in `//test/mtlspool`), which by itself is
-nowhere near enough to close 3.3× → 1.5×. Treat the gate as open.
+| h2 reference | rev239, no QUIC | 2026-09-26 19:20:42–20:40:42Z | 2.092 (idle 0.923) | 350 | 3.3 ms = (2.092 − 0.923) / 350 |
+| QUIC | rev242, svc-1/2 on QUIC (100 of 350 rps) | 2026-09-27 16:00–17:20Z | 2.872 | 350 | h3 = 3.3 + (2.872 − 2.092) / 100 = 11.1 ms → 3.3× (superseded) |
 
 **Method (#1006, reproduce it exactly or the numbers do not compare):**
 

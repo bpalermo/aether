@@ -22,7 +22,8 @@ import (
 // The demand-scoped QUIC twin gates (issue #1020).
 //
 // Before #1020 the cache built one `quic:` twin per local ServiceAccount for
-// every allow-listed destination, up front: on rev242, 118 twins fleet-wide of
+// every QUIC destination (then an allow-list, unconditional since #979), up
+// front: on rev242, 118 twins fleet-wide of
 // which 2 ever carried a request. Now every local ServiceAccount still gets a
 // selection ARM on the destination's routes, but the twin behind it is built
 // only once that source has dialled: its first request routes to the missing
@@ -34,7 +35,8 @@ const quicDemandTD = "aether.internal"
 var quicDemandSAs = []string{"source-a", "source-b", "source-c"}
 
 // newQUICDemandCache is a node with three local ServiceAccounts, "demo/echo"
-// allow-listed for QUIC and "demo/other" a declared, non-QUIC upstream.
+// in the dependency set (so QUIC-eligible: east-west QUIC is unconditional,
+// #979) and "demo/other" registered but NOT a dependency of this node.
 // storePath, when set, turns on persistence of the observed set there BEFORE
 // the first snapshot, as the agent does at boot.
 func newQUICDemandCache(t *testing.T, storePath string) *SnapshotCache {
@@ -50,7 +52,6 @@ func newQUICDemandCacheWith(t *testing.T, storePath string, localSAs ...string) 
 	c.SetCaptureEnabled(true)
 	c.observedFlushDebounce = time.Millisecond
 	ctx := context.Background()
-	c.SetEastWestQUICServices([]string{"demo/echo"})
 	if storePath != "" {
 		c.EnableObservedUpstreamsStore(ctx, storePath)
 		// Drain the debounced write before t.TempDir's cleanup removes the
@@ -66,7 +67,7 @@ func newQUICDemandCacheWith(t *testing.T, storePath string, localSAs ...string) 
 	}
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
 	c.SetCaptureAuthorities(map[string]string{"demo/echo": "echo.demo.svc.cluster.local", "demo/other": "other.demo.svc.cluster.local"})
-	declareDeps(c, "demo/other")
+	declareDeps(c, "demo/echo")
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			return map[string][]*registryv1.ServiceEndpoint{
@@ -149,13 +150,13 @@ func requireSelections(t *testing.T, c *SnapshotCache, st quicState, want map[st
 	echo := proxy.ServiceClusterName("demo/echo", c.meshDomain)
 	require.GreaterOrEqual(t, len(st.selections), 2, "the echo vhost on BOTH out_http and cap_http must select")
 	for where, sel := range st.selections {
-		assert.NotContains(t, where, "other", "the non-QUIC destination must not select")
+		assert.NotContains(t, where, "other", "a destination outside the dependency set must not select")
 		assert.Equal(t, want, sel.arms, "%s: arms", where)
 		assert.Equal(t, echo, sel.noMatch, "%s: on_no_match must stay the h2 cluster", where)
 	}
 }
 
-// (a) A QUIC-enabled destination with three local ServiceAccounts and NO
+// (a) A QUIC-eligible destination with three local ServiceAccounts and NO
 // observed pairs builds ZERO twins and publishes ZERO twin load assignments.
 // The routes still carry one arm per ServiceAccount -- each naming a twin that
 // is not in CDS, which is what sends a source's first request to ODCDS -- and
@@ -230,8 +231,8 @@ func TestQUICDemandPairSurvivesAgentRestart(t *testing.T) {
 
 // (d) Pruning is on removal evidence only: the last pod of a source
 // ServiceAccount leaving drops that source's twin, its arm and its persisted
-// pair; delisting the destination drops the rest.
-func TestQUICDemandPrunesWhenSourceLeavesOrDestinationIsDelisted(t *testing.T) {
+// pair; the destination leaving the dependency set drops the rest.
+func TestQUICDemandPrunesWhenSourceLeavesOrDestinationLeavesDependencySet(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ObservedUpstreamsFile)
 	c := newQUICDemandCache(t, path)
 	ctx := context.Background()
@@ -247,10 +248,10 @@ func TestQUICDemandPrunesWhenSourceLeavesOrDestinationIsDelisted(t *testing.T) {
 	c.FlushObservedUpstreams()
 	require.Len(t, readStore(t, path).GetQuicPairs(), 1, "the pruned pair must leave the persisted set")
 
-	c.SetEastWestQUICServices(nil)
+	declareDeps(c)
 	require.NoError(t, c.generateSnapshot(ctx))
 	st = readQUICState(t, c)
-	assert.Empty(t, st.twins, "the destination left the allow-list: no twin may survive")
+	assert.Empty(t, st.twins, "the destination left the dependency set: no twin may survive")
 	assert.Empty(t, st.selections)
 	assert.Empty(t, c.QUICPairs())
 	c.FlushObservedUpstreams()
@@ -261,7 +262,7 @@ func TestQUICDemandPrunesWhenSourceLeavesOrDestinationIsDelisted(t *testing.T) {
 // records are loaded -- the restore can run before them -- and pruned after.
 func TestQUICDemandRestoredPairWaitsForThePodSetBeforePruning(t *testing.T) {
 	c := newTestCache("node-1")
-	c.SetEastWestQUICServices([]string{"demo/echo"})
+	declareDeps(c, "demo/echo")
 	gone := proxy.QUICClusterName("demo/echo", c.meshDomain, "demo/gone")
 	c.quicPairs[quicPair{service: "demo/echo", source: "demo/gone"}] = time.Now()
 
@@ -273,7 +274,7 @@ func TestQUICDemandRestoredPairWaitsForThePodSetBeforePruning(t *testing.T) {
 	assert.Empty(t, c.QUICPairs(), "after it is, the pair's source has left")
 }
 
-// (e) Refusals: a destination that is not QUIC-enabled, a source that is not
+// (e) Refusals: a destination outside the dependency set, a source that is not
 // a local ServiceAccount, and names QUICClusterName would never produce.
 // Nothing is recorded and no snapshot changes.
 func TestQUICDemandRefusesWhatItCannotBuild(t *testing.T) {
@@ -284,7 +285,7 @@ func TestQUICDemandRefusesWhatItCannotBuild(t *testing.T) {
 	for _, tc := range []struct {
 		name, want string
 	}{
-		{proxy.QUICClusterName("demo/other", c.meshDomain, "demo/source-a"), QUICRefusedNotQUICService},
+		{proxy.QUICClusterName("demo/other", c.meshDomain, "demo/source-a"), QUICRefusedNotInDependency},
 		{echoTwin(c, "stranger"), QUICRefusedSourceNotOnNode},
 		{proxy.QUICClusterName("demo/echo", c.meshDomain, "other-ns/source-a"), QUICRefusedSourceNotOnNode},
 		{"quic:" + proxy.ServiceClusterName("demo/echo", c.meshDomain) + ":8080@demo/source-a", QUICRefusedMalformed},

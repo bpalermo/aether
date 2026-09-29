@@ -17,7 +17,10 @@
 #                  the #1009 timing attributes; the twin for (client-a, quic-a)
 #                  exists and carries requests (the loop below rides HTTP/3)
 #   H1  client     HTTP/1.1 keep-alive loops from client-a to quic-a, quic-b
-#                  (h3 twins) and h2only (the h2 control) through HR_RESTARTS
+#                  (h3 twins) and gamma-a behind the weighted gamma-a/gamma-b
+#                  HTTPRoute (the h2 control: east-west QUIC is unconditional
+#                  since #979, so a weighted split -- which never selects a
+#                  twin, #961 -- is the one h2-by-design path) through HR_RESTARTS
 #                  supervisor hot restarts (SIGHUP, the supervisor's own
 #                  trigger): every transfer answers 200 with the full body, and
 #                  the loops RECONNECTED (the drain closed connections, so the
@@ -146,7 +149,11 @@ HR_RATE="${HR_RATE:-5}"
 # race gets HR_LOOPS chances per destination per restart.
 HR_LOOPS="${HR_LOOPS:-16}"
 HR_SRC="client-a"
-HR_DSTS=(quic-a quic-b "$H2_DST")
+# The h2 control: the parent of eastwest-quic.sh's weighted canary. Both
+# backends are agnhost netexec, so the echo body (and bytes_sent) is the same
+# whichever one answers.
+HR_H2_CTL="${GAMMA_DSTS[0]}"
+HR_DSTS=(quic-a quic-b "$HR_H2_CTL")
 # A fixed 700-byte echo body, so bytes_sent is one known number per destination.
 HR_MSG="$(printf 'x%.0s' $(seq 1 700))"
 HR_PATH="/echo?msg=$HR_MSG"
@@ -307,6 +314,9 @@ verify_hotrestart() {
 		die "H0: the access logger lacks upstream_rx_ms — is this image built from this branch?"
 	ok "access logger present with upstream_rx_ms / downstream_tx_end_ms"
 
+	# The h2 control is h2 only while the weighted split is live (#979).
+	gamma_split_up H0
+
 	# Warm every pair (the first request fetches the twin over ODCDS) and prove
 	# the h3 destinations ride their twin.
 	local d dumpc before after
@@ -317,6 +327,14 @@ verify_hotrestart() {
 	after="$(host_rq "$(admin /clusters)" "$(twin quic-a "$HR_SRC")")"
 	[ "$((after - before))" -ge 5 ] || die "H0: the ($HR_SRC, quic-a) twin did not carry the warm-up batch ($before -> $after)"
 	ok "($HR_SRC -> quic-a) rides its HTTP/3 twin ($before -> $after)"
+	local ctl_twins
+	ctl_twins="$(quic_twins "$(admin /clusters)")"
+	case $'\n'"$ctl_twins"$'\n' in
+	*$'\n'"$(twin "$HR_H2_CTL" "$HR_SRC")"$'\n'*)
+		die "H0: the h2 control $HR_H2_CTL has a quic: twin for $HR_SRC — the weighted split selected one (#961)"
+		;;
+	esac
+	ok "the h2 control $HR_H2_CTL has no quic: twin for $HR_SRC (weighted split)"
 
 	# A fresh collector, so the records read in H2 are this run's only.
 	kc -n "$COLLECTOR_NS" rollout restart "deploy/$COLLECTOR_SVC" >/dev/null
@@ -369,7 +387,7 @@ verify_hotrestart() {
 		fi
 		echo "  $d clean-line timing (upstream_rx_ms, downstream_tx_end_ms) top 3:"
 		awk -F'\t' -v a="$auth" '$1 == a && $3 == "-" { print "     " $6 " " $7 }' <<<"$recs" | sort | uniq -c | sort -rn | head -3
-		if [ "$d" = "$H2_DST" ]; then
+		if [ "$d" = "$HR_H2_CTL" ]; then
 			[ "$ndc" -eq 0 ] || die "H2: the h2 control $d logged $ndc DC lines"
 			ok "h2 control $d: no DC"
 		else

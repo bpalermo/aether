@@ -219,15 +219,15 @@ func TestOnDemandObserver_ResumeIsIdempotentAndFirstRequestOnly(t *testing.T) {
 
 // TestOnDemandObserver_QUICTwinRequests: a named CDS subscription for a
 // `quic:` twin (issue #1020) is a QUIC pair observation, never a mesh
-// dependency. A local source dialling an allow-listed destination is
-// admitted; a foreign source is refused; neither pollutes the dependency set.
+// dependency. A local source dialling a destination in the dependency set
+// (every such destination is QUIC-eligible, #979) is admitted; a foreign source is refused; neither pollutes the dependency set.
 // A twin the proxy only HOLDS on a fresh stream admits nothing (issue #1033);
 // a later request for it does.
 func TestOnDemandObserver_QUICTwinRequests(t *testing.T) {
 	newCache := func(t *testing.T) *cache.SnapshotCache {
 		t.Helper()
 		c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
-		c.SetEastWestQUICServices([]string{"demo/echo"})
+		c.RestoreDependency(context.Background(), "demo/echo")
 		require.NoError(t, c.AddPod(context.Background(), &cniv1.CNIPod{
 			Name: "a-0", Namespace: "demo", ServiceAccount: "source-a",
 			NetworkNamespace: "/var/run/netns/cni-a-0",

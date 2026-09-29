@@ -421,12 +421,6 @@ func (c *SnapshotCache) populateStaticDepsLocked(set map[string]struct{}) {
 	for _, svc := range c.captureTCPDeps {
 		set[svc] = struct{}{}
 	}
-	// East-west QUIC destinations (proposal 038 Phase 4b): the per-source
-	// quic: clusters are clones of the h2 entry, so the destination must be
-	// in the set for there to be an entry at all.
-	for svc := range c.quicServices {
-		set[svc] = struct{}{}
-	}
 	// Services with a service-wide chain filter (025 M4): always in scope — the
 	// filter is enabled at the service's capture vhost, and vhost emission is
 	// dependency-gated. Without this, a chain-filtered service with NO GAMMA routes

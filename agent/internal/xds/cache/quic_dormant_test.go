@@ -16,7 +16,7 @@ import (
 // demand, Envoy drops the cluster and keeps the subscription, and every later
 // on-demand request for the name is "already subscribed, skipping" -- 503 NC
 // at the on_demand timeout, until the proxy restarts. So when the source's
-// last pod leaves the node (or the destination is delisted) the pair goes
+// last pod leaves the node (or the destination leaves the dependency set) the pair goes
 // DORMANT: the twin leaves the snapshot as before, and it is republished --
 // with no request, the subscription is still open -- the moment the pair is
 // valid again.
@@ -70,22 +70,22 @@ func TestQUICDormantPairRepublishedWhenSourceReturns(t *testing.T) {
 	assert.Empty(t, stored.GetDormantQuicPairs())
 }
 
-// Destination delisted -> dormant -> re-listed -> republished.
-func TestQUICDormantPairRepublishedWhenDestinationIsRelisted(t *testing.T) {
+// Destination leaves the dependency set -> dormant -> returns -> republished.
+func TestQUICDormantPairRepublishedWhenDestinationReturns(t *testing.T) {
 	c := newQUICDemandCache(t, "")
 	ctx := context.Background()
 	twinA, twinB := echoTwin(c, "source-a"), echoTwin(c, "source-b")
 	observeQUIC(t, c, "demo/echo", "demo/source-a", "demo/source-b")
 
-	c.SetEastWestQUICServices(nil)
+	declareDeps(c)
 	require.NoError(t, c.generateSnapshot(ctx))
-	assert.Empty(t, readQUICState(t, c).twins, "delisted: no twin")
+	assert.Empty(t, readQUICState(t, c).twins, "out of the dependency set: no twin")
 	assert.Equal(t, []string{twinA, twinB}, c.DormantQUICPairs())
 
-	c.SetEastWestQUICServices([]string{"demo/echo"})
+	declareDeps(c, "demo/echo")
 	require.NoError(t, c.generateSnapshot(ctx))
 	st := readQUICState(t, c)
-	assert.ElementsMatch(t, []string{twinA, twinB}, st.twins, "re-listed: both twins republished with no request")
+	assert.ElementsMatch(t, []string{twinA, twinB}, st.twins, "back in the dependency set: both twins republished with no request")
 	assert.ElementsMatch(t, []string{twinA, twinB}, st.twinCLAs)
 	assert.Empty(t, c.DormantQUICPairs())
 }

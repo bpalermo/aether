@@ -623,18 +623,22 @@ spec:
   `x-geo-*` request headers (proposal 028).
 - The edge gets its own SVID straight from SPIRE; with `spire.enabled` the chart
   can create its `ClusterSPIFFEID` (`edge.spire.clusterSpiffeID`).
-- **East-west QUIC (`agent.eastWestQuicServices`, proposal 038):** the workloads'
-  `ClusterSPIFFEID` must also issue two DNS SANs per SVID,
-  `<sa>.<ns>.<mesh domain>` and `*.<sa>.<ns>.<mesh domain>` (`dnsNameTemplates:
+- **East-west QUIC (proposal 038) is unconditional — nothing to enable, one
+  mesh-wide SPIRE requirement.** Every service is dialled over HTTP/3 (mTLS over
+  QUIC, UDP 18008) by every caller, so the workloads' `ClusterSPIFFEID` must issue
+  two DNS SANs per SVID, `<sa>.<ns>.<mesh domain>` and
+  `*.<sa>.<ns>.<mesh domain>` (`dnsNameTemplates:
   ["{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.<mesh domain>",
   "*.{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.<mesh domain>"]`;
   on the spiffe/spire chart:
   `spire-server.controllerManager.identities.clusterSPIFFEIDs.default.dnsNameTemplates`).
   Envoy's QUIC client checks the SNI against the leaf's DNS SANs after the
-  SPIFFE pin (aether#957); without them every HTTP/3 handshake to a listed
-  service fails and the h2 path is unaffected. `e2e/l4routes.sh` shows the shape;
-  `e2e/eastwest-quic.sh` is the end-to-end proof (per-source HTTP/3 with the
-  caller's own identity in XFCC, unlisted and GAMMA-routed services staying h2).
+  SPIFFE pin (aether#957); the requirement stands until envoyproxy/envoy#47740 is
+  in a plain proxy pin. Also open UDP:18008 wherever TCP:18008 is allowed.
+  `e2e/l4routes.sh` shows the SPIRE shape; `e2e/eastwest-quic.sh` is the
+  end-to-end proof (per-source HTTP/3 with the caller's own identity in XFCC,
+  and a `QUIC_DNS_SANS=off` negative control), and the runbook's *East-west
+  QUIC* section has the budget and the escape hatch.
 
 ---
 

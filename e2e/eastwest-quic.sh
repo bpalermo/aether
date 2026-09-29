@@ -2,7 +2,9 @@
 # Single-cluster kind e2e for proposal 038 Phase 4 (east-west QUIC): the
 # per-pod HTTP/3 inbound on UDP:18008 (#953, unconditional) and the per-source
 # `quic:<svc>.<ns>.<domain>@<ns>/<sa>` clusters selected by the source SPIFFE
-# ID (#956, opt-in per destination via agent.eastWestQuicServices).
+# ID (#956; unconditional since the proving allow-list was removed, #979:
+# EVERY destination in the node's dependency set is QUIC-eligible, and its
+# twins are built per (source, destination) pair on first use, #1020).
 #
 # What it proves, on a real data path (kind + the real chart + the real
 # aether-proxy + SPIRE + the CNI's capture):
@@ -13,18 +15,20 @@
 #                   an absent stat (#853)
 #   E1  fan-out     twins are DEMAND-SCOPED (aether#1020): before any request
 #                   no pair has dialled, so no quic: twin exists (on a fresh
-#                   cluster: zero), and none ever for the h2-only destination
+#                   cluster: zero) -- nothing is listed anywhere, and still no
+#                   twin exists for a pair that never dialled
 #   E2  h3 + id     client-a and client-b (DIFFERENT ServiceAccounts) each call
 #                   quic-a and quic-b: every request answers 200, the destination
 #                   sees the CALLER'S OWN SPIFFE ID in x-forwarded-client-cert,
 #                   and the request rode the caller's own quic: twin over HTTP/3
 #                   (never the other source's twin, never the h2 cluster)
-#   E3  h2-only     h2only is not allow-listed: no quic: twin, requests succeed
-#                   with the caller's identity, and its HTTP/3 inbound stays idle
-#   E4  GAMMA       gamma-a (allow-listed) with a weighted HTTPRoute canary to
-#                   gamma-a / gamma-b (both allow-listed) stays on h2 — the
-#                   matcher action names ONE cluster, so a weighted split has no
-#                   per-source form (#961) — and so never fetches a twin
+#   E4  GAMMA       gamma-a with a weighted HTTPRoute canary to gamma-a /
+#                   gamma-b (both QUIC-eligible) stays on h2 — the matcher
+#                   action names ONE cluster, so a weighted split has no
+#                   per-source form (#961) — and so never fetches a twin.
+#                   (There is no E3 any more: it was the h2-only, not
+#                   allow-listed destination, and no such destination exists
+#                   since #979; a weighted split is the one h2-by-design path.)
 #   E4b GAMMA       a single-backendRef HTTPRoute rule to the parent (gamma-a)
 #                   renders as `cluster:` and IS selected: it rides the caller's
 #                   own quic: twin over HTTP/3 like the default route (#961)
@@ -32,8 +36,8 @@
 #                   destination) pairs this suite drove over a selecting route
 #                   (E2 + E4b = 2 sources x 3 destinations = 6), and the set is
 #                   exactly those pairs: a twin is built only for a pair that has
-#                   dialled (aether#1020; the pre-#1020 agent built every local
-#                   SA x allow-listed destination: 7 x 4 = 28 on this node)
+#                   dialled (aether#1020; the pre-#1020 up-front fan-out would be
+#                   every local SA x QUIC destination: 6 x 4 = 24 on this node)
 #   E5  Q3          client-a's pod is deleted and comes back with a NEW pod IP;
 #                   its requests still carry client-a's identity over HTTP/3, and
 #                   client-b's still carry client-b's
@@ -77,21 +81,36 @@
 # render on Envoy's main thread; a handful of reads per phase on a one-node test
 # cluster is fine, and nothing here polls them in a tight loop.
 #
-# SEEN RED WITH THE FEATURE OFF. `up` takes EASTWEST_QUIC (default on). With
-# EASTWEST_QUIC=off the chart is installed with NO allow-list — everything else
-# identical, including the unconditional HTTP/3 inbound and the DNS SANs — and
-# `verify` goes red at E2: nothing is allow-listed, so no route selects a twin,
-# the caller's first request never fetches one, and every request rides h2.
-# (E1 passes: since aether#1020 "no twin before any request" is the expected
-# state either way.) That is the honest name of the failure: it is not a broken
-# data path, it is the feature not being asked for. The red-then-green:
+# THE NEGATIVE CONTROL: QUIC_DNS_SANS=off. With no allow-list there is no
+# "feature off" install left to go red, so the red half is the real failure
+# the mesh-wide SPIRE prerequisite exists for — aether#957. `up` takes
+# QUIC_DNS_SANS (default on). With QUIC_DNS_SANS=off:
 #
-#   EASTWEST_QUIC=off e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh verify  # RED at E2
+#   * the workloads' ClusterSPIFFEID is applied WITHOUT dnsNameTemplates, so
+#     every SVID is URI-SAN-only (everything else identical: SPIRE, the chart,
+#     the twins, the HTTP/3 inbound);
+#   * the node proxy's bootstrap gets one runtime layer setting
+#     envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match
+#     to false. The chart's proxy pin (#972) CARRIES envoyproxy/envoy#47740,
+#     which skips the QUIC client's hostname check when a SAN matcher is
+#     configured — so on this pin missing DNS SANs alone would NOT fail. The
+#     guard restores the check a plain (#47740-less) pin performs, which is
+#     exactly the world the SAN prerequisite protects (validated in #973's
+#     TestQUICPathAGuardOffRestoresHostnameCheck). `up` asserts the override
+#     is live on the node proxy (admin /runtime) so the red cannot be vacuous.
+#
+# `verify` then goes red at E2 with the twins PRESENT (E0/E1 pass): the QUIC
+# handshake fails closed — 503s, the twin's host cx_connect_fail climbing, and
+# the proxy log (quic:info, raised by `up`) saying `Cert chain verification
+# failed: Leaf certificate doesn't match hostname: <port>.<sa>.<ns>.<domain>`.
+# The red-then-green:
+#
+#   QUIC_DNS_SANS=off e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh verify  # RED at E2
+#   e2e/eastwest-quic.sh down
 #   e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh verify                    # GREEN
 #
-# (`up` is re-runnable: the second one only `helm upgrade`s aether with the
-# allow-list, which rolls the agent. Never --reuse-values: the allow-list must
-# come from THIS invocation.)
+# Tear down between the two: already-issued SVIDs keep their SANs until they
+# rotate, so re-running `up` over the red cluster would not be a clean green.
 #
 # E6 WITH THE GATE OFF (IDENTITY_GATE=off installs the chart with
 # controller.webhook.identityGate.enabled=false) is a report, not a red: no init
@@ -110,7 +129,7 @@
 #   e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh idgate                    # GREEN
 #
 # E4c's pair count is seen red by asserting the pre-#1020 count against a
-# #1020 agent: EWQ_EXPECT_TWINS=28 e2e/eastwest-quic.sh verify goes red at E4c
+# #1020 agent: EWQ_EXPECT_TWINS=24 e2e/eastwest-quic.sh verify goes red at E4c
 # with 6 twins present (the override exists only for that red run).
 #
 # Q3 LIMITATION, STATED RATHER THAN DISCOVERED. True QUIC connection migration
@@ -127,9 +146,9 @@
 # SPIRE IS ON, AND MUST BE: QUIC mandates TLS, so NewInboundQUICListener returns
 # nothing when cleartext and no twin is built without a served node identity.
 # The workloads' ClusterSPIFFEID carries the two DNS SANs aether#957 requires
-# (`<sa>.<ns>.<meshDomain>`, `*.<sa>.<ns>.<meshDomain>`) — without them every
-# HTTP/3 handshake fails the QUIC client's hostname check and E2 goes red with
-# the twins present (that shape is the one to look for in the proxy log).
+# (`<sa>.<ns>.<meshDomain>`, `*.<sa>.<ns>.<meshDomain>`) — without them (and
+# without #47740) every HTTP/3 handshake fails the QUIC client's hostname check
+# and E2 goes red with the twins present: the negative control above.
 #
 # Usage: e2e/eastwest-quic.sh {up|test|verify|idgate|down}   (bare = up + verify)
 #
@@ -160,9 +179,19 @@ NS="aether-system"
 TEST_NS="aether-test"
 MESH_DOMAIN="aether.internal"
 TRUST_DOMAIN="aether.internal"
-# on (default) = the allow-list below is installed; off = the same install with
-# NO allow-list, for the red half of red-then-green (see the header).
-EASTWEST_QUIC="${EASTWEST_QUIC:-on}"
+# on (default) = the workloads' SVIDs carry the aether#957 DNS SANs; off = the
+# negative control (no DNS SANs + the #47740 guard off; see the header).
+QUIC_DNS_SANS="${QUIC_DNS_SANS:-on}"
+case "$QUIC_DNS_SANS" in
+on | off) ;;
+*)
+	printf 'QUIC_DNS_SANS must be on or off, got %s\n' "$QUIC_DNS_SANS" >&2
+	exit 1
+	;;
+esac
+# The runtime guard envoyproxy/envoy#47740 registers (carried on the chart's
+# proxy pin, #972); off restores the QUIC client's SNI-vs-DNS-SAN check.
+QUIC_HOSTNAME_GUARD="envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match"
 # on (default) = the chart's default egress identity gate (#1053); off = the
 # same install with controller.webhook.identityGate.enabled=false (E6's red arm).
 IDENTITY_GATE="${IDENTITY_GATE:-on}"
@@ -171,10 +200,9 @@ IDENTITY_GATE="${IDENTITY_GATE:-on}"
 OUTBOUND_PORT="18081"
 # The application port every destination binds and registers.
 APP_PORT="8080"
-# Destinations. QUIC_DSTS and GAMMA_DSTS are allow-listed; H2_DST is not.
+# Destinations. Every one of them is QUIC-eligible — nothing is listed.
 QUIC_DSTS=(quic-a quic-b)
 GAMMA_DSTS=(gamma-a gamma-b)
-H2_DST="h2only"
 # Sources, each its own ServiceAccount (= its own SPIFFE ID).
 SOURCES=(client-a client-b)
 # Requests per measured batch.
@@ -212,11 +240,14 @@ spiffe_id() { printf 'spiffe://%s/ns/%s/sa/%s' "$TRUST_DOMAIN" "$TEST_NS" "$1"; 
 # twin DST SRC — proxy.QUICClusterName: quic:<svc>.<ns>.<domain>@<ns>/<sa>.
 twin() { printf 'quic:%s@%s/%s' "$(fqdn "$1")" "$TEST_NS" "$2"; }
 
-# The allow-list as the agent actually received it — the first thing to read
-# when E1 is red.
-agent_quic_args() {
-	kc -n "$NS" get ds aether-agent -o jsonpath='{.spec.template.spec.containers[*].args}' 2>/dev/null |
-		tr ',' '\n' | grep -o 'east-west-quic-services=[^"]*' || echo "(none: nothing is allow-listed)"
+# The negative-control state as the cluster actually has it — the first thing
+# to read when E2 is red: the ClusterSPIFFEID's dnsNameTemplates and the
+# #47740 guard as the node proxy's runtime reports it (absent = default true).
+quic_sans_state() {
+	printf 'ClusterSPIFFEID dnsNameTemplates: %s\n' \
+		"$(kc get clusterspiffeid aether-workloads -o jsonpath='{.spec.dnsNameTemplates}' 2>/dev/null || echo '?')"
+	printf '%s: %s\n' "$QUIC_HOSTNAME_GUARD" \
+		"$(admin /runtime 2>/dev/null | grep -A8 "\"$QUIC_HOSTNAME_GUARD\"" | grep -o '"final_value": *"[^"]*"' || echo '(not overridden: default true)')"
 }
 
 # Every failure here is one of "the twin was never published", "the twin exists
@@ -226,8 +257,8 @@ dump_state() {
 	kubectl config get-contexts "$CTX" >/dev/null 2>&1 || return 0
 	printf '\033[1;33m  -- pods --\033[0m\n' >&2
 	kc get pods -A -o wide 2>&1 | sed 's/^/    /' >&2 || true
-	printf '\033[1;33m  -- agent allow-list (EASTWEST_QUIC=%s) --\033[0m\n' "$EASTWEST_QUIC" >&2
-	agent_quic_args | sed 's/^/    /' >&2 || true
+	printf '\033[1;33m  -- DNS SANs + hostname guard (QUIC_DNS_SANS=%s) --\033[0m\n' "$QUIC_DNS_SANS" >&2
+	quic_sans_state | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- agent log: east-west QUIC fan-out budget --\033[0m\n' >&2
 	kc -n "$NS" logs -l app.kubernetes.io/component=agent --all-containers --tail=600 --prefix 2>&1 |
 		grep -i "east-west QUIC" | tail -10 | sed 's/^/    /' >&2 || true
@@ -244,6 +275,9 @@ dump_state() {
 		head -60 | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- httproutes --\033[0m\n' >&2
 	kc get httproutes -A -o yaml 2>&1 | sed 's/^/    /' >&2 || true
+	printf '\033[1;33m  -- proxy log: the aether#957 shape (hostname mismatch) --\033[0m\n' >&2
+	kc -n "$NS" logs -l app.kubernetes.io/component=proxy -c proxy --tail=2000 --prefix 2>&1 |
+		grep -i "match hostname" | tail -5 | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- proxy log (quic / handshake / verify errors first) --\033[0m\n' >&2
 	kc -n "$NS" logs -l app.kubernetes.io/component=proxy -c proxy --tail=400 --prefix 2>&1 |
 		grep -iE 'quic|http3|handshake|verif|san' | tail -40 | sed 's/^/    /' >&2 || true
@@ -328,7 +362,8 @@ install_gwapi_crds() {
 }
 
 # SPIRE, single cluster, self-signed — verbatim from e2e/l4routes.sh, including
-# the dnsNameTemplates aether#957 requires (see the header).
+# the dnsNameTemplates aether#957 requires (see the header); QUIC_DNS_SANS=off
+# leaves them out (the negative control).
 install_spire() {
 	log "installing SPIRE (trust domain $TRUST_DOMAIN)"
 	helm --kube-context "$CTX" repo add spiffe https://spiffe.github.io/helm-charts-hardened/ >/dev/null 2>&1 || true
@@ -353,6 +388,12 @@ install_spire() {
 		--set "spire-agent.workloadAttestors.k8s.brokerAPI.accessPolicy=permissive" \
 		--set "spire-agent.workloadAttestors.k8s.brokerAPI.brokers.aether-agent.enabled=true" \
 		--wait --timeout 8m >/dev/null || die "SPIRE install failed"
+	local sans=""
+	if [ "$QUIC_DNS_SANS" = on ]; then
+		sans="  dnsNameTemplates:
+    - \"{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.$MESH_DOMAIN\"
+    - \"*.{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.$MESH_DOMAIN\""
+	fi
 	kc apply -f - >/dev/null <<YAML || die "ClusterSPIFFEID apply failed"
 apiVersion: spire.spiffe.io/v1alpha1
 kind: ClusterSPIFFEID
@@ -366,14 +407,13 @@ spec:
   # the SPIFFE SAN pin (aether#957), and the east-west QUIC SNI is
   # "<port>.<sa>.<ns>.<mesh domain>" (proxy.QUICServerName). Identity is still
   # the URI SAN; these only satisfy the QUIC client's hostname check.
-  dnsNameTemplates:
-    - "{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.$MESH_DOMAIN"
-    - "*.{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.$MESH_DOMAIN"
+  # QUIC_DNS_SANS=$QUIC_DNS_SANS
+$sans
   podSelector:
     matchLabels:
       aether.io/managed: "true"
 YAML
-	ok "SPIRE up"
+	ok "SPIRE up (DNS SANs: $QUIC_DNS_SANS)"
 }
 
 # Render the chart placeholders into a temp copy so the source tree stays clean.
@@ -383,6 +423,22 @@ chart_dir() {
 	cp -r "$REPO_ROOT/charts" "$out/"
 	sed -i -e 's/{GIT_COMMIT}/e2e/' -e 's/{STABLE_GIT_VERSION}/0.0.0-e2e/' \
 		"$out/charts/crds/Chart.yaml" "$out/charts/aether/Chart.yaml"
+	if [ "$QUIC_DNS_SANS" = off ]; then
+		# The negative control's runtime layer, spliced into the COPY's proxy
+		# bootstrap as a top-level key just before dynamic_resources (the chart
+		# has no runtime value, and this must never be one). Checked below so a
+		# template change cannot make the splice silently miss.
+		local cm="$out/charts/aether/templates/agent-proxy-configmap.yaml"
+		sed -i "/^    dynamic_resources:\$/i\\
+    layered_runtime:\\
+      layers:\\
+        - name: e2e-quic-negative-control\\
+          static_layer:\\
+            $QUIC_HOSTNAME_GUARD: false\\
+" "$cm"
+		grep -q "^            $QUIC_HOSTNAME_GUARD: false\$" "$cm" ||
+			die "could not splice the $QUIC_HOSTNAME_GUARD override into $cm"
+	fi
 	echo "$out/charts"
 }
 
@@ -390,22 +446,6 @@ install_aether() {
 	local charts
 	charts="$(chart_dir)"
 	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
-	# The allow-list: both QUIC destinations AND both GAMMA destinations (E4
-	# needs twins present for the GAMMA backends, so that "stays h2" is a choice
-	# the route makes, not an absence). h2only is deliberately NOT listed. Each
-	# entry renders one --east-west-quic-services=<ns>/<svc> agent arg
-	# (charts/aether/templates/agent-daemonset.yaml).
-	local quic=() i=0 svc
-	case "$EASTWEST_QUIC" in
-	on)
-		for svc in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}"; do
-			quic+=(--set "agent.eastWestQuicServices[$i]=$TEST_NS/$svc")
-			i=$((i + 1))
-		done
-		;;
-	off) ;;
-	*) die "EASTWEST_QUIC must be 'on' or 'off', got '$EASTWEST_QUIC'" ;;
-	esac
 	local gate=()
 	case "$IDENTITY_GATE" in
 	on) ;;
@@ -417,11 +457,11 @@ install_aether() {
 	helm --kube-context "$CTX" upgrade --install aether-crds "$charts/crds" \
 		-n "$NS" --create-namespace --wait --timeout 2m >/dev/null || die "crds chart install failed"
 
-	# Everything except spire and the allow-list is chart default (kubernetes
-	# registry backend, capture + mesh DNS, GAMMA on). No --reuse-values: the
-	# allow-list must be exactly what THIS invocation says, so on -> off -> on
-	# re-runs of `up` really toggle it.
-	log "installing aether (SPIRE ON; EASTWEST_QUIC=$EASTWEST_QUIC; IDENTITY_GATE=$IDENTITY_GATE)"
+	# Everything except spire (and the identity-gate / harness overrides) is
+	# chart default (kubernetes registry backend, capture + mesh DNS, GAMMA on,
+	# east-west QUIC unconditional). Never --reuse-values: the overrides must be
+	# exactly what THIS invocation says, so re-runs of `up` really toggle them.
+	log "installing aether (SPIRE ON; QUIC_DNS_SANS=$QUIC_DNS_SANS; IDENTITY_GATE=$IDENTITY_GATE)"
 	# shellcheck disable=SC2046
 	helm --kube-context "$CTX" upgrade --install aether "$charts/aether" \
 		-n "$NS" --create-namespace \
@@ -429,7 +469,6 @@ install_aether() {
 		--set "meshDomain=$MESH_DOMAIN" \
 		--set spire.enabled=true \
 		--set edge.enabled=false \
-		"${quic[@]}" \
 		"${gate[@]+"${gate[@]}"}" \
 		"${EWQ_EXTRA_HELM_ARGS[@]+"${EWQ_EXTRA_HELM_ARGS[@]}"}" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
@@ -444,7 +483,30 @@ install_aether() {
 	kc -n "$NS" rollout status ds/aether-mesh-dns --timeout=180s >/dev/null || die "the mesh-DNS DaemonSet never became Ready"
 	kc -n "$NS" rollout status deploy/aether-registrar --timeout=180s >/dev/null || die "the registrar never became Ready"
 	kc -n "$NS" rollout status deploy/aether-controller --timeout=180s >/dev/null || die "the controller never became Ready"
-	ok "aether up (allow-list: $(agent_quic_args | tr '\n' ' '))"
+	ok "aether up"
+	if [ "$QUIC_DNS_SANS" = off ]; then
+		arm_negative_control
+	fi
+}
+
+# arm_negative_control — prove the #47740 guard override is LIVE on the node
+# proxy (never a vacuous red) and raise the loggers that print the handshake
+# verdict: both verify lines come from quiche's tls_handshaker at quic:info /
+# pool:debug (#957), which the default level hides.
+arm_negative_control() {
+	kc -n "$NS" rollout status ds/aether-proxy --timeout=300s >/dev/null || die "the proxy DaemonSet never became Ready"
+	local deadline=$((SECONDS + 120))
+	until admin /runtime 2>/dev/null | grep -A8 "\"$QUIC_HOSTNAME_GUARD\"" | grep -q '"final_value": *"false"'; do
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "negative control: the node proxy's /runtime never reported $QUIC_HOSTNAME_GUARD=false — a missing-SAN run would then be GREEN on the #47740 pin, not the aether#957 red"
+		sleep 5
+	done
+	local logger
+	for logger in quic=info pool=debug; do
+		docker exec "$NODE" curl -sf --max-time 5 -X POST "http://127.0.0.1:9901/logging?$logger" >/dev/null ||
+			die "negative control: could not set $logger on the node proxy's logging"
+	done
+	ok "negative control armed: SVIDs without DNS SANs, $QUIC_HOSTNAME_GUARD=false on the node proxy, quic:info pool:debug"
 }
 
 # node_pin NODE — a pod-spec nodeSelector line pinning to NODE with
@@ -492,7 +554,7 @@ YAML
 
 deploy_source() {
 	local name="$1" ups="" d
-	for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}" "$H2_DST"; do
+	for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}"; do
 		ups="${ups:+$ups,}$d.$TEST_NS"
 	done
 	kc apply -f - >/dev/null <<YAML || die "source $name apply failed"
@@ -525,12 +587,12 @@ YAML
 }
 
 deploy_workloads() {
-	log "deploying destinations (${QUIC_DSTS[*]} ${GAMMA_DSTS[*]} $H2_DST) and sources (${SOURCES[*]})"
+	log "deploying destinations (${QUIC_DSTS[*]} ${GAMMA_DSTS[*]}) and sources (${SOURCES[*]})"
 	kc create ns "$TEST_NS" >/dev/null 2>&1 || true
 	local d
-	for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}" "$H2_DST"; do deploy_destination "$d"; done
+	for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}"; do deploy_destination "$d"; done
 	for d in "${SOURCES[@]}"; do deploy_source "$d"; done
-	for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}" "$H2_DST" "${SOURCES[@]}"; do
+	for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}" "${SOURCES[@]}"; do
 		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null ||
 			die "workload '$d' never became Ready"
 	done
@@ -630,27 +692,32 @@ verify_preflight() {
 	while true; do
 		listeners="$(admin /listeners)"
 		missing=""
-		for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}" "$H2_DST"; do
+		for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}"; do
 			pod="$(pod_of "$d")"
 			[ -n "$pod" ] || die "E0: no Running pod for destination $d"
 			printf '%s\n' "$listeners" | awk -F'::' -v l="inbound_${pod}_h3" '$1 == l { f = 1 } END { exit !f }' || missing="$missing inbound_${pod}_h3"
 		done
 		[ -z "$missing" ] && break
 		[ "$SECONDS" -lt "$deadline" ] ||
-			die "E0: HTTP/3 inbound listener(s) still absent after 180s:$missing — #953's inbound is unconditional with SPIRE on, so this is the inbound (or the pod's SVID) missing, not the allow-list and not timing"
+			die "E0: HTTP/3 inbound listener(s) still absent after 180s:$missing — #953's inbound is unconditional with SPIRE on, so this is the inbound (or the pod's SVID) missing, not timing"
 		sleep 5
 	done
-	for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}" "$H2_DST"; do
+	for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}"; do
 		pod="$(pod_of "$d")"
 		v="$(h3_rq "$pod")"
 		[ -n "$v" ] ||
 			die "E0: $(h3_stat "$pod") is not in /stats — every 'h3 delta == 0' below would be reading an absent stat; fix the stat name before trusting this suite (#853)"
 	done
-	ok "HTTP/3 inbound listeners + counters present for every destination (they exist whether or not anything is allow-listed)"
+	ok "HTTP/3 inbound listeners + counters present for every destination"
 }
 
 # quic_twins DUMP — the distinct quic: cluster names in a /clusters dump, sorted.
-quic_twins() { printf '%s\n' "$1" | awk -F'::' 'index($1, "quic:") == 1 { print $1 }' | sort -u; }
+# E6's brand-new idgate-<ts> ServiceAccounts are left out: since #979 their
+# first request is QUIC-eligible like any other, and their pods (and so their
+# pairs) outlive the run, so a re-run of verify would count them as strays.
+quic_twins() {
+	printf '%s\n' "$1" | awk -F'::' -v g="@$TEST_NS/idgate-" 'index($1, "quic:") == 1 && index($1, g) == 0 { print $1 }' | sort -u
+}
 
 # driven_pairs — the twins E2 + E4b dial over a SELECTING route, sorted: every
 # source x (each QUIC destination + the GAMMA parent's single-backend rule).
@@ -666,7 +733,7 @@ driven_pairs() {
 }
 
 verify_fanout() {
-	log "E1 fan-out: twins are demand-scoped (aether#1020) — before any request, none outside the pairs this suite drives; never one for $H2_DST"
+	log "E1 fan-out: twins are demand-scoped (aether#1020) — before any request, none outside the pairs this suite drives; nothing is listed (#979)"
 	local dump present strays
 	dump="$(admin /clusters)"
 	present="$(quic_twins "$dump")"
@@ -675,9 +742,8 @@ verify_fanout() {
 	# was built for a pair that never dialled.
 	strays="$(comm -23 <(printf '%s\n' "$present" | sed '/^$/d') <(driven_pairs))"
 	[ -z "$strays" ] ||
-		die "E1: quic: twins exist for pairs that never dialled: $strays — the agent is building twins up front (the pre-#1020 fan-out: every local SA x allow-listed destination)"
-	printf '%s\n' "$present" | grep -q "^quic:$(fqdn "$H2_DST")@" && die "E1: the NOT allow-listed $H2_DST has a quic: twin"
-	ok "$(printf '%s\n' "$present" | sed '/^$/d' | wc -l | tr -d ' ') quic: twins before any request in this run (0 on a fresh cluster); none for a pair that never dialled; none for $H2_DST"
+		die "E1: quic: twins exist for pairs that never dialled: $strays — the agent is building twins up front (the pre-#1020 fan-out: every local SA x QUIC destination)"
+	ok "$(printf '%s\n' "$present" | sed '/^$/d' | wc -l | tr -d ' ') quic: twins before any request in this run (0 on a fresh cluster); none for a pair that never dialled"
 }
 
 # verify_pairs — E4c: the node's twin set IS the set of pairs driven so far.
@@ -719,7 +785,7 @@ assert_quic() {
 			break
 		fi
 		[ "$SECONDS" -lt "$deadline" ] ||
-			die "$phase: $src -> $dst never converged onto $(twin "$dst" "$src"): replies $(summarize "$replies"); twin rq_total $(host_rq "$d0" "$(twin "$dst" "$src")") -> $(host_rq "$d1" "$(twin "$dst" "$src")"). 200s with the right URI but a still twin = the route never selected the twin (h2 fallback); 503s with a moving twin = the QUIC handshake fails (the #957 DNS-SAN shape — check the proxy log)"
+			die "$phase: $src -> $dst never converged onto $(twin "$dst" "$src"): replies $(summarize "$replies"); twin rq_total $(host_rq "$d0" "$(twin "$dst" "$src")") -> $(host_rq "$d1" "$(twin "$dst" "$src")"). 200s with the right URI but a still twin = the route never selected the twin (h2 fallback); 503s with a moving twin = the QUIC handshake fails (the #957 DNS-SAN shape — the EXPECTED red under QUIC_DNS_SANS=off; check 'match hostname' in the proxy log and the DNS SANs + hostname guard state in the dump)"
 		sleep 5
 	done
 
@@ -758,7 +824,7 @@ verify_quic() {
 	done
 }
 
-# --- E3: the h2-only destination ---------------------------------------------
+# --- E4 helper: a destination that must stay on h2 ---------------------------
 
 # assert_h2 PHASE SRC DST... — one measured batch from SRC to the FIRST DST;
 # every listed DST (the GAMMA split's backends) must show no quic: twin traffic
@@ -794,17 +860,9 @@ assert_h2() {
 	ok "$phase: $src -> $dst: $BATCH/$BATCH x 200, XFCC URI=$(spiffe_id "$src"); h2 +$h2, every quic: twin +0, HTTP/3 inbound +0 on [$*]"
 }
 
-verify_h2only() {
-	log "E3 h2-only: $H2_DST is not allow-listed — no twin, still served, over h2"
-	local s
-	for s in "${SOURCES[@]}"; do
-		assert_h2 E3 "$s" "$H2_DST"
-	done
-}
-
 # --- E4: GAMMA-routed destination stays on h2 --------------------------------
 
-# A weighted canary parented to gamma-a (both backends allow-listed). #956
+# A weighted canary parented to gamma-a (both backends QUIC-eligible). #956
 # rewrites only routes whose action is `cluster: <this service's h2 cluster>`;
 # a WeightedClusters action is left alone because the matcher plugin's action
 # names ONE cluster (#961) -- so a GAMMA split stays h2. E4b below covers the
@@ -825,21 +883,28 @@ spec:
 YAML
 }
 
-verify_gamma() {
-	log "E4 GAMMA: weighted HTTPRoute on ${GAMMA_DSTS[0]} (${GAMMA_DSTS[0]} 50 / ${GAMMA_DSTS[1]} 50, both allow-listed) — stays h2"
+# gamma_split_up PHASE — apply the weighted canary and wait until it is live.
+# Converge on the DATA, not the status: the route is live once a request to the
+# parent is answered by the second backend's pod (agnhost /hostname). Since #979
+# this split is the one h2-by-design route, so e2e/eastwest-quic-hotrestart.sh
+# uses it as its h2 control too.
+gamma_split_up() {
+	local phase="$1" b_pod deadline=$((SECONDS + 180)) replies
 	apply_gamma_route
-	# Converge on the DATA, not the status: the route is live once a request to
-	# the parent is answered by the second backend's pod (agnhost /hostname).
-	local b_pod deadline=$((SECONDS + 180)) replies
 	b_pod="$(pod_of "${GAMMA_DSTS[1]}")"
 	while true; do
 		replies="$(req_batch "${SOURCES[0]}" "${GAMMA_DSTS[0]}" /hostname 20)"
 		printf '%s\n' "$replies" | awk -v p="$b_pod" '$1 == "200" && $2 == p { f = 1 } END { exit !f }' && break
 		[ "$SECONDS" -lt "$deadline" ] ||
-			die "E4: the HTTPRoute never took effect — no request to ${GAMMA_DSTS[0]} reached ${GAMMA_DSTS[1]} ($b_pod) in 180s: $(summarize "$replies")"
+			die "$phase: the HTTPRoute never took effect — no request to ${GAMMA_DSTS[0]} reached ${GAMMA_DSTS[1]} ($b_pod) in 180s: $(summarize "$replies")"
 		sleep 5
 	done
 	ok "the weighted route is live (requests to ${GAMMA_DSTS[0]} reach $b_pod)"
+}
+
+verify_gamma() {
+	log "E4 GAMMA: weighted HTTPRoute on ${GAMMA_DSTS[0]} (${GAMMA_DSTS[0]} 50 / ${GAMMA_DSTS[1]} 50, both QUIC-eligible) — stays h2"
+	gamma_split_up E4
 	local s
 	for s in "${SOURCES[@]}"; do
 		assert_h2 E4 "$s" "${GAMMA_DSTS[@]}"
@@ -944,7 +1009,7 @@ metadata:
   namespace: $TEST_NS
   labels: {app: $sa, aether.io/managed: "true"}
   annotations:
-    config.aether.io/upstreams: "$H2_DST.$TEST_NS"
+    config.aether.io/upstreams: "${QUIC_DSTS[0]}.$TEST_NS"
 spec:
   serviceAccountName: $sa
   restartPolicy: Never
@@ -954,7 +1019,7 @@ spec:
       command: ["sh", "-c"]
       args:
         - |
-          out=\$(curl -s --max-time 30 -w '\\n%{http_code} %{time_total}' "http://$(fqdn "$H2_DST"):$OUTBOUND_PORT/header?key=X-Forwarded-Client-Cert")
+          out=\$(curl -s --max-time 30 -w '\\n%{http_code} %{time_total}' "http://$(fqdn "${QUIC_DSTS[0]}"):$OUTBOUND_PORT/header?key=X-Forwarded-Client-Cert")
           last=\$(printf '%s\\n' "\$out" | tail -n 1)
           body=\$(printf '%s\\n' "\$out" | sed '\$d' | head -n 1)
           echo "AETHER_IDGATE_FIRST code=\${last%% *} took=\${last#* }s xfcc=\$body"
@@ -1006,13 +1071,12 @@ verify() {
 	verify_preflight
 	verify_fanout
 	verify_quic
-	verify_h2only
 	verify_gamma
 	verify_gamma_single
 	verify_pairs
 	verify_q3
 	verify_identity_gate
-	log "all east-west QUIC assertions passed (demand-scoped twins, per-source HTTP/3 + XFCC, h2-only untouched, GAMMA stays h2, twins = driven pairs, identity across a client address change, the identity gate holds a new pod until its SVID exists)"
+	log "all east-west QUIC assertions passed (demand-scoped twins with nothing listed, per-source HTTP/3 + XFCC, GAMMA weighted stays h2 / single-backend rides h3, twins = driven pairs, identity across a client address change, the identity gate holds a new pod until its SVID exists)"
 }
 
 down() {

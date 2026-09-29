@@ -26,12 +26,13 @@ import (
 const firstUseNodeSVID = "spiffe://aether.internal/ns/aether-system/sa/aether-agent"
 
 // newFirstUseNode is a node with one local ServiceAccount (demo/source-a) and
-// one QUIC-enabled destination (demo/echo) loaded from the registry. It returns
+// one destination (demo/echo, QUIC-eligible by being in the dependency set)
+// loaded from the registry. It returns
 // source-a's twin name and SPIFFE ID.
 func newFirstUseNode(ctx context.Context, t *testing.T) (*cache.SnapshotCache, string, string) {
 	t.Helper()
 	c := cache.NewSnapshotCache(restateNode, slog.New(slog.DiscardHandler))
-	c.SetEastWestQUICServices([]string{"demo/echo"})
+	c.RestoreDependency(ctx, "demo/echo")
 	require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
 		Name: "source-a-0", Namespace: "demo", ServiceAccount: "source-a",
 		NetworkNamespace: "/var/run/netns/cni-source-a",
@@ -173,7 +174,7 @@ func TestOnDemandTwinWaitingForItsCertificateIsHeldNeverAbsent(t *testing.T) {
 	}))
 	require.Eventually(t, func() bool { return len(c.QUICPairs()) == 1 }, 5*time.Second, 5*time.Millisecond, "first use admits the pair")
 	if held := recvWithin(responses, 300*time.Millisecond); held != nil {
-		assert.NotContains(t, held.GetRemovedResources(), twin, "a subscribed twin of a QUIC-enabled destination is never answered absent")
+		assert.NotContains(t, held.GetRemovedResources(), twin, "a subscribed twin of a QUIC-eligible destination is never answered absent")
 		assert.NotContains(t, resourceNames(held), twin, "no twin before its certificate")
 		require.NoError(t, stream.Send(&discoveryv3.DeltaDiscoveryRequest{
 			Node: node, TypeUrl: resourcev3.ClusterType, ResponseNonce: held.GetNonce(),

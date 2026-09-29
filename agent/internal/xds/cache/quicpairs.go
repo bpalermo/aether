@@ -27,8 +27,8 @@ type QUICTwinDecision int
 
 const (
 	// QUICTwinRefused: the name is malformed, or names a destination that is
-	// not QUIC-enabled / not in the dependency set, or a source that is not a
-	// local ServiceAccount. Nothing is recorded; the proxy's paused request
+	// not in the dependency set, or a source that is not a local
+	// ServiceAccount. Nothing is recorded; the proxy's paused request
 	// fails at the on_demand timeout (503 NC).
 	QUICTwinRefused QUICTwinDecision = iota
 	// QUICTwinKnown: the pair was already observed; the twin is (or is about
@@ -42,7 +42,6 @@ const (
 // Refusal reasons for an on-demand `quic:` request, as logged and counted.
 const (
 	QUICRefusedMalformed       = "malformed_name"
-	QUICRefusedNotQUICService  = "destination_not_quic_enabled"
 	QUICRefusedNotInDependency = "destination_not_in_dependency_set"
 	QUICRefusedSourceNotOnNode = "source_not_local"
 )
@@ -50,7 +49,6 @@ const (
 // Prune reasons, as logged.
 const (
 	quicPairPruneReasonSource = "source_left_node"
-	quicPairPruneReasonDest   = "destination_not_quic_enabled"
 	quicPairPruneReasonDepSet = "destination_left_dependency_set"
 
 	// quicPairsLogCap bounds how many pairs one prune log line names.
@@ -60,12 +58,11 @@ const (
 // ObserveQUICTwin handles the node proxy's on-demand CDS request for a
 // `quic:<svc>.<ns>.<domain>@<ns>/<sa>` twin (issue #1020).
 //
-// Every local ServiceAccount has a selection arm on a QUIC-enabled
-// destination's routes, but the twin behind the arm is built only once that
+// Every local ServiceAccount has a selection arm on every eligible
+// destination's routes (east-west QUIC is unconditional, #979), but the twin behind the arm is built only once that
 // source has actually dialled the destination: the first request finds no
 // such cluster and Envoy's on_demand filter asks for it by name. This
-// validates the name -- the destination must be QUIC-enabled and in the
-// dependency set, the source must be a ServiceAccount with a pod on this node
+// validates the name -- the destination must be in the dependency set, the source must be a ServiceAccount with a pod on this node
 // -- records the pair in the persisted demand set and regenerates the
 // snapshot, which then carries the twin and its own load assignment together
 // (the #1008 rule), answering the subscription.
@@ -234,8 +231,6 @@ func (c *SnapshotCache) recordQUICPair(streamID int64, name string) (QUICTwinDec
 	switch {
 	case !has(local, source):
 		reason = QUICRefusedSourceNotOnNode
-	case !has(c.quicServices, service):
-		reason = QUICRefusedNotQUICService
 	case !has(c.dependencySetLocked(), service):
 		reason = QUICRefusedNotInDependency
 	}
@@ -318,15 +313,18 @@ func (c *SnapshotCache) markLocalPodsSynced() {
 }
 
 // quicDemandSnapshot prunes the observed QUIC pairs against the current
-// local identities and allow-list, then returns copies of the allow-list and
-// the surviving pairs for one snapshot.
+// local identities and dependency set, then returns copies of the dependency
+// set and of the surviving pairs for one snapshot. The dependency set is what
+// makes a destination QUIC-eligible now that there is no allow-list (#979):
+// armsFor gives arms only to its members, the same rule recordQUICPair admits
+// by, so no route names a twin the agent would refuse.
 func (c *SnapshotCache) quicDemandSnapshot(identities []string) (map[string]struct{}, map[quicPair]struct{}) {
 	local := sourceSAKeys(identities)
 
 	c.depMu.Lock()
 	pruned := c.pruneQUICPairsLocked(local)
 	revived := c.reviveDormantQUICPairsLocked(local)
-	services := maps.Clone(c.quicServices)
+	deps := maps.Clone(c.dependencySetLocked())
 	var pairs map[quicPair]struct{}
 	if len(c.quicPairs) > 0 {
 		pairs = make(map[quicPair]struct{}, len(c.quicPairs))
@@ -343,11 +341,11 @@ func (c *SnapshotCache) quicDemandSnapshot(identities []string) (map[string]stru
 		c.log.Info("republished dormant east-west QUIC pairs: the proxy still holds their on-demand subscriptions, so the twin is pushed with no request",
 			"count", len(revived), "pairs", capStrings(revived, quicPairsLogCap))
 	}
-	return services, pairs
+	return deps, pairs
 }
 
 // reviveDormantQUICPairsLocked moves every dormant pair that is servable again
-// -- its destination QUIC-enabled and in the dependency set, and its source
+// -- its destination in the dependency set, and its source
 // ServiceAccount back on the node (judged only once the pod set is known) --
 // into the observed set, so the snapshot being built republishes its twin
 // (issue #1036). The proxy's on-demand subscription for the name never closed,
@@ -360,7 +358,7 @@ func (c *SnapshotCache) reviveDormantQUICPairsLocked(local map[string]struct{}) 
 	}
 	deps := c.dependencySetLocked()
 	woken := c.quicLedger.Revive(func(p quicPair) bool {
-		return has(c.quicServices, p.service) && has(deps, p.service) && has(local, p.source)
+		return has(deps, p.service) && has(local, p.source)
 	})
 	if len(woken) == 0 {
 		return nil
@@ -377,10 +375,14 @@ func (c *SnapshotCache) reviveDormantQUICPairsLocked(local map[string]struct{}) 
 }
 
 // pruneQUICPairsLocked drops the pairs whose twin can no longer be built or
-// selected: the destination is no longer QUIC-enabled or no longer in the
-// dependency set, or -- once the local pod set is known -- the source
-// ServiceAccount has no pod on this node. There is deliberately NO idle
-// expiry: nothing in the xDS protocol tells the agent a twin stopped
+// selected: once the local pod set is known, the destination is no longer in
+// the dependency set or the source ServiceAccount has no pod on this node.
+// Both wait for the pod set: the declared half of the dependency set IS the
+// pod records (their upstream annotations), so before they are loaded a
+// destination's absence is not evidence -- a restored pair would otherwise be
+// dropped by the first snapshot after an agent restart. (The allow-list forced
+// its destinations into the set, which hid this until #979.) There is
+// deliberately NO idle expiry: nothing in the xDS protocol tells the agent a twin stopped
 // carrying traffic, and a wrongly pruned pair costs its next request one
 // ODCDS round trip, so the rule prunes only on removal evidence. (The one
 // time-based rule is the bounded post-start prune of persisted pairs that are
@@ -399,9 +401,7 @@ func (c *SnapshotCache) pruneQUICPairsLocked(local map[string]struct{}) []string
 	for p := range c.quicPairs {
 		reason := ""
 		switch {
-		case !has(c.quicServices, p.service):
-			reason = quicPairPruneReasonDest
-		case !has(deps, p.service):
+		case c.localPodsSynced && !has(deps, p.service):
 			reason = quicPairPruneReasonDepSet
 		case c.localPodsSynced && !has(local, p.source):
 			reason = quicPairPruneReasonSource
@@ -451,7 +451,7 @@ func (c *SnapshotCache) SetQUICIdleTimeout(d time.Duration) {
 // Why it exists: the #1032 agent admitted a pair for every twin the proxy
 // re-stated on a fresh stream, so the first talos deploy persisted the whole
 // SAs x destinations fan-out on every node, and pairs prune otherwise only on
-// removal evidence (source left the node, destination delisted). The agent has
+// removal evidence (source left the node, destination left the dependency set). The agent has
 // no traffic signal of its own -- it makes no admin calls, and a served twin
 // is never fetched again -- so "fetched on demand since start" is the only
 // evidence of use it can see. A pair first used in this process is marked
@@ -582,8 +582,8 @@ func (c *SnapshotCache) DormantQUICPairs() []string {
 }
 
 // admitStoredQUICPairs merges persisted pairs into quicPairs (union, never
-// override). A malformed entry is skipped. Validation against the allow-list
-// and the local pods is left to the snapshot-time prune: at restore the pod
+// override). A malformed entry is skipped. Validation against the dependency
+// set and the local pods is left to the snapshot-time prune: at restore the pod
 // records may not be loaded yet. Returns how many pairs were admitted and
 // skipped.
 func (c *SnapshotCache) admitStoredQUICPairs(entries []*agentv1.ObservedQUICPair) (admitted, skipped int) {

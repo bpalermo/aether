@@ -413,9 +413,11 @@ identity-bearing class (R2):
   longer holds it, or a new proxy generation after a hot restart, which holds no
   ODCDS subscriptions. The fetch-window prune never applies to a dormant pair.
 
-  **Per-request cost (#1021).** On the rev242 proving soak an HTTP/3 mesh request
-  cost ~3.3× the proxy CPU of an h2 one (~11 ms vs ~3.3 ms across both proxies,
-  #1006), with ~128 QUIC connections carrying 100 rps. Two things were checked
+  **Per-request cost (#1021).** The first reading, on the rev242 proving soak, put
+  an HTTP/3 mesh request at ~3.3× the proxy CPU of an h2 one (~11 ms vs ~3.3 ms
+  across both proxies, #1006), with ~128 QUIC connections carrying 100 rps. That
+  compared two different revisions (rev239 h2 vs rev242 QUIC) and is superseded
+  by the same-build A/B below (1.18×). Two things were checked
   and one changed:
 
   - *Why so many connections.* Not `connection_pool_per_downstream_connection`:
@@ -462,7 +464,11 @@ identity-bearing class (R2):
   The gate for dropping the allow-list (#979) is **QUIC per-request proxy CPU
   ≤ 1.5× h2**, measured on a soak with the #1006 method
   (`e2e/soak/README.md`, "The QUIC per-request cost gate"). The baseline is the
-  rev242 reading: 3.3×, with 2.88 fleet envoy cores.
+  same-revision A/B of 2026-09-28 (rev247, 300 rps, matched 80-min no-roll
+  windows, Pyroscope fleet envoy cores): h3/h2 = **1.18×** per request (10.5 ms
+  vs 8.9 ms), under the gate — [#1021, "Same-revision measurement,
+  2026-09-28"](https://github.com/bpalermo/aether/issues/1021). The earlier
+  3.3× (rev242 vs rev239) mixed two builds and no longer counts.
 
 Required mode only until the pin passes #47341; the extra peer-cert fields of
 #45978 are not needed by anything today.
@@ -636,7 +642,12 @@ over a tested path. The full assessment is on #916.
   `dnsNameTemplates` on the workloads' `ClusterSPIFFEID` (SPIRE accepts a
   single leading-label wildcard). Identity is still the URI-SAN pin; the DNS
   SANs only satisfy the QUIC client's check. Once the upstream fix lands the
-  DNS SANs become optional, the SNI shape stays.
+  DNS SANs become optional, the SNI shape stays. The upstream fix is
+  envoyproxy/envoy#47740, carried as a patch on the proxy pin since #972; with
+  the allow-list removed (4c, #979, gated on the next proving soak) every workload
+  talks QUIC, so the SANs are a **mesh-wide** SPIRE requirement until #47740 is
+  in a plain pin. `e2e/eastwest-quic.sh`'s negative control
+  (`QUIC_DNS_SANS=off`: no SANs, #47740's runtime guard off) is this failure.
 
 ## Plan
 
@@ -674,17 +685,21 @@ before a UDPRoute exists, and equally deliberate.
 | 3a | `e2e/l4routes.sh` T3 grows a second UDPRoute-backed service on the same node and asserts **selection**: each service's datagrams reach its own backend. Run first with the mode `redirect` and **seen red** (second service dropped, as today), then with `tproxy` green. | M | red-then-green on kind |
 | 3b | Flip `--capture-udp-mode` to `tproxy`. Chart bump. Deploy to talos-main; 8h soak with the UDP workload in the churn set. Then delete the 18081/udp REDIRECT one release later. | S + soak | soak PASS |
 
-### Phase 4 — east-west QUIC (behind `--east-west-quic`, default off)
+### Phase 4 — east-west QUIC (planned behind a flag; unconditional with #979, gated on the next proving soak)
 
 | PR | scope | size | gate |
 |---|---|---|---|
 | 4a **(shipped, unconditional — no flag; no 18008 divert, inbound QUIC arrives on eth0 and needs none)** | Inbound: a QUIC listener bound into each pod's netns on **UDP:18008**, `envoy.transport_sockets.quic` wrapping the SAME `DownstreamTlsContext` (SDS server cert, validation context with SPIFFE SAN pinning) as the TCP inbound; `require_client_certificate: true`; `enable_resumption: false`, `enable_early_data: false` (R4). Routes to the same per-port app clusters. Extend the port-role gate to 18008. | M | `//test/envoy_validate` asserts the two `false`s on every mTLS QUIC chain — a chain without them must FAIL validation, and the test must be seen red |
-| 4b **(shipped 2026-09-26: #956 outbound + selection, #958 mtlspool HTTP/3 arm, #962 per-source stats key; e2e #959; the #957 hostname-check workaround is Q5)** | Outbound — **Q2 answered: one QUIC cluster per source ServiceAccount.** `QuicUpstreamTransport` rejects the cert mapper at load (Q2a=no), so the per-source identity has to be the cluster's own `UpstreamTlsContext`, one per local ServiceAccount, named `quic:<svc>@<source-sa>` and selected by the source's filter-state identity at the route. The identity-set re-push cost #842 removed returns for these clusters only: the first pod of a new ServiceAccount on a node adds a QUIC cluster, the last one leaving removes it, and each add re-warms only that cluster — bounded by local ServiceAccounts, not by mesh services, and never touching the TCP clusters. Pooling still partitions per identity (Q2b=yes), so `//test/mtlspool` gains a QUIC arm asserting source B never rides source A's connection — the pooling guarantee is real even though the certificate is per cluster. **Each twin carries its own EDS resource name** (its cluster name; the agent publishes the h2 cluster's load assignment under it too) rather than sharing the h2 cluster's bare-service name: Envoy's delta-ADS `WatchMap` deduplicates EDS interest per resource name, so a twin added after its base was subscribed — exactly the new-ServiceAccount case above — sent no subscribe and warmed for the full 15 s `initial_fetch_timeout`, `503/NC` for that source to every QUIC destination (#1008, found by the rev242 proving soak; #842's mechanism on EDS). A separate `api_config_source` for the twins was rejected: one mux per twin set and a SotW/delta split for endpoints, where a distinct name costs one extra CLA copy per twin on the existing stream. **Demand-scoped since #1020:** the routes keep one selection arm per local ServiceAccount, but a twin is built only for a (source SA, destination) pair that has dialled. The first request of a new pair fetches its twin over ODCDS (the arm names it; the `on_demand` filter asks for it; the agent validates, persists the pair in `ObservedUpstreams.quic_pairs`, and publishes twin + load assignment together). That makes every twin a late twin, so the own-EDS-name rule above is load-bearing for all of them. Pairs are pruned on source-leaves-node or destination-leaves-allow-list/dependency-set only, with no idle TTL. The budget is observed pairs, not local SAs × QUIC destinations: 118 → ~10 on rev242's fleet. **Per-request cost (#1021):** twins never pool per downstream connection (pinned off in `QUICClusterFrom`; measured 1 vs 12 QUIC connections for 12 app connections), and the inbound QUIC listener reads with GRO (−11 % destination CPU per request); the flag drop gates on h3 ≤ 1.5× h2 per request (baseline 3.3×). | L | mtlspool QUIC negative control red-then-green; a cluster-count budget stated before commit (local SAs × QUIC-enabled destinations) |
-| 4c **(decision 2026-09-26: NO opt-in for QUIC. The allow-list #956 shipped is a proving gate for the first QUIC soak and is removed once it passes — QUIC then applies to every destination; the registry-advertised opt-in is dropped, not deferred)** | Selection: explicit allow-list flag first; then "destination advertises UDP:18008" via the registry once the inbound has soaked. | S | e2e |
+| 4b **(shipped 2026-09-26: #956 outbound + selection, #958 mtlspool HTTP/3 arm, #962 per-source stats key; e2e #959; the #957 hostname-check workaround is Q5. Unconditional since #979: every service in the node's dependency set is eligible — default entry only, identity-ready, never a service with a waypointed endpoint — and gets arms for every local SA; twins stay demand-scoped (#1020), so the budget is observed pairs, bounded by local SAs × dependency-set services)** | Outbound — **Q2 answered: one QUIC cluster per source ServiceAccount.** `QuicUpstreamTransport` rejects the cert mapper at load (Q2a=no), so the per-source identity has to be the cluster's own `UpstreamTlsContext`, one per local ServiceAccount, named `quic:<svc>@<source-sa>` and selected by the source's filter-state identity at the route. The identity-set re-push cost #842 removed returns for these clusters only: the first pod of a new ServiceAccount on a node adds a QUIC cluster, the last one leaving removes it, and each add re-warms only that cluster — bounded by local ServiceAccounts, not by mesh services, and never touching the TCP clusters. Pooling still partitions per identity (Q2b=yes), so `//test/mtlspool` gains a QUIC arm asserting source B never rides source A's connection — the pooling guarantee is real even though the certificate is per cluster. **Each twin carries its own EDS resource name** (its cluster name; the agent publishes the h2 cluster's load assignment under it too) rather than sharing the h2 cluster's bare-service name: Envoy's delta-ADS `WatchMap` deduplicates EDS interest per resource name, so a twin added after its base was subscribed — exactly the new-ServiceAccount case above — sent no subscribe and warmed for the full 15 s `initial_fetch_timeout`, `503/NC` for that source to every QUIC destination (#1008, found by the rev242 proving soak; #842's mechanism on EDS). A separate `api_config_source` for the twins was rejected: one mux per twin set and a SotW/delta split for endpoints, where a distinct name costs one extra CLA copy per twin on the existing stream. **Demand-scoped since #1020:** the routes keep one selection arm per local ServiceAccount, but a twin is built only for a (source SA, destination) pair that has dialled. The first request of a new pair fetches its twin over ODCDS (the arm names it; the `on_demand` filter asks for it; the agent validates, persists the pair in `ObservedUpstreams.quic_pairs`, and publishes twin + load assignment together). That makes every twin a late twin, so the own-EDS-name rule above is load-bearing for all of them. Pairs are pruned on source-leaves-node or destination-leaves-allow-list/dependency-set only (dependency-set only since #979), with no idle TTL. The budget is observed pairs, not local SAs × QUIC destinations: 118 → ~10 on rev242's fleet. **Per-request cost (#1021):** twins never pool per downstream connection (pinned off in `QUICClusterFrom`; measured 1 vs 12 QUIC connections for 12 app connections), and the inbound QUIC listener reads with GRO (−11 % destination CPU per request); the flag drop gates on h3 ≤ 1.5× h2 per request (same-build baseline 1.18×, rev247 2026-09-28, #1021; the earlier 3.3× compared two revisions). | L | mtlspool QUIC negative control red-then-green; a cluster-count budget stated before commit (local SAs × QUIC-enabled destinations) |
+| 4c **(decision 2026-09-26: NO opt-in for QUIC. The allow-list #956 shipped was a proving gate for the first QUIC soak; #979 removes it once a proving soak passes — the first one (2026-09-27, rev242) did not (k6 failed: 1,060 × 503 NC at first use, #1008), so the flip is gated on the NEXT proving soak, result pending — `--east-west-quic-services` / `agent.eastWestQuicServices` are gone and QUIC applies to every destination; the registry-advertised opt-in is dropped, not deferred)** | Selection: explicit allow-list flag first; then "destination advertises UDP:18008" via the registry once the inbound has soaked. | S | e2e |
 | 4d | East-west gateway: UDP:18009 beside TCP:18009, same SNI-forwarding role; cross-cluster last. | M | 019's cross-cluster e2e over QUIC |
 
 Then a soak with `--east-west-quic` on for the whole 8h, graded on the same
-prober SLI, before any default flips.
+prober SLI, before any default flips. (The first proving soak, with
+`aether-test/svc-1` and `svc-2` allow-listed on 2026-09-27, did **not** pass: the
+prober passed, but k6 failed with 1,154 errors, 1,060 of them 503 NC at first use
+(#1008). The unconditional flip in #979 is gated on the NEXT proving soak, whose
+result is pending.)
 
 ### Phase 5 — TCP capture to TPROXY
 

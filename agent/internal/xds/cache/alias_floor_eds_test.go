@@ -219,7 +219,6 @@ func TestNoNonDefaultClusterSharesTheBareServiceEDSName(t *testing.T) {
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
 	declareDeps(c, "demo/echo", "demo/mixed")
 	c.SetCaptureAuthorities(map[string]string{"demo/echo": "echo.demo.svc.cluster.local"})
-	c.SetEastWestQUICServices([]string{"demo/echo"})
 	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "demo/mixed", ClusterIP: "10.96.0.61", PrimaryIsTCP: true}})
 
 	multi := makeEndpoint("10.0.3.1", "cluster-1", "node-2", 8080)

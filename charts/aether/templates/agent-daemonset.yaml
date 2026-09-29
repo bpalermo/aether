@@ -120,9 +120,6 @@ spec:
             {{- if .Values.agent.eastWestWaypoint }}
             - "--east-west-waypoint"
             {{- end }}
-            {{- range .Values.agent.eastWestQuicServices }}
-            - "--east-west-quic-services={{ . }}"
-            {{- end }}
             # #1054: no idle h3 twin connection may outlive a destination's
             # hot-restart parent; the helper fails the render unless it is 5s
             # shorter than proxy.hotRestart.parentShutdownTime.

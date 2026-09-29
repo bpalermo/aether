@@ -59,7 +59,7 @@ func newOnDemandObserver(snapshotCache *cache.SnapshotCache, reg registry.Regist
 		o.log.Error("failed to create rejected counter; continuing without instrumentation", "error", err)
 	}
 	if o.quicRefused, err = otel.Meter("aether/agent-odcds").Int64Counter("aether.agent.quic.twin.refused",
-		metric.WithDescription("On-demand quic: twin requests refused (malformed name, destination not QUIC-enabled or not in the dependency set, source not a local ServiceAccount); each 503s at the on_demand timeout")); err != nil {
+		metric.WithDescription("On-demand quic: twin requests refused (malformed name, destination not in the dependency set, source not a local ServiceAccount); each 503s at the on_demand timeout")); err != nil {
 		o.log.Error("failed to create QUIC twin refused counter; continuing without instrumentation", "error", err)
 	}
 	return o
@@ -170,7 +170,7 @@ func (o *onDemandObserver) restateTwins(streamID int64, twins quicdemand.Classif
 }
 
 // observeQUICTwin handles an on-demand request for a `quic:` twin (issue
-// #1020): a local ServiceAccount's first request to a QUIC-enabled
+// #1020): a local ServiceAccount's first request to an eligible
 // destination, routed by its selection arm to a twin the snapshot does not
 // carry yet. Only names quicdemand classifies as first use reach it; a fresh
 // stream's re-stated twins go to restateTwins (issue #1033). The cache validates
@@ -181,7 +181,7 @@ func (o *onDemandObserver) restateTwins(streamID int64, twins quicdemand.Classif
 //
 // Deliberately NOT tracked as a live on-demand subscription: a pair has no
 // idle TTL for a subscription to exempt it from (the pair is pruned only when
-// its source leaves the node or its destination leaves the allow-list).
+// its source leaves the node or its destination leaves the dependency set).
 func (o *onDemandObserver) observeQUICTwin(streamID int64, name string) {
 	ctx := context.Background()
 	decision, reason := o.cache.ObserveQUICTwin(ctx, streamID, name)

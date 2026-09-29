@@ -891,28 +891,31 @@ for the full install + onboarding walkthrough.
 > [`observability/profiling-symbols.md`](./observability/profiling-symbols.md) for the
 > path table that has to be updated alongside it.
 
-### East-west QUIC (proposal 038 Phase 4): enabling, verifying, rolling back
+### East-west QUIC (proposal 038 Phase 4): prerequisites, verifying, escape hatch
 
-Since #953 every mesh pod has an HTTP/3 inbound on UDP:18008 beside the TCP one
-(same SVID, same client-certificate requirement, same SAN pin); it is inert until a
-source proxy dials it. #956 adds the dialling side, behind a per-destination allow-list **that is a proving
-gate, not the product surface** (decision 2026-09-26: no opt-in for QUIC — once the
-first QUIC soak on a real cluster passes, the list is removed and every mesh
-destination is dialled over HTTP/3 by every caller, exactly as the inbound is
-unconditional today). Until then:
+East-west QUIC is **unconditional**. Every mesh pod has an HTTP/3 inbound on
+UDP:18008 beside the TCP one (#953: same SVID, same client-certificate
+requirement, same SAN pin), and every node proxy dials every service in its
+dependency set over HTTP/3 from every local ServiceAccount that calls it (#956;
+the per-source clusters are built on first use, #1020). There is no
+value or flag for it: the per-destination allow-list (a chart value + agent flag)
+was a proving gate for QUIC on a real cluster and is removed by #979 (decision
+2026-09-26: no opt-in for QUIC). The first proving soak (2026-09-27) did not pass —
+k6 saw 1,060 × 503 NC at first use (#1008) — so the removal is gated on the next
+proving soak. The one exception is a service with any endpoint behind the east/west
+waypoint (019): it stays h2, because the waypoint tunnel has no QUIC leg.
 
-```bash
-# one entry per destination; the h2 path is untouched for everything else
---set agent.eastWestQuicServices[0]=aether-test/svc-1
-```
-
-Before listing anything, the workloads' `ClusterSPIFFEID` must issue two DNS SANs
-per SVID — `<sa>.<ns>.<meshDomain>` and `*.<sa>.<ns>.<meshDomain>`. Envoy's QUIC
-client verifies the SNI (`<port>.<sa>.<ns>.<meshDomain>`) against the leaf's DNS
-SANs *after* the SPIFFE pin succeeds and nothing but `accept_untrusted` skips it
-(aether#957); without the SANs every HTTP/3 handshake to a listed service fails
-closed (503 at the source, `QUIC_TLS_CERTIFICATE_UNKNOWN` in the proxy log) while
-h2 keeps working. On the spiffe/spire chart:
+**Mesh-wide SPIRE prerequisite.** Every workload SVID must carry two DNS SANs —
+`<sa>.<ns>.<meshDomain>` and `*.<sa>.<ns>.<meshDomain>` — until
+envoyproxy/envoy#47740 is in a *plain* proxy pin. Envoy's QUIC client verifies the
+SNI (`<port>.<sa>.<ns>.<meshDomain>`) against the leaf's DNS SANs *after* the SPIFFE
+pin succeeds (aether#957); without the SANs every HTTP/3 handshake fails closed
+(503 at the source, `Leaf certificate doesn't match hostname` /
+`QUIC_TLS_CERTIFICATE_UNKNOWN` in the proxy log at `quic:info`). The proxy pin since
+chart 0.95.3 carries #47740 as a patch (#972), which defers that check to the SAN
+pin, so today a missing SAN does not fail — but the carry is transitional and a pin
+bump can drop it, so the SANs stay required until upstream ships it. On the
+spiffe/spire chart:
 
 ```yaml
 spire-server:
@@ -926,18 +929,26 @@ spire-server:
 ```
 
 Changing the entry re-issues every workload SVID on the agents' next fetch; no pod
-roll. Order of operations on a live cluster: SPIRE first, wait for the agents'
-`envoy_sds_*_version` to move on every node, then the allow-list.
+roll. **Order of operations on a live cluster upgrading from a chart that still
+had the allow-list: SPIRE first, wait for the agents' `envoy_sds_*_version` to move
+on every node, then the chart** — the upgrade turns QUIC on for every destination
+at once.
 
-**What to expect once a destination is listed.** Twins are **demand-scoped**
+**Network prerequisite.** UDP:18008 must be open wherever TCP:18008 is: from every
+node (the source proxy is host-network) to every mesh pod IP. A NetworkPolicy or
+host firewall that allows only TCP:18008 breaks every mesh request, not just a few.
+
+**What to expect.** Every service in a node's dependency set is QUIC-eligible
+(default entry only, identity-ready, never a service with an endpoint behind the
+east/west waypoint), but twins are **demand-scoped**
 (#1020): a node builds a `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster only for a
-(source ServiceAccount, destination) pair that has actually dialled. The route to a
-listed destination carries one selection arm per local ServiceAccount (a matcher
+(source ServiceAccount, destination) pair that has actually dialled. The route to an
+eligible destination carries one selection arm per local ServiceAccount (a matcher
 cluster specifier keyed on the connection's `aether.source.spiffe_id` filter
 state), each naming that source's twin, built or not. A source's **first** request
 resolves to a twin the proxy does not have yet; the HCM's `on_demand` filter asks
-the agent for it by name over ODCDS; the agent checks the name (destination listed
-and in the dependency set, source a ServiceAccount with a pod on the node), records
+the agent for it by name over ODCDS; the agent checks the name (destination in the
+dependency set, source a ServiceAccount with a pod on the node), records
 the pair and publishes the twin with its own load assignment; the paused request
 resumes on it, over HTTP/3. That costs one local round trip. It was 17–24 ms in
 `//test/mtlspool`'s `TestOnDemandQUICTwinPerPair`, and every later request from
@@ -947,16 +958,20 @@ whose single backendRef is the parent rides QUIC too; a weighted split stays h2
 (#961) and never fetches a twin.
 
 The agent logs `east-west QUIC fan-out quic_clusters=N observed_pairs=P
-local_identities=I allow_listed_services=S` whenever `N` changes, and for each
+local_identities=I awaiting_client_cert=W` whenever `N` or `W` changes, and for each
 new pair `observed east-west QUIC pair (ODCDS); building its twin cluster=…`.
 `N` is the number of observed pairs whose source is still local, so it is at most
-`I × S` and on a real fleet much less (rev242: 118 possible, 2 used).
+`I × S`, where `S` is the node's eligible dependency-set services (the line no
+longer carries a service count since #979), and on a real fleet much less (rev242,
+with an allow-list of 2: 118 possible, 2 used; without the allow-list the ceiling on
+talos-main is 8–14 SAs × ~19 services ≈ 150–270 per node, the pairs actually dialled
+stay the same).
 
 **What a healthy node reads.** `observed_pairs` ≈ the (source ServiceAccount,
 destination) pairs that carry traffic on that node: on talos the k6 loaders, the
 prober and the dialers, so **single digits per node**, and `quic_clusters` equal to
-it. `observed_pairs == local_identities × allow_listed_services` on every node is the
-#1033 red reading (rev245, 2026-09-28: 24/24/12, 18/18/9, 28/28/14, 20/20/10,
+it. `observed_pairs` that is a whole multiple of `local_identities` on every node
+(every local SA × the same destinations) is the #1033 red reading (rev245, 2026-09-28: 24/24/12, 18/18/9, 28/28/14, 20/20/10,
 20/20/10), not a busy fleet.
 
 **Reading twin count against pairs.** On one node, the `quic:` clusters in the
@@ -965,7 +980,7 @@ persisted beside the observed upstreams (`state/observed-upstreams.json`,
 `quic_pairs`), so they survive an agent or agent+proxy roll. There is **no idle
 expiry**: nothing in xDS tells the agent that a twin stopped carrying traffic. A
 pair is pruned when its source ServiceAccount has no pod left on the node, or when
-its destination leaves the allow-list or the dependency set, or by the post-start
+its destination leaves the dependency set, or by the post-start
 prune below. In the first two cases, a pair whose twin the proxy fetched on demand
 loses its twin but is kept **dormant** and republished when it is valid again (#1036,
 "Stranded twin" below). A pair that did receive traffic therefore keeps its twin while both
@@ -1024,7 +1039,7 @@ name is skipped inside the proxy and never reaches the agent. The pair is then
 
 - **Access log.** `reporter:source`, `response_code:503`, `response_flags:NC`,
   `duration_ms` ≈ `2000` (the `on_demand` timeout) on every request from one source
-  ServiceAccount to one QUIC-enabled destination, starting when a pod of that
+  ServiceAccount to one QUIC destination, starting when a pod of that
   ServiceAccount came back to the node. `upstream_cluster` is `-` on an `NC` line, so
   scope by `authority` and the source pod.
 - **Proxy debug log.** `ODCDS-manager: resource quic:<svc>.<ns>.<domain>@<ns>/<sa> is
@@ -1036,7 +1051,7 @@ name is skipped inside the proxy and never reaches the agent. The pair is then
 
 Until #1036 this was reachable on every Deployment roll. A pair was *forgotten* when
 its source ServiceAccount's last pod left the node, or when its destination left the
-allow-list or the dependency set. The next pod of that ServiceAccount on the node
+dependency set (or, before #979, the allow-list). The next pod of that ServiceAccount on the node
 then routed to a name Envoy would never ask for again. `//test/mtlspool`
 `TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control` reproduces
 it: `status=503 … in 2.000099268s`, and no CDS request reaches the control plane.
@@ -1052,7 +1067,7 @@ destination, it goes **dormant**:
   to `dormant_quic_pairs` in `state/observed-upstreams.json`, and the prune line reads
   `pruned east-west QUIC pairs … (source_left_node, dormant)`.
 - **Returning.** The pair is valid again when a pod of the ServiceAccount is back on
-  the node, or the destination is re-listed. The **same snapshot** then republishes
+  the node, or the destination is back in the dependency set. The **same snapshot** then republishes
   the twin and its load assignment, with no request. The subscription never closed, so
   its delta watch is still on the stream and Envoy takes the pushed cluster. The agent
   logs `republished dormant east-west QUIC pairs: the proxy still holds their on-demand
@@ -1108,8 +1123,9 @@ bound the mesh catch-all's cold path uses), fails that request with **503 `NC`**
 Envoy's API has no per-route fallback from an on-demand miss to the h2 cluster: the
 matcher's action names one cluster and nothing else. Refusals are counted by the
 agent as `aether_agent_quic_twin_refused_total{reason}`, and each one is a request
-that 503'd. `source_not_local` and `destination_not_quic_enabled` are races with a
-pod leaving or the allow-list changing. `malformed_name` means a route and the
+that 503'd. `source_not_local` and `destination_not_in_dependency_set` are races
+with a pod leaving or the destination's idle TTL expiring (`destination_not_quic_enabled`
+is gone with the allow-list, #979). `malformed_name` means a route and the
 agent disagree on the naming. On the proxy, watch the ODCDS subscription:
 
 ```promql
@@ -1150,7 +1166,7 @@ it:
   main-worker-03 at 15:45:04.7, 15 s after its loader's first request. The agent now
   re-sends a subscribed twin it already sent (`cache.SnapshotCache.CreateDeltaWatch`).
 
-The invariant, with #1035/#1036: for a well-formed twin name of a QUIC-enabled
+The invariant, with #1035/#1036: for a well-formed twin name of an eligible
 destination, the agent answers with the twin or holds the subscription open. It
 never answers such a name absent while the pair is servable. A twin leaves the
 snapshot only in two cases. Its source or destination has gone, and then the pair
@@ -1181,11 +1197,15 @@ leaves warming" below.
 
 On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
-kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), including E4c: the node's `quic:` cluster count equals the (source, destination) pairs the suite drove.
+kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), including E4c: the node's `quic:` cluster count equals the (source, destination) pairs the suite drove. Its `QUIC_DNS_SANS=off` negative control reproduces the missing-SAN failure.
 
-**HTTP/3 per-request cost and connection counts (#1021).** On the rev242 proving
-soak an HTTP/3 mesh request cost ~11 ms of proxy CPU across both proxies against
-~3.3 ms for h2 (3.3×). The flag drop (#979) waits on ≤ 1.5×. Grade it only with the
+**HTTP/3 per-request cost and connection counts (#1021).** A same-build A/B on
+2026-09-28 (rev247, 300 rps, matched 80-min no-roll windows, Pyroscope fleet envoy
+cores) measured an HTTP/3 mesh request at **1.18×** the proxy CPU of an h2 one
+(10.5 ms vs 8.9 ms across both proxies) — under the ≤ 1.5× gate the allow-list drop
+(#979) waits on ([#1021, "Same-revision measurement, 2026-09-28"](https://github.com/bpalermo/aether/issues/1021)).
+The earlier ~3.3× (~11 ms vs ~3.3 ms, rev242 QUIC vs rev239 h2) compared two
+builds and is superseded. Grade it only with the
 matched-window method in `e2e/soak/README.md` ("The QUIC per-request cost gate"):
 envoy-only Pyroscope cores over the T0+6h05m→T0+7h25m no-roll window of a QUIC run
 and of an h2 reference run with matched per-destination rps, loaded minus idle, per
@@ -1226,10 +1246,23 @@ the kernel has `UDP_SEGMENT` (Linux ≥ 4.18; talos 6.18). A kernel without UDP 
 logs `GRO requested but not supported by the OS` once per listener and reads without
 it. That warning costs performance, never correctness.
 
-**Rolling back.** Remove the entries (or `--set agent.eastWestQuicServices=null`):
-the twins and the selection disappear on the next push and every caller is back on
-the h2 route it had before, byte-for-byte. The inbound listener and the DNS SANs are
-harmless to leave in place. Nothing here needs a proxy roll.
+**If UDP:18008 is blocked, or HTTP/3 fails mesh-wide.** Symptom: twins'
+`cx_connect_fail` climbing, 503s from every caller, h2 clusters idle. There is no
+per-destination or per-node off switch any more, by design, and none should be
+added. In order:
+
+1. **Fix the path** — open UDP:18008 (NetworkPolicy, host firewall, cloud security
+   group) or, for handshake failures, re-issue the SVIDs with the DNS SANs above.
+   Both converge without a pod or proxy roll.
+2. **Roll the chart back** to the last release that still had the allow-list
+   (1.0.11, the release before #979): its default (an empty list) is h2 for every
+   destination, and the twins and selection disappear on the next push with no
+   proxy roll (same proxy pin). Take the
+   values from `helm get values -o yaml` and pass them with `-f`; never
+   `--reuse-values`. This is the escape hatch; there is no other.
+
+`spire.enabled=false` also removes QUIC (no TLS, no QUIC) but turns off mTLS
+mesh-wide — it is not an escape hatch.
 
 ## 8. Troubleshooting
 
@@ -1237,7 +1270,7 @@ harmless to leave in place. Nothing here needs a proxy roll.
 
 **Symptom.** The first pod of a ServiceAccount that is new on a node gets
 `503` with response flag `NC` (no cluster) for ~15 s on every request to every
-QUIC-enabled destination, then recovers on its own. Other callers on the node
+QUIC destination, then recovers on its own. Other callers on the node
 are unaffected; h2 destinations are unaffected. On talos (rev242) it was 1,060
 client-visible 503/NC in 11 s when the k6 loaders started.
 

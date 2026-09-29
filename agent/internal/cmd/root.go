@@ -139,7 +139,6 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.AuthzSidecarFailureModeAllow, "authz-sidecar-failure-mode-allow", false, "Fail-open: allow requests when the authz sidecar is unreachable (default fail-closed: deny)")
 	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, imported config is trusted ONLY from this origin; empty = federated (trust any peer)")
 	rootCmd.Flags().BoolVar(&cfg.EastWestWaypoint, "east-west-waypoint", false, "Enable the split-horizon east/west waypoint (proposal 019): dial cross-cluster endpoints at their node's routable IP + the fixed tunnel port (18009) instead of their pod IP, and SNI-forward to the local pod. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared SPIRE trust domain.")
-	rootCmd.Flags().StringSliceVar(&cfg.EastWestQUICServices, "east-west-quic-services", nil, "East-west QUIC allow-list (proposal 038 Phase 4b): namespace-qualified <ns>/<svc> destinations every local ServiceAccount dials over HTTP/3 (mTLS over QUIC, one per-source quic: cluster each) instead of HTTP/2. Repeatable / comma-separated. Empty (default) keeps every destination on HTTP/2; the per-pod HTTP/3 inbound exists regardless")
 	rootCmd.Flags().DurationVar(&cfg.EastWestQUICPairFetchWindow, "east-west-quic-pair-fetch-window", cache.DefaultQUICPairFetchWindow, "How long after the agent starts a persisted east-west QUIC (source ServiceAccount, destination) pair may go without an on-demand fetch of its quic: twin before the pair and its twin are pruned (issue #1033). A pair first used in this process is kept; a pruned pair that still has traffic is re-fetched on its next request (one ODCDS round trip). 0 disables the prune")
 	rootCmd.Flags().DurationVar(&cfg.EastWestQUICIdleTimeout, "east-west-quic-idle-timeout", xdsconfig.DefaultQUICTwinIdleTimeout, "Idle timeout of each east-west QUIC (quic:) twin's upstream connection pool (issue #1054). Shorter than the 30s h1/h2 idle timeout so no idle HTTP/3 connection outlives a destination proxy's hot-restart parent (whose exit turns its connections into stateless resets). Keep it at least 5s below the proxy's --parent-shutdown-time (the chart enforces this). Must be > 0")
 	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services (proposal 018, mesh-global FQDN); the mesh-dns daemon (agent/cmd/mesh-dns) owns upstream forwarding")
@@ -493,12 +492,12 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache.SetCaptureEnabled(true)
 	snapshotCache.SetCaptureRedirectAll(true)
 	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
-	// East-west QUIC (proposal 038 Phase 4b): opt-in per destination. The
-	// listed services are forced into the dependency set and each gets an
-	// HTTP/3 twin per (local ServiceAccount) that has dialled it -- fetched on
-	// the pair's first request over ODCDS (#1020) -- selected per request by
-	// the source identity; unlisted destinations are byte-identical to before.
-	snapshotCache.SetEastWestQUICServices(cfg.EastWestQUICServices)
+	// East-west QUIC (proposal 038 Phase 4b) is unconditional: every
+	// destination is eligible for an HTTP/3 twin per (local ServiceAccount)
+	// that has dialled it -- fetched on the pair's first request over ODCDS
+	// (#1020) -- selected per request by the source identity. The proving
+	// per-destination allow-list is removed by #979, which is gated on the
+	// next proving soak.
 	// A persisted pair must be fetched on demand within this window of the
 	// agent starting or it is pruned (#1033): the migration off the
 	// SAs x destinations fan-out #1032's first deploy persisted.

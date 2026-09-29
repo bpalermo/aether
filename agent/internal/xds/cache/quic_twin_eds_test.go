@@ -43,7 +43,7 @@ func TestQUICTwinsSubscribeToTheirOwnEDSResource(t *testing.T) {
 	}
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
 	c.SetCaptureAuthorities(map[string]string{"demo/echo": "echo.demo.svc.cluster.local"})
-	c.SetEastWestQUICServices([]string{"demo/echo"})
+	declareDeps(c, "demo/echo")
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			return map[string][]*registryv1.ServiceEndpoint{
