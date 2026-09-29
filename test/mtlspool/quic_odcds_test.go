@@ -151,12 +151,12 @@ func (a *odcdsAgent) onDelta(streamID int64, req *discoverygrpc.DeltaDiscoveryRe
 	// The agent's ledger (issue #1036): a fresh stream re-states the proxy's
 	// subscriptions; every name it asks for is one it now holds.
 	if cls.Fresh {
-		for _, name := range a.ledger.Restate(cls.Resubscribed) {
+		for _, name := range a.ledger.Restate(streamID, cls.Resubscribed) {
 			a.t.Logf("[odcds] fresh stream %d: pruned dormant %s (no subscription left)", streamID, name)
 		}
 	}
 	for _, name := range append(slices.Clone(cls.FirstUse), cls.Resubscribed...) {
-		a.ledger.Subscribe(name)
+		a.ledger.Subscribe(streamID, name)
 	}
 	a.resubscribed = append(a.resubscribed, cls.Resubscribed...)
 	a.heldOnly = append(a.heldOnly, cls.HeldOnly...)

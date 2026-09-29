@@ -110,7 +110,7 @@ func TestOnDemandSubscribeForATwinTheWildcardAlreadySentIsAnswered(t *testing.T)
 	t.Cleanup(cancel)
 	c, twin, sourceID := newFirstUseNode(ctx, t)
 	require.NoError(t, c.SetSecrets(ctx, secretsNamed(firstUseNodeSVID, sourceID)))
-	decision, reason := c.ObserveQUICTwin(ctx, twin)
+	decision, reason := c.ObserveQUICTwin(ctx, 1, twin)
 	require.Equal(t, cache.QUICTwinAdded, decision, reason)
 	require.Eventually(t, func() bool {
 		snap, err := c.GetSnapshot(restateNode)

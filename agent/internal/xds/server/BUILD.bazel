@@ -38,6 +38,7 @@ go_test(
         "local_only_severity_test.go",
         "odcds_test.go",
         "quic_first_use_test.go",
+        "quic_generation_test.go",
         "quic_restate_test.go",
         "refresh_identity_test.go",
         "refresh_test.go",

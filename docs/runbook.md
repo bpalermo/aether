@@ -1059,13 +1059,22 @@ destination, it goes **dormant**:
   subscriptions, so the twin is pushed with no request count=N pairs=[…]`. The
   returning source's first request is 200 over HTTP/3 in milliseconds (6.7 ms in the
   gate above).
-- **Pruning.** A dormant pair is dropped only when the proxy no longer holds the
-  subscription. The agent learns this from a fresh xDS stream whose first CDS request
-  does not name the pair: after an agent restart, or on a new proxy generation after a
-  hot restart, whose child holds no ODCDS subscriptions. The agent logs `pruned dormant
-  east-west QUIC pairs: the proxy's fresh stream holds no on-demand subscription for
-  their twins count=N dormant=M pairs=[…]`. After that the name is free, and the next
-  request that routes to it is an ordinary first use.
+- **Pruning.** A dormant pair is dropped only when no live proxy generation holds the
+  subscription. Subscriptions are tracked per xDS stream, because one Envoy process
+  speaks one ADS stream and the node proxy's `Node` does not tell hot-restart
+  generations apart (#1052). A pair is held by the stream that re-subscribed it in its
+  first CDS request, or that asked for it since. It is pruned when a fresh stream's
+  re-statement leaves no live stream holding it, or when the stream that held it ends
+  while another stream is live (the draining parent of a hot restart exiting). The
+  last live stream ending prunes nothing, since the proxy may be reconnecting. The
+  agent logs `pruned dormant east-west QUIC pairs: no live proxy stream holds an
+  on-demand subscription for their twins stream=S count=N dormant=M pairs=[…]` or
+  `… the proxy generation that held their on-demand subscriptions ended its stream
+  while a newer one is live …`. After that the name is free, and the next request that
+  routes to it is an ordinary first use. Before #1052 an agent restart that landed mid
+  hot restart could leave dormant pairs no live generation subscribed to: the child's
+  fresh stream (naming nothing) pruned them, and the parent's stream seconds later
+  (naming them) parked them again, past the parent's exit.
 - **Refusals.** A first-use request the agent has to refuse opens a subscription too:
   a `source_not_local` race, say, with a pod whose records are not loaded yet. So the
   pair is parked dormant as well, and only the refused request 503s. A re-subscribed

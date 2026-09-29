@@ -126,13 +126,18 @@ func TestQUICFanoutPublishesPerSourceTwins(t *testing.T) {
 	assert.Empty(t, c.QUICPairs(), "clearing the allow-list must prune the observed pairs too (aether#1020)")
 }
 
+// testQUICStream is the xDS stream -- the proxy generation, issue #1052 -- the
+// cache tests' on-demand requests and re-statements arrive on, unless a test
+// models more than one.
+const testQUICStream int64 = 1
+
 // observeQUIC records that each source ("<ns>/<sa>") has dialled service over
 // QUIC -- what an admitted on-demand request does -- and regenerates the
 // snapshot synchronously.
 func observeQUIC(t *testing.T, c *SnapshotCache, service string, sources ...string) {
 	t.Helper()
 	for _, src := range sources {
-		d, reason := c.recordQUICPair(proxy.QUICClusterName(service, c.meshDomain, src))
+		d, reason := c.recordQUICPair(testQUICStream, proxy.QUICClusterName(service, c.meshDomain, src))
 		require.NotEqual(t, QUICTwinRefused, d, "pair %s <- %s refused: %s", service, src, reason)
 	}
 	require.NoError(t, c.generateSnapshot(context.Background()))
