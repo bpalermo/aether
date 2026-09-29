@@ -899,9 +899,10 @@ requirement, same SAN pin), and every node proxy dials every service in its
 dependency set over HTTP/3 from every local ServiceAccount that calls it (#956;
 the per-source clusters are built on first use, #1020). There is no
 value or flag for it: the per-destination allow-list (a chart value + agent flag)
-was a proving gate for the first QUIC soak on a real
-cluster and was removed once that soak passed (decision 2026-09-26: no opt-in for
-QUIC). The one exception is a service with any endpoint behind the east/west
+was a proving gate for QUIC on a real cluster and is removed by #979 (decision
+2026-09-26: no opt-in for QUIC). The first proving soak (2026-09-27) did not pass —
+k6 saw 1,060 × 503 NC at first use (#1008) — so the removal is gated on the next
+proving soak. The one exception is a service with any endpoint behind the east/west
 waypoint (019): it stays h2, because the waypoint tunnel has no QUIC leg.
 
 **Mesh-wide SPIRE prerequisite.** Every workload SVID must carry two DNS SANs —
@@ -1189,9 +1190,13 @@ On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
 kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), including E4c: the node's `quic:` cluster count equals the (source, destination) pairs the suite drove. Its `QUIC_DNS_SANS=off` negative control reproduces the missing-SAN failure.
 
-**HTTP/3 per-request cost and connection counts (#1021).** On the rev242 proving
-soak an HTTP/3 mesh request cost ~11 ms of proxy CPU across both proxies against
-~3.3 ms for h2 (3.3×). The allow-list drop (#979) waits on ≤ 1.5×. Grade it only with the
+**HTTP/3 per-request cost and connection counts (#1021).** A same-build A/B on
+2026-09-28 (rev247, 300 rps, matched 80-min no-roll windows, Pyroscope fleet envoy
+cores) measured an HTTP/3 mesh request at **1.18×** the proxy CPU of an h2 one
+(10.5 ms vs 8.9 ms across both proxies) — under the ≤ 1.5× gate the allow-list drop
+(#979) waits on ([#1021, "Same-revision measurement, 2026-09-28"](https://github.com/bpalermo/aether/issues/1021)).
+The earlier ~3.3× (~11 ms vs ~3.3 ms, rev242 QUIC vs rev239 h2) compared two
+builds and is superseded. Grade it only with the
 matched-window method in `e2e/soak/README.md` ("The QUIC per-request cost gate"):
 envoy-only Pyroscope cores over the T0+6h05m→T0+7h25m no-roll window of a QUIC run
 and of an h2 reference run with matched per-destination rps, loaded minus idle, per

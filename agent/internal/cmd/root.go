@@ -496,7 +496,8 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	// destination is eligible for an HTTP/3 twin per (local ServiceAccount)
 	// that has dialled it -- fetched on the pair's first request over ODCDS
 	// (#1020) -- selected per request by the source identity. The proving
-	// per-destination allow-list was removed after its soak (#979).
+	// per-destination allow-list is removed by #979, which is gated on the
+	// next proving soak.
 	// A persisted pair must be fetched on demand within this window of the
 	// agent starting or it is pruned (#1033): the migration off the
 	// SAs x destinations fan-out #1032's first deploy persisted.

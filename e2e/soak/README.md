@@ -561,8 +561,8 @@ the pod exists, and after that it cannot be placed.
   FIN race, not a failure; every other `DC` is. See "Benign `DC` at a source-proxy hot
   restart".
 - **The QUIC per-request cost gate (#1021)**, on any run with twins carrying load —
-  h3 per-request envoy CPU ≤ 1.5× h2, matched no-roll windows, against the 3.3× /
-  2.88-core baseline. See "The QUIC per-request cost gate".
+  h3 per-request envoy CPU ≤ 1.5× h2, matched no-roll windows, against the
+  same-build 1.18× baseline (rev247, 2026-09-28). See "The QUIC per-request cost gate".
 - **SVID rotation** is a bar since the SPIFFE Broker API (proposal 036): with the default
   4h TTL a pod rotates every ~2h, so an 8h run sees four cycles.
   The rotation signal is the agent's counter, summed per node (a restarted agent
@@ -762,9 +762,11 @@ node's agent started — roll the agent.
 East-west QUIC is unconditional: every service in a node's dependency set is dialled
 over HTTP/3 by every local ServiceAccount that calls it, so this leg grades **every** service the
 k6 loaders and the prober call — no `--set` is needed and there is nothing to list.
-(The per-destination allow-list was a proving gate:
-the first QUIC soak ran with `aether-test/svc-1` and `svc-2` listed, its PASS removed
-it, decision 2026-09-26.)
+(The per-destination allow-list was a proving gate, decision 2026-09-26. The first
+proving soak ran on 2026-09-27 with `aether-test/svc-1` and `svc-2` listed and did
+**not** pass: prober green, k6 1,154 errors, 1,060 of them 503 NC at first use
+(#1008). #979 drops the allow-list; that is gated on the NEXT proving soak, result
+pending.)
 
 ```bash
 # prerequisite ON TALOS: the SPIRE default ClusterSPIFFEID must already issue the
@@ -898,20 +900,25 @@ connections per h3 destination. That run passes H2 vacuously and says so, and
 
 **Acceptance for dropping the allow-list (#979): an HTTP/3 mesh request costs at
 most 1.5× the proxy CPU of an h2 mesh request, at the soak's load shape.** The
-prober and k6 SLIs cannot see this: a QUIC run can be error-free and still cost 2.3×
-the fleet's proxy CPU once every destination is on it (#1006's projection).
+prober and k6 SLIs cannot see this: a QUIC run can be error-free and still cost far
+more proxy CPU once every destination is on it (#1006 projected 2.3× the fleet's,
+from the since-superseded cross-revision 3.3× reading).
 
-**Baseline (grade the next QUIC soak against these):**
+**Baseline (grade the next QUIC soak against this): h3/h2 = 1.18× per request —
+the gate is passed.** A same-build A/B on 2026-09-28 (rev247, 300 rps, matched
+80-min no-roll windows, Pyroscope fleet envoy cores) measured **8.9 ms** per h2
+request against **10.5 ms** per h3 request: [#1021, "Same-revision measurement,
+2026-09-28"](https://github.com/bpalermo/aether/issues/1021). A QUIC run that grades above 1.5× against it is a
+regression.
+
+The earlier reading below is **superseded**: it compared two different revisions
+(rev239 h2 vs rev242 QUIC), so build drift and the QUIC path were not separable.
+Kept for the record only:
 
 | | run | window | envoy cores (fleet) | mesh rps | per request |
 |---|---|---|---|---|---|
-| h2 reference | rev239, no QUIC | 2026-09-26 19:20:42–20:40:42Z | 2.092 (idle 0.923) | 350 | **3.3 ms** = (2.092 − 0.923) / 350 |
-| QUIC | rev242, svc-1/2 on QUIC (100 of 350 rps) | 2026-09-27 16:00–17:20Z | **2.872** | 350 | h3 = 3.3 + (2.872 − 2.092) / 100 = **11.1 ms → 3.3×** |
-
-The 7 h figures (2.165 / **2.879**) reproduce the window within 1 %; **2.88 fleet
-cores** is the QUIC baseline. Since then the inbound QUIC listener reads with GRO
-(#1021: −11 % destination CPU per request in `//test/mtlspool`), which by itself is
-nowhere near enough to close 3.3× → 1.5×. Treat the gate as open.
+| h2 reference | rev239, no QUIC | 2026-09-26 19:20:42–20:40:42Z | 2.092 (idle 0.923) | 350 | 3.3 ms = (2.092 − 0.923) / 350 |
+| QUIC | rev242, svc-1/2 on QUIC (100 of 350 rps) | 2026-09-27 16:00–17:20Z | 2.872 | 350 | h3 = 3.3 + (2.872 − 2.092) / 100 = 11.1 ms → 3.3× (superseded) |
 
 **Method (#1006, reproduce it exactly or the numbers do not compare):**
 
