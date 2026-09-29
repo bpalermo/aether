@@ -1701,12 +1701,15 @@ outlasts the 15 s parent-shutdown window.
 
 **The fix** is two chart values:
 
-- `proxy.hotRestart.drainStrategy: immediate` (the default) passes Envoy
-  `--drain-strategy immediate`: from the start of the drain every response carries a
-  GOAWAY, so a source's h3 pool stops using the parent on its next response. The cost is
-  server-wide: reconnections (h2 and h3) bunch at the start of the drain instead of
-  spreading over `drainTime`, and LDS listener drains and the pod-termination drain
-  switch too. Setting `gradual` brings #1054 back.
+- `proxy.hotRestart.drainStrategy` (default **`gradual`**; `immediate` is an opt-in)
+  passes Envoy `--drain-strategy`. `immediate` puts a GOAWAY on every response from the
+  start of the drain, but on talos-main (2026-09-28) it made the #1054 resets **worse**
+  (4/8/0 per roll vs 1–3 per run under gradual): more parent connections close inside
+  the drain window, and those closes are what sources then see reset. It is also
+  server-wide (h2 and h3 reconnections bunch at drain start; LDS and pod-termination
+  drains switch too). The carried Envoy patches #1064 (child unpauses its UDP listeners
+  only after the parent exits) and #1066 (draining parent answers its own time-wait
+  connections) are the fix under `gradual`.
 - `agent.eastWestQuicIdleTimeout: 8s` (the agent's `--east-west-quic-idle-timeout`) is
   the idle timeout on the `quic:` twins only; h1/h2 keep 30 s. It closes the connections
   that were idle when the drain started, before the parent exits. The chart refuses to

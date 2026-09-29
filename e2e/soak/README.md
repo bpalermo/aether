@@ -1022,9 +1022,9 @@ carried patch: against the chart's current proxy pin, `WEDGE_SKIP_PARENT_STATS=f
 
 A source h3 connection that outlives the destination proxy's hot-restart parent dies on
 a QUIC stateless reset when the parent exits (mechanism in the runbook, "Source h3
-requests die on a stateless reset at a destination's roll"). The chart's
-`proxy.hotRestart.drainStrategy: immediate` and the 8 s `agent.eastWestQuicIdleTimeout`
-on the `quic:` twins remove it. Grade **per proxy roll**, source side, toward the
+requests die on a stateless reset at a destination's roll"). The carried Envoy
+patches (#1064, #1066) address it with the chart default
+`proxy.hotRestart.drainStrategy: gradual`; `immediate` made it worse on talos-main. Grade **per proxy roll**, source side, toward the
 rolling node (resolve `upstream_host` as in (b) above):
 
 ```

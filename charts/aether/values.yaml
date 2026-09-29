@@ -442,7 +442,15 @@ proxy:
     # over drainTime (a burst of TLS/QUIC handshakes against the child), and it
     # is server-wide: h2 connections, LDS listener drains and the
     # pod-termination drain all switch too.
-    drainStrategy: immediate
+    #
+    # Default is gradual. On talos-main immediate made the #1054 resets WORSE
+    # (4/8/0 per roll vs 1–3 per run under gradual): every parent connection
+    # closes at drain start, and those closes are what the source then sees
+    # reset. The carried patches (#1064: the child unpauses its UDP listeners
+    # only after the parent exits; #1066: the draining parent answers its own
+    # time-wait connections) fixed the exit window under gradual. Keep
+    # immediate as an explicit opt-in only.
+    drainStrategy: gradual
     # Pass Envoy --skip-hot-restart-parent-stats (#1050). This was the
     # workaround for a hot-restart deadlock: the child asked the draining parent
     # for its stats on every 5s flush with a blocking, timeout-less recvmsg
