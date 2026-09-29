@@ -1531,10 +1531,23 @@ the supervisor won the race against its own replacement and left the node with n
 which cost 7.95 s / 8.11 s of blackout and 130 / 126 prober `connection_error`s per delete
 on rev214, before this branch existed.
 
+The supervisor's lines **are** in VictoriaLogs. Since #772 the supervisor is PID 1 of
+the pod's `proxy` container, so its stdout (and Envoy's, which it inherits) is that
+container's log stream: `service.name` `aether-proxy`, `k8s.container.name` `proxy`.
+They outlive the pod, so this is where to read a delete after the fact. The whole #1050
+timeline (`live predecessor confirmed`, `successor ready gate anchored`, `liveness
+watchdog fired`, `drain deadline elapsed`) came from this stream (#1059):
+
+```
+_stream:{service.name="aether-proxy"} AND "k8s.container.name":proxy AND "liveness watchdog fired"
+```
+
+Swap the phrase for any line below. Add `AND "<pod-name>"` for one pod. Keep the
+container filter: `service.name="aether-proxy"` also matches the access logs (by
+`log_name`). To follow a delete live instead:
+
 ```bash
-# The supervisor's logs never reach VictoriaLogs (service.name carries only
-# registrar/agent/controller/edge), so start the follower BEFORE the delete.
-kubectl -n aether logs -f <proxy-pod> -c aether-proxy | tee /tmp/sigterm.log &
+kubectl -n aether logs -f <proxy-pod> -c proxy | tee /tmp/sigterm.log &
 kubectl -n aether delete pod <proxy-pod>
 ```
 
@@ -1684,6 +1697,60 @@ again with the signature above, set it true and roll. The cost is that the paren
 gauges and its last ≤5 s of counter deltas are not merged into the child. Counters are
 already per generation (#708), so dashboards built on `increase()`/`rate()` do not
 change.
+
+**What the supervisor does about it (#1058).** Two changes, so that a recurrence is
+both shorter and visible sooner:
+
+- *Early signal.* A hot-restart child (epoch > 0) whose admin stops answering for
+  **10 s** after its first observed LIVE is logged once per epoch and counted. LIVE is
+  the step that logs `starting workers`, and it is the anchor the #991 ready gate uses.
+  The check covers streaks that begin before the parent is gone (first LIVE +
+  `parentShutdownTime` + 2 s). It is not anchored on the fork, because a successor's
+  xDS-gated init legitimately misses admin probes (#991). Silence before LIVE is still
+  the handoff watchdog's job. On the #1050 timeline this fires about 20 s before the
+  watchdog.
+
+  ```
+  hot-restart child silent   epoch=54 silentSeconds=10 sinceLiveSeconds=17.8 threshold=10s
+  ```
+
+  ```promql
+  # Expected 0 per roll. Seeded at zero, so an empty result means the metric never arrived.
+  sum by (k8s_node_name) (increase(aether_supervisor_child_silent_total[30m]))
+  ```
+
+- *No dead grace.* When the liveness watchdog fires and **both** epochs of the
+  hot-restart pair have been silent on the admin for the watchdog's bound, the supervisor
+  SIGKILLs straight away. It no longer sends a SIGTERM that a blocked main thread cannot
+  take and then waits `drainTime` + 5 s (15 s) for it. The pair is every epoch the
+  supervisor tracks, plus the cross-pod predecessor until the pod has gone Ready, plus a
+  newer epoch the admin last answered as. So the old pod and the successor pod each kill
+  their own Envoy at once. Answers are attributed per epoch, so a handoff watchdog on a
+  child that never went LIVE while the parent still answers is one silent epoch, and keeps
+  SIGTERM then grace, as does a single wedged epoch with no handoff in flight:
+
+  ```
+  liveness watchdog fired; terminating for container restart   error="admin watchdog: …" exitCode=1
+  both hot-restart epochs silent; SIGKILLing now instead of SIGTERM + drain grace (a blocked main thread cannot take SIGTERM)   epochs=53,54 silentFor="53=41.8s 54=31.0s" bound=30s graceSkipped=15s
+  killing wedged envoy epoch   epoch=54
+  ```
+
+  `drain deadline elapsed, killing envoy epoch` after a watchdog line now means the
+  SIGTERM path was taken, with one epoch still answering.
+
+**The container restarts in place.** A watchdog exit is `Run` returning an error, which
+`proxy-supervisor` turns into `os.Exit(1)`. The kubelet restarts the `proxy` container
+in the **same pod** (DaemonSet pods are `restartPolicy: Always`), so its `restartCount`
+goes up by one and its `lastState.terminated.exitCode` is 1. Nothing re-execs in place,
+and the DaemonSet does not replace the pod. The kind reproduction shows `restartCount 1`.
+Only a pod that is already terminating (it has a `deletionTimestamp`) does not get its
+container restarted. The talos reading of `restartCount 0` after #1050 is therefore not
+what this code does. Read the count by container name: `containerStatuses` is sorted by
+name, and with the ext_authz sidecar enabled `[0]` is `authz`, not `proxy`.
+
+```bash
+kubectl -n aether get pod <proxy-pod> -o jsonpath='{range .status.containerStatuses[?(@.name=="proxy")]}{.restartCount} {.lastState.terminated.exitCode} {.lastState.terminated.finishedAt}{"\n"}{end}'
+```
 
 Reproduce it on kind with `e2e/hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
 WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 against the unpatched image, and

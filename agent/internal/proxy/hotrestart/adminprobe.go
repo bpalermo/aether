@@ -249,6 +249,11 @@ func newAdminProber(s *Supervisor) *adminProber {
 func (p *adminProber) probe(ctx context.Context, epoch int) (live, reachable bool) {
 	if p.fastPathValid(epoch) {
 		live, reachable = p.s.adminReady(ctx)
+		if reachable {
+			// The pinned connection is to our verified epoch's process: any
+			// answer on it proves that epoch's main thread is running.
+			p.s.noteAdminAnswer(epoch)
+		}
 		if live {
 			return true, true
 		}
@@ -349,6 +354,7 @@ func (s *Supervisor) adminServerInfo(ctx context.Context, epoch int) (live, reac
 		s.metrics.adminProbed(probeEndpointServerInfo, probeResultNotLive)
 		return false, true
 	}
+	s.noteAdminAnswer(info.CommandLineOptions.RestartEpoch)
 	live = info.State == adminLiveState && info.CommandLineOptions.RestartEpoch == epoch
 	s.metrics.adminProbed(probeEndpointServerInfo, probeResult(live))
 	return live, true

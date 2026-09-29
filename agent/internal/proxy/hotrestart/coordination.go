@@ -61,6 +61,7 @@ func (s *Supervisor) initStartEpoch(ctx context.Context) {
 			// that happens to reuse the number is never gated.
 			s.mu.Lock()
 			s.gatedEpoch = -1
+			s.handoffPeer = -1
 			s.mu.Unlock()
 			s.log.InfoContext(ctx, "no live predecessor; starting fresh at epoch 0", "statePresent", ok)
 			s.metrics.predecessorFound(false)
@@ -77,6 +78,7 @@ func (s *Supervisor) initStartEpoch(ctx context.Context) {
 			s.nextEpoch = epoch + 1
 			s.readyGate = s.successorReadyGate()
 			s.gatedEpoch = epoch + 1
+			s.handoffPeer = epoch
 			gate := s.readyGate
 			s.mu.Unlock()
 			s.metrics.predecessorFound(true)
@@ -218,6 +220,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			// still run: a successor stuck pre-LIVE or an unreachable admin ends
 			// the hold via container restart, and the child exiting ends it here.
 			ready, holding = s.onNotLiveEpoch(ctx, epoch, ready, reachable, holding, unreachableSince)
+			s.checkChildSilent(ctx, epoch, reachable, unreachableSince)
 			if s.checkWedgeWatchdogs(ctx, epoch, everLive, reachable, unreachableSince) {
 				return
 			}
@@ -255,6 +258,12 @@ func (s *Supervisor) onLiveEpoch(ctx context.Context, epoch int, ready bool) boo
 	if !ready && !now.Before(s.readyGateTime()) {
 		s.setReady()
 		ready = true
+		// The gate passed while LIVE: any cross-pod predecessor has been
+		// terminated by our Envoy's parent-shutdown, so it is no longer part
+		// of a handoff pair (see handoffSilence).
+		s.mu.Lock()
+		s.handoffPeer = -1
+		s.mu.Unlock()
 		s.metrics.readyTransition(true)
 		s.log.InfoContext(ctx, "pod ready: envoy live at newest epoch", "epoch", epoch)
 	}
