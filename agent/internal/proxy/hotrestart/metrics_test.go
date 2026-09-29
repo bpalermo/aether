@@ -128,6 +128,7 @@ func TestSupervisorMetrics_NilReceiverSafe(t *testing.T) {
 	m.readyTransition(true)
 	m.adminProbed(probeEndpointReady, probeResultLive)
 	m.shutdownBranchTaken(shutdownBranchSuccessorWait)
+	m.childSilentDetected()
 }
 
 // TestShutdownBranchesSeededAtZero is the #717 lesson applied to a counter that
