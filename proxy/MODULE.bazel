@@ -64,6 +64,19 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 #   (test/server:hot_restarting_{base,child,parent}_test, hot_restart_impl_test),
 #   run by //bazel/patches:carried_patch_tests; it also brings the 47743 test hunks
 #   those files need to compile against the 47743 source.
+#   aether#1054 (not yet proposed upstream; the maintainer's call), applied AFTER
+#   aether1050 (it builds on its liveness probe and touches the same child file):
+#   (1) the hot-restart child keeps its inherited UDP listeners paused until the
+#   parent has actually exited (its domain socket refuses a probe; 50 ms timer,
+#   2 s cap) instead of unpausing them while asking the parent to terminate, which
+#   had both processes reading the same sockets for the parent's shutdown and the
+#   child stateless-resetting parent-owned QUIC packets; (2) an HTTP/3 connection
+#   notified of a drain starts its own drain sequence (GOAWAY, then close) inside
+#   the drain window even when idle, behind
+#   envoy.reloadable_features.http3_drain_idle_connections (default true). Carries
+#   its tests (test/server:hot_restarting_child_test,
+#   test/common/http:conn_manager_impl_test), run by //bazel/patches:carried_patch_tests;
+#   its quic_http_integration_test case only builds in the Envoy workspace.
 #   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
@@ -74,6 +87,7 @@ single_version_override(
         "//bazel/patches:envoy-47740-quic-hostname-check-explicit-san.patch",
         "//bazel/patches:envoy-aether1022-exec-in-netns-thread-self.patch",
         "//bazel/patches:envoy-aether1050-hotrestart-nonblocking-forward.patch",
+        "//bazel/patches:envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch",
     ],
 )
 

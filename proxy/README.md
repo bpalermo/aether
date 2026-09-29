@@ -123,7 +123,10 @@ symbol upload is keyed by (#653).
   proposed upstream), and aether#1050 (the hot-restart main-thread deadlock:
   parent UDP/QUIC forwarding to the child no longer blocks the parent's main
   thread, and the child keeps servicing forwarded packets while it waits, with a
-  bound, for the parent's replies; not yet proposed upstream). A carried patch's own Envoy tests run from
+  bound, for the parent's replies; not yet proposed upstream), and aether#1054 (the
+  hot-restart child keeps its inherited UDP listeners paused until the parent has
+  exited, and idle HTTP/3 connections drain themselves inside the drain window;
+  not yet proposed upstream). A carried patch's own Envoy tests run from
   `//bazel/patches:carried_patch_tests`, since `//...` does not reach `@envoy` tests.
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)
