@@ -251,7 +251,8 @@ T0+120 edge roll and the T0+300 TRIPLE so neither confounds the other) the drive
 2. the pod (`curlimages/curl:8.22.0`, already resident for the UDP dialer, so no pull)
    drives **~20 rps** from its first instant for **120 s**, split across
    `svc-1.aether-test.aether.internal:18081` (QUIC-enabled on the proving run) and
-   `svc-3…:18081` (h2), with user agent **`aether-soak-newsa/sa-new-<epoch>`**, and
+   `svc-3…:18081` (h2 on the proving run; since #979 both are QUIC-eligible, so
+   each is a first-use twin fetch for the new ServiceAccount), with user agent **`aether-soak-newsa/sa-new-<epoch>`**, and
    prints a per-destination `ok` / `non2xx` / `connerr` tally every 10 s
    (`AETHER_NEWSA …`), then `AETHER_NEWSA_FINAL …` and
    `AETHER_METRIC newsa_tally={…}`;
@@ -976,19 +977,26 @@ switch. These gates are what show the deadlock stayed removed with the child mer
 the parent's stats again. Grade them **per roll**, over the proxy DaemonSet's roll
 windows from `/tmp/soak-churn.log`.
 
+All of these lines are the supervisor's and Envoy's stdout, i.e. the `proxy`
+container's stream (`service.name` `aether-proxy`, `k8s.container.name` `proxy`, #1059).
+The container filter keeps the access logs, which share the service name, out.
+
 **(a) No watchdog kill.** Zero of each, per roll, fleet-wide:
 
 ```
-_stream:{service.name="aether-proxy"} AND _msg:"liveness watchdog fired"
-_stream:{service.name="aether-proxy"} AND _msg:"drain deadline elapsed, killing envoy epoch"
+_stream:{service.name="aether-proxy"} AND "k8s.container.name":proxy AND _msg:"liveness watchdog fired"
+_stream:{service.name="aether-proxy"} AND "k8s.container.name":proxy AND _msg:"both hot-restart epochs silent"
+_stream:{service.name="aether-proxy"} AND "k8s.container.name":proxy AND _msg:"drain deadline elapsed, killing envoy epoch"
 ```
 
-The second line is only a finding when the epoch it kills still had a live child,
-i.e. when it follows a watchdog line in the same pod. A pod that is deleted with no
-successor (see the runbook, "What the proxy supervisor does on SIGTERM") can log it
-on its own. Control-test the zero: `_msg:"starting workers"` over the same window must
-return one line per node per roll. If it does not, the container logs did not reach
-VictoriaLogs and the zero is vacuous.
+Since #1058 a watchdog that finds both epochs of the pair silent SIGKILLs at once and
+logs the second line (with `epochs=` and `silentFor=`) instead of the third. The third
+line is only a finding when the epoch it kills still had a live child, i.e. when it
+follows a watchdog line in the same pod. A pod that is deleted with no successor (see
+the runbook, "What the proxy supervisor does on SIGTERM") can log it on its own.
+Control-test the zero: `_msg:"starting workers"` over the same window must return one
+line per node per roll. If it does not, the container logs did not reach VictoriaLogs
+and the zero is vacuous.
 
 **(b) No QUIC blackhole toward the rolling node.** Per roll, count the source-side
 QUIC failures whose upstream is on the node being rolled:
@@ -1010,8 +1018,23 @@ parent exited, 2 on roll 4). Report it, but it is not this gate.
 its next line (listener warming, xDS updates, the supervisor's `pod ready`) within a few
 seconds of `all dependencies initialized. starting workers`. A child that is silent for
 **10 s** after that line is the wedge signature, whether or not the watchdog later
-fires. Grade it from the same stream, per pod, by the gap between `starting workers` and
-the next line from that pod. No metric carries it yet.
+fires. Since #1058 the supervisor measures it: a hot-restart child whose admin stops
+answering for 10 s after its first observed LIVE (the step that logs `starting workers`)
+is logged once per epoch and counted. The gate is **0 per roll** of each:
+
+```
+_stream:{service.name="aether-proxy"} AND "k8s.container.name":proxy AND _msg:"hot-restart child silent"
+```
+
+```promql
+sum by (k8s_node_name) (increase(aether_supervisor_child_silent_total[30m]))
+```
+
+The counter is seeded at zero, so a node with no series at all means its supervisor
+metrics never arrived and the zero is vacuous. The log-gap reading (the gap between
+`starting workers` and the next line from that pod) stays as the cross-check. It also
+catches a child that goes quiet in its log while its admin still answers, which the
+metric does not.
 
 **The kind form.** `e2e/hotrestart-wedge.sh` forces the same deadlock by freezing the
 child inside the parent's forwarding window. It is the red-then-green check for any

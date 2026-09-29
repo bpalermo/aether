@@ -78,9 +78,13 @@ func (o *onDemandObserver) Callbacks() serverv3.Callbacks {
 
 // onDeltaStreamClosed forgets every on-demand subscription the ended stream
 // held. The reconnecting proxy re-subscribes from real demand; anything nobody
-// asks for again ages out on the observed-dependency idle TTL.
+// asks for again ages out on the observed-dependency idle TTL. The stream's
+// `quic:` twin subscriptions are released too (issue #1052): with a newer
+// proxy generation live, the ended stream's process has exited, and a dormant
+// pair only it held has no subscription left.
 func (o *onDemandObserver) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 	o.cache.CloseOnDemandStream(streamID)
+	o.cache.CloseQUICStream(context.Background(), streamID)
 	o.twinRequests.Close(streamID)
 }
 
@@ -105,7 +109,7 @@ func (o *onDemandObserver) onDeltaRequest(streamID int64, req *discoveryv3.Delta
 	}
 	twins := o.twinRequests.Classify(streamID, req)
 	for _, name := range twins.FirstUse {
-		o.observeQUICTwin(name)
+		o.observeQUICTwin(streamID, name)
 	}
 	o.restateTwins(streamID, twins)
 	for _, name := range req.GetResourceNamesSubscribe() {
@@ -132,11 +136,13 @@ func (o *onDemandObserver) onDeltaRequest(streamID int64, req *discoveryv3.Delta
 //     strands the pair (503 at the on_demand timeout, forever). Its pair is
 //     admitted if valid, and marked fetched.
 //
-// The re-subscribed set is also the proxy's complete set of on-demand
-// subscriptions (issue #1036), so it is handed to the cache on EVERY fresh
-// stream, empty or not: a dormant pair it does not name has no subscription
-// left and is pruned. A hot-restart child's stream is the case where it is
-// empty -- a new generation holds no ODCDS subscriptions.
+// The re-subscribed set is also the complete set of on-demand subscriptions
+// of the proxy process on this stream (issue #1036), so it is handed to the
+// cache on EVERY fresh stream, empty or not, recorded for this stream alone
+// (issue #1052): a dormant pair no live stream holds is pruned. A hot-restart
+// child's stream is the case where it is empty -- a new generation holds no
+// ODCDS subscriptions -- and the draining parent's stream, if live, keeps
+// vouching for its own until it ends (onDeltaStreamClosed).
 //
 // One line per fresh stream that re-states any twin.
 func (o *onDemandObserver) restateTwins(streamID int64, twins quicdemand.Classification) {
@@ -144,10 +150,10 @@ func (o *onDemandObserver) restateTwins(streamID int64, twins quicdemand.Classif
 	if !twins.Fresh {
 		// A later request that re-subscribes a twin it holds: same handling,
 		// but it says nothing about the proxy's other subscriptions.
-		o.cache.ResumeQUICSubscriptions(ctx, twins.Resubscribed)
+		o.cache.ResumeQUICSubscriptions(ctx, streamID, twins.Resubscribed)
 		return
 	}
-	resumed := o.cache.RestateQUICSubscriptions(ctx, twins.Resubscribed)
+	resumed := o.cache.RestateQUICSubscriptions(ctx, streamID, twins.Resubscribed)
 	if len(twins.Resubscribed) == 0 && len(twins.HeldOnly) == 0 {
 		return
 	}
@@ -176,9 +182,9 @@ func (o *onDemandObserver) restateTwins(streamID int64, twins quicdemand.Classif
 // Deliberately NOT tracked as a live on-demand subscription: a pair has no
 // idle TTL for a subscription to exempt it from (the pair is pruned only when
 // its source leaves the node or its destination leaves the dependency set).
-func (o *onDemandObserver) observeQUICTwin(name string) {
+func (o *onDemandObserver) observeQUICTwin(streamID int64, name string) {
 	ctx := context.Background()
-	decision, reason := o.cache.ObserveQUICTwin(ctx, name)
+	decision, reason := o.cache.ObserveQUICTwin(ctx, streamID, name)
 	if decision == cache.QUICTwinRefused && o.quicRefused != nil {
 		o.quicRefused.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
 	}

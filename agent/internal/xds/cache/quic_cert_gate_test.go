@@ -89,7 +89,7 @@ func TestQUICDormantPairReturnAfterLedgerReloadWaitsForCertificate(t *testing.T)
 	twinA := echoTwin(restarted, "source-a")
 	require.NoError(t, restarted.SetSecrets(ctx, quicSecrets("source-b", "source-c")))
 	require.Equal(t, []string{twinA}, restarted.DormantQUICPairs(), "restored from the ledger")
-	restarted.RestateQUICSubscriptions(ctx, []string{twinA})
+	restarted.RestateQUICSubscriptions(ctx, testQUICStream, []string{twinA})
 	require.Equal(t, []string{twinA}, restarted.DormantQUICPairs(), "the proxy still subscribes to it")
 
 	// k6's new pod lands (CNI ADD). The pair is valid again, but the SVID is not
@@ -152,7 +152,7 @@ func TestQUICFirstUsePublishedWhileARegistryReloadIsInFlight(t *testing.T) {
 
 	twin := echoTwin(c, "source-b")
 	start := time.Now()
-	decision, reason := c.ObserveQUICTwin(ctx, twin)
+	decision, reason := c.ObserveQUICTwin(ctx, testQUICStream, twin)
 	require.Equal(t, QUICTwinAdded, decision, reason)
 	require.Eventually(t, func() bool {
 		snap, err := c.GetSnapshot("node-1")

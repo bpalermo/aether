@@ -132,7 +132,7 @@ func TestQUICDormantPairsPersistAcrossAgentRestart(t *testing.T) {
 	assert.Equal(t, []string{twinB, twinC}, restarted.DormantQUICPairs(), "absent sources stay dormant across the restart")
 
 	// The proxy's fresh stream re-subscribes b's twin (and a's), not c's.
-	restarted.RestateQUICSubscriptions(ctx, []string{twinA, twinB})
+	restarted.RestateQUICSubscriptions(ctx, testQUICStream, []string{twinA, twinB})
 	assert.Equal(t, []string{twinB}, restarted.DormantQUICPairs(), "c's subscription is gone: pruned; b's is held: kept")
 	restarted.FlushObservedUpstreams()
 	stored := readStore(t, path)
@@ -145,9 +145,12 @@ func TestQUICDormantPairsPersistAcrossAgentRestart(t *testing.T) {
 }
 
 // A proxy generation change (hot restart): the child's fresh stream holds no
-// on-demand subscription, so its first CDS request names none and every
-// dormant pair is pruned. After that, a removed twin is forgotten (the child
-// holds it only through the wildcard) until a request subscribes it again.
+// on-demand subscription, so its first CDS request names none. The draining
+// parent still holds its subscriptions until it exits, so the dormant pairs it
+// vouches for stay dormant while its stream is live (issue #1052), and are
+// pruned when that stream ends. After that, a removed twin is forgotten (the
+// child holds it only through the wildcard) until a request subscribes it
+// again.
 func TestQUICDormantPairsPrunedOnProxyGenerationChange(t *testing.T) {
 	c := newQUICDemandCache(t, "")
 	ctx := context.Background()
@@ -155,8 +158,12 @@ func TestQUICDormantPairsPrunedOnProxyGenerationChange(t *testing.T) {
 	require.NoError(t, c.RemovePod(ctx, "/var/run/netns/cni-source-a"))
 	require.Equal(t, []string{echoTwin(c, "source-a")}, c.DormantQUICPairs())
 
-	assert.Zero(t, c.RestateQUICSubscriptions(ctx, nil))
-	assert.Empty(t, c.DormantQUICPairs(), "the new generation holds no subscription: dormant pairs are pruned")
+	const child int64 = testQUICStream + 1
+	assert.Zero(t, c.RestateQUICSubscriptions(ctx, child, nil))
+	assert.Equal(t, []string{echoTwin(c, "source-a")}, c.DormantQUICPairs(),
+		"the parent generation's stream is still live and holds the subscription: still dormant")
+	assert.Equal(t, 1, c.CloseQUICStream(ctx, testQUICStream))
+	assert.Empty(t, c.DormantQUICPairs(), "the parent exited; the new generation holds no subscription: dormant pairs are pruned")
 
 	require.NoError(t, c.RemovePod(ctx, "/var/run/netns/cni-source-b"))
 	assert.Empty(t, c.DormantQUICPairs(), "b's twin is not subscribed by the new generation: forgotten")
@@ -173,7 +180,7 @@ func TestQUICRefusedFirstUseIsParkedDormant(t *testing.T) {
 	ctx := context.Background()
 	late := echoTwin(c, "late")
 
-	decision, reason := c.ObserveQUICTwin(ctx, late)
+	decision, reason := c.ObserveQUICTwin(ctx, testQUICStream, late)
 	require.Equal(t, QUICTwinRefused, decision)
 	require.Equal(t, QUICRefusedSourceNotOnNode, reason)
 	assert.Empty(t, c.QUICPairs())

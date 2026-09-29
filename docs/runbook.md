@@ -1074,13 +1074,22 @@ destination, it goes **dormant**:
   subscriptions, so the twin is pushed with no request count=N pairs=[…]`. The
   returning source's first request is 200 over HTTP/3 in milliseconds (6.7 ms in the
   gate above).
-- **Pruning.** A dormant pair is dropped only when the proxy no longer holds the
-  subscription. The agent learns this from a fresh xDS stream whose first CDS request
-  does not name the pair: after an agent restart, or on a new proxy generation after a
-  hot restart, whose child holds no ODCDS subscriptions. The agent logs `pruned dormant
-  east-west QUIC pairs: the proxy's fresh stream holds no on-demand subscription for
-  their twins count=N dormant=M pairs=[…]`. After that the name is free, and the next
-  request that routes to it is an ordinary first use.
+- **Pruning.** A dormant pair is dropped only when no live proxy generation holds the
+  subscription. Subscriptions are tracked per xDS stream, because one Envoy process
+  speaks one ADS stream and the node proxy's `Node` does not tell hot-restart
+  generations apart (#1052). A pair is held by the stream that re-subscribed it in its
+  first CDS request, or that asked for it since. It is pruned when a fresh stream's
+  re-statement leaves no live stream holding it, or when the stream that held it ends
+  while another stream is live (the draining parent of a hot restart exiting). The
+  last live stream ending prunes nothing, since the proxy may be reconnecting. The
+  agent logs `pruned dormant east-west QUIC pairs: no live proxy stream holds an
+  on-demand subscription for their twins stream=S count=N dormant=M pairs=[…]` or
+  `… the proxy generation that held their on-demand subscriptions ended its stream
+  while a newer one is live …`. After that the name is free, and the next request that
+  routes to it is an ordinary first use. Before #1052 an agent restart that landed mid
+  hot restart could leave dormant pairs no live generation subscribed to: the child's
+  fresh stream (naming nothing) pruned them, and the parent's stream seconds later
+  (naming them) parked them again, past the parent's exit.
 - **Refusals.** A first-use request the agent has to refuse opens a subscription too:
   a `source_not_local` race, say, with a pod whose records are not loaded yet. So the
   pair is parked dormant as well, and only the refused request 503s. A re-subscribed
@@ -1555,10 +1564,23 @@ the supervisor won the race against its own replacement and left the node with n
 which cost 7.95 s / 8.11 s of blackout and 130 / 126 prober `connection_error`s per delete
 on rev214, before this branch existed.
 
+The supervisor's lines **are** in VictoriaLogs. Since #772 the supervisor is PID 1 of
+the pod's `proxy` container, so its stdout (and Envoy's, which it inherits) is that
+container's log stream: `service.name` `aether-proxy`, `k8s.container.name` `proxy`.
+They outlive the pod, so this is where to read a delete after the fact. The whole #1050
+timeline (`live predecessor confirmed`, `successor ready gate anchored`, `liveness
+watchdog fired`, `drain deadline elapsed`) came from this stream (#1059):
+
+```
+_stream:{service.name="aether-proxy"} AND "k8s.container.name":proxy AND "liveness watchdog fired"
+```
+
+Swap the phrase for any line below. Add `AND "<pod-name>"` for one pod. Keep the
+container filter: `service.name="aether-proxy"` also matches the access logs (by
+`log_name`). To follow a delete live instead:
+
 ```bash
-# The supervisor's logs never reach VictoriaLogs (service.name carries only
-# registrar/agent/controller/edge), so start the follower BEFORE the delete.
-kubectl -n aether logs -f <proxy-pod> -c aether-proxy | tee /tmp/sigterm.log &
+kubectl -n aether logs -f <proxy-pod> -c proxy | tee /tmp/sigterm.log &
 kubectl -n aether delete pod <proxy-pod>
 ```
 
@@ -1708,6 +1730,60 @@ again with the signature above, set it true and roll. The cost is that the paren
 gauges and its last ≤5 s of counter deltas are not merged into the child. Counters are
 already per generation (#708), so dashboards built on `increase()`/`rate()` do not
 change.
+
+**What the supervisor does about it (#1058).** Two changes, so that a recurrence is
+both shorter and visible sooner:
+
+- *Early signal.* A hot-restart child (epoch > 0) whose admin stops answering for
+  **10 s** after its first observed LIVE is logged once per epoch and counted. LIVE is
+  the step that logs `starting workers`, and it is the anchor the #991 ready gate uses.
+  The check covers streaks that begin before the parent is gone (first LIVE +
+  `parentShutdownTime` + 2 s). It is not anchored on the fork, because a successor's
+  xDS-gated init legitimately misses admin probes (#991). Silence before LIVE is still
+  the handoff watchdog's job. On the #1050 timeline this fires about 20 s before the
+  watchdog.
+
+  ```
+  hot-restart child silent   epoch=54 silentSeconds=10 sinceLiveSeconds=17.8 threshold=10s
+  ```
+
+  ```promql
+  # Expected 0 per roll. Seeded at zero, so an empty result means the metric never arrived.
+  sum by (k8s_node_name) (increase(aether_supervisor_child_silent_total[30m]))
+  ```
+
+- *No dead grace.* When the liveness watchdog fires and **both** epochs of the
+  hot-restart pair have been silent on the admin for the watchdog's bound, the supervisor
+  SIGKILLs straight away. It no longer sends a SIGTERM that a blocked main thread cannot
+  take and then waits `drainTime` + 5 s (15 s) for it. The pair is every epoch the
+  supervisor tracks, plus the cross-pod predecessor until the pod has gone Ready, plus a
+  newer epoch the admin last answered as. So the old pod and the successor pod each kill
+  their own Envoy at once. Answers are attributed per epoch, so a handoff watchdog on a
+  child that never went LIVE while the parent still answers is one silent epoch, and keeps
+  SIGTERM then grace, as does a single wedged epoch with no handoff in flight:
+
+  ```
+  liveness watchdog fired; terminating for container restart   error="admin watchdog: …" exitCode=1
+  both hot-restart epochs silent; SIGKILLing now instead of SIGTERM + drain grace (a blocked main thread cannot take SIGTERM)   epochs=53,54 silentFor="53=41.8s 54=31.0s" bound=30s graceSkipped=15s
+  killing wedged envoy epoch   epoch=54
+  ```
+
+  `drain deadline elapsed, killing envoy epoch` after a watchdog line now means the
+  SIGTERM path was taken, with one epoch still answering.
+
+**The container restarts in place.** A watchdog exit is `Run` returning an error, which
+`proxy-supervisor` turns into `os.Exit(1)`. The kubelet restarts the `proxy` container
+in the **same pod** (DaemonSet pods are `restartPolicy: Always`), so its `restartCount`
+goes up by one and its `lastState.terminated.exitCode` is 1. Nothing re-execs in place,
+and the DaemonSet does not replace the pod. The kind reproduction shows `restartCount 1`.
+Only a pod that is already terminating (it has a `deletionTimestamp`) does not get its
+container restarted. The talos reading of `restartCount 0` after #1050 is therefore not
+what this code does. Read the count by container name: `containerStatuses` is sorted by
+name, and with the ext_authz sidecar enabled `[0]` is `authz`, not `proxy`.
+
+```bash
+kubectl -n aether get pod <proxy-pod> -o jsonpath='{range .status.containerStatuses[?(@.name=="proxy")]}{.restartCount} {.lastState.terminated.exitCode} {.lastState.terminated.finishedAt}{"\n"}{end}'
+```
 
 Reproduce it on kind with `e2e/hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
 WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 against the unpatched image, and

@@ -112,7 +112,7 @@
 # because the k6 loaders happened to start 58s before T0; fixed in #1012). Each NEW-SA
 # step creates, together, a ServiceAccount + ConfigMap + 1-replica Deployment named
 # sa-new-<epoch> in $NEWSA_NS, pinned to one worker node (round-robin across steps), whose
-# pod (newsa-client.sh) drives ~20 rps at a QUIC-enabled and an h2 destination for 2
+# pod (newsa-client.sh) drives ~20 rps at two destinations (one of them QUIC on the proving run; both QUIC-eligible since #979) for 2
 # minutes from its first instant, with user agent aether-soak-newsa/sa-new-<epoch>. The
 # driver then reads the pod's tally, logs
 #   ROLLED newsa/sa-new-<epoch> <node> ready=<s>s <dst>:ok=..,non2xx=..,connerr=..,codes=.. ...

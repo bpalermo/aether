@@ -209,6 +209,11 @@ func TestOnDemandObserver_FreshStreamRestatesSubscriptionsForDormantPairs(t *tes
 	}))
 	require.Equal(t, []string{away}, c.DormantQUICPairs(), "a subscribed, unservable twin is kept dormant")
 
+	// Stream 1 ends (the agent went away) with no other stream live: nothing
+	// is concluded, the proxy may be reconnecting (issue #1052).
+	cb.OnDeltaStreamClosed(1, &corev3.Node{Id: restateNode})
+	require.Equal(t, []string{away}, c.DormantQUICPairs(), "the last stream ending prunes nothing")
+
 	// Stream 2 (agent restart, same proxy): re-subscribes it. Kept.
 	require.NoError(t, cb.OnStreamDeltaRequest(2, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl: resourcev3.ClusterType, ResourceNamesSubscribe: []string{"*", away},
@@ -220,5 +225,10 @@ func TestOnDemandObserver_FreshStreamRestatesSubscriptionsForDormantPairs(t *tes
 	require.NoError(t, cb.OnStreamDeltaRequest(3, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl: resourcev3.ClusterType, ResourceNamesSubscribe: []string{"*"},
 	}))
-	assert.Empty(t, c.DormantQUICPairs(), "a fresh stream that does not subscribe to it: pruned")
+	assert.Equal(t, []string{away}, c.DormantQUICPairs(),
+		"the parent generation (stream 2) is still live and holds the subscription: kept (issue #1052)")
+
+	// The parent exits: its stream ends while the new generation's is live.
+	cb.OnDeltaStreamClosed(2, &corev3.Node{Id: restateNode})
+	assert.Empty(t, c.DormantQUICPairs(), "no live stream subscribes to it: pruned")
 }
