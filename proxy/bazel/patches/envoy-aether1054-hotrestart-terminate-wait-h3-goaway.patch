@@ -1,0 +1,641 @@
+diff --git a/source/common/http/conn_manager_impl.cc b/source/common/http/conn_manager_impl.cc
+index 8fa9f8cac7..85d8379d99 100644
+--- a/source/common/http/conn_manager_impl.cc
++++ b/source/common/http/conn_manager_impl.cc
+@@ -226,6 +226,8 @@ ConnectionManagerImpl::ConnectionManagerImpl(
+       direction_(direction), server_context_(server_context),
+       use_connection_event_drain_(
+           Runtime::runtimeFeatureEnabled("envoy.reloadable_features.use_connection_event_drain")),
++      drain_idle_http3_connections_(Runtime::runtimeFeatureEnabled(
++          "envoy.reloadable_features.http3_drain_idle_connections")),
+       allow_upstream_half_close_(Runtime::runtimeFeatureEnabled(
+           "envoy.reloadable_features.allow_multiplexed_upstream_half_close")),
+       close_connection_on_zombie_stream_complete_(Runtime::runtimeFeatureEnabled(
+@@ -729,9 +731,57 @@ void ConnectionManagerImpl::onEvent(Network::ConnectionEvent event) {
+ }
+ 
+ void ConnectionManagerImpl::onDrain(Network::ConnectionDrainEvent drain_event) {
+-  if (!connection_drain_event_.has_value()) {
+-    connection_drain_event_ = drain_event;
++  if (connection_drain_event_.has_value()) {
++    return;
++  }
++  connection_drain_event_ = drain_event;
++  if (!use_connection_event_drain_ || !drain_idle_http3_connections_ ||
++      (codec_ != nullptr && codec_->protocol() != Protocol::Http3)) {
++    return;
++  }
++  // The drain-close decision is otherwise only taken when a response is encoded, so a connection
++  // with no request in the drain window never learns of the drain: the client keeps it, and keeps
++  // sending on it, until the server goes away without a word. For HTTP/3 that ends in a stateless
++  // reset for whatever the client sends next, so schedule a drain sequence of our own inside the
++  // window. Only the event may be recorded here (this can run from the connection's constructor
++  // via addConnectionCallbacks()); the codec is looked at when the timer fires.
++  //
++  // Immediate: now. Gradual: uniformly within the drain window, leaving room for the drain
++  // timeout so the GOAWAY and the close both land before the window ends; the window is measured
++  // from the drain's start, which may predate this connection.
++  std::chrono::milliseconds delay{0};
++  if (drain_event.strategy == Server::DrainStrategy::Gradual) {
++    const auto drain_time =
++        std::chrono::duration_cast<std::chrono::milliseconds>(server_context_.options().drainTime());
++    const auto window =
++        drain_time > config_->drainTimeout() ? drain_time - config_->drainTimeout() : delay;
++    const MonotonicTime now = server_context_.timeSource().monotonicTime();
++    const auto elapsed =
++        now <= drain_event.start_time
++            ? std::chrono::milliseconds{0}
++            : std::chrono::duration_cast<std::chrono::milliseconds>(now - drain_event.start_time);
++    const auto remaining = window > elapsed ? window - elapsed : delay;
++    if (remaining.count() > 0) {
++      delay = std::chrono::milliseconds{
++          static_cast<int64_t>(server_context_.api().randomGenerator().random() %
++                               static_cast<uint64_t>(remaining.count() + 1))};
++    }
++  }
++  idle_drain_timer_ = dispatcher_->createTimer([this]() -> void { onIdleDrainTimeout(); });
++  idle_drain_timer_->enableTimer(delay);
++}
++
++void ConnectionManagerImpl::onIdleDrainTimeout() {
++  // A codec exists once the first bytes arrived; a connection with none yet has nothing to send
++  // a GOAWAY on, and its first response takes the regular drain-close decision. Only HTTP/3 is
++  // pushed here: it is the protocol whose lingering connections end in a stateless reset.
++  if (drain_state_ != DrainState::NotDraining || codec_ == nullptr ||
++      codec_->protocol() != Protocol::Http3) {
++    return;
+   }
++  ENVOY_CONN_LOG(debug, "drain closing idle connection", read_callbacks_->connection());
++  startDrainSequence();
++  stats_.named_.downstream_cx_drain_close_.inc();
+ }
+ 
+ bool ConnectionManagerImpl::shouldDrainClose(Network::DrainDirection scope) {
+diff --git a/source/common/http/conn_manager_impl.h b/source/common/http/conn_manager_impl.h
+index a205dca4a7..fe8c848e4b 100644
+--- a/source/common/http/conn_manager_impl.h
++++ b/source/common/http/conn_manager_impl.h
+@@ -626,6 +626,9 @@ private:
+   void onIdleTimeout();
+   void onConnectionDurationTimeout();
+   void onDrainTimeout();
++  // Fires the drain sequence on an HTTP/3 connection that was notified of a drain, at a point
++  // inside the drain window, whether or not it has a stream to send a GOAWAY with. See onDrain().
++  void onIdleDrainTimeout();
+   void startDrainSequence();
+   Tracing::Tracer& tracer() { return *config_->tracer(); }
+   void handleCodecErrorImpl(absl::string_view error, absl::string_view details,
+@@ -675,6 +678,8 @@ private:
+   // A connection duration timer. Armed during handling new connection if enabled in config.
+   Event::TimerPtr connection_duration_timer_;
+   Event::TimerPtr drain_timer_;
++  // Armed by onDrain() on HTTP/3 connections; see onIdleDrainTimeout().
++  Event::TimerPtr idle_drain_timer_;
+   // When set to true, add Connection:close response header to nudge downstream client to reconnect.
+   bool soft_drain_http1_{false};
+   Random::RandomGenerator& random_generator_;
+@@ -721,6 +726,9 @@ private:
+   // Latched when the connection manager is created so it is not re-read on every response. See
+   // shouldDrainClose().
+   const bool use_connection_event_drain_ = false;
++  // Whether an HTTP/3 connection notified of a drain starts its own drain sequence inside the
++  // drain window even when idle, instead of only when a response happens to be encoded.
++  const bool drain_idle_http3_connections_ = false;
+ 
+   // If independent half-close is enabled and the upstream protocol is either HTTP/2 or HTTP/3
+   // protocols the stream is destroyed after both request and response are complete i.e. reach their
+diff --git a/source/common/runtime/runtime_features.cc b/source/common/runtime/runtime_features.cc
+index add618e724..3bb4210772 100644
+--- a/source/common/runtime/runtime_features.cc
++++ b/source/common/runtime/runtime_features.cc
+@@ -79,6 +79,10 @@ RUNTIME_GUARD(envoy_reloadable_features_filter_chain_drain_uses_configured_strat
+ // lost. See https://github.com/envoyproxy/envoy/issues/46841
+ RUNTIME_GUARD(envoy_reloadable_features_filter_manager_forward_added_data_on_continue);
+ RUNTIME_GUARD(envoy_reloadable_features_fix_http3_early_data_timing);
++// An HTTP/3 connection notified of a drain starts its own drain sequence (GOAWAY, then close)
++// inside the drain window even if no response is encoded meanwhile. Requires
++// use_connection_event_drain.
++RUNTIME_GUARD(envoy_reloadable_features_http3_drain_idle_connections);
+ RUNTIME_GUARD(envoy_reloadable_features_grpc_side_stream_flow_control);
+ RUNTIME_GUARD(envoy_reloadable_features_happy_eyeballs_sort_non_ip_addresses);
+ RUNTIME_GUARD(envoy_reloadable_features_header_mutation_url_encode_query_params);
+diff --git a/source/server/hot_restarting_child.cc b/source/server/hot_restarting_child.cc
+index 0aaadcdb47..fcad4db0e2 100644
+--- a/source/server/hot_restarting_child.cc
++++ b/source/server/hot_restarting_child.cc
+@@ -107,9 +107,14 @@ void HotRestartingChild::initialize(Event::Dispatcher& dispatcher) {
+         return onSocketEventUdpForwarding();
+       },
+       Event::FileTriggerType::Edge, Event::FileReadyType::Read);
++  dispatcher_ = dispatcher;
++  parent_exit_timer_ = dispatcher.createTimer([this]() { onParentExitProbe(); });
+ }
+ 
+-void HotRestartingChild::shutdown() { socket_event_udp_forwarding_.reset(); }
++void HotRestartingChild::shutdown() {
++  socket_event_udp_forwarding_.reset();
++  parent_exit_timer_.reset();
++}
+ 
+ void HotRestartingChild::onForwardedUdpPacket(uint32_t worker_index,
+                                               const Network::Address::Instance& listener_address,
+@@ -327,15 +332,28 @@ void HotRestartingChild::sendParentTerminateRequest() {
+   if (parent_terminated_) {
+     return;
+   }
+-  allDrainsImplicitlyComplete();
+ 
+   HotRestartMessage wrapped_request;
+   wrapped_request.mutable_request()->mutable_terminate();
+   // A parent that is already gone cannot be told, and one that is wedged will not listen.
+-  main_rpc_stream_.sendHotRestartMessage(parent_address_, wrapped_request,
+-                                         /*allow_failure=*/true);
++  const RpcStream::SendResult sent =
++      main_rpc_stream_.trySendHotRestartMessage(parent_address_, wrapped_request);
+   parent_terminated_ = true;
+ 
++  // The drains complete once the parent has actually exited, not now. The inherited UDP listeners
++  // that the drained callbacks unpause are the parent's own sockets: until the parent's workers
++  // stop reading them, a packet for one of the parent's QUIC connections that we dequeue first is
++  // an unknown connection to us and gets a stateless reset. Nothing tells us when the parent's
++  // workers stop, but the parent's domain socket refusing our datagrams tells us it has exited,
++  // which is later. Packets simply queue in the kernel meanwhile. The wait is capped so a parent
++  // that lingers cannot keep our listeners paused for long.
++  if (sent == RpcStream::SendResult::ConnectionRefused || parent_exit_timer_ == nullptr) {
++    allDrainsImplicitlyComplete();
++  } else {
++    parent_exit_wait_start_ = absl::Now();
++    parent_exit_timer_->enableTimer(parent_exit_probe_interval_);
++  }
++
+   // Note that the 'generation' counter needs to retain the contribution from
+   // the parent.
+   if (stat_merger_ != nullptr) {
+@@ -351,6 +369,27 @@ void HotRestartingChild::sendParentTerminateRequest() {
+   }
+ }
+ 
++void HotRestartingChild::onParentExitProbe() {
++  HotRestartMessage probe;
++  probe.mutable_request()->mutable_test_connection();
++  const RpcStream::SendResult result = main_rpc_stream_.trySendHotRestartMessage(parent_address_, probe);
++  if (result == RpcStream::SendResult::ConnectionRefused) {
++    ENVOY_LOG(info, "hot restart parent has exited; completing the drain from it");
++    allDrainsImplicitlyComplete();
++    return;
++  }
++  const absl::Duration waited = absl::Now() - parent_exit_wait_start_;
++  if (waited >= absl::FromChrono(parent_exit_wait_cap_)) {
++    ENVOY_LOG(warn,
++              "hot restart parent has not exited {}ms after being asked to terminate; completing "
++              "the drain from it anyway",
++              absl::ToInt64Milliseconds(waited));
++    allDrainsImplicitlyComplete();
++    return;
++  }
++  parent_exit_timer_->enableTimer(parent_exit_probe_interval_);
++}
++
+ void HotRestartingChild::mergeParentStats(Stats::Store& stats_store,
+                                           const HotRestartMessage::Reply::Stats& stats_proto) {
+   if (!stat_merger_) {
+diff --git a/source/server/hot_restarting_child.h b/source/server/hot_restarting_child.h
+index 4d5ef71e0b..357854d435 100644
+--- a/source/server/hot_restarting_child.h
++++ b/source/server/hot_restarting_child.h
+@@ -8,6 +8,8 @@
+ #include "source/common/stats/stat_merger.h"
+ #include "source/server/hot_restarting_base.h"
+ 
++#include "absl/time/time.h"
++
+ namespace Envoy {
+ namespace Server {
+ 
+@@ -78,6 +80,11 @@ public:
+   // How often, while waiting for a reply, the parent's socket is probed to detect that the parent
+   // is gone (which a datagram socket does not otherwise report to the receiver).
+   static constexpr std::chrono::milliseconds PARENT_PROBE_INTERVAL{1000};
++  // After the terminate request, how often the parent's socket is probed to see that the parent
++  // has exited, and how long to keep probing before the drains complete regardless. See
++  // sendParentTerminateRequest().
++  static constexpr std::chrono::milliseconds PARENT_EXIT_PROBE_INTERVAL{50};
++  static constexpr std::chrono::milliseconds PARENT_EXIT_WAIT_CAP{2000};
+ 
+ protected:
+   absl::Status onSocketEventUdpForwarding();
+@@ -106,6 +113,9 @@ private:
+   // The parent is definitely gone (its socket refuses our datagrams): there is nothing left to
+   // drain from, so complete the drains as sendParentTerminateRequest() would.
+   void onParentGone(absl::string_view reason);
++  // Probes the parent's socket after the terminate request; completes the drains once the parent
++  // is gone (its socket refuses the probe) or PARENT_EXIT_WAIT_CAP has elapsed.
++  void onParentExitProbe();
+   friend class HotRestartUdpForwardingTestHelper;
+   absl::Mutex registry_mu_;
+   const int restart_epoch_;
+@@ -114,6 +124,12 @@ private:
+   bool parent_unresponsive_{false};
+   std::chrono::milliseconds parent_reply_timeout_{PARENT_REPLY_TIMEOUT};
+   std::chrono::milliseconds parent_probe_interval_{PARENT_PROBE_INTERVAL};
++  std::chrono::milliseconds parent_exit_probe_interval_{PARENT_EXIT_PROBE_INTERVAL};
++  std::chrono::milliseconds parent_exit_wait_cap_{PARENT_EXIT_WAIT_CAP};
++  // Set in initialize(); absent when hot restart was skipped or in tests without a dispatcher.
++  OptRef<Event::Dispatcher> dispatcher_;
++  Event::TimerPtr parent_exit_timer_;
++  absl::Time parent_exit_wait_start_;
+   bool parent_drained_ ABSL_GUARDED_BY(registry_mu_);
+   const bool skip_hot_restart_on_no_parent_;
+   const bool skip_parent_stats_;
+diff --git a/test/common/http/conn_manager_impl_test_3.cc b/test/common/http/conn_manager_impl_test_3.cc
+index 2d269e7183..209eff8046 100644
+--- a/test/common/http/conn_manager_impl_test_3.cc
++++ b/test/common/http/conn_manager_impl_test_3.cc
+@@ -3384,3 +3384,187 @@ TEST_F(HttpConnectionManagerImplTest, TestRefreshRouteCluster) {
+ 
+ } // namespace Http
+ } // namespace Envoy
++
++namespace Envoy {
++namespace Http {
++
++// An HTTP/3 connection notified of an immediate drain starts its own drain sequence right away,
++// with no request needed to carry the decision: an idle connection gets its GOAWAY too.
++TEST_F(HttpConnectionManagerImplTest, Http3IdleConnectionDrainsOnImmediateDrain) {
++  setup();
++  codec_->protocol_ = Protocol::Http3;
++  // Create the codec without a stream.
++  EXPECT_CALL(*codec_, dispatch(_)).WillOnce(Return(Http::okStatus()));
++  Buffer::OwnedImpl fake_input;
++  conn_manager_->onData(fake_input, false);
++
++  Event::MockTimer* idle_drain_timer = setUpTimer();
++  EXPECT_CALL(*idle_drain_timer, enableTimer(std::chrono::milliseconds(0), _));
++  EXPECT_CALL(drain_close_, drainClose(_)).Times(0);
++  filter_callbacks_.connection_.raiseConnectionDrain(
++      Network::ConnectionDrainEvent{{}, Server::DrainStrategy::Immediate});
++
++  Event::MockTimer* drain_timer = setUpTimer();
++  EXPECT_CALL(*drain_timer, enableTimer(_, _));
++  EXPECT_CALL(*codec_, shutdownNotice());
++  idle_drain_timer->invokeCallback();
++  EXPECT_EQ(1U, stats_.named_.downstream_cx_drain_close_.value());
++
++  EXPECT_CALL(*codec_, goAway());
++  EXPECT_CALL(filter_callbacks_.connection_,
++              close(Network::ConnectionCloseType::FlushWriteAndDelay, _));
++  EXPECT_CALL(*drain_timer, disableTimer());
++  drain_timer->invokeCallback();
++}
++
++// With the gradual strategy the drain sequence is scheduled at a random point inside the drain
++// window, leaving the drain timeout so that the GOAWAY and the close both land before the window
++// ends, and measured from the drain's start rather than from the notification.
++TEST_F(HttpConnectionManagerImplTest, Http3IdleConnectionDrainsInsideGradualDrainWindow) {
++  setup();
++  codec_->protocol_ = Protocol::Http3;
++  EXPECT_CALL(*codec_, dispatch(_)).WillOnce(Return(Http::okStatus()));
++  Buffer::OwnedImpl fake_input;
++  conn_manager_->onData(fake_input, false);
++
++  auto& server_context = factory_context_.server_factory_context_;
++  EXPECT_CALL(server_context.options_, drainTime())
++      .WillRepeatedly(Return(std::chrono::seconds(600)));
++  // Window: 600s drain time - 100ms drain timeout (the fixture's) - 100s already elapsed =
++  // 499900ms.
++  const MonotonicTime start = server_context.timeSource().monotonicTime();
++  test_time_.advanceTimeWait(std::chrono::seconds(100));
++  EXPECT_CALL(server_context.api_.random_, random()).WillOnce(Return(1000000));
++  // 1000000 % (499900 + 1) == 198.
++  Event::MockTimer* idle_drain_timer = setUpTimer();
++  EXPECT_CALL(*idle_drain_timer, enableTimer(std::chrono::milliseconds(198), _));
++  filter_callbacks_.connection_.raiseConnectionDrain(
++      Network::ConnectionDrainEvent{start, Server::DrainStrategy::Gradual});
++
++  Event::MockTimer* drain_timer = setUpTimer();
++  EXPECT_CALL(*drain_timer, enableTimer(_, _));
++  EXPECT_CALL(*codec_, shutdownNotice());
++  idle_drain_timer->invokeCallback();
++  EXPECT_EQ(1U, stats_.named_.downstream_cx_drain_close_.value());
++}
++
++// A drain window that has already passed schedules the drain sequence at once.
++TEST_F(HttpConnectionManagerImplTest, Http3IdleConnectionDrainsAtOnceWhenWindowHasPassed) {
++  setup();
++  codec_->protocol_ = Protocol::Http3;
++  EXPECT_CALL(*codec_, dispatch(_)).WillOnce(Return(Http::okStatus()));
++  Buffer::OwnedImpl fake_input;
++  conn_manager_->onData(fake_input, false);
++
++  auto& server_context = factory_context_.server_factory_context_;
++  EXPECT_CALL(server_context.options_, drainTime())
++      .WillRepeatedly(Return(std::chrono::seconds(10)));
++  const MonotonicTime start = server_context.timeSource().monotonicTime();
++  test_time_.advanceTimeWait(std::chrono::seconds(20));
++  EXPECT_CALL(server_context.api_.random_, random()).Times(0);
++  Event::MockTimer* idle_drain_timer = setUpTimer();
++  EXPECT_CALL(*idle_drain_timer, enableTimer(std::chrono::milliseconds(0), _));
++  filter_callbacks_.connection_.raiseConnectionDrain(
++      Network::ConnectionDrainEvent{start, Server::DrainStrategy::Gradual});
++}
++
++// A connection that is already draining when the timer fires does not start a second sequence.
++TEST_F(HttpConnectionManagerImplTest, Http3IdleConnectionDrainDoesNotStartTwice) {
++  setup(SetupOpts().setSsl(true));
++  codec_->protocol_ = Protocol::Http3;
++
++  MockStreamDecoderFilter* filter = new NiceMock<MockStreamDecoderFilter>();
++  EXPECT_CALL(filter_factory_, createFilterChain(_))
++      .WillOnce(Invoke([&](FilterChainFactoryCallbacks& callbacks) -> bool {
++        auto factory = createDecoderFilterFactoryCb(StreamDecoderFilterSharedPtr{filter});
++        callbacks.setFilterConfigName("");
++        factory(callbacks);
++        return true;
++      }));
++  EXPECT_CALL(*filter, decodeHeaders(_, true)).WillOnce(Return(FilterHeadersStatus::StopIteration));
++  EXPECT_CALL(*codec_, dispatch(_)).WillOnce(Invoke([&](Buffer::Instance&) -> Http::Status {
++    decoder_ = &conn_manager_->newStream(response_encoder_);
++    RequestHeaderMapPtr headers{
++        new TestRequestHeaderMapImpl{{":authority", "host"}, {":path", "/"}, {":method", "GET"}}};
++    decoder_->decodeHeaders(std::move(headers), true);
++    return Http::okStatus();
++  }));
++  Buffer::OwnedImpl fake_input;
++  conn_manager_->onData(fake_input, false);
++
++  Event::MockTimer* idle_drain_timer = setUpTimer();
++  EXPECT_CALL(*idle_drain_timer, enableTimer(std::chrono::milliseconds(0), _));
++  filter_callbacks_.connection_.raiseConnectionDrain(
++      Network::ConnectionDrainEvent{{}, Server::DrainStrategy::Immediate});
++
++  // The response's drain-close decision starts the drain first.
++  Event::MockTimer* drain_timer = setUpTimer();
++  EXPECT_CALL(*drain_timer, enableTimer(_, _));
++  EXPECT_CALL(*codec_, shutdownNotice());
++  ResponseHeaderMapPtr response_headers{new TestResponseHeaderMapImpl{{":status", "200"}}};
++  filter->callbacks_->streamInfo().setResponseCodeDetails("");
++  filter->callbacks_->encodeHeaders(std::move(response_headers), true, "details");
++  response_encoder_.stream_.codec_callbacks_->onCodecEncodeComplete();
++  EXPECT_EQ(1U, stats_.named_.downstream_cx_drain_close_.value());
++
++  // The idle drain timer then finds the connection draining and does nothing more.
++  idle_drain_timer->invokeCallback();
++  EXPECT_EQ(1U, stats_.named_.downstream_cx_drain_close_.value());
++
++  EXPECT_CALL(*codec_, goAway());
++  EXPECT_CALL(filter_callbacks_.connection_,
++              close(Network::ConnectionCloseType::FlushWriteAndDelay, _));
++  EXPECT_CALL(*drain_timer, disableTimer());
++  drain_timer->invokeCallback();
++}
++
++// Only HTTP/3 is pushed: an HTTP/2 connection keeps the regular response-time decision.
++TEST_F(HttpConnectionManagerImplTest, Http2IdleConnectionIsNotDrainedByTimer) {
++  setup();
++  codec_->protocol_ = Protocol::Http2;
++  EXPECT_CALL(*codec_, dispatch(_)).WillOnce(Return(Http::okStatus()));
++  Buffer::OwnedImpl fake_input;
++  conn_manager_->onData(fake_input, false);
++
++  EXPECT_CALL(filter_callbacks_.connection_.dispatcher_, createTimer_(_)).Times(0);
++  EXPECT_CALL(*codec_, shutdownNotice()).Times(0);
++  filter_callbacks_.connection_.raiseConnectionDrain(
++      Network::ConnectionDrainEvent{{}, Server::DrainStrategy::Immediate});
++}
++
++// A connection notified before its codec exists (the drain predates the connection) is checked
++// when the timer fires: without a codec there is nothing to send a GOAWAY on.
++TEST_F(HttpConnectionManagerImplTest, Http3IdleConnectionDrainWaitsForCodec) {
++  setup();
++  Event::MockTimer* idle_drain_timer = setUpTimer();
++  EXPECT_CALL(*idle_drain_timer, enableTimer(std::chrono::milliseconds(0), _));
++  filter_callbacks_.connection_.raiseConnectionDrain(
++      Network::ConnectionDrainEvent{{}, Server::DrainStrategy::Immediate});
++  EXPECT_CALL(*codec_, shutdownNotice()).Times(0);
++  idle_drain_timer->invokeCallback();
++  EXPECT_EQ(0U, stats_.named_.downstream_cx_drain_close_.value());
++
++  // The codec arrives afterwards; its first response takes the regular drain-close decision.
++  EXPECT_CALL(*codec_, dispatch(_)).WillOnce(Return(Http::okStatus()));
++  Buffer::OwnedImpl fake_input;
++  conn_manager_->onData(fake_input, false);
++}
++
++// The behavior is behind a runtime guard.
++TEST_F(HttpConnectionManagerImplTest, Http3IdleConnectionDrainDisabledByRuntime) {
++  TestScopedRuntime scoped_runtime;
++  scoped_runtime.mergeValues({{"envoy.reloadable_features.http3_drain_idle_connections", "false"}});
++  setup();
++  codec_->protocol_ = Protocol::Http3;
++  EXPECT_CALL(*codec_, dispatch(_)).WillOnce(Return(Http::okStatus()));
++  Buffer::OwnedImpl fake_input;
++  conn_manager_->onData(fake_input, false);
++
++  EXPECT_CALL(filter_callbacks_.connection_.dispatcher_, createTimer_(_)).Times(0);
++  EXPECT_CALL(*codec_, shutdownNotice()).Times(0);
++  filter_callbacks_.connection_.raiseConnectionDrain(
++      Network::ConnectionDrainEvent{{}, Server::DrainStrategy::Immediate});
++}
++
++} // namespace Http
++} // namespace Envoy
+diff --git a/test/integration/quic_http_integration_test.cc b/test/integration/quic_http_integration_test.cc
+index 3089ba3544..60e831da9a 100644
+--- a/test/integration/quic_http_integration_test.cc
++++ b/test/integration/quic_http_integration_test.cc
+@@ -561,6 +561,28 @@ TEST_P(QuicHttpIntegrationTest, AdminDrainDrainsListeners) {
+   testAdminDrain(Http::CodecType::HTTP1);
+ }
+ 
++// An HTTP/3 connection that is idle when a graceful drain starts still gets a GOAWAY: it does
++// not have to send a request for the drain-close decision to be taken on its response.
++TEST_P(QuicHttpIntegrationTest, IdleConnectionGetsGoAwayOnGracefulDrain) {
++  initialize();
++  codec_client_ = makeHttpConnection(lookupPort("http"));
++  // One request, so the server side has a codec to send the GOAWAY on; then the connection idles.
++  auto response = codec_client_->makeHeaderOnlyRequest(default_request_headers_);
++  waitForNextUpstreamRequest();
++  upstream_request_->encodeHeaders(default_response_headers_, true);
++  ASSERT_TRUE(response->waitForEndStream());
++
++  BufferingStreamDecoderPtr admin_response = IntegrationUtil::makeSingleRequest(
++      lookupPort("admin"), "POST", "/drain_listeners?graceful", "", Http::CodecType::HTTP1,
++      version_);
++  EXPECT_EQ("200", admin_response->headers().getStatusValue());
++
++  // The server drains the idle connection on its own: GOAWAY, then close after the drain timeout.
++  test_server_->waitForCounter("http.config_test.downstream_cx_drain_close", 1);
++  ASSERT_TRUE(codec_client_->waitForDisconnect());
++  EXPECT_TRUE(codec_client_->sawGoAway());
++}
++
+ TEST_P(QuicHttpIntegrationTest, CertVerificationFailure) {
+   san_to_match_ = "www.random_domain.com";
+   initialize();
+diff --git a/test/server/hot_restart_udp_forwarding_test_helper.h b/test/server/hot_restart_udp_forwarding_test_helper.h
+index d068e7559e..970b14a372 100644
+--- a/test/server/hot_restart_udp_forwarding_test_helper.h
++++ b/test/server/hot_restart_udp_forwarding_test_helper.h
+@@ -27,6 +27,7 @@ public:
+   void setParentProbeInterval(std::chrono::milliseconds interval) {
+     child_.parent_probe_interval_ = interval;
+   }
++  void setParentExitWaitCap(std::chrono::milliseconds cap) { child_.parent_exit_wait_cap_ = cap; }
+   bool parentUnresponsive() const { return child_.parent_unresponsive_; }
+   bool parentTerminated() const { return child_.parent_terminated_; }
+ 
+diff --git a/test/server/hot_restarting_child_test.cc b/test/server/hot_restarting_child_test.cc
+index 3cb0ad87a9..3e97679a4a 100644
+--- a/test/server/hot_restarting_child_test.cc
++++ b/test/server/hot_restarting_child_test.cc
+@@ -142,9 +142,31 @@ public:
+     if (!hotRestartIsSkipped()) {
+       EXPECT_CALL(dispatcher_, createFileEvent_(_, _, _, Event::FileReadyType::Read))
+           .WillOnce(DoAll(SaveArg<1>(&fake_parent_->udp_file_ready_callback_), Return(nullptr)));
++      // The timer that probes for the parent's exit after the terminate request.
++      parent_exit_timer_ = new testing::NiceMock<Event::MockTimer>(&dispatcher_);
+     }
+     hot_restarting_child_->initialize(dispatcher_);
+   }
++  // The terminate request goes out; the drains do not complete until the parent has exited, which
++  // the exit probe sees as ECONNREFUSED. Drives one successful terminate send and one refused
++  // probe.
++  void terminateParentAndWaitForItsExit() {
++    testing::InSequence s;
++    EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr* msg, int) {
++      EXPECT_EQ(FakeHotRestartingParent::requestCase(msg),
++                envoy::HotRestartMessage::Request::kTerminate);
++      return Api::SysCallSizeResult{static_cast<ssize_t>(msg->msg_iov[0].iov_len), 0};
++    });
++    EXPECT_CALL(*parent_exit_timer_, enableTimer(_, _));
++    hot_restarting_child_->sendParentTerminateRequest();
++    EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr* msg, int) {
++      EXPECT_EQ(FakeHotRestartingParent::requestCase(msg),
++                envoy::HotRestartMessage::Request::kTestConnection);
++      return Api::SysCallSizeResult{-1, ECONNREFUSED};
++    });
++    parent_exit_timer_->invokeCallback();
++  }
++  testing::NiceMock<Event::MockTimer>* parent_exit_timer_{};
+   void TearDown() override { hot_restarting_child_.reset(); }
+   std::string socket_path_ = testDomainSocketName();
+   Api::MockOsSysCalls os_sys_calls_;
+@@ -188,8 +210,7 @@ TEST_F(HotRestartingChildTest, ParentDrainedCallbacksAreCalled) {
+                                                        callback2.AsStdFunction());
+   EXPECT_CALL(callback1, Call());
+   EXPECT_CALL(callback2, Call());
+-  fake_parent_->expectParentTerminateMessages();
+-  hot_restarting_child_->sendParentTerminateRequest();
++  terminateParentAndWaitForItsExit();
+ }
+ 
+ TEST_F(HotRestartingChildTest, ParentDrainedCallbacksAreCalledImmediatelyWhenAlreadyDrained) {
+@@ -197,8 +218,7 @@ TEST_F(HotRestartingChildTest, ParentDrainedCallbacksAreCalledImmediatelyWhenAlr
+   auto test_listener_addr2 = *Network::Utility::resolveUrl("udp://127.0.0.1:1235");
+   testing::MockFunction<void()> callback1;
+   testing::MockFunction<void()> callback2;
+-  fake_parent_->expectParentTerminateMessages();
+-  hot_restarting_child_->sendParentTerminateRequest();
++  terminateParentAndWaitForItsExit();
+   EXPECT_CALL(callback1, Call());
+   EXPECT_CALL(callback2, Call());
+   hot_restarting_child_->registerParentDrainedCallback(test_listener_addr,
+@@ -216,6 +236,85 @@ TEST_F(HotRestartingChildTest, ParentStopAcceptingLatchesOnDrainRequest) {
+   EXPECT_TRUE(hot_restarting_child_->parentStopAcceptingRequested());
+ }
+ 
++// The both-readers window: the drained callbacks unpause the inherited UDP listeners, which the
++// parent's workers keep reading until the parent stops. They must not run when the terminate
++// request is sent, only once the parent's socket refuses a probe, i.e. the parent has exited.
++TEST_F(HotRestartingChildTest, DrainsCompleteOnlyAfterParentHasExited) {
++  auto test_listener_addr = *Network::Utility::resolveUrl("udp://127.0.0.1:1234");
++  testing::MockFunction<void()> callback;
++  hot_restarting_child_->registerParentDrainedCallback(test_listener_addr,
++                                                       callback.AsStdFunction());
++  EXPECT_CALL(callback, Call()).Times(0);
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr* msg, int) {
++    EXPECT_EQ(FakeHotRestartingParent::requestCase(msg),
++              envoy::HotRestartMessage::Request::kTerminate);
++    return Api::SysCallSizeResult{static_cast<ssize_t>(msg->msg_iov[0].iov_len), 0};
++  });
++  EXPECT_CALL(*parent_exit_timer_, enableTimer(HotRestartingChild::PARENT_EXIT_PROBE_INTERVAL, _));
++  hot_restarting_child_->sendParentTerminateRequest();
++  // A callback registered while the parent is still exiting also waits.
++  testing::MockFunction<void()> late_callback;
++  hot_restarting_child_->registerParentDrainedCallback(test_listener_addr,
++                                                       late_callback.AsStdFunction());
++  EXPECT_CALL(late_callback, Call()).Times(0);
++
++  // The parent is still there: the probe is accepted and the wait continues.
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr* msg, int) {
++    EXPECT_EQ(FakeHotRestartingParent::requestCase(msg),
++              envoy::HotRestartMessage::Request::kTestConnection);
++    return Api::SysCallSizeResult{static_cast<ssize_t>(msg->msg_iov[0].iov_len), 0};
++  });
++  EXPECT_CALL(*parent_exit_timer_, enableTimer(HotRestartingChild::PARENT_EXIT_PROBE_INTERVAL, _));
++  parent_exit_timer_->invokeCallback();
++  testing::Mock::VerifyAndClearExpectations(&callback);
++  testing::Mock::VerifyAndClearExpectations(&late_callback);
++
++  // The parent has exited: the probe is refused and the drains complete.
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr*, int) {
++    return Api::SysCallSizeResult{-1, ECONNREFUSED};
++  });
++  EXPECT_CALL(callback, Call());
++  EXPECT_CALL(late_callback, Call());
++  EXPECT_LOG_CONTAINS("info", "hot restart parent has exited", parent_exit_timer_->invokeCallback());
++}
++
++// A parent that does not exit in time cannot keep the listeners paused: the wait is capped.
++TEST_F(HotRestartingChildTest, DrainsCompleteAtTheCapIfParentLingers) {
++  HotRestartUdpForwardingTestHelper(*hot_restarting_child_)
++      .setParentExitWaitCap(std::chrono::milliseconds(0));
++  auto test_listener_addr = *Network::Utility::resolveUrl("udp://127.0.0.1:1234");
++  testing::MockFunction<void()> callback;
++  hot_restarting_child_->registerParentDrainedCallback(test_listener_addr,
++                                                       callback.AsStdFunction());
++  EXPECT_CALL(callback, Call()).Times(0);
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr* msg, int) {
++    return Api::SysCallSizeResult{static_cast<ssize_t>(msg->msg_iov[0].iov_len), 0};
++  });
++  hot_restarting_child_->sendParentTerminateRequest();
++  testing::Mock::VerifyAndClearExpectations(&callback);
++
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr* msg, int) {
++    return Api::SysCallSizeResult{static_cast<ssize_t>(msg->msg_iov[0].iov_len), 0};
++  });
++  EXPECT_CALL(callback, Call());
++  EXPECT_LOG_CONTAINS("warning", "hot restart parent has not exited",
++                      parent_exit_timer_->invokeCallback());
++}
++
++// A parent that is already gone when asked to terminate needs no wait.
++TEST_F(HotRestartingChildTest, DrainsCompleteImmediatelyIfParentIsAlreadyGone) {
++  auto test_listener_addr = *Network::Utility::resolveUrl("udp://127.0.0.1:1234");
++  testing::MockFunction<void()> callback;
++  hot_restarting_child_->registerParentDrainedCallback(test_listener_addr,
++                                                       callback.AsStdFunction());
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr*, int) {
++    return Api::SysCallSizeResult{-1, ECONNREFUSED};
++  });
++  EXPECT_CALL(*parent_exit_timer_, enableTimer(_, _)).Times(0);
++  EXPECT_CALL(callback, Call());
++  hot_restarting_child_->sendParentTerminateRequest();
++}
++
+ TEST_F(HotRestartingChildTest, LogsErrorOnReplyMessageInUdpStream) {
+   envoy::HotRestartMessage msg;
+   msg.mutable_reply();
+@@ -454,10 +553,9 @@ TEST_F(HotRestartingChildWaitingForParentTest, WritesParentOffAfterReplyTimeout)
+   EXPECT_EQ(hot_restarting_child_->duplicateParentListenSocket("udp://127.0.0.1:5678", 0, ""), -1);
+   EXPECT_EQ(hot_restarting_child_->sendParentAdminShutdownRequest(), std::nullopt);
+ 
+-  // The terminate request is still sent, and completes the drains.
++  // The terminate request is still sent, and the drains complete once the parent has exited.
+   EXPECT_CALL(drained_callback, Call());
+-  fake_parent_->expectParentTerminateMessages();
+-  hot_restarting_child_->sendParentTerminateRequest();
++  terminateParentAndWaitForItsExit();
+   EXPECT_TRUE(helper_->parentTerminated());
+ }
+ 

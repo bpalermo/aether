@@ -21,5 +21,14 @@ test_suite(
         "@envoy//test/server:hot_restarting_base_test",
         "@envoy//test/server:hot_restarting_child_test",
         "@envoy//test/server:hot_restarting_parent_test",
+        # envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch (aether#1054):
+        # the child's inherited UDP listeners stay paused until the parent has exited
+        # (hot_restarting_child_test DrainsCompleteOnlyAfterParentHasExited), and idle
+        # HTTP/3 connections drain themselves inside the drain window
+        # (conn_manager_impl_test Http3IdleConnection*). The patch's
+        # quic_http_integration_test case is not listed: quiche's test tooling needs
+        # Envoy's platform test headers, which this downstream module does not wire
+        # up, so it runs in the Envoy workspace only.
+        "@envoy//test/common/http:conn_manager_impl_test",
     ],
 )
