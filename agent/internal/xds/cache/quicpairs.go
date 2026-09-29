@@ -73,8 +73,11 @@ const (
 // The regeneration runs on its own goroutine: this is called from the xDS
 // stream's request callback, and publishing a snapshot from inside it could
 // block on the very stream whose request is being processed.
-func (c *SnapshotCache) ObserveQUICTwin(ctx context.Context, name string) (QUICTwinDecision, string) {
-	decision, reason := c.recordQUICPair(name)
+//
+// streamID is the xDS stream that asked: the proxy generation that now holds
+// the name's on-demand subscription (issue #1052).
+func (c *SnapshotCache) ObserveQUICTwin(ctx context.Context, streamID int64, name string) (QUICTwinDecision, string) {
+	decision, reason := c.recordQUICPair(streamID, name)
 	switch decision {
 	case QUICTwinRefused:
 		c.log.InfoContext(ctx, "refusing on-demand QUIC twin", "cluster", name, "reason", reason)
@@ -92,15 +95,19 @@ func (c *SnapshotCache) ObserveQUICTwin(ctx context.Context, name string) (QUICT
 
 // RestateQUICSubscriptions is a fresh xDS stream's first CDS request (issue
 // #1036): names -- quicdemand's Resubscribed, possibly empty -- is then exactly
-// the set of on-demand subscriptions the proxy holds, and replaces the
-// ledger's. A dormant pair it does not name has no subscription left -- the
-// proxy restarted, or this stream belongs to a new proxy generation after a
-// hot restart, whose child holds no ODCDS subscriptions -- and is pruned: the
-// next request that routes to its twin opens a subscription, real first use.
-// The named twins are then resumed (ResumeQUICSubscriptions), which keeps a
-// named pair that is not servable right now dormant. Called on EVERY fresh
-// stream. Returns how many pairs were new.
-func (c *SnapshotCache) RestateQUICSubscriptions(ctx context.Context, names []string) int {
+// the set of on-demand subscriptions that stream's proxy process holds. They
+// are recorded for streamID alone (issue #1052): across a hot restart the
+// draining parent and the child are two live streams, and only the stream that
+// re-subscribed a twin vouches for its subscription. A dormant pair NO live
+// stream holds -- the proxy restarted, or the only live stream is a new
+// generation's, whose child holds no ODCDS subscriptions -- is pruned: the next
+// request that routes to its twin opens a subscription, real first use. One
+// that another live generation still holds stays dormant until that stream
+// ends (CloseQUICStream). The named twins are then resumed
+// (ResumeQUICSubscriptions), which keeps a named pair that is not servable
+// right now dormant. Called on EVERY fresh stream. Returns how many pairs were
+// new.
+func (c *SnapshotCache) RestateQUICSubscriptions(ctx context.Context, streamID int64, names []string) int {
 	pairs := make([]quicPair, 0, len(names))
 	for _, name := range names {
 		if service, source, ok := proxy.ParseQUICClusterName(name, c.meshDomain); ok {
@@ -108,17 +115,40 @@ func (c *SnapshotCache) RestateQUICSubscriptions(ctx context.Context, names []st
 		}
 	}
 	c.depMu.Lock()
-	pruned := c.quicLedger.Restate(pairs)
+	pruned := c.quicLedger.Restate(streamID, pairs)
 	if len(pruned) > 0 {
 		c.markObservedDirtyLocked()
 	}
 	dormantLeft := len(c.quicLedger.Dormant())
 	c.depMu.Unlock()
 	if len(pruned) > 0 {
-		c.log.InfoContext(ctx, "pruned dormant east-west QUIC pairs: the proxy's fresh stream holds no on-demand subscription for their twins",
-			"count", len(pruned), "dormant", dormantLeft, "pairs", capStrings(pairStrings(pruned), quicPairsLogCap))
+		c.log.InfoContext(ctx, "pruned dormant east-west QUIC pairs: no live proxy stream holds an on-demand subscription for their twins",
+			"stream", streamID, "count", len(pruned), "dormant", dormantLeft, "pairs", capStrings(pairStrings(pruned), quicPairsLogCap))
 	}
-	return c.ResumeQUICSubscriptions(ctx, names)
+	return c.ResumeQUICSubscriptions(ctx, streamID, names)
+}
+
+// CloseQUICStream is the end of an xDS stream (issue #1052). If another stream
+// is live, the ended one was a proxy generation that exited -- the draining
+// parent of a hot restart, which after an agent restart may well have
+// re-subscribed twins the child never held -- so the subscriptions it vouched
+// for are dropped, not kept, and a dormant pair no live stream holds is pruned.
+// If it was the last live stream nothing is concluded (the proxy may be
+// reconnecting); the next fresh stream's re-statement decides. Returns how many
+// dormant pairs were pruned.
+func (c *SnapshotCache) CloseQUICStream(ctx context.Context, streamID int64) int {
+	c.depMu.Lock()
+	pruned := c.quicLedger.Close(streamID)
+	if len(pruned) > 0 {
+		c.markObservedDirtyLocked()
+	}
+	dormantLeft := len(c.quicLedger.Dormant())
+	c.depMu.Unlock()
+	if len(pruned) > 0 {
+		c.log.InfoContext(ctx, "pruned dormant east-west QUIC pairs: the proxy generation that held their on-demand subscriptions ended its stream while a newer one is live",
+			"stream", streamID, "count", len(pruned), "dormant", dormantLeft, "pairs", capStrings(pairStrings(pruned), quicPairsLogCap))
+	}
+	return len(pruned)
 }
 
 // ResumeQUICSubscriptions admits the pairs behind twins the node proxy
@@ -137,10 +167,10 @@ func (c *SnapshotCache) RestateQUICSubscriptions(ctx context.Context, names []st
 // subscription) admits nothing: it is whatever an older agent generation
 // built. #1032 admitted those too (RestoreQUICTwin), which on the first talos
 // deploy (rev245) persisted every SAs x destinations twin as a pair.
-func (c *SnapshotCache) ResumeQUICSubscriptions(ctx context.Context, names []string) int {
+func (c *SnapshotCache) ResumeQUICSubscriptions(ctx context.Context, streamID int64, names []string) int {
 	added, parked := 0, 0
 	for _, name := range names {
-		switch d, reason := c.recordQUICPair(name); {
+		switch d, reason := c.recordQUICPair(streamID, name); {
 		case d == QUICTwinAdded:
 			added++
 		case d == QUICTwinRefused && reason != QUICRefusedMalformed:
@@ -186,8 +216,9 @@ func (c *SnapshotCache) HasQUICPair(name string) bool {
 // keeps it for the life of the process (issue #1036), so the ledger records it
 // even when the pair is refused: a well-formed name that is not servable right
 // now is parked dormant and republished when it becomes valid -- its paused
-// request still 503s, but the ones after it do not.
-func (c *SnapshotCache) recordQUICPair(name string) (QUICTwinDecision, string) {
+// request still 503s, but the ones after it do not. The subscription is
+// recorded for streamID, the proxy generation that holds it (issue #1052).
+func (c *SnapshotCache) recordQUICPair(streamID int64, name string) (QUICTwinDecision, string) {
 	service, source, ok := proxy.ParseQUICClusterName(name, c.meshDomain)
 	if !ok {
 		return QUICTwinRefused, QUICRefusedMalformed
@@ -198,7 +229,7 @@ func (c *SnapshotCache) recordQUICPair(name string) (QUICTwinDecision, string) {
 	c.depMu.Lock()
 	defer c.depMu.Unlock()
 	p := quicPair{service: service, source: source}
-	c.quicLedger.Subscribe(p)
+	c.quicLedger.Subscribe(streamID, p)
 	reason := ""
 	switch {
 	case !has(local, source):

@@ -185,7 +185,7 @@ func TestQUICDemandOnDemandRequestBuildsExactlyThatTwin(t *testing.T) {
 	ctx := context.Background()
 	twinB := echoTwin(c, "source-b")
 
-	decision, reason := c.ObserveQUICTwin(ctx, twinB)
+	decision, reason := c.ObserveQUICTwin(ctx, testQUICStream, twinB)
 	require.Equal(t, QUICTwinAdded, decision, reason)
 
 	var st quicState
@@ -204,7 +204,7 @@ func TestQUICDemandOnDemandRequestBuildsExactlyThatTwin(t *testing.T) {
 	assert.Equal(t, []string{twinB}, c.QUICPairs())
 
 	// A repeat request (a second listener, a reconnecting stream) is a no-op.
-	decision, _ = c.ObserveQUICTwin(ctx, twinB)
+	decision, _ = c.ObserveQUICTwin(ctx, testQUICStream, twinB)
 	assert.Equal(t, QUICTwinKnown, decision)
 }
 
@@ -213,7 +213,7 @@ func TestQUICDemandOnDemandRequestBuildsExactlyThatTwin(t *testing.T) {
 func TestQUICDemandPairSurvivesAgentRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ObservedUpstreamsFile)
 	c := newQUICDemandCache(t, path)
-	d, reason := c.recordQUICPair(echoTwin(c, "source-b"))
+	d, reason := c.recordQUICPair(testQUICStream, echoTwin(c, "source-b"))
 	require.Equal(t, QUICTwinAdded, d, reason)
 	c.FlushObservedUpstreams()
 
@@ -292,7 +292,7 @@ func TestQUICDemandRefusesWhatItCannotBuild(t *testing.T) {
 		{"quic:" + proxy.ServiceClusterName("demo/echo", c.meshDomain) + "@demo/source-a/x", QUICRefusedMalformed},
 		{"quic:" + proxy.ServiceClusterName("demo/echo", c.meshDomain), QUICRefusedMalformed},
 	} {
-		decision, reason := c.ObserveQUICTwin(ctx, tc.name)
+		decision, reason := c.ObserveQUICTwin(ctx, testQUICStream, tc.name)
 		assert.Equal(t, QUICTwinRefused, decision, tc.name)
 		assert.Equal(t, tc.want, reason, tc.name)
 	}
@@ -327,9 +327,9 @@ func TestQUICDemandPrunesPersistedPairsNotFetchedWithinTheWindow(t *testing.T) {
 	// source-b's twin is fetched on demand in this process; source-c's is
 	// re-subscribed on the proxy's fresh stream (a live on-demand
 	// subscription: pruning it would strand it); source-a's is neither.
-	decision, _ := restarted.ObserveQUICTwin(ctx, twinB)
+	decision, _ := restarted.ObserveQUICTwin(ctx, testQUICStream, twinB)
 	require.Equal(t, QUICTwinKnown, decision)
-	require.Zero(t, restarted.ResumeQUICSubscriptions(ctx, []string{twinC}), "already restored: nothing new")
+	require.Zero(t, restarted.ResumeQUICSubscriptions(ctx, testQUICStream, []string{twinC}), "already restored: nothing new")
 
 	window := DefaultQUICPairFetchWindow
 	restarted.pruneUnfetchedQUICPairs(restarted.quicStart.Add(window - time.Second))
@@ -349,7 +349,7 @@ func TestQUICDemandPrunesPersistedPairsNotFetchedWithinTheWindow(t *testing.T) {
 	assert.Equal(t, "demo/source-c", stored[1].GetSource())
 
 	// A pruned pair that still has traffic is re-fetched: real first use.
-	decision, _ = restarted.ObserveQUICTwin(ctx, twinA)
+	decision, _ = restarted.ObserveQUICTwin(ctx, testQUICStream, twinA)
 	assert.Equal(t, QUICTwinAdded, decision)
 
 	// Pairs first used in this process are never pruned by the window.

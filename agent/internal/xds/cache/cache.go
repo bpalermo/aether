@@ -295,7 +295,8 @@ type SnapshotCache struct {
 	// re-requests a name it is subscribed to, so a forgotten pair whose source
 	// returns is stranded (503 NC at the on_demand timeout, forever). A
 	// dormant pair is republished the moment it is valid again, and pruned only
-	// when a fresh stream shows the subscription is gone. Guarded by depMu;
+	// when no live xDS stream -- proxy generation, issue #1052 -- holds the
+	// subscription any more. Guarded by depMu;
 	// dormant pairs are persisted with observedDeps.
 	quicLedger *quicdemand.Ledger[quicPair]
 	// quicStart is when this agent process started (the cache was built);
