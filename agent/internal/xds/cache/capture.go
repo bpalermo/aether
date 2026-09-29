@@ -344,13 +344,24 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	c.signalDependencyChange()
 }
 
-// captureTCPClusters returns the TCP floor clusters for non-HTTP services as a resource
-// slice. These are separate EDS clusters (prefixed "tcp:") that share the same endpoints
-// as the HTTP clusters but use NO ALPN on their transport socket so the destination
-// inbound routes to the TCP floor DEFAULT chain. Called from generateSnapshot.
-func (c *SnapshotCache) captureTCPClusters() []types.Resource {
+// captureTCPClusters returns the TCP floor clusters for non-HTTP services, and the
+// load assignments they subscribe to. These are separate EDS clusters (prefixed
+// "tcp:") that have the same membership as the service's bare-name EDS resource
+// but use NO ALPN on their transport socket so the destination inbound routes to
+// the TCP floor DEFAULT chain. Called from generateSnapshot.
+//
+// The floor cluster and its primary-port alias subscribe to their OWN EDS names,
+// and the bare service's load assignment is returned under each of them from
+// this same pass (proxy.LoadAssignmentAlias), so a floor cluster and its CLA
+// always ride the same snapshot. Sharing the bare name with the default HTTP
+// cluster was only accidentally safe: Envoy's delta-ADS WatchMap deduplicates
+// subscription interest per resource name, and a floor added in a LATER CDS
+// update than the default cluster (a TCPRoute attached after the service is in
+// the dependency set) sent no subscribe and warmed for the full 15 s
+// initial_fetch_timeout -- the #1008 mechanism (aether#1013).
+func (c *SnapshotCache) captureTCPClusters() ([]types.Resource, []types.Resource) {
 	if !c.captureEnabled {
-		return nil
+		return nil, nil
 	}
 
 	c.captureMu.RLock()
@@ -359,7 +370,7 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 	c.captureMu.RUnlock()
 
 	if len(entries) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Only the node SVID is read here. The local workload identities used to be
@@ -386,7 +397,7 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		// Node SVID or trust domain not yet available; skip the per-service TCP
 		// clusters until both are (an empty trust domain renders `spiffe://`,
 		// #815). The blackhole still goes out — see above.
-		return blackhole
+		return blackhole, nil
 	}
 
 	// SAN namespaces come from the service's TCP floor entry, which since
@@ -398,6 +409,7 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 	c.clusterMu.RLock()
 	resources := make([]types.Resource, 0, len(entries)+len(blackhole))
 	resources = append(resources, blackhole...)
+	var clas []types.Resource
 	for _, e := range entries {
 		tcpEntry, ok := c.tcpEntryLocked(e.serviceName)
 		if !ok {
@@ -410,7 +422,11 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		// HTTP cluster path uses.
 		sanURIs := tcpEntry.sanURIs
 		tcpName := proxy.TCPClusterName(e.serviceName, c.meshDomain)
-		cl := proxy.NewTCPServiceCluster(tcpName, e.serviceName, e.serviceName)
+		bare := c.bareServiceCLALocked(e.serviceName)
+		// Its own stat key, tcp_<ns>/<svc>: never the bare service key the HTTP
+		// cluster reports under (aether#1023, proxy.TCPStatKey). The alias and
+		// per-port clusters below carry tcp_<ns>/<svc>_<port>.
+		cl := proxy.NewTCPServiceCluster(tcpName, tcpName, proxy.TCPStatKey(e.serviceName))
 		// NO SNI for the TCP floor: the egress floor connection must NOT carry the
 		// destination port as SNI, or the peer's inbound per-port HCM chain
 		// (server_names:[port]) would win over the inbound TCP floor's default chain
@@ -419,27 +435,36 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		// fall through to the inbound default floor chain (tcp_proxy to the app).
 		proxy.InjectUpstreamTCPMTLS(cl, nodeSpiffeID, validationContextName, sanURIs, "")
 		resources = append(resources, cl)
+		if cla := proxy.LoadAssignmentAlias(bare, tcpName); cla != nil {
+			clas = append(clas, cla)
+		}
 
-		resources = append(resources, c.tcpPortClustersLocked(
-			e, tcpEntry, tcpName, sanURIs, nodeSpiffeID, validationContextName)...)
+		portClusters, portCLAs := c.tcpPortClustersLocked(
+			e, tcpEntry, tcpName, bare, sanURIs, nodeSpiffeID, validationContextName)
+		resources = append(resources, portClusters...)
+		clas = append(clas, portCLAs...)
 	}
 	c.clusterMu.RUnlock()
 
-	return resources
+	return resources, clas
 }
 
 // edgeTCPClusters returns TCP floor clusters for services referenced by the edge's
-// L4 routes (TCPRoute/TLSRoute parented to a Gateway). Called from generateSnapshot
-// when in edge mode; parallel to captureTCPClusters but for the edge identity
-// (EdgeUpstreamTCPTransportSocket fetches SDS from spire_agent, not ADS).
+// L4 routes (TCPRoute/TLSRoute parented to a Gateway), and their load
+// assignments. Called from generateSnapshot when in edge mode; parallel to
+// captureTCPClusters but for the edge identity (EdgeUpstreamTCPTransportSocket
+// fetches SDS from spire_agent, not ADS). Like the node proxy's floor, each
+// cluster subscribes to its own EDS name and the bare service's load assignment
+// is republished under it (aether#1013): the edge also carries the service's
+// default HTTP cluster when an HTTPRoute targets it.
 //
 // The edge has one identity so no per-source matcher is needed: the cluster gets
 // a single transport socket presenting the edge SVID with no ALPN and no SNI,
 // so the destination inbound demuxes to the TCP floor DEFAULT chain.
-func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
+func (c *SnapshotCache) edgeTCPClusters() ([]types.Resource, []types.Resource) {
 	services := c.collectEdgeTCPServices()
 	if len(services) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	c.localMu.RLock()
@@ -447,11 +472,12 @@ func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
 	c.localMu.RUnlock()
 	validationContextName := c.validationContextName()
 	if nodeSpiffeID == "" || validationContextName == "" {
-		return nil
+		return nil, nil
 	}
 
 	c.clusterMu.RLock()
 	resources := make([]types.Resource, 0, len(services))
+	clas := make([]types.Resource, 0, len(services))
 	for _, svc := range services {
 		// The TCP floor entry, keyed "tcp:<fqdn>" (proposal 037 design (a)).
 		entry, ok := c.tcpEntryLocked(svc)
@@ -462,14 +488,17 @@ func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
 		// #537); see the node-proxy TCP variant above.
 		sanURIs := entry.sanURIs
 		tcpName := proxy.TCPClusterName(svc, c.meshDomain)
-		cl := proxy.NewTCPServiceCluster(tcpName, svc, svc)
+		cl := proxy.NewTCPServiceCluster(tcpName, tcpName, proxy.TCPStatKey(svc))
 		// Edge variant: fetch SVID/bundle from spire_agent (not ADS), no ALPN, no SNI (TCP floor).
 		cl.TransportSocket = proxy.EdgeUpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs)
 		resources = append(resources, cl)
+		if cla := proxy.LoadAssignmentAlias(c.bareServiceCLALocked(svc), tcpName); cla != nil {
+			clas = append(clas, cla)
+		}
 	}
 	c.clusterMu.RUnlock()
 
-	return resources
+	return resources, clas
 }
 
 // collectEdgeTCPServices returns the distinct service names (with a Cluster name
@@ -684,7 +713,7 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 			c.log.Warn("UDP cluster published with no routable endpoint: udp_proxy will discard datagrams for it, silently",
 				"service", svc, "cluster", udpName, "endpoints", n, "issue", "931")
 		}
-		cl := proxy.NewUDPServiceCluster(udpName, svc, la)
+		cl := proxy.NewUDPServiceCluster(udpName, proxy.UDPStatKey(svc), la)
 		resources = append(resources, cl)
 	}
 	return resources
@@ -1401,7 +1430,9 @@ func primaryPortOf(entry clusterEntry) uint32 {
 //
 // Two shapes, and the difference is the SNI:
 //
-//   - The PRIMARY port is an alias. Same EDS as the floor and NO SNI, because
+//   - The PRIMARY port is an alias. Same membership as the floor -- its own EDS
+//     name, with the bare service's load assignment (bare) republished under it
+//     and returned alongside (aether#1013) -- and NO SNI, because
 //     the destination's default inbound chain is what serves it and a non-empty
 //     SNI would route it to a per-port chain that does not exist (#306). It
 //     exists so a port-qualified reference resolves for every TCP port and not
@@ -1419,16 +1450,20 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 	e captureTCPEntry,
 	tcpEntry clusterEntry,
 	tcpName string,
+	bare *endpointv3.ClusterLoadAssignment,
 	sanURIs []string,
 	nodeSpiffeID, validationContextName string,
-) []types.Resource {
-	var out []types.Resource
+) ([]types.Resource, []types.Resource) {
+	var out, clas []types.Resource
 
 	if aliasName := proxy.TCPPortClusterName(tcpName, primaryPortOf(tcpEntry)); aliasName != "" {
 		if _, ok := c.clusters[aliasName]; ok {
-			ac := proxy.NewTCPServiceCluster(aliasName, e.serviceName, e.serviceName)
+			ac := proxy.NewTCPServiceCluster(aliasName, aliasName, proxy.TCPPortStatKey(e.serviceName, primaryPortOf(tcpEntry)))
 			proxy.InjectUpstreamTCPMTLS(ac, nodeSpiffeID, validationContextName, sanURIs, "")
 			out = append(out, ac)
+			if cla := proxy.LoadAssignmentAlias(bare, aliasName); cla != nil {
+				clas = append(clas, cla)
+			}
 		}
 	}
 
@@ -1440,12 +1475,12 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 		pc := proxy.NewTCPServiceCluster(
 			proxy.TCPPortClusterName(tcpName, port),
 			portEntry.loadAssignment.GetClusterName(),
-			e.serviceName,
+			proxy.TCPPortStatKey(e.serviceName, port),
 		)
 		proxy.InjectUpstreamTCPMTLS(pc, nodeSpiffeID, validationContextName, portEntry.sanURIs, strconv.Itoa(int(port)))
 		out = append(out, pc)
 	}
-	return out
+	return out, clas
 }
 
 // tcpSpellingsIfNoHTTPPortLocked returns the TCP spellings a caller should use

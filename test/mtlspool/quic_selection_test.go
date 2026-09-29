@@ -141,7 +141,7 @@ func quicTwinWith(t *testing.T, name, sourceSpiffeID, destAddr string, o quicOpt
 	base.EdsClusterConfig = nil
 	base.LbSubsetConfig = nil
 	base.LoadAssignment = staticEndpoint(name, destAddr)
-	cl := proxy.QUICClusterFrom(base, name, sourceSpiffeID, validationContextName, o.sanPin, o.sni)
+	cl := proxy.QUICClusterFrom(base, name, sourceSpiffeID, validationContextName, o.sanPin, o.sni, 0)
 	rewriteQUICSDSToHarness(t, cl.GetTransportSocket())
 	return cl
 }

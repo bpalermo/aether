@@ -27,7 +27,7 @@ bazel build //:envoy
 # --config=release bakes the optimized Envoy (plain builds are fastbuild/dev).
 # The Makefile `load-proxy-image` target does this for you.
 bazel build --config=release //:image
-bazel run --config=release //:load   # ghcr.io/bpalermo/aether/aether-proxy:latest
+bazel run --config=release //:load   # quay.io/aethermesh/proxy:latest
 
 # Image smoke test (container-structure-test).
 bazel test //:image_test
@@ -117,7 +117,23 @@ symbol upload is keyed by (#653).
   aether#967; test cases, docs and changelog dropped, `test/mocks/network/mocks.h` kept for our test build)
   and envoyproxy/envoy#47740 (QUIC client hostname check deferred to explicit SAN
   matchers, aether#957; behind
-  `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`).
+  `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`),
+  and aether#1022 (`execInNetworkNamespace` restores the calling THREAD's netns via
+  `/proc/thread-self/ns/net`, not the main thread's `/proc/self/ns/net`; not yet
+  proposed upstream), and aether#1050 (the hot-restart main-thread deadlock:
+  parent UDP/QUIC forwarding to the child no longer blocks the parent's main
+  thread, and the child keeps servicing forwarded packets while it waits, with a
+  bound, for the parent's replies; not yet proposed upstream), and aether#1054 (the
+  hot-restart child keeps its inherited UDP listeners paused until the parent has
+  exited, and idle HTTP/3 connections drain themselves inside the drain window;
+  not yet proposed upstream), and a second aether#1054 patch (a draining hot-restart
+  parent answers packets for its own recently closed QUIC connections from its
+  time-wait list instead of forwarding them to the child, which stateless-reset
+  them; not yet proposed upstream), and a third aether#1054 patch (a paused
+  hot-restart child UDP listener no longer reads the parent's socket when the
+  QUIC listener injects a read to process forwarded handshakes; an upstream bug,
+  to be proposed upstream). A carried patch's own Envoy tests run from
+  `//bazel/patches:carried_patch_tests`, since `//...` does not reach `@envoy` tests.
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)
 
@@ -191,8 +207,8 @@ config) and **annotations** (manifest):
 To read them off a published image, without pulling it:
 
 ```bash
-crane config ghcr.io/bpalermo/aether/aether-proxy@sha256:… | jq .config.Labels
-crane manifest ghcr.io/bpalermo/aether/aether-proxy@sha256:… | jq .annotations
+crane config quay.io/aethermesh/proxy@sha256:… | jq .config.Labels
+crane manifest quay.io/aethermesh/proxy@sha256:… | jq .annotations
 ```
 
 None of this costs reproducibility: the labels are fixed strings, `created`

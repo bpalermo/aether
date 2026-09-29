@@ -33,6 +33,7 @@ go_test(
         "coordination_test.go",
         "crash_test.go",
         "epoch_test.go",
+        "handoffgate_test.go",
         "metrics_test.go",
         "shutdown_test.go",
         "supervisor_test.go",

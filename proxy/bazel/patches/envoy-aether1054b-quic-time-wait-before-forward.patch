@@ -1,0 +1,136 @@
+diff --git a/source/common/quic/envoy_quic_dispatcher.cc b/source/common/quic/envoy_quic_dispatcher.cc
+index fee95ab99e..119f508966 100644
+--- a/source/common/quic/envoy_quic_dispatcher.cc
++++ b/source/common/quic/envoy_quic_dispatcher.cc
+@@ -11,6 +11,7 @@
+ 
+ #include "source/common/common/safe_memcpy.h"
+ #include "source/common/http/session_idle_list.h"
++#include "source/common/runtime/runtime_features.h"
+ #include "source/common/quic/envoy_quic_connection_debug_visitor_factory_interface.h"
+ #include "source/common/quic/envoy_quic_server_connection.h"
+ #include "source/common/quic/envoy_quic_server_session.h"
+@@ -182,6 +183,20 @@ bool EnvoyQuicDispatcher::processPacket(const quic::QuicSocketAddress& self_addr
+ bool EnvoyQuicDispatcher::OnFailedToDispatchPacket(
+     const quic::ReceivedPacketInfo& received_packet_info) {
+   if (!accept_new_connections()) {
++    // While not accepting (a hot restart parent draining), packets for unknown connections are
++    // handed to the caller for forwarding to the child. A connection this dispatcher closed
++    // recently is not unknown though: it is in the time-wait list, which quiche consults right
++    // after this hook, re-sending the stored CONNECTION_CLOSE (or, for a connection the peer
++    // itself closed, a stateless reset). Forwarding such a packet instead would make the child,
++    // which never knew the connection, answer with a stateless reset to a peer that only missed
++    // our close. Leave those to the time-wait list.
++    // Only reached while draining, so the runtime lookup is off the steady-state path.
++    if (time_wait_list_manager()->IsConnectionIdInTimeWait(
++            received_packet_info.destination_connection_id) &&
++        Runtime::runtimeFeatureEnabled(
++            "envoy.reloadable_features.quic_hot_restart_time_wait_before_forward")) {
++      return false;
++    }
+     current_packet_dispatch_success_ = false;
+     return true;
+   }
+diff --git a/source/common/runtime/runtime_features.cc b/source/common/runtime/runtime_features.cc
+index 3bb4210772..23f904d9f7 100644
+--- a/source/common/runtime/runtime_features.cc
++++ b/source/common/runtime/runtime_features.cc
+@@ -141,6 +141,10 @@ RUNTIME_GUARD(envoy_reloadable_features_proxy_protocol_remove_too_long_tlvs);
+ // TODO(panting): Default to true after ssl fix.
+ FALSE_RUNTIME_GUARD(envoy_reloadable_features_quic_enable_reset_ssl_after_handshake);
+ RUNTIME_GUARD(envoy_reloadable_features_quic_hostname_check_deferred_to_explicit_san_match);
++// A draining hot restart parent leaves packets for connections in its QUIC time-wait list to the
++// time-wait manager (re-sending the stored CONNECTION_CLOSE) instead of forwarding them to the
++// child, which would answer with a stateless reset.
++RUNTIME_GUARD(envoy_reloadable_features_quic_hot_restart_time_wait_before_forward);
+ RUNTIME_GUARD(envoy_reloadable_features_quic_mtls_resumption_disabled_by_default);
+ RUNTIME_GUARD(envoy_reloadable_features_quic_mtls_server_enabled);
+ // Ignore the automated "remove this flag" issue: we should keep this for 1 year. Confirm with
+diff --git a/test/common/quic/envoy_quic_dispatcher_test.cc b/test/common/quic/envoy_quic_dispatcher_test.cc
+index cbfe51d13e..903ccb9b37 100644
+--- a/test/common/quic/envoy_quic_dispatcher_test.cc
++++ b/test/common/quic/envoy_quic_dispatcher_test.cc
+@@ -503,6 +503,83 @@ TEST_P(EnvoyQuicDispatcherTest, ProcessPacketReturnsTrueForDispatchedPacketOnExi
+   envoy_quic_dispatcher_.Shutdown();
+ }
+ 
++// A draining dispatcher (not accepting) forwards packets for unknown connections, but a
++// connection it closed itself is in its time-wait list and must stay with the time-wait manager,
++// which re-sends the stored CONNECTION_CLOSE. Forwarding it would make the hot restart child,
++// which never knew the connection, answer with a stateless reset.
++TEST_P(EnvoyQuicDispatcherTest, ProcessPacketHandlesTimeWaitConnectionLocallyWhenNotAccepting) {
++  EnvoyQuicClock clock(*dispatcher_);
++  PreparedFilterChainMocks mocks(*this);
++  quic::QuicSocketAddress self_addr = envoyIpAddressToQuicSocketAddress(
++      listen_socket_->connectionInfoProvider().localAddress()->ip());
++  quic::QuicSocketAddress peer_addr(version_ == Network::Address::IpVersion::v4
++                                        ? quic::QuicIpAddress::Loopback4()
++                                        : quic::QuicIpAddress::Loopback6(),
++                                    54321);
++  std::vector<std::unique_ptr<quic::QuicReceivedPacket>> chlo_packets =
++      quic::test::GetFirstFlightOfPackets(quic_version_, quic_config_, connection_id_);
++  for (const auto& packet : chlo_packets) {
++    auto wrapped_packet = wrapPacket(*encryptPacket(*packet), clock);
++    EXPECT_TRUE(envoy_quic_dispatcher_.processPacket(self_addr, peer_addr, *wrapped_packet));
++  }
++  envoy_quic_dispatcher_.ProcessBufferedChlos(kNumSessionsToCreatePerLoopForTests);
++  ASSERT_EQ(1u, envoy_quic_dispatcher_.NumSessions());
++
++  // Close the connection ourselves: its ID moves to the time-wait list with a CONNECTION_CLOSE.
++  quic::QuicSession* session = const_cast<quic::QuicSession*>(
++      quic::test::QuicDispatcherPeer::FindSession(&envoy_quic_dispatcher_, connection_id_));
++  ASSERT_NE(session, nullptr);
++  session->connection()->CloseConnection(
++      quic::QUIC_NO_ERROR, "closed by test",
++      quic::ConnectionCloseBehavior::SEND_CONNECTION_CLOSE_PACKET);
++  quic::QuicTimeWaitListManager* time_wait_list_manager =
++      quic::test::QuicDispatcherPeer::GetTimeWaitListManager(&envoy_quic_dispatcher_);
++  ASSERT_TRUE(time_wait_list_manager->IsConnectionIdInTimeWait(connection_id_));
++
++  envoy_quic_dispatcher_.StopAcceptingNewConnections();
++  // A late packet for the closed connection is handled here (not reported as non-dispatched).
++  auto packet = wrapPacket(*testEncryptedPacket(quic_version_, connection_id_, "hello"), clock);
++  EXPECT_TRUE(envoy_quic_dispatcher_.processPacket(self_addr, peer_addr, *packet));
++  // A packet for a connection this dispatcher never had is still forwarded.
++  const quic::QuicConnectionId unknown_id = quic::test::TestConnectionId(4242);
++  auto unknown_packet = wrapPacket(*testEncryptedPacket(quic_version_, unknown_id, "hello"), clock);
++  EXPECT_FALSE(envoy_quic_dispatcher_.processPacket(self_addr, peer_addr, *unknown_packet));
++  envoy_quic_dispatcher_.Shutdown();
++}
++
++// The time-wait carve-out is behind a runtime guard; without it every unknown connection ID is
++// forwarded, time-wait or not.
++TEST_P(EnvoyQuicDispatcherTest, ProcessPacketForwardsTimeWaitConnectionWhenGuardDisabled) {
++  TestScopedRuntime scoped_runtime;
++  scoped_runtime.mergeValues(
++      {{"envoy.reloadable_features.quic_hot_restart_time_wait_before_forward", "false"}});
++  EnvoyQuicClock clock(*dispatcher_);
++  PreparedFilterChainMocks mocks(*this);
++  quic::QuicSocketAddress self_addr = envoyIpAddressToQuicSocketAddress(
++      listen_socket_->connectionInfoProvider().localAddress()->ip());
++  quic::QuicSocketAddress peer_addr(version_ == Network::Address::IpVersion::v4
++                                        ? quic::QuicIpAddress::Loopback4()
++                                        : quic::QuicIpAddress::Loopback6(),
++                                    54321);
++  std::vector<std::unique_ptr<quic::QuicReceivedPacket>> chlo_packets =
++      quic::test::GetFirstFlightOfPackets(quic_version_, quic_config_, connection_id_);
++  for (const auto& packet : chlo_packets) {
++    auto wrapped_packet = wrapPacket(*encryptPacket(*packet), clock);
++    EXPECT_TRUE(envoy_quic_dispatcher_.processPacket(self_addr, peer_addr, *wrapped_packet));
++  }
++  envoy_quic_dispatcher_.ProcessBufferedChlos(kNumSessionsToCreatePerLoopForTests);
++  quic::QuicSession* session = const_cast<quic::QuicSession*>(
++      quic::test::QuicDispatcherPeer::FindSession(&envoy_quic_dispatcher_, connection_id_));
++  ASSERT_NE(session, nullptr);
++  session->connection()->CloseConnection(
++      quic::QUIC_NO_ERROR, "closed by test",
++      quic::ConnectionCloseBehavior::SEND_CONNECTION_CLOSE_PACKET);
++  envoy_quic_dispatcher_.StopAcceptingNewConnections();
++  auto packet = wrapPacket(*testEncryptedPacket(quic_version_, connection_id_, "hello"), clock);
++  EXPECT_FALSE(envoy_quic_dispatcher_.processPacket(self_addr, peer_addr, *packet));
++  envoy_quic_dispatcher_.Shutdown();
++}
++
+ TEST_P(EnvoyQuicDispatcherTest, CloseWithGivenFilterChain) {
+   Network::MockFilterChainManager filter_chain_manager;
+   std::shared_ptr<Network::MockReadFilter> read_filter(new Network::MockReadFilter());

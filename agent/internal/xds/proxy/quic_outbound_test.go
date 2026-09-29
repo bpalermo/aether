@@ -2,14 +2,18 @@ package proxy
 
 import (
 	"testing"
+	"time"
 
 	"aethermesh.dev/agent/internal/xds/config"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	quicv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -23,6 +27,34 @@ func TestSourceSAKeyFromSpiffeID(t *testing.T) {
 
 func TestQUICClusterName(t *testing.T) {
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", QUICClusterName("demo/echo", "aether.internal", "demo/source-a"))
+}
+
+// TestParseQUICClusterName pins the inverse the on-demand twin path validates
+// with (issue #1020): it accepts exactly what QUICClusterName produces.
+func TestParseQUICClusterName(t *testing.T) {
+	name := QUICClusterName("demo/echo", "aether.internal", "demo/source-a")
+	svc, src, ok := ParseQUICClusterName(name, "aether.internal")
+	require.True(t, ok)
+	assert.Equal(t, "demo/echo", svc)
+	assert.Equal(t, "demo/source-a", src)
+	assert.True(t, IsQUICClusterName(name))
+	assert.False(t, IsQUICClusterName("echo.demo.aether.internal"))
+
+	for _, bad := range []string{
+		"echo.demo.aether.internal@demo/source-a",           // no prefix
+		"quic:echo.demo.aether.internal",                    // no source
+		"quic:echo.demo.aether.internal:8080@demo/source-a", // a port: never produced
+		"quic:echo.demo.example.com@demo/source-a",          // foreign domain
+		"quic:a.echo.demo.aether.internal@demo/source-a",    // extra label
+		"quic:echo.demo.aether.internal@source-a",           // source not <ns>/<sa>
+		"quic:echo.demo.aether.internal@demo/",              // empty sa
+		"quic:echo.demo.aether.internal@/source-a",          // empty ns
+		"quic:echo.demo.aether.internal@demo/source-a/x",    // extra segment
+		"quic:echo.demo.aether.internal@demo/a@b",           // a second @
+	} {
+		_, _, ok := ParseQUICClusterName(bad, "aether.internal")
+		assert.False(t, ok, bad)
+	}
 }
 
 // TestQUICAltStatName pins the per-source stats key (aether#960).
@@ -41,7 +73,8 @@ func TestQUICServerName(t *testing.T) {
 }
 
 // TestQUICClusterFrom pins the per-source HTTP/3 cluster's shape (038 Phase 4b):
-// a clone of the h2 base (same EDS resource, subsets, outlier detection),
+// a clone of the h2 base (same endpoints via its own EDS name, subsets,
+// outlier detection),
 // renamed, HTTP/3 protocol options, and a QuicUpstreamTransport that names the
 // SOURCE's SVID statically, pins the destination SAN, carries the SNI it is given,
 // offers only h3 and sets MaxSessionKeys: 0 (R4 on the client side).
@@ -49,21 +82,35 @@ func TestQUICClusterFrom(t *testing.T) {
 	base := NewServiceCluster("echo.demo.aether.internal", "demo/echo", "demo/echo", []string{"zone"})
 	q := QUICClusterFrom(base, "quic:echo.demo.aether.internal@demo/source-a",
 		"spiffe://aether.internal/ns/demo/sa/source-a", "spiffe://aether.internal",
-		[]string{"spiffe://aether.internal/ns/demo/sa/echo"}, QUICServerName("8080", "echo.demo.aether.internal"))
+		[]string{"spiffe://aether.internal/ns/demo/sa/echo"}, QUICServerName("8080", "echo.demo.aether.internal"), 0)
 
 	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", q.GetName())
 	assert.Equal(t, "demo/echo@demo/source-a", q.GetAltStatName(), "a twin must NOT share the h2 cluster's stat tree (aether#960)")
 	assert.Equal(t, "demo/echo", base.GetAltStatName(), "the base keeps its own")
-	assert.Equal(t, "demo/echo", q.GetEdsClusterConfig().GetServiceName(), "the same EDS resource as the h2 twin: no second load assignment")
+	assert.Equal(t, "quic:echo.demo.aether.internal@demo/source-a", q.GetEdsClusterConfig().GetServiceName(),
+		"the twin's OWN EDS resource: sharing the base's name is deduplicated by Envoy's delta WatchMap and a late twin warms for 15 s (aether#1008)")
+	assert.Equal(t, "demo/echo", base.GetEdsClusterConfig().GetServiceName(), "the base keeps the bare-service EDS name")
+	assert.True(t, proto.Equal(base.GetEdsClusterConfig().GetEdsConfig(), q.GetEdsClusterConfig().GetEdsConfig()), "same ads: {} source: the fix is the name, not a second stream")
 	assert.Equal(t, clusterv3.Cluster_EDS, q.GetType())
 	assert.NotNil(t, q.GetLbSubsetConfig(), "subset config cloned")
 	assert.NotNil(t, q.GetOutlierDetection(), "outlier detection cloned")
 	assert.Equal(t, "echo.demo.aether.internal", base.GetName(), "the base must not be mutated")
 	assert.Nil(t, base.GetTransportSocket())
+	assert.False(t, q.GetConnectionPoolPerDownstreamConnection(), "a twin carries one identity: per-downstream pools only multiply QUIC connections (aether#1021)")
+	pooled := proto.Clone(base).(*clusterv3.Cluster)
+	pooled.ConnectionPoolPerDownstreamConnection = true
+	assert.False(t, QUICClusterFrom(pooled, "quic:x@demo/source-a", "spiffe://aether.internal/ns/demo/sa/source-a", "spiffe://aether.internal", nil, "8080.x", 0).GetConnectionPoolPerDownstreamConnection(),
+		"the twin forces the option off even if the h2 base ever sets it again")
 
 	po := &httpv3.HttpProtocolOptions{}
 	require.NoError(t, q.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey].UnmarshalTo(po))
 	assert.NotNil(t, po.GetExplicitHttpConfig().GetHttp3ProtocolOptions(), "explicit HTTP/3")
+	assert.Equal(t, config.DefaultQUICTwinIdleTimeout, po.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration(),
+		"a zero idle timeout means the twin default, not the h2 30 s (aether#1054)")
+	custom := QUICClusterFrom(base, "quic:y@demo/source-a", "spiffe://aether.internal/ns/demo/sa/source-a", "spiffe://aether.internal", nil, "8080.y", 5*time.Second)
+	cpo := &httpv3.HttpProtocolOptions{}
+	require.NoError(t, custom.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey].UnmarshalTo(cpo))
+	assert.Equal(t, 5*time.Second, cpo.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration(), "the caller's idle timeout reaches the twin")
 
 	require.Equal(t, "envoy.transport_sockets.quic", q.GetTransportSocket().GetName())
 	assert.Nil(t, q.GetTransportSocketMatcher(), "no per-connection selection on QUIC: the identity is the cluster's")
@@ -139,4 +186,51 @@ func TestApplyQUICClusterSelection(t *testing.T) {
 	_, _, sel := QUICSelectionArms(gvh.GetRoutes()[0])
 	assert.True(t, sel, "/api (single backendRef = parent) must carry the selection")
 	assert.Equal(t, other, gvh.GetRoutes()[1].GetRoute().GetCluster(), "/elsewhere keeps its own cluster")
+}
+
+// TestLoadAssignmentAlias pins the twin's load assignment (aether#1008): the
+// base's, byte for byte, under the twin's name. Every field of the base is
+// populated so a field the copy forgets shows up as a difference, and the
+// descriptor's field set is pinned so a NEW upstream field fails here instead
+// of silently vanishing from every twin.
+func TestLoadAssignmentAlias(t *testing.T) {
+	base := &endpointv3.ClusterLoadAssignment{
+		ClusterName: "demo/echo",
+		Endpoints: []*endpointv3.LocalityLbEndpoints{{
+			Locality: &corev3.Locality{Region: "r1", Zone: "z1"},
+			LbEndpoints: []*endpointv3.LbEndpoint{{
+				HealthStatus: corev3.HealthStatus_DRAINING,
+				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{Endpoint: &endpointv3.Endpoint{
+					Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
+						Address: "10.0.0.1", PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: 18008},
+					}}},
+				}},
+			}},
+		}},
+		NamedEndpoints: map[string]*endpointv3.Endpoint{"n": {Hostname: "h"}},
+		Policy:         &endpointv3.ClusterLoadAssignment_Policy{OverprovisioningFactor: wrapperspb.UInt32(140)},
+	}
+	const twin = "quic:echo.demo.aether.internal@demo/source-a"
+
+	got := LoadAssignmentAlias(base, twin)
+	require.Equal(t, twin, got.GetClusterName())
+	assert.Equal(t, "demo/echo", base.GetClusterName(), "the base must not be renamed")
+	renamed, _ := proto.Clone(got).(*endpointv3.ClusterLoadAssignment)
+	renamed.ClusterName = base.GetClusterName()
+	assert.True(t, proto.Equal(base, renamed), "the twin's CLA is the base's in every field but the name")
+
+	a, err := proto.MarshalOptions{Deterministic: true}.Marshal(LoadAssignmentAlias(base, twin))
+	require.NoError(t, err)
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(LoadAssignmentAlias(base, twin))
+	require.NoError(t, err)
+	assert.Equal(t, a, b, "identical inputs must marshal to identical bytes (delta-xDS hashing)")
+
+	var fields []string
+	fds := base.ProtoReflect().Descriptor().Fields()
+	for i := range fds.Len() {
+		fields = append(fields, string(fds.Get(i).Name()))
+	}
+	assert.ElementsMatch(t, []string{"cluster_name", "endpoints", "named_endpoints", "policy"}, fields,
+		"ClusterLoadAssignment grew a field: LoadAssignmentAlias must carry it")
+	assert.Nil(t, LoadAssignmentAlias(nil, twin))
 }

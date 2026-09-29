@@ -25,9 +25,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
+	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
@@ -42,6 +44,7 @@ import (
 	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
 	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -178,6 +181,16 @@ func TestEnvoyValidate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SAN-pin check %s: %v", b.name, err)
 		}
+		// No cluster but a service's default may subscribe to an EDS name that
+		// is not its own (aether#842/#1008/#1013): a later-added sharer is
+		// deduplicated by the delta-ADS WatchMap into 15 s of warming.
+		sharing, err := ClustersSharingServiceEDSName(data)
+		if err != nil {
+			t.Fatalf("EDS-name check %s: %v", b.name, err)
+		}
+		if len(sharing) > 0 {
+			t.Errorf("%s: clusters not subscribed to an EDS name of their own: %v", b.name, sharing)
+		}
 		if len(unpinned) > 0 {
 			t.Errorf("%s: upstream TLS contexts with no match_typed_subject_alt_names: %v\n"+
 				"an unpinned context authenticates ANY workload in the trust domain, not the service asked for", b.name, unpinned)
@@ -216,6 +229,26 @@ func TestEnvoyValidate(t *testing.T) {
 		}
 		if len(cached) > 0 {
 			t.Errorf("%s: QUIC upstream clusters without explicit max_session_keys:0: %v (038 R4)", b.name, cached)
+		}
+		// aether#1023: every L4 cluster reports under its OWN kind-prefixed
+		// stat key, shared with no other cluster. Envoy accepts any
+		// alt_stat_name, so only the bytes can say.
+		badKeys, _, err := L4StatKeyViolations(data)
+		if err != nil {
+			t.Fatalf("L4 stat-key check %s: %v", b.name, err)
+		}
+		if len(badKeys) > 0 {
+			t.Errorf("%s: L4 clusters not reporting under their own tcp_/udp_ key: %v\n"+
+				"a shared key merges L4 kinds (and the HTTP cluster) into one aether_cluster series, and a verify_san tick can no longer be attributed (#1007)", b.name, badKeys)
+		}
+		// aether#1023: every tcp_proxy chain on a capture listener carries the
+		// connection-level L4 access log.
+		unlogged, _, err := CaptureTCPChainsWithoutL4AccessLog(data)
+		if err != nil {
+			t.Fatalf("L4 access-log check %s: %v", b.name, err)
+		}
+		if len(unlogged) > 0 {
+			t.Errorf("%s: capture L4 chains without the %s access log: %v", b.name, proxy.L4AccessLogName, unlogged)
 		}
 	}
 
@@ -925,6 +958,18 @@ func TestNodeBootstrapCarriesTheQUICInbound(t *testing.T) {
 	if quic.GetUdpListenerConfig().GetQuicOptions() == nil {
 		t.Errorf("QUIC inbound has no udp_listener_config.quic_options; without it this is a plain UDP listener")
 	}
+	// aether#1021: GRO on the receive path (Envoy defaults it OFF for listener
+	// sockets; measured -11 % destination CPU per request), and the send path
+	// left to Envoy's automatic writer, which is the GSO batch writer wherever
+	// the kernel supports UDP_SEGMENT. A writer named here would either drop
+	// GSO (the default writer) or drop the kernel-support check (the explicit
+	// GSO writer).
+	if !quic.GetUdpListenerConfig().GetDownstreamSocketConfig().GetPreferGro().GetValue() {
+		t.Errorf("QUIC inbound does not set udp_listener_config.downstream_socket_config.prefer_gro: true (aether#1021)")
+	}
+	if w := quic.GetUdpListenerConfig().GetUdpPacketPacketWriterConfig(); w != nil {
+		t.Errorf("QUIC inbound pins udp_packet_packet_writer_config %q; leave it unset so Envoy picks GSO when the kernel supports it (aether#1021)", w.GetName())
+	}
 	var mtlsChains int
 	for _, fc := range quic.GetFilterChains() {
 		ctx, err := downstreamTLSContextOf(fc.GetTransportSocket())
@@ -1014,6 +1059,97 @@ func TestQUICUpstreamSNIIsAHostname(t *testing.T) {
 	}
 }
 
+// TestQUICUpstreamsDoNotPoolPerDownstreamConnection: no `quic:` twin may set
+// connection_pool_per_downstream_connection (aether#1021). Over the generated
+// fixture bytes; the anti-vacuity half turns it on for every twin and requires
+// each one to be flagged.
+func TestQUICUpstreamsDoNotPoolPerDownstreamConnection(t *testing.T) {
+	data, err := QUICOutboundBootstrapJSON()
+	if err != nil {
+		t.Fatalf("QUICOutboundBootstrapJSON: %v", err)
+	}
+	bad, err := QUICUpstreamsPoolingPerDownstream(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) > 0 {
+		t.Errorf("quic: clusters pooling per downstream connection (one QUIC connection per app connection, aether#1021): %v", bad)
+	}
+
+	bs := &bootstrapv3.Bootstrap{}
+	if err := protojson.Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	var twins int
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if strings.HasPrefix(c.GetName(), "quic:") {
+			twins++
+			c.ConnectionPoolPerDownstreamConnection = true
+		}
+	}
+	if twins < 2 {
+		t.Fatalf("fixture carries %d quic: twins, want >= 2", twins)
+	}
+	flipped, err := protojson.Marshal(bs)
+	if err != nil {
+		t.Fatalf("marshal rewritten bootstrap: %v", err)
+	}
+	flagged, err := QUICUpstreamsPoolingPerDownstream(flipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flagged) != twins {
+		t.Errorf("per-downstream pooling was not reported for every twin: flagged %v of %d", flagged, twins)
+	}
+}
+
+// TestQUICUpstreamsIdleOutBeforeAHotRestartParentExits (aether#1054): every
+// `quic:` twin carries the h3 idle timeout (config.DefaultQUICTwinIdleTimeout,
+// 8s) so an idle source h3 connection is closed before the destination's
+// hot-restart parent exits and its packets start drawing stateless resets;
+// every other cluster that carries HTTP protocol options keeps the 30s
+// config.UpstreamIdleTimeout. Over the generated fixture bytes that Envoy
+// validates, so the value checked is the value Envoy accepted.
+func TestQUICUpstreamsIdleOutBeforeAHotRestartParentExits(t *testing.T) {
+	data, err := QUICOutboundBootstrapJSON()
+	if err != nil {
+		t.Fatalf("QUICOutboundBootstrapJSON: %v", err)
+	}
+	bs := &bootstrapv3.Bootstrap{}
+	if err := protojson.Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	var twins, others int
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		raw, ok := c.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey]
+		if !ok {
+			continue
+		}
+		po := &httpv3.HttpProtocolOptions{}
+		if err := raw.UnmarshalTo(po); err != nil {
+			t.Fatalf("%s: unmarshal protocol options: %v", c.GetName(), err)
+		}
+		idle := po.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration()
+		if strings.HasPrefix(c.GetName(), "quic:") {
+			twins++
+			if idle != config.DefaultQUICTwinIdleTimeout {
+				t.Errorf("%s: h3 twin idle timeout = %v, want %v", c.GetName(), idle, config.DefaultQUICTwinIdleTimeout)
+			}
+			continue
+		}
+		others++
+		if idle != config.UpstreamIdleTimeout {
+			t.Errorf("%s: idle timeout = %v, want %v (only quic: twins are shortened)", c.GetName(), idle, config.UpstreamIdleTimeout)
+		}
+	}
+	if twins < 2 {
+		t.Fatalf("fixture carries %d quic: twins, want >= 2", twins)
+	}
+	if others < 1 {
+		t.Fatalf("fixture carries no non-twin cluster with HTTP protocol options: the 30s half is vacuous")
+	}
+}
+
 // TestQUICUpstreamsHaveTheirOwnStatsKey: no `quic:` twin may report into another
 // cluster's stats tree (aether#960). Over the generated fixture bytes; the
 // fixture's twins are clones of the h2 cluster, which is exactly the shape
@@ -1029,6 +1165,143 @@ func TestQUICUpstreamsHaveTheirOwnStatsKey(t *testing.T) {
 	}
 	if len(bad) > 0 {
 		t.Errorf("quic: clusters sharing a stats key with another cluster: %v", bad)
+	}
+}
+
+// TestQUICUpstreamsHaveTheirOwnEDSName: no `quic:` twin may subscribe to
+// another cluster's EDS resource (aether#1008). Over the generated fixture
+// bytes; the fixture carries the h2 base on the bare-service EDS name, which
+// is exactly the name the twins used to share. The anti-vacuity half checks
+// the helper DOES flag that shape.
+func TestQUICUpstreamsHaveTheirOwnEDSName(t *testing.T) {
+	data, err := QUICOutboundBootstrapJSON()
+	if err != nil {
+		t.Fatalf("QUICOutboundBootstrapJSON: %v", err)
+	}
+	bad, err := QUICUpstreamsSharingEDSName(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) > 0 {
+		t.Errorf("quic: clusters sharing an EDS resource name with another cluster: %v", bad)
+	}
+
+	// Anti-vacuity: rewrite every twin back to the base's EDS name (the
+	// pre-#1008 shape) and require the helper to report each one.
+	bs := &bootstrapv3.Bootstrap{}
+	if err := protojson.Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	var twins int
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if strings.HasPrefix(c.GetName(), "quic:") {
+			twins++
+			if c.GetEdsClusterConfig() == nil {
+				t.Fatalf("twin %s has no eds_cluster_config", c.GetName())
+			}
+			c.EdsClusterConfig.ServiceName = quicDestSvc
+		}
+	}
+	if twins < 2 {
+		t.Fatalf("fixture carries %d quic: twins, want >= 2", twins)
+	}
+	shared, err := protojson.Marshal(bs)
+	if err != nil {
+		t.Fatalf("marshal rewritten bootstrap: %v", err)
+	}
+	flagged, err := QUICUpstreamsSharingEDSName(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flagged) != twins {
+		t.Errorf("the shared-EDS-name shape was not reported for every twin: flagged %v of %d", flagged, twins)
+	}
+}
+
+// TestNoNonDefaultClusterSharesTheServiceEDSName is the aether#1013 gate over
+// the fixtures that carry the cluster kinds that used to share the default
+// cluster's bare-service EDS name: the port alias (quic_outbound, next to the
+// default cluster and the twins) and the TCP floors (capture_tcproute,
+// capture_tlsroute). The fixtures must pass ClustersSharingServiceEDSName; the
+// anti-vacuity half rewrites every alias, floor and twin back to the bare
+// service name (its alt_stat_name, which is the bare key for all three --
+// with the twin's "@<ns>/<sa>" suffix stripped) and requires each one to be
+// flagged.
+func TestNoNonDefaultClusterSharesTheServiceEDSName(t *testing.T) {
+	for _, b := range []struct {
+		name string
+		fn   func() ([]byte, error)
+		// kinds is the minimum count of each rewritten kind the fixture must
+		// carry, so the check is not vacuous.
+		kinds map[string]int
+	}{
+		{"quic_outbound_bootstrap.json", QUICOutboundBootstrapJSON, map[string]int{"alias": 1, "quic": 2}},
+		{"capture_tcproute_bootstrap.json", CaptureTCPRouteBootstrapJSON, map[string]int{"tcp": 2}},
+		{"capture_tlsroute_bootstrap.json", CaptureTLSRouteBootstrapJSON, map[string]int{"tcp": 3}},
+	} {
+		t.Run(b.name, func(t *testing.T) {
+			data, err := b.fn()
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			bad, err := ClustersSharingServiceEDSName(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bad) > 0 {
+				t.Errorf("clusters not subscribed to an EDS name of their own: %v", bad)
+			}
+
+			bs := &bootstrapv3.Bootstrap{}
+			if err := protojson.Unmarshal(data, bs); err != nil {
+				t.Fatalf("unmarshal bootstrap: %v", err)
+			}
+			seen := map[string]int{}
+			var rewritten []string
+			for _, c := range bs.GetStaticResources().GetClusters() {
+				var kind string
+				switch {
+				case strings.HasPrefix(c.GetName(), "quic:"):
+					kind = "quic"
+				case strings.HasPrefix(c.GetName(), "tcp:"):
+					kind = "tcp"
+				case c.GetType() == clusterv3.Cluster_EDS && strings.Contains(c.GetName(), ":"):
+					kind = "alias"
+				default:
+					continue
+				}
+				bare, _, _ := strings.Cut(c.GetAltStatName(), "@")
+				// An L4 cluster's stat key carries its kind (aether#1023):
+				// tcp_<ns>/<svc>[_<port>]. The bare service key is between.
+				if rest, ok := strings.CutPrefix(bare, proxy.L4StatKeyTCPPrefix); ok {
+					bare, _, _ = strings.Cut(rest, "_")
+				}
+				if bare == "" || c.GetEdsClusterConfig() == nil {
+					t.Fatalf("%s %s has no bare alt_stat_name or no eds_cluster_config", kind, c.GetName())
+				}
+				seen[kind]++
+				c.EdsClusterConfig.ServiceName = bare
+				rewritten = append(rewritten, c.GetName())
+			}
+			for kind, want := range b.kinds {
+				if seen[kind] < want {
+					t.Fatalf("fixture carries %d %s clusters, want >= %d: the check would be vacuous", seen[kind], kind, want)
+				}
+			}
+			shared, err := protojson.Marshal(bs)
+			if err != nil {
+				t.Fatalf("marshal rewritten bootstrap: %v", err)
+			}
+			flagged, err := ClustersSharingServiceEDSName(shared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range rewritten {
+				if !slices.Contains(flagged, name) {
+					t.Errorf("the bare-service-EDS shape of %s was not reported (flagged %v)", name, flagged)
+				}
+			}
+		})
 	}
 }
 
@@ -1082,6 +1355,19 @@ func TestQUICOutboundFixtureCarriesTheSelection(t *testing.T) {
 							if arms[id] != name {
 								t.Errorf("arm %s = %q, want %q", id, arms[id], name)
 							}
+						}
+						// Demand-scoped twins (aether#1020): an unobserved
+						// source keeps its arm, and its twin is NOT built.
+						for id, name := range QUICOutboundUnobservedArms() {
+							if arms[id] != name {
+								t.Errorf("unobserved arm %s = %q, want %q", id, arms[id], name)
+							}
+							if quicClusters[name] {
+								t.Errorf("twin %q for an unobserved pair is built; it must be fetched on demand", name)
+							}
+						}
+						if n := len(hcm.GetHttpFilters()); n < 2 || hcm.GetHttpFilters()[0].GetName() != "envoy.filters.http.on_demand" {
+							t.Errorf("the selecting HCM must run the on_demand filter first (an arm to an unbuilt twin 503s without it): %v", hcm.GetHttpFilters())
 						}
 						if r.GetRoute().GetEarlyDataPolicy() != nil {
 							t.Errorf("route to a quic: cluster sets early_data_policy (038 R4)")

@@ -325,6 +325,9 @@ func TestNoNetnsPathInServiceClusterBytes(t *testing.T) {
 		ServiceAccount:   "svc-5",
 		NetworkNamespace: "/var/run/netns/cni-c",
 	}, "aether.internal"))
+	// svc-5 has dialled svc-2, so the snapshot carries its quic: twin
+	// (demand-scoped, aether#1020) -- the one sanctioned exception below.
+	observeQUIC(t, c, "aether-test/svc-2", "aether-test/svc-5")
 
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
@@ -357,7 +360,7 @@ func TestNoNetnsPathInServiceClusterBytes(t *testing.T) {
 		// (quic:<authority>@<ns>/<sa>, proposal 038 Phase 4b) presents ITS OWN
 		// source's SVID statically -- QuicUpstreamTransport rejects a
 		// certificate selector (Q2a), so the identity is the cluster's. Twins
-		// exist for every service since the allow-list was removed; each may
+		// exist for every eligible service (#979) once a pair has dialled; each may
 		// name exactly the source in its own name and nothing else (no netns,
 		// no other workload).
 		_, ownSource, isTwin := strings.Cut(name, "@")

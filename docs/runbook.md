@@ -100,6 +100,59 @@ And a clean run is not evidence of absence: the detector only reports
 interleavings a test actually produced, so a race between two goroutines no test
 runs concurrently stays invisible no matter how often you run it.
 
+### CI: external repository fetches (#1001)
+
+BuildBuddy caches **actions**, not **repository fetches**. Every external
+repository a CI job needs — each Go module behind `gazelle++go_deps+…`
+(`fetch_repo` → `proxy.golang.org`), every release asset from github.com — comes
+from Bazel's repository cache on the runner or from the network. Two mechanisms
+keep a flaky upstream from turning a job red:
+
+- **A persisted repository cache.** `bazel-contrib/setup-bazel` restores
+  `~/.cache/bazel-repo` (Bazel 9 also keeps its repo *contents* cache under it,
+  `contents/`, which is what makes a `go_repository` a local hit instead of a
+  `fetch_repo` run). The key hashes `MODULE.bazel`, `MODULE.bazel.lock`, `go.mod`
+  and `go.sum`, so a Go dependency bump gets a new key and the newest older entry
+  is restored as the fallback. The root and `//proxy` workspaces are in separate
+  namespaces (`cache-version: root-1` / `proxy-1`). **Exactly one job per
+  workflow saves** — `diff` in `ci.yaml` and `main.yaml` (the `main` entry is the
+  one every PR falls back to), the `test`/`build-push` matrix per arch for the
+  proxy — because its warm-up fetches for all of `//...`; every other job sets
+  `cache-save: false`. The first job to finish used to save, so a job that
+  fetched a handful of repositories (or, before the namespaces, a *proxy* job)
+  could write the entry every later job restored as an exact hit and never
+  re-saved. That is how the 2026-09-27 `netns` failure fetched
+  `googleapis/api` from the network with a 1.9 GB cache freshly restored.
+- **A retried warm-up.** Each Bazel job's first Bazel step is
+  `scripts/ci-bazel-warmup.sh <flags> <targets>`: `bazel build --nobuild`
+  (loading + analysis, which is where the fetches happen), retried up to 3 times
+  with a 20 s / 40 s backoff **only when the output shows a repository-fetch
+  error**. A broken BUILD file fails on the first attempt. The warm-up clears the
+  remote executor, cache and BES backend, so it needs no BuildBuddy key and never
+  shows up as an invocation; the real steps keep `--config=ci` / `--config=remote`
+  unchanged. `scripts/check-ci-bazel-warmup.sh` (in the `shell` job) pins that
+  contract with a stub bazel.
+
+Reading a red job:
+
+| The log shows | What it means | Do |
+|---|---|---|
+| `::warning::bazel warm-up attempt 1/3 hit a repository-fetch error`, then success | the retry absorbed a blip | nothing |
+| `::error::bazel warm-up: repository fetch failed on all 3 attempts` | the upstream was down for the whole ~1 min of backoff | **re-run the job** once the upstream answers (`gh run rerun <id> --failed`); a re-run restores the same cache, so it only re-fetches what failed |
+| a `fetch_repo` / `Error downloading` failure in a step **after** the warm-up | that step needed a repository the warm-up's targets did not cover (e.g. a `bazel run` of a tool, `bazel-diff` at the base revision, which falls back to a full run on failure) | re-run; if it repeats, add the target to that job's warm-up |
+| `bazel warm-up failed (exit N) with no repository-fetch error` | a real analysis failure | fix the change; a re-run will not help |
+
+A plain re-run is still the answer for anything the warm-up does not cover: the
+Go tool's own downloads in `deps-audit` (`go list -m all` talks to
+`proxy.golang.org` directly, outside Bazel), docker/kind image pulls in the e2e
+jobs, and a cold namespace (the first run after a `cache-version` bump, or after
+GitHub evicted the entry: the repository has a 10 GB cache budget and each entry
+is ~2 GB).
+
+To check what a job restored, open its **Setup Bazel** step: `Cache hit for:
+setup-bazel-root-1-linux-x64-repository-<hash>` is an exact hit;
+`Successfully restored cache from …` with a different hash is the fallback.
+
 ---
 
 ## 4. Format & lint
@@ -284,13 +337,13 @@ CRDS_VERSION=<X.Y.Z>-$COMMIT
 AETHER_VERSION=<X.Y.Z>-$COMMIT
 
 # 1) CRDs first
-helm upgrade --install aether-crds oci://ghcr.io/bpalermo/aether/charts/crds \
+helm upgrade --install aether-crds oci://quay.io/aethermesh/chart-crds \
   --version "$CRDS_VERSION"
 
 # 2) then the system. Prefer this commit-pinned chart tag over the bare
 #    `--version <X.Y.Z>`: the bare tag is mutable and re-pushed by every publish,
 #    the commit tag never is (#692).
-helm upgrade --install aether oci://ghcr.io/bpalermo/aether/charts/aether \
+helm upgrade --install aether oci://quay.io/aethermesh/chart-aether \
   --version "$AETHER_VERSION" -n aether-system --create-namespace \
   --set clusterName=my-cluster --set meshDomain=aether.internal
 
@@ -430,12 +483,16 @@ log. A control's `MISSING` lines are expected and never reach `verify.log` or
 the job summary. If the control fails, the gate still runs, and the run files
 (or comments on) its own rolling issue, **publish-verify: the expected-red
 control did not go red**. Until that issue is fixed, a green gate proves
-nothing. Exit 2 (GHCR unreadable) is inconclusive, and it fails the run too.
+nothing. Exit 2 (registry unreadable) is inconclusive, and it fails the run too.
 Reproduce with `scripts/publish-verify-control.sh [<base>]`. The offline check,
 `scripts/check-publish-verify-control.sh`, runs in `ci`'s `shell` job. It drives
 the real verifier against a fake registry and shows the control rejects a
 verifier that stopped counting `MISSING`, an absence with no witness, a `MISSING` line
-naming another commit, and a stray `ok`.
+naming another commit, a stray `ok`, and a red reported against the wrong
+registry (every `MISSING` line must name the registry the control's tree names —
+proposal 040). Its fake registry, like `scripts/check-registry-lookup.sh`'s, accepts only the
+bearer token it issued and answers any other with a 401, so a verifier that
+sends the wrong value as the token goes red offline (#999).
 
 ### Where images and charts are published: one setting (proposal 040)
 
@@ -445,25 +502,98 @@ and from nowhere else:
 
 | reader | how |
 |---|---|
-| image pushes, chart pushes, chart template tests, e2e go_test defaults | `load("//bazel/img:registry.bzl", ...)` — `image_repository()`, `image_reference()`, `chart_registry_url()` |
+| image pushes, chart pushes, chart template tests, e2e go_test defaults | `load("//bazel/img:registry.bzl", ...)` — `image_repository()`, `image_reference()`, `chart_registry_url(<chart>)` |
 | the `//proxy` workspace (`oci_push`) | its byte-identical copy `proxy/bazel/registry.bzl` (it cannot load from the root module) |
-| `//bazel/proxy_pin` (the Envoy the validate gate runs) | `image_reference("proxy")` + `registry_token_url()` |
-| workflows | `scripts/image-registry.sh >> "$GITHUB_ENV"` after checkout → `IMAGE_REGISTRY_HOST`, `IMAGE_NAMESPACE`, `IMAGE_REGISTRY` (host/namespace), `PROXY_IMAGE` |
-| verifiers, e2e scripts | `scripts/image-registry.sh {prefix,host,repo <c>,ref <c>,chart-repo <c>}`; `scripts/registry-lib.sh` resolves its repository lists through it |
+| `//bazel/proxy_pin` (the Envoy the validate gate runs) | `proxy_pin_references()` + `registry_token_url()` |
+| workflows | `scripts/image-registry.sh >> "$GITHUB_ENV"` after checkout → `IMAGE_REGISTRY_HOST`, `IMAGE_NAMESPACE`, `IMAGE_REGISTRY` (host/namespace), `PROXY_IMAGE`, `IMAGE_SIGNATURE_LAYOUT` |
+| verifiers, e2e scripts | `scripts/image-registry.sh {prefix,host,repo <c>,ref <c>,chart-repo <c>,chart-ref <c>,signature-layout,proxy-pin-refs}`; `scripts/registry-lib.sh` resolves its repository lists through it |
 
-Today it says `ghcr.io` / `bpalermo/aether` (images `ghcr.io/bpalermo/aether/<component>`,
-the proxy `…/aether-proxy`, charts `…/charts/<chart>`). **Phase 2 of proposal 040
-flips it to `quay.io` / `aethermesh`** — images `quay.io/aethermesh/<component>`
-(the proxy becomes plain `proxy`), charts `quay.io/aethermesh/chart-<chart>` — by
-editing that one file (and its proxy copy), not the workflows. The install
-commands in this runbook and in `charts/README.md` name the ghcr coordinates on
-purpose and change in the same PR as the flip.
+It says **`quay.io` / `aethermesh`** since the phase-2 cut-over (proposal 040):
+images `quay.io/aethermesh/<component>` (the proxy is plain `proxy`), charts
+`quay.io/aethermesh/chart-<chart>`, signatures as OCI 1.1 referrers
+(`SIGNATURE_LAYOUT = "referrer"`). Before it: `ghcr.io/bpalermo/aether/<component>`,
+the proxy `…/aether-proxy`, charts `…/charts/<chart>`, signatures as cosign tags.
+The cut-over commit is the phase-2 PR's merge commit — the first whose
+`registry.bzl` says quay.io.
+
+**Charts are pushed with oras, not `helm push`.** `helm push` appends the
+chart's `name:` to its base and cannot name a flat `chart-<name>` repository;
+Quay has no nested repositories (and bare `prober` / `udsecho` would collide
+with those images). `chart_push` (`//bazel/helm:defs.bzl`) writes exactly the
+artifact `helm push` writes — the packaged `.tgz` as the
+`application/vnd.cncf.helm.chart.content.v1.tar+gzip` layer, `Chart.yaml` as the
+`application/vnd.cncf.helm.config.v1+json` config (`//tools/chartconfig`) — with
+the pinned oras (`//tools/oras`, v1.3.4, `version_test`) to
+`chart_registry_url(<chart>)`, tagged with the packaged version. publish.yaml
+runs `<chart>.push_images`, then `<chart>.chart_push` (and
+`aether_commit.chart_push` for the commit-suffixed tag). `helm pull
+oci://quay.io/aethermesh/chart-aether --version <v>` reads it like any
+helm-pushed chart (proved against a local registry: same layer digest, same
+config, `helm template` renders).
+
+**Credentials.** Every job that pushes or signs (`publish.yaml`'s `publish`,
+`proxy-release.yml`'s `build-push`, `manifest`, `sign`) declares
+`environment: release` and logs in to `$IMAGE_REGISTRY_HOST` with the Quay robot
+(`QUAY_USERNAME` / `QUAY_TOKEN`, secrets of the `release` environment only;
+deployment-branch policy `main`). `GITHUB_TOKEN` is no longer a registry
+credential; it stays for GitHub API calls (PRs, issues). The repositories are
+pre-created public in the org — the robot **cannot create repositories** (the
+quay-smoke gate), so a new component needs its repository created (public, robot
+write) before its first publish.
+
+**The sweep across the cut-over (the split rule).** `verify-published-artifacts.sh`
+reads `bazel/img/registry.bzl` **as of each push head it checks** (`git show
+<sha>:bazel/img/registry.bzl`), exactly as it reads each chart's version and the
+release-tag prefix: heads before the cut-over are checked on ghcr.io (charts
+`charts/<name>`, the `aether-proxy` override, a signature TAG), heads at or after
+it on quay.io (`chart-<name>`, flat names, a signature REFERRER — and nothing
+else: a fallback tag there, or a referrer plus a tag, is `MISSING`). No sha or
+date is typed anywhere; a commit older than `registry.bzl` itself (before #998)
+uses the file's first version, which phase 1 introduced with no behaviour change.
+A post-cut-over head whose artifacts exist only on ghcr.io is `MISSING`, never
+borrowed from the old registry. Each `commit` block of the output starts with a
+`registry <host>/<namespace>, signatures as <layout>` line saying which setting
+it used. The aether-proxy pin is looked up where **the pin** says (it moves with
+the next proxy release, not with the flip), in the layout of the newest
+`registry.bzl` under which that reference was `image_reference("proxy")`.
+
+**The aether-proxy pin during the cut-over.** The flip could not move the pin
+(it is data only `proxy-release.yml`'s bump-chart job writes), so right after the
+cut-over `charts/aether/values.yaml` still names the ghcr.io image. Every pin
+reader accepts `proxy_pin_references()` — `image_reference("proxy")` plus
+`PROXY_PIN_LEGACY_REFERENCES` — and the bump-chart rewrite
+(`proxy_pin_rewrite`, `scripts/proxy-pin-lib.sh`) finds the block by any of them
+and moves `repository:` together with `tag:` and `digest:`. The phase-2 merge
+itself triggers a proxy release (it touches `proxy-release.yml` and
+`proxy/bazel/registry.bzl`), whose bump-chart PR re-pins to
+`quay.io/aethermesh/proxy`.
+
+**Migrating a chart consumer.** Every chart took a **major** bump (aether
+`1.0.0`, and crds / prober / udsecho to `1.0.0`) because the default image
+repositories moved. Upgrade from the new coordinates with the values you run
+today — `helm get values <release> -n <ns> -o yaml > values.yaml`, then
+`helm upgrade <release> oci://quay.io/aethermesh/chart-<name> --version <v> -f
+values.yaml`; **never `--reuse-values`**, which pins the old chart's defaults.
+Anyone mirroring images and overriding `repository` by prefix must now mirror
+from `quay.io/aethermesh/<component>` and override each image's `repository`
+individually. Releases published before the cut-over stay on ghcr.io, untouched.
+
+**TODO — decommission ghcr (proposal 040 phase 4).** Once no supported release
+and no cluster references a ghcr.io coordinate: delete the sweep's ghcr branch
+(the first-version fallback and the `tag` default for a `registry.bzl` without
+`SIGNATURE_LAYOUT`), empty `PROXY_PIN_LEGACY_REFERENCES`, drop `GHCR_TOKEN` from
+`publish-verify.yaml` and `registry-lib.sh`, and shrink
+`check-registry-config.sh`'s legacy allow-list. Leave the ghcr.io packages in
+place, read-only: deleting them would break every historical pin.
 
 `scripts/check-registry-config.sh` (in `ci`'s and `proxy`'s `shell` jobs)
 keeps it one setting: the file parses, the proxy copy is identical, the
-aether-proxy pin in `charts/aether/values.yaml` names `image_reference("proxy")`,
-and no file outside its written-down allow-list (docs, the website, the two
-READMEs, the setting itself, the pin) spells the registry out.
+aether-proxy pin in `charts/aether/values.yaml` names one of
+`proxy_pin_references()` (a pre-cut-over one is reported as a notice), no file
+outside its written-down allow-list (docs, the website, the two READMEs, the
+setting itself, the pin) spells the current registry out, and no file outside
+its **legacy** allow-list (the setting's history note, the pin, proposals, this
+runbook's records, observability notes) spells a pre-cut-over coordinate out.
 `//bazel/img:registry_test` pins `image-registry.sh` against the Starlark helpers.
 
 **Registry library.** `scripts/registry-lib.sh` (was `ghcr-lib.sh`, which is now a
@@ -476,8 +606,12 @@ fetches the anonymous pull token from the registry's own endpoint (ghcr.io
 (`GET /v2/<repo>/referrers/<digest>`): quay.io serves it, ghcr.io answers 404 —
 which the library reads as "no referrers API", never as "no signatures".
 
-**Quay smoke (the phase-2 gate).** Before the flip, prove push + keyless sign +
-verify on quay.io with one throwaway image:
+**Quay smoke (the phase-2 gate).** Proves push + keyless sign + verify on
+quay.io with one throwaway image. It gated the flip (green: run 36345331611 — the
+robot pushes to a pre-created repository but cannot create one; cosign v3.1.2
+writes the signature as a referrer, no tag, on the index and every child;
+`verify_image_signatures` passes), and stays dispatchable for re-checking quay
+after a cosign or robot change:
 
 ```bash
 gh workflow run quay-smoke.yaml --ref main    # main only: the `release` environment holds the robot secrets
@@ -503,7 +637,7 @@ fallback tags) and leaves the repository. The run summary is a table:
 | signature layout (index) / (index + children) | `referrer`, `bundle` (`sha256-<hex>` fallback tag), `legacy` (`.sig`), or `both` (a referrer AND a tag — the sweep's double-write defect), from `registry_signature_layout_direct`. `mixed` in the second row = the children disagree with the index. This answers where cosign v3.1.2 puts a signature on quay and decides phase 2's verify path |
 | referrer artifactTypes | what the referrers API lists for the index (`application/vnd.dev.sigstore.bundle.v0.3+json` expected) |
 | verify (index + every child) | `verify_image_signatures` with identity `^https://github\.com/<repo>/\.github/workflows/quay-smoke\.yaml@refs/heads/main$` |
-| certificate SAN | `.optional.Subject` from `cosign verify` — the workflow ref, NOT the OIDC `sub` |
+| certificate SAN | the X.509 SAN URI of the signing certificate — the workflow ref, NOT the OIDC `sub` — read from the sigstore bundle `cosign download signature` returns (`verificationMaterial.certificate.rawBytes`, or the chain's leaf), decoded with openssl. cosign v3's `verify` JSON has no `optional` block, so there is nothing to read there. A SAN that cannot be read, or that does not match the verify identity, **fails the summary** |
 | OIDC token | the Actions token's `sub` (with `environment: release`: `repo:<owner>/<repo>:environment:release`) and `job_workflow_ref`; the token itself is masked and never printed |
 | cleanup | tags deleted with a robot `pull,push` token (`DELETE /v2/<repo>/manifests/<tag>`); a failure is a warning, not a red |
 
@@ -533,24 +667,28 @@ was `sigstore/cosign-installer` pinned by SHA (v4.1.2 → cosign v3.0.6).
 
 **Why only the module's CLI, not its signer plugin.** `rules_img_signer_cosign`
 also ships `sign-oci-artifact`, a signer plugin for rules_img's
-`signing_config` / `img deploy`. It stores signatures as **OCI 1.1 referrers**,
-and ghcr.io has no Referrers API (below) — everything here (sign, verify, the
-`publish-verify` sweep) reads cosign's `sha256-<hex>` tag. Signing stays an
-explicit `cosign sign` step after the pushes.
+`signing_config` / `img deploy`. Signing stays an explicit `cosign sign
+--recursive` step after the pushes, by digest, with the same cosign every
+verifier runs: that path is the one the quay-smoke gate measured on quay.io
+(referrer, no tag), and the plugin's layout there is unmeasured.
 
-**Layout.** ghcr.io does not implement the OCI Referrers API, so the signature
-lands in a tag in the image's own repository: cosign 3 writes the OCI 1.1
-fallback index `sha256-<hex>` (the bundle format — keyless v3 *requires*
-`--new-bundle-format`; `=false` is rejected), cosign 2 wrote `sha256-<hex>.sig`.
-Everything published before 2026-09-24 carries the legacy `.sig`. On a registry
-that **does** serve the Referrers API (quay.io, after the proposal 040 cut-over)
-cosign 3 attaches the bundle as a real **referrer** (artifactType
+**Layout.** quay.io serves the OCI 1.1 Referrers API, so cosign 3 attaches the
+sigstore bundle as a real **referrer** of the signed manifest (artifactType
 `application/vnd.dev.sigstore.bundle.v0.3+json`, annotation
 `dev.sigstore.bundle.predicateType: https://sigstore.dev/cosign/sign/v1`) and
-writes no tag — observed on `quay.io/argoproj/argocd` and `quay.io/cilium/cilium`.
-Exactly one of the three layouts must exist per digest (`scripts/registry-lib.sh`,
-`registry_signature_layout`; a bundle referrer with any other predicateType is an
-attestation, not a signature). `cosign verify` finds all three itself.
+writes no tag — measured by the quay-smoke gate on our own index and children,
+and observed on `quay.io/argoproj/argocd` and `quay.io/cilium/cilium`.
+`bazel/img/registry.bzl` records that as `SIGNATURE_LAYOUT = "referrer"`, and
+the sweep holds every post-cut-over commit to it: a fallback tag on quay.io, or a
+referrer plus a tag, is `MISSING`. Before the cut-over, on ghcr.io (no Referrers
+API), the signature landed in a tag in the image's own repository: cosign 3's
+OCI 1.1 fallback index `sha256-<hex>` (the bundle format — keyless v3 *requires*
+`--new-bundle-format`; `=false` is rejected), and before 2026-09-24 cosign 2's
+`sha256-<hex>.sig`; a `registry.bzl` without `SIGNATURE_LAYOUT` promises that
+`tag` layout. Exactly one of the three layouts may exist per digest
+(`scripts/registry-lib.sh`, `registry_signature_layout`; a bundle referrer with
+any other predicateType is an attestation, not a signature). `cosign verify`
+finds all three itself.
 Do not pass `--new-bundle-format` to `cosign verify` expecting it to assert the
 layout: `=true` still accepts a legacy `.sig`.
 
@@ -562,10 +700,10 @@ child with the same identity and issuer:
 
 ```bash
 # Read-only; no credentials. The target sets COSIGN to the pinned cosign.
-bazel run //tools/cosign:verify_image_signatures -- ghcr.io/bpalermo/aether/agent@sha256:<index digest>
-#   verified index ghcr.io/bpalermo/aether/agent@sha256:…
-#   verified child ghcr.io/bpalermo/aether/agent@sha256:…   (linux/amd64)
-#   verified child ghcr.io/bpalermo/aether/agent@sha256:…   (linux/arm64)
+bazel run //tools/cosign:verify_image_signatures -- quay.io/aethermesh/agent@sha256:<index digest>
+#   verified index quay.io/aethermesh/agent@sha256:…
+#   verified child quay.io/aethermesh/agent@sha256:…   (linux/amd64)
+#   verified child quay.io/aethermesh/agent@sha256:…   (linux/arm64)
 ```
 
 Identity is `^https://github\.com/bpalermo/aether/\.github/workflows/publish\.yaml@`,
@@ -578,9 +716,11 @@ working directory. Standalone, `COSIGN=/path/to/cosign
 scripts/verify-image-signatures.sh …` still works with any cosign — the version
 is then yours to vouch for.
 
-cosign v3.1.2 verifies both layouts: a pre-2026-09-24 legacy `.sig`
-(`agent@sha256:14949387…`, commit 5b0c199) and a v3 bundle
-(`agent@sha256:066267b6…`, commit 7f8f825) both pass, index and children.
+cosign v3.1.2 verifies every layout: a pre-2026-09-24 legacy `.sig`
+(`agent@sha256:14949387…`, commit 5b0c199) and a v3 fallback-tag bundle
+(`agent@sha256:066267b6…`, commit 7f8f825) on ghcr.io both pass, index and
+children, and so does a referrer on quay.io (the quay-smoke gate). Images
+published before the cut-over are verified at their ghcr.io coordinates.
 
 Not signed by this pipeline: any `agent`-family image published before f332061
 (#875, 2026-09-20) — those verify as `no signatures found`. The proxy is signed
@@ -588,7 +728,9 @@ by its own workflow; see the next section.
 
 ### Verifying the aether-proxy signature (#984)
 
-`ghcr.io/bpalermo/aether/aether-proxy` is built by `proxy-release.yml`, not
+The proxy image (`quay.io/aethermesh/proxy` since the cut-over; before it, and
+in the chart until the first proxy release after it re-pins,
+`ghcr.io/bpalermo/aether/aether-proxy`) is built by `proxy-release.yml`, not
 `publish.yaml`, and is versioned by the commit that changed `proxy/`, not by the
 aether commit — the chart carries its **digest** in
 `charts/aether/values.yaml` (`proxy.image.digest`). Since #984 that workflow's
@@ -608,9 +750,10 @@ https://github.com/bpalermo/aether/.github/workflows/proxy-release.yml@refs/head
 rejects them, and vice versa. By hand, for whatever digest a chart pins:
 
 ```bash
-digest="$(sed -nE '/aether-proxy$/,+4 s/^[[:space:]]*digest:[[:space:]]*"(sha256:[0-9a-f]{64})"$/\1/p' charts/aether/values.yaml)"
+# The pin names its own registry: read repository AND digest from the chart.
+pinned="$(bash -c '. scripts/proxy-pin-lib.sh && proxy_pinned_ref' < charts/aether/values.yaml)"   # "<repository> <digest>"
 CERT_IDENTITY_REGEXP='^https://github\.com/bpalermo/aether/\.github/workflows/proxy-release\.yml@refs/heads/main$' \
-  bazel run //tools/cosign:verify_image_signatures -- "ghcr.io/bpalermo/aether/aether-proxy@${digest}"
+  bazel run //tools/cosign:verify_image_signatures -- "${pinned% *}@${pinned#* }"
 ```
 
 **Pins older than signing are unsigned, permanently.** Every proxy image
@@ -753,7 +896,8 @@ for the full install + onboarding walkthrough.
 East-west QUIC is **unconditional**. Every mesh pod has an HTTP/3 inbound on
 UDP:18008 beside the TCP one (#953: same SVID, same client-certificate
 requirement, same SAN pin), and every node proxy dials every service in its
-dependency set over HTTP/3 from every local ServiceAccount (#956). There is no
+dependency set over HTTP/3 from every local ServiceAccount that calls it (#956;
+the per-source clusters are built on first use, #1020). There is no
 value or flag for it: the per-destination allow-list (a chart value + agent flag)
 was a proving gate for the first QUIC soak on a real
 cluster and was removed once that soak passed (decision 2026-09-26: no opt-in for
@@ -793,20 +937,231 @@ at once.
 node (the source proxy is host-network) to every mesh pod IP. A NetworkPolicy or
 host firewall that allows only TCP:18008 breaks every mesh request, not just a few.
 
-**What to expect.** The agent logs
-`east-west QUIC fan-out quic_clusters=N local_identities=I` whenever the count
-changes, with `N = I × S` where S is the number of services in the node's
-dependency set that got twins (the line no longer carries a listed-service count).
-Budget: local ServiceAccounts × dependency-set services per node — on talos-main
-8–14 SAs × ~19 services ≈ 150–270 extra clusters per node, each an EDS clone of
-the h2 cluster (no second load assignment). The proxy admin (`127.0.0.1:9901` on
-the node) lists one `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster per (service,
-local ServiceAccount). Requests from a caller take its own twin (a matcher cluster
-specifier keyed on the connection's `aether.source.spiffe_id` filter state); a
-caller with no twin — or a connection stamped before the trust domain was known —
-takes the h2 cluster. A GAMMA (HTTPRoute) rule whose single backendRef is the
-parent rides QUIC too; a weighted split stays h2 (#961). Twins appear only once
-the node identity is served.
+**What to expect.** Every service in a node's dependency set is QUIC-eligible
+(default entry only, identity-ready, never a service with an endpoint behind the
+east/west waypoint), but twins are **demand-scoped**
+(#1020): a node builds a `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster only for a
+(source ServiceAccount, destination) pair that has actually dialled. The route to an
+eligible destination carries one selection arm per local ServiceAccount (a matcher
+cluster specifier keyed on the connection's `aether.source.spiffe_id` filter
+state), each naming that source's twin, built or not. A source's **first** request
+resolves to a twin the proxy does not have yet; the HCM's `on_demand` filter asks
+the agent for it by name over ODCDS; the agent checks the name (destination in the
+dependency set, source a ServiceAccount with a pod on the node), records
+the pair and publishes the twin with its own load assignment; the paused request
+resumes on it, over HTTP/3. That costs one local round trip. It was 17–24 ms in
+`//test/mtlspool`'s `TestOnDemandQUICTwinPerPair`, and every later request from
+the pair skips it. A connection with no identity stamp (stamped before the trust
+domain was known) takes `on_no_match`, the h2 cluster. A GAMMA (HTTPRoute) rule
+whose single backendRef is the parent rides QUIC too; a weighted split stays h2
+(#961) and never fetches a twin.
+
+The agent logs `east-west QUIC fan-out quic_clusters=N observed_pairs=P
+local_identities=I awaiting_client_cert=W` whenever `N` or `W` changes, and for each
+new pair `observed east-west QUIC pair (ODCDS); building its twin cluster=…`.
+`N` is the number of observed pairs whose source is still local, so it is at most
+`I × S`, where `S` is the node's eligible dependency-set services (the line no
+longer carries a service count since #979), and on a real fleet much less (rev242,
+with an allow-list of 2: 118 possible, 2 used; without the allow-list the ceiling on
+talos-main is 8–14 SAs × ~19 services ≈ 150–270 per node, the pairs actually dialled
+stay the same).
+
+**What a healthy node reads.** `observed_pairs` ≈ the (source ServiceAccount,
+destination) pairs that carry traffic on that node: on talos the k6 loaders, the
+prober and the dialers, so **single digits per node**, and `quic_clusters` equal to
+it. `observed_pairs` that is a whole multiple of `local_identities` on every node
+(every local SA × the same destinations) is the #1033 red reading (rev245, 2026-09-28: 24/24/12, 18/18/9, 28/28/14, 20/20/10,
+20/20/10), not a busy fleet.
+
+**Reading twin count against pairs.** On one node, the `quic:` clusters in the
+proxy admin (`/clusters`) must be exactly the pairs with traffic. Pairs are
+persisted beside the observed upstreams (`state/observed-upstreams.json`,
+`quic_pairs`), so they survive an agent or agent+proxy roll. There is **no idle
+expiry**: nothing in xDS tells the agent that a twin stopped carrying traffic. A
+pair is pruned when its source ServiceAccount has no pod left on the node, or when
+its destination leaves the dependency set, or by the post-start
+prune below. In the first two cases, a pair whose twin the proxy fetched on demand
+loses its twin but is kept **dormant** and republished when it is valid again (#1036,
+"Stranded twin" below). A pair that did receive traffic therefore keeps its twin while both
+ends stay put, even if it goes quiet. `envoy_cluster_manager_active_clusters` rises
+by one when a pair first dials, falls when a pair is pruned, and is otherwise
+**flat**. A step that tracks pod churn rather than new callers is the pre-#1020
+fan-out and a regression.
+
+**Agent restarts (#1033).** A restarted agent opens a fresh xDS stream, and the
+running proxy re-states its twins in the stream's first CDS request. Only the
+persisted pairs carry over; the re-statement is read two ways:
+
+- A twin the proxy merely **holds** (`initial_resource_versions`, delivered by the
+  wildcard, e.g. built up front by an older agent) admits nothing. If its pair is
+  not persisted it is answered absent (`removed_resources`) and the proxy drops
+  it; the next request that routes to it opens an on-demand fetch, one ~20 ms round
+  trip, no 503. The #1032 agent re-admitted these, which is how rev245 persisted the
+  whole SAs × destinations fan-out on every node.
+- A twin the proxy **re-subscribes** by name holds a live on-demand subscription: a
+  request routed to it at some point in this proxy's life. Its pair is admitted.
+  This is not optional. Envoy's ODCDS manager keeps one subscription per name for
+  the life of the process and answers every later request for the name "already
+  subscribed, skipping", so a subscribed twin answered absent is **stranded**: every
+  request from that pair 503s `NC` at the 2 s `on_demand` timeout until the proxy
+  restarts. `//test/mtlspool`'s `TestOnDemandQUICSubscribedTwinsServedAfterAgentRestart/strand_control`
+  shows it.
+
+The agent logs one line per fresh stream: `fresh xDS stream re-stated QUIC twins:
+held-only twins admit nothing, live on-demand subscriptions are served
+resubscribed=R resumed_pairs=P held_only=H held_served=S answered_absent=A`.
+
+**Post-start prune of unfetched pairs (`--east-west-quic-pair-fetch-window`, default
+`1h`).** A persisted pair that has had no on-demand fetch since the agent started,
+and whose twin the proxy did not re-subscribe, is dropped with its twin once the
+window has elapsed (checked on the one-minute prune tick). A pair first used in this
+process, or re-subscribed by the proxy, is kept. This is the migration off the
+fan-out rev245 persisted, and it bounds anything else a restart carries over without
+evidence of use. The agent has no traffic signal of its own (no admin calls, and a
+served twin is never fetched again), so a pruned pair that is still in use pays one
+ODCDS round trip on its next request and is re-admitted; that is the whole cost of a
+wrong prune, once per agent start. It logs one line per node:
+
+```
+pruned persisted east-west QUIC pairs with no on-demand fetch since agent start count=N remaining=M window=1h0m0s pairs=[…]
+```
+
+followed by a `east-west QUIC fan-out` line with the new, smaller `quic_clusters`.
+`0` disables the prune.
+
+**Stranded twin: 503 `NC` at 2 s for a source that came back (#1036).** Envoy's
+ODCDS manager keeps **one subscription per cluster name for the life of the
+process**. When the agent removes a twin the proxy fetched on demand, Envoy drops
+the *cluster* and keeps the *subscription*. Every later on-demand request for that
+name is skipped inside the proxy and never reaches the agent. The pair is then
+**stranded** until the proxy restarts. The failure signature:
+
+- **Access log.** `reporter:source`, `response_code:503`, `response_flags:NC`,
+  `duration_ms` ≈ `2000` (the `on_demand` timeout) on every request from one source
+  ServiceAccount to one QUIC destination, starting when a pod of that
+  ServiceAccount came back to the node. `upstream_cluster` is `-` on an `NC` line, so
+  scope by `authority` and the source pod.
+- **Proxy debug log.** `ODCDS-manager: resource quic:<svc>.<ns>.<domain>@<ns>/<sa> is
+  already subscribed to, skipping` for each of those requests.
+- **Agent.** Nothing for that name: no `observed east-west QUIC pair (ODCDS)` line, no
+  refusal, and `aether_agent_quic_twin_refused_total` flat, because no request arrives.
+  `envoy_cluster_manager_odcds_init_fetch_timeout_total` does not move either. The
+  timeout is the HCM `on_demand` filter's, not the subscription's.
+
+Until #1036 this was reachable on every Deployment roll. A pair was *forgotten* when
+its source ServiceAccount's last pod left the node, or when its destination left the
+dependency set (or, before #979, the allow-list). The next pod of that ServiceAccount on the node
+then routed to a name Envoy would never ask for again. `//test/mtlspool`
+`TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control` reproduces
+it: `status=503 … in 2.000099268s`, and no CDS request reaches the control plane.
+
+**`DC` 200s on a QUIC destination at a source-proxy roll (#1009)** are benign when the line is `DC` + `downstream_remote_disconnect` + 200 + the clean-line `bytes_sent`: the HTTP/1.1 client closed after a complete body before the h3 FIN was decoded. `upstream_rx_ms` and `downstream_tx_end_ms` read `-` on such a line. The rule and its LogsQL are in `e2e/soak/README.md`, "Benign `DC` at a source-proxy hot restart"; any other `DC` is a real failure.
+
+**Why the agent never forgets a subscribed pair.** The agent tracks which twins the
+proxy holds an ODCDS subscription for: those it asked for by name, and those it
+re-subscribes on a fresh stream. When such a pair loses its source or its
+destination, it goes **dormant**:
+
+- **Leaving.** The twin still leaves the snapshot, exactly as before. The pair moves
+  to `dormant_quic_pairs` in `state/observed-upstreams.json`, and the prune line reads
+  `pruned east-west QUIC pairs … (source_left_node, dormant)`.
+- **Returning.** The pair is valid again when a pod of the ServiceAccount is back on
+  the node, or the destination is back in the dependency set. The **same snapshot** then republishes
+  the twin and its load assignment, with no request. The subscription never closed, so
+  its delta watch is still on the stream and Envoy takes the pushed cluster. The agent
+  logs `republished dormant east-west QUIC pairs: the proxy still holds their on-demand
+  subscriptions, so the twin is pushed with no request count=N pairs=[…]`. The
+  returning source's first request is 200 over HTTP/3 in milliseconds (6.7 ms in the
+  gate above).
+- **Pruning.** A dormant pair is dropped only when the proxy no longer holds the
+  subscription. The agent learns this from a fresh xDS stream whose first CDS request
+  does not name the pair: after an agent restart, or on a new proxy generation after a
+  hot restart, whose child holds no ODCDS subscriptions. The agent logs `pruned dormant
+  east-west QUIC pairs: the proxy's fresh stream holds no on-demand subscription for
+  their twins count=N dormant=M pairs=[…]`. After that the name is free, and the next
+  request that routes to it is an ordinary first use.
+- **Refusals.** A first-use request the agent has to refuse opens a subscription too:
+  a `source_not_local` race, say, with a pod whose records are not loaded yet. So the
+  pair is parked dormant as well, and only the refused request 503s. A re-subscribed
+  pair that is not servable on a fresh stream logs `kept east-west QUIC pairs dormant
+  … count=N`.
+- **The fetch-window prune.** It never touches a dormant pair, because a dormant pair
+  is not a served pair. It also never touches a served pair the proxy holds a
+  subscription for.
+
+A dormant pair costs a few bytes in the state file and nothing in the proxy. It is
+bounded by the names the proxy has subscribed to since its last restart.
+
+**If you see the signature anyway:** restart the node's proxy (a hot restart,
+`kubectl -n aether delete pod <aether-proxy pod>`). The new generation holds no
+subscription, so the next request fetches the twin (~20 ms). Then file it. The
+agent's `republished dormant` / `pruned dormant` lines around the source's return say
+which half failed.
+
+```promql
+# twins per node, then the pairs among them that carried traffic in the last hour.
+# Under steady load the two are equal; the difference is pairs that went quiet
+# (kept by design, see above), never pairs that did not dial.
+count by (node) (envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"})
+count by (node) (increase(envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"}[1h]) > 0)
+envoy_cluster_manager_active_clusters
+```
+
+**The failure mode of the first request.** A twin the agent refuses, or one that
+takes longer than the `on_demand` timeout (2 s, `onDemandClusterTimeout`, the same
+bound the mesh catch-all's cold path uses), fails that request with **503 `NC`**.
+Envoy's API has no per-route fallback from an on-demand miss to the h2 cluster: the
+matcher's action names one cluster and nothing else. Refusals are counted by the
+agent as `aether_agent_quic_twin_refused_total{reason}`, and each one is a request
+that 503'd. `source_not_local` and `destination_not_in_dependency_set` are races
+with a pod leaving or the destination's idle TTL expiring (`destination_not_quic_enabled`
+is gone with the allow-list, #979). `malformed_name` means a route and the
+agent disagree on the naming. On the proxy, watch the ODCDS subscription:
+
+```promql
+# on-demand CDS fetches that timed out (a 503 NC per paused request): MUST stay 0
+sum(increase(envoy_cluster_manager_odcds_init_fetch_timeout_total[1h]))
+# agent refusals, by reason
+sum by (reason) (increase(aether_agent_quic_twin_refused_total[1h]))
+```
+
+The one gap that remains by design is an agent that is down while a new pair
+dials. That is the same exposure the capture catch-all already has (#682): the
+paused request 503s at the timeout, and the next request retries the fetch.
+
+**The fast path, and why a twin waits for its source's certificate (#1049).** The
+agent side of a first use is not the slow part. It publishes the twin 2-10 ms after
+the ODCDS request (a dormant pair returning is republished by the CNI ADD's own
+snapshot), with no debounce and no wait on a registry reload. What used to lose to
+the 2 s timeout was Envoy warming the twin. A twin names its source ServiceAccount's
+SVID statically in its transport socket, so a twin published before that secret is
+in the snapshot warms on SDS until SPIRE delivers it. On rev248 (2026-09-28
+15:44Z, the k6 loaders' first pods on every node right after an agent roll) that
+took 6.9-7.4 s from the CNI ADD, and 428 requests failed 503 `NC`. Two rules close
+it:
+
+- **An identity whose certificate is not in the snapshot yet gets no selection arm
+  and no twin.** Its requests ride the warm h2 cluster, whose certificate is fetched
+  per connection. The snapshot that carries the certificate carries the arm, the
+  twin and the twin's load assignment together. The fan-out line shows the wait:
+  `east-west QUIC fan-out … awaiting_client_cert=N`. `N` above 0 for more than a few
+  seconds is a stuck SVID (see the SPIRE sections), not a QUIC fault. Before SPIRE
+  serves any secret at all, nothing is held back.
+- **A named subscribe for a twin is always answered.** Envoy's ODCDS manager
+  subscribes to a twin by name whenever a request routes to it while it is not
+  active, including when the wildcard already delivered it. go-control-plane stays
+  silent on an unchanged resource. The per-name subscription then waited out its 15 s
+  initial-fetch timeout and Envoy logged `cm odcds: cluster quic:… not found during
+  on-demand discovery`, which fails any request still waiting on the name. That was
+  main-worker-03 at 15:45:04.7, 15 s after its loader's first request. The agent now
+  re-sends a subscribed twin it already sent (`cache.SnapshotCache.CreateDeltaWatch`).
+
+The invariant, with #1035/#1036: for a well-formed twin name of an eligible
+destination, the agent answers with the twin or holds the subscription open. It
+never answers such a name absent while the pair is servable. A twin leaves the
+snapshot only in two cases. Its source or destination has gone, and then the pair
+is dormant and republished on return (#1036). Or the proxy holds the twin through
+the wildcard alone, with no subscription (#1035).
 
 **Verifying.** Per twin, the admin `/clusters` host rows (`<cluster>::<ip:port>::
 rq_total::N`) are the ground truth. In Prometheus the twins carry their own stats
@@ -819,12 +1174,63 @@ sum by (aether_cluster) (rate(envoy_cluster_upstream_rq_total{aether_cluster=~".
 sum(rate(envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/svc-1(@.*)?"}[5m]))
 # a twin that cannot connect: the #957 DNS-SAN shape, or UDP:18008 blocked between nodes
 increase(envoy_cluster_upstream_cx_connect_fail{aether_cluster=~".*@.*"}[5m])
+# a twin whose endpoints never arrived (#1008): MUST be 0, fleet-wide, always
+sum(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"})
 ```
+
+Each twin subscribes to its **own** EDS resource, named after the twin cluster
+(`quic:<svc>.<ns>.<domain>@<ns>/<sa>`), and the agent publishes the h2 cluster's
+load assignment under that name too. In `/config_dump` a twin's
+`eds_cluster_config.service_name` equals its own cluster name, never the bare
+`<ns>/<svc>` the h2 cluster uses; if it ever does again, see "QUIC twin never
+leaves warming" below.
 
 On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
-kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), and
-its `QUIC_DNS_SANS=off` negative control reproduces the missing-SAN failure.
+kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), including E4c: the node's `quic:` cluster count equals the (source, destination) pairs the suite drove. Its `QUIC_DNS_SANS=off` negative control reproduces the missing-SAN failure.
+
+**HTTP/3 per-request cost and connection counts (#1021).** On the rev242 proving
+soak an HTTP/3 mesh request cost ~11 ms of proxy CPU across both proxies against
+~3.3 ms for h2 (3.3×). The allow-list drop (#979) waits on ≤ 1.5×. Grade it only with the
+matched-window method in `e2e/soak/README.md` ("The QUIC per-request cost gate"):
+envoy-only Pyroscope cores over the T0+6h05m→T0+7h25m no-roll window of a QUIC run
+and of an h2 reference run with matched per-destination rps, loaded minus idle, per
+request. Fleet CPU alone says nothing, because the QUIC share of the load changes
+between runs.
+
+Expected upstream QUIC connections to one destination are **one per (source node,
+source ServiceAccount that dialled it, Envoy worker that SA's app connections landed
+on, destination endpoint)**. They are NOT one per app connection. A twin does not
+pool per downstream connection (`QUICClusterFrom` pins
+`connection_pool_per_downstream_connection` off), so a k6 runner's 60 keep-alive
+connections share its node's per-worker pools. Pods of one ServiceAccount share a
+twin's connections, because the SA is the identity. The upper bound per destination
+is `Σ_nodes (dialling SAs × workers × endpoints)`:
+
+```promql
+# live QUIC connections per twin, and the node's worker count (the per-endpoint multiplier's ceiling)
+sum by (node, aether_cluster) (envoy_cluster_upstream_cx_active{aether_cluster=~".*@.*"})
+max by (node) (envoy_server_concurrency)
+# endpoints per destination
+max by (aether_cluster) (envoy_cluster_membership_total{aether_cluster=~".*@.*"})
+# density: QUIC rps per live QUIC connection (#1006: ~0.8, i.e. every request is its own flight)
+sum(rate(envoy_cluster_upstream_rq_total{aether_cluster=~".*@.*"}[5m]))
+  / sum(envoy_cluster_upstream_cx_active{aether_cluster=~".*@.*"})
+```
+
+A connection count that grows with app connections (k6 VUs, a client's pool size)
+rather than with SAs × workers × endpoints means a twin started pooling per
+downstream connection again. `//test/mtlspool` `TestQUICTwinUpstreamConnections`
+reproduces both shapes: 12 app connections open 1 QUIC connection (one worker), 4
+(four workers), or 12 (option forced on). The same counts hold on the h2 path, whose
+pool key has carried the source identity instead of the downstream connection since
+#842.
+
+The inbound QUIC listener reads with UDP GRO (`prefer_gro: true`, off by Envoy default
+for listeners). It writes with Envoy's automatic GSO batch writer, which is used when
+the kernel has `UDP_SEGMENT` (Linux ≥ 4.18; talos 6.18). A kernel without UDP GRO
+logs `GRO requested but not supported by the OS` once per listener and reads without
+it. That warning costs performance, never correctness.
 
 **If UDP:18008 is blocked, or HTTP/3 fails mesh-wide.** Symptom: twins'
 `cx_connect_fail` climbing, 503s from every caller, h2 clusters idle. There is no
@@ -835,8 +1241,9 @@ added. In order:
    group) or, for handshake failures, re-issue the SVIDs with the DNS SANs above.
    Both converge without a pod or proxy roll.
 2. **Roll the chart back** to the last release that still had the allow-list
-   (≤ 0.95.3): its default (an empty list) is h2 for every destination, and the
-   twins and selection disappear on the next push with no proxy roll. Take the
+   (1.0.11, the release before #979): its default (an empty list) is h2 for every
+   destination, and the twins and selection disappear on the next push with no
+   proxy roll (same proxy pin). Take the
    values from `helm get values -o yaml` and pass them with `-f`; never
    `--reuse-values`. This is the escape hatch; there is no other.
 
@@ -844,6 +1251,189 @@ added. In order:
 mesh-wide — it is not an escape hatch.
 
 ## 8. Troubleshooting
+
+### QUIC twin never leaves warming / 503 NC on a new ServiceAccount (#1008)
+
+**Symptom.** The first pod of a ServiceAccount that is new on a node gets
+`503` with response flag `NC` (no cluster) for ~15 s on every request to every
+QUIC destination, then recovers on its own. Other callers on the node
+are unaffected; h2 destinations are unaffected. On talos (rev242) it was 1,060
+client-visible 503/NC in 11 s when the k6 loaders started.
+
+Since #1020 every twin is a late twin, because it is built on the pair's first
+request. A regression of this fix would therefore hit **every** new (source,
+destination) pair, not only a new ServiceAccount. A 503 `NC` that ends after
+**~2 s** is a different failure: the on-demand fetch itself timed out or was
+refused. See "The failure mode of the first request" above.
+
+**Read.**
+
+```promql
+# the twin sat in warming (1) from its CDS add until the timeout
+envoy_cluster_warming_state{aether_cluster=~".*@.*"}
+envoy_cluster_manager_warming_clusters
+# and gave up waiting for its endpoints: 1 per affected twin per proxy
+envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}
+```
+
+In the proxy log: `cds: response indicates N added/updated cluster(s)`, then
+~15 s later `gRPC config: initial fetch timed out for
+type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment`, one per
+late twin. The agent is idle through the gap: nothing on the control-plane side
+is pending.
+
+**Cause.** A twin that shares its h2 base's EDS resource name. Envoy's delta-ADS
+`WatchMap` deduplicates subscription interest per (type_url, resource name):
+when the twin arrives *after* the base is subscribed, its watch adds nothing to
+`resource_names_subscribe`, no request is sent, the control plane (correctly)
+sends nothing because the resource did not change, and the twin waits out its
+15 s `initial_fetch_timeout`. At agent start base and twins arrive in one CDS
+response, so only a *late* twin — a new local ServiceAccount — is hit. Fixed in
+#1008: `proxy.QUICClusterFrom` points the twin at its own EDS name and the cache
+publishes the base's `ClusterLoadAssignment` under it
+(`proxy.LoadAssignmentAlias`). Seeing this again means that pairing broke;
+`//test/mtlspool`'s `TestLateQUICTwin*` pair reproduces it against the pinned
+proxy (the negative control times out at ~15 s by design).
+
+**Invariant.** A delta-ADS subscriber must never share a resource name with an
+already-subscribed sibling. It has bitten twice and was found latent a third
+time:
+
+- **SDS (#842):** the on-demand certificate selector behind every static SVID
+  reference. Fixed in #865 with its own SotW stream.
+- **EDS, QUIC twins (#1008):** a twin behind its h2 base.
+- **EDS, port aliases and TCP floors (#1013):** the `<fqdn>:<port>` alias
+  clusters (the ODCDS cold-path authorities, e.g. `:18081`) and the TCP floor
+  `tcp:<fqdn>` with its primary-port alias `tcp:<fqdn>:<port>` all subscribed to
+  the bare `<ns>/<svc>` name that the default cluster holds. They usually arrived
+  in the same CDS response as the default cluster, so nothing showed. A *later*
+  one would warm for 15 s: a Service gaining a port after the node depends on
+  it, or a service joining the capture TCP set (a TCPRoute attached) after it
+  is in the dependency set. For a floor that means every captured TCP
+  connection to the service is closed, because `tcp_proxy` has no cold path.
+
+The fix is the same for every EDS case. The cluster's
+`eds_cluster_config.service_name` is its own cluster name, and the agent
+republishes the bare `ClusterLoadAssignment` under that name in the same
+snapshot pass that emits the cluster (`proxy.LoadAssignmentAlias`, the one
+helper for twins, aliases and floors). The TCP per-port clusters
+`tcp:<fqdn>:<port>` keep their own port-filtered membership, now named after
+the cluster rather than the HTTP spelling `<fqdn>:<port>`. In `/config_dump`,
+only a service's default cluster `<svc>.<ns>.<domain>` may carry
+`service_name: <ns>/<svc>`. Every other EDS cluster's `service_name` equals its
+own name.
+
+Three gates keep it that way:
+
+- `//agent/internal/xds/cache` `TestNoNonDefaultClusterSharesTheBareServiceEDSName`
+  and `TestLate{PortAlias,TCPFloor}SubscribesToItsOwnEDSResource`.
+- `//test/envoy_validate` `ClustersSharingServiceEDSName`, over every fixture.
+- `//test/mtlspool` `TestLate{PortAlias,TCPFloor,QUICTwin}*`, against the
+  pinned proxy, each with a shared-name negative control that must time out at
+  ~15 s.
+
+Any new cluster, secret or config that is a clone or second consumer of an
+existing resource needs either its own resource name or its own
+`api_config_source`.
+
+**Fleet gate.** HTTP port aliases and per-port HTTP clusters keep the default
+cluster's `alt_stat_name` (the bare `<ns>/<svc>`), so their stats land in the
+default cluster's `cluster.<ns>/<svc>.*` tree. L4 clusters no longer do (#1023):
+the TCP floor reports as `tcp_<ns>/<svc>`, a TCP per-port or primary-port alias
+cluster as `tcp_<ns>/<svc>_<port>`, a UDP floor as `udp_<ns>/<svc>` (see "L4 stat
+keys and the L4 access log"). A twin has its own key (`<ns>/<svc>@<ns>/<sa>`,
+#960). A mesh EDS cluster that follows the invariant never times out, so the gate
+is zero on the whole family, twins included, across a soak:
+
+```promql
+# #1013 (HTTP aliases, per-port and default clusters as <ns>/<svc>; L4 clusters as
+# tcp_<ns>/<svc>[_<port>] -- the selector matches both, as it did before #1023)
+sum(increase(envoy_cluster_init_fetch_timeout_total{aether_cluster=~"[^@]+/[^@]+"}[8h]))   # MUST be 0
+# #1008 (QUIC twins)
+sum(increase(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".+@.+"}[8h]))         # MUST be 0
+```
+
+A non-zero first line says which service and, since #1023, whether it was an L4
+cluster (and which port) or the HTTP family. Tell the HTTP clusters apart with
+`/config_dump`, as above, and the proxy log line
+`initial fetch timed out for …ClusterLoadAssignment`.
+
+### Attributing a prober failure: its labels and the `AETHER_PROBE_FAIL` line (#1040, #1041)
+
+**Labels.** `aether_probe_requests_total` and `aether_probe_request_duration_seconds`
+carry:
+
+| label | value | set by |
+|---|---|---|
+| `node` | the **Kubernetes node** (`main-worker-03`) | the collector, from the resource's `k8s.node.name` (chart env `OTEL_RESOURCE_ATTRIBUTES`, downward API `spec.nodeName`) |
+| `pod` | the prober pod (`prober-h2mzs`) | the prober, as a datapoint attribute |
+| `tier` | `liveness`, `reachability`, `mesh_dns` | the prober |
+| `target` | the probed name (`egress`, `echo.aether-test.aether.internal:18081`, …) | the prober |
+| `result` | `success`, `http_error`, `connection_error`, `timeout`, `saturated`, `dns_error`, `dns_nxdomain`, `dns_timeout` | the prober (`classifyErr`) |
+
+**Until #1041, `node` held the POD name** (`node="prober-h2mzs"`). The prober's resource
+carried `host.name`, and for a pod that is not hostNetwork that is the pod name. The
+talos collector's `transform/promote` set `node` from `host.name` before it looked at
+`k8s.node.name`. A pod that had since been rolled away could not be placed on a node
+(#1040). Two changes fix this: the prober no longer sets `host.name`, and the
+collector now prefers `k8s.node.name`
+(bpalermo/k8s-talos-main#128). Series from before the
+fix still show a pod name in `node`. For any window that spans the change, group by
+`pod`, which exists only on series from after the fix, or translate the old values with
+`kubectl -n aether-test get pods -o wide` while those pods still exist.
+
+Group per node with `by (node)`, and per prober generation with `by (node, pod)`. A
+DaemonSet roll starts a new `pod` series on the same `node`, so only a `by (node)`
+aggregate spans the roll:
+
+```promql
+# per node, across prober generations
+sum by (node, tier, result) (increase(aether_probe_requests_total{result!="success"}[10m]))
+# per prober pod: a new generation starts a new series
+sum by (node, pod, tier, result) (increase(aether_probe_requests_total{result!="success"}[10m]))
+```
+
+Any rule that guarded against dead prober generations with
+`and on (node) max by (node) (present_over_time(...[3m]))` (#47) relied on `node` being
+the pod. Now that `node` is the node, a new pod on the same node satisfies that guard
+for a dead pod's frozen burst. Guard `on (node, pod)` instead.
+
+**The failure line.** Every probe that does not succeed prints one line to the prober's
+stdout. It follows the soak's k6 `AETHER_FAIL` convention: a fixed marker, then one
+JSON object:
+
+```
+AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"pod":"prober-h2mzs","node":"main-worker-01","n":1,"truncated":false}
+```
+
+- `t` is the client-side timestamp. Line it up against the proxy's hot-restart
+  parent-exit time and the mesh-dns handoff on `node`.
+- `elapsed_ms` separates a probe that used its whole budget (`timeout` at about 2000 ms,
+  meaning the request went out and nothing came back) from a fast `connection_error`
+  (a refusal or reset in a few ms, meaning nothing was listening).
+- `err` is the Go error string. For `http_error` it is `HTTP <status>`. For `saturated`
+  the probe was never sent because `--max-concurrent` probes were already in flight.
+
+It is **bounded**: at most 20 detail lines per `(tier, result)` per minute (`n` counts
+them, and `truncated:true` marks the 20th). Later failures in that minute are only
+counted, and when the minute closes they produce ONE summary line under the same marker:
+
+```
+AETHER_PROBE_FAIL {"t":"…","tier":"mesh_dns","result":"timeout","suppressed":122,"window_s":60,"pod":"prober-h2mzs","node":"main-worker-01"}
+```
+
+A 30 s burst of about 142 timeouts therefore prints 20 lines plus one summary, not 142
+lines. The budget renews every minute, so the next burst is still attributable.
+
+Pull the lines from VictoriaLogs (the logs are not in Loki):
+
+```
+_stream:{k8s.namespace.name="aether-test"} AND "k8s.container.name":prober AND "AETHER_PROBE_FAIL"
+```
+
+To see one pod or one class, add `AND "prober-h2mzs"` or `AND "\"result\":\"timeout\""`.
+To read them straight from a live pod:
+`kubectl -n aether-test logs <prober-pod> | grep AETHER_PROBE_FAIL`.
 
 ### Forwarded DNS keeps failing after a kube-dns roll
 
@@ -990,9 +1580,10 @@ you look. The branch counter is **seeded at zero for all four values** (#717), s
 empty result means the metric never arrived, not that nothing happened:
 
 ```promql
-# Which branch each node's last terminating supervisor took. Anything other than
-# handoff/successor_wait during a rolling upgrade means the surge replacement
-# never arrived.
+# Which branch each node's last terminating supervisor took. drain_fallback or
+# child_dead during a rolling upgrade means the surge replacement never arrived;
+# handoff during a rolling upgrade means the old pod was deleted mid-handoff
+# (#991, see the next section) -- expected ~0 per roll.
 sum by (k8s_node_name, aether_supervisor_shutdown_branch) (
   increase(aether_supervisor_shutdown_branch_total[30m]))
 
@@ -1006,6 +1597,158 @@ histogram_quantile(0.95,
 > SIGKILLed at the grace period flushes nothing, so a *missing* branch sample on a node is
 > itself the finding. Use `increase()`/`max_over_time`, never an instant read: like the
 > mesh-DNS lame-duck series, these age out with the generation that wrote them.
+
+### How a proxy roll hands the node over: the successor's ready gate and the parent's hold (#991)
+
+A rolling upgrade (`maxSurge: 1`, `maxUnavailable: 0`) is safe only if the **old** pod
+stays until the new pod's Envoy has taken over — the #132/#795 invariant. The DaemonSet
+deletes the old pod about 1 s after the new one turns Ready, and at once if the old one
+turns NotReady while a surge pod exists. Two supervisor rules decide both moments.
+
+**1. The successor's ready gate is anchored on its first LIVE, not only on its fork.**
+Envoy arms `--parent-shutdown-time-s` in `startWorkers()`, the step that also turns its
+admin LIVE. The predecessor Envoy therefore exits at *workers + ParentShutdownTime*
+(measured 14.93–15.00 s after `starting workers`, then 0.4–0.9 s to exit), not at
+*fork + ParentShutdownTime*. The successor's supervisor goes Ready at
+
+```
+max(fork + ParentShutdownTime + 3s,  firstLiveObserved + ParentShutdownTime + 2s)
+```
+
+`ParentShutdownTime` is the chart's `proxy.hotRestart.parentShutdownTime` (15 s), the
+value the supervisor passes to Envoy, not a literal. The fork anchor used to be the only
+one. Under soak load on rev242 the successor took 3.2–6.0 s from fork to workers, so the
+old Envoy was still serving at fork + 18 s, and the old pod was deleted mid-handoff in 13
+of 30 rolls. Cost: Ready moves from fork + 18 s to roughly fork + 19.5–23 s under load,
+1.5–5 s per node-roll. An unloaded successor that is LIVE within ~1 s keeps the fork gate.
+
+**2. The old pod keeps its readiness through a busy successor's admin.** While the old
+supervisor's Envoy is still tracked, it holds its ready marker whenever the admin answers
+at another epoch (#132). During the handoff that admin port belongs to the **successor**,
+whose main thread is busy loading its first listener batch before `starting workers`, so
+a `/server_info` probe can miss its 1 s timeout. The hold used to drop on the first
+miss, and three failed exec probes (2 s period) later the DaemonSet deleted the pod. That
+happened in 9 of 30 rolls on rev242, 5.0–6.3 s after `pod not ready`. The hold now lasts
+through an unreachable admin for up to the admin watchdog's existing bound
+(`--admin-unresponsive-deadline`, 30 s default). A genuinely wedged admin still ends it at
+that bound, on the same tick the admin watchdog restarts the container. With no Envoy of
+ours tracked, an unreachable admin never holds.
+
+Lines to grep in the `aether-proxy` container logs, per roll:
+
+```
+# successor pod: which anchor set its gate, and where the gate landed
+live predecessor confirmed; starting cross-pod hot restart  ... readyGateIn=18s readyGateAnchor=fork
+successor ready gate anchored   epoch=N anchor=live sinceFork=4.9s readyGateIn=17s readyGateAfterFork=21.9s parentShutdownTime=15s
+pod ready: envoy live at newest epoch                       epoch=N
+
+# old pod: the hold carried through the successor's busy init (once per unreachable streak)
+holding readiness: serving as hot-restart parent mid-handoff              epoch=N-1
+holding readiness through unreachable admin: successor likely initializing  epoch=N-1 unreachableFor=0s holdBound=30s
+newest epoch terminated cleanly by successor; awaiting pod deletion        epoch=N-1
+```
+
+`anchor=fork` on the second line means the successor went LIVE fast enough that the fork
+gate was already the later one. On a healthy roll the old pod logs **no**
+`termination requested mid-handoff`. Its Envoy is terminated by the successor's
+parent-shutdown first, the pod turns NotReady because nothing of its own is left
+running, and the DaemonSet deletes an idle pod. So during a rolling upgrade:
+
+- `aether_supervisor_shutdown_branch_total{branch="handoff"}` is **≈ 0 per roll**. The
+  fleet gate for a soak is the per-node `increase()` over the roll window. A non-zero
+  count means an old pod was deleted while its Envoy was still the serving parent, which
+  is a finding again, not background. On rev242, before this fix, it was 1 per node on
+  22 of 30 rolls.
+- `termination requested mid-handoff` lines are **0**. One that comes 5–6 s after the same
+  pod's `pod not ready` is rule 2 failing. One at about fork + 19 s, after the successor's
+  `pod ready`, is rule 1 failing.
+
+### A roll wedges both epochs after `starting workers` (#1050)
+
+Symptom, per roll: the successor's last Envoy line is `all dependencies initialized.
+starting workers`, the draining parent's last is `closing and draining listeners`, the
+admin on 127.0.0.1:9901 stops answering, and about 30 s later the supervisor logs
+`liveness watchdog fired; terminating for container restart` for **both** epochs and,
+15 s after that, `drain deadline elapsed, killing envoy epoch` for both. Existing
+connections keep serving (worker threads are fine); every new connection to or from the
+node fails until the fresh epoch 0 comes up, and source nodes log `503 UC
+…QUIC_TOO_MANY_RTOS` / `Network_blackhole_detected` toward the node's QUIC twins.
+
+The cause is a deadlock between the two Envoys' **main threads** over the hot-restart
+domain sockets
+([analysis](https://github.com/bpalermo/aether/issues/1050#issuecomment-5875727632)).
+Once the child asks the parent to drain, the parent forwards every QUIC/UDP datagram
+that no parent session owns to the child, from its main thread, with a blocking
+`sendmsg` with no timeout; the child's UDP listeners stay paused until the parent exits,
+so for the whole `parentShutdownTime` every packet of every new QUIC connection takes
+that path. Meanwhile the child asks the parent for its stats on every 5 s stats flush
+with a blocking `recvmsg`, also with no timeout. When about 24 forwarded datagrams fill
+the child's queue as it enters that `recvmsg`, the parent is parked in `sendmsg` and
+never reads the stats request. Signals are handled on the main dispatcher, so neither
+process honours SIGTERM, which is why the supervisor ends up killing both.
+
+**The fix** is the carried Envoy patch in the aether-proxy image (#1060,
+`proxy/bazel/patches/envoy-aether1050-hotrestart-nonblocking-forward.patch`): the
+parent forwards UDP to the child with a non-blocking `sendmsg` behind a bounded queue,
+and every child wait for a parent reply (stats, listen-socket hand-off, admin shutdown)
+keeps draining the forwarded datagrams and is bounded, so neither main thread can park
+on the other. It also covers the `duplicateParentListenSocket` (LDS add inside the
+window) case the stats-only workaround could not. On kind the forced fault wedged 0 of 8
+restarts with it; talos rev252 ran the e2e with the workaround off.
+
+**The workaround**, `proxy.hotRestart.skipParentStats`, is now **off** by default (it was
+on from #1056 until the patch landed). It passes Envoy `--skip-hot-restart-parent-stats`,
+so the child never makes the stats call. Keep it as an emergency switch: if a roll wedges
+again with the signature above, set it true and roll. The cost is that the parent's
+gauges and its last ≤5 s of counter deltas are not merged into the child. Counters are
+already per generation (#708), so dashboards built on `increase()`/`rate()` do not
+change.
+
+Reproduce it on kind with `e2e/hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
+WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 against the unpatched image, and
+0 against the patched one (see the header of the script). The per-roll soak gates are in
+`e2e/soak/README.md`, "The hot-restart wedge gates (#1050)".
+
+### Source h3 requests die on a stateless reset at a destination's roll (#1054)
+
+Symptom, per roll of a node's proxy: **source** proxies on other nodes log a few
+`503 UC` lines toward the rolling node's pods with `response_code_details` containing
+`QUIC_PUBLIC_RESET|FROM_PEER|Received_stateless_reset`, clustered at the moment the
+draining parent exits (about `parentShutdownTime` after the successor started).
+
+The cause ([mechanism](https://github.com/bpalermo/aether/issues/1054)): a source's h3
+connection to the draining parent was still open when the parent exited. Its next packet
+reached the child, which does not own the connection ID and answers with a QUIC stateless
+reset; the source accepts it because the token is derived from the connection ID alone,
+so parent and child mint the same one. The request in flight fails, and the source's
+retry policy does not cover it (the request was already sent). Two things kept such a
+connection alive past the parent: under Envoy's default `gradual` drain strategy the
+GOAWAY is a coin flip per response, so a busy connection can dodge it for the whole drain,
+and an idle connection gets no GOAWAY at all while the h3 pool's 30 s idle timeout
+outlasts the 15 s parent-shutdown window.
+
+**The fix** is two chart values:
+
+- `proxy.hotRestart.drainStrategy` (default **`gradual`**; `immediate` is an opt-in)
+  passes Envoy `--drain-strategy`. `immediate` puts a GOAWAY on every response from the
+  start of the drain, but on talos-main (2026-09-28) it made the #1054 resets **worse**
+  (4/8/0 per roll vs 1–3 per run under gradual): more parent connections close inside
+  the drain window, and those closes are what sources then see reset. It is also
+  server-wide (h2 and h3 reconnections bunch at drain start; LDS and pod-termination
+  drains switch too). The carried Envoy patches #1064 (child unpauses its UDP listeners
+  only after the parent exits) and #1066 (draining parent answers its own time-wait
+  connections) are the fix under `gradual`.
+- `agent.eastWestQuicIdleTimeout: 8s` (the agent's `--east-west-quic-idle-timeout`) is
+  the idle timeout on the `quic:` twins only; h1/h2 keep 30 s. It closes the connections
+  that were idle when the drain started, before the parent exits. The chart refuses to
+  render unless `eastWestQuicIdleTimeout + 5s < proxy.hotRestart.parentShutdownTime`, so
+  lowering the parent-shutdown time needs the idle timeout lowered with it. The cost is
+  one extra QUIC handshake for a (source, destination) pair that sits idle between 8 s
+  and 30 s.
+
+A request in flight at the parent's exit still dies, as it does on h2. The soak gate is
+in `e2e/soak/README.md`, "The h3 stateless-reset gate (#1054)"; the kind leg is
+`e2e/eastwest-quic-hotrestart.sh` with `HR_MODE=sparse` (two nodes, `EWQ_WORKER=1`).
 
 ### The agent reports an unrepairable conflist
 
@@ -1518,6 +2261,223 @@ proxy **served** it, then compared with the node whose proxy was restarting.
      identity was not bound per-server, and `upstream_host` is not the TLS-terminating
      peer; record it and re-open the transport path.
 
+#### L4 hops: the source / destination / SAN join from the L4 access log (#1023)
+
+The ledger above reads the HTTP access log, which has no record of an L4 hop: until
+#1023 an L4 `ssl_fail_verify_san` tick had no source, no destination and no SAN on
+record, and the #1007 event had to be inferred from per-pod connection counters and the
+chain config. Every capture TCP/TLS chain now writes one record per connection on the
+`aether_l4_access_logs` stream (see "L4 stat keys and the L4 access log" below), and a
+SAN rejection is a connection with a response flag, so it is always logged, never
+sampled away:
+
+```
+_stream:{service.name="aether-proxy"}
+  AND log_name:aether_l4_access_logs
+  AND upstream_transport_failure_reason:~"CERTIFICATE_VERIFY_FAILED"
+```
+
+Control-test the negative the same way: drop the reason field and the clean
+connections of the same chains must come back. Each line is the whole join:
+
+| field | answers |
+|---|---|
+| `node_name` (resource attribute), `pod_name`, `pod_namespace`, `source_netns`, `source_spiffe_id` | **source**: which pod dialled, from which netns, presenting which identity |
+| `filter_chain_name` | which capture chain took it: `cap_tcp_*` (floor, per-port, any-port shim), `cap_tls_*` (TLSRoute SNI), `cap_tcp_blackhole` |
+| `downstream_local_address` | what the client **dialled** (the restored VIP:port) |
+| `upstream_cluster` | which L4 cluster was chosen, as its **stat key** (`tcp_<ns>/<svc>[_<port>]`, the `aether_cluster` the tick landed on): Envoy's `%UPSTREAM_CLUSTER%` renders the cluster's `alt_stat_name`, not its config name `tcp:<fqdn>[:<port>]` |
+| `upstream_host` | the **intended destination** endpoint, `<pod IP>:18008` → pod → node as in step 2 above |
+| `requested_server_name` | SNI (`-` on the floor; the port on a per-port cluster; the hostname on a TLSRoute chain) |
+| `upstream_transport_failure_reason` | the rejection, with the **presented** SAN where the pinned proxy prints it (`certificate SANs are [...]`) |
+| `upstream_peer_uri_san` | the verified server identity on a **successful** connection (`-` on a rejection: the handshake never completed) |
+
+Verdict, per line:
+
+- Presented SAN **is** the identity of the pod at `upstream_host` → the connection reached
+  the endpoint it dialled and the **pin** is wrong (check `sanURIs`, `cache/mtls.go`).
+- Presented SAN is **another** workload's, and that workload has a pod on the **source's
+  node** → a local pod's inbound terminated the connection, not `upstream_host`: the
+  cross-pod landing below (#1007/#1022). The node's newest mesh pod at that minute is
+  the usual suspect; its `in_tcp_<pod>` counter confirms it.
+- Presented SAN is another workload's on a **different** node → `upstream_host` was not
+  the terminating peer; record it and re-open the transport path, as for HTTP.
+
+### L4 stat keys and the L4 access log (#1023)
+
+**Stat keys.** Every L4 cluster reports under its own `alt_stat_name`, which the proxy
+bootstrap's `aether.cluster` stats tag turns into the `aether_cluster` label:
+
+| cluster (config_dump name) | `aether_cluster` |
+|---|---|
+| HTTP default `<svc>.<ns>.<domain>`, its port aliases and per-port clusters | `<ns>/<svc>` (unchanged) |
+| QUIC twin `quic:<fqdn>@<ns>/<sa>` | `<ns>/<svc>@<ns>/<sa>` (unchanged, #960) |
+| TCP floor `tcp:<fqdn>` | `tcp_<ns>/<svc>` |
+| TCP per-port or primary-port alias `tcp:<fqdn>:<port>` | `tcp_<ns>/<svc>_<port>` |
+| UDP floor `udp:<fqdn>` | `udp_<ns>/<svc>` |
+
+Before #1023 every L4 row reported as `<ns>/<svc>`, so
+`aether_cluster="aether-test/mixed-svc"` mixed the HTTP cluster with the `:9000` TCP
+cluster, and a tick could not be assigned to a cluster kind (#1007).
+
+- **`_`, not `:`.** Envoy sanitizes every stat name and tag value
+  (`Stats::Utility::sanitizeStatsName` rewrites `:` to `_`), so a `tcp:…:9000` key would
+  be exported as `tcp_…_9000` anyway, and a selector written as `tcp:.*` would match
+  nothing, forever. The key aether writes is the label you query. Namespaces and service
+  names are DNS labels, so `_` is unambiguous.
+- **No `tls_` key.** A TLSRoute SNI chain routes to its backends' **per-port**
+  `tcp:<fqdn>:<port>` clusters (the primary-port alias when the backendRef names the
+  primary port), never the floor: every backendRef is resolved by its port, and Gateway
+  API requires a port on a Service backendRef. So its connections count under
+  `tcp_<ns>/<svc>_<port>`, and a selector anchored on the floor key
+  (`^tcp_<ns>/<svc>$`) reads **nothing** for a TLSRoute backend (#1044; on kind,
+  `upstream_cluster=tcp_aether-test/l4tls-a_9443`). The chain itself is told apart in the
+  L4 access log (`filter_chain_name` = `cap_tls_*`).
+- **Cardinality** is one key per cluster (services × raw-TCP ports), never per endpoint
+  or per source.
+- **HTTP queries are unaffected**: an exact `<ns>/<svc>` or `<ns>/<svc>(@.*)?` selector
+  cannot match an L4 key. `//test/envoy_validate` runs the chart's own tag regex over the
+  keys, after Envoy's sanitization, and pins that.
+
+```promql
+# L4 only, every kind
+sum by (node, aether_cluster) (rate(envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_.*|udp_.*"}[5m]))
+# One service's L4 clusters: the floor and every port
+sum by (aether_cluster) (rate(envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_aether-test/mixed-svc(_[0-9]+)?"}[5m]))
+# A TLSRoute backend: always port-qualified (the _<port> suffix is required)
+sum by (aether_cluster) (rate(envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_aether-test/l4tls-a_[0-9]+"}[5m]))
+# Client-side SAN rejections on L4 clusters (the soak gate; never an instant query)
+max by (node, aether_cluster) (max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}[8h]))
+```
+
+A dashboard or alert that selected an L4 service by its bare key
+(`aether_cluster="aether-test/tcp-echo"`) reads **no series** from a #1023 proxy onward.
+Move it to the `tcp_` key.
+
+**The L4 access log.** Every `tcp_proxy` chain on a capture listener carries an OTel
+access logger on the stream **`log_name=aether_l4_access_logs`**, next to the HTTP stream
+`aether_access_logs`. That covers the TCP floor and its port spellings, per-port chains,
+TCPRoute-weighted chains, the any-port shim, TLSRoute SNI chains and the scoped-mode
+`cap_tcp_blackhole`.
+
+- **Same switch, same sink.** It is on exactly when the HTTP log is (MeshConfig
+  `accessLogsEnabled`; no new flag) and ships to the same `otel_collector` cluster.
+- **Connection-level.** One record when the downstream connection **closes** (no
+  `access_log_options` flush interval). Logged: every connection with a response flag
+  (`UF`, `UH`, `UO`, `NR`, …, which is where a SAN rejection or a blackholed flow lands)
+  plus the HTTP log's success sample (`aether.access_log.sample`, the same runtime key).
+- **Not logged:** the redirect-all passthrough `DefaultFilterChain` (all non-mesh egress),
+  the UDP capture listener (no per-datagram log), and the inbound side.
+- **A separate stream** because the shapes differ: no method, path, authority, status or
+  request id. It deliberately carries **no `reporter`** attribute. The collector's
+  identity counters (`aether_access_log_*`, k8s-talos-main otel-collector values) select
+  on `reporter`, because `log_name` is a resource attribute their transform cannot see,
+  and an L4 record must not enter the HTTP request counters.
+- **Fields:** `pod_name`, `pod_namespace`, `source_netns`, `source_spiffe_id` (the source),
+  `filter_chain_name`, `downstream_local_address` (the dialled VIP:port),
+  `downstream_remote_address`, `upstream_cluster`, `upstream_host`,
+  `upstream_local_address`, `requested_server_name` (SNI), `upstream_peer_uri_san`,
+  `response_flags`, `upstream_transport_failure_reason`,
+  `connection_termination_details`, `start_time`, `duration_ms`, `bytes_received`,
+  `bytes_sent`. The node is Envoy's resource attribute `node_name`.
+
+```
+# Every failed L4 connection
+_stream:{service.name="aether-proxy"} AND log_name:aether_l4_access_logs AND response_flags:!"-"
+# One service's L4 traffic
+# (upstream_cluster is the stat key, tcp_<ns>/<svc>[_<port>], never the tcp:<fqdn> config name)
+log_name:aether_l4_access_logs AND upstream_cluster:~"^tcp_aether-test/tcp-echo(_[0-9]+)?$"
+# TLSRoute chains only
+log_name:aether_l4_access_logs AND filter_chain_name:~"^cap_tls_"
+# One TLSRoute backend (per-port key: tcp_<ns>/<svc>_<port>, never the bare floor key)
+log_name:aether_l4_access_logs AND filter_chain_name:~"^cap_tls_" AND upstream_cluster:~"^tcp_aether-test/l4tls-a_[0-9]+$"
+```
+
+### Cross-pod L4 landings (#1007/#1022)
+
+**Symptom.** A node proxy's outbound L4 connection to `tcp-echo` or `mixed-svc` is
+rejected with `ssl_fail_verify_san`: it reached the inbound `:18008` listener of an
+**unrelated pod on the same node** (always the node's newest mesh pod), which presented
+its own SVID. The soak's `mp-dialer` shows it as one failure on every L4 leg at once.
+
+**Two defects, one proof order.**
+
+- **(b) #1022, Envoy.** `Network::Utility::execInNetworkNamespace` recorded the
+  namespace to return to from `/proc/self/ns/net`, which is the **main thread's**
+  namespace. `setns()` is per thread, so a worker calling it while the main thread was
+  briefly inside a pod netns (health-check connects every 5 s per pod, listener socket
+  creation) "restored" itself **into** that pod's netns and stayed there, creating its
+  later upstream sockets inside the pod where redirect-all capture diverted them. The
+  proxy carries `proxy/bazel/patches/envoy-aether1022-exec-in-netns-thread-self.patch`
+  (`/proc/thread-self/ns/net`, fallback `/proc/self/task/<tid>/ns/net`).
+- **(a) #1007, aether.** The capture listener's `use_original_dst: true` hands a
+  diverted connection to "the listener bound to its original address", looked up by the
+  address string only (`0.0.0.0:18008`, no netns), so the most recently added pod's
+  inbound listener wins.
+
+Fixing (a) alone **hides** (b): the leaked connection would then leave through the
+right endpoint's ORIGINAL_DST from a pod IP and succeed silently, and this counter would
+go quiet for the wrong reason. So (b) is proven on talos first, with (a) still in place.
+
+**The proof signal: TCP-floor connections on pods that serve no raw-TCP port.** The
+inbound listener's DEFAULT chain is the TCP floor (`in_tcp_<pod>`, stat prefix
+`inboundTCPFloorStatPrefix` in `agent/internal/xds/proxy/ingress.go`). Only a pod whose
+primary port is raw TCP can legitimately receive a connection there; per-port raw-TCP
+chains are `in_tcp_<pod>_<port>` and are excluded. The pod name is part of the METRIC
+NAME, so select by `__name__` pattern and read the RAW counters (a series is born on the
+first stray connection):
+
+```promql
+# Stray landings: default floor chain of every pod except tcp-echo (TCP-primary);
+# the per-port chains (…_<port>_downstream_cx_total) are legitimate and excluded.
+sum by (__name__) ({__name__=~"envoy_tcp_in_tcp_.*_downstream_cx_total",
+                    __name__!~"envoy_tcp_in_tcp_tcp_echo_.*|envoy_tcp_in_tcp_.*_[0-9]+_downstream_cx_total"})
+
+# The same over a window, with the pod lifted into a label (the soak gate, #1023).
+# max_over_time drops __name__, so the label is taken first, inside a subquery.
+max by (node, pod) (max_over_time((label_replace(
+  {__name__=~"envoy_tcp_in_tcp_.+_downstream_cx_total",
+   __name__!~"envoy_tcp_in_tcp_(tcp_echo_.+|.+_[0-9]+)_downstream_cx_total"},
+  "pod", "$1", "__name__", "envoy_tcp_in_tcp_(.+)_downstream_cx_total"))[8h:1m]))
+
+# The client side: SAN rejections on the L4 clusters, per node and per L4 cluster
+# (never an instant query). From #1023 on, the tcp_ keys hold ONLY L4 clusters, and
+# aether_cluster names the floor or the port the misdirected connection was dialled on.
+max by (node, aether_cluster) (max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}[8h]))
+# ...on a pre-#1023 proxy the same ticks read under the bare keys, mixed with HTTP:
+max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"aether-test/(tcp-echo|mixed-svc)"}[8h])
+
+# The landing pod's inbound sees the client abort after its SAN check
+max_over_time(envoy_listener_inbound_ssl_connection_error_total[8h]) > 0   # by aether_pod, node
+```
+
+The exclusion list is the soak's: `tcp-echo` is its only TCP-primary workload. The
+stat keys cannot derive it (an HTTP-primary service with a raw-TCP port, like
+`mixed-svc`, has a `tcp_` floor key too), so a cluster with another TCP-primary
+workload adds it to the `__name__!~` alternation. A pod whose 5-character hash suffix
+happens to be all digits is excluded along with the per-port chains; that is rare
+(about 0.1% of pods) and errs toward a missed landing, not a false one.
+
+Attribute a tick by joining on node and minute. Since #1023 the L4 access log carries the
+whole join in one record (see "L4 hops" above): the source pod, the dialled VIP:port,
+the chosen `tcp:` cluster, the intended `upstream_host` and the rejection. Before it,
+the join was three counters: the `verify_san` +1 on node N, a new or incremented
+`in_tcp_<pod>` series for a pod on N, and that pod's `inbound_ssl_connection_error`
+climbing in the same minute (the 2026-09-27 16:37Z w04 event in #1007 is the worked
+example).
+
+**Reading it.**
+
+| build | expected |
+|---|---|
+| rev242 and earlier (no thread-self patch) — the negative control | non-zero on svc-1..5, prober, k6-soak-loader, udp-dialer (and echo, uds-cr-echo, udp-echo); ~1 burst per node per hour; `verify_san` ticks on `tcp-echo`/`mixed-svc` (23 over the rev242 soak) |
+| rev243 (unpatched, 1h47m generation, 2026-09-27 22:53Z–09-28 00:39Z) | 6 stray floor connections, all on `prober` pods (w05 2, w03 3, w04 1), and 1 `verify_san` on w03 `tcp-echo` |
+| first proxy with the #1022 patch, #1007 still unfixed | **no new series and no increments** after every node's proxy has rolled onto it (series from older generations age out with them) |
+
+A landing that persists on the patched proxy **refutes** #1022 as the (only) cause:
+something else moves node-proxy sockets into pod netns — keep #1007 unmerged and
+re-open the attribution. Only once the patched proxy reads zero for a full soak does
+the #1007 capture fix merge; after it, this counter no longer discriminates (b).
+
 ### Known-unexercised code paths
 
 Recovery branches that have never run in production. **This is the system working, not a
@@ -1865,6 +2825,66 @@ Two guards remain and still earn their place:
 A node-wide demotion wave aligned with a proxy roll is therefore a bug, not a
 tuning problem — capture `aether_agent_liveness_health_transitions_total` and
 the agent log and reopen #815.
+
+### Pod held in Init by aether-identity-ready (#1053)
+
+The section above is the **inbound** half of "no traffic before identity": an
+endpoint is not advertised until an mTLS handshake with the pod's own inbound
+listener proves its SVID is loaded. Since #1053 the **egress** half is
+symmetric: the controller's pod-mutating webhook injects the
+`aether-identity-ready` init container, first in line, into every mesh pod it
+admits (`controller.webhook.identityGate.enabled`, default on; never with
+`spire.enabled=false`). It asks the SPIRE Workload API — a `csi.spiffe.io`
+volume mounted into the init container only — for the pod's X.509 SVID and
+exits 0 once SPIRE has issued it. Until then the app containers do not start,
+so the app cannot send before the node proxy has a client certificate for it.
+
+Without it, a pod that sends in its first seconds gets `503 UF`
+`upstream_reset_before_response_started{connection_timeout}` (and `UO`/`URX`
+once the pending queue overflows): the Broker API subscription is open, but
+SPIRE delivers the initial SVID only after its registration entry is created
+and synced to the node's spire-agent — `processed SVID update svids=0` twice,
+then `svids=1 update=initial` 7.46 s after the subscribe on talos-main
+(2026-09-28, #1053). Why not block the CNI ADD instead: that makes SPIRE a hard
+dependency of sandbox creation, and the ADD races SPIRE's own pod-list
+attestation. Gating the app container keeps the sandbox SPIRE-independent.
+
+Symptom of a gate that does not release: `kubectl get pod` shows
+`Init:0/N` (N counts the gate) and the pod never starts.
+
+```bash
+# What it is waiting for — one WARN line every 10s, with the socket and the last error
+kubectl -n <ns> logs <pod> -c aether-identity-ready
+#   level=WARN msg="still waiting for SPIRE to issue this pod's SVID; ..." socket=/run/secrets/workload-spiffe-uds/socket elapsed=40s attempts=78 last_error="rpc error: code = PermissionDenied desc = no identity issued"
+
+# On release (normal: a few seconds after pod creation)
+#   level=INFO msg="identity ready: SPIRE issued this pod's SVID; releasing the pod's containers" spiffe_id=spiffe://aether.internal/ns/<ns>/sa/<sa> elapsed=6.9s
+```
+
+Read `last_error`:
+
+| `last_error` | Meaning | Fix |
+|---|---|---|
+| `PermissionDenied … no identity issued` | spire-agent is up and attested the pod, but **no registration entry matches it** | Check the `ClusterSPIFFEID` `podSelector`/`namespaceSelector` covers the pod (`kubectl get clusterspiffeid -o yaml`); an entry keyed on `k8s:container-name`/`k8s:container-image` never matches the init container. Nothing matching also means the node agent's Broker API subscription gets nothing: the pod could not have spoken mTLS anyway |
+| `Unavailable … connect: no such file or directory` / `connection refused` | No Workload API on the node | spire-agent not running on this node, or the SPIFFE CSI driver is not (`kubectl get pods -A -o wide | grep -E "spire-agent|spiffe-csi"`); a `FailedMount … csi.spiffe.io` event on the pod means the driver is missing entirely |
+| `DeadlineExceeded` | The spire-agent accepted the call but did not answer within 15 s | spire-agent overloaded or wedged; check its log |
+
+It fails **closed** on purpose (no default timeout): a pod whose identity never
+comes cannot talk to the mesh, and `Init` with a reason is a better failure than
+Running with 503s. Escape hatches, narrowest first: annotate the pod
+`aether.io/identity-gate: "false"` (the webhook skips it; its first requests may
+fail until the SVID lands), set `controller.webhook.identityGate.timeout` (the
+init container exits 1 after that long and the kubelet retries it with backoff —
+or fails the pod if its `restartPolicy` is `Never`), or disable the gate
+chart-wide. The webhook is `failurePolicy: Ignore`, so pods admitted while no
+controller replica answers get no gate (and no mesh label) at all.
+
+The Workload API answers as soon as the node's spire-agent holds the pod's
+entry; the node agent's Broker API stream receives the same entry from the same
+spire-agent cache. The proxy fetches the client certificate on demand at connect
+time (#842/#843), so a connect in the sub-second gap before the node agent
+publishes the SVID waits for it (within `connect_timeout`) rather than failing: the gate has no settle
+delay.
 
 ### #815 release two: every pod event used to re-warm every cluster on the node
 

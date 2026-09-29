@@ -43,7 +43,15 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          repository-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # main.yaml's `diff` is the one job that saves it (docs/runbook.md,
+          # "CI: external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh //website:site
       # Local build on purpose: this is one genrule over a few hundred kilobytes
       # of markdown (~1 min cold), so the BuildBuddy round trip that `ci` and
       # `publish` need would cost more than it saves.

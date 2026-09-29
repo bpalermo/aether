@@ -113,6 +113,9 @@ type adsControlPlane struct {
 	// resources is the snapshot currently served, kept so a rotation can
 	// replace ONE resource type and leave the rest alone.
 	resources map[resourcev3.Type][]types.Resource
+	// stop tears the gRPC server down (closing every stream and unlinking the
+	// socket); also registered as a test cleanup.
+	stop func()
 }
 
 // rotateSecrets republishes the snapshot with a new generation of secrets and
@@ -153,6 +156,33 @@ func (cp *adsControlPlane) rotateSecrets(t *testing.T, version string, secrets [
 // this shape shows it.
 func startADSControlPlane(t *testing.T, resources map[resourcev3.Type][]types.Resource) *adsControlPlane {
 	t.Helper()
+	return startADSControlPlaneWithHook(t, resources, nil)
+}
+
+// startADSControlPlaneWithHook is startADSControlPlane plus onDelta, called
+// with every delta request BEFORE the server processes it -- where the node
+// agent's on-demand observer sits (agent/internal/xds/server/odcds.go). nil
+// is no hook.
+func startADSControlPlaneWithHook(t *testing.T, resources map[resourcev3.Type][]types.Resource, onDelta func(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest)) *adsControlPlane {
+	t.Helper()
+
+	// A short path: AF_UNIX addresses are capped at 107 bytes and a Bazel test
+	// tmpdir is long enough to matter.
+	dir, err := os.MkdirTemp("", "aetherads")
+	if err != nil {
+		t.Fatalf("temp dir for xds socket: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return startADSControlPlaneOn(t, filepath.Join(dir, "xds.sock"), resources, onDelta)
+}
+
+// startADSControlPlaneOn is startADSControlPlaneWithHook on a given socket
+// path, so a test can stop the control plane (adsControlPlane.stop) and start
+// a NEW one where the proxy's bootstrap already points -- an agent restart as
+// the proxy sees it: its ADS stream drops, and it reconnects to a server with
+// a fresh process's state.
+func startADSControlPlaneOn(t *testing.T, socketPath string, resources map[resourcev3.Type][]types.Resource, onDelta func(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest)) *adsControlPlane {
+	t.Helper()
 
 	snapshot, err := cachev3.NewSnapshot("1", resources)
 	if err != nil {
@@ -164,21 +194,12 @@ func startADSControlPlane(t *testing.T, resources map[resourcev3.Type][]types.Re
 		t.Fatalf("set ADS snapshot: %v", err)
 	}
 
-	// A short path: AF_UNIX addresses are capped at 107 bytes and a Bazel test
-	// tmpdir is long enough to matter.
-	dir, err := os.MkdirTemp("", "aetherads")
-	if err != nil {
-		t.Fatalf("temp dir for xds socket: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	socketPath := filepath.Join(dir, "xds.sock")
-
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen on %s: %v", socketPath, err)
 	}
 	gs := grpc.NewServer()
-	srv := serverv3.NewServer(context.Background(), cache, xdsTrace(t))
+	srv := serverv3.NewServer(context.Background(), cache, xdsTrace(t, onDelta))
 	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(gs, srv)
 	// The node agent registers the per-type services alongside ADS on the same
 	// socket (common/xds/xds.go), and the certificate selector's own
@@ -188,7 +209,7 @@ func startADSControlPlane(t *testing.T, resources map[resourcev3.Type][]types.Re
 	go func() { _ = gs.Serve(ln) }()
 	t.Cleanup(gs.Stop)
 
-	return &adsControlPlane{socketPath: socketPath, cache: cache, resources: resources}
+	return &adsControlPlane{socketPath: socketPath, cache: cache, resources: resources, stop: gs.Stop}
 }
 
 // xdsTrace logs what the proxy asks for and what the control plane answers
@@ -200,10 +221,17 @@ func startADSControlPlane(t *testing.T, resources map[resourcev3.Type][]types.Re
 // outage was the first: the subscription was deduplicated away inside Envoy and
 // no request was ever sent, which no amount of control-plane logging would have
 // shown.
-func xdsTrace(t *testing.T) serverv3.Callbacks {
-	secretsOnly := func(typeURL string) bool { return strings.HasSuffix(typeURL, "v3.Secret") }
+func xdsTrace(t *testing.T, onDelta func(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest)) serverv3.Callbacks {
+	// Secrets (#842) and load assignments (#1008): the two resource types a
+	// delta WatchMap has been caught deduplicating away.
+	secretsOnly := func(typeURL string) bool {
+		return strings.HasSuffix(typeURL, "v3.Secret") || strings.HasSuffix(typeURL, "v3.ClusterLoadAssignment")
+	}
 	return &serverv3.CallbackFuncs{
-		StreamDeltaRequestFunc: func(_ int64, req *discoverygrpc.DeltaDiscoveryRequest) error {
+		StreamDeltaRequestFunc: func(streamID int64, req *discoverygrpc.DeltaDiscoveryRequest) error {
+			if onDelta != nil {
+				onDelta(streamID, req)
+			}
 			if secretsOnly(req.GetTypeUrl()) {
 				t.Logf("[ads-delta]  SUBSCRIBE add=%v remove=%v nonce=%q",
 					req.GetResourceNamesSubscribe(), req.GetResourceNamesUnsubscribe(), req.GetResponseNonce())
@@ -337,6 +365,29 @@ func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, opts adsOptions) *
 		resourcev3.SecretType:   secretResources(t, p, []string{spiffeSourceA, spiffeSourceB, spiffeNode}),
 	})
 
+	launchEnvoyOverADS(t, bin, cp, adminPort)
+
+	h := &adsProxyHandle{
+		proxyHandle: &proxyHandle{
+			addrA: fmt.Sprintf("127.0.0.1:%d", portA),
+			addrB: fmt.Sprintf("127.0.0.1:%d", portB),
+		},
+		adminAddr: fmt.Sprintf("127.0.0.1:%d", adminPort),
+		cp:        cp,
+	}
+	// The listeners arrive over LDS, so this also proves the stream is up.
+	waitListening(t, h.addrA)
+	waitListening(t, h.addrB)
+	return h
+}
+
+// launchEnvoyOverADS runs the pinned proxy against a production-shaped
+// bootstrap: nothing but the ADS cluster in static_resources, CDS and LDS over
+// one delta-ADS stream to cp, admin on 127.0.0.1:adminPort. The process is
+// killed at test cleanup.
+func launchEnvoyOverADS(t *testing.T, bin string, cp *adsControlPlane, adminPort int) {
+	t.Helper()
+
 	bs := &bootstrapv3.Bootstrap{
 		Node:  &corev3.Node{Id: envoyNodeID, Cluster: "aether"},
 		Admin: &bootstrapv3.Admin{Address: socketAddress("127.0.0.1", adminPort)},
@@ -379,19 +430,6 @@ func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, opts adsOptions) *
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-
-	h := &adsProxyHandle{
-		proxyHandle: &proxyHandle{
-			addrA: fmt.Sprintf("127.0.0.1:%d", portA),
-			addrB: fmt.Sprintf("127.0.0.1:%d", portB),
-		},
-		adminAddr: fmt.Sprintf("127.0.0.1:%d", adminPort),
-		cp:        cp,
-	}
-	// The listeners arrive over LDS, so this also proves the stream is up.
-	waitListening(t, h.addrA)
-	waitListening(t, h.addrB)
-	return h
 }
 
 // setMaxRequestsPerConnection sets the cluster's upstream

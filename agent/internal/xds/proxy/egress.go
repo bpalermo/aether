@@ -104,6 +104,82 @@ func UDPClusterName(serviceName, meshDomain string) string {
 	return "udp:" + base
 }
 
+// L4 stat keys (aether#1023). Every L4 cluster reports under its OWN
+// alt_stat_name, which the chart's aether.cluster stats tag lifts into the
+// aether_cluster label:
+//
+//	tcp_<ns>/<svc>          the TCP floor            tcp:<fqdn>
+//	tcp_<ns>/<svc>_<port>   a TCP per-port or primary-port alias cluster
+//	                                                 tcp:<fqdn>:<port>
+//	udp_<ns>/<svc>          the UDP floor            udp:<fqdn>
+//
+// Until #1023 all of them passed the bare "<ns>/<svc>" service key, so the
+// floor, the primary-port alias and every per-port cluster reported into ONE
+// cluster.<ns>/<svc>.* tree -- and for a service with an HTTP port that tree
+// was also the HTTP cluster's. A tick could not be assigned to a cluster kind:
+// the #1007 attribution had to rule the HTTP side out from access logs.
+//
+// The separator is "_", not the ":" the cluster NAMES use, on purpose: Envoy
+// sanitizes every stat name and tag value (Stats::Utility::sanitizeStatsName
+// rewrites ":" to "_"), so a "tcp:<ns>/<svc>:<port>" alt_stat_name would
+// surface as aether_cluster="tcp_<ns>/<svc>_<port>" anyway, and a gate written
+// against the "tcp:" spelling would match nothing, forever. Writing the
+// sanitized form keeps the config and the label identical. It is unambiguous:
+// namespaces and service names are DNS labels and cannot contain "_".
+//
+// There is no "tls_" key: a TLSRoute SNI chain routes to its backends'
+// PORT-QUALIFIED tcp: clusters, "tcp:<fqdn>:<port>" -- the per-port cluster, or
+// the primary-port alias when the backendRef names the primary port -- because
+// l4route resolves every backendRef through TCPPortClusterName, and Gateway
+// API's CRD validation requires a port on a Service backendRef ("Must have
+// port for Service reference"). So its connections report under
+// tcp_<ns>/<svc>_<port>, not the floor's tcp_<ns>/<svc> (aether#1044; kind:
+// upstream_cluster=tcp_aether-test/l4tls-a_9443). Only a portless ref, which
+// that validation rejects, would fall back to the floor. The chain itself is
+// told apart by the L4 access log's filter_chain_name (cap_tls_*).
+//
+// Cardinality: one key per CLUSTER, never per endpoint or per source --
+// bounded by services x raw-TCP ports, the same set the cluster names already
+// are. The keys carry no dot, so the chart's tag regex `^cluster\.(([^.]+)\.)`
+// captures each one whole (pinned by //test/envoy_validate against the chart's
+// own regex, after Envoy's sanitization). The HTTP keys ("<ns>/<svc>",
+// "<ns>/<svc>@<ns>/<sa>") are untouched, and a query selecting an HTTP
+// service by exact key or by `<ns>/<svc>(@.*)?` cannot match an L4 key.
+//
+// Each returns "" for an empty service key (Envoy then keys stats by the
+// cluster's own, already unique, name).
+const (
+	L4StatKeyTCPPrefix = "tcp_"
+	L4StatKeyUDPPrefix = "udp_"
+)
+
+// TCPStatKey is the alt_stat_name of a service's TCP floor cluster.
+func TCPStatKey(serviceKey string) string {
+	if serviceKey == "" {
+		return ""
+	}
+	return L4StatKeyTCPPrefix + serviceKey
+}
+
+// TCPPortStatKey is the alt_stat_name of a service's port-qualified TCP
+// cluster (per-port, or the primary-port alias). Port 0 is the floor,
+// mirroring TCPPortClusterName.
+func TCPPortStatKey(serviceKey string, port uint32) string {
+	base := TCPStatKey(serviceKey)
+	if base == "" || port == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s_%d", base, port)
+}
+
+// UDPStatKey is the alt_stat_name of a service's UDP floor cluster.
+func UDPStatKey(serviceKey string) string {
+	if serviceKey == "" {
+		return ""
+	}
+	return L4StatKeyUDPPrefix + serviceKey
+}
+
 // ServiceFromClusterName maps a data-plane cluster name (a mesh authority,
 // <svc>.<ns>.<meshDomain>) back to the namespace-qualified "<ns>/<svc>" service
 // key (proposal 020 Part 1). ok is false when the name is not under the mesh
@@ -115,7 +191,42 @@ func UDPClusterName(serviceName, meshDomain string) string {
 // the name unique per source identity; the prefix keeps it out of every
 // ODCDS/authority namespace (a client can never dial a "quic:" authority).
 func QUICClusterName(serviceName, meshDomain, sourceSAKey string) string {
-	return "quic:" + ServiceClusterName(serviceName, meshDomain) + "@" + sourceSAKey
+	return quicClusterPrefix + ServiceClusterName(serviceName, meshDomain) + "@" + sourceSAKey
+}
+
+// quicClusterPrefix is the prefix every `quic:` twin name carries.
+const quicClusterPrefix = "quic:"
+
+// IsQUICClusterName reports whether name is shaped like a `quic:` twin name.
+// It does not validate the name; ParseQUICClusterName does.
+func IsQUICClusterName(name string) bool {
+	return strings.HasPrefix(name, quicClusterPrefix)
+}
+
+// ParseQUICClusterName is the inverse of QUICClusterName: it splits a twin name
+// into the destination's "<ns>/<svc>" service key and the source's "<ns>/<sa>"
+// key. ok is false unless name is exactly what QUICClusterName produces for
+// them. The on-demand CDS path (issue #1020) validates a requested name with
+// it before building a twin, so a name with a port, a foreign domain, an extra
+// label or an extra path segment is refused.
+func ParseQUICClusterName(name, meshDomain string) (service, sourceSAKey string, ok bool) {
+	rest, found := strings.CutPrefix(name, quicClusterPrefix)
+	if !found {
+		return "", "", false
+	}
+	authority, source, found := strings.Cut(rest, "@")
+	if !found {
+		return "", "", false
+	}
+	service, ok = ServiceFromClusterName(authority, meshDomain)
+	if !ok || ServiceClusterName(service, meshDomain) != authority {
+		return "", "", false
+	}
+	ns, sa, found := strings.Cut(source, "/")
+	if !found || ns == "" || sa == "" || strings.ContainsAny(sa, "/@") || strings.Contains(ns, "@") {
+		return "", "", false
+	}
+	return service, source, true
 }
 
 // QUICServerName is the SNI a `quic:` cluster presents and the server_names
@@ -173,25 +284,59 @@ func SourceSAKeyFromSpiffeID(spiffeID string) string {
 }
 
 // QUICClusterFrom derives a source's HTTP/3 cluster from the destination's h2
-// service cluster: the same EDS resource (so the same endpoints, the same
-// subset selectors, the same outlier detection and circuit breakers -- a
-// clone), renamed, with HTTP/3 protocol options and the QUIC upstream socket
-// presenting clientSpiffeID. base is the entry's BARE cluster (no transport
-// socket); the caller passes the same sanURIs it would give InjectUpstreamMTLS
-// for the h2 twin, so the two transports pin the same server identity, and
-// sni = QUICServerName(<the h2 twin's port SNI>, <authority>), so the
-// destination demuxes to the same inbound chain.
-func QUICClusterFrom(base *clusterv3.Cluster, name, clientSpiffeID, validationContextName string, sanURIs []string, sni string) *clusterv3.Cluster {
+// service cluster: the same endpoints, the same subset selectors, the same
+// outlier detection and circuit breakers -- a clone -- renamed, with HTTP/3
+// protocol options and the QUIC upstream socket presenting clientSpiffeID.
+// base is the entry's BARE cluster (no transport socket); the caller passes the
+// same sanURIs it would give InjectUpstreamMTLS for the h2 twin, so the two
+// transports pin the same server identity, and sni = QUICServerName(<the h2
+// twin's port SNI>, <authority>), so the destination demuxes to the same
+// inbound chain.
+//
+// The twin subscribes to its OWN EDS resource, named after the twin (the
+// control plane publishes the base's load assignment under that name too:
+// LoadAssignmentAlias). It must not share the base's EDS name (aether#1008).
+// Envoy's delta-ADS WatchMap deduplicates subscription interest per (type_url,
+// resource name): a twin added AFTER its base is subscribed -- a new
+// ServiceAccount's first pod on the node -- adds nothing to
+// resource_names_subscribe, no request goes out, the control plane has no
+// reason to answer (the resource did not change), and the twin sits in warming
+// until its 15 s initial_fetch_timeout while every request from that source is
+// 503/NC. The same mechanism as the SDS outage of #842.
+//
+// idleTimeout is the twin pool's idle timeout (the agent's
+// --east-west-quic-idle-timeout; <= 0 means config.DefaultQUICTwinIdleTimeout).
+// It is deliberately shorter than the h2 base's config.UpstreamIdleTimeout so
+// no idle h3 connection outlives a destination's hot-restart parent
+// (aether#1054).
+func QUICClusterFrom(base *clusterv3.Cluster, name, clientSpiffeID, validationContextName string, sanURIs []string, sni string, idleTimeout time.Duration) *clusterv3.Cluster {
 	cl, _ := proto.Clone(base).(*clusterv3.Cluster)
 	cl.Name = name
+	if cl.EdsClusterConfig != nil {
+		cl.EdsClusterConfig.ServiceName = name
+	}
 	cl.AltStatName = QUICAltStatName(base.GetAltStatName(), SourceSAKeyFromSpiffeID(clientSpiffeID))
 	if cl.TypedExtensionProtocolOptions == nil {
 		cl.TypedExtensionProtocolOptions = map[string]*anypb.Any{}
 	}
-	cl.TypedExtensionProtocolOptions[config.UpstreamHTTPProtocolOptionsKey] = config.TypedConfig(config.Http3ProtocolOptions())
+	cl.TypedExtensionProtocolOptions[config.UpstreamHTTPProtocolOptionsKey] = config.TypedConfig(config.Http3ProtocolOptions(idleTimeout))
 	cl.TransportSocketMatches = nil
 	cl.TransportSocketMatcher = nil
 	cl.TransportSocket = QUICUpstreamTransportSocket(clientSpiffeID, validationContextName, sanURIs, sni)
+	// A twin never pools per downstream connection, whatever the base says
+	// (aether#1021). The option exists to keep one source's upstream connection
+	// -- and so its certificate -- from serving another source; a twin carries
+	// exactly ONE identity (its source ServiceAccount's SVID, named statically
+	// in the transport socket above), so every downstream connection routed
+	// here is already the same identity and the option could only multiply
+	// QUIC connections by the number of app->proxy connections. The #842 h2
+	// base does not set it either (the source identity is in its pool key);
+	// this line pins the twin's half so a future base change cannot turn every
+	// k6/app keep-alive connection into its own QUIC connection.
+	// Pods of the SAME ServiceAccount share a twin's connection; that is the
+	// mesh's identity model (identity = ServiceAccount), the same partition
+	// the h2 pool key has had since #842.
+	cl.ConnectionPoolPerDownstreamConnection = false
 	return cl
 }
 
@@ -341,10 +486,15 @@ func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []st
 		},
 		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
 			EdsConfig: config.XDSConfigSourceADS(),
-			// EDS resource name: the default cluster shares the bare-service EDS
-			// (all endpoints); a per-port cluster uses its own name so its EDS
-			// membership is filtered to pods advertising that port (safe new-port
-			// rollout). The cache keys load assignments by this name.
+			// EDS resource name: the default cluster subscribes to the
+			// bare-service EDS (all endpoints); a per-port cluster uses its own
+			// name so its EDS membership is filtered to pods advertising that
+			// port (safe new-port rollout). A port alias also uses its own name,
+			// with the bare membership republished under it
+			// (LoadAssignmentAlias): NO cluster but the default may subscribe
+			// to the bare name, or a later-added one is deduplicated by the
+			// delta-ADS WatchMap into 15 s of warming (aether#1013). The cache
+			// keys load assignments by this name.
 			ServiceName: edsServiceName,
 		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
@@ -568,7 +718,8 @@ func isWaypointEndpoint(lb *endpointv3.LbEndpoint) bool {
 // HasWaypointEndpoint reports whether any endpoint of the load assignment is
 // dialed through a remote cluster's east/west waypoint tunnel (proposal 019).
 // The east-west QUIC fan-out (proposal 038 Phase 4b) uses it to keep such a
-// service on h2: a `quic:` twin shares the h2 cluster's EDS resource but
+// service on h2: a `quic:` twin's load assignment is the h2 cluster's (an
+// alias under the twin's own EDS name, aether#1008) but it
 // carries ONE QUIC socket and no transport-socket matcher, so it would dial
 // the waypoint's tunnel address over UDP with the direct-path SNI -- and the
 // waypoint tunnel has no QUIC leg (cross-cluster QUIC is the last step of

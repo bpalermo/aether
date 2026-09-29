@@ -1,3 +1,45 @@
 # Source patches applied to the registry-fetched @envoy module (single_version_override
-# in MODULE.bazel). Each one is an upstream PR carried until it lands in a pin.
+# in MODULE.bazel). Each one is an upstream PR (or an aether fix not yet proposed
+# upstream) carried until it lands in a pin.
 exports_files(glob(["*.patch"]))
+
+# The carried patches' own Envoy tests, run by the proxy workspace's `bazel test //...`
+# (tests under @envoy are not part of //... otherwise). Add a patch's test targets here
+# when the patch adds or changes one; drop them with the patch.
+test_suite(
+    name = "carried_patch_tests",
+    tests = [
+        # envoy-aether1022-exec-in-netns-thread-self.patch (aether#1022):
+        # execInNetworkNamespace restores the CALLING THREAD's netns.
+        "@envoy//test/common/network:exec_in_netns_thread_test",
+        "@envoy//test/common/network:utility_test",
+        # envoy-aether1050-hotrestart-nonblocking-forward.patch (aether#1050):
+        # non-blocking parent UDP forwarding, child keeps servicing it while waiting
+        # for a reply, bounded waits. The child test's
+        # ServicesUdpForwardingWhileWaitingForParentStats is the deadlock interleaving.
+        "@envoy//test/server:hot_restart_impl_test",
+        "@envoy//test/server:hot_restarting_base_test",
+        "@envoy//test/server:hot_restarting_child_test",
+        "@envoy//test/server:hot_restarting_parent_test",
+        # envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch (aether#1054):
+        # the child's inherited UDP listeners stay paused until the parent has exited
+        # (hot_restarting_child_test DrainsCompleteOnlyAfterParentHasExited), and idle
+        # HTTP/3 connections drain themselves inside the drain window
+        # (conn_manager_impl_test Http3IdleConnection*). The patch's
+        # quic_http_integration_test case is not listed: quiche's test tooling needs
+        # Envoy's platform test headers, which this downstream module does not wire
+        # up, so it runs in the Envoy workspace only.
+        "@envoy//test/common/http:conn_manager_impl_test",
+        # envoy-aether1054c-paused-udp-listener-no-read.patch (aether#1054): a paused
+        # child UDP listener runs its read-ready hook on an injected read but never reads
+        # the parent's socket (udp_listener_impl_test InjectedReadWhilePausedDoesNotReadTheSocket).
+        "@envoy//test/common/network:udp_listener_impl_test",
+        # envoy-aether1054b-quic-time-wait-before-forward.patch (aether#1054): a draining
+        # parent leaves time-wait connection IDs to quiche instead of forwarding them. Its
+        # test (envoy_quic_dispatcher_test
+        # ProcessPacketHandlesTimeWaitConnectionLocallyWhenNotAccepting) is not listed:
+        # like every @envoy//test/common/quic and QUIC integration target it needs quiche's
+        # test tooling, which this downstream module does not wire up (see aether1054 above),
+        # so it runs in the Envoy workspace only.
+    ],
+)

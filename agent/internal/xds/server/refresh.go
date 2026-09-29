@@ -169,6 +169,10 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 			// so expiry must be time-driven, not event-driven.
 			r.cache.PruneObservedDependencies()
 			r.cache.SignalIfRetentionExpired()
+			// Persisted east-west QUIC pairs never fetched on demand since
+			// this agent started are dropped once the fetch window elapses
+			// (issue #1033).
+			r.cache.PruneUnfetchedQUICPairs()
 		case <-timer.C:
 			loop.reload(ctx)
 		}

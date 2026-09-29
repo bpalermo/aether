@@ -25,9 +25,12 @@ Parsing contract (deliberately strict — it fails the build rather than silentl
 validating against the wrong binary):
 
   * Find the first line of the form `repository: <ref>` whose `<ref>` is
-    exactly `image_reference("proxy")` from //bazel/img:registry.bzl — the one
-    registry setting (proposal 040) — so a pin into any other registry is not
-    silently accepted.
+    exactly one of `proxy_pin_references()` from //bazel/img:registry.bzl — the
+    one registry setting (proposal 040): `image_reference("proxy")`, or a
+    PROXY_PIN_LEGACY_REFERENCES entry (the ghcr.io coordinate the pin keeps
+    until the first proxy release after the Quay cut-over re-pins it) — so a pin
+    into any other registry is not silently accepted. The image is fetched from
+    whichever registry the pin names.
   * Starting from the line after it, scan forward while still inside that
     mapping (indentation >= the `repository:` key's indentation; blank lines and
     comment-only lines do not end the block) for a line `digest: "sha256:<64
@@ -45,7 +48,7 @@ credentials. If it is ever made private, `docker login <registry>` locally and a
 `_fetch_manifest` failure path says so.
 """
 
-load("//bazel/img:registry.bzl", "image_reference", "registry_token_url")
+load("//bazel/img:registry.bzl", "proxy_pin_references", "registry_token_url")
 
 _ENVOY_PATH_IN_IMAGE = "usr/local/bin/envoy"
 
@@ -101,7 +104,7 @@ def _parse_proxy_pin(mctx):
         if not stripped.startswith("repository:"):
             continue
         candidate = _scalar(stripped[len("repository:"):])
-        if candidate != image_reference("proxy"):
+        if candidate not in proxy_pin_references():
             continue
 
         repository = candidate
@@ -121,10 +124,10 @@ def _parse_proxy_pin(mctx):
     if repository == None:
         fail((
             "{label}: could not find the aether-proxy image pin. Expected a line " +
-            "`repository: {want}` (image_reference(\"proxy\") in " +
-            "//bazel/img:registry.bzl). //test/envoy_validate validates against " +
+            "`repository: <ref>` with <ref> one of {want} (proxy_pin_references() " +
+            "in //bazel/img:registry.bzl). //test/envoy_validate validates against " +
             "the Envoy inside that image, so the pin cannot be guessed (aether #709)."
-        ).format(label = _VALUES_LABEL, want = image_reference("proxy")))
+        ).format(label = _VALUES_LABEL, want = proxy_pin_references()))
     if digest == None:
         fail((
             "{label}: found `repository: {repo}` but no `digest:` key inside the " +
@@ -302,7 +305,7 @@ _proxy_envoy = repository_rule(
         "architecture": attr.string(mandatory = True, doc = "OCI platform.architecture, e.g. amd64."),
         "digest": attr.string(mandatory = True, doc = "sha256 digest of the image index or manifest."),
         "os": attr.string(default = "linux", doc = "OCI platform.os."),
-        "registry": attr.string(mandatory = True, doc = "Registry host, e.g. ghcr.io."),
+        "registry": attr.string(mandatory = True, doc = "Registry host, e.g. quay.io."),
         "repository": attr.string(mandatory = True, doc = "Repository path within the registry."),
     },
 )

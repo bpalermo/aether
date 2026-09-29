@@ -179,16 +179,30 @@ agent:
   # visibility (shared etcd) and a shared SPIRE trust domain across clusters.
   # Default off.
   eastWestWaypoint: false
-  # East-west QUIC (proposal 038 Phase 4b) has NO value: it is unconditional.
-  # Every service in a node's dependency set is dialled over HTTP/3 (mTLS over
-  # QUIC, UDP 18008) by every local ServiceAccount, through one per-source
-  # `quic:` cluster each -- local ServiceAccounts x services per node; the agent
-  # logs the count as "east-west QUIC fan-out". Services with endpoints behind
-  # the east/west waypoint stay h2. MESH-WIDE PREREQUISITE (until
-  # envoyproxy/envoy#47740 is in a plain proxy pin): every workload SVID must
-  # carry the DNS SANs "<sa>.<ns>.<meshDomain>" and "*.<sa>.<ns>.<meshDomain>"
-  # (dnsNameTemplates on the workloads' ClusterSPIFFEID) -- see
-  # docs/configuration.md, "SPIRE", and docs/runbook.md, "East-west QUIC".
+  # East-west QUIC (proposal 038 Phase 4b) has NO on/off value: it is
+  # unconditional (#979). Every service in a node's dependency set is dialled
+  # over HTTP/3 (mTLS over QUIC, UDP 18008) instead of HTTP/2 by each local
+  # ServiceAccount that has dialled it, through one per-source `quic:` cluster
+  # per (ServiceAccount, destination) pair -- built on the pair's first request
+  # (on-demand CDS, #1020), so the cost is the pairs actually used, bounded by
+  # local ServiceAccounts x dependency-set services per node; the agent logs it
+  # as "east-west QUIC fan-out". Services with endpoints behind the east/west
+  # waypoint stay h2. MESH-WIDE PREREQUISITE (until envoyproxy/envoy#47740 is in
+  # a plain proxy pin): every workload SVID must carry the DNS SANs
+  # "<sa>.<ns>.<meshDomain>" and "*.<sa>.<ns>.<meshDomain>" (dnsNameTemplates on
+  # the workloads' ClusterSPIFFEID) -- see docs/configuration.md, "SPIRE", and
+  # docs/runbook.md, "East-west QUIC".
+  # Idle timeout of every east-west QUIC twin's upstream connection pool
+  # (#1054); h1/h2 pools keep 30s. An idle source h3 connection receives no
+  # GOAWAY when the destination proxy hot-restarts, so it must close on its
+  # own before the destination's parent exits: once the parent is gone, the
+  # connection's next packet reaches the child and draws a stateless reset
+  # (the source's request fails `503 UC ... Received_stateless_reset`). The
+  # chart REFUSES to render unless this + 5s < proxy.hotRestart.parentShutdownTime
+  # (the agent cannot check it: it never sees the proxy DaemonSet's value).
+  # Cost: a (source, destination) pair idle between this and 30s pays a fresh
+  # QUIC handshake on its next request.
+  eastWestQuicIdleTimeout: 8s
   # M2-default flip (proposal 022, Step 4): make redirect-all the DEFAULT for
   # managed pods (Istio-style "capture what the app sends", zero per-pod config).
   # Every non-system pod on the node is redirect-all'd UNLESS it carries the
@@ -362,14 +376,23 @@ cniInstall:
 # one release), so a `helm rollback` is safe.
 proxy:
   enabled: true
-  # External image (built by the //proxy workspace), tag-pinned to the publishing
-  # commit SHA. Mirror by overriding `repository`.
+  # External image (built by the //proxy workspace), pinned by proxy-release.yml's
+  # bump-chart PR to the publishing commit SHA + index digest. Mirror by
+  # overriding `repository`.
+  #
+  # The pin names whatever registry the proxy release that wrote it pushed to.
+  # Until the first proxy release after the Quay cut-over (proposal 040 phase 2)
+  # re-pins it, that is the pre-cut-over ghcr.io image; that release's bump-chart
+  # PR moves it to image_reference("proxy") on quay.io, rewriting `repository:`
+  # together with `tag:` and `digest:` (scripts/proxy-pin-lib.sh,
+  # proxy_pin_rewrite). Every pin reader accepts exactly proxy_pin_references()
+  # (bazel/img/registry.bzl).
   image:
-    repository: ghcr.io/bpalermo/aether/aether-proxy
-    tag: 717a3609cff42d0e1008379f3fb5ea8bc51d081b
+    repository: quay.io/aethermesh/proxy
+    tag: a1bcf0594089191a0cb33eedecd88ba0eabf1e63
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
-    # helper prefers digest over tag. Multi-arch index for 717a3609cff42d0e1008379f3fb5ea8bc51d081b.
-    digest: "sha256:0722f675b05d14cccf4e9d94aa48011fae06ef342cd73bc475b9ca95efd5dc5e"
+    # helper prefers digest over tag. Multi-arch index for a1bcf0594089191a0cb33eedecd88ba0eabf1e63.
+    digest: "sha256:3814b09745bd7f527e780a0a074c21ecee4a197100f5afd918c8cefdcd420fc1"
     pullPolicy: Always
   # The Envoy hot-restart supervisor (#772): its own binary and its own image
   # since it stopped being an `agent` subcommand. The initContainer runs it to
@@ -401,6 +424,47 @@ proxy:
     handoffDeadline: 0
     adminUnresponsiveDeadline: 0
     shmHostPath: /run/aether/shm
+    # Envoy --drain-strategy for the hot-restart parent (and every other drain:
+    # LDS listener removal, the pod-termination drain). One of immediate or
+    # gradual (Envoy's own default).
+    #
+    # immediate (#1054): from the moment the drain starts, EVERY response on a
+    # draining HTTP connection carries GOAWAY (h2) / an HTTP/3 GOAWAY, so a
+    # source's h3 pool stops sending new requests to the parent and moves to
+    # the child. Under gradual the GOAWAY is a coin flip per response weighted
+    # by elapsed/drainTime, so a busy connection can lose every flip and still
+    # be open when the parent exits at parentShutdownTime; its next packet then
+    # reaches the child, which answers with a QUIC stateless reset the source
+    # accepts, and the in-flight request fails (source `503 UC ...
+    # Received_stateless_reset`). An IDLE connection gets no GOAWAY under
+    # either strategy — agent.eastWestQuicIdleTimeout closes those first.
+    #
+    # Cost: reconnections bunch at the start of the drain instead of spreading
+    # over drainTime (a burst of TLS/QUIC handshakes against the child), and it
+    # is server-wide: h2 connections, LDS listener drains and the
+    # pod-termination drain all switch too.
+    #
+    # Default is gradual. On talos-main immediate made the #1054 resets WORSE
+    # (4/8/0 per roll vs 1–3 per run under gradual): every parent connection
+    # closes at drain start, and those closes are what the source then sees
+    # reset. The carried patches (#1064: the child unpauses its UDP listeners
+    # only after the parent exits; #1066: the draining parent answers its own
+    # time-wait connections) fixed the exit window under gradual. Keep
+    # immediate as an explicit opt-in only.
+    drainStrategy: gradual
+    # Pass Envoy --skip-hot-restart-parent-stats (#1050). This was the
+    # workaround for a hot-restart deadlock: the child asked the draining parent
+    # for its stats on every 5s flush with a blocking, timeout-less recvmsg
+    # while the parent's main thread forwarded QUIC/UDP datagrams to the child
+    # with a blocking, timeout-less sendmsg, and each main thread could end up
+    # waiting on the other forever (both epochs dead until the supervisor's
+    # watchdog killed them). The carried Envoy patch in the aether-proxy image
+    # (#1060: non-blocking forwarding, bounded child receives) removes the
+    # deadlock itself, so the default is off again and the child merges the
+    # parent's stats as upstream intends. Kept as an emergency switch: turning
+    # it on only costs the parent's gauges and its last <=5s of counter deltas
+    # in the child (counters are per-generation already, #708).
+    skipParentStats: false
   # Pod terminationGracePeriodSeconds, and the same value passed to the supervisor
   # as --termination-grace. The deleted pod must keep its Envoy alive as the
   # successor's hot-restart parent until the successor's (xDS-gated, unbounded)
@@ -766,6 +830,46 @@ controller:
       # "spire-mgmt-spire"). REQUIRED when create=true; if empty the resource is
       # not rendered (manage the ClusterSPIFFEID yourself).
       className: ""
+    # Egress identity gate (#1053). The pod-mutating webhook injects an
+    # `aether-identity-ready` init container — FIRST, ahead of the pod's own init
+    # containers — into every mesh-managed pod it admits. It asks the SPIRE
+    # Workload API (a csi.spiffe.io volume mounted into that init container only)
+    # for the pod's X.509 SVID and exits 0 once SPIRE has issued it, so the app
+    # cannot send before the node proxy has a client certificate for it. Without
+    # it, a pod that sends in its first seconds (SPIRE's entry sync; ~7.5 s on
+    # talos-main) gets 503 UF connection_timeout until its SVID lands. The egress
+    # twin of the inbound-readiness promotion gate.
+    #
+    # Fail closed: a pod whose SVID never comes stays in Init, and the init
+    # container's log / termination message says what it is waiting for (see
+    # docs/runbook.md, "Pod held in Init by aether-identity-ready"). Opt a single
+    # pod out with the annotation `aether.io/identity-gate: "false"`.
+    #
+    # Rides the pod-mutating webhook: inert unless namespaceInjection or
+    # injectPodNdots is on, and never rendered with spire.enabled=false (no SVID
+    # would ever come). Default ON.
+    identityGate:
+      enabled: true
+      # Empty repository = the agent image (agent.image), which carries
+      # /identity-ready as an extra layer and is already on every node. Set to
+      # run it from a mirror.
+      image:
+        repository: ""
+        digest: ""
+        tag: ""
+      # IfNotPresent: the agent image is digest-pinned, and the agent DaemonSet
+      # has already pulled it onto the node, so a pod start never waits on a pull.
+      pullPolicy: IfNotPresent
+      # Give up after this long without an SVID (Go duration; the init container
+      # exits 1 and the kubelet retries it with backoff). Empty = wait forever.
+      timeout: ""
+      resources:
+        requests:
+          cpu: 5m
+          memory: 16Mi
+        limits:
+          cpu: ""
+          memory: 64Mi
   resources:
     requests:
       cpu: 50m

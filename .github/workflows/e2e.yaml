@@ -67,6 +67,16 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
+          # Repository cache (#1001): keyed on everything that changes the
+          # fetched set, in the root workspace's own namespace. Restore only —
+          # ci.yaml's / main.yaml's `diff` is the one job that saves it
+          # (docs/runbook.md, "CI: external repository fetches").
+          cache-version: root-1
+          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          cache-save: false
+
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh --config=ci //agent/cmd/agent:image_load //agent/cmd/mesh-dns:image_load //agent/cmd/proxy-supervisor:image_load //cni/cmd/cni-install:image_load //registrar/cmd/registrar:image_load //controller/cmd/controller:image_load //e2e/udsecho:image_load //e2e/l4echo:image_load
 
       - name: Build and load container images
         run: |
@@ -716,7 +726,7 @@ jobs:
           EWQ_SKIP_BUILD: "1"
         run: ./e2e/eastwest-quic.sh up
 
-      - name: Verify the unconditional fan-out, per-source HTTP/3 + XFCC identity, GAMMA weighted stays h2, identity across a client address change
+      - name: Verify demand-scoped twins with nothing listed, per-source HTTP/3 + XFCC identity, GAMMA weighted stays h2, identity across a client address change
         id: verify
         continue-on-error: ${{ github.event.inputs.soft == 'true' }}
         run: ./e2e/eastwest-quic.sh verify

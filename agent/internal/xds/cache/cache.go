@@ -26,6 +26,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/quicdemand"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/registry"
@@ -268,10 +269,48 @@ type SnapshotCache struct {
 	// annotation of its own. Fed by the endpointpolicy reconciler; at most one
 	// per service. Guarded by depMu.
 	udsServicePolicies map[string]string
-	// quicBudgetSeen/quicBudgetMu: the QUIC twin count last logged, so the
+	// quicPairs is the OBSERVED east-west QUIC demand (issue #1020): the
+	// (destination, source ServiceAccount) pairs whose `quic:` twin the node
+	// proxy asked for on demand, valued with when each was first recorded. A
+	// twin is built only for these. No idle TTL (the proxy never says a twin
+	// went idle); pruned when the source leaves the node or the destination
+	// leaves the dependency set (pruneQUICPairsLocked). Guarded
+	// by depMu; persisted with observedDeps.
+	quicPairs map[quicPair]time.Time
+	// quicFetched is the pairs fetched on demand (ObserveQUICTwin) in THIS
+	// process. A pair restored from the persisted set and not in here by
+	// quicStart+quicFetchWindow is pruned (PruneUnfetchedQUICPairs, issue
+	// #1033). Guarded by depMu.
+	quicFetched map[quicPair]struct{}
+	// quicLedger remembers which twins the node proxy holds an on-demand
+	// (ODCDS) subscription for, and keeps a pair whose twin had to leave the
+	// snapshot DORMANT rather than forgetting it (issue #1036): Envoy never
+	// re-requests a name it is subscribed to, so a forgotten pair whose source
+	// returns is stranded (503 NC at the on_demand timeout, forever). A
+	// dormant pair is republished the moment it is valid again, and pruned only
+	// when a fresh stream shows the subscription is gone. Guarded by depMu;
+	// dormant pairs are persisted with observedDeps.
+	quicLedger *quicdemand.Ledger[quicPair]
+	// quicStart is when this agent process started (the cache was built);
+	// quicFetchWindow is the unfetched-pair prune window (<= 0 disables it).
+	// Guarded by depMu.
+	quicStart       time.Time
+	quicFetchWindow time.Duration
+	// quicIdleTimeout is the `quic:` twins' pool idle timeout, as a
+	// time.Duration (--east-west-quic-idle-timeout, aether#1054). Atomic
+	// rather than under depMu: it is read while building every snapshot's
+	// fan-out and written once at boot.
+	quicIdleTimeout atomic.Int64
+	// localPodsSynced is set once LoadListenersFromStorage has merged the
+	// node's pod records: only then is "no local pod of this ServiceAccount"
+	// evidence that a persisted QUIC pair's source left. Guarded by depMu.
+	localPodsSynced bool
+	// quicBudgetSeen/quicAwaitingSeen/quicBudgetMu: the QUIC twin count and
+	// the count of identities awaiting their certificate last logged, so the
 	// fan-out is announced on change rather than on every snapshot.
-	quicBudgetMu   sync.Mutex
-	quicBudgetSeen int
+	quicBudgetMu     sync.Mutex
+	quicBudgetSeen   int
+	quicAwaitingSeen int
 	// edgeGeo configures the edge geoip filter (proposal 028); nil = no geoip
 	// (the x-geo-* strip is emitted regardless on edge chains). Boot-time.
 	edgeGeo            *proxy.GeoipConfig
@@ -612,9 +651,10 @@ type clusterEntry struct {
 	mtlsCluster *clusterv3.Cluster
 	// l4Floor marks an L4 floor service entry -- PROTOCOL_TCP or PROTOCOL_UDP.
 	// Such entries hold only the bare-name EDS load assignment (+
-	// sanNamespaces/sni) for the floor cluster that references it: the
-	// transparent-capture TCP floor's "tcp:<svc>", or the UDP floor's
-	// "udp:<svc>". No HTTP (h2) cluster or outbound vhost is emitted for them
+	// sanNamespaces/sni) the floor cluster is built from: the
+	// transparent-capture TCP floor's "tcp:<svc>" (which subscribes to its own
+	// EDS name, the bare one republished under it -- aether#1013), or the UDP
+	// floor's "udp:<svc>" (STATIC, the load assignment inlined). No HTTP (h2) cluster or outbound vhost is emitted for them
 	// (clustersEndpointsAndVhosts skips it), and no upstream mTLS is injected
 	// (refreshEntryMTLSLocked skips it) -- for TCP because the floor cluster
 	// carries its own transport socket, for UDP because there is none: the UDP
@@ -624,6 +664,13 @@ type clusterEntry struct {
 	// were already protocol-agnostic in behaviour, so UDP needed no new branch
 	// at either, only a name that did not claim otherwise.
 	l4Floor bool
+	// bareEDSAlias marks an HTTP port-alias entry ("<fqdn>:<port>",
+	// buildPortAliasesLocked). Its cluster subscribes to its OWN EDS resource
+	// name (the alias name) and it carries no load assignment of its own:
+	// clustersEndpointsAndVhosts republishes whatever the bare service name
+	// resolves to (bareServiceCLALocked) under the alias name, in the same pass
+	// that emits the cluster (proxy.LoadAssignmentAlias, aether#1013).
+	bareEDSAlias bool
 	// absentSince is non-zero while the service is missing from the registry
 	// listing. Such entries are retained (with empty endpoints) for
 	// serviceRetentionGrace before being pruned: during pod churn a service
@@ -662,6 +709,11 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		localWorkloads:     make(map[string]string),
 		podDeps:            make(map[string]podDependencies),
 		observedDeps:       make(map[string]time.Time),
+		quicPairs:          make(map[quicPair]time.Time),
+		quicFetched:        make(map[quicPair]struct{}),
+		quicLedger:         quicdemand.NewLedger[quicPair](),
+		quicStart:          time.Now(),
+		quicFetchWindow:    DefaultQUICPairFetchWindow,
 		onDemandSubs:       make(map[int64]map[string]string),
 		staticDeps:         make(map[string]struct{}),
 		serviceRoutes:      make(map[string][]proxy.GammaRoute),

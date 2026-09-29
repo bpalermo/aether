@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 )
@@ -126,5 +127,33 @@ func TestUpstreamIdleTimeoutSet(t *testing.T) {
 		if idle.AsDuration() != UpstreamIdleTimeout {
 			t.Fatalf("%s: idle timeout = %v, want %v", name, idle.AsDuration(), UpstreamIdleTimeout)
 		}
+	}
+}
+
+// TestHttp3ProtocolOptionsIdleTimeout pins the h3 twin's idle timeout
+// (aether#1054): the caller's value when set, DefaultQUICTwinIdleTimeout
+// otherwise, and never the 30s h1/h2 value by accident.
+func TestHttp3ProtocolOptionsIdleTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"zero means default", 0, DefaultQUICTwinIdleTimeout},
+		{"negative means default", -time.Second, DefaultQUICTwinIdleTimeout},
+		{"explicit", 5 * time.Second, 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := Http3ProtocolOptions(tc.in)
+			if got := opts.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration(); got != tc.want {
+				t.Fatalf("idle timeout = %v, want %v", got, tc.want)
+			}
+			if opts.GetExplicitHttpConfig().GetHttp3ProtocolOptions() == nil {
+				t.Fatal("expected explicit HTTP/3 protocol options")
+			}
+		})
+	}
+	if DefaultQUICTwinIdleTimeout >= UpstreamIdleTimeout {
+		t.Fatalf("DefaultQUICTwinIdleTimeout %v must be below UpstreamIdleTimeout %v (aether#1054)", DefaultQUICTwinIdleTimeout, UpstreamIdleTimeout)
 	}
 }

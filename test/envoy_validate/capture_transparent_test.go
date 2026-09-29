@@ -26,6 +26,13 @@ import (
 // These are asserted together because they are a pair, and a future "simplify:
 // transparent makes original_dst redundant" would be wrong for the second
 // reason above.
+//
+// The use_original_dst listener FIELD, by contrast, must be OFF (#1007): it adds
+// nothing the filter does not, except the restored-destination handoff, which
+// finds "the listener bound to the original address" by address string with no
+// netns -- so a diverted connection to <endpoint>:18008 ran through whichever
+// pod's inbound listener (every one binds 0.0.0.0:18008 in its own netns) was
+// added last. The fixture still validates with it off.
 func TestCaptureTCPListenerIsTransparentAndKeepsOriginalDst(t *testing.T) {
 	bs, err := buildCaptureBootstrap()
 	require.NoError(t, err)
@@ -38,7 +45,9 @@ func TestCaptureTCPListenerIsTransparentAndKeepsOriginalDst(t *testing.T) {
 		found++
 		assert.True(t, l.GetTransparent().GetValue(),
 			"capture listener must set transparent: tproxy will not assign to a non-transparent socket")
-		assert.True(t, l.GetUseOriginalDst().GetValue(), "use_original_dst must stay set")
+		require.NotNil(t, l.GetUseOriginalDst(), "use_original_dst must be set explicitly")
+		assert.False(t, l.GetUseOriginalDst().GetValue(),
+			"use_original_dst must be false: its handoff picks the newest pod's 0.0.0.0:18008 inbound listener (#1007)")
 		require.NotEmpty(t, l.GetListenerFilters(), "listener filters must be present")
 		assert.Equal(t, "envoy.filters.listener.original_dst", l.GetListenerFilters()[0].GetName(),
 			"original_dst must remain the FIRST listener filter: the passthrough cluster depends on localAddressRestored()")

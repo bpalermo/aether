@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 # Exercise the aether-proxy pin logic the signature sweep relies on (#984):
-# proxy_pinned_digest (which digest a values.yaml pins) and proxy_pin_verdict
-# (whether that pin is checked or skipped as pre-signing history).
+# proxy_pinned_digest / proxy_pinned_ref (which digest a values.yaml pins, and
+# under which reference), proxy_pin_verdict (whether that pin is checked or
+# skipped as pre-signing history), and proxy_pin_rewrite (the bump-chart job's
+# edit).
+#
+# The Quay cut-over (proposal 040) adds a third silent failure: the flip moves
+# image_reference("proxy") to quay.io but cannot move the pin, which is data the
+# next proxy release writes. A parser that only knows the new reference finds NO
+# pin (every sweep exit 2, and bump-chart's rewrite silently matching nothing,
+# so the first quay release would never be pinned at all). So the pin may name
+# exactly proxy_pin_references() -- image_reference("proxy") or a
+# PROXY_PIN_LEGACY_REFERENCES entry -- and nothing else, and the rewrite moves a
+# legacy pin, repository line included, onto image_reference("proxy").
 #
 # The two dangerous failures are both SILENT:
 #   - reading the wrong digest (the supervisor image sits directly below the
@@ -37,9 +48,17 @@ bad() {
 	fail=1
 }
 
-# values <digest line> — a values.yaml shaped like charts/aether/values.yaml
-# around the proxy block, including the supervisor's own digest right below it.
+legacy_ref="${PROXY_PIN_REFS[1]:-}"
+if [ -z "$PROXY_IMAGE" ] || [ "${PROXY_PIN_REFS[0]:-}" != "$PROXY_IMAGE" ] || [ -z "$legacy_ref" ]; then
+	echo "::error::need image_reference(\"proxy\") and at least one PROXY_PIN_LEGACY_REFERENCES entry (bazel/img/registry.bzl) to exercise the cut-over cases; got [${PROXY_PIN_REFS[*]}]" >&2
+	exit 2
+fi
+
+# values <digest line> [<proxy repository>] — a values.yaml shaped like
+# charts/aether/values.yaml around the proxy block, including the supervisor's
+# own digest right below it.
 values() {
+	local repo="${2:-$PROXY_IMAGE}"
 	cat <<EOF
 agent:
   image:
@@ -47,7 +66,7 @@ agent:
     digest: "{@//agent/cmd/agent:image_push.digest}"
 proxy:
   image:
-    repository: ${PROXY_IMAGE}
+    repository: ${repo}
     tag: 0123456789abcdef0123456789abcdef01234567
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
     # helper prefers digest over tag. Multi-arch index for 0123456.
@@ -86,7 +105,7 @@ echo "proxy_pinned_digest:"
 want_digest "quoted digest (the bump-chart shape)" "$d1" "$(values "    digest: \"$d1\"")"
 want_digest "unquoted digest with a trailing comment" "$d1" "$(values "    digest: $d1 # pinned")"
 want_digest "the real charts/aether/values.yaml parses" \
-	"$(sed -nE '/aether-proxy$/,+4 s/^[[:space:]]*digest:[[:space:]]*"(sha256:[0-9a-f]{64})"$/\1/p' charts/aether/values.yaml)" \
+	"$(sed -nE '/^proxy:/,/^[[:space:]]*digest:/ s/^[[:space:]]*digest:[[:space:]]*"(sha256:[0-9a-f]{64})"$/\1/p' charts/aether/values.yaml)" \
 	"$(cat charts/aether/values.yaml)"
 # The supervisor's digest must never stand in for a missing proxy one.
 want_no_digest "proxy block without a digest (supervisor digest below)" "$(values "    # no digest")"
@@ -95,6 +114,75 @@ want_no_digest "stamp placeholder instead of a digest" "$(values '    digest: "{
 want_no_digest "truncated digest" "$(values '    digest: "sha256:938c5a57"')"
 want_no_digest "no proxy block at all" "$(printf 'agent:\n  image:\n    digest: "%s"\n' "$d1")"
 want_no_digest "two proxy blocks" "$(values "    digest: \"$d1\"")"$'\n'"$(values "    digest: \"$d2\"" | sed -n '5,$p')"
+
+# --- the cut-over: which reference the pin may name -------------------------
+# want_ref <name> <expected "<ref> <digest>"> <values text>
+want_ref() {
+	local name="$1" want="$2" got
+	n=$((n + 1))
+	if got="$(printf '%s\n' "$3" | proxy_pinned_ref)" && [ "$got" = "$want" ]; then
+		ok "$name"
+	else
+		bad "$name: want [$want] got [$got]"
+	fi
+}
+echo "proxy_pinned_ref (proposal 040 cut-over):"
+want_ref "pin on image_reference(\"proxy\")" "${PROXY_IMAGE} ${d1}" "$(values "    digest: \"$d1\"")"
+want_ref "pre-cut-over pin on the legacy reference (the pin's registry is what it says)" \
+	"${legacy_ref} ${d1}" "$(values "    digest: \"$d1\"" "$legacy_ref")"
+want_no_digest "pin on a registry nobody named (not accepted)" "$(values "    digest: \"$d1\"" "registry.invalid/someone/aether-proxy")"
+want_no_digest "a legacy AND a current proxy block" \
+	"$(values "    digest: \"$d1\"" "$legacy_ref")"$'\n'"$(values "    digest: \"$d2\"" | sed -n '5,$p')"
+
+# --- proxy_pin_rewrite (the bump-chart edit) --------------------------------
+echo "proxy_pin_rewrite:"
+rw_dir="$(mktemp -d)"
+sup="sha256:$(printf 'f%.0s' {1..64})"
+new_tag=fedcba9876543210fedcba9876543210fedcba98
+
+# rewrite_case <name> <from repository> — the next release pins d2 under
+# image_reference("proxy"), whichever accepted reference the pin named before.
+rewrite_case() {
+	local name="$1" from="$2" f="${rw_dir}/values.yaml" got
+	values "    digest: \"$d1\"" "$from" >"$f"
+	n=$((n + 1))
+	if ! proxy_pin_rewrite "$f" "$PROXY_IMAGE" "$new_tag" "$d2"; then
+		bad "$name: the rewrite failed"
+		return
+	fi
+	got="$(proxy_pinned_ref <"$f")" || got=""
+	if [ "$got" = "${PROXY_IMAGE} ${d2}" ] &&
+		grep -qxF "    tag: ${new_tag}" "$f" &&
+		grep -qF "Multi-arch index for ${new_tag}." "$f" &&
+		grep -qxF "      digest: \"${sup}\"" "$f" &&
+		[ "$(grep -c "$d1" "$f")" = 0 ]; then
+		ok "$name -> ${got%% *} @ new digest, tag + provenance moved, supervisor digest untouched"
+	else
+		bad "$name: pinned [$got]"
+		sed 's/^/        | /' "$f"
+	fi
+}
+rewrite_case "legacy (ghcr) pin moves to image_reference(\"proxy\")" "$legacy_ref"
+rewrite_case "current pin is re-pinned in place" "$PROXY_IMAGE"
+
+# refuse_rewrite <name> <values text> <image> <tag> <digest>
+refuse_rewrite() {
+	local name="$1" f="${rw_dir}/values.yaml" before
+	printf '%s\n' "$2" >"$f"
+	before="$(cat "$f")"
+	n=$((n + 1))
+	if proxy_pin_rewrite "$f" "$3" "$4" "$5"; then
+		bad "$name: accepted"
+	elif [ "$(cat "$f")" != "$before" ]; then
+		bad "$name: refused but CHANGED the file"
+	else
+		ok "$name (refused, file unchanged)"
+	fi
+}
+refuse_rewrite "no accepted proxy block" "$(values "    digest: \"$d1\"" "registry.invalid/someone/aether-proxy")" "$PROXY_IMAGE" "$new_tag" "$d2"
+refuse_rewrite "a proxy block with no digest" "$(values "    # no digest")" "$PROXY_IMAGE" "$new_tag" "$d2"
+refuse_rewrite "a truncated digest to pin" "$(values "    digest: \"$d1\"")" "$PROXY_IMAGE" "$new_tag" "sha256:938c5a57"
+rm -rf "$rw_dir"
 
 # --- proxy_pin_verdict, over a throwaway history ----------------------------
 #
@@ -181,8 +269,8 @@ else
 	bad "committed PROXY_SIGNING_CUTOVER is not a full sha: [$committed_cutover]"
 fi
 
-if [ "$n" -ne 18 ]; then
-	echo "::error::ran ${n} cases, expected 18 -- a gate that checks nothing passes" >&2
+if [ "$n" -ne 27 ]; then
+	echo "::error::ran ${n} cases, expected 27 -- a gate that checks nothing passes" >&2
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then

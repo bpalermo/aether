@@ -1,0 +1,33 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "quicdemand",
+    srcs = [
+        "ledger.go",
+        "requests.go",
+    ],
+    importpath = "aethermesh.dev/agent/internal/xds/quicdemand",
+    visibility = [
+        "//agent:__subpackages__",
+        "//test:__subpackages__",  # mtlspool: the live #1033 gate runs the agent's classifier
+    ],
+    deps = [
+        "//agent/internal/xds/proxy",
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
+    ],
+)
+
+go_test(
+    name = "quicdemand_test",
+    srcs = [
+        "ledger_test.go",
+        "requests_test.go",
+    ],
+    embed = [":quicdemand"],
+    deps = [
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
+        "@com_github_stretchr_testify//assert",
+    ],
+)

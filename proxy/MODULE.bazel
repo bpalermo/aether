@@ -39,6 +39,67 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 #   (default true; the runtime_features.cc hunk registers it). Source + the
 #   SPIFFE validator BUILD visibility line; api/ doc comment (a separate module),
 #   tests and changelog dropped. Applied AFTER 47743 (patches apply in order).
+#   aether#1022 (not proposed upstream from automation; the maintainer's call):
+#   Network::Utility::execInNetworkNamespace records the namespace to return to
+#   from /proc/thread-self/ns/net (fallback /proc/self/task/<tid>/ns/net) instead
+#   of /proc/self/ns/net, which is the MAIN thread's namespace. setns() is per
+#   thread, so a worker calling it while the main thread was briefly inside a pod
+#   netns (health-check connects, listener creation) "restored" itself INTO that
+#   pod's netns and created its later upstream sockets there, where the pod's
+#   redirect-all capture diverted them (the #1007 cross-pod L4 landings). Carries
+#   its own test (test/common/network:exec_in_netns_thread_test), run by
+#   //bazel/patches:carried_patch_tests.
+#   aether#1050 (not yet proposed upstream; the maintainer's call): the hot-restart
+#   main-thread deadlock. The parent forwards undispatchable UDP/QUIC packets to
+#   the child from its main thread with a BLOCKING sendmsg(); the child's main
+#   thread waits for the parent's replies (stats merge every flush, listen socket
+#   hand-offs) with a BLOCKING recvmsg() and reads no forwarded packets meanwhile.
+#   Once the child's socket fills, both main threads wait on each other for good.
+#   The patch makes parent forwarding a bounded non-blocking queue (retried on a
+#   2ms timer, dropped when full or when the child is gone), makes the child keep
+#   servicing forwarded packets while it waits for a reply, probe the parent for
+#   liveness and give up after a bounded deadline, and gives the domain sockets
+#   send/receive timeouts so no blocking call can hang. Applied AFTER 47743 (it
+#   touches the same hot-restart files) and carries its tests
+#   (test/server:hot_restarting_{base,child,parent}_test, hot_restart_impl_test),
+#   run by //bazel/patches:carried_patch_tests; it also brings the 47743 test hunks
+#   those files need to compile against the 47743 source.
+#   aether#1054 (not yet proposed upstream; the maintainer's call), applied AFTER
+#   aether1050 (it builds on its liveness probe and touches the same child file):
+#   (1) the hot-restart child keeps its inherited UDP listeners paused until the
+#   parent has actually exited (its domain socket refuses a probe; 50 ms timer,
+#   2 s cap) instead of unpausing them while asking the parent to terminate, which
+#   had both processes reading the same sockets for the parent's shutdown and the
+#   child stateless-resetting parent-owned QUIC packets; (2) an HTTP/3 connection
+#   notified of a drain starts its own drain sequence (GOAWAY, then close) inside
+#   the drain window even when idle, behind
+#   envoy.reloadable_features.http3_drain_idle_connections (default true). Carries
+#   its tests (test/server:hot_restarting_child_test,
+#   test/common/http:conn_manager_impl_test), run by //bazel/patches:carried_patch_tests;
+#   its quic_http_integration_test case only builds in the Envoy workspace.
+#   aether#1054, second patch (not yet proposed upstream; the maintainer's call),
+#   applied AFTER aether1054: a draining hot-restart parent (QUIC dispatcher not
+#   accepting) forwarded EVERY packet without a live session to the child, before
+#   quiche's own time-wait check, so packets for connections the parent had just
+#   closed reached the child, which never knew them and answered with a stateless
+#   reset. EnvoyQuicDispatcher::OnFailedToDispatchPacket now leaves connection IDs
+#   in the time-wait list to the time-wait manager (which re-sends the stored
+#   CONNECTION_CLOSE) and forwards only genuinely unknown ones. Behind
+#   envoy.reloadable_features.quic_hot_restart_time_wait_before_forward (default
+#   true). Parent-side, so it takes effect from the second roll on. Its test
+#   (test/common/quic:envoy_quic_dispatcher_test) only builds in the Envoy workspace
+#   (quiche test tooling), so it is not in //bazel/patches:carried_patch_tests.
+#   aether#1054, third patch (an upstream bug; to be proposed upstream), applied
+#   AFTER aether1054b: a paused hot-restart child UDP listener (inherited socket,
+#   read events disabled until the parent is gone) still READ the shared socket
+#   whenever the QUIC listener injected a read activation to process handshakes
+#   buffered from forwarded packets (injected activations bypass the enabled-event
+#   mask); the packets it dequeued belonged to the parent's connections and the
+#   child's dispatcher stateless-reset each one (the drain-start resets left after
+#   #1064/#1066). UdpListenerImpl::handleReadCallback now runs onReadReady() and
+#   returns without reading while paused. Child-side: effective from the first roll.
+#   Carries its test (test/common/network:udp_listener_impl_test), run by
+#   //bazel/patches:carried_patch_tests.
 #   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
@@ -47,6 +108,11 @@ single_version_override(
     patches = [
         "//bazel/patches:envoy-47743-udp-hot-restart-forwarding-netns.patch",
         "//bazel/patches:envoy-47740-quic-hostname-check-explicit-san.patch",
+        "//bazel/patches:envoy-aether1022-exec-in-netns-thread-self.patch",
+        "//bazel/patches:envoy-aether1050-hotrestart-nonblocking-forward.patch",
+        "//bazel/patches:envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch",
+        "//bazel/patches:envoy-aether1054b-quic-time-wait-before-forward.patch",
+        "//bazel/patches:envoy-aether1054c-paused-udp-listener-no-read.patch",
     ],
 )
 

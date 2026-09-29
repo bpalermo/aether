@@ -100,7 +100,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | Key | Default | Purpose |
 |---|---|---|
 | `proxy.enabled` | `true` | Deploy the per-node Envoy. Disable to run only the agent. |
-| `proxy.image.repository` | `ghcr.io/bpalermo/aether/aether-proxy` | External image built by the `//proxy` workspace, tag-pinned. |
+| `proxy.image.repository` | `quay.io/aethermesh/proxy` | External image built by the `//proxy` workspace, digest-pinned by the proxy release's bump-chart PR. A chart published before the first proxy release after the Quay cut-over (proposal 040) still pins the pre-cut-over ghcr.io image; that release moves `repository` with the tag and digest. |
 | `proxy.image.tag` | (commit SHA) | The publishing commit. |
 | `proxy.logLevel` | `info` | Envoy log level. |
 | `proxy.jsonLogs` | `true` | Envoy application logs as one JSON object per line. |
@@ -164,6 +164,11 @@ decision every cycle — see `charts/prober/values.yaml`.
 | `controller.webhook.spire` | `false` | Webhook serving cert source — decoupled from mesh SPIRE. `false` = Helm self-signed cert (works out of the box). `true` = serve with the controller's SPIRE SVID + inject the trust bundle. |
 | `controller.webhook.clusterSpiffeID.create` | `true` | When `spire=true`, create the controller's `ClusterSPIFFEID` with the webhook Service DNS SANs. |
 | `controller.webhook.clusterSpiffeID.className` | `""` | spire-controller-manager class name; REQUIRED when `create=true`. |
+| `controller.webhook.identityGate.enabled` | `true` | Egress identity gate (#1053): the pod-mutating webhook injects the `aether-identity-ready` init container (first in line) into every mesh pod it admits; it holds the app containers until SPIRE has issued the pod's X.509 SVID, so no request leaves before the pod has a client certificate (otherwise `503 UF` for the first seconds). Asks the Workload API over a `csi.spiffe.io` volume mounted into the init container only. Never rendered with `spire.enabled=false`; rides the `/mutate` webhook, so inert unless `namespaceInjection` or `injectPodNdots` is on. Opt a pod out with `aether.io/identity-gate: "false"`. |
+| `controller.webhook.identityGate.image.*` | empty = `agent.image` | Image running `/identity-ready` (an extra layer of the agent image, already on every node). |
+| `controller.webhook.identityGate.pullPolicy` | `IfNotPresent` | The agent image is digest-pinned and already pulled by the agent DaemonSet. |
+| `controller.webhook.identityGate.timeout` | `""` (wait forever) | Go duration after which the init container gives up (exit 1; the kubelet retries with backoff). Empty = fail closed: the pod stays in `Init` until the SVID exists. |
+| `controller.webhook.identityGate.resources` | req cpu `5m` mem `16Mi`, limit mem `64Mi` | Init container resources; an empty value leaves that entry unset. |
 | `controller.image.*` / `controller.resources.*` | placeholders / cpu `50m`, mem `64Mi` | |
 
 ### `edge` — north-south ingress gateway (proposals 003/018/021/028)
@@ -290,6 +295,7 @@ Node-agent-specific:
 | `--import-config` | `false` | Enable cross-cluster config import (026). |
 | `--control-cluster` | `""` | Trust imported config ONLY from this origin (026 EM3). Empty = federated. |
 | `--east-west-waypoint` | `false` | Per-node east/west waypoint for cross-cluster traffic (019); tunnel port is the fixed constant 18009. |
+| `--east-west-quic-pair-fetch-window` | `1h` | How long after the agent starts a **persisted** (source ServiceAccount, destination) QUIC pair may go without an on-demand fetch of its `quic:` twin before the pair and its twin are pruned (issue #1033). A pair first used in this process is kept. A pruned pair that still carries traffic is re-fetched on its next request (one ODCDS round trip, no 503). `0` disables the prune. Not exposed in the chart; the default applies. See the runbook, "East-west QUIC demand set". |
 | `--mesh-dns` | `false` | Per-pod mesh DNS (018): answer `<svc>.<ns>.<mesh-domain>` from the generated mesh Services. Upstream forwarding belongs to the `mesh-dns` daemon, not the agent. |
 | `--mesh-dns-snapshot-path` | `/host/var/lib/aether/registry/mesh-dns/records.json` | Host-persistent record table the in-process resolver writes and warm-loads at boot (and the `mesh-dns` daemon watches). Under the CNI registry hostPath so it survives a rolling restart; empty disables persistence. |
 | `--authz-sidecar` | `false` | Node-local ext_authz sidecar entry (027). |
@@ -320,7 +326,7 @@ until #772: as a subcommand it made the proxy pod stage and run the whole 65MiB
 agent binary — controller-runtime, client-go, go-control-plane, SPIRE, Gateway
 API, miekg/dns — to fork a child process. It is now its own binary
 (`//agent/cmd/proxy-supervisor`, 15MiB / 24 modules) in its own image
-(`ghcr.io/bpalermo/aether/proxy-supervisor`), which also means the proxy
+(`quay.io/aethermesh/proxy-supervisor`), which also means the proxy
 DaemonSet no longer depends on the agent image at all. `agent proxy-supervisor`
 remains as a deprecated alias for one release so a chart predating #772 still
 has a working initContainer against a newer agent image.
@@ -519,7 +525,8 @@ is its whole flag set.
 | `--otlp-endpoint` | `""` | OTLP gRPC collector `host:port` (insecure). Empty disables telemetry — the prober still runs but emits nothing. |
 
 **Metrics.** Two instruments, both carrying `tier` (`liveness`, `reachability`,
-`mesh_dns`), `target` (the probed name) and `result`:
+`mesh_dns`), `target` (the probed name), `result` and `pod` (the prober pod, from the
+resource's `k8s.pod.name`; #1041):
 
 | Metric | Type | Notes |
 |---|---|---|
@@ -529,7 +536,16 @@ is its whole flag set.
 Per-node identity is a **resource** attribute, not a metric label: the chart sets
 `OTEL_RESOURCE_ATTRIBUTES=k8s.node.name=$(NODE_NAME),…` and the prober's resource
 builder reads it from the environment, so the series de-collapse per node once
-the collector promotes it (#210).
+the collector promotes it to `node` (#210). The prober deliberately sets **no**
+`host.name`. On a pod without hostNetwork that is the pod name, and a collector that
+promotes `host.name` ahead of `k8s.node.name` would export `node="prober-xxxxx"`, which
+is what happened until #1041.
+
+**Failure log.** Every non-success probe prints one bounded
+`AETHER_PROBE_FAIL {t, tier, target, result, err, elapsed_ms, pod, node, n, truncated}`
+line to stdout: at most 20 per `(tier, result)` per minute, then one summary line with
+the `suppressed` count (#1040). See [`runbook.md`](./runbook.md), "Attributing a prober
+failure".
 
 **Deployment.** The chart renders a DaemonSet + ServiceAccount into a namespace
 that must already be mesh-managed — the probe only works if the CNI has plumbed
@@ -558,6 +574,12 @@ Defined in [`common/constants/`](../common/constants). Prefixes:
 |---|---|---|
 | `aether.io/managed` | `"true"` | Opt a pod (or, with `controller.namespaceInjection`, a namespace) into the mesh. |
 | `aether.io/agent-not-ready` | (taint) | Startup taint keeping pods off a node until the agent's CNI serves. |
+
+### Pod annotations (`aether.io/*`)
+
+| Annotation | Value | Meaning |
+|---|---|---|
+| `aether.io/identity-gate` | `"false"` | Skip the egress identity gate for this pod: no `aether-identity-ready` init container, so the app may start (and send) before its SVID exists. Any other value, or absent, leaves `controller.webhook.identityGate.enabled` in charge. |
 
 ### Endpoint annotations (`endpoint.aether.io/*`)
 

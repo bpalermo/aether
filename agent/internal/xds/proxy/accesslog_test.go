@@ -68,6 +68,14 @@ func TestBuildAccessLogEnabled(t *testing.T) {
 		assert.Contains(t, attrs, key, "missing access-log attribute %q", key)
 	}
 	assert.Equal(t, "%REQ(TRACEPARENT)%", attrs["traceparent"])
+	// Upstream end-of-stream timing (#1009): both anchored at the first upstream
+	// response byte, so a DC line shows whether the upstream FIN had landed
+	// (upstream_rx_ms) and whether the response finished downstream
+	// (downstream_tx_end_ms). The exact operator strings are the contract the
+	// soak grader's benign-DC rule reads; //test/envoy_validate proves the
+	// pinned Envoy accepts them.
+	assert.Equal(t, "%COMMON_DURATION(US_RX_BEG:US_RX_END:ms)%", attrs["upstream_rx_ms"])
+	assert.Equal(t, "%COMMON_DURATION(US_RX_BEG:DS_TX_END:ms)%", attrs["downstream_tx_end_ms"])
 	// RBAC shadow metadata keys must include the "aether_audit_" prefix — Envoy
 	// prepends shadow_rules_stat_prefix to the metadata field name in
 	// evaluateShadowEngine(), so a bare "shadow_engine_result" key always returns "-".

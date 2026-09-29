@@ -43,6 +43,7 @@ import (
 	"aethermesh.dev/agent/internal/spire"
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache"
+	xdsconfig "aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	xdsServer "aethermesh.dev/agent/internal/xds/server"
 	"aethermesh.dev/agent/storage"
@@ -138,6 +139,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.AuthzSidecarFailureModeAllow, "authz-sidecar-failure-mode-allow", false, "Fail-open: allow requests when the authz sidecar is unreachable (default fail-closed: deny)")
 	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, imported config is trusted ONLY from this origin; empty = federated (trust any peer)")
 	rootCmd.Flags().BoolVar(&cfg.EastWestWaypoint, "east-west-waypoint", false, "Enable the split-horizon east/west waypoint (proposal 019): dial cross-cluster endpoints at their node's routable IP + the fixed tunnel port (18009) instead of their pod IP, and SNI-forward to the local pod. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared SPIRE trust domain.")
+	rootCmd.Flags().DurationVar(&cfg.EastWestQUICPairFetchWindow, "east-west-quic-pair-fetch-window", cache.DefaultQUICPairFetchWindow, "How long after the agent starts a persisted east-west QUIC (source ServiceAccount, destination) pair may go without an on-demand fetch of its quic: twin before the pair and its twin are pruned (issue #1033). A pair first used in this process is kept; a pruned pair that still has traffic is re-fetched on its next request (one ODCDS round trip). 0 disables the prune")
+	rootCmd.Flags().DurationVar(&cfg.EastWestQUICIdleTimeout, "east-west-quic-idle-timeout", xdsconfig.DefaultQUICTwinIdleTimeout, "Idle timeout of each east-west QUIC (quic:) twin's upstream connection pool (issue #1054). Shorter than the 30s h1/h2 idle timeout so no idle HTTP/3 connection outlives a destination proxy's hot-restart parent (whose exit turns its connections into stateless resets). Keep it at least 5s below the proxy's --parent-shutdown-time (the chart enforces this). Must be > 0")
 	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services (proposal 018, mesh-global FQDN); the mesh-dns daemon (agent/cmd/mesh-dns) owns upstream forwarding")
 	rootCmd.Flags().StringVar(&cfg.MeshDNSSnapshotPath, "mesh-dns-snapshot-path", cfg.MeshDNSSnapshotPath, "Host-persistent file the in-process mesh-DNS resolver persists its last-known record table to and warm-loads at boot, closing the agent-roll cold window (proposal 018, mesh-global FQDN). Defaults under the CNI registry hostPath so it survives a rolling restart; empty disables persistence")
 }
@@ -207,6 +210,9 @@ func applyMeshConfig(mc *configv1.MeshConfigSpec) {
 // CNI gRPC server, and optionally the SPIRE bridge as runnables. The agent then waits
 // for local storage to become ready before starting the manager's event loop.
 func runAgent(ctx context.Context) (retErr error) {
+	if err := validateEastWestQUICIdleTimeout(cfg.EastWestQUICIdleTimeout); err != nil {
+		return err
+	}
 	l.InfoContext(
 		ctx, "starting aether agent",
 		"nodeName", cfg.NodeName,
@@ -486,10 +492,18 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache.SetCaptureEnabled(true)
 	snapshotCache.SetCaptureRedirectAll(true)
 	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
-	// East-west QUIC (proposal 038 Phase 4b) is unconditional: every service
-	// in the node's dependency set gets one HTTP/3 twin per local
-	// ServiceAccount, selected per request by the source identity (the proving
-	// per-destination allow-list was removed after its soak).
+	// East-west QUIC (proposal 038 Phase 4b) is unconditional: every
+	// destination is eligible for an HTTP/3 twin per (local ServiceAccount)
+	// that has dialled it -- fetched on the pair's first request over ODCDS
+	// (#1020) -- selected per request by the source identity. The proving
+	// per-destination allow-list was removed after its soak (#979).
+	// A persisted pair must be fetched on demand within this window of the
+	// agent starting or it is pruned (#1033): the migration off the
+	// SAs x destinations fan-out #1032's first deploy persisted.
+	snapshotCache.SetQUICPairFetchWindow(cfg.EastWestQUICPairFetchWindow)
+	// No idle h3 twin connection may outlive a destination's hot-restart
+	// parent (#1054); validated at the top of runAgent.
+	snapshotCache.SetQUICIdleTimeout(cfg.EastWestQUICIdleTimeout)
 	// Persist the OBSERVED half of the demand set beside the CNI pod records
 	// and restore it now, before the first snapshot, so a full agent+proxy
 	// replacement (every Helm upgrade) starts warm instead of paying one cold

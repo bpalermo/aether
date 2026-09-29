@@ -10,7 +10,7 @@ description: |
   channel); the VirtualHost CRD was retired (proposal 018).
 type: application
 # Stamped at package time when built with `--stamp` (see other charts).
-version: "0.8.1-{GIT_COMMIT}"
+version: "1.0.0-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether

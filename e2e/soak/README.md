@@ -9,7 +9,7 @@ Three components run together:
 |---|---|
 | **External prober** (`//prober`, DaemonSet, already deployed) | the availability SLI — **authoritative for PASS/FAIL** |
 | **k6 runners** (`k6-runner.yaml`) | mesh load by NAME (~300/s) so DNS + cross-node paths are exercised |
-| **Churn driver** (`churn.sh`) | 31 rolling restarts incl. mesh-dns/agent/proxy/edge + a concurrent triple, then a 90-minute no-roll window and a demand-set shrink |
+| **Churn driver** (`churn.sh`) | 31 rolling restarts incl. mesh-dns/agent/proxy/edge + a concurrent triple, two mid-run pods under a brand-new ServiceAccount (#1014), then a 90-minute no-roll window and a demand-set shrink |
 | **Multi-protocol leg** (`multiprotocol.yaml`) | proposal 037's per-port TCP chains under load, and the evidence for its Phase 4 gate |
 | **UDP leg** (`udp.yaml`) | proposal 038's transparent UDP capture under load: the divert, the transparent socket, and the VIP-sourced reply, through every roll |
 
@@ -48,6 +48,15 @@ kubectl -n aether-test logs -l app.kubernetes.io/name=udp-dialer --tail=1 | grep
 #     "The Phase 4 evidence clock" below -- a zero from a counter that was never
 #     driven is not evidence, and this is the step that makes it evidence.
 bash e2e/soak/anyport-probe.sh
+
+# 0d. ONCE, before the run: one new-ServiceAccount step, now, so the two the
+#     driver runs mid-soak are known to work on this cluster (image resident,
+#     objects creatable, tally readable). Its own log; exits 1 on a hole. Expect a
+#     single `ROLLED newsa/...` line with non2xx=0 and connerr=0 on every
+#     destination. See "The new-ServiceAccount step" below.
+SOAK_CHURN_LOG=/tmp/soak-newsa-preflight.log \
+  bash "$PWD/e2e/soak/churn.sh" --context talos-main --new-sa-once &&
+  grep -E 'ROLLED|FAILED' /tmp/soak-newsa-preflight.log
 
 # 1. Load the k6 script as a ConfigMap (source of truth is the .js file here).
 #    RE-RUN THIS after any edit to k6-mesh-soak.js -- the pod mounts the
@@ -99,7 +108,9 @@ head -2 /tmp/soak-churn.log
 # Fail fast: the FIRST `FAILED` roll (or a SHRINK that cannot scale) ends the
 # driver with `CHURN ABORTED ...` and exit 1, restoring the SHRINK target first.
 # It no longer carries on with holes in the schedule. An ABORTED line means stop,
-# fix, relaunch with a fresh T0 -- that run is not gradeable.
+# fix, relaunch with a fresh T0 -- that run is not gradeable. The one exception
+# is `FAILED newsa/...` with a tally and no ABORTED after it: that is the
+# new-ServiceAccount gate reading red (a finding), not a hole -- the run goes on.
 grep -E "FAILED|CHURN ABORTED" /tmp/soak-churn.log   # expect nothing
 
 # 4. Age-matched proxy RSS baseline at T0+30m (churn.sh takes the rest itself,
@@ -118,16 +129,18 @@ kubectl delete -f e2e/soak/k6-runner.yaml
 # Count ROLLED in the CURRENT log only. churn.sh archives the previous run as
 # /tmp/soak-churn.log.<ts>.prev, and older runs left /tmp/soak-churn-*.log
 # behind, so `grep -c ROLLED /tmp/soak-churn*` inflates the tally across runs.
-grep -c ROLLED /tmp/soak-churn.log      # expect 31 -- this exact path, no glob
+grep -c ROLLED /tmp/soak-churn.log      # expect 33 (31 rolls + 2 new-SA steps) -- this exact path, no glob
+grep -E "newsa/" /tmp/soak-churn.log    # expect 2 ROLLED, 0 FAILED -- see "The new-ServiceAccount step"
 grep -E "no-roll window|SHRINK" /tmp/soak-churn.log
 column -t /tmp/soak-proxy-rss.tsv       # the #628 age-matched series
 ```
 
 ## The churn schedule
 
-29 schedule entries; the TRIPLE fires three rolls at once, so `grep -c ROLLED` is
-**31** (6 proxy, 2 agent, 3 mesh-dns, 2 edge, 18 svc). The older footer said 30 — it
-forgot the TRIPLE's proxy. The set of rolls has not changed, only the tally.
+29 roll entries; the TRIPLE fires three rolls at once, so the rolls are **31** (6
+proxy, 2 agent, 3 mesh-dns, 2 edge, 18 svc). The older footer said 30 — it forgot the
+TRIPLE's proxy. The two new-ServiceAccount steps (#1014) each log one `ROLLED newsa/…`
+line too, so `grep -c ROLLED` is **33** by default.
 
 | T0+ (min) | Roll | | T0+ (min) | Roll |
 |---|---|---|---|---|
@@ -136,13 +149,15 @@ forgot the TRIPLE's proxy. The set of rolls has not changed, only the tally.
 | 60 | **proxy** \* — the first one, a full hour after T0 (see below) | | 72 | **agent** |
 | 84 | svc-5 | | 96 | **proxy** \* |
 | 108 | svc-1 | | 120 | edge |
+| 126 | **NEW-SA** #1 — a pod under a brand-new ServiceAccount, 2 min of traffic (#1014) | | | |
 | 132 | svc-2 | | 144 | mesh-dns |
 | 156 | svc-3 | | 168 | svc-4 |
 | 180 | svc-5 | | 192 | svc-1 |
 | 204 | edge | | 216 | **proxy** \* |
 | 228 | svc-2 | | 240 | svc-4 |
 | 252 | **proxy** \* | | 264 | svc-3 |
-| 276 | svc-1 | | 300 | **TRIPLE** \* — agent + proxy + svc-3, the stress peak **and the last agent roll** |
+| 276 | svc-1 | | 288 | **NEW-SA** #2 (#1014) |
+| 300 | **TRIPLE** \* — agent + proxy + svc-3, the stress peak **and the last agent roll** | | | |
 | 312 | mesh-dns | | 324 | svc-4 |
 | 336 | **proxy** \* | | 348 | svc-2 |
 | 360 | svc-1 — the last roll of any kind | | | |
@@ -202,6 +217,224 @@ the proxy log.
 
 Opt out with `SOAK_SHRINK=0` (default on); `SOAK_SHRINK_TARGET` / `SOAK_SHRINK_SECONDS`
 retarget it.
+
+### The new-ServiceAccount step (#1008/#1014)
+
+**Why.** Every other step rolls a workload whose ServiceAccount the node has already
+seen, so the run never makes a node proxy build clusters for an identity that is *new
+to it*. That is exactly where #1008 lived: an east-west QUIC twin
+(`<ns>/<svc>@<ns>/<sa>`) added *after* its h2 base was subscribed shared the base's EDS
+resource name, Envoy's delta `WatchMap` deduplicated the subscription, and the twin sat
+warming for its full 15 s `initial_fetch_timeout` while every request from that
+identity to a QUIC destination got **503/NC**. On rev242 that was **1,060** k6 failures
+in 11 s, visible only because the k6 loaders happened to start (as a new identity,
+`aether-test/default`, on every node) 58 s before T0 — the 8 h of churn after it showed
+nothing, because nothing in it introduced a new identity. Fixed in #1012 (each twin
+gets its own EDS resource name); this step is what lets a soak see a regression of it.
+Gotcha 8's shape again: the schedule never created the state the defect needed.
+
+**Since #1020 it also proves the on-demand path.** Twins are demand-scoped: a new
+identity has a selection arm on svc-1's route but no twin until it dials. Its **first**
+request to svc-1 resolves to the missing twin. The proxy fetches it over ODCDS, and
+the agent admits the pair and publishes the twin together with its load assignment.
+That request, and every one after it, must be **200 with no `NC`**. An `NC` in the
+step's first ~2 s is the on-demand fetch failing, and ~15 s of them is #1008 back (every
+on-demand twin is a late twin). Either way, it is a gate failure.
+
+**What it does.** At T0+126 and T0+288 (`SOAK_NEWSA_OFFSETS`, minutes; nudged off the
+T0+120 edge roll and the T0+300 TRIPLE so neither confounds the other) the driver:
+
+1. creates, together, a ServiceAccount, a ConfigMap (`newsa-client.sh`) and a
+   1-replica Deployment, all named `sa-new-<epoch>`, in `aether-test`, pinned with a
+   `kubernetes.io/hostname` nodeSelector to one Ready worker, round-robin across steps
+   (offset by T0, so successive runs start elsewhere);
+2. the pod (`curlimages/curl:8.22.0`, already resident for the UDP dialer, so no pull)
+   drives **~20 rps** from its first instant for **120 s**, split across
+   `svc-1.aether-test.aether.internal:18081` (QUIC-enabled on the proving run) and
+   `svc-3…:18081` (h2), with user agent **`aether-soak-newsa/sa-new-<epoch>`**, and
+   prints a per-destination `ok` / `non2xx` / `connerr` tally every 10 s
+   (`AETHER_NEWSA …`), then `AETHER_NEWSA_FINAL …` and
+   `AETHER_METRIC newsa_tally={…}`;
+3. copies those lines into the churn log, deletes all three objects together, and logs
+
+   ```
+   ROLLED newsa/sa-new-<epoch> <node> ready=<s>s svc-1:ok=1300,non2xx=0,connerr=0,codes=- svc-3:ok=1300,…
+   ```
+
+   or `FAILED newsa/…` with the same tally when any destination saw a non-2xx or a
+   connect error, or no 2xx at all.
+
+A `FAILED newsa/` line **without** a following `CHURN ABORTED` is a gate finding, not
+a hole in the schedule: the driver carries on and the run stays gradeable. A step
+that produced no tally at all (apply refused, pod not Ready in 180 s, no final line)
+is a hole and aborts the run like a failed roll. The step's name is the join key
+everywhere: it is the SA, the user agent's suffix and the twin's stats key
+(`aether-test/svc-1@aether-test/sa-new-<epoch>`).
+
+Knobs: `SOAK_NEWSA=0` (opt out), `SOAK_NEWSA_OFFSETS`, `SOAK_NEWSA_SECONDS`,
+`SOAK_NEWSA_RPS`, `SOAK_NEWSA_TARGETS` (`name=url …`), `SOAK_NEWSA_UPSTREAMS`,
+`SOAK_NEWSA_IMAGE`. `churn.sh --new-sa-once` runs one step now and exits (step 0d).
+
+**Gate.** Both must hold, at T0+8h (and gates 3 and 4 below):
+
+```promql
+# 1. no twin ever waited out its initial fetch (the #1008 signature)
+sum(increase(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}[8h])) == 0
+# ... AND, because increase() reads 0 for a series BORN at 1 -- which is exactly how
+#     the rev242 series appeared (first sample 1, at 09:54:44Z) -- the raw form must
+#     be empty too:
+max_over_time(envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}[8h]) > 0
+```
+
+```logsql
+# 2. zero 503/NC for the new identities (VictoriaLogs, not Loki)
+log_name:aether_access_logs AND reporter:source AND user_agent:~"aether-soak-newsa" AND response_flags:NC
+  | stats by (node_name, authority) count()
+```
+
+**The hard case is an agent restart immediately before the step (#1049).** On rev248,
+the first pods of a ServiceAccount started right after an agent roll waited
+6.9-7.4 s for their SVID. A twin published before its source's certificate warms on
+SDS for all of that time, so the step's first requests 503 `NC` at the 2 s
+`on_demand` timeout (428 k6 failures fleet-wide). To test it, roll the agent
+DaemonSet and start `churn.sh --new-sa-once` as soon as the roll finishes. The step
+must still read `non2xx=0`. On the step's node the agent logs `east-west QUIC fan-out
+… awaiting_client_cert=1`, then `awaiting_client_cert=0` when the SVID lands. Only
+after that does the pod's first svc-1 request fetch its twin.
+Neither the step's node nor any other may log `not found during on-demand discovery`
+for a `quic:` name.
+
+plus the driver's own reading: `grep 'newsa/' /tmp/soak-churn.log` shows two `ROLLED`
+lines with `non2xx=0,connerr=0` on both destinations.
+
+**Gate 3 (#1020): twin count = observed pairs.** Every `quic:` twin on a node must be
+a (source ServiceAccount, destination) pair that sent traffic, and
+`envoy_cluster_manager_active_clusters` must be flat across the run except for +1 per
+new pair (each new-SA step adds one on its node when it first dials svc-1, and removes
+it when the step's pod is deleted). A step that tracks pod churn rather than new callers
+is the pre-#1020 SA × destination fan-out.
+
+```promql
+# twins per node == pairs with traffic (k6 loaders + prober + the new-SA steps)
+count by (node) (envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"})
+count by (node) (increase(envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"}[8h]) > 0)
+# flat, but for the new-SA steps' +1/-1 and the drift of the rolls
+envoy_cluster_manager_active_clusters
+# no on-demand fetch timed out; no pair refused by the agent
+sum(increase(envoy_cluster_manager_odcds_init_fetch_timeout_total[8h])) == 0
+sum(increase(aether_agent_quic_twin_refused_total[8h])) == 0
+```
+
+rev242's 118 twins (59 local SAs × 2 destinations) with 2 carrying traffic is the red
+reading for the first line. The agent's `east-west QUIC fan-out quic_clusters=N
+observed_pairs=P local_identities=I awaiting_client_cert=W` log line gives the same
+numbers per node, and must read **`N == P`** and **`P ≪ I × S`**: `P` is the pairs
+with traffic, not every local ServiceAccount times every destination (`S` = the
+eligible services in the node's dependency set; the line stopped carrying a service
+count when #979 dropped the allow-list). On the two-destination proving runs `P` was
+single digits per node; with every destination on QUIC it is roughly one per
+(caller SA, destination it calls) on the node.
+
+**Red reading for `P ≪ I × S` (#1033).** rev245 (1.0.2-6ad804b, the first deploy of
+#1032, 2026-09-28 03:00Z) logged `observed_pairs == local_identities × 2` on all five
+nodes — `quic_clusters=24 observed_pairs=24 local_identities=12`, 18/18/9, 28/28/14,
+20/20/10, 20/20/10 — because the fresh agent admitted every twin the proxy still held
+from the up-front fan-out. On a node carried over from that state, `P` falls to the
+traffic pairs one `--east-west-quic-pair-fetch-window` (1 h) after the new agent
+starts, with one `pruned persisted east-west QUIC pairs with no on-demand fetch since
+agent start count=N` line per node; grade gate 3 after that line, not before.
+
+```bash
+# per agent pod, the latest fan-out line (N == P and P << I*S) and the prune line
+for p in $(kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent -o name); do
+  echo "$p"
+  kubectl -n aether logs "$p" -c agent | grep 'east-west QUIC fan-out' | tail -1
+  kubectl -n aether logs "$p" -c agent | grep 'no on-demand fetch since agent start'
+done
+```
+
+**Gate 4 (#1036): no stranded twin after a roll.** A svc roll, or a new-SA step's
+pod deletion, can take a source ServiceAccount's last pod off a node. The pair's
+twin then leaves the snapshot. Envoy keeps its ODCDS subscription for that name for
+the life of the process and never re-requests it. So if the agent *forgot* the pair,
+the next pod of that ServiceAccount on the node would 503 `NC` at the 2 s
+`on_demand` timeout on every request to the QUIC destination, until the proxy
+restarts. Since #1036 the agent keeps the pair dormant and republishes the twin the
+moment a pod of that ServiceAccount is back. The 18 svc rolls, and the churn of the
+two new-SA steps, exercise this every run. After each svc roll there must be **no
+`503/NC` on a QUIC destination** from the rolled workload's pods:
+
+```logsql
+# the stranded-twin signature: 503/NC after the 2 s on_demand timeout, on a QUIC
+# destination (svc-1 on the proving run). upstream_cluster is "-" on an NC line,
+# so scope by authority. MUST be empty over T0..T0+8h.
+log_name:aether_access_logs AND reporter:source AND authority:~"svc-1" AND response_flags:NC AND duration_ms:>=1900
+  | stats by (node_name, pod_namespace, pod_name) count()
+```
+
+Also read the agent's side of each roll: a `pruned east-west QUIC pairs … (source_left_node,
+dormant)` line when the last pod leaves, and a `republished dormant east-west QUIC pairs`
+line when the new pod lands on the same node. The pair only goes dormant if its old
+pod was the ServiceAccount's last on the node. With a surge rollout the new pod often
+lands first, and then neither line appears, which is fine.
+
+```bash
+for p in $(kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent -o name); do
+  echo "$p"
+  kubectl -n aether logs "$p" -c agent | grep -E 'dormant east-west QUIC pairs|, dormant\)'
+done
+```
+
+A stranded-twin hit reads as a burst of `NC` rows for one `pod_name` that does not
+stop until that node's proxy is rolled. Each row has `duration_ms` ≈ 2000, and there
+is no `observed east-west QUIC pair` or refusal line on the agent for that twin. The
+live red reading is `//test/mtlspool`
+`TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control`: `status=503
+… in 2.000099268s`, with no CDS request reaching the control plane. Troubleshoot it
+with the runbook, "Stranded twin: 503 NC at 2 s for a source that came back (#1036)".
+
+**Negative control — the gate can fail.** rev242 (pre-#1012) *is* the red reading:
+`envoy_cluster_init_fetch_timeout_total{aether_cluster="aether-test/svc-{1,2}@aether-test/default"}`
+= 1 on all five nodes (and `…@aether-test/anyport-probe` = 1 on w02, the day's other
+new identity), and the access logs held **1,060 × 503/NC** from `aether-test/default`
+(svc-1 521, svc-2 539), every node, 09:54:32–43Z. Both halves moved; the step exists so
+that a run whose T0 comes after every workload already exists can still move them.
+
+**Neither zero is evidence on its own** (see "Zero-reading gates" below). Before
+grading, confirm each step actually built its twins and sent traffic:
+
+```promql
+# one series per (QUIC destination x step), on the step's node, non-zero
+envoy_cluster_upstream_rq_total{aether_cluster=~".*@aether-test/sa-new-.*"}
+```
+
+```logsql
+log_name:aether_access_logs AND reporter:source AND user_agent:~"aether-soak-newsa"
+  | stats by (user_agent, authority, response_flags) count()
+```
+
+Since #979 every destination in the node's dependency set is QUIC-eligible, and its
+twins exist only for the pairs that dial it (#1020). If `svc-1` has no twin anyway —
+a build before #979 without it allow-listed, or an endpoint behind the east/west
+waypoint — the `@` half of the gate is vacuous: say so in the grade rather than
+reading it as a pass.
+
+**What a FAIL reads like.** The #1008 class looks like this, all on one node, in the
+first ~15 s of one step:
+
+- churn log: `FAILED newsa/sa-new-<epoch> <node> ready=…s svc-1:ok=…,non2xx=~150,connerr=0,codes=503x~150 svc-3:ok=…,non2xx=0,…`
+  — only the QUIC destination, ~15 s × 10 rps, and the pod's `AETHER_NEWSA` lines
+  show `non2xx` climbing in the first two 10-second windows and then flat;
+- `envoy_cluster_init_fetch_timeout_total{aether_cluster="aether-test/svc-1@aether-test/sa-new-<epoch>"}`
+  = 1 on that node, and the proxy log's `initial fetch timed out for
+  …ClusterLoadAssignment` ~15 s after the CDS add;
+- the LogsQL above returns `503/NC` rows for `authority` svc-1 on that `node_name`.
+
+Troubleshoot it with the runbook, "QUIC twin never leaves warming / 503 NC on a new
+ServiceAccount (#1008)". Other shapes are other classes and are findings in their own
+right: non-2xx on the **h2** destination too (a new identity's SVID or inbound secret
+not ready — not a twin), or `connerr` with `codes=err6`/`err7` (the new pod's mesh DNS
+or capture, i.e. the CNI ADD path, not the proxy).
 
 **Authorization:** rolling these shared `talos-main` workloads for soak validation is
 standing-authorized, and scaling `svc-5` down and back up for 90s is the same class of
@@ -276,7 +509,25 @@ Compute prober deltas over the churn window and compare against the last known-g
 
 ```promql
 sum by (tier, result) (increase(aether_probe_requests_total[8h]))
+# where: `node` is the Kubernetes node since #1041 (before it, the prober POD name);
+# `pod` is the prober pod, and a proxy/prober roll starts a new `pod` series on the same node
+sum by (node, tier, result) (increase(aether_probe_requests_total{result!="success"}[8h]))
 ```
+
+Attribute every non-success burst from the prober's own `AETHER_PROBE_FAIL` lines
+(#1040). There is one per failed probe, capped at 20 per `(tier, result)` per minute plus
+a `suppressed` summary, and each carries the client-side `t`, `err`, `elapsed_ms`, `pod`
+and `node`. Pull them from VictoriaLogs for the graded window:
+
+```
+_stream:{k8s.namespace.name="aether-test"} AND "k8s.container.name":prober AND "AETHER_PROBE_FAIL"
+```
+
+Put each burst's `t` and `node` next to that node's proxy parent-exit and mesh-dns
+handoff times. `elapsed_ms` of about 2000 means the probe used its whole budget
+(`timeout`), and a few ms means a fast refusal (`connection_error`). Runs graded before
+#1041 carry the pod name in `node`. Translate it with `kubectl get pods -o wide` while
+the pod exists, and after that it cannot be placed.
 
 - **liveness** tier (local, no DNS) — data-path SLI. Target **0.000%**.
 - **mesh_dns** tier (resolves a real FQDN) — DNS + cross-node SLI. Target: `dns_error`,
@@ -300,13 +551,113 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
 - **The first proxy roll and the SHRINK are graded as their own episodes.** Attribute every non-success to its bracketing step from the RAW counter
   series at 30–60s resolution: `x - x offset 8h` silently drops an error series that did
   not exist at the offset, and the unseeded ones are exactly the ones that matter.
+- **The new-ServiceAccount gate (#1014)** — `init_fetch_timeout` on `@` clusters and
+  zero `503/NC` for `user_agent:aether-soak-newsa`. See "The new-ServiceAccount step".
+- **The L4 gates (#1023)** — `ssl_fail_verify_san` on the `tcp_` keys is zero outside
+  rolls, and no pod without a raw-TCP primary port takes a TCP-floor connection. See
+  "The L4 gates".
+- **Benign `DC` on QUIC destinations (#1009)** — at a source-node proxy roll, `DC` +
+  `downstream_remote_disconnect` + 200 + the clean-line `bytes_sent` is the hot-restart
+  FIN race, not a failure; every other `DC` is. See "Benign `DC` at a source-proxy hot
+  restart".
+- **The QUIC per-request cost gate (#1021)**, on any run with twins carrying load —
+  h3 per-request envoy CPU ≤ 1.5× h2, matched no-roll windows, against the 3.3× /
+  2.88-core baseline. See "The QUIC per-request cost gate".
 - **SVID rotation** is a bar since the SPIFFE Broker API (proposal 036): with the default
   4h TTL a pod rotates every ~2h, so an 8h run sees four cycles.
-  `aether_agent_spire_svid_updates_total{aether_spire_update="rotated"}` counts them;
-  the prober delta in each rotation minute must be zero. `rotated` also counts the
-  fresh SVIDs a restarted SPIRE agent mints (a whole node's pods at once), so a churn
-  step that deletes a `spire-agent` pod is NOT a rotation cycle — exclude that node's
-  restart minute when counting cycles.
+  The rotation signal is the agent's counter, summed per node (a restarted agent
+  starts a new series, so sum across its generations — `increase()` does this):
+
+  ```promql
+  sum by (k8s_node_name) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod",aether_spire_update="rotated"}[8h]))
+  ```
+
+  It matched the agent's `pod SVID rotated` log lines exactly on 2026-09-19 and again
+  on 2026-09-27 (240/240 and 89/89). The prober delta in each rotation minute must be
+  zero. `rotated` also counts the fresh SVIDs a restarted SPIRE agent mints (a whole
+  node's pods at once), so a churn step that deletes a `spire-agent` pod is NOT a
+  rotation cycle — exclude that node's restart minute when counting cycles. Its
+  sibling `{aether_spire_update="unchanged"}` fires once per subscribed pod at the
+  daily JWT-key prepare (~16:05Z): same certificate redelivered, not a rotation.
+  That holds for `aether_spire_identity="node"` (the agent's own SVID) only since
+  #993: before it, `node/unchanged` could not move at all, so a zero there from an
+  older build is no evidence of anything.
+
+  **Do NOT count `changes()` on `envoy_sds_spiffe_*_version` (#992).** For the
+  identities that ORIGINATE mesh connections — `aether_agent`, `prober`, `mp_dialer`,
+  `default`, `authz_canary`, `uds_client` — those gauges over-read by ~50×: 258–283
+  changes per node over 8 h, in bursts of ~12 at every svc roll, against 5–18 for
+  every other identity (its real rotations plus one per proxy roll). The per-connection
+  cert selector fetches an originator's secret over its own SotW SDS stream (#865), and
+  that stream re-serves the secret on every snapshot bump. Envoy keys SDS stats by
+  secret NAME, so the static ADS subscription and the selector's subscription bump the
+  same `sds.<name>.version` gauge. It cannot be split without renaming the resources,
+  so it is documented rather than changed; the gauges remain usable only as "this
+  node's Envoy has received *a* secret push", never as a rotation count.
+
+### Zero-reading gates: seeded or vacuous?
+
+Several gates pass on a zero, and a zero from a series that was never created reads
+exactly like a zero from a healthy system (aether#853, gotcha 10). Before grading on
+one, know which kind it is and what proves it can move:
+
+| gate | series on a clean run | what proves it can move |
+|---|---|---|
+| prober `dns_*` classes | **no series** (created on first occurrence) | source: `classifyErr` in `prober/internal/prober/prober.go` |
+| `cap_tcp_anyport_*` | seeded by `anyport-probe.sh` before T0 | the probe's own +N, and the neighbouring `cap_tcp_*` chains climbing |
+| `aether_cni_operations_total{operation="capture_divert",result="error"}` | **no series** | `…{operation="add"}` must exist (the export works) |
+| `envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}` (#1014) | **no series**; a failure is BORN at 1, so `increase()` alone reads 0 — use `max_over_time` too | rev242's red reading (above), and each step's own `@…/sa-new-*` twin series existing with traffic |
+| `503/NC` for `user_agent:aether-soak-newsa` | no rows | the same query without `response_flags:NC` returns the step's requests |
+| **L4 (a)** `envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}` outside roll brackets (#1023; see "The L4 gates") | **no series** (born at 1 on the first rejection — read `max_over_time`, not only `increase`) | rev242: **23** ticks over its soak, and rev243: 1 in 1h47m — both read under the pre-#1023 keys `aether-test/(tcp-echo\|mixed-svc)`, since a pre-#1023 proxy exports no `tcp_` key at all; on a #1023 build, `envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_.*"}` must EXIST and climb with the mp-dialer legs (the keys are exported and the selector is spelled right) |
+| **L4 (b)** stray TCP-floor landings `envoy_tcp_in_tcp_<pod>_downstream_cx_total` on pods that serve no raw-TCP primary port (#1007/#1022/#1023; see "The L4 gates") | **no series** once every proxy runs the #1022 thread-self patch | rev243 is the negative control: **6** stray landings in its 1h47m generation, all on `prober` pods (w05 2, w03 3, w04 1); rev242 non-zero on svc-1..5, prober, k6-soak-loader and udp-dialer. On any build, `tcp-echo`'s own `in_tcp_*` and the `*_9000` per-port chains climbing proves the chain family is exported |
+
+### The L4 gates (#1023)
+
+Two zero-reading gates on the L4 data path. Both are **seeded as vacuous** in the table
+above until a #1023 build has been seen red, and on every run they need the existence
+proof in its last column before a zero means anything.
+
+**(a) No client-side SAN rejection on an L4 cluster outside a roll.** Since #1023 each
+L4 cluster has its own `aether_cluster` key (`tcp_<ns>/<svc>` for the floor,
+`tcp_<ns>/<svc>_<port>` per port; `docs/runbook.md`, "L4 stat keys and the L4 access
+log"), so this counts L4 clusters only. Before it, `aether-test/mixed-svc` also carried
+the HTTP cluster's rejections. `udp_` keys carry no TLS and are left out. There is no
+`tls_` key: TLSRoute chains count under their backends' per-port
+`tcp_<ns>/<svc>_<port>` keys, never the floor's (#1044).
+
+```promql
+# Per minute. A non-zero minute outside a proxy/agent roll bracket is a FAIL.
+sum by (node, aether_cluster) (increase(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}[1m]))
+# The born-at-1 half: a series whose first sample is already 1 reads 0 above.
+max by (node, aether_cluster) (max_over_time(envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}[8h]))
+# Existence proof: the keys are exported and the selector matches them.
+sum by (aether_cluster) (increase(envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_.*"}[8h])) > 0
+```
+
+**(b) No TCP-floor connection on a pod that serves no raw-TCP primary port.** The
+inbound DEFAULT chain (`in_tcp_<pod>`) is where a misdirected L4 connection lands
+(#1007). Only `tcp-echo` is TCP-primary in this harness, and per-port chains
+(`in_tcp_<pod>_<port>`) are legitimate:
+
+```promql
+# One series per landing pod over the window; MUST return no series (or 0).
+max by (node, pod) (max_over_time((label_replace(
+  {__name__=~"envoy_tcp_in_tcp_.+_downstream_cx_total",
+   __name__!~"envoy_tcp_in_tcp_(tcp_echo_.+|.+_[0-9]+)_downstream_cx_total"},
+  "pod", "$1", "__name__", "envoy_tcp_in_tcp_(.+)_downstream_cx_total"))[8h:1m]))
+```
+
+A landing is not a roll artifact, so (b) is graded over the whole window, rolls
+included. Attribute any hit of either gate from the L4 access log, which puts the
+source pod, the dialled VIP:port, the chosen L4 cluster (by its `tcp_` stat key), the intended endpoint and
+the rejection on one line:
+
+```
+_stream:{service.name="aether-proxy"} AND log_name:aether_l4_access_logs AND response_flags:!"-"
+```
+
+`docs/runbook.md`, "Attributing an `ssl_fail_verify_san` event … L4 hops", has the
+verdict table.
 
 ### The Phase 4 evidence clock (proposal 037)
 
@@ -409,7 +760,7 @@ node's agent started — roll the agent.
 ### The QUIC leg (proposal 038 Phase 4)
 
 East-west QUIC is unconditional: every service in a node's dependency set is dialled
-over HTTP/3 by every local ServiceAccount, so this leg grades **every** service the
+over HTTP/3 by every local ServiceAccount that calls it, so this leg grades **every** service the
 k6 loaders and the prober call — no `--set` is needed and there is nothing to list.
 (The per-destination allow-list was a proving gate:
 the first QUIC soak ran with `aether-test/svc-1` and `svc-2` listed, its PASS removed
@@ -419,19 +770,26 @@ it, decision 2026-09-26.)
 # prerequisite ON TALOS: the SPIRE default ClusterSPIFFEID must already issue the
 # <sa>.<ns>.aether.internal + *.<sa>.<ns>.aether.internal DNS SANs (GitOps,
 # spire-server.controllerManager.identities.clusterSPIFFEIDs.default.dnsNameTemplates)
-# and every node's envoy_sds_*_version must have moved since — otherwise, on a
-# proxy pin without envoyproxy/envoy#47740, every HTTP/3 handshake fails closed
-# (#957) and the leg grades the wrong thing. Then a plain upgrade:
+# and every node's pods must have ROTATED since (aether_agent_spire_svid_updates_total
+# {aether_spire_identity="pod",aether_spire_update="rotated"} moved on every node --
+# NOT envoy_sds_*_version, which moves on every svc roll for originator identities,
+# #992) -- otherwise, on a proxy pin without envoyproxy/envoy#47740, every HTTP/3
+# handshake fails closed (#957) and the leg grades the wrong thing. Then a plain
+# upgrade (QUIC is unconditional since #979; there is nothing to --set):
 helm upgrade aether ... -f <saved values>
 ```
 
-The agent logs `east-west QUIC fan-out quic_clusters=N local_identities=I` on every
-node whenever the count changes; `N = I × S`, S = the services in that node's
-dependency set with twins (on talos-main 8–14 SAs × ~19 services ≈ 150–270 per
-node) — that is the budget the run is paying for, and it must be flat outside roll
-brackets. Since #962 the twins have their own stats key `<ns>/<svc>@<ns>/<sa>`, so
-the leg grades from Prometheus (the admin is loopback-only on talos and
-`kubectl exec` is denied):
+The agent logs `east-west QUIC fan-out quic_clusters=N observed_pairs=P
+local_identities=I awaiting_client_cert=W` on every node with a caller. Since #1020
+`N` is the number of (source SA, destination) pairs that have dialled, not `I × S`
+(S = the eligible services in that node's dependency set; on talos-main the ceiling
+without the allow-list is 8–14 SAs × ~19 services ≈ 150–270 per node). That is the
+budget the run is paying for: the pairs the k6 loaders, the prober and the dialers
+actually use -- with every destination now QUIC, expect it to grow from the ~10 of
+the two-destination proving runs to roughly one per (caller SA, destination it
+calls) per node, and to be flat outside roll brackets. Since #962 the twins have
+their own stats key `<ns>/<svc>@<ns>/<sa>`, so the leg grades from Prometheus (the
+admin is loopback-only on talos and `kubectl exec` is denied):
 
 ```promql
 # HTTP/3 requests per (destination, caller ServiceAccount) -- must be non-zero for
@@ -457,6 +815,276 @@ error episode on a destination was the QUIC path (its twin's `connect_fail`
 / `rq_5xx` moved) or the h2 path (they did not). Not gradeable from Prometheus: the
 destination's per-pod `listener.inbound_<pod>_h3.*` counter (admin only; the kind
 harness `e2e/eastwest-quic.sh` reads it).
+
+### Benign `DC` at a source-proxy hot restart (#1009)
+
+A QUIC run leaves a few source-reporter `DC` lines on the QUIC destinations at each
+**source-node** proxy roll (74 over the rev242 run, all 200s). They are not failures.
+The draining parent stamps `Connection: close` on the 200; the HTTP/1.1 client (k6)
+reads the full Content-Length body and closes; the h3 upstream FIN is decoded a moment
+later, so `ConnectionManagerImpl::onEvent(RemoteClose)` → `resetAllStreams` flags the
+still-open stream `DC` with `response_code_details=downstream_remote_disconnect`. The
+client has every byte and k6 counts the request a success. h2 has no such window
+(nghttp2 hands DATA and END_STREAM over from one TCP read), so the h2 path never logs it.
+No Envoy setting ends a stream on a satisfied Content-Length. Mechanism, read from the
+pinned Envoy:
+[#1009](https://github.com/bpalermo/aether/issues/1009#issuecomment-5869601110).
+
+**The rule.** A `DC` line is **benign** iff all four hold:
+
+- `response_flags` is exactly `DC` (no other flag beside it),
+- `response_code_details` is `downstream_remote_disconnect`,
+- `response_code` is `200`,
+- `bytes_sent` equals the clean-line body size **for that target**. That is 791 for the
+  soak's `svc-1`/`svc-2` twins on rev242; read it fresh with the first query below,
+  and it must be ONE value per authority.
+
+Anything else stays a failure: `downstream_local_disconnect(...)` (the proxy closed on
+the client), a short `bytes_sent` (the body was cut), a non-200, or `DC` beside another
+flag. Benign lines are also **excluded from the k6 reconciliation**: k6 counted them as
+successes, so they have no k6 failure to match.
+
+```logsql
+# 1. the clean-line body size per QUIC destination: exactly one bytes_sent per authority
+log_name:aether_access_logs AND reporter:source AND authority:~"svc-[12]" AND response_code:200 AND response_flags:="-"
+  | stats by (authority, bytes_sent) count()
+
+# 2. benign DC, per node and minute, inside one roll bracket (the roll's start/end
+#    from /tmp/soak-churn.log). One authority per query: <clean_bytes> is per target.
+log_name:aether_access_logs AND reporter:source AND _time:[<roll_start>, <roll_end>]
+  AND authority:~"svc-1" AND response_flags:="DC" AND response_code:200
+  AND response_code_details:="downstream_remote_disconnect" AND bytes_sent:="<clean_bytes>"
+  | stats by (_time:1m, node_name) count() benign
+
+# 3. NON-benign DC in the same bracket. MUST be empty. Drop the time filter to get
+#    the whole run; every row that comes back is a failure to attribute.
+log_name:aether_access_logs AND reporter:source AND _time:[<roll_start>, <roll_end>]
+  AND authority:~"svc-1" AND response_flags:~"DC"
+  AND NOT (response_flags:="DC" AND response_code:200
+           AND response_code_details:="downstream_remote_disconnect" AND bytes_sent:="<clean_bytes>")
+  | stats by (node_name, response_code, response_flags, response_code_details, bytes_sent) count()
+```
+
+Control-test a zero from query 3 by dropping its `NOT (...)` clause: the benign lines
+from query 2 must come back. Benign lines belong to the rolled node: their `node_name`
+is the source node whose proxy was restarting. The same shape on a node whose proxy
+was *not* rolling is not this mechanism, and needs its own attribution.
+
+**The timing fields (#1009).** Since #1009 every HTTP access-log line carries two
+durations, both measured from the first upstream response byte:
+
+- `upstream_rx_ms`: `%COMMON_DURATION(US_RX_BEG:US_RX_END:ms)%`, ending when the router
+  decoded the upstream end-of-stream.
+- `downstream_tx_end_ms`: `%COMMON_DURATION(US_RX_BEG:DS_TX_END:ms)%`, ending when the
+  downstream codec finished encoding the response.
+
+`-` means that end point never happened; a clean line carries two numbers (often `0`,
+at millisecond precision). The benign race reads **`upstream_rx_ms:"-"` and
+`downstream_tx_end_ms:"-"`** alongside a full `bytes_sent`, because the FIN had not been
+decoded when `resetAllStreams` destroyed and logged the stream. A `DC` line with
+`upstream_rx_ms` set but `downstream_tx_end_ms` `-` is a different case: the upstream
+had finished and the response stalled on its way out. Attribute it; it is not the
+race. The fields are a cross-check, not a condition of the rule, because lines from
+builds before #1009 do not have them.
+
+The kind reproduction attempt is `e2e/eastwest-quic-hotrestart.sh`. It runs HTTP/1.1
+keep-alive loops through supervisor hot restarts (SIGHUP) to two h3 twins and an h2
+control, then grades the collector stand-in's records with this rule. On a single-node
+kind cluster the race did not reproduce: 0 `DC` lines in about 100 drain-closed
+connections per h3 destination. That run passes H2 vacuously and says so, and
+`HR_REQUIRE_DC=1` turns a zero into a failure.
+
+### The QUIC per-request cost gate (#1021)
+
+**Acceptance for dropping the allow-list (#979): an HTTP/3 mesh request costs at
+most 1.5× the proxy CPU of an h2 mesh request, at the soak's load shape.** The
+prober and k6 SLIs cannot see this: a QUIC run can be error-free and still cost 2.3×
+the fleet's proxy CPU once every destination is on it (#1006's projection).
+
+**Baseline (grade the next QUIC soak against these):**
+
+| | run | window | envoy cores (fleet) | mesh rps | per request |
+|---|---|---|---|---|---|
+| h2 reference | rev239, no QUIC | 2026-09-26 19:20:42–20:40:42Z | 2.092 (idle 0.923) | 350 | **3.3 ms** = (2.092 − 0.923) / 350 |
+| QUIC | rev242, svc-1/2 on QUIC (100 of 350 rps) | 2026-09-27 16:00–17:20Z | **2.872** | 350 | h3 = 3.3 + (2.872 − 2.092) / 100 = **11.1 ms → 3.3×** |
+
+The 7 h figures (2.165 / **2.879**) reproduce the window within 1 %; **2.88 fleet
+cores** is the QUIC baseline. Since then the inbound QUIC listener reads with GRO
+(#1021: −11 % destination CPU per request in `//test/mtlspool`), which by itself is
+nowhere near enough to close 3.3× → 1.5×. Treat the gate as open.
+
+**Method (#1006, reproduce it exactly or the numbers do not compare):**
+
+1. **Windows.** The T0-matched no-roll window, 80 min, the same churn offset in
+   both runs: **T0 + 6h05m → T0 + 7h25m**. No proxy, agent or service roll may
+   fall inside it (check `/tmp/soak-churn.log`). Drop the first point of each
+   window; Pyroscope points are end-labelled.
+2. **Load matched.** Per mesh destination, `increase(envoy_cluster_upstream_rq_total
+   {aether_cluster=~"aether-test/<svc>(@.*)?"}[80m]) / 4800` must agree between the
+   two runs to within ~2 % (rev239 vs rev242: echo 100.1/99.9, mixed-svc 50.8/50.8,
+   svc-1..4 49.9–50.1). The QUIC share is the same query over `@` series only.
+3. **CPU.** Pyroscope `process_cpu`, `service_name="aether-proxy"`, split by
+   `process_executable_name`; grade on **`envoy`** only (the supervisor moved
+   −0.036 cores between these runs for reasons unrelated to QUIC). Average cores
+   over the window, fleet sum.
+4. **Idle reference.** Envoy cores with no k6 load but the same background traffic
+   (~150 rps of prober and dialers), on the same build: 0.923 on rev239.
+5. **Arithmetic.** `per_h2 = (envoy_ref_loaded − envoy_ref_idle) / mesh_rps` on a
+   run with no QUIC; `per_h3 = per_h2 + (envoy_quic − envoy_ref_loaded) / quic_rps`
+   on a run where `quic_rps` of the same load rides twins. **Gate: `per_h3 / per_h2
+   ≤ 1.5`.** An unconditional-QUIC run (no reference half) grades as
+   `envoy_quic_loaded − envoy_idle` over mesh rps against the latest h2 reference.
+6. **Build drift.** If the Envoy pin moved between the reference and the QUIC run,
+   say so and bound it with the idle reading (rev240 vs rev239: −1.3 %); it is not
+   separable at load.
+
+Attribute a miss with the frames #1006 used (source-side
+`EnvoyQuicClientConnection` read events, `UdpListenerImpl::handleReadCallback`,
+`quic::QuicConnection::OnAckAlarm`, `ScopedPacketFlusher`, kernel `udp_sendmsg` /
+`udp_recvmsg`) and the connection density: `sum(envoy_cluster_upstream_cx_active
+{aether_cluster=~".*@.*"})` against the QUIC rps. Connections are **one per (source
+node, source ServiceAccount, Envoy worker the SA's app connections landed on,
+destination endpoint)**, not one per app connection (see the runbook, "HTTP/3
+per-request cost"); a count that tracks k6 VUs is a regression of #1021.
+
+Do **not** measure this against talos-main with synthetic load outside a soak: the
+harness form of the same comparison is `//test/mtlspool` `TestQUICRequestCPU`
+(`--test_env=AETHER_QUIC_COST=1`), which prints loaded-minus-idle CPU per request
+for h2 and for each inbound UDP option.
+
+### The hot-restart wedge gates (#1050)
+
+On rev248 one proxy roll in ~60 wedged: the successor's last line was `all
+dependencies initialized. starting workers`, the draining parent's last was `closing
+and draining listeners`, both main threads then sat in blocking hot-restart socket
+calls on each other (parent `sendmsg` forwarding QUIC/UDP to the child, child
+`recvmsg` waiting for the parent's stats) until the supervisor's liveness watchdog
+killed both epochs 38 s later. Every new connection to or from that node was dead for
+the whole window, and the prober took 56 errors on it. Mechanism:
+[#1050](https://github.com/bpalermo/aether/issues/1050#issuecomment-5875727632). The
+carried Envoy patch in the aether-proxy image (#1060) removes the deadlock, so the
+chart's workaround, Envoy `--skip-hot-restart-parent-stats`
+(`proxy.hotRestart.skipParentStats`), is off by default again and stays as an emergency
+switch. These gates are what show the deadlock stayed removed with the child merging
+the parent's stats again. Grade them **per roll**, over the proxy DaemonSet's roll
+windows from `/tmp/soak-churn.log`.
+
+**(a) No watchdog kill.** Zero of each, per roll, fleet-wide:
+
+```
+_stream:{service.name="aether-proxy"} AND _msg:"liveness watchdog fired"
+_stream:{service.name="aether-proxy"} AND _msg:"drain deadline elapsed, killing envoy epoch"
+```
+
+The second line is only a finding when the epoch it kills still had a live child,
+i.e. when it follows a watchdog line in the same pod. A pod that is deleted with no
+successor (see the runbook, "What the proxy supervisor does on SIGTERM") can log it
+on its own. Control-test the zero: `_msg:"starting workers"` over the same window must
+return one line per node per roll. If it does not, the container logs did not reach
+VictoriaLogs and the zero is vacuous.
+
+**(b) No QUIC blackhole toward the rolling node.** Per roll, count the source-side
+QUIC failures whose upstream is on the node being rolled:
+
+```
+_stream:{service.name="aether-proxy"} AND log_name:aether_access_logs AND reporter:source
+  AND response_flags:UC
+  AND response_code_details:~"QUIC_TOO_MANY_RTOS|Network_blackhole_detected"
+```
+
+Resolve `upstream_host` to its node as in the runbook ("upstream_host → pod → node").
+The baseline is the count on the rolls that did not wedge: 0 on rolls 1–3 of the
+rev248 run. The wedged roll logged ~550 in two minutes. A handful of
+`QUIC_PUBLIC_RESET|FROM_PEER|Received_stateless_reset` at a roll is the milder,
+separate case (a parent-owned QUIC connection's packets reaching the child after the
+parent exited, 2 on roll 4). Report it, but it is not this gate.
+
+**(c) The successor keeps talking after `starting workers`.** A healthy successor logs
+its next line (listener warming, xDS updates, the supervisor's `pod ready`) within a few
+seconds of `all dependencies initialized. starting workers`. A child that is silent for
+**10 s** after that line is the wedge signature, whether or not the watchdog later
+fires. Grade it from the same stream, per pod, by the gap between `starting workers` and
+the next line from that pod. No metric carries it yet.
+
+**The kind form.** `e2e/hotrestart-wedge.sh` forces the same deadlock by freezing the
+child inside the parent's forwarding window. It is the red-then-green check for any
+change that touches hot restart or the Envoy pin:
+
+```bash
+# red: the knob off. Each wedge costs a container restart, and kubelet's
+# crash-loop backoff grows with each one (~2-4 min apiece by the third).
+WEDGE_SKIP_PARENT_STATS=false e2e/hotrestart-wedge.sh up
+WEDGE_FREEZE_S=6 WEDGE_RESTARTS=4 WEDGE_STOP_ON_FIRST=0 e2e/hotrestart-wedge.sh run
+#   -> WEDGES=4 RESTARTS=4 FREEZE_S=6 SKIP_PARENT_STATS=no     (2026-09-28)
+# green: the chart default. `up` again only upgrades the release (rolls the proxy).
+EWQ_SKIP_BUILD=1 e2e/hotrestart-wedge.sh up
+WEDGE_FREEZE_S=6 WEDGE_RESTARTS=6 WEDGE_STOP_ON_FIRST=0 e2e/hotrestart-wedge.sh run
+#   -> WEDGES=0 RESTARTS=6 FREEZE_S=6 SKIP_PARENT_STATS=yes    (2026-09-28)
+e2e/hotrestart-wedge.sh down
+```
+
+The `SKIP_PARENT_STATS=` field is read from the live Envoy's argv, not from the
+setting, so a red run that says `yes` was not a red run. The red run above predates the
+carried patch: against the chart's current proxy pin, `WEDGE_SKIP_PARENT_STATS=false`
+(now the default) is the green arm.
+
+### The h3 stateless-reset gate (#1054)
+
+A source h3 connection that outlives the destination proxy's hot-restart parent dies on
+a QUIC stateless reset when the parent exits (mechanism in the runbook, "Source h3
+requests die on a stateless reset at a destination's roll"). The carried Envoy
+patches (#1064, #1066) address it with the chart default
+`proxy.hotRestart.drainStrategy: gradual`; `immediate` made it worse on talos-main. Grade **per proxy roll**, source side, toward the
+rolling node (resolve `upstream_host` as in (b) above):
+
+```
+_stream:{service.name="aether-proxy"} AND log_name:aether_access_logs AND reporter:source
+  AND response_code_details:~"Received_stateless_reset"
+```
+
+must be **0**, and so must the QUIC `503 UC` lines toward the rolling node:
+
+```
+_stream:{service.name="aether-proxy"} AND log_name:aether_access_logs AND reporter:source
+  AND response_code:503 AND response_flags:UC AND upstream_cluster:~"^quic:"
+```
+
+Also report the same query with `PEER_GOING_AWAY` in place of `Received_stateless_reset`:
+a change that only turns one failure into another must not read as a pass.
+
+Do **not** gate on the destination's `quic.dispatcher.stateless_reset_packets_sent`.
+The draining parent also forwards its own time-wait connection IDs to the child, which
+answers them with stateless resets that no live source connection ever sees, so the
+counter is non-zero on a clean roll.
+
+The kind form is `e2e/eastwest-quic-hotrestart.sh` in `HR_MODE=sparse` on two nodes.
+Busy loops never reproduce it (every connection keeps drawing responses and so, sooner
+or later, a GOAWAY); the sparse leg ends its loops at the SIGHUP, sends one request at
+T+2, and bursts at the parent's `shutting down due to child request`:
+
+```bash
+# red: the pre-#1054 settings (HR_QUIC_IDLE is patched past the chart's check)
+EWQ_WORKER=1 HR_DRAIN_STRATEGY=gradual HR_QUIC_IDLE=30s e2e/eastwest-quic-hotrestart.sh up
+EWQ_WORKER=1 HR_MODE=sparse HR_REQUIRE_RESET=1 HR_FREEZE_PARENT_S=4 HR_FREEZE_AT=14 \
+  e2e/eastwest-quic-hotrestart.sh verify
+#   -> STATELESS_RESET=1 over 10 restarts (2026-09-28); unforced: 0 over 10
+# green: the chart defaults. `up` again only upgrades the release.
+EWQ_WORKER=1 EWQ_SKIP_BUILD=1 e2e/eastwest-quic-hotrestart.sh up
+EWQ_WORKER=1 HR_MODE=sparse e2e/eastwest-quic-hotrestart.sh verify
+#   -> STATELESS_RESET=0 PEER_GOING_AWAY=0 CLIENT_NON200=0 over 10
+EWQ_WORKER=1 HR_MODE=sparse HR_FREEZE_PARENT_S=4 HR_FREEZE_AT=14 e2e/eastwest-quic-hotrestart.sh verify
+#   -> STATELESS_RESET=0 PEER_GOING_AWAY=0 HUNG=0 over 10 (4 freeze handshake timeouts each)
+e2e/eastwest-quic-hotrestart.sh down
+```
+
+Kind reproduces the race weakly. Unforced, the window is the few milliseconds between
+the child unpausing its inherited UDP listeners and the parent's workers stopping, and
+the red arm saw no reset in 10 restarts. `HR_FREEZE_PARENT_S` holds that window open
+by stopping the parent just before the child's parent-shutdown timer fires; even then
+the red arm produced 1 reset in 10. Its `503 URX,UF … QUIC_NETWORK_IDLE_TIMEOUT` lines
+are new handshakes that cannot complete while the parent is stopped and the child is
+still paused: an artifact of the freeze, present in both arms, and not gated. The
+soak gate above is the real evidence.
 
 ## Hard-won gotchas
 
@@ -576,8 +1204,10 @@ Each of these invalidated a real run:
   > bounded verbatim sample. Verified on k6 v2.3.0; see the comment block in
   > `k6-mesh-soak.js`.
 - `k6-runner.yaml` — the 5-node runner DaemonSet.
-- `churn.sh` — the 31-roll churn driver plus the no-roll window and the demand-set
-  shrink; takes a build label for the log header.
+- `churn.sh` — the 31-roll churn driver plus the two new-ServiceAccount steps, the
+  no-roll window and the demand-set shrink; takes a build label for the log header.
+- `newsa-client.sh` — the new-SA step's workload (busybox `sh` + `curl` in the pod,
+  shipped per step as a ConfigMap); never run on the workstation.
 - `sample-proxy-rss.sh` — age-matched `aether-proxy` working-set sampler for #628.
   Standalone, and queued automatically by `churn.sh` after each proxy roll.
 - `multiprotocol.yaml` — the proposal-037 leg: `mixed-svc` (HTTP :8080 primary + raw

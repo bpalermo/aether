@@ -2,8 +2,9 @@
 # Single-cluster kind e2e for proposal 038 Phase 4 (east-west QUIC): the
 # per-pod HTTP/3 inbound on UDP:18008 (#953, unconditional) and the per-source
 # `quic:<svc>.<ns>.<domain>@<ns>/<sa>` clusters selected by the source SPIFFE
-# ID (#956; unconditional since the proving allow-list was removed: EVERY
-# destination in the node's dependency set gets its twins).
+# ID (#956; unconditional since the proving allow-list was removed, #979:
+# EVERY destination in the node's dependency set is QUIC-eligible, and its
+# twins are built per (source, destination) pair on first use, #1020).
 #
 # What it proves, on a real data path (kind + the real chart + the real
 # aether-proxy + SPIRE + the CNI's capture):
@@ -12,26 +13,40 @@
 #                   (inbound_<pod>_h3) and the per-listener request counter this
 #                   suite reads exists — so every "== 0" below is a reading, not
 #                   an absent stat (#853)
-#   E1  fan-out     a quic: twin exists for every (destination x source
-#                   ServiceAccount) -- nothing is listed anywhere, so this is
-#                   the unconditional fan-out read off the real proxy
+#   E1  fan-out     twins are DEMAND-SCOPED (aether#1020): before any request
+#                   no pair has dialled, so no quic: twin exists (on a fresh
+#                   cluster: zero) -- nothing is listed anywhere, and still no
+#                   twin exists for a pair that never dialled
 #   E2  h3 + id     client-a and client-b (DIFFERENT ServiceAccounts) each call
 #                   quic-a and quic-b: every request answers 200, the destination
 #                   sees the CALLER'S OWN SPIFFE ID in x-forwarded-client-cert,
 #                   and the request rode the caller's own quic: twin over HTTP/3
 #                   (never the other source's twin, never the h2 cluster)
 #   E4  GAMMA       gamma-a with a weighted HTTPRoute canary to gamma-a /
-#                   gamma-b (twins present for both) stays on h2 — the matcher
+#                   gamma-b (both QUIC-eligible) stays on h2 — the matcher
 #                   action names ONE cluster, so a weighted split has no
-#                   per-source form (#961). (There is no E3 any more: it was the
-#                   h2-only, not-allow-listed destination, and no such
-#                   destination exists now.)
+#                   per-source form (#961) — and so never fetches a twin.
+#                   (There is no E3 any more: it was the h2-only, not
+#                   allow-listed destination, and no such destination exists
+#                   since #979; a weighted split is the one h2-by-design path.)
 #   E4b GAMMA       a single-backendRef HTTPRoute rule to the parent (gamma-a)
 #                   renders as `cluster:` and IS selected: it rides the caller's
 #                   own quic: twin over HTTP/3 like the default route (#961)
+#   E4c pairs       the node's quic: cluster count EQUALS the (source,
+#                   destination) pairs this suite drove over a selecting route
+#                   (E2 + E4b = 2 sources x 3 destinations = 6), and the set is
+#                   exactly those pairs: a twin is built only for a pair that has
+#                   dialled (aether#1020; the pre-#1020 up-front fan-out would be
+#                   every local SA x QUIC destination: 6 x 4 = 24 on this node)
 #   E5  Q3          client-a's pod is deleted and comes back with a NEW pod IP;
 #                   its requests still carry client-a's identity over HTTP/3, and
 #                   client-b's still carry client-b's
+#   E6  id gate     a pod under a ServiceAccount that did not exist a second
+#                   earlier sends its FIRST request the instant its container
+#                   starts (#1053). The webhook-injected aether-identity-ready
+#                   init container ran and exited 0 BEFORE the app started, and
+#                   that first request answers 200 carrying the new SA's own
+#                   SPIFFE ID
 #
 # HOW "OVER HTTP/3" IS PROVEN. The application behind the inbound only ever sees
 # the proxy's loopback hop, so nothing the app can report distinguishes h2 from
@@ -97,6 +112,26 @@
 # Tear down between the two: already-issued SVIDs keep their SANs until they
 # rotate, so re-running `up` over the red cluster would not be a clean green.
 #
+# E6 WITH THE GATE OFF (IDENTITY_GATE=off installs the chart with
+# controller.webhook.identityGate.enabled=false) is a report, not a red: no init
+# container is injected and the app's t=0 request races SPIRE's entry sync. On
+# kind (2026-09-28) SPIRE issued the SVID 3.9-5.9 s after the agent's subscribe
+# (two svids=0 updates first, the talos-main shape) and the first request
+# STALLED 3.4-5.4 s waiting for the pod's client certificate before answering
+# 200; with the gate on it answered in 12-14 ms after the gate held the pod
+# 3.6-4.1 s. On talos-main the same window is ~7.5 s, which crosses the mesh
+# cluster connect_timeout and becomes 503 UF (#1053). E6 prints the first
+# request's status and latency either way and asserts only the gate-on
+# contract (init container injected first, exited 0, first request 200 as the
+# new ServiceAccount).
+#
+#   IDENTITY_GATE=off e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh idgate  # the stall
+#   e2e/eastwest-quic.sh up && e2e/eastwest-quic.sh idgate                    # GREEN
+#
+# E4c's pair count is seen red by asserting the pre-#1020 count against a
+# #1020 agent: EWQ_EXPECT_TWINS=24 e2e/eastwest-quic.sh verify goes red at E4c
+# with 6 twins present (the override exists only for that red run).
+#
 # Q3 LIMITATION, STATED RATHER THAN DISCOVERED. True QUIC connection migration
 # (one connection surviving a client 5-tuple change) cannot be exercised here:
 # the QUIC client is the node PROXY in the host netns, not the pod, so a pod's
@@ -115,10 +150,19 @@
 # without #47740) every HTTP/3 handshake fails the QUIC client's hostname check
 # and E2 goes red with the twins present: the negative control above.
 #
-# Usage: e2e/eastwest-quic.sh {up|test|verify|down}   (bare = up + verify)
+# Usage: e2e/eastwest-quic.sh {up|test|verify|idgate|down}   (bare = up + verify)
 #
 # Prereqs: kind, docker, kubectl, helm, bazel (for the image build; CI sets
 # EWQ_SKIP_BUILD=1 and pre-loads the images from the nightly build artifact).
+# EWQ_LOCAL_PROXY=1 runs the proxy image already in the local Docker daemon
+# (`make load-proxy-image`: <registry>/proxy:latest, e.g. a carried-patch build)
+# instead of the chart's digest-pinned release; read at `up`. Never built here.
+# EWQ_WORKER=1 (read at `up`) adds a kind worker node, pins every destination to
+# it and every source to the control-plane node, so a destination's proxy can
+# hot-restart while the sources' proxy keeps running: the cross-node shape of
+# aether#1054 (e2e/eastwest-quic-hotrestart.sh HR_MODE=sparse). This suite's own
+# `verify` reads destination-side counters from $NODE and needs the default
+# single node.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -128,6 +172,9 @@ IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
 CLUSTER="${EWQ_CLUSTER:-eastwest-quic}"
 CTX="kind-$CLUSTER"
 NODE="$CLUSTER-control-plane"
+# The node the destinations run on: $NODE, or the worker with EWQ_WORKER=1.
+DST_NODE="$NODE"
+if [ "${EWQ_WORKER:-0}" = "1" ]; then DST_NODE="$CLUSTER-worker"; fi
 NS="aether-system"
 TEST_NS="aether-test"
 MESH_DOMAIN="aether.internal"
@@ -145,12 +192,15 @@ esac
 # The runtime guard envoyproxy/envoy#47740 registers (carried on the chart's
 # proxy pin, #972); off restores the QUIC client's SNI-vs-DNS-SAN check.
 QUIC_HOSTNAME_GUARD="envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match"
+# on (default) = the chart's default egress identity gate (#1053); off = the
+# same install with controller.webhook.identityGate.enabled=false (E6's red arm).
+IDENTITY_GATE="${IDENTITY_GATE:-on}"
 # The mesh VIP Service port every client dials through mesh DNS
 # (meshconst.ProxyOutboundPort); the capture route claims "<fqdn>:18081".
 OUTBOUND_PORT="18081"
 # The application port every destination binds and registers.
 APP_PORT="8080"
-# Destinations. Every one of them gets quic: twins — nothing is listed.
+# Destinations. Every one of them is QUIC-eligible — nothing is listed.
 QUIC_DSTS=(quic-a quic-b)
 GAMMA_DSTS=(gamma-a gamma-b)
 # Sources, each its own ServiceAccount (= its own SPIFFE ID).
@@ -166,6 +216,11 @@ SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.30.2}"
 SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.6.1}"
 SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller)
+if [ "${EWQ_LOCAL_PROXY:-0}" = "1" ]; then IMAGES+=(proxy); fi
+# Extra `helm upgrade aether` arguments for a harness that sources this file
+# (e2e/eastwest-quic-hotrestart.sh adds the OTLP collector and access logs).
+# Empty for this suite's own runs.
+EWQ_EXTRA_HELM_ARGS=("${EWQ_EXTRA_HELM_ARGS[@]+"${EWQ_EXTRA_HELM_ARGS[@]}"}")
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 ok() { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
@@ -270,8 +325,15 @@ create_cluster() {
 		-e "s#POD_SUBNET#10.30.0.0/16#g" \
 		-e "s#SVC_SUBNET#10.130.0.0/16#g" \
 		"$REPO_ROOT/e2e/kind-cluster.yaml" >"$cfg"
+	if [ "${EWQ_WORKER:-0}" = "1" ]; then
+		printf '  - role: worker\n    labels:\n      topology.kubernetes.io/region: local\n      topology.kubernetes.io/zone: %s\n' "$CLUSTER" >>"$cfg"
+	fi
 	kind create cluster --config "$cfg" --wait 60s >/dev/null
 	rm -f "$cfg"
+	if [ "${EWQ_WORKER:-0}" = "1" ]; then
+		# kind taints the control plane once a worker exists; the sources run there.
+		kc taint nodes "$NODE" node-role.kubernetes.io/control-plane:NoSchedule- >/dev/null 2>&1 || true
+	fi
 	ok "cluster '$CLUSTER' ready"
 }
 
@@ -384,14 +446,22 @@ install_aether() {
 	local charts
 	charts="$(chart_dir)"
 	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	local gate=()
+	case "$IDENTITY_GATE" in
+	on) ;;
+	off) gate=(--set controller.webhook.identityGate.enabled=false) ;;
+	*) die "IDENTITY_GATE must be 'on' or 'off', got '$IDENTITY_GATE'" ;;
+	esac
+
 	log "installing the aether CRDs"
 	helm --kube-context "$CTX" upgrade --install aether-crds "$charts/crds" \
 		-n "$NS" --create-namespace --wait --timeout 2m >/dev/null || die "crds chart install failed"
 
-	# Everything except spire is chart default (kubernetes registry backend,
-	# capture + mesh DNS, GAMMA on, east-west QUIC unconditional). Never
-	# --reuse-values.
-	log "installing aether (SPIRE ON; QUIC_DNS_SANS=$QUIC_DNS_SANS)"
+	# Everything except spire (and the identity-gate / harness overrides) is
+	# chart default (kubernetes registry backend, capture + mesh DNS, GAMMA on,
+	# east-west QUIC unconditional). Never --reuse-values: the overrides must be
+	# exactly what THIS invocation says, so re-runs of `up` really toggle them.
+	log "installing aether (SPIRE ON; QUIC_DNS_SANS=$QUIC_DNS_SANS; IDENTITY_GATE=$IDENTITY_GATE)"
 	# shellcheck disable=SC2046
 	helm --kube-context "$CTX" upgrade --install aether "$charts/aether" \
 		-n "$NS" --create-namespace \
@@ -399,10 +469,13 @@ install_aether() {
 		--set "meshDomain=$MESH_DOMAIN" \
 		--set spire.enabled=true \
 		--set edge.enabled=false \
+		"${gate[@]+"${gate[@]}"}" \
+		"${EWQ_EXTRA_HELM_ARGS[@]+"${EWQ_EXTRA_HELM_ARGS[@]}"}" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
 		$(img registrar registrar) $(img controller controller) \
 		--set proxy.image.pullPolicy=IfNotPresent \
+		$([ "${EWQ_LOCAL_PROXY:-0}" = "1" ] && img proxy proxy) \
 		--timeout 6m >/dev/null || die "aether install failed"
 	rm -rf "$(dirname "$charts")"
 
@@ -436,6 +509,14 @@ arm_negative_control() {
 	ok "negative control armed: SVIDs without DNS SANs, $QUIC_HOSTNAME_GUARD=false on the node proxy, quic:info pool:debug"
 }
 
+# node_pin NODE — a pod-spec nodeSelector line pinning to NODE with
+# EWQ_WORKER=1, and an empty line otherwise (one node: nothing to pin).
+node_pin() {
+	if [ "${EWQ_WORKER:-0}" = "1" ]; then
+		printf 'nodeSelector: {kubernetes.io/hostname: %s}' "$1"
+	fi
+}
+
 # A destination: agnhost netexec on :$APP_PORT, its own ServiceAccount (= its
 # mesh service name). No Kubernetes Service is written by hand: the registrar
 # generates the mesh VIP Service and skips a name another Service owns.
@@ -459,6 +540,7 @@ spec:
         endpoint.aether.io/port: "$APP_PORT"
     spec:
       serviceAccountName: $name
+      $(node_pin "$DST_NODE")
       containers:
         - name: app
           image: $AGNHOST_IMAGE
@@ -493,6 +575,7 @@ spec:
         config.aether.io/upstreams: "$ups"
     spec:
       serviceAccountName: $name
+      $(node_pin "$NODE")
       containers:
         - name: curl
           image: $CURL_IMAGE
@@ -628,23 +711,56 @@ verify_preflight() {
 	ok "HTTP/3 inbound listeners + counters present for every destination"
 }
 
-verify_fanout() {
-	log "E1 fan-out: a quic: twin for every (destination x source SA) — nothing is listed"
-	local deadline=$((SECONDS + 180)) dump missing d s
-	while true; do
-		dump="$(admin /clusters)"
-		missing=""
-		for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}"; do
-			for s in "${SOURCES[@]}"; do
-				has_cluster "$dump" "$(twin "$d" "$s")" || missing="$missing $(twin "$d" "$s")"
-			done
+# quic_twins DUMP — the distinct quic: cluster names in a /clusters dump, sorted.
+# E6's brand-new idgate-<ts> ServiceAccounts are left out: since #979 their
+# first request is QUIC-eligible like any other, and their pods (and so their
+# pairs) outlive the run, so a re-run of verify would count them as strays.
+quic_twins() {
+	printf '%s\n' "$1" | awk -F'::' -v g="@$TEST_NS/idgate-" 'index($1, "quic:") == 1 && index($1, g) == 0 { print $1 }' | sort -u
+}
+
+# driven_pairs — the twins E2 + E4b dial over a SELECTING route, sorted: every
+# source x (each QUIC destination + the GAMMA parent's single-backend rule).
+# E4's weighted split never selects, so gamma-b is never a pair.
+driven_pairs() {
+	local s d
+	for s in "${SOURCES[@]}"; do
+		for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[0]}"; do
+			twin "$d" "$s"
+			printf '\n'
 		done
-		[ -z "$missing" ] && break
+	done | sort -u
+}
+
+verify_fanout() {
+	log "E1 fan-out: twins are demand-scoped (aether#1020) — before any request, none outside the pairs this suite drives; nothing is listed (#979)"
+	local dump present strays
+	dump="$(admin /clusters)"
+	present="$(quic_twins "$dump")"
+	# A re-run of verify finds the previous run's pairs (they are persisted
+	# in the agent's observed set, by design); anything OUTSIDE the driven set
+	# was built for a pair that never dialled.
+	strays="$(comm -23 <(printf '%s\n' "$present" | sed '/^$/d') <(driven_pairs))"
+	[ -z "$strays" ] ||
+		die "E1: quic: twins exist for pairs that never dialled: $strays — the agent is building twins up front (the pre-#1020 fan-out: every local SA x QUIC destination)"
+	ok "$(printf '%s\n' "$present" | sed '/^$/d' | wc -l | tr -d ' ') quic: twins before any request in this run (0 on a fresh cluster); none for a pair that never dialled"
+}
+
+# verify_pairs — E4c: the node's twin set IS the set of pairs driven so far.
+verify_pairs() {
+	local want present n expect deadline=$((SECONDS + 60))
+	want="$(driven_pairs)"
+	expect="${EWQ_EXPECT_TWINS:-$(printf '%s\n' "$want" | wc -l | tr -d ' ')}"
+	log "E4c pairs: the node's quic: cluster count must equal the $expect (source, destination) pairs E2 + E4b drove"
+	while true; do
+		present="$(quic_twins "$(admin /clusters)")"
+		n="$(printf '%s\n' "$present" | sed '/^$/d' | wc -l | tr -d ' ')"
+		[ "$n" -eq "$expect" ] && [ "$present" = "$want" ] && break
 		[ "$SECONDS" -lt "$deadline" ] ||
-			die "E1: quic: twins missing after 180s:$missing — read the agent's 'east-west QUIC fan-out' log line: twins exist only once the node identity is served, and only for services in the node's dependency set (the sources declare every destination in config.aether.io/upstreams)"
+			die "E4c: $n quic: clusters on the node, want $expect = the driven pairs [$(printf '%s\n' "$want" | tr '\n' ' ')]; present: [$(printf '%s\n' "$present" | tr '\n' ' ')]. More than the pairs = a twin built for a pair that never dialled (the pre-#1020 SA x destination fan-out); fewer = a pair that dialled lost its twin"
 		sleep 5
 	done
-	ok "$((${#QUIC_DSTS[@]} * ${#SOURCES[@]} + ${#GAMMA_DSTS[@]} * ${#SOURCES[@]})) twins present (e.g. $(twin "${QUIC_DSTS[0]}" "${SOURCES[0]}"))"
+	ok "E4c: $n quic: clusters = $expect driven pairs, exactly [$(printf '%s\n' "$present" | tr '\n' ' ')]"
 }
 
 # --- E2 / E5: per-source HTTP/3 with the caller's own identity ---------------
@@ -746,7 +862,7 @@ assert_h2() {
 
 # --- E4: GAMMA-routed destination stays on h2 --------------------------------
 
-# A weighted canary parented to gamma-a (both backends have twins). #956
+# A weighted canary parented to gamma-a (both backends QUIC-eligible). #956
 # rewrites only routes whose action is `cluster: <this service's h2 cluster>`;
 # a WeightedClusters action is left alone because the matcher plugin's action
 # names ONE cluster (#961) -- so a GAMMA split stays h2. E4b below covers the
@@ -767,21 +883,28 @@ spec:
 YAML
 }
 
-verify_gamma() {
-	log "E4 GAMMA: weighted HTTPRoute on ${GAMMA_DSTS[0]} (${GAMMA_DSTS[0]} 50 / ${GAMMA_DSTS[1]} 50, both with twins) — stays h2"
+# gamma_split_up PHASE — apply the weighted canary and wait until it is live.
+# Converge on the DATA, not the status: the route is live once a request to the
+# parent is answered by the second backend's pod (agnhost /hostname). Since #979
+# this split is the one h2-by-design route, so e2e/eastwest-quic-hotrestart.sh
+# uses it as its h2 control too.
+gamma_split_up() {
+	local phase="$1" b_pod deadline=$((SECONDS + 180)) replies
 	apply_gamma_route
-	# Converge on the DATA, not the status: the route is live once a request to
-	# the parent is answered by the second backend's pod (agnhost /hostname).
-	local b_pod deadline=$((SECONDS + 180)) replies
 	b_pod="$(pod_of "${GAMMA_DSTS[1]}")"
 	while true; do
 		replies="$(req_batch "${SOURCES[0]}" "${GAMMA_DSTS[0]}" /hostname 20)"
 		printf '%s\n' "$replies" | awk -v p="$b_pod" '$1 == "200" && $2 == p { f = 1 } END { exit !f }' && break
 		[ "$SECONDS" -lt "$deadline" ] ||
-			die "E4: the HTTPRoute never took effect — no request to ${GAMMA_DSTS[0]} reached ${GAMMA_DSTS[1]} ($b_pod) in 180s: $(summarize "$replies")"
+			die "$phase: the HTTPRoute never took effect — no request to ${GAMMA_DSTS[0]} reached ${GAMMA_DSTS[1]} ($b_pod) in 180s: $(summarize "$replies")"
 		sleep 5
 	done
 	ok "the weighted route is live (requests to ${GAMMA_DSTS[0]} reach $b_pod)"
+}
+
+verify_gamma() {
+	log "E4 GAMMA: weighted HTTPRoute on ${GAMMA_DSTS[0]} (${GAMMA_DSTS[0]} 50 / ${GAMMA_DSTS[1]} 50, both QUIC-eligible) — stays h2"
+	gamma_split_up E4
 	local s
 	for s in "${SOURCES[@]}"; do
 		assert_h2 E4 "$s" "${GAMMA_DSTS[@]}"
@@ -862,14 +985,98 @@ verify_q3() {
 	done
 }
 
+# --- E6: the egress identity gate (#1053) ------------------------------------
+
+# verify_identity_gate — a client under a brand-new ServiceAccount whose app
+# sends at t=0. The pod is a bare Pod (restartPolicy Never) so it runs exactly
+# once: a restart would send a second "first" request under an identity that is
+# no longer new.
+verify_identity_gate() {
+	local sa pod want first init_exit init_ran started
+	sa="idgate-$(date +%s)"
+	pod="$sa"
+	want="$(spiffe_id "$sa")"
+	log "E6 identity gate (IDENTITY_GATE=$IDENTITY_GATE): new ServiceAccount $sa; the app's first request leaves at container start"
+	kc apply -f - >/dev/null <<YAML || die "E6: client apply failed"
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: $sa, namespace: $TEST_NS}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $pod
+  namespace: $TEST_NS
+  labels: {app: $sa, aether.io/managed: "true"}
+  annotations:
+    config.aether.io/upstreams: "${QUIC_DSTS[0]}.$TEST_NS"
+spec:
+  serviceAccountName: $sa
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: $CURL_IMAGE
+      command: ["sh", "-c"]
+      args:
+        - |
+          out=\$(curl -s --max-time 30 -w '\\n%{http_code} %{time_total}' "http://$(fqdn "${QUIC_DSTS[0]}"):$OUTBOUND_PORT/header?key=X-Forwarded-Client-Cert")
+          last=\$(printf '%s\\n' "\$out" | tail -n 1)
+          body=\$(printf '%s\\n' "\$out" | sed '\$d' | head -n 1)
+          echo "AETHER_IDGATE_FIRST code=\${last%% *} took=\${last#* }s xfcc=\$body"
+          exec sleep 3600
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+YAML
+	# The first request has a 30s ceiling of its own; wait for its line.
+	local deadline=$((SECONDS + 180))
+	first=""
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		first="$(kc -n "$TEST_NS" logs "$pod" -c curl 2>/dev/null | grep '^AETHER_IDGATE_FIRST' || true)"
+		[ -n "$first" ] && break
+		sleep 2
+	done
+	init_ran="$(kc -n "$TEST_NS" get pod "$pod" -o jsonpath='{.spec.initContainers[*].name}' 2>/dev/null || true)"
+	init_exit="$(kc -n "$TEST_NS" get pod "$pod" \
+		-o jsonpath='{.status.initContainerStatuses[?(@.name=="aether-identity-ready")].state.terminated.exitCode}' 2>/dev/null || true)"
+	started="$(kc -n "$TEST_NS" get pod "$pod" \
+		-o jsonpath='{.status.initContainerStatuses[?(@.name=="aether-identity-ready")].state.terminated.startedAt}..{.status.initContainerStatuses[?(@.name=="aether-identity-ready")].state.terminated.finishedAt}' 2>/dev/null || true)"
+	printf '    init containers: [%s]  aether-identity-ready exit=%s (%s)\n' "${init_ran:-none}" "${init_exit:-n/a}" "${started:-n/a}"
+	printf '    gate log: %s\n' "$(kc -n "$TEST_NS" logs "$pod" -c aether-identity-ready 2>/dev/null | tail -n 1 || echo n/a)"
+	printf '    %s\n' "${first:-AETHER_IDGATE_FIRST (none within 180s)}"
+
+	[ -n "$first" ] || die "E6: the client never reported its first request"
+	if [ "$IDENTITY_GATE" = "off" ]; then
+		case "$init_ran" in *aether-identity-ready*) die "E6: IDENTITY_GATE=off but the gate was injected" ;; esac
+		ok "E6 (gate OFF): first request, with no gate holding the app: ${first#AETHER_IDGATE_FIRST }"
+		return
+	fi
+	case "$init_ran" in
+	aether-identity-ready*) ;;
+	*) die "E6: the webhook did not inject aether-identity-ready FIRST (init containers: [${init_ran:-none}])" ;;
+	esac
+	[ "$init_exit" = "0" ] || die "E6: aether-identity-ready did not exit 0 (exit=${init_exit:-still running})"
+	case "$first" in
+	*"code=200 "*) ;;
+	*) die "E6: the pod's FIRST request did not answer 200 with the gate on: $first" ;;
+	esac
+	case "$first" in
+	*"URI=$want"*) ;;
+	*) die "E6: the first request did not carry the new ServiceAccount's own identity ($want): $first" ;;
+	esac
+	ok "E6: aether-identity-ready held the app until the SVID existed; its t=0 request answered 200 as $want"
+}
+
 verify() {
 	verify_preflight
 	verify_fanout
 	verify_quic
 	verify_gamma
 	verify_gamma_single
+	verify_pairs
 	verify_q3
-	log "all east-west QUIC assertions passed (unconditional fan-out, per-source HTTP/3 + XFCC, GAMMA weighted stays h2 / single-backend rides h3, identity across a client address change)"
+	verify_identity_gate
+	log "all east-west QUIC assertions passed (demand-scoped twins with nothing listed, per-source HTTP/3 + XFCC, GAMMA weighted stays h2 / single-backend rides h3, twins = driven pairs, identity across a client address change, the identity gate holds a new pod until its SVID exists)"
 }
 
 down() {
@@ -889,11 +1096,18 @@ up() {
 	deploy_workloads
 }
 
+# Sourced (e2e/eastwest-quic-hotrestart.sh reuses the bring-up and readings):
+# define everything, run nothing.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+	return 0
+fi
+
 case "${1:-}" in
 up) up ;;
 test) verify ;;
 verify) verify ;;
+idgate) verify_identity_gate ;;
 down) down ;;
 "") up && verify ;;
-*) die "usage: $0 {up|test|verify|down}" ;;
+*) die "usage: $0 {up|test|verify|idgate|down}" ;;
 esac

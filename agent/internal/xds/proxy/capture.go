@@ -168,6 +168,14 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 	if !withPassthrough {
 		chains = append(chains, BuildCaptureTCPBlackholeFilterChain(sourceSpiffeID))
 	}
+	// The connection-level L4 access log (aether#1023) on every tcp_proxy chain
+	// built above: floor, per-port, TCPRoute-weighted, the any-port shim, the
+	// TLSRoute SNI chains and the scoped-mode blackhole. Applied here, over the
+	// finished list, rather than in each builder, so a new L4 chain kind cannot
+	// be added without one. The passthrough DefaultFilterChain is attached
+	// below and is NOT logged: it is every non-mesh egress connection, the
+	// volume the log must not carry.
+	attachL4AccessLog(chains, cniPod.GetName(), cniPod.GetNamespace())
 	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, withPassthrough, extensionFilters))
 
 	l := &listenerv3.Listener{
@@ -189,7 +197,8 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		// original_dst recovers the pre-REDIRECT ClusterIP:meshPort (SO_ORIGINAL_DST);
 		// http_inspector detects HTTP/1 vs HTTP/2; tls_inspector detects TLS on the
 		// captured stream for future downstreams that speak TLS at the app layer.
-		// use_original_dst keeps the recovered destination on the connection.
+		// The original_dst filter alone keeps the recovered destination on the
+		// connection (localAddressRestored()); use_original_dst stays OFF (#1007).
 		ListenerFilters: buildCaptureListenerFilters(),
 		// The inspectors stall INCONCLUSIVE first writes: a raw-TCP client whose first
 		// chunk is <6 bytes (e.g. a 4-byte "p9\r\n") — or a server-first protocol that
@@ -218,12 +227,27 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		// netns -- the init userns here -- which the proxy container grants
 		// (pinned by //charts/aether:aether_proxy_net_admin_test).
 		Transparent: wrapperspb.Bool(true),
-		// use_original_dst stays: original_dst is what sets localAddressRestored(),
-		// which the ORIGINAL_DST passthrough cluster requires (Envoy
-		// original_dst_cluster.cc). On a diverted flow SO_ORIGINAL_DST succeeds --
-		// the flow is conntrack-tracked, just not NATed -- and returns the same
-		// VIP:port getsockname would (proven in e2e/spike/tproxy-phase0b.py T1).
-		UseOriginalDst:                wrapperspb.Bool(true),
+		// use_original_dst is OFF (#1007). The explicit original_dst LISTENER
+		// FILTER (buildCaptureListenerFilters, first in the list) is what sets
+		// localAddressRestored(), which is all the ORIGINAL_DST passthrough
+		// cluster needs (Envoy original_dst_cluster.cc reads the downstream
+		// local address only when it was restored) and what every filter chain
+		// matches on. The listener FIELD adds nothing to that -- it only adds a
+		// second copy of the same filter (listener_impl.cc
+		// buildOriginalDstListenerFilter) -- plus the restored-destination
+		// HANDOFF (active_tcp_socket.cc): a connection whose restored address
+		// matches another listener is handed to "the listener bound to that
+		// address", looked up by the address STRING alone. Every pod's inbound
+		// listener binds 0.0.0.0:18008 in its own netns, so the lookup has no
+		// netns and the most recently added pod's inbound listener wins: a
+		// diverted connection to <endpoint>:18008 ran through an unrelated
+		// pod's inbound chains, which presented that pod's SVID and failed the
+		// client's SAN check. Mesh capture never needs the handoff: every
+		// decision is a chain match on the restored destination or the
+		// ORIGINAL_DST passthrough. On a diverted flow SO_ORIGINAL_DST succeeds
+		// -- the flow is conntrack-tracked, just not NATed -- and returns the
+		// same VIP:port getsockname would (e2e/spike/tproxy-phase0b.py T1).
+		UseOriginalDst:                wrapperspb.Bool(false),
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		StatPrefix:                    fmt.Sprintf("capture_%s", cniPod.GetName()),
 		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
@@ -259,8 +283,9 @@ func buildCaptureListenerFilters() []*listenerv3.ListenerFilter {
 // for ONE of a service's non-primary raw-TCP ports (proposal 037).
 //
 // Envoy evaluates destination_port ahead of prefix_ranges, and the capture
-// listener already sets use_original_dst, so the port this matches is the
-// pre-REDIRECT one the client actually dialed. That ordering is what lets a
+// listener's original_dst listener filter restores the original destination
+// before chain selection, so the port this matches is the one the client
+// actually dialed. That ordering is what lets a
 // per-port TCP chain coexist with the HCM catch-all on the same VIP: a chain
 // matching only the ClusterIP would outrank the HCM's application_protocols
 // match and swallow the service's HTTP traffic, which is precisely why a
@@ -607,4 +632,24 @@ func tcpPrimaryFloorChains(svc CaptureTCPService, sourceSpiffeID string) []*list
 		}
 	}
 	return append(out, qualifyChainByPort(tc, 0, "cap_tcp_anyport_"+svc.ClusterName))
+}
+
+// attachL4AccessLog sets the L4 access log (buildL4AccessLog) on every
+// tcp_proxy in chains (aether#1023). A no-op when access logging is off, so a
+// disabled mesh's capture listener is byte-identical to before.
+func attachL4AccessLog(chains []*listenerv3.FilterChain, podName, podNamespace string) {
+	al := buildL4AccessLog(podName, podNamespace)
+	if al == nil {
+		return
+	}
+	for _, fc := range chains {
+		for _, f := range fc.GetFilters() {
+			tc := &tcp_proxyv3.TcpProxy{}
+			if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(tc) != nil {
+				continue
+			}
+			tc.AccessLog = al
+			f.ConfigType = &listenerv3.Filter_TypedConfig{TypedConfig: config.TypedConfig(tc)}
+		}
+	}
 }

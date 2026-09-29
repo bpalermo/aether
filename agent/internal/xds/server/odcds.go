@@ -9,6 +9,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/cache"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/quicdemand"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/registry"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -16,6 +17,7 @@ import (
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
@@ -32,6 +34,13 @@ type onDemandObserver struct {
 	// rejected counts on-demand requests refused because the service does
 	// not exist in the catalog (nil if instrumentation disabled).
 	rejected metric.Int64Counter
+	// quicRefused counts on-demand `quic:` twin requests the agent refused
+	// (issue #1020), by reason. Each one is a request that 503s at the
+	// on_demand timeout.
+	quicRefused metric.Int64Counter
+	// twinRequests tells a `quic:` twin's first use apart from the proxy
+	// re-stating the twins it already had on a fresh stream (issue #1033).
+	twinRequests *quicdemand.Requests
 }
 
 // newOnDemandObserver creates an onDemandObserver over the snapshot cache.
@@ -39,14 +48,19 @@ type onDemandObserver struct {
 // to reject nonexistent services before they pollute the dependency set.
 func newOnDemandObserver(snapshotCache *cache.SnapshotCache, reg registry.Registry, log *slog.Logger) *onDemandObserver {
 	o := &onDemandObserver{
-		cache:    snapshotCache,
-		registry: reg,
-		log:      commonlog.Named(log, "odcds"),
+		cache:        snapshotCache,
+		registry:     reg,
+		log:          commonlog.Named(log, "odcds"),
+		twinRequests: quicdemand.NewRequests(),
 	}
 	var err error
 	if o.rejected, err = otel.Meter("aether/agent-odcds").Int64Counter("aether.agent.upstreams.rejected",
 		metric.WithDescription("On-demand requests refused: the service has no endpoints anywhere in the mesh (catalog miss)")); err != nil {
 		o.log.Error("failed to create rejected counter; continuing without instrumentation", "error", err)
+	}
+	if o.quicRefused, err = otel.Meter("aether/agent-odcds").Int64Counter("aether.agent.quic.twin.refused",
+		metric.WithDescription("On-demand quic: twin requests refused (malformed name, destination not in the dependency set, source not a local ServiceAccount); each 503s at the on_demand timeout")); err != nil {
+		o.log.Error("failed to create QUIC twin refused counter; continuing without instrumentation", "error", err)
 	}
 	return o
 }
@@ -67,6 +81,7 @@ func (o *onDemandObserver) Callbacks() serverv3.Callbacks {
 // asks for again ages out on the observed-dependency idle TTL.
 func (o *onDemandObserver) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 	o.cache.CloseOnDemandStream(streamID)
+	o.twinRequests.Close(streamID)
 }
 
 // onDeltaRequest inspects delta CDS subscriptions for on-demand cluster
@@ -88,13 +103,85 @@ func (o *onDemandObserver) onDeltaRequest(streamID int64, req *discoveryv3.Delta
 	for _, name := range req.GetResourceNamesUnsubscribe() {
 		o.cache.UntrackOnDemandCluster(streamID, name)
 	}
+	twins := o.twinRequests.Classify(streamID, req)
+	for _, name := range twins.FirstUse {
+		o.observeQUICTwin(name)
+	}
+	o.restateTwins(streamID, twins)
 	for _, name := range req.GetResourceNamesSubscribe() {
-		if name == "*" || name == "" || proxy.IsPerPodClusterName(name) {
+		if name == "*" || name == "" || proxy.IsPerPodClusterName(name) || proxy.IsQUICClusterName(name) {
 			continue
 		}
 		o.observeSubscription(streamID, name)
 	}
 	return nil
+}
+
+// restateTwins handles the `quic:` twins a fresh stream's first CDS request
+// re-stated (issue #1033; quicdemand documents the protocol facts).
+//
+//   - A twin the proxy merely HOLDS (delivered by the wildcard, e.g. built up
+//     front by an older agent) is not demand and admits nothing. Unless its
+//     pair is already known (persisted), it is answered absent --
+//     go-control-plane puts a held cluster missing from the snapshot in
+//     removed_resources -- and Envoy drops it; the next request that routes to
+//     it opens an on-demand subscription, which is real first use. #1032
+//     admitted these, which is how rev245 persisted SAs x destinations pairs.
+//   - A twin the proxy re-SUBSCRIBES holds a live on-demand subscription that
+//     a routed request opened and Envoy will never re-send: answering it absent
+//     strands the pair (503 at the on_demand timeout, forever). Its pair is
+//     admitted if valid, and marked fetched.
+//
+// The re-subscribed set is also the proxy's complete set of on-demand
+// subscriptions (issue #1036), so it is handed to the cache on EVERY fresh
+// stream, empty or not: a dormant pair it does not name has no subscription
+// left and is pruned. A hot-restart child's stream is the case where it is
+// empty -- a new generation holds no ODCDS subscriptions.
+//
+// One line per fresh stream that re-states any twin.
+func (o *onDemandObserver) restateTwins(streamID int64, twins quicdemand.Classification) {
+	ctx := context.Background()
+	if !twins.Fresh {
+		// A later request that re-subscribes a twin it holds: same handling,
+		// but it says nothing about the proxy's other subscriptions.
+		o.cache.ResumeQUICSubscriptions(ctx, twins.Resubscribed)
+		return
+	}
+	resumed := o.cache.RestateQUICSubscriptions(ctx, twins.Resubscribed)
+	if len(twins.Resubscribed) == 0 && len(twins.HeldOnly) == 0 {
+		return
+	}
+	servedHeld := 0
+	for _, name := range twins.HeldOnly {
+		if o.cache.HasQUICPair(name) {
+			servedHeld++
+		}
+	}
+	o.log.Info("fresh xDS stream re-stated QUIC twins: held-only twins admit nothing, live on-demand subscriptions are served",
+		"stream", streamID,
+		"resubscribed", len(twins.Resubscribed), "resumed_pairs", resumed,
+		"held_only", len(twins.HeldOnly), "held_served", servedHeld, "answered_absent", len(twins.HeldOnly)-servedHeld)
+}
+
+// observeQUICTwin handles an on-demand request for a `quic:` twin (issue
+// #1020): a local ServiceAccount's first request to an eligible
+// destination, routed by its selection arm to a twin the snapshot does not
+// carry yet. Only names quicdemand classifies as first use reach it; a fresh
+// stream's re-stated twins go to restateTwins (issue #1033). The cache validates
+// the name and, when it admits it, publishes the twin with its load
+// assignment, which answers this subscription. A
+// refused name is counted: the proxy's paused request 503s (NC) at the
+// on_demand timeout, so a non-zero rate here is client-visible.
+//
+// Deliberately NOT tracked as a live on-demand subscription: a pair has no
+// idle TTL for a subscription to exempt it from (the pair is pruned only when
+// its source leaves the node or its destination leaves the dependency set).
+func (o *onDemandObserver) observeQUICTwin(name string) {
+	ctx := context.Background()
+	decision, reason := o.cache.ObserveQUICTwin(ctx, name)
+	if decision == cache.QUICTwinRefused && o.quicRefused != nil {
+		o.quicRefused.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+	}
 }
 
 // resumeHeldClusters re-seeds the node dependency set from the clusters the
@@ -135,14 +222,7 @@ func (o *onDemandObserver) resumeHeldClusters(streamID int64, held map[string]st
 	ctx := context.Background()
 	restored := 0
 	for _, name := range names {
-		service, ok := o.meshServiceKey(name)
-		if !ok {
-			continue
-		}
-		if cat, hasCatalog := o.registry.(registry.ServiceCatalog); hasCatalog && !cat.HasService(service) {
-			continue
-		}
-		if o.cache.RestoreDependency(ctx, service) {
+		if o.restoreHeldCluster(ctx, name) {
 			restored++
 		}
 	}
@@ -150,6 +230,22 @@ func (o *onDemandObserver) resumeHeldClusters(streamID int64, held map[string]st
 		o.log.InfoContext(ctx, "restored node dependency set from the clusters the proxy still holds (fresh delta stream)",
 			"stream", streamID, "services", restored, "held", len(held))
 	}
+}
+
+// restoreHeldCluster re-admits one held cluster's demand and reports whether it
+// was new to this process: a mesh service cluster re-seeds the dependency set.
+// A held `quic:` twin restores nothing here (issue #1033): the proxy holds
+// whatever the previous agent generation built, which on rev245 was every
+// SAs x destinations twin. restateTwins handles twins on a fresh stream.
+func (o *onDemandObserver) restoreHeldCluster(ctx context.Context, name string) bool {
+	service, ok := o.meshServiceKey(name)
+	if !ok {
+		return false
+	}
+	if cat, hasCatalog := o.registry.(registry.ServiceCatalog); hasCatalog && !cat.HasService(service) {
+		return false
+	}
+	return o.cache.RestoreDependency(ctx, service)
 }
 
 // meshServiceKey maps a held cluster resource name to its dependency-set service

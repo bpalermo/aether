@@ -20,6 +20,7 @@ package envoy_validate
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -37,9 +38,11 @@ import (
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	otelaccesslogv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/open_telemetry/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	quicv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
@@ -235,8 +238,12 @@ func QUICOutboundBootstrapJSON() ([]byte, error) {
 }
 
 const (
-	quicSourceA   = "spiffe://" + trustDomain + "/ns/demo/sa/source-a"
-	quicSourceB   = "spiffe://" + trustDomain + "/ns/demo/sa/source-b"
+	quicSourceA = "spiffe://" + trustDomain + "/ns/demo/sa/source-a"
+	quicSourceB = "spiffe://" + trustDomain + "/ns/demo/sa/source-b"
+	// quicSourceC is a local ServiceAccount that has NOT dialled the
+	// destination (aether#1020): its arm is on the route, its twin is not
+	// built -- the on_demand filter fetches it on first use.
+	quicSourceC   = "spiffe://" + trustDomain + "/ns/demo/sa/source-c"
 	quicDestSvc   = "demo/echo"
 	quicDestSA    = "spiffe://" + trustDomain + "/ns/demo/sa/echo"
 	quicDestPort  = "8080"
@@ -254,20 +261,38 @@ func QUICOutboundArms() map[string]string {
 	}
 }
 
+// QUICOutboundUnobservedArms is the arm the fixture route carries for a
+// local source whose (source, destination) pair has not been observed
+// (aether#1020): it names a twin the fixture deliberately does NOT build.
+func QUICOutboundUnobservedArms() map[string]string {
+	return map[string]string{
+		quicSourceC: proxy.QUICClusterName(quicDestSvc, meshDomain, proxy.SourceSAKeyFromSpiffeID(quicSourceC)),
+	}
+}
+
 func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 	fqdn := proxy.ServiceClusterName(quicDestSvc, meshDomain)
 	h2 := newPerSourceServiceCluster(fqdn, trustDomain, "demo", "echo")
 	// The bare base the cache clones: NewServiceCluster before mTLS injection.
+	// Each twin QUICClusterFrom derives subscribes to its OWN EDS resource
+	// (its cluster name), never the base's (aether#1008); the agent publishes
+	// the base's load assignment under every twin's name.
 	base := proxy.NewServiceCluster(fqdn, quicDestSvc, quicDestSvc, nil)
 	arms := QUICOutboundArms()
 	delete(arms, "")
 	var twins []*clusterv3.Cluster
 	for _, id := range []string{quicSourceA, quicSourceB} {
-		twins = append(twins, proxy.QUICClusterFrom(base, arms[id], id, "spiffe://"+trustDomain, []string{quicDestSA}, proxy.QUICServerName(quicDestPort, fqdn)))
+		twins = append(twins, proxy.QUICClusterFrom(base, arms[id], id, "spiffe://"+trustDomain, []string{quicDestSA}, proxy.QUICServerName(quicDestPort, fqdn), config.DefaultQUICTwinIdleTimeout))
 	}
 
+	// Demand-scoped twins (aether#1020): the route carries an arm for EVERY
+	// local source, the snapshot a twin only for the observed pairs (a, b).
+	// Source c's arm names a cluster that is not here, which is how its first
+	// request reaches ODCDS; validation must accept that shape.
+	selection := maps.Clone(arms)
+	maps.Copy(selection, QUICOutboundUnobservedArms())
 	vh := proxy.BuildOutboundClusterVirtualHost(fqdn, []string{fqdn})
-	if n := proxy.ApplyQUICClusterSelection(vh, fqdn, arms); n != 1 {
+	if n := proxy.ApplyQUICClusterSelection(vh, fqdn, selection); n != 1 {
 		return nil, fmt.Errorf("ApplyQUICClusterSelection rewrote %d routes, want 1", n)
 	}
 	rc := &routev3.RouteConfiguration{Name: quicRouteName, VirtualHosts: []*routev3.VirtualHost{vh}}
@@ -275,7 +300,10 @@ func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 	hcm := &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix:     "quic_out",
 		RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{RouteConfig: rc},
-		HttpFilters: []*http_connection_managerv3.HttpFilter{{
+		// Production's on_demand filter ahead of the router, as on every
+		// node-proxy HCM: it is what turns an arm naming an unbuilt twin into
+		// an ODCDS request instead of a 503 (aether#1020).
+		HttpFilters: []*http_connection_managerv3.HttpFilter{proxy.OnDemandHTTPFilter(), {
 			Name:       "envoy.filters.http.router",
 			ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{TypedConfig: mustAny(&routerv3.Router{})},
 		}},
@@ -293,7 +321,15 @@ func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 		}}},
 		FilterChains: []*listenerv3.FilterChain{chain},
 	}
-	clusters := []*clusterv3.Cluster{xdsCluster(), h2}
+	// The service's mesh-port alias ("<fqdn>:18081", the ODCDS cold-path
+	// authority), as the cache builds it (buildPortAliasesLocked): the default
+	// cluster's membership on its OWN EDS name (aether#1013), with the same
+	// per-source mTLS and the port as SNI.
+	aliasName := proxy.PortClusterName(quicDestSvc, meshDomain, meshconst.ProxyOutboundPort)
+	alias := proxy.NewServiceCluster(aliasName, aliasName, quicDestSvc, nil)
+	proxy.InjectUpstreamMTLS(alias, fmt.Sprintf(nodeSpiffeIDFmt, trustDomain), "spiffe://"+trustDomain,
+		[]string{quicDestSA}, strconv.Itoa(int(meshconst.ProxyOutboundPort)), "")
+	clusters := []*clusterv3.Cluster{xdsCluster(), h2, alias}
 	clusters = append(clusters, twins...)
 	return newBootstrap(clusters, []*listenerv3.Listener{l}), nil
 }
@@ -446,6 +482,11 @@ func buildNodeUDSBootstrap() (*bootstrapv3.Bootstrap, error) {
 // buildCaptureBootstrap builds the transparent-capture bootstrap config.
 func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
+	// Access logging ON: the L4 access log every capture tcp_proxy chain
+	// carries (aether#1023) is then parsed by the real proxy, and the chain
+	// gate has something to find. Its collector cluster is in the bootstrap.
+	proxy.SetAccessLogConfig(proxy.AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+	defer proxy.SetAccessLogConfig(proxy.AccessLogConfig{})
 
 	tcpSvc := proxy.CaptureTCPService{
 		ClusterName: "redis." + meshDomain,
@@ -473,7 +514,7 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	tcpSvc2 := newServiceCluster("redis."+meshDomain, trustDomain, "default", "redis")
 
 	return newBootstrap(
-		[]*clusterv3.Cluster{xdsCluster(), passthrough, httpSvc, tcpSvc2},
+		[]*clusterv3.Cluster{xdsCluster(), passthrough, httpSvc, tcpSvc2, accessLogCluster()},
 		[]*listenerv3.Listener{captureListener},
 	), nil
 }
@@ -538,6 +579,10 @@ const (
 	L4TCPWeightA = 75
 	L4TCPWeightB = 25
 
+	// L4TCPBackendPort is a raw-TCP port backend A serves beside its floor,
+	// giving the fixture a port-qualified tcp: cluster (aether#1023 stat keys).
+	L4TCPBackendPort = 9000
+
 	// L4SNIAlpha and L4SNIBravo are the TLSRoute fixture's two hostnames — one
 	// TLSRoute object each, because TLSRoute.Spec.Hostnames is route-level.
 	L4SNIAlpha = "a.l4.test"
@@ -597,6 +642,9 @@ func CaptureTCPRouteBootstrapJSON() ([]byte, error) {
 
 func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
+	// Access logging ON (aether#1023): see buildCaptureBootstrap.
+	proxy.SetAccessLogConfig(proxy.AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+	defer proxy.SetAccessLogConfig(proxy.AccessLogConfig{})
 
 	svc := proxy.CaptureTCPService{
 		// The production ClusterName is the "tcp:"-prefixed floor cluster, not
@@ -637,9 +685,16 @@ func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 			// over its own api_config_source naming agent_xds (#842), so the
 			// bootstrap has to define it or the reference dangles.
 			agentXDSCluster(),
+			accessLogCluster(),
 			proxy.NewPassthroughOriginalDstCluster(),
 			newTCPFloorCluster(l4TCPBackendA, "l4-a"),
 			newTCPFloorCluster(l4TCPBackendB, "l4-b"),
+			// Backend A also serves a raw-TCP port and an HTTP port, so this
+			// bootstrap carries every kind that used to collapse onto the one
+			// "<ns>/<svc>" stat key (aether#1023): the floor, a port-qualified
+			// TCP cluster and the HTTP default cluster.
+			newTCPPortCluster(l4TCPBackendA, "l4-a", L4TCPBackendPort),
+			newHTTPDefaultCluster(l4TCPBackendA, "l4-a"),
 		},
 		[]*listenerv3.Listener{listener},
 	), nil
@@ -663,6 +718,9 @@ func CaptureTLSRouteBootstrapJSON() ([]byte, error) {
 
 func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
+	// Access logging ON (aether#1023): see buildCaptureBootstrap.
+	proxy.SetAccessLogConfig(proxy.AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+	defer proxy.SetAccessLogConfig(proxy.AccessLogConfig{})
 
 	svc := proxy.CaptureTCPService{
 		ClusterName: proxy.TCPClusterName(l4TLSParent, meshDomain),
@@ -707,6 +765,7 @@ func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		[]*clusterv3.Cluster{
 			xdsCluster(),
 			agentXDSCluster(),
+			accessLogCluster(),
 			proxy.NewPassthroughOriginalDstCluster(),
 			// The floor chain routes to the PARENT's own TCP cluster; the SNI
 			// chains route to the backends'.
@@ -773,20 +832,23 @@ func buildCaptureUDPBootstrap() (*bootstrapv3.Bootstrap, error) {
 	return newBootstrap(
 		[]*clusterv3.Cluster{
 			xdsCluster(),
-			proxy.NewUDPServiceCluster(clusterA, l4UDPBackendA, laA),
-			proxy.NewUDPServiceCluster(clusterB, l4UDPBackendB, laB),
+			proxy.NewUDPServiceCluster(clusterA, proxy.UDPStatKey(l4UDPBackendA), laA),
+			proxy.NewUDPServiceCluster(clusterB, proxy.UDPStatKey(l4UDPBackendB), laB),
 		},
 		[]*listenerv3.Listener{listener},
 	), nil
 }
 
 // newTCPFloorCluster builds a service's "tcp:" floor cluster exactly as
-// SnapshotCache.captureTCPClusters does: NewTCPServiceCluster plus the
-// per-connection mesh mTLS socket, SAN-pinned to the backend's workload
-// identity. saName is the bare service name the SPIFFE ID's sa/ segment
-// carries (refreshEntryMTLSLocked uses the bare name, not the key).
+// SnapshotCache.captureTCPClusters does: NewTCPServiceCluster on its OWN EDS
+// name (the agent republishes the bare service's load assignment under it,
+// aether#1013) plus the per-connection mesh mTLS socket, SAN-pinned to the
+// backend's workload identity. saName is the bare service name the SPIFFE
+// ID's sa/ segment carries (refreshEntryMTLSLocked uses the bare name, not the
+// key).
 func newTCPFloorCluster(serviceKey, saName string) *clusterv3.Cluster {
-	c := proxy.NewTCPServiceCluster(proxy.TCPClusterName(serviceKey, meshDomain), serviceKey, serviceKey)
+	name := proxy.TCPClusterName(serviceKey, meshDomain)
+	c := proxy.NewTCPServiceCluster(name, name, proxy.TCPStatKey(serviceKey))
 	proxy.InjectUpstreamTCPMTLS(
 		c,
 		fmt.Sprintf(nodeSpiffeIDFmt, trustDomain),
@@ -794,6 +856,35 @@ func newTCPFloorCluster(serviceKey, saName string) *clusterv3.Cluster {
 		[]string{fmt.Sprintf("spiffe://%s/ns/default/sa/%s", trustDomain, saName)},
 		"", // no SNI on the floor: the peer must demux to its inbound default chain
 	)
+	return c
+}
+
+// newTCPPortCluster builds a service's port-qualified TCP cluster
+// "tcp:<fqdn>:<port>" exactly as SnapshotCache.tcpPortClustersLocked does for
+// a non-primary raw-TCP port: its own EDS name, the per-kind stat key
+// tcp_<ns>/<svc>_<port> (aether#1023), and the port as SNI so the destination
+// demuxes to its per-port inbound chain.
+func newTCPPortCluster(serviceKey, saName string, port uint32) *clusterv3.Cluster {
+	name := proxy.TCPPortClusterName(proxy.TCPClusterName(serviceKey, meshDomain), port)
+	c := proxy.NewTCPServiceCluster(name, name, proxy.TCPPortStatKey(serviceKey, port))
+	proxy.InjectUpstreamTCPMTLS(
+		c,
+		fmt.Sprintf(nodeSpiffeIDFmt, trustDomain),
+		fmt.Sprintf("spiffe://%s", trustDomain),
+		[]string{fmt.Sprintf("spiffe://%s/ns/default/sa/%s", trustDomain, saName)},
+		fmt.Sprintf("%d", port),
+	)
+	return c
+}
+
+// newHTTPDefaultCluster builds a service's DEFAULT h2 cluster the way the
+// agent's HTTP pass does (cache/cluster.go): named by the FQDN, subscribed to
+// the bare "<ns>/<svc>" EDS name, and reporting under the bare service key --
+// the aether_cluster value every HTTP query selects on.
+func newHTTPDefaultCluster(serviceKey, saName string) *clusterv3.Cluster {
+	c := newServiceCluster(proxy.ServiceClusterName(serviceKey, meshDomain), trustDomain, "default", saName)
+	c.AltStatName = serviceKey
+	c.EdsClusterConfig.ServiceName = serviceKey
 	return c
 }
 
@@ -1380,6 +1471,26 @@ func QUICUpstreamsWithSessionCache(bootstrapJSON []byte) ([]string, error) {
 	return bad, nil
 }
 
+// QUICUpstreamsPoolingPerDownstream returns the name of every `quic:` cluster
+// that sets connection_pool_per_downstream_connection (aether#1021). A twin
+// carries ONE identity, so the option buys no isolation and only multiplies
+// upstream QUIC connections by the number of downstream (app -> proxy)
+// connections: //test/mtlspool's TestQUICTwinUpstreamConnections measured 12
+// QUIC connections for 12 downstream connections with it on, 1 with it off.
+func QUICUpstreamsPoolingPerDownstream(bootstrapJSON []byte) ([]string, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	var bad []string
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if strings.HasPrefix(c.GetName(), "quic:") && c.GetConnectionPoolPerDownstreamConnection() {
+			bad = append(bad, c.GetName())
+		}
+	}
+	return bad, nil
+}
+
 // QUICUpstreamsWithPortSNI returns the name of every cluster whose
 // QuicUpstreamTransport carries an SNI that is not a hostname under the mesh
 // domain (a bare port, empty, or foreign). Envoy's QUIC client verifies the
@@ -1436,6 +1547,234 @@ func QUICUpstreamsSharingStatsKey(bootstrapJSON []byte) ([]string, error) {
 	var bad []string
 	for _, c := range bs.GetStaticResources().GetClusters() {
 		if strings.HasPrefix(c.GetName(), "quic:") && len(owners[statsKey(c)]) > 1 {
+			bad = append(bad, c.GetName())
+		}
+	}
+	return bad, nil
+}
+
+// L4StatKeyViolations returns every L4 cluster ("tcp:"/"udp:") whose stats key
+// is not its own kind-prefixed key (aether#1023) -- tcp_<ns>/<svc> for a TCP
+// floor, tcp_<ns>/<svc>_<port> for a port-qualified TCP cluster,
+// udp_<ns>/<svc> for a UDP floor -- or is shared with any other cluster in the
+// bootstrap, plus how many L4 clusters it examined so a caller can refuse a
+// vacuous pass.
+//
+// The expected key is derived from the cluster NAME, not from the builder
+// that set it, so a builder that collapses a cluster back onto the bare
+// service key (the pre-#1023 shape, which merged every L4 kind with the HTTP
+// cluster's aether_cluster series) is reported however it got there.
+func L4StatKeyViolations(bootstrapJSON []byte) ([]string, int, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, 0, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	owners := map[string][]string{}
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		owners[clusterStatsKey(c)] = append(owners[clusterStatsKey(c)], c.GetName())
+	}
+	var bad []string
+	n := 0
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		msg, isL4 := l4StatKeyViolation(c, owners)
+		if isL4 {
+			n++
+		}
+		if msg != "" {
+			bad = append(bad, msg)
+		}
+	}
+	return bad, n, nil
+}
+
+// clusterStatsKey is the name a cluster's stats are keyed by: its
+// alt_stat_name, or its name when unset.
+func clusterStatsKey(c *clusterv3.Cluster) string {
+	if c.GetAltStatName() != "" {
+		return c.GetAltStatName()
+	}
+	return c.GetName()
+}
+
+// l4StatKeyViolation checks one cluster. isL4 reports whether it is an L4
+// cluster at all; msg is non-empty when its stat key is wrong or shared.
+func l4StatKeyViolation(c *clusterv3.Cluster, owners map[string][]string) (msg string, isL4 bool) {
+	name := c.GetName()
+	namePrefix, keyPrefix, isL4 := l4Kind(name)
+	if !isL4 {
+		return "", false
+	}
+	want, ok := expectedL4StatKey(keyPrefix, strings.TrimPrefix(name, namePrefix))
+	switch {
+	case !ok:
+		return fmt.Sprintf("%s: not a mesh L4 cluster name", name), true
+	case c.GetAltStatName() != want:
+		return fmt.Sprintf("%s: alt_stat_name %q, want %q", name, c.GetAltStatName(), want), true
+	case len(owners[want]) > 1:
+		return fmt.Sprintf("%s: stat key %q shared by %v", name, want, owners[want]), true
+	}
+	return "", true
+}
+
+// l4Kind maps an L4 cluster name's kind prefix ("tcp:"/"udp:") to its stat
+// key prefix; ok is false for any other cluster.
+func l4Kind(name string) (namePrefix, keyPrefix string, ok bool) {
+	switch {
+	case strings.HasPrefix(name, "tcp:"):
+		return "tcp:", proxy.L4StatKeyTCPPrefix, true
+	case strings.HasPrefix(name, "udp:"):
+		return "udp:", proxy.L4StatKeyUDPPrefix, true
+	}
+	return "", "", false
+}
+
+// expectedL4StatKey maps an L4 cluster name, minus its kind prefix
+// ("<svc>.<ns>.<domain>[:<port>]"), to the stat key it must report under.
+func expectedL4StatKey(prefix, rest string) (string, bool) {
+	fqdn, port := rest, ""
+	if i := strings.LastIndexByte(rest, ':'); i >= 0 {
+		fqdn, port = rest[:i], rest[i+1:]
+	}
+	svc, ok := proxy.ServiceFromClusterName(fqdn, meshDomain)
+	if !ok {
+		return "", false
+	}
+	if port != "" {
+		return prefix + svc + "_" + port, true
+	}
+	return prefix + svc, true
+}
+
+// CaptureTCPChainsWithoutL4AccessLog returns every filter chain on a capture
+// listener ("capture_*") whose tcp_proxy carries no access logger on the
+// L4 stream (proxy.L4AccessLogName, aether#1023), plus how many such chains
+// it examined. The passthrough default_filter_chain is deliberately not
+// examined: it is all non-mesh egress and is not logged.
+func CaptureTCPChainsWithoutL4AccessLog(bootstrapJSON []byte) ([]string, int, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, 0, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	var missing []string
+	checked := 0
+	for _, l := range bs.GetStaticResources().GetListeners() {
+		if !strings.HasPrefix(l.GetName(), "capture_") {
+			continue
+		}
+		for _, fc := range l.GetFilterChains() {
+			for _, tc := range chainTCPProxies(fc) {
+				checked++
+				if !hasL4AccessLog(tc) {
+					missing = append(missing, l.GetName()+"/"+fc.GetName())
+				}
+			}
+		}
+	}
+	return missing, checked, nil
+}
+
+// chainTCPProxies returns every tcp_proxy config on a filter chain.
+func chainTCPProxies(fc *listenerv3.FilterChain) []*tcp_proxyv3.TcpProxy {
+	var out []*tcp_proxyv3.TcpProxy
+	for _, f := range fc.GetFilters() {
+		tc := &tcp_proxyv3.TcpProxy{}
+		if f.GetTypedConfig() != nil && f.GetTypedConfig().UnmarshalTo(tc) == nil {
+			out = append(out, tc)
+		}
+	}
+	return out
+}
+
+func hasL4AccessLog(tc *tcp_proxyv3.TcpProxy) bool {
+	for _, al := range tc.GetAccessLog() {
+		cfg := &otelaccesslogv3.OpenTelemetryAccessLogConfig{}
+		if al.GetTypedConfig() == nil || al.GetTypedConfig().UnmarshalTo(cfg) != nil {
+			continue
+		}
+		if cfg.GetLogName() == proxy.L4AccessLogName {
+			return true
+		}
+	}
+	return false
+}
+
+// QUICUpstreamsSharingEDSName returns the name of every `quic:` cluster whose
+// EDS resource name (eds_cluster_config.service_name, or the cluster name when
+// unset) equals another cluster's in the same bootstrap (aether#1008). Envoy's
+// delta-ADS WatchMap deduplicates subscriptions per resource name, so a twin
+// that shares its base's EDS name and arrives after the base is subscribed
+// never sends a subscribe and warms for the full initial_fetch_timeout. A
+// twin must subscribe to its own name (proxy.QUICClusterFrom) and the agent
+// publishes the base's load assignment under it (proxy.LoadAssignmentAlias).
+func QUICUpstreamsSharingEDSName(bootstrapJSON []byte) ([]string, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	edsName := func(c *clusterv3.Cluster) string {
+		if n := c.GetEdsClusterConfig().GetServiceName(); n != "" {
+			return n
+		}
+		return c.GetName()
+	}
+	owners := map[string][]string{}
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if c.GetType() != clusterv3.Cluster_EDS {
+			continue
+		}
+		owners[edsName(c)] = append(owners[edsName(c)], c.GetName())
+	}
+	var bad []string
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if c.GetType() == clusterv3.Cluster_EDS && strings.HasPrefix(c.GetName(), "quic:") && len(owners[edsName(c)]) > 1 {
+			bad = append(bad, c.GetName())
+		}
+	}
+	return bad, nil
+}
+
+// ClustersSharingServiceEDSName returns the name of every EDS cluster that does
+// not subscribe to an EDS resource of its own (aether#842 SDS, #1008 QUIC
+// twins, #1013 port aliases and TCP floors). Envoy's delta-ADS WatchMap
+// deduplicates subscription interest per (type_url, resource name), so a
+// cluster that shares a name with an already-subscribed sibling and arrives in
+// a LATER CDS update sends no subscribe and warms for the full
+// initial_fetch_timeout.
+//
+// The one cluster allowed to subscribe to a name other than its own is a
+// service's DEFAULT cluster: <svc>.<ns>.<domain> on the bare "<ns>/<svc>" key
+// (proxy.ServiceClusterName). Every other kind -- per-port, port alias
+// "<fqdn>:<port>", TCP floor "tcp:<fqdn>" and its per-port/primary-alias
+// "tcp:<fqdn>:<port>", QUIC twin "quic:..." -- must subscribe to its own
+// cluster name, and the agent publishes the matching load assignment under it
+// (proxy.LoadAssignmentAlias for the ones that mirror the bare membership).
+// A name with more than one subscriber is reported for every subscriber.
+func ClustersSharingServiceEDSName(bootstrapJSON []byte) ([]string, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	edsName := func(c *clusterv3.Cluster) string {
+		if n := c.GetEdsClusterConfig().GetServiceName(); n != "" {
+			return n
+		}
+		return c.GetName()
+	}
+	owners := map[string]int{}
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if c.GetType() == clusterv3.Cluster_EDS {
+			owners[edsName(c)]++
+		}
+	}
+	var bad []string
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if c.GetType() != clusterv3.Cluster_EDS {
+			continue
+		}
+		eds := edsName(c)
+		ownName := eds == c.GetName()
+		defaultOfService := proxy.ServiceClusterName(eds, meshDomain) == c.GetName()
+		if (!ownName && !defaultOfService) || owners[eds] > 1 {
 			bad = append(bad, c.GetName())
 		}
 	}

@@ -1,6 +1,6 @@
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "helm_template_fail_test")
-load("//bazel/img:registry.bzl", "IMAGE_REGISTRY", "chart_registry_url", "image_reference")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_template_fail_test")
+load("//bazel/img:registry.bzl", "chart_registry_url", "image_reference")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
@@ -9,10 +9,15 @@ load("//bazel/img:registry.bzl", "IMAGE_REGISTRY", "chart_registry_url", "image_
 # argv the supervisor is handed, and //agent/internal/supervisorcmd asserts every
 # flag in it exists on the command (#772). A rename there would otherwise only
 # surface as every proxy pod failing to start at rollout time.
+# agent-proxy-configmap.yaml is exported so //test/envoy_validate can run its
+# aether.cluster stats-tag regex over the per-kind L4 stat keys (#1023): a
+# regex edit that cut "tcp:<ns>/<svc>:<port>" short would silently merge L4
+# series again.
 exports_files([
     "values.yaml",
     "templates/agent-daemonset.yaml",
     "templates/agent-proxy-daemonset.yaml",
+    "templates/agent-proxy-configmap.yaml",
 ])
 
 # Shared by both packagings below (see :aether_commit). `images` is what makes the
@@ -28,7 +33,7 @@ AETHER_IMAGES = [
     "//controller/cmd/controller:image_push",
 ]
 
-# aether Helm chart (published as chart_repository("aether") under IMAGE_REGISTRY; see //bazel/img:registry.bzl).
+# aether Helm chart (published to chart_registry_url("aether"); see //bazel/img:registry.bzl).
 #
 # The whole system in one chart: agent + cni-install + per-node proxy, registrar,
 # and the mesh-config controller. The MeshConfig CRD ships in //charts/crds
@@ -38,18 +43,28 @@ AETHER_IMAGES = [
 # placeholders in values.yaml are digest-pinned at package time and published with
 # the chart.
 #
-# Publish targets (OCI; registry from //bazel/img:registry.bzl):
-#   bazel run //charts/aether:aether.push           # chart + images
-#   bazel run //charts/aether:aether.push_registry  # chart only
-# Authenticate first via HELM_REGISTRY_USERNAME / HELM_REGISTRY_PASSWORD.
+# Publish targets (OCI; registry from //bazel/img:registry.bzl). No
+# `registry_url`, so rules_helm defines no `.push`/`.push_registry`: `helm push`
+# appends the chart's name to its base and cannot reach the flat
+# `chart-aether` repository (proposal 040). The images and the chart go
+# separately, images first:
+#   bazel run --stamp //charts/aether:aether.push_images   # the images, by digest
+#   bazel run --stamp //charts/aether:aether.chart_push    # the chart, <X.Y.Z>
+# Credentials: `docker login <registry>` (image_push and oras both read the
+# Docker config).
 helm_chart(
     name = "aether",
     chart = "Chart.yaml",
     images = AETHER_IMAGES,
-    login_url = IMAGE_REGISTRY,
-    registry_url = chart_registry_url(),
     values = "values.yaml",
     visibility = ["//visibility:public"],
+)
+
+chart_push(
+    name = "aether.chart_push",
+    chart_name = "aether",
+    package = ":aether",
+    repository = chart_registry_url("aether"),
 )
 
 helm_lint_test(
@@ -96,6 +111,133 @@ helm_template_test(
     },
 )
 
+# #1050: --skip-hot-restart-parent-stats was the workaround for the hot-restart
+# main-thread deadlock. The carried Envoy patch (#1060) fixes the deadlock, so
+# the chart default is OFF again. rules_helm can only assert presence, so the
+# default pins absence positionally: the last Envoy arg (--drain-strategy's
+# value) is followed directly by the container's `env:`.
+helm_template_test(
+    name = "aether_proxy_skip_parent_stats_off_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--envoy-arg=gradual\"\\n\\s+env:\\n",
+        ],
+    },
+)
+
+# ...and the emergency switch still renders it.
+helm_template_test(
+    name = "aether_proxy_skip_parent_stats_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.hotRestart.skipParentStats=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--envoy-arg=--skip-hot-restart-parent-stats\"",
+        ],
+    },
+)
+
+# #1054: the proxy drains with --drain-strategy gradual by default (immediate
+# made the stateless resets worse on talos-main); immediate stays an opt-in.
+helm_template_test(
+    name = "aether_proxy_drain_strategy_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--envoy-arg=--drain-strategy\"\\n\\s+- \"--envoy-arg=gradual\"",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "aether_proxy_drain_strategy_immediate_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.hotRestart.drainStrategy=immediate",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--envoy-arg=--drain-strategy\"\\n\\s+- \"--envoy-arg=immediate\"",
+        ],
+    },
+)
+
+helm_template_fail_test(
+    name = "aether_proxy_drain_strategy_invalid_test",
+    chart = ":aether",
+    expected_message = "proxy.hotRestart.drainStrategy must be immediate or gradual",
+    opts = [
+        "--set",
+        "proxy.hotRestart.drainStrategy=Immediate",
+    ],
+)
+
+# #1054: the h3 twin idle timeout reaches the agent (default 8s)...
+helm_template_test(
+    name = "aether_agent_quic_idle_timeout_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--east-west-quic-idle-timeout=8s\"",
+        ],
+    },
+)
+
+# ...an override is passed through when it still fits...
+helm_template_test(
+    name = "aether_agent_quic_idle_timeout_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "agent.eastWestQuicIdleTimeout=20s",
+        "--set",
+        "proxy.hotRestart.parentShutdownTime=1m",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--east-west-quic-idle-timeout=20s\"",
+        ],
+    },
+)
+
+# ...and the chart refuses idle + 5s >= parentShutdownTime: an idle h3
+# connection would outlive the hot-restart parent (10s + 5s == 15s fails).
+helm_template_fail_test(
+    name = "aether_agent_quic_idle_timeout_too_long_test",
+    chart = ":aether",
+    expected_message = "agent.eastWestQuicIdleTimeout (10s) + 5s must be below proxy.hotRestart.parentShutdownTime (15s)",
+    opts = [
+        "--set",
+        "agent.eastWestQuicIdleTimeout=10s",
+    ],
+)
+
+# The same check holds when the parent-shutdown time is the one that moves.
+helm_template_fail_test(
+    name = "aether_agent_quic_idle_timeout_short_parent_test",
+    chart = ":aether",
+    expected_message = "must be below proxy.hotRestart.parentShutdownTime (12s)",
+    opts = [
+        "--set",
+        "proxy.hotRestart.parentShutdownTime=12s",
+    ],
+)
+
+helm_template_fail_test(
+    name = "aether_agent_quic_idle_timeout_malformed_test",
+    chart = ":aether",
+    expected_message = "agent.eastWestQuicIdleTimeout must be a duration",
+    opts = [
+        "--set",
+        "agent.eastWestQuicIdleTimeout=8",
+    ],
+)
+
 # Proposal 036: the agent brokers per-pod SVIDs over the SPIRE agent's SPIFFE
 # Broker Endpoint, not the Delegated Identity API's admin socket. Three things
 # have to agree — the flag, the hostPath the SPIRE chart puts the socket
@@ -111,6 +253,77 @@ helm_template_test(
         "aether/templates/agent-daemonset.yaml": [
             "--spire-broker-socket=/run/spire/broker-sockets/broker.sock",
             "/run/spire/agent/sockets/csi.spiffe.io/broker",
+        ],
+    },
+)
+
+# #1053: the egress identity gate is default ON. The controller must be told to
+# inject it, from the AGENT image (the one carrying /identity-ready as an extra
+# layer, already on every node), against the same Workload API socket path every
+# aether component mounts from csi.spiffe.io. The flags' existence is pinned by
+# //controller/internal/cmd:TestIdentityGate_FlagsRegistered.
+helm_template_test(
+    name = "aether_identity_gate_default_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "--identity-gate=true",
+            "--identity-gate-image=" + image_reference("agent") + "@sha256:",
+            "--identity-gate-image-pull-policy=IfNotPresent",
+            "--identity-gate-workload-socket=/run/secrets/workload-spiffe-uds/socket",
+            "--identity-gate-memory-request=16Mi",
+            "--identity-gate-memory-limit=64Mi",
+        ],
+    },
+)
+
+# The chart knob turns it off...
+helm_template_test(
+    name = "aether_identity_gate_disabled_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.identityGate.enabled=false",
+    ],
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "--identity-gate=false",
+        ],
+    },
+)
+
+# ...and so does a mesh without SPIRE, whatever the knob says: no SVID would ever
+# come, and every mesh pod would be held in Init forever.
+helm_template_test(
+    name = "aether_identity_gate_no_spire_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "spire.enabled=false",
+    ],
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "--identity-gate=false",
+        ],
+    },
+)
+
+# A timeout and an image override reach the controller verbatim.
+helm_template_test(
+    name = "aether_identity_gate_overrides_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.identityGate.timeout=5m",
+        "--set",
+        "controller.webhook.identityGate.image.repository=mirror.example/aether/agent",
+        "--set",
+        "controller.webhook.identityGate.image.tag=v1",
+    ],
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "--identity-gate-timeout=5m",
+            "--identity-gate-image=mirror.example/aether/agent:v1",
         ],
     },
 )
@@ -193,20 +406,20 @@ helm_template_fail_test(
 
 # Commit-pinned second packaging of the SAME chart (#692).
 #
-# `helm push` derives the OCI tag from the packaged chart's `version:`, so the
-# chart above publishes under the bare `charts/aether:<X.Y.Z>` tag — a tag that
-# does not change per commit. Two publish runs therefore used to write it in
+# chart_push tags with the packaged chart's `version:`, so the chart above
+# publishes under the bare `<X.Y.Z>` tag — a tag that does not change per
+# commit. Two publish runs therefore used to write it in
 # whatever order they finished, and on 2026-09-05 the older commit's chart won.
 # `publish.yaml` is now serialised, which makes the bare tag last-writer-correct;
 # this target additionally makes every commit's chart addressable by a tag that
-# can never be reused: `charts/aether:<X.Y.Z>-<full git sha>`, the same scheme the
+# can never be reused: `<X.Y.Z>-<full git sha>`, the same scheme the
 # crds/prober/udsecho charts already carry in their own `Chart.yaml`.
 #
 # The version suffix is *derived* from Chart.yaml rather than duplicated, so the
 # bare tag and the commit tag can never disagree about X.Y.Z.
 #
-# Only `:aether_commit.push_registry` (chart, no images) is published — the images
-# are byte-identical to the ones `:aether.push` already pushed by digest.
+# Only `:aether_commit.chart_push` (chart, no images) is published — the images
+# are byte-identical to the ones `:aether.push_images` already pushed by digest.
 genrule(
     name = "chart_commit_yaml",
     srcs = ["Chart.yaml"],
@@ -225,10 +438,15 @@ helm_chart(
     name = "aether_commit",
     chart = ":Chart.commit.yaml",
     images = AETHER_IMAGES,
-    login_url = IMAGE_REGISTRY,
-    registry_url = chart_registry_url(),
     values = "values.yaml",
     visibility = ["//visibility:public"],
+)
+
+chart_push(
+    name = "aether_commit.chart_push",
+    chart_name = "aether",
+    package = ":aether_commit",
+    repository = chart_registry_url("aether"),
 )
 
 helm_lint_test(

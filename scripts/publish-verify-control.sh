@@ -20,7 +20,7 @@
 # origin/main, else HEAD), <base> as its parent, a fixed identity and fixed
 # dates, and a message naming it as this control. It exists only in this
 # checkout's object store — no ref points at it and it is never pushed — so no
-# publish run can ever have built it, and its sha is in no GHCR tag list.
+# publish run can ever have built it, and its sha is in no registry's tag list.
 #
 # Why not a real commit on main: the natural candidates (a stack-merge
 # intermediate such as ef44437, #975; or 1e31e3a) are pinned facts about the
@@ -37,8 +37,8 @@
 #
 #   1. the verifier exits EXACTLY 1 (missing). 0 is a vacuous gate; 2 is
 #      "inconclusive" (registry unreadable, bad commit) — a control that went
-#      red because GHCR was down proves nothing about detection, so it is
-#      reported as inconclusive (exit 2), not as a passing control.
+#      red because the registry was down proves nothing about detection, so it
+#      is reported as inconclusive (exit 2), not as a passing control.
 #   2. it printed exactly <expected> MISSING lines — 4 charts + 8 images + 8
 #      signatures, derived from scripts/registry-lib.sh, not typed here — and no
 #      `ok` line. A partial red would mean part of the gate can no longer fail.
@@ -52,6 +52,12 @@
 #      gate report a present artifact as missing.
 #   5. the summary line reads `FAIL: <expected> of <expected> artifact(s)
 #      missing across 1 commit(s)`.
+#   6. EVERY MISSING line names the registry the control's tree names — the
+#      `<host>/<namespace>/` of bazel/img/registry.bzl as of <base> (proposal
+#      040). The verifier reads that file per commit; a red reported against
+#      another registry (the old one, after the Quay cut-over) is a red for the
+#      wrong reason: the gate would be checking where the commit never
+#      published.
 #
 # USAGE
 #
@@ -100,9 +106,20 @@ control="$(
 
 expected=$((${#REGISTRY_CHARTS[@]} + 2 * ${#REGISTRY_IMAGE_REPOS[@]}))
 
+# The registry the control's tree names (its tree IS base's): where every
+# MISSING line must point.
+base_bzl="$(mktemp)"
+if ! git show "${base_sha}:bazel/img/registry.bzl" >"$base_bzl" 2>/dev/null ||
+	! want_prefix="$(IMAGE_REGISTRY_BZL="$base_bzl" "${here}/image-registry.sh" prefix)"; then
+	rm -f "$base_bzl"
+	echo "::error::expected-red control: cannot read bazel/img/registry.bzl as of ${base_sha}" >&2
+	exit 2
+fi
+rm -f "$base_bzl"
+
 echo "expected-red control: commit ${control}"
 echo "  built from ${base_sha} (${base}); never pushed, so nothing can have published it"
-echo "  expecting: exit 1, ${expected} MISSING lines naming ${control}, every absence witnessed"
+echo "  expecting: exit 1, ${expected} MISSING lines naming ${control} on ${want_prefix}/, every absence witnessed"
 
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
@@ -142,13 +159,25 @@ n_missing="$(printf '%s\n' "$missing_lines" | grep -c . || true)"
 if [ "$n_missing" -ne "$expected" ]; then
 	fail "${n_missing} MISSING line(s), expected ${expected} — part of the gate cannot fail"
 fi
-if printf '%s\n' "$missing_lines" | grep . | grep -qvF -- "$control"; then
+# Each offending set is collected ONCE, with `|| true` on the whole pipeline,
+# and tested with `[ -n ]` (#1046). Not `if producer | grep -q`: under pipefail
+# an early-exiting `grep -q` can SIGPIPE its producer and read a match as a
+# miss, skipping the fail(). And the first three are shown with `sed -n 1,3p`,
+# which reads all of its input, not `head -3`: a producer killed by head's early
+# exit fails its pipeline, and `set -e` would end this script mid-report.
+wrong_sha="$(printf '%s\n' "$missing_lines" | grep . | grep -vF -- "$control" || true)"
+if [ -n "$wrong_sha" ]; then
 	fail "a MISSING line does not name the control sha — red for the wrong reason:"
-	printf '%s\n' "$missing_lines" | grep . | grep -vF -- "$control" | head -3 >&2
+	printf '%s\n' "$wrong_sha" | sed -n 1,3p >&2
+fi
+wrong_registry="$(printf '%s\n' "$missing_lines" | grep . | grep -vF -- "MISSING ${want_prefix}/" || true)"
+if [ -n "$wrong_registry" ]; then
+	fail "a MISSING line names a registry other than ${want_prefix}/ (bazel/img/registry.bzl as of the control's tree) — red for the wrong reason:"
+	printf '%s\n' "$wrong_registry" | sed -n 1,3p >&2
 fi
 if grep -qE '^[[:space:]]*ok[[:space:]]' "$log"; then
 	fail "the verifier reported an artifact PRESENT for a commit that was never published:"
-	grep -E '^[[:space:]]*ok[[:space:]]' "$log" | head -3 >&2
+	grep -E '^[[:space:]]*ok[[:space:]]' "$log" | sed -n 1,3p >&2
 fi
 # One witness per chart and per image absence (a "no image to sign" line rides
 # on its image's). Fewer means some absence was never shown to be one: the

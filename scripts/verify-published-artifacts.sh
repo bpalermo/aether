@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 # Assert that the artifacts for a commit on `main` actually exist in the image
-# registry (#880) -- the one bazel/img/registry.bzl names (proposal 040).
+# registry (#880) -- the one bazel/img/registry.bzl named AS OF THAT COMMIT
+# (proposal 040).
+#
+# WHICH REGISTRY, PER COMMIT (the Quay cut-over, proposal 040 phase 2)
+#
+# A commit is published by publish.yaml as it stood at that commit, to the
+# registry its own bazel/img/registry.bzl named. So this script reads that file
+# AS OF EACH COMMIT it checks (`git show <sha>:bazel/img/registry.bzl`) and
+# derives everything from it -- host, namespace, name overrides, chart prefix,
+# and SIGNATURE_LAYOUT, the layout the signature must have there -- exactly the
+# way it already reads the chart versions and the release-tag prefix. There is
+# no cut-over sha or date typed anywhere: the cut-over commit is simply the
+# first one whose registry.bzl says quay.io (the phase-2 PR's merge commit).
+# Push heads from before it are checked on ghcr.io (charts/<name>, the
+# aether-proxy name override, signature TAGS); heads at or after it on quay.io
+# (chart-<name>, flat names, signature REFERRERS). A post-flip head whose
+# artifacts exist only on ghcr.io is MISSING, not present.
+#
+#   - A commit older than registry.bzl itself (before #998, phase 1) was
+#     published exactly where the file's FIRST version says -- phase 1 was
+#     introduced with no behaviour change -- so that version stands in.
+#   - A registry.bzl without a SIGNATURE_LAYOUT line predates the cut-over and
+#     was published under "tag" (cosign's `.sig` or `sha256-<hex>` tag).
+#   - A registry.bzl this script cannot parse is exit 2, never a default.
 #
 # WHY THIS EXISTS
 #
@@ -23,22 +46,27 @@
 # manifest (36 today: every image is a two-platform index)
 #
 #   1. All FOUR charts under their commit-addressable tag:
-#      charts/{aether,crds,prober,udsecho}:<X.Y.Z>-<full 40-char sha>. crds,
+#      <chart repository>:<X.Y.Z>-<full 40-char sha> for aether, crds, prober
+#      and udsecho (`charts/<name>` on ghcr.io, `chart-<name>` on quay.io). crds,
 #      prober and udsecho spell that in their own Chart.yaml
 #      (`version: "X.Y.Z-{GIT_COMMIT}"`); aether gets it from
 #      //charts/aether:aether_commit (#692). The version is read from Chart.yaml
 #      AS OF that commit, so a commit that bumped a chart is checked against the
 #      version it actually published under.
 #   2. The image tag `<release tag>-<full sha>` (`dev-<sha>` today) in each of
-#      the eight published image repositories (REGISTRY_IMAGE_REPOS in
-#      scripts/registry-lib.sh). The prefix is read from the `release_tag` flag's
+#      the eight published image repositories (REGISTRY_IMAGE_COMPONENTS in
+#      scripts/registry-lib.sh, named by that commit's registry.bzl). The prefix is read from the `release_tag` flag's
 #      default in bazel/img/go_multi_arch_image.bzl AS OF that commit, like the
 #      chart versions.
 #   3. A cosign signature for each of those images: the index digest resolved
 #      from (2), present in the same repository as exactly one of
 #      `sha256-<hex>.sig` (cosign 2), `sha256-<hex>` (cosign 3 bundle, the
 #      referrers fallback tag) or an OCI 1.1 signature referrer (cosign 3 on a
-#      registry with the Referrers API -- quay.io, not ghcr.io; proposal 040).
+#      registry with the Referrers API -- quay.io, not ghcr.io; proposal 040) --
+#      AND in the layout that commit's SIGNATURE_LAYOUT promises: `referrer`
+#      on quay.io, a tag layout on ghcr.io. A tag where a referrer is promised
+#      is MISSING (the wrong layout), and a referrer plus a tag is `both`, the
+#      double-write defect.
 #      "Published but unsigned" is its own silent failure (#875) and reads
 #      identically to "never published" unless someone asks the registry.
 #   4. The same, for EVERY child manifest the index lists (#925). The signer
@@ -55,6 +83,10 @@
 #      before proxy signing existed, whose digest has no signature tag, are
 #      printed as `skip` and not counted — see scripts/proxy-pin-lib.sh for the
 #      cut-over; a pin introduced after it with no signature is MISSING.
+#      The pin is looked up on the registry the PIN names (it moves with the
+#      next proxy release, not with the flip), and its signature layout is the
+#      one promised by the newest registry.bzl in which that reference was
+#      image_reference("proxy") (setting_for_proxy_ref_at).
 #
 # (3), (4) and (5) ask whether a signature is THERE. Whether it VERIFIES is
 # scripts/verify-image-signatures.sh's job; set SIGNED_REFS_OUT=<file> and this
@@ -62,8 +94,8 @@
 # The proxy is signed by a DIFFERENT workflow (proxy-release.yml, so a different
 # certificate identity); its refs go to PROXY_SIGNED_REFS_OUT=<file> instead.
 #
-# That is every artefact the `Push charts + images` step publishes, bar the bare
-# mutable `charts/*:<X.Y.Z>` tags, which carry no commit coordinate and which no
+# That is every artefact the `Push images + charts` step publishes, bar the bare
+# mutable `<chart>:<X.Y.Z>` tags, which carry no commit coordinate and which no
 # query can attribute to a commit.
 #
 # HOW IT LOOKS (#985)
@@ -115,7 +147,8 @@
 # intermediate.
 #
 # Reads public packages anonymously. For private ones set REGISTRY_USERNAME +
-# REGISTRY_PASSWORD, or GHCR_TOKEN on ghcr.io (scripts/registry-lib.sh).
+# REGISTRY_PASSWORD, or GHCR_TOKEN on ghcr.io (scripts/registry-lib.sh; it is
+# only ever sent to ghcr.io, so one run can read both registries).
 #
 # EXIT CODES
 #   0  every artifact for every commit is present
@@ -171,7 +204,7 @@ if [ "$1" = "--recent" ]; then
 	# file, so a failed or empty read is caught here rather than turning into
 	# "every commit skipped".
 	heads_file="$(mktemp)"
-	trap 'rm -f "$heads_file"' EXIT
+	trap 'rm -f "$heads_file"' EXIT # widened below, once the setting files exist
 	if ! github_push_heads >"$heads_file"; then
 		echo "::error::--recent: could not read the push heads of main (GitHub activity log)" >&2
 		exit 2
@@ -270,6 +303,59 @@ chart_commit_tag() {
 	esac
 }
 
+# The registry setting AS OF ONE COMMIT (see WHICH REGISTRY, PER COMMIT above).
+#
+# Writes bazel/img/registry.bzl as of <sha> to <file>: the commit's own, or --
+# for a commit that predates the file -- the file's first version, which phase 1
+# introduced with no behaviour change. Anything else is exit 2.
+setting_bzl_at() {
+	local sha="$1" out="$2" first
+	if git show "${sha}:bazel/img/registry.bzl" >"$out" 2>/dev/null; then
+		return 0
+	fi
+	first="$(git log --diff-filter=A --format=%H -- bazel/img/registry.bzl | tail -1)"
+	if [ -n "$first" ] && [ "$sha" != "$first" ] &&
+		git merge-base --is-ancestor "$sha" "$first" 2>/dev/null &&
+		git show "${first}:bazel/img/registry.bzl" >"$out" 2>/dev/null; then
+		return 0
+	fi
+	echo "::error::no bazel/img/registry.bzl at ${sha}, and it is not older than the file's first version — cannot tell where it published" >&2
+	return 2
+}
+
+# The newest registry setting, reachable from <sha>, under which <proxy ref> was
+# image_reference("proxy"), written to <file>. The aether-proxy pin names its
+# own registry and moves only with a proxy release, so the layout its signature
+# must have is the one promised by the setting that made that reference current
+# -- not the checked commit's (a ghcr.io pin can outlive the flip) and not the
+# introducing commit's (a revert can re-pin an old ghcr.io digest after it).
+# Exit 2 when no version of the file ever named it.
+setting_for_proxy_ref_at() {
+	local sha="$1" want="$2" out="$3" c
+	if setting_bzl_at "$sha" "$out" 2>/dev/null &&
+		[ "$(setting "$out" ref proxy 2>/dev/null)" = "$want" ]; then
+		return 0
+	fi
+	while read -r c; do
+		if git show "${c}:bazel/img/registry.bzl" >"$out" 2>/dev/null &&
+			[ "$(setting "$out" ref proxy 2>/dev/null)" = "$want" ]; then
+			return 0
+		fi
+	done < <(git log --format=%H "$sha" -- bazel/img/registry.bzl)
+	echo "::error::no version of bazel/img/registry.bzl reachable from ${sha} ever named ${want} as image_reference(\"proxy\") — cannot tell how its signature is laid out" >&2
+	return 2
+}
+
+# setting <bzl> <image-registry.sh args...>: ask image-registry.sh about <bzl>.
+setting() {
+	local bzl="$1"
+	shift
+	IMAGE_REGISTRY_BZL="$bzl" "${here}/image-registry.sh" "$@"
+}
+
+# The signature layout a setting promises (registry-lib.sh).
+setting_layout() { registry_setting_signature_layout "$1"; }
+
 # The tag an image publishes under FOR ONE COMMIT: `<release tag>-<full sha>`,
 # the second entry of go_multi_arch_image()'s image_push tag_list, where the
 # release tag is the `release_tag` string_flag's default (publish.yaml does not
@@ -359,13 +445,32 @@ absent_direct() {
 # Referrers API is asked too (a 404 there is "no API", as on ghcr.io), so `both`
 # is seen; any lookup going unanswered is exit 2. The referrers GET is not a tag
 # lookup and is not counted in `checked N expected tags`.
+#
+# <expected> is the layout the commit's registry.bzl promises (setting_layout):
+# `referrer` accepts only a referrer; `tag` accepts only a tag layout. A present
+# signature in the other shape is MISSING — the publish did not write what that
+# registry is supposed to hold (on quay.io, a fallback tag instead of a
+# referrer means the signer is not writing referrers there).
 check_signature() {
-	local repo="$1" digest="$2" tok="$3" what="$4" layout
+	local repo="$1" digest="$2" tok="$3" what="$4" expected="$5" layout
 	lookups_total=$((lookups_total + 2))
 	if ! layout="$(registry_signature_layout_direct "$repo" "$digest" "$tok")"; then
 		echo "::error::inconclusive: could not look up the signature tags of ${REGISTRY_HOST}/${repo}@${digest}" >&2
 		exit 2
 	fi
+	local rc=0
+	registry_layout_satisfies "$layout" "$expected" || rc=$?
+	case "${rc}/${layout}" in
+	0/* | 1/both | 1/none) ;;
+	1/*)
+		absent "${REGISTRY_HOST}/${repo} signature for ${what} ${digest} — layout '${layout}', but this commit's bazel/img/registry.bzl promises SIGNATURE_LAYOUT '${expected}' there"
+		return
+		;;
+	*)
+		echo "::error::internal: unknown expected signature layout '${expected}'" >&2
+		exit 2
+		;;
+	esac
 	case "$layout" in
 	legacy)
 		present "${REGISTRY_HOST}/${repo}:$(registry_signature_tag_legacy "$digest") (signature of ${what} ${digest}, cosign 2 layout)"
@@ -389,10 +494,16 @@ check_signature() {
 	esac
 }
 
+setting_file="$(mktemp)"
+pin_setting_file="$(mktemp)"
+# (--recent's trap covers its own file; this one covers both runs.)
+trap 'rm -f "$setting_file" "$pin_setting_file" "${heads_file:-}"' EXIT
+
 verify_commit() {
 	local ref="$1"
-	local sha chart chart_repo chart_tag repo tok tag digest children child
+	local sha chart chart_repo chart_tag repo tok tag digest children child c layout
 	local before="$checks_total" lookups_before="$lookups_total" expected_children=0
+	local -a repos=()
 
 	if ! sha="$(git rev-parse --verify --quiet "${ref}^{commit}")"; then
 		echo "::error::not a commit in this repository: ${ref}" >&2
@@ -401,9 +512,28 @@ verify_commit() {
 
 	say "commit ${sha} ($(git log -1 --format='%cI %s' "$sha"))"
 
+	# The registry THIS commit published to, and how it signs there (proposal
+	# 040): its own bazel/img/registry.bzl, never the checkout's.
+	if ! setting_bzl_at "$sha" "$setting_file"; then
+		exit 2
+	fi
+	if ! REGISTRY_HOST="$(setting "$setting_file" host)" || [ -z "$REGISTRY_HOST" ] ||
+		! layout="$(setting_layout "$setting_file")"; then
+		echo "::error::cannot parse bazel/img/registry.bzl as of ${sha}" >&2
+		exit 2
+	fi
+	for c in "${REGISTRY_IMAGE_COMPONENTS[@]}"; do
+		if ! repo="$(setting "$setting_file" repo "$c")"; then
+			echo "::error::cannot derive the ${c} repository from bazel/img/registry.bzl as of ${sha}" >&2
+			exit 2
+		fi
+		repos+=("$repo")
+	done
+	say "  registry ${REGISTRY_HOST}/$(setting "$setting_file" prefix | cut -d/ -f2-), signatures as ${layout} (bazel/img/registry.bzl as of ${sha:0:12})"
+
 	# 1. every chart, under the tag that belongs to this commit alone (#692).
 	for chart in "${REGISTRY_CHARTS[@]}"; do
-		if ! chart_repo="$(registry_chart_repo "$chart")"; then
+		if ! chart_repo="$(setting "$setting_file" chart-repo "$chart")"; then
 			exit 2
 		fi
 		chart_tag="$(chart_commit_tag "$sha" "$chart")"
@@ -420,7 +550,7 @@ verify_commit() {
 
 	# 2 + 3. every published image, and its signature.
 	tag="$(image_commit_tag "$sha")"
-	for repo in "${REGISTRY_IMAGE_REPOS[@]}"; do
+	for repo in "${repos[@]}"; do
 		# A repository we cannot read is an inconclusive check, not a passing one.
 		if ! tok="$(registry_registry_token "$repo")" || [ -z "$tok" ]; then
 			echo "::error::could not obtain a pull token for ${repo}" >&2
@@ -437,12 +567,16 @@ verify_commit() {
 		fi
 		present "${REGISTRY_HOST}/${repo}:${tag}"
 
-		digest="$(registry_manifest_digest "$repo" "$tag" "$tok")"
+		# `|| true`: the helper is a `curl -f | ... | head` pipeline, so under
+		# pipefail a failed HEAD would end the script here with curl's status
+		# (22, say) instead of the inconclusive 2 below that names the reference
+		# (#1046).
+		digest="$(registry_manifest_digest "$repo" "$tag" "$tok" || true)"
 		if [ -z "$digest" ]; then
 			echo "::error::could not resolve a digest for ${REGISTRY_HOST}/${repo}:${tag}" >&2
 			exit 2
 		fi
-		check_signature "$repo" "$digest" "$tok" "index"
+		check_signature "$repo" "$digest" "$tok" "index" "$layout"
 
 		# 4. every CHILD manifest's signature (#925). `cosign sign --recursive`
 		# signs the per-architecture manifests too, and those are what a node
@@ -455,7 +589,7 @@ verify_commit() {
 		fi
 		while read -r child; do
 			expected_children=$((expected_children + 1))
-			check_signature "$repo" "$child" "$tok" "child"
+			check_signature "$repo" "$child" "$tok" "child" "$layout"
 		done <<<"$children"
 
 		# Hand the exact index reference to the cosign pass, when asked for
@@ -479,21 +613,33 @@ verify_commit() {
 	# coordinates. The proxy pin has its own gate and its own seen-red
 	# (scripts/check-proxy-pin.sh, the cut-over cases). The real sweep and the
 	# workflow_run path never set this.
-	local proxy_expected=0 values pin verdict got
+	local proxy_expected=0 values pinned pin pin_ref pin_repo pin_layout verdict got commit_host="$REGISTRY_HOST"
 	if [ "${PROXY_PIN_CHECK:-1}" = 0 ]; then
-		say "  skip    ${REGISTRY_HOST}/${PROXY_REPO} pin check (PROXY_PIN_CHECK=0: the expected-red control covers the per-commit coordinates only)"
+		say "  skip    aether-proxy pin check (PROXY_PIN_CHECK=0: the expected-red control covers the per-commit coordinates only)"
 	else
 		if ! values="$(git show "${sha}:${PROXY_VALUES_PATH}")" ||
-			! pin="$(printf '%s\n' "$values" | proxy_pinned_digest)"; then
-			echo "::error::could not read the aether-proxy digest pinned in ${PROXY_VALUES_PATH} at ${sha}" >&2
+			! pinned="$(printf '%s\n' "$values" | proxy_pinned_ref)"; then
+			echo "::error::could not read the aether-proxy pin in ${PROXY_VALUES_PATH} at ${sha} (a repository: naming one of ${PROXY_PIN_REFS[*]}, and its digest)" >&2
 			exit 2
 		fi
-		if ! tok="$(registry_registry_token "$PROXY_REPO")" || [ -z "$tok" ]; then
-			echo "::error::could not obtain a pull token for ${PROXY_REPO}" >&2
+		# The pin names its own registry (proposal 040): it moves with the next
+		# proxy release, not with the registry flip.
+		pin_ref="${pinned%% *}"
+		pin="${pinned#* }"
+		REGISTRY_HOST="${pin_ref%%/*}"
+		pin_repo="${pin_ref#*/}"
+		# Its signature layout is what the registry setting that made pin_ref
+		# image_reference("proxy") promised (setting_for_proxy_ref_at).
+		if ! setting_for_proxy_ref_at "$sha" "$pin_ref" "$pin_setting_file" ||
+			! pin_layout="$(setting_layout "$pin_setting_file")"; then
 			exit 2
 		fi
-		if ! tags="$(registry_all_tags "$PROXY_REPO" "$tok")"; then
-			echo "::error::could not list tags for ${PROXY_REPO}" >&2
+		if ! tok="$(registry_registry_token "$pin_repo")" || [ -z "$tok" ]; then
+			echo "::error::could not obtain a pull token for ${pin_ref}" >&2
+			exit 2
+		fi
+		if ! tags="$(registry_all_tags "$pin_repo" "$tok")"; then
+			echo "::error::could not list tags for ${pin_ref}" >&2
 			exit 2
 		fi
 		if ! verdict="$(proxy_pin_verdict "$sha" "$pin" "$tags")"; then
@@ -502,28 +648,28 @@ verify_commit() {
 		case "$verdict" in
 		"skip "*)
 			# Printed, never silent, and never counted: a skipped check is not a pass.
-			say "  skip    ${REGISTRY_HOST}/${PROXY_REPO}@${pin} (pinned by ${verdict#skip }, before proxy signing existed — cut-over ${PROXY_SIGNING_CUTOVER:0:12}; unsigned by history, #984)"
+			say "  skip    ${pin_ref}@${pin} (pinned by ${verdict#skip }, before proxy signing existed — cut-over ${PROXY_SIGNING_CUTOVER:0:12}; unsigned by history, #984)"
 			;;
 		check)
-			got="$(registry_manifest_digest "$PROXY_REPO" "$pin" "$tok")" || got=""
+			got="$(registry_manifest_digest "$pin_repo" "$pin" "$tok")" || got=""
 			if [ "$got" != "$pin" ]; then
 				proxy_expected=2
-				absent "${REGISTRY_HOST}/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH}; the registry does not serve it)"
-				absent "${REGISTRY_HOST}/${PROXY_REPO} signature for pinned ${pin} (no image to sign)"
+				absent "${pin_ref}@${pin} (pinned in ${PROXY_VALUES_PATH}; the registry does not serve it)"
+				absent "${pin_ref} signature for pinned ${pin} (no image to sign)"
 			else
-				present "${REGISTRY_HOST}/${PROXY_REPO}@${pin} (pinned in ${PROXY_VALUES_PATH})"
-				check_signature "$PROXY_REPO" "$pin" "$tok" "proxy index"
-				if ! children="$(registry_index_children "$PROXY_REPO" "$pin" "$tok")" || [ -z "$children" ]; then
-					echo "::error::could not enumerate the child manifests of ${REGISTRY_HOST}/${PROXY_REPO}@${pin}" >&2
+				present "${pin_ref}@${pin} (pinned in ${PROXY_VALUES_PATH})"
+				check_signature "$pin_repo" "$pin" "$tok" "proxy index" "$pin_layout"
+				if ! children="$(registry_index_children "$pin_repo" "$pin" "$tok")" || [ -z "$children" ]; then
+					echo "::error::could not enumerate the child manifests of ${pin_ref}@${pin}" >&2
 					exit 2
 				fi
 				proxy_expected=2
 				while read -r child; do
 					proxy_expected=$((proxy_expected + 1))
-					check_signature "$PROXY_REPO" "$child" "$tok" "proxy child"
+					check_signature "$pin_repo" "$child" "$tok" "proxy child" "$pin_layout"
 				done <<<"$children"
 				if [ -n "${PROXY_SIGNED_REFS_OUT:-}" ]; then
-					printf '%s/%s@%s\n' "$REGISTRY_HOST" "$PROXY_REPO" "$pin" >>"$PROXY_SIGNED_REFS_OUT"
+					printf '%s@%s\n' "$pin_ref" "$pin" >>"$PROXY_SIGNED_REFS_OUT"
 				fi
 			fi
 			;;
@@ -532,12 +678,13 @@ verify_commit() {
 			exit 2
 			;;
 		esac
+		REGISTRY_HOST="$commit_host"
 	fi
 
 	# 4 charts + 8 images + 8 index signatures + one signature per child, plus
 	# the proxy pin's checks. If the loops ever stop iterating, this says so
 	# instead of reporting a clean run over nothing.
-	local expected=$((${#REGISTRY_CHARTS[@]} + 2 * ${#REGISTRY_IMAGE_REPOS[@]} + expected_children + proxy_expected))
+	local expected=$((${#REGISTRY_CHARTS[@]} + 2 * ${#repos[@]} + expected_children + proxy_expected))
 	local did=$((checks_total - before))
 	if [ "$did" -ne "$expected" ]; then
 		echo "::error::internal: ran ${did} checks for ${sha}, expected ${expected}" >&2
@@ -560,7 +707,7 @@ if [ "$missing_total" -gt 0 ]; then
 		cat >>"$GITHUB_STEP_SUMMARY" <<EOF
 ### publish verification FAILED
 
-${missing_total} of ${checks_total} artifacts are missing from ${REGISTRY_HOST}.
+${missing_total} of ${checks_total} artifacts are missing (each line names its registry: the one bazel/img/registry.bzl named as of that commit).
 
 \`\`\`
 ${report}\`\`\`

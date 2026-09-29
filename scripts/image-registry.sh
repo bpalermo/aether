@@ -14,18 +14,32 @@
 #
 # Usage:
 #   image-registry.sh               KEY=VALUE lines (for "$GITHUB_ENV" or eval):
-#       IMAGE_REGISTRY_HOST      ghcr.io
-#       IMAGE_NAMESPACE          bpalermo/aether
+#       IMAGE_REGISTRY_HOST      quay.io
+#       IMAGE_NAMESPACE          aethermesh
 #       IMAGE_REGISTRY           <host>/<namespace>: the prefix the workflows
 #                                append a component name to (not valid for a
 #                                component with a name override -- use `ref`)
 #       PROXY_IMAGE              image_reference("proxy")
-#       CHART_REPOSITORY_PREFIX  charts/
+#       CHART_REPOSITORY_PREFIX  chart-
+#       IMAGE_SIGNATURE_LAYOUT   referrer | tag (SIGNATURE_LAYOUT)
 #   image-registry.sh repo <component>   image_repository(component)
 #   image-registry.sh ref <component>    image_reference(component)
 #   image-registry.sh chart-repo <chart> chart_repository(chart)
+#   image-registry.sh chart-ref <chart>  chart_registry_url(chart): the
+#                                        host-qualified chart repository
 #   image-registry.sh host               the registry host alone
 #   image-registry.sh prefix             <host>/<namespace> (IMAGE_REGISTRY above)
+#   image-registry.sh signature-layout   SIGNATURE_LAYOUT: referrer | tag
+#   image-registry.sh proxy-pin-refs     proxy_pin_references(), one per line:
+#                                        image_reference("proxy"), then each
+#                                        PROXY_PIN_LEGACY_REFERENCES entry
+#
+# SIGNATURE_LAYOUT and PROXY_PIN_LEGACY_REFERENCES are parsed only by the
+# subcommands that print them (and `env`), so a registry.bzl from BEFORE they
+# existed -- the publish-verify sweep reads the file as of each commit it checks
+# -- still answers host/prefix/repo/ref/chart-repo/chart-ref. Asked for one it
+# does not have, it fails (exit 2) like any other unparseable setting; the
+# sweep checks for the line itself before asking.
 #
 # Every value is validated against [a-z0-9./_-] (plus :port on the host), so the
 # KEY=VALUE form is safe to eval and to append to $GITHUB_ENV unquoted.
@@ -79,6 +93,27 @@ name_ok() {
 	}
 }
 
+# SIGNATURE_LAYOUT, parsed on demand (see the usage note above).
+signature_layout() {
+	one SIGNATURE_LAYOUT 'referrer|tag'
+}
+
+# PROXY_PIN_LEGACY_REFERENCES = ["a", "b"]  (or []), one reference per line.
+legacy_proxy_refs() {
+	local lines ref='"[a-z0-9]([a-z0-9.:/_-]*[a-z0-9])?"' body
+	lines="$(grep -E '^PROXY_PIN_LEGACY_REFERENCES[[:space:]]*=' "$bzl" || true)"
+	[ -n "$lines" ] || die "no PROXY_PIN_LEGACY_REFERENCES assignment"
+	[ "$(printf '%s\n' "$lines" | wc -l)" -eq 1 ] || die "PROXY_PIN_LEGACY_REFERENCES is assigned more than once"
+	[[ "$lines" =~ ^PROXY_PIN_LEGACY_REFERENCES\ =\ \[((${ref})(,\ ${ref})*)?\]$ ]] ||
+		die "cannot parse: ${lines}"
+	body="${BASH_REMATCH[1]}"
+	while [[ "$body" =~ ^\"([a-z0-9][a-z0-9.:/_-]*)\"(,\ )?(.*)$ ]]; do
+		printf '%s\n' "${BASH_REMATCH[1]}"
+		body="${BASH_REMATCH[3]}"
+	done
+	[ -z "$body" ] || die "cannot parse PROXY_PIN_LEGACY_REFERENCES near: ${body}"
+}
+
 repo() {
 	local c="$1" k v name
 	name_ok "$c"
@@ -97,6 +132,8 @@ env)
 	proxy_repo="$(repo proxy)"
 	printf 'PROXY_IMAGE=%s/%s\n' "$host" "$proxy_repo"
 	printf 'CHART_REPOSITORY_PREFIX=%s\n' "$chart_prefix"
+	layout="$(signature_layout)"
+	printf 'IMAGE_SIGNATURE_LAYOUT=%s\n' "$layout"
 	;;
 host) printf '%s\n' "$host" ;;
 prefix) printf '%s/%s\n' "$host" "$namespace" ;;
@@ -114,8 +151,22 @@ chart-repo)
 	name_ok "$2"
 	printf '%s/%s%s\n' "$namespace" "$chart_prefix" "$2"
 	;;
+chart-ref)
+	[ "$#" -eq 2 ] || die "usage: chart-ref <chart>"
+	name_ok "$2"
+	printf '%s/%s/%s%s\n' "$host" "$namespace" "$chart_prefix" "$2"
+	;;
+signature-layout) signature_layout ;;
+proxy-pin-refs)
+	current="${host}/$(repo proxy)"
+	legacy="$(legacy_proxy_refs)"
+	printf '%s\n' "$current"
+	while read -r r; do
+		[ -n "$r" ] && [ "$r" != "$current" ] && printf '%s\n' "$r"
+	done <<<"$legacy"
+	;;
 *)
-	echo "usage: $0 [env | host | prefix | repo <component> | ref <component> | chart-repo <chart>]" >&2
+	echo "usage: $0 [env | host | prefix | repo <component> | ref <component> | chart-repo <chart> | chart-ref <chart> | signature-layout | proxy-pin-refs]" >&2
 	exit 2
 	;;
 esac

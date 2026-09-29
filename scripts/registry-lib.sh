@@ -59,11 +59,36 @@ registry_token_url() {
 # all. For private ones: REGISTRY_USERNAME + REGISTRY_PASSWORD (a Quay robot
 # account, say), or GHCR_TOKEN (a GITHUB_TOKEN or a PAT with read:packages),
 # which is only ever sent to ghcr.io.
+#
+# THE CREDENTIALS ARE BOUND TO ONE HOST. REGISTRY_USERNAME/REGISTRY_PASSWORD
+# were issued by one registry -- REGISTRY_CREDENTIAL_HOST, default the
+# IMAGE_REGISTRY_HOST the workflows export from scripts/image-registry.sh (or,
+# unset, the setting's host) -- and are sent to that host's token endpoint and
+# NO other. A token request to any other host goes anonymous, with one stderr
+# line saying so. The split sweep (proposal 040) reads pre-cut-over heads on
+# ghcr.io in the same run that may hold the quay robot, and nothing that ever
+# points REGISTRY_HOST at a third registry may hand it that password.
+registry__credential_host() {
+	if [ -n "${REGISTRY_CREDENTIAL_HOST:-}" ]; then
+		printf '%s\n' "$REGISTRY_CREDENTIAL_HOST"
+	elif [ -n "${IMAGE_REGISTRY_HOST:-}" ]; then
+		printf '%s\n' "$IMAGE_REGISTRY_HOST"
+	else
+		"${registry__here}/image-registry.sh" host 2>/dev/null
+	fi
+}
+
 registry_registry_token() {
-	local repo="$1" url
+	local repo="$1" url cred_host=""
 	registry__host_ok || return 2
 	url="$(registry_token_url "$repo")"
 	if [ -n "${REGISTRY_PASSWORD:-}" ]; then
+		cred_host="$(registry__credential_host)" || cred_host=""
+		if [ -z "$cred_host" ] || [ "$REGISTRY_HOST" != "$cred_host" ]; then
+			echo "registry-lib: credentials are for ${cred_host:-an unknown host}; reading ${REGISTRY_HOST} anonymously" >&2
+		fi
+	fi
+	if [ -n "${REGISTRY_PASSWORD:-}" ] && [ -n "$cred_host" ] && [ "$REGISTRY_HOST" = "$cred_host" ]; then
 		curl -fsS -u "${REGISTRY_USERNAME:-x}:${REGISTRY_PASSWORD}" "$url" | registry__json_str token
 	elif [ -n "${GHCR_TOKEN:-}" ] && [ "$REGISTRY_HOST" = ghcr.io ]; then
 		curl -fsS -u "x:${GHCR_TOKEN}" "$url" | registry__json_str token
@@ -109,6 +134,57 @@ registry_all_tags() {
 		[ -n "$last" ] || break
 	done
 	rm -f "$hdr"
+}
+
+# Resolve the commit-suffixed tag (`<tag>-<full sha>`) a publish JUST pushed,
+# for the sign step in .github/workflows/publish.yaml. That tag is the only
+# immutable one (`dev` is rewritten by every publish, #692); the step signs the
+# digest it points at. Its prefix is not known here, so it is found by listing.
+#
+# Two things this function exists for (#1046):
+#
+#   - A MISS MUST BE LOUD. The step used to run
+#       tag="$(printf '%s\n' "$tags" | grep -E -- "-${COMMIT}$" | head -1)"
+#     under `set -euo pipefail`: when nothing matched, grep exited 1, pipefail
+#     failed the substitution, and `set -e` ended the step BEFORE the
+#     `if [ -z "$tag" ]` written to explain the miss. Publish run 36417203322
+#     died that way with zero output. The grep below cannot fail its pipeline,
+#     and nothing here relies on `set -e` (bash clears it inside a command
+#     substitution anyway): every outcome is an explicit return.
+#   - THE LISTING LAGS THE PUSH. The same job pushed the tag seconds earlier,
+#     and a registry's `tags/list` need not show it yet, so re-list up to
+#     REGISTRY_COMMIT_TAG_ATTEMPTS times (default 13), REGISTRY_COMMIT_TAG_INTERVAL
+#     seconds apart (default 5): about 60 s. Every miss is printed with the
+#     number of tags it scanned -- "not found in 667" is a real absence, "not
+#     found in 100" is the pagination regressing (#875), and the two must never
+#     look the same.
+#
+# Progress and the final ::error:: go to stderr; only the tag goes to stdout.
+#
+# Usage: registry_commit_tag <repo> <token> <commit>  -> the tag on stdout
+#   0  found   1  still absent after every listing
+registry_commit_tag() {
+	local repo="$1" tok="$2" commit="$3"
+	local attempts="${REGISTRY_COMMIT_TAG_ATTEMPTS:-13}"
+	local interval="${REGISTRY_COMMIT_TAG_INTERVAL:-5}"
+	local i=1 tags n_tags tag
+	while :; do
+		tags="$(registry_all_tags "$repo" "$tok")"
+		n_tags="$(printf '%s\n' "$tags" | grep -c . || true)"
+		tag="$(printf '%s\n' "$tags" | { grep -E -- "-${commit}$" || true; } | head -1)"
+		if [ -n "$tag" ]; then
+			echo "resolved ${repo}: ${tag} (scanned ${n_tags} tags, listing ${i}/${attempts})" >&2
+			printf '%s\n' "$tag"
+			return 0
+		fi
+		if [ "$i" -ge "$attempts" ]; then
+			echo "::error::no tag ending in -${commit} in ${repo} (scanned ${n_tags} tags); still absent after ${attempts} listing(s) ${interval}s apart -- refusing to sign a tag that is not this commit" >&2
+			return 1
+		fi
+		echo "no tag ending in -${commit} in ${repo} yet (scanned ${n_tags} tags, listing ${i}/${attempts}); the listing can lag the push, re-listing in ${interval}s" >&2
+		sleep "$interval"
+		i=$((i + 1))
+	done
 }
 
 # The manifest media types a published coordinate can carry: a multi-arch index
@@ -334,10 +410,13 @@ registry_signature_tag_bundle() {
 # every caller already treats it as the double-write defect). The caller decides
 # what to do; the point of naming `both` separately is that it is a DIFFERENT
 # defect from `none` and must not be reported as a healthy signature.
+# (`grep -c`, not `-q`, on the piped tag list: see proxy_pin_introduced_by in
+# scripts/proxy-pin-lib.sh -- an early-exiting grep under pipefail reads a
+# present tag as absent.)
 registry_signature_layout() {
 	local digest="$1" tags="$2" referrers="${3:-}" has_legacy=0 has_bundle=0 has_ref=0
-	printf '%s\n' "$tags" | grep -qxF -- "$(registry_signature_tag_legacy "$digest")" && has_legacy=1
-	printf '%s\n' "$tags" | grep -qxF -- "$(registry_signature_tag_bundle "$digest")" && has_bundle=1
+	printf '%s\n' "$tags" | grep -cxF -- "$(registry_signature_tag_legacy "$digest")" >/dev/null && has_legacy=1
+	printf '%s\n' "$tags" | grep -cxF -- "$(registry_signature_tag_bundle "$digest")" >/dev/null && has_bundle=1
 	if [ -n "$referrers" ]; then
 		has_ref="$(printf '%s' "$referrers" | registry__json_has_signature_referrer)" || has_ref=0
 	fi
@@ -369,6 +448,40 @@ registry_signature_layout_direct() {
 	registry_tag_exists "$repo" "$(registry_signature_tag_bundle "$digest")" "$tok" || rc=$?
 	case "$rc" in 0) has_bundle=1 ;; 1) has_bundle=0 ;; *) return 2 ;; esac
 	registry__layout "$has_legacy" "$has_bundle" "$has_ref"
+}
+
+# The layout a registry setting PROMISES, per commit (proposal 040 phase 2):
+# SIGNATURE_LAYOUT in the given bazel/img/registry.bzl -- `referrer` (quay.io)
+# or `tag` -- or `tag` for a file from before that line existed, which is every
+# commit published to ghcr.io. A present but unparseable line is rc 2, never a
+# default.
+#
+# Usage: registry_setting_signature_layout <registry.bzl>   -> referrer | tag
+registry_setting_signature_layout() {
+	local bzl="$1"
+	[ -r "$bzl" ] || return 2
+	if grep -qE '^SIGNATURE_LAYOUT[[:space:]]*=' "$bzl"; then
+		IMAGE_REGISTRY_BZL="$bzl" "${registry__here}/image-registry.sh" signature-layout || return 2
+	else
+		printf 'tag\n'
+	fi
+}
+
+# Does a signature found in <layout> (registry_signature_layout*) satisfy the
+# <expected> layout a commit's setting promises?
+#
+#   0  yes: `referrer` for referrer; `legacy` or `bundle` for tag
+#   1  no:  present in the OTHER shape (a fallback tag where a referrer is
+#           promised, a referrer where a tag is), or `both` / `none`
+#   2  <expected> is neither `referrer` nor `tag`
+#
+# Usage: registry_layout_satisfies <layout> <expected>
+registry_layout_satisfies() {
+	case "$2" in
+	referrer) [ "$1" = referrer ] ;;
+	tag) [ "$1" = legacy ] || [ "$1" = bundle ] ;;
+	*) return 2 ;;
+	esac
 }
 
 # The image components the publish workflow pushes AND signs.

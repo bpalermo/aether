@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"fmt"
 	"time"
 
 	"aethermesh.dev/agent/constants"
@@ -158,6 +159,15 @@ type AgentConfig struct {
 	// remaining capture knobs are the per-pod capture.aether.io/* annotations
 	// and the CNI's --capture-redirect-all-default.
 	EastWestWaypoint bool
+	// EastWestQUICPairFetchWindow bounds how long a PERSISTED QUIC pair may go
+	// without an on-demand fetch of its twin after the agent starts before it
+	// is pruned (issue #1033). <= 0 disables the prune.
+	EastWestQUICPairFetchWindow time.Duration
+	// EastWestQUICIdleTimeout is the idle timeout of every `quic:` twin's
+	// connection pool (aether#1054). Must be > 0; the chart also enforces
+	// idle + 5s < proxy.hotRestart.parentShutdownTime, which the agent does
+	// not know (the proxy is another DaemonSet). h1/h2 keep 30s.
+	EastWestQUICIdleTimeout time.Duration
 
 	// MeshDNS enables the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
 	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs.
@@ -213,4 +223,18 @@ func NewAgentConfig() *AgentConfig {
 		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,
 		SpireWaitWarnAfter:      commonspire.DefaultWaitWarnAfter,
 	}
+}
+
+// validateEastWestQUICIdleTimeout rejects a non-positive
+// --east-west-quic-idle-timeout (aether#1054). Zero would render no idle
+// timeout on the h3 twins at all -- Envoy's 1 h default -- which is the exact
+// failure the flag exists to prevent: an idle source h3 connection outliving
+// a destination's hot-restart parent and dying on a stateless reset. The upper
+// bound (idle + 5s < proxy.hotRestart.parentShutdownTime) is enforced by the
+// chart, the only place that sees both DaemonSets' values.
+func validateEastWestQUICIdleTimeout(d time.Duration) error {
+	if d <= 0 {
+		return fmt.Errorf("--east-west-quic-idle-timeout must be > 0, got %s", d)
+	}
+	return nil
 }

@@ -871,6 +871,19 @@ const (
 // before the trust domain was known) takes on_no_match, the h2 cluster, which
 // is byte-for-byte the route it had before.
 //
+// An arm may name a twin the snapshot does NOT carry (issue #1020): the agent
+// builds a twin only for a (source, destination) pair that has dialled. The
+// matcher's action is a static cluster name (ClusterAction has nothing else), so
+// the arm names the twin and the HCM's on_demand filter does the rest -- it
+// resolves the route through this plugin, finds no such cluster, and asks for
+// it by that name over ODCDS (on_demand_update.cc: entry->clusterName() on the
+// plugin's route entry). The agent validates the name, records the pair and
+// publishes the twin with its load assignment; the paused request resumes on
+// it, over HTTP/3. If the name is refused or the fetch outlives the on_demand
+// timeout, the router finds no cluster and answers 503 (NC) -- the same failure
+// mode as the mesh catch-all's cold path; there is no per-route fallback to
+// the h2 cluster in Envoy's API.
+//
 // Which routes this reaches (aether#961): EVERY route on the vhost whose
 // action names the h2 cluster -- the default route, and a GAMMA (HTTPRoute)
 // rule whose single backendRef is the parent Service itself, since it renders

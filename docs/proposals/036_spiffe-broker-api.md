@@ -237,6 +237,42 @@ Still open: **phase 3** — `access_policy: enforced` together with the
 `impersonate-via-spire` grant, in one change — and the selector gain, which remains
 theoretical while controller-manager entries carry only `k8s:pod-uid`.
 
+## Follow-up: the egress identity gate (#1053, 2026-09-28)
+
+The Broker subscription opens at CNI ADD, but SPIRE delivers the pod's initial
+SVID only once the pod's entry exists and has synced to the node's spire-agent:
+two `svids=0` updates, then `update=initial` 7.46 s after the subscribe on
+talos-main. A pod that sent in that window got `503 UF` — the source proxy had no
+client certificate for it. The inbound side already had a gate (an endpoint turns
+HEALTHY only after an mTLS handshake with the pod's own inbound listener, #815);
+egress now has the symmetric one.
+
+The controller's pod-mutating webhook injects an `aether-identity-ready` init
+container (`agent/cmd/identity-ready`, an extra layer of the agent image) first
+in every mesh pod. It asks the SPIRE **Workload API** — a `csi.spiffe.io` volume
+mounted into that init container only — for the pod's X.509 SVID and exits once
+SPIRE issues it; the app containers start after. Default on
+(`controller.webhook.identityGate.enabled`), opt-out per pod with
+`aether.io/identity-gate: "false"`, fail closed (no default timeout).
+
+Decisions:
+
+- **Not the CNI ADD.** Blocking sandbox creation on SPIRE makes SPIRE a hard
+  dependency of every pod start, and the ADD races SPIRE's own pod-list
+  attestation. The gate holds the *app*: the netns exists, SPIRE attests
+  normally, and a SPIRE outage reads as pods in `Init` with a log line naming the
+  socket and the last error.
+- **The pod's own Workload API, not an agent RPC.** Asking the node agent ("has
+  this pod's Broker stream delivered?") would be marginally more exact but needs a
+  new RPC and a **hostPath** socket in every workload pod — inadmissible under the
+  Pod Security `baseline` profile — plus caller authentication on the agent side.
+  The CSI volume is allowed even under `restricted`, needs nothing new on the
+  node, and SPIRE answers about the same entry the Broker stream resolves: both
+  come from the same spire-agent cache, and today's entries carry only
+  `k8s:pod-uid`, which the init container matches. An entry keyed on a
+  container-level selector would not; the runbook lists that under "Pod held in
+  Init by aether-identity-ready".
+
 ## Rejected alternatives
 
 - **Opt-in flag with the delegated path kept as default.** Doubles the identity

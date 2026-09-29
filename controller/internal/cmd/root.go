@@ -95,6 +95,15 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.WebhookConfigName, "webhook-config-name", cfg.WebhookConfigName, "ValidatingWebhookConfiguration to patch with the SPIRE caBundle (SPIRE mode)")
 	rootCmd.Flags().StringVar(&cfg.MutatingWebhookConfigName, "mutating-webhook-config-name", cfg.MutatingWebhookConfigName, "MutatingWebhookConfiguration (pod ndots) to patch with the SPIRE caBundle (SPIRE mode); empty disables")
 	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under; the pod-mutating webhook derives the injected dnsConfig ndots from its label count (2 for aether.internal)")
+	rootCmd.Flags().BoolVar(&cfg.IdentityGate, "identity-gate", cfg.IdentityGate, "Inject the identity-ready init container into mesh-managed pods, holding their app containers until SPIRE has issued the pod's SVID (#1053); opt a pod out with aether.io/identity-gate=false")
+	rootCmd.Flags().StringVar(&cfg.IdentityGateImage, "identity-gate-image", cfg.IdentityGateImage, "Image the identity gate init container runs /identity-ready from (the agent image); required with --identity-gate")
+	rootCmd.Flags().StringVar(&cfg.IdentityGateImagePullPolicy, "identity-gate-image-pull-policy", cfg.IdentityGateImagePullPolicy, "imagePullPolicy of the identity gate init container (Always, IfNotPresent or Never)")
+	rootCmd.Flags().StringVar(&cfg.IdentityGateWorkloadSocket, "identity-gate-workload-socket", cfg.IdentityGateWorkloadSocket, "SPIRE Workload API socket path inside the identity gate init container; the csi.spiffe.io volume is mounted at its directory")
+	rootCmd.Flags().DurationVar(&cfg.IdentityGateTimeout, "identity-gate-timeout", cfg.IdentityGateTimeout, "Give up waiting for the pod's SVID after this long (the init container exits 1 and the kubelet retries it); 0 waits forever (fail closed)")
+	rootCmd.Flags().StringVar(&cfg.IdentityGateCPURequest, "identity-gate-cpu-request", cfg.IdentityGateCPURequest, "CPU request of the identity gate init container; empty leaves it unset")
+	rootCmd.Flags().StringVar(&cfg.IdentityGateMemoryRequest, "identity-gate-memory-request", cfg.IdentityGateMemoryRequest, "Memory request of the identity gate init container; empty leaves it unset")
+	rootCmd.Flags().StringVar(&cfg.IdentityGateCPULimit, "identity-gate-cpu-limit", cfg.IdentityGateCPULimit, "CPU limit of the identity gate init container; empty leaves it unset")
+	rootCmd.Flags().StringVar(&cfg.IdentityGateMemoryLimit, "identity-gate-memory-limit", cfg.IdentityGateMemoryLimit, "Memory limit of the identity gate init container; empty leaves it unset")
 }
 
 // podNDots derives the dnsConfig ndots the pod-mutating webhook injects from
@@ -168,7 +177,14 @@ func runController(ctx context.Context) (retErr error) {
 	// MutatingWebhookConfiguration, scoped to managed pods, failurePolicy=Ignore).
 	// Served on /mutate (mirrors the shared /validate endpoint); inert unless the
 	// apiserver routes pods here.
-	m.GetWebhookServer().Register("/mutate", &admission.Webhook{Handler: podmutate.NewMutator(podNDots(cfg.MeshDomain), l)})
+	gate, err := identityGate(cfg)
+	if err != nil {
+		return err
+	}
+	m.GetWebhookServer().Register("/mutate", &admission.Webhook{
+		Handler: podmutate.NewMutator(podNDots(cfg.MeshDomain), l).WithIdentityGate(gate),
+	})
+	l.InfoContext(ctx, "pod-mutating webhook configured", "identityGate", gate != nil)
 
 	if err = wireCABundleInjector(m, spireSource); err != nil {
 		return err

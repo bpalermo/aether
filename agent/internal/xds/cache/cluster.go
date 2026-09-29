@@ -14,6 +14,7 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/registry"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -101,9 +102,7 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 		if entry.l4Floor {
 			// TCP/UDP floor entries publish their load assignment only; their
 			// clusters are rendered by captureTCPClusters / captureUDPClusters.
-			if entry.loadAssignment != nil {
-				clas = append(clas, entry.loadAssignment)
-			}
+			clas = c.appendEntryCLAsLocked(clas, entry)
 			continue
 		}
 		// Precomputed mTLS-injected cluster when the node SVID is available
@@ -113,21 +112,67 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 			cluster = entry.mtlsCluster
 		}
 		clusters = append(clusters, cluster)
-		if entry.loadAssignment != nil {
-			clas = append(clas, entry.loadAssignment)
-		}
-		twins, vhost := quic.entryTwinsAndVhost(key, entry, c.meshDomain)
+		clas = c.appendEntryCLAsLocked(clas, entry)
+		twins, twinCLAs, vhost := quic.entryTwinsAndVhost(key, entry, c.meshDomain)
 		clusters = append(clusters, twins...)
+		clas = append(clas, twinCLAs...)
 		quicClusters += len(twins)
 		if vhost != nil {
 			vhosts = append(vhosts, vhost)
 		}
 	}
-	c.noteQUICFanout(quicClusters, len(quic.identities))
+	c.noteQUICFanout(quicClusters, len(quic.pairs), len(quic.identities), len(quic.awaitingCert))
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)
 	sortVirtualHostsByName(vhosts)
 	return clusters, clas, vhosts
+}
+
+// appendEntryCLAsLocked appends the load assignment(s) one cluster-cache entry
+// publishes: its own, if it holds one, and -- for a port alias, which
+// subscribes to its own EDS name -- the bare service's load assignment
+// republished under that name, in THIS snapshot (aether#1013). Caller must
+// hold clusterMu.
+func (c *SnapshotCache) appendEntryCLAsLocked(clas []types.Resource, entry clusterEntry) []types.Resource {
+	if entry.loadAssignment != nil {
+		clas = append(clas, entry.loadAssignment)
+	}
+	if entry.bareEDSAlias && entry.cluster != nil {
+		if cla := proxy.LoadAssignmentAlias(c.bareServiceCLALocked(entry.service), edsServiceName(entry.cluster)); cla != nil {
+			clas = append(clas, cla)
+		}
+	}
+	return clas
+}
+
+// bareServiceCLALocked returns the load assignment published under a service's
+// BARE EDS resource name (the default HTTP cluster's subscription): the HTTP
+// default entry's when it owns one, otherwise the L4 floor entry's, which takes
+// ownership when the service has no HTTP entry (buildTCPEndpointsLocked). Nil
+// when nothing publishes it. The clusters that must see the same membership
+// without sharing the subscription -- port aliases and TCP floors -- republish
+// it under their own names (proxy.LoadAssignmentAlias, aether#1013). Caller
+// must hold clusterMu.
+func (c *SnapshotCache) bareServiceCLALocked(serviceName string) *endpointv3.ClusterLoadAssignment {
+	if e, ok := c.clusters[serviceName]; ok && e.loadAssignment != nil {
+		return e.loadAssignment
+	}
+	if e, ok := c.tcpEntryLocked(serviceName); ok && e.loadAssignment != nil {
+		return e.loadAssignment
+	}
+	if e, ok := c.udpEntryLocked(serviceName); ok && e.loadAssignment != nil {
+		return e.loadAssignment
+	}
+	return nil
+}
+
+// edsServiceName is the EDS resource name a cluster subscribes to: its
+// eds_cluster_config.service_name, or the cluster name when that is unset.
+func edsServiceName(cl *clusterv3.Cluster) string {
+	if n := cl.GetEdsClusterConfig().GetServiceName(); n != "" {
+		return n
+	}
+	return cl.GetName()
 }
 
 // Endpoints returns the pre-built load assignment (cluster endpoints) for the given
@@ -440,8 +485,16 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 // its vhost disappears, no ODCDS request ever reaches the agent again: every
 // request to that authority fails until the ADS stream resets.
 //
-// An alias shares the default cluster's bare-service EDS (same endpoints, same
-// SAN pinning, same SNI) and carries NO vhost of its own: the default entry's
+// An alias has the default cluster's membership (same endpoints, same SAN
+// pinning, same SNI) but NOT its EDS subscription: it subscribes to its own
+// name, and clustersEndpointsAndVhosts republishes the bare service's load
+// assignment under it in the same snapshot (aether#1013). Sharing the bare name
+// was only accidentally safe: Envoy's delta-ADS WatchMap deduplicates
+// subscription interest per resource name, so an alias added in a LATER CDS
+// update than the default cluster (a Service gaining a port after the node
+// depends on it) sent no subscribe, got no EDS, and warmed for the full 15 s
+// initial_fetch_timeout -- the #1008 mechanism. An alias carries NO vhost of
+// its own: the default entry's
 // vhost already claims the "<fqdn>:<defaultPort>" domain and the capture route
 // domains already claim the mesh-port spelling, and a second vhost with either
 // domain would be a duplicate-domain RDS reject. A port that has a real per-port
@@ -459,13 +512,15 @@ func (c *SnapshotCache) buildPortAliasesLocked(serviceName, fqdn string, default
 			continue
 		}
 		c.clusters[alias] = clusterEntry{
-			// EDS resource name is the BARE service (not the alias): the alias is the
-			// same endpoint set as the default cluster, so it must not publish a
-			// second, duplicate load assignment.
-			cluster:       proxy.NewServiceCluster(alias, serviceName, serviceName, sortedKeys),
+			// EDS resource name is the ALIAS, never the bare service: the load
+			// assignment under it is derived from the bare one at snapshot time
+			// (bareEDSAlias), so the alias tracks every endpoint change of the
+			// default cluster without a second copy to keep in sync here.
+			cluster:       proxy.NewServiceCluster(alias, alias, serviceName, sortedKeys),
 			sanNamespaces: sanNamespaces,
 			service:       serviceName,
 			sni:           strconv.Itoa(int(port)),
+			bareEDSAlias:  true,
 		}
 	}
 }
@@ -579,8 +634,9 @@ func endpointSubsetKeys(endpoints []*registryv1.ServiceEndpoint, nodeSubsetKeys 
 // must hold clusterMu.
 func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[string]struct{}, tcpServiceEndpoints map[string][]*registryv1.ServiceEndpoint, localRegion, localZone string, waypoint proxy.WaypointRewrite) {
 	// TCP service entries: bare-name EDS load assignment + SAN/sni only. The
-	// capture TCP floor's "tcp:<svc>" cluster (captureTCPClusters) references
-	// that EDS resource (by bare name) and pins peer identity from sanNamespaces.
+	// capture TCP floor's "tcp:<svc>" cluster (captureTCPClusters) republishes
+	// that load assignment under its OWN EDS name (aether#1013) and pins peer
+	// identity from sanNamespaces.
 	//
 	// Keyed by the entry's own Envoy cluster name, "tcp:<fqdn>", NOT by the bare
 	// service name (proposal 037 design (a)). The HTTP pass above writes
@@ -627,8 +683,12 @@ func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[str
 // therefore have to be produced from the same derived facts in the same
 // snapshot generation — proposal 037 Risk 1, and the same shape as #877.
 //
-// Each carries its OWN load assignment, named <fqdn>:<port> and filtered to the
-// endpoints that advertise that port AS TCP. Sharing the bare-name EDS would
+// Each carries its OWN load assignment, named after its own cluster
+// (tcp:<fqdn>:<port>) and filtered to the endpoints that advertise that port AS
+// TCP. The name is the cluster's, not the HTTP per-port spelling <fqdn>:<port>:
+// that one belongs to the HTTP per-port and :<port> alias clusters, and two
+// load assignments (or two subscribers) under one EDS name is exactly the
+// sharing aether#1013 removes. Mirroring the bare-name EDS instead would
 // put every pod of the service in the pool, including ones that do not serve
 // the port at all — the per-port membership filter is what makes adding a port
 // to a rolling Deployment safe, exactly as it already is for HTTP (proposal
@@ -655,9 +715,10 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 	// resolve to a cluster that does not exist, and tcp_proxy would kill those
 	// connections silently — the same Risk 1 shape as a chain without a cluster.
 	//
-	// It carries NO load assignment of its own: it shares the floor's bare-name
-	// EDS, exactly as the HTTP :<port> aliases share their default cluster's
-	// (buildPortAliasesLocked). And its sni stays EMPTY, because it addresses
+	// It carries NO load assignment of its own: its cluster subscribes to its
+	// own EDS name and captureTCPClusters republishes the bare service's load
+	// assignment under it, exactly as the HTTP :<port> aliases do
+	// (buildPortAliasesLocked, aether#1013). And its sni stays EMPTY, because it addresses
 	// the primary port — the destination's default inbound floor chain is what
 	// serves it, and a non-empty SNI would route it to a per-port chain that
 	// does not exist (#306).
@@ -682,7 +743,7 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 			continue
 		}
 
-		claName := proxy.PortClusterName(serviceName, c.meshDomain, port)
+		claName := proxy.TCPPortClusterName(tcpName, port)
 		portCla := proxy.NewClusterLoadAssignment(claName)
 		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(members))
 		for _, ep := range members {
@@ -710,9 +771,11 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 // the same service reference a load assignment named <serviceName>, and two EDS
 // resources with one name is a snapshot-consistency error in go-control-plane
 // (or a silent last-writer-wins). The HTTP entry owns it when the service has
-// one; the TCP entry then references it by name and carries no load assignment
-// of its own, exactly as the :<port> aliases do — clustersEndpointsAndVhosts
-// already guards on loadAssignment != nil.
+// one; the TCP entry then carries no load assignment of its own —
+// clustersEndpointsAndVhosts already guards on loadAssignment != nil. The TCP
+// floor cluster itself never subscribes to the bare name: captureTCPClusters
+// republishes it under the floor's own name (bareServiceCLALocked,
+// aether#1013).
 //
 // An HTTP entry with no CLA of its own (the retained-absent alias shape) does
 // not own one either, so the TCP entry takes ownership rather than leave the
@@ -880,18 +943,19 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 		}
 		if entry.absentSince.IsZero() {
 			entry.absentSince = now
-			// The default-port alias publishes no load assignment of its own (it
-			// shares the default cluster's bare-service EDS); synthesizing an empty
-			// one here would emit an orphan CLA under the alias name that nothing
-			// references.
+			// A port alias holds no load assignment of its own (its EDS copy is
+			// derived from the bare one at snapshot time, so a retained, emptied
+			// default entry empties it too); synthesizing one here would publish
+			// a second CLA under the alias name.
 			if entry.loadAssignment != nil {
 				// Name the replacement after the load assignment it replaces, NOT
 				// after the map key. They coincide for HTTP and per-port entries,
 				// but a TCP floor entry is keyed "tcp:<fqdn>" while publishing the
-				// BARE-name EDS resource its floor cluster resolves through
-				// (NewTCPServiceCluster's EdsClusterConfig.ServiceName). Keying off
-				// `name` there would retain an empty CLA under a name nothing
-				// references and leave the real one unpublished.
+				// BARE-name EDS resource (when no HTTP entry owns it) that its floor
+				// cluster's own-name copy is derived from (bareServiceCLALocked).
+				// Keying off `name` there would retain an empty CLA under a name
+				// that collides with the floor's copy and leave the bare one
+				// unpublished.
 				entry.loadAssignment = proxy.NewClusterLoadAssignment(entry.loadAssignment.GetClusterName())
 				entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
 			}
@@ -976,92 +1040,173 @@ func outboundPortVhostWithChainFilter(portName string, chainFilters map[string]p
 }
 
 // quicFanout is the per-snapshot input to the east-west QUIC fan-out: the
-// local workload identities (sorted), the mTLS state the twins are rendered
-// from, and whether the waypoint split is on. East-west QUIC is unconditional
-// (decision 2026-09-26, after the proving soak): every eligible destination
-// gets its twins, there is no allow-list.
+// local workload identities whose client certificate the snapshot carries
+// (sorted), the OBSERVED (destination, source) pairs (issue #1020), the mTLS
+// state the twins are rendered from, and whether the waypoint split is on.
+// East-west QUIC is unconditional (decision 2026-09-26, #979): every eligible
+// destination (see armsFor) gets selection arms, there is no allow-list.
+//
+// identities is deliberately NOT every local identity (issue #1049). A twin
+// names its source's SVID statically in its transport socket, so a twin
+// published before that secret is in the snapshot warms on SDS until SPIRE
+// delivers it -- 6.9-7.4 s after the CNI ADD of a new pod on talos (rev248) --
+// and every request its arm routes there meanwhile 503s NC at the 2 s
+// on_demand timeout. An identity still waiting for its certificate
+// (awaitingCert) gets neither an arm nor a twin, so its requests ride the h2
+// cluster: that one is already warm, and its client certificate is fetched on
+// demand per connection (the #842 selector), so no route points at a cluster
+// that cannot exist yet. The snapshot that carries the certificate carries the
+// arm and the twin with it.
 type quicFanout struct {
-	identities []string
-	mtls       localMTLSState
-	waypoint   bool
+	// deps is the node's dependency set: the destinations eligible for arms.
+	deps         map[string]struct{}
+	identities   []string
+	awaitingCert []string
+	pairs        map[quicPair]struct{}
+	mtls         localMTLSState
+	waypoint     bool
+	// idleTimeout is every twin's pool idle timeout (aether#1054).
+	idleTimeout time.Duration
 }
 
+// quicFanoutSnapshot takes the fan-out inputs for one snapshot. It also
+// prunes the observed pairs whose source left the node or whose destination
+// left the dependency set, so a pruned pair's twin leaves in the
+// same snapshot. localMu and depMu are taken one after the other, never
+// nested, and neither inside clusterMu.
 func (c *SnapshotCache) quicFanoutSnapshot() quicFanout {
 	if c.edge {
 		return quicFanout{}
 	}
-	f := quicFanout{identities: c.localWorkloadIdentities(), waypoint: c.waypointEnabled}
-	if len(f.identities) == 0 {
+	identities := c.localWorkloadIdentities()
+	deps, pairs := c.quicDemandSnapshot(identities)
+	f := quicFanout{deps: deps, pairs: pairs, waypoint: c.waypointEnabled, idleTimeout: time.Duration(c.quicIdleTimeout.Load())}
+	if len(identities) == 0 {
 		return f
 	}
+	f.identities, f.awaitingCert = c.splitByClientCertificate(identities)
 	f.mtls = c.localMTLSSnapshot()
 	return f
 }
 
-// twinsFor returns the per-source HTTP/3 clusters for one cluster-cache entry
-// and the (source SPIFFE ID -> twin name) arms for its vhost, or nothing when
-// the entry is not an eligible destination: a service's DEFAULT entry (keyed
-// by the bare service, so never a per-port or alias entry), identity-ready
-// (mtlsCluster != nil), with no endpoint dialed through a remote cluster's
-// waypoint tunnel (proxy.HasWaypointEndpoint -- that path has no QUIC leg).
-// Every service in the node's dependency set that passes gets one twin per
-// local ServiceAccount.
-func (q quicFanout) twinsFor(key string, entry clusterEntry, meshDomain string) ([]types.Resource, map[string]string) {
+// armsFor returns the (source SPIFFE ID -> twin name) selection arms for one
+// cluster-cache entry -- one per local ServiceAccount whose certificate is
+// served, whether or not its twin has been built -- or nil when the entry is
+// not an eligible destination: a service in the node's dependency set (an
+// entry can outlive its membership until the scoped reload drops it, and
+// recordQUICPair refuses such a pair), its DEFAULT entry (keyed by the bare
+// service, so never a per-port or alias entry), identity-ready (mtlsCluster !=
+// nil), with no endpoint dialed through a remote cluster's waypoint tunnel
+// (proxy.HasWaypointEndpoint -- that path has no QUIC leg). Every service in
+// the node's dependency set that passes is eligible; there is no allow-list.
+//
+// An arm whose twin is not in the snapshot is how a new pair is observed
+// (issue #1020): the source's first request routes to the missing name, the
+// on_demand filter asks for it over ODCDS, and ObserveQUICTwin builds it.
+func (q quicFanout) armsFor(key string, entry clusterEntry, meshDomain string) map[string]string {
 	if len(q.identities) == 0 || key != entry.service || entry.mtlsCluster == nil || entry.cluster == nil {
-		return nil, nil
+		return nil
+	}
+	if !has(q.deps, entry.service) {
+		return nil
 	}
 	if q.waypoint && proxy.HasWaypointEndpoint(entry.loadAssignment) {
+		return nil
+	}
+	arms := make(map[string]string, len(q.identities))
+	for _, id := range q.identities {
+		arms[id] = proxy.QUICClusterName(entry.service, meshDomain, proxy.SourceSAKeyFromSpiffeID(id))
+	}
+	return arms
+}
+
+// twinsFor returns the per-source HTTP/3 clusters for one entry: one per arm
+// whose (destination, source) pair has been OBSERVED, in sorted identity
+// order, with their names in the same order.
+func (q quicFanout) twinsFor(entry clusterEntry, arms map[string]string, meshDomain string) ([]types.Resource, []string) {
+	if len(arms) == 0 || len(q.pairs) == 0 {
 		return nil, nil
 	}
 	// The default entry's sni is its primary port; QUIC needs the hostname
 	// form "<port>.<authority>" (aether#957, proxy.QUICServerName).
 	sni := proxy.QUICServerName(entry.sni, proxy.ServiceClusterName(entry.service, meshDomain))
-	twins := make([]types.Resource, 0, len(q.identities))
-	arms := make(map[string]string, len(q.identities))
+	var twins []types.Resource
+	var names []string
 	for _, id := range q.identities {
-		name := proxy.QUICClusterName(entry.service, meshDomain, proxy.SourceSAKeyFromSpiffeID(id))
-		twins = append(twins, proxy.QUICClusterFrom(entry.cluster, name, id, q.mtls.validationContextName, entry.sanURIs, sni))
-		arms[id] = name
+		if _, observed := q.pairs[quicPair{service: entry.service, source: proxy.SourceSAKeyFromSpiffeID(id)}]; !observed {
+			continue
+		}
+		twins = append(twins, proxy.QUICClusterFrom(entry.cluster, arms[id], id, q.mtls.validationContextName, entry.sanURIs, sni, q.idleTimeout))
+		names = append(names, arms[id])
 	}
-	return twins, arms
+	return twins, names
 }
 
-// entryTwinsAndVhost returns an entry's HTTP/3 twins (proposal 038 Phase 4b)
-// and the vhost to publish for it: the entry's own vhost, or -- when twins
-// exist -- a clone whose route to the h2 cluster selects per source identity.
+// entryTwinsAndVhost returns an entry's HTTP/3 twins (proposal 038 Phase 4b),
+// their load assignments, and the vhost to publish for it: the entry's own
+// vhost, or -- for an eligible, identity-ready default entry -- a clone
+// whose route to the h2 cluster selects per source identity.
 //
-// A service's DEFAULT entry (the one keyed by the bare service name; per-port
-// and alias entries are deliberately excluded, they would multiply the
-// fan-out) gets one twin per local ServiceAccount, only once the node identity
-// is served (mtlsCluster != nil): before that the h2 cluster is unpinned too.
-func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomain string) ([]types.Resource, *routev3.VirtualHost) {
-	twins, arms := q.twinsFor(key, entry, meshDomain)
-	if len(twins) == 0 || entry.vhost == nil {
-		return twins, entry.vhost
+// Twins are demand-scoped (issue #1020): the vhost carries an arm for every
+// local ServiceAccount, but only an OBSERVED pair's arm has its twin in the
+// snapshot. The others are fetched on first use over ODCDS
+// (ObserveQUICTwin).
+//
+// Each twin subscribes to its OWN EDS resource (named after the twin, see
+// proxy.QUICClusterFrom), so the base's load assignment is published again
+// under every twin's name in the SAME snapshot that introduces the twin. A
+// twin sharing the base's EDS name is deduplicated away by Envoy's delta-ADS
+// WatchMap when it arrives after its base, and warms for the full
+// initial_fetch_timeout (aether#1008). An on-demand twin is always such a
+// late twin, so the rule is load-bearing for every one of them. The copies
+// follow twinsFor's order and are re-sorted with every other CLA by the
+// caller.
+func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomain string) ([]types.Resource, []types.Resource, *routev3.VirtualHost) {
+	arms := q.armsFor(key, entry, meshDomain)
+	if len(arms) == 0 {
+		return nil, nil, entry.vhost
+	}
+	twins, names := q.twinsFor(entry, arms, meshDomain)
+	var clas []types.Resource
+	if entry.loadAssignment != nil && len(names) > 0 {
+		clas = make([]types.Resource, 0, len(names))
+		for _, name := range names {
+			clas = append(clas, proxy.LoadAssignmentAlias(entry.loadAssignment, name))
+		}
+	}
+	if entry.vhost == nil {
+		return twins, clas, nil
 	}
 	vhost, _ := proto.Clone(entry.vhost).(*routev3.VirtualHost)
 	proxy.ApplyQUICClusterSelection(vhost, entry.cluster.GetName(), arms)
-	return twins, vhost
+	return twins, clas, vhost
 }
 
 // noteQUICFanout logs the cluster budget east-west QUIC costs whenever it
-// changes: local ServiceAccounts x eligible services in the node's dependency
-// set. INFO because the number is the thing an operator sizing a node needs
-// to see (quic_clusters / local_identities = the services that got twins).
-func (c *SnapshotCache) noteQUICFanout(twins, identities int) {
+// changes: one twin per OBSERVED (destination, source) pair (issue #1020), out
+// of local ServiceAccounts x eligible services in the node's dependency set
+// possible ones. INFO because the number is the thing an operator sizing a
+// node needs to see; it must equal the proxy's `quic:` cluster count.
+// awaitingCert is how many local identities are held out of the fan-out -- no
+// arm, no twin -- until SPIRE delivers their certificate (issue #1049); a value
+// that never returns to 0 is a stuck SVID, not a QUIC fault.
+func (c *SnapshotCache) noteQUICFanout(twins, pairs, identities, awaitingCert int) {
 	c.quicBudgetMu.Lock()
-	changed := c.quicBudgetSeen != twins
+	changed := c.quicBudgetSeen != twins || c.quicAwaitingSeen != awaitingCert
 	c.quicBudgetSeen = twins
+	c.quicAwaitingSeen = awaitingCert
 	c.quicBudgetMu.Unlock()
 	if changed {
-		c.log.Info("east-west QUIC fan-out", "quic_clusters", twins, "local_identities", identities)
+		c.log.Info("east-west QUIC fan-out", "quic_clusters", twins, "observed_pairs", pairs, "local_identities", identities,
+			"awaiting_client_cert", awaitingCert)
 	}
 }
 
-// quicArmsByService returns, for every eligible service (see twinsFor), the (source SPIFFE ID -> quic: twin) arms its vhosts
-// select with -- the same predicate twinsFor applies when the twins are
-// published, so no route can name a twin that is not in the snapshot. Takes
-// clusterMu for reading; callers must not hold it.
+// quicArmsByService returns, for every eligible service (see armsFor), the
+// (source SPIFFE ID -> quic: twin) arms its vhosts select with -- the same
+// predicate armsFor applies on out_http, so both route tables select
+// identically. An arm may name a twin that is not built yet; see
+// entryTwinsAndVhost. Takes clusterMu for reading; callers must not hold it.
 func (c *SnapshotCache) quicArmsByService() map[string]map[string]string {
 	quic := c.quicFanoutSnapshot()
 	if len(quic.identities) == 0 {
@@ -1071,7 +1216,7 @@ func (c *SnapshotCache) quicArmsByService() map[string]map[string]string {
 	defer c.clusterMu.RUnlock()
 	out := map[string]map[string]string{}
 	for key, entry := range c.clusters {
-		if twins, arms := quic.twinsFor(key, entry, c.meshDomain); len(twins) > 0 {
+		if arms := quic.armsFor(key, entry, c.meshDomain); len(arms) > 0 {
 			out[entry.service] = arms
 		}
 	}
