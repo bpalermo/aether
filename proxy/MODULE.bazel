@@ -77,6 +77,18 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 #   its tests (test/server:hot_restarting_child_test,
 #   test/common/http:conn_manager_impl_test), run by //bazel/patches:carried_patch_tests;
 #   its quic_http_integration_test case only builds in the Envoy workspace.
+#   aether#1054, second patch (not yet proposed upstream; the maintainer's call),
+#   applied AFTER aether1054: a draining hot-restart parent (QUIC dispatcher not
+#   accepting) forwarded EVERY packet without a live session to the child, before
+#   quiche's own time-wait check, so packets for connections the parent had just
+#   closed reached the child, which never knew them and answered with a stateless
+#   reset. EnvoyQuicDispatcher::OnFailedToDispatchPacket now leaves connection IDs
+#   in the time-wait list to the time-wait manager (which re-sends the stored
+#   CONNECTION_CLOSE) and forwards only genuinely unknown ones. Behind
+#   envoy.reloadable_features.quic_hot_restart_time_wait_before_forward (default
+#   true). Parent-side, so it takes effect from the second roll on. Its test
+#   (test/common/quic:envoy_quic_dispatcher_test) only builds in the Envoy workspace
+#   (quiche test tooling), so it is not in //bazel/patches:carried_patch_tests.
 #   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
@@ -88,6 +100,7 @@ single_version_override(
         "//bazel/patches:envoy-aether1022-exec-in-netns-thread-self.patch",
         "//bazel/patches:envoy-aether1050-hotrestart-nonblocking-forward.patch",
         "//bazel/patches:envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch",
+        "//bazel/patches:envoy-aether1054b-quic-time-wait-before-forward.patch",
     ],
 )
 

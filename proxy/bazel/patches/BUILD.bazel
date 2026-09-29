@@ -30,5 +30,12 @@ test_suite(
         # Envoy's platform test headers, which this downstream module does not wire
         # up, so it runs in the Envoy workspace only.
         "@envoy//test/common/http:conn_manager_impl_test",
+        # envoy-aether1054b-quic-time-wait-before-forward.patch (aether#1054): a draining
+        # parent leaves time-wait connection IDs to quiche instead of forwarding them. Its
+        # test (envoy_quic_dispatcher_test
+        # ProcessPacketHandlesTimeWaitConnectionLocallyWhenNotAccepting) is not listed:
+        # like every @envoy//test/common/quic and QUIC integration target it needs quiche's
+        # test tooling, which this downstream module does not wire up (see aether1054 above),
+        # so it runs in the Envoy workspace only.
     ],
 )
