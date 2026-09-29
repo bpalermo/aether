@@ -121,7 +121,7 @@ helm_template_test(
     chart = ":aether",
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
-            "- \"--envoy-arg=immediate\"\\n\\s+env:\\n",
+            "- \"--envoy-arg=gradual\"\\n\\s+env:\\n",
         ],
     },
 )
@@ -141,29 +141,28 @@ helm_template_test(
     },
 )
 
-# #1054: the proxy drains with --drain-strategy immediate by default, so every
-# response after a drain starts carries GOAWAY and a source's h3 pool leaves
-# the hot-restart parent before it exits.
+# #1054: the proxy drains with --drain-strategy gradual by default (immediate
+# made the stateless resets worse on talos-main); immediate stays an opt-in.
 helm_template_test(
     name = "aether_proxy_drain_strategy_test",
     chart = ":aether",
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
-            "- \"--envoy-arg=--drain-strategy\"\\n\\s+- \"--envoy-arg=immediate\"",
+            "- \"--envoy-arg=--drain-strategy\"\\n\\s+- \"--envoy-arg=gradual\"",
         ],
     },
 )
 
 helm_template_test(
-    name = "aether_proxy_drain_strategy_gradual_test",
+    name = "aether_proxy_drain_strategy_immediate_test",
     chart = ":aether",
     opts = [
         "--set",
-        "proxy.hotRestart.drainStrategy=gradual",
+        "proxy.hotRestart.drainStrategy=immediate",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
-            "- \"--envoy-arg=--drain-strategy\"\\n\\s+- \"--envoy-arg=gradual\"",
+            "- \"--envoy-arg=--drain-strategy\"\\n\\s+- \"--envoy-arg=immediate\"",
         ],
     },
 )
