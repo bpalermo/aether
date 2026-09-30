@@ -113,6 +113,11 @@ spec:
             # Must equal terminationGracePeriodSeconds above: it is how the
             # supervisor knows how long it has before the kubelet's SIGKILL.
             - "--termination-grace={{ .Values.proxy.terminationGracePeriodSeconds }}s"
+            {{- if .Values.proxy.shutdownDrainImmediately }}
+            # Escape hatch (#795): drain on SIGTERM instead of waiting for a
+            # surge replacement to hot-restart this Envoy.
+            - "--shutdown-drain-immediately"
+            {{- end }}
             {{- with .Values.otel.endpoint }}
             # Push-first: the supervisor exports its hot-restart lifecycle
             # metrics over OTLP; no scrape port to collide on in the host netns.

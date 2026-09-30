@@ -220,6 +220,15 @@ app.kubernetes.io/version: {{ . | quote }}
 {{- define "aether.registrar.fullname" -}}
 {{- printf "%s-registrar" (include "aether.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+{{/*
+The registrar's in-cluster gRPC address, built from THIS release's registrar
+Service (name, namespace, port). The agent and edge binaries default to
+aether-registrar.aether-system.svc:443, which is only right for a release named
+"aether" in aether-system with the default port, so both are always handed it.
+*/}}
+{{- define "aether.registrar.address" -}}
+{{- printf "%s.%s.svc:%v" (include "aether.registrar.fullname" .) (include "aether.namespace" .) .Values.registrar.service.port -}}
+{{- end -}}
 {{- define "aether.registrar.serviceAccountName" -}}{{ include "aether.registrar.fullname" . }}{{- end -}}
 {{- define "aether.registrar.clusterScopedName" -}}
 {{- printf "%s-%s" (include "aether.registrar.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-" -}}
