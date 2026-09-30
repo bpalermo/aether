@@ -8,8 +8,13 @@ Phase 0 has to confirm or refute a symlink confused-deputy in the shipped 034 de
 structural fix and goes ahead. If it is refuted, the remaining benefits do not justify
 a new privileged node component at today's UDS demand, and the proposal is parked. The
 bar is written down in advance so the decision is not re-argued once the result is in.
+**Owner decisions 2026-09-30** (folded in below; superseded text is marked, not
+deleted): (1) no `node-driver-registrar` sidecar: the node plugin serves the kubelet
+plugin-registration API itself; (2) Q2 answered: `fsGroupPolicy: File`, the per-pod
+tmpfs is `root:<fsGroup>` mode `2770`, and a pod without `fsGroup` is rejected;
+(3) the image is `quay.io/aethermesh/uds-csi` (proposal 040 naming).
 **Author:** Bruno Palermo
-**Date:** 2026-09-26
+**Date:** 2026-09-26 (decisions 2026-09-27, 2026-09-30)
 **Related:** 034 (UDS delivery: annotation, `EndpointPolicy`, the `emptyDir`-only
 rule, shipped #616–#620), 033 (node-taint lifecycle), 036 (SPIFFE Broker API — the
 node agent already leans on a CSI-delivered socket), #583 / #772 (the slim-binary /
@@ -161,7 +166,8 @@ aether and feeds both the agent and the proxy:
     own CSI socket directory at `/var/lib/kubelet/plugins/csi.spiffe.io`.
   - `node-driver-registrar` (`registry.k8s.io/sig-storage/csi-node-driver-registrar:
     v2.15.0`). It registers `/var/lib/kubelet/plugins/csi.spiffe.io/csi.sock`
-    through `/var/lib/kubelet/plugins_registry`.
+    through `/var/lib/kubelet/plugins_registry`. (aether does **not** copy this half
+    of the pattern; see *Kubelet registration, built in*.)
 - `NodePublishVolume` bind-mounts the host socket directory read-only onto the
   kubelet-supplied `target_path`. Nothing more happens: there is no state and no API
   access.
@@ -221,30 +227,83 @@ Admission can check it exactly.
 
 **Binary and packaging.** The node plugin is a new slim binary,
 `agent/cmd/uds-csi`, with its logic in `agent/internal/udscsi/`. It gets its own
-image (`aether-uds-csi`) and its own DaemonSet (`aether-uds-csi`, template
-`charts/aether/templates/uds-csi-daemonset.yaml`) with a `node-driver-registrar`
-sidecar. This follows the mesh-dns (#583) and proxy-supervisor (#772) splits, for
-the same reasons:
+image, `quay.io/aethermesh/uds-csi` (named per proposal 040, no `aether-` prefix;
+the 2026-09-26 draft said ~~`aether-uds-csi`~~), and its own DaemonSet
+(`aether-uds-csi`, template `charts/aether/templates/uds-csi-daemonset.yaml`) with
+**one container, `uds-csi`**. The draft's ~~`node-driver-registrar` sidecar~~ is
+dropped (decision 2026-09-30): the plugin registers itself with the kubelet, see
+*Kubelet registration, built in*. This follows the mesh-dns (#583) and
+proxy-supervisor (#772) splits, for the same reasons:
 
 - Rolling the agent must not make UDS pods starting at that moment eat
   `FailedMount` backoff.
 - This code changes almost never.
 - A `deps_test` (the `//agent/cmd/proxy-supervisor:deps_test` pattern) keeps its
   dependencies to the CSI spec protos, grpc, and `x/sys/unix`. No client-go, no
-  controller-runtime: the plugin makes no API calls, so it needs no RBAC.
+  controller-runtime: the plugin makes no API calls, so it needs no RBAC. The
+  kubelet registration proto is aether's own copy under `api/` (below), so it adds
+  no module to that list.
 
 Hosting it inside the agent pod was rejected. The agent container is deliberately
 not privileged (`allowPrivilegeEscalation: false`, root only), and `Bidirectional`
 propagation requires a privileged container. Adding a privileged container to the
 agent pod couples the rolls and widens the agent pod's surface for no gain.
 
+**Kubelet registration, built in (decision 2026-09-30).** The plugin serves the
+kubelet's plugin-registration API itself instead of shipping the
+`node-driver-registrar` sidecar every CSI driver conventionally carries:
+
+- At start, `uds-csi` removes any stale
+  `<kubeletRoot>/plugins_registry/csi.aether.io-reg.sock` (left by an instance
+  killed without cleanup) and listens there. On it, it serves the
+  `pluginregistration.v1` `Registration` gRPC service:
+  - `GetInfo` returns `{type: "CSIPlugin", name: "csi.aether.io", endpoint:
+    "<kubeletRoot>/plugins/csi.aether.io/csi.sock", supported_versions: ["1.0.0"]}`.
+    The endpoint is the CSI socket the plugin serves Identity/Node on; the kubelet
+    dials it by that host path.
+  - `NotifyRegistrationStatus` with `plugin_registered: true` is logged and the
+    plugin carries on. With `false`, it logs the kubelet's `error` string, records
+    it as the container's termination message (so it shows in `kubectl describe
+    pod`), and **exits non-zero**, so the pod restarts and re-registers under the
+    kubelet's backoff instead of sitting Running and unregistered.
+- On SIGTERM it closes both listeners and removes the registration socket, so the
+  kubelet's plugin watcher deregisters the driver before the successor creates its
+  own. A kubelet restart re-discovers the socket that is still there; nothing
+  special is needed.
+- The registration proto is **copied** into `api/` under an aether path
+  (`api/aether/kubelet/pluginregistration/v1/`, aether `go_package`) instead of
+  importing `k8s.io/kubelet`, which would pull `k8s.io/apimachinery` and friends
+  into the binary and break the `deps_test` allow-list. Two details keep it
+  wire-identical: the proto **`package` stays `pluginregistration`**, because the
+  gRPC method path (`/pluginregistration.Registration/GetInfo`) is derived from it
+  and the kubelet calls exactly that path; and the field numbers are unchanged
+  when the file is re-declared as `edition = "2023"` with implicit presence (the
+  repo's proto rule). The file carries a buf lint ignore for
+  `PACKAGE_VERSION_SUFFIX`, since `pluginregistration` has no version suffix.
+
+Why no sidecar: one image and one container per node instead of two; no
+third-party image to pin, bump, verify and mirror; and the smallest surface for a
+privileged node component. The cost is about 100 lines plus tests: a unit test
+that drives the registration server with a fake kubelet registration client
+(`GetInfo` payload, both `NotifyRegistrationStatus` outcomes, stale-socket
+removal, socket removal on shutdown), and a kind e2e asserting that the node's
+`CSINode` lists `csi.aether.io` and still lists it after a `uds-csi` roll.
+
+The UDS carrier has **no SPIRE dependency**: it works with `spire.enabled: false`.
+The `node-driver-registrar` that the SPIFFE CSI driver runs on talos belongs to the
+SPIRE chart and is unrelated to this driver; nothing here reuses or waits on it.
+
 **CSI services** (`container-storage-interface/spec` v1, a new direct require):
 
 - **Identity:** `GetPluginInfo` (`csi.aether.io`, version), `GetPluginCapabilities`
   (none), `Probe`.
-- **Node:** `NodeGetInfo` (`node_id` = node name), `NodeGetCapabilities` (possibly
-  `VOLUME_MOUNT_GROUP`, see open question Q2), `NodePublishVolume`, and
-  `NodeUnpublishVolume`. There is no Controller service and no staging.
+- **Node:** `NodeGetInfo` (`node_id` = node name), `NodeGetCapabilities`
+  (`VOLUME_MOUNT_GROUP`; the draft said ~~possibly, see open question Q2~~, now
+  decided, see *Decided*), `NodePublishVolume`, and `NodeUnpublishVolume`. There is
+  no Controller service and no staging. With `VOLUME_MOUNT_GROUP` advertised and
+  `fsGroupPolicy: File`, the kubelet passes the pod's `securityContext.fsGroup` as
+  `volume_capability.mount.volume_mount_group` and does **not** chown the volume
+  itself; the plugin owns the group assignment.
 
 **`NodePublishVolume`** takes `volume_context["csi.storage.k8s.io/pod.uid"]`, which
 `podInfoOnMount` supplies, and does the following:
@@ -255,11 +314,25 @@ agent pod couples the rolls and widens the agent pod's surface for no gain.
    an unknown `volumeAttributes` key, a UID that is not a clean single segment
    (reusing `udspath.validateSegment`), and a second, *different* `volume_id` for a
    UID that already has one. That last rule enforces one mesh socket volume per pod.
+   Also rejected: an empty `volume_mount_group`, i.e. a pod with no
+   `securityContext.fsGroup`. The message names the fix (`csi.aether.io requires
+   the pod to set securityContext.fsGroup`), so it reads straight off the
+   `FailedMount` event. There is **no** world-writable fallback.
 2. It `mkdir`s `/run/aether/uds/<uid>` (0700 root) and mounts a fresh tmpfs there:
    `nosymfollow,nodev,nosuid,noexec,size=<chart value, default 1Mi>,
-   nr_inodes=<small>,mode=0777`. The mode matches the kubelet's `emptyDir` default,
-   so apps that work on an `emptyDir` today work unchanged; `fsGroup` tightening is
-   Q2.
+   nr_inodes=<small>,uid=0,gid=<fsGroup>,mode=2770` (decision 2026-09-30). The
+   draft had ~~`mode=0777`, matching the kubelet's `emptyDir` default so apps that
+   work on an `emptyDir` today work unchanged~~. The app reaches the directory
+   through the `fsGroup`, which the kubelet adds as a supplementary group to every
+   container in the pod; the proxy connects as root and needs no group.
+   **Setgid (`2770`, not `0770`) is deliberate.** Without it, a file created in the
+   directory takes its creator's primary group, so a socket the proxy binds as
+   root (034 Phase 2's `mesh.sock`) would be `root:root`, and the app could dial it
+   only if the proxy made it world-writable. With setgid every socket in the
+   directory is group `<fsGroup>`, so `0660` suffices in both directions. It is
+   also what the kubelet itself does when it applies an `fsGroup` to an `emptyDir`
+   (setgid on directories), so the carrier behaves like the `emptyDir`-with-`fsGroup`
+   setup apps already know.
 3. It bind-mounts `/run/aether/uds/<uid>` onto `target_path`. The bind inherits the
    source mount's flags, so `nosymfollow` holds on both the app's view and the
    proxy's view.
@@ -292,14 +365,13 @@ whoever writes them, which is the app, so a per-pod tmpfs is bounded twice.
 | Item | Value |
 |---|---|
 | namespace | `aether-system` (already `enforce=privileged`) |
-| containers | `uds-csi` (`privileged: true`, `capabilities.drop: [ALL]`, `readOnlyRootFilesystem`, `runAsUser: 0`) + `node-driver-registrar` |
-| host mounts | `<kubeletRoot>/pods` (**Bidirectional**, `type: Directory`); `<kubeletRoot>/plugins/csi.aether.io` (CSI socket); `<kubeletRoot>/plugins_registry` (registration); `/run/aether/uds` (**Bidirectional**, `DirectoryOrCreate`) |
+| containers | one: `uds-csi` (`privileged: true`, `capabilities.drop: [ALL]`, `readOnlyRootFilesystem`, `runAsUser: 0`), image `quay.io/aethermesh/uds-csi`. No `node-driver-registrar` (decision 2026-09-30). |
+| host mounts | `<kubeletRoot>/pods` (**Bidirectional**, `type: Directory`); `<kubeletRoot>/plugins/csi.aether.io` (CSI socket); `<kubeletRoot>/plugins_registry` (the plugin itself creates its registration socket `csi.aether.io-reg.sock` here); `/run/aether/uds` (**Bidirectional**, `DirectoryOrCreate`) |
 | chart values | `udsCsi.enabled`, `udsCsi.kubeletRootDir` (default `/var/lib/kubelet`, the **only** place the kubelet root appears for the CSI path), `udsCsi.tmpfsSize`, image, resources |
 | scheduling | `priorityClassName: system-node-critical`; tolerates `aether.io/agent-not-ready` (as the spiffe driver already does) and every `NoSchedule` taint the agent DaemonSet tolerates |
 | rollout | `maxSurge: 0, maxUnavailable: 1`. Two plugin instances cannot register the same driver name on one node. |
-| cluster-scoped | `CSIDriver csi.aether.io` (`attachRequired: false`, `podInfoOnMount: true`, `volumeLifecycleModes: [Ephemeral]`, `fsGroupPolicy: None`, or `File` if Q2 says yes, `requiresRepublish: false`) |
-| RBAC | none for the plugin; the registrar sidecar needs none either |
-| new external image | `csi-node-driver-registrar` (same tag family SPIRE pins; its own Renovate lane) |
+| cluster-scoped | `CSIDriver csi.aether.io` (`attachRequired: false`, `podInfoOnMount: true`, `volumeLifecycleModes: [Ephemeral]`, **`fsGroupPolicy: File`** (decided 2026-09-30; with the plugin's `VOLUME_MOUNT_GROUP` the kubelet delegates the group to the plugin; the draft said ~~`None`, or `File` if Q2 says yes~~), `requiresRepublish: false`) |
+| RBAC | none |
 | Chart.yaml | bump (CI-enforced) |
 
 ### Agent side
@@ -382,8 +454,12 @@ unmounted directory fails `ENOENT` exactly like a dead app.)
   pod is a new UID.
 - **Permissions are a wash on the inbound side.** The proxy is root, so no mode ever
   stops it. The app owns its socket's mode either way. The ownership story matters
-  only for Phase 2, where the app must traverse a root-created directory, and
-  `mode=0777` on the tmpfs, or `fsGroup` via Q2, covers that.
+  only for Phase 2, where the app must traverse a root-created directory. The
+  decided `root:<fsGroup>` `2770` covers that (the draft's ~~`mode=0777` on the
+  tmpfs, or `fsGroup` via Q2~~ covered it world-writably). Note what `fsGroup` does
+  **not** buy: the kubelet adds it to every container in the pod, so it does not
+  keep one container of a pod away from another. What it removes is the
+  world-writable directory.
 
 ## What it buys, what it costs
 
@@ -413,7 +489,8 @@ unmounted directory fails `ENOENT` exactly like a dead app.)
    lands in exactly the reboot and power-blip windows that the incident history says
    are where aether hurts.
 2. **Demand is close to zero today.** The known UDS workloads are the e2e `udsecho`
-   and the talos soak's echo. A CSI driver, a registrar sidecar image, a CSIDriver
+   and the talos soak's echo. A CSI driver, ~~a registrar sidecar image~~ (gone
+   since 2026-09-30), a CSIDriver
    object, a new CNIPod field, a migration, and a deprecation window is a lot of
    machinery for that. It is justified by fixing a security class, not by features.
 3. **It is a breaking change for today's UDS workloads** (decision 2026-09-27: no
@@ -467,8 +544,8 @@ unmounted directory fails `ENOENT` exactly like a dead app.)
 | Phase | PR(s) | Contents | Gate |
 |---|---|---|---|
 | **0 — settle the finding** | 0a (issue + kind repro); 0b (interim) | 0a: `e2e/uds.sh` gains a `hostile` leg, where a `udsecho` variant swaps `app.sock` for a symlink to `/run/aether/cni.sock` (and, SPIRE on, to the workload socket) and calls itself with `protocol: grpc`. The assertion is that the gRPC reaches the agent. The leg must be seen **failing** (attack works) before any fix, so it is not a vacuous gate. 0b, only if 0a confirms: supervisor `mount_setattr(AT_RECURSIVE, NOSYMFOLLOW)` on its kubelet-pods view, the agent refuses `medium: Memory` UDS volumes, and `udsWorkloads.enabled` defaults to `false` (chart bump, release note). The 0a leg then asserts `ELOOP`/no delivery. | 0a result decides the proposal's fate (see Status) |
-| **1 — the driver** | 1a, 1b | 1a: `agent/cmd/uds-csi` + `agent/internal/udscsi/` (Identity/Node services, per-pod tmpfs + bind, idempotency, unit tests against a fake mounter, and a root-only mount test in the kernel-gate CI lane the TPROXY work added). 1b: chart (`uds-csi-daemonset.yaml`, `CSIDriver`, values, Chart.yaml bump), image, `deps_test`. Inert until a pod declares the volume. | driver registers on kind; `FailedMount` on bad requests |
-| **2 — the CSI volume becomes the only carrier (BREAKING)** | 2 | `CNIPod.uds_csi_volume = 12` via `enhanceCNIPod`; `udspath.ResolveCSI` **replaces** the `kubernetes.io~empty-dir` resolver (the emptyDir shape, `--kubelet-pods-dir`, the proxy's `/var/lib/kubelet/pods` mount and `proxy.udsWorkloads` are deleted in the same PR — chart major bump, release note); `--uds-csi-root`; `resolve_failures{reason}` counter (seeded at 0 so it is never "no series"); the `EndpointPolicy` webhook computes the 54-byte CSI budget (for a policy the webhook cannot see the pod, so it keeps a conservative budget and the agent stays fail-closed, as today); podmutate **rejects** an `emptyDir` carrier with a message naming the CSI volume; `e2e/udsecho` and `e2e/soak/udsecho` switch their volume source in the same PR. | `e2e/uds.sh` runs every existing leg on the CSI carrier; the hostile leg passes with no kubelet-pods mount on the proxy at all; an `emptyDir` carrier is rejected at admission (seen red on the old build) |
+| **1 — the driver** | 1a, 1b | 1a: `agent/cmd/uds-csi` + `agent/internal/udscsi/` (Identity/Node services, per-pod tmpfs `root:<fsGroup>` `2770` + bind, `InvalidArgument` on a missing `fsGroup`, idempotency, unit tests against a fake mounter, and a root-only mount test in the kernel-gate CI lane the TPROXY work added), plus the built-in kubelet registration server (the `pluginregistration` proto copied into `api/aether/kubelet/pluginregistration/v1/`, unit-tested against a fake kubelet registration client; no `node-driver-registrar`). 1b: chart (`uds-csi-daemonset.yaml` with the single `uds-csi` container, `CSIDriver` with `fsGroupPolicy: File`, values, Chart.yaml bump), the `quay.io/aethermesh/uds-csi` image, `deps_test`. **Before 1b's first publish the owner pre-creates the `aethermesh/uds-csi` quay repository** (public, robot write): the push robot cannot create repositories (proposal 040). Inert until a pod declares the volume. | driver registers on kind: `CSINode` lists `csi.aether.io`, and still does after a `uds-csi` roll; `FailedMount` on bad requests, including a pod with no `fsGroup` |
+| **2 — the CSI volume becomes the only carrier (BREAKING)** | 2 | `CNIPod.uds_csi_volume = 12` via `enhanceCNIPod`; `udspath.ResolveCSI` **replaces** the `kubernetes.io~empty-dir` resolver (the emptyDir shape, `--kubelet-pods-dir`, the proxy's `/var/lib/kubelet/pods` mount and `proxy.udsWorkloads` are deleted in the same PR — chart major bump, release note); `--uds-csi-root`; `resolve_failures{reason}` counter (seeded at 0 so it is never "no series"); the `EndpointPolicy` webhook computes the 54-byte CSI budget (for a policy the webhook cannot see the pod, so it keeps a conservative budget and the agent stays fail-closed, as today); podmutate **rejects** an `emptyDir` carrier with a message naming the CSI volume, and may reject a `csi.aether.io` volume on a pod with no `securityContext.fsGroup` at admission, earlier than the plugin's `FailedMount`; `e2e/udsecho` and `e2e/soak/udsecho` switch their volume source in the same PR. | `e2e/uds.sh` runs every existing leg on the CSI carrier; the hostile leg passes with no kubelet-pods mount on the proxy at all; an `emptyDir` carrier is rejected at admission (seen red on the old build) |
 | **3 — talos** | — | Migrate the soak's UDS echo to the CSI volume in the same `helm upgrade` (the old carrier stops resolving the moment the agent rolls, so the workload and the chart move together); validate across an **agent roll, a uds-csi roll, a proxy roll and a node reboot**: mounts persist across a plugin roll, republish is idempotent after reboot, Terminating pods drain while the plugin rolls. One 8 h soak with the UDS leg on the CSI carrier. 034 Phase 2 is built on the CSI carrier only. | soak grade |
 
 No coexistence phase and no deprecation window (decision 2026-09-27): a UDS workload
@@ -487,12 +564,8 @@ unaffected.
   SPIRE's attestation of Envoy's PID mapping to *no* registration entry (then that
   row degrades to "denied", but the CNI/xDS rows stand). **Any one confirmed row is a
   confirmation.**
-- **Q2 — `fsGroup` delegation.** Should the CSIDriver declare `fsGroupPolicy: File`
-  with the `VOLUME_MOUNT_GROUP` capability, so the plugin gets
-  `volume_mount_group` and mounts the tmpfs `gid=<fsGroup>,mode=2770` instead of
-  `0777`? It is tighter, and it matters for Phase 2 where a *third* container in the
-  pod should not reach the mesh socket. The cost is a behaviour difference from
-  `emptyDir` that could break apps that are migrated blindly.
+- ~~**Q2 — `fsGroup` delegation.**~~ Answered 2026-09-30; moved to *Decided*
+  below.
 - **Q3 — Join the 033 taint gate?** Should the agent's taint removal also wait for
   `csi.aether.io` to appear in the node's `CSINode`? This gives UDS pods scheduling
   protection at the cost of one more gate on *every* node, most of which host no UDS
@@ -503,7 +576,26 @@ unaffected.
   across a plugin roll on talos, and does anything in aether (the ghost sweep, the
   #641 eviction path) misread a long Terminating as a stale pod? This should be
   measured in Phase 3, not assumed.
-- **Q5 — Registrar sidecar supply chain.** Should aether reuse the exact
-  `csi-node-driver-registrar` tag the SPIRE chart pins, so talos pulls one image
-  instead of two, or pin its own? The recommendation is to pin its own and let
-  Renovate converge them.
+- ~~**Q5 — Registrar sidecar supply chain.**~~ Moot since 2026-09-30: there is no
+  registrar sidecar (the plugin registers itself). The draft asked whether to reuse
+  the exact `csi-node-driver-registrar` tag the SPIRE chart pins or pin aether's own
+  and let Renovate converge them.
+
+## Decided
+
+- **Q2 — `fsGroup` delegation (2026-09-30): yes, and tightened.** The question was
+  whether the CSIDriver should declare `fsGroupPolicy: File` with the
+  `VOLUME_MOUNT_GROUP` capability, so the plugin gets `volume_mount_group` and
+  mounts the tmpfs `gid=<fsGroup>,mode=2770` instead of `0777`, at the cost of a
+  behaviour difference from `emptyDir` that could break apps migrated blindly.
+  Decision: `fsGroupPolicy: File` + `VOLUME_MOUNT_GROUP`; the tmpfs is
+  `uid=0,gid=<fsGroup>,mode=2770` (setgid so sockets inherit the group, see
+  `NodePublishVolume` step 2); the proxy connects as root. A pod without
+  `securityContext.fsGroup` fails loudly: the plugin rejects `NodePublishVolume`
+  with `InvalidArgument` naming the missing field (`FailedMount`), and
+  podmutate/admission may reject it earlier in Phase 2. There is no `0777`
+  fallback. The migration cost is bounded: the only known UDS workloads are ours,
+  they already change their volume source in Phase 2, and they gain an `fsGroup`
+  in the same edit. The draft's hope that this keeps a *third* container of the
+  pod off the mesh socket does not hold (the kubelet adds `fsGroup` to every
+  container); what it removes is the world-writable directory.
