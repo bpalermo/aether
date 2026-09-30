@@ -404,6 +404,180 @@ helm_template_fail_test(
     ],
 )
 
+# Chart-wiring audit: the node agent never passed --registrar-address, so it
+# dialed the binary default aether-registrar.aether-system.svc:443 — wrong for any
+# release not named "aether" in aether-system with the default port. The agent
+# and the edge now both get the address of THIS release's registrar Service
+# (aether.registrar.address). Default release: the Service port is 443...
+helm_template_test(
+    name = "aether_agent_registrar_address_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--registrar-address=[a-z0-9-]+-registrar\\.[a-z0-9-]+\\.svc:443\"",
+        ],
+    },
+)
+
+# ...and a non-default name, namespace and port reach both consumers.
+helm_template_test(
+    name = "aether_registrar_address_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "fullnameOverride=mesh",
+        "--set",
+        "namespace.name=mesh-ops",
+        "--set",
+        "registrar.service.port=9443",
+        "--set",
+        "edge.enabled=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--registrar-address=mesh-registrar.mesh-ops.svc:9443\"",
+        ],
+        "aether/templates/edge-deployment.yaml": [
+            "- \"--registrar-address=mesh-registrar.mesh-ops.svc:9443\"",
+        ],
+        "aether/templates/registrar-service.yaml": [
+            "name: mesh-registrar\\n\\s+namespace: mesh-ops",
+            "port: 9443",
+        ],
+    },
+)
+
+# The registrar's config-export controller (proposal 026) resolves exported
+# backends as <svc>.<mesh-domain>; it used to run on the binary default whatever
+# meshDomain the rest of the release was given.
+helm_template_test(
+    name = "aether_registrar_mesh_domain_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "meshDomain=mesh.example",
+    ],
+    template_patterns = {
+        "aether/templates/registrar-deployment.yaml": [
+            "- \"--mesh-domain=mesh.example\"",
+        ],
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--mesh-domain=mesh.example\"",
+        ],
+    },
+)
+
+# With controller.webhook.spire=true the MutatingWebhookConfiguration renders with
+# an EMPTY caBundle that only the controller patches, and it renders when EITHER
+# namespaceInjection or injectPodNdots is on. The flag naming it used to follow
+# injectPodNdots alone, so namespace injection without ndots (and the identity
+# gate riding it) was never trusted by the apiserver — silently, failurePolicy
+# Ignore. Namespace injection alone must still name it...
+helm_template_test(
+    name = "aether_controller_mutating_webhook_ca_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+        "--set",
+        "controller.injectPodNdots=false",
+        "--set",
+        "controller.namespaceInjection=true",
+    ],
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "- \"--mutating-webhook-config-name=[a-z0-9-]+-pod-ndots\"",
+        ],
+    },
+)
+
+# ...and with both off (no mutating webhook rendered) it is not passed: the
+# validating config name is followed directly by the container's `ports:`.
+helm_template_test(
+    name = "aether_controller_mutating_webhook_ca_absent_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+        "--set",
+        "controller.injectPodNdots=false",
+        "--set",
+        "controller.namespaceInjection=false",
+    ],
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "- \"--webhook-config-name=[a-z0-9-]+\"\\n\\s+ports:\\n",
+        ],
+    },
+)
+
+# proxy.shutdownDrainImmediately (#795's escape hatch) is off by default: nothing
+# follows --termination-grace but the Envoy args (otel.endpoint is empty by
+# default, so no --otlp-endpoint either)...
+helm_template_test(
+    name = "aether_proxy_shutdown_drain_immediately_off_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--termination-grace=180s\"\\n\\s+- \"--envoy-arg=-l\"",
+        ],
+    },
+)
+
+# ...and the knob passes the supervisor flag.
+helm_template_test(
+    name = "aether_proxy_shutdown_drain_immediately_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.shutdownDrainImmediately=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--shutdown-drain-immediately\"",
+        ],
+    },
+)
+
+# cni.binDir / cni.confDir: the host CNI dirs. The defaults are exactly what the
+# chart hardcoded before (and the binaries' own flag defaults)...
+helm_template_test(
+    name = "aether_cni_dirs_default_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--cni-bin-target-dir=/host/opt/cni/bin\"",
+            "- \"--mounted-cni-net-dir=/host/etc/cni/net.d\"",
+            "- name: cni-bin-dir\\n\\s+mountPath: /host/opt/cni/bin\\n",
+            "- name: cni-conf-dir\\n\\s+mountPath: /host/etc/cni/net.d\\n",
+            "- name: cni-bin-dir\\n\\s+hostPath:\\n\\s+path: /opt/cni/bin\\n",
+            "- name: cni-conf-dir\\n\\s+hostPath:\\n\\s+path: /etc/cni/net.d\\n",
+        ],
+    },
+)
+
+# ...and an override moves the hostPath, the mount and both containers' flags
+# together (cni-install's and the agent's --mounted-cni-net-dir).
+helm_template_test(
+    name = "aether_cni_dirs_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "cni.binDir=/var/lib/cni/bin",
+        "--set",
+        "cni.confDir=/var/lib/rancher/k3s/agent/etc/cni/net.d",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--cni-bin-target-dir=/host/var/lib/cni/bin\"",
+            "- \"--mounted-cni-net-dir=/host/var/lib/rancher/k3s/agent/etc/cni/net.d\"(.|\\n)+- \"--mounted-cni-net-dir=/host/var/lib/rancher/k3s/agent/etc/cni/net.d\"",
+            "- name: cni-bin-dir\\n\\s+mountPath: /host/var/lib/cni/bin\\n",
+            "- name: cni-bin-dir\\n\\s+hostPath:\\n\\s+path: /var/lib/cni/bin\\n",
+            "- name: cni-conf-dir\\n\\s+hostPath:\\n\\s+path: /var/lib/rancher/k3s/agent/etc/cni/net.d\\n",
+        ],
+    },
+)
+
 # Commit-pinned second packaging of the SAME chart (#692).
 #
 # chart_push tags with the packaged chart's `version:`, so the chart above
