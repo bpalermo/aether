@@ -8,16 +8,12 @@ fileExistenceTests:
     shouldExist: true
     permissions: '-rwxr-xr-x'
     isExecutableBy: 'other'
-  # The aether-proxy pod's stdlib-only exec readiness probe (#673). Since #772
-  # the chart stages it out of the proxy-supervisor image instead; this copy is
-  # kept for the DEPRECATED `agent proxy-supervisor` alias, which a chart
-  # predating #772 still runs from THIS image and which hard-fails without it.
-  # Assert it until the alias goes.
-  - name: 'proxy-ready'
+  # The aether-proxy pod's readiness prober (#673) ships ONLY in the
+  # proxy-supervisor image since the deprecated `agent proxy-supervisor` alias
+  # was removed; assert it cannot silently creep back into this image.
+  - name: 'no proxy-ready binary'
     path: '/proxy-ready'
-    shouldExist: true
-    permissions: '-rwxr-xr-x'
-    isExecutableBy: 'other'
+    shouldExist: false
   # The egress identity gate (#1053): the pod-mutating webhook injects this
   # image with command ["/identity-ready"] as every mesh pod's first init
   # container, so it must be here and executable by the nonroot user.

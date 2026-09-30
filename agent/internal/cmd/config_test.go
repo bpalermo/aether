@@ -106,3 +106,13 @@ func TestGammaDefaultOn(t *testing.T) {
 	require.NotNil(t, f)
 	assert.Equal(t, "true", f.DefValue)
 }
+
+// TestRetiredSubcommandsGone pins the removal of the deprecated `agent
+// proxy-supervisor` alias (#772). The supervisor is its own binary and image
+// (//agent/cmd/proxy-supervisor); re-adding the subcommand would re-link the
+// supervisor into the agent and invite the chart back onto the 65MiB binary.
+func TestRetiredSubcommandsGone(t *testing.T) {
+	for _, sub := range GetCommand().Commands() {
+		assert.NotEqual(t, "proxy-supervisor", sub.Name(), "the `agent proxy-supervisor` alias was retired and must not be re-registered")
+	}
+}

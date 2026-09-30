@@ -62,7 +62,6 @@ var (
 	debug           bool
 	otlpEndpoint    string
 	readyMarker     string
-	readinessCheck  bool
 	forwardPoolSize int
 	lameDuckMax     time.Duration
 )
@@ -73,8 +72,10 @@ func main() {
 	}
 }
 
-// rootCmd builds the cobra command that wires the flags and dispatches to either the
-// cheap --readiness-check probe branch or the resolver run loop.
+// rootCmd builds the cobra command that wires the flags and runs the resolver loop.
+// The readiness probe is not this binary: the chart execs the stdlib-only
+// //agent/cmd/mesh-dns-ready from this same image (#683); the old --readiness-check
+// exec-probe mode was removed.
 func rootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mesh-dns",
@@ -86,22 +87,6 @@ func rootCmd() *cobra.Command {
 			"access — records come only from the file.",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// --readiness-check is the DEPRECATED (#683) exec readiness probe: exit 0
-			// iff this pod's pod-local ready marker is present. The chart now execs
-			// the stdlib-only /mesh-dns-ready binary from this same image instead —
-			// re-launching this daemon (cobra + miekg/dns + the OTel SDK) every 15s
-			// per pod is package init() the Go runtime runs before main() is entered,
-			// so this branch cannot avoid it however early it returns. Retained so a
-			// chart predating #683 keeps a working probe against a newer image.
-			//
-			// The marker is written only once THIS process has bound its listeners, so
-			// the surge rollout keeps the predecessor until the successor truly serves.
-			if readinessCheck {
-				if _, err := os.Stat(readyMarker); err != nil {
-					return fmt.Errorf("not ready: %w", err)
-				}
-				return nil
-			}
 			return run(cmd.Context())
 		},
 	}
@@ -113,12 +98,6 @@ func rootCmd() *cobra.Command {
 	f.BoolVar(&debug, "debug", false, "Enable debug-level logging")
 	f.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint for mesh-DNS metrics push (e.g. collector:4317); empty disables telemetry")
 	f.StringVar(&readyMarker, "ready-marker", "/run/aether/mesh-dns.ready", "Pod-local path for the readiness marker written once the resolver's listeners are bound")
-	f.BoolVar(&readinessCheck, "readiness-check", false, "DEPRECATED (#683): exit 0 iff the --ready-marker file exists (exec readiness probe mode). Re-execing this 16.9MB daemon every 15s per pod cost ~3-4% of its CPU in container exec and Go package init alone; the chart execs the stdlib-only /mesh-dns-ready prober from this same image instead. Retained so a chart predating #683 keeps a working probe against a newer image")
-	// Deprecated since #683, but still functional: a chart older than #683 probes
-	// with it. pflag prints "Flag --readiness-check has been deprecated, ..." on use,
-	// so an operator on a stale chart is told what to move to. The error can only be
-	// a missing flag name — it was registered on the line above.
-	_ = f.MarkDeprecated("readiness-check", "exec the stdlib-only /mesh-dns-ready binary shipped in this image instead (#683)")
 	f.IntVar(&forwardPoolSize, "forward-pool-size", meshdns.DefaultForwardPoolSize, "Connected UDP sockets kept open per forward upstream (issue #674); 0 dials a fresh socket per forwarded query")
 	f.DurationVar(&lameDuckMax, "lame-duck-max", meshdns.DefaultLameDuckMax, "Longest this resolver keeps SERVING after SIGTERM before closing its SO_REUSEPORT listeners (issue #729). It stops reporting ready immediately and closes as soon as a successor is observed answering on the same address, so this ceiling only applies when no successor appears (a scale-down, or a failed surge). Must stay below the pod's terminationGracePeriodSeconds — the chart derives that as this + 5s. 0 disables the window and closes on SIGTERM, which is what dropped one queued datagram on every roll before #729")
 

@@ -12,8 +12,8 @@ import (
 // TestCheckMatchesStat pins Check to os.Stat byte for byte. #673 moved the
 // readiness predicate out of the agent binary into a stdlib-only reader; the
 // only thing that must NOT change in that move is the answer, so every case
-// asserts Check agrees with the os.Stat the supervisor's --readiness-check used
-// to do inline.
+// asserts Check agrees with the os.Stat the supervisor's former --readiness-check
+// mode (since removed) used to do inline.
 func TestCheckMatchesStat(t *testing.T) {
 	dir := t.TempDir()
 

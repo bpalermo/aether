@@ -172,7 +172,7 @@ func WithReusePort(v bool) Option {
 
 // WithReadyMarker makes Start write a pod-local ready-marker file at path once the
 // UDP+TCP listeners are bound (and remove it on shutdown). The exec readiness probe
-// (`agent mesh-dns --readiness-check`) stats this file, so the DaemonSet's
+// (the stdlib-only //agent/cmd/mesh-dns-ready, #683) stats this file, so the DaemonSet's
 // maxSurge:1/maxUnavailable:0 rollout keeps the predecessor pod until the successor
 // is TRULY bound — that overlap is what lets SO_REUSEPORT hand off with zero gap.
 // The marker is intentionally pod-local (each container's own fs): a network probe

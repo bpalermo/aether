@@ -30,14 +30,12 @@ import (
 	"aethermesh.dev/agent/internal/proxy/hotrestart"
 	"aethermesh.dev/common/file"
 	"aethermesh.dev/common/log"
-	"aethermesh.dev/common/readymarker"
 	"github.com/spf13/cobra"
 )
 
 // readinessBinarySource is where //agent/cmd/proxy-ready lands inside the image
-// this command ships in (an extra tars_layer on both
-// //agent/cmd/proxy-supervisor:image and, for the deprecated `agent
-// proxy-supervisor` alias, //agent/cmd/agent:image). It rides alongside the
+// this command ships in (an extra tars_layer on
+// //agent/cmd/proxy-supervisor:image). It rides alongside the
 // supervisor rather than in its own image because the only thing that ever reads
 // it is the install-supervisor initContainer, which already runs this image — so
 // it costs no second pull per node, and the probe and the process that writes the
@@ -45,24 +43,22 @@ import (
 const readinessBinarySource = "/proxy-ready"
 
 // config is the flag-bound configuration for one supervisor command. It is built
-// per New() call rather than held in package-level vars so the standalone binary
-// and the agent's deprecated alias cannot share (or fight over) state.
+// per New() call rather than held in package-level vars, so tests can build
+// independent commands without sharing (or fighting over) state.
 type config struct {
 	supervisor           hotrestart.Config
 	telemetry            hotrestart.TelemetryConfig
 	debug                bool
 	installPath          string
 	readinessInstallPath string
-	readinessCheck       bool
 	version              string
 }
 
 // New returns the `proxy-supervisor` command. version is stamped into the OTel
 // service.version on the supervisor's pushed hot-restart metrics.
 //
-// //agent/cmd/proxy-supervisor runs it as its root command; //agent/internal/cmd
-// adds it to the agent as a deprecated alias so a chart predating #772 still has
-// a working initContainer against a newer agent image.
+// //agent/cmd/proxy-supervisor runs it as its root command. It was also an
+// `agent proxy-supervisor` alias until that was removed after #772.
 func New(version string) *cobra.Command {
 	cfg := &config{version: version}
 
@@ -78,8 +74,8 @@ func New(version string) *cobra.Command {
 	return cmd
 }
 
-// run dispatches between the initContainer staging mode, the deprecated exec
-// probe and the supervisor itself.
+// run dispatches between the initContainer staging mode and the supervisor
+// itself.
 func (c *config) run(cmd *cobra.Command, _ []string) error {
 	// --install-path / --install-readiness-path let the initContainer stage
 	// binaries out of this image onto a shared volume, so the runtime container
@@ -88,15 +84,10 @@ func (c *config) run(cmd *cobra.Command, _ []string) error {
 	if c.installPath != "" || c.readinessInstallPath != "" {
 		return runInstall(c.installPath, c.readinessInstallPath)
 	}
-	// --readiness-check is the legacy exec readiness probe: exit 0 iff the
-	// supervisor's pod-local ready marker is present. Since #673 the chart execs
-	// //agent/cmd/proxy-ready instead — a ~1.7MB stdlib-only binary whose package
-	// init() is a rounding error next to this one's, when re-exec'd every 2s per
-	// pod. Kept working (and only deprecated) so a chart predating #673 still has
-	// a probe against a newer image.
-	if c.readinessCheck {
-		return readymarker.Check(c.supervisor.ReadyMarkerPath)
-	}
+	// The readiness probe is not this binary: the chart execs the stdlib-only
+	// //agent/cmd/proxy-ready (#673) staged by --install-readiness-path, whose
+	// package init() is a rounding error next to this one's when re-exec'd every
+	// 2s per pod. The old --readiness-check exec-probe mode was removed.
 
 	l := log.Named(log.NewLogger(c.debug), cmd.Name())
 
@@ -194,12 +185,6 @@ func bindFlags(cmd *cobra.Command, c *config) {
 	f.StringVar(&c.supervisor.StateDir, "state-dir", "/run/aether/hotrestart", "Shared-hostPath dir for the per-node epoch heartbeat that drives cross-pod hot restart")
 	f.StringVar(&c.supervisor.ReadyMarkerPath, "ready-marker", "/var/run/aether-proxy/ready", "Pod-local path for the readiness marker maintained while Envoy is live at the newest epoch")
 	f.StringVar(&c.supervisor.AdminAddress, "admin-address", "127.0.0.1:9901", "Envoy admin host:port used for the readiness check")
-	f.BoolVar(&c.readinessCheck, "readiness-check", false, "DEPRECATED (#673): exit 0 iff the --ready-marker file exists (exec readiness probe mode). Re-execing a supervisor binary every 2s per pod cost >=31% of the supervisor container's CPU in package init alone; the chart execs the stdlib-only proxy-ready prober instead. Retained so a chart predating #673 keeps a working probe against a newer image")
-	// Deprecated since #673, but still functional: a chart older than #673 probes
-	// with it. pflag prints "Flag --readiness-check has been deprecated, ..." on use,
-	// so an operator on a stale chart is told what to move to. The error can only be
-	// a missing flag name — it was registered on the line above.
-	_ = f.MarkDeprecated("readiness-check", "exec the stdlib-only proxy-ready prober staged by --install-readiness-path instead (#673)")
 	f.DurationVar(&c.supervisor.HandoffDeadline, "handoff-deadline", 0, "Watchdog: max time a hot-restart epoch may stay not-LIVE after launch before the supervisor exits non-zero (0 = 2m default)")
 	f.DurationVar(&c.supervisor.AdminUnresponsiveDeadline, "admin-unresponsive-deadline", 0, "Watchdog: max time the Envoy admin may be unreachable (once previously LIVE) before the supervisor exits non-zero (0 = 30s default)")
 	f.DurationVar(&c.supervisor.TerminationGrace, "termination-grace", 0, "This pod's terminationGracePeriodSeconds (the chart passes its own value). Bounds the mid-handoff wait for a successor so a termination that can never have one — node shutdown, scale-down, DaemonSet delete, a replacement stuck Pending — still drains Envoy before the kubelet's SIGKILL (#771). 0 = unknown: wait indefinitely")
