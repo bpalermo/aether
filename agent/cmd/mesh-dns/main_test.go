@@ -101,3 +101,13 @@ func TestSnapshotWatcherRecoversWhenDirAppears(t *testing.T) {
 	require.NotNil(t, w, "watcher established after the dir appears")
 	_ = w.Close()
 }
+
+// TestRetiredFlagsGone pins the removal of --readiness-check, the pre-#683 exec
+// readiness probe (deprecated by #683, removed once no supported chart used it).
+// The chart execs the stdlib-only /mesh-dns-ready prober from this image instead.
+func TestRetiredFlagsGone(t *testing.T) {
+	flags := rootCmd().Flags()
+	for _, name := range []string{"readiness-check"} {
+		assert.Nil(t, flags.Lookup(name), "flag --%s was retired and must not be re-registered", name)
+	}
+}

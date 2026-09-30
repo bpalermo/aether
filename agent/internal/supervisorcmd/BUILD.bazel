@@ -9,7 +9,6 @@ go_library(
         "//agent/internal/proxy/hotrestart",
         "//common/file",
         "//common/log",
-        "//common/readymarker",
         "@com_github_spf13_cobra//:cobra",
     ],
 )
