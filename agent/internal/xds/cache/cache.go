@@ -277,11 +277,15 @@ type SnapshotCache struct {
 	// leaves the dependency set (pruneQUICPairsLocked). Guarded
 	// by depMu; persisted with observedDeps.
 	quicPairs map[quicPair]time.Time
-	// quicFetched is the pairs fetched on demand (ObserveQUICTwin) in THIS
-	// process. A pair restored from the persisted set and not in here by
-	// quicStart+quicFetchWindow is pruned (PruneUnfetchedQUICPairs, issue
-	// #1033). Guarded by depMu.
-	quicFetched map[quicPair]struct{}
+	// quicConfirmed is the pairs some agent generation has seen evidence of
+	// use for (issue #1073): fetched on demand, re-subscribed on a fresh
+	// stream, or their twin HELD by the proxy and re-stated on a fresh stream
+	// while served. Persisted with the pair (demand_confirmed), so the
+	// evidence survives agent restarts. A pair in quicPairs and NOT in here --
+	// only a restored one can be -- is pruned at quicStart+quicFetchWindow
+	// unless a live stream holds a subscription for it
+	// (PruneUnfetchedQUICPairs, issues #1033/#1073). Guarded by depMu.
+	quicConfirmed map[quicPair]struct{}
 	// quicLedger remembers which twins the node proxy holds an on-demand
 	// (ODCDS) subscription for, and keeps a pair whose twin had to leave the
 	// snapshot DORMANT rather than forgetting it (issue #1036): Envoy never
@@ -711,7 +715,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		podDeps:            make(map[string]podDependencies),
 		observedDeps:       make(map[string]time.Time),
 		quicPairs:          make(map[quicPair]time.Time),
-		quicFetched:        make(map[quicPair]struct{}),
+		quicConfirmed:      make(map[quicPair]struct{}),
 		quicLedger:         quicdemand.NewLedger[quicPair](),
 		quicStart:          time.Now(),
 		quicFetchWindow:    DefaultQUICPairFetchWindow,

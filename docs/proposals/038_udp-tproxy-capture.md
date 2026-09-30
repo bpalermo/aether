@@ -390,10 +390,15 @@ identity-bearing class (R2):
   the life of the process and skips every later request for it, so the pair
   would 503 at the `on_demand` timeout until the proxy restarts (shown live in
   `//test/mtlspool`). Persisted pairs are the carry-over across agent restarts,
-  and a persisted pair with neither an on-demand fetch nor a re-subscription
-  within `--east-west-quic-pair-fetch-window` (default 1 h) of the agent starting
-  is pruned with its twin. That is the migration off rev245's persisted fan-out;
-  a wrongly pruned live pair costs one ODCDS round trip on its next request.
+  and a persisted pair with no evidence of use -- no on-demand fetch, no
+  re-subscription, and its twin not re-stated as held on a fresh stream, in this
+  or any earlier agent process -- within `--east-west-quic-pair-fetch-window`
+  (default 1 h) of the agent starting is pruned with its twin. That is the
+  migration off rev245's persisted fan-out. A held twin counts as used (#1073):
+  after a proxy restart every twin reaches the new generation through the
+  wildcard and is never fetched again, so the pre-#1073 "fetched since agent
+  start" rule pruned every live twin one window after each agent-only roll
+  (503 NC bursts on the #979 proving soak, and an Envoy crash, #1074).
 
   **A pair whose twin the proxy subscribed to is never forgotten (#1036).** The
   same Envoy behaviour applies to removal-evidence pruning. A pair whose source

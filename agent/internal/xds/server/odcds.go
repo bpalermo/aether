@@ -131,10 +131,15 @@ func (o *onDemandObserver) onDeltaRequest(streamID int64, req *discoveryv3.Delta
 //     removed_resources -- and Envoy drops it; the next request that routes to
 //     it opens an on-demand subscription, which is real first use. #1032
 //     admitted these, which is how rev245 persisted SAs x destinations pairs.
+//     A held twin whose pair IS known stays served and confirms the pair
+//     (issue #1073): after a proxy restart every twin the proxy uses arrived
+//     through the wildcard and is never fetched again, so being held is the
+//     only evidence of use it will ever give, and the fetch-window prune must
+//     not remove it.
 //   - A twin the proxy re-SUBSCRIBES holds a live on-demand subscription that
 //     a routed request opened and Envoy will never re-send: answering it absent
 //     strands the pair (503 at the on_demand timeout, forever). Its pair is
-//     admitted if valid, and marked fetched.
+//     admitted if valid, and confirmed (issue #1073).
 //
 // The re-subscribed set is also the complete set of on-demand subscriptions
 // of the proxy process on this stream (issue #1036), so it is handed to the
@@ -157,12 +162,10 @@ func (o *onDemandObserver) restateTwins(streamID int64, twins quicdemand.Classif
 	if len(twins.Resubscribed) == 0 && len(twins.HeldOnly) == 0 {
 		return
 	}
-	servedHeld := 0
-	for _, name := range twins.HeldOnly {
-		if o.cache.HasQUICPair(name) {
-			servedHeld++
-		}
-	}
+	// A held twin the agent serves is confirmed in use (issue #1073): the
+	// proxy re-stating it is the only sign of use a twin it already holds
+	// ever gives, and the fetch-window prune must never remove it.
+	servedHeld := o.cache.ConfirmHeldQUICTwins(ctx, twins.HeldOnly)
 	o.log.Info("fresh xDS stream re-stated QUIC twins: held-only twins admit nothing, live on-demand subscriptions are served",
 		"stream", streamID,
 		"resubscribed", len(twins.Resubscribed), "resumed_pairs", resumed,

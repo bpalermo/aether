@@ -105,6 +105,7 @@ go_test(
         "quic_dormant_test.go",
         "quic_fanout_test.go",
         "quic_generation_test.go",
+        "quic_held_prune_test.go",
         "quic_twin_eds_test.go",
         "races_test.go",
         "route_memo_test.go",

@@ -1012,22 +1012,57 @@ The agent logs one line per fresh stream: `fresh xDS stream re-stated QUIC twins
 held-only twins admit nothing, live on-demand subscriptions are served
 resubscribed=R resumed_pairs=P held_only=H held_served=S answered_absent=A`.
 
-**Post-start prune of unfetched pairs (`--east-west-quic-pair-fetch-window`, default
-`1h`).** A persisted pair that has had no on-demand fetch since the agent started,
-and whose twin the proxy did not re-subscribe, is dropped with its twin once the
-window has elapsed (checked on the one-minute prune tick). A pair first used in this
-process, or re-subscribed by the proxy, is kept. This is the migration off the
-fan-out rev245 persisted, and it bounds anything else a restart carries over without
-evidence of use. The agent has no traffic signal of its own (no admin calls, and a
-served twin is never fetched again), so a pruned pair that is still in use pays one
-ODCDS round trip on its next request and is re-admitted; that is the whole cost of a
-wrong prune, once per agent start. It logs one line per node:
+**Post-start prune of pairs with no evidence of use (`--east-west-quic-pair-fetch-window`,
+default `1h`).** A persisted pair that no agent process has ever seen evidence of use
+for is dropped with its twin once the window has elapsed (checked on the one-minute
+prune tick). Evidence of use is any of:
+
+- an on-demand fetch of the twin (first use);
+- an on-demand subscription for it, held by a live stream or re-subscribed on a fresh one;
+- the twin re-stated as **held** (`initial_resource_versions`) on a fresh stream while
+  the agent serves the pair (#1073).
+
+The evidence is persisted with the pair (`demand_confirmed` in
+`observed-upstreams.json`), so it survives agent restarts and node reboots. A pair
+with evidence is never pruned by the window; it goes only on removal evidence
+(source left the node, destination left the dependency set).
+
+What is left for the window is the fan-out rev245 persisted, and any pair persisted
+before #1073 that the proxy neither holds nor fetches. The agent has no traffic signal
+of its own: it makes no admin calls, and a twin the proxy already holds is never
+fetched again. So a held twin counts as used.
+
+**#1073, why "fetched" was the wrong signal.** After a proxy restart, every twin
+reaches the new generation through the wildcard, with no fetch and no subscription,
+and carries its traffic that way. On an agent-only roll the fresh stream re-states
+those twins as held-only. The pre-#1073 rule ("no on-demand fetch since agent start")
+then pruned every one of them exactly one window later, while they carried traffic:
+
+- the #979 proving soak saw about 200 × `503 NC` per burst fleet-wide;
+- Envoy crashed on one node (#1074, SIGBUS removing a QUIC cluster with a live connection).
+
+A held twin whose pair the agent does not serve still admits nothing and is answered
+absent (#1033). The fresh-stream line's `held_served=S` counts the held twins that
+were confirmed. The first time a pair is confirmed that way, the agent logs:
 
 ```
-pruned persisted east-west QUIC pairs with no on-demand fetch since agent start count=N remaining=M window=1h0m0s pairs=[…]
+confirmed east-west QUIC pairs the proxy holds without an on-demand subscription: never pruned by the fetch window count=N held_served=S
 ```
 
-followed by a `east-west QUIC fan-out` line with the new, smaller `quic_clusters`.
+When the window prunes anything, the agent logs one line per node:
+
+```
+pruned persisted east-west QUIC pairs with no evidence of use: never fetched, subscribed or held by the proxy count=N remaining=M window=1h0m0s pairs=[…]
+```
+
+It is followed by a `east-west QUIC fan-out` line with the new, smaller
+`quic_clusters`. Builds before #1073 logged `… with no on-demand fetch since agent
+start` instead.
+
+If that line shows up **after an agent roll on a node whose proxy kept running**,
+with `503 NC` on QUIC destinations right after it, that is #1073 again: the prune
+removed twins in use. File it with the fresh-stream line from the same agent
+generation.
 `0` disables the prune.
 
 **Stranded twin: 503 `NC` at 2 s for a source that came back (#1036).** Envoy's
@@ -1096,8 +1131,9 @@ destination, it goes **dormant**:
   pair that is not servable on a fresh stream logs `kept east-west QUIC pairs dormant
   … count=N`.
 - **The fetch-window prune.** It never touches a dormant pair, because a dormant pair
-  is not a served pair. It also never touches a served pair the proxy holds a
-  subscription for.
+  is not a served pair. It also never touches a served pair that a live stream holds a
+  subscription for. And it never touches a pair with persisted evidence of use: fetched,
+  subscribed, or re-stated as held (#1073).
 
 A dormant pair costs a few bytes in the state file and nothing in the proxy. It is
 bounded by the names the proxy has subscribed to since its last restart.

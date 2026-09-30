@@ -155,7 +155,7 @@ func (c *SnapshotCache) CloseQUICStream(ctx context.Context, streamID int64) int
 // re-sends it, so a valid pair that is not served here is stranded -- every
 // request 503s at the on_demand timeout -- rather than re-fetched. Same
 // validation as ObserveQUICTwin, silent on refusal; admitted and known pairs
-// are marked fetched, so the unfetched-pair prune keeps them, and a refused
+// are confirmed (issue #1073), so the fetch-window prune keeps them, and a refused
 // well-formed name is kept dormant (issue #1036) so it is republished when it
 // becomes valid. Returns how many pairs were new; those are published with one
 // regeneration, off the caller's goroutine (see ObserveQUICTwin).
@@ -206,8 +206,8 @@ func (c *SnapshotCache) HasQUICPair(name string) bool {
 // only on evidence that a request routed to the twin -- an on-demand fetch
 // (ObserveQUICTwin) or a live on-demand subscription re-stated on a fresh
 // stream (ResumeQUICSubscriptions) -- so an admitted or already-known pair is
-// also marked fetched in this process, which exempts it from the
-// unfetched-pair prune (pruneUnfetchedQUICPairs).
+// also confirmed (persisted, issue #1073), which exempts it from the
+// fetch-window prune (pruneUnfetchedQUICPairs) in this and later agent processes.
 //
 // Either way the proxy now holds an on-demand subscription for the name, and
 // keeps it for the life of the process (issue #1036), so the ledger records it
@@ -241,8 +241,8 @@ func (c *SnapshotCache) recordQUICPair(streamID int64, name string) (QUICTwinDec
 		}
 		return QUICTwinRefused, reason
 	}
-	c.quicFetched[p] = struct{}{}
 	if _, known := c.quicPairs[p]; known {
+		c.confirmQUICPairLocked(p)
 		return QUICTwinKnown, ""
 	}
 	at := time.Now()
@@ -250,9 +250,66 @@ func (c *SnapshotCache) recordQUICPair(streamID int64, name string) (QUICTwinDec
 		at = dormantAt
 	}
 	c.quicPairs[p] = at
+	c.quicConfirmed[p] = struct{}{}
 	c.bumpDepGenLocked()
 	c.markObservedDirtyLocked()
 	return QUICTwinAdded, ""
+}
+
+// confirmQUICPairLocked records evidence that the proxy uses p's twin (issue
+// #1073), marking the persisted set dirty the first time so the confirmation
+// survives an agent restart. Caller must hold depMu for writing.
+func (c *SnapshotCache) confirmQUICPairLocked(p quicPair) bool {
+	if _, ok := c.quicConfirmed[p]; ok {
+		return false
+	}
+	c.quicConfirmed[p] = struct{}{}
+	c.markObservedDirtyLocked()
+	return true
+}
+
+// ConfirmHeldQUICTwins handles the `quic:` twins a fresh xDS stream's first CDS
+// request re-stated as HELD without an on-demand subscription
+// (quicdemand.Classification's HeldOnly; issue #1073), and returns how many of
+// them the agent serves.
+//
+// A held twin of a pair the agent serves stays served -- the proxy holds it
+// and traffic may well be flowing on it -- and counts as evidence of use at
+// this moment: its pair is confirmed, which exempts it from the fetch-window
+// prune for good (PruneUnfetchedQUICPairs). This is the #1073 case: after a
+// proxy restart every twin reaches the new generation through the wildcard,
+// with no on-demand fetch and no subscription, and carries its traffic that
+// way; an agent-only restart then re-states all of them as held-only, and the
+// pre-#1073 prune removed every one of them one window later (~200 x 503 NC per
+// burst fleet-wide, and an Envoy SIGBUS in QuicConnection::OnCanWrite on one
+// node, #1074).
+//
+// A held twin whose pair the agent does NOT serve admits nothing (issue
+// #1033): it is answered absent and the proxy drops it -- it holds no
+// subscription for it, so its next request is real first use.
+func (c *SnapshotCache) ConfirmHeldQUICTwins(ctx context.Context, names []string) int {
+	served, confirmed := 0, 0
+	c.depMu.Lock()
+	for _, name := range names {
+		service, source, ok := proxy.ParseQUICClusterName(name, c.meshDomain)
+		if !ok {
+			continue
+		}
+		p := quicPair{service: service, source: source}
+		if _, known := c.quicPairs[p]; !known {
+			continue
+		}
+		served++
+		if c.confirmQUICPairLocked(p) {
+			confirmed++
+		}
+	}
+	c.depMu.Unlock()
+	if confirmed > 0 {
+		c.log.InfoContext(ctx, "confirmed east-west QUIC pairs the proxy holds without an on-demand subscription: never pruned by the fetch window",
+			"count", confirmed, "held_served", served)
+	}
+	return served
 }
 
 // localSourceSAKeys returns the "<ns>/<sa>" keys of the local workload
@@ -366,6 +423,8 @@ func (c *SnapshotCache) reviveDormantQUICPairsLocked(local map[string]struct{}) 
 	revived := make([]string, 0, len(woken))
 	for p, at := range woken {
 		c.quicPairs[p] = at
+		// A dormant pair exists because the proxy subscribed to its twin.
+		c.quicConfirmed[p] = struct{}{}
 		revived = append(revived, p.service+" <- "+p.source)
 	}
 	c.bumpDepGenLocked()
@@ -412,7 +471,7 @@ func (c *SnapshotCache) pruneQUICPairsLocked(local map[string]struct{}) []string
 			reason += ", dormant"
 		}
 		delete(c.quicPairs, p)
-		delete(c.quicFetched, p)
+		delete(c.quicConfirmed, p)
 		pruned = append(pruned, p.service+" <- "+p.source+" ("+reason+")")
 	}
 	if len(pruned) > 0 {
@@ -424,11 +483,11 @@ func (c *SnapshotCache) pruneQUICPairsLocked(local map[string]struct{}) []string
 }
 
 // DefaultQUICPairFetchWindow is how long after an agent start a persisted QUIC
-// pair may go without an on-demand fetch before it is pruned (issue #1033;
-// --east-west-quic-pair-fetch-window).
+// pair with no evidence of use may stay before it is pruned (issues #1033,
+// #1073; --east-west-quic-pair-fetch-window).
 const DefaultQUICPairFetchWindow = time.Hour
 
-// SetQUICPairFetchWindow sets the unfetched-pair prune window (issue #1033).
+// SetQUICPairFetchWindow sets the unconfirmed-pair prune window (issue #1033).
 // d <= 0 disables the prune. Boot-time, before the manager starts.
 func (c *SnapshotCache) SetQUICPairFetchWindow(d time.Duration) {
 	c.depMu.Lock()
@@ -444,26 +503,49 @@ func (c *SnapshotCache) SetQUICIdleTimeout(d time.Duration) {
 	c.quicIdleTimeout.Store(int64(d))
 }
 
-// PruneUnfetchedQUICPairs drops the persisted QUIC pairs that have had no
-// on-demand fetch since this agent started, once the fetch window has elapsed
-// (issue #1033). Called from the refresher's prune tick.
+// PruneUnfetchedQUICPairs drops the persisted QUIC pairs no agent generation
+// has seen evidence of use for, once the fetch window after this agent's start
+// has elapsed (issues #1033, #1073). Called from the refresher's prune tick.
 //
 // Why it exists: the #1032 agent admitted a pair for every twin the proxy
 // re-stated on a fresh stream, so the first talos deploy persisted the whole
 // SAs x destinations fan-out on every node, and pairs prune otherwise only on
-// removal evidence (source left the node, destination left the dependency set). The agent has
-// no traffic signal of its own -- it makes no admin calls, and a served twin
-// is never fetched again -- so "fetched on demand since start" is the only
-// evidence of use it can see. A pair first used in this process is marked
-// fetched and kept, and so is one whose twin the proxy re-subscribed on this
-// agent's stream (ResumeQUICSubscriptions): removing a twin Envoy holds an
-// on-demand subscription for would strand it, because Envoy never re-requests
-// a subscribed name. What is left -- a restored pair whose twin the proxy
-// holds only through the wildcard, or not at all -- is kept for the window,
-// then pruned with its twin. Envoy drops that cluster outright (it has no
-// subscription for it), so a pruned pair that still carries traffic opens one
-// on its next request: one ODCDS round trip (~20 ms), no 503, re-admitted as
-// real first use. The cost of a wrong prune is bounded and once per agent start.
+// removal evidence (source left the node, destination left the dependency
+// set). This drains that, and anything else persisted without evidence.
+//
+// What "in use" means (issue #1073). The agent has no traffic signal -- it
+// makes no admin calls -- and a twin the proxy already holds is never fetched
+// again, however much traffic it carries. After a proxy restart every twin
+// reaches the new generation through the wildcard CDS subscription, with no
+// fetch and no on-demand subscription, and carries its traffic that way. So
+// the pre-#1073 rule, "fetched since agent start", pruned every live twin one
+// window after any agent-only restart: the next requests paid 503 NC while the
+// twin was re-fetched, and removing a QUIC cluster that has live connections
+// can crash Envoy (#1074). The costs are asymmetric -- a wrongly kept pair is
+// one idle cluster until its source leaves the node or its destination leaves
+// the dependency set; a wrongly pruned one is 503s and a possible proxy crash
+// -- so a pair is kept on ANY evidence of use, ever:
+//
+//   - a live stream holds an on-demand subscription for its twin (the
+//     ledger's Subscribed; removing it would also strand it, #1036);
+//   - it is confirmed (quicConfirmed): fetched on demand, re-subscribed, or
+//     its twin re-stated as HELD on a fresh stream while the agent served it
+//     (ConfirmHeldQUICTwins) -- by this agent or, through the persisted
+//     demand_confirmed bit, any earlier one.
+//
+// "Held by a live stream" needs no per-stream holding set beyond the ledger's
+// subscriptions: the proxy keeps every twin the agent serves, so a pair a
+// fresh stream re-stated as held is held by every later generation too, and
+// its confirmation is sticky for the same reason. It also covers the node
+// reboot (agent AND proxy fresh): the restored pairs carry their confirmation
+// from the previous agent, so the twins the new proxy uses without ever
+// fetching them are not pruned an hour later.
+//
+// What is left is a restored pair no generation has vouched for: one persisted
+// before #1073 whose twin no fresh stream has re-stated since this agent
+// started, or the #1032 fan-out. Envoy drops such a cluster outright (it holds
+// no subscription for it), so a pruned pair that still has traffic re-fetches
+// on its next request and is re-admitted, confirmed -- at most once per pair.
 //
 // Logs one line per node with the count when it prunes anything.
 func (c *SnapshotCache) PruneUnfetchedQUICPairs() {
@@ -479,7 +561,7 @@ func (c *SnapshotCache) pruneUnfetchedQUICPairs(now time.Time) {
 	}
 	var pruned []string
 	for p := range c.quicPairs {
-		if _, fetched := c.quicFetched[p]; fetched || c.quicLedger.Subscribed(p) {
+		if _, confirmed := c.quicConfirmed[p]; confirmed || c.quicLedger.Subscribed(p) {
 			continue
 		}
 		delete(c.quicPairs, p)
@@ -496,7 +578,7 @@ func (c *SnapshotCache) pruneUnfetchedQUICPairs(now time.Time) {
 		return
 	}
 	slices.Sort(pruned)
-	c.log.Info("pruned persisted east-west QUIC pairs with no on-demand fetch since agent start",
+	c.log.Info("pruned persisted east-west QUIC pairs with no evidence of use: never fetched, subscribed or held by the proxy",
 		"count", len(pruned), "remaining", remaining, "window", window, "pairs", capStrings(pruned, quicPairsLogCap))
 	c.signalDependencyChange()
 }
@@ -531,23 +613,27 @@ func (c *SnapshotCache) QUICPairs() []string {
 // quicPairsLocked encodes the observed pairs in (service, source) order for
 // persistence. Caller must hold depMu.
 func (c *SnapshotCache) quicPairsLocked() []*agentv1.ObservedQUICPair {
-	return encodeQUICPairs(c.quicPairs)
+	return encodeQUICPairs(c.quicPairs, c.quicConfirmed)
 }
 
 // dormantQUICPairsLocked encodes the dormant pairs (issue #1036) the same way.
 // Caller must hold depMu.
 func (c *SnapshotCache) dormantQUICPairsLocked() []*agentv1.ObservedQUICPair {
-	return encodeQUICPairs(c.quicLedger.Dormant())
+	return encodeQUICPairs(c.quicLedger.Dormant(), nil)
 }
 
-func encodeQUICPairs(set map[quicPair]time.Time) []*agentv1.ObservedQUICPair {
+// encodeQUICPairs encodes set; a pair in confirmed carries demand_confirmed
+// (issue #1073).
+func encodeQUICPairs(set map[quicPair]time.Time, confirmed map[quicPair]struct{}) []*agentv1.ObservedQUICPair {
 	pairs := slices.SortedFunc(maps.Keys(set), compareQUICPairs)
 	out := make([]*agentv1.ObservedQUICPair, 0, len(pairs))
 	for _, p := range pairs {
+		_, isConfirmed := confirmed[p]
 		out = append(out, agentv1.ObservedQUICPair_builder{
-			Service:    p.service,
-			Source:     p.source,
-			ObservedAt: timestamppb.New(set[p]),
+			Service:         p.service,
+			Source:          p.source,
+			ObservedAt:      timestamppb.New(set[p]),
+			DemandConfirmed: isConfirmed,
 		}.Build())
 	}
 	return out
@@ -597,6 +683,11 @@ func (c *SnapshotCache) admitStoredQUICPairs(entries []*agentv1.ObservedQUICPair
 			continue
 		}
 		p := quicPair{service: svc, source: src}
+		if e.GetDemandConfirmed() {
+			// Evidence of use from an earlier agent generation (issue #1073):
+			// exempt from the fetch-window prune.
+			c.quicConfirmed[p] = struct{}{}
+		}
 		if _, known := c.quicPairs[p]; known {
 			continue
 		}
