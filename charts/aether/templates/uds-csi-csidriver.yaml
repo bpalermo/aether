@@ -1,0 +1,27 @@
+{{- if .Values.udsCsi.enabled }}
+# The csi.aether.io driver object (proposal 039 Phase 1). Cluster-scoped; the
+# node plugin that serves it is the aether-uds-csi DaemonSet.
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi.aether.io
+  labels:
+    {{- include "aether.udsCsi.labels" . | nindent 4 }}
+spec:
+  # Node-local tmpfs: nothing to attach, no Controller service.
+  attachRequired: false
+  # The kubelet passes the pod's UID (and name, namespace, service account) in
+  # the volume context. The plugin names the per-pod directory after the UID —
+  # never after anything the pod author controls.
+  podInfoOnMount: true
+  # Inline `csi:` volumes in the pod spec only: no PVs, no PVCs.
+  volumeLifecycleModes:
+    - Ephemeral
+  # File + the plugin's VOLUME_MOUNT_GROUP capability: the kubelet hands the
+  # pod's fsGroup to NodePublishVolume (volume_mount_group) instead of chowning
+  # the volume itself, and the plugin mounts the tmpfs gid=<fsGroup>,mode=2770.
+  # A pod with no fsGroup is refused with a FailedMount naming the fix.
+  fsGroupPolicy: File
+  requiresRepublish: false
+  seLinuxMount: false
+{{- end }}

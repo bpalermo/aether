@@ -1,0 +1,140 @@
+{{- if .Values.udsCsi.enabled }}
+{{- $kubeletRoot := include "aether.udsCsi.kubeletRoot" . }}
+{{- $root := include "aether.udsCsi.root" . }}
+# The csi.aether.io node plugin (proposal 039 Phase 1). It mounts a per-pod tmpfs
+# at <root>/<pod-uid> for every pod that declares an inline csi.aether.io volume
+# and bind-mounts it onto the kubelet's target path. It serves the kubelet's
+# plugin-registration API itself (no node-driver-registrar sidecar) and makes no
+# Kubernetes API calls, so it needs no RBAC and no token.
+#
+# Every host path is mounted at the SAME path in the container: the kubelet hands
+# the plugin host paths (target_path, and the CSI endpoint it dials).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "aether.udsCsi.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.udsCsi.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "aether.udsCsi.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # No surge: two instances on one node would fight over the same two
+      # socket paths and the same driver name. Mounts survive the gap (they live
+      # in the host mount namespace, not in this pod); only publishes and
+      # unpublishes wait, on the kubelet's own retry backoff.
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "aether.udsCsi.labels" . | nindent 8 }}
+    spec:
+      # A UDS pod cannot start, and a deleted one cannot finish terminating,
+      # while this plugin is down on its node.
+      priorityClassName: system-node-critical
+      # Reuse the agent ServiceAccount with no token mounted: the plugin talks
+      # only to the kubelet, over the two sockets below.
+      serviceAccountName: {{ include "aether.agent.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      # SIGTERM removes the registration socket (the kubelet deregisters the
+      # driver) and then stops the gRPC servers; nothing to drain beyond that.
+      terminationGracePeriodSeconds: 15
+      {{- with .Values.udsCsi.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      tolerations:
+        # Like every aether DaemonSet: run on a node the agent has not untainted
+        # yet, so a UDS pod's volume is publishable as soon as the node admits it.
+        - key: aether.io/agent-not-ready
+          operator: Exists
+          effect: NoSchedule
+        {{- with .Values.udsCsi.tolerations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: uds-csi
+          image: {{ include "aether.image" .Values.udsCsi.image | quote }}
+          imagePullPolicy: {{ .Values.udsCsi.image.pullPolicy }}
+          command: ["/uds-csi"]
+          args:
+            - "--debug={{ .Values.udsCsi.debug }}"
+            - "--kubelet-root={{ $kubeletRoot }}"
+            - "--root={{ $root }}"
+            - "--size={{ .Values.udsCsi.size }}"
+          env:
+            # NodeGetInfo's node_id.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+          # The binary's own --probe mode: exit 0 iff the CSI socket exists. A
+          # plugin that lost its socket (someone cleaned the plugins dir) is
+          # restarted, and a restart re-creates both sockets and re-registers.
+          livenessProbe:
+            exec:
+              command:
+                - "/uds-csi"
+                - "--probe"
+                - "--kubelet-root={{ $kubeletRoot }}"
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            # mount(2) in the host mount namespace, and Bidirectional
+            # propagation, both require a privileged container. The image's
+            # default user is nonroot; this container runs as root.
+            privileged: true
+            runAsUser: 0
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # Bidirectional: the bind onto the kubelet's target_path must
+            # propagate back to the host, where the kubelet and the pod's
+            # containers see it. Scoped to <kubeletRoot>/pods — every
+            # target_path lives there — rather than the whole kubelet root.
+            - name: kubelet-pods
+              mountPath: {{ $kubeletRoot }}/pods
+              mountPropagation: Bidirectional
+            # The per-pod tmpfs mounts. Bidirectional so they exist in the host
+            # mount namespace (and survive this pod), where the node proxy's
+            # HostToContainer /run/aether mount will see them in Phase 2.
+            - name: uds-root
+              mountPath: {{ $root }}
+              mountPropagation: Bidirectional
+            # The CSI endpoint the kubelet dials.
+            - name: plugin-dir
+              mountPath: {{ $kubeletRoot }}/plugins/csi.aether.io
+            # The registration socket the kubelet's plugin watcher discovers.
+            - name: registration-dir
+              mountPath: {{ $kubeletRoot }}/plugins_registry
+          resources:
+            {{- toYaml .Values.udsCsi.resources | nindent 12 }}
+      volumes:
+        - name: kubelet-pods
+          hostPath:
+            path: {{ $kubeletRoot }}/pods
+            type: Directory
+        - name: uds-root
+          hostPath:
+            path: {{ $root }}
+            type: DirectoryOrCreate
+        - name: plugin-dir
+          hostPath:
+            path: {{ $kubeletRoot }}/plugins/csi.aether.io
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: {{ $kubeletRoot }}/plugins_registry
+            type: Directory
+{{- end }}

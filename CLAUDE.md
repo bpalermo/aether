@@ -29,6 +29,7 @@ make test-race               # whole tree, same flag
 make build-agent             # or: bazel build //agent/cmd/agent/...
 make build-mesh-dns          # or: bazel build //agent/cmd/mesh-dns/...
 make build-proxy-supervisor  # or: bazel build //agent/cmd/proxy-supervisor/...
+make build-uds-csi           # or: bazel build //agent/cmd/uds-csi/...
 make build-cni-install       # or: bazel build //cni/cmd/cni-install/...
 make build-registrar         # or: bazel build //registrar/cmd/registrar/...
 
@@ -63,6 +64,7 @@ bazel run @rules_go//go get <package>
 make load-agent-image        # Load agent image into local Docker
 make load-mesh-dns-image     # Load mesh-dns image into local Docker
 make load-proxy-supervisor-image  # Load proxy-supervisor image into local Docker
+make load-uds-csi-image      # Load uds-csi image into local Docker
 make load-cni-install-image  # Load cni-install image into local Docker
 make load-registrar-image    # Load registrar image into local Docker
 make load-all                # Load all images
@@ -77,6 +79,7 @@ There is no top-level `cmd/`: each component owns its own (`agent/cmd/`, `cni/cm
 
 - **`agent/cmd/agent`** - Node agent DaemonSet. Uses `controller-runtime` manager to run the xDS server and CNI gRPC server as runnables. CLI built with Cobra. Also hosts the `agent edge` subcommand (the north-south edge gateway control plane, proposal 003/018). The supervisor is NOT an agent subcommand any more — the `agent proxy-supervisor` alias was removed after #772.
 - **`agent/cmd/proxy-supervisor`** - The Envoy hot-restart supervisor (proposal 001), PID 1 of the `aether-proxy` container. Its own binary and its own image since #772: it used to be an `agent` subcommand, so the proxy pod staged and ran the whole 65 MiB agent binary (controller-runtime, client-go, go-control-plane, SPIRE) to fork a child process. 15 MiB / 24 modules now. `//agent/cmd/proxy-supervisor:deps_test` and `scripts/check-proxy-supervisor-deps.sh` keep it that way.
+- **`agent/cmd/uds-csi`** - The `csi.aether.io` CSI node plugin (proposal 039 Phase 1), its own image (`uds-csi`) and its own privileged DaemonSet (`charts/aether` `udsCsi.enabled`, default **off** until Phase 2 makes it the only UDS carrier). Mounts a per-pod tmpfs (`nosuid,nodev,noexec,nosymfollow`, `mode=2770,gid=<fsGroup>`) at `/run/aether/uds/<pod-uid>` and binds it onto the kubelet's target path; serves the kubelet plugin-registration API itself (no `node-driver-registrar`). Logic in `agent/internal/udscsi` (mounts behind a `Mounter` interface so unit tests need no root). `//agent/cmd/uds-csi:deps_test` and `scripts/check-uds-csi-deps.sh` keep it free of client-go/controller-runtime/SPIRE. Kind e2e: `e2e/uds-csi.sh`.
 - **`agent/cmd/mesh-dns`** - Slim standalone mesh-DNS daemon (its own DaemonSet and its own image since #583). Serves `<svc>.<ns>.<mesh-domain>` from the record snapshot the node agent writes and forwards everything else upstream, so the resolver survives agent rolls (#578).
 - **`agent/cmd/proxy-ready`** - The `aether-proxy` pod's exec readiness probe (#673). One flag (`--ready-marker`); exit 0 iff that path stats. Deliberately stdlib-only (~1.7MB vs the agent's 67MB) — `//agent/cmd/proxy-ready:deps_test` fails the build if it ever grows a dependency. Ships as an extra layer in the proxy-supervisor image (not the agent image) and is staged onto the proxy pod by the `install-supervisor` initContainer.
 - **`agent/cmd/mesh-dns-ready`** - The same pattern for the `aether-mesh-dns` pod (#683), guarded by `//agent/cmd/mesh-dns-ready:deps_test`. Bundled in the mesh-dns image the DaemonSet already runs, so the prober and the daemon that writes the marker are the same artifact and no chart/image skew is possible.
@@ -113,7 +116,7 @@ There is no top-level `cmd/`: each component owns its own (`agent/cmd/`, `cni/cm
 - **`registrar/internal/replicator/`** - The registrar's leader-elected cross-region etcd replicator (proposal 006 Phase 2). It watches only this region's own authoritative subtree and replays every change verbatim into each peer region's etcd, so mirroring is loop-free by construction; every mirrored key hangs off a per-peer origin-heartbeat lease that only this replicator refreshes, so a dead region's mirror expires on the peers with no peer-side GC.
 - **`common/udspath/`** - Resolves a pod's `<volume>/<socket>` annotation onto its host path under kubelet's pod-volumes dir (`--kubelet-pods-dir`), enforcing the `emptyDir`-only shape and the 107-byte `AF_UNIX` budget (proposal 034).
 - **`agent/storage/`** - Local file-based storage with in-memory caching and fsnotify file watching. Stores CNI pod data as protojson (`<key>.json`).
-- **`api/`** - Protobuf definitions under `aether/cni/v1/`, `aether/registry/v1/`, `aether/registrar/v1/`, `aether/config/v1/` (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`), and `aether/agent/v1/` (the node agent's persisted observed demand set, `ObservedUpstreams`; node-local state, not a wire API). Uses `buf/validate` for proto validation.
+- **`api/`** - Protobuf definitions under `aether/cni/v1/`, `aether/registry/v1/`, `aether/registrar/v1/`, `aether/config/v1/` (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`), `aether/kubelet/pluginregistration/v1/` (a copy of the kubelet's plugin-registration API, proto package kept as `pluginregistration` — wire contract; `bazel/lint/buf.yaml` scopes the naming-rule ignores to that file), and `aether/agent/v1/` (the node agent's persisted observed demand set, `ObservedUpstreams`; node-local state, not a wire API). Uses `buf/validate` for proto validation.
 - **`common/apis/config/v1/`** - Kubernetes CRD Go types (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`) wrapping the `aether/config/v1` protos with deepcopy/jsonshim glue.
 - **`common/constants/`** - Shared Kubernetes labels, annotations (prefixes `aether.io/`, `endpoint.aether.io/`, `config.aether.io/`, `capture.aether.io/`), and registry/proxy/endpoint constants.
 - **`common/file/`** - Atomic file write utilities with platform-specific fadvise support.

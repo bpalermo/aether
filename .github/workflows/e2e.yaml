@@ -1,5 +1,5 @@
 # Nightly e2e — conformance (GATEWAY-HTTP + MESH-HTTP), waypoint, replicator, uds,
-# l4-routes, eastwest-quic.
+# uds-csi, l4-routes, eastwest-quic.
 #
 # Consolidates the former conformance.yaml, waypoint-e2e.yaml, and
 # replicator-e2e.yaml into ONE workflow: a single bazel `build` job builds the
@@ -30,7 +30,7 @@ on:
         description: "Run a single job (debugging)"
         type: choice
         default: all
-        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, l4-routes, eastwest-quic]
+        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, l4-routes, eastwest-quic]
   schedule:
     # Nightly at 04:17 UTC (off the hour to avoid contention).
     - cron: "17 4 * * *"
@@ -76,13 +76,13 @@ jobs:
           cache-save: false
 
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
-        run: scripts/ci-bazel-warmup.sh --config=ci //agent/cmd/agent:image_load //agent/cmd/mesh-dns:image_load //agent/cmd/proxy-supervisor:image_load //cni/cmd/cni-install:image_load //registrar/cmd/registrar:image_load //controller/cmd/controller:image_load //e2e/udsecho:image_load //e2e/l4echo:image_load
+        run: scripts/ci-bazel-warmup.sh --config=ci //agent/cmd/agent:image_load //agent/cmd/mesh-dns:image_load //agent/cmd/proxy-supervisor:image_load //agent/cmd/uds-csi:image_load //cni/cmd/cni-install:image_load //registrar/cmd/registrar:image_load //controller/cmd/controller:image_load //e2e/udsecho:image_load //e2e/l4echo:image_load
 
       - name: Build and load container images
         run: |
           retry() { for n in 1 2 3; do "$@" && return 0; echo "attempt $n failed; retrying in 20s"; sleep 20; done; return 1; }
           for t in //agent/cmd/agent:image_load //agent/cmd/mesh-dns:image_load \
-                   //agent/cmd/proxy-supervisor:image_load \
+                   //agent/cmd/proxy-supervisor:image_load //agent/cmd/uds-csi:image_load \
                    //cni/cmd/cni-install:image_load //registrar/cmd/registrar:image_load \
                    //controller/cmd/controller:image_load //e2e/udsecho:image_load \
                    //e2e/l4echo:image_load; do
@@ -95,6 +95,7 @@ jobs:
             "${IMAGE_REGISTRY}/agent:latest" \
             "${IMAGE_REGISTRY}/mesh-dns:latest" \
             "${IMAGE_REGISTRY}/proxy-supervisor:latest" \
+            "${IMAGE_REGISTRY}/uds-csi:latest" \
             "${IMAGE_REGISTRY}/cni-install:latest" \
             "${IMAGE_REGISTRY}/registrar:latest" \
             "${IMAGE_REGISTRY}/controller:latest" \
@@ -146,7 +147,7 @@ jobs:
 
       - name: Load images into kind
         run: |
-          for img in agent:latest mesh-dns:latest proxy-supervisor:latest cni-install:latest registrar:latest controller:latest; do
+          for img in agent:latest mesh-dns:latest proxy-supervisor:latest uds-csi:latest cni-install:latest registrar:latest controller:latest; do
             kind load docker-image "${IMAGE_REGISTRY}/${img}" --name "${KIND_CLUSTER}"
           done
 
@@ -202,6 +203,7 @@ jobs:
             $(img cniInstall cni-install) \
             $(img registrar registrar) \
             $(img controller controller) \
+            $(img udsCsi uds-csi) \
             --set proxy.image.pullPolicy=IfNotPresent
           kubectl get gatewayclass aether -o yaml || true
 
@@ -314,7 +316,7 @@ jobs:
 
       - name: Load images into kind
         run: |
-          for img in agent:latest mesh-dns:latest proxy-supervisor:latest cni-install:latest registrar:latest controller:latest; do
+          for img in agent:latest mesh-dns:latest proxy-supervisor:latest uds-csi:latest cni-install:latest registrar:latest controller:latest; do
             kind load docker-image "${IMAGE_REGISTRY}/${img}" --name "${KIND_CLUSTER}"
           done
 
@@ -349,6 +351,7 @@ jobs:
             $(img cniInstall cni-install) \
             $(img registrar registrar) \
             $(img controller controller) \
+            $(img udsCsi uds-csi) \
             --set proxy.image.pullPolicy=IfNotPresent
           kubectl get gatewayclass aether -o yaml || true
 
@@ -605,6 +608,66 @@ jobs:
         if: always()
         run: ./e2e/uds.sh down || true
 
+  # --- Proposal 039 Phase 1: the csi.aether.io CSI node plugin, on its own.
+  # ONE kind cluster, SPIRE off, udsCsi.enabled=true. Asserts the kubelet
+  # registered the driver (CSINode) through the plugin's OWN registration
+  # socket (no node-driver-registrar), that a pod with an fsGroup gets a
+  # per-pod tmpfs (mode 2770, gid = fsGroup, nosuid/nodev/noexec/nosymfollow)
+  # in which its nonroot app binds a socket that answers, that a pod WITHOUT
+  # an fsGroup stays Pending with a FailedMount naming the fix, that deleting
+  # the pod removes the host tmpfs, and that a rollout restart of the plugin
+  # re-registers and still publishes. Harness: e2e/uds-csi.sh. Nothing in
+  # aether consumes the driver yet (Phase 2).
+  uds-csi:
+    needs: build
+    if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'uds-csi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download images artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: aether-images
+          path: /tmp
+
+      - name: Load images into docker
+        run: docker load -i /tmp/aether-images.tar
+
+      - name: Bring up the uds-csi environment
+        env:
+          UDS_CSI_SKIP_BUILD: "1"
+        run: ./e2e/uds-csi.sh up
+
+      - name: Verify registration, publish, FailedMount and plugin roll
+        id: verify
+        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
+        run: ./e2e/uds-csi.sh verify
+
+      - name: Collect diagnostics on failure
+        if: failure() || steps.verify.outcome == 'failure'
+        run: |
+          mkdir -p /tmp/uds-csi-logs
+          kubectl --context kind-uds-csi get pods -A -o wide 2>&1 | tee /tmp/uds-csi-logs/pods.txt || true
+          kind export logs /tmp/uds-csi-logs/kind --name uds-csi || true
+          kubectl --context kind-uds-csi get csinode,csidriver -o yaml > /tmp/uds-csi-logs/csi.yaml 2>&1 || true
+          kubectl --context kind-uds-csi -n aether-system logs -l app.kubernetes.io/component=uds-csi --tail=400 > /tmp/uds-csi-logs/uds-csi.log 2>&1 || true
+          kubectl --context kind-uds-csi -n aether-test get events --sort-by=.lastTimestamp > /tmp/uds-csi-logs/events.txt 2>&1 || true
+
+      - name: Upload diagnostics
+        if: failure() || steps.verify.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: uds-csi-e2e-logs
+          path: /tmp/uds-csi-logs
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: ./e2e/uds-csi.sh down || true
+
   # --- Gateway API L4 routes on the mesh capture path (proposal 018 Phase 3b).
   #
   # All three route types (issue #868). TCPRoute: a weighted 75/25 split and
@@ -773,7 +836,7 @@ jobs:
   # rather than filing per night — three duplicate issues is how people learn to
   # ignore them, which is the very failure mode this exists to prevent.
   report-failure:
-    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, l4-routes, eastwest-quic]
+    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, l4-routes, eastwest-quic]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -801,6 +864,7 @@ jobs:
             waypoint=${{ needs.waypoint.result }}
             replicator=${{ needs.replicator.result }}
             uds=${{ needs.uds.result }}
+            uds-csi=${{ needs.uds-csi.result }}
             l4-routes=${{ needs.l4-routes.result }}
             eastwest-quic=${{ needs.eastwest-quic.result }}
         run: |

@@ -373,6 +373,65 @@ cniInstall:
       cpu: 100m
       memory: 32Mi
 
+# The csi.aether.io CSI node plugin (proposal 039 Phase 1): the mesh-owned
+# carrier for a UDS-served workload's socket directory. A pod that declares
+#
+#   securityContext: {fsGroup: <gid>}
+#   volumes: [{name: s, csi: {driver: csi.aether.io}}]
+#
+# gets, at the volume's mountPath, a per-pod tmpfs the plugin mounts at
+# <root>/<pod-uid> on the host: nosuid,nodev,noexec,nosymfollow, capped at
+# `size`, mode 2770 owned by root:<fsGroup>. A pod WITHOUT an fsGroup is refused
+# with a FailedMount event naming the fix.
+#
+# Renders the `aether-uds-csi` DaemonSet (privileged: it mounts in the host mount
+# namespace, with Bidirectional propagation so its mounts reach the kubelet and
+# the host) and the cluster-scoped CSIDriver object. The plugin registers itself
+# with the kubelet (no node-driver-registrar sidecar) and makes no API calls.
+#
+# Phase 1 ships the driver ALONE and OFF: nothing in aether consumes it yet.
+# Phase 2 makes it the only UDS carrier (a breaking cut-over) and flips the
+# default. See docs/proposals/039_uds-csi-driver.md.
+udsCsi:
+  enabled: false
+  # Its own slim image: the CSI + registration gRPC services and x/sys/unix, no
+  # Kubernetes client (//agent/cmd/uds-csi:deps_test). Same repository+digest
+  # convention as the other images.
+  image:
+    repository: "{@//agent/cmd/uds-csi:image_push.repository}"
+    digest: "{@//agent/cmd/uds-csi:image_push.digest}"
+    tag: ""
+    pullPolicy: Always
+  # The kubelet's --root-dir, and the ONLY place it appears on the CSI path: the
+  # plugin's CSI socket (<kubeletRoot>/plugins/csi.aether.io/csi.sock), its
+  # registration socket (<kubeletRoot>/plugins_registry/), and the pods dir the
+  # kubelet's target paths live under all derive from it. The default is right
+  # for kubeadm, kind and Talos; k0s is /var/lib/k0s/kubelet, microk8s
+  # /var/snap/microk8s/common/var/lib/kubelet.
+  kubeletRoot: /var/lib/kubelet
+  # Host directory holding the per-pod tmpfs mounts (<root>/<pod-uid>). Under
+  # /run so a reboot starts it empty (the kubelet republishes); under
+  # /run/aether because the node proxy already mounts /run/aether from the host.
+  root: /run/aether/uds
+  # Size cap of each per-pod tmpfs (bytes, or Ki/Mi/Gi). It holds a socket inode
+  # and whatever else the app writes there; pages are charged to the app's
+  # memory cgroup.
+  size: 1Mi
+  # Verbose logging for THIS daemon only (the global `debug` does not reach it).
+  debug: false
+  # Extra scheduling constraints. The aether.io/agent-not-ready toleration is
+  # always rendered (like every aether DaemonSet): a UDS pod's volume must be
+  # publishable as soon as the node admits it.
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    requests:
+      cpu: 5m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 32Mi
+
 # Per-node Envoy proxy DaemonSet. Disable to deploy only the agent.
 #
 # NOTE — this DaemonSet uses TWO images: `proxy.image` (Envoy) for the runtime

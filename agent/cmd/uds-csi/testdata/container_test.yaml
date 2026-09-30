@@ -1,0 +1,21 @@
+schemaVersion: 2.0.0
+metadataTest:
+  entrypoint: ["/uds-csi"]
+  # The shared distroless nonroot base, like every aether image. The chart runs
+  # this container privileged as root (runAsUser: 0) — mount(2) needs it — the
+  # same way it runs the agent, proxy and mesh-dns containers as root on this
+  # same base.
+  user: 65532 # nonroot
+fileExistenceTests:
+  # The csi.aether.io node plugin (proposal 039). Also the DaemonSet's exec
+  # liveness probe (`/uds-csi --probe`).
+  - name: 'uds-csi'
+    path: '/uds-csi'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'
+  # This image exists to NOT be the agent image: a privileged node plugin must
+  # not carry the agent's client-go / controller-runtime / SPIRE payload.
+  - name: 'no agent binary'
+    path: '/agent'
+    shouldExist: false

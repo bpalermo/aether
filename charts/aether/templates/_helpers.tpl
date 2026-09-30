@@ -122,6 +122,46 @@ meshdns.DefaultLameDuckMax.
 {{- end -}}
 {{- end -}}
 
+{{/* --------------------------------------------------------------- uds-csi */}}
+{{- define "aether.udsCsi.fullname" -}}
+{{- printf "%s-uds-csi" (include "aether.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- define "aether.udsCsi.selectorLabels" -}}
+app.kubernetes.io/name: aether-uds-csi
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: uds-csi
+{{- end -}}
+{{- define "aether.udsCsi.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.udsCsi.selectorLabels" . }}
+app.kubernetes.io/part-of: aether
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- with .Chart.AppVersion }}
+app.kubernetes.io/version: {{ . | quote }}
+{{- end }}
+{{- end -}}
+{{/*
+udsCsi.kubeletRoot, validated and without a trailing slash. It is the ONLY
+place the kubelet root appears on the CSI path (proposal 039, R3): the
+DaemonSet's hostPaths, its mountPaths (identical, because the kubelet hands the
+plugin HOST paths) and the plugin's --kubelet-root all derive from it, so they
+cannot disagree.
+*/}}
+{{- define "aether.udsCsi.kubeletRoot" -}}
+{{- $r := .Values.udsCsi.kubeletRoot | toString | trimSuffix "/" -}}
+{{- if not (hasPrefix "/" $r) -}}
+{{- fail (printf "udsCsi.kubeletRoot must be an absolute path, got %q" .Values.udsCsi.kubeletRoot) -}}
+{{- end -}}
+{{- $r -}}
+{{- end -}}
+{{- define "aether.udsCsi.root" -}}
+{{- $r := .Values.udsCsi.root | toString | trimSuffix "/" -}}
+{{- if not (hasPrefix "/" $r) -}}
+{{- fail (printf "udsCsi.root must be an absolute path, got %q" .Values.udsCsi.root) -}}
+{{- end -}}
+{{- $r -}}
+{{- end -}}
+
 {{/* ------------------------------------------------------------------ proxy */}}
 {{- define "aether.proxy.fullname" -}}{{- "aether-proxy" -}}{{- end -}}
 {{- define "aether.proxy.serviceAccountName" -}}{{ include "aether.proxy.fullname" . }}{{- end -}}

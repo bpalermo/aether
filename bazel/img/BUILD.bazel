@@ -16,6 +16,7 @@ _COMPONENTS = [
     "agent",
     "mesh-dns",
     "proxy-supervisor",
+    "uds-csi",
     "cni-install",
     "registrar",
     "controller",

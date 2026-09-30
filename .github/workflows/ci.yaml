@@ -610,6 +610,14 @@ jobs:
       # this is the build-graph half.
       - name: Guard proxy-supervisor linkage
         run: scripts/check-proxy-supervisor-deps.sh --config=ci
+      # Proposal 039: the csi.aether.io node plugin runs privileged on every node
+      # with Bidirectional mount propagation, and talks only to the kubelet and
+      # the kernel — a Kubernetes client, the xDS stack or SPIRE in its link set
+      # is attack surface in the most privileged aether process.
+      # //agent/cmd/uds-csi:deps_test asserts this on the linked ELF; this is
+      # the build-graph half.
+      - name: Guard uds-csi linkage
+        run: scripts/check-uds-csi-deps.sh --config=ci
 
   # Race gate (#772). Runs the same impacted test set as `test` + `integration`,
   # rebuilt with the Go race detector. Scoped by bazel-diff exactly like the

@@ -423,8 +423,8 @@ make check-published                           # the last day of main
 
 Read-only, no credentials needed (the packages are public), and it cannot push
 anything. It prints every coordinate it checked — four commit-tagged charts,
-eight images, a cosign signature for each image's index **and for every child
-manifest it lists** (36 coordinates today), plus the aether-proxy digest the commit's chart pins (see "Verifying the aether-proxy signature") — and exits non-zero naming each one
+nine images (eight for a commit before uds-csi), a cosign signature for each image's index **and for every child
+manifest it lists** (40 coordinates today), plus the aether-proxy digest the commit's chart pins (see "Verifying the aether-proxy signature") — and exits non-zero naming each one
 that is missing. It checks that a signature *exists*; to check that it
 *verifies*, see "Verifying image signatures" below.
 

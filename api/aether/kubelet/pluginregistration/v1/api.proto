@@ -1,0 +1,63 @@
+// The kubelet plugin-registration API, served by the uds-csi node plugin
+// (proposal 039 Phase 1) so the kubelet registers csi.aether.io WITHOUT a
+// node-driver-registrar sidecar.
+//
+// Copied from k8s.io/kubelet pkg/apis/pluginregistration/v1/api.proto
+// (Copyright The Kubernetes Authors, Apache License 2.0) and converted from
+// proto3 to edition 2023 with implicit presence, so the wire format is
+// byte-identical to the original.
+//
+// THE PACKAGE AND EVERY NAME BELOW ARE WIRE CONTRACT, NOT STYLE. The kubelet's
+// plugin watcher dials the socket it finds under <kubelet-root>/plugins_registry
+// and calls `/pluginregistration.Registration/GetInfo` and
+// `/pluginregistration.Registration/NotifyRegistrationStatus` by those literal
+// gRPC paths. Renaming the package (to satisfy PACKAGE_VERSION_SUFFIX) or the
+// service (SERVICE_SUFFIX) makes the kubelet get `Unimplemented` and never
+// register the driver — hence the file-scoped ignore_only in
+// bazel/lint/buf.yaml. Field numbers and types must
+// stay exactly as upstream.
+edition = "2023";
+
+package pluginregistration;
+
+option features.field_presence = IMPLICIT;
+option go_package = "aethermesh.dev/api/aether/kubelet/pluginregistration/v1;pluginregistrationv1";
+
+// PluginInfo is the message sent from a plugin to the Kubelet pluginwatcher for
+// plugin registration.
+message PluginInfo {
+  // Type of the Plugin. CSIPlugin or DevicePlugin.
+  string type = 1;
+  // Plugin name that uniquely identifies the plugin for the given plugin type.
+  // For CSI, this is the CSI driver name.
+  string name = 2;
+  // Optional endpoint location. If set, the kubelet uses this endpoint for the
+  // plugin's own API (for CSI: the CSI socket), not the registration socket.
+  string endpoint = 3;
+  // Plugin service API versions the plugin supports.
+  repeated string supported_versions = 4;
+}
+
+// RegistrationStatus is the message sent from Kubelet pluginwatcher to the
+// plugin for notification on registration status.
+message RegistrationStatus {
+  // True if plugin gets registered successfully at Kubelet.
+  bool plugin_registered = 1;
+  // Error message in case plugin fails to register, empty string otherwise.
+  string error = 2;
+}
+
+// RegistrationStatusResponse is sent by plugin to kubelet in response to
+// RegistrationStatus RPC.
+message RegistrationStatusResponse {}
+
+// InfoRequest is the empty request message from Kubelet.
+message InfoRequest {}
+
+// Registration is the service advertised by the Plugins.
+service Registration {
+  // GetInfo is how the kubelet learns the plugin's type, name and endpoint.
+  rpc GetInfo(InfoRequest) returns (PluginInfo) {}
+  // NotifyRegistrationStatus reports the kubelet's verdict on the registration.
+  rpc NotifyRegistrationStatus(RegistrationStatus) returns (RegistrationStatusResponse) {}
+}

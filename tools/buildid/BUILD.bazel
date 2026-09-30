@@ -42,6 +42,8 @@ build_id_check(
         # property #673's profiling pass depended on when the same code was part
         # of the agent binary.
         "//agent/cmd/proxy-supervisor:proxy-supervisor_image_buildid_binary",
+        # The csi.aether.io node plugin (proposal 039): its own published image.
+        "//agent/cmd/uds-csi:uds-csi_image_buildid_binary",
         "//cni/cmd/cni-install:cni-install_image_buildid_binary",
         # The CNI plugin the installer drops on the host — a second released ELF
         # inside the cni-install image.

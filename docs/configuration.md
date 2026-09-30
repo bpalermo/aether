@@ -141,6 +141,32 @@ decision every cycle — see `charts/prober/values.yaml`.
 | `cniInstall.otlpEndpoint` | `""` (= `otel.endpoint`) | OTLP gRPC `host:port` the CNI **plugin binary** exports `aether_cni_*` to. Overrides `otel.endpoint` for the CNI alone. |
 | `cniInstall.pinOTLPEndpoint` | `true` | cni-install resolves the endpoint's host through cluster DNS and writes the **address** into the netconf. The plugin runs under the host's resolver, which cannot resolve `*.svc.cluster.local` (#950: on Talos and kind every export failed with `produced zero addresses`). An unresolvable name is written unchanged. A collector Service created/recreated after the agent started is picked up on the next agent roll; use a ClusterIP Service, not a headless one. |
 
+### `udsCsi` — the `csi.aether.io` CSI node plugin (proposal 039)
+
+Phase 1: the driver ships **off** and nothing in aether consumes it yet; Phase 2
+makes it the only UDS carrier and flips the default. A pod declaring
+`securityContext.fsGroup: <gid>` and `volumes: [{name: s, csi: {driver: csi.aether.io}}]`
+gets a per-pod tmpfs at the volume's `mountPath`, mounted by the plugin at
+`<root>/<pod-uid>` on the host: `nosuid,nodev,noexec,nosymfollow`, capped at
+`size`, `mode=2770,uid=0,gid=<fsGroup>`. A pod **without** an `fsGroup` is refused
+with a `FailedMount` event naming the fix. Renders the `aether-uds-csi` DaemonSet
+(privileged; `Bidirectional` propagation on `<kubeletRoot>/pods` and on `root`)
+and the cluster-scoped `CSIDriver` (`attachRequired: false`, `podInfoOnMount:
+true`, `volumeLifecycleModes: [Ephemeral]`, `fsGroupPolicy: File`). The plugin
+serves the kubelet's plugin-registration API itself (no `node-driver-registrar`
+sidecar), makes no API calls (no RBAC, no token) and does not involve SPIRE.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `udsCsi.enabled` | `false` | Render the DaemonSet and the `CSIDriver`. |
+| `udsCsi.image.*` | repo+digest placeholders, `pullPolicy: Always` | The slim `uds-csi` image (`quay.io/aethermesh/uds-csi`). It is published with the chart even while disabled. |
+| `udsCsi.kubeletRoot` | `/var/lib/kubelet` | The kubelet's `--root-dir` — the **only** place it appears on the CSI path: `--kubelet-root`, the CSI socket (`<kubeletRoot>/plugins/csi.aether.io/csi.sock`), the registration socket (`<kubeletRoot>/plugins_registry/csi.aether.io-reg.sock`) and the `pods` dir every target path lives under all derive from it, with hostPath == mountPath. Right for kubeadm, kind and **Talos** (default root); k0s is `/var/lib/k0s/kubelet`, microk8s `/var/snap/microk8s/common/var/lib/kubelet`. Must be absolute (the chart refuses otherwise). |
+| `udsCsi.root` | `/run/aether/uds` | Host directory holding the per-pod tmpfs mounts (`<root>/<pod-uid>`). Under `/run` so a reboot starts it empty (the kubelet republishes); under `/run/aether` because the node proxy already mounts `/run/aether` from the host. |
+| `udsCsi.size` | `1Mi` | Size cap of each per-pod tmpfs (bytes or `Ki`/`Mi`/`Gi`, at most `1Gi`). Pages are charged to the writing app's memory cgroup. |
+| `udsCsi.debug` | `false` | Debug logging for this daemon only; the global `debug` does not reach it. |
+| `udsCsi.nodeSelector` / `udsCsi.tolerations` | `{}` / `[]` | Extra scheduling constraints. The `aether.io/agent-not-ready` toleration is always rendered. |
+| `udsCsi.resources.{requests,limits}` | cpu `5m`/`100m`, mem `16Mi`/`32Mi` | |
+
 ### `registrar`
 
 | Key | Default | Purpose |
@@ -455,6 +481,28 @@ than an `httpGet`/`tcpSocket`: this DaemonSet is `hostNetwork: true` with
 `maxSurge: 1`, so predecessor and successor share the host netns for the whole
 handoff and a port-based check could be answered by the peer pod's SO_REUSEPORT
 socket. That is precisely what #582 proposed and why it was closed abandoned.
+
+### `uds-csi` (standalone binary — the `aether-uds-csi` DaemonSet, proposal 039)
+
+The `csi.aether.io` CSI node plugin. Stdlib `flag` parsing; no Kubernetes client,
+no telemetry exporter (`//agent/cmd/uds-csi:deps_test`,
+`scripts/check-uds-csi-deps.sh`).
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--kubelet-root` | `/var/lib/kubelet` | The kubelet's `--root-dir`. Every `target_path` must lie under `<kubelet-root>/pods/<pod-uid>/`, and the socket defaults derive from it. |
+| `--csi-socket` | `<kubelet-root>/plugins/csi.aether.io/csi.sock` | CSI Identity + Node endpoint; also the `endpoint` reported to the kubelet, so it must be the path the kubelet sees. |
+| `--registration-socket` | `<kubelet-root>/plugins_registry/csi.aether.io-reg.sock` | The kubelet plugin-registration endpoint (served by this binary, not a sidecar). |
+| `--node-id` | `$NODE_NAME` | `NodeGetInfo`'s node ID. |
+| `--root` | `/run/aether/uds` | Host directory holding the per-pod tmpfs mounts. |
+| `--size` | `1Mi` | Size cap of each per-pod tmpfs. |
+| `--debug` | `false` | Debug logging. |
+| `--probe` | `false` | Liveness mode: exit 0 iff the CSI socket exists, then exit. |
+
+Both sockets are created at start (stale socket files are removed first; a
+non-socket at either path is refused) and removed on SIGTERM, the registration
+socket first so the kubelet deregisters the driver before its endpoint stops
+answering. A kubelet-reported registration error exits the process non-zero.
 
 ### `registrar`
 
