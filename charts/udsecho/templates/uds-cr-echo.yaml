@@ -46,7 +46,7 @@ spec:
               mountPath: /{{ (split "/" .Values.socket)._0 }}
       volumes:
         - name: {{ (split "/" .Values.socket)._0 }}
-          emptyDir: {medium: Memory}
+          csi: {driver: csi.aether.io}
 ---
 apiVersion: config.aether.io/v1
 kind: EndpointPolicy

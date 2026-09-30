@@ -373,8 +373,9 @@ cniInstall:
       cpu: 100m
       memory: 32Mi
 
-# The csi.aether.io CSI node plugin (proposal 039 Phase 1): the mesh-owned
-# carrier for a UDS-served workload's socket directory. A pod that declares
+# The csi.aether.io CSI node plugin (proposal 039): the mesh-owned carrier for a
+# UDS-served workload's socket directory, and since 039 Phase 2 the ONLY one —
+# UDS delivery (proposal 034) requires it. A pod that declares
 #
 #   securityContext: {fsGroup: <gid>}
 #   volumes: [{name: s, csi: {driver: csi.aether.io}}]
@@ -389,11 +390,21 @@ cniInstall:
 # the host) and the cluster-scoped CSIDriver object. The plugin registers itself
 # with the kubelet (no node-driver-registrar sidecar) and makes no API calls.
 #
-# Phase 1 ships the driver ALONE and OFF: nothing in aether consumes it yet.
-# Phase 2 makes it the only UDS carrier (a breaking cut-over) and flips the
-# default. See docs/proposals/039_uds-csi-driver.md.
+# and annotates endpoint.aether.io/uds-socket: s/<file> (or is targeted by an
+# EndpointPolicy naming s/<file>) is delivered over <root>/<pod-uid>/<file>. An
+# emptyDir socket volume is NOT a carrier any more: the controller webhook denies
+# such a pod, and a running one falls back to TCP (unpromoted), counted as
+# aether.agent.uds.resolve_failures{reason="not_csi"}.
+#
+# Default ON. This one switch gates all of UDS delivery: the plugin DaemonSet +
+# CSIDriver, the agent's --uds-csi-root (= root below), the proxy's read-only
+# mount of root, and the agent's EndpointPolicy watch. On a node with no UDS
+# workload the plugin is a small idle DaemonSet (5m CPU / 16Mi requested) that
+# serves nothing. Set false only if no workload uses UDS delivery and you want
+# one fewer privileged node component; pods asking for a socket then fall back
+# to TCP (reason="disabled"). See docs/proposals/039_uds-csi-driver.md.
 udsCsi:
-  enabled: false
+  enabled: true
   # Its own slim image: the CSI + registration gRPC services and x/sys/unix, no
   # Kubernetes client (//agent/cmd/uds-csi:deps_test). Same repository+digest
   # convention as the other images.
@@ -410,8 +421,11 @@ udsCsi:
   # /var/snap/microk8s/common/var/lib/kubelet.
   kubeletRoot: /var/lib/kubelet
   # Host directory holding the per-pod tmpfs mounts (<root>/<pod-uid>). Under
-  # /run so a reboot starts it empty (the kubelet republishes); under
-  # /run/aether because the node proxy already mounts /run/aether from the host.
+  # /run so a reboot starts it empty (the kubelet republishes). The ONE source
+  # of truth for the carrier path: the plugin's --root, the agent's
+  # --uds-csi-root and the proxy's read-only mount all render from it. Keep it
+  # short: the socket file budget is 107 - len("<root>/") - 36 (pod UID) - 1,
+  # i.e. 54 bytes at the default, which is what admission checks.
   root: /run/aether/uds
   # Size cap of each per-pod tmpfs (bytes, or Ki/Mi/Gi). It holds a socket inode
   # and whatever else the app writes there; pages are charged to the app's
@@ -600,25 +614,6 @@ proxy:
         memory: 32Mi
       limits:
         memory: 128Mi
-  # UDS delivery for workloads that serve on a Unix domain socket (proposal 034
-  # Phase 1). Gates BOTH halves: the proxy container's /var/lib/kubelet/pods
-  # hostPath mount (the only bridge from the host mount namespace to a pod's
-  # emptyDir socket) and the agent's --kubelet-pods-dir, which authorizes it to
-  # render Envoy Pipe addresses. A pod opts in per-workload with
-  # endpoint.aether.io/uds-socket: <volume>/<file>; unannotated pods are
-  # completely unaffected. It also gates the agent's read access to the
-  # service-scoped EndpointPolicy CRD (Phase 1b), the annotation's alternative.
-  #
-  # Default true: it is inert until a workload asks for it, and turning it off
-  # after the fact silently degrades annotated pods to TCP (nothing listens on
-  # their port, so their endpoints stay unpromoted).
-  #
-  # Security: the mount exposes EVERY pod's volumes on the node to the proxy
-  # container. The proxy is already privileged, hostNetwork, runAsUser 0 with the
-  # host netns directory mounted, so this adds no meaningful privilege — but set
-  # enabled: false if you have no UDS workloads and want the smaller surface.
-  udsWorkloads:
-    enabled: true
   # Envoy overload manager graceful-degradation ladder; engages before the OOM
   # kill. Keep maxHeapSizeBytes at ~75% of resources.limits.memory.
   overload:

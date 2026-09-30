@@ -547,12 +547,14 @@ jobs:
 
   # --- Proposal 034 Phases 1 + 1b: UDS delivery to pods.
   # ONE kind cluster, SPIRE off. Deploys a workload that serves only on a Unix
-  # socket in an emptyDir (//e2e/udsecho — it binds no TCP port, so every 200 is
-  # proof the node proxy dialed the pipe) and asserts both ways of declaring the
-  # socket (pod annotation, EndpointPolicy CR), annotation-over-CR precedence,
-  # webhook/CRD rejection of an unusable policy, and that a policy naming a
-  # volume the pods don't mount degrades only its own service (no CDS NACK) and
-  # recovers on delete. Harness: e2e/uds.sh. The talos half of proposal 034's
+  # socket in its csi.aether.io volume (proposal 039 Phase 2; //e2e/udsecho — it
+  # binds no TCP port, so every 200 is proof the node proxy dialed the pipe) and
+  # asserts both ways of declaring the socket (pod annotation, EndpointPolicy
+  # CR), annotation-over-CR precedence, webhook/CRD rejection of an unusable
+  # policy, that a policy naming an unbound socket degrades only its own service
+  # (no CDS NACK) and recovers on delete, that an emptyDir-carrier pod is denied
+  # at admission, and that the agent counts not_csi / volume_not_declared
+  # resolve failures. Harness: e2e/uds.sh. The talos half of proposal 034's
   # PR 3 (agent restart / storage replay, cross-node) is validated separately.
   uds:
     needs: build
@@ -616,8 +618,8 @@ jobs:
   # in which its nonroot app binds a socket that answers, that a pod WITHOUT
   # an fsGroup stays Pending with a FailedMount naming the fix, that deleting
   # the pod removes the host tmpfs, and that a rollout restart of the plugin
-  # re-registers and still publishes. Harness: e2e/uds-csi.sh. Nothing in
-  # aether consumes the driver yet (Phase 2).
+  # re-registers and still publishes. Harness: e2e/uds-csi.sh. The driver in
+  # isolation; the uds job above covers it as the UDS carrier (Phase 2).
   uds-csi:
     needs: build
     if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'uds-csi'

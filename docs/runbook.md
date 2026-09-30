@@ -877,7 +877,8 @@ flags, metrics and deployment shape are in
 [`configuration.md`](./configuration.md) § *`prober`*) — and
 **`udsecho`** (`charts/udsecho`) — the UDS validation workloads (proposal 034)
 that exercise both socket-delivery paths (annotation and `EndpointPolicy`) under
-continuous mesh traffic.
+continuous mesh traffic, on the `csi.aether.io` carrier (udsecho `2.x` needs
+aether `2.x`; see *Upgrading to chart 2.0.0* below).
 
 See [`charts/README.md`](../charts/README.md) for chart layout, image mirroring,
 and the `--stamp` versioning scheme, and [`getting-started.md`](./getting-started.md)
@@ -890,6 +891,63 @@ for the full install + onboarding walkthrough.
 > as hex until it is listed. See
 > [`observability/profiling-symbols.md`](./observability/profiling-symbols.md) for the
 > path table that has to be updated alongside it.
+
+### Upgrading to chart 2.0.0: the UDS carrier cut-over (proposal 039 Phase 2)
+
+**Breaking, no compatibility window.** Chart `2.0.0` makes the `csi.aether.io`
+CSI volume the **only** carrier for a UDS-delivered workload socket (proposal
+034). The `emptyDir` carrier, the proxy's `/var/lib/kubelet/pods` mount, the
+agent's `--kubelet-pods-dir` and the `proxy.udsWorkloads` value are gone;
+`udsCsi.enabled` (the plugin DaemonSet + `CSIDriver`, the agent's
+`--uds-csi-root`, the proxy's read-only mount of `udsCsi.root`) is now **on by
+default**. TCP-served workloads are untouched.
+
+**Before upgrading the chart, every UDS workload must switch its socket volume**
+(or ship the switch in the same rollout — the old carrier stops resolving the
+moment the agent rolls):
+
+```yaml
+spec:
+  securityContext:
+    fsGroup: 65532                  # NEW, required: the socket dir is root:<fsGroup> 2770
+  volumes:
+    - name: s                       # the <volume> the annotation / EndpointPolicy names
+      csi: {driver: csi.aether.io}  # was: emptyDir: {} (or {medium: Memory})
+```
+
+Find them first — every pod carrying the annotation, and every `EndpointPolicy`:
+
+```bash
+kubectl get pods -A -o json | jq -r '.items[]
+  | select(.metadata.annotations["endpoint.aether.io/uds-socket"] != null)
+  | "\(.metadata.namespace)/\(.metadata.name) \(.metadata.annotations["endpoint.aether.io/uds-socket"])"'
+kubectl get endpointpolicies -A
+```
+
+A workload that misses the switch is not deleted, but it stops being delivered:
+
+- **new pods** (a roll, a reschedule) carrying the annotation are **denied** by
+  the controller's pod webhook, with a message naming the fix
+  (`… cannot be delivered (not_csi): … change the volume's source to
+  csi: {driver: csi.aether.io} and set the pod's securityContext.fsGroup`);
+- **running pods** — and policy-declared pods, which admission cannot see — fall
+  back to TCP; a UDS-only app has nothing listening there, so its endpoint stays
+  **unpromoted**, counted as `aether_agent_uds_resolve_failures_total{reason="not_csi"}`.
+
+Verify after the upgrade (every reason is exported at zero, so an absent series
+means the agent is not exporting, not "no failures"):
+
+```bash
+# expect 0 for every reason; non-zero names what is wrong (see §8)
+kubectl get --raw "/api/v1/namespaces/aether-system/pods/<agent-pod>:8080/proxy/metrics" \
+  | grep '^aether_agent_uds_resolve_failures_total'
+kubectl -n aether-system rollout status ds/aether-uds-csi
+kubectl get csinode -o jsonpath='{range .items[*]}{.metadata.name}{": "}{.spec.drivers[*].name}{"\n"}{end}'   # lists csi.aether.io
+```
+
+Talos needs nothing extra (the default `udsCsi.kubeletRoot`, `/var/lib/kubelet`,
+is right). On k0s / microk8s set `udsCsi.kubeletRoot`. Rolling back to `1.x`
+requires reverting the workloads to `emptyDir` too.
 
 ### East-west QUIC (proposal 038 Phase 4): prerequisites, verifying, escape hatch
 
@@ -2804,6 +2862,33 @@ validation at config load) is in the snapshot too and stays **off** — it would
 stale pod into an LDS/CDS NACK, which is worse. The netns pin and its 60s unpin delay
 stay: a hot-restart successor re-creating the pod's listeners and dials deferred 10-13s
 past removal still need a live netns to *succeed* rather than merely fail cleanly.
+
+### A UDS workload is not delivered: `aether_agent_uds_resolve_failures_total{reason}`
+
+A pod that asks for UDS delivery (annotation or `EndpointPolicy`) but whose
+socket the agent cannot resolve falls back to TCP loopback; a UDS-only app then
+stays **unpromoted** (callers see no endpoint, never a blackhole). The agent
+counts it once per pod per reason and logs one ERROR line naming the pod
+(`failed to resolve the pod's UDS socket; …`, fields `reason`, `pod`,
+`namespace`, `socket`, `source`=`annotation|endpointpolicy`).
+
+| `reason` | Meaning | Fix |
+|---|---|---|
+| `not_csi` | The named volume exists but is not `csi: {driver: csi.aether.io}` — almost always an `emptyDir` left over from before chart 2.0.0 | Switch the volume source and add `securityContext.fsGroup` (see §7 *Upgrading to chart 2.0.0*) |
+| `volume_not_declared` | The pod declares no volume of that name (typically an `EndpointPolicy` drifted from its Deployment) | Fix the policy's `udsSocket` or the pod spec |
+| `bad_file` | The file part is not a single clean path segment | Fix the value |
+| `path_too_long` | `<uds-csi-root>/<uid>/<file>` over 107 bytes (file over 54 bytes at the default root) | Shorten the socket file name |
+| `multiple_csi_volumes` | The pod declares two `csi.aether.io` volumes | Keep one |
+| `no_uid` | The stored pod record has no UID (written by a pre-034 agent) | Restart the pod |
+| `bad_request` | The value is not `<volume>/<file>` | Fix the value |
+| `disabled` | The chart runs with `udsCsi.enabled: false` (`--uds-csi-root=`) | Enable it |
+
+A pod stuck in `ContainerCreating` with `FailedMount: driver name csi.aether.io
+not found in the list of registered CSI drivers` is on a node where the
+`aether-uds-csi` DaemonSet is not (yet) running; one with `FailedMount … requires
+the pod to set securityContext.fsGroup` needs an fsGroup. A deleted UDS pod stays
+`Terminating` while the plugin is down on its node (the kubelet cannot
+unpublish); it finishes once the plugin is back.
 
 ### A pod never becomes routable: what HEALTHY means since #815
 

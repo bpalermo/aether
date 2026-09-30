@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"testing"
 
+	"aethermesh.dev/common/udspath"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -71,6 +72,7 @@ func TestCacheMetrics_NilReceiverSafe(t *testing.T) {
 	m.UpstreamTTLRefreshed(context.Background(), 3)
 	m.UpstreamsRestored(context.Background(), 3)
 	m.ClusterUnpinned(context.Background(), 3)
+	m.UDSResolveFailure(context.Background(), "not_csi")
 }
 
 // TestCacheMetrics_UpstreamsRestored verifies the restore counter records the
@@ -166,6 +168,10 @@ var seededCounters = []string{
 	// udp_unsupported stays quiet, and udp_proxy's own rx counter is per-session
 	// and a session needs a host, so it does not move either.
 	"aether.agent.l4route.udp_no_healthy_backend",
+	// Proposal 039 Phase 2: a local pod whose UDS request resolves to no
+	// csi.aether.io socket. Seeded once PER REASON (see
+	// TestCacheMetrics_UDSResolveFailuresSeededPerReason).
+	"aether.agent.uds.resolve_failures",
 }
 
 // countersDeliberatelyNotSeeded are the registered counters that are NOT seeded
@@ -191,6 +197,54 @@ func TestCacheMetrics_AnomalyCountersSeededAtZero(t *testing.T) {
 		if v != 0 {
 			t.Errorf("%s = %d, want 0", name, v)
 		}
+	}
+}
+
+// reasonValues returns the per-reason data points of the named counter.
+func reasonValues(t *testing.T, reader *sdkmetric.ManualReader, name string) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	out := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %s is %T, want Sum[int64]", name, m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				v, _ := dp.Attributes.Value(attrReason)
+				out[v.AsString()] = dp.Value
+			}
+		}
+	}
+	return out
+}
+
+// TestCacheMetrics_UDSResolveFailuresSeededPerReason: every reason exists at
+// zero before the first failure, so reason="not_csi" == 0 is a live answer
+// rather than an absent series, and a failure increments only its own reason.
+func TestCacheMetrics_UDSResolveFailuresSeededPerReason(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	got := reasonValues(t, reader, "aether.agent.uds.resolve_failures")
+	if len(got) != len(udspath.Reasons) {
+		t.Fatalf("seeded %d reasons (%v), want %d", len(got), got, len(udspath.Reasons))
+	}
+	for _, r := range udspath.Reasons {
+		if v, ok := got[string(r)]; !ok || v != 0 {
+			t.Errorf("reason %q = %d (present %v), want a seeded 0", r, v, ok)
+		}
+	}
+
+	m.UDSResolveFailure(context.Background(), string(udspath.ReasonNotCSI))
+	got = reasonValues(t, reader, "aether.agent.uds.resolve_failures")
+	if got[string(udspath.ReasonNotCSI)] != 1 || got[string(udspath.ReasonVolumeNotDeclared)] != 0 {
+		t.Errorf("after one not_csi failure: %v", got)
 	}
 }
 

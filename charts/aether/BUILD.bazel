@@ -34,9 +34,8 @@ AETHER_IMAGES = [
     "//cni/cmd/cni-install:image_push",
     "//registrar/cmd/registrar:image_push",
     "//controller/cmd/controller:image_push",
-    # The csi.aether.io node plugin (proposal 039). Published with the chart even
-    # while udsCsi.enabled defaults to false, so enabling it never needs an image
-    # nobody pushed.
+    # The csi.aether.io node plugin (proposal 039), the only UDS socket carrier
+    # since Phase 2 (udsCsi.enabled defaults to true).
     "//agent/cmd/uds-csi:image_push",
 ]
 
@@ -603,19 +602,96 @@ helm_template_test(
     },
 )
 
-# Proposal 039 Phase 1: the csi.aether.io node plugin ships OFF. With the
-# default values neither the DaemonSet nor the CSIDriver renders — Phase 2 flips
-# the default in the same PR that makes the CSI volume the only UDS carrier.
+# Proposal 039 Phase 2: the csi.aether.io node plugin is the ONLY UDS carrier
+# and ships ON. With the default values the DaemonSet and the CSIDriver render,
+# the agent is pointed at the same root the plugin mounts under, and the proxy
+# mounts that root — and only that root — read-only at the identical path.
+helm_template_test(
+    name = "aether_uds_csi_default_on_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/uds-csi-daemonset.yaml": [
+            "kind: DaemonSet",
+            "name: aether-uds-csi",
+            "- \"--root=/run/aether/uds\"",
+        ],
+        "aether/templates/uds-csi-csidriver.yaml": [
+            "kind: CSIDriver",
+            "name: csi.aether.io",
+        ],
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--uds-csi-root=/run/aether/uds\"",
+        ],
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- name: uds-root\\n\\s+mountPath: /run/aether/uds\\n\\s+mountPropagation: HostToContainer\\n\\s+readOnly: true\\n",
+            "- name: uds-root\\n\\s+hostPath:\\n\\s+path: /run/aether/uds\\n\\s+type: DirectoryOrCreate\\n",
+        ],
+    },
+)
+
+# R2: the proxy no longer sees the kubelet's pod-volumes tree (every pod's
+# volumes, Secrets included) at all — not by default, and the agent is never
+# handed the removed --kubelet-pods-dir flag.
 helm_template_absent_test(
-    name = "aether_uds_csi_default_off_test",
+    name = "aether_proxy_no_kubelet_pods_test",
+    absent = [
+        "/var/lib/kubelet",
+        "name: kubelet-pods",
+        "kubelet-pods-dir",
+    ],
+    chart = ":aether",
+    control = "name: aether-proxy",
+    opts = [
+        "--show-only",
+        "templates/agent-proxy-daemonset.yaml",
+        "--show-only",
+        "templates/agent-daemonset.yaml",
+    ],
+)
+
+# The carrier's single root value moves the plugin, the agent flag and the
+# proxy mount together (one source of truth, values.yaml udsCsi.root).
+helm_template_test(
+    name = "aether_uds_csi_root_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "udsCsi.root=/run/mesh/uds/",
+    ],
+    template_patterns = {
+        "aether/templates/uds-csi-daemonset.yaml": [
+            "- \"--root=/run/mesh/uds\"\\n",
+        ],
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--uds-csi-root=/run/mesh/uds\"\\n",
+        ],
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "mountPath: /run/mesh/uds\\n",
+            "path: /run/mesh/uds\\n",
+        ],
+    },
+)
+
+# Off: no plugin, no CSIDriver, no proxy mount, no EndpointPolicy grant, and the
+# agent is told explicitly that UDS delivery is disabled (it then counts every
+# socket request as reason="disabled" and falls back to TCP).
+helm_template_absent_test(
+    name = "aether_uds_csi_off_test",
     absent = [
         "kind: CSIDriver",
         "csi.aether.io",
         "aether-uds-csi",
         "/uds-csi",
+        "name: uds-root",
+        "the service-scoped UDS delivery CRD",
+        "--uds-csi-root=/",
     ],
     chart = ":aether",
-    control = "name: aether-agent",
+    control = "- \"--uds-csi-root=\"",
+    opts = [
+        "--set",
+        "udsCsi.enabled=false",
+    ],
 )
 
 # Enabled: the DaemonSet runs the uds-csi image privileged, with Bidirectional

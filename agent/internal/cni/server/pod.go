@@ -16,6 +16,7 @@ import (
 	"aethermesh.dev/common/constants"
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	"aethermesh.dev/common/telemetry"
+	"aethermesh.dev/common/udspath"
 	"aethermesh.dev/registry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
@@ -320,8 +321,18 @@ func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) (_ 
 	cniPod.Labels = k8sPod.Labels
 	cniPod.ServiceAccount = k8sPod.Spec.ServiceAccountName
 	// Persisted (not just returned) so listener regeneration from storage can
-	// resolve kubelet pod-volume paths (proposal 034) without the API server.
+	// resolve the pod's UDS socket path (proposals 034/039) without the API server.
 	cniPod.Uid = string(k8sPod.UID)
+	// The UDS carrier (proposal 039 Phase 2): which volume, if any, is the pod's
+	// inline csi.aether.io volume, plus every volume name so a request naming an
+	// emptyDir is reported as not_csi rather than volume_not_declared. Persisted
+	// for the same reason as the UID.
+	// A pod with two such volumes records neither (one mesh socket volume per
+	// pod) and the count, so resolution reports multiple_csi_volumes.
+	vols := udspath.VolumesOf(&k8sPod.Spec)
+	cniPod.UdsCsiVolume = vols.CSIVolume
+	cniPod.UdsCsiVolumes = vols.CSIVolumes
+	cniPod.Volumes = vols.Names
 	// A pod whose deletion has already been requested must never (re-)enter the
 	// registry: CNI CHECK re-sends AddPod for existing pods, which would
 	// otherwise clear the terminating flag and resurrect the endpoint mid-drain.

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Single-cluster kind e2e for proposal 034 (UDS delivery to pods), Phases 1 + 1b.
+# Single-cluster kind e2e for proposal 034 (UDS delivery to pods), Phases 1 + 1b,
+# on the csi.aether.io carrier (proposal 039 Phase 2: the ONLY carrier; the
+# emptyDir one is gone).
 #
 # Proves that a workload which serves ONLY on a Unix domain socket — no TCP port
 # bound at all — joins the mesh and is reachable by name from another mesh pod,
@@ -7,7 +9,9 @@
 # degrades the one affected service and nothing else.
 #
 # The workload is e2e/udsecho (built here as <IMAGE_REGISTRY>/udsecho:latest):
-# it listens on a socket in an emptyDir and never calls listen(2) on a TCP port.
+# it listens on a socket in its inline `csi: {driver: csi.aether.io}` volume
+# (securityContext.fsGroup set, as the carrier requires) and never calls
+# listen(2) on a TCP port.
 # That is what makes every 200 below load-bearing — a delivery that fell back to
 # TCP loopback would find nothing listening, fail the delegated-liveness probe,
 # and leave the endpoint unpromoted (proposal 034's failure semantics).
@@ -17,12 +21,14 @@
 #   b. policy path      — an EndpointPolicy on the service, no annotation       -> 200
 #   c. precedence       — a policy naming a volume uds-echo does NOT mount does
 #                         not disturb it: the pod annotation wins               -> 200
-#   d. admission        — the controller webhook rejects a socket over the
-#                         AF_UNIX budget, and the CRD rejects a non-Service target
-#   e. drift / fallback — a policy on a TCP-only service (whose pods have no
-#                         socket volume) unpromotes THAT service and nothing
-#                         else (no CDS NACK, no snapshot poisoning), and the
-#                         service recovers when the policy is deleted
+#   d. admission        — the controller webhook rejects a socket file over the
+#                         54-byte csi budget, and the CRD rejects a non-Service
+#                         target
+#   e. drift / fallback — a policy on a TCP-serving service whose pods mount a
+#                         csi.aether.io volume but bind no socket in it
+#                         unpromotes THAT service and nothing else (no CDS NACK,
+#                         no snapshot poisoning), and the service recovers when
+#                         the policy is deleted
 #   f. CNI telemetry    — the CNI plugin's aether_cni_* metrics reach an OTLP
 #                         collector addressed by its cluster Service NAME
 #                         (issue #950). The plugin runs on the kind node under
@@ -30,6 +36,17 @@
 #                         exactly like a Talos host — cannot resolve
 #                         *.svc.cluster.local, so this fails unless cni-install
 #                         pinned the name to the Service's ClusterIP.
+#   g. cut-over admission — a pod declaring its socket on an emptyDir (the removed
+#                         carrier) is DENIED by the controller's pod webhook, and
+#                         the denial names the fix (csi.aether.io + fsGroup)
+#   h. resolve failures — the agent counts, per reason, what it could not resolve:
+#                         an EndpointPolicy onto pods whose volume is an emptyDir
+#                         (admitted: no annotation) -> reason="not_csi", and the
+#                         service stays unpromoted; a policy naming a volume the
+#                         pods do not declare -> reason="volume_not_declared",
+#                         and that TCP service keeps serving. Read from the
+#                         agent's Prometheus endpoint and its one log line per
+#                         pod per reason.
 #
 # Usage: e2e/uds.sh {up|test|verify|down}   (bare = up + verify)
 #
@@ -50,11 +67,13 @@ MESH_DOMAIN="aether.internal"
 OUTBOUND_PORT="18081"
 GWAPI_VERSION="v1.6.2"
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi udsecho)
-# The declared socket, as "<volume>/<file>". SHORT by necessity: the resolved
-# host path is <kubelet-pods-dir>/<36-byte UID>/volumes/kubernetes.io~empty-dir/
-# + this value, and the whole thing must fit an AF_UNIX sun_path (107 bytes),
-# which leaves ~15 characters. "s/a.sock" is 8.
+# The declared socket, as "<volume>/<file>". The resolved host path is
+# /run/aether/uds/<36-byte pod UID>/<file>, so <file> has a 54-byte budget (the
+# volume name costs nothing).
 SOCKET="s/a.sock"
+# The csi.aether.io carrier requires a pod fsGroup (the per-pod tmpfs is
+# root:<fsGroup> 2770); 65532 is distroless nonroot, udsecho's user.
+FS_GROUP=65532
 # Assertion f (#950): a stand-in for talos-main's o11y collector, at the SAME
 # Service name shape (<svc>.<ns>.svc.cluster.local) the chart is handed there.
 # Only the CNI plugin is pointed at it (cniInstall.otlpEndpoint), so the rest of
@@ -243,11 +262,13 @@ install_aether() {
 		die "the EndpointPolicy CRD never became Established"
 
 	# SPIRE off (cleartext mesh inbound, #421) — this suite tests DELIVERY to the
-	# app, which is orthogonal to the inbound transport. Everything else is chart
-	# default: capture/redirect-all, mesh DNS, the kubernetes registry backend,
-	# and proxy.udsWorkloads.enabled (the kubelet pod-volumes mount on the proxy
-	# + the agent's default --kubelet-pods-dir).
-	log "installing aether (SPIRE off, UDS delivery on by default)"
+	# app, which is orthogonal to the inbound transport. otel.enabled with NO
+	# endpoint: every component keeps its Prometheus exporter and pushes nothing
+	# (assertion h reads the agent's resolve-failure counter there). Everything
+	# else is chart default: capture/redirect-all, mesh DNS, the kubernetes
+	# registry backend, and udsCsi.enabled (the csi.aether.io plugin, the agent's
+	# --uds-csi-root, the proxy's read-only mount of the CSI root).
+	log "installing aether (SPIRE off, UDS delivery on the csi.aether.io carrier by default)"
 	# shellcheck disable=SC2046
 	helm --kube-context "$CTX" upgrade --install aether "$charts/aether" \
 		-n "$NS" --create-namespace \
@@ -255,6 +276,7 @@ install_aether() {
 		--set "meshDomain=$MESH_DOMAIN" \
 		--set spire.enabled=false \
 		--set edge.enabled=false \
+		--set otel.enabled=true \
 		--set "cniInstall.otlpEndpoint=$COLLECTOR_ENDPOINT" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
@@ -270,6 +292,7 @@ install_aether() {
 	# failurePolicy is Ignore, so a controller that is not up yet ADMITS the
 	# invalid policies this suite expects it to reject.
 	kc -n "$NS" rollout status deploy/aether-controller --timeout=180s >/dev/null || die "the controller never became Ready"
+	kc -n "$NS" rollout status ds/aether-uds-csi --timeout=180s >/dev/null || die "the csi.aether.io plugin DaemonSet never became Ready"
 	ok "aether up"
 }
 
@@ -302,9 +325,9 @@ spec:
         endpoint.aether.io/uds-socket: "$SOCKET"
     spec:
       serviceAccountName: uds-echo
-      # fsGroup makes the emptyDir group-writable for the distroless nonroot
-      # user, so the app can create the socket in it.
-      securityContext: {fsGroup: 65532}
+      # Required by csi.aether.io: the per-pod tmpfs is root:<fsGroup> 2770,
+      # which is how the distroless nonroot user creates the socket in it.
+      securityContext: {fsGroup: $FS_GROUP}
       containers:
         - name: app
           image: ${IMAGE_REGISTRY}/udsecho:latest
@@ -313,7 +336,7 @@ spec:
           volumeMounts: [{name: s, mountPath: /s}]
       volumes:
         - name: s
-          emptyDir: {}
+          csi: {driver: csi.aether.io}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -334,7 +357,7 @@ spec:
         endpoint.aether.io/port: "8080"
     spec:
       serviceAccountName: uds-cr-echo
-      securityContext: {fsGroup: 65532}
+      securityContext: {fsGroup: $FS_GROUP}
       containers:
         - name: app
           image: ${IMAGE_REGISTRY}/udsecho:latest
@@ -343,13 +366,17 @@ spec:
           volumeMounts: [{name: s, mountPath: /s}]
       volumes:
         - name: s
-          emptyDir: {}
+          csi: {driver: csi.aether.io}
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: tcp-echo, namespace: $TEST_NS}
 ---
-# (e) A plain TCP-serving service with NO socket volume at all: the drift target.
+# (e) A plain TCP-serving service: the drift target. It mounts a csi.aether.io
+# volume "s" it never binds a socket in, so a policy naming s/a.sock RESOLVES
+# (to a path nothing listens on) — the drift that reaches the data plane. A
+# policy naming a volume it does not declare at all is (h)'s
+# volume_not_declared: it never resolves, and the service keeps TCP.
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: tcp-echo, namespace: $TEST_NS}
@@ -362,11 +389,48 @@ spec:
       annotations: {endpoint.aether.io/port: "8080"}
     spec:
       serviceAccountName: tcp-echo
+      securityContext: {fsGroup: $FS_GROUP}
       containers:
         - name: app
           image: hashicorp/http-echo:1.0
           args: ["-text=served-by-tcp-echo", "-listen=:8080"]
           ports: [{containerPort: 8080}]
+          volumeMounts: [{name: s, mountPath: /s}]
+      volumes:
+        - name: s
+          csi: {driver: csi.aether.io}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: legacy-echo, namespace: $TEST_NS}
+---
+# (h) A workload still on the REMOVED carrier: its socket in an emptyDir, and
+# declared by an EndpointPolicy (below), not an annotation — so the pod webhook
+# has nothing to refuse and it is admitted, exactly like a pre-039 workload
+# that was running when the chart was upgraded. The agent must refuse to
+# deliver to it (reason="not_csi") and it must stay unpromoted.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: legacy-echo, namespace: $TEST_NS}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: legacy-echo}}
+  template:
+    metadata:
+      labels: {app: legacy-echo, aether.io/managed: "true"}
+      annotations: {endpoint.aether.io/port: "8080"}
+    spec:
+      serviceAccountName: legacy-echo
+      securityContext: {fsGroup: $FS_GROUP}
+      containers:
+        - name: app
+          image: ${IMAGE_REGISTRY}/udsecho:latest
+          imagePullPolicy: Never
+          args: ["--socket=/s/a.sock", "--text=served-by-legacy-echo"]
+          volumeMounts: [{name: s, mountPath: /s}]
+      volumes:
+        - name: s
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -384,7 +448,7 @@ spec:
       # Declare the upstreams so all three clusters are warm on this node
       # (demand-scoped distribution, proposal 004) instead of paying an ODCDS
       # round trip inside each assertion's poll.
-      annotations: {config.aether.io/upstreams: "uds-echo.$TEST_NS,uds-cr-echo.$TEST_NS,tcp-echo.$TEST_NS"}
+      annotations: {config.aether.io/upstreams: "uds-echo.$TEST_NS,uds-cr-echo.$TEST_NS,tcp-echo.$TEST_NS,legacy-echo.$TEST_NS"}
     spec:
       serviceAccountName: client
       containers:
@@ -402,13 +466,21 @@ metadata: {name: uds-cr, namespace: $TEST_NS}
 spec:
   targetRef: {kind: Service, name: uds-cr-echo}
   udsSocket: $SOCKET
+---
+# (h) The same service-scoped declaration for the emptyDir workload.
+apiVersion: config.aether.io/v1
+kind: EndpointPolicy
+metadata: {name: legacy, namespace: $TEST_NS}
+spec:
+  targetRef: {kind: Service, name: legacy-echo}
+  udsSocket: $SOCKET
 YAML
 	local d
-	for d in uds-echo uds-cr-echo tcp-echo client; do
+	for d in uds-echo uds-cr-echo tcp-echo legacy-echo client; do
 		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null ||
 			die "workload '$d' never became Ready"
 	done
-	ok "workloads deployed (uds-echo, uds-cr-echo, tcp-echo, client)"
+	ok "workloads deployed (uds-echo, uds-cr-echo, tcp-echo, legacy-echo, client)"
 }
 
 # --- data-path probes -------------------------------------------------------
@@ -525,14 +597,15 @@ YAML
 # agent's own resolver with a worst-case pod UID); the target-kind check is in
 # the CRD schema itself.
 verify_admission() {
-	log "d. admission: an over-budget socket must be REJECTED at apply time"
+	log "d. admission: a socket file over the 54-byte budget must be REJECTED at apply time"
 	local out
+	# 55 bytes of file name: one over /run/aether/uds/<36-byte uid>/ + 54 = 107.
 	if out="$(expect_rejected "apiVersion: config.aether.io/v1
 kind: EndpointPolicy
 metadata: {name: uds-too-long, namespace: $TEST_NS}
 spec:
   targetRef: {kind: Service, name: uds-echo}
-  udsSocket: waytoolongvolumenameforanafunixpath/socket.sock")"; then
+  udsSocket: s/$(printf 'f%.0s' $(seq 1 55))")"; then
 		case "$out" in
 		*AF_UNIX*) ok "over-budget EndpointPolicy rejected, and the message names the limit: $(printf '%s' "$out" | tr '\n' ' ')" ;;
 		*) die "the over-budget EndpointPolicy was rejected but the error never mentions the AF_UNIX limit: $out" ;;
@@ -565,7 +638,7 @@ verify_drift() {
 		die "tcp-echo answered $code before any policy was applied, expected 200"
 	ok "tcp-echo serves (HTTP 200) with plain TCP delivery"
 
-	log "e. drift: an EndpointPolicy for tcp-echo, whose pods mount no socket volume"
+	log "e. drift: an EndpointPolicy for tcp-echo, whose csi.aether.io volume holds no socket"
 	kc apply -f - >/dev/null <<YAML
 apiVersion: config.aether.io/v1
 kind: EndpointPolicy
@@ -640,13 +713,139 @@ verify_cni_telemetry() {
 	ok "no resolver errors in the CNI plugin log"
 }
 
+# (g) The cut-over's front door: a pod that still declares its socket on an
+# emptyDir is refused at admission, with a message that names the fix — not
+# admitted to run Ready-but-undelivered. A bare Pod, not a Deployment: a
+# Deployment's apply succeeds and only its ReplicaSet's pod creations fail.
+verify_cutover_admission() {
+	log "g. cut-over admission: a pod with an emptyDir socket carrier must be DENIED"
+	local out
+	if out="$(expect_rejected "apiVersion: v1
+kind: Pod
+metadata:
+  name: legacy-carrier
+  namespace: $TEST_NS
+  labels: {aether.io/managed: \"true\"}
+  annotations:
+    endpoint.aether.io/port: \"8080\"
+    endpoint.aether.io/uds-socket: \"$SOCKET\"
+spec:
+  securityContext: {fsGroup: $FS_GROUP}
+  containers:
+    - name: app
+      image: ${IMAGE_REGISTRY}/udsecho:latest
+      imagePullPolicy: Never
+      args: [\"--socket=/s/a.sock\"]
+      volumeMounts: [{name: s, mountPath: /s}]
+  volumes:
+    - name: s
+      emptyDir: {}")"; then
+		case "$out" in
+		*not_csi*"csi: {driver: csi.aether.io}"*fsGroup*)
+			ok "emptyDir-carrier pod denied, naming the fix: $(printf '%s' "$out" | tr '\n' ' ')"
+			;;
+		*) die "the emptyDir-carrier pod was denied, but the message does not name the fix (not_csi, csi: {driver: csi.aether.io}, fsGroup): $out" ;;
+		esac
+	else
+		die "a pod declaring its UDS socket on an emptyDir was ADMITTED (pod webhook not in the path, or not checking the carrier): $out"
+	fi
+}
+
+# resolve_failures REASON — the agent's aether_agent_uds_resolve_failures_total
+# for REASON, summed over every agent pod, read through the API server's pod
+# proxy (the agent's Prometheus exporter on :8080). Empty when no agent exports
+# the series at all.
+resolve_failures() {
+	local reason="$1" pod metrics total="" v
+	for pod in $(kc -n "$NS" get pods -l app.kubernetes.io/component=agent -o jsonpath='{.items[*].metadata.name}'); do
+		metrics="$(kc get --raw "/api/v1/namespaces/$NS/pods/$pod:8080/proxy/metrics" 2>/dev/null)" || continue
+		v="$(awk -v r="reason=\"$reason\"" '$1 ~ /^aether_agent_uds_resolve_failures_total\{/ && index($1, r) { s += $2; n++ } END { if (n) printf "%d", s }' <<<"$metrics")"
+		[ -n "$v" ] && total=$((${total:-0} + v))
+	done
+	printf '%s' "$total"
+}
+
+# await_failures REASON TIMEOUT — wait until the counter for REASON is >= 1.
+await_failures() {
+	local reason="$1" deadline=$((SECONDS + $2)) v
+	while true; do
+		v="$(resolve_failures "$reason")"
+		if [ -n "$v" ] && [ "$v" -ge 1 ]; then
+			printf '%s' "$v"
+			return 0
+		fi
+		[ "$SECONDS" -lt "$deadline" ] || {
+			printf '%s' "${v:-<no series>}"
+			return 1
+		}
+		sleep 3
+	done
+}
+
+# agent_log_has REGEX — grep EVERY agent pod's (JSON) log, not `logs ds/`, which
+# reads one pod.
+agent_log_has() {
+	local pod
+	for pod in $(kc -n "$NS" get pods -l app.kubernetes.io/component=agent -o jsonpath='{.items[*].metadata.name}'); do
+		if grep -Eq -- "$1" <<<"$(kc -n "$NS" logs "$pod" -c agent 2>/dev/null)"; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+# (h) What admission cannot see — a socket declared by an EndpointPolicy — the
+# agent refuses at resolution, counted per reason, never silently.
+verify_resolve_failures() {
+	log "h. resolve failures: the counter is exported, seeded at zero for every reason"
+	local v code
+	v="$(resolve_failures volume_not_declared)"
+	[ -n "$v" ] || die "no agent exports aether_agent_uds_resolve_failures_total{reason=\"volume_not_declared\"} — the counter must be seeded (a zero, not an absent series)"
+	ok "aether_agent_uds_resolve_failures_total{reason=\"volume_not_declared\"} is exported (= $v before the drift below)"
+
+	log "h. not_csi: legacy-echo (emptyDir socket, declared by EndpointPolicy 'legacy') is refused and stays unpromoted"
+	v="$(await_failures not_csi 90)" ||
+		die "aether_agent_uds_resolve_failures_total{reason=\"not_csi\"} is $v after 90s — the agent did not count the emptyDir-carrier workload"
+	ok "resolve_failures{reason=\"not_csi\"} = $v"
+	agent_log_has '"reason":"not_csi".*"pod":"legacy-echo' ||
+		die "no agent log line carries reason not_csi for a legacy-echo pod"
+	ok "the agent logged the refusal once for the pod (reason not_csi, pod legacy-echo-*)"
+	code="$(mesh_code legacy-echo)"
+	[ "$code" != "200" ] ||
+		die "legacy-echo answered 200 — a workload on the removed emptyDir carrier must NOT be delivered"
+	ok "legacy-echo is not delivered ($code): the endpoint stays unpromoted, the 034 failure semantics"
+
+	log "h. volume_not_declared: a policy on tcp-echo naming a volume its pods do not declare"
+	kc apply -f - >/dev/null <<YAML
+apiVersion: config.aether.io/v1
+kind: EndpointPolicy
+metadata: {name: tcp-echo-undeclared, namespace: $TEST_NS}
+spec:
+  targetRef: {kind: Service, name: tcp-echo}
+  udsSocket: nope/a.sock
+YAML
+	v="$(await_failures volume_not_declared 90)" ||
+		die "aether_agent_uds_resolve_failures_total{reason=\"volume_not_declared\"} is $v after 90s"
+	ok "resolve_failures{reason=\"volume_not_declared\"} = $v"
+	# The policy never resolved, so delivery never left TCP: sustained 200s.
+	local check
+	for check in 1 2 3; do
+		code="$(await_code tcp-echo 200 60)" ||
+			die "tcp-echo answered $code on check $check — a policy naming an undeclared volume must leave TCP delivery in place"
+	done
+	ok "tcp-echo keeps serving over TCP (3/3): an unresolvable policy never reaches the data plane"
+	kc -n "$TEST_NS" delete endpointpolicy tcp-echo-undeclared >/dev/null
+}
+
 verify() {
 	verify_delivery
 	verify_precedence
 	verify_admission
 	verify_drift
 	verify_cni_telemetry
-	log "all assertions passed (proposal 034: annotation, EndpointPolicy, precedence, admission, drift+recovery; #950: CNI telemetry)"
+	verify_cutover_admission
+	verify_resolve_failures
+	log "all assertions passed (proposal 034 on the csi.aether.io carrier: annotation, EndpointPolicy, precedence, admission, drift+recovery; #950: CNI telemetry; 039 Phase 2: emptyDir carrier denied, resolve failures counted)"
 }
 
 down() {

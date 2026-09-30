@@ -119,13 +119,18 @@ spec:
             - "--authz-sidecar-failure-mode-allow"
             {{- end }}
             {{- end }}
-            {{- if not .Values.proxy.udsWorkloads.enabled }}
-            # UDS delivery off (proposal 034): with no kubelet pod-volumes mount on
-            # the proxy, the agent must not render Pipe addresses it could never
-            # reach. Empty disables resolution — annotated pods fall back to TCP.
-            # When enabled the flag is omitted: the binary default is the same
-            # /var/lib/kubelet/pods the proxy DaemonSet mounts.
-            - "--kubelet-pods-dir="
+            {{- if .Values.udsCsi.enabled }}
+            # UDS delivery (proposals 034/039): the csi.aether.io tmpfs root — the
+            # SAME udsCsi.root the node plugin mounts under and the proxy mounts
+            # at the identical path — so the rendered Envoy Pipe addresses
+            # (<root>/<pod-uid>/<file>) need no translation.
+            - "--uds-csi-root={{ include "aether.udsCsi.root" . }}"
+            {{- else }}
+            # UDS delivery off: with no carrier on the node the agent must not
+            # render Pipe addresses it could never reach. Empty disables
+            # resolution — pods requesting a socket fall back to TCP (counted as
+            # aether.agent.uds.resolve_failures{reason="disabled"}).
+            - "--uds-csi-root="
             {{- end }}
             {{- if .Values.agent.eastWestWaypoint }}
             - "--east-west-waypoint"

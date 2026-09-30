@@ -119,34 +119,80 @@ func (c *SnapshotCache) udsSocketRequestForPod(cniPod *cniv1.CNIPod) (socket, so
 }
 
 // udsSocketPathForPod resolves the pod's requested socket to its host path under
-// kubelet's pod-volumes directory (proposal 034). It returns "" — TCP loopback
-// delivery — when no socket is requested, when UDS delivery is disabled
-// (--kubelet-pods-dir empty), when the stored record carries no pod UID (written
-// before the UID was persisted), or when the request fails validation.
+// the csi.aether.io tmpfs root (proposals 034/039): <udsCSIRoot>/<uid>/<file>.
+// It returns "" — TCP loopback delivery — when no socket is requested, and on
+// every resolution failure: UDS delivery disabled (--uds-csi-root empty), no
+// stored pod UID, a request naming a volume the pod does not declare
+// (volume_not_declared) or declares with another carrier such as an emptyDir
+// (not_csi), a bad file name, or a path over the AF_UNIX budget.
 //
 // Every failure falls back rather than rejecting the pod: falling back is
 // safe-degraded, not a blackhole. A UDS pod has nothing listening on its TCP
 // port, so the delegated-liveness probe fails, the endpoint stays unpromoted,
-// and no traffic is sent to an address that cannot serve it.
+// and no traffic is sent to an address that cannot serve it. Each failure is
+// counted (aether.agent.uds.resolve_failures{reason}) and logged once per pod
+// per reason (reportUDSResolveFailure).
 func (c *SnapshotCache) udsSocketPathForPod(ctx context.Context, cniPod *cniv1.CNIPod) string {
 	socket, source := c.udsSocketRequestForPod(cniPod)
 	if socket == "" {
+		c.clearUDSResolveFailure(cniPod.GetNetworkNamespace())
 		return ""
 	}
-	if c.kubeletPodsDir == "" {
-		c.log.ErrorContext(ctx, "pod requests UDS delivery but it is disabled (--kubelet-pods-dir is empty); falling back to TCP loopback", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "socket", socket, "source", source)
-		return ""
+	var (
+		path string
+		err  error
+	)
+	if c.udsCSIRoot == "" {
+		err = &udspath.Error{Reason: udspath.ReasonDisabled, Err: errors.New("UDS delivery is disabled (--uds-csi-root is empty; chart udsCsi.enabled=false)")}
+	} else {
+		path, err = udspath.ResolvePod(c.udsCSIRoot, cniPod.GetUid(), udspath.PodVolumes{
+			CSIVolume:  cniPod.GetUdsCsiVolume(),
+			CSIVolumes: cniPod.GetUdsCsiVolumes(),
+			Names:      cniPod.GetVolumes(),
+		}, socket)
 	}
-	if cniPod.GetUid() == "" {
-		c.log.ErrorContext(ctx, "pod requests UDS delivery but its stored record has no pod UID; falling back to TCP loopback", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "socket", socket, "source", source)
-		return ""
-	}
-	path, err := udspath.Resolve(c.kubeletPodsDir, cniPod.GetUid(), socket)
 	if err != nil {
-		c.log.ErrorContext(ctx, "failed to resolve the pod's UDS socket path; falling back to TCP loopback", "error", err, "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "socket", socket, "source", source)
+		c.reportUDSResolveFailure(ctx, cniPod, socket, source, err)
 		return ""
 	}
+	c.clearUDSResolveFailure(cniPod.GetNetworkNamespace())
 	return path
+}
+
+// reportUDSResolveFailure counts and logs a pod's UDS resolution failure, once
+// per pod per reason: the same pod re-resolves on every delivery-cluster
+// rebuild, and a counter or log line per rebuild would measure rebuilds, not
+// broken pods.
+func (c *SnapshotCache) reportUDSResolveFailure(ctx context.Context, cniPod *cniv1.CNIPod, socket, source string, err error) {
+	reason := udspath.ReasonOf(err)
+	if reason == "" {
+		// An unclassified error is a misconfigured root; it still must not be
+		// an unlabeled series.
+		reason = udspath.ReasonBadRequest
+	}
+	netns := cniPod.GetNetworkNamespace()
+	c.udsResolveMu.Lock()
+	if c.udsResolveReported == nil {
+		c.udsResolveReported = make(map[string]udspath.Reason)
+	}
+	prev, seen := c.udsResolveReported[netns]
+	c.udsResolveReported[netns] = reason
+	c.udsResolveMu.Unlock()
+	if seen && prev == reason {
+		return
+	}
+	c.metrics.UDSResolveFailure(ctx, string(reason))
+	c.log.ErrorContext(ctx, "failed to resolve the pod's UDS socket; falling back to TCP loopback (a UDS-only app stays unpromoted)",
+		"reason", string(reason), "error", err, "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(),
+		"socket", socket, "source", source)
+}
+
+// clearUDSResolveFailure forgets a pod's reported failure, so a later failure
+// (after the pod was fixed) is reported again.
+func (c *SnapshotCache) clearUDSResolveFailure(netns string) {
+	c.udsResolveMu.Lock()
+	delete(c.udsResolveReported, netns)
+	c.udsResolveMu.Unlock()
 }
 
 // inboundReadyIdentity is the node-wide input the per-pod inbound-readiness
@@ -393,6 +439,7 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 	}
 
 	c.forgetStaleNetnsWarning(netns)
+	c.clearUDSResolveFailure(netns)
 	c.removeLocalWorkload(netns)
 
 	// Shrink the node dependency set; clusters only this pod depended on are

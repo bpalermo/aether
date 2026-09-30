@@ -1,6 +1,7 @@
 // Command udsecho is the UDS-serving test workload for the proposal 034 e2e
 // harness (e2e/uds.sh): a tiny HTTP server that listens ONLY on a Unix domain
-// socket inside its pod's emptyDir and never binds a TCP port.
+// socket inside its pod's csi.aether.io volume (proposal 039) and never binds a
+// TCP port.
 //
 // That "never binds TCP" property is what makes the harness's assertions
 // meaningful: the mesh advertises the pod at pod_ip:18008 and delivers over the
@@ -50,8 +51,9 @@ func main() {
 }
 
 func run(socket, text string) error {
-	// A container restart leaves the previous socket file behind in the emptyDir
-	// (the volume outlives the container), and bind(2) fails on an existing path.
+	// A container restart leaves the previous socket file behind in the volume
+	// (the per-pod tmpfs outlives the container), and bind(2) fails on an
+	// existing path.
 	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("removing stale socket %q: %w", socket, err)
 	}

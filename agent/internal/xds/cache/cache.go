@@ -29,6 +29,7 @@ import (
 	"aethermesh.dev/agent/internal/xds/quicdemand"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
+	"aethermesh.dev/common/udspath"
 	"aethermesh.dev/registry"
 
 	commonlog "aethermesh.dev/common/log"
@@ -106,13 +107,24 @@ type SnapshotCache struct {
 	waypointEnabled    bool
 	waypointTunnelPort uint32
 
-	// kubeletPodsDir is kubelet's pod-volumes directory on the host
-	// (--kubelet-pods-dir), through which the proxy reaches a workload's Unix
-	// socket (proposal 034). Empty disables UDS delivery entirely: pods
-	// carrying endpoint.aether.io/uds-socket fall back to TCP loopback. Set
-	// once before the manager starts (SetKubeletPodsDir); read without locking
-	// on every listener build.
-	kubeletPodsDir string
+	// udsCSIRoot is the host directory under which the csi.aether.io node
+	// plugin mounts each UDS pod's socket tmpfs (--uds-csi-root), through which
+	// the proxy reaches a workload's Unix socket (proposals 034/039). Empty
+	// disables UDS delivery entirely: pods requesting a socket fall back to TCP
+	// loopback. Set once before the manager starts (SetUDSCSIRoot); read
+	// without locking on every listener build.
+	udsCSIRoot string
+
+	// udsResolveMu guards udsResolveReported. Its own mutex because resolution
+	// runs under listenerMu on the regeneration paths.
+	udsResolveMu sync.Mutex
+	// udsResolveReported remembers, per pod (keyed by netns like c.listeners),
+	// the resolve-failure reason already logged and counted. Resolution re-runs
+	// on every delivery-cluster rebuild, so without it one bad pod would log and
+	// count on every policy change and trust-domain fold; with it each pod
+	// reports once per reason. Bounded by the local pods: cleared on success and
+	// on RemovePod.
+	udsResolveReported map[string]udspath.Reason
 
 	// emitStatsPod enables per-pod labels (source_pod/destination_pod) on the
 	// aether_stats request counter. Off by default to bound cardinality; set
@@ -709,6 +721,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		// panics on agent restart when pods already exist in local storage.
 		listeners:          make(map[string]listenerEntry),
 		staleNetnsWarned:   make(map[string]struct{}),
+		udsResolveReported: make(map[string]udspath.Reason),
 		clusters:           make(map[string]clusterEntry),
 		secrets:            make(map[string]*tlsv3.Secret),
 		localWorkloads:     make(map[string]string),
@@ -794,12 +807,12 @@ func (c *SnapshotCache) SetWaypointConfig(enabled bool, tunnelPort uint32) {
 	c.waypointTunnelPort = tunnelPort
 }
 
-// SetKubeletPodsDir sets kubelet's pod-volumes directory (--kubelet-pods-dir),
-// the host bridge to a workload's Unix socket (proposal 034). An empty dir is
-// the operator's off switch: annotated pods then get TCP delivery. Must be
+// SetUDSCSIRoot sets the csi.aether.io tmpfs root (--uds-csi-root), the host
+// bridge to a workload's Unix socket (proposals 034/039). An empty root is the
+// operator's off switch: pods requesting a socket then get TCP delivery. Must be
 // called before the manager starts; read without locking on every listener build.
-func (c *SnapshotCache) SetKubeletPodsDir(dir string) {
-	c.kubeletPodsDir = dir
+func (c *SnapshotCache) SetUDSCSIRoot(root string) {
+	c.udsCSIRoot = root
 }
 
 // SetEmitStatsPod enables per-pod labels on the aether_stats request counter

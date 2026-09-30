@@ -30,8 +30,8 @@ spec:
             Service's pods (aether.config.v1.EndpointPolicySpec, proposal 034 Phase 1b):
             today, the Unix socket to dial instead of TCP loopback. The equivalent pod
             annotation (endpoint.aether.io/uds-socket) takes precedence. The schema
-            below mirrors the proto rules; the AF_UNIX sun_path budget — which OpenAPI
-            cannot express, since it depends on the kubelet pod-volumes prefix — is
+            below mirrors the proto rules; the AF_UNIX sun_path budget for the socket
+            file (54 bytes under the default csi.aether.io root, proposal 039) is
             enforced by the aether-controller webhook.
           properties:
             spec:
@@ -63,10 +63,12 @@ spec:
                 udsSocket:
                   type: string
                   description: |
-                    "<volume-name>/<socket-file>": the emptyDir volume the target's pods
-                    declare and the socket file the app creates inside it. Both names must
-                    be short — the full host path must fit an AF_UNIX address (107 bytes),
-                    leaving about 16 characters for this value.
+                    "<volume-name>/<socket-file>": the inline `csi: {driver: csi.aether.io}`
+                    volume the target's pods declare (proposal 039; an emptyDir is no longer
+                    a supported carrier) and the socket file the app creates inside it. The
+                    socket file name has a 54-byte budget (the host path
+                    /run/aether/uds/<pod-UID>/<file> must fit an AF_UNIX address, 107
+                    bytes); the volume name costs nothing.
                   minLength: 3
                   maxLength: 64
                   pattern: '^[^/]+/[^/]+$'

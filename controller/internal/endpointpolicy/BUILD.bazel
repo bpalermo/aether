@@ -21,6 +21,7 @@ go_test(
     deps = [
         "//api/aether/config/v1:config",
         "//common/apis/config/v1:config",
+        "//common/udspath",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//admission/v1:admission",
