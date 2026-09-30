@@ -140,8 +140,8 @@ spec:
             # CPU) on runc/libcontainer exec, a second runtime.main and Go package
             # init(), which runs before main() and so no argv check can skip. The prober
             # ships in THIS image (same layer set as the daemon), so there is no
-            # chart/image skew to sequence: /mesh-dns --readiness-check is retained but
-            # deprecated for a chart older than this one.
+            # chart/image skew to sequence. (The old /mesh-dns --readiness-check flag
+            # was removed in #1080.)
             #
             # Since #729 the marker is also removed the moment SIGTERM starts the
             # lame-duck window, so this probe reports the pod NotReady while it is
