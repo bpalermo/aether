@@ -14,7 +14,7 @@ plugin-registration API itself; (2) Q2 answered: `fsGroupPolicy: File`, the per-
 tmpfs is `root:<fsGroup>` mode `2770`, and a pod without `fsGroup` is rejected;
 (3) the image is `quay.io/aethermesh/uds-csi` (proposal 040 naming).
 **Implementation:** **Phase 1 implemented** (#1090): the `csi.aether.io` node plugin,
-its `uds-csi` image and its chart wiring. **Phase 2 implemented** (#PRNUM, chart
+its `uds-csi` image and its chart wiring. **Phase 2 implemented** (#1092, chart
 `2.0.0`): the breaking cut-over — the CSI volume is the only UDS carrier, the
 `emptyDir` resolver, `--kubelet-pods-dir`, the proxy's kubelet-pods mount and
 `proxy.udsWorkloads` are gone, `udsCsi.enabled` defaults on. Phase 3 (talos) is
@@ -607,7 +607,7 @@ from the design text:
 
 ### Phase 2 as built
 
-Phase 2 shipped as ONE PR, #PRNUM (chart `2.0.0`, crds `1.1.0`, udsecho `2.0.0`).
+Phase 2 shipped as ONE PR, #1092 (chart `2.0.0`, crds `1.1.0`, udsecho `2.0.0`).
 Where the build departs from the design text:
 
 - **`CNIPod` carries three fields, not one.** `uds_csi_volume = 12` as designed,
