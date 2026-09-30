@@ -1,0 +1,136 @@
+diff --git a/envoy/http/persistent_quic_info.h b/envoy/http/persistent_quic_info.h
+index 9a81840e35..2a0177a46d 100644
+--- a/envoy/http/persistent_quic_info.h
++++ b/envoy/http/persistent_quic_info.h
+@@ -6,15 +6,25 @@ namespace Envoy {
+ namespace Http {
+ 
+ // Store quic helpers which can be shared between connections and must live beyond the lifetime of
+-// individual connections. When used in HTTP/3 upstream, it should be owned by cluster and shared
++// individual connections. When used in HTTP/3 upstream, it is created by the cluster and shared
+ // across its HTTP/3 connection pools. This an opaque placeholder is needed so that an
+ // implementation can be passed around while the QUICHE members which are behind ENVOY_ENABLE_QUIC
+ // preprocessor in the actual implementation can be hidden from the Envoy interfaces.
+-struct PersistentQuicInfo {
++//
++// Every upstream QUIC connection keeps raw pointers into this object (its clock, alarm factory and
++// config), and a connection pool can outlive the cluster that created it: a removed cluster only
++// drains its pools, and pools with active streams live on until those streams end. Pools therefore
++// share ownership (see keepAlive()), so the object outlives every connection that uses it.
++struct PersistentQuicInfo : public std::enable_shared_from_this<PersistentQuicInfo> {
+   virtual ~PersistentQuicInfo() = default;
++
++  // Returns shared ownership of this object when it is owned by a PersistentQuicInfoPtr, or
++  // nullptr when it is owned some other way (e.g. by a test), in which case the owner is
++  // responsible for outliving its users.
++  std::shared_ptr<PersistentQuicInfo> keepAlive() { return weak_from_this().lock(); }
+ };
+ 
+-using PersistentQuicInfoPtr = std::unique_ptr<PersistentQuicInfo>;
++using PersistentQuicInfoPtr = std::shared_ptr<PersistentQuicInfo>;
+ 
+ } // namespace Http
+ } // namespace Envoy
+diff --git a/source/common/http/conn_pool_grid.cc b/source/common/http/conn_pool_grid.cc
+index 8b1f4a5306..c8b3d46d07 100644
+--- a/source/common/http/conn_pool_grid.cc
++++ b/source/common/http/conn_pool_grid.cc
+@@ -341,7 +341,7 @@ ConnectivityGrid::ConnectivityGrid(
+       // TODO(RyanTheOptimist): Figure out how scheme gets plumbed in here.
+       origin_("https", getTargetHostname(transport_socket_options, host_),
+               host_->address()->ip()->port()),
+-      quic_info_(quic_info), priority_(priority), overload_manager_(overload_manager),
++      quic_info_keep_alive_(quic_info.keepAlive()), quic_info_(quic_info), priority_(priority), overload_manager_(overload_manager),
+       network_observer_registry_(network_observer_registry) {
+   // ProdClusterManagerFactory::allocateConnPool verifies the protocols are HTTP/1, HTTP/2 and
+   // HTTP/3.
+diff --git a/source/common/http/conn_pool_grid.h b/source/common/http/conn_pool_grid.h
+index 6a47a5763e..cca66905e2 100644
+--- a/source/common/http/conn_pool_grid.h
++++ b/source/common/http/conn_pool_grid.h
+@@ -293,6 +293,9 @@ private:
+   // may be from the cluster config, or the request headers for auto-sni.
+   HttpServerPropertiesCache::Origin origin_;
+ 
++  // Keeps quic_info_ alive for the HTTP/3 pools this grid creates, even if the cluster that created
++  // it is removed first (each HTTP/3 pool holds its own as well).
++  const std::shared_ptr<Http::PersistentQuicInfo> quic_info_keep_alive_;
+   Http::PersistentQuicInfo& quic_info_;
+   Upstream::ResourcePriority priority_;
+   Server::OverloadManager& overload_manager_;
+diff --git a/source/common/http/http3/conn_pool.cc b/source/common/http/http3/conn_pool.cc
+index f0449e31aa..4028e5fdba 100644
+--- a/source/common/http/http3/conn_pool.cc
++++ b/source/common/http/http3/conn_pool.cc
+@@ -123,6 +123,7 @@ Http3ConnPoolImpl::Http3ConnPoolImpl(
+     : FixedHttpConnPoolImpl(host, priority, dispatcher, options, transport_socket_options,
+                             random_generator, state, client_fn, codec_fn, protocol,
+                             overload_manager, {}, nullptr),
++      quic_info_keep_alive_(quic_info.keepAlive()),
+       quic_info_(dynamic_cast<Quic::PersistentQuicInfoImpl&>(quic_info)),
+       server_id_(sni(transport_socket_options, host),
+                  static_cast<uint16_t>(host_->address()->ip()->port())),
+diff --git a/source/common/http/http3/conn_pool.h b/source/common/http/http3/conn_pool.h
+index e5696fbb2a..245f7b116a 100644
+--- a/source/common/http/http3/conn_pool.h
++++ b/source/common/http/http3/conn_pool.h
+@@ -196,6 +196,9 @@ protected:
+ private:
+   friend class Http3ConnPoolImplPeer;
+ 
++  // Keeps the Quic helpers below alive for as long as this pool and its connections are, even if
++  // the cluster that created them is removed first.
++  const std::shared_ptr<Http::PersistentQuicInfo> quic_info_keep_alive_;
+   // Latches Quic helpers shared across the cluster
+   Quic::PersistentQuicInfoImpl& quic_info_;
+   // server-id can change over the lifetime of Envoy but will be consistent for a
+diff --git a/test/common/http/http3/conn_pool_test.cc b/test/common/http/http3/conn_pool_test.cc
+index 358b6a5df2..469cb2e328 100644
+--- a/test/common/http/http3/conn_pool_test.cc
++++ b/test/common/http/http3/conn_pool_test.cc
+@@ -90,7 +90,8 @@ public:
+         allocateConnPool(dispatcher_, random_, host_, Upstream::ResourcePriority::Default, options,
+                          transport_options, state_, quic_stat_names_, {}, *store_.rootScope(),
+                          makeOptRef<PoolConnectResultCallback>(connect_result_callback_),
+-                         *quic_info_, {observers_}, overload_manager_, happy_eyeballs_);
++                         shared_quic_info_ != nullptr ? *shared_quic_info_ : *quic_info_,
++                         {observers_}, overload_manager_, happy_eyeballs_);
+     EXPECT_EQ(test_address_->ip()->port(), Http3ConnPoolImplPeer::getServerId(*pool_).port());
+   }
+ 
+@@ -101,6 +102,8 @@ public:
+   testing::NiceMock<ThreadLocal::MockInstance> thread_local_;
+   NiceMock<Event::MockDispatcher> dispatcher_;
+   std::unique_ptr<Quic::PersistentQuicInfoImpl> quic_info_;
++  // When set, used by initialize() instead of quic_info_: owned the way the cluster manager owns it.
++  Http::PersistentQuicInfoPtr shared_quic_info_;
+   Upstream::HostSharedPtr host_{new NiceMock<Upstream::MockHost>};
+   NiceMock<Random::MockRandomGenerator> random_;
+   Upstream::ClusterConnectivityState state_;
+@@ -240,6 +243,26 @@ void Http3ConnPoolImplTest::createNewStream() {
+ 
+ TEST_F(Http3ConnPoolImplTest, CreationAndNewStream) { createNewStream(); }
+ 
++// The cluster that creates the persistent QUIC info can be removed while one of its HTTP/3 pools
++// still has active streams: the pool is only drained, and lives on until they end. Its connections
++// keep raw pointers into the info (clock, alarm factory, config), so the pool must keep the info
++// alive; otherwise the next write or alarm on such a connection is a use-after-free.
++TEST_F(Http3ConnPoolImplTest, PoolKeepsPersistentQuicInfoAliveAfterItsCreatorReleasesIt) {
++  shared_quic_info_ = Quic::createPersistentQuicInfoForCluster(dispatcher_, mockHost().cluster_,
++                                                               context_.server_context_);
++  std::weak_ptr<Http::PersistentQuicInfo> info = shared_quic_info_;
++  initialize();
++
++  // The cluster goes away: its reference to the info is released. The pool, and so its
++  // connections, must still be able to use it.
++  shared_quic_info_.reset();
++  EXPECT_FALSE(info.expired());
++
++  // Once the pool is gone, so is the info.
++  pool_.reset();
++  EXPECT_TRUE(info.expired());
++}
++
+ TEST_F(Http3ConnPoolImplTest, CreationAndNewHappyEyeballsStream) {
+   happy_eyeballs_ = true;
+   createNewStream();
