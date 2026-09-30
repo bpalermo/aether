@@ -169,8 +169,11 @@ func (s *Supervisor) writeState(epoch int) {
 // inside Envoy recovers from that; the supervisor must diagnose it and exit
 // non-zero so Kubernetes recreates the pod.
 //
-//   - handoff watchdog: a hot-restart epoch (N>0) still not LIVE
-//     HandoffDeadline after launch, child still alive → wedged pre-LIVE.
+//   - handoff watchdog: a hot-restart epoch (N>0) still not LIVE, child
+//     still alive, and its admin silent at its own epoch for HandoffDeadline
+//     (from launch, or from its last answer) → wedged pre-LIVE. A successor
+//     that keeps answering is waiting on xDS, not wedged (issue #1085; see
+//     handoffProgressAt).
 //   - admin watchdog: admin unreachable (connect/timeout, NOT "answers with a
 //     different epoch", which is the normal mid-handoff state) for
 //     AdminUnresponsiveDeadline once some epoch has been LIVE → wedged
@@ -320,13 +323,18 @@ func (s *Supervisor) onNotLiveEpoch(ctx context.Context, epoch int, ready, reach
 // (watchdog fired).
 func (s *Supervisor) checkWedgeWatchdogs(ctx context.Context, epoch int, everLive, reachable bool, unreachableSince time.Time) bool {
 	launched, wasLive := s.epochProgress()
-	if epoch > 0 && !wasLive && s.childTracked(epoch) && s.now().Sub(launched) > s.handoffDeadline() {
-		s.metrics.wedged(wedgeHandoffTimeout)
-		s.fireWatchdog(fmt.Errorf(
-			"hot-restart handoff watchdog: epoch %d not LIVE within %s of launch (parent likely died mid-handoff)",
-			epoch, s.handoffDeadline(),
-		))
-		return true
+	if epoch > 0 && !wasLive && s.childTracked(epoch) {
+		now := s.now()
+		progress := s.handoffProgressAt(epoch, launched)
+		if now.Sub(progress) > s.handoffDeadline() {
+			s.metrics.wedged(wedgeHandoffTimeout)
+			s.fireWatchdog(fmt.Errorf(
+				"hot-restart handoff watchdog: epoch %d not LIVE and its admin silent for %s since %s (parent likely died mid-handoff)",
+				epoch, s.handoffDeadline(), handoffProgressKind(progress, launched),
+			))
+			return true
+		}
+		s.noteHandoffWaitingOnInit(ctx, epoch, now, launched)
 	}
 	if everLive && !reachable && s.childTracked(epoch) && s.now().Sub(unreachableSince) > s.adminUnresponsiveDeadline() {
 		s.metrics.wedged(wedgeAdminUnresponsive)

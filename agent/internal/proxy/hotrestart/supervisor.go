@@ -44,8 +44,10 @@ const (
 	// SIGTERM before they are SIGKILLed.
 	shutdownGrace = 5 * time.Second
 	// defaultHandoffDeadline bounds how long a hot-restart epoch (N>0) may stay
-	// not-LIVE after launch before the handoff watchdog declares it wedged. The
-	// observed failure mode (e2e 2026-06-10): the parent Envoy dies between a
+	// not-LIVE with its admin SILENT (counted from the fork, or from the last
+	// admin answer at its own epoch; issue #1085) before the handoff watchdog
+	// declares it wedged. The observed failure mode (e2e 2026-06-10): the
+	// parent Envoy dies between a
 	// hot-restart RPC request and its reply, leaving the successor's main thread
 	// blocked forever in recvmsg on the hot-restart domain socket — admin bound
 	// but never accepting, pod NotReady forever, DaemonSet roll wedged.
@@ -128,8 +130,11 @@ type Config struct {
 	// per-second liveness watchdog, and /server_info on a fresh connection
 	// whenever the answer must identify the epoch (see adminprobe.go).
 	AdminAddress string
-	// HandoffDeadline overrides defaultHandoffDeadline (0 = default). Must be
-	// comfortably larger than ParentShutdownTime plus worst-case xDS-gated init.
+	// HandoffDeadline overrides defaultHandoffDeadline (0 = default). It is
+	// measured from the successor's fork or from its admin's last answer at its
+	// own epoch, whichever is later (issue #1085): a successor still answering
+	// is waiting on xDS, not wedged. Must be comfortably larger than the
+	// successor's worst-case admin silence while it loads its first batch.
 	HandoffDeadline time.Duration
 	// AdminUnresponsiveDeadline overrides defaultAdminUnresponsiveDeadline
 	// (0 = default).
@@ -230,6 +235,12 @@ type Supervisor struct {
 	// (-1: none), so the signal fires at most once per epoch. Owned by the
 	// watchLiveness goroutine; not guarded.
 	childSilentEpoch int
+
+	// handoffWaitEpoch is the last epoch logged as a hot-restart successor
+	// held past HandoffDeadline in init while its admin answers (-1: none),
+	// so the line is written once per epoch (issue #1085). Owned by the
+	// watchLiveness goroutine; not guarded.
+	handoffWaitEpoch int
 }
 
 // watchdogFire is a fatal wedge diagnosis delivered from watchLiveness to Run.
@@ -332,6 +343,7 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 		adminHeardLatest:   -1,
 		handoffPeer:        -1,
 		childSilentEpoch:   -1,
+		handoffWaitEpoch:   -1,
 		now:                time.Now,
 		childExited:        make(chan childExit, 8),
 		done:               make(chan struct{}),
