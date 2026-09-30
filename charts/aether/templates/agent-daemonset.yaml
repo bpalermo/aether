@@ -42,6 +42,9 @@ spec:
           imagePullPolicy: {{ .Values.cniInstall.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
+            # The host CNI dirs (cni.binDir / cni.confDir) as mounted below.
+            - "--cni-bin-target-dir=/host{{ .Values.cni.binDir }}"
+            - "--mounted-cni-net-dir=/host{{ .Values.cni.confDir }}"
             {{- with (.Values.cniInstall.otlpEndpoint | default .Values.otel.endpoint) }}
             # Written into the netconf: the CNI plugin binary runs under the
             # container runtime, so the endpoint cannot reach it via pod env.
@@ -77,9 +80,9 @@ spec:
             runAsUser: 0
           volumeMounts:
             - name: cni-bin-dir
-              mountPath: /host/opt/cni/bin
+              mountPath: /host{{ .Values.cni.binDir }}
             - name: cni-conf-dir
-              mountPath: /host/etc/cni/net.d
+              mountPath: /host{{ .Values.cni.confDir }}
           resources:
             {{- toYaml .Values.cniInstall.resources | nindent 12 }}
       containers:
@@ -96,6 +99,13 @@ spec:
             # Explicit boolean form: the binary default is true (safety net), so
             # agent.cniConflistReassert=false must be passed through (#645).
             - "--cni-conflist-reassert={{ .Values.agent.cniConflistReassert }}"
+            # Where cni-conf-dir (cni.confDir on the host) is mounted below; the
+            # conflist re-assert loop watches the active conflist here.
+            - "--mounted-cni-net-dir=/host{{ .Values.cni.confDir }}"
+            # The registrar stays in the release namespace, under a release-derived
+            # name; the binary default assumes aether-registrar in aether-system,
+            # so pass this release's Service address explicitly (as the edge does).
+            - "--registrar-address={{ include "aether.registrar.address" . }}"
             {{- if .Values.agent.importConfig }}
             - "--import-config"
             {{- end }}
@@ -236,7 +246,7 @@ spec:
             # which a Talos bootstrap-manifest re-sync triggers). The cni-install
             # init container mounts the same dir for the one-shot append.
             - name: cni-conf-dir
-              mountPath: /host/etc/cni/net.d
+              mountPath: /host{{ .Values.cni.confDir }}
             - name: containerd-sock
               mountPath: /run/containerd/containerd.sock
               readOnly: true
@@ -262,11 +272,11 @@ spec:
             type: DirectoryOrCreate
         - name: cni-bin-dir
           hostPath:
-            path: /opt/cni/bin
+            path: {{ .Values.cni.binDir }}
             type: DirectoryOrCreate
         - name: cni-conf-dir
           hostPath:
-            path: /etc/cni/net.d
+            path: {{ .Values.cni.confDir }}
             type: DirectoryOrCreate
         - name: cni-netns-dir
           hostPath:
