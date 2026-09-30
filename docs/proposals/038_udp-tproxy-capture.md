@@ -19,7 +19,7 @@ there is nothing for the divert mark to compose with. Phase 3 (e2e) and Phase 4
 per-source outbound twins (#956, demand-scoped since #1020), and the allow-list
 removed — QUIC is unconditional since #979 (merged 2026-09-29, 33ff5e9, chart
 1.0.12). Re-soak of the merged build:
-<!-- SOAK RESULT -->
+**2026-09-30 (chart 1.0.13-84fb413): all Phase 4 gates passed, and #1073/#1074 are shown fixed; the run failed on liveness (9 / 719,984), a hot-restart race outside QUIC (agent down during a proxy fork, #1085).**
 4d (UDP:18009 on the east/west gateway) is not built.
 **Author:** Bruno Palermo
 **Date:** 2026-09-23 (revised 2026-09-26)
@@ -710,7 +710,7 @@ prober SLI, before any default flips. (The first proving soak, with
 `aether-test/svc-1` and `svc-2` allow-listed on 2026-09-27, did **not** pass: the
 prober passed, but k6 failed with 1,154 errors, 1,060 of them 503 NC at first use
 (#1008). The unconditional flip in #979 merged on 2026-09-29; the re-soak of the
-merged build: <!-- SOAK RESULT -->)
+merged build: 2026-09-30 on chart 1.0.13-84fb413. It failed on liveness alone: 9 / 719,984 on one node for 1.6 s, when the TRIPLE's agent restart landed inside a proxy hot restart. That cause is outside QUIC (#1085). Every QUIC gate passed: 0 prunes of in-use twins, 0 `503 NC` in the window, 0 Envoy crashes, and h3/h2 = 1.18×. k6 had 147 / 9.18 M failures: 141 before T0 at loader first use and 6 × 504 in the TRIPLE.)
 
 ### Phase 5 — TCP capture to TPROXY
 

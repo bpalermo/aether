@@ -903,7 +903,20 @@ was a proving gate for QUIC on a real cluster and was removed by #979 (33ff5e9,
 chart 1.0.12; decision 2026-09-26: no opt-in for QUIC). The first proving soak
 (2026-09-27) did not pass — k6 saw 1,060 × 503 NC at first use (#1008, closed) —
 and #979 merged on 2026-09-29; the re-soak of the merged build:
-<!-- SOAK RESULT -->
+**2026-09-30, chart 1.0.13-84fb413 (T0 10:57:18Z): every QUIC gate passed; the run failed only on liveness, 9 of 719,984, with a cause outside QUIC.**
+- **The two defects that failed the 09-29 run did not recur.**
+  - No agent logged a `pruned persisted east-west QUIC pairs` line, and all 30 fresh xDS streams re-stated their held twins as served.
+  - There was no source-side `503 NC` in the window.
+  - There was no Envoy crash across 6 hot restarts per node.
+- **The new-ServiceAccount steps, wedge gates, stateless-reset gate and L4 gates were all at zero.** h3 costs 1.18× h2 per request.
+- **The 9 liveness errors are a new race (#1085).**
+  - In the TRIPLE, main-worker-05's agent was down while its proxy forked a successor.
+  - The successor's CDS and LDS initial fetches timed out (15 s each), and Envoy started workers with no listeners.
+  - The parent then drained, so `127.0.0.1:18081` refused new connections for 1.6 s.
+  - A successor that logs `initial fetch timed out for …Listener` next to `starting workers` is this case.
+- **k6 had 147 failures in 9.18 M requests.**
+  - 141 were `503 NC` first-use timeouts at loader start, before T0 (#1086).
+  - 6 were `504 UT` to a terminating svc-3 pod in the TRIPLE (#1087).
 The one exception is a service with any endpoint behind the east/west
 waypoint (019): it stays h2, because the waypoint tunnel has no QUIC leg.
 
