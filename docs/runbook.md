@@ -899,10 +899,12 @@ requirement, same SAN pin), and every node proxy dials every service in its
 dependency set over HTTP/3 from every local ServiceAccount that calls it (#956;
 the per-source clusters are built on first use, #1020). There is no
 value or flag for it: the per-destination allow-list (a chart value + agent flag)
-was a proving gate for QUIC on a real cluster and is removed by #979 (decision
-2026-09-26: no opt-in for QUIC). The first proving soak (2026-09-27) did not pass —
-k6 saw 1,060 × 503 NC at first use (#1008) — so the removal is gated on the next
-proving soak. The one exception is a service with any endpoint behind the east/west
+was a proving gate for QUIC on a real cluster and was removed by #979 (33ff5e9,
+chart 1.0.12; decision 2026-09-26: no opt-in for QUIC). The first proving soak
+(2026-09-27) did not pass — k6 saw 1,060 × 503 NC at first use (#1008, closed) —
+and #979 merged on 2026-09-29; the re-soak of the merged build:
+<!-- SOAK RESULT -->
+The one exception is a service with any endpoint behind the east/west
 waypoint (019): it stays h2, because the waypoint tunnel has no QUIC leg.
 
 **Mesh-wide SPIRE prerequisite.** Every workload SVID must carry two DNS SANs —
@@ -1015,7 +1017,7 @@ resubscribed=R resumed_pairs=P held_only=H held_served=S answered_absent=A`.
 **Post-start prune of pairs with no evidence of use (`--east-west-quic-pair-fetch-window`,
 default `1h`).** A persisted pair that no agent process has ever seen evidence of use
 for is dropped with its twin once the window has elapsed (checked on the one-minute
-prune tick). Evidence of use is any of:
+prune tick). `0` disables the prune. Evidence of use is any of:
 
 - an on-demand fetch of the twin (first use);
 - an on-demand subscription for it, held by a live stream or re-subscribed on a fresh one;
@@ -1039,7 +1041,9 @@ those twins as held-only. The pre-#1073 rule ("no on-demand fetch since agent st
 then pruned every one of them exactly one window later, while they carried traffic:
 
 - the #979 proving soak saw about 200 × `503 NC` per burst fleet-wide;
-- Envoy crashed on one node (#1074, SIGBUS removing a QUIC cluster with a live connection).
+- Envoy crashed on one node (#1074, SIGBUS removing a QUIC cluster with a live connection;
+  fixed by the carried patch #1077, chart 1.0.13 — see "Envoy SIGBUS/SEGV in
+  `QuicConnection` after an h3 cluster removal (#1074)" below).
 
 A held twin whose pair the agent does not serve still admits nothing and is answered
 absent (#1033). The fresh-stream line's `held_served=S` counts the held twins that
@@ -1063,7 +1067,6 @@ If that line shows up **after an agent roll on a node whose proxy kept running**
 with `503 NC` on QUIC destinations right after it, that is #1073 again: the prune
 removed twins in use. File it with the fresh-stream line from the same agent
 generation.
-`0` disables the prune.
 
 **Stranded twin: 503 `NC` at 2 s for a source that came back (#1036).** Envoy's
 ODCDS manager keeps **one subscription per cluster name for the life of the
@@ -1239,7 +1242,7 @@ kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), in
 2026-09-28 (rev247, 300 rps, matched 80-min no-roll windows, Pyroscope fleet envoy
 cores) measured an HTTP/3 mesh request at **1.18×** the proxy CPU of an h2 one
 (10.5 ms vs 8.9 ms across both proxies) — under the ≤ 1.5× gate the allow-list drop
-(#979) waits on ([#1021, "Same-revision measurement, 2026-09-28"](https://github.com/bpalermo/aether/issues/1021)).
+(#979, merged as 33ff5e9) was held to ([#1021, "Same-revision measurement, 2026-09-28"](https://github.com/bpalermo/aether/issues/1021)).
 The earlier ~3.3× (~11 ms vs ~3.3 ms, rev242 QUIC vs rev239 h2) compared two
 builds and is superseded. Grade it only with the
 matched-window method in `e2e/soak/README.md` ("The QUIC per-request cost gate"):
@@ -1292,10 +1295,39 @@ added. In order:
    Both converge without a pod or proxy roll.
 2. **Roll the chart back** to the last release that still had the allow-list
    (1.0.11, the release before #979): its default (an empty list) is h2 for every
-   destination, and the twins and selection disappear on the next push with no
-   proxy roll (same proxy pin). Take the
+   destination, and the twins and selection disappear on the next push. Take the
    values from `helm get values -o yaml` and pass them with `-f`; never
    `--reuse-values`. This is the escape hatch; there is no other.
+
+   **It is not proxy-neutral.** 1.0.11 pins `proxy.image` at `a1bcf05…` (#1070);
+   main pins `71be75f…` (#1078, chart 1.0.13). A plain rollback therefore rolls
+   every node's proxy (and the edge, which runs the same image) and loses:
+
+   - the #1074 carried patch (#1077). Without it Envoy can SIGBUS/SEGV when a CDS
+     removal drops an h3 cluster with streams in flight — and the rollback's first
+     push removes every twin at once;
+   - the #1073 fix (#1076): the agent goes back to the build whose fetch-window
+     prune removes held twins. Moot while every destination is h2, but it returns
+     with QUIC.
+
+   To keep the proxy where it is, roll back the agent only: add the current
+   `proxy.image` **and** `proxy.supervisor.image` to the `-f` file. The 1.0.11 chart
+   reads the same keys, its `aether.image` helper uses the digest when one is set,
+   and its proxy DaemonSet template is unchanged through 1.0.13, so with both images
+   pinned the proxy DaemonSet does not roll at all. (Pinning only `proxy.image` keeps
+   the patched Envoy but still rolls the proxy pods, because the supervisor image is
+   in the same pod template.) The proxy half, for chart 1.0.13:
+
+   ```yaml
+   proxy:
+     image:
+       repository: quay.io/aethermesh/proxy
+       tag: 71be75f9244c3eaddb1f05e0b9a0f08f0afcb6fa
+       digest: "sha256:7cb11392fc028946e7dc5bb4a42a4882932bb214c15535a07240d3fa1dc1d167"
+   ```
+
+   Copy `proxy.supervisor.image` (and, for a later chart, `proxy.image`) from
+   `helm get values <release> -n <ns> --all -o yaml`.
 
 `spire.enabled=false` also removes QUIC (no TLS, no QUIC) but turns off mTLS
 mesh-wide — it is not an escape hatch.
@@ -1852,9 +1884,16 @@ outlasts the 15 s parent-shutdown window.
   (4/8/0 per roll vs 1–3 per run under gradual): more parent connections close inside
   the drain window, and those closes are what sources then see reset. It is also
   server-wide (h2 and h3 reconnections bunch at drain start; LDS and pod-termination
-  drains switch too). The carried Envoy patches #1064 (child unpauses its UDP listeners
-  only after the parent exits) and #1066 (draining parent answers its own time-wait
-  connections) are the fix under `gradual`.
+  drains switch too). Three carried Envoy patches are the fix under `gradual`:
+  #1064 (`envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch`: the child
+  unpauses its UDP listeners only after the parent exits), #1066
+  (`envoy-aether1054b-quic-time-wait-before-forward.patch`: the draining parent
+  answers its own time-wait connections) and #1069
+  (`envoy-aether1054c-paused-udp-listener-no-read.patch`, chart 1.0.11), the actual
+  root cause: a **paused** child UDP listener still read the inherited socket when
+  the parent forwarded it a CHLO, because the QUIC listener injects a read event to
+  process the buffered handshake, and every packet it dequeued that way belonged to a
+  parent connection and drew a stateless reset.
 - `agent.eastWestQuicIdleTimeout: 8s` (the agent's `--east-west-quic-idle-timeout`) is
   the idle timeout on the `quic:` twins only; h1/h2 keep 30 s. It closes the connections
   that were idle when the drain started, before the parent exits. The chart refuses to
@@ -1866,6 +1905,26 @@ outlasts the 15 s parent-shutdown window.
 A request in flight at the parent's exit still dies, as it does on h2. The soak gate is
 in `e2e/soak/README.md`, "The h3 stateless-reset gate (#1054)"; the kind leg is
 `e2e/eastwest-quic-hotrestart.sh` with `HR_MODE=sparse` (two nodes, `EWQ_WORKER=1`).
+
+### Envoy SIGBUS/SEGV in `QuicConnection` after an h3 cluster removal (#1074)
+
+Symptom: the proxy container restarts with a SIGBUS or SIGSEGV whose backtrace ends in
+`quic::QuicConnection::OnCanWrite` / `CanWrite` (or a QUIC alarm), shortly after a
+CDS push removed a `quic:` twin while requests were still in flight on it. Seen on
+talos-main w01 when the pre-#1073 fetch-window prune removed held twins.
+
+Cause: the per-cluster `PersistentQuicInfoImpl` (connection helper and clock, alarm
+factory, QUIC config) was owned by the worker's thread-local `ClusterEntry`, while the
+HTTP/3 pools held it by reference and their connections kept raw pointers into it. A
+CDS removal destroys the entry after only *draining* its pools, so a pool with live
+streams outlived the info and its next write or alarm read freed memory.
+
+Fix: the carried patch `envoy-aether1074-quic-persistent-info-lifetime.patch` (#1077;
+upstream as envoyproxy/envoy#47893): the info is shared, and every HTTP/3 pool and
+connectivity grid holds a reference. It is in the proxy pinned by chart **1.0.13**
+(`71be75f…`, #1078). A proxy older than that is exposed on any h3 cluster removal
+with streams in flight, which includes rolling the chart back to 1.0.11 without
+pinning `proxy.image` (see "If UDP:18008 is blocked" above).
 
 ### The agent reports an unrepairable conflist
 

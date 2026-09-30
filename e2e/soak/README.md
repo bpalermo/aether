@@ -815,8 +815,9 @@ k6 loaders and the prober call — no `--set` is needed and there is nothing to 
 (The per-destination allow-list was a proving gate, decision 2026-09-26. The first
 proving soak ran on 2026-09-27 with `aether-test/svc-1` and `svc-2` listed and did
 **not** pass: prober green, k6 1,154 errors, 1,060 of them 503 NC at first use
-(#1008). #979 drops the allow-list; that is gated on the NEXT proving soak, result
-pending.)
+(#1008, since closed). #979 dropped the allow-list: merged 2026-09-29 as 33ff5e9,
+chart 1.0.12.) The re-soak of the merged build:
+<!-- SOAK RESULT -->
 
 ```bash
 # prerequisite ON TALOS: the SPIRE default ClusterSPIFFEID must already issue the
@@ -948,8 +949,10 @@ connections per h3 destination. That run passes H2 vacuously and says so, and
 
 ### The QUIC per-request cost gate (#1021)
 
-**Acceptance for dropping the allow-list (#979): an HTTP/3 mesh request costs at
-most 1.5× the proxy CPU of an h2 mesh request, at the soak's load shape.** The
+**Acceptance for dropping the allow-list (#979, merged 2026-09-29 after this gate
+passed at 1.18×): an HTTP/3 mesh request costs at most 1.5× the proxy CPU of an h2
+mesh request, at the soak's load shape.** It stays the regression gate for every
+QUIC soak. The
 prober and k6 SLIs cannot see this: a QUIC run can be error-free and still cost far
 more proxy CPU once every destination is on it (#1006 projected 2.3× the fleet's,
 from the since-superseded cross-revision 3.3× reading).
