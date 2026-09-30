@@ -132,7 +132,9 @@ symbol upload is keyed by (#653).
   them; not yet proposed upstream), and a third aether#1054 patch (a paused
   hot-restart child UDP listener no longer reads the parent's socket when the
   QUIC listener injects a read to process forwarded handshakes; an upstream bug,
-  to be proposed upstream). A carried patch's own Envoy tests run from
+  to be proposed upstream), and aether#1074 (HTTP/3 pools keep the per-cluster
+  persistent QUIC info alive after a CDS removal, instead of their draining
+  connections reading its freed clock; an upstream bug). A carried patch's own Envoy tests run from
   `//bazel/patches:carried_patch_tests`, since `//...` does not reach `@envoy` tests.
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)

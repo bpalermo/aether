@@ -100,6 +100,16 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 #   returns without reading while paused. Child-side: effective from the first roll.
 #   Carries its test (test/common/network:udp_listener_impl_test), run by
 #   //bazel/patches:carried_patch_tests.
+#   aether#1074 (an upstream bug; to be proposed upstream on the maintainer's word),
+#   applied AFTER aether1054c: the persistent QUIC info (connection helper + clock,
+#   alarm factory, QUIC config) was owned by the thread-local ClusterEntry while
+#   HTTP/3 pools held it by reference and their connections by raw pointer; a CDS
+#   removal destroys the entry after only DRAINING its pools, so a pool with live
+#   streams outlived the info and the next write/alarm read the freed clock (the w01
+#   SIGBUS in QuicConnection::CanWrite). PersistentQuicInfoPtr is now shared and each
+#   HTTP/3 pool and connectivity grid holds a reference. Its test
+#   (test/common/http/http3:conn_pool_test) needs quiche's test tooling, so it runs in
+#   the Envoy workspace only, not in //bazel/patches:carried_patch_tests.
 #   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
@@ -113,6 +123,7 @@ single_version_override(
         "//bazel/patches:envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch",
         "//bazel/patches:envoy-aether1054b-quic-time-wait-before-forward.patch",
         "//bazel/patches:envoy-aether1054c-paused-udp-listener-no-read.patch",
+        "//bazel/patches:envoy-aether1074-quic-persistent-info-lifetime.patch",
     ],
 )
 
