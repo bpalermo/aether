@@ -215,7 +215,7 @@ GWAPI_VERSION="v1.6.2"
 SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.30.2}"
 SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.6.1}"
 SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
-IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller)
+IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi)
 if [ "${EWQ_LOCAL_PROXY:-0}" = "1" ]; then IMAGES+=(proxy); fi
 # Extra `helm upgrade aether` arguments for a harness that sources this file
 # (e2e/eastwest-quic-hotrestart.sh adds the OTLP collector and access logs).
@@ -307,7 +307,7 @@ build_images() {
 	log "building + loading aether images"
 	local t
 	for t in //agent/cmd/agent //agent/cmd/mesh-dns //agent/cmd/proxy-supervisor \
-		//cni/cmd/cni-install //registrar/cmd/registrar //controller/cmd/controller; do
+		//cni/cmd/cni-install //registrar/cmd/registrar //controller/cmd/controller //agent/cmd/uds-csi; do
 		(cd "$REPO_ROOT" && bazel run "$t:image_load" >/dev/null 2>&1) || die "image build failed for $t"
 	done
 	ok "images built"
@@ -473,7 +473,7 @@ install_aether() {
 		"${EWQ_EXTRA_HELM_ARGS[@]+"${EWQ_EXTRA_HELM_ARGS[@]}"}" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
-		$(img registrar registrar) $(img controller controller) \
+		$(img registrar registrar) $(img controller controller) $(img udsCsi uds-csi) \
 		--set proxy.image.pullPolicy=IfNotPresent \
 		$([ "${EWQ_LOCAL_PROXY:-0}" = "1" ] && img proxy proxy) \
 		--timeout 6m >/dev/null || die "aether install failed"

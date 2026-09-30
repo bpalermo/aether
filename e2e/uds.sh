@@ -49,7 +49,7 @@ MESH_DOMAIN="aether.internal"
 # The pod-local outbound listener port every mesh client dials (post-030).
 OUTBOUND_PORT="18081"
 GWAPI_VERSION="v1.6.2"
-IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller udsecho)
+IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi udsecho)
 # The declared socket, as "<volume>/<file>". SHORT by necessity: the resolved
 # host path is <kubelet-pods-dir>/<36-byte UID>/volumes/kubernetes.io~empty-dir/
 # + this value, and the whole thing must fit an AF_UNIX sun_path (107 bytes),
@@ -121,7 +121,7 @@ build_images() {
 	log "building + loading aether images (incl. the udsecho test workload)"
 	local t
 	for t in //agent/cmd/agent //agent/cmd/mesh-dns //agent/cmd/proxy-supervisor \
-		//cni/cmd/cni-install //registrar/cmd/registrar //controller/cmd/controller \
+		//cni/cmd/cni-install //registrar/cmd/registrar //controller/cmd/controller //agent/cmd/uds-csi \
 		//e2e/udsecho; do
 		bazel run "$t:image_load" >/dev/null 2>&1 || die "image build failed for $t"
 	done
@@ -258,7 +258,7 @@ install_aether() {
 		--set "cniInstall.otlpEndpoint=$COLLECTOR_ENDPOINT" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
-		$(img registrar registrar) $(img controller controller) \
+		$(img registrar registrar) $(img controller controller) $(img udsCsi uds-csi) \
 		--set proxy.image.pullPolicy=IfNotPresent \
 		--timeout 5m >/dev/null || die "aether install failed"
 	rm -rf "$(dirname "$charts")"

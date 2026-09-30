@@ -160,42 +160,42 @@ post_base="$(base_with "$post_bzl" "a tree from after the Quay cut-over")"
 
 # Hand-written verifiers for shapes the real one cannot easily be driven into.
 # Each takes the control sha as $1, like the real one. Every shape keeps the
-# counts right (20 lines, 12 witnesses) so exactly ONE defect is under test.
+# counts right (22 lines, 13 witnesses) so exactly ONE defect is under test.
 stub() {
 	local name="$1" body="$2"
 	printf '#!/usr/bin/env bash\nsha="$1"\n%s\n' "$body" >"$tmp/$name"
 	chmod +x "$tmp/$name"
 }
-sigs='for i in $(seq 1 8); do echo "  MISSING ${STUB_PREFIX}/r$i signature for *-${sha} (no image to sign)"; done'
-stub right-red 'for i in $(seq 1 12); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+sigs='for i in $(seq 1 9); do echo "  MISSING ${STUB_PREFIX}/r$i signature for *-${sha} (no image to sign)"; done'
+stub right-red 'for i in $(seq 1 13); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
 '"$sigs"'
 echo ""
-echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
-stub other-sha 'for i in $(seq 1 11); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
-echo "  MISSING ${STUB_PREFIX}/r12:*-ffffffffffffffffffffffffffffffffffffffff (looked up directly: 404; witness dev: 200)"
+echo "FAIL: 22 of 22 artifact(s) missing across 1 commit(s)"; exit 1'
+stub other-sha 'for i in $(seq 1 12); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+echo "  MISSING ${STUB_PREFIX}/r13:*-ffffffffffffffffffffffffffffffffffffffff (looked up directly: 404; witness dev: 200)"
 '"$sigs"'
-echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
-stub one-present 'for i in $(seq 1 11); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
-echo "  ok      ${STUB_PREFIX}/r12:dev-${sha}"
+echo "FAIL: 22 of 22 artifact(s) missing across 1 commit(s)"; exit 1'
+stub one-present 'for i in $(seq 1 12); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+echo "  ok      ${STUB_PREFIX}/r13:dev-${sha}"
 '"$sigs"'
-echo "  MISSING ${STUB_PREFIX}/r12 extra (looked up directly: 404; witness dev: 200)"
-echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
+echo "  MISSING ${STUB_PREFIX}/r13 extra (looked up directly: 404; witness dev: 200)"
+echo "FAIL: 22 of 22 artifact(s) missing across 1 commit(s)"; exit 1'
 # Prints a perfect red and exits 0: only the exit-code assertion can catch it.
-stub exit-zero 'for i in $(seq 1 12); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+stub exit-zero 'for i in $(seq 1 13); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
 '"$sigs"'
-echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 0'
+echo "FAIL: 22 of 22 artifact(s) missing across 1 commit(s)"; exit 0'
 stub inconclusive 'echo "::error::could not list tags for x" >&2; exit 2'
 # A perfect red — right sha, right count, every absence witnessed — reported
 # against the OTHER registry of the cut-over pair: the gate would be checking
 # where the commit never published.
-stub wrong-registry 'for i in $(seq 1 12); do echo "  MISSING ${STUB_OTHER_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
-for i in $(seq 1 8); do echo "  MISSING ${STUB_OTHER_PREFIX}/r$i signature for *-${sha} (no image to sign)"; done
-echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
+stub wrong-registry 'for i in $(seq 1 13); do echo "  MISSING ${STUB_OTHER_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+for i in $(seq 1 9); do echo "  MISSING ${STUB_OTHER_PREFIX}/r$i signature for *-${sha} (no image to sign)"; done
+echo "FAIL: 22 of 22 artifact(s) missing across 1 commit(s)"; exit 1'
 # A perfect red whose absences carry no witness (the pre-#985 line shape): the
 # 404s were never shown to come from a lookup that can answer "present".
-stub no-witness 'for i in $(seq 1 12); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (scanned 5 tags)"; done
+stub no-witness 'for i in $(seq 1 13); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (scanned 5 tags)"; done
 '"$sigs"'
-echo "FAIL: 20 of 20 artifact(s) missing across 1 commit(s)"; exit 1'
+echo "FAIL: 22 of 22 artifact(s) missing across 1 commit(s)"; exit 1'
 
 # --- cases -------------------------------------------------------------------
 control=scripts/publish-verify-control.sh
@@ -222,10 +222,10 @@ expect_rc() {
 expect_rc "real verifier, commit absent from a non-empty registry: control accepts" 0 \
 	env VERIFIER="$reg/verify-published-artifacts.sh" "$control" HEAD
 n=$((n + 1))
-if grep -qxF '  | FAIL: 20 of 20 artifact(s) missing across 1 commit(s)' "$tmp/out"; then
-	printf '  ok    the real verifier printed FAIL: 20 of 20\n'
+if grep -qxF '  | FAIL: 22 of 22 artifact(s) missing across 1 commit(s)' "$tmp/out"; then
+	printf '  ok    the real verifier printed FAIL: 22 of 22\n'
 else
-	printf '  FAIL  the real verifier did not print FAIL: 20 of 20\n'
+	printf '  FAIL  the real verifier did not print FAIL: 22 of 22\n'
 	fail=1
 fi
 first="$(sed -nE 's/^expected-red control: commit ([0-9a-f]{40})$/\1/p' "$tmp/out")"
@@ -279,10 +279,10 @@ split_case() {
 	expect_rc "$name" 0 env "$@" VERIFIER="$reg/verify-published-artifacts.sh" "$control" "$base"
 	n=$((n + 1))
 	n_on="$(grep -cE "^  \| +MISSING ${want_prefix//./\\.}/" "$tmp/out" || true)"
-	if [ "$n_on" = 20 ]; then
-		printf '  ok    …all 20 MISSING lines on %s/\n' "$want_prefix"
+	if [ "$n_on" = 22 ]; then
+		printf '  ok    …all 22 MISSING lines on %s/\n' "$want_prefix"
 	else
-		printf '  FAIL  …%s of 20 MISSING lines on %s/\n' "$n_on" "$want_prefix"
+		printf '  FAIL  …%s of 22 MISSING lines on %s/\n' "$n_on" "$want_prefix"
 		sed 's/^/        | /' "$tmp/out" | tail -8
 		fail=1
 	fi
@@ -304,7 +304,7 @@ fi
 #    chart pins a digest the fake registry has never seen, introduced by a
 #    commit AFTER the signing cut-over (so the pin check would look and find
 #    nothing). The control must still accept: it sets PROXY_PIN_CHECK=0 and
-#    asserts exactly the 20 per-commit coordinates. Then prove the switch is
+#    asserts exactly the 22 per-commit coordinates. Then prove the switch is
 #    load-bearing: the same verifier with the pin check ON reports the proxy
 #    pin MISSING too, which is exactly the red the bot's first signed pin PR
 #    (#988) hit in CI.

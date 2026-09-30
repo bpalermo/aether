@@ -13,6 +13,10 @@ deleted): (1) no `node-driver-registrar` sidecar: the node plugin serves the kub
 plugin-registration API itself; (2) Q2 answered: `fsGroupPolicy: File`, the per-pod
 tmpfs is `root:<fsGroup>` mode `2770`, and a pod without `fsGroup` is rejected;
 (3) the image is `quay.io/aethermesh/uds-csi` (proposal 040 naming).
+**Implementation:** **Phase 1 implemented** (#1090): the `csi.aether.io` node plugin,
+its `uds-csi` image and its chart wiring, **default off** and consumed by nothing.
+**Phase 2 (the breaking cut-over) is pending.** *Phase 1 as built* (under *Plan*)
+lists only where the build departs from the design text.
 **Author:** Bruno Palermo
 **Date:** 2026-09-26 (decisions 2026-09-27, 2026-09-30)
 **Related:** 034 (UDS delivery: annotation, `EndpointPolicy`, the `emptyDir`-only
@@ -547,6 +551,56 @@ unmounted directory fails `ENOENT` exactly like a dead app.)
 | **1 — the driver** | 1a, 1b | 1a: `agent/cmd/uds-csi` + `agent/internal/udscsi/` (Identity/Node services, per-pod tmpfs `root:<fsGroup>` `2770` + bind, `InvalidArgument` on a missing `fsGroup`, idempotency, unit tests against a fake mounter, and a root-only mount test in the kernel-gate CI lane the TPROXY work added), plus the built-in kubelet registration server (the `pluginregistration` proto copied into `api/aether/kubelet/pluginregistration/v1/`, unit-tested against a fake kubelet registration client; no `node-driver-registrar`). 1b: chart (`uds-csi-daemonset.yaml` with the single `uds-csi` container, `CSIDriver` with `fsGroupPolicy: File`, values, Chart.yaml bump), the `quay.io/aethermesh/uds-csi` image, `deps_test`. **Before 1b's first publish the owner pre-creates the `aethermesh/uds-csi` quay repository** (public, robot write): the push robot cannot create repositories (proposal 040). Inert until a pod declares the volume. | driver registers on kind: `CSINode` lists `csi.aether.io`, and still does after a `uds-csi` roll; `FailedMount` on bad requests, including a pod with no `fsGroup` |
 | **2 — the CSI volume becomes the only carrier (BREAKING)** | 2 | `CNIPod.uds_csi_volume = 12` via `enhanceCNIPod`; `udspath.ResolveCSI` **replaces** the `kubernetes.io~empty-dir` resolver (the emptyDir shape, `--kubelet-pods-dir`, the proxy's `/var/lib/kubelet/pods` mount and `proxy.udsWorkloads` are deleted in the same PR — chart major bump, release note); `--uds-csi-root`; `resolve_failures{reason}` counter (seeded at 0 so it is never "no series"); the `EndpointPolicy` webhook computes the 54-byte CSI budget (for a policy the webhook cannot see the pod, so it keeps a conservative budget and the agent stays fail-closed, as today); podmutate **rejects** an `emptyDir` carrier with a message naming the CSI volume, and may reject a `csi.aether.io` volume on a pod with no `securityContext.fsGroup` at admission, earlier than the plugin's `FailedMount`; `e2e/udsecho` and `e2e/soak/udsecho` switch their volume source in the same PR. | `e2e/uds.sh` runs every existing leg on the CSI carrier; the hostile leg passes with no kubelet-pods mount on the proxy at all; an `emptyDir` carrier is rejected at admission (seen red on the old build) |
 | **3 — talos** | — | Migrate the soak's UDS echo to the CSI volume in the same `helm upgrade` (the old carrier stops resolving the moment the agent rolls, so the workload and the chart move together); validate across an **agent roll, a uds-csi roll, a proxy roll and a node reboot**: mounts persist across a plugin roll, republish is idempotent after reboot, Terminating pods drain while the plugin rolls. One 8 h soak with the UDS leg on the CSI carrier. 034 Phase 2 is built on the CSI carrier only. | soak grade |
+
+### Phase 1 as built
+
+Phase 1 shipped as ONE PR, #1090 (1a + 1b together). The 2026-09-30 decisions
+(built-in registration, `root:<fsGroup>` `2770` with `fsGroupPolicy: File`, the
+`uds-csi` image name) are implemented as written above. Where the build departs
+from the design text:
+
+- **`nosymfollow` is a `mount(2)` flag (`MS_NOSYMFOLLOW`), not a later
+  `mount_setattr(2)`, and the bind does not carry it into the app's view** (this
+  corrects `NodePublishVolume` step 3). The plugin mounts in its own mount
+  namespace; the host's copy (created by `Bidirectional` propagation, and the one
+  the node proxy's `HostToContainer` `/run/aether` view clones) carries the flags
+  the mount had when it propagated. A `mount_setattr` afterwards changed only the
+  plugin's copy — seen on kind: the host mount was `nosuid,nodev,noexec` without
+  `nosymfollow`, and the host followed a symlink the app planted. A kernel that
+  rejects `MS_NOSYMFOLLOW` (< 5.10) gets the mount without it and a logged warning.
+  Separately, the container runtime re-binds `target_path` into the pod with flags
+  it chooses (the pod sees plain `rw`); only the superblock options (size, mode,
+  gid) reach the app. That is enough: the confused deputy is the proxy following an
+  app-planted link, and the proxy's view is the host copy, so the per-mount flags
+  are asserted on the host.
+- **Registration failure:** a kubelet-reported error is logged and exits the
+  plugin non-zero (the reason is on stderr, i.e. in `kubectl logs --previous`); it
+  is not written to the termination-message file.
+- **Validation (step 1):** the UID check is a pod-UID pattern (UUID or a static
+  pod's 32-hex hash) rather than `udspath.validateSegment` (unexported; `udspath`
+  unchanged). Also rejected: a block volume and a `target_path` outside
+  `<kubeletRoot>/pods/<that-uid>/`; unpublish recovers the UID from `target_path`,
+  so the plugin stays stateless. **Not built:** the "second, different
+  `volume_id` for a UID" rejection — it needs state; a second volume of one pod
+  reuses the pod's tmpfs. No `nr_inodes` cap: the data string is exactly
+  `mode=2770,uid=0,gid=<fsGroup>,size=<bytes>`.
+- **Chart values** are `udsCsi.{enabled,image,kubeletRoot,root,size,debug,
+  nodeSelector,tolerations,resources}` (not `kubeletRootDir` / `tmpfsSize`).
+  `Bidirectional` on `<kubeletRoot>/pods` and on `udsCsi.root`. The image uses the
+  same distroless base as every aether image, run `privileged` as root by the
+  chart. The linkage guard is `//agent/cmd/uds-csi:deps_test` +
+  `scripts/check-uds-csi-deps.sh` (~11 MiB, no client-go / controller-runtime /
+  SPIRE / go-control-plane).
+- **Gate:** `e2e/uds-csi.sh` (kind, nightly `uds-csi` job): `CSINode` lists the
+  driver, and still does after a plugin `rollout restart` that still publishes; an
+  `fsGroup` pod gets a tmpfs with `2770`/gid and a working socket from a nonroot
+  app; the host holds that tmpfs `nosuid,nodev,noexec,nosymfollow` and does not
+  follow a symlink the app planted (`ELOOP`); a pod without `fsGroup` stays Pending
+  with a `FailedMount` naming the fix; deletion removes the host tmpfs. The
+  registration unit test drives the real server over a UDS rather than a fake
+  client. The root-only mount unit test in the kernel-gate lane is not built: the
+  kind leg exercises the real mounts end to end. The quay repository was created
+  2026-09-30.
 
 No coexistence phase and no deprecation window (decision 2026-09-27): a UDS workload
 that does not switch its volume source in the upgrade that ships Phase 2 stops being

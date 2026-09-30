@@ -1,5 +1,5 @@
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_template_fail_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_template_absent_test", "helm_template_fail_test")
 load("//bazel/img:registry.bzl", "chart_registry_url", "image_reference")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
@@ -13,11 +13,14 @@ load("//bazel/img:registry.bzl", "chart_registry_url", "image_reference")
 # aether.cluster stats-tag regex over the per-kind L4 stat keys (#1023): a
 # regex edit that cut "tcp:<ns>/<svc>:<port>" short would silently merge L4
 # series again.
+# uds-csi-daemonset.yaml is exported so //agent/cmd/uds-csi asserts every flag
+# it passes (args and the liveness probe's command) exists on the binary.
 exports_files([
     "values.yaml",
     "templates/agent-daemonset.yaml",
     "templates/agent-proxy-daemonset.yaml",
     "templates/agent-proxy-configmap.yaml",
+    "templates/uds-csi-daemonset.yaml",
 ])
 
 # Shared by both packagings below (see :aether_commit). `images` is what makes the
@@ -31,6 +34,10 @@ AETHER_IMAGES = [
     "//cni/cmd/cni-install:image_push",
     "//registrar/cmd/registrar:image_push",
     "//controller/cmd/controller:image_push",
+    # The csi.aether.io node plugin (proposal 039). Published with the chart even
+    # while udsCsi.enabled defaults to false, so enabling it never needs an image
+    # nobody pushed.
+    "//agent/cmd/uds-csi:image_push",
 ]
 
 # aether Helm chart (published to chart_registry_url("aether"); see //bazel/img:registry.bzl).
@@ -594,6 +601,106 @@ helm_template_test(
             "- name: cni-conf-dir\\n\\s+hostPath:\\n\\s+path: /var/lib/rancher/k3s/agent/etc/cni/net.d\\n",
         ],
     },
+)
+
+# Proposal 039 Phase 1: the csi.aether.io node plugin ships OFF. With the
+# default values neither the DaemonSet nor the CSIDriver renders — Phase 2 flips
+# the default in the same PR that makes the CSI volume the only UDS carrier.
+helm_template_absent_test(
+    name = "aether_uds_csi_default_off_test",
+    absent = [
+        "kind: CSIDriver",
+        "csi.aether.io",
+        "aether-uds-csi",
+        "/uds-csi",
+    ],
+    chart = ":aether",
+    control = "name: aether-agent",
+)
+
+# Enabled: the DaemonSet runs the uds-csi image privileged, with Bidirectional
+# propagation on BOTH the kubelet pods dir (so the bind onto target_path reaches
+# the kubelet) and the per-pod tmpfs root (so the tmpfs mounts exist on the host,
+# where the proxy will see them); every kubelet path derives from kubeletRoot,
+# and hostPath == mountPath (the kubelet hands the plugin host paths).
+helm_template_test(
+    name = "aether_uds_csi_enabled_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "udsCsi.enabled=true",
+    ],
+    template_patterns = {
+        "aether/templates/uds-csi-daemonset.yaml": [
+            "kind: DaemonSet",
+            "name: aether-uds-csi",
+            image_reference("uds-csi") + "@sha256:",
+            "command: \\[\"/uds-csi\"\\]",
+            "- \"--kubelet-root=/var/lib/kubelet\"",
+            "- \"--root=/run/aether/uds\"",
+            "- \"--size=1Mi\"",
+            "privileged: true",
+            "runAsUser: 0",
+            "- name: kubelet-pods\\n\\s+mountPath: /var/lib/kubelet/pods\\n\\s+mountPropagation: Bidirectional\\n",
+            "- name: uds-root\\n\\s+mountPath: /run/aether/uds\\n\\s+mountPropagation: Bidirectional\\n",
+            "- name: plugin-dir\\n\\s+mountPath: /var/lib/kubelet/plugins/csi.aether.io\\n",
+            "- name: registration-dir\\n\\s+mountPath: /var/lib/kubelet/plugins_registry\\n",
+            "- name: kubelet-pods\\n\\s+hostPath:\\n\\s+path: /var/lib/kubelet/pods\\n",
+            "- name: uds-root\\n\\s+hostPath:\\n\\s+path: /run/aether/uds\\n",
+            "- \"/uds-csi\"\\n\\s+- \"--probe\"",
+            "key: aether.io/agent-not-ready",
+            "maxSurge: 0",
+            "priorityClassName: system-node-critical",
+            "automountServiceAccountToken: false",
+        ],
+        "aether/templates/uds-csi-csidriver.yaml": [
+            "kind: CSIDriver",
+            "name: csi.aether.io",
+            "attachRequired: false",
+            "podInfoOnMount: true",
+            "volumeLifecycleModes:\\n\\s+- Ephemeral\\n",
+            "fsGroupPolicy: File",
+            "requiresRepublish: false",
+            "seLinuxMount: false",
+        ],
+    },
+)
+
+# kubeletRoot is the ONE knob for the kubelet root (proposal 039, R3): it moves
+# the flag, every hostPath and every mountPath together.
+helm_template_test(
+    name = "aether_uds_csi_kubelet_root_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "udsCsi.enabled=true",
+        "--set",
+        "udsCsi.kubeletRoot=/var/lib/k0s/kubelet/",
+        "--set",
+        "udsCsi.size=512Ki",
+    ],
+    template_patterns = {
+        "aether/templates/uds-csi-daemonset.yaml": [
+            "- \"--kubelet-root=/var/lib/k0s/kubelet\"\\n",
+            "- \"--size=512Ki\"",
+            "mountPath: /var/lib/k0s/kubelet/pods\\n",
+            "path: /var/lib/k0s/kubelet/pods\\n",
+            "mountPath: /var/lib/k0s/kubelet/plugins/csi.aether.io\\n",
+            "path: /var/lib/k0s/kubelet/plugins_registry\\n",
+        ],
+    },
+)
+
+helm_template_fail_test(
+    name = "aether_uds_csi_relative_kubelet_root_test",
+    chart = ":aether",
+    expected_message = "udsCsi.kubeletRoot must be an absolute path",
+    opts = [
+        "--set",
+        "udsCsi.enabled=true",
+        "--set",
+        "udsCsi.kubeletRoot=var/lib/kubelet",
+    ],
 )
 
 # Commit-pinned second packaging of the SAME chart (#692).

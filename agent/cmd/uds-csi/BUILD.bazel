@@ -1,0 +1,68 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+load("//bazel/img:registry.bzl", "image_repository")
+
+# deps_test.go is hand-wired below into its own :deps_test target (it needs the
+# linked binary as data and has to be nameable on its own), so keep gazelle from
+# folding it into :uds-csi_test.
+# gazelle:exclude deps_test.go
+
+go_library(
+    name = "uds-csi_lib",
+    srcs = ["main.go"],
+    importpath = "aethermesh.dev/agent/cmd/uds-csi",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//agent/internal/udscsi",
+        "//common/log",
+        "//common/signals",
+    ],
+)
+
+go_binary(
+    name = "uds-csi",
+    embed = [":uds-csi_lib"],
+    visibility = ["//visibility:public"],
+    x_defs = {
+        "aethermesh.dev/agent/cmd/uds-csi.Version": "{STABLE_GIT_VERSION}",
+    },
+)
+
+go_test(
+    name = "uds-csi_test",
+    srcs = ["main_test.go"],
+    # TestChartFlagsExist reads the argv the chart actually passes. Gazelle does
+    # not manage `data` — keep this by hand.
+    data = ["//charts/aether:templates/uds-csi-daemonset.yaml"],
+    embed = [":uds-csi_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# The csi.aether.io node plugin's own image (proposal 039 Phase 1), published as
+# image_repository("uds-csi"). Same shared base as every aether image; the chart
+# runs the container privileged as root.
+go_multi_arch_image(
+    name = "uds-csi_image",
+    binary = ":uds-csi",
+    repository = image_repository("uds-csi"),
+)
+
+# Linkage guard (proposal 039). This binary runs PRIVILEGED on every node with
+# Bidirectional mount propagation: every package it links is attack surface in
+# the most privileged aether process there is. It talks to the kubelet over two
+# Unix sockets and to the kernel through x/sys/unix — no Kubernetes client, no
+# xDS, no SPIRE — and that is asserted against the linked ELF that ships.
+go_test(
+    name = "deps_test",
+    size = "small",
+    srcs = ["deps_test.go"],
+    data = [":uds-csi"],
+    embed = [":uds-csi_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

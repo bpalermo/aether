@@ -42,8 +42,8 @@
 # success but pushed nothing, a run that was cancelled at queue time, and a run
 # that never existed are all the same answer here: MISSING.
 #
-# WHAT IT CHECKS, per commit — 20 registry coordinates plus one per child
-# manifest (36 today: every image is a two-platform index)
+# WHAT IT CHECKS, per commit — 22 registry coordinates plus one per child
+# manifest (40 today: every image is a two-platform index)
 #
 #   1. All FOUR charts under their commit-addressable tag:
 #      <chart repository>:<X.Y.Z>-<full 40-char sha> for aether, crds, prober
@@ -54,8 +54,9 @@
 #      AS OF that commit, so a commit that bumped a chart is checked against the
 #      version it actually published under.
 #   2. The image tag `<release tag>-<full sha>` (`dev-<sha>` today) in each of
-#      the eight published image repositories (REGISTRY_IMAGE_COMPONENTS in
-#      scripts/registry-lib.sh, named by that commit's registry.bzl). The prefix is read from the `release_tag` flag's
+#      the published image repositories (REGISTRY_IMAGE_COMPONENTS in
+#      scripts/registry-lib.sh AS OF that commit -- nine since uds-csi, eight
+#      before -- named by that commit's registry.bzl). The prefix is read from the `release_tag` flag's
 #      default in bazel/img/go_multi_arch_image.bzl AS OF that commit, like the
 #      chart versions.
 #   3. A cosign signature for each of those images: the index digest resolved
@@ -522,13 +523,13 @@ verify_commit() {
 		echo "::error::cannot parse bazel/img/registry.bzl as of ${sha}" >&2
 		exit 2
 	fi
-	for c in "${REGISTRY_IMAGE_COMPONENTS[@]}"; do
+	while read -r c; do
 		if ! repo="$(setting "$setting_file" repo "$c")"; then
 			echo "::error::cannot derive the ${c} repository from bazel/img/registry.bzl as of ${sha}" >&2
 			exit 2
 		fi
 		repos+=("$repo")
-	done
+	done < <(registry_image_components_at "$sha")
 	say "  registry ${REGISTRY_HOST}/$(setting "$setting_file" prefix | cut -d/ -f2-), signatures as ${layout} (bazel/img/registry.bzl as of ${sha:0:12})"
 
 	# 1. every chart, under the tag that belongs to this commit alone (#692).
@@ -609,7 +610,7 @@ verify_commit() {
 	# constructed commit still pins whatever proxy digest main's chart pins —
 	# which, once that digest is signed, is legitimately PRESENT and would add
 	# `ok` lines (or, in the offline harness's fake registry, spurious MISSING
-	# lines) to a red that must otherwise be exactly the 20 per-commit
+	# lines) to a red that must otherwise be exactly the 22 per-commit
 	# coordinates. The proxy pin has its own gate and its own seen-red
 	# (scripts/check-proxy-pin.sh, the cut-over cases). The real sweep and the
 	# workflow_run path never set this.
@@ -681,7 +682,7 @@ verify_commit() {
 		REGISTRY_HOST="$commit_host"
 	fi
 
-	# 4 charts + 8 images + 8 index signatures + one signature per child, plus
+	# 4 charts + N images + N index signatures + one signature per child, plus
 	# the proxy pin's checks. If the loops ever stop iterating, this says so
 	# instead of reporting a clean run over nothing.
 	local expected=$((${#REGISTRY_CHARTS[@]} + 2 * ${#repos[@]} + expected_children + proxy_expected))

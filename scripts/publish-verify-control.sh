@@ -39,8 +39,9 @@
 #      "inconclusive" (registry unreadable, bad commit) — a control that went
 #      red because the registry was down proves nothing about detection, so it
 #      is reported as inconclusive (exit 2), not as a passing control.
-#   2. it printed exactly <expected> MISSING lines — 4 charts + 8 images + 8
-#      signatures, derived from scripts/registry-lib.sh, not typed here — and no
+#   2. it printed exactly <expected> MISSING lines — 4 charts + 9 images + 9
+#      signatures, derived from scripts/registry-lib.sh AS OF <base>, not typed
+#      here — and no
 #      `ok` line. A partial red would mean part of the gate can no longer fail.
 #   3. EVERY MISSING line names the control sha. A MISSING line about some other
 #      commit is a red for the wrong reason.
@@ -104,7 +105,10 @@ control="$(
 		-m "publish-verify expected-red control (#930): never pushed, never published"
 )"
 
-expected=$((${#REGISTRY_CHARTS[@]} + 2 * ${#REGISTRY_IMAGE_REPOS[@]}))
+# The image components the control's tree names (its tree IS base's), counted
+# the way the verifier counts them per commit (registry_image_components_at).
+n_images="$(registry_image_components_at "$base_sha" | grep -c . || true)"
+expected=$((${#REGISTRY_CHARTS[@]} + 2 * n_images))
 
 # The registry the control's tree names (its tree IS base's): where every
 # MISSING line must point.
@@ -127,7 +131,7 @@ trap 'rm -f "$log"' EXIT
 # The control's red must not land in the job summary as a publish failure, and
 # nothing it prints may be mistaken for the gate's own verify.log.
 rc=0
-# PROXY_PIN_CHECK=0: the control asserts EXACTLY the 20 per-commit coordinates;
+# PROXY_PIN_CHECK=0: the control asserts EXACTLY the 22 per-commit coordinates;
 # the constructed commit pins main's (signed, present) aether-proxy digest,
 # which is not what this control is about — see verify-published-artifacts.sh
 # step 5 and scripts/check-proxy-pin.sh for the proxy pin's own red.
@@ -183,7 +187,7 @@ fi
 # on its image's). Fewer means some absence was never shown to be one: the
 # lookup behind it was never seen to answer "present" in that repository.
 n_witness="$(printf '%s\n' "$missing_lines" | grep -cE '; witness [^ ]+: 200\)$' || true)"
-want_witness=$((${#REGISTRY_CHARTS[@]} + ${#REGISTRY_IMAGE_REPOS[@]}))
+want_witness=$((${#REGISTRY_CHARTS[@]} + n_images))
 if [ "$n_witness" -ne "$want_witness" ]; then
 	fail "${n_witness} witnessed absence(s), expected ${want_witness} — cannot tell a real absence from an unread registry or a lookup that 404s everything"
 fi

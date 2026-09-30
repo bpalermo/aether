@@ -503,6 +503,7 @@ REGISTRY_IMAGE_COMPONENTS=(
 	agent
 	mesh-dns
 	proxy-supervisor
+	uds-csi
 	cni-install
 	registrar
 	controller
@@ -524,6 +525,33 @@ REGISTRY_CHARTS=(
 	prober
 	udsecho
 )
+
+# The image components ONE COMMIT published (read with git, not the registry): REGISTRY_IMAGE_COMPONENTS as
+# scripts/registry-lib.sh spelled it AT that commit, one per line. publish.yaml
+# signs exactly that list at that commit, so a component added later (uds-csi,
+# proposal 039) is not reported MISSING on the heads that predate it -- which the
+# sweep would otherwise do for a whole day after the component lands. Falls back
+# to this checkout's list when the file is absent at <sha> or yields nothing
+# (a pre-040 head, or the fake histories of scripts/check-registry-lookup.sh).
+# Used by the verifier per commit and by the expected-red control per base.
+registry_image_components_at() {
+	local sha="$1" list=""
+	list="$(git show "${sha}:scripts/registry-lib.sh" 2>/dev/null |
+		sed -n '/^REGISTRY_IMAGE_COMPONENTS=(/,/^)/{
+			/^REGISTRY_IMAGE_COMPONENTS=(/d
+			/^)/d
+			s/[[:space:]]*#.*//
+			s/^[[:space:]]*//
+			s/[[:space:]]*$//
+			/^$/d
+			p
+		}')" || list=""
+	if [ -z "$list" ]; then
+		printf '%s\n' "${REGISTRY_IMAGE_COMPONENTS[@]}"
+	else
+		printf '%s\n' "$list"
+	fi
+}
 
 # Repository (no host) of one image component / chart, from the single setting.
 registry_image_repo() { "${registry__here}/image-registry.sh" repo "$1"; }

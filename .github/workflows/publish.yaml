@@ -108,8 +108,10 @@ jobs:
       # `<chart>.push_images` (rules_helm) pushes every image a chart's `images`
       # attr names, by digest plus the `latest` / `dev-<full sha>` tags
       # (aether -> agent + mesh-dns + proxy-supervisor + cni-install +
-      # registrar + controller; prober -> prober; udsecho -> udsecho). Adding an
-      # image to a chart's `images` is all it takes to get it published (#583).
+      # registrar + controller + uds-csi; prober -> prober; udsecho -> udsecho).
+      # Adding an image to a chart's `images` is all it takes to get it
+      # published (#583) -- but its repository must EXIST on the registry first
+      # (quay.io does not create one on push for a robot account).
       #
       # `<chart>.chart_push` (//bazel/helm:defs.bzl) pushes the packaged chart
       # with oras to chart_registry_url(<chart>) = `<registry>/<namespace>/chart-

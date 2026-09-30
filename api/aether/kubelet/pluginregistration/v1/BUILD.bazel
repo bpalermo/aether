@@ -1,0 +1,35 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//proto:def.bzl", "go_proto_library")
+load("//bazel/lint:linters.bzl", "buf_test")
+
+proto_library(
+    name = "pluginregistrationv1_proto",
+    srcs = ["api.proto"],
+    visibility = ["//visibility:public"],
+)
+
+go_proto_library(
+    name = "pluginregistrationv1_go_proto",
+    compilers = [
+        "@rules_go//proto:go_grpc_v2",
+        "@rules_go//proto:go_proto",
+    ],
+    importpath = "aethermesh.dev/api/aether/kubelet/pluginregistration/v1",
+    proto = ":pluginregistrationv1_proto",
+    visibility = ["//visibility:public"],
+)
+
+go_library(
+    name = "pluginregistration",
+    embed = [":pluginregistrationv1_go_proto"],
+    importpath = "aethermesh.dev/api/aether/kubelet/pluginregistration/v1",
+    visibility = ["//visibility:public"],
+)
+
+# The package and service names deliberately break buf's STANDARD naming rules:
+# they are the kubelet's wire contract. api.proto carries the per-rule ignores.
+buf_test(
+    name = "pluginregistrationv1_buf_lint_test",
+    srcs = [":pluginregistrationv1_proto"],
+)
