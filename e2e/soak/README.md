@@ -815,8 +815,18 @@ k6 loaders and the prober call — no `--set` is needed and there is nothing to 
 (The per-destination allow-list was a proving gate, decision 2026-09-26. The first
 proving soak ran on 2026-09-27 with `aether-test/svc-1` and `svc-2` listed and did
 **not** pass: prober green, k6 1,154 errors, 1,060 of them 503 NC at first use
-(#1008). #979 drops the allow-list; that is gated on the NEXT proving soak, result
-pending.)
+(#1008, since closed). #979 dropped the allow-list: merged 2026-09-29 as 33ff5e9,
+chart 1.0.12.) The re-soak of the merged build:
+2026-09-30, chart 1.0.13-84fb413, T0 10:57:18Z, 33 ROLLED / 0 FAILED: **FAIL on liveness (9 / 719,984)**. Every QUIC gate passed:
+- gate 5 (#1073): 0 prune lines, 0 NC in the window, `held_served == held_only` on 30 fresh streams, so non-vacuous
+- #1074: 0 crashes, `child_silent` 0 on 5/5 nodes, `starting workers` 6 per node
+- new-SA: 2 × 1,200/1,200 on both destinations, `init_fetch_timeout` no series
+- gate 3: N == P, 7–10 per node
+- #1054: 0 stateless resets, 0 PEER_GOING_AWAY
+- L4 (a) and (b): no series, existence proven
+- h3/h2: 1.18×
+
+The liveness miss (#1085) happened in the TRIPLE on w05. The agent restart landed inside the proxy fork, and the successor's CDS and LDS initial fetches timed out. It went live with no listeners and the parent drained, so `:18081` refused new connections for 1.6 s. The same gap also caused 44 mesh_dns timeouts and 1 UDP dialer failure. k6: 147 / 9,179,821, of which 141 were before T0 (`503 NC` first use at loader start, #1086) and 6 were `504 UT` in the TRIPLE (#1087). The prober had 61 mesh_dns timeouts, all inside proxy-roll brackets. `dns_*` emitted no series.
 
 ```bash
 # prerequisite ON TALOS: the SPIRE default ClusterSPIFFEID must already issue the
@@ -948,8 +958,10 @@ connections per h3 destination. That run passes H2 vacuously and says so, and
 
 ### The QUIC per-request cost gate (#1021)
 
-**Acceptance for dropping the allow-list (#979): an HTTP/3 mesh request costs at
-most 1.5× the proxy CPU of an h2 mesh request, at the soak's load shape.** The
+**Acceptance for dropping the allow-list (#979, merged 2026-09-29 after this gate
+passed at 1.18×): an HTTP/3 mesh request costs at most 1.5× the proxy CPU of an h2
+mesh request, at the soak's load shape.** It stays the regression gate for every
+QUIC soak. The
 prober and k6 SLIs cannot see this: a QUIC run can be error-free and still cost far
 more proxy CPU once every destination is on it (#1006 projected 2.3× the fleet's,
 from the since-superseded cross-revision 3.3× reading).

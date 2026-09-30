@@ -1,6 +1,11 @@
 # Proposal 037: Multi-Protocol Ports on One Mesh Service
 
-**Status:** Accepted. Phase 0 shipped (#888, merged 2026-09-21); Phase 1 next.
+**Status:** Accepted. Phase 0 shipped (#888, merged 2026-09-21); Phases 1–3
+shipped (#889–#902: cache keyed by cluster identity, the TCP mesh port 18082 and
+per-port protocol, port-qualified L4 routes, the any-port shim and the soak's
+per-port TCP leg); L4 observability shipped (#1043, per-service `tcp_`/`udp_`
+floor stat keys and the `aether_l4_access_logs` stream). Phase 4 (remove the
+portless floor chain) is pending.
 **Author:** Bruno Palermo
 **Date:** 2026-09-20
 **History:** first draft resolved the bare-name spelling to "the primary port,

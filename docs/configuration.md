@@ -89,6 +89,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | `agent.meshDnsDaemon.forwardPoolSize` | `null` | Pooled, already-connected UDP sockets per upstream on the forward path (`--forward-pool-size`; #674 — dialling per query was 20.97% of this daemon's CPU). Unset emits no flag and takes the built-in default of `8`; `0` disables pooling and restores dial-per-query. An escape hatch, not a tuning knob: reuse trades per-query source-port randomisation for the socket's lifetime, which is safe only because the socket is *connected* (the kernel drops any datagram not from the upstream's exact address). |
 | `agent.meshDnsDaemon.lameDuckMax` | `10s` | Ceiling on the post-SIGTERM window in which the resolver stops reporting ready but keeps answering (`--lame-duck-max`; #729). It closes as soon as it observes a *different* instance answering on the same address, so the ceiling only bites when no successor appears (scale-down, node drain, failed surge). The DaemonSet's `terminationGracePeriodSeconds` is derived from this (+5s). `"0s"` restores the pre-#729 close-on-SIGTERM behaviour, which dropped one queued datagram on every roll. |
 | `agent.meshDnsDaemon.debug` | `false` | TRACE logging for this daemon only (#684). The top-level `debug` deliberately no longer reaches mesh-dns — it is the one component on every managed pod's `:53` path, and everything it logs is also fanned out to the OTLP log exporter. |
+| `agent.eastWestQuicIdleTimeout` | `8s` | Idle timeout of every east-west QUIC (`quic:`) twin's upstream pool (`--east-west-quic-idle-timeout`, #1054); h1/h2 pools keep 30 s. An idle source h3 connection gets no GOAWAY when the destination proxy hot-restarts, so it must close before the parent exits or its next packet draws a stateless reset. The chart **refuses to render** unless `eastWestQuicIdleTimeout + 5s < proxy.hotRestart.parentShutdownTime` (and it must be `> 0`); lowering the parent-shutdown time needs this lowered with it. Cost: a pair idle between this and 30 s pays one extra QUIC handshake. |
 | `agent.image.*` | repo+digest placeholders, `pullPolicy: Always` | Digest-pinned image; mirror by overriding `repository` alone. |
 | `agent.resources.{requests,limits}` | cpu `200m`, mem `64Mi` | |
 
@@ -102,6 +103,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | `proxy.enabled` | `true` | Deploy the per-node Envoy. Disable to run only the agent. |
 | `proxy.image.repository` | `quay.io/aethermesh/proxy` | External image built by the `//proxy` workspace, digest-pinned by the proxy release's bump-chart PR. A chart published before the first proxy release after the Quay cut-over (proposal 040) still pins the pre-cut-over ghcr.io image; that release moves `repository` with the tag and digest. |
 | `proxy.image.tag` | (commit SHA) | The publishing commit. |
+| `proxy.image.digest` | (index digest) | Multi-arch index digest of that commit's image; the `aether.image` helper prefers it over `tag`. |
 | `proxy.logLevel` | `info` | Envoy log level. |
 | `proxy.jsonLogs` | `true` | Envoy application logs as one JSON object per line. |
 | `proxy.hotRestart.baseId` | `0` | Envoy hot-restart tunables (mechanism is not optional; see proposal 001). |
@@ -109,7 +111,10 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | `proxy.hotRestart.parentShutdownTime` | `15s` | When the previous epoch is terminated (must exceed drainTime). Also the supervisor's admin re-verify budget: the epoch-identity probe re-confirms on a fresh connection every `parentShutdownTime/3` (floor 2s, ceiling 15s), so a cross-pod takeover is diagnosed while the draining parent still lives. Below ~6s the floor takes over and the supervisor logs the lost margin at startup; raising it also delays successor-pod readiness by the same amount. |
 | `proxy.hotRestart.handoffDeadline` / `adminUnresponsiveDeadline` | `0` | Supervisor watchdogs (0 = built-in defaults). |
 | `proxy.hotRestart.shmHostPath` | `/run/aether/shm` | Shared-memory hostPath for cross-pod hot restart. |
+| `proxy.hotRestart.drainStrategy` | `gradual` | Envoy `--drain-strategy` for the hot-restart parent and every other drain (LDS listener removal, the pod-termination drain): `gradual` or `immediate`. `immediate` is an opt-in only: on talos-main it made the #1054 stateless resets worse (#1068); the carried patches (#1064/#1066/#1069) fix the exit window under `gradual`. See [`runbook.md`](./runbook.md) § *Source h3 requests die on a stateless reset at a destination's roll (#1054)*. |
+| `proxy.hotRestart.skipParentStats` | `false` | Pass Envoy `--skip-hot-restart-parent-stats` (#1050). An off-by-default **emergency switch**: the hot-restart main-thread deadlock it worked around is fixed by the carried patch #1060. Turning it on costs the parent's gauges and its last ≤5 s of counter deltas in the child. |
 | `proxy.udsWorkloads.enabled` | `true` | UDS delivery (034). Gates the proxy's `/var/lib/kubelet/pods` hostPath mount, the agent's `--kubelet-pods-dir`, and the agent's read access to the `EndpointPolicy` CRD. Inert until a workload asks for it; turning it off later silently degrades annotated pods to TCP (nothing listens, so their endpoints stay unpromoted). |
+| `proxy.terminationGracePeriodSeconds` | `180` | The proxy pod's `terminationGracePeriodSeconds`, also passed to the supervisor as `--termination-grace`. The deleted pod keeps its Envoy alive as the successor's hot-restart parent, so it is deliberately generous. Where no successor can appear (node shutdown, `kubectl delete daemonset`, a replacement stuck Pending) the supervisor drains Envoy itself at `terminationGrace − (hotRestart.drainTime + 15s)` instead of being SIGKILLed (#771); keep it well above `drainTime + 15s`. |
 | `proxy.overload.enabled` | `true` | Envoy overload-manager graceful-degradation ladder. |
 | `proxy.overload.maxHeapSizeBytes` | `402653184` (384Mi) | Keep at ~75% of `resources.limits.memory`. |
 | `proxy.resources.{requests,limits}` | cpu `500m`, mem `512Mi` | |
@@ -173,6 +178,7 @@ sidecar), makes no API calls (no RBAC, no token) and does not involve SPIRE.
 |---|---|---|
 | `registrar.registryBackend` | `kubernetes` | Backend (`--registry-backend`): `kubernetes` or `etcd`. |
 | `registrar.replicaCount` | `2` | Always 2 (exercises the multi-replica write-behind topology). |
+| `registrar.topologySpreadConstraints` | `[]` | Empty = chart default: a soft hostname spread across the replicas (`maxSkew: 1`, `ScheduleAnyway`; stacking both on one node was the #628/#629 hot spot). Set to replace the default entirely. |
 | `registrar.enableMCS` | `false` | Multi-Cluster Services phase 1 (018 + 006): export `ServiceExport`s and materialize `ServiceImport`s + clusterset VIPs. Requires the etcd backend + the MCS-API CRDs. |
 | `registrar.region` | `local` | Region owning this registrar's etcd partition (006); keys are `/aether/v1/regions/<region>/clusters/<clusterName>/…`. One region = one etcd. |
 | `registrar.etcd.endpoints` | `[]` | etcd client endpoints (etcd backend). |
@@ -208,6 +214,8 @@ over mTLS and routes external traffic via the Gateway API. Disabled by default.
 | `edge.namespace` | `aether-ingress` | The edge runs in its own namespace, isolated from the control plane. |
 | `edge.namespaceCreate` | `true` | Let the chart create it (baseline PSA). |
 | `edge.replicaCount` | `2` | Gateway replicas (standard RollingUpdate + readiness gate; no hot-restart supervisor). |
+| `edge.topologySpreadConstraints` | `[]` | Empty = chart default: a soft hostname spread across the gateway replicas (`maxSkew: 1`, `ScheduleAnyway`). Set to replace the default entirely. |
+| `edge.rollingUpdate` | `{}` | Empty = chart default by `replicaCount` (#812): ≥ 2 replicas `maxSurge: 0, maxUnavailable: 1`; exactly 1 `maxSurge: 1, maxUnavailable: 0`. Set to replace it entirely. |
 | `edge.gatewayClassName` | `aether` | The `GatewayClass` whose Gateways this edge serves (controller `gateway.aether.io/edge`). Requires the Gateway API CRDs. |
 | `edge.gateway.create` | `true` | Chart-manage a `Gateway` of that class (HTTP + optional HTTPS listeners). |
 | `edge.gateway.tlsSecretName` / `tlsSecretNamespace` | `""` | The `kubernetes.io/tls` Secret for the downstream cert; REQUIRED when `tls.enabled` + `gateway.create`. |
@@ -221,12 +229,17 @@ over mTLS and routes external traffic via the Gateway API. Disabled by default.
 | `edge.xffNumTrustedHops` | `0` | Trusted proxies in front of the edge (feeds HCM client-address + geoip XFF). |
 | `edge.httpPort` / `httpsPort` | `80` / `443` | Public listener ports (privileged ports via `NET_BIND_SERVICE`; pod stays unprivileged). |
 | `edge.routeNamespace` | `""` | Namespace the edge watches Gateways/HTTPRoutes in. Empty = its own namespace. |
-| `edge.service.{type,port,httpsPort,annotations,extraPorts}` | `LoadBalancer` / `80` / `443` / `{}` / `[]` | The edge's Service; `extraPorts` exposes TCP/TLS listener ports. |
+| `edge.service.port` | `80` | HTTP port of the shared edge Service. That Service is always `ClusterIP`: each Gateway gets its own LoadBalancer Service (021 Phase 2), so there is no `type` value. |
+| `edge.service.httpsPort` | `443` | HTTPS port of the shared Service; rendered only with `edge.tls.enabled`. |
+| `edge.service.extraPorts` | `[]` | Extra Service ports for Gateway TCP/TLS listeners (`TCPRoute`/`TLSRoute`), e.g. `[{name: postgres, port: 5432, protocol: TCP}]`; `protocol` defaults to `TCP`. |
 | `edge.drain.preStopSeconds` | `10` | preStop sleep holding off SIGTERM during drain (matches `proxy.hotRestart.drainTime`). 0 disables. |
 | `edge.drain.terminationGracePeriodSeconds` | `30` | Must exceed preStop + Envoy drain. |
-| `edge.admin.{enabled,port}` | `false` / `9901` | Envoy admin on loopback only; off by default. |
-| `edge.overload.{enabled,maxHeapSizeBytes}` | `true` / `201326592` (192Mi) | Overload monitor (works here; the pod is unprivileged). |
-| `edge.spire.clusterSpiffeID.{create,className}` | `true` / `""` | Create the edge's `ClusterSPIFFEID` (when `spire.enabled`); `className` required when `create=true`. |
+| `edge.admin.enabled` | `false` | Envoy admin endpoint, bound to `127.0.0.1` only and never exposed via a Service (an unauthenticated control surface). Reach it with `kubectl port-forward`. |
+| `edge.admin.port` | `9901` | Loopback admin port. |
+| `edge.overload.enabled` | `true` | Envoy overload manager on the `fixed_heap` monitor (shrink heap, then stop accepting requests, before the container memory limit OOM-kills Envoy). |
+| `edge.overload.maxHeapSizeBytes` | `201326592` (192Mi) | Keep at ~75% of `edge.resources.limits.memory`. |
+| `edge.spire.clusterSpiffeID.create` | `true` | Create the edge's `ClusterSPIFFEID` (when `spire.enabled`) so SPIRE issues the edge pod its SVID. |
+| `edge.spire.clusterSpiffeID.className` | `""` | spire-controller-manager class name; required when `create=true` (empty = not rendered; manage the `ClusterSPIFFEID` yourself). |
 | `edge.resources.{requests,limits}` | cpu `200m`, mem `128Mi`/`256Mi` | |
 
 #### `edge.config` — the fleet-default `EdgeConfig` (proposal 029)
@@ -321,7 +334,8 @@ Node-agent-specific:
 | `--import-config` | `false` | Enable cross-cluster config import (026). |
 | `--control-cluster` | `""` | Trust imported config ONLY from this origin (026 EM3). Empty = federated. |
 | `--east-west-waypoint` | `false` | Per-node east/west waypoint for cross-cluster traffic (019); tunnel port is the fixed constant 18009. |
-| `--east-west-quic-pair-fetch-window` | `1h` | How long after the agent starts a **persisted** (source ServiceAccount, destination) QUIC pair with **no evidence of use** is kept before the pair and its twin are pruned (issues #1033, #1073). Evidence of use is an on-demand fetch of the `quic:` twin, an on-demand subscription for it, or the proxy re-stating the twin as held on a fresh xDS stream, in this or any earlier agent process (`demand_confirmed` in the persisted set). A pair with any of it is never pruned by this window. A pruned pair that still carries traffic is re-fetched on its next request (one ODCDS round trip). `0` disables the prune. Not exposed in the chart; the default applies. See the runbook, "East-west QUIC demand set". |
+| `--east-west-quic-pair-fetch-window` | `1h` | How long after the agent starts a **persisted** (source ServiceAccount, destination) QUIC pair with **no evidence of use** is kept before the pair and its twin are pruned (issues #1033, #1073). Evidence of use is an on-demand fetch of the `quic:` twin, an on-demand subscription for it, or the proxy re-stating the twin as held on a fresh xDS stream, in this or any earlier agent process (`demand_confirmed` in the persisted set). A pair with any of it is never pruned by this window. A pruned pair that still carries traffic is re-fetched on its next request (one ODCDS round trip). `0` disables the prune. Not exposed in the chart; the default applies. See [`runbook.md`](./runbook.md) § *East-west QUIC (proposal 038 Phase 4)*, the "Post-start prune of pairs with no evidence of use" paragraph. |
+| `--east-west-quic-idle-timeout` | `8s` | Idle timeout of each `quic:` twin's upstream connection pool (#1054); h1/h2 keep 30 s. Must be `> 0`. Keep it at least 5 s below the proxy's `--parent-shutdown-time`: the agent cannot check that (it never sees the proxy DaemonSet), so the chart does — `agent.eastWestQuicIdleTimeout + 5s < proxy.hotRestart.parentShutdownTime` or the chart fails to render. |
 | `--mesh-dns` | `false` | Per-pod mesh DNS (018): answer `<svc>.<ns>.<mesh-domain>` from the generated mesh Services. Upstream forwarding belongs to the `mesh-dns` daemon, not the agent. |
 | `--mesh-dns-snapshot-path` | `/host/var/lib/aether/registry/mesh-dns/records.json` | Host-persistent record table the in-process resolver writes and warm-loads at boot (and the `mesh-dns` daemon watches). Under the CNI registry hostPath so it survives a rolling restart; empty disables persistence. |
 | `--authz-sidecar` | `false` | Node-local ext_authz sidecar entry (027). |
@@ -482,6 +496,30 @@ than an `httpGet`/`tcpSocket`: this DaemonSet is `hostNetwork: true` with
 handoff and a port-based check could be answered by the peer pod's SO_REUSEPORT
 socket. That is precisely what #582 proposed and why it was closed abandoned.
 
+### `identity-ready` (standalone binary — bundled in the agent image, run as an injected init container)
+
+The egress identity gate (#1053): the controller's `/mutate` webhook injects it as
+the `aether-identity-ready` init container (first in line) into every mesh pod it
+admits (#1055, `--identity-gate`). It asks the SPIRE agent's Workload API — over a
+`csi.spiffe.io` volume mounted into this init container only — for the pod's own
+X.509 SVID and exits 0 once SPIRE has issued it, so the app containers never start
+before the node proxy has a client certificate for the pod. It ships as an extra
+layer (`/identity-ready`) in the agent image, already on every node; it links gRPC,
+protobuf and go-spiffe's generated Workload API client and nothing heavier, and
+`//agent/cmd/identity-ready:deps_test` keeps it that way.
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--spire-workload-socket` | `/run/secrets/workload-spiffe-uds/socket` | Workload API socket (the `csi.spiffe.io` mount). |
+| `--timeout` | `0` | Exit non-zero after this long without an SVID; `0` waits forever (fail closed: the pod stays in `Init`). |
+| `--retry-interval` | `500ms` | Pause between Workload API fetch attempts. |
+| `--attempt-timeout` | `15s` | Upper bound on one fetch attempt. |
+| `--log-every` | `10s` | How often it logs what it is still waiting for. |
+
+The controller sets `--spire-workload-socket` and `--timeout` from its
+`--identity-gate-*` flags. See [`runbook.md`](./runbook.md) § *Pod held in Init by
+aether-identity-ready (#1053)*.
+
 ### `uds-csi` (standalone binary — the `aether-uds-csi` DaemonSet, proposal 039)
 
 The `csi.aether.io` CSI node plugin. Stdlib `flag` parsing; no Kubernetes client,
@@ -525,10 +563,26 @@ SVID (no `--spire-trust-domain`).
 the pod-mutating webhook derives its injected ndots from the domain's label
 count; the old `--pod-ndots` was retired).
 
+The egress identity gate (#1053/#1055), rendered from
+`controller.webhook.identityGate.*`:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--identity-gate` | `false` (the chart sets it) | Inject the `aether-identity-ready` init container into mesh-managed pods on `/mutate`, holding their app containers until SPIRE has issued the pod's SVID. Opt a pod out with `aether.io/identity-gate=false`. |
+| `--identity-gate-image` | `""` | Image the init container runs `/identity-ready` from (the agent image). Required with `--identity-gate`. |
+| `--identity-gate-image-pull-policy` | `IfNotPresent` | `Always`, `IfNotPresent` or `Never`. |
+| `--identity-gate-workload-socket` | `/run/secrets/workload-spiffe-uds/socket` | Workload API socket path inside the init container; the `csi.spiffe.io` volume is mounted at its directory. |
+| `--identity-gate-timeout` | `0` | Give up after this long (the init container exits 1 and the kubelet retries it); `0` waits forever (fail closed). |
+| `--identity-gate-cpu-request` / `--identity-gate-cpu-limit` | `5m` / `""` | Init container CPU; empty leaves that entry unset. |
+| `--identity-gate-memory-request` / `--identity-gate-memory-limit` | `16Mi` / `64Mi` | Init container memory; empty leaves that entry unset. |
+
 ### `cni-install` (init container)
 
 `--cni-bin-dir`, `--cni-bin-target-dir`, `--mounted-cni-net-dir`,
-`--otlp-endpoint`, `--capture-redirect-all-default`,
+`--otlp-endpoint`, `--otlp-pin-endpoint` (`true`; resolve `--otlp-endpoint`'s host
+through cluster DNS and write the address into the netconf, because the plugin runs
+under the host's resolver, #950/#969; chart key `cniInstall.pinOTLPEndpoint`),
+`--capture-redirect-all-default`,
 `--mesh-dns`, `--host-ip`, `--debug`. The per-pod capture redirect is
 unconditional (no `--transparent-capture`; per-pod `capture.aether.io/*`
 annotations opt out). (The `cni` plugin binary itself is configured via
