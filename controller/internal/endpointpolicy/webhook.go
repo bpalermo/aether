@@ -1,9 +1,10 @@
 // Package endpointpolicy holds the controller's admission webhook for the
 // EndpointPolicy CRD (proposal 034 Phase 1b, service-scoped UDS delivery). It runs
-// the agent's own resolver over the declared socket, so a value the data plane
-// would refuse — a bad path segment, or one that overflows the AF_UNIX sun_path
-// budget — is rejected at apply time instead of degrading one service to TCP with
-// an error log on every node that hosts it.
+// the agent's own resolver rules over the declared socket, so a value the data
+// plane would refuse — a bad path segment, or a file name that overflows the
+// AF_UNIX sun_path budget on the csi.aether.io carrier (proposal 039) — is
+// rejected at apply time instead of degrading one service to TCP with a
+// resolve-failure count on every node that hosts it.
 package endpointpolicy
 
 import (
@@ -11,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	configv1 "aethermesh.dev/api/aether/config/v1"
 	crdv1 "aethermesh.dev/common/apis/config/v1"
@@ -19,11 +19,6 @@ import (
 	"buf.build/go/protovalidate"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
-
-// uidPlaceholder stands in for the pod UID the agent substitutes at resolution
-// time. Kubernetes UIDs are RFC 4122 strings, so 36 bytes is both the worst case
-// and the only case; using it here makes the webhook's budget check exact.
-const uidPlaceholder = 36
 
 // Validator is served by the controller's shared /validate dispatcher, keyed by
 // the EndpointPolicy Kind.
@@ -59,16 +54,18 @@ func Validate(spec *configv1.EndpointPolicySpec) error {
 	return validateSocket(spec.GetUdsSocket())
 }
 
-// validateSocket runs the agent's resolver over the declared socket with a
-// worst-case pod UID, so admission enforces exactly the segment rules and the
-// 107-byte sun_path budget the data plane enforces.
+// validateSocket checks the declared socket the way the agent resolves it on the
+// csi.aether.io carrier (udspath.ValidateRequest): "<volume>/<file>" with clean
+// segments, and a file name within the budget under the default tmpfs root with
+// a worst-case 36-byte pod UID — udspath.MaxFileLen, 54 bytes. The volume name
+// no longer costs budget: it selects the carrier and never reaches the path.
 //
-// The budget is computed against the DEFAULT kubelet pods directory. A cluster
-// running the agent with a nonstandard --kubelet-pods-dir shifts it either way,
-// which is why the agent still resolves fail-closed at listener-generation time
-// (falling back to TCP delivery) instead of trusting this check.
+// A policy names no pod, so whether each target pod really mounts that volume as
+// csi.aether.io cannot be checked here. The agent stays fail-closed on that
+// (volume_not_declared / not_csi) and on a non-default --uds-csi-root, which
+// shifts the budget.
 func validateSocket(socket string) error {
-	if _, err := udspath.Resolve(udspath.DefaultKubeletPodsDir, strings.Repeat("0", uidPlaceholder), socket); err != nil {
+	if err := udspath.ValidateRequest(socket); err != nil {
 		return fmt.Errorf("spec.udsSocket %q is not usable: %w", socket, err)
 	}
 	return nil

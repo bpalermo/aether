@@ -123,9 +123,9 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.MountedCNINetDir, "mounted-cni-net-dir", cfg.MountedCNINetDir, "Host CNI network-config directory as mounted into the agent (read-write); the conflist re-assert loop watches the active config here")
 	rootCmd.Flags().BoolVar(&cfg.CNIConflistReassert, "cni-conflist-reassert", cfg.CNIConflistReassert, "Keep aether chained in the node's active CNI conflist: watch the CNI config dir and re-append the aether-cni entry whenever a competing writer strips it (issue #645, kube-flannel's cp -f on pod recreation). Default on (safety net); never creates a conflist of its own")
 
-	// Kubelet pod-volumes directory (node proxy only — UDS delivery is a per-pod
+	// The csi.aether.io tmpfs root (node proxy only — UDS delivery is a per-pod
 	// concern; the edge serves no local workloads).
-	rootCmd.Flags().StringVar(&cfg.KubeletPodsDir, "kubelet-pods-dir", cfg.KubeletPodsDir, "Kubelet pod-volumes directory, mounted into the proxy at the identical host path, through which the proxy reaches a workload's Unix socket for UDS delivery (proposal 034). Empty disables UDS delivery: pods annotated endpoint.aether.io/uds-socket fall back to TCP loopback")
+	rootCmd.Flags().StringVar(&cfg.UDSCSIRoot, "uds-csi-root", cfg.UDSCSIRoot, "Host directory under which the csi.aether.io node plugin mounts each UDS pod's socket tmpfs (<root>/<pod-UID>/<file>), mounted into the proxy at the identical path; must match the plugin's --root (chart: udsCsi.root). The proxy dials a workload's Unix socket there for UDS delivery (proposals 034/039). Empty disables UDS delivery: pods requesting a socket fall back to TCP loopback")
 
 	// SPIFFE Broker Endpoint socket (node proxy only — the agent brokers an
 	// identity for every local workload; the edge presents a single identity
@@ -479,9 +479,9 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
-	// The host bridge to a workload's Unix socket (proposal 034); empty means the
-	// operator turned UDS delivery off and annotated pods get TCP loopback.
-	snapshotCache.SetKubeletPodsDir(cfg.KubeletPodsDir)
+	// The host bridge to a workload's Unix socket (proposals 034/039); empty means
+	// the operator turned UDS delivery off and annotated pods get TCP loopback.
+	snapshotCache.SetUDSCSIRoot(cfg.UDSCSIRoot)
 	// With SPIRE off no SVIDs/SDS exist; the cache builds the per-pod inbound
 	// listener cleartext so the mesh hop stays routable (the outbound clusters
 	// already go cleartext without a node SVID). Production keeps mTLS.
@@ -770,11 +770,11 @@ func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 // wireEndpointPolicies registers the EndpointPolicy reconciler, which projects
 // service-scoped UDS delivery declarations into the cache (proposal 034 Phase 1b).
 // It is gated on the same operator switch as the annotation path: with
-// --kubelet-pods-dir empty the agent cannot render pipe addresses at all, so the
+// --uds-csi-root empty the agent cannot render pipe addresses at all, so the
 // watch would buy nothing. CRD presence is detected by the reconciler itself,
 // which registers no watch (and stays inert) when the CRD is absent.
 func wireEndpointPolicies(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
-	if cfg.KubeletPodsDir == "" {
+	if cfg.UDSCSIRoot == "" {
 		return nil
 	}
 	// The config.aether.io types MUST be in the scheme before the watch is set up —

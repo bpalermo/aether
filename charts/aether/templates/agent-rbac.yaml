@@ -41,11 +41,12 @@ rules:
     resources: ["httpfilters"]
     verbs: ["list", "get", "watch"]
   {{- end }}
-  {{- if .Values.proxy.udsWorkloads.enabled }}
+  {{- if .Values.udsCsi.enabled }}
   # EndpointPolicy (proposal 034 Phase 1b): the service-scoped UDS delivery CRD.
   # Read-only, cluster-wide; the reconciler projects it into the node proxy's
-  # per-pod delivery clusters. Only granted when UDS delivery is enabled — the
-  # agent registers no watch otherwise.
+  # per-pod delivery clusters. Only granted when UDS delivery is enabled (the
+  # csi.aether.io carrier, udsCsi.enabled) — the agent registers no watch
+  # otherwise.
   - apiGroups: ["config.aether.io"]
     resources: ["endpointpolicies"]
     verbs: ["list", "get", "watch"]

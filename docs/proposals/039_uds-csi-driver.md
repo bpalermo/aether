@@ -14,9 +14,12 @@ plugin-registration API itself; (2) Q2 answered: `fsGroupPolicy: File`, the per-
 tmpfs is `root:<fsGroup>` mode `2770`, and a pod without `fsGroup` is rejected;
 (3) the image is `quay.io/aethermesh/uds-csi` (proposal 040 naming).
 **Implementation:** **Phase 1 implemented** (#1090): the `csi.aether.io` node plugin,
-its `uds-csi` image and its chart wiring, **default off** and consumed by nothing.
-**Phase 2 (the breaking cut-over) is pending.** *Phase 1 as built* (under *Plan*)
-lists only where the build departs from the design text.
+its `uds-csi` image and its chart wiring. **Phase 2 implemented** (#1092, chart
+`2.0.0`): the breaking cut-over — the CSI volume is the only UDS carrier, the
+`emptyDir` resolver, `--kubelet-pods-dir`, the proxy's kubelet-pods mount and
+`proxy.udsWorkloads` are gone, `udsCsi.enabled` defaults on. Phase 3 (talos) is
+pending. *Phase 1 as built* and *Phase 2 as built* (under *Plan*) list only where
+the build departs from the design text.
 **Author:** Bruno Palermo
 **Date:** 2026-09-26 (decisions 2026-09-27, 2026-09-30)
 **Related:** 034 (UDS delivery: annotation, `EndpointPolicy`, the `emptyDir`-only
@@ -602,9 +605,70 @@ from the design text:
   kind leg exercises the real mounts end to end. The quay repository was created
   2026-09-30.
 
+### Phase 2 as built
+
+Phase 2 shipped as ONE PR, #1092 (chart `2.0.0`, crds `1.1.0`, udsecho `2.0.0`).
+Where the build departs from the design text:
+
+- **`CNIPod` carries three fields, not one.** `uds_csi_volume = 12` as designed,
+  plus `volumes = 13` (every volume name) and `uds_csi_volumes = 14` (the count of
+  `csi.aether.io` volumes). With the name alone the agent cannot tell a request
+  naming an `emptyDir` (`not_csi`, the cut-over's signature) from one naming an
+  undeclared volume (`volume_not_declared`), nor a pod with two carriers from one
+  with none. All three are recorded by `enhanceCNIPod` and persisted, so storage
+  replay resolves without the API server; a record written before Phase 2 has no
+  volume data and resolves as `volume_not_declared` (never as a path).
+- **Resolver.** `udspath.ResolveCSI(udsRoot, podUID, csiVolume, request)` takes
+  the pod's CSI volume name explicitly; `udspath.ResolvePod` wraps it with the
+  pod's volume list to produce `not_csi` / `multiple_csi_volumes`. There is no
+  legacy `Resolve` to fall back to (no coexistence). Every failure is a
+  classified `udspath.Reason`.
+- **`resolve_failures` reasons** are `not_csi` (the proposal's
+  ~~`emptydir`~~), `volume_not_declared`, `bad_file`, `path_too_long`,
+  `multiple_csi_volumes`, `no_uid`, `bad_request` and `disabled`
+  (`--uds-csi-root=` / `udsCsi.enabled: false`); all seeded at zero. The counter
+  and the ERROR log line fire once per pod per reason (delivery clusters are
+  rebuilt on every policy change and trust-domain fold; counting rebuilds would
+  measure rebuilds). The attribute is `reason`; Prometheus:
+  `aether_agent_uds_resolve_failures_total`.
+- **Budget.** `udspath.MaxFileLen = MaxPipePathLen(107) − len(DefaultCSIRoot)(15)
+  − 1 − PodUIDLen(36) − 1 = 54`, derived from constants. The EndpointPolicy
+  webhook checks exactly that (default root, worst-case UID); it cannot see the
+  pods, so a non-default `--uds-csi-root` is still enforced by the agent.
+- **Admission rides the existing `/mutate` pod webhook** (there is no separate
+  validating pod webhook): for a mesh-managed pod it DENIES an
+  `endpoint.aether.io/uds-socket` whose volume is not the pod's `csi.aether.io`
+  volume (message names `csi: {driver: csi.aether.io}` and `fsGroup`), a file
+  over budget, a `csi.aether.io` volume without `securityContext.fsGroup`, and two
+  `csi.aether.io` volumes. Policy-delivered pods carry no annotation, so the
+  agent is their check (`not_csi` / `volume_not_declared`).
+- **The proxy mounts `udsCsi.root` explicitly, read-only, `HostToContainer`**,
+  rather than relying on its `/run/aether` mount (*Shape, end to end* said it
+  needs no new mount). The explicit mount keeps working if `udsCsi.root` is moved
+  outside `/run/aether`, and read-only is free: verified on kind (kernel 6.8)
+  that root `connect(2)`s through a read-only bind mount, through a read-only
+  tmpfs superblock, and to a mode-`0000` socket — the mount's read-only flag
+  gates only regular files, directories and symlinks. (The 034-era chart
+  comment claiming a read-only mount fails `connect` with `EROFS` was wrong.) The
+  per-pod tmpfs mounts arrive in the proxy as propagated clones carrying their
+  own flags (`rw,nosuid,nodev,noexec,nosymfollow`); `readOnly` only stops the
+  proxy creating anything in the root itself. On kind the proxy's mountinfo
+  holds no `/var/lib/kubelet` entry at all (R2).
+- **One chart value for the path.** `udsCsi.root` renders the plugin's `--root`,
+  the agent's `--uds-csi-root` and the proxy mount; `udsCsi.enabled` (default
+  **true**) gates all of it plus the agent's `EndpointPolicy` RBAC.
+- **Workloads.** `e2e/uds.sh` runs every Phase-1 leg on the CSI carrier and adds
+  (g) an `emptyDir`-carrier pod denied at admission and (h) the counter for
+  `not_csi` (a policy-declared `emptyDir` workload, admitted, stays unpromoted)
+  and `volume_not_declared` (that TCP service keeps serving). The (e) drift
+  target now mounts an unused `csi.aether.io` volume, since a policy naming an
+  undeclared volume no longer reaches the data plane. `charts/udsecho` (the
+  talos soak's UDS workloads; the proposal's ~~`e2e/soak/udsecho`~~) switched in
+  the same PR. The Phase 0 hostile leg is not part of this PR.
+
 No coexistence phase and no deprecation window (decision 2026-09-27): a UDS workload
 that does not switch its volume source in the upgrade that ships Phase 2 stops being
-delivered — loudly, at admission for new pods and as `resolve_failures{reason="emptydir"}`
+delivered — loudly, at admission for new pods and as `resolve_failures{reason="not_csi"}`
 for running ones — which is the same "breaking change, no compatibility flags" rule the
 TPROXY cut-over used. Callers see nothing, exactly as in 034: endpoints stay
 `pod_ip:18008`, and multi-cluster, E/W waypoint, and delegated liveness are all

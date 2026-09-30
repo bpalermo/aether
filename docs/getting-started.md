@@ -392,7 +392,7 @@ Your service is now addressable mesh-wide as `my-svc.<namespace>.aether.internal
 | `endpoint.aether.io/health-path` | `/` | Path the node-local agent health-checks (delegated liveness). |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds` = agent vets the endpoint and publishes health over EDS (clients get pre-warmed endpoints); `active` = every client proxy probes the endpoint itself. |
 | `metadata.endpoint.aether.io/<key>` | — | Free-form endpoint metadata, usable as routing subsets (§9). |
-| `endpoint.aether.io/uds-socket` | — | Serve on a Unix socket (`<volume>/<file>`) instead of a TCP port — see [workload-requirements.md](./workload-requirements.md#serving-on-a-unix-domain-socket). |
+| `endpoint.aether.io/uds-socket` | — | Serve on a Unix socket (`<volume>/<file>`) instead of a TCP port. `<volume>` is the pod's inline `csi: {driver: csi.aether.io}` volume and the pod sets `securityContext.fsGroup` (an `emptyDir` is no longer a carrier since chart 2.0.0) — see [workload-requirements.md](./workload-requirements.md#serving-on-a-unix-domain-socket). |
 | `config.aether.io/upstreams` | — | Comma-separated services this pod **calls** (§7). |
 
 ---

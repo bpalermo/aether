@@ -15,8 +15,8 @@ image:
   pullPolicy: IfNotPresent
 
 # The socket, as <volume>/<file> — the same value the annotation and the
-# EndpointPolicy carry. Keep it short: the resolved kubelet path must fit the
-# 107-byte AF_UNIX budget (~15 chars for this value).
+# EndpointPolicy carry. <volume> is the pods' csi.aether.io volume; <file> has a
+# 54-byte budget (/run/aether/uds/<pod-uid>/<file> must fit AF_UNIX's 107).
 socket: "s/a.sock"
 
 # Annotation delivery path (uds-echo).

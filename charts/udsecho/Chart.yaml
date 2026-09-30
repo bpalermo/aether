@@ -3,13 +3,14 @@ name: udsecho
 description: |
   UDS validation workloads (proposal 034 PR 3b). Deploys both pod-UDS delivery
   paths — uds-echo (endpoint.aether.io/uds-socket annotation) and uds-cr-echo
-  (EndpointPolicy attachment) — plus a light curl client keeping continuous
+  (EndpointPolicy attachment), both on the csi.aether.io socket carrier
+  (proposal 039 Phase 2; needs aether >= 2.0.0) — plus a light curl client keeping continuous
   mesh traffic on both, so soaks and rollouts exercise pipe delivery in anger.
   The udsecho server binds NO TCP port: every 200 through the mesh is proof of
   socket delivery, because the TCP-fallback path finds nothing listening.
 type: application
 # Stamped at package time when built with `--stamp` (see registrar Chart.yaml).
-version: "1.0.0-{GIT_COMMIT}"
+version: "2.0.0-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether

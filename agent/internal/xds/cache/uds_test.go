@@ -2,10 +2,12 @@ package cache
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
+	"aethermesh.dev/common/udspath"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/stretchr/testify/assert"
@@ -13,16 +15,24 @@ import (
 )
 
 const (
-	testPodUID     = "11111111-2222-3333-4444-555555555555"
-	testKubeletDir = "/var/lib/kubelet/pods"
-	testUDSPath    = testKubeletDir + "/" + testPodUID + "/volumes/kubernetes.io~empty-dir/uds/app.sock"
+	testPodUID  = "11111111-2222-3333-4444-555555555555"
+	testUDSRoot = udspath.DefaultCSIRoot
+	// The volume name selects the csi.aether.io carrier; it is not in the path.
+	testUDSPath = testUDSRoot + "/" + testPodUID + "/app.sock"
+
+	udsResolveFailuresCtr = "aether.agent.uds.resolve_failures"
+	udsResolveFailureMsg  = "failed to resolve the pod's UDS socket; falling back to TCP loopback (a UDS-only app stays unpromoted)"
 )
 
-// makeUDSPod builds a multi-port pod annotated for UDS delivery. The ports
-// annotation pins the all-ports-one-socket semantic (proposal 034 Phase 1).
+// makeUDSPod builds a multi-port pod annotated for UDS delivery whose "uds"
+// volume is its csi.aether.io volume, as the CNI server records it on ADD. The
+// ports annotation pins the all-ports-one-socket semantic (proposal 034 Phase 1).
 func makeUDSPod(uid string) *cniv1.CNIPod {
 	pod := makeCNIPod("uds-pod", "default", "/proc/900/ns/net")
 	pod.Uid = uid
+	pod.UdsCsiVolume = "uds"
+	pod.UdsCsiVolumes = 1
+	pod.Volumes = []string{"uds", "kube-api-access"}
 	pod.Annotations = map[string]string{
 		aetherannotations.AnnotationEndpointPort:      "8080",
 		aetherannotations.AnnotationEndpointPorts:     "8080,9090",
@@ -44,12 +54,28 @@ func pipePaths(t *testing.T, resources []types.Resource) map[string]string {
 	return out
 }
 
-// TestAddPod_UDSDelivery verifies an annotated pod with a persisted UID gets
-// pipe app clusters on EVERY declared port (all dialing the same socket) plus a
-// pipe health cluster, none of them carrying an upstream bind config.
+// assertTCPDelivery requires every app cluster of the pod to dial TCP loopback
+// in its netns: the safe-degraded fallback.
+func assertTCPDelivery(t *testing.T, c *SnapshotCache, pod *cniv1.CNIPod) {
+	t.Helper()
+	entry := c.listeners[pod.GetNetworkNamespace()]
+	require.NotEmpty(t, entry.appClusters)
+	for _, r := range entry.appClusters {
+		cl := r.(*clusterv3.Cluster)
+		addr := cl.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress()
+		assert.Nil(t, addr.GetPipe(), "falls back to TCP loopback")
+		assert.Equal(t, "127.0.0.1", addr.GetSocketAddress().GetAddress())
+		assert.Equal(t, pod.GetNetworkNamespace(), cl.GetUpstreamBindConfig().GetSourceAddress().GetNetworkNamespaceFilepath())
+	}
+}
+
+// TestAddPod_UDSDelivery verifies an annotated pod with a persisted UID and its
+// csi.aether.io volume gets pipe app clusters on EVERY declared port (all
+// dialing the same socket under the CSI root) plus a pipe health cluster, none
+// of them carrying an upstream bind config.
 func TestAddPod_UDSDelivery(t *testing.T) {
 	c := newTestCache("node-1")
-	c.SetKubeletPodsDir(testKubeletDir)
+	c.SetUDSCSIRoot(testUDSRoot)
 
 	pod := makeUDSPod(testPodUID)
 	require.NoError(t, c.AddPod(context.Background(), pod, "example.org"))
@@ -69,48 +95,161 @@ func TestAddPod_UDSDelivery(t *testing.T) {
 	assert.Nil(t, health.GetUpstreamBindConfig())
 }
 
-// TestAddPod_UDSFallsBackToTCP covers the two safe-degraded fallbacks: a stored
-// record without a pod UID (written before the UID was persisted) and the
-// operator gate (--kubelet-pods-dir empty). Both keep TCP loopback delivery
-// rather than failing the pod add.
+// TestAddPod_UDSFallsBackToTCP covers every safe-degraded fallback, each with
+// the reason the resolve-failure counter reports. None fails the pod add, and
+// the kubelet pod-volumes path is never rendered: an emptyDir carrier (the
+// pre-039 shape) is not_csi, not a path.
 func TestAddPod_UDSFallsBackToTCP(t *testing.T) {
 	tests := []struct {
-		name           string
-		kubeletPodsDir string
-		uid            string
+		name   string
+		root   string
+		mutate func(*cniv1.CNIPod)
+		reason udspath.Reason
 	}{
-		{name: "annotated pod without a persisted UID", kubeletPodsDir: testKubeletDir, uid: ""},
-		{name: "UDS delivery disabled", kubeletPodsDir: "", uid: testPodUID},
-		{name: "annotation does not resolve", kubeletPodsDir: testKubeletDir, uid: "../other-pod"},
+		{
+			name:   "UDS delivery disabled",
+			mutate: func(*cniv1.CNIPod) {},
+			reason: udspath.ReasonDisabled,
+		},
+		{
+			name:   "annotated pod without a persisted UID",
+			root:   testUDSRoot,
+			mutate: func(p *cniv1.CNIPod) { p.Uid = "" },
+			reason: udspath.ReasonNoUID,
+		},
+		{
+			name:   "uid does not resolve",
+			root:   testUDSRoot,
+			mutate: func(p *cniv1.CNIPod) { p.Uid = "../other-pod" },
+			reason: udspath.ReasonNoUID,
+		},
+		{
+			// The cut-over's loud failure: the named volume exists, but as an
+			// emptyDir (the CNI server recorded no csi.aether.io volume).
+			name: "volume is an emptyDir, not csi.aether.io",
+			root: testUDSRoot,
+			mutate: func(p *cniv1.CNIPod) {
+				p.UdsCsiVolume = ""
+				p.UdsCsiVolumes = 0
+			},
+			reason: udspath.ReasonNotCSI,
+		},
+		{
+			name: "volume not declared",
+			root: testUDSRoot,
+			mutate: func(p *cniv1.CNIPod) {
+				p.Annotations[aetherannotations.AnnotationEndpointUDSSocket] = "nope/app.sock"
+			},
+			reason: udspath.ReasonVolumeNotDeclared,
+		},
+		{
+			// A record replayed from storage written before 039 Phase 2.
+			name: "pre-039 record without volume data",
+			root: testUDSRoot,
+			mutate: func(p *cniv1.CNIPod) {
+				p.UdsCsiVolume, p.UdsCsiVolumes, p.Volumes = "", 0, nil
+			},
+			reason: udspath.ReasonVolumeNotDeclared,
+		},
+		{
+			name: "two csi.aether.io volumes",
+			root: testUDSRoot,
+			mutate: func(p *cniv1.CNIPod) {
+				p.UdsCsiVolume, p.UdsCsiVolumes, p.Volumes = "", 2, []string{"uds", "uds2"}
+			},
+			reason: udspath.ReasonMultipleCSIVolumes,
+		},
+		{
+			name: "bad socket file",
+			root: testUDSRoot,
+			mutate: func(p *cniv1.CNIPod) {
+				p.Annotations[aetherannotations.AnnotationEndpointUDSSocket] = "uds/.."
+			},
+			reason: udspath.ReasonBadFile,
+		},
+		{
+			name: "socket path over the AF_UNIX budget",
+			root: testUDSRoot,
+			mutate: func(p *cniv1.CNIPod) {
+				p.Annotations[aetherannotations.AnnotationEndpointUDSSocket] = "uds/" + strings.Repeat("x", udspath.MaxFileLen+1)
+			},
+			reason: udspath.ReasonPathTooLong,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := newTestCache("node-1")
-			c.SetKubeletPodsDir(tt.kubeletPodsDir)
+			c, rec, reader := newBindingTestCache(t)
+			c.SetUDSCSIRoot(tt.root)
 
-			pod := makeUDSPod(tt.uid)
+			pod := makeUDSPod(testPodUID)
+			tt.mutate(pod)
 			require.NoError(t, c.AddPod(context.Background(), pod, "example.org"), "a failed resolution must never fail the pod add")
 
-			entry := c.listeners[pod.GetNetworkNamespace()]
-			require.Len(t, entry.appClusters, 2)
-			for _, r := range entry.appClusters {
-				cl := r.(*clusterv3.Cluster)
-				addr := cl.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress()
-				assert.Nil(t, addr.GetPipe(), "falls back to TCP loopback")
-				assert.Equal(t, "127.0.0.1", addr.GetSocketAddress().GetAddress())
-				assert.Equal(t, pod.GetNetworkNamespace(), cl.GetUpstreamBindConfig().GetSourceAddress().GetNetworkNamespaceFilepath())
-			}
+			assertTCPDelivery(t, c, pod)
+			assert.Equal(t, int64(1), counterValue(t, reader, udsResolveFailuresCtr), "counted once")
+			lines := rec.with(udsResolveFailureMsg)
+			require.Len(t, lines, 1)
+			assert.Equal(t, string(tt.reason), lines[0].attrs["reason"])
 		})
 	}
 }
 
+// TestUDSResolveFailure_ReportedOncePerPodPerReason pins the bound: a pod that
+// keeps failing re-resolves on every delivery-cluster rebuild (policy changes,
+// trust-domain folds), and must not log or count on each; a different reason,
+// and a failure after the pod was removed and re-added, are reported again.
+func TestUDSResolveFailure_ReportedOncePerPodPerReason(t *testing.T) {
+	c, rec, reader := newBindingTestCache(t)
+	c.SetUDSCSIRoot(testUDSRoot)
+
+	pod := makeUDSPod(testPodUID)
+	pod.UdsCsiVolume, pod.UdsCsiVolumes = "", 0 // emptyDir carrier: not_csi
+	require.NoError(t, c.AddPod(context.Background(), pod, "example.org"))
+	for range 3 {
+		c.regenerateAllAppDeliveryClusters()
+	}
+	assert.Equal(t, int64(1), counterValue(t, reader, udsResolveFailuresCtr), "rebuilds do not re-count")
+	assert.Len(t, rec.with(udsResolveFailureMsg), 1, "rebuilds do not re-log")
+
+	// The same pod now fails differently (the policy/annotation changed).
+	c.listenerMu.Lock()
+	entry := c.listeners[pod.GetNetworkNamespace()]
+	entry.cniPod.Annotations[aetherannotations.AnnotationEndpointUDSSocket] = "nope/app.sock"
+	c.listenerMu.Unlock()
+	c.regenerateAllAppDeliveryClusters()
+	assert.Equal(t, int64(2), counterValue(t, reader, udsResolveFailuresCtr), "a new reason is reported")
+
+	// Removal forgets the pod; the same failure on a re-add is reported again.
+	require.NoError(t, c.RemovePod(context.Background(), pod.GetNetworkNamespace()))
+	require.NoError(t, c.AddPod(context.Background(), pod, "example.org"))
+	assert.Equal(t, int64(3), counterValue(t, reader, udsResolveFailuresCtr))
+}
+
+// TestUDSResolveFailure_Recovery: a pod fixed in place (its failure cleared by a
+// successful resolution) is reported again if it breaks again.
+func TestUDSResolveFailure_Recovery(t *testing.T) {
+	c, _, reader := newBindingTestCache(t)
+	c.SetUDSCSIRoot(testUDSRoot)
+
+	pod := makePolicyPod()
+	c.SetUDSServicePolicies(map[string]string{"default/echo": "nope/svc.sock"})
+	require.NoError(t, c.AddPod(context.Background(), pod, "example.org"))
+	assert.Equal(t, int64(1), counterValue(t, reader, udsResolveFailuresCtr))
+
+	c.SetUDSServicePolicies(map[string]string{"default/echo": "p/svc.sock"})
+	assert.Equal(t, testPolicyUDSPath, appPipePath(t, c, pod.GetNetworkNamespace()))
+
+	c.SetUDSServicePolicies(map[string]string{"default/echo": "nope/svc.sock"})
+	assert.Equal(t, int64(2), counterValue(t, reader, udsResolveFailuresCtr))
+}
+
 // TestLoadListenersFromStorage_UDSDelivery verifies storage replay resolves the
-// socket from the persisted UID — delivery must not depend on the API server
-// being reachable at agent boot.
+// socket from the persisted UID and csi.aether.io volume — delivery must not
+// depend on the API server being reachable at agent boot.
 func TestLoadListenersFromStorage_UDSDelivery(t *testing.T) {
 	c := newTestCache("node-1")
-	c.SetKubeletPodsDir(testKubeletDir)
+	c.SetUDSCSIRoot(testUDSRoot)
 
 	pod := makeUDSPod(testPodUID)
 	seedListeners(c, pod)
@@ -124,19 +263,17 @@ func TestLoadListenersFromStorage_UDSDelivery(t *testing.T) {
 }
 
 // TestAddPod_TCPPodUnaffected pins that a pod without the annotation keeps the
-// loopback delivery shape byte-for-byte.
+// loopback delivery shape byte-for-byte, and reports nothing.
 func TestAddPod_TCPPodUnaffected(t *testing.T) {
-	c := newTestCache("node-1")
-	c.SetKubeletPodsDir(testKubeletDir)
+	c, rec, reader := newBindingTestCache(t)
+	c.SetUDSCSIRoot(testUDSRoot)
 
 	pod := makeCNIPod("tcp-pod", "default", "/proc/901/ns/net")
 	require.NoError(t, c.AddPod(context.Background(), pod, "example.org"))
 
 	entry := c.listeners[pod.GetNetworkNamespace()]
 	require.Len(t, entry.appClusters, 1)
-	cl := entry.appClusters[0].(*clusterv3.Cluster)
-	addr := cl.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress()
-	assert.Nil(t, addr.GetPipe())
-	assert.Equal(t, "127.0.0.1", addr.GetSocketAddress().GetAddress())
-	assert.Equal(t, pod.GetNetworkNamespace(), cl.GetUpstreamBindConfig().GetSourceAddress().GetNetworkNamespaceFilepath())
+	assertTCPDelivery(t, c, pod)
+	assert.Zero(t, counterValue(t, reader, udsResolveFailuresCtr))
+	assert.Empty(t, rec.with(udsResolveFailureMsg))
 }

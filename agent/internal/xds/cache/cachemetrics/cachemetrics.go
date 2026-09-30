@@ -10,11 +10,17 @@ import (
 	"context"
 	"fmt"
 
+	"aethermesh.dev/common/udspath"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
 // MeterName identifies this instrumentation scope in metric backends.
 const MeterName = "aether/agent-xds-cache"
+
+// attrReason labels aether.agent.uds.resolve_failures with the udspath.Reason.
+// Bounded: udspath.Reasons is a closed set.
+const attrReason = attribute.Key("reason")
 
 // Metrics holds the snapshot-generation instruments. All methods are
 // nil-receiver-safe so the cache runs unchanged when telemetry is disabled.
@@ -91,6 +97,13 @@ type Metrics struct {
 	// that a UDPRoute is not doing what its author wrote.
 	udpRouteUnsupported metric.Int64Counter
 	udpNoHealthyBackend metric.Int64Counter
+	// udsResolveFailures counts local pods whose UDS delivery request could not
+	// be resolved to a socket path (proposals 034/039), once per pod per
+	// reason. The pod falls back to TCP loopback, so a UDS-only app stays
+	// unpromoted; before 039 Phase 2 that was visible only as one ERROR line in
+	// one node's agent log. reason="not_csi" is the cut-over's signature: a
+	// workload still carrying its socket on an emptyDir.
+	udsResolveFailures metric.Int64Counter
 }
 
 // snapshotDurationBuckets are the explicit boundaries, in SECONDS, for
@@ -198,6 +211,10 @@ func (m *Metrics) registerAnomalyCounters(meter metric.Meter) error {
 		metric.WithDescription("Endpoints in a published udp: cluster that Envoy will not load balance to, when NONE of them is routable: udp_proxy silently discards every datagram for that service (#931)")); err != nil {
 		return fmt.Errorf("udp no healthy backend: %w", err)
 	}
+	if m.udsResolveFailures, err = meter.Int64Counter("aether.agent.uds.resolve_failures",
+		metric.WithDescription("Local pods whose UDS delivery request (endpoint.aether.io/uds-socket or an EndpointPolicy) could not be resolved to a csi.aether.io socket path, once per pod per reason; the pod falls back to TCP loopback")); err != nil {
+		return fmt.Errorf("uds resolve failures: %w", err)
+	}
 	if m.clusterUnpinned, err = meter.Int64Counter("aether.agent.identity.cluster_unpinned",
 		metric.WithDescription("Mesh clusters published with no server-identity SAN pin (handshake proves trust-domain membership only)")); err != nil {
 		return fmt.Errorf("cluster unpinned: %w", err)
@@ -228,6 +245,21 @@ func (m *Metrics) seedAnomalyCounters() {
 	m.clusterUnpinned.Add(ctx, 0)
 	m.udpRouteUnsupported.Add(ctx, 0)
 	m.udpNoHealthyBackend.Add(ctx, 0)
+	// One series per reason, so a grader can ask for reason="not_csi" and get
+	// a zero rather than nothing.
+	for _, r := range udspath.Reasons {
+		m.udsResolveFailures.Add(ctx, 0, metric.WithAttributes(attrReason.String(string(r))))
+	}
+}
+
+// UDSResolveFailure counts one local pod whose UDS request failed to resolve
+// with the given udspath.Reason. The pod is deliberately NOT an attribute
+// (unbounded cardinality); the cache logs it once per pod per reason.
+func (m *Metrics) UDSResolveFailure(ctx context.Context, reason string) {
+	if m == nil {
+		return
+	}
+	m.udsResolveFailures.Add(ctx, 1, metric.WithAttributes(attrReason.String(reason)))
 }
 
 // OutboundBindingMismatch counts n source pods found bound to a foreign

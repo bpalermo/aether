@@ -36,14 +36,17 @@ message EndpointPolicySpec {
     }
   ];
 
-  // uds_socket is "<volume-name>/<socket-file>": the emptyDir volume declared by
-  // the target service's pods and the socket file the app creates inside it.
+  // uds_socket is "<volume-name>/<socket-file>": the inline
+  // `csi: {driver: csi.aether.io}` volume declared by the target service's pods
+  // (proposal 039 Phase 2; an emptyDir is no longer a carrier) and the socket
+  // file the app creates inside it.
   //
   // The rules here are shape only — exactly one "/", no empty component, a sane
   // upper bound. The authoritative check is the admission webhook, which runs the
-  // agent's own resolver (common/udspath) so the segment rules AND the 107-byte
-  // AF_UNIX sun_path budget are enforced at apply time. The budget leaves roughly
-  // 16 characters for this whole value under the default kubelet pods directory.
+  // agent's own resolver rules (common/udspath) so the segment rules AND the
+  // 107-byte AF_UNIX sun_path budget are enforced at apply time. The host path is
+  // /run/aether/uds/<pod-UID>/<socket-file>, which leaves 54 bytes for the file
+  // name; the volume name is not part of the path.
   string uds_socket = 2 [(buf.validate.field).string = {
     min_len: 3
     max_len: 64

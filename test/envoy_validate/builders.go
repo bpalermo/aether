@@ -462,9 +462,9 @@ func buildNodeUDSBootstrap() (*bootstrapv3.Bootstrap, error) {
 		aetherannotations.AnnotationEndpointUDSSocket: "uds/app.sock",
 	}
 
-	socketPath, err := udspath.Resolve(udspath.DefaultKubeletPodsDir, "11111111-2222-3333-4444-555555555555", "uds/app.sock")
+	socketPath, err := udspath.ResolveCSI(udspath.DefaultCSIRoot, "11111111-2222-3333-4444-555555555555", "uds", "uds/app.sock")
 	if err != nil {
-		return nil, fmt.Errorf("udspath.Resolve: %w", err)
+		return nil, fmt.Errorf("udspath.ResolveCSI: %w", err)
 	}
 
 	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false, nil, nil, socketPath)

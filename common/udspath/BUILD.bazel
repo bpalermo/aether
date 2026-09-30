@@ -2,9 +2,13 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "udspath",
-    srcs = ["udspath.go"],
+    srcs = [
+        "pod.go",
+        "udspath.go",
+    ],
     importpath = "aethermesh.dev/common/udspath",
     visibility = ["//visibility:public"],
+    deps = ["@io_k8s_api//core/v1:core"],
 )
 
 go_test(
@@ -14,5 +18,6 @@ go_test(
     deps = [
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_k8s_api//core/v1:core",
     ],
 )

@@ -53,14 +53,14 @@ type AgentConfig struct {
 	// fleet-wide unmeshing, and it never creates a config of its own.
 	CNIConflistReassert bool
 
-	// KubeletPodsDir is kubelet's pod-volumes directory as mounted into the proxy
-	// container (identical host path, so no prefix translation is needed when
-	// rendering Envoy Pipe addresses). It is how the node proxy reaches a
-	// workload's Unix socket for UDS delivery (proposal 034):
-	// <KubeletPodsDir>/<pod-UID>/volumes/kubernetes.io~empty-dir/<volume>/<file>.
-	// The location is distro-dependent; empty disables UDS delivery, and pods
-	// annotated endpoint.aether.io/uds-socket fall back to TCP loopback.
-	KubeletPodsDir string
+	// UDSCSIRoot is where the csi.aether.io node plugin mounts each UDS pod's
+	// tmpfs on the host, and — at the identical path — what the proxy container
+	// mounts, so rendered Envoy Pipe addresses need no prefix translation. It is
+	// how the node proxy reaches a workload's Unix socket for UDS delivery
+	// (proposals 034/039): <UDSCSIRoot>/<pod-UID>/<file>. The chart passes
+	// udsCsi.root, the same value the node plugin gets. Empty disables UDS
+	// delivery: pods requesting a socket fall back to TCP loopback.
+	UDSCSIRoot string
 
 	// RegistrarAddress is the gRPC address of the in-cluster Registrar service
 	RegistrarAddress string
@@ -216,7 +216,7 @@ func NewAgentConfig() *AgentConfig {
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
 		MountedCNINetDir:        constants.DefaultHostCNINetDir,
 		CNIConflistReassert:     true,
-		KubeletPodsDir:          udspath.DefaultKubeletPodsDir,
+		UDSCSIRoot:              udspath.DefaultCSIRoot,
 		MeshDNSSnapshotPath:     constants.DefaultMeshDNSSnapshotPath,
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
 		MeshDomain:              meshconst.DefaultMeshDomain,

@@ -34,12 +34,14 @@ go_library(
 go_test(
     name = "udscsi_test",
     srcs = [
+        "carrier_contract_test.go",
         "driver_test.go",
         "serve_test.go",
     ],
     embed = [":udscsi"],
     deps = [
         "//api/aether/kubelet/pluginregistration/v1:pluginregistration",
+        "//common/udspath",
         "@com_github_container_storage_interface_spec//lib/go/csi",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

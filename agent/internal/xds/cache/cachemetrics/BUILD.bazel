@@ -5,7 +5,11 @@ go_library(
     srcs = ["cachemetrics.go"],
     importpath = "aethermesh.dev/agent/internal/xds/cache/cachemetrics",
     visibility = ["//agent:__subpackages__"],
-    deps = ["@io_opentelemetry_go_otel_metric//:metric"],
+    deps = [
+        "//common/udspath",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_metric//:metric",
+    ],
 )
 
 go_test(
@@ -14,6 +18,7 @@ go_test(
     embed = [":cachemetrics"],
     embedsrcs = ["cachemetrics.go"],
     deps = [
+        "//common/udspath",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],

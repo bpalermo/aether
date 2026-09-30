@@ -9,6 +9,7 @@ import (
 
 	configv1 "aethermesh.dev/api/aether/config/v1"
 	crdv1 "aethermesh.dev/common/apis/config/v1"
+	"aethermesh.dev/common/udspath"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -86,10 +87,23 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			// Shape-valid but over the sun_path budget: exactly the failure an
-			// annotation would only surface as an agent error log.
-			name:    "socket overflows the sun_path budget",
-			spec:    spec("Service", "", "echo", "socket-volume/"+strings.Repeat("a", 24)+".sock"),
+			// annotation would only surface as an agent resolve failure. On the
+			// csi.aether.io carrier the budget is the FILE name's: 54 bytes.
+			name:    "socket file overflows the sun_path budget",
+			spec:    spec("Service", "", "echo", "s/"+strings.Repeat("a", udspath.MaxFileLen+1)),
 			wantErr: "over the 107-byte AF_UNIX limit",
+		},
+		{
+			// Exactly at the 54-byte file budget: admitted. Under the pre-039
+			// emptyDir resolver this value was ~40 bytes over and was rejected.
+			name: "socket file at the csi budget",
+			spec: spec("Service", "", "echo", "s/"+strings.Repeat("a", udspath.MaxFileLen)),
+		},
+		{
+			// The volume name selects the carrier and is not in the path, so a
+			// long one costs nothing (the old resolver charged it to the budget).
+			name: "long volume name",
+			spec: spec("Service", "", "echo", "socket-volume/"+strings.Repeat("a", 24)+".sock"),
 		},
 	}
 

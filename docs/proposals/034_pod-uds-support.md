@@ -4,6 +4,16 @@
 and `EndpointPolicy` CRD path (#618) shipped, kind e2e in CI (#619), and both paths validated
 under an 8-hour churn soak on talos-main (2026-08-03; follow-ups tracked in #628/#629).
 Phase 2 (outbound egress socket) remains deferred post-redirect-all.
+**Superseded carrier (2026-09-30):** the `emptyDir` socket carrier this proposal
+specifies — the `kubernetes.io~empty-dir` resolver, `--kubelet-pods-dir`, the
+proxy's `/var/lib/kubelet/pods` mount and `proxy.udsWorkloads` — was **removed**
+by proposal 039 Phase 2 (#1092, chart 2.0.0). The carrier is now an inline
+`csi: {driver: csi.aether.io}` volume (the pod needs `securityContext.fsGroup`),
+resolved to `/run/aether/uds/<pod-uid>/<file>`; the annotation, `EndpointPolicy`,
+the annotation-wins precedence, the failure semantics and the pipe cluster shapes
+below are unchanged. Read the carrier-specific text below (the volume kind, the
+kubelet path, the ~16-character budget) as history; the current contract is in
+`docs/workload-requirements.md`.
 **Author:** Bruno Palermo
 **Date:** 2026-06-11, revised 2026-08-01 against current main
 **History:** originally numbered 002; renumbered (002 is taken by the merged

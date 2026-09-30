@@ -47,8 +47,29 @@ message CNIPod {
   bool terminating = 10;
 
   // uid is the Kubernetes pod UID, fetched from the API server on CNI ADD and
-  // persisted so listener regeneration from storage can resolve kubelet
-  // pod-volume paths (proposal 034, UDS delivery) without the API server.
-  // Empty on records written before the field existed.
+  // persisted so listener regeneration from storage can resolve the pod's UDS
+  // socket path (<uds-csi-root>/<uid>/<file>, proposals 034/039) without the
+  // API server. Empty on records written before the field existed.
   string uid = 11;
+
+  // uds_csi_volume is the name of the pod's inline `csi: {driver: csi.aether.io}`
+  // volume, the only carrier for a UDS-delivered socket since proposal 039
+  // Phase 2. Recorded by the agent on CNI ADD from the pod spec and persisted so
+  // storage replay resolves the socket without the API server. Empty when the
+  // pod declares no such volume, and ALSO when it declares more than one (one
+  // mesh socket volume per pod: the agent trusts neither; see uds_csi_volumes).
+  string uds_csi_volume = 12;
+
+  // volumes lists the name of every volume the pod declares, whatever its
+  // source. It lets the agent tell a UDS request naming a volume the pod mounts
+  // with another carrier (an emptyDir left over from before 039 Phase 2:
+  // reason "not_csi") from one naming a volume the pod does not declare at all
+  // (reason "volume_not_declared").
+  repeated string volumes = 13;
+
+  // uds_csi_volumes counts the pod's csi.aether.io volumes, so a pod declaring
+  // more than one (uds_csi_volume then empty) is reported as
+  // "multiple_csi_volumes" rather than misattributed. Zero on records written
+  // before the field existed.
+  uint32 uds_csi_volumes = 14;
 }

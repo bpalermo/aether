@@ -113,7 +113,6 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | `proxy.hotRestart.shmHostPath` | `/run/aether/shm` | Shared-memory hostPath for cross-pod hot restart. |
 | `proxy.hotRestart.drainStrategy` | `gradual` | Envoy `--drain-strategy` for the hot-restart parent and every other drain (LDS listener removal, the pod-termination drain): `gradual` or `immediate`. `immediate` is an opt-in only: on talos-main it made the #1054 stateless resets worse (#1068); the carried patches (#1064/#1066/#1069) fix the exit window under `gradual`. See [`runbook.md`](./runbook.md) § *Source h3 requests die on a stateless reset at a destination's roll (#1054)*. |
 | `proxy.hotRestart.skipParentStats` | `false` | Pass Envoy `--skip-hot-restart-parent-stats` (#1050). An off-by-default **emergency switch**: the hot-restart main-thread deadlock it worked around is fixed by the carried patch #1060. Turning it on costs the parent's gauges and its last ≤5 s of counter deltas in the child. |
-| `proxy.udsWorkloads.enabled` | `true` | UDS delivery (034). Gates the proxy's `/var/lib/kubelet/pods` hostPath mount, the agent's `--kubelet-pods-dir`, and the agent's read access to the `EndpointPolicy` CRD. Inert until a workload asks for it; turning it off later silently degrades annotated pods to TCP (nothing listens, so their endpoints stay unpromoted). |
 | `proxy.terminationGracePeriodSeconds` | `180` | The proxy pod's `terminationGracePeriodSeconds`, also passed to the supervisor as `--termination-grace`. The deleted pod keeps its Envoy alive as the successor's hot-restart parent, so it is deliberately generous. Where no successor can appear (node shutdown, `kubectl delete daemonset`, a replacement stuck Pending) the supervisor drains Envoy itself at `terminationGrace − (hotRestart.drainTime + 15s)` instead of being SIGKILLed (#771); keep it well above `drainTime + 15s`. |
 | `proxy.overload.enabled` | `true` | Envoy overload-manager graceful-degradation ladder. |
 | `proxy.overload.maxHeapSizeBytes` | `402653184` (384Mi) | Keep at ~75% of `resources.limits.memory`. |
@@ -148,13 +147,19 @@ decision every cycle — see `charts/prober/values.yaml`.
 
 ### `udsCsi` — the `csi.aether.io` CSI node plugin (proposal 039)
 
-Phase 1: the driver ships **off** and nothing in aether consumes it yet; Phase 2
-makes it the only UDS carrier and flips the default. A pod declaring
+The **only** carrier for UDS delivery (034) since 039 Phase 2 (chart `2.0.0`),
+and **on** by default: `udsCsi.enabled` gates all of UDS delivery — this
+DaemonSet and the `CSIDriver`, the agent's `--uds-csi-root` (rendered from
+`udsCsi.root`), the proxy's read-only `HostToContainer` mount of `udsCsi.root`
+(its only view of workload sockets; the old `/var/lib/kubelet/pods` mount and
+`proxy.udsWorkloads` are gone), and the agent's `EndpointPolicy` watch. On a
+node without UDS workloads it is an idle 5m/16Mi DaemonSet. A pod declaring
 `securityContext.fsGroup: <gid>` and `volumes: [{name: s, csi: {driver: csi.aether.io}}]`
 gets a per-pod tmpfs at the volume's `mountPath`, mounted by the plugin at
 `<root>/<pod-uid>` on the host: `nosuid,nodev,noexec,nosymfollow`, capped at
 `size`, `mode=2770,uid=0,gid=<fsGroup>`. A pod **without** an `fsGroup` is refused
-with a `FailedMount` event naming the fix. Renders the `aether-uds-csi` DaemonSet
+with a `FailedMount` event naming the fix (and, if mesh-managed, denied earlier by the
+controller's pod webhook). Renders the `aether-uds-csi` DaemonSet
 (privileged; `Bidirectional` propagation on `<kubeletRoot>/pods` and on `root`)
 and the cluster-scoped `CSIDriver` (`attachRequired: false`, `podInfoOnMount:
 true`, `volumeLifecycleModes: [Ephemeral]`, `fsGroupPolicy: File`). The plugin
@@ -163,10 +168,10 @@ sidecar), makes no API calls (no RBAC, no token) and does not involve SPIRE.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `udsCsi.enabled` | `false` | Render the DaemonSet and the `CSIDriver`. |
-| `udsCsi.image.*` | repo+digest placeholders, `pullPolicy: Always` | The slim `uds-csi` image (`quay.io/aethermesh/uds-csi`). It is published with the chart even while disabled. |
+| `udsCsi.enabled` | `true` | UDS delivery on the `csi.aether.io` carrier: the DaemonSet, the `CSIDriver`, the agent's `--uds-csi-root`, the proxy's read-only mount of `root`, and the agent's `EndpointPolicy` RBAC/watch. `false` renders none of them and passes `--uds-csi-root=`: pods asking for a socket fall back to TCP, counted as `aether.agent.uds.resolve_failures{reason="disabled"}`. |
+| `udsCsi.image.*` | repo+digest placeholders, `pullPolicy: Always` | The slim `uds-csi` image (`quay.io/aethermesh/uds-csi`). |
 | `udsCsi.kubeletRoot` | `/var/lib/kubelet` | The kubelet's `--root-dir` — the **only** place it appears on the CSI path: `--kubelet-root`, the CSI socket (`<kubeletRoot>/plugins/csi.aether.io/csi.sock`), the registration socket (`<kubeletRoot>/plugins_registry/csi.aether.io-reg.sock`) and the `pods` dir every target path lives under all derive from it, with hostPath == mountPath. Right for kubeadm, kind and **Talos** (default root); k0s is `/var/lib/k0s/kubelet`, microk8s `/var/snap/microk8s/common/var/lib/kubelet`. Must be absolute (the chart refuses otherwise). |
-| `udsCsi.root` | `/run/aether/uds` | Host directory holding the per-pod tmpfs mounts (`<root>/<pod-uid>`). Under `/run` so a reboot starts it empty (the kubelet republishes); under `/run/aether` because the node proxy already mounts `/run/aether` from the host. |
+| `udsCsi.root` | `/run/aether/uds` | Host directory holding the per-pod tmpfs mounts (`<root>/<pod-uid>`). Under `/run` so a reboot starts it empty (the kubelet republishes). The single source of truth for the carrier path: the plugin's `--root`, the agent's `--uds-csi-root` and the proxy's mount all render from it. Sets the socket-file budget: `107 − len("<root>/") − 36 − 1` = **54 bytes** at the default, which is what admission checks. |
 | `udsCsi.size` | `1Mi` | Size cap of each per-pod tmpfs (bytes or `Ki`/`Mi`/`Gi`, at most `1Gi`). Pages are charged to the writing app's memory cgroup. |
 | `udsCsi.debug` | `false` | Debug logging for this daemon only; the global `debug` does not reach it. |
 | `udsCsi.nodeSelector` / `udsCsi.tolerations` | `{}` / `[]` | Extra scheduling constraints. The `aether.io/agent-not-ready` toleration is always rendered. |
@@ -283,7 +288,7 @@ controller's protovalidate webhook, not OpenAPI. All carry
 | `meshconfigs.config.aether.io` | `MeshConfig` (`mc`) | Per-namespace proxy observability overrides (access logs, tracing, per-pod stats). A namespace inherits the control-plane namespace's `MeshConfig` field-by-field unless it sets its own (proposal 015). |
 | `httpfilters.config.aether.io` | `HTTPFilter` (`htf`) | The proxy-extension escape hatch (proposal 025): attach a supported Envoy HTTP filter (ext_authz, RBAC, header-to-metadata) at a chosen scope. |
 | `edgeconfigs.config.aether.io` | `EdgeConfig` | Edge Envoy tuning (proposal 029): best-practices hardening defaults, HTTP/3 (QUIC, ALPN `h3`), timeouts/limits. Attached natively via Gateway API `parametersRef` on the `GatewayClass` (fleet default) or per-`Gateway` (override-wins merge). |
-| `endpointpolicies.config.aether.io` | `EndpointPolicy` | Service-scoped UDS delivery (proposal 034 Phase 1b): `spec.targetRef` (kind=Service, same namespace) + `spec.udsSocket` (`<volume>/<file>`) declares socket delivery for every pod of a service. The per-pod `endpoint.aether.io/uds-socket` annotation wins; one policy per Service (lexicographically smallest name wins). Read by the agent only when `proxy.udsWorkloads.enabled`. |
+| `endpointpolicies.config.aether.io` | `EndpointPolicy` | Service-scoped UDS delivery (proposal 034 Phase 1b): `spec.targetRef` (kind=Service, same namespace) + `spec.udsSocket` (`<volume>/<file>`) declares socket delivery for every pod of a service; `<volume>` must be the pods' `csi.aether.io` volume (039), the file at most 54 bytes. The per-pod `endpoint.aether.io/uds-socket` annotation wins; one policy per Service (lexicographically smallest name wins). Read by the agent only when `udsCsi.enabled` (default). |
 
 **`HTTPFilter` scopes** (`spec.scope`, plus the `target_refs` attachment):
 
@@ -326,7 +331,7 @@ Node-agent-specific:
 | Flag | Default | Purpose |
 |---|---|---|
 | `--mounted-registry-dir` | `/host/var/lib/aether/registry` | Local pod-data dir for the CNI plugin. |
-| `--kubelet-pods-dir` | `/var/lib/kubelet/pods` | Kubelet's pod-volumes dir, mounted into the proxy at the identical host path, through which the proxy reaches a workload's Unix socket (034). Empty disables UDS delivery: pods annotated `endpoint.aether.io/uds-socket` fall back to TCP loopback. Gated by the chart's `proxy.udsWorkloads.enabled`. |
+| `--uds-csi-root` | `/run/aether/uds` | Host directory under which the `csi.aether.io` plugin mounts each UDS pod's tmpfs, mounted into the proxy at the identical path; the proxy dials `<root>/<pod-uid>/<file>` (034/039). Must match the plugin's `--root` (the chart renders both from `udsCsi.root`). Empty disables UDS delivery: pods requesting a socket fall back to TCP loopback (`resolve_failures{reason="disabled"}`). Replaced `--kubelet-pods-dir` (039 Phase 2). |
 | `--spire-broker-socket` | `/run/spire/broker-sockets/broker.sock` | SPIRE agent's SPIFFE Broker Endpoint socket, over which the agent brokers an X.509-SVID for every pod on its node (036). Replaced `--spire-admin-socket`; requires SPIRE >= 1.15.2 with its experimental broker enabled. |
 | `--gamma` | `true` | GAMMA east-west routing (018); default-on kill switch (031). CRD-detected. |
 | `--cni-conflist-reassert` | `true` | Re-assert the chained `aether-cni` entry in the node's active CNI conflist whenever a competing writer strips it (#645). Watches `--mounted-cni-net-dir` (fsnotify) plus a 60s re-check; only ever appends to an existing, valid conflist that still carries a primary CNI plugin. |
@@ -687,7 +692,7 @@ Defined in [`common/constants/`](../common/constants). Prefixes:
 | `endpoint.aether.io/health-path` | `/` | Path the agent active-health-checks. |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds` (agent vets + publishes over EDS) or `active` (each client proxy probes). |
 | `endpoint.aether.io/protocol` | `http` | Wire protocol served: `http` or `tcp`. |
-| `endpoint.aether.io/uds-socket` | — | Deliver inbound to a Unix socket (`<volume>/<file>`, `emptyDir` only, no `subPath`) instead of the TCP port (034). Wins over an `EndpointPolicy` on the service; needs `proxy.udsWorkloads.enabled`. |
+| `endpoint.aether.io/uds-socket` | — | Deliver inbound to a Unix socket (`<volume>/<file>`) instead of the TCP port (034). `<volume>` must be the pod's inline `csi: {driver: csi.aether.io}` volume (039; the pod needs `securityContext.fsGroup`; an `emptyDir` is denied at admission), `<file>` at most 54 bytes. Wins over an `EndpointPolicy` on the service; needs `udsCsi.enabled` (default). |
 | `metadata.endpoint.aether.io/<key>` | — | Free-form metadata → selectable routing subset (e.g. `…/version=v2`). |
 
 ### Config annotations (`config.aether.io/*`)

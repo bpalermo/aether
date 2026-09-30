@@ -92,6 +92,11 @@ delivers inbound requests to that socket. Nothing changes for callers: the pod
 is still reached at its pod IP over mTLS and is indistinguishable from a
 TCP-serving pod.
 
+The socket lives in an inline **`csi.aether.io`** volume: a small per-pod
+tmpfs the mesh's own CSI node plugin mounts for the pod (proposal 039). It is
+the only supported carrier. Since chart `2.0.0` an `emptyDir` is **not** (see
+"Upgrading from an emptyDir socket" below).
+
 ```yaml
     metadata:
       labels:
@@ -100,31 +105,40 @@ TCP-serving pod.
         endpoint.aether.io/port: "8080"
         endpoint.aether.io/uds-socket: "uds/app.sock"
     spec:
+      securityContext:
+        fsGroup: 65532                 # REQUIRED: owns the socket directory
       containers:
         - name: app
           volumeMounts:
-            - name: uds                # NO subPath
-              mountPath: /run/app
+            - name: uds
+              mountPath: /run/app      # the app binds /run/app/app.sock
       volumes:
         - name: uds
-          emptyDir: {}                 # emptyDir only
+          csi:
+            driver: csi.aether.io      # the ONLY socket carrier
 ```
 
 Requirements:
 
-- **`emptyDir` volume, mounted without `subPath`.** The proxy reaches the
-  socket through kubelet's pod-volumes directory on the host
-  (`/var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~empty-dir/<volume>/`);
-  CSI, projected and `hostPath` volumes, and `subPath` mounts, all have a
-  different (or no) host path and are rejected.
+- **An inline `csi: {driver: csi.aether.io}` volume, exactly one per pod.** The
+  plugin mounts a tmpfs at `/run/aether/uds/<pod-uid>` on the node
+  (`nosuid,nodev,noexec,nosymfollow`, 1 MiB by default) and binds it onto the
+  volume's mount path. The proxy dials the socket there, and sees nothing else
+  of the pod. Two such volumes, or an annotation naming any other volume, are
+  refused.
+- **`securityContext.fsGroup` is required.** The tmpfs is
+  `root:<fsGroup>`, mode `2770`: the kubelet adds the fsGroup to every
+  container of the pod, which is how a nonroot app creates its socket. A pod
+  without one is denied at admission (and the plugin would refuse it with a
+  `FailedMount` event anyway). There is no world-writable fallback.
 - **The annotation is `<volume>/<socket-file>`** — the volume *name* from the
   pod spec (not its mount path) and a file directly inside it. Anything else
   (extra path segments, `..`, absolute paths) is rejected.
-- **Keep both names short.** The full host path must fit an `AF_UNIX` address
-  (107 bytes), and the fixed kubelet prefix consumes ~91 of them, leaving about
-  **16 characters** for `<volume>/<socket-file>` together. A resolution that
-  does not fit is refused (and logged) rather than sent to Envoy, which would
-  reject the cluster.
+- **The socket file name has a 54-byte budget.** The host path
+  `/run/aether/uds/<36-byte pod UID>/<file>` must fit an `AF_UNIX` address (107
+  bytes). The volume name is not part of the path and costs nothing. A value
+  over budget is denied at admission; one that slips past is refused by the
+  agent (not sent to Envoy, which would reject the cluster).
 - **Ports are still required and still meaningful.** `endpoint.aether.io/port`
   (and `endpoint.aether.io/ports` for multi-port) name the *service* ports
   clients dial and drive inbound demux and endpoint registration; the
@@ -132,8 +146,13 @@ Requirements:
   socket and every declared port is delivered to it — multiplexing protocols on
   the one socket is the app's affair (normal for gRPC).
 - **The app creates the socket**, ideally `0600`–`0660`. The proxy runs as root
-  and is never blocked by the mode; restrictive modes keep other containers in
-  the pod out.
+  and is never blocked by the mode; the directory's setgid bit makes the socket
+  group `<fsGroup>`, so `0660` lets the pod's other containers in and keeps
+  everyone else out.
+- **The node needs the plugin.** It ships with the chart and is on by default
+  (`udsCsi.enabled`). A pod scheduled onto a node where it is not running waits
+  in `ContainerCreating` with `FailedMount: driver name csi.aether.io not found`
+  until it is. Talos needs nothing extra.
 
 ### Declaring it once per service instead (EndpointPolicy)
 
@@ -153,29 +172,62 @@ spec:
   udsSocket: s/app.sock    # same <volume>/<file> value as the annotation
 ```
 
-Its advantage is *when* mistakes are caught: the admission webhook rejects a
-malformed value — including one that overflows the 107-byte budget — at
-`kubectl apply`, instead of leaving the agent to log an error and fall back.
+The admission webhook rejects a malformed value — including a socket file over
+the 54-byte budget — at `kubectl apply`, instead of leaving the agent to count
+a resolve failure and fall back.
 
 - **The pod annotation wins.** A pod carrying
   `endpoint.aether.io/uds-socket` uses its own value; the policy is the
   service-level default for the pods that do not.
 - **The pod spec still has to match.** The CR cannot see the workload, so a
-  policy naming a volume the pods do not mount is not rejected at apply time —
-  it degrades exactly like a bad annotation (below).
+  policy naming a volume the pods do not mount as `csi.aether.io` is not
+  rejected at apply time. The agent refuses it per pod, counted with a reason
+  (below).
 - **One policy per service.** A second policy targeting the same Service is
   ignored (the lexicographically smallest policy name wins) and the conflict is
   logged by the agent.
 - The CRD ships in the `crds` chart, and the agent only reads it when
-  `proxy.udsWorkloads.enabled` is true.
+  `udsCsi.enabled` is true.
 
-Failure semantics match TCP delivery: until the socket file exists and accepts,
-the delegated-liveness probe fails and the endpoint stays **unpromoted** — no
-traffic is sent to it, exactly as for an app that has not yet bound its port.
-The same applies if the mesh cannot use the socket at all (the annotation does
-not resolve, or the operator disabled `proxy.udsWorkloads`): delivery falls back
-to the TCP port, where nothing is listening, so the endpoint stays unpromoted
-instead of blackholing traffic. The agent logs the reason.
+### When delivery cannot happen
+
+Admission catches what it can see on the pod: the controller's pod webhook
+**denies** a pod whose `endpoint.aether.io/uds-socket` names an `emptyDir` (or
+any volume that is not its `csi.aether.io` volume), a socket file over budget,
+a `csi.aether.io` volume without `fsGroup`, or two of them. The denial names
+the fix.
+
+Everything else — a policy-declared socket, a pod admitted while the webhook
+was down — the agent refuses at resolution and **counts**:
+`aether.agent.uds.resolve_failures{reason}` (Prometheus
+`aether_agent_uds_resolve_failures_total`, every reason exported at zero), plus
+one log line per pod per reason naming the pod. Reasons: `not_csi` (the named
+volume is declared, but not as `csi.aether.io` — an old `emptyDir`),
+`volume_not_declared`, `bad_file`, `path_too_long`, `multiple_csi_volumes`,
+`no_uid`, `bad_request`, and `disabled` (`udsCsi.enabled: false`).
+
+A refused pod keeps TCP delivery. Failure semantics then match an app that has
+not bound its port: a UDS-only app has nothing listening on TCP, so the
+delegated-liveness probe fails and the endpoint stays **unpromoted**; no
+traffic is sent to it. The same holds until the socket file exists and
+accepts.
+
+### Upgrading from an emptyDir socket
+
+Chart `2.0.0` removed the `emptyDir` carrier with no compatibility window. Every
+UDS workload must switch its socket volume **before** (or in the same rollout
+as) the chart upgrade:
+
+1. `emptyDir: {}` → `csi: {driver: csi.aether.io}` on the volume the annotation
+   (or policy) names; drop any `subPath` on its mount.
+2. Add `securityContext.fsGroup` (any gid your app runs with; distroless
+   nonroot is `65532`).
+3. Check the socket file name fits 54 bytes (it almost certainly does; the old
+   budget was ~16 for volume and file together).
+
+A workload left on an `emptyDir` is not deleted: new pods are denied at
+admission, and running pods fall back to TCP and stay unpromoted, counted as
+`resolve_failures{reason="not_csi"}`.
 
 ## Calling other services
 

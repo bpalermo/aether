@@ -1,5 +1,7 @@
 # Annotation delivery path: the socket is declared in the pod template, next to
-# the emptyDir it lives in (the two cannot drift). No Service object is written
+# the csi.aether.io volume it lives in (the two cannot drift). Requires the aether
+# chart's csi.aether.io carrier (udsCsi.enabled, default on since proposal 039
+# Phase 2). No Service object is written
 # here on purpose: the registrar's mesh-Service generator skips names an
 # existing Service owns — a hand-written one would suppress the mesh VIP and
 # break mesh-DNS resolution for this name.
@@ -36,8 +38,9 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels: {app: uds-echo}
-      # fsGroup makes the emptyDir group-writable for the distroless nonroot
-      # user, so the app can create the socket in it.
+      # fsGroup is REQUIRED by csi.aether.io: the per-pod tmpfs is
+      # root:<fsGroup> mode 2770, which is how the distroless nonroot user can
+      # create the socket in it (the plugin refuses a pod without one).
       securityContext: {fsGroup: 65532}
       containers:
         - name: app
@@ -51,7 +54,8 @@ spec:
               mountPath: /{{ (split "/" .Values.socket)._0 }}
       volumes:
         - name: {{ (split "/" .Values.socket)._0 }}
-          # medium: Memory on purpose: a tmpfs mount created after the proxy
-          # starts, exercising the HostToContainer propagation the chart's
-          # kubelet-pods mount depends on (a plain emptyDir would not).
-          emptyDir: {medium: Memory}
+          # The mesh socket carrier (proposal 039): a per-pod tmpfs the node
+          # plugin mounts at /run/aether/uds/<pod-uid> after the proxy started,
+          # so every request exercises the HostToContainer propagation of the
+          # proxy's read-only view of that root.
+          csi: {driver: csi.aether.io}

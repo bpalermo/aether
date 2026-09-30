@@ -1,5 +1,5 @@
 // Package podmutate contains the controller's pod-mutating admission webhook. It
-// does three things on pod CREATE, mirroring Istio's sidecar injector:
+// does these things on pod CREATE, mostly mirroring Istio's sidecar injector:
 //
 //   - Namespace auto-injection: a pod created in a namespace labeled
 //     aether.io/managed=true is given the aether.io/managed=true POD label so the
@@ -30,6 +30,13 @@
 //     proxy has a client certificate for it. Opt out per pod with
 //     aether.io/identity-gate=false; the chart turns it off mesh-wide with
 //     controller.webhook.identityGate.enabled=false.
+//   - UDS carrier check (proposal 039 Phase 2, see udscarrier.go): a managed
+//     pod whose Unix socket could never be delivered — an
+//     endpoint.aether.io/uds-socket annotation naming an emptyDir (the removed
+//     carrier) or an undeclared volume, a file name over the AF_UNIX budget, a
+//     csi.aether.io volume without securityContext.fsGroup, or two of them — is
+//     DENIED with a message naming the fix. This is the one thing the webhook
+//     refuses rather than mutates.
 //
 // The webhook is wired with two rules: an objectSelector (aether.io/managed=true
 // pods, in any namespace) and a namespaceSelector (pods in aether.io/managed=true
@@ -101,6 +108,14 @@ func (m *Mutator) Handle(ctx context.Context, req admission.Request) admission.R
 	// Explicit opt-out: a pod in a managed namespace can exclude itself.
 	if v, ok := pod.Labels[aetherlabels.LabelAetherManaged]; ok && v != "true" {
 		return admission.Allowed("pod opted out of mesh management (aether.io/managed!=true)")
+	}
+
+	// UDS delivery on the csi.aether.io carrier (proposal 039 Phase 2): refuse a
+	// pod whose socket can never be delivered, naming the fix.
+	if reason := udsCarrierDenial(pod); reason != "" {
+		m.Log.InfoContext(ctx, "denied pod: UDS carrier", "namespace", req.Namespace, "name", pod.Name,
+			"generateName", pod.GenerateName, "reason", reason)
+		return admission.Denied(reason)
 	}
 
 	changed := false

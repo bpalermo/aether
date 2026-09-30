@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Single-cluster kind e2e for proposal 039 Phase 1: the csi.aether.io CSI node
-# plugin, deployed on its own (udsCsi.enabled=true). Nothing in aether consumes
-# the driver yet (Phase 2 makes it the UDS carrier), so this proves the driver
-# in isolation: registration, publish, refusal, teardown and a plugin roll.
+# plugin (udsCsi.enabled, on by default since Phase 2), proven in isolation:
+# registration, publish, refusal, teardown and a plugin roll. Its use as the UDS
+# carrier (Phase 2) is e2e/uds.sh's job. The test pods here are NOT
+# mesh-managed, so the controller's pod webhook (which would deny the
+# no-fsGroup pod at admission) never sees them and (iii) exercises the plugin's
+# own FailedMount refusal.
 #
 # Assertions (verify):
 #   i.   registration — the kubelet lists csi.aether.io in the node's CSINode.

@@ -139,6 +139,7 @@ go_test(
         "//common/constants/mesh",
         "//common/extensionfilter",
         "//common/serviceref",
+        "//common/udspath",
         "//registry",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",

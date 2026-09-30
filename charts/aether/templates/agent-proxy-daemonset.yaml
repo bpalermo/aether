@@ -268,22 +268,31 @@ spec:
             - name: authz-socket
               mountPath: /run/aether/authz
             {{- end }}
-            {{- if .Values.proxy.udsWorkloads.enabled }}
-            # Kubelet's pod-volumes directory, mounted at the IDENTICAL host path so
-            # the agent's rendered Envoy Pipe addresses need no prefix translation
-            # (proposal 034). It is how the proxy — in the host mount namespace —
-            # reaches a workload's Unix socket inside its own emptyDir.
+            {{- if .Values.udsCsi.enabled }}
+            # The csi.aether.io tmpfs root (proposal 039), mounted at the IDENTICAL
+            # host path so the agent's rendered Envoy Pipe addresses
+            # (<root>/<pod-uid>/<file>) need no prefix translation. It is the
+            # proxy's ONLY view of workload sockets: a directory holding nothing
+            # but the per-pod socket tmpfs mounts — never the kubelet's
+            # pod-volumes tree (and with it every pod's Secret volumes), which
+            # the proxy mounted before 039 Phase 2.
             #
-            # NOT readOnly: connect(2) on an AF_UNIX socket requires write permission
-            # on the socket inode, and a read-only mount fails the connect with EROFS
-            # even for root. (readOnlyRootFilesystem above governs the container
-            # rootfs, not this volume.)
+            # HostToContainer: the per-pod tmpfs mounts appear AFTER this
+            # container starts (the plugin mounts them at NodePublishVolume), and
+            # each arrives as a clone of the host mount, nosymfollow included.
             #
-            # HostToContainer propagation so emptyDirs with medium: Memory — tmpfs
-            # MOUNTS created after this container starts — become visible.
-            - name: kubelet-pods
-              mountPath: /var/lib/kubelet/pods
+            # readOnly: the proxy only ever connect(2)s here, and connect on an
+            # AF_UNIX socket is not a filesystem write — the kernel checks write
+            # PERMISSION on the socket inode (root passes) but never the mount's
+            # read-only flag, which gates only regular files, directories and
+            # symlinks. Verified on kind when 039 Phase 2 landed: delivery works
+            # through this read-only view, and a connect through a read-only
+            # bind of a socket's own directory succeeds. It stops the proxy creating anything in the root
+            # itself; the propagated per-pod mounts keep their own (rw) flags.
+            - name: uds-root
+              mountPath: {{ include "aether.udsCsi.root" . }}
               mountPropagation: HostToContainer
+              readOnly: true
             {{- end }}
         {{- if .Values.proxy.authzSidecar.enabled }}
         # External authorization sidecar (proposal 027): serves
@@ -370,15 +379,13 @@ spec:
           hostPath:
             path: /run/aether
             type: DirectoryOrCreate
-        {{- if .Values.proxy.udsWorkloads.enabled }}
-        # type: Directory (not DirectoryOrCreate): kubelet owns this directory and
-        # it exists on every node that runs pods. Requiring it surfaces a wrong
-        # --kubelet-pods-dir as a FailedMount instead of silently creating an empty
-        # directory whose sockets would never appear.
-        - name: kubelet-pods
+        {{- if .Values.udsCsi.enabled }}
+        # DirectoryOrCreate: the uds-csi DaemonSet creates it too; whichever pod
+        # lands first on a fresh node must not wait for the other.
+        - name: uds-root
           hostPath:
-            path: /var/lib/kubelet/pods
-            type: Directory
+            path: {{ include "aether.udsCsi.root" . }}
+            type: DirectoryOrCreate
         {{- end }}
         {{- if .Values.spire.enabled }}
         - name: workload-socket

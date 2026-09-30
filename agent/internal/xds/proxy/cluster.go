@@ -148,8 +148,9 @@ type AppAddress struct {
 	// agent. Unused when Pipe is set.
 	Netns string
 	// Pipe, when non-empty, is the socket's HOST path (resolved from the
-	// endpoint.aether.io/uds-socket annotation through kubelet's pod-volumes
-	// directory, common/udspath). Pathname sockets are mount-namespace-scoped,
+	// endpoint.aether.io/uds-socket annotation or an EndpointPolicy onto the
+	// pod's csi.aether.io tmpfs, <uds-csi-root>/<pod-UID>/<file>,
+	// common/udspath). Pathname sockets are mount-namespace-scoped,
 	// so the proxy dials it from its own mount namespace; no netns bind exists
 	// or is needed. Every declared port of a UDS pod dials this one socket.
 	Pipe string
