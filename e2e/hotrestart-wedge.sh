@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Kind leg for aether#1050: the hot-restart main-thread deadlock, and proof that
-# the chart's mitigation (proxy.hotRestart.skipParentStats, which passes Envoy
-# --skip-hot-restart-parent-stats) removes it.
+# the fix -- the carried Envoy patch #1060
+# (proxy/bazel/patches/envoy-aether1050-hotrestart-nonblocking-forward.patch) --
+# removes it. proxy.hotRestart.skipParentStats (Envoy
+# --skip-hot-restart-parent-stats) is an off-by-default emergency switch, not
+# the fix; this leg exercises it too.
 #
 # The production symptom: a hot-restart successor whose main thread goes silent
 # right after `starting workers` while the draining parent goes silent right

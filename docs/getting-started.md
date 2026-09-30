@@ -61,9 +61,12 @@ flowchart TB
   its **ServiceAccount name in its namespace** (`<ns>/<sa>`); its SPIFFE ID is
   `spiffe://<trust-domain>/ns/<namespace>/sa/<serviceaccount>`. Pods sharing a
   ServiceAccount (in one namespace) are endpoints of the same service.
-- **Transparent addressing (default).** The CNI redirects managed pods'
-  outbound TCP into the per-pod capture listener and DNATs `:53` to a per-node
-  mesh DNS. Apps dial `http://<svc>.<ns>.<meshDomain>:18081` — or the
+- **Transparent addressing (default).** The CNI diverts managed pods' outbound
+  TCP **and UDP** into the node proxy's per-pod capture listeners with a
+  TPROXY-style mark-and-divert that leaves the IP header intact, so the original
+  destination survives (proposal 038, #947): TCP lands on the capture listener,
+  UDP on a per-VIP listener on 18082. DNS is still a plain DNAT: `:53` goes to a
+  per-node mesh DNS. Apps dial `http://<svc>.<ns>.<meshDomain>:18081` — or the
   generated Kubernetes Service name `<svc>.<ns>.svc.cluster.local:18081` —
   with no client changes. The explicit listener (`127.0.0.1:18081` +
   `Host: <svc>.<ns>.<meshDomain>`) still works everywhere.
@@ -156,6 +159,32 @@ Aether's own defaults already point at where that chart puts the socket
 (`/run/spire/agent/sockets/csi.spiffe.io/broker/broker.sock`); override
 `spire.brokerSocket.hostPath` if your SPIRE install uses a different
 `sockets.hostBasePath`.
+
+**Recommended: shorten SPIRE's sync intervals.** A new pod's SVID reaches the
+node only after its registration entry has been loaded into the SPIRE server's
+entry cache (`cache_reload_interval`) *and* pulled by the node's spire-agent
+(`sync_interval`); both default to 5 s. Every mesh pod waits that long in `Init`,
+because the controller injects the `aether-identity-ready` init container that
+holds the app containers until the SVID exists (#1053/#1055): talos-main measured
+the initial SVID 7.46 s after the subscribe with the defaults. With the
+`spiffe/spire` chart (0.30.2) both knobs sit behind `experimental.enabled`:
+
+```yaml
+spire-agent:
+  experimental:
+    enabled: true
+    syncInterval: 1s          # agent sync_interval (default 5s)
+spire-server:
+  experimental:
+    enabled: true
+    cacheReloadInterval: 1s   # server cache_reload_interval (default 5s)
+```
+
+That bounds the entry-to-node delay to about 2 s instead of about 10 s, at the
+cost of five times the agent→server sync RPCs and server cache reloads; size the
+server's datastore for it on a large cluster. `experimental.enabled: true` also
+renders the chart's other `experimental.*` values (`requirePQKEM`, `featureFlags`
+and, on the server, `eventsBasedCache`), so check they are what you want.
 
 ---
 
@@ -638,7 +667,11 @@ spec:
   `e2e/l4routes.sh` shows the SPIRE shape; `e2e/eastwest-quic.sh` is the
   end-to-end proof (per-source HTTP/3 with the caller's own identity in XFCC,
   and a `QUIC_DNS_SANS=off` negative control), and the runbook's *East-west
-  QUIC* section has the budget and the escape hatch.
+  QUIC* section has the budget and the escape hatch. Two cases stay on h2 by
+  design: a GAMMA rule with a **weighted split** (#961; a rule whose single
+  backendRef is the parent Service rides QUIC like the default route), and any
+  service with an endpoint behind the **east/west waypoint** (019), whose tunnel
+  has no QUIC leg.
 
 ---
 

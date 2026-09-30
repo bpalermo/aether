@@ -1,8 +1,14 @@
 # Proposal 040: Publish to Quay (`quay.io/aethermesh`)
 
-**Status:** Accepted 2026-09-27. Phase 1 (the abstraction, #998) and phase 2
-(the cut-over) are done; phases 3 (talos rollout) and 4 (decommission ghcr)
-follow.
+**Status:** Accepted 2026-09-27. Phases 1 (the abstraction, #998), 2 (the
+cut-over) and 3 (talos-main runs from quay since rev243, 2026-09-27) are done.
+Phase 4 (decommission ghcr) has not started: the repo still carries
+`PROXY_PIN_LEGACY_REFERENCES = ["ghcr.io/bpalermo/aether/aether-proxy"]`
+(`bazel/img/registry.bzl`), the publish-verify sweep's ghcr branch
+(`.github/workflows/publish-verify.yaml`, `scripts/registry-lib.sh`) and its CI
+fixtures, and a `ghcr.io/bpalermo/aether/*` step in
+`docs/observability/profiling-symbols.md`; the remaining mentions are
+migration notes for pre-1.0.0 releases, which stay.
 **Author:** Bruno Palermo
 **Date:** 2026-09-27
 **Related:** #875 / #880 / #925 / #984 / #985 (signing and the publish-verify
@@ -157,7 +163,7 @@ and falls back to the tags; any other non-200 is inconclusive.
      triggers one — whose bump-chart PR rewrites `repository:` with `tag:` and
      `digest:`. Every pin reader accepts `proxy_pin_references()`, and the sweep
      looks a pin up on the registry the pin names.
-3. **talos rollout.**3. **talos rollout.** `helm upgrade` on talos-main from the quay coordinates
+3. **talos rollout.** `helm upgrade` on talos-main from the quay coordinates
    (values from `helm get values -o yaml`, never `--reuse-values`), then an 8h
    soak graded as usual.
 4. **Decommission ghcr.** Once no supported release and no cluster references a

@@ -42,7 +42,8 @@ make format-check  # CI-friendly check (fails on drift)
 - `controller/cmd/controller` — In-cluster Deployment (leader-elected). Serves the validating + pod-mutating admission webhooks and the `MeshConfig`→ConfigMap reconciler.
 - `cni/cmd/cni` — CNI plugin binary (Add/Del/Check/GC/Status).
 - `cni/cmd/cni-install` — Init container that installs the CNI plugin binary and config onto the host.
-- `agent/cmd/proxy-ready` — Exec readiness probe for the `aether-proxy` pod (#673). One flag (`--ready-marker`), stdlib-only; `//agent/cmd/proxy-ready:deps_test` fails the build if it grows a dependency.
+- `agent/cmd/proxy-ready` — Exec readiness probe for the `aether-proxy` pod (#673). One flag (`--ready-marker`), stdlib-only; `//agent/cmd/proxy-ready:deps_test` fails the build if it grows a dependency. Ships in the proxy-supervisor image (since #772), staged by the `install-supervisor` initContainer.
+- `agent/cmd/identity-ready` — The egress identity gate (#1053): the init container the controller's `/mutate` webhook injects first into every mesh pod (#1055); it waits on the pod's own SPIRE Workload API until the pod's SVID exists. Ships in the agent image; `//agent/cmd/identity-ready:deps_test` guards its link set.
 - `agent/cmd/mesh-dns-ready` — Same for the `aether-mesh-dns` pod (#683); bundled in the mesh-dns image, guarded by `//agent/cmd/mesh-dns-ready:deps_test`.
 - `prober/cmd/prober` — Synthetic mesh-availability prober (proposal 013). Own chart (`charts/prober`) + own image; mesh-managed per-node DaemonSet that probes the data plane from the client side and emits `aether_probe_requests_total`.
 
@@ -53,6 +54,16 @@ make format-check  # CI-friendly check (fails on drift)
 - `agent/internal/node` + `controller/internal/nodetaint` — proposal 033 taint lifecycle: the agent removes `aether.io/agent-not-ready`, the controller's leader-elected guard re-arms it.
 - `agent/internal/cniconflist` — re-asserts aether's chained entry in the node's CNI conflist (#645).
 - `registrar/internal/replicator` — leader-elected cross-region etcd mirroring under an origin-heartbeat lease (proposal 006).
+- `agent/internal/xds/cache/quicpairs.go`, `agent/internal/xds/quicdemand`, `agent/internal/xds/server` (`odcds.go`) — east-west QUIC twins: observed (SA, destination) pairs and their persisted `demand_confirmed` (#1076), the per-stream ODCDS subscription ledger (#1036/#1052), and on-demand twin admission (#1033).
+- `agent/internal/xds/ack` — per-resource delta-xDS ACK/NACK tracking (no admin polling).
+- `agent/internal/capture` — projects mesh-Service authorities into the `cap_http` capture route table.
+- `agent/internal/proxy/hotrestart` + `agent/internal/supervisorcmd` — the Envoy hot-restart supervisor and its command (#772; child-silent signal #1058).
+- `agent/internal/gatewaystatus` — Gateway API status writers scoped to aether's `controllerName`.
+- `cni/internal/plugin` — the chained CNI plugin, including the TPROXY capture divert (proposal 038) and the mesh-DNS `:53` DNAT.
+
+**Ports:** 18001 per-pod TCP capture (TPROXY target), 18008 inbound TCP + UDP/QUIC, 18009 east/west waypoint, 18021 edge readiness, 18054 host mesh-DNS, 18081 per-pod outbound HTTP, 18082 L4 TCP + UDP (`common/constants/mesh`, `agent/internal/xds/proxy`).
+
+**Carried Envoy patches:** `proxy/bazel/patches/` (applied by `proxy/MODULE.bazel`; each one listed in `proxy/README.md`).
 
 **Key patterns:**
 - gRPC servers use Unix domain sockets for node-local communication.
