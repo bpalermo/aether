@@ -15,8 +15,9 @@ import (
 
 // Check returns nil iff path exists.
 //
-// Semantics are exactly os.Stat's, unchanged from the pre-#673 supervisor
-// --readiness-check branch this replaced: symlinks are followed (a dangling
+// Semantics are exactly os.Stat's, unchanged from the supervisor's former
+// --readiness-check exec-probe mode this replaced (#673; the flag has since been
+// removed): symlinks are followed (a dangling
 // symlink is NOT ready) and a directory at path IS ready. The supervisor writes
 // a regular file (see hotrestart.Supervisor.setReady), so those shapes never
 // occur in practice; they are pinned here only so the reader stays bug-for-bug

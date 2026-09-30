@@ -341,9 +341,9 @@ agent binary — controller-runtime, client-go, go-control-plane, SPIRE, Gateway
 API, miekg/dns — to fork a child process. It is now its own binary
 (`//agent/cmd/proxy-supervisor`, 15MiB / 24 modules) in its own image
 (`quay.io/aethermesh/proxy-supervisor`), which also means the proxy
-DaemonSet no longer depends on the agent image at all. `agent proxy-supervisor`
-remains as a deprecated alias for one release so a chart predating #772 still
-has a working initContainer against a newer agent image.
+DaemonSet no longer depends on the agent image at all. The `agent
+proxy-supervisor` alias that bridged the split for one release has been removed,
+along with the `/proxy-ready` copy in the agent image that only it read.
 
 Flags (every name and default unchanged by the split — the chart passes them
 literally): `--envoy-path`
@@ -353,7 +353,7 @@ literally): `--envoy-path`
 (repeatable), `--handoff-deadline`/`--admin-unresponsive-deadline` (`0` = defaults),
 `--termination-grace` (`0`), `--shutdown-drain-immediately` (`false`),
 `--admin-address` (`127.0.0.1:9901`), `--install-path`,
-`--install-readiness-path`, `--readiness-check` (deprecated), `--otlp-endpoint`.
+`--install-readiness-path`, `--otlp-endpoint`.
 
 `--termination-grace` is the pod's own `terminationGracePeriodSeconds` (the chart
 passes the same value it sets on the pod spec; `180s` as deployed). The supervisor
@@ -381,17 +381,13 @@ requested `--install-readiness-path` against an image that does not carry one is
 a hard failure, so image skew surfaces in the initContainer rather than as a pod
 that can never become Ready. Since #772 both binaries ship in the
 `proxy-supervisor` image and are built from one commit, so that skew is no longer
-reachable through the supported path — the check stays for the deprecated
-`agent proxy-supervisor` alias, where the source is the agent image.
+reachable through the supported path; the check stays as a guard.
 
-`--readiness-check` is the pre-#673 exec probe and is deprecated: re-execing a
-supervisor binary every 2s per pod spent >=31% of the supervisor container's CPU
-on Go package init alone (which runs before `main()`, so no argv check can avoid
-it) — measured when that binary was the agent's 67MB one.
-The chart now execs the standalone `proxy-ready` binary below instead. The flag
-still works, so a chart predating #673 keeps a probe against a newer image — it is
-marked deprecated in cobra, so using it prints a warning and it no longer appears
-in `--help`.
+The supervisor is not its own readiness probe. The pre-#673 `--readiness-check`
+exec-probe mode (re-execing a supervisor binary every 2s per pod spent >=31% of
+the supervisor container's CPU on Go package init alone — measured when that
+binary was the agent's 67MB one) was deprecated by #673 and has been removed;
+the chart execs the standalone `proxy-ready` binary below.
 
 ### `proxy-ready` (standalone binary — bundled in the proxy-supervisor image, not run from it)
 
@@ -402,8 +398,8 @@ stdlib-only (~1.7MB vs the agent's 67MB) — it imports nothing but
 that ever changes. It ships as an extra layer in the `proxy-supervisor` image (no
 second pull: the `install-supervisor` initContainer, which already runs that
 image, copies it onto the proxy pod's shared volume at
-`/opt/aether/proxy-ready`). It is also still layered into the agent image, for
-the deprecated `agent proxy-supervisor` alias.
+`/opt/aether/proxy-ready`). It is not in the agent image: the copy there
+served only the removed `agent proxy-supervisor` alias.
 
 The probe stays an **exec** probe on the pod-local marker rather than an
 `httpGet`/`tcpSocket`: the proxy DaemonSet is `hostNetwork: true` with
@@ -422,7 +418,7 @@ agent rolls never gap pod DNS. It does **not** share the agent's flag set:
 `--snapshot-path` (`/host/var/lib/aether/registry/mesh-dns/records.json`),
 `--mesh-domain` (`aether.internal`), `--mesh-dns-upstream` (repeatable,
 `host[:port]`; empty = `/etc/resolv.conf`), `--ready-marker`
-(`/run/aether/mesh-dns.ready`), `--readiness-check` (deprecated),
+(`/run/aether/mesh-dns.ready`),
 `--forward-pool-size` (`8`), `--lame-duck-max` (`10s`), `--otlp-endpoint`,
 `--debug`.
 It binds UDP+TCP on the host at port 18054, which the CNI DNATs each managed
@@ -442,13 +438,11 @@ roll before #729. Grade a roll on
 on every node (see [`runbook.md`](./runbook.md) § *Grading the mesh-DNS lame-duck
 handoff across a roll*).
 
-`--readiness-check` is the pre-#683 exec probe and is deprecated: re-execing this
-16.9MB daemon every 15s per pod spent ~10 core-seconds per 25 minutes fleet-wide
-(~3-4% of the container's CPU) on container exec and Go package init alone (which
-runs before `main()`, so no argv check can avoid it). The chart execs the
-standalone `mesh-dns-ready` binary below instead. The flag still works, so a
-chart predating #683 keeps a probe against a newer image — it is marked deprecated
-in cobra, so using it prints a warning and it no longer appears in `--help`.
+The daemon is not its own readiness probe. The pre-#683 `--readiness-check`
+exec-probe mode (re-execing this 16.9MB daemon every 15s per pod spent ~10
+core-seconds per 25 minutes fleet-wide, ~3-4% of the container's CPU, on container
+exec and Go package init alone) was deprecated by #683 and has been removed; the
+chart execs the standalone `mesh-dns-ready` binary below.
 
 `--debug` only raises the log level (Info to Trace); it gates no feature and no
 data-path behaviour. The mesh-DNS forward path logs **nothing per query** at any

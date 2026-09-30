@@ -48,6 +48,9 @@ spec:
             - "--debug={{ .Values.debug }}"
             - "--cluster-name={{ .Values.clusterName }}"
             # Aether system config, inherited from the umbrella global block.
+            # The config-export controller (proposal 026) resolves exported
+            # backends as <svc>.<mesh-domain>, so it must be the agent's domain.
+            - "--mesh-domain={{ .Values.meshDomain }}"
             {{- if .Values.otel.enabled }}
             - "--otel-enabled=true"
             {{- end }}

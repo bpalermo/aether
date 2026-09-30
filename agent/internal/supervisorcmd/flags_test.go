@@ -89,18 +89,15 @@ func TestFlagsCoverTheChartContract(t *testing.T) {
 	t.Logf("chart passes %d supervisor flags: %v", len(names), names)
 }
 
-// TestDeprecatedFlagsStayRegistered guards the backward-compatibility surface.
-//
-// --readiness-check is how a chart predating #673 probes readiness. It is
-// deprecated, not removed: removing it turns a chart/image skew from "a warning
-// in the logs" into "every proxy pod is permanently NotReady", and
-// maxUnavailable:0 then wedges the rollout with no explanation.
-func TestDeprecatedFlagsStayRegistered(t *testing.T) {
+// TestRetiredFlagsGone pins the removal of --readiness-check, the pre-#673 exec
+// readiness probe (deprecated by #673, removed once no supported chart used it).
+// The chart execs the stdlib-only proxy-ready prober instead; re-registering the
+// flag would re-open a path that re-execs this binary every 2s per pod.
+func TestRetiredFlagsGone(t *testing.T) {
 	flags := New("test").Flags()
-
-	f := flags.Lookup("readiness-check")
-	require.NotNil(t, f, "--readiness-check must stay registered for pre-#673 charts")
-	assert.NotEmpty(t, f.Deprecated, "--readiness-check must be marked deprecated so using it warns")
+	for _, name := range []string{"readiness-check"} {
+		assert.Nil(t, flags.Lookup(name), "flag --%s was retired and must not be re-registered", name)
+	}
 }
 
 // findRepoFile locates a repo-relative path from the test's working directory,

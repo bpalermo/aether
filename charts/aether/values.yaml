@@ -76,12 +76,16 @@ otel:
   traceExport: false
 
 # System-wide SPIRE config. `enabled` is the mesh-wide mTLS switch (agent,
-# registrar, and the controller webhook serving cert); the socket paths / trust
-# domain / broker socket are per-component plumbing.
+# registrar, edge and the controller's identity gate); the webhook serving cert
+# is controller.webhook.spire. The Workload API and broker socket paths are
+# per-component plumbing.
 spire:
   enabled: true
-  # Workload API socket path (the csi.spiffe.io mount + socket filename), shared
-  # by agent, registrar and controller. Every component resolves its trust
+  # Workload API socket path, shared by agent, registrar, controller and edge.
+  # Every template mounts the csi.spiffe.io volume at the FIXED directory
+  # /run/secrets/workload-spiffe-uds, so only the socket FILE name within it is
+  # configurable here: a path outside that directory is passed to the binaries
+  # but names nothing they can reach. Every component resolves its trust
   # domain (mTLS peer authorization) from its own SVID over this socket — there
   # is no trustDomain value to configure (retired: it could silently disagree
   # with what SPIRE actually issues).
@@ -332,6 +336,16 @@ agent:
   # talks to an external registry backend and carries no backend credentials.
 
 # CNI installer (init container). Its config is deterministic deploy-time data.
+# The node's CNI directories, as the container runtime / kubelet see them on the
+# HOST. cni-install copies the plugin binary into binDir and chains aether into
+# the active conflist in confDir; the agent's conflist re-assert loop watches
+# confDir. Both are hostPath-mounted at /host<dir> and the containers are told
+# that path. Change them only for a runtime configured with non-standard
+# directories (e.g. k3s's /var/lib/rancher/k3s/agent/etc/cni/net.d).
+cni:
+  binDir: /opt/cni/bin
+  confDir: /etc/cni/net.d
+
 cniInstall:
   image:
     repository: "{@//cni/cmd/cni-install:image_push.repository}"
@@ -367,13 +381,6 @@ cniInstall:
 # `/proxy-ready` prober onto the pod's shared volume. Both staged binaries come
 # out of that one image, built from one commit, so they cannot skew against each
 # other.
-#
-# Until #772 the initContainer ran `agent.image` instead and self-copied the
-# whole agent binary as the supervisor, which made this DaemonSet depend on the
-# agent image and required chart >= 0.92.0 to be paired with a #673-or-later
-# agent image. That coupling is gone. A chart predating #772 still works against
-# a newer agent image (`agent proxy-supervisor` is kept as a deprecated alias for
-# one release), so a `helm rollback` is safe.
 proxy:
   enabled: true
   # External image (built by the //proxy workspace), pinned by proxy-release.yml's
@@ -478,6 +485,14 @@ proxy:
   # above hotRestart.drainTime + 15s or that fallback cannot fit and the supervisor
   # reverts to waiting for the SIGKILL.
   terminationGracePeriodSeconds: 180
+  # Supervisor --shutdown-drain-immediately (#795): on SIGTERM, drain Envoy's
+  # listeners straight away instead of first waiting (bounded by
+  # terminationGracePeriodSeconds, above) for a surge replacement to hot-restart
+  # it. The escape hatch for a deployment where no replacement pod can overlap
+  # this one (docs/configuration.md). LEAVE IT OFF wherever a surge replacement
+  # exists: that wait is what keeps pod delete, node drain, eviction and
+  # preemption hitless.
+  shutdownDrainImmediately: false
   resources:
     requests:
       cpu: 500m
@@ -694,8 +709,10 @@ edge:
       memory: 128Mi
     limits:
       memory: 256Mi
-  # The edge pod is unprivileged (private cgroup namespace), so the cgroup_memory
-  # overload monitor — fatal in the privileged node DaemonSet — works here.
+  # Envoy overload manager on the fixed_heap monitor (edge-configmap.yaml), the
+  # same monitor the node proxy uses. The unprivileged edge pod COULD use
+  # cgroup_memory, but fixed_heap keeps parity and is independent of the cgroup
+  # layout. Keep maxHeapSizeBytes at ~75% of resources.limits.memory.
   overload:
     enabled: true
     maxHeapSizeBytes: 201326592 # 192Mi = 75% of 256Mi
@@ -846,8 +863,11 @@ controller:
     # pod out with the annotation `aether.io/identity-gate: "false"`.
     #
     # Rides the pod-mutating webhook: inert unless namespaceInjection or
-    # injectPodNdots is on, and never rendered with spire.enabled=false (no SVID
-    # would ever come). Default ON.
+    # injectPodNdots renders it. With webhook.spire=true that webhook's caBundle
+    # is patched by the controller whenever it renders (either knob); unpatched,
+    # the apiserver cannot call it and — failurePolicy: Ignore — the gate is
+    # silently skipped. With spire.enabled=false the controller is always passed
+    # --identity-gate=false (no SVID would ever come). Default ON.
     identityGate:
       enabled: true
       # Empty repository = the agent image (agent.image), which carries
