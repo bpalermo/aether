@@ -255,3 +255,59 @@ func (s *Supervisor) checkChildSilent(ctx context.Context, epoch int, reachable 
 		"threshold", childSilentAfter.String(),
 		"adminAddress", s.cfg.AdminAddress)
 }
+
+// Init-aware handoff watchdog (issue #1085).
+//
+// The handoff watchdog exists for one failure: a successor whose main thread
+// is blocked in a hot-restart RPC against a dead parent (e2e 2026-06-10) —
+// admin bound but never accepting, LIVE never reached. It used to count from
+// the fork alone, which also catches a successor that is perfectly healthy
+// but still in init because its xDS server, the node agent, is down: the
+// proxy bootstrap sets initial_fetch_timeout: 0s on CDS and LDS precisely so
+// such a successor WAITS for its first listeners instead of going LIVE empty
+// and draining the parent. Firing on it would SIGTERM an in-pod parent that
+// is serving the node's traffic — trading a bounded wait for an outage.
+//
+// A main thread that is waiting on xDS keeps answering the admin, and
+// adminServerInfo attributes every answer to the epoch that gave it. So the
+// deadline runs from the later of the fork and the successor's last answer at
+// its own epoch: a wedged successor never answers (or stops answering) and
+// still trips it HandoffDeadline later; one that answers is never killed for
+// being slow.
+
+// handoffProgressAt is the moment the handoff watchdog's deadline runs from:
+// the successor's fork, or its admin's last answer at its own epoch if later.
+func (s *Supervisor) handoffProgressAt(epoch int, launched time.Time) time.Time {
+	s.mu.Lock()
+	heard, ok := s.adminHeard[epoch]
+	s.mu.Unlock()
+	if ok && heard.After(launched) {
+		return heard
+	}
+	return launched
+}
+
+// handoffProgressKind names the anchor handoffProgressAt picked, for the
+// watchdog's error.
+func handoffProgressKind(progress, launched time.Time) string {
+	if progress.After(launched) {
+		return "its last admin answer"
+	}
+	return "launch"
+}
+
+// noteHandoffWaitingOnInit logs, once per epoch, a successor that is still
+// not LIVE HandoffDeadline after its fork but has been kept alive because its
+// admin answers: the node agent's xDS is the likely hold-up, and the parent is
+// still serving.
+func (s *Supervisor) noteHandoffWaitingOnInit(ctx context.Context, epoch int, now, launched time.Time) {
+	if s.handoffWaitEpoch == epoch || now.Sub(launched) <= s.handoffDeadline() {
+		return
+	}
+	s.handoffWaitEpoch = epoch
+	s.log.WarnContext(ctx, "hot-restart successor still initializing past the handoff deadline; "+
+		"its admin answers, so it is waiting on xDS (node agent) rather than wedged, and the parent keeps serving",
+		"epoch", epoch,
+		"sinceForkSeconds", now.Sub(launched).Round(100*time.Millisecond).Seconds(),
+		"handoffDeadline", s.handoffDeadline().String())
+}
