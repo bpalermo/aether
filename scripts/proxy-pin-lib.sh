@@ -5,9 +5,9 @@
 # sourced by scripts/verify-published-artifacts.sh and exercised, with no
 # network, by scripts/check-proxy-pin.sh.
 #
-# WHY THE PROXY IS DIFFERENT FROM THE OTHER EIGHT IMAGES
+# WHY THE PROXY IS DIFFERENT FROM THE OTHER NINE IMAGES
 #
-# The eight images in REGISTRY_IMAGE_REPOS are built by publish.yaml on every push
+# The nine images in REGISTRY_IMAGE_REPOS are built by publish.yaml on every push
 # to main and carry a `*-<aether sha>` tag, so "the image for commit X" is a tag
 # lookup. aether-proxy is not: proxy-release.yml builds it only when proxy/
 # changes, tags it with the commit that CHANGED the proxy, and a bot PR pins

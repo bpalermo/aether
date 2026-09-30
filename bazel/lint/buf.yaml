@@ -4,6 +4,22 @@ lint:
     - STANDARD
   except:
     - PACKAGE_DIRECTORY_MATCH
+  # The kubelet plugin-registration API (proposal 039) is a verbatim copy of
+  # k8s.io/kubelet's pluginregistration/v1 api.proto: the kubelet dials it by the
+  # literal gRPC path `/pluginregistration.Registration/<Method>`, so its package,
+  # service and message names are wire contract and cannot follow STANDARD naming.
+  # Scoped to that one file; every other proto stays under the full rule set.
+  ignore_only:
+    PACKAGE_VERSION_SUFFIX:
+      - api/aether/kubelet/pluginregistration/v1/api.proto
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - api/aether/kubelet/pluginregistration/v1/api.proto
+    RPC_REQUEST_STANDARD_NAME:
+      - api/aether/kubelet/pluginregistration/v1/api.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - api/aether/kubelet/pluginregistration/v1/api.proto
+    SERVICE_SUFFIX:
+      - api/aether/kubelet/pluginregistration/v1/api.proto
 breaking:
   use:
     - PACKAGE

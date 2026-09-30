@@ -506,7 +506,7 @@ printf '%s\n' present-tag >"$FAKE/tags"
 if env -u REGISTRY_HOST bash -c '
 	eval "$1"
 	. scripts/ghcr-lib.sh
-	ghcr_tag_exists "$2" present-tag fake && [ "${#GHCR_IMAGE_REPOS[@]}" -eq 8 ] &&
+	ghcr_tag_exists "$2" present-tag fake && [ "${#GHCR_IMAGE_REPOS[@]}" -eq 9 ] &&
 		[ "${GHCR_IMAGE_REPOS[0]}" = "$(scripts/image-registry.sh repo agent)" ]
 ' _ "$fake_curl" "$repo" >/dev/null 2>&1; then
 	ok "scripts/ghcr-lib.sh shim: ghcr_* names and GHCR_IMAGE_REPOS still resolve"

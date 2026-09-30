@@ -119,6 +119,7 @@ use_repo(
     "build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go",
     "build_buf_go_protovalidate",
     "com_github_cncf_xds_go",
+    "com_github_container_storage_interface_spec",
     "com_github_containernetworking_cni",
     "com_github_envoyproxy_go_control_plane",
     "com_github_envoyproxy_go_control_plane_envoy",

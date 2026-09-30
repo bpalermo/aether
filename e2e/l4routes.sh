@@ -211,7 +211,7 @@ GWAPI_CHANNEL="experimental-install.yaml"
 SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.30.2}"
 SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.6.1}"
 SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
-IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller l4echo)
+IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi l4echo)
 # The ETCD registry backend, not the chart-default kubernetes one — see the
 # second block in the header. etcd runs as a plain docker container on kind's
 # network, exactly as the multicluster harnesses run theirs.
@@ -311,7 +311,7 @@ build_images() {
 	log "building + loading aether images (incl. the l4echo test backend)"
 	local t
 	for t in //agent/cmd/agent //agent/cmd/mesh-dns //agent/cmd/proxy-supervisor \
-		//cni/cmd/cni-install //registrar/cmd/registrar //controller/cmd/controller \
+		//cni/cmd/cni-install //registrar/cmd/registrar //controller/cmd/controller //agent/cmd/uds-csi \
 		//e2e/l4echo; do
 		(cd "$REPO_ROOT" && bazel run "$t:image_load" >/dev/null 2>&1) || die "image build failed for $t"
 	done
@@ -511,7 +511,7 @@ install_aether() {
 		--set "registrar.etcd.endpoints[0]=$etcd" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
-		$(img registrar registrar) $(img controller controller) \
+		$(img registrar registrar) $(img controller controller) $(img udsCsi uds-csi) \
 		--set proxy.image.pullPolicy=IfNotPresent \
 		--timeout 6m >/dev/null || die "aether install failed"
 	rm -rf "$(dirname "$charts")"

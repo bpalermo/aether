@@ -6,6 +6,7 @@ require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.12-20260825204119-511051f7f437.2 // bazel-only: referenced from BUILD/.bzl, no Go import
 	buf.build/go/protovalidate v1.4.0
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2
+	github.com/container-storage-interface/spec v1.13.0
 	github.com/containernetworking/cni v1.3.1
 	github.com/envoyproxy/go-control-plane v0.14.0
 	github.com/envoyproxy/go-control-plane/envoy v1.39.0
