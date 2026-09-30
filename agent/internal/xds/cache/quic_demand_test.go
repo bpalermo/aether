@@ -318,6 +318,9 @@ func TestQUICDemandPrunesPersistedPairsNotFetchedWithinTheWindow(t *testing.T) {
 	observeQUIC(t, c, "demo/echo", "demo/source-a", "demo/source-b", "demo/source-c")
 	c.FlushObservedUpstreams()
 	require.Len(t, readStore(t, path).GetQuicPairs(), 3)
+	// The #1032 fan-out carried no evidence of use: a store written before
+	// #1073, whose pairs have no demand_confirmed bit.
+	stripDemandConfirmed(t, path)
 
 	restarted := newQUICDemandCache(t, path)
 	ctx := context.Background()
@@ -364,6 +367,7 @@ func TestQUICDemandFetchWindowZeroDisablesThePrune(t *testing.T) {
 	c := newQUICDemandCache(t, path)
 	observeQUIC(t, c, "demo/echo", "demo/source-a")
 	c.FlushObservedUpstreams()
+	stripDemandConfirmed(t, path)
 
 	restarted := newQUICDemandCache(t, path)
 	restarted.SetQUICPairFetchWindow(0)

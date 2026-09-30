@@ -159,9 +159,11 @@ type AgentConfig struct {
 	// remaining capture knobs are the per-pod capture.aether.io/* annotations
 	// and the CNI's --capture-redirect-all-default.
 	EastWestWaypoint bool
-	// EastWestQUICPairFetchWindow bounds how long a PERSISTED QUIC pair may go
-	// without an on-demand fetch of its twin after the agent starts before it
-	// is pruned (issue #1033). <= 0 disables the prune.
+	// EastWestQUICPairFetchWindow bounds how long after the agent starts a
+	// PERSISTED QUIC pair with no evidence of use -- never fetched on demand,
+	// subscribed, or re-stated as held by the proxy, in this or any earlier
+	// agent process -- is kept before it is pruned (issues #1033, #1073).
+	// <= 0 disables the prune.
 	EastWestQUICPairFetchWindow time.Duration
 	// EastWestQUICIdleTimeout is the idle timeout of every `quic:` twin's
 	// connection pool (aether#1054). Must be > 0; the chart also enforces

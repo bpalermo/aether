@@ -276,7 +276,7 @@ Knobs: `SOAK_NEWSA=0` (opt out), `SOAK_NEWSA_OFFSETS`, `SOAK_NEWSA_SECONDS`,
 `SOAK_NEWSA_RPS`, `SOAK_NEWSA_TARGETS` (`name=url …`), `SOAK_NEWSA_UPSTREAMS`,
 `SOAK_NEWSA_IMAGE`. `churn.sh --new-sa-once` runs one step now and exits (step 0d).
 
-**Gate.** Both must hold, at T0+8h (and gates 3 and 4 below):
+**Gate.** Both must hold, at T0+8h (and gates 3, 4 and 5 below):
 
 ```promql
 # 1. no twin ever waited out its initial fetch (the #1008 signature)
@@ -342,15 +342,17 @@ nodes — `quic_clusters=24 observed_pairs=24 local_identities=12`, 18/18/9, 28/
 20/20/10, 20/20/10 — because the fresh agent admitted every twin the proxy still held
 from the up-front fan-out. On a node carried over from that state, `P` falls to the
 traffic pairs one `--east-west-quic-pair-fetch-window` (1 h) after the new agent
-starts, with one `pruned persisted east-west QUIC pairs with no on-demand fetch since
-agent start count=N` line per node; grade gate 3 after that line, not before.
+starts, with one `pruned persisted east-west QUIC pairs … count=N` line per node
+(`with no on-demand fetch since agent start` before #1073, `with no evidence of use`
+since); grade gate 3 after that line, not before. On a node with no such legacy state
+the line must not appear at all: see gate 5.
 
 ```bash
 # per agent pod, the latest fan-out line (N == P and P << I*S) and the prune line
 for p in $(kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent -o name); do
   echo "$p"
   kubectl -n aether logs "$p" -c agent | grep 'east-west QUIC fan-out' | tail -1
-  kubectl -n aether logs "$p" -c agent | grep 'no on-demand fetch since agent start'
+  kubectl -n aether logs "$p" -c agent | grep 'pruned persisted east-west QUIC pairs'
 done
 ```
 
@@ -393,6 +395,50 @@ live red reading is `//test/mtlspool`
 `TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control`: `status=503
 … in 2.000099268s`, with no CDS request reaching the control plane. Troubleshoot it
 with the runbook, "Stranded twin: 503 NC at 2 s for a source that came back (#1036)".
+
+**Gate 5 (#1073): the fetch-window prune never removes a twin in use.** The first
+proxy roll (T0+60) moves every twin onto the wildcard: the new generation receives it
+with no fetch and no subscription. The agent rolls that follow (T0+72, and the TRIPLE
+at T0+300) re-state those twins on a fresh stream as **held**. Before #1073 the agent
+counted only fetches as use, so exactly one `--east-west-quic-pair-fetch-window` (1 h)
+after each agent roll every agent pruned the twins it was serving. That produced
+about 200 × `503 NC` per burst fleet-wide, and on one node an Envoy SIGBUS (#1074).
+That is the red reading: #979 proving soak, 23:37Z and 03:25Z. Since #1073 a held
+twin confirms its pair, so for each agent generation, both of these must hold:
+
+- **0 prune lines for pairs in use.** A #1073 build carrying no pre-#1073 state
+  logs no `pruned persisted east-west QUIC pairs` line at all. On a run whose store
+  predates #1073, a line is allowed only as the one-time drain of pairs the proxy
+  neither holds nor fetches. It must name no pair whose twin carried traffic in the
+  preceding hour, and no `observed east-west QUIC pair (ODCDS)` re-admission of a
+  pruned pair may follow it. A re-admission right after the prune line is the #1073
+  signature.
+- **0 `503 NC` outside first use.** An `NC` on a QUIC destination is allowed only
+  as a pair's first request: an `observed east-west QUIC pair (ODCDS); building its twin`
+  line for that twin on that node, within the same second. The windows to read are
+  one hour after each agent roll (T0+132 and T0+360, ±2 min). Those minutes must
+  read zero.
+
+```bash
+# per agent pod: the fresh-stream re-statement (held_served = twins confirmed by
+# being held), any confirmation line, and any prune line
+for p in $(kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent -o name); do
+  echo "$p"
+  kubectl -n aether logs "$p" -c agent | grep -E 'fresh xDS stream re-stated QUIC twins|confirmed east-west QUIC pairs the proxy holds|pruned persisted east-west QUIC pairs|observed east-west QUIC pair \(ODCDS\)'
+done
+```
+
+```logsql
+# 503 NC on the QUIC destinations, in the hour-after-agent-roll windows
+log_name:aether_access_logs AND reporter:source AND response_flags:NC
+  | stats by (node_name, authority, _time:1m) count()
+```
+
+**The gate is not vacuous only if** the agent's fresh-stream line after each roll reads
+`held_only=H held_served=S` with `S > 0` on the nodes whose twins carry load. In other
+words, the proxy really did hold twins without subscribing to them. If `S` is 0
+everywhere, the run never built the #1073 precondition (no proxy roll before the agent
+roll), and the gate proves nothing: say so in the grade.
 
 **Negative control — the gate can fail.** rev242 (pre-#1012) *is* the red reading:
 `envoy_cluster_init_fetch_timeout_total{aether_cluster="aether-test/svc-{1,2}@aether-test/default"}`
@@ -552,6 +598,9 @@ the pod exists, and after that it cannot be placed.
 - **The first proxy roll and the SHRINK are graded as their own episodes.** Attribute every non-success to its bracketing step from the RAW counter
   series at 30–60s resolution: `x - x offset 8h` silently drops an error series that did
   not exist at the offset, and the unseeded ones are exactly the ones that matter.
+- **The fetch-window gate (#1073)** — no `pruned persisted east-west QUIC pairs` line
+  removes a pair in use, and zero `503 NC` outside first use in the hour after each
+  agent roll. See gate 5 under "The new-ServiceAccount step".
 - **The new-ServiceAccount gate (#1014)** — `init_fetch_timeout` on `@` clusters and
   zero `503/NC` for `user_agent:aether-soak-newsa`. See "The new-ServiceAccount step".
 - **The L4 gates (#1023)** — `ssl_fail_verify_san` on the `tcp_` keys is zero outside

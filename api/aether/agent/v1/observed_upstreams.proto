@@ -73,4 +73,17 @@ message ObservedQUICPair {
 
   // observed_at is when the pair was first recorded. Informational.
   google.protobuf.Timestamp observed_at = 3;
+
+  // demand_confirmed is set once some agent generation saw evidence that the
+  // node proxy uses the pair's twin (issue #1073): an on-demand fetch, an
+  // on-demand subscription re-stated on a fresh xDS stream, or the twin HELD by
+  // the proxy and re-stated on a fresh stream while the agent served it. The
+  // agent cannot see traffic, and a twin the proxy already holds is never
+  // fetched again, so a confirmed pair is exempt from the post-start
+  // fetch-window prune (--east-west-quic-pair-fetch-window) for good: it is
+  // pruned only on removal evidence, like a pair first used in the running
+  // process. Unset on pairs written before #1073 and on the #1032 up-front
+  // fan-out, which the window prune still drains. Only meaningful on
+  // quic_pairs; dormant pairs never carry it.
+  bool demand_confirmed = 4;
 }

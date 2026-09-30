@@ -39,6 +39,7 @@ go_test(
         "odcds_test.go",
         "quic_first_use_test.go",
         "quic_generation_test.go",
+        "quic_held_prune_test.go",
         "quic_restate_test.go",
         "refresh_identity_test.go",
         "refresh_test.go",
@@ -51,6 +52,7 @@ go_test(
         "//agent/internal/xds/proxy",
         "//agent/internal/xds/xdsconst",
         "//agent/storage",
+        "//api/aether/agent/v1:agent",
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//common/constants/mesh",
@@ -77,5 +79,6 @@ go_test(
         "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//status",
         "@org_golang_google_grpc//test/bufconn",
+        "@org_golang_google_protobuf//encoding/protojson",
     ],
 )
