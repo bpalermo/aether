@@ -17,11 +17,15 @@ import (
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	commonlog "aethermesh.dev/common/log"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 // CaptureTCPService describes a non-HTTP mesh Service that needs a per-ClusterIP
@@ -78,8 +82,28 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Service{}, builder.WithPredicates(meshService)).
+		WatchesRawSource(source.Channel(initialProjection(), &handler.EnqueueRequestForObject{})).
 		Named("capture").
 		Complete(r)
+}
+
+// initialProjection returns a source holding exactly one event, so the
+// reconciler projects once after its cache syncs even when there is no mesh
+// Service to trigger it (#1094).
+//
+// The xDS server holds its first serve until the sink has seen one projection
+// (cache.SnapshotCache.CaptureProjected), because the projection defines the
+// capture listener's TCP chains. A node in a mesh with no Services would
+// otherwise never project and would sit out the whole hold. Going through the
+// controller's own workqueue, rather than calling Reconcile from a side
+// goroutine, keeps every projection serialized: a second concurrent re-list
+// could finish last with an older view.
+//
+// Reconcile ignores the request, so the object only has to be a valid key.
+func initialProjection() <-chan event.GenericEvent {
+	ch := make(chan event.GenericEvent, 1)
+	ch <- event.GenericEvent{Object: &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "aether-initial-projection"}}}
+	return ch
 }
 
 // isHTTPAppProtocol reports whether the annotation value represents an HTTP-family
