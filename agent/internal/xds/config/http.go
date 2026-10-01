@@ -55,7 +55,7 @@ const DefaultQUICTwinIdleTimeout = 8 * time.Second
 // granularity), and QuicIdleNetworkDetector closes the connection
 // QUICTwinNetworkIdleTimeout after the first ack-eliciting packet sent since
 // the peer was last heard from. A dead peer is therefore detected within
-// interval + 1 s + idle (<= 6 s) of its last packet; a live one ACKs the PING
+// interval + 1 s + idle (<= 10 s) of its last packet; a live one ACKs the PING
 // and is never touched, however slow its application is. That is why this is
 // transport liveness and not a per-try timeout: it fails what is dead, never
 // what is merely slow, and it lives on the twin CLUSTER, not on the route
@@ -68,16 +68,43 @@ const DefaultQUICTwinIdleTimeout = 8 * time.Second
 // GET and a POST alike are never replayed.
 //
 // The idle timeout is negotiated as min(client, server), so the destination
-// also closes an idle twin connection after QUICTwinNetworkIdleTimeout. That
-// caps the pool idle (DefaultQUICTwinIdleTimeout) for a connection with no
-// open stream -- keep-alive PINGs only run while a stream is open -- which
-// can only shorten how long an idle connection outlives a destination
-// hot-restart parent (aether#1054). The client's deadline is always the
-// earlier one (the server last heard the client's ACK of its final packet),
-// so the client never sends into a connection the server already closed.
+// also closes an idle twin connection after QUICTwinNetworkIdleTimeout.
+// Keep-alive PINGs only run while a stream is open, so for a connection with
+// no open stream this is a second idle timeout next to the pool's
+// (DefaultQUICTwinIdleTimeout); at equal values it costs no extra handshake.
+// The client's deadline is always the earlier one (the server last heard the
+// client's ACK of its final packet), so the client never sends into a
+// connection the server already closed.
+//
+// WHY 8 s AND NOT LESS (aether#1093). The idle deadline cannot tell a dead
+// peer from a peer, or a local worker, that is merely not being scheduled,
+// and talos-main has recurring node-local stalls of Envoy worker threads
+// (requests delayed 1-3.3 s, episodes of 5-7 s, outside rolls too; #1093).
+//   - A DESTINATION worker stalled for >= the idle timeout cannot ACK the
+//     PINGs, so every in-flight twin request to it fails 503 where today it
+//     completes late.
+//   - A SOURCE worker stalled for >= the idle timeout wakes with the idle
+//     alarm expired. That is safe when the peer's packets are queued in the
+//     socket: libevent activates fd events (event.c:2072, evsel->dispatch)
+//     before expired timers (event.c:2091, timeout_process) in one FIFO
+//     priority, Envoy stamps a read packet with the time it is READ
+//     (network/utility.cc:599, :674), not when it arrived, so
+//     QuicIdleNetworkDetector::OnPacketReceived pushes the deadline past now,
+//     and re-arming the alarm removes its stale activation from the active
+//     list (event.c:2796-2810). It is NOT safe when nothing is queued: a
+//     request to a live but slow (silent) application, whose last ACK
+//     predates the stall, is idled out, because QuicIdleNetworkDetector::OnAlarm
+//     closes without re-checking the deadline (quic_idle_network_detector.cc:
+//     28-30; QuicAlarm::Fire, quic_alarm.cc:82-93, does not either).
+//
+// So the timeout must exceed the longest stall we expect: 8 s, equal to the
+// pool idle. The soak's failure COUNT is unchanged by any value (those
+// requests were delivered and are not retryable); this only shortens the
+// hang, and must not buy that with new 503s during stalls. Tighten once
+// #1093 is fixed.
 const (
 	QUICTwinKeepaliveInterval  = 1 * time.Second
-	QUICTwinNetworkIdleTimeout = 4 * time.Second
+	QUICTwinNetworkIdleTimeout = 8 * time.Second
 )
 
 // QUICTwinTransportOptions is the QuicProtocolOptions of every HTTP/3 twin:

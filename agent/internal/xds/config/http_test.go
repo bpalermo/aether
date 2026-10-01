@@ -195,6 +195,12 @@ func TestHttp3ProtocolOptionsDetectADeadPeer(t *testing.T) {
 	if bound := QUICTwinKeepaliveInterval + time.Second + QUICTwinNetworkIdleTimeout; bound >= 15*time.Second {
 		t.Errorf("dead-peer bound %v does not beat the 15 s route timeout", bound)
 	}
+	// aether#1093: worker stalls of 5-7 s are observed; an idle deadline at
+	// or below that idles out live peers. Never below the pool idle either,
+	// or idle pairs pay an extra handshake.
+	if QUICTwinNetworkIdleTimeout < 8*time.Second || QUICTwinNetworkIdleTimeout < DefaultQUICTwinIdleTimeout {
+		t.Errorf("QUICTwinNetworkIdleTimeout %v is below the #1093 stall margin (8 s) or the pool idle %v", QUICTwinNetworkIdleTimeout, DefaultQUICTwinIdleTimeout)
+	}
 	for name, po := range map[string]interface {
 		GetExplicitHttpConfig() *httpv3.HttpProtocolOptions_ExplicitHttpConfig
 	}{"h1": Http1ProtocolOptions(), "h2": Http2ProtocolOptions()} {

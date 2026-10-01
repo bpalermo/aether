@@ -39,8 +39,8 @@
 #                  and every id the client saw 200 for appears exactly once.
 #                  A retried request would show up on the second replica.
 #
-# The bound (DP_BOUND, default 7.5 s): keep-alive 1 s + QUICHE's 1 s ping alarm
-# granularity + idle_network_timeout 4 s = 6 s after the peer's last packet,
+# The bound (DP_BOUND, default 11.5 s): keep-alive 1 s + QUICHE's 1 s ping alarm
+# granularity + idle_network_timeout 8 s = 10 s after the peer's last packet,
 # plus scheduling slack (config.QUICTwinKeepaliveInterval,
 # config.QUICTwinNetworkIdleTimeout).
 #
@@ -61,7 +61,7 @@ export EWQ_WORKER=1
 . "$HERE/eastwest-quic.sh"
 
 DP_EXPECT="${DP_EXPECT:-green}"
-DP_BOUND="${DP_BOUND:-7.5}"
+DP_BOUND="${DP_BOUND:-11.5}"
 DP_SECONDS="${DP_SECONDS:-15}"
 # Request ids carry the run so a pod that outlives one run (the survivor) never
 # counts a previous run's ids as replays.

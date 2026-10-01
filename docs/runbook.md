@@ -1969,10 +1969,11 @@ outlasts the 15 s parent-shutdown window.
   the idle timeout on the `quic:` twins only; h1/h2 keep 30 s. It closes the connections
   that were idle when the drain started, before the parent exits. The chart refuses to
   render unless `eastWestQuicIdleTimeout + 5s < proxy.hotRestart.parentShutdownTime`, so
-  lowering the parent-shutdown time needs the idle timeout lowered with it. Since #1087
-  the QUIC transport's own `idle_network_timeout` (4 s, negotiated to the minimum on both
-  ends) closes a twin connection with no open stream after 4 s anyway, so a pair idle
-  for more than 4 s pays one extra QUIC handshake; this flag matters only below that.
+  lowering the parent-shutdown time needs the idle timeout lowered with it. The cost is
+  one extra QUIC handshake for a (source, destination) pair that sits idle between 8 s
+  and 30 s. Since #1087 the QUIC transport's own `idle_network_timeout` (8 s, negotiated
+  to the minimum on both ends) also closes a twin connection with no open stream after
+  8 s, so raising this flag above 8 s no longer lengthens reuse.
 
 A request in flight at the parent's exit still dies, as it does on h2. The soak gate is
 in `e2e/soak/README.md`, "The h3 stateless-reset gate (#1054)"; the kind leg is
@@ -1995,10 +1996,14 @@ won. h2 has the same exposure for an ACKed request (no TCP keepalive or HTTP/2 P
 configured); the h2 base is not changed by #1087.
 
 Since #1087 every twin carries `quic_protocol_options` with
-`connection_keepalive.max_interval: 1s` and `idle_network_timeout: 4s`. While a request
+`connection_keepalive.max_interval: 1s` and `idle_network_timeout: 8s`. While a request
 stream is open the source PINGs after 1 s of silence; a live destination ACKs it, however
-slow its application is, and a dead one is closed 4 s after the first unanswered PING.
-The bound is about 6 s after the destination's last packet. What you see now is a
+slow its application is, and a dead one is closed 8 s after the first unanswered PING.
+The bound is about 10 s after the destination's last packet (9 s measured on kind).
+It is 8 s and not shorter because of the #1093 node-local worker stalls (5–7 s
+episodes): an idle deadline inside a stall would fail live requests, and the soak's
+failure count is the same either way (those requests were delivered, so they are not
+retryable), so only the hang gets shorter. Tighten it once #1093 is fixed. What you see now is a
 `503 UC` with `response_code_details` starting
 `upstream_reset_before_response_started{connection_termination` and mentioning
 `QUIC_NETWORK_IDLE_TIMEOUT`, well under 15 s.

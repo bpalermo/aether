@@ -1212,8 +1212,12 @@ func TestQUICUpstreamsDetectADeadPeer(t *testing.T) {
 	// The bound the PR states: the first PING leaves within keepalive + 1 s
 	// (QUICHE arms the keep-alive alarm with 1 s granularity) of the peer's
 	// last packet, and the idle deadline is idle_network_timeout after it.
-	if bound := wantKeepalive + time.Second + wantIdle; bound > 6*time.Second {
-		t.Errorf("dead-peer bound %v exceeds 6 s", bound)
+	if bound := wantKeepalive + time.Second + wantIdle; bound > 10*time.Second {
+		t.Errorf("dead-peer bound %v exceeds 10 s", bound)
+	}
+	// aether#1093: never at or below the 5-7 s worker stalls seen on talos-main.
+	if wantIdle < 8*time.Second {
+		t.Errorf("idle_network_timeout %v is inside the #1093 stall range", wantIdle)
 	}
 
 	// The route the twins are selected on: only pre-request conditions.
