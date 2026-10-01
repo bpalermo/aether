@@ -90,6 +90,10 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 	// The east-west QUIC fan-out inputs, snapshotted BEFORE clusterMu; their
 	// own locks (depMu, localMu) never nest inside it (see mtls.go's lock order).
 	quic := c.quicFanoutSnapshot()
+	// One derived-object generation per snapshot (#1115, derivedmemo.go).
+	c.derived.rotate()
+	quic.aliasCLA = c.derived.aliasCLA
+	quic.twinCluster = c.derived.twinCluster
 
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
@@ -138,7 +142,7 @@ func (c *SnapshotCache) appendEntryCLAsLocked(clas []types.Resource, entry clust
 		clas = append(clas, entry.loadAssignment)
 	}
 	if entry.bareEDSAlias && entry.cluster != nil {
-		if cla := proxy.LoadAssignmentAlias(c.bareServiceCLALocked(entry.service), edsServiceName(entry.cluster)); cla != nil {
+		if cla := c.derived.aliasCLA(c.bareServiceCLALocked(entry.service), edsServiceName(entry.cluster)); cla != nil {
 			clas = append(clas, cla)
 		}
 	}
@@ -285,9 +289,15 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	prev := c.clusters
 	c.clusters = make(map[string]clusterEntry, len(deps))
 	nodeSubsetKeys := make(map[string]struct{})
-	c.buildHTTPClustersLocked(ctx, deps, serviceEndpoints, gammaRoutes, chainFilters, localRegion, localZone, waypoint, nodeSubsetKeys)
-	c.buildTCPClustersLocked(ctx, deps, tcpServiceEndpoints, localRegion, localZone, waypoint)
-	c.buildUDPClustersLocked(ctx, deps, udpServiceEndpoints, localRegion, localZone, waypoint)
+	// A service whose builder inputs did not change keeps the entries -- the
+	// very proto objects -- of the previous refresh, so the snapshot's version
+	// memo does not re-marshal and re-hash them (#1115, registryreuse.go).
+	in := reuseInputs{localRegion: localRegion, localZone: localZone, waypoint: waypoint}
+	reuse := c.beginRegistryReuseLocked()
+	c.buildHTTPClustersLocked(deps, serviceEndpoints, gammaRoutes, chainFilters, in, nodeSubsetKeys, prev, reuse)
+	c.buildTCPClustersLocked(deps, tcpServiceEndpoints, in, prev, reuse)
+	c.buildUDPClustersLocked(ctx, deps, udpServiceEndpoints, in, prev, reuse)
+	c.commitRegistryReuseLocked(reuse)
 	c.retainAbsentClustersLocked(ctx, prev, deps)
 	// Precompute each entry's mTLS-injected cluster + SAN URIs (issue #537) so
 	// snapshot generation only reads the cached protos. Covers the freshly
@@ -297,6 +307,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// Counted under the lock: the log below used to read len(c.clusters)
 	// after Unlock, racing a concurrent recomputeMTLSClusters (AddPod).
 	loaded := len(c.clusters)
+	reusedN, builtN := c.registryReuse.reused, c.registryReuse.built
 	c.clusterMu.Unlock()
 
 	// Publish the node-wide subset-key union as the shared ECDS mapping.
@@ -326,7 +337,8 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	}
 	c.refreshCaptureTCPPorts(derived, primary)
 
-	c.log.DebugContext(ctx, "loaded clusters from registry", "count", loaded)
+	c.log.DebugContext(ctx, "loaded clusters from registry", "count", loaded,
+		"servicesReused", reusedN, "servicesBuilt", builtN)
 
 	return c.generateClusterSnapshot(ctx)
 }
@@ -390,8 +402,9 @@ func coldFillTCPEndpoints(ctx context.Context, log interface {
 }
 
 // buildHTTPClustersLocked populates c.clusters with HTTP service entries from
-// serviceEndpoints. Caller must hold clusterMu.
-func (c *SnapshotCache) buildHTTPClustersLocked(ctx context.Context, deps map[string]struct{}, serviceEndpoints map[string][]*registryv1.ServiceEndpoint, gammaRoutes map[string][]proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter, localRegion, localZone string, waypoint proxy.WaypointRewrite, nodeSubsetKeys map[string]struct{}) {
+// serviceEndpoints, reusing a service's previous entries when its inputs are
+// unchanged (#1115). Caller must hold clusterMu.
+func (c *SnapshotCache) buildHTTPClustersLocked(deps map[string]struct{}, serviceEndpoints map[string][]*registryv1.ServiceEndpoint, gammaRoutes map[string][]proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter, in reuseInputs, nodeSubsetKeys map[string]struct{}, prev map[string]clusterEntry, reuse map[string]reuseRecord) {
 	for serviceName, endpoints := range serviceEndpoints {
 		// Demand scoping: only services in the node dependency set are
 		// distributed to this node's proxy. Everything else stays in the
@@ -402,13 +415,48 @@ func (c *SnapshotCache) buildHTTPClustersLocked(ctx context.Context, deps map[st
 		if len(endpoints) == 0 {
 			continue
 		}
-		c.buildHTTPServiceEntryLocked(serviceName, endpoints, gammaRoutes, chainFilters, localRegion, localZone, waypoint, nodeSubsetKeys)
+		build := func(dst map[string]clusterEntry, subsetKeys map[string]struct{}) {
+			c.buildHTTPServiceEntryLocked(dst, serviceName, endpoints, gammaRoutes, chainFilters, in, subsetKeys)
+		}
+		refresh := func(names []string) {
+			c.refreshReusedVhostsLocked(names, serviceName, endpoints, gammaRoutes, chainFilters)
+		}
+		keys, _ := c.reuseOrBuildLocked(reusePassHTTP, serviceName, endpoints, false, in, prev, reuse, build, refresh)
+		for _, k := range keys {
+			nodeSubsetKeys[k] = struct{}{}
+		}
 	}
 }
 
-// buildHTTPServiceEntryLocked builds and stores the cluster entries for one HTTP
-// service (default port cluster + per-non-default-port clusters). Caller must hold clusterMu.
-func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoints []*registryv1.ServiceEndpoint, gammaRoutes map[string][]proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter, localRegion, localZone string, waypoint proxy.WaypointRewrite, nodeSubsetKeys map[string]struct{}) {
+// refreshReusedVhostsLocked rebuilds the outbound vhosts of a service's reused
+// HTTP entries from the CURRENT GAMMA rules and chain filters, which are not
+// part of the reuse key (#1115): a vhost is not an xDS resource of its own
+// (it is embedded in out_http, which every snapshot rebuilds), so rebuilding it
+// costs no version and keeps it exact. The default entry is keyed by the bare
+// service name; every other entry carrying a vhost is a per-port one, keyed by
+// its cluster name. Port aliases carry none. Caller must hold clusterMu.
+func (c *SnapshotCache) refreshReusedVhostsLocked(names []string, serviceName string, endpoints []*registryv1.ServiceEndpoint, gammaRoutes map[string][]proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter) {
+	fqdn := proxy.ServiceClusterName(serviceName, c.meshDomain)
+	for _, name := range names {
+		e := c.clusters[name]
+		if e.vhost == nil {
+			continue
+		}
+		if name == serviceName {
+			e.vhost = outboundVhostWithChainFilter(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, endpoints[0].GetPort())}, gammaRoutes[serviceName], chainFilters, serviceName)
+		} else {
+			e.vhost = outboundPortVhostWithChainFilter(name, chainFilters, serviceName)
+		}
+		c.clusters[name] = e
+	}
+}
+
+// buildHTTPServiceEntryLocked builds the cluster entries for one HTTP service
+// (default port cluster + per-non-default-port clusters + port aliases) into
+// dst. Every input it reads is either in the #1115 reuse key (registryreuse.go)
+// or re-derived on reuse (the vhosts); keep it that way when adding one. Caller
+// must hold clusterMu.
+func (c *SnapshotCache) buildHTTPServiceEntryLocked(dst map[string]clusterEntry, serviceName string, endpoints []*registryv1.ServiceEndpoint, gammaRoutes map[string][]proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter, in reuseInputs, nodeSubsetKeys map[string]struct{}) {
 	// The outbound service cluster speaks per-source mTLS HTTP/2 to each
 	// destination pod's mesh inbound (pod_ip:18008). The per-source mTLS transport
 	// socket is precomputed into entry.mtlsCluster below (recomputeMTLSClustersLocked).
@@ -422,9 +470,9 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 	// one service share the primary; take the first.
 	defaultPort := endpoints[0].GetPort()
 
-	defaultCla, defaultEpMap, buckets := buildHTTPEndpointBuckets(serviceName, endpoints, localRegion, localZone, waypoint, defaultPort)
+	defaultCla, defaultEpMap, buckets := buildHTTPEndpointBuckets(serviceName, endpoints, in.localRegion, in.localZone, in.waypoint, defaultPort)
 
-	c.clusters[serviceName] = clusterEntry{
+	dst[serviceName] = clusterEntry{
 		cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys),
 		loadAssignment: defaultCla,
 		endpoints:      defaultEpMap,
@@ -434,7 +482,7 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 		sni:            strconv.Itoa(int(defaultPort)),
 	}
 
-	c.buildPortAliasesLocked(serviceName, fqdn, defaultPort, sanNamespaces, sortedKeys, buckets)
+	c.buildPortAliasesLocked(dst, serviceName, fqdn, defaultPort, sanNamespaces, sortedKeys, buckets)
 
 	// One cluster per non-default advertised port.
 	for port, b := range buckets {
@@ -442,7 +490,7 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 		pcla := proxy.NewClusterLoadAssignment(portName)
 		pcla.Endpoints = b.eps
 		proxy.SortLocalityLbEndpoints(pcla.Endpoints)
-		c.clusters[portName] = clusterEntry{
+		dst[portName] = clusterEntry{
 			cluster:        proxy.NewServiceCluster(portName, portName, serviceName, sortedKeys),
 			loadAssignment: pcla,
 			endpoints:      b.epMap,
@@ -505,7 +553,7 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 // membership and must not be shadowed by a whole-service alias. Node proxies
 // only: the edge serves an explicit exposed set with no ODCDS catch-all (see
 // BuildEdgeRouteConfiguration).
-func (c *SnapshotCache) buildPortAliasesLocked(serviceName, fqdn string, defaultPort uint32, sanNamespaces, sortedKeys []string, buckets map[uint32]*portBucket) {
+func (c *SnapshotCache) buildPortAliasesLocked(dst map[string]clusterEntry, serviceName, fqdn string, defaultPort uint32, sanNamespaces, sortedKeys []string, buckets map[uint32]*portBucket) {
 	if c.edge || fqdn == "" {
 		return
 	}
@@ -514,7 +562,7 @@ func (c *SnapshotCache) buildPortAliasesLocked(serviceName, fqdn string, default
 		if alias == "" {
 			continue
 		}
-		c.clusters[alias] = clusterEntry{
+		dst[alias] = clusterEntry{
 			// EDS resource name is the ALIAS, never the bare service: the load
 			// assignment under it is derived from the bare one at snapshot time
 			// (bareEDSAlias), so the alias tracks every endpoint change of the
@@ -635,7 +683,7 @@ func endpointSubsetKeys(endpoints []*registryv1.ServiceEndpoint, nodeSubsetKeys 
 
 // buildTCPClustersLocked populates c.clusters with TCP service entries. Caller
 // must hold clusterMu.
-func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[string]struct{}, tcpServiceEndpoints map[string][]*registryv1.ServiceEndpoint, localRegion, localZone string, waypoint proxy.WaypointRewrite) {
+func (c *SnapshotCache) buildTCPClustersLocked(deps map[string]struct{}, tcpServiceEndpoints map[string][]*registryv1.ServiceEndpoint, in reuseInputs, prev map[string]clusterEntry, reuse map[string]reuseRecord) {
 	// TCP service entries: bare-name EDS load assignment + SAN/sni only. The
 	// capture TCP floor's "tcp:<svc>" cluster (captureTCPClusters) republishes
 	// that load assignment under its OWN EDS name (aether#1013) and pins peer
@@ -658,26 +706,39 @@ func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[str
 		if len(endpoints) == 0 {
 			continue
 		}
-		sanNamespaces := endpointSANNamespaces(endpoints)
-		defaultPort := endpoints[0].GetPort()
-		cla, epMap := c.buildTCPEndpointsLocked(serviceName, endpoints, localRegion, localZone, waypoint)
-
-		tcpName := proxy.TCPClusterName(serviceName, c.meshDomain)
-		c.clusters[tcpName] = clusterEntry{
-			loadAssignment: cla,
-			endpoints:      epMap,
-			sanNamespaces:  sanNamespaces,
-			service:        serviceName,
-			sni:            strconv.Itoa(int(defaultPort)),
-			l4Floor:        true,
+		owns := c.ownsBareCLALocked(serviceName)
+		build := func(dst map[string]clusterEntry, _ map[string]struct{}) {
+			c.buildTCPServiceEntriesLocked(dst, serviceName, endpoints, owns, in)
 		}
-
-		c.buildTCPPortEntriesLocked(serviceName, tcpName, endpoints, defaultPort, sanNamespaces, localRegion, localZone, waypoint)
+		c.reuseOrBuildLocked(reusePassTCP, serviceName, endpoints, owns, in, prev, reuse, build, nil)
 	}
 }
 
-// buildTCPPortEntriesLocked adds one entry per NON-PRIMARY raw-TCP port the
-// service advertises (proposal 037). Caller must hold clusterMu.
+// buildTCPServiceEntriesLocked builds one TCP service's floor entry and its
+// per-port entries into dst. owns is ownsBareCLALocked, evaluated after the
+// HTTP pass. Every input it reads is in the #1115 reuse key
+// (registryreuse.go); keep it that way when adding one. Caller must hold
+// clusterMu.
+func (c *SnapshotCache) buildTCPServiceEntriesLocked(dst map[string]clusterEntry, serviceName string, endpoints []*registryv1.ServiceEndpoint, owns bool, in reuseInputs) {
+	sanNamespaces := endpointSANNamespaces(endpoints)
+	defaultPort := endpoints[0].GetPort()
+	cla, epMap := buildTCPEndpoints(serviceName, endpoints, owns, in.localRegion, in.localZone, in.waypoint)
+
+	tcpName := proxy.TCPClusterName(serviceName, c.meshDomain)
+	dst[tcpName] = clusterEntry{
+		loadAssignment: cla,
+		endpoints:      epMap,
+		sanNamespaces:  sanNamespaces,
+		service:        serviceName,
+		sni:            strconv.Itoa(int(defaultPort)),
+		l4Floor:        true,
+	}
+
+	buildTCPPortEntries(dst, serviceName, tcpName, endpoints, defaultPort, sanNamespaces, in.localRegion, in.localZone, in.waypoint)
+}
+
+// buildTCPPortEntries adds into dst one entry per NON-PRIMARY raw-TCP port the
+// service advertises (proposal 037), plus the primary port's alias entry.
 //
 // These exist because the capture listener emits a destination_port-qualified
 // chain per such port, and that chain names tcp:<fqdn>:<port>. A chain whose
@@ -702,7 +763,8 @@ func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[str
 // The primary port deliberately has no entry here: it is what the floor cluster
 // already reaches, and the floor carries NO SNI on purpose (#306) so it lands on
 // the destination's default inbound chain.
-func (c *SnapshotCache) buildTCPPortEntriesLocked(
+func buildTCPPortEntries(
+	dst map[string]clusterEntry,
 	serviceName, tcpName string,
 	endpoints []*registryv1.ServiceEndpoint,
 	defaultPort uint32,
@@ -725,7 +787,7 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 	// the primary port — the destination's default inbound floor chain is what
 	// serves it, and a non-empty SNI would route it to a per-port chain that
 	// does not exist (#306).
-	c.clusters[proxy.TCPPortClusterName(tcpName, defaultPort)] = clusterEntry{
+	dst[proxy.TCPPortClusterName(tcpName, defaultPort)] = clusterEntry{
 		sanNamespaces: sanNamespaces,
 		service:       serviceName,
 		sni:           "",
@@ -756,7 +818,7 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 		}
 		proxy.SortLocalityLbEndpoints(portCla.Endpoints)
 
-		c.clusters[proxy.TCPPortClusterName(tcpName, port)] = clusterEntry{
+		dst[proxy.TCPPortClusterName(tcpName, port)] = clusterEntry{
 			loadAssignment: portCla,
 			endpoints:      epMap,
 			sanNamespaces:  sanNamespaces,
@@ -767,8 +829,8 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 	}
 }
 
-// buildTCPEndpointsLocked builds a TCP service's endpoint map and, when this
-// entry owns it, its bare-name load assignment. Caller must hold clusterMu.
+// buildTCPEndpoints builds a TCP service's endpoint map and, when this entry
+// owns it (owns, from ownsBareCLALocked), its bare-name load assignment.
 //
 // Bare-name CLA ownership: both an HTTP default entry and a TCP floor entry for
 // the same service reference a load assignment named <serviceName>, and two EDS
@@ -784,15 +846,13 @@ func (c *SnapshotCache) buildTCPPortEntriesLocked(
 // not own one either, so the TCP entry takes ownership rather than leave the
 // bare EDS name unpublished: the floor cluster resolves through it, and
 // tcp_proxy has no ODCDS cold path to recover from a missing one.
-func (c *SnapshotCache) buildTCPEndpointsLocked(
+func buildTCPEndpoints(
 	serviceName string,
 	endpoints []*registryv1.ServiceEndpoint,
+	owns bool,
 	localRegion, localZone string,
 	waypoint proxy.WaypointRewrite,
 ) (*endpointv3.ClusterLoadAssignment, map[string]*endpointv3.LocalityLbEndpoints) {
-	httpEntry, httpOwnsCLA := c.clusters[serviceName]
-	owns := !httpOwnsCLA || httpEntry.loadAssignment == nil
-
 	var cla *endpointv3.ClusterLoadAssignment
 	if owns {
 		cla = proxy.NewClusterLoadAssignment(serviceName)
@@ -811,6 +871,15 @@ func (c *SnapshotCache) buildTCPEndpointsLocked(
 	return cla, epMap
 }
 
+// ownsBareCLALocked reports whether an L4 floor entry built now for
+// serviceName owns the service's bare-name load assignment: it does unless the
+// HTTP entry built in the same refresh owns one (see buildTCPEndpoints). Caller
+// must hold clusterMu, after the HTTP pass.
+func (c *SnapshotCache) ownsBareCLALocked(serviceName string) bool {
+	httpEntry, ok := c.clusters[serviceName]
+	return !ok || httpEntry.loadAssignment == nil
+}
+
 // buildUDPClustersLocked adds the cluster entries for PROTOCOL_UDP services.
 // Caller must hold clusterMu.
 //
@@ -825,7 +894,7 @@ func (c *SnapshotCache) buildTCPEndpointsLocked(
 // is plaintext, so there is no peer identity to pin, and it has no
 // destination_port-qualified chains to name a per-port cluster from -- a
 // connection-less UDP listener carries no filter chains at all.
-func (c *SnapshotCache) buildUDPClustersLocked(ctx context.Context, deps map[string]struct{}, udpServiceEndpoints map[string][]*registryv1.ServiceEndpoint, localRegion, localZone string, waypoint proxy.WaypointRewrite) {
+func (c *SnapshotCache) buildUDPClustersLocked(ctx context.Context, deps map[string]struct{}, udpServiceEndpoints map[string][]*registryv1.ServiceEndpoint, in reuseInputs, prev map[string]clusterEntry, reuse map[string]reuseRecord) {
 	for serviceName, endpoints := range udpServiceEndpoints {
 		if _, inScope := deps[serviceName]; !inScope {
 			continue
@@ -833,17 +902,21 @@ func (c *SnapshotCache) buildUDPClustersLocked(ctx context.Context, deps map[str
 		if len(endpoints) == 0 {
 			continue
 		}
-		cla, epMap := c.buildTCPEndpointsLocked(serviceName, endpoints, localRegion, localZone, waypoint)
-
+		owns := c.ownsBareCLALocked(serviceName)
 		udpName := proxy.UDPClusterName(serviceName, c.meshDomain)
-		c.clusters[udpName] = clusterEntry{
-			loadAssignment: cla,
-			endpoints:      epMap,
-			service:        serviceName,
-			sni:            strconv.Itoa(int(endpoints[0].GetPort())),
-			l4Floor:        true,
+		build := func(dst map[string]clusterEntry, _ map[string]struct{}) {
+			cla, epMap := buildTCPEndpoints(serviceName, endpoints, owns, in.localRegion, in.localZone, in.waypoint)
+			dst[udpName] = clusterEntry{
+				loadAssignment: cla,
+				endpoints:      epMap,
+				service:        serviceName,
+				sni:            strconv.Itoa(int(endpoints[0].GetPort())),
+				l4Floor:        true,
+			}
 		}
-		c.log.DebugContext(ctx, "built UDP floor cluster entry", "service", serviceName, "cluster", udpName)
+		if _, reused := c.reuseOrBuildLocked(reusePassUDP, serviceName, endpoints, owns, in, prev, reuse, build, nil); !reused {
+			c.log.DebugContext(ctx, "built UDP floor cluster entry", "service", serviceName, "cluster", udpName)
+		}
 	}
 }
 
@@ -1070,6 +1143,12 @@ type quicFanout struct {
 	waypoint     bool
 	// idleTimeout is every twin's pool idle timeout (aether#1054).
 	idleTimeout time.Duration
+	// aliasCLA republishes a load assignment under a twin's EDS name and
+	// twinCluster builds a twin: the snapshot's memoized ones (#1115,
+	// derivedmemo.go), or proxy.LoadAssignmentAlias / proxy.QUICClusterFrom
+	// when nil.
+	aliasCLA    func(base *endpointv3.ClusterLoadAssignment, name string) *endpointv3.ClusterLoadAssignment
+	twinCluster func(base *clusterv3.Cluster, name, clientSpiffeID, validationContextName string, sanURIs []string, sni string, idleTimeout time.Duration) *clusterv3.Cluster
 }
 
 // quicFanoutSnapshot takes the fan-out inputs for one snapshot. It also
@@ -1133,13 +1212,17 @@ func (q quicFanout) twinsFor(entry clusterEntry, arms map[string]string, meshDom
 	// The default entry's sni is its primary port; QUIC needs the hostname
 	// form "<port>.<authority>" (aether#957, proxy.QUICServerName).
 	sni := proxy.QUICServerName(entry.sni, proxy.ServiceClusterName(entry.service, meshDomain))
+	twinCluster := q.twinCluster
+	if twinCluster == nil {
+		twinCluster = proxy.QUICClusterFrom
+	}
 	var twins []types.Resource
 	var names []string
 	for _, id := range q.identities {
 		if _, observed := q.pairs[quicPair{service: entry.service, source: proxy.SourceSAKeyFromSpiffeID(id)}]; !observed {
 			continue
 		}
-		twins = append(twins, proxy.QUICClusterFrom(entry.cluster, arms[id], id, q.mtls.validationContextName, entry.sanURIs, sni, q.idleTimeout))
+		twins = append(twins, twinCluster(entry.cluster, arms[id], id, q.mtls.validationContextName, entry.sanURIs, sni, q.idleTimeout))
 		names = append(names, arms[id])
 	}
 	return twins, names
@@ -1172,9 +1255,13 @@ func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomai
 	twins, names := q.twinsFor(entry, arms, meshDomain)
 	var clas []types.Resource
 	if entry.loadAssignment != nil && len(names) > 0 {
+		alias := q.aliasCLA
+		if alias == nil {
+			alias = proxy.LoadAssignmentAlias
+		}
 		clas = make([]types.Resource, 0, len(names))
 		for _, name := range names {
-			clas = append(clas, proxy.LoadAssignmentAlias(entry.loadAssignment, name))
+			clas = append(clas, alias(entry.loadAssignment, name))
 		}
 	}
 	if entry.vhost == nil {

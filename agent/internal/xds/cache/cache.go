@@ -202,6 +202,14 @@ type SnapshotCache struct {
 
 	clusterMu sync.RWMutex
 	clusters  map[string]clusterEntry // keyed by cluster name
+	// registryReuse remembers, per (protocol pass, service), the inputs and
+	// entries of the last registry refresh, so an unchanged service keeps its
+	// proto objects (#1115, registryreuse.go). Guarded by clusterMu (write).
+	registryReuse registryReuse
+	// derived memoizes what every snapshot derives from the entries -- alias
+	// load assignments and QUIC twin clusters -- on their inputs (#1115,
+	// derivedmemo.go).
+	derived derivedMemo
 	// serviceRetentionGrace overrides defaultServiceRetentionGrace when > 0
 	// (test hook; see clusterEntry.absentSince).
 	serviceRetentionGrace time.Duration
@@ -692,6 +700,12 @@ type clusterEntry struct {
 	// server goroutines marshal it without holding clusterMu. Invalidation
 	// paths REPLACE it with a freshly built clone.
 	mtlsCluster *clusterv3.Cluster
+	// mtlsRendered records what sanURIs and mtlsCluster were last rendered
+	// from (#1115): refreshEntryMTLSLocked skips the clone + inject while the
+	// base cluster object and every other render input are unchanged, so an
+	// unchanged entry keeps its mTLS cluster OBJECT across refreshes and pod
+	// events and the version memo reuses its version. Nil = never rendered.
+	mtlsRendered *mtlsRenderKey
 	// l4Floor marks an L4 floor service entry -- PROTOCOL_TCP or PROTOCOL_UDP.
 	// Such entries hold only the bare-name EDS load assignment (+
 	// sanNamespaces/sni) the floor cluster is built from: the
