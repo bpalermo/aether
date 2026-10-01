@@ -104,7 +104,24 @@ type Metrics struct {
 	// one node's agent log. reason="not_csi" is the cut-over's signature: a
 	// workload still carrying its socket on an emptyDir.
 	udsResolveFailures metric.Int64Counter
+	// setDuration is how long go-control-plane's SetSnapshot took: the part
+	// of a build that holds the snapshot-cache mutex every ADS request also
+	// needs (issue #1105). It was most of a build while the delta version map
+	// was hashed in there; it must now stay in the low milliseconds.
+	setDuration metric.Float64Histogram
+	// resourceVersions counts the per-resource delta versions a build
+	// resolved, by source: "memo" (unchanged proto, version reused) or
+	// "hashed" (marshalled and sha256'd). The memo share is the #1105 saving.
+	resourceVersions metric.Int64Counter
+	// versionMemoMismatch counts published resources an audit found mutated
+	// in place: the same proto object marshalled to new bytes, so the memo
+	// had been serving a stale version and Envoy had missed the change until
+	// the audit corrected it (#1105). Healthy value: zero forever.
+	versionMemoMismatch metric.Int64Counter
 }
+
+// attrVersionSource labels aether.agent.snapshot.resource_versions.
+const attrVersionSource = attribute.Key("source")
 
 // snapshotDurationBuckets are the explicit boundaries, in SECONDS, for
 // aether.agent.snapshot.duration. The OTel default boundaries are millisecond-oriented
@@ -184,6 +201,16 @@ func (m *Metrics) registerActivityInstruments(meter metric.Meter) error {
 		metric.WithDescription("Observed dependencies restored from the agent's local storage at start (a replaced agent starting warm)")); err != nil {
 		return fmt.Errorf("upstreams restored: %w", err)
 	}
+	if m.setDuration, err = meter.Float64Histogram("aether.agent.snapshot.set_duration",
+		metric.WithDescription("Duration of go-control-plane SetSnapshot, which holds the snapshot-cache mutex every ADS request needs"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(snapshotDurationBuckets...)); err != nil {
+		return fmt.Errorf("set duration: %w", err)
+	}
+	if m.resourceVersions, err = meter.Int64Counter("aether.agent.snapshot.resource_versions",
+		metric.WithDescription("Per-resource delta xDS versions resolved by snapshot builds, by source (memo: reused for an unchanged proto; hashed: marshalled and hashed)")); err != nil {
+		return fmt.Errorf("resource versions: %w", err)
+	}
 	return nil
 }
 
@@ -219,6 +246,10 @@ func (m *Metrics) registerAnomalyCounters(meter metric.Meter) error {
 		metric.WithDescription("Mesh clusters published with no server-identity SAN pin (handshake proves trust-domain membership only)")); err != nil {
 		return fmt.Errorf("cluster unpinned: %w", err)
 	}
+	if m.versionMemoMismatch, err = meter.Int64Counter("aether.agent.snapshot.version_memo_mismatch",
+		metric.WithDescription("Published xDS resources found mutated in place by a version-memo audit; Envoy missed the change until the audit (#1105)")); err != nil {
+		return fmt.Errorf("version memo mismatch: %w", err)
+	}
 
 	return nil
 }
@@ -245,6 +276,7 @@ func (m *Metrics) seedAnomalyCounters() {
 	m.clusterUnpinned.Add(ctx, 0)
 	m.udpRouteUnsupported.Add(ctx, 0)
 	m.udpNoHealthyBackend.Add(ctx, 0)
+	m.versionMemoMismatch.Add(ctx, 0)
 	// One series per reason, so a grader can ask for reason="not_csi" and get
 	// a zero rather than nothing.
 	for _, r := range udspath.Reasons {
@@ -380,6 +412,31 @@ func (m *Metrics) UpstreamsRestored(ctx context.Context, n int64) {
 		return
 	}
 	m.upstreamsRestored.Add(ctx, n)
+}
+
+// SnapshotSet records how long one go-control-plane SetSnapshot took.
+func (m *Metrics) SnapshotSet(ctx context.Context, seconds float64) {
+	if m == nil {
+		return
+	}
+	m.setDuration.Record(ctx, seconds)
+}
+
+// SnapshotVersions records how one build resolved its per-resource versions:
+// reused from the memo, freshly hashed, and memo hits an audit found mutated.
+func (m *Metrics) SnapshotVersions(ctx context.Context, memoized, hashed, mismatched int64) {
+	if m == nil {
+		return
+	}
+	if memoized > 0 {
+		m.resourceVersions.Add(ctx, memoized, metric.WithAttributes(attrVersionSource.String("memo")))
+	}
+	if hashed > 0 {
+		m.resourceVersions.Add(ctx, hashed, metric.WithAttributes(attrVersionSource.String("hashed")))
+	}
+	if mismatched > 0 {
+		m.versionMemoMismatch.Add(ctx, mismatched)
+	}
 }
 
 // Generated records the outcome of one snapshot generation.
