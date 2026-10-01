@@ -199,11 +199,13 @@ spec:
                 resourceFieldRef:
                   resource: limits.memory
                   divisor: "1"
+            {{- /* #1116: explicit, not derived from limits.cpu -- the agent has
+                   no CPU limit by default (values.yaml agent.resources). 0/empty
+                   omits it so the Go runtime picks GOMAXPROCS itself. */}}
+            {{- with .Values.agent.goMaxProcs }}
             - name: GOMAXPROCS
-              valueFrom:
-                resourceFieldRef:
-                  resource: limits.cpu
-                  divisor: "1"
+              value: {{ . | quote }}
+            {{- end }}
             - name: POD_NAME
               valueFrom:
                 fieldRef:

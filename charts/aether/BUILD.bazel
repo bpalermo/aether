@@ -83,6 +83,41 @@ helm_template_test(
     chart = ":aether",
 )
 
+# #1116: the node agent keeps its 200m CPU request but has NO CPU limit -- a
+# 200m CFS quota turned 5-25 ms snapshot builds into 100 ms steps and could
+# throttle a goroutine holding the snapshot-cache mutex (#1105/#1114) -- and,
+# with the limit gone, GOMAXPROCS is pinned explicitly rather than derived from
+# limits.cpu (which would fall back to the node's cores). Positional on the agent
+# container: its resources block is followed directly by the pod's `volumes:`
+# (the cni-install initContainer's is followed by `containers:`), and `limits:`
+# carrying only memory proves there is no limits.cpu.
+helm_template_test(
+    name = "aether_agent_cpu_resources_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+memory: \\S+\\n\\s+requests:\\n\\s+cpu: 200m\\n\\s+memory: \\S+\\n\\s+volumes:\\n",
+            "- name: GOMAXPROCS\\n\\s+value: \"2\"\\n",
+        ],
+    },
+)
+
+# ...and agent.goMaxProcs=0 hands GOMAXPROCS back to the Go runtime: no env var.
+helm_template_absent_test(
+    name = "aether_agent_gomaxprocs_off_test",
+    absent = [
+        "name: GOMAXPROCS",
+    ],
+    chart = ":aether",
+    control = "name: GOMEMLIMIT",
+    opts = [
+        "--show-only",
+        "templates/agent-daemonset.yaml",
+        "--set",
+        "agent.goMaxProcs=0",
+    ],
+)
+
 # Proposal 038: the capture listeners bind with IP_TRANSPARENT, which the kernel
 # checks as CAP_NET_ADMIN in the user namespace owning the pod netns -- the init
 # userns here -- and Envoy's supportsIpTransparent() probe runs once in the HOST
