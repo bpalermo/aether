@@ -1929,6 +1929,78 @@ WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 against the unpatched ima
 0 against the patched one (see the header of the script). The per-roll soak gates are in
 `e2e/soak/README.md`, "The hot-restart wedge gates (#1050)".
 
+### A node stalls for seconds during a handoff (#1093)
+
+Symptom: on some handoffs, for about 2–7 s, requests from every node to pods on the rolling
+node take 1–3 s, the node's own `127.0.0.1:18081/-/-/live` (a `direct_response`, no
+upstream) misses the prober's 2 s budget, and the mesh_dns tier times out on that node.
+It is not #1085 (listeners are present, no `initial fetch timed out`) and not #1050 (the
+admin keeps answering, `child_silent` stays 0).
+
+What the 2026-10-01 soak established:
+
+- **It is node-local and not specific to the handoff.** The same shape recurs at
+  0.5–1 s on main-worker-04 and main-worker-05, dozens of times in 8 h, including in the
+  no-roll window. The shape is destination-side h3 requests whose `upstream_service_time`
+  to the local app is about 1 s on every pod at once. It is almost never seen on w01–w03.
+  Envoy's worker watchdog (`envoy_server_worker_<n>_watchdog_miss_total`, ≥ 200 ms
+  without a loop iteration) moved only on w04 and w05. A handoff is the tail of that
+  distribution.
+- **The successor's workers are the ones that stall.** At w04's 02:16 roll, workers 0
+  and 3 of the new epoch missed the watchdog between 02:16:45 and :50, which is the
+  stall. A request a w04 source received at 46.618 reached its w02 destination at
+  49.099, 2.5 s later, and was then served in 6 ms. The new epoch's h3 connects took
+  250 ms–2.5 s for 40% of them, against ≤ 100 ms for most of the parent's.
+- **It is not CPU the profiler can see.** Pyroscope (on-CPU only) shows both Envoys at
+  0.6–1.1 cores and the node at about 2.7 of 4 cores, with no unusual frame.
+
+Whether the threads were starved of CPU, blocked, or busy is the open question. Since
+#1093 the supervisor answers it. Every 100 ms (`--stall-sample-interval`, 0 disables it)
+it reads `/proc/<envoy>/task/<tid>/{schedstat,stat,wchan}` for the main and `wrk:*`
+threads of every epoch it runs. When a thread spends `--stall-threshold` (default
+200 ms, Envoy's own watchdog miss bound) of a one-second window in one of the states
+below, it logs one line per epoch for that window:
+
+| class | meaning |
+|---|---|
+| `starved` | Runnable but waiting for a CPU (the schedstat runqueue delay). This is CPU contention or a node-level scheduling stall. |
+| `blocked` | Asleep anywhere other than the idle `ep_poll`/`do_epoll_wait`. `wchan=` names where, e.g. `__futex_wait` (a lock) or `unix_wait_for_peer` (a full hot-restart socket). |
+| `busy` | On a CPU for ≥ 90% of the window. The event loop is saturated. |
+
+Example line:
+
+```
+envoy thread stall   epoch=119 pid=15 windowMs=1000 thresholdMs=200
+  threads=["wrk:worker_3[starved] cpu=140ms runq=620ms blocked=0ms"]
+  nodeBusyPct=71.2 nodeIrqPct=3.1 nodeSoftirqPct=9.8 nodeStealPct=0
+  nodeHottestCPUIrqSoftirqPct=38.5 nodePSICPUSomeMs=640 nodePSIIRQFullMs=55
+  trackedEpochs=1 handoffPeer=118
+```
+
+The kernel charges a runqueue wait when it *ends*, so `runq` can exceed `windowMs`: a 5 s
+starvation is reported whole in the second it ended. The supervisor shares the proxy
+container's cgroup, so it is starved along with Envoy and reports the stall afterwards. On
+kind, a 6 s `cpu.max` throttle of the proxy container logged every worker as
+`[starved] cpu=0ms runq=~5500ms` with `nodeBusyPct=7.2`: Envoy-only starvation on a
+quiet node.
+
+The `node*` fields come from `/proc/stat` and `/proc/pressure`, which are not
+namespaced, so they describe the node for the same second. Read them like this:
+
+- A stall that every process on the node shares shows high PSI cpu-some and a hot CPU.
+- A stall only Envoy has shows `blocked` with a wchan, or `busy`, on a quiet node.
+
+The counter `aether_supervisor_envoy_thread_stalls_total{aether_supervisor_stall_class}`
+is seeded per class. Grade it per roll and per node:
+
+```promql
+sum by (node, aether_supervisor_stall_class) (increase(aether_supervisor_envoy_thread_stalls_total[30m]))
+```
+
+```logsql
+service.name:aether-proxy "envoy thread stall"
+```
+
 ### Source h3 requests die on a stateless reset at a destination's roll (#1054)
 
 Symptom, per roll of a node's proxy: **source** proxies on other nodes log a few

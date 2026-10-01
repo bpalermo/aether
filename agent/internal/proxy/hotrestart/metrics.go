@@ -55,6 +55,10 @@ var shutdownBranchValues = []string{
 	shutdownBranchChildDead,
 }
 
+// attrStallClass labels an Envoy thread stall (stallsampler.go, issue #1093).
+// Three values, fixed: starved, blocked, busy.
+const attrStallClass = attribute.Key("aether.supervisor.stall.class")
+
 // Admin endpoints the watchdog probes.
 const (
 	probeEndpointReady      = "ready"
@@ -102,6 +106,7 @@ type SupervisorMetrics struct {
 	adminProbes         metric.Int64Counter
 	shutdownBranches    metric.Int64Counter
 	childSilent         metric.Int64Counter
+	envoyThreadStalls   metric.Int64Counter
 }
 
 // NewSupervisorMetrics registers the supervisor instruments on the given meter.
@@ -160,6 +165,15 @@ func NewSupervisorMetrics(meter metric.Meter) (*SupervisorMetrics, error) {
 	if m.childSilent, err = meter.Int64Counter("aether.supervisor.child_silent",
 		metric.WithDescription("Hot-restart children whose admin stopped answering for 10s after they went LIVE, inside the parent-shutdown window: the #1050 wedge signature, counted once per epoch and well before the liveness watchdog fires (#1058). Expected 0 per roll")); err != nil {
 		return nil, fmt.Errorf("child silent: %w", err)
+	}
+	if m.envoyThreadStalls, err = meter.Int64Counter("aether.supervisor.envoy_thread_stalls",
+		metric.WithDescription("One-second windows in which an Envoy main or worker thread was starved of CPU (runnable but waiting), blocked outside its idle epoll wait, or busy (on a CPU for >=90% of the window) for at least the stall threshold, counted per thread and class (#1093). The matching 'envoy thread stall' log line names the thread, the wchan it blocked in and the node's CPU/softirq/PSI picture for that second")); err != nil {
+		return nil, fmt.Errorf("envoy thread stalls: %w", err)
+	}
+	// Seeded per class: the soak reading is "stalls per roll, by class", and an
+	// unseeded class reads the same as a sampler that never ran.
+	for _, class := range stallClassValues {
+		m.envoyThreadStalls.Add(context.Background(), 0, metric.WithAttributes(attrStallClass.String(class)))
 	}
 	// Seeded at zero for the same reason as the shutdown branches below: the
 	// soak gate is "0 per roll", and an unseeded counter cannot tell 0 from
@@ -263,6 +277,15 @@ func (m *SupervisorMetrics) childSilentDetected() {
 		return
 	}
 	m.childSilent.Add(context.Background(), 1)
+}
+
+// envoyThreadStalled counts one flagged thread-window of the given class (see
+// stallSampler.closeWindow).
+func (m *SupervisorMetrics) envoyThreadStalled(class string) {
+	if m == nil {
+		return
+	}
+	m.envoyThreadStalls.Add(context.Background(), 1, metric.WithAttributes(attrStallClass.String(class)))
 }
 
 func (m *SupervisorMetrics) adminProbed(endpoint, result string) {

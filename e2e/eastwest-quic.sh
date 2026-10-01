@@ -47,6 +47,18 @@
 #                   init container ran and exited 0 BEFORE the app started, and
 #                   that first request answers 200 carrying the new SA's own
 #                   SPIFFE ID
+#   E7  burst       a pod under a brand-new ServiceAccount dials BURST_DSTS (10)
+#                   QUIC destinations for the first time AT ONCE, BURST_PER_DST
+#                   concurrent requests each, the instant its app starts -- the
+#                   k6 loader start of aether#1086, where every first request
+#                   routes to a `quic:` twin the snapshot does not carry yet and
+#                   the node proxy asks for all of them over ODCDS within ~100
+#                   ms. Asserts 0 non-200 (the failure was 503 NC
+#                   cluster_not_found at the 2 s on_demand timeout) and reports
+#                   the first-use latency (p50/p99/max), the admissions, and --
+#                   with EWQ_DEBUG=1 at `up`, which turns on the agent's debug
+#                   log -- how many snapshot builds the burst cost (one per
+#                   admission before #1086; one or two after)
 #
 # HOW "OVER HTTP/3" IS PROVEN. The application behind the inbound only ever sees
 # the proxy's loopback hop, so nothing the app can report distinguishes h2 from
@@ -150,7 +162,12 @@
 # without #47740) every HTTP/3 handshake fails the QUIC client's hostname check
 # and E2 goes red with the twins present: the negative control above.
 #
-# Usage: e2e/eastwest-quic.sh {up|test|verify|idgate|down}   (bare = up + verify)
+# E7 alone, against an `up` cluster: e2e/eastwest-quic.sh burst. Its red is
+# main before #1086 on a CPU-starved agent (talos: 66-141 x 503 NC per loader
+# start); on kind the agent is rarely slow enough to cross 2 s, so the leg also
+# prints the build count and first-use latency the fix moves.
+#
+# Usage: e2e/eastwest-quic.sh {up|test|verify|idgate|burst|down}   (bare = up + verify)
 #
 # Prereqs: kind, docker, kubectl, helm, bazel (for the image build; CI sets
 # EWQ_SKIP_BUILD=1 and pre-loads the images from the nightly build artifact).
@@ -207,6 +224,9 @@ GAMMA_DSTS=(gamma-a gamma-b)
 SOURCES=(client-a client-b)
 # Requests per measured batch.
 BATCH=10
+# E7 (aether#1086): first-use fan-out width and per-destination concurrency.
+BURST_DSTS="${BURST_DSTS:-10}"
+BURST_PER_DST="${BURST_PER_DST:-5}"
 AGNHOST_IMAGE="registry.k8s.io/e2e-test-images/agnhost:2.53"
 CURL_IMAGE="curlimages/curl:8.22.0"
 GWAPI_VERSION="v1.6.2"
@@ -475,6 +495,7 @@ install_aether() {
 		--set spire.enabled=true \
 		--set edge.enabled=false \
 		"${gate[@]+"${gate[@]}"}" \
+		--set "debug=$([ "${EWQ_DEBUG:-0}" = "1" ] && echo true || echo false)" \
 		"${EWQ_EXTRA_HELM_ARGS[@]+"${EWQ_EXTRA_HELM_ARGS[@]}"}" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
@@ -717,11 +738,12 @@ verify_preflight() {
 }
 
 # quic_twins DUMP — the distinct quic: cluster names in a /clusters dump, sorted.
-# E6's brand-new idgate-<ts> ServiceAccounts are left out: since #979 their
+# E6's brand-new idgate-<ts> and E7's burst-<ts> ServiceAccounts are left out: since #979 their
 # first request is QUIC-eligible like any other, and their pods (and so their
 # pairs) outlive the run, so a re-run of verify would count them as strays.
 quic_twins() {
-	printf '%s\n' "$1" | awk -F'::' -v g="@$TEST_NS/idgate-" 'index($1, "quic:") == 1 && index($1, g) == 0 { print $1 }' | sort -u
+	printf '%s\n' "$1" | awk -F'::' -v g="@$TEST_NS/idgate-" -v b="@$TEST_NS/burst-" \
+		'index($1, "quic:") == 1 && index($1, g) == 0 && index($1, b) == 0 { print $1 }' | sort -u
 }
 
 # driven_pairs — the twins E2 + E4b dial over a SELECTING route, sorted: every
@@ -1072,6 +1094,153 @@ YAML
 	ok "E6: aether-identity-ready held the app until the SVID existed; its t=0 request answered 200 as $want"
 }
 
+# --- E7: a brand-new identity's first use of many QUIC destinations at once ---
+
+# burst_dsts — E7's destinations, burst-dst-0 .. burst-dst-<BURST_DSTS-1>.
+burst_dsts() {
+	local i
+	for ((i = 0; i < BURST_DSTS; i++)); do printf 'burst-dst-%d\n' "$i"; done
+}
+
+# percentiles — "p50=… p99=… max=…" of the seconds on stdin.
+percentiles() {
+	sort -n | awk '{ v[NR] = $1 } END {
+		if (NR == 0) { print "n/a"; exit }
+		printf "p50=%.3fs p99=%.3fs max=%.3fs", v[int((NR - 1) * 0.50) + 1], v[int((NR - 1) * 0.99) + 1], v[NR] }'
+}
+
+# verify_burst — E7, aether#1086. The client is a bare Pod (it runs once) under
+# a ServiceAccount that did not exist a moment earlier, so no (source,
+# destination) pair has dialled and no twin exists: EVERY one of its first
+# requests needs an on-demand twin. The identity gate (#1053) holds the app
+# until its SVID exists, so what is measured is twin admission + publish +
+# warm, never the SVID wait. All BURST_DSTS x BURST_PER_DST requests leave
+# together (curl --parallel-immediate), as k6's VUs do.
+verify_burst() {
+	local sa pod d i ups="" urls="" since result lines n bad admitted published builds alog
+	log "E7 burst (aether#1086): a new ServiceAccount's first requests to $BURST_DSTS QUIC destinations at once, $BURST_PER_DST each"
+	kc create ns "$TEST_NS" >/dev/null 2>&1 || true
+	for d in $(burst_dsts); do deploy_destination "$d"; done
+	for d in $(burst_dsts); do
+		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null || die "E7: destination '$d' never became Ready"
+	done
+	# Every destination's HTTP/3 inbound must be up before the burst, or a
+	# listener still warming would read as a #1086 failure.
+	local deadline=$((SECONDS + 120)) missing
+	while true; do
+		missing=""
+		for d in $(burst_dsts); do
+			[ -n "$(h3_rq "$(pod_of "$d")")" ] || missing="$missing $d"
+		done
+		[ -z "$missing" ] && break
+		[ "$SECONDS" -lt "$deadline" ] || die "E7: no HTTP/3 inbound for:$missing"
+		sleep 3
+	done
+	# And resolvable: the registrar generates each destination's mesh VIP
+	# Service, and mesh DNS serves it only after the agent projects the record
+	# into its snapshot file. A burst sent before that fails DNS (curl 000) on
+	# the not-yet-known names, which is not #1086 -- so wait for every Service,
+	# then give the record projection a fixed settle.
+	deadline=$((SECONDS + 120))
+	while true; do
+		missing=""
+		for d in $(burst_dsts); do
+			kc -n "$TEST_NS" get service "$d" >/dev/null 2>&1 || missing="$missing $d"
+		done
+		[ -z "$missing" ] && break
+		[ "$SECONDS" -lt "$deadline" ] || die "E7: no mesh VIP Service for:$missing"
+		sleep 3
+	done
+	sleep "${BURST_DNS_SETTLE:-15}"
+	ok "E7: $BURST_DSTS destinations Ready with their HTTP/3 inbound and mesh VIP Service"
+
+	sa="burst-$(date +%s)"
+	pod="$sa"
+	for d in $(burst_dsts); do
+		ups="${ups:+$ups,}$d.$TEST_NS"
+		for ((i = 0; i < BURST_PER_DST; i++)); do
+			# -o binds to ONE url: every request needs its own.
+			urls="$urls -o /dev/null http://$(fqdn "$d"):$OUTBOUND_PORT/hostname"
+		done
+	done
+	since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	kc apply -f - >/dev/null <<YAML || die "E7: client apply failed"
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: $sa, namespace: $TEST_NS}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $pod
+  namespace: $TEST_NS
+  labels: {app: $sa, aether.io/managed: "true"}
+  annotations:
+    config.aether.io/upstreams: "$ups"
+spec:
+  serviceAccountName: $sa
+  restartPolicy: Never
+  $(node_pin "$NODE")
+  containers:
+    - name: curl
+      image: $CURL_IMAGE
+      command: ["sh", "-c"]
+      args:
+        - |
+          echo AETHER_BURST_START
+          curl -s --parallel --parallel-immediate --parallel-max 200 --max-time 10 -w 'AETHER_BURST %{http_code} %{time_total} %{url}\\n' $urls
+          echo AETHER_BURST_DONE
+          exec sleep 3600
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+YAML
+	deadline=$((SECONDS + 240))
+	result=""
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		result="$(kc -n "$TEST_NS" logs "$pod" -c curl 2>/dev/null || true)"
+		case "$result" in *AETHER_BURST_DONE*) break ;; esac
+		sleep 2
+	done
+	case "$result" in
+	*AETHER_BURST_DONE*) ;;
+	*) die "E7: the burst client never finished (log tail: $(printf '%s\n' "$result" | tail -n 3 | tr '\n' ' '))" ;;
+	esac
+	lines="$(printf '%s\n' "$result" | grep '^AETHER_BURST [0-9]' || true)"
+	n="$(printf '%s\n' "$lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+	bad="$(printf '%s\n' "$lines" | sed '/^$/d' | awk '$2 != "200"' | wc -l | tr -d ' ')"
+	printf '    first-use requests: %s, non-200: %s; latency %s\n' "$n" "$bad" \
+		"$(printf '%s\n' "$lines" | sed '/^$/d' | awk '{ print $3 }' | percentiles)"
+	printf '%s\n' "$lines" | sed '/^$/d' | awk '$2 != "200" { c[$2]++ } END { for (k in c) printf "    status %s x%d\n", k, c[k] }'
+
+	# What the agent did for the burst: one admission line per twin, then the
+	# snapshot builds (the "setting snapshot" line is debug: EWQ_DEBUG=1 at up).
+	alog="$(kc -n "$NS" logs -l app.kubernetes.io/component=agent -c agent --since-time="$since" --tail=-1 2>/dev/null || true)"
+	admitted="$(printf '%s\n' "$alog" | grep -c "observed east-west QUIC pair (ODCDS).*@$TEST_NS/$sa" || true)"
+	published="$(printf '%s\n' "$alog" | grep -c 'published observed east-west QUIC pairs' || true)"
+	# Builds from the burst's first admission on (the pod's own arrival --
+	# listeners, dependency set -- costs builds of its own before that). The
+	# agent logs JSON; "timestamp" is RFC 3339, so a prefix compare orders it.
+	builds="$(printf '%s\n' "$alog" | awk -v sa="@$TEST_NS/$sa\"" '
+		{ ts = ""; if (match($0, /"timestamp":"[^"]*"/)) ts = substr($0, RSTART + 13, 23) }
+		index($0, "observed east-west QUIC pair (ODCDS)") && index($0, sa) && first == "" { first = ts }
+		/setting snapshot/ && first != "" && ts >= first { n++ }
+		END { print n + 0 }')"
+	printf '    agent: %s admissions for %s; from the first of them on, %s coalesced publishes and %s snapshot builds%s\n' \
+		"$admitted" "$sa" "$published" "$builds" "$([ "${EWQ_DEBUG:-0}" = "1" ] || echo ' (EWQ_DEBUG off: builds are not logged)')"
+	printf '%s\n' "$alog" | grep -E "observed east-west QUIC pair \(ODCDS\).*@$TEST_NS/$sa|published observed east-west QUIC pairs|setting snapshot" |
+		cut -c1-240 | sed 's/^/    /' || true
+	# The client ran once; remove it so repeated runs do not pile pods (and
+	# their listeners, SVIDs and pairs) onto the one node's agent.
+	kc -n "$TEST_NS" delete pod "$pod" --wait=false >/dev/null 2>&1 || true
+	kc -n "$TEST_NS" delete serviceaccount "$sa" >/dev/null 2>&1 || true
+
+	[ "$n" -eq $((BURST_DSTS * BURST_PER_DST)) ] || die "E7: $n first-use results, want $((BURST_DSTS * BURST_PER_DST))"
+	[ "$bad" -eq 0 ] ||
+		die "E7: $bad of $n first-use requests did not answer 200 (aether#1086: 503 NC = the twin was not admitted, published and warmed inside the on_demand timeout; 000 = the client never got a response)"
+	ok "E7: $n/$n first-use requests to $BURST_DSTS fresh QUIC destinations answered 200"
+}
+
 verify() {
 	verify_preflight
 	verify_fanout
@@ -1081,7 +1250,8 @@ verify() {
 	verify_pairs
 	verify_q3
 	verify_identity_gate
-	log "all east-west QUIC assertions passed (demand-scoped twins with nothing listed, per-source HTTP/3 + XFCC, GAMMA weighted stays h2 / single-backend rides h3, twins = driven pairs, identity across a client address change, the identity gate holds a new pod until its SVID exists)"
+	verify_burst
+	log "all east-west QUIC assertions passed (demand-scoped twins with nothing listed, per-source HTTP/3 + XFCC, GAMMA weighted stays h2 / single-backend rides h3, twins = driven pairs, identity across a client address change, the identity gate holds a new pod until its SVID exists, a new identity's first use of $BURST_DSTS destinations at once answers 200)"
 }
 
 down() {
@@ -1112,7 +1282,8 @@ up) up ;;
 test) verify ;;
 verify) verify ;;
 idgate) verify_identity_gate ;;
+burst) verify_burst ;;
 down) down ;;
 "") up && verify ;;
-*) die "usage: $0 {up|test|verify|idgate|down}" ;;
+*) die "usage: $0 {up|test|verify|idgate|burst|down}" ;;
 esac

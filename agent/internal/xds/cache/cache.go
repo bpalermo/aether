@@ -328,6 +328,11 @@ type SnapshotCache struct {
 	quicBudgetMu     sync.Mutex
 	quicBudgetSeen   int
 	quicAwaitingSeen int
+	// quicPublish coalesces the snapshot publishes QUIC twin admissions
+	// request (issue #1086; see quicPublisher). quicPublishWindow overrides
+	// defaultQUICPublishWindow when non-zero (test hook; negative = no wait).
+	quicPublish       quicPublisher
+	quicPublishWindow time.Duration
 	// edgeGeo configures the edge geoip filter (proposal 028); nil = no geoip
 	// (the x-geo-* strip is emitted regardless on edge chains). Boot-time.
 	edgeGeo            *proxy.GeoipConfig
