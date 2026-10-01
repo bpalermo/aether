@@ -501,6 +501,22 @@ type SnapshotCache struct {
 	// name, that need per-ClusterIP TCP-proxy floor chains on the capture listener.
 	// A nil/empty slice means all captured traffic goes through the HCM chain.
 	captureTCPServices []captureTCPEntry
+	// captureDerivedTCPPorts / captureDerivedPrimaryPorts are the last per-port
+	// derivation from the registry endpoints (refreshCaptureTCPPorts), keyed by
+	// service and guarded by captureMu. They are kept apart from
+	// captureTCPServices because the two halves of an entry come from different
+	// sources in no fixed order -- the mesh-Service reconciler supplies
+	// name/VIP/class, a registry load supplies the ports -- and either may run
+	// first, or again. SetCaptureTCPServices re-applies them to the entries it
+	// builds; without that, every mesh-Service re-projection erased the
+	// declared-port chains until the next registry load (#1094).
+	captureDerivedTCPPorts     map[string][]uint32
+	captureDerivedPrimaryPorts map[string]uint32
+	// captureProjected is closed by the first SetCaptureTCPServices call: the
+	// mesh-Service reconciler has delivered the service set that defines the
+	// capture listener's TCP chains at least once (CaptureProjected).
+	captureProjected     chan struct{}
+	captureProjectedOnce sync.Once
 	// tcpFloorWarnMu/tcpFloorWarnedAt rate-limit the #877 warning: TCP mesh
 	// services configured while the node has no identity. That is also the
 	// normal startup state for a few seconds, and the listener build runs per
@@ -741,6 +757,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		udpServiceRoutes:   make(map[string][]proxy.L4Backend),
 		captureAuthorities: make(map[string]string),
 		depChanged:         make(chan struct{}, 1),
+		captureProjected:   make(chan struct{}),
 		version:            atomic.NewUint64(0),
 	}
 }

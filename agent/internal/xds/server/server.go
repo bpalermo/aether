@@ -59,6 +59,57 @@ type AgentXdsServer struct {
 	// retryBackoff is the background retry's first delay after a local-only
 	// start; a field for the same reason readyTimeout is one.
 	retryBackoff time.Duration
+
+	// captureGate, when set, is closed once the mesh-Service reconciler has
+	// projected the capture TCP service set (cache.CaptureProjected). The first
+	// serve waits for it, at most captureTimeout (#1094).
+	captureGate    <-chan struct{}
+	captureTimeout time.Duration
+}
+
+// captureProjectionTimeout bounds the first serve's wait for the mesh-Service
+// projection. The reconciler projects within a second or two of its informer
+// syncing (~2 s after start on talos); the bound exists only for a kube API
+// that cannot be listed, where holding Envoy's previous configuration a little
+// longer is the safe failure and holding it forever is not.
+const captureProjectionTimeout = 10 * time.Second
+
+// SetCaptureGate makes the first serve wait (bounded) until the capture
+// listener's TCP chain set is known: ready is closed by the first mesh-Service
+// projection (cache.SnapshotCache.CaptureProjected).
+//
+// Without it the socket opens on whatever had arrived by the time the registry
+// answered. On a restart that replaces Envoy's still-correct capture listener
+// with one carrying none of the per-VIP/per-port TCP chains, and raw TCP to a
+// mesh Service falls to the passthrough until the reconciler catches up. A
+// setter for the same reason SetIdentityGate is one: the edge serves no capture
+// listener and builds the same server without it.
+func (s *AgentXdsServer) SetCaptureGate(ready <-chan struct{}) {
+	s.captureGate = ready
+	if s.captureTimeout == 0 {
+		s.captureTimeout = captureProjectionTimeout
+	}
+}
+
+// waitForCaptureProjection blocks until the capture gate opens, the bound
+// passes, or ctx ends. A timeout is logged and the serve proceeds: the
+// projection still rebuilds the listeners whenever it lands.
+func (s *AgentXdsServer) waitForCaptureProjection(ctx context.Context) {
+	if s.captureGate == nil {
+		return
+	}
+	started := time.Now()
+	timer := time.NewTimer(s.captureTimeout)
+	defer timer.Stop()
+	select {
+	case <-s.captureGate:
+		s.log.DebugContext(ctx, "mesh-Service projection received; capture TCP chains are complete for the first serve",
+			"waited", time.Since(started).Round(time.Millisecond).String())
+	case <-timer.C:
+		s.log.WarnContext(ctx, "mesh-Service projection not received in time; serving the capture listener without its TCP chains until it arrives",
+			"timeout", s.captureTimeout.String(), "issue", "aether#1094")
+	case <-ctx.Done():
+	}
 }
 
 // IdentityGate is the mesh identity as the xDS server needs to see it: is it
@@ -176,6 +227,16 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	// watch to it before waiting on the watch cache, so the snapshot the
 	// registrar streams is the filtered one (demand-scoped distribution).
 	AssertWatchFilter(s.cache, s.registry)
+
+	// Before the registry load, not after: the load ends in a full snapshot,
+	// so waiting first makes that snapshot -- the one the socket opens on --
+	// carry the projected TCP chains. Its rebuild only signals; it does not
+	// itself publish (#1094).
+	s.waitForCaptureProjection(ctx)
+	if ctx.Err() != nil {
+		// Shutting down during the hold: nil, as for the identity hold.
+		return nil
+	}
 
 	s.loadInitialRegistryConfig(ctx)
 

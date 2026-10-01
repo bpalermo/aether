@@ -881,6 +881,11 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 	// registrar handshake cannot succeed, so publishing anyway would replace
 	// Envoy's working config with a local-only one (#740, finding 1).
 	xdsSrv.SetIdentityGate(identity)
+	// And until the mesh-Service reconciler has projected once: that projection
+	// defines the capture listener's TCP chains, and serving before it replaces
+	// a restarted agent's still-correct capture listener with a chainless one
+	// (#1094). Capture is unconditional (proposal 031), so this is too.
+	xdsSrv.SetCaptureGate(snapshotCache.CaptureProjected())
 	if err = m.Add(xdsSrv); err != nil {
 		return fmt.Errorf("failed to add xDS server: %w", err)
 	}

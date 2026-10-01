@@ -75,6 +75,7 @@ go_test(
     srcs = [
         "alias_floor_eds_test.go",
         "cache_test.go",
+        "capture_reproject_test.go",
         "capture_test.go",
         "chain_seam_test.go",
         "chaincluster_test.go",

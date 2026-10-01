@@ -1750,7 +1750,7 @@ empty result means the metric never arrived, not that nothing happened:
 # child_dead during a rolling upgrade means the surge replacement never arrived;
 # handoff during a rolling upgrade means the old pod was deleted mid-handoff
 # (#991, see the next section) -- expected ~0 per roll.
-sum by (k8s_node_name, aether_supervisor_shutdown_branch) (
+sum by (node, aether_supervisor_shutdown_branch) (
   increase(aether_supervisor_shutdown_branch_total[30m]))
 
 # How long a fallback drain actually took (the graceful window included).
@@ -1888,7 +1888,7 @@ both shorter and visible sooner:
 
   ```promql
   # Expected 0 per roll. Seeded at zero, so an empty result means the metric never arrived.
-  sum by (k8s_node_name) (increase(aether_supervisor_child_silent_total[30m]))
+  sum by (node) (increase(aether_supervisor_child_silent_total[30m]))
   ```
 
 - *No dead grace.* When the liveness watchdog fires and **both** epochs of the
@@ -2203,7 +2203,7 @@ Metrics for the same question, fleet-wide:
 
 ```promql
 # nodes without an SVID right now (0 = waiting)
-min by (k8s_node_name) (aether_agent_spire_svid_ready)
+min by (node) (aether_agent_spire_svid_ready)
 # how long the wait took on the last boot
 histogram_quantile(0.99, sum by (le) (rate(aether_agent_spire_wait_seconds_bucket[15m])))
 # must stay flat at 0: a source that connected but could not serve an SVID
@@ -2233,9 +2233,9 @@ failure the delegated path did not have.
 ```promql
 # references that did not resolve — a handful per pod creation is the expected
 # CNI-ADD-beats-the-kubelet-list race; a sustained rate is not
-sum by (k8s_node_name) (rate(aether_agent_spire_broker_reference_not_found_total[5m]))
+sum by (node) (rate(aether_agent_spire_broker_reference_not_found_total[5m]))
 # the provider refused us: ALWAYS a policy/config problem, never transient churn
-sum by (k8s_node_name) (rate(aether_agent_spire_broker_permission_denied_total[5m]))
+sum by (node) (rate(aether_agent_spire_broker_permission_denied_total[5m]))
 ```
 
 Both counters are seeded at zero, so "no series" means the agent is too old, not
@@ -2258,11 +2258,11 @@ path has its own pair, also seeded at zero per attribute set:
 # agent restart (a new process has served nothing yet). `unchanged` is the same
 # certificate redelivered: a stream that dropped and re-subscribed while the
 # SPIRE agent stayed up.
-sum by (k8s_node_name) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod", aether_spire_update="rotated"}[3h]))
+sum by (node) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod", aether_spire_update="rotated"}[3h]))
 # the agent's own SVID (identity="node"), and the trust-bundle inputs:
 # bundle="own", update="rotated" is a trust-ROOT change — SPIRE's 24h signing-CA
 # rotation does not move it, because the bundle is the upstream root.
-sum by (k8s_node_name, aether_spire_bundle, aether_spire_update) (increase(aether_agent_spire_bundle_updates_total[24h]))
+sum by (node, aether_spire_bundle, aether_spire_update) (increase(aether_agent_spire_bundle_updates_total[24h]))
 ```
 
 **`rotated` is "the certificate changed", not "the TTL ran down".** A restarted
@@ -2496,10 +2496,13 @@ proxy **served** it, then compared with the node whose proxy was restarting.
    200s must come back).
 
    ```
-   _stream:{service.name="aether-proxy"}
-     AND log_name:aether_access_logs
+   log_name:aether_access_logs
      AND upstream_transport_failure_reason:"CERTIFICATE_VERIFY_FAILED"
    ```
+
+   Do not prefix it with `_stream:{service.name="aether-proxy"}`. The access-log records
+   carry an empty `_stream` and no `service.name`, so that prefix matches nothing (0 of
+   20,289,652 records over 2026-10-01 00:40:30–08:40:30Z).
 
    The identity in `certificate SANs are [spiffe://…]` on these lines is the **server's**.
    Keep `upstream_host`, `upstream_cluster`, `pod_name`/`pod_namespace` (the local pod this
@@ -2551,8 +2554,7 @@ SAN rejection is a connection with a response flag, so it is always logged, neve
 sampled away:
 
 ```
-_stream:{service.name="aether-proxy"}
-  AND log_name:aether_l4_access_logs
+log_name:aether_l4_access_logs
   AND upstream_transport_failure_reason:~"CERTIFICATE_VERIFY_FAILED"
 ```
 
@@ -2661,7 +2663,7 @@ TCPRoute-weighted chains, the any-port shim, TLSRoute SNI chains and the scoped-
 
 ```
 # Every failed L4 connection
-_stream:{service.name="aether-proxy"} AND log_name:aether_l4_access_logs AND response_flags:!"-"
+log_name:aether_l4_access_logs AND response_flags:!"-"
 # One service's L4 traffic
 # (upstream_cluster is the stat key, tcp_<ns>/<svc>[_<port>], never the tcp:<fqdn> config name)
 log_name:aether_l4_access_logs AND upstream_cluster:~"^tcp_aether-test/tcp-echo(_[0-9]+)?$"
@@ -2848,11 +2850,11 @@ the registry.**
 ```promql
 # Prunes per node over the last hour. A burst right after an agent comes back on a node
 # is the expected #796 reconciliation; a series that never stops is a defect.
-sum by (k8s_node_name) (increase(aether_agent_ghost_sweep_stale_pruned_total[1h]))
+sum by (node) (increase(aether_agent_ghost_sweep_stale_pruned_total[1h]))
 # Stale entries the snapshot generator had to step over. Non-zero is normal for a minute
 # after a DEL the agent missed; still climbing an hour later means the sweep is not
 # pruning. Both counters are seeded, so a flat 0 is a real reading.
-sum by (k8s_node_name) (increase(aether_agent_snapshot_stale_netns_skipped_total[1h]))
+sum by (node) (increase(aether_agent_snapshot_stale_netns_skipped_total[1h]))
 # Entries the agent is tracking per node -- must settle at the node's managed pod count.
 aether_agent_storage_pods
 ```
