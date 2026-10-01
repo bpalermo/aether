@@ -162,3 +162,28 @@ func TestWriteBehindSupersede(t *testing.T) {
 	reg.mu.Unlock()
 	assert.Equal(t, []string{"svc-a/10.0.0.3"}, removes)
 }
+
+// TestWriteBehindFlushesANewIntentWithoutWaitingForTheTick pins issue #1103's
+// registrar half. A peer replica learns of an endpoint change (a drain mark
+// above all) only once the external registry holds it, through its etcd
+// watch. The flush loop used to write a fresh intent at the next wbTick, so
+// every cross-replica drain mark waited up to 500 ms before it even left this
+// replica: 0.5-0.9 s from mark to the last request a source selected the
+// endpoint for, against 0.2 s when source and destination agents shared a
+// replica (kind, e2e/drain-propagation.sh).
+//
+// Red on main: nothing is written until the first tick, 500 ms after Start.
+func TestWriteBehindFlushesANewIntentWithoutWaitingForTheTick(t *testing.T) {
+	reg := &flakyRegistry{}
+	q := NewWriteBehindQueue(reg, slog.New(slog.DiscardHandler), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = q.Start(ctx) }()
+
+	q.EnqueueRegister("svc-a", registryv1.Service_PROTOCOL_HTTP, &registryv1.ServiceEndpoint{
+		Ip:     "10.0.0.1",
+		Health: registryv1.ServiceEndpoint_HEALTH_DRAINING,
+	})
+	require.Eventually(t, func() bool { return len(reg.registered()) == 1 }, wbTick/2, 5*time.Millisecond,
+		"a fresh intent must reach the external registry well inside one wbTick (%s)", wbTick)
+}

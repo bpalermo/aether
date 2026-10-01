@@ -2086,6 +2086,69 @@ application, and the mesh retry policy retries only `connect-failure`, `refused-
 QUIC handshake within the 2 s connect timeout and are retried on another endpoint.
 The kind proof is `e2e/eastwest-quic-deadpeer.sh`.
 
+### A source keeps picking an endpoint seconds after its drain mark (#1103)
+
+Symptom: a request is sent to an endpoint whose destination agent logged
+`pod terminating: endpoint marked draining ahead of shutdown` seconds earlier, and
+fails (#1087's `504 UT`/`503 UC`). Join the source access-log line to the
+destination agent's drain mark by `upstream_host` / pod IP.
+
+The drain mark itself is fast. The registrar applies it to its snapshot and broadcasts
+it the moment the RPC lands; the other replica picks it up through its etcd watch
+(200 ms debounce). On 2026-10-01 the peer replica had it 0.15 s after the mark. A
+source whose ADS stream to its node agent is up rebuilds and pushes EDS within the
+snapshot cost (#1105). Envoy excludes an EDS `DRAINING` host from new selections
+(`upstream_impl.cc` `setEdsHealthFlag` → `EDS_STATUS_DRAINING`;
+`excludeBasedOnHealthFlag` puts it in the excluded set) and panic routing is off
+(`healthy_panic_threshold: 0`), so nothing selects it once the update is applied.
+
+What was slow is a source proxy that **had no ADS stream**: its own node agent was
+restarting. While the stream is down the proxy routes on its last config, so it cannot
+hear a drain mark however fast the registrar is. All five 2026-10-01 TRIPLE failures
+were of this kind:
+
+| source | source agent | drain mark (destination) | requests | proxy reconnected |
+|---|---|---|---|---|
+| main-worker-02 (proxy also rolling, parent epoch serving) | down 05:41:08, serving xDS 05:41:20.51 | 05:41:20.14 (w05) | 05:41:23.92, 24.04 | child CDS 05:41:22.51 |
+| main-worker-04 | down 05:41:24.45, new pod 05:41:33.16, serving xDS 05:41:39.93 | 05:41:36.42 (w02) | 05:41:39.78–39.97 | **05:41:48.34**, 8.4 s after the agent was serving |
+
+The 8.4 s is Envoy's xDS reconnect backoff: fully jittered exponential, 500 ms base,
+30 s cap (`xds_manager_impl.cc` `SubscriptionFactory::RetryInitialDelayMs` /
+`RetryMaxDelayMs`; `backoff_strategy.cc` returns `random() % interval` and doubles the
+interval). The longer the agent was away, the longer the proxy waits after it is back.
+Since #1103 the bootstrap's `ads_config` carries
+`retry_policy.retry_back_off {base_interval: 0.1s, max_interval: 1s}`, so the proxy
+reconnects within 1 s of the agent serving. Checked by
+`//test/envoy_validate:envoy_validate_test` (`TestNodeProxyADSReconnectBackoffIsBounded`)
+and `//charts/aether:aether_proxy_bootstrap_ads_reconnect_backoff_test`; the kind proof
+is `e2e/drain-propagation.sh`.
+
+The fast reconnect needs the agent's half of #1103. A restarted agent holds its own
+SVID before the SPIRE bridge has re-delivered the pods' certificates, and until then
+the #1049 gate keeps those identities' `quic:` twins out of the snapshot. A proxy that
+connects to that snapshot is told to remove the twins it holds (`cds: response
+indicates 0 added/updated cluster(s), 1 removed cluster(s)` right after the reconnect)
+and the requests its routes still send to a twin fail until the certificate's snapshot
+re-adds it. On kind, with the 1 s cap and main's agent, that happened on 8 of 18
+restarts, for 1–9.6 s each, and once cost 56 × 503. The 30 s default mostly hid it by
+reconnecting late. The agent now opens its xDS socket only once the snapshot carries
+every local certificate (bounded at 5 s; `local workloads' client certificates
+delivered; serving the complete snapshot`, or a WARN with `awaiting_client_cert` on
+timeout). On talos-main the certificates already arrive before the registry load
+finishes (all five TRIPLE agents on 2026-10-01: 0.3–2.6 s before), so the wait costs
+nothing there.
+
+**What it does not cover:** the agent's own outage. A drain mark that lands while the
+source agent is down is heard only once the new agent serves xDS: on w04 that was
+15.5 s after the old agent stopped (8.7 s pod replacement, then 6.8 s to identity,
+the registrar watch and the first registry load). The two-phase drain gives the
+destination only its preStop window, so a source agent restart that overlaps a
+destination pod's deletion can still send it requests.
+
+To see whether a proxy is blind right now: `control_plane.connected_state` on its admin
+(`0` = no ADS stream). On reconnect the proxy logs `cds: response indicates ...`, and
+the agent logs `fresh xDS stream re-stated QUIC twins` when the proxy holds twins.
+
 ### `504 UT` after exactly 15 s over an h2 mesh cluster to a terminating pod (#1104)
 
 The h2 sibling of #1087. Since QUIC went unconditional, h2 carries the GAMMA

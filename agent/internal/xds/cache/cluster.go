@@ -1185,6 +1185,21 @@ func (q quicFanout) entryTwinsAndVhost(key string, entry clusterEntry, meshDomai
 	return twins, clas, vhost
 }
 
+// AwaitingClientCertificates is how many local workload identities the most
+// recently BUILT snapshot held out of east-west QUIC -- no selection arm, no
+// `quic:` twin -- because SPIRE had not delivered their client certificate yet
+// (issue #1049). 0 before the first build.
+//
+// The xDS server's first serve after an agent restart waits (bounded) for it to
+// reach 0 (issue #1103): a proxy reconnecting to a snapshot built before the
+// SPIRE bridge caught up is told to REMOVE every twin it holds, and routes into
+// the gap until the certificate's snapshot re-adds them.
+func (c *SnapshotCache) AwaitingClientCertificates() int {
+	c.quicBudgetMu.Lock()
+	defer c.quicBudgetMu.Unlock()
+	return c.quicAwaitingSeen
+}
+
 // noteQUICFanout logs the cluster budget east-west QUIC costs whenever it
 // changes: one twin per OBSERVED (destination, source) pair (issue #1020), out
 // of local ServiceAccounts x eligible services in the node's dependency set

@@ -165,6 +165,21 @@ helm_template_test(
     },
 )
 
+# #1103: the proxy's ADS reconnect backoff is capped at 1 s. While the stream to
+# the node agent is down the proxy routes on stale endpoints (DRAINING hosts
+# included), and Envoy's 500 ms / 30 s default kept a proxy blind 8.4 s after
+# its restarted agent was serving again. //test/envoy_validate checks the values
+# and that Envoy accepts them; this pins them in the packaged chart.
+helm_template_test(
+    name = "aether_proxy_bootstrap_ads_reconnect_backoff_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-proxy-configmap.yaml": [
+            "ads_config:\\n\\s+api_type: DELTA_GRPC\\n\\s+grpc_services:\\n\\s+- envoy_grpc:\\n\\s+cluster_name: agent_xds\\n\\s+retry_policy:\\n\\s+retry_back_off:\\n\\s+base_interval: 0.1s\\n\\s+max_interval: 1s\\n",
+        ],
+    },
+)
+
 # #1054: the proxy drains with --drain-strategy gradual by default (immediate
 # made the stateless resets worse on talos-main); immediate stays an opt-in.
 helm_template_test(

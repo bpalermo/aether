@@ -34,6 +34,7 @@ go_test(
     name = "server_test",
     srcs = [
         "capture_gate_test.go",
+        "client_cert_wait_test.go",
         "identity_hold_test.go",
         "initial_snapshot_test.go",
         "local_only_severity_test.go",
