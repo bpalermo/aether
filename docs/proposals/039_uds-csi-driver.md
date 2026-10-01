@@ -585,9 +585,11 @@ from the design text:
   `<kubeletRoot>/pods/<that-uid>/`; unpublish recovers the UID from `target_path`,
   so the plugin stays stateless. **Not built:** the "second, different
   `volume_id` for a UID" rejection — it needs state; a second volume of one pod
-  reuses the pod's tmpfs. No `nr_inodes` cap: the data string is exactly
-  `mode=2770,uid=0,gid=<fsGroup>,size=<bytes>`.
-- **Chart values** are `udsCsi.{enabled,image,kubeletRoot,root,size,debug,
+  reuses the pod's tmpfs. The data string is exactly
+  `mode=2770,uid=0,gid=<fsGroup>,size=<bytes>,nr_inodes=<n>`; the inode cap
+  (`--inodes` / `udsCsi.inodes`, default 64, at least 8) was missing from #1090
+  and added in #1107 — the root directory counts against it.
+- **Chart values** are `udsCsi.{enabled,image,kubeletRoot,root,size,inodes,debug,
   nodeSelector,tolerations,resources}` (not `kubeletRootDir` / `tmpfsSize`).
   `Bidirectional` on `<kubeletRoot>/pods` and on `udsCsi.root`. The image uses the
   same distroless base as every aether image, run `privileged` as root by the
@@ -597,7 +599,7 @@ from the design text:
 - **Gate:** `e2e/uds-csi.sh` (kind, nightly `uds-csi` job): `CSINode` lists the
   driver, and still does after a plugin `rollout restart` that still publishes; an
   `fsGroup` pod gets a tmpfs with `2770`/gid and a working socket from a nonroot
-  app; the host holds that tmpfs `nosuid,nodev,noexec,nosymfollow` and does not
+  app, capped at `nr_inodes` (ENOSPC past it, the socket still answering); the host holds that tmpfs `nosuid,nodev,noexec,nosymfollow` and does not
   follow a symlink the app planted (`ELOOP`); a pod without `fsGroup` stays Pending
   with a `FailedMount` naming the fix; deletion removes the host tmpfs. The
   registration unit test drives the real server over a UDS rather than a fake

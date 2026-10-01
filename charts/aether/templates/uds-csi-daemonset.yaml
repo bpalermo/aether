@@ -67,6 +67,7 @@ spec:
             - "--kubelet-root={{ $kubeletRoot }}"
             - "--root={{ $root }}"
             - "--size={{ .Values.udsCsi.size }}"
+            - "--inodes={{ include "aether.udsCsi.inodes" . }}"
           env:
             # NodeGetInfo's node_id.
             - name: NODE_NAME
