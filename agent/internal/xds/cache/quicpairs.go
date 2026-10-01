@@ -67,9 +67,12 @@ const (
 // snapshot, which then carries the twin and its own load assignment together
 // (the #1008 rule), answering the subscription.
 //
-// The regeneration runs on its own goroutine: this is called from the xDS
-// stream's request callback, and publishing a snapshot from inside it could
-// block on the very stream whose request is being processed.
+// The regeneration runs off the caller's goroutine and is COALESCED with the
+// other admissions of the same burst (issue #1086, requestQUICPublish): this
+// is called from the xDS stream's request callback, publishing a snapshot from
+// inside it could block on the very stream whose request is being processed,
+// and a full rebuild per admitted pair is what pushed a 10-destination first
+// use past the on_demand timeout.
 //
 // streamID is the xDS stream that asked: the proxy generation that now holds
 // the name's on-demand subscription (issue #1052).
@@ -80,11 +83,7 @@ func (c *SnapshotCache) ObserveQUICTwin(ctx context.Context, streamID int64, nam
 		c.log.InfoContext(ctx, "refusing on-demand QUIC twin", "cluster", name, "reason", reason)
 	case QUICTwinAdded:
 		c.log.InfoContext(ctx, "observed east-west QUIC pair (ODCDS); building its twin", "cluster", name)
-		go func() {
-			if err := c.generateSnapshot(context.WithoutCancel(ctx)); err != nil {
-				c.log.Error("failed to publish the snapshot for an observed QUIC pair", "cluster", name, "error", err)
-			}
-		}()
+		c.requestQUICPublish(ctx, 1)
 	case QUICTwinKnown:
 	}
 	return decision, reason
@@ -158,7 +157,7 @@ func (c *SnapshotCache) CloseQUICStream(ctx context.Context, streamID int64) int
 // are confirmed (issue #1073), so the fetch-window prune keeps them, and a refused
 // well-formed name is kept dormant (issue #1036) so it is republished when it
 // becomes valid. Returns how many pairs were new; those are published with one
-// regeneration, off the caller's goroutine (see ObserveQUICTwin).
+// coalesced regeneration, off the caller's goroutine (see ObserveQUICTwin).
 //
 // A twin the proxy merely HOLDS (initial_resource_versions without a
 // subscription) admits nothing: it is whatever an older agent generation
@@ -180,11 +179,7 @@ func (c *SnapshotCache) ResumeQUICSubscriptions(ctx context.Context, streamID in
 	}
 	if added > 0 {
 		c.log.InfoContext(ctx, "resumed east-west QUIC pairs the proxy holds a live on-demand subscription for", "count", added)
-		go func() {
-			if err := c.generateSnapshot(context.WithoutCancel(ctx)); err != nil {
-				c.log.Error("failed to publish the snapshot for resumed QUIC pairs", "error", err)
-			}
-		}()
+		c.requestQUICPublish(ctx, added)
 	}
 	return added
 }
