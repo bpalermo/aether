@@ -209,3 +209,56 @@ func TestHttp3ProtocolOptionsDetectADeadPeer(t *testing.T) {
 		}
 	}
 }
+
+// TestMeshHttp2ProtocolOptionsDetectADeadPeer pins the h2 mesh clusters' PING
+// liveness (aether#1104) and its bound: Envoy sends the PING
+// interval*(1+jitter) after the previous ACK and closes the connection timeout
+// after an unanswered PING, so a dead peer is detected within
+// interval*(1+jitter) + timeout of its last frame -- under 10 s, well inside
+// the 15 s route timeout -- while the timeout stays at or above the 8 s
+// #1093 stall margin. The plain Http2ProtocolOptions (app hop, authz, xDS,
+// collector) must stay PING-free.
+func TestMeshHttp2ProtocolOptionsDetectADeadPeer(t *testing.T) {
+	po := MeshHttp2ProtocolOptions()
+	h2 := po.GetExplicitHttpConfig().GetHttp2ProtocolOptions()
+	if h2 == nil {
+		t.Fatal("expected explicit HTTP/2 protocol options")
+	}
+	if got := po.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration(); got != UpstreamIdleTimeout {
+		t.Errorf("idle timeout = %v, want %v", got, UpstreamIdleTimeout)
+	}
+	ka := h2.GetConnectionKeepalive()
+	if ka == nil {
+		t.Fatal("no connection_keepalive: a delivered request to a vanished endpoint hangs to the route timeout")
+	}
+	if got := ka.GetInterval().AsDuration(); got != MeshH2KeepaliveInterval {
+		t.Errorf("interval = %v, want %v", got, MeshH2KeepaliveInterval)
+	}
+	if got := ka.GetTimeout().AsDuration(); got != MeshH2KeepaliveTimeout {
+		t.Errorf("timeout = %v, want %v", got, MeshH2KeepaliveTimeout)
+	}
+	if got := ka.GetIntervalJitter().GetValue(); got != MeshH2KeepaliveJitterPercent {
+		t.Errorf("interval_jitter = %v%%, want %v%%", got, MeshH2KeepaliveJitterPercent)
+	}
+	if ka.GetConnectionIdleInterval() != nil {
+		t.Error("connection_idle_interval set; it is not part of the bound")
+	}
+
+	maxInterval := MeshH2KeepaliveInterval + time.Duration(float64(MeshH2KeepaliveInterval)*MeshH2KeepaliveJitterPercent/100)
+	if bound := maxInterval + MeshH2KeepaliveTimeout; bound > 10*time.Second {
+		t.Errorf("dead-peer bound %v exceeds 10 s", bound)
+	}
+	// aether#1093: never inside the 5-7 s worker stalls seen on talos-main --
+	// a stalled DESTINATION worker cannot ACK, and a live request would fail.
+	if MeshH2KeepaliveTimeout < 8*time.Second {
+		t.Errorf("keepalive timeout %v is inside the #1093 stall range", MeshH2KeepaliveTimeout)
+	}
+	// Same budget as the QUIC twins: one dead-peer story across both transports.
+	if MeshH2KeepaliveTimeout != QUICTwinNetworkIdleTimeout {
+		t.Errorf("h2 keepalive timeout %v differs from the twin idle %v", MeshH2KeepaliveTimeout, QUICTwinNetworkIdleTimeout)
+	}
+
+	if Http2ProtocolOptions().GetExplicitHttpConfig().GetHttp2ProtocolOptions().GetConnectionKeepalive() != nil {
+		t.Error("Http2ProtocolOptions carries a PING keepalive; it is also the app/authz/xDS hop, whose h2 peer is not an aether proxy")
+	}
+}

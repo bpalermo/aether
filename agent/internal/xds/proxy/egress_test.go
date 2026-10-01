@@ -11,6 +11,7 @@ import (
 	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
 	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -295,12 +296,14 @@ func TestEndpointHealthStatus(t *testing.T) {
 }
 
 // TestServiceClusterDrainPoolClose pins the P2 drain-gap fix shape: pool
-// connections close on (EDS) health failure, panic routing is off, and the
-// retry circuit breaker has headroom for the drain-time reset burst.
+// connections close on host health failure (outlier ejection -- the only
+// trigger this cluster has; the EDS drain mark does not close anything,
+// aether#1104), panic routing is off, and the retry circuit breaker has
+// headroom for the drain-time reset burst.
 func TestServiceClusterDrainPoolClose(t *testing.T) {
 	c := NewServiceCluster("svc-x.aether.internal", "svc-x", "svc-x", nil)
 	assert.True(t, c.GetCloseConnectionsOnHostHealthFailure(),
-		"pools must close at drain-mark, not at the app-exit GOAWAY race")
+		"an outlier-ejected host's pool connections must close")
 	require.NotNil(t, c.GetCommonLbConfig().GetHealthyPanicThreshold())
 	assert.Zero(t, c.GetCommonLbConfig().GetHealthyPanicThreshold().GetValue(),
 		"panic spraying at known-unhealthy hosts is never the mesh behavior")
@@ -689,4 +692,46 @@ func staticSecretSources(t *testing.T, ts *corev3.TransportSocket) []*corev3.Con
 		sources = append(sources, c.GetValidationContextSdsSecretConfig().GetSdsConfig())
 	}
 	return sources
+}
+
+// TestServiceClusterH2PingLiveness (aether#1104): every h2 mesh service
+// cluster -- the default, per-port and alias clusters alike are
+// NewServiceCluster, and so are the waypointed, GAMMA weighted-split and
+// edge -> mesh paths -- carries the HTTP/2 PING keepalive, so a request
+// delivered to an endpoint whose network then vanished fails within the bound
+// instead of hanging to the 15 s route timeout. The clusters whose h2 peer is
+// NOT an aether inbound proxy (the app hop, the passthrough) must not carry
+// it: an application h2 server may answer a PING a second with GOAWAY.
+func TestServiceClusterH2PingLiveness(t *testing.T) {
+	h2Of := func(t *testing.T, c *clusterv3.Cluster) *corev3.Http2ProtocolOptions {
+		t.Helper()
+		raw, ok := c.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey]
+		require.True(t, ok, "%s: no HTTP protocol options", c.GetName())
+		po := &httpv3.HttpProtocolOptions{}
+		require.NoError(t, raw.UnmarshalTo(po))
+		if h2 := po.GetExplicitHttpConfig().GetHttp2ProtocolOptions(); h2 != nil {
+			return h2
+		}
+		return po.GetUseDownstreamProtocolConfig().GetHttp2ProtocolOptions()
+	}
+
+	port := PortClusterName("default/svc-a", "aether.internal", 9090)
+	for _, c := range []*clusterv3.Cluster{
+		NewServiceCluster("svc-a.default.aether.internal", "default/svc-a", "default/svc-a", nil),
+		NewServiceCluster(port, port, "default/svc-a", []string{"version"}),
+	} {
+		ka := h2Of(t, c).GetConnectionKeepalive()
+		require.NotNil(t, ka, "%s: no h2 connection_keepalive: a delivered request to a vanished endpoint hangs to the route timeout", c.GetName())
+		assert.Equal(t, config.MeshH2KeepaliveInterval, ka.GetInterval().AsDuration(), c.GetName())
+		assert.Equal(t, config.MeshH2KeepaliveTimeout, ka.GetTimeout().AsDuration(), c.GetName())
+		assert.Nil(t, ka.GetConnectionIdleInterval(), "%s: connection_idle_interval is not part of the bound", c.GetName())
+	}
+
+	for _, c := range []*clusterv3.Cluster{
+		NewAppCluster("app_pod", AppAddress{Netns: "/var/run/netns/x"}, 8080, true),
+		NewPassthroughOriginalDstCluster(),
+	} {
+		assert.Nil(t, h2Of(t, c).GetConnectionKeepalive(),
+			"%s: h2 PING keepalive on a cluster whose peer is not an aether inbound proxy", c.GetName())
+	}
 }
