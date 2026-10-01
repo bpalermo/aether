@@ -1969,13 +1969,45 @@ outlasts the 15 s parent-shutdown window.
   the idle timeout on the `quic:` twins only; h1/h2 keep 30 s. It closes the connections
   that were idle when the drain started, before the parent exits. The chart refuses to
   render unless `eastWestQuicIdleTimeout + 5s < proxy.hotRestart.parentShutdownTime`, so
-  lowering the parent-shutdown time needs the idle timeout lowered with it. The cost is
-  one extra QUIC handshake for a (source, destination) pair that sits idle between 8 s
-  and 30 s.
+  lowering the parent-shutdown time needs the idle timeout lowered with it. Since #1087
+  the QUIC transport's own `idle_network_timeout` (4 s, negotiated to the minimum on both
+  ends) closes a twin connection with no open stream after 4 s anyway, so a pair idle
+  for more than 4 s pays one extra QUIC handshake; this flag matters only below that.
 
 A request in flight at the parent's exit still dies, as it does on h2. The soak gate is
 in `e2e/soak/README.md`, "The h3 stateless-reset gate (#1054)"; the kind leg is
 `e2e/eastwest-quic-hotrestart.sh` with `HR_MODE=sparse` (two nodes, `EWQ_WORKER=1`).
+
+### `504 UT` after exactly 15 s over a `quic:` twin to a terminating pod (#1087)
+
+Symptom (before the fix): a few source-reporter `504 UT response_timeout` lines per
+churn-heavy roll, each `duration_ms` ≈ 15000, `upstream_cluster` a `quic:` twin,
+`upstream_host` an endpoint whose pod was terminating. The destination-reporter lines
+for the **same `x_request_id`** show the request arrived: `503 UF` after 5 s, or code 0
+after 3–5 s.
+
+Cause: the destination pod's network went away (CNI DEL deletes the veth) after the
+request was delivered and ACKed, so nothing the destination proxy wrote back could
+leave the pod netns. QUIC has no RST, and the source had nothing in flight, so no PTO
+or blackhole detector ran. The only timers left were the QUIC idle timeout (300 s from
+the inbound listener's default) and QUICHE's 15 s keep-alive, and the 15 s route timeout
+won. h2 has the same exposure for an ACKed request (no TCP keepalive or HTTP/2 PING is
+configured); the h2 base is not changed by #1087.
+
+Since #1087 every twin carries `quic_protocol_options` with
+`connection_keepalive.max_interval: 1s` and `idle_network_timeout: 4s`. While a request
+stream is open the source PINGs after 1 s of silence; a live destination ACKs it, however
+slow its application is, and a dead one is closed 4 s after the first unanswered PING.
+The bound is about 6 s after the destination's last packet. What you see now is a
+`503 UC` with `response_code_details` starting
+`upstream_reset_before_response_started{connection_termination` and mentioning
+`QUIC_NETWORK_IDLE_TIMEOUT`, well under 15 s.
+
+The request is **not retried**, GET or POST. It was sent, so it may have reached the
+application, and the mesh retry policy retries only `connect-failure`, `refused-stream`,
+`reset-before-request` and a 503 *response*. New requests to the dead endpoint fail the
+QUIC handshake within the 2 s connect timeout and are retried on another endpoint.
+The kind proof is `e2e/eastwest-quic-deadpeer.sh`.
 
 ### Envoy SIGBUS/SEGV in `QuicConnection` after an h3 cluster removal (#1074)
 

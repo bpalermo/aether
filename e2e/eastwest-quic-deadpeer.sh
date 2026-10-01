@@ -63,6 +63,9 @@ export EWQ_WORKER=1
 DP_EXPECT="${DP_EXPECT:-green}"
 DP_BOUND="${DP_BOUND:-7.5}"
 DP_SECONDS="${DP_SECONDS:-15}"
+# Request ids carry the run so a pod that outlives one run (the survivor) never
+# counts a previous run's ids as replays.
+DP_RUN="${DP_RUN:-$(date +%s)}"
 DP_DST="quic-a"
 DP_SRC="client-a"
 DP_OUT="${DP_OUT:-$(mktemp -d)}"
@@ -142,10 +145,19 @@ warm() {
 	local pods p ip dump n
 	pods="$(dst_pods)"
 	[ "$(printf '%s\n' "$pods" | grep -c .)" -eq 2 ] || die "want 2 Running $DP_DST pods, have: $pods"
-	local deadline=$((SECONDS + 120))
+	local deadline=$((SECONDS + 120)) before
 	while true; do
+		before="$(twin_rq)"
 		req_batch "$DP_SRC" "$DP_DST" "/hostname" 20 >/dev/null
 		dump="$(admin /clusters)"
+		# Every request of the batch must have ridden the twin: a source
+		# whose arm is not live yet takes on_no_match, the h2 cluster, and
+		# the legs below would then measure h2, not HTTP/3.
+		if [ $(($(host_rq "$dump" "$(twin "$DP_DST" "$DP_SRC")") - before)) -lt 20 ]; then
+			[ "$SECONDS" -lt "$deadline" ] || die "the source's requests never all rode the twin"
+			sleep 3
+			continue
+		fi
 		n=0
 		for p in $pods; do
 			ip="$(kc -n "$TEST_NS" get pod "$p" -o jsonpath='{.status.podIP}')"
@@ -158,7 +170,18 @@ warm() {
 		[ "$SECONDS" -lt "$deadline" ] || die "the source's twin never carried requests to both $DP_DST replicas"
 		sleep 3
 	done
-	ok "twin $(twin "$DP_DST" "$DP_SRC") carries requests to both replicas"
+	ok "twin $(twin "$DP_DST" "$DP_SRC") carries every request, to both replicas"
+}
+
+# twin_rq — the source twin's rq_total summed over its hosts.
+twin_rq() { host_rq "$(admin /clusters)" "$(twin "$DP_DST" "$DP_SRC")"; }
+
+# assert_on_twin BEFORE N LEG — at least N of the leg's requests rode the twin.
+assert_on_twin() {
+	local d
+	d=$(($(twin_rq) - $1))
+	[ "$d" -ge "$2" ] || die "$3: only $d of >= $2 requests rode the twin: this would measure the h2 cluster, not HTTP/3"
+	ok "$3: $d requests rode the twin"
 }
 
 # stream_logs DIR — follow every current quic-a pod's app log into DIR, so a
@@ -254,21 +277,23 @@ $dups"
 
 leg_a() {
 	log "A in flight: 2 GET + 2 POST pinned to the victim, its network cut 2 s in, source agent frozen"
-	local pods victim url res
+	local pods victim url res rq0
 	pods="$(dst_pods)"
 	victim="$(printf '%s\n' "$pods" | head -n 1)"
 	url="http://$(fqdn "$DP_DST"):$OUTBOUND_PORT"
 	local dir="$DP_OUT/legA"
 	res="$dir/results"
 	stream_logs "$dir"
+	rq0="$(twin_rq)"
 	freeze_agent
-	in_pod "$LEG_A" sh "$url" "$victim" "dpA" >"$res" 2>/dev/null &
+	in_pod "$LEG_A" sh "$url" "$victim" "dpA$DP_RUN" >"$res" 2>/dev/null &
 	local pid=$!
 	sleep 2
 	cut_pod_network "$victim"
 	kc -n "$TEST_NS" delete pod "$victim" --wait=false >/dev/null
 	wait "$pid" || true
 	thaw_agent
+	assert_on_twin "$rq0" 4 A
 	sed 's/^/    /' "$res"
 	[ "$(grep -c . "$res")" -eq 4 ] || die "A: want 4 results, got $(grep -c . "$res")"
 	collect_logs "$dir"
@@ -285,26 +310,28 @@ leg_a() {
 		;;
 	*) die "DP_EXPECT must be red or green, got '$DP_EXPECT'" ;;
 	esac
-	no_replay dpA "$dir"
+	no_replay "dpA$DP_RUN" "$dir"
 }
 
 leg_b() {
 	log "B continuous: 4 GET loops + 1 slow POST/s for ${DP_SECONDS}s, unpinned; the victim's network cut 3 s in, source agent frozen"
-	local pods victim url res
+	local pods victim url res rq0
 	pods="$(dst_pods)"
 	victim="$(printf '%s\n' "$pods" | head -n 1)"
 	url="http://$(fqdn "$DP_DST"):$OUTBOUND_PORT"
 	local dir="$DP_OUT/legB"
 	res="$dir/results"
 	stream_logs "$dir"
+	rq0="$(twin_rq)"
 	freeze_agent
-	in_pod "$LEG_B" sh "$url" "dpB" "$DP_SECONDS" >"$res" 2>/dev/null &
+	in_pod "$LEG_B" sh "$url" "dpB$DP_RUN" "$DP_SECONDS" >"$res" 2>/dev/null &
 	local pid=$!
 	sleep 3
 	cut_pod_network "$victim"
 	kc -n "$TEST_NS" delete pod "$victim" --wait=false >/dev/null
 	wait "$pid" || true
 	thaw_agent
+	assert_on_twin "$rq0" 20 B
 	collect_logs "$dir"
 	awk '{ c[$2 " " $3]++; if ($4 > max) max = $4; if ($4 >= 14) slow++ }
 		END { for (k in c) printf "    %s x%d\n", k, c[k]; printf "    total %d, max %.3f s, >=14 s: %d\n", NR, max, slow + 0 }' "$res"
@@ -316,7 +343,7 @@ leg_b() {
 			die "B: a request answered something other than 200/503, or took longer than ${b3}s"
 		ok "B: no 504, nothing slower than ${b3}s, failures only 503 ($(awk '$3 == 503' "$res" | wc -l) of $(grep -c . "$res"))"
 	fi
-	no_replay dpB "$dir"
+	no_replay "dpB$DP_RUN" "$dir"
 }
 
 dp_verify() {
