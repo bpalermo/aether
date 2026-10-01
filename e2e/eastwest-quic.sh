@@ -216,6 +216,11 @@ SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.30.2}"
 SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.6.1}"
 SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi)
+# The tag every aether image is loaded and installed under. `latest` is what
+# `bazel run …:image_load` writes; a harness sharing the workstation with other
+# builds re-tags its images and sets EWQ_IMAGE_TAG (with EWQ_SKIP_BUILD=1) so a
+# concurrent build cannot swap the images under it between build and load.
+IMAGE_TAG="${EWQ_IMAGE_TAG:-latest}"
 if [ "${EWQ_LOCAL_PROXY:-0}" = "1" ]; then IMAGES+=(proxy); fi
 # Extra `helm upgrade aether` arguments for a harness that sources this file
 # (e2e/eastwest-quic-hotrestart.sh adds the OTLP collector and access logs).
@@ -341,8 +346,8 @@ load_images() {
 	log "loading images into '$CLUSTER'"
 	local img
 	for img in "${IMAGES[@]}"; do
-		kind load docker-image "${IMAGE_REGISTRY}/${img}:latest" --name "$CLUSTER" >/dev/null 2>&1 ||
-			die "could not load ${IMAGE_REGISTRY}/${img}:latest into kind (was it built?)"
+		kind load docker-image "${IMAGE_REGISTRY}/${img}:${IMAGE_TAG}" --name "$CLUSTER" >/dev/null 2>&1 ||
+			die "could not load ${IMAGE_REGISTRY}/${img}:${IMAGE_TAG} into kind (was it built?)"
 	done
 	ok "images loaded"
 }
@@ -445,7 +450,7 @@ chart_dir() {
 install_aether() {
 	local charts
 	charts="$(chart_dir)"
-	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=${IMAGE_TAG} --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
 	local gate=()
 	case "$IDENTITY_GATE" in
 	on) ;;

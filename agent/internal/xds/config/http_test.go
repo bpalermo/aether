@@ -157,3 +157,49 @@ func TestHttp3ProtocolOptionsIdleTimeout(t *testing.T) {
 		t.Fatalf("DefaultQUICTwinIdleTimeout %v must be below UpstreamIdleTimeout %v (aether#1054)", DefaultQUICTwinIdleTimeout, UpstreamIdleTimeout)
 	}
 }
+
+// TestHttp3ProtocolOptionsDetectADeadPeer pins the twin's QUIC transport
+// liveness (aether#1087) whatever pool idle timeout the caller passes: a
+// keep-alive PING while a stream is open and an idle_network_timeout that
+// closes a connection whose peer stopped answering, both well inside the
+// 15 s route timeout they exist to beat. h1/h2 options carry nothing QUIC.
+func TestHttp3ProtocolOptionsDetectADeadPeer(t *testing.T) {
+	for _, idle := range []time.Duration{0, 5 * time.Second, 30 * time.Second} {
+		q := Http3ProtocolOptions(idle).GetExplicitHttpConfig().GetHttp3ProtocolOptions().GetQuicProtocolOptions()
+		if q == nil {
+			t.Fatalf("idle %v: no quic_protocol_options", idle)
+		}
+		if got := q.GetIdleNetworkTimeout().AsDuration(); got != QUICTwinNetworkIdleTimeout {
+			t.Errorf("idle %v: idle_network_timeout = %v, want %v", idle, got, QUICTwinNetworkIdleTimeout)
+		}
+		if got := q.GetConnectionKeepalive().GetMaxInterval().AsDuration(); got != QUICTwinKeepaliveInterval {
+			t.Errorf("idle %v: keepalive max_interval = %v, want %v", idle, got, QUICTwinKeepaliveInterval)
+		}
+		if q.GetConnectionKeepalive().GetInitialInterval() != nil {
+			t.Errorf("idle %v: initial_interval set; only max_interval is part of the bound", idle)
+		}
+	}
+	// Envoy truncates idle_network_timeout to whole seconds (convertQuicConfig:
+	// DurationUtil::durationToSeconds) and documents max_interval >= 1 s.
+	if QUICTwinNetworkIdleTimeout%time.Second != 0 || QUICTwinNetworkIdleTimeout < time.Second {
+		t.Errorf("QUICTwinNetworkIdleTimeout %v must be a whole number of seconds >= 1 s", QUICTwinNetworkIdleTimeout)
+	}
+	if QUICTwinKeepaliveInterval < time.Second {
+		t.Errorf("QUICTwinKeepaliveInterval %v is below Envoy's documented 1 s floor", QUICTwinKeepaliveInterval)
+	}
+	// The keep-alive must fire well before the idle deadline, or a live but
+	// quiet peer (a slow application) would be idled out.
+	if 2*QUICTwinKeepaliveInterval >= QUICTwinNetworkIdleTimeout {
+		t.Errorf("keepalive %v leaves no room for a live peer to answer before the %v idle deadline", QUICTwinKeepaliveInterval, QUICTwinNetworkIdleTimeout)
+	}
+	if bound := QUICTwinKeepaliveInterval + time.Second + QUICTwinNetworkIdleTimeout; bound >= 15*time.Second {
+		t.Errorf("dead-peer bound %v does not beat the 15 s route timeout", bound)
+	}
+	for name, po := range map[string]interface {
+		GetExplicitHttpConfig() *httpv3.HttpProtocolOptions_ExplicitHttpConfig
+	}{"h1": Http1ProtocolOptions(), "h2": Http2ProtocolOptions()} {
+		if po.GetExplicitHttpConfig().GetHttp3ProtocolOptions() != nil {
+			t.Errorf("%s options carry HTTP/3 settings", name)
+		}
+	}
+}
