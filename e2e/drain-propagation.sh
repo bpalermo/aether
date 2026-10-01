@@ -32,17 +32,24 @@
 #               (old pod gone -> new agent serving xDS), and the RECONNECT LAG
 #               (new agent serving -> the proxy's first CDS response on the
 #               new stream). The fix (#1103) caps the reconnect backoff at 1 s:
-#               green gates every lag at DRP_RECONNECT_BOUND (1.5 s); red
-#               reports.
+#               green gates every lag at DRP_RECONNECT_BOUND (1.5 s), and
+#               that no CDS response after the reconnect REMOVES a cluster (a
+#               first snapshot built before the pods' certificates withdraws
+#               the `quic:` twin the proxy holds); red reports.
 #
-# Red and green differ ONLY in the proxy bootstrap: `bootstrap main|fix`
-# rewrites the live proxy ConfigMap with or without the ADS retry_back_off and
-# waits for the supervisor's hot restart to load it (read back from the admin
-# config dump).
+# Red and green differ in the proxy bootstrap and the agent image. `bootstrap
+# main|fix` rewrites the live proxy ConfigMap with or without the ADS
+# retry_back_off and waits for the supervisor's hot restart to load it (read
+# back from the admin config dump); `swap-agent TAG` rolls the agent onto an
+# image with (or without) the first-serve wait for the local client
+# certificates. The bootstrap alone, on main's agent, reconnects fast into a
+# first snapshot that lacks the pods' `quic:` twins -- the R gate's removal
+# check fails on it -- which is why the two ship together.
 #
 # Usage:
 #   EWQ_IMAGE_TAG=<tag> EWQ_SKIP_BUILD=1 e2e/drain-propagation.sh up
 #   e2e/drain-propagation.sh bootstrap main && DRP_EXPECT=red e2e/drain-propagation.sh verify
+#   e2e/drain-propagation.sh swap-agent <tag-with-the-fix>
 #   e2e/drain-propagation.sh bootstrap fix && DRP_EXPECT=green e2e/drain-propagation.sh verify
 #   e2e/drain-propagation.sh down
 set -euo pipefail
@@ -281,17 +288,32 @@ print(n)' "$t_mark")"
 	src_agent_new="$(agent_pod_on "$NODE")"
 	t_gone="$(kc -n "$NS" logs "$src_agent_new" -c agent 2>/dev/null |
 		python3 -c "$PY_AGENT_TS" "starting aether agent" | head -n 1)"
-	t_serving="$(kc -n "$NS" logs "$src_agent_new" -c agent 2>/dev/null |
-		python3 -c "$PY_AGENT_TS" "generating the initial snapshot" | tail -n 1)"
+	# The socket opens after PreListen's last step: the registry load, then
+	# (since #1103) the wait for the local client certificates when there was
+	# one to wait for. The latest of those lines is when the agent serves xDS.
+	local agent_log
+	agent_log="$(kc -n "$NS" logs "$src_agent_new" -c agent 2>/dev/null)"
+	t_serving="$({
+		printf '%s\n' "$agent_log" | python3 -c "$PY_AGENT_TS" "generating the initial snapshot"
+		printf '%s\n' "$agent_log" | python3 -c "$PY_AGENT_TS" "client certificates"
+	} | sort -g | tail -n 1)"
 	ppod="$(proxy_pod_on "$NODE")"
 	t_reconnect="$(kc -n "$NS" logs "$ppod" -c proxy --since=3m 2>/dev/null |
 		python3 -c "$PY_PROXY_TS" "cds: response indicates" |
 		awk -v s="$t_serving" '$1 >= s - 0.05 { print; exit }')"
 	[ -n "$t_serving" ] && [ -n "$t_reconnect" ] || die "R$i: could not read the source agent's serving time ($t_serving) or the proxy's reconnect ($t_reconnect)"
+	# CDS responses that REMOVED clusters in the 15 s after the reconnect: the
+	# restarted agent withdrawing what the proxy holds (the `quic:` twin, when
+	# its first snapshot predates the pod certificates).
+	local removals
+	removals="$(kc -n "$NS" logs "$ppod" -c proxy --since=3m 2>/dev/null |
+		{ grep -E 'cds: response indicates [0-9]+ added/updated cluster\(s\), [1-9][0-9]* removed' || true; } |
+		python3 -c "$PY_PROXY_TS" "cds: response indicates" |
+		awk -v s="$t_reconnect" '$1 >= s - 0.05 && $1 <= s + 15 { n++ } END { print n + 0 }')"
 	outage="$(awk -v a="$t_serving" -v b="$t0" 'BEGIN { printf "%.3f", a - b - 4 }')"
 	lag="$(awk -v a="$t_reconnect" -v b="$t_serving" 'BEGIN { printf "%.3f", a - b }')"
-	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$gap" "$after" "$non200" "$outage" "$lag" >>"$DRP_OUT/R.tsv"
-	ok "R$i: victim $victim  mark->last request ${gap}s  requests >1 s after the mark: $after  non-200: $non200  agent delete->serving ${outage}s (new agent started $(awk -v a="$t_gone" -v b="$t0" 'BEGIN { printf "%.1f", a - b - 4 }')s)  reconnect lag ${lag}s"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$gap" "$after" "$non200" "$outage" "$lag" "$removals" >>"$DRP_OUT/R.tsv"
+	ok "R$i: victim $victim  mark->last request ${gap}s  requests >1 s after the mark: $after  non-200: $non200  agent delete->serving ${outage}s (new agent started $(awk -v a="$t_gone" -v b="$t0" 'BEGIN { printf "%.1f", a - b - 4 }')s)  reconnect lag ${lag}s  CDS removals after reconnect: $removals"
 }
 
 summarize_leg() {
@@ -322,11 +344,15 @@ drp_verify() {
 		summarize_leg R 2 "mark -> last request at the victim (s)"
 		summarize_leg R 5 "source agent delete -> serving xDS (s)"
 		summarize_leg R 6 "source agent serving -> proxy reconnected (s)"
+		summarize_leg R 7 "CDS responses removing a held cluster after the reconnect"
 		case "$DRP_EXPECT" in
 		green)
 			awk -F'\t' -v b="$DRP_RECONNECT_BOUND" '$6 > b { bad = 1 } END { exit bad }' "$DRP_OUT/R.tsv" ||
 				die "R: the source proxy reconnected more than ${DRP_RECONNECT_BOUND}s after its agent was serving xDS"
 			ok "R: every reconnect within ${DRP_RECONNECT_BOUND}s of the agent serving"
+			awk -F'\t' '$7 > 0 { bad = 1 } END { exit bad }' "$DRP_OUT/R.tsv" ||
+				die "R: a restarted agent withdrew a cluster the proxy held on reconnect (its first snapshot predates the local client certificates)"
+			ok "R: no restarted agent withdrew a cluster the proxy held"
 			;;
 		red) ok "R (red): reported, not gated" ;;
 		*) die "DRP_EXPECT must be red or green, got '$DRP_EXPECT'" ;;
@@ -416,10 +442,21 @@ drp_down() {
 	down
 }
 
+# swap_agent TAG — roll the agent DaemonSet onto <registry>/agent:TAG (loaded
+# into the cluster first): the agent half of a red -> green step.
+swap_agent() {
+	local ref="${IMAGE_REGISTRY}/agent:$1"
+	kind load docker-image "$ref" --name "$CLUSTER" >/dev/null || die "could not load $ref"
+	kc -n "$NS" set image ds/aether-agent "agent=$ref" >/dev/null
+	kc -n "$NS" rollout status ds/aether-agent --timeout=300s >/dev/null || die "the agent never rolled onto $ref"
+	ok "agent DaemonSet on $ref"
+}
+
 case "${1:-}" in
 up) drp_up ;;
 verify) drp_verify ;;
 bootstrap) drp_bootstrap "${2:?usage: $0 bootstrap main|fix}" ;;
+swap-agent) swap_agent "${2:?usage: $0 swap-agent <tag>}" ;;
 down) drp_down ;;
-*) die "usage: $0 {up|verify|bootstrap main|fix|down}" ;;
+*) die "usage: $0 {up|verify|bootstrap main|fix|swap-agent <tag>|down}" ;;
 esac

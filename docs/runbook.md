@@ -2123,6 +2123,21 @@ reconnects within 1 s of the agent serving. Checked by
 and `//charts/aether:aether_proxy_bootstrap_ads_reconnect_backoff_test`; the kind proof
 is `e2e/drain-propagation.sh`.
 
+The fast reconnect needs the agent's half of #1103. A restarted agent holds its own
+SVID before the SPIRE bridge has re-delivered the pods' certificates, and until then
+the #1049 gate keeps those identities' `quic:` twins out of the snapshot. A proxy that
+connects to that snapshot is told to remove the twins it holds (`cds: response
+indicates 0 added/updated cluster(s), 1 removed cluster(s)` right after the reconnect)
+and the requests its routes still send to a twin fail until the certificate's snapshot
+re-adds it. On kind, with the 1 s cap and main's agent, that happened on 8 of 18
+restarts, for 1–9.6 s each, and once cost 56 × 503. The 30 s default mostly hid it by
+reconnecting late. The agent now opens its xDS socket only once the snapshot carries
+every local certificate (bounded at 5 s; `local workloads' client certificates
+delivered; serving the complete snapshot`, or a WARN with `awaiting_client_cert` on
+timeout). On talos-main the certificates already arrive before the registry load
+finishes (all five TRIPLE agents on 2026-10-01: 0.3–2.6 s before), so the wait costs
+nothing there.
+
 **What it does not cover:** the agent's own outage. A drain mark that lands while the
 source agent is down is heard only once the new agent serves xDS: on w04 that was
 15.5 s after the old agent stopped (8.7 s pod replacement, then 6.8 s to identity,

@@ -77,6 +77,12 @@ type WriteBehindQueue struct {
 
 	mu  sync.Mutex
 	ops map[wbKey]*wbOp
+
+	// kick wakes the flush loop as soon as an op is enqueued (issue #1103), so
+	// a fresh intent is written within one registry round trip instead of at
+	// the next wbTick. Buffered 1: a burst of enqueues coalesces into one
+	// flush, and the ticker still drives retries and backoff.
+	kick chan struct{}
 }
 
 // NewWriteBehindQueue creates the queue. metrics may be nil.
@@ -86,6 +92,7 @@ func NewWriteBehindQueue(reg registry.Registry, log *slog.Logger, metrics *Metri
 		log:      commonlog.Named(log, "write-behind"),
 		metrics:  metrics,
 		ops:      make(map[wbKey]*wbOp),
+		kick:     make(chan struct{}, 1),
 	}
 }
 
@@ -114,6 +121,10 @@ func (q *WriteBehindQueue) enqueue(key wbKey, op *wbOp) {
 	depth := len(q.ops)
 	q.mu.Unlock()
 	q.metrics.wbDepth(context.Background(), depth)
+	select {
+	case q.kick <- struct{}{}:
+	default:
+	}
 }
 
 // Start runs the flush loop until ctx ends. Implements Runnable.
@@ -126,6 +137,12 @@ func (q *WriteBehindQueue) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			q.flushDue(ctx)
+		case <-q.kick:
+			// A new intent. Peer replicas see an endpoint change only once it
+			// is in the external registry (their etcd watch), so waiting for
+			// the next tick added up to wbTick to every cross-replica drain
+			// mark (#1103: 0.5-0.9 s vs 0.2 s same-replica on kind).
 			q.flushDue(ctx)
 		}
 	}
