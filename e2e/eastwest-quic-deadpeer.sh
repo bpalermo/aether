@@ -292,8 +292,10 @@ leg_a() {
 	cut_pod_network "$victim"
 	kc -n "$TEST_NS" delete pod "$victim" --wait=false >/dev/null
 	wait "$pid" || true
-	thaw_agent
+	# Read while the agent is still frozen: its first push after the thaw
+	# removes the victim host row, and its rq_total with it.
 	assert_on_twin "$rq0" 4 A
+	thaw_agent
 	sed 's/^/    /' "$res"
 	[ "$(grep -c . "$res")" -eq 4 ] || die "A: want 4 results, got $(grep -c . "$res")"
 	collect_logs "$dir"
@@ -330,8 +332,10 @@ leg_b() {
 	cut_pod_network "$victim"
 	kc -n "$TEST_NS" delete pod "$victim" --wait=false >/dev/null
 	wait "$pid" || true
-	thaw_agent
+	# Read while the agent is still frozen: its first push after the thaw
+	# removes the victim host row, and its rq_total with it.
 	assert_on_twin "$rq0" 20 B
+	thaw_agent
 	collect_logs "$dir"
 	awk '{ c[$2 " " $3]++; if ($4 > max) max = $4; if ($4 >= 14) slow++ }
 		END { for (k in c) printf "    %s x%d\n", k, c[k]; printf "    total %d, max %.3f s, >=14 s: %d\n", NR, max, slow + 0 }' "$res"
