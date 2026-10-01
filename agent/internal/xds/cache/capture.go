@@ -280,6 +280,19 @@ func (c *SnapshotCache) SetCaptureAuthorities(authorities map[string]string) {
 // listener. A change rebuilds all per-pod capture listeners (they embed the TCP chains)
 // and regenerates the xDS snapshot so Envoy picks up the new filter chains.
 func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPService) {
+	c.captureMu.Lock()
+	// The reconciler knows a service's name, VIP and primary class; its PORTS
+	// are derived by the cache from the registry endpoints
+	// (refreshCaptureTCPPorts), on the registry's schedule. Carry the last
+	// derivation into every entry built here. Dropping it -- as this did until
+	// #1094 -- made an unchanged re-projection compare as a change (the derived
+	// fields went to zero), so every mesh-Service event rebuilt every capture
+	// listener WITHOUT its destination_port chains: a connection to a declared
+	// port fell to the any-port shim (past proposal 037 Phase 4, to nothing),
+	// and the connections riding the removed chains were drained, until the
+	// next registry load put them back. An agent restart interleaves one
+	// reconcile per mesh Service with its first registry loads, which is how
+	// talos hit it 12 s after a restart.
 	entries := make([]captureTCPEntry, 0, len(services))
 	for _, s := range services {
 		if s.ServiceName != "" && s.ClusterIP != "" {
@@ -287,14 +300,18 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 				serviceName:  s.ServiceName,
 				clusterIP:    s.ClusterIP,
 				primaryIsTCP: s.PrimaryIsTCP,
+				tcpPorts:     c.captureDerivedTCPPorts[s.ServiceName],
+				primaryPort:  c.captureDerivedPrimaryPorts[s.ServiceName],
 			})
 		}
 	}
-
-	c.captureMu.Lock()
 	changed := !equalTCPEntries(c.captureTCPServices, entries)
 	c.captureTCPServices = entries
 	c.captureMu.Unlock()
+	// Closed AFTER the listener rebuild below has run when it matters: a waiter
+	// that wakes here goes on to open the xDS socket, and the snapshot it serves
+	// must already carry these chains. Deferred so every return path closes it.
+	defer c.captureProjectedOnce.Do(func() { close(c.captureProjected) })
 
 	if !changed {
 		return
@@ -343,6 +360,16 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	// are also rebuilt from captureTCPServices) and a full snapshot push to Envoy.
 	c.signalDependencyChange()
 }
+
+// CaptureProjected returns a channel closed once the mesh-Service reconciler
+// has delivered its first SetCaptureTCPServices projection (#1094).
+//
+// That projection defines which per-VIP and per-port TCP chains the capture
+// listener carries. A snapshot served before it would replace a restarted
+// agent's still-correct listener in Envoy with one that has none of them, so
+// the xDS server holds its first serve on this (bounded; see
+// AgentXdsServer.SetCaptureGate). Closed, not sent on: any number of waiters.
+func (c *SnapshotCache) CaptureProjected() <-chan struct{} { return c.captureProjected }
 
 // captureTCPClusters returns the TCP floor clusters for non-HTTP services, and the
 // load assignments they subscribe to. These are separate EDS clusters (prefixed
@@ -1322,6 +1349,13 @@ func nonPrimaryTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
 // into dropped connections.
 func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string][]uint32, primary map[string]uint32) {
 	c.captureMu.Lock()
+	// Keep the derivation itself, not only its application to today's entries:
+	// a service the reconciler projects AFTER this load (the order at agent
+	// start) or projects again later gets these ports from
+	// SetCaptureTCPServices (#1094). Both maps are freshly built by the caller
+	// and never mutated afterwards, so holding them is safe.
+	c.captureDerivedTCPPorts = derived
+	c.captureDerivedPrimaryPorts = primary
 	next := make([]captureTCPEntry, 0, len(c.captureTCPServices))
 	for _, e := range c.captureTCPServices {
 		e.tcpPorts = derived[e.serviceName]
