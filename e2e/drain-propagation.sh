@@ -318,8 +318,8 @@ print(n)' "$t_mark")"
 
 summarize_leg() {
 	local leg="$1" col="$2" name="$3"
-	sort -t$'\t' -k"$col,$col" -g "$DRP_OUT/$leg.tsv" | awk -F'\t' -v c="$col" -v n="$name" '
-		{ v[NR] = $c; s += $c } END { if (NR) printf "    %s: n=%d min %.3f median %.3f max %.3f\n", n, NR, v[1], v[int((NR + 1) / 2)], v[NR] }'
+	cut -f"$col" "$DRP_OUT/$leg.tsv" | LC_ALL=C sort -g | awk -v n="$name" '
+		{ v[NR] = $1 } END { if (NR) printf "    %s: n=%d min %.3f median %.3f max %.3f\n", n, NR, v[1], v[int((NR + 1) / 2)], v[NR] }'
 }
 
 drp_verify() {
