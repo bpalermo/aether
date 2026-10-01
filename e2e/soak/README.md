@@ -8,8 +8,8 @@ Three components run together:
 | Component | What it proves |
 |---|---|
 | **External prober** (`//prober`, DaemonSet, already deployed) | the availability SLI — **authoritative for PASS/FAIL** |
-| **k6 runners** (`k6-runner.yaml`) | mesh load by NAME (~300/s) so DNS + cross-node paths are exercised |
-| **Churn driver** (`churn.sh`) | 31 rolling restarts incl. mesh-dns/agent/proxy/edge + a concurrent triple, two mid-run pods under a brand-new ServiceAccount (#1014), then a 90-minute no-roll window and a demand-set shrink |
+| **k6 runners** (`k6-runner.yaml`) | mesh load by NAME (~300/s) so DNS + cross-node paths are exercised, 5% of it on the two UDS-delivered services (#1108) |
+| **Churn driver** (`churn.sh`) | 33 rolling restarts incl. mesh-dns/agent/proxy/edge/uds-csi + a concurrent triple, two mid-run pods under a brand-new ServiceAccount (#1014), then a 90-minute no-roll window and a demand-set shrink |
 | **Multi-protocol leg** (`multiprotocol.yaml`) | proposal 037's per-port TCP chains under load, and the evidence for its Phase 4 gate |
 | **UDP leg** (`udp.yaml`) | proposal 038's transparent UDP capture under load: the divert, the transparent socket, and the VIP-sourced reply, through every roll |
 
@@ -59,6 +59,19 @@ SOAK_CHURN_LOG=/tmp/soak-newsa-preflight.log \
   bash "$PWD/e2e/soak/churn.sh" --context talos-main --new-sa-once &&
   grep -E 'ROLLED|FAILED' /tmp/soak-newsa-preflight.log
 
+# 0e. The UDS leg (#1108/#1109): charts/udsecho installed in aether-test (uds-echo
+#     = annotation delivery, uds-cr-echo = EndpointPolicy delivery, uds-client),
+#     on the csi.aether.io carrier. k6 drives both services and churn.sh rolls
+#     aether-uds-csi under them, deleting one of their pods mid-roll; its
+#     pre-flight refuses to start without them (or set SOAK_UDSCSI=0). Optionally,
+#     ONCE before the run, one uds-csi step now. It rolls the plugin and replaces
+#     one uds-echo pod. Expect a single `ROLLED aether-system/daemonset/aether-uds-csi`
+#     line with window=down, csinode=n/n and failedmount_after=0. See "The UDS leg".
+kubectl -n aether-test get deploy uds-echo uds-cr-echo uds-client   # expect 2/2 2/2 1/1
+SOAK_CHURN_LOG=/tmp/soak-udscsi-preflight.log \
+  bash "$PWD/e2e/soak/churn.sh" --context talos-main --uds-csi-once &&
+  grep -E 'ROLLED|FAILED' /tmp/soak-udscsi-preflight.log
+
 # 1. Load the k6 script as a ConfigMap (source of truth is the .js file here).
 #    RE-RUN THIS after any edit to k6-mesh-soak.js -- the pod mounts the
 #    ConfigMap, so an edited .js that was never re-applied runs the OLD script
@@ -85,7 +98,7 @@ kubectl get pods -n aether-system
 #    T0+75m, and a driver started inside a subagent dies with it.
 kubectl apply -f e2e/soak/k6-runner.yaml
 # REFUSE to start a second driver. Two of them share /tmp/soak-churn.log and
-# interleave their schedules into ~62 rolls instead of 31, which does not fail
+# interleave their schedules into ~66 rolls instead of 33, which does not fail
 # the run -- it silently invalidates it. Match on the ABSOLUTE path, never on
 # "soak/churn.sh": see "Stopping the churn driver" below for why.
 #
@@ -94,7 +107,8 @@ kubectl apply -f e2e/soak/k6-runner.yaml
 # cluster: on 2026-09-26 that made every roll hit localhost:8080 for 58 minutes
 # while the soak looked healthy. The foreground --preflight run is the loud one:
 # it checks /readyz, that every DaemonSet/Deployment the schedule rolls (and the
-# SHRINK target) exists, and that the context may patch them, and exits non-zero
+# SHRINK target) exists, and that the context may patch them, that the uds-csi
+# step's UDS Deployments have a Running pod to delete, and exits non-zero
 # with the reason on stderr. The detached launch pre-flights again, but its stderr
 # goes to /dev/null -- so never skip the foreground run. A failed pre-flight
 # writes NOTHING: /tmp/soak-churn.log is neither archived nor truncated, and no T0
@@ -111,9 +125,10 @@ head -2 /tmp/soak-churn.log
 # Fail fast: the FIRST `FAILED` roll (or a SHRINK that cannot scale) ends the
 # driver with `CHURN ABORTED ...` and exit 1, restoring the SHRINK target first.
 # It no longer carries on with holes in the schedule. An ABORTED line means stop,
-# fix, relaunch with a fresh T0 -- that run is not gradeable. The one exception
-# is `FAILED newsa/...` with a tally and no ABORTED after it: that is the
-# new-ServiceAccount gate reading red (a finding), not a hole -- the run goes on.
+# fix, relaunch with a fresh T0 -- that run is not gradeable. The two exceptions
+# are `FAILED newsa/...` and `FAILED aether-system/daemonset/aether-uds-csi ...`
+# with a tally and no ABORTED after it: that is the new-ServiceAccount or the
+# uds-csi gate reading red (a finding), not a hole -- the run goes on.
 grep -E "FAILED|CHURN ABORTED" /tmp/soak-churn.log   # expect nothing
 
 # 4. Age-matched proxy RSS baseline at T0+30m (churn.sh takes the rest itself,
@@ -132,18 +147,19 @@ kubectl delete -f e2e/soak/k6-runner.yaml
 # Count ROLLED in the CURRENT log only. churn.sh archives the previous run as
 # /tmp/soak-churn.log.<ts>.prev, and older runs left /tmp/soak-churn-*.log
 # behind, so `grep -c ROLLED /tmp/soak-churn*` inflates the tally across runs.
-grep -c ROLLED /tmp/soak-churn.log      # expect 33 (31 rolls + 2 new-SA steps) -- this exact path, no glob
+grep -c ROLLED /tmp/soak-churn.log      # expect 35 (33 rolls incl. 2 uds-csi + 2 new-SA steps) -- this exact path, no glob
 grep -E "newsa/" /tmp/soak-churn.log    # expect 2 ROLLED, 0 FAILED -- see "The new-ServiceAccount step"
+grep aether-uds-csi /tmp/soak-churn.log # expect 2 ROLLED, 0 FAILED -- see "The UDS leg"
 grep -E "no-roll window|SHRINK" /tmp/soak-churn.log
 column -t /tmp/soak-proxy-rss.tsv       # the #628 age-matched series
 ```
 
 ## The churn schedule
 
-29 roll entries; the TRIPLE fires three rolls at once, so the rolls are **31** (6
-proxy, 2 agent, 3 mesh-dns, 2 edge, 18 svc). The older footer said 30 — it forgot the
-TRIPLE's proxy. The two new-ServiceAccount steps (#1014) each log one `ROLLED newsa/…`
-line too, so `grep -c ROLLED` is **33** by default.
+31 roll entries; the TRIPLE fires three rolls at once, so the rolls are **33** (6
+proxy, 2 agent, 3 mesh-dns, 2 edge, 2 uds-csi, 18 svc). An older footer said 30 — it
+forgot the TRIPLE's proxy. The two new-ServiceAccount steps (#1014) each log one
+`ROLLED newsa/…` line too, so `grep -c ROLLED` is **35** by default.
 
 | T0+ (min) | Roll | | T0+ (min) | Roll |
 |---|---|---|---|---|
@@ -155,10 +171,12 @@ line too, so `grep -c ROLLED` is **33** by default.
 | 126 | **NEW-SA** #1 — a pod under a brand-new ServiceAccount, 2 min of traffic (#1014) | | | |
 | 132 | svc-2 | | 144 | mesh-dns |
 | 156 | svc-3 | | 168 | svc-4 |
+| 162 | **UDS-CSI** #1 — roll `aether-uds-csi`, delete a `uds-echo` pod mid-roll (#1109) | | | |
 | 180 | svc-5 | | 192 | svc-1 |
 | 204 | edge | | 216 | **proxy** \* |
 | 228 | svc-2 | | 240 | svc-4 |
 | 252 | **proxy** \* | | 264 | svc-3 |
+| 270 | **UDS-CSI** #2 — the same, deleting a `uds-cr-echo` pod (#1109) | | | |
 | 276 | svc-1 | | 288 | **NEW-SA** #2 (#1014) |
 | 300 | **TRIPLE** \* — agent + proxy + svc-3, the stress peak **and the last agent roll** | | | |
 | 312 | mesh-dns | | 324 | svc-4 |
@@ -663,6 +681,10 @@ the pod exists, and after that it cannot be placed.
   agent roll. See gate 5 under "The new-ServiceAccount step".
 - **The new-ServiceAccount gate (#1014)** — `init_fetch_timeout` on `@` clusters and
   zero `503/NC` for `user_agent:aether-soak-newsa`. See "The new-ServiceAccount step".
+- **The UDS gates (#1108/#1109)** — 0 non-benign access-log lines on `uds-echo` /
+  `uds-cr-echo` with a clean-200 control, both uds-csi roll lines `ROLLED` with
+  `csinode=n/n` and `failedmount_after=0`, and `aether_agent_uds_resolve_failures_total`
+  unchanged T0 → T0+8h. See "The UDS leg".
 - **The L4 gates (#1023)** — `ssl_fail_verify_san` on the `tcp_` keys is zero outside
   rolls, and no pod without a raw-TCP primary port takes a TCP-floor connection. See
   "The L4 gates".
@@ -726,8 +748,137 @@ one, know which kind it is and what proves it can move:
 | `aether_cni_operations_total{aether_cni_operation="capture_divert",aether_cni_result="error"}` | **no series** | `…{aether_cni_operation="add"}` must exist (the export works). The labels are `aether_cni_operation`/`aether_cni_result` (#1088); `operation`/`result` match nothing |
 | `envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}` (#1014) | **no series**; a failure is BORN at 1, so `increase()` alone reads 0 — use `max_over_time` too | rev242's red reading (above), and each step's own `@…/sa-new-*` twin series existing with traffic |
 | `503/NC` for `user_agent:aether-soak-newsa` | no rows | the same query without `response_flags:NC` returns the step's requests |
+| non-benign lines on `uds-echo` / `uds-cr-echo` (#1108; see "The UDS leg") | no rows | the clean-200 control query: k6 (`default`) and `uds-client` rows on both authorities |
+| `aether_agent_uds_resolve_failures_total` (#1109) | **seeded**: one row per node × reason, at 0 | the T0 query returning every row; an empty result is a broken selector, not a zero |
 | **L4 (a)** `envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}` outside roll brackets (#1023; see "The L4 gates") | **no series** (born at 1 on the first rejection — read `max_over_time`, not only `increase`) | rev242: **23** ticks over its soak, and rev243: 1 in 1h47m — both read under the pre-#1023 keys `aether-test/(tcp-echo\|mixed-svc)`, since a pre-#1023 proxy exports no `tcp_` key at all; on a #1023 build, `envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_.*"}` must EXIST and climb with the mp-dialer legs (the keys are exported and the selector is spelled right) |
 | **L4 (b)** stray TCP-floor landings `envoy_tcp_in_tcp_<pod>_downstream_cx_total` on pods that serve no raw-TCP primary port (#1007/#1022/#1023; see "The L4 gates") | **no series** once every proxy runs the #1022 thread-self patch | rev243 is the negative control: **6** stray landings in its 1h47m generation, all on `prober` pods (w05 2, w03 3, w04 1); rev242 non-zero on svc-1..5, prober, k6-soak-loader and udp-dialer. On any build, `tcp-echo`'s own `in_tcp_*` and the `*_9000` per-port chains climbing proves the chain family is exported |
+
+### The UDS leg: k6 on the CSI carrier (#1108) and the uds-csi roll (#1109)
+
+**Why.** Since proposal 039 (chart 2.0.0) a UDS-served pod's socket lives on a per-pod
+tmpfs that the privileged `aether-uds-csi` DaemonSet mounts. The node proxy reaches it
+through a read-only view of `/run/aether/uds`. Before #1108/#1109 the soak only graded
+that path from access logs, via `uds-client`'s 1 rps curl loop. No client-side SLI
+covered it, and nothing ever rolled the plugin. Two gaps follow from that. A delivery
+failure during a roll would only show as a non-200 line that nobody was looking for. And
+the three things a plugin roll can break were never exercised under load:
+
+- mounts persisting across the roll;
+- `NodeUnpublishVolume` retried for a pod that terminates while its node's plugin is down;
+- a new pod mounting right after.
+
+**The load (#1108).** `k6-mesh-soak.js` sends `UDS_SHARE` = 5% of its iterations to
+`uds-echo` (annotation delivery) and `uds-cr-echo` (`EndpointPolicy` delivery), split
+evenly. The total arrival rate is unchanged, so the TCP targets each drop from 16.7% to
+15.8%. At 60 iters/s × 5 runners that is ~7.5 rps per UDS authority, about 216,000
+requests each over 8 h. The workloads are `charts/udsecho`, already installed in
+`aether-test` (0e above). The k6 runner's `config.aether.io/upstreams` lists both.
+
+**The roll (#1109).** `churn.sh` runs a UDS-CSI step at T0+162 and T0+270. Each step
+does the following:
+
+1. `rollout restart ds/aether-uds-csi`.
+2. As soon as the plugin pod on a UDS pod's node is terminating, delete that UDS pod.
+   Step 1 picks a `uds-echo` pod, step 2 a `uds-cr-echo` pod.
+3. Wait for the DaemonSet rollout to finish, the deleted pod to finish Terminating, and
+   its replacement to become Ready.
+4. Log one line:
+
+```
+ROLLED aether-system/daemonset/aether-uds-csi victim=aether-test/uds-echo-…@<node> window=down
+  rollout=<s>s terminated=<s>s replacement=uds-echo-… ready=<s>s csinode=5/5 failedmount_during=1 failedmount_after=0
+```
+
+The line's fields:
+
+- `window=down`: the pod was deleted while its node's plugin was down, so the kubelet's
+  unpublish had to wait for the new plugin. `window=missed` means the plugin pod was
+  already gone before the driver looked. The step still counts, but the mid-roll
+  unpublish leg was not exercised.
+- `failedmount_during`: FailedMount events in `aether-test` between the restart and
+  the end of the step. Non-zero is expected. The replacement is usually scheduled while
+  its node's plugin is still unregistered, and the kubelet retries. On kind every step
+  logged `driver name csi.aether.io not found in the list of registered CSI drivers`
+  once, then mounted.
+- `failedmount_after`: FailedMount events stamped in the 30 s after the step finished.
+  This is a gate and must be 0.
+- `csinode=k/n`: nodes running a plugin pod whose CSINode lists `csi.aether.io`. This is
+  a gate and must be `n/n`.
+
+The step logs `FAILED … bad=<rollout|terminating|replacement|csinode|failedmount>`
+instead of `ROLLED` when any of those breaks. Like `FAILED newsa/…`, that is a gate
+finding and the run goes on. Only a refused restart, or no Running UDS pod to delete,
+aborts. Opt out with `SOAK_UDSCSI=0`. `SOAK_UDSCSI_OFFSETS` and `SOAK_UDSCSI_VICTIMS`
+retarget it. Run one step by hand with `--uds-csi-once` (0e).
+
+**The gates.**
+
+1. **0 non-benign failures on the UDS authorities, with a success control.** Every
+   query starts at `log_name:` (#1098), and the benign-`DC` sizes are re-derived from
+   this run's own clean lines (#1089). The authority is matched by pattern, so the short
+   name and the FQDN spelling both count.
+
+   ```logsql
+   # control: clean 200s per UDS authority and calling client. Expect k6
+   # (client_sa default) ~216,000 per authority over T0..T0+8h and uds-client
+   # ~28,800. A UDS authority missing here means the leg was idle and the
+   # zero below means nothing.
+   log_name:aether_access_logs AND reporter:source AND authority:~"^uds-(cr-)?echo"
+     AND response_code:="200" AND response_flags:="-"
+     | extract_regexp "/sa/(?P<client_sa>[^/]+)$" from source_spiffe_id
+     | stats by (authority, client_sa) count() clean, uniq_values(bytes_sent) clean_sizes
+
+   # THE GATE: every other line on the UDS authorities. Each row must be benign DC by
+   # the four-condition rule (DC alone, downstream_remote_disconnect, 200, bytes_sent
+   # in that authority's clean_sizes above), with k6 rows inside a source-node proxy
+   # roll bracket and uds-client rows in its per-client baseline. Any other row is a
+   # FAIL, and the uds-csi roll brackets in /tmp/soak-churn.log are the first place
+   # to look for it.
+   log_name:aether_access_logs AND reporter:source AND authority:~"^uds-(cr-)?echo"
+     AND NOT (response_code:="200" AND response_flags:="-")
+     | extract_regexp "/sa/(?P<client_sa>[^/]+)$" from source_spiffe_id
+     | stats by (authority, client_sa, node_name, response_code, response_flags, response_code_details, bytes_sent) count()
+   ```
+
+   Cross-check against each runner's k6 summary. The `--- by target` table must show no
+   `uds-echo` / `uds-cr-echo` row. A row there is a client-side failure, and it must
+   match a gate row above. Benign `DC` is a k6 success, so it never appears in k6.
+
+2. **The roll lines.**
+
+   ```bash
+   grep aether-uds-csi /tmp/soak-churn.log
+   # expect: 2 ROLLED (no FAILED), each window=down, csinode=n/n where n is the
+   # number of nodes running the plugin, and failedmount_after=0
+   ```
+
+   That `failedmount_after=0` is the record that no FailedMount outlived a roll. The
+   API server keeps Events for about 1 h, so a `kubectl get events` at T0+8h cannot
+   see a roll at T0+162. For the same reason, read CSINode right after each roll from
+   the line's `csinode=` field. To re-check by hand within the hour:
+
+   ```bash
+   kubectl -n aether-test get events --field-selector reason=FailedMount \
+     -o custom-columns=LAST:.lastTimestamp,POD:.involvedObject.name,MSG:.message
+   kubectl get csinode -o custom-columns=NODE:.metadata.name,DRIVERS:.spec.drivers[*].name
+   ```
+
+3. **`aether_agent_uds_resolve_failures_total` unchanged.** This uses the counter
+   rule: raw values at T0 and at T0+8h, compared per row.
+
+   ```promql
+   # instant query at T0 and again at T0+8h; every (node, reason) row must be equal
+   sum by (node, reason) (aether_agent_uds_resolve_failures_total)
+   # the two agent rolls (T0+72, the TRIPLE) restart the counter, so a generation
+   # that climbed and was rolled away is invisible to the T0+8h value. This catches
+   # it: every row must equal its T0 value.
+   max by (node, reason) (max_over_time(aether_agent_uds_resolve_failures_total[8h]))
+   ```
+
+   The counter is seeded at 0 for every reason, so the T0 query must return one row per
+   node × reason (5 × 8 on talos-main). An empty result means the selector or the
+   export is broken, not that the counter is zero. Any increase means a UDS pod fell
+   back to TCP, and the agent logs one ERROR line per pod per reason naming it.
 
 ### The L4 gates (#1023)
 
@@ -1505,8 +1656,9 @@ Each of these invalidated a real run:
   > bounded verbatim sample. Verified on k6 v2.3.0; see the comment block in
   > `k6-mesh-soak.js`.
 - `k6-runner.yaml` — the 5-node runner DaemonSet.
-- `churn.sh` — the 31-roll churn driver plus the two new-ServiceAccount steps, the
-  no-roll window and the demand-set shrink; takes a build label for the log header.
+- `churn.sh` — the 33-roll churn driver (incl. the two uds-csi steps) plus the two
+  new-ServiceAccount steps, the no-roll window and the demand-set shrink; takes a build
+  label for the log header.
 - `newsa-client.sh` — the new-SA step's workload (busybox `sh` + `curl` in the pod,
   shipped per step as a ConfigMap); never run on the workstation.
 - `sample-proxy-rss.sh` — age-matched `aether-proxy` working-set sampler for #628.
