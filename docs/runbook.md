@@ -2064,8 +2064,8 @@ request was delivered and ACKed, so nothing the destination proxy wrote back cou
 leave the pod netns. QUIC has no RST, and the source had nothing in flight, so no PTO
 or blackhole detector ran. The only timers left were the QUIC idle timeout (300 s from
 the inbound listener's default) and QUICHE's 15 s keep-alive, and the 15 s route timeout
-won. h2 has the same exposure for an ACKed request (no TCP keepalive or HTTP/2 PING is
-configured); the h2 base is not changed by #1087.
+won. h2 had the same exposure for an ACKed request (no TCP keepalive or HTTP/2 PING was
+configured); #1104 closed it, see the next section.
 
 Since #1087 every twin carries `quic_protocol_options` with
 `connection_keepalive.max_interval: 1s` and `idle_network_timeout: 8s`. While a request
@@ -2085,6 +2085,32 @@ application, and the mesh retry policy retries only `connect-failure`, `refused-
 `reset-before-request` and a 503 *response*. New requests to the dead endpoint fail the
 QUIC handshake within the 2 s connect timeout and are retried on another endpoint.
 The kind proof is `e2e/eastwest-quic-deadpeer.sh`.
+
+### `504 UT` after exactly 15 s over an h2 mesh cluster to a terminating pod (#1104)
+
+The h2 sibling of #1087. Since QUIC went unconditional, h2 carries the GAMMA
+weighted split (by design, #961), waypointed (cross-cluster) traffic and the
+edge -> mesh hop; all of them are `NewServiceCluster`. A request the destination
+proxy had received (TCP-ACKed) whose pod veth was then deleted got no FIN and no
+RST (the node-shared destination proxy keeps its sockets in the dead netns), the
+source had no unacked bytes, and nothing was configured to probe, so it waited for
+the 15 s route timeout.
+
+Since #1104 every h2 mesh cluster carries
+`http2_protocol_options.connection_keepalive {interval: 1s, interval_jitter: 15%, timeout: 8s}`.
+Envoy PINGs every connection (open streams or not) about once a second; the
+destination proxy's codec answers, never the application, so a slow application is
+not touched (kind: a 10 s handler on the live backend answers 200). An unanswered
+PING closes the connection 8 s later: at most ~9.2 s after the peer's last frame
+(8.1-8.95 s after the cut on kind). It is 8 s, not less, for the same #1093 reason as
+the twins: a destination worker stalled for 8 s or more cannot answer the PING. What you
+see now is `503 UC` (upstream connection termination)
+and `cluster.<svc>.http2.keepalive_timeout` incrementing. The request is **not
+retried**, GET or POST: the close is a `ConnectionTermination` reset of a request
+already sent, which `reset-before-request` excludes. The PING is NOT on the app hop,
+authz, xDS or collector clusters (their h2 peer is not an aether proxy; a gRPC server
+answers frequent PINGs with `GOAWAY too_many_pings`). The kind proof is
+`e2e/eastwest-quic-deadpeer.sh verify-h2`.
 
 ### Envoy SIGBUS/SEGV in `QuicConnection` after an h3 cluster removal (#1074)
 

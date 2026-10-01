@@ -497,8 +497,12 @@ func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []st
 			// keys load assignments by this name.
 			ServiceName: edsServiceName,
 		},
+		// h2 with PING liveness (aether#1104): a request delivered to an
+		// endpoint whose pod network then vanished fails 503 UC within ~9 s
+		// instead of hanging to the 15 s route timeout, and is never replayed.
+		// See config.MeshH2KeepaliveInterval.
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
-			config.UpstreamHTTPProtocolOptionsKey: config.TypedConfig(config.Http2ProtocolOptions()),
+			config.UpstreamHTTPProtocolOptionsKey: config.TypedConfig(config.MeshHttp2ProtocolOptions()),
 		},
 		// Cluster-level ANY_ENDPOINT routes criteria-less traffic (normal
 		// requests with no subset headers) across all healthy endpoints; the
@@ -539,16 +543,23 @@ func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []st
 			MaxEjectionPercent:             wrapperspb.UInt32(50),
 			Interval:                       durationpb.New(10 * time.Second),
 		},
-		// Close pool connections the moment an endpoint goes unhealthy (incl.
-		// the EDS drain mark above): the pools are idle then, and closing them
-		// pre-empts the app-exit GOAWAY race that strands claimed-but-unanswered
-		// streams. See endpointHealthStatus.
+		// Close the host's pool connections, in-flight streams included, when
+		// OUTLIER DETECTION ejects it. That is the only trigger this cluster
+		// has: Envoy calls it from an active health-check failure (none is
+		// configured here) or an outlier ejection, nothing else
+		// (cluster_manager_impl.cc:971-988 at the pinned Envoy). The EDS drain
+		// mark and an EDS removal do NOT close anything: a removed host's pools
+		// are only drained (removeHosts -> drainConnPools,
+		// cluster_manager_impl.cc:1954-1957), so new streams go elsewhere and
+		// in-flight ones keep waiting for their answer. What bounds an
+		// in-flight request to an endpoint whose network vanished is the h2
+		// PING keepalive above (aether#1104).
 		CloseConnectionsOnHostHealthFailure: true,
 		// Retry headroom: the default cluster max_retries circuit breaker (3
 		// concurrent) rejected retries during roll bursts (retry_overflow,
-		// instrumented 2026-06-11); pool-close at drain-mark briefly retries a
-		// burst of pre-request resets, which must never be sacrificed to the
-		// breaker.
+		// instrumented 2026-06-11); a roll's burst of connect failures and
+		// pre-request resets (and an outlier ejection's pool close) is retried
+		// at once, and must never be sacrificed to the breaker.
 		CircuitBreakers: &clusterv3.CircuitBreakers{
 			Thresholds: []*clusterv3.CircuitBreakers_Thresholds{
 				{MaxRetries: wrapperspb.UInt32(16)},
