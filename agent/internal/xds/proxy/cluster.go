@@ -231,6 +231,14 @@ func NewAppCluster(name string, addr AppAddress, port uint16, http2 bool) *clust
 			},
 		},
 		UpstreamBindConfig: addr.bindConfig(),
+		// Bounded, not Envoy's 5 s default (aether#1103): during pod teardown
+		// containerd sets the pod's lo DOWN before the CNI DEL that removes
+		// the veth, and a dial through a DOWN loopback is dropped, not
+		// refused. The 503 UF must leave the pod while the veth still exists,
+		// so the source's retry policy moves the request to another
+		// endpoint. A live app answers a loopback connect in microseconds.
+		// See meshconst.AppConnectTimeout for the measured window.
+		ConnectTimeout: durationpb.New(meshconst.AppConnectTimeout),
 		// Collapse every per-pod app cluster into one cluster.app.* stats block
 		// (cardinality round 2): the Envoy->app loopback hop gets node-aggregate
 		// visibility (connect failures, rq totals) at O(1) instead of either
