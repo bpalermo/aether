@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
@@ -1147,6 +1148,114 @@ func TestQUICUpstreamsIdleOutBeforeAHotRestartParentExits(t *testing.T) {
 	}
 	if others < 1 {
 		t.Fatalf("fixture carries no non-twin cluster with HTTP protocol options: the 30s half is vacuous")
+	}
+}
+
+// TestQUICUpstreamsDetectADeadPeer (aether#1087): every `quic:` twin carries
+// QUIC-level liveness -- a keepalive PING at most every
+// QUICTwinKeepaliveInterval while a request stream is open, and a transport
+// idle_network_timeout of QUICTwinNetworkIdleTimeout -- so a request whose
+// destination's network vanished after it was delivered (ACKed, then nothing:
+// QUIC has no RST) fails within a few seconds instead of hanging to the 15 s
+// route timeout. h2 clusters carry no QUIC options at all. And the route the
+// twins are selected on still retries only conditions that fail before a
+// request can reach an application: a liveness close resets a stream whose
+// request was already sent, and that must surface as a fast 503, never as a
+// replay. Over the generated fixture bytes Envoy validates.
+func TestQUICUpstreamsDetectADeadPeer(t *testing.T) {
+	data, err := QUICOutboundBootstrapJSON()
+	if err != nil {
+		t.Fatalf("QUICOutboundBootstrapJSON: %v", err)
+	}
+	bs := &bootstrapv3.Bootstrap{}
+	if err := protojson.Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal bootstrap: %v", err)
+	}
+	wantKeepalive, wantIdle := config.QUICTwinKeepaliveInterval, config.QUICTwinNetworkIdleTimeout
+	var twins, others int
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		raw, ok := c.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey]
+		if !ok {
+			continue
+		}
+		po := &httpv3.HttpProtocolOptions{}
+		if err := raw.UnmarshalTo(po); err != nil {
+			t.Fatalf("%s: unmarshal protocol options: %v", c.GetName(), err)
+		}
+		q := po.GetExplicitHttpConfig().GetHttp3ProtocolOptions().GetQuicProtocolOptions()
+		if !strings.HasPrefix(c.GetName(), "quic:") {
+			others++
+			if q != nil {
+				t.Errorf("%s: a non-twin cluster carries QUIC protocol options %v", c.GetName(), q)
+			}
+			continue
+		}
+		twins++
+		if q == nil {
+			t.Errorf("%s: no quic_protocol_options: the twin has no dead-peer detection (QUICHE idle default, 15 s keepalive), so a request to a vanished destination hangs to the route timeout", c.GetName())
+			continue
+		}
+		if got := q.GetIdleNetworkTimeout().AsDuration(); got != wantIdle {
+			t.Errorf("%s: idle_network_timeout = %v, want %v", c.GetName(), got, wantIdle)
+		}
+		if got := q.GetConnectionKeepalive().GetMaxInterval().AsDuration(); got != wantKeepalive {
+			t.Errorf("%s: connection_keepalive.max_interval = %v, want %v", c.GetName(), got, wantKeepalive)
+		}
+	}
+	if twins < 2 {
+		t.Fatalf("fixture carries %d quic: twins, want >= 2", twins)
+	}
+	if others < 1 {
+		t.Fatalf("fixture carries no non-twin cluster with HTTP protocol options: the h2 half is vacuous")
+	}
+
+	// The bound the PR states: the first PING leaves within keepalive + 1 s
+	// (QUICHE arms the keep-alive alarm with 1 s granularity) of the peer's
+	// last packet, and the idle deadline is idle_network_timeout after it.
+	if bound := wantKeepalive + time.Second + wantIdle; bound > 10*time.Second {
+		t.Errorf("dead-peer bound %v exceeds 10 s", bound)
+	}
+	// aether#1093: never at or below the 5-7 s worker stalls seen on talos-main.
+	if wantIdle < 8*time.Second {
+		t.Errorf("idle_network_timeout %v is inside the #1093 stall range", wantIdle)
+	}
+
+	// The route the twins are selected on: only pre-request conditions.
+	safe := map[string]bool{"connect-failure": true, "refused-stream": true, "reset-before-request": true, "retriable-status-codes": true}
+	var routes int
+	for _, l := range bs.GetStaticResources().GetListeners() {
+		for _, fc := range l.GetFilterChains() {
+			for _, f := range fc.GetFilters() {
+				hcm := &http_connection_managerv3.HttpConnectionManager{}
+				if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(hcm) != nil {
+					continue
+				}
+				for _, vh := range hcm.GetRouteConfig().GetVirtualHosts() {
+					for _, r := range vh.GetRoutes() {
+						if _, _, ok := proxy.QUICSelectionArms(r); !ok {
+							continue
+						}
+						routes++
+						rp := r.GetRoute().GetRetryPolicy()
+						if rp == nil {
+							t.Errorf("the twin-selecting route has no retry policy: connect failures to a vanished endpoint would not move to a live one")
+							continue
+						}
+						for _, cond := range strings.Split(rp.GetRetryOn(), ",") {
+							if !safe[strings.TrimSpace(cond)] {
+								t.Errorf("the twin-selecting route retries on %q: a request that may have reached the application could be replayed", cond)
+							}
+						}
+						if rp.GetPerTryTimeout() != nil || rp.GetPerTryIdleTimeout() != nil {
+							t.Errorf("the twin-selecting route sets a per-try timeout: that would cap slow-but-alive requests on the shared h2/h3 route")
+						}
+					}
+				}
+			}
+		}
+	}
+	if routes != 1 {
+		t.Fatalf("%d routes carry the QUIC selection plugin, want 1", routes)
 	}
 }
 
