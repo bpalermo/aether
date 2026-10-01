@@ -173,6 +173,7 @@ sidecar), makes no API calls (no RBAC, no token) and does not involve SPIRE.
 | `udsCsi.kubeletRoot` | `/var/lib/kubelet` | The kubelet's `--root-dir` — the **only** place it appears on the CSI path: `--kubelet-root`, the CSI socket (`<kubeletRoot>/plugins/csi.aether.io/csi.sock`), the registration socket (`<kubeletRoot>/plugins_registry/csi.aether.io-reg.sock`) and the `pods` dir every target path lives under all derive from it, with hostPath == mountPath. Right for kubeadm, kind and **Talos** (default root); k0s is `/var/lib/k0s/kubelet`, microk8s `/var/snap/microk8s/common/var/lib/kubelet`. Must be absolute (the chart refuses otherwise). |
 | `udsCsi.root` | `/run/aether/uds` | Host directory holding the per-pod tmpfs mounts (`<root>/<pod-uid>`). Under `/run` so a reboot starts it empty (the kubelet republishes). The single source of truth for the carrier path: the plugin's `--root`, the agent's `--uds-csi-root` and the proxy's mount all render from it. Sets the socket-file budget: `107 − len("<root>/") − 36 − 1` = **54 bytes** at the default, which is what admission checks. |
 | `udsCsi.size` | `1Mi` | Size cap of each per-pod tmpfs (bytes or `Ki`/`Mi`/`Gi`, at most `1Gi`). Pages are charged to the writing app's memory cgroup. |
+| `udsCsi.inodes` | `64` | Inode cap (`nr_inodes`) of each per-pod tmpfs: files, sockets and directories, its root directory included (#1107). Without it the kernel default is half the node's RAM pages' worth, far past anything `size` bounds. At least `8`; the chart refuses less. |
 | `udsCsi.debug` | `false` | Debug logging for this daemon only; the global `debug` does not reach it. |
 | `udsCsi.nodeSelector` / `udsCsi.tolerations` | `{}` / `[]` | Extra scheduling constraints. The `aether.io/agent-not-ready` toleration is always rendered. |
 | `udsCsi.resources.{requests,limits}` | cpu `5m`/`100m`, mem `16Mi`/`32Mi` | |
@@ -539,6 +540,7 @@ no telemetry exporter (`//agent/cmd/uds-csi:deps_test`,
 | `--node-id` | `$NODE_NAME` | `NodeGetInfo`'s node ID. |
 | `--root` | `/run/aether/uds` | Host directory holding the per-pod tmpfs mounts. |
 | `--size` | `1Mi` | Size cap of each per-pod tmpfs. |
+| `--inodes` | `64` | Inode cap (`nr_inodes`) of each per-pod tmpfs, its root directory included; at least `8`. |
 | `--debug` | `false` | Debug logging. |
 | `--probe` | `false` | Liveness mode: exit 0 iff the CSI socket exists, then exit. |
 

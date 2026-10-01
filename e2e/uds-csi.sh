@@ -24,6 +24,9 @@
 #            mount); the app's own view is a runtime re-bind with the flags
 #            the container runtime picks, so the flags are asserted where the
 #            confused deputy would act, not in the pod.
+#          - the inode cap (#1107): the host mount carries nr_inodes=64
+#            (`findmnt -o OPTIONS`, `df -i`), creating files past it fails
+#            with ENOSPC, and the socket still answers with the tmpfs full.
 #        Deleting the pod unmounts and removes the host directory.
 #   iii. refusal — the same pod WITHOUT an fsGroup stays Pending with a
 #        FailedMount event whose message names the fix ("fsGroup").
@@ -50,6 +53,8 @@ CURL_IMAGE="curlimages/curl:8.22.0"
 DRIVER="csi.aether.io"
 UDS_ROOT="/run/aether/uds"
 FS_GROUP=65532
+# udsCsi.inodes' chart default: the per-pod tmpfs nr_inodes (#1107).
+INODES=64
 # The single kind node (kind-cluster.yaml).
 NODE="${CLUSTER}-control-plane"
 
@@ -264,7 +269,7 @@ assert_published() {
 
 	mnt="$(in_pod "$pod" "grep ' /s ' /proc/mounts")"
 	case "$mnt" in tmpfs\ /s\ tmpfs\ *) ;; *) die "/s in $pod is not a tmpfs mount: '$mnt'" ;; esac
-	case "$mnt" in *size=1024k*mode=2770*gid=${FS_GROUP}*) ;; *) die "/s in $pod lacks the plugin's size/mode/gid: '$mnt'" ;; esac
+	case "$mnt" in *size=1024k*nr_inodes=${INODES}*mode=2770*gid=${FS_GROUP}*) ;; *) die "/s in $pod lacks the plugin's size/nr_inodes/mode/gid: '$mnt'" ;; esac
 	ok "$pod: /s is the plugin's tmpfs ($mnt)"
 
 	got="$(in_pod "$pod" "stat -c '%F %g' /s/a.sock")"
@@ -297,6 +302,39 @@ assert_published() {
 		die "host followed a symlink the app planted on its tmpfs — nosymfollow is not in effect (read: $follow)"
 	fi
 	ok "host: a symlink the app planted is not followed (${follow##*: })"
+
+	assert_inode_cap "$pod" "$uid"
+}
+
+# assert_inode_cap <pod> <uid>: the per-pod tmpfs is capped at $INODES inodes
+# (#1107). The host's mount carries the option and reports the cap; the app
+# filling it gets ENOSPC well before anything `size` bounds, and the socket it
+# already bound keeps answering with the tmpfs full.
+assert_inode_cap() {
+	local pod="$1" uid="$2" opts total free out made err body
+	opts="$(docker exec "$NODE" findmnt -n -o OPTIONS -M "$UDS_ROOT/$uid")" ||
+		die "findmnt found no mount at host $UDS_ROOT/$uid"
+	case ",$opts," in *",nr_inodes=${INODES},"*) ;; *) die "host mount $UDS_ROOT/$uid lacks nr_inodes=${INODES}: '$opts'" ;; esac
+	out="$(docker exec "$NODE" df --output=itotal,iavail "$UDS_ROOT/$uid")" || die "host df on $UDS_ROOT/$uid failed: $out"
+	read -r total free <<<"$(tail -1 <<<"$out")"
+	[ "$total" = "$INODES" ] || die "host df -i $UDS_ROOT/$uid reports $total inodes, want $INODES"
+	ok "host: $UDS_ROOT/$uid is capped at $total inodes ($free free; options $opts)"
+
+	# Fill it. A cap that does not bite would let all 200 through.
+	# shellcheck disable=SC2016  # evaluated by the POD's shell
+	out="$(in_pod "$pod" 'i=0; while [ $i -lt 200 ]; do
+		if ! err=$(touch /s/fill.$i 2>&1); then echo "$i $err"; exit 0; fi
+		i=$((i + 1)); done; echo "$i none"')"
+	made="${out%% *}" err="${out#* }"
+	[ "$made" -lt 200 ] || die "$pod created 200 files on a tmpfs capped at $INODES inodes — the cap is not in effect"
+	[ "$made" -gt 0 ] || die "$pod could not create even one file on /s (control): $err"
+	case "$err" in *"No space left on device"*) ;; *) die "$pod: file $made on /s failed with '$err', want ENOSPC" ;; esac
+	free="$(docker exec "$NODE" df --output=iavail "$UDS_ROOT/$uid" | tail -1 | tr -d ' ')"
+	[ "$free" = 0 ] || die "host df -i $UDS_ROOT/$uid reports $free inodes free after ENOSPC, want 0"
+	body="$(in_pod "$pod" "curl -sS --max-time 5 --unix-socket /s/a.sock http://uds/")"
+	case "$body" in *"served-by-$pod"*) ;; *) die "with the tmpfs full, the socket in $pod answered '$body'" ;; esac
+	ok "$pod: file $((made + 1)) on /s failed with ENOSPC (${err##*: }); 0 inodes free and the socket still answers"
+	in_pod "$pod" 'rm -f /s/fill.*' || die "$pod: could not clean up the fill files"
 }
 
 assert_unpublished() {
@@ -365,7 +403,7 @@ verify() {
 	verify_publish
 	verify_no_fsgroup
 	verify_roll
-	log "all assertions passed (proposal 039 Phase 1: registration, publish + nosymfollow + host propagation, unpublish, fsGroup refusal, plugin roll)"
+	log "all assertions passed (proposal 039 Phase 1: registration, publish + nosymfollow + host propagation + inode cap, unpublish, fsGroup refusal, plugin roll)"
 }
 
 down() {

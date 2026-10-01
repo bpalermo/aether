@@ -41,6 +41,7 @@ type options struct {
 	nodeID             string
 	root               string
 	size               string
+	inodes             int64
 	debug              bool
 	probe              bool
 }
@@ -60,6 +61,8 @@ func newFlagSet(o *options) *flag.FlagSet {
 	fs.StringVar(&o.root, "root", udscsi.DefaultRoot,
 		"Host directory holding the per-pod tmpfs mounts (<root>/<pod-uid>)")
 	fs.StringVar(&o.size, "size", "1Mi", "Size cap of each per-pod tmpfs (bytes, or Ki/Mi/Gi)")
+	fs.Int64Var(&o.inodes, "inodes", 64,
+		fmt.Sprintf("Inode cap (nr_inodes) of each per-pod tmpfs, its root directory included; at least %d", udscsi.MinInodes))
 	fs.BoolVar(&o.debug, "debug", false, "Enable debug-level logging")
 	fs.BoolVar(&o.probe, "probe", false,
 		"Liveness probe mode: exit 0 iff the CSI socket exists, then exit (no server)")
@@ -103,13 +106,14 @@ func run(ctx context.Context, args []string) error {
 		KubeletRoot: o.kubeletRoot,
 		Root:        o.root,
 		SizeBytes:   size,
+		Inodes:      o.inodes,
 		Version:     Version,
 	}, udscsi.NewMounter(), logger)
 	if err != nil {
 		return err
 	}
 	logger.Info("starting", "version", Version, "node_id", o.nodeID, "root", o.root,
-		"size_bytes", size, "kubelet_root", o.kubeletRoot)
+		"size_bytes", size, "inodes", o.inodes, "kubelet_root", o.kubeletRoot)
 	return udscsi.Serve(ctx, udscsi.ServeConfig{
 		CSISocket:          o.csiSocket,
 		RegistrationSocket: o.registrationSocket,

@@ -431,6 +431,12 @@ udsCsi:
   # and whatever else the app writes there; pages are charged to the app's
   # memory cgroup.
   size: 1Mi
+  # Inode cap (nr_inodes) of each per-pod tmpfs: how many files, sockets and
+  # directories it can hold, its own root directory included (#1107). Without it
+  # the kernel default is half the node's RAM pages' worth, so a workload could
+  # create files in its socket directory far past anything `size` bounds. At
+  # least 8 (the chart refuses less).
+  inodes: 64
   # Verbose logging for THIS daemon only (the global `debug` does not reach it).
   debug: false
   # Extra scheduling constraints. The aether.io/agent-not-ready toleration is
