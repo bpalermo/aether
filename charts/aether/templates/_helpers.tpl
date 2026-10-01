@@ -238,6 +238,22 @@ crash-loop every proxy pod at rollout time instead of failing here.
 {{- end -}}
 
 {{/*
+proxy.concurrency, validated (#1093): Envoy's --concurrency takes a positive
+integer. 0 renders nothing (Envoy's one-worker-per-core default); a negative or
+non-integer value fails the render instead of crash-looping every proxy pod.
+Renders the integer when > 0, else the empty string.
+*/}}
+{{- define "aether.proxy.concurrency" -}}
+{{- $s := toString (.Values.proxy.concurrency | default 0) -}}
+{{- if not (regexMatch "^[0-9]+$" $s) -}}
+{{- fail (printf "proxy.concurrency must be a non-negative integer, got %q" $s) -}}
+{{- end -}}
+{{- if gt (atoi $s) 0 -}}
+{{- atoi $s -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 agent.eastWestQuicIdleTimeout, validated against the proxy's parent-shutdown
 time (#1054). A source h3 connection that is idle when a destination proxy's
 hot-restart drain starts gets no GOAWAY; it must be closed by this idle timeout

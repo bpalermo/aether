@@ -136,6 +136,12 @@ spec:
             # proxy.hotRestart.drainStrategy.
             - "--envoy-arg=--drain-strategy"
             - "--envoy-arg={{ include "aether.proxy.drainStrategy" . }}"
+            {{- with include "aether.proxy.concurrency" . }}
+            # #1093: fixed Envoy worker count; constant across epochs — see
+            # proxy.concurrency.
+            - "--envoy-arg=--concurrency"
+            - "--envoy-arg={{ . }}"
+            {{- end }}
             {{- if .Values.proxy.hotRestart.skipParentStats }}
             # #1050 emergency switch: the child never asks the draining parent
             # for stats — see proxy.hotRestart.skipParentStats.
