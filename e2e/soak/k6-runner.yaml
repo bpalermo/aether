@@ -46,7 +46,10 @@ spec:
         app.kubernetes.io/component: load-generator
       annotations:
         # Pre-warm ODCDS clusters so the first requests aren't cold-service misses.
-        config.aether.io/upstreams: "echo,svc-1,svc-2,svc-3,svc-4,svc-5,mixed-svc"
+        # uds-echo/uds-cr-echo are the UDS-served targets (#1108; charts/udsecho).
+        # Bare same-namespace names: a value with no "/" is qualified with the
+        # POD's namespace (#636).
+        config.aether.io/upstreams: "echo,svc-1,svc-2,svc-3,svc-4,svc-5,mixed-svc,uds-echo,uds-cr-echo"
         capture.aether.io/exclude-outbound-ports: "6565"
     spec:
       priorityClassName: aether-soak-loader
