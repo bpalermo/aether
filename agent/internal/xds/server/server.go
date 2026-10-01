@@ -65,7 +65,22 @@ type AgentXdsServer struct {
 	// serve waits for it, at most captureTimeout (#1094).
 	captureGate    <-chan struct{}
 	captureTimeout time.Duration
+
+	// clientCertTimeout bounds the first serve's wait for the local workloads'
+	// client certificates (waitForClientCertificates, #1103). Zero means
+	// clientCertificateTimeout; a field so tests can shorten it.
+	clientCertTimeout time.Duration
 }
+
+// clientCertificateTimeout bounds the first serve's wait for the SPIRE bridge
+// to deliver every local workload's certificate. The broker delivers them a few
+// seconds after the agent's own SVID (~2 s on talos-main, ~3.5 s on kind); the
+// bound exists for a pod whose SVID never comes, which would otherwise hold the
+// node's xDS forever.
+const clientCertificateTimeout = 5 * time.Second
+
+// clientCertificatePoll is how often the wait re-reads the cache.
+const clientCertificatePoll = 50 * time.Millisecond
 
 // captureProjectionTimeout bounds the first serve's wait for the mesh-Service
 // projection. The reconciler projects within a second or two of its informer
@@ -240,7 +255,64 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 
 	s.loadInitialRegistryConfig(ctx)
 
+	s.waitForClientCertificates(ctx)
+
 	return nil
+}
+
+// waitForClientCertificates holds the first serve (bounded) until the snapshot
+// carries every local workload's client certificate (issue #1103).
+//
+// A restarted agent holds its own SVID long before the SPIRE bridge has
+// re-delivered the pods' certificates, and until it has, the #1049 gate keeps
+// those identities' `quic:` twins and selection arms out of the snapshot. A
+// proxy that reconnects to that snapshot is told to REMOVE every twin it holds
+// (delta xDS: a held resource missing from the snapshot is in
+// removed_resources), and the requests its routes still select a twin for
+// fail until the certificate's snapshot re-adds it: on kind 1-9.6 s of
+// cluster_not_found, up to 56 x 503 in one restart. Envoy's default 30 s
+// reconnect backoff hid this most of the time by reconnecting late; the 1 s
+// cap #1103 adds to the proxy bootstrap makes the proxy reconnect within a
+// second of the socket opening, so the socket must open on the complete
+// snapshot. With every certificate present the reconnecting proxy finds its
+// twins unchanged and keeps them.
+//
+// Only with an identity gate (SPIRE on, the node agent): with no certificates
+// at all the #1049 gate is off and nothing is held back. A timeout serves what
+// there is, as before, and says how many identities are still missing.
+func (s *AgentXdsServer) waitForClientCertificates(ctx context.Context) {
+	if s.identity == nil || ctx.Err() != nil {
+		return
+	}
+	awaiting := s.cache.AwaitingClientCertificates()
+	if awaiting == 0 {
+		return
+	}
+	timeout := s.clientCertTimeout
+	if timeout <= 0 {
+		timeout = clientCertificateTimeout
+	}
+	started := time.Now()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(clientCertificatePoll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			s.log.WarnContext(ctx, "local workloads' client certificates not delivered in time; serving without their east-west QUIC twins until they arrive",
+				"timeout", timeout.String(), "awaiting_client_cert", s.cache.AwaitingClientCertificates(), "issue", "aether#1103")
+			return
+		case <-tick.C:
+			if s.cache.AwaitingClientCertificates() == 0 {
+				s.log.InfoContext(ctx, "local workloads' client certificates delivered; serving the complete snapshot",
+					"awaiting_at_start", awaiting, "waited", time.Since(started).Round(time.Millisecond).String())
+				return
+			}
+		}
+	}
 }
 
 // loadInitialRegistryConfig derives the registry half of the initial snapshot,
