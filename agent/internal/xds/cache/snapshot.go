@@ -30,7 +30,9 @@ const tracerName = "aether/agent-xds-cache"
 // replaces the entire node snapshot, so emitting a partial snapshot for one
 // resource type (e.g. only listeners) drops every other type from Envoy — which
 // makes listener, cluster and secret updates clobber one another. Resources are
-// read from the in-memory maps (nothing is rebuilt), so a full snapshot is cheap.
+// read from the in-memory maps (most are not rebuilt); the expensive part of a
+// build is versioning every resource for delta xDS, which happens before
+// SetSnapshot and reuses the previous build's versions (#1105, versionmemo.go).
 //
 // snapshotMu serializes the whole version-generate + read + SetSnapshot sequence:
 // concurrent callers would otherwise interleave so the snapshot carrying the
@@ -217,7 +219,21 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
-	if err := c.SetSnapshot(ctx, c.nodeName, snapshot); err != nil {
+	// The per-resource version map, computed HERE -- before SetSnapshot, so
+	// outside go-control-plane's cache mutex -- and memoized across builds
+	// (#1105). Left to go-control-plane it is built lazily by the first delta
+	// watch to look at the snapshot, under that mutex, which is what stalled
+	// the ADS stream for the length of every build. See versionmemo.go.
+	if err := c.fillVersionMap(ctx, span, snapshot); err != nil {
+		return fmt.Errorf("failed to version snapshot resources: %w", err)
+	}
+
+	// Everything SetSnapshot does runs under the cache mutex the ADS stream
+	// needs; time it so a regression of the above is visible.
+	setStart := time.Now()
+	err = c.SetSnapshot(ctx, c.nodeName, snapshot)
+	c.metrics.SnapshotSet(ctx, time.Since(setStart).Seconds())
+	if err != nil {
 		return fmt.Errorf("failed to set snapshot: %w", err)
 	}
 
@@ -238,5 +254,30 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// checking the identity we are handed at all".
 	c.reportUnpinnedClusters(ctx, v)
 
+	return nil
+}
+
+// fillVersionMap fills the snapshot's per-resource version map from the memo,
+// records what it cost, and reports a memo violation (a published proto
+// mutated in place). Caller holds snapshotMu.
+func (c *SnapshotCache) fillVersionMap(ctx context.Context, span trace.Span, snapshot *cachev3.Snapshot) error {
+	st, err := c.versions.fill(snapshot, time.Now())
+	if err != nil {
+		return err
+	}
+	c.metrics.SnapshotVersions(ctx, int64(st.hits), int64(st.hashed), int64(st.mismatchN))
+	span.SetAttributes(
+		attribute.Int("aether.snapshot.versions_memoized", st.hits),
+		attribute.Int("aether.snapshot.versions_hashed", st.hashed),
+		attribute.Bool("aether.snapshot.versions_audit", st.audit),
+	)
+	if st.mismatchN > 0 {
+		// Corrected in this snapshot (the audit published the fresh version),
+		// but every build between the mutation and this audit served the stale
+		// version, so Envoy missed the change for that long. A builder broke
+		// the never-mutate-a-published-proto rule; the names say which.
+		c.log.ErrorContext(ctx, "xDS resources changed in place after being published; their delta versions were stale until this audit (issue #1105)",
+			"count", st.mismatchN, "resources", st.mismatches)
+	}
 	return nil
 }

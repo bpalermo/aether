@@ -215,6 +215,11 @@ type SnapshotCache struct {
 	// set last — Envoy sees a version change and applies the stale config,
 	// silently dropping the newer mutation until the next snapshot trigger.
 	snapshotMu sync.Mutex
+	// versions memoizes per-resource xDS versions across builds so the
+	// version map is computed before SetSnapshot (outside go-control-plane's
+	// cache mutex) and an unchanged resource is not re-hashed (#1105).
+	// Guarded by snapshotMu.
+	versions *versionMemo
 
 	// depMu guards podDeps and observedDeps. The node dependency set derived
 	// from them scopes which registry services the snapshot carries
@@ -764,6 +769,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		depChanged:         make(chan struct{}, 1),
 		captureProjected:   make(chan struct{}),
 		version:            atomic.NewUint64(0),
+		versions:           newVersionMemo(),
 	}
 }
 
