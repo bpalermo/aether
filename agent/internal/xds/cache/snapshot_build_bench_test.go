@@ -100,7 +100,16 @@ func newBuildBenchCache(tb testing.TB) (*SnapshotCache, *mockRegistry, *atomic.I
 			Ips:              []string{fmt.Sprintf("10.1.0.%d", i+1)},
 			Labels:           map[string]string{"app": fmt.Sprintf("svc-%03d", i%buildBenchServices)},
 		}, quicDemandTD))
-		secrets = append(secrets, fakeSVID(fmt.Sprintf("spiffe://%s/ns/demo/sa/%s#%d", quicDemandTD, sa, i)))
+		// One secret per pod for the SDS byte volume; the first pod of each
+		// ServiceAccount carries the SA's exact SPIFFE ID, so the QUIC
+		// fan-out sees its client certificate and the 10 observed twins
+		// below are actually published (#1115: with only "#<i>" names every
+		// identity was awaiting its certificate and no twin was built).
+		name := fmt.Sprintf("spiffe://%s/ns/demo/sa/%s", quicDemandTD, sa)
+		if i >= buildBenchSAs {
+			name = fmt.Sprintf("%s#%d", name, i)
+		}
+		secrets = append(secrets, fakeSVID(name))
 	}
 	require.NoError(tb, c.SetNodeIdentity(ctx, nodeIdentity))
 	require.NoError(tb, c.SetSecrets(ctx, secrets))
@@ -249,8 +258,15 @@ func cloneSnapshot(tb testing.TB, c *SnapshotCache, version string) *cachev3.Sna
 // BenchmarkSnapshotBuild reports, per build: total wall clock (p50/p99) and
 // the longest the ADS stand-in waited for the cache mutex (p50/p99). Two
 // triggers: "rebuild" (nothing changed -- the same-shape rebuilds of the
-// #1086 timeline) and "registry-refresh" (one service's endpoints changed, so
-// the whole cluster map is rebuilt from the registry).
+// #1086 timeline), "registry-refresh" (the registry listing is reloaded and
+// two services' endpoints changed since the last refresh: the one perturbed
+// now and the one perturbed last time, restored) and "registry-refresh-
+// nochange" (the listing is reloaded and nothing in it changed).
+//
+// versions-memo/build and versions-hashed/build are the
+// aether.agent.snapshot.resource_versions{source="memo"|"hashed"} split: a
+// resource is a memo hit iff it is the same object under the same name as in
+// the previous snapshot (versionMemo.version, outside an audit).
 //
 // BenchmarkSnapshotVersioning (versionmemo_test.go) splits out the
 // versioning cost itself.
@@ -259,19 +275,28 @@ func BenchmarkSnapshotBuild(b *testing.B) {
 	run := func(b *testing.B, step func(c *SnapshotCache, reg *mockRegistry, flip *atomic.Int64, i int)) {
 		c, reg, flip := newBuildBenchCache(b)
 		productionMemo(c)
+		defer productionReuse()()
 		probe := startStallProbe(c)
 		defer probe.close()
 		var total, stall []time.Duration
+		var memoHits, hashed int
 		b.ResetTimer()
 		for i := range b.N {
 			b.StopTimer()
 			cancels := armDeltaWatches(b, c)
 			probe.reset()
+			before, err := c.GetSnapshot("node-1")
+			require.NoError(b, err)
 			b.StartTimer()
 			t0 := time.Now()
 			step(c, reg, flip, i)
 			total = append(total, time.Since(t0))
 			b.StopTimer()
+			after, err := c.GetSnapshot("node-1")
+			require.NoError(b, err)
+			h, n := memoSplit(before, after)
+			memoHits += h
+			hashed += n
 			stall = append(stall, probe.worst())
 			for _, cancel := range cancels {
 				cancel()
@@ -283,6 +308,8 @@ func BenchmarkSnapshotBuild(b *testing.B) {
 		b.ReportMetric(pct(total, 0.99), "build-p99-ms")
 		b.ReportMetric(pct(stall, 0.5), "ads-stall-p50-ms")
 		b.ReportMetric(pct(stall, 0.99), "ads-stall-p99-ms")
+		b.ReportMetric(float64(memoHits)/float64(b.N), "versions-memo/build")
+		b.ReportMetric(float64(hashed)/float64(b.N), "versions-hashed/build")
 	}
 	b.Run("rebuild", func(b *testing.B) {
 		run(b, func(c *SnapshotCache, _ *mockRegistry, _ *atomic.Int64, _ int) {
@@ -295,4 +322,30 @@ func BenchmarkSnapshotBuild(b *testing.B) {
 			require.NoError(b, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 		})
 	})
+	b.Run("registry-refresh-nochange", func(b *testing.B) {
+		run(b, func(c *SnapshotCache, reg *mockRegistry, _ *atomic.Int64, _ int) {
+			require.NoError(b, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+		})
+	})
+}
+
+// memoSplit counts, across every type, the resources of after that are the
+// same object under the same name as in before (version-memo hits) and the
+// rest (hashed).
+func memoSplit(before, after cachev3.ResourceSnapshot) (hits, hashed int) {
+	for i := range types.UnknownType {
+		typ, err := cachev3.GetResponseTypeURL(types.ResponseType(i))
+		if err != nil {
+			continue
+		}
+		prev := before.GetResources(typ)
+		for name, r := range after.GetResources(typ) {
+			if prev[name] == r {
+				hits++
+			} else {
+				hashed++
+			}
+		}
+	}
+	return hits, hashed
 }
