@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"testing"
+	"time"
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	meshconst "aethermesh.dev/common/constants/mesh"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,6 +25,27 @@ func TestNewAppCluster_TCPDelivery(t *testing.T) {
 	assert.Nil(t, ep.GetPipe())
 	assert.Equal(t, "/var/run/netns/x", c.GetUpstreamBindConfig().GetSourceAddress().GetNetworkNamespaceFilepath(),
 		"the loopback dial must be bound into the pod's netns or it reaches the agent")
+}
+
+// TestNewAppCluster_ConnectTimeoutIsTheTeardownBound pins the app hop's connect
+// timeout (aether#1103). On pod teardown containerd runs the loopback CNI DEL
+// (lo DOWN) before the pod's conflist DEL, so a request delivered in between
+// dials 127.0.0.1 into a netns whose loopback drops the SYN. Envoy's default
+// (5 s) outlived the pod's veth and the source never heard the 503. The bound
+// must be set on every app cluster, TCP or pipe, and must stay short of the
+// CNI DEL's hold so the 503 still leaves the pod (see meshconst).
+func TestNewAppCluster_ConnectTimeoutIsTheTeardownBound(t *testing.T) {
+	for name, addr := range map[string]AppAddress{
+		"tcp":  {Netns: "/var/run/netns/x"},
+		"pipe": {Pipe: testSocketPath},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := NewAppCluster("app_p_8080", addr, 8080, false)
+			require.NotNil(t, c.GetConnectTimeout(), "unset means Envoy's 5 s default: the #1103 hang")
+			assert.Equal(t, time.Second, c.GetConnectTimeout().AsDuration())
+			assert.Equal(t, meshconst.AppConnectTimeout, c.GetConnectTimeout().AsDuration())
+		})
+	}
 }
 
 // TestNewAppCluster_PipeDelivery covers UDS delivery (proposal 034 Phase 1): the
