@@ -156,6 +156,13 @@ type Config struct {
 	// pod delete, node drain, eviction and preemption hitless, because the
 	// replacement's Envoy hot-restarts ours instead of finding the node empty.
 	ShutdownDrainImmediately bool
+	// StallSampleInterval enables the Envoy thread-stall sampler (issue #1093,
+	// stallsampler.go) at this sampling interval; 0 disables it.
+	StallSampleInterval time.Duration
+	// StallThreshold is how long a thread may wait for a CPU, stay blocked, or
+	// stay on a CPU within a one-second window before the sampler reports it
+	// (0 = DefaultStallThreshold, Envoy's worker watchdog miss threshold).
+	StallThreshold time.Duration
 }
 
 // childExit reports the termination of a supervised Envoy epoch.
@@ -374,6 +381,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	// maintain the readiness marker and the LIVE-gated node epoch heartbeat.
 	s.initStartEpoch(ctx)
 	go s.watchLiveness(ctx)
+	if s.cfg.StallSampleInterval > 0 {
+		go s.sampleStalls(ctx)
+	}
 
 	if err := s.hotRestart(); err != nil {
 		return fmt.Errorf("starting initial envoy epoch: %w", err)
