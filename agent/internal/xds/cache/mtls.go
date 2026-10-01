@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -93,6 +94,64 @@ func (c *SnapshotCache) recomputeMTLSClustersLocked() {
 // goroutines marshal it without holding clusterMu — an in-place mutation would
 // be a data race (torn marshal).
 func (c *SnapshotCache) refreshEntryMTLSLocked(entry *clusterEntry, st localMTLSState) {
+	key := c.mtlsRenderKeyFor(entry, st)
+	if entry.mtlsRendered != nil && entry.mtlsRendered.equal(key) {
+		// Nothing the render reads changed: keep the previous sanURIs and the
+		// previous mTLS cluster OBJECT (#1115), so the version memo reuses its
+		// version instead of re-hashing an identical clone.
+		if registryReuseAudit {
+			c.auditMTLSRenderLocked(*entry, st)
+		}
+		return
+	}
+	c.renderEntryMTLSLocked(entry, st)
+	entry.mtlsRendered = &key
+}
+
+// mtlsRenderKey is every input the mTLS render (renderEntryMTLSLocked) reads:
+// the base cluster OBJECT (never mutated once built, so the pointer stands for
+// its bytes), the entry facts rendered into the socket and the SAN pin, the
+// node-wide mTLS state, and the cache settings the render branches on.
+type mtlsRenderKey struct {
+	base          *clusterv3.Cluster
+	service, sni  string
+	sanNamespaces []string
+	l4Floor       bool
+	st            localMTLSState
+	edge          bool
+	waypoint      bool
+	meshDomain    string
+}
+
+func (c *SnapshotCache) mtlsRenderKeyFor(entry *clusterEntry, st localMTLSState) mtlsRenderKey {
+	return mtlsRenderKey{
+		base: entry.cluster, service: entry.service, sni: entry.sni,
+		sanNamespaces: entry.sanNamespaces, l4Floor: entry.l4Floor,
+		st: st, edge: c.edge, waypoint: c.waypointEnabled, meshDomain: c.meshDomain,
+	}
+}
+
+func (k mtlsRenderKey) equal(o mtlsRenderKey) bool {
+	return k.base == o.base && k.service == o.service && k.sni == o.sni &&
+		slices.Equal(k.sanNamespaces, o.sanNamespaces) && k.l4Floor == o.l4Floor &&
+		k.st == o.st && k.edge == o.edge && k.waypoint == o.waypoint && k.meshDomain == o.meshDomain
+}
+
+// auditMTLSRenderLocked re-renders an entry whose render was skipped and
+// panics if the result differs from what it kept (tests only,
+// registryReuseAudit): a render input missing from mtlsRenderKey would show
+// here as a stale mTLS cluster.
+func (c *SnapshotCache) auditMTLSRenderLocked(kept clusterEntry, st localMTLSState) {
+	fresh := kept
+	c.renderEntryMTLSLocked(&fresh, st)
+	if !slices.Equal(fresh.sanURIs, kept.sanURIs) || !proto.Equal(fresh.mtlsCluster, kept.mtlsCluster) {
+		panic(fmt.Sprintf("mtls render memo: entry %q (service %q) kept a STALE mTLS render (#1115)", kept.cluster.GetName(), kept.service))
+	}
+}
+
+// renderEntryMTLSLocked unconditionally renders entry's sanURIs and mTLS
+// cluster from st. Caller holds clusterMu for writing.
+func (c *SnapshotCache) renderEntryMTLSLocked(entry *clusterEntry, st localMTLSState) {
 	// Expected server identities for this service: one SPIFFE ID per endpoint
 	// namespace. The peer SVID's SA is the BARE service name — entry.service
 	// is the namespace-qualified "<ns>/<svc>" key (020 Part 1), so parse out
