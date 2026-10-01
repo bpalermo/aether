@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -94,6 +96,40 @@ func TestWaitGone(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "timed out waiting for proxy listener removal")
 	})
+}
+
+// TestWaitGoneHoldsTheDelPastTheAppConnectTimeout pins the hold aether#1103's
+// fix relies on. containerd's loopback CNI DEL has set the pod's lo DOWN before
+// this DEL runs, so no probe can be refused: each one times out. The DEL then
+// returns -- and the primary CNI deletes the veth -- only when the whole
+// readyProbeDelTimeout has passed. The node proxy fails a request stuck on the
+// DOWN loopback after meshconst.AppConnectTimeout, so that 503 leaves the pod
+// only if this hold is comfortably longer.
+func TestWaitGoneHoldsTheDelPastTheAppConnectTimeout(t *testing.T) {
+	require.GreaterOrEqual(t, readyProbeDelTimeout, 2*meshconst.AppConnectTimeout,
+		"the DEL hold must cover a request that arrives as the DEL starts, plus its app connect timeout")
+
+	// A probe that is never answered: connects land in the backlog, nothing
+	// accepts, every request times out (the dropped-SYN case reads the same to
+	// waitGone: not ECONNREFUSED, keep waiting).
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = lis.Close() }()
+	p := &readinessProber{
+		client: &http.Client{
+			Transport: &http.Transport{DisableKeepAlives: true},
+			Timeout:   readyProbeRequestTimeout,
+		},
+		url: "http://" + lis.Addr().String() + meshconst.ProxyReadinessPath,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), readyProbeDelTimeout)
+	defer cancel()
+	start := time.Now()
+	require.Error(t, p.waitGone(ctx))
+	held := time.Since(start)
+	assert.GreaterOrEqual(t, held, readyProbeDelTimeout-50*time.Millisecond)
+	assert.Greater(t, held, 2*meshconst.AppConnectTimeout-50*time.Millisecond)
 }
 
 func TestNetnsDialContext_MissingNetns(t *testing.T) {
