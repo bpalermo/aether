@@ -44,9 +44,10 @@ kubectl apply -n aether-test -f e2e/soak/udp.yaml
 kubectl -n aether-test get pods -l app=udp-echo -o wide         # expect 3, spread
 kubectl -n aether-test logs -l app.kubernetes.io/name=udp-dialer --tail=1 | grep AETHER_METRIC
 
-# 0c. ONCE, before the run: prove the any-port shim's counter can move. See
-#     "The Phase 4 evidence clock" below -- a zero from a counter that was never
-#     driven is not evidence, and this is the step that makes it evidence.
+# 0c. ONCE, before the run: prove the any-port shim can be seen taking a
+#     connection. See "The Phase 4 evidence clock" below -- the probe's L4
+#     access-log rows (port 19999) are the control that makes an empty gate
+#     evidence (#1095); its counter bump is only a pre-roll sanity check.
 bash e2e/soak/anyport-probe.sh
 
 # 0d. ONCE, before the run: one new-ServiceAccount step, now, so the two the
@@ -69,8 +70,10 @@ kubectl create configmap k6-soak-script -n aether-test \
 # 2. Pre-flight: every component Ready, 0 restarts, prober SLI live at 25/s with 0 errors.
 kubectl get pods -n aether-system
 # prober baseline (Grafana/Prometheus):
-#   sum by (tier) (rate(aether_probe_requests_total{result="success"}[3m]))   -> ~25/s
+#   sum by (tier) (rate(aether_probe_requests_total{result="success"}[3m]))
+#     -> liveness ~25/s, mesh_dns ~50/s (two targets at ~25/s each)
 #   sum by (tier) (rate(aether_probe_requests_total{result!="success"}[5m]))  -> 0
+# (a rate is fine for this live check; the GRADE uses raw counters, see "Grading")
 
 # 3. Start load, then churn ~4 minutes later, once all five runners report
 #    60.00 iters/s and 0 interrupted. T0 is the churn driver's own start line. k6
@@ -319,11 +322,14 @@ is the pre-#1020 SA × destination fan-out.
 # twins per node == pairs with traffic (k6 loaders + prober + the new-SA steps)
 count by (node) (envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"})
 count by (node) (increase(envoy_cluster_upstream_rq_total{aether_cluster=~".+@.+"}[8h]) > 0)
-# flat, but for the new-SA steps' +1/-1 and the drift of the rolls
-envoy_cluster_manager_active_clusters
-# no on-demand fetch timed out; no pair refused by the agent
-sum(increase(envoy_cluster_manager_odcds_init_fetch_timeout_total[8h])) == 0
-sum(increase(aether_agent_quic_twin_refused_total[8h])) == 0
+# flat, but for the new-SA steps' +1/-1 and the drift of the rolls. The edge
+# proxy exports the same name (job="aether-edge-proxy"); keep it out.
+envoy_cluster_manager_active_clusters{job!="aether-edge-proxy"}
+# no on-demand fetch timed out; no pair refused by the agent. Both MUST return no
+# series. Neither exists on a clean run, so the first event creates the series at 1,
+# and increase() reads that as 0 (the counter rule under "Grading").
+max_over_time(envoy_cluster_manager_odcds_init_fetch_timeout_total[8h]) > 0
+max_over_time(aether_agent_quic_twin_refused_total[8h]) > 0
 ```
 
 rev242's 118 twins (59 local SAs × 2 destinations) with 2 carrying traffic is the red
@@ -349,10 +355,10 @@ the line must not appear at all: see gate 5.
 
 ```bash
 # per agent pod, the latest fan-out line (N == P and P << I*S) and the prune line
-for p in $(kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent -o name); do
+for p in $(kubectl -n aether-system get pods -l app.kubernetes.io/name=aether-agent -o name); do
   echo "$p"
-  kubectl -n aether logs "$p" -c agent | grep 'east-west QUIC fan-out' | tail -1
-  kubectl -n aether logs "$p" -c agent | grep 'pruned persisted east-west QUIC pairs'
+  kubectl -n aether-system logs "$p" -c agent | grep 'east-west QUIC fan-out' | tail -1
+  kubectl -n aether-system logs "$p" -c agent | grep 'pruned persisted east-west QUIC pairs'
 done
 ```
 
@@ -382,9 +388,9 @@ pod was the ServiceAccount's last on the node. With a surge rollout the new pod 
 lands first, and then neither line appears, which is fine.
 
 ```bash
-for p in $(kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent -o name); do
+for p in $(kubectl -n aether-system get pods -l app.kubernetes.io/name=aether-agent -o name); do
   echo "$p"
-  kubectl -n aether logs "$p" -c agent | grep -E 'dormant east-west QUIC pairs|, dormant\)'
+  kubectl -n aether-system logs "$p" -c agent | grep -E 'dormant east-west QUIC pairs|, dormant\)'
 done
 ```
 
@@ -422,9 +428,9 @@ twin confirms its pair, so for each agent generation, both of these must hold:
 ```bash
 # per agent pod: the fresh-stream re-statement (held_served = twins confirmed by
 # being held), any confirmation line, and any prune line
-for p in $(kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent -o name); do
+for p in $(kubectl -n aether-system get pods -l app.kubernetes.io/name=aether-agent -o name); do
   echo "$p"
-  kubectl -n aether logs "$p" -c agent | grep -E 'fresh xDS stream re-stated QUIC twins|confirmed east-west QUIC pairs the proxy holds|pruned persisted east-west QUIC pairs|observed east-west QUIC pair \(ODCDS\)'
+  kubectl -n aether-system logs "$p" -c agent | grep -E 'fresh xDS stream re-stated QUIC twins|confirmed east-west QUIC pairs the proxy holds|pruned persisted east-west QUIC pairs|observed east-west QUIC pair \(ODCDS\)'
 done
 ```
 
@@ -552,14 +558,57 @@ ramp-then-plateau (born-hot) cannot be told from a leak without holding age fixe
 
 ## Grading
 
-Compute prober deltas over the churn window and compare against the last known-good run:
+> **The counter rule (#1088). Grade a counter gate from RAW cumulative values at T0 and
+> at T0+8h, compared per series. Never use a bare `increase()` or `rate()` over the window.**
+> An error series is created by its first occurrence, so it is born at 1 (or more)
+> inside the window. `increase()` needs two samples of a series, so the first
+> occurrence never counts, and a series born at 1 reads **0**. On 2026-10-01 the
+> liveness `timeout` series was born at 1 at 02:16:49Z. `increase(...[8h])` read **0**
+> and the raw comparison read **1**, the only liveness failure of the run. The
+> extrapolation also skews every other value: mesh_dns `timeout` read 6.0/8.0 under
+> `increase()` against a raw 7/11. Pair every error delta with the **success** delta
+> of the same tier and target as a control. A success delta that is not
+> ~25/s × 28,800 s ≈ 720,000 per target means the SLI was blind for part of the
+> window, and its error zeros mean nothing.
+
+Compute the prober deltas with two instant queries of the same expression, one at T0
+and one at T0+8h. Diff them per series, then compare against the last known-good run:
 
 ```promql
-sum by (tier, result) (increase(aether_probe_requests_total[8h]))
-# where: `node` is the Kubernetes node since #1041 (before it, the prober POD name);
-# `pod` is the prober pod, and a proxy/prober roll starts a new `pod` series on the same node
-sum by (node, tier, result) (increase(aether_probe_requests_total{result!="success"}[8h]))
+# run once at T0 and once at T0+8h (instant queries); diff per row
+sum by (tier, target, result) (aether_probe_requests_total)
 ```
+
+Or in one instant query at T0+8h. `or … * 0` gives a series that did not exist at T0
+a baseline of 0 instead of dropping it:
+
+```promql
+sum by (tier, target, result) (
+  aether_probe_requests_total
+  - (aether_probe_requests_total offset 8h or aether_probe_requests_total * 0)
+)
+# the series born inside the window: every row here is an error class that was
+# absent at T0, and its value is its whole in-window count
+aether_probe_requests_total unless aether_probe_requests_total offset 8h
+```
+
+Both forms are only valid if the **prober pod set is the same at both ends**. A prober
+pod that was replaced mid-run takes its counts with it, because its series goes stale
+and drops out of the T0+8h instant sum. This query must return nothing:
+
+```promql
+(count by (node, pod) (aether_probe_requests_total)
+   unless count by (node, pod) (aether_probe_requests_total offset 8h))
+or (count by (node, pod) (aether_probe_requests_total offset 8h)
+   unless count by (node, pod) (aether_probe_requests_total))
+```
+
+If it returns rows, grade each replaced pod from its own last raw value
+(`last_over_time(aether_probe_requests_total{pod="<old>"}[8h])`) and add it to the sum.
+`node` is the Kubernetes node since #1041 (before it, the prober POD name), and `pod` is
+the prober pod. Group by `node, pod` instead of `tier, target, result` to place a burst.
+
+The same rule applies to every other counter gate in this README.
 
 Attribute every non-success burst from the prober's own `AETHER_PROBE_FAIL` lines
 (#1040). There is one per failed probe, capped at 20 per `(tier, result)` per minute plus
@@ -569,6 +618,17 @@ and `node`. Pull them from VictoriaLogs for the graded window:
 ```
 _stream:{k8s.namespace.name="aether-test"} AND "k8s.container.name":prober AND "AETHER_PROBE_FAIL"
 ```
+
+Outside a suppressed minute, the line count must equal the sum of the raw error deltas.
+On 2026-10-01 it was 19 lines for 1 liveness + 7 + 11 mesh_dns `timeout`.
+
+> **Access-log queries start at `log_name:`, never at `_stream:`.** The HTTP and L4
+> access-log records (`log_name:aether_access_logs`, `log_name:aether_l4_access_logs`)
+> carry an empty `_stream` and no `service.name` field. A query that starts
+> `_stream:{service.name="aether-proxy"} AND log_name:…` therefore matches nothing.
+> Over 2026-10-01 00:40:30Z → 08:40:30Z it returned 0 against 20,289,652 HTTP and
+> 70,593 L4 records. The `_stream:{service.name="aether-proxy"} AND "k8s.container.name":proxy`
+> form is correct for the supervisor and Envoy stdout, which do carry the stream.
 
 Put each burst's `t` and `node` next to that node's proxy parent-exit and mesh-dns
 handoff times. `elapsed_ms` of about 2000 means the probe used its whole budget
@@ -606,21 +666,29 @@ the pod exists, and after that it cannot be placed.
 - **The L4 gates (#1023)** — `ssl_fail_verify_san` on the `tcp_` keys is zero outside
   rolls, and no pod without a raw-TCP primary port takes a TCP-floor connection. See
   "The L4 gates".
-- **Benign `DC` on QUIC destinations (#1009)** — at a source-node proxy roll, `DC` +
-  `downstream_remote_disconnect` + 200 + the clean-line `bytes_sent` is the hot-restart
-  FIN race, not a failure; every other `DC` is. See "Benign `DC` at a source-proxy hot
-  restart".
+- **Benign `DC` on QUIC destinations (#1009)** — `DC` + `downstream_remote_disconnect`
+  + 200 + a `bytes_sent` in the authority's clean-size SET (#1089) is the hot-restart
+  FIN race, not a failure; every other `DC` is. k6 and new-SA lines must sit in a
+  source-node proxy roll bracket. The prober, `uds-client` and `authz-canary` log it
+  continuously and are graded as a per-client baseline (#1075). See "Benign `DC` at a
+  source-proxy hot restart".
 - **The QUIC per-request cost gate (#1021)**, on any run with twins carrying load —
   h3 per-request envoy CPU ≤ 1.5× h2, matched no-roll windows, against the
   same-build 1.18× baseline (rev247, 2026-09-28). See "The QUIC per-request cost gate".
 - **SVID rotation** is a bar since the SPIFFE Broker API (proposal 036): with the default
   4h TTL a pod rotates every ~2h, so an 8h run sees four cycles.
-  The rotation signal is the agent's counter, summed per node (a restarted agent
-  starts a new series, so sum across its generations — `increase()` does this):
+  The rotation signal is the agent's counter, summed per node. A restarted agent
+  starts a new series, so sum across its generations. `increase()` does this, and it
+  is acceptable here because the gate asks whether the counter MOVED on every node
+  (tens per node per 8 h), not for an exact count. The label is `node` (#1088); there
+  is no `k8s_node_name` on any `aether_*` series, and grouping by it collapses the
+  fleet into one label-less row:
 
   ```promql
-  sum by (k8s_node_name) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod",aether_spire_update="rotated"}[8h]))
+  sum by (node) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod",aether_spire_update="rotated"}[8h]))
   ```
+
+  It must return one row per node (2026-10-01: 5 rows, 44.1–48.2).
 
   It matched the agent's `pod SVID rotated` log lines exactly on 2026-09-19 and again
   on 2026-09-27 (240/240 and 89/89). The prober delta in each rotation minute must be
@@ -654,8 +722,8 @@ one, know which kind it is and what proves it can move:
 | gate | series on a clean run | what proves it can move |
 |---|---|---|
 | prober `dns_*` classes | **no series** (created on first occurrence) | source: `classifyErr` in `prober/internal/prober/prober.go` |
-| `cap_tcp_anyport_*` | seeded by `anyport-probe.sh` before T0 | the probe's own +N, and the neighbouring `cap_tcp_*` chains climbing |
-| `aether_cni_operations_total{operation="capture_divert",result="error"}` | **no series** | `…{operation="add"}` must exist (the export works) |
+| anyport hits on DECLARED ports in the L4 access log (#1095; see "The Phase 4 evidence clock") | no rows | the `anyport-probe.sh` connections (undeclared port 19999) in the same query's pre-T0 window, and the neighbouring `cap_tcp_*` chains climbing. The `cap_tcp_anyport_*` counter is NOT the proof: its series vanishes at the first proxy roll |
+| `aether_cni_operations_total{aether_cni_operation="capture_divert",aether_cni_result="error"}` | **no series** | `…{aether_cni_operation="add"}` must exist (the export works). The labels are `aether_cni_operation`/`aether_cni_result` (#1088); `operation`/`result` match nothing |
 | `envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}` (#1014) | **no series**; a failure is BORN at 1, so `increase()` alone reads 0 — use `max_over_time` too | rev242's red reading (above), and each step's own `@…/sa-new-*` twin series existing with traffic |
 | `503/NC` for `user_agent:aether-soak-newsa` | no rows | the same query without `response_flags:NC` returns the step's requests |
 | **L4 (a)** `envoy_cluster_ssl_fail_verify_san_total{aether_cluster=~"tcp_.*"}` outside roll brackets (#1023; see "The L4 gates") | **no series** (born at 1 on the first rejection — read `max_over_time`, not only `increase`) | rev242: **23** ticks over its soak, and rev243: 1 in 1h47m — both read under the pre-#1023 keys `aether-test/(tcp-echo\|mixed-svc)`, since a pre-#1023 proxy exports no `tcp_` key at all; on a #1023 build, `envoy_cluster_upstream_cx_total{aether_cluster=~"tcp_.*"}` must EXIST and climb with the mp-dialer legs (the keys are exported and the selector is spelled right) |
@@ -703,16 +771,63 @@ source pod, the dialled VIP:port, the chosen L4 cluster (by its `tcp_` stat key)
 the rejection on one line:
 
 ```
-_stream:{service.name="aether-proxy"} AND log_name:aether_l4_access_logs AND response_flags:!"-"
+log_name:aether_l4_access_logs AND response_flags:!"-"
 ```
+
+Control-test its zero by dropping `response_flags:!"-"`: the clean connections must
+come back (2026-10-01: 0 flagged, 70,593 clean).
 
 `docs/runbook.md`, "Attributing an `ssl_fail_verify_san` event … L4 hops", has the
 verdict table.
 
 ### The Phase 4 evidence clock (proposal 037)
 
-Phase 4 removes the portless TCP floor chain once `cap_tcp_anyport_<svc>` reads zero
-across a full release. Read these at T0 and at the end, from the RAW counters:
+Phase 4 removes the portless TCP floor chain (`cap_tcp_anyport_<svc>`) once no client
+needs it across a full release. **The gate is the L4 access log, not the counter
+(#1095).** Every capture TCP connection writes one `aether_l4_access_logs` record that
+names the chain that took it (`filter_chain_name`) and the VIP:port the client dialled
+(`downstream_local_address`). The gate counts anyport-chain connections to a
+**declared** port:
+
+```logsql
+# THE GATE. MUST return no rows over T0..T0+8h.
+# Declared ports are the ones that have their own per-port chain: for tcp-echo, the
+# primary port from the mesh Service's `aether.io/port` annotation (9000) plus the
+# TCP mesh port 18082. Re-derive them for any other TCP-primary service with
+#   kubectl -n aether-test get svc <svc> -o jsonpath='{.metadata.annotations.aether\.io/port}'
+# and the per-port series in the PromQL below.
+log_name:aether_l4_access_logs AND filter_chain_name:~"anyport"
+  | extract_regexp ":(?P<dport>[0-9]+)$" from downstream_local_address
+  | filter dport:~"^(9000|18082)$"
+  | stats by (_time:1m, node_name, pod_name, downstream_local_address, filter_chain_name) count() declared_port_cx
+```
+
+A row here is a connection the per-port chain should have taken and the floor took
+instead. Phase 4 would have dropped it. This is what the gate found on its first run,
+2026-10-01. At 05:41:55Z `mp-dialer-fdbk2` on main-worker-03 dialled
+`10.96.11.228:9000` and landed on `cap_tcp_anyport_tcp:tcp-echo…`, 12 s after w03's
+agent restarted in the TRIPLE. That is **#1094**, and it blocks Phase 4.
+
+The same query without the `filter dport` stage lists every anyport connection by
+port. Use it for two more readings:
+
+- **Control (non-vacuous).** Run it over the `anyport-probe.sh` minutes before T0. The
+  probe's connections must come back on the undeclared port 19999. On 2026-10-01 that
+  was 20 connections on main-worker-05 at 00:33:42–00:34:01Z. Without that row, the
+  log is not reaching VictoriaLogs and an empty gate is vacuous.
+- **Other undeclared-port rows in the window** from any pod other than `anyport-probe`.
+  Such a row is a client that still uses the portless spelling. That is a Phase 4
+  finding in its own right, so report it as well.
+
+```logsql
+log_name:aether_l4_access_logs AND filter_chain_name:~"anyport"
+  | extract_regexp ":(?P<dport>[0-9]+)$" from downstream_local_address
+  | stats by (filter_chain_name, dport, node_name, pod_name) count() cx, min(_time) first, max(_time) last
+```
+
+The neighbouring chains must carry traffic for the whole run. Without them, no client
+dialled any spelling, and an empty gate says nothing. Read them RAW at T0 and at T0+8h
+(the counter rule under "Grading"):
 
 ```promql
 # Every capture TCP chain at once, by pattern. Match these by PATTERN rather than
@@ -723,27 +838,34 @@ across a full release. Read these at T0 and at the end, from the RAW counters:
 sum by (__name__) ({__name__=~"envoy_tcp_cap_tcp_.*_downstream_cx_total"})
 ```
 
-Expect exactly these, all non-zero and still climbing at the end of the run:
+Expect these three, all non-zero and still climbing at the end of the run (2026-10-01:
+7,009 / 7,009 / 7,011 at T0+8h):
 
 | series | what it proves |
 |---|---|
 | `…cap_tcp_tcp_mixed_svc_…_9000_…` | the 037 per-port path: a raw-TCP port on an **HTTP-primary** service |
 | `…cap_tcp_tcp_tcp_echo_…_18082_…` | the well-known TCP mesh port |
 | `…cap_tcp_tcp_tcp_echo_…_9000_…` | the primary-port spelling |
-| `…cap_tcp_anyport_tcp_tcp_echo_…` | **the gate** — must stay FLAT at its post-probe value |
 
-**The first three are what make the fourth mean anything.** Envoy omits a counter it
-never increments, so an absent `anyport` series and a healthy one look identical from
-the gate's side. Before this leg existed the talos fleet had *no* raw-TCP client at all:
-over seven days the only `envoy_tcp_cap_tcp_*` series that had ever existed came from a
-manual e2e run, and `tcp-echo`'s own floor chain — which predates 037 — had never carried
-one connection. A zero read in that state says nothing about whether any client still
-uses the portless spelling, which is the only question Phase 4 asks.
+Before this leg existed the talos fleet had *no* raw-TCP client at all. Over seven days
+the only `envoy_tcp_cap_tcp_*` series that had ever existed came from a manual e2e
+run, and `tcp-echo`'s own floor chain had never carried one connection, although it
+predates 037. A zero in that state says nothing about whether any client still uses
+the portless spelling, and that is the only question Phase 4 asks. So the reading is a
+conjunction: the neighbouring chains carried traffic for the whole run **and** the
+gate query is empty. Neither half alone is evidence.
 
-So the reading is a conjunction: the neighbouring chains carried traffic for the whole
-run **and** `anyport` did not move. Either half alone is not evidence. If `anyport` did
-move, that is the finding — some client is still using an unsanctioned spelling, and
-Phase 4 waits.
+**The `cap_tcp_anyport_*` counter is a pre-roll sanity check only.** Read it after
+`anyport-probe.sh` and before T0: it must show the probe's +N on the probe's node
+(2026-10-01: 20 on main-worker-05 at T0). Do not grade on it. Envoy does not carry
+that stat across a hot restart, so the series **vanishes at the first proxy roll** and
+never comes back unless something dials the floor again. "Flat at its post-probe
+value" then reads ABSENCE for the rest of the run, which makes it vacuous after roll
+1. On 2026-10-01 the w05 series' last sample was at 01:47:00Z, during the first
+proxy roll. The #1094 connection then existed as a w03 series only from 05:42:00 to
+05:47:00Z. At T0+8h,
+`count({__name__=~"envoy_tcp_cap_tcp_anyport_.*_downstream_cx_total"})` was 0, so
+the raw T0/T0+8h comparison misses the hit entirely.
 
 Grade the dialer's own tallies separately from the prober SLI; it is a supplementary
 signal for the 037 chains, never authoritative for PASS/FAIL.
@@ -778,11 +900,13 @@ the next push). A climb in the no-roll window is a finding too. Two proxy-side s
 which half broke:
 
 ```promql
-# datagrams the transparent listener received and replied to, per pod (RAW counters)
-envoy_udp_capture_udp_.*_downstream_sess_rx_datagrams
-envoy_udp_capture_udp_.*_downstream_sess_tx_datagrams
+# datagrams the transparent listener received and replied to, per dialer pod (RAW
+# counters). The pod is in the metric NAME, so select by __name__ pattern; the
+# names end in `_total`, and a bare `envoy_udp_capture_udp_.*_…` is not a selector.
+sum by (__name__, node) ({__name__=~"envoy_udp_capture_udp_.+_downstream_sess_rx_datagrams_total"})
+sum by (__name__, node) ({__name__=~"envoy_udp_capture_udp_.+_downstream_sess_tx_datagrams_total"})
 # an arm whose every backend is unroutable (#937) -- must stay flat
-aether_agent_l4route_udp_no_healthy_backend_total
+sum by (node) (aether_agent_l4route_udp_no_healthy_backend_total)
 ```
 
 Both agent counters (`udp_no_healthy_backend_total`, `udp_unsupported_total`) are
@@ -791,15 +915,29 @@ regenerates each pod's listener (the 09-26 run: 110 → 164 → 108 across three
 generations). "Must stay flat" means flat *within one agent generation*; the raw sum
 across the run is not flat and that is only the reset, not a finding.
 
-And one CNI-side counter that must stay at zero for the whole run:
-`aether_cni_operations_total{operation="capture_divert",result="error"}` — a
-non-zero here is a pod that started UNCAPTURED (the table was rejected), and the
-mesh silently does nothing for it. It is a per-pod-ADD counter, so any increase
-during a roll is a real event, not a rate artefact.
+And one CNI-side counter that must stay at zero for the whole run. The labels are
+`aether_cni_operation` and `aether_cni_result` (#1088). The `operation`/`result`
+spelling this section used to carry matches nothing, so both the gate and its
+existence proof read empty:
 
-Before reading it, prove the CNI exports at all: `aether_cni_operations_total{operation="add"}`
-must have at least one series (every pod ADD increments it). An EMPTY result is a broken
-export, never "zero errors" — that was talos-main until #950, where the plugin (which runs
+```promql
+# MUST return no series. Use max_over_time, not increase(). The plugin is a
+# short-lived process per CNI call, and over 2026-10-01 every series sat at 1 on
+# every node. A series born at its final value reads 0 under increase() (the
+# counter rule under "Grading").
+max_over_time(aether_cni_operations_total{aether_cni_operation="capture_divert",aether_cni_result="error"}[8h])
+# the existence proof: one row per node per (operation, result) that occurred
+count by (node, aether_cni_operation, aether_cni_result) (last_over_time(aether_cni_operations_total[8h]))
+```
+
+A non-zero error series is a pod that started UNCAPTURED (the table was rejected), and
+the mesh silently does nothing for it. Each CNI ADD counts it, so a series that
+appears during a roll is a real event, not a rate artefact.
+
+Before reading it, prove the CNI exports at all: `aether_cni_operations_total{aether_cni_operation="add"}`
+must have at least one series (every pod ADD increments it). On 2026-10-01 the
+existence proof returned add, del and capture_divert `success` on all five nodes. An
+EMPTY result is a broken export, never "zero errors" — that was talos-main until #950, where the plugin (which runs
 under the host's resolver) could not resolve `otel-collector.o11y.svc.cluster.local` and no
 `aether_cni_*` series existed at all. Since #950 cni-install pins the name to the
 Service's ClusterIP; confirm on a node with
@@ -860,14 +998,18 @@ admin is loopback-only on talos and `kubectl exec` is denied):
 envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/.*@.*"}
 # the same requests must not have fallen back to h2: the h2 series of a destination
 # stays FLAT while its twins move (a moving h2 series = on_no_match), except for
-# destinations reached through a GAMMA weighted split (h2 by design, #961)
+# destinations reached through a GAMMA weighted split (h2 by design, #961). Since
+# QUIC is unconditional (#979) the h2 kin carry no request at all, so on a clean
+# run this returns NO SERIES (2026-10-01: none). A series appearing is the finding.
 envoy_cluster_upstream_rq_total{aether_cluster=~"aether-test/[^@]*"}
 # every twin connection is HTTP/3 (must climb with the twins, never the h1/h2 kin)
 envoy_cluster_upstream_cx_http3_total{aether_cluster=~".*@.*"}
 # a twin that cannot connect: 0 outside roll brackets; a step in the no-roll window
-# is a finding (the #957 DNS-SAN shape, or UDP:18008 blocked between nodes)
-envoy_cluster_upstream_cx_connect_fail{aether_cluster=~".*@.*"}
-envoy_cluster_upstream_rq_5xx{aether_cluster=~".*@.*"}
+# is a finding (the #957 DNS-SAN shape, or UDP:18008 blocked between nodes).
+# Both names end in `_total`; without it they match nothing. rq_5xx has no series on a
+# clean run (born at 1), so read it with max_over_time, never increase() alone.
+envoy_cluster_upstream_cx_connect_fail_total{aether_cluster=~".*@.*"}
+max_over_time(envoy_cluster_upstream_rq_5xx_total{aether_cluster=~".*@.*"}[8h])
 ```
 
 The prober and k6 SLIs grade the run exactly as before: a QUIC destination that
@@ -897,40 +1039,98 @@ pinned Envoy:
 - `response_flags` is exactly `DC` (no other flag beside it),
 - `response_code_details` is `downstream_remote_disconnect`,
 - `response_code` is `200`,
-- `bytes_sent` equals the clean-line body size **for that target**. That is 791 for the
-  soak's `svc-1`/`svc-2` twins on rev242; read it fresh with the first query below,
-  and it must be ONE value per authority.
+- `bytes_sent` is in the **set** of clean-line body sizes **for that authority**,
+  derived from the same run's own 2xx non-`DC` lines (query 1 below). It is not one
+  literal (#1089). A destination's clean bodies come in several sizes that differ by
+  a few bytes. On 2026-10-01 svc-3 had six, and the sets were:
+
+  | authority | clean `bytes_sent` set |
+  |---|---|
+  | `svc-1` | {789, 791, 866, 867, 868} |
+  | `svc-2` | {790, 791} |
+  | `svc-3` | {790, 791, 865, 866, 867, 868} |
+  | `svc-4` | {789, 791} |
+  | `echo.aether-test.aether.internal` | {789, 827} |
+  | `echo.aether-test.svc.cluster.local` | {829} |
+  | `mixed-svc` | {20} |
+  | `uds-echo` / `uds-cr-echo` | {73} / {79} |
+  | `authz-echo` | {867} |
+
+  Re-derive the sets for every run, and never copy them from this table. A single
+  literal per authority (the old wording) would have failed svc-1/2/3/4 and echo.
 
 Anything else stays a failure: `downstream_local_disconnect(...)` (the proxy closed on
-the client), a short `bytes_sent` (the body was cut), a non-200, or `DC` beside another
-flag. Benign lines are also **excluded from the k6 reconciliation**: k6 counted them as
-successes, so they have no k6 failure to match.
+the client), a `bytes_sent` outside the set (the body was cut), a non-200, or `DC`
+beside another flag. Benign lines are also **excluded from the k6 reconciliation**: k6
+counted them as successes, so they have no k6 failure to match.
 
 ```logsql
-# 1. the clean-line body size per QUIC destination: exactly one bytes_sent per authority
-log_name:aether_access_logs AND reporter:source AND authority:~"svc-[12]" AND response_code:200 AND response_flags:="-"
-  | stats by (authority, bytes_sent) count()
+# 1. the clean-size SET per authority, from this run's own 2xx non-DC lines
+log_name:aether_access_logs AND reporter:source AND response_code:="200" AND response_flags:="-"
+  | stats by (authority) uniq_values(bytes_sent) clean_sizes, count() clean_lines
 
-# 2. benign DC, per node and minute, inside one roll bracket (the roll's start/end
-#    from /tmp/soak-churn.log). One authority per query: <clean_bytes> is per target.
-log_name:aether_access_logs AND reporter:source AND _time:[<roll_start>, <roll_end>]
-  AND authority:~"svc-1" AND response_flags:="DC" AND response_code:200
-  AND response_code_details:="downstream_remote_disconnect" AND bytes_sent:="<clean_bytes>"
-  | stats by (_time:1m, node_name) count() benign
+# 2. the size condition, applied to every candidate line in one pass. It counts
+#    clean and DC lines per (authority, bytes_sent). A row with dc > 0 and
+#    clean = 0 is a DC size that no clean line of that authority had: NOT benign.
+#    Add `_time:[<roll_start>, <roll_end>]` to read one roll bracket.
+log_name:aether_access_logs AND reporter:source AND response_code:="200"
+  AND (response_flags:="-" OR (response_flags:="DC" AND response_code_details:="downstream_remote_disconnect"))
+  | stats by (authority, bytes_sent) count() if (response_flags:="-") clean, count() if (response_flags:="DC") dc
+  | filter dc:>0
 
-# 3. NON-benign DC in the same bracket. MUST be empty. Drop the time filter to get
-#    the whole run; every row that comes back is a failure to attribute.
-log_name:aether_access_logs AND reporter:source AND _time:[<roll_start>, <roll_end>]
-  AND authority:~"svc-1" AND response_flags:~"DC"
-  AND NOT (response_flags:="DC" AND response_code:200
-           AND response_code_details:="downstream_remote_disconnect" AND bytes_sent:="<clean_bytes>")
-  | stats by (node_name, response_code, response_flags, response_code_details, bytes_sent) count()
+# 3. DC lines that fail the other three conditions. Every row is a failure to
+#    attribute. client_sa is the calling ServiceAccount (see the per-client baseline).
+log_name:aether_access_logs AND reporter:source AND response_flags:~"DC"
+  AND NOT (response_flags:="DC" AND response_code:="200" AND response_code_details:="downstream_remote_disconnect")
+  | extract_regexp "/sa/(?P<client_sa>[^/]+)$" from source_spiffe_id
+  | stats by (authority, client_sa, node_name, response_code, response_flags, response_code_details, bytes_sent) count()
+
+# 4. benign DC per calling client: the input to the per-client baseline below
+log_name:aether_access_logs AND reporter:source AND response_code:="200" AND response_flags:="DC"
+  AND response_code_details:="downstream_remote_disconnect"
+  | extract_regexp "/sa/(?P<client_sa>[^/]+)$" from source_spiffe_id
+  | stats by (client_sa, authority) count() dc
 ```
 
-Control-test a zero from query 3 by dropping its `NOT (...)` clause: the benign lines
-from query 2 must come back. Benign lines belong to the rolled node: their `node_name`
-is the source node whose proxy was restarting. The same shape on a node whose proxy
-was *not* rolling is not this mechanism, and needs its own attribution.
+On 2026-10-01 query 2 returned 16 rows, every one with `clean` > 0, so every 200/`DC`
+size was in its authority's set. Query 3 returned 7 lines, all
+`response_code 0, bytes_sent 0` from the prober on the two echo authorities. Those
+were the prober's own 2 s timeouts, which the prober counter already counts. Control-test
+a zero from query 3 by dropping its `NOT (...)` clause: the benign lines must come back.
+
+**Per-client baseline: the clients whose benign `DC` is continuous (#1075).** The rule
+above was written for the roll-bracketed race, where `DC` lines appear only while a
+source node's proxy is restarting. Three harness clients log benign `DC` **all the
+time**, at a steady rate unrelated to rolls. Their lines meet all four conditions, and
+the client counts them as successes. Identify the client by its source workload,
+i.e. the ServiceAccount in `source_spiffe_id` (query 4), and grade them as a baseline.
+They are not failures, and they are not roll evidence:
+
+| client (`client_sa`, `user_agent`) | authorities | 2026-10-01 benign DC |
+|---|---|---|
+| `prober`, `Go-http-client/1.1` | `echo.aether-test.aether.internal`, `echo.aether-test.svc.cluster.local` | 20,088 + 20,821 = 40,909 over 8 h; 4,821–5,259 per full hour (01–07Z), ~2.5k/h per authority |
+| `uds-client`, `curl/…` | `uds-echo`, `uds-cr-echo` | 258 + 371 |
+| `authz-canary`, `curl/…` | `authz-echo` | 87 |
+
+(`uds-client` and `authz-canary` together: 74–109 per full hour.) How to grade them:
+
+- **Subtract, do not flag.** A grader that reads the prober's ~41k benign lines as roll
+  evidence, or as failures, has misread the run. Report the per-client totals, and
+  confirm that each full hour is in the same band as the rest of the run. A step in
+  the band, i.e. an hour well outside the run's own range, is the finding. A steady
+  count is not.
+- **The roll-bracketed clients are everything else.** These are the k6 loaders
+  (`client_sa` `default`, `Grafana k6/…`) and the new-SA steps (`sa-new-*`). Every one
+  of their benign lines must fall inside a source-node proxy roll bracket from
+  `/tmp/soak-churn.log`. On 2026-10-01 there were 360 k6 lines plus 1 new-SA line, and
+  every k6 minute was one of the six proxy-roll brackets (01:40–42, 02:16–18,
+  04:16–18, 04:52–54, 05:40–43, 06:16–18Z).
+- The prober is deliberately left unchanged (#1075). Its SLI already counts these
+  probes as successes.
+
+Benign lines from a roll-bracketed client belong to the rolled node: their
+`node_name` is the source node whose proxy was restarting. The same shape on a node
+whose proxy was *not* rolling is not this mechanism, and needs its own attribution.
 
 **The timing fields (#1009).** Since #1009 every HTTP access-log line carries two
 durations, both measured from the first upstream response byte:
@@ -1063,10 +1263,14 @@ and the zero is vacuous.
 QUIC failures whose upstream is on the node being rolled:
 
 ```
-_stream:{service.name="aether-proxy"} AND log_name:aether_access_logs AND reporter:source
+log_name:aether_access_logs AND reporter:source
   AND response_flags:UC
   AND response_code_details:~"QUIC_TOO_MANY_RTOS|Network_blackhole_detected"
 ```
+
+Control-test its zero with the same matcher widened to
+`…|response_timeout` and without `response_flags:UC`. Over 2026-10-01 that returned
+the run's 5 `504 UT` lines.
 
 Resolve `upstream_host` to its node as in the runbook ("upstream_host → pod → node").
 The baseline is the count on the rolls that did not wedge: 0 on rolls 1–3 of the
@@ -1088,11 +1292,13 @@ _stream:{service.name="aether-proxy"} AND "k8s.container.name":proxy AND _msg:"h
 ```
 
 ```promql
-sum by (k8s_node_name) (increase(aether_supervisor_child_silent_total[30m]))
+sum by (node) (increase(aether_supervisor_child_silent_total[30m]))
 ```
 
-The counter is seeded at zero, so a node with no series at all means its supervisor
-metrics never arrived and the zero is vacuous. The log-gap reading (the gap between
+The label is `node` (#1088). Grouping by `k8s_node_name` returns ONE label-less row,
+and then the "node with no series" check cannot be made. The counter is seeded at
+zero, so it must return one row per node (2026-10-01, over `[8h]`: 5 rows, all 0). A
+node with no row means its supervisor metrics never arrived, and its zero is vacuous. The log-gap reading (the gap between
 `starting workers` and the next line from that pod) stays as the cross-check. It also
 catches a child that goes quiet in its log while its admin still answers, which the
 metric does not.
@@ -1129,16 +1335,20 @@ patches (#1064, #1066) address it with the chart default
 rolling node (resolve `upstream_host` as in (b) above):
 
 ```
-_stream:{service.name="aether-proxy"} AND log_name:aether_access_logs AND reporter:source
+log_name:aether_access_logs AND reporter:source
   AND response_code_details:~"Received_stateless_reset"
 ```
 
 must be **0**, and so must the QUIC `503 UC` lines toward the rolling node:
 
 ```
-_stream:{service.name="aether-proxy"} AND log_name:aether_access_logs AND reporter:source
-  AND response_code:503 AND response_flags:UC AND upstream_cluster:~"^quic:"
+log_name:aether_access_logs AND reporter:source
+  AND response_code:503 AND response_flags:UC AND upstream_cluster:~"@"
 ```
+
+`upstream_cluster` carries the twin's stat key, `<ns>/<svc>@<ns>/<sa>`, and never its
+`quic:` config name. Over 2026-10-01, `upstream_cluster:~"^quic:"` matched 0 of
+20,289,652 records and `upstream_cluster:~"@"` matched 10,146,248 source lines.
 
 Also report the same query with `PEER_GOING_AWAY` in place of `Received_stateless_reset`:
 a change that only turns one failure into another must not read as a pass.
@@ -1311,5 +1521,7 @@ Each of these invalidated a real run:
   `udp-echo.<ns>.aether.internal:18082` from every node with a unique token per
   datagram. Plaintext by design; delivery under churn is the question it asks.
 - `anyport-probe.sh` — the one-shot negative control for that gate: dials a TCP-primary
-  service at an unsanctioned port so `cap_tcp_anyport_*` is *shown* to move before the
-  run relies on it not moving.
+  service at an unsanctioned port (19999), so anyport connections are *shown* to appear
+  in the L4 access log before the run relies on the gate query being empty. Its
+  `cap_tcp_anyport_*` counter bump is only a pre-roll check, because the series does
+  not survive a proxy roll (#1095).
