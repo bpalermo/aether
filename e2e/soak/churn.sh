@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# 8-hour soak churn driver: 31 rolling restarts (29 schedule entries; the TRIPLE
+# 8-hour soak churn driver: 33 rolling restarts (31 schedule entries; the TRIPLE
 # fires three at once), including three aether-mesh-dns DaemonSet rolls (surge +
-# SO_REUSEPORT handoff) and one CONCURRENT triple (agent + proxy + svc at the same
+# SO_REUSEPORT handoff), two aether-uds-csi DaemonSet rolls with a UDS pod deleted
+# mid-roll (#1109), and one CONCURRENT triple (agent + proxy + svc at the same
 # instant) as the stress peak -- followed by a deliberate 90-minute NO-ROLL WINDOW
 # and a demand-set SHRINK.
 #
@@ -24,6 +25,8 @@
 #   --new-sa-once    run ONE new-ServiceAccount step now (see below) and exit: the
 #                    pre-run check that the step works on this cluster, and the
 #                    way to exercise it on kind. Writes its own fresh $LOG.
+#   --uds-csi-once   run ONE uds-csi roll step now (see below) and exit; same
+#                    purpose and the same fresh-$LOG behaviour as --new-sa-once.
 #
 # Pre-flight runs BEFORE the log is touched and before T0: the API server must answer
 # /readyz, every workload the schedule rolls (and the SHRINK target) must exist, and
@@ -45,10 +48,12 @@
 #   108   svc-1        120 edge
 #   132   svc-2        144 mesh-dns
 #   156   svc-3        168 svc-4
+#   162   UDS-CSI      the plugin DaemonSet + a uds-echo pod deleted mid-roll
 #   180   svc-5        192 svc-1
 #   204   edge         216 proxy  *
 #   228   svc-2        240 svc-4
 #   252   proxy  *     264 svc-3
+#   270   UDS-CSI      the plugin DaemonSet + a uds-cr-echo pod deleted mid-roll
 #   276   svc-1
 #   300   TRIPLE *     agent + proxy + svc-3 concurrently -- the stress peak, and
 #                      the LAST agent roll of the run (see the no-roll window)
@@ -77,7 +82,7 @@
 # a roll landing before the load had settled. Moving it to a full hour after T0 (k6
 # starts ~4 minutes before T0) separates them: if the first roll still costs an order
 # of magnitude more than the rest, it is the pre-load generation, not the timing.
-# mesh-dns took the T0+36 slot; the set of rolls, and the 31 tally, are unchanged.
+# mesh-dns took the T0+36 slot; the set of rolls, and the tally, were unchanged.
 #
 # ------------------------------------------------ why the window and the shrink
 #
@@ -128,11 +133,51 @@
 #   SOAK_NEWSA_SECONDS=120  SOAK_NEWSA_RPS=20  SOAK_NEWSA_NS=aether-test
 #   SOAK_NEWSA_TARGETS="svc-1=http://svc-1.aether-test.aether.internal:18081/ svc-3=..."
 #   SOAK_NEWSA_UPSTREAMS="svc-1,svc-3"  SOAK_NEWSA_IMAGE=curlimages/curl:8.22.0
+#
+# ------------------------------------------------------- the uds-csi roll (#1109)
+#
+# The csi.aether.io node plugin (aether-uds-csi, proposal 039) is a per-node
+# privileged component since chart 2.0.0, and nothing else here rolls it. Each
+# UDS-CSI step exercises the three things a plugin roll can break: the per-pod
+# mounts of running UDS pods persisting across it (k6 and uds-client keep
+# driving them), NodeUnpublishVolume for a pod that is deleted WHILE its node's
+# plugin is down (the kubelet retries until the new plugin registers), and a new
+# pod mounting right after. The step:
+#   1. picks a Running pod of the step's UDS Deployment (round-robin over
+#      SOAK_UDSCSI_VICTIMS: uds-echo = the annotation path, uds-cr-echo = the
+#      EndpointPolicy path) and the plugin pod on that pod's node;
+#   2. `rollout restart`s the DaemonSet and, as soon as that node's plugin pod is
+#      terminating (window=down; window=missed if it was replaced before the
+#      driver saw it), deletes the UDS pod;
+#   3. waits for the DaemonSet rollout, the deleted pod to finish Terminating, and
+#      its replacement to become Ready; then checks every node running the plugin
+#      lists csi.aether.io in its CSINode, and counts FailedMount events in the
+#      victim's namespace during the step and in the 30s after it (the latter
+#      MUST be 0: a FailedMount that outlives the roll);
+#   4. logs ONE line:
+#        ROLLED aether-system/daemonset/aether-uds-csi victim=<ns>/<pod>@<node> window=down
+#          rollout=<s>s terminated=<s>s replacement=<pod> ready=<s>s csinode=<k>/<n>
+#          failedmount_during=<n> failedmount_after=<n>
+#      or FAILED ... with the same fields plus bad=<what>. Like a FAILED newsa
+#      step, a FAILED uds-csi step is a GATE FINDING and does not abort the run;
+#      only a refused `rollout restart` (or no victim pod to delete) is a hole
+#      and aborts.
+#
+#   SOAK_UDSCSI=0                   opt out (default ON)
+#   SOAK_UDSCSI_OFFSETS="162 270"   minutes after T0: midway between two svc rolls,
+#                                   clear of the TRIPLE (300), the new-SA steps
+#                                   (126, 288), every proxy/agent roll and the
+#                                   no-roll window (360-450). A step takes ~2-4 min.
+#   SOAK_UDSCSI_VICTIMS="aether-test/uds-echo aether-test/uds-cr-echo"
+#                                   <ns>/<Deployment>, pods labelled app=<Deployment>
+#   SOAK_UDSCSI_TIMEOUT=600         seconds for the DaemonSet rollout; 300 each for
+#                                   the pod to terminate and its replacement
 set -uo pipefail
 
 CTX="${SOAK_CONTEXT:-talos-main}"
 PREFLIGHT_ONLY=0
 NEWSA_ONCE=0
+UDSCSI_ONCE=0
 BUILD_LABEL=""
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -152,8 +197,12 @@ while [ $# -gt 0 ]; do
 		NEWSA_ONCE=1
 		shift
 		;;
+	--uds-csi-once)
+		UDSCSI_ONCE=1
+		shift
+		;;
 	-*)
-		echo "churn.sh: unknown flag '$1' (usage: churn.sh [--context NAME] [--preflight] [--new-sa-once] [BUILD_LABEL])" >&2
+		echo "churn.sh: unknown flag '$1' (usage: churn.sh [--context NAME] [--preflight] [--new-sa-once] [--uds-csi-once] [BUILD_LABEL])" >&2
 		exit 2
 		;;
 	*)
@@ -167,6 +216,10 @@ while [ $# -gt 0 ]; do
 	esac
 done
 BUILD_LABEL="${BUILD_LABEL:-unspecified-build}"
+if [ "$NEWSA_ONCE" = "1" ] && [ "$UDSCSI_ONCE" = "1" ]; then
+	echo "churn.sh: --new-sa-once and --uds-csi-once are separate runs; pass one" >&2
+	exit 2
+fi
 if [ -z "$CTX" ]; then
 	echo "churn.sh: --context needs a kubeconfig context name" >&2
 	exit 2
@@ -215,12 +268,24 @@ NEWSA_ON="${SOAK_NEWSA:-1}"
 NEWSA_STEP=0
 NEWSA_LIVE=""
 
+# uds-csi roll (#1109). See the header.
+UDSCSI_ON="${SOAK_UDSCSI:-1}"
+UDSCSI_OFFSETS="${SOAK_UDSCSI_OFFSETS:-162 270}"
+UDSCSI_VICTIMS="${SOAK_UDSCSI_VICTIMS:-aether-test/uds-echo aether-test/uds-cr-echo}"
+UDSCSI_TIMEOUT="${SOAK_UDSCSI_TIMEOUT:-600}"
+UDSCSI_NS="aether-system"
+UDSCSI_DS="daemonset/aether-uds-csi"
+UDSCSI_SELECTOR="app.kubernetes.io/component=uds-csi"
+UDSCSI_DRIVER="csi.aether.io"
+UDSCSI_STEP=0
+
 # Pre-flight (#951). Writes to stderr only -- never to $LOG -- and runs before T0.
 # "<namespace> <kind>/<name>" for every workload the schedule or the SHRINK touches.
 PREFLIGHT_TARGETS=(
 	"aether-system daemonset/aether-agent"
 	"aether-system daemonset/aether-proxy"
 	"aether-system daemonset/aether-mesh-dns"
+	"aether-system daemonset/aether-uds-csi"
 	"aether-ingress deployment/aether-edge"
 	"aether-test deployment/svc-1"
 	"aether-test deployment/svc-2"
@@ -260,6 +325,39 @@ preflight_newsa() {
 	return "$fail"
 }
 
+# The uds-csi step patches the plugin DaemonSet (a PREFLIGHT_TARGETS entry when it
+# is on) and deletes one pod of each victim Deployment; it reads CSINodes and the
+# victims' FailedMount events.
+preflight_udscsi() {
+	local out fail=0 spec vns vdep running
+	for spec in $UDSCSI_VICTIMS; do
+		vns="${spec%%/*}" vdep="${spec#*/}"
+		if ! out=$(k --request-timeout=15s -n "$vns" get "deployment/$vdep" -o name 2>&1); then
+			echo "churn.sh: PRE-FLIGHT FAILED: UDS victim $vns/deployment/$vdep not found on context '$CTX' (install charts/udsecho, or SOAK_UDSCSI=0): $out" >&2
+			fail=1
+			continue
+		fi
+		running=$(k --request-timeout=15s -n "$vns" get pods -l "app=$vdep" --field-selector=status.phase=Running -o name 2>/dev/null | wc -l)
+		if [ "$running" -eq 0 ]; then
+			echo "churn.sh: PRE-FLIGHT FAILED: no Running pod labelled app=$vdep in $vns to delete mid-roll" >&2
+			fail=1
+		fi
+		if ! out=$(k --request-timeout=15s -n "$vns" auth can-i delete pods 2>&1); then
+			echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' may not delete pods in $vns ($out)" >&2
+			fail=1
+		fi
+		if ! out=$(k --request-timeout=15s -n "$vns" auth can-i list events 2>&1); then
+			echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' may not list events in $vns ($out)" >&2
+			fail=1
+		fi
+	done
+	if ! out=$(k --request-timeout=15s auth can-i list csinodes.storage.k8s.io 2>&1); then
+		echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' may not list CSINodes ($out)" >&2
+		fail=1
+	fi
+	return "$fail"
+}
+
 preflight() {
 	local out fail=0 ns obj t
 	if ! out=$(k --request-timeout=15s get --raw /readyz 2>&1); then
@@ -269,6 +367,14 @@ preflight() {
 		return 1
 	fi
 	if [ "$NEWSA_ONCE" = "1" ]; then PREFLIGHT_TARGETS=(); fi
+	if [ "$UDSCSI_ONCE" = "1" ]; then PREFLIGHT_TARGETS=("$UDSCSI_NS $UDSCSI_DS"); fi
+	if [ "$UDSCSI_ON" = "0" ] && [ "$UDSCSI_ONCE" != "1" ]; then
+		local keep=()
+		for t in "${PREFLIGHT_TARGETS[@]}"; do
+			if [ "$t" != "$UDSCSI_NS $UDSCSI_DS" ]; then keep+=("$t"); fi
+		done
+		PREFLIGHT_TARGETS=("${keep[@]}")
+	fi
 	for t in "${PREFLIGHT_TARGETS[@]}"; do
 		read -r ns obj <<<"$t"
 		if ! out=$(k --request-timeout=15s -n "$ns" get "$obj" -o name 2>&1); then
@@ -281,16 +387,21 @@ preflight() {
 			fail=1
 		fi
 	done
-	if [ "$NEWSA_ON" != "0" ] || [ "$NEWSA_ONCE" = "1" ]; then
+	if { [ "$NEWSA_ON" != "0" ] && [ "$UDSCSI_ONCE" != "1" ]; } || [ "$NEWSA_ONCE" = "1" ]; then
 		preflight_newsa || fail=1
+	fi
+	if { [ "$UDSCSI_ON" != "0" ] && [ "$NEWSA_ONCE" != "1" ]; } || [ "$UDSCSI_ONCE" = "1" ]; then
+		preflight_udscsi || fail=1
 	fi
 	if [ "$fail" -ne 0 ]; then
 		echo "churn.sh: refusing to start; $LOG untouched, no T0 written." >&2
 		return 1
 	fi
 	local newsa_state="new-SA step ON at T0+{${NEWSA_OFFSETS// /,}}m"
-	if [ "$NEWSA_ONCE" = "1" ]; then newsa_state="new-SA step once, now"; elif [ "$NEWSA_ON" = "0" ]; then newsa_state="new-SA step OFF"; fi
-	echo "churn.sh: pre-flight OK on context '$CTX' (API ready; ${#PREFLIGHT_TARGETS[@]} targets present and patchable; $newsa_state)" >&2
+	if [ "$NEWSA_ONCE" = "1" ]; then newsa_state="new-SA step once, now"; elif [ "$NEWSA_ON" = "0" ] || [ "$UDSCSI_ONCE" = "1" ]; then newsa_state="new-SA step OFF"; fi
+	local udscsi_state="uds-csi step ON at T0+{${UDSCSI_OFFSETS// /,}}m"
+	if [ "$UDSCSI_ONCE" = "1" ]; then udscsi_state="uds-csi step once, now"; elif [ "$UDSCSI_ON" = "0" ] || [ "$NEWSA_ONCE" = "1" ]; then udscsi_state="uds-csi step OFF"; fi
+	echo "churn.sh: pre-flight OK on context '$CTX' (API ready; ${#PREFLIGHT_TARGETS[@]} targets present and patchable; $newsa_state; $udscsi_state)" >&2
 }
 
 if ! preflight; then exit 2; fi
@@ -300,7 +411,7 @@ T0=$(date +%s)
 
 # Start a FRESH log, archiving any previous run alongside it. Without this the driver
 # appends to the last soak's file, and `grep -c ROLLED` -- which teardown uses to confirm
-# 31 rolls -- silently double-counts, so a run looks complete when it is not.
+# 33 rolls -- silently double-counts, so a run looks complete when it is not.
 if [ -s "$LOG" ]; then
 	mv -f "$LOG" "$LOG.$(date -u +%Y%m%dT%H%M%SZ).prev"
 fi
@@ -552,6 +663,145 @@ spec:
 EOF
 }
 
+# FailedMount events in namespace $1 last seen at or after $2 (and, with $3, at or
+# before $3), all ISO-8601 UTC. lastTimestamp for core events, eventTime for the
+# events.k8s.io shape; ISO strings compare lexically. Prints "?" when the events
+# cannot be listed, so an API error never reads as a clean 0.
+failedmount_count() {
+	local ev
+	if ! ev=$(k --request-timeout=15s -n "$1" get events --field-selector reason=FailedMount \
+		-o jsonpath='{range .items[*]}{.lastTimestamp}{" "}{.eventTime}{"\n"}{end}' 2>/dev/null); then
+		echo "?"
+		return
+	fi
+	printf '%s\n' "$ev" |
+		awk -v from="$2" -v to="${3:-9999}" '
+			{ t = ($1 != "" && $1 != "<nil>") ? $1 : $2 }
+			t != "" && t >= from && t <= to { n++ }
+			END { print n + 0 }'
+}
+
+# "<ok>/<total>": nodes running a uds-csi plugin pod whose CSINode lists the driver.
+udscsi_csinodes() {
+	local nodes node ok=0 total=0
+	nodes=$(k -n "$UDSCSI_NS" get pods -l "$UDSCSI_SELECTOR" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>/dev/null | sort -u)
+	for node in $nodes; do
+		total=$((total + 1))
+		case " $(k get csinode "$node" -o jsonpath='{.spec.drivers[*].name}' 2>/dev/null) " in
+		*" $UDSCSI_DRIVER "*) ok=$((ok + 1)) ;;
+		esac
+	done
+	echo "$ok/$total"
+}
+
+# One uds-csi roll step (#1109). See the header. Returns non-zero only for a hole
+# (restart refused, or nothing to delete); every other outcome is a tally line.
+udscsi() {
+	local spec vns vdep victims n line victim vnode before plugin t_begin since t_del t_done
+	local window="missed" rollout_s=- term_s=- ready_s=- replacement=- csinode fm_during fm_after bad="" deadline p
+	UDSCSI_STEP=$((UDSCSI_STEP + 1))
+	read -r -a victims <<<"$UDSCSI_VICTIMS"
+	n=${#victims[@]}
+	spec="${victims[$(((UDSCSI_STEP - 1) % n))]}"
+	vns="${spec%%/*}" vdep="${spec#*/}"
+	# A Running, not-terminating pod of the victim Deployment, and its node.
+	line=$(k -n "$vns" get pods -l "app=$vdep" --field-selector=status.phase=Running \
+		-o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{" "}{.metadata.deletionTimestamp}{"\n"}{end}' 2>>"$LOG" |
+		awk 'NF == 2 {print; exit}')
+	read -r victim vnode <<<"$line"
+	if [ -z "${victim:-}" ]; then
+		log "FAILED $UDSCSI_NS/$UDSCSI_DS - no Running pod labelled app=$vdep in $vns to delete mid-roll"
+		return 1
+	fi
+	before=$(k -n "$vns" get pods -l "app=$vdep" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+	plugin=$(k -n "$UDSCSI_NS" get pods -l "$UDSCSI_SELECTOR" --field-selector "spec.nodeName=$vnode" \
+		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+	t_begin=$(date +%s)
+	since=$(date -u +%FT%TZ)
+	log "UDSCSI begin $UDSCSI_NS/$UDSCSI_DS; will delete $vns/$victim on $vnode once its plugin ${plugin:-<none>} is down"
+	if ! k -n "$UDSCSI_NS" rollout restart "$UDSCSI_DS" >>"$LOG" 2>&1; then
+		log "FAILED $UDSCSI_NS/$UDSCSI_DS - rollout restart refused"
+		return 1
+	fi
+	# Delete the victim while ITS node's plugin is down, so the kubelet's
+	# NodeUnpublishVolume has to wait for the new plugin to register.
+	deadline=$((t_begin + UDSCSI_TIMEOUT))
+	while [ -n "$plugin" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+		# Terminating = down (it unregistered on SIGTERM). Already gone = we
+		# missed the window. Any other API error: keep polling.
+		if p=$(k --request-timeout=10s -n "$UDSCSI_NS" get pod "$plugin" -o jsonpath='{.metadata.deletionTimestamp}' 2>&1); then
+			if [ -n "$p" ]; then
+				window="down"
+				break
+			fi
+		else
+			case "$p" in *NotFound*) break ;; esac
+		fi
+		sleep 1
+	done
+	t_del=$(date +%s)
+	if ! k -n "$vns" delete pod "$victim" --wait=false >>"$LOG" 2>&1; then
+		log "FAILED $UDSCSI_NS/$UDSCSI_DS - could not delete $vns/$victim"
+		return 1
+	fi
+	if k -n "$UDSCSI_NS" rollout status "$UDSCSI_DS" --timeout="${UDSCSI_TIMEOUT}s" >>"$LOG" 2>&1; then
+		rollout_s=$(($(date +%s) - t_begin))
+	else
+		bad="$bad,rollout"
+	fi
+	if k -n "$vns" wait --for=delete "pod/$victim" --timeout=300s >>"$LOG" 2>&1; then
+		term_s=$(($(date +%s) - t_del))
+	else
+		bad="$bad,terminating"
+	fi
+	# The replacement: a pod of the Deployment that did not exist before the delete.
+	deadline=$(($(date +%s) + 300))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		replacement=$(k -n "$vns" get pods -l "app=$vdep" \
+			-o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>/dev/null |
+			awk -v before=" $before " '$2 == "True" && index(before, " " $1 " ") == 0 {print $1; exit}')
+		if [ -n "$replacement" ]; then
+			ready_s=$(($(date +%s) - t_del))
+			break
+		fi
+		sleep 3
+	done
+	if [ -z "$replacement" ]; then
+		replacement=-
+		bad="$bad,replacement"
+	fi
+	# Registration is asynchronous to pod readiness: give the kubelet a minute.
+	deadline=$(($(date +%s) + 60))
+	while :; do
+		csinode=$(udscsi_csinodes)
+		if [ "${csinode%/*}" = "${csinode#*/}" ] && [ "${csinode#*/}" != 0 ]; then break; fi
+		if [ "$(date +%s)" -ge "$deadline" ]; then
+			bad="$bad,csinode"
+			break
+		fi
+		sleep 5
+	done
+	t_done=$(date -u +%FT%TZ)
+	fm_during=$(failedmount_count "$vns" "$since" "$t_done")
+	# Settle, then any FailedMount stamped after the step finished outlived the roll.
+	sleep 30
+	fm_after=$(failedmount_count "$vns" "$t_done")
+	if [ "$fm_after" != 0 ]; then bad="$bad,failedmount"; fi
+	line="$UDSCSI_NS/$UDSCSI_DS victim=$vns/$victim@$vnode window=$window rollout=${rollout_s}s terminated=${term_s}s replacement=$replacement ready=${ready_s}s csinode=$csinode failedmount_during=$fm_during failedmount_after=$fm_after"
+	if [ -z "$bad" ]; then
+		log "ROLLED $line"
+	else
+		log "FAILED $line bad=${bad#,}"
+	fi
+}
+
+if [ "$UDSCSI_ONCE" = "1" ]; then
+	log "churn driver uds-csi-once start T0=$(date -u +%FT%TZ) build=$BUILD_LABEL context=$CTX"
+	udscsi || abort "uds-csi step could not run"
+	log "churn driver uds-csi-once complete"
+	exit 0
+fi
+
 if [ "$NEWSA_ONCE" = "1" ]; then
 	log "churn driver new-sa-once start T0=$(date -u +%FT%TZ) build=$BUILD_LABEL context=$CTX"
 	newsa || abort "new-SA step produced no tally"
@@ -572,8 +822,8 @@ SCHED=(
 	"324 svc svc-4" "336 proxy" "348 svc svc-2" "360 svc svc-1"
 )
 
-# The new-SA steps join the schedule by offset (a stable numeric sort keeps a roll
-# that shares a minute with a step ahead of it).
+# The new-SA and uds-csi steps join the schedule by offset (a stable numeric sort
+# keeps a roll that shares a minute with a step ahead of it).
 NEWSA_COUNT=0
 if [ "$NEWSA_ON" = "0" ]; then
 	log "new-SA step SKIPPED (SOAK_NEWSA=0)"
@@ -582,15 +832,26 @@ else
 		SCHED+=("$off newsa")
 		NEWSA_COUNT=$((NEWSA_COUNT + 1))
 	done
-	mapfile -t SCHED < <(printf '%s\n' "${SCHED[@]}" | sort -s -n -k1,1)
 	log "new-SA step scheduled at T0+{${NEWSA_OFFSETS// /,}}m ($NEWSA_COUNT steps, ${NEWSA_SECONDS}s each, #1014)"
 fi
+UDSCSI_COUNT=0
+if [ "$UDSCSI_ON" = "0" ]; then
+	log "uds-csi step SKIPPED (SOAK_UDSCSI=0)"
+else
+	for off in $UDSCSI_OFFSETS; do
+		SCHED+=("$off udscsi")
+		UDSCSI_COUNT=$((UDSCSI_COUNT + 1))
+	done
+	log "uds-csi step scheduled at T0+{${UDSCSI_OFFSETS// /,}}m ($UDSCSI_COUNT steps; victims round-robin over: $UDSCSI_VICTIMS; #1109)"
+fi
+mapfile -t SCHED < <(printf '%s\n' "${SCHED[@]}" | sort -s -n -k1,1)
 
 for entry in "${SCHED[@]}"; do
 	read -r off kind name <<<"$entry"
 	waituntil "$off"
 	case "$kind" in
 	newsa) newsa || abort "new-SA step produced no tally" ;;
+	udscsi) udscsi || abort "uds-csi step could not run" ;;
 	svc) roll aether-test "deployment/$name" || abort "roll failed: aether-test/deployment/$name" ;;
 	proxy) roll_proxy ;;
 	agent) roll aether-system daemonset/aether-agent || abort "roll failed: aether-system/daemonset/aether-agent" ;;
@@ -638,8 +899,9 @@ else
 	shrink
 fi
 
-# 29 schedule entries, but the TRIPLE logs its three concurrent rolls separately, so
-# the rolls alone are 31. (The old footer said 30: it forgot the TRIPLE's proxy. The
-# set of rolls is unchanged -- only the tally is now honest.) Each new-SA step adds
-# one `ROLLED newsa/` (or `FAILED newsa/`) line: `grep -c ROLLED` is 33 by default.
-log "churn driver complete (31 rolls: 6 proxy incl triple, 2 agent incl triple, 2 edge, 3 meshdns, 18 svc incl triple; + $NEWSA_COUNT new-SA steps)"
+# 29 schedule entries plus the uds-csi steps, but the TRIPLE logs its three
+# concurrent rolls separately, so the rolls are 31 + the uds-csi steps = 33 by
+# default. (A footer once said 30: it forgot the TRIPLE's proxy.) Each new-SA step
+# adds one `ROLLED newsa/` (or `FAILED newsa/`) line: `grep -c ROLLED` is 35 by
+# default.
+log "churn driver complete ($((31 + UDSCSI_COUNT)) rolls: 6 proxy incl triple, 2 agent incl triple, 2 edge, 3 meshdns, $UDSCSI_COUNT uds-csi, 18 svc incl triple; + $NEWSA_COUNT new-SA steps)"

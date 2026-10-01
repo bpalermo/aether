@@ -3,7 +3,8 @@ import exec from 'k6/execution';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
 
-const targets = [
+// The bulk of the load: TCP-delivered mesh services, picked uniformly.
+const MESH_TARGETS = [
   'http://svc-1.aether-test.aether.internal:18081/',
   'http://svc-2.aether-test.aether.internal:18081/',
   'http://svc-3.aether-test.aether.internal:18081/',
@@ -24,6 +25,37 @@ const targets = [
   // rev231 run. Only the per-target share moves, 20% to 16.7%.
   'http://mixed-svc.aether-test.aether.internal:18081/',
 ];
+
+// The UDS-served services (proposals 034/039, charts/udsecho): the node proxy
+// delivers to a Unix socket on the pod's csi.aether.io per-pod tmpfs instead of
+// a TCP port (#1108). uds-echo declares its socket with the pod annotation,
+// uds-cr-echo through an EndpointPolicy -- the two delivery paths. Until #1108
+// nothing CLIENT-side measured them under load: the prober has no UDS tier,
+// and uds-client's 1 rps curl loop is graded only from access logs, so a
+// failure there showed up at best as a non-200 line nobody was looking for.
+//
+// A MODEST share, not a uniform eighth: UDS_SHARE of the iterations go to the
+// two UDS targets together, the rest to MESH_TARGETS. The total arrival rate
+// is unchanged (constant-arrival-rate), so fleet CPU stays comparable with
+// earlier runs; the TCP targets give up UDS_SHARE of their share between them
+// (16.7% -> 15.8% each). At 60 iters/s that is ~1.5 rps per UDS target per
+// runner, about 9x the uds-client loop across five runners -- enough that a
+// roll's failures land in k6's per-target breakdown, not only in access logs.
+const UDS_TARGETS = [
+  'http://uds-echo.aether-test.aether.internal:18081/',
+  'http://uds-cr-echo.aether-test.aether.internal:18081/',
+];
+const UDS_SHARE = 0.05;
+
+// Every target, for the per-target submetric declarations and the summary.
+const targets = MESH_TARGETS.concat(UDS_TARGETS);
+
+// pickTarget draws one target: a UDS one with probability UDS_SHARE, else a
+// mesh one, each uniform within its group.
+function pickTarget() {
+  const group = Math.random() < UDS_SHARE ? UDS_TARGETS : MESH_TARGETS;
+  return group[Math.floor(Math.random() * group.length)];
+}
 
 const CLASSES = ['dns', 'conn', 'tls', 'timeout', 'proto', 'http_4xx', 'http_5xx', 'other'];
 
@@ -84,7 +116,8 @@ const cAll = new Counter('aether_fail');
 // k6-runner.yaml). An instrument must not cost as much as the effects it is
 // meant to measure.
 //
-// Hence the split below: a SMALL declared key space -- 281 submetrics, measured
+// Hence the split below: a SMALL declared key space -- 281 submetrics (297
+// since the two UDS targets, #1108: 8 classes x 2 more targets), measured
 // at +5MiB RSS and +0.9s CPU over a 180s 60rps run against a healthy target,
 // most of it one-off startup (the same delta over 60s was +0.65s), so the
 // steady-state share is well under 1% of a core -- plus a bounded verbatim
@@ -268,7 +301,7 @@ function sampleFailure(cls, url, code, status, err) {
 }
 
 export default function () {
-  const url = targets[Math.floor(Math.random() * targets.length)];
+  const url = pickTarget();
   const res = http.get(url, { tags: { endpoint: url } });
 
   const cls = classify(res);
