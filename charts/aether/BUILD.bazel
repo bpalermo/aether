@@ -730,6 +730,8 @@ helm_template_test(
             "- \"--kubelet-root=/var/lib/kubelet\"",
             "- \"--root=/run/aether/uds\"",
             "- \"--size=1Mi\"",
+            # The per-pod tmpfs inode cap (#1107), default 64.
+            "- \"--inodes=64\"\\n",
             "privileged: true",
             "runAsUser: 0",
             "- name: kubelet-pods\\n\\s+mountPath: /var/lib/kubelet/pods\\n\\s+mountPropagation: Bidirectional\\n",
@@ -769,17 +771,33 @@ helm_template_test(
         "udsCsi.kubeletRoot=/var/lib/k0s/kubelet/",
         "--set",
         "udsCsi.size=512Ki",
+        "--set",
+        "udsCsi.inodes=1000000",
     ],
     template_patterns = {
         "aether/templates/uds-csi-daemonset.yaml": [
             "- \"--kubelet-root=/var/lib/k0s/kubelet\"\\n",
             "- \"--size=512Ki\"",
+            # A plain integer, never 1e+06.
+            "- \"--inodes=1000000\"\\n",
             "mountPath: /var/lib/k0s/kubelet/pods\\n",
             "path: /var/lib/k0s/kubelet/pods\\n",
             "mountPath: /var/lib/k0s/kubelet/plugins/csi.aether.io\\n",
             "path: /var/lib/k0s/kubelet/plugins_registry\\n",
         ],
     },
+)
+
+# The plugin refuses an inode cap below 8; the chart fails the install first
+# rather than render a crash-looping DaemonSet (#1107).
+helm_template_fail_test(
+    name = "aether_uds_csi_inodes_too_small_test",
+    chart = ":aether",
+    expected_message = "udsCsi.inodes must be at least 8",
+    opts = [
+        "--set",
+        "udsCsi.inodes=4",
+    ],
 )
 
 helm_template_fail_test(

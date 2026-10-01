@@ -154,6 +154,19 @@ cannot disagree.
 {{- end -}}
 {{- $r -}}
 {{- end -}}
+{{/*
+udsCsi.inodes as a plain integer (a YAML number is a float64 to the template
+engine, and 1e+06 is not a flag value), refused below the plugin's minimum of 8
+so a bad value fails the install rather than crash-looping the DaemonSet.
+*/}}
+{{- define "aether.udsCsi.inodes" -}}
+{{- $n := .Values.udsCsi.inodes | int64 -}}
+{{- if lt $n 8 -}}
+{{- fail (printf "udsCsi.inodes must be at least 8, got %v" .Values.udsCsi.inodes) -}}
+{{- end -}}
+{{- $n -}}
+{{- end -}}
+
 {{- define "aether.udsCsi.root" -}}
 {{- $r := .Values.udsCsi.root | toString | trimSuffix "/" -}}
 {{- if not (hasPrefix "/" $r) -}}

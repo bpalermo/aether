@@ -150,6 +150,9 @@ func TestCacheMetrics_GeneratedFailure(t *testing.T) {
 // Each must exist (at zero) before anything is ever counted; otherwise its
 // absence in Prometheus reads as a false zero.
 var seededCounters = []string{
+	// #1105: a published proto mutated in place, caught by a version-memo
+	// audit. Zero forever when every builder honours the rule.
+	"aether.agent.snapshot.version_memo_mismatch",
 	"aether.agent.identity.outbound_binding_mismatch",
 	"aether.agent.identity.inbound_binding_mismatch",
 	// #832: a cluster shipped with no SAN pin. Its healthy value is zero
@@ -179,11 +182,12 @@ var seededCounters = []string{
 // anomaly, so their first increment arrives on its own in a healthy process and
 // a pre-increment zero would say nothing a later sample does not.
 var countersDeliberatelyNotSeeded = map[string]string{
-	"aether.agent.snapshot.builds":         "increments on the first snapshot generation, which every live agent performs",
-	"aether.agent.snapshot.errors":         "paired with builds; TestCacheMetrics_GeneratedFailure asserts the absence of a build alongside it",
-	"aether.agent.upstreams.miss":          "ODCDS misses are traffic-driven, not an always-on invariant",
-	"aether.agent.upstreams.ttl_refreshed": "prune-pass activity; a zero before the first prune pass is not a health signal",
-	"aether.agent.upstreams.restored":      "a cold start legitimately restores nothing, and TestCacheMetrics_UpstreamsRestored asserts that absence",
+	"aether.agent.snapshot.builds":            "increments on the first snapshot generation, which every live agent performs",
+	"aether.agent.snapshot.errors":            "paired with builds; TestCacheMetrics_GeneratedFailure asserts the absence of a build alongside it",
+	"aether.agent.upstreams.miss":             "ODCDS misses are traffic-driven, not an always-on invariant",
+	"aether.agent.upstreams.ttl_refreshed":    "prune-pass activity; a zero before the first prune pass is not a health signal",
+	"aether.agent.upstreams.restored":         "a cold start legitimately restores nothing, and TestCacheMetrics_UpstreamsRestored asserts that absence",
+	"aether.agent.snapshot.resource_versions": "increments on the first snapshot generation (every resource is hashed), which every live agent performs",
 }
 
 func TestCacheMetrics_AnomalyCountersSeededAtZero(t *testing.T) {

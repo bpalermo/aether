@@ -24,8 +24,8 @@ func TestChartFlagsExist(t *testing.T) {
 
 	matches := argFlag.FindAllStringSubmatch(string(raw), -1)
 	// Control: the template passes --debug, --kubelet-root (twice), --root,
-	// --size and --probe; a scan that found fewer is not scanning it.
-	require.GreaterOrEqual(t, len(matches), 6, "the flag scan of %s cannot be trusted", chartDaemonSet)
+	// --size, --inodes and --probe; a scan that found fewer is not scanning it.
+	require.GreaterOrEqual(t, len(matches), 7, "the flag scan of %s cannot be trusted", chartDaemonSet)
 
 	fs := newFlagSet(&options{})
 	for _, m := range matches {
@@ -45,6 +45,11 @@ func TestParseFlagsDerivesSocketsFromTheKubeletRoot(t *testing.T) {
 	assert.Equal(t, "/y/reg.sock", o.registrationSocket)
 	assert.Equal(t, "/run/aether/uds", o.root)
 	assert.Equal(t, "1Mi", o.size)
+	assert.Equal(t, int64(64), o.inodes)
+
+	o, err = parseFlags([]string{"--inodes=16"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(16), o.inodes)
 
 	_, err = parseFlags([]string{"stray"})
 	require.Error(t, err)

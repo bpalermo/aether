@@ -1259,6 +1259,116 @@ func TestQUICUpstreamsDetectADeadPeer(t *testing.T) {
 	}
 }
 
+// TestH2MeshClustersDetectADeadPeer (aether#1104): every h2 mesh cluster in
+// every generated bootstrap -- the node proxy's plain, per-source and
+// waypointed clusters, the capture fixtures', the edge's and the QUIC
+// fixture's h2 base and alias -- carries the HTTP/2 PING keepalive
+// (config.MeshH2Keepalive), so a request already delivered to an endpoint
+// whose pod network then vanished (no FIN, no RST: the node-shared
+// destination proxy outlives the pod netns its sockets live in) fails within
+// ~9 s instead of hanging to the 15 s route timeout. And every inline route
+// onto one of them retries only conditions that fail before a request can
+// reach an application: the keepalive close resets a stream whose request was
+// already sent, and that must surface as a fast 503, never as a replay. Over
+// the fixture bytes `envoy --mode validate` accepts (TestEnvoyValidate), so
+// Envoy is also proven to accept the keepalive on every one of these shapes.
+func TestH2MeshClustersDetectADeadPeer(t *testing.T) {
+	builders := []struct {
+		name string
+		fn   func() ([]byte, error)
+		// minimum h2 mesh clusters the fixture must carry, so the check
+		// cannot pass vacuously on the bootstraps that matter.
+		min int
+	}{
+		{"node", NodeBootstrapJSON, 3},
+		{"node_cleartext", NodeCleartextBootstrapJSON, 0},
+		{"node_uds", NodeUDSBootstrapJSON, 0},
+		{"capture", CaptureBootstrapJSON, 0},
+		{"capture_route_target", CaptureRouteTargetBootstrapJSON, 0},
+		{"outbound_zero_vhost_route", OutboundZeroVhostRouteBootstrapJSON, 0},
+		{"capture_tcproute", CaptureTCPRouteBootstrapJSON, 0},
+		{"capture_tlsroute", CaptureTLSRouteBootstrapJSON, 0},
+		{"capture_udp", CaptureUDPBootstrapJSON, 0},
+		{"edge", EdgeBootstrapJSON, 1},
+		{"quic_outbound", QUICOutboundBootstrapJSON, 2},
+	}
+	safe := map[string]bool{"connect-failure": true, "refused-stream": true, "reset-before-request": true, "retriable-status-codes": true}
+	var total, routes int
+	for _, b := range builders {
+		data, err := b.fn()
+		if err != nil {
+			t.Fatalf("build %s: %v", b.name, err)
+		}
+		mesh, err := H2MeshClusters(data)
+		if err != nil {
+			t.Fatalf("%s: %v", b.name, err)
+		}
+		if len(mesh) < b.min {
+			t.Errorf("%s: %d h2 mesh clusters, want >= %d (the check would be vacuous)", b.name, len(mesh), b.min)
+		}
+		total += len(mesh)
+		for name, problem := range mesh {
+			if problem != "" {
+				t.Errorf("%s: %s: %s", b.name, name, problem)
+			}
+		}
+
+		bs := &bootstrapv3.Bootstrap{}
+		if err := protojson.Unmarshal(data, bs); err != nil {
+			t.Fatalf("%s: unmarshal bootstrap: %v", b.name, err)
+		}
+		for _, l := range bs.GetStaticResources().GetListeners() {
+			for _, fc := range l.GetFilterChains() {
+				for _, f := range fc.GetFilters() {
+					hcm := &http_connection_managerv3.HttpConnectionManager{}
+					if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(hcm) != nil {
+						continue
+					}
+					for _, vh := range hcm.GetRouteConfig().GetVirtualHosts() {
+						for _, r := range vh.GetRoutes() {
+							ra := r.GetRoute()
+							targets := []string{ra.GetCluster()}
+							for _, wc := range ra.GetWeightedClusters().GetClusters() {
+								targets = append(targets, wc.GetName())
+							}
+							if _, base, ok := proxy.QUICSelectionArms(r); ok {
+								targets = append(targets, base)
+							}
+							onMesh := false
+							for _, c := range targets {
+								if _, ok := mesh[c]; ok {
+									onMesh = true
+								}
+							}
+							if !onMesh {
+								continue
+							}
+							routes++
+							rp := ra.GetRetryPolicy()
+							if rp == nil {
+								t.Errorf("%s: route %q onto an h2 mesh cluster has no retry policy", b.name, r.GetName())
+								continue
+							}
+							for _, cond := range strings.Split(rp.GetRetryOn(), ",") {
+								if !safe[strings.TrimSpace(cond)] {
+									t.Errorf("%s: route %q retries on %q: a request the keepalive close cut off may have reached the application and would be replayed", b.name, r.GetName(), cond)
+								}
+							}
+							if rp.GetPerTryTimeout() != nil || rp.GetPerTryIdleTimeout() != nil {
+								t.Errorf("%s: route %q sets a per-try timeout: that would cap slow-but-alive requests", b.name, r.GetName())
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	t.Logf("%d h2 mesh clusters, %d inline routes onto them", total, routes)
+	if routes < 1 {
+		t.Fatal("no inline route onto an h2 mesh cluster: the no-replay half is vacuous")
+	}
+}
+
 // TestQUICUpstreamsHaveTheirOwnStatsKey: no `quic:` twin may report into another
 // cluster's stats tree (aether#960). Over the generated fixture bytes; the
 // fixture's twins are clones of the h2 cluster, which is exactly the shape

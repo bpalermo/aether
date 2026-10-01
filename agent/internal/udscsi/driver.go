@@ -5,7 +5,7 @@
 // the kubelet calls NodePublishVolume, and the plugin:
 //
 //  1. mounts a FRESH tmpfs at <root>/<pod-uid> (default /run/aether/uds/<uid>)
-//     with nosuid,nodev,noexec,nosymfollow, a size cap, and
+//     with nosuid,nodev,noexec,nosymfollow, a size cap, an inode cap, and
 //     `mode=2770,uid=0,gid=<fsGroup>` — so only the pod's fsGroup (and root, i.e.
 //     the node proxy) can reach it, and files created in it inherit that group;
 //  2. bind-mounts it onto the kubelet's target_path, which is what the pod's
@@ -61,6 +61,10 @@ const (
 	// proxy) and the pod's fsGroup, nothing for anyone else, and setgid so a
 	// socket the app binds inherits the fsGroup.
 	tmpfsMode = "2770"
+	// MinInodes is the smallest accepted per-pod inode cap. The tmpfs root
+	// directory takes one and the socket another; much below a handful, an app
+	// that also writes a pid or lock file next to its socket fails to start.
+	MinInodes = 8
 	// fsGroupHint is the fix for the most likely FailedMount this driver emits.
 	fsGroupHint = "set pod.spec.securityContext.fsGroup"
 )
@@ -81,6 +85,10 @@ type Config struct {
 	Root string
 	// SizeBytes caps each per-pod tmpfs.
 	SizeBytes int64
+	// Inodes caps the number of inodes (files, directories, sockets — the
+	// root directory included) on each per-pod tmpfs: its nr_inodes. At least
+	// MinInodes.
+	Inodes int64
 	// Version is reported by GetPluginInfo.
 	Version string
 }
@@ -112,6 +120,8 @@ func NewDriver(cfg Config, m Mounter, log *slog.Logger) (*Driver, error) {
 		return nil, fmt.Errorf("root %q must be an absolute path", cfg.Root)
 	case cfg.SizeBytes <= 0:
 		return nil, fmt.Errorf("size must be positive, got %d", cfg.SizeBytes)
+	case cfg.Inodes < MinInodes:
+		return nil, fmt.Errorf("inodes must be at least %d, got %d", MinInodes, cfg.Inodes)
 	}
 	cfg.KubeletRoot = filepath.Clean(cfg.KubeletRoot)
 	cfg.Root = filepath.Clean(cfg.Root)
@@ -233,7 +243,7 @@ func (d *Driver) ensurePodTmpfs(log *slog.Logger, podDir string, gid uint32) err
 	if err := d.mounter.MkdirAll(podDir, 0o700); err != nil {
 		return status.Errorf(codes.Internal, "create %s: %v", podDir, err)
 	}
-	data := TmpfsData(gid, d.cfg.SizeBytes)
+	data := TmpfsData(gid, d.cfg.SizeBytes, d.cfg.Inodes)
 	err = d.mounter.Mount("tmpfs", podDir, "tmpfs", tmpfsFlags|noSymfollowFlag, data)
 	if errors.Is(err, syscall.EINVAL) {
 		// A kernel older than 5.10 rejects MS_NOSYMFOLLOW. Not fatal, but
@@ -250,9 +260,13 @@ func (d *Driver) ensurePodTmpfs(log *slog.Logger, podDir string, gid uint32) err
 	return nil
 }
 
-// TmpfsData is the tmpfs mount data string for a pod whose fsGroup is gid.
-func TmpfsData(gid uint32, sizeBytes int64) string {
-	return fmt.Sprintf("mode=%s,uid=0,gid=%d,size=%d", tmpfsMode, gid, sizeBytes)
+// TmpfsData is the tmpfs mount data string for a pod whose fsGroup is gid:
+// mode/owner, the size cap and the inode cap (nr_inodes, #1107). Without
+// nr_inodes the kernel default is half the node's RAM pages' worth of inodes,
+// so a workload could fill its socket directory with empty files without ever
+// touching the size cap.
+func TmpfsData(gid uint32, sizeBytes, inodes int64) string {
+	return fmt.Sprintf("mode=%s,uid=0,gid=%d,size=%d,nr_inodes=%d", tmpfsMode, gid, sizeBytes, inodes)
 }
 
 func (d *Driver) validatePublish(req *csi.NodePublishVolumeRequest) (*publishRequest, error) {

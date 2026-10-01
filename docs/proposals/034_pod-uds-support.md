@@ -13,7 +13,11 @@ resolved to `/run/aether/uds/<pod-uid>/<file>`; the annotation, `EndpointPolicy`
 the annotation-wins precedence, the failure semantics and the pipe cluster shapes
 below are unchanged. Read the carrier-specific text below (the volume kind, the
 kubelet path, the ~16-character budget) as history; the current contract is in
-`docs/workload-requirements.md`.
+`docs/workload-requirements.md`. Proposal 039 is implemented (Phases 1–2, #1090 /
+#1092) and validated on talos-main (chart 2.0.0, soaked 2026-10-01; the node-reboot
+check is still open in #1106). This proposal's Phase 2 (outbound: the proxy listens,
+the app dials) waited on that carrier and is now **unblocked**, but it remains
+deferred.
 **Author:** Bruno Palermo
 **Date:** 2026-06-11, revised 2026-08-01 against current main
 **History:** originally numbered 002; renumbered (002 is taken by the merged

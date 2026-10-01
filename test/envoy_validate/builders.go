@@ -364,11 +364,7 @@ func newPerSourceServiceCluster(clusterName, td, namespace, svcName string) *clu
 			EdsConfig: config.XDSConfigSourceADS(),
 		},
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(32 * 1024),
-		TypedExtensionProtocolOptions: map[string]*anypb.Any{
-			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
-				config.Http2ProtocolOptions(),
-			),
-		},
+		TypedExtensionProtocolOptions: meshClusterProtocolOptions(),
 	}
 	proxy.InjectUpstreamMTLS(c, nodeID, validationCtxName, []string{sanURI}, "8080", "")
 	return c
@@ -393,11 +389,7 @@ func newWaypointServiceCluster(clusterName, td, namespace, svcName string) *clus
 			EdsConfig: config.XDSConfigSourceADS(),
 		},
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(32 * 1024),
-		TypedExtensionProtocolOptions: map[string]*anypb.Any{
-			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
-				config.Http2ProtocolOptions(),
-			),
-		},
+		TypedExtensionProtocolOptions: meshClusterProtocolOptions(),
 	}
 	proxy.InjectUpstreamMTLS(c, nodeID, validationCtxName, []string{sanURI}, "8080", "8080."+clusterName)
 	return c
@@ -1922,11 +1914,7 @@ func newServiceCluster(clusterName, td, namespace, svcName string) *clusterv3.Cl
 		},
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(32 * 1024),
 		TransportSocket:               ts,
-		TypedExtensionProtocolOptions: map[string]*anypb.Any{
-			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
-				config.Http2ProtocolOptions(),
-			),
-		},
+		TypedExtensionProtocolOptions: meshClusterProtocolOptions(),
 	}
 }
 
@@ -1950,11 +1938,7 @@ func newEdgeServiceCluster(clusterName, td, namespace, svcName string) *clusterv
 		},
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(32 * 1024),
 		TransportSocket:               ts,
-		TypedExtensionProtocolOptions: map[string]*anypb.Any{
-			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
-				config.Http2ProtocolOptions(),
-			),
-		},
+		TypedExtensionProtocolOptions: meshClusterProtocolOptions(),
 	}
 }
 
@@ -1982,6 +1966,94 @@ func newSpireAgentCluster() *clusterv3.Cluster {
 			),
 		},
 	}
+}
+
+// meshClusterProtocolOptions is the HTTP protocol options map the agent puts
+// on every h2 mesh service cluster, taken from the production builder
+// (proxy.NewServiceCluster) so the hand-assembled fixture clusters cannot
+// drift from it -- they used to carry config.Http2ProtocolOptions(), which is
+// what the app hop gets, and would have hidden aether#1104.
+func meshClusterProtocolOptions() map[string]*anypb.Any {
+	return proxy.NewServiceCluster("fixture", "fixture", "fixture", nil).GetTypedExtensionProtocolOptions()
+}
+
+// H2MeshClusters returns, for a generated bootstrap, the name of every h2
+// MESH cluster -- one whose upstream speaks explicit HTTP/2 AND carries an
+// upstream TLS context (the mesh mTLS shape; the app, authz, xDS, collector
+// and SPIRE clusters have none and are out of scope automatically) -- mapped
+// to a description of what is wrong with its HTTP/2 PING liveness
+// (aether#1104), or "" when it carries exactly config.MeshH2Keepalive.
+//
+// Scope is structural, never an allow-list, like UnpinnedMeshClusters: a new
+// h2 mesh cluster added to any builder is in scope the moment it grows TLS.
+func H2MeshClusters(bootstrapJSON []byte) (map[string]string, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	out := map[string]string{}
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		h2, err := explicitH2Of(c)
+		if err != nil {
+			return nil, err
+		}
+		if h2 == nil {
+			continue
+		}
+		tls, err := hasUpstreamTLS(c)
+		if err != nil {
+			return nil, err
+		}
+		if !tls {
+			continue
+		}
+		out[c.GetName()] = h2KeepaliveProblem(h2.GetConnectionKeepalive())
+	}
+	return out, nil
+}
+
+func explicitH2Of(c *clusterv3.Cluster) (*corev3.Http2ProtocolOptions, error) {
+	raw, ok := c.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey]
+	if !ok {
+		return nil, nil
+	}
+	po := &httpv3.HttpProtocolOptions{}
+	if err := raw.UnmarshalTo(po); err != nil {
+		return nil, fmt.Errorf("cluster %s: unmarshal protocol options: %w", c.GetName(), err)
+	}
+	return po.GetExplicitHttpConfig().GetHttp2ProtocolOptions(), nil
+}
+
+func hasUpstreamTLS(c *clusterv3.Cluster) (bool, error) {
+	sockets := []*corev3.TransportSocket{c.GetTransportSocket()}
+	for _, m := range c.GetTransportSocketMatches() {
+		sockets = append(sockets, m.GetTransportSocket())
+	}
+	for _, ts := range sockets {
+		ctx, err := upstreamTLSContextOf(ts)
+		if err != nil {
+			return false, fmt.Errorf("cluster %s: %w", c.GetName(), err)
+		}
+		if ctx != nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func h2KeepaliveProblem(ka *corev3.KeepaliveSettings) string {
+	want := config.MeshH2Keepalive()
+	switch {
+	case ka == nil:
+		return "no http2_protocol_options.connection_keepalive: a request delivered to an endpoint whose network then vanished gets no RST and hangs to the 15 s route timeout"
+	case ka.GetInterval().AsDuration() != want.GetInterval().AsDuration():
+		return fmt.Sprintf("keepalive interval %v, want %v", ka.GetInterval().AsDuration(), want.GetInterval().AsDuration())
+	case ka.GetTimeout().AsDuration() != want.GetTimeout().AsDuration():
+		return fmt.Sprintf("keepalive timeout %v, want %v", ka.GetTimeout().AsDuration(), want.GetTimeout().AsDuration())
+	case ka.GetIntervalJitter().GetValue() != want.GetIntervalJitter().GetValue():
+		return fmt.Sprintf("keepalive interval_jitter %v%%, want %v%%", ka.GetIntervalJitter().GetValue(), want.GetIntervalJitter().GetValue())
+	}
+	return ""
 }
 
 // pipeEndpoint builds a ClusterLoadAssignment with a single Unix-socket endpoint.

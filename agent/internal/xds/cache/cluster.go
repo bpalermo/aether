@@ -294,6 +294,9 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// built entries AND the retained (grace-period) ones, under the same
 	// clusterMu hold that rebuilt the map.
 	c.recomputeMTLSClustersLocked()
+	// Counted under the lock: the log below used to read len(c.clusters)
+	// after Unlock, racing a concurrent recomputeMTLSClusters (AddPod).
+	loaded := len(c.clusters)
 	c.clusterMu.Unlock()
 
 	// Publish the node-wide subset-key union as the shared ECDS mapping.
@@ -323,7 +326,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	}
 	c.refreshCaptureTCPPorts(derived, primary)
 
-	c.log.DebugContext(ctx, "loaded clusters from registry", "count", len(c.clusters))
+	c.log.DebugContext(ctx, "loaded clusters from registry", "count", loaded)
 
 	return c.generateClusterSnapshot(ctx)
 }
