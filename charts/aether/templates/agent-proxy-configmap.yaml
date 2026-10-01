@@ -363,12 +363,32 @@ data:
     # would pin a cluster or listener in warming forever at RUNTIME (#817,
     # #1008). Their timeouts only matter once CDS/LDS have arrived, i.e. once
     # the agent is answering.
+    #
+    # ⚠ retry_policy.retry_back_off bounds how long the proxy stays BLIND after
+    # the node agent comes back (issue #1103). While the ADS stream is down the
+    # proxy keeps routing on its last config: a destination marked DRAINING in
+    # the meantime is still picked, and the request lands in a pod whose
+    # network is about to go. Envoy's default for an xDS stream is a fully
+    # jittered exponential backoff of 500 ms base, 30 s cap
+    # (xds_manager_impl.cc: SubscriptionFactory::RetryInitialDelayMs /
+    # RetryMaxDelayMs; backoff_strategy.cc: random() % interval, interval
+    # doubling), so the longer the agent was away the longer the proxy waits
+    # after it is back. On talos-main (2026-10-01 TRIPLE) a 15 s agent restart
+    # left main-worker-04's proxy reconnecting 8.4 s after the agent's xDS
+    # socket was serving, and it sent three requests to a pod drained 3.4 s
+    # earlier. With a 1 s cap the proxy reconnects within 1 s of the socket
+    # opening, however long the agent was down. Each failed attempt is a
+    # connect() to a local unix socket that is not there yet: free.
     dynamic_resources:
       ads_config:
         api_type: DELTA_GRPC
         grpc_services:
           - envoy_grpc:
               cluster_name: agent_xds
+              retry_policy:
+                retry_back_off:
+                  base_interval: 0.1s
+                  max_interval: 1s
       cds_config:
         ads: {}
         initial_fetch_timeout: 0s
