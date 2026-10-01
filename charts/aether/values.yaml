@@ -579,6 +579,21 @@ proxy:
     # it on only costs the parent's gauges and its last <=5s of counter deltas
     # in the child (counters are per-generation already, #708).
     skipParentStats: false
+  # Envoy worker thread count (#1093). 0 = do not pass the flag: Envoy runs one
+  # worker per core, today's behaviour. N > 0 passes `--concurrency N` to every
+  # Envoy epoch through the supervisor (--envoy-arg). It exists because on a
+  # 4-core node a hot-restart handoff runs two Envoys at once — 8 worker threads
+  # plus 2 main threads on 4 saturated cores — and #1093 needs to A/B a smaller
+  # count.
+  #
+  # The value MUST be constant across epochs. Envoy hands listen sockets to the
+  # successor per worker, so the rollout that CHANGES it performs one hot restart
+  # between epochs with different worker counts, which can drop connections
+  # sitting in the old listeners' accept queues (see the ExtraArgs comment in
+  # agent/internal/proxy/hotrestart/supervisor.go). Expect that one rollout to
+  # cost a few connections; after it every restart is same-to-same again.
+  # Must be a non-negative integer; the chart refuses to render otherwise.
+  concurrency: 0
   # Pod terminationGracePeriodSeconds, and the same value passed to the supervisor
   # as --termination-grace. The deleted pod must keep its Envoy alive as the
   # successor's hot-restart parent until the successor's (xDS-gated, unbounded)

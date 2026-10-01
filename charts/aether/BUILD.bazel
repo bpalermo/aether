@@ -227,6 +227,36 @@ helm_template_test(
     },
 )
 
+# #1093: proxy.concurrency > 0 passes Envoy --concurrency N to every epoch, as
+# two adjacent supervisor --envoy-arg values in that order...
+helm_template_test(
+    name = "aether_proxy_concurrency_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.concurrency=2",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--envoy-arg=--concurrency\"\\n\\s+- \"--envoy-arg=2\"\\n",
+        ],
+    },
+)
+
+# ...and the default (0) passes no flag, so Envoy keeps one worker per core.
+helm_template_absent_test(
+    name = "aether_proxy_concurrency_off_test",
+    absent = [
+        "--concurrency",
+    ],
+    chart = ":aether",
+    control = "--envoy-arg=--drain-strategy",
+    opts = [
+        "--show-only",
+        "templates/agent-proxy-daemonset.yaml",
+    ],
+)
+
 helm_template_test(
     name = "aether_proxy_drain_strategy_immediate_test",
     chart = ":aether",
