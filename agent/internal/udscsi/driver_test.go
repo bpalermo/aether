@@ -23,6 +23,7 @@ const (
 	testRoot    = "/run/aether/uds"
 	testKubelet = "/var/lib/kubelet"
 	testSize    = 1 << 20
+	testInodes  = 64
 )
 
 var testTarget = testKubelet + "/pods/" + testUID + "/volumes/kubernetes.io~csi/s/mount"
@@ -94,7 +95,7 @@ func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, ni
 func newTestDriver(t *testing.T, m Mounter) *Driver {
 	t.Helper()
 	d, err := NewDriver(Config{
-		NodeID: "node-a", KubeletRoot: testKubelet, Root: testRoot, SizeBytes: testSize, Version: "test",
+		NodeID: "node-a", KubeletRoot: testKubelet, Root: testRoot, SizeBytes: testSize, Inodes: testInodes, Version: "test",
 	}, m, discard())
 	require.NoError(t, err)
 	return d
@@ -147,7 +148,7 @@ func TestNodePublishVolume_MountsPerPodTmpfsAndBindsIt(t *testing.T) {
 	assert.Equal(t, mountCall{
 		source: "tmpfs", target: podDir, fstype: "tmpfs",
 		flags: tmpfsFlags | noSymfollowFlag,
-		data:  "mode=2770,uid=0,gid=65532,size=1048576",
+		data:  "mode=2770,uid=0,gid=65532,size=1048576,nr_inodes=64",
 	}, m.mountLog[0], "the per-pod tmpfs: exact flags and data string")
 	assert.Equal(t, mountCall{source: podDir, target: testTarget, flags: bindFlags}, m.mountLog[1],
 		"the per-pod tmpfs is bind-mounted onto the kubelet's target_path")
@@ -382,10 +383,26 @@ func TestIdentity(t *testing.T) {
 }
 
 func TestNewDriver_Validation(t *testing.T) {
-	_, err := NewDriver(Config{KubeletRoot: testKubelet, Root: testRoot, SizeBytes: 1}, newFakeMounter(), discard())
+	_, err := NewDriver(Config{KubeletRoot: testKubelet, Root: testRoot, SizeBytes: 1, Inodes: MinInodes}, newFakeMounter(), discard())
 	require.ErrorContains(t, err, "node ID is required")
-	_, err = NewDriver(Config{NodeID: "n", KubeletRoot: "var/lib/kubelet", Root: testRoot, SizeBytes: 1}, newFakeMounter(), discard())
+	_, err = NewDriver(Config{NodeID: "n", KubeletRoot: "var/lib/kubelet", Root: testRoot, SizeBytes: 1, Inodes: MinInodes}, newFakeMounter(), discard())
 	require.ErrorContains(t, err, "absolute")
+	// The inode cap (#1107): below MinInodes is refused, MinInodes itself is not.
+	for _, n := range []int64{0, -1, MinInodes - 1} {
+		_, err = NewDriver(Config{NodeID: "n", KubeletRoot: testKubelet, Root: testRoot, SizeBytes: 1, Inodes: n}, newFakeMounter(), discard())
+		require.ErrorContains(t, err, "inodes", "inodes=%d", n)
+	}
+	_, err = NewDriver(Config{NodeID: "n", KubeletRoot: testKubelet, Root: testRoot, SizeBytes: 1, Inodes: MinInodes}, newFakeMounter(), discard())
+	require.NoError(t, err)
+}
+
+// TestTmpfsData pins the exact tmpfs mount data string: the superblock options
+// every view of the per-pod tmpfs carries, including the inode cap (#1107)
+// without which a workload could create files until the kernel default (half
+// the node's RAM pages) ran out.
+func TestTmpfsData(t *testing.T) {
+	assert.Equal(t, "mode=2770,uid=0,gid=65532,size=1048576,nr_inodes=64", TmpfsData(65532, 1<<20, 64))
+	assert.Equal(t, "mode=2770,uid=0,gid=1000,size=524288,nr_inodes=8", TmpfsData(1000, 512<<10, 8))
 }
 
 func TestParseSize(t *testing.T) {
