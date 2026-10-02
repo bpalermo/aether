@@ -355,7 +355,20 @@ func (s *Supervisor) adminServerInfo(ctx context.Context, epoch int) (live, reac
 		return false, true
 	}
 	s.noteAdminAnswer(info.CommandLineOptions.RestartEpoch)
-	live = info.State == adminLiveState && info.CommandLineOptions.RestartEpoch == epoch
+	live = info.State == adminLiveState && info.CommandLineOptions.RestartEpoch == epoch &&
+		s.answerMayBeOurs(info)
 	s.metrics.adminProbed(probeEndpointServerInfo, probeResult(live))
 	return live, true
+}
+
+// answerMayBeOurs is the identity half of adminServerInfo's LIVE verdict. It
+// only bites after a fresh lineage replaced a predecessor drained for a
+// worker-count change (issue #1136): the new lineage restarts at epoch 0, so
+// a predecessor that has not exited yet can answer LIVE at the very epoch
+// this supervisor is waiting on, and must not make this pod Ready.
+func (s *Supervisor) answerMayBeOurs(info adminServerInfoDoc) bool {
+	s.mu.Lock()
+	strict := s.readyRequiresOwnIdentity
+	s.mu.Unlock()
+	return !strict || info.CommandLineOptions.AdminAddressPath == s.adminIdentity
 }

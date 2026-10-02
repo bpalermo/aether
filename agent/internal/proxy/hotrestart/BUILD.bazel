@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "adminidentity.go",
         "adminprobe.go",
+        "concurrencychange.go",
         "coordination.go",
         "crash.go",
         "metrics.go",
@@ -35,6 +36,7 @@ go_test(
         "adminidentity_test.go",
         "adminprobe_test.go",
         "adminreverify_test.go",
+        "concurrencychange_test.go",
         "coordination_test.go",
         "crash_test.go",
         "epoch_test.go",

@@ -2121,6 +2121,29 @@ them with the commands in §7 "Pre-flight: node headroom before a roll (#812)".
   the old pod's drain now reaches only its own Envoy (see "What the proxy supervisor
   does on SIGTERM"). A crashed successor still costs the old pod its graceful drain,
   because its Envoy has already handed the admin over, so it is SIGTERMed instead.
+
+  **A count change is a drain + fresh start, not a hot restart (#1136).** Even without
+  the crash, a hot restart between different counts is not hitless: the child attaches
+  its QUIC connection-ID steering program (`CID % concurrency`) to the sockets it
+  inherits, the program applies to the whole reuse-port group, and about half of the
+  parent's live HTTP/3 connections are steered to a worker that does not own them
+  (`Mismatched worker index. expected 3, actual 1`, then a stateless reset). On the
+  2026-10-02 4→2 rollout that was 34 mismatched batches and 12 stateless resets fleet-wide;
+  on kind, 14 mismatched lines and 5–10 `503`s per roll in either direction. So the new
+  pod's supervisor reads the live predecessor's `command_line_options.concurrency` from
+  `/server_info` (trusted only from a LIVE aether supervisor's Envoy at the heartbeat's
+  epoch; anything else hot-restarts as before) and, when it differs from its own, logs
+  `envoy worker count changes across this handoff; NOT hot-restarting` with both counts,
+  drains the predecessor gracefully over `proxy.hotRestart.drainTime`, stops it, and
+  starts a fresh Envoy at epoch 0. The pod goes Ready only when its own fresh Envoy is
+  LIVE. The cost per node is the drain window plus a gap with no listeners while the
+  fresh Envoy initializes: about 2 s on kind (requests waited up to 2.1 s on SYN
+  retransmits; 0 failed), longer on a busy node, where a handoff's init takes 3–15 s,
+  so expect some failed requests and prober misses on each node in turn. Count it with
+  `aether_supervisor_handoff_mode_total{mode="fresh_after_drain"}` (expected once per
+  node on the rollout that changes the count, 0 otherwise).
+  `proxy.hotRestart.hotRestartOnConcurrencyChange: true` forces the old hot restart.
+  Reproduce with `e2e/proxy-concurrency-change.sh`.
 - **The node agent.** It has no CPU limit since #1119 (`agent.resources.requests.cpu`
   `200m`, `GOMAXPROCS=2`), because a CFS quota parked snapshot builds while they held
   the snapshot-cache mutex. Do not add one back to save headroom.

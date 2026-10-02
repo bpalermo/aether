@@ -74,6 +74,10 @@ var adminOwnerValues = []adminOwnership{adminOwn, adminForeign, adminUnreachable
 // Three values, fixed: starved, blocked, busy.
 const attrStallClass = attribute.Key("aether.supervisor.stall.class")
 
+// attrHandoffMode labels how a supervisor took over from a live predecessor
+// (issue #1136): hot or fresh_after_drain.
+const attrHandoffMode = attribute.Key("mode")
+
 // Admin endpoints the watchdog probes.
 const (
 	probeEndpointReady      = "ready"
@@ -123,6 +127,7 @@ type SupervisorMetrics struct {
 	childSilent         metric.Int64Counter
 	envoyThreadStalls   metric.Int64Counter
 	adminMutations      metric.Int64Counter
+	handoffModes        metric.Int64Counter
 }
 
 // NewSupervisorMetrics registers the supervisor instruments on the given meter.
@@ -318,7 +323,30 @@ func (m *SupervisorMetrics) withAdminMutations(meter metric.Meter) (*SupervisorM
 		m.adminMutations.Add(context.Background(), 0, metric.WithAttributes(
 			attrAdminRequest.String(adminRequestDrainListeners), attrAdminOwner.String(string(owner))))
 	}
+	return m.withHandoffModes(meter)
+}
+
+// withHandoffModes registers the handoff-mode counter (issue #1136), seeded at
+// zero per mode for the same reason as admin_mutations: "no fresh start this
+// roll" must read as 0, not as an absent series.
+func (m *SupervisorMetrics) withHandoffModes(meter metric.Meter) (*SupervisorMetrics, error) {
+	var err error
+	if m.handoffModes, err = meter.Int64Counter("aether.supervisor.handoff_mode",
+		metric.WithDescription("Takeovers from a live predecessor Envoy, by mode. hot is the hot restart; fresh_after_drain means the predecessor ran a different worker count (--concurrency), so it was drained and stopped and a fresh Envoy started instead, because a hot restart would reset about half of its live QUIC connections (#1136). Expected fresh_after_drain only on the rollout that changes proxy.concurrency")); err != nil {
+		return nil, fmt.Errorf("handoff modes: %w", err)
+	}
+	for _, mode := range handoffModeValues {
+		m.handoffModes.Add(context.Background(), 0, metric.WithAttributes(attrHandoffMode.String(mode)))
+	}
 	return m, nil
+}
+
+// handoffMode counts one takeover decision (see freshStartInsteadOfHotRestart).
+func (m *SupervisorMetrics) handoffMode(mode string) {
+	if m == nil {
+		return
+	}
+	m.handoffModes.Add(context.Background(), 1, metric.WithAttributes(attrHandoffMode.String(mode)))
 }
 
 // adminMutation counts one state-changing admin request decision (see
