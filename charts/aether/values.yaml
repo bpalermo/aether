@@ -592,6 +592,10 @@ proxy:
   # sitting in the old listeners' accept queues (see the ExtraArgs comment in
   # agent/internal/proxy/hotrestart/supervisor.go). Expect that one rollout to
   # cost a few connections; after it every restart is same-to-same again.
+  # Do not change it on a live mesh until both prerequisites are deployed: the
+  # successor crash of a downward change (#1126) is fixed by the carried Envoy
+  # patch envoy-aether1126-forwarded-udp-worker-index.patch, in proxy images
+  # built from it or later, and the #1127 supervisor fix is the other one.
   # Must be a non-negative integer; the chart refuses to render otherwise.
   concurrency: 0
   # Pod terminationGracePeriodSeconds, and the same value passed to the supervisor

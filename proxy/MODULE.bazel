@@ -110,6 +110,19 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 #   HTTP/3 pool and connectivity grid holds a reference. Its test
 #   (test/common/http/http3:conn_pool_test) needs quiche's test tooling, so it runs in
 #   the Envoy workspace only, not in //bazel/patches:carried_patch_tests.
+#   aether#1126 (an upstream bug in the #47743 forwarding; to be reported upstream on
+#   the maintainer's word), applied AFTER aether1074: the hot-restart parent forwards
+#   each undispatched UDP/QUIC datagram tagged with ITS worker index and the child
+#   delivered it with UdpListenerWorkerRouterImpl::deliver(), which indexes its
+#   per-worker table unchecked (an ASSERT only). A child with fewer workers than its
+#   parent (proxy.concurrency lowered, 4 -> 2) read past the end of the table and
+#   segfaulted. deliver() now maps an index this instance does not have onto
+#   index % workers -- for a parent count that is a multiple of the child's, the
+#   worker the child's own connection-ID routing (CID prefix % concurrency) picks.
+#   Child-side: effective from the first roll. Carries its tests
+#   (udp_listener_impl_test DeliverMapsAWorkerIndexItDoesNotHaveOntoItsOwnWorkers,
+#   hot_restarting_child_test ForwardsPacketFromAParentWorkerTheChildDoesNotHave), run by
+#   //bazel/patches:carried_patch_tests.
 #   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
@@ -124,6 +137,7 @@ single_version_override(
         "//bazel/patches:envoy-aether1054b-quic-time-wait-before-forward.patch",
         "//bazel/patches:envoy-aether1054c-paused-udp-listener-no-read.patch",
         "//bazel/patches:envoy-aether1074-quic-persistent-info-lifetime.patch",
+        "//bazel/patches:envoy-aether1126-forwarded-udp-worker-index.patch",
     ],
 )
 

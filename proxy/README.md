@@ -135,7 +135,11 @@ symbol upload is keyed by (#653).
   to be proposed upstream), and aether#1074 (HTTP/3 pools keep the per-cluster
   persistent QUIC info alive after a CDS removal, instead of their draining
   connections reading its freed clock; an upstream bug, proposed as
-  envoyproxy/envoy#47893). A carried patch's own Envoy tests run from
+  envoyproxy/envoy#47893), and aether#1126 (a hot-restart child with fewer workers
+  than its parent no longer indexes past its worker table when the parent forwards a
+  UDP/QUIC datagram tagged with one of its extra workers: the index is mapped onto
+  index % concurrency; an upstream bug in the envoyproxy/envoy#47743 forwarding, not
+  yet reported upstream). A carried patch's own Envoy tests run from
   `//bazel/patches:carried_patch_tests`, since `//...` does not reach `@envoy` tests.
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)
