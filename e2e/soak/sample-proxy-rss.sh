@@ -137,7 +137,11 @@ sample_once() {
 		[ -n "$start" ] || continue
 		age=$(date -u -d "$start" +%s 2>/dev/null) || continue
 		age=$((now - age))
-		mem=$(printf '%s\n' "$mems" | awk -v p="$pod" '$1 == p { print $2; exit }')
+		# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail,
+		# so no pipeline may end in a reader that exits before its writer is
+		# done (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of
+		# SIGPIPE and the pipeline fails with 141. awk keeps the first match.
+		mem=$(printf '%s\n' "$mems" | awk -v p="$pod" '!f && $1 == p { print $2; f = 1 }')
 		if [ -z "$mem" ]; then
 			mi="NA"
 		else

@@ -63,8 +63,13 @@ build_images() {
 
 create_clusters() {
 	local i=0
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`grep -c ... >/dev/null`).
 	for c in "$CLUSTER_A" "$CLUSTER_B"; do
-		if kind get clusters 2>/dev/null | grep -qx "$c"; then
+		if kind get clusters 2>/dev/null | grep -cx "$c" >/dev/null; then
 			ok "kind cluster '$c' already exists"
 		else
 			log "creating kind cluster '$c' from e2e/kind-cluster.yaml"
@@ -203,7 +208,7 @@ verify() {
 	local prefix="/aether/v1/regions/$REGION/clusters/cluster-$CLUSTER_A/config/"
 	log "asserting the export propagated to the shared store"
 	local tries=0
-	until docker exec "$ETCD_NAME" etcdctl get --prefix "$prefix" --keys-only 2>/dev/null | grep -q "$key"; do
+	until docker exec "$ETCD_NAME" etcdctl get --prefix "$prefix" --keys-only 2>/dev/null | grep -c "$key" >/dev/null; do
 		tries=$((tries + 1))
 		[ "$tries" -ge 20 ] && die "exported projection for demo/echo never appeared under cluster-$CLUSTER_A's partition"
 		sleep 2

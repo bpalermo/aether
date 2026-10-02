@@ -310,7 +310,12 @@ leg_a() {
 	log "A in flight: 2 GET + 2 POST pinned to the victim, its network cut 2 s in, source agent frozen"
 	local pods victim url res rq0
 	pods="$(dst_pods)"
-	victim="$(printf '%s\n' "$pods" | head -n 1)"
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`sed -n '1p'`).
+	victim="$(printf '%s\n' "$pods" | sed -n '1p')"
 	url="http://$(fqdn "$DP_DST"):$OUTBOUND_PORT"
 	local dir="$DP_OUT/legA"
 	res="$dir/results"
@@ -350,7 +355,7 @@ leg_b() {
 	log "B continuous: 4 GET loops + 1 slow POST/s for ${DP_SECONDS}s, unpinned; the victim's network cut 3 s in, source agent frozen"
 	local pods victim url res rq0
 	pods="$(dst_pods)"
-	victim="$(printf '%s\n' "$pods" | head -n 1)"
+	victim="$(printf '%s\n' "$pods" | sed -n '1p')"
 	url="http://$(fqdn "$DP_DST"):$OUTBOUND_PORT"
 	local dir="$DP_OUT/legB"
 	res="$dir/results"
