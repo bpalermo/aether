@@ -2046,8 +2046,13 @@ service.name:aether-proxy "envoy thread stall" | stats by (k8s.node.name) count(
 ```
 
 ```logsql
-service.name:aether-proxy "envoy thread stall" threads:starved k8s.node.name:<node>
+service.name:aether-proxy "envoy thread stall" "[starved]" k8s.node.name:<node>
 ```
+
+The supervisor's records are not field-parsed: the whole line sits in `_msg`, so there
+is no `threads` field to filter on, and a filter has to match the message text. Select a
+class with its bracketed phrase, `"[starved]"`, `"[blocked]"` or `"[busy]"`. The bare
+word `blocked` matches every line, because each thread entry carries `blocked=<n>ms`.
 
 A node whose steady-state count is several times its peers' is the one a handoff will
 tip over. A starved line whose `nodeBusyPct` is near 100 and whose `nodePSICPUSomeMs`
