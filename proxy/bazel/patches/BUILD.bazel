@@ -34,6 +34,12 @@ test_suite(
         # child UDP listener runs its read-ready hook on an injected read but never reads
         # the parent's socket (udp_listener_impl_test InjectedReadWhilePausedDoesNotReadTheSocket).
         "@envoy//test/common/network:udp_listener_impl_test",
+        # envoy-aether1126-forwarded-udp-worker-index.patch (aether#1126): a datagram a
+        # hot-restart parent forwards with a worker index the child does not have (concurrency
+        # lowered across the restart) is delivered to index % workers instead of crashing the
+        # child (udp_listener_impl_test DeliverMapsAWorkerIndexItDoesNotHaveOntoItsOwnWorkers,
+        # hot_restarting_child_test ForwardsPacketFromAParentWorkerTheChildDoesNotHave; both
+        # targets are listed above).
         # envoy-aether1074-quic-persistent-info-lifetime.patch (aether#1074): HTTP/3 pools
         # keep the persistent QUIC info alive after their cluster is removed. Its test
         # (http3 conn_pool_test PoolKeepsPersistentQuicInfoAliveAfterItsCreatorReleasesIt)

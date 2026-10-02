@@ -2109,16 +2109,18 @@ them with the commands in §7 "Pre-flight: node headroom before a roll (#812)".
   spent about 40% more CPU per handoff, and rolls took 70% longer. Keep the default.
 - **`proxy.concurrency`** (default `0`, one worker per core). In an A/B, 2 workers
   instead of 4 cut handoff starvation per thread by about 27% and steady-state
-  starvation by 57–81%. **Do not change it on a live mesh** until
-  [#1126](https://github.com/bpalermo/aether/issues/1126) is fixed. On talos-main a
-  4→2 change crashed successors (`Mismatched worker index` in
-  `HotRestartingChild::onForwardedUdpPacket`, #1126), and the old pods' self-drain
-  drained the new pods' Envoys
+  starvation by 57–81%. **Do not change it on a live mesh** until both prerequisites
+  are deployed. On talos-main a 4→2 change crashed successors (`Mismatched worker
+  index` in `HotRestartingChild::onForwardedUdpPacket`,
+  [#1126](https://github.com/bpalermo/aether/issues/1126)), and the old pods'
+  self-drain drained the new pods' Envoys
   ([#1127](https://github.com/bpalermo/aether/issues/1127)). Together they left two
-  nodes not accepting new pods' connections for about 12 minutes. #1127 is fixed: the
-  old pod's drain now reaches only its own Envoy (see "What the proxy supervisor does
-  on SIGTERM"). A crashed successor still costs the old pod its graceful drain, because
-  its Envoy has already handed the admin over, so it is SIGTERMed instead.
+  nodes not accepting new pods' connections for about 12 minutes. The crash is fixed by
+  the carried Envoy patch `envoy-aether1126-forwarded-udp-worker-index.patch`, in proxy
+  images built from it or later. The #1127 supervisor fix is the other prerequisite:
+  the old pod's drain now reaches only its own Envoy (see "What the proxy supervisor
+  does on SIGTERM"). A crashed successor still costs the old pod its graceful drain,
+  because its Envoy has already handed the admin over, so it is SIGTERMed instead.
 - **The node agent.** It has no CPU limit since #1119 (`agent.resources.requests.cpu`
   `200m`, `GOMAXPROCS=2`), because a CFS quota parked snapshot builds while they held
   the snapshot-cache mutex. Do not add one back to save headroom.
