@@ -218,21 +218,21 @@ func (s *AgentXdsServer) NeedLeaderElection() bool { return false }
 // It creates listeners, clusters, endpoints, and routes, then sets the snapshot in the cache
 // before the server starts accepting xDS client connections.
 //
-// It first HOLDS until this agent has a mesh identity (see holdForIdentity):
+// After building the local listeners it HOLDS until this agent has a mesh
+// identity (see holdForIdentity) before anything that needs the registry:
 // the whole point of the local-only fallback below is to survive a registrar
 // blip, and without an SVID there is no such thing as a registrar blip — every
 // handshake fails, so the fallback would fire on every restart and publish a
 // snapshot with no cross-node endpoints at all.
 func (s *AgentXdsServer) PreListen(ctx context.Context) error {
-	if !s.holdForIdentity(ctx) {
-		// Shutting down before identity arrived. Return nil rather than an error:
-		// the manager is already stopping and a SPIRE outage must never be the
-		// reason a shutdown is reported as a failure.
-		return nil
-	}
-
 	s.log.DebugContext(ctx, "generating initial snapshot")
 
+	// The local half first, BEFORE the identity hold (issue #1123): building
+	// the local pods' listeners needs nothing from SPIRE (the trust domain is
+	// the seeded one; reconcileSpireIdentity rebuilds them if SPIRE issues into
+	// another) and publishes nothing, because the socket is not open yet. Run
+	// after the hold it added 0.25-0.98 s to every talos restart, serially
+	// behind an SVID wait it can overlap instead.
 	if err := s.cache.LoadListenersFromStorage(ctx, s.storage, s.trustDomain); err != nil {
 		s.log.ErrorContext(ctx, "failed to load listeners from storage", "error", err)
 		return err
@@ -240,8 +240,18 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 
 	// The dependency set is now known (local pods loaded): scope the registry
 	// watch to it before waiting on the watch cache, so the snapshot the
-	// registrar streams is the filtered one (demand-scoped distribution).
+	// registrar streams is the filtered one (demand-scoped distribution). Also
+	// ahead of the hold: the registrar client defers its stream until identity
+	// anyway, so its first stream carries the filter instead of being
+	// superseded by it.
 	AssertWatchFilter(s.cache, s.registry)
+
+	if !s.holdForIdentity(ctx) {
+		// Shutting down before identity arrived. Return nil rather than an error:
+		// the manager is already stopping and a SPIRE outage must never be the
+		// reason a shutdown is reported as a failure.
+		return nil
+	}
 
 	// Before the registry load, not after: the load ends in a full snapshot,
 	// so waiting first makes that snapshot -- the one the socket opens on --

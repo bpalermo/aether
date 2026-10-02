@@ -541,6 +541,10 @@ type SnapshotCache struct {
 	// pod, so an unthrottled log would be one line per pod per rebuild.
 	tcpFloorWarnMu   sync.Mutex
 	tcpFloorWarnedAt time.Time
+	// createdAt anchors the #877 warning's startup grace (issue #1123): with
+	// SPIRE on, a pod listener built before this agent's SVID lands is the
+	// designed startup state, not the misconfiguration the WARN is for.
+	createdAt time.Time
 	// tcpFloorIdentitySeen is the identity readiness the capture listeners were
 	// last built against (#877). Compared on every snapshot push so a change
 	// rebuilds them; see reconcileCaptureTCPChains.
@@ -751,6 +755,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		SnapshotCache: cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil),
 		log:           commonlog.Named(log, "cache"),
 		nodeName:      nodeName,
+		createdAt:     time.Now(),
 		meshDomain:    meshconst.DefaultMeshDomain,
 		metrics:       metrics,
 		// Default to the production posture: SPIRE-backed mTLS on. The agent flips

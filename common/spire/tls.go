@@ -62,7 +62,10 @@ func NewSourceWithTimeout(ctx context.Context, socketPath string, timeout time.D
 		defer cancel()
 	}
 	src, err := workloadapi.NewX509Source(ctx,
-		workloadapi.WithClientOptions(workloadapi.WithAddr(socketAddr(socketPath))))
+		workloadapi.WithClientOptions(
+			workloadapi.WithAddr(socketAddr(socketPath)),
+			workloadapi.WithBackoffStrategy(firstSVIDBackoffStrategy{}),
+		))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SPIRE Workload API source (socket %s): %w", socketPath, err)
 	}
@@ -186,3 +189,36 @@ func socketAddr(path string) string {
 	}
 	return "unix://" + path
 }
+
+// firstSVIDBackoffStrategy is the Workload API retry for every aether binary
+// (issue #1123): 200 ms, 400 ms, then every 500 ms.
+//
+// go-spiffe's default is linear in whole seconds (1 s, 2 s, 3 s, ... capped at
+// 30 s), which is what a restarted workload paid for its FIRST SVID: the SPIRE
+// agent cannot attest a pod the kubelet does not list yet, refuses the first
+// fetches, and the SVID that becomes available a moment later was picked up on
+// the next rung of the ladder. On kind the node agent's SVID wait was exactly
+// 1.01 / 2.02 / 4.04 / 7.05 s, and the agent serves its node proxy no xDS until
+// it has one (#740). The socket is node-local, so a retry every half second for
+// the length of an outage costs the SPIRE agent nothing worth saving.
+type firstSVIDBackoffStrategy struct{}
+
+// NewBackoff implements workloadapi.BackoffStrategy.
+func (firstSVIDBackoffStrategy) NewBackoff() workloadapi.Backoff { return &firstSVIDBackoff{} }
+
+// firstSVIDBackoff steps 200 ms per retry up to a 500 ms cap.
+type firstSVIDBackoff struct{ n int }
+
+const (
+	firstSVIDBackoffStep = 200 * time.Millisecond
+	firstSVIDBackoffMax  = 500 * time.Millisecond
+)
+
+// Next implements workloadapi.Backoff.
+func (b *firstSVIDBackoff) Next() time.Duration {
+	b.n++
+	return min(time.Duration(b.n)*firstSVIDBackoffStep, firstSVIDBackoffMax)
+}
+
+// Reset implements workloadapi.Backoff.
+func (b *firstSVIDBackoff) Reset() { b.n = 0 }

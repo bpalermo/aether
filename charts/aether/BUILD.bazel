@@ -102,6 +102,22 @@ helm_template_test(
     },
 )
 
+# #1123: an agent pod start is time the node's proxy spends on no ADS stream.
+# Both of its images are digest-pinned, so they are pulled IfNotPresent (Always
+# only adds a registry round trip per container), and readiness is probed every
+# 2 s from the start while keeping 30 s to NotReady (15 x 2 s).
+helm_template_test(
+    name = "aether_agent_restart_fast_path_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- name: cni-install\\n\\s+image: \\S+\\n\\s+imagePullPolicy: IfNotPresent\\n",
+            "- name: agent\\n\\s+image: \\S+\\n\\s+imagePullPolicy: IfNotPresent\\n",
+            "readinessProbe:\\n\\s+httpGet:\\n\\s+path: /readyz\\n\\s+port: health\\n\\s+periodSeconds: 2\\n\\s+failureThreshold: 15\\n",
+        ],
+    },
+)
+
 # ...and agent.goMaxProcs=0 hands GOMAXPROCS back to the Go runtime: no env var.
 helm_template_absent_test(
     name = "aether_agent_gomaxprocs_off_test",

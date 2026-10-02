@@ -1,6 +1,7 @@
 package install
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -101,12 +102,19 @@ func writeCNIConfig(ctx context.Context, logger *slog.Logger, pluginConfig []byt
 		return "", err
 	}
 
-	if err = file.AtomicWrite(cniConfigFilepath, merged, confMode); err != nil {
-		logger.ErrorContext(ctx, "failed to write CNI config file", "error", err, "filepath", cniConfigFilepath)
-		return cniConfigFilepath, err
+	// Already chained exactly as rendered (an agent pod restart on a node whose
+	// conflist nobody touched): leave the file alone. Rewriting identical bytes
+	// costs a write + fsync + rename on the new agent's path to serving (#1123)
+	// and wakes every watcher of the CNI config dir for nothing.
+	if bytes.Equal(merged, existingCNIConfig) {
+		logger.InfoContext(ctx, "CNI config already carries this aether entry; not rewriting it", "filepath", cniConfigFilepath)
+	} else {
+		if err = file.AtomicWrite(cniConfigFilepath, merged, confMode); err != nil {
+			logger.ErrorContext(ctx, "failed to write CNI config file", "error", err, "filepath", cniConfigFilepath)
+			return cniConfigFilepath, err
+		}
+		logger.InfoContext(ctx, "Wrote CNI config", "filepath", cniConfigFilepath)
 	}
-
-	logger.InfoContext(ctx, "Wrote CNI config", "filepath", cniConfigFilepath)
 
 	writeDurableEntry(ctx, logger, filepath.Dir(cniConfigFilepath), merged)
 
@@ -138,6 +146,10 @@ func writeDurableEntry(ctx context.Context, logger *slog.Logger, confDir string,
 	}
 
 	path := conflist.EntryPath(confDir)
+	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, entry) {
+		logger.InfoContext(ctx, "durable aether CNI entry unchanged; not rewriting it", "filepath", path)
+		return
+	}
 	if err := file.AtomicWrite(path, entry, confMode); err != nil {
 		logger.ErrorContext(ctx, "failed to write the durable aether CNI entry; the re-assert loop cannot prime from disk", "error", err, "filepath", path)
 		return

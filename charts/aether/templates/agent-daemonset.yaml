@@ -182,12 +182,18 @@ spec:
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Probed every 2 s from the start (#1123), not first at +5 s and then
+          # every 10 s: a restarted agent's pod reported Ready ~10 s after its
+          # container started on talos (2026-10-02), which paced every agent
+          # roll node by node. failureThreshold keeps the time to NotReady at
+          # 30 s, what the controller's node-taint guard (proposal 033) and
+          # every operator alert were tuned against.
           readinessProbe:
             httpGet:
               path: /readyz
               port: health
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: 2
+            failureThreshold: 15
           env:
             - name: NODE_NAME
               valueFrom:
