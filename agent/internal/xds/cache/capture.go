@@ -1388,6 +1388,10 @@ func (c *SnapshotCache) tcpFloorIdentityReady() bool {
 	return nodeSpiffeID != "" && c.validationContextName() != ""
 }
 
+// tcpFloorStartupGrace is how long after start a SPIRE-enabled node may build
+// capture listeners without an identity before the #877 warning speaks.
+const tcpFloorStartupGrace = time.Minute
+
 // warnTCPFloorWithoutIdentity logs, at most once a minute, that TCP mesh
 // services are configured but unroutable for want of identity (#877).
 //
@@ -1395,7 +1399,17 @@ func (c *SnapshotCache) tcpFloorIdentityReady() bool {
 // and a per-listener-build log would be one line per pod per rebuild. It is a
 // WARN rather than an INFO because the steady state is a real outage: with
 // SPIRE off, every raw-TCP mesh service silently refuses.
+//
+// With SPIRE on it is also silent for tcpFloorStartupGrace after the cache is
+// created (issue #1123): the node agent now builds its local pods' listeners
+// from storage WHILE it waits for its SVID, so every restart passes through
+// this state, and the identity gate plus the spire-svid readiness check (with
+// its own dwell) already own a missing SVID. Past the grace, or with SPIRE
+// off, it warns exactly as before.
 func (c *SnapshotCache) warnTCPFloorWithoutIdentity(services int) {
+	if c.spireEnabled && time.Since(c.createdAt) < tcpFloorStartupGrace {
+		return
+	}
 	c.tcpFloorWarnMu.Lock()
 	defer c.tcpFloorWarnMu.Unlock()
 	if time.Since(c.tcpFloorWarnedAt) < time.Minute {

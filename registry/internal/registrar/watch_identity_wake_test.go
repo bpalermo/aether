@@ -118,3 +118,55 @@ func TestWatchLoop_ConnectsImmediatelyWhenIdentityArrives(t *testing.T) {
 	assert.Less(t, time.Since(start), 2*time.Second,
 		"recovery must follow identity within about a second, not a backoff interval")
 }
+
+// TestWatchLoop_ReconnectWaitEndsWhenTheConnectionIsReady is issue #1123's
+// registry term. The wake above resets the ClientConn's backoff and retries at
+// once, but that first retry races the redial: the ClientConn still answers it
+// with the failure it cached before identity, the loop classifies it as the
+// post-identity reconnect, and then slept a whole initialBackoff (1s + jitter)
+// although the connection came up a few milliseconds later. On talos-main that
+// was the steady ~1.05s between `identity acquired` and `watch stream
+// connected` on every node of the 2026-10-02 agent rolls (03:05Z, 06:53Z), all
+// of it inside the window in which the node's proxy has no ADS stream.
+//
+// The reconnect wait now ends as soon as the ClientConn reports READY, so the
+// stream follows identity by a dial, not by a backoff interval.
+func TestWatchLoop_ReconnectWaitEndsWhenTheConnectionIsReady(t *testing.T) {
+	for i := range 5 {
+		target := &swappableListener{}
+		var ready atomic.Bool
+
+		r, logs := newLoggingRegistry(t, []grpc.DialOption{
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithContextDialer(target.dial),
+		})
+		r.config.IdentityReady = ready.Load
+		metrics, _ := newTestClientMetrics(t)
+		r.metrics = metrics
+
+		ctx, cancel := context.WithCancel(t.Context())
+		require.NoError(t, r.Initialize(ctx))
+
+		require.Eventually(t, func() bool {
+			return findRecord(logRecords(t, logs), "watch stream deferred until this agent has an SVID") != nil
+		}, 30*time.Second, 10*time.Millisecond, "logs:\n%s", logs.String())
+
+		_, lis, _ := serveCatalog(t, "svc-a", "v1")
+		target.set(lis)
+		ready.Store(true)
+
+		start := time.Now()
+		r.NotifyIdentityReady()
+
+		select {
+		case <-r.Reconnects():
+		case <-time.After(10 * time.Second):
+			t.Fatalf("run %d: the watch stream did not connect after identity arrived; logs:\n%s", i, logs.String())
+		}
+		took := time.Since(start)
+		cancel()
+		_ = r.Close()
+		assert.Less(t, took, 500*time.Millisecond,
+			"run %d: the stream must follow identity by a dial, not by initialBackoff (%s); logs:\n%s", i, initialBackoff, logs.String())
+	}
+}

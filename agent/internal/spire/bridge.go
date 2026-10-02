@@ -178,6 +178,25 @@ type Bridge struct {
 	// started is closed once Start has built the Broker client and the bridge can
 	// accept subscriptions (SubscribePod no-ops before then).
 	started chan struct{}
+
+	// identityArrived is closed the first time the agent's own SVID is served:
+	// the moment a subscribe that failed for want of OUR client certificate
+	// can succeed, so the subscriptions waiting out a backoff retry at once
+	// (issue #1123). identityOnce guards the close.
+	identityArrived chan struct{}
+	identityOnce    sync.Once
+}
+
+// connReadiness is the optional part of a BrokerClient that lets the bridge
+// retry the moment the transport can carry a subscribe: the production client
+// implements it over its gRPC ClientConn; test fakes need not.
+type connReadiness interface {
+	// ResetConnectBackoff makes a connection that failed its handshakes while
+	// this agent had no SVID redial now, not on its own backoff.
+	ResetConnectBackoff()
+	// WaitReady blocks until the connection is READY or ctx ends, reporting
+	// whether it became READY.
+	WaitReady(ctx context.Context) bool
 }
 
 // podSubscription is an active Broker subscription for one pod.
@@ -215,6 +234,30 @@ func NewBridge(socketPath string, store SecretStore, source IdentitySource, log 
 		podSVIDs:       make(map[string][]byte),
 		subscriptions:  make(map[string]podSubscription),
 		started:        make(chan struct{}),
+
+		identityArrived: make(chan struct{}),
+	}
+}
+
+// announceIdentity marks the agent's own SVID as served (once) and makes the
+// broker connection redial now: every subscription that failed while it was
+// missing is waiting on identityArrived.
+func (b *Bridge) announceIdentity() {
+	b.identityOnce.Do(func() {
+		if r, ok := b.client.(connReadiness); ok {
+			r.ResetConnectBackoff()
+		}
+		close(b.identityArrived)
+	})
+}
+
+// identityServed reports whether the agent's own SVID has been served yet.
+func (b *Bridge) identityServed() bool {
+	select {
+	case <-b.identityArrived:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -351,9 +394,12 @@ type subscriptionLoop struct {
 // retry ends the subscription.
 func (s *subscriptionLoop) run(ctx context.Context) {
 	for {
+		// Read BEFORE the attempt: an SVID served while it is in flight must
+		// still wake the wait that follows its failure.
+		identityPending := !s.bridge.identityServed()
 		ch, err := s.bridge.client.SubscribeX509SVID(ctx, s.ref)
 		if err != nil {
-			if !s.onSubscribeFailed(ctx, err) {
+			if !s.onSubscribeFailed(ctx, err, identityPending) {
 				return
 			}
 			continue
@@ -372,7 +418,8 @@ func (s *subscriptionLoop) run(ctx context.Context) {
 
 // onSubscribeFailed classifies, logs and counts a failed subscribe, then waits.
 // It reports whether the loop should try again.
-func (s *subscriptionLoop) onSubscribeFailed(ctx context.Context, err error) bool {
+// identityPending says this agent had no SVID served when the attempt began.
+func (s *subscriptionLoop) onSubscribeFailed(ctx context.Context, err error, identityPending bool) bool {
 	if ctx.Err() != nil {
 		return false
 	}
@@ -387,7 +434,9 @@ func (s *subscriptionLoop) onSubscribeFailed(ctx context.Context, err error) boo
 		// the slowest backoff rather than hammering the endpoint.
 		s.backoff = s.bridge.backoffMax
 	}
-	return s.wait(ctx)
+	// Failed while this agent had no SVID to present: the failure was ours,
+	// and it ends the moment the SVID is served, not when the backoff does.
+	return s.wait(ctx, identityPending)
 }
 
 // onSubscribed resets the retry state after a successful subscribe.
@@ -412,13 +461,35 @@ func (s *subscriptionLoop) onStreamEnded(ctx context.Context) bool {
 	s.degraded = true
 	s.bridge.log.Info("SVID subscription stream closed; re-subscribing",
 		"spiffeID", s.spiffeID, "pod", s.ref.String(), "backoff", s.backoff)
-	return s.wait(ctx)
+	return s.wait(ctx, false)
 }
 
-// wait sleeps out the jittered backoff and doubles it, reporting whether the
-// full wait elapsed (false = the subscription is shutting down).
-func (s *subscriptionLoop) wait(ctx context.Context) bool {
-	if !sleepCtx(ctx, jitteredBackoff(s.backoff)) {
+// wait sleeps out the jittered backoff and doubles it, reporting whether to
+// retry (false = the subscription is shutting down).
+//
+// wakeOnIdentity cuts the sleep short when the agent's own SVID is served
+// (issue #1123): the subscribe failed for want of OUR client certificate, so
+// that is the moment it can succeed. The retry then waits, within what is left
+// of the backoff, for the broker connection to come back up (its own redial
+// backoff was reset by announceIdentity) instead of racing it, and starts the
+// next backoff from the initial value: nothing about the broker failed.
+func (s *subscriptionLoop) wait(ctx context.Context, wakeOnIdentity bool) bool {
+	var arrived <-chan struct{}
+	if wakeOnIdentity {
+		arrived = s.bridge.identityArrived
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, jitteredBackoff(s.backoff))
+	defer cancel()
+	select {
+	case <-arrived:
+		if r, ok := s.bridge.client.(connReadiness); ok {
+			r.WaitReady(waitCtx)
+		}
+		s.backoff = s.bridge.backoffInitial
+		return ctx.Err() == nil
+	case <-waitCtx.Done():
+	}
+	if ctx.Err() != nil {
 		return false
 	}
 	s.backoff = min(s.backoff*2, s.bridge.backoffMax)
@@ -868,6 +939,7 @@ func (b *Bridge) refreshNodeSVID(ctx context.Context, delivered bool) error {
 				b.log.ErrorContext(ctx, "setting node identity on cache", "error", err, "spiffeID", secret.GetName())
 			}
 		}
+		b.announceIdentity()
 	}
 
 	b.log.DebugContext(ctx, "served node SVID", "spiffeID", secret.GetName())

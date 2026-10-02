@@ -15,6 +15,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -181,6 +182,29 @@ func brokerHeaderStreamInterceptor(ctx context.Context, desc *grpc.StreamDesc, c
 // withBrokerHeader returns ctx carrying the broker security header.
 func withBrokerHeader(ctx context.Context) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, brokerSecurityHeaderKey, brokerSecurityHeaderValue)
+}
+
+// ResetConnectBackoff implements connReadiness: the handshakes this connection
+// failed while the agent had no SVID put it on gRPC's reconnect backoff, which
+// nothing else would cut short once the SVID exists.
+func (c *brokerClient) ResetConnectBackoff() { c.conn.ResetConnectBackoff() }
+
+// WaitReady implements connReadiness.
+func (c *brokerClient) WaitReady(ctx context.Context) bool {
+	for {
+		state := c.conn.GetState()
+		switch state {
+		case connectivity.Ready:
+			return true
+		case connectivity.Idle:
+			c.conn.Connect()
+		case connectivity.Shutdown:
+			return false
+		}
+		if !c.conn.WaitForStateChange(ctx, state) {
+			return false
+		}
+	}
 }
 
 // SubscribeX509SVID implements BrokerClient.

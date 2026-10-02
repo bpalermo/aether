@@ -47,6 +47,7 @@ go_test(
         "refresh_test.go",
         "server_integration_test.go",
         "server_test.go",
+        "startup_overlap_test.go",
     ],
     embed = [":server"],
     deps = [

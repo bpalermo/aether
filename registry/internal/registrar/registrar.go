@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
@@ -701,8 +702,58 @@ func (r *RegistrarRegistry) deferPeerStream(ctx context.Context, err error, back
 //
 // Same handling as deferPeerStream — INFO, no watch_errors, escalating backoff
 // capped at maxBackoff — only the attribution differs.
+//
+// The wait itself ends early, unlike the peer's: the condition is local and
+// observable. Whatever the backoff, the next attempt is made the moment the
+// ClientConn reports READY (issue #1123). The wake's own retry routinely races
+// the redial and loses (the ClientConn answers it from the cached pre-identity
+// failure a few milliseconds before the new transport is up), and sleeping a
+// full initialBackoff after that was a steady ~1.05s on every node of the
+// 2026-10-02 talos agent rolls, spent with the node's proxy on no ADS stream.
 func (r *RegistrarRegistry) deferReconnect(ctx context.Context, err error, backoff *time.Duration) bool {
-	return r.deferRetry(ctx, "registrar connection not yet re-established after identity; retrying", err, backoff, "reconnecting")
+	jitter := time.Duration(float64(*backoff) * jitterFraction * rand.Float64())
+	wait := *backoff + jitter
+	r.log.InfoContext(ctx, "registrar connection not yet re-established after identity; retrying", "reconnecting", true, "error", err, "backoff", wait)
+	if !r.waitForConnReady(ctx, wait) {
+		return false
+	}
+	*backoff = min(*backoff*2, maxBackoff)
+	return true
+}
+
+// waitForConnReady sleeps up to wait, returning early once the ClientConn is
+// READY (the retry will then succeed) or on a wake; false only when ctx ended
+// (shutdown). An IDLE connection is asked to connect, since nothing else would
+// move it while this loop is the only caller. With no connection (a client
+// used before Initialize, or in tests) it is the plain sleep.
+func (r *RegistrarRegistry) waitForConnReady(ctx context.Context, wait time.Duration) bool {
+	if r.conn == nil {
+		return r.waitBeforeRetry(ctx, wait)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	// A wake (a second identity notification) still cuts the wait short.
+	go func() {
+		select {
+		case <-r.wake:
+			cancel()
+		case <-waitCtx.Done():
+		}
+	}()
+	for {
+		state := r.conn.GetState()
+		if state == connectivity.Ready {
+			return true
+		}
+		if state == connectivity.Idle {
+			r.conn.Connect()
+		}
+		if !r.conn.WaitForStateChange(waitCtx, state) {
+			// The wait elapsed (or was woken): retry as before, unless this is
+			// the shutdown.
+			return ctx.Err() == nil
+		}
+	}
 }
 
 // deferRetry is the shared body of the two peer-side deferrals: announce at

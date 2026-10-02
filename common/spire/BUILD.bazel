@@ -31,6 +31,7 @@ go_test(
         "handshake_test.go",
         "identity_test.go",
         "peer_test.go",
+        "tls_backoff_test.go",
         "tls_test.go",
         "waiting_test.go",
     ],

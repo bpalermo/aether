@@ -24,7 +24,9 @@ go_library(
 go_test(
     name = "install_test",
     srcs = [
+        "cniconfig_idempotent_test.go",
         "cniconfig_test.go",
+        "install_test.go",
         "otlpendpoint_test.go",
     ],
     embed = [":install"],
