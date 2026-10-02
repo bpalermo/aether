@@ -34,6 +34,7 @@ func TestBuildEnvoyCmd(t *testing.T) {
 		"--restart-epoch", "3",
 		"--drain-time-s", "45",
 		"--parent-shutdown-time-s", "60",
+		"--admin-address-path", s.adminIdentity, // issue #1127
 		"-l", "info", "--service-cluster", "aether-proxy",
 	}
 	assert.Equal(t, want, cmd.Args)

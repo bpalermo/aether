@@ -1693,8 +1693,36 @@ it took (issue #795):
 | --- | --- | --- | --- |
 | `handoff` | admin answers at a **newer** epoch — a successor already holds our listen sockets | wait, without signalling Envoy, for the successor's parent-shutdown protocol to terminate it | none |
 | `successor_wait` | admin answers **LIVE at our own epoch** — no handoff has begun | keep serving and wait (bounded by `successorWaitBudget`, 155 s at the chart default) for the DaemonSet's surge replacement, which is created within ~1 s and hot-restarts us | none |
-| `drain_fallback` | that wait expires, or `--shutdown-drain-immediately` is set | `POST /drain_listeners?graceful`, wait `--drain-time`, then SIGTERM and reap | in-flight requests finish; new connections go to whatever else serves the node |
+| `drain_fallback` | that wait expires, or `--shutdown-drain-immediately` is set | `POST /drain_listeners?graceful` **to our own Envoy only** (see below), wait `--drain-time`, then SIGTERM and reap | in-flight requests finish; new connections go to whatever else serves the node |
 | `child_dead` | the admin does not answer at all | SIGTERM and reap; there is nothing to drain | already gone |
+
+**The drain only ever reaches this pod's own Envoy (#1127).** `127.0.0.1:9901` is one
+address for the whole node, so whoever answers it may be another proxy pod's Envoy: a
+successor that took the admin over the hot-restart protocol, or a *fresh* Envoy the new
+pod started after its successor crashed. Before #1127 the old pod drained whatever
+answered. On 2026-10-01 that was the new pod's fresh epoch-0 Envoy, which then added no
+listeners for pods created on the node until the next handoff (about 12 min on w01 and
+w03). Now every supervisor starts its Envoys with `--admin-address-path
+<ready-marker dir>/envoy-admin-address.<pod>.<nonce>`, a per-supervisor nonce that
+`/server_info` echoes as `command_line_options.admin_address_path`. The drain is sent only
+when `/server_info` returns that nonce **and** an epoch whose child this supervisor still
+tracks. The check and the drain go over **one** TCP connection, so the drain reaches the
+process that passed the check, or nothing. If the check fails, or our Envoy has already
+exited, the supervisor sends nothing, logs one WARN, and goes on to SIGTERM its own
+Envoy:
+
+```
+not sending envoy admin request: the shared admin address is answered by ANOTHER envoy, not this supervisor's …
+    adminOwner=foreign answeredBy=envoy-admin-address.aether-proxy-<new>.<nonce> answeredEpoch=0 ourEpoch=1
+not sending envoy admin request: this supervisor's envoy has exited, …   adminOwner=own_envoy_gone
+```
+
+`listeners drained; stopping envoy` then logs `drainAccepted=false`. The decision is
+counted in `aether_supervisor_admin_mutations_total{aether_supervisor_admin_request="drain_listeners",
+aether_supervisor_admin_owner=own|foreign|unreachable|own_envoy_gone}`, seeded at zero. Only
+`own` sends the request. `foreign` during a roll means the old pod's Envoy had already
+handed its admin to another Envoy, so it could not be drained gracefully. The supervisor
+reserves `--admin-address-path` and refuses to start if an `--envoy-arg` sets it.
 
 `kubectl delete pod aether-proxy-<x>` takes the **`successor_wait`** branch. Expect
 **≈20–25 s** of termination (that is the successor initializing, not a hang) and **zero**
@@ -2081,13 +2109,18 @@ them with the commands in §7 "Pre-flight: node headroom before a roll (#812)".
   spent about 40% more CPU per handoff, and rolls took 70% longer. Keep the default.
 - **`proxy.concurrency`** (default `0`, one worker per core). In an A/B, 2 workers
   instead of 4 cut handoff starvation per thread by about 27% and steady-state
-  starvation by 57–81%. **Do not change it on a live mesh** until
-  [#1126](https://github.com/bpalermo/aether/issues/1126) and
-  [#1127](https://github.com/bpalermo/aether/issues/1127) are fixed. On talos-main a
-  4→2 change crashed successors (`Mismatched worker index` in
-  `HotRestartingChild::onForwardedUdpPacket`, #1126), and the old pods' self-drain
-  drained the new pods' Envoys (#1127). Together they left two nodes not accepting
-  new pods' connections for about 12 minutes.
+  starvation by 57–81%. **Do not change it on a live mesh** until both prerequisites
+  are deployed. On talos-main a 4→2 change crashed successors (`Mismatched worker
+  index` in `HotRestartingChild::onForwardedUdpPacket`,
+  [#1126](https://github.com/bpalermo/aether/issues/1126)), and the old pods'
+  self-drain drained the new pods' Envoys
+  ([#1127](https://github.com/bpalermo/aether/issues/1127)). Together they left two
+  nodes not accepting new pods' connections for about 12 minutes. The crash is fixed by
+  the carried Envoy patch `envoy-aether1126-forwarded-udp-worker-index.patch`, in proxy
+  images built from it or later. The #1127 supervisor fix is the other prerequisite:
+  the old pod's drain now reaches only its own Envoy (see "What the proxy supervisor
+  does on SIGTERM"). A crashed successor still costs the old pod its graceful drain,
+  because its Envoy has already handed the admin over, so it is SIGTERMed instead.
 - **The node agent.** It has no CPU limit since #1119 (`agent.resources.requests.cpu`
   `200m`, `GOMAXPROCS=2`), because a CFS quota parked snapshot builds while they held
   the snapshot-cache mutex. Do not add one back to save headroom.

@@ -1,0 +1,160 @@
+diff --git a/envoy/network/listener.h b/envoy/network/listener.h
+--- a/envoy/network/listener.h
++++ b/envoy/network/listener.h
+@@ -594,7 +594,10 @@
+ 
+   /**
+    * Deliver ``data`` to the correct worker by calling ``onDataWorker()``
+-   * or ``post()`` on one of the registered workers.
++   * or ``post()`` on one of the registered workers. A ``dest_worker_index`` that is
++   * not one of this instance's workers (a hot restart parent's worker index, when the
++   * parent ran more workers) is delivered to ``dest_worker_index`` modulo the number
++   * of workers.
+    */
+   virtual void deliver(uint32_t dest_worker_index, UdpRecvData&& data) PURE;
+ };
+diff --git a/source/common/network/udp_listener_impl.cc b/source/common/network/udp_listener_impl.cc
+--- a/source/common/network/udp_listener_impl.cc
++++ b/source/common/network/udp_listener_impl.cc
+@@ -200,8 +200,24 @@
+ void UdpListenerWorkerRouterImpl::deliver(uint32_t dest_worker_index, UdpRecvData&& data) {
+   absl::ReaderMutexLock lock(mutex_);
+ 
+-  ASSERT(dest_worker_index < workers_.size(),
+-         "UdpListenerCallbacks::destination returned out-of-range value");
++  if (dest_worker_index >= workers_.size()) {
++    // Only a hot restart parent hands us an index we do not have: it forwards the datagrams it
++    // cannot dispatch tagged with ITS worker index, and it had more workers than we do (the
++    // in-process caller, ActiveUdpListenerBase::onData(), asserts its destination is in range).
++    // Map it onto our workers the way the QUIC worker selector does, modulo the worker count. For
++    // a parent whose worker count is a multiple of ours this is the worker our own connection ID
++    // routing picks for the packet, so a connection accepted from a forwarded handshake stays on
++    // the worker its later packets reach once the parent is gone.
++    if (workers_.empty()) {
++      return;
++    }
++    ENVOY_LOG_EVERY_POW_2_MISC(info,
++                               "udp worker index {} is not one of this instance's {} workers "
++                               "(hot restart parent with more workers); delivering to worker {}",
++                               dest_worker_index, workers_.size(),
++                               dest_worker_index % workers_.size());
++    dest_worker_index %= workers_.size();
++  }
+   auto* worker = workers_[dest_worker_index];
+ 
+   // When a listener is being removed, packets could be processed on some workers after the
+diff --git a/source/server/hot_restarting_child.cc b/source/server/hot_restarting_child.cc
+--- a/source/server/hot_restarting_child.cc
++++ b/source/server/hot_restarting_child.cc
+@@ -125,7 +125,9 @@
+     // We send to the worker index from the parent instance.
+     // In the case that the number of workers changes between instances,
+     // or the quic connection id generator changes how it selects worker
+-    // ids, the hot restart packet transfer will fail.
++    // ids, the hot restart packet transfer will fail. A parent index this
++    // instance does not have (the parent ran more workers) is mapped by the
++    // router onto index % concurrency rather than read past its workers.
+     //
+     // One option would be to dispatch an onData call to have the receiving
+     // worker forward the packet if the calculated destination differs from
+diff --git a/test/common/network/udp_listener_impl_test.cc b/test/common/network/udp_listener_impl_test.cc
+--- a/test/common/network/udp_listener_impl_test.cc
++++ b/test/common/network/udp_listener_impl_test.cc
+@@ -968,6 +968,50 @@
+ 
+ #endif
+ 
++// A hot restart parent forwards the datagrams it cannot dispatch tagged with ITS worker index. When
++// the worker count shrank across the restart that index names a worker this instance does not
++// have: the router maps it onto one of its own workers (index modulo the worker count) instead of
++// reading past the end of its worker table (aether#1126).
++TEST(UdpListenerWorkerRouterImplTest, DeliverMapsAWorkerIndexItDoesNotHaveOntoItsOwnWorkers) {
++  UdpListenerWorkerRouterImpl router(2);
++  testing::NiceMock<MockUdpListenerCallbacks> worker0;
++  testing::NiceMock<MockUdpListenerCallbacks> worker1;
++  ON_CALL(worker0, workerIndex()).WillByDefault(Return(0));
++  ON_CALL(worker1, workerIndex()).WillByDefault(Return(1));
++  router.registerWorkerForListener(worker0);
++  router.registerWorkerForListener(worker1);
++
++  auto datagram = [](absl::string_view payload) {
++    UdpRecvData data;
++    data.buffer_ = std::make_unique<Buffer::OwnedImpl>(payload);
++    return data;
++  };
++  std::vector<std::string> on_worker0;
++  std::vector<std::string> on_worker1;
++  EXPECT_CALL(worker0, post(_)).WillRepeatedly(Invoke([&](UdpRecvData&& data) {
++    on_worker0.push_back(data.buffer_->toString());
++  }));
++  EXPECT_CALL(worker1, post(_)).WillRepeatedly(Invoke([&](UdpRecvData&& data) {
++    on_worker1.push_back(data.buffer_->toString());
++  }));
++
++  // In range: delivered as addressed.
++  router.deliver(0, datagram("w0"));
++  router.deliver(1, datagram("w1"));
++  // A four-worker parent's workers 2 and 3.
++  router.deliver(2, datagram("w2"));
++  router.deliver(3, datagram("w3"));
++  EXPECT_THAT(on_worker0, testing::ElementsAre("w0", "w2"));
++  EXPECT_THAT(on_worker1, testing::ElementsAre("w1", "w3"));
++
++  router.unregisterWorkerForListener(worker0);
++  router.unregisterWorkerForListener(worker1);
++  // No worker registered for the mapped index (listener being removed): dropped, as for an
++  // in-range index.
++  router.deliver(3, datagram("dropped"));
++  EXPECT_THAT(on_worker1, testing::ElementsAre("w1", "w3"));
++}
++
+ } // namespace
+ } // namespace Network
+ } // namespace Envoy
+diff --git a/test/server/hot_restarting_child_test.cc b/test/server/hot_restarting_child_test.cc
+--- a/test/server/hot_restarting_child_test.cc
++++ b/test/server/hot_restarting_child_test.cc
+@@ -690,6 +690,43 @@
+   EXPECT_LOG_NOT_CONTAINS("error", "", fake_parent_->sendUdpForwardingMessage(msg));
+ }
+ 
++// A parent with more workers than this child (concurrency lowered across the hot restart) forwards
++// packets tagged with a worker index the child does not have. The child's own worker router must
++// deliver them to one of its workers (index modulo its worker count) instead of indexing past the
++// end of its worker table, which crashed the child in production (aether#1126).
++TEST_F(HotRestartingChildTest, ForwardsPacketFromAParentWorkerTheChildDoesNotHave) {
++  envoy::HotRestartMessage msg;
++  auto* packet = msg.mutable_request()->mutable_forwarded_udp_packet();
++  // Two workers, with the real worker router.
++  auto listener_config = std::make_shared<testing::NiceMock<Network::MockUdpListenerConfig>>(2);
++  auto test_listener_addr = *Network::Utility::resolveUrl("udp://127.0.0.1:1234");
++  auto test_remote_addr = *Network::Utility::resolveUrl("udp://127.0.0.1:4321");
++  HotRestartUdpForwardingTestHelper(*hot_restarting_child_)
++      .registerUdpForwardingListener(
++          test_listener_addr, std::dynamic_pointer_cast<Network::UdpListenerConfig>(listener_config));
++  testing::NiceMock<Network::MockUdpListenerCallbacks> worker0;
++  testing::NiceMock<Network::MockUdpListenerCallbacks> worker1;
++  ON_CALL(worker0, workerIndex()).WillByDefault(Return(0));
++  ON_CALL(worker1, workerIndex()).WillByDefault(Return(1));
++  Network::UdpListenerWorkerRouter& router =
++      listener_config->listenerWorkerRouter(*test_listener_addr);
++  router.registerWorkerForListener(worker0);
++  router.registerWorkerForListener(worker1);
++
++  packet->set_local_addr(Network::Utility::urlFromDatagramAddress(*test_listener_addr));
++  packet->set_peer_addr(Network::Utility::urlFromDatagramAddress(*test_remote_addr));
++  packet->set_payload("from parent worker 3");
++  // Worker 3 of a four-worker parent.
++  packet->set_worker_index(3);
++  EXPECT_CALL(worker0, post(_)).Times(0);
++  EXPECT_CALL(worker1, post(IsUdpWith(test_listener_addr, test_remote_addr, "from parent worker 3",
++                                      uint64_t(0))));
++  EXPECT_LOG_NOT_CONTAINS("error", "", fake_parent_->sendUdpForwardingMessage(msg));
++
++  router.unregisterWorkerForListener(worker0);
++  router.unregisterWorkerForListener(worker1);
++}
++
+ // A listener is not matched across network namespaces, nor by a namespace-less lookup.
+ TEST_F(HotRestartingChildTest, DoesNotForwardAcrossNetworkNamespaces) {
+   envoy::HotRestartMessage msg;
