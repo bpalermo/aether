@@ -2248,7 +2248,8 @@ and destination agents were on the same replica, **14.9 s** (the full preStop) w
 they were not. Since #1124 the backend lists a pod whose deletion was requested as
 DRAINING while it is still Ready (UNHEALTHY once it is not), and the registrar syncs
 from a managed-pod informer instead of only the poll, so every replica hears the drain
-from the pod's `deletionTimestamp` within the 200 ms debounce. The registrar logs
+from the pod's `deletionTimestamp` within the 200 ms debounce (kind: cross-replica
+0.46–0.60 s, same-replica 0.17–0.25 s). The registrar logs
 `kubernetes registry initialized ... podWatch=true` and `registry supports change
 notifications`. What still differs cross-replica: the agent's phase-2 UNHEALTHY
 (pool close ~1 s before SIGTERM) reaches only the receiving replica; the others see
