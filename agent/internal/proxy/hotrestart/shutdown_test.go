@@ -37,6 +37,9 @@ func newShutdownSupervisor(t *testing.T, f *fakeAdminServer) *Supervisor {
 		ReadyMarkerPath:    filepath.Join(t.TempDir(), "ready"),
 		AdminAddress:       f.addr(),
 	}, slog.New(slog.DiscardHandler), nil)
+	// The fake answers as THIS supervisor's Envoy unless a test says otherwise
+	// (issue #1127: only our own Envoy is ever drained).
+	f.identity.Store(s.adminIdentity)
 
 	require.NoError(t, s.hotRestart())
 	require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) == 1 },
@@ -212,8 +215,13 @@ func TestSuccessorWaitBudget(t *testing.T) {
 // successor can ever appear (node shutdown, scale-down, `kubectl delete
 // daemonset`, a replacement stuck Pending). Admin answers LIVE at a newer epoch,
 // so the mid-handoff branch is correctly entered — but nothing ever terminates
-// our Envoy. The wait must expire at the budget and drain the child, rather than
-// sit there until the kubelet's SIGKILL with connections open.
+// our Envoy. The wait must expire at the budget and stop the child, rather than
+// sit there until the kubelet's SIGKILL.
+//
+// What it must NOT do any more is send the drain: the Envoy answering at the
+// newer epoch is the SUCCESSOR's, not ours, and draining it is issue #1127 (the
+// node then serves no listeners for new pods until the next handoff). Before
+// #1127 this test asserted exactly that drain.
 func TestHandleShutdownFallsBackToDrainWhenNoSuccessorComes(t *testing.T) {
 	requireShell(t)
 
@@ -236,10 +244,9 @@ func TestHandleShutdownFallsBackToDrainWhenNoSuccessorComes(t *testing.T) {
 
 	assert.GreaterOrEqual(t, time.Since(start), 2*time.Second+s.cfg.DrainTime,
 		"the fallback must not cut a handoff short before the budget, nor skip the drain window")
-	assert.Equal(t, int64(1), f.drainHits.Load(),
-		"the fallback must drain the listeners, not bare-SIGTERM a serving envoy")
-	assert.Equal(t, "graceful", f.drainQuery.Load())
-	assert.False(t, s.childTracked(0), "the fallback must drain and reap the child")
+	assert.Zero(t, f.drainHits.Load(),
+		"the envoy answering at the newer epoch is the successor's: the old pod must not drain it (#1127)")
+	assert.False(t, s.childTracked(0), "the fallback must still stop and reap our child")
 }
 
 // TestHandleShutdownDrainsGracefullyWhenNoSuccessorArrives is the other half of

@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "hotrestart",
     srcs = [
+        "adminidentity.go",
         "adminprobe.go",
         "coordination.go",
         "crash.go",
@@ -31,6 +32,7 @@ go_library(
 go_test(
     name = "hotrestart_test",
     srcs = [
+        "adminidentity_test.go",
         "adminprobe_test.go",
         "adminreverify_test.go",
         "coordination_test.go",
