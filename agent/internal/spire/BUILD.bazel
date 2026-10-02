@@ -23,7 +23,9 @@ go_library(
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel_metric//:metric",
         "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//backoff",
         "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//connectivity",
         "@org_golang_google_grpc//credentials",
         "@org_golang_google_grpc//metadata",
         "@org_golang_google_grpc//status",
@@ -35,6 +37,7 @@ go_test(
     name = "spire_test",
     srcs = [
         "bridge_broker_test.go",
+        "bridge_identity_wake_test.go",
         "bridge_late_identity_test.go",
         "bridge_node_unchanged_test.go",
         "bridge_push_ordering_test.go",

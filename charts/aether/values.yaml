@@ -324,7 +324,13 @@ agent:
     repository: "{@//agent/cmd/agent:image_push.repository}"
     digest: "{@//agent/cmd/agent:image_push.digest}"
     tag: ""
-    pullPolicy: Always
+    # IfNotPresent, not Always (#1123): the reference is a digest, so the node
+    # either holds exactly this image or pulls it; Always only adds a registry
+    # round trip (token + manifest HEAD) to every agent pod start. That start
+    # is spent with the node's proxy on no ADS stream: the kubelet measured
+    # 1.44 s of image "pulling" (agent + cni-install, both already present) on
+    # one 2026-10-02 talos agent restart. Set Always only for a mutable tag.
+    pullPolicy: IfNotPresent
   # CPU: a 200m REQUEST and deliberately NO CPU LIMIT (#1116). The agent's xDS
   # snapshot builds are 5-25 ms CPU bursts on latency-critical paths (ODCDS
   # first-use answers, EDS / drain-mark propagation). Under a 200m CFS quota
@@ -379,7 +385,9 @@ cniInstall:
     repository: "{@//cni/cmd/cni-install:image_push.repository}"
     digest: "{@//cni/cmd/cni-install:image_push.digest}"
     tag: ""
-    pullPolicy: Always
+    # IfNotPresent for the same reason as agent.image (#1123): digest-pinned,
+    # and this init container sits on every agent pod start.
+    pullPolicy: IfNotPresent
   # OTLP gRPC endpoint (host:port, plaintext) the CNI plugin binary exports its
   # aether_cni_* telemetry to. Empty = otel.endpoint. Override it when the plugin
   # must reach a different collector than the pods do (e.g. a node-local agent).
