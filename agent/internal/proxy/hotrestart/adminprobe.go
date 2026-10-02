@@ -142,13 +142,21 @@ const adminDrainPath = "/drain_listeners?graceful"
 // waits out DrainTime itself.
 const adminDrainRequestTimeout = 2 * readyPollInterval
 
-// drainListeners asks Envoy to start a graceful listener drain and reports
-// whether it accepted. Best-effort: a supervisor that cannot reach its own
-// admin still has to stop Envoy, so the caller proceeds either way.
+// drainListeners asks THIS supervisor's Envoy to start a graceful listener
+// drain and reports whether it accepted. Best-effort: a supervisor that cannot
+// reach its own admin still has to stop Envoy, so the caller proceeds either
+// way.
+//
+// The request is sent only after /server_info, on the same connection, has
+// identified the answering Envoy as ours (ownAdminRequest, issue #1127). The
+// admin address is shared by every proxy pod on the node, and by the time this
+// fallback runs our own Envoy may have exited or closed its admin to a
+// hot-restart child: a drain sent blind then lands on another pod's Envoy,
+// which stops adding listeners for the rest of its life.
 //
 // Like every other shutdown-path request this runs on a context DETACHED from
 // the caller's, which is already cancelled by the signal handler by the time
-// any of this executes — otherwise http.Client.Do returns "context canceled" in
+// any of this executes — otherwise the dial fails with "context canceled" in
 // microseconds without opening a socket, and the drain silently never happens
 // (issue #771, the same trap, on a path where it would be invisible).
 func (s *Supervisor) drainListeners(ctx context.Context) bool {
@@ -156,22 +164,19 @@ func (s *Supervisor) drainListeners(ctx context.Context) bool {
 	defer cancel()
 
 	url := "http://" + s.cfg.AdminAddress + adminDrainPath
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, nil)
-	if err != nil {
-		s.log.ErrorContext(ctx, "building the envoy graceful-drain request", "error", err, "url", url)
+	owner, status, body, err := s.ownAdminRequest(reqCtx, adminRequestDrainListeners,
+		http.MethodPost, adminDrainPath, adminDrainBodyLimit)
+	switch {
+	case owner != adminOwn:
+		// ownAdminRequest has logged whose admin answered; nothing was sent.
 		return false
-	}
-	resp, err := s.adminAuthoritative.Do(req)
-	if err != nil {
+	case err != nil:
 		s.log.ErrorContext(ctx, "envoy admin did not accept the graceful listener drain; "+
 			"stopping it without one", "error", err, "url", url)
 		return false
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, adminDrainBodyLimit))
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	case status != http.StatusOK:
 		s.log.ErrorContext(ctx, "envoy admin rejected the graceful listener drain; stopping it without one",
-			"status", resp.StatusCode, "body", strings.TrimSpace(string(body)), "url", url)
+			"status", status, "body", strings.TrimSpace(string(body)), "url", url)
 		return false
 	}
 	return true
@@ -340,12 +345,7 @@ func (s *Supervisor) adminServerInfo(ctx context.Context, epoch int) (live, reac
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, adminServerInfoBodyLimit))
 	_ = resp.Body.Close()
-	var info struct {
-		State              string `json:"state"`
-		CommandLineOptions struct {
-			RestartEpoch int `json:"restart_epoch"`
-		} `json:"command_line_options"`
-	}
+	var info adminServerInfoDoc
 	// Unmarshal (rather than Decoder.Decode) rejects trailing content the
 	// streaming decoder would ignore; Envoy emits exactly one protojson object,
 	// and reading the body whole is what a truncated transient response (a bare

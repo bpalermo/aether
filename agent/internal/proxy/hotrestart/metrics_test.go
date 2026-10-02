@@ -129,6 +129,30 @@ func TestSupervisorMetrics_NilReceiverSafe(t *testing.T) {
 	m.adminProbed(probeEndpointReady, probeResultLive)
 	m.shutdownBranchTaken(shutdownBranchSuccessorWait)
 	m.childSilentDetected()
+	m.adminMutation(adminRequestDrainListeners, adminForeign)
+}
+
+// TestAdminMutationsSeededAndRecorded: every owner verdict is exported at zero
+// before its first increment (the #1127 gate is "foreign stays 0"), and a
+// recorded verdict lands on its own series.
+func TestAdminMutationsSeededAndRecorded(t *testing.T) {
+	m, reader := newTestSupervisorMetrics(t)
+
+	byOwner := metricSumByAttr(t, reader, "aether.supervisor.admin_mutations", attrAdminOwner)
+	for _, owner := range adminOwnerValues {
+		if got, ok := byOwner[string(owner)]; !ok || got != 0 {
+			t.Errorf("owner %q seeded = %d (exported %v), want 0", owner, got, ok)
+		}
+	}
+
+	m.adminMutation(adminRequestDrainListeners, adminForeign)
+	byOwner = metricSumByAttr(t, reader, "aether.supervisor.admin_mutations", attrAdminOwner)
+	if got := byOwner[string(adminForeign)]; got != 1 {
+		t.Errorf("foreign = %d, want 1", got)
+	}
+	if got := byOwner[string(adminOwn)]; got != 0 {
+		t.Errorf("own = %d, want 0", got)
+	}
 }
 
 // TestShutdownBranchesSeededAtZero is the #717 lesson applied to a counter that
