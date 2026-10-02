@@ -15,8 +15,8 @@
 #
 # THE HARNESS. EWQ_WORKER=1 shape of e2e/eastwest-quic.sh (the source client-a
 # on the control plane, the destination quic-a on the worker), on the etcd
-# registry backend as talos-main runs it (DRP_BACKEND=kubernetes for the chart
-# default). quic-a runs 2 replicas with a 15 s preStop sleep, so a deleted
+# registry backend as talos-main runs it (REGISTRY_BACKEND=kubernetes, read at
+# `up` and `verify`, for the chart default). quic-a runs 2 replicas with a 15 s preStop sleep, so a deleted
 # replica's application keeps serving -- and logging every request it gets --
 # for 15 s after its drain mark: the last request it logs is the last request
 # a source SELECTED it for. Load is 4 unpinned GET loops from client-a.
@@ -46,6 +46,18 @@
 # first snapshot that lacks the pods' `quic:` twins -- the R gate's removal
 # check fails on it -- which is why the two ship together.
 #
+# REGISTRAR REPLICAS (aether#1124). The registrar runs 2 replicas. Every run
+# reports which one the source agent and the destination agent hold their
+# registrar connection to (read from the node's conntrack table), and the gap
+# is summarized split same-replica / cross-replica. On the kubernetes backend
+# the agent's DRAINING mark is a no-op write that only the receiving replica's
+# snapshot carries, so cross-replica is the case that matters there; verify
+# steers leg S onto both (DRP_PLACEMENT, default alternate on that backend).
+#
+#   REGISTRY_BACKEND=kubernetes EWQ_CLUSTER=aether-1124 e2e/drain-propagation.sh up
+#   REGISTRY_BACKEND=kubernetes DRP_LEGS=S DRP_RUNS=8 e2e/drain-propagation.sh verify
+#   e2e/drain-propagation.sh swap-registrar <tag-with-the-fix>
+#
 # Usage:
 #   EWQ_IMAGE_TAG=<tag> EWQ_SKIP_BUILD=1 e2e/drain-propagation.sh up
 #   e2e/drain-propagation.sh bootstrap main && DRP_EXPECT=red e2e/drain-propagation.sh verify
@@ -63,7 +75,24 @@ export EWQ_WORKER=1
 . "$HERE/eastwest-quic.sh"
 
 DRP_EXPECT="${DRP_EXPECT:-green}"
-DRP_BACKEND="${DRP_BACKEND:-etcd}"
+# REGISTRY_BACKEND (or DRP_BACKEND) = etcd | kubernetes, read at `up` and by
+# `verify` for the placement steering below.
+DRP_BACKEND="${REGISTRY_BACKEND:-${DRP_BACKEND:-etcd}}"
+case "$DRP_BACKEND" in
+etcd | kubernetes) ;;
+*)
+	printf 'REGISTRY_BACKEND must be etcd or kubernetes, got %s\n' "$DRP_BACKEND" >&2
+	exit 1
+	;;
+esac
+# DRP_PLACEMENT: which registrar replica the SOURCE agent is on relative to the
+# DESTINATION agent's (aether#1124). The destination agent writes the drain mark
+# to the replica it holds its registrar connection to; the source agent hears it
+# from the replica IT watches. `alternate` (the default on the kubernetes
+# backend) steers odd runs onto the same replica and even runs onto the other
+# one, by restarting the source agent until its new connection lands there;
+# `same` / `cross` pin every run; `any` (the etcd default) only reports.
+DRP_PLACEMENT="${DRP_PLACEMENT:-$([ "$DRP_BACKEND" = kubernetes ] && echo alternate || echo any)}"
 DRP_RUNS="${DRP_RUNS:-5}"
 DRP_LEGS="${DRP_LEGS:-S R}"
 DRP_STEADY_BOUND="${DRP_STEADY_BOUND:-1.0}"
@@ -95,6 +124,51 @@ start_etcd() {
 	[ -n "$ip" ] || die "no etcd IP"
 	EWQ_EXTRA_HELM_ARGS+=(--set registrar.registryBackend=etcd --set "registrar.etcd.endpoints[0]=http://$ip:2379")
 	ok "etcd at http://$ip:2379; registrar on the etcd backend"
+}
+
+# --- registrar replica placement (aether#1124) ---------------------------------
+
+# registrar_of AGENT_POD — the registrar replica AGENT_POD holds its registrar
+# connection to. Registration (the drain mark) and the endpoint watch share that
+# one gRPC connection, dialled at the registrar Service VIP; kube-proxy DNATs it
+# to one replica, so the node's conntrack table names the replica's pod IP as the
+# reply source. Prints the replica's pod name, "?" when there is no established
+# flow, or "a|b" when the agent holds flows to both.
+registrar_of() {
+	local pod="$1" node src vip ips ip names=""
+	node="$(kc -n "$NS" get pod "$pod" -o jsonpath='{.spec.nodeName}')"
+	src="$(kc -n "$NS" get pod "$pod" -o jsonpath='{.status.podIP}')"
+	vip="$(kc -n "$NS" get svc aether-registrar -o jsonpath='{.spec.clusterIP}')"
+	ips="$(docker exec "$node" conntrack -L -p tcp --orig-src "$src" --orig-dst "$vip" 2>/dev/null |
+		awk '/ESTABLISHED/ { n = 0; for (i = 1; i <= NF; i++) if ($i ~ /^src=/ && ++n == 2) print substr($i, 5) }' | sort -u)"
+	for ip in $ips; do
+		names="${names:+$names|}$(kc -n "$NS" get pod -l app.kubernetes.io/name=aether-registrar \
+			-o jsonpath="{.items[?(@.status.podIP==\"$ip\")].metadata.name}")"
+	done
+	echo "${names:-?}"
+}
+
+# place_source WANT — restart the source agent until its registrar replica is
+# the destination agent's (WANT=same) or the other one (WANT=cross). Each new
+# agent dials the Service afresh, so each restart is a fresh draw.
+place_source() {
+	local want="$1" tries=0 src dst got
+	while true; do
+		src="$(registrar_of "$(agent_pod_on "$NODE")")"
+		dst="$(registrar_of "$(agent_pod_on "$DST_NODE")")"
+		got="?"
+		if [[ "$src" != *"|"* && "$src" != "?" && "$dst" != *"|"* && "$dst" != "?" ]]; then
+			if [ "$src" = "$dst" ]; then got=same; else got=cross; fi
+		fi
+		[ "$got" = "$want" ] && return 0
+		tries=$((tries + 1))
+		[ "$tries" -le 12 ] || die "could not place the source agent on the $want registrar replica (source on $src, destination on $dst)"
+		echo "  placement: source agent on $src, destination agent on $dst ($got); want $want -- restarting the source agent"
+		kc -n "$NS" delete pod "$(agent_pod_on "$NODE")" --wait=false >/dev/null
+		sleep 3
+		kc -n "$NS" rollout status ds/aether-agent --timeout=180s >/dev/null || die "the agent DaemonSet never became Ready"
+		sleep 3
+	done
 }
 
 # --- the destination workload --------------------------------------------------
@@ -234,10 +308,16 @@ start_load() {
 
 # run_once LEG I — delete one quic-a replica under load (after restarting the
 # source agent for leg R) and append one result line to $DRP_OUT/LEG.tsv:
-#   run gap_s victim_reqs_after_mark+1s [agent_outage_s reconnect_lag_s]
+#   S: run gap_s reqs_after_mark+1s non200 placement src_replica dst_replica
+#   R: run gap_s reqs_after_mark+1s non200 agent_outage_s reconnect_lag_s
+#      cds_removals placement src_replica dst_replica
 run_once() {
-	local leg="$1" i="$2" tag victim dst_agent src_agent_old t0 dur=30
+	local leg="$1" i="$2" tag victim dst_agent src_agent_old t0 dur=30 want
 	tag="drp$leg$i$RANDOM"
+	# Leg R restarts the source agent itself, so only leg S is steered.
+	want="$DRP_PLACEMENT"
+	if [ "$want" = alternate ]; then want="$([ $((i % 2)) -eq 1 ] && echo same || echo cross)"; fi
+	if [ "$leg" = S ] && { [ "$want" = same ] || [ "$want" = cross ]; }; then place_source "$want"; fi
 	wait_two_serving
 	victim="$(dst_pods | head -n 1)"
 	dst_agent="$(agent_pod_on "$DST_NODE")"
@@ -253,6 +333,12 @@ run_once() {
 		kc -n "$NS" delete pod "$src_agent_old" --wait=false >/dev/null
 		sleep "$DRP_RESTART_LEAD"
 	fi
+	# The registrar replica each side is on as the mark is written: the
+	# destination agent's (it sends the mark) and the source agent's (the replica
+	# the source proxy's EDS comes from; leg R re-reads it once the new agent is up).
+	local src_rep dst_rep place
+	dst_rep="$(registrar_of "$dst_agent")"
+	if [ "$leg" = S ]; then src_rep="$(registrar_of "$src_agent_old")"; fi
 	kc -n "$TEST_NS" delete pod "$victim" --wait=false >/dev/null
 	wait "$LOAD_PID" || true
 	sleep 2
@@ -277,9 +363,14 @@ print(n)' "$t_mark")"
 
 	local non200
 	non200="$(grep -vc '^200$' "$DRP_OUT/$tag.codes" || true)"
+	if [ "$leg" = R ]; then src_rep="$(registrar_of "$(agent_pod_on "$NODE")")"; fi
+	place="?"
+	if [[ "$src_rep" != *"|"* && "$src_rep" != "?" && "$dst_rep" != *"|"* && "$dst_rep" != "?" ]]; then
+		if [ "$src_rep" = "$dst_rep" ]; then place=same; else place=cross; fi
+	fi
 	if [ "$leg" = S ]; then
-		printf '%s\t%s\t%s\t%s\n' "$i" "$gap" "$after" "$non200" >>"$DRP_OUT/S.tsv"
-		ok "S$i: victim $victim  mark->last request ${gap}s  requests >1 s after the mark: $after  non-200: $non200"
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$gap" "$after" "$non200" "$place" "$src_rep" "$dst_rep" >>"$DRP_OUT/S.tsv"
+		ok "S$i [$place-replica: source agent on $src_rep, destination agent on $dst_rep]: victim $victim  mark->last request ${gap}s  requests >1 s after the mark: $after  non-200: $non200"
 		return
 	fi
 
@@ -312,18 +403,31 @@ print(n)' "$t_mark")"
 		awk -v s="$t_reconnect" '$1 >= s - 0.05 && $1 <= s + 15 { n++ } END { print n + 0 }')"
 	outage="$(awk -v a="$t_serving" -v b="$t0" 'BEGIN { printf "%.3f", a - b - 4 }')"
 	lag="$(awk -v a="$t_reconnect" -v b="$t_serving" 'BEGIN { printf "%.3f", a - b }')"
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$gap" "$after" "$non200" "$outage" "$lag" "$removals" >>"$DRP_OUT/R.tsv"
-	ok "R$i: victim $victim  mark->last request ${gap}s  requests >1 s after the mark: $after  non-200: $non200  agent delete->serving ${outage}s (new agent started $(awk -v a="$t_gone" -v b="$t0" 'BEGIN { printf "%.1f", a - b - 4 }')s)  reconnect lag ${lag}s  CDS removals after reconnect: $removals"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$gap" "$after" "$non200" "$outage" "$lag" "$removals" "$place" "$src_rep" "$dst_rep" >>"$DRP_OUT/R.tsv"
+	ok "R$i [$place-replica: new source agent on $src_rep, destination agent on $dst_rep]: victim $victim  mark->last request ${gap}s  requests >1 s after the mark: $after  non-200: $non200  agent delete->serving ${outage}s (new agent started $(awk -v a="$t_gone" -v b="$t0" 'BEGIN { printf "%.1f", a - b - 4 }')s)  reconnect lag ${lag}s  CDS removals after reconnect: $removals"
 }
 
 summarize_leg() {
-	local leg="$1" col="$2" name="$3"
-	cut -f"$col" "$DRP_OUT/$leg.tsv" | LC_ALL=C sort -g | awk -v n="$name" '
+	local leg="$1" col="$2" name="$3" place="${4:-}" pcol
+	pcol="$([ "$leg" = S ] && echo 5 || echo 8)"
+	awk -F'\t' -v c="$col" -v p="$place" -v pc="$pcol" 'p == "" || $pc == p { print $c }' "$DRP_OUT/$leg.tsv" |
+		LC_ALL=C sort -g | awk -v n="$name${place:+ [$place-replica]}" '
 		{ v[NR] = $1 } END { if (NR) printf "    %s: n=%d min %.3f median %.3f max %.3f\n", n, NR, v[1], v[int((NR + 1) / 2)], v[NR] }'
 }
 
+# summarize_gap LEG — the mark -> last request gap, overall and split by whether
+# the source agent watched the replica the mark was written to (aether#1124).
+summarize_gap() {
+	local leg="$1" place
+	summarize_leg "$leg" 2 "mark -> last request at the victim (s)"
+	for place in same cross "?"; do
+		summarize_leg "$leg" 2 "mark -> last request at the victim (s)" "$place"
+	done
+}
+
 drp_verify() {
-	log "aether#1103 drain propagation (DRP_EXPECT=$DRP_EXPECT, backend $DRP_BACKEND, legs: $DRP_LEGS, $DRP_RUNS runs each; results in $DRP_OUT)"
+	log "aether#1103 drain propagation (DRP_EXPECT=$DRP_EXPECT, backend $DRP_BACKEND, placement $DRP_PLACEMENT, legs: $DRP_LEGS, $DRP_RUNS runs each; results in $DRP_OUT)"
+	echo "  registrar backend running: $(kc -n "$NS" get deploy aether-registrar -o jsonpath='{.spec.template.spec.containers[0].args}' | tr ',' '\n' | grep -o 'registry-backend=[a-z]*' || echo '?')"
 	echo "  proxy ADS retry policy: $(ads_retry_policy)"
 	drp_workload
 	local leg i
@@ -334,14 +438,14 @@ drp_verify() {
 
 	if [[ " $DRP_LEGS " == *" S "* ]]; then
 		log "S steady state"
-		summarize_leg S 2 "mark -> last request at the victim (s)"
+		summarize_gap S
 		awk -F'\t' -v b="$DRP_STEADY_BOUND" '$2 > b { bad = 1 } END { exit bad }' "$DRP_OUT/S.tsv" ||
 			die "S: a source selected the drained endpoint more than ${DRP_STEADY_BOUND}s after its drain mark"
 		ok "S: every gap <= ${DRP_STEADY_BOUND}s"
 	fi
 	if [[ " $DRP_LEGS " == *" R "* ]]; then
 		log "R source agent restarting"
-		summarize_leg R 2 "mark -> last request at the victim (s)"
+		summarize_gap R
 		summarize_leg R 5 "source agent delete -> serving xDS (s)"
 		summarize_leg R 6 "source agent serving -> proxy reconnected (s)"
 		summarize_leg R 7 "CDS responses removing a held cluster after the reconnect"
@@ -452,11 +556,22 @@ swap_agent() {
 	ok "agent DaemonSet on $ref"
 }
 
+# swap_registrar TAG — roll the registrar Deployment onto <registry>/registrar:TAG
+# (loaded into the cluster first): the red -> green step of aether#1124.
+swap_registrar() {
+	local ref="${IMAGE_REGISTRY}/registrar:$1"
+	kind load docker-image "$ref" --name "$CLUSTER" >/dev/null || die "could not load $ref"
+	kc -n "$NS" set image deploy/aether-registrar "registrar=$ref" >/dev/null
+	kc -n "$NS" rollout status deploy/aether-registrar --timeout=300s >/dev/null || die "the registrar never rolled onto $ref"
+	ok "registrar Deployment on $ref"
+}
+
 case "${1:-}" in
 up) drp_up ;;
 verify) drp_verify ;;
 bootstrap) drp_bootstrap "${2:?usage: $0 bootstrap main|fix}" ;;
 swap-agent) swap_agent "${2:?usage: $0 swap-agent <tag>}" ;;
+swap-registrar) swap_registrar "${2:?usage: $0 swap-registrar <tag>}" ;;
 down) drp_down ;;
-*) die "usage: $0 {up|verify|bootstrap main|fix|swap-agent <tag>|down}" ;;
+*) die "usage: $0 {up|verify|bootstrap main|fix|swap-agent <tag>|swap-registrar <tag>|down}" ;;
 esac

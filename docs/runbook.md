@@ -2237,6 +2237,25 @@ snapshot cost (#1105). Envoy excludes an EDS `DRAINING` host from new selections
 `excludeBasedOnHealthFlag` puts it in the excluded set) and panic routing is off
 (`healthy_panic_threshold: 0`), so nothing selects it once the update is applied.
 
+**On the kubernetes registry backend (the chart default) the mark itself never leaves
+the replica that received it (#1124).** That backend derives endpoints from Pods and
+ignores writes, so the agent's DRAINING mark lives only in the receiving replica's
+snapshot. Before #1124 the other replica listed the pod HEALTHY for its whole preStop
+(the kubelet keeps a terminating pod Ready until its containers stop) and only polled
+every 5 s, so every source agent attached to it kept sending new requests into the
+dying pod. On kind with a 15 s preStop: 0.22–0.26 s mark → last request when the source
+and destination agents were on the same replica, **14.9 s** (the full preStop) when
+they were not. Since #1124 the backend lists a pod whose deletion was requested as
+DRAINING while it is still Ready (UNHEALTHY once it is not), and the registrar syncs
+from a managed-pod informer instead of only the poll, so every replica hears the drain
+from the pod's `deletionTimestamp` within the 200 ms debounce. The registrar logs
+`kubernetes registry initialized ... podWatch=true` and `registry supports change
+notifications`. What still differs cross-replica: the agent's phase-2 UNHEALTHY
+(pool close ~1 s before SIGTERM) reaches only the receiving replica; the others see
+UNHEALTHY when the pod's Ready condition drops. Find which replica an agent is on with
+`conntrack -L -p tcp --orig-src <agent IP> --orig-dst <registrar Service IP>` on its node
+(`e2e/drain-propagation.sh` does this per run).
+
 What was slow is a source proxy that **had no ADS stream**: its own node agent was
 restarting. While the stream is down the proxy routes on its last config, so it cannot
 hear a drain mark however fast the registrar is. All five 2026-10-01 TRIPLE failures

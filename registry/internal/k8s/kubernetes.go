@@ -8,10 +8,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	toolscache "k8s.io/client-go/tools/cache"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
@@ -26,6 +29,18 @@ import (
 type Config struct {
 	// ClusterName is the name of the cluster, used to populate ServiceEndpoint.ClusterName.
 	ClusterName string
+	// Informers, when set, is where the backend gets a shared Pod informer to
+	// push change notifications from (registry.ChangeNotifier): the
+	// controller-runtime manager's cache in the registrar. Nil leaves the
+	// backend poll-only.
+	Informers PodInformerSource
+}
+
+// PodInformerSource yields a shared Pod informer. The controller-runtime cache
+// (ctrlcache.Informers) satisfies it; the narrow interface is what lets tests
+// drive the handler with a fake informer.
+type PodInformerSource interface {
+	GetInformer(ctx context.Context, obj client.Object, opts ...ctrlcache.InformerGetOption) (ctrlcache.Informer, error)
 }
 
 // nodeLocalityCacheTTL bounds how long cached node localities are served without
@@ -38,10 +53,21 @@ const nodeLocalityCacheTTL = 5 * time.Minute
 // KubernetesRegistry is a Registry implementation backed by the Kubernetes API server.
 // It reads pods labeled with aether.io/managed=true and converts them to ServiceEndpoints.
 // Write operations (Register/Unregister) are no-ops since the API server is the source of truth.
+//
+// Drain state lives on the Pod too (aether#1124): a pod whose deletion was
+// requested lists as DRAINING (see podHealth). Because writes are no-ops, the
+// DRAINING mark an agent sends lands only in the snapshot of the registrar
+// replica that received it; every OTHER replica learns the drain from the same
+// deletionTimestamp the agent reacted to and, with Informers set, at watch
+// speed rather than at its next poll.
 type KubernetesRegistry struct {
 	log         *slog.Logger
 	clusterName string
 	reader      client.Reader
+
+	// informers feeds notify (registry.ChangeNotifier); nil = poll-only.
+	informers PodInformerSource
+	notify    chan struct{}
 
 	// Node-locality cache (issue #541): List/ListAll run on every registry
 	// reload — dozens of times per minute during churn — and used to resolve
@@ -59,20 +85,87 @@ type KubernetesRegistry struct {
 // The reader should be a direct API reader (e.g., manager.GetAPIReader()) to avoid
 // cache synchronization issues during startup.
 func NewKubernetesRegistry(log *slog.Logger, reader client.Reader, cfg Config) *KubernetesRegistry {
-	return &KubernetesRegistry{
+	r := &KubernetesRegistry{
 		log:          commonlog.Named(log, "registry-kubernetes"),
 		clusterName:  cfg.ClusterName,
 		reader:       reader,
+		informers:    cfg.Informers,
 		nodeCacheTTL: nodeLocalityCacheTTL,
 		now:          time.Now,
 	}
+	if cfg.Informers != nil {
+		r.notify = make(chan struct{}, 1)
+	}
+	return r
 }
 
-// Initialize is a no-op for the Kubernetes registry.
-// The API server connection is managed by the controller-runtime manager.
-func (r *KubernetesRegistry) Initialize(_ context.Context) error {
-	r.log.Info("kubernetes registry initialized", "cluster", r.clusterName)
+// Initialize registers the Pod change handler when an informer source is
+// configured. The API server connection is managed by the controller-runtime
+// manager; the informer starts with the manager's cache, so this does not
+// block on its sync.
+func (r *KubernetesRegistry) Initialize(ctx context.Context) error {
+	if r.informers != nil {
+		informer, err := r.informers.GetInformer(ctx, &corev1.Pod{}, ctrlcache.BlockUntilSynced(false))
+		if err != nil {
+			return fmt.Errorf("failed to get pod informer: %w", err)
+		}
+		if _, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
+			AddFunc:    r.onPodAddOrDelete,
+			UpdateFunc: r.onPodUpdate,
+			DeleteFunc: r.onPodAddOrDelete,
+		}); err != nil {
+			return fmt.Errorf("failed to add pod event handler: %w", err)
+		}
+	}
+	r.log.Info("kubernetes registry initialized", "cluster", r.clusterName, "podWatch", r.informers != nil)
 	return nil
+}
+
+func (r *KubernetesRegistry) onPodAddOrDelete(obj any) {
+	if tombstone, ok := obj.(toolscache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
+	if pod, ok := obj.(*corev1.Pod); ok && isManaged(pod) {
+		r.signal()
+	}
+}
+
+func (r *KubernetesRegistry) onPodUpdate(oldObj, newObj any) {
+	oldPod, okOld := oldObj.(*corev1.Pod)
+	newPod, okNew := newObj.(*corev1.Pod)
+	if okOld && okNew && (isManaged(oldPod) || isManaged(newPod)) && endpointInputsChanged(oldPod, newPod) {
+		r.signal()
+	}
+}
+
+// Changes implements registry.ChangeNotifier: a coalesced signal whenever a
+// managed pod changes in a way that can change its endpoint. Nil (never fires)
+// when the backend was built without an informer source.
+func (r *KubernetesRegistry) Changes() <-chan struct{} { return r.notify }
+
+func (r *KubernetesRegistry) signal() {
+	select {
+	case r.notify <- struct{}{}:
+	default:
+	}
+}
+
+func isManaged(pod *corev1.Pod) bool {
+	return pod.Labels[aetherlabels.LabelAetherManaged] == "true"
+}
+
+// endpointInputsChanged reports whether an update touched anything the
+// listing or podToEndpoint reads, so status-only churn (restart counts, probe
+// timestamps) does not trigger a full re-list.
+func endpointInputsChanged(oldPod, newPod *corev1.Pod) bool {
+	return isManaged(oldPod) != isManaged(newPod) ||
+		(oldPod.DeletionTimestamp == nil) != (newPod.DeletionTimestamp == nil) ||
+		oldPod.Status.Phase != newPod.Status.Phase ||
+		oldPod.Status.PodIP != newPod.Status.PodIP ||
+		podReady(oldPod) != podReady(newPod) ||
+		oldPod.Spec.NodeName != newPod.Spec.NodeName ||
+		oldPod.Spec.ServiceAccountName != newPod.Spec.ServiceAccountName ||
+		!maps.Equal(oldPod.Annotations, newPod.Annotations)
 }
 
 // Close is a no-op for the Kubernetes registry.
@@ -415,16 +508,47 @@ func (r *KubernetesRegistry) podToEndpoint(pod *corev1.Pod, nodeLocalities map[s
 
 // podHealth maps a pod's readiness condition to the endpoint health: ready pods
 // are healthy, otherwise unhealthy.
+//
+// A pod whose deletion has been requested is DRAINING while it is still Ready
+// (aether#1124). That is the signal, at the same moment, that the node agent's
+// termination watch turns into its DRAINING mark. The agent's mark reaches only
+// the registrar replica it is connected to, because this backend ignores
+// writes. Without this, a peer replica kept listing the pod HEALTHY through the
+// whole preStop window (the kubelet keeps a terminating pod Ready until its
+// containers stop), and every source agent watching that replica kept sending
+// new requests into it. Once a terminating pod is no longer Ready it is
+// UNHEALTHY, like the agent's own phase 2.
 func podHealth(pod *corev1.Pod) registryv1.ServiceEndpoint_Health {
+	ready, known := podReadyCondition(pod)
+	if pod.DeletionTimestamp != nil {
+		if ready {
+			return registryv1.ServiceEndpoint_HEALTH_DRAINING
+		}
+		return registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+	}
+	switch {
+	case !known:
+		return registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED
+	case ready:
+		return registryv1.ServiceEndpoint_HEALTH_HEALTHY
+	default:
+		return registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+	}
+}
+
+// podReadyCondition returns the pod's Ready condition and whether it has one.
+func podReadyCondition(pod *corev1.Pod) (ready, known bool) {
 	for _, c := range pod.Status.Conditions {
 		if c.Type == corev1.PodReady {
-			if c.Status == corev1.ConditionTrue {
-				return registryv1.ServiceEndpoint_HEALTH_HEALTHY
-			}
-			return registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+			return c.Status == corev1.ConditionTrue, true
 		}
 	}
-	return registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED
+	return false, false
+}
+
+func podReady(pod *corev1.Pod) bool {
+	ready, _ := podReadyCondition(pod)
+	return ready
 }
 
 // healthCheckModeFromAnnotations maps the endpoint.aether.io/health-check-mode

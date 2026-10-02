@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	configapisv1 "aethermesh.dev/common/apis/config/v1"
+	aetherlabels "aethermesh.dev/common/constants/labels"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/common/manager"
 	"aethermesh.dev/common/must"
@@ -22,9 +23,13 @@ import (
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	ctrlmanager "sigs.k8s.io/controller-runtime/pkg/manager"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -180,11 +185,34 @@ func bootstrapManager(ctx context.Context) (ctrl.Manager, func(context.Context) 
 	if err != nil {
 		return nil, nil, err
 	}
-	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version, l, bootstrapOpts...)
+	mgrCfg := cfg.Config
+	if cfg.RegistryBackend == backendKubernetes {
+		mgrCfg.CacheOptions = managedPodCacheOptions()
+	}
+	result, err := manager.Bootstrap(ctx, mgrCfg, name, Version, l, bootstrapOpts...)
 	if err != nil {
 		return nil, nil, err
 	}
 	return result.Manager, result.Shutdown, nil
+}
+
+// backendKubernetes is the --registry-backend value whose endpoints are derived
+// from Pods.
+const backendKubernetes = "kubernetes"
+
+// managedPodCacheOptions scopes the manager cache's Pod informer, which the
+// kubernetes backend watches for change notifications (aether#1124), to the
+// mesh-managed pods it lists, with managedFields stripped: the registrar runs
+// on a 64Mi limit, and nothing else in it reads Pods from the cache.
+func managedPodCacheOptions() *cache.Options {
+	return &cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Pod{}: {
+				Label:     labels.SelectorFromSet(labels.Set{aetherlabels.LabelAetherManaged: "true"}),
+				Transform: cache.TransformStripManagedFields(),
+			},
+		},
+	}
 }
 
 // buildMCSScheme builds the bootstrap options for the manager when MCS is enabled.
@@ -447,12 +475,19 @@ func wireGRPCServer(ctx context.Context, m ctrl.Manager, reg registry.Registry, 
 func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, error) {
 	// Backend selection lives in the registry/backend factory; this is the only
 	// consumer that links every backend.
-	reg, err := backend.New(ctx, l, cfg.RegistryBackend, backend.Config{
+	bcfg := backend.Config{
 		ClusterName:   cfg.ClusterName,
 		Reader:        m.GetAPIReader(),
 		EtcdEndpoints: cfg.EtcdEndpoints,
 		Region:        cfg.Region,
-	})
+	}
+	if cfg.RegistryBackend == backendKubernetes {
+		// Push, not poll (aether#1124): the backend signals the syncer from the
+		// manager cache's (managed-)Pod informer, so every replica re-lists
+		// within the syncer's debounce of a pod changing, not at its next poll.
+		bcfg.Informers = m.GetCache()
+	}
+	reg, err := backend.New(ctx, l, cfg.RegistryBackend, bcfg)
 	if err != nil {
 		return nil, err
 	}
