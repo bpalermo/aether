@@ -2001,6 +2001,103 @@ sum by (node, aether_supervisor_stall_class) (increase(aether_supervisor_envoy_t
 service.name:aether-proxy "envoy thread stall"
 ```
 
+How to tell which class you have, and where to go from there:
+
+| what the lines show | what it is | where to look |
+|---|---|---|
+| `[starved]` with a large `runq=`, `nodeBusyPct` in the high 90s and a high `nodePSICPUSomeMs` | The node is out of CPU. Every runnable thread waits, Envoy's included. | "Sizing nodes for a proxy hot restart" below. |
+| `[blocked]` with a `wchan=` | A kernel path: a lock, a full socket, I/O. | The function `wchan=` names. |
+| `[busy]` | One callback keeps an event loop on its CPU. | The profiler (Pyroscope) for that Envoy, over the same seconds. |
+
+### Sizing nodes for a proxy hot restart
+
+The measurements in this section come from talos-main (5 workers, 4 cores each, arm64)
+on 2026-10-01 and 2026-10-02. They are readings from that cluster under the soak load,
+not constants. Take the method, then measure your own nodes.
+
+**What a handoff costs.** For the length of a hot restart two Envoy processes run on
+the node: the successor's init (about 3–15 s, gated on xDS) plus
+`proxy.hotRestart.parentShutdownTime` (15 s by default), during which the parent drains.
+On talos-main a handoff cost about 10–13 CPU-seconds of Envoy CPU on top of steady
+state, and up to about 1.9 cores in the 5 s after the successor started its workers,
+on a proxy that used 0.8–0.9 core in steady state. Rule of thumb: **keep about one core
+of headroom on each node for the roughly 20 s of a handoff.**
+
+**What happens without it.** On the nodes that ran 81–85% busy in steady state, handoffs
+pushed them to 99–100%. The stall lines classed every Envoy thread `starved` (0
+`blocked`), parent and child alike. The prober's 2 s liveness probe timed out only in
+the most starved handoffs. Of the 30 handoffs in one 8 h soak, the two with the most
+starvation failed 4 probes of 719,979. Starvation there was 54.8k and 85.9k ms of `runq`,
+summed over all threads in the bracket [parent drain − 5 s, parent exit + 5 s]. No
+handoff at or below 41.8k ms failed one. Client traffic was not affected (k6: 0 failures
+in 9,179,946 requests) because the failed attempts were retried. This is a threshold
+effect of CPU oversubscription, not a functional bug: below the threshold a handoff costs
+latency, above it a probe misses its budget.
+
+**How to see it.** Count the stall windows per node and class over the roll, then read
+the lines for the node that stands out (the fields are explained in the section above):
+
+```promql
+sum by (node, aether_supervisor_stall_class) (increase(aether_supervisor_envoy_thread_stalls_total[30m]))
+```
+
+```logsql
+service.name:aether-proxy "envoy thread stall" | stats by (k8s.node.name) count() stalls
+```
+
+```logsql
+service.name:aether-proxy "envoy thread stall" threads:starved k8s.node.name:<node>
+```
+
+A node whose steady-state count is several times its peers' is the one a handoff will
+tip over. A starved line whose `nodeBusyPct` is near 100 and whose `nodePSICPUSomeMs`
+is in the hundreds is this section. Rank the nodes by CPU requests and name what holds
+them with the commands in §7 "Pre-flight: node headroom before a roll (#812)".
+
+**What to size.**
+
+- **Workload CPU requests.** The scheduler places pods by request, not by use. Pods with
+  token requests (the talos test services request `10m`) are packed onto whichever node
+  shows room, and on talos-main one node ended up with about 4× the steady-state
+  starvation of its peers. Give workloads requests that reflect what they actually use,
+  so the scheduler spreads them.
+- **`proxy.resources.requests.cpu`** (chart default `500m`). Raising it to `800m` on
+  talos-main cut steady-state starvation on the two hot nodes by 26–35%. It buys
+  cgroup weight (the proxy wins more of a contended CPU), not capacity: the stall during
+  a handoff was unchanged within noise. The proxy has no CPU limit on purpose, and
+  should not get one. Remember that during a DaemonSet roll the surge pod's request and
+  the departing pod's are both on the node, so the node needs room for two proxy
+  requests at once.
+- **Co-tenants.** Latency-insensitive pods on a hot node (profilers, collectors, batch
+  jobs) use exactly the headroom a handoff needs. Move them to a quieter node, or keep
+  them off the nodes that carry the mesh's busiest services.
+- **`proxy.hotRestart.drainTime`** (default `10s`). Do not stretch it to spread the cost.
+  At `30s` on talos-main the peak was no lower, there were more starved seconds, Envoy
+  spent about 40% more CPU per handoff, and rolls took 70% longer. Keep the default.
+- **`proxy.concurrency`** (default `0`, one worker per core). In an A/B, 2 workers
+  instead of 4 cut handoff starvation per thread by about 27% and steady-state
+  starvation by 57–81%. **Do not change it on a live mesh** until
+  [#1126](https://github.com/bpalermo/aether/issues/1126) and
+  [#1127](https://github.com/bpalermo/aether/issues/1127) are fixed. On talos-main a
+  4→2 change crashed successors (`Mismatched worker index` in
+  `HotRestartingChild::onForwardedUdpPacket`, #1126), and the old pods' self-drain
+  drained the new pods' Envoys (#1127). Together they left two nodes not accepting
+  new pods' connections for about 12 minutes.
+- **The node agent.** It has no CPU limit since #1119 (`agent.resources.requests.cpu`
+  `200m`, `GOMAXPROCS=2`), because a CFS quota parked snapshot builds while they held
+  the snapshot-cache mutex. Do not add one back to save headroom.
+
+**Timeouts under starvation (#1128).** The destination's connect timeout to its local
+app is 1 s (`meshconst.AppConnectTimeout`, #1122), so the `503 UF` for a pod in
+teardown leaves the node while the pod's veth still exists and the source can retry it
+elsewhere. A live app answers a loopback connect in microseconds, but on a starved node
+the same 1 s timeout fires for live pods too: the two starved handoffs above produced
+111 destination `503 UF` with `connection_timeout`. The source retried each one, at a
+cost of at least 1 s of latency. That is the intended trade, not a fault, and the fix
+is CPU headroom, not a longer timeout. Note also that 1 s is the kernel's initial SYN
+retransmit timeout, so a single dropped SYN cannot be recovered inside it (tracked on
+#1093).
+
 ### Source h3 requests die on a stateless reset at a destination's roll (#1054)
 
 Symptom, per roll of a node's proxy: **source** proxies on other nodes log a few
