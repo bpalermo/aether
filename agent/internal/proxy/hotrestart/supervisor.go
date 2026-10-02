@@ -163,6 +163,12 @@ type Config struct {
 	// stay on a CPU within a one-second window before the sampler reports it
 	// (0 = DefaultStallThreshold, Envoy's worker watchdog miss threshold).
 	StallThreshold time.Duration
+	// PodName is this proxy pod's name (optional). It is folded into the
+	// per-supervisor admin identity (see adminidentity.go) only so a log line
+	// about a FOREIGN Envoy answering the node-shared admin address can name
+	// the pod it belongs to; the identity's uniqueness comes from a random
+	// nonce, not from this.
+	PodName string
 }
 
 // childExit reports the termination of a supervised Envoy epoch.
@@ -181,6 +187,12 @@ type Supervisor struct {
 	// difference between them is a correctness invariant, see newAdminClients.
 	adminAuthoritative *http.Client
 	adminFast          *http.Client
+	// adminIdentity is the --admin-address-path every Envoy this supervisor
+	// forks is started with: a per-supervisor nonce that /server_info echoes
+	// back, so a state-changing admin request is sent only to OUR Envoy and
+	// never to another proxy pod's on the node-shared admin address (issue
+	// #1127, adminidentity.go). Immutable after New.
+	adminIdentity string
 
 	mu        sync.Mutex
 	children  map[int]*exec.Cmd // keyed by restart epoch
@@ -344,6 +356,7 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 		metrics:            metrics,
 		adminAuthoritative: authoritative,
 		adminFast:          fast,
+		adminIdentity:      newAdminIdentity(cfg),
 		children:           make(map[int]*exec.Cmd),
 		gatedEpoch:         -1,
 		adminHeard:         make(map[int]time.Time),
@@ -367,6 +380,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	defer s.adminFast.CloseIdleConnections()
 
 	s.logAdminReverifyBudget(ctx)
+	s.removeStaleAdminIdentities()
+	s.log.InfoContext(ctx, "envoy admin identity for state-changing admin requests",
+		"adminIdentity", s.adminIdentity, "adminAddress", s.cfg.AdminAddress)
 
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGUSR1)
@@ -972,6 +988,11 @@ func (s *Supervisor) buildEnvoyCmd(epoch int) *exec.Cmd {
 		"--restart-epoch", strconv.Itoa(epoch),
 		"--drain-time-s", strconv.Itoa(int(s.cfg.DrainTime.Seconds())),
 		"--parent-shutdown-time-s", strconv.Itoa(int(s.cfg.ParentShutdownTime.Seconds())),
+		// Not for the file Envoy writes: the path is this supervisor's nonce,
+		// echoed by /server_info as command_line_options.admin_address_path,
+		// which is how ownAdminRequest tells our Envoy from another pod's on
+		// the shared admin address (issue #1127).
+		"--admin-address-path", s.adminIdentity,
 	}
 	args = append(args, s.cfg.ExtraArgs...)
 

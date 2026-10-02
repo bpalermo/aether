@@ -123,3 +123,13 @@ func findRepoFile(t *testing.T, rel string) string {
 		"needs data = [\"//charts/aether:templates/agent-proxy-daemonset.yaml\"]", rel)
 	return ""
 }
+
+// TestEnvoyArgRejectsTheReservedAdminAddressPath: the supervisor sets Envoy's
+// --admin-address-path itself — it carries the admin identity that keeps a
+// drain off another pod's Envoy (#1127) — and Envoy refuses the flag twice, so
+// an operator-supplied one must fail fast rather than fail every fork.
+func TestEnvoyArgRejectsTheReservedAdminAddressPath(t *testing.T) {
+	require.NoError(t, checkEnvoyArgs([]string{"-l", "info", "--service-node", "n1", "--admin-address-pathology"}))
+	assert.Error(t, checkEnvoyArgs([]string{"--admin-address-path", "/tmp/x"}))
+	assert.Error(t, checkEnvoyArgs([]string{"--admin-address-path=/tmp/x"}))
+}

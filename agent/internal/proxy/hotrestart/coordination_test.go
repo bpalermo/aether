@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -62,6 +63,53 @@ type fakeAdminServer struct {
 	// close (issue #795).
 	drainHits  atomic.Int64
 	drainQuery atomic.Value // string
+	// identity is the command_line_options.admin_address_path /server_info
+	// reports: a supervisor's own value makes this "its" Envoy, anything else
+	// another pod's on the node-shared admin address (issue #1127).
+	identity atomic.Value // string
+	// closeAfterServerInfo makes /server_info answer "Connection: close", as an
+	// admin going away between the identity check and the request would.
+	closeAfterServerInfo atomic.Bool
+	// connRequests records, per accepted connection, the requests served on
+	// it, keyed by remote address; the identity tests use it to prove the drain
+	// rode the very connection that was identity-checked.
+	connRequests sync.Map // remote addr -> *requestLog
+}
+
+// recordRequest appends r to the log of the connection it arrived on.
+func (f *fakeAdminServer) recordRequest(r *http.Request) {
+	v, _ := f.connRequests.LoadOrStore(r.RemoteAddr, &requestLog{})
+	v.(*requestLog).add(r.URL.Path)
+}
+
+type requestLog struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (l *requestLog) add(p string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.paths = append(l.paths, p)
+}
+
+// connectionsServing returns, for every connection that carried a request for
+// path, the full ordered list of paths it carried.
+func (f *fakeAdminServer) connectionsServing(path string) [][]string {
+	var out [][]string
+	f.connRequests.Range(func(_, v any) bool {
+		l := v.(*requestLog)
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		for _, p := range l.paths {
+			if p == path {
+				out = append(out, append([]string(nil), l.paths...))
+				break
+			}
+		}
+		return true
+	})
+	return out
 }
 
 func newFakeAdmin(t *testing.T, state string, epoch int) *fakeAdminServer {
@@ -75,8 +123,13 @@ func newFakeAdmin(t *testing.T, state string, epoch int) *fakeAdminServer {
 		if f.wedged(r) {
 			return
 		}
-		fmt.Fprintf(w, `{"state":%q,"command_line_options":{"restart_epoch":%d}}`,
-			f.state.Load().(string), f.epoch.Load())
+		f.recordRequest(r)
+		if f.closeAfterServerInfo.Load() {
+			w.Header().Set("Connection", "close")
+		}
+		identity, _ := f.identity.Load().(string)
+		fmt.Fprintf(w, `{"state":%q,"command_line_options":{"restart_epoch":%d,"admin_address_path":%q}}`,
+			f.state.Load().(string), f.epoch.Load(), identity)
 	})
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
 		f.readyHits.Add(1)
@@ -92,6 +145,7 @@ func newFakeAdmin(t *testing.T, state string, epoch int) *fakeAdminServer {
 
 	mux.HandleFunc("/drain_listeners", func(w http.ResponseWriter, r *http.Request) {
 		f.drainHits.Add(1)
+		f.recordRequest(r)
 		f.drainQuery.Store(r.URL.RawQuery)
 		if f.wedged(r) {
 			return
