@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//agent/internal/cniconflist",
         "//common/constants/labels",
+        "//common/ctrlqueue",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/types",
         "@io_k8s_client_go//util/retry",

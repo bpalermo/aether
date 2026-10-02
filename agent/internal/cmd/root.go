@@ -40,6 +40,7 @@ import (
 	"aethermesh.dev/agent/internal/l4route"
 	"aethermesh.dev/agent/internal/meshdns"
 	"aethermesh.dev/agent/internal/node"
+	"aethermesh.dev/agent/internal/schedmetrics"
 	"aethermesh.dev/agent/internal/spire"
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache"
@@ -53,10 +54,12 @@ import (
 	"aethermesh.dev/common/config"
 	"aethermesh.dev/common/manager"
 	"aethermesh.dev/common/must"
+	"aethermesh.dev/common/procsched"
 	commonspire "aethermesh.dev/common/spire"
 	"aethermesh.dev/registry"
 	"aethermesh.dev/registry/registrarclient"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
@@ -242,6 +245,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 	defer deferTelemetryShutdown(ctx, result.Shutdown)
+	registerSchedMetrics(ctx)
 
 	m := result.Manager
 
@@ -994,6 +998,15 @@ func deferLogShutdown(ctx context.Context) {
 	}
 	if err := logShutdown(ctx); err != nil {
 		l.ErrorContext(ctx, "failed to flush OTel logs", "error", err)
+	}
+}
+
+// registerSchedMetrics exports the agent's own kernel scheduler counters
+// (aether.agent.sched.*, issue #1131) on the global MeterProvider — a no-op one
+// when OTel is disabled. Best-effort: a failure is a WARN, never a startup error.
+func registerSchedMetrics(ctx context.Context) {
+	if _, err := schedmetrics.Register(otel.Meter(schedmetrics.MeterName), procsched.Reader{}); err != nil {
+		l.WarnContext(ctx, "failed to register scheduler metrics; continuing without them", "error", err)
 	}
 }
 

@@ -20,6 +20,7 @@ go_library(
         "//agent/internal/xds/proxy",
         "//api/aether/config/v1:config",
         "//common/apis/config/v1:config",
+        "//common/ctrlqueue",
         "//common/l4project",
         "//common/log",
         "//common/referencegrant",
@@ -48,6 +49,7 @@ go_test(
     srcs = [
         "edge_cases_test.go",
         "edgeconfig_resolve_test.go",
+        "options_test.go",
         "reconciler_test.go",
         "service_test.go",
         "status_test.go",

@@ -12,6 +12,7 @@ go_library(
         "//api/aether/registry/v1:registry",
         "//common/apis/config/v1:config",
         "//common/crdcheck",
+        "//common/ctrlqueue",
         "//common/gammaproject",
         "//common/log",
         "//common/referencegrant",

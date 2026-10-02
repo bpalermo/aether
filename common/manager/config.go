@@ -37,4 +37,8 @@ type Config struct {
 	// TracerProvider still gives logs their trace_id but exports no spans (no
 	// trace backend needed)
 	TracingExport bool
+	// SchedulerLatency exports the Go runtime's scheduler-latency histogram
+	// (go.schedule.duration) when OTel metrics are enabled. Not a flag: the node
+	// agent sets it (issue #1131), the other components leave it off.
+	SchedulerLatency bool
 }

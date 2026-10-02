@@ -28,9 +28,11 @@ type shutdownNoiseHandler struct {
 	slog.Handler
 }
 
-// controllerRuntimeHandler wraps the handler controller-runtime logs through.
+// controllerRuntimeHandler wraps the handler controller-runtime logs through:
+// its verbosity is capped at ControllerRuntimeMaxVerbosity (issue #1131) and the
+// one expected shutdown error is demoted.
 func controllerRuntimeHandler(h slog.Handler) slog.Handler {
-	return shutdownNoiseHandler{Handler: h}
+	return capVerbosity(shutdownNoiseHandler{Handler: h}, ControllerRuntimeMaxVerbosity)
 }
 
 func (h shutdownNoiseHandler) Handle(ctx context.Context, r slog.Record) error {
