@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"aethermesh.dev/agent/internal/proxy/hotrestart"
@@ -91,6 +92,17 @@ func (c *config) run(cmd *cobra.Command, _ []string) error {
 
 	l := log.Named(log.NewLogger(c.debug), cmd.Name())
 
+	// The supervisor owns Envoy's --admin-address-path: it carries the
+	// per-supervisor identity that keeps a state-changing admin request off
+	// another proxy pod's Envoy on the node-shared admin address (#1127).
+	// Envoy rejects the flag twice, so a duplicate would fail every fork.
+	if err := checkEnvoyArgs(c.supervisor.ExtraArgs); err != nil {
+		return err
+	}
+	// POD_NAME is the downward-API env the chart already sets on the proxy
+	// container; it only labels the identity for logs.
+	c.supervisor.PodName = os.Getenv("POD_NAME")
+
 	// Metrics are the supervisor's crash forensics: the wedge watchdog exits
 	// the process non-zero, so the deferred Shutdown flush is what gets the
 	// wedge counter out before the pod is recreated. Push-only via the OTel
@@ -117,6 +129,20 @@ func (c *config) run(cmd *cobra.Command, _ []string) error {
 	}
 
 	return hotrestart.New(c.supervisor, l, metrics).Run(cmd.Context())
+}
+
+// reservedEnvoyArg is the Envoy flag the supervisor sets itself on every fork
+// (see hotrestart's adminidentity.go).
+const reservedEnvoyArg = "--admin-address-path"
+
+// checkEnvoyArgs refuses an --envoy-arg the supervisor reserves.
+func checkEnvoyArgs(args []string) error {
+	for _, a := range args {
+		if a == reservedEnvoyArg || strings.HasPrefix(a, reservedEnvoyArg+"=") {
+			return fmt.Errorf("--envoy-arg %s is reserved: the supervisor sets it to its own admin identity (#1127)", a)
+		}
+	}
+	return nil
 }
 
 // runInstall stages the initContainer's binaries onto the shared volume.

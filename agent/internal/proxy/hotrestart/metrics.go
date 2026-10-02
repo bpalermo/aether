@@ -55,6 +55,21 @@ var shutdownBranchValues = []string{
 	shutdownBranchChildDead,
 }
 
+// Admin-mutation attribute keys (issue #1127): which state-changing admin
+// request the supervisor meant to send, and whose Envoy the identity check found
+// on the shared admin address. Both from small fixed sets.
+const (
+	attrAdminRequest = attribute.Key("aether.supervisor.admin.request")
+	attrAdminOwner   = attribute.Key("aether.supervisor.admin.owner")
+)
+
+// adminRequestDrainListeners is the only state-changing admin request the
+// supervisor makes.
+const adminRequestDrainListeners = "drain_listeners"
+
+// adminOwnerValues is the closed set, used to seed the counter at zero.
+var adminOwnerValues = []adminOwnership{adminOwn, adminForeign, adminUnreachable, adminOwnGone}
+
 // attrStallClass labels an Envoy thread stall (stallsampler.go, issue #1093).
 // Three values, fixed: starved, blocked, busy.
 const attrStallClass = attribute.Key("aether.supervisor.stall.class")
@@ -107,6 +122,7 @@ type SupervisorMetrics struct {
 	shutdownBranches    metric.Int64Counter
 	childSilent         metric.Int64Counter
 	envoyThreadStalls   metric.Int64Counter
+	adminMutations      metric.Int64Counter
 }
 
 // NewSupervisorMetrics registers the supervisor instruments on the given meter.
@@ -189,7 +205,8 @@ func NewSupervisorMetrics(meter metric.Meter) (*SupervisorMetrics, error) {
 		m.shutdownBranches.Add(context.Background(), 0, metric.WithAttributes(attrShutdownBranch.String(branch)))
 	}
 
-	return m, nil
+	// Registered in a helper so this constructor stays under the gocognit bar.
+	return m.withAdminMutations(meter)
 }
 
 func (m *SupervisorMetrics) epochStarted(epoch int) {
@@ -286,6 +303,32 @@ func (m *SupervisorMetrics) envoyThreadStalled(class string) {
 		return
 	}
 	m.envoyThreadStalls.Add(context.Background(), 1, metric.WithAttributes(attrStallClass.String(class)))
+}
+
+// withAdminMutations registers the admin-mutation counter, seeded at zero for
+// every owner verdict: the gate is "foreign stays 0 per roll", and an unseeded
+// counter cannot tell 0 from "never exported" (#717).
+func (m *SupervisorMetrics) withAdminMutations(meter metric.Meter) (*SupervisorMetrics, error) {
+	var err error
+	if m.adminMutations, err = meter.Int64Counter("aether.supervisor.admin_mutations",
+		metric.WithDescription("State-changing Envoy admin requests the supervisor decided on, by request and by whose Envoy the identity check found on the node-shared admin address. Only owner=own is sent; foreign means another pod's Envoy answered and was left alone (#1127)")); err != nil {
+		return nil, fmt.Errorf("admin mutations: %w", err)
+	}
+	for _, owner := range adminOwnerValues {
+		m.adminMutations.Add(context.Background(), 0, metric.WithAttributes(
+			attrAdminRequest.String(adminRequestDrainListeners), attrAdminOwner.String(string(owner))))
+	}
+	return m, nil
+}
+
+// adminMutation counts one state-changing admin request decision (see
+// ownAdminRequest).
+func (m *SupervisorMetrics) adminMutation(request string, owner adminOwnership) {
+	if m == nil {
+		return
+	}
+	m.adminMutations.Add(context.Background(), 1, metric.WithAttributes(
+		attrAdminRequest.String(request), attrAdminOwner.String(string(owner))))
 }
 
 func (m *SupervisorMetrics) adminProbed(endpoint, result string) {
