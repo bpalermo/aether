@@ -190,10 +190,14 @@ type Bridge struct {
 // connReadiness is the optional part of a BrokerClient that lets the bridge
 // retry the moment the transport can carry a subscribe: the production client
 // implements it over its gRPC ClientConn; test fakes need not.
+//
+// There is deliberately no ResetConnectBackoff here: grpc-go's
+// ClientConn.ResetConnectBackoff iterates the ClientConn's subchannel map
+// after dropping the lock that guards it, so it races the balancer creating a
+// subchannel (a data race under -race, #1135). The broker connection instead
+// redials on a short capped backoff of its own (brokerConnectParams), which is
+// what bounds how long WaitReady takes after the SVID lands.
 type connReadiness interface {
-	// ResetConnectBackoff makes a connection that failed its handshakes while
-	// this agent had no SVID redial now, not on its own backoff.
-	ResetConnectBackoff()
 	// WaitReady blocks until the connection is READY or ctx ends, reporting
 	// whether it became READY.
 	WaitReady(ctx context.Context) bool
@@ -239,16 +243,10 @@ func NewBridge(socketPath string, store SecretStore, source IdentitySource, log 
 	}
 }
 
-// announceIdentity marks the agent's own SVID as served (once) and makes the
-// broker connection redial now: every subscription that failed while it was
-// missing is waiting on identityArrived.
+// announceIdentity marks the agent's own SVID as served (once): every
+// subscription that failed while it was missing is waiting on identityArrived.
 func (b *Bridge) announceIdentity() {
-	b.identityOnce.Do(func() {
-		if r, ok := b.client.(connReadiness); ok {
-			r.ResetConnectBackoff()
-		}
-		close(b.identityArrived)
-	})
+	b.identityOnce.Do(func() { close(b.identityArrived) })
 }
 
 // identityServed reports whether the agent's own SVID has been served yet.
@@ -470,8 +468,8 @@ func (s *subscriptionLoop) onStreamEnded(ctx context.Context) bool {
 // wakeOnIdentity cuts the sleep short when the agent's own SVID is served
 // (issue #1123): the subscribe failed for want of OUR client certificate, so
 // that is the moment it can succeed. The retry then waits, within what is left
-// of the backoff, for the broker connection to come back up (its own redial
-// backoff was reset by announceIdentity) instead of racing it, and starts the
+// of the backoff, for the broker connection to come back up (it redials on
+// its own short backoff, brokerConnectParams) instead of racing it, and starts the
 // next backoff from the initial value: nothing about the broker failed.
 func (s *subscriptionLoop) wait(ctx context.Context, wakeOnIdentity bool) bool {
 	var arrived <-chan struct{}

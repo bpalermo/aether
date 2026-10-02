@@ -15,6 +15,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -115,6 +116,24 @@ type brokerClient struct {
 	log  *slog.Logger
 }
 
+// brokerConnectParams is the broker connection's redial policy (issue #1123).
+// gRPC's default (1 s base, x1.6, 120 s cap) is for remote servers. This one is
+// a node-local socket whose handshakes fail for a known, local reason until the
+// agent's own SVID lands, and every pod's certificate (which the first xDS
+// serve waits on) rides it: by then the default had backed the connection off
+// for seconds. A 250 ms cap redials within a quarter second of the SVID, and
+// costs a local connect + failed handshake four times a second during a SPIRE
+// outage.
+var brokerConnectParams = grpc.ConnectParams{
+	Backoff: backoff.Config{
+		BaseDelay:  50 * time.Millisecond,
+		Multiplier: 1.6,
+		Jitter:     0.2,
+		MaxDelay:   250 * time.Millisecond,
+	},
+	MinConnectTimeout: 5 * time.Second,
+}
+
 // newBrokerClient dials the Broker Endpoint at socketPath with mutual TLS built
 // from the agent's own identity source.
 //
@@ -131,6 +150,7 @@ func newBrokerClient(socketPath string, source IdentitySource, log *slog.Logger)
 	conn, err := grpc.NewClient(
 		"unix://"+socketPath,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
+		grpc.WithConnectParams(brokerConnectParams),
 		grpc.WithUnaryInterceptor(brokerHeaderUnaryInterceptor),
 		grpc.WithStreamInterceptor(brokerHeaderStreamInterceptor),
 	)
@@ -183,11 +203,6 @@ func brokerHeaderStreamInterceptor(ctx context.Context, desc *grpc.StreamDesc, c
 func withBrokerHeader(ctx context.Context) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, brokerSecurityHeaderKey, brokerSecurityHeaderValue)
 }
-
-// ResetConnectBackoff implements connReadiness: the handshakes this connection
-// failed while the agent had no SVID put it on gRPC's reconnect backoff, which
-// nothing else would cut short once the SVID exists.
-func (c *brokerClient) ResetConnectBackoff() { c.conn.ResetConnectBackoff() }
 
 // WaitReady implements connReadiness.
 func (c *brokerClient) WaitReady(ctx context.Context) bool {
