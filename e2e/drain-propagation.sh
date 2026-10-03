@@ -129,8 +129,13 @@ wait_two_serving() {
 			tag="warm$RANDOM"
 			req_batch "$DRP_SRC" "$DRP_DST" "/echo?msg=$tag" 30 >/dev/null || true
 			n=0
+			# SIGPIPE rule (#1121, e2e/README.md): this script runs under
+			# pipefail, so no pipeline may end in a reader that exits before its
+			# writer is done (`head`, `grep -q`/`-m`, `awk '...; exit'`): the
+			# writer dies of SIGPIPE and the pipeline fails with 141 at a random
+			# point. Read to EOF, or capture the writer first (as here).
 			for p in $pods; do
-				kc -n "$TEST_NS" logs "$p" -c app 2>/dev/null | grep -q "msg=$tag" && n=$((n + 1))
+				grep -q "msg=$tag" <<<"$(kc -n "$TEST_NS" logs "$p" -c app 2>/dev/null)" && n=$((n + 1))
 			done
 			[ "$n" -eq 2 ] && return 0
 		fi
@@ -143,12 +148,12 @@ wait_two_serving() {
 
 agent_pod_on() {
 	kc -n "$NS" get pod -l app.kubernetes.io/name=aether-agent --field-selector "spec.nodeName=$1" \
-		--no-headers -o custom-columns=N:.metadata.name,D:.metadata.deletionTimestamp | awk '$2 == "<none>" { print $1; exit }'
+		--no-headers -o custom-columns=N:.metadata.name,D:.metadata.deletionTimestamp | awk '!f && $2 == "<none>" { print $1; f = 1 }'
 }
 
 proxy_pod_on() {
 	kc -n "$NS" get pod -l app.kubernetes.io/name=aether-proxy --field-selector "spec.nodeName=$1" \
-		--no-headers -o custom-columns=N:.metadata.name,D:.metadata.deletionTimestamp | awk '$2 == "<none>" { print $1; exit }'
+		--no-headers -o custom-columns=N:.metadata.name,D:.metadata.deletionTimestamp | awk '!f && $2 == "<none>" { print $1; f = 1 }'
 }
 
 # The python helpers print epoch seconds (float) or nothing.
@@ -239,7 +244,7 @@ run_once() {
 	local leg="$1" i="$2" tag victim dst_agent src_agent_old t0 dur=30
 	tag="drp$leg$i$RANDOM"
 	wait_two_serving
-	victim="$(dst_pods | head -n 1)"
+	victim="$(dst_pods | sed -n '1p')"
 	dst_agent="$(agent_pod_on "$DST_NODE")"
 	src_agent_old="$(agent_pod_on "$NODE")"
 	[ -n "$dst_agent" ] && [ -n "$src_agent_old" ] || die "agent pods not found"
@@ -260,7 +265,7 @@ run_once() {
 
 	local t_mark t_last gap after
 	t_mark="$(kc -n "$NS" logs "$dst_agent" -c agent --since=5m 2>/dev/null |
-		python3 -c "$PY_AGENT_TS" "endpoint marked draining ahead of shutdown" "$victim" | head -n 1)"
+		python3 -c "$PY_AGENT_TS" "endpoint marked draining ahead of shutdown" "$victim" | sed -n '1p')"
 	[ -n "$t_mark" ] || die "$leg$i: no drain mark for $victim in $dst_agent's log"
 	t_last="$(python3 -c "$PY_APP_LAST" "$tag" <"$follow")"
 	[ -n "$t_last" ] || die "$leg$i: $victim logged none of the run's requests (the load did not reach it)"
@@ -287,7 +292,7 @@ print(n)' "$t_mark")"
 	local src_agent_new t_gone t_serving t_reconnect outage lag ppod
 	src_agent_new="$(agent_pod_on "$NODE")"
 	t_gone="$(kc -n "$NS" logs "$src_agent_new" -c agent 2>/dev/null |
-		python3 -c "$PY_AGENT_TS" "starting aether agent" | head -n 1)"
+		python3 -c "$PY_AGENT_TS" "starting aether agent" | sed -n '1p')"
 	# The socket opens after PreListen's last step: the registry load, then
 	# (since #1103) the wait for the local client certificates when there was
 	# one to wait for. The latest of those lines is when the agent serves xDS.
@@ -300,7 +305,7 @@ print(n)' "$t_mark")"
 	ppod="$(proxy_pod_on "$NODE")"
 	t_reconnect="$(kc -n "$NS" logs "$ppod" -c proxy --since=3m 2>/dev/null |
 		python3 -c "$PY_PROXY_TS" "cds: response indicates" |
-		awk -v s="$t_serving" '$1 >= s - 0.05 { print; exit }')"
+		awk -v s="$t_serving" '!f && $1 >= s - 0.05 { print; f = 1 }')"
 	[ -n "$t_serving" ] && [ -n "$t_reconnect" ] || die "R$i: could not read the source agent's serving time ($t_serving) or the proxy's reconnect ($t_reconnect)"
 	# CDS responses that REMOVED clusters in the 15 s after the reconnect: the
 	# restarted agent withdrawing what the proxy holds (the `quic:` twin, when
@@ -362,7 +367,7 @@ drp_verify() {
 
 # --- the proxy bootstrap arm ---------------------------------------------------
 
-proxy_cm() { kc -n "$NS" get cm -o name | grep -- '-proxy-config$' | head -n 1; }
+proxy_cm() { kc -n "$NS" get cm -o name | grep -- '-proxy-config$' | sed -n '1p'; }
 
 # ads_retry_policy — the ADS retry policy the SOURCE node's running proxy
 # loaded, from its admin bootstrap dump ("none" when absent).
