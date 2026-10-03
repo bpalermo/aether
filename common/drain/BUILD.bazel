@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "drain",
+    srcs = ["drain.go"],
+    importpath = "aethermesh.dev/common/drain",
+    visibility = ["//visibility:public"],
+    deps = ["@io_k8s_api//core/v1:core"],
+)
+
+go_test(
+    name = "drain_test",
+    srcs = ["drain_test.go"],
+    embed = [":drain"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+    ],
+)

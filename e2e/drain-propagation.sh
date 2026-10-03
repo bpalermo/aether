@@ -284,6 +284,21 @@ for line in sys.stdin:
         print("%.3f" % datetime.datetime.fromisoformat(t).timestamp())
 '
 
+# POLL_HEALTH, run on the SOURCE node: the source proxy's view of one host, from
+# its admin /clusters every 100 ms for DUR s. One line per host entry:
+# "<epoch> <cluster>::<ip>:<port>::health_flags::<flags>". The first
+# /failed_eds_health is the source's pool close (aether#1144): the destination
+# agent's phase-2 UNHEALTHY, or the pod's Ready drop, as this source heard it
+# (close_connections_on_host_health_failure closes the pools at that update).
+# shellcheck disable=SC2016 # evaluated by the node's shell
+POLL_HEALTH='
+ip="$1"; end=$(( $(date +%s) + $2 ))
+while [ "$(date +%s)" -lt "$end" ]; do
+	t="$(date +%s.%N)"
+	curl -s --max-time 1 http://127.0.0.1:9901/clusters | grep -F "::$ip:" | grep -F "::health_flags::" | sed "s|^|$t |"
+	sleep 0.1
+done'
+
 # --- load ----------------------------------------------------------------------
 
 # shellcheck disable=SC2016 # evaluated by the pod's shell
@@ -344,8 +359,13 @@ run_once() {
 	local src_rep dst_rep place
 	dst_rep="$(registrar_of "$dst_agent")"
 	if [ "$leg" = S ]; then src_rep="$(registrar_of "$src_agent_old")"; fi
+	local victim_ip health="$DRP_OUT/$tag.health" hpid
+	victim_ip="$(kc -n "$TEST_NS" get pod "$victim" -o jsonpath='{.status.podIP}')"
+	docker exec "$NODE" sh -c "$POLL_HEALTH" sh "$victim_ip" $((DRP_PRESTOP + 25)) >"$health" 2>/dev/null &
+	hpid=$!
 	kc -n "$TEST_NS" delete pod "$victim" --wait=false >/dev/null
 	wait "$LOAD_PID" || true
+	wait "$hpid" || true
 	sleep 2
 	kill "$fpid" 2>/dev/null || true
 
@@ -373,9 +393,21 @@ print(n)' "$t_mark")"
 	if [[ "$src_rep" != *"|"* && "$src_rep" != "?" && "$dst_rep" != *"|"* && "$dst_rep" != "?" ]]; then
 		if [ "$src_rep" = "$dst_rep" ]; then place=same; else place=cross; fi
 	fi
+	# The source proxy's pool close (first /failed_eds_health on the victim) and
+	# its DRAINING (first draining flag), each relative to the mark; "-" when the
+	# poll never saw it.
+	# Also the last poll that still listed the host (its EDS removal, when that
+	# fell inside the poll window).
+	local t_close t_drain t_seen close drain seen
+	t_close="$(awk '!f && /failed_eds_health/ { print $1; f = 1 }' "$health")"
+	t_drain="$(awk '!f && tolower($0) ~ /draining/ { print $1; f = 1 }' "$health")"
+	t_seen="$(awk '{ t = $1 } END { print t }' "$health")"
+	close="$([ -n "$t_close" ] && awk -v a="$t_close" -v b="$t_mark" 'BEGIN { printf "%.3f", a - b }' || echo -)"
+	drain="$([ -n "$t_drain" ] && awk -v a="$t_drain" -v b="$t_mark" 'BEGIN { printf "%.3f", a - b }' || echo -)"
+	seen="$([ -n "$t_seen" ] && awk -v a="$t_seen" -v b="$t_mark" 'BEGIN { printf "%.3f", a - b }' || echo -)"
 	if [ "$leg" = S ]; then
-		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$gap" "$after" "$non200" "$place" "$src_rep" "$dst_rep" >>"$DRP_OUT/S.tsv"
-		ok "S$i [$place-replica: source agent on $src_rep, destination agent on $dst_rep]: victim $victim  mark->last request ${gap}s  requests >1 s after the mark: $after  non-200: $non200"
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$gap" "$after" "$non200" "$place" "$src_rep" "$dst_rep" "$close" "$drain" "$seen" >>"$DRP_OUT/S.tsv"
+		ok "S$i [$place-replica: source agent on $src_rep, destination agent on $dst_rep]: victim $victim  mark->last request ${gap}s  requests >1 s after the mark: $after  non-200: $non200  mark->source DRAINING ${drain}s  mark->source pool close ${close}s  host last listed ${seen}s (SIGTERM at ~${DRP_PRESTOP}s)"
 		return
 	fi
 
@@ -415,7 +447,7 @@ print(n)' "$t_mark")"
 summarize_leg() {
 	local leg="$1" col="$2" name="$3" place="${4:-}" pcol
 	pcol="$([ "$leg" = S ] && echo 5 || echo 8)"
-	awk -F'\t' -v c="$col" -v p="$place" -v pc="$pcol" 'p == "" || $pc == p { print $c }' "$DRP_OUT/$leg.tsv" |
+	awk -F'\t' -v c="$col" -v p="$place" -v pc="$pcol" 'p == "" || $pc == p { print $c }' "${DRP_OUT_TSV:-$DRP_OUT/$leg.tsv}" |
 		LC_ALL=C sort -g | awk -v n="$name${place:+ [$place-replica]}" '
 		{ v[NR] = $1 } END { if (NR) printf "    %s: n=%d min %.3f median %.3f max %.3f\n", n, NR, v[1], v[int((NR + 1) / 2)], v[NR] }'
 }
@@ -444,6 +476,15 @@ drp_verify() {
 	if [[ " $DRP_LEGS " == *" S "* ]]; then
 		log "S steady state"
 		summarize_gap S
+		# Pool close (aether#1144): the destination agent's phase-2 UNHEALTHY
+		# lands ~1 s before SIGTERM on every replica, or only on the one it was
+		# written to.
+		local place
+		awk -F'\t' '$8 != "-" { print }' "$DRP_OUT/S.tsv" >"$DRP_OUT/S.close.tsv"
+		for place in "" same cross; do
+			DRP_OUT_TSV="$DRP_OUT/S.close.tsv" summarize_leg S 8 "mark -> source pool close (s)" "$place"
+		done
+		echo "    runs whose source never saw the pool close: $(awk -F'\t' '$8 == "-"' "$DRP_OUT/S.tsv" | grep -c . || true)"
 		awk -F'\t' -v b="$DRP_STEADY_BOUND" '$2 > b { bad = 1 } END { exit bad }' "$DRP_OUT/S.tsv" ||
 			die "S: a source selected the drained endpoint more than ${DRP_STEADY_BOUND}s after its drain mark"
 		ok "S: every gap <= ${DRP_STEADY_BOUND}s"

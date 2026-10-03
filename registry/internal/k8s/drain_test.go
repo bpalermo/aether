@@ -52,9 +52,81 @@ func TestPodHealth_DeletionRequested(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, podHealth(tt.pod))
+			assert.Equal(t, tt.want, podHealth(tt.pod, time.Now()))
 		})
 	}
+}
+
+// terminatingAt makes pod a deletion requested at requested with a grace of
+// grace s and a sleep preStop of sleep s, as the API server records it.
+func terminatingAt(pod *corev1.Pod, requested time.Time, grace, sleep int64) *corev1.Pod {
+	dt := metav1.NewTime(requested.Add(time.Duration(grace) * time.Second))
+	pod.DeletionTimestamp = &dt
+	pod.DeletionGracePeriodSeconds = &grace
+	pod.Finalizers = []string{"test.aether.io/hold"}
+	pod.Spec.Containers = []corev1.Container{{
+		Name:      "app",
+		Lifecycle: &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Sleep: &corev1.SleepAction{Seconds: sleep}}},
+	}}
+	return pod
+}
+
+// TestPodHealth_PoolCloseFromThePod is aether#1144: the drain's second phase,
+// UNHEALTHY about 1 s before SIGTERM, derived from the Pod so every registrar
+// replica lists it, not only the one the node agent's mark reached. A 15 s
+// sleep preStop, 30 s grace: DRAINING until 14 s after the request, UNHEALTHY
+// from then on, while the kubelet still reports the pod Ready.
+func TestPodHealth_PoolCloseFromThePod(t *testing.T) {
+	requested := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	pod := terminatingAt(withReady(managedPod("p", "ns", "sa", "10.0.0.1", "n"), corev1.ConditionTrue), requested, 30, 15)
+
+	assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_DRAINING, podHealth(pod, requested))
+	assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_DRAINING, podHealth(pod, requested.Add(14*time.Second-time.Millisecond)))
+	assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_UNHEALTHY, podHealth(pod, requested.Add(14*time.Second)),
+		"phase 2 is due 1 s before the preStop ends")
+	assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_UNHEALTHY,
+		podHealth(withReady(pod.DeepCopy(), corev1.ConditionFalse), requested), "no longer Ready: UNHEALTHY whatever the time")
+}
+
+// TestArmPoolClose_WakesTheSyncWhenPhaseTwoIsDue: nothing about the Pod
+// changes at the phase-2 moment, so the deletion event arms one wake-up for
+// it, and the wake-up signals a re-list.
+func TestArmPoolClose_WakesTheSyncWhenPhaseTwoIsDue(t *testing.T) {
+	informer := controllertest.NewFakeInformer()
+	r := NewKubernetesRegistry(slog.New(slog.DiscardHandler), fake.NewClientBuilder().Build(),
+		Config{ClusterName: "c", Informers: fakeInformerSource{informer}})
+	requested := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return requested.Add(100 * time.Millisecond) }
+	type armed struct {
+		wait time.Duration
+		fire func()
+	}
+	var timers []armed
+	r.afterFunc = func(d time.Duration, f func()) { timers = append(timers, armed{d, f}) }
+	require.NoError(t, r.Initialize(context.Background()))
+	changes := r.Changes()
+
+	ready := withReady(managedPod("p", "ns", "sa", "10.0.0.1", "n"), corev1.ConditionTrue)
+	ready.UID = "uid-p"
+	draining := terminatingAt(ready.DeepCopy(), requested, 30, 15)
+	informer.Update(ready, draining)
+	require.True(t, signalled(changes), "the deletion request")
+	require.Len(t, timers, 1)
+	assert.Equal(t, 14*time.Second-100*time.Millisecond, timers[0].wait, "due 14 s after the request")
+
+	churn := draining.DeepCopy()
+	churn.Annotations = map[string]string{"endpoint.aether.io/weight": "5"}
+	informer.Update(draining, churn)
+	assert.True(t, signalled(changes))
+	assert.Len(t, timers, 1, "one wake-up per pod and due time")
+
+	timers[0].fire()
+	assert.True(t, signalled(changes), "phase 2 due: re-list")
+
+	notReady := withReady(churn.DeepCopy(), corev1.ConditionFalse)
+	notReady.Annotations = nil
+	informer.Update(churn, notReady)
+	assert.Len(t, timers, 1, "a pod no longer Ready is UNHEALTHY already; nothing to wake for")
 }
 
 // TestListAllEndpoints_TerminatingPodListsDraining: a terminating pod is still

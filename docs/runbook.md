@@ -2274,9 +2274,15 @@ from a managed-pod informer instead of only the poll, so every replica hears the
 from the pod's `deletionTimestamp` within the 200 ms debounce (kind: cross-replica
 0.46–0.60 s, same-replica 0.17–0.25 s). The registrar logs
 `kubernetes registry initialized ... podWatch=true` and `registry supports change
-notifications`. What still differs cross-replica: the agent's phase-2 UNHEALTHY
-(pool close ~1 s before SIGTERM) reaches only the receiving replica; the others see
-UNHEALTHY when the pod's Ready condition drops. Since #1145 the receiving replica
+notifications`. The agent's phase-2 UNHEALTHY (pool close ~1 s before SIGTERM) is
+derived from the Pod the same way since #1144. Every replica lists a terminating,
+still-Ready pod UNHEALTHY from `drain.PoolCloseAt`, which is the deletion request
+(`deletionTimestamp` − `deletionGracePeriodSeconds`) plus the agent's own
+`drain.PoolCloseDelay` (sleep preStop − 1 s, floor 2 s). A per-pod timer in the backend
+wakes the sync at that moment. Because `deletionTimestamp` has one-second resolution,
+this can land up to 1 s before the agent's own mark, never after it. Before #1144 the
+other replicas saw UNHEALTHY only when the Ready condition dropped, after SIGTERM.
+Since #1145 the receiving replica
 holds an agent's write only until its next sync (the first listing that started after
 the RPC; the informer or the 5 s poll), then serves the Pod-derived endpoint like every
 other replica. Before, it kept the agent's version for the pod's lifetime whenever the
