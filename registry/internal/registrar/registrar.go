@@ -64,6 +64,10 @@ type Config struct {
 	ClusterName string
 	// NodeName identifies this agent's node to the Registrar. See ClusterName.
 	NodeName string
+	// Instance distinguishes this agent from another watching for the same
+	// node at the same time — a surge roll's standby and the agent it replaces
+	// (proposal 041). Optional: empty keys the watch by cluster and node only.
+	Instance string
 	// DialOptions are additional gRPC dial options (e.g., TLS credentials).
 	// When empty, insecure credentials are used.
 	DialOptions []grpc.DialOption
@@ -591,6 +595,7 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		req := &registrarv1.WatchEndpointsRequest{
 			ClusterName: r.config.ClusterName,
 			NodeName:    r.config.NodeName,
+			Instance:    r.config.Instance,
 			LastVersion: lastVersion,
 		}
 		if services != nil {

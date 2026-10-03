@@ -395,6 +395,12 @@ type SnapshotCache struct {
 	// observedWriteMu serializes flushes of the observed set so a slow earlier
 	// write can never land over a newer one. Never held with depMu held.
 	observedWriteMu sync.Mutex
+	// nodeWrites, when set, is closed once this agent owns its node (proposal
+	// 041). Until then the cache writes no node-local file — the observed set
+	// (with its QUIC pairs) and the mesh-DNS snapshot both have a live writer
+	// in the agent that still owns the node. nil means always allowed. Set once
+	// at boot (SetNodeWriteGate).
+	nodeWrites <-chan struct{}
 	// depGen counts mutations of the dependency-set inputs (issue #539): EVERY
 	// writer of ANY depMu-guarded field bumps it via bumpDepGenLocked, even for
 	// fields dependencySetLocked does not read today — over-invalidation costs

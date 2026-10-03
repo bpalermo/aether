@@ -210,6 +210,74 @@ func (f *CachedLocalStorage[T]) GetAll(_ context.Context) ([]T, error) {
 	return result, nil
 }
 
+var _ Reloader[proto.Message] = (*CachedLocalStorage[proto.Message])(nil)
+
+// Reload re-reads the directory and replaces the in-memory view with it,
+// returning the difference (see Reloader). The directory is read under the
+// write lock, so this process's own AddResource/RemoveResource serialize
+// around the reload rather than being lost by its swap. A file that cannot be
+// read or decoded fails the whole reload and leaves the view untouched: a
+// half-applied diff would be worse than the previous, internally consistent
+// view.
+func (f *CachedLocalStorage[T]) Reload(_ context.Context) (Delta[T], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	fresh, err := f.readDir()
+	if err != nil {
+		return Delta[T]{}, err
+	}
+
+	var d Delta[T]
+	for key, now := range fresh {
+		before, known := f.cache[key]
+		switch {
+		case !known:
+			d.Added = append(d.Added, clone(now))
+		case !proto.Equal(before, now):
+			d.Updated = append(d.Updated, clone(now))
+		}
+	}
+	for key, before := range f.cache {
+		if _, still := fresh[key]; !still {
+			d.Removed = append(d.Removed, clone(before))
+		}
+	}
+	f.cache = fresh
+	return d, nil
+}
+
+// readDir decodes every top-level "*.json" resource in the base directory,
+// keyed as loadAll keys them. The caller holds f.mu.
+func (f *CachedLocalStorage[T]) readDir() (map[types.ContainerID]T, error) {
+	entries, err := os.ReadDir(f.basePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read directory: %w", err)
+	}
+	out := make(map[types.ContainerID]T, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		filePath := filepath.Join(f.basePath, entry.Name())
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Removed between ReadDir and here: a DEL the other writer just
+				// served. Absent is the right view.
+				continue
+			}
+			return nil, fmt.Errorf("failed to read file %s: %w", filePath, err)
+		}
+		resource := f.newFunc()
+		if err := unmarshalOpts.Unmarshal(data, resource); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal resource from %s: %w", filePath, err)
+		}
+		out[types.ContainerID(entry.Name()[:len(entry.Name())-5])] = resource
+	}
+	return out, nil
+}
+
 // loadAll loads all resources from disk into the in-memory cache.
 // It reads all JSON files from the base directory and unmarshals them.
 // The returned slice holds deep copies (see CachedLocalStorage).

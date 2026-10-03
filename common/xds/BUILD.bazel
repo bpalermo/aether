@@ -31,6 +31,7 @@ go_library(
 go_test(
     name = "xds_test",
     srcs = [
+        "bindgate_test.go",
         "callbacks_test.go",
         "config_test.go",
         "readiness_test.go",

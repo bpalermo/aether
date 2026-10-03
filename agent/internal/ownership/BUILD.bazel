@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "ownership",
+    srcs = ["ownership.go"],
+    importpath = "aethermesh.dev/agent/internal/ownership",
+    visibility = ["//agent:__subpackages__"],
+    deps = ["//common/log"],
+)
+
+go_test(
+    name = "ownership_test",
+    srcs = ["ownership_test.go"],
+    embed = [":ownership"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

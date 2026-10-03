@@ -93,6 +93,15 @@ type TaintRemover struct {
 	// times in a row (issue #740, finding 2). Two controllers fighting is not a
 	// gate. Reading the same verdict the guard reacted to makes them agree.
 	Ready func() error
+
+	// Owned reports whether this agent owns its node (proposal 041). Optional:
+	// nil means always. A surge-rolled standby runs beside the agent that owns
+	// the node, and every other condition here would lie for it: the CNI socket
+	// it stats is the OTHER agent's, and its readiness passes as soon as its
+	// first snapshot is built — before it serves anything. Removing the taint
+	// is a claim that THIS agent can mesh a new pod, which it cannot until it
+	// owns the node.
+	Owned func() bool
 }
 
 // NeedLeaderElection runs on every agent (the taint is per-node), not just the
@@ -132,6 +141,13 @@ func (r *TaintRemover) Reconcile(ctx context.Context, req reconcile.Request) (re
 
 	if !hasTaint(node, aetherlabels.TaintAgentNotReady) {
 		return reconcile.Result{}, nil // nothing to do
+	}
+
+	if r.Owned != nil && !r.Owned() {
+		// A standby: not ours to claim yet (see Owned). Leaving the taint is
+		// always safe; the agent that owns the node handles it meanwhile.
+		r.Log.DebugContext(ctx, "startup taint present but this agent is a standby; requeueing", "node", r.NodeName)
+		return reconcile.Result{RequeueAfter: notReadyRequeue}, nil
 	}
 
 	socket, chained, notReady := r.socketServing(), r.chained(), r.notReady()

@@ -46,6 +46,9 @@ type namedCheck struct {
 	name    string
 	check   healthz.Checker
 	failing atomic.Bool
+	// expected marks a check whose failure is a normal phase, not a fault, so
+	// its failing transition logs at INFO (see addExpected).
+	expected bool
 }
 
 // newAgentReadiness returns an empty aggregate.
@@ -57,7 +60,19 @@ func newAgentReadiness(log *slog.Logger) *agentReadiness {
 // The registered checker is the wrapped one, so the transition logging fires on
 // the kubelet's polls as well as on the taint remover's in-process calls.
 func (a *agentReadiness) add(m readyzAdder, name string, check healthz.Checker) error {
-	nc := &namedCheck{name: name, check: check}
+	return a.register(m, &namedCheck{name: name, check: check})
+}
+
+// addExpected is add for a check whose failure is an expected phase rather
+// than a fault: the surge standby (proposal 041) fails "standby" for the few
+// seconds it builds its first snapshot on every roll, and a WARN per node per
+// roll would bury the WARNs that mean something. Its transitions log at INFO.
+func (a *agentReadiness) addExpected(m readyzAdder, name string, check healthz.Checker) error {
+	return a.register(m, &namedCheck{name: name, check: check, expected: true})
+}
+
+func (a *agentReadiness) register(m readyzAdder, nc *namedCheck) error {
+	name := nc.name
 	a.checks = append(a.checks, nc)
 	if err := m.AddReadyzCheck(name, a.wrap(nc)); err != nil {
 		return fmt.Errorf("failed to set up the %s ready check: %w", name, err)
@@ -82,6 +97,10 @@ func (a *agentReadiness) logTransition(nc *namedCheck, err error) {
 		return // no transition
 	}
 	if err != nil {
+		if nc.expected {
+			a.log.Info(nc.name+" readiness failing", "check", nc.name, "reason", err.Error())
+			return
+		}
 		a.log.Warn(nc.name+" readiness failing", "check", nc.name, "reason", err.Error())
 		return
 	}

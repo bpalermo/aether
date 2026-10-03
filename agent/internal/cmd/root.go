@@ -26,7 +26,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"aethermesh.dev/agent/constants"
@@ -40,6 +42,7 @@ import (
 	"aethermesh.dev/agent/internal/l4route"
 	"aethermesh.dev/agent/internal/meshdns"
 	"aethermesh.dev/agent/internal/node"
+	"aethermesh.dev/agent/internal/ownership"
 	"aethermesh.dev/agent/internal/schedmetrics"
 	"aethermesh.dev/agent/internal/spire"
 	"aethermesh.dev/agent/internal/xds/ack"
@@ -56,6 +59,7 @@ import (
 	"aethermesh.dev/common/must"
 	"aethermesh.dev/common/procsched"
 	commonspire "aethermesh.dev/common/spire"
+	"aethermesh.dev/common/telemetry/setup"
 	"aethermesh.dev/registry"
 	"aethermesh.dev/registry/registrarclient"
 	"github.com/spf13/cobra"
@@ -69,6 +73,7 @@ import (
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlmanager "sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
@@ -121,6 +126,9 @@ func init() {
 
 	// Local storage configuration (node proxy only — the edge runs no CNI/storage).
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where pod data is stored locally for the CNI plugin")
+
+	// Node ownership (proposal 041; node proxy only — the edge owns no node).
+	rootCmd.Flags().StringVar(&cfg.NodeLockPath, "node-lock", cfg.NodeLockPath, "Node-ownership lock file (proposal 041). The agent that owns the node holds an exclusive flock on it; an agent that finds it taken (a surge roll) starts as a standby that builds its first snapshot but binds no node socket and writes no node file until the lock is released. Must be on a host path every agent pod on the node shares. Empty disables the lock")
 
 	// CNI conflist re-assert (node proxy only — the edge chains no CNI).
 	rootCmd.Flags().StringVar(&cfg.MountedCNINetDir, "mounted-cni-net-dir", cfg.MountedCNINetDir, "Host CNI network-config directory as mounted into the agent (read-write); the conflist re-assert loop watches the active config here")
@@ -230,17 +238,16 @@ func runAgent(ctx context.Context) (retErr error) {
 	// when OTLP logging is disabled.
 	defer deferLogShutdown(ctx)
 
-	// Scope the manager's Pod informer to this node: the agent only ever reads
-	// (CNI ADD enrichment) and watches (termination drain) its own node's pods,
-	// and an unscoped Pod cache on a DaemonSet means every agent caching every
-	// pod in the cluster.
-	cfg.CacheOptions = &ctrlcache.Options{
-		ByObject: map[client.Object]ctrlcache.ByObject{
-			&corev1.Pod{}: {Field: fields.OneTermEqualSelector("spec.nodeName", cfg.NodeName)},
-		},
-	}
+	// Claim the node first, before local storage is read (proposal 041). A free
+	// lock here proves no other agent owned the node while storage was loaded,
+	// so an uncontended start needs no takeover reconcile and owns the node as
+	// soon as the manager starts — today's behaviour. A taken lock makes this
+	// agent a standby: everything below is still built, but the node sockets
+	// bind, and the node files are written, only once the lock is released.
+	owner := ownership.New(cfg.NodeLockPath, []string{constants.DefaultXdsSocketPath, cfg.CNIServerConfig.SocketPath}, l)
+	owner.Claim()
 
-	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version, l)
+	result, err := bootstrapAgentManager(ctx, owner)
 	if err != nil {
 		return err
 	}
@@ -269,7 +276,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 	wakeRegistryOnIdentity(ctx, spireSource, reg)
 
-	snapshotCache, err := configureSnapshotCache(ctx, m)
+	snapshotCache, err := configureSnapshotCache(ctx, m, owner)
 	if err != nil {
 		return err
 	}
@@ -289,7 +296,8 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache, ackTracker, identityTrustDomain.Get(), identityGateOf(spireSource)); err != nil {
+	xdsSrv, err := setXDSServer(ctx, m, reg, localStorage, snapshotCache, ackTracker, identityTrustDomain.Get(), identityGateOf(spireSource), owner)
+	if err != nil {
 		return err
 	}
 
@@ -297,13 +305,16 @@ func runAgent(ctx context.Context) (retErr error) {
 	// truth for whether aether is actually chained in this node's CNI conflist,
 	// which gates the taint removal, the agent's readiness, and the ghost sweep's
 	// self-heal evictions. It is registered with the manager further down.
-	reasserter := newCNIConflistReasserter()
+	reasserter := newCNIConflistReasserter(owner)
 
-	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain.Get(), chainStateOf(reasserter), cniIdentityWatchOf(spireSource)); err != nil {
+	cniSrv, err := setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain.Get(), chainStateOf(reasserter), cniIdentityWatchOf(spireSource), owner)
+	if err != nil {
 		return err
 	}
 
-	if err = setupNodeGating(m, reasserter, spireSource); err != nil {
+	addTakeoverSteps(owner, snapshotCache, xdsSrv, cniSrv)
+
+	if err = setupNodeGating(m, reasserter, spireSource, owner, xdsSrv.StandbyComplete()); err != nil {
 		return err
 	}
 
@@ -336,6 +347,41 @@ func runAgent(ctx context.Context) (retErr error) {
 
 	l.DebugContext(ctx, "local storage is ready, starting manager")
 	return m.Start(ctx)
+}
+
+// bootstrapAgentManager builds the node agent's controller-runtime manager and
+// registers the node-ownership claim and the metrics endpoint with it.
+func bootstrapAgentManager(ctx context.Context, owner *ownership.Node) (*manager.Result, error) {
+	// Scope the manager's Pod informer to this node: the agent only ever reads
+	// (CNI ADD enrichment) and watches (termination drain) its own node's pods,
+	// and an unscoped Pod cache on a DaemonSet means every agent caching every
+	// pod in the cluster.
+	cfg.CacheOptions = &ctrlcache.Options{
+		ByObject: map[client.Object]ctrlcache.ByObject{
+			&corev1.Pod{}: {Field: fields.OneTermEqualSelector("spec.nodeName", cfg.NodeName)},
+		},
+	}
+
+	// The manager's own metrics server would bind its TCP port as the manager
+	// starts — on a hostNetwork pod, the port the agent that owns the node is
+	// still serving, which fails the standby's start outright. It is served by
+	// wireMetrics instead, once this agent owns the node.
+	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version, l, func(o *ctrl.Options) {
+		o.Metrics = metricsserver.Options{BindAddress: "0"}
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err = result.Manager.Add(owner); err != nil {
+		err = fmt.Errorf("failed to add the node-ownership claim: %w", err)
+	} else {
+		err = wireMetrics(result.Manager, owner)
+	}
+	if err != nil {
+		deferTelemetryShutdown(ctx, result.Shutdown)
+		return nil, err
+	}
+	return result, nil
 }
 
 // runnableAdder is the one thing startSpireIdentity needs from the manager. A
@@ -481,8 +527,12 @@ func reconcileSpireIdentity(
 // configureSnapshotCache creates and configures the xDS snapshot cache, including
 // optional mesh-DNS server wiring. Global access-log and tracing configs are also
 // set here before the cache builds any listener.
-func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.SnapshotCache, error) {
+func configureSnapshotCache(ctx context.Context, m ctrl.Manager, owner *ownership.Node) (*cache.SnapshotCache, error) {
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
+	// No node file until this agent owns the node (proposal 041): the observed
+	// set and the mesh-DNS snapshot still have a live writer while it is a
+	// standby. Before the store is enabled, so even its restore's rewrite waits.
+	snapshotCache.SetNodeWriteGate(owner.Owned())
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 	// The host bridge to a workload's Unix socket (proposals 034/039); empty means
@@ -580,11 +630,13 @@ func wireMeshDNS(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 // Split from the registration below because the Reasserter is also the agent's
 // ChainState: the node taint gate and the readiness check both need it in hand
 // before they are constructed (#667).
-func newCNIConflistReasserter() *cniconflist.Reasserter {
+func newCNIConflistReasserter(owner *ownership.Node) *cniconflist.Reasserter {
 	if !cfg.CNIConflistReassert {
 		return nil
 	}
-	return &cniconflist.Reasserter{Dir: cfg.MountedCNINetDir, Log: l}
+	// A standby observes (readiness needs the chaining state) but leaves the
+	// repair to the agent that owns the node (proposal 041).
+	return &cniconflist.Reasserter{Dir: cfg.MountedCNINetDir, Log: l, Owned: owner.Owned()}
 }
 
 // setupNodeGating wires the two mechanisms that decide whether the scheduler may
@@ -613,9 +665,20 @@ func newCNIConflistReasserter() *cniconflist.Reasserter {
 // SPIRE gate and the remover, which could not see it, cleared it 50ms later,
 // every 30s. A nil re-asserter (--cni-conflist-reassert=false) reduces the
 // chaining half of both to its pre-#667 behaviour.
-func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSource *commonspire.WaitingSource) error {
+func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSource *commonspire.WaitingSource, owner *ownership.Node, standbyComplete <-chan struct{}) error {
 	chain := chainStateOf(reasserter)
 	ready := newAgentReadiness(l)
+
+	// What Ready means to a surge roll (proposal 041): the DaemonSet controller
+	// deletes the old agent once this one is Ready, so a standby is Ready only
+	// once its first snapshot is complete with the registry and capture gates
+	// PASSED, not timed out (StandbyComplete): a standby that cannot reach the
+	// registrar stalls the roll, visibly, instead of replacing a healthy agent
+	// with local-only config. Always passes once this agent owns the node, so
+	// an uncontended start reads exactly as before.
+	if err := ready.addExpected(m, "standby", owner.StandbyChecker(standbyComplete)); err != nil {
+		return err
+	}
 
 	if err := ready.add(m, "cni-chained", cniconflist.ReadyChecker(chain)); err != nil {
 		return err
@@ -644,6 +707,9 @@ func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSo
 		Log:        l,
 		Chain:      chain,
 		Ready:      ready.Err,
+		// A standby stats the OTHER agent's socket and is Ready before it
+		// serves anything; removing the taint is only the owner's claim.
+		Owned: owner.IsOwned,
 	}
 	if err := tr.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up startup-taint remover: %w", err)
@@ -877,12 +943,16 @@ func wireCaptureReconciler(m ctrl.Manager, snapshotCache *cache.SnapshotCache) e
 // setXDSServer creates and registers an Agent xDS server as a runnable with the Manager.
 // The server listens on a Unix domain socket and serves Envoy discovery service requests
 // (LDS, CDS, EDS, RDS, ADS) with resource snapshots generated from local pod storage and the registry.
-func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, trustDomain string, identity xdsServer.IdentityGate) error {
+func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, trustDomain string, identity xdsServer.IdentityGate, owner *ownership.Node) (*xdsServer.AgentXdsServer, error) {
 	// Create xDS server
 	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.NodeName, trustDomain, registry, localStorage, snapshotCache, ackTracker.Callbacks(), l)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	// Bind xds.sock only once this agent owns the node (proposal 041). A
+	// standby still runs PreListen to completion — its readiness is exactly
+	// that — so the socket opens on a complete snapshot the moment it binds.
+	xdsSrv.SetOwnership(owner)
 	// Hold the first snapshot until this agent has an identity: without one the
 	// registrar handshake cannot succeed, so publishing anyway would replace
 	// Envoy's working config with a local-only one (#740, finding 1).
@@ -893,16 +963,101 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 	// (#1094). Capture is unconditional (proposal 031), so this is too.
 	xdsSrv.SetCaptureGate(snapshotCache.CaptureProjected())
 	if err = m.Add(xdsSrv); err != nil {
-		return fmt.Errorf("failed to add xDS server: %w", err)
+		return nil, fmt.Errorf("failed to add xDS server: %w", err)
 	}
 
+	return xdsSrv, nil
+}
+
+// addTakeoverSteps registers what a standby does between acquiring the node
+// lock and announcing ownership (proposal 041), in order:
+//
+//  1. merge the node state the previous agent persisted after this one
+//     started (its observed upstreams and QUIC pairs, final flush included),
+//     so the first write this agent makes is the union;
+//  2. note the node's client-certificate backlog, so the xDS bind waits only
+//     for the certificates of pods step 3 adds;
+//  3. apply the CNI ADD/DEL that agent served during the overlap to the
+//     listeners and SVID subscriptions — after the xDS server's own load from
+//     storage, which is the view the diff is taken against.
+//
+// Then the sockets bind (xDS and CNI wait on ownership) and the held-back
+// writers start. An uncontended start runs none of this.
+func addTakeoverSteps(owner *ownership.Node, snapshotCache *cache.SnapshotCache, xdsSrv *xdsServer.AgentXdsServer, cniSrv *cniServer.CNIServer) {
+	owner.AddStep(ownership.Step{Name: "merge the previous agent's persisted node state", Run: snapshotCache.ReloadNodeState})
+	// Before the reconcile, so the bind's certificate wait covers only the pods
+	// the reconcile adds.
+	owner.AddStep(ownership.Step{Name: "note the client-certificate backlog", Run: xdsSrv.MarkTakeoverBaseline})
+	owner.AddStep(ownership.Step{Name: "apply the overlap's CNI ADD/DEL", Run: func(ctx context.Context) error {
+		select {
+		case <-xdsSrv.LocalListenersLoaded():
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return cniSrv.ReconcileStorage(ctx)
+	}})
+}
+
+// ownedRunnable starts a runnable only once this agent owns its node.
+type ownedRunnable struct {
+	owner *ownership.Node
+	inner ctrlmanager.Runnable
+}
+
+// portReleaseWait bounds how long an owned runnable retries a bind its
+// predecessor's port still holds (see Start).
+const portReleaseWait = 30 * time.Second
+
+func (r ownedRunnable) Start(ctx context.Context) error {
+	if err := r.owner.WaitOwned(ctx); err != nil {
+		return nil
+	}
+	// Owning the node does not quite mean the predecessor's ports are free.
+	// The kernel releases its flock while closing its descriptors on exit, in
+	// descriptor order, so the lock can be ours a moment before its listening
+	// socket is closed; and an agent that predates the lock is "gone" once its
+	// node sockets stop answering, before its process has exited. A bind that
+	// fails with EADDRINUSE in that window is retried, never fatal: a runnable
+	// error would stop the whole manager, CNI and xDS with it.
+	deadline := time.Now().Add(portReleaseWait)
+	for {
+		err := r.inner.Start(ctx)
+		if !errors.Is(err, syscall.EADDRINUSE) || ctx.Err() != nil || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func (r ownedRunnable) NeedLeaderElection() bool { return false }
+
+// wireMetrics serves the Prometheus metrics endpoint once this agent owns its
+// node (proposal 041, "hostNetwork ports"). The agent pod is hostNetwork, so
+// its metrics port is a NODE port: a standby binding it beside the agent that
+// owns the node would fail (and, with SO_REUSEPORT, answer for it). A no-op
+// when metrics are off.
+func wireMetrics(m ctrl.Manager, owner *ownership.Node) error {
+	srv, err := metricsserver.NewServer(setup.ManagerMetricsOptions(cfg.MetricsEnabled, cfg.MetricsBindAddress), m.GetConfig(), m.GetHTTPClient())
+	if err != nil {
+		return fmt.Errorf("failed to create the metrics server: %w", err)
+	}
+	if srv == nil {
+		return nil
+	}
+	if err := m.Add(ownedRunnable{owner: owner, inner: srv}); err != nil {
+		return fmt.Errorf("failed to add the metrics server: %w", err)
+	}
 	return nil
 }
 
 // setupCNIServer creates and registers a CNI gRPC server as a runnable with the Manager.
 // The server listens on a Unix domain socket and handles pod registration/deregistration
 // requests from the CNI plugin binary. It stores pod data locally and triggers xDS snapshot updates.
-func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, trustDomain string, chain cniconflist.ChainState, identity cniServer.IdentityWatch) error {
+func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, trustDomain string, chain cniconflist.ChainState, identity cniServer.IdentityWatch, owner *ownership.Node) (*cniServer.CNIServer, error) {
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(
 		cfg.ClusterName,
@@ -919,7 +1074,7 @@ func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod],
 		cfg.CNIServerConfig,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// A setter rather than a 13th positional argument: the chaining state is an
 	// optional interlock on the ghost sweep's self-heal evictions (#667), not
@@ -927,11 +1082,13 @@ func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod],
 	// snapshotCache.SetMeshDNSSnapshotPath.
 	cniSrv.SetChainState(chain)
 	cniSrv.SetIdentityWatch(identity)
+	// cni.sock and the node-writing loops wait for ownership (proposal 041).
+	cniSrv.SetOwnership(owner)
 	if err = m.Add(cniSrv); err != nil {
-		return fmt.Errorf("failed to add CNI server: %w", err)
+		return nil, fmt.Errorf("failed to add CNI server: %w", err)
 	}
 
-	return nil
+	return cniSrv, nil
 }
 
 // setupStorage initializes the local file-based storage for pod data.
@@ -960,6 +1117,10 @@ func setupRegistrarClient(ctx context.Context, src commonspire.SVIDSource) (regi
 		Address:     cfg.RegistrarAddress,
 		ClusterName: cfg.ClusterName,
 		NodeName:    cfg.NodeName,
+		// The pod name keys this agent's watch apart from a surge standby's (or
+		// the agent it replaces) on the same node (proposal 041). Empty off the
+		// chart, which keeps the cluster/node key.
+		Instance: os.Getenv("POD_NAME"),
 	}
 
 	if cfg.SpireEnabled {

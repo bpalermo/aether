@@ -251,6 +251,11 @@ func (c *SnapshotCache) RewriteMeshDNSSnapshot() {
 // writeMeshDNSSnapshot persists the envelope; a write failure is logged, never fatal
 // (the daemon keeps serving its current table).
 func (c *SnapshotCache) writeMeshDNSSnapshot(records map[string]string, generation uint64) {
+	if !c.nodeWritesAllowed() {
+		// A standby (proposal 041): the owning agent is still the writer. The
+		// table is kept and written by SetNodeWriteGate's takeover rewrite.
+		return
+	}
 	if err := meshdns.WriteSnapshot(c.meshDNSSnapshotPath, records, generation); err != nil {
 		c.log.Warn("failed to persist mesh-DNS snapshot", "path", c.meshDNSSnapshotPath, "error", err)
 	}

@@ -43,3 +43,35 @@ type Storage[T proto.Message] interface {
 	// loadAll loads all resources from persistent storage. This is an internal method.
 	loadAll(ctx context.Context) ([]T, error)
 }
+
+// Reloader is a Storage whose in-memory view can be re-synchronised with disk,
+// reporting what another writer changed since this process last looked.
+//
+// It exists for the node agent's surge handoff (proposal 041): a standby agent
+// loads storage at its start, but until it takes the node over the OLD agent is
+// the one serving CNI ADD/DEL and writing these files. On takeover the standby
+// reloads and applies only the difference — a full listener rebuild costs
+// 0.25-0.98 s on talos, inside the window the node's proxy has no ADS stream.
+type Reloader[T proto.Message] interface {
+	// Reload re-reads every resource from disk, replaces the in-memory view with
+	// it, and returns how it differs from the view it replaced. Every value in
+	// the returned Delta is a deep copy the caller owns.
+	Reload(ctx context.Context) (Delta[T], error)
+}
+
+// Delta is the difference between two views of a storage directory, by key.
+type Delta[T proto.Message] struct {
+	// Added holds resources present on disk that the previous view did not have.
+	Added []T
+	// Updated holds resources present in both views whose content differs; the
+	// value is the one now on disk.
+	Updated []T
+	// Removed holds resources the previous view had that are no longer on disk;
+	// the value is the one the previous view held (what the caller built from).
+	Removed []T
+}
+
+// Empty reports whether the two views were identical.
+func (d Delta[T]) Empty() bool {
+	return len(d.Added) == 0 && len(d.Updated) == 0 && len(d.Removed) == 0
+}

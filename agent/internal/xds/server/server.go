@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"aethermesh.dev/agent/constants"
@@ -70,7 +71,155 @@ type AgentXdsServer struct {
 	// client certificates (waitForClientCertificates, #1103). Zero means
 	// clientCertificateTimeout; a field so tests can shorten it.
 	clientCertTimeout time.Duration
+
+	// localLoaded is closed once PreListen has built the local pods' listeners
+	// from storage; firstServeReady once PreListen has passed (or timed out) every first-serve
+	// gate. A surge standby's takeover reconcile waits on the first (it diffs
+	// against that load), its readiness on the second (proposal 041).
+	localLoaded     chan struct{}
+	firstServeReady chan struct{}
+
+	// registryLoaded is closed the first time the registry-derived config
+	// actually LOADS (the initial load or, after a local-only start, the
+	// background retry). standbyComplete is closed once firstServeReady,
+	// registryLoaded and the capture projection are all in: the gates PASSED,
+	// not merely timed out. See StandbyComplete.
+	registryLoaded  chan struct{}
+	standbyComplete chan struct{}
+
+	// takeoverAwaiting is the node's client-certificate backlog just before the
+	// takeover reconcile (MarkTakeoverBaseline); -1 until marked. The post-
+	// takeover certificate wait covers only what the takeover added to it.
+	takeoverAwaiting atomic.Int64
+
+	// ownedGate is the bind gate SetOwnership installed (nil without one).
+	ownedGate func(ctx context.Context) error
 }
+
+// Ownership is this agent's claim on its node as the xDS server needs to see
+// it (proposal 041). *ownership.Node implements it.
+type Ownership interface {
+	// WaitOwned blocks until this agent owns the node, or returns ctx's error.
+	WaitOwned(ctx context.Context) error
+	// Contended reports whether this agent started as a standby.
+	Contended() bool
+}
+
+// takeoverClientCertTimeout bounds the second, post-takeover wait for client
+// certificates: pods the previous agent ADDed during the overlap are
+// subscribed only at takeover, and their certificates arrive ~50 ms later on
+// kind. Short, because it sits inside the proxy's gap; the bound is for a pod
+// whose SVID never comes, as with clientCertificateTimeout.
+const takeoverClientCertTimeout = time.Second
+
+// SetOwnership makes the server a standby until this agent owns its node
+// (proposal 041): PreListen still builds the complete first snapshot, but
+// xds.sock is bound only once the agent that owned the node is gone and the
+// takeover steps have run. The proxy's stream to that agent ended when it
+// exited; its next reconnect attempt lands here.
+func (s *AgentXdsServer) SetOwnership(o Ownership) {
+	if o == nil {
+		return
+	}
+	s.ownedGate = func(ctx context.Context) error {
+		if err := o.WaitOwned(ctx); err != nil {
+			return err
+		}
+		if o.Contended() {
+			// The takeover may have added pods whose certificates are still in
+			// flight; give them a moment so the reconnecting proxy keeps their
+			// QUIC twins (the #1103 rationale, at a takeover's scale).
+			s.waitForTakeoverCertificates(ctx)
+		}
+		return nil
+	}
+	s.SetBindGate(s.ownedGate)
+}
+
+// MarkTakeoverBaseline records the node's client-certificate backlog before
+// the takeover reconcile. A takeover step, registered ahead of the CNI one:
+// the post-takeover wait then covers only the pods the takeover added, so a
+// pod whose SVID never comes (already in the backlog, already waited out by
+// PreListen) does not add the full bound to every surge takeover.
+func (s *AgentXdsServer) MarkTakeoverBaseline(context.Context) error {
+	s.takeoverAwaiting.Store(int64(s.cache.AwaitingClientCertificates()))
+	return nil
+}
+
+// waitForTakeoverCertificates waits (bounded by takeoverClientCertTimeout)
+// until the certificate backlog is back at its pre-takeover baseline. No
+// baseline, or no increase, means nothing to wait for.
+func (s *AgentXdsServer) waitForTakeoverCertificates(ctx context.Context) {
+	baseline := s.takeoverAwaiting.Load()
+	if s.identity == nil || baseline < 0 {
+		return
+	}
+	backlog := func() bool { return int64(s.cache.AwaitingClientCertificates()) <= baseline }
+	if backlog() {
+		return
+	}
+	started := time.Now()
+	deadline := time.NewTimer(takeoverClientCertTimeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(clientCertificatePoll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			s.log.WarnContext(ctx, "certificates of pods the takeover added not delivered in time; binding without their east-west QUIC twins until they arrive",
+				"timeout", takeoverClientCertTimeout.String())
+			return
+		case <-tick.C:
+			if backlog() {
+				s.log.InfoContext(ctx, "certificates of pods the takeover added delivered",
+					"waited", time.Since(started).Round(time.Millisecond).String())
+				return
+			}
+		}
+	}
+}
+
+// StandbyComplete returns a channel closed once this server could take its
+// node over without degrading what the proxy already has (proposal 041): the
+// first snapshot is built AND the registry gate and the capture-projection
+// gate actually passed. FirstServeReady also closes when those gates time out
+// (a local-only start, a capture listener without its TCP chains), which is
+// the right call for a node nobody else is serving and the wrong one for a
+// standby: Ready there lets the DaemonSet delete a healthy old agent, and the
+// takeover would publish local-only CDS/EDS over the proxy's working config
+// (the #740 clobber). The client-certificate gate stays lenient: its timeout
+// costs a pod's QUIC twins, not the node's endpoints.
+//
+// It closes late rather than never: a background registry retry that later
+// succeeds, or a projection that later lands, completes the standby then.
+func (s *AgentXdsServer) StandbyComplete() <-chan struct{} { return s.standbyComplete }
+
+// watchStandbyComplete closes standbyComplete once every condition holds.
+func (s *AgentXdsServer) watchStandbyComplete(ctx context.Context) {
+	for _, ch := range []<-chan struct{}{s.firstServeReady, s.registryLoaded, s.captureGate} {
+		if ch == nil {
+			continue
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return
+		}
+	}
+	closeOnce(s.standbyComplete)
+}
+
+// LocalListenersLoaded returns a channel closed once the local pods' listeners
+// have been built from storage (the first step of PreListen).
+func (s *AgentXdsServer) LocalListenersLoaded() <-chan struct{} { return s.localLoaded }
+
+// FirstServeReady returns a channel closed once PreListen has built the first
+// snapshot and passed every first-serve gate (identity, registry, capture
+// projection, client certificates). On a standby this is what "ready to take
+// the node over" means.
+func (s *AgentXdsServer) FirstServeReady() <-chan struct{} { return s.firstServeReady }
 
 // clientCertificateTimeout bounds the first serve's wait for the SPIRE bridge
 // to deliver every local workload's certificate. The broker delivers them a few
@@ -188,17 +337,22 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 	snapshotCache.SetRegistry(registry)
 
 	aXdsServer := &AgentXdsServer{
-		XdsServer:    xds.NewXdsServer(ctx, cfg, snapshotCache, combined, log),
-		log:          commonlog.Named(log, "agent-xds"),
-		clusterName:  clusterName,
-		nodeName:     nodeName,
-		trustDomain:  trustDomain,
-		registry:     registry,
-		storage:      storage,
-		cache:        snapshotCache,
-		readyTimeout: registryReadyTimeout,
-		retryBackoff: time.Second,
+		XdsServer:       xds.NewXdsServer(ctx, cfg, snapshotCache, combined, log),
+		log:             commonlog.Named(log, "agent-xds"),
+		clusterName:     clusterName,
+		nodeName:        nodeName,
+		trustDomain:     trustDomain,
+		registry:        registry,
+		storage:         storage,
+		cache:           snapshotCache,
+		readyTimeout:    registryReadyTimeout,
+		retryBackoff:    time.Second,
+		localLoaded:     make(chan struct{}),
+		firstServeReady: make(chan struct{}),
+		registryLoaded:  make(chan struct{}),
+		standbyComplete: make(chan struct{}),
 	}
+	aXdsServer.takeoverAwaiting.Store(-1)
 
 	aXdsServer.AddCallback(aXdsServer)
 
@@ -226,6 +380,7 @@ func (s *AgentXdsServer) NeedLeaderElection() bool { return false }
 // snapshot with no cross-node endpoints at all.
 func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	s.log.DebugContext(ctx, "generating initial snapshot")
+	go s.watchStandbyComplete(ctx)
 
 	// The local half first, BEFORE the identity hold (issue #1123): building
 	// the local pods' listeners needs nothing from SPIRE (the trust domain is
@@ -237,6 +392,7 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 		s.log.ErrorContext(ctx, "failed to load listeners from storage", "error", err)
 		return err
 	}
+	closeOnce(s.localLoaded)
 
 	// The dependency set is now known (local pods loaded): scope the registry
 	// watch to it before waiting on the watch cache, so the snapshot the
@@ -266,8 +422,24 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	s.loadInitialRegistryConfig(ctx)
 
 	s.waitForClientCertificates(ctx)
+	if ctx.Err() == nil {
+		closeOnce(s.firstServeReady)
+	}
 
 	return nil
+}
+
+// closeOnce closes ch unless it is nil or already closed. PreListen runs once
+// per server, but tests drive it more than once on the same value.
+func closeOnce(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
 }
 
 // waitForClientCertificates holds the first serve (bounded) until the snapshot
@@ -291,16 +463,21 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 // at all the #1049 gate is off and nothing is held back. A timeout serves what
 // there is, as before, and says how many identities are still missing.
 func (s *AgentXdsServer) waitForClientCertificates(ctx context.Context) {
+	timeout := s.clientCertTimeout
+	if timeout <= 0 {
+		timeout = clientCertificateTimeout
+	}
+	s.waitForClientCertificatesFor(ctx, timeout)
+}
+
+// waitForClientCertificatesFor is waitForClientCertificates with its bound.
+func (s *AgentXdsServer) waitForClientCertificatesFor(ctx context.Context, timeout time.Duration) {
 	if s.identity == nil || ctx.Err() != nil {
 		return
 	}
 	awaiting := s.cache.AwaitingClientCertificates()
 	if awaiting == 0 {
 		return
-	}
-	timeout := s.clientCertTimeout
-	if timeout <= 0 {
-		timeout = clientCertificateTimeout
 	}
 	started := time.Now()
 	deadline := time.NewTimer(timeout)
@@ -361,7 +538,9 @@ func (s *AgentXdsServer) loadInitialRegistryConfig(ctx context.Context) {
 	if !watchBacked {
 		if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
 			s.startLocalOnly(ctx, err)
+			return
 		}
+		closeOnce(s.registryLoaded)
 		return
 	}
 
@@ -383,6 +562,7 @@ func (s *AgentXdsServer) loadInitialRegistryConfig(ctx context.Context) {
 		return
 	}
 
+	closeOnce(s.registryLoaded)
 	s.log.InfoContext(ctx, "registry connected; generating the initial snapshot",
 		"waited", time.Since(started).Round(time.Millisecond).String())
 }
@@ -548,6 +728,7 @@ func (s *AgentXdsServer) retryInitialRegistryLoad(ctx context.Context, excused b
 			}
 			continue
 		}
+		closeOnce(s.registryLoaded)
 		s.log.InfoContext(ctx, "registry recovered; snapshot now includes registry-derived config")
 		return
 	}

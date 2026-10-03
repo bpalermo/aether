@@ -26,6 +26,7 @@ go_test(
     srcs = [
         "readyz_test.go",
         "reassert_test.go",
+        "standby_test.go",
         "state_test.go",
     ],
     embed = [":cniconflist"],

@@ -40,6 +40,9 @@ type MockStorage[T proto.Message] struct {
 	// RemoveResourceFunc is called by RemoveResource. If nil, the resource is deleted from the map.
 	RemoveResourceFunc func(ctx context.Context, key types.ContainerID) error
 
+	// ReloadFunc is called by Reload. If nil, Reload reports no difference.
+	ReloadFunc func(ctx context.Context) (Delta[T], error)
+
 	// mu guards resources.
 	mu sync.RWMutex
 
@@ -116,6 +119,15 @@ func (m *MockStorage[T]) GetAll(ctx context.Context) ([]T, error) {
 		result = append(result, clone(v))
 	}
 	return result, nil
+}
+
+// Reload satisfies Reloader. The mock's map is its own disk, so there is never
+// another writer's change to find unless the test scripts one with ReloadFunc.
+func (m *MockStorage[T]) Reload(ctx context.Context) (Delta[T], error) {
+	if m.ReloadFunc != nil {
+		return m.ReloadFunc(ctx)
+	}
+	return Delta[T]{}, nil
 }
 
 // loadAll satisfies the unexported Storage method. It delegates to GetAll so

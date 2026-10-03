@@ -159,6 +159,21 @@ func TestAgentReadinessLogsTransitions(t *testing.T) {
 	assert.Equal(t, "spire-svid readiness passing", records[1]["msg"])
 }
 
+// TestAgentReadinessExpectedFailureIsInfo: the surge standby fails "standby"
+// for a few seconds on every roll (proposal 041); that is a phase, not a
+// fault, and must not add a WARN per node per roll.
+func TestAgentReadinessExpectedFailureIsInfo(t *testing.T) {
+	ready, buf := newTestReadiness()
+	require.NoError(t, ready.addExpected(newFakeReadyzAdder(), "standby", func(*http.Request) error {
+		return errors.New("first snapshot not built yet")
+	}))
+	require.Error(t, ready.Err())
+	records := logLines(t, buf)
+	require.Len(t, records, 1)
+	assert.Equal(t, "INFO", records[0]["level"])
+	assert.Equal(t, "standby readiness failing", records[0]["msg"])
+}
+
 // TestAgentReadinessRegisteredCheckerLogsToo pins that the checker handed to the
 // manager is the WRAPPED one: the kubelet's polls are what usually observe a
 // transition first, and an operator reading the log should not have to wait for
