@@ -15,9 +15,9 @@ go_library(
     deps = [
         "//api/aether/registrar/v1:registrar",
         "//api/aether/registry/v1:registry",
+        "//common/grpcserver",
         "//common/log",
         "//common/telemetry",
-        "//common/xds",
         "//registry",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",

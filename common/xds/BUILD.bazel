@@ -2,17 +2,11 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "xds",
-    srcs = [
-        "callbacks.go",
-        "config.go",
-        "readiness.go",
-        "server.go",
-        "xds.go",
-    ],
+    srcs = ["xds.go"],
     importpath = "aethermesh.dev/common/xds",
     visibility = ["//visibility:public"],
     deps = [
-        "//common/log",
+        "//common/grpcserver",
         "//common/telemetry",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
         "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
@@ -24,22 +18,15 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//service/secret/v3:secret",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//keepalive",
-        "@org_uber_go_atomic//:atomic",
     ],
 )
 
 go_test(
     name = "xds_test",
-    srcs = [
-        "bindgate_test.go",
-        "callbacks_test.go",
-        "config_test.go",
-        "readiness_test.go",
-        "server_test.go",
-        "xds_test.go",
-    ],
+    srcs = ["xds_test.go"],
     embed = [":xds"],
     deps = [
+        "//common/grpcserver",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
         "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
         "@com_github_stretchr_testify//assert",
