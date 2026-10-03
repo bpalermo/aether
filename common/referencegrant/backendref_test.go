@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
@@ -45,4 +46,50 @@ func TestBackendNamespace(t *testing.T) {
 	ns := gatewayv1.Namespace("other")
 	assert.Equal(t, "", BackendNamespace(nil))
 	assert.Equal(t, "other", BackendNamespace(&ns))
+}
+
+// ResolveBackends validates the backendRef shape (aether resolves by name via the
+// registry): a valid core Service-kind ref is resolved; a non-Service ref is
+// InvalidKind; an empty name is BackendNotFound.
+func TestResolveBackends_Shapes(t *testing.T) {
+	svcKind := gatewayv1.Kind("Service")
+	otherKind := gatewayv1.Kind("Foo")
+
+	ok, _, _ := ResolveBackends("ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
+		{Name: "svc-1", Kind: &svcKind},
+	}, nil)
+	assert.True(t, ok, "valid Service-kind ref resolves")
+
+	ok, reason, _ := ResolveBackends("ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
+		{Name: "x", Kind: &otherKind},
+	}, nil)
+	assert.False(t, ok)
+	assert.Equal(t, string(gatewayv1.RouteReasonInvalidKind), reason)
+
+	ok, reason, _ = ResolveBackends("ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
+		{Name: ""},
+	}, nil)
+	assert.False(t, ok)
+	assert.Equal(t, string(gatewayv1.RouteReasonBackendNotFound), reason)
+
+	// Cross-namespace ref with no ReferenceGrant → RefNotPermitted.
+	otherNs := gatewayv1.Namespace("other")
+	ok, reason, _ = ResolveBackends("ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
+		{Name: "svc-1", Kind: &svcKind, Namespace: &otherNs},
+	}, nil)
+	assert.False(t, ok)
+	assert.Equal(t, string(gatewayv1.RouteReasonRefNotPermitted), reason)
+
+	// Cross-namespace ref WITH a matching grant → resolved.
+	grants := []gatewayv1beta1.ReferenceGrant{{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "other"},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Namespace: "ns"}},
+			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service"}},
+		},
+	}}
+	ok, _, _ = ResolveBackends("ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
+		{Name: "svc-1", Kind: &svcKind, Namespace: &otherNs},
+	}, grants)
+	assert.True(t, ok, "granted cross-namespace ref resolves")
 }
