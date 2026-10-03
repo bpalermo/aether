@@ -12,6 +12,7 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/log",
+        "//common/spire",
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
         "@com_github_spiffe_go_spiffe_v2//bundle/x509bundle",
