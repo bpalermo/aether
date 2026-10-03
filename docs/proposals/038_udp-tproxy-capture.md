@@ -1,8 +1,13 @@
 # Proposal 038: TPROXY Capture for UDP, and East-West QUIC on Top of It
 
-**Status:** Accepted; **revised 2026-09-26** to fold east-west QUIC in as a
-requirement rather than a deferred question. All four premises verified by
-experiment; Phase 0 settled on a node 2026-09-25.
+**Status:** Implemented (Phases 0–4c; 4d pending: UDP:18009 on the east-west
+gateway is not built). Phase 0: settled on a node 2026-09-25 (#940), full-ruleset
+spike #944. Phases 1, 2 and 5: superseded by the TPROXY-for-both-transports plan
+and shipped as #945, #946 and #947 (chart 0.94.0, #949). Phase 3: per-VIP
+selection e2e #948 (no mode flag left to flip). Phase 4a: #953. Phase 4b: #956
+(with #958, #959 and #962). Phase 4c: #979. (Accepted 2026-09-23; revised
+2026-09-26 to fold east-west QUIC in as a requirement rather than a deferred
+question. All four premises verified by experiment.)
 **Superseded in part (2026-09-26):** Phases 1, 2 and 5 below were replaced by the
 *TPROXY for both transports* plan and shipped as one breaking change with no
 mode flag, no `redirect` fallback and no REDIRECT kept for a release — #944
