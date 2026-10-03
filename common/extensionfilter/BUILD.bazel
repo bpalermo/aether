@@ -21,6 +21,7 @@ go_library(
 
 go_test(
     name = "extensionfilter_test",
+    size = "small",
     srcs = ["extensionfilter_test.go"],
     embed = [":extensionfilter"],
     deps = [

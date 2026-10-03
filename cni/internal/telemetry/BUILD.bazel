@@ -25,6 +25,7 @@ go_library(
 
 go_test(
     name = "telemetry_test",
+    size = "small",
     srcs = ["telemetry_test.go"],
     embed = [":telemetry"],
     deps = [

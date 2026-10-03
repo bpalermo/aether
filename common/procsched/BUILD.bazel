@@ -9,6 +9,7 @@ go_library(
 
 go_test(
     name = "procsched_test",
+    size = "small",
     srcs = ["procsched_test.go"],
     embed = [":procsched"],
     deps = [

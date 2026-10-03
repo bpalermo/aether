@@ -20,6 +20,7 @@ go_binary(
 
 go_test(
     name = "agent-ready_test",
+    size = "small",
     srcs = ["main_test.go"],
     embed = [":agent-ready_lib"],
     deps = [

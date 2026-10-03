@@ -24,6 +24,7 @@ go_library(
 
 go_test(
     name = "config_test",
+    size = "small",
     srcs = [
         "common_test.go",
         "determinism_test.go",

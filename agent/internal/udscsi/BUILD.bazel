@@ -33,6 +33,7 @@ go_library(
 
 go_test(
     name = "udscsi_test",
+    size = "small",
     srcs = [
         "carrier_contract_test.go",
         "driver_test.go",

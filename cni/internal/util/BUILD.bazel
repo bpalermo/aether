@@ -13,6 +13,7 @@ go_library(
 
 go_test(
     name = "util_test",
+    size = "small",
     srcs = ["watcher_test.go"],
     deps = [
         ":util",

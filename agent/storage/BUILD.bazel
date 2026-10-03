@@ -19,6 +19,7 @@ go_library(
 
 go_test(
     name = "storage_test",
+    size = "small",
     srcs = [
         "isolation_test.go",
         "local_test.go",

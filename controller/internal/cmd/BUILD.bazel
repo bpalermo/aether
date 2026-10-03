@@ -37,6 +37,7 @@ go_library(
 
 go_test(
     name = "cmd_test",
+    size = "small",
     srcs = [
         "config_test.go",
         "identitygate_test.go",

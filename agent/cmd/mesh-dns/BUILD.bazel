@@ -50,6 +50,7 @@ go_multi_arch_image(
 
 go_test(
     name = "mesh-dns_test",
+    size = "small",
     srcs = ["main_test.go"],
     data = glob(["testdata/**"]),
     embed = [":mesh-dns_lib"],

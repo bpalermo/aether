@@ -25,6 +25,7 @@ go_library(
 
 go_test(
     name = "mcs_test",
+    size = "small",
     srcs = ["mcs_test.go"],
     embed = [":mcs"],
     deps = [

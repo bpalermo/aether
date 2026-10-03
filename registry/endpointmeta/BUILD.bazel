@@ -14,6 +14,7 @@ go_library(
 
 go_test(
     name = "endpointmeta_test",
+    size = "small",
     srcs = [
         "portprotocol_test.go",
         "portprotocols_test.go",

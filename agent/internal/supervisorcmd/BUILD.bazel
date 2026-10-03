@@ -15,6 +15,7 @@ go_library(
 
 go_test(
     name = "supervisorcmd_test",
+    size = "small",
     srcs = [
         "flags_test.go",
         "supervisor_test.go",

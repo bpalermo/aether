@@ -22,6 +22,7 @@ go_library(
 
 go_test(
     name = "podmutate_test",
+    size = "small",
     srcs = [
         "identitygate_test.go",
         "mutator_test.go",

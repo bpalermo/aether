@@ -20,6 +20,7 @@ go_library(
 
 go_test(
     name = "nodetaint_test",
+    size = "small",
     srcs = [
         "guard_conflict_test.go",
         "guard_test.go",

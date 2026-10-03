@@ -9,6 +9,7 @@ go_library(
 
 go_test(
     name = "portalloc_test",
+    size = "small",
     srcs = ["portalloc_test.go"],
     embed = [":portalloc"],
     deps = [

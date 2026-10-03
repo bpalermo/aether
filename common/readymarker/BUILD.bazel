@@ -9,6 +9,7 @@ go_library(
 
 go_test(
     name = "readymarker_test",
+    size = "small",
     srcs = ["readymarker_test.go"],
     embed = [":readymarker"],
     deps = [
