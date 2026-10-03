@@ -109,7 +109,12 @@ build_images() {
 }
 
 create_cluster() {
-	if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`grep -c ... >/dev/null`).
+	if kind get clusters 2>/dev/null | grep -cx "$CLUSTER" >/dev/null; then
 		ok "kind cluster '$CLUSTER' already exists"
 		return
 	fi
@@ -249,7 +254,7 @@ verify_registration() {
 	policy="$(kc get csidriver "$DRIVER" -o jsonpath='{.spec.fsGroupPolicy} {.spec.podInfoOnMount} {.spec.volumeLifecycleModes[*]}')"
 	[ "$policy" = "File true Ephemeral" ] || die "CSIDriver $DRIVER spec is '$policy', want 'File true Ephemeral'"
 	ok "CSIDriver $DRIVER: fsGroupPolicy=File podInfoOnMount=true volumeLifecycleModes=[Ephemeral]"
-	if kc -n "$NS" get ds aether-uds-csi -o jsonpath='{.spec.template.spec.containers[*].name}' | grep -q registrar; then
+	if kc -n "$NS" get ds aether-uds-csi -o jsonpath='{.spec.template.spec.containers[*].name}' | grep -c registrar >/dev/null; then
 		die "the uds-csi DaemonSet has a registrar sidecar; the plugin must register itself"
 	fi
 	ok "no node-driver-registrar sidecar (containers: $(kc -n "$NS" get ds aether-uds-csi -o jsonpath='{.spec.template.spec.containers[*].name}'))"

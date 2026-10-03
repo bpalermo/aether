@@ -319,7 +319,13 @@ build_images() {
 }
 
 create_cluster() {
-	if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`grep -c ... >/dev/null`). The pods' own `sh` scripts run without
+	# pipefail.
+	if kind get clusters 2>/dev/null | grep -cx "$CLUSTER" >/dev/null; then
 		ok "kind cluster '$CLUSTER' already exists"
 		return
 	fi
@@ -395,7 +401,7 @@ install_gwapi_crds() {
 		kc wait --for=condition=Established "crd/$kind.gateway.networking.k8s.io" --timeout=60s >/dev/null ||
 			die "the ${kind%s} CRD never became Established"
 		kc get crd "$kind.gateway.networking.k8s.io" \
-			-o jsonpath='{.status.storedVersions}' 2>/dev/null | grep -q v1 ||
+			-o jsonpath='{.status.storedVersions}' 2>/dev/null | grep -c v1 >/dev/null ||
 			die "the ${kind%s} CRD does not serve v1 — the agent's crdcheck is v1-only and would disable that route type silently"
 	done
 	ok "Gateway API CRDs installed (TCPRoute, TLSRoute, UDPRoute at v1)"
@@ -409,7 +415,7 @@ install_gwapi_crds() {
 require_crd() {
 	local kind="$1" plural="$2"
 	kc get crd "$plural.gateway.networking.k8s.io" \
-		-o jsonpath='{.status.storedVersions}' 2>/dev/null | grep -q v1 ||
+		-o jsonpath='{.status.storedVersions}' 2>/dev/null | grep -c v1 >/dev/null ||
 		die "$kind is not served at v1 in this cluster, so the agent never watched it — run '$0 up' first (it installs the gateway-api $GWAPI_VERSION experimental bundle); this leg is NOT skipped, because a leg that skips itself green cannot fail (#853)"
 }
 
