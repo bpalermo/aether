@@ -17,7 +17,6 @@ package l4project
 
 import (
 	"aethermesh.dev/common/referencegrant"
-	"aethermesh.dev/common/serviceref"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
@@ -84,7 +83,7 @@ func Backends(
 		if name == "" {
 			continue
 		}
-		if !backendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
+		if !referencegrant.BackendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
 			continue
 		}
 		weight := uint32(1)
@@ -95,7 +94,7 @@ func Backends(
 		// namespace-qualified "<ns>/<svc>" (backendRef namespace if set, else the
 		// route's). A split to a different backend service therefore resolves the
 		// right registry cluster.
-		key := backendServiceKey(b.Namespace, routeNamespace, name)
+		key := referencegrant.BackendKey(b.Namespace, routeNamespace, name)
 		var port uint32
 		if b.Port != nil {
 			port = uint32(*b.Port)
@@ -107,35 +106,4 @@ func Backends(
 		})
 	}
 	return backends
-}
-
-// backendServiceKey resolves a backendRef to its namespace-qualified "<ns>/<svc>"
-// registry key (020 Part 1): the backendRef's own namespace when set, else the
-// route's namespace.
-func backendServiceKey(backendNamespace *gatewayv1.Namespace, routeNamespace, name string) string {
-	ns := routeNamespace
-	if bn := derefBackendNamespace(backendNamespace); bn != "" {
-		ns = bn
-	}
-	return serviceref.New(ns, name).Key()
-}
-
-// backendPermitted reports whether a backendRef is allowed onto the data plane: a
-// same-namespace ref always is; a cross-namespace ref needs a matching ReferenceGrant
-// in the backend's namespace whose from matches the route and whose to allows the
-// Service.
-func backendPermitted(backendNamespace *gatewayv1.Namespace, routeNamespace, routeKind, name string, grants []gatewayv1beta1.ReferenceGrant) bool {
-	ns := derefBackendNamespace(backendNamespace)
-	if !referencegrant.CrossNamespace(ns, routeNamespace) {
-		return true
-	}
-	return referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, name)
-}
-
-// derefBackendNamespace returns the backendRef namespace ("" when unset).
-func derefBackendNamespace(ns *gatewayv1.Namespace) string {
-	if ns == nil {
-		return ""
-	}
-	return string(*ns)
 }

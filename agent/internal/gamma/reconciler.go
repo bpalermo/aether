@@ -11,7 +11,6 @@ package gamma
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -350,7 +349,7 @@ func buildRouteTargetPorts(portSets map[string]map[uint32]struct{}) map[string][
 func (r *Reconciler) writeHTTPRouteStatuses(ctx context.Context, httpList *gatewayv1.HTTPRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
-		resolved, reason, msg := r.backendsResolve(ctx, hr.Namespace, "HTTPRoute", httpBackendRefs(hr.Spec.Rules), grants)
+		resolved, reason, msg := referencegrant.ResolveBackends(hr.Namespace, "HTTPRoute", httpBackendRefs(hr.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, hr, hr.Generation, &hr.Status.RouteStatus, hr.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write HTTPRoute status", "route", hr.Name, "namespace", hr.Namespace, "error", err.Error())
 		}
@@ -361,7 +360,7 @@ func (r *Reconciler) writeHTTPRouteStatuses(ctx context.Context, httpList *gatew
 func (r *Reconciler) writeGRPCRouteStatuses(ctx context.Context, grpcList *gatewayv1.GRPCRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range grpcList.Items {
 		gr := &grpcList.Items[i]
-		resolved, reason, msg := r.backendsResolve(ctx, gr.Namespace, "GRPCRoute", grpcBackendRefs(gr.Spec.Rules), grants)
+		resolved, reason, msg := referencegrant.ResolveBackends(gr.Namespace, "GRPCRoute", grpcBackendRefs(gr.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, gr, gr.Generation, &gr.Status.RouteStatus, gr.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write GRPCRoute status", "route", gr.Name, "namespace", gr.Namespace, "error", err.Error())
 		}
@@ -415,39 +414,6 @@ func (r *Reconciler) writeRouteStatus(
 	}
 	status.Parents = parents
 	return r.Status().Update(ctx, obj)
-}
-
-// backendsResolve reports whether every backendRef is resolvable. aether resolves
-// backends by NAME via the registry (namespace-free), so a valid core Service-kind
-// ref with a non-empty name is resolved here; a genuinely-absent backend surfaces at
-// runtime as no endpoints / 503, not a static ResolvedRefs failure. A k8s Service Get
-// would be a false negative (the registry, not a k8s Service, backs the route). Only
-// the ref *shape* — and, for cross-namespace refs, ReferenceGrant permission — is
-// validated. routeKind is the referring route's kind (HTTPRoute/GRPCRoute), used to
-// match a grant's spec.from.kind.
-func (r *Reconciler) backendsResolve(_ context.Context, routeNamespace, routeKind string, refs []gatewayv1.BackendObjectReference, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
-	for _, ref := range refs {
-		if (ref.Group != nil && string(*ref.Group) != "") || (ref.Kind != nil && string(*ref.Kind) != "Service") {
-			return false, string(gatewayv1.RouteReasonInvalidKind), fmt.Sprintf("backendRef %q is not a core Service", ref.Name)
-		}
-		if string(ref.Name) == "" {
-			return false, string(gatewayv1.RouteReasonBackendNotFound), "backendRef has an empty name"
-		}
-		if ns := derefBackendNamespace(ref.Namespace); referencegrant.CrossNamespace(ns, routeNamespace) &&
-			!referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, string(ref.Name)) {
-			return false, string(gatewayv1.RouteReasonRefNotPermitted),
-				fmt.Sprintf("cross-namespace backendRef to Service %q in namespace %q is not permitted by any ReferenceGrant", ref.Name, ns)
-		}
-	}
-	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
-}
-
-// derefBackendNamespace returns the backendRef namespace ("" when unset).
-func derefBackendNamespace(ns *gatewayv1.Namespace) string {
-	if ns == nil {
-		return ""
-	}
-	return string(*ns)
 }
 
 func httpBackendRefs(rules []gatewayv1.HTTPRouteRule) []gatewayv1.BackendObjectReference {

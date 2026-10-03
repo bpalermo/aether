@@ -2,10 +2,14 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "referencegrant",
-    srcs = ["referencegrant.go"],
+    srcs = [
+        "backendref.go",
+        "referencegrant.go",
+    ],
     importpath = "aethermesh.dev/common/referencegrant",
     visibility = ["//visibility:public"],
     deps = [
+        "//common/serviceref",
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
         "@io_k8s_sigs_gateway_api//apis/v1beta1",
     ],
@@ -13,9 +17,13 @@ go_library(
 
 go_test(
     name = "referencegrant_test",
-    srcs = ["referencegrant_test.go"],
+    srcs = [
+        "backendref_test.go",
+        "referencegrant_test.go",
+    ],
     embed = [":referencegrant"],
     deps = [
+        "@com_github_stretchr_testify//assert",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
         "@io_k8s_sigs_gateway_api//apis/v1beta1",

@@ -235,53 +235,6 @@ func TestReconcile_RouteTargetNoPort(t *testing.T) {
 	assert.False(t, has, "no port entry when the parentRef omits a port")
 }
 
-// backendsResolve validates the backendRef shape (aether resolves by name via the
-// registry): a valid core Service-kind ref is resolved; a non-Service ref is
-// InvalidKind; an empty name is BackendNotFound.
-func TestBackendsResolve_Shapes(t *testing.T) {
-	r := &Reconciler{MeshDomain: "mesh"}
-	svcKind := gatewayv1.Kind("Service")
-	otherKind := gatewayv1.Kind("Foo")
-
-	ok, _, _ := r.backendsResolve(context.Background(), "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
-		{Name: "svc-1", Kind: &svcKind},
-	}, nil)
-	assert.True(t, ok, "valid Service-kind ref resolves")
-
-	ok, reason, _ := r.backendsResolve(context.Background(), "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
-		{Name: "x", Kind: &otherKind},
-	}, nil)
-	assert.False(t, ok)
-	assert.Equal(t, string(gatewayv1.RouteReasonInvalidKind), reason)
-
-	ok, reason, _ = r.backendsResolve(context.Background(), "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
-		{Name: ""},
-	}, nil)
-	assert.False(t, ok)
-	assert.Equal(t, string(gatewayv1.RouteReasonBackendNotFound), reason)
-
-	// Cross-namespace ref with no ReferenceGrant → RefNotPermitted.
-	otherNs := gatewayv1.Namespace("other")
-	ok, reason, _ = r.backendsResolve(context.Background(), "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
-		{Name: "svc-1", Kind: &svcKind, Namespace: &otherNs},
-	}, nil)
-	assert.False(t, ok)
-	assert.Equal(t, string(gatewayv1.RouteReasonRefNotPermitted), reason)
-
-	// Cross-namespace ref WITH a matching grant → resolved.
-	grants := []gatewayv1beta1.ReferenceGrant{{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "other"},
-		Spec: gatewayv1beta1.ReferenceGrantSpec{
-			From: []gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Namespace: "ns"}},
-			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service"}},
-		},
-	}}
-	ok, _, _ = r.backendsResolve(context.Background(), "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
-		{Name: "svc-1", Kind: &svcKind, Namespace: &otherNs},
-	}, grants)
-	assert.True(t, ok, "granted cross-namespace ref resolves")
-}
-
 // TestBuildGammaRoute_DropsUngrantedCrossNamespaceBackend: an ungranted
 // cross-namespace backendRef is dropped from the built route; a same-namespace one
 // (and a granted cross-ns one) stays.

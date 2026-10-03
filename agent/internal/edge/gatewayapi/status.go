@@ -626,7 +626,7 @@ func (r *Reconciler) backendsResolveL4(ctx context.Context, routeNamespace, rout
 		if string(ref.Name) == "" {
 			return false, string(gatewayv1.RouteReasonBackendNotFound), "backendRef has an empty name"
 		}
-		backendNS := attachment.DerefBackendNamespace(ref.Namespace)
+		backendNS := referencegrant.BackendNamespace(ref.Namespace)
 		if referencegrant.CrossNamespace(backendNS, routeNamespace) &&
 			!referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, backendNS, string(ref.Name)) {
 			return false, string(gatewayv1.RouteReasonRefNotPermitted),
