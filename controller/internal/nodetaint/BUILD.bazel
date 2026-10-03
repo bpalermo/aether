@@ -7,6 +7,7 @@ go_library(
     visibility = ["//controller:__subpackages__"],
     deps = [
         "//common/constants/labels",
+        "//common/taint",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/api/errors",
         "@io_k8s_apimachinery//pkg/types",
@@ -28,6 +29,7 @@ go_test(
     embed = [":nodetaint"],
     deps = [
         "//common/constants/labels",
+        "//common/taint",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//core/v1:core",
