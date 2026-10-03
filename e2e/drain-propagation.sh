@@ -93,6 +93,10 @@ esac
 # one, by restarting the source agent until its new connection lands there;
 # `same` / `cross` pin every run; `any` (the etcd default) only reports.
 DRP_PLACEMENT="${DRP_PLACEMENT:-$([ "$DRP_BACKEND" = kubernetes ] && echo alternate || echo any)}"
+# DRP_ATTACH_WAIT: how long (s) placement steering polls, every 250 ms, for a
+# just-restarted agent's registrar flow to show up in conntrack before it reads
+# the attachment as unknown and restarts the agent again (aether#1154).
+DRP_ATTACH_WAIT="${DRP_ATTACH_WAIT:-10}"
 DRP_RUNS="${DRP_RUNS:-5}"
 DRP_LEGS="${DRP_LEGS:-S R}"
 DRP_STEADY_BOUND="${DRP_STEADY_BOUND:-1.0}"
@@ -148,14 +152,44 @@ registrar_of() {
 	echo "${names:-?}"
 }
 
+# now_ms — wall-clock milliseconds (bash 5 EPOCHREALTIME; "." or "," decimal).
+now_ms() {
+	local t="${EPOCHREALTIME//[.,]/}"
+	echo $((t / 1000))
+}
+
+# attachments — "SRC DST POLLS": the source and destination agents' registrar
+# replicas (registrar_of), polled every 250 ms for up to DRP_ATTACH_WAIT s while
+# either reads "?". Right after a restart the new agent is Ready before its
+# registrar stream shows up as an ESTABLISHED conntrack flow, and reading that
+# window as "unknown" cost a spurious agent restart per placement (aether#1154).
+# POLLS is how many extra reads it took (0 = the first read was settled).
+attachments() {
+	local src_pod dst_pod src dst polls=0 deadline
+	src_pod="$(agent_pod_on "$NODE")"
+	dst_pod="$(agent_pod_on "$DST_NODE")"
+	deadline=$(($(now_ms) + DRP_ATTACH_WAIT * 1000))
+	while true; do
+		src="$(registrar_of "$src_pod")"
+		dst="$(registrar_of "$dst_pod")"
+		if [ "$src" != "?" ] && [ "$dst" != "?" ]; then break; fi
+		[ "$(now_ms)" -lt "$deadline" ] || break
+		polls=$((polls + 1))
+		sleep 0.25
+	done
+	echo "$src $dst $polls"
+}
+
 # place_source WANT — restart the source agent until its registrar replica is
 # the destination agent's (WANT=same) or the other one (WANT=cross). Each new
 # agent dials the Service afresh, so each restart is a fresh draw.
 place_source() {
-	local want="$1" tries=0 src dst got
+	local want="$1" tries=0 src dst got polls
 	while true; do
-		src="$(registrar_of "$(agent_pod_on "$NODE")")"
-		dst="$(registrar_of "$(agent_pod_on "$DST_NODE")")"
+		read -r src dst polls <<<"$(attachments)"
+		if [ "$polls" -gt 0 ]; then
+			echo "  placement: attachment read took $polls extra poll(s) at 250 ms (source on $src, destination on $dst)"
+		fi
 		got="?"
 		if [[ "$src" != *"|"* && "$src" != "?" && "$dst" != *"|"* && "$dst" != "?" ]]; then
 			if [ "$src" = "$dst" ]; then got=same; else got=cross; fi
