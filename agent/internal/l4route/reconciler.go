@@ -347,21 +347,13 @@ func (r *Reconciler) backendsResolve(_ context.Context, routeNamespace, routeKin
 		if string(ref.Name) == "" {
 			return false, string(gatewayv1.RouteReasonBackendNotFound), "backendRef has an empty name"
 		}
-		if ns := derefBackendNamespace(ref.Namespace); referencegrant.CrossNamespace(ns, routeNamespace) &&
+		if ns := referencegrant.BackendNamespace(ref.Namespace); referencegrant.CrossNamespace(ns, routeNamespace) &&
 			!referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, string(ref.Name)) {
 			return false, string(gatewayv1.RouteReasonRefNotPermitted),
 				fmt.Sprintf("cross-namespace backendRef to Service %q in namespace %q is not permitted by any ReferenceGrant", ref.Name, ns)
 		}
 	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
-}
-
-// derefBackendNamespace returns the backendRef namespace ("" when unset).
-func derefBackendNamespace(ns *gatewayv1.Namespace) string {
-	if ns == nil {
-		return ""
-	}
-	return string(*ns)
 }
 
 func tcpBackendRefs(rules []gatewayv1.TCPRouteRule) []gatewayv1.BackendObjectReference {

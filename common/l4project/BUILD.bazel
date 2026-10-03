@@ -7,7 +7,6 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//common/referencegrant",
-        "//common/serviceref",
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
         "@io_k8s_sigs_gateway_api//apis/v1beta1",
     ],
