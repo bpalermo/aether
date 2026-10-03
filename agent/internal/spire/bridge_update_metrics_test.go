@@ -2,8 +2,10 @@ package spire
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
+	"time"
 
 	"aethermesh.dev/common/spire/spiretest"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
@@ -17,31 +19,77 @@ import (
 // exact series is exported at all — the seeding contract is per attribute set.
 func counterPoint(t *testing.T, reader *sdkmetric.ManualReader, name string, attrs ...attribute.KeyValue) (int64, bool) {
 	t.Helper()
+	v, ok, err := readCounterPoint(reader, name, attrs...)
+	require.NoError(t, err)
+	return v, ok
+}
+
+// readCounterPoint is counterPoint without the assertions, for
+// require.Eventually conditions: they run off the test goroutine, where
+// t.FailNow must not be called (#1151). The caller asserts the error once
+// Eventually has returned.
+func readCounterPoint(reader *sdkmetric.ManualReader, name string, attrs ...attribute.KeyValue) (int64, bool, error) {
 	want := attribute.NewSet(attrs...)
 	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm))
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		return 0, false, err
+	}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			if m.Name != name {
 				continue
 			}
 			sum, ok := m.Data.(metricdata.Sum[int64])
-			require.Truef(t, ok, "metric %s is %T, want Sum[int64]", name, m.Data)
+			if !ok {
+				return 0, false, fmt.Errorf("metric %s is %T, want Sum[int64]", name, m.Data)
+			}
 			for _, dp := range sum.DataPoints {
 				if dp.Attributes.Equals(&want) {
-					return dp.Value, true
+					return dp.Value, true, nil
 				}
 			}
 		}
 	}
-	return 0, false
+	return 0, false, nil
 }
 
 func svidUpdates(t *testing.T, reader *sdkmetric.ManualReader, identity, update string) int64 {
 	t.Helper()
-	v, ok := counterPoint(t, reader, "aether.agent.spire.svid_updates", attrIdentity.String(identity), attrUpdate.String(update))
-	require.Truef(t, ok, "svid_updates{%s,%s} not exported", identity, update)
+	v, err := readSVIDUpdates(reader, identity, update)
+	require.NoError(t, err)
 	return v
+}
+
+// readSVIDUpdates is svidUpdates for require.Eventually conditions (see
+// readCounterPoint); an unexported series is an error.
+func readSVIDUpdates(reader *sdkmetric.ManualReader, identity, update string) (int64, error) {
+	v, ok, err := readCounterPoint(reader, "aether.agent.spire.svid_updates", attrIdentity.String(identity), attrUpdate.String(update))
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, fmt.Errorf("svid_updates{%s,%s} not exported", identity, update)
+	}
+	return v, nil
+}
+
+// eventuallyCounter polls read until want holds. A read error ends the poll at
+// once and is asserted here, on the test goroutine, not inside Eventually's
+// condition goroutine (#1151). The condition that sets readErr is the last one
+// Eventually waits for, so reading it afterwards is ordered by Eventually's own
+// channel receive.
+func eventuallyCounter(t *testing.T, read func() (int64, error), want func(int64) bool, waitFor, tick time.Duration, msgAndArgs ...any) {
+	t.Helper()
+	var readErr error
+	require.Eventually(t, func() bool {
+		v, err := read()
+		if err != nil {
+			readErr = err
+			return true
+		}
+		return want(v)
+	}, waitFor, tick, msgAndArgs...)
+	require.NoError(t, readErr)
 }
 
 // TestUpdateCountersAreSeeded: a healthy agent that has not seen a rotation yet
