@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -136,13 +137,23 @@ func TestPushSecretsPublishesMonotonically(t *testing.T) {
 	// Errors are collected rather than asserted in the goroutines: testify's
 	// require calls runtime.Goexit, which off the test goroutine would leak the
 	// WaitGroup instead of failing the test.
+	// The responses are minted here, on the test goroutine, for the same
+	// reason: svidResponse asserts through spiretest's require (#1151).
+	mint := func(id string) []*brokerpb.SubscribeToX509SVIDResponse {
+		out := make([]*brokerpb.SubscribeToX509SVIDResponse, rounds)
+		for i := range rounds {
+			out[i] = svidResponse(t, ca, id, i+1, nil)
+		}
+		return out
+	}
+	responses := map[string][]*brokerpb.SubscribeToX509SVIDResponse{idAName: mint(idAName), idBName: mint(idBName)}
 	errs := make(chan error, 3*rounds)
 	var wg sync.WaitGroup
 	wg.Add(3)
 	rotate := func(netns, id string) {
 		defer wg.Done()
-		for i := 1; i <= rounds; i++ {
-			if err := b.handleSVIDUpdate(ctx, netns, svidResponse(t, ca, id, i, nil)); err != nil {
+		for _, resp := range responses[id] {
+			if err := b.handleSVIDUpdate(ctx, netns, resp); err != nil {
 				errs <- err
 			}
 		}
@@ -312,21 +323,46 @@ func counterValue(t *testing.T, reader *sdkmetric.ManualReader, name string) int
 
 func lookupCounter(t *testing.T, reader *sdkmetric.ManualReader, name string) (int64, bool) {
 	t.Helper()
+	value, found, err := readLookupCounter(reader, name)
+	require.NoError(t, err)
+	return value, found
+}
+
+// readCounter is counterValue for require.Eventually conditions (see
+// readCounterPoint); an unexported counter is an error.
+func readCounter(reader *sdkmetric.ManualReader, name string) (int64, error) {
+	value, found, err := readLookupCounter(reader, name)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, fmt.Errorf("counter %s not exported", name)
+	}
+	return value, nil
+}
+
+// readLookupCounter is lookupCounter without the assertions, so it is safe off
+// the test goroutine (#1151).
+func readLookupCounter(reader *sdkmetric.ManualReader, name string) (int64, bool, error) {
 	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm))
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		return 0, false, err
+	}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			if m.Name != name {
 				continue
 			}
 			sum, ok := m.Data.(metricdata.Sum[int64])
-			require.Truef(t, ok, "metric %s is %T, want Sum[int64]", name, m.Data)
+			if !ok {
+				return 0, false, fmt.Errorf("metric %s is %T, want Sum[int64]", name, m.Data)
+			}
 			var total int64
 			for _, dp := range sum.DataPoints {
 				total += dp.Value
 			}
-			return total, true
+			return total, true, nil
 		}
 	}
-	return 0, false
+	return 0, false, nil
 }
