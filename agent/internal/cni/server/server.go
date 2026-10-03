@@ -130,6 +130,37 @@ type CNIServer struct {
 	// which is what decides whether self-heal eviction can heal anything at all
 	// (see unchained). Set via SetChainState; nil disables the interlock.
 	chain cniconflist.ChainState
+
+	// ownership, when set, holds the socket bind and every node-writing loop
+	// (liveness, termination drain, ghost sweep) until this agent owns its
+	// node (proposal 041). Set via SetOwnership; nil means owned from the
+	// start.
+	ownership Ownership
+}
+
+// Ownership is this agent's claim on its node as the CNI server needs to see
+// it (proposal 041). *ownership.Node implements it.
+type Ownership interface {
+	// WaitOwned blocks until this agent owns the node, or returns ctx's error.
+	WaitOwned(ctx context.Context) error
+}
+
+// SetOwnership makes the server a standby until this agent owns its node: it
+// binds cni.sock only then, and only then starts the loops that write the
+// registry, local storage or the Kubernetes API. Before that the agent that
+// owns the node serves every CNI ADD/DEL, and a standby answering one would
+// wait for an ACK from a proxy that is not its client (envoyAckTimeout) and
+// start the pod with no listener. What that agent did meanwhile is picked up
+// by ReconcileStorage, a takeover step that runs before ownership is announced.
+//
+// Only the SPIRE resubscription of stored pods runs before ownership: client
+// certificates are a first-serve gate (#1103), and two Broker subscriptions
+// for one pod are two streams of the same SVID.
+func (s *CNIServer) SetOwnership(o Ownership) {
+	s.ownership = o
+	if o != nil {
+		s.SetBindGate(o.WaitOwned)
+	}
 }
 
 // SetChainState wires the CNI conflist chaining state into the ghost sweep's
@@ -249,15 +280,30 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 
 	s.log.DebugContext(ctx, "node metadata queried successfully", "region", region, "zone", zone, "nodeIP", nodeIP)
 
+	// Restore SVID subscriptions for pods loaded from storage: subscriptions are
+	// otherwise created only on CNI ADD, so an agent restart would leave existing
+	// pods' workload SVIDs unsubscribed and their mTLS broken until recreation.
+	// Also on a standby: the certificates are a first-serve gate (#1103).
+	go s.runResubscribeStoredPods(ctx)
+
+	go s.startNodeWriters(ctx)
+	return nil
+}
+
+// startNodeWriters starts the loops that write the registry, local storage
+// and the Kubernetes API on this node's behalf, once this agent owns the node
+// (immediately when no ownership is wired).
+func (s *CNIServer) startNodeWriters(ctx context.Context) {
+	if s.ownership != nil {
+		if err := s.ownership.WaitOwned(ctx); err != nil {
+			return
+		}
+	}
+
 	// Delegated liveness: reflect each local pod's app health (from the proxy's
 	// active health check) into the registry so it is marked unhealthy in every
 	// client's EDS while the app is not serving.
 	go s.runLivenessLoop(ctx)
-
-	// Restore SVID subscriptions for pods loaded from storage: subscriptions are
-	// otherwise created only on CNI ADD, so an agent restart would leave existing
-	// pods' workload SVIDs unsubscribed and their mTLS broken until recreation.
-	go s.runResubscribeStoredPods(ctx)
 
 	// Early drain: deregister endpoints the moment pod deletion is requested
 	// (deletionTimestamp), instead of waiting for CNI DEL after the containers
@@ -268,7 +314,6 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 	// live local pod accounts for (lost CNI DELs, node churn). Prerequisite for
 	// EDS health-check mode, where a HEALTHY ghost would receive traffic forever.
 	go s.runGhostSweepLoop(ctx)
-	return nil
 }
 
 // queryNodeMetadata retrieves the topology.kubernetes.io/region and

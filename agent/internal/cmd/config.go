@@ -41,6 +41,12 @@ type AgentConfig struct {
 	// MountedLocalStorageDir is the directory where pod data is stored locally
 	MountedLocalStorageDir string
 
+	// NodeLockPath is the node-ownership lock (proposal 041): the agent that
+	// owns the node holds an exclusive flock on it, and an agent that finds it
+	// taken starts as a standby that takes the node over when it is released.
+	// Empty disables the lock (owned from the start, the pre-041 behaviour).
+	NodeLockPath string
+
 	// MountedCNINetDir is the host's CNI network-config directory as mounted into
 	// the agent container (read-write). The re-assert loop watches the active
 	// conflist there.
@@ -216,6 +222,7 @@ func NewAgentConfig() *AgentConfig {
 		GatewayClassName:        "aether",
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
+		NodeLockPath:            constants.DefaultAgentLockPath,
 		MountedCNINetDir:        constants.DefaultHostCNINetDir,
 		CNIConflistReassert:     true,
 		UDSCSIRoot:              udspath.DefaultCSIRoot,

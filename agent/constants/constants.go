@@ -38,6 +38,13 @@ const (
 	// /run/aether is shared between the agent and proxy containers.
 	DefaultProxyHealthSocketPath = "/run/aether/health.sock"
 
+	// DefaultAgentLockPath is the node-ownership lock (proposal 041). The agent
+	// that owns this node holds an exclusive flock(2) on it for its whole life;
+	// a surge-rolled successor starts as a standby blocked on it and takes the
+	// node over the instant the kernel releases it (the owner's exit, however it
+	// dies). On /run/aether, the hostPath both agent pods of a surge mount.
+	DefaultAgentLockPath = "/run/aether/agent.lock"
+
 	// DefaultSpireBrokerSocketPath is the default path to the SPIRE agent's
 	// SPIFFE Broker Endpoint socket, as the aether chart mounts it (proposal 036).
 	// The SPIRE chart puts it on the node at

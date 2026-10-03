@@ -187,7 +187,7 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 // (demand-scoped distribution): the agent re-asserts its filter on every
 // reconnect, and an unset filter preserves the full watch.
 func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest, stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse]) error {
-	watcherID := fmt.Sprintf("%s/%s", req.GetClusterName(), req.GetNodeName())
+	watcherID := watcherIDOf(req)
 	filterServices, filterSet := buildWatchFilter(req)
 	s.log.DebugContext(stream.Context(), "WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion(),
 		"filtered", filterSet != nil, "filterServices", len(filterServices))
@@ -224,6 +224,18 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 	ch := s.broadcaster.Subscribe(watcherID, filterServices)
 	defer s.broadcaster.Unsubscribe(watcherID, ch)
 	return streamEvents(stream, ch)
+}
+
+// watcherIDOf keys a watch stream: one per cluster and node, and per agent
+// instance when the agent names one. A reconnect from the same key replaces the
+// previous stream; two agents on one node during a surge roll (proposal 041)
+// must not, or each one's watch would close the other's with DataLoss for the
+// whole overlap.
+func watcherIDOf(req *registrarv1.WatchEndpointsRequest) string {
+	if instance := req.GetInstance(); instance != "" {
+		return fmt.Sprintf("%s/%s/%s", req.GetClusterName(), req.GetNodeName(), instance)
+	}
+	return fmt.Sprintf("%s/%s", req.GetClusterName(), req.GetNodeName())
 }
 
 // buildWatchFilter parses the request filter into a service list and lookup set.

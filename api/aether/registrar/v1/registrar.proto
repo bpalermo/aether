@@ -59,6 +59,14 @@ message WatchEndpointsRequest {
   // Agents re-assert their filter on every reconnect; the registrar never
   // serves less than asked.
   ServiceFilter filter = 4;
+  // instance distinguishes two agents watching for the same node at once: a
+  // surge roll runs the new agent as a standby beside the old one (proposal
+  // 041), and keyed by cluster and node alone each one's watch would replace
+  // the other's — closing it with DataLoss, forcing a full resync, and
+  // ping-ponging for the whole overlap. The agent sends its pod name, so a
+  // container restart in the same pod still replaces its own stale watch.
+  // Empty keeps the cluster/node key (an agent that predates this field).
+  string instance = 5;
 }
 
 // ServiceFilter scopes a watch to a set of service names.

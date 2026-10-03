@@ -197,6 +197,15 @@ func (c *SnapshotCache) markObservedDirtyLocked() {
 func (c *SnapshotCache) flushObservedUpstreams() {
 	c.observedWriteMu.Lock()
 	defer c.observedWriteMu.Unlock()
+	if !c.nodeWritesAllowed() {
+		// A standby (proposal 041): keep the change pending, disarm the timer so
+		// the next change can re-arm it, and let SetNodeWriteGate's takeover
+		// flush write it once this agent owns the node.
+		c.depMu.Lock()
+		c.observedFlushTimer = nil
+		c.depMu.Unlock()
+		return
+	}
 	path, stored, ok := c.takeObservedSnapshot()
 	if !ok {
 		return

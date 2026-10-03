@@ -5,6 +5,7 @@ import (
 
 	"aethermesh.dev/agent/internal/cniconflist"
 	"aethermesh.dev/agent/internal/node"
+	"aethermesh.dev/agent/internal/ownership"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,10 +17,10 @@ func TestNewCNIConflistReasserterKillSwitch(t *testing.T) {
 	t.Cleanup(func() { cfg.CNIConflistReassert = prev })
 
 	cfg.CNIConflistReassert = false
-	assert.Nil(t, newCNIConflistReasserter(), "the kill switch must build no re-asserter at all")
+	assert.Nil(t, newCNIConflistReasserter(ownership.New("", nil, nil)), "the kill switch must build no re-asserter at all")
 
 	cfg.CNIConflistReassert = true
-	require.NotNil(t, newCNIConflistReasserter())
+	require.NotNil(t, newCNIConflistReasserter(ownership.New("", nil, nil)))
 }
 
 // TestChainStateOf is the regression test for the typed-nil trap. A nil
@@ -54,7 +55,7 @@ func TestTaintRemoverKillSwitchIsSocketOnly(t *testing.T) {
 	t.Cleanup(func() { cfg.CNIConflistReassert = prev })
 	cfg.CNIConflistReassert = false
 
-	reasserter := newCNIConflistReasserter()
+	reasserter := newCNIConflistReasserter(ownership.New("", nil, nil))
 	tr := &node.TaintRemover{Chain: chainStateOf(reasserter)}
 
 	// Compared as an interface, not via assert.Nil: the gate's own kill-switch
@@ -70,7 +71,7 @@ func TestTaintRemoverWiresTheReasserter(t *testing.T) {
 	t.Cleanup(func() { cfg.CNIConflistReassert = prev })
 	cfg.CNIConflistReassert = true
 
-	reasserter := newCNIConflistReasserter()
+	reasserter := newCNIConflistReasserter(ownership.New("", nil, nil))
 	require.NotNil(t, reasserter)
 
 	tr := &node.TaintRemover{Chain: chainStateOf(reasserter)}

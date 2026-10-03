@@ -24,6 +24,7 @@ go_test(
     name = "node_test",
     srcs = [
         "taint_conflict_test.go",
+        "taint_owned_test.go",
         "taint_test.go",
     ],
     embed = [":node"],

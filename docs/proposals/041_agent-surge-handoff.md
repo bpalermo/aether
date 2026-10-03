@@ -106,6 +106,48 @@ standard churn.
    delete-then-create? Yes: the lock is free at start, so the agent serves
    immediately, as today.
 
+### Resolutions (implementation)
+
+1. **Diff reconcile.** `storage.Reloader` (`CachedLocalStorage.Reload`)
+   re-reads the directory under the storage lock and returns
+   added/updated/removed records, the removed ones with the value the standby
+   built from. `CNIServer.ReconcileStorage` applies it under `lifecycleMu`:
+   `RemovePod` + SVID unsubscribe for a DEL, `AddPod` + SVID subscribe for an
+   ADD, `AddPod` for a rewritten record (the old agent's termination watch
+   marking a pod Terminating). It is a takeover step, so it runs after the
+   lock and before either socket binds, and it waits for the xDS server's own
+   load from storage (`LocalListenersLoaded`), the view the diff is against.
+   An uncontended start (free lock at process start, before storage is read)
+   runs no takeover step at all.
+2. **Probe cost.** The `agent-ready` exec probe is stdlib-only (`net`, no
+   `net/http`), guarded by `//agent/cmd/agent-ready:deps_test` (the linked
+   ELF's build info must list no module). Period stays 2 s.
+3. **Old agent never exits.** The standby stays a standby, Ready (its
+   `standby` readiness check passes once the first snapshot is complete), and
+   binds nothing; the old pod's `terminationGracePeriodSeconds` bounds it, and
+   the kernel releases the lock when the kubelet kills the process. A standby
+   deleted before takeover exits without ever owning the node.
+4. **`kubectl delete pod` without surge.** The lock is free at start, so the
+   agent owns the node as soon as the manager starts. Nothing waits on the
+   lock or runs a takeover step.
+
+Found during implementation:
+
+- **The registrar keyed watch streams by cluster/node.** Two agents on one
+  node would replace each other's `WatchEndpoints` subscription (DataLoss,
+  full resync) for the whole overlap. `WatchEndpointsRequest.instance`
+  (the pod name) is now part of the key; empty keeps the old key, so an
+  agent predating it behaves as before.
+- **An agent that predates the lock.** The first surge roll onto this version
+  replaces an agent that holds no lock. The standby therefore also waits until
+  no server answers on `xds.sock`/`cni.sock` (a dial; a stale file from a
+  killed agent answers ECONNREFUSED and does not count) before it binds.
+- **The CNI conflist re-asserter** writes a node file too. A standby
+  observes (readiness reads the chaining state) but repairs only once it owns
+  the node, and re-checks at takeover.
+- **QUIC pair fetch window** (#1033) restarts at takeover: it measures how
+  long the agent has served, and a standby serves nothing.
+
 ## Rejected alternatives
 
 - **Socket handoff by rename while both run** (the standby binds a temp path

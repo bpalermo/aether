@@ -66,6 +66,11 @@ type Reasserter struct {
 	SettleDelay time.Duration
 	// Log is the agent logger; a "cni-conflist" child is derived from it.
 	Log *slog.Logger
+	// Owned, when set, is closed once this agent owns its node (proposal 041).
+	// Until then the loop only OBSERVES — the chaining state still feeds the
+	// readiness check — and leaves the repair to the agent that owns the node:
+	// a standby writes no node file. nil repairs from the start.
+	Owned <-chan struct{}
 
 	log     *slog.Logger
 	metrics *reassertMetrics
@@ -107,14 +112,7 @@ func (r *Reasserter) Start(ctx context.Context) error {
 	events, errs, closeWatcher := r.watch(ctx)
 	defer closeWatcher()
 
-	interval := r.Interval
-	if interval <= 0 {
-		interval = DefaultCheckInterval
-	}
-	settleDelay := r.SettleDelay
-	if settleDelay <= 0 {
-		settleDelay = DefaultSettleDelay
-	}
+	interval, settleDelay := r.timings()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -127,10 +125,17 @@ func (r *Reasserter) Start(ctx context.Context) error {
 	r.log.InfoContext(ctx, "CNI conflist re-assert loop started", "dir", r.Dir, "interval", interval, "settleDelay", settleDelay)
 	r.check(ctx)
 
+	// Re-check the moment a standby takes the node over: a strip it saw while
+	// it was not allowed to repair is its to repair now.
+	ownedCh := r.pendingOwnership()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-ownedCh:
+			ownedCh = nil
+			r.check(ctx)
 		case <-ticker.C:
 			r.check(ctx)
 		case <-settle.C:
@@ -159,6 +164,28 @@ func (r *Reasserter) Start(ctx context.Context) error {
 			r.log.WarnContext(ctx, "CNI config directory watch error", "dir", r.Dir, "error", err)
 		}
 	}
+}
+
+// timings returns the re-check interval and the settle delay, defaulted.
+func (r *Reasserter) timings() (interval, settle time.Duration) {
+	interval, settle = r.Interval, r.SettleDelay
+	if interval <= 0 {
+		interval = DefaultCheckInterval
+	}
+	if settle <= 0 {
+		settle = DefaultSettleDelay
+	}
+	return interval, settle
+}
+
+// pendingOwnership returns the channel to re-check on when this agent takes
+// the node over, or nil when there is nothing to wait for (already owned, or
+// no gate): a nil channel never fires in a select.
+func (r *Reasserter) pendingOwnership() <-chan struct{} {
+	if r.owned() {
+		return nil
+	}
+	return r.Owned
 }
 
 // NeedLeaderElection reports false: every node's conflist is that node's own, so
@@ -228,7 +255,24 @@ func (r *Reasserter) check(ctx context.Context) {
 	}
 
 	r.record(ctx, false)
+	if !r.owned() {
+		r.log.InfoContext(ctx, "aether is not chained in the active CNI conflist; leaving the repair to the agent that owns this node (this one is a standby)", "path", path)
+		return
+	}
 	r.repair(ctx, path, data, chain)
+}
+
+// owned reports whether this agent may write the conflist (see Owned).
+func (r *Reasserter) owned() bool {
+	if r.Owned == nil {
+		return true
+	}
+	select {
+	case <-r.Owned:
+		return true
+	default:
+		return false
+	}
 }
 
 // repair re-appends the last-known-good aether entry to a conflist it went

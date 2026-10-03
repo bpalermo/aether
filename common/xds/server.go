@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"syscall"
 
 	commonlog "aethermesh.dev/common/log"
 	"go.uber.org/atomic"
@@ -28,6 +29,15 @@ type Server struct {
 	readiness *atomic.Bool
 
 	callback ServerCallback
+
+	// bindGate, when set, is waited on between PreListen and binding the
+	// listener. See SetBindGate.
+	bindGate func(ctx context.Context) error
+
+	// boundInode is the inode of the Unix socket this server bound (0 for TCP
+	// or before binding). Shutdown unlinks the path only while it still names
+	// this inode. See listen.
+	boundInode uint64
 }
 
 // ServerOption is a functional option for configuring a Server.
@@ -64,6 +74,15 @@ func (s *Server) AddCallback(callback ServerCallback) {
 	s.callback = callback
 }
 
+// SetBindGate makes Start wait on gate after PreListen and before it binds its
+// listener. A gate returning an error while ctx is live fails Start; one
+// returning because ctx ended makes Start return nil (a shutdown, not a fault).
+//
+// The node agent uses it for the surge handoff (proposal 041): a standby agent
+// builds everything a first serve needs, but must not bind the node's sockets
+// until the agent that owns them has exited.
+func (s *Server) SetBindGate(gate func(ctx context.Context) error) { s.bindGate = gate }
+
 // Start starts the gRPC server and blocks until the context is cancelled or the server errors.
 // It invokes the PreListen callback before starting to listen if a callback is registered.
 // For Unix domain sockets, it sets appropriate permissions on the socket file.
@@ -80,10 +99,20 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
+	if s.bindGate != nil {
+		if err := s.bindGate(ctx); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+	}
+
 	listener, err := s.listen(ctx)
 	if err != nil {
 		return err
 	}
+	defer s.unlinkOwnSocket()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -114,8 +143,10 @@ func (s *Server) listen(ctx context.Context) (net.Listener, error) {
 		// (SIGKILL, OOM, a segfault) leaves it behind — every subsequent restart
 		// would then crash-loop on bind until the file is cleared by hand. Remove a
 		// stale socket first so the agent restarts cleanly however its predecessor
-		// died. Safe in the node-singleton model: only one process binds this path,
-		// and the roll is delete-then-add, so no live listener is ever displaced.
+		// died. Safe in the node-singleton model: only one process binds this path
+		// at a time. A delete-then-create roll has no overlap, and a surge roll's
+		// standby agent binds only once it holds the node lock its predecessor
+		// held until it exited (proposal 041, SetBindGate).
 		if err := os.Remove(s.cfg.Address); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("failed to remove stale socket %s: %w", s.cfg.Address, err)
 		}
@@ -128,14 +159,53 @@ func (s *Server) listen(ctx context.Context) (net.Listener, error) {
 	}
 
 	if s.cfg.Network == "unix" {
+		// Go's UnixListener.Close unlinks its path BY NAME. If the socket file was
+		// replaced since this bind (a successor that took the node over, proposal
+		// 041), that would delete the successor's live socket, and every later
+		// dial by the proxy or the CNI plugin would find nothing. So unlinking is
+		// this server's own decision, made against the inode it bound
+		// (unlinkOwnSocket).
+		if ul, ok := listener.(*net.UnixListener); ok {
+			ul.SetUnlinkOnClose(false)
+		}
+		s.boundInode = inodeOf(s.cfg.Address)
 		if err := os.Chmod(s.cfg.Address, os.ModePerm); err != nil {
 			if closeErr := listener.Close(); closeErr != nil {
 				s.Log.ErrorContext(ctx, "failed to close listener during cleanup", "error", closeErr)
 			}
+			s.unlinkOwnSocket()
 			return nil, fmt.Errorf("failed to set socket file permissions: %w", err)
 		}
 	}
 	return listener, nil
+}
+
+// inodeOf returns path's inode, or 0 when it cannot be read.
+func inodeOf(path string) uint64 {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return 0
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return st.Ino
+	}
+	return 0
+}
+
+// unlinkOwnSocket removes the Unix socket file this server bound, but only
+// while the path still names the inode it bound: a path another process has
+// re-bound since is that process's socket and is left alone. A no-op for TCP.
+func (s *Server) unlinkOwnSocket() {
+	if s.cfg.Network != "unix" || s.boundInode == 0 {
+		return
+	}
+	if inodeOf(s.cfg.Address) != s.boundInode {
+		s.Log.Debug("socket path re-bound by another process; leaving it", "address", s.cfg.Address)
+		return
+	}
+	if err := os.Remove(s.cfg.Address); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.Log.Warn("failed to remove own socket on shutdown", "address", s.cfg.Address, "error", err)
+	}
 }
 
 // NeedLeaderElection returns false so the server runs on all replicas,

@@ -40,6 +40,7 @@ go_test(
         "snapshot_test.go",
         "snapshot_toctou_test.go",
         "sync_test.go",
+        "watcherid_test.go",
         "writebehind_test.go",
     ],
     embed = [":server"],
