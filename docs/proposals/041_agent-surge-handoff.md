@@ -1,8 +1,12 @@
 # Proposal 041: Surge roll for the node agent — a standby agent takes the node over
 
-**Status:** Draft 2026-10-02. Not implemented. The cheap half of #1123 shipped
-in its PR (startup overlap, image pull policy, cni-install idempotence,
-readiness cadence); this is the remaining half.
+**Status:** Implemented 2026-10-03, PRs #1155 (lock + standby), #1156
+(`agent-ready` probe), #1157 (chart, `agent.updateStrategy.surge`), #1158 (kind
+gate). On kind, with load running and 20 rolls, the proxy-side gap went from
+median 6.30 s / p99 10.22 s with delete-then-create to median 0.080 s / p99
+0.242 s with surge. Of the surge samples, 11 of 40 were shorter than the
+~80 ms poll and are reported as their bracketing bound. Open questions resolved
+below. The cheap half of #1123 shipped earlier in #1135.
 **Author:** Bruno Palermo
 **Date:** 2026-10-02
 **Related:** #1123 (the gap), #1129 (a successor proxy's SDS fetch timing out

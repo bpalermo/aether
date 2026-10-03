@@ -894,15 +894,15 @@ another agent owns this node; starting as a standby: building everything, bindin
 node lock acquired: the previous owner is gone; taking the node over   standby=6.2s
 takeover step done   step="merge the previous agent's persisted node state"
 takeover: applied the previous agent's CNI ADD/DEL from the overlap   added=1 updated=0 removed=1
-this agent owns the node; binding its sockets and starting its writers   takeover=4ms
+this agent owns the node; binding its sockets and starting its writers   takeover=1ms
 ```
 
 `takeover: local storage unchanged during the overlap` is the common case. The
 pod is Ready once its first snapshot is complete (`standby` readiness check).
 The DaemonSet controller then deletes the old pod, the old agent exits in
 20-100 ms, and the kernel hands the lock (`/run/aether/agent.lock`) to the
-standby. Proxy side, `control_plane.connected_state` drops to 0 for a few
-hundred ms (what `e2e/agent-restart-gap.sh` measures):
+standby. Proxy side, `control_plane.connected_state` drops to 0 for about 0.1 s
+(on kind: median 0.08 s, p99 0.24 s; what `e2e/agent-restart-gap.sh` measures):
 
 ```bash
 kubectl -n aether-system exec <proxy-pod> -c aether-proxy -- \
