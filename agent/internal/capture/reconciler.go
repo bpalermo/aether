@@ -15,6 +15,7 @@ import (
 
 	aetherannotations "aethermesh.dev/common/constants/annotations"
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/common/ctrlqueue"
 	commonlog "aethermesh.dev/common/log"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -84,6 +85,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&corev1.Service{}, builder.WithPredicates(meshService)).
 		WatchesRawSource(source.Channel(initialProjection(), &handler.EnqueueRequestForObject{})).
 		Named("capture").
+		WithOptions(ctrlqueue.Options()).
 		Complete(r)
 }
 

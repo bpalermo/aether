@@ -42,6 +42,12 @@ type Config struct {
 	// TraceExport attaches the OTLP span exporter. When false, SetupTracing still
 	// installs a TracerProvider (so logs get trace_id) but exports no spans.
 	TraceExport bool
+	// SchedulerLatency adds the Go runtime's scheduler-latency histogram
+	// (go.schedule.duration: how long runnable goroutines waited to run) to
+	// every metric reader. It is one series of ~160 fixed buckets read from
+	// runtime/metrics at collection time, so it costs no timer; it is opt-in per
+	// component because only the node agent needs it (issue #1131).
+	SchedulerLatency bool
 }
 
 // newResource builds the OTel Resource shared by the meter and tracer
@@ -60,6 +66,21 @@ func newResource(ctx context.Context, cfg Config) (*resource.Resource, error) {
 	)
 }
 
+// readerProducers is one external metric producer per reader: a runtime
+// Producer keeps per-collection state, so the two readers do not share one.
+type readerProducers struct {
+	prom, periodic sdkmetric.Producer
+}
+
+// runtimeProducers returns the external producers cfg asks for: the Go
+// scheduler-latency histogram when cfg.SchedulerLatency is set.
+func runtimeProducers(cfg Config) []readerProducers {
+	if !cfg.SchedulerLatency {
+		return nil
+	}
+	return []readerProducers{{prom: runtime.NewProducer(), periodic: runtime.NewProducer()}}
+}
+
 // Setup creates an OTel MeterProvider with a Prometheus exporter registered
 // against controller-runtime's metrics registry. When OTLPEndpoint is non-empty,
 // an OTLP gRPC periodic exporter is added as a second reader. A Resource with
@@ -73,7 +94,14 @@ func Setup(ctx context.Context, cfg Config) (shutdown func(context.Context) erro
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
-	promExporter, err := prometheus.New(prometheus.WithRegisterer(ctrlmetrics.Registry))
+	promOpts := []prometheus.Option{prometheus.WithRegisterer(ctrlmetrics.Registry)}
+	var periodicOpts []sdkmetric.PeriodicReaderOption
+	for _, p := range runtimeProducers(cfg) {
+		promOpts = append(promOpts, prometheus.WithProducer(p.prom))
+		periodicOpts = append(periodicOpts, sdkmetric.WithProducer(p.periodic))
+	}
+
+	promExporter, err := prometheus.New(promOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create prometheus exporter: %w", err)
 	}
@@ -93,7 +121,7 @@ func Setup(ctx context.Context, cfg Config) (shutdown func(context.Context) erro
 		if grpcErr != nil {
 			return nil, fmt.Errorf("failed to create OTLP gRPC exporter: %w", grpcErr)
 		}
-		opts = append(opts, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(grpcExporter)))
+		opts = append(opts, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(grpcExporter, periodicOpts...)))
 	}
 
 	provider := sdkmetric.NewMeterProvider(opts...)

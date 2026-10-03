@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//common/apis/config/v1:config",
         "//common/crdcheck",
+        "//common/ctrlqueue",
         "//common/log",
         "//common/serviceref",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",

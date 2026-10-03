@@ -14,6 +14,8 @@ func TestNewAgentConfig(t *testing.T) {
 	require.NotNil(t, c)
 	assert.False(t, c.Debug)
 	assert.NotNil(t, c.CNIServerConfig)
+	// The agent exports go.schedule.duration beside aether.agent.sched.* (#1131).
+	assert.True(t, c.SchedulerLatency)
 }
 
 func TestAgentConfig_DefaultValues(t *testing.T) {

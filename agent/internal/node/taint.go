@@ -11,6 +11,7 @@ import (
 
 	"aethermesh.dev/agent/internal/cniconflist"
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/common/ctrlqueue"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -108,6 +109,7 @@ func (r *TaintRemover) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Node{}, builder.WithPredicates(ownNode)).
 		Named("agent-taint-remover").
+		WithOptions(ctrlqueue.Options()).
 		Complete(r)
 }
 

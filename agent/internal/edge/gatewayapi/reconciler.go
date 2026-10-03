@@ -21,6 +21,7 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	configv1 "aethermesh.dev/api/aether/config/v1"
 	configapisv1 "aethermesh.dev/common/apis/config/v1"
+	"aethermesh.dev/common/ctrlqueue"
 	"aethermesh.dev/common/l4project"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/referencegrant"
@@ -142,7 +143,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Envoy must receive its own SnapshotCache update (per-Gateway listeners).
 		// Without this, the follower replica's Envoy has no listener on the
 		// internal ports and any connection kube-proxy routes to it is refused.
-		WithOptions(controller.Options{NeedLeaderElection: boolPtr(false)}).
+		// Its queue keeps no metrics (#1131, common/ctrlqueue).
+		WithOptions(edgeControllerOptions()).
 		For(&gatewayv1.HTTPRoute{}).
 		// GatewayClass: a spec change must re-publish status (observedGeneration
 		// bump). We reconcile any GatewayClass bearing our controllerName.
@@ -163,6 +165,14 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		b = b.Watches(&corev1.Secret{}, resync)
 	}
 	return b.Complete(r)
+}
+
+// edgeControllerOptions are the gatewayapi controller's options: run on every
+// replica, with a queue that keeps no metrics.
+func edgeControllerOptions() controller.Options {
+	o := ctrlqueue.Options()
+	o.NeedLeaderElection = boolPtr(false)
+	return o
 }
 
 // Reconcile re-lists our Gateways and the HTTPRoutes, TCPRoutes, and TLSRoutes

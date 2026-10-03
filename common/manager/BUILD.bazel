@@ -8,6 +8,7 @@ go_library(
         "logging.go",
         "manager.go",
         "shutdown_log.go",
+        "verbosity.go",
     ],
     importpath = "aethermesh.dev/common/manager",
     visibility = ["//visibility:public"],
@@ -28,9 +29,11 @@ go_test(
     srcs = [
         "shutdown_log_test.go",
         "telemetry_test.go",
+        "verbosity_test.go",
     ],
     embed = [":manager"],
     deps = [
+        "//common/log",
         "//common/telemetry/setup",
         "@com_github_go_logr_logr//:logr",
         "@org_golang_google_grpc//:grpc",
