@@ -35,6 +35,7 @@ go_library(
 
 go_test(
     name = "meshdns_test",
+    size = "small",
     srcs = [
         "forwardpool_test.go",
         "lameduck_test.go",

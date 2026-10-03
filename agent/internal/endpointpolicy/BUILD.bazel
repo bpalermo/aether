@@ -19,6 +19,7 @@ go_library(
 
 go_test(
     name = "endpointpolicy_test",
+    size = "small",
     srcs = ["reconciler_test.go"],
     embed = [":endpointpolicy"],
     deps = [

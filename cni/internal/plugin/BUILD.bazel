@@ -52,6 +52,7 @@ go_library(
 
 go_test(
     name = "plugin_test",
+    size = "small",
     srcs = [
         "capture_test.go",
         "client_test.go",

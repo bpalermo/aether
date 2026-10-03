@@ -26,6 +26,7 @@ go_binary(
 
 go_test(
     name = "identity-ready_test",
+    size = "small",
     srcs = ["main_test.go"],
     embed = [":identity-ready_lib"],
     deps = [

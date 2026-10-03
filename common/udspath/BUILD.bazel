@@ -13,6 +13,7 @@ go_library(
 
 go_test(
     name = "udspath_test",
+    size = "small",
     srcs = ["udspath_test.go"],
     embed = [":udspath"],
     deps = [

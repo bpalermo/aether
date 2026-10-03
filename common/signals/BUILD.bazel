@@ -9,6 +9,7 @@ go_library(
 
 go_test(
     name = "signals_test",
+    size = "small",
     srcs = ["signals_test.go"],
     embed = [":signals"],
     deps = ["@com_github_stretchr_testify//require"],

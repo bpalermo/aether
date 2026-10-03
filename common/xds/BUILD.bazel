@@ -30,6 +30,7 @@ go_library(
 
 go_test(
     name = "xds_test",
+    size = "small",
     srcs = [
         "bindgate_test.go",
         "callbacks_test.go",

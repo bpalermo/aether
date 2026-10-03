@@ -10,6 +10,7 @@ go_library(
 
 go_test(
     name = "ownership_test",
+    size = "small",
     srcs = ["ownership_test.go"],
     embed = [":ownership"],
     deps = [

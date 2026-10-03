@@ -29,6 +29,7 @@ go_library(
 
 go_test(
     name = "capture_test",
+    size = "small",
     srcs = [
         "heartbeat_test.go",
         "initial_projection_test.go",

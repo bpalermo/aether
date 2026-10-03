@@ -22,6 +22,7 @@ go_library(
 
 go_test(
     name = "node_test",
+    size = "small",
     srcs = [
         "taint_conflict_test.go",
         "taint_owned_test.go",

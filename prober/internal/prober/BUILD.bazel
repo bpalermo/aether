@@ -21,6 +21,7 @@ go_library(
 
 go_test(
     name = "prober_test",
+    size = "small",
     srcs = [
         "identity_test.go",
         "prober_test.go",

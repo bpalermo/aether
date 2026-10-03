@@ -19,6 +19,7 @@ go_binary(
 
 go_test(
     name = "chartconfig_test",
+    size = "small",
     srcs = ["chartconfig_test.go"],
     embed = [":chartconfig_lib"],
 )

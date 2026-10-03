@@ -22,6 +22,7 @@ go_library(
 
 go_test(
     name = "ack_test",
+    size = "small",
     srcs = [
         "metrics_test.go",
         "tracker_test.go",

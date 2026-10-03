@@ -13,6 +13,7 @@ go_library(
 
 go_test(
     name = "webhook_test",
+    size = "small",
     srcs = ["webhook_test.go"],
     embed = [":webhook"],
     deps = [

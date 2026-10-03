@@ -30,6 +30,7 @@ go_binary(
 
 go_test(
     name = "uds-csi_test",
+    size = "small",
     srcs = ["main_test.go"],
     # TestChartFlagsExist reads the argv the chart actually passes. Gazelle does
     # not manage `data` — keep this by hand.

@@ -21,6 +21,7 @@ go_binary(
 
 go_test(
     name = "proxy-ready_test",
+    size = "small",
     srcs = ["main_test.go"],
     embed = [":proxy-ready_lib"],
     deps = [

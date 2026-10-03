@@ -66,10 +66,10 @@ go_library(
 #   bazel test //test/envoy_validate:envoy_validate_test --test_output=all
 #
 # Tagged "envoy-validate" (not "integration") — no Docker daemon required.
-# size=medium: 3 Envoy validation processes, ~5 s wall time.
+# size=small: 3 Envoy validation processes, ~3-5 s wall time (measured 3.1 s).
 go_test(
     name = "envoy_validate_test",
-    size = "medium",
+    size = "small",
     srcs = [
         "ads_reconnect_test.go",
         "capture_transparent_test.go",
