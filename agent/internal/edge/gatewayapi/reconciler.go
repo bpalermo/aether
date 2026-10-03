@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"time"
 
 	"aethermesh.dev/common/serviceref"
 
@@ -22,10 +21,10 @@ import (
 	configv1 "aethermesh.dev/api/aether/config/v1"
 	configapisv1 "aethermesh.dev/common/apis/config/v1"
 	"aethermesh.dev/common/ctrlqueue"
+	"aethermesh.dev/common/gammaproject"
 	"aethermesh.dev/common/l4project"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/referencegrant"
-	"google.golang.org/protobuf/types/known/durationpb"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -659,7 +658,7 @@ func (r *Reconciler) buildRoutesForRule(
 ) ([]cache.Route, bool) {
 	redirect := buildHTTPRedirect(rule.Filters)
 	urlRewrite := buildHTTPURLRewrite(rule.Filters)
-	timeout := buildRouteTimeout(rule.Timeouts)
+	timeout := gammaproject.HTTPRouteTimeout(rule.Timeouts)
 	backends := r.buildHTTPRouteBackends(ctx, rule.BackendRefs, hr.Namespace, grants)
 
 	if redirect == nil && len(backends) == 0 {
@@ -996,21 +995,6 @@ func ptrType(p *gatewayv1.PathMatchType, def gatewayv1.PathMatchType) gatewayv1.
 		return def
 	}
 	return *p
-}
-
-// buildRouteTimeout parses the HTTPRoute rule's timeouts.request field into a
-// protobuf Duration for the edge route action. Returns nil when no timeout is set
-// or the duration is zero/unparseable (GEP-2257: a zero-value timeout means "no
-// timeout", and an invalid string is treated as unset rather than an error).
-func buildRouteTimeout(timeouts *gatewayv1.HTTPRouteTimeouts) *durationpb.Duration {
-	if timeouts == nil || timeouts.Request == nil {
-		return nil
-	}
-	d, err := time.ParseDuration(string(*timeouts.Request))
-	if err != nil || d <= 0 {
-		return nil
-	}
-	return durationpb.New(d)
 }
 
 // buildHTTPRedirect extracts the first RequestRedirect filter and converts it to a
