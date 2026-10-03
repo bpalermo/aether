@@ -78,9 +78,9 @@ func TestPermissionDeniedIsCountedAndRetried(t *testing.T) {
 
 	require.NoError(t, f.bridge.SubscribePod("/proc/42/ns/net", testWorkload, testPodRef))
 
-	require.Eventually(t, func() bool {
-		return counterValue(t, reader, "aether.agent.spire.broker.permission_denied") >= 2
-	}, 10*time.Second, 10*time.Millisecond, "a denied reference must be counted and retried, not abandoned")
+	eventuallyCounter(t, func() (int64, error) {
+		return readCounter(reader, "aether.agent.spire.broker.permission_denied")
+	}, func(v int64) bool { return v >= 2 }, 10*time.Second, 10*time.Millisecond, "a denied reference must be counted and retried, not abandoned")
 
 	f.bridge.mu.RLock()
 	_, served := f.bridge.secrets[testWorkload]
@@ -233,8 +233,11 @@ func TestSVIDRotationOnALiveStream(t *testing.T) {
 		return servedSVIDVersion(f.bridge, testWorkload) == 1
 	}, 10*time.Second, 10*time.Millisecond, "the first SVID must be served")
 
+	// Minted here, not in the condition: BrokerSVID asserts through require, and
+	// Eventually runs its condition off the test goroutine (#1151).
+	rotation := &spiretest.BrokerEntry{SVIDs: []*brokerpb.X509SVID{f.ca.BrokerSVID(t, testWorkload, 7)}}
 	require.Eventually(t, func() bool {
-		return f.rotate(t, 7, nil) == 1
+		return f.broker.Rotate(testPodRef.Namespace, testPodRef.Name, rotation) == 1
 	}, 5*time.Second, 20*time.Millisecond, "the stream must be live to receive a rotation")
 
 	require.Eventually(t, func() bool {

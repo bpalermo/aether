@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -57,28 +58,58 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// records parses the JSON log lines emitted so far.
-func (b *lockedBuffer) records(t *testing.T) []map[string]any {
-	t.Helper()
-
+// records parses the JSON log lines emitted so far. It returns a parse failure
+// instead of asserting on it: it runs inside require.Eventually conditions,
+// which execute off the test goroutine, where t.FailNow must not be called
+// (#1151). eventually and mustRecords assert on the test goroutine.
+func (b *lockedBuffer) records() ([]map[string]any, error) {
 	var out []map[string]any
 	for line := range strings.SplitSeq(strings.TrimSpace(b.String()), "\n") {
 		if line == "" {
 			continue
 		}
 		var rec map[string]any
-		require.NoError(t, json.Unmarshal([]byte(line), &rec), "log line is not JSON: %s", line)
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			return nil, fmt.Errorf("log line is not JSON: %s: %w", line, err)
+		}
 		out = append(out, rec)
 	}
-	return out
+	return out, nil
+}
+
+// mustRecords is records for the test goroutine.
+func (b *lockedBuffer) mustRecords(t *testing.T) []map[string]any {
+	t.Helper()
+
+	recs, err := b.records()
+	require.NoError(t, err)
+	return recs
+}
+
+// eventually polls cond over the parsed records until it holds. A line that
+// does not parse ends the poll at once; the error is then asserted here, on the
+// test goroutine, not inside the condition goroutine (#1151). The condition
+// that sets parseErr is the last one Eventually waits for, so reading it after
+// Eventually returns is ordered by Eventually's own channel receive.
+func (b *lockedBuffer) eventually(t *testing.T, cond func([]map[string]any) bool, waitFor, tick time.Duration, msgAndArgs ...any) {
+	t.Helper()
+
+	var parseErr error
+	require.Eventually(t, func() bool {
+		recs, err := b.records()
+		if err != nil {
+			parseErr = err
+			return true
+		}
+		return cond(recs)
+	}, waitFor, tick, msgAndArgs...)
+	require.NoError(t, parseErr)
 }
 
 // waitingLines returns the per-attempt waiting records.
-func (b *lockedBuffer) waitingLines(t *testing.T) []map[string]any {
-	t.Helper()
-
+func waitingLines(recs []map[string]any) []map[string]any {
 	var out []map[string]any
-	for _, rec := range b.records(t) {
+	for _, rec := range recs {
 		if rec["msg"] == "waiting for the SPIRE Workload API to issue this workload's SVID" {
 			out = append(out, rec)
 		}
@@ -99,13 +130,13 @@ func TestWaitingSourceIsNeverFatal(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- w.Start(ctx) }()
 
-	require.Eventually(t, func() bool {
-		return len(logs.waitingLines(t)) >= 3
-	}, 30*time.Second, 10*time.Millisecond, "the wait must be announced once per attempt; logs:\n%s", logs.String())
+	logs.eventually(t, func(recs []map[string]any) bool {
+		return len(waitingLines(recs)) >= 3
+	}, 30*time.Second, 10*time.Millisecond, "the wait must be announced once per attempt; logs:\n%s", logs)
 
 	// The attempt counter increases and the elapsed counter never goes backwards:
 	// that pair is what tells an operator "still coming up" from "not coming".
-	lines := logs.waitingLines(t)
+	lines := waitingLines(logs.mustRecords(t))
 	var lastElapsed float64
 	for i, rec := range lines {
 		assert.Equal(t, float64(i+1), rec["attempt"], "attempts must be numbered consecutively")
@@ -144,11 +175,11 @@ func TestWaitingSourceEscalatesToWarn(t *testing.T) {
 	defer cancel()
 	go func() { _ = w.Start(ctx) }()
 
-	require.Eventually(t, func() bool {
-		return len(logs.waitingLines(t)) >= 2
-	}, 30*time.Second, 10*time.Millisecond, "logs:\n%s", logs.String())
+	logs.eventually(t, func(recs []map[string]any) bool {
+		return len(waitingLines(recs)) >= 2
+	}, 30*time.Second, 10*time.Millisecond, "logs:\n%s", logs)
 
-	for _, rec := range logs.waitingLines(t) {
+	for _, rec := range waitingLines(logs.mustRecords(t)) {
 		assert.Equal(t, "WARN", rec["level"], "past the warn threshold the wait must escalate")
 		assert.Contains(t, rec, "error", "the line must carry why the attempt failed")
 	}
@@ -217,11 +248,11 @@ func TestWaitingSourceBecomesReadyWhenSPIREArrives(t *testing.T) {
 	// signals Updated (waiting.go attempt), so neither channel orders it before
 	// this read: poll with a deadline instead of reading the buffer once (#1140).
 	const arrivedMsg = "obtained this workload's SVID from the SPIRE Workload API"
-	var ready map[string]any
-	require.Eventually(t, func() bool {
-		ready = findRecord(logs.records(t), arrivedMsg)
-		return ready != nil
+	logs.eventually(t, func(recs []map[string]any) bool {
+		return findRecord(recs, arrivedMsg) != nil
 	}, 10*time.Second, 10*time.Millisecond, "the arrival must be announced; logs:\n%s", logs)
+	ready := findRecord(logs.mustRecords(t), arrivedMsg)
+	require.NotNil(t, ready)
 	assert.Equal(t, testTrustDomain, ready["trustDomain"])
 }
 
