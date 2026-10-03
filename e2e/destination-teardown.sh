@@ -133,10 +133,15 @@ warm() {
 # app (waited for), set lo DOWN in the pod netns, delete the pod.
 teardown_victim() {
 	local pod="$1" sb ppid app apid
-	sb="$(docker exec "$DST_NODE" crictl pods --name "$pod" -q | head -n 1)"
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`sed -n '1p'`).
+	sb="$(docker exec "$DST_NODE" crictl pods --name "$pod" -q | sed -n '1p')"
 	[ -n "$sb" ] || die "no sandbox for $pod on $DST_NODE"
 	ppid="$(docker exec "$DST_NODE" crictl inspectp "$sb" | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["pid"])')"
-	app="$(docker exec "$DST_NODE" crictl ps --pod "$sb" --name app -q | head -n 1)"
+	app="$(docker exec "$DST_NODE" crictl ps --pod "$sb" --name app -q | sed -n '1p')"
 	apid="$(docker exec "$DST_NODE" crictl inspect "$app" | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["pid"])')"
 	docker exec "$DST_NODE" sh -c "kill -TERM $apid; while kill -0 $apid 2>/dev/null; do sleep 0.005; done; nsenter -t $ppid -n ip link set lo down" ||
 		die "could not stop $pod's app and set its lo down"
@@ -205,7 +210,7 @@ run_once() {
 	res="$dir/results"
 	dt_scale
 	warm
-	victim="$(dst_pods | head -n 1)"
+	victim="$(dst_pods | sed -n '1p')"
 	stream_logs "$dir"
 	ct0="$(app_connect_timeouts)"
 	pod="$(pod_of "$DT_SRC")"

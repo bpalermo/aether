@@ -288,8 +288,12 @@ dump_state() {
 	kc -n "$NS" logs -l app.kubernetes.io/component=agent --all-containers --tail=600 --prefix 2>&1 |
 		grep -i "east-west QUIC" | tail -10 | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- envoy: quic: clusters and their host rq_total/cx_connect_fail --\033[0m\n' >&2
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead.
 	admin /clusters 2>/dev/null | grep -E '^quic:[^:]*::[0-9.]+:[0-9]+::(rq_total|cx_total|cx_connect_fail)::' |
-		head -60 | sed 's/^/    /' >&2 || true
+		sed -n '1,60s/^/    /p' >&2 || true
 	printf '\033[1;33m  -- envoy: HTTP/3 inbound listeners --\033[0m\n' >&2
 	admin /listeners 2>/dev/null | grep '_h3::' | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- envoy: _h3 listener + http3 upstream counters --\033[0m\n' >&2
@@ -297,7 +301,7 @@ dump_state() {
 		admin '/stats?filter=_h3' 2>/dev/null
 		admin '/stats?filter=upstream_cx_http3_total' 2>/dev/null
 	} | grep -E '(downstream_cx_total|downstream_rq_2xx|downstream_rq_5xx|upstream_cx_http3_total)' |
-		head -60 | sed 's/^/    /' >&2 || true
+		sed -n '1,60s/^/    /p' >&2 || true
 	printf '\033[1;33m  -- httproutes --\033[0m\n' >&2
 	kc get httproutes -A -o yaml 2>&1 | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- proxy log: the aether#957 shape (hostname mismatch) --\033[0m\n' >&2
@@ -339,7 +343,7 @@ build_images() {
 }
 
 create_cluster() {
-	if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+	if kind get clusters 2>/dev/null | grep -cx "$CLUSTER" >/dev/null; then
 		ok "kind cluster '$CLUSTER' already exists"
 		return
 	fi
@@ -522,7 +526,7 @@ install_aether() {
 arm_negative_control() {
 	kc -n "$NS" rollout status ds/aether-proxy --timeout=300s >/dev/null || die "the proxy DaemonSet never became Ready"
 	local deadline=$((SECONDS + 120))
-	until admin /runtime 2>/dev/null | grep -A8 "\"$QUIC_HOSTNAME_GUARD\"" | grep -q '"final_value": *"false"'; do
+	until admin /runtime 2>/dev/null | grep -A8 "\"$QUIC_HOSTNAME_GUARD\"" | grep -c '"final_value": *"false"' >/dev/null; do
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "negative control: the node proxy's /runtime never reported $QUIC_HOSTNAME_GUARD=false — a missing-SAN run would then be GREEN on the #47740 pin, not the aether#957 red"
 		sleep 5
@@ -632,7 +636,7 @@ deploy_workloads() {
 pod_of() {
 	kc -n "$TEST_NS" get pod -l "app=$1" --no-headers \
 		-o custom-columns=N:.metadata.name,D:.metadata.deletionTimestamp,P:.status.phase 2>/dev/null |
-		awk '$2 == "<none>" && $3 == "Running" { print $1; exit }'
+		awk '!f && $2 == "<none>" && $3 == "Running" { print $1; f = 1 }'
 }
 
 # host_rq DUMP CLUSTER — sum of rq_total over CLUSTER's host rows in a /clusters
@@ -657,7 +661,7 @@ h3_stat() { printf 'listener.inbound_%s_h3.http.inbound.downstream_rq_2xx' "$1";
 h3_rq() {
 	local name
 	name="$(h3_stat "$1")"
-	admin "/stats?filter=inbound_$1_h3" 2>/dev/null | awk -v n="$name:" '$1 == n { print $2; exit }'
+	admin "/stats?filter=inbound_$1_h3" 2>/dev/null | awk -v n="$name:" '!f && $1 == n { print $2; f = 1 }'
 }
 
 # req_batch SRC DST PATH N — N requests from SRC's pod to DST's mesh name, one

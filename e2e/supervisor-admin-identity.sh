@@ -124,7 +124,12 @@ s1_kill_successor() {
 	kc -n "$NS" rollout restart ds/aether-proxy >/dev/null
 	for i in $(seq 1 600); do
 		if [ "$(admin_epoch)" = "$((old_epoch + 1))" ]; then
-			pid="$(envoy_pids | awk -v e="$((old_epoch + 1))" '$2 == e { print $1; exit }')"
+			# SIGPIPE rule (#1121, e2e/README.md): this script runs under
+			# pipefail, so no pipeline may end in a reader that exits before its
+			# writer is done (`head`, `grep -q`/`-m`, `awk '...; exit'`): the
+			# writer dies of SIGPIPE and the pipeline fails with 141 at a random
+			# point. Read to EOF instead (awk keeps the first match, no `exit`).
+			pid="$(envoy_pids | awk -v e="$((old_epoch + 1))" '!f && $2 == e { print $1; f = 1 }')"
 			if [ -n "$pid" ]; then
 				node_sh "kill -9 $pid"
 				ok "killed successor envoy pid $pid (epoch $((old_epoch + 1))) after ~$((i / 5))s"
@@ -184,7 +189,7 @@ s4_new_pod_served() {
 
 	local listed=no
 	for i in $(seq 1 30); do
-		if admin /listeners 2>/dev/null | grep -q "inbound_${newpod}"; then
+		if grep -q "inbound_${newpod}" <<<"$(admin /listeners 2>/dev/null)"; then
 			listed=yes
 			break
 		fi
@@ -218,7 +223,7 @@ s4_new_pod_served() {
 run() {
 	s0_epoch_ge1
 	local old old_epoch logf
-	old="$(proxy_pods | awk '$2 == "<none>" { print $1; exit }')"
+	old="$(proxy_pods | awk '!f && $2 == "<none>" { print $1; f = 1 }')"
 	old_epoch="$(admin_epoch)"
 	logf="$(mktemp)"
 	# shellcheck disable=SC2064  # expand now: the path is known here

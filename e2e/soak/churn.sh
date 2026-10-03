@@ -705,9 +705,13 @@ udscsi() {
 	spec="${victims[$(((UDSCSI_STEP - 1) % n))]}"
 	vns="${spec%%/*}" vdep="${spec#*/}"
 	# A Running, not-terminating pod of the victim Deployment, and its node.
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141. awk keeps the first match, no `exit`.
 	line=$(k -n "$vns" get pods -l "app=$vdep" --field-selector=status.phase=Running \
 		-o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{" "}{.metadata.deletionTimestamp}{"\n"}{end}' 2>>"$LOG" |
-		awk 'NF == 2 {print; exit}')
+		awk '!f && NF == 2 {print; f = 1}')
 	read -r victim vnode <<<"$line"
 	if [ -z "${victim:-}" ]; then
 		log "FAILED $UDSCSI_NS/$UDSCSI_DS - no Running pod labelled app=$vdep in $vns to delete mid-roll"
@@ -759,7 +763,7 @@ udscsi() {
 	while [ "$(date +%s)" -lt "$deadline" ]; do
 		replacement=$(k -n "$vns" get pods -l "app=$vdep" \
 			-o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>/dev/null |
-			awk -v before=" $before " '$2 == "True" && index(before, " " $1 " ") == 0 {print $1; exit}')
+			awk -v before=" $before " '!f && $2 == "True" && index(before, " " $1 " ") == 0 {print $1; f = 1}')
 		if [ -n "$replacement" ]; then
 			ready_s=$(($(date +%s) - t_del))
 			break

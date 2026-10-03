@@ -239,8 +239,13 @@ echo "$OUT" | grep '^RESULT' || {
 	echo "$OUT" | tail -20
 }
 
+# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so no
+# pipeline may end in a reader that exits before its writer is done (`head`,
+# `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE and the
+# pipeline fails with 141 at a random point. Read to EOF instead, or grep a
+# captured variable (as here).
 for check in http_18081 http_portless tcp_9000; do
-	if echo "$OUT" | grep -q "^RESULT $check PASS"; then
+	if grep -q "^RESULT $check PASS" <<<"$OUT"; then
 		ok "$check"
 	else
 		bad "$check — $(echo "$OUT" | grep "^RESULT $check" || echo 'no result line')"
@@ -248,7 +253,7 @@ for check in http_18081 http_portless tcp_9000; do
 done
 
 log "registry: the pod must appear under BOTH protocol keys (037 dual registration)"
-if k get pods -l app=mp-e2e-svc -o jsonpath='{.items[0].metadata.annotations}' 2>/dev/null | grep -q '9000=tcp'; then
+if k get pods -l app=mp-e2e-svc -o jsonpath='{.items[0].metadata.annotations}' 2>/dev/null | grep -c '9000=tcp' >/dev/null; then
 	ok "pod carries ports=8080,9000=tcp"
 else
 	bad "pod annotation missing the =tcp suffix"
