@@ -64,7 +64,7 @@ func ServiceParents(refs []gatewayv1.ParentReference, routeNamespace string) []S
 // ServiceFilters); they are appended after any per-route ExtensionRef.
 func ProjectHTTPRule(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configprotov1.HTTPFilterSpec, serviceFilters []*registryv1.ExtensionFilter) *registryv1.GammaRoute {
 	gr := &registryv1.GammaRoute{}
-	gr.Timeout = httpRouteTimeout(rule.Timeouts)
+	gr.Timeout = HTTPRouteTimeout(rule.Timeouts)
 	gr.Backends = projectBackends(rule.BackendRefs, routeNamespace, routeKind, meshDomain, grants)
 	gr.Matches = projectHTTPMatches(rule.Matches)
 	gr.HeaderMutation = httpHeaderMutation(rule.Filters)
@@ -75,8 +75,12 @@ func ProjectHTTPRule(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind, me
 	return gr
 }
 
-// httpRouteTimeout extracts the request timeout from an HTTPRouteTimeouts, or nil.
-func httpRouteTimeout(timeouts *gatewayv1.HTTPRouteTimeouts) *durationpb.Duration {
+// HTTPRouteTimeout parses an HTTPRoute rule's timeouts.request field into a
+// protobuf Duration for the route action. Returns nil when no timeout is set or the
+// duration is zero/unparseable (GEP-2257: a zero-value timeout means "no timeout",
+// and an invalid string is treated as unset rather than an error). Shared by the
+// mesh (GAMMA) projection and the edge gateway reconciler.
+func HTTPRouteTimeout(timeouts *gatewayv1.HTTPRouteTimeouts) *durationpb.Duration {
 	if timeouts == nil || timeouts.Request == nil {
 		return nil
 	}
