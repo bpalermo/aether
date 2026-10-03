@@ -323,7 +323,8 @@ func (n *Node) liveServer() string {
 // meaning (proposal 041, "Readiness meaning"): the DaemonSet controller deletes
 // the old agent once the new one is Ready, so a standby must report Ready only
 // when it could serve the node the moment it gets it — its first snapshot built
-// and every first-serve gate passed, which is what complete being closed means.
+// and its identity, registry and capture-projection gates PASSED (not timed out),
+// which is what complete being closed means (AgentXdsServer.StandbyComplete).
 // Once this agent owns the node the check always passes and the agent's other
 // checks carry the verdict, exactly as before.
 func (n *Node) StandbyChecker(complete <-chan struct{}) func(*http.Request) error {
@@ -335,7 +336,7 @@ func (n *Node) StandbyChecker(complete <-chan struct{}) func(*http.Request) erro
 		case <-complete:
 			return nil
 		default:
-			return fmt.Errorf("standby since %s: first snapshot not built yet (identity, registry, capture projection, client certificates)",
+			return fmt.Errorf("standby since %s: first snapshot not complete: identity, registry or capture projection not in yet",
 				time.Since(n.claimed).Round(time.Second))
 		}
 	}

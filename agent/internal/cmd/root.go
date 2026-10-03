@@ -314,7 +314,7 @@ func runAgent(ctx context.Context) (retErr error) {
 
 	addTakeoverSteps(owner, snapshotCache, xdsSrv, cniSrv)
 
-	if err = setupNodeGating(m, reasserter, spireSource, owner, xdsSrv.FirstServeReady()); err != nil {
+	if err = setupNodeGating(m, reasserter, spireSource, owner, xdsSrv.StandbyComplete()); err != nil {
 		return err
 	}
 
@@ -665,15 +665,18 @@ func newCNIConflistReasserter(owner *ownership.Node) *cniconflist.Reasserter {
 // SPIRE gate and the remover, which could not see it, cleared it 50ms later,
 // every 30s. A nil re-asserter (--cni-conflist-reassert=false) reduces the
 // chaining half of both to its pre-#667 behaviour.
-func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSource *commonspire.WaitingSource, owner *ownership.Node, firstServeReady <-chan struct{}) error {
+func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSource *commonspire.WaitingSource, owner *ownership.Node, standbyComplete <-chan struct{}) error {
 	chain := chainStateOf(reasserter)
 	ready := newAgentReadiness(l)
 
 	// What Ready means to a surge roll (proposal 041): the DaemonSet controller
 	// deletes the old agent once this one is Ready, so a standby is Ready only
-	// once its first snapshot is complete. Always passes once this agent owns
-	// the node, so an uncontended start reads exactly as before.
-	if err := ready.addExpected(m, "standby", owner.StandbyChecker(firstServeReady)); err != nil {
+	// once its first snapshot is complete with the registry and capture gates
+	// PASSED, not timed out (StandbyComplete): a standby that cannot reach the
+	// registrar stalls the roll, visibly, instead of replacing a healthy agent
+	// with local-only config. Always passes once this agent owns the node, so
+	// an uncontended start reads exactly as before.
+	if err := ready.addExpected(m, "standby", owner.StandbyChecker(standbyComplete)); err != nil {
 		return err
 	}
 
@@ -972,7 +975,9 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 //  1. merge the node state the previous agent persisted after this one
 //     started (its observed upstreams and QUIC pairs, final flush included),
 //     so the first write this agent makes is the union;
-//  2. apply the CNI ADD/DEL that agent served during the overlap to the
+//  2. note the node's client-certificate backlog, so the xDS bind waits only
+//     for the certificates of pods step 3 adds;
+//  3. apply the CNI ADD/DEL that agent served during the overlap to the
 //     listeners and SVID subscriptions — after the xDS server's own load from
 //     storage, which is the view the diff is taken against.
 //
@@ -980,6 +985,9 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 // writers start. An uncontended start runs none of this.
 func addTakeoverSteps(owner *ownership.Node, snapshotCache *cache.SnapshotCache, xdsSrv *xdsServer.AgentXdsServer, cniSrv *cniServer.CNIServer) {
 	owner.AddStep(ownership.Step{Name: "merge the previous agent's persisted node state", Run: snapshotCache.ReloadNodeState})
+	// Before the reconcile, so the bind's certificate wait covers only the pods
+	// the reconcile adds.
+	owner.AddStep(ownership.Step{Name: "note the client-certificate backlog", Run: xdsSrv.MarkTakeoverBaseline})
 	owner.AddStep(ownership.Step{Name: "apply the overlap's CNI ADD/DEL", Run: func(ctx context.Context) error {
 		select {
 		case <-xdsSrv.LocalListenersLoaded():

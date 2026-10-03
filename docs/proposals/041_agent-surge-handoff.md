@@ -147,6 +147,31 @@ Found during implementation:
   the node, and re-checks at takeover.
 - **QUIC pair fetch window** (#1033) restarts at takeover: it measures how
   long the agent has served, and a standby serves nothing.
+- **"Complete" means the gates passed, not timed out.** A lone agent's first
+  serve proceeds when the registry gate (15 s) or the capture gate (10 s)
+  times out, which is right when nobody else serves the node. For a standby,
+  proceeding would let the DaemonSet delete a healthy old agent and then
+  publish local-only CDS/EDS over the proxy's working config (the #740
+  clobber). The `standby` readiness therefore waits for
+  `AgentXdsServer.StandbyComplete`: the first snapshot is built, the
+  registry has actually loaded (initially or by the background retry), and
+  the capture projection has landed. A standby that cannot reach the
+  registrar stalls the roll, visibly. The client-certificate gate stays
+  lenient: a timeout there costs a pod's QUIC twins, not the node's
+  endpoints.
+- **Takeover certificate wait.** The bind waits (≤1 s) only for the
+  certificates of pods the takeover itself added. It compares the backlog
+  with a baseline noted just before the reconcile, so one pod whose SVID
+  never comes does not tax every takeover.
+- **Known gap cost: an in-flight CNI ADD at SIGTERM.** The old agent's
+  GracefulStop lets an in-flight ADD finish. Its best-effort ACK wait
+  (`envoyAckTimeout`, 2 s) can then hold the old process, and with it the
+  lock, for up to ~2 s, and that time adds to the gap. It is rare (an ADD
+  has to be in flight at the moment of the roll's delete) and bounded.
+- **Lock-less predecessor check** (`liveServer`) treats any dial error as "no
+  server". It only matters for the first surge roll from a pre-lock agent,
+  which the two-step rollout (chart 2.3.0 with `surge=false` first) avoids
+  entirely.
 
 ## Rejected alternatives
 

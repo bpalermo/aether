@@ -265,7 +265,7 @@ func TestStandbyReadiness(t *testing.T) {
 
 	err := check(nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "first snapshot not built yet")
+	assert.Contains(t, err.Error(), "first snapshot not complete")
 
 	close(complete)
 	assert.NoError(t, check(nil), "a complete standby is Ready: the roll may delete the old agent")
