@@ -189,6 +189,15 @@ jobs:
       # the build-graph half.
       - name: Guard uds-csi linkage
         run: scripts/check-uds-csi-deps.sh --config=ci
+      # The two other slim binaries on every node. The CNI plugin is exec'd by the
+      # container runtime for every pod ADD/DEL, and mesh-dns was carved out of the
+      # agent (#583) so the node's resolver survives agent rolls without the
+      # agent's payload. Each :deps_test pins the module set (allow-list + budget)
+      # on the linked ELF; these are the build-graph halves.
+      - name: Guard cni plugin linkage
+        run: scripts/check-cni-deps.sh --config=ci
+      - name: Guard mesh-dns linkage
+        run: scripts/check-mesh-dns-deps.sh --config=ci
 
   # Keep the open chart-pin PRs (#727) current with `main`.
   #

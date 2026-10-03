@@ -2,6 +2,11 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
 load("//bazel/img:registry.bzl", "image_repository")
 
+# deps_test.go is hand-wired below into its own :deps_test target (it needs the
+# linked binary as data and has to be nameable on its own), so keep gazelle from
+# folding it into :mesh-dns_test.
+# gazelle:exclude deps_test.go
+
 go_library(
     name = "mesh-dns_lib",
     srcs = ["main.go"],
@@ -56,6 +61,24 @@ go_test(
     embed = [":mesh-dns_lib"],
     deps = [
         "//agent/internal/meshdns",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# Linkage guard. mesh-dns was carved out of the agent (#583) so the node's
+# resolver survives agent rolls without pulling controller-runtime,
+# go-control-plane, the CNI server and SPIRE onto every node. The test pins its
+# module set as an explicit allow-list (and a module budget) against the linked
+# ELF that ships in the mesh-dns image, and forbids the agent's heavyweights
+# outright. scripts/check-mesh-dns-deps.sh is the build-graph half.
+go_test(
+    name = "deps_test",
+    size = "small",
+    srcs = ["deps_test.go"],
+    data = [":mesh-dns"],
+    embed = [":mesh-dns_lib"],
+    deps = [
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
