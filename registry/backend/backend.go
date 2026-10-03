@@ -17,6 +17,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// PodInformerSource yields a shared Pod informer; the controller-runtime
+// manager's cache satisfies it.
+type PodInformerSource = k8s.PodInformerSource
+
 // Config carries the union of per-backend settings for New. Only the fields the
 // selected backend needs are read; the rest are ignored.
 type Config struct {
@@ -25,6 +29,12 @@ type Config struct {
 	// Reader reads pods/nodes for the kubernetes backend. It should be a direct
 	// API reader (e.g., manager.GetAPIReader()) to avoid cache timing issues.
 	Reader client.Reader
+	// Informers, for the kubernetes backend, supplies the shared Pod informer it
+	// pushes change notifications from (the manager's cache), so the registrar
+	// syncs at watch speed: a peer replica learns a pod's drain from its
+	// deletionTimestamp without waiting for the poll (aether#1124). Nil leaves
+	// the backend poll-only.
+	Informers PodInformerSource
 	// EtcdEndpoints is the etcd client endpoint list (etcd backend).
 	EtcdEndpoints []string
 	// Region is the region owning this etcd partition (etcd backend, proposal 006).
@@ -38,6 +48,7 @@ func New(_ context.Context, log *slog.Logger, name string, cfg Config) (registry
 	case "kubernetes":
 		return k8s.NewKubernetesRegistry(log, cfg.Reader, k8s.Config{
 			ClusterName: cfg.ClusterName,
+			Informers:   cfg.Informers,
 		}), nil
 	case "etcd":
 		return etcd.NewEtcdRegistry(log, etcd.Config{
