@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strconv"
 	"strings"
 
@@ -122,7 +121,7 @@ func runController(ctx context.Context) (retErr error) {
 		"spireEnabled", cfg.SpireEnabled,
 	)
 
-	defer deferControllerLogShutdown(ctx)
+	defer manager.FlushLogs(ctx, l, logShutdown)
 
 	spireSource, bootstrapOpts, err := buildControllerBootstrapOpts(ctx)
 	if err != nil {
@@ -136,7 +135,7 @@ func runController(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
-	defer deferControllerTelemetryShutdown(ctx, result.Shutdown)
+	defer manager.ShutdownTelemetry(ctx, l, result.Shutdown)
 
 	m := result.Manager
 
@@ -146,7 +145,7 @@ func runController(ctx context.Context) (retErr error) {
 
 	// The controller's own namespace holds the canonical (fallback) MeshConfig that
 	// other namespaces inherit from unless they set their own.
-	fallbackNamespace := currentNamespace()
+	fallbackNamespace := manager.CurrentNamespace()
 
 	reconciler := &meshconfig.Reconciler{
 		Client:            m.GetClient(),
@@ -323,40 +322,4 @@ func wireCABundleInjector(m ctrl.Manager, spireSource *spire.WaitingSource) erro
 		return fmt.Errorf("failed to add caBundle injector: %w", err)
 	}
 	return nil
-}
-
-// deferControllerLogShutdown flushes and stops the OTLP log exporter. No-op when
-// logShutdown is nil (OTLP logging is disabled).
-func deferControllerLogShutdown(ctx context.Context) {
-	if logShutdown == nil {
-		return
-	}
-	if err := logShutdown(ctx); err != nil {
-		l.ErrorContext(ctx, "failed to flush OTel logs", "error", err)
-	}
-}
-
-// deferControllerTelemetryShutdown runs the telemetry shutdown returned by
-// manager.Bootstrap. No-op when shutdown is nil.
-func deferControllerTelemetryShutdown(ctx context.Context, shutdown func(context.Context) error) {
-	if shutdown == nil {
-		return
-	}
-	if err := shutdown(ctx); err != nil {
-		l.ErrorContext(ctx, "failed to shutdown telemetry", "error", err)
-	}
-}
-
-// currentNamespace resolves the namespace the controller runs in, used as the
-// default target for the projected ConfigMap. It reads POD_NAMESPACE (set via
-// the downward API by the chart) and falls back to the service-account namespace
-// file.
-func currentNamespace() string {
-	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
-		return ns
-	}
-	if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
-		return string(data)
-	}
-	return "default"
 }
