@@ -41,3 +41,18 @@ grep -q "inbound_${pod}" <<<"$(admin /listeners 2>/dev/null)"
 here-string; the rule is only about a **process** on the left of the `|`.
 Scripts that run inside a pod or a kind node (`kubectl exec … sh -c '…'`,
 `docker exec … sh -c '…'`) run without `pipefail` and are not affected.
+
+### Evidence never fails on "no match" (`grep` exits 1 under `set -e`)
+
+`grep` exits **1** when nothing matches, and under `pipefail` that is the
+pipeline's status even when a `sed` or `cut` follows it. A forensics, summary
+or "print the evidence" pipeline without a guard therefore aborts the script
+exactly when the evidence it looks for is absent (#1143). Such a pipeline ends
+in `|| true`, or filters with `awk` (which exits 0 on no match):
+
+```bash
+sed -n '1,200p' "$f" | grep -aE 'sendmsg|recvmsg' | sed -n '1,40p' || true
+```
+
+Gates are the opposite: a pipeline whose failure *should* stop the run belongs
+in an `if` or ends in `|| die "…"`, so it fails with a message, not silently.
