@@ -86,11 +86,12 @@ func setupTelemetry(ctx context.Context, cfg Config, serviceName, serviceVersion
 	}
 
 	telemetryCfg := setup.Config{
-		ServiceName:     serviceName,
-		ServiceVersion:  serviceVersion,
-		OTLPEndpoint:    cfg.OTLPEndpoint,
-		TraceSampleRate: cfg.TraceSampleRate,
-		TraceExport:     cfg.TracingExport,
+		ServiceName:      serviceName,
+		ServiceVersion:   serviceVersion,
+		OTLPEndpoint:     cfg.OTLPEndpoint,
+		TraceSampleRate:  cfg.TraceSampleRate,
+		TraceExport:      cfg.TracingExport,
+		SchedulerLatency: cfg.SchedulerLatency,
 	}
 
 	setupCtx, cancel := setup.DetachedTimeout(ctx, setup.SetupTimeout)

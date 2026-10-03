@@ -22,6 +22,7 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	configapisv1 "aethermesh.dev/common/apis/config/v1"
 	"aethermesh.dev/common/crdcheck"
+	"aethermesh.dev/common/ctrlqueue"
 	"aethermesh.dev/common/gammaproject"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/referencegrant"
@@ -136,7 +137,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// that reference it.
 		b = b.Watches(&configapisv1.HTTPFilter{}, enqueueAll)
 	}
-	return b.Named("gamma").Complete(r)
+	return b.Named("gamma").WithOptions(ctrlqueue.Options()).Complete(r)
 }
 
 // Reconcile re-lists every HTTPRoute and GRPCRoute, keeps those attached to a Service,

@@ -11,6 +11,7 @@ go_library(
     deps = [
         "//common/constants/annotations",
         "//common/constants/labels",
+        "//common/ctrlqueue",
         "//common/log",
         "//common/serviceref",
         "@io_k8s_api//core/v1:core",

@@ -207,6 +207,8 @@ func NewAgentConfig() *AgentConfig {
 			HealthProbeBindAddress: ":8082",
 			MetricsEnabled:         true,
 			MetricsBindAddress:     ":8080",
+			// go.schedule.duration, beside aether.agent.sched.* (#1131).
+			SchedulerLatency: true,
 		},
 		MeshConfigPath:          DefaultMeshConfigPath,
 		EdgeHTTPPort:            proxy.DefaultEdgeHTTPPort,

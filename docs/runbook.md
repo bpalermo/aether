@@ -3221,6 +3221,80 @@ stale pod into an LDS/CDS NACK, which is worse. The netns pin and its 60s unpin 
 stay: a hot-restart successor re-creating the pod's listeners and dials deferred 10-13s
 past removal still need a live netns to *succeed* rather than merely fail cleanly.
 
+### One node agent burns several times its peers' idle CPU (#1131)
+
+**Symptom.** On a healthy cluster one `aether-agent` pod uses 2–8× the CPU of the
+others (≈29 mCPU against 6–8) while doing the same work: same snapshot builds,
+goroutines, allocation rate and log volume. Which agent is hot changes when agents
+restart and is fixed for the life of the process. Severity is low (tens of mCPU, no
+effect on correctness). The profile shows the extra CPU is all Go-scheduler wake and
+idle overhead: `park → schedule → findRunnable`, `sysmon`, kernel `epoll_wait` and
+`finish_task_switch`.
+
+**What changed to reduce it (#1131).** The agent's controllers use a queue with no
+metrics (`common/ctrlqueue`), so each one no longer runs a 500 ms
+`updateUnfinishedWorkLoop` ticker. Nothing scraped the agent's `workqueue_*` series.
+`--debug` also no longer enables controller-runtime's V(2)+ logging: its verbosity is
+capped at V(1) (`manager.ControllerRuntimeMaxVerbosity`), so the V(5)
+`workqueue_items … items=[]` dump every 10 s per queue is gone. aether's own debug
+and trace lines are unchanged. Talos runs with the chart's global `debug: true`.
+
+**Reading the ratio.** The figure to watch is max/min agent CPU across nodes, and it
+should trend towards 1× over a few agent generations. In Pyroscope (Grafana →
+Explore → Profiles), select `process_cpu` for `service_name="aether-agent"` and group
+by node over 30 min windows. Or use the counters below, which need no profile:
+
+```promql
+# Hot-agent ratio: max / min agent CPU across nodes, 30 m windows.
+max(rate(aether_agent_sched_cpu_time_seconds_total[30m]))
+  / min(rate(aether_agent_sched_cpu_time_seconds_total[30m]))
+```
+
+**Telling "more wakeups" from "costlier wakeups".** There are two candidate causes
+and a profile cannot tell them apart. (a) Timer phases stop coinciding, so the agent
+wakes **more often**. (b) The runtime's threads land on deep-idle CPUs, so each wakeup
+**costs more**. The agent exports its own kernel scheduler counters. They are read
+from `/proc/self/task/*/{schedstat,status,sched}`, summed over every thread, and
+monotonic even when threads exit. They are observable instruments, so reading them
+adds no timer. Compare the hot node with a cold one:
+
+| Metric (Prometheus name) | Source | What it tells you |
+| --- | --- | --- |
+| `aether_agent_sched_timeslices_total` | schedstat field 3 | Times a thread was put on a CPU. Its rate is the **wakeup rate**: (a) raises it. |
+| `aether_agent_sched_run_delay_seconds_total` | schedstat field 2 | Time spent runnable but waiting for a CPU. Divided by timeslices, it is the **wait per wakeup**: (b) raises it. |
+| `aether_agent_sched_cpu_time_seconds_total` | schedstat field 1 | CPU time on a CPU. Divided by timeslices, it is the **CPU per wakeup**: (b) raises it. |
+| `aether_agent_sched_context_switches_total{aether_sched_switch="voluntary"\|"involuntary"}` | `/proc/…/status` | Voluntary switches (blocked or slept) follow the wakeup rate. Involuntary ones (preempted) point at contention. |
+| `aether_agent_sched_migrations_total` | `se.nr_migrations` in `/proc/…/sched` | CPU migrations. Divided by timeslices, a high value is (b). **Absent** on a kernel without `CONFIG_SCHED_DEBUG`. |
+| `aether_agent_sched_threads` | task count | Live OS threads. A hot agent with many more threads is a different problem. |
+| `go_schedule_duration_seconds_bucket` | Go `runtime/metrics` `/sched/latencies` | How long runnable goroutines waited for a P. This is the Go-level twin of `run_delay`. |
+
+Every series carries `job="aether-agent"` and the `node`, both from the resource
+attributes. No series is seeded: an observable counter reports its cumulative value on every collection, so a
+missing series means the agent is not exporting it, not a value of zero.
+
+```promql
+# (a) wakeups per second, by node
+sum by (node) (rate(aether_agent_sched_timeslices_total[30m]))
+# (b) mean run-queue wait per wakeup (seconds), by node
+sum by (node) (rate(aether_agent_sched_run_delay_seconds_total[30m]))
+  / sum by (node) (rate(aether_agent_sched_timeslices_total[30m]))
+# (b) CPU cost per wakeup and migrations per wakeup
+sum by (node) (rate(aether_agent_sched_cpu_time_seconds_total[30m]))
+  / sum by (node) (rate(aether_agent_sched_timeslices_total[30m]))
+sum by (node) (rate(aether_agent_sched_migrations_total[30m]))
+  / sum by (node) (rate(aether_agent_sched_timeslices_total[30m]))
+# Go scheduler p99 latency, by node
+histogram_quantile(0.99, sum by (node, le) (rate(go_schedule_duration_seconds_bucket{job="aether-agent"}[30m])))
+```
+
+How to read the result:
+
+- **(a)**: the hot node shows more timeslices per second at the same CPU per
+  timeslice. Look for remaining tickers.
+- **(b)**: the hot node shows a similar timeslice rate, but more CPU, run delay or
+  migrations per timeslice. The cause is CPU placement or idle states, not the
+  agent's code. A `GOMAXPROCS=1` trial on that node is the next experiment.
+
 ### A UDS workload is not delivered: `aether_agent_uds_resolve_failures_total{reason}`
 
 A pod that asks for UDS delivery (annotation or `EndpointPolicy`) but whose
