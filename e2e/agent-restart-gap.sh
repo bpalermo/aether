@@ -53,9 +53,9 @@
 #   e2e/agent-restart-gap.sh swap <tag>                  # agent + cni-install images
 #   e2e/agent-restart-gap.sh down
 #
-# ARG_EXPECT=green (default) fails `measure` when any gap exceeds ARG_BOUND
-# (5 s, the #1123 target; proposal 041 gates surge at 1 s); ARG_EXPECT=report
-# only reports.
+# ARG_EXPECT=green (default) fails `measure` when any gap exceeds ARG_BOUND.
+# Unset, the bound follows the strategy measured: 1 s for surge (proposal 041),
+# 5 s (the #1123 target) for delete-then-create. ARG_EXPECT=report only reports.
 set -euo pipefail
 if [ -n "${ARG_TRACE:-}" ]; then set -x; fi
 
@@ -69,7 +69,7 @@ export EWQ_WORKER=1
 ARG_EXPECT="${ARG_EXPECT:-green}"
 ARG_BACKEND="${ARG_BACKEND:-etcd}"
 ARG_ROLLS="${ARG_ROLLS:-5}"
-ARG_BOUND="${ARG_BOUND:-5.0}"
+ARG_BOUND="${ARG_BOUND:-}" # resolved per run by gate_bound
 ARG_POLL="${ARG_POLL:-0.05}"
 ARG_SETTLE="${ARG_SETTLE:-15}"
 ARG_SURGE="${ARG_SURGE:-0}"
@@ -328,7 +328,25 @@ stop_all() {
 	stop_load
 }
 
+# gate_bound — ARG_BOUND if set; otherwise 1.0 for a surge DaemonSet (proposal
+# 041) and 5.0 (#1123) for delete-then-create. With no cluster to ask (a
+# `report` of a finished run), the run itself says which: surge rows carry a
+# takeover reading.
+gate_bound() {
+	if [ -n "$ARG_BOUND" ]; then
+		printf '%s' "$ARG_BOUND"
+		return
+	fi
+	local surge
+	surge="$(kc -n "$NS" get ds aether-agent -o jsonpath='{.spec.updateStrategy.rollingUpdate.maxSurge}' 2>/dev/null || true)"
+	if [ -z "$surge" ] && [ -s "$ARG_OUT/gap.tsv" ]; then
+		surge="$(awk -F'\t' '$10 != "-" { s = 1 } END { print s + 0 }' "$ARG_OUT/gap.tsv")"
+	fi
+	if [ "$surge" = 1 ]; then printf '1.0'; else printf '5.0'; fi
+}
+
 measure() {
+	ARG_BOUND="$(gate_bound)"
 	log "aether#1123 agent restart gap: $ARG_ROLLS rolls, poll ${ARG_POLL}s, gate ${ARG_BOUND}s (ARG_EXPECT=$ARG_EXPECT); results in $ARG_OUT"
 	kc -n "$NS" get ds aether-agent -o jsonpath='{range .spec.template.spec.initContainers[*]}{.name}={.image} {end}{range .spec.template.spec.containers[*]}{.name}={.image}{end}{"\n"}'
 	kc -n "$NS" get ds aether-agent -o jsonpath='  strategy: maxSurge={.spec.updateStrategy.rollingUpdate.maxSurge} maxUnavailable={.spec.updateStrategy.rollingUpdate.maxUnavailable}{"\n"}'
@@ -364,6 +382,7 @@ measure() {
 # report_and_gate — summarize and gate the run in ARG_OUT (also `report`, to
 # re-read a finished run).
 report_and_gate() {
+	ARG_BOUND="$(gate_bound)"
 	log "summary (seconds, per node per roll)"
 	summarize 3 "gap (proxy without an ADS stream)"
 	summarize 4 "replace (gap start -> agent start)"
@@ -461,7 +480,10 @@ YAML
 }
 
 pod_gone() { ! kc -n "$TEST_NS" get pod "$1" >/dev/null 2>&1; }
-replaced() { local p; p="$(agent_pod_on "$DST_NODE")" && [ -n "$p" ] && [ "$p" != "$1" ]; }
+replaced() {
+	local p
+	p="$(agent_pod_on "$DST_NODE")" && [ -n "$p" ] && [ "$p" != "$1" ]
+}
 pod_ready() {
 	[ "$(kc -n "$TEST_NS" get pod "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]
 }
