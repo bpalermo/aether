@@ -183,8 +183,3 @@ func (m *versionMemo) hash(r types.Resource) (string, error) {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:]), nil
 }
-
-// hashResource is hash without a reusable buffer.
-func hashResource(r types.Resource) (string, error) {
-	return (&versionMemo{}).hash(r)
-}

@@ -310,17 +310,6 @@ func jitteredBackoff(d time.Duration) time.Duration {
 	return d + time.Duration(float64(d)*streamJitterFraction*rand.Float64())
 }
 
-// sleepCtx waits for d or until ctx is done; it reports whether the full wait
-// elapsed (false means ctx was cancelled).
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(d):
-		return true
-	}
-}
-
 // SubscribePod starts a Broker subscription for the pod in the given network
 // namespace, referenced by its namespace, name and UID. The SPIRE agent resolves
 // and attests the pod itself, so every selector its Kubernetes attestor can
