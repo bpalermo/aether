@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "config.go",
         "flags.go",
+        "lifecycle.go",
         "logging.go",
         "manager.go",
         "shutdown_log.go",

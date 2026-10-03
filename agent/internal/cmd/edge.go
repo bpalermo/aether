@@ -91,7 +91,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		"edgeHTTPPort", cfg.EdgeHTTPPort,
 	)
 
-	defer deferLogShutdown(ctx)
+	defer manager.FlushLogs(ctx, l, logShutdown)
 
 	// Watch Gateway API objects CLUSTER-WIDE. The edge reconciles every Gateway of
 	// our GatewayClass wherever it lives (namespace-agnostic): the conformance suite
@@ -105,7 +105,7 @@ func runEdge(ctx context.Context) (retErr error) {
 	// secrets are expected alongside the edge by default.
 	routeNamespace := cfg.RouteNamespace
 	if routeNamespace == "" {
-		routeNamespace = currentNamespace()
+		routeNamespace = manager.CurrentNamespace()
 	}
 	cfg.CacheOptions = nil
 
@@ -133,7 +133,7 @@ func runEdge(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
-	defer deferTelemetryShutdown(ctx, result.Shutdown)
+	defer manager.ShutdownTelemetry(ctx, l, result.Shutdown)
 	m := result.Manager
 
 	spireSource, identityTrustDomain, edgeSpiffeID, err := resolveEdgeIdentity(ctx, m)
@@ -388,18 +388,4 @@ func wireGatewayAPIReconciler(m ctrl.Manager, snapshotCache *cache.SnapshotCache
 // (set by the chart); empty if unset. Used as the edge's xDS/watch identity.
 func currentPodName() string {
 	return os.Getenv("POD_NAME")
-}
-
-// currentNamespace returns the namespace the edge pod runs in (the default
-// namespace to watch Gateways/HTTPRoutes in). It reads POD_NAMESPACE (set via the
-// downward API by the chart) and falls back to the service-account namespace
-// file.
-func currentNamespace() string {
-	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
-		return ns
-	}
-	if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
-		return string(data)
-	}
-	return "default"
 }
