@@ -55,15 +55,14 @@ func TestNodeSVIDRedeliveryCountsUnchanged(t *testing.T) {
 
 	svid := ca.SVID(t, testAgentID)
 	identity.Arrive(svid, ca.Bundle(td))
-	require.Eventually(t, func() bool {
-		return svidUpdates(t, reader, identityNode, updateInitial) == 1
-	}, wait, tick, "the first node SVID must be served as initial")
+	eventuallyCounter(t, func() (int64, error) { return readSVIDUpdates(reader, identityNode, updateInitial) },
+		func(v int64) bool { return v == 1 }, wait, tick, "the first node SVID must be served as initial")
 	// The bundle half of the same wake is served right after the SVID half; wait
 	// for it so the generation and push baseline below is settled.
-	require.Eventually(t, func() bool {
-		v, _ := counterPoint(t, reader, "aether.agent.spire.bundle_updates", attrBundle.String(bundleOwn), attrUpdate.String(updateInitial))
-		return v == 1
-	}, wait, tick)
+	eventuallyCounter(t, func() (int64, error) {
+		v, _, err := readCounterPoint(reader, "aether.agent.spire.bundle_updates", attrBundle.String(bundleOwn), attrUpdate.String(updateInitial))
+		return v, err
+	}, func(v int64) bool { return v == 1 }, wait, tick)
 	// ...and for its PUSH, not just its metric: refreshWorkloadBundle records
 	// bundle_updates before it calls pushSecrets, so the counter reaching 1 does
 	// not mean the initial wake's second push has landed. Snapshotting the push
@@ -74,9 +73,8 @@ func TestNodeSVIDRedeliveryCountsUnchanged(t *testing.T) {
 
 	// SPIRE re-sends the very same SVID and bundle.
 	identity.Arrive(svid, ca.Bundle(td))
-	require.Eventually(t, func() bool {
-		return svidUpdates(t, reader, identityNode, updateUnchanged) == 1
-	}, wait, tick, "a redelivered, byte-identical node SVID must count as unchanged (issue #993)")
+	eventuallyCounter(t, func() (int64, error) { return readSVIDUpdates(reader, identityNode, updateUnchanged) },
+		func(v int64) bool { return v == 1 }, wait, tick, "a redelivered, byte-identical node SVID must count as unchanged (issue #993)")
 	require.Equal(t, genBefore, gen(), "an unchanged node SVID must not bump the snapshot generation")
 	require.Len(t, store.snapshot(), pushesBefore, "an unchanged node SVID must not push")
 	require.Equal(t, int64(1), svidUpdates(t, reader, identityNode, updateInitial))
@@ -84,9 +82,8 @@ func TestNodeSVIDRedeliveryCountsUnchanged(t *testing.T) {
 
 	// A new certificate is a rotation, and the unchanged count stays put.
 	identity.Arrive(ca.SVID(t, testAgentID), ca.Bundle(td))
-	require.Eventually(t, func() bool {
-		return svidUpdates(t, reader, identityNode, updateRotated) == 1
-	}, wait, tick, "a new node certificate must count as rotated")
+	eventuallyCounter(t, func() (int64, error) { return readSVIDUpdates(reader, identityNode, updateRotated) },
+		func(v int64) bool { return v == 1 }, wait, tick, "a new node certificate must count as rotated")
 	require.Equal(t, int64(1), svidUpdates(t, reader, identityNode, updateUnchanged))
 	require.Equal(t, int64(1), svidUpdates(t, reader, identityNode, updateInitial))
 	require.Greater(t, gen(), genBefore, "a rotated node SVID must bump the snapshot generation")
