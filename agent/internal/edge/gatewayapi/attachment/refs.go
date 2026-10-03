@@ -1,9 +1,7 @@
 package attachment
 
 import (
-	"aethermesh.dev/common/referencegrant"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 // GatewayKey identifies a Gateway by namespace+name. Since the edge
@@ -168,24 +166,4 @@ func OurGatewayParentRefs(parentRefs []gatewayv1.ParentReference, routeNamespace
 		out = append(out, p)
 	}
 	return out
-}
-
-// DerefBackendNamespace returns the backendRef namespace ("" when unset).
-func DerefBackendNamespace(ns *gatewayv1.Namespace) string {
-	if ns == nil {
-		return ""
-	}
-	return string(*ns)
-}
-
-// BackendPermitted reports whether a backendRef is allowed onto the data plane: a
-// same-namespace ref always is; a cross-namespace ref needs a matching ReferenceGrant
-// in the backend's namespace whose from matches the route and whose to allows the
-// Service. routeKind is the referring route's kind (HTTPRoute/TCPRoute/TLSRoute).
-func BackendPermitted(backendNamespace *gatewayv1.Namespace, routeNamespace, routeKind, name string, grants []gatewayv1beta1.ReferenceGrant) bool {
-	ns := DerefBackendNamespace(backendNamespace)
-	if !referencegrant.CrossNamespace(ns, routeNamespace) {
-		return true
-	}
-	return referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, name)
 }
