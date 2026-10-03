@@ -107,6 +107,22 @@ func (a *agentReadiness) logTransition(nc *namedCheck, err error) {
 	a.log.Info(nc.name + " readiness passing")
 }
 
+// probeChecks returns the checks the kubelet's readiness probe evaluates, by
+// name: every check registered here (wrapped, so transitions are logged on
+// the probe's polls too) plus the manager's own baseline the TCP endpoint also
+// serves — a ping and the informer cache sync. For the pod-local health socket
+// (wireHealthSocket), which has no manager-provided handler behind it.
+func (a *agentReadiness) probeChecks(cacheSync healthz.Checker) map[string]healthz.Checker {
+	out := map[string]healthz.Checker{"readyz": healthz.Ping}
+	if cacheSync != nil {
+		out["cache-sync"] = cacheSync
+	}
+	for _, nc := range a.checks {
+		out[nc.name] = a.wrap(nc)
+	}
+	return out
+}
+
 // Err returns the aggregate verdict — nil when every check passes, otherwise the
 // first failure, named. It is the same computation /readyz performs, minus the
 // HTTP.

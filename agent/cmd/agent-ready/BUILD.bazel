@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+# deps_test.go is hand-wired below into its own :deps_test target (it needs the
+# linked binary as data and has to be nameable on its own), so keep gazelle from
+# folding it into :agent-ready_test.
+# gazelle:exclude deps_test.go
+
+go_library(
+    name = "agent-ready_lib",
+    srcs = ["main.go"],
+    importpath = "aethermesh.dev/agent/cmd/agent-ready",
+    visibility = ["//visibility:private"],
+)
+
+go_binary(
+    name = "agent-ready",
+    embed = [":agent-ready_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "agent-ready_test",
+    srcs = ["main_test.go"],
+    embed = [":agent-ready_lib"],
+    deps = [
+        "//agent/constants",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# Linkage guard (proposal 041). The kubelet execs this binary every probe
+# period on every node, and package init() runs before main() whatever the argv,
+# so the only way not to pay for a dependency is not to link it. Asserted
+# against the linked ELF that ships: its build info must list no module at all.
+go_test(
+    name = "deps_test",
+    size = "small",
+    srcs = ["deps_test.go"],
+    data = [":agent-ready"],
+    embed = [":agent-ready_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

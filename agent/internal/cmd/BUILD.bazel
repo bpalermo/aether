@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "config.go",
         "edge.go",
+        "healthsock.go",
         "readiness.go",
         "root.go",
     ],
@@ -72,6 +73,7 @@ go_test(
         "chart_flags_test.go",
         "config_test.go",
         "edge_identity_test.go",
+        "healthsock_test.go",
         "owned_runnable_test.go",
         "quic_idle_test.go",
         "readiness_test.go",

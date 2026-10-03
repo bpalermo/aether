@@ -47,6 +47,13 @@ type AgentConfig struct {
 	// Empty disables the lock (owned from the start, the pre-041 behaviour).
 	NodeLockPath string
 
+	// HealthSocketPath, when set, serves /healthz and /readyz on this Unix
+	// socket for the agent-ready exec probe (proposal 041). It must be in the
+	// pod's own filesystem (an emptyDir), never on a host path. Empty serves
+	// no socket. The TCP endpoint (manager.Config.HealthProbeBindAddress) is
+	// independent; the chart turns it off ("0") when it uses the socket.
+	HealthSocketPath string
+
 	// MountedCNINetDir is the host's CNI network-config directory as mounted into
 	// the agent container (read-write). The re-assert loop watches the active
 	// conflist there.
