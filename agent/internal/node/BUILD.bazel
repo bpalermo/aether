@@ -9,6 +9,7 @@ go_library(
         "//agent/internal/cniconflist",
         "//common/constants/labels",
         "//common/ctrlqueue",
+        "//common/taint",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/types",
         "@io_k8s_client_go//util/retry",
@@ -31,6 +32,7 @@ go_test(
     deps = [
         "//agent/internal/cniconflist",
         "//common/constants/labels",
+        "//common/taint",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//core/v1:core",
