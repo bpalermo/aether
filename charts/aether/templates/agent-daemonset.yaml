@@ -17,6 +17,24 @@ spec:
       {{- include "aether.agent.selectorLabels" . | nindent 6 }}
   updateStrategy:
     type: RollingUpdate
+    {{- if .Values.agent.updateStrategy.surge }}
+    rollingUpdate:
+      # Proposal 041: the new agent starts BESIDE the old one as a standby
+      # (it finds /run/aether/agent.lock held), builds its whole first
+      # snapshot, reports Ready, and takes the node over the instant the old
+      # agent exits (the kernel releases the flock). The proxy's ADS gap is
+      # the reconnect backoff plus the takeover diff instead of a whole pod
+      # start (#1123).
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- else }}
+    rollingUpdate:
+      # Delete-then-create: the node's proxy has no ADS stream from the old
+      # agent's exit until the new one serves (#1123). See
+      # agent.updateStrategy.surge.
+      maxSurge: 0
+      maxUnavailable: 1
+    {{- end }}
   template:
     metadata:
       labels:
@@ -169,17 +187,21 @@ spec:
             - "--spire-broker-socket={{ .Values.spire.brokerSocket.mountPath }}/{{ .Values.spire.brokerSocket.socketName }}"
             - "--spire-wait-warn-after={{ .Values.spire.waitWarnAfter }}"
             {{- end }}
-          ports:
-            - name: metrics
-              containerPort: 8080
-              protocol: TCP
-            - name: health
-              containerPort: 8082
-              protocol: TCP
+            # Proposal 041: probes go over a Unix socket in this pod's own /tmp
+            # emptyDir, never a TCP port. The pod is hostNetwork, so a port is a
+            # NODE port: a surge pod declaring it would stay Pending (the
+            # scheduler's NodePorts filter), could not bind it, and a port shared
+            # with SO_REUSEPORT would let the OTHER agent answer for this one.
+            - "--health-socket=/tmp/aether-agent-health.sock"
+            - "--health-probe-bind-address=0"
+          # No `ports:` (proposal 041). On a hostNetwork pod every containerPort
+          # defaults to a hostPort, which keeps a surge pod Pending beside the
+          # old one. They were informational only: metrics (:8080, bound once the
+          # agent owns its node) is scraped by address, and health moved to the
+          # pod-local socket above.
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: health
+            exec:
+              command: ["/agent-ready", "--path=/healthz"]
             initialDelaySeconds: 5
             periodSeconds: 10
           # Probed every 2 s from the start (#1123), not first at +5 s and then
@@ -187,11 +209,12 @@ spec:
           # container started on talos (2026-10-02), which paced every agent
           # roll node by node. failureThreshold keeps the time to NotReady at
           # 30 s, what the controller's node-taint guard (proposal 033) and
-          # every operator alert were tuned against.
+          # every operator alert were tuned against. /agent-ready is the
+          # stdlib-only exec probe (proposal 041, open question 2): one fork
+          # per period, of a binary that links no module.
           readinessProbe:
-            httpGet:
-              path: /readyz
-              port: health
+            exec:
+              command: ["/agent-ready", "--path=/readyz"]
             periodSeconds: 2
             failureThreshold: 15
           env:
@@ -243,6 +266,10 @@ spec:
                 - DAC_OVERRIDE
                 {{- end }}
           volumeMounts:
+            # The node sockets (xds.sock, cni.sock) and the node-ownership lock
+            # (agent.lock, proposal 041). The lock only works because every
+            # agent pod on the node opens the SAME host file: a surge standby
+            # blocks on the flock the old agent holds until it exits.
             - name: run-dir
               mountPath: /run/aether
               mountPropagation: HostToContainer

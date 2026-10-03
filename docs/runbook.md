@@ -791,8 +791,11 @@ Two distinct exposures, and only one of them is fixed in the chart:
   override `edge.rollingUpdate` back to a surging strategy, this pre-flight is
   mandatory — on rev214 that surge pod was preempted on a node at 84 % CPU
   requests and wedged the roll.
-- **The DaemonSets (`aether-agent`, `aether-proxy`, `aether-mesh-dns`).** Not
-  fixed and not fixable by a strategy: a DaemonSet pod must land on *its* node
+- **The DaemonSets (`aether-agent`, `aether-proxy`, `aether-mesh-dns`).** The
+  proxy and mesh-dns always surge, and so does the agent when
+  `agent.updateStrategy.surge` is on (proposal 041). A surge pod needs its
+  *whole* request on top of the old pod's. Not fixed and not fixable by a
+  strategy: a DaemonSet pod must land on *its* node
   or not at all. The replacement needs the departing pod's request back, and if
   anything on that node is stuck `Terminating` it is still holding its CPU
   request — at which point the scheduler will not even preempt (`preemption: not
@@ -836,6 +839,99 @@ as the preemption victim twice on a dense node and cost a soak its data; it runs
 under the `aether-soak-loader` PriorityClass since #811. Any new load or probe
 workload needs a PriorityClass for the same reason — an evicted generator looks
 exactly like a passing test.
+
+### Agent surge roll (proposal 041)
+
+`agent.updateStrategy.surge` (chart >= 2.3.0, default `false`) rolls the agent
+DaemonSet with `maxSurge: 1, maxUnavailable: 0` instead of delete-then-create.
+It removes the pod replacement and the new agent's startup from the window in
+which the node's proxy has no ADS stream (#1123): the gap becomes the proxy's
+reconnect backoff plus a small storage diff.
+
+**Turning it on: two upgrades, never one.**
+
+```bash
+# 1. Upgrade to chart >= 2.3.0 with surge OFF (the default). Delete-then-create:
+#    every agent comes up holding the node lock, and the registrar learns the
+#    per-agent watch key.
+helm upgrade aether <chart> -n aether-system -f values.yaml --set agent.updateStrategy.surge=false
+kubectl -n aether-system rollout status ds/aether-agent
+kubectl -n aether-system rollout status deploy/aether-registrar
+# 2. Only then turn surge on. Changing only the strategy rolls nothing; the
+#    next agent roll is the first surge.
+helm upgrade aether <chart> -n aether-system -f values.yaml --set agent.updateStrategy.surge=true
+```
+
+Turning surge on in the same upgrade that first ships it is unsafe. That
+surge would run the new agent beside an old one, and three things go wrong:
+
+- **An older registrar ignores the watch `instance` field.** It keys watch
+  streams by cluster/node alone, so the owner's and the standby's
+  `WatchEndpoints` streams replace each other. Each replacement is a DataLoss
+  close and a full resync, and they ping-pong for the whole overlap. The
+  registrar Deployment rolls in the same upgrade, so this cannot be ordered
+  away.
+- **The old agent holds no lock.** The standby falls back to probing the
+  node sockets. An old agent that restarts between those probes can rebind
+  `xds.sock`/`cni.sock` after the standby has taken the node. When its pod is
+  deleted, Go unlinks both paths by name, and the node is left with no
+  sockets while the new agent runs.
+- **The old agent's last flush can land after the takeover.** Without a lock
+  it flushes the observed upstreams on its way out, possibly after the new
+  agent has already written them.
+
+Do the node-headroom pre-flight below first. With surge each node
+briefly runs two agents, so it needs room for a second `agent.resources`
+request (200m CPU, 64Mi). The pod is `system-node-critical` and preempts if it
+has to. If it cannot be placed, it stays `Pending` and the roll stalls on that
+node, visibly. Nothing breaks: the old agent keeps serving.
+
+**What the overlap looks like.** Per node, in the new agent's log:
+
+```
+another agent owns this node; starting as a standby: building everything, binding nothing until its lock is released
+... (the usual startup: SVID, registry connected, client certificates)
+node lock acquired: the previous owner is gone; taking the node over   standby=6.2s
+takeover step done   step="merge the previous agent's persisted node state"
+takeover: applied the previous agent's CNI ADD/DEL from the overlap   added=1 updated=0 removed=1
+this agent owns the node; binding its sockets and starting its writers   takeover=4ms
+```
+
+`takeover: local storage unchanged during the overlap` is the common case. The
+pod is Ready once its first snapshot is complete (`standby` readiness check).
+The DaemonSet controller then deletes the old pod, the old agent exits in
+20-100 ms, and the kernel hands the lock (`/run/aether/agent.lock`) to the
+standby. Proxy side, `control_plane.connected_state` drops to 0 for a few
+hundred ms (what `e2e/agent-restart-gap.sh` measures):
+
+```bash
+kubectl -n aether-system exec <proxy-pod> -c aether-proxy -- \
+  curl -s 'http://127.0.0.1:9901/stats?filter=^control_plane.connected_state$'
+```
+
+**A standby that never takes over** is waiting on an old agent stuck
+`Terminating`. It stays Ready and binds nothing; the old pod's
+`terminationGracePeriodSeconds` (30 s) bounds the wait, then the kubelet kills
+the process and the kernel releases the lock. If the old pod is stuck past that
+(a wedged kubelet, #796), the old *process* may already be gone. Check:
+
+```bash
+kubectl -n aether-system exec <new-agent-pod> -c agent -- /agent-ready --path=/readyz   # prints the failing check, if any
+kubectl -n aether-system logs <new-agent-pod> -c agent | grep -E "standby|node lock|owns the node"
+```
+
+A standby still logging `another agent owns this node` with no `node lock
+acquired` means some process on the node still holds the lock. On the node,
+`fuser /run/aether/agent.lock` names it. Do not delete the lock file: an
+unlinked lock file is a different inode from the one the next agent opens, and
+the two would both believe they own the node.
+
+**`kubectl delete pod` of an agent** (any strategy) is still delete-then-create:
+the lock is free when the new pod starts, so it owns the node at once and
+serves exactly as before (no takeover step runs).
+
+**Turning it off** (`surge: false`) takes effect on the next roll. The lock
+stays: it costs nothing when nothing contends for it.
 
 ### Version-ordering constraint: issue #815 (per-source client certificates)
 
@@ -1213,7 +1309,7 @@ A dormant pair costs a few bytes in the state file and nothing in the proxy. It 
 bounded by the names the proxy has subscribed to since its last restart.
 
 **If you see the signature anyway:** restart the node's proxy (a hot restart,
-`kubectl -n aether delete pod <aether-proxy pod>`). The new generation holds no
+`kubectl -n aether-system delete pod <aether-proxy pod>`). The new generation holds no
 subscription, so the next request fetches the twin (~20 ms). Then file it. The
 agent's `republished dormant` / `pruned dormant` lines around the source's return say
 which half failed.
@@ -1747,8 +1843,8 @@ container filter: `service.name="aether-proxy"` also matches the access logs (by
 `log_name`). To follow a delete live instead:
 
 ```bash
-kubectl -n aether logs -f <proxy-pod> -c proxy | tee /tmp/sigterm.log &
-kubectl -n aether delete pod <proxy-pod>
+kubectl -n aether-system logs -f <proxy-pod> -c proxy | tee /tmp/sigterm.log &
+kubectl -n aether-system delete pod <proxy-pod>
 ```
 
 Lines to look for, in order, on a healthy delete:
@@ -1949,7 +2045,7 @@ what this code does. Read the count by container name: `containerStatuses` is so
 name, and with the ext_authz sidecar enabled `[0]` is `authz`, not `proxy`.
 
 ```bash
-kubectl -n aether get pod <proxy-pod> -o jsonpath='{range .status.containerStatuses[?(@.name=="proxy")]}{.restartCount} {.lastState.terminated.exitCode} {.lastState.terminated.finishedAt}{"\n"}{end}'
+kubectl -n aether-system get pod <proxy-pod> -o jsonpath='{range .status.containerStatuses[?(@.name=="proxy")]}{.restartCount} {.lastState.terminated.exitCode} {.lastState.terminated.finishedAt}{"\n"}{end}'
 ```
 
 Reproduce it on kind with `e2e/hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
@@ -2415,7 +2511,7 @@ grep -c aether-cni /etc/cni/net.d/*.conflist
   where `cni-install` wrote.
 - **Missing** — the node predates #680, or `cni-install` failed to write it (search the
   init container's log for `failed to write the durable aether CNI entry`). Recreate the
-  agent **pod** on that node (`kubectl -n aether delete pod aether-agent-…`): only the
+  agent **pod** on that node (`kubectl -n aether-system delete pod aether-agent-…`): only the
   init container renders the entry, so restarting the container is not enough.
 - **Present but garbage** — the agent logs `the durable aether entry is unusable` and
   ignores it, by design; recreate the agent pod to have `cni-install` rewrite it.
@@ -2441,13 +2537,15 @@ What to check, in order:
 
 ```bash
 # 1. Is it still waiting, or did it resolve? (arrival is one INFO line)
-kubectl -n aether logs ds/aether-agent | grep -E "waiting for the SPIRE Workload API|obtained this workload's SVID|resolved workload trust domain"
+kubectl -n aether-system logs ds/aether-agent | grep -E "waiting for the SPIRE Workload API|obtained this workload's SVID|resolved workload trust domain"
 
 # 2. Restarts must be zero — a restarting agent is a DIFFERENT problem
-kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent
+kubectl -n aether-system get pods -l app.kubernetes.io/name=aether-agent
 
 # 3. The readiness gate and its dwell
-kubectl -n aether exec ds/aether-agent -c agent -- wget -qO- localhost:8082/readyz?verbose
+# (chart >= 2.3.0: health is a pod-local socket; the probe prints the verbose
+# body, naming the failing check, and exits 1 when not ready)
+kubectl -n aether-system exec ds/aether-agent -c agent -- /agent-ready --path=/readyz
 ```
 
 #### The readiness semantics are NOT the same on every component
@@ -2484,7 +2582,7 @@ longer drives readiness on any component. On the agent the two values coincide a
 the endpoint never shows the reason. The reason is in the **log**, once per transition:
 
 ```bash
-kubectl -n aether logs ds/aether-agent | grep -E "readiness (failing|passing)"
+kubectl -n aether-system logs ds/aether-agent | grep -E "readiness (failing|passing)"
 # spire-svid readiness failing   reason="no SPIRE SVID after 2m10s (socket /run/secrets/…)"
 # spire-svid readiness passing
 ```
@@ -2514,7 +2612,7 @@ bundle for its trust domain), and the registrar client is kicked out of its gRPC
 backoff the moment they do:
 
 ```bash
-kubectl -n aether logs ds/aether-agent | grep -E "identity acquired"
+kubectl -n aether-system logs ds/aether-agent | grep -E "identity acquired"
 # identity acquired; generating the initial snapshot                      held=6m41.2s
 # identity acquired; reconnecting the registrar client immediately …
 ```
@@ -2527,7 +2625,7 @@ another route. Since #740 PR 5 the initial snapshot therefore waits for a regist
 actually **answers**, not merely for its readiness latch, and says so:
 
 ```bash
-kubectl -n aether logs ds/aether-agent | grep -E "registry connected|not yet re-established|local-only"
+kubectl -n aether-system logs ds/aether-agent | grep -E "registry connected|not yet re-established|local-only"
 # registry connected; generating the initial snapshot                     waited=1.106s
 # registrar connection not yet re-established after identity; retrying    reconnecting=true …
 ```
@@ -2689,7 +2787,7 @@ What each component does while it waits:
 ```bash
 for d in aether-controller aether-registrar aether-edge; do
   echo "== $d"
-  kubectl -n aether logs deploy/$d | grep -E "waiting for the SPIRE Workload API|obtained this workload's SVID"
+  kubectl -n aether-system logs deploy/$d | grep -E "waiting for the SPIRE Workload API|obtained this workload's SVID"
 done
 ```
 
@@ -3173,7 +3271,7 @@ removal (grep that node's agent for the RemovePod error) or a failure outside ae
 
 ```bash
 # Is the node's agent even there? (the unreachable case should no longer stick)
-kubectl -n aether get pods -o wide --field-selector spec.nodeName=<node>
+kubectl -n aether-system get pods -o wide --field-selector spec.nodeName=<node>
 # The plugin's own verdict, on the node:
 journalctl -u containerd | grep -E 'agent unreachable at CNI DEL|give-up bound'
 # Node pressure, which is what turns one stuck DEL into an outage:

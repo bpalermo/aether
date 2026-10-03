@@ -170,6 +170,36 @@ agent:
   # (safety net); it never creates a conflist of its own. Needs the read-write
   # /etc/cni/net.d mount on the agent container.
   cniConflistReassert: true
+  # How the agent DaemonSet rolls (proposal 041, #1123).
+  updateStrategy:
+    # false (default): delete-then-create (maxSurge 0, maxUnavailable 1). The
+    # node's proxy has no ADS stream from the old agent's exit until the new
+    # one serves: the whole pod replacement plus startup (7.6-15.8 s on talos
+    # before #1123's first half, ~4-9 s after it).
+    #
+    # true: surge (maxSurge 1, maxUnavailable 0). The new agent starts beside
+    # the old one as a STANDBY: it finds the node lock (/run/aether/agent.lock)
+    # held, builds its whole first snapshot (identity, registry, capture
+    # projection, client certificates) but binds no node socket and writes no
+    # node file, and reports Ready once that snapshot is complete with its
+    # registry and capture gates passed (a timeout does not count). The
+    # DaemonSet controller then deletes the old pod; the kernel releases the
+    # lock the instant it exits; the standby applies the CNI ADD/DEL the old
+    # agent served meanwhile and binds. The gap is the proxy's reconnect
+    # backoff plus that diff, ~0.1-0.4 s.
+    #
+    # Costs and caveats (docs/runbook.md, "Agent surge roll"):
+    #   - each node briefly runs two agents, so it needs room for a second
+    #     agent.resources request (system-node-critical preempts if it must);
+    #     a node without it stalls the roll there, visibly (Pending surge pod);
+    #   - an old agent stuck terminating keeps its standby a standby until its
+    #     terminationGracePeriodSeconds (30 s) expires.
+    #   - a registrar that cannot be reached keeps the standby NotReady, so the
+    #     roll stalls rather than replacing a working agent.
+    # Roll it out in TWO steps: first upgrade to this chart with surge: false
+    # (every agent, registrar and lock-holder on the new version), then set
+    # surge: true. Never both in one upgrade. See docs/runbook.md for why.
+    surge: false
   # Cross-cluster config import (proposal 026): poll the registrar for GAMMA config
   # projections peer clusters exported and materialize them into the node proxy's
   # routes (merged with local; local wins). Default off; no-op unless the registry
