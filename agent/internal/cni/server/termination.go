@@ -8,6 +8,7 @@ import (
 	"aethermesh.dev/agent/types"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/drain"
 	"aethermesh.dev/registry"
 	corev1 "k8s.io/api/core/v1"
 	toolscache "k8s.io/client-go/tools/cache"
@@ -150,49 +151,15 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 	go s.schedulePoolClose(ctx, s.drainDelayForPod(pod), cur.GetContainerId(), serviceName, protocols, endpoint, log)
 }
 
-// drainPoolCloseDelay is the phase-2 floor: long enough for phase 1's
-// DRAINING to propagate (~1s broadcast + EDS apply) and for fast in-flight
-// requests to complete, short enough to land inside the minimum preStop
-// window (workload-requirements: preStop sleep >= 3s) so pools close before
-// the app exits. Workloads with a longer sleep preStop get a proportionally
-// longer drain window — see drainDelayForPod.
-const drainPoolCloseDelay = 2 * time.Second
+// drainPoolCloseDelay is the phase-2 floor (drain.PoolCloseFloor).
+const drainPoolCloseDelay = drain.PoolCloseFloor
 
-// drainDelayForPod sizes phase 2 to the workload: as generous an in-flight
-// window as the pod's own shutdown sequence allows. The bound is NOT the
-// termination grace period (default 30s) — it is the moment the app receives
-// SIGTERM (when its preStop hook finishes), because the pool close must land
-// while the app is still serving to pre-empt the exit-GOAWAY race. A sleep
-// preStop is machine-readable, so the drain window scales with it: close 1s
-// before SIGTERM, capped 2s short of the deletion grace (the kubelet's hard
-// kill). Exec preStop hooks and hookless pods are opaque, so they keep the
-// conservative floor.
+// drainDelayForPod sizes phase 2 to the workload (drain.PoolCloseDelay). The
+// registrar's kubernetes backend derives the same moment from the Pod with the
+// same function (aether#1144), so the UNHEALTHY this agent writes to one
+// registrar replica is what every other replica lists too.
 func (s *CNIServer) drainDelayForPod(pod *corev1.Pod) time.Duration {
-	delay := s.drainPoolCloseDelay
-
-	var sleep int64
-	for i := range pod.Spec.Containers {
-		ls := pod.Spec.Containers[i].Lifecycle
-		if ls != nil && ls.PreStop != nil && ls.PreStop.Sleep != nil && ls.PreStop.Sleep.Seconds > sleep {
-			sleep = ls.PreStop.Sleep.Seconds
-		}
-	}
-	if sleep <= 0 {
-		return delay
-	}
-
-	derived := time.Duration(sleep-1) * time.Second
-	// DeletionGracePeriodSeconds is set on a deletion-requested pod; never
-	// schedule the close into the kubelet's hard-kill window.
-	if grace := pod.GetDeletionGracePeriodSeconds(); grace != nil && *grace > 2 {
-		if hardCap := time.Duration(*grace-2) * time.Second; derived > hardCap {
-			derived = hardCap
-		}
-	}
-	if derived > delay {
-		delay = derived
-	}
-	return delay
+	return drain.PoolCloseDelay(pod, s.drainPoolCloseDelay)
 }
 
 // schedulePoolClose re-registers the endpoint UNHEALTHY after the given drain

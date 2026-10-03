@@ -31,6 +31,7 @@ go_library(
         "//common/constants",
         "//common/constants/annotations",
         "//common/constants/labels",
+        "//common/drain",
         "//common/log",
         "//common/telemetry",
         "//common/udspath",
