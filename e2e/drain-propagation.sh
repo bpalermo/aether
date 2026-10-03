@@ -410,7 +410,7 @@ run_once() {
 	t_last="$(python3 -c "$PY_APP_LAST" "$tag" <"$follow")"
 	[ -n "$t_last" ] || die "$leg$i: $victim logged none of the run's requests (the load did not reach it)"
 	gap="$(awk -v a="$t_last" -v b="$t_mark" 'BEGIN { printf "%.3f", a - b }')"
-	after="$(grep "GET /echo?msg=$tag" "$follow" | python3 -c '
+	after="$({ grep "GET /echo?msg=$tag" "$follow" || true; } | python3 -c '
 import sys, datetime, calendar
 mark = float(sys.argv[1]); year = datetime.datetime.now(datetime.timezone.utc).year; n = 0
 for line in sys.stdin:
@@ -568,7 +568,7 @@ for c in d.get("configs", []):
 # (fix) the ADS retry_back_off, then wait for the source proxy to load it.
 drp_bootstrap() {
 	local arm="$1" cm tmp want
-	cm="$(proxy_cm)"
+	cm="$(proxy_cm || true)"
 	[ -n "$cm" ] || die "no proxy ConfigMap"
 	tmp="$(mktemp)"
 	kc -n "$NS" get "$cm" -o yaml >"$tmp"
