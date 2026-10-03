@@ -268,22 +268,22 @@ assert_published() {
 		die "pod $pod never became Ready"
 	uid="$(pod_uid "$pod")"
 
-	got="$(in_pod "$pod" "stat -c '%a %g' /s")"
+	got="$(in_pod "$pod" "stat -c '%a %g' /s" || true)"
 	[ "$got" = "2770 $FS_GROUP" ] || die "/s in $pod is '$got' (mode gid), want '2770 $FS_GROUP'"
 	ok "$pod: /s is mode 2770, group $FS_GROUP (stat: $got)"
 
-	mnt="$(in_pod "$pod" "grep ' /s ' /proc/mounts")"
+	mnt="$(in_pod "$pod" "grep ' /s ' /proc/mounts" || true)"
 	case "$mnt" in tmpfs\ /s\ tmpfs\ *) ;; *) die "/s in $pod is not a tmpfs mount: '$mnt'" ;; esac
 	case "$mnt" in *size=1024k*nr_inodes=${INODES}*mode=2770*gid=${FS_GROUP}*) ;; *) die "/s in $pod lacks the plugin's size/nr_inodes/mode/gid: '$mnt'" ;; esac
 	ok "$pod: /s is the plugin's tmpfs ($mnt)"
 
-	got="$(in_pod "$pod" "stat -c '%F %g' /s/a.sock")"
+	got="$(in_pod "$pod" "stat -c '%F %g' /s/a.sock" || true)"
 	[ "$got" = "socket $FS_GROUP" ] || die "/s/a.sock in $pod is '$got', want 'socket $FS_GROUP' (the nonroot app could not bind, or setgid did not apply)"
-	body="$(in_pod "$pod" "curl -sS --max-time 5 --unix-socket /s/a.sock http://uds/")"
+	body="$(in_pod "$pod" "curl -sS --max-time 5 --unix-socket /s/a.sock http://uds/" || true)"
 	case "$body" in *"served-by-$pod"*) ;; *) die "the socket in $pod answered '$body'" ;; esac
 	ok "$pod: the nonroot app bound /s/a.sock (group $FS_GROUP) and it answers: $body"
 
-	got="$(docker exec "$NODE" stat -c '%a %g' "$UDS_ROOT/$uid")"
+	got="$(docker exec "$NODE" stat -c '%a %g' "$UDS_ROOT/$uid" || true)"
 	[ "$got" = "2770 $FS_GROUP" ] || die "host $UDS_ROOT/$uid is '$got', want '2770 $FS_GROUP'"
 	docker exec "$NODE" test -S "$UDS_ROOT/$uid/a.sock" ||
 		die "host $UDS_ROOT/$uid/a.sock is not a socket — the host does not see the pod's tmpfs"
@@ -334,9 +334,9 @@ assert_inode_cap() {
 	[ "$made" -lt 200 ] || die "$pod created 200 files on a tmpfs capped at $INODES inodes — the cap is not in effect"
 	[ "$made" -gt 0 ] || die "$pod could not create even one file on /s (control): $err"
 	case "$err" in *"No space left on device"*) ;; *) die "$pod: file $made on /s failed with '$err', want ENOSPC" ;; esac
-	free="$(docker exec "$NODE" df --output=iavail "$UDS_ROOT/$uid" | tail -1 | tr -d ' ')"
+	free="$(docker exec "$NODE" df --output=iavail "$UDS_ROOT/$uid" | tail -1 | tr -d ' ' || true)"
 	[ "$free" = 0 ] || die "host df -i $UDS_ROOT/$uid reports $free inodes free after ENOSPC, want 0"
-	body="$(in_pod "$pod" "curl -sS --max-time 5 --unix-socket /s/a.sock http://uds/")"
+	body="$(in_pod "$pod" "curl -sS --max-time 5 --unix-socket /s/a.sock http://uds/" || true)"
 	case "$body" in *"served-by-$pod"*) ;; *) die "with the tmpfs full, the socket in $pod answered '$body'" ;; esac
 	ok "$pod: file $((made + 1)) on /s failed with ENOSPC (${err##*: }); 0 inodes free and the socket still answers"
 	in_pod "$pod" 'rm -f /s/fill.*' || die "$pod: could not clean up the fill files"
