@@ -213,8 +213,15 @@ func TestWaitingSourceBecomesReadyWhenSPIREArrives(t *testing.T) {
 	require.Equal(t, int64(0), metricSum(t, reader, "aether.agent.spire.source_restarts"),
 		"a source that comes up cleanly must never be re-created")
 
-	ready := findRecord(logs.records(t), "obtained this workload's SVID from the SPIRE Workload API")
-	require.NotNil(t, ready, "the arrival must be announced; logs:\n%s", logs.String())
+	// The arrival line is written by Start's goroutine AFTER it closes Ready and
+	// signals Updated (waiting.go attempt), so neither channel orders it before
+	// this read: poll with a deadline instead of reading the buffer once (#1140).
+	const arrivedMsg = "obtained this workload's SVID from the SPIRE Workload API"
+	var ready map[string]any
+	require.Eventually(t, func() bool {
+		ready = findRecord(logs.records(t), arrivedMsg)
+		return ready != nil
+	}, 10*time.Second, 10*time.Millisecond, "the arrival must be announced; logs:\n%s", logs)
 	assert.Equal(t, testTrustDomain, ready["trustDomain"])
 }
 
