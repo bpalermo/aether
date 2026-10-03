@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "taint",
+    srcs = ["taint.go"],
+    importpath = "aethermesh.dev/common/taint",
+    visibility = ["//visibility:public"],
+    deps = ["@io_k8s_api//core/v1:core"],
+)

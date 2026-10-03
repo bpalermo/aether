@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/common/taint"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -30,11 +31,11 @@ func TestReconcileStandbyLeavesTheTaint(t *testing.T) {
 	assert.Equal(t, notReadyRequeue, res.RequeueAfter)
 	n := &corev1.Node{}
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: testNode}, n))
-	assert.True(t, hasTaint(n, aetherlabels.TaintAgentNotReady), "a standby never removes the taint")
+	assert.True(t, taint.Has(n, aetherlabels.TaintAgentNotReady), "a standby never removes the taint")
 
 	owned.Store(true)
 	_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: testNode}})
 	require.NoError(t, err)
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: testNode}, n))
-	assert.False(t, hasTaint(n, aetherlabels.TaintAgentNotReady), "the owner removes it once the node can mesh a pod")
+	assert.False(t, taint.Has(n, aetherlabels.TaintAgentNotReady), "the owner removes it once the node can mesh a pod")
 }

@@ -12,6 +12,7 @@ import (
 	"aethermesh.dev/agent/internal/cniconflist"
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	"aethermesh.dev/common/ctrlqueue"
+	"aethermesh.dev/common/taint"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -41,16 +42,6 @@ func removeTaint(node *corev1.Node, key string) (changed bool) {
 	}
 	node.Spec.Taints = kept
 	return changed
-}
-
-// hasTaint reports whether the node carries a taint with the given key.
-func hasTaint(node *corev1.Node, key string) bool {
-	for _, t := range node.Spec.Taints {
-		if t.Key == key {
-			return true
-		}
-	}
-	return false
 }
 
 // TaintRemover is a controller-runtime reconciler that removes the aether
@@ -139,7 +130,7 @@ func (r *TaintRemover) Reconcile(ctx context.Context, req reconcile.Request) (re
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if !hasTaint(node, aetherlabels.TaintAgentNotReady) {
+	if !taint.Has(node, aetherlabels.TaintAgentNotReady) {
 		return reconcile.Result{}, nil // nothing to do
 	}
 
