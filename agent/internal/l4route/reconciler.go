@@ -22,6 +22,7 @@ import (
 	"aethermesh.dev/agent/internal/gatewaystatus"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	"aethermesh.dev/common/crdcheck"
+	"aethermesh.dev/common/ctrlqueue"
 	"aethermesh.dev/common/l4project"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/referencegrant"
@@ -129,7 +130,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		b = b.Watches(w.obj, enqueueAll)
 	}
-	return b.Named("l4route").Complete(r)
+	return b.Named("l4route").WithOptions(ctrlqueue.Options()).Complete(r)
 }
 
 // Reconcile re-lists every TCPRoute, TLSRoute, and UDPRoute, keeps those

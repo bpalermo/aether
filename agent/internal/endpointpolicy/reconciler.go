@@ -13,6 +13,7 @@ import (
 
 	configapisv1 "aethermesh.dev/common/apis/config/v1"
 	"aethermesh.dev/common/crdcheck"
+	"aethermesh.dev/common/ctrlqueue"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/serviceref"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -63,6 +64,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&configapisv1.EndpointPolicy{}).
 		Named("endpointpolicy").
+		WithOptions(ctrlqueue.Options()).
 		Complete(r)
 }
 
