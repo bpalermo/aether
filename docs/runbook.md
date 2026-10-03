@@ -791,8 +791,11 @@ Two distinct exposures, and only one of them is fixed in the chart:
   override `edge.rollingUpdate` back to a surging strategy, this pre-flight is
   mandatory — on rev214 that surge pod was preempted on a node at 84 % CPU
   requests and wedged the roll.
-- **The DaemonSets (`aether-agent`, `aether-proxy`, `aether-mesh-dns`).** Not
-  fixed and not fixable by a strategy: a DaemonSet pod must land on *its* node
+- **The DaemonSets (`aether-agent`, `aether-proxy`, `aether-mesh-dns`).** The
+  proxy and mesh-dns always surge, and so does the agent when
+  `agent.updateStrategy.surge` is on (proposal 041). A surge pod needs its
+  *whole* request on top of the old pod's. Not fixed and not fixable by a
+  strategy: a DaemonSet pod must land on *its* node
   or not at all. The replacement needs the departing pod's request back, and if
   anything on that node is stuck `Terminating` it is still holding its CPU
   request — at which point the scheduler will not even preempt (`preemption: not
@@ -836,6 +839,75 @@ as the preemption victim twice on a dense node and cost a soak its data; it runs
 under the `aether-soak-loader` PriorityClass since #811. Any new load or probe
 workload needs a PriorityClass for the same reason — an evicted generator looks
 exactly like a passing test.
+
+### Agent surge roll (proposal 041)
+
+`agent.updateStrategy.surge` (chart >= 2.3.0, default `false`) rolls the agent
+DaemonSet with `maxSurge: 1, maxUnavailable: 0` instead of delete-then-create.
+It removes the pod replacement and the new agent's startup from the window in
+which the node's proxy has no ADS stream (#1123): the gap becomes the proxy's
+reconnect backoff plus a small storage diff.
+
+**Turning it on.**
+
+```bash
+helm upgrade aether <chart> -n aether-system -f values.yaml --set agent.updateStrategy.surge=true
+```
+
+It is safe in the same upgrade that first ships it: a standby also waits for an
+agent that predates the lock to stop answering on `xds.sock`/`cni.sock` before
+it binds. Do the node-headroom pre-flight below first. With surge each node
+briefly runs two agents, so it needs room for a second `agent.resources`
+request (200m CPU, 64Mi). The pod is `system-node-critical` and preempts if it
+has to. If it cannot be placed, it stays `Pending` and the roll stalls on that
+node, visibly. Nothing breaks: the old agent keeps serving.
+
+**What the overlap looks like.** Per node, in the new agent's log:
+
+```
+another agent owns this node; starting as a standby: building everything, binding nothing until its lock is released
+... (the usual startup: SVID, registry connected, client certificates)
+node lock acquired: the previous owner is gone; taking the node over   standby=6.2s
+takeover step done   step="merge the previous agent's persisted node state"
+takeover: applied the previous agent's CNI ADD/DEL from the overlap   added=1 updated=0 removed=1
+this agent owns the node; binding its sockets and starting its writers   takeover=4ms
+```
+
+`takeover: local storage unchanged during the overlap` is the common case. The
+pod is Ready once its first snapshot is complete (`standby` readiness check).
+The DaemonSet controller then deletes the old pod, the old agent exits in
+20-100 ms, and the kernel hands the lock (`/run/aether/agent.lock`) to the
+standby. Proxy side, `control_plane.connected_state` drops to 0 for a few
+hundred ms (what `e2e/agent-restart-gap.sh` measures):
+
+```bash
+kubectl -n aether-system exec <proxy-pod> -c aether-proxy -- \
+  curl -s 'http://127.0.0.1:9901/stats?filter=^control_plane.connected_state$'
+```
+
+**A standby that never takes over** is waiting on an old agent stuck
+`Terminating`. It stays Ready and binds nothing; the old pod's
+`terminationGracePeriodSeconds` (30 s) bounds the wait, then the kubelet kills
+the process and the kernel releases the lock. If the old pod is stuck past that
+(a wedged kubelet, #796), the old *process* may already be gone. Check:
+
+```bash
+kubectl -n aether-system exec <new-agent-pod> -c agent -- /agent-ready --path=/readyz   # prints the failing check, if any
+kubectl -n aether-system logs <new-agent-pod> -c agent | grep -E "standby|node lock|owns the node"
+```
+
+A standby still logging `another agent owns this node` with no `node lock
+acquired` means some process on the node still holds the lock. On the node,
+`fuser /run/aether/agent.lock` names it. Do not delete the lock file: an
+unlinked lock file is a different inode from the one the next agent opens, and
+the two would both believe they own the node.
+
+**`kubectl delete pod` of an agent** (any strategy) is still delete-then-create:
+the lock is free when the new pod starts, so it owns the node at once and
+serves exactly as before (no takeover step runs).
+
+**Turning it off** (`surge: false`) takes effect on the next roll. The lock
+stays: it costs nothing when nothing contends for it.
 
 ### Version-ordering constraint: issue #815 (per-source client certificates)
 
@@ -2447,7 +2519,9 @@ kubectl -n aether logs ds/aether-agent | grep -E "waiting for the SPIRE Workload
 kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent
 
 # 3. The readiness gate and its dwell
-kubectl -n aether exec ds/aether-agent -c agent -- wget -qO- localhost:8082/readyz?verbose
+# (chart >= 2.3.0: health is a pod-local socket; the probe prints the verbose
+# body, naming the failing check, and exits 1 when not ready)
+kubectl -n aether exec ds/aether-agent -c agent -- /agent-ready --path=/readyz
 ```
 
 #### The readiness semantics are NOT the same on every component

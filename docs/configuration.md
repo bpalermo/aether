@@ -80,6 +80,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 |---|---|---|
 | `agent.gamma` | `true` | GAMMA east-west L7 routing (018): watch `HTTPRoute`s **and `GRPCRoute`s** parented to a Service (plus `ReferenceGrant`s and `HTTPFilter` attachments) and apply them on **both** the explicit outbound path and the transparent-capture path. MESH-HTTP Core conformance-green. Safe without the Gateway API CRDs (CRD-detected, degrades with a warning); `false` is a kill switch. |
 | `agent.cniConflistReassert` | `true` | Keep aether chained in the node's active CNI conflist (#645): the agent watches `/etc/cni/net.d` (read-write mount) and re-appends the `aether-cni` entry whenever a competing writer strips it — kube-flannel `cp -f`s its ConfigMap template over `10-flannel.conflist` on every flannel pod recreation, which a Talos bootstrap-manifest re-sync triggers, silently unmeshing every pod started afterwards. Never creates a conflist of its own; `false` is a kill switch. |
+| `agent.updateStrategy.surge` | `false` | How the agent DaemonSet rolls (proposal 041). `false`: delete-then-create (`maxSurge: 0, maxUnavailable: 1`); the node's proxy has no ADS stream for the whole pod replacement + startup. `true`: `maxSurge: 1, maxUnavailable: 0`; the new agent starts as a **standby** (it finds `/run/aether/agent.lock` held), builds its whole first snapshot but binds no node socket and writes no node file, reports Ready, and takes the node over the instant the old agent exits. The gap becomes the reconnect backoff plus a storage diff (~0.1-0.4 s). Needs room on every node for a second `agent.resources` request during the overlap. In both modes the agent pod declares no `ports:` and probes over a pod-local socket (`/agent-ready`). See [`runbook.md`](./runbook.md) § *Agent surge roll (proposal 041)*. |
 | `agent.importConfig` | `false` | Cross-cluster config import (026): poll the registrar for peer-exported GAMMA projections and materialize them (merged with local; local wins). Pairs with `registrar.registryBackend=etcd`. |
 | `agent.eastWestWaypoint` | `false` | East/west waypoint (019): dial **cross-cluster** endpoints at their node's routable IP + the fixed tunnel port `18009` instead of the (unroutable) pod IP; this node's host-network proxy SNI-forwards inbound tunnel traffic to local pods. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared or replicated etcd) + a shared SPIRE trust domain. |
 | `agent.captureRedirectAllDefault` | `true` | Redirect-all as the DEFAULT for managed pods (022 Step 4); opt out per-pod with `capture.aether.io/redirect-all="false"`. `false` = per-pod opt-in via the same annotation set to `"true"`. (Transparent capture itself and the passthrough chain are unconditional since proposal 031.) |
@@ -335,6 +336,9 @@ Node-agent-specific:
 | Flag | Default | Purpose |
 |---|---|---|
 | `--mounted-registry-dir` | `/host/var/lib/aether/registry` | Local pod-data dir for the CNI plugin. |
+| `--node-lock` | `/run/aether/agent.lock` | Node-ownership lock (proposal 041). The agent that owns the node holds an exclusive `flock` on it for its life. An agent that finds it taken (a surge roll) is a standby: it builds its first snapshot but binds neither `xds.sock` nor `cni.sock` and writes no node file (observed upstreams, mesh-DNS snapshot, conflist repair, storage) until the lock is released. It then applies the CNI ADD/DEL served meanwhile and binds. Must be on a host path every agent pod on the node shares. Empty disables the lock. |
+| `--health-socket` | `""` | Serve `/healthz` and `/readyz` on this Unix socket for the `agent-ready` exec probe (041). Must be in the pod's own filesystem (the chart uses `/tmp/aether-agent-health.sock` in the `tmp` emptyDir), so the kubelet is never answered by a surge peer on the same hostNetwork node. Empty serves no socket. |
+| `--health-probe-bind-address` | `:8082` | TCP `/healthz` and `/readyz`. `0` disables it; the chart passes `0` and probes the socket. Metrics (`--metrics-bind-address`, `:8080`) bind only once the agent owns its node. |
 | `--uds-csi-root` | `/run/aether/uds` | Host directory under which the `csi.aether.io` plugin mounts each UDS pod's tmpfs, mounted into the proxy at the identical path; the proxy dials `<root>/<pod-uid>/<file>` (034/039). Must match the plugin's `--root` (the chart renders both from `udsCsi.root`). Empty disables UDS delivery: pods requesting a socket fall back to TCP loopback (`resolve_failures{reason="disabled"}`). Replaced `--kubelet-pods-dir` (039 Phase 2). |
 | `--spire-broker-socket` | `/run/spire/broker-sockets/broker.sock` | SPIRE agent's SPIFFE Broker Endpoint socket, over which the agent brokers an X.509-SVID for every pod on its node (036). Replaced `--spire-admin-socket`; requires SPIRE >= 1.15.2 with its experimental broker enabled. |
 | `--gamma` | `true` | GAMMA east-west routing (018); default-on kill switch (031). CRD-detected. |
@@ -504,6 +508,21 @@ than an `httpGet`/`tcpSocket`: this DaemonSet is `hostNetwork: true` with
 `maxSurge: 1`, so predecessor and successor share the host netns for the whole
 handoff and a port-based check could be answered by the peer pod's SO_REUSEPORT
 socket. That is precisely what #582 proposed and why it was closed abandoned.
+
+### `agent-ready` (standalone binary — bundled in the agent image, the agent pod's exec probe)
+
+The `aether-agent` container's liveness and readiness probe (proposal 041). It
+dials the agent's `--health-socket`, sends one `GET <path>?verbose`, and exits 0
+iff the agent answers 200. On failure it prints the response body, which names
+the failing check (the kubelet records it in the probe event). Stdlib-only and
+without `net/http`. `//agent/cmd/agent-ready:deps_test` asserts that the linked
+binary's build info lists no module at all: it is exec'd every 2 s on every node.
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--socket` | `/tmp/aether-agent-health.sock` | The agent's health socket. |
+| `--path` | `/readyz` | `/readyz` (readiness) or `/healthz` (liveness). |
+| `--timeout` | `1s` | Bound on the whole exchange. |
 
 ### `identity-ready` (standalone binary — bundled in the agent image, run as an injected init container)
 

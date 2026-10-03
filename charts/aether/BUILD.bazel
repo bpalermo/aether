@@ -113,9 +113,65 @@ helm_template_test(
         "aether/templates/agent-daemonset.yaml": [
             "- name: cni-install\\n\\s+image: \\S+\\n\\s+imagePullPolicy: IfNotPresent\\n",
             "- name: agent\\n\\s+image: \\S+\\n\\s+imagePullPolicy: IfNotPresent\\n",
-            "readinessProbe:\\n\\s+httpGet:\\n\\s+path: /readyz\\n\\s+port: health\\n\\s+periodSeconds: 2\\n\\s+failureThreshold: 15\\n",
+            "readinessProbe:\\n\\s+exec:\\n\\s+command: \\[\"/agent-ready\", \"--path=/readyz\"\\]\\n\\s+periodSeconds: 2\\n\\s+failureThreshold: 15\\n",
         ],
     },
+)
+
+# Proposal 041: agent.updateStrategy.surge. Off (the default) keeps the
+# delete-then-create roll; on rolls with maxSurge 1 / maxUnavailable 0 so the
+# new agent runs as a standby beside the old one.
+helm_template_test(
+    name = "aether_agent_update_strategy_default_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "updateStrategy:\\n\\s+type: RollingUpdate\\n\\s+rollingUpdate:\\n(\\s+#.*\\n)*\\s+maxSurge: 0\\n\\s+maxUnavailable: 1\\n",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "aether_agent_update_strategy_surge_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "agent.updateStrategy.surge=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "updateStrategy:\\n\\s+type: RollingUpdate\\n\\s+rollingUpdate:\\n(\\s+#.*\\n)*\\s+maxSurge: 1\\n\\s+maxUnavailable: 0\\n",
+            # Everything that makes the overlap safe, in BOTH strategies (the
+            # default test below pins the same): probes over the pod-local
+            # socket, no TCP health port, the lock's hostPath mounted.
+            "- \"--health-socket=/tmp/aether-agent-health.sock\"",
+            "- \"--health-probe-bind-address=0\"",
+            "livenessProbe:\\n\\s+exec:\\n\\s+command: \\[\"/agent-ready\", \"--path=/healthz\"\\]\\n",
+            "- name: run-dir\\n\\s+mountPath: /run/aether\\n",
+            "priorityClassName: system-node-critical\\n",
+        ],
+    },
+)
+
+# A hostNetwork pod's containerPort defaults to a hostPort: the scheduler's
+# NodePorts filter would keep a surge agent Pending beside the old one forever.
+# The agent declares no ports, in either strategy; the control proves the
+# render reached the agent container.
+helm_template_absent_test(
+    name = "aether_agent_no_host_ports_test",
+    absent = [
+        "containerPort: 8080",
+        "containerPort: 8082",
+        "port: health",
+    ],
+    chart = ":aether",
+    control = "- \"--health-socket=/tmp/aether-agent-health.sock\"",
+    opts = [
+        "--show-only",
+        "templates/agent-daemonset.yaml",
+        "--set",
+        "agent.updateStrategy.surge=true",
+    ],
 )
 
 # ...and agent.goMaxProcs=0 hands GOMAXPROCS back to the Go runtime: no env var.
