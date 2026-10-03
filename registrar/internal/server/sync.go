@@ -81,19 +81,24 @@ const changeDebounce = 200 * time.Millisecond
 
 // Start runs the sync loop until the context is cancelled. When the registry
 // supports change notifications (registry.ChangeNotifier — the etcd backend's
-// clientv3 watch), the loop syncs at watch speed (debounced) instead of only
-// at the poll interval; the periodic poll remains a backstop for any event
-// missed during a watch re-establish. Backends without notifications (the
-// kubernetes backend) fall back to poll-only, unchanged.
+// clientv3 watch, the kubernetes backend's managed-Pod informer since
+// aether#1124), the loop syncs at watch speed (debounced) instead of only at
+// the poll interval; the periodic poll remains a backstop for any event missed
+// during a watch re-establish. Backends without notifications fall back to
+// poll-only, unchanged.
 func (s *Syncer) Start(ctx context.Context) error {
 	s.log.InfoContext(ctx, "starting sync loop", "interval", s.syncInterval)
 
 	// Perform an initial sync immediately.
 	s.sync(ctx)
 
+	// A nil channel (a kubernetes backend built without a pod informer) never
+	// fires, which is poll-only.
 	var changes <-chan struct{}
 	if n, ok := s.registry.(registry.ChangeNotifier); ok {
 		changes = n.Changes()
+	}
+	if changes != nil {
 		s.log.InfoContext(ctx, "registry supports change notifications; syncing at watch speed (poll is backstop)")
 	}
 
