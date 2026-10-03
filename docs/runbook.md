@@ -89,7 +89,7 @@ the supported spelling and `make test-race` is the whole-tree run of it:
 
 ```bash
 bazel test --config=race //agent/internal/meshdns:all //agent/storage:all
-bazel test --config=race --runs_per_test=3 --nocache_test_results //common/xds:all
+bazel test --config=race --runs_per_test=3 --nocache_test_results //common/grpcserver:all
 ```
 
 Prefer the scoped spelling while developing: a bare `//...` race run currently

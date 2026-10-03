@@ -1,4 +1,10 @@
-package xds
+// Package grpcserver is the lifecycle shell every aether gRPC server runs in:
+// TCP or Unix-socket listen, PreListen callbacks, a bind gate, liveness and
+// readiness, and graceful shutdown. It deliberately depends on nothing Envoy:
+// the xDS server (common/xds) builds on it, and so do servers that are not
+// xDS at all (the registrar, the agent's CNI server), which therefore do not
+// link go-control-plane through it.
+package grpcserver
 
 import (
 	"context"
@@ -47,6 +53,8 @@ type ServerOption func(*Server)
 // The server is not started until Start is called.
 func NewServer(cfg *ServerConfig, log *slog.Logger, opts ...ServerOption) Server {
 	s := Server{
+		// "xds" predates this package's split out of common/xds; kept so the
+		// logger name every component's log queries match on is unchanged.
 		Log:       commonlog.Named(log, "xds"),
 		cfg:       cfg,
 		liveness:  atomic.NewBool(false),
@@ -82,6 +90,13 @@ func (s *Server) AddCallback(callback ServerCallback) {
 // builds everything a first serve needs, but must not bind the node's sockets
 // until the agent that owns them has exited.
 func (s *Server) SetBindGate(gate func(ctx context.Context) error) { s.bindGate = gate }
+
+// GRPCServer returns the gRPC server this Server serves (the one passed via
+// WithGRPCServer), so a wrapper that built it can inspect its registered services.
+func (s *Server) GRPCServer() *grpc.Server { return s.gSrv }
+
+// Config returns the configuration this Server was built with.
+func (s *Server) Config() *ServerConfig { return s.cfg }
 
 // Start starts the gRPC server and blocks until the context is cancelled or the server errors.
 // It invokes the PreListen callback before starting to listen if a callback is registered.

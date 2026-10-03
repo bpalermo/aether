@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"aethermesh.dev/common/grpcserver"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/stretchr/testify/assert"
@@ -23,7 +24,7 @@ func TestNewXdsServer_ReturnsInitializedServer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewServerConfig()
+			cfg := grpcserver.NewServerConfig()
 			cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 
 			got := NewXdsServer(context.Background(), cfg, cache, nil, slog.New(slog.DiscardHandler))
@@ -31,7 +32,7 @@ func TestNewXdsServer_ReturnsInitializedServer(t *testing.T) {
 			require.NotNil(t, got.cache)
 			assert.Equal(t, cache, got.cache)
 			// The embedded Server should have a gRPC server configured by NewXdsServer.
-			assert.NotNil(t, got.gSrv)
+			assert.NotNil(t, got.GRPCServer())
 			// The xDS server wrapper should be set.
 			assert.NotNil(t, got.xSrv)
 		})
@@ -51,7 +52,7 @@ func TestNewXdsServer_WithCallbacks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewServerConfig()
+			cfg := grpcserver.NewServerConfig()
 			cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 
 			got := NewXdsServer(context.Background(), cfg, cache, tt.callbacks, slog.New(slog.DiscardHandler))
@@ -72,12 +73,12 @@ func TestNewXdsServer_DiscoveryServicesRegistered(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewServerConfig()
+			cfg := grpcserver.NewServerConfig()
 			cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 
 			got := NewXdsServer(context.Background(), cfg, cache, nil, slog.New(slog.DiscardHandler))
 
-			grpcSrv := got.gSrv
+			grpcSrv := got.GRPCServer()
 			require.NotNil(t, grpcSrv)
 
 			// grpc.Server.GetServiceInfo returns a map of registered service names
@@ -119,15 +120,15 @@ func TestNewXdsServer_EmbeddedServerUsesProvidedConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewServerConfig()
+			cfg := grpcserver.NewServerConfig()
 			cfg.Network = tt.network
 			cfg.Address = tt.address
 
 			cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 			got := NewXdsServer(context.Background(), cfg, cache, nil, slog.New(slog.DiscardHandler))
 
-			assert.Equal(t, tt.network, got.cfg.Network)
-			assert.Equal(t, tt.address, got.cfg.Address)
+			assert.Equal(t, tt.network, got.Config().Network)
+			assert.Equal(t, tt.address, got.Config().Address)
 		})
 	}
 }
@@ -143,17 +144,17 @@ func TestNewXdsServer_GRPCServerIsDistinctFromBareGRPCServer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewServerConfig()
+			cfg := grpcserver.NewServerConfig()
 			cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 
 			bare := grpc.NewServer()
 			defer bare.Stop()
 
 			got := NewXdsServer(context.Background(), cfg, cache, nil, slog.New(slog.DiscardHandler))
-			defer got.gSrv.Stop()
+			defer got.GRPCServer().Stop()
 
 			// The gRPC server created by NewXdsServer must not be the bare one.
-			assert.NotEqual(t, bare, got.gSrv)
+			assert.NotEqual(t, bare, got.GRPCServer())
 		})
 	}
 }

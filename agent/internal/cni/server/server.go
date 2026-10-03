@@ -14,9 +14,9 @@ import (
 	"aethermesh.dev/agent/storage"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
+	"aethermesh.dev/common/grpcserver"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/telemetry"
-	"aethermesh.dev/common/xds"
 	"aethermesh.dev/registry"
 	"buf.build/go/protovalidate"
 	protovalidate_middleware "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/protovalidate"
@@ -36,11 +36,11 @@ import (
 // and registers service endpoints in the registry. The server also queries Kubernetes
 // node metadata (region and zone) for topology-aware routing.
 //
-// CNIServer embeds xds.Server and implements the ServerCallback interface to query
+// CNIServer embeds grpcserver.Server and implements the ServerCallback interface to query
 // node metadata before accepting client connections.
 type CNIServer struct {
 	cniv1.UnimplementedCNIServiceServer
-	xds.Server
+	grpcserver.Server
 
 	log *slog.Logger
 
@@ -204,7 +204,7 @@ func (s *CNIServer) unchained() bool {
 	return st.Observed && !st.Chained
 }
 
-var _ xds.ServerCallback = (*CNIServer)(nil)
+var _ grpcserver.ServerCallback = (*CNIServer)(nil)
 
 // NewCNIServer creates a new CNI gRPC server.
 // The server listens on a Unix domain socket and registers the CNI service with
@@ -228,7 +228,7 @@ func NewCNIServer(clusterName string, nodeName string, trustDomain string, local
 
 	cniSrv := &CNIServer{
 		drainPoolCloseDelay: drainPoolCloseDelay,
-		Server:              xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
+		Server:              grpcserver.NewServer(grpcserver.NewServerConfig(grpcserver.WithUDS(cfg.SocketPath)), log, grpcserver.WithGRPCServer(grpcServer)),
 		log:                 commonlog.Named(log, "cni"),
 		metrics:             metrics,
 		clusterName:         clusterName,

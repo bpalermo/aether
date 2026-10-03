@@ -13,6 +13,7 @@ import (
 	"aethermesh.dev/agent/internal/xds/cache"
 	"aethermesh.dev/agent/storage"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	"aethermesh.dev/common/grpcserver"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/xds"
 	"aethermesh.dev/registry"
@@ -320,8 +321,8 @@ func (s *AgentXdsServer) identityPending() bool {
 // callbacks (optional, may be nil) observe the discovery streams — the agent
 // passes the ACK tracker's callbacks so pod lifecycle can await Envoy ACKs.
 func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string, trustDomain string, registry registry.Registry, storage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, callbacks serverv3.Callbacks, log *slog.Logger) (*AgentXdsServer, error) {
-	cfg := xds.NewServerConfig(
-		xds.WithUDS(constants.DefaultXdsSocketPath),
+	cfg := grpcserver.NewServerConfig(
+		grpcserver.WithUDS(constants.DefaultXdsSocketPath),
 	)
 
 	// Watch the discovery streams for on-demand CDS subscriptions (ODCDS cold
@@ -362,7 +363,7 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 // NeedLeaderElection returns false so the xDS server runs on EVERY replica, not
 // just the leader. Each edge/agent pod serves xDS to its own co-located Envoy
 // over a node-local UDS; leader-gating it would leave all non-leader proxies
-// without a control plane and break data-plane HA. (The embedded xds.Server
+// without a control plane and break data-plane HA. (The embedded grpcserver.Server
 // already declares this; AgentXdsServer states it explicitly so the
 // per-pod-runnable contract is visible at this type.) On the node agent (leader
 // election off) this method is a no-op.
