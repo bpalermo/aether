@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -20,6 +21,7 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/common/drain"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/serviceref"
 	"aethermesh.dev/registry/endpointmeta"
@@ -69,6 +71,13 @@ type KubernetesRegistry struct {
 	informers PodInformerSource
 	notify    chan struct{}
 
+	// Phase-2 wake-ups (aether#1144): a terminating pod turns UNHEALTHY at
+	// drain.PoolCloseAt with no Pod event to say so, so the handler arms one
+	// timer per (pod, due time) that signals a re-list when it is due.
+	closeMu    sync.Mutex
+	closeArmed map[poolCloseKey]struct{}
+	afterFunc  func(time.Duration, func())
+
 	// Node-locality cache (issue #541): List/ListAll run on every registry
 	// reload — dozens of times per minute during churn — and used to resolve
 	// node localities with serial per-node Gets each call. The cache is
@@ -92,6 +101,8 @@ func NewKubernetesRegistry(log *slog.Logger, reader client.Reader, cfg Config) *
 		informers:    cfg.Informers,
 		nodeCacheTTL: nodeLocalityCacheTTL,
 		now:          time.Now,
+		closeArmed:   make(map[poolCloseKey]struct{}),
+		afterFunc:    func(d time.Duration, f func()) { time.AfterFunc(d, f) },
 	}
 	if cfg.Informers != nil {
 		r.notify = make(chan struct{}, 1)
@@ -126,6 +137,7 @@ func (r *KubernetesRegistry) onPodAddOrDelete(obj any) {
 		obj = tombstone.Obj
 	}
 	if pod, ok := obj.(*corev1.Pod); ok && isManaged(pod) {
+		r.armPoolClose(pod)
 		r.signal()
 	}
 }
@@ -134,8 +146,50 @@ func (r *KubernetesRegistry) onPodUpdate(oldObj, newObj any) {
 	oldPod, okOld := oldObj.(*corev1.Pod)
 	newPod, okNew := newObj.(*corev1.Pod)
 	if okOld && okNew && (isManaged(oldPod) || isManaged(newPod)) && endpointInputsChanged(oldPod, newPod) {
+		r.armPoolClose(newPod)
 		r.signal()
 	}
+}
+
+// poolCloseKey identifies one armed phase-2 wake-up: a pod and the moment it
+// is due. A second deletion request with a shorter grace moves the moment and
+// arms a fresh timer.
+type poolCloseKey struct {
+	uid types.UID
+	at  int64 // drain.PoolCloseAt, Unix nanoseconds
+}
+
+// armPoolClose schedules a re-list for the moment a terminating, still-Ready
+// managed pod turns UNHEALTHY (drain.PoolCloseAt, see podHealth). Nothing about
+// the Pod changes at that moment, so without the wake-up every replica would
+// only notice at its next poll. One timer per pod and due time; a pod already
+// past it lists UNHEALTHY on the re-list the caller signals anyway.
+func (r *KubernetesRegistry) armPoolClose(pod *corev1.Pod) {
+	if !isManaged(pod) || !podReady(pod) {
+		return
+	}
+	at, ok := drain.PoolCloseAt(pod)
+	if !ok {
+		return
+	}
+	wait := at.Sub(r.now())
+	if wait <= 0 {
+		return
+	}
+	key := poolCloseKey{uid: pod.UID, at: at.UnixNano()}
+	r.closeMu.Lock()
+	_, armed := r.closeArmed[key]
+	r.closeArmed[key] = struct{}{}
+	r.closeMu.Unlock()
+	if armed {
+		return
+	}
+	r.afterFunc(wait, func() {
+		r.closeMu.Lock()
+		delete(r.closeArmed, key)
+		r.closeMu.Unlock()
+		r.signal()
+	})
 }
 
 // Changes implements registry.ChangeNotifier: a coalesced signal whenever a
@@ -159,7 +213,9 @@ func isManaged(pod *corev1.Pod) bool {
 // timestamps) does not trigger a full re-list.
 func endpointInputsChanged(oldPod, newPod *corev1.Pod) bool {
 	return isManaged(oldPod) != isManaged(newPod) ||
-		(oldPod.DeletionTimestamp == nil) != (newPod.DeletionTimestamp == nil) ||
+		// Set, or moved by a second deletion request with a shorter grace
+		// (which moves the phase-2 moment, drain.PoolCloseAt, too).
+		!oldPod.DeletionTimestamp.Equal(newPod.DeletionTimestamp) ||
 		oldPod.Status.Phase != newPod.Status.Phase ||
 		oldPod.Status.PodIP != newPod.Status.PodIP ||
 		podReady(oldPod) != podReady(newPod) ||
@@ -497,7 +553,7 @@ func (r *KubernetesRegistry) podToEndpoint(pod *corev1.Pod, nodeLocalities map[s
 		// This backend derives endpoints from the API server rather than receiving
 		// agent registrations, so health comes from the pod's readiness condition
 		// (the delegated active-HC path applies only to the write-based backends).
-		Health:          podHealth(pod),
+		Health:          podHealth(pod, r.now()),
 		HealthCheckMode: healthCheckModeFromAnnotations(pod.Annotations),
 	}
 
@@ -521,12 +577,18 @@ func (r *KubernetesRegistry) podToEndpoint(pod *corev1.Pod, nodeLocalities map[s
 // writes. Without this, a peer replica kept listing the pod HEALTHY through the
 // whole preStop window (the kubelet keeps a terminating pod Ready until its
 // containers stop), and every source agent watching that replica kept sending
-// new requests into it. Once a terminating pod is no longer Ready it is
-// UNHEALTHY, like the agent's own phase 2.
-func podHealth(pod *corev1.Pod) registryv1.ServiceEndpoint_Health {
+// new requests into it.
+//
+// The drain's second phase is derived the same way (aether#1144): from
+// drain.PoolCloseAt -- the moment the agent's own phase-2 timer marks the pod
+// UNHEALTHY, about 1 s before SIGTERM -- a terminating pod is UNHEALTHY on
+// every replica, so every source closes its pools to it before the app exits,
+// not only those watching the replica the agent's mark reached. A terminating
+// pod that is no longer Ready is UNHEALTHY whatever the time.
+func podHealth(pod *corev1.Pod, now time.Time) registryv1.ServiceEndpoint_Health {
 	ready, known := podReadyCondition(pod)
 	if pod.DeletionTimestamp != nil {
-		if ready {
+		if closeAt, ok := drain.PoolCloseAt(pod); ready && (!ok || now.Before(closeAt)) {
 			return registryv1.ServiceEndpoint_HEALTH_DRAINING
 		}
 		return registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
