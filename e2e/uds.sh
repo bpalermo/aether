@@ -688,7 +688,7 @@ verify_cni_telemetry() {
 	[ -n "$cluster_ip" ] || die "the collector Service has no ClusterIP"
 	want="${cluster_ip}:4317"
 	got="$(docker exec "$NODE" sh -c 'cat /etc/cni/net.d/*.conflist' |
-		grep -o '"otlp_endpoint": *"[^"]*"' | sed -n '1s/.*"\([^"]*\)"$/\1/p')"
+		grep -o '"otlp_endpoint": *"[^"]*"' | sed -n '1s/.*"\([^"]*\)"$/\1/p' || true)"
 	[ "$got" = "$want" ] ||
 		die "the chained aether netconf has otlp_endpoint='$got', want '$want' — cni-install did not pin the Service name to its ClusterIP, and the host resolver cannot resolve '$COLLECTOR_ENDPOINT'"
 	ok "netconf otlp_endpoint pinned to the ClusterIP ($got)"
