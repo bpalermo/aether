@@ -12,6 +12,7 @@ import (
 
 	"aethermesh.dev/agent/internal/cniconflist"
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/common/taint"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -94,7 +95,7 @@ func nodeTaintPresent(t *testing.T, c client.Client) bool {
 	t.Helper()
 	n := &corev1.Node{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: testNode}, n))
-	return hasTaint(n, aetherlabels.TaintAgentNotReady)
+	return taint.Has(n, aetherlabels.TaintAgentNotReady)
 }
 
 func reconcileNode(t *testing.T, r *TaintRemover) reconcile.Result {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/common/taint"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -118,7 +119,7 @@ func (g *Guard) Reconcile(ctx context.Context, req reconcile.Request) (reconcile
 	}
 
 	// No Ready agent pod. If the taint is already armed, we're done (idempotent).
-	if hasTaint(node, aetherlabels.TaintAgentNotReady) {
+	if taint.Has(node, aetherlabels.TaintAgentNotReady) {
 		g.forget(req.Name)
 		return reconcile.Result{}, nil
 	}
@@ -206,7 +207,7 @@ func (g *Guard) armTaint(ctx context.Context, nodeName string) error {
 		if err := g.Client.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
 			return client.IgnoreNotFound(err)
 		}
-		if hasTaint(node, aetherlabels.TaintAgentNotReady) {
+		if taint.Has(node, aetherlabels.TaintAgentNotReady) {
 			return nil
 		}
 		base := node.DeepCopy()
@@ -219,16 +220,6 @@ func (g *Guard) armTaint(ctx context.Context, nodeName string) error {
 			client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}),
 			client.FieldOwner(fieldOwner))
 	})
-}
-
-// hasTaint reports whether the node carries a taint with the given key.
-func hasTaint(node *corev1.Node, key string) bool {
-	for _, t := range node.Spec.Taints {
-		if t.Key == key {
-			return true
-		}
-	}
-	return false
 }
 
 // podReady reports whether a pod's Ready condition is True.

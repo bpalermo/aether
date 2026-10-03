@@ -7,6 +7,7 @@ import (
 	"time"
 
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/common/taint"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -77,7 +78,7 @@ func tainted(t *testing.T, c client.Client) bool {
 	t.Helper()
 	n := &corev1.Node{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: nodeName}, n))
-	return hasTaint(n, aetherlabels.TaintAgentNotReady)
+	return taint.Has(n, aetherlabels.TaintAgentNotReady)
 }
 
 // TestReadyAgent: a Ready agent pod keeps the node untainted and clears any
