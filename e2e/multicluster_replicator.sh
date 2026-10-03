@@ -152,10 +152,15 @@ dump_failover_state() {
 	# hold them all (origin data must persist).
 	printf '\033[1;33m  -- registry: %s keys (etcd-a = expired mirror, etcd-b = live origin) --\033[0m\n' "$region_b" >&2
 	local c
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`sed -n '1,Np'`, `grep -c ... >/dev/null`, or grep a captured variable).
 	for c in "$CLUSTER_A" "$CLUSTER_B"; do
 		printf '    [etcd-%s]\n' "$c" >&2
 		docker exec "$(etcd_name "$c")" etcdctl get --prefix "/aether/v1/regions/$region_b/" \
-			--keys-only 2>&1 | grep -v '^$' | head -20 | sed 's/^/      /' >&2 || true
+			--keys-only 2>&1 | grep -v '^$' | sed -n '1,20s/^/      /p' >&2 || true
 	done
 
 	# Registrar layer on 'a' — this is what discriminates (1) from (2). Two greps,
@@ -254,7 +259,7 @@ build_images() {
 create_clusters() {
 	local i=0
 	for c in "$CLUSTER_A" "$CLUSTER_B"; do
-		if kind get clusters 2>/dev/null | grep -qx "$c"; then
+		if kind get clusters 2>/dev/null | grep -cx "$c" >/dev/null; then
 			ok "kind cluster '$c' already exists"
 		else
 			log "creating kind cluster '$c' (non-overlapping, non-routable pod CIDRs)"
@@ -516,7 +521,7 @@ now_ms() { date +%s%3N; }
 # Host rows are the ones carrying an address: `::<ip>:<port>::`.
 echo_host_rows() {
 	docker exec "$1" curl -s --max-time 5 http://127.0.0.1:9901/clusters 2>/dev/null |
-		grep -iE '^[^:]*echo[^:]*::[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+::' | head -60 || true
+		grep -iE '^[^:]*echo[^:]*::[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+::' | sed -n '1,60p' || true
 }
 
 # mirror_state <cluster-of-etcd> <region-prefix-to-look-for>
@@ -546,7 +551,7 @@ mirror_state() {
 			"$1" "$rc" "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)" >&2
 		return 2
 	fi
-	if printf '%s' "$out" | grep -q '[^[:space:]]'; then
+	if grep -q '[^[:space:]]' <<<"$out"; then
 		return 0
 	fi
 	return 1

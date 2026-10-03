@@ -216,12 +216,17 @@ YAML
 # sees it (default $NODE). Matched on argv[0] EXACTLY, so the scanning shell
 # (argv[0] "sh") never matches itself.
 supervisor_pid() {
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`sed -n '1p'`). The node's own `sh` below runs without pipefail.
 	# shellcheck disable=SC2016  # evaluated by the node's shell
 	docker exec "${1:-$NODE}" sh -c '
 		for p in /proc/[0-9]*; do
 			a0=$({ tr "\0" "\n" <"$p/cmdline"; } 2>/dev/null | head -n 1)
 			if [ "$a0" = /opt/aether/supervisor ]; then echo "${p#/proc/}"; fi
-		done; exit 0' | head -n 1
+		done; exit 0' | sed -n '1p'
 }
 
 # admin_on NODE PATH — admin() against a given kind node's proxy.
@@ -383,10 +388,10 @@ verify_hotrestart() {
 		echo "  $d: records=$(awk -F'\t' -v a="$auth" '$1 == a' <<<"$recs" | wc -l) clean_bytes=$clean DC=$ndc benign=$nbenign"
 		if [ "$ndc" -gt 0 ]; then
 			echo "  $d DC lines (code flags details bytes_sent upstream_rx_ms downstream_tx_end_ms protocol start_time):"
-			awk -F'\t' -v a="$auth" '$1 == a && $3 ~ /DC/ { $1 = ""; print "     " $0 }' <<<"$recs" | head -20
+			awk -F'\t' -v a="$auth" '$1 == a && $3 ~ /DC/ { $1 = ""; print "     " $0 }' <<<"$recs" | sed -n '1,20p'
 		fi
 		echo "  $d clean-line timing (upstream_rx_ms, downstream_tx_end_ms) top 3:"
-		awk -F'\t' -v a="$auth" '$1 == a && $3 == "-" { print "     " $6 " " $7 }' <<<"$recs" | sort | uniq -c | sort -rn | head -3
+		awk -F'\t' -v a="$auth" '$1 == a && $3 == "-" { print "     " $6 " " $7 }' <<<"$recs" | sort | uniq -c | sort -rn | sed -n '1,3p'
 		if [ "$d" = "$HR_H2_CTL" ]; then
 			[ "$ndc" -eq 0 ] || die "H2: the h2 control $d logged $ndc DC lines"
 			ok "h2 control $d: no DC"
@@ -632,7 +637,7 @@ verify_sparse() {
 		total_hung=$((total_hung + hung))
 	done
 	local details
-	details="$(awk -F'\t' '$3 != "-" { print $2 " " $3 " " $4 }' <<<"$recs" | sort | uniq -c | sort -rn | head -10 | awk '{ print "     " $0 }')"
+	details="$(awk -F'\t' '$3 != "-" { print $2 " " $3 " " $4 }' <<<"$recs" | sort | uniq -c | sort -rn | sed -n '1,10p' | awk '{ print "     " $0 }')"
 	[ -z "$details" ] || printf '  failure details (count code flags details):\n%s\n' "$details"
 	rm -rf "$out"
 	echo "SPARSE RESTARTS=$HR_RESTARTS FREEZE_S=$HR_FREEZE_PARENT_S STATELESS_RESET=$total_reset PEER_GOING_AWAY=$total_goaway CLIENT_NON200=$total_bad HUNG=$total_hung HANDSHAKE_TIMEOUT=$total_hs DRAIN_STRATEGY=$pdrain TWIN_IDLE=[$idle]"

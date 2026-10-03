@@ -226,7 +226,11 @@ start_pf() {
 	kubectl -n "$ns" port-forward "$target" ":${port}" --address 127.0.0.1 >"$logf" 2>&1 &
 	pid=$!
 	while [ "$waited" -lt 30 ]; do
-		lport=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\).*/\1/p' "$logf" | head -1)
+		# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail,
+		# so no pipeline may end in a reader that exits before its writer is
+		# done (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of
+		# SIGPIPE and the pipeline fails with 141. Read to EOF (`sed -n '1p'`).
+		lport=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\).*/\1/p' "$logf" | sed -n '1p')
 		if [ -n "$lport" ]; then
 			echo "$pid $lport"
 			return 0

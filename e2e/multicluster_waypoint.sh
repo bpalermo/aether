@@ -90,8 +90,13 @@ dump_echo_eds() {
 		return
 	fi
 	printf '\033[1;33m  -- envoy EDS for echo on %s (admin /clusters, node %s) --\033[0m\n' "$CLUSTER_A" "$node" >&2
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`sed -n '1,Np'`, `grep -c ... >/dev/null`).
 	hosts="$(docker exec "$node" curl -s --max-time 5 http://127.0.0.1:9901/clusters 2>/dev/null |
-		grep -i echo | head -40 || true)"
+		grep -i echo | sed -n '1,40p' || true)"
 	if [ -n "$hosts" ]; then
 		printf '%s\n' "$hosts" | sed 's/^/    /' >&2
 		printf '    ^ the host should be b-node-ip:%s; a pod IP or an empty cluster means\n' "$TUNNEL_PORT" >&2
@@ -126,7 +131,7 @@ build_images() {
 create_clusters() {
 	local i=0
 	for c in "$CLUSTER_A" "$CLUSTER_B"; do
-		if kind get clusters 2>/dev/null | grep -qx "$c"; then
+		if kind get clusters 2>/dev/null | grep -cx "$c" >/dev/null; then
 			ok "kind cluster '$c' already exists"
 		else
 			log "creating kind cluster '$c' (non-overlapping, non-routable pod CIDRs)"
@@ -367,7 +372,7 @@ verify() {
 	local nip
 	nip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${CLUSTER_B}-control-plane" 2>/dev/null || true)"
 	[ -n "$nip" ] && ok "cluster b node IP: $nip"
-	docker exec "$ETCD_NAME" etcdctl get --prefix /aether/v1/regions --keys-only 2>/dev/null | grep -q "clusters/cluster-b" &&
+	docker exec "$ETCD_NAME" etcdctl get --prefix /aether/v1/regions --keys-only 2>/dev/null | grep -c "clusters/cluster-b" >/dev/null &&
 		ok "cluster b endpoints present in the shared registry" || echo "  (no cluster-b endpoints yet)"
 
 	# The data-path assertion. echo is a cross-cluster (off-node) service, so the

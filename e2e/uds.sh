@@ -148,7 +148,12 @@ build_images() {
 }
 
 create_cluster() {
-	if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`grep -c ... >/dev/null`, `sed -n '1p'`).
+	if kind get clusters 2>/dev/null | grep -cx "$CLUSTER" >/dev/null; then
 		ok "kind cluster '$CLUSTER' already exists"
 		return
 	fi
@@ -683,7 +688,7 @@ verify_cni_telemetry() {
 	[ -n "$cluster_ip" ] || die "the collector Service has no ClusterIP"
 	want="${cluster_ip}:4317"
 	got="$(docker exec "$NODE" sh -c 'cat /etc/cni/net.d/*.conflist' |
-		grep -o '"otlp_endpoint": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+		grep -o '"otlp_endpoint": *"[^"]*"' | sed -n '1s/.*"\([^"]*\)"$/\1/p')"
 	[ "$got" = "$want" ] ||
 		die "the chained aether netconf has otlp_endpoint='$got', want '$want' — cni-install did not pin the Service name to its ClusterIP, and the host resolver cannot resolve '$COLLECTOR_ENDPOINT'"
 	ok "netconf otlp_endpoint pinned to the ClusterIP ($got)"

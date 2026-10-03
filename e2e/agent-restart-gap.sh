@@ -103,8 +103,13 @@ start_pollers() {
 		docker exec -d "$n" sh -c "$POLLER" sh "$POLL_LOG" "$POLL_STOP" "$ARG_POLL"
 	done
 	sleep 2
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`grep -c ... >/dev/null`, awk without `exit`).
 	for n in "${NODES[@]}"; do
-		docker exec "$n" tail -n 1 "$POLL_LOG" | grep -q ' 1$' ||
+		docker exec "$n" tail -n 1 "$POLL_LOG" | grep -c ' 1$' >/dev/null ||
 			die "the proxy on $n is not connected to its agent before the first roll ($(docker exec "$n" tail -n 1 "$POLL_LOG"))"
 	done
 	ok "proxy-side pollers running every ${ARG_POLL}s on ${NODES[*]}"
@@ -120,7 +125,7 @@ stop_pollers() {
 
 agent_pod_on() {
 	kc -n "$NS" get pod -l app.kubernetes.io/name=aether-agent --field-selector "spec.nodeName=$1" \
-		--no-headers -o custom-columns=N:.metadata.name,D:.metadata.deletionTimestamp | awk '$2 == "<none>" { print $1; exit }'
+		--no-headers -o custom-columns=N:.metadata.name,D:.metadata.deletionTimestamp | awk '!f && $2 == "<none>" { print $1; f = 1 }'
 }
 
 # --- analysis --------------------------------------------------------------------

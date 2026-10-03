@@ -117,12 +117,17 @@ envoy_pids() {
 }
 
 supervisor_pid() {
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`sed -n '1p'`). The node's own `sh` below runs without pipefail.
 	# shellcheck disable=SC2016
 	node_sh '
 		for p in /proc/[0-9]*; do
 			a0=$({ tr "\0" "\n" <"$p/cmdline"; } 2>/dev/null | head -n 1)
 			if [ "$a0" = /opt/aether/supervisor ]; then echo "${p#/proc/}"; fi
-		done; exit 0' | head -n 1
+		done; exit 0' | sed -n '1p'
 }
 
 # skip_parent_stats — "yes" iff a live envoy was started with
@@ -292,7 +297,7 @@ wedge_run() {
 			wedges=$((wedges + 1))
 			f="$(forensics "wedge-$i")"
 			printf '\033[1;31m  ✗ restart %s (epoch %s -> ?): WEDGE — forensics %s\033[0m\n' "$i" "$before" "$f"
-			sed -n '1,200p' "$f" | grep -aE '^(##|###|tid=[0-9]+ comm=envoy )|sendmsg|recvmsg|unix' | head -40
+			sed -n '1,200p' "$f" | grep -aE '^(##|###|tid=[0-9]+ comm=envoy )|sendmsg|recvmsg|unix' | sed -n '1,40p'
 			kc -n "$NS" logs -l app.kubernetes.io/component=proxy -c proxy --tail=200 --prefix >"$WEDGE_OUT/wedge-$i-proxy.log" 2>&1 || true
 			if [ "$WEDGE_STOP_ON_FIRST" = 1 ]; then
 				sleep 3
