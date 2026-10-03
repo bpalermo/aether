@@ -98,16 +98,6 @@ func (f *brokerFixture) setEntry(t *testing.T, version int, federated map[string
 	})
 }
 
-// rotate pushes a new SVID generation onto every live stream for testPodRef and
-// reports how many streams received it.
-func (f *brokerFixture) rotate(t *testing.T, version int, federated map[string][]byte) int {
-	t.Helper()
-	return f.broker.Rotate(testPodRef.Namespace, testPodRef.Name, &spiretest.BrokerEntry{
-		SVIDs:            []*brokerpb.X509SVID{f.ca.BrokerSVID(t, testWorkload, version)},
-		FederatedBundles: federated,
-	})
-}
-
 // TestSVIDStreamResubscribes verifies that a pod's subscription stream ending
 // (e.g. a SPIRE agent restart) is re-subscribed instead of silently freezing the
 // pod's SVID until expiry, and that the subscription stays tracked so
