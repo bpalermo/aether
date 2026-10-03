@@ -178,18 +178,19 @@ func (w *WaitingSource) acquire(ctx context.Context) bool {
 		if w.attempt(ctx, attempt) {
 			return true
 		}
-		wait := jitter(backoff)
+		wait := Jitter(backoff)
 		select {
 		case <-ctx.Done():
 			return false
 		case <-time.After(wait):
 		}
-		backoff = nextBackoff(backoff, w.backoffMax)
+		backoff = NextBackoff(backoff, w.backoffMax)
 	}
 }
 
-// nextBackoff doubles d, capped at maxBackoff.
-func nextBackoff(d, maxBackoff time.Duration) time.Duration {
+// NextBackoff doubles d, capped at maxBackoff. Shared with the node agent's SPIRE
+// bridge (stream re-subscribe), which follows the same policy.
+func NextBackoff(d, maxBackoff time.Duration) time.Duration {
 	return min(d*2, maxBackoff)
 }
 
@@ -447,8 +448,9 @@ func ReadyChecker(w *WaitingSource, dwell time.Duration) func(*http.Request) err
 	}
 }
 
-// jitter returns d plus up to waitJitterFraction of random jitter, so a fleet
-// restarting together does not retry in lockstep.
-func jitter(d time.Duration) time.Duration {
+// Jitter returns d plus up to waitJitterFraction (20%) of random jitter, so a
+// fleet restarting together does not retry in lockstep. Shared with the node
+// agent's SPIRE bridge, which de-synchronizes stream re-subscribes the same way.
+func Jitter(d time.Duration) time.Duration {
 	return d + time.Duration(float64(d)*waitJitterFraction*rand.Float64())
 }

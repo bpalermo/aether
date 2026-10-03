@@ -23,11 +23,11 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"math/rand/v2"
 	"sync"
 	"time"
 
 	commonlog "aethermesh.dev/common/log"
+	commonspire "aethermesh.dev/common/spire"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	brokerpb "github.com/spiffe/go-spiffe/v2/exp/proto/spiffe/broker"
 	"go.opentelemetry.io/otel"
@@ -66,11 +66,11 @@ const brokerUnreachableErrorAfter = 2 * time.Minute
 // subscribe or a disconnect (e.g. a SPIRE agent restart). Matches the registrar
 // watch-stream policy. The backoff resets only once a subscribe succeeds, so a
 // stream that connects and immediately closes keeps backing off rather than
-// hot-looping.
+// hot-looping. Doubling and jitter come from common/spire (NextBackoff, Jitter),
+// the same policy the Workload API WaitingSource uses.
 const (
 	initialStreamBackoff = 1 * time.Second
 	maxStreamBackoff     = 30 * time.Second
-	streamJitterFraction = 0.2
 )
 
 // SecretStore is the interface for pushing secrets into the xDS snapshot cache.
@@ -304,12 +304,6 @@ func (b *Bridge) Start(ctx context.Context) error {
 	return nil
 }
 
-// jitteredBackoff returns d plus up to streamJitterFraction of random jitter,
-// de-synchronizing re-subscribe attempts across streams and agents.
-func jitteredBackoff(d time.Duration) time.Duration {
-	return d + time.Duration(float64(d)*streamJitterFraction*rand.Float64())
-}
-
 // SubscribePod starts a Broker subscription for the pod in the given network
 // namespace, referenced by its namespace, name and UID. The SPIRE agent resolves
 // and attests the pod itself, so every selector its Kubernetes attestor can
@@ -465,7 +459,7 @@ func (s *subscriptionLoop) wait(ctx context.Context, wakeOnIdentity bool) bool {
 	if wakeOnIdentity {
 		arrived = s.bridge.identityArrived
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, jitteredBackoff(s.backoff))
+	waitCtx, cancel := context.WithTimeout(ctx, commonspire.Jitter(s.backoff))
 	defer cancel()
 	select {
 	case <-arrived:
@@ -479,7 +473,7 @@ func (s *subscriptionLoop) wait(ctx context.Context, wakeOnIdentity bool) bool {
 	if ctx.Err() != nil {
 		return false
 	}
-	s.backoff = min(s.backoff*2, s.bridge.backoffMax)
+	s.backoff = commonspire.NextBackoff(s.backoff, s.bridge.backoffMax)
 	return true
 }
 
