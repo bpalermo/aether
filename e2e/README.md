@@ -56,3 +56,27 @@ sed -n '1,200p' "$f" | grep -aE 'sendmsg|recvmsg' | sed -n '1,40p' || true
 
 Gates are the opposite: a pipeline whose failure *should* stop the run belongs
 in an `if` or ends in `|| die "…"`, so it fails with a message, not silently.
+
+### A captured gate value never aborts before its check (`x="$(…)"` under `set -e`)
+
+An assignment from a command substitution takes the substitution's exit
+status, and under `set -e` a non-zero one aborts the script **on the
+assignment** — so when a gate captures a value and checks it on the next line,
+a producer that exits non-zero exactly when the thing is absent (`grep` with no
+match, `stat`/`cat` of a missing path, `curl` that cannot connect, a
+`kubectl exec` wrapping any of them) stops the run before the `die` that names
+the cause can print (#1150). The gate still fails, but with no message, at the
+wrong line. End the substitution in `|| true` and let the check carry the gate:
+
+```bash
+# Don't: no `/s` mount → grep exits 1 → silent exit here, the die never runs.
+mnt="$(in_pod "$pod" "grep ' /s ' /proc/mounts")"
+# Do:
+mnt="$(in_pod "$pod" "grep ' /s ' /proc/mounts" || true)"
+case "$mnt" in tmpfs\ /s\ tmpfs\ *) ;; *) die "/s in $pod is not a tmpfs mount: '$mnt'" ;; esac
+```
+
+The same holds for a helper function captured as `x="$(helper)"`: guard the
+call (`x="$(helper || true)"`) or end the helper's pipeline in `|| true`. The
+check after the capture must then reject the empty string, which an equality or
+`case` test against the expected value, or `[ -n "$x" ] || die …`, already does.
