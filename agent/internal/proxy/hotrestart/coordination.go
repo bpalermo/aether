@@ -68,6 +68,19 @@ func (s *Supervisor) initStartEpoch(ctx context.Context) {
 			return
 		}
 		if s.adminLiveAtEpoch(ctx, epoch) {
+			if s.freshStartInsteadOfHotRestart(ctx, epoch) {
+				// The predecessor ran another worker count and has been
+				// drained and stopped (issue #1136): start a new lineage
+				// at epoch 0, ungated, exactly like a node with no
+				// predecessor.
+				s.mu.Lock()
+				s.nextEpoch = 0
+				s.gatedEpoch = -1
+				s.handoffPeer = -1
+				s.mu.Unlock()
+				s.metrics.predecessorFound(false)
+				return
+			}
 			// Publish the successor epoch and its readiness gate in ONE
 			// critical section. A watchLiveness tick that reads the new epoch
 			// must never be able to see a stale gate: it would find the

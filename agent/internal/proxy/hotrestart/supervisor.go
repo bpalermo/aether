@@ -109,8 +109,9 @@ type Config struct {
 	// adminprobe.go).
 	ParentShutdownTime time.Duration
 	// ExtraArgs are appended to every Envoy invocation (e.g. -l, --service-cluster,
-	// --service-node, --service-zone, --concurrency). Concurrency must stay constant
-	// across epochs to avoid dropping accept-queue connections.
+	// --service-node, --service-zone, --concurrency). A --concurrency that differs
+	// from a live predecessor's is not hot-restarted: the predecessor is drained
+	// and a fresh lineage started (issue #1136, concurrencychange.go).
 	ExtraArgs []string
 	// WatchConfig enables an fsnotify watch on ConfigPath's directory that
 	// self-triggers a hot restart when the bootstrap config changes (e.g. a
@@ -169,6 +170,13 @@ type Config struct {
 	// the pod it belongs to; the identity's uniqueness comes from a random
 	// nonce, not from this.
 	PodName string
+	// HotRestartOnConcurrencyChange forces a hot restart from a live
+	// predecessor whose Envoy worker count differs from the one the next Envoy
+	// would run with. By default (false) such a predecessor is drained and a
+	// fresh Envoy lineage started instead, because a hot restart across a
+	// worker-count change resets about half of the predecessor's live QUIC
+	// connections (issue #1136, concurrencychange.go).
+	HotRestartOnConcurrencyChange bool
 }
 
 // childExit reports the termination of a supervised Envoy epoch.
@@ -260,6 +268,20 @@ type Supervisor struct {
 	// so the line is written once per epoch (issue #1085). Owned by the
 	// watchLiveness goroutine; not guarded.
 	handoffWaitEpoch int
+
+	// drainedPredecessor is the admin identity of the predecessor this
+	// supervisor drained for a worker-count change (issue #1136), so the same
+	// Envoy is never drained twice. Written and read by the Run goroutine
+	// (initStartEpoch) only, under mu.
+	drainedPredecessor string
+	// readyRequiresOwnIdentity makes adminServerInfo count an answer as LIVE
+	// only when it carries this supervisor's admin identity. Set once a fresh
+	// lineage replaces a drained predecessor, whose epoch numbers it reuses.
+	// Guarded by mu.
+	readyRequiresOwnIdentity bool
+	// onlineCPUs is Envoy's default --concurrency on this node; swapped in
+	// tests.
+	onlineCPUs func() (int, error)
 }
 
 // watchdogFire is a fatal wedge diagnosis delivered from watchLiveness to Run.
@@ -364,6 +386,7 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 		handoffPeer:        -1,
 		childSilentEpoch:   -1,
 		handoffWaitEpoch:   -1,
+		onlineCPUs:         readOnlineCPUs,
 		now:                time.Now,
 		childExited:        make(chan childExit, 8),
 		done:               make(chan struct{}),

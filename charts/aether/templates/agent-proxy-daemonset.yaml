@@ -118,6 +118,11 @@ spec:
             # surge replacement to hot-restart this Envoy.
             - "--shutdown-drain-immediately"
             {{- end }}
+            {{- if .Values.proxy.hotRestart.hotRestartOnConcurrencyChange }}
+            # #1136 opt-out: hot-restart even across a worker-count change
+            # instead of draining the predecessor and starting fresh.
+            - "--hot-restart-on-concurrency-change"
+            {{- end }}
             {{- with .Values.otel.endpoint }}
             # Push-first: the supervisor exports its hot-restart lifecycle
             # metrics over OTLP; no scrape port to collide on in the host netns.

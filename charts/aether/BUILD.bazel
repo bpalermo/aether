@@ -198,6 +198,23 @@ helm_template_test(
     },
 )
 
+# #1136: the opt-out that forces a hot restart across a worker-count change
+# reaches the supervisor (default off: the flag is absent and the supervisor
+# drains the predecessor and starts fresh instead).
+helm_template_test(
+    name = "aether_proxy_hot_restart_on_concurrency_change_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.hotRestart.hotRestartOnConcurrencyChange=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--hot-restart-on-concurrency-change\"",
+        ],
+    },
+)
+
 # #1085: a hot-restart successor must never finish init without having received
 # CDS and LDS. Envoy drains the parent only when the successor's init completes,
 # and a timed-out initial fetch completes it with nothing loaded: a successor

@@ -74,6 +74,12 @@ type fakeAdminServer struct {
 	// it, keyed by remote address; the identity tests use it to prove the drain
 	// rode the very connection that was identity-checked.
 	connRequests sync.Map // remote addr -> *requestLog
+	// concurrency is command_line_options.concurrency in /server_info (0 = not
+	// reported), the worker count the #1136 check compares.
+	concurrency atomic.Int64
+	// quitHits counts POST /quitquitquit; the fake then stops answering, as an
+	// Envoy that exits does.
+	quitHits atomic.Int64
 }
 
 // recordRequest appends r to the log of the connection it arrived on.
@@ -128,8 +134,16 @@ func newFakeAdmin(t *testing.T, state string, epoch int) *fakeAdminServer {
 			w.Header().Set("Connection", "close")
 		}
 		identity, _ := f.identity.Load().(string)
-		fmt.Fprintf(w, `{"state":%q,"command_line_options":{"restart_epoch":%d,"admin_address_path":%q}}`,
-			f.state.Load().(string), f.epoch.Load(), identity)
+		fmt.Fprintf(w, `{"state":%q,"command_line_options":{"restart_epoch":%d,"admin_address_path":%q,"concurrency":%d}}`,
+			f.state.Load().(string), f.epoch.Load(), identity, f.concurrency.Load())
+	})
+	mux.HandleFunc("/quitquitquit", func(w http.ResponseWriter, r *http.Request) {
+		f.quitHits.Add(1)
+		f.recordRequest(r)
+		fmt.Fprint(w, "OK\n")
+		// The Envoy exits: its admin stops accepting. Close asynchronously,
+		// httptest.Server.Close waits for this very handler.
+		go f.srv.Close()
 	})
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
 		f.readyHits.Add(1)

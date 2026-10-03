@@ -587,6 +587,14 @@ proxy:
     # it on only costs the parent's gauges and its last <=5s of counter deltas
     # in the child (counters are per-generation already, #708).
     skipParentStats: false
+    # Supervisor --hot-restart-on-concurrency-change (#1136). Off (default): when
+    # the live predecessor's Envoy worker count differs from the one the new pod
+    # will run with (the rollout that changes proxy.concurrency, below), the new
+    # pod does NOT hot-restart. It drains the predecessor (graceful drain over
+    # drainTime, then stops it) and starts a fresh Envoy at epoch 0. On: hot-
+    # restart anyway, which resets about half of the predecessor's live HTTP/3
+    # connections on every node. An operator override, not a tuning knob.
+    hotRestartOnConcurrencyChange: false
   # Envoy worker thread count (#1093). 0 = do not pass the flag: Envoy runs one
   # worker per core, today's behaviour. N > 0 passes `--concurrency N` to every
   # Envoy epoch through the supervisor (--envoy-arg). It exists because on a
@@ -594,12 +602,16 @@ proxy:
   # plus 2 main threads on 4 saturated cores — and #1093 needs to A/B a smaller
   # count.
   #
-  # The value MUST be constant across epochs. Envoy hands listen sockets to the
-  # successor per worker, so the rollout that CHANGES it performs one hot restart
-  # between epochs with different worker counts, which can drop connections
-  # sitting in the old listeners' accept queues (see the ExtraArgs comment in
-  # agent/internal/proxy/hotrestart/supervisor.go). Expect that one rollout to
-  # cost a few connections; after it every restart is same-to-same again.
+  # Changing it is a drain + fresh start, not a hot restart (#1136). A hot
+  # restart between different worker counts re-steers the parent's QUIC
+  # connections by the child's count (the reuse-port steering program belongs to
+  # the whole socket group) and resets about half of them. So when the new pod's
+  # supervisor finds a live predecessor with another count, it drains it
+  # (graceful drain over hotRestart.drainTime, then stops it) and starts its own
+  # Envoy fresh. Expect, on each node in turn, the drain window plus a short
+  # data-plane gap while the fresh Envoy initializes (no listeners on the node);
+  # every restart after that rollout is same-to-same and hitless again.
+  # hotRestart.hotRestartOnConcurrencyChange forces the old hot restart.
   # Do not change it on a live mesh until both prerequisites are deployed: the
   # successor crash of a downward change (#1126) is fixed by the carried Envoy
   # patch envoy-aether1126-forwarded-udp-worker-index.patch, in proxy images
