@@ -400,12 +400,14 @@ type identityWaker interface {
 //
 // Without this, recovery is announced long before it happens. The watch loop's
 // own backoff is short, but the gRPC ClientConn underneath it has its own — and
-// after a multi-minute outage's worth of failed handshakes that one has reached
-// its ~120s cap, so new RPCs are answered from the cached failure rather than a
-// fresh dial. On 2026-09-07 readiness, svid_ready and the pod all said
-// "recovered" while the node's data path stayed down for another 2m11s (#740,
-// finding 3). A no-op when SPIRE is disabled or the registry does not implement
-// the wake.
+// with gRPC's defaults, after a multi-minute outage's worth of failed handshakes
+// that one had reached its ~120s cap, so new RPCs were answered from the cached
+// failure rather than a fresh dial. On 2026-09-07 readiness, svid_ready and the
+// pod all said "recovered" while the node's data path stayed down for another
+// 2m11s (#740, finding 3). The registrar client now caps that redial backoff at
+// 500ms itself (#1137) rather than resetting it here, and the wake cuts the
+// watch loop's own sleep. A no-op when SPIRE is disabled or the registry does
+// not implement the wake.
 func wakeRegistryOnIdentity(ctx context.Context, src *commonspire.WaitingSource, reg registry.Registry) {
 	waker, ok := reg.(identityWaker)
 	if src == nil || !ok {

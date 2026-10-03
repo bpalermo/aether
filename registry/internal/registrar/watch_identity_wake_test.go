@@ -75,7 +75,8 @@ func TestNotifyIdentityReadyCutsTheRetrySleep(t *testing.T) {
 // the node's mTLS clients kept failing until 19:25:22 — 2m11s of "recovered"
 // that was not, because the gRPC ClientConn had backed off to its ~120s cap and
 // was answering from the cached handshake failure instead of dialling again.
-// Nothing polls a ClientConn out of that; something has to reset it. This pins
+// The ClientConn's redial backoff is now capped short (registrarConnectParams;
+// #1137 removed the ResetConnectBackoff that used to do this job). This pins
 // the observable consequence: once identity exists the very next attempt
 // connects, in about a second rather than in minutes.
 func TestWatchLoop_ConnectsImmediatelyWhenIdentityArrives(t *testing.T) {
@@ -120,8 +121,8 @@ func TestWatchLoop_ConnectsImmediatelyWhenIdentityArrives(t *testing.T) {
 }
 
 // TestWatchLoop_ReconnectWaitEndsWhenTheConnectionIsReady is issue #1123's
-// registry term. The wake above resets the ClientConn's backoff and retries at
-// once, but that first retry races the redial: the ClientConn still answers it
+// registry term. The wake above retries at once, but that first retry races
+// the redial: the ClientConn still answers it
 // with the failure it cached before identity, the loop classifies it as the
 // post-identity reconnect, and then slept a whole initialBackoff (1s + jitter)
 // although the connection came up a few milliseconds later. On talos-main that
@@ -169,4 +170,55 @@ func TestWatchLoop_ReconnectWaitEndsWhenTheConnectionIsReady(t *testing.T) {
 		assert.Less(t, took, 500*time.Millisecond,
 			"run %d: the stream must follow identity by a dial, not by initialBackoff (%s); logs:\n%s", i, initialBackoff, logs.String())
 	}
+}
+
+// TestWatchLoop_RedialFollowsALongIdentityWaitWithinTheCap pins what replaced
+// #740's ResetConnectBackoff (removed by #1137: it races grpc-go's subchannel
+// creation). Identity stays pending long enough for the ClientConn's own redial
+// backoff to climb all the way to its cap, and nothing resets it when the SVID
+// lands. The stream must still follow identity within about the cap
+// (registrarConnectParams: 500ms plus jitter), where gRPC's default ladder
+// (1s, 1.6s, 2.56s, ... 120s) would leave it seconds away and, after a real
+// outage, minutes.
+func TestWatchLoop_RedialFollowsALongIdentityWaitWithinTheCap(t *testing.T) {
+	target := &swappableListener{}
+	var ready atomic.Bool
+
+	r, logs := newLoggingRegistry(t, []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(target.dial),
+	})
+	r.config.IdentityReady = ready.Load
+	metrics, _ := newTestClientMetrics(t)
+	r.metrics = metrics
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	require.NoError(t, r.Initialize(ctx))
+	defer func() { _ = r.Close() }()
+
+	require.Eventually(t, func() bool {
+		return findRecord(logRecords(t, logs), "watch stream deferred until this agent has an SVID") != nil
+	}, 30*time.Second, 10*time.Millisecond, "logs:\n%s", logs.String())
+
+	// The cap is reached after ~0.9s of failures; three seconds is well past it
+	// and, with gRPC's default policy, two rungs into a ladder that keeps
+	// climbing.
+	time.Sleep(3 * time.Second)
+
+	_, lis, _ := serveCatalog(t, "svc-a", "v1")
+	target.set(lis)
+	ready.Store(true)
+
+	start := time.Now()
+	r.NotifyIdentityReady()
+
+	select {
+	case <-r.Reconnects():
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the watch stream did not connect after identity arrived; logs:\n%s", logs.String())
+	}
+	assert.Less(t, time.Since(start), time.Second,
+		"the redial must follow identity within the ClientConn's capped backoff (%s); logs:\n%s",
+		registrarConnectParams.Backoff.MaxDelay, logs.String())
 }
