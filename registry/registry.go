@@ -50,6 +50,19 @@ type ChangeNotifier interface {
 	Changes() <-chan struct{}
 }
 
+// DerivedEndpoints is an optional capability for Registry backends that derive
+// every endpoint from shared state rather than store what is written to them:
+// the kubernetes backend lists Pods, and its RegisterEndpoint /
+// UnregisterEndpoint are no-ops. For such a backend a listing is the single
+// source of truth. A writer must not wait for a listing to "reflect" a write,
+// since none ever will (aether#1145): the registrar's write-behind queue
+// releases such an intent at the first listing taken after it.
+type DerivedEndpoints interface {
+	// DerivesEndpoints reports that writes are ignored and every endpoint is
+	// derived from shared state at listing time.
+	DerivesEndpoints() bool
+}
+
 // ReadyWaiter is an optional capability for Registry implementations whose
 // reads are served from an asynchronously populated cache (the registrar
 // watch client). WaitReady blocks until the cache holds a complete snapshot

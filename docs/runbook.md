@@ -2276,8 +2276,12 @@ from the pod's `deletionTimestamp` within the 200 ms debounce (kind: cross-repli
 `kubernetes registry initialized ... podWatch=true` and `registry supports change
 notifications`. What still differs cross-replica: the agent's phase-2 UNHEALTHY
 (pool close ~1 s before SIGTERM) reaches only the receiving replica; the others see
-UNHEALTHY when the pod's Ready condition drops. Find which replica an agent is on with
-`conntrack -L -p tcp --orig-src <agent IP> --orig-dst <registrar Service IP>` on its node
+UNHEALTHY when the pod's Ready condition drops. Since #1145 the receiving replica
+holds an agent's write only until its next sync (the first listing that started after
+the RPC; the informer or the 5 s poll), then serves the Pod-derived endpoint like every
+other replica. Before, it kept the agent's version for the pod's lifetime whenever the
+two differed in any field (the CNI path's health-check mode, for one). Find which
+replica an agent is on with `conntrack -L -p tcp --orig-src <agent IP> --orig-dst <registrar Service IP>` on its node
 (`e2e/drain-propagation.sh` does this per run).
 
 What was slow is a source proxy that **had no ADS stream**: its own node agent was
