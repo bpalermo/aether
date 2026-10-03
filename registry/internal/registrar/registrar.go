@@ -23,6 +23,7 @@ import (
 	"aethermesh.dev/common/telemetry"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
@@ -310,6 +311,60 @@ func stringSetsEqual(a, b []string) bool {
 	return true
 }
 
+// registrarConnectParams is the registrar ClientConn's redial policy
+// (issue #1137): 100 ms base, x1.6, 20% jitter, 500 ms cap. gRPC's default
+// (1 s base, 120 s cap) is for remote servers. The registrar is an in-cluster
+// Service, and how fast this connection redials is on the agent's critical
+// path twice:
+//
+//   - At startup. The agent dials the registrar before SPIRE has issued its
+//     SVID, so every attempt fails the handshake and the ClientConn backs off
+//     on its own schedule, invisible to the watch loop. The xDS PreListen hold
+//     waits for the registry snapshot after identity, with the node's proxy on
+//     no ADS stream (#1123), so whatever backoff the ClientConn has reached when
+//     the SVID lands is added to that gap. The own-SVID wait was 0.15–2 s on
+//     talos-main and 1–5 s on kind. This ladder (0.1, 0.16, 0.26, 0.41, then
+//     0.5 s) reaches its cap after ~0.9 s of failures, so the redial follows
+//     identity by at most ~0.6 s (cap plus jitter), ~0.25 s on average. A 1 s
+//     cap would double both.
+//   - After an identity change that follows an outage. #740's finding 3 was
+//     this ClientConn sitting at gRPC's 120 s default cap and answering every
+//     RPC from its cached handshake failure for 2m11s after the SVID was back.
+//     A 500 ms cap rules that out by construction.
+//
+// The cap also stays under initialBackoff, which bounds deferReconnect's
+// wait-for-READY: one wait always spans the ClientConn's next redial, so the
+// post-identity reconnect never falls through to another backoff round. And it
+// is far inside spire.ReconnectWindow (5 s), whose classification assumes the
+// redial lands within the window.
+//
+// The cost is paid only while the connection is failing: at most two dials a
+// second per node. Against a registrar Service with no endpoints that is a
+// refused connect; against a registrar replica with no SVID yet, a failed TLS
+// handshake. MinConnectTimeout stays at gRPC's default (20 s): this policy
+// changes how soon an attempt is made, not how long one may take.
+//
+// This replaces the ClientConn.ResetConnectBackoff call NotifyIdentityReady
+// used to make, and that call must not come back. In grpc-go (1.83.2)
+// ResetConnectBackoff copies the reference to the ClientConn's subchannel map
+// under cc.mu, unlocks, and then iterates it, while the balancer creating a
+// subchannel writes the same map under the lock (newAddrConnLocked). Announcing
+// identity while the connection is being established, which is exactly when
+// the agent announces it, is a data race, and can crash the process outright:
+// a nil *addrConn read from the torn map
+// (TestNotifyIdentityReady_DoesNotRaceSubchannelCreation failed 20 of 20 race
+// runs with the call in place, 4 of them that way). The SPIRE broker client
+// dropped the same call for the same reason (#1135, brokerConnectParams).
+var registrarConnectParams = grpc.ConnectParams{
+	Backoff: backoff.Config{
+		BaseDelay:  100 * time.Millisecond,
+		Multiplier: 1.6,
+		Jitter:     0.2,
+		MaxDelay:   500 * time.Millisecond,
+	},
+	MinConnectTimeout: 20 * time.Second,
+}
+
 // signalChange performs a non-blocking send on the notify channel, coalescing
 // bursts of events into a single pending signal.
 func (r *RegistrarRegistry) signalChange() {
@@ -321,9 +376,13 @@ func (r *RegistrarRegistry) signalChange() {
 
 // Initialize connects to the Registrar and starts the background watch stream.
 func (r *RegistrarRegistry) Initialize(ctx context.Context) error {
-	opts := r.config.DialOptions
-	if len(opts) == 0 {
-		opts = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	// The redial policy goes first so a caller that passes its own
+	// WithConnectParams still wins (later options override earlier ones).
+	opts := []grpc.DialOption{grpc.WithConnectParams(registrarConnectParams)}
+	if len(r.config.DialOptions) == 0 {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	} else {
+		opts = append(opts, r.config.DialOptions...)
 	}
 	// No-op until OTel providers are registered (--otel-enabled / --tracing-enabled).
 	opts = append(opts, grpc.WithStatsHandler(telemetry.ClientStatsHandler()))
@@ -694,8 +753,8 @@ func (r *RegistrarRegistry) deferPeerStream(ctx context.Context, err error, back
 // the SVID landed failed the handshake, so the ClientConn holds a cached
 // transport failure — with the pre-identity error text — until it redials.
 //
-// On the rev211 deploy roll (2026-09-07, main-worker-02) the wake fired
-// ResetConnectBackoff at 20:47:27.911Z, this loop logged
+// On the rev211 deploy roll (2026-09-07, main-worker-02) the wake fired (then a
+// ResetConnectBackoff, removed by #1137) at 20:47:27.911Z, this loop logged
 // `registrar has no identity yet; retrying` 1ms later, and the stream connected
 // at 20:47:29.017Z. The registrar had had its identity for a minute. Blaming the
 // far side for our own reconnect sends an operator to the wrong pod's logs.
@@ -796,29 +855,27 @@ func (r *RegistrarRegistry) waitBeforeRetry(ctx context.Context, wait time.Durat
 // NotifyIdentityReady tells this client that SPIRE has now issued the SVID its
 // mTLS handshake needs, so the next watch attempt should happen NOW.
 //
-// Two things stand between the SVID landing and the stream working, and this
-// clears both:
+// Two things stand between the SVID landing and the stream working:
 //
 //   - The gRPC ClientConn's OWN reconnect backoff, which the app-level loop
-//     cannot see. Every attempt during the outage failed the handshake, so by
-//     the time identity arrived the ClientConn had backed off to its ~120s cap
-//     and was answering new RPCs with the cached failure instead of dialling.
-//     On 2026-09-07 that made the node's data path stay down for 2m11s AFTER
-//     readiness said it had recovered — `could not get X509 bundle` long after
-//     the bundle existed, because nothing had tried again (#740, finding 3).
-//     ResetConnectBackoff drops the ClientConn straight back to CONNECTING.
-//   - This loop's own sleep, cut short by the wake.
+//     cannot see. Every attempt during the outage failed the handshake, so the
+//     ClientConn answers new RPCs from its cached failure until its next
+//     redial. On 2026-09-07 it had backed off to gRPC's default ~120s cap, and
+//     the node's data path stayed down for 2m11s AFTER readiness said it had
+//     recovered (#740, finding 3). That redial is now never more than ~0.6s
+//     away (registrarConnectParams), and deferReconnect retries the moment the
+//     ClientConn reports READY. This method deliberately does NOT call
+//     ClientConn.ResetConnectBackoff: that races the balancer's subchannel
+//     creation inside grpc-go (#1137; see registrarConnectParams).
+//   - This loop's own sleep, which the wake cuts short.
 //
 // Safe to call at any time and from any goroutine, including before Initialize
-// (the wake is buffered and the nil conn is skipped).
+// (the wake is buffered).
 func (r *RegistrarRegistry) NotifyIdentityReady() {
 	// Stamp the FIRST notification only: what the reconnect window measures is
 	// the age of this connection's identity, and a later re-announcement must
 	// not reopen a window that closed seconds after boot.
 	r.identityReadyAt.CompareAndSwap(0, time.Now().UnixNano())
-	if r.conn != nil {
-		r.conn.ResetConnectBackoff()
-	}
 	select {
 	case r.wake <- struct{}{}:
 	default:
