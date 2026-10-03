@@ -32,7 +32,12 @@ go_multi_arch_image(
     # keeps on every node, so the gate costs no extra pull and cannot skew from
     # the agent it fronts. See //agent/cmd/identity-ready:deps_test for what it
     # may link.
+    # /agent-ready is this pod's own exec liveness/readiness probe (proposal
+    # 041): it asks the agent over its pod-local health socket, so a surge
+    # standby's probes are never answered by the other agent on the node. See
+    # //agent/cmd/agent-ready:deps_test for what it may link (nothing).
     tars_layer = {
+        "/agent-ready": "//agent/cmd/agent-ready:agent-ready",
         "/identity-ready": "//agent/cmd/identity-ready:identity-ready",
     },
 )

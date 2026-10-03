@@ -22,6 +22,14 @@ fileExistenceTests:
     shouldExist: true
     permissions: '-rwxr-xr-x'
     isExecutableBy: 'other'
+  # The agent pod's own exec liveness/readiness probe (proposal 041): the
+  # chart's probes run ["/agent-ready", ...] in the agent container, so it must
+  # be here and executable by whatever user the container runs as.
+  - name: 'agent-ready'
+    path: '/agent-ready'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'
   # The slim mesh-DNS daemon now has its OWN image
   # (//agent/cmd/mesh-dns:mesh-dns_image, #583 option B). It was only ever bundled
   # here to avoid standing up a second publish pipeline; assert it is gone so the

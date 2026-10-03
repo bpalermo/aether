@@ -45,6 +45,13 @@ const (
 	// dies). On /run/aether, the hostPath both agent pods of a surge mount.
 	DefaultAgentLockPath = "/run/aether/agent.lock"
 
+	// DefaultAgentHealthSocketPath is where the agent serves /healthz and
+	// /readyz for its exec probes (agent/cmd/agent-ready) when the chart runs
+	// it with --health-socket (proposal 041). In the pod's OWN /tmp emptyDir,
+	// never a host path: during a surge roll two agent pods share the node, and
+	// a kubelet probe answered by the other pod's agent would be meaningless.
+	DefaultAgentHealthSocketPath = "/tmp/aether-agent-health.sock"
+
 	// DefaultSpireBrokerSocketPath is the default path to the SPIRE agent's
 	// SPIFFE Broker Endpoint socket, as the aether chart mounts it (proposal 036).
 	// The SPIRE chart puts it on the node at

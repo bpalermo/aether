@@ -128,6 +128,8 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where pod data is stored locally for the CNI plugin")
 
 	// Node ownership (proposal 041; node proxy only — the edge owns no node).
+	rootCmd.Flags().StringVar(&cfg.HealthSocketPath, "health-socket", cfg.HealthSocketPath, "Serve /healthz and /readyz on this Unix socket, for the agent-ready exec probe (proposal 041). Must be in the pod's own filesystem (an emptyDir): on a hostNetwork pod a TCP probe port would collide with, or be answered by, a surge-rolled agent on the same node. Empty serves no socket")
+	rootCmd.Flags().StringVar(&cfg.HealthProbeBindAddress, "health-probe-bind-address", cfg.HealthProbeBindAddress, "TCP address of the HTTP /healthz and /readyz endpoint; \"0\" disables it (the chart does, and probes --health-socket instead)")
 	rootCmd.Flags().StringVar(&cfg.NodeLockPath, "node-lock", cfg.NodeLockPath, "Node-ownership lock file (proposal 041). The agent that owns the node holds an exclusive flock on it; an agent that finds it taken (a surge roll) starts as a standby that builds its first snapshot but binds no node socket and writes no node file until the lock is released. Must be on a host path every agent pod on the node shares. Empty disables the lock")
 
 	// CNI conflist re-assert (node proxy only — the edge chains no CNI).
@@ -714,7 +716,8 @@ func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSo
 	if err := tr.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up startup-taint remover: %w", err)
 	}
-	return nil
+	// The kubelet reads the same verdict over the pod-local socket.
+	return wireHealthSocket(m, ready.probeChecks(setup.CacheSyncChecker(m)))
 }
 
 // chainStateOf adapts the re-asserter to the ChainState interface its consumers
