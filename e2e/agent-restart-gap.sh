@@ -220,7 +220,10 @@ print("\t".join([d(up, down), d(t_start, down), d(t_init1, t_init0), d(t_serving
 
 summarize() {
 	local col="$1" name="$2"
-	cut -f"$col" "$ARG_OUT/gap.tsv" | grep -v '^-$' | LC_ALL=C sort -g | awk -v n="$name" '
+	# A column of nothing but `-` makes `grep -v` exit 1; under `set -e` +
+	# pipefail that aborted the summary before awk's n=0 line (#1143). Filter
+	# in awk instead, which exits 0 on no input.
+	cut -f"$col" "$ARG_OUT/gap.tsv" | awk '$0 != "-"' | LC_ALL=C sort -g | awk -v n="$name" '
 		{ v[NR] = $1 } END {
 			if (!NR) { printf "    %-34s n=0\n", n; exit }
 			p99 = v[int(0.99 * NR + 0.999)]; if (p99 == "") p99 = v[NR]
