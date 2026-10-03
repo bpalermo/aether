@@ -238,7 +238,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	// Flush and stop the OTLP log exporter last (registered first → runs last),
 	// so records emitted during the rest of shutdown are still exported. No-op
 	// when OTLP logging is disabled.
-	defer deferLogShutdown(ctx)
+	defer manager.FlushLogs(ctx, l, logShutdown)
 
 	// Claim the node first, before local storage is read (proposal 041). A free
 	// lock here proves no other agent owned the node while storage was loaded,
@@ -253,7 +253,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
-	defer deferTelemetryShutdown(ctx, result.Shutdown)
+	defer manager.ShutdownTelemetry(ctx, l, result.Shutdown)
 	registerSchedMetrics(ctx)
 
 	m := result.Manager
@@ -380,7 +380,7 @@ func bootstrapAgentManager(ctx context.Context, owner *ownership.Node) (*manager
 		err = wireMetrics(result.Manager, owner)
 	}
 	if err != nil {
-		deferTelemetryShutdown(ctx, result.Shutdown)
+		manager.ShutdownTelemetry(ctx, l, result.Shutdown)
 		return nil, err
 	}
 	return result, nil
@@ -1156,34 +1156,12 @@ func setupRegistrarClient(ctx context.Context, src commonspire.SVIDSource) (regi
 	return reg, nil
 }
 
-// deferLogShutdown flushes and stops the OTLP log exporter. No-op when
-// logShutdown is nil (OTLP logging is disabled).
-func deferLogShutdown(ctx context.Context) {
-	if logShutdown == nil {
-		return
-	}
-	if err := logShutdown(ctx); err != nil {
-		l.ErrorContext(ctx, "failed to flush OTel logs", "error", err)
-	}
-}
-
 // registerSchedMetrics exports the agent's own kernel scheduler counters
 // (aether.agent.sched.*, issue #1131) on the global MeterProvider — a no-op one
 // when OTel is disabled. Best-effort: a failure is a WARN, never a startup error.
 func registerSchedMetrics(ctx context.Context) {
 	if _, err := schedmetrics.Register(otel.Meter(schedmetrics.MeterName), procsched.Reader{}); err != nil {
 		l.WarnContext(ctx, "failed to register scheduler metrics; continuing without them", "error", err)
-	}
-}
-
-// deferTelemetryShutdown runs the telemetry shutdown returned by manager.Bootstrap.
-// No-op when shutdown is nil.
-func deferTelemetryShutdown(ctx context.Context, shutdown func(context.Context) error) {
-	if shutdown == nil {
-		return
-	}
-	if err := shutdown(ctx); err != nil {
-		l.ErrorContext(ctx, "failed to shutdown telemetry", "error", err)
 	}
 }
 
