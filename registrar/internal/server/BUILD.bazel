@@ -36,6 +36,7 @@ go_test(
         "logattr_test.go",
         "metrics_test.go",
         "replica_drain_test.go",
+        "replica_overlay_test.go",
         "server_test.go",
         "snapshot_test.go",
         "snapshot_toctou_test.go",
@@ -64,5 +65,6 @@ go_test(
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
         "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_protobuf//proto",
     ],
 )

@@ -168,6 +168,11 @@ func endpointInputsChanged(oldPod, newPod *corev1.Pod) bool {
 		!maps.Equal(oldPod.Annotations, newPod.Annotations)
 }
 
+// DerivesEndpoints implements registry.DerivedEndpoints: writes are no-ops and
+// every endpoint is derived from its Pod at listing time, so the Pod is the one
+// source of truth every registrar replica reads (aether#1145).
+func (r *KubernetesRegistry) DerivesEndpoints() bool { return true }
+
 // Close is a no-op for the Kubernetes registry.
 func (r *KubernetesRegistry) Close() error {
 	return nil

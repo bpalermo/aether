@@ -194,8 +194,11 @@ forensics() {
 			local pid
 			for pid in $(envoy_pids 2>/dev/null | cut -d' ' -f1); do
 				echo "### gdb main-thread backtrace, pid $pid"
+				# `|| true` (#1143): a gdb that cannot attach prints no `#` frame,
+				# grep exits 1, and `forensics … >/dev/null` (run directly, with
+				# errexit live) would abort mid-capture instead of recording that.
 				docker run --rm --privileged --pid="container:$NODE" "$WEDGE_GDB_IMAGE" \
-					gdb -batch -ex "set sysroot /proc/$pid/root" "/proc/$pid/root/usr/local/bin/envoy" -p "$pid" -ex "thread apply 1 bt 30" 2>&1 | grep -E '^#' | cut -c1-240
+					gdb -batch -ex "set sysroot /proc/$pid/root" "/proc/$pid/root/usr/local/bin/envoy" -p "$pid" -ex "thread apply 1 bt 30" 2>&1 | grep -E '^#' | cut -c1-240 || true
 			done
 		fi
 	} >"$f" 2>&1
@@ -297,7 +300,10 @@ wedge_run() {
 			wedges=$((wedges + 1))
 			f="$(forensics "wedge-$i")"
 			printf '\033[1;31m  ✗ restart %s (epoch %s -> ?): WEDGE — forensics %s\033[0m\n' "$i" "$before" "$f"
-			sed -n '1,200p' "$f" | grep -aE '^(##|###|tid=[0-9]+ comm=envoy )|sendmsg|recvmsg|unix' | sed -n '1,40p'
+			# Evidence, not a gate (#1143): under `set -e` + pipefail a forensics
+			# file with no matching line makes grep exit 1 and would abort the
+			# script exactly where it prints the wedge evidence. No match = no lines.
+			sed -n '1,200p' "$f" | grep -aE '^(##|###|tid=[0-9]+ comm=envoy )|sendmsg|recvmsg|unix' | sed -n '1,40p' || true
 			kc -n "$NS" logs -l app.kubernetes.io/component=proxy -c proxy --tail=200 --prefix >"$WEDGE_OUT/wedge-$i-proxy.log" 2>&1 || true
 			if [ "$WEDGE_STOP_ON_FIRST" = 1 ]; then
 				sleep 3

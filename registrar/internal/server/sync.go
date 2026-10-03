@@ -166,9 +166,11 @@ func (s *Syncer) sync(ctx context.Context) {
 
 	// Reconcile pending write-behind intents: release the observed ones,
 	// overlay the rest so neither the diff events nor the replacement
-	// snapshot regress them toward the external registry's stale view.
+	// snapshot regress them toward the external registry's stale view. start
+	// precedes the first listing, so every intent received before it is in
+	// what the listings returned (the derived-backend release rule, #1145).
 	if s.writeBehind != nil {
-		s.writeBehind.Overlay(newState)
+		s.writeBehind.Overlay(newState, start)
 	}
 
 	// Compute diff and apply, in one critical section: a RegisterEndpoint

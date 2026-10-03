@@ -30,6 +30,17 @@ import (
 // would re-create the partial-world-view bug from the other direction).
 // Overlay implements that by patching the fetched state with pending intents
 // before the sync's Diff/Replace.
+//
+// Derived backends (registry.DerivedEndpoints, the kubernetes backend) are the
+// exception to "observed back": their writes are no-ops and a listing derives
+// each endpoint from its Pod, so a listing never reflects the agent's version
+// of an endpoint field for field. Waiting for it pinned the agent's version on
+// the receiving replica for the pod's lifetime while every other replica served
+// the Pod's (aether#1145). There the Pod is the single source of truth: an
+// intent is released by the first listing that STARTED after it was received,
+// and is overlaid only onto a listing that may predate it (a sync already in
+// flight when the RPC landed, which would otherwise regress the snapshot-first
+// apply until the next sync).
 const (
 	wbInitialBackoff = 1 * time.Second
 	wbMaxBackoff     = 30 * time.Second
@@ -74,6 +85,9 @@ type WriteBehindQueue struct {
 	registry registry.Registry
 	log      *slog.Logger
 	metrics  *Metrics
+	// derived: the backend ignores writes and derives every endpoint at listing
+	// time (registry.DerivedEndpoints); see Overlay's release rule.
+	derived bool
 
 	mu  sync.Mutex
 	ops map[wbKey]*wbOp
@@ -87,8 +101,13 @@ type WriteBehindQueue struct {
 
 // NewWriteBehindQueue creates the queue. metrics may be nil.
 func NewWriteBehindQueue(reg registry.Registry, log *slog.Logger, metrics *Metrics) *WriteBehindQueue {
+	derived := false
+	if d, ok := reg.(registry.DerivedEndpoints); ok {
+		derived = d.DerivesEndpoints()
+	}
 	return &WriteBehindQueue{
 		registry: reg,
+		derived:  derived,
 		log:      commonlog.Named(log, "write-behind"),
 		metrics:  metrics,
 		ops:      make(map[wbKey]*wbOp),
@@ -222,34 +241,33 @@ func (q *WriteBehindQueue) flushOp(ctx context.Context, key wbKey, op wbOp) {
 // loop BEFORE Diff/Replace, so neither the broadcast events nor the snapshot
 // regress an intent the external registry has not materialized yet.
 //
+// listedAt is when the sync started listing: every intent received before it
+// is in what the listing returned.
+//
 // Release rule: a flushed op whose intent the fetched state reflects
 // (register: key present with an equal endpoint; unregister: key absent) is
 // done and removed. Everything else is overlaid onto the state.
-func (q *WriteBehindQueue) Overlay(state map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) {
+//
+// On a derived backend (kubernetes) the rule is the listing's age instead: an
+// op received before listedAt is released and the listing is taken as it is, so
+// every replica serves the same Pod-derived endpoint (aether#1145). An op
+// received after listedAt is overlaid as above.
+func (q *WriteBehindQueue) Overlay(state map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint, listedAt time.Time) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	shielded := 0
 	for key, op := range q.ops {
-		fetched, present := findEndpoint(state, key)
-
-		switch op.kind {
-		case wbRegister:
-			if op.flushed && present && proto.Equal(fetched, op.endpoint) {
-				delete(q.ops, key) // intent observed; released
-				continue
-			}
-			setEndpoint(state, key, op.endpoint)
+		if q.derived && op.enqueued.Before(listedAt) {
+			delete(q.ops, key) // listed after the intent: the Pod decides
+			continue
+		}
+		released, overlaid := overlayOp(state, key, op)
+		if released {
+			delete(q.ops, key)
+		}
+		if overlaid {
 			shielded++
-		case wbUnregister:
-			if op.flushed && !present {
-				delete(q.ops, key)
-				continue
-			}
-			if present {
-				removeEndpoint(state, key)
-				shielded++
-			}
 		}
 	}
 	if shielded > 0 {
@@ -257,6 +275,30 @@ func (q *WriteBehindQueue) Overlay(state map[string]map[registryv1.Service_Proto
 		q.log.Debug("overlaid pending write-behind intents onto sync state", "count", shielded)
 	}
 	q.metrics.wbDepth(context.Background(), len(q.ops))
+}
+
+// overlayOp applies Overlay's observed-back rule to one op: released when the
+// fetched state reflects the flushed intent, otherwise the intent is patched
+// onto the state (overlaid reports whether that changed anything).
+func overlayOp(state map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint, key wbKey, op *wbOp) (released, overlaid bool) {
+	fetched, present := findEndpoint(state, key)
+	switch op.kind {
+	case wbRegister:
+		if op.flushed && present && proto.Equal(fetched, op.endpoint) {
+			return true, false // intent observed; released
+		}
+		setEndpoint(state, key, op.endpoint)
+		return false, true
+	case wbUnregister:
+		if op.flushed && !present {
+			return true, false
+		}
+		if present {
+			removeEndpoint(state, key)
+			return false, true
+		}
+	}
+	return false, false
 }
 
 func findEndpoint(state map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint, key wbKey) (*registryv1.ServiceEndpoint, bool) {
