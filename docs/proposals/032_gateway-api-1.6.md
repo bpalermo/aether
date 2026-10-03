@@ -1,6 +1,6 @@
 # 032 — Upgrade Gateway API to v1.6.1
 
-Status: Accepted (implemented 2026-07-18)
+Status: Implemented — Gateway API upgraded to v1.6.1: TCPRoute/UDPRoute watched at `v1`, plus `InvalidParameters` (#532). (Accepted 2026-07-18.)
 
 ## Motivation
 
