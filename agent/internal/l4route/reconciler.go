@@ -16,7 +16,6 @@ package l4route
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"aethermesh.dev/agent/internal/gatewaystatus"
@@ -252,7 +251,7 @@ func (r *Reconciler) projectUDPRoutes(udpList *gatewayv1.UDPRouteList, grants []
 func (r *Reconciler) writeTCPRouteStatuses(ctx context.Context, tcpList *gatewayv1.TCPRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range tcpList.Items {
 		tr := &tcpList.Items[i]
-		resolved, reason, msg := r.backendsResolve(ctx, tr.Namespace, "TCPRoute", tcpBackendRefs(tr.Spec.Rules), grants)
+		resolved, reason, msg := referencegrant.ResolveBackends(tr.Namespace, "TCPRoute", tcpBackendRefs(tr.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, tr.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write TCPRoute status", "route", tr.Name, "namespace", tr.Namespace, "error", err.Error())
 		}
@@ -263,7 +262,7 @@ func (r *Reconciler) writeTCPRouteStatuses(ctx context.Context, tcpList *gateway
 func (r *Reconciler) writeTLSRouteStatuses(ctx context.Context, tlsList *gatewayv1.TLSRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range tlsList.Items {
 		tr := &tlsList.Items[i]
-		resolved, reason, msg := r.backendsResolve(ctx, tr.Namespace, "TLSRoute", tlsBackendRefs(tr.Spec.Rules), grants)
+		resolved, reason, msg := referencegrant.ResolveBackends(tr.Namespace, "TLSRoute", tlsBackendRefs(tr.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, tr.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write TLSRoute status", "route", tr.Name, "namespace", tr.Namespace, "error", err.Error())
 		}
@@ -274,7 +273,7 @@ func (r *Reconciler) writeTLSRouteStatuses(ctx context.Context, tlsList *gateway
 func (r *Reconciler) writeUDPRouteStatuses(ctx context.Context, udpList *gatewayv1.UDPRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range udpList.Items {
 		ur := &udpList.Items[i]
-		resolved, reason, msg := r.backendsResolve(ctx, ur.Namespace, "UDPRoute", udpBackendRefs(ur.Spec.Rules), grants)
+		resolved, reason, msg := referencegrant.ResolveBackends(ur.Namespace, "UDPRoute", udpBackendRefs(ur.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, ur, ur.Generation, &ur.Status.RouteStatus, ur.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write UDPRoute status", "route", ur.Name, "namespace", ur.Namespace, "error", err.Error())
 		}
@@ -330,30 +329,6 @@ func (r *Reconciler) writeRouteStatus(
 	}
 	status.Parents = parents
 	return r.Status().Update(ctx, obj)
-}
-
-// backendsResolve reports whether every backendRef is resolvable. aether resolves
-// backends by NAME via the registry (namespace-free), so a valid core Service-kind
-// ref with a non-empty name is resolved here; a genuinely-absent backend surfaces at
-// runtime as no endpoints / 503, not a static ResolvedRefs failure. A k8s Service Get
-// would be a false negative (the registry, not a k8s Service, backs the route). Only
-// the ref *shape* — and, for cross-namespace refs, ReferenceGrant permission — is
-// validated. routeKind is the referring route's kind (TCPRoute/TLSRoute/UDPRoute).
-func (r *Reconciler) backendsResolve(_ context.Context, routeNamespace, routeKind string, refs []gatewayv1.BackendObjectReference, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
-	for _, ref := range refs {
-		if (ref.Group != nil && string(*ref.Group) != "") || (ref.Kind != nil && string(*ref.Kind) != "Service") {
-			return false, string(gatewayv1.RouteReasonInvalidKind), fmt.Sprintf("backendRef %q is not a core Service", ref.Name)
-		}
-		if string(ref.Name) == "" {
-			return false, string(gatewayv1.RouteReasonBackendNotFound), "backendRef has an empty name"
-		}
-		if ns := referencegrant.BackendNamespace(ref.Namespace); referencegrant.CrossNamespace(ns, routeNamespace) &&
-			!referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, string(ref.Name)) {
-			return false, string(gatewayv1.RouteReasonRefNotPermitted),
-				fmt.Sprintf("cross-namespace backendRef to Service %q in namespace %q is not permitted by any ReferenceGrant", ref.Name, ns)
-		}
-	}
-	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
 }
 
 func tcpBackendRefs(rules []gatewayv1.TCPRouteRule) []gatewayv1.BackendObjectReference {
