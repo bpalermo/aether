@@ -881,7 +881,7 @@ func (r *Reconciler) httpBackendRefToRouteBackend(ctx context.Context, b gateway
 	if name == "" {
 		return cache.RouteBackend{}, false
 	}
-	if !attachment.BackendPermitted(b.Namespace, routeNamespace, "HTTPRoute", name, grants) {
+	if !referencegrant.BackendPermitted(b.Namespace, routeNamespace, "HTTPRoute", name, grants) {
 		return cache.RouteBackend{}, false
 	}
 	ns := routeNamespace

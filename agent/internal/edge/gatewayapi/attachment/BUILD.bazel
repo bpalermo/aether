@@ -10,7 +10,6 @@ go_library(
     importpath = "aethermesh.dev/agent/internal/edge/gatewayapi/attachment",
     visibility = ["//agent:__subpackages__"],
     deps = [
-        "//common/referencegrant",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/api/errors",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
@@ -18,7 +17,6 @@ go_library(
         "@io_k8s_apimachinery//pkg/types",
         "@io_k8s_sigs_controller_runtime//pkg/client",
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
-        "@io_k8s_sigs_gateway_api//apis/v1beta1",
     ],
 )
 

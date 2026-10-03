@@ -225,14 +225,14 @@ func projectBackend(ref gatewayv1.BackendObjectReference, weight *int32, routeNa
 	name := string(ref.Name)
 	// Drop ungranted cross-namespace backends (RefNotPermitted): removed from the data
 	// plane, but the rest of the route still applies.
-	if !backendPermitted(ref.Namespace, routeNamespace, routeKind, name, grants) {
+	if !referencegrant.BackendPermitted(ref.Namespace, routeNamespace, routeKind, name, grants) {
 		return nil
 	}
 	w := uint32(1)
 	if weight != nil {
 		w = uint32(*weight)
 	}
-	key := backendServiceKey(ref.Namespace, routeNamespace, name)
+	key := referencegrant.BackendKey(ref.Namespace, routeNamespace, name)
 	return &registryv1.GammaBackend{Service: key, Cluster: serviceClusterName(key, meshDomain), Weight: w}
 }
 
@@ -244,29 +244,6 @@ func serviceClusterName(serviceKey, meshDomain string) string {
 		return ""
 	}
 	return ref.FQDN(meshDomain)
-}
-
-func backendServiceKey(backendNamespace *gatewayv1.Namespace, routeNamespace, name string) string {
-	ns := routeNamespace
-	if bn := derefBackendNamespace(backendNamespace); bn != "" {
-		ns = bn
-	}
-	return serviceref.New(ns, name).Key()
-}
-
-func backendPermitted(backendNamespace *gatewayv1.Namespace, routeNamespace, routeKind, name string, grants []gatewayv1beta1.ReferenceGrant) bool {
-	ns := derefBackendNamespace(backendNamespace)
-	if !referencegrant.CrossNamespace(ns, routeNamespace) {
-		return true
-	}
-	return referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, name)
-}
-
-func derefBackendNamespace(ns *gatewayv1.Namespace) string {
-	if ns == nil {
-		return ""
-	}
-	return string(*ns)
 }
 
 // resolveExtensionFilter resolves a route's ExtensionRef (proposal 025) to a proto
