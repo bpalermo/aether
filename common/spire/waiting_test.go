@@ -319,7 +319,7 @@ func TestWaitingSourceBackoffIsBounded(t *testing.T) {
 	got := waitBackoffInitial
 	seen := []time.Duration{got}
 	for range 10 {
-		got = nextBackoff(got, waitBackoffMax)
+		got = NextBackoff(got, waitBackoffMax)
 		seen = append(seen, got)
 	}
 	assert.Equal(t, waitBackoffMax, got, "the backoff must saturate at the maximum")
@@ -329,7 +329,7 @@ func TestWaitingSourceBackoffIsBounded(t *testing.T) {
 	}
 
 	for range 100 {
-		j := jitter(time.Second)
+		j := Jitter(time.Second)
 		assert.GreaterOrEqual(t, j, time.Second)
 		assert.Less(t, j, time.Duration(float64(time.Second)*(1+waitJitterFraction)))
 	}
