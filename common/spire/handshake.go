@@ -15,11 +15,13 @@ import (
 // made before the SVID landed failed the handshake, so the gRPC ClientConn has
 // a cached transport failure and a backoff of its own; the next RPC is answered
 // from that cache — with the PRE-identity error string — for as long as it takes
-// the connection to redial. #740's wake (NotifyIdentityReady →
-// ResetConnectBackoff) makes that a redial rather than a wait, but not an
-// instant one: on the rev211 deploy roll (2026-09-07 20:47Z) the reset landed at
-// 20:47:27.911 and the watch stream connected at 20:47:29.017, and every failure
-// in between carried an error written before identity existed.
+// the connection to redial. A short capped redial backoff on the ClientConn
+// (the registrar client's registrarConnectParams, #1137; it replaced #740's
+// ResetConnectBackoff call, which raced grpc-go's subchannel creation) makes
+// that a short wait, but not an instant one: on the rev211 deploy roll
+// (2026-09-07 20:47Z) the reset landed at 20:47:27.911 and the watch stream
+// connected at 20:47:29.017, and every failure in between carried an error
+// written before identity existed.
 //
 // A few seconds, therefore: long enough to cover a redial plus a handshake,
 // short enough that a registrar which is genuinely down is misreported for one
