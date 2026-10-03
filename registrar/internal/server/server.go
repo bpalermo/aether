@@ -7,9 +7,9 @@ import (
 
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/grpcserver"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/telemetry"
-	"aethermesh.dev/common/xds"
 	"aethermesh.dev/registry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -39,8 +39,8 @@ type RegistrarServer struct {
 	// and 404 live traffic (rev-66 co-roll, 2026-06-11).
 	synced <-chan struct{}
 
-	// Embed xds.Server for gRPC lifecycle management.
-	xds.Server
+	// Embed grpcserver.Server for gRPC lifecycle management.
+	grpcserver.Server
 }
 
 // UseWriteBehind enables snapshot-first registry mutations through q.
@@ -76,7 +76,7 @@ func NewRegistrarServer(
 	metrics *Metrics,
 	grpcOpts ...grpc.ServerOption,
 ) *RegistrarServer {
-	cfg := xds.NewServerConfig()
+	cfg := grpcserver.NewServerConfig()
 	cfg.Network = "tcp"
 	cfg.Address = address
 
@@ -91,7 +91,7 @@ func NewRegistrarServer(
 		broadcaster: broadcaster,
 		log:         commonlog.Named(log, "registrar-server"),
 		metrics:     metrics,
-		Server:      xds.NewServer(cfg, log, xds.WithGRPCServer(grpcSrv)),
+		Server:      grpcserver.NewServer(cfg, log, grpcserver.WithGRPCServer(grpcSrv)),
 	}
 
 	registrarv1.RegisterRegistrarServiceServer(grpcSrv, srv)

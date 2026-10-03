@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "grpcserver",
+    srcs = [
+        "callbacks.go",
+        "config.go",
+        "readiness.go",
+        "server.go",
+    ],
+    importpath = "aethermesh.dev/common/grpcserver",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//common/log",
+        "@org_golang_google_grpc//:grpc",
+        "@org_uber_go_atomic//:atomic",
+    ],
+)
+
+go_test(
+    name = "grpcserver_test",
+    size = "small",
+    srcs = [
+        "bindgate_test.go",
+        "callbacks_test.go",
+        "config_test.go",
+        "readiness_test.go",
+        "server_test.go",
+    ],
+    embed = [":grpcserver"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_grpc//:grpc",
+    ],
+)
