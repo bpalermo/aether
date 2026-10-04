@@ -55,17 +55,16 @@ registry_token_url() {
 # Both registries hand out an anonymous pull token for public repositories,
 # which is what lets the verifier run from a workstation with no credentials at
 # all. For private ones: REGISTRY_USERNAME + REGISTRY_PASSWORD (a Quay robot
-# account, say), or GHCR_TOKEN (a GITHUB_TOKEN or a PAT with read:packages),
-# which is only ever sent to ghcr.io.
+# account, say). (The ghcr.io-only GHCR_TOKEN was removed with the sweep's
+# pre-cut-over branch, proposal 040 phase 4.)
 #
 # THE CREDENTIALS ARE BOUND TO ONE HOST. REGISTRY_USERNAME/REGISTRY_PASSWORD
 # were issued by one registry -- REGISTRY_CREDENTIAL_HOST, default the
 # IMAGE_REGISTRY_HOST the workflows export from scripts/image-registry.sh (or,
 # unset, the setting's host) -- and are sent to that host's token endpoint and
 # NO other. A token request to any other host goes anonymous, with one stderr
-# line saying so. The split sweep (proposal 040) reads pre-cut-over heads on
-# ghcr.io in the same run that may hold the quay robot, and nothing that ever
-# points REGISTRY_HOST at a third registry may hand it that password.
+# line saying so: nothing that ever points REGISTRY_HOST at another registry
+# may hand it that password.
 registry__credential_host() {
 	if [ -n "${REGISTRY_CREDENTIAL_HOST:-}" ]; then
 		printf '%s\n' "$REGISTRY_CREDENTIAL_HOST"
@@ -88,8 +87,6 @@ registry_registry_token() {
 	fi
 	if [ -n "${REGISTRY_PASSWORD:-}" ] && [ -n "$cred_host" ] && [ "$REGISTRY_HOST" = "$cred_host" ]; then
 		curl -fsS -u "${REGISTRY_USERNAME:-x}:${REGISTRY_PASSWORD}" "$url" | registry__json_str token
-	elif [ -n "${GHCR_TOKEN:-}" ] && [ "$REGISTRY_HOST" = ghcr.io ]; then
-		curl -fsS -u "x:${GHCR_TOKEN}" "$url" | registry__json_str token
 	else
 		curl -fsS "$url" | registry__json_str token
 	fi
@@ -448,19 +445,20 @@ registry_signature_layout_direct() {
 
 # The layout a registry setting PROMISES, per commit (proposal 040 phase 2):
 # SIGNATURE_LAYOUT in the given bazel/img/registry.bzl -- `referrer` (quay.io)
-# or `tag` -- or `tag` for a file from before that line existed, which is every
-# commit published to ghcr.io. A present but unparseable line is rc 2, never a
-# default.
+# or `tag`. A file without that line predates the Quay cut-over: its commit
+# published to the pre-cut-over registry, which proposal 040 phase 4
+# decommissioned, so there is no layout to promise -- rc 3, with one stderr
+# line saying so, never a default. A present but unparseable line is rc 2.
 #
 # Usage: registry_setting_signature_layout <registry.bzl>   -> referrer | tag
 registry_setting_signature_layout() {
 	local bzl="$1"
 	[ -r "$bzl" ] || return 2
-	if grep -qE '^SIGNATURE_LAYOUT[[:space:]]*=' "$bzl"; then
-		IMAGE_REGISTRY_BZL="$bzl" "${registry__here}/image-registry.sh" signature-layout || return 2
-	else
-		printf 'tag\n'
+	if ! grep -qE '^SIGNATURE_LAYOUT[[:space:]]*=' "$bzl"; then
+		echo "registry-lib: ${bzl} has no SIGNATURE_LAYOUT: a pre-cut-over setting, whose registry is decommissioned (proposal 040 phase 4)" >&2
+		return 3
 	fi
+	IMAGE_REGISTRY_BZL="$bzl" "${registry__here}/image-registry.sh" signature-layout || return 2
 }
 
 # Does a signature found in <layout> (registry_signature_layout*) satisfy the

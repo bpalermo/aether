@@ -24,11 +24,11 @@
 #
 # THE PER-COMMIT EXPECTATION (proposal 040 phase 2). Presence is not the whole
 # answer any more: each commit's bazel/img/registry.bzl promises a layout
-# (SIGNATURE_LAYOUT: `referrer` on quay.io; a registry.bzl from before the line
-# existed promises `tag`, which is every ghcr.io publish), and the sweep holds
-# each commit to its own. So the second half pins registry_setting_signature_
-# layout (which layout a setting promises, including the pre-cut-over file that
-# has no such line, and a malformed line refused rather than defaulted) and
+# (SIGNATURE_LAYOUT: `referrer` on quay.io), and the sweep holds each commit to
+# its own. So the second half pins registry_setting_signature_layout (which
+# layout a setting promises; a pre-cut-over file with no such line is rc 3 --
+# its registry is decommissioned, proposal 040 phase 4 -- and a malformed line
+# is refused rather than defaulted) and
 # registry_layout_satisfies over every (found, promised) pair -- in particular
 # that a cosign fallback TAG on quay.io does NOT satisfy `referrer` (the signer
 # silently writing the ghcr.io shape on the new registry would read as healthy)
@@ -120,11 +120,11 @@ promise() {
 	local name="$1" want="$2" bzl="$3" got rc=0
 	got="$(registry_setting_signature_layout "$bzl" 2>/dev/null)" || rc=$?
 	n=$((n + 1))
-	if [ "$want" = rc2 ]; then
-		if [ "$rc" = 2 ] && [ -z "$got" ]; then
-			printf '  ok    promise: %s -> refused (rc 2)\n' "$name"
+	if [ "$want" = rc2 ] || [ "$want" = rc3 ]; then
+		if [ "$rc" = "${want#rc}" ] && [ -z "$got" ]; then
+			printf '  ok    promise: %s -> refused (rc %s)\n' "$name" "$rc"
 		else
-			printf '  FAIL  promise: %s: want rc 2, got [%s] rc %s\n' "$name" "$got" "$rc"
+			printf '  FAIL  promise: %s: want %s, got [%s] rc %s\n' "$name" "$want" "$got" "$rc"
 			fail=1
 		fi
 	elif [ "$rc" = 0 ] && [ "$got" = "$want" ]; then
@@ -137,7 +137,8 @@ promise() {
 echo "promised layout, per commit:"
 promise "this checkout's registry.bzl ($(scripts/image-registry.sh host))" \
 	"$(sed -nE 's/^SIGNATURE_LAYOUT = "([a-z]+)"$/\1/p' "$post_bzl")" "$post_bzl"
-promise "a pre-cut-over registry.bzl (no SIGNATURE_LAYOUT line)" tag "$pre_bzl"
+# Phase 4: no default for it any more -- its registry is decommissioned.
+promise "a pre-cut-over registry.bzl (no SIGNATURE_LAYOUT line)" rc3 "$pre_bzl"
 promise "a malformed SIGNATURE_LAYOUT line" rc2 "$bad_bzl"
 promise "no registry.bzl at all" rc2 "$tmp/absent.bzl"
 

@@ -174,14 +174,15 @@ jobs:
       #             (artifactType application/vnd.dev.sigstore.bundle.v0.3+json)
       #             and writes NO tag. Measured by the quay-smoke gate (run
       #             36345331611) on the index and every child: layout `referrer`.
-      #   ghcr.io   (before the proposal 040 cut-over) has no Referrers API, so
-      #             cosign 3 wrote the `sha256-<digest>` fallback-index tag, and
-      #             cosign 2 (until 2026-09-24) `sha256-<digest>.sig`.
+      #   a registry WITHOUT the API (the pre-cut-over one, proposal 040;
+      #             decommissioned in phase 4) gets the `sha256-<digest>`
+      #             fallback-index tag from cosign 3, and got
+      #             `sha256-<digest>.sig` from cosign 2 (until 2026-09-24).
       #
       # scripts/registry-lib.sh reads all three layouts and names two-at-once
       # `both`; publish-verify then ASSERTS the layout each commit's registry.bzl
-      # promises (referrer on quay, a tag on ghcr), so a double-write -- a
-      # referrer AND a fallback tag -- is a red, not a healthy signature.
+      # promises (`referrer` on quay), so a double-write -- a referrer AND a
+      # fallback tag -- is a red, not a healthy signature.
       #
       # An earlier attempt (#924) tried to KEEP the legacy shape with
       # `--new-bundle-format=false` and failed in CI: cosign 3's keyless path rejects

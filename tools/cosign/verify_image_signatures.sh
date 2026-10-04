@@ -4,7 +4,7 @@
 # scripts/verify-image-signatures.sh with COSIGN pointed at the Bazel-pinned
 # cosign (see cosign.sh next to this file), so the verify in CI and a verify by
 # hand use the same binary. Everything else -- CERT_IDENTITY_REGEXP,
-# CERT_OIDC_ISSUER, GHCR_TOKEN, GITHUB_REPOSITORY -- passes through from the
+# CERT_OIDC_ISSUER, REGISTRY_USERNAME/PASSWORD, GITHUB_REPOSITORY -- passes through from the
 # caller's environment, and relative paths (`--file signed-images.txt`) resolve
 # against the caller's directory. The script itself still runs standalone with
 # any cosign on PATH or in $COSIGN.
