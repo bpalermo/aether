@@ -400,6 +400,14 @@ func TestPoolPrunedOnUpstreamChange(t *testing.T) {
 
 // TestForwardPoolDisabled: --forward-pool-size=0 restores the pre-#674 dial-per-query
 // behaviour exactly — a fresh source port every time, and no pool instrument moves.
+//
+// A dial-per-query socket is closed before the next query, so its ephemeral port is
+// free again and the kernel may hand that same port to the next dial (#1182): counting
+// distinct ports alone would read a reused port as a shared socket. So after each query
+// the test reserves the source port it just saw. With the pool off the socket is
+// already closed and the reservation keeps the next dial off that port; with a pooled
+// socket the port is still held by the resolver, the reservation simply fails, and the
+// next query arrives from the same port — so a pool left ON still fails this test.
 func TestForwardPoolDisabled(t *testing.T) {
 	seen := &portRecorder{}
 	addr := startUpstream(t, echoUpstream(seen))
@@ -409,8 +417,10 @@ func TestForwardPoolDisabled(t *testing.T) {
 	s.SetUpstreams([]string{addr})
 	t.Cleanup(s.closeForwardPools)
 
-	for range 5 {
+	for i := range 5 {
 		require.NotNil(t, serve(s, query("google.com", dns.TypeA)))
+		require.Equal(t, i+1, seen.count(), "every query reached the upstream")
+		reservePort(t, seen.at(-1))
 	}
 
 	assert.Equal(t, 5, seen.distinct(), "every query dialled its own socket")
@@ -432,6 +442,19 @@ func TestJitteredMaxAgeStaysInBand(t *testing.T) {
 		seen[d] = struct{}{}
 	}
 	assert.Greater(t, len(seen), 1, "the age budget is actually jittered, not constant")
+}
+
+// reservePort binds a UDP socket on port for the rest of the test so the kernel cannot
+// hand it to a later ephemeral dial. A failed bind is not an error: it means something
+// still holds the port (a socket the resolver kept, or an unrelated process), which
+// keeps it from a fresh dial for as long as it does.
+func reservePort(t *testing.T, port int) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp4", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return
+	}
+	t.Cleanup(func() { _ = pc.Close() })
 }
 
 // poolServer builds a pooled resolver pointed at addr, with the pools closed on cleanup.
