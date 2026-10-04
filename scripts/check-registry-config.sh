@@ -58,8 +58,7 @@
 #                                   registry facts the library is written
 #                                   against (ghcr.io has no Referrers API) and
 #                                   the pre-signing proxy pins, all on ghcr.io
-#   .github/workflows/{ci,proxy-release}.y*ml
-#                                   comments on the legacy-check and the pin
+#   .github/workflows/ci.yaml       comments on the legacy-check
 # (Phase 4 decommissioned the sweep's ghcr.io branch: the verifier, the
 # signature verifier, publish.yaml and publish-verify.yaml no longer mention it.)
 #   scripts/check-registry-lookup.sh, scripts/check-publish-verify-control.sh,
@@ -189,7 +188,6 @@ legacy_allow=(
 	':(exclude)scripts/registry-lib.sh'
 	':(exclude)scripts/proxy-pin-lib.sh'
 	':(exclude).github/workflows/ci.yaml'
-	':(exclude).github/workflows/proxy-release.yml'
 	':(exclude)scripts/check-registry-lookup.sh'
 	':(exclude)scripts/check-publish-verify-control.sh'
 	':(exclude)scripts/check-signature-layout.sh'
