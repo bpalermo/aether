@@ -101,8 +101,9 @@ func TestBuildAccessLogEnabled(t *testing.T) {
 //
 // The two hard requirements are the key and the ":PLAIN" suffix. The key must be
 // the one the originating chains actually stamp, and %FILTER_STATE(key)% with no
-// format defaults to TYPED, which renders "-" for a Router::StringAccessorImpl
-// (no serializeAsProto) — a silent, permanently empty field.
+// format defaults to TYPED, which renders "-" for a HashableString / any
+// Router::StringAccessorImpl (no serializeAsProto) — a silent, permanently
+// empty field.
 func TestAccessLogCarriesClaimedSourceIdentity(t *testing.T) {
 	t.Cleanup(func() { SetAccessLogConfig(AccessLogConfig{}) })
 	SetAccessLogConfig(AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
@@ -116,8 +117,10 @@ func TestAccessLogCarriesClaimedSourceIdentity(t *testing.T) {
 		attrs[kv.GetKey()] = kv.GetValue().GetStringValue()
 	}
 
-	assert.Equal(t, "%FILTER_STATE("+SourceIdentityFilterStateKey+":PLAIN)%", attrs["source_spiffe_id"],
+	assert.Equal(t, "%FILTER_STATE("+SourceIdentityCertMapperFilterStateKey+":PLAIN)%", attrs["source_spiffe_id"],
 		"source_spiffe_id must read the key the originating chains stamp, in PLAIN form")
+	assert.NotContains(t, attrs["source_spiffe_id"], retiredSourceIdentityKey,
+		"#1165 retired the aether.source.spiffe_id copy: no chain stamps it, so reading it renders \"-\" forever")
 	assert.Contains(t, attrs["source_spiffe_id"], ":PLAIN)%",
 		"without :PLAIN the formatter defaults to TYPED and renders \"-\" forever")
 

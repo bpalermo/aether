@@ -1773,6 +1773,41 @@ func ClustersSharingServiceEDSName(bootstrapJSON []byte) ([]string, error) {
 	return bad, nil
 }
 
+// RetiredSourceIdentityKey is the pre-#842 source-identity filter-state key,
+// retired in #1165. Production no longer names it anywhere; it is spelled here
+// only so ListenersNamingRetiredSourceKey has something to look for.
+const RetiredSourceIdentityKey = "aether.source.spiffe_id"
+
+// ListenersNamingRetiredSourceKey returns every listener in the bootstrap whose
+// serialised form still mentions RetiredSourceIdentityKey (issue #1165), plus
+// how many listeners it checked.
+//
+// It searches a listener's WHOLE protojson rendering rather than only its
+// set_filter_state entries, so the three places the key used to live -- the
+// per-chain stamp, the access-log attribute that read it, and the QUIC
+// selection matcher's FilterStateInput on an inline route -- are covered by one
+// check, and so is any reader added later. Envoy accepts a stamp nothing reads
+// and a reader nothing stamps alike, so `--mode validate` passing says nothing
+// about either.
+func ListenersNamingRetiredSourceKey(bootstrapJSON []byte) ([]string, int, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, 0, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	var naming []string
+	listeners := bs.GetStaticResources().GetListeners()
+	for _, l := range listeners {
+		b, err := protojson.Marshal(l)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshal listener %q: %w", l.GetName(), err)
+		}
+		if strings.Contains(string(b), RetiredSourceIdentityKey) {
+			naming = append(naming, l.GetName())
+		}
+	}
+	return naming, len(listeners), nil
+}
+
 // marshalBootstrap serialises a Bootstrap proto to protojson, stripping
 // custom extensions that require the proxy-workspace Envoy binary.
 func marshalBootstrap(bs *bootstrapv3.Bootstrap) ([]byte, error) {
