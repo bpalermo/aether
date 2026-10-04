@@ -6,7 +6,7 @@ go_library(
         "chartconfig.go",
         "main.go",
     ],
-    importpath = "aethermesh.dev/tools/chartconfig",
+    importpath = "aethermesh.dev/bazel/chartconfig",
     visibility = ["//visibility:private"],
     deps = ["@io_k8s_sigs_yaml//:yaml"],
 )

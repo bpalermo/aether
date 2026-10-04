@@ -136,7 +136,7 @@ and falls back to the tags; any other non-200 is inconclusive.
      `prober` / `udsecho` would collide with those images. `chart_push`
      (`//bazel/helm:defs.bzl`) writes what `helm push` writes — the `.tgz` as
      the helm chart-content layer, Chart.yaml as JSON under the helm config
-     media type (`//tools/chartconfig`) — with the pinned oras (`//tools/oras`,
+     media type (`//bazel/chartconfig`) — with the pinned oras (`//bazel/oras`,
      1.3.4, sha256-pinned archives in MODULE.bazel) to
      `chart_registry_url(<chart>)` = `quay.io/aethermesh/chart-<name>`, tagged
      with the packaged version; both tag shapes are kept (`<version>` and

@@ -30,14 +30,14 @@ sh_library(
     visibility = ["//visibility:private"],
 )
 
-# The verifier and the helper it sources, for //tools/cosign:verify_image_signatures,
+# The verifier and the helper it sources, for //bazel/cosign:verify_image_signatures,
 # which runs it with COSIGN set to the Bazel-pinned cosign binary.
 exports_files(
     [
         "registry-lib.sh",
         "verify-image-signatures.sh",
     ],
-    visibility = ["//tools/cosign:__pkg__"],
+    visibility = ["//bazel/cosign:__pkg__"],
 )
 
 # The registry setting reader (proposal 040), for //bazel/img:registry_test,

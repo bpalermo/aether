@@ -1,5 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
-load("//tools/buildid:defs.bzl", "build_id_check")
+load("//bazel/buildid:defs.bzl", "build_id_check")
 
 go_library(
     name = "buildid_lib",
@@ -7,7 +7,7 @@ go_library(
         "buildid.go",
         "main.go",
     ],
-    importpath = "aethermesh.dev/tools/buildid",
+    importpath = "aethermesh.dev/bazel/buildid",
     visibility = ["//visibility:private"],
 )
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# `bazel run //tools/oras -- <oras args>`: THE oras for this repository.
+# `bazel run //bazel/oras -- <oras args>`: THE oras for this repository.
 #
 # Execs the official oras release binary MODULE.bazel pins (http_archive per
 # platform, sha256 from the release's checksums file). chart_push
 # (//bazel/helm:defs.bzl) pushes every chart with this same binary, so a
 # workstation and CI run one oras version. Bumping oras is bumping those
-# archives; //tools/oras:version_test fails until its EXPECTED moves with them.
+# archives; //bazel/oras:version_test fails until its EXPECTED moves with them.
 #
 # The process runs in the caller's directory (BUILD_WORKING_DIRECTORY), not the
 # runfiles tree, so relative paths mean what they look like, and it inherits

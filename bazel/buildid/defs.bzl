@@ -69,7 +69,7 @@ content_build_id = rule(
             doc = "The binary to rewrite. Non-ELF inputs are copied unchanged.",
         ),
         "_tool": attr.label(
-            default = Label("//tools/buildid"),
+            default = Label("//bazel/buildid"),
             executable = True,
             cfg = "exec",
         ),
@@ -108,7 +108,7 @@ build_id_check = rule(
             doc = "The released binaries to check.",
         ),
         "_tool": attr.label(
-            default = Label("//tools/buildid"),
+            default = Label("//bazel/buildid"),
             executable = True,
             cfg = "exec",
         ),

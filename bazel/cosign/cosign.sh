@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `bazel run //tools/cosign -- <cosign args>`: THE cosign for this repository.
+# `bazel run //bazel/cosign -- <cosign args>`: THE cosign for this repository.
 #
 # Execs the official prebuilt cosign release binary that the
 # rules_img_signer_cosign module downloads for the current platform
@@ -7,7 +7,7 @@
 # cli/cosign_cli.lock.json. CI signs and verifies with it and so does a
 # workstation, so there is exactly one cosign version in play and it is whatever
 # the bazel_dep in MODULE.bazel says. Bumping cosign is bumping that bazel_dep;
-# //tools/cosign:version_test fails until the expected version moves with it.
+# //bazel/cosign:version_test fails until the expected version moves with it.
 #
 # The process runs in the caller's directory (BUILD_WORKING_DIRECTORY), not the
 # runfiles tree, so relative paths in the arguments mean what they look like, and

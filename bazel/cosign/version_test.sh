@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The cosign //tools/cosign runs is the version this repository documents.
+# The cosign //bazel/cosign runs is the version this repository documents.
 #
 # Network-free: the binary is a repository artifact, checksummed by the
 # rules_img_signer_cosign lock. A bazel_dep bump that moves cosign fails here

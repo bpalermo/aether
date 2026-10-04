@@ -177,7 +177,7 @@ jobs:
       # walked explicitly or they are never checked).
       #
       # Same cosign as publish.yaml and proxy-release.yml: `bazel run
-      # //tools/cosign...`, the rules_img_signer_cosign bazel_dep's release
+      # //bazel/cosign...`, the rules_img_signer_cosign bazel_dep's release
       # binary (sha256 in MODULE.bazel.lock, v3.1.2), fetched and run LOCALLY --
       # no BuildBuddy key, no --config. One pin for all three workflows, by
       # construction. Note the checkout above is `main`, so this is main's
@@ -197,7 +197,7 @@ jobs:
 
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         if: success() || steps.verify.conclusion == 'failure'
-        run: scripts/ci-bazel-warmup.sh //tools/cosign:verify_image_signatures
+        run: scripts/ci-bazel-warmup.sh //bazel/cosign:verify_image_signatures
 
       - name: Verify the signatures (every index and every child manifest)
         id: cosign
@@ -220,7 +220,7 @@ jobs:
           rc=0
           CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
           CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-            bazel run //tools/cosign:verify_image_signatures -- --file signed-refs.txt | tee cosign.log || rc=$?
+            bazel run //bazel/cosign:verify_image_signatures -- --file signed-refs.txt | tee cosign.log || rc=$?
 
           # aether-proxy (#984): the digest each checked commit's chart PINS,
           # signed by proxy-release.yml -- a different workflow, so a different
@@ -233,7 +233,7 @@ jobs:
             sort -u proxy-signed-refs.txt > proxy-signed-refs.uniq
             CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/proxy-release\\.yml@refs/heads/main\$" \
             CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-              bazel run //tools/cosign:verify_image_signatures -- --file proxy-signed-refs.uniq | tee -a cosign.log || rc=$?
+              bazel run //bazel/cosign:verify_image_signatures -- --file proxy-signed-refs.uniq | tee -a cosign.log || rc=$?
           else
             echo "aether-proxy: no pin in this window is past the signing cut-over (see the skip lines above)"
           fi

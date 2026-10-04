@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The oras //tools/oras runs is the version MODULE.bazel pins.
+# The oras //bazel/oras runs is the version MODULE.bazel pins.
 #
 # Network-free: the binary is a repository artifact, checksummed by its
 # http_archive. A bump of those archives fails here until EXPECTED below moves

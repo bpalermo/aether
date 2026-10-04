@@ -387,7 +387,7 @@ jobs:
   # on the pinned index and both children.
   #
   # Same scheme as publish.yaml's sign step (read its comment for the long
-  # form): the Bazel-pinned cosign (`bazel run //tools/cosign`, the
+  # form): the Bazel-pinned cosign (`bazel run //bazel/cosign`, the
   # rules_img_signer_cosign bazel_dep's release binary, sha256 in its lock;
   # v3.1.2), run LOCALLY on this runner, keyless via this job's OIDC token, `--recursive` so the index
   # AND each per-arch child are signed, and cosign 3's default bundle format --
@@ -423,7 +423,7 @@ jobs:
       signed_digest: ${{ steps.sign.outputs.signed_digest }}
     steps:
       - name: Checkout
-        # For //tools/cosign (MODULE.bazel pins cosign), the verifier scripts and
+        # For //bazel/cosign (MODULE.bazel pins cosign), the verifier scripts and
         # the registry setting.
         uses: actions/checkout@v7
 
@@ -431,7 +431,7 @@ jobs:
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
       # Plain setup, as ci.yaml's `shell` job: no BuildBuddy key, no --config.
-      # The only targets this job builds are //tools/cosign's, fetched and run on
+      # The only targets this job builds are //bazel/cosign's, fetched and run on
       # this runner.
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.19.0
@@ -446,7 +446,7 @@ jobs:
           cache-save: false
 
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
-        run: scripts/ci-bazel-warmup.sh //tools/cosign //tools/cosign:verify_image_signatures
+        run: scripts/ci-bazel-warmup.sh //bazel/cosign //bazel/cosign:verify_image_signatures
 
       # The Quay robot account (proposal 040): QUAY_USERNAME / QUAY_TOKEN are
       # secrets of the `release` environment only, so this job declares it. The
@@ -466,7 +466,7 @@ jobs:
         # step's own environment, so the OIDC request variables `id-token: write`
         # provides reach it (strict_action_env / --action_env shape build
         # actions, not the run). See publish.yaml's "Build cosign" step.
-        run: bazel build //tools/cosign
+        run: bazel build //bazel/cosign
 
       - name: Sign the index and every child (keyless, --recursive)
         id: sign
@@ -482,7 +482,7 @@ jobs:
             echo "::error::manifest job produced no usable index digest ('${INDEX_DIGEST}')"
             exit 1
           fi
-          bazel run //tools/cosign -- sign --yes --recursive "${PROXY_IMAGE}@${INDEX_DIGEST}"
+          bazel run //bazel/cosign -- sign --yes --recursive "${PROXY_IMAGE}@${INDEX_DIGEST}"
           echo "signed_digest=${INDEX_DIGEST}" >> "$GITHUB_OUTPUT"
           echo "signed ${PROXY_IMAGE}@${INDEX_DIGEST} (index + children)"
 
@@ -503,7 +503,7 @@ jobs:
           set -euo pipefail
           CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/proxy-release\\.yml@refs/heads/main\$" \
           CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-            bazel run //tools/cosign:verify_image_signatures -- "${PROXY_IMAGE}@${SIGNED_DIGEST}"
+            bazel run //bazel/cosign:verify_image_signatures -- "${PROXY_IMAGE}@${SIGNED_DIGEST}"
 
   # Pin the aether chart to the just-published image (commit-SHA tag) and, when a
   # release token is available, open the pin PR and hand the merge to GitHub

@@ -4,7 +4,7 @@ load("@rules_img//img:image.bzl", "image_index", "image_manifest")
 load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
 load("@rules_img//img:load.bzl", "image_load")
 load("@rules_img//img:push.bzl", "image_push")
-load("//tools/buildid:defs.bzl", "content_build_id")
+load("//bazel/buildid:defs.bzl", "content_build_id")
 load(":registry.bzl", "IMAGE_REGISTRY")
 
 # OCI provenance, on the config (labels) AND on the descriptors (annotations).
@@ -61,7 +61,7 @@ def go_multi_arch_image(name, binary, repository, registry = IMAGE_REGISTRY, bas
     content_build_id(
         name = image_binary,
         binary = binary,
-        # Public so //tools/buildid:release_build_ids can assert on the exact
+        # Public so //bazel/buildid:release_build_ids can assert on the exact
         # ELF that ships, not on a rebuild of it.
         visibility = ["//visibility:public"],
     )

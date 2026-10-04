@@ -35,7 +35,7 @@ bazel_dep(name = "rules_helm", version = "0.32.0")
 
 # The cosign CLI -- ONLY the CLI. @rules_img_signer_cosign//cosign is the official
 # prebuilt release binary, selected per exec platform, with its sha256 pinned in
-# the module's cli/cosign_cli.lock.json (v3.1.2 at 0.0.1). //tools/cosign wraps it
+# the module's cli/cosign_cli.lock.json (v3.1.2 at 0.0.1). //bazel/cosign wraps it
 # so CI and a workstation run the same checksummed cosign; bumping cosign is
 # bumping this bazel_dep. The module's other half, the `sign-oci-artifact` signer
 # plugin for `img deploy`, is NOT used: publish.yaml keeps image_push + a
@@ -265,8 +265,8 @@ use_repo(pip, "aether_docs_pip")
 # chart_push (//bazel/helm:defs.bzl) writes exactly what `helm push` writes --
 # the packaged .tgz as a helm chart-content layer plus Chart.yaml as the helm
 # config -- to chart_registry_url(<chart>) with `oras push`. Official release
-# archives, sha256 from oras_1.3.4_checksums.txt; //tools/oras selects one per
-# platform, and //tools/oras:version_test fails until EXPECTED moves with a bump.
+# archives, sha256 from oras_1.3.4_checksums.txt; //bazel/oras selects one per
+# platform, and //bazel/oras:version_test fails until EXPECTED moves with a bump.
 # ORAS_VERSION = "1.3.4"
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 

@@ -522,8 +522,8 @@ Quay has no nested repositories (and bare `prober` / `udsecho` would collide
 with those images). `chart_push` (`//bazel/helm:defs.bzl`) writes exactly the
 artifact `helm push` writes — the packaged `.tgz` as the
 `application/vnd.cncf.helm.chart.content.v1.tar+gzip` layer, `Chart.yaml` as the
-`application/vnd.cncf.helm.config.v1+json` config (`//tools/chartconfig`) — with
-the pinned oras (`//tools/oras`, v1.3.4, `version_test`) to
+`application/vnd.cncf.helm.config.v1+json` config (`//bazel/chartconfig`) — with
+the pinned oras (`//bazel/oras`, v1.3.4, `version_test`) to
 `chart_registry_url(<chart>)`, tagged with the packaged version. publish.yaml
 runs `<chart>.push_images`, then `<chart>.chart_push` (and
 `aether_commit.chart_push` for the commit-suffixed tag). `helm pull
@@ -626,7 +626,7 @@ l4echo test image's rules_img amd64+arm64 index, built and pushed by the same
 rules_img path as the released images — to `quay.io/aethermesh/smoke:<run id>-<attempt>`
 with the robot account, signs it `cosign sign --recursive` by digest as
 `…/quay-smoke.yaml@refs/heads/main`, verifies the index and every child with
-`//tools/cosign:verify_image_signatures`, then deletes the tag (and any cosign
+`//bazel/cosign:verify_image_signatures`, then deletes the tag (and any cosign
 fallback tags) and leaves the repository. The run summary is a table:
 
 | row | meaning |
@@ -649,21 +649,21 @@ fallback tags) and leaves the repository. The run summary is a table:
 --recursive` — the multi-arch **index and each per-architecture child
 manifest**.
 
-**Getting cosign: `bazel run //tools/cosign`.** There is one cosign for this
+**Getting cosign: `bazel run //bazel/cosign`.** There is one cosign for this
 repository, in CI and on a workstation: the official release binary that the
 `rules_img_signer_cosign` bazel_dep (`MODULE.bazel`) downloads for the current
 platform, sha256-pinned in that module's `cli/cosign_cli.lock.json` —
 **cosign v3.1.2** at module 0.0.1. `publish.yaml`, `proxy-release.yml` and
-`publish-verify.yaml` all sign and verify through `//tools/cosign`, run
+`publish-verify.yaml` all sign and verify through `//bazel/cosign`, run
 locally on the runner (never on RBE), so the three cannot drift apart.
 
 ```bash
-bazel run //tools/cosign -- version            # GitVersion: v3.1.2
-bazel run //tools/cosign -- verify …           # any cosign subcommand
+bazel run //bazel/cosign -- version            # GitVersion: v3.1.2
+bazel run //bazel/cosign -- verify …           # any cosign subcommand
 ```
 
 The version is the module's lock, so **bumping cosign is bumping the
-`bazel_dep`**; `//tools/cosign:version_test` (network-free) fails until its
+`bazel_dep`**; `//bazel/cosign:version_test` (network-free) fails until its
 `EXPECTED` moves too, so a new cosign never lands unread. Until 2026-09-27 this
 was `sigstore/cosign-installer` pinned by SHA (v4.1.2 → cosign v3.0.6).
 
@@ -702,7 +702,7 @@ child with the same identity and issuer:
 
 ```bash
 # Read-only; no credentials. The target sets COSIGN to the pinned cosign.
-bazel run //tools/cosign:verify_image_signatures -- quay.io/aethermesh/agent@sha256:<index digest>
+bazel run //bazel/cosign:verify_image_signatures -- quay.io/aethermesh/agent@sha256:<index digest>
 #   verified index quay.io/aethermesh/agent@sha256:…
 #   verified child quay.io/aethermesh/agent@sha256:…   (linux/amd64)
 #   verified child quay.io/aethermesh/agent@sha256:…   (linux/arm64)
@@ -737,7 +737,7 @@ in the chart until the first proxy release after it re-pins,
 aether commit — the chart carries its **digest** in
 `charts/aether/values.yaml` (`proxy.image.digest`). Since #984 that workflow's
 `sign` job runs `cosign sign --recursive` on the index right after the manifest
-job publishes it (same Bazel-pinned `//tools/cosign`, keyless, v3 bundle
+job publishes it (same Bazel-pinned `//bazel/cosign`, keyless, v3 bundle
 layout), verifies the index and every child, and only then lets `bump-chart`
 open the pin PR. A proxy index that does not verify is never pinned.
 
@@ -755,7 +755,7 @@ rejects them, and vice versa. By hand, for whatever digest a chart pins:
 # The pin names its own registry: read repository AND digest from the chart.
 pinned="$(bash -c '. scripts/proxy-pin-lib.sh && proxy_pinned_ref' < charts/aether/values.yaml)"   # "<repository> <digest>"
 CERT_IDENTITY_REGEXP='^https://github\.com/bpalermo/aether/\.github/workflows/proxy-release\.yml@refs/heads/main$' \
-  bazel run //tools/cosign:verify_image_signatures -- "${pinned% *}@${pinned#* }"
+  bazel run //bazel/cosign:verify_image_signatures -- "${pinned% *}@${pinned#* }"
 ```
 
 **Pins older than signing are unsigned, permanently.** Every proxy image

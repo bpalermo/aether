@@ -154,7 +154,7 @@ common --config=clang
 # only key the Pyroscope symbolizer joins samples to uploaded debuginfo by, so it
 # has to identify *this* ELF and nothing else: `sha1` makes lld hash the linked
 # output, so the id is unique by construction, reproducible for identical inputs,
-# and can never collide with the six Go binaries (//tools/buildid).
+# and can never collide with the six Go binaries (//bazel/buildid).
 #
 # The hermetic toolchain passes `-Wl,--build-id=md5` earlier on the link command
 # line; lld honours the LAST --build-id, so this line wins and widens the note from

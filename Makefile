@@ -135,7 +135,7 @@ load-all: load-agent-image load-mesh-dns-image load-proxy-supervisor-image load-
 
 # Every push target passes --stamp so the released artifacts carry the git
 # version information (charts, x_defs). The GNU build-IDs do NOT depend on it:
-# //tools/buildid derives each one from the binary's own content (#651, #653),
+# //bazel/buildid derives each one from the binary's own content (#651, #653),
 # in every build configuration.
 .PHONY: push-all
 push-all: push-agent-image push-mesh-dns-image push-proxy-supervisor-image push-uds-csi-image push-cni-install-image push-registrar-image
@@ -145,8 +145,8 @@ push-all: push-agent-image push-mesh-dns-image push-proxy-supervisor-image push-
 # collision that made Pyroscope symbol upload unsafe (#653).
 .PHONY: check-build-id
 check-build-id:
-	@bazel build //tools/buildid:release_build_ids
-	@cat bazel-bin/tools/buildid/release_build_ids.txt
+	@bazel build //bazel/buildid:release_build_ids
+	@cat bazel-bin/bazel/buildid/release_build_ids.txt
 
 # Did a commit on main actually publish? Read-only registry query — no
 # credentials needed for our public packages, and it cannot push anything.

@@ -4,8 +4,8 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 # oras from the official release archives pinned in MODULE.bazel (sha256 from the
 # release's checksums file), the ONLY oras this repository pushes charts with --
 # chart_push in //bazel/helm:defs.bzl, run by publish.yaml -- and what
-# `bazel run //tools/oras -- <args>` gives a workstation. Bumping oras is editing
-# those four http_archive entries; //tools/oras:version_test fails until
+# `bazel run //bazel/oras -- <args>` gives a workstation. Bumping oras is editing
+# those four http_archive entries; //bazel/oras:version_test fails until
 # EXPECTED below moves with them.
 #
 # Hand-written: Gazelle manages Go only.
@@ -53,12 +53,12 @@ alias(
             ":linux_amd64": "@oras_cli_linux_amd64//:oras",
             ":linux_arm64": "@oras_cli_linux_arm64//:oras",
         },
-        no_match_error = "//tools/oras: no pinned oras release for this platform (linux/darwin x amd64/arm64 only; see MODULE.bazel)",
+        no_match_error = "//bazel/oras: no pinned oras release for this platform (linux/darwin x amd64/arm64 only; see MODULE.bazel)",
     ),
     visibility = ["//visibility:public"],
 )
 
-# bazel run //tools/oras -- <args>
+# bazel run //bazel/oras -- <args>
 sh_binary(
     name = "oras",
     srcs = ["oras.sh"],
