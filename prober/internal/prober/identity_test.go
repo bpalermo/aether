@@ -247,7 +247,10 @@ func TestProbeFailureLineTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newProber: %v", err)
 	}
-	p.probe(ctx, findTarget(t, p, tierLiveness))
+	tgt := findTarget(t, p, tierLiveness)
+	called := time.Now()
+	p.probe(ctx, tgt)
+	wall := time.Since(called)
 
 	lines := failLines(t, out.String())
 	if len(lines) != 1 {
@@ -256,8 +259,22 @@ func TestProbeFailureLineTimeout(t *testing.T) {
 	if lines[0]["result"] != resultTimeout {
 		t.Fatalf("result = %v, want %s", lines[0]["result"], resultTimeout)
 	}
-	if ms, _ := lines[0]["elapsed_ms"].(float64); ms < 150 {
-		t.Fatalf("elapsed_ms = %v, want >= the 150 ms budget", ms)
+	// The probe starts its clock a moment AFTER it arms the context deadline (it
+	// builds the request in between), so elapsed_ms can land a few ms under the
+	// budget on a loaded host (#1189: 149.7 ms). The lower bound only has to tell a
+	// spent budget from a fast refusal (~0 ms), so it leaves 10 ms of slack.
+	ms, _ := lines[0]["elapsed_ms"].(float64)
+	if ms < 140 {
+		t.Fatalf("elapsed_ms = %v, want ~the 150 ms budget (>= 140 ms)", ms)
+	}
+	// Upper bounds: elapsed_ms is measured inside probe, so it cannot exceed the
+	// call's own wall time; and it stays far below the 2 s default budget, so it was
+	// this config's 150 ms deadline that fired. (+0.05 ms: the line rounds to 0.1 ms.)
+	if ms > float64(wall.Microseconds())/1000+0.05 {
+		t.Fatalf("elapsed_ms = %v exceeds the probe call's own wall time %v", ms, wall)
+	}
+	if ms >= 1000 {
+		t.Fatalf("elapsed_ms = %v, want well under the 2 s default budget", ms)
 	}
 }
 
