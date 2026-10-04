@@ -362,6 +362,11 @@ func (p *Prober) runTarget(ctx context.Context, t target) {
 	defer ticker.Stop()
 	// Bound in-flight probes so a hung hop never blocks the open-loop ticker.
 	sem := make(chan struct{}, max(1, p.cfg.MaxConcurrent))
+	// Return only once every in-flight probe has finished (#1209), so Run's final
+	// fail-log flush and telemetry shutdown come after the last record. The
+	// cancelled ctx ends them promptly; Timeout bounds them regardless.
+	var inflight sync.WaitGroup
+	defer inflight.Wait()
 	for {
 		select {
 		case <-ctx.Done():
@@ -369,10 +374,10 @@ func (p *Prober) runTarget(ctx context.Context, t target) {
 		case <-ticker.C:
 			select {
 			case sem <- struct{}{}:
-				go func() {
+				inflight.Go(func() {
 					defer func() { <-sem }()
 					p.probe(ctx, t)
-				}()
+				})
 			default:
 				p.record(t, resultSaturated, 0, errSaturated)
 			}
@@ -405,6 +410,14 @@ func (p *Prober) probe(ctx context.Context, t target) {
 	resp, err := t.client.Do(req)
 	elapsed := time.Since(start).Seconds()
 	if err != nil {
+		// The prober itself is stopping (SIGTERM cancels ctx): the probe was cut
+		// short by us, not failed by the data plane. Record nothing, not even an
+		// attempt, or every prober roll writes connection_error into the SLI
+		// (#1209). The probe's own deadline is DeadlineExceeded and still lands
+		// in timeout below; a cancel while ctx is live stays classified as before.
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			return
+		}
 		p.record(t, classifyErr(rctx, err), elapsed, err)
 		return
 	}
