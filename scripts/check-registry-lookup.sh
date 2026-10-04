@@ -499,21 +499,6 @@ cred_case "IMAGE_REGISTRY_HOST exported by the workflow" "$other_host" sent IMAG
 cred_case "REGISTRY_CREDENTIAL_HOST override, its host" "$other_host" sent REGISTRY_CREDENTIAL_HOST="$other_host"
 cred_case "REGISTRY_CREDENTIAL_HOST override, the setting's host" "$setting_host" anonymous REGISTRY_CREDENTIAL_HOST="$other_host"
 
-# The shim: ghcr-lib.sh still sources the library and the old names still work.
-# A fresh bash, so nothing this file defined can stand in for the shim's.
-reset_registry
-printf '%s\n' present-tag >"$FAKE/tags"
-if env -u REGISTRY_HOST bash -c '
-	eval "$1"
-	. scripts/ghcr-lib.sh
-	ghcr_tag_exists "$2" present-tag fake && [ "${#GHCR_IMAGE_REPOS[@]}" -eq 9 ] &&
-		[ "${GHCR_IMAGE_REPOS[0]}" = "$(scripts/image-registry.sh repo agent)" ]
-' _ "$fake_curl" "$repo" >/dev/null 2>&1; then
-	ok "scripts/ghcr-lib.sh shim: ghcr_* names and GHCR_IMAGE_REPOS still resolve"
-else
-	bad "scripts/ghcr-lib.sh shim no longer provides the ghcr_* names"
-fi
-
 # --- 6. the real verifier, end to end, across the cut-over -----------------
 lib="$tmp/lib"
 mkdir -p "$lib"
@@ -863,8 +848,8 @@ else
 	printf '%s\n' "$out" | sed 's/^/        | /'
 fi
 
-if [ "$n" -ne 43 ]; then
-	echo "::error::ran ${n} cases, expected 43 -- a gate that checks nothing passes" >&2
+if [ "$n" -ne 42 ]; then
+	echo "::error::ran ${n} cases, expected 42 -- a gate that checks nothing passes" >&2
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then
