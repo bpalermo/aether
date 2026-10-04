@@ -26,9 +26,8 @@ anywhere (scripts/verify-published-artifacts.sh).
 
 scripts/image-registry.sh reads the assignments below with a strict,
 line-anchored grep: keep each on ONE line, exactly `NAME = "value"` (the
-overrides as a one-line dict of string pairs, the legacy references as a
-one-line list of strings). Anything it cannot parse is a hard failure, never a
-fallback.
+overrides as a one-line dict of string pairs). Anything it cannot parse is a
+hard failure, never a fallback.
 """
 
 # Registry host.
@@ -60,17 +59,6 @@ CHART_REPOSITORY_PREFIX = "chart-"
 # registry without the API, as ghcr.io). A commit whose registry.bzl predates
 # this line was published under "tag".
 SIGNATURE_LAYOUT = "referrer"
-
-# aether-proxy references the chart's proxy pin (charts/aether/values.yaml) may
-# name besides image_reference("proxy"). The pin is DATA that only
-# proxy-release.yml's bump-chart job writes, so the flip cannot move it: it
-# keeps naming the ghcr.io image until the first proxy release after the
-# cut-over re-pins it to image_reference("proxy"). Every pin reader accepts
-# exactly proxy_pin_references() (//bazel/proxy_pin, scripts/proxy-pin-lib.sh,
-# ci.yaml's proxy-pin job, the bump-chart rewrite,
-# scripts/check-registry-config.sh). Empty this (phase 4, "decommission ghcr")
-# once no supported chart pins the old coordinate.
-PROXY_PIN_LEGACY_REFERENCES = ["ghcr.io/bpalermo/aether/aether-proxy"]
 
 def image_repository(component):
     """Repository path (no host) of a component's image.
@@ -122,15 +110,6 @@ def chart_registry_url(chart):
       e.g. "quay.io/aethermesh/chart-aether".
     """
     return "{}/{}".format(IMAGE_REGISTRY, chart_repository(chart))
-
-def proxy_pin_references():
-    """Every aether-proxy reference the chart's proxy pin may name.
-
-    Returns:
-      image_reference("proxy") first, then PROXY_PIN_LEGACY_REFERENCES.
-    """
-    current = image_reference("proxy")
-    return [current] + [r for r in PROXY_PIN_LEGACY_REFERENCES if r != current]
 
 def registry_token_url(registry, repository):
     """The anonymous pull-token endpoint for <registry>/<repository>.

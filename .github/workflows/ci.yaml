@@ -301,7 +301,7 @@ jobs:
       # The registry is ONE setting (bazel/img/registry.bzl, proposal 040), so
       # the Quay cut-over was a one-file flip. This asserts the setting parses,
       # the //proxy workspace's copy is identical, the aether-proxy pin names
-      # one of proxy_pin_references(), no file outside a written-down allow-list
+      # image_reference("proxy"), no file outside a written-down allow-list
       # spells the registry out, and no file outside the legacy allow-list
       # spells a pre-cut-over (ghcr.io) coordinate. No network, no Bazel.
       - name: The image registry is one setting
@@ -425,14 +425,12 @@ jobs:
 
           # Parse exactly the way bazel/proxy_pin/extensions.bzl does, so the two
           # can never disagree about what the pin is: the first `repository:`
-          # that is exactly one of proxy_pin_references() — image_reference("proxy")
-          # ($PROXY_IMAGE), or a PROXY_PIN_LEGACY_REFERENCES entry, the ghcr.io
-          # image the pin names until the first proxy release after the Quay
-          # cut-over re-pins it (proposal 040) — then `tag:` / `digest:`
-          # inside that same mapping — indentation >= the repository key's, with
-          # blank and comment-only lines not ending the block. The registry the
-          # tag is resolved against below is whatever the pin names.
-          accepted="$(scripts/image-registry.sh proxy-pin-refs)"
+          # that is exactly image_reference("proxy") ($PROXY_IMAGE, from the
+          # step above) — no other registry is accepted (proposal 040 phase 4)
+          # — then `tag:` / `digest:` inside that same mapping — indentation >=
+          # the repository key's, with blank and comment-only lines not ending
+          # the block. The tag is resolved against that registry below.
+          accepted="${PROXY_IMAGE:?scripts/image-registry.sh did not export PROXY_IMAGE}"
           scalar() {
             raw="${1%%#*}"
             raw="$(printf '%s' "$raw" | sed -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')"
@@ -484,7 +482,7 @@ jobs:
 
           fail=0
           if [ -z "$repository" ]; then
-            echo "::error file=${values}::no aether-proxy image pin found. Expected a line \`repository: <ref>\` with <ref> one of: $(paste -sd, - <<<"$accepted") (proxy_pin_references(), bazel/img/registry.bzl) — the same contract bazel/proxy_pin/extensions.bzl parses."
+            echo "::error file=${values}::no aether-proxy image pin found. Expected a line \`repository: <ref>\` with <ref> exactly ${accepted} (image_reference(\"proxy\"), bazel/img/registry.bzl) — the same contract bazel/proxy_pin/extensions.bzl parses."
             fail=1
           fi
           if [ -z "$tag" ]; then

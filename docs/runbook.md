@@ -504,9 +504,9 @@ and from nowhere else:
 |---|---|
 | image pushes, chart pushes, chart template tests, e2e go_test defaults | `load("//bazel/img:registry.bzl", ...)` — `image_repository()`, `image_reference()`, `chart_registry_url(<chart>)` |
 | the `//proxy` workspace (`oci_push`) | its byte-identical copy `proxy/bazel/registry.bzl` (it cannot load from the root module) |
-| `//bazel/proxy_pin` (the Envoy the validate gate runs) | `proxy_pin_references()` + `registry_token_url()` |
+| `//bazel/proxy_pin` (the Envoy the validate gate runs) | `image_reference("proxy")` + `registry_token_url()` |
 | workflows | `scripts/image-registry.sh >> "$GITHUB_ENV"` after checkout → `IMAGE_REGISTRY_HOST`, `IMAGE_NAMESPACE`, `IMAGE_REGISTRY` (host/namespace), `PROXY_IMAGE`, `IMAGE_SIGNATURE_LAYOUT` |
-| verifiers, e2e scripts | `scripts/image-registry.sh {prefix,host,repo <c>,ref <c>,chart-repo <c>,chart-ref <c>,signature-layout,proxy-pin-refs}`; `scripts/registry-lib.sh` resolves its repository lists through it |
+| verifiers, e2e scripts | `scripts/image-registry.sh {prefix,host,repo <c>,ref <c>,chart-repo <c>,chart-ref <c>,signature-layout}`; `scripts/registry-lib.sh` resolves its repository lists through it |
 
 It says **`quay.io` / `aethermesh`** since the phase-2 cut-over (proposal 040):
 images `quay.io/aethermesh/<component>` (the proxy is plain `proxy`), charts
@@ -559,14 +559,14 @@ the next proxy release, not with the flip), in the layout of the newest
 
 **The aether-proxy pin during the cut-over.** The flip could not move the pin
 (it is data only `proxy-release.yml`'s bump-chart job writes), so right after the
-cut-over `charts/aether/values.yaml` still names the ghcr.io image. Every pin
-reader accepts `proxy_pin_references()` — `image_reference("proxy")` plus
-`PROXY_PIN_LEGACY_REFERENCES` — and the bump-chart rewrite
-(`proxy_pin_rewrite`, `scripts/proxy-pin-lib.sh`) finds the block by any of them
-and moves `repository:` together with `tag:` and `digest:`. The phase-2 merge
-itself triggers a proxy release (it touches `proxy-release.yml` and
-`proxy/bazel/registry.bzl`), whose bump-chart PR re-pins to
-`quay.io/aethermesh/proxy`.
+cut-over `charts/aether/values.yaml` still named the ghcr.io image, and every pin
+reader briefly accepted it too (`PROXY_PIN_LEGACY_REFERENCES`). The phase-2
+merge triggered a proxy release whose bump-chart PR (#1027) re-pinned to
+`quay.io/aethermesh/proxy`. Phase 4 removed the allowance: every pin reader
+(`//bazel/proxy_pin`, the sweep, ci.yaml's proxy-pin job, `proxy_pin_rewrite`
+in `scripts/proxy-pin-lib.sh`) accepts exactly `image_reference("proxy")`, and a
+pin on any other reference is a hard failure — never a lookup on the old
+registry.
 
 **Migrating a chart consumer.** Every chart took a **major** bump (aether
 `1.0.0`, and crds / prober / udsecho to `1.0.0`) because the default image
@@ -588,11 +588,11 @@ place, read-only: deleting them would break every historical pin.
 
 `scripts/check-registry-config.sh` (in `ci`'s and `proxy`'s `shell` jobs)
 keeps it one setting: the file parses, the proxy copy is identical, the
-aether-proxy pin in `charts/aether/values.yaml` names one of
-`proxy_pin_references()` (a pre-cut-over one is reported as a notice), no file
+aether-proxy pin in `charts/aether/values.yaml` names exactly
+`image_reference("proxy")`, no file
 outside its written-down allow-list (docs, the website, the two READMEs, the
 setting itself, the pin) spells the current registry out, and no file outside
-its **legacy** allow-list (the setting's history note, the pin, proposals, this
+its **legacy** allow-list (the setting's history note, proposals, this
 runbook's records, observability notes) spells a pre-cut-over coordinate out.
 `//bazel/img:registry_test` pins `image-registry.sh` against the Starlark helpers.
 

@@ -13,12 +13,7 @@ n=0
 fail=0
 while read -r cmd a b; do
 	[ -n "$cmd" ] || continue
-	if [ "$cmd" = proxy-pin-refs ]; then
-		# The one list-valued answer: one reference per line from the script,
-		# ","-joined by BUILD.bazel.
-		want="$a" got="$("$script" "$cmd" | paste -sd, -)"
-		label="$cmd"
-	elif [ -z "$b" ]; then
+	if [ -z "$b" ]; then
 		want="$a" got="$("$script" "$cmd")"
 		label="$cmd"
 	else

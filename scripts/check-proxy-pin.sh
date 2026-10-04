@@ -5,14 +5,12 @@
 # skipped as pre-signing history), and proxy_pin_rewrite (the bump-chart job's
 # edit).
 #
-# The Quay cut-over (proposal 040) adds a third silent failure: the flip moves
-# image_reference("proxy") to quay.io but cannot move the pin, which is data the
-# next proxy release writes. A parser that only knows the new reference finds NO
-# pin (every sweep exit 2, and bump-chart's rewrite silently matching nothing,
-# so the first quay release would never be pinned at all). So the pin may name
-# exactly proxy_pin_references() -- image_reference("proxy") or a
-# PROXY_PIN_LEGACY_REFERENCES entry -- and nothing else, and the rewrite moves a
-# legacy pin, repository line included, onto image_reference("proxy").
+# The pin may name exactly image_reference("proxy") and nothing else. During the
+# Quay cut-over (proposal 040 phase 2) it could also name the pre-cut-over
+# image; phase 4 removed that allowance, so a pin on the pre-cut-over reference
+# (derived below from registry.bzl's own history note, never typed here) is
+# refused by the reader AND by the rewrite -- never looked up on the old
+# registry.
 #
 # The two dangerous failures are both SILENT:
 #   - reading the wrong digest (the supervisor image sits directly below the
@@ -48,9 +46,15 @@ bad() {
 	fail=1
 }
 
-legacy_ref="${PROXY_PIN_REFS[1]:-}"
-if [ -z "$PROXY_IMAGE" ] || [ "${PROXY_PIN_REFS[0]:-}" != "$PROXY_IMAGE" ] || [ -z "$legacy_ref" ]; then
-	echo "::error::need image_reference(\"proxy\") and at least one PROXY_PIN_LEGACY_REFERENCES entry (bazel/img/registry.bzl) to exercise the cut-over cases; got [${PROXY_PIN_REFS[*]}]" >&2
+# The pre-cut-over proxy reference, from the setting's history note in
+# bazel/img/registry.bzl (the four assignments it quotes, indented four spaces).
+pre_bzl="$(mktemp)"
+sed -nE 's/^    (IMAGE_REGISTRY|IMAGE_NAMESPACE|IMAGE_NAME_OVERRIDES|CHART_REPOSITORY_PREFIX) = /\1 = /p' \
+	bazel/img/registry.bzl >"$pre_bzl"
+old_ref="$(IMAGE_REGISTRY_BZL="$pre_bzl" scripts/image-registry.sh ref proxy 2>/dev/null)" || old_ref=""
+rm -f "$pre_bzl"
+if [ -z "$PROXY_IMAGE" ] || [ -z "$old_ref" ] || [ "$old_ref" = "$PROXY_IMAGE" ]; then
+	echo "::error::need image_reference(\"proxy\") and the pre-cut-over proxy reference (bazel/img/registry.bzl's history note) to exercise the refusal cases; got [${PROXY_IMAGE}] and [${old_ref}]" >&2
 	exit 2
 fi
 
@@ -126,13 +130,14 @@ want_ref() {
 		bad "$name: want [$want] got [$got]"
 	fi
 }
-echo "proxy_pinned_ref (proposal 040 cut-over):"
+echo "proxy_pinned_ref (only image_reference(\"proxy\"); proposal 040 phase 4):"
 want_ref "pin on image_reference(\"proxy\")" "${PROXY_IMAGE} ${d1}" "$(values "    digest: \"$d1\"")"
-want_ref "pre-cut-over pin on the legacy reference (the pin's registry is what it says)" \
-	"${legacy_ref} ${d1}" "$(values "    digest: \"$d1\"" "$legacy_ref")"
+want_no_digest "pin on the pre-cut-over reference ${old_ref}, never looked up there" \
+	"$(values "    digest: \"$d1\"" "$old_ref")"
 want_no_digest "pin on a registry nobody named (not accepted)" "$(values "    digest: \"$d1\"" "registry.invalid/someone/aether-proxy")"
-want_no_digest "a legacy AND a current proxy block" \
-	"$(values "    digest: \"$d1\"" "$legacy_ref")"$'\n'"$(values "    digest: \"$d2\"" | sed -n '5,$p')"
+want_ref "a stray pre-cut-over block beside the current one: only the current pin is read" \
+	"${PROXY_IMAGE} ${d2}" \
+	"$(values "    digest: \"$d1\"" "$old_ref")"$'\n'"$(values "    digest: \"$d2\"" | sed -n '5,$p')"
 
 # --- proxy_pin_rewrite (the bump-chart edit) --------------------------------
 echo "proxy_pin_rewrite:"
@@ -141,7 +146,7 @@ sup="sha256:$(printf 'f%.0s' {1..64})"
 new_tag=fedcba9876543210fedcba9876543210fedcba98
 
 # rewrite_case <name> <from repository> — the next release pins d2 under
-# image_reference("proxy"), whichever accepted reference the pin named before.
+# image_reference("proxy").
 rewrite_case() {
 	local name="$1" from="$2" f="${rw_dir}/values.yaml" got
 	values "    digest: \"$d1\"" "$from" >"$f"
@@ -162,7 +167,6 @@ rewrite_case() {
 		sed 's/^/        | /' "$f"
 	fi
 }
-rewrite_case "legacy (ghcr) pin moves to image_reference(\"proxy\")" "$legacy_ref"
 rewrite_case "current pin is re-pinned in place" "$PROXY_IMAGE"
 
 # refuse_rewrite <name> <values text> <image> <tag> <digest>
@@ -180,6 +184,7 @@ refuse_rewrite() {
 	fi
 }
 refuse_rewrite "no accepted proxy block" "$(values "    digest: \"$d1\"" "registry.invalid/someone/aether-proxy")" "$PROXY_IMAGE" "$new_tag" "$d2"
+refuse_rewrite "a pin on the pre-cut-over reference is not moved (no fallback)" "$(values "    digest: \"$d1\"" "$old_ref")" "$PROXY_IMAGE" "$new_tag" "$d2"
 refuse_rewrite "a proxy block with no digest" "$(values "    # no digest")" "$PROXY_IMAGE" "$new_tag" "$d2"
 refuse_rewrite "a truncated digest to pin" "$(values "    digest: \"$d1\"")" "$PROXY_IMAGE" "$new_tag" "sha256:938c5a57"
 rm -rf "$rw_dir"

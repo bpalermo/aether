@@ -656,10 +656,8 @@ jobs:
           # (This was a real bug: the chart stayed pinned to the Envoy v1.39.0
           # index across every proxy release.)
           #
-          # And the REPOSITORY moves with them (proposal 040): the block is the
-          # one whose `repository:` names any of proxy_pin_references() — so the
-          # first release after the Quay cut-over finds the ghcr.io pin — and it
-          # is rewritten to $PROXY_IMAGE, where this run just pushed and signed.
+          # The block is the one whose `repository:` names $PROXY_IMAGE
+          # (image_reference("proxy"), where this run just pushed and signed).
           # proxy_pin_rewrite fails (file unchanged) unless it found exactly one
           # such block and moved its tag AND digest: a pin it cannot find is a
           # red run, never a silent "nothing to do" (scripts/check-proxy-pin.sh
@@ -668,7 +666,7 @@ jobs:
           # shellcheck source=scripts/proxy-pin-lib.sh
           . ./scripts/proxy-pin-lib.sh
           if ! proxy_pin_rewrite charts/aether/values.yaml "$PROXY_IMAGE" "$SHA" "$INDEX_DIGEST"; then
-            echo "::error::could not rewrite the aether-proxy pin in charts/aether/values.yaml (no single block naming one of: ${PROXY_PIN_REFS[*]})"
+            echo "::error::could not rewrite the aether-proxy pin in charts/aether/values.yaml (no single block naming ${PROXY_IMAGE})"
             exit 1
           fi
           grep -A5 "repository: ${PROXY_IMAGE}" charts/aether/values.yaml
