@@ -9,8 +9,6 @@
 #     actually landed)
 #   - scripts/verify-image-signatures.sh  (#925, which cosign-verifies each index
 #     AND every child manifest it lists)
-# scripts/ghcr-lib.sh is a one-line shim onto this file, kept so nothing breaks
-# mid-migration; every ghcr_* name below is an alias of its registry_* twin.
 #
 # WHICH REGISTRY. REGISTRY_HOST, read at CALL time (so a caller can point one
 # lookup at another registry by setting it), defaulting to the host in

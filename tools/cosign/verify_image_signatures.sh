@@ -38,6 +38,6 @@ done
 export COSIGN
 
 cd "${BUILD_WORKING_DIRECTORY:-.}"
-# The script sources ghcr-lib.sh from its own directory; in runfiles that is the
+# The script sources registry-lib.sh from its own directory; in runfiles that is the
 # sibling this target's data puts next to it.
 exec bash "$script" "$@"
