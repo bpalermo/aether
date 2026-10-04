@@ -2,6 +2,7 @@ package meshdns
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -294,12 +295,12 @@ func TestLameDuckHandsOffToACoBoundSuccessor(t *testing.T) {
 	predecessor, stopPredecessor, predDone := startCoBound(t, domain, addr, "pred", records, 5*time.Second)
 	// The successor gets NO window of its own: it is not the subject here, and a
 	// window would make the test's own teardown wait out its deadline.
-	successor, _, _ := startCoBound(t, domain, addr, "succ", records, 0)
+	successor, _, succDone := startCoBound(t, domain, addr, "succ", records, 0)
 
 	// Both must be genuinely serving before the handoff is meaningful. The successor's
 	// ready marker proves it BOUND; a probe that comes back with its stamp proves it
 	// ANSWERS — which is exactly what the lame duck is about to look for.
-	requireMarker(t, successor)
+	requireMarker(t, successor, succDone)
 	requireStampSeen(t, predecessor, "succ")
 
 	// A steady query stream over the shared port. Whichever socket the kernel picks,
@@ -310,7 +311,7 @@ func TestLameDuckHandsOffToACoBoundSuccessor(t *testing.T) {
 	select {
 	case err := <-predDone:
 		require.NoError(t, err)
-	case <-time.After(20 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the predecessor never returned from its lame-duck window")
 	}
 
@@ -465,13 +466,11 @@ func lameDuckSeriesOf(t *testing.T, attrs attribute.Set) lameDuckSeries {
 // reusablePort picks a loopback port both servers can co-bind. It is chosen by binding
 // and releasing an ephemeral one — the classic small race, and acceptable here because
 // the alternative (a hard-coded port) collides with whatever else runs on the machine.
+// It must be free on TCP as well as UDP. Start binds both, and on a busy runner a port
+// that is free only for UDP can fail the TCP bind (#1177).
 func reusablePort(t *testing.T) string {
 	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := pc.LocalAddr().String()
-	require.NoError(t, pc.Close())
-	return addr
+	return fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
 }
 
 // startCoBound launches one resolver on the shared SO_REUSEPORT address and returns it
@@ -507,13 +506,13 @@ func startCoBound(t *testing.T, domain, addr, id string, records map[string]stri
 }
 
 // requireMarker waits until the server has written its pod-local ready marker, i.e. its
-// listeners are bound.
-func requireMarker(t *testing.T, s *Server) {
+// listeners are bound. It fails early if the server's Start (done) returns first.
+func requireMarker(t *testing.T, s *Server, done <-chan error) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	awaitBound(t, done, func() bool {
 		_, err := os.Stat(s.readyMarker)
 		return err == nil
-	}, 10*time.Second, 10*time.Millisecond, "the resolver never reported ready")
+	}, "the resolver never reported ready")
 }
 
 // requireStampSeen waits until a probe from s comes back carrying want's stamp, proving
@@ -523,7 +522,7 @@ func requireStampSeen(t *testing.T, s *Server, want string) {
 	require.Eventually(t, func() bool {
 		peer, ok := s.probeSuccessor(context.Background())
 		return ok && peer == want
-	}, 10*time.Second, 20*time.Millisecond, "never saw %q answer on the shared reuseport address", want)
+	}, eventWait, 20*time.Millisecond, "never saw %q answer on the shared reuseport address", want)
 }
 
 // queryStream fires mesh A queries at the shared address until stopped, counting the
