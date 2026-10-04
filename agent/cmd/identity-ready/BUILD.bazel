@@ -13,8 +13,10 @@ go_library(
     deps = [
         "@com_github_spiffe_go_spiffe_v2//proto/spiffe/workload",
         "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//metadata",
+        "@org_golang_google_grpc//status",
     ],
 )
 
@@ -31,8 +33,12 @@ go_test(
     embed = [":identity-ready_lib"],
     deps = [
         "//common/spire/spiretest",
+        "@com_github_spiffe_go_spiffe_v2//proto/spiffe/workload",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//status",
     ],
 )
 

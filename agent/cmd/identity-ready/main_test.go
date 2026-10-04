@@ -6,16 +6,23 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"aethermesh.dev/common/spire/spiretest"
+	"github.com/spiffe/go-spiffe/v2/proto/spiffe/workload"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // subprocessEnv makes this test binary behave as identity-ready itself, so the
@@ -130,6 +137,85 @@ func TestWait_TimeoutFailsWithAClearMessage(t *testing.T) {
 	assert.Contains(t, err.Error(), sock)
 	assert.Contains(t, err.Error(), "no identity issued", "the last Workload API error is surfaced")
 	assert.Less(t, time.Since(start), 5*time.Second)
+}
+
+// scriptedWorkloadAPI is a Workload API whose first `refuse` fetches answer
+// "no identity issued" at once and whose later fetches stall. With failEarly
+// set, a stalled fetch fails with DeadlineExceeded that long BEFORE the
+// deadline it received (grpc-timeout) — deterministically reproducing the
+// #1190 race, where gRPC reports an attempt capped by the overall --timeout as
+// DeadlineExceeded while the outer context's own timer has not fired yet.
+type scriptedWorkloadAPI struct {
+	workload.UnimplementedSpiffeWorkloadAPIServer
+
+	refuse    int64
+	failEarly time.Duration
+	fetches   atomic.Int64
+}
+
+func (s *scriptedWorkloadAPI) FetchX509SVID(_ *workload.X509SVIDRequest, stream grpc.ServerStreamingServer[workload.X509SVIDResponse]) error {
+	ctx := stream.Context()
+	if s.fetches.Add(1) <= s.refuse {
+		return status.Error(codes.PermissionDenied, "no identity issued")
+	}
+	if deadline, ok := ctx.Deadline(); ok && s.failEarly > 0 {
+		select {
+		case <-time.After(time.Until(deadline) - s.failEarly):
+			return status.Error(codes.DeadlineExceeded, context.DeadlineExceeded.Error())
+		case <-ctx.Done():
+			return status.FromContextError(ctx.Err()).Err()
+		}
+	}
+	<-ctx.Done()
+	return status.FromContextError(ctx.Err()).Err()
+}
+
+// startScripted serves s on a temporary UDS and returns the socket path.
+func startScripted(t *testing.T, s *scriptedWorkloadAPI) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "wlapi") // short path: the AF_UNIX budget
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "workload.sock")
+	lis, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	srv := grpc.NewServer()
+	workload.RegisterSpiffeWorkloadAPIServer(srv, s)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	return sock
+}
+
+// TestWait_TimeoutKeepsTheLastMeaningfulError is #1190: SPIRE answers "no
+// identity issued", then the next attempt — capped below --attempt-timeout by
+// the overall --timeout — fails with DeadlineExceeded before the outer
+// context's own timer fires. That attempt was only cut short, so the reported
+// last error must stay SPIRE's real answer, not "context deadline exceeded".
+func TestWait_TimeoutKeepsTheLastMeaningfulError(t *testing.T) {
+	sock := startScripted(t, &scriptedWorkloadAPI{refuse: 1, failEarly: 150 * time.Millisecond})
+
+	o := fast(sock)
+	o.attempt = 10 * time.Second // every attempt after the first is capped by --timeout
+	o.timeout = 400 * time.Millisecond
+	_, err := wait(context.Background(), o, logger(io.Discard))
+	require.ErrorIs(t, err, errTimedOut)
+	assert.Contains(t, err.Error(), "no identity issued", "an attempt cut short by --timeout must not mask SPIRE's answer")
+	assert.NotContains(t, err.Error(), "DeadlineExceeded")
+}
+
+// TestWait_StallingSPIREReportsDeadlineExceeded is the inverse: SPIRE never
+// answers within a full --attempt-timeout. That timeout IS the truth about
+// SPIRE, so it is the error reported.
+func TestWait_StallingSPIREReportsDeadlineExceeded(t *testing.T) {
+	sock := startScripted(t, &scriptedWorkloadAPI{})
+
+	o := fast(sock)
+	o.attempt = 50 * time.Millisecond
+	o.timeout = 300 * time.Millisecond
+	_, err := wait(context.Background(), o, logger(io.Discard))
+	require.ErrorIs(t, err, errTimedOut)
+	assert.Contains(t, err.Error(), "DeadlineExceeded",
+		"an attempt that had its full budget and still timed out is SPIRE not answering")
 }
 
 // TestWait_NoSPIREAgentKeepsWaiting: nothing listens on the socket (spire-agent
