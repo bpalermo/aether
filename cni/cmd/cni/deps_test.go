@@ -139,8 +139,12 @@ func TestCNIPluginLinksOnlyAllowedModules(t *testing.T) {
 				"import; do not relax this test.", pkg)
 	}
 
-	assert.LessOrEqual(t, len(binary), maxBinaryBytes,
-		"cni is %d bytes, over the %d-byte ceiling", len(binary), maxBinaryBytes)
+	if raceInstrumented {
+		t.Logf("%s is %d bytes under -race; the %d-byte ceiling applies to plain builds only", "cni", len(binary), maxBinaryBytes)
+	} else {
+		assert.LessOrEqual(t, len(binary), maxBinaryBytes,
+			"cni is %d bytes, over the %d-byte ceiling", len(binary), maxBinaryBytes)
+	}
 	t.Logf("cni is %d bytes", len(binary))
 }
 

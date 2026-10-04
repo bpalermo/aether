@@ -1,4 +1,7 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+# gazelle:exclude race_test.go
+# gazelle:exclude norace_test.go
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
 load("//bazel/img:registry.bzl", "image_repository")
 
@@ -75,7 +78,11 @@ go_test(
 go_test(
     name = "deps_test",
     size = "small",
-    srcs = ["deps_test.go"],
+    srcs = [
+        "deps_test.go",
+        "norace_test.go",
+        "race_test.go",
+    ],
     data = [":mesh-dns"],
     embed = [":mesh-dns_lib"],
     deps = [

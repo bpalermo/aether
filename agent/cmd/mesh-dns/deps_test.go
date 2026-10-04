@@ -120,8 +120,12 @@ func TestMeshDNSLinksOnlyAllowedModules(t *testing.T) {
 				"not relax this test.", pkg)
 	}
 
-	assert.LessOrEqual(t, len(binary), maxBinaryBytes,
-		"mesh-dns is %d bytes, over the %d-byte ceiling", len(binary), maxBinaryBytes)
+	if raceInstrumented {
+		t.Logf("%s is %d bytes under -race; the %d-byte ceiling applies to plain builds only", "mesh-dns", len(binary), maxBinaryBytes)
+	} else {
+		assert.LessOrEqual(t, len(binary), maxBinaryBytes,
+			"mesh-dns is %d bytes, over the %d-byte ceiling", len(binary), maxBinaryBytes)
+	}
 	t.Logf("mesh-dns is %d bytes", len(binary))
 }
 

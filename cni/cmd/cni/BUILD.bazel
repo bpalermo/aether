@@ -1,5 +1,8 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
+# gazelle:exclude race_test.go
+# gazelle:exclude norace_test.go
+
 # deps_test.go is hand-wired below into its own :deps_test target (it needs the
 # linked binary as data and has to be nameable on its own), so keep gazelle from
 # folding it into a :cni_test.
@@ -35,7 +38,11 @@ go_binary(
 go_test(
     name = "deps_test",
     size = "small",
-    srcs = ["deps_test.go"],
+    srcs = [
+        "deps_test.go",
+        "norace_test.go",
+        "race_test.go",
+    ],
     data = [":cni"],
     embed = [":cni_lib"],
     deps = [
