@@ -550,6 +550,55 @@ func (s *Snapshot) Apply(events []*registrarv1.WatchEndpointsResponse) (string, 
 	return s.version, transitions
 }
 
+// RemoveIPs removes the given IPs of a service under every protocol the
+// snapshot holds them, returning one ENDPOINT_REMOVED event per removed entry
+// (carrying its protocol and stored endpoint), the new version, and the catalog
+// transitions. An IP the snapshot does not hold yields no event (#1206).
+//
+// UnregisterEndpointRequest names no protocol, but the snapshot and every
+// agent cache key an endpoint by (service, protocol, ip): a REMOVED event
+// without a protocol matches nothing on either side, so the removal must be
+// resolved against what is stored, under the same lock that removes it.
+func (s *Snapshot) RemoveIPs(serviceName string, ips []string) ([]*registrarv1.WatchEndpointsResponse, string, []*registrarv1.WatchEndpointsResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var events, transitions []*registrarv1.WatchEndpointsResponse
+	for _, ip := range ips {
+		for _, protocol := range allProtocols {
+			key := serviceKey{ServiceName: serviceName, Protocol: protocol, IP: ip}
+			entry, ok := s.entries[key]
+			if !ok {
+				continue
+			}
+			events = append(events, &registrarv1.WatchEndpointsResponse{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
+				ServiceName: serviceName,
+				Protocol:    protocol,
+				Endpoint:    entry.Endpoint,
+			})
+			if tr := s.applyRemoveLocked(key); tr != nil {
+				transitions = append(transitions, tr)
+			}
+		}
+	}
+	if len(events) > 0 {
+		s.refreshLocked(true)
+	}
+	return events, s.version, transitions
+}
+
+// allProtocols is every Service_Protocol value, in enum order: the protocols an
+// endpoint may be stored under (RegisterEndpoint stores whatever it is given).
+var allProtocols = func() []registryv1.Service_Protocol {
+	out := make([]registryv1.Service_Protocol, 0, len(registryv1.Service_Protocol_name))
+	for v := range registryv1.Service_Protocol_name {
+		out = append(out, registryv1.Service_Protocol(v))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}()
+
 // applyUpsertLocked stores an added/updated endpoint, maintaining serviceCounts,
 // and returns the SERVICE_ADDED transition when this is the service's first
 // endpoint (nil otherwise). Caller must hold mu for writing.

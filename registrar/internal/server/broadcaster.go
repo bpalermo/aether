@@ -34,6 +34,18 @@ type watcher struct {
 // fresh (filtered) snapshot — it must never silently miss an event and serve
 // stale endpoints until something else triggers a resync.
 type Broadcaster struct {
+	// publishMu orders publications against watch starts (#1205). A
+	// publication -- a snapshot mutation and the broadcast of the batch it
+	// produced -- holds it for reading, so publications still run concurrently
+	// with each other. A watch start -- Subscribe plus the snapshot read --
+	// holds it for writing. Every batch is therefore either wholly before a
+	// watch start (in the snapshot it reads, and broadcast before the watcher
+	// existed) or wholly after it (absent from that snapshot, and buffered on
+	// the watcher's channel): never in the snapshot AND on the channel, whose
+	// batch version would then name contents older than the snapshot's.
+	// Acquired before mu, never while holding it.
+	publishMu sync.RWMutex
+
 	mu       sync.RWMutex
 	watchers map[string]*watcher
 	// byService indexes filtered watchers by service name for O(consumers)
@@ -86,6 +98,35 @@ func (b *Broadcaster) Subscribe(id string, services []string) <-chan *registrarv
 	b.metrics.filteredWatchers(context.Background(), b.filteredCountLocked())
 	b.log.Debug("watcher subscribed", "id", id, "filtered", w.services != nil, "services", len(services))
 	return w.ch
+}
+
+// SubscribeWith subscribes like Subscribe and then runs start (the watch's
+// snapshot read), both with every publication excluded (see publishMu): the
+// returned channel receives exactly the batches that start's snapshot does not
+// contain. start must only read in-memory state -- the snapshot is sent after
+// SubscribeWith returns, while new batches buffer on the channel -- and must not
+// publish. A buffer that overflows while the snapshot is still being sent closes
+// the channel, which ends the stream with DataLoss as for any slow watcher.
+func (b *Broadcaster) SubscribeWith(id string, services []string, start func()) <-chan *registrarv1.WatchEndpointsResponse {
+	b.publishMu.Lock()
+	defer b.publishMu.Unlock()
+	ch := b.Subscribe(id, services)
+	start()
+	return ch
+}
+
+// Publish runs mutate -- which applies a batch to the snapshot and returns the
+// batch's events, version-stamped -- and broadcasts the events, as one
+// publication with respect to SubscribeWith (see publishMu). Every snapshot
+// mutation whose events are broadcast must go through Publish, or a watch
+// starting between the mutation and its broadcast receives the batch twice:
+// once in its snapshot and once, carrying an older version, after it.
+func (b *Broadcaster) Publish(mutate func() []*registrarv1.WatchEndpointsResponse) {
+	b.publishMu.RLock()
+	defer b.publishMu.RUnlock()
+	if events := mutate(); len(events) > 0 {
+		b.Broadcast(events)
+	}
 }
 
 // Unsubscribe removes a watcher and closes its channel. The channel returned

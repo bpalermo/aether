@@ -6,7 +6,6 @@ import (
 	"log/slog"
 
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
-	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"aethermesh.dev/common/grpcserver"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/telemetry"
@@ -115,19 +114,17 @@ func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1
 	}
 
 	// Snapshot-first broadcast: watchers see the endpoint immediately.
-	events := []*registrarv1.WatchEndpointsResponse{{
-		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
-		ServiceName: req.GetServiceName(),
-		Protocol:    req.GetProtocol(),
-		Endpoint:    req.GetEndpoint(),
-	}}
-	version, transitions := s.snapshot.Apply(events)
-	events = append(events, transitions...)
-	for _, e := range events {
-		e.Version = version
-	}
+	s.broadcaster.Publish(func() []*registrarv1.WatchEndpointsResponse {
+		events := []*registrarv1.WatchEndpointsResponse{{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+			ServiceName: req.GetServiceName(),
+			Protocol:    req.GetProtocol(),
+			Endpoint:    req.GetEndpoint(),
+		}}
+		version, transitions := s.snapshot.Apply(events)
+		return stampVersion(append(events, transitions...), version)
+	})
 	s.metrics.snapshotState(ctx, s.snapshot.State())
-	s.broadcaster.Broadcast(events)
 
 	return &registrarv1.RegisterEndpointResponse{}, nil
 }
@@ -160,30 +157,23 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 		}
 	}
 
-	// Build removal events.
-	events := make([]*registrarv1.WatchEndpointsResponse, 0, len(ips))
-	for _, ip := range ips {
-		events = append(events, &registrarv1.WatchEndpointsResponse{
-			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
-			ServiceName: req.GetServiceName(),
-			Endpoint:    &registryv1.ServiceEndpoint{Ip: ip},
-		})
-	}
-	version, transitions := s.snapshot.Apply(events)
-	events = append(events, transitions...)
-	for _, e := range events {
-		e.Version = version
-	}
+	// The request names no protocol, and both the snapshot and the agents key
+	// an endpoint by (service, protocol, ip): the removal is resolved against
+	// the snapshot, one REMOVED event per protocol each IP is actually held
+	// under (#1206). An IP the snapshot does not hold yields no event.
+	s.broadcaster.Publish(func() []*registrarv1.WatchEndpointsResponse {
+		events, version, transitions := s.snapshot.RemoveIPs(req.GetServiceName(), ips)
+		return stampVersion(append(events, transitions...), version)
+	})
 	s.metrics.snapshotState(ctx, s.snapshot.State())
-	s.broadcaster.Broadcast(events)
 
 	return &registrarv1.UnregisterEndpointResponse{}, nil
 }
 
-// WatchEndpoints streams endpoint events to the agent. It first sends a full
-// snapshot (unless the client's last_version names the current contents -- see
-// Snapshot.WatchStart), then
-// forwards incremental events from the broadcaster. A request filter scopes
+// WatchEndpoints streams endpoint events to the agent. It subscribes to the
+// broadcaster, then sends a full snapshot (unless the client's last_version
+// names the current contents -- see Snapshot.WatchStart), then forwards the
+// incremental events buffered since the subscription and every later one. A request filter scopes
 // both the snapshot and the incremental events to the named services
 // (demand-scoped distribution): the agent re-asserts its filter on every
 // reconnect, and an unset filter preserves the full watch.
@@ -198,10 +188,28 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 		return err
 	}
 
+	// Subscribe BEFORE reading the snapshot, and with publications excluded
+	// (#1205): a batch broadcast while the initial exchange is on the wire
+	// buffers on ch and follows the marker, instead of finding no subscription
+	// and being lost on this stream until an unrelated event touches its
+	// service. Excluding publications makes every batch either part of the
+	// snapshot read here or delivered on ch, never both, so no batch whose
+	// version predates the snapshot's can reach the client after the marker and
+	// move its resume token back (see Broadcaster.SubscribeWith).
+	//
 	// The resume decision and the state it is made against are one critical
 	// section: a sync landing between them must not make a current client
 	// look stale, or a stale one current.
-	events, catalog, currentVersion, resume := s.snapshot.WatchStart(req.GetLastVersion(), filterSet)
+	var (
+		events         []*registrarv1.WatchEndpointsResponse
+		catalog        []string
+		currentVersion string
+		resume         Resume
+	)
+	ch := s.broadcaster.SubscribeWith(watcherID, filterServices, func() {
+		events, catalog, currentVersion, resume = s.snapshot.WatchStart(req.GetLastVersion(), filterSet)
+	})
+	defer s.broadcaster.Unsubscribe(watcherID, ch)
 	s.metrics.watchStarted(stream.Context(), resume)
 	if resume == ResumeResend {
 		if err := sendFilteredSnapshot(stream, events, filterSet); err != nil {
@@ -232,10 +240,18 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 		return fmt.Errorf("failed to send snapshot-complete event: %w", err)
 	}
 
-	// Subscribe and stream incremental events (fan-out indexed by service).
-	ch := s.broadcaster.Subscribe(watcherID, filterServices)
-	defer s.broadcaster.Unsubscribe(watcherID, ch)
+	// Stream the incremental events buffered since the subscription, then
+	// live ones (fan-out indexed by service).
 	return streamEvents(stream, ch)
+}
+
+// stampVersion sets version on every event of a batch and returns it. The
+// broadcaster keeps it only on each watcher's last event of the batch (#1203).
+func stampVersion(events []*registrarv1.WatchEndpointsResponse, version string) []*registrarv1.WatchEndpointsResponse {
+	for _, e := range events {
+		e.Version = version
+	}
+	return events
 }
 
 // watcherIDOf keys a watch stream: one per cluster and node, and per agent
