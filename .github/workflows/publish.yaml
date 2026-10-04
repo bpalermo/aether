@@ -90,7 +90,7 @@ jobs:
         # hosted executor pool and reuses the cache warmed by PR `ci` builds.
         run: |
           bazel build --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //...
-      # Acceptance guard for #651 and #653. //tools/buildid:release_build_ids
+      # Acceptance guard for #651 and #653. //bazel/buildid:release_build_ids
       # fails the build unless every binary that ships in a released image
       # carries a GNU build-ID that (a) is present, (b) equals the SHA-1
       # recomputed from that binary's own bytes, and (c) is shared with no other
@@ -100,9 +100,9 @@ jobs:
       - name: Verify released GNU build-IDs
         run: |
           bazel build --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
-            //tools/buildid:release_build_ids
+            //bazel/buildid:release_build_ids
           echo "per-binary GNU build-IDs (content-derived, pairwise distinct):"
-          cat bazel-bin/tools/buildid/release_build_ids.txt
+          cat bazel-bin/bazel/buildid/release_build_ids.txt
       # Images first, then the charts that reference them by digest.
       #
       # `<chart>.push_images` (rules_helm) pushes every image a chart's `images`
@@ -146,11 +146,11 @@ jobs:
       - name: Build cosign (Bazel-pinned, local)
         # cosign comes from the rules_img_signer_cosign bazel_dep (MODULE.bazel):
         # the official release binary for this runner, sha256-pinned in that
-        # module's lock (v3.1.2 at 0.0.1). //tools/cosign runs it. This replaces
+        # module's lock (v3.1.2 at 0.0.1). //bazel/cosign runs it. This replaces
         # sigstore/cosign-installer, whose action pin also pinned the binary --
         # here the pin is the MODULE.bazel.lock entry, reviewed like any other
         # dependency bump, and the same binary signs here, verifies below and in
-        # publish-verify.yaml, and is what `bazel run //tools/cosign` gives a
+        # publish-verify.yaml, and is what `bazel run //bazel/cosign` gives a
         # workstation. Bumping cosign is bumping that bazel_dep.
         #
         # LOCAL, deliberately: no --config=remote on these invocations, so the
@@ -162,7 +162,7 @@ jobs:
         # --incompatible_strict_action_env and --action_env only shape BUILD
         # actions, never the run. Built once here so a fetch failure is its own
         # red step rather than a mid-loop one.
-        run: bazel build //tools/cosign
+        run: bazel build //bazel/cosign
 
       # Sign every published image, keyless.
       #
@@ -277,7 +277,7 @@ jobs:
             fi
 
             echo "signing ${REGISTRY_HOST}/${repo}@${digest} (from ${tag})"
-            bazel run //tools/cosign -- sign --yes --recursive "${REGISTRY_HOST}/${repo}@${digest}"
+            bazel run //bazel/cosign -- sign --yes --recursive "${REGISTRY_HOST}/${repo}@${digest}"
             # Hand the EXACT reference to the verify step. It must not re-resolve
             # the list itself: a second copy of the repo list can drift from this
             # one, and re-resolving a tag would let verify pass against something
@@ -332,4 +332,4 @@ jobs:
           # reads without opening the script.
           CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
           CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-            bazel run //tools/cosign:verify_image_signatures -- --file signed-images.txt
+            bazel run //bazel/cosign:verify_image_signatures -- --file signed-images.txt

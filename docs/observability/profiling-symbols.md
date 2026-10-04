@@ -9,10 +9,10 @@ A release that rebuilds a binary changes that binary's build ID, so Pyroscope no
 knows how to symbolise it until a matching blob arrives.
 
 > **Since #651/#653 the ID is a hash of the binary's own content, not of the release.**
-> Every Go ELF that enters an image — the six binaries `//tools/buildid:release_build_ids`
+> Every Go ELF that enters an image — the six binaries `//bazel/buildid:release_build_ids`
 > guards, plus the readiness probers that ride along as extra layers — gets
 > `sha1(its own bytes)` written into `.note.gnu.build-id` by
-> `//tools/buildid`, and the custom Envoy gets lld's
+> `//bazel/buildid`, and the custom Envoy gets lld's
 > `--build-id=sha1` over the linked output. So a binary that a release leaves
 > **byte-identical keeps its build ID**, its already-uploaded symbols stay correct, and
 > the sync job skips it. "Every release mints new build IDs" used to be literally true —
@@ -192,7 +192,7 @@ going hex while every other component stays fine. The sync job alerts on this
 Three build-time gates keep the *inputs* to symbolisation honest. They cannot know about
 `targets.tsv`, but they make "the binary is unsymbolisable" impossible:
 
-- **`//tools/buildid:release_build_ids`** — fails the build if any released binary lacks
+- **`//bazel/buildid:release_build_ids`** — fails the build if any released binary lacks
   a build-ID note, carries one that is not the hash of its own bytes, or shares an ID
   with another released binary. That collision is why the rule exists: before #653 one
   commit produced seven ELFs sharing a single stamped ID, and Pyroscope resolved all of

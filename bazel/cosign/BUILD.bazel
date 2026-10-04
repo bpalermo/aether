@@ -14,7 +14,7 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 _COSIGN = "@rules_img_signer_cosign//cosign"
 
-# bazel run //tools/cosign -- <args>
+# bazel run //bazel/cosign -- <args>
 sh_binary(
     name = "cosign",
     srcs = ["cosign.sh"],
@@ -24,7 +24,7 @@ sh_binary(
     deps = ["@bazel_tools//tools/bash/runfiles"],
 )
 
-# bazel run //tools/cosign:verify_image_signatures -- <registry/repo@digest>... | --file <refs>
+# bazel run //bazel/cosign:verify_image_signatures -- <registry/repo@digest>... | --file <refs>
 sh_binary(
     name = "verify_image_signatures",
     srcs = ["verify_image_signatures.sh"],

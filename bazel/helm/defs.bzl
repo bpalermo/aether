@@ -351,7 +351,7 @@ flat `chart-<name>` prefix (//bazel/img:registry.bzl): `chart-aether`, and
 and udsecho IMAGE repositories. So this writes exactly the artifact `helm push`
 writes -- the packaged .tgz as an
 `application/vnd.cncf.helm.chart.content.v1.tar+gzip` layer and Chart.yaml (as
-JSON, //tools/chartconfig) as the `application/vnd.cncf.helm.config.v1+json`
+JSON, //bazel/chartconfig) as the `application/vnd.cncf.helm.config.v1+json`
 config -- with `oras push <repository>:<chart version>`, and
 `helm pull oci://<repository> --version <chart version>` reads it back like any
 helm-pushed chart.
@@ -381,12 +381,12 @@ time, never pushed. Registry credentials come from the Docker config, which
             mandatory = True,
         ),
         "_chartconfig": attr.label(
-            default = Label("//tools/chartconfig"),
+            default = Label("//bazel/chartconfig"),
             executable = True,
             cfg = "exec",
         ),
         "_oras": attr.label(
-            default = Label("//tools/oras:oras_bin"),
+            default = Label("//bazel/oras:oras_bin"),
             executable = True,
             allow_single_file = True,
             cfg = "target",

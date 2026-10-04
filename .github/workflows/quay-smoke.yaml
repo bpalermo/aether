@@ -64,7 +64,7 @@ jobs:
           repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
           cache-save: false
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
-        run: scripts/ci-bazel-warmup.sh --config=remote //e2e/l4echo:smoke_push //tools/cosign //tools/cosign:verify_image_signatures
+        run: scripts/ci-bazel-warmup.sh --config=remote //e2e/l4echo:smoke_push //bazel/cosign //bazel/cosign:verify_image_signatures
       - name: Log in to quay.io (robot)
         uses: docker/login-action@v4
         with:
@@ -86,7 +86,7 @@ jobs:
         run: scripts/quay-smoke.sh push
 
       - name: Build cosign (Bazel-pinned, local)
-        run: bazel build //tools/cosign
+        run: bazel build //bazel/cosign
 
       # cosign sign --recursive by digest, then the signature layout of the
       # index and every child read back from the registry (referrers API + both
@@ -94,7 +94,7 @@ jobs:
       - name: Sign (keyless) and read the signature layout
         run: scripts/quay-smoke.sh sign
 
-      # //tools/cosign:verify_image_signatures on the index AND every child, as
+      # //bazel/cosign:verify_image_signatures on the index AND every child, as
       # ^https://github.com/<repo>/.github/workflows/quay-smoke.yaml@refs/heads/main$,
       # then the signing certificate's SAN, read from the sigstore bundle
       # (`cosign download signature` + openssl; cosign v3's verify JSON has no

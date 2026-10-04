@@ -155,7 +155,7 @@ write `<base>/aether`, and Quay has no nested repositories to hold
 `charts/aether` (and a bare `prober` / `udsecho` would collide with those
 images). `chart_push` (`//bazel/helm:defs.bzl`) writes the identical artifact —
 the packaged `.tgz` as the helm chart-content layer, `Chart.yaml` as the helm
-config — with the pinned `oras` (`//tools/oras`) to the repository it names, so
+config — with the pinned `oras` (`//bazel/oras`) to the repository it names, so
 `helm pull oci://quay.io/aethermesh/chart-aether --version <v>` reads it like any
 helm-pushed chart.
 

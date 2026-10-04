@@ -14,12 +14,12 @@
 #
 # USAGE
 #
-#   bazel run //tools/cosign:verify_image_signatures -- <ref> [<ref>...]
-#   bazel run //tools/cosign:verify_image_signatures -- --file <refs, one per line>
+#   bazel run //bazel/cosign:verify_image_signatures -- <ref> [<ref>...]
+#   bazel run //bazel/cosign:verify_image_signatures -- --file <refs, one per line>
 #
 # That is how CI runs it and how to run it by hand: the target exports COSIGN as
 # the Bazel-pinned cosign (the rules_img_signer_cosign bazel_dep's release
-# binary, sha256-pinned in its lock; `bazel run //tools/cosign -- version`), so
+# binary, sha256-pinned in its lock; `bazel run //bazel/cosign -- version`), so
 # every verify uses the same cosign as the signer. Relative paths resolve
 # against your working directory. The script still runs standalone:
 #
@@ -42,7 +42,7 @@
 # ENVIRONMENT
 #
 #   COSIGN               cosign binary (default: `cosign` on PATH). Set by
-#                        //tools/cosign:verify_image_signatures to the pinned
+#                        //bazel/cosign:verify_image_signatures to the pinned
 #                        v3.1.2; a standalone run uses whatever you point it at.
 #   CERT_IDENTITY_REGEXP certificate identity; default is publish.yaml on
 #                        ${GITHUB_REPOSITORY:-bpalermo/aether}, any ref.

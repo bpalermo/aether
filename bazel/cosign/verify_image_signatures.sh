@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `bazel run //tools/cosign:verify_image_signatures -- <ref>... | --file <refs>`
+# `bazel run //bazel/cosign:verify_image_signatures -- <ref>... | --file <refs>`
 #
 # scripts/verify-image-signatures.sh with COSIGN pointed at the Bazel-pinned
 # cosign (see cosign.sh next to this file), so the verify in CI and a verify by

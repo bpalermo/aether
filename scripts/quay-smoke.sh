@@ -32,7 +32,7 @@
 #   push       bazel run //e2e/l4echo:smoke_push; digest; created?; public?
 #   sign       cosign sign --recursive by digest; signature layout of the index
 #              and every child, read from the registry (referrers + both tags)
-#   verify     //tools/cosign:verify_image_signatures (index AND children) with
+#   verify     //bazel/cosign:verify_image_signatures (index AND children) with
 #              this workflow's identity; the signing certificate's SAN, read
 #              from the sigstore bundle (`cosign download signature` + openssl)
 #   cleanup    delete the run's tag and any cosign fallback tags it produced;
@@ -280,7 +280,7 @@ cmd_sign() {
 	esac
 
 	echo "signing ${ref} (--recursive: the index and every child)"
-	if ! (cd "$repo_root" && COSIGN_YES=true "$bazel" run //tools/cosign -- sign --yes --recursive "$ref"); then
+	if ! (cd "$repo_root" && COSIGN_YES=true "$bazel" run //bazel/cosign -- sign --yes --recursive "$ref"); then
 		put SMOKE_SIGN failed
 		err "cosign sign failed for ${ref}"
 		exit 1
@@ -328,7 +328,7 @@ cmd_verify() {
 	echo "verifying ${ref} (index and every child) as ${identity}"
 	(cd "$repo_root" && CERT_IDENTITY_REGEXP="$identity" \
 		CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-		"$bazel" run //tools/cosign:verify_image_signatures -- "$ref") || rc=$?
+		"$bazel" run //bazel/cosign:verify_image_signatures -- "$ref") || rc=$?
 	if [ "$rc" -ne 0 ]; then
 		put SMOKE_VERIFY "failed (exit ${rc})"
 		err "verify_image_signatures failed for ${ref} (exit ${rc})"
@@ -345,7 +345,7 @@ cmd_verify() {
 	local dl
 	dl="$(mktemp)"
 	san=""
-	if (cd "$repo_root" && "$bazel" run //tools/cosign -- download signature "$ref") >"$dl" 2>/dev/null; then
+	if (cd "$repo_root" && "$bazel" run //bazel/cosign -- download signature "$ref") >"$dl" 2>/dev/null; then
 		san="$(bundle_sans "$dl")" || san=""
 	fi
 	rm -f "$dl"
