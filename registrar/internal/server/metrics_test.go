@@ -88,6 +88,7 @@ func TestMetrics_NilReceiverSafe(t *testing.T) {
 	m.syncCompleted(ctx, 0.1, State{Generation: 1}, map[string]int{"EVENT_TYPE_ENDPOINT_ADDED": 1})
 	m.syncFailed(ctx, 0.1)
 	m.snapshotState(ctx, State{Generation: 7})
+	m.watchStarted(ctx, true)
 	if err := m.ObserveSnapshot(NewSnapshot(), nil); err != nil {
 		t.Errorf("ObserveSnapshot on nil metrics = %v, want nil", err)
 	}
@@ -246,5 +247,41 @@ func TestMetrics_ObserveSnapshotWithoutRevisions(t *testing.T) {
 	}
 	if got := collectGaugePoints(t, reader, "aether.registrar.snapshot.content"); len(got) != 1 {
 		t.Errorf("snapshot.content series = %d, want 1", len(got))
+	}
+}
+
+// TestMetrics_WatchStarts: every watch start is counted once, labelled by
+// whether it resent the snapshot.
+func TestMetrics_WatchStarts(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	snap := NewSnapshot()
+	snap.DiffAndReplaceAt(listing(map[string][]string{"ns/a": {"10.0.0.1"}}), Origin{Revision: 4})
+	s := NewRegistrarServer(&flakyRegistry{}, snap, NewBroadcaster(slog.New(slog.DiscardHandler), nil), "127.0.0.1:0", slog.New(slog.DiscardHandler), m)
+	synced := make(chan struct{})
+	close(synced)
+	s.GateOnSync(synced)
+
+	reconnect(t, s, "")
+	reconnect(t, s, "4")
+	reconnect(t, s, "4")
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	got := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, mt := range sm.Metrics {
+			if mt.Name != "aether.registrar.watch.starts" {
+				continue
+			}
+			for _, dp := range mt.Data.(metricdata.Sum[int64]).DataPoints {
+				v, _ := dp.Attributes.Value(attrResume)
+				got[v.AsString()] += dp.Value
+			}
+		}
+	}
+	if got["resent"] != 1 || got["current"] != 2 {
+		t.Errorf("watch.starts = %v, want resent=1 current=2", got)
 	}
 }

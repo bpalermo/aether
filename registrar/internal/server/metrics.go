@@ -68,6 +68,7 @@ type Metrics struct {
 	wbFlushFailures metric.Int64Counter
 	wbDrops         metric.Int64Counter
 	wbShields       metric.Int64Counter
+	watchStarts     metric.Int64Counter
 }
 
 // syncDurationBuckets are the explicit boundaries, in SECONDS, for
@@ -140,7 +141,32 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, fmt.Errorf("writebehind shields: %w", err)
 	}
 
+	if m.watchStarts, err = meter.Int64Counter("aether.registrar.watch.starts",
+		metric.WithDescription("Agent watch streams opened, by whether the full snapshot was sent (resume=resent) or the agent's last_version named the current contents (resume=current)")); err != nil {
+		return nil, fmt.Errorf("watch starts: %w", err)
+	}
+
 	return m, nil
+}
+
+// attrResume labels a watch start by its resume outcome. Two values.
+const attrResume = attribute.Key("resume")
+
+var (
+	resumeResent  = metric.WithAttributes(attrResume.String("resent"))
+	resumeCurrent = metric.WithAttributes(attrResume.String("current"))
+)
+
+// watchStarted counts a watch start by whether it resent the snapshot.
+func (m *Metrics) watchStarted(ctx context.Context, resent bool) {
+	if m == nil {
+		return
+	}
+	if resent {
+		m.watchStarts.Add(ctx, 1, resumeResent)
+		return
+	}
+	m.watchStarts.Add(ctx, 1, resumeCurrent)
 }
 
 func (m *Metrics) watcherSubscribed(ctx context.Context) {

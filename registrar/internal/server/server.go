@@ -202,6 +202,7 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 	// section: a sync landing between them must not make a current client
 	// look stale, or a stale one current.
 	events, catalog, currentVersion, current := s.snapshot.WatchStart(req.GetLastVersion(), filterSet)
+	s.metrics.watchStarted(stream.Context(), !current)
 	if !current {
 		if err := sendFilteredSnapshot(stream, events, filterSet); err != nil {
 			return err

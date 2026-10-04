@@ -140,13 +140,24 @@ type Snapshot struct {
 	generation uint64
 	// version is the cached formatVersion of the fields above. Guarded by mu.
 	version string
+	// cleanHashes remembers the content hash of the last cleanHistory clean
+	// revisions this replica installed, oldest first in cleanOrder, so a client
+	// holding a clean "<rev>" token is recognized as current after the revision
+	// moved without a content change (an agent's re-assert re-Puts what etcd
+	// already holds). Guarded by mu.
+	cleanHashes map[int64]string
+	cleanOrder  []int64
 }
+
+// cleanHistory bounds Snapshot.cleanHashes.
+const cleanHistory = 64
 
 // NewSnapshot creates an empty Snapshot at generation 0.
 func NewSnapshot() *Snapshot {
 	s := &Snapshot{
 		entries:       make(map[serviceKey]*snapshotEntry),
 		serviceCounts: make(map[string]int),
+		cleanHashes:   make(map[int64]string),
 	}
 	s.contentHash = s.computeContentHashLocked()
 	s.version = formatVersion(0, false, s.contentHash)
@@ -268,9 +279,12 @@ func (s *Snapshot) stateLocked() State {
 }
 
 // currentLocked reports whether a client presenting token holds the current
-// contents: the token is the current version, or it embeds the current content
+// contents: the token is the current version; or it embeds the current content
 // hash (a "<rev>+<h>" or "hash:<h>" token taken before a sync re-derived the
-// same contents at a newer revision). Caller must hold mu.
+// same contents at a newer revision); or it is a clean "<rev>" this replica
+// installed with the current content hash. A clean revision names one listing
+// on every replica, so a token issued by another replica at that revision is
+// recognized too, provided this one installed it. Caller must hold mu.
 func (s *Snapshot) currentLocked(token string) bool {
 	if token == "" {
 		return false
@@ -278,8 +292,28 @@ func (s *Snapshot) currentLocked(token string) bool {
 	if token == s.version {
 		return true
 	}
-	h, ok := versionContentHash(token)
-	return ok && h == s.contentHash
+	if h, ok := versionContentHash(token); ok {
+		return h == s.contentHash
+	}
+	if rev, err := strconv.ParseInt(token, 10, 64); err == nil {
+		h, ok := s.cleanHashes[rev]
+		return ok && h == s.contentHash
+	}
+	return false
+}
+
+// rememberCleanLocked records that the listing at rev has hash h. Caller must
+// hold mu for writing.
+func (s *Snapshot) rememberCleanLocked(rev int64, h string) {
+	if _, seen := s.cleanHashes[rev]; seen {
+		return
+	}
+	s.cleanHashes[rev] = h
+	s.cleanOrder = append(s.cleanOrder, rev)
+	if len(s.cleanOrder) > cleanHistory {
+		delete(s.cleanHashes, s.cleanOrder[0])
+		s.cleanOrder = s.cleanOrder[1:]
+	}
 }
 
 // GetAll returns all endpoints organized by service name. The caller receives
@@ -455,6 +489,9 @@ func (s *Snapshot) replaceLocked(endpoints map[string]map[registryv1.Service_Pro
 	s.revision = origin.Revision
 	s.dirty = origin.Revision > 0 && origin.Overlaid
 	s.refreshLocked(false)
+	if s.revision > 0 && !s.dirty {
+		s.rememberCleanLocked(s.revision, s.contentHash)
+	}
 	return s.version, computeTransitions(oldServices, newServices)
 }
 

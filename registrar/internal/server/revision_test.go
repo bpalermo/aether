@@ -354,6 +354,29 @@ func TestWatchEndpoints_ResumeDecision(t *testing.T) {
 			"the marker must echo the token, or the agent swaps in an empty catalog replay")
 	})
 
+	t.Run("clean token, revision moved without a content change: current", func(t *testing.T) {
+		// An agent's re-assert after a reconnect re-Puts endpoints etcd already
+		// holds: the revision moves, the contents do not. A token naming the
+		// earlier revision still names the current contents.
+		snap := NewSnapshot()
+		snap.DiffAndReplaceAt(two, Origin{Revision: 30})
+		snap.DiffAndReplaceAt(two, Origin{Revision: 34})
+		require.Equal(t, "34", snap.Version())
+		sent := watchOnce(t, snap, "30")
+		require.Len(t, sent, 1, "same contents at a newer revision: no resend")
+		assert.Equal(t, "30", sent[0].GetVersion())
+
+		// ...but not once the contents changed since.
+		snap.DiffAndReplaceAt(listing(map[string][]string{"ns/a": {"10.0.0.1"}}), Origin{Revision: 35})
+		sent = watchOnce(t, snap, "30")
+		assert.Equal(t, 1, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT))
+
+		// ...nor for a revision this replica never installed.
+		snap.DiffAndReplaceAt(two, Origin{Revision: 36})
+		sent = watchOnce(t, snap, "33")
+		assert.Equal(t, 2, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT))
+	})
+
 	t.Run("pre-#1193 counter token: full snapshot", func(t *testing.T) {
 		snap := NewSnapshot()
 		snap.DiffAndReplace(two)
