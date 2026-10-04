@@ -1,5 +1,5 @@
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_template_absent_test")
 load("//bazel/img:registry.bzl", "chart_registry_url")
 
 # prober Helm chart (published to chart_registry_url("prober"); see //bazel/img:registry.bzl).
@@ -36,4 +36,47 @@ helm_lint_test(
 helm_template_test(
     name = "prober_template_test",
     chart = ":prober",
+)
+
+# 2026-10-04 (aether agent OOMKills): GOMEMLIMIT must sit BELOW the cgroup
+# limit, never equal to it (`resourceFieldRef: limits.memory` was the whole
+# limit). prober.goMemLimit renders 90% as an integer byte count, pinned
+# exactly: 64Mi = 67108864 -> 60397977; 128Mi = 134217728 -> 120795955.
+helm_template_test(
+    name = "prober_gomemlimit_test",
+    chart = ":prober",
+    template_patterns = {
+        "prober/templates/daemonset.yaml": [
+            "limits:\\n\\s+memory: 64Mi\\n",
+            "- name: GOMEMLIMIT\\n\\s+value: \"60397977\"\\n",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "prober_gomemlimit_override_test",
+    chart = ":prober",
+    opts = [
+        "--set",
+        "resources.limits.memory=128Mi",
+    ],
+    template_patterns = {
+        "prober/templates/daemonset.yaml": [
+            "- name: GOMEMLIMIT\\n\\s+value: \"120795955\"\\n",
+        ],
+    },
+)
+
+helm_template_absent_test(
+    name = "prober_gomemlimit_no_limit_test",
+    absent = [
+        "name: GOMEMLIMIT",
+        "resource: limits.memory",
+    ],
+    chart = ":prober",
+    control = "name: OTEL_RESOURCE_ATTRIBUTES",
+    opts = [
+        "--set",
+        "resources.limits.memory=null",
+    ],
 )

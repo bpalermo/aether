@@ -20,6 +20,47 @@ registrar and controller objects get distinct names within one release.
 {{- default .Release.Namespace .Values.namespace.name -}}
 {{- end -}}
 
+{{/*
+GOMEMLIMIT for a Go container, as an integer byte count: 90% of the container's
+memory limit. Takes the container's `resources` dict; renders "" (the caller
+omits the env var) when no memory limit is set.
+
+Never the limit itself. `resourceFieldRef: limits.memory` (divisor 1) handed the
+Go runtime the WHOLE cgroup, so the heap could grow to the limit before the GC
+tightened, leaving nothing for everything else charged to the same cgroup: exec
+probe processes (proposal 041), runc's exec helper, kernel socket buffers, page
+cache. The 2026-10-04 agent OOMKills were exactly that.
+
+Accepts plain or decimal numbers (`128Mi`, `1.5Gi`, `134217728`) with the
+Ki/Mi/Gi/Ti and k/M/G/T suffixes; anything else fails the render rather than
+silently dropping the limit.
+Usage:
+  {{- with include "aether.goMemLimit" .Values.agent.resources }}
+  - name: GOMEMLIMIT
+    value: {{ . | quote }}
+  {{- end }}
+*/}}
+{{- define "aether.goMemLimit" -}}
+{{- $q := dig "limits" "memory" "" (default (dict) .) -}}
+{{- if $q -}}
+{{- $s := "" -}}
+{{- if or (kindIs "float64" $q) (kindIs "int" $q) (kindIs "int64" $q) -}}
+{{- $s = int64 $q | toString -}}
+{{- else -}}
+{{- $s = toString $q | trim -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$" $s) -}}
+{{- fail (printf "cannot derive GOMEMLIMIT from resources.limits.memory %q: use a number with an optional Ki/Mi/Gi/Ti or k/M/G/T suffix" $s) -}}
+{{- end -}}
+{{- $units := dict "" 1 "Ki" 1024 "Mi" 1048576 "Gi" 1073741824 "Ti" 1099511627776 "k" 1000 "M" 1000000 "G" 1000000000 "T" 1000000000000 -}}
+{{- $n := regexReplaceAll "^([0-9.]+).*$" $s "${1}" | float64 -}}
+{{- $unit := regexReplaceAll "^[0-9.]+" $s "" -}}
+{{- /* x9 first, then /10: exact in float64 for any realistic limit, so an
+       exact 90% is never floored one byte low. */}}
+{{- divf (mulf $n (get $units $unit) 9) 10 | floor | int64 -}}
+{{- end -}}
+{{- end -}}
+
 {{/* Chart label value (name-version). */}}
 {{- define "aether.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
