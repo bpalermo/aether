@@ -215,11 +215,12 @@ spec:
                 fieldRef:
                   apiVersion: v1
                   fieldPath: spec.nodeName
+            {{- /* 90% of limits.memory, never 100%: the exec probes above run
+                   inside this container's cgroup (aether.goMemLimit). */}}
+            {{- with include "aether.goMemLimit" .Values.agent.resources }}
             - name: GOMEMLIMIT
-              valueFrom:
-                resourceFieldRef:
-                  resource: limits.memory
-                  divisor: "1"
+              value: {{ . | quote }}
+            {{- end }}
             {{- /* #1116: explicit, not derived from limits.cpu -- the agent has
                    no CPU limit by default (values.yaml agent.resources). 0/empty
                    omits it so the Go runtime picks GOMAXPROCS itself. */}}

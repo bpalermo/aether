@@ -73,7 +73,7 @@ telemetry:
 #
 # Hence: a request that reflects real demand, and NO CPU limit. The workload is
 # open-loop and rate-bounded (probe.rate × number of targets) so it cannot run away.
-# The memory limit stays — it also feeds GOMEMLIMIT. Re-add limits.cpu here only with a
+# The memory limit stays — GOMEMLIMIT is rendered at 90% of it. Re-add limits.cpu here only with a
 # quota that cannot bind (>= 1), never a fraction of a core.
 resources:
   requests:

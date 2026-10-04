@@ -29,6 +29,33 @@ Namespace the chart deploys into. Defaults to the release namespace.
 {{- end -}}
 
 {{/*
+GOMEMLIMIT as an integer byte count: 90% of the container's memory limit (a
+copy of the aether chart's aether.goMemLimit; the charts are packaged
+separately). Takes the container's `resources` dict; renders "" (the caller
+omits the env var) when no memory limit is set. Never the limit itself: a
+`resourceFieldRef: limits.memory` hands the Go heap the whole cgroup and leaves
+nothing for the rest of it (the 2026-10-04 agent OOMKills).
+*/}}
+{{- define "prober.goMemLimit" -}}
+{{- $q := dig "limits" "memory" "" (default (dict) .) -}}
+{{- if $q -}}
+{{- $s := "" -}}
+{{- if or (kindIs "float64" $q) (kindIs "int" $q) (kindIs "int64" $q) -}}
+{{- $s = int64 $q | toString -}}
+{{- else -}}
+{{- $s = toString $q | trim -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$" $s) -}}
+{{- fail (printf "cannot derive GOMEMLIMIT from resources.limits.memory %q: use a number with an optional Ki/Mi/Gi/Ti or k/M/G/T suffix" $s) -}}
+{{- end -}}
+{{- $units := dict "" 1 "Ki" 1024 "Mi" 1048576 "Gi" 1073741824 "Ti" 1099511627776 "k" 1000 "M" 1000000 "G" 1000000000 "T" 1000000000000 -}}
+{{- $n := regexReplaceAll "^([0-9.]+).*$" $s "${1}" | float64 -}}
+{{- $unit := regexReplaceAll "^[0-9.]+" $s "" -}}
+{{- divf (mulf $n (get $units $unit) 9) 10 | floor | int64 -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 ServiceAccount name.
 */}}
 {{- define "prober.serviceAccountName" -}}

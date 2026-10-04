@@ -340,7 +340,10 @@ agent:
     # relaunching the 16.9Mi daemon every 15s, which was ~3-4% of this container's
     # CPU in runc/libcontainer exec and Go package init. The resident resolver is
     # ~12-15Mi RSS and a stdlib stat is a rounding error. These are conservative for
-    # that footprint; revisit against live usage if needed.
+    # that footprint; revisit against live usage if needed. The probe process runs
+    # inside THIS container's cgroup and counts against limits.memory: ~2.4Mi max
+    # RSS per run (the same stat-a-marker binary as /proxy-ready, measured at 500
+    # runs). This daemon sets no GOMEMLIMIT.
     resources:
       requests:
         cpu: 25m
@@ -373,20 +376,36 @@ agent:
   #
   # Trade-off, stated plainly: with no CPU limit (limits != requests) the agent
   # pod is QoS class Burstable, not Guaranteed. That moves it up the kubelet's
-  # node-pressure eviction order (memory request = limit is kept, so it is only
-  # evicted after BestEffort pods and Burstable pods exceeding their requests)
-  # and makes it ineligible for exclusive cores under the CPU manager's static
-  # policy. An operator who needs Guaranteed sets limits.cpu equal to
-  # requests.cpu, and should raise BOTH to at least 1000m so the quota is not the
-  # bottleneck again.
+  # node-pressure eviction order (while its usage stays under requests.memory it
+  # is only evicted after BestEffort pods and Burstable pods exceeding their
+  # requests) and makes it ineligible for exclusive cores under the CPU manager's
+  # static policy. An operator who needs Guaranteed sets limits.cpu equal to
+  # requests.cpu AND requests.memory equal to limits.memory, and should raise the
+  # CPU to at least 1000m so the quota is not the bottleneck again.
   #
-  # Memory: request = limit, unchanged. GOMEMLIMIT is derived from limits.memory.
+  # Memory: 96Mi request / 128Mi limit (was 64Mi / 64Mi until chart 2.4.2). The
+  # 2026-10-04 soak OOMKilled agents (exit 137, 3 kills on 2 of 5 nodes within
+  # ~1 h of churn) at 64Mi: Go runtime memory (go_memory_used_bytes) is 44-61Mi
+  # under soak load -- no leak, the same as the passing 10-03 soak -- and the
+  # cgroup has to hold more than the Go runtime:
+  #   - the EXEC probes (proposal 041, chart 2.3.0): every /agent-ready run is a
+  #     process inside THIS container's cgroup, readiness every 2s and liveness
+  #     every 10s, so two can overlap. Measured: 3.0Mi max RSS per run (2.8Mi
+  #     p50; 500 runs of the static linux_amd64 image binary against a dummy
+  #     socket under /usr/bin/time), plus runc's short-lived exec helper;
+  #   - kernel socket buffers and the page cache of the files the agent writes.
+  # GOMEMLIMIT is rendered at 90% of limits.memory (115.2Mi of 128Mi, the
+  # aether.goMemLimit helper), never 100%: a Go limit equal to the cgroup limit
+  # let the heap fill the whole cgroup before the GC tightened, which is what the
+  # probe processes tipped over. Remove limits.memory and GOMEMLIMIT is omitted.
+  # Surge rolls (updateStrategy.surge) run two agents per node for the overlap:
+  # budget 2 x 200m / 96Mi of node requests.
   resources:
     requests:
       cpu: 200m
-      memory: 64Mi
+      memory: 96Mi
     limits:
-      memory: 64Mi
+      memory: 128Mi
   # GOMAXPROCS for the agent container, set as an explicit env var (#1116).
   # Since Go 1.25 the runtime derives GOMAXPROCS from the cgroup CPU limit; with
   # the limit removed above it would scale to the node's core count, and the
@@ -653,6 +672,12 @@ proxy:
   # exists: that wait is what keeps pod delete, node drain, eviction and
   # preemption hitless.
   shutdownDrainImmediately: false
+  # The /proxy-ready exec readiness probe runs inside this container's cgroup, so
+  # each probe process counts against limits.memory alongside the supervisor and
+  # BOTH Envoy epochs during a hot restart: ~2.4Mi max RSS per run (measured, 500
+  # runs). Small next to 512Mi, but keep it in mind before trimming the limit.
+  # The supervisor sets no GOMEMLIMIT; Envoy's heap is bounded by overload
+  # (maxHeapSizeBytes, below).
   resources:
     requests:
       cpu: 500m

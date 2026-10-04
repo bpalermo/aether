@@ -190,6 +190,128 @@ helm_template_absent_test(
     ],
 )
 
+# 2026-10-04 soak: agents OOMKilled at a 64Mi limit. GOMEMLIMIT came from
+# `resourceFieldRef: limits.memory` (divisor 1) -- the WHOLE cgroup limit -- so
+# the Go heap could fill the cgroup before the GC tightened, and the /agent-ready
+# exec probe processes (proposal 041) charged to the same cgroup tipped it over.
+# GOMEMLIMIT is now a literal integer byte count at 90% of limits.memory
+# (aether.goMemLimit), pinned EXACTLY below, which is what makes it numeric and
+# strictly below the limit:
+#   agent      128Mi = 134217728 -> 120795955 (115.2Mi)
+#   agent      256Mi = 268435456 -> 241591910 (override)
+#   registrar   64Mi =  67108864 ->  60397977
+#   controller  64Mi =  67108864 ->  60397977
+#   edge       256Mi = 268435456 -> 241591910
+helm_template_test(
+    name = "aether_agent_gomemlimit_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "requests:\\n\\s+cpu: 200m\\n\\s+memory: 96Mi\\n",
+            "limits:\\n\\s+memory: 128Mi\\n",
+            "- name: GOMEMLIMIT\\n\\s+value: \"120795955\"\\n",
+        ],
+    },
+)
+
+# An operator override moves GOMEMLIMIT with the limit, still at 90%.
+helm_template_test(
+    name = "aether_agent_gomemlimit_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "agent.resources.limits.memory=256Mi",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "limits:\\n\\s+memory: 256Mi\\n",
+            "- name: GOMEMLIMIT\\n\\s+value: \"241591910\"\\n",
+        ],
+    },
+)
+
+# Decimal quantities are real Kubernetes quantities too: 1.5Gi -> 1449551462.
+helm_template_test(
+    name = "aether_agent_gomemlimit_decimal_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "agent.resources.limits.memory=1.5Gi",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- name: GOMEMLIMIT\\n\\s+value: \"1449551462\"\\n",
+        ],
+    },
+)
+
+# No memory limit: no GOMEMLIMIT (the Go runtime's default, no soft limit).
+helm_template_absent_test(
+    name = "aether_agent_gomemlimit_no_limit_test",
+    absent = [
+        "name: GOMEMLIMIT",
+    ],
+    chart = ":aether",
+    control = "name: GOMAXPROCS",
+    opts = [
+        "--show-only",
+        "templates/agent-daemonset.yaml",
+        "--set",
+        "agent.resources.limits.memory=null",
+    ],
+)
+
+# A quantity the helper cannot read fails the render instead of silently
+# shipping a container with no Go memory limit.
+helm_template_fail_test(
+    name = "aether_agent_gomemlimit_invalid_test",
+    chart = ":aether",
+    expected_message = "cannot derive GOMEMLIMIT from resources.limits.memory \"1e9\"",
+    opts = [
+        "--set",
+        "agent.resources.limits.memory=1e9",
+    ],
+)
+
+# The other Go workloads that set GOMEMLIMIT get the same 90%.
+helm_template_test(
+    name = "aether_gomemlimit_workloads_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+    template_patterns = {
+        "aether/templates/registrar-deployment.yaml": [
+            "- name: GOMEMLIMIT\\n\\s+value: \"60397977\"\\n",
+            "limits:\\n(\\s+cpu: \\S+\\n)?\\s+memory: 64Mi\\n",
+        ],
+        "aether/templates/controller-deployment.yaml": [
+            "- name: GOMEMLIMIT\\n\\s+value: \"60397977\"\\n",
+            "limits:\\n(\\s+cpu: \\S+\\n)?\\s+memory: 64Mi\\n",
+        ],
+        "aether/templates/edge-deployment.yaml": [
+            "- name: GOMEMLIMIT\\n\\s+value: \"241591910\"\\n",
+            "limits:\\n\\s+memory: 256Mi\\n",
+        ],
+    },
+)
+
+# ...and none of them hands the Go runtime the whole limit any more: the only
+# `resource: limits.memory` reference was GOMEMLIMIT's resourceFieldRef.
+helm_template_absent_test(
+    name = "aether_gomemlimit_no_resource_field_ref_test",
+    absent = [
+        "resource: limits.memory",
+    ],
+    chart = ":aether",
+    control = "name: GOMEMLIMIT",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
 # Proposal 038: the capture listeners bind with IP_TRANSPARENT, which the kernel
 # checks as CAP_NET_ADMIN in the user namespace owning the pod netns -- the init
 # userns here -- and Envoy's supportsIpTransparent() probe runs once in the HOST

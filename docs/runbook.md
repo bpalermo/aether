@@ -884,7 +884,8 @@ surge would run the new agent beside an old one, and three things go wrong:
 
 Do the node-headroom pre-flight below first. With surge each node
 briefly runs two agents, so it needs room for a second `agent.resources`
-request (200m CPU, 64Mi). The pod is `system-node-critical` and preempts if it
+request (200m CPU, 96Mi since chart 2.4.2; 64Mi before, see *The node agent
+is OOMKilled*). The pod is `system-node-critical` and preempts if it
 has to. If it cannot be placed, it stays `Pending` and the roll stalls on that
 node, visibly. Nothing breaks: the old agent keeps serving.
 
@@ -2610,6 +2611,52 @@ connectivity grid holds a reference. It is in the proxy pinned by chart **1.0.13
 (`71be75f…`, #1078). A proxy older than that is exposed on any h3 cluster removal
 with streams in flight, which includes rolling the chart back to 1.0.11 without
 pinning `proxy.image` (see "If UDP:18008 is blocked" above).
+
+### The node agent is OOMKilled (exit 137)
+
+Symptom: agent pods restart with exit code 137 and the reason is `OOMKilled`,
+typically at churn peaks (many pod ADD/DEL, snapshot rebuilds):
+
+```bash
+kubectl get pod -n aether-system -l app.kubernetes.io/component=agent \
+  -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,RESTARTS:.status.containerStatuses[0].restartCount,LAST:.status.containerStatuses[0].lastState.terminated.reason,EXIT:.status.containerStatuses[0].lastState.terminated.exitCode'
+```
+
+The check: compare the Go runtime's memory with the container limit and with
+`GOMEMLIMIT`.
+
+```bash
+# the limit and the GOMEMLIMIT the chart rendered (bytes)
+kubectl get ds -n aether-system aether-agent -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].resources.limits.memory}{"\n"}{.spec.template.spec.containers[?(@.name=="agent")].env[?(@.name=="GOMEMLIMIT")].value}{"\n"}'
+```
+
+```promql
+# peak Go runtime memory per agent over the incident window, MiB
+max by (node) (max_over_time(go_memory_used_bytes{job="aether-agent"}[1h])) / 1048576
+```
+
+Read it as follows:
+
+- `GOMEMLIMIT` must be **below** `limits.memory`. Since chart 2.4.2 the chart
+  renders it at 90 % of the limit (`aether.goMemLimit` in `_helpers.tpl`).
+  Before that it was a `resourceFieldRef` on `limits.memory`, which is the
+  whole limit: the heap could fill the cgroup before the GC tightened. If it
+  is a `valueFrom` again, or absent while a limit is set, that is the bug.
+- The cgroup holds more than the Go runtime. The exec probes (proposal 041:
+  `/agent-ready`, readiness every 2 s and liveness every 10 s) are processes
+  in the agent container's cgroup, ~3 MiB RSS each (measured), plus runc's
+  exec helper, plus kernel socket buffers and page cache. Count on ~10 MiB
+  beyond `go_memory_used_bytes`.
+- Peaks near `GOMEMLIMIT` with steady growth between churn waves point at a
+  leak: capture a heap profile (Pyroscope) before raising anything. Flat peaks
+  (the 2026-10-04 soak: 44-61 MiB per agent, the same as the passing 10-03
+  soak) mean the limit is simply too small for the load.
+
+The knobs: `agent.resources.limits.memory` (default 128Mi since 2.4.2; was
+64Mi, which the 2026-10-04 soak OOMKilled 3 times on 2 of 5 nodes within ~1 h
+of churn) and `agent.resources.requests.memory` (96Mi). `GOMEMLIMIT` follows
+the limit at 90 % with no separate setting. Raising the request also raises
+what a surge roll needs per node (see *Agent surge roll (proposal 041)*).
 
 ### The agent reports an unrepairable conflist
 
