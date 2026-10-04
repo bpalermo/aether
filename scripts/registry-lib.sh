@@ -190,8 +190,6 @@ registry_commit_tag() {
 # chart, a cosign 2 `.sig` and a cosign 3 fallback index alike. A HEAD whose
 # Accept matches none of them may be refused for a manifest that exists.
 REGISTRY_MANIFEST_ACCEPT='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
-# shellcheck disable=SC2034  # the pre-040 name, for whoever sources this file.
-GHCR_MANIFEST_ACCEPT="$REGISTRY_MANIFEST_ACCEPT"
 
 # Does ONE tag exist? `HEAD /v2/<repo>/manifests/<tag>` (#985).
 #
@@ -517,6 +515,7 @@ REGISTRY_IMAGE_COMPONENTS=(
 #
 # The chart directory name is also the chart name; its repository is
 # chart_repository(<name>) of bazel/img/registry.bzl (registry_chart_repo).
+# shellcheck disable=SC2034  # consumed by whoever sources this file.
 REGISTRY_CHARTS=(
 	aether
 	crds
@@ -567,24 +566,6 @@ for registry__c in "${REGISTRY_IMAGE_COMPONENTS[@]}"; do
 	REGISTRY_IMAGE_REPOS+=("$registry__r")
 done
 unset registry__c registry__r
-
-# The pre-040 names, for whoever sources this file.
-# shellcheck disable=SC2034
-GHCR_IMAGE_REPOS=("${REGISTRY_IMAGE_REPOS[@]}")
-# shellcheck disable=SC2034
-GHCR_CHARTS=("${REGISTRY_CHARTS[@]}")
-
-ghcr_registry_token() { registry_registry_token "$@"; }
-ghcr_all_tags() { registry_all_tags "$@"; }
-ghcr_tag_exists() { registry_tag_exists "$@"; }
-ghcr_any_tag() { registry_any_tag "$@"; }
-ghcr_manifest_digest() { registry_manifest_digest "$@"; }
-ghcr_index_children() { registry_index_children "$@"; }
-ghcr_signature_tag_legacy() { registry_signature_tag_legacy "$@"; }
-ghcr_signature_tag_bundle() { registry_signature_tag_bundle "$@"; }
-ghcr_signature_layout() { registry_signature_layout "$@"; }
-ghcr_signature_layout_direct() { registry_signature_layout_direct "$@"; }
-ghcr__json_children() { registry__json_children "$@"; }
 
 # --- internals -------------------------------------------------------------
 
