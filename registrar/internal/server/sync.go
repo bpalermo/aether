@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 
+	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	commonlog "aethermesh.dev/common/log"
 )
@@ -174,8 +175,18 @@ func (s *Syncer) sync(ctx context.Context) {
 	// erased by the replacement with no compensating REMOVED (#772, S13).
 	// The version is the listing's store revision, suffixed with the content
 	// hash when the overlay patched it (#1193); content-addressed without one.
-	events, version, transitions := s.snapshot.DiffAndReplaceAt(newState, Origin{Revision: revision, Overlaid: overlaid > 0})
-	events = append(events, transitions...)
+	//
+	// The install and its broadcast are one publication (#1205; see
+	// Broadcaster.Publish): a watch starting between them must not receive
+	// this batch both in its snapshot and, carrying an older version, after it.
+	var events []*registrarv1.WatchEndpointsResponse
+	var version string
+	s.broadcaster.Publish(func() []*registrarv1.WatchEndpointsResponse {
+		var transitions []*registrarv1.WatchEndpointsResponse
+		events, version, transitions = s.snapshot.DiffAndReplaceAt(newState, Origin{Revision: revision, Overlaid: overlaid > 0})
+		events = stampVersion(append(events, transitions...), version)
+		return events
+	})
 	state := s.snapshot.State()
 	span.SetAttributes(
 		attribute.Int("aether.sync.events", len(events)),
@@ -196,14 +207,6 @@ func (s *Syncer) sync(ctx context.Context) {
 		close(s.synced)
 	} else if len(events) > 0 {
 		s.log.DebugContext(ctx, "sync detected changes", "version", version, "events", len(events))
-	}
-
-	// Stamp version on events and broadcast.
-	if len(events) > 0 {
-		for _, event := range events {
-			event.Version = version
-		}
-		s.broadcaster.Broadcast(events)
 	}
 }
 
