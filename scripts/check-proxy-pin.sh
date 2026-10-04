@@ -39,14 +39,14 @@ bad() {
 }
 
 # The pre-cut-over proxy reference, from the setting's history note in
-# bazel/img/registry.bzl (the four assignments it quotes, indented four spaces).
+# bazel/registry/registry.bzl (the four assignments it quotes, indented four spaces).
 pre_bzl="$(mktemp)"
 sed -nE 's/^    (IMAGE_REGISTRY|IMAGE_NAMESPACE|IMAGE_NAME_OVERRIDES|CHART_REPOSITORY_PREFIX) = /\1 = /p' \
-	bazel/img/registry.bzl >"$pre_bzl"
+	bazel/registry/registry.bzl >"$pre_bzl"
 old_ref="$(IMAGE_REGISTRY_BZL="$pre_bzl" scripts/image-registry.sh ref proxy 2>/dev/null)" || old_ref=""
 rm -f "$pre_bzl"
 if [ -z "$PROXY_IMAGE" ] || [ -z "$old_ref" ] || [ "$old_ref" = "$PROXY_IMAGE" ]; then
-	echo "::error::need image_reference(\"proxy\") and the pre-cut-over proxy reference (bazel/img/registry.bzl's history note) to exercise the refusal cases; got [${PROXY_IMAGE}] and [${old_ref}]" >&2
+	echo "::error::need image_reference(\"proxy\") and the pre-cut-over proxy reference (bazel/registry/registry.bzl's history note) to exercise the refusal cases; got [${PROXY_IMAGE}] and [${old_ref}]" >&2
 	exit 2
 fi
 

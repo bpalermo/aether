@@ -539,7 +539,7 @@ proxy:
   # overriding `repository`.
   #
   # `repository:` must be exactly image_reference("proxy") from
-  # bazel/img/registry.bzl: every pin reader (//bazel/proxy_pin, the publish-verify
+  # bazel/registry/registry.bzl: every pin reader (//bazel/proxy_pin, the publish-verify
   # sweep, ci.yaml's proxy-pin job, the bump-chart rewrite in
   # scripts/proxy-pin-lib.sh) accepts that reference and no other.
   image:

@@ -184,7 +184,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # <registry>/<namespace> every aether image is tagged under, from the single
-# setting in bazel/img/registry.bzl (proposal 040) -- never a literal.
+# setting in bazel/registry/registry.bzl (proposal 040) -- never a literal.
 IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
 CLUSTER="${EWQ_CLUSTER:-eastwest-quic}"
 CTX="kind-$CLUSTER"

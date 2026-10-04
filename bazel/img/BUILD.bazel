@@ -1,6 +1,6 @@
+load("@aether_registry//:registry.bzl", "IMAGE_NAMESPACE", "IMAGE_REGISTRY", "SIGNATURE_LAYOUT", "chart_registry_url", "chart_repository", "image_reference", "image_repository")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load(":registry.bzl", "IMAGE_NAMESPACE", "IMAGE_REGISTRY", "SIGNATURE_LAYOUT", "chart_registry_url", "chart_repository", "image_reference", "image_repository")
 
 # The registry is ONE setting, registry.bzl (proposal 040), read two ways: Bazel
 # loads it, and scripts/image-registry.sh parses it for everything that is not
@@ -72,11 +72,11 @@ sh_test(
     args = [
         "$(rootpath :registry_expected)",
         "$(rootpath //scripts:image-registry.sh)",
-        "$(rootpath :registry.bzl)",
+        "$(rootpath @aether_registry//:registry.bzl)",
     ],
     data = [
-        ":registry.bzl",
         ":registry_expected",
         "//scripts:image-registry.sh",
+        "@aether_registry//:registry.bzl",
     ],
 )

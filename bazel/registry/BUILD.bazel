@@ -1,0 +1,7 @@
+# registry.bzl is loaded as @aether_registry//:registry.bzl. It is exported as a
+# file too: //bazel/img:registry_test hands it to scripts/image-registry.sh, the
+# shell reader of the same setting.
+exports_files(
+    ["registry.bzl"],
+    visibility = ["//visibility:public"],
+)

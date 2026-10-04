@@ -56,6 +56,17 @@ bazel_dep(name = "rules_shell", version = "0.8.0")
 # registers (see the extension block below).
 bazel_dep(name = "toolchains_buildbuddy", version = "0.0.4")
 
+# The image-registry setting (proposal 040): ONE file, bazel/registry/registry.bzl,
+# loaded as @aether_registry//:registry.bzl. It is a module of its own, not a
+# package of this one, so that the //proxy workspace (which cannot load from
+# this module) loads the very same file through its own local_path_override
+# instead of keeping a copy of it.
+bazel_dep(name = "aether_registry")
+local_path_override(
+    module_name = "aether_registry",
+    path = "bazel/registry",
+)
+
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.27.1")
 

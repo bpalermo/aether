@@ -23,7 +23,7 @@
 #     referrers of keycloak's children today) must read as `none`.
 #
 # THE PER-COMMIT EXPECTATION (proposal 040 phase 2). Presence is not the whole
-# answer any more: each commit's bazel/img/registry.bzl promises a layout
+# answer any more: each commit's bazel/registry/registry.bzl promises a layout
 # (SIGNATURE_LAYOUT: `referrer` on quay.io), and the sweep holds each commit to
 # its own. So the second half pins registry_setting_signature_layout (which
 # layout a setting promises; a pre-cut-over file with no such line is rc 3 --
@@ -109,7 +109,7 @@ REFS="" REFS_NAME=""
 # --- the per-commit expectation (proposal 040 phase 2) ----------------------
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-post_bzl=bazel/img/registry.bzl
+post_bzl=bazel/registry/registry.bzl
 pre_bzl="$tmp/pre.bzl"
 bad_bzl="$tmp/bad.bzl"
 # The pre-cut-over file had no SIGNATURE_LAYOUT line at all.

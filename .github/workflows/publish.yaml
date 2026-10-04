@@ -42,7 +42,7 @@ concurrency:
   group: publish-main
   cancel-in-progress: false
 
-# The registry (host, namespace, naming) is ONE setting, bazel/img/registry.bzl
+# The registry (host, namespace, naming) is ONE setting, bazel/registry/registry.bzl
 # (proposal 040: the Quay org since the phase-2 cut-over). Bazel reads it
 # directly; the steps below read it through scripts/image-registry.sh, which each
 # job appends to $GITHUB_ENV right after checkout — never a literal here.
@@ -61,7 +61,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Image registry (bazel/img/registry.bzl)
+      - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
@@ -167,7 +167,7 @@ jobs:
       # Sign every published image, keyless.
       #
       # WHERE THE SIGNATURE GOES depends on the registry, and the registry
-      # setting says which (SIGNATURE_LAYOUT in bazel/img/registry.bzl):
+      # setting says which (SIGNATURE_LAYOUT in bazel/registry/registry.bzl):
       #
       #   quay.io   serves the OCI 1.1 Referrers API, so cosign 3 attaches the
       #             sigstore bundle as a REFERRER of the signed manifest
@@ -241,7 +241,7 @@ jobs:
           # image, so the verify step below re-reads this same list.
           repos=("${REGISTRY_IMAGE_REPOS[@]}")
           if [ "${#repos[@]}" -eq 0 ]; then
-            echo "::error::no image repositories (scripts/image-registry.sh could not read bazel/img/registry.bzl)"
+            echo "::error::no image repositories (scripts/image-registry.sh could not read bazel/registry/registry.bzl)"
             exit 1
           fi
 

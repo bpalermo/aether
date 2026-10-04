@@ -1,6 +1,6 @@
+load("@aether_registry//:registry.bzl", "chart_registry_url", "image_reference")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
 load("//bazel/helm:defs.bzl", "chart_push", "helm_template_absent_test", "helm_template_fail_test")
-load("//bazel/img:registry.bzl", "chart_registry_url", "image_reference")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
@@ -39,7 +39,7 @@ AETHER_IMAGES = [
     "//agent/cmd/uds-csi:image_push",
 ]
 
-# aether Helm chart (published to chart_registry_url("aether"); see //bazel/img:registry.bzl).
+# aether Helm chart (published to chart_registry_url("aether"); see @aether_registry//:registry.bzl).
 #
 # The whole system in one chart: agent + cni-install + per-node proxy, registrar,
 # and the mesh-config controller. The MeshConfig CRD ships in //charts/crds
@@ -49,7 +49,7 @@ AETHER_IMAGES = [
 # placeholders in values.yaml are digest-pinned at package time and published with
 # the chart.
 #
-# Publish targets (OCI; registry from //bazel/img:registry.bzl). No
+# Publish targets (OCI; registry from @aether_registry//:registry.bzl). No
 # `registry_url`, so rules_helm defines no `.push`/`.push_registry`: `helm push`
 # appends the chart's name to its base and cannot reach the flat
 # `chart-aether` repository (proposal 040). The images and the chart go

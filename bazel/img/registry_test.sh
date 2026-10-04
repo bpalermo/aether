@@ -35,7 +35,7 @@ if [ "$n" -lt 30 ]; then
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then
-	echo "scripts/image-registry.sh disagrees with bazel/img/registry.bzl" >&2
+	echo "scripts/image-registry.sh disagrees with bazel/registry/registry.bzl" >&2
 	exit 1
 fi
 echo "registry: shell and Starlark agree on ${n} answers"

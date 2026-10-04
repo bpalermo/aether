@@ -1,5 +1,5 @@
+load("@aether_registry//:registry.bzl", "image_reference")
 load("@rules_go//go:def.bzl", "go_test")
-load("//bazel/img:registry.bzl", "image_reference")
 
 go_test(
     name = "e2e_test",

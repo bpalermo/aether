@@ -17,7 +17,7 @@
 # and a run that never existed all have to be caught, and only one question
 # separates them: are the artifacts for this commit in the registry?
 # `scripts/verify-published-artifacts.sh` asks the registry that question
-# directly — the registry that commit's own bazel/img/registry.bzl names (read
+# directly — the registry that commit's own bazel/registry/registry.bzl names (read
 # AS OF each head, like the chart versions; quay.io with signature referrers).
 # Heads from before the Quay cut-over are not checked: their registry is
 # decommissioned (proposal 040 phase 4), and the verifier exits 2 on one.
@@ -273,7 +273,7 @@ jobs:
           [ -n "$missing" ] || missing="(see the run log)"
 
           body=$(printf '%s\n\n```\n%s\n```\n\n%s\n%s\n\n%s\n' \
-            "A commit on \`main\` is missing artifacts in the image registry (bazel/img/registry.bzl) — never published, or published only in part. A deploy pinned to it will 404, and \`helm upgrade\` against its commit-suffixed chart tag cannot work." \
+            "A commit on \`main\` is missing artifacts in the image registry (bazel/registry/registry.bzl) — never published, or published only in part. A deploy pinned to it will 404, and \`helm upgrade\` against its commit-suffixed chart tag cannot work." \
             "$missing" \
             "Verification run: ${RUN_URL}" \
             "Publish run: ${TRIGGERING_RUN:-n/a}" \

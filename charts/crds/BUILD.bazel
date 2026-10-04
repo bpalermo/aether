@@ -1,13 +1,13 @@
+load("@aether_registry//:registry.bzl", "chart_registry_url")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
 load("//bazel/helm:defs.bzl", "chart_push")
-load("//bazel/img:registry.bzl", "chart_registry_url")
 
-# crds Helm chart (published to chart_registry_url("crds"); see //bazel/img:registry.bzl).
+# crds Helm chart (published to chart_registry_url("crds"); see @aether_registry//:registry.bzl).
 #
 # Standalone CRD chart so the CRDs can be installed/upgraded ahead of the
 # controllers. See docs/proposals/015_mesh-config.md.
 #
-# Publish target (OCI; registry from //bazel/img:registry.bzl):
+# Publish target (OCI; registry from @aether_registry//:registry.bzl):
 #   bazel run --stamp //charts/crds:crds.chart_push
 # Credentials: `docker login <registry>` (oras reads the Docker config).
 helm_chart(

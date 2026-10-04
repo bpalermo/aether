@@ -18,7 +18,7 @@ permissions:
   contents: read
   pull-requests: read
 
-# No registry literal here: the registry is ONE setting, bazel/img/registry.bzl
+# No registry literal here: the registry is ONE setting, bazel/registry/registry.bzl
 # (proposal 040), read through scripts/image-registry.sh where a job needs it.
 # The `shell` job's scripts/check-registry-config.sh keeps it that way.
 
@@ -309,7 +309,7 @@ jobs:
       - name: Registry direct lookup survives a concurrent publish
         run: scripts/check-registry-lookup.sh
 
-      # The registry is ONE setting (bazel/img/registry.bzl, proposal 040), so
+      # The registry is ONE setting (bazel/registry/registry.bzl, proposal 040), so
       # the Quay cut-over was a one-file flip. This asserts the setting parses,
       # the //proxy workspace's copy is identical, the aether-proxy pin names
       # image_reference("proxy"), no file outside a written-down allow-list
@@ -426,7 +426,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # The aether-proxy image (image_reference("proxy"), bazel/img/registry.bzl)
+      # The aether-proxy image (image_reference("proxy"), bazel/registry/registry.bzl)
       # is a PUBLIC package — anonymous pull works and nothing below logs in.
       # Declared for the day it is made private (then a docker/login-action step
       # is needed too, as //bazel/proxy_pin says).
@@ -434,7 +434,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Image registry (bazel/img/registry.bzl)
+      - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
       - name: Setup helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -501,7 +501,7 @@ jobs:
 
           fail=0
           if [ -z "$repository" ]; then
-            echo "::error file=${values}::no aether-proxy image pin found. Expected a line \`repository: <ref>\` with <ref> exactly ${accepted} (image_reference(\"proxy\"), bazel/img/registry.bzl) — the same contract bazel/proxy_pin/extensions.bzl parses."
+            echo "::error file=${values}::no aether-proxy image pin found. Expected a line \`repository: <ref>\` with <ref> exactly ${accepted} (image_reference(\"proxy\"), bazel/registry/registry.bzl) — the same contract bazel/proxy_pin/extensions.bzl parses."
             fail=1
           fi
           if [ -z "$tag" ]; then

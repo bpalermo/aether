@@ -1,6 +1,7 @@
+load("@aether_registry//:registry.bzl", "chart_registry_url")
+
 # Helm helpers. See defs.bzl; the rules themselves are loaded from //charts/*.
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//bazel/img:registry.bzl", "chart_registry_url")
 
 # chart_push hands oras exactly what `helm push` writes, at the repository and
 # tag it names (proposal 040). No network: oras is replaced by a recorder.

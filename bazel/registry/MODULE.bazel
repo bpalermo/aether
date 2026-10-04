@@ -1,0 +1,10 @@
+# The image-registry setting (proposal 040) as its own tiny, source-only Bazel
+# module, so BOTH workspaces load the one file instead of carrying copies:
+#
+#   root MODULE.bazel   local_path_override(path = "bazel/registry")
+#   proxy/MODULE.bazel  local_path_override(path = "../bazel/registry")
+#
+# It has no dependencies and must keep none: it is a leaf that both module
+# graphs (Bazel 9 at the root, Bazel 8 in //proxy) resolve without a registry
+# lookup.
+module(name = "aether_registry")

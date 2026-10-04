@@ -1,10 +1,10 @@
+load("@aether_registry//:registry.bzl", "chart_registry_url")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
 load("//bazel/helm:defs.bzl", "chart_push")
-load("//bazel/img:registry.bzl", "chart_registry_url")
 
-# udsecho validation chart (published to chart_registry_url("udsecho"); see //bazel/img:registry.bzl).
+# udsecho validation chart (published to chart_registry_url("udsecho"); see @aether_registry//:registry.bzl).
 #
-# Publish targets (OCI; registry from //bazel/img:registry.bzl), images first:
+# Publish targets (OCI; registry from @aether_registry//:registry.bzl), images first:
 #   bazel run --stamp //charts/udsecho:udsecho.push_images   # the image, by digest
 #   bazel run --stamp //charts/udsecho:udsecho.chart_push    # the chart
 # Credentials: `docker login <registry>` (image_push and oras both read the

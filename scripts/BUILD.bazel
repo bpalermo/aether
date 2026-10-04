@@ -41,7 +41,7 @@ exports_files(
 )
 
 # The registry setting reader (proposal 040), for //bazel/img:registry_test,
-# which pins it against the Starlark helpers in bazel/img/registry.bzl.
+# which pins it against the Starlark helpers in bazel/registry/registry.bzl.
 exports_files(
     ["image-registry.sh"],
     visibility = ["//bazel/img:__pkg__"],

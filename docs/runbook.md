@@ -579,14 +579,14 @@ sends the wrong value as the token goes red offline (#999).
 
 ### Where images and charts are published: one setting (proposal 040)
 
-Every published coordinate derives from **`bazel/img/registry.bzl`** — registry
+Every published coordinate derives from **`bazel/registry/registry.bzl`** — registry
 host, namespace, per-component name overrides and the chart-repository prefix —
 and from nowhere else:
 
 | reader | how |
 |---|---|
-| image pushes, chart pushes, chart template tests, e2e go_test defaults | `load("//bazel/img:registry.bzl", ...)` — `image_repository()`, `image_reference()`, `chart_registry_url(<chart>)` |
-| the `//proxy` workspace (`oci_push`) | its byte-identical copy `proxy/bazel/registry.bzl` (it cannot load from the root module) |
+| image pushes, chart pushes, chart template tests, e2e go_test defaults | `load("@aether_registry//:registry.bzl", ...)` — `image_repository()`, `image_reference()`, `chart_registry_url(<chart>)` |
+| the `//proxy` workspace (`oci_push`) | the same file, `load("@aether_registry//:registry.bzl", ...)`: `bazel/registry/` is a local module each workspace reaches with `local_path_override` (`../bazel/registry` from `proxy/`), since `//proxy` cannot load from the root module |
 | `//bazel/proxy_pin` (the Envoy the validate gate runs) | `image_reference("proxy")` + `registry_token_url()` |
 | workflows | `scripts/image-registry.sh >> "$GITHUB_ENV"` after checkout → `IMAGE_REGISTRY_HOST`, `IMAGE_NAMESPACE`, `IMAGE_REGISTRY` (host/namespace), `PROXY_IMAGE`, `IMAGE_SIGNATURE_LAYOUT` |
 | verifiers, e2e scripts | `scripts/image-registry.sh {prefix,host,repo <c>,ref <c>,chart-repo <c>,chart-ref <c>,signature-layout}`; `scripts/registry-lib.sh` resolves its repository lists through it |
@@ -625,8 +625,10 @@ quay-smoke gate), so a new component needs its repository created (public, robot
 write) before its first publish.
 
 **The sweep across the cut-over (the split rule).** `verify-published-artifacts.sh`
-reads `bazel/img/registry.bzl` **as of each push head it checks** (`git show
-<sha>:bazel/img/registry.bzl`), exactly as it reads each chart's version and the
+reads the registry setting **as of each push head it checks** (`git show
+<sha>:bazel/registry/registry.bzl`, or `bazel/img/registry.bzl` for a head from
+before the setting became its own module — `REGISTRY_SETTING_PATHS` in
+`scripts/registry-lib.sh`), exactly as it reads each chart's version and the
 release-tag prefix: heads at or after the cut-over are checked on quay.io
 (`chart-<name>`, flat names, a signature REFERRER — and nothing else: a fallback
 tag there, or a referrer plus a tag, is `MISSING`). Heads from **before** the
@@ -763,7 +765,7 @@ sigstore bundle as a real **referrer** of the signed manifest (artifactType
 `dev.sigstore.bundle.predicateType: https://sigstore.dev/cosign/sign/v1`) and
 writes no tag — measured by the quay-smoke gate on our own index and children,
 and observed on `quay.io/argoproj/argocd` and `quay.io/cilium/cilium`.
-`bazel/img/registry.bzl` records that as `SIGNATURE_LAYOUT = "referrer"`, and
+`bazel/registry/registry.bzl` records that as `SIGNATURE_LAYOUT = "referrer"`, and
 the sweep holds every post-cut-over commit to it: a fallback tag on quay.io, or a
 referrer plus a tag, is `MISSING`. Before the cut-over, on ghcr.io (no Referrers
 API), the signature landed in a tag in the image's own repository: cosign 3's

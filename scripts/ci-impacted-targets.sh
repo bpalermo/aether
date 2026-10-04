@@ -70,6 +70,9 @@ cat >"$SEED" <<'EOF'
 scripts/ci-impacted-targets.sh
 MODULE.bazel
 MODULE.bazel.lock
+bazel/registry/MODULE.bazel
+bazel/registry/BUILD.bazel
+bazel/registry/registry.bzl
 EOF
 
 generate() { # ref outfile

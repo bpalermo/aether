@@ -1,8 +1,8 @@
+load("@aether_registry//:registry.bzl", "image_reference")
 load("@container_structure_test//:defs.bzl", "container_structure_test")
 load("@envoy//bazel:envoy_build_system.bzl", "envoy_cc_binary")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_pkg//:pkg.bzl", "pkg_tar")
-load("//bazel:registry.bzl", "image_reference")
 
 # Custom aether Envoy: upstream core extensions (//bazel/build_config) plus
 # our compiled-in C++ extensions.
@@ -108,9 +108,9 @@ oci_push(
     name = "push",
     image = ":image",
     remote_tags = [],
-    # bazel/registry.bzl is a byte-identical copy of the root workspace's
-    # bazel/img/registry.bzl (proposal 040; scripts/check-registry-config.sh
-    # enforces it): the proxy image is published beside every other image.
+    # @aether_registry is the root workspace's bazel/registry/ (proposal 040),
+    # overridden in by path in MODULE.bazel: the proxy image is published
+    # beside every other image, from the one registry setting.
     repository = image_reference("proxy"),
 )
 

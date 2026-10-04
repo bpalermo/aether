@@ -115,7 +115,7 @@ Formatting uses [gofumpt](https://github.com/mvdan/gofumpt), [buildifier](https:
 ```bash
 make load-all              # Load the five Make-built images (agent, mesh-dns, proxy-supervisor,
                            # cni-install, registrar) into local Docker
-make push-all              # Push those five to the registry (bazel/img/registry.bzl); for
+make push-all              # Push those five to the registry (bazel/registry/registry.bzl); for
                            # local/dev use — releases are published by the signed publish workflow
 ```
 

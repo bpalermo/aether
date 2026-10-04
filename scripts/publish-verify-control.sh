@@ -54,7 +54,7 @@
 #   5. the summary line reads `FAIL: <expected> of <expected> artifact(s)
 #      missing across 1 commit(s)`.
 #   6. EVERY MISSING line names the registry the control's tree names — the
-#      `<host>/<namespace>/` of bazel/img/registry.bzl as of <base> (proposal
+#      `<host>/<namespace>/` of bazel/registry/registry.bzl as of <base> (proposal
 #      040). The verifier reads that file per commit; a red reported against
 #      another registry (the old one, after the Quay cut-over) is a red for the
 #      wrong reason: the gate would be checking where the commit never
@@ -113,10 +113,10 @@ expected=$((${#REGISTRY_CHARTS[@]} + 2 * n_images))
 # The registry the control's tree names (its tree IS base's): where every
 # MISSING line must point.
 base_bzl="$(mktemp)"
-if ! git show "${base_sha}:bazel/img/registry.bzl" >"$base_bzl" 2>/dev/null ||
+if ! registry_setting_at "$base_sha" "$base_bzl" ||
 	! want_prefix="$(IMAGE_REGISTRY_BZL="$base_bzl" "${here}/image-registry.sh" prefix)"; then
 	rm -f "$base_bzl"
-	echo "::error::expected-red control: cannot read bazel/img/registry.bzl as of ${base_sha}" >&2
+	echo "::error::expected-red control: cannot read the registry setting (${REGISTRY_SETTING_PATHS[*]}) as of ${base_sha}" >&2
 	exit 2
 fi
 rm -f "$base_bzl"
@@ -177,7 +177,7 @@ if [ -n "$wrong_sha" ]; then
 fi
 wrong_registry="$(printf '%s\n' "$missing_lines" | grep . | grep -vF -- "MISSING ${want_prefix}/" || true)"
 if [ -n "$wrong_registry" ]; then
-	fail "a MISSING line names a registry other than ${want_prefix}/ (bazel/img/registry.bzl as of the control's tree) — red for the wrong reason:"
+	fail "a MISSING line names a registry other than ${want_prefix}/ (bazel/registry/registry.bzl as of the control's tree) — red for the wrong reason:"
 	printf '%s\n' "$wrong_registry" | sed -n 1,3p >&2
 fi
 if grep -qE '^[[:space:]]*ok[[:space:]]' "$log"; then
