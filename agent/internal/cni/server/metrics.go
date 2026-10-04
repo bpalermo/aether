@@ -53,6 +53,7 @@ type cniMetrics struct {
 	spiffeIDOverrides  metric.Int64Counter
 	inboundGatePods    metric.Int64Gauge
 	inboundGateHeld    metric.Int64Gauge
+	pluginOperations   metric.Int64Counter
 }
 
 // newCNIMetrics registers the reconciliation instruments on the given meter.
@@ -66,6 +67,9 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 		return nil, err
 	}
 	if err := m.registerLifecycleInstruments(meter); err != nil {
+		return nil, err
+	}
+	if err := m.registerPluginInstruments(meter); err != nil {
 		return nil, err
 	}
 	m.seedCounters()

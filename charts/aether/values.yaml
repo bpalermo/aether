@@ -418,19 +418,6 @@ cniInstall:
     # IfNotPresent for the same reason as agent.image (#1123): digest-pinned,
     # and this init container sits on every agent pod start.
     pullPolicy: IfNotPresent
-  # OTLP gRPC endpoint (host:port, plaintext) the CNI plugin binary exports its
-  # aether_cni_* telemetry to. Empty = otel.endpoint. Override it when the plugin
-  # must reach a different collector than the pods do (e.g. a node-local agent).
-  otlpEndpoint: ""
-  # The plugin runs under the container runtime with the HOST's resolver, which
-  # cannot resolve cluster Service names (issue #950: on Talos and kind every
-  # export failed with "name resolver error: produced zero addresses"). When
-  # true, cni-install resolves the endpoint's host through cluster DNS and
-  # writes the resulting address (a ClusterIP) into the CNI netconf; a name that
-  # does not resolve is written unchanged. A collector Service created or
-  # recreated AFTER the agent started is picked up on the next agent roll.
-  # Point this at a ClusterIP Service, not a headless one (pod IPs move).
-  pinOTLPEndpoint: true
   resources:
     requests:
       cpu: 100m

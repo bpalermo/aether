@@ -119,7 +119,6 @@ COLLECTOR_IMAGE="ghcr.io/open-telemetry/opentelemetry-collector-releases/opentel
 # at 100 % the run's records rotate away before they are read.
 EWQ_EXTRA_HELM_ARGS=(
 	--set "otel.endpoint=$COLLECTOR_ENDPOINT"
-	--set "cniInstall.otlpEndpoint=$COLLECTOR_ENDPOINT"
 	--set meshConfig.proxy.accessLogsEnabled=true
 	--set "meshConfig.proxy.accessLogSuccessSampleRate=${HR_SAMPLE:-2}"
 	# The #1050 workaround (Envoy --skip-hot-restart-parent-stats). Chart default

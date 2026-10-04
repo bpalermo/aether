@@ -17,12 +17,20 @@ func TestRetiredFlagsGone(t *testing.T) {
 	}
 }
 
-// TestOTLPPinDefaultsOn pins issue #950: the plugin runs under the HOST's
-// resolver, so an unpinned cluster Service name exports nothing. Pinning must be
-// the default, not an opt-in an operator has to discover.
-func TestOTLPPinDefaultsOn(t *testing.T) {
-	flag := GetCommand().Flags().Lookup("otlp-pin-endpoint")
-	if assert.NotNil(t, flag, "--otlp-pin-endpoint must be registered") {
-		assert.Equal(t, "true", flag.DefValue)
+// TestOTLPFlagsDeprecatedNoOps pins #1166: the plugin no longer exports
+// telemetry, so cni-install writes no otlp_endpoint. The two flags a pre-#1166
+// chart passes must still parse (deprecated, ignored) for one release, or that
+// chart's agent pods fail in their init container.
+func TestOTLPFlagsDeprecatedNoOps(t *testing.T) {
+	cmd := GetCommand()
+	for _, name := range []string{"otlp-endpoint", "otlp-pin-endpoint"} {
+		flag := cmd.Flags().Lookup(name)
+		if assert.NotNil(t, flag, "--%s must stay parseable for one release", name) {
+			assert.NotEmpty(t, flag.Deprecated, "--%s must be marked deprecated", name)
+		}
 	}
+	assert.NoError(t, cmd.Flags().Parse([]string{
+		"--otlp-endpoint=otel-collector.o11y.svc.cluster.local:4317",
+		"--otlp-pin-endpoint=false",
+	}))
 }

@@ -56,10 +56,6 @@ func createCNIConfigFile(ctx context.Context, logger *slog.Logger, cfg *Installe
 	pluginConfig.Type = conflist.AetherPluginType
 	pluginConfig.CNIVersion = "0.0.1"
 	pluginConfig.AgentCNIPath = constants.DefaultCNISocketPath
-	pluginConfig.OTLPEndpoint = cfg.OTLPEndpoint
-	if cfg.PinOTLPEndpoint {
-		pluginConfig.OTLPEndpoint = pinOTLPEndpoint(ctx, logger, cfg.OTLPEndpoint, cfg.lookupHost)
-	}
 	pluginConfig.CaptureRedirectAllDefault = cfg.CaptureRedirectAllDefault
 	pluginConfig.MeshDNSEnabled = cfg.MeshDNSEnabled
 	pluginConfig.HostIP = cfg.HostIP

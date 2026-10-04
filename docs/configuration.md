@@ -146,8 +146,13 @@ decision every cycle — see `charts/prober/values.yaml`.
 |---|---|---|
 | `cniInstall.image.*` | repo+digest placeholders, `pullPolicy: Always` | Digest-pinned image. |
 | `cniInstall.resources.{requests,limits}` | cpu `100m`, mem `32Mi` | |
-| `cniInstall.otlpEndpoint` | `""` (= `otel.endpoint`) | OTLP gRPC `host:port` the CNI **plugin binary** exports `aether_cni_*` to. Overrides `otel.endpoint` for the CNI alone. |
-| `cniInstall.pinOTLPEndpoint` | `true` | cni-install resolves the endpoint's host through cluster DNS and writes the **address** into the netconf. The plugin runs under the host's resolver, which cannot resolve `*.svc.cluster.local` (#950: on Talos and kind every export failed with `produced zero addresses`). An unresolvable name is written unchanged. A collector Service created/recreated after the agent started is picked up on the next agent roll; use a ClusterIP Service, not a headless one. |
+
+`cniInstall.otlpEndpoint` and `cniInstall.pinOTLPEndpoint` were removed in chart
+`2.4.0` (#1166): the CNI plugin binary exports no telemetry of its own. It reports
+its timings and its capture-divert outcome to the agent over the CNI gRPC socket,
+and the agent exports `aether_cni_operations_total{aether_cni_operation="capture_divert"}`
+and the span attributes with its own telemetry (`otel.*`). A values file that still
+sets the two keys is accepted and ignored.
 
 ### `udsCsi` — the `csi.aether.io` CSI node plugin (proposal 039)
 
@@ -608,14 +613,13 @@ The egress identity gate (#1053/#1055), rendered from
 ### `cni-install` (init container)
 
 `--cni-bin-dir`, `--cni-bin-target-dir`, `--mounted-cni-net-dir`,
-`--otlp-endpoint`, `--otlp-pin-endpoint` (`true`; resolve `--otlp-endpoint`'s host
-through cluster DNS and write the address into the netconf, because the plugin runs
-under the host's resolver, #950/#969; chart key `cniInstall.pinOTLPEndpoint`),
 `--capture-redirect-all-default`,
 `--mesh-dns`, `--host-ip`, `--debug`. The per-pod capture redirect is
 unconditional (no `--transparent-capture`; per-pod `capture.aether.io/*`
-annotations opt out). (The `cni` plugin binary itself is configured via
-CNI-spec stdin, not flags.)
+annotations opt out). `--otlp-endpoint` and `--otlp-pin-endpoint` are deprecated
+no-ops since #1166 (the plugin exports no telemetry), kept parseable for one release
+so an older chart still starts a newer image. (The `cni` plugin binary itself is
+configured via CNI-spec stdin, not flags.)
 
 Netconf keys the plugin reads but `cni-install` does not write (edit the conflist to
 override a default): `netns_pin_disabled`, `netns_pin_dir` (`/run/aether/netns`),

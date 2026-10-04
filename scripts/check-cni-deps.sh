@@ -21,10 +21,11 @@ set -euo pipefail
 
 TARGET="//cni/cmd/cni:cni"
 
-# grpc, protobuf, netlink/nftables, zap and (for now) the OTel SDK are
-# load-bearing, so this names the heavyweights (the
-# scripts/check-proxy-supervisor-deps.sh shape) rather than forbidding everything.
-FORBIDDEN='controller_runtime|io_k8s_client_go|io_k8s_apimachinery|io_k8s_api//|gateway_api|go_control_plane|go_spiffe|spiffe_go|miekg|spf13_cobra'
+# grpc, protobuf, netlink/nftables and zap are load-bearing, so this names the
+# heavyweights (the scripts/check-proxy-supervisor-deps.sh shape) rather than
+# forbidding everything. OpenTelemetry is on the list since #1166: the plugin
+# exports no telemetry, it forwards its timings to the agent over the CNI socket.
+FORBIDDEN='controller_runtime|io_k8s_client_go|io_k8s_apimachinery|io_k8s_api//|gateway_api|go_control_plane|go_spiffe|spiffe_go|miekg|spf13_cobra|io_opentelemetry'
 
 deps="$(bazel query "deps(${TARGET})" --output=label "$@")"
 

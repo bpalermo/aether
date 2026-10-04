@@ -79,6 +79,7 @@ func startStepSpan(ctx context.Context, name string, pod *cniv1.CNIPod) (context
 func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv1.AddPodResponse, error) {
 	cniPod := req.GetPod()
 	log := s.log.With("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
+	recordPluginTimings(ctx, req.GetPluginTimings())
 
 	podUID, err := s.enhanceCNIPod(ctx, cniPod)
 	if err != nil {
@@ -193,6 +194,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	podName := req.GetName()
 	namespace := req.GetNamespace()
 	log := s.log.With("pod", podName, "namespace", namespace)
+	recordPluginTimings(ctx, req.GetPluginTimings())
 
 	containerID := types.ContainerID(containerId)
 
