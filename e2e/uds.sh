@@ -29,13 +29,12 @@
 #                         unpromotes THAT service and nothing else (no CDS NACK,
 #                         no snapshot poisoning), and the service recovers when
 #                         the policy is deleted
-#   f. CNI telemetry    — the CNI plugin's aether_cni_* metrics reach an OTLP
-#                         collector addressed by its cluster Service NAME
-#                         (issue #950). The plugin runs on the kind node under
-#                         the node's resolver (docker's 127.0.0.11), which —
-#                         exactly like a Talos host — cannot resolve
-#                         *.svc.cluster.local, so this fails unless cni-install
-#                         pinned the name to the Service's ClusterIP.
+#   f. CNI telemetry    — the CNI plugin exports nothing itself (#1166); it
+#                         reports its capture-divert outcome to the agent, which
+#                         exports aether_cni_operations_total. After a fresh
+#                         managed-pod ADD the agent's capture_divert success
+#                         count has grown, the error series is absent, and the
+#                         netconf carries no otlp_endpoint.
 #   g. cut-over admission — a pod declaring its socket on an emptyDir (the removed
 #                         carrier) is DENIED by the controller's pod webhook, and
 #                         the denial names the fix (csi.aether.io + fsGroup)
@@ -74,15 +73,6 @@ SOCKET="s/a.sock"
 # The csi.aether.io carrier requires a pod fsGroup (the per-pod tmpfs is
 # root:<fsGroup> 2770); 65532 is distroless nonroot, udsecho's user.
 FS_GROUP=65532
-# Assertion f (#950): a stand-in for talos-main's o11y collector, at the SAME
-# Service name shape (<svc>.<ns>.svc.cluster.local) the chart is handed there.
-# Only the CNI plugin is pointed at it (cniInstall.otlpEndpoint), so the rest of
-# this suite runs exactly as before. Pinned, never :latest; ghcr, not Docker Hub,
-# so an anonymous CI pull is not rate-limited.
-COLLECTOR_NS="o11y"
-COLLECTOR_SVC="otel-collector"
-COLLECTOR_ENDPOINT="${COLLECTOR_SVC}.${COLLECTOR_NS}.svc.cluster.local:4317"
-COLLECTOR_IMAGE="ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.159.0"
 # The single kind node (kind-cluster.yaml): where containerd execs the plugin.
 NODE="${CLUSTER}-control-plane"
 
@@ -113,11 +103,9 @@ dump_state() {
 	printf '\033[1;33m  -- mesh-dns --\033[0m\n' >&2
 	kc -n "$NS" logs -l app.kubernetes.io/component=mesh-dns --tail=15 --prefix 2>&1 |
 		sed 's/^/    /' >&2 || true
-	printf '\033[1;33m  -- CNI plugin log: telemetry flushes (assertion f) --\033[0m\n' >&2
-	docker exec "$NODE" sh -c 'grep -h "flush" /var/log/aether-cni/plugin.log | tail -5' 2>&1 |
+	printf '\033[1;33m  -- CNI plugin log: capture divert + ADD report (assertion f) --\033[0m\n' >&2
+	docker exec "$NODE" sh -c 'grep -hE "divert|ADD outcome|ReportAddResult" /var/log/aether-cni/plugin.log | tail -5' 2>&1 |
 		sed 's/^/    /' >&2 || true
-	printf '\033[1;33m  -- otel-collector (assertion f) --\033[0m\n' >&2
-	kc -n "$COLLECTOR_NS" logs "deploy/$COLLECTOR_SVC" --tail=15 2>&1 | sed 's/^/    /' >&2 || true
 }
 
 raise_inotify() {
@@ -186,64 +174,6 @@ install_crds() {
 	ok "Gateway API CRDs installed"
 }
 
-# Assertion f's collector: OTLP gRPC in, the debug exporter out (to its own
-# stdout, which the assertion reads). It MUST exist before aether is installed:
-# cni-install resolves the Service name once, at agent start, and a name that
-# does not resolve yet is written unpinned — that is the documented behaviour
-# (the next agent roll pins it), not the one under test.
-deploy_collector() {
-	log "deploying an OTLP collector at $COLLECTOR_ENDPOINT (assertion f, #950)"
-	kc create ns "$COLLECTOR_NS" >/dev/null 2>&1 || true
-	kc apply -f - >/dev/null <<YAML
-apiVersion: v1
-kind: ConfigMap
-metadata: {name: $COLLECTOR_SVC, namespace: $COLLECTOR_NS}
-data:
-  config.yaml: |
-    receivers:
-      otlp:
-        protocols:
-          grpc: {endpoint: 0.0.0.0:4317}
-    exporters:
-      debug: {verbosity: detailed}
-    service:
-      pipelines:
-        metrics: {receivers: [otlp], exporters: [debug]}
-        traces: {receivers: [otlp], exporters: [debug]}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name: $COLLECTOR_SVC, namespace: $COLLECTOR_NS}
-spec:
-  replicas: 1
-  selector: {matchLabels: {app: $COLLECTOR_SVC}}
-  template:
-    metadata:
-      labels: {app: $COLLECTOR_SVC}
-    spec:
-      containers:
-        - name: collector
-          image: $COLLECTOR_IMAGE
-          args: ["--config=/conf/config.yaml"]
-          ports: [{containerPort: 4317, name: otlp-grpc}]
-          volumeMounts: [{name: conf, mountPath: /conf}]
-      volumes:
-        - name: conf
-          configMap: {name: $COLLECTOR_SVC}
----
-# A ClusterIP Service (NOT headless): its ClusterIP is what cni-install pins.
-apiVersion: v1
-kind: Service
-metadata: {name: $COLLECTOR_SVC, namespace: $COLLECTOR_NS}
-spec:
-  selector: {app: $COLLECTOR_SVC}
-  ports: [{name: otlp-grpc, port: 4317, targetPort: 4317}]
-YAML
-	kc -n "$COLLECTOR_NS" rollout status "deploy/$COLLECTOR_SVC" --timeout=180s >/dev/null ||
-		die "the OTLP collector never became Ready"
-	ok "collector up"
-}
-
 # Render the chart placeholders into a temp copy so the source tree stays clean.
 chart_dir() {
 	local out
@@ -282,7 +212,6 @@ install_aether() {
 		--set spire.enabled=false \
 		--set edge.enabled=false \
 		--set otel.enabled=true \
-		--set "cniInstall.otlpEndpoint=$COLLECTOR_ENDPOINT" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
 		$(img registrar registrar) $(img controller controller) $(img udsCsi uds-csi) \
@@ -671,51 +600,63 @@ YAML
 	ok "tcp-echo recovered (HTTP 200) once the policy was removed"
 }
 
-# (f) #950. Three checks, each of which the pre-fix build fails:
-#   1. the netconf containerd hands the plugin carries the collector's ClusterIP,
-#      not its name (pre-fix: the name, verbatim);
-#   2. after a fresh pod ADD, the collector's debug exporter has printed the
-#      plugin's aether.cni.operations metric (pre-fix: never — every flush died
-#      on "name resolver error: produced zero addresses");
-#   3. the plugin log on the node has no such resolver error (pre-fix: one per
-#      CNI operation).
-# The collector is this suite's stand-in for Prometheus: it is the hop the
-# plugin talks to, and a series that reaches it is exported.
-verify_cni_telemetry() {
-	log "(f) CNI plugin telemetry reaches the collector by Service name (#950)"
-	local cluster_ip want got
-	cluster_ip="$(kc -n "$COLLECTOR_NS" get svc "$COLLECTOR_SVC" -o jsonpath='{.spec.clusterIP}')"
-	[ -n "$cluster_ip" ] || die "the collector Service has no ClusterIP"
-	want="${cluster_ip}:4317"
-	got="$(docker exec "$NODE" sh -c 'cat /etc/cni/net.d/*.conflist' |
-		grep -o '"otlp_endpoint": *"[^"]*"' | sed -n '1s/.*"\([^"]*\)"$/\1/p' || true)"
-	[ "$got" = "$want" ] ||
-		die "the chained aether netconf has otlp_endpoint='$got', want '$want' — cni-install did not pin the Service name to its ClusterIP, and the host resolver cannot resolve '$COLLECTOR_ENDPOINT'"
-	ok "netconf otlp_endpoint pinned to the ClusterIP ($got)"
+# cni_divert_count RESULT — aether_cni_operations_total{aether_cni_operation=
+# "capture_divert",aether_cni_result=RESULT} summed over every agent pod's
+# Prometheus exporter. Empty when no agent exports that series.
+cni_divert_count() {
+	local result="$1" pod metrics total="" v
+	for pod in $(kc -n "$NS" get pods -l app.kubernetes.io/component=agent -o jsonpath='{.items[*].metadata.name}'); do
+		metrics="$(kc get --raw "/api/v1/namespaces/$NS/pods/$pod:8080/proxy/metrics" 2>/dev/null)" || continue
+		v="$(awk -v r="aether_cni_result=\"$result\"" '$1 ~ /^aether_cni_operations_total\{/ && index($1, "aether_cni_operation=\"capture_divert\"") && index($1, r) { s += $2; n++ } END { if (n) printf "%d", s }' <<<"$metrics")"
+		[ -n "$v" ] && total=$((${total:-0} + v))
+	done
+	printf '%s' "$total"
+}
 
-	# A fresh ADD (and its DEL) now, so the export under test happened after the
-	# checks above and cannot be an artefact of an earlier install.
+# (f) #1166: the CNI plugin links no OTel SDK and exports nothing; what only it
+# can see (the capture divert it installs AFTER AddPod answers) reaches
+# Prometheus through the agent, via ReportAddResult. Three checks:
+#   1. the chained netconf has no otlp_endpoint (cni-install stopped writing it);
+#   2. a fresh managed-pod ADD grows the agent's
+#      aether_cni_operations_total{capture_divert,success} — the soak gate's
+#      existence proof, now exported by the agent;
+#   3. the error series is absent: no pod in this suite started UNCAPTURED.
+verify_cni_telemetry() {
+	log "(f) the CNI plugin's capture-divert outcome reaches Prometheus through the agent (#1166)"
+	local conflists
+	conflists="$(docker exec "$NODE" sh -c 'cat /etc/cni/net.d/*.conflist')" || die "could not read the node's CNI conflists"
+	grep -q '"type": *"aether-cni"' <<<"$conflists" || die "no chained aether-cni entry in the node's conflists — the check below would pass vacuously"
+	# A here-string, not `docker exec | grep -q`: under pipefail grep -q's early
+	# exit SIGPIPEs the producer and a MATCH reads as a miss.
+	if grep -q '"otlp_endpoint"' <<<"$conflists"; then
+		die "the chained aether netconf still carries otlp_endpoint — cni-install must not write it any more (#1166)"
+	fi
+	ok "netconf carries no otlp_endpoint"
+
+	local before after deadline
+	before="$(cni_divert_count success)"
+	# A fresh managed ADD (and its DEL) now, so the count under test moved after
+	# the read above and cannot be an artefact of an earlier install.
 	kc -n "$TEST_NS" run cni-telemetry-probe --image=registry.k8s.io/pause:3.10 \
-		--restart=Never --labels=app=cni-telemetry-probe >/dev/null
+		--restart=Never --labels='app=cni-telemetry-probe,aether.io/managed=true' >/dev/null
 	kc -n "$TEST_NS" wait --for=condition=Ready pod/cni-telemetry-probe --timeout=120s >/dev/null ||
 		die "the probe pod never became Ready"
 	kc -n "$TEST_NS" delete pod cni-telemetry-probe --wait=true --timeout=60s >/dev/null || true
 
-	local deadline=$((SECONDS + 60))
-	# NOT `logs | grep -q`: under pipefail, grep -q's early exit SIGPIPEs kubectl
-	# and the pipeline reports failure even when the metric IS in the log
-	# (seen 2026-09-26: the export worked, the gate stayed red for 60s).
-	until grep -q 'aether\.cni\.operations' <<<"$(kc -n "$COLLECTOR_NS" logs "deploy/$COLLECTOR_SVC" 2>/dev/null)"; do
+	deadline=$((SECONDS + 60))
+	while true; do
+		after="$(cni_divert_count success)"
+		[ -n "$after" ] && [ "$after" -gt "${before:-0}" ] && break
 		[ "$SECONDS" -lt "$deadline" ] ||
-			die "no aether.cni.operations metric reached the collector within 60s of a pod ADD — the plugin's OTLP export is broken"
-		sleep 2
+			die "aether_cni_operations_total{capture_divert,success} did not grow within 60s of a managed pod ADD (before='${before:-<no series>}' after='${after:-<no series>}') — the plugin's ReportAddResult did not reach the agent"
+		sleep 3
 	done
-	ok "the collector received aether.cni.operations"
+	ok "the agent counted the probe pod's capture divert (success: ${before:-<no series>} -> $after)"
 
-	if docker exec "$NODE" grep -q 'produced zero addresses' /var/log/aether-cni/plugin.log 2>/dev/null; then
-		die "the CNI plugin log still has 'name resolver error: produced zero addresses' flush failures"
-	fi
-	ok "no resolver errors in the CNI plugin log"
+	local errors
+	errors="$(cni_divert_count error)"
+	[ -z "$errors" ] || die "aether_cni_operations_total{capture_divert,error} = $errors — a pod in this suite started UNCAPTURED"
+	ok "no capture_divert error series"
 }
 
 # (g) The cut-over's front door: a pod that still declares its socket on an
@@ -850,7 +791,7 @@ verify() {
 	verify_cni_telemetry
 	verify_cutover_admission
 	verify_resolve_failures
-	log "all assertions passed (proposal 034 on the csi.aether.io carrier: annotation, EndpointPolicy, precedence, admission, drift+recovery; #950: CNI telemetry; 039 Phase 2: emptyDir carrier denied, resolve failures counted)"
+	log "all assertions passed (proposal 034 on the csi.aether.io carrier: annotation, EndpointPolicy, precedence, admission, drift+recovery; #1166: CNI capture divert via the agent; 039 Phase 2: emptyDir carrier denied, resolve failures counted)"
 }
 
 down() {
@@ -865,7 +806,6 @@ up() {
 	create_cluster
 	load_images
 	install_crds
-	deploy_collector
 	install_aether
 	deploy_workloads
 }

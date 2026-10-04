@@ -33,10 +33,8 @@ import (
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	"aethermesh.dev/cni/config"
 	"aethermesh.dev/cni/internal/cri"
-	"aethermesh.dev/cni/internal/telemetry"
 	"aethermesh.dev/common/constants"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
-	commontelemetry "aethermesh.dev/common/telemetry"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -50,14 +48,22 @@ import (
 // It is invoked by the container runtime during pod lifecycle transitions.
 type AetherPlugin struct {
 	logger *zap.Logger
+	// started is when the plugin process entered main(); the origin of the
+	// timings forwarded to the agent (see timings.go).
+	started time.Time
 }
 
 // NewAetherPlugin creates a new AetherPlugin instance with the given logger.
 func NewAetherPlugin(logger *zap.Logger) *AetherPlugin {
 	return &AetherPlugin{
-		logger,
+		logger:  logger,
+		started: time.Now(),
 	}
 }
+
+// SetStarted overrides the process start time the forwarded timings are
+// measured from (main records it before building the logger).
+func (p *AetherPlugin) SetStarted(t time.Time) { p.started = t }
 
 // CmdAdd handles the CNI Add operation, called when a pod is created.
 // It parses the CNI configuration and Kubernetes arguments, extracts pod networking info,
@@ -70,7 +76,6 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-	telemetry.Init(context.Background(), p.logger, netConf.OTLPEndpoint)
 
 	if ignorableNamespace(string(k8sArgs.K8S_POD_NAMESPACE)) {
 		p.logger.Info("skipping CNI add for system pod",
@@ -113,7 +118,17 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	// NO capture, or a managed=false pod in a non-ignored namespace would have its
 	// egress redirected to a capture port with no listener → blackholed control plane
 	// (the edge outage, fixed structurally here rather than per-pod annotation).
-	ignored, err := p.sendAddPod(context.Background(), netConf, cniPod, prevResult)
+	client, err := NewCNIClient(p.logger, netConf.AgentCNIPath)
+	if err != nil {
+		return fmt.Errorf("failed to create CNI client: %w", err)
+	}
+	defer func() {
+		if cerr := client.Close(); cerr != nil {
+			p.logger.Warn("failed to close CNI client", zap.Error(cerr))
+		}
+	}()
+
+	ignored, report, err := p.sendAddPod(context.Background(), netConf, client, cniPod)
 	if err != nil {
 		return err
 	}
@@ -144,12 +159,13 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 
 	divertStart := time.Now()
 	divertErr := installCaptureDivert(args.Netns, podRedirectAll(netConf), excludePorts, excludeRanges, p.logger)
-	// Counted as its own operation (aether.cni.operations{operation="capture_divert"})
-	// so an uncaptured node is visible from Prometheus, not only from a log line
-	// the pod's owner never reads: a rejected table (nft_tproxy missing, a
+	// Reported to the agent (ReportAddResult below), which counts it as
+	// aether.cni.operations{operation="capture_divert"} so an uncaptured node is
+	// visible from Prometheus and the agent's log, not only from this node-local
+	// log the pod's owner never reads: a rejected table (nft_tproxy missing, a
 	// kernel without a route-type chain) leaves the pod running UNCAPTURED and
 	// the mesh silently doing nothing for it.
-	telemetry.RecordOperation("capture_divert", time.Since(divertStart), divertErr)
+	report.setCaptureDivert(time.Since(divertStart), divertErr)
 	if divertErr != nil {
 		p.logger.Warn("failed to install transparent-capture divert; POD IS RUNNING UNCAPTURED (mesh does nothing for it)",
 			zap.String("netns", args.Netns), zap.Bool("redirect_all", podRedirectAll(netConf)), zap.Error(divertErr))
@@ -165,6 +181,8 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
+	p.reportAddResult(client, report)
+
 	return types.PrintResult(prevResult, netConf.CNIVersion)
 }
 
@@ -177,7 +195,6 @@ func (p *AetherPlugin) CmdCheck(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-	telemetry.Init(context.Background(), p.logger, netConf.OTLPEndpoint)
 
 	if ignorableNamespace(string(k8sArgs.K8S_POD_NAMESPACE)) {
 		return nil
@@ -217,7 +234,6 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-	telemetry.Init(context.Background(), p.logger, conf.OTLPEndpoint)
 
 	namespace := string(k8sArgs.K8S_POD_NAMESPACE)
 	if ignorableNamespace(namespace) {
@@ -457,44 +473,36 @@ func (p *AetherPlugin) resolvePID(netns, criSocket, containerID string) *wrapper
 	return wrapperspb.UInt32(pid)
 }
 
-// sendAddPod sends the pod to the agent and returns the previous result on success.
-func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, pod *cniv1.CNIPod, prevResult *current.Result) (ignored bool, retErr error) {
-	ctx, span := startPodSpan(ctx, "cni.add_pod", pod.GetName(), pod.GetNamespace(), pod.GetContainerId())
-	defer func() { commontelemetry.EndSpan(span, retErr) }()
-
-	client, err := NewCNIClient(p.logger, conf.AgentCNIPath)
+// sendAddPod registers the pod with the agent and, for a managed pod, runs the
+// data-plane readiness probe. ignored reports RESULT_IGNORED (the pod is not
+// mesh-managed); report collects what happens after the RPC for
+// ReportAddResult (nil when ignored or on error).
+func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, client *CNIClient, pod *cniv1.CNIPod) (ignored bool, report *addReport, err error) {
+	res, err := client.AddPod(ctx, pod, p.pluginTimings())
 	if err != nil {
-		return false, fmt.Errorf("failed to create CNI client: %w", err)
-	}
-	defer func() {
-		if cerr := client.Close(); cerr != nil {
-			p.logger.Warn("failed to close CNI client", zap.Error(cerr))
-		}
-	}()
-
-	res, err := client.AddPod(ctx, pod)
-	if err != nil {
-		return false, fmt.Errorf("failed to add pod to agent: %w", err)
+		return false, nil, fmt.Errorf("failed to add pod to agent: %w", err)
 	}
 
 	// RESULT_IGNORED: the pod is not mesh-managed — caller skips capture install.
 	if res.Result == cniv1.AddPodResponse_RESULT_IGNORED {
-		return true, nil
+		return true, nil, nil
 	}
 	if res.Result != cniv1.AddPodResponse_RESULT_SUCCESS {
-		return false, fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
+		return false, nil, fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
 	}
+
+	report = p.newAddReport(pod)
 
 	// Data-plane proof, before pod start completes: probe the outbound capture
 	// listener from inside the pod's netns until the proxy's health_check
 	// filter answers 200. The agent's ACK wait above only confirmed config
 	// acceptance. Best-effort: a timeout is logged, never fails the ADD.
 	if !conf.ReadinessProbeDisabled {
-		probeCtx, probeSpan := startPodSpan(ctx, "cni.readiness_probe", pod.GetName(), pod.GetNamespace(), pod.GetContainerId())
-		probeCtx, cancel := context.WithTimeout(probeCtx, readyProbeAddTimeout)
+		probeStart := time.Now()
+		probeCtx, cancel := context.WithTimeout(ctx, readyProbeAddTimeout)
 		probeErr := newReadinessProber(pod.GetNetworkNamespace()).waitServing(probeCtx)
 		cancel()
-		commontelemetry.EndSpan(probeSpan, probeErr)
+		report.setReadinessProbe(time.Since(probeStart), probeErr)
 		if probeErr != nil {
 			p.logger.Warn("data plane not confirmed serving; continuing",
 				zap.String("netns", pod.GetNetworkNamespace()), zap.Error(probeErr))
@@ -503,7 +511,7 @@ func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, p
 
 	// Managed pod registered + serving: NOT ignored. CmdAdd installs capture next
 	// and prints the CNI result.
-	return false, nil
+	return false, report, nil
 }
 
 // delProbeNetns resolves the netns path to probe during DEL: the pinned path
@@ -519,10 +527,7 @@ func (p *AetherPlugin) delProbeNetns(conf config.AetherConf, args *skel.CmdArgs)
 }
 
 // sendRemovePod sends the pod removal request to the agent.
-func (p *AetherPlugin) sendRemovePod(ctx context.Context, conf config.AetherConf, podName, namespace, containerID string) (retErr error) {
-	ctx, span := startPodSpan(ctx, "cni.remove_pod", podName, namespace, containerID)
-	defer func() { commontelemetry.EndSpan(span, retErr) }()
-
+func (p *AetherPlugin) sendRemovePod(ctx context.Context, conf config.AetherConf, podName, namespace, containerID string) error {
 	client, err := NewCNIClient(p.logger, conf.AgentCNIPath)
 	if err != nil {
 		return fmt.Errorf("failed to create CNI client: %w", err)
@@ -533,7 +538,7 @@ func (p *AetherPlugin) sendRemovePod(ctx context.Context, conf config.AetherConf
 		}
 	}()
 
-	res, err := client.RemovePod(ctx, podName, namespace, containerID)
+	res, err := client.RemovePod(ctx, podName, namespace, containerID, p.pluginTimings())
 	if err != nil {
 		return fmt.Errorf("failed to remove pod from agent: %w", err)
 	}

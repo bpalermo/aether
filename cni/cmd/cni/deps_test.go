@@ -12,20 +12,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// allowedModules is the COMPLETE set of modules the CNI plugin may link: the
-// 37 it linked when this guard was added. It is an allow-list, so a new module
-// fails the build by name — including one that arrives transitively through a
-// dependency bump.
+// allowedModules is the COMPLETE set of modules the CNI plugin may link. It is
+// an allow-list, so a new module fails the build by name — including one that
+// arrives transitively through a dependency bump.
 //
 // The plugin is exec'd by the container runtime for every pod ADD and DEL on
 // every node, so each linked package is paid in Go package init() on every
 // invocation (init() runs before main(); no argv check can skip it). Adding a
 // module is a deliberate act: justify it in the PR.
 //
-// This pins today's set; it does not endorse it. The OTel SDK and OTLP
-// exporters (cni/internal/telemetry, ~13 of these modules) are a separate,
-// open decision about keeping CNI-ADD traces. Removing modules only needs the
-// list trimmed to match.
+// 37 when this guard was added; 19 since #1166 dropped the OTel SDK, the OTLP
+// exporters and otelgrpc (18 modules, 3.2 MB). The plugin exports no telemetry:
+// it forwards its timings and its capture-divert outcome to the agent on the
+// CNI gRPC requests, and the agent exports them. Do not bring an OTel module
+// back for the plugin; add a field to api/aether/cni/v1 instead.
 var allowedModules = map[string]bool{
 	// The plugin itself: CNI spec, netlink/nftables capture rules, the agent's
 	// CNI gRPC API (protovalidate), and the CRI pod sandbox lookup.
@@ -42,7 +42,6 @@ var allowedModules = map[string]bool{
 	"google.golang.org/grpc":                    true,
 	"google.golang.org/protobuf":                true,
 	"github.com/golang/protobuf":                true,
-	"google.golang.org/genproto/googleapis/api": true,
 	"google.golang.org/genproto/googleapis/rpc": true,
 	"golang.org/x/net":                          true,
 	"golang.org/x/sync":                         true,
@@ -53,31 +52,12 @@ var allowedModules = map[string]bool{
 	"go.uber.org/zap":                  true,
 	"go.uber.org/multierr":             true,
 	"gopkg.in/natefinch/lumberjack.v2": true,
-
-	// cni/internal/telemetry: OTel SDK + OTLP trace/metric exporters.
-	"go.opentelemetry.io/otel":                                                    true,
-	"go.opentelemetry.io/otel/metric":                                             true,
-	"go.opentelemetry.io/otel/trace":                                              true,
-	"go.opentelemetry.io/otel/sdk":                                                true,
-	"go.opentelemetry.io/otel/sdk/metric":                                         true,
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace":                           true,
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc":             true,
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc":           true,
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc": true,
-	"go.opentelemetry.io/proto/otlp":                                              true,
-	"go.opentelemetry.io/auto/sdk":                                                true,
-	"github.com/grpc-ecosystem/grpc-gateway/v2":                                   true,
-	"github.com/cenkalti/backoff/v5":                                              true,
-	"github.com/cespare/xxhash/v2":                                                true,
-	"github.com/go-logr/logr":                                                     true,
-	"github.com/go-logr/stdr":                                                     true,
-	"github.com/google/uuid":                                                      true,
 }
 
 // maxModules is the module budget: the size of the allow-list above. It is
 // asserted separately so a change to the list has to change this number too,
 // which makes a growing budget visible in review.
-const maxModules = 37
+const maxModules = 19
 
 // forbiddenPackages must never be reachable from the plugin, under any module.
 // It runs no Kubernetes client (the agent does that and answers over the CNI
@@ -93,10 +73,14 @@ var forbiddenPackages = []string{
 	"github.com/spiffe/go-spiffe",
 	"github.com/miekg/dns",
 	"github.com/spf13/cobra",
+	// #1166: the plugin exports no telemetry. The OTel API alone would come
+	// back with a no-op tracer and nothing to show for its init() cost.
+	"go.opentelemetry.io/",
 }
 
-// maxBinaryBytes is a bloat ceiling, not a target: the plugin is ~17.9MiB.
-const maxBinaryBytes = 24 * 1024 * 1024
+// maxBinaryBytes is a bloat ceiling, not a target: the plugin is ~14.8MiB
+// since #1166 (17.9MiB before it).
+const maxBinaryBytes = 18 * 1024 * 1024
 
 // TestCNIPluginLinksOnlyAllowedModules asserts the allow-list and the module
 // budget against the linked ELF that ships in the cni-install image, via the

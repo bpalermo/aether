@@ -63,17 +63,9 @@ spec:
             # The host CNI dirs (cni.binDir / cni.confDir) as mounted below.
             - "--cni-bin-target-dir=/host{{ .Values.cni.binDir }}"
             - "--mounted-cni-net-dir=/host{{ .Values.cni.confDir }}"
-            {{- with (.Values.cniInstall.otlpEndpoint | default .Values.otel.endpoint) }}
-            # Written into the netconf: the CNI plugin binary runs under the
-            # container runtime, so the endpoint cannot reach it via pod env.
-            # This is the Envoy/CNI plumbing endpoint (template-time), distinct
-            # from the agent's runtime OTLP in the MeshConfig CR.
-            - "--otlp-endpoint={{ . }}"
-            # The plugin resolves names with the HOST's resolver, which cannot
-            # resolve cluster Service names (#950), so cni-install resolves the
-            # host here (cluster DNS) and writes the address into the netconf.
-            - "--otlp-pin-endpoint={{ $.Values.cniInstall.pinOTLPEndpoint }}"
-            {{- end }}
+            # No --otlp-endpoint (#1166): the CNI plugin exports no telemetry;
+            # it reports its timings and capture-divert outcome to the agent,
+            # which exports them with its own.
             # Capture is unconditional (proposal 031, netconf gate retired in
             # round 2); redirect-all-default is the remaining node-wide capture
             # knob (per-pod annotations override).

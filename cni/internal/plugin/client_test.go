@@ -138,7 +138,7 @@ func TestCNIClient_AddPod(t *testing.T) {
 		ContainerId:      "container-123",
 	}
 
-	resp, err := client.AddPod(context.Background(), pod)
+	resp, err := client.AddPod(context.Background(), pod, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
 	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, resp.Result)
@@ -160,7 +160,7 @@ func TestCNIClient_AddPod_Timeout(t *testing.T) {
 		Namespace: "default",
 	}
 
-	_, err := client.AddPod(ctx, pod)
+	_, err := client.AddPod(ctx, pod, nil)
 	assert.Error(t, err)
 }
 
@@ -177,7 +177,7 @@ func TestCNIClient_AddPod_RetryOnTransient(t *testing.T) {
 		Namespace: "default",
 	}
 
-	_, err := client.AddPod(context.Background(), pod)
+	_, err := client.AddPod(context.Background(), pod, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed after 3 attempts")
 	assert.Equal(t, int32(maxRetries), svc.addPodCalls.Load())
@@ -196,7 +196,7 @@ func TestCNIClient_AddPod_NoRetryOnNonTransient(t *testing.T) {
 		Namespace: "default",
 	}
 
-	_, err := client.AddPod(context.Background(), pod)
+	_, err := client.AddPod(context.Background(), pod, nil)
 	assert.Error(t, err)
 	assert.Equal(t, int32(1), svc.addPodCalls.Load())
 }
@@ -206,7 +206,7 @@ func TestCNIClient_RemovePod(t *testing.T) {
 	lis := startMockServer(t, mockService)
 	client := newBufconnClient(t, lis)
 
-	resp, err := client.RemovePod(context.Background(), "test-pod", "default", "container-1234")
+	resp, err := client.RemovePod(context.Background(), "test-pod", "default", "container-1234", nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
 	assert.Equal(t, cniv1.RemovePodResponse_RESULT_SUCCESS, resp.Result)
@@ -222,7 +222,7 @@ func TestCNIClient_RemovePod_NoRetry(t *testing.T) {
 	lis := startMockServer(t, svc)
 	client := newBufconnClient(t, lis)
 
-	_, err := client.RemovePod(context.Background(), "pod", "ns", "ctr")
+	_, err := client.RemovePod(context.Background(), "pod", "ns", "ctr", nil)
 	assert.Error(t, err)
 }
 
@@ -352,11 +352,11 @@ func TestCNIClient_UnixSocketIntegration(t *testing.T) {
 		ContainerId: "container-456",
 	}
 
-	addResp, err := client.AddPod(ctx, pod)
+	addResp, err := client.AddPod(ctx, pod, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, addResp.Result)
 
-	removeResp, err := client.RemovePod(ctx, "integration-pod", "test", "container-456")
+	removeResp, err := client.RemovePod(ctx, "integration-pod", "test", "container-456", nil)
 	assert.NoError(t, err)
 	assert.Equal(t, cniv1.RemovePodResponse_RESULT_SUCCESS, removeResp.Result)
 }
