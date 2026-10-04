@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
 
 # Arch-appropriate Envoy binary, selected at analysis time.
 #
@@ -8,6 +9,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 # proxy compiles most upstream extensions out, so validating against stock Envoy
 # passes configs the real proxy would NACK (#709). Moving the chart pin moves
 # this gate; there is no version to keep in sync here.
+#
+# validate-built-proxy.sh swaps the host-arch repo for a locally built Envoy
+# (--override_repository) so a proxy/ PR is validated against the proxy it
+# builds; proxy.yml runs it. Without that flag nothing here changes.
 alias(
     name = "envoy_bin",
     actual = select({
@@ -73,6 +78,7 @@ go_test(
     srcs = [
         "ads_reconnect_test.go",
         "capture_transparent_test.go",
+        "identity_test.go",
         "l4_observability_test.go",
         "validate_test.go",
     ],
@@ -114,4 +120,11 @@ go_test(
         "@org_golang_google_protobuf//types/known/durationpb",
         "@org_golang_google_protobuf//types/known/wrapperspb",
     ],
+)
+
+# validate-built-proxy.sh, in range of the shellcheck aspect (#853).
+sh_library(
+    name = "envoy_validate_shell",
+    srcs = glob(["*.sh"]),
+    visibility = ["//visibility:private"],
 )
