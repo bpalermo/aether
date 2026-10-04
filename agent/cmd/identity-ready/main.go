@@ -68,8 +68,10 @@ import (
 
 	"github.com/spiffe/go-spiffe/v2/proto/spiffe/workload"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // defaultWorkloadSocket is where the webhook mounts the csi.spiffe.io volume in
@@ -167,6 +169,7 @@ func wait(ctx context.Context, o options, log *slog.Logger) (string, error) {
 	)
 	for {
 		attempts++
+		capped := attemptCapped(ctx, o.attempt)
 		actx, cancel := context.WithTimeout(ctx, o.attempt)
 		id, err := fetchOnce(actx, client)
 		cancel()
@@ -175,9 +178,7 @@ func wait(ctx context.Context, o options, log *slog.Logger) (string, error) {
 				"spiffe_id", id, "elapsed", time.Since(start).Round(time.Millisecond).String(), "attempts", attempts)
 			return id, nil
 		}
-		// An attempt cut short by the overall timeout (or SIGTERM) says nothing
-		// about SPIRE: keep the previous attempt's answer as the one to report.
-		if lastErr == nil || ctx.Err() == nil {
+		if lastErr == nil || !cutShort(ctx, err, capped) {
 			lastErr = err
 		}
 
@@ -199,6 +200,34 @@ func wait(ctx context.Context, o options, log *slog.Logger) (string, error) {
 		case <-time.After(o.retry):
 		}
 	}
+}
+
+// attemptCapped reports whether an attempt started now is denied its full
+// budget because ctx's deadline (the overall --timeout) comes first:
+// context.WithTimeout takes the earlier of the two deadlines.
+func attemptCapped(ctx context.Context, budget time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	return ok && time.Until(deadline) < budget
+}
+
+// cutShort reports whether a failed attempt was merely cut short by the
+// overall --timeout (or SIGTERM) rather than answered by SPIRE. Such an attempt
+// says nothing about SPIRE, so wait keeps the previous attempt's error ("no
+// identity issued", a missing socket) as the one to report.
+//
+// It cannot be decided from ctx.Err() alone (#1190): when the overall deadline
+// caps an attempt, gRPC fails the call with DeadlineExceeded as soon as the
+// deadline is imminent — and the server, which received it as grpc-timeout,
+// can fail it first — so the error routinely arrives while the outer ctx's own
+// timer has not fired yet and ctx.Err() is still nil. The attempt's own budget
+// decides instead: a DeadlineExceeded from an attempt that was capped below
+// --attempt-timeout is the overall deadline, while one from an attempt that had
+// its full budget is SPIRE not answering, and is recorded as such.
+func cutShort(ctx context.Context, err error, capped bool) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	return capped && (status.Code(err) == codes.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded))
 }
 
 // run is main without os.Exit, so tests drive it directly.
