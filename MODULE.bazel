@@ -7,31 +7,31 @@ module(name = "aethermesh")
 
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "platforms", version = "1.1.0")
-bazel_dep(name = "protobuf", version = "36.1.bcr.1")
-bazel_dep(name = "rules_go", version = "0.63.0")
+bazel_dep(name = "protobuf", version = "36.2")
+bazel_dep(name = "rules_go", version = "0.64.1")
 bazel_dep(name = "gazelle", version = "0.54.0")
 
 # Hermetic CPython + pip for //website (the aethermesh.dev MkDocs site). This is
 # the only Python in the repo; see the website block at the bottom of this file.
-bazel_dep(name = "rules_python", version = "2.3.3")
+bazel_dep(name = "rules_python", version = "2.3.4")
 
 # Transitive dependency of rules_img pinned for Bazel 9 compatibility.
 # Older versions (e.g. 0.10.1, pulled in via rules_img → rules_pkg) use the
 # removed `incompatible_use_toolchain_transition` rule() kwarg.
-bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+bazel_dep(name = "rules_foreign_cc", version = "0.16.0")
 
 # Transitive dependency pinned for Bazel 9 compatibility.
 # Pulled in via protobuf → rules_jvm_external → rules_android
 #              and protobuf → rules_kotlin → rules_android.
 # Older version (0.6.4) fails to load CcInfo from rules_cc in android_local_test/attrs.bzl.
 bazel_dep(name = "rules_android", version = "0.7.3")
-bazel_dep(name = "rules_img", version = "0.3.21")
+bazel_dep(name = "rules_img", version = "0.3.22")
 bazel_dep(name = "container_structure_test", version = "1.22.1")
 bazel_dep(name = "protovalidate", version = "1.2.2")
-bazel_dep(name = "aspect_rules_lint", version = "2.9.0")
+bazel_dep(name = "aspect_rules_lint", version = "2.9.1")
 bazel_dep(name = "rules_buf", version = "0.5.4")
-bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
-bazel_dep(name = "rules_helm", version = "0.32.0")
+bazel_dep(name = "buildifier_prebuilt", version = "10.1.0")
+bazel_dep(name = "rules_helm", version = "0.33.0")
 
 # The cosign CLI -- ONLY the CLI. @rules_img_signer_cosign//cosign is the official
 # prebuilt release binary, selected per exec platform, with its sha256 pinned in

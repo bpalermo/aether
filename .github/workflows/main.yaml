@@ -60,7 +60,7 @@ jobs:
       has_unit: ${{ steps.impacted.outputs.has_unit }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           # Full history so the first parent is reachable for the diff.
@@ -78,12 +78,12 @@ jobs:
             echo "sha=" >>"$GITHUB_OUTPUT"
           fi
       - name: Setup Java
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: "21"
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           bazelisk-cache: true
           # Repository cache (#1001): keyed on everything that changes the
@@ -113,7 +113,7 @@ jobs:
           cp scripts/ci-impacted-targets.sh "$RUNNER_TEMP/impacted.sh"
           bash "$RUNNER_TEMP/impacted.sh"
       - name: Upload impacted target lists
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: impacted-targets-main
           path: ${{ runner.temp }}/bazel-diff-out/impacted_*.txt
@@ -129,11 +129,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           bazelisk-cache: true
           # Repository cache (#1001): keyed on everything that changes the
@@ -144,7 +144,7 @@ jobs:
           repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
           cache-save: false
       - name: Download impacted target lists
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: impacted-targets-main
           path: ${{ runner.temp }}/impacted
