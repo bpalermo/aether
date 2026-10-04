@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -390,6 +391,15 @@ func TestSyncer_Start_MultipleEndpointsAcrossServices(t *testing.T) {
 
 // TestSyncer_Start_NoEventsAfterInitialSync verifies that no events are
 // broadcast on subsequent syncs when the registry state is unchanged.
+//
+// The watcher subscribes BEFORE Start and the initial sync's events are
+// expected and filtered out by version, rather than subscribing after Synced()
+// and expecting silence: Synced() closes before the first cycle's Broadcast
+// runs (the gate means "the snapshot is populated", not "its events have been
+// fanned out"), so a post-Synced subscriber can still receive the version-1
+// events late (#1187). Start returning is the barrier for every later cycle:
+// Broadcast is a synchronous enqueue on the sync goroutine, so once <-done
+// fires every event any cycle produced is already in the channel.
 func TestSyncer_Start_NoEventsAfterInitialSync(t *testing.T) {
 	ep := &registryv1.ServiceEndpoint{Ip: "10.0.5.1", Port: 8080, Weight: 100}
 
@@ -403,16 +413,17 @@ func TestSyncer_Start_NoEventsAfterInitialSync(t *testing.T) {
 
 	syncer, _, bc := newTestSyncer(reg, 20*time.Millisecond)
 
+	// Subscribe before the loop runs so the initial sync's events are observed
+	// deterministically, not raced against.
+	eventCh := bc.Subscribe("no-change-watcher", nil)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
 		done <- syncer.Start(ctx)
 	}()
 
-	// Let the initial sync complete, then subscribe so only subsequent syncs
-	// can contribute events.
 	requireSynced(t, syncer)
-	eventCh := bc.Subscribe("no-change-watcher", nil)
 
 	// Let at least two more cycles fire (one list call per synced protocol).
 	requireListCalls(t, reg, reg.listCalls.Load()+2*int64(len(syncedProtocols)))
@@ -421,9 +432,22 @@ func TestSyncer_Start_NoEventsAfterInitialSync(t *testing.T) {
 	require.NoError(t, <-done)
 	bc.Unsubscribe("no-change-watcher", eventCh)
 
-	// Because the state never changed after the first sync, no events should
-	// have been broadcast to the watcher.
-	assert.Empty(t, eventCh, "expected no events when state is unchanged between syncs")
+	var events []*registrarv1.WatchEndpointsResponse
+	for e := range eventCh { // Unsubscribe closed the channel.
+		events = append(events, e)
+	}
+
+	// The initial sync announces the service and its endpoint once per synced
+	// protocol, all stamped with that cycle's version.
+	require.Len(t, events, 1+len(syncedProtocols), "initial sync events: %v", events)
+	initialVersion := events[0].GetVersion()
+
+	// Because the state never changed after the first sync, no event from any
+	// later cycle (a later version) should have been broadcast.
+	for _, e := range events {
+		assert.Equal(t, initialVersion, e.GetVersion(),
+			"expected no events when state is unchanged between syncs, got %v", e)
+	}
 }
 
 // notifyMockRegistry adds a controllable Changes() channel to mockRegistry to
