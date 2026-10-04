@@ -19,11 +19,6 @@ load("@rules_shell//shell:sh_library.bzl", "sh_library")
 # `scripts/check-shell-lint.sh` asserts that the union of these targets' srcs
 # covers every shell script in the repository, so adding one in a directory with
 # no target fails rather than silently falling outside the gate.
-#
-# This replaces the single-file `check_proxy_shell_lint` target added by #848:
-# the guard it named is still here, it is simply one of the seven files the glob
-# now picks up. Only `//scripts:all` was ever referenced (by .github/workflows/
-# proxy.yml), so nothing depended on the old name.
 sh_library(
     name = "scripts_shell",
     srcs = glob(["*.sh"]),

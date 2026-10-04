@@ -17,6 +17,8 @@
 # "envoy_build_config")`); the root //MODULE.bazel instantiates it with
 # local_repository and points Envoy's default @envoy_build_config at it with
 # override_repo. `bazel mod show_repo envoy_build_config` must print this path.
+"""The Envoy extensions compiled into //:envoy: Envoy's default set minus _DROPPED."""
+
 load(
     "@envoy//source/extensions:extensions_build_config.bzl",
     _CONTRIB_EXTENSION_PACKAGE_VISIBILITY = "CONTRIB_EXTENSION_PACKAGE_VISIBILITY",

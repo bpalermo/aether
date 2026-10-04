@@ -43,11 +43,10 @@ bazel_dep(name = "rules_helm", version = "0.33.0")
 # the signature as an OCI 1.1 referrer (docs/runbook.md, "Image signing").
 bazel_dep(name = "rules_img_signer_cosign", version = "0.0.1")
 
-# sh_library, for //bazel/lint/proxy_shell (#848) — the only thing in this
-# workspace that declares shell as a Bazel target, and the reason the shellcheck
-# aspect in //bazel/lint:linters.bzl has anything to visit at all. Bazel 9 no
-# longer provides the native sh_* rules, and autoloading them needs this module
-# in the graph regardless. Same version the //proxy workspace already pins.
+# sh_library / sh_test: the shell targets of //scripts, //bazel, //e2e (#853),
+# which are what the shellcheck aspect in //bazel/lint:linters.bzl visits. Bazel
+# 9 no longer provides the native sh_* rules, and autoloading them needs this
+# module in the graph regardless. Same version the //proxy workspace pins.
 bazel_dep(name = "rules_shell", version = "0.8.0")
 
 # BuildBuddy RBE toolchain — provides the hosted-executor platform and a matching

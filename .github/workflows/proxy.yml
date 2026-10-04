@@ -51,25 +51,28 @@ jobs:
               - 'bazel/registry/**'
               - '.github/workflows/proxy.yml'
 
-  # ShellCheck over the proxy workspace's shell (#848). It runs HERE, not in the
-  # `ci` workflow, because `ci`'s `changes` filter excludes `proxy/**/!(*.md)`
-  # outright — on a proxy-only PR the whole control-plane workflow skips, so a
-  # gate that lived only there would be silent in exactly the case that matters.
-  # This workflow is the one that fires on a proxy change.
+  # Lint and format of the proxy workspace's Starlark and shell (#848). It runs
+  # HERE, not only in the `ci` workflow, because `ci`'s `changes` filter
+  # excludes `proxy/**/!(*.md)` outright — on a proxy-only PR the whole
+  # control-plane workflow skips, so a gate that lived only there would be
+  # silent in exactly the case that matters. This workflow is the one that
+  # fires on a proxy change. (`ci` runs the same two checks on root changes,
+  # where a tool bump or a .shellcheckrc edit can newly flag a proxy file.)
   #
-  # Both steps run from the repository ROOT (no `working-directory: proxy`): the
-  # target is a root-workspace sh_library over symlinks into //proxy, which is
-  # how it gets past //.bazelignore at all. See //bazel/lint/proxy_shell.
+  # Every step runs from the repository ROOT (no `working-directory: proxy`):
+  # proxy/ is behind //.bazelignore, so the root's lint aspects cannot see it,
+  # and scripts/lint-proxy.sh runs buildifier's linter and ShellCheck on the
+  # files git lists instead; the root formatter (//:format) reaches proxy/
+  # directly, the same `git ls-files` way (see .gitattributes).
   #
-  # Cheap by construction — shellcheck over a dozen source files, no toolchain,
-  # no C++, no Envoy — so it needs no RBE and no BuildBuddy key, and it is a
-  # separate job from `test` rather than a step inside it so it reports in
-  # seconds instead of waiting on the compile matrix.
+  # Cheap by construction — no toolchain, no C++, no Envoy — so it needs no RBE
+  # and no BuildBuddy key, and it is a separate job from `test` rather than a
+  # step inside it so it reports in seconds instead of waiting on the compile
+  # matrix.
   #
-  # `//scripts:all` is here because check-proxy-shell-lint.sh lives there and a
-  # gate that is itself unlinted is the same bug one level up. Since #853 that
-  # target is all of scripts/, not one file; //e2e and //bazel are the `ci`
-  # workflow's `shell` job, which is where a root-shell PR actually lands.
+  # `//scripts:all` is ShellCheck'd here because lint-proxy.sh lives there and a
+  # gate that is itself unlinted is the same bug one level up; //e2e and //bazel
+  # are the `ci` workflow's `shell` job, which is where a root-shell PR lands.
   shell:
     needs: changes
     if: needs.changes.outputs.proxy == 'true'
@@ -91,13 +94,7 @@ jobs:
           cache-save: false
 
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
-        run: scripts/ci-bazel-warmup.sh --config=lint --@aspect_rules_lint//lint:fail_on_violation //bazel/lint/proxy_shell:all //scripts:all
-
-      # First: is every proxy script actually reachable by the aspect? A script
-      # added without its symlink would pass the lint step below by simply not
-      # being in it.
-      - name: Every proxy shell script is mirrored into the lint target
-        run: scripts/check-proxy-shell-lint.sh
+        run: scripts/ci-bazel-warmup.sh --config=lint --@aspect_rules_lint//lint:fail_on_violation //scripts:all //:format.check @buildifier_prebuilt//:buildifier @aspect_rules_lint//lint:shellcheck_bin
 
       # The //proxy workspace loads the one registry setting
       # (bazel/registry/registry.bzl, proposal 040) through its
@@ -107,15 +104,43 @@ jobs:
       - name: The image registry is one setting
         run: scripts/check-registry-config.sh
 
-      # Then: lint them. `--config=lint` plus fail_on_violation, NOT
-      # `--config=ci` — that pulls in `--config=remote` and would need the
-      # BuildBuddy key for a job that has no compile to offload.
-      - name: ShellCheck the proxy workspace's shell
+      # buildifier's linter over every proxy BUILD / MODULE.bazel / .bzl, and
+      # ShellCheck over every proxy shell script, both discovered from git — no
+      # mirror to keep complete. Exit 2 if it finds nothing to lint.
+      - name: Lint the proxy workspace's Starlark and shell
+        run: scripts/lint-proxy.sh
+
+      # The whole-repository format check (seconds), which since proxy/ left
+      # rules-lint-ignored includes proxy Starlark (buildifier) and shell
+      # (shfmt). Same language-set assertion as ci.yaml's `format` job.
+      - name: Check formatting (proxy/ included)
+        run: |
+          set +e
+          out="$(bazel run //:format.check 2>&1)"
+          rc=$?
+          printf '%s\n' "$out"
+          missing=()
+          for lang in Starlark Shell; do
+            grep -qF "Formatted $lang in" <<<"$out" || missing+=("$lang")
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            printf '::error::the formatter never ran for: %s — refusing to pass a format gate that checked less than it claims (#853)\n' "${missing[*]}"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::formatting violations — run 'make format' and commit the result"
+            exit 1
+          fi
+
+      # `--config=lint` plus fail_on_violation, NOT `--config=ci` — that pulls
+      # in `--config=remote` and would need the BuildBuddy key for a job that
+      # has no compile to offload.
+      - name: ShellCheck the lint scripts themselves
         run: |
           bazel build \
             --config=lint \
             --@aspect_rules_lint//lint:fail_on_violation \
-            //bazel/lint/proxy_shell:all //scripts:all
+            //scripts:all
 
   test:
     needs: changes

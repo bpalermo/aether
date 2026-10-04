@@ -1,1 +1,0 @@
-../../../../proxy/integration/check_build_id.sh

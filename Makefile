@@ -41,6 +41,15 @@ format-check:
 .PHONY: lint
 lint:
 	@bazel build --config=lint //...
+	@scripts/lint-proxy.sh
+
+# The //proxy workspace's Starlark (buildifier lint) and shell (ShellCheck).
+# proxy/ is behind //.bazelignore, out of the lint aspects' reach, so this runs
+# the same tools on the files git lists. Formatting of proxy/ is plain
+# `make format` / `make format-check`.
+.PHONY: lint-proxy
+lint-proxy:
+	@scripts/lint-proxy.sh
 
 # Is every shell script actually reachable by the shellcheck aspect? `make lint`
 # can only lint what an sh_* target hands it, and for this repository's whole
