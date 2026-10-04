@@ -112,13 +112,9 @@ type AetherConf struct {
 	// resolver). Written by cni-install from the downward-API HOST_IP.
 	HostIP string `json:"host_ip,omitempty"`
 
-	// OTLPEndpoint enables OTel telemetry (traces + metrics) pushed to the
-	// given OTLP gRPC collector (host:port, insecure). The plugin binary is
-	// exec'd by the container runtime, so its environment is the runtime's,
-	// not a pod's — the endpoint travels in the netconf (written by
-	// cni-install) instead. Empty = the standard OTEL_EXPORTER_OTLP_* env
-	// vars, if the runtime happens to set them; otherwise telemetry is off.
-	OTLPEndpoint string `json:"otlp_endpoint,omitempty"`
+	// There is no otlp_endpoint any more (#1166): the plugin exports no
+	// telemetry and forwards its timings to the agent instead. A netconf an
+	// older cni-install wrote still carries the key; json.Unmarshal ignores it.
 
 	// RuntimeConfig holds runtime-provided configuration like pod annotations
 	RuntimeConfig *RuntimeConfig `json:"runtimeConfig,omitempty"`

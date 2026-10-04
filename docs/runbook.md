@@ -3500,6 +3500,34 @@ the pod to set securityContext.fsGroup` needs an fsGroup. A deleted UDS pod stay
 `Terminating` while the plugin is down on its node (the kubelet cannot
 unpublish); it finishes once the plugin is back.
 
+### A pod started uncaptured, or a pod start is slow in the CNI plugin (#1166)
+
+The CNI plugin binary exports no telemetry of its own. Until #1166 it linked the
+OTel SDK and the OTLP exporters (18 of its 37 modules, 3.2 MB of its 18.7 MB) and
+flushed them before every exit, which cost every pod ADD/DEL ~6 ms with a reachable
+collector and **2 s** with an unreachable one — the #950 state talos-main was in for
+weeks. Nothing queried its spans. What only the plugin can see now reaches the
+collector through the agent:
+
+- **Capture divert** (the nftables table + policy routing it installs AFTER AddPod
+  answers): the plugin sends it on `ReportAddResult`, and the agent counts
+  `aether_cni_operations_total{aether_cni_operation="capture_divert",aether_cni_result=…}`
+  (same name and labels the plugin exported) and logs
+  `CNI plugin failed to install the transparent-capture divert; POD IS RUNNING UNCAPTURED`
+  at WARN with the pod. A non-zero `error` series is a pod the mesh silently does
+  nothing for. The `success` series is the existence proof that reporting works.
+- **Timings**, as attributes on the agent's RPC spans (`--trace-export`):
+  `aether.cni.plugin.pre_call_seconds` on `AddPod`/`RemovePod` (netconf parse, PID/CRI
+  lookup, netns pin — before the agent's own span starts), and on `ReportAddResult`
+  `aether.cni.plugin.{readiness_probe,capture_divert,total}_seconds` plus
+  `…readiness_probe_error` / `…capture_divert_error`.
+- ADD/DEL counts and latency as the agent served them: otelgrpc's `rpc.server.*`
+  metrics for `aether.cni.v1.CNIService/AddPod` and `/RemovePod`.
+
+Still node-local only: an ADD that never reached the agent (agent down). Its trace is
+the kubelet's `FailedCreatePodSandBox` event and the plugin log,
+`/var/log/aether-cni/plugin.log` on the node (`talosctl -n <node> read …`).
+
 ### A pod never becomes routable: what HEALTHY means since #815
 
 An endpoint is advertised to the mesh only after the node agent's liveness loop

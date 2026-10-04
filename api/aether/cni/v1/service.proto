@@ -4,6 +4,8 @@ package aether.cni.v1;
 
 import "api/aether/cni/v1/cni.proto";
 import "buf/validate/validate.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 
 // Preserve proto3 implicit field presence so the generated Go/C++ API is
 // unchanged by the edition migration (scalars stay value types, not pointers).
@@ -13,10 +15,34 @@ option go_package = "aethermesh.dev/api/aether/cni/v1;cniv1";
 service CNIService {
   rpc AddPod(AddPodRequest) returns (AddPodResponse) {}
   rpc RemovePod(RemovePodRequest) returns (RemovePodResponse) {}
+  // ReportAddResult carries what the plugin did AFTER AddPod answered: the
+  // data-plane readiness probe and the transparent-capture divert (nftables)
+  // install. Best-effort: the plugin never fails an ADD on it, and an agent
+  // that predates it answers UNIMPLEMENTED, which the plugin ignores. The agent
+  // records it as span attributes, the
+  // aether.cni.operations{operation="capture_divert"} counter, and a WARN when
+  // the divert failed (the pod runs UNCAPTURED). Issue #1166.
+  rpc ReportAddResult(ReportAddResultRequest) returns (ReportAddResultResponse) {}
+}
+
+// PluginTimings are the CNI plugin's own timings for one invocation. The plugin
+// exports no telemetry of its own (issue #1166: the OTel SDK cost every pod
+// ADD/DEL a collector round trip, and 2 s whenever the collector was
+// unreachable), so it forwards them to the agent, whose RPC span records them
+// as attributes. Optional throughout: a plugin that predates them sends none,
+// and the agent then records nothing extra for that call.
+message PluginTimings {
+  // started is when the plugin process entered main().
+  google.protobuf.Timestamp started = 1;
+  // pre_call is started -> this RPC was sent: netconf parsing, the container
+  // PID lookup (a CRI call when the netns path carries no PID) and the netns
+  // pin. Work the agent's own span cannot see.
+  google.protobuf.Duration pre_call = 2;
 }
 
 message AddPodRequest {
   CNIPod pod = 1;
+  PluginTimings plugin_timings = 2;
 }
 
 message AddPodResponse {
@@ -34,6 +60,45 @@ message AddPodResponse {
   Result result = 1;
 }
 
+message ReportAddResultRequest {
+  string name = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  string namespace = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  string container_id = 3 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  PluginTimings plugin_timings = 4;
+
+  // readiness_probe is how long the in-netns probe of the pod's outbound
+  // capture listener took. Unset when the probe is disabled
+  // (readiness_probe_disabled in the netconf).
+  google.protobuf.Duration readiness_probe = 5;
+  // readiness_probe_error is the probe's failure; empty = it confirmed serving.
+  string readiness_probe_error = 6;
+
+  // capture_divert is how long installing the transparent-capture divert
+  // (nftables table + policy routing) in the pod's netns took.
+  google.protobuf.Duration capture_divert = 7;
+  // capture_divert_error is the install failure; empty = installed. Non-empty
+  // means the pod is running UNCAPTURED: the mesh does nothing for it.
+  string capture_divert_error = 8;
+
+  // total is the plugin's started -> this report was sent: the whole ADD as
+  // the plugin saw it, short of printing the result to the runtime.
+  google.protobuf.Duration total = 9;
+}
+
+message ReportAddResultResponse {}
+
 message RemovePodRequest {
   string name = 1 [
     (buf.validate.field).required = true,
@@ -49,6 +114,8 @@ message RemovePodRequest {
     (buf.validate.field).required = true,
     (buf.validate.field).string.min_len = 1
   ];
+
+  PluginTimings plugin_timings = 5;
 }
 
 message RemovePodResponse {

@@ -7,7 +7,6 @@ import (
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	"aethermesh.dev/common/retry"
-	"aethermesh.dev/common/telemetry"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -21,6 +20,11 @@ const (
 	delTimeout = 5 * time.Second
 	// checkTimeout is the context timeout for check-related gRPC calls.
 	checkTimeout = 1 * time.Second
+	// reportTimeout bounds the best-effort ReportAddResult call. The agent's
+	// handler only records attributes and a counter, so a healthy agent answers
+	// in well under a millisecond over the node-local socket; this caps what a
+	// wedged one can add to a pod start.
+	reportTimeout = 500 * time.Millisecond
 
 	// maxRetries is the maximum number of retries for transient failures.
 	maxRetries = 3
@@ -41,9 +45,6 @@ func NewCNIClient(logger *zap.Logger, socketPath string) (*CNIClient, error) {
 	conn, err := grpc.NewClient(
 		"unix://"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		// No-op unless tracing is enabled via OTEL_EXPORTER_OTLP_ENDPOINT;
-		// propagates the CNI operation's trace context to the agent.
-		grpc.WithStatsHandler(telemetry.ClientStatsHandler()),
 	)
 	if err != nil {
 		msg := "failed to connect to socket"
@@ -59,7 +60,8 @@ func NewCNIClient(logger *zap.Logger, socketPath string) (*CNIClient, error) {
 }
 
 // AddPod adds a pod to the registry with a timeout and retry logic for transient failures.
-func (c *CNIClient) AddPod(ctx context.Context, pod *cniv1.CNIPod) (*cniv1.AddPodResponse, error) {
+// timings (nil = none) ride along for the agent's span (#1166).
+func (c *CNIClient) AddPod(ctx context.Context, pod *cniv1.CNIPod, timings *cniv1.PluginTimings) (*cniv1.AddPodResponse, error) {
 	c.logger.Debug("adding pod to registry",
 		zap.String("name", pod.Name),
 		zap.String("namespace", pod.Namespace),
@@ -67,7 +69,8 @@ func (c *CNIClient) AddPod(ctx context.Context, pod *cniv1.CNIPod) (*cniv1.AddPo
 		zap.String("networkNamespace", pod.NetworkNamespace))
 
 	req := &cniv1.AddPodRequest{
-		Pod: pod,
+		Pod:           pod,
+		PluginTimings: timings,
 	}
 
 	var resp *cniv1.AddPodResponse
@@ -91,22 +94,35 @@ func (c *CNIClient) AddPod(ctx context.Context, pod *cniv1.CNIPod) (*cniv1.AddPo
 
 // RemovePod removes a pod from the registry with a timeout. Del operations
 // are not retried to avoid issues with duplicate deletions.
-func (c *CNIClient) RemovePod(ctx context.Context, podName string, namespace string, containerId string) (*cniv1.RemovePodResponse, error) {
+// timings (nil = none) ride along for the agent's span (#1166).
+func (c *CNIClient) RemovePod(ctx context.Context, podName string, namespace string, containerId string, timings *cniv1.PluginTimings) (*cniv1.RemovePodResponse, error) {
 	c.logger.Debug("removing pod from registry",
 		zap.String("containerId", containerId),
 		zap.String("name", podName),
 		zap.String("namespace", namespace))
 
 	req := &cniv1.RemovePodRequest{
-		Name:        podName,
-		Namespace:   namespace,
-		ContainerId: containerId,
+		Name:          podName,
+		Namespace:     namespace,
+		ContainerId:   containerId,
+		PluginTimings: timings,
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, delTimeout)
 	defer cancel()
 
 	return c.client.RemovePod(callCtx, req)
+}
+
+// ReportAddResult sends the post-AddPod outcome (readiness probe, capture
+// divert) to the agent. One attempt, short timeout, no retry: it is telemetry,
+// and the pod's start must not wait on it.
+func (c *CNIClient) ReportAddResult(ctx context.Context, req *cniv1.ReportAddResultRequest) error {
+	callCtx, cancel := context.WithTimeout(ctx, reportTimeout)
+	defer cancel()
+
+	_, err := c.client.ReportAddResult(callCtx, req)
+	return err
 }
 
 // VerifyPodRegistered verifies that a pod is still registered with the agent

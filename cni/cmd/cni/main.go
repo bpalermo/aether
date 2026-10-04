@@ -7,26 +7,16 @@ import (
 
 	cnilog "aethermesh.dev/cni/internal/log"
 	"aethermesh.dev/cni/internal/plugin"
-	"aethermesh.dev/cni/internal/telemetry"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/version"
 	"go.uber.org/zap"
 )
 
-// instrument wraps a CNI command handler with operation metrics. Telemetry is
-// initialized lazily inside the handler (the OTLP endpoint lives in the
-// netconf, parsed there); recording after the handler returns is therefore
-// already past initialization — or a no-op when telemetry is disabled.
-func instrument(op string, fn func(*skel.CmdArgs) error) func(*skel.CmdArgs) error {
-	return func(args *skel.CmdArgs) error {
-		start := time.Now()
-		err := fn(args)
-		telemetry.RecordOperation(op, time.Since(start), err)
-		return err
-	}
-}
-
 func main() {
+	// The plugin exports no telemetry of its own (#1166): it forwards its timings
+	// to the agent on the CNI gRPC requests, measured from here.
+	started := time.Now()
+
 	logger, err := cnilog.NewLogger()
 	defer func(logger *zap.Logger) {
 		if err := logger.Sync(); err != nil {
@@ -41,6 +31,7 @@ func main() {
 	logger.Debug("aether CNI plugin started")
 
 	p := plugin.NewAetherPlugin(logger)
+	p.SetStarted(started)
 
 	// Detached netns-unpin mode (spawned by CmdDel, not by the runtime): wait
 	// out the drain tail, then release the pin. See plugin.RunDetachedUnpin.
@@ -49,17 +40,13 @@ func main() {
 		return
 	}
 
-	// The plugin process exits after a single CNI operation, so batched spans
-	// and metrics must be flushed on every path — including failures — before
-	// the error is reported to the runtime.
 	e := skel.PluginMainFuncsWithError(skel.CNIFuncs{
-		Add:    instrument("add", p.CmdAdd),
-		Check:  instrument("check", p.CmdCheck),
-		Del:    instrument("del", p.CmdDel),
-		GC:     instrument("gc", p.CmdGC),
-		Status: instrument("status", p.CmdStatus),
+		Add:    p.CmdAdd,
+		Check:  p.CmdCheck,
+		Del:    p.CmdDel,
+		GC:     p.CmdGC,
+		Status: p.CmdStatus,
 	}, version.All, "CNI aether plugin v0.0.1")
-	telemetry.Flush(logger)
 	if e != nil {
 		if err := e.Print(); err != nil {
 			log.Print("Error writing error JSON to stdout: ", err)

@@ -11,6 +11,8 @@ proto_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "@protobuf//:duration_proto",
+        "@protobuf//:timestamp_proto",
         "@protobuf//:wrappers_proto",
         "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
     ],

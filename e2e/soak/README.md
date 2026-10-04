@@ -745,7 +745,7 @@ one, know which kind it is and what proves it can move:
 |---|---|---|
 | prober `dns_*` classes | **no series** (created on first occurrence) | source: `classifyErr` in `prober/internal/prober/prober.go` |
 | anyport hits on DECLARED ports in the L4 access log (#1095; see "The Phase 4 evidence clock") | no rows | the `anyport-probe.sh` connections (undeclared port 19999) in the same query's pre-T0 window, and the neighbouring `cap_tcp_*` chains climbing. The `cap_tcp_anyport_*` counter is NOT the proof: its series vanishes at the first proxy roll |
-| `aether_cni_operations_total{aether_cni_operation="capture_divert",aether_cni_result="error"}` | **no series** | `…{aether_cni_operation="add"}` must exist (the export works). The labels are `aether_cni_operation`/`aether_cni_result` (#1088); `operation`/`result` match nothing |
+| `aether_cni_operations_total{aether_cni_operation="capture_divert",aether_cni_result="error"}` | **no series** | `…{aether_cni_operation="capture_divert",aether_cni_result="success"}` must exist (the report reaches the agent; exported by the agent since #1166, there is no `add` series any more). The labels are `aether_cni_operation`/`aether_cni_result` (#1088); `operation`/`result` match nothing |
 | `envoy_cluster_init_fetch_timeout_total{aether_cluster=~".*@.*"}` (#1014) | **no series**; a failure is BORN at 1, so `increase()` alone reads 0 — use `max_over_time` too | rev242's red reading (above), and each step's own `@…/sa-new-*` twin series existing with traffic |
 | `503/NC` for `user_agent:aether-soak-newsa` | no rows | the same query without `response_flags:NC` returns the step's requests |
 | non-benign lines on `uds-echo` / `uds-cr-echo` (#1108; see "The UDS leg") | no rows | the clean-200 control query: k6 (`default`) and `uds-client` rows on both authorities |
@@ -1072,10 +1072,10 @@ spelling this section used to carry matches nothing, so both the gate and its
 existence proof read empty:
 
 ```promql
-# MUST return no series. Use max_over_time, not increase(). The plugin is a
-# short-lived process per CNI call, and over 2026-10-01 every series sat at 1 on
-# every node. A series born at its final value reads 0 under increase() (the
-# counter rule under "Grading").
+# MUST return no series. Use max_over_time, not increase(). Since #1166 the AGENT
+# exports this counter (the plugin reports each capture divert to it), so it is
+# per agent process: it resets at every agent roll, and an error is born at 1,
+# which increase() reads as 0 (the counter rule under "Grading").
 max_over_time(aether_cni_operations_total{aether_cni_operation="capture_divert",aether_cni_result="error"}[8h])
 # the existence proof: one row per node per (operation, result) that occurred
 count by (node, aether_cni_operation, aether_cni_result) (last_over_time(aether_cni_operations_total[8h]))
@@ -1085,16 +1085,18 @@ A non-zero error series is a pod that started UNCAPTURED (the table was rejected
 the mesh silently does nothing for it. Each CNI ADD counts it, so a series that
 appears during a roll is a real event, not a rate artefact.
 
-Before reading it, prove the CNI exports at all: `aether_cni_operations_total{aether_cni_operation="add"}`
-must have at least one series (every pod ADD increments it). On 2026-10-01 the
-existence proof returned add, del and capture_divert `success` on all five nodes. An
-EMPTY result is a broken export, never "zero errors" — that was talos-main until #950, where the plugin (which runs
-under the host's resolver) could not resolve `otel-collector.o11y.svc.cluster.local` and no
-`aether_cni_*` series existed at all. Since #950 cni-install pins the name to the
-Service's ClusterIP; confirm on a node with
-`talosctl -n <node> read /etc/cni/net.d/10-flannel.conflist | grep otlp_endpoint` (an IP, not
-the name). If it still shows the name, the collector Service did not resolve when that
-node's agent started — roll the agent.
+Before reading it, prove the report path works at all:
+`aether_cni_operations_total{aether_cni_operation="capture_divert",aether_cni_result="success"}`
+must have at least one series (every managed-pod ADD increments it). An EMPTY result
+is a broken report path, never "zero errors". Before #1166 the PLUGIN exported this
+series (with `add` and `del` beside it) over its own OTLP exporter, and talos-main had
+none at all until #950 because the plugin, under the host's resolver, could not resolve
+the collector's Service name. Since #1166 the plugin sends the outcome to the agent
+over the CNI socket (`ReportAddResult`), so the series exists wherever the agent's
+own metrics do. If `success` is absent while agent metrics flow, check the agent log
+and `/var/log/aether-cni/plugin.log` on a node for `failed to report the ADD outcome`.
+A plugin older than the agent sends no report: during an upgrade the series appears
+only once cni-install has rolled with the agent.
 
 ### The QUIC leg (proposal 038 Phase 4)
 
