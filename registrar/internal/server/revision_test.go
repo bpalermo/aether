@@ -64,6 +64,11 @@ type derivedRevisionedRegistry struct{ revisionedRegistry }
 
 func (*derivedRevisionedRegistry) DerivesEndpoints() bool { return true }
 
+// clean renders the clean version for revision rev and state st's hash.
+func clean(rev int64, st State) string {
+	return strconv.FormatInt(rev, 10) + "." + st.ContentHash
+}
+
 func ep(ip string) *registryv1.ServiceEndpoint {
 	return &registryv1.ServiceEndpoint{Ip: ip, Port: 8080}
 }
@@ -85,7 +90,7 @@ func TestSync_StoreRevisionIsTheVersion(t *testing.T) {
 	reg.set(7, map[string][]*registryv1.ServiceEndpoint{"ns/a": {ep("10.0.0.1")}})
 	syncer.sync(ctx)
 	first := snap.State()
-	assert.Equal(t, "7", first.Version)
+	assert.Equal(t, clean(7, first), first.Version)
 	assert.Equal(t, int64(7), first.Revision)
 	assert.Equal(t, 1, reg.revLists, "one read per sync")
 	assert.Zero(t, reg.listCalls.Load(), "the per-protocol listing must not be used")
@@ -97,23 +102,23 @@ func TestSync_StoreRevisionIsTheVersion(t *testing.T) {
 	reg.set(8, map[string][]*registryv1.ServiceEndpoint{"ns/a": {ep("10.0.0.1")}})
 	syncer.sync(ctx)
 	moved := snap.State()
-	assert.Equal(t, "8", moved.Version)
+	assert.Equal(t, clean(8, moved), moved.Version)
 	assert.Equal(t, first.Generation, moved.Generation, "same contents, same generation")
 	assert.Equal(t, first.ContentHash, moved.ContentHash, "the hash is computed from the entries, not the revision")
 
 	reg.set(9, map[string][]*registryv1.ServiceEndpoint{"ns/a": {ep("10.0.0.1"), ep("10.0.0.2")}})
 	syncer.sync(ctx)
 	changed := snap.State()
-	assert.Equal(t, "9", changed.Version)
+	assert.Equal(t, clean(9, changed), changed.Version)
 	assert.Equal(t, first.Generation+1, changed.Generation)
 	assert.NotEqual(t, first.ContentHash, changed.ContentHash)
 }
 
 // TestSnapshot_ReplicasAtOneRevision (#1193): two replicas fed the same listing
 // at the same revision report the same version and hash; a replica whose
-// contents differ at that revision reports the same clean version but a
-// different content_hash -- the divergence the content.content_hash gauge
-// exists to expose.
+// contents differ at that revision (the divergence the content_hash gauge
+// exists to expose) reports a different version, so no client is ever told it
+// is current against contents it does not hold.
 func TestSnapshot_ReplicasAtOneRevision(t *testing.T) {
 	state := func(ips ...string) map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint {
 		return listing(map[string][]string{"ns/a": ips})
@@ -125,11 +130,12 @@ func TestSnapshot_ReplicasAtOneRevision(t *testing.T) {
 	c.DiffAndReplaceAt(state("10.0.0.1"), Origin{Revision: 42})
 
 	sa, sb, sc := a.State(), b.State(), c.State()
-	assert.Equal(t, "42", sa.Version)
+	assert.Equal(t, clean(42, sa), sa.Version)
 	assert.Equal(t, sa.Version, sb.Version)
 	assert.Equal(t, sa.ContentHash, sb.ContentHash)
-	assert.Equal(t, sa.Version, sc.Version, "a clean version names the revision only")
+	assert.Equal(t, sa.Revision, sc.Revision)
 	assert.NotEqual(t, sa.ContentHash, sc.ContentHash, "same revision + different content_hash = divergence")
+	assert.NotEqual(t, sa.Version, sc.Version, "the revision alone never names contents")
 }
 
 // TestSnapshot_ContentHashCoversEveryField: the hash is over the endpoints'
@@ -156,7 +162,7 @@ func TestSnapshot_ContentHashCoversEveryField(t *testing.T) {
 func TestSnapshot_ApplyDirtiesARevisionedVersion(t *testing.T) {
 	s := NewSnapshot()
 	s.DiffAndReplaceAt(listing(map[string][]string{"ns/a": {"10.0.0.1"}}), Origin{Revision: 3})
-	require.Equal(t, "3", s.Version())
+	require.Equal(t, clean(3, s.State()), s.Version())
 
 	s.Apply([]*registrarv1.WatchEndpointsResponse{{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
@@ -164,7 +170,7 @@ func TestSnapshot_ApplyDirtiesARevisionedVersion(t *testing.T) {
 		Protocol:    registryv1.Service_PROTOCOL_HTTP,
 		Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.9.9.9"}, // absent
 	}})
-	assert.Equal(t, "3", s.Version(), "an Apply that changes nothing keeps the clean version")
+	assert.Equal(t, clean(3, s.State()), s.Version(), "an Apply that changes nothing keeps the clean version")
 
 	s.Apply([]*registrarv1.WatchEndpointsResponse{{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
@@ -193,7 +199,7 @@ func TestSync_PendingOverlayDirtiesTheVersionUntilObserved(t *testing.T) {
 
 	reg.set(10, map[string][]*registryv1.ServiceEndpoint{"ns/a": {ep("10.0.0.1")}})
 	syncer.sync(ctx)
-	require.Equal(t, "10", snap.Version())
+	require.Equal(t, clean(10, snap.State()), snap.Version())
 
 	_, err := srv.RegisterEndpoint(ctx, &registrarv1.RegisterEndpointRequest{
 		ServiceName: "ns/a", Protocol: registryv1.Service_PROTOCOL_HTTP, Endpoint: ep("10.0.0.2"),
@@ -207,7 +213,7 @@ func TestSync_PendingOverlayDirtiesTheVersionUntilObserved(t *testing.T) {
 	syncer.sync(ctx)
 	overlaid := snap.State()
 	assert.Equal(t, "11+"+overlaid.ContentHash, overlaid.Version, "a pending intent must not let the version read clean")
-	assert.NotEqual(t, "11", overlaid.Version)
+	assert.NotEqual(t, clean(11, overlaid), overlaid.Version)
 	assert.Equal(t, applied.ContentHash, overlaid.ContentHash, "the overlay kept the applied contents")
 	assert.Equal(t, applied.Generation, overlaid.Generation)
 
@@ -216,10 +222,10 @@ func TestSync_PendingOverlayDirtiesTheVersionUntilObserved(t *testing.T) {
 	reg.set(12, map[string][]*registryv1.ServiceEndpoint{"ns/a": {ep("10.0.0.1"), ep("10.0.0.2")}})
 	syncer.sync(ctx)
 	require.False(t, q.Shielding("ns/a", "10.0.0.2"), "an observed intent is released")
-	clean := snap.State()
-	assert.Equal(t, "12", clean.Version)
-	assert.Equal(t, applied.ContentHash, clean.ContentHash)
-	assert.Equal(t, applied.Generation, clean.Generation, "releasing an intent the store now holds is not a content change")
+	released := snap.State()
+	assert.Equal(t, clean(12, released), released.Version)
+	assert.Equal(t, applied.ContentHash, released.ContentHash)
+	assert.Equal(t, applied.Generation, released.Generation, "releasing an intent the store now holds is not a content change")
 }
 
 // TestSync_DerivedReleaseReturnsToTheCleanRevision is the #1152 release path
@@ -236,7 +242,7 @@ func TestSync_DerivedReleaseReturnsToTheCleanRevision(t *testing.T) {
 
 	reg.set(20, map[string][]*registryv1.ServiceEndpoint{"ns/a": {ep("10.0.0.1")}})
 	syncer.sync(ctx)
-	require.Equal(t, "20", snap.Version())
+	require.Equal(t, clean(20, snap.State()), snap.Version())
 
 	// A sync already in flight when the intent arrived: overlaid, dirty.
 	listedAt := time.Now()
@@ -253,7 +259,7 @@ func TestSync_DerivedReleaseReturnsToTheCleanRevision(t *testing.T) {
 	// The next sync started after the intent: released, the listing decides.
 	syncer.sync(ctx)
 	assert.False(t, q.Shielding("ns/a", "10.0.0.1"))
-	assert.Equal(t, "20", snap.Version())
+	assert.Equal(t, clean(20, snap.State()), snap.Version())
 }
 
 // TestSync_NoRevisionIsContentAddressed: a backend without revisions (the
@@ -294,51 +300,71 @@ func watchOnce(t *testing.T, snap *Snapshot, token string) []*registrarv1.WatchE
 	return reconnect(t, s, token)
 }
 
-// TestWatchEndpoints_ResumeDecision (#1193): a token naming the current
-// contents gets the marker alone; a stale or foreign one gets the snapshot and
-// the catalog; a dirty token whose contents a later sync re-derived cleanly is
-// still current, and its marker echoes the client's own token.
+// TestWatchEndpoints_ResumeDecision (#1193): only the token's content hash
+// decides. The current version gets the marker alone; the current contents
+// under another name get the catalog and a marker carrying the CURRENT version
+// (no endpoint events); anything else gets the snapshot and the catalog.
 func TestWatchEndpoints_ResumeDecision(t *testing.T) {
 	two := listing(map[string][]string{"ns/a": {"10.0.0.1", "10.0.0.2"}})
+	one := listing(map[string][]string{"ns/a": {"10.0.0.1"}})
+	hashOf := func(state map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) string {
+		s := NewSnapshot()
+		s.DiffAndReplace(state)
+		return s.State().ContentHash
+	}
+	// renamed asserts the rename shape: catalog + marker(current), no endpoints.
+	renamed := func(t *testing.T, sent []*registrarv1.WatchEndpointsResponse, current string) {
+		t.Helper()
+		assert.Zero(t, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT), "same contents: no endpoint resend")
+		assert.Equal(t, 1, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED), "the identical catalog precedes the new name")
+		last := sent[len(sent)-1]
+		assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, last.GetType())
+		assert.Equal(t, current, last.GetVersion(), "the marker hands the client the current name")
+	}
 
-	t.Run("matching revision: marker only", func(t *testing.T) {
+	t.Run("current version: marker only", func(t *testing.T) {
 		snap := NewSnapshot()
 		snap.DiffAndReplaceAt(two, Origin{Revision: 30})
-		sent := watchOnce(t, snap, "30")
+		sent := watchOnce(t, snap, snap.Version())
 		require.Len(t, sent, 1)
 		assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, sent[0].GetType())
-		assert.Equal(t, "30", sent[0].GetVersion())
+		assert.Equal(t, snap.Version(), sent[0].GetVersion())
 	})
 
-	t.Run("stale revision: full snapshot and catalog", func(t *testing.T) {
+	t.Run("other contents: full snapshot and catalog", func(t *testing.T) {
 		snap := NewSnapshot()
 		snap.DiffAndReplaceAt(two, Origin{Revision: 30})
-		sent := watchOnce(t, snap, "29")
+		sent := watchOnce(t, snap, "29."+hashOf(one))
 		assert.Equal(t, 2, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT))
 		assert.Equal(t, 1, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED))
 		last := sent[len(sent)-1]
 		assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, last.GetType())
-		assert.Equal(t, "30", last.GetVersion())
+		assert.Equal(t, snap.Version(), last.GetVersion())
 		for _, e := range sent[:len(sent)-1] {
 			assert.Empty(t, e.GetVersion(), "only the marker carries the version (#1203)")
 		}
 	})
 
-	t.Run("no revision: the content hash decides", func(t *testing.T) {
+	t.Run("same revision, other contents: full snapshot", func(t *testing.T) {
+		// A rebuilt etcd restarting its revisions, or a binary decoding a stored
+		// value differently: the revision is never trusted for equality.
 		snap := NewSnapshot()
-		snap.DiffAndReplace(two)
-		current := snap.Version()
-		require.Len(t, watchOnce(t, snap, current), 1)
-
-		other := NewSnapshot()
-		other.DiffAndReplace(listing(map[string][]string{"ns/a": {"10.0.0.1"}}))
-		sent := watchOnce(t, snap, other.Version())
+		snap.DiffAndReplaceAt(two, Origin{Revision: 30})
+		sent := watchOnce(t, snap, "30."+hashOf(one))
 		assert.Equal(t, 2, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT))
 	})
 
-	t.Run("dirty token re-derived cleanly: current, marker echoes the token", func(t *testing.T) {
+	t.Run("no revision: the content hash decides", func(t *testing.T) {
 		snap := NewSnapshot()
-		snap.DiffAndReplaceAt(listing(map[string][]string{"ns/a": {"10.0.0.1"}}), Origin{Revision: 30})
+		snap.DiffAndReplace(two)
+		require.Len(t, watchOnce(t, snap, snap.Version()), 1)
+		sent := watchOnce(t, snap, "hash:"+hashOf(one))
+		assert.Equal(t, 2, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT))
+	})
+
+	t.Run("dirty token re-derived cleanly: renamed", func(t *testing.T) {
+		snap := NewSnapshot()
+		snap.DiffAndReplaceAt(one, Origin{Revision: 30})
 		snap.Apply([]*registrarv1.WatchEndpointsResponse{{
 			Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, ServiceName: "ns/a",
 			Protocol: registryv1.Service_PROTOCOL_HTTP, Endpoint: ep("10.0.0.2"),
@@ -347,41 +373,37 @@ func TestWatchEndpoints_ResumeDecision(t *testing.T) {
 		require.Contains(t, token, "30+")
 
 		snap.DiffAndReplaceAt(two, Origin{Revision: 31}) // the write landed
-		require.Equal(t, "31", snap.Version())
-		sent := watchOnce(t, snap, token)
-		require.Len(t, sent, 1, "same contents under a new name: no resend")
-		assert.Equal(t, token, sent[0].GetVersion(),
-			"the marker must echo the token, or the agent swaps in an empty catalog replay")
+		require.Equal(t, clean(31, snap.State()), snap.Version())
+		renamed(t, watchOnce(t, snap, token), snap.Version())
 	})
 
-	t.Run("clean token, revision moved without a content change: current", func(t *testing.T) {
-		// An agent's re-assert after a reconnect re-Puts endpoints etcd already
-		// holds: the revision moves, the contents do not. A token naming the
-		// earlier revision still names the current contents.
+	t.Run("clean token, revision moved without a content change: renamed", func(t *testing.T) {
+		// An agent's re-assert re-Puts endpoints etcd already holds, or config
+		// export / 006 mirroring writes elsewhere under the prefix: the revision
+		// moves, the contents do not -- however far, and whichever replica
+		// issued the token.
 		snap := NewSnapshot()
 		snap.DiffAndReplaceAt(two, Origin{Revision: 30})
-		snap.DiffAndReplaceAt(two, Origin{Revision: 34})
-		require.Equal(t, "34", snap.Version())
-		sent := watchOnce(t, snap, "30")
-		require.Len(t, sent, 1, "same contents at a newer revision: no resend")
-		assert.Equal(t, "30", sent[0].GetVersion())
+		token := snap.Version()
+		snap.DiffAndReplaceAt(two, Origin{Revision: 5000})
+		renamed(t, watchOnce(t, snap, token), snap.Version())
+
+		other := NewSnapshot() // a replica that never installed revision 30
+		other.DiffAndReplaceAt(two, Origin{Revision: 5001})
+		renamed(t, watchOnce(t, other, token), other.Version())
 
 		// ...but not once the contents changed since.
-		snap.DiffAndReplaceAt(listing(map[string][]string{"ns/a": {"10.0.0.1"}}), Origin{Revision: 35})
-		sent = watchOnce(t, snap, "30")
+		snap.DiffAndReplaceAt(one, Origin{Revision: 5002})
+		sent := watchOnce(t, snap, token)
 		assert.Equal(t, 1, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT))
-
-		// ...nor for a revision this replica never installed.
-		snap.DiffAndReplaceAt(two, Origin{Revision: 36})
-		sent = watchOnce(t, snap, "33")
-		assert.Equal(t, 2, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT))
 	})
 
 	t.Run("pre-#1193 counter token: full snapshot", func(t *testing.T) {
 		snap := NewSnapshot()
-		snap.DiffAndReplace(two)
+		snap.DiffAndReplaceAt(two, Origin{Revision: 7})
 		sent := watchOnce(t, snap, "7")
-		assert.Equal(t, 2, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT))
+		assert.Equal(t, 2, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT),
+			"a bare integer embeds no hash and never matches, even equal to the revision")
 	})
 }
 

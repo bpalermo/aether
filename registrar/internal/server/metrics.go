@@ -142,31 +142,28 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	}
 
 	if m.watchStarts, err = meter.Int64Counter("aether.registrar.watch.starts",
-		metric.WithDescription("Agent watch streams opened, by whether the full snapshot was sent (resume=resent) or the agent's last_version named the current contents (resume=current)")); err != nil {
+		metric.WithDescription("Agent watch streams opened, by resume outcome: resent (full snapshot), current (last_version is the current version: marker only), renamed (same contents under an older version: catalog + marker)")); err != nil {
 		return nil, fmt.Errorf("watch starts: %w", err)
 	}
 
 	return m, nil
 }
 
-// attrResume labels a watch start by its resume outcome. Two values.
+// attrResume labels a watch start by its resume outcome. Three values.
 const attrResume = attribute.Key("resume")
 
-var (
-	resumeResent  = metric.WithAttributes(attrResume.String("resent"))
-	resumeCurrent = metric.WithAttributes(attrResume.String("current"))
-)
+var resumeOptions = map[Resume]metric.MeasurementOption{
+	ResumeResend:  metric.WithAttributes(attrResume.String("resent")),
+	ResumeCurrent: metric.WithAttributes(attrResume.String("current")),
+	ResumeRenamed: metric.WithAttributes(attrResume.String("renamed")),
+}
 
-// watchStarted counts a watch start by whether it resent the snapshot.
-func (m *Metrics) watchStarted(ctx context.Context, resent bool) {
+// watchStarted counts a watch start by its resume outcome.
+func (m *Metrics) watchStarted(ctx context.Context, resume Resume) {
 	if m == nil {
 		return
 	}
-	if resent {
-		m.watchStarts.Add(ctx, 1, resumeResent)
-		return
-	}
-	m.watchStarts.Add(ctx, 1, resumeCurrent)
+	m.watchStarts.Add(ctx, 1, resumeOptions[resume])
 }
 
 func (m *Metrics) watcherSubscribed(ctx context.Context) {

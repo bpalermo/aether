@@ -100,15 +100,38 @@ func (f *truncatingStream) received() []*registrarv1.WatchEndpointsResponse {
 }
 
 // agentResumeToken applies the agent's rule (registry/internal/registrar
-// processStream): the resume token is the last non-empty version received.
+// processStream): the first FULL_SNAPSHOT clears the token along with the
+// cache, and the resume token is the last non-empty version received.
 func agentResumeToken(start string, events []*registrarv1.WatchEndpointsResponse) string {
 	token := start
+	cleared := false
 	for _, e := range events {
+		if e.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT && !cleared {
+			token, cleared = "", true
+		}
 		if e.GetVersion() != "" {
 			token = e.GetVersion()
 		}
 	}
 	return token
+}
+
+// TestWatchEndpoints_TruncatedResendOntoALaggingReplica is the review's
+// scenario (2) end to end: the agent holds replica B's version, reconnects to
+// replica A (one revision ahead), A resends, and the stream dies after the
+// first FULL_SNAPSHOT event. The reconnect lands on B, still at the agent's old
+// version. B must resend: the agent's cache was cleared by the cut resend.
+func TestWatchEndpoints_TruncatedResendOntoALaggingReplica(t *testing.T) {
+	b := newResumeTestServer(t, "10.0.0.1", "10.0.0.2")
+	token := b.snapshot.Version() // the agent is current on B
+
+	a := newResumeTestServer(t, "10.0.0.1", "10.0.0.2", "10.0.0.3")
+	stream := &truncatingStream{ctx: context.Background(), limit: 1}
+	require.ErrorIs(t, a.WatchEndpoints(&registrarv1.WatchEndpointsRequest{NodeName: "n1", LastVersion: token}, stream), errTransportGone)
+
+	sent := reconnect(t, b, agentResumeToken(token, stream.received()))
+	assert.Equal(t, 2, countType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT),
+		"a reconnect after a cut resend must be served a snapshot, even by a replica matching the old token")
 }
 
 func countType(events []*registrarv1.WatchEndpointsResponse, t registrarv1.WatchEndpointsResponse_EventType) int {

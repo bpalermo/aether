@@ -925,6 +925,12 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 			r.cache = make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint)
 			r.mu.Unlock()
 			snapshotCleared = true
+			// The cache no longer holds what the old token names. Drop it until
+			// this resend completes (SNAPSHOT_COMPLETE carries the new one): a
+			// stream cut mid-resend must reconnect with no token, or a replica
+			// whose contents match the OLD token -- a lagging peer, or contents
+			// that reverted -- answers "current" onto an empty cache (#1203).
+			lastVersion = ""
 		}
 
 		r.handleCatalogEvent(ctx, event, &catalogReplay, connectVersion)

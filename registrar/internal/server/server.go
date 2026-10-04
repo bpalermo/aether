@@ -201,16 +201,20 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 	// The resume decision and the state it is made against are one critical
 	// section: a sync landing between them must not make a current client
 	// look stale, or a stale one current.
-	events, catalog, currentVersion, current := s.snapshot.WatchStart(req.GetLastVersion(), filterSet)
-	s.metrics.watchStarted(stream.Context(), !current)
-	if !current {
+	events, catalog, currentVersion, resume := s.snapshot.WatchStart(req.GetLastVersion(), filterSet)
+	s.metrics.watchStarted(stream.Context(), resume)
+	if resume == ResumeResend {
 		if err := sendFilteredSnapshot(stream, events, filterSet); err != nil {
 			return err
 		}
-		// Replay the full service catalog (every watcher, regardless of filter):
-		// agents keep a local index of service names so the on-demand cold path
-		// answers existence locally. Skipped when the client is current (its
-		// catalog is too: transitions ride the same versioned stream).
+	}
+	// Replay the full service catalog (every watcher, regardless of filter):
+	// agents keep a local index of service names so the on-demand cold path
+	// answers existence locally. Sent on a resend and on a rename (the client's
+	// contents are current under an older name: the marker's new version makes
+	// it swap catalogs, so it must receive the identical one first). Skipped
+	// only when the client's token is the current version.
+	if resume != ResumeCurrent {
 		if err := sendServiceCatalog(stream, catalog); err != nil {
 			return err
 		}

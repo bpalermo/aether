@@ -56,22 +56,27 @@ func endpointDigest(ep *registryv1.ServiceEndpoint) [sha256.Size]byte {
 // names the contents it holds now. It is therefore a NAME OF THE CONTENTS, not
 // a count of writes, and it is comparable across replicas:
 //
-//   - "<rev>": the contents are exactly the external registry's listing at
-//     store revision rev (a backend implementing registry.RevisionedLister:
-//     etcd). Two replicas that listed the same revision hold the same contents.
+//   - "<rev>.<hash>": the contents are exactly the external registry's
+//     listing at store revision rev (a backend implementing
+//     registry.RevisionedLister: etcd).
 //   - "<rev>+<hash>": the contents started from the listing at rev but deviate
 //     from it -- a write-behind intent was overlaid, or an agent RPC was
-//     applied since. The suffix is the content hash, so it can never equal
-//     another replica's clean "<rev>".
+//     applied since.
 //   - "hash:<hash>": the backend has no store revision (kubernetes, where a
 //     listing is not a function of the list's resourceVersion: health depends
-//     on the clock and locality on a separate node list). The version is
-//     content-addressed. The prefix keeps it from ever parsing as a revision.
+//     on the clock and locality on a separate node list).
 //
 // <hash> is contentHashLen hex digits of a sha256 over the canonical contents
-// (sorted keys + deterministic proto encoding of each endpoint).
+// (sorted keys + deterministic proto encoding of each endpoint), and it ALONE
+// decides whether a client is current: a token is current iff its hash part
+// equals the current content hash. The revision is carried for the lag metrics
+// and for operators, never trusted for equality -- a rebuilt etcd restarts its
+// revisions at 1, and a binary that decodes a stored value differently derives
+// different contents at the same revision. No form parses as a bare integer, so
+// a pre-#1193 counter token never matches.
 const (
 	versionHashPrefix = "hash:"
+	versionCleanSep   = "."
 	versionDirtySep   = "+"
 	contentHashLen    = 16
 )
@@ -85,18 +90,18 @@ func formatVersion(revision int64, dirty bool, contentHash string) string {
 	if dirty {
 		return rev + versionDirtySep + contentHash
 	}
-	return rev
+	return rev + versionCleanSep + contentHash
 }
 
-// versionContentHash returns the content hash a version embeds, if it embeds
-// one ("hash:<h>" or "<rev>+<h>"). A clean "<rev>" (and any pre-#1193 counter
-// version) embeds none.
+// versionContentHash returns the content hash a version embeds: the part after
+// "hash:", or after the "." / "+" that follows the revision. A pre-#1193
+// counter version embeds none.
 func versionContentHash(version string) (string, bool) {
 	if h, ok := strings.CutPrefix(version, versionHashPrefix); ok {
 		return h, h != ""
 	}
-	if i := strings.LastIndex(version, versionDirtySep); i >= 0 {
-		h := version[i+len(versionDirtySep):]
+	if i := strings.IndexAny(version, versionCleanSep+versionDirtySep); i >= 0 {
+		h := version[i+1:]
 		return h, h != ""
 	}
 	return "", false
@@ -140,24 +145,13 @@ type Snapshot struct {
 	generation uint64
 	// version is the cached formatVersion of the fields above. Guarded by mu.
 	version string
-	// cleanHashes remembers the content hash of the last cleanHistory clean
-	// revisions this replica installed, oldest first in cleanOrder, so a client
-	// holding a clean "<rev>" token is recognized as current after the revision
-	// moved without a content change (an agent's re-assert re-Puts what etcd
-	// already holds). Guarded by mu.
-	cleanHashes map[int64]string
-	cleanOrder  []int64
 }
-
-// cleanHistory bounds Snapshot.cleanHashes.
-const cleanHistory = 64
 
 // NewSnapshot creates an empty Snapshot at generation 0.
 func NewSnapshot() *Snapshot {
 	s := &Snapshot{
 		entries:       make(map[serviceKey]*snapshotEntry),
 		serviceCounts: make(map[string]int),
-		cleanHashes:   make(map[int64]string),
 	}
 	s.contentHash = s.computeContentHashLocked()
 	s.version = formatVersion(0, false, s.contentHash)
@@ -167,6 +161,11 @@ func NewSnapshot() *Snapshot {
 // computeContentHashLocked hashes the canonical contents: every entry's key in
 // sorted order followed by its endpoint digest. It depends on the entries only,
 // never on the revision. Caller must hold mu.
+//
+// Cost, all under the write lock: a replace re-marshals and re-digests EVERY
+// endpoint (newEntry), O(N) per sync; every mutation, Apply included, re-sorts
+// all N keys, O(N log N). Negligible at talos scale (hundreds of endpoints);
+// revisit -- an incremental (e.g. additive multiset) hash -- before ~10k.
 func (s *Snapshot) computeContentHashLocked() string {
 	keys := make([]serviceKey, 0, len(s.entries))
 	for k := range s.entries {
@@ -278,42 +277,36 @@ func (s *Snapshot) stateLocked() State {
 	}
 }
 
-// currentLocked reports whether a client presenting token holds the current
-// contents: the token is the current version; or it embeds the current content
-// hash (a "<rev>+<h>" or "hash:<h>" token taken before a sync re-derived the
-// same contents at a newer revision); or it is a clean "<rev>" this replica
-// installed with the current content hash. A clean revision names one listing
-// on every replica, so a token issued by another replica at that revision is
-// recognized too, provided this one installed it. Caller must hold mu.
-func (s *Snapshot) currentLocked(token string) bool {
+// Resume is the outcome of a watch start (Snapshot.WatchStart).
+type Resume int
+
+const (
+	// ResumeResend: the client's token does not name the current contents; it
+	// gets the full snapshot and the catalog.
+	ResumeResend Resume = iota
+	// ResumeCurrent: the token is the current version; the marker alone.
+	ResumeCurrent
+	// ResumeRenamed: the token names the current contents under an older name
+	// (same content hash, another revision or another form). No endpoint
+	// events; the catalog and a marker carrying the CURRENT version, so the
+	// client swaps in an identical catalog and adopts the fresh token.
+	ResumeRenamed
+)
+
+// resumeLocked classifies a client's token against the current contents. Only
+// the embedded content hash decides (see the version format). Caller must hold
+// mu.
+func (s *Snapshot) resumeLocked(token string) Resume {
 	if token == "" {
-		return false
+		return ResumeResend
 	}
 	if token == s.version {
-		return true
+		return ResumeCurrent
 	}
-	if h, ok := versionContentHash(token); ok {
-		return h == s.contentHash
+	if h, ok := versionContentHash(token); ok && h == s.contentHash {
+		return ResumeRenamed
 	}
-	if rev, err := strconv.ParseInt(token, 10, 64); err == nil {
-		h, ok := s.cleanHashes[rev]
-		return ok && h == s.contentHash
-	}
-	return false
-}
-
-// rememberCleanLocked records that the listing at rev has hash h. Caller must
-// hold mu for writing.
-func (s *Snapshot) rememberCleanLocked(rev int64, h string) {
-	if _, seen := s.cleanHashes[rev]; seen {
-		return
-	}
-	s.cleanHashes[rev] = h
-	s.cleanOrder = append(s.cleanOrder, rev)
-	if len(s.cleanOrder) > cleanHistory {
-		delete(s.cleanHashes, s.cleanOrder[0])
-		s.cleanOrder = s.cleanOrder[1:]
-	}
+	return ResumeResend
 }
 
 // GetAll returns all endpoints organized by service name. The caller receives
@@ -448,7 +441,7 @@ func (s *Snapshot) DiffAndReplace(endpoints map[string]map[registryv1.Service_Pr
 
 // DiffAndReplaceAt is DiffAndReplace for a listing with a known origin: the
 // store revision it was taken at and whether it was overlaid. The resulting
-// version is "<rev>" for a clean revisioned listing, "<rev>+<hash>" for an
+// version is "<rev>.<hash>" for a clean revisioned listing, "<rev>+<hash>" for an
 // overlaid one, and "hash:<hash>" without a revision.
 func (s *Snapshot) DiffAndReplaceAt(endpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint, origin Origin) ([]*registrarv1.WatchEndpointsResponse, string, []*registrarv1.WatchEndpointsResponse) {
 	s.mu.Lock()
@@ -489,9 +482,6 @@ func (s *Snapshot) replaceLocked(endpoints map[string]map[registryv1.Service_Pro
 	s.revision = origin.Revision
 	s.dirty = origin.Revision > 0 && origin.Overlaid
 	s.refreshLocked(false)
-	if s.revision > 0 && !s.dirty {
-		s.rememberCleanLocked(s.revision, s.contentHash)
-	}
 	return s.version, computeTransitions(oldServices, newServices)
 }
 
@@ -616,24 +606,26 @@ func (s *Snapshot) FullSnapshotEvents(filter map[string]struct{}) ([]*registrarv
 }
 
 // WatchStart is the snapshot half of a new watch, read in one critical
-// section: given the client's resume token, it reports whether the client is
-// current (then events and services are nil) and otherwise returns the
-// unversioned FULL_SNAPSHOT events and the service catalog to replay. version
-// is what the SNAPSHOT_COMPLETE marker must carry: the client's own token when
-// it is current under another name (its embedded content hash matches), so a
-// client never sees a marker version differ from its token without a resend.
-func (s *Snapshot) WatchStart(token string, filter map[string]struct{}) (events []*registrarv1.WatchEndpointsResponse, services []string, version string, current bool) {
+// section. Given the client's resume token it returns the resume outcome, the
+// unversioned FULL_SNAPSHOT events (ResumeResend only), the service catalog to
+// replay (all but ResumeCurrent), and the current version, which the
+// SNAPSHOT_COMPLETE marker carries in every case.
+func (s *Snapshot) WatchStart(token string, filter map[string]struct{}) (events []*registrarv1.WatchEndpointsResponse, services []string, version string, resume Resume) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.currentLocked(token) {
-		return nil, nil, token, true
+	resume = s.resumeLocked(token)
+	if resume == ResumeCurrent {
+		return nil, nil, s.version, resume
 	}
 	services = make([]string, 0, len(s.serviceCounts))
 	for name := range s.serviceCounts {
 		services = append(services, name)
 	}
 	sort.Strings(services)
-	return s.fullSnapshotEventsLocked(filter), services, s.version, false
+	if resume == ResumeResend {
+		events = s.fullSnapshotEventsLocked(filter)
+	}
+	return events, services, s.version, resume
 }
 
 func (s *Snapshot) fullSnapshotEventsLocked(filter map[string]struct{}) []*registrarv1.WatchEndpointsResponse {

@@ -2477,14 +2477,19 @@ the agent logs `fresh xDS stream re-stated QUIC twins` when the proxy holds twin
 An endpoint change passes through three places: **stored** (the external
 registry: etcd), **in place** (a registrar replica's snapshot, rebuilt by its
 sync loop), and **applied** (each agent's watch cache). Since #1193 the
-registrar's snapshot version is the etcd revision the snapshot was listed at.
-That makes the three comparable across processes and replicas:
+registrar's snapshot version carries the etcd revision the snapshot was listed
+at, which makes the three comparable across processes and replicas, and always
+the content hash, which alone names the contents:
 
 | Version | Meaning |
 |---|---|
-| `<rev>` | exactly the etcd listing at revision `rev` |
-| `<rev>+<hash>` | the listing at `rev` plus something not yet in it: a write-behind intent still overlaid, or an agent RPC applied since the last sync. `<hash>` is the content hash |
+| `<rev>.<hash>` | exactly the etcd listing at revision `rev` |
+| `<rev>+<hash>` | the listing at `rev` plus something not yet in it: a write-behind intent still overlaid, or an agent RPC applied since the last sync |
 | `hash:<hash>` | the backend has no revision (kubernetes). The version is content-addressed |
+
+`<hash>` is 16 hex digits of a sha256 over the snapshot's endpoints. The
+revision is never trusted for equality: a rebuilt etcd restarts its revisions at
+1, and two binaries can decode one stored value differently.
 
 ```promql
 # in place: how far each registrar replica's snapshot trails the store
@@ -2544,12 +2549,21 @@ Notes:
   the snapshot **generation**: a per-process count of content changes. It moves
   only when the served endpoint set changes, and it is not comparable across
   replicas.
-- A reconnecting agent whose `last_version` names the current contents gets
-  only `SNAPSHOT_COMPLETE`, with no resend. That holds both for an equal version
-  and for a `<rev>+<hash>` / `hash:<hash>` whose hash still matches. The version
-  is sent only where the receiver holds everything it names: on
+- **Reconnect outcomes**, counted by `aether_registrar_watch_starts_total{resume}`:
+  - `current`: the agent's `last_version` is the current version. It gets only
+    `SNAPSHOT_COMPLETE`.
+  - `renamed`: the hash matches but the name differs, for example because the
+    revision moved with no content change. It gets the service catalog plus
+    `SNAPSHOT_COMPLETE` carrying the current version. No endpoint events are
+    sent.
+  - `resent`: anything else. It gets the full snapshot.
+- The version is sent only where the receiver holds everything it names: on
   `SNAPSHOT_COMPLETE`, and on the last event of each broadcast batch per watcher
-  (#1203). A stream cut mid-snapshot or mid-batch therefore resends in full.
+  (#1203). The agent also drops its token when a resend starts clearing its
+  cache. A stream cut mid-snapshot or mid-batch therefore resends in full. Agents
+  older than #1204 keep the old token across a cut resend, so until the agent
+  DaemonSet has rolled they are exposed to an empty cache on a reconnect that
+  matches it. The window is milliseconds per reconnect.
 
 ### `504 UT` after exactly 15 s over an h2 mesh cluster to a terminating pod (#1104)
 

@@ -685,3 +685,36 @@ func TestSetServiceFilter_PurgesOutOfScopeCache(t *testing.T) {
 	assert.Contains(t, r.cache[registryv1.Service_PROTOCOL_HTTP], "default/svc-a")
 	assert.NotContains(t, r.cache[registryv1.Service_PROTOCOL_TCP], "default/svc-b", "out-of-scope entries must purge with the filter, across protocols")
 }
+
+// TestProcessStream_TruncatedResendClearsResumeToken is the agent half of
+// #1203 (review of #1204). The agent reconnects with a NON-EMPTY token, the
+// registrar decides it is stale and resends, and the stream dies after the
+// first FULL_SNAPSHOT event -- which has already cleared the cache. Whatever
+// ended the stream, the old token must not survive: it names contents the
+// cache no longer holds, and with content-addressed versions a later reconnect
+// (to a lagging replica, or after the contents reverted) can match it again and
+// be served the marker alone onto an empty cache.
+//
+// Red before the fix: every non-DataLoss end returned the pre-snapshot token.
+func TestProcessStream_TruncatedResendClearsResumeToken(t *testing.T) {
+	ends := map[string]error{
+		"transport error": status.Error(codes.Unavailable, "connection reset"),
+		"EOF":             io.EOF,
+		"server drain":    status.Error(codes.Unavailable, "closing transport due to: connection error: desc = \""+goawayNoErrorDetail+"\""),
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			r := newTestRegistry()
+			stream := &fakeWatchStream{
+				events: []*registrarv1.WatchEndpointsResponse{{
+					Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
+					ServiceName: "default/svc-a",
+					Endpoint:    makeEndpoint("10.0.0.1", 8080),
+				}},
+				err: end,
+			}
+			got, _ := r.processStream(context.Background(), stream, "41.0123456789abcdef")
+			assert.Equal(t, "", got, "a resend cut short must leave no resume token")
+		})
+	}
+}

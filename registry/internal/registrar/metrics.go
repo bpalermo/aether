@@ -80,9 +80,12 @@ func (m *clientMetrics) versionApplied(ctx context.Context, version string) {
 	if m == nil {
 		return
 	}
-	// "<rev>" or "<rev>+<content hash>": the revision is the part before '+'.
-	// A content-addressed "hash:<h>" never parses, by construction.
-	rev, _, _ := strings.Cut(version, "+")
+	// "<rev>.<hash>" or "<rev>+<hash>": the revision is the part before the
+	// separator. A content-addressed "hash:<h>" never parses, by construction.
+	rev := version
+	if i := strings.IndexAny(version, ".+"); i >= 0 {
+		rev = version[:i]
+	}
 	if v, err := strconv.ParseInt(rev, 10, 64); err == nil {
 		m.lastVersion.Record(ctx, v)
 	}

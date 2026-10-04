@@ -88,7 +88,7 @@ func TestMetrics_NilReceiverSafe(t *testing.T) {
 	m.syncCompleted(ctx, 0.1, State{Generation: 1}, map[string]int{"EVENT_TYPE_ENDPOINT_ADDED": 1})
 	m.syncFailed(ctx, 0.1)
 	m.snapshotState(ctx, State{Generation: 7})
-	m.watchStarted(ctx, true)
+	m.watchStarted(ctx, ResumeResend)
 	if err := m.ObserveSnapshot(NewSnapshot(), nil); err != nil {
 		t.Errorf("ObserveSnapshot on nil metrics = %v, want nil", err)
 	}
@@ -262,8 +262,9 @@ func TestMetrics_WatchStarts(t *testing.T) {
 	s.GateOnSync(synced)
 
 	reconnect(t, s, "")
-	reconnect(t, s, "4")
-	reconnect(t, s, "4")
+	reconnect(t, s, snap.Version())
+	reconnect(t, s, snap.Version())
+	reconnect(t, s, "3."+snap.State().ContentHash) // same contents, older name
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
@@ -281,7 +282,7 @@ func TestMetrics_WatchStarts(t *testing.T) {
 			}
 		}
 	}
-	if got["resent"] != 1 || got["current"] != 2 {
-		t.Errorf("watch.starts = %v, want resent=1 current=2", got)
+	if got["resent"] != 1 || got["current"] != 2 || got["renamed"] != 1 {
+		t.Errorf("watch.starts = %v, want resent=1 current=2 renamed=1", got)
 	}
 }

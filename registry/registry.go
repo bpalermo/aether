@@ -66,9 +66,9 @@ type DerivedEndpoints interface {
 // RevisionedLister is an optional capability for Registry backends whose
 // listings are a pure function of a store revision (etcd): it lists every
 // requested protocol from ONE consistent read and returns the revision that
-// read was served at. The registrar uses that revision as its snapshot version
-// (issue #1193), so two replicas that listed the same revision serve the same
-// contents under the same version, and a no-op sync does not move it.
+// read was served at. The registrar carries that revision in its snapshot
+// version ("<rev>.<content hash>", issue #1193) for the revision lag metrics; a
+// client's currency is decided by the content hash alone.
 //
 // Implement it only when "same revision ⇒ same listing" holds. The kubernetes
 // backend deliberately does NOT: its listing derives endpoint health from the
