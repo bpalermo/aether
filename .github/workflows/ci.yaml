@@ -695,6 +695,7 @@ jobs:
           agent/internal/xds/cache
           agent/internal/xds/server
           agent/storage
+          common/grpcserver
           common/spire
           common/xds
           prober/internal/prober

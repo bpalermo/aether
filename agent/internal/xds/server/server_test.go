@@ -95,7 +95,7 @@ func TestNewAgentXdsServer(t *testing.T) {
 }
 
 // TestNewAgentXdsServer_ImplementsServerCallback verifies that AgentXdsServer satisfies
-// the xds.ServerCallback interface, which is required for it to be registered as the
+// the grpcserver.ServerCallback interface, which is required for it to be registered as the
 // pre-listen callback on the embedded XdsServer.
 func TestNewAgentXdsServer_ImplementsServerCallback(t *testing.T) {
 	ctx := context.Background()

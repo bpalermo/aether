@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"aethermesh.dev/common/grpcserver"
 	"aethermesh.dev/common/telemetry"
 	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -19,14 +20,14 @@ import (
 )
 
 // XdsServer is a gRPC server that implements Envoy's xDS discovery services.
-// It embeds Server and registers discovery service handlers for LDS, CDS, EDS, RDS,
+// It embeds grpcserver.Server and registers discovery service handlers for LDS, CDS, EDS, RDS,
 // and ADS with Envoy's go-control-plane server. The server uses a snapshot cache
 // to manage versioned Envoy configurations.
 //
 // XdsServer is configured with appropriate keepalive parameters for long-lived client
 // connections and supports up to 1000 concurrent gRPC streams.
 type XdsServer struct {
-	Server
+	grpcserver.Server
 
 	xSrv serverv3.Server
 
@@ -37,7 +38,7 @@ type XdsServer struct {
 // It configures the gRPC server with keepalive parameters suitable for long-lived
 // client connections, registers all Envoy discovery services (LDS, CDS, EDS, RDS, ADS),
 // and returns an XdsServer ready to be started.
-func NewXdsServer(ctx context.Context, cfg *ServerConfig, cache cachev3.SnapshotCache, callbacks serverv3.Callbacks, log *slog.Logger) XdsServer {
+func NewXdsServer(ctx context.Context, cfg *grpcserver.ServerConfig, cache cachev3.SnapshotCache, callbacks serverv3.Callbacks, log *slog.Logger) XdsServer {
 	keepAliveTime := 30 * time.Second
 	grpcServer := grpc.NewServer(
 		grpc.KeepaliveParams(keepalive.ServerParameters{
@@ -69,7 +70,7 @@ func NewXdsServer(ctx context.Context, cfg *ServerConfig, cache cachev3.Snapshot
 	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(grpcServer, xdsSrv)
 
 	return XdsServer{
-		Server: NewServer(cfg, log, WithGRPCServer(grpcServer)),
+		Server: grpcserver.NewServer(cfg, log, grpcserver.WithGRPCServer(grpcServer)),
 		xSrv:   xdsSrv,
 		cache:  cache,
 	}

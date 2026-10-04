@@ -15,6 +15,7 @@ import (
 	"aethermesh.dev/agent/storage"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/grpcserver"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/xds"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -58,9 +59,9 @@ func newTestXdsServer(ctx context.Context, t *testing.T, snapshotCache cachev3.S
 	t.Helper()
 
 	sockPath := integrationSocketPath(t)
-	cfg := xds.NewServerConfig(
-		xds.WithUDS(sockPath),
-		func(c *xds.ServerConfig) { c.ShutdownTimeout = 2 * time.Second },
+	cfg := grpcserver.NewServerConfig(
+		grpcserver.WithUDS(sockPath),
+		func(c *grpcserver.ServerConfig) { c.ShutdownTimeout = 2 * time.Second },
 	)
 
 	xdsSrv := xds.NewXdsServer(ctx, cfg, snapshotCache, nil, log)
@@ -332,9 +333,9 @@ func TestIntegration_PreListenFailsPreventsServerStart(t *testing.T) {
 	reg := &mockRegistry{}
 
 	sockPath := integrationSocketPath(t)
-	cfg := xds.NewServerConfig(
-		xds.WithUDS(sockPath),
-		func(c *xds.ServerConfig) { c.ShutdownTimeout = 2 * time.Second },
+	cfg := grpcserver.NewServerConfig(
+		grpcserver.WithUDS(sockPath),
+		func(c *grpcserver.ServerConfig) { c.ShutdownTimeout = 2 * time.Second },
 	)
 
 	srv := &AgentXdsServer{
