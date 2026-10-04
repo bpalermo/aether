@@ -596,8 +596,8 @@ its **legacy** allow-list (the setting's history note, the pin, proposals, this
 runbook's records, observability notes) spells a pre-cut-over coordinate out.
 `//bazel/img:registry_test` pins `image-registry.sh` against the Starlark helpers.
 
-**Registry library.** `scripts/registry-lib.sh` (was `ghcr-lib.sh`, which is now a
-one-line shim; every `ghcr_*` name still works) is registry-neutral: it speaks the
+**Registry library.** `scripts/registry-lib.sh` (was `ghcr-lib.sh`; the shim and
+the `ghcr_*` aliases were removed in proposal 040 phase 4) is registry-neutral: it speaks the
 OCI distribution API against `REGISTRY_HOST` (default: the setting's host),
 fetches the anonymous pull token from the registry's own endpoint (ghcr.io
 `/token`, quay.io `/v2/auth`), and for private repositories takes
