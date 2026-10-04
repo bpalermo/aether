@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,7 +90,62 @@ func envoyBinary(t *testing.T) string {
 	if _, err := os.Stat(p); err != nil {
 		t.Fatalf("envoy binary not found at %s: %v\n(RUNFILES_DIR=%s)", p, err, runfiles)
 	}
+
+	// Say which Envoy this run validated against, and refuse anything that is
+	// not one. The repo can be swapped for a locally built proxy
+	// (validate-built-proxy.sh, --override_repository), so the log line is the
+	// CI evidence of which binary the gate ran, and the identity check keeps a
+	// stand-in that exits 0 (/bin/true) from passing every positive case.
+	id := identity(p)
+	if id.err != nil {
+		t.Fatalf("%s is not a working Envoy: %v", id.resolved, id.err)
+	}
+	t.Logf("envoy under validation: %s (%s)", id.resolved, id.version)
 	return p
+}
+
+type envoyIdentity struct {
+	resolved string
+	version  string
+	err      error
+}
+
+// identity runs `envoy --version` once per binary per test process.
+var identity = func() func(string) envoyIdentity {
+	var mu sync.Mutex
+	seen := map[string]envoyIdentity{}
+	return func(p string) envoyIdentity {
+		mu.Lock()
+		defer mu.Unlock()
+		if id, ok := seen[p]; ok {
+			return id
+		}
+		id := envoyIdentity{resolved: p}
+		// The runfiles entry is a symlink into the repo, and an overridden
+		// repo may symlink further, to the build output the gate was pointed
+		// at: log the end of that chain, not the runfiles alias.
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			id.resolved = r
+		}
+		id.version, id.err = envoyVersion(p)
+		seen[p] = id
+		return id
+	}
+}()
+
+// envoyVersion returns the `envoy --version` line of bin, or an error when bin
+// does not run, exits non-zero, or prints no Envoy version line.
+func envoyVersion(bin string) (string, error) {
+	out, err := exec.Command(bin, "--version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s --version: %w\n%s", bin, err, out)
+	}
+	for line := range strings.Lines(string(out)) {
+		if _, v, ok := strings.Cut(line, " version: "); ok && strings.TrimSpace(v) != "" {
+			return "version: " + strings.TrimSpace(v), nil
+		}
+	}
+	return "", fmt.Errorf("%s --version printed no Envoy version line:\n%s", bin, out)
 }
 
 // canonicalRepo resolves a user-visible repository name to its canonical bzlmod

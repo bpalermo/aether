@@ -177,6 +177,10 @@ jobs:
 
       - name: Test (${{ matrix.arch }}, ${{ matrix.bazel_config }})
         # //... runs //:image_test (compiles Envoy + validates the image structure).
+        # The branch name is attacker-controlled text: through env, never
+        # interpolated into the script (actionlint `expression`).
+        env:
+          BRANCH_NAME: ${{ github.head_ref }}
         run: |
           bazel test \
             --config=ci \
@@ -184,8 +188,51 @@ jobs:
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
-            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            --build_metadata=BRANCH_NAME="$BRANCH_NAME" \
             //...
+
+      # Validate the agent's generated Envoy config against the proxy THIS PR
+      # builds, not the released one. By default //test/envoy_validate (root
+      # workspace, `ci` workflow) runs the binary lifted from the chart-pinned
+      # aether-proxy image, so a PR that compiles an extension out or changes a
+      # carried patch was checked against the previous release and its NACKs
+      # surfaced only after the release. This leg's runner arch == the binary's
+      # arch (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm), so the binary
+      # runs natively.
+      #
+      # No second Envoy build: //:envoy was just built by the test step above,
+      # so this is a remote-cache hit whose only effect is that
+      # --remote_download_toplevel puts the binary on local disk. The proxy
+      # server is shut down afterwards to hand its memory to the root one.
+      - name: Fetch the built Envoy binary (cache hit of the test step)
+        run: |
+          flags=(
+            --config=ci
+            --config=${{ matrix.bazel_config }}
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }}
+          )
+          bazel build "${flags[@]}" //:envoy
+          out="$(bazel cquery "${flags[@]}" --output=files //:envoy 2>/dev/null)"
+          install -m 0755 "$out" "$RUNNER_TEMP/envoy"
+          bazel shutdown
+          "$RUNNER_TEMP/envoy" --version
+
+      # Root workspace (Bazel 9.2 from the root .bazelversion; Bazelisk picks it
+      # up by cwd), hence `working-directory: .`. Entirely LOCAL: no
+      # --config=remote — the root's test actions stay local anyway and the
+      # BuildBuddy platform there is x86_64-only, which the arm64 leg could not
+      # use. The warm-up fetches the root's Go deps with retries; it targets the
+      # go_library, not the test, so it does not also fetch the pinned binary
+      # the override replaces. The test logs
+      # `envoy under validation: <path> (version: ...)` per test.
+      - name: Warm the root Bazel repository cache (envoy_validate deps, retried)
+        working-directory: .
+        run: scripts/ci-bazel-warmup.sh "--repository_cache=$RUNNER_TEMP/root-repo-cache" //test/envoy_validate:envoy_validate
+
+      - name: envoy_validate against the built proxy (${{ matrix.arch }})
+        working-directory: .
+        timeout-minutes: 30
+        run: test/envoy_validate/validate-built-proxy.sh "$RUNNER_TEMP/envoy" "--repository_cache=$RUNNER_TEMP/root-repo-cache"
 
   # Single required status check — symmetric with the control-plane `ci` gate.
   # Always runs so it reports on every PR (including control-plane-only PRs where
