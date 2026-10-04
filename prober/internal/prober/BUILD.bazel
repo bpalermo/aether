@@ -25,6 +25,7 @@ go_test(
     srcs = [
         "identity_test.go",
         "prober_test.go",
+        "shutdown_test.go",
     ],
     embed = [":prober"],
     deps = [
@@ -32,6 +33,7 @@ go_test(
         "@io_opentelemetry_go_otel//semconv/v1.30.0:v1_30_0",
         "@io_opentelemetry_go_otel_metric//:metric",
         "@io_opentelemetry_go_otel_metric//noop",
+        "@io_opentelemetry_go_otel_sdk//resource",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],
