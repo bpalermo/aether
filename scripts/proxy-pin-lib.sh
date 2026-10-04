@@ -48,22 +48,15 @@ PROXY_SIGNING_CUTOVER="${PROXY_SIGNING_CUTOVER:-857e65988acda3c84ec33ae2e8eace2f
 # The proxy's repository and host-qualified image come from the single registry
 # setting, bazel/img/registry.bzl (proposal 040), never a literal.
 #
-# WHICH REGISTRY A PIN IS ON is whatever the pin says. The pin is data only the
-# bump-chart job writes, so the Quay cut-over (proposal 040 phase 2) could not
-# move it: until the first proxy release after the flip re-pins it, it names
-# the ghcr.io image. PROXY_PIN_REFS is every reference a pin may name --
-# image_reference("proxy") first, then PROXY_PIN_LEGACY_REFERENCES (both from
-# registry.bzl, via `image-registry.sh proxy-pin-refs`) -- and the sweep looks
-# the pinned digest up on the host the pin itself names.
+# THE PIN NAMES EXACTLY PROXY_IMAGE, image_reference("proxy"). The Quay
+# cut-over (proposal 040 phase 2) briefly let it name the pre-cut-over image
+# too, until the first proxy release after the flip re-pinned it; phase 4
+# removed that allowance. A pin on any other reference is unreadable here (the
+# sweep exits 2, the bump-chart rewrite refuses), never looked up elsewhere.
 proxy_pin__here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2034  # consumed by whoever sources this file.
 PROXY_REPO="$("${proxy_pin__here}/image-registry.sh" repo proxy)" || PROXY_REPO=""
 PROXY_IMAGE="$("${proxy_pin__here}/image-registry.sh" ref proxy)" || PROXY_IMAGE=""
-PROXY_PIN_REFS=()
-if proxy_pin__refs="$("${proxy_pin__here}/image-registry.sh" proxy-pin-refs)"; then
-	mapfile -t PROXY_PIN_REFS <<<"$proxy_pin__refs"
-fi
-unset proxy_pin__refs
 
 # The chart values file whose pin is checked. The path is the bump-chart job's.
 # shellcheck disable=SC2034  # consumed by whoever sources this file.
@@ -72,26 +65,24 @@ PROXY_VALUES_PATH=charts/aether/values.yaml
 # The pinned proxy reference in a values.yaml read on stdin: `<repository>
 # <digest>` on one line.
 #
-# Scoped to the block opened by `repository: <ref>` for a <ref> in
-# PROXY_PIN_REFS and closed by the next `repository:` line (the supervisor image
-# sits right below it and carries a digest of its own, which must never be
-# picked up) or by six lines, the window the bump-chart rewrite covers.
+# Scoped to the block opened by `repository: <PROXY_IMAGE>` and closed by the
+# next `repository:` line (the supervisor image sits right below it and carries
+# a digest of its own, which must never be picked up) or by six lines, the
+# window the bump-chart rewrite covers.
 #
-# Prints exactly one `<ref> sha256:<64 hex>` and succeeds, or prints nothing and
-# fails: no proxy block, no digest in it, a placeholder, or more than one proxy
-# block (under any accepted reference).
+# Prints exactly one `<PROXY_IMAGE> sha256:<64 hex>` and succeeds, or prints
+# nothing and fails: no proxy block, no digest in it, a placeholder, or more
+# than one proxy block.
 proxy_pinned_ref() {
-	local out refs
-	[ "${#PROXY_PIN_REFS[@]}" -gt 0 ] || return 1
-	refs="$(printf '%s\n' "${PROXY_PIN_REFS[@]}")"
-	out="$(awk -v refs="$refs" '
-		BEGIN { n = split(refs, r, "\n"); for (i = 1; i <= n; i++) if (r[i] != "") ok[r[i]] = 1 }
+	local out
+	[ -n "$PROXY_IMAGE" ] || return 1
+	out="$(awk -v want="$PROXY_IMAGE" '
 		/^[[:space:]]*repository:/ {
 			v = $0
 			sub(/^[[:space:]]*repository:[[:space:]]*/, "", v)
 			sub(/[[:space:]]*$/, "", v)
 			gsub(/"/, "", v)
-			if (v in ok) { blocks++; inblk = 1; n = 0; img = v; next }
+			if (v == want) { blocks++; inblk = 1; n = 0; img = v; next }
 		}
 		inblk {
 			n++
@@ -122,31 +113,28 @@ proxy_pinned_digest() {
 # the bump-chart job's edit (proxy-release.yml).
 #
 # The block is found exactly as proxy_pinned_ref finds it -- the ONE
-# `repository:` naming a PROXY_PIN_REFS entry -- so the first release after the
-# Quay cut-over finds the ghcr.io pin and moves it, repository line included,
-# to image_reference("proxy"). Inside that block (up to the next `repository:`
-# or six lines) the `tag:`, the `digest:` and the "Multi-arch index for"
-# provenance comment are rewritten; nothing outside it is touched (the
-# supervisor's digest sits right below). Fails, leaving the file unchanged,
-# unless exactly one block was found and it got a new tag AND a new digest.
+# `repository:` naming PROXY_IMAGE -- and its repository line is rewritten to
+# <image>. Inside that block (up to the next `repository:` or six lines) the
+# `tag:`, the `digest:` and the "Multi-arch index for" provenance comment are
+# rewritten; nothing outside it is touched (the supervisor's digest sits right
+# below). Fails, leaving the file unchanged, unless exactly one block was found
+# and it got a new tag AND a new digest.
 #
 # Usage: proxy_pin_rewrite <values file> <image> <tag> <digest>
 proxy_pin_rewrite() {
-	local file="$1" image="$2" tag="$3" digest="$4" refs tmp
-	[ "${#PROXY_PIN_REFS[@]}" -gt 0 ] || return 1
+	local file="$1" image="$2" tag="$3" digest="$4" tmp
+	[ -n "$PROXY_IMAGE" ] || return 1
 	[[ "$image" =~ ^[a-z0-9][a-z0-9.:/_-]*$ ]] || return 1
 	[[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] || return 1
 	[[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
-	refs="$(printf '%s\n' "${PROXY_PIN_REFS[@]}")"
 	tmp="$(mktemp)"
-	if ! awk -v refs="$refs" -v image="$image" -v tag="$tag" -v digest="$digest" '
-		BEGIN { n = split(refs, r, "\n"); for (i = 1; i <= n; i++) if (r[i] != "") ok[r[i]] = 1 }
+	if ! awk -v want="$PROXY_IMAGE" -v image="$image" -v tag="$tag" -v digest="$digest" '
 		/^[[:space:]]*repository:/ {
 			v = $0
 			sub(/^[[:space:]]*repository:[[:space:]]*/, "", v)
 			sub(/[[:space:]]*$/, "", v)
 			gsub(/"/, "", v)
-			if (v in ok) {
+			if (v == want) {
 				blocks++; inblk = 1; n = 0
 				ind = $0; sub(/repository:.*/, "", ind)
 				print ind "repository: " image
