@@ -134,7 +134,8 @@ rc=0
 # PROXY_PIN_CHECK=0: the control asserts EXACTLY the 22 per-commit coordinates;
 # the constructed commit pins main's (signed, present) aether-proxy digest,
 # which is not what this control is about — see verify-published-artifacts.sh
-# step 5 and scripts/check-proxy-pin.sh for the proxy pin's own red.
+# step 5 and case 7 of scripts/check-publish-verify-control.sh for the proxy
+# pin's own red.
 env -u GITHUB_STEP_SUMMARY PROXY_PIN_CHECK=0 "$verifier" "$control" >"$log" 2>&1 || rc=$?
 sed 's/^/  | /' "$log"
 

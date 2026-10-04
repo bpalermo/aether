@@ -81,10 +81,8 @@
 #      pinned in that commit's charts/aether/values.yaml — not a `*-<sha>` tag,
 #      because proxy-release.yml versions the proxy by the commit that changed
 #      proxy/, and every later commit ships the same pin. The digest must exist,
-#      and the index and every child must carry a signature. Pins introduced
-#      before proxy signing existed, whose digest has no signature tag, are
-#      printed as `skip` and not counted — see scripts/proxy-pin-lib.sh for the
-#      cut-over; a pin introduced after it with no signature is MISSING.
+#      and the index and every child must carry a signature; an unsigned pin is
+#      MISSING. Every pin is checked (the pre-signing skip is gone, #1191).
 #      The pin is looked up on the registry the PIN names (it moves with the
 #      next proxy release, not with the flip), and its signature layout is the
 #      one promised by the newest registry.bzl in which that reference was
@@ -620,9 +618,9 @@ verify_commit() {
 	# `ok` lines (or, in the offline harness's fake registry, spurious MISSING
 	# lines) to a red that must otherwise be exactly the 22 per-commit
 	# coordinates. The proxy pin has its own gate and its own seen-red
-	# (scripts/check-proxy-pin.sh, the cut-over cases). The real sweep and the
+	# (scripts/check-publish-verify-control.sh, case 7). The real sweep and the
 	# workflow_run path never set this.
-	local proxy_expected=0 values pinned pin pin_ref pin_repo pin_layout verdict got commit_host="$REGISTRY_HOST"
+	local proxy_expected=0 values pinned pin pin_ref pin_repo pin_layout got commit_host="$REGISTRY_HOST"
 	if [ "${PROXY_PIN_CHECK:-1}" = 0 ]; then
 		say "  skip    aether-proxy pin check (PROXY_PIN_CHECK=0: the expected-red control covers the per-commit coordinates only)"
 	else
@@ -647,46 +645,27 @@ verify_commit() {
 			echo "::error::could not obtain a pull token for ${pin_ref}" >&2
 			exit 2
 		fi
-		if ! tags="$(registry_all_tags "$pin_repo" "$tok")"; then
-			echo "::error::could not list tags for ${pin_ref}" >&2
-			exit 2
-		fi
-		if ! verdict="$(proxy_pin_verdict "$sha" "$pin" "$tags")"; then
-			exit 2
-		fi
-		case "$verdict" in
-		"skip "*)
-			# Printed, never silent, and never counted: a skipped check is not a pass.
-			say "  skip    ${pin_ref}@${pin} (pinned by ${verdict#skip }, before proxy signing existed — cut-over ${PROXY_SIGNING_CUTOVER:0:12}; unsigned by history, #984)"
-			;;
-		check)
-			got="$(registry_manifest_digest "$pin_repo" "$pin" "$tok")" || got=""
-			if [ "$got" != "$pin" ]; then
-				proxy_expected=2
-				absent "${pin_ref}@${pin} (pinned in ${PROXY_VALUES_PATH}; the registry does not serve it)"
-				absent "${pin_ref} signature for pinned ${pin} (no image to sign)"
-			else
-				present "${pin_ref}@${pin} (pinned in ${PROXY_VALUES_PATH})"
-				check_signature "$pin_repo" "$pin" "$tok" "proxy index" "$pin_layout"
-				if ! children="$(registry_index_children "$pin_repo" "$pin" "$tok")" || [ -z "$children" ]; then
-					echo "::error::could not enumerate the child manifests of ${pin_ref}@${pin}" >&2
-					exit 2
-				fi
-				proxy_expected=2
-				while read -r child; do
-					proxy_expected=$((proxy_expected + 1))
-					check_signature "$pin_repo" "$child" "$tok" "proxy child" "$pin_layout"
-				done <<<"$children"
-				if [ -n "${PROXY_SIGNED_REFS_OUT:-}" ]; then
-					printf '%s@%s\n' "$pin_ref" "$pin" >>"$PROXY_SIGNED_REFS_OUT"
-				fi
+		got="$(registry_manifest_digest "$pin_repo" "$pin" "$tok")" || got=""
+		if [ "$got" != "$pin" ]; then
+			proxy_expected=2
+			absent "${pin_ref}@${pin} (pinned in ${PROXY_VALUES_PATH}; the registry does not serve it)"
+			absent "${pin_ref} signature for pinned ${pin} (no image to sign)"
+		else
+			present "${pin_ref}@${pin} (pinned in ${PROXY_VALUES_PATH})"
+			check_signature "$pin_repo" "$pin" "$tok" "proxy index" "$pin_layout"
+			if ! children="$(registry_index_children "$pin_repo" "$pin" "$tok")" || [ -z "$children" ]; then
+				echo "::error::could not enumerate the child manifests of ${pin_ref}@${pin}" >&2
+				exit 2
 			fi
-			;;
-		*)
-			echo "::error::internal: unexpected proxy pin verdict '${verdict}'" >&2
-			exit 2
-			;;
-		esac
+			proxy_expected=2
+			while read -r child; do
+				proxy_expected=$((proxy_expected + 1))
+				check_signature "$pin_repo" "$child" "$tok" "proxy child" "$pin_layout"
+			done <<<"$children"
+			if [ -n "${PROXY_SIGNED_REFS_OUT:-}" ]; then
+				printf '%s@%s\n' "$pin_ref" "$pin" >>"$PROXY_SIGNED_REFS_OUT"
+			fi
+		fi
 		REGISTRY_HOST="$commit_host"
 	fi
 

@@ -403,8 +403,8 @@ registry_signature_tag_bundle() {
 # every caller already treats it as the double-write defect). The caller decides
 # what to do; the point of naming `both` separately is that it is a DIFFERENT
 # defect from `none` and must not be reported as a healthy signature.
-# (`grep -c`, not `-q`, on the piped tag list: see proxy_pin_introduced_by in
-# scripts/proxy-pin-lib.sh -- an early-exiting grep under pipefail reads a
+# (`grep -c`, not `-q`, on the piped tag list: under a caller's pipefail an
+# early-exiting `grep -q` can SIGPIPE the writer, and the pipeline then reads a
 # present tag as absent.)
 registry_signature_layout() {
 	local digest="$1" tags="$2" referrers="${3:-}" has_legacy=0 has_bundle=0 has_ref=0

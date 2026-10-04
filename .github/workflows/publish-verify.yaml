@@ -225,17 +225,21 @@ jobs:
           # aether-proxy (#984): the digest each checked commit's chart PINS,
           # signed by proxy-release.yml -- a different workflow, so a different
           # certificate identity, and on main only. Deduplicated: consecutive
-          # commits usually ship the same pin. An empty file is legitimate here
-          # and only here: every pin in the window predates proxy signing and was
-          # printed as `skip` by the step above (scripts/proxy-pin-lib.sh). A
-          # post-cut-over pin is never skipped, so it is always in this file.
+          # commits usually ship the same pin. Every pin is checked (#1191 removed
+          # the pre-signing skip), so a present pin is always in this file; it can
+          # only be empty when the artifact check above already failed (the pin
+          # is MISSING). A PASSING check that recorded no proxy pin is a vacuous
+          # gate (#853), exactly like signed-refs.txt above.
           if [ -s proxy-signed-refs.txt ]; then
             sort -u proxy-signed-refs.txt > proxy-signed-refs.uniq
             CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/proxy-release\\.yml@refs/heads/main\$" \
             CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
               bazel run //bazel/cosign:verify_image_signatures -- --file proxy-signed-refs.uniq | tee -a cosign.log || rc=$?
+          elif [ "${VERIFY_OUTCOME}" = "failure" ]; then
+            echo "aether-proxy: no pinned digest resolved; the artifact check above already failed"
           else
-            echo "aether-proxy: no pin in this window is past the signing cut-over (see the skip lines above)"
+            echo "::error::the artifact check passed but recorded no aether-proxy pin to verify"
+            rc=1
           fi
           exit "$rc"
 

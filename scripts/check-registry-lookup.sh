@@ -721,39 +721,38 @@ else
 fi
 
 # 6g. Step 5, the aether-proxy pin (#984), through the token-enforcing fake
-# (#999). This checkout's HEAD, its pinned digest, with the cut-over placed just
-# before the commit that introduced it, so the pin is always a post-cut-over one
-# and is CHECKED, never skipped: the pinned index, its signature and both
+# (#999). This checkout's HEAD and its pinned digest, which is always CHECKED
+# (#1191 removed the pre-signing skip): the pinned index, its signature and both
 # children's signatures, each looked up with the pull token -- on the registry
 # the PIN names (proposal 040: it moves with the next proxy release, not with
-# the flip). Then the #999 bug re-injected into a copy of the verifier (the tag
-# list passed where check_signature takes the token): the fake must answer 401
-# and the run must be exit 2, not green. Both halves, so the case cannot pass on
-# a fake that stopped checking the token.
+# the flip). Then the #999 bug class re-injected into a copy of the verifier
+# (something other than the token passed where check_signature takes it; #999
+# passed the tag list, which the step no longer reads, so the mutation passes
+# the pin reference): the fake must answer 401 and the run must be exit 2, not
+# green. Both halves, so the case cannot pass on a fake that stopped checking
+# the token.
 # shellcheck source=scripts/proxy-pin-lib.sh
 . scripts/proxy-pin-lib.sh
 pinned="$(git show "HEAD:${PROXY_VALUES_PATH}" | proxy_pinned_ref)" || pinned=""
 pin="${pinned#* }"
 pin_ref="${pinned%% *}"
-pin_intro=""
-[ -n "$pinned" ] && pin_intro="$(proxy_pin_introduced_by HEAD "$pin")"
 buggy="$tmp/buggy"
 mkdir -p "$buggy"
 cp "$lib"/* "$buggy/"
-sed -i -E 's/(check_signature "\$pin_repo" "\$(pin|child)" )"\$tok"/\1"$tags"/' "$buggy/verify-published-artifacts.sh"
+sed -i -E 's/(check_signature "\$pin_repo" "\$(pin|child)" )"\$tok"/\1"$pin_ref"/' "$buggy/verify-published-artifacts.sh"
 # verify_pin <verifier dir> -> exit status; output in $tmp/out, refusals in $FAKE/unauthorized
 verify_pin() {
 	local rc=0
 	reset_registry
 	touch "$FAKE/everything"
 	printf '%s\n' dev >"$FAKE/tags"
-	env -u GITHUB_STEP_SUMMARY -u REGISTRY_HOST PROXY_PIN_CHECK=1 PROXY_SIGNING_CUTOVER="${pin_intro}~1" \
+	env -u GITHUB_STEP_SUMMARY -u REGISTRY_HOST PROXY_PIN_CHECK=1 \
 		"$1/verify-published-artifacts.sh" HEAD >"$tmp/out" 2>&1 || rc=$?
 	echo "$rc"
 }
-if [ -z "$pinned" ] || [ -z "$pin_intro" ]; then
-	bad "verifier proxy pin: could not read HEAD's pinned reference or the commit that introduced it"
-elif [ "$(grep -cF '"$tags" "proxy ' "$buggy/verify-published-artifacts.sh")" != 2 ]; then
+if [ -z "$pinned" ]; then
+	bad "verifier proxy pin: could not read HEAD's pinned reference"
+elif [ "$(grep -cF '"$pin_ref" "proxy ' "$buggy/verify-published-artifacts.sh")" != 2 ]; then
 	bad "verifier proxy pin: the #999 mutation did not apply to both call sites -- the red half would test nothing"
 else
 	rc="$(verify_pin "$lib")"
@@ -769,7 +768,7 @@ else
 		grep -qxF "PASS: $((want_checks + 4)) artifact(s) present across 1 commit(s)" <<<"$good_out" &&
 		[ "$rc_bug" = 2 ] && [ -s "$FAKE/unauthorized" ] &&
 		grep -qF "::error::inconclusive: could not look up the signature tags of ${pin_ref}@${pin}" "$tmp/out"; then
-		ok "verifier: a signed post-cut-over proxy pin (${pin_ref}) passes on the issued token ($((want_checks + 4)) artifacts, 3 proxy signatures); #999's tag list as the token is refused 401, exit 2"
+		ok "verifier: a signed proxy pin (${pin_ref}) passes on the issued token ($((want_checks + 4)) artifacts, 3 proxy signatures); a non-token in the token slot (#999) is refused 401, exit 2"
 	else
 		bad "verifier proxy pin: fixed rc ${rc} (${n_sig}/3 proxy signatures, $(grep -c . <<<"$good_refused") request(s) refused 401), #999-mutated rc ${rc_bug} (want 0 and 2)"
 		printf '%s\n' "$good_out" | tail -5 | sed 's/^/        fixed | /'
