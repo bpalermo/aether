@@ -30,7 +30,7 @@ bazel_dep(name = "container_structure_test", version = "1.22.1")
 bazel_dep(name = "protovalidate", version = "1.2.2")
 bazel_dep(name = "aspect_rules_lint", version = "2.9.1")
 bazel_dep(name = "rules_buf", version = "0.5.4")
-bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
+bazel_dep(name = "buildifier_prebuilt", version = "10.1.0")
 bazel_dep(name = "rules_helm", version = "0.33.0")
 
 # The cosign CLI -- ONLY the CLI. @rules_img_signer_cosign//cosign is the official
