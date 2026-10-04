@@ -79,7 +79,8 @@ ARG_OVERLAP_HOLD="${ARG_OVERLAP_HOLD:-30}"
 ARG_OUT="${ARG_OUT:-$(mktemp -d)}"
 mkdir -p "$ARG_OUT"
 ETCD_NAME="$CLUSTER-etcd"
-ETCD_IMAGE="${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.16}"
+# shellcheck source=e2e/etcd-image.sh
+. "$HERE/etcd-image.sh"
 POLL_LOG="/tmp/aether-1123-connected-state.log"
 POLL_STOP="/tmp/aether-1123-connected-state.stop"
 NODES=("$NODE" "$DST_NODE")
