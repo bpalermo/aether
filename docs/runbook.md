@@ -145,6 +145,26 @@ target with:
 bazel test //... --test_arg=-test.short
 ```
 
+### `envoy --mode validate`: the released proxy or the one a PR builds
+
+`//test/envoy_validate` runs `envoy --mode validate` over aether-generated
+configs, and it has two modes. **Default** (`bazel test //test/envoy_validate/...`,
+what the `ci` workflow runs): the binary is `@pinned_envoy_linux_<arch>`, lifted
+by `//bazel/proxy_pin` from the aether-proxy image `charts/aether/values.yaml`
+pins — the proxy the mesh deploys today (#709). **Built proxy**
+(`test/envoy_validate/validate-built-proxy.sh <envoy-binary>`): the script points
+`--override_repository` for the host arch's pinned repo at a local repo whose
+`envoy` symlinks to the given binary, so the same tests validate against an
+Envoy built elsewhere — typically the `//proxy` workspace's `//:envoy`. Bazel
+digests the binary behind the symlink, so a rebuilt proxy reruns the gate rather
+than hitting a cached pass. `.github/workflows/proxy.yml` runs this mode on every
+PR that touches `proxy/`, on both arch legs, against the binary that leg just
+built: without it a proxy PR that compiles an extension out or changes a carried
+patch was validated against the *previous* release. Either way the log names the
+binary (`envoy under validation: <path> (version: ...)`), and the test fails on
+anything whose `--version` is not Envoy's, so a stand-in like `/bin/true` cannot
+pass the positive cases.
+
 ### The race gate
 
 `.bazelrc` defines `test:race --@rules_go//go/config:race`, so `--config=race` is
