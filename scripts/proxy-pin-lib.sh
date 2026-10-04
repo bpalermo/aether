@@ -15,35 +15,14 @@
 # that same digest until the next proxy release. So for the proxy, "the artifact
 # commit X deploys" is the digest pinned in X's values.yaml — nothing else.
 #
-# THE CUT-OVER
+# EVERY PIN IS CHECKED
 #
-# Nothing signed the proxy before #984. Every pin introduced before signing
-# existed points at an image that has no signature and never will (the images
-# are immutable and nobody re-signs history), so checking them would make the
-# sweep permanently red about a fact that cannot change. Those pins are SKIPPED,
-# by name, when BOTH hold:
-#
-#   1. the commit that introduced the pinned digest into values.yaml is an
-#      ancestor of (or equal to) PROXY_SIGNING_CUTOVER, and
-#   2. the registry holds no signature tag of either layout for the digest.
-#
-# A pin introduced AFTER the cut-over is always checked — unsigned is red. A
-# pre-cut-over pin that does carry a signature is checked too (it is signed, so
-# it must verify). "Introduced" is the NEWEST commit reachable from X that
-# changed the number of occurrences of the digest in values.yaml, so a revert
-# that re-pins an old unsigned digest after the cut-over counts as a new pin and
-# goes red, rather than inheriting the old pin's exemption.
-#
-# PROXY_SIGNING_CUTOVER is the commit that pinned the FIRST signed aether-proxy
-# image: #988 (2026-09-27), index sha256:574d5211…, signed by proxy-release.yml
-# and hand-verified (index + both children) under the proxy-release identity.
-# Every pin introduced after it came from a proxy-release run that had the sign
-# job. Pins at or before it with no signature are history and are skipped (see
-# proxy_pin_verdict). It moved forward once, from #986's base 8422b46 to this
-# pin's merge commit; it must never move backwards.
-#
-# shellcheck disable=SC2034  # consumed by whoever sources this file.
-PROXY_SIGNING_CUTOVER="${PROXY_SIGNING_CUTOVER:-857e65988acda3c84ec33ae2e8eace2fdbf0407a}"
+# The sweep checks the pin at every commit it is given: the digest must exist,
+# and the index and every child must carry a signature. There is no exemption.
+# The pre-signing pins (before #988) all named the pre-cut-over registry, which the reader
+# below refuses, and the sweep refuses any commit that predates the Quay
+# cut-over (proposal 040 phase 4), so the old PROXY_SIGNING_CUTOVER skip could
+# no longer be reached and was removed (#1191).
 #
 # The proxy's repository and host-qualified image come from the single registry
 # setting, bazel/img/registry.bzl (proposal 040), never a literal.
@@ -161,50 +140,4 @@ proxy_pin_rewrite() {
 	fi
 	cat "$tmp" >"$file"
 	rm -f "$tmp"
-}
-
-# The commit that introduced <digest> into values.yaml, as seen from <sha>: the
-# newest commit reachable from <sha> that changed the digest's occurrence count
-# AND leaves it present (an ADD, not a removal). Prints nothing when <sha> does
-# not pin <digest> at all.
-# `grep -c`, never `grep -q`, after a pipe: under a caller's pipefail (the
-# verifier sets it) `grep -q` exits on the first match, the writer can take a
-# SIGPIPE, and the pipeline reports a HIT as a miss -- seen as "no commit
-# introduced <digest>" on a merge-commit HEAD.
-proxy_pin_introduced_by() {
-	local sha="$1" digest="$2" c
-	git show "${sha}:${PROXY_VALUES_PATH}" 2>/dev/null | grep -cF -- "$digest" >/dev/null || return 0
-	while read -r c; do
-		if git show "${c}:${PROXY_VALUES_PATH}" 2>/dev/null | grep -cF -- "$digest" >/dev/null; then
-			printf '%s\n' "$c"
-			return 0
-		fi
-	done < <(git log --format=%H -S "$digest" "$sha" -- "$PROXY_VALUES_PATH")
-}
-
-# Whether the proxy pin at <sha> is checked or skipped.
-#
-# Usage: proxy_pin_verdict <sha> <digest> <tags of the proxy repo>
-#   prints `check`, or `skip <introducing commit>`; exit 2 when it cannot decide
-#   (unknown cut-over, pin with no introducing commit) — never a silent skip.
-proxy_pin_verdict() {
-	local sha="$1" digest="$2" tags="$3" cut intro
-	# Tag layouts only (below): every pin from before PROXY_SIGNING_CUTOVER lives
-	# on ghcr.io, which has no Referrers API, so a referrer can neither exempt nor
-	# condemn one.
-	if ! cut="$(git rev-parse --verify --quiet "${PROXY_SIGNING_CUTOVER}^{commit}")"; then
-		echo "::error::PROXY_SIGNING_CUTOVER ${PROXY_SIGNING_CUTOVER} is not a commit in this repository" >&2
-		return 2
-	fi
-	intro="$(proxy_pin_introduced_by "$sha" "$digest")"
-	if [ -z "$intro" ]; then
-		echo "::error::no commit reachable from ${sha} introduced ${digest} into ${PROXY_VALUES_PATH}" >&2
-		return 2
-	fi
-	if git merge-base --is-ancestor "$intro" "$cut" &&
-		[ "$(registry_signature_layout "$digest" "$tags")" = none ]; then
-		printf 'skip %s\n' "$intro"
-	else
-		printf 'check\n'
-	fi
 }

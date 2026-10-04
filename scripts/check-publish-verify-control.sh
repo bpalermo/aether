@@ -311,9 +311,9 @@ if [ "$fail" -ne 0 ]; then
 	exit 1
 fi
 # 7. The proxy pin is NOT part of the control (#984 x #930). Build a base whose
-#    chart pins a digest the fake registry has never seen, introduced by a
-#    commit AFTER the signing cut-over (so the pin check would look and find
-#    nothing). The control must still accept: it sets PROXY_PIN_CHECK=0 and
+#    chart pins a digest the fake registry has never seen (so the pin check,
+#    which checks every pin since #1191, would look and find nothing). The
+#    control must still accept: it sets PROXY_PIN_CHECK=0 and
 #    asserts exactly the 22 per-commit coordinates. Then prove the switch is
 #    load-bearing: the same verifier with the pin check ON reports the proxy
 #    pin MISSING too, which is exactly the red the bot's first signed pin PR
@@ -329,13 +329,13 @@ git update-index --cacheinfo "100644,${values_blob},charts/aether/values.yaml"
 pin_tree="$(git write-tree)"
 unset GIT_INDEX_FILE
 pin_base="$(GIT_AUTHOR_NAME=c GIT_AUTHOR_EMAIL=c@invalid GIT_COMMITTER_NAME=c GIT_COMMITTER_EMAIL=c@invalid \
-	git commit-tree "$pin_tree" -p HEAD -m "harness: pin an unsigned proxy digest after the cut-over")"
-expect_rc "a base pinning an unsigned post-cut-over proxy digest: control still accepts (pin check is not the control's)" 0 \
+	git commit-tree "$pin_tree" -p HEAD -m "harness: pin an unsigned proxy digest")"
+expect_rc "a base pinning an unsigned proxy digest: control still accepts (pin check is not the control's)" 0 \
 	env VERIFIER="$reg/verify-published-artifacts.sh" "$control" "$pin_base"
 ctl_sha="$(grep -oE 'expected-red control: commit [0-9a-f]{40}' "$tmp/out" | head -1 | awk '{print $4}')"
 n=$((n + 1))
-if [ -n "$ctl_sha" ] && env PROXY_PIN_CHECK=1 PROXY_SIGNING_CUTOVER=HEAD~1 "$reg/verify-published-artifacts.sh" "$ctl_sha" >"$tmp/out2" 2>&1; then
-	printf '  FAIL  with the pin check ON the verifier passed a never-signed post-cut-over pin\n'
+if [ -n "$ctl_sha" ] && env PROXY_PIN_CHECK=1 "$reg/verify-published-artifacts.sh" "$ctl_sha" >"$tmp/out2" 2>&1; then
+	printf '  FAIL  with the pin check ON the verifier passed a never-signed pin\n'
 	fail=1
 elif [ -z "$ctl_sha" ]; then
 	printf '  FAIL  could not learn the control sha from the previous case\n'

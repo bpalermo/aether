@@ -273,11 +273,12 @@ jobs:
         run: scripts/check-publish-verify-control.sh
 
       # publish-verify checks the aether-proxy digest each commit's chart PINS
-      # (#984), skipping only pins that predate proxy signing. This pins that
-      # the digest is read from the proxy block (never the supervisor's, right
-      # below it) and that the skip cannot swallow a post-cut-over unsigned pin
-      # — including a revert to an old digest. No network; throwaway git repo.
-      - name: aether-proxy pin extraction and signing cut-over are exact
+      # (#984), every one of them (#1191 removed the pre-signing skip). This
+      # pins that the digest is read from the proxy block (never the
+      # supervisor's, right below it), that only image_reference("proxy") is
+      # accepted, and that the bump-chart rewrite moves exactly that pin. No
+      # network.
+      - name: aether-proxy pin extraction and rewrite are exact
         run: scripts/check-proxy-pin.sh
 
       # publish-verify looks each expected tag up by name (HEAD

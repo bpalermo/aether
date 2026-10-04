@@ -467,7 +467,7 @@ a repository with no witness, is exit 2 (inconclusive), never `MISSING`. A
 `MISSING` line from this check is a real absence, so don't re-run it hoping it
 goes away.
 
-**Every run proves the gate can fail first (#930).** (The control covers the per-commit coordinates only: it runs the verifier with `PROXY_PIN_CHECK=0`, because the constructed commit pins main's signed aether-proxy digest, which is legitimately present; the proxy pin's own red lives in `scripts/check-proxy-pin.sh`.) Before the gate step,
+**Every run proves the gate can fail first (#930).** (The control covers the per-commit coordinates only: it runs the verifier with `PROXY_PIN_CHECK=0`, because the constructed commit pins main's signed aether-proxy digest, which is legitimately present; the proxy pin's own red is case 7 of `scripts/check-publish-verify-control.sh`.) Before the gate step,
 `publish-verify` runs an *expected-red control*: `scripts/publish-verify-control.sh`
 builds a commit with `git commit-tree` on `origin/main`'s tree (fixed identity
 and dates, so the same base always gives the same sha). No ref points at that
@@ -771,13 +771,13 @@ index plus both children (`4d7b967b…`, `1505e36b…`).
 **The sweep.** `make check-published` / `publish-verify` check, for every
 commit, the proxy digest that commit's `values.yaml` pins: it must exist, and
 the index and every child must carry a signature (the cosign pass then verifies
-them under the proxy identity above). A pin whose introducing commit is at or
-before `PROXY_SIGNING_CUTOVER` (`scripts/proxy-pin-lib.sh`) **and** whose digest
-has no signature tag is printed as `skip … unsigned by history` and not counted.
-Any pin introduced after the cut-over is always checked — including a revert
-to an old unsigned digest, which counts as a new pin — so an unsigned proxy pin
-goes red. The cut-over may move forward (to the first signed pin commit), never
-backwards.
+them under the proxy identity above). Every pin is checked, so an unsigned proxy
+pin goes red, and that includes a revert to an old unsigned digest. There used to be a
+`PROXY_SIGNING_CUTOVER` that skipped the unsigned pre-signing pins as history.
+#1191 removed it as unreachable: every one of those pins named the pre-cut-over
+registry, which the pin reader refuses, and the sweep refuses any commit that
+predates the Quay cut-over (proposal 040 phase 4). Each digest ever pinned under
+`image_reference("proxy")` was introduced after the signing cut-over.
 
 ### Pre-flight: node headroom before a roll (#812)
 

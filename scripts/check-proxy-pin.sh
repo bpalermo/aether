@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Exercise the aether-proxy pin logic the signature sweep relies on (#984):
 # proxy_pinned_digest / proxy_pinned_ref (which digest a values.yaml pins, and
-# under which reference), proxy_pin_verdict (whether that pin is checked or
-# skipped as pre-signing history), and proxy_pin_rewrite (the bump-chart job's
-# edit).
+# under which reference) and proxy_pin_rewrite (the bump-chart job's edit).
 #
 # The pin may name exactly image_reference("proxy") and nothing else. During the
 # Quay cut-over (proposal 040 phase 2) it could also name the pre-cut-over
@@ -12,26 +10,20 @@
 # refused by the reader AND by the rewrite -- never looked up on the old
 # registry.
 #
-# The two dangerous failures are both SILENT:
-#   - reading the wrong digest (the supervisor image sits directly below the
-#     proxy's and has a `digest:` line of its own), which would check the
-#     signature of an image the chart does not deploy for the proxy; and
-#   - a skip that is too wide. The cut-over exists so pins that predate proxy
-#     signing do not keep the sweep red forever; if it also swallowed a NEW
-#     unsigned pin, the gate would be vacuous (#853). So the cases below insist
-#     that a post-cut-over pin with no signature is `check` (which the sweep
-#     reports as MISSING), including a revert to an old unsigned digest.
+# The dangerous failure is SILENT: reading the wrong digest (the supervisor
+# image sits directly below the proxy's and has a `digest:` line of its own),
+# which would check the signature of an image the chart does not deploy for the
+# proxy.
 #
-# No registry access: tag lists are literals, and the git history is a throw-
-# away repository built here.
+# The sweep checks every pin it reads (scripts/proxy-pin-lib.sh); the
+# pre-signing skip and its cases are gone (#1191). An unsigned pin going red is
+# proven by scripts/check-publish-verify-control.sh (case 7).
+#
+# No registry access and no repository history: the inputs are literals.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 # shellcheck disable=SC1091
-. scripts/registry-lib.sh
-unset PROXY_SIGNING_CUTOVER # read the COMMITTED value, not an override
-# shellcheck disable=SC1091
 . scripts/proxy-pin-lib.sh
-committed_cutover="$PROXY_SIGNING_CUTOVER"
 
 d1="sha256:$(printf '1%.0s' {1..64})"
 d2="sha256:$(printf '2%.0s' {1..64})"
@@ -189,93 +181,8 @@ refuse_rewrite "a proxy block with no digest" "$(values "    # no digest")" "$PR
 refuse_rewrite "a truncated digest to pin" "$(values "    digest: \"$d1\"")" "$PROXY_IMAGE" "$new_tag" "sha256:938c5a57"
 rm -rf "$rw_dir"
 
-# --- proxy_pin_verdict, over a throwaway history ----------------------------
-#
-#   c1  pins d1                      <- PROXY_SIGNING_CUTOVER
-#   c2  unrelated change             (still pins d1)
-#   c3  pins d2                      (a post-cut-over release)
-#   c4  re-pins d1                   (a revert, post-cut-over)
-echo "proxy_pin_verdict:"
-repo_dir="$(mktemp -d)"
-trap 'rm -rf "$repo_dir"' EXIT
-(
-	set -e
-	cd "$repo_dir"
-	git init -q -b main .
-	git config user.email check@example.invalid
-	git config user.name check-proxy-pin
-	git config commit.gpgsign false
-	mkdir -p charts/aether
-	values "    digest: \"$d1\"" >charts/aether/values.yaml
-	git add -A && git commit -qm c1
-	echo "# unrelated" >>charts/aether/values.yaml
-	git commit -qam c2
-	values "    digest: \"$d2\"" >charts/aether/values.yaml
-	git commit -qam c3
-	values "    digest: \"$d1\"" >charts/aether/values.yaml
-	git commit -qam c4
-) || {
-	echo "::error::could not build the throwaway history" >&2
-	exit 2
-}
-rev() { git -C "$repo_dir" rev-parse "main~$1"; }
-c1="$(rev 3)"
-c2="$(rev 2)"
-c3="$(rev 1)"
-c4="$(rev 0)"
-
-unsigned=(dev-0123 other)
-signed_d1="$(registry_signature_tag_bundle "$d1")"
-signed_d2="$(registry_signature_tag_legacy "$d2")"
-
-# want_verdict <name> <expected> <sha> <digest> <tags...>
-want_verdict() {
-	local name="$1" want="$2" sha="$3" digest="$4" got rc
-	shift 4
-	n=$((n + 1))
-	got="$(cd "$repo_dir" && PROXY_SIGNING_CUTOVER="$c1" proxy_pin_verdict "$sha" "$digest" "$(printf '%s\n' "$@")" 2>/dev/null)"
-	rc=$?
-	if [ "$rc" -eq 0 ] && [ "$got" = "$want" ]; then
-		ok "$name -> $got"
-	else
-		bad "$name: want [$want] got [$got] (rc=$rc)"
-	fi
-}
-
-want_verdict "pre-cut-over pin, unsigned -> skipped as history" "skip $c1" "$c1" "$d1" "${unsigned[@]}"
-want_verdict "later commit still on the pre-cut-over pin -> skipped" "skip $c1" "$c2" "$d1" "${unsigned[@]}"
-want_verdict "pre-cut-over pin that IS signed -> checked" check "$c2" "$d1" "${unsigned[@]}" "$signed_d1"
-want_verdict "post-cut-over pin, unsigned -> checked (goes red)" check "$c3" "$d2" "${unsigned[@]}"
-want_verdict "post-cut-over pin, signed -> checked" check "$c3" "$d2" "${unsigned[@]}" "$signed_d2"
-want_verdict "revert to an old unsigned digest after the cut-over -> checked (goes red)" check "$c4" "$d1" "${unsigned[@]}"
-
-# Cannot decide -> exit 2, never a skip.
-n=$((n + 1))
-if got="$(cd "$repo_dir" && PROXY_SIGNING_CUTOVER="$(printf 'e%.0s' {1..40})" proxy_pin_verdict "$c4" "$d1" "" 2>/dev/null)"; then
-	bad "unknown cut-over commit: accepted, printed [$got]"
-else
-	ok "unknown cut-over commit (refused)"
-fi
-n=$((n + 1))
-if got="$(cd "$repo_dir" && PROXY_SIGNING_CUTOVER="$c1" proxy_pin_verdict "$c4" "$d2" "" 2>/dev/null)"; then
-	bad "digest no longer pinned at this commit: accepted, printed [$got]"
-else
-	ok "digest no longer pinned at this commit (refused)"
-fi
-
-# The committed cut-over is a FULL sha. An abbreviation would still resolve
-# today and silently stop resolving once it becomes ambiguous; a typo would
-# make every sweep exit 2. Existence is checked by the sweep itself (it has the
-# full history; CI's shallow checkout here does not).
-n=$((n + 1))
-if [[ "$committed_cutover" =~ ^[0-9a-f]{40}$ ]]; then
-	ok "committed PROXY_SIGNING_CUTOVER is a full 40-hex sha"
-else
-	bad "committed PROXY_SIGNING_CUTOVER is not a full sha: [$committed_cutover]"
-fi
-
-if [ "$n" -ne 27 ]; then
-	echo "::error::ran ${n} cases, expected 27 -- a gate that checks nothing passes" >&2
+if [ "$n" -ne 18 ]; then
+	echo "::error::ran ${n} cases, expected 18 -- a gate that checks nothing passes" >&2
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then
