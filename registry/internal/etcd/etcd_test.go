@@ -12,6 +12,7 @@ import (
 	"time"
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/registry"
 	"aethermesh.dev/registry/internal/etcd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -681,4 +682,50 @@ func TestEtcdRegistry_ConfigProjection_RoundTrip(t *testing.T) {
 	after, err := registry.ListConfig(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, after)
+}
+
+// TestEtcdRegistry_ListAllEndpointsRevisioned (#1193): one read lists every
+// requested protocol and names the store revision it was served at. A second
+// read with no write in between returns the same revision; a write moves it,
+// and StoreRevision tracks the newest revision seen (watch or listing).
+func TestEtcdRegistry_ListAllEndpointsRevisioned(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+
+	ctx := context.Background()
+	reg := setupRegistry(ctx, t)
+	var _ registry.RevisionedLister = reg
+
+	require.NoError(t, reg.RegisterEndpoint(ctx, "ns/web", registryv1.Service_PROTOCOL_HTTP,
+		&registryv1.ServiceEndpoint{Ip: "10.0.1.1", Port: 8080}))
+	require.NoError(t, reg.RegisterEndpoint(ctx, "ns/db", registryv1.Service_PROTOCOL_TCP,
+		&registryv1.ServiceEndpoint{Ip: "10.0.2.1", Port: 5432}))
+
+	protocols := []registryv1.Service_Protocol{registryv1.Service_PROTOCOL_HTTP, registryv1.Service_PROTOCOL_TCP}
+	state, rev1, err := reg.ListAllEndpointsRevisioned(ctx, protocols)
+	require.NoError(t, err)
+	require.Positive(t, rev1)
+	require.Len(t, state["ns/web"][registryv1.Service_PROTOCOL_HTTP], 1)
+	require.Len(t, state["ns/db"][registryv1.Service_PROTOCOL_TCP], 1)
+	assert.Empty(t, state["ns/web"][registryv1.Service_PROTOCOL_TCP], "protocols must not bleed into each other")
+
+	_, again, err := reg.ListAllEndpointsRevisioned(ctx, protocols)
+	require.NoError(t, err)
+	assert.Equal(t, rev1, again, "no write, same revision")
+	assert.GreaterOrEqual(t, reg.StoreRevision(), rev1)
+
+	require.NoError(t, reg.RegisterEndpoint(ctx, "ns/web", registryv1.Service_PROTOCOL_HTTP,
+		&registryv1.ServiceEndpoint{Ip: "10.0.1.2", Port: 8080}))
+	_, rev2, err := reg.ListAllEndpointsRevisioned(ctx, protocols)
+	require.NoError(t, err)
+	assert.Greater(t, rev2, rev1, "a write moves the revision")
+	require.Eventually(t, func() bool { return reg.StoreRevision() >= rev2 },
+		5*time.Second, 10*time.Millisecond, "StoreRevision never reached the listed revision")
+
+	// The per-protocol API is unchanged.
+	http, err := reg.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	assert.Len(t, http["ns/web"], 2)
+	assert.NotContains(t, http, "ns/db")
 }

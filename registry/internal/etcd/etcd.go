@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -92,6 +93,10 @@ type EtcdRegistry struct {
 	// double-close the etcd client.
 	closeOnce sync.Once
 	closeErr  error
+
+	// storeRevision is the newest etcd revision seen in a watch or listing
+	// response header (registry.RevisionedLister.StoreRevision).
+	storeRevision atomic.Int64
 }
 
 // NewEtcdRegistry creates a new etcd-backed Registry.
@@ -224,6 +229,7 @@ func (r *EtcdRegistry) watchLoop(ctx context.Context, done chan<- struct{}) {
 				r.log.DebugContext(ctx, "etcd watch error; will re-establish", "error", err.Error())
 				break
 			}
+			r.observeRevision(resp.Header.GetRevision())
 			if len(resp.Events) > 0 {
 				r.signalChange()
 			}
@@ -383,42 +389,99 @@ func (r *EtcdRegistry) ListEndpoints(ctx context.Context, service string, protoc
 func (r *EtcdRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	r.log.DebugContext(ctx, "listing all endpoints for protocol", "protocol", protocol.String())
 
-	// Get all keys under the prefix
-	resp, err := r.client.Get(ctx, r.keyPrefix, clientv3.WithPrefix())
+	byService, _, err := r.listRevisioned(ctx, []registryv1.Service_Protocol{protocol})
 	if err != nil {
 		r.log.ErrorContext(ctx, "failed to list all endpoints", "error", err, "protocol", protocol.String())
-		return nil, fmt.Errorf("failed to list all endpoints: %w", err)
+		return nil, err
+	}
+	endpointsByService := make(map[string][]*registryv1.ServiceEndpoint, len(byService))
+	for svc, protocols := range byService {
+		endpointsByService[svc] = protocols[protocol]
 	}
 
-	endpointsByService := make(map[string][]*registryv1.ServiceEndpoint)
-	protocolStr := protocol.String()
+	r.log.DebugContext(ctx, "listed all endpoints", "protocol", protocol.String(), "services", len(endpointsByService))
+	return endpointsByService, nil
+}
 
+// ListAllEndpointsRevisioned lists every given protocol's endpoints from ONE
+// prefix read and returns the etcd revision it was served at (the response
+// header's revision: the store's revision at the read, so two reads at the same
+// revision see the same keys). Satisfies registry.RevisionedLister.
+func (r *EtcdRegistry) ListAllEndpointsRevisioned(ctx context.Context, protocols []registryv1.Service_Protocol) (map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint, int64, error) {
+	r.log.DebugContext(ctx, "listing all endpoints", "protocols", len(protocols))
+
+	out, revision, err := r.listRevisioned(ctx, protocols)
+	if err != nil {
+		r.log.ErrorContext(ctx, "failed to list all endpoints", "error", err)
+		return nil, 0, err
+	}
+
+	r.log.DebugContext(ctx, "listed all endpoints", "services", len(out), "revision", revision)
+	return out, revision, nil
+}
+
+// listRevisioned is the single prefix read behind both listings.
+func (r *EtcdRegistry) listRevisioned(ctx context.Context, protocols []registryv1.Service_Protocol) (map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint, int64, error) {
+	resp, err := r.client.Get(ctx, r.keyPrefix, clientv3.WithPrefix())
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list all endpoints: %w", err)
+	}
+	revision := resp.Header.GetRevision()
+	r.observeRevision(revision)
+
+	// Key format:
+	// <root>/<region>/clusters/<cluster>/services/<service>/protocols/<protocol>/endpoints/<ip>
+	markers := make(map[registryv1.Service_Protocol]string, len(protocols))
+	for _, p := range protocols {
+		markers[p] = fmt.Sprintf("/protocols/%s/endpoints/", p.String())
+	}
+
+	out := make(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
 	for _, kv := range resp.Kvs {
 		key := string(kv.Key)
-
-		// Filter by protocol - key format:
-		// <root>/<region>/clusters/<cluster>/services/<service>/protocols/<protocol>/endpoints/<ip>
-		if !strings.Contains(key, fmt.Sprintf("/protocols/%s/endpoints/", protocolStr)) {
+		protocol, ok := matchProtocol(key, markers)
+		if !ok {
 			continue
 		}
-
-		// Extract service name from key
 		serviceName := r.extractServiceName(key)
 		if serviceName == "" {
 			continue
 		}
-
 		var endpoint registryv1.ServiceEndpoint
 		if err := proto.Unmarshal(kv.Value, &endpoint); err != nil {
 			r.log.ErrorContext(ctx, "failed to unmarshal endpoint", "error", err, "key", key)
 			continue
 		}
-
-		endpointsByService[serviceName] = append(endpointsByService[serviceName], &endpoint)
+		if out[serviceName] == nil {
+			out[serviceName] = make(map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
+		}
+		out[serviceName][protocol] = append(out[serviceName][protocol], &endpoint)
 	}
+	return out, revision, nil
+}
 
-	r.log.DebugContext(ctx, "listed all endpoints", "protocol", protocol.String(), "services", len(endpointsByService))
-	return endpointsByService, nil
+// matchProtocol returns the protocol whose endpoint marker key contains.
+func matchProtocol(key string, markers map[registryv1.Service_Protocol]string) (registryv1.Service_Protocol, bool) {
+	for p, marker := range markers {
+		if strings.Contains(key, marker) {
+			return p, true
+		}
+	}
+	return registryv1.Service_PROTOCOL_UNSPECIFIED, false
+}
+
+// StoreRevision returns the newest etcd revision seen by the change watch or a
+// listing. Satisfies registry.RevisionedLister.
+func (r *EtcdRegistry) StoreRevision() int64 { return r.storeRevision.Load() }
+
+// observeRevision raises storeRevision to rev (monotonic max).
+func (r *EtcdRegistry) observeRevision(rev int64) {
+	for {
+		cur := r.storeRevision.Load()
+		if rev <= cur || r.storeRevision.CompareAndSwap(cur, rev) {
+			return
+		}
+	}
 }
 
 // exportsMarker delimits the export-mark segment within a key, after the origin

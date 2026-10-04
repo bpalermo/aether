@@ -126,7 +126,7 @@ func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1
 	for _, e := range events {
 		e.Version = version
 	}
-	s.metrics.versionAdvanced(ctx, version)
+	s.metrics.snapshotState(ctx, s.snapshot.State())
 	s.broadcaster.Broadcast(events)
 
 	return &registrarv1.RegisterEndpointResponse{}, nil
@@ -174,14 +174,15 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 	for _, e := range events {
 		e.Version = version
 	}
-	s.metrics.versionAdvanced(ctx, version)
+	s.metrics.snapshotState(ctx, s.snapshot.State())
 	s.broadcaster.Broadcast(events)
 
 	return &registrarv1.UnregisterEndpointResponse{}, nil
 }
 
 // WatchEndpoints streams endpoint events to the agent. It first sends a full
-// snapshot (unless the client's last_version matches the current version), then
+// snapshot (unless the client's last_version names the current contents -- see
+// Snapshot.WatchStart), then
 // forwards incremental events from the broadcaster. A request filter scopes
 // both the snapshot and the incremental events to the named services
 // (demand-scoped distribution): the agent re-asserts its filter on every
@@ -197,22 +198,33 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 		return err
 	}
 
-	events, currentVersion := s.snapshot.FullSnapshotEvents(filterSet)
-	if req.GetLastVersion() != currentVersion {
+	// The resume decision and the state it is made against are one critical
+	// section: a sync landing between them must not make a current client
+	// look stale, or a stale one current.
+	events, catalog, currentVersion, resume := s.snapshot.WatchStart(req.GetLastVersion(), filterSet)
+	s.metrics.watchStarted(stream.Context(), resume)
+	if resume == ResumeResend {
 		if err := sendFilteredSnapshot(stream, events, filterSet); err != nil {
 			return err
 		}
-		// Replay the full service catalog (every watcher, regardless of filter):
-		// agents keep a local index of service names so the on-demand cold path
-		// answers existence locally. Skipped when the client is current (its
-		// catalog is too: transitions ride the same versioned stream).
-		if err := sendServiceCatalog(stream, s.snapshot.ServiceNames(), currentVersion); err != nil {
+	}
+	// Replay the full service catalog (every watcher, regardless of filter):
+	// agents keep a local index of service names so the on-demand cold path
+	// answers existence locally. Sent on a resend and on a rename (the client's
+	// contents are current under an older name: the marker's new version makes
+	// it swap catalogs, so it must receive the identical one first). Skipped
+	// only when the client's token is the current version.
+	if resume != ResumeCurrent {
+		if err := sendServiceCatalog(stream, catalog); err != nil {
 			return err
 		}
 	}
 
 	// Mark the snapshot boundary so the client knows its cache is complete
-	// (sent even when the snapshot was skipped: the client is current).
+	// (sent even when the snapshot was skipped: the client is current). This is
+	// the ONLY event of the initial exchange that carries the version (#1203):
+	// the client adopts a version as its resume token, which is safe only once
+	// it holds everything the version names.
 	if err := stream.Send(&registrarv1.WatchEndpointsResponse{
 		Type:    registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE,
 		Version: currentVersion,
@@ -275,12 +287,12 @@ func sendFilteredSnapshot(stream grpc.ServerStreamingServer[registrarv1.WatchEnd
 
 // sendServiceCatalog sends SERVICE_ADDED events for all names to the stream.
 // Catalog events are sent to ALL watchers regardless of filter (see Broadcast).
-func sendServiceCatalog(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse], names []string, version string) error {
+// Like the FULL_SNAPSHOT events they carry no version (#1203).
+func sendServiceCatalog(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse], names []string) error {
 	for _, name := range names {
 		if err := stream.Send(&registrarv1.WatchEndpointsResponse{
 			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED,
 			ServiceName: name,
-			Version:     version,
 		}); err != nil {
 			return fmt.Errorf("failed to send service catalog event: %w", err)
 		}
@@ -300,10 +312,12 @@ func streamEvents(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsRe
 				// Channel closed: either the broadcaster force-resynced this
 				// slow watcher after an overflow, or a reconnect replaced the
 				// subscription. Either way the client must NOT resume from its
-				// last seen version — events within a batch share one version,
-				// so a mid-batch overflow can leave the client's lastVersion
-				// equal to the current version while it still missed events.
-				// DataLoss tells the client to clear its resume token.
+				// last seen version: an overflow drops events without regard to
+				// batch boundaries, so a batch's versioned last event can reach
+				// the client after an earlier event of the same batch was
+				// dropped (#1203 versions only that last event, which covers a
+				// stream cut, not a hole in the middle). DataLoss tells the
+				// client to clear its resume token.
 				return status.Error(codes.DataLoss, "watch stream overflowed; reconnect for a full snapshot")
 			}
 			if err := stream.Send(event); err != nil {

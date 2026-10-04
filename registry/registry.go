@@ -63,6 +63,31 @@ type DerivedEndpoints interface {
 	DerivesEndpoints() bool
 }
 
+// RevisionedLister is an optional capability for Registry backends whose
+// listings are a pure function of a store revision (etcd): it lists every
+// requested protocol from ONE consistent read and returns the revision that
+// read was served at. The registrar carries that revision in its snapshot
+// version ("<rev>.<content hash>", issue #1193) for the revision lag metrics; a
+// client's currency is decided by the content hash alone.
+//
+// Implement it only when "same revision ⇒ same listing" holds. The kubernetes
+// backend deliberately does NOT: its listing derives endpoint health from the
+// clock (the drain pool-close deadline) and locality from a separately listed,
+// cached node set, so one Pod-list resourceVersion can produce two listings;
+// and a list's resourceVersion moves on every write anywhere in the cluster.
+// Without this capability the registrar's version is content-addressed (a hash
+// of the snapshot), which is correct for any backend; only the revision lag
+// metrics are lost.
+type RevisionedLister interface {
+	// ListAllEndpointsRevisioned lists the endpoints of every given protocol,
+	// keyed by service then protocol, from a single read, and returns the store
+	// revision the read was served at (> 0).
+	ListAllEndpointsRevisioned(ctx context.Context, protocols []registryv1.Service_Protocol) (map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint, int64, error)
+	// StoreRevision returns the newest store revision this instance has seen
+	// (from its change watch or a listing); 0 before the first.
+	StoreRevision() int64
+}
+
 // ReadyWaiter is an optional capability for Registry implementations whose
 // reads are served from an asynchronously populated cache (the registrar
 // watch client). WaitReady blocks until the cache holds a complete snapshot

@@ -925,11 +925,22 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 			r.cache = make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint)
 			r.mu.Unlock()
 			snapshotCleared = true
+			// The cache no longer holds what the old token names. Drop it until
+			// this resend completes (SNAPSHOT_COMPLETE carries the new one): a
+			// stream cut mid-resend must reconnect with no token, or a replica
+			// whose contents match the OLD token -- a lagging peer, or contents
+			// that reverted -- answers "current" onto an empty cache (#1203).
+			lastVersion = ""
 		}
 
 		r.handleCatalogEvent(ctx, event, &catalogReplay, connectVersion)
 		r.applyEvent(ctx, event)
 
+		// The registrar versions only the points at which this cache holds
+		// everything the version names: SNAPSHOT_COMPLETE and the last event
+		// of each batch it sends us (#1203). Adopting any non-empty version is
+		// therefore safe; an older registrar versions every event, which a
+		// stream cut can turn into a stale skip on reconnect (#1203).
 		if event.GetVersion() != "" {
 			lastVersion = event.GetVersion()
 			r.metrics.versionApplied(ctx, lastVersion)
@@ -946,9 +957,10 @@ func (r *RegistrarRegistry) handleStreamError(ctx context.Context, err error, la
 	case status.Code(err) == codes.DataLoss:
 		// DataLoss means the registrar force-resynced this watcher (its
 		// event buffer overflowed). Resuming from lastVersion could skip
-		// the missed events — batches share a version, so lastVersion may
-		// match the current version while events were still dropped. Clear
-		// the resume token so the reconnect receives a full snapshot.
+		// the missed events: the drop can open a hole inside a batch whose
+		// versioned last event still arrived, so lastVersion may name the
+		// current contents while events were dropped. Clear the resume token
+		// so the reconnect receives a full snapshot.
 		r.log.InfoContext(ctx, "registrar forced a resync; requesting full snapshot on reconnect")
 		return "", nil
 

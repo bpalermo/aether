@@ -2472,6 +2472,99 @@ To see whether a proxy is blind right now: `control_plane.connected_state` on it
 (`0` = no ADS stream). On reconnect the proxy logs `cds: response indicates ...`, and
 the agent logs `fresh xDS stream re-stated QUIC twins` when the proxy holds twins.
 
+### Stored vs in place vs applied: registrar snapshot lag and divergence (#1193)
+
+An endpoint change passes through three places: **stored** (the external
+registry: etcd), **in place** (a registrar replica's snapshot, rebuilt by its
+sync loop), and **applied** (each agent's watch cache). Since #1193 the
+registrar's snapshot version carries the etcd revision the snapshot was listed
+at, which makes the three comparable across processes and replicas, and always
+the content hash, which alone names the contents:
+
+| Version | Meaning |
+|---|---|
+| `<rev>.<hash>` | exactly the etcd listing at revision `rev` |
+| `<rev>+<hash>` | the listing at `rev` plus something not yet in it: a write-behind intent still overlaid, or an agent RPC applied since the last sync |
+| `hash:<hash>` | the backend has no revision (kubernetes). The version is content-addressed |
+
+`<hash>` is 16 hex digits of a sha256 over the snapshot's endpoints. The
+revision is never trusted for equality: a rebuilt etcd restarts its revisions at
+1, and two binaries can decode one stored value differently.
+
+```promql
+# in place: how far each registrar replica's snapshot trails the store
+aether_registrar_store_revision - aether_registrar_snapshot_revision
+
+# applied: how far the fleet's agents trail the store (worst agent)
+max(aether_registrar_store_revision) - min(aether_agent_registry_last_version)
+
+# divergence: more than one endpoint set while every replica is on the same
+# revision and none has a write-behind intent pending. MUST be empty.
+count(count by (content_hash) (aether_registrar_snapshot_content)) > 1
+  and on() (max(aether_registrar_snapshot_revision) == min(aether_registrar_snapshot_revision))
+  and on() (max(aether_registrar_writebehind_queue_depth) == 0)
+```
+
+The replica-lag line settles at 0 between changes. A short climb during churn
+is the watch-to-sync debounce (200 ms). A replica that stays behind has a
+stalled sync loop: check `aether_registrar_sync_errors_total`.
+
+The agent line is an **upper bound**. An agent learns a revision only from an
+event that reaches it: the last event of a batch it is sent, or the
+`SNAPSHOT_COMPLETE` of a (re)connect. Two kinds of store write move the
+revision without sending it anything, so its gauge stays behind while its cache
+is current:
+
+- a write that changes no contents, such as a re-Put of an identical endpoint;
+- a change to a service outside a demand-scoped agent's watch filter.
+
+On kind, during one pod churn, both agents sat one revision behind for 11 s with
+identical contents, until the next real change. Read a gap as lag only if it
+persists **while** `aether_registrar_sync_events_total` shows changes the agent
+should have received. An agent that is actually stuck has a broken watch stream:
+check `aether_agent_registry_reconnects_total` and `watch_errors_total` on that
+agent.
+
+**Divergence rule.** Two replicas reporting the **same**
+`aether_registrar_snapshot_revision`, with no write-behind intent pending
+(`aether_registrar_writebehind_queue_depth == 0` on both), must report the
+**same** `content_hash` label on `aether_registrar_snapshot_content`. The same
+revision with a different `content_hash` is a bug: the listing is a pure function
+of the revision, so two replicas that disagree are not serving what the store
+holds. `aether_registrar_snapshot_content` exports exactly one series per
+replica, the current hash. A superseded hash stops being exported rather than
+accumulating.
+
+Notes:
+
+- **kubernetes backend: the version is content-addressed, and the lag metrics
+  are etcd-only.** A kubernetes listing is not a function of the Pod list's
+  `resourceVersion`: endpoint health derives from the clock (the drain
+  pool-close deadline), locality comes from a separately cached node list, and
+  the list RV moves on every write anywhere in the cluster. So that backend does
+  not implement `registry.RevisionedLister`, and `store_revision`,
+  `snapshot_revision` and the agent's `last_version` are not reported. The
+  content-hash gauge and the divergence check above still apply.
+- `aether_registrar_snapshot_version` keeps its pre-#1193 series name but is now
+  the snapshot **generation**: a per-process count of content changes. It moves
+  only when the served endpoint set changes, and it is not comparable across
+  replicas.
+- **Reconnect outcomes**, counted by `aether_registrar_watch_starts_total{resume}`:
+  - `current`: the agent's `last_version` is the current version. It gets only
+    `SNAPSHOT_COMPLETE`.
+  - `renamed`: the hash matches but the name differs, for example because the
+    revision moved with no content change. It gets the service catalog plus
+    `SNAPSHOT_COMPLETE` carrying the current version. No endpoint events are
+    sent.
+  - `resent`: anything else. It gets the full snapshot.
+- The version is sent only where the receiver holds everything it names: on
+  `SNAPSHOT_COMPLETE`, and on the last event of each broadcast batch per watcher
+  (#1203). The agent also drops its token when a resend starts clearing its
+  cache. A stream cut mid-snapshot or mid-batch therefore resends in full. Agents
+  older than #1204 keep the old token across a cut resend, so until the agent
+  DaemonSet has rolled they are exposed to an empty cache on a reconnect that
+  matches it. The window is milliseconds per reconnect.
+
 ### `504 UT` after exactly 15 s over an h2 mesh cluster to a terminating pod (#1104)
 
 The h2 sibling of #1087. Since QUIC went unconditional, h2 carries the GAMMA

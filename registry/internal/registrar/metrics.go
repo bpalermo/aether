@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"go.opentelemetry.io/otel/metric"
 )
@@ -14,9 +15,14 @@ const meterName = "aether/registry-registrar"
 // clientMetrics holds the watch-stream instruments. All methods are
 // nil-receiver-safe so the client runs unchanged when telemetry is disabled.
 //
-// aether.agent.registry.last_version is the agent half of the staleness skew
-// query: compare against aether.registrar.snapshot.version — a persistent gap
-// means this agent is consuming a stale endpoint view.
+// aether.agent.registry.last_version is the agent half of the propagation-lag
+// query (#1193): on the etcd backend the registrar's version is the store
+// revision it serves, so aether.registrar.store_revision minus this gauge is how
+// far this agent trails the store -- an upper bound, since the agent learns a
+// revision only from an event that reaches it (a no-op store write, or a change
+// outside its watch filter, leaves the gauge behind a current cache). On the
+// kubernetes backend the version is content-addressed ("hash:<h>") and the gauge
+// is not recorded.
 type clientMetrics struct {
 	reconnects    metric.Int64Counter
 	watchErrors   metric.Int64Counter
@@ -38,7 +44,7 @@ func newClientMetrics(meter metric.Meter) (*clientMetrics, error) {
 		return nil, fmt.Errorf("watch errors: %w", err)
 	}
 	if m.lastVersion, err = meter.Int64Gauge("aether.agent.registry.last_version",
-		metric.WithDescription("Last registrar snapshot version applied by this agent (compare with aether.registrar.snapshot.version for skew)")); err != nil {
+		metric.WithDescription("Store revision of the last registrar snapshot version applied by this agent (etcd backend only; aether.registrar.store_revision minus this bounds the agent's propagation lag from above: it advances only on events that reach this agent)")); err != nil {
 		return nil, fmt.Errorf("last version: %w", err)
 	}
 	if m.malformedKeys, err = meter.Int64Counter("aether.agent.registry.malformed_keys",
@@ -74,7 +80,13 @@ func (m *clientMetrics) versionApplied(ctx context.Context, version string) {
 	if m == nil {
 		return
 	}
-	if v, err := strconv.ParseInt(version, 10, 64); err == nil {
+	// "<rev>.<hash>" or "<rev>+<hash>": the revision is the part before the
+	// separator. A content-addressed "hash:<h>" never parses, by construction.
+	rev := version
+	if i := strings.IndexAny(version, ".+"); i >= 0 {
+		rev = version[:i]
+	}
+	if v, err := strconv.ParseInt(rev, 10, 64); err == nil {
 		m.lastVersion.Record(ctx, v)
 	}
 }

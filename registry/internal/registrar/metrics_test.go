@@ -78,3 +78,26 @@ func TestClientMetrics_Recording(t *testing.T) {
 		t.Errorf("last_version = %d, want 12", got)
 	}
 }
+
+// TestClientMetrics_LastVersionIsTheStoreRevision (#1193): the registrar's
+// version is "<rev>.<hash>" for a clean etcd listing, "<rev>+<hash>" while it serves
+// an overlaid or RPC-applied state, and "hash:<hash>" on a backend without
+// revisions. The gauge records the revision in the first two and nothing for
+// the third -- an all-digit hash must never read as a revision.
+func TestClientMetrics_LastVersionIsTheStoreRevision(t *testing.T) {
+	m, reader := newTestClientMetrics(t)
+	ctx := context.Background()
+
+	m.versionApplied(ctx, "40.0123456789abcdef")
+	if got, _ := metricValue(t, reader, "aether.agent.registry.last_version"); got != 40 {
+		t.Errorf("last_version after a clean version = %d, want its revision 40", got)
+	}
+	m.versionApplied(ctx, "41+0123456789abcdef")
+	if got, _ := metricValue(t, reader, "aether.agent.registry.last_version"); got != 41 {
+		t.Errorf("last_version after a dirty version = %d, want its revision 41", got)
+	}
+	m.versionApplied(ctx, "hash:1234567890123456")
+	if got, _ := metricValue(t, reader, "aether.agent.registry.last_version"); got != 41 {
+		t.Errorf("last_version after a content-addressed version = %d, want 41 (unchanged)", got)
+	}
+}
