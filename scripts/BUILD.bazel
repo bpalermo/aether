@@ -34,7 +34,6 @@ sh_library(
 # which runs it with COSIGN set to the Bazel-pinned cosign binary.
 exports_files(
     [
-        "ghcr-lib.sh",
         "registry-lib.sh",
         "verify-image-signatures.sh",
     ],
