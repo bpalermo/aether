@@ -683,36 +683,77 @@ func upstreamProto(w dns.ResponseWriter) string {
 }
 
 // startUpstream runs a test resolver on ONE host:port over BOTH udp and tcp (what a
-// real upstream looks like) and returns its address.
+// real upstream looks like) and returns its address. The sockets are bound here, on
+// a kernel-chosen port, and handed to the servers still open (#1199): probing for a
+// free port, closing the probe and binding the port again later let another process
+// take it in between.
 func startUpstream(t *testing.T, h dns.HandlerFunc) string {
 	t.Helper()
-	addr := fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
-	startUpstreamOn(t, addr, "udp", h)
-	startUpstreamOn(t, addr, "tcp", h)
-	return addr
+	pc, ln := listenDNSPair(t)
+	serveUpstream(t, &dns.Server{PacketConn: pc, Handler: h})
+	serveUpstream(t, &dns.Server{Listener: ln, Handler: h})
+	return pc.LocalAddr().String()
 }
 
 // startUpstreamUDPOnly runs a test resolver that answers over udp only, so a TCP retry
 // against it fails.
 func startUpstreamUDPOnly(t *testing.T, h dns.HandlerFunc) string {
 	t.Helper()
-	addr := fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
-	startUpstreamOn(t, addr, "udp", h)
-	return addr
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	serveUpstream(t, &dns.Server{PacketConn: pc, Handler: h})
+	return pc.LocalAddr().String()
 }
 
-// startUpstreamOn binds one transport of the test upstream and waits for it to serve.
-func startUpstreamOn(t *testing.T, addr, network string, h dns.HandlerFunc) {
+// listenDNSPair binds a UDP socket on a kernel-chosen loopback port and a TCP listener
+// on the same port, and returns both still open. A port whose TCP side is taken is
+// released and another one tried.
+func listenDNSPair(t *testing.T) (net.PacketConn, net.Listener) {
 	t.Helper()
+	for range 20 {
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		require.NoError(t, err)
+		ln, err := net.Listen("tcp", pc.LocalAddr().String())
+		if err == nil {
+			return pc, ln
+		}
+		require.NoError(t, pc.Close())
+	}
+	t.Fatal("no port could be bound on both udp and tcp")
+	return nil, nil
+}
+
+// serveUpstream starts a test upstream and waits for it to serve. A server handed an
+// open socket (PacketConn or Listener) serves it; one with only Addr/Net binds it. If
+// serving returns before the server starts -- a bind error, say -- it fails AT ONCE
+// with that error, as awaitBound does for the resolver, instead of waiting out the
+// whole eventWait and reporting a bind failure as slowness (#1199).
+func serveUpstream(t *testing.T, srv *dns.Server) {
+	t.Helper()
+	where := srv.Addr + "/" + srv.Net
+	switch {
+	case srv.PacketConn != nil:
+		where = srv.PacketConn.LocalAddr().String() + "/udp"
+	case srv.Listener != nil:
+		where = srv.Listener.Addr().String() + "/tcp"
+	}
 	started := make(chan struct{})
-	srv := &dns.Server{Addr: addr, Net: network, Handler: h}
 	srv.NotifyStartedFunc = func() { close(started) }
-	go func() { _ = srv.ListenAndServe() }()
+	errc := make(chan error, 1)
+	go func() {
+		if srv.PacketConn != nil || srv.Listener != nil {
+			errc <- srv.ActivateAndServe()
+		} else {
+			errc <- srv.ListenAndServe()
+		}
+	}()
 	t.Cleanup(func() { _ = srv.Shutdown() })
 	select {
 	case <-started:
+	case err := <-errc:
+		t.Fatalf("test upstream on %s did not start: %v", where, err)
 	case <-time.After(eventWait):
-		t.Fatalf("test upstream did not bind %s/%s in time", addr, network)
+		t.Fatalf("test upstream did not bind %s in time", where)
 	}
 }
 
