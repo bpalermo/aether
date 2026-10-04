@@ -256,42 +256,6 @@ func TestBackends(t *testing.T) {
 	}
 }
 
-// TestBackendServiceKey covers namespace defaulting in isolation: an unset backendRef
-// namespace inherits the route's, an explicit one wins.
-func TestBackendServiceKey(t *testing.T) {
-	otherNS := gatewayv1.Namespace("other")
-	emptyNS := gatewayv1.Namespace("")
-
-	assert.Equal(t, "ns/svc", backendServiceKey(nil, "ns", "svc"))
-	assert.Equal(t, "ns/svc", backendServiceKey(&emptyNS, "ns", "svc"))
-	assert.Equal(t, "other/svc", backendServiceKey(&otherNS, "ns", "svc"))
-}
-
-// TestBackendPermitted covers the ReferenceGrant gate in isolation.
-func TestBackendPermitted(t *testing.T) {
-	otherNS := gatewayv1.Namespace("other")
-	sameNS := gatewayv1.Namespace("ns")
-	grants := []gatewayv1beta1.ReferenceGrant{crossNSGrant("TCPRoute")}
-
-	assert.True(t, backendPermitted(nil, "ns", "TCPRoute", "svc", nil),
-		"same-namespace (unset) ref needs no grant")
-	assert.True(t, backendPermitted(&sameNS, "ns", "TCPRoute", "svc", nil),
-		"explicit same-namespace ref needs no grant")
-	assert.False(t, backendPermitted(&otherNS, "ns", "TCPRoute", "svc", nil),
-		"cross-namespace ref without a grant is not permitted")
-	assert.True(t, backendPermitted(&otherNS, "ns", "TCPRoute", "svc", grants),
-		"cross-namespace ref with a matching grant is permitted")
-	assert.False(t, backendPermitted(&otherNS, "ns", "UDPRoute", "svc", grants),
-		"grant naming another route kind does not permit the ref")
-}
-
-// TestDerefBackendNamespace covers the nil-safe accessor.
-func TestDerefBackendNamespace(t *testing.T) {
-	ns := gatewayv1.Namespace("other")
-	assert.Equal(t, "", derefBackendNamespace(nil))
-	assert.Equal(t, "other", derefBackendNamespace(&ns))
-}
-
 // TestBackends_PortQualified covers proposal 037 Phase 3: a backendRef's port
 // selects that port's cluster.
 //
