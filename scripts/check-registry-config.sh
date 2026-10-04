@@ -12,13 +12,10 @@
 #      non-empty.
 #   2. proxy/bazel/registry.bzl — the //proxy workspace's copy, which cannot
 #      load() from this module — is byte-identical to bazel/img/registry.bzl.
-#   3. The aether-proxy pin in charts/aether/values.yaml names exactly one of
-#      proxy_pin_references(): image_reference("proxy"), or a
-#      PROXY_PIN_LEGACY_REFERENCES entry. The pin is DATA (proxy-release's
-#      bump-chart job rewrites it), so it cannot be derived, and the flip could
-#      not move it: it names the pre-cut-over (ghcr.io) image until the first
-#      proxy release after the flip re-pins it — reported below as a notice,
-#      never silently. Any other registry is an error.
+#   3. The aether-proxy pin in charts/aether/values.yaml names exactly
+#      image_reference("proxy"). The pin is DATA (proxy-release's bump-chart
+#      job rewrites it), so it cannot be derived; any other registry is an
+#      error (proposal 040 phase 4 removed the pre-cut-over allowance).
 #   4. No tracked file outside the allow-list below contains the registry
 #      literal: `<IMAGE_REGISTRY>/<IMAGE_NAMESPACE>`, or the namespace path
 #      standing alone (`bpalermo/aether/agent` in a repo list) — both computed
@@ -47,10 +44,8 @@
 #
 # LEGACY ALLOW-LIST — where the pre-cut-over registry (ghcr.io) may appear:
 #   bazel/img/registry.bzl, proxy/bazel/registry.bzl   the setting's history
-#                                   note and PROXY_PIN_LEGACY_REFERENCES
-#   bazel/proxy_pin/extensions.bzl  documents accepting that legacy pin
-#   charts/aether/values.yaml       the proxy pin, until the next proxy release
-#   docs/proposals/                 history: every proposal records the
+#                                   note
+#   docs/proposals/                history: every proposal records the
 #                                   coordinates of its time (010, 040's mapping)
 #   docs/runbook.md                 incident/validation records that cite the
 #                                   coordinates in force then, and the
@@ -113,25 +108,11 @@ else
 fi
 
 # --- 3. the proxy pin agrees --------------------------------------------------
-if ! pin_refs="$(scripts/image-registry.sh proxy-pin-refs)"; then
-	echo "::error::scripts/image-registry.sh cannot read proxy_pin_references() from bazel/img/registry.bzl" >&2
-	exit 2
-fi
-n_pin=0
-pinned=""
-while read -r ref; do
-	[ -n "$ref" ] || continue
-	c="$(grep -cE "^[[:space:]]*repository:[[:space:]]*\"?${ref//./\\.}\"?[[:space:]]*$" charts/aether/values.yaml || true)"
-	n_pin=$((n_pin + c))
-	[ "$c" = 0 ] || pinned="$ref"
-done <<<"$pin_refs"
+n_pin="$(grep -cE "^[[:space:]]*repository:[[:space:]]*\"?${PROXY_IMAGE//./\\.}\"?[[:space:]]*$" charts/aether/values.yaml || true)"
 if [ "$n_pin" != 1 ]; then
-	bad "charts/aether/values.yaml has ${n_pin} \`repository:\` line(s) naming one of proxy_pin_references() ($(printf '%s' "$pin_refs" | paste -sd, -)), want exactly 1 — the proxy pin disagrees with bazel/img/registry.bzl"
-elif [ "$pinned" = "$PROXY_IMAGE" ]; then
-	echo "ok: charts/aether/values.yaml pins the proxy as ${PROXY_IMAGE}"
+	bad "charts/aether/values.yaml has ${n_pin} \`repository:\` line(s) naming image_reference(\"proxy\") (${PROXY_IMAGE}), want exactly 1 — the proxy pin disagrees with bazel/img/registry.bzl"
 else
-	echo "ok: charts/aether/values.yaml pins the proxy as ${pinned} — a PRE-cut-over reference (PROXY_PIN_LEGACY_REFERENCES); the next proxy release re-pins it to ${PROXY_IMAGE}"
-	echo "::notice::the aether-proxy pin still names ${pinned}; it moves to ${PROXY_IMAGE} with the next proxy release (proxy-release.yml bump-chart)"
+	echo "ok: charts/aether/values.yaml pins the proxy as ${PROXY_IMAGE}"
 fi
 
 # --- 4. no literal outside the allow-list ------------------------------------
@@ -197,8 +178,6 @@ LEGACY_PREFIXES=(
 legacy_allow=(
 	':(exclude)bazel/img/registry.bzl'
 	':(exclude)proxy/bazel/registry.bzl'
-	':(exclude)bazel/proxy_pin/extensions.bzl'
-	':(exclude)charts/aether/values.yaml'
 	':(exclude)docs/proposals/'
 	':(exclude)docs/runbook.md'
 	':(exclude)docs/observability/'

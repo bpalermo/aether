@@ -1,6 +1,6 @@
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load(":registry.bzl", "IMAGE_NAMESPACE", "IMAGE_REGISTRY", "SIGNATURE_LAYOUT", "chart_registry_url", "chart_repository", "image_reference", "image_repository", "proxy_pin_references")
+load(":registry.bzl", "IMAGE_NAMESPACE", "IMAGE_REGISTRY", "SIGNATURE_LAYOUT", "chart_registry_url", "chart_repository", "image_reference", "image_repository")
 
 # The registry is ONE setting, registry.bzl (proposal 040), read two ways: Bazel
 # loads it, and scripts/image-registry.sh parses it for everything that is not
@@ -38,8 +38,6 @@ _EXPECTED = [
     "host " + IMAGE_REGISTRY,
     "prefix " + IMAGE_REGISTRY + "/" + IMAGE_NAMESPACE,
     "signature-layout " + SIGNATURE_LAYOUT,
-    # A list: registry_test.sh joins the script's lines with "," to compare.
-    "proxy-pin-refs " + ",".join(proxy_pin_references()),
 ]
 
 _EXPECTED += ["repo {} {}".format(

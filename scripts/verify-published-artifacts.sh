@@ -620,7 +620,7 @@ verify_commit() {
 	else
 		if ! values="$(git show "${sha}:${PROXY_VALUES_PATH}")" ||
 			! pinned="$(printf '%s\n' "$values" | proxy_pinned_ref)"; then
-			echo "::error::could not read the aether-proxy pin in ${PROXY_VALUES_PATH} at ${sha} (a repository: naming one of ${PROXY_PIN_REFS[*]}, and its digest)" >&2
+			echo "::error::could not read the aether-proxy pin in ${PROXY_VALUES_PATH} at ${sha} (a repository: naming ${PROXY_IMAGE}, and its digest)" >&2
 			exit 2
 		fi
 		# The pin names its own registry (proposal 040): it moves with the next

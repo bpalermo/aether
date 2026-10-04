@@ -30,16 +30,13 @@
 #   image-registry.sh host               the registry host alone
 #   image-registry.sh prefix             <host>/<namespace> (IMAGE_REGISTRY above)
 #   image-registry.sh signature-layout   SIGNATURE_LAYOUT: referrer | tag
-#   image-registry.sh proxy-pin-refs     proxy_pin_references(), one per line:
-#                                        image_reference("proxy"), then each
-#                                        PROXY_PIN_LEGACY_REFERENCES entry
 #
-# SIGNATURE_LAYOUT and PROXY_PIN_LEGACY_REFERENCES are parsed only by the
-# subcommands that print them (and `env`), so a registry.bzl from BEFORE they
-# existed -- the publish-verify sweep reads the file as of each commit it checks
-# -- still answers host/prefix/repo/ref/chart-repo/chart-ref. Asked for one it
-# does not have, it fails (exit 2) like any other unparseable setting; the
-# sweep checks for the line itself before asking.
+# SIGNATURE_LAYOUT is parsed only by the subcommands that print it (and `env`),
+# so a registry.bzl from BEFORE it existed -- the publish-verify sweep reads the
+# file as of each commit it checks -- still answers
+# host/prefix/repo/ref/chart-repo/chart-ref. Asked for it when the line is
+# absent, it fails (exit 2) like any other unparseable setting; the sweep checks
+# for the line itself before asking.
 #
 # Every value is validated against [a-z0-9./_-] (plus :port on the host), so the
 # KEY=VALUE form is safe to eval and to append to $GITHUB_ENV unquoted.
@@ -98,22 +95,6 @@ signature_layout() {
 	one SIGNATURE_LAYOUT 'referrer|tag'
 }
 
-# PROXY_PIN_LEGACY_REFERENCES = ["a", "b"]  (or []), one reference per line.
-legacy_proxy_refs() {
-	local lines ref='"[a-z0-9]([a-z0-9.:/_-]*[a-z0-9])?"' body
-	lines="$(grep -E '^PROXY_PIN_LEGACY_REFERENCES[[:space:]]*=' "$bzl" || true)"
-	[ -n "$lines" ] || die "no PROXY_PIN_LEGACY_REFERENCES assignment"
-	[ "$(printf '%s\n' "$lines" | wc -l)" -eq 1 ] || die "PROXY_PIN_LEGACY_REFERENCES is assigned more than once"
-	[[ "$lines" =~ ^PROXY_PIN_LEGACY_REFERENCES\ =\ \[((${ref})(,\ ${ref})*)?\]$ ]] ||
-		die "cannot parse: ${lines}"
-	body="${BASH_REMATCH[1]}"
-	while [[ "$body" =~ ^\"([a-z0-9][a-z0-9.:/_-]*)\"(,\ )?(.*)$ ]]; do
-		printf '%s\n' "${BASH_REMATCH[1]}"
-		body="${BASH_REMATCH[3]}"
-	done
-	[ -z "$body" ] || die "cannot parse PROXY_PIN_LEGACY_REFERENCES near: ${body}"
-}
-
 repo() {
 	local c="$1" k v name
 	name_ok "$c"
@@ -157,16 +138,8 @@ chart-ref)
 	printf '%s/%s/%s%s\n' "$host" "$namespace" "$chart_prefix" "$2"
 	;;
 signature-layout) signature_layout ;;
-proxy-pin-refs)
-	current="${host}/$(repo proxy)"
-	legacy="$(legacy_proxy_refs)"
-	printf '%s\n' "$current"
-	while read -r r; do
-		[ -n "$r" ] && [ "$r" != "$current" ] && printf '%s\n' "$r"
-	done <<<"$legacy"
-	;;
 *)
-	echo "usage: $0 [env | host | prefix | repo <component> | ref <component> | chart-repo <chart> | chart-ref <chart> | signature-layout | proxy-pin-refs]" >&2
+	echo "usage: $0 [env | host | prefix | repo <component> | ref <component> | chart-repo <chart> | chart-ref <chart> | signature-layout]" >&2
 	exit 2
 	;;
 esac

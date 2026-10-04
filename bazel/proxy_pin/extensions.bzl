@@ -25,12 +25,11 @@ Parsing contract (deliberately strict — it fails the build rather than silentl
 validating against the wrong binary):
 
   * Find the first line of the form `repository: <ref>` whose `<ref>` is
-    exactly one of `proxy_pin_references()` from //bazel/img:registry.bzl — the
-    one registry setting (proposal 040): `image_reference("proxy")`, or a
-    PROXY_PIN_LEGACY_REFERENCES entry (the ghcr.io coordinate the pin keeps
-    until the first proxy release after the Quay cut-over re-pins it) — so a pin
-    into any other registry is not silently accepted. The image is fetched from
-    whichever registry the pin names.
+    exactly `image_reference("proxy")` from //bazel/img:registry.bzl — the one
+    registry setting (proposal 040) — so a pin into any other registry
+    (including the pre-cut-over one, decommissioned in proposal 040 phase 4) is
+    a hard failure, never a fallback. The image is fetched from that registry;
+    a digest it does not serve fails the fetch below, loudly.
   * Starting from the line after it, scan forward while still inside that
     mapping (indentation >= the `repository:` key's indentation; blank lines and
     comment-only lines do not end the block) for a line `digest: "sha256:<64
@@ -48,7 +47,7 @@ credentials. If it is ever made private, `docker login <registry>` locally and a
 `_fetch_manifest` failure path says so.
 """
 
-load("//bazel/img:registry.bzl", "proxy_pin_references", "registry_token_url")
+load("//bazel/img:registry.bzl", "image_reference", "registry_token_url")
 
 _ENVOY_PATH_IN_IMAGE = "usr/local/bin/envoy"
 
@@ -104,7 +103,7 @@ def _parse_proxy_pin(mctx):
         if not stripped.startswith("repository:"):
             continue
         candidate = _scalar(stripped[len("repository:"):])
-        if candidate not in proxy_pin_references():
+        if candidate != image_reference("proxy"):
             continue
 
         repository = candidate
@@ -124,10 +123,10 @@ def _parse_proxy_pin(mctx):
     if repository == None:
         fail((
             "{label}: could not find the aether-proxy image pin. Expected a line " +
-            "`repository: <ref>` with <ref> one of {want} (proxy_pin_references() " +
-            "in //bazel/img:registry.bzl). //test/envoy_validate validates against " +
+            "`repository: {want}` (image_reference(\"proxy\") in " +
+            "//bazel/img:registry.bzl). //test/envoy_validate validates against " +
             "the Envoy inside that image, so the pin cannot be guessed (aether #709)."
-        ).format(label = _VALUES_LABEL, want = proxy_pin_references()))
+        ).format(label = _VALUES_LABEL, want = image_reference("proxy")))
     if digest == None:
         fail((
             "{label}: found `repository: {repo}` but no `digest:` key inside the " +

@@ -532,13 +532,10 @@ proxy:
   # bump-chart PR to the publishing commit SHA + index digest. Mirror by
   # overriding `repository`.
   #
-  # The pin names whatever registry the proxy release that wrote it pushed to.
-  # Until the first proxy release after the Quay cut-over (proposal 040 phase 2)
-  # re-pins it, that is the pre-cut-over ghcr.io image; that release's bump-chart
-  # PR moves it to image_reference("proxy") on quay.io, rewriting `repository:`
-  # together with `tag:` and `digest:` (scripts/proxy-pin-lib.sh,
-  # proxy_pin_rewrite). Every pin reader accepts exactly proxy_pin_references()
-  # (bazel/img/registry.bzl).
+  # `repository:` must be exactly image_reference("proxy") from
+  # bazel/img/registry.bzl: every pin reader (//bazel/proxy_pin, the publish-verify
+  # sweep, ci.yaml's proxy-pin job, the bump-chart rewrite in
+  # scripts/proxy-pin-lib.sh) accepts that reference and no other.
   image:
     repository: quay.io/aethermesh/proxy
     tag: 05b687b77741b8271a7c35962a5716eee28319cf
