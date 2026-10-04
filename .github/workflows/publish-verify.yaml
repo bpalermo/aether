@@ -96,7 +96,7 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # ALWAYS the trusted default branch, never the triggering run's head:
           # the scripts this job executes come from main; the commit under
@@ -184,7 +184,7 @@ jobs:
       # cosign whatever commit is under verification.
       - name: Setup Bazel
         if: success() || steps.verify.conclusion == 'failure'
-        uses: bazel-contrib/setup-bazel@0.19.0
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           bazelisk-cache: true
           # Repository cache (#1001): keyed on everything that changes the
