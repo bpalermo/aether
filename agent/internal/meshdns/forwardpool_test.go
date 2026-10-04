@@ -292,11 +292,15 @@ func TestPoolFallbackWhenAllSlotsBusy(t *testing.T) {
 // port-unreachable to the socket) — the failing exchange retires the socket, and the
 // next query dials a fresh one rather than reusing a dead conn forever.
 func TestPooledConnRecycledAfterUpstreamRestart(t *testing.T) {
-	port := freeDNSPort(t)
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	seen := &portRecorder{}
 
-	first := serveUpstreamOn(t, addr, echoUpstream(seen))
+	// The first upstream binds a kernel-chosen port and keeps the socket (#1199); the
+	// restart below has to reuse that port, so only it binds by address.
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := pc.LocalAddr().String()
+	first := &dns.Server{PacketConn: pc, Handler: echoUpstream(seen)}
+	serveUpstream(t, first)
 
 	s, reader := meteredServer(t, nil)
 	s.SetUpstreams([]string{addr})
@@ -468,19 +472,12 @@ func poolServer(t *testing.T, addr string) *Server {
 
 // serveUpstreamOn binds a UDP test upstream on a FIXED address and returns the server so
 // the test can shut it down mid-run (the upstream-restart case). Unlike startUpstream it
-// does not pick the port, because the restart has to land on the same one.
+// does not pick the port, because the restart has to land on the same one. Losing that
+// port to another process in the gap fails at once with the bind error.
 func serveUpstreamOn(t *testing.T, addr string, h dns.HandlerFunc) *dns.Server {
 	t.Helper()
-	started := make(chan struct{})
 	srv := &dns.Server{Addr: addr, Net: "udp", Handler: h}
-	srv.NotifyStartedFunc = func() { close(started) }
-	go func() { _ = srv.ListenAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
-	select {
-	case <-started:
-	case <-time.After(eventWait):
-		t.Fatalf("test upstream did not bind %s in time", addr)
-	}
+	serveUpstream(t, srv)
 	return srv
 }
 
