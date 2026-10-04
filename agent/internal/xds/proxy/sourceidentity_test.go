@@ -15,9 +15,14 @@ import (
 )
 
 // Issue #815: every listener chain that can originate mesh traffic stamps BOTH
-// the netns filter-state key and the source pod's SPIFFE ID. Release one added
-// the second key; release two moved the cluster transport-socket matcher onto
-// it. The netns key stays on the listeners until release three.
+// the netns filter-state key and the source pod's SPIFFE ID. Since #842 the
+// identity lives under SourceIdentityCertMapperFilterStateKey; #1165 retired
+// the aether.source.spiffe_id copy that #815/#842 kept for rollback.
+
+// retiredSourceIdentityKey is the pre-#842 identity key, retired in #1165.
+// Spelled here (not in production code) so the absence assertions below have
+// something to look for.
+const retiredSourceIdentityKey = "aether.source.spiffe_id"
 
 const (
 	testSourcePod      = "echo-1"
@@ -57,30 +62,29 @@ func filterStateValues(t *testing.T, chain *listenerv3.FilterChain) [][2]string 
 	return out
 }
 
-// requireBothSourceKeys asserts a chain carries the three source filter-state
-// entries in their fixed order: netns, the aether identity key, and the
-// certificate-mapper identity key. The last two carry the SAME value — the
-// pod's SPIFFE ID as a literal — and differ only in name and object factory
-// (issue #842; see SourceIdentityCertMapperFilterStateKey for why both are
-// stamped for one release).
+// requireBothSourceKeys asserts a chain carries the two source filter-state
+// entries in their fixed order — netns, then the certificate-mapper identity
+// key carrying the pod's SPIFFE ID as a literal — and NOT the retired
+// aether.source.spiffe_id copy (#1165).
 func requireBothSourceKeys(t *testing.T, chain *listenerv3.FilterChain, what string) {
 	t.Helper()
 	got := filterStateValues(t, chain)
-	require.Lenf(t, got, 3, "%s must carry exactly the three source filter-state entries", what)
+	for _, kv := range got {
+		assert.NotEqualf(t, retiredSourceIdentityKey, kv[0], "%s: #1165 retired %s; nothing reads it", what, retiredSourceIdentityKey)
+	}
+	require.Lenf(t, got, 2, "%s must carry exactly the two source filter-state entries", what)
 	assert.Equalf(t, networkNamespaceFilterStateKey, got[0][0], "%s: netns key must stay first", what)
 	assert.Equalf(t, "%FILTER_STATE(envoy.network.network_namespace:PLAIN)%", got[0][1], "%s: netns value unchanged", what)
-	assert.Equalf(t, SourceIdentityFilterStateKey, got[1][0], "%s: identity key must follow the netns key", what)
-	assert.Equalf(t, testSourceIdentity, got[1][1], "%s: identity must be the pod's SPIFFE ID, as a literal", what)
-	assert.Equalf(t, SourceIdentityCertMapperFilterStateKey, got[2][0], "%s: the certificate-mapper key comes last", what)
-	assert.Equalf(t, testSourceIdentity, got[2][1], "%s: the mapper key carries the SAME SPIFFE ID — it IS the SDS secret name", what)
+	assert.Equalf(t, SourceIdentityCertMapperFilterStateKey, got[1][0], "%s: the certificate-mapper key follows the netns key", what)
+	assert.Equalf(t, testSourceIdentity, got[1][1], "%s: the mapper key carries the pod's SPIFFE ID — it IS the SDS secret name", what)
 }
 
 // TestSourceIdentityStampedOnEveryMeshOriginatingChain enumerates the listener
 // kinds that can open an upstream mesh connection. Each one must stamp the
-// identity key — the cluster matcher reads it since release two, and a chain
-// that sets only the netns key falls to OnNoMatch (the node identity presented
-// instead of the pod's, #686 territory). The netns key must stay too until
-// release three, so both are asserted.
+// identity key — the cluster's certificate mapper reads it, and a chain that
+// sets only the netns key falls back to default_value (the node identity
+// presented instead of the pod's, #686 territory). The netns key stays too
+// (source_netns reads it), so both are asserted.
 func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 	pod := sourceTestPod()
 	id := SourceIdentityForPod(pod, testTrustDomain)
@@ -133,10 +137,10 @@ func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 	})
 }
 
-// TestSourceIdentityFilterStateIsSharedLikeNetns: the matcher reads both keys
-// out of TransportSocketOptions::downstreamSharedFilterStateObjects(), which is
-// populated only from entries marked shared. The new key must therefore carry
-// exactly the netns key's sharing semantics, or release two selects nothing.
+// TestSourceIdentityFilterStateIsSharedLikeNetns: the certificate mapper and
+// the pool hash read the identity key out of
+// TransportSocketOptions::downstreamSharedFilterStateObjects(), which is
+// populated only from entries marked shared.
 func TestSourceIdentityFilterStateIsSharedLikeNetns(t *testing.T) {
 	decode := func(f *listenerv3.Filter) *setFilterStatev3.FilterStateValue {
 		var cfg set_filter_state_v3.Config
@@ -146,17 +150,14 @@ func TestSourceIdentityFilterStateIsSharedLikeNetns(t *testing.T) {
 	}
 
 	netns := decode(buildNetworkNamespaceFilterState())
-	identity := decode(buildSourceIdentityFilterState(testSourceIdentity))
 	mapperKey := decode(buildCertMapperIdentityFilterState(testSourceIdentity))
 
-	assert.Equal(t, setFilterStatev3.FilterStateValue_ONCE, identity.GetSharedWithUpstream())
-	assert.Equal(t, netns.GetSharedWithUpstream(), identity.GetSharedWithUpstream(),
-		"the identity key must be shared with upstream exactly like the netns key")
 	assert.Equal(t, "envoy.string", netns.GetFactoryKey())
-	assert.Equal(t, "envoy.string", identity.GetFactoryKey())
-	assert.Equal(t, netns.GetReadOnly(), identity.GetReadOnly(),
+	assert.Equal(t, netns.GetSharedWithUpstream(), mapperKey.GetSharedWithUpstream(),
+		"the identity key must be shared with upstream exactly like the netns key")
+	assert.Equal(t, netns.GetReadOnly(), mapperKey.GetReadOnly(),
 		"read-only semantics must match: nothing downstream writes either key")
-	assert.Equal(t, netns.GetSkipIfEmpty(), identity.GetSkipIfEmpty())
+	assert.Equal(t, netns.GetSkipIfEmpty(), mapperKey.GetSkipIfEmpty())
 
 	// The certificate-mapper key. SharedWithUpstream is not merely "like the
 	// others" here, it is REQUIRED: both of its readers —
@@ -172,10 +173,8 @@ func TestSourceIdentityFilterStateIsSharedLikeNetns(t *testing.T) {
 		"the whole point of #842: envoy.string builds a non-Hashable StringAccessorImpl, "+
 			"which hashKey's dynamic_cast<const Hashable*> rejects, so the identity would "+
 			"contribute zero bytes to the upstream pool key")
-	assert.NotEqual(t, identity.GetFactoryKey(), mapperKey.GetFactoryKey())
-	assert.Equal(t, identity.GetFormatString().GetTextFormatSource().GetInlineString(),
-		mapperKey.GetFormatString().GetTextFormatSource().GetInlineString(),
-		"both identity keys carry the same value; only the name and factory differ")
+	assert.Equal(t, testSourceIdentity, mapperKey.GetFormatString().GetTextFormatSource().GetInlineString(),
+		"the value is the pod's SPIFFE ID as a literal")
 }
 
 // TestSourceIdentityAbsentWithoutTrustDomain: before the trust domain is known
@@ -197,10 +196,9 @@ func TestSourceIdentityAbsentWithoutTrustDomain(t *testing.T) {
 func TestSourceFilterStatesOrderIsFixed(t *testing.T) {
 	for range 8 {
 		got := filterStateValues(t, buildDefaultOutboundHTTPFilterChain(sourceTestPod(), testSourceIdentity, testTrustDomain, false, nil))
-		require.Len(t, got, 3)
+		require.Len(t, got, 2)
 		require.Equal(t, networkNamespaceFilterStateKey, got[0][0])
-		require.Equal(t, SourceIdentityFilterStateKey, got[1][0])
-		require.Equal(t, SourceIdentityCertMapperFilterStateKey, got[2][0])
+		require.Equal(t, SourceIdentityCertMapperFilterStateKey, got[1][0])
 	}
 }
 

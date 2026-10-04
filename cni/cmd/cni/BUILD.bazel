@@ -1,4 +1,12 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+# gazelle:exclude race_test.go
+# gazelle:exclude norace_test.go
+
+# deps_test.go is hand-wired below into its own :deps_test target (it needs the
+# linked binary as data and has to be nameable on its own), so keep gazelle from
+# folding it into a :cni_test.
+# gazelle:exclude deps_test.go
 
 go_library(
     name = "cni_lib",
@@ -19,4 +27,26 @@ go_binary(
     name = "cni",
     embed = [":cni_lib"],
     visibility = ["//visibility:public"],
+)
+
+# Linkage guard. The container runtime execs this plugin for every pod ADD and
+# DEL on every node, so every linked package is paid in Go package init() on each
+# invocation. The test pins the plugin's module set as an explicit allow-list (and
+# a module budget) against the linked ELF that ships in the cni-install image, and
+# forbids the agent's heavyweights outright. scripts/check-cni-deps.sh is the
+# build-graph half.
+go_test(
+    name = "deps_test",
+    size = "small",
+    srcs = [
+        "deps_test.go",
+        "norace_test.go",
+        "race_test.go",
+    ],
+    data = [":cni"],
+    embed = [":cni_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )
