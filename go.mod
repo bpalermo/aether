@@ -20,14 +20,14 @@ require (
 	github.com/pseudomuto/protokit v0.3.0 // build tooling: imported by //bazel/protodoc only
 	github.com/quic-go/quic-go v0.63.0
 	github.com/spf13/cobra v1.10.2
-	github.com/spiffe/go-spiffe/v2 v2.8.1
+	github.com/spiffe/go-spiffe/v2 v2.8.2
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/etcd v0.44.0
 	github.com/uudashr/gocognit v1.2.1 // bazel-only: referenced from BUILD/.bzl, no Go import
-	github.com/vishvananda/netlink v1.3.0
-	go.etcd.io/etcd/api/v3 v3.7.1
-	go.etcd.io/etcd/client/v3 v3.7.1
+	github.com/vishvananda/netlink v1.3.1
+	go.etcd.io/etcd/api/v3 v3.7.2
+	go.etcd.io/etcd/client/v3 v3.7.2
 	go.opentelemetry.io/contrib/bridges/otelslog v0.21.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.72.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.72.0
@@ -43,7 +43,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	go.opentelemetry.io/proto/otlp v1.11.1
-	go.uber.org/atomic v1.11.0
+	go.uber.org/atomic v1.12.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.84.0
@@ -160,7 +160,7 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zeebo/errs v1.4.0 // indirect
-	go.etcd.io/etcd/client/pkg/v3 v3.7.1 // indirect
+	go.etcd.io/etcd/client/pkg/v3 v3.7.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0 // indirect
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
