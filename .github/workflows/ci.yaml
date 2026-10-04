@@ -281,6 +281,16 @@ jobs:
       - name: aether-proxy pin extraction and rewrite are exact
         run: scripts/check-proxy-pin.sh
 
+      # The Envoy pin (proxy/MODULE.bazel envoy/envoy_api + proxy/.bazelrc's
+      # registry commit) is one fact in two files. This is the harness for the
+      # gate that checks it (run for real, online, in `envoy-api-parity`) and
+      # for scripts/bump-envoy-pin.sh's rewrite, registry-commit selection,
+      # carried-patch report and upstream .bazelrc diff: every red case
+      # (envoy/envoy_api skew, a branch-name registry, two registry lines, a
+      # module dir the registry dropped, ...) must be red. No network.
+      - name: Envoy pin checks are exact
+        run: scripts/check-envoy-pin.sh --self-test
+
       # publish-verify looks each expected tag up by name (HEAD
       # /v2/<repo>/manifests/<tag>) instead of paging through every tag (#985):
       # a publish writing tags mid-walk shifted a page boundary past a present
@@ -393,6 +403,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require the xDS bindings to match the proxy's Envoy
         run: scripts/check-envoy-api-parity.sh
+      # Here rather than in `shell` because this job is unconditional: a
+      # proxy-only pin bump skips `shell` (control_plane is false) and is exactly
+      # the change this gate exists for. Online: the pinned bazel-registry
+      # commit must still serve envoy, envoy_api and every `.envoy` sibling at
+      # the declared versions (raw.githubusercontent.com, HTTP 200), and the
+      # snapshot's source.json must name the Envoy commit the version does.
+      - name: Require the Envoy pin to be self-consistent and resolvable
+        run: scripts/check-envoy-pin.sh --online
 
   # The chart's aether-proxy pin has three parts that must agree: `tag:`,
   # `digest:`, and what the registry actually serves under that tag. Two shipped
