@@ -108,7 +108,8 @@ mkdir -p "$DRP_OUT"
 DRP_DST="quic-a"
 DRP_SRC="client-a"
 ETCD_NAME="$CLUSTER-etcd"
-ETCD_IMAGE="${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.16}"
+# shellcheck source=e2e/etcd-image.sh
+. "$HERE/etcd-image.sh"
 
 # --- registry backend ----------------------------------------------------------
 

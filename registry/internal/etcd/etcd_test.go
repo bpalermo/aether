@@ -13,6 +13,7 @@ import (
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"aethermesh.dev/registry"
+	"aethermesh.dev/registry/etcdtest"
 	"aethermesh.dev/registry/internal/etcd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,7 +37,7 @@ func TestMain(m *testing.M) {
 
 	ctx := context.Background()
 
-	container, err := tcetcd.Run(ctx, "gcr.io/etcd-development/etcd:v3.5.21")
+	container, err := tcetcd.Run(ctx, etcdtest.Image)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "failed to start etcd container: %v\n", err)
 		os.Exit(1)
