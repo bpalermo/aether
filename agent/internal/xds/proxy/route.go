@@ -857,8 +857,11 @@ const (
 // returns how many routes it rewrote.
 //
 // The mechanism is a route-level matcher cluster specifier keyed on the
-// aether.source.spiffe_id filter state -- the plain-string stamp every
-// mesh-originating chain already carries (BuildSourceFilterStates). Nothing
+// SourceIdentityCertMapperFilterStateKey filter state -- the source-identity
+// stamp every mesh-originating chain already carries (BuildSourceFilterStates;
+// the same key the cluster's certificate mapper reads, so the arm a request
+// takes and the client certificate it presents come from one value). Until
+// #1165 this read the retired aether.source.spiffe_id copy. Nothing
 // else would work here: the route tables are node-shared (one cap_http /
 // out_http per snapshot), so a route cannot NAME a per-source cluster; and a
 // header written by request_headers_to_add is applied AFTER route matching,
@@ -916,7 +919,7 @@ func ApplyQUICClusterSelection(vh *routev3.VirtualHost, h2Cluster string, arms m
 								MatcherTree: &xdsmatcherv3.Matcher_MatcherTree{
 									Input: &xdscorev3.TypedExtensionConfig{
 										Name:        quicSourceIdentityInputName,
-										TypedConfig: config.TypedConfig(&network_inputsv3.FilterStateInput{Key: SourceIdentityFilterStateKey}),
+										TypedConfig: config.TypedConfig(&network_inputsv3.FilterStateInput{Key: SourceIdentityCertMapperFilterStateKey}),
 									},
 									TreeType: &xdsmatcherv3.Matcher_MatcherTree_ExactMatchMap{
 										ExactMatchMap: &xdsmatcherv3.Matcher_MatcherTree_MatchMap{Map: m},

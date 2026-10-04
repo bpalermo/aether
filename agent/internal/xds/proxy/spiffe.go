@@ -98,9 +98,10 @@ func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 }
 
 // SourceIdentityForPod returns the SPIFFE ID that the pod's mesh-originating
-// listener chains stamp into filter state (SourceIdentityFilterStateKey,
-// networkfilter.go) so the cluster transport-socket matcher can select the
-// pod's client certificate by identity rather than by netns path (issue #815).
+// listener chains stamp into filter state
+// (SourceIdentityCertMapperFilterStateKey, networkfilter.go) so the cluster's
+// certificate mapper can select the pod's client certificate by identity
+// rather than by netns path (issues #815, #842).
 //
 // An unknown trust domain yields "" (SpiffeIDFromPod), and the chains then
 // carry only the netns key — byte-for-byte the pre-#815 shape — picking the
@@ -108,15 +109,13 @@ func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 // domain is late-bound (agent/internal/identity), so this is a real, if brief,
 // startup state.
 //
-// Since release two the cluster matcher READS this key, so a chain built in
-// that window selects OnNoMatch and its egress presents the NODE identity until
-// the next rebuild. That is a degradation, not a failure: the node SVID is a
+// The cluster's certificate mapper READS this key, so a chain built in that
+// window falls back to the mapper's default_value and its egress presents the
+// NODE identity until the next rebuild. That is a degradation, not a failure: the node SVID is a
 // real attested identity in the same trust domain, so mTLS still completes —
 // unlike the inbound SERVER certificate, where an empty trust domain yields a
 // name the agent never serves and the listener comes up with no certificate at
-// all (the main-worker-03 outage). The same window also leaves the cluster
-// matcher without an entry for the pod's identity, because both sides are
-// derived from the same trust domain, so the two stay consistent.
+// all (the main-worker-03 outage).
 func SourceIdentityForPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 	return SpiffeIDFromPod(cniPod, trustDomain)
 }

@@ -362,7 +362,9 @@ identity-bearing class (R2):
 
   The route tables are node-shared, so a route cannot name a per-source cluster.
   Instead, the twin is selected per source by a matcher cluster specifier on the
-  filter-state `aether.source.spiffe_id`, with the h2 cluster as `on_no_match`.
+  source-identity filter state (`envoy.tls.certificate_mappers.on_demand_secret`,
+  the key the certificate mapper reads; `aether.source.spiffe_id` until #1165
+  retired it), with the h2 cluster as `on_no_match`.
   **Twins are demand-scoped (#1020).** The matcher carries an arm for every local
   ServiceAccount, but the `quic:` twin behind an arm exists only once that
   (source, destination) pair has dialled. A source's first request resolves to
