@@ -142,11 +142,11 @@ func TestWatchdogRunStopsWithContext(t *testing.T) {
 
 	// Let at least one tick land, then stop.
 	require.Eventually(t, func() bool { return s.observedState().lastAnswered > 0 },
-		2*time.Second, 10*time.Millisecond, "the watchdog stamps last-answered on a quiet resolver")
+		eventWait, 10*time.Millisecond, "the watchdog stamps last-answered on a quiet resolver")
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the watchdog did not stop with its context")
 	}
 }

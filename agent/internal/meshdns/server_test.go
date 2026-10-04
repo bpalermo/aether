@@ -277,7 +277,7 @@ func TestReloadFromSnapshot(t *testing.T) {
 // simultaneously (the surge-handoff guarantee) and both answer mesh queries. Without
 // SO_REUSEPORT the second bind would fail with EADDRINUSE.
 func TestReusePortCoBind(t *testing.T) {
-	addr := fmt.Sprintf("127.0.0.1:%d", freeUDPPort(t))
+	addr := fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
 	records := map[string]string{"default/echo": "10.111.0.6"}
 
 	s1 := newReusePortServer(t, addr, records)
@@ -299,44 +299,42 @@ func newReusePortServer(t *testing.T, addr string, records map[string]string) *S
 	s := NewServerWithOptions("aether.internal", addr, "", slog.New(slog.DiscardHandler), WithReusePort(true))
 	s.SetRecords(records)
 	ctx, cancel := context.WithCancel(context.Background())
-	errc := make(chan error, 1)
-	go func() { errc <- s.Start(ctx) }()
+	errc := startServer(ctx, s)
 	t.Cleanup(func() {
 		cancel()
 		select {
 		case <-errc:
-		case <-time.After(2 * time.Second):
+		case <-time.After(eventWait):
 		}
 	})
-	waitForUDP(t, addr)
+	waitForUDP(t, addr, errc)
 	return s
 }
 
 // TestReadyMarkerWrittenOnStartRemovedOnCancel: Start writes the pod-local ready
 // marker once the listeners are bound, and removes it when the context is cancelled.
 func TestReadyMarkerWrittenOnStartRemovedOnCancel(t *testing.T) {
-	addr := fmt.Sprintf("127.0.0.1:%d", freeUDPPort(t))
+	addr := fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
 	marker := filepath.Join(t.TempDir(), "sub", "mesh-dns.ready") // dir created by Start
 
 	s := NewServerWithOptions("aether.internal", addr, "", slog.New(slog.DiscardHandler),
 		WithReusePort(true), WithReadyMarker(marker))
 	ctx, cancel := context.WithCancel(context.Background())
-	errc := make(chan error, 1)
-	go func() { errc <- s.Start(ctx) }()
+	errc := startServer(ctx, s)
 
 	// Once the resolver answers over UDP its listeners are bound, so the marker
 	// (written right after buildServers) must exist.
-	waitForUDP(t, addr)
+	waitForUDP(t, addr, errc)
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(marker)
 		return err == nil
-	}, 2*time.Second, 20*time.Millisecond, "ready marker written after bind")
+	}, eventWait, 20*time.Millisecond, "ready marker written after bind")
 
 	// Shutdown removes the marker so a terminating pod stops reporting ready.
 	cancel()
 	select {
 	case <-errc:
-	case <-time.After(2 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("Start did not return after cancel")
 	}
 	_, err := os.Stat(marker)
@@ -376,18 +374,61 @@ func freeUDPPort(t *testing.T) int {
 	return port
 }
 
-// waitForUDP polls until a UDP query to addr succeeds (the server has bound).
-func waitForUDP(t *testing.T, addr string) {
+// eventWait bounds every wait in this package's tests on a discrete event: a resolver
+// binding, a ready marker landing, a goroutine returning, an upstream seeing a query.
+// Each wait returns the moment its event happens, so a healthy run pays nothing for
+// the width. The bound has to be wide enough for a race-instrumented binary on a
+// starved runner (#1177: the old 2 s and 10 s budgets both missed under parallel
+// --config=race load). It also has to stay a HARD bound, so a wedged resolver still
+// fails with the wait's own message, well inside the 60 s Bazel timeout of a "small"
+// test.
+const eventWait = 30 * time.Second
+
+// startServer runs s.Start(ctx) in the background and returns a channel that carries
+// its error. The channel is buffered and closed after the send, so a cleanup still
+// returns at once when a wait (awaitBound, on an early exit) already drained it.
+func startServer(ctx context.Context, s *Server) <-chan error {
+	errc := make(chan error, 1)
+	go func() {
+		errc <- s.Start(ctx)
+		close(errc)
+	}()
+	return errc
+}
+
+// awaitBound polls cond until it holds, bounded by eventWait. If the server's Start
+// (errc) returns first, it fails AT ONCE with Start's error. A resolver that could not
+// bind (EADDRINUSE on a port that was free a moment earlier) never gets there, and
+// waiting out the whole budget would mislabel a bind failure as slowness (#1177).
+func awaitBound(t *testing.T, errc <-chan error, cond func() bool, format string, args ...any) {
 	t.Helper()
-	c := &dns.Client{Net: "udp", Timeout: 200 * time.Millisecond}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, _, err := c.Exchange(query("echo.default.aether.internal.", dns.TypeA), addr); err == nil {
+	what := fmt.Sprintf(format, args...)
+	deadline := time.Now().Add(eventWait)
+	for {
+		if cond() {
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case err := <-errc:
+			t.Fatalf("%s: Start returned first: %v", what, err)
+		default:
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("%s: not within %s", what, eventWait)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("resolver did not bind %s in time", addr)
+}
+
+// waitForUDP polls until a UDP query to addr succeeds (the server has bound), failing
+// early if the server's Start (errc) returns first.
+func waitForUDP(t *testing.T, addr string, errc <-chan error) {
+	t.Helper()
+	c := &dns.Client{Net: "udp", Timeout: 200 * time.Millisecond}
+	awaitBound(t, errc, func() bool {
+		_, _, err := c.Exchange(query("echo.default.aether.internal.", dns.TypeA), addr)
+		return err == nil
+	}, "resolver did not bind %s", addr)
 }
 
 func query(name string, qtype uint16) *dns.Msg {
@@ -670,7 +711,7 @@ func startUpstreamOn(t *testing.T, addr, network string, h dns.HandlerFunc) {
 	t.Cleanup(func() { _ = srv.Shutdown() })
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatalf("test upstream did not bind %s/%s in time", addr, network)
 	}
 }

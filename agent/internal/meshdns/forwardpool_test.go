@@ -215,7 +215,7 @@ func TestConcurrentForwardsDoNotSerialise(t *testing.T) {
 
 	select {
 	case <-allArrived:
-	case <-time.After(2 * time.Second):
+	case <-time.After(eventWait):
 		close(release)
 		t.Fatal("the upstream never saw 4 simultaneous queries: the forward path serialised")
 	}
@@ -226,7 +226,7 @@ func TestConcurrentForwardsDoNotSerialise(t *testing.T) {
 		case resp := <-done:
 			require.NotNil(t, resp)
 			require.Equal(t, dns.RcodeSuccess, resp.Rcode)
-		case <-time.After(2 * time.Second):
+		case <-time.After(eventWait):
 			t.Fatal("a concurrent forward never completed")
 		}
 	}
@@ -265,7 +265,7 @@ func TestPoolFallbackWhenAllSlotsBusy(t *testing.T) {
 	for range 2 {
 		select {
 		case <-arrived:
-		case <-time.After(2 * time.Second):
+		case <-time.After(eventWait):
 			close(release)
 			t.Fatal("the second query blocked on the single pooled slot instead of dialling its own")
 		}
@@ -277,7 +277,7 @@ func TestPoolFallbackWhenAllSlotsBusy(t *testing.T) {
 		case resp := <-done:
 			require.NotNil(t, resp)
 			assert.Equal(t, dns.RcodeSuccess, resp.Rcode)
-		case <-time.After(2 * time.Second):
+		case <-time.After(eventWait):
 			t.Fatal("a forward never completed")
 		}
 	}
@@ -455,7 +455,7 @@ func serveUpstreamOn(t *testing.T, addr string, h dns.HandlerFunc) *dns.Server {
 	t.Cleanup(func() { _ = srv.Shutdown() })
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatalf("test upstream did not bind %s in time", addr)
 	}
 	return srv
