@@ -544,14 +544,15 @@ write) before its first publish.
 **The sweep across the cut-over (the split rule).** `verify-published-artifacts.sh`
 reads `bazel/img/registry.bzl` **as of each push head it checks** (`git show
 <sha>:bazel/img/registry.bzl`), exactly as it reads each chart's version and the
-release-tag prefix: heads before the cut-over are checked on ghcr.io (charts
-`charts/<name>`, the `aether-proxy` override, a signature TAG), heads at or after
-it on quay.io (`chart-<name>`, flat names, a signature REFERRER — and nothing
-else: a fallback tag there, or a referrer plus a tag, is `MISSING`). No sha or
-date is typed anywhere; a commit older than `registry.bzl` itself (before #998)
-uses the file's first version, which phase 1 introduced with no behaviour change.
-A post-cut-over head whose artifacts exist only on ghcr.io is `MISSING`, never
-borrowed from the old registry. Each `commit` block of the output starts with a
+release-tag prefix: heads at or after the cut-over are checked on quay.io
+(`chart-<name>`, flat names, a signature REFERRER — and nothing else: a fallback
+tag there, or a referrer plus a tag, is `MISSING`). Heads from **before** the
+cut-over — a `registry.bzl` without `SIGNATURE_LAYOUT`, or none at all (before
+#998) — are exit 2 and never read: phase 4 decommissioned the sweep's ghcr.io
+branch (the first-version fallback, the `tag` default and `GHCR_TOKEN` are gone),
+so naming such a commit by hand gets "decommissioned (proposal 040 phase 4)",
+not a verdict. A post-cut-over head whose artifacts exist only on ghcr.io is
+`MISSING`, never borrowed from the old registry. Each `commit` block of the output starts with a
 `registry <host>/<namespace>, signatures as <layout>` line saying which setting
 it used. The aether-proxy pin is looked up where **the pin** says (it moves with
 the next proxy release, not with the flip), in the layout of the newest
@@ -576,15 +577,16 @@ today — `helm get values <release> -n <ns> -o yaml > values.yaml`, then
 values.yaml`; **never `--reuse-values`**, which pins the old chart's defaults.
 Anyone mirroring images and overriding `repository` by prefix must now mirror
 from `quay.io/aethermesh/<component>` and override each image's `repository`
-individually. Releases published before the cut-over stay on ghcr.io, untouched.
+individually. Releases published before the cut-over went to ghcr.io and were not
+copied to quay.io.
 
-**TODO — decommission ghcr (proposal 040 phase 4).** Once no supported release
-and no cluster references a ghcr.io coordinate: delete the sweep's ghcr branch
-(the first-version fallback and the `tag` default for a `registry.bzl` without
-`SIGNATURE_LAYOUT`), empty `PROXY_PIN_LEGACY_REFERENCES`, drop `GHCR_TOKEN` from
-`publish-verify.yaml` and `registry-lib.sh`, and shrink
-`check-registry-config.sh`'s legacy allow-list. Leave the ghcr.io packages in
-place, read-only: deleting them would break every historical pin.
+**ghcr decommissioned (proposal 040 phase 4, #1167).** Nothing in the repository
+reads, verifies or publishes to ghcr.io any more: the `ghcr-lib.sh` shim and the
+`ghcr_*` aliases are gone, `PROXY_PIN_LEGACY_REFERENCES` is gone (the proxy pin
+must name `image_reference("proxy")`), and the sweep refuses pre-cut-over heads
+(above) with no `GHCR_TOKEN`. The ghcr.io packages themselves were **not**
+touched: whether to delete them or keep them read-only as an archive is a
+separate maintainer decision (deleting them breaks every historical pin).
 
 `scripts/check-registry-config.sh` (in `ci`'s and `proxy`'s `shell` jobs)
 keeps it one setting: the file parses, the proxy copy is identical, the
@@ -601,8 +603,8 @@ the `ghcr_*` aliases were removed in proposal 040 phase 4) is registry-neutral: 
 OCI distribution API against `REGISTRY_HOST` (default: the setting's host),
 fetches the anonymous pull token from the registry's own endpoint (ghcr.io
 `/token`, quay.io `/v2/auth`), and for private repositories takes
-`REGISTRY_USERNAME` + `REGISTRY_PASSWORD` (a Quay robot account) or `GHCR_TOKEN`
-(sent only to ghcr.io). `registry_referrers` reads the OCI 1.1 Referrers API
+`REGISTRY_USERNAME` + `REGISTRY_PASSWORD` (a Quay robot account, sent only to
+the host it was issued for). `registry_referrers` reads the OCI 1.1 Referrers API
 (`GET /v2/<repo>/referrers/<digest>`): quay.io serves it, ghcr.io answers 404 —
 which the library reads as "no referrers API", never as "no signatures".
 

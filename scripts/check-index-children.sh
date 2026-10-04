@@ -9,10 +9,9 @@
 # down (#853). So every shape that is not "an index with well-formed children"
 # must fail, not print nothing and succeed.
 #
-# The walk also has to happen on the RIGHT registry (proposal 040 phase 2): the
-# sweep checks a pre-cut-over commit's children on ghcr.io and a post-cut-over
-# commit's on quay.io, in one run, by setting REGISTRY_HOST per commit. The last
-# cases walk the same index through a fake `curl` that serves it on ONE host
+# The walk also has to happen on the RIGHT registry (proposal 040): the sweep
+# sets REGISTRY_HOST per commit from that commit's registry.bzl, and the walk
+# must ask exactly that host. The last cases walk the same index through a fake `curl` that serves it on ONE host
 # only: asked on that host the walk yields the children, asked on the other it
 # yields nothing and FAILS -- a child walk that silently went to the other
 # registry must never read as "no children to check".
@@ -103,7 +102,7 @@ walk_on() {
 		fail=1
 	fi
 }
-walk_on "pre-cut-over commit: the walk asks ghcr.io" ghcr.io ghcr.io "$a"$'\n'"$b"
+walk_on "REGISTRY_HOST ghcr.io: the walk asks ghcr.io, not the setting's host" ghcr.io ghcr.io "$a"$'\n'"$b"
 walk_on "post-cut-over commit: the walk asks quay.io" quay.io quay.io "$a"$'\n'"$b"
 walk_on "post-cut-over commit whose index is only on ghcr.io: no children, FAILS" quay.io ghcr.io refused
 unset -f curl

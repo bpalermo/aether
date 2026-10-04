@@ -24,14 +24,15 @@
 #   - the real verifier on unreadable repositories, or behind a lookup that
 #     404s every tag, never goes red at all: it exits 2 and the control reports
 #     inconclusive — a red that proves nothing is not available to accept.
-#   - THE SPLIT (proposal 040 phase 2): the verifier reads bazel/img/registry.bzl
-#     AS OF the control commit, so a control built on a PRE-cut-over tree goes
-#     red on the old registry (ghcr.io, charts/<name>) and one built on a
-#     POST-cut-over tree on the new one (quay.io, chart-<name>), and the control
-#     accepts each only when every MISSING line names its tree's registry. A
-#     perfect red printed against the OTHER registry is rejected, and a POST
-#     tree whose registry is unreadable while the old one answers is
-#     inconclusive — never a red borrowed from the old registry.
+#   - THE SPLIT (proposal 040): the verifier reads bazel/img/registry.bzl AS OF
+#     the control commit. A control built on a POST-cut-over tree goes red on
+#     quay.io (chart-<name>), and the control accepts it only when every MISSING
+#     line names that registry. A perfect red printed against the OTHER
+#     (pre-cut-over) registry is rejected, and a POST tree whose registry is
+#     unreadable while the old one answers is inconclusive — never a red
+#     borrowed from the old registry. A control built on a PRE-cut-over tree is
+#     inconclusive too: phase 4 decommissioned that registry, so the verifier
+#     exits 2 on such a commit without reading it (no red, no MISSING line).
 #
 # The fake registry is scripts/registry-lib.sh with its network functions
 # overridden, placed next to UNMODIFIED copies of the verifier,
@@ -127,7 +128,6 @@ sed -E \
 	-e 's|^IMAGE_NAME_OVERRIDES = .*|IMAGE_NAME_OVERRIDES = {"proxy": "aether-proxy"}|' \
 	-e 's|^CHART_REPOSITORY_PREFIX = .*|CHART_REPOSITORY_PREFIX = "charts/"|' \
 	-e '/^SIGNATURE_LAYOUT = /d' \
-	-e '/^PROXY_PIN_LEGACY_REFERENCES = /d' \
 	bazel/img/registry.bzl >"$pre_bzl"
 post_bzl="$PWD/bazel/img/registry.bzl"
 prefix_of() { IMAGE_REGISTRY_BZL="$1" scripts/image-registry.sh prefix; }
@@ -268,11 +268,12 @@ expect_rc "hand-written correct red: control accepts" 0 \
 expect_rc "a perfect red on the OTHER registry (${other_prefix}): control rejects" 1 \
 	env VERIFIER="$tmp/wrong-registry" "$control" HEAD
 
-# 12-15. The split, with the REAL verifier (proposal 040). A control on a PRE
-#        tree is red on the old registry, one on a POST tree on the new one —
-#        each MISSING line naming its tree's registry (the control asserts it)
-#        — and a POST tree whose registry is unreadable while the old one
-#        answers is inconclusive, never a red borrowed from the old registry.
+# 12-15. The split, with the REAL verifier (proposal 040). A control on a POST
+#        tree is red on quay.io, each MISSING line naming that registry (the
+#        control asserts it); a POST tree whose registry is unreadable while
+#        the old one answers is inconclusive, never a red borrowed from the old
+#        registry; and a control on a PRE tree is inconclusive with no MISSING
+#        line at all — the decommissioned registry is never read (phase 4).
 split_case() {
 	local name="$1" base="$2" want_prefix="$3" n_on
 	shift 3
@@ -287,7 +288,16 @@ split_case() {
 		fail=1
 	fi
 }
-split_case "real verifier, control on a PRE-cut-over tree: red on ${pre_prefix}, control accepts" "$pre_base" "$pre_prefix"
+expect_rc "real verifier, control on a PRE-cut-over tree: verifier refuses it (decommissioned registry), control inconclusive" 2 \
+	env VERIFIER="$reg/verify-published-artifacts.sh" "$control" "$pre_base"
+n=$((n + 1))
+if ! grep -qE '^  \| +MISSING ' "$tmp/out" && grep -qF 'is decommissioned (proposal 040 phase 4)' "$tmp/out"; then
+	printf '  ok    …no MISSING line, and the verifier says why (decommissioned)\n'
+else
+	printf '  FAIL  …the PRE control printed MISSING lines or no decommission error\n'
+	sed 's/^/        | /' "$tmp/out" | tail -8
+	fail=1
+fi
 split_case "real verifier, control on a POST-cut-over tree: red on ${post_prefix}, control accepts" "$post_base" "$post_prefix"
 expect_rc "real verifier, POST tree, only ${pre_prefix%%/*} readable: inconclusive, never a red from the old registry" 2 \
 	env FAKE_ONLY_HOST="${pre_prefix%%/*}" VERIFIER="$reg/verify-published-artifacts.sh" "$control" "$post_base"

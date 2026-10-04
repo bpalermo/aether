@@ -227,7 +227,8 @@ charts as `quay.io/aethermesh/chart-<name>`, images as
 > which would carry the old chart's defaults along). If you mirror images and
 > override `repository` by prefix, mirror from `quay.io/aethermesh/<component>`
 > and override each image's `repository` individually. Releases published
-> before the move stay on ghcr.io.
+> before the move went to ghcr.io; nothing publishes to or verifies against
+> ghcr.io any more (proposal 040 phase 4).
 
 Resource names derive from the **release** name — installing as `aether` yields
 `aether-agent`, `aether-proxy`, `aether-mesh-dns`, `aether-registrar`,

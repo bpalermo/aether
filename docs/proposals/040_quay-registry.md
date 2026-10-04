@@ -1,14 +1,15 @@
 # Proposal 040: Publish to Quay (`quay.io/aethermesh`)
 
-**Status:** Accepted 2026-09-27. Phases 1 (the abstraction, #998), 2 (the
-cut-over) and 3 (talos-main runs from quay since rev243, 2026-09-27) are done.
-Phase 4 (decommission ghcr) has not started: the repo still carries
-`PROXY_PIN_LEGACY_REFERENCES = ["ghcr.io/bpalermo/aether/aether-proxy"]`
-(`bazel/img/registry.bzl`), the publish-verify sweep's ghcr branch
-(`.github/workflows/publish-verify.yaml`, `scripts/registry-lib.sh`) and its CI
-fixtures, and a `ghcr.io/bpalermo/aether/*` step in
-`docs/observability/profiling-symbols.md`; the remaining mentions are
-migration notes for pre-1.0.0 releases, which stay.
+**Status:** Implemented. Phases 1 (the abstraction, #998), 2 (the cut-over,
+#1017) and 3 (talos-main runs from quay since rev243, 2026-09-27) are done, and
+phase 4 (decommission ghcr, #1167) is implemented: the `ghcr-lib.sh` shim
+(#1179), the 11 `ghcr_*` aliases (#1181), `PROXY_PIN_LEGACY_REFERENCES` and
+every pin reader's ghcr allowance (#1184), and the publish-verify sweep's ghcr
+branch plus `GHCR_TOKEN` and the docs that named ghcr.io as a source (#1186).
+Pre-check on 2026-10-04: no deployed chart or pod on talos-main references a
+`ghcr.io/bpalermo/aether/*` image. The ghcr.io packages themselves were **not**
+deleted; their retention is a separate maintainer decision. The remaining
+mentions are history and migration notes for pre-1.0.0 releases.
 **Author:** Bruno Palermo
 **Date:** 2026-09-27
 **Related:** #875 / #880 / #925 / #984 / #985 (signing and the publish-verify
@@ -84,12 +85,13 @@ IMAGE_NAMESPACE = "aethermesh"               # phase 1: "bpalermo/aether"
 IMAGE_NAME_OVERRIDES = {}                    # phase 1: {"proxy": "aether-proxy"}
 CHART_REPOSITORY_PREFIX = "chart-"           # phase 1: "charts/"
 SIGNATURE_LAYOUT = "referrer"                # phase 2; absent before = "tag"
-PROXY_PIN_LEGACY_REFERENCES = ["ghcr.io/bpalermo/aether/aether-proxy"]  # phase 2; [] in phase 4
+PROXY_PIN_LEGACY_REFERENCES = ["ghcr.io/bpalermo/aether/aether-proxy"]  # phase 2 only; removed in phase 4 (#1184)
 ```
 
 with `image_repository(component)`, `image_reference(component)`,
 `chart_repository(chart)`, `chart_registry_url(chart)`,
-`proxy_pin_references()` and `registry_token_url(registry, repo)`. Bazel reads it directly (every
+`proxy_pin_references()` (phase 2 only; removed with the legacy references in
+phase 4) and `registry_token_url(registry, repo)`. Bazel reads it directly (every
 `go_multi_arch_image` call site, the chart pushes and template tests, the e2e
 `go_test`'s `x_defs`, `//bazel/proxy_pin`). The `//proxy` workspace is a separate
 Bazel module that cannot load from the root, so it carries a byte-identical copy
@@ -166,10 +168,28 @@ and falls back to the tags; any other non-200 is inconclusive.
 3. **talos rollout.** `helm upgrade` on talos-main from the quay coordinates
    (values from `helm get values -o yaml`, never `--reuse-values`), then an 8h
    soak graded as usual.
-4. **Decommission ghcr.** Once no supported release and no cluster references a
-   ghcr coordinate: stop the sweep's ghcr branch, update the docs, and leave the
-   ghcr packages in place read-only (deleting them would break every historical
-   pin).
+4. **Decommission ghcr — DONE (#1167).** Pre-checked 2026-10-04: no chart
+   values or pod image on talos-main names a `ghcr.io/bpalermo/aether/*`
+   coordinate, and the GitOps repository's only aether hit is a stale doc line.
+   Then, one PR each:
+   - **#1179** removed the `scripts/ghcr-lib.sh` shim and the regression case
+     that existed only to cover it.
+   - **#1181** removed the 11 `ghcr_*` aliases (and `GHCR_IMAGE_REPOS`,
+     `GHCR_CHARTS`, `GHCR_MANIFEST_ACCEPT`) from `scripts/registry-lib.sh`.
+   - **#1184** removed `PROXY_PIN_LEGACY_REFERENCES` / `proxy_pin_references()`.
+     Every pin reader (`//bazel/proxy_pin`, the sweep, ci.yaml's proxy-pin
+     job, the bump-chart rewrite, `check-registry-config.sh`) accepts exactly
+     `image_reference("proxy")` and fails loudly on anything else, never
+     falling back to ghcr.io.
+   - **#1186** removed the sweep's ghcr branch: the first-version fallback, the
+     `tag` default for a `registry.bzl` without `SIGNATURE_LAYOUT`, and
+     `GHCR_TOKEN`. A pre-cut-over head is now exit 2 with no request to any
+     registry. It also updated the docs that still named ghcr.io as a source
+     and shrank `check-registry-config.sh`'s legacy allow-list.
+
+   The ghcr packages were **not** deleted or modified. Deleting them would break
+   every historical pin; keeping them read-only as an archive versus deleting
+   them is the maintainer's separate decision.
 
 ## Open questions (answered in phase 2)
 

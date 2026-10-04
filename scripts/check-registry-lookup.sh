@@ -45,17 +45,19 @@
 # section 5b pins that a token request to that host carries them and one to any
 # other host carries none (the fake records every `-u` it is handed).
 #
-# THE SPLIT (proposal 040 phase 2). The verifier reads bazel/img/registry.bzl AS
-# OF EACH COMMIT it checks, so section 6 runs it against a throwaway git history
-# of two commits: PRE, whose registry.bzl is the pre-cut-over setting (ghcr.io,
-# charts/ prefix, the aether-proxy override, no SIGNATURE_LAYOUT line), and
-# POST, whose registry.bzl is this checkout's (quay.io, chart- prefix,
-# SIGNATURE_LAYOUT "referrer"). The fake plays both registries at once, each the
-# way it really behaves: ghcr.io signatures as tags with a referrers 404, quay.io
-# signatures as referrers only. Pinned: PRE passes on ghcr.io, POST passes on
-# quay.io, both in one run pass with each commit on its own registry, and three
-# REDs -- POST whose artifacts exist only on ghcr.io is MISSING on quay.io (the
-# split must never fall back to the old registry); POST signed with a fallback
+# THE SPLIT (proposal 040). The verifier reads bazel/img/registry.bzl AS OF EACH
+# COMMIT it checks, so section 6 runs it against a throwaway git history of
+# three commits: ANCIENT (no registry.bzl), PRE, whose registry.bzl is the
+# pre-cut-over setting (ghcr.io, charts/ prefix, the aether-proxy override, no
+# SIGNATURE_LAYOUT line), and POST, whose registry.bzl is this checkout's
+# (quay.io, chart- prefix, SIGNATURE_LAYOUT "referrer"). The fake plays both
+# registries at once, each the way it really behaves: ghcr.io signatures as
+# tags with a referrers 404, quay.io signatures as referrers only. Pinned: POST
+# passes on quay.io and goes red/inconclusive for the right reasons; PRE and
+# ANCIENT are exit 2 with NO request to any registry (phase 4 decommissioned
+# the old one -- even a complete ghcr.io behind the fake must not read green);
+# and three REDs -- POST whose artifacts exist only on ghcr.io is MISSING on
+# quay.io (never a fallback to the old registry); POST signed with a fallback
 # TAG on quay.io is MISSING (the wrong layout for its SIGNATURE_LAYOUT); POST
 # with a referrer AND a tag is MISSING (`both`, the double-write).
 #
@@ -101,6 +103,8 @@ mkdir -p "$FAKE"
 #                referrer: the double-write)
 #   norefs       with `everything` on quay.io: the referrers index is empty
 #                (so only quaytags can sign anything)
+#   unsigned     digests (one per line) whose referrers index is empty under
+#                `quaylike`: an unsigned manifest on quay.io
 #   published_on if present, a host: on every OTHER host each manifest lookup
 #                404s except the tags listed in `tags` (the witness), so
 #                "published, but on the wrong registry" is expressible
@@ -192,7 +196,10 @@ curl() {
 		503) code=503 body="unavailable" ;;
 		garbage) code=200 body="{\"name\":\"x\",\"tags\":[\"not\",\"an\",\"index\"]}" ;;
 		index) code=200 body="$(cat "$FAKE/refs_${dg}" 2>/dev/null || printf "%s" "$empty")" ;;
-		quaylike) code=200 body="$(cat "$FAKE/sign_index")" ;;
+		quaylike)
+			code=200 body="$(cat "$FAKE/sign_index")"
+			grep -qxF -- "$dg" "$FAKE/unsigned" 2>/dev/null && body="$empty"
+			;;
 		paged)
 			code=200
 			if [[ "$url" == *"page=2"* ]]; then
@@ -506,11 +513,11 @@ cp scripts/verify-published-artifacts.sh scripts/push-heads-lib.sh scripts/proxy
 	scripts/registry-lib.sh scripts/image-registry.sh "$lib/"
 printf '\n# --- test override: no network ---\n%s\n' "$fake_curl" >>"$lib/registry-lib.sh"
 
-# The throwaway history: PRE (the pre-cut-over setting, exactly the shape the
-# file had before phase 2 -- ghcr.io, charts/, the aether-proxy override, no
-# SIGNATURE_LAYOUT or PROXY_PIN_LEGACY_REFERENCES line) and POST (this
-# checkout's registry.bzl). Both carry the real chart versions and release-tag
-# default the verifier reads per commit.
+# The throwaway history: ANCIENT (no registry.bzl at all: before #998), PRE (the
+# pre-cut-over setting, exactly the shape the file had before phase 2 --
+# ghcr.io, charts/, the aether-proxy override, no SIGNATURE_LAYOUT line) and
+# POST (this checkout's registry.bzl). All carry the real chart versions and
+# release-tag default the verifier reads per commit.
 hist="$tmp/history"
 mkdir -p "$hist/bazel/img"
 for c in "${REGISTRY_CHARTS[@]}"; do
@@ -525,7 +532,6 @@ sed -E \
 	-e 's|^IMAGE_NAME_OVERRIDES = .*|IMAGE_NAME_OVERRIDES = {"proxy": "aether-proxy"}|' \
 	-e 's|^CHART_REPOSITORY_PREFIX = .*|CHART_REPOSITORY_PREFIX = "charts/"|' \
 	-e '/^SIGNATURE_LAYOUT = /d' \
-	-e '/^PROXY_PIN_LEGACY_REFERENCES = /d' \
 	bazel/img/registry.bzl >"$pre_bzl"
 if ! (
 	set -e
@@ -534,6 +540,7 @@ if ! (
 	git config user.email check@example.invalid
 	git config user.name check-registry-lookup
 	git config commit.gpgsign false
+	git add -A && git commit -qm "ancient: before bazel/img/registry.bzl existed"
 	cp "$pre_bzl" bazel/img/registry.bzl
 	git add -A && git commit -qm "pre: published to the pre-cut-over registry"
 	cp "$OLDPWD/bazel/img/registry.bzl" bazel/img/registry.bzl
@@ -542,11 +549,10 @@ if ! (
 	echo "::error::could not build the throwaway history" >&2
 	exit 2
 fi
+ancient="$(git -C "$hist" rev-parse HEAD~2)"
 pre="$(git -C "$hist" rev-parse HEAD~1)"
 post="$(git -C "$hist" rev-parse HEAD)"
 pre_host="$(IMAGE_REGISTRY_BZL="$pre_bzl" scripts/image-registry.sh host)"
-pre_agent_ref="$(IMAGE_REGISTRY_BZL="$pre_bzl" scripts/image-registry.sh ref agent)"
-pre_chart_ref="$(IMAGE_REGISTRY_BZL="$pre_bzl" scripts/image-registry.sh chart-ref aether)"
 post_host="$(scripts/image-registry.sh host)"
 post_agent_ref="$(scripts/image-registry.sh ref agent)"
 post_chart_ref="$(scripts/image-registry.sh chart-ref aether)"
@@ -574,27 +580,31 @@ verify() {
 }
 show() { tail -6 "$tmp/out" | sed 's/^/        | /'; }
 
-# 6a. PRE on its own registry (tag signatures, referrers 404): the pre-040
-#     cases, unchanged -- a complete registry, an unsigned child, a 503, an
-#     absent image with its witness, and a lookup that 404s everything.
+# 6a. POST on quay.io: referrer-only signatures, flat names, chart- prefix --
+#     a complete registry, then the cases every head must keep: an unsigned
+#     child, a 503, an absent image with its witness, and a lookup that 404s
+#     everything.
 reset_registry
 touch "$FAKE/everything"
-rc="$(verify "$pre")"
+rc="$(verify "$post")"
+n_ref="$(grep -cE "^  ok      ${post_host//./\\.}/[a-z/-]+@sha256:[0-9a-f]{64} <- OCI 1\.1 referrer " "$tmp/out" || true)"
 if [ "$rc" = 0 ] &&
 	grep -qxF "PASS: ${want_checks} artifact(s) present across 1 commit(s)" "$tmp/out" &&
 	grep -qxF "  checked ${want_lookups} expected tags directly (HEAD /v2/<repo>/manifests/<tag>; no tag listing)" "$tmp/out" &&
-	grep -qF "  ok      ${pre_chart_ref}:" "$tmp/out" &&
-	! grep -qF " ${post_host}/" "$tmp/out"; then
-	ok "verifier, PRE-cut-over head: complete ${pre_host} registry passes ${want_checks}/${want_checks} with ${want_lookups} direct lookups, nothing asked of ${post_host}"
+	[ "$n_ref" = "$((3 * n_images))" ] &&
+	grep -qF "  ok      ${post_chart_ref}:" "$tmp/out" &&
+	grep -qF "  ok      ${post_agent_ref}:dev-${post}" "$tmp/out" &&
+	! grep -qF " ${pre_host}/" "$tmp/out"; then
+	ok "verifier, POST-cut-over head: ${post_host} with referrer-only signatures passes ${want_checks}/${want_checks} with ${want_lookups} direct lookups, ${n_ref} via referrers, nothing asked of ${pre_host}"
 else
-	bad "verifier on a complete ${pre_host} registry for the PRE head: rc ${rc}"
+	bad "verifier on ${post_host} with referrer signatures for the POST head: rc ${rc}, ${n_ref} referrer lines (want $((3 * n_images)))"
 	show
 fi
 
 reset_registry
 touch "$FAKE/everything"
-printf 'sha256-%064d\n' 3 >"$FAKE/absent" # every image's second child is unsigned
-rc="$(verify "$pre")"
+printf 'sha256:%064d\n' 3 >"$FAKE/unsigned" # every image's second child is unsigned
+rc="$(verify "$post")"
 n_missing="$(grep -c '^  MISSING .* signature for child sha256:0*3 ' "$tmp/out" || true)"
 if [ "$rc" = 1 ] && [ "$n_missing" = "$n_images" ] &&
 	grep -qxF "FAIL: ${n_images} of ${want_checks} artifact(s) missing across 1 commit(s)" "$tmp/out"; then
@@ -606,10 +616,10 @@ fi
 
 reset_registry
 touch "$FAKE/everything"
-image_tag="dev-${pre}"
+image_tag="dev-${post}"
 printf '%s 503\n' "$image_tag" >"$FAKE/codes"
-rc="$(verify "$pre")"
-if [ "$rc" = 2 ] && ! grep -q '^  MISSING' "$tmp/out" && grep -qF "::error::inconclusive: ${pre_host}/" "$tmp/out"; then
+rc="$(verify "$post")"
+if [ "$rc" = 2 ] && ! grep -q '^  MISSING' "$tmp/out" && grep -qF "::error::inconclusive: ${post_host}/" "$tmp/out"; then
 	ok "verifier: an unanswered image lookup is exit 2, not MISSING"
 else
 	bad "verifier with a 503 lookup: want exit 2 and no MISSING, got rc ${rc}"
@@ -621,8 +631,8 @@ reset_registry
 touch "$FAKE/everything"
 printf '%s\n' dev dev-older >"$FAKE/tags"
 printf '%s\n' "$image_tag" >"$FAKE/absent"
-rc="$(verify "$pre")"
-n_witnessed="$(grep -cE "^  MISSING ${pre_host//./\\.}/.*:${image_tag} \(looked up directly: 404; witness dev: 200\)$" "$tmp/out" || true)"
+rc="$(verify "$post")"
+n_witnessed="$(grep -cE "^  MISSING ${post_host//./\\.}/.*:${image_tag} \(looked up directly: 404; witness dev: 200\)$" "$tmp/out" || true)"
 if [ "$rc" = 1 ] && [ "$n_witnessed" = "$n_images" ]; then
 	ok "verifier: each absent image is MISSING with a witness (${n_witnessed}/${n_images}), exit 1"
 else
@@ -635,7 +645,7 @@ fi
 reset_registry
 touch "$FAKE/nothing"
 printf '%s\n' dev >"$FAKE/tags"
-rc="$(verify "$pre")"
+rc="$(verify "$post")"
 if [ "$rc" = 2 ] && ! grep -q '^  MISSING' "$tmp/out" && grep -qF "the lookup is broken" "$tmp/out"; then
 	ok "verifier: a lookup that 404s a listed tag is exit 2, not a wall of MISSING"
 else
@@ -643,39 +653,28 @@ else
 	show
 fi
 
-# 6b. POST on quay.io: referrer-only signatures, flat names, chart- prefix.
-reset_registry
-touch "$FAKE/everything"
-rc="$(verify "$post")"
-n_ref="$(grep -cE "^  ok      ${post_host//./\\.}/[a-z/-]+@sha256:[0-9a-f]{64} <- OCI 1\.1 referrer " "$tmp/out" || true)"
-if [ "$rc" = 0 ] &&
-	grep -qxF "PASS: ${want_checks} artifact(s) present across 1 commit(s)" "$tmp/out" &&
-	[ "$n_ref" = "$((3 * n_images))" ] &&
-	grep -qF "  ok      ${post_chart_ref}:" "$tmp/out" &&
-	grep -qF "  ok      ${post_agent_ref}:dev-${post}" "$tmp/out" &&
-	! grep -qF " ${pre_host}/" "$tmp/out"; then
-	ok "verifier, POST-cut-over head: ${post_host} with referrer-only signatures passes ${want_checks}/${want_checks}, ${n_ref} via referrers, nothing asked of ${pre_host}"
-else
-	bad "verifier on ${post_host} with referrer signatures for the POST head: rc ${rc}, ${n_ref} referrer lines (want $((3 * n_images)))"
-	show
-fi
-
-# 6c. Both heads in ONE run (what --recent does across the cut-over): each on
-#     its own registry, each in its own layout.
-reset_registry
-touch "$FAKE/everything"
-rc="$(verify "$pre" "$post")"
-if [ "$rc" = 0 ] &&
-	grep -qxF "PASS: $((2 * want_checks)) artifact(s) present across 2 commit(s)" "$tmp/out" &&
-	grep -qF "  ok      ${pre_agent_ref}:dev-${pre}" "$tmp/out" &&
-	grep -qF "  ok      ${post_agent_ref}:dev-${post}" "$tmp/out" &&
-	[ "$(grep -c "cosign 3 layout)$" "$tmp/out")" = "$((3 * n_images))" ] &&
-	[ "$(grep -c " <- OCI 1\.1 referrer " "$tmp/out")" = "$((3 * n_images))" ]; then
-	ok "verifier across the cut-over: PRE on ${pre_host} (tags) + POST on ${post_host} (referrers) in one run, $((2 * want_checks))/$((2 * want_checks))"
-else
-	bad "verifier across the cut-over: rc ${rc}"
-	show
-fi
+# 6b + 6c. Heads from BEFORE the cut-over are not checked (proposal 040 phase
+#     4): the pre-cut-over registry is decommissioned. A PRE head (registry.bzl
+#     without SIGNATURE_LAYOUT) and an ANCIENT one (no registry.bzl) are exit 2
+#     -- inconclusive, never a pass and never MISSING -- and not one request
+#     reaches any registry for them: no token, no lookup. Even with a complete
+#     ${pre_host} behind the fake, which a fallback would happily read green.
+# refused <name> <commit> <error text>
+refused() {
+	local name="$1" commit="$2" want="$3" rc
+	reset_registry
+	touch "$FAKE/everything"
+	rc="$(verify "$commit")"
+	if [ "$rc" = 2 ] && ! grep -q '^  MISSING\|^  ok ' "$tmp/out" &&
+		grep -qF -- "$want" "$tmp/out" && [ ! -s "$FAKE/token_urls" ]; then
+		ok "verifier, ${name} head: exit 2, nothing asked of any registry ($(grep -o 'decommissioned (proposal 040 phase 4)' "$tmp/out" | head -1))"
+	else
+		bad "verifier, ${name} head: want exit 2, no ok/MISSING, '${want}', no token request; got rc ${rc}, $(grep -c . "$FAKE/token_urls" 2>/dev/null || echo 0) token request(s)"
+		show
+	fi
+}
+refused "PRE-cut-over" "$pre" "predates the Quay cut-over (its bazel/img/registry.bzl has no SIGNATURE_LAYOUT; it published to ${pre_host})"
+refused "ANCIENT (no registry.bzl)" "$ancient" "no bazel/img/registry.bzl at ${ancient}"
 
 # 6d. RED: POST published only to the OLD registry. The split must never fall
 #     back: every coordinate is MISSING on quay.io, each with its witness.

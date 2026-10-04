@@ -28,12 +28,11 @@
 # Each ref is `<registry>/<repo>@sha256:<index digest>` — a DIGEST, never a tag,
 # so nothing here can re-resolve to a different artefact than the caller named.
 # The registry is taken from each ref (REGISTRY_HOST is set per ref for the
-# child walk), so one run can verify refs on ghcr.io and on quay.io alike — the
-# phase-2 sweep of proposal 040 does exactly that.
+# child walk), so one run can verify refs on more than one registry.
 #
 # REGISTRY-NEUTRAL. `cosign verify` finds the signature itself in every layout
-# we publish: the cosign 2 `.sig` tag, cosign 3's referrers fallback tag on a
-# registry without the Referrers API (ghcr.io), and — on quay.io, which serves
+# cosign writes: the cosign 2 `.sig` tag, cosign 3's referrers fallback tag on a
+# registry without the Referrers API, and — on quay.io, which serves
 # the API — the bundle attached as an OCI 1.1 referrer, which cosign 3
 # discovers through /v2/<repo>/referrers/<digest> with no tag at all.
 #
@@ -48,9 +47,9 @@
 #   CERT_IDENTITY_REGEXP certificate identity; default is publish.yaml on
 #                        ${GITHUB_REPOSITORY:-bpalermo/aether}, any ref.
 #   CERT_OIDC_ISSUER     default https://token.actions.githubusercontent.com
-#   GHCR_TOKEN           optional (ghcr.io only); public packages read
-#                        anonymously. REGISTRY_USERNAME + REGISTRY_PASSWORD for
-#                        any registry (scripts/registry-lib.sh).
+#   REGISTRY_USERNAME, REGISTRY_PASSWORD
+#                        optional; public packages read anonymously
+#                        (scripts/registry-lib.sh).
 #
 # READ-ONLY. cosign verify and registry GETs only; nothing here can sign, push
 # or delete.

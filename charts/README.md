@@ -106,8 +106,9 @@ helm install aether oci://quay.io/aethermesh/chart-aether \
 > repositories changed: re-point `helm` at the `oci://quay.io/aethermesh/chart-<name>`
 > coordinates above, and if you override an image `repository:` by prefix (a
 > mirror), mirror from `quay.io/aethermesh/<component>` now — override each
-> image's `repository` individually. Releases published before the move stay
-> where they were; nothing is deleted.
+> image's `repository` individually. Nothing publishes to or verifies against
+> ghcr.io any more (proposal 040 phase 4); releases from before the move were
+> not copied to quay.io.
 
 ## Multiple instances & labels
 

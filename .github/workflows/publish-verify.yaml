@@ -17,10 +17,10 @@
 # and a run that never existed all have to be caught, and only one question
 # separates them: are the artifacts for this commit in the registry?
 # `scripts/verify-published-artifacts.sh` asks the registry that question
-# directly — the registry that commit's own bazel/img/registry.bzl names (the
-# proposal 040 split: push heads before the Quay cut-over are checked on ghcr.io
-# with signature tags, heads at or after it on quay.io with signature
-# referrers; the file is read AS OF each head, like the chart versions).
+# directly — the registry that commit's own bazel/img/registry.bzl names (read
+# AS OF each head, like the chart versions; quay.io with signature referrers).
+# Heads from before the Quay cut-over are not checked: their registry is
+# decommissioned (proposal 040 phase 4), and the verifier exits 2 on one.
 #
 # It does not touch publish.yaml's serialisation: it is a separate workflow, in
 # a separate concurrency group, and it never pushes anything (the release
@@ -130,15 +130,11 @@ jobs:
       # runs in ci.yaml.
       - name: Expected-red control (must fail on a never-published commit)
         id: control
-        env:
-          # Only ever sent to ghcr.io (scripts/registry-lib.sh), which the sweep
-          # still reads for heads from before the Quay cut-over (until phase 4).
-          GHCR_TOKEN: ${{ github.token }}
         run: ./scripts/publish-verify-control.sh
 
       # The gate runs whatever the control concluded: a broken control must not
       # also cost the real check. Only a failed checkout stops it.
-      - name: Gate (verify the artifacts for this commit exist in GHCR)
+      - name: Gate (verify the artifacts for this commit exist in the registry)
         id: verify
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         env:
@@ -146,9 +142,8 @@ jobs:
           TARGET: ${{ github.event.workflow_run.head_sha || github.event.inputs.commit }}
           TRIGGERING_RUN: ${{ github.event.workflow_run.html_url }}
           TRIGGERING_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-          # The packages are public, so an anonymous pull token would do; using
-          # the run's token keeps the check working if one is ever made private.
-          GHCR_TOKEN: ${{ github.token }}
+          # The repositories are public: the registry hands out an anonymous
+          # pull token, so no registry credential is needed here.
           # `--recent` reads main's push heads from the repository activity log
           # (#975); that endpoint needs only the metadata read every token has.
           # The repository is the runner's own GITHUB_REPOSITORY.
@@ -208,7 +203,6 @@ jobs:
         id: cosign
         if: success() || steps.verify.conclusion == 'failure'
         env:
-          GHCR_TOKEN: ${{ github.token }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
           set -euo pipefail

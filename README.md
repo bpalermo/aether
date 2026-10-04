@@ -136,7 +136,8 @@ helm upgrade --install aether oci://quay.io/aethermesh/chart-aether --version <X
 
 The charts moved from ghcr.io at **1.0.0** — a major bump, because the default
 image repositories changed; see [Getting started](docs/getting-started.md) for the
-upgrade. Releases published before the move stay on ghcr.io.
+upgrade. Releases published before the move went to ghcr.io; nothing publishes to
+or verifies against ghcr.io any more (proposal 040 phase 4).
 
 ### Adding Go Dependencies
 

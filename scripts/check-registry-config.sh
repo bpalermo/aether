@@ -26,11 +26,11 @@
 #      pre-cut-over registry at all (LEGACY_PREFIXES: the `<host>/<namespace>`
 #      it was before proposal 040 phase 2): not a coordinate, not the bare host
 #      (other projects' images on that host, `<host>/<someone else>/…`, are not
-#      ours and do not count), not the namespace path standing alone. The
-#      sweep still reads the old registry for old commits — from git history,
-#      never from a literal — and everything user-facing points at the new one;
-#      the legacy allow-list is exactly the footprint phase 4 ("decommission
-#      ghcr") removes. Same positive and negative controls.
+#      ours and do not count), not the namespace path standing alone. Phase 4
+#      ("decommission ghcr") removed the sweep's reads of the old registry;
+#      what the legacy allow-list still holds is history, the library's
+#      registry facts and the offline harnesses that prove the old registry is
+#      never read. Same positive and negative controls.
 #
 # ALLOW-LIST — where the literal is legitimate:
 #   bazel/img/registry.bzl, proxy/bazel/registry.bzl   the setting itself
@@ -54,13 +54,14 @@
 #   README.md, charts/README.md, docs/getting-started.md, docs/configuration.md
 #                                   the chart-consumer migration note (where
 #                                   releases before 1.0.0 live)
-#   scripts/registry-lib.sh, scripts/verify-published-artifacts.sh,
-#   scripts/verify-image-signatures.sh, scripts/proxy-pin-lib.sh
-#                                   the split sweep: pre-cut-over heads are still
-#                                   read on ghcr.io (GHCR_TOKEN, tag layouts)
-#   .github/workflows/{ci,publish,publish-verify,proxy-release}.y*ml
-#                                   comments on that split, and publish-verify's
-#                                   GHCR_TOKEN for pre-cut-over reads
+#   scripts/registry-lib.sh, scripts/proxy-pin-lib.sh
+#                                   registry facts the library is written
+#                                   against (ghcr.io has no Referrers API) and
+#                                   the pre-signing proxy pins, all on ghcr.io
+#   .github/workflows/{ci,proxy-release}.y*ml
+#                                   comments on the legacy-check and the pin
+# (Phase 4 decommissioned the sweep's ghcr.io branch: the verifier, the
+# signature verifier, publish.yaml and publish-verify.yaml no longer mention it.)
 #   scripts/check-registry-lookup.sh, scripts/check-publish-verify-control.sh,
 #   scripts/check-signature-layout.sh, scripts/check-index-children.sh
 #                                   the offline harnesses play the pre-cut-over
@@ -186,12 +187,8 @@ legacy_allow=(
 	':(exclude)docs/getting-started.md'
 	':(exclude)docs/configuration.md'
 	':(exclude)scripts/registry-lib.sh'
-	':(exclude)scripts/verify-published-artifacts.sh'
-	':(exclude)scripts/verify-image-signatures.sh'
 	':(exclude)scripts/proxy-pin-lib.sh'
 	':(exclude).github/workflows/ci.yaml'
-	':(exclude).github/workflows/publish.yaml'
-	':(exclude).github/workflows/publish-verify.yaml'
 	':(exclude).github/workflows/proxy-release.yml'
 	':(exclude)scripts/check-registry-lookup.sh'
 	':(exclude)scripts/check-publish-verify-control.sh'

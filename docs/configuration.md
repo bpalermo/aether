@@ -103,7 +103,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | Key | Default | Purpose |
 |---|---|---|
 | `proxy.enabled` | `true` | Deploy the per-node Envoy. Disable to run only the agent. |
-| `proxy.image.repository` | `quay.io/aethermesh/proxy` | External image built by the `//proxy` workspace, digest-pinned by the proxy release's bump-chart PR. A chart published before the first proxy release after the Quay cut-over (proposal 040) still pins the pre-cut-over ghcr.io image; that release moves `repository` with the tag and digest. |
+| `proxy.image.repository` | `quay.io/aethermesh/proxy` | External image built by the `//proxy` workspace, digest-pinned by the proxy release's bump-chart PR. Every pin reader accepts exactly this repository (`image_reference("proxy")`). |
 | `proxy.image.tag` | (commit SHA) | The publishing commit. |
 | `proxy.image.digest` | (index digest) | Multi-arch index digest of that commit's image; the `aether.image` helper prefers it over `tag`. |
 | `proxy.logLevel` | `info` | Envoy log level. |

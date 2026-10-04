@@ -223,7 +223,7 @@ A new component only gets symbolised profiles once it is added there:
    `<image>` ⇥ `<artifact>` ⇥ `<tar-relative path>` ⇥ `executable-full` ⇥ `true`
    (the path has **no leading slash**, and `<artifact>` must be unique in that file).
 2. Make sure the workload runs in a namespace the job discovers (`aether-system` or
-   `aether-ingress`) from a **digest-pinned** `ghcr.io/bpalermo/aether/*` reference.
+   `aether-ingress`) from a **digest-pinned** `quay.io/aethermesh/*` reference.
 3. Add it to the warm-up list above — the first query on a cold series pays the lidia
    conversion, and you want to pay it deliberately rather than at T0 of an investigation.
 

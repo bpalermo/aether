@@ -289,13 +289,13 @@ jobs:
       # drives the real verifier end to end. It also plays quay.io (proposal
       # 040): the /v2/auth token endpoint, and the OCI 1.1 Referrers API — a
       # sign-bundle referrer is a signature, a referrers 404 falls back to the
-      # tag layouts, a 5xx is inconclusive — and runs the verifier across the
-      # cut-over on a throwaway two-commit history (a pre-cut-over head on the
-      # fake ghcr.io with tag signatures, a post-cut-over head on the fake
-      # quay.io with referrers), plus the reds: a post-cut-over head published
-      # only to ghcr.io, a fallback tag where a referrer is promised, and a
-      # double-write. No network.
-      - name: Registry direct lookup survives a concurrent publish (ghcr.io + quay.io)
+      # tag layouts, a 5xx is inconclusive — and runs the verifier on a
+      # throwaway history: a post-cut-over head on the fake quay.io with
+      # referrers; pre-cut-over heads refused (exit 2, no request at all: the
+      # old registry is decommissioned, proposal 040 phase 4); plus the reds: a
+      # post-cut-over head published only to the old registry, a fallback tag
+      # where a referrer is promised, and a double-write. No network.
+      - name: Registry direct lookup survives a concurrent publish
         run: scripts/check-registry-lookup.sh
 
       # The registry is ONE setting (bazel/img/registry.bzl, proposal 040), so

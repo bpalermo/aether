@@ -10,20 +10,21 @@
 # AS OF EACH COMMIT it checks (`git show <sha>:bazel/img/registry.bzl`) and
 # derives everything from it -- host, namespace, name overrides, chart prefix,
 # and SIGNATURE_LAYOUT, the layout the signature must have there -- exactly the
-# way it already reads the chart versions and the release-tag prefix. There is
-# no cut-over sha or date typed anywhere: the cut-over commit is simply the
-# first one whose registry.bzl says quay.io (the phase-2 PR's merge commit).
-# Push heads from before it are checked on ghcr.io (charts/<name>, the
-# aether-proxy name override, signature TAGS); heads at or after it on quay.io
-# (chart-<name>, flat names, signature REFERRERS). A post-flip head whose
-# artifacts exist only on ghcr.io is MISSING, not present.
+# way it already reads the chart versions and the release-tag prefix. A head
+# whose artifacts exist only on some other registry is MISSING, not present.
 #
-#   - A commit older than registry.bzl itself (before #998, phase 1) was
-#     published exactly where the file's FIRST version says -- phase 1 was
-#     introduced with no behaviour change -- so that version stands in.
-#   - A registry.bzl without a SIGNATURE_LAYOUT line predates the cut-over and
-#     was published under "tag" (cosign's `.sig` or `sha256-<hex>` tag).
-#   - A registry.bzl this script cannot parse is exit 2, never a default.
+# ONLY POST-CUT-OVER HEADS ARE CHECKED (proposal 040 phase 4). Heads from before
+# the Quay cut-over published to the pre-cut-over registry, which phase 4
+# decommissioned: this script no longer reads it. Such a head is exit 2
+# (cannot be checked), never a pass and never MISSING:
+#
+#   - a commit with no bazel/img/registry.bzl at all (before #998, phase 1);
+#   - a registry.bzl without a SIGNATURE_LAYOUT line (phase 1, before the
+#     cut-over);
+#   - a registry.bzl this script cannot parse.
+#
+# The `--recent` sweep's window (one day) has held only post-cut-over heads
+# since 2026-09-28.
 #
 # WHY THIS EXISTS
 #
@@ -47,7 +48,7 @@
 #
 #   1. All FOUR charts under their commit-addressable tag:
 #      <chart repository>:<X.Y.Z>-<full 40-char sha> for aether, crds, prober
-#      and udsecho (`charts/<name>` on ghcr.io, `chart-<name>` on quay.io). crds,
+#      and udsecho (`chart-<name>` on quay.io). crds,
 #      prober and udsecho spell that in their own Chart.yaml
 #      (`version: "X.Y.Z-{GIT_COMMIT}"`); aether gets it from
 #      //charts/aether:aether_commit (#692). The version is read from Chart.yaml
@@ -63,9 +64,9 @@
 #      from (2), present in the same repository as exactly one of
 #      `sha256-<hex>.sig` (cosign 2), `sha256-<hex>` (cosign 3 bundle, the
 #      referrers fallback tag) or an OCI 1.1 signature referrer (cosign 3 on a
-#      registry with the Referrers API -- quay.io, not ghcr.io; proposal 040) --
+#      registry with the Referrers API -- quay.io; proposal 040) --
 #      AND in the layout that commit's SIGNATURE_LAYOUT promises: `referrer`
-#      on quay.io, a tag layout on ghcr.io. A tag where a referrer is promised
+#      on quay.io, a tag layout on a registry without the API. A tag where a referrer is promised
 #      is MISSING (the wrong layout), and a referrer plus a tag is `both`, the
 #      double-write defect.
 #      "Published but unsigned" is its own silent failure (#875) and reads
@@ -148,8 +149,8 @@
 # intermediate.
 #
 # Reads public packages anonymously. For private ones set REGISTRY_USERNAME +
-# REGISTRY_PASSWORD, or GHCR_TOKEN on ghcr.io (scripts/registry-lib.sh; it is
-# only ever sent to ghcr.io, so one run can read both registries).
+# REGISTRY_PASSWORD (scripts/registry-lib.sh; sent only to the host they were
+# issued for).
 #
 # EXIT CODES
 #   0  every artifact for every commit is present
@@ -306,21 +307,15 @@ chart_commit_tag() {
 
 # The registry setting AS OF ONE COMMIT (see WHICH REGISTRY, PER COMMIT above).
 #
-# Writes bazel/img/registry.bzl as of <sha> to <file>: the commit's own, or --
-# for a commit that predates the file -- the file's first version, which phase 1
-# introduced with no behaviour change. Anything else is exit 2.
+# Writes bazel/img/registry.bzl as of <sha> to <file>. A commit without the file
+# predates #998 and published to the pre-cut-over registry, which is
+# decommissioned (proposal 040 phase 4): exit 2, never a stand-in version.
 setting_bzl_at() {
-	local sha="$1" out="$2" first
+	local sha="$1" out="$2"
 	if git show "${sha}:bazel/img/registry.bzl" >"$out" 2>/dev/null; then
 		return 0
 	fi
-	first="$(git log --diff-filter=A --format=%H -- bazel/img/registry.bzl | tail -1)"
-	if [ -n "$first" ] && [ "$sha" != "$first" ] &&
-		git merge-base --is-ancestor "$sha" "$first" 2>/dev/null &&
-		git show "${first}:bazel/img/registry.bzl" >"$out" 2>/dev/null; then
-		return 0
-	fi
-	echo "::error::no bazel/img/registry.bzl at ${sha}, and it is not older than the file's first version — cannot tell where it published" >&2
+	echo "::error::no bazel/img/registry.bzl at ${sha}: it predates the Quay cut-over and published to the pre-cut-over registry, which is decommissioned (proposal 040 phase 4) and no longer checked" >&2
 	return 2
 }
 
@@ -328,8 +323,8 @@ setting_bzl_at() {
 # image_reference("proxy"), written to <file>. The aether-proxy pin names its
 # own registry and moves only with a proxy release, so the layout its signature
 # must have is the one promised by the setting that made that reference current
-# -- not the checked commit's (a ghcr.io pin can outlive the flip) and not the
-# introducing commit's (a revert can re-pin an old ghcr.io digest after it).
+# -- not the checked commit's (a pin can outlive a registry flip) and not the
+# introducing commit's (a revert can re-pin an old digest after it).
 # Exit 2 when no version of the file ever named it.
 setting_for_proxy_ref_at() {
 	local sha="$1" want="$2" out="$3" c
@@ -443,7 +438,7 @@ absent_direct() {
 # the state a format migration actually fails into.
 #
 # Both tag shapes are looked up by name, every time (two HEADs), and the
-# Referrers API is asked too (a 404 there is "no API", as on ghcr.io), so `both`
+# Referrers API is asked too (a 404 there is "no API"), so `both`
 # is seen; any lookup going unanswered is exit 2. The referrers GET is not a tag
 # lookup and is not counted in `checked N expected tags`.
 #
@@ -518,11 +513,24 @@ verify_commit() {
 	if ! setting_bzl_at "$sha" "$setting_file"; then
 		exit 2
 	fi
-	if ! REGISTRY_HOST="$(setting "$setting_file" host)" || [ -z "$REGISTRY_HOST" ] ||
-		! layout="$(setting_layout "$setting_file")"; then
+	if ! REGISTRY_HOST="$(setting "$setting_file" host)" || [ -z "$REGISTRY_HOST" ]; then
 		echo "::error::cannot parse bazel/img/registry.bzl as of ${sha}" >&2
 		exit 2
 	fi
+	local layout_rc=0
+	layout="$(setting_layout "$setting_file" 2>/dev/null)" || layout_rc=$?
+	case "$layout_rc" in
+	0) ;;
+	3)
+		# A pre-cut-over head: never looked up on the old registry, never MISSING.
+		echo "::error::${sha} predates the Quay cut-over (its bazel/img/registry.bzl has no SIGNATURE_LAYOUT; it published to ${REGISTRY_HOST}), and that registry is decommissioned (proposal 040 phase 4) — not checked" >&2
+		exit 2
+		;;
+	*)
+		echo "::error::cannot parse SIGNATURE_LAYOUT in bazel/img/registry.bzl as of ${sha}" >&2
+		exit 2
+		;;
+	esac
 	while read -r c; do
 		if ! repo="$(setting "$setting_file" repo "$c")"; then
 			echo "::error::cannot derive the ${c} repository from bazel/img/registry.bzl as of ${sha}" >&2

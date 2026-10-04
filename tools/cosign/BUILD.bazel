@@ -24,7 +24,7 @@ sh_binary(
     deps = ["@bazel_tools//tools/bash/runfiles"],
 )
 
-# bazel run //tools/cosign:verify_image_signatures -- <ghcr ref@digest>... | --file <refs>
+# bazel run //tools/cosign:verify_image_signatures -- <registry/repo@digest>... | --file <refs>
 sh_binary(
     name = "verify_image_signatures",
     srcs = ["verify_image_signatures.sh"],
