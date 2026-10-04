@@ -18,8 +18,11 @@ const meterName = "aether/registry-registrar"
 // aether.agent.registry.last_version is the agent half of the propagation-lag
 // query (#1193): on the etcd backend the registrar's version is the store
 // revision it serves, so aether.registrar.store_revision minus this gauge is how
-// far this agent trails the store. On the kubernetes backend the version is
-// content-addressed ("hash:<h>") and the gauge is not recorded.
+// far this agent trails the store -- an upper bound, since the agent learns a
+// revision only from an event that reaches it (a no-op store write, or a change
+// outside its watch filter, leaves the gauge behind a current cache). On the
+// kubernetes backend the version is content-addressed ("hash:<h>") and the gauge
+// is not recorded.
 type clientMetrics struct {
 	reconnects    metric.Int64Counter
 	watchErrors   metric.Int64Counter
@@ -41,7 +44,7 @@ func newClientMetrics(meter metric.Meter) (*clientMetrics, error) {
 		return nil, fmt.Errorf("watch errors: %w", err)
 	}
 	if m.lastVersion, err = meter.Int64Gauge("aether.agent.registry.last_version",
-		metric.WithDescription("Store revision of the last registrar snapshot version applied by this agent (etcd backend only; aether.registrar.store_revision minus this is the agent's propagation lag)")); err != nil {
+		metric.WithDescription("Store revision of the last registrar snapshot version applied by this agent (etcd backend only; aether.registrar.store_revision minus this bounds the agent's propagation lag from above: it advances only on events that reach this agent)")); err != nil {
 		return nil, fmt.Errorf("last version: %w", err)
 	}
 	if m.malformedKeys, err = meter.Int64Counter("aether.agent.registry.malformed_keys",

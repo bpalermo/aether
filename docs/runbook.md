@@ -2500,11 +2500,25 @@ count(count by (content_hash) (aether_registrar_snapshot_content)) > 1
   and on() (max(aether_registrar_writebehind_queue_depth) == 0)
 ```
 
-The two lag lines settle at 0 between changes. A short climb during churn is
-the watch-to-sync debounce (200 ms) plus the stream fan-out. A replica that
-stays behind has a stalled sync loop: check `aether_registrar_sync_errors_total`.
-An agent that stays behind has a stuck watch stream: check
-`aether_agent_registry_reconnects_total` on that agent.
+The replica-lag line settles at 0 between changes. A short climb during churn
+is the watch-to-sync debounce (200 ms). A replica that stays behind has a
+stalled sync loop: check `aether_registrar_sync_errors_total`.
+
+The agent line is an **upper bound**. An agent learns a revision only from an
+event that reaches it: the last event of a batch it is sent, or the
+`SNAPSHOT_COMPLETE` of a (re)connect. Two kinds of store write move the
+revision without sending it anything, so its gauge stays behind while its cache
+is current:
+
+- a write that changes no contents, such as a re-Put of an identical endpoint;
+- a change to a service outside a demand-scoped agent's watch filter.
+
+On kind, during one pod churn, both agents sat one revision behind for 11 s with
+identical contents, until the next real change. Read a gap as lag only if it
+persists **while** `aether_registrar_sync_events_total` shows changes the agent
+should have received. An agent that is actually stuck has a broken watch stream:
+check `aether_agent_registry_reconnects_total` and `watch_errors_total` on that
+agent.
 
 **Divergence rule.** Two replicas reporting the **same**
 `aether_registrar_snapshot_revision`, with no write-behind intent pending
