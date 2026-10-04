@@ -43,6 +43,7 @@ go_library(
 
 go_test(
     name = "cmd_test",
+    size = "small",
     srcs = [
         "config_test.go",
         "spire_identity_test.go",

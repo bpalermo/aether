@@ -27,6 +27,7 @@ go_library(
 
 go_test(
     name = "spire_test",
+    size = "small",
     srcs = [
         "handshake_test.go",
         "identity_test.go",

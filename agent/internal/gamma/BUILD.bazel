@@ -28,6 +28,7 @@ go_library(
 
 go_test(
     name = "gamma_test",
+    size = "small",
     srcs = ["reconciler_test.go"],
     embed = [":gamma"],
     deps = [

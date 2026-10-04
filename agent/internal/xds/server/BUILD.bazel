@@ -32,6 +32,7 @@ go_library(
 
 go_test(
     name = "server_test",
+    size = "small",
     srcs = [
         "capture_gate_test.go",
         "client_cert_wait_test.go",

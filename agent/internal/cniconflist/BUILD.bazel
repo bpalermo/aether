@@ -23,6 +23,7 @@ go_library(
 
 go_test(
     name = "cniconflist_test",
+    size = "small",
     srcs = [
         "readyz_test.go",
         "reassert_test.go",

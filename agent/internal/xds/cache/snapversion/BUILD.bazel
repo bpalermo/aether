@@ -10,6 +10,7 @@ go_library(
 
 go_test(
     name = "snapversion_test",
+    size = "small",
     srcs = ["snapversion_test.go"],
     embed = [":snapversion"],
     deps = [

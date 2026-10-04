@@ -15,6 +15,7 @@ go_library(
 
 go_test(
     name = "l4project_test",
+    size = "small",
     srcs = ["l4project_test.go"],
     embed = [":l4project"],
     deps = [

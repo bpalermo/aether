@@ -24,6 +24,7 @@ go_library(
 
 go_test(
     name = "attachment_test",
+    size = "small",
     srcs = ["attachment_test.go"],
     embed = [":attachment"],
     deps = [

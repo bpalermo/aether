@@ -12,6 +12,7 @@ go_library(
 
 go_test(
     name = "mesh_test",
+    size = "small",
     srcs = [
         "l4port_test.go",
         "marks_test.go",

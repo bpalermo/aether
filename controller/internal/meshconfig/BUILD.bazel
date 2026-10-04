@@ -33,6 +33,7 @@ go_library(
 
 go_test(
     name = "meshconfig_test",
+    size = "small",
     srcs = [
         "cabundle_test.go",
         "meshconfig_test.go",

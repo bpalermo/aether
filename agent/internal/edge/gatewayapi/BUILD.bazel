@@ -46,6 +46,7 @@ go_library(
 
 go_test(
     name = "gatewayapi_test",
+    size = "small",
     srcs = [
         "edge_cases_test.go",
         "edgeconfig_resolve_test.go",

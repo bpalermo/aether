@@ -19,6 +19,7 @@ go_binary(
 
 go_test(
     name = "buildid_test",
+    size = "small",
     srcs = ["buildid_test.go"],
     embed = [":buildid_lib"],
 )

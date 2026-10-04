@@ -36,6 +36,7 @@ go_library(
 
 go_test(
     name = "spire_test",
+    size = "small",
     srcs = [
         "bridge_broker_test.go",
         "bridge_identity_wake_test.go",

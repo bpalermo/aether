@@ -16,6 +16,7 @@ go_library(
 
 go_test(
     name = "ctrlqueue_test",
+    size = "small",
     srcs = ["ctrlqueue_test.go"],
     embed = [":ctrlqueue"],
     deps = [

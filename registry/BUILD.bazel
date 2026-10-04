@@ -21,6 +21,7 @@ go_library(
 
 go_test(
     name = "registry_test",
+    size = "small",
     srcs = [
         "cni_test.go",
         "protocols_test.go",

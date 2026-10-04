@@ -103,6 +103,7 @@ go_library(
 
 go_test(
     name = "proxy_test",
+    size = "small",
     srcs = [
         "accesslog_test.go",
         "authz_test.go",

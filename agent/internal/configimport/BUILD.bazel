@@ -20,6 +20,7 @@ go_library(
 
 go_test(
     name = "configimport_test",
+    size = "small",
     srcs = ["importer_test.go"],
     embed = [":configimport"],
     deps = [

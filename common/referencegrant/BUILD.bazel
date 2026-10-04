@@ -13,6 +13,7 @@ go_library(
 
 go_test(
     name = "referencegrant_test",
+    size = "small",
     srcs = ["referencegrant_test.go"],
     embed = [":referencegrant"],
     deps = [

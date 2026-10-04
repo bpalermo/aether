@@ -76,8 +76,11 @@ go_library(
     ],
 )
 
+# size=medium, not small: ~12 s plain, but 54-58 s under --config=race (the CI
+# race gate), which is at the edge of small's 60 s timeout.
 go_test(
     name = "cache_test",
+    size = "medium",
     srcs = [
         "alias_floor_eds_test.go",
         "cache_test.go",

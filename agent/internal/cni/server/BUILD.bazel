@@ -59,6 +59,7 @@ go_library(
 
 go_test(
     name = "server_test",
+    size = "small",
     srcs = [
         "dualregistration_test.go",
         "ghostsweep_lock_test.go",

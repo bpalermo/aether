@@ -23,6 +23,7 @@ go_library(
 
 go_test(
     name = "install_test",
+    size = "small",
     srcs = [
         "cniconfig_idempotent_test.go",
         "cniconfig_test.go",

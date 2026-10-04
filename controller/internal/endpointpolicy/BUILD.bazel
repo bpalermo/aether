@@ -16,6 +16,7 @@ go_library(
 
 go_test(
     name = "endpointpolicy_test",
+    size = "small",
     srcs = ["webhook_test.go"],
     embed = [":endpointpolicy"],
     deps = [

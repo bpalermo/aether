@@ -10,6 +10,7 @@ go_library(
 
 go_test(
     name = "drain_test",
+    size = "small",
     srcs = ["drain_test.go"],
     embed = [":drain"],
     deps = [

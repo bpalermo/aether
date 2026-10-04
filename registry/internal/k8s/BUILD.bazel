@@ -23,6 +23,7 @@ go_library(
 
 go_test(
     name = "k8s_test",
+    size = "small",
     srcs = [
         "drain_test.go",
         "kubernetes_test.go",
