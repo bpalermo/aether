@@ -952,20 +952,55 @@ same snapshot, but LDS and CDS are separate xDS responses with no ordering
 guarantee, so a release-two cluster can briefly face a pre-release-one listener.
 That connection matches nothing and takes `on_no_match` = the node identity.
 
-**This is the only version-ordering constraint #815 will ever impose.** Both
-keys are stamped permanently. A third release that dropped
-`aether.network.network_namespace` from the listeners was evaluated on
-2026-09-19 and **closed**: on a listener that key carries no per-pod state (its
-value is a constant format string), so removing it would save about 240 bytes
-per mesh-originating filter chain and nothing else — while creating the
-mirror-image constraint forever, and costing another full re-key of every mesh
-pod's filter chains to deploy.
+A third release that dropped `aether.network.network_namespace` from the
+listeners was evaluated on 2026-09-19 and **closed**: on a listener that key
+carries no per-pod state (its value is a constant format string), so removing it
+would save about 240 bytes per mesh-originating filter chain and nothing else —
+while costing another full re-key of every mesh pod's filter chains to deploy.
+The netns key is still stamped (the access log's `source_netns` reads it).
 
-Keeping both keys is also what makes **rolling back below `0.92.28` safe**: a
-proxy whose listeners stamp both keys matches correctly against clusters from
-*either* side of release two. This issue needed exactly that once — release one
-was rolled back on talos-main on 2026-09-19. Verification and the runtime
-failure signature are under *"#815 release two"* in §8.
+While the listeners stamped both keys, **rolling back below `0.92.28` was
+safe**: a proxy whose listeners stamp both keys matches correctly against
+clusters from *either* side of release two. This issue needed exactly that once
+— release one was rolled back on talos-main on 2026-09-19. That safety ended
+with #1165 (next section). Verification and the runtime failure signature are
+under *"#815 release two"* in §8.
+
+### Rollback floor: chart `0.93.0` (issue #1165)
+
+**After the chart that ships #1165, rolling back to a chart older than `0.93.0`
+is no longer hitless.** `0.93.0` (2026-09-20) is the chart that shipped #842,
+the per-connection certificate selector; use `0.93.1` or newer as the floor in
+practice, since `0.93.0` itself carried the #842 SDS-dedup stall that `0.93.1`
+(#865) fixed. Rolling back to any chart `>= 0.93.0` is unaffected.
+
+Why: from `0.92.27` the source pod's SPIFFE ID was stamped under
+`aether.source.spiffe_id`, and every cluster before `0.93.0` selects its client
+certificate with a `transport_socket_matcher` that reads that key. #842 moved
+selection to the `filter_state_override` certificate mapper, which reads
+`envoy.tls.certificate_mappers.on_demand_secret`, and kept stamping the old key
+for one release purely so a rollback stayed hitless. #1165 stopped stamping it.
+A node proxy running post-#1165 listeners that is handed pre-`0.93.0` clusters
+during a rollback matches nothing and takes `on_no_match` — the **agent's own
+SVID** (`spiffe://<td>/ns/aether-system/sa/aether-agent`, #825) — so every
+pod's egress presents the wrong identity until the old agent's listeners land
+too (LDS and CDS are separate responses with no ordering guarantee).
+`ext_authz` / RBAC / peer-identity checks at the destination will see it.
+
+If you must go below `0.93.0`: step through a `0.93.x` / `0.94.x` chart first
+(its listeners stamp both keys), let every node's proxy take the new listeners,
+then roll back again.
+
+Nothing else in the observable surface changed. The access log's
+`source_spiffe_id` attribute (HTTP `aether_access_logs` and L4
+`aether_l4_access_logs` streams) keeps its **name** and value; only the
+filter-state key it reads moved to the mapper key, so VictoriaLogs queries and
+dashboards that filter or extract on `source_spiffe_id` need no change. The
+proposal 038 QUIC selection matcher reads the mapper key too, so the arm a
+request takes and the client certificate it presents now come from one value.
+Rolling **forward** re-keys every mesh-originating filter chain (one
+`set_filter_state` entry fewer) and every QUIC-selecting route, so those chains
+drain once on `--drain-time-s`.
 
 There are also two standalone charts, installed independently: **`prober`**
 (`charts/prober`) — the external mesh-availability prober (proposal 013; its
@@ -1113,8 +1148,10 @@ east/west waypoint), but twins are **demand-scoped**
 (#1020): a node builds a `quic:<svc>.<ns>.<domain>@<ns>/<sa>` cluster only for a
 (source ServiceAccount, destination) pair that has actually dialled. The route to an
 eligible destination carries one selection arm per local ServiceAccount (a matcher
-cluster specifier keyed on the connection's `aether.source.spiffe_id` filter
-state), each naming that source's twin, built or not. A source's **first** request
+cluster specifier keyed on the connection's
+`envoy.tls.certificate_mappers.on_demand_secret` filter state — the same
+source-identity stamp the certificate mapper reads; `aether.source.spiffe_id`
+before #1165), each naming that source's twin, built or not. A source's **first** request
 resolves to a twin the proxy does not have yet; the HCM's `on_demand` filter asks
 the agent for it by name over ODCDS; the agent checks the name (destination in the
 dependency set, source a ServiceAccount with a pod on the node), records
@@ -3755,7 +3792,9 @@ for 15 s; two new pods on one node → 30 clusters for 30 s; nodes with no new p
 cost an 8 h soak its largest error episode.
 
 The map is now keyed by the **source SPIFFE ID** (`aether.source.spiffe_id`
-filter state), which is per **ServiceAccount**. The thing the matcher selects
+filter state; since #842 the matcher is gone and the certificate mapper reads
+the same ID from `envoy.tls.certificate_mappers.on_demand_secret`, and #1165
+stopped stamping `aether.source.spiffe_id`), which is per **ServiceAccount**. The thing the matcher selects
 was always per-ServiceAccount — the `transport_socket_matches` entry name *is*
 the SPIFFE ID — so nothing about certificate selection changed; the key simply
 stopped carrying per-pod state.
@@ -4184,7 +4223,10 @@ traffic is presenting the agent identity" signal without anyone noticing.
 2. **The source-side access log's `source_spiffe_id`.** Absent (`-`) is
    *precisely* the condition that makes the mapper fall back to `default_value`,
    so it is the direct successor to the no-match counter — and it is per
-   request, not per connection:
+   request, not per connection. Since #1165 the attribute reads the mapper's
+   own key rather than the `aether.source.spiffe_id` copy stamped beside it,
+   so "absent here" and "the mapper missed" are the same lookup, not two that
+   happened to be stamped together:
 
    ```logsql
    log_name:"aether_access_logs" AND reporter:"source" AND source_spiffe_id:"-"
@@ -4264,14 +4306,16 @@ churn #815 and this change removed.
 
 #### Rollback
 
-The listeners stamp **both** identity keys for one release: `aether.source.spiffe_id`
-(what a pre-#842 cluster's matcher reads) and the certificate-mapper key. A
-rollback to release-two clusters is therefore hitless, the same dual-key overlap
-#815 used. One release after this ships, the netns copy and
-`aether.source.spiffe_id` can be retired together, with the access log's
-`source_spiffe_id` attribute repointed at the mapper key (the attribute NAME
-stays).
+For one release the listeners stamped **both** identity keys:
+`aether.source.spiffe_id` (what a pre-#842 cluster's matcher reads) and the
+certificate-mapper key, so a rollback to release-two clusters stayed hitless —
+the same dual-key overlap #815 used. **#1165 retired `aether.source.spiffe_id`**:
+the access log's `source_spiffe_id` attribute now reads the mapper key (the
+attribute NAME is unchanged), and a rollback below chart `0.93.0` is no longer
+hitless — see *"Rollback floor: chart `0.93.0` (issue #1165)"* in §7. The netns
+copy was kept (it still feeds `source_netns`).
 
-Rolling **forward** replaces every mesh-originating filter chain (the `filters`
-list gains an entry), so those chains drain once on `--drain-time-s` (10 s here)
-— the same one-time cost release one paid.
+Rolling **forward** to #842 replaced every mesh-originating filter chain (the
+`filters` list gained an entry), so those chains drained once on
+`--drain-time-s` (10 s here) — the same one-time cost release one paid; #1165
+(one entry fewer) costs the same once more.

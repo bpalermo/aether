@@ -113,8 +113,8 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 // Default off (no listener is generated unless transparent capture is on).
 // sourceSpiffeID is the capturing pod's own SPIFFE ID (SourceIdentityForPod),
 // stamped into filter state next to the netns on every chain that originates
-// mesh traffic (see SourceIdentityFilterStateKey). "" reproduces the pre-#815
-// shape exactly.
+// mesh traffic (see SourceIdentityCertMapperFilterStateKey). "" reproduces the
+// pre-#815 shape exactly.
 func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")

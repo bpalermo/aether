@@ -19,89 +19,30 @@ const (
 	// networkNamespaceFilterStateKey is the filter state key for the network namespace
 	networkNamespaceFilterStateKey = "aether.network.network_namespace"
 
-	// SourceIdentityFilterStateKey carries the SOURCE POD'S SPIFFE ID, written as
-	// a literal string by every listener chain that can originate mesh traffic,
-	// and read by the cluster transport_socket_matcher
-	// (UpstreamTransportSocketMatcher, transportsocketmatch.go) since release two.
+	// The source pod's SPIFFE ID used to be stamped a SECOND time, under
+	// "aether.source.spiffe_id" with the plain "envoy.string" factory. That key
+	// was the #815 transport_socket_matcher's input (release two, chart
+	// 0.92.28) and survived #842 (chart 0.93.0, 2026-09-20) for one release so
+	// a rollback to a pre-#842 cluster — whose matcher still read it — stayed
+	// hitless. It was RETIRED in #1165: every reader (the access log's
+	// `source_spiffe_id`, the QUIC selection matcher) now reads
+	// SourceIdentityCertMapperFilterStateKey instead.
 	//
-	// THREE-RELEASE CONTRACT (issue #815) — read this before touching either key.
+	// ROLLBACK FLOOR: a proxy running these listeners, handed a pre-0.93.0
+	// cluster (the netns- or aether.source-keyed matcher), matches nothing and
+	// takes OnNoMatch — the AGENT'S OWN SVID,
+	// spiffe://<td>/ns/aether-system/sa/aether-agent (#825) — so a rollback
+	// below 0.93.0 is no longer hitless. //test/envoy_validate asserts the
+	// retired name appears in no listener of any fixture.
 	//
-	// The matcher's exact_match_map used to be keyed on
-	// networkNamespaceFilterStateKey. A netns path is unique PER POD, so every
-	// local pod ADD/DEL rewrote a field of EVERY mesh cluster on the node; under
-	// delta-xDS each rewritten EDS cluster re-warmed for the full 15 s EDS
-	// initial_fetch_timeout and the warming→active swap then DrainAndDeletes
-	// every upstream connection pool on the node. Measured on the live cluster:
-	// 20–33 clusters warming for exactly 15 s per pod ADD, 30 s for two.
-	//
-	// The thing the matcher SELECTS was always per-ServiceAccount (the match name
-	// is the SPIFFE ID, UpstreamTransportSocketMatches). Keying the map on the
-	// SPIFFE ID instead makes the Cluster proto byte-stable across pod churn: a
-	// pod of an already-present ServiceAccount changes no cluster at all and
-	// Envoy's hash gate blocks the update.
-	//
-	//	RELEASE ONE (#819/#821, SHIPPED — talos-main rev224, 2026-09-19): every
-	//	chain that sets the netns key ALSO sets this one. Clusters untouched and
-	//	byte-identical.
-	//
-	//	RELEASE TWO (#822, SHIPPED — talos-main rev225, chart 0.92.28): the
-	//	matcher's FilterStateInput.key is this key. Both keys are still stamped
-	//	on every originating chain.
-	//	UPGRADE CONSTRAINT: a proxy must run release-one (or later) LISTENERS
-	//	before it is handed release-two CLUSTERS. Upgrading a node straight from a
-	//	pre-#819 build is NOT supported — the agent publishes both in one
-	//	snapshot, but LDS and CDS are separate responses with no ordering
-	//	guarantee (the ADS server is go-control-plane's default, not
-	//	sotw.WithOrderedADS), so a cluster with the new input can face a listener
-	//	that only sets the old key. Such a connection matches nothing, takes
-	//	OnNoMatch, and presents the NODE identity instead of the pod's (#686
-	//	territory). Go through release one first.
-	//
-	//	RELEASE THREE (drop networkNamespaceFilterStateKey from the listeners):
-	//	EVALUATED 2026-09-19 AND CLOSED. BOTH KEYS STAY. Do not "finish" the
-	//	contract by deleting the netns key — that is a net loss:
-	//
-	//	  - It buys ~240 bytes. Unlike the cluster matcher, the netns entry on a
-	//	    LISTENER carries no per-pod state: its value is the constant format
-	//	    string below, byte-identical on every chain of every pod, so it
-	//	    causes no churn and no re-warm. Deleting it saves one
-	//	    set_filter_state entry (~240 B) per mesh-originating filter chain
-	//	    (~0.5–1 KB per pod) and one format-string evaluation per new
-	//	    downstream connection. That is the entire benefit.
-	//	  - It costs rollback, permanently. While the listeners stamp BOTH keys
-	//	    a proxy is safe against clusters from EITHER side of release two, so
-	//	    a downgrade below 0.92.28 is hitless — which this very issue needed
-	//	    once (release one was rolled back on talos-main, 2026-09-19). A
-	//	    listener stamping only the SPIFFE ID, facing a pre-release-two
-	//	    netns-keyed cluster, matches nothing and takes OnNoMatch: on this
-	//	    mesh that is the AGENT'S OWN SVID,
-	//	    spiffe://<td>/ns/aether-system/sa/aether-agent — NOT
-	//	    spiffe://<td>/node/<node> (#825). A permanent version floor of
-	//	    0.92.28 in exchange for 240 bytes is a bad trade.
-	//	  - It costs a deploy. Every per-pod chain's bytes change again, so
-	//	    Envoy replaces and drains every mesh pod's filter chains once more.
-	//	  - accesslog.go's `source_netns` attribute is the netns key's ONLY
-	//	    remaining reader and would have to move with it; see
-	//	    buildNetworkNamespaceFilterState.
-	//
-	//	If some LATER change is already re-keying every mesh-originating chain
-	//	(#824's source-side peer-identity access-log field is the obvious
-	//	candidate), fold the removal into that change — the deploy and the
-	//	access-log migration are then already paid for, and the only remaining
-	//	cost is the version floor. On its own it is not worth a release.
-	//
-	// Namespaced under "aether." like the netns key so it can never collide with
-	// an Envoy-owned filter state object name.
-	//
-	// EXPORTED so the out-of-tree runtime harness (//test/mtlspool) stamps the
-	// same key production does rather than re-spelling the literal: that test
-	// asserts an end-to-end identity property, and a drifted key would make it
-	// pass by matching nothing.
-	SourceIdentityFilterStateKey = "aether.source.spiffe_id"
+	// The netns key (networkNamespaceFilterStateKey) is NOT retired with it: it
+	// carries no per-pod state on a listener (its value is a constant format
+	// string), and accesslog.go's `source_netns` is still its reader. See
+	// buildNetworkNamespaceFilterState for what dropping it would take.
 
-	// SourceIdentityCertMapperFilterStateKey carries the SAME value as
-	// SourceIdentityFilterStateKey — the source pod's SPIFFE ID — under the
-	// name Envoy's upstream certificate mapper reads, and with a HASHABLE
+	// SourceIdentityCertMapperFilterStateKey carries the source pod's SPIFFE
+	// ID, written as a literal string by every listener chain that can
+	// originate mesh traffic, under the name Envoy's upstream certificate mapper reads, and with a HASHABLE
 	// factory so it reaches the upstream connection-pool key (issue #842).
 	//
 	// THE NAME IS NOT OURS TO CHOOSE. The
@@ -137,18 +78,18 @@ const (
 	// exactly the partition the client certificate needs. Never put a
 	// per-request or per-pod value in this key.
 	//
-	// WHY THIS IS A SECOND OBJECT AND NOT A RENAME OF THE KEY ABOVE. Both are
-	// stamped, carrying the same string, for one release — the same dual-key
-	// overlap #815 used (see the RELEASE THREE note above, which asks for
-	// exactly this whenever a change is already re-keying every
-	// mesh-originating chain). SourceIdentityFilterStateKey is what a
-	// PRE-#842 cluster's transport_socket_matcher reads, so while both are
-	// stamped a rollback to release-two clusters stays hitless; it is also
-	// accesslog.go's `source_spiffe_id`, so no access-log migration rides on
-	// this change. One release after #842 has shipped, the netns copy and
-	// SourceIdentityFilterStateKey can both be retired together, with the
-	// access log repointed at this key (the attribute NAME stays
-	// `source_spiffe_id`; only the key it reads moves).
+	// IT IS THE ONLY SOURCE-IDENTITY KEY (since #1165). Readers:
+	//   - the cluster's filter_state_override certificate mapper (above);
+	//   - CommonUpstreamTransportSocketFactory::hashKey (the pool partition);
+	//   - accesslog.go's `source_spiffe_id` (HTTP and L4 logs) — HashableString
+	//     is a StringAccessor, so %FILTER_STATE(<key>:PLAIN)% renders it; the
+	//     attribute NAME did not change when its key moved here;
+	//   - the QUIC selection matcher (route.go, ApplyQUICClusterSelection),
+	//     through envoy.matching.inputs.filter_state, which reads
+	//     serializeAsString() — again the StringAccessor surface.
+	//
+	// EXPORTED so the out-of-tree runtime harness (//test/mtlspool) stamps the
+	// same key production does rather than re-spelling the literal.
 	SourceIdentityCertMapperFilterStateKey = "envoy.tls.certificate_mappers.on_demand_secret"
 
 	// genericStringFactory builds Router::StringAccessorImpl — readable by
@@ -175,14 +116,16 @@ const (
 // "-"). Not populated for QUIC/HTTP3 or internal listeners.
 //
 // SINCE RELEASE TWO THIS COPY HAS EXACTLY ONE READER: accesslog.go's
-// `source_netns` attribute. The cluster transport_socket_matcher moved to
-// SourceIdentityFilterStateKey in #822, and the SharedWithUpstream: ONCE below
+// `source_netns` attribute. The cluster transport_socket_matcher moved off it
+// in #822 (and was itself removed in #842), and the SharedWithUpstream: ONCE below
 // is now vestigial for this key (nothing upstream reads it). It is left as-is
 // deliberately — changing it would rewrite every per-pod filter chain's bytes
 // for no behavioural gain.
 //
-// If this copy is ever dropped (see the RELEASE THREE note on
-// SourceIdentityFilterStateKey), the access log does NOT need it: an HCM
+// Dropping this copy (#815's "release three") was evaluated on 2026-09-19 and
+// declined: it buys ~240 B per chain, costs a deploy that drains every mesh
+// pod's filter chains, and needs the access-log field migrated. If it is ever
+// dropped, the access log does NOT need it: an HCM
 // access-log substitution can read the native object directly, because the
 // per-stream filter state parents onto the connection-lifespan store. But
 // beware the semantics change — the native object is the netns the LISTENER is
@@ -194,36 +137,21 @@ func buildNetworkNamespaceFilterState() *listenerv3.Filter {
 	return buildSetFilterState(networkNamespaceFilterStateKey, genericStringFactory, "%FILTER_STATE(envoy.network.network_namespace:PLAIN)%")
 }
 
-// buildSourceIdentityFilterState stores the source pod's SPIFFE ID in filter
-// state as a LITERAL inline string (not a %FILTER_STATE(...)% substitution —
-// Envoy has no notion of the pod's mesh identity, the control plane does).
-// The value is the identity proxy.SpiffeIDFromPod derives for the pod, i.e.
-// exactly the name of the SDS secret whose certificate the upstream connection
-// must present.
-//
-// A literal contains no '%', so SubstitutionFormatString passes it through
-// unchanged; the format parser only treats %…% pairs as commands.
-//
-// Shared with the upstream connection with the SAME semantics as the netns key
-// (SharedWithUpstream ONCE) because it is destined for the same consumer: the
-// cluster's transport-socket matcher reads it through
-// TransportSocketOptions::downstreamSharedFilterStateObjects(), which is
-// populated only from filter state objects marked shared. ONCE scopes the
-// propagation to the immediate upstream hop, so a future chained/internal hop
-// cannot silently inherit source-identity cert selection.
-func buildSourceIdentityFilterState(sourceSpiffeID string) *listenerv3.Filter {
-	return buildSetFilterState(SourceIdentityFilterStateKey, genericStringFactory, sourceSpiffeID)
-}
-
 // buildCertMapperIdentityFilterState stamps the same SPIFFE ID under the name
 // Envoy's filter_state_override upstream certificate mapper reads, using the
 // HASHABLE string factory so the value also partitions the upstream connection
 // pool. See SourceIdentityCertMapperFilterStateKey for why the key is an
-// Envoy-owned literal, why the factory is load-bearing, and why this is stamped
-// alongside (not instead of) SourceIdentityFilterStateKey.
+// Envoy-owned literal and why the factory is load-bearing.
 //
-// SharedWithUpstream: ONCE is not optional for this one — unlike the other two
-// keys it is REQUIRED for the feature to work at all. Both readers
+// The value is a LITERAL inline string (not a %FILTER_STATE(...)%
+// substitution — Envoy has no notion of the pod's mesh identity, the control
+// plane does): the identity proxy.SpiffeIDFromPod derives for the pod, i.e.
+// exactly the name of the SDS secret whose certificate the upstream connection
+// must present. A literal contains no '%', so SubstitutionFormatString passes
+// it through unchanged.
+//
+// SharedWithUpstream: ONCE is not optional for this one — unlike the netns
+// key it is REQUIRED for the feature to work at all. Both readers
 // (hashKey and the mapper) look only at
 // TransportSocketOptions::downstreamSharedFilterStateObjects(), which is
 // populated exclusively from shared filter-state objects. An unshared object is
@@ -236,13 +164,12 @@ func buildCertMapperIdentityFilterState(sourceSpiffeID string) *listenerv3.Filte
 
 // BuildSourceFilterStates returns the source-attribution network filters every
 // mesh-originating filter chain carries, in a FIXED order (netns, then the
-// aether identity key, then the certificate-mapper identity key): these land in
-// the chain's repeated `filters` field, whose order is part of the listener's
-// bytes and therefore of its delta-xDS hash.
+// certificate-mapper identity key): these land in the chain's repeated
+// `filters` field, whose order is part of the listener's bytes and therefore of
+// its delta-xDS hash.
 //
-// The third entry is APPENDED rather than substituted for the second so the
-// order of the first two is unchanged from #822 — only new bytes are added to
-// the end of the list.
+// Until #1165 a third entry — the retired "aether.source.spiffe_id" copy —
+// sat between the two; see SourceIdentityCertMapperFilterStateKey.
 //
 // sourceSpiffeID may be empty — before the trust domain is known there is no
 // identity to stamp — in which case only the netns filter is emitted, which is
@@ -253,10 +180,7 @@ func buildCertMapperIdentityFilterState(sourceSpiffeID string) *listenerv3.Filte
 func BuildSourceFilterStates(sourceSpiffeID string) []*listenerv3.Filter {
 	filters := []*listenerv3.Filter{buildNetworkNamespaceFilterState()}
 	if sourceSpiffeID != "" {
-		filters = append(filters,
-			buildSourceIdentityFilterState(sourceSpiffeID),
-			buildCertMapperIdentityFilterState(sourceSpiffeID),
-		)
+		filters = append(filters, buildCertMapperIdentityFilterState(sourceSpiffeID))
 	}
 	return filters
 }
@@ -282,15 +206,14 @@ func buildSetFilterState(objectKey, factoryKey string, inlineStringFormatString 
 						},
 					},
 				},
-				// Shared with the upstream connection so the service cluster's
-				// transport-socket matcher can read the source pod's network namespace
-				// and select that pod's client certificate for the outbound mTLS.
-				// ONCE (immediate upstream connection only) is sufficient for the
+				// Shared with the upstream connection so the cluster's certificate
+				// mapper and the pool hash can read it (they see only
+				// downstreamSharedFilterStateObjects()). ONCE (immediate upstream connection only) is sufficient for the
 				// single-hop transport: TRANSITIVE — which re-propagates through any
 				// further upstream hops — was HBONE/tunnel-era (#86) plumbing for the
 				// two-layer upstream path and was left behind when #98 flattened the
 				// transport; scoping it to one hop keeps a future chained/internal
-				// hop from silently inheriting source-netns cert selection.
+				// hop from silently inheriting source-identity cert selection.
 				SharedWithUpstream: setFilterStatev3.FilterStateValue_ONCE,
 			},
 		},

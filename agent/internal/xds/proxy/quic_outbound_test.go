@@ -9,6 +9,8 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	network_inputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
+	matcher_cluster_specifierv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/router/cluster_specifiers/matcher/v3"
 	quicv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/stretchr/testify/assert"
@@ -154,6 +156,9 @@ func TestApplyQUICClusterSelection(t *testing.T) {
 		assert.Equal(t, arms, got)
 		assert.Equal(t, h2, noMatch, "an identity with no arm -- or no stamp -- keeps the h2 cluster")
 		assert.Nil(t, r.GetRoute().GetEarlyDataPolicy(), "no 0-RTT on a route that can reach QUIC (R4)")
+		assert.Equal(t, SourceIdentityCertMapperFilterStateKey, quicSelectionInputKey(t, r),
+			"the matcher must read the key every originating chain stamps (#1165 retired aether.source.spiffe_id); "+
+				"a key nothing stamps sends every request to on_no_match, silently")
 	}
 	require.True(t, found, "no route carries the selection plugin")
 
@@ -233,4 +238,15 @@ func TestLoadAssignmentAlias(t *testing.T) {
 	assert.ElementsMatch(t, []string{"cluster_name", "endpoints", "named_endpoints", "policy"}, fields,
 		"ClusterLoadAssignment grew a field: LoadAssignmentAlias must carry it")
 	assert.Nil(t, LoadAssignmentAlias(nil, twin))
+}
+
+// quicSelectionInputKey returns the filter-state key the QUIC selection
+// matcher's input reads on a route rewritten by ApplyQUICClusterSelection.
+func quicSelectionInputKey(t *testing.T, r *routev3.Route) string {
+	t.Helper()
+	spec := &matcher_cluster_specifierv3.MatcherClusterSpecifier{}
+	require.NoError(t, r.GetRoute().GetInlineClusterSpecifierPlugin().GetExtension().GetTypedConfig().UnmarshalTo(spec))
+	in := &network_inputsv3.FilterStateInput{}
+	require.NoError(t, spec.GetClusterMatcher().GetMatcherTree().GetInput().GetTypedConfig().UnmarshalTo(in))
+	return in.GetKey()
 }
