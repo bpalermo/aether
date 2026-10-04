@@ -252,7 +252,10 @@ func (q *WriteBehindQueue) flushOp(ctx context.Context, key wbKey, op wbOp) {
 // op received before listedAt is released and the listing is taken as it is, so
 // every replica serves the same Pod-derived endpoint (aether#1145). An op
 // received after listedAt is overlaid as above.
-func (q *WriteBehindQueue) Overlay(state map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint, listedAt time.Time) {
+//
+// It returns how many intents it overlaid: nonzero means the state is no longer
+// exactly the store's listing, which the snapshot version must say (#1193).
+func (q *WriteBehindQueue) Overlay(state map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint, listedAt time.Time) int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -275,6 +278,7 @@ func (q *WriteBehindQueue) Overlay(state map[string]map[registryv1.Service_Proto
 		q.log.Debug("overlaid pending write-behind intents onto sync state", "count", shielded)
 	}
 	q.metrics.wbDepth(context.Background(), len(q.ops))
+	return shielded
 }
 
 // overlayOp applies Overlay's observed-back rule to one op: released when the

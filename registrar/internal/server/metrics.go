@@ -3,9 +3,9 @@ package server
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
+	"aethermesh.dev/registry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -51,9 +51,11 @@ func eventTypeOption(t registrarv1.WatchEndpointsResponse_EventType) metric.Meas
 //
 // These instruments exist to make missed updates and stale state observable:
 // a nonzero dropped-events counter means at least one agent was force-resynced
-// (or, before PR4, silently diverged), and the snapshot-version gauge is the
-// registrar half of the registrar-vs-agent version-skew query.
+// (or, before PR4, silently diverged), and the store/snapshot revision gauges
+// (ObserveSnapshot) against the agents' aether.agent.registry.last_version are
+// the stored -> in-place -> applied lag queries (docs/runbook.md, #1193).
 type Metrics struct {
+	meter           metric.Meter
 	watchers        metric.Int64UpDownCounter
 	broadcastEvents metric.Int64Counter
 	droppedEvents   metric.Int64Counter
@@ -79,7 +81,7 @@ var syncDurationBuckets = []float64{
 
 // NewMetrics registers the registrar server instruments on the given meter.
 func NewMetrics(meter metric.Meter) (*Metrics, error) {
-	m := &Metrics{}
+	m := &Metrics{meter: meter}
 	var err error
 
 	if m.watchers, err = meter.Int64UpDownCounter("aether.registrar.watchers",
@@ -112,8 +114,13 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Watch streams carrying a service filter (demand-scoped agents)")); err != nil {
 		return nil, fmt.Errorf("filtered subscribers: %w", err)
 	}
+	// The series name predates #1193, when it was a per-process counter bumped
+	// on every sync; it is kept so existing queries keep resolving. It is now
+	// the snapshot GENERATION: per process, and it moves only when the
+	// snapshot's contents change. It is not comparable across replicas or with
+	// agents -- aether.registrar.snapshot_revision is.
 	if m.snapshotVersion, err = meter.Int64Gauge("aether.registrar.snapshot.version",
-		metric.WithDescription("Current endpoint snapshot version (compare with aether.agent.registry.last_version for skew)")); err != nil {
+		metric.WithDescription("Snapshot generation: per-process count of content changes (changes only when the served endpoint set changes; not comparable across replicas -- use aether.registrar.snapshot_revision)")); err != nil {
 		return nil, fmt.Errorf("snapshot version: %w", err)
 	}
 	if m.wbQueueDepth, err = meter.Int64Gauge("aether.registrar.writebehind.queue_depth",
@@ -176,26 +183,84 @@ func (m *Metrics) eventDropped(ctx context.Context, eventType string) {
 	m.droppedEvents.Add(ctx, 1, metric.WithAttributes(attrEventType.String(eventType)))
 }
 
-func (m *Metrics) syncCompleted(ctx context.Context, seconds float64, version int64, eventsByType map[string]int) {
+func (m *Metrics) syncCompleted(ctx context.Context, seconds float64, state State, eventsByType map[string]int) {
 	if m == nil {
 		return
 	}
 	m.syncDuration.Record(ctx, seconds)
-	m.snapshotVersion.Record(ctx, version)
+	m.snapshotVersion.Record(ctx, int64(state.Generation))
 	for eventType, n := range eventsByType {
 		m.syncEvents.Add(ctx, int64(n), metric.WithAttributes(attrEventType.String(eventType)))
 	}
 }
 
-// versionAdvanced records the snapshot version after an RPC write path
-// (RegisterEndpoint/UnregisterEndpoint) bumped it outside the sync loop.
-func (m *Metrics) versionAdvanced(ctx context.Context, version string) {
+// snapshotState records the snapshot generation after an RPC write path
+// (RegisterEndpoint/UnregisterEndpoint) changed it outside the sync loop.
+func (m *Metrics) snapshotState(ctx context.Context, state State) {
 	if m == nil {
 		return
 	}
-	if v, err := strconv.ParseInt(version, 10, 64); err == nil {
-		m.snapshotVersion.Record(ctx, v)
+	m.snapshotVersion.Record(ctx, int64(state.Generation))
+}
+
+// attrContentHash labels the snapshot-content info gauge with the hash of the
+// endpoint set this replica serves.
+const attrContentHashLabel = attribute.Key("content_hash")
+
+// ObserveSnapshot registers the asynchronous snapshot-identity instruments
+// (#1193), read from snap (and store, when the backend has revisions) at each
+// collection:
+//
+//   - aether.registrar.store_revision: the newest store revision this replica
+//     has seen (its etcd watch or listing headers). etcd only.
+//   - aether.registrar.snapshot_revision: the store revision of the listing
+//     this replica's snapshot was last installed from. etcd only.
+//   - aether.registrar.snapshot.content: an info gauge, always 1, labelled
+//     content_hash. It is observed (not recorded) so exactly ONE series per
+//     replica is exported at a time: an asynchronous instrument reports only
+//     the attribute sets of its latest callback, so a superseded hash stops
+//     being exported instead of accumulating. Two replicas reporting the same
+//     snapshot_revision with different content_hash (and no write-behind
+//     intent pending) diverged: that is a bug.
+//
+// A nil receiver or nil snap registers nothing; store may be nil (backend
+// without revisions), in which case the revision gauges are not reported.
+func (m *Metrics) ObserveSnapshot(snap *Snapshot, store registry.RevisionedLister) error {
+	if m == nil || snap == nil {
+		return nil
 	}
+	storeRev, err := m.meter.Int64ObservableGauge("aether.registrar.store_revision",
+		metric.WithDescription("Newest store revision this registrar replica has seen (etcd header revision; etcd backend only). store_revision - snapshot_revision is this replica's lag"))
+	if err != nil {
+		return fmt.Errorf("store revision: %w", err)
+	}
+	snapRev, err := m.meter.Int64ObservableGauge("aether.registrar.snapshot_revision",
+		metric.WithDescription("Store revision of the listing this replica serves (etcd backend only); compare with store_revision (replica lag) and aether.agent.registry.last_version (fleet propagation lag)"))
+	if err != nil {
+		return fmt.Errorf("snapshot revision: %w", err)
+	}
+	content, err := m.meter.Int64ObservableGauge("aether.registrar.snapshot.content",
+		metric.WithDescription("Always 1; the content_hash label names the endpoint set this replica serves (one series per replica). Same snapshot_revision with different content_hash across replicas means divergence"))
+	if err != nil {
+		return fmt.Errorf("snapshot content: %w", err)
+	}
+	_, err = m.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		state := snap.State()
+		o.ObserveInt64(content, 1, metric.WithAttributes(attrContentHashLabel.String(state.ContentHash)))
+		if state.Revision > 0 {
+			o.ObserveInt64(snapRev, state.Revision)
+		}
+		if store != nil {
+			if rev := store.StoreRevision(); rev > 0 {
+				o.ObserveInt64(storeRev, rev)
+			}
+		}
+		return nil
+	}, storeRev, snapRev, content)
+	if err != nil {
+		return fmt.Errorf("register snapshot callback: %w", err)
+	}
+	return nil
 }
 
 func (m *Metrics) syncFailed(ctx context.Context, seconds float64) {

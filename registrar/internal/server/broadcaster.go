@@ -7,6 +7,7 @@ import (
 
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	commonlog "aethermesh.dev/common/log"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -155,6 +156,15 @@ func (b *Broadcaster) filteredCountLocked() int {
 // the agent reconnects to receive a fresh filtered snapshot. The alternative —
 // silently dropping the event — leaves the agent serving stale endpoints with
 // nothing to correct it until its next reconnect for unrelated reasons.
+//
+// Version stamping (#1203): the caller stamps the batch's version on its
+// events, but each watcher receives it on the LAST event of the batch that
+// watcher is sent, and on no other. The agent adopts every non-empty version as
+// its resume token, and a stream cut between two events of a batch would
+// otherwise leave it presenting the post-batch version while missing the rest
+// of the batch -- which a reconnect then treats as current. Filtered watchers
+// receive different subsets, so "last" is per watcher. The unversioned copies
+// are built once per event, not per watcher.
 func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 	// Collect overflowed watchers under the read lock; closing them requires
 	// the write lock, taken afterwards to avoid lock-upgrade deadlocks.
@@ -179,22 +189,26 @@ func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 	}
 
 	b.mu.RLock()
-	for _, event := range events {
-		// Service-catalog events bypass the watch filter: every agent keeps
-		// the full service-name index (rare, deploy-time transitions).
-		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED ||
-			event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED {
-			for id, w := range b.watchers {
+	// Pass 1: the index of the last event each watcher receives.
+	last := make(map[*watcher]int)
+	for i, event := range events {
+		b.forEachRecipientLocked(event, func(_ string, w *watcher) { last[w] = i })
+	}
+	// Pass 2: fan out, versioned only at each watcher's last event.
+	unversioned := make([]*registrarv1.WatchEndpointsResponse, len(events))
+	for i, event := range events {
+		b.forEachRecipientLocked(event, func(id string, w *watcher) {
+			if last[w] == i || event.GetVersion() == "" {
 				send(id, w, event)
+				return
 			}
-			continue
-		}
-		for id, w := range b.byService[event.GetServiceName()] {
-			send(id, w, event)
-		}
-		for id, w := range b.fullWatchers {
-			send(id, w, event)
-		}
+			if unversioned[i] == nil {
+				c := proto.CloneOf(event)
+				c.Version = ""
+				unversioned[i] = c
+			}
+			send(id, w, unversioned[i])
+		})
 	}
 	b.mu.RUnlock()
 
@@ -204,6 +218,27 @@ func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 
 	if len(dropped) > 0 {
 		b.closeDroppedWatchers(dropped)
+	}
+}
+
+// forEachRecipientLocked calls fn for every watcher that receives event: all
+// watchers for a service-catalog event (catalog events bypass the watch filter:
+// every agent keeps the full service-name index -- rare, deploy-time
+// transitions), else the service's consumers plus the full watchers. Caller
+// must hold mu (read or write).
+func (b *Broadcaster) forEachRecipientLocked(event *registrarv1.WatchEndpointsResponse, fn func(id string, w *watcher)) {
+	if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED ||
+		event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED {
+		for id, w := range b.watchers {
+			fn(id, w)
+		}
+		return
+	}
+	for id, w := range b.byService[event.GetServiceName()] {
+		fn(id, w)
+	}
+	for id, w := range b.fullWatchers {
+		fn(id, w)
 	}
 }
 

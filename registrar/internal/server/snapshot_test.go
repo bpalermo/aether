@@ -2,6 +2,7 @@ package server
 
 import (
 	"sort"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -21,10 +22,18 @@ func makeEndpoint(ip string) *registryv1.ServiceEndpoint {
 	}
 }
 
+// generationOf renders the snapshot's content-change generation. Since #1193
+// the version names the contents rather than counting writes; these tests pin
+// the generation, which counts content changes.
+func generationOf(s *Snapshot) string {
+	return strconv.FormatUint(s.State().Generation, 10)
+}
+
 func TestNewSnapshot(t *testing.T) {
 	s := NewSnapshot()
 	require.NotNil(t, s)
-	assert.Equal(t, "0", s.Version())
+	assert.Equal(t, "0", generationOf(s))
+	assert.Equal(t, "hash:"+s.State().ContentHash, s.Version(), "an empty snapshot is content-addressed")
 	assert.Empty(t, s.GetAll(registryv1.Service_PROTOCOL_HTTP))
 }
 
@@ -35,19 +44,19 @@ func TestVersion(t *testing.T) {
 		expectedVersion string
 	}{
 		{
-			name:            "fresh snapshot has version 0",
+			name:            "fresh snapshot has generation 0",
 			applyOperations: func(s *Snapshot) {},
 			expectedVersion: "0",
 		},
 		{
-			name: "version increments after Replace",
+			name: "generation does not move after a Replace that changes nothing",
 			applyOperations: func(s *Snapshot) {
 				_, _ = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
 			},
-			expectedVersion: "1",
+			expectedVersion: "0",
 		},
 		{
-			name: "version increments after Apply with events",
+			name: "generation increments after Apply with events",
 			applyOperations: func(s *Snapshot) {
 				s.Apply([]*registrarv1.WatchEndpointsResponse{
 					{
@@ -61,20 +70,20 @@ func TestVersion(t *testing.T) {
 			expectedVersion: "1",
 		},
 		{
-			name: "version does not increment after Apply with empty events",
+			name: "generation does not increment after Apply with empty events",
 			applyOperations: func(s *Snapshot) {
 				_, _ = s.Apply([]*registrarv1.WatchEndpointsResponse{})
 			},
 			expectedVersion: "0",
 		},
 		{
-			name: "version increments multiple times",
+			name: "generation stays put across repeated no-op Replaces",
 			applyOperations: func(s *Snapshot) {
 				_, _ = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
 				_, _ = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
 				_, _ = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
 			},
-			expectedVersion: "3",
+			expectedVersion: "0",
 		},
 	}
 
@@ -82,7 +91,7 @@ func TestVersion(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSnapshot()
 			tt.applyOperations(s)
-			assert.Equal(t, tt.expectedVersion, s.Version())
+			assert.Equal(t, tt.expectedVersion, generationOf(s))
 		})
 	}
 }
@@ -175,10 +184,10 @@ func TestGetAllWithVersion(t *testing.T) {
 		expectedKeys    []string
 	}{
 		{
-			name:            "empty snapshot returns empty map and version 1",
+			name:            "empty snapshot returns empty map at generation 0",
 			seed:            map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
 			protocol:        registryv1.Service_PROTOCOL_HTTP,
-			expectedVersion: "1",
+			expectedVersion: "0",
 			expectedKeys:    nil,
 		},
 		{
@@ -201,7 +210,8 @@ func TestGetAllWithVersion(t *testing.T) {
 
 			got, version := s.GetAllWithVersion(tt.protocol)
 
-			assert.Equal(t, tt.expectedVersion, version)
+			assert.Equal(t, s.Version(), version)
+			assert.Equal(t, tt.expectedVersion, generationOf(s))
 			for _, key := range tt.expectedKeys {
 				assert.Contains(t, got, key)
 			}
@@ -362,11 +372,11 @@ func TestReplace(t *testing.T) {
 		expectedEmpty   bool
 	}{
 		{
-			name:            "replace on empty snapshot bumps version",
+			name:            "an empty replace on an empty snapshot changes nothing",
 			initial:         map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
 			replacement:     map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
 			protocol:        registryv1.Service_PROTOCOL_HTTP,
-			expectedVersion: "2",
+			expectedVersion: "0",
 			expectedEmpty:   true,
 		},
 		{
@@ -378,7 +388,7 @@ func TestReplace(t *testing.T) {
 				},
 			},
 			protocol:        registryv1.Service_PROTOCOL_HTTP,
-			expectedVersion: "2",
+			expectedVersion: "1",
 			expectedKeys:    []string{"svc-a"},
 		},
 		{
@@ -406,8 +416,8 @@ func TestReplace(t *testing.T) {
 
 			newVersion, _ := s.Replace(tt.replacement)
 
-			assert.Equal(t, tt.expectedVersion, newVersion)
-			assert.Equal(t, tt.expectedVersion, s.Version())
+			assert.Equal(t, s.Version(), newVersion)
+			assert.Equal(t, tt.expectedVersion, generationOf(s))
 
 			got := s.GetAll(tt.protocol)
 			if tt.expectedEmpty {
@@ -451,7 +461,7 @@ func TestApply(t *testing.T) {
 			name:    "empty events returns current version without bump",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
 			events:  []*registrarv1.WatchEndpointsResponse{},
-			// No Replace was called; version stays at 0.
+			// No Replace was called; generation stays at 0.
 			expectedVersion: "0",
 			checkSnapshot:   func(t *testing.T, s *Snapshot) {},
 		},
@@ -473,7 +483,7 @@ func TestApply(t *testing.T) {
 					Endpoint:    ep1,
 				},
 			},
-			// No prior Replace; version starts at 0, Apply bumps to 1.
+			// No prior Replace; generation starts at 0, Apply bumps to 1.
 			expectedVersion: "1",
 			checkSnapshot: func(t *testing.T, s *Snapshot) {
 				got := s.GetAll(registryv1.Service_PROTOCOL_HTTP)
@@ -565,7 +575,8 @@ func TestApply(t *testing.T) {
 					Endpoint:    ep2, // ep2 was never added
 				},
 			},
-			expectedVersion: "2",
+			// The contents did not change, so neither does the generation.
+			expectedVersion: "1",
 			checkSnapshot: func(t *testing.T, s *Snapshot) {
 				got := s.GetAll(registryv1.Service_PROTOCOL_HTTP)
 				require.Contains(t, got, "svc-a")
@@ -583,8 +594,8 @@ func TestApply(t *testing.T) {
 
 			gotVersion, _ := s.Apply(tt.events)
 
-			assert.Equal(t, tt.expectedVersion, gotVersion)
-			assert.Equal(t, tt.expectedVersion, s.Version())
+			assert.Equal(t, s.Version(), gotVersion)
+			assert.Equal(t, tt.expectedVersion, generationOf(s))
 			tt.checkSnapshot(t, s)
 		})
 	}
@@ -605,7 +616,7 @@ func TestFullSnapshotEvents(t *testing.T) {
 			name:          "empty snapshot returns empty slice",
 			seed:          map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
 			wantCount:     0,
-			wantVersion:   "1",
+			wantVersion:   "0",
 			wantEventType: registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
 		},
 		{
@@ -639,12 +650,14 @@ func TestFullSnapshotEvents(t *testing.T) {
 
 			events, version := s.FullSnapshotEvents(nil)
 
-			assert.Equal(t, tt.wantVersion, version)
+			assert.Equal(t, s.Version(), version)
+			assert.Equal(t, tt.wantVersion, generationOf(s))
 			assert.Len(t, events, tt.wantCount)
 
 			for _, ev := range events {
 				assert.Equal(t, tt.wantEventType, ev.GetType())
-				assert.Equal(t, tt.wantVersion, ev.GetVersion())
+				// The version rides only on SNAPSHOT_COMPLETE (#1203).
+				assert.Empty(t, ev.GetVersion())
 				assert.NotEmpty(t, ev.GetServiceName())
 				assert.NotNil(t, ev.GetEndpoint())
 			}

@@ -229,8 +229,8 @@ func TestSyncer_Start_EmptyRegistryPopulatesEmptySnapshot(t *testing.T) {
 
 	result := snap.GetAll(registryv1.Service_PROTOCOL_HTTP)
 	assert.Empty(t, result)
-	// Version is still bumped even for an empty sync.
-	assert.NotEqual(t, "0", snap.Version())
+	// An empty sync still yields a (content-addressed) version.
+	assert.NotEmpty(t, snap.Version())
 }
 
 // TestSyncer_Start_RegistryErrorDoesNotCrash verifies that a registry error
@@ -438,15 +438,17 @@ func TestSyncer_Start_NoEventsAfterInitialSync(t *testing.T) {
 	}
 
 	// The initial sync announces the service and its endpoint once per synced
-	// protocol, all stamped with that cycle's version.
+	// protocol. Only the batch's last event carries the cycle's version (#1203).
 	require.Len(t, events, 1+len(syncedProtocols), "initial sync events: %v", events)
-	initialVersion := events[0].GetVersion()
+	initialVersion := events[len(events)-1].GetVersion()
+	require.NotEmpty(t, initialVersion, "the batch's last event must carry its version")
 
 	// Because the state never changed after the first sync, no event from any
-	// later cycle (a later version) should have been broadcast.
-	for _, e := range events {
-		assert.Equal(t, initialVersion, e.GetVersion(),
-			"expected no events when state is unchanged between syncs, got %v", e)
+	// later cycle should have been broadcast: the count above holds, and every
+	// earlier event of the one batch is unversioned.
+	for _, e := range events[:len(events)-1] {
+		assert.Empty(t, e.GetVersion(),
+			"only the batch's last event may carry a version, got %v", e)
 	}
 }
 

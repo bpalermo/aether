@@ -257,6 +257,12 @@ func wireServerCore(m ctrl.Manager, reg registry.Registry) (*server.Metrics, *se
 	}
 
 	snapshot := server.NewSnapshot()
+	// Snapshot identity gauges (#1193): content hash always; store and snapshot
+	// revisions only when the backend lists at a store revision (etcd).
+	revisioned, _ := reg.(registry.RevisionedLister)
+	if err = serverMetrics.ObserveSnapshot(snapshot, revisioned); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to register snapshot metrics: %w", err)
+	}
 	broadcaster := server.NewBroadcaster(l, serverMetrics)
 
 	syncer := server.NewSyncer(reg, snapshot, broadcaster, cfg.SyncInterval, l, serverMetrics)

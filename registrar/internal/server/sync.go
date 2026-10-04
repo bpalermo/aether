@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"log/slog"
-	"strconv"
 	"time"
 
 	"aethermesh.dev/common/telemetry"
@@ -17,6 +16,12 @@ import (
 
 // tracerName identifies this instrumentation scope in trace backends.
 const tracerName = "aether/registrar"
+
+// Span attributes naming the snapshot a sync installed (#1193).
+const (
+	attrSnapshotGeneration = attribute.Key("aether.snapshot.generation")
+	attrContentHash        = attribute.Key("aether.snapshot.content_hash")
+)
 
 // syncedProtocols are the registry protocols the syncer reflects into the
 // snapshot each cycle. HTTP services ride the HCM path, TCP services the
@@ -147,21 +152,11 @@ func (s *Syncer) sync(ctx context.Context) {
 	// Build the new state in the format the snapshot expects, listing every
 	// protocol so non-HTTP (TCP) services flow through the snapshot, watch
 	// stream, and name resolution alongside HTTP.
-	newState := make(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
-	for _, protocol := range syncedProtocols {
-		endpoints, err := s.registry.ListAllEndpoints(ctx, protocol)
-		if err != nil {
-			s.log.ErrorContext(ctx, "failed to list endpoints from registry", "protocol", protocol.String(), "error", err)
-			s.metrics.syncFailed(ctx, time.Since(start).Seconds())
-			retErr = err
-			return
-		}
-		for svcName, eps := range endpoints {
-			if newState[svcName] == nil {
-				newState[svcName] = make(map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
-			}
-			newState[svcName][protocol] = eps
-		}
+	newState, revision, err := s.list(ctx)
+	if err != nil {
+		s.metrics.syncFailed(ctx, time.Since(start).Seconds())
+		retErr = err
+		return
 	}
 
 	// Reconcile pending write-behind intents: release the observed ones,
@@ -169,26 +164,31 @@ func (s *Syncer) sync(ctx context.Context) {
 	// snapshot regress them toward the external registry's stale view. start
 	// precedes the first listing, so every intent received before it is in
 	// what the listings returned (the derived-backend release rule, #1145).
+	overlaid := 0
 	if s.writeBehind != nil {
-		s.writeBehind.Overlay(newState, start)
+		overlaid = s.writeBehind.Overlay(newState, start)
 	}
 
 	// Compute diff and apply, in one critical section: a RegisterEndpoint
 	// landing between the two halves would be broadcast as ADDED and then
 	// erased by the replacement with no compensating REMOVED (#772, S13).
-	events, version, transitions := s.snapshot.DiffAndReplace(newState)
+	// The version is the listing's store revision, suffixed with the content
+	// hash when the overlay patched it (#1193); content-addressed without one.
+	events, version, transitions := s.snapshot.DiffAndReplaceAt(newState, Origin{Revision: revision, Overlaid: overlaid > 0})
 	events = append(events, transitions...)
+	state := s.snapshot.State()
 	span.SetAttributes(
 		attribute.Int("aether.sync.events", len(events)),
 		telemetry.AttrSnapshotVersion.String(version),
+		attrSnapshotGeneration.Int64(int64(state.Generation)),
+		attrContentHash.String(state.ContentHash),
 	)
 
 	eventsByType := make(map[string]int)
 	for _, event := range events {
 		eventsByType[event.GetType().String()]++
 	}
-	versionNum, _ := strconv.ParseInt(version, 10, 64)
-	s.metrics.syncCompleted(ctx, time.Since(start).Seconds(), versionNum, eventsByType)
+	s.metrics.syncCompleted(ctx, time.Since(start).Seconds(), state, eventsByType)
 
 	if s.firstSync {
 		s.log.InfoContext(ctx, "initial sync complete", "version", version, "endpoints", countEndpoints(newState))
@@ -205,6 +205,37 @@ func (s *Syncer) sync(ctx context.Context) {
 		}
 		s.broadcaster.Broadcast(events)
 	}
+}
+
+// list fetches the external registry's endpoints for every synced protocol.
+// A registry.RevisionedLister answers from ONE read and names the store
+// revision it was served at; any other backend is listed per protocol and
+// reports revision 0, which makes the snapshot version content-addressed.
+func (s *Syncer) list(ctx context.Context) (map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint, int64, error) {
+	if rl, ok := s.registry.(registry.RevisionedLister); ok {
+		state, revision, err := rl.ListAllEndpointsRevisioned(ctx, syncedProtocols)
+		if err != nil {
+			s.log.ErrorContext(ctx, "failed to list endpoints from registry", "error", err)
+			return nil, 0, err
+		}
+		return state, revision, nil
+	}
+
+	newState := make(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
+	for _, protocol := range syncedProtocols {
+		endpoints, err := s.registry.ListAllEndpoints(ctx, protocol)
+		if err != nil {
+			s.log.ErrorContext(ctx, "failed to list endpoints from registry", "protocol", protocol.String(), "error", err)
+			return nil, 0, err
+		}
+		for svcName, eps := range endpoints {
+			if newState[svcName] == nil {
+				newState[svcName] = make(map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
+			}
+			newState[svcName][protocol] = eps
+		}
+	}
+	return newState, 0, nil
 }
 
 // NeedLeaderElection returns false so the syncer runs on all replicas,

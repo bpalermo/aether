@@ -38,6 +38,8 @@ go_test(
         "metrics_test.go",
         "replica_drain_test.go",
         "replica_overlay_test.go",
+        "resume_test.go",
+        "revision_test.go",
         "server_test.go",
         "snapshot_test.go",
         "snapshot_toctou_test.go",
