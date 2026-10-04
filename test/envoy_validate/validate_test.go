@@ -251,6 +251,19 @@ func TestEnvoyValidate(t *testing.T) {
 		if len(unlogged) > 0 {
 			t.Errorf("%s: capture L4 chains without the %s access log: %v", b.name, proxy.L4AccessLogName, unlogged)
 		}
+		// aether#1165: the pre-#842 identity key is retired. No listener may
+		// stamp it, log it, or match on it -- every reader moved to
+		// proxy.SourceIdentityCertMapperFilterStateKey.
+		retired, nListeners, err := ListenersNamingRetiredSourceKey(data)
+		if err != nil {
+			t.Fatalf("retired-key check %s: %v", b.name, err)
+		}
+		if nListeners == 0 {
+			t.Errorf("%s: no listeners decoded; the retired-key check is vacuous", b.name)
+		}
+		if len(retired) > 0 {
+			t.Errorf("%s: listeners still naming the retired %q filter-state key: %v", b.name, RetiredSourceIdentityKey, retired)
+		}
 	}
 
 	// Validate each bootstrap with Envoy.
@@ -991,6 +1004,48 @@ func TestNodeBootstrapCarriesTheQUICInbound(t *testing.T) {
 	}
 	if mtlsChains == 0 {
 		t.Fatal("the QUIC inbound has no filter chains")
+	}
+}
+
+// TestListenersNamingRetiredSourceKeySeesThroughAny is the anti-vacuity half
+// of the aether#1165 check in TestEnvoyValidate: the key it hunts for only ever
+// appears inside an Any (a set_filter_state config, an access-log attribute, a
+// matcher input), so a detector that saw the Any's packed bytes instead of its
+// rendered fields would pass every fixture vacuously. A hand-built listener
+// carrying the retired key one Any deep must be reported, and a clean
+// listener beside it must not.
+func TestListenersNamingRetiredSourceKeySeesThroughAny(t *testing.T) {
+	addr := func(port uint32) *corev3.Address {
+		return &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
+			Address: "127.0.0.1", PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: port},
+		}}}
+	}
+	dirty := &listenerv3.Listener{
+		Name:    "dirty",
+		Address: addr(18181),
+		FilterChains: []*listenerv3.FilterChain{{Filters: []*listenerv3.Filter{{
+			Name:       "carrier",
+			ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: mustAny(&network_inputsv3.FilterStateInput{Key: RetiredSourceIdentityKey})},
+		}}}},
+	}
+	clean := &listenerv3.Listener{
+		Name:    "clean",
+		Address: addr(18182),
+		FilterChains: []*listenerv3.FilterChain{{Filters: []*listenerv3.Filter{{
+			Name:       "carrier",
+			ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: mustAny(&network_inputsv3.FilterStateInput{Key: proxy.SourceIdentityCertMapperFilterStateKey})},
+		}}}},
+	}
+	data, err := marshalBootstrap(newBootstrap([]*clusterv3.Cluster{xdsCluster()}, []*listenerv3.Listener{dirty, clean}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, n, err := ListenersNamingRetiredSourceKey(data)
+	if err != nil {
+		t.Fatalf("ListenersNamingRetiredSourceKey: %v", err)
+	}
+	if n != 2 || !slices.Equal(got, []string{"dirty"}) {
+		t.Fatalf("got %v of %d listeners, want [dirty] of 2: the retired-key check cannot see inside an Any", got, n)
 	}
 }
 

@@ -144,7 +144,7 @@ func TestCaptureL4ChainsCarryTheL4AccessLog(t *testing.T) {
 				assert.Equal(t, op, attrs[key], "chain %s: field %s", fc.GetName(), key)
 			}
 			assert.Contains(t, attrs["source_netns"], "aether.network.network_namespace:PLAIN")
-			assert.Contains(t, attrs["source_spiffe_id"], SourceIdentityFilterStateKey+":PLAIN")
+			assert.Contains(t, attrs["source_spiffe_id"], SourceIdentityCertMapperFilterStateKey+":PLAIN")
 			_, hasReporter := attrs["reporter"]
 			assert.False(t, hasReporter, "an L4 record must not carry `reporter`: the collector's HTTP identity counters key on it")
 			// Connection-level only: no periodic flush, one record at close.
