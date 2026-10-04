@@ -218,7 +218,8 @@ IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi
 KIND_NET="kind"
 REGION="local"
 ETCD_NAME="${ETCD_NAME:-aether-l4-etcd}"
-ETCD_IMAGE="${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.16}"
+# shellcheck source=e2e/etcd-image.sh
+. "$REPO_ROOT/e2e/etcd-image.sh"
 
 # The mesh controllerName the l4route reconciler writes its RouteParentStatus
 # under (agent/internal/gatewaystatus). Waiting on it separates "the agent never

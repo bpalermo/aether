@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"aethermesh.dev/registrar/internal/replicator"
+	"aethermesh.dev/registry/etcdtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tcetcd "github.com/testcontainers/testcontainers-go/modules/etcd"
@@ -33,12 +34,12 @@ func TestMain(m *testing.M) {
 
 	ctx := context.Background()
 
-	localContainer, err := tcetcd.Run(ctx, "gcr.io/etcd-development/etcd:v3.5.21")
+	localContainer, err := tcetcd.Run(ctx, etcdtest.Image)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "failed to start local etcd container: %v\n", err)
 		os.Exit(1)
 	}
-	peerContainer, err := tcetcd.Run(ctx, "gcr.io/etcd-development/etcd:v3.5.21")
+	peerContainer, err := tcetcd.Run(ctx, etcdtest.Image)
 	if err != nil {
 		_ = localContainer.Terminate(ctx)
 		_, _ = fmt.Fprintf(os.Stderr, "failed to start peer etcd container: %v\n", err)
