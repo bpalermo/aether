@@ -694,7 +694,11 @@ proxy:
     # Built-in OPA preset (opt-in): runs the OPA envoy plugin with the policy below.
     opa:
       enabled: false
-      image: openpolicyagent/opa:1.20.2-envoy-static
+      # OPA >= 1.21 reads YAML under the 1.2 core schema: bare yes/no/on/off/y/n
+      # are strings, not booleans. The preset passes OPA no YAML (flags and a
+      # .rego file only); a policy that calls yaml.unmarshal, or a bundle/--data
+      # YAML you add, must spell booleans true/false (#1222).
+      image: openpolicyagent/opa:1.21.1-envoy-static
       # Rego policy mounted via ConfigMap; must define the decision the plugin
       # queries (envoy/authz/allow by default). Required when opa.enabled.
       policy: ""
