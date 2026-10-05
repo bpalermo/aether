@@ -28,9 +28,12 @@
 # alternative — the head shas of `publish` workflow runs — would narrow the gate
 # to "commits a publish run exists for", and "a run that never existed" is one
 # of the three failures the verifier exists to catch (#880). The activity log
-# records the PUSH, independently of whether any workflow reacted to it. A
-# superseded publish (#880's f332061: run `cancelled` at queue time) is still a
-# push head here, so it is still checked and still goes red.
+# records the PUSH, independently of whether any workflow reacted to it. A push
+# with no publish run at all is still a head here, so it is still checked and
+# still goes red. (A push whose publish run was SUPERSEDED — #880's f332061, run
+# `cancelled` at queue time by a newer merge — is a head too; since #1282 it is
+# skipped with a notice by select_unsuperseded below, because the newer publish
+# carries its change. Main's own head is never skipped.)
 #
 # Both functions fail closed: an unreadable or empty activity log is an
 # inconclusive check (the caller exits 2), never "nothing to check".
@@ -89,6 +92,66 @@ select_push_heads() {
 			printf 'check %s\n' "$sha"
 		else
 			printf 'skip %s\n' "$sha"
+		fi
+	done
+}
+
+# ---------------------------------------------------------------------------
+# SUPERSEDED PUSH HEADS (#1282)
+#
+# A push head whose publish run did not succeed, on a main that has since moved
+# past it, was superseded (publish.yaml keeps one pending run per concurrency
+# group, so the next merge cancels it) — the newer push's publish carries its
+# change. That is the rule the workflow_run path applies
+# (scripts/publish-verify-superseded.sh, #1277), and the sweep applies the SAME
+# function to every push head rather than restating it: a superseded head is
+# printed with a notice and not looked up, everything else is still checked.
+# Fail-closed, as there: no publish run on record, an unknown main head or an
+# unreadable run list all mean `check`.
+
+_push_heads_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Print `<head sha> <conclusion>` for main's most recent publish runs, newest
+# first (conclusion empty while a run has none). One page of 100: a busy day is
+# ~40 publishes, and a head older than the page reads as "no run on record",
+# which is checked, never skipped.
+#
+# PUBLISH_RUNS_FILE, when set, is read INSTEAD of the API (same format).
+github_publish_conclusions() {
+	local repo="${GITHUB_REPOSITORY:-bpalermo/aether}"
+	if [ -n "${PUBLISH_RUNS_FILE:-}" ]; then
+		cat -- "$PUBLISH_RUNS_FILE"
+		return
+	fi
+	gh api "/repos/${repo}/actions/workflows/publish.yaml/runs?branch=main&per_page=100" \
+		-q '.workflow_runs[] | "\(.head_sha) \(.conclusion // "")"'
+}
+
+# publish_conclusion <runs-file> <sha>: `success` if ANY publish run for <sha>
+# succeeded (a re-run that went green wins over the cancelled attempt), else the
+# newest non-empty conclusion, else empty (no finished run on record).
+publish_conclusion() {
+	awk -v s="$2" '$1 == s { if ($2 == "success") ok = 1; else if (c == "" && $2 != "") c = $2 }
+		END { print (ok ? "success" : c) }' "$1"
+}
+
+# Classify push heads against the publish runs and main's head.
+#
+#   select_unsuperseded <runs-file> <main head>   < push-head shas, one per line
+#
+# prints, in input order:
+#   check <sha>                     — verify it
+#   superseded <sha> <conclusion>   — publish did not succeed and main has moved
+#                                     on: skip it, with a notice
+select_unsuperseded() {
+	local runs="$1" head="$2" sha conclusion
+	while IFS= read -r sha; do
+		[ -n "$sha" ] || continue
+		conclusion="$(publish_conclusion "$runs" "$sha")"
+		if [ "$(bash "${_push_heads_dir}/publish-verify-superseded.sh" decide "$sha" "$conclusion" "$head")" = superseded ]; then
+			printf 'superseded %s %s\n' "$sha" "$conclusion"
+		else
+			printf 'check %s\n' "$sha"
 		fi
 	done
 }
