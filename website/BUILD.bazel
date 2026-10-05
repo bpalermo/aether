@@ -138,10 +138,10 @@ py_test(
         "$(rootpath mermaid.min.js)",
     ] + API_DOC_ROOTPATHS,
     data = [
-        "mkdocs.yml",
         "mermaid.min.js",
-        "//:website_docs",
+        "mkdocs.yml",
         ":sources",
+        "//:website_docs",
     ] + API_DOC_TARGETS,
     legacy_create_init = 0,
     main = "build_site.py",
