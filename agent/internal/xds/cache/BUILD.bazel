@@ -94,6 +94,7 @@ go_test(
         "dependencies_test.go",
         "determinism_test.go",
         "edge_test.go",
+        "entryport_test.go",
         "identitybinding_test.go",
         "inboundgate_test.go",
         "inboundidentitybinding_test.go",
