@@ -93,17 +93,11 @@ jobs:
           distribution: temurin
           java-version: "21"
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        uses: ./.github/actions/setup-bazel
         with:
-          bazelisk-cache: true
-          # Repository cache (#1001): keyed on everything that changes the
-          # fetched set, in the root workspace's own namespace. THIS job is
-          # the workflow's one saver: the warm-up below fetches for all of
-          # //... under --config=ci, so what it saves is a superset of every
-          # other job's fetches, which only restore (docs/runbook.md, "CI:
-          # external repository fetches").
-          cache-version: root-1
-          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
+          # The repository-cache SAVER (see .github/actions/setup-bazel): this
+          # job's warm-up fetches a superset of what every other job restores.
+          cache-save: true
       - name: Warm the Bazel repository cache (fetch + analysis of //..., retried)
         run: scripts/ci-bazel-warmup.sh --config=ci //...
       - name: Download bazel-diff
@@ -161,16 +155,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-cache: true
-          # Repository cache (#1001): keyed on everything that changes the
-          # fetched set, in the root workspace's own namespace. Restore only —
-          # `diff` is the one job that saves it (docs/runbook.md, "CI:
-          # external repository fetches").
-          cache-version: root-1
-          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
-          cache-save: false
+        uses: ./.github/actions/setup-bazel
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh @rules_go//go
       - name: Audit the Go dependency surface
@@ -210,16 +195,7 @@ jobs:
           # checkout makes that lookup fail closed (exit 2) and the control red.
           fetch-depth: 0
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-cache: true
-          # Repository cache (#1001): keyed on everything that changes the
-          # fetched set, in the root workspace's own namespace. Restore only —
-          # `diff` is the one job that saves it (docs/runbook.md, "CI:
-          # external repository fetches").
-          cache-version: root-1
-          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
-          cache-save: false
+        uses: ./.github/actions/setup-bazel
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh --config=lint --@aspect_rules_lint//lint:fail_on_violation //scripts:all @buildifier_prebuilt//:buildifier @aspect_rules_lint//lint:shellcheck_bin
 
@@ -362,16 +338,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-cache: true
-          # Repository cache (#1001): keyed on everything that changes the
-          # fetched set, in the root workspace's own namespace. Restore only —
-          # `diff` is the one job that saves it (docs/runbook.md, "CI:
-          # external repository fetches").
-          cache-version: root-1
-          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
-          cache-save: false
+        uses: ./.github/actions/setup-bazel
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh //:format.check
 
@@ -580,23 +547,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-cache: true
-          # Cache the external repository downloads too, not just bazelisk.
-          # Without it these jobs re-fetch every release asset (protoc, buf,
-          # buildifier, rules_kotlin, ...) from github.com on EVERY run, so a
-          # GitHub release-download blip fails the build with a 504 that has
-          # nothing to do with the change under test. On 2026-09-21 that took
-          # out `test` and `race` repeatedly while `diff`, `deps-audit` and
-          # `shell` -- the three jobs that already had this -- rode it out.
-          # Repository cache (#1001): keyed on everything that changes the
-          # fetched set, in the root workspace's own namespace. Restore only —
-          # `diff` is the one job that saves it (docs/runbook.md, "CI:
-          # external repository fetches").
-          cache-version: root-1
-          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
-          cache-save: false
+        uses: ./.github/actions/setup-bazel
       - name: Download impacted target lists
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -676,23 +627,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-cache: true
-          # Cache the external repository downloads too, not just bazelisk.
-          # Without it these jobs re-fetch every release asset (protoc, buf,
-          # buildifier, rules_kotlin, ...) from github.com on EVERY run, so a
-          # GitHub release-download blip fails the build with a 504 that has
-          # nothing to do with the change under test. On 2026-09-21 that took
-          # out `test` and `race` repeatedly while `diff`, `deps-audit` and
-          # `shell` -- the three jobs that already had this -- rode it out.
-          # Repository cache (#1001): keyed on everything that changes the
-          # fetched set, in the root workspace's own namespace. Restore only —
-          # `diff` is the one job that saves it (docs/runbook.md, "CI:
-          # external repository fetches").
-          cache-version: root-1
-          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
-          cache-save: false
+        uses: ./.github/actions/setup-bazel
       - name: Download impacted target lists
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -800,18 +735,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-cache: true
-          # See the note on the `test` job: without this the external release
-          # assets are re-fetched from github.com on every run.
-          # Repository cache (#1001): keyed on everything that changes the
-          # fetched set, in the root workspace's own namespace. Restore only —
-          # `diff` is the one job that saves it (docs/runbook.md, "CI:
-          # external repository fetches").
-          cache-version: root-1
-          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
-          cache-save: false
+        uses: ./.github/actions/setup-bazel
       - name: Download impacted target lists
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -863,23 +787,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-cache: true
-          # Cache the external repository downloads too, not just bazelisk.
-          # Without it these jobs re-fetch every release asset (protoc, buf,
-          # buildifier, rules_kotlin, ...) from github.com on EVERY run, so a
-          # GitHub release-download blip fails the build with a 504 that has
-          # nothing to do with the change under test. On 2026-09-21 that took
-          # out `test` and `race` repeatedly while `diff`, `deps-audit` and
-          # `shell` -- the three jobs that already had this -- rode it out.
-          # Repository cache (#1001): keyed on everything that changes the
-          # fetched set, in the root workspace's own namespace. Restore only —
-          # `diff` is the one job that saves it (docs/runbook.md, "CI:
-          # external repository fetches").
-          cache-version: root-1
-          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
-          cache-save: false
+        uses: ./.github/actions/setup-bazel
       - name: Download impacted target lists
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -901,18 +809,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-cache: true
-          # See the note on the `test` job: without this the external release
-          # assets are re-fetched from github.com on every run.
-          # Repository cache (#1001): keyed on everything that changes the
-          # fetched set, in the root workspace's own namespace. Restore only —
-          # `diff` is the one job that saves it (docs/runbook.md, "CI:
-          # external repository fetches").
-          cache-version: root-1
-          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
-          cache-save: false
+        uses: ./.github/actions/setup-bazel
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh --config=ci //agent/cmd/agent:image_load //cni/cmd/cni-install:image_load //registrar/cmd/registrar:image_load //test/e2e:e2e_test
       - name: Build and load container images

@@ -1,0 +1,69 @@
+# The one bazel-contrib/setup-bazel configuration every non-release workflow
+# job uses. Before this wrapper the same block was repeated 16 times across
+# ci.yaml, main.yaml, e2e.yaml, pages.yaml, proxy.yml and quay-smoke.yaml,
+# differing only in the two inputs below; the release and signing workflows
+# (publish.yaml, proxy-release.yml, publish-verify.yaml) keep their own explicit
+# copies by decision, and must stay equal to this file's values.
+#
+# - bazelisk-cache: the Bazel binary itself is cached.
+# - A persisted repository cache (#1001), keyed on everything that changes the
+#   fetched set, in the workspace's OWN namespace: `root-1` for the root
+#   workspace, `proxy-1` for //proxy (which used to hash the root MODULE.bazel
+#   and share the root key, so an Envoy-only cache could be restored into a root
+#   job and vice versa). Without it a job re-fetches every release asset
+#   (protoc, buf, buildifier, ...) from github.com on every run, so a release
+#   download blip fails the build with a 504 unrelated to the change; on
+#   2026-09-21 that took out `test` and `race` repeatedly while the jobs that
+#   already restored the cache rode it out.
+# - Exactly ONE saver per workflow (`cache-save: true`): the job whose warm-up
+#   fetches for all of //... — `diff` in ci.yaml / main.yaml, the proxy `test`
+#   matrix per arch. Everyone else restores only. When the first job to finish
+#   saved, a job that fetched a handful of repositories could write the entry
+#   every later job restored as an exact hit (the 2026-09-27 `netns` failure).
+#
+# docs/runbook.md, "CI: external repository fetches". Requires the repository
+# to be checked out first.
+name: Setup Bazel (aether)
+description: bazel-contrib/setup-bazel with the repository's bazelisk and repository-cache configuration.
+
+inputs:
+  workspace:
+    description: '"root" (the default) or "proxy": which workspace''s MODULE files key the repository cache, and its cache namespace.'
+    required: false
+    default: root
+  cache-save:
+    description: '"true" only for the one job per workflow whose warm-up fetches all of //...; everyone else restores only.'
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Repository-cache key for the ${{ inputs.workspace }} workspace
+      id: key
+      shell: bash
+      env:
+        WORKSPACE: ${{ inputs.workspace }}
+      run: |
+        case "$WORKSPACE" in
+        root)
+          echo "cache-version=root-1" >> "$GITHUB_OUTPUT"
+          echo 'repository-cache=["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]' >> "$GITHUB_OUTPUT"
+          ;;
+        proxy)
+          echo "cache-version=proxy-1" >> "$GITHUB_OUTPUT"
+          echo 'repository-cache=["proxy/MODULE.bazel", "proxy/MODULE.bazel.lock"]' >> "$GITHUB_OUTPUT"
+          ;;
+        *)
+          echo "::error::setup-bazel: workspace must be root or proxy, got '$WORKSPACE'"
+          exit 1
+          ;;
+        esac
+
+    - name: Setup Bazel
+      uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+      with:
+        bazelisk-cache: true
+        cache-version: ${{ steps.key.outputs.cache-version }}
+        repository-cache: ${{ steps.key.outputs.repository-cache }}
+        cache-save: ${{ inputs.cache-save }}
