@@ -3,12 +3,14 @@ package meshdns
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -277,26 +279,55 @@ func TestReloadFromSnapshot(t *testing.T) {
 // simultaneously (the surge-handoff guarantee) and both answer mesh queries. Without
 // SO_REUSEPORT the second bind would fail with EADDRINUSE.
 func TestReusePortCoBind(t *testing.T) {
-	addr := fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
 	records := map[string]string{"default/echo": "10.111.0.6"}
 
-	s1 := newReusePortServer(t, addr, records)
-	s2 := newReusePortServer(t, addr, records) // co-bind the SAME addr
+	// Only the FIRST resolver's bind is retried on a fresh port (#1236). Once it holds
+	// the address no other process can take it, so an EADDRINUSE from the co-binder is
+	// the regression this test exists for, and it fails at once.
+	addr := onFreshDNSAddr(t, func(addr string) error {
+		return startReusePortServer(t, addr, records)
+	})
+	require.NoError(t, startReusePortServer(t, addr, records), // co-bind the SAME addr
+		"the second resolver must co-bind the address the first one holds")
 
 	// Both resolvers answer over their shared port (the kernel load-balances across
 	// the two SO_REUSEPORT sockets; either answering proves both are live).
 	assertResolves(t, addr, "echo.default.aether.internal.", "10.111.0.6")
 	assertResolves(t, addr, "echo.default.aether.internal.", "10.111.0.6")
-
-	_ = s1
-	_ = s2
 }
 
-// newReusePortServer starts a reuse-port Server bound to addr with the given
-// records, waits for it to bind, and registers cleanup to stop it.
-func newReusePortServer(t *testing.T, addr string, records map[string]string) *Server {
+// TestOnFreshDNSAddrRetriesALostPort pins the #1236 retry on a REAL lost port: another
+// socket takes the first attempt's port before the resolver binds it, which is what a
+// process racing freeDNSPort does, and the helper must come back with the resolver
+// bound on a different port rather than fail the test.
+func TestOnFreshDNSAddrRetriesALostPort(t *testing.T) {
+	var tried []string
+	addr := onFreshDNSAddr(t, func(addr string) error {
+		tried = append(tried, addr)
+		if len(tried) == 1 {
+			// No SO_REUSEPORT on this socket, so the resolver cannot join it: its bind
+			// fails with EADDRINUSE exactly as on a port another process took.
+			thief, err := net.ListenPacket("udp", addr)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = thief.Close() })
+		}
+		return startReusePortServer(t, addr, map[string]string{})
+	})
+	require.Len(t, tried, 2, "the lost port is retried exactly once")
+	assert.NotEqual(t, tried[0], addr, "the retry runs on a fresh port")
+	assert.Equal(t, tried[1], addr, "the address returned is the one the resolver bound")
+}
+
+// startReusePortServer starts a reuse-port Server bound to addr with the given records
+// and registers cleanup to stop it. It waits for the server's OWN ready marker, written
+// right after its bind, so a co-bound peer already answering on addr cannot satisfy the
+// wait for it. A lost port (Start returned EADDRINUSE) comes back as the error, for
+// onFreshDNSAddr to retry; anything else fails the test.
+func startReusePortServer(t *testing.T, addr string, records map[string]string) error {
 	t.Helper()
-	s := NewServerWithOptions("aether.internal", addr, "", slog.New(slog.DiscardHandler), WithReusePort(true))
+	marker := filepath.Join(t.TempDir(), "ready")
+	s := NewServerWithOptions("aether.internal", addr, "", slog.New(slog.DiscardHandler),
+		WithReusePort(true), WithReadyMarker(marker))
 	s.SetRecords(records)
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := startServer(ctx, s)
@@ -307,24 +338,30 @@ func newReusePortServer(t *testing.T, addr string, records map[string]string) *S
 		case <-time.After(eventWait):
 		}
 	})
-	waitForUDP(t, addr, errc)
-	return s
+	return startFailure(t, waitStarted(errc, fileExists(marker)), "resolver did not bind %s", addr)
 }
 
 // TestReadyMarkerWrittenOnStartRemovedOnCancel: Start writes the pod-local ready
 // marker once the listeners are bound, and removes it when the context is cancelled.
 func TestReadyMarkerWrittenOnStartRemovedOnCancel(t *testing.T) {
-	addr := fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
 	marker := filepath.Join(t.TempDir(), "sub", "mesh-dns.ready") // dir created by Start
 
-	s := NewServerWithOptions("aether.internal", addr, "", slog.New(slog.DiscardHandler),
-		WithReusePort(true), WithReadyMarker(marker))
-	ctx, cancel := context.WithCancel(context.Background())
-	errc := startServer(ctx, s)
-
+	var (
+		cancel context.CancelFunc
+		errc   <-chan error
+	)
 	// Once the resolver answers over UDP its listeners are bound, so the marker
-	// (written right after buildServers) must exist.
-	waitForUDP(t, addr, errc)
+	// (written right after buildServers) must exist. A port lost before the bind is
+	// retried on a fresh one (#1236).
+	onFreshDNSAddr(t, func(addr string) error {
+		s := NewServerWithOptions("aether.internal", addr, "", slog.New(slog.DiscardHandler),
+			WithReusePort(true), WithReadyMarker(marker))
+		var ctx context.Context
+		ctx, cancel = context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		errc = startServer(ctx, s)
+		return startFailure(t, waitStarted(errc, udpAnswers(addr)), "resolver did not bind %s", addr)
+	})
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(marker)
 		return err == nil
@@ -402,33 +439,100 @@ func startServer(ctx context.Context, s *Server) <-chan error {
 // waiting out the whole budget would mislabel a bind failure as slowness (#1177).
 func awaitBound(t *testing.T, errc <-chan error, cond func() bool, format string, args ...any) {
 	t.Helper()
-	what := fmt.Sprintf(format, args...)
+	if err := waitStarted(errc, cond); err != nil {
+		t.Fatalf("%s: %v", fmt.Sprintf(format, args...), err)
+	}
+}
+
+// errStartReturned marks a waitStarted failure where the server's Start returned before
+// the awaited condition held. It wraps Start's own error, so errors.Is still sees the
+// bind error (EADDRINUSE) underneath.
+var errStartReturned = errors.New("the server's Start returned first")
+
+// waitStarted is awaitBound without the t.Fatal, for callers that retry a lost port. It
+// returns nil once cond holds, Start's error (wrapped in errStartReturned) if Start
+// returns first, and a timeout error after eventWait.
+func waitStarted(errc <-chan error, cond func() bool) error {
 	deadline := time.Now().Add(eventWait)
 	for {
 		if cond() {
-			return
+			return nil
 		}
 		select {
 		case err := <-errc:
-			t.Fatalf("%s: Start returned first: %v", what, err)
+			return fmt.Errorf("%w: %w", errStartReturned, err)
 		default:
 		}
 		if !time.Now().Before(deadline) {
-			t.Fatalf("%s: not within %s", what, eventWait)
+			return fmt.Errorf("not within %s", eventWait)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-// waitForUDP polls until a UDP query to addr succeeds (the server has bound), failing
-// early if the server's Start (errc) returns first.
-func waitForUDP(t *testing.T, addr string, errc <-chan error) {
+// isLostPort reports whether err is the resolver's Start failing its bind because the
+// port was taken: the one start failure a fresh port can cure.
+func isLostPort(err error) bool {
+	return errors.Is(err, errStartReturned) && errors.Is(err, syscall.EADDRINUSE)
+}
+
+// startFailure returns err when it is nil or a lost port (for onFreshDNSAddr to retry)
+// and fails the test at once on anything else.
+func startFailure(t *testing.T, err error, format string, args ...any) error {
 	t.Helper()
+	if err != nil && !isLostPort(err) {
+		t.Fatalf("%s: %v", fmt.Sprintf(format, args...), err)
+	}
+	return err
+}
+
+// bindAttempts bounds onFreshDNSAddr. A port is lost only when another process binds it
+// in the instant between freeDNSPort's probe and the resolver's own bind, so losing
+// this many in a row is not bad luck: it is a resolver that cannot bind at all.
+const bindAttempts = 5
+
+// onFreshDNSAddr starts the FIRST resolver on an address from freeDNSPort and returns
+// that address. freeDNSPort has to release its probe sockets so the resolver can bind
+// the port by address, as it does in production, and another process can take the port
+// in that gap (#1236). When start reports exactly that (see isLostPort) the attempt is
+// repeated on a fresh port, at most bindAttempts times. Any other error fails the test.
+//
+// start must fail only through the resolver's Start returning, so a failed attempt
+// leaves nothing bound and nothing running. Only the first resolver on an address goes
+// through here: once it holds the address no other process can take it, so a resolver
+// co-binding it that gets EADDRINUSE is a real SO_REUSEPORT failure, never retried.
+func onFreshDNSAddr(t *testing.T, start func(addr string) error) string {
+	t.Helper()
+	var err error
+	for range bindAttempts {
+		addr := fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
+		if err = start(addr); err == nil {
+			return addr
+		}
+		if !isLostPort(err) {
+			t.Fatalf("resolver on %s did not start: %v", addr, err)
+		}
+		t.Logf("lost %s before the resolver bound it: %v", addr, err)
+	}
+	t.Fatalf("the resolver lost its port %d times in a row: %v", bindAttempts, err)
+	return ""
+}
+
+// udpAnswers reports whether a UDP query to addr gets an answer, i.e. a server is bound.
+func udpAnswers(addr string) func() bool {
 	c := &dns.Client{Net: "udp", Timeout: 200 * time.Millisecond}
-	awaitBound(t, errc, func() bool {
+	return func() bool {
 		_, _, err := c.Exchange(query("echo.default.aether.internal.", dns.TypeA), addr)
 		return err == nil
-	}, "resolver did not bind %s", addr)
+	}
+}
+
+// fileExists reports whether path exists, e.g. a resolver's ready marker.
+func fileExists(path string) func() bool {
+	return func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}
 }
 
 func query(name string, qtype uint16) *dns.Msg {
