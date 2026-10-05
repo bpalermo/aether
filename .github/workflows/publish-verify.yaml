@@ -31,7 +31,10 @@
 #   workflow_run  — the primary detector. Fires the moment a publish run reaches
 #     a conclusion, whatever that conclusion is, and verifies THAT run's commit.
 #     There is no race to lose: a run that ended `cancelled` is never going to
-#     push anything later, so a missing artifact at that point is final.
+#     push anything later, so a missing artifact at that point is final. One
+#     exception: a run that did not succeed for a commit main has already
+#     moved past is SUPERSEDED and skipped with a notice (the newer push's
+#     publish carries the change); main's head is always verified.
 #
 #   schedule      — the backstop, and it exists because the primary detector
 #     rests on an assumption: that `workflow_run: [completed]` really does fire
@@ -132,11 +135,27 @@ jobs:
         id: control
         run: ./scripts/publish-verify-control.sh
 
+      # A publish run that ended without success for a commit main has since
+      # moved past was superseded (a newer merge replaced its pending run), not
+      # lost: the newer publish carries the change. Skip the registry check for
+      # it with a notice instead of going red on every such merge, which buried
+      # real failures. A successful publish, or main's own head, is still
+      # verified and still red when anything is missing.
+      # scripts/publish-verify-superseded.sh; //scripts:publish_verify_superseded_test.
+      - name: Superseded? (publish not successful, commit no longer main's head)
+        id: superseded
+        if: github.event_name == 'workflow_run'
+        env:
+          TARGET: ${{ github.event.workflow_run.head_sha }}
+          TRIGGERING_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          TRIGGERING_RUN: ${{ github.event.workflow_run.html_url }}
+        run: ./scripts/publish-verify-superseded.sh
+
       # The gate runs whatever the control concluded: a broken control must not
       # also cost the real check. Only a failed checkout stops it.
       - name: Gate (verify the artifacts for this commit exist in the registry)
         id: verify
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.superseded.outputs.skip != 'true' }}
         env:
           # A publish run's head commit, a manually named commit, or --recent.
           TARGET: ${{ github.event.workflow_run.head_sha || github.event.inputs.commit }}
@@ -183,7 +202,7 @@ jobs:
       # construction. Note the checkout above is `main`, so this is main's
       # cosign whatever commit is under verification.
       - name: Setup Bazel
-        if: success() || steps.verify.conclusion == 'failure'
+        if: (success() || steps.verify.conclusion == 'failure') && steps.superseded.outputs.skip != 'true'
         uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           bazelisk-cache: true
@@ -196,12 +215,12 @@ jobs:
           cache-save: false
 
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
-        if: success() || steps.verify.conclusion == 'failure'
+        if: (success() || steps.verify.conclusion == 'failure') && steps.superseded.outputs.skip != 'true'
         run: scripts/ci-bazel-warmup.sh //bazel/cosign:verify_image_signatures
 
       - name: Verify the signatures (every index and every child manifest)
         id: cosign
-        if: success() || steps.verify.conclusion == 'failure'
+        if: (success() || steps.verify.conclusion == 'failure') && steps.superseded.outputs.skip != 'true'
         env:
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
@@ -272,6 +291,7 @@ jobs:
           missing="$(printf '%s\n%s\n' "$missing" "$unverified" | grep . || true)"
           [ -n "$missing" ] || missing="(see the run log)"
 
+          # shellcheck disable=SC2016 # literal Markdown code fences, nothing to expand
           body=$(printf '%s\n\n```\n%s\n```\n\n%s\n%s\n\n%s\n' \
             "A commit on \`main\` is missing artifacts in the image registry (bazel/registry/registry.bzl) — never published, or published only in part. A deploy pinned to it will 404, and \`helm upgrade\` against its commit-suffixed chart tag cannot work." \
             "$missing" \
