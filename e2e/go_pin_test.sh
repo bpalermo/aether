@@ -146,10 +146,13 @@ job_go_use() {
 	$0 ~ re { if (!go_at) go_at = NR }
 	END { done_job() }' "$1"
 }
-# Composite actions: the whole file is one unit.
+# Composite actions: the whole `runs:` block is one unit (not `inputs:`, whose
+# descriptions may well mention `go test`).
 action_go_use() {
 	awk -v re="$GO_CMD" '
-	/^[[:space:]]*#/ { next }
+	/^runs:[[:space:]]*$/ { in_runs = 1; next }
+	in_runs && /^[^[:space:]#]/ { in_runs = 0 }
+	!in_runs || /^[[:space:]]*#/ { next }
 	/uses:[[:space:]]*actions\/setup-go@/ { if (!setup_at) setup_at = NR }
 	$0 ~ re { if (!go_at) go_at = NR }
 	END { if (go_at) printf "(action)\t%d\t%d\n", go_at, setup_at }' "$1"

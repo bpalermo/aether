@@ -23,7 +23,9 @@
 # body through .github/actions/run-e2e-script (up -> verify -> diagnostics ->
 # down); each stays its own job rather than a matrix leg so `report-failure`
 # names the suite that failed, `only=<suite>` selects it, and its check name and
-# timeout are unchanged.
+# timeout are unchanged. The two conformance jobs share theirs the same way
+# through .github/actions/run-conformance (#1286), which also sets up the
+# repository's Go for the suite's `go test` (#1283, //e2e:go_pin_test).
 
 name: e2e
 
@@ -112,360 +114,116 @@ jobs:
 
   # --- Gateway API conformance: GATEWAY-HTTP profile in kind (proposal 024).
   # Throwaway kind cluster, aether EDGE (north-south) with SPIRE disabled,
-  # Gateway API CRDs, upstream suite's GATEWAY-HTTP profile. The runner is
-  # committed at test/conformance/conformance_test.go but builds only INSIDE a
-  # gateway-api checkout (the conformance pkg is a self-replace module), so the
-  # job checks out gateway-api@$GATEWAY_API_VERSION and copies the runner in.
+  # Gateway API CRDs, upstream suite's GATEWAY-HTTP profile. The body (pinned Go,
+  # images, kind, CRDs, install, suite, report, diagnostics, teardown) is shared
+  # with mesh-http through .github/actions/run-conformance (#1286).
+  #
+  # Hard gate (43/43 on kind + talos). Runs the suite's native parallelism:
+  # aether's cross-route precedence (oldest creationTimestamp, then ns/name —
+  # the reconciler's pre-projection sort + the cache's stable specificity
+  # sort) resolves same-match routes deterministically (#533). The earlier
+  # wrong-backend failures were per-test-cleanup pollution (1.6 made
+  # CleanupTestResources opt-in; the runner now sets it).
   gateway-http:
     needs: build
     if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'gateway-http'
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    env:
-      KIND_CLUSTER: aether-conformance
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # The repository's Go, not the runner image's (#1283): go.mod names
-      # MODULE.bazel's go_sdk.download version (//e2e:go_pin_test keeps them
-      # equal). setup-go also exports GOTOOLCHAIN=local, so neither the
-      # cloud-provider-kind install nor the gateway-api checkout's go.mod can
-      # switch to a downloaded toolchain. No cache: the suite builds from the
-      # gateway-api checkout, which this repository's go.sum does not describe.
-      - name: Setup Go (go.mod)
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-
-      - name: Image registry (bazel/registry/registry.bzl)
-        run: scripts/image-registry.sh >> "$GITHUB_ENV"
-
-      - name: Download images artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: aether-images
-          path: /tmp
-
-      - name: Load images into docker
-        run: docker load -i /tmp/aether-images.tar
-
-      # kind, kubectl and the node image from e2e/kind-version.sh (#1251), the
-      # one pin every e2e surface shares; the action creates the cluster.
-      - name: Setup kind (pinned)
-        uses: ./.github/actions/setup-kind
-        with:
-          cluster_name: ${{ env.KIND_CLUSTER }}
-
-      - name: Load images into kind
-        run: |
-          for img in agent:latest mesh-dns:latest proxy-supervisor:latest uds-csi:latest cni-install:latest registrar:latest controller:latest; do
-            kind load docker-image "${IMAGE_REGISTRY}/${img}" --name "${KIND_CLUSTER}"
-          done
-
-      # cloud-provider-kind assigns docker-network IPs to type: LoadBalancer
-      # Services so the edge's per-Gateway LB Services get external IPs ->
-      # Gateway.status.addresses.
-      - name: Start cloud-provider-kind
-        run: |
-          # Pinned: `@latest` let any upstream release change what this gate
-          # runs (and what runs under sudo) without a commit here. v0.12.0 is
-          # what @latest resolved to when it was pinned (2026-10-05).
-          go install sigs.k8s.io/cloud-provider-kind@v0.12.0
-          # shellcheck disable=SC2024 # the log is meant to be written as the runner user, not root
-          sudo "$(go env GOPATH)/bin/cloud-provider-kind" > /tmp/cloud-provider-kind.log 2>&1 &
-          echo "cloud-provider-kind started (pid $!)"
-
-      # Experimental channel (superset of standard): the edge agent's manager
-      # watches TCPRoute/TLSRoute, TLSRoute is experimental-only — without it the
-      # manager's watch fails and the edge container crash-loops. Server-side
-      # apply: the bundle is large; client-side apply flakes on AlreadyExists.
-      - name: Install Gateway API CRDs
-        run: |
-          kubectl apply --server-side --force-conflicts -f \
-            "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml"
-          kubectl wait --for=condition=Established crd/gateways.gateway.networking.k8s.io --timeout=60s
-          kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
-
-      # The aether chart's edge-meshconfig template does a helm `lookup` for a
-      # config.aether.io/v1 MeshConfig, which requires the CRD at render time.
-      - name: Install aether CRDs (MeshConfig)
-        run: |
-          sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/crds/Chart.yaml
-          helm install aether-crds charts/crds \
-            --namespace default --wait --timeout 2m
-          kubectl wait --for=condition=Established crd/meshconfigs.config.aether.io --timeout=60s
 
       # Install aether with the EDGE enabled and SPIRE OFF: the edge dials
       # conformance backends over cleartext. edge.tls.enabled=true wires the
       # Kubernetes Secret provider (the HTTPS-listener fixtures need cert
       # resolution or Gateways stay Programmed=False and setup times out).
-      # edge.gateway.create=false: the suite brings its own Gateways. Images are
-      # the kind-loaded :latest (digest cleared — it wins over tag otherwise).
-      - name: Install aether (edge, no SPIRE)
-        run: |
-          sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/aether/Chart.yaml
-          # One array element per argument: the images' --set flags, built
-          # without relying on word splitting.
-          images=()
-          img() { images+=(--set "$1.image.repository=${IMAGE_REGISTRY}/$2" --set "$1.image.tag=latest" --set "$1.image.digest=" --set "$1.image.pullPolicy=Never"); }
-          img agent agent
-          img agent.meshDnsDaemon mesh-dns
-          img proxy.supervisor proxy-supervisor
-          img cniInstall cni-install
-          img registrar registrar
-          img controller controller
-          img udsCsi uds-csi
-          helm install aether charts/aether \
-            --namespace aether-system --create-namespace \
-            --set namespace.create=false \
-            --set spire.enabled=false \
-            --set edge.enabled=true \
-            --set edge.tls.enabled=true \
-            --set edge.gateway.create=false \
-            "${images[@]}" \
-            --set proxy.image.pullPolicy=IfNotPresent
-          kubectl get gatewayclass aether -o yaml || true
-
-      - name: Wait for edge to be Ready
-        run: |
-          kubectl rollout status deploy/aether-edge -n aether-ingress --timeout=5m || {
-            echo "edge not ready; cluster state:"; kubectl get pods -A -o wide; exit 1;
-          }
-          kubectl rollout status daemonset/aether-agent -n aether-system --timeout=2m || \
-            echo "agent DaemonSet not Ready (not required for GATEWAY-HTTP); continuing"
-
-      - name: Check out gateway-api @ suite version
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: kubernetes-sigs/gateway-api
-          ref: ${{ env.GATEWAY_API_VERSION }}
-          path: gateway-api
-
-      - name: Drop in the aether runner + mesh overlay
-        run: |
-          cp test/conformance/conformance_test.go \
-            gateway-api/conformance/aether_conformance_test.go
-          cp test/conformance/mesh/manifests.yaml \
-            gateway-api/conformance/mesh/manifests.yaml
-
-      # Hard gate (43/43 on kind + talos). Runs the suite's native parallelism:
-      # aether's cross-route precedence (oldest creationTimestamp, then ns/name —
-      # the reconciler's pre-projection sort + the cache's stable specificity
-      # sort) resolves same-match routes deterministically (#533). The earlier
-      # wrong-backend failures were per-test-cleanup pollution (1.6 made
-      # CleanupTestResources opt-in; the runner now sets it).
+      # edge.gateway.create=false: the suite brings its own Gateways.
+      # cloud-provider-kind gives the edge's per-Gateway LB Services external
+      # IPs -> Gateway.status.addresses.
       - name: Run GATEWAY-HTTP conformance
-        id: conformance
-        working-directory: gateway-api/conformance
-        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
-        env:
-          AETHER_CONFORMANCE: "1"
-          AETHER_CONFORMANCE_REPORT: ${{ runner.temp }}/gateway-http-report.yaml
-        run: |
-          go test . \
-            -tags conformance \
-            -run TestAetherGatewayHTTP \
-            -v -timeout 60m
-
-      - name: Upload conformance report
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/run-conformance
         with:
-          name: gateway-http-conformance-report
-          path: ${{ runner.temp }}/gateway-http-report.yaml
-          if-no-files-found: warn
-
-      - name: Collect logs on failure
-        if: failure() || steps.conformance.outcome == 'failure'
-        run: |
-          mkdir -p /tmp/conformance-logs
-          kind export logs /tmp/conformance-logs --name "${KIND_CLUSTER}" || true
-          echo "=== all pods ==="
-          kubectl get pods -A -o wide || true
-          echo "=== gatewayclass / gateways / httproutes ==="
-          kubectl get gatewayclass,gateways,httproutes -A -o wide || true
-          echo "=== edge / registrar / controller / agent logs ==="
-          kubectl logs -n aether-ingress -l app.kubernetes.io/name=aether-edge --all-containers --tail=200 || true
-          for d in registrar controller; do kubectl logs -n aether-system deploy/aether-$d --all-containers --tail=120 || true; done
-          kubectl logs -n aether-system daemonset/aether-agent --all-containers --tail=100 || true
-          cp /tmp/cloud-provider-kind.log /tmp/conformance-logs/ || true
-
-      - name: Upload logs on failure
-        if: failure() || steps.conformance.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: conformance-logs
-          path: /tmp/conformance-logs
-          if-no-files-found: ignore
-
-      - name: Cleanup
-        if: always()
-        run: kind delete cluster --name "${KIND_CLUSTER}" || true
+          profile: GATEWAY-HTTP
+          suite: TestAetherGatewayHTTP
+          cluster-name: aether-conformance
+          gateway-api-version: ${{ env.GATEWAY_API_VERSION }}
+          cloud-provider-kind: "true"
+          install-description: Install aether (edge, no SPIRE)
+          helm-set: |
+            edge.enabled=true
+            edge.tls.enabled=true
+            edge.gateway.create=false
+          ready-description: Wait for edge to be Ready
+          wait-for-ready: |
+            kubectl rollout status deploy/aether-edge -n aether-ingress --timeout=5m || {
+              echo "edge not ready; cluster state:"; kubectl get pods -A -o wide; exit 1;
+            }
+            kubectl rollout status daemonset/aether-agent -n aether-system --timeout=2m || \
+              echo "agent DaemonSet not Ready (not required for GATEWAY-HTTP); continuing"
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          report-file: gateway-http-report.yaml
+          report-artifact-name: gateway-http-conformance-report
+          logs-dir: /tmp/conformance-logs
+          logs-artifact-name: conformance-logs
+          diagnostics: |
+            echo "=== gatewayclass / gateways / httproutes ==="
+            kubectl get gatewayclass,gateways,httproutes -A -o wide || true
+            echo "=== edge / registrar / controller / agent logs ==="
+            kubectl logs -n aether-ingress -l app.kubernetes.io/name=aether-edge --all-containers --tail=200 || true
+            for d in registrar controller; do kubectl logs -n aether-system deploy/aether-$d --all-containers --tail=120 || true; done
+            kubectl logs -n aether-system daemonset/aether-agent --all-containers --tail=100 || true
+            cp /tmp/cloud-provider-kind.log "$LOGS_DIR/" || true
 
   # --- MESH-HTTP (east-west GAMMA) conformance: the FULL mesh path on kind —
   # CNI capture (redirect-all default) + GAMMA cap_http tables, SPIRE off
-  # (cleartext mesh mode). Hard gate (Core 8/8). Own kind cluster.
+  # (cleartext mesh mode). Hard gate (Core 8/8). Own kind cluster. Same
+  # .github/actions/run-conformance body as gateway-http; its diagnostics are
+  # collected on every run, not only on failure.
   mesh-http:
     needs: build
     if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'mesh-http'
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    env:
-      KIND_CLUSTER: aether-conformance-mesh
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The repository's Go, not the runner image's (#1283): go.mod names
-      # MODULE.bazel's go_sdk.download version (//e2e:go_pin_test keeps them
-      # equal). setup-go also exports GOTOOLCHAIN=local, so neither the
-      # cloud-provider-kind install nor the gateway-api checkout's go.mod can
-      # switch to a downloaded toolchain. No cache: the suite builds from the
-      # gateway-api checkout, which this repository's go.sum does not describe.
-      - name: Setup Go (go.mod)
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-
-      - name: Image registry (bazel/registry/registry.bzl)
-        run: scripts/image-registry.sh >> "$GITHUB_ENV"
-
-      - name: Download images artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: aether-images
-          path: /tmp
-
-      - name: Load images into docker
-        run: docker load -i /tmp/aether-images.tar
-
-      # kind, kubectl and the node image from e2e/kind-version.sh (#1251), the
-      # one pin every e2e surface shares; the action creates the cluster.
-      - name: Setup kind (pinned)
-        uses: ./.github/actions/setup-kind
-        with:
-          cluster_name: ${{ env.KIND_CLUSTER }}
-
-      - name: Load images into kind
-        run: |
-          for img in agent:latest mesh-dns:latest proxy-supervisor:latest uds-csi:latest cni-install:latest registrar:latest controller:latest; do
-            kind load docker-image "${IMAGE_REGISTRY}/${img}" --name "${KIND_CLUSTER}"
-          done
-
-      - name: Install Gateway API CRDs
-        run: |
-          kubectl apply --server-side --force-conflicts -f \
-            "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml"
-          kubectl wait --for=condition=Established crd/gateways.gateway.networking.k8s.io --timeout=60s
-          kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
-
-      - name: Install aether CRDs (MeshConfig)
-        run: |
-          sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/crds/Chart.yaml
-          helm install aether-crds charts/crds \
-            --namespace default --wait --timeout 2m
-          kubectl wait --for=condition=Established crd/meshconfigs.config.aether.io --timeout=60s
-
       # Mesh path on, SPIRE off (cleartext mesh mode); gamma + redirect-all +
       # capture + generateMeshServices + namespace injection are chart defaults.
-      - name: Install aether (mesh, no SPIRE)
-        run: |
-          sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/aether/Chart.yaml
-          # One array element per argument: the images' --set flags, built
-          # without relying on word splitting.
-          images=()
-          img() { images+=(--set "$1.image.repository=${IMAGE_REGISTRY}/$2" --set "$1.image.tag=latest" --set "$1.image.digest=" --set "$1.image.pullPolicy=Never"); }
-          img agent agent
-          img agent.meshDnsDaemon mesh-dns
-          img proxy.supervisor proxy-supervisor
-          img cniInstall cni-install
-          img registrar registrar
-          img controller controller
-          img udsCsi uds-csi
-          helm install aether charts/aether \
-            --namespace aether-system --create-namespace \
-            --set namespace.create=false \
-            --set spire.enabled=false \
-            --set agent.gamma=true \
-            "${images[@]}" \
-            --set proxy.image.pullPolicy=IfNotPresent
-          kubectl get gatewayclass aether -o yaml || true
-
-      - name: Wait for mesh control plane to be Ready
-        run: |
-          kubectl rollout status daemonset/aether-agent -n aether-system --timeout=5m || {
-            echo "agent DaemonSet not ready; cluster state:"; kubectl get pods -A -o wide; exit 1;
-          }
-          kubectl rollout status deploy/aether-registrar -n aether-system --timeout=3m || \
-            echo "registrar not Ready; continuing (may still converge)"
-          kubectl rollout status deploy/aether-controller -n aether-system --timeout=3m || \
-            echo "controller not Ready; continuing (namespace injection may be degraded)"
-
-      - name: Check out gateway-api @ suite version
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: kubernetes-sigs/gateway-api
-          ref: ${{ env.GATEWAY_API_VERSION }}
-          path: gateway-api
-
-      - name: Drop in the aether runner + mesh overlay
-        run: |
-          cp test/conformance/conformance_test.go \
-            gateway-api/conformance/aether_conformance_test.go
-          cp test/conformance/mesh/manifests.yaml \
-            gateway-api/conformance/mesh/manifests.yaml
-
       - name: Run MESH-HTTP conformance
-        id: conformance
-        working-directory: gateway-api/conformance
-        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
-        env:
-          AETHER_CONFORMANCE: "1"
-          AETHER_CONFORMANCE_REPORT: ${{ runner.temp }}/mesh-http-report.yaml
-        run: |
-          go test . \
-            -tags conformance \
-            -run TestAetherMeshHTTP \
-            -v -timeout 60m
-
-      - name: Upload conformance report
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/run-conformance
         with:
-          name: mesh-http-conformance-report
-          path: ${{ runner.temp }}/mesh-http-report.yaml
-          if-no-files-found: warn
-
-      - name: Collect logs on failure
-        if: always()
-        run: |
-          mkdir -p /tmp/mesh-conformance-logs
-          kind export logs /tmp/mesh-conformance-logs --name "${KIND_CLUSTER}" || true
-          echo "=== all pods ==="
-          kubectl get pods -A -o wide || true
-          echo "=== mesh conformance namespaces ==="
-          for ns in gateway-conformance-mesh gateway-conformance-mesh-consumer; do
-            echo "--- $ns ---"
-            kubectl get pods,httproutes,svc,sa -n "$ns" -o wide || true
-          done
-          echo "=== agent / registrar / controller logs ==="
-          kubectl logs -n aether-system daemonset/aether-agent --all-containers --tail=200 || true
-          for d in registrar controller; do kubectl logs -n aether-system deploy/aether-$d --all-containers --tail=120 || true; done
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: mesh-conformance-logs
-          path: /tmp/mesh-conformance-logs
-          if-no-files-found: ignore
-
-      - name: Cleanup
-        if: always()
-        run: kind delete cluster --name "${KIND_CLUSTER}" || true
+          profile: MESH-HTTP
+          suite: TestAetherMeshHTTP
+          cluster-name: aether-conformance-mesh
+          gateway-api-version: ${{ env.GATEWAY_API_VERSION }}
+          install-description: Install aether (mesh, no SPIRE)
+          helm-set: |
+            agent.gamma=true
+          ready-description: Wait for mesh control plane to be Ready
+          wait-for-ready: |
+            kubectl rollout status daemonset/aether-agent -n aether-system --timeout=5m || {
+              echo "agent DaemonSet not ready; cluster state:"; kubectl get pods -A -o wide; exit 1;
+            }
+            kubectl rollout status deploy/aether-registrar -n aether-system --timeout=3m || \
+              echo "registrar not Ready; continuing (may still converge)"
+            kubectl rollout status deploy/aether-controller -n aether-system --timeout=3m || \
+              echo "controller not Ready; continuing (namespace injection may be degraded)"
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          report-file: mesh-http-report.yaml
+          report-artifact-name: mesh-http-conformance-report
+          logs-dir: /tmp/mesh-conformance-logs
+          logs-artifact-name: mesh-conformance-logs
+          logs-when: always
+          diagnostics: |
+            echo "=== mesh conformance namespaces ==="
+            for ns in gateway-conformance-mesh gateway-conformance-mesh-consumer; do
+              echo "--- $ns ---"
+              kubectl get pods,httproutes,svc,sa -n "$ns" -o wide || true
+            done
+            echo "=== agent / registrar / controller logs ==="
+            kubectl logs -n aether-system daemonset/aether-agent --all-containers --tail=200 || true
+            for d in registrar controller; do kubectl logs -n aether-system deploy/aether-$d --all-containers --tail=120 || true; done
 
   # --- Proposal 019: per-node east/west waypoint cross-cluster data-path e2e.
   # Two kind clusters on the shared docker network + shared etcd + SPIRE on both
