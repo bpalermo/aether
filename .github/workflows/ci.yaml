@@ -231,11 +231,12 @@ jobs:
         run: scripts/check-shell-lint.sh
 
       # The //proxy workspace is behind //.bazelignore, out of every aspect's
-      # reach, so its Starlark (buildifier lint) and shell (ShellCheck) are
-      # linted by a direct run of the same tools. The `proxy` workflow runs it
-      # on proxy/ changes; it is here too because a root change (a buildifier
-      # or ShellCheck bump, .shellcheckrc) can newly flag a proxy file.
-      - name: Lint the //proxy workspace's Starlark and shell
+      # reach, so its shell is ShellCheck'd by a direct run of the same tool
+      # (its Starlark is buildifier-linted by the `format` job, #1245). The
+      # `proxy` workflow runs it on proxy/ changes; it is here too because a
+      # root change (a ShellCheck bump, .shellcheckrc) can newly flag a proxy
+      # file.
+      - name: Lint the //proxy workspace's shell
         run: scripts/lint-proxy.sh
 
       # scripts/ci-bazel-warmup.sh (#1001) retries a repository-fetch failure
@@ -395,7 +396,7 @@ jobs:
             exit 1
           fi
           if [ "$rc" -ne 0 ]; then
-            echo "::error::formatting violations — run 'make format' and commit the result"
+            echo "::error::formatting or buildifier lint violations — run 'make format' (it also applies the mechanical lint fixes), fix any lint finding left, and commit the result"
             exit 1
           fi
           echo "formatter ran for all 4 configured languages"

@@ -54,7 +54,7 @@ make deps-audit              # or: scripts/go-deps-audit.sh — also a required
 make format                  # or: bazel run //:format
 make format-check            # Check only, no modifications
 
-# Lint (buf, buildifier, shellcheck)
+# Lint (buf, shellcheck, gocognit). buildifier's Starlark lint runs in format-check
 make lint                    # or: bazel build --config=lint //...
 
 # Add a Go dependency
@@ -154,7 +154,7 @@ The proxy image (`proxy/`, its own Bazel workspace) builds a pinned Envoy plus s
 - Proto files use `buf/validate` annotations.
 - Gazelle manages BUILD.bazel files. Run `make gazelle` after modifying Go imports or adding files.
 - Container images use distroless base (`gcr.io/distroless/static-debian13:nonroot`) and multi-arch builds (amd64/arm64).
-- Formatting and linting use `aspect_rules_lint`. Formatters (gofumpt, buildifier, shfmt, buf) are configured in `bazel/format/BUILD.bazel`. Lint aspects (buf, buildifier, shellcheck) are defined in `bazel/lint/linters.bzl`. Use `--config=lint` to run lints, `--config=ci` to fail on violations.
+- Formatting and linting use `aspect_rules_lint`. Formatters (gofumpt, buildifier, shfmt, buf) are configured in `bazel/format/BUILD.bazel`. Lint aspects (buf, shellcheck, gocognit) are defined in `bazel/lint/linters.bzl`; buildifier's Starlark *lint* rides the formatter (`starlark_check_args`/`starlark_fix_args`), so `make format-check` reports it and `make format` applies its mechanical fixes. Use `--config=lint` to run lints, `--config=ci` to fail on violations.
 
 ## Testing
 

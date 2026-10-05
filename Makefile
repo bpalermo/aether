@@ -43,10 +43,10 @@ lint:
 	@bazel build --config=lint //...
 	@scripts/lint-proxy.sh
 
-# The //proxy workspace's Starlark (buildifier lint) and shell (ShellCheck).
-# proxy/ is behind //.bazelignore, out of the lint aspects' reach, so this runs
-# the same tools on the files git lists. Formatting of proxy/ is plain
-# `make format` / `make format-check`.
+# The //proxy workspace's shell (ShellCheck). proxy/ is behind //.bazelignore,
+# out of the lint aspects' reach, so this runs the same tool on the files git
+# lists. Formatting AND buildifier lint of all Starlark, proxy/ included, is
+# `make format` / `make format-check` (#1245).
 .PHONY: lint-proxy
 lint-proxy:
 	@scripts/lint-proxy.sh

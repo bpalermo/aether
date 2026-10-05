@@ -20,8 +20,8 @@ did not cause.
 **Format & Lint:**
 ```bash
 make format        # Format all code
-make lint          # Run linters (buf, buildifier, shellcheck)
-make format-check  # CI-friendly check (fails on drift)
+make lint          # Run linters (buf, shellcheck, gocognit)
+make format-check  # CI-friendly check (fails on drift + buildifier lint)
 ```
 
 ## Toolchain

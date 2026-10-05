@@ -1,7 +1,6 @@
 "Define linter aspects"
 
 load("@aspect_rules_lint//lint:buf.bzl", "lint_buf_aspect")
-load("@aspect_rules_lint//lint:buildifier.bzl", "lint_buildifier_aspect")
 load("@aspect_rules_lint//lint:lint_test.bzl", "lint_test")
 load("@aspect_rules_lint//lint:shellcheck.bzl", "lint_shellcheck_aspect")
 load("//bazel/lint:gocognit.bzl", "lint_gocognit_aspect")
@@ -12,11 +11,10 @@ buf = lint_buf_aspect(
 
 buf_test = lint_test(aspect = buf)
 
-buildifier = lint_buildifier_aspect(
-    binary = Label("@buildifier_prebuilt//:buildifier"),
-)
-
-buildifier_test = lint_test(aspect = buildifier)
+# No buildifier aspect: rules_lint's only visits bzl_library targets and
+# "starlark"-tagged filegroups, and BUILD files cannot be srcs of a target in
+# another package, so here it linted nothing (#1245). buildifier's linter runs
+# in the Starlark formatter instead: bazel/format/BUILD.bazel.
 
 shellcheck = lint_shellcheck_aspect(
     binary = Label("@aspect_rules_lint//lint:shellcheck_bin"),

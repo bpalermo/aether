@@ -104,11 +104,11 @@ make test-race             # Run all tests with Go race detector
 
 ```bash
 make format                # Format all code (Go, protobuf, Starlark, shell)
-make format-check          # Check formatting (CI-friendly, fails on drift)
-make lint                  # Run linters (buf, buildifier, shellcheck)
+make format-check          # Check formatting + buildifier lint (CI-friendly, fails on drift)
+make lint                  # Run linters (buf, shellcheck, gocognit)
 ```
 
-Formatting uses [gofumpt](https://github.com/mvdan/gofumpt), [buildifier](https://github.com/bazelbuild/buildtools), [shfmt](https://github.com/mvdan/sh), and [buf](https://buf.build) via [`aspect_rules_lint`](https://github.com/aspect-build/rules_lint). Linting runs buf (protobuf), buildifier (Starlark), and shellcheck (shell) as Bazel aspects. CI enforces lint violations with `--config=ci`.
+Formatting uses [gofumpt](https://github.com/mvdan/gofumpt), [buildifier](https://github.com/bazelbuild/buildtools), [shfmt](https://github.com/mvdan/sh), and [buf](https://buf.build) via [`aspect_rules_lint`](https://github.com/aspect-build/rules_lint). Linting runs buf (protobuf), shellcheck (shell) and gocognit (Go) as Bazel aspects; buildifier's Starlark linter runs inside `make format-check`. CI enforces lint violations with `--config=ci`.
 
 ### Container Images
 
