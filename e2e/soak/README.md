@@ -10,6 +10,7 @@ Three components run together:
 | **External prober** (`//prober`, DaemonSet, already deployed) | the availability SLI — **authoritative for PASS/FAIL** |
 | **k6 runners** (`k6-runner.yaml`) | mesh load by NAME (~300/s) so DNS + cross-node paths are exercised, 5% of it on the two UDS-delivered services (#1108) |
 | **Churn driver** (`churn.sh`) | 33 rolling restarts incl. mesh-dns/agent/proxy/edge/uds-csi + a concurrent triple, two mid-run pods under a brand-new ServiceAccount (#1014), then a 90-minute no-roll window and a demand-set shrink |
+| **Restart watchdog** (`restart-watch.sh`) | 0 new container restarts in the soak's namespaces, with the last-terminated reason of any that happen (#1242) |
 | **Multi-protocol leg** (`multiprotocol.yaml`) | proposal 037's per-port TCP chains under load, and the evidence for its Phase 4 gate |
 | **UDP leg** (`udp.yaml`) | proposal 038's transparent UDP capture under load: the divert, the transparent socket, and the VIP-sourced reply, through every roll |
 
@@ -82,6 +83,8 @@ kubectl create configmap k6-soak-script -n aether-test \
 
 # 2. Pre-flight: every component Ready, 0 restarts, prober SLI live at 25/s with 0 errors.
 kubectl get pods -n aether-system
+# (restarts that already exist are recorded by the watchdog's baseline in 3b and
+# reported as BASELINE, not graded; still find out why they happened before T0)
 # prober baseline (Grafana/Prometheus):
 #   sum by (tier) (rate(aether_probe_requests_total{result="success"}[3m]))
 #     -> liveness ~25/s, mesh_dns ~50/s (two targets at ~25/s each)
@@ -122,6 +125,19 @@ fi
 # context. A stale T0 means the detached run refused to start.
 head -2 /tmp/soak-churn.log
 #
+# 3b. The restart watchdog (#1242), right after the churn driver so its
+#     baseline is T0. Same rules: explicit context, foreground pre-flight
+#     (it takes the baseline and prints it), then detached with nohup setsid
+#     from the MAIN session. It runs 8h (the graded window) and must not run
+#     past ~T0+8h26m, where the k6 runners exit and restart once by design.
+#     See "The restart gate" under Grading.
+if pgrep -f "bash $PWD/e2e/soak/restart-watch.sh"; then
+  echo "a watchdog is already running"
+elif bash "$PWD/e2e/soak/restart-watch.sh" --context talos-main --preflight; then
+  nohup setsid bash "$PWD/e2e/soak/restart-watch.sh" --context talos-main >/dev/null 2>&1 &
+fi
+head -2 /tmp/soak-restart-watch.log   # TODAY's start line, then `BASELINE count=<n>`
+#
 # Fail fast: the FIRST `FAILED` roll (or a SHRINK that cannot scale) ends the
 # driver with `CHURN ABORTED ...` and exit 1, restoring the SHRINK target first.
 # It no longer carries on with holes in the schedule. An ABORTED line means stop,
@@ -149,7 +165,8 @@ kubectl delete -f e2e/soak/k6-runner.yaml
 # behind, so `grep -c ROLLED /tmp/soak-churn*` inflates the tally across runs.
 grep -c ROLLED /tmp/soak-churn.log      # expect 35 (33 rolls incl. 2 uds-csi + 2 new-SA steps) -- this exact path, no glob
 grep -E "newsa/" /tmp/soak-churn.log    # expect 2 ROLLED, 0 FAILED -- see "The new-ServiceAccount step"
-grep aether-uds-csi /tmp/soak-churn.log # expect 2 ROLLED, 0 FAILED -- see "The UDS leg"
+grep aether-uds-csi /tmp/soak-churn.log # expect 2 ROLLED, 0 FAILED, each window=down -- see "The UDS leg"
+grep ' SUMMARY ' /tmp/soak-restart-watch.log  # expect verdict=PASS new_restarts=0 -- see "The restart gate"
 grep -E "no-roll window|SHRINK" /tmp/soak-churn.log
 column -t /tmp/soak-proxy-rss.tsv       # the #628 age-matched series
 ```
@@ -681,6 +698,9 @@ the pod exists, and after that it cannot be placed.
   agent roll. See gate 5 under "The new-ServiceAccount step".
 - **The new-ServiceAccount gate (#1014)** — `init_fetch_timeout` on `@` clusters and
   zero `503/NC` for `user_agent:aether-soak-newsa`. See "The new-ServiceAccount step".
+- **The restart gate (#1242)** — 0 new container restarts in `aether-system`,
+  `aether-ingress` and `aether-test` over T0 → T0+8h: the watchdog's `SUMMARY` line
+  reads `verdict=PASS new_restarts=0`. See "The restart gate".
 - **The UDS gates (#1108/#1109)** — 0 non-benign access-log lines on `uds-echo` /
   `uds-cr-echo` with a clean-200 control, both uds-csi roll lines `ROLLED` with
   `csinode=n/n` and `failedmount_after=0`, and `aether_agent_uds_resolve_failures_total`
@@ -735,6 +755,57 @@ the pod exists, and after that it cannot be placed.
   so it is documented rather than changed; the gauges remain usable only as "this
   node's Envoy has received *a* secret push", never as a rotation count.
 
+### The restart gate (#1242)
+
+**Why.** talos-main has no kube-state-metrics or cAdvisor series (`kube_*` /
+`container_*` do not exist in Prometheus), so a container restart, its last-terminated
+reason and an OOMKill cannot be graded from metrics. Until #1242 the only record was a
+one-liner in a workstation wrapper that printed the restarted containers every 10 minutes
+and printed the SAME blank line when `kubectl` failed, so its log could never prove
+"0 restarts". The `nightly-1005-surge` run had to be graded from VictoriaLogs and Envoy
+epoch counts instead. Whether to add kube-state-metrics to the platform is a separate
+GitOps decision.
+
+**The watchdog.** `restart-watch.sh` (launched in step 3b) lists every pod in the three
+namespaces (the prober DaemonSet, the k6 runners and the soak workloads all live in
+`aether-test`) every 120 s for 8 h. It records a baseline at start, so restarts that
+predate the run are reported but never counted. Pods are keyed by UID, and init
+containers are included. Its log is `/tmp/soak-restart-watch.log`
+(`SOAK_RESTART_LOG`), and every line carries a UTC timestamp:
+
+| Line | Meaning |
+|---|---|
+| `BASELINE count=<n>` + one `BASELINE <ns>/<pod>/<ctr> restarts=… lastReason=…` per container | restarts that existed at start. Not a finding for this run. |
+| `ok count=0 sample=<k>` | every namespace was listed and nothing has restarted since the baseline. **The only line that means "none".** |
+| `RESTARTS count=<n> sample=<k>` + one `RESTART <ns>/<pod>/<ctr> restarts=<N> new=<M> lastReason=<OOMKilled\|Error\|…> exitCode=… finishedAt=… state=… seen=<live\|gone>` per container | n containers restarted since the baseline. The list is cumulative: a restarted pod that a later roll deleted stays listed as `seen=gone`. |
+| `ERROR kubectl failed: ns=<ns> sample=<k> …` | that namespace could not be listed or parsed. The sample proves nothing for it, and no `ok` line is written. |
+| `SUMMARY restart-watch verdict=<PASS\|FAIL\|UNPROVEN> new_restarts=<n> containers=<n> samples=<n> error_samples=<n> baseline=<n> ended=<complete\|TERM\|INT> from=… to=…` + one `SUMMARY RESTART …` per container | the end-of-run grade. |
+
+**The gate.**
+
+```bash
+grep ' SUMMARY ' /tmp/soak-restart-watch.log
+# expect exactly: ... SUMMARY restart-watch verdict=PASS new_restarts=0 containers=0 ... ended=complete
+grep -E ' (RESTART|ERROR) ' /tmp/soak-restart-watch.log   # expect nothing
+```
+
+- `verdict=PASS`: no new restart, no failed sample, and the run reached its end.
+- `verdict=FAIL`: the `SUMMARY RESTART` lines name each container, its last-terminated
+  reason and exit code (`OOMKilled`/137 is the memory limit), and when it finished.
+  Place `finishedAt` against the churn log's roll brackets.
+- `verdict=UNPROVEN`: no restart was seen, but the gate is not proven. Either some
+  samples failed (`error_samples>0`; their `ERROR` lines say why), or the watchdog was
+  stopped early (`ended=TERM|INT`), or it never got a baseline
+  (`reason=no-baseline`, exit 2). restartCount is cumulative for the life of a pod, so
+  the only restart a gap can hide is one in a pod that was also deleted inside it.
+  Cross-check that window in VictoriaLogs (one `starting aether agent` line per agent
+  pod; `k8s.container.restart_count` on its records) before grading the gate.
+
+The watchdog is a workstation script. It cannot see a container that restarts AND whose
+pod is deleted within one 120 s interval. Lower `--interval` if a run needs that, and
+keep it well under the 12-minute roll spacing. `k6-soak-loader` restarts once after k6
+exits at ~T0+8h26m by design, which is why the watchdog stops at T0+8h.
+
 ### Zero-reading gates: seeded or vacuous?
 
 Several gates pass on a zero, and a zero from a series that was never created reads
@@ -777,9 +848,12 @@ requests each over 8 h. The workloads are `charts/udsecho`, already installed in
 **The roll (#1109).** `churn.sh` runs a UDS-CSI step at T0+162 and T0+270. Each step
 does the following:
 
-1. `rollout restart ds/aether-uds-csi`.
-2. As soon as the plugin pod on a UDS pod's node is terminating, delete that UDS pod.
-   Step 1 picks a `uds-echo` pod, step 2 a `uds-cr-echo` pod.
+1. Start a `kubectl get pods -w` on the plugin pods of a UDS pod's node, then
+   `rollout restart ds/aether-uds-csi`.
+2. As soon as the watch shows that node's plugin **down** — the old plugin pod
+   terminating or gone and no Ready replacement yet — delete the UDS pod. Step 1 picks
+   a `uds-echo` pod, step 2 a `uds-cr-echo` pod. The wait is bounded by
+   `SOAK_UDSCSI_WINDOW_TIMEOUT` (300 s); the roll reaches nodes one at a time.
 3. Wait for the DaemonSet rollout to finish, the deleted pod to finish Terminating, and
    its replacement to become Ready.
 4. Log one line:
@@ -792,9 +866,22 @@ ROLLED aether-system/daemonset/aether-uds-csi victim=aether-test/uds-echo-…@<n
 The line's fields:
 
 - `window=down`: the pod was deleted while its node's plugin was down, so the kubelet's
-  unpublish had to wait for the new plugin. `window=missed` means the plugin pod was
-  already gone before the driver looked. The step still counts, but the mid-roll
-  unpublish leg was not exercised.
+  unpublish had to wait for the new plugin. A read of the node's plugin pods taken
+  *after* the delete was accepted still showed it down, so this is proven, not
+  inferred.
+- `window=late`: the plugin was seen down, but it was Ready again by the time the
+  delete was accepted. **Treat as "leg not exercised".**
+- `window=missed`: the plugin was never seen down within the timeout, or its
+  replacement was already Ready when first seen. **Treat as "leg not exercised".**
+
+  `late` and `missed` also log a `UDSCSI window=<w> on <node>: <why> -- the mid-roll
+  NodeUnpublishVolume leg was NOT exercised` line, followed by `plugin-watch` lines with
+  what the watch saw. The step still counts as one roll and its other gates still
+  apply. It is never retried: a retry would roll the DaemonSet again and change the
+  roll count. Before #1243 the step polled only the OLD plugin pod once a second and
+  called it `missed` as soon as that pod was gone, although the node's plugin stays
+  down until the replacement is Ready (`maxSurge: 0`). That logged `window=missed` on
+  2026-10-05 (step 1 of `nightly-1005-surge`).
 - `failedmount_during`: FailedMount events in `aether-test` between the restart and
   the end of the step. Non-zero is expected. The replacement is usually scheduled while
   its node's plugin is still unregistered, and the kubelet retries. On kind every step
@@ -850,6 +937,9 @@ retarget it. Run one step by hand with `--uds-csi-once` (0e).
    grep aether-uds-csi /tmp/soak-churn.log
    # expect: 2 ROLLED (no FAILED), each window=down, csinode=n/n where n is the
    # number of nodes running the plugin, and failedmount_after=0
+   grep -E 'UDSCSI window=(late|missed)' /tmp/soak-churn.log
+   # expect nothing. A line here means that step's mid-roll unpublish leg was
+   # NOT exercised: report the UDS roll gate as "1 of 2 legs exercised", not PASS.
    ```
 
    That `failedmount_after=0` is the record that no FailedMount outlived a roll. The
@@ -1661,6 +1751,13 @@ Each of these invalidated a real run:
 - `churn.sh` — the 33-roll churn driver (incl. the two uds-csi steps) plus the two
   new-ServiceAccount steps, the no-roll window and the demand-set shrink; takes a build
   label for the log header.
+- `udscsi-window.awk` — the uds-csi step's plugin-down detector (#1243), fed the step's
+  `kubectl get pods -w` lines; `churn.sh` reads it from this directory.
+- `restart-watch.sh` — the restart watchdog (#1242). See "The restart gate".
+- `harness_test.sh` + `testdata/restart-watch/` — dry tests for `restart-watch.sh`
+  (canned `kubectl get pods -o json` through a fake kubectl, including a refused call
+  and a non-List answer) and `udscsi-window.awk`. No cluster; needs bash, jq and awk.
+  Run `bash e2e/soak/harness_test.sh` after editing either file.
 - `newsa-client.sh` — the new-SA step's workload (busybox `sh` + `curl` in the pod,
   shipped per step as a ConfigMap); never run on the workstation.
 - `sample-proxy-rss.sh` — age-matched `aether-proxy` working-set sampler for #628.

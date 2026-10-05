@@ -146,16 +146,28 @@
 #   1. picks a Running pod of the step's UDS Deployment (round-robin over
 #      SOAK_UDSCSI_VICTIMS: uds-echo = the annotation path, uds-cr-echo = the
 #      EndpointPolicy path) and the plugin pod on that pod's node;
-#   2. `rollout restart`s the DaemonSet and, as soon as that node's plugin pod is
-#      terminating (window=down; window=missed if it was replaced before the
-#      driver saw it), deletes the UDS pod;
+#   2. starts a `kubectl get pods -w` on that node's plugin pods, `rollout
+#      restart`s the DaemonSet and, as soon as the watch shows the node's plugin
+#      DOWN (the old pod terminating or gone, no Ready replacement yet), deletes
+#      the UDS pod (#1243: the step synchronises on that event, not on a timer).
+#      The window is then one of:
+#        window=down    the delete was accepted while the plugin was down,
+#                       confirmed by a read AFTER the delete -- the leg ran;
+#        window=late    the plugin was Ready again by the time the delete was
+#                       accepted -- the leg may not have run;
+#        window=missed  the plugin was never seen down within
+#                       SOAK_UDSCSI_WINDOW_TIMEOUT, or a replacement was already
+#                       Ready when first seen -- the leg did not run.
+#      late/missed also log a `UDSCSI window=<w> ... NOT exercised` line with
+#      the reason and what the watch saw. Never retried: a retry would roll the
+#      DaemonSet a second time and change the roll count;
 #   3. waits for the DaemonSet rollout, the deleted pod to finish Terminating, and
 #      its replacement to become Ready; then checks every node running the plugin
 #      lists csi.aether.io in its CSINode, and counts FailedMount events in the
 #      victim's namespace during the step and in the 30s after it (the latter
 #      MUST be 0: a FailedMount that outlives the roll);
 #   4. logs ONE line:
-#        ROLLED aether-system/daemonset/aether-uds-csi victim=<ns>/<pod>@<node> window=down
+#        ROLLED aether-system/daemonset/aether-uds-csi victim=<ns>/<pod>@<node> window=<down|late|missed>
 #          rollout=<s>s terminated=<s>s replacement=<pod> ready=<s>s csinode=<k>/<n>
 #          failedmount_during=<n> failedmount_after=<n>
 #      or FAILED ... with the same fields plus bad=<what>. Like a FAILED newsa
@@ -172,6 +184,8 @@
 #                                   <ns>/<Deployment>, pods labelled app=<Deployment>
 #   SOAK_UDSCSI_TIMEOUT=600         seconds for the DaemonSet rollout; 300 each for
 #                                   the pod to terminate and its replacement
+#   SOAK_UDSCSI_WINDOW_TIMEOUT=300  seconds to wait for the victim node's plugin
+#                                   to go down (the roll reaches nodes one by one)
 set -uo pipefail
 
 CTX="${SOAK_CONTEXT:-talos-main}"
@@ -277,6 +291,13 @@ UDSCSI_NS="aether-system"
 UDSCSI_DS="daemonset/aether-uds-csi"
 UDSCSI_SELECTOR="app.kubernetes.io/component=uds-csi"
 UDSCSI_DRIVER="csi.aether.io"
+UDSCSI_WINDOW_TIMEOUT="${SOAK_UDSCSI_WINDOW_TIMEOUT:-300}"
+UDSCSI_WINDOW_AWK="$HERE/udscsi-window.awk"
+# One line per plugin pod observation, the udscsi-window.awk input format. No
+# {range} in it: kubectl 1.35's `get -w -o jsonpath` with a {range}...{end}
+# template prints the initial list and then EXITS 0 at the first change (seen on
+# kind while building #1243), so the watch would end exactly when it matters.
+UDSCSI_POD_FMT='pod={.metadata.name} del={.metadata.deletionTimestamp} ready={.status.conditions[?(@.type=="Ready")].status}{"\n"}'
 UDSCSI_STEP=0
 
 # Pre-flight (#951). Writes to stderr only -- never to $LOG -- and runs before T0.
@@ -351,6 +372,14 @@ preflight_udscsi() {
 			fail=1
 		fi
 	done
+	if [ ! -r "$UDSCSI_WINDOW_AWK" ]; then
+		echo "churn.sh: PRE-FLIGHT FAILED: uds-csi window detector missing at $UDSCSI_WINDOW_AWK" >&2
+		fail=1
+	fi
+	if ! out=$(k --request-timeout=15s -n "$UDSCSI_NS" auth can-i watch pods 2>&1); then
+		echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' may not watch pods in $UDSCSI_NS ($out)" >&2
+		fail=1
+	fi
 	if ! out=$(k --request-timeout=15s auth can-i list csinodes.storage.k8s.io 2>&1); then
 		echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' may not list CSINodes ($out)" >&2
 		fail=1
@@ -694,11 +723,21 @@ udscsi_csinodes() {
 	echo "$ok/$total"
 }
 
+# The node's plugin state from the watch file: unseen|up|down|back (see the awk).
+udscsi_window() { awk -v orig="$1" -f "$UDSCSI_WINDOW_AWK" "$2"; }
+
+# Stop a step's plugin watch and drop its file.
+udscsi_unwatch() {
+	if [ -n "$1" ]; then kill "$1" 2>/dev/null; fi
+	rm -f "$2"
+}
+
 # One uds-csi roll step (#1109). See the header. Returns non-zero only for a hole
 # (restart refused, or nothing to delete); every other outcome is a tally line.
 udscsi() {
 	local spec vns vdep victims n line victim vnode before plugin t_begin since t_del t_done
-	local window="missed" rollout_s=- term_s=- ready_s=- replacement=- csinode fm_during fm_after bad="" deadline p
+	local window="missed" window_why="" rollout_s=- term_s=- ready_s=- replacement=- csinode fm_during fm_after bad="" deadline
+	local wfile wpid how state
 	UDSCSI_STEP=$((UDSCSI_STEP + 1))
 	read -r -a victims <<<"$UDSCSI_VICTIMS"
 	n=${#victims[@]}
@@ -720,34 +759,95 @@ udscsi() {
 	before=$(k -n "$vns" get pods -l "app=$vdep" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
 	plugin=$(k -n "$UDSCSI_NS" get pods -l "$UDSCSI_SELECTOR" --field-selector "spec.nodeName=$vnode" \
 		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+	# Watch the node's plugin pods from BEFORE the restart (#1243). The old
+	# 1-second poll of the old plugin pod alone logged window=missed whenever
+	# that pod was already gone at the next poll -- although the node's plugin
+	# stays down until the REPLACEMENT is Ready (maxSurge 0), which is the
+	# window that matters. The watch delivers the terminating update itself,
+	# so the step acts on the event, not on a timer.
+	wfile=$(mktemp)
+	wpid=""
+	if [ -n "$plugin" ]; then
+		k -n "$UDSCSI_NS" get pods -l "$UDSCSI_SELECTOR" --field-selector "spec.nodeName=$vnode" \
+			-w -o jsonpath="$UDSCSI_POD_FMT" >"$wfile" 2>>"$LOG" &
+		wpid=$!
+		# The watch lists the existing pods first; wait (bounded) until it has.
+		deadline=$(($(date +%s) + 15))
+		while [ "$(udscsi_window "$plugin" "$wfile")" = "unseen" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+			sleep 0.2
+		done
+		if [ "$(udscsi_window "$plugin" "$wfile")" = "unseen" ]; then
+			log "UDSCSI watch on $vnode listed nothing in 15s; polling instead"
+			kill "$wpid" 2>/dev/null
+		fi
+	fi
 	t_begin=$(date +%s)
 	since=$(date -u +%FT%TZ)
 	log "UDSCSI begin $UDSCSI_NS/$UDSCSI_DS; will delete $vns/$victim on $vnode once its plugin ${plugin:-<none>} is down"
 	if ! k -n "$UDSCSI_NS" rollout restart "$UDSCSI_DS" >>"$LOG" 2>&1; then
 		log "FAILED $UDSCSI_NS/$UDSCSI_DS - rollout restart refused"
+		udscsi_unwatch "$wpid" "$wfile"
 		return 1
 	fi
 	# Delete the victim while ITS node's plugin is down, so the kubelet's
-	# NodeUnpublishVolume has to wait for the new plugin to register.
-	deadline=$((t_begin + UDSCSI_TIMEOUT))
-	while [ -n "$plugin" ] && [ "$(date +%s)" -lt "$deadline" ]; do
-		# Terminating = down (it unregistered on SIGTERM). Already gone = we
-		# missed the window. Any other API error: keep polling.
-		if p=$(k --request-timeout=10s -n "$UDSCSI_NS" get pod "$plugin" -o jsonpath='{.metadata.deletionTimestamp}' 2>&1); then
-			if [ -n "$p" ]; then
-				window="down"
-				break
-			fi
-		else
-			case "$p" in *NotFound*) break ;; esac
+	# NodeUnpublishVolume has to wait for the new plugin to register. Down =
+	# the old plugin pod terminating or gone AND no Ready replacement on the
+	# node. Bounded: the roll reaches the node within the rollout, or never.
+	deadline=$((t_begin + UDSCSI_WINDOW_TIMEOUT))
+	how="watch"
+	while [ -n "$plugin" ]; do
+		if [ -n "$wpid" ] && ! kill -0 "$wpid" 2>/dev/null; then
+			# The watch ended (API error, server-side timeout): poll the same
+			# lines into the same file; the latest line per pod wins.
+			if [ "$how" = "watch" ]; then log "UDSCSI plugin watch on $vnode ended; polling every 0.2s instead"; fi
+			how="poll"
+			k --request-timeout=10s -n "$UDSCSI_NS" get pods -l "$UDSCSI_SELECTOR" \
+				--field-selector "spec.nodeName=$vnode" -o jsonpath="{range .items[*]}$UDSCSI_POD_FMT{end}" \
+				>>"$wfile" 2>/dev/null
 		fi
-		sleep 1
+		state=$(udscsi_window "$plugin" "$wfile")
+		case "$state" in
+		down)
+			window="down"
+			break
+			;;
+		back)
+			window_why="replacement already Ready when first seen"
+			break
+			;;
+		esac
+		if [ "$(date +%s)" -ge "$deadline" ]; then
+			window_why="plugin $plugin not down within ${UDSCSI_WINDOW_TIMEOUT}s (last state: $state)"
+			break
+		fi
+		sleep 0.2
 	done
 	t_del=$(date +%s)
 	if ! k -n "$vns" delete pod "$victim" --wait=false >>"$LOG" 2>&1; then
 		log "FAILED $UDSCSI_NS/$UDSCSI_DS - could not delete $vns/$victim"
+		udscsi_unwatch "$wpid" "$wfile"
 		return 1
 	fi
+	# Confirm AFTER the delete was accepted: still down = the delete provably
+	# landed inside the window. Back up already = window=late, the leg may not
+	# have been exercised (conservative: it may also have been a near miss).
+	if [ "$window" = "down" ]; then
+		k --request-timeout=10s -n "$UDSCSI_NS" get pods -l "$UDSCSI_SELECTOR" \
+			--field-selector "spec.nodeName=$vnode" -o jsonpath="{range .items[*]}$UDSCSI_POD_FMT{end}" \
+			>>"$wfile" 2>/dev/null
+		if [ "$(udscsi_window "$plugin" "$wfile")" != "down" ]; then
+			window="late"
+			window_why="plugin on $vnode Ready again by the time the delete was accepted"
+		fi
+	fi
+	if [ "$window" = "down" ]; then
+		log "UDSCSI window=down on $vnode: $vns/$victim deleted $((t_del - t_begin))s after the restart while the plugin was down ($how)"
+	else
+		# Keep what the driver saw, so a miss can be read from the log.
+		log "UDSCSI window=$window on $vnode: ${window_why:-no plugin pod on $vnode} -- the mid-roll NodeUnpublishVolume leg was NOT exercised in this step ($how)"
+		sed 's/^/  plugin-watch /' "$wfile" >>"$LOG"
+	fi
+	udscsi_unwatch "$wpid" "$wfile"
 	if k -n "$UDSCSI_NS" rollout status "$UDSCSI_DS" --timeout="${UDSCSI_TIMEOUT}s" >>"$LOG" 2>&1; then
 		rollout_s=$(($(date +%s) - t_begin))
 	else
