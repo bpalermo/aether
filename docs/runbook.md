@@ -2188,6 +2188,68 @@ running, and the DaemonSet deletes an idle pod. So during a rolling upgrade:
   pod's `pod not ready` is rule 2 failing. One at about fork + 19 s, after the successor's
   `pod ready`, is rule 1 failing.
 
+### The ext_authz sidecar across a proxy roll (#1275)
+
+**Symptom (chart <= 2.4.8).** `ext_authz` errors on a node right after its proxy pod was
+replaced: `envoy_http_<stat_prefix>_ext_authz_error_total` goes up by a few, and with
+`failureMode: DENY` those requests got a 403. The prober's `AetherAuthzCanaryErrors` fires
+on it. It is worst on the first roll onto a new sidecar image. On talos-main on 2026-10-05
+(OPA 1.21.1, chart 2.4.8) the `authz` container started 7–13 s after `proxy` in every new
+pod, because the kubelet starts regular containers in order without waiting and the new
+image had to be pulled (10.4 s on worker-01). The new Envoy hot-restarted and took the
+node's listeners before anything listened on `/run/aether/authz/authz.sock`.
+
+**Since chart 2.4.9** `authz` is a native sidecar: an init container with
+`restartPolicy: Always`, after `install-supervisor` and before `proxy`. Its startupProbe
+execs the staged `proxy-ready --unix-socket=/run/aether/authz/authz.sock` in the sidecar's
+container, and passes once a `connect(2)` to the socket succeeds.
+
+What the ordering guarantees:
+
+- **Startup.** The kubelet does not start `proxy` until the probe passes. A new pod's Envoy
+  therefore cannot fork, hot-restart, or take a listener before its own authz accepts. The
+  image pull and OPA's start now delay the new pod instead: it turns Ready later, and with
+  `maxUnavailable: 0` the old pod serves meanwhile. If the sidecar never comes up, the new
+  pod stays in `Init`, the roll stops, and the old pod keeps serving.
+- **Shutdown.** On deletion the kubelet sends SIGTERM to `proxy` and stops `authz` only after
+  `proxy` has exited. The old Envoy is a child of the supervisor in `proxy`, so it has its
+  pod's authz for as long as it runs. That covers `successor_wait` after `kubectl delete pod`
+  (about 20–25 s of serving, see *What the proxy supervisor does on SIGTERM*), the
+  `drain_fallback` drain, and a parent that is still draining when its pod is deleted.
+  Before 2.4.9 both containers got SIGTERM at once, and OPA closed its socket while the old
+  Envoy was still the node's only Envoy. In a plain DaemonSet roll this matters less: the
+  successor turns Ready only after the parent Envoy has exited (see *How a proxy roll hands
+  the node over*), so the old pod is usually deleted after its Envoy is gone.
+- **Both Envoys of a handoff have an authz.** Each Envoy reaches the socket in its own pod's
+  `authz-socket` emptyDir. The old one uses the old pod's sidecar and the new one uses the
+  new pod's sidecar.
+
+What it does not guarantee:
+
+- **A sidecar that dies mid-life.** The kubelet restarts it in place (`restartPolicy:
+  Always`) while `proxy` keeps serving. Checks fail per `failureMode` until it is back, as
+  before.
+- **"Accepting" is not "has the latest policy".** For the OPA preset the gRPC listener opens
+  after `/policy/policy.rego` has loaded, so a pass means a policy is in place. A
+  bring-your-own sidecar that loads its policy after it binds the socket needs
+  `startupProbe.override` with its own readiness test.
+- **The grace period still applies.** The sidecar's shutdown shares the pod's
+  `terminationGracePeriodSeconds` (`proxy.terminationGracePeriodSeconds`, 180 s). If the
+  supervisor uses all of it, the kubelet kills both.
+- **With `startupProbe.enabled: false`** the kubelet starts `proxy` as soon as the sidecar's
+  process is running, not when it serves.
+
+Check the order on a live pod. `authz` is listed under `initContainerStatuses`, and its
+`started` turns true only when the probe passes. The `proxy` container's `startedAt` must
+be later than that:
+
+```bash
+kubectl -n aether-system get pod <proxy-pod> -o jsonpath='{range .status.initContainerStatuses[?(@.name=="authz")]}authz started={.started} at {.state.running.startedAt}{"\n"}{end}{range .status.containerStatuses[?(@.name=="proxy")]}proxy at {.state.running.startedAt}{"\n"}{end}'
+```
+
+The chart needs Kubernetes >= 1.29 for this and refuses to render with the sidecar enabled
+on an older cluster.
+
 ### A roll wedges both epochs after `starting workers` (#1050)
 
 Symptom, per roll: the successor's last Envoy line is `all dependencies initialized.
@@ -2276,8 +2338,10 @@ goes up by one and its `lastState.terminated.exitCode` is 1. Nothing re-execs in
 and the DaemonSet does not replace the pod. The kind reproduction shows `restartCount 1`.
 Only a pod that is already terminating (it has a `deletionTimestamp`) does not get its
 container restarted. The talos reading of `restartCount 0` after #1050 is therefore not
-what this code does. Read the count by container name: `containerStatuses` is sorted by
-name, and with the ext_authz sidecar enabled `[0]` is `authz`, not `proxy`.
+what this code does. Read the count by container name, not by index. Before chart 2.4.9
+`containerStatuses` held `authz` and `proxy` sorted by name, so with the ext_authz sidecar
+enabled `[0]` was `authz`. Since #1275 `authz` is a native sidecar and is listed under
+`initContainerStatuses`.
 
 ```bash
 kubectl -n aether-system get pod <proxy-pod> -o jsonpath='{range .status.containerStatuses[?(@.name=="proxy")]}{.restartCount} {.lastState.terminated.exitCode} {.lastState.terminated.finishedAt}{"\n"}{end}'

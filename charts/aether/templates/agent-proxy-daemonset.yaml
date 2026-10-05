@@ -1,4 +1,11 @@
 {{- if .Values.proxy.enabled }}
+{{- if and .Values.proxy.authzSidecar.enabled (semverCompare "<1.29.0-0" .Capabilities.KubeVersion.Version) }}
+{{- /* #1275: the authz sidecar is a native sidecar (initContainers +
+restartPolicy: Always). An apiserver without SidecarContainers drops the
+field, which leaves an init container that never exits: every proxy pod stuck
+in Init. Refuse to render rather than fall back to the ordering that 403s. */}}
+{{- fail (printf "proxy.authzSidecar requires Kubernetes >= 1.29 (native sidecar containers), got %s; with `helm template` pass --kube-version" .Capabilities.KubeVersion.Version) }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -87,6 +94,113 @@ spec:
           volumeMounts:
             - name: supervisor-bin
               mountPath: /opt/aether
+        {{- if .Values.proxy.authzSidecar.enabled }}
+        {{- $authz := .Values.proxy.authzSidecar }}
+        {{- $authzDefaultProbe := and $authz.startupProbe.enabled (empty $authz.startupProbe.override) }}
+        # External authorization sidecar (proposal 027): serves
+        # envoy.service.auth.v3.Authorization on the shared Unix socket. The proxy's
+        # bootstrap carries a static `authz_sidecar` cluster pointing at it.
+        #
+        # #1275: a Kubernetes NATIVE sidecar (an init container with
+        # restartPolicy: Always), not a regular container. The kubelet starts
+        # regular containers in order without waiting for any of them, so as the
+        # second container it started AFTER the proxy: when its image had to be
+        # pulled (7-13 s on talos-main, the first roll onto a new OPA tag) the new
+        # Envoy took over the node's listeners with nothing behind the authz
+        # socket, and every check in that window was an ext_authz error — a 403
+        # under failureMode DENY. As a native sidecar:
+        #   - startup: the kubelet does not start the proxy container until this
+        #     one's startupProbe has passed, i.e. until the authz socket accepts.
+        #     The new Envoy cannot take traffic before its authz is up.
+        #   - shutdown: the kubelet stops native sidecars only after every
+        #     regular container has exited. The old pod's Envoy (the hot-restart
+        #     parent, which keeps serving and draining until the successor's
+        #     protocol stops it) therefore has its authz for as long as it runs,
+        #     instead of both getting SIGTERM at once.
+        # It sits after install-supervisor because its default startupProbe execs
+        # the proxy-ready binary that container stages. Requires Kubernetes >= 1.29
+        # (native sidecars on by default; GA in 1.33), enforced at render time.
+        - name: authz
+          restartPolicy: Always
+          {{- if $authz.opa.enabled }}
+          image: {{ $authz.opa.image | quote }}
+          args:
+            - "run"
+            - "--server"
+            # No phone-home version check. OPA 1.20 deprecates the old spelling
+            # (--disable-telemetry) in favour of this one; a future release that
+            # drops it would stop the sidecar from starting.
+            - "--skip-version-check"
+            # Bind OPA's diagnostic API to a per-pod UDS, NOT a host TCP port. The
+            # proxy DS is hostNetwork=true, so 127.0.0.1:8181 would be host-wide and
+            # collide between the old and surged-in new pod during every rollout
+            # (maxSurge=1) — a deterministic 2-3 restart bind race. The authz-socket
+            # emptyDir is per-pod, so this socket is unique per pod. Envoy reaches OPA
+            # only over the ext_authz gRPC UDS below; nothing consumes 8181.
+            - "--addr=unix:///run/aether/authz/opa-api.sock"
+            - "--set=plugins.envoy_ext_authz_grpc.addr=unix:///run/aether/authz/authz.sock"
+            - "--set=decision_logs.console=true"
+            - "/policy/policy.rego"
+          {{- else }}
+          image: "{{ $authz.image.repository }}:{{ $authz.image.tag }}"
+          {{- with $authz.image.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- if $authzDefaultProbe }}
+          # Started = the authz gRPC socket ACCEPTS a connection: exactly the
+          # contract every authz sidecar here must meet (OPA preset or your own),
+          # and the thing Envoy needs. A port probe cannot be pod-local on this
+          # hostNetwork DaemonSet (see the proxy's readinessProbe), and the OPA
+          # image is distroless with no shell or client, so this execs the
+          # stdlib-only proxy-ready prober install-supervisor staged — inside THIS
+          # container, through the supervisor-bin mount below. For OPA the gRPC
+          # listener opens after the policy file has loaded, so "accepts" also
+          # means "has a policy". period 1s: the proxy container waits on it.
+          startupProbe:
+            exec:
+              command:
+                - "/opt/aether/proxy-ready"
+                - "--unix-socket=/run/aether/authz/authz.sock"
+            periodSeconds: {{ $authz.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ $authz.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ $authz.startupProbe.failureThreshold }}
+          {{- else if $authz.startupProbe.enabled }}
+          startupProbe:
+            {{- toYaml $authz.startupProbe.override | nindent 12 }}
+          {{- end }}
+          {{- with $authz.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $authz.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: authz-socket
+              mountPath: /run/aether/authz
+            {{- if $authz.opa.enabled }}
+            - name: opa-policy
+              mountPath: /policy
+              readOnly: true
+            {{- end }}
+            {{- if $authzDefaultProbe }}
+            # The staged startupProbe binary (proxy-ready).
+            - name: supervisor-bin
+              mountPath: /opt/aether
+              readOnly: true
+            {{- end }}
+          {{- with $authz.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+        {{- end }}
       containers:
         - name: proxy
           # Custom aether-proxy = Envoy with the compiled-in aether_stats C++
@@ -305,55 +419,6 @@ spec:
               mountPropagation: HostToContainer
               readOnly: true
             {{- end }}
-        {{- if .Values.proxy.authzSidecar.enabled }}
-        # External authorization sidecar (proposal 027): serves
-        # envoy.service.auth.v3.Authorization on the shared Unix socket. The proxy's
-        # bootstrap carries a static `authz_sidecar` cluster pointing at it.
-        - name: authz
-          {{- if .Values.proxy.authzSidecar.opa.enabled }}
-          image: {{ .Values.proxy.authzSidecar.opa.image | quote }}
-          args:
-            - "run"
-            - "--server"
-            # No phone-home version check. OPA 1.20 deprecates the old spelling
-            # (--disable-telemetry) in favour of this one; a future release that
-            # drops it would stop the sidecar from starting.
-            - "--skip-version-check"
-            # Bind OPA's diagnostic API to a per-pod UDS, NOT a host TCP port. The
-            # proxy DS is hostNetwork=true, so 127.0.0.1:8181 would be host-wide and
-            # collide between the old and surged-in new pod during every rollout
-            # (maxSurge=1) — a deterministic 2-3 restart bind race. The authz-socket
-            # emptyDir is per-pod, so this socket is unique per pod. Envoy reaches OPA
-            # only over the ext_authz gRPC UDS below; nothing consumes 8181.
-            - "--addr=unix:///run/aether/authz/opa-api.sock"
-            - "--set=plugins.envoy_ext_authz_grpc.addr=unix:///run/aether/authz/authz.sock"
-            - "--set=decision_logs.console=true"
-            - "/policy/policy.rego"
-          volumeMounts:
-            - name: authz-socket
-              mountPath: /run/aether/authz
-            - name: opa-policy
-              mountPath: /policy
-              readOnly: true
-          {{- else }}
-          image: "{{ .Values.proxy.authzSidecar.image.repository }}:{{ .Values.proxy.authzSidecar.image.tag }}"
-          {{- with .Values.proxy.authzSidecar.image.args }}
-          args:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          volumeMounts:
-            - name: authz-socket
-              mountPath: /run/aether/authz
-          {{- end }}
-          {{- with .Values.proxy.authzSidecar.resources }}
-          resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-        {{- end }}
       volumes:
         - name: supervisor-bin
           emptyDir: {}

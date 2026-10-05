@@ -739,6 +739,37 @@ proxy:
     # error. It used to be compared raw, so `allow` silently meant DENY (#770).
     timeout: 200ms
     failureMode: DENY
+    # #1275: the sidecar is a Kubernetes NATIVE sidecar (an init container with
+    # restartPolicy: Always; needs Kubernetes >= 1.29, enforced at render time).
+    # The kubelet starts the proxy container only after this startupProbe passes
+    # and stops the sidecar only after the proxy container has exited, so neither
+    # a new nor a draining old Envoy runs without its authz.
+    #
+    # The default probe execs the staged stdlib-only proxy-ready prober inside
+    # the sidecar's container: started = a connect(2) to
+    # /run/aether/authz/authz.sock succeeds. That is the contract every sidecar
+    # here must already meet (OPA preset or bring-your-own), so it works for
+    # both. Budget: failureThreshold x periodSeconds before the kubelet restarts
+    # the sidecar (image pulls do not count — probing starts once the container
+    # has started); the old pod keeps serving meanwhile (maxUnavailable: 0).
+    startupProbe:
+      enabled: true
+      periodSeconds: 1
+      timeoutSeconds: 1
+      failureThreshold: 120
+      # A full Kubernetes probe (exec/grpc/httpGet plus its timings) used
+      # verbatim INSTEAD of the socket check, for a sidecar that is "started"
+      # by some other test. Mind the pod is hostNetwork: a port probe answers for
+      # whichever pod on the node holds the port. With enabled: false there is
+      # no startupProbe at all and the kubelet counts the sidecar started as soon
+      # as its process is; the ordering then guarantees "running", not "serving".
+      override: {}
+    # Optional probes for the sidecar, rendered verbatim; none by default. A
+    # native sidecar's readinessProbe counts toward the pod's Ready (and so
+    # gates a proxy roll); a livenessProbe failure restarts only the sidecar
+    # — while it is down, checks fail per failureMode (403s under DENY).
+    livenessProbe: {}
+    readinessProbe: {}
     # The sidecar used to run with `resources: {}`: unbounded, and invisible to
     # node CPU/memory request accounting on a DaemonSet that is on every node.
     # OPA idles at ~10 Mi / ~0 m with a small policy (measured on 1.20.2); the
