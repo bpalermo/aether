@@ -1930,6 +1930,64 @@ rolls, and the series age out with the generation. That ageing-out is why an **i
 query is never the right read here: minutes after a roll the generation's series is
 gone, and the instant read returns nothing at all rather than the exit it recorded.
 
+### mesh-dns CPU throttling
+
+mesh-dns is every managed pod's resolver, so a CFS-throttled period on it is added
+to the DNS latency of every lookup in flight on that node. Until chart 2.4.7 it ran
+with a `25m` request and a `100m` limit and was throttled in 8.7 % of 100 ms periods
+at steady state (talos w05, #1253) while *averaging* ~24.5m: its CPU comes in bursts,
+and a burst that spends the period's 10 ms of quota parks the daemon until the next
+period. Since #1253 it has a `50m` request and **no CPU limit** by default, with
+`GOMAXPROCS=2` pinned in the chart (`agent.meshDnsDaemon.goMaxProcs`).
+
+Read the throttling straight from the container's cgroup. The image is distroless
+(no shell), so go through a node debug pod; the `find` works under both the
+`systemd` and `cgroupfs` cgroup drivers:
+
+```bash
+NODE=<node>
+POD=$(kubectl get pod -n aether-system -l app.kubernetes.io/component=mesh-dns \
+  --field-selector spec.nodeName="$NODE" -o jsonpath='{.items[0].metadata.name}')
+CID=$(kubectl get pod -n aether-system "$POD" \
+  -o jsonpath='{.status.containerStatuses[?(@.name=="mesh-dns")].containerID}' | sed 's|.*://||')
+kubectl debug node/"$NODE" -it --profile=sysadmin --image=busybox:1.37 -- sh -c \
+  "d=\$(find /host/sys/fs/cgroup -type d -name \"*$CID*\" | head -1); echo \$d; cat \$d/cpu.max \$d/cpu.stat \$d/cpu.pressure"
+```
+
+- `cpu.max` is `max 100000` with no limit, `10000 100000` at `100m`.
+- `cpu.stat`: `nr_throttled / nr_periods` is the fraction of periods throttled and
+  `throttled_usec` the total time parked. With no limit both stay at 0 — `nr_periods`
+  only counts while a quota is set. `usage_usec` over the pod's age is its average CPU.
+- `cpu.pressure`: the PSI `some avg10/avg60` is the share of time the daemon had a
+  runnable task waiting for CPU for *any* reason — quota throttling or node
+  contention. With no limit, this is the number to watch: non-zero means the `50m`
+  request (its CFS weight) is too low for the node it shares.
+
+If the kubelet's cAdvisor is scraped, the same counters are
+`container_cpu_cfs_throttled_periods_total` / `container_cpu_cfs_periods_total`:
+
+```promql
+# Fraction of CFS periods throttled, per mesh-dns pod (0 once the limit is gone)
+sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace="aether-system", container="mesh-dns"}[5m]))
+  / sum by (pod) (rate(container_cpu_cfs_periods_total{namespace="aether-system", container="mesh-dns"}[5m]))
+
+# CPU actually used, millicores
+1000 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="aether-system", container="mesh-dns"}[5m]))
+```
+
+What the throttling costs shows in the daemon's own latency histogram, split by path
+(`answered` = an authoritative mesh hit from memory, `forwarded` = a kube-dns round
+trip). Throttling lifts the tail, not the median:
+
+```promql
+histogram_quantile(0.99,
+  sum by (le, result) (rate(aether_mesh_dns_query_duration_seconds_bucket{result=~"answered|forwarded"}[30m])))
+```
+
+To put a cap back, set `agent.meshDnsDaemon.resources.limits.cpu` (an empty value
+renders no limit) and consider `agent.meshDnsDaemon.goMaxProcs=0`, which hands
+`GOMAXPROCS` back to the Go runtime to derive from that limit.
+
 ### What the proxy supervisor does on SIGTERM (`kubectl delete pod`, drain, eviction)
 
 The `aether-proxy` pod is `hostNetwork` with `maxSurge: 1`, so the node's Envoy is a

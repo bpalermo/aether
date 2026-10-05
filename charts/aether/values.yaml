@@ -344,13 +344,36 @@ agent:
     # inside THIS container's cgroup and counts against limits.memory: ~2.4Mi max
     # RSS per run (the same stat-a-marker binary as /proxy-ready, measured at 500
     # runs). This daemon sets no GOMEMLIMIT.
+    #
+    # CPU: a 50m REQUEST and deliberately NO CPU LIMIT (#1253), the same call as
+    # the agent (#1116) and the authz sidecar. This daemon is every managed pod's
+    # resolver, so its tail latency is every pod's lookup latency. At the old
+    # 25m request / 100m limit it averaged ~24.5m and was STILL CFS-throttled in
+    # 8.7 % of 100 ms periods (live cgroup on talos w05: nr_throttled 16851 of
+    # nr_periods 193397, ~1,632 s throttled over ~4.5 h): its CPU arrives in
+    # bursts (a reload, a query storm at a rollout, a GC cycle), and a burst
+    # past 10 ms in a period parks every query in flight until the next period.
+    # The request still reserves CPU for scheduling and is the CFS weight under
+    # contention (25m against talos' 800m proxy request was a ~1:32 weight on a
+    # saturated node). A surge roll (maxSurge 1) needs a second 50m per node.
+    # The pod was already QoS Burstable (requests != limits), so no QoS class
+    # changes. To restore a cap, set limits.cpu (and see goMaxProcs below);
+    # an empty limits.cpu renders no CPU limit.
     resources:
       requests:
-        cpu: 25m
+        cpu: 50m
         memory: 32Mi
       limits:
-        cpu: 100m
         memory: 64Mi
+    # GOMAXPROCS for the mesh-dns container, set as an explicit env var (#1253).
+    # Since Go 1.25 the runtime derives GOMAXPROCS from the cgroup CPU limit with
+    # a floor of 2, so under the old 100m limit this daemon already ran with 2;
+    # with the limit gone it would scale to the node's core count, and with it
+    # the GC's background workers (25 % of Ps), which burst across the node for
+    # a process whose work is a map lookup or a UDP round trip. 2 keeps today's
+    # runtime behaviour exactly. 0 (or empty) omits the env var and hands
+    # GOMAXPROCS back to the Go runtime.
+    goMaxProcs: 2
   # Image as repository + digest (digest-pinned for immutability). Mirror to a
   # private registry by overriding `repository` alone; the digest is preserved.
   image:
