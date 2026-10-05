@@ -176,12 +176,16 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 // incremental events buffered since the subscription and every later one. A request filter scopes
 // both the snapshot and the incremental events to the named services
 // (demand-scoped distribution): the agent re-asserts its filter on every
-// reconnect, and an unset filter preserves the full watch.
+// reconnect, and an unset filter preserves the full watch. A client whose
+// filter grew sends partial_resume instead of last_version and, when its token
+// names the current contents, receives only the added services' endpoints
+// (#1239; see Snapshot.WatchStart).
 func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest, stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse]) error {
 	watcherID := watcherIDOf(req)
 	filterServices, filterSet := buildWatchFilter(req)
-	s.log.DebugContext(stream.Context(), "WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion(),
-		"filtered", filterSet != nil, "filterServices", len(filterServices))
+	token, have := resumeRequest(req)
+	s.log.DebugContext(stream.Context(), "WatchEndpoints", "watcher", watcherID, "lastVersion", token,
+		"partial", have != nil, "filtered", filterSet != nil, "filterServices", len(filterServices))
 
 	// Never serve a snapshot before the first sync has populated it.
 	if err := s.awaitSynced(stream.Context()); err != nil {
@@ -205,16 +209,19 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 		catalog        []string
 		currentVersion string
 		resume         Resume
+		extended       bool
 	)
 	ch := s.broadcaster.SubscribeWith(watcherID, filterServices, func() {
-		events, catalog, currentVersion, resume = s.snapshot.WatchStart(req.GetLastVersion(), filterSet)
+		events, catalog, currentVersion, resume, extended = s.snapshot.WatchStart(token, filterSet, have)
 	})
 	defer s.broadcaster.Unsubscribe(watcherID, ch)
-	s.metrics.watchStarted(stream.Context(), resume)
-	if resume == ResumeResend {
-		if err := sendFilteredSnapshot(stream, events, filterSet); err != nil {
-			return err
-		}
+	s.metrics.watchStarted(stream.Context(), resume, extended)
+	s.log.DebugContext(stream.Context(), "WatchEndpoints resolved", "watcher", watcherID,
+		"resume", resumeLabel(resume, extended), "version", currentVersion, "events", len(events))
+	// A resend's FULL_SNAPSHOT events, or an extended client's missing
+	// services as ENDPOINT_ADDED (#1239); nothing for a plain resume.
+	if err := sendFilteredSnapshot(stream, events, filterSet); err != nil {
+		return err
 	}
 	// Replay the full service catalog (every watcher, regardless of filter):
 	// agents keep a local index of service names so the on-demand cold path
@@ -234,8 +241,9 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 	// the client adopts a version as its resume token, which is safe only once
 	// it holds everything the version names.
 	if err := stream.Send(&registrarv1.WatchEndpointsResponse{
-		Type:    registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE,
-		Version: currentVersion,
+		Type:     registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE,
+		Version:  currentVersion,
+		Extended: extended,
 	}); err != nil {
 		return fmt.Errorf("failed to send snapshot-complete event: %w", err)
 	}
@@ -266,6 +274,25 @@ func watcherIDOf(req *registrarv1.WatchEndpointsRequest) string {
 	return fmt.Sprintf("%s/%s", req.GetClusterName(), req.GetNodeName())
 }
 
+// resumeRequest returns the request's resume token and, for a partial resume
+// (#1239), the services the client holds at it (non-nil, possibly empty). A
+// last_version wins: partial_resume is defined only alongside an empty one, so
+// a client sending both is answered as an ordinary resume.
+func resumeRequest(req *registrarv1.WatchEndpointsRequest) (string, map[string]struct{}) {
+	if token := req.GetLastVersion(); token != "" {
+		return token, nil
+	}
+	p := req.GetPartialResume()
+	if p == nil || p.GetVersion() == "" {
+		return "", nil
+	}
+	have := make(map[string]struct{}, len(p.GetServices()))
+	for _, svc := range p.GetServices() {
+		have[svc] = struct{}{}
+	}
+	return p.GetVersion(), have
+}
+
 // buildWatchFilter parses the request filter into a service list and lookup set.
 // nil filterSet = full watch; non-nil (possibly empty) = scoped watch.
 func buildWatchFilter(req *registrarv1.WatchEndpointsRequest) ([]string, map[string]struct{}) {
@@ -285,7 +312,7 @@ func buildWatchFilter(req *registrarv1.WatchEndpointsRequest) ([]string, map[str
 }
 
 // sendFilteredSnapshot sends snapshot events scoped to filterSet (nil = send all).
-// FullSnapshotEvents already applied the same filter; the check is kept as
+// WatchStart already applied the same filter; the check is kept as
 // defense in depth so no out-of-scope endpoint can reach a scoped watcher.
 func sendFilteredSnapshot(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse], events []*registrarv1.WatchEndpointsResponse, filterSet map[string]struct{}) error {
 	for _, event := range events {
