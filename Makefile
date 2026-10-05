@@ -60,6 +60,13 @@ lint-proxy:
 check-shell-lint:
 	@scripts/check-shell-lint.sh
 
+# actionlint over .github/workflows with the pinned actionlint + ShellCheck
+# (//bazel/actionlint, config .github/actionlint.yaml). Also a required CI job
+# (`actionlint` in .github/workflows/ci.yaml).
+.PHONY: actionlint
+actionlint:
+	@bazel run //bazel/actionlint
+
 .PHONY: build-agent
 build-agent:
 	@bazel build //agent/cmd/agent/...

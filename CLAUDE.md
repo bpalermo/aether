@@ -57,6 +57,10 @@ make format-check            # Check only, no modifications
 # Lint (buf, shellcheck, gocognit). buildifier's Starlark lint runs in format-check
 make lint                    # or: bazel build --config=lint //...
 
+# Lint the GitHub Actions workflows (pinned actionlint + the repo's ShellCheck;
+# config .github/actionlint.yaml). A required CI job (`actionlint` in ci.yaml)
+make actionlint              # or: bazel run //bazel/actionlint
+
 # Add a Go dependency
 bazel run @rules_go//go get <package>
 

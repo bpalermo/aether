@@ -22,6 +22,7 @@ did not cause.
 make format        # Format all code
 make lint          # Run linters (buf, shellcheck, gocognit)
 make format-check  # CI-friendly check (fails on drift + buildifier lint)
+make actionlint    # GitHub Actions workflows (pinned actionlint + ShellCheck)
 ```
 
 ## Toolchain

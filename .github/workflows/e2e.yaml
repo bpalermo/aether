@@ -158,6 +158,7 @@ jobs:
       - name: Start cloud-provider-kind
         run: |
           go install sigs.k8s.io/cloud-provider-kind@latest
+          # shellcheck disable=SC2024 # the log is meant to be written as the runner user, not root
           sudo "$(go env GOPATH)/bin/cloud-provider-kind" > /tmp/cloud-provider-kind.log 2>&1 &
           echo "cloud-provider-kind started (pid $!)"
 
@@ -190,7 +191,17 @@ jobs:
       - name: Install aether (edge, no SPIRE)
         run: |
           sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/aether/Chart.yaml
-          img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+          # One array element per argument: the images' --set flags, built
+          # without relying on word splitting.
+          images=()
+          img() { images+=(--set "$1.image.repository=${IMAGE_REGISTRY}/$2" --set "$1.image.tag=latest" --set "$1.image.digest=" --set "$1.image.pullPolicy=Never"); }
+          img agent agent
+          img agent.meshDnsDaemon mesh-dns
+          img proxy.supervisor proxy-supervisor
+          img cniInstall cni-install
+          img registrar registrar
+          img controller controller
+          img udsCsi uds-csi
           helm install aether charts/aether \
             --namespace aether-system --create-namespace \
             --set namespace.create=false \
@@ -198,13 +209,7 @@ jobs:
             --set edge.enabled=true \
             --set edge.tls.enabled=true \
             --set edge.gateway.create=false \
-            $(img agent agent) \
-            $(img agent.meshDnsDaemon mesh-dns) \
-            $(img proxy.supervisor proxy-supervisor) \
-            $(img cniInstall cni-install) \
-            $(img registrar registrar) \
-            $(img controller controller) \
-            $(img udsCsi uds-csi) \
+            "${images[@]}" \
             --set proxy.image.pullPolicy=IfNotPresent
           kubectl get gatewayclass aether -o yaml || true
 
@@ -342,19 +347,23 @@ jobs:
       - name: Install aether (mesh, no SPIRE)
         run: |
           sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/aether/Chart.yaml
-          img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+          # One array element per argument: the images' --set flags, built
+          # without relying on word splitting.
+          images=()
+          img() { images+=(--set "$1.image.repository=${IMAGE_REGISTRY}/$2" --set "$1.image.tag=latest" --set "$1.image.digest=" --set "$1.image.pullPolicy=Never"); }
+          img agent agent
+          img agent.meshDnsDaemon mesh-dns
+          img proxy.supervisor proxy-supervisor
+          img cniInstall cni-install
+          img registrar registrar
+          img controller controller
+          img udsCsi uds-csi
           helm install aether charts/aether \
             --namespace aether-system --create-namespace \
             --set namespace.create=false \
             --set spire.enabled=false \
             --set agent.gamma=true \
-            $(img agent agent) \
-            $(img agent.meshDnsDaemon mesh-dns) \
-            $(img proxy.supervisor proxy-supervisor) \
-            $(img cniInstall cni-install) \
-            $(img registrar registrar) \
-            $(img controller controller) \
-            $(img udsCsi uds-csi) \
+            "${images[@]}" \
             --set proxy.image.pullPolicy=IfNotPresent
           kubectl get gatewayclass aether -o yaml || true
 

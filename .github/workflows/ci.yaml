@@ -326,6 +326,27 @@ jobs:
             --@aspect_rules_lint//lint:fail_on_violation \
             "${targets[@]}"
 
+  # actionlint over every workflow, with the pinned actionlint and the same
+  # ShellCheck the lint aspects run (//bazel/actionlint; config in
+  # .github/actionlint.yaml). It was run by hand, never enforced, and ~20
+  # findings had accumulated — among them `github.head_ref` interpolated into
+  # four inline scripts in this file. Deliberately unconditional, like
+  # envoy-api-parity: `changes` excludes proxy.yml and proxy-release.yml from
+  # control_plane, and those are workflows too. No RBE, no BuildBuddy key: one
+  # local test over YAML.
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Bazel
+        uses: ./.github/actions/setup-bazel
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh //bazel/actionlint:actionlint_test
+      - name: actionlint (every workflow under .github/workflows)
+        run: bazel test --test_output=all //bazel/actionlint:actionlint_test
+
   # Formatting was configured but never enforced. `make format-check` exists in
   # the Makefile, gofumpt/buildifier/shfmt/buf are wired up in
   # bazel/format/BUILD.bazel, CLAUDE.md documents the target — and no job ran it,
@@ -552,6 +573,11 @@ jobs:
     if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_any == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # The PR's branch name is attacker-controlled text: it reaches the build
+    # metadata through the environment, never interpolated into a script
+    # (actionlint `expression`, as in proxy.yml).
+    env:
+      BRANCH_NAME: ${{ github.head_ref }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -570,7 +596,7 @@ jobs:
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
-            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            --build_metadata=BRANCH_NAME="$BRANCH_NAME" \
             --target_pattern_file=${{ runner.temp }}/impacted/impacted_build.txt
       - name: Unit tests
         if: needs.diff.outputs.has_unit == 'true'
@@ -633,6 +659,11 @@ jobs:
     if: needs.changes.outputs.control_plane == 'true' && (needs.diff.outputs.has_unit == 'true' || needs.diff.outputs.has_integration == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # The PR's branch name is attacker-controlled text: it reaches the build
+    # metadata through the environment, never interpolated into a script
+    # (actionlint `expression`, as in proxy.yml).
+    env:
+      BRANCH_NAME: ${{ github.head_ref }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -716,7 +747,7 @@ jobs:
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
-            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            --build_metadata=BRANCH_NAME="$BRANCH_NAME" \
             --target_pattern_file=${{ runner.temp }}/race_normal.txt
       - name: Race tests (concurrency-heavy packages, 3 runs)
         if: steps.split.outputs.has_hot == 'true'
@@ -725,7 +756,7 @@ jobs:
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
-            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            --build_metadata=BRANCH_NAME="$BRANCH_NAME" \
             --target_pattern_file=${{ runner.temp }}/race_hot.txt
 
   # Proposal 038: the CNI's transparent-capture divert against a REAL kernel.
@@ -742,6 +773,11 @@ jobs:
     if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_unit == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The PR's branch name is attacker-controlled text: it reaches the build
+    # metadata through the environment, never interpolated into a script
+    # (actionlint `expression`, as in proxy.yml).
+    env:
+      BRANCH_NAME: ${{ github.head_ref }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -771,7 +807,7 @@ jobs:
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
-            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            --build_metadata=BRANCH_NAME="$BRANCH_NAME" \
             //cni/internal/plugin:capture_netns_test
           bazel cquery --config=ci --output=files \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
@@ -884,7 +920,7 @@ jobs:
   # (and often `integration`) skip for an empty impact set.
   ci:
     if: always()
-    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, shell, format, test, race, netns, integration, e2e]
+    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, actionlint, shell, format, test, race, netns, integration, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

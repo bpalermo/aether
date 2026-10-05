@@ -1,0 +1,89 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# actionlint from the official release archives pinned in MODULE.bazel (sha256
+# from the release's checksums file), over .github/workflows, with the same
+# ShellCheck binary //bazel/lint's aspect runs. `bazel run //bazel/actionlint`
+# (make actionlint) lints the working tree; :actionlint_test is the CI gate (the
+# `actionlint` job in ci.yaml, and part of `bazel test //...`).
+#
+# Hand-written: Gazelle manages Go only.
+
+config_setting(
+    name = "linux_amd64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+config_setting(
+    name = "darwin_amd64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "darwin_arm64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+alias(
+    name = "actionlint_bin",
+    actual = select(
+        {
+            ":darwin_amd64": "@actionlint_darwin_amd64//:actionlint",
+            ":darwin_arm64": "@actionlint_darwin_arm64//:actionlint",
+            ":linux_amd64": "@actionlint_linux_amd64//:actionlint",
+            ":linux_arm64": "@actionlint_linux_arm64//:actionlint",
+        },
+        no_match_error = "//bazel/actionlint: no pinned actionlint release for this platform (linux/darwin x amd64/arm64 only; see MODULE.bazel)",
+    ),
+)
+
+_SHELLCHECK = "@aspect_rules_lint//lint:shellcheck_bin"
+
+_ENV = {
+    "ACTIONLINT_RLOCATIONPATH": "$(rlocationpath :actionlint_bin)",
+    "SHELLCHECK_RLOCATIONPATH": "$(rlocationpath %s)" % _SHELLCHECK,
+}
+
+# bazel run //bazel/actionlint [-- <workflow files>]
+sh_binary(
+    name = "actionlint",
+    srcs = ["actionlint.sh"],
+    data = [
+        ":actionlint_bin",
+        _SHELLCHECK,
+    ],
+    env = _ENV,
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# Network-free: every workflow, against the pinned actionlint + ShellCheck.
+sh_test(
+    name = "actionlint_test",
+    size = "small",
+    srcs = ["actionlint.sh"],
+    data = [
+        ":actionlint_bin",
+        "//:.github/actionlint.yaml",
+        "//:ci_definitions",
+        _SHELLCHECK,
+    ],
+    env = _ENV,
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
