@@ -24,7 +24,7 @@
 #   - the real verifier on unreadable repositories, or behind a lookup that
 #     404s every tag, never goes red at all: it exits 2 and the control reports
 #     inconclusive — a red that proves nothing is not available to accept.
-#   - THE SPLIT (proposal 040): the verifier reads bazel/img/registry.bzl AS OF
+#   - THE SPLIT (proposal 040): the verifier reads bazel/registry/registry.bzl AS OF
 #     the control commit. A control built on a POST-cut-over tree goes red on
 #     quay.io (chart-<name>), and the control accepts it only when every MISSING
 #     line names that registry. A perfect red printed against the OTHER
@@ -38,7 +38,7 @@
 # overridden, placed next to UNMODIFIED copies of the verifier,
 # push-heads-lib.sh, proxy-pin-lib.sh and image-registry.sh in a temp dir (the
 # verifier sources its libraries from its own directory; IMAGE_REGISTRY_BZL
-# points image-registry.sh back at this checkout's bazel/img/registry.bzl for the
+# points image-registry.sh back at this checkout's bazel/registry/registry.bzl for the
 # source-time lists; the verifier reads each commit's own). The control commit is
 # written to this checkout's object store by the control itself; no ref ever
 # points at it, and neither does any PRE/POST base built below.
@@ -58,7 +58,7 @@ reg="$tmp/registry"
 mkdir -p "$reg"
 cp scripts/verify-published-artifacts.sh scripts/push-heads-lib.sh scripts/proxy-pin-lib.sh scripts/image-registry.sh "$reg/"
 cp scripts/registry-lib.sh "$reg/registry-lib.sh"
-IMAGE_REGISTRY_BZL="$PWD/bazel/img/registry.bzl"
+IMAGE_REGISTRY_BZL="$PWD/bazel/registry/registry.bzl"
 export IMAGE_REGISTRY_BZL
 cat >>"$reg/registry-lib.sh" <<'FAKE'
 
@@ -120,7 +120,7 @@ fi
 # The registry HEAD's own tree names (what the control, built on HEAD, expects
 # every MISSING line to point at), and the other one of the cut-over pair.
 head_bzl="$tmp/head-registry.bzl"
-git show HEAD:bazel/img/registry.bzl >"$head_bzl"
+git show HEAD:bazel/registry/registry.bzl >"$head_bzl"
 pre_bzl="$tmp/pre-registry.bzl"
 sed -E \
 	-e 's|^IMAGE_REGISTRY = .*|IMAGE_REGISTRY = "ghcr.io"|' \
@@ -128,8 +128,8 @@ sed -E \
 	-e 's|^IMAGE_NAME_OVERRIDES = .*|IMAGE_NAME_OVERRIDES = {"proxy": "aether-proxy"}|' \
 	-e 's|^CHART_REPOSITORY_PREFIX = .*|CHART_REPOSITORY_PREFIX = "charts/"|' \
 	-e '/^SIGNATURE_LAYOUT = /d' \
-	bazel/img/registry.bzl >"$pre_bzl"
-post_bzl="$PWD/bazel/img/registry.bzl"
+	bazel/registry/registry.bzl >"$pre_bzl"
+post_bzl="$PWD/bazel/registry/registry.bzl"
 prefix_of() { IMAGE_REGISTRY_BZL="$1" scripts/image-registry.sh prefix; }
 head_prefix="$(prefix_of "$head_bzl")"
 pre_prefix="$(prefix_of "$pre_bzl")"
@@ -149,7 +149,7 @@ base_with() {
 	blob="$(git hash-object -w "$1")"
 	export GIT_INDEX_FILE="$tmp/index"
 	git read-tree HEAD
-	git update-index --cacheinfo "100644,${blob},bazel/img/registry.bzl"
+	git update-index --cacheinfo "100644,${blob},bazel/registry/registry.bzl"
 	tree="$(git write-tree)"
 	unset GIT_INDEX_FILE
 	GIT_AUTHOR_NAME=c GIT_AUTHOR_EMAIL=c@invalid GIT_COMMITTER_NAME=c GIT_COMMITTER_EMAIL=c@invalid \

@@ -1,9 +1,9 @@
+load("@aether_registry//:registry.bzl", "image_repository")
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 # gazelle:exclude race_test.go
 # gazelle:exclude norace_test.go
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
-load("//bazel/img:registry.bzl", "image_repository")
 
 # deps_test.go is hand-wired below into its own :deps_test target (it needs the
 # linked binary as data and has to be nameable on its own), so keep gazelle from

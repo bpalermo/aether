@@ -185,6 +185,16 @@ bazel_dep(name = "toolchains_llvm", version = "1.9.1.envoy")
 bazel_dep(name = "rules_oci", version = "2.3.0")
 bazel_dep(name = "container_structure_test", version = "1.22.1")
 
+# The image-registry setting (proposal 040), for //:push and //:load: the root
+# workspace's ONE file, bazel/registry/registry.bzl, a source-only module with
+# no dependencies. The path leaves this workspace on purpose — the proxy image is
+# published beside every other image, so it reads the same setting, not a copy.
+bazel_dep(name = "aether_registry")
+local_path_override(
+    module_name = "aether_registry",
+    path = "../bazel/registry",
+)
+
 ####################################################################################
 # Tests
 ####################################################################################

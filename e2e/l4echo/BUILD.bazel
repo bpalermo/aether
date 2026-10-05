@@ -1,8 +1,8 @@
+load("@aether_registry//:registry.bzl", "image_repository")
 load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
 load("@rules_img//img:push.bzl", "image_push")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
-load("//bazel/img:registry.bzl", "image_repository")
 
 go_library(
     name = "l4echo_lib",

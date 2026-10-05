@@ -19,7 +19,7 @@
 # the real thing; l4echo itself is never released.
 #
 # THE REGISTRY. quay.io explicitly (SMOKE_REGISTRY / SMOKE_ORG), NOT the
-# single setting in bazel/img/registry.bzl: the smoke ran before the flip, while
+# single setting in bazel/registry/registry.bzl: the smoke ran before the flip, while
 # the setting still said ghcr.io, and it targets the throwaway `smoke`
 # repository, not a published one. Host and org are separate variables on
 # purpose — `<host>/<org>` IS the setting now, and

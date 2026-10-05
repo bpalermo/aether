@@ -39,7 +39,7 @@ permissions:
   contents: read
 
 # IMAGE_REGISTRY (<registry>/<namespace> the images are tagged under) is NOT set
-# here: it is derived from bazel/img/registry.bzl, the one registry setting
+# here: it is derived from bazel/registry/registry.bzl, the one registry setting
 # (proposal 040), by scripts/image-registry.sh in each job that uses it. The
 # script-driven jobs (uds, l4-routes, ...) derive it inside the scripts.
 env:
@@ -60,7 +60,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Image registry (bazel/img/registry.bzl)
+      - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
       - name: Setup Bazel
@@ -128,7 +128,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Image registry (bazel/img/registry.bzl)
+      - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
       - name: Download images artifact
@@ -297,7 +297,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Image registry (bazel/img/registry.bzl)
+      - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
       - name: Download images artifact

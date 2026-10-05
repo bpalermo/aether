@@ -346,7 +346,7 @@ chart_push = rule(
 `helm push` derives the repository's last path segment from Chart.yaml's
 `name:` and nothing else, so it can only publish chart `aether` as
 `<base>/aether`. Quay has no nested repositories, and the charts live under a
-flat `chart-<name>` prefix (//bazel/img:registry.bzl): `chart-aether`, and
+flat `chart-<name>` prefix (@aether_registry//:registry.bzl): `chart-aether`, and
 `chart-prober` / `chart-udsecho`, which would otherwise collide with the prober
 and udsecho IMAGE repositories. So this writes exactly the artifact `helm push`
 writes -- the packaged .tgz as an

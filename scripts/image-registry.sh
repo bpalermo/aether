@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Print the image registry setting, parsed from bazel/img/registry.bzl.
+# Print the image registry setting, parsed from bazel/registry/registry.bzl.
 #
-# bazel/img/registry.bzl is the ONE place the registry host, namespace and naming
+# bazel/registry/registry.bzl is the ONE place the registry host, namespace and naming
 # rules are written down (proposal 040). Bazel loads it; everything that is not
 # Bazel -- the workflows, the verifiers, the e2e scripts -- asks this script, so
 # a registry flip is an edit to that file and nothing else.
@@ -42,7 +42,7 @@
 # KEY=VALUE form is safe to eval and to append to $GITHUB_ENV unquoted.
 set -euo pipefail
 
-bzl="${IMAGE_REGISTRY_BZL:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bazel/img/registry.bzl}"
+bzl="${IMAGE_REGISTRY_BZL:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bazel/registry/registry.bzl}"
 
 die() {
 	echo "image-registry.sh: ${bzl}: $*" >&2

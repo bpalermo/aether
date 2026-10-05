@@ -25,7 +25,7 @@
 # no longer be reached and was removed (#1191).
 #
 # The proxy's repository and host-qualified image come from the single registry
-# setting, bazel/img/registry.bzl (proposal 040), never a literal.
+# setting, bazel/registry/registry.bzl (proposal 040), never a literal.
 #
 # THE PIN NAMES EXACTLY PROXY_IMAGE, image_reference("proxy"). The Quay
 # cut-over (proposal 040 phase 2) briefly let it name the pre-cut-over image

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Assert that the artifacts for a commit on `main` actually exist in the image
-# registry (#880) -- the one bazel/img/registry.bzl named AS OF THAT COMMIT
-# (proposal 040).
+# registry (#880) -- the one the registry setting named AS OF THAT COMMIT
+# (proposal 040): bazel/registry/registry.bzl, or bazel/img/registry.bzl in a
+# commit from before the setting became its own Bazel module
+# (REGISTRY_SETTING_PATHS, scripts/registry-lib.sh).
 #
 # WHICH REGISTRY, PER COMMIT (the Quay cut-over, proposal 040 phase 2)
 #
 # A commit is published by publish.yaml as it stood at that commit, to the
-# registry its own bazel/img/registry.bzl named. So this script reads that file
-# AS OF EACH COMMIT it checks (`git show <sha>:bazel/img/registry.bzl`) and
+# registry its own registry.bzl named. So this script reads that file AS OF EACH
+# COMMIT it checks (`git show <sha>:<path>`, registry_setting_at) and
 # derives everything from it -- host, namespace, name overrides, chart prefix,
 # and SIGNATURE_LAYOUT, the layout the signature must have there -- exactly the
 # way it already reads the chart versions and the release-tag prefix. A head
@@ -18,7 +20,7 @@
 # decommissioned: this script no longer reads it. Such a head is exit 2
 # (cannot be checked), never a pass and never MISSING:
 #
-#   - a commit with no bazel/img/registry.bzl at all (before #998, phase 1);
+#   - a commit with no registry.bzl at all (before #998, phase 1);
 #   - a registry.bzl without a SIGNATURE_LAYOUT line (phase 1, before the
 #     cut-over);
 #   - a registry.bzl this script cannot parse.
@@ -305,15 +307,17 @@ chart_commit_tag() {
 
 # The registry setting AS OF ONE COMMIT (see WHICH REGISTRY, PER COMMIT above).
 #
-# Writes bazel/img/registry.bzl as of <sha> to <file>. A commit without the file
-# predates #998 and published to the pre-cut-over registry, which is
-# decommissioned (proposal 040 phase 4): exit 2, never a stand-in version.
+# Writes the registry setting as of <sha> to <file> (registry_setting_at: the
+# file is bazel/registry/registry.bzl, bazel/img/registry.bzl before it moved).
+# A commit without either predates #998 and published to the pre-cut-over
+# registry, which is decommissioned (proposal 040 phase 4): exit 2, never a
+# stand-in version.
 setting_bzl_at() {
 	local sha="$1" out="$2"
-	if git show "${sha}:bazel/img/registry.bzl" >"$out" 2>/dev/null; then
+	if registry_setting_at "$sha" "$out"; then
 		return 0
 	fi
-	echo "::error::no bazel/img/registry.bzl at ${sha}: it predates the Quay cut-over and published to the pre-cut-over registry, which is decommissioned (proposal 040 phase 4) and no longer checked" >&2
+	echo "::error::no registry.bzl (${REGISTRY_SETTING_PATHS[*]}) at ${sha}: it predates the Quay cut-over and published to the pre-cut-over registry, which is decommissioned (proposal 040 phase 4) and no longer checked" >&2
 	return 2
 }
 
@@ -331,12 +335,12 @@ setting_for_proxy_ref_at() {
 		return 0
 	fi
 	while read -r c; do
-		if git show "${c}:bazel/img/registry.bzl" >"$out" 2>/dev/null &&
+		if registry_setting_at "$c" "$out" &&
 			[ "$(setting "$out" ref proxy 2>/dev/null)" = "$want" ]; then
 			return 0
 		fi
-	done < <(git log --format=%H "$sha" -- bazel/img/registry.bzl)
-	echo "::error::no version of bazel/img/registry.bzl reachable from ${sha} ever named ${want} as image_reference(\"proxy\") — cannot tell how its signature is laid out" >&2
+	done < <(git log --format=%H "$sha" -- "${REGISTRY_SETTING_PATHS[@]}")
+	echo "::error::no version of the registry setting (${REGISTRY_SETTING_PATHS[*]}) reachable from ${sha} ever named ${want} as image_reference(\"proxy\") — cannot tell how its signature is laid out" >&2
 	return 2
 }
 
@@ -457,7 +461,7 @@ check_signature() {
 	case "${rc}/${layout}" in
 	0/* | 1/both | 1/none) ;;
 	1/*)
-		absent "${REGISTRY_HOST}/${repo} signature for ${what} ${digest} — layout '${layout}', but this commit's bazel/img/registry.bzl promises SIGNATURE_LAYOUT '${expected}' there"
+		absent "${REGISTRY_HOST}/${repo} signature for ${what} ${digest} — layout '${layout}', but this commit's registry.bzl promises SIGNATURE_LAYOUT '${expected}' there"
 		return
 		;;
 	*)
@@ -507,12 +511,12 @@ verify_commit() {
 	say "commit ${sha} ($(git log -1 --format='%cI %s' "$sha"))"
 
 	# The registry THIS commit published to, and how it signs there (proposal
-	# 040): its own bazel/img/registry.bzl, never the checkout's.
+	# 040): its own registry.bzl, never the checkout's.
 	if ! setting_bzl_at "$sha" "$setting_file"; then
 		exit 2
 	fi
 	if ! REGISTRY_HOST="$(setting "$setting_file" host)" || [ -z "$REGISTRY_HOST" ]; then
-		echo "::error::cannot parse bazel/img/registry.bzl as of ${sha}" >&2
+		echo "::error::cannot parse registry.bzl as of ${sha}" >&2
 		exit 2
 	fi
 	local layout_rc=0
@@ -521,22 +525,22 @@ verify_commit() {
 	0) ;;
 	3)
 		# A pre-cut-over head: never looked up on the old registry, never MISSING.
-		echo "::error::${sha} predates the Quay cut-over (its bazel/img/registry.bzl has no SIGNATURE_LAYOUT; it published to ${REGISTRY_HOST}), and that registry is decommissioned (proposal 040 phase 4) — not checked" >&2
+		echo "::error::${sha} predates the Quay cut-over (its registry.bzl has no SIGNATURE_LAYOUT; it published to ${REGISTRY_HOST}), and that registry is decommissioned (proposal 040 phase 4) — not checked" >&2
 		exit 2
 		;;
 	*)
-		echo "::error::cannot parse SIGNATURE_LAYOUT in bazel/img/registry.bzl as of ${sha}" >&2
+		echo "::error::cannot parse SIGNATURE_LAYOUT in registry.bzl as of ${sha}" >&2
 		exit 2
 		;;
 	esac
 	while read -r c; do
 		if ! repo="$(setting "$setting_file" repo "$c")"; then
-			echo "::error::cannot derive the ${c} repository from bazel/img/registry.bzl as of ${sha}" >&2
+			echo "::error::cannot derive the ${c} repository from registry.bzl as of ${sha}" >&2
 			exit 2
 		fi
 		repos+=("$repo")
 	done < <(registry_image_components_at "$sha")
-	say "  registry ${REGISTRY_HOST}/$(setting "$setting_file" prefix | cut -d/ -f2-), signatures as ${layout} (bazel/img/registry.bzl as of ${sha:0:12})"
+	say "  registry ${REGISTRY_HOST}/$(setting "$setting_file" prefix | cut -d/ -f2-), signatures as ${layout} (registry.bzl as of ${sha:0:12})"
 
 	# 1. every chart, under the tag that belongs to this commit alone (#692).
 	for chart in "${REGISTRY_CHARTS[@]}"; do
@@ -695,7 +699,7 @@ if [ "$missing_total" -gt 0 ]; then
 		cat >>"$GITHUB_STEP_SUMMARY" <<EOF
 ### publish verification FAILED
 
-${missing_total} of ${checks_total} artifacts are missing (each line names its registry: the one bazel/img/registry.bzl named as of that commit).
+${missing_total} of ${checks_total} artifacts are missing (each line names its registry: the registry.bzl named as of that commit).
 
 \`\`\`
 ${report}\`\`\`

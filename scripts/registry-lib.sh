@@ -12,7 +12,7 @@
 #
 # WHICH REGISTRY. REGISTRY_HOST, read at CALL time (so a caller can point one
 # lookup at another registry by setting it), defaulting to the host in
-# bazel/img/registry.bzl via scripts/image-registry.sh — the single setting.
+# bazel/registry/registry.bzl via scripts/image-registry.sh — the single setting.
 # The repository lists below come from the same place. Everything here speaks
 # the plain OCI distribution API; the one registry-specific thing is where the
 # anonymous pull token is handed out (registry_token_url).
@@ -41,7 +41,7 @@ fi
 #   ghcr.io  https://ghcr.io/token?service=ghcr.io&scope=repository:<repo>:pull
 #   quay.io  https://quay.io/v2/auth?service=quay.io&scope=repository:<repo>:pull
 #
-# The Starlark twin is registry_token_url() in bazel/img/registry.bzl (used by
+# The Starlark twin is registry_token_url() in bazel/registry/registry.bzl (used by
 # //bazel/proxy_pin). Both registries answer `{"token": "..."}`.
 registry_token_url() {
 	local repo="$1" path=token
@@ -443,8 +443,34 @@ registry_signature_layout_direct() {
 	registry__layout "$has_legacy" "$has_bundle" "$has_ref"
 }
 
+# Where the registry setting has lived, NEWEST FIRST. It moved from
+# bazel/img/registry.bzl into its own local Bazel module, bazel/registry/, so
+# that the //proxy workspace loads the same file instead of a copy; a commit
+# from before the move still has it only at the old path. Readers of the
+# setting AS OF a commit (the publish-verify sweep) try each path in order.
+REGISTRY_SETTING_PATHS=(
+	bazel/registry/registry.bzl
+	bazel/img/registry.bzl
+)
+
+# The registry setting as of <sha>, written to <file>: the first of
+# REGISTRY_SETTING_PATHS that exists in that commit's tree. rc 1 (and <file>
+# left empty) when none does: a commit from before the setting existed.
+#
+# Usage: registry_setting_at <sha> <file>
+registry_setting_at() {
+	local sha="$1" out="$2" p
+	for p in "${REGISTRY_SETTING_PATHS[@]}"; do
+		if git show "${sha}:${p}" >"$out" 2>/dev/null; then
+			return 0
+		fi
+	done
+	: >"$out"
+	return 1
+}
+
 # The layout a registry setting PROMISES, per commit (proposal 040 phase 2):
-# SIGNATURE_LAYOUT in the given bazel/img/registry.bzl -- `referrer` (quay.io)
+# SIGNATURE_LAYOUT in the given registry.bzl -- `referrer` (quay.io)
 # or `tag`. A file without that line predates the Quay cut-over: its commit
 # published to the pre-cut-over registry, which proposal 040 phase 4
 # decommissioned, so there is no layout to promise -- rc 3, with one stderr
@@ -492,7 +518,7 @@ registry_layout_satisfies() {
 # find a readable tag in (the witness behind every absence, registry_any_tag).
 #
 # Component names, not repositories: the repository is image_repository() of
-# bazel/img/registry.bzl, asked of scripts/image-registry.sh.
+# bazel/registry/registry.bzl, asked of scripts/image-registry.sh.
 REGISTRY_IMAGE_COMPONENTS=(
 	agent
 	mesh-dns
@@ -512,7 +538,7 @@ REGISTRY_IMAGE_COMPONENTS=(
 # one commit, which is what makes them checkable at all.
 #
 # The chart directory name is also the chart name; its repository is
-# chart_repository(<name>) of bazel/img/registry.bzl (registry_chart_repo).
+# chart_repository(<name>) of bazel/registry/registry.bzl (registry_chart_repo).
 # shellcheck disable=SC2034  # consumed by whoever sources this file.
 REGISTRY_CHARTS=(
 	aether
@@ -569,7 +595,7 @@ unset registry__c registry__r
 
 registry__host_ok() {
 	[ -n "${REGISTRY_HOST:-}" ] && return 0
-	echo "registry-lib: no REGISTRY_HOST (scripts/image-registry.sh could not read bazel/img/registry.bzl)" >&2
+	echo "registry-lib: no REGISTRY_HOST (scripts/image-registry.sh could not read bazel/registry/registry.bzl)" >&2
 	return 2
 }
 

@@ -33,7 +33,7 @@ var (
 )
 
 // The default image references, stamped at link time by the go_test's x_defs
-// from bazel/img/registry.bzl (proposal 040), so the registry is spelled out in
+// from bazel/registry/registry.bzl (proposal 040), so the registry is spelled out in
 // exactly one place. Empty outside Bazel: set the AETHER_*_IMAGE variables then.
 var (
 	defaultAgentImage      string
@@ -55,7 +55,7 @@ func TestMain(m *testing.M) {
 		"AETHER_REGISTRAR_IMAGE":   registrarImage,
 	} {
 		if ref == "" {
-			fmt.Fprintf(os.Stderr, "no image for %s: run under Bazel (x_defs from bazel/img/registry.bzl) or set it\n", name)
+			fmt.Fprintf(os.Stderr, "no image for %s: run under Bazel (x_defs from bazel/registry/registry.bzl) or set it\n", name)
 			os.Exit(2)
 		}
 	}

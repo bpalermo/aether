@@ -1,3 +1,4 @@
+load("@aether_registry//:registry.bzl", "IMAGE_REGISTRY")
 load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@container_structure_test//:defs.bzl", "container_structure_test")
 load("@rules_img//img:image.bzl", "image_index", "image_manifest")
@@ -5,7 +6,6 @@ load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
 load("@rules_img//img:load.bzl", "image_load")
 load("@rules_img//img:push.bzl", "image_push")
 load("//bazel/buildid:defs.bzl", "content_build_id")
-load(":registry.bzl", "IMAGE_REGISTRY")
 
 # OCI provenance, on the config (labels) AND on the descriptors (annotations).
 #

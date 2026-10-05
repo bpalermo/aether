@@ -25,7 +25,7 @@ Parsing contract (deliberately strict — it fails the build rather than silentl
 validating against the wrong binary):
 
   * Find the first line of the form `repository: <ref>` whose `<ref>` is
-    exactly `image_reference("proxy")` from //bazel/img:registry.bzl — the one
+    exactly `image_reference("proxy")` from @aether_registry//:registry.bzl — the one
     registry setting (proposal 040) — so a pin into any other registry
     (including the pre-cut-over one, decommissioned in proposal 040 phase 4) is
     a hard failure, never a fallback. The image is fetched from that registry;
@@ -47,7 +47,7 @@ credentials. If it is ever made private, `docker login <registry>` locally and a
 `_fetch_manifest` failure path says so.
 """
 
-load("//bazel/img:registry.bzl", "image_reference", "registry_token_url")
+load("@aether_registry//:registry.bzl", "image_reference", "registry_token_url")
 
 _ENVOY_PATH_IN_IMAGE = "usr/local/bin/envoy"
 
@@ -124,7 +124,7 @@ def _parse_proxy_pin(mctx):
         fail((
             "{label}: could not find the aether-proxy image pin. Expected a line " +
             "`repository: {want}` (image_reference(\"proxy\") in " +
-            "//bazel/img:registry.bzl). //test/envoy_validate validates against " +
+            "@aether_registry//:registry.bzl). //test/envoy_validate validates against " +
             "the Envoy inside that image, so the pin cannot be guessed (aether #709)."
         ).format(label = _VALUES_LABEL, want = image_reference("proxy")))
     if digest == None:

@@ -130,7 +130,7 @@ All objects carry the [recommended `app.kubernetes.io/*` labels](https://kuberne
 ## Publish to Quay (OCI)
 
 Charts and images both publish to the `aethermesh` organisation on quay.io — the
-one setting in `bazel/img/registry.bzl` (proposal 040); every coordinate below is
+one setting in `bazel/registry/registry.bzl` (proposal 040); every coordinate below is
 derived from it:
 
 | Artifact | Reference |
@@ -177,4 +177,4 @@ In CI, `.github/workflows/publish.yaml` does exactly this, logged in with the
 Quay robot account (secrets `QUAY_USERNAME` / `QUAY_TOKEN` of the `release`
 environment, which only runs on `main`). Never push by hand: the release
 workflow is the only publisher. To target a different registry, change
-`bazel/img/registry.bzl` — nothing else spells the registry out.
+`bazel/registry/registry.bzl` — nothing else spells the registry out.

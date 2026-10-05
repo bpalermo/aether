@@ -2,14 +2,19 @@
 
 Every published coordinate is derived from the constants below: the image_push
 targets (//bazel/img:go_multi_arch_image.bzl), the chart pushes (//charts/*,
-chart_push in //bazel/helm:defs.bzl), the proxy's oci_push (the //proxy
-workspace carries a byte-identical copy of this file at proxy/bazel/registry.bzl,
-since it cannot load from this module), the aether-proxy pin parser
-(//bazel/proxy_pin), the e2e go_test's default image references, and -- through
-scripts/image-registry.sh, which parses THIS file -- every workflow, verifier
-and e2e script. Nothing else may spell the registry out:
-scripts/check-registry-config.sh fails CI on a literal anywhere outside its
-allow-list.
+chart_push in //bazel/helm:defs.bzl), the proxy's oci_push (//proxy:push), the
+aether-proxy pin parser (//bazel/proxy_pin), the e2e go_test's default image
+references, and -- through scripts/image-registry.sh, which parses THIS file --
+every workflow, verifier and e2e script. Nothing else may spell the registry
+out: scripts/check-registry-config.sh fails CI on a literal anywhere outside
+its allow-list.
+
+This directory is a Bazel module of its own (`aether_registry`), so both
+workspaces load this one file as `@aether_registry//:registry.bzl`: the root
+through `local_path_override(path = "bazel/registry")` and the //proxy
+workspace, which cannot load from the root module, through
+`local_path_override(path = "../bazel/registry")`. Until then the setting lived
+at bazel/img/registry.bzl, with a byte-identical copy at proxy/bazel/registry.bzl.
 
 History. Until the phase-2 cut-over (proposal 040) this file said
 
@@ -20,9 +25,10 @@ History. Until the phase-2 cut-over (proposal 040) this file said
 
 and had no SIGNATURE_LAYOUT. Commits published before the cut-over live on
 ghcr.io under those names and stay there: the publish-verify sweep reads THIS
-FILE AS OF EACH PUSH HEAD (`git show <sha>:bazel/img/registry.bzl`), so an old
-head is checked on ghcr.io and a new one on quay.io, with no date or sha typed
-anywhere (scripts/verify-published-artifacts.sh).
+FILE AS OF EACH PUSH HEAD (`git show <sha>:<path>`, at this path or, before the
+move, bazel/img/registry.bzl: REGISTRY_SETTING_PATHS in scripts/registry-lib.sh),
+so an old head is checked on ghcr.io and a new one on quay.io, with no date or
+sha typed anywhere (scripts/verify-published-artifacts.sh).
 
 scripts/image-registry.sh reads the assignments below with a strict,
 line-anchored grep: keep each on ONE line, exactly `NAME = "value"` (the

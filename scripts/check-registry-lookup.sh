@@ -45,12 +45,14 @@
 # section 5b pins that a token request to that host carries them and one to any
 # other host carries none (the fake records every `-u` it is handed).
 #
-# THE SPLIT (proposal 040). The verifier reads bazel/img/registry.bzl AS OF EACH
+# THE SPLIT (proposal 040). The verifier reads the registry setting AS OF EACH
 # COMMIT it checks, so section 6 runs it against a throwaway git history of
 # three commits: ANCIENT (no registry.bzl), PRE, whose registry.bzl is the
 # pre-cut-over setting (ghcr.io, charts/ prefix, the aether-proxy override, no
-# SIGNATURE_LAYOUT line), and POST, whose registry.bzl is this checkout's
-# (quay.io, chart- prefix, SIGNATURE_LAYOUT "referrer"). The fake plays both
+# SIGNATURE_LAYOUT line) at its old path, bazel/img/registry.bzl, and POST,
+# whose registry.bzl is this checkout's (quay.io, chart- prefix,
+# SIGNATURE_LAYOUT "referrer") at bazel/registry/registry.bzl only — so both
+# paths of REGISTRY_SETTING_PATHS are read. The fake plays both
 # registries at once, each the way it really behaves: ghcr.io signatures as
 # tags with a referrers 404, quay.io signatures as referrers only. Pinned: POST
 # passes on quay.io and goes red/inconclusive for the right reasons; PRE and
@@ -73,7 +75,7 @@
 # shellcheck disable=SC2016
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
-IMAGE_REGISTRY_BZL="$PWD/bazel/img/registry.bzl"
+IMAGE_REGISTRY_BZL="$PWD/bazel/registry/registry.bzl"
 export IMAGE_REGISTRY_BZL
 # shellcheck disable=SC1091
 . scripts/registry-lib.sh
@@ -532,7 +534,7 @@ sed -E \
 	-e 's|^IMAGE_NAME_OVERRIDES = .*|IMAGE_NAME_OVERRIDES = {"proxy": "aether-proxy"}|' \
 	-e 's|^CHART_REPOSITORY_PREFIX = .*|CHART_REPOSITORY_PREFIX = "charts/"|' \
 	-e '/^SIGNATURE_LAYOUT = /d' \
-	bazel/img/registry.bzl >"$pre_bzl"
+	bazel/registry/registry.bzl >"$pre_bzl"
 if ! (
 	set -e
 	cd "$hist"
@@ -540,11 +542,16 @@ if ! (
 	git config user.email check@example.invalid
 	git config user.name check-registry-lookup
 	git config commit.gpgsign false
-	git add -A && git commit -qm "ancient: before bazel/img/registry.bzl existed"
+	git add -A && git commit -qm "ancient: before the registry setting existed"
+	# PRE keeps the setting where it lived then, bazel/img/registry.bzl; POST
+	# has it only where it lives now (REGISTRY_SETTING_PATHS), so the
+	# verifier's per-commit read must find it at both.
 	cp "$pre_bzl" bazel/img/registry.bzl
 	git add -A && git commit -qm "pre: published to the pre-cut-over registry"
-	cp "$OLDPWD/bazel/img/registry.bzl" bazel/img/registry.bzl
-	git commit -qam "post: the cut-over"
+	git rm -q bazel/img/registry.bzl
+	mkdir -p bazel/registry
+	cp "$OLDPWD/bazel/registry/registry.bzl" bazel/registry/registry.bzl
+	git add -A && git commit -qm "post: the cut-over"
 ); then
 	echo "::error::could not build the throwaway history" >&2
 	exit 2
@@ -673,8 +680,8 @@ refused() {
 		show
 	fi
 }
-refused "PRE-cut-over" "$pre" "predates the Quay cut-over (its bazel/img/registry.bzl has no SIGNATURE_LAYOUT; it published to ${pre_host})"
-refused "ANCIENT (no registry.bzl)" "$ancient" "no bazel/img/registry.bzl at ${ancient}"
+refused "PRE-cut-over" "$pre" "predates the Quay cut-over (its registry.bzl has no SIGNATURE_LAYOUT; it published to ${pre_host})"
+refused "ANCIENT (no registry.bzl)" "$ancient" "no registry.bzl (bazel/registry/registry.bzl bazel/img/registry.bzl) at ${ancient}"
 
 # 6d. RED: POST published only to the OLD registry. The split must never fall
 #     back: every coordinate is MISSING on quay.io, each with its witness.
@@ -700,7 +707,7 @@ fi
 reset_registry
 touch "$FAKE/everything" "$FAKE/quaytags" "$FAKE/norefs"
 rc="$(verify "$post")"
-n_wrong="$(grep -c "^  MISSING .*layout 'bundle', but this commit's bazel/img/registry.bzl promises SIGNATURE_LAYOUT 'referrer' there$" "$tmp/out" || true)"
+n_wrong="$(grep -c "^  MISSING .*layout 'bundle', but this commit's registry.bzl promises SIGNATURE_LAYOUT 'referrer' there$" "$tmp/out" || true)"
 if [ "$rc" = 1 ] && [ "$n_wrong" = "$((3 * n_images))" ]; then
 	ok "RED: a tag-layout signature on ${post_host} (SIGNATURE_LAYOUT referrer) is MISSING for all $((3 * n_images)) signatures, exit 1"
 else

@@ -4,7 +4,7 @@
 #
 # No network: CHART_PUSH_ORAS points the runner at a recorder that saves its
 # argv and the files it was handed. What is pinned:
-#   - the repository is chart_registry_url(<chart>) from //bazel/img:registry.bzl
+#   - the repository is chart_registry_url(<chart>) from @aether_registry//:registry.bzl
 #     and the tag is the PACKAGED version, with SemVer's '+' written as '_'
 #     (helm's rule; an OCI tag cannot hold '+');
 #   - the config is Chart.yaml as JSON under helm's config media type, and the

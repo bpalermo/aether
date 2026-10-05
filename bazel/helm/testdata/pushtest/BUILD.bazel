@@ -1,8 +1,9 @@
+load("@aether_registry//:registry.bzl", "chart_registry_url")
+
 # A throwaway chart for //bazel/helm:chart_push_test. Never published: nothing in
 # publish.yaml runs these targets, and the test replaces oras with a recorder.
 load("@rules_helm//helm:defs.bzl", "helm_chart")
 load("//bazel/helm:defs.bzl", "chart_push")
-load("//bazel/img:registry.bzl", "chart_registry_url")
 
 helm_chart(
     name = "pushtest",

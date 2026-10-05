@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The image registry is ONE setting: bazel/img/registry.bzl (proposal 040).
+# The image registry is ONE setting: bazel/registry/registry.bzl (proposal 040).
 #
 # Phase 2 of the Quay migration flipped that setting (quay.io since then). It
 # was only a one-file flip because nothing else spelled the registry out, and
@@ -10,8 +10,12 @@
 #   1. scripts/image-registry.sh parses the setting (the strict parse the
 #      workflows, verifiers and e2e scripts depend on) and every value is
 #      non-empty.
-#   2. proxy/bazel/registry.bzl — the //proxy workspace's copy, which cannot
-#      load() from this module — is byte-identical to bazel/img/registry.bzl.
+#   2. There is ONE registry.bzl. Both workspaces load it as
+#      @aether_registry//:registry.bzl (bazel/registry is a local module the
+#      root and //proxy each reach with local_path_override), so a second
+#      tracked registry.bzl — a copy, the way //proxy used to carry one at
+#      proxy/bazel/registry.bzl — is an error, and so is a //proxy MODULE.bazel
+#      that no longer overrides aether_registry onto ../bazel/registry.
 #   3. The aether-proxy pin in charts/aether/values.yaml names exactly
 #      image_reference("proxy"). The pin is DATA (proxy-release's bump-chart
 #      job rewrites it), so it cannot be derived; any other registry is an
@@ -33,7 +37,7 @@
 #      never read. Same positive and negative controls.
 #
 # ALLOW-LIST — where the literal is legitimate:
-#   bazel/img/registry.bzl, proxy/bazel/registry.bzl   the setting itself
+#   bazel/registry/registry.bzl     the setting itself
 #   charts/aether/values.yaml       the proxy pin (data; asserted by 3)
 #   docs/                           runbooks, and proposals' history text
 #   website/                        the published site (user-facing install docs)
@@ -43,8 +47,7 @@
 # The user-facing docs moved to the new coordinates with the flip (phase 2).
 #
 # LEGACY ALLOW-LIST — where the pre-cut-over registry (ghcr.io) may appear:
-#   bazel/img/registry.bzl, proxy/bazel/registry.bzl   the setting's history
-#                                   note
+#   bazel/registry/registry.bzl     the setting's history note
 #   docs/proposals/                history: every proposal records the
 #                                   coordinates of its time (010, 040's mapping)
 #   docs/runbook.md                 incident/validation records that cite the
@@ -81,7 +84,7 @@ bad() {
 
 # --- 1. the setting parses ---------------------------------------------------
 if ! env_out="$(scripts/image-registry.sh)"; then
-	echo "::error::scripts/image-registry.sh cannot parse bazel/img/registry.bzl" >&2
+	echo "::error::scripts/image-registry.sh cannot parse bazel/registry/registry.bzl" >&2
 	exit 2
 fi
 IMAGE_REGISTRY_HOST="" IMAGE_NAMESPACE="" PROXY_IMAGE=""
@@ -99,26 +102,34 @@ if [ -z "$IMAGE_REGISTRY_HOST" ] || [ -z "$IMAGE_NAMESPACE" ] || [ -z "$PROXY_IM
 fi
 echo "setting: ${IMAGE_REGISTRY_HOST}/${IMAGE_NAMESPACE} (proxy: ${PROXY_IMAGE})"
 
-# --- 2. the proxy workspace's copy -------------------------------------------
-if cmp -s bazel/img/registry.bzl proxy/bazel/registry.bzl; then
-	echo "ok: proxy/bazel/registry.bzl is identical to bazel/img/registry.bzl"
+# --- 2. one file, loaded by both workspaces ----------------------------------
+copies="$(git ls-files -- '*registry.bzl' ':(exclude)bazel/registry/registry.bzl')"
+if [ -n "$copies" ]; then
+	bad "the registry setting has a second copy — load @aether_registry//:registry.bzl instead (bazel/registry is a local module both workspaces override onto):"
+	printf '%s\n' "$copies" | sed 's/^/  /'
 else
-	bad "proxy/bazel/registry.bzl differs from bazel/img/registry.bzl — the //proxy workspace would publish somewhere else. Copy it: cp bazel/img/registry.bzl proxy/bazel/registry.bzl"
-	diff -u bazel/img/registry.bzl proxy/bazel/registry.bzl | head -20
+	echo "ok: bazel/registry/registry.bzl is the only registry.bzl"
 fi
+for ws in MODULE.bazel:bazel/registry proxy/MODULE.bazel:../bazel/registry; do
+	mod="${ws%%:*}" want="${ws#*:}"
+	if tr -d ' \n\t' <"$mod" | grep -qF "local_path_override(module_name=\"aether_registry\",path=\"${want}\",)"; then
+		echo "ok: ${mod} overrides aether_registry onto ${want}"
+	else
+		bad "${mod} does not override aether_registry onto ${want} (local_path_override) — that workspace would not load the one registry setting"
+	fi
+done
 
 # --- 3. the proxy pin agrees --------------------------------------------------
 n_pin="$(grep -cE "^[[:space:]]*repository:[[:space:]]*\"?${PROXY_IMAGE//./\\.}\"?[[:space:]]*$" charts/aether/values.yaml || true)"
 if [ "$n_pin" != 1 ]; then
-	bad "charts/aether/values.yaml has ${n_pin} \`repository:\` line(s) naming image_reference(\"proxy\") (${PROXY_IMAGE}), want exactly 1 — the proxy pin disagrees with bazel/img/registry.bzl"
+	bad "charts/aether/values.yaml has ${n_pin} \`repository:\` line(s) naming image_reference(\"proxy\") (${PROXY_IMAGE}), want exactly 1 — the proxy pin disagrees with bazel/registry/registry.bzl"
 else
 	echo "ok: charts/aether/values.yaml pins the proxy as ${PROXY_IMAGE}"
 fi
 
 # --- 4. no literal outside the allow-list ------------------------------------
 allow=(
-	':(exclude)bazel/img/registry.bzl'
-	':(exclude)proxy/bazel/registry.bzl'
+	':(exclude)bazel/registry/registry.bzl'
 	':(exclude)charts/aether/values.yaml'
 	':(exclude)docs/'
 	':(exclude)website/'
@@ -159,7 +170,7 @@ hits="$(git grep -nP -- "$pattern" -- . "${allow[@]}")"
 rc=$?
 case "$rc" in
 0)
-	bad "the registry is spelled out outside bazel/img/registry.bzl. Derive it (Bazel: load //bazel/img:registry.bzl; shell/workflows: scripts/image-registry.sh), or — if it is documentation — add the path to the allow-list in scripts/check-registry-config.sh with a reason:"
+	bad "the registry is spelled out outside bazel/registry/registry.bzl. Derive it (Bazel: load @aether_registry//:registry.bzl; shell/workflows: scripts/image-registry.sh), or — if it is documentation — add the path to the allow-list in scripts/check-registry-config.sh with a reason:"
 	printf '%s\n' "$hits" | sed 's/^/  /'
 	;;
 1) echo "ok: no registry literal outside the allow-list" ;;
@@ -176,8 +187,7 @@ LEGACY_PREFIXES=(
 	"ghcr.io/bpalermo/aether"
 )
 legacy_allow=(
-	':(exclude)bazel/img/registry.bzl'
-	':(exclude)proxy/bazel/registry.bzl'
+	':(exclude)bazel/registry/registry.bzl'
 	':(exclude)docs/proposals/'
 	':(exclude)docs/runbook.md'
 	':(exclude)docs/observability/'
@@ -239,4 +249,4 @@ esac
 if [ "$fail" -ne 0 ]; then
 	exit 1
 fi
-echo "registry config: one setting, bazel/img/registry.bzl"
+echo "registry config: one setting, bazel/registry/registry.bzl"

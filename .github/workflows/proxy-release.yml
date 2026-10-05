@@ -23,9 +23,15 @@ on:
     # merge publishes the first image built and signed by the new workflow and
     # the bot pins it. Otherwise the change would sit unexercised until the next
     # unrelated proxy/ edit.
+    #
+    # bazel/registry/** is the registry setting //:push publishes to (loaded as
+    # @aether_registry, a local module outside proxy/): a registry flip must
+    # republish the proxy there, as it did when the workspace kept a copy of
+    # the setting under proxy/.
     paths:
       - "proxy/**"
       - "!proxy/**/*.md"
+      - "bazel/registry/**"
       - ".github/workflows/proxy-release.yml"
 
 permissions:
@@ -52,9 +58,10 @@ concurrency:
 # graph needs a repo from it, and //bazel/build_config compiles in no
 # dynamic-modules extension, so nothing does.
 # The image (PROXY_IMAGE = image_reference("proxy")) is NOT a literal here: the
-# registry is ONE setting, bazel/img/registry.bzl (proposal 040; the //proxy
-# workspace's oci_push reads its copy, proxy/bazel/registry.bzl). Every job that
-# needs it appends scripts/image-registry.sh's output to $GITHUB_ENV first.
+# registry is ONE setting, bazel/registry/registry.bzl (proposal 040; the //proxy
+# workspace's oci_push loads that same file as @aether_registry//:registry.bzl).
+# Every job that needs it appends scripts/image-registry.sh's output to
+# $GITHUB_ENV first.
 
 jobs:
   build-push:
@@ -84,7 +91,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Image registry (bazel/img/registry.bzl)
+      - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
       - name: Setup Bazel
@@ -186,11 +193,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
-            bazel/img/registry.bzl
+            bazel/registry/registry.bzl
             scripts/image-registry.sh
           sparse-checkout-cone-mode: false
 
-      - name: Image registry (bazel/img/registry.bzl)
+      - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
       # The Quay robot account (proposal 040): QUAY_USERNAME / QUAY_TOKEN are
@@ -391,7 +398,7 @@ jobs:
   # rules_img_signer_cosign bazel_dep's release binary, sha256 in its lock;
   # v3.1.2), run LOCALLY on this runner, keyless via this job's OIDC token, `--recursive` so the index
   # AND each per-arch child are signed, and cosign 3's default bundle format --
-  # which on quay.io (SIGNATURE_LAYOUT = "referrer", bazel/img/registry.bzl)
+  # which on quay.io (SIGNATURE_LAYOUT = "referrer", bazel/registry/registry.bzl)
   # lands as an OCI 1.1 referrer with no tag. No `--new-bundle-format` flag,
   # exactly as publish.yaml: `=false` is rejected on the v3 keyless path and
   # `=true` is the default.
@@ -427,7 +434,7 @@ jobs:
         # the registry setting.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Image registry (bazel/img/registry.bzl)
+      - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
       # Plain setup, as ci.yaml's `shell` job: no BuildBuddy key, no --config.
@@ -633,7 +640,7 @@ jobs:
         with:
           ref: main
 
-      - name: Image registry (bazel/img/registry.bzl)
+      - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
       - name: Pin aether chart to aether-proxy:${{ github.sha }}

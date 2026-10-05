@@ -47,6 +47,8 @@ jobs:
             proxy:
               - 'proxy/**'
               - '!proxy/**/*.md'
+              # The registry setting //proxy loads (@aether_registry).
+              - 'bazel/registry/**'
               - '.github/workflows/proxy.yml'
 
   # ShellCheck over the proxy workspace's shell (#848). It runs HERE, not in the
@@ -97,9 +99,11 @@ jobs:
       - name: Every proxy shell script is mirrored into the lint target
         run: scripts/check-proxy-shell-lint.sh
 
-      # proxy/bazel/registry.bzl is the //proxy workspace's copy of the one
-      # registry setting (bazel/img/registry.bzl, proposal 040). A proxy-only PR
-      # skips the `ci` workflow, so the copy's drift must be caught here too.
+      # The //proxy workspace loads the one registry setting
+      # (bazel/registry/registry.bzl, proposal 040) through its
+      # local_path_override of @aether_registry. A proxy-only PR skips the `ci`
+      # workflow, so a dropped override or a reintroduced copy must be caught
+      # here too.
       - name: The image registry is one setting
         run: scripts/check-registry-config.sh
 
