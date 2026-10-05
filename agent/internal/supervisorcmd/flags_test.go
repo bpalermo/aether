@@ -24,12 +24,15 @@ const chartDaemonSet = "charts/aether/templates/agent-proxy-daemonset.yaml"
 var argFlag = regexp.MustCompile(`(?m)^\s*-\s*"--([a-z0-9-]+)`)
 
 // The supervisor's argv spans the install-supervisor initContainer and the proxy
-// container, which is everything from `initContainers:` up to the optional authz
-// sidecar. The sidecar's own flags (--server, --addr, --set) live in the same
-// file and belong to OPA, not to us.
+// container. Since #1275 the optional authz sidecar sits BETWEEN them — it is a
+// native sidecar, an init container after install-supervisor — and its flags
+// (OPA's --server, --addr, --set; proxy-ready's --unix-socket) live in the same
+// file but are not ours. So the scan is `initContainers:` up to the sidecar,
+// plus `containers:` (the proxy) to the end.
 const (
-	argvStart = "initContainers:"
-	argvEnd   = "- name: authz"
+	argvStart  = "initContainers:"
+	authzStart = "- name: authz"
+	proxyStart = "\n      containers:\n"
 )
 
 // supervisorArgv slices the template down to the two blocks whose flags the
@@ -40,11 +43,13 @@ func supervisorArgv(t *testing.T, template string) string {
 	require.GreaterOrEqual(t, start, 0,
 		"%s has no %q — the template was restructured and this scan cannot be trusted",
 		chartDaemonSet, argvStart)
-	end := strings.Index(template[start:], argvEnd)
-	require.GreaterOrEqual(t, end, 0,
-		"%s has no %q — the template was restructured and this scan would pick up "+
-			"another container's flags", chartDaemonSet, argvEnd)
-	return template[start : start+end]
+	authz := strings.Index(template, authzStart)
+	proxy := strings.Index(template, proxyStart)
+	require.True(t, start < authz && authz < proxy,
+		"%s: expected %q, then the authz sidecar %q, then %q — the template was restructured "+
+			"and this scan would pick up another container's flags or miss the supervisor's",
+		chartDaemonSet, argvStart, authzStart, proxyStart)
+	return template[start:authz] + template[proxy:]
 }
 
 // TestFlagsCoverTheChartContract pins the flag set against the chart.

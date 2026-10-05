@@ -136,6 +136,26 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | `proxy.authzSidecar.timeout` | `200ms` | Per-check gRPC timeout. |
 | `proxy.authzSidecar.failureMode` | `DENY` | `DENY` (fail-closed, 403 when unreachable) or `ALLOW` (fail-open). |
 | `proxy.authzSidecar.resources` | `10m` / `32Mi` requests, `128Mi` memory limit | Sidecar resources (OPA preset and bring-your-own). No CPU limit on purpose: it is on the request path, and throttling becomes ext_authz timeouts — 403s under `DENY`. |
+| `proxy.authzSidecar.startupProbe.enabled` | `true` | Render the sidecar's startupProbe. The kubelet starts the `proxy` container only after it passes (#1275). Off: the sidecar counts as started as soon as its process runs. |
+| `proxy.authzSidecar.startupProbe.{periodSeconds,timeoutSeconds,failureThreshold}` | `1` / `1` / `120` | Timings of the default probe, which execs the staged `proxy-ready --unix-socket=/run/aether/authz/authz.sock` inside the sidecar container: it passes once a `connect(2)` to the authz socket succeeds. Works for the OPA preset and for a bring-your-own image, since both must serve on that socket. |
+| `proxy.authzSidecar.startupProbe.override` | `{}` | A full Kubernetes probe, used verbatim instead of the default socket check. The pod is `hostNetwork`, so a port probe answers for whichever pod on the node holds the port. |
+| `proxy.authzSidecar.{livenessProbe,readinessProbe}` | `{}` | Optional probes, rendered verbatim. A native sidecar's readinessProbe counts toward pod Ready (and so gates a proxy roll); a failed livenessProbe restarts only the sidecar, and checks fail per `failureMode` while it is down. |
+
+**The sidecar is a native sidecar (chart 2.4.9, #1275).** `authz` is an init container
+with `restartPolicy: Always`, placed after `install-supervisor` (which stages the probe
+binary) and before the `proxy` container. The kubelet does not start `proxy` until the
+sidecar's startupProbe passes, so a new Envoy never takes the node's listeners with no
+authz behind it. On deletion the kubelet stops the sidecar only after `proxy` has exited,
+so an Envoy that is still serving (waiting for a successor, or draining) keeps its authz.
+It used to be a second regular container, started after `proxy`. When its image had to be
+pulled, the new Envoy served for 7–13 s with no authz, and every check failed (a 403 under
+`DENY`). See [`runbook.md`](./runbook.md) § *The ext_authz sidecar across a proxy roll*.
+Native sidecars need **Kubernetes >= 1.29** (on by default from 1.29, GA in 1.33). With
+the sidecar enabled the chart refuses to render for an older cluster. An older apiserver
+drops `restartPolicy` from an init container, and the sidecar would then be an init
+container that never exits, with every proxy pod stuck in `Init`. `helm template` with no
+cluster uses Helm's built-in Kubernetes version, so pass `--kube-version` there. With the
+sidecar disabled nothing changes and no minimum applies.
 
 **OPA 1.21 YAML change (chart 2.4.6, #1222).** The preset image moved from OPA 1.20.2
 to 1.21.1, which parses YAML under the 1.2 core schema everywhere OPA reads it

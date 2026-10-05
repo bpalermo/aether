@@ -749,6 +749,192 @@ helm_template_fail_test(
     ],
 )
 
+# #1275: the ext_authz sidecar is a Kubernetes NATIVE sidecar -- an init
+# container with `restartPolicy: Always` -- ordered after install-supervisor
+# (which stages the probe binary it execs) and before the proxy container, with
+# a startupProbe that connects to the authz gRPC socket. The kubelet starts the
+# proxy container only once that probe has passed, and stops the sidecar only
+# after the proxy container has exited. As a regular container it was started
+# AFTER the proxy, so a sidecar image pull left the new Envoy serving with no
+# authz behind it (403s under failureMode DENY), and on deletion both got
+# SIGTERM at once while the old Envoy was still draining.
+AUTHZ_NATIVE_SIDECAR_ORDER = "(?s)initContainers:\\n.*\\n        - name: install-supervisor\\n.*\\n        - name: authz\\n          restartPolicy: Always\\n.*\\n      containers:\\n        - name: proxy\\n"
+
+AUTHZ_DEFAULT_STARTUP_PROBE = "startupProbe:\\n\\s+exec:\\n\\s+command:\\n\\s+- \"/opt/aether/proxy-ready\"\\n\\s+- \"--unix-socket=/run/aether/authz/authz.sock\"\\n\\s+periodSeconds: 1\\n\\s+timeoutSeconds: 1\\n\\s+failureThreshold: 120\\n"
+
+# ...and the proxy is the ONLY regular container: every line between
+# `containers:` and `volumes:` belongs to the proxy (indented deeper than a list
+# item) or is a comment/blank -- a second `- name:` item fails the match.
+PROXY_ONLY_REGULAR_CONTAINER = "\\n      containers:\\n        - name: proxy\\n(?:(?:          [^\\n]*|        [^-\\n][^\\n]*|[ ]*)\\n)*      volumes:\\n"
+
+helm_template_test(
+    name = "aether_authz_native_sidecar_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set",
+        "proxy.authzSidecar.opa.enabled=true",
+        "--set",
+        "proxy.authzSidecar.opa.policy=package envoy.authz",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            AUTHZ_NATIVE_SIDECAR_ORDER,
+            AUTHZ_DEFAULT_STARTUP_PROBE,
+            PROXY_ONLY_REGULAR_CONTAINER,
+            # The probe binary is exec'd INSIDE the sidecar's container, so the
+            # staged volume must be mounted there.
+            "- name: authz\\n(?s:.*)- name: supervisor-bin\\n\\s+mountPath: /opt/aether\\n\\s+readOnly: true\\n(?s:.*)\\n      containers:\\n",
+        ],
+    },
+)
+
+# A bring-your-own sidecar gets the same ordering and the same probe: the
+# contract it must already meet (serve on unix:///run/aether/authz/authz.sock)
+# is exactly what the probe checks.
+helm_template_test(
+    name = "aether_authz_native_sidecar_byo_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set",
+        "proxy.authzSidecar.image.repository=example.com/authz",
+        "--set",
+        "proxy.authzSidecar.image.tag=1.0",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            AUTHZ_NATIVE_SIDECAR_ORDER,
+            AUTHZ_DEFAULT_STARTUP_PROBE,
+            PROXY_ONLY_REGULAR_CONTAINER,
+            "- name: authz\\n\\s+restartPolicy: Always\\n\\s+image: \"example.com/authz:1.0\"\\n",
+        ],
+    },
+)
+
+# A custom sidecar whose readiness is not "the socket accepts" replaces the probe
+# wholesale (startupProbe.override), and the default's volume mount goes with it.
+helm_template_test(
+    name = "aether_authz_startup_probe_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set",
+        "proxy.authzSidecar.image.repository=example.com/authz",
+        "--set",
+        "proxy.authzSidecar.image.tag=1.0",
+        "--set-json",
+        "proxy.authzSidecar.startupProbe.override={\"exec\":{\"command\":[\"/authz\",\"healthcheck\"]},\"periodSeconds\":3}",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            AUTHZ_NATIVE_SIDECAR_ORDER,
+            "startupProbe:\\n\\s+exec:\\n\\s+command:\\n\\s+- /authz\\n\\s+- healthcheck\\n\\s+periodSeconds: 3\\n",
+        ],
+    },
+)
+
+helm_template_absent_test(
+    name = "aether_authz_startup_probe_override_no_default_test",
+    absent = [
+        "--unix-socket",
+    ],
+    chart = ":aether",
+    control = "- /authz",
+    opts = [
+        "--show-only",
+        "templates/agent-proxy-daemonset.yaml",
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set-json",
+        "proxy.authzSidecar.startupProbe.override={\"exec\":{\"command\":[\"/authz\",\"healthcheck\"]}}",
+    ],
+)
+
+# startupProbe.enabled=false: still a native sidecar (ordered before the proxy,
+# outliving it on shutdown), but the kubelet counts it started as soon as its
+# process is -- no probe, and no probe-binary mount.
+helm_template_absent_test(
+    name = "aether_authz_startup_probe_disabled_test",
+    absent = [
+        "startupProbe:",
+        "--unix-socket",
+    ],
+    chart = ":aether",
+    control = "restartPolicy: Always",
+    opts = [
+        "--show-only",
+        "templates/agent-proxy-daemonset.yaml",
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set",
+        "proxy.authzSidecar.startupProbe.enabled=false",
+    ],
+)
+
+# Disabled (the default): no sidecar anywhere, no restartable init container, no
+# socket probe -- the pod renders as it did before #1275.
+helm_template_absent_test(
+    name = "aether_authz_disabled_absent_test",
+    absent = [
+        "- name: authz",
+        "restartPolicy: Always",
+        "--unix-socket",
+    ],
+    chart = ":aether",
+    control = "- name: install-supervisor",
+    opts = [
+        "--show-only",
+        "templates/agent-proxy-daemonset.yaml",
+    ],
+)
+
+# Native sidecars are on by default from Kubernetes 1.29 (GA in 1.33). Older
+# apiservers DROP an init container's unknown `restartPolicy`, turning the
+# sidecar into an init container that never exits -- every proxy pod stuck in
+# Init. Refuse to render instead, naming the requirement...
+helm_template_fail_test(
+    name = "aether_authz_kube_version_too_old_test",
+    chart = ":aether",
+    expected_message = "proxy.authzSidecar requires Kubernetes >= 1.29",
+    opts = [
+        "--kube-version",
+        "1.28.15",
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+    ],
+)
+
+# ...while 1.29 itself (and a provider's pre-release suffix) renders...
+helm_template_test(
+    name = "aether_authz_kube_version_min_test",
+    chart = ":aether",
+    opts = [
+        "--kube-version",
+        "1.29.0-eks-1",
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            AUTHZ_NATIVE_SIDECAR_ORDER,
+        ],
+    },
+)
+
+# ...and an old cluster without the sidecar is not refused.
+helm_template_test(
+    name = "aether_authz_disabled_old_kube_test",
+    chart = ":aether",
+    opts = [
+        "--kube-version",
+        "1.28.15",
+    ],
+)
+
 # Chart-wiring audit: the node agent never passed --registrar-address, so it
 # dialed the binary default aether-registrar.aether-system.svc:443 — wrong for any
 # release not named "aether" in aether-system with the default port. The agent

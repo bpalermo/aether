@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,4 +85,55 @@ func TestExitCodes(t *testing.T) {
 			assert.Contains(t, string(out), "not ready")
 		})
 	}
+}
+
+// TestUnixSocket is the ext_authz sidecar's startupProbe contract (#1275): ready
+// iff something is ACCEPTING on the socket. A socket file whose listener is gone
+// is exactly what a restarted sidecar finds in its emptyDir, and it must read as
+// not ready, or the kubelet would start the proxy container against a dead
+// authz socket — the 403s under failureMode DENY this probe exists to prevent.
+func TestUnixSocket(t *testing.T) {
+	// Short path: the AF_UNIX budget is 107 bytes and Bazel's TEST_TMPDIR alone
+	// can exceed it.
+	dir, err := os.MkdirTemp("", "pr")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	live := filepath.Join(dir, "live.sock")
+	ln, err := net.Listen("unix", live)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	stale := filepath.Join(dir, "stale.sock")
+	staleLn, err := net.ListenUnix("unix", &net.UnixAddr{Name: stale, Net: "unix"})
+	require.NoError(t, err)
+	// Keep the file, drop the listener: a crashed sidecar's leftover.
+	staleLn.SetUnlinkOnClose(false)
+	require.NoError(t, staleLn.Close())
+	_, err = os.Stat(stale)
+	require.NoError(t, err, "control: the stale socket file must still exist")
+
+	// A regular file is not a socket either.
+	regular := filepath.Join(dir, "file")
+	require.NoError(t, os.WriteFile(regular, nil, 0o644))
+
+	t.Run("listening", func(t *testing.T) {
+		assert.NoError(t, run([]string{"--unix-socket=" + live}))
+	})
+	t.Run("stale socket file", func(t *testing.T) {
+		assert.Error(t, run([]string{"--unix-socket=" + stale}))
+	})
+	t.Run("missing", func(t *testing.T) {
+		assert.Error(t, run([]string{"--unix-socket=" + filepath.Join(dir, "absent.sock")}))
+	})
+	t.Run("regular file", func(t *testing.T) {
+		assert.Error(t, run([]string{"--unix-socket=" + regular}))
+	})
+	t.Run("socket mode ignores the marker", func(t *testing.T) {
+		// A present marker must not rescue a dead socket: the two modes are
+		// independent, and the sidecar's probe passes no marker at all.
+		marker := filepath.Join(dir, "ready")
+		require.NoError(t, os.WriteFile(marker, []byte("ready\n"), 0o644))
+		assert.Error(t, run([]string{"--ready-marker=" + marker, "--unix-socket=" + stale}))
+	})
 }

@@ -28,6 +28,15 @@
 // deliberately HOLDS readiness while it is still the serving parent. The
 // ready-marker is pod-local by construction — it lives in a per-pod emptyDir —
 // and the supervisor's write/clear logic is the only thing that decides it.
+//
+// --unix-socket is a second, independent mode (#1275): exit 0 iff a connect(2)
+// to that AF_UNIX stream socket succeeds. The chart uses it as the startupProbe
+// of the ext_authz native sidecar (proposal 027), exec'd INSIDE the sidecar's
+// container from the same staged /opt/aether volume, so the kubelet holds the
+// proxy container until the authz gRPC socket in the per-pod authz emptyDir is
+// accepting. The hostNetwork argument above applies unchanged: the socket is
+// pod-local, a port would not be, and the OPA image has no shell or client to
+// probe it with.
 package main
 
 import (
@@ -49,8 +58,13 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("proxy-ready", flag.ContinueOnError)
 	marker := fs.String("ready-marker", defaultReadyMarker,
 		"Pod-local readiness marker path; exit 0 iff it exists")
+	socket := fs.String("unix-socket", "",
+		"If set, ignore --ready-marker and exit 0 iff a connect(2) to this AF_UNIX stream socket succeeds")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *socket != "" {
+		return checkUnixSocket(*socket)
 	}
 	return readymarker.Check(*marker)
 }
