@@ -1,0 +1,110 @@
+# The body every script-driven nightly e2e job shares (.github/workflows/e2e.yaml:
+# waypoint, replicator, uds, uds-csi, l4-routes, eastwest-quic): load the
+# images the `build` job saved, install the pinned kind + kubectl, then
+# `<script> up` -> `<script> verify` -> diagnostics + artifact on failure ->
+# `<script> down`. What differs per suite is an input; the job (its name, `if:`,
+# `timeout-minutes`) stays in the workflow, so `report-failure` still reads one
+# result per suite and `only=<suite>` still selects one job.
+#
+# Requires the repository to be checked out first.
+name: Run an e2e harness script
+description: Bring up, verify, collect diagnostics for, and tear down one e2e/*.sh kind suite against the images the e2e build job saved.
+
+inputs:
+  script:
+    description: The harness under e2e/, e.g. uds.sh.
+    required: true
+  skip-build-var:
+    description: >-
+      The harness's "images are pre-built" switch (e.g. UDS_SKIP_BUILD), set to
+      1 for `up`: the `build` job built them and they arrive as an artifact.
+    required: true
+  verify-description:
+    description: The verify step's name in the log, i.e. what `verify` asserts.
+    required: true
+  logs-dir:
+    description: Where the diagnostics write; uploaded as the artifact.
+    required: true
+  artifact-name:
+    description: Name of the diagnostics artifact.
+    required: true
+  diagnostics:
+    description: >-
+      Shell run (bash -e) when `up` or `verify` fails: best-effort collection
+      into logs-dir. Every command should tolerate failure (`|| true`).
+    required: true
+  soft:
+    description: '"true" = a verify failure does not fail the job (debugging only).'
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Download images artifact
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: aether-images
+        path: /tmp
+
+    - name: Load images into docker
+      shell: bash
+      run: docker load -i /tmp/aether-images.tar
+
+    # Before #1251 these jobs ran the runner's preinstalled kind and its default
+    # node image (1.37 while everything else ran 1.35). The harness creates the
+    # clusters itself, with --image "$KIND_NODE_IMAGE" from e2e/kind-version.sh.
+    - name: Setup kind (pinned)
+      uses: ./.github/actions/setup-kind
+
+    - name: Bring up the environment (e2e/${{ inputs.script }} up)
+      shell: bash
+      env:
+        SCRIPT: ${{ inputs.script }}
+        SKIP_BUILD_VAR: ${{ inputs.skip-build-var }}
+      run: |
+        export "$SKIP_BUILD_VAR=1"
+        "./e2e/$SCRIPT" up
+
+    # Evidence only: never fails the job, so it cannot skip `verify`.
+    - name: Report the clusters' Kubernetes
+      shell: bash
+      run: |
+        for c in $(kind get clusters 2>/dev/null || true); do
+          echo "--- kind cluster $c"
+          kubectl --context "kind-$c" get nodes \
+            -o custom-columns=NODE:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion || true
+          for n in $(kind get nodes --name "$c" 2>/dev/null || true); do
+            echo "$n image: $(docker inspect --format '{{.Config.Image}}' "$n" 2>&1 || true)"
+          done
+        done
+
+    - name: ${{ inputs.verify-description }}
+      id: verify
+      continue-on-error: ${{ inputs.soft == 'true' }}
+      shell: bash
+      env:
+        SCRIPT: ${{ inputs.script }}
+      run: '"./e2e/$SCRIPT" verify'
+
+    - name: Collect diagnostics on failure
+      if: failure() || steps.verify.outcome == 'failure'
+      shell: bash
+      env:
+        DIAGNOSTICS: ${{ inputs.diagnostics }}
+      run: bash -e -c "$DIAGNOSTICS"
+
+    - name: Upload diagnostics
+      if: failure() || steps.verify.outcome == 'failure'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.logs-dir }}
+        if-no-files-found: ignore
+
+    - name: Tear down
+      if: always()
+      shell: bash
+      env:
+        SCRIPT: ${{ inputs.script }}
+      run: '"./e2e/$SCRIPT" down || true'
