@@ -1933,7 +1933,7 @@ gone, and the instant read returns nothing at all rather than the exit it record
 ### mesh-dns CPU throttling
 
 mesh-dns is every managed pod's resolver, so a CFS-throttled period on it is added
-to the DNS latency of every lookup in flight on that node. Until chart 2.4.7 it ran
+to the DNS latency of every lookup in flight on that node. Until chart 2.4.8 it ran
 with a `25m` request and a `100m` limit and was throttled in 8.7 % of 100 ms periods
 at steady state (talos w05, #1253) while *averaging* ~24.5m: its CPU comes in bursts,
 and a burst that spends the period's 10 ms of quota parks the daemon until the next
