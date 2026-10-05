@@ -4,6 +4,7 @@ go_library(
     name = "prober",
     srcs = [
         "faillog.go",
+        "phase.go",
         "prober.go",
     ],
     importpath = "aethermesh.dev/prober/internal/prober",
@@ -24,6 +25,8 @@ go_test(
     size = "small",
     srcs = [
         "identity_test.go",
+        "phase_recorder_test.go",
+        "phase_test.go",
         "prober_test.go",
         "shutdown_test.go",
     ],

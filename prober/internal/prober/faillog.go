@@ -16,12 +16,16 @@ import (
 // took, so a burst like #1040's (~142 mesh_dns timeouts from one pod in <=30 s) could not
 // be lined up against a proxy hot-restart. Each failed probe therefore prints one line:
 //
-//	AETHER_PROBE_FAIL {"t":...,"tier":...,"target":...,"result":...,"err":...,"elapsed_ms":...,"pod":...,"node":...,"n":...,"truncated":...}
+//	AETHER_PROBE_FAIL {"t":...,"tier":...,"target":...,"result":...,"err":...,"elapsed_ms":...,
+//	  "phase":...,"reused":...,"conn_ms":...,"dns_ms":...,"connect_ms":...,"tls_ms":...,
+//	  "write_ms":...,"ttfb_ms":...,"pod":...,"node":...,"n":...,"truncated":...}
 //
 // the same shape as the soak's k6 AETHER_FAIL sample (e2e/soak/k6-mesh-soak.js): one
 // JSON object per line behind a fixed greppable marker, with the timestamp as the
 // load-bearing field. elapsed_ms separates a probe that burned the whole 2 s budget
-// (timeout) from a fast refusal (connection_error).
+// (timeout) from a fast refusal (connection_error); phase and the *_ms fields (#1252, see
+// phase.go) say which step of the request the time went to. Every key is always present;
+// a *_ms of -1 means that phase never started.
 //
 // It is bounded so a burst cannot flood the log pipeline: at most failLogCap detail lines
 // per (tier, result) per failLogWindow. Past the cap the failures are only counted, and
@@ -57,10 +61,11 @@ type failLine struct {
 	Result    string  `json:"result"`
 	Err       string  `json:"err"`
 	ElapsedMS float64 `json:"elapsed_ms"`
-	Pod       string  `json:"pod"`
-	Node      string  `json:"node"`
-	N         int     `json:"n"`
-	Truncated bool    `json:"truncated"`
+	phaseTimings
+	Pod       string `json:"pod"`
+	Node      string `json:"node"`
+	N         int    `json:"n"`
+	Truncated bool   `json:"truncated"`
 }
 
 // failSummary is the once-per-window count of the failures the cap suppressed.
@@ -93,8 +98,9 @@ func newFailLog(out io.Writer, pod, node string, capPerWindow int, window time.D
 	}
 }
 
-// log records one failed probe observed at now.
-func (f *failLog) log(now time.Time, t target, result string, elapsedSeconds float64, err error) {
+// log records one failed probe observed at now, with the phase timings of its trace
+// (noPhase when it never reached the transport).
+func (f *failLog) log(now time.Time, t target, result string, elapsedSeconds float64, err error, pt phaseTimings) {
 	if f == nil || f.out == nil {
 		return
 	}
@@ -120,16 +126,17 @@ func (f *failLog) log(now time.Time, t target, result string, elapsedSeconds flo
 		errStr = err.Error()
 	}
 	f.write(failLine{
-		T:         now.UTC().Format(time.RFC3339Nano),
-		Tier:      t.tier,
-		Target:    t.name,
-		Result:    result,
-		Err:       errStr,
-		ElapsedMS: math.Round(elapsedSeconds*1e4) / 10, // 0.1 ms resolution
-		Pod:       f.pod,
-		Node:      f.node,
-		N:         w.logged,
-		Truncated: w.logged == f.cap,
+		T:            now.UTC().Format(time.RFC3339Nano),
+		Tier:         t.tier,
+		Target:       t.name,
+		Result:       result,
+		Err:          errStr,
+		ElapsedMS:    math.Round(elapsedSeconds*1e4) / 10, // 0.1 ms resolution
+		phaseTimings: pt,
+		Pod:          f.pod,
+		Node:         f.node,
+		N:            w.logged,
+		Truncated:    w.logged == f.cap,
 	})
 }
 

@@ -674,7 +674,7 @@ resource's `k8s.pod.name`; #1041):
 
 | Metric | Type | Notes |
 |---|---|---|
-| `aether_probe_requests_total` | counter | `result` is one of `success`, `http_error`, `connection_error`, `timeout`, `saturated`, plus — `mesh_dns` tier only — `dns_error`, `dns_nxdomain`, `dns_timeout`. A resolution failure is an independently alertable signal; a post-resolution connect failure stays `connection_error`. |
+| `aether_probe_requests_total` | counter | `result` is one of `success`, `http_error`, `connection_error`, `timeout`, `saturated`, plus — `mesh_dns` tier only — `dns_error`, `dns_nxdomain`, `dns_timeout`. A resolution failure is an independently alertable signal; a post-resolution connect failure stays `connection_error`. A probe deadline that interrupts the name lookup is `dns_timeout`; a deadline in any later phase is `timeout` (#1252). |
 | `aether_probe_request_duration_seconds` | histogram | Explicit **seconds**-valued buckets (`0.001` … `5`). They have to be set explicitly: the SDK's default boundaries are tuned for millisecond-valued durations, so against seconds the first bucket is `<= 5s` and a healthy 2 ms probe is indistinguishable from a timed-out 2 s one (#732). |
 
 Per-node identity is a **resource** attribute, not a metric label: the chart sets
@@ -686,9 +686,11 @@ promotes `host.name` ahead of `k8s.node.name` would export `node="prober-xxxxx"`
 is what happened until #1041.
 
 **Failure log.** Every non-success probe prints one bounded
-`AETHER_PROBE_FAIL {t, tier, target, result, err, elapsed_ms, pod, node, n, truncated}`
+`AETHER_PROBE_FAIL {t, tier, target, result, err, elapsed_ms, phase, reused, conn_ms, dns_ms, connect_ms, tls_ms, write_ms, ttfb_ms, pod, node, n, truncated}`
 line to stdout: at most 20 per `(tier, result)` per minute, then one summary line with
-the `suppressed` count (#1040). See [`runbook.md`](./runbook.md), "Attributing a prober
+the `suppressed` count (#1040). `phase` and the `*_ms` fields come from a per-probe
+`httptrace` trace and say which step of the request the time went to (#1252; `-1` =
+the phase never started). See [`runbook.md`](./runbook.md), "Attributing a prober
 failure".
 
 **Deployment.** The chart renders a DaemonSet + ServiceAccount into a namespace

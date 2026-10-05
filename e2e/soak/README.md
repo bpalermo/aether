@@ -648,7 +648,10 @@ The same rule applies to every other counter gate in this README.
 Attribute every non-success burst from the prober's own `AETHER_PROBE_FAIL` lines
 (#1040). There is one per failed probe, capped at 20 per `(tier, result)` per minute plus
 a `suppressed` summary, and each carries the client-side `t`, `err`, `elapsed_ms`, `pod`
-and `node`. Pull them from VictoriaLogs for the graded window:
+and `node`, plus (#1252) the request `phase` it ended in and per-phase `conn_ms`,
+`dns_ms`, `connect_ms`, `tls_ms`, `write_ms`, `ttfb_ms` (`-1` = never started) and
+`reused`. The field reference is in `docs/runbook.md`, "Attributing a prober failure".
+Pull them from VictoriaLogs for the graded window:
 
 ```
 _stream:{k8s.namespace.name="aether-test"} AND "k8s.container.name":prober AND "AETHER_PROBE_FAIL"
@@ -667,7 +670,8 @@ On 2026-10-01 it was 19 lines for 1 liveness + 7 + 11 mesh_dns `timeout`.
 
 Put each burst's `t` and `node` next to that node's proxy parent-exit and mesh-dns
 handoff times. `elapsed_ms` of about 2000 means the probe used its whole budget
-(`timeout`), and a few ms means a fast refusal (`connection_error`). Runs graded before
+(`timeout`), and a few ms means a fast refusal (`connection_error`). `phase` says where
+the budget went: `connect` (no accept), `first_byte` (connected and sent, no answer). Runs graded before
 #1041 carry the pod name in `node`. Translate it with `kubectl get pods -o wide` while
 the pod exists, and after that it cannot be placed.
 
@@ -681,12 +685,22 @@ the pod exists, and after that it cannot be placed.
   legitimately returns *no data* on a clean run — which is indistinguishable from the
   metric having been renamed away. A 2026-09-22 grading pass read that empty result as
   "the dns_* classes do not exist" and proposed dropping them from the grade. They do
-  exist (`prober/internal/prober/prober.go:59-61`, returned by `classifyErr`), and
-  dropping them would have retired the signal #726 was fixed to restore: the comment
-  above `classifyErr` records **three separate investigations** that read "dns_* is zero"
-  as "DNS is healthy" when it only ever meant "DNS never failed FAST". Confirm the
-  classes are still reachable in the source when they read empty; do not infer their
-  absence from an empty query.
+  exist (`resultDNS*` in `prober/internal/prober/prober.go`, returned by
+  `classifyFailure`), and dropping them would have retired the signal #726 was fixed to
+  restore: the comment above `classifyErr` records **three separate investigations**
+  that read "dns_* is zero" as "DNS is healthy" when it only ever meant "DNS never
+  failed FAST". Confirm the classes are still reachable in the source when they read
+  empty; do not infer their absence from an empty query.
+
+  **Runs graded before #1252 could not see a resolution stall at all.** Go's transport
+  returns the request deadline, not a DNS error, when the deadline fires mid-lookup, so
+  a stall that outlived the 2 s budget was counted `timeout`. Since #1252 the prober
+  classifies the deadline by the request phase it interrupted (an `httptrace` trace per
+  probe): a stall in resolution is `dns_timeout`, and every later stall is still
+  `timeout`. To attribute a mesh_dns `timeout`, read the `phase` field of its
+  `AETHER_PROBE_FAIL` line (`connect`, `first_byte`, …) and the per-phase `*_ms`
+  fields, instead of inferring the phase from access-log source-port order as #1240
+  had to.
 - **#682 episodes during the no-roll window or SHRINK are the harness working, not a
   regression** — attribute via the agent log line
   `expired observed upstreams from node dependency set`.

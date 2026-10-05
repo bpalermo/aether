@@ -1743,7 +1743,18 @@ carry:
 | `pod` | the prober pod (`prober-h2mzs`) | the prober, as a datapoint attribute |
 | `tier` | `liveness`, `reachability`, `mesh_dns` | the prober |
 | `target` | the probed name (`egress`, `echo.aether-test.aether.internal:18081`, …) | the prober |
-| `result` | `success`, `http_error`, `connection_error`, `timeout`, `saturated`, `dns_error`, `dns_nxdomain`, `dns_timeout` | the prober (`classifyErr`) |
+| `result` | `success`, `http_error`, `connection_error`, `timeout`, `saturated`, `dns_error`, `dns_nxdomain`, `dns_timeout` | the prober (`classifyFailure`: the error, plus the request phase the deadline interrupted) |
+
+**`timeout` vs `dns_timeout` (#1252).** A probe whose deadline fires while its name
+lookup is still in flight is `dns_timeout`. Before #1252 it was `timeout`: Go's
+transport dials on a context detached from the request and, when the request deadline
+fires first, returns that deadline (`context deadline exceeded`), never a DNS error, so
+the prober could not tell a resolution stall from a connect or upstream stall. Every
+probe now carries an `httptrace` trace, and the deadline is classified by the phase it
+interrupted. A deadline in any later phase (connect, TLS, write, waiting for the first
+response byte) is still `timeout`; which one it was is the `phase` field of the
+failure line below, not a label. In series from before #1252, part of the mesh_dns
+`timeout` count was resolution stalls; from #1252 on, those count as `dns_timeout`.
 
 **Until #1041, `node` held the POD name** (`node="prober-h2mzs"`). The prober's resource
 carried `host.name`, and for a pod that is not hostNetwork that is the pod name. The
@@ -1777,7 +1788,7 @@ stdout. It follows the soak's k6 `AETHER_FAIL` convention: a fixed marker, then 
 JSON object:
 
 ```
-AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"pod":"prober-h2mzs","node":"main-worker-01","n":1,"truncated":false}
+AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"pod":"prober-h2mzs","node":"main-worker-01","n":1,"truncated":false}
 ```
 
 - `t` is the client-side timestamp. Line it up against the proxy's hot-restart
@@ -1785,6 +1796,25 @@ AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"ec
 - `elapsed_ms` separates a probe that used its whole budget (`timeout` at about 2000 ms,
   meaning the request went out and nothing came back) from a fast `connection_error`
   (a refusal or reset in a few ms, meaning nothing was listening).
+- `phase` (#1252) is the step of the request the probe was in when it ended: the one
+  the deadline interrupted for a `timeout`/`dns_timeout`, the one that failed for a
+  `connection_error`. One of `dns`, `connect`, `tls`, `write` (connection up, request
+  not fully written), `first_byte` (request written, nothing back yet), `headers`
+  (first byte back, headers incomplete), `conn_wait` (waiting for a connection with no
+  dial step running), `response` (an `http_error`: the answer arrived, the status is
+  the failure), or empty when the probe never reached the transport (`saturated`). The example above connected after a slow 411 ms and then waited 1.6 s
+  for the proxy to answer: the time went to the proxy, not to DNS. (Its phase values are
+  illustrative; lines written before #1252 carry no phase fields.)
+- `dns_ms`, `connect_ms`, `tls_ms`, `write_ms`, `ttfb_ms` are each phase's duration in
+  ms (`ttfb_ms` is from the request written to the first response byte). `conn_ms` is
+  everything it took to get a connection (pool wait, resolution, connect, TLS). The
+  phase the probe ended in is measured up to the failure. **`-1` means the phase never
+  started**: `dns_ms` is always `-1` on the liveness and reachability tiers (they dial
+  an IP), and `dns_ms`/`connect_ms` are `-1` on a reused connection.
+- `reused` is `true` when the probe ran on a pooled keep-alive connection (liveness,
+  reachability). The mesh_dns tier never reuses, so it is always `false` there.
+- Every key is present on every detail line, so a query can filter on any of them
+  (`AND "\"phase\":\"dns\""`).
 - `err` is the Go error string. For `http_error` it is `HTTP <status>`. For `saturated`
   the probe was never sent because `--max-concurrent` probes were already in flight.
 

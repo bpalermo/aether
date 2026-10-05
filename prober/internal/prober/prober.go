@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"sync"
 	"time"
@@ -56,7 +57,9 @@ const (
 	resultSaturated       = "saturated"
 	// resultDNSError and its refinements are emitted only by the mesh_dns tier: a
 	// name-resolution failure is an independently alertable signal, distinct from a
-	// post-resolution connect failure (which stays connection_error).
+	// post-resolution connect failure (which stays connection_error). dns_timeout
+	// also covers a probe whose deadline fired while the lookup was still in flight
+	// (classifyFailure, #1252).
 	resultDNSError    = "dns_error"
 	resultDNSNXDomain = "dns_nxdomain"
 	resultDNSTimeout  = "dns_timeout"
@@ -379,7 +382,7 @@ func (p *Prober) runTarget(ctx context.Context, t target) {
 					p.probe(ctx, t)
 				})
 			default:
-				p.record(t, resultSaturated, 0, errSaturated)
+				p.record(t, resultSaturated, 0, errSaturated, noPhase)
 			}
 		}
 	}
@@ -390,7 +393,7 @@ func (p *Prober) probe(ctx context.Context, t target) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, t.url, nil)
 	if err != nil {
-		p.record(t, resultConnectionError, 0, err)
+		p.record(t, resultConnectionError, 0, err, noPhase)
 		return
 	}
 	// mesh_dns targets carry no authority: leaving req.Host unset preserves the
@@ -407,8 +410,14 @@ func (p *Prober) probe(ctx context.Context, t target) {
 	// tracing equivalent for the direct_response liveness route).
 	req.Header.Set("traceparent", notSampledTraceparent())
 	start := time.Now()
+	// The phase trace (#1252): which step of the request the time went to. The
+	// transport's dial goroutine keeps the request context's values, so the DNS and
+	// connect hooks fire even for a dial the deadline abandons.
+	rec := newPhaseRecorder()
+	req = req.WithContext(httptrace.WithClientTrace(rctx, rec.trace()))
 	resp, err := t.client.Do(req)
-	elapsed := time.Since(start).Seconds()
+	end := time.Now()
+	elapsed := end.Sub(start).Seconds()
 	if err != nil {
 		// The prober itself is stopping (SIGTERM cancels ctx): the probe was cut
 		// short by us, not failed by the data plane. Record nothing, not even an
@@ -418,15 +427,20 @@ func (p *Prober) probe(ctx context.Context, t target) {
 		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
 			return
 		}
-		p.record(t, classifyErr(rctx, err), elapsed, err)
+		snap := rec.snapshot(end)
+		pt := snap.timings()
+		p.record(t, classifyFailure(rctx, err, pt.Phase), elapsed, err, pt)
 		return
 	}
 	drainBody(resp.Body)
 	if resp.StatusCode == http.StatusOK {
-		p.record(t, resultSuccess, elapsed, nil)
+		p.record(t, resultSuccess, elapsed, nil, noPhase)
 		return
 	}
-	p.record(t, resultHTTPError, elapsed, fmt.Errorf("HTTP %d", resp.StatusCode))
+	snap := rec.snapshot(end)
+	pt := snap.timings()
+	pt.Phase = phaseResponse // the request completed; the status is the failure
+	p.record(t, resultHTTPError, elapsed, fmt.Errorf("HTTP %d", resp.StatusCode), pt)
 }
 
 // drainBody reads the rest of the response body before closing it. Closing a body that
@@ -476,11 +490,18 @@ func notSampledTraceparent() string {
 // failure it exists to name: three separate investigations read "dns_* is zero" as
 // "DNS is healthy" when it only ever meant "DNS never failed FAST".
 //
-// The reorder is safe because *net.DNSError is produced only by resolution — Go
-// returns one (with IsTimeout set) when the context deadline cancels a lookup in
-// flight, and a plain OpError with no DNSError inside when the deadline lands on a
-// post-resolution connect. So the DNS branch catches resolution stalls and nothing
-// else; connect stalls still fall through to resultTimeout below.
+// The reorder is safe because *net.DNSError is produced only by resolution, so the DNS
+// branch catches resolution failures and nothing else; connect failures still fall
+// through below.
+//
+// What the error alone CANNOT show is a resolution stall that outlives the probe
+// (#1252). On the net/http path a *net.DNSError arrives only when the lookup itself
+// fails first (NXDOMAIN, SERVFAIL, the resolver's own retransmit timeout). The dial runs
+// on a context detached from the request's cancellation, so when the probe's deadline
+// fires while the lookup is still in flight, Transport.getConn returns the REQUEST
+// context's cause, a bare context.DeadlineExceeded, and this function can only say
+// `timeout` (TestTransportHidesResolutionStall). classifyFailure adds the phase the
+// probe's trace saw.
 func classifyErr(ctx context.Context, err error) string {
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
@@ -503,9 +524,29 @@ func classifyErr(ctx context.Context, err error) string {
 	return resultConnectionError
 }
 
+// classifyFailure is classifyErr plus the phase the probe's trace was in when it ended
+// (#1252). A deadline that interrupted name resolution is dns_timeout: Go's transport
+// returns it as a bare context deadline (see classifyErr), so without the phase it
+// was always counted `timeout` and "dns_* is zero" never meant DNS was healthy.
+//
+// Deadlines in every later phase stay `timeout`. The result label set is deliberately
+// NOT widened with connect_timeout / first_byte_timeout: aether_probe_requests_total is
+// the soak SLI and the alert input, every new value is a new series per tier, target
+// and pod, and splitting `timeout` would silently change what an existing
+// result="timeout" rule matches. The phase, with per-phase milliseconds, is on the
+// AETHER_PROBE_FAIL line instead.
+func classifyFailure(ctx context.Context, err error, phase string) string {
+	result := classifyErr(ctx, err)
+	if result == resultTimeout && phase == phaseDNS {
+		return resultDNSTimeout
+	}
+	return result
+}
+
 // record counts one probe outcome and, for anything but success, emits the bounded
-// AETHER_PROBE_FAIL line. err is the failure's cause (nil on success).
-func (p *Prober) record(t target, result string, elapsed float64, err error) {
+// AETHER_PROBE_FAIL line. err is the failure's cause (nil on success); pt is the
+// probe's phase timings (noPhase when it never reached the transport).
+func (p *Prober) record(t target, result string, elapsed float64, err error, pt phaseTimings) {
 	kvs := []attribute.KeyValue{
 		attribute.String("tier", t.tier),
 		attribute.String("target", t.name),
@@ -523,6 +564,6 @@ func (p *Prober) record(t target, result string, elapsed float64, err error) {
 		p.duration.Record(context.Background(), elapsed, attrs)
 	}
 	if result != resultSuccess {
-		p.fails.log(time.Now(), t, result, elapsed, err)
+		p.fails.log(time.Now(), t, result, elapsed, err, pt)
 	}
 }

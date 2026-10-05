@@ -76,7 +76,7 @@ func TestDatapointsCarryPod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newProber: %v", err)
 	}
-	p.record(p.targets[0], resultSuccess, 0.002, nil)
+	p.record(p.targets[0], resultSuccess, 0.002, nil, noPhase)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -286,10 +286,10 @@ func TestFailLogCapIsPerKey(t *testing.T) {
 	now := time.Date(2026, 9, 28, 4, 38, 0, 0, time.UTC)
 	dns := target{tier: tierMeshDNS, name: "echo.aether-test.aether.internal:18081"}
 	for range 5 {
-		f.log(now, dns, resultTimeout, 2, context.DeadlineExceeded)
+		f.log(now, dns, resultTimeout, 2, context.DeadlineExceeded, noPhase)
 	}
-	f.log(now, dns, resultConnectionError, 0.001, nil)
-	f.log(now, target{tier: tierLiveness, name: "egress"}, resultTimeout, 2, nil)
+	f.log(now, dns, resultConnectionError, 0.001, nil, noPhase)
+	f.log(now, target{tier: tierLiveness, name: "egress"}, resultTimeout, 2, nil, noPhase)
 
 	lines := failLines(t, out.String())
 	if len(lines) != 4 { // 2 capped mesh_dns/timeout + 1 mesh_dns/connection_error + 1 liveness/timeout
