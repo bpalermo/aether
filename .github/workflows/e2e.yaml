@@ -157,7 +157,10 @@ jobs:
       # Gateway.status.addresses.
       - name: Start cloud-provider-kind
         run: |
-          go install sigs.k8s.io/cloud-provider-kind@latest
+          # Pinned: `@latest` let any upstream release change what this gate
+          # runs (and what runs under sudo) without a commit here. v0.12.0 is
+          # what @latest resolved to when it was pinned (2026-10-05).
+          go install sigs.k8s.io/cloud-provider-kind@v0.12.0
           # shellcheck disable=SC2024 # the log is meant to be written as the runner user, not root
           sudo "$(go env GOPATH)/bin/cloud-provider-kind" > /tmp/cloud-provider-kind.log 2>&1 &
           echo "cloud-provider-kind started (pid $!)"

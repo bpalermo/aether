@@ -117,7 +117,7 @@ jobs:
   # Byte-for-byte the same legs as ci.yaml's `test` job: build every impacted
   # target (compile + lint on BuildBuddy RBE), run the impacted unit tests
   # (--config=ci implies --config=remote, which pins TestRunner to the local
-  # strategy — tests must NOT run remotely), then the proxy-ready linkage guard.
+  # strategy — tests must NOT run remotely), then the five linkage guards.
   test:
     needs: diff
     if: needs.diff.outputs.has_any == 'true'

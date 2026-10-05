@@ -183,8 +183,9 @@ jobs:
   # target at all. `test` still lints any impacted sh_* target as a side effect of
   # `--config=ci`; that is a second net, not this one.
   #
-  # Cheap by construction: shellcheck over 17 source files, no toolchain, no Go,
-  # so it reports in seconds instead of riding the critical path.
+  # Cheap by construction: shellcheck over the root workspace's shell (70
+  # scripts as of #1276), no toolchain, no Go, so it reports in a few minutes
+  # instead of riding the critical path.
   shell:
     needs: changes
     if: needs.changes.outputs.control_plane == 'true'
@@ -202,7 +203,7 @@ jobs:
       - name: Setup Bazel
         uses: ./.github/actions/setup-bazel
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
-        run: scripts/ci-bazel-warmup.sh --config=lint --@aspect_rules_lint//lint:fail_on_violation //scripts:all @buildifier_prebuilt//:buildifier @aspect_rules_lint//lint:shellcheck_bin
+        run: scripts/ci-bazel-warmup.sh --config=lint --@aspect_rules_lint//lint:fail_on_violation //scripts:all @aspect_rules_lint//lint:shellcheck_bin
 
       # First: is every script actually reachable by the aspect? The srcs are
       # per-package globs and a glob cannot cross a package boundary, so a script
