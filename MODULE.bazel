@@ -8,6 +8,25 @@ module(name = "aethermesh")
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "protobuf", version = "36.2")
+
+# protobuf 36.2's rules_rust `crate` usage has no lockfile, so the extension
+# re-resolved against live crates.io and rewrote MODULE.bazel.lock on any
+# re-evaluation (#1284). The patch points it at the lockfiles in
+# //bazel/protobuf_crates (a backport of upstream protobuf e5deac314d); with
+# both lockfiles set the extension is reproducible and leaves the lock alone.
+# `version` is required (a MODULE.bazel patch is applied to every version MVS
+# reads, and older ones do not match) and must track the bazel_dep above; 36.2
+# is what MVS selected anyway, so the resolved graph is unchanged and only the
+# older protobuf MODULE.bazel hashes drop out of the lock's registryFileHashes.
+# Drop the override with the first protobuf release that ships its own crate
+# lockfiles.
+single_version_override(
+    module_name = "protobuf",
+    patch_strip = 1,
+    patches = ["//bazel/protobuf_crates:protobuf_crate_lockfiles.patch"],
+    version = "36.2",
+)
+
 bazel_dep(name = "rules_go", version = "0.64.1")
 bazel_dep(name = "gazelle", version = "0.54.0")
 

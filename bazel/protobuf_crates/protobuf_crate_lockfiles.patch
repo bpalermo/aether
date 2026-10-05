@@ -1,0 +1,27 @@
+Pin protobuf's crate_universe resolution to checked-in lockfiles (#1284).
+
+protobuf 36.2 calls `crate.from_specs()` with no lockfile, so every evaluation
+of the rules_rust `crate` extension re-resolves its open-ended specs
+(`googletest >0.0.0`, `quote >=1`, ...) against the live crates.io index and
+rewrites MODULE.bazel.lock (syn 3.0.5 -> 3.0.6, unicode-ident 1.0.24 -> 1.0.26).
+Backport of upstream protobuf e5deac314d ("Provide pre-generated lockfiles for
+Protobuf Rust under Bzlmod", 2026-09-01), except the lockfiles live in this
+repo so that a repin writes them back into the source tree.
+
+Drop this patch (and //bazel/protobuf_crates) with the first protobuf release
+whose MODULE.bazel passes `cargo_lockfile`/`lockfile` itself.
+
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -214,7 +214,10 @@
+     package = "syn",
+     version = "2",
+ )
+-crate.from_specs()
++crate.from_specs(
++    cargo_lockfile = "@@//bazel/protobuf_crates:Cargo.lock",
++    lockfile = "@@//bazel/protobuf_crates:Cargo.Bazel.lock",
++)
+ use_repo(crate, crate_index = "crates")
+
+ # Keep this list minimal; these dependencies will be part of the common `maven` install and could affect end-user projects.

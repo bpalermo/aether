@@ -1,0 +1,14 @@
+# Lockfiles for the rules_rust `crate` extension usage in protobuf's MODULE.bazel
+# (patched in by protobuf_crate_lockfiles.patch; see the single_version_override
+# in //:MODULE.bazel). Nothing in this repo builds Rust: these only make that
+# extension's resolution reproducible, so it neither rewrites MODULE.bazel.lock
+# nor reaches crates.io on a plain build (#1284).
+#
+# Regenerate after a protobuf or rules_rust bump that changes the specs or the
+# cargo-bazel digest (the build fails with "lockfile is out of date" otherwise):
+#
+#     CARGO_BAZEL_REPIN=1 bazel mod deps
+exports_files([
+    "Cargo.Bazel.lock",
+    "Cargo.lock",
+])

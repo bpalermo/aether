@@ -1,6 +1,7 @@
 # Machine-managed files: mark as generated so GitHub collapses them in pull
 # request diffs and excludes them from language statistics. They are produced by
-# bzlmod (MODULE.bazel.lock) and go mod (go.sum) rather than edited by hand.
+# bzlmod (MODULE.bazel.lock), go mod (go.sum) and crate_universe repins
+# (bazel/protobuf_crates) rather than edited by hand.
 #
 # rules_lint's format multirun (`make format`, `make format-check`, the `format`
 # CI job) SKIPS every file whose `linguist-generated`, `gitlab-generated` or
@@ -18,3 +19,5 @@
 /MODULE.bazel.lock linguist-generated=true
 /proxy/MODULE.bazel.lock linguist-generated=true
 /go.sum linguist-generated=true
+/bazel/protobuf_crates/Cargo.lock linguist-generated=true
+/bazel/protobuf_crates/Cargo.Bazel.lock linguist-generated=true
