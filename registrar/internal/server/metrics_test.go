@@ -88,7 +88,8 @@ func TestMetrics_NilReceiverSafe(t *testing.T) {
 	m.syncCompleted(ctx, 0.1, State{Generation: 1}, map[string]int{"EVENT_TYPE_ENDPOINT_ADDED": 1})
 	m.syncFailed(ctx, 0.1)
 	m.snapshotState(ctx, State{Generation: 7})
-	m.watchStarted(ctx, ResumeResend)
+	m.watchStarted(ctx, ResumeResend, false)
+	m.watchStarted(ctx, ResumeCurrent, true)
 	if err := m.ObserveSnapshot(NewSnapshot(), nil); err != nil {
 		t.Errorf("ObserveSnapshot on nil metrics = %v, want nil", err)
 	}

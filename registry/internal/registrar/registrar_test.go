@@ -584,7 +584,7 @@ func TestReconnectSignal(t *testing.T) {
 
 // TestSetServiceFilter_ReassertsOnChangeOnly verifies the filter setter
 // cancels the active stream only when the effective set changes (order
-// -insensitive), and that the generation bump clears the resume token path.
+// -insensitive), and that the loop then asserts the newest filter.
 func TestSetServiceFilter_ReassertsOnChangeOnly(t *testing.T) {
 	r := NewRegistrarRegistry(slog.New(slog.DiscardHandler), Config{Address: "test"})
 
@@ -610,9 +610,7 @@ func TestSetServiceFilter_ReassertsOnChangeOnly(t *testing.T) {
 	r.SetServiceFilter(nil)
 	assert.Equal(t, 4, cancels)
 
-	services, gen := r.assertFilter(func() {})
-	assert.Nil(t, services)
-	assert.Equal(t, uint64(4), gen)
+	assert.Nil(t, r.assertFilter(func() {}))
 }
 
 // TestServiceCatalog_ReplayAndIncrementals verifies the client catalog:

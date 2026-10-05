@@ -104,7 +104,7 @@ func TestAssertFilter_PublishAndReadAreOneCriticalSection(t *testing.T) {
 			<-start
 			// The loop: publish this stream's canceller and read the filter it
 			// must assert on it.
-			svcs, _ := r.assertFilter(func() {
+			svcs := r.assertFilter(func() {
 				mu.Lock()
 				cancelled = true
 				mu.Unlock()

@@ -659,12 +659,27 @@ func (s *Snapshot) FullSnapshotEvents(filter map[string]struct{}) ([]*registrarv
 // unversioned FULL_SNAPSHOT events (ResumeResend only), the service catalog to
 // replay (all but ResumeCurrent), and the current version, which the
 // SNAPSHOT_COMPLETE marker carries in every case.
-func (s *Snapshot) WatchStart(token string, filter map[string]struct{}) (events []*registrarv1.WatchEndpointsResponse, services []string, version string, resume Resume) {
+//
+// have is the request's partial_resume (#1239): nil for an ordinary token, else
+// the services the client's cache holds at token. When the token names the
+// current contents, the client is EXTENDED instead of resent: events are the
+// ENDPOINT_ADDED events of filter's services outside have, and extended is
+// true. A token that does not name the current contents is resent in full, as
+// for an ordinary token: the client's held services may be stale too.
+//
+// Extending is exact only because the content hash is over the WHOLE snapshot:
+// a token naming the current contents means every service the client holds is
+// current, whatever its filter was when it earned the token.
+func (s *Snapshot) WatchStart(token string, filter, have map[string]struct{}) (events []*registrarv1.WatchEndpointsResponse, services []string, version string, resume Resume, extended bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	resume = s.resumeLocked(token)
+	extended = have != nil && resume != ResumeResend
+	if extended {
+		events = s.missingEventsLocked(filter, have)
+	}
 	if resume == ResumeCurrent {
-		return nil, nil, s.version, resume
+		return events, nil, s.version, resume, extended
 	}
 	services = make([]string, 0, len(s.serviceCounts))
 	for name := range s.serviceCounts {
@@ -674,7 +689,32 @@ func (s *Snapshot) WatchStart(token string, filter map[string]struct{}) (events 
 	if resume == ResumeResend {
 		events = s.fullSnapshotEventsLocked(filter)
 	}
-	return events, services, s.version, resume
+	return events, services, s.version, resume, extended
+}
+
+// missingEventsLocked returns, as unversioned ENDPOINT_ADDED events, the
+// endpoints of the services in filter (nil = every service) that are not in
+// have: what an extended client lacks. Not FULL_SNAPSHOT: a client clears its
+// whole cache on the first of those. Caller must hold mu.
+func (s *Snapshot) missingEventsLocked(filter, have map[string]struct{}) []*registrarv1.WatchEndpointsResponse {
+	var events []*registrarv1.WatchEndpointsResponse
+	for _, entry := range s.entries {
+		if _, held := have[entry.ServiceName]; held {
+			continue
+		}
+		if filter != nil {
+			if _, inScope := filter[entry.ServiceName]; !inScope {
+				continue
+			}
+		}
+		events = append(events, &registrarv1.WatchEndpointsResponse{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+			ServiceName: entry.ServiceName,
+			Protocol:    entry.Protocol,
+			Endpoint:    entry.Endpoint,
+		})
+	}
+	return events
 }
 
 func (s *Snapshot) fullSnapshotEventsLocked(filter map[string]struct{}) []*registrarv1.WatchEndpointsResponse {

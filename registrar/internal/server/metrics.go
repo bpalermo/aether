@@ -142,14 +142,14 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	}
 
 	if m.watchStarts, err = meter.Int64Counter("aether.registrar.watch.starts",
-		metric.WithDescription("Agent watch streams opened, by resume outcome: resent (full snapshot), current (last_version is the current version: marker only), renamed (same contents under an older version: catalog + marker)")); err != nil {
+		metric.WithDescription("Agent watch streams opened, by resume outcome: resent (full snapshot), current (last_version is the current version: marker only), renamed (same contents under an older version: catalog + marker), extended (a grown filter's partial_resume named the current contents: the added services' endpoints only, #1239)")); err != nil {
 		return nil, fmt.Errorf("watch starts: %w", err)
 	}
 
 	return m, nil
 }
 
-// attrResume labels a watch start by its resume outcome. Three values.
+// attrResume labels a watch start by its resume outcome. Four values.
 const attrResume = attribute.Key("resume")
 
 var resumeOptions = map[Resume]metric.MeasurementOption{
@@ -158,9 +158,30 @@ var resumeOptions = map[Resume]metric.MeasurementOption{
 	ResumeRenamed: metric.WithAttributes(attrResume.String("renamed")),
 }
 
-// watchStarted counts a watch start by its resume outcome.
-func (m *Metrics) watchStarted(ctx context.Context, resume Resume) {
+var resumeExtendedOption = metric.WithAttributes(attrResume.String("extended"))
+
+// resumeLabel is a watch start's resume outcome as the metric labels it.
+func resumeLabel(resume Resume, extended bool) string {
+	switch {
+	case extended:
+		return "extended"
+	case resume == ResumeCurrent:
+		return "current"
+	case resume == ResumeRenamed:
+		return "renamed"
+	default:
+		return "resent"
+	}
+}
+
+// watchStarted counts a watch start by its resume outcome. An extended start
+// (#1239) counts as "extended" whether its token was current or renamed.
+func (m *Metrics) watchStarted(ctx context.Context, resume Resume, extended bool) {
 	if m == nil {
+		return
+	}
+	if extended {
+		m.watchStarts.Add(ctx, 1, resumeExtendedOption)
 		return
 	}
 	m.watchStarts.Add(ctx, 1, resumeOptions[resume])

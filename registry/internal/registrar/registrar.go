@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -108,6 +109,26 @@ type RegistrarRegistry struct {
 	// existence locally instead of stalling on nonexistent services. Replayed
 	// on every reconnect; swapped atomically at SNAPSHOT_COMPLETE.
 	services map[string]struct{}
+	// scope is the watch filter the cache admits endpoints for (nil = every
+	// service): the filter most recently set, updated in the same critical
+	// section that purges the services leaving it. An endpoint event for a
+	// service outside it is not cached, so a stream still carrying an older,
+	// wider filter cannot re-insert a service the purge just dropped.
+	scope map[string]struct{}
+	// held is the set of services whose cached endpoints are exactly what the
+	// resume token names (nil = every service). The token is only ever
+	// presented as covering held (#1239): a filter that stays within it
+	// resumes with last_version, a filter that grows past it asks for the
+	// missing services alone (partial_resume). Shrinks as the scope does, set to
+	// the stream's filter at SNAPSHOT_COMPLETE, emptied when a resend clears
+	// the cache.
+	held map[string]struct{}
+	// streamComplete is the set of services the current stream can still
+	// deliver whole (nil = every service): its filter at the open, less every
+	// service the filter has dropped since, whose entries were purged and whose
+	// earlier events are gone even if it comes back. completeStart holds only
+	// these (#1239 review, F1).
+	streamComplete map[string]struct{}
 
 	// wake cuts short the retry sleep between watch-stream attempts. Buffered
 	// with capacity 1 and written non-blocking, so a signal raised while the
@@ -143,13 +164,9 @@ type RegistrarRegistry struct {
 
 	// filterMu guards the watch service filter. filterServices nil = full
 	// watch; non-nil = scope the watch to these services (demand-scoped
-	// distribution). filterGen increments on every filter change; the watch
-	// loop compares it against the generation its stream was opened with and
-	// clears the resume token when they differ, forcing a full (re-filtered)
-	// snapshot — resuming by version would skip the newly in-scope services.
+	// distribution). Acquired before mu, never while holding it.
 	filterMu       sync.Mutex
 	filterServices []string
-	filterGen      uint64
 	// streamCancel ends the in-flight watch stream so the loop reconnects
 	// with the current filter.
 	streamCancel context.CancelFunc
@@ -172,6 +189,7 @@ func NewRegistrarRegistry(log *slog.Logger, cfg Config) *RegistrarRegistry {
 		metrics:     metrics,
 		cache:       make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint),
 		services:    make(map[string]struct{}),
+		held:        make(map[string]struct{}),
 		wake:        make(chan struct{}, 1),
 		notify:      make(chan struct{}, 1),
 		ready:       make(chan struct{}),
@@ -229,41 +247,36 @@ func (r *RegistrarRegistry) WaitReady(ctx context.Context) error {
 // SetServiceFilter scopes the endpoint watch to the given services (the
 // node's dependency set). nil restores the full watch; an empty non-nil set
 // watches nothing. If the effective filter changed while a stream is active,
-// the stream is cancelled so the loop reconnects re-asserting the new filter
-// with a cleared resume token (the registrar must resend the snapshot — the
-// new scope may include services the old stream never delivered). It
-// satisfies the registry.WatchScoper capability.
+// the stream is cancelled so the loop reconnects re-asserting the new filter.
+// The reconnect keeps the resume token for the services the cache still holds
+// (#1239): a filter that shrank resumes without a resend, one that grew asks
+// for the added services alone (see resumeFor). It satisfies the
+// registry.WatchScoper capability.
 func (r *RegistrarRegistry) SetServiceFilter(services []string) {
 	r.filterMu.Lock()
 	if stringSetsEqual(r.filterServices, services) {
 		r.filterMu.Unlock()
 		return
 	}
-	previous := r.filterServices
 	r.filterServices = slices.Clone(services)
-	r.filterGen++
 	cancelStream := r.streamCancel
-	r.filterMu.Unlock()
 
-	// Purge cache entries for services leaving the filter: the registrar
+	// Purge cache entries for services outside the new filter: the registrar
 	// sends no removal events for out-of-scope services, so without this the
 	// entries go stale — and stale entries would satisfy ListEndpoints' cache
-	// check, poisoning the cold path's RPC-fill with old endpoints.
-	if previous != nil {
-		keep := make(map[string]struct{}, len(services))
-		for _, svc := range services {
-			keep[svc] = struct{}{}
-		}
-		r.mu.Lock()
-		for _, svc := range previous {
-			if _, ok := keep[svc]; !ok {
-				for _, byName := range r.cache {
-					delete(byName, svc)
-				}
-			}
-		}
-		r.mu.Unlock()
-	}
+	// check, poisoning the cold path's RPC-fill with old endpoints. This
+	// includes a switch from the full watch, whose cache holds every service.
+	//
+	// Still under filterMu: two concurrent calls must leave the cache scope
+	// equal to the filter the loop asserts, never the older of the two.
+	scope := serviceSet(services)
+	r.mu.Lock()
+	r.scope = scope
+	r.held = intersect(r.held, scope)
+	r.streamComplete = intersect(r.streamComplete, scope)
+	r.purgeExceptLocked(scope)
+	r.mu.Unlock()
+	r.filterMu.Unlock()
 
 	r.log.Debug("watch service filter updated; re-asserting on stream", "services", len(services))
 	if cancelStream != nil {
@@ -271,10 +284,149 @@ func (r *RegistrarRegistry) SetServiceFilter(services []string) {
 	}
 }
 
+// purgeExceptLocked drops the cached endpoints of every service outside keep
+// (nil = keep everything). Caller must hold mu for writing.
+func (r *RegistrarRegistry) purgeExceptLocked(keep map[string]struct{}) {
+	if keep == nil {
+		return
+	}
+	for _, byName := range r.cache {
+		for svc := range byName {
+			if _, ok := keep[svc]; !ok {
+				delete(byName, svc)
+			}
+		}
+	}
+}
+
+// serviceSet converts a filter to a set, preserving nil (= every service).
+func serviceSet(services []string) map[string]struct{} {
+	if services == nil {
+		return nil
+	}
+	set := make(map[string]struct{}, len(services))
+	for _, svc := range services {
+		set[svc] = struct{}{}
+	}
+	return set
+}
+
+// intersect returns a ∩ b as a new set, where nil is the set of every service.
+func intersect(a, b map[string]struct{}) map[string]struct{} {
+	switch {
+	case a == nil && b == nil:
+		return nil
+	case a == nil:
+		return maps.Clone(b)
+	case b == nil:
+		return maps.Clone(a)
+	}
+	out := make(map[string]struct{}, min(len(a), len(b)))
+	for svc := range a {
+		if _, ok := b[svc]; ok {
+			out[svc] = struct{}{}
+		}
+	}
+	return out
+}
+
+// subset reports whether a ⊆ b, where nil is the set of every service.
+func subset(a, b map[string]struct{}) bool {
+	if b == nil {
+		return true
+	}
+	if a == nil {
+		return false
+	}
+	for svc := range a {
+		if _, ok := b[svc]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// inScope reports whether set admits svc (nil admits every service).
+func inScope(set map[string]struct{}, svc string) bool {
+	if set == nil {
+		return true
+	}
+	_, ok := set[svc]
+	return ok
+}
+
+// streamOpen is how one watch stream was opened: its filter and its resume
+// request, which together decide what the initial exchange means.
+type streamOpen struct {
+	// filter is the stream's watch filter (nil = full watch).
+	filter map[string]struct{}
+	// lastVersion is the resume token sent as last_version.
+	lastVersion string
+	// partial is sent instead of a token when the filter grew past what the
+	// token covers (#1239).
+	partial *registrarv1.PartialResume
+	// noToken: last_version was empty, so the registrar resends in full unless
+	// it honoured partial (SNAPSHOT_COMPLETE.extended). Every registrar
+	// version resends on an empty last_version, which is what makes an empty
+	// resend detectable (completeStart).
+	noToken bool
+}
+
+// resumeFor decides how the stream about to assert filter (nil = full watch)
+// resumes from token, the token the cache last earned (#1239).
+//
+// The token names the registrar's WHOLE contents at some version V, but the
+// cache holds V only for the services in held: those of the filter the token
+// was earned under, less every service the filter has dropped since (their
+// entries are purged, and events for them are no longer admitted). It is
+// presented accordingly:
+//
+//   - filter ⊆ held (a shrink, or no change): last_version = token. The
+//     registrar answers current/renamed iff V's contents are its current
+//     contents, and then the cache holds the current endpoints of every
+//     service in filter. Safe against every registrar version, because the
+//     claim is exactly the one a token has always made.
+//   - filter ⊄ held (a growth): the added services were never delivered at V,
+//     so last_version = token would be answered "current" with them missing.
+//     The token goes in partial_resume instead, naming held ∩ filter; a
+//     registrar that predates the field sees no token and resends in full.
+//
+// Either way the cache keeps only held ∩ filter: anything else is either out
+// of the filter or not covered by the token (for example the partial
+// endpoints of a service that left and re-entered the filter while one
+// stream was live), and an extended or resent start rebuilds it.
+func (r *RegistrarRegistry) resumeFor(filter map[string]struct{}, token string) streamOpen {
+	open := streamOpen{filter: filter, noToken: true}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Everything this stream is about to deliver starts from here: a purge
+	// before this point cannot have cost it an event.
+	r.streamComplete = filter
+	if token == "" {
+		r.held = make(map[string]struct{})
+		return open
+	}
+	keep := intersect(filter, r.held)
+	r.held = keep
+	r.purgeExceptLocked(keep)
+	if subset(filter, keep) {
+		open.lastVersion = token
+		open.noToken = false
+		return open
+	}
+	services := make([]string, 0, len(keep))
+	for svc := range keep {
+		services = append(services, svc)
+	}
+	slices.Sort(services)
+	open.partial = &registrarv1.PartialResume{Version: token, Services: services}
+	return open
+}
+
 // assertFilter publishes cancel as the canceller for the stream the watch loop
-// is about to open and returns the filter that stream must assert, together
-// with its generation. Both halves happen in ONE filterMu critical section,
-// and that is the whole point: it makes the re-assert lossless.
+// is about to open and returns the filter that stream must assert. Both halves
+// happen in ONE filterMu critical section, and that is the whole point: it
+// makes the re-assert lossless.
 //
 // Read the filter in one critical section and publish the canceller in another
 // and a SetServiceFilter landing in between is lost (#772, S8): it reads the
@@ -287,11 +439,11 @@ func (r *RegistrarRegistry) SetServiceFilter(services []string) {
 // Holding the lock across both makes the two interleavings the only ones:
 // SetServiceFilter runs entirely before (this stream carries the new filter)
 // or entirely after (it sees this stream's canceller and cancels it).
-func (r *RegistrarRegistry) assertFilter(cancel context.CancelFunc) ([]string, uint64) {
+func (r *RegistrarRegistry) assertFilter(cancel context.CancelFunc) []string {
 	r.filterMu.Lock()
 	defer r.filterMu.Unlock()
 	r.streamCancel = cancel
-	return slices.Clone(r.filterServices), r.filterGen
+	return slices.Clone(r.filterServices)
 }
 
 // stringSetsEqual reports whether a and b contain the same members,
@@ -558,10 +710,9 @@ func (r *RegistrarRegistry) listAllEndpointsFromServer(ctx context.Context, prot
 
 // watchLoop maintains a persistent WatchEndpoints stream, reconnecting with
 // exponential backoff on disconnect. Every (re)connect asserts the current
-// service filter; when the filter changed since the stream the resume token
-// was earned on, the token is cleared so the registrar resends the full
-// (re-filtered) snapshot — newly in-scope services were never delivered to
-// the old stream, so resuming by version would silently skip them.
+// service filter and resumes from the token for the services it covers
+// (resumeFor): newly in-scope services were never delivered to the old stream,
+// so a grown filter asks for them explicitly rather than resuming past them.
 //
 // A stream the loop itself lost to a filter re-assert or to shutdown is not a
 // failure: it is classified out of the error path (no ERROR, no backoff, no
@@ -570,7 +721,6 @@ func (r *RegistrarRegistry) listAllEndpointsFromServer(ctx context.Context, prot
 func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 	backoff := initialBackoff
 	lastVersion := ""
-	lastFilterGen := uint64(0)
 	// The process's first stream is opened by Initialize, before the node's
 	// dependency set exists, so it is routinely superseded by the startup
 	// filter assert (issue #700). The marker keeps that expected handoff
@@ -587,16 +737,14 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		// Per-stream context so SetServiceFilter can end the stream and force
 		// a reconnect that re-asserts the new filter.
 		streamCtx, streamCancel := context.WithCancel(ctx)
-		services, filterGen := r.assertFilter(streamCancel)
-		if filterGen != lastFilterGen {
-			lastVersion = ""
-			lastFilterGen = filterGen
-		}
+		services := r.assertFilter(streamCancel)
+		open := r.resumeFor(serviceSet(services), lastVersion)
 		req := &registrarv1.WatchEndpointsRequest{
-			ClusterName: r.config.ClusterName,
-			NodeName:    r.config.NodeName,
-			Instance:    r.config.Instance,
-			LastVersion: lastVersion,
+			ClusterName:   r.config.ClusterName,
+			NodeName:      r.config.NodeName,
+			Instance:      r.config.Instance,
+			LastVersion:   open.lastVersion,
+			PartialResume: open.partial,
 		}
 		if services != nil {
 			req.Filter = &registrarv1.ServiceFilter{Services: services}
@@ -621,11 +769,12 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		// Reset backoff on successful connection.
 		backoff = initialBackoff
 		r.metrics.streamReconnected(ctx)
-		r.log.DebugContext(ctx, "watch stream connected", "filtered", services != nil, "filterServices", len(services))
+		r.log.DebugContext(ctx, "watch stream connected", "filtered", services != nil, "filterServices", len(services),
+			"resume", open.lastVersion != "", "partialResume", open.partial != nil)
 		r.signalReconnect()
 
 		var failure error
-		lastVersion, failure = r.processStream(ctx, stream, lastVersion)
+		lastVersion, failure = r.consumeStream(ctx, stream, lastVersion, open)
 		streamCancel()
 		if failure != nil && !r.failStream(ctx, "watch stream disconnected, retrying", failure, &backoff) {
 			return
@@ -899,12 +1048,21 @@ func isServerDrainGoaway(err error) bool {
 	return strings.Contains(status.Convert(err).Message(), goawayNoErrorDetail)
 }
 
-// processStream reads events from the stream and updates the local cache.
+// processStream reads events from a stream opened with last_version =
+// lastVersion over the full watch, and updates the local cache. See
+// consumeStream.
+func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv1.RegistrarService_WatchEndpointsClient, lastVersion string) (string, error) {
+	return r.consumeStream(ctx, stream, lastVersion, streamOpen{lastVersion: lastVersion})
+}
+
+// consumeStream reads events from the stream and updates the local cache.
+// lastVersion is the resume token the cache held when the stream was opened
+// (whatever open actually presented), and open how the stream was opened.
 // It returns the last version seen, for use as a resume token, and the error
 // the stream ended with when that end was a genuine failure (nil when it was
 // an expected end: EOF, our own shutdown or filter re-assert, a forced resync,
 // or a server drain — see handleStreamError).
-func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv1.RegistrarService_WatchEndpointsClient, lastVersion string) (string, error) {
+func (r *RegistrarRegistry) consumeStream(ctx context.Context, stream registrarv1.RegistrarService_WatchEndpointsClient, lastVersion string, open streamOpen) (string, error) {
 	snapshotCleared := false
 	// Catalog replay: SERVICE_ADDED events before SNAPSHOT_COMPLETE rebuild
 	// the service set, swapped in at the marker — but only when the server
@@ -923,6 +1081,7 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT && !snapshotCleared {
 			r.mu.Lock()
 			r.cache = make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint)
+			r.held = make(map[string]struct{})
 			r.mu.Unlock()
 			snapshotCleared = true
 			// The cache no longer holds what the old token names. Drop it until
@@ -931,6 +1090,9 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 			// whose contents match the OLD token -- a lagging peer, or contents
 			// that reverted -- answers "current" onto an empty cache (#1203).
 			lastVersion = ""
+		}
+		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE && catalogReplay != nil {
+			r.completeStart(open, event, snapshotCleared)
 		}
 
 		r.handleCatalogEvent(ctx, event, &catalogReplay, connectVersion)
@@ -946,6 +1108,71 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 			r.metrics.versionApplied(ctx, lastVersion)
 		}
 	}
+}
+
+// completeStart settles the cache at the SNAPSHOT_COMPLETE that ends a
+// stream's initial exchange: from here the cache holds the marker's version for
+// every service the stream could deliver whole (streamComplete) that is still
+// in scope.
+//
+// Not the stream's whole filter: a service the filter dropped while this
+// exchange was being read was purged, and a stream keeps delivering after the
+// cancellation that drop caused, so if the service came back before the marker
+// the cache holds only the events after the purge. It is not held, and the next
+// stream asks for it again (#1239 review, F1).
+//
+// A full resend clears the cache at its first FULL_SNAPSHOT event, so a resend
+// with nothing in the filter clears nothing and would leave stale endpoints
+// standing under the new token: it is cleared here instead (emptyResend).
+func (r *RegistrarRegistry) completeStart(open streamOpen, marker *registrarv1.WatchEndpointsResponse, snapshotCleared bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !snapshotCleared && emptyResend(open, marker) {
+		r.cache = make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint)
+	}
+	r.held = intersect(r.streamComplete, r.scope)
+}
+
+// emptyResend reports whether an initial exchange that carried no FULL_SNAPSHOT
+// was nevertheless a full resend -- of a filter with no endpoints at all -- as
+// told by its marker:
+//
+//   - extended: not a resend (the registrar honoured partial_resume);
+//   - no token presented: always a resend, from every registrar version;
+//   - the marker names the presented token: current;
+//   - the marker's content hash equals the token's: renamed (the registrar
+//     answers "renamed" only on equal hashes);
+//   - anything else: the registrar resent, because the token named other
+//     contents (#1239 review, P2). That includes a token or a marker without a
+//     content hash, which only a registrar older than #1193 sends, and which
+//     resumes only on an identical version.
+func emptyResend(open streamOpen, marker *registrarv1.WatchEndpointsResponse) bool {
+	switch {
+	case marker.GetExtended():
+		return false
+	case open.noToken:
+		return true
+	case marker.GetVersion() == open.lastVersion:
+		return false
+	}
+	tokenHash, ok := versionContentHash(open.lastVersion)
+	markerHash, markerOK := versionContentHash(marker.GetVersion())
+	return !ok || !markerOK || tokenHash != markerHash
+}
+
+// versionContentHash returns the content hash a registrar version embeds: the
+// part after "hash:", or after the "." / "+" that follows the store revision
+// (registrar/internal/server's version format, #1193). A pre-#1193 counter
+// version embeds none.
+func versionContentHash(version string) (string, bool) {
+	if h, ok := strings.CutPrefix(version, "hash:"); ok {
+		return h, h != ""
+	}
+	if i := strings.IndexAny(version, ".+"); i >= 0 {
+		h := version[i+1:]
+		return h, h != ""
+	}
+	return "", false
 }
 
 // handleStreamError classifies a stream.Recv error and returns the appropriate
@@ -1043,11 +1270,15 @@ func (r *RegistrarRegistry) applyEvent(ctx context.Context, event *registrarv1.W
 	defer r.mu.Unlock()
 
 	switch event.GetType() {
-	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT:
-		// Upsert for full snapshot events.
-		r.upsertLocked(protocol, svcName, ep)
-
-	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED:
+	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
+		registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+		registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED:
+		// A stream opened under an older, wider filter keeps delivering until
+		// its cancellation lands; a service the new filter dropped was purged
+		// and must not come back half-filled (see scope).
+		if !inScope(r.scope, svcName) {
+			return
+		}
 		r.upsertLocked(protocol, svcName, ep)
 
 	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED:

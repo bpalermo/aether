@@ -2752,7 +2752,39 @@ Notes:
     revision moved with no content change. It gets the service catalog plus
     `SNAPSHOT_COMPLETE` carrying the current version. No endpoint events are
     sent.
+  - `extended`: a dependency-set **growth** (#1239), below. It gets only the
+    added services' endpoints, plus the catalog when its token was renamed.
   - `resent`: anything else. It gets the full snapshot.
+- **Dependency-set changes** (#1239). An agent's watch is filtered to its
+  dependency set, and a server-streaming RPC cannot change its filter, so every
+  change of the set (a TCP service appearing or disappearing anywhere changes it
+  on every node; `service left dependency set` in the agent log) re-opens the
+  stream. Before #1239 that re-open always dropped the resume token and every
+  agent was `resent` its whole filtered snapshot. Now the agent keeps the token
+  for the services its cache still holds:
+  - The set **shrank** (or is unchanged): it sends `last_version` as on any
+    reconnect, and gets `current` or `renamed`. The version names the
+    registrar's whole snapshot, so a token that is current is current for any
+    subset of the services it was earned on.
+  - The set **grew**: the added services were never delivered at that version,
+    so `last_version` would wrongly be answered `current`. The agent leaves it
+    empty and sends `partial_resume {version, services it holds}` instead. A
+    registrar that knows the field answers `extended` when the version names its
+    current contents, and `resent` otherwise. One that predates it sees no token
+    and resends: a one-release skew in either direction is safe, it only costs
+    the resend.
+  - A service that leaves and re-enters the set while one stream is open,
+    including while its initial exchange is still arriving, is not held (its
+    endpoints were purged when it left, and the stream keeps delivering only
+    what came after), so it is re-requested.
+  - A resend of a filter with no endpoints carries no `FULL_SNAPSHOT` to clear
+    the cache with. The agent clears it at the marker when the marker's content
+    hash differs from the token it presented (`renamed` always has an equal
+    hash), or when it presented none.
+  `resent` therefore still counts every agent and registrar restart and every
+  stale token (a change landed while the stream was being re-opened), and on a
+  registrar older than #1239 every growth. A `resent` step on every node at
+  each dependency-set change, with agents on #1239, is a bug.
 - The version is sent only where the receiver holds everything it names: on
   `SNAPSHOT_COMPLETE`, and on the last event of each broadcast batch per watcher
   (#1203). The agent also drops its token when a resend starts clearing its
@@ -2760,6 +2792,13 @@ Notes:
   older than #1204 keep the old token across a cut resend, so until the agent
   DaemonSet has rolled they are exposed to an empty cache on a reconnect that
   matches it. The window is milliseconds per reconnect.
+- Publications (an RPC's or a sync's snapshot change plus its broadcast) are
+  serialized: every watcher receives batches in the order they changed the
+  snapshot, each one contiguous. Before the #1239 review they ran concurrently,
+  and two on one endpoint (a register and an unregister, or two agents
+  registering it during a surge roll) could reach a watcher in reverse, leaving
+  it holding the endpoint under an older version (healed only by a resend on its
+  next reconnect).
 
 ### `504 UT` after exactly 15 s over an h2 mesh cluster to a terminating pod (#1104)
 

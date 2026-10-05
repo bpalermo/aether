@@ -67,6 +67,24 @@ message WatchEndpointsRequest {
   // container restart in the same pod still replaces its own stale watch.
   // Empty keeps the cluster/node key (an agent that predates this field).
   string instance = 5;
+  // partial_resume lets a client whose watch filter GREW resume without a
+  // full resend (#1239). It is sent INSTEAD of last_version, which stays
+  // empty: a registrar that predates this field sees no token and resends in
+  // full, which is always safe. A registrar that knows it answers as for
+  // last_version = partial_resume.version, except that when the token names
+  // the current contents it sends, as ENDPOINT_ADDED events before
+  // SNAPSHOT_COMPLETE, only the endpoints of the filter's services that are
+  // NOT in partial_resume.services, and marks the SNAPSHOT_COMPLETE with
+  // extended = true. A token that does not name the current contents is
+  // answered with the full (filtered) snapshot as usual.
+  PartialResume partial_resume = 6;
+}
+
+// PartialResume names what a client's cache holds: exactly the endpoints of
+// `services` at `version`, and nothing else in its new filter.
+message PartialResume {
+  string version = 1;
+  repeated string services = 2;
 }
 
 // ServiceFilter scopes a watch to a set of service names.
@@ -104,6 +122,11 @@ message WatchEndpointsResponse {
   aether.registry.v1.Service.Protocol protocol = 3;
   aether.registry.v1.ServiceEndpoint endpoint = 4;
   string version = 5;
+  // extended is set on the SNAPSHOT_COMPLETE of a watch start that honoured
+  // the request's partial_resume (#1239): the events before it were the
+  // missing services' endpoints, not a full snapshot. A client that sent a
+  // partial_resume and gets a marker without it was resent in full.
+  bool extended = 6;
 }
 
 message ListAllEndpointsRequest {
