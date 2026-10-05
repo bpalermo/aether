@@ -1914,6 +1914,51 @@ the socket only ever sees a read timeout.
 This self-heals: any exchange error retires the socket, and every socket also expires on
 its own budget (a jittered ~30s, or 1000 queries). Symptoms are therefore a burst of
 `aether_mesh_dns_forward_conn_recycles_total{reason="error"}`, not a sustained outage.
+
+**Forward timeouts (#1254).** A pod's resolver gives up on a datagram after 1 s and
+sends it again (`timeout:1 attempts:3`), so the forwarder retries inside that window.
+For each upstream, in order:
+
+| step | bound | what happens |
+|---|---|---|
+| first try | 600 ms (`forwardTryTimeout`) | the query goes out on a pooled socket (or a fresh one when every slot is busy or pooling is off) |
+| one re-send | until 2 s from the start (`forwardTimeout`, the per-upstream budget) | only if the first try **timed out**: the query is sent once more on a freshly dialled socket (a new source port, so a new conntrack entry and possibly another kube-dns backend). The first socket keeps listening; the first reply from either socket is delivered and the other is read and dropped |
+| next upstream / SERVFAIL | | neither answered within 2 s |
+
+- A lost datagram costs about 0.6 s plus one round trip, inside the client's 1 s
+  window. Before, it cost 2 s and then a cold dial.
+- A black-holed upstream fails at 2 s with exactly one re-send. Before, a pooled socket
+  waited 2 s and its cold-dial fallback waited another 2 s, so 4 s per upstream. The
+  budget is per upstream: N dead upstreams still cost N x 2 s.
+- A reply that arrives within 2 s is accepted, as before. The change only makes answers
+  come sooner.
+- A first try that fails **fast** (ECONNREFUSED from an ICMP port-unreachable, a write
+  error) does not re-send. It works as before: the pooled socket is retired and the
+  query gets one cold dial (`forward_conn_dials_total{reason="fallback"}`).
+- A pooled socket whose reply came back after the re-send went out is healthy and is
+  kept. One that got nothing by 2 s is retired (`reason="error"`), because that is what a
+  stale conntrack entry looks like.
+- TCP queries and the TC=1 re-fetch over TCP do not re-send: TCP retransmits on its own.
+
+Both bounds are compile-time constants in `agent/internal/meshdns`, like the 2 s timeout
+before them. They follow the clients' resolv.conf timeout, so there is no flag and no chart
+value.
+
+How often the re-send fires, and why:
+
+```promql
+# Re-sends per forwarded query, by which reply was delivered:
+#   resend = the re-send answered (datagrams to the upstream are being lost)
+#   late   = the first try answered after 600 ms (the upstream is slow, not lossy)
+#   failed = nothing within 2 s (the upstream is down or black-holed)
+sum by (result) (rate(aether_mesh_dns_forward_retries_total[5m]))
+  / scalar(sum(rate(aether_mesh_dns_queries_total{result=~"forwarded|forward_error"}[5m])))
+```
+
+A steady `late` share means kube-dns answers slower than 600 ms. That is a kube-dns
+capacity problem, and every such query also pays an extra datagram and a dial
+(`forward_conn_dials_total{reason="retry"}`).
+
 If it does NOT settle:
 
 ```bash

@@ -95,9 +95,10 @@ groups:
       # error, so a sustained error-recycle rate means the upstream is genuinely
       # failing -- most often a stale conntrack entry still DNAT'ing the kube-dns
       # ClusterIP at a backend pod that has rolled away, which black-holes datagrams
-      # with NO ICMP and shows only as read timeouts. Resolution still WORKS (each
-      # failure falls back to a cold dial), it just costs a full round of retries, so
-      # this is a low-severity efficiency signal, not an outage.
+      # with NO ICMP and shows only as read timeouts. Resolution still WORKS (a
+      # timed-out try is re-sent once on a fresh socket after 600 ms, and a fast
+      # failure falls back to a cold dial, #1254), it just costs a retry, so this is a
+      # low-severity efficiency signal, not an outage.
       - alert: MeshDNSForwardConnsRecyclingOnError
         expr: sum by (node) (rate(aether_mesh_dns_forward_conn_recycles_total{reason="error"}[10m])) > 0.5
         for: 30m
