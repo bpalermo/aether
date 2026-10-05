@@ -1,0 +1,76 @@
+# The ONE way a workflow gets kind and kubectl (#1251): the versions come from
+# e2e/kind-version.sh, the file every local e2e harness also sources, so CI and a
+# local run cannot drift apart and a Kubernetes bump is one file. Wraps
+# helm/kind-action (SHA-pinned) with exactly the behaviour the jobs had when
+# they called it directly: kind + kubectl installed into the tool cache and put
+# on PATH ahead of the runner's preinstalled kind, and — when `cluster_name` is
+# set — a cluster created from the pinned node image and deleted in the post
+# step. //e2e:kind_pin_test fails if helm/kind-action is used anywhere else.
+#
+# Requires the repository to be checked out (this action and the pin file live
+# in it).
+name: Setup kind (pinned)
+description: Install kind and kubectl at the versions e2e/kind-version.sh pins; optionally create a cluster from the pinned node image.
+
+inputs:
+  cluster_name:
+    description: >-
+      Create a kind cluster with this name from the pinned node image. Leave
+      empty to install kind + kubectl only, for a job whose harness creates its
+      own clusters (they pass --image "$KIND_NODE_IMAGE" from the same file).
+    required: false
+    default: ""
+
+outputs:
+  kind_version:
+    description: The kind release installed.
+    value: ${{ steps.pin.outputs.kind_version }}
+  kubectl_version:
+    description: The kubectl release installed.
+    value: ${{ steps.pin.outputs.kubectl_version }}
+  node_image:
+    description: The pinned kindest/node image, with digest.
+    value: ${{ steps.pin.outputs.node_image }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read the kind pin (e2e/kind-version.sh)
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The file's own default, never a value inherited from the job env.
+        unset KIND_NODE_IMAGE
+        # shellcheck source=/dev/null
+        . "$GITHUB_ACTION_PATH/../../../e2e/kind-version.sh"
+        {
+          echo "kind_version=$KIND_VERSION"
+          echo "kubectl_version=$KUBECTL_VERSION"
+          echo "node_image=$KIND_NODE_IMAGE"
+        } >> "$GITHUB_OUTPUT"
+        echo "kind $KIND_VERSION, kubectl $KUBECTL_VERSION, node image $KIND_NODE_IMAGE"
+
+    - name: Install kind + kubectl${{ inputs.cluster_name != '' && ' and create the cluster' || '' }}
+      uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+      with:
+        version: ${{ steps.pin.outputs.kind_version }}
+        kubectl_version: ${{ steps.pin.outputs.kubectl_version }}
+        node_image: ${{ steps.pin.outputs.node_image }}
+        cluster_name: ${{ inputs.cluster_name }}
+        install_only: ${{ inputs.cluster_name == '' }}
+
+    # The evidence a reviewer reads to know which Kubernetes a run tested. A job
+    # whose harness creates its clusters later prints the same thing itself.
+    - name: Report the cluster's Kubernetes
+      if: inputs.cluster_name != ''
+      shell: bash
+      env:
+        CLUSTER: ${{ inputs.cluster_name }}
+      run: |
+        # Evidence only: never fails the job.
+        kubectl --context "kind-$CLUSTER" get nodes \
+          -o custom-columns=NODE:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion || true
+        for n in $(kind get nodes --name "$CLUSTER" 2>/dev/null || true); do
+          echo "$n image: $(docker inspect --format '{{.Config.Image}}' "$n" 2>&1 || true)"
+        done

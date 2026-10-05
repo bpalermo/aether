@@ -16,6 +16,14 @@
 #
 # NOT run per PR (too heavy). The per-PR `e2e` job in ci.yaml covers the basic
 # data path functionally.
+#
+# ONE Kubernetes everywhere (#1251): every job gets kind + kubectl + the node
+# image from .github/actions/setup-kind, which reads e2e/kind-version.sh — the
+# file the local harnesses source too. The six script-driven jobs share their
+# body through .github/actions/run-e2e-script (up -> verify -> diagnostics ->
+# down); each stays its own job rather than a matrix leg so `report-failure`
+# names the suite that failed, `only=<suite>` selects it, and its check name and
+# timeout are unchanged.
 
 name: e2e
 
@@ -140,20 +148,12 @@ jobs:
       - name: Load images into docker
         run: docker load -i /tmp/aether-images.tar
 
-      - name: Setup kind
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+      # kind, kubectl and the node image from e2e/kind-version.sh (#1251), the
+      # one pin every e2e surface shares; the action creates the cluster.
+      - name: Setup kind (pinned)
+        uses: ./.github/actions/setup-kind
         with:
-          cluster_name: aether-conformance
-          # kind binary, node image and kubectl pinned explicitly (#1221): the
-          # action's defaults move with its releases (v1.15.0: kind v0.33.0 ->
-          # Kubernetes 1.37, kubectl v1.37.0), so a Kubernetes bump stays a
-          # separate, visible change. Kubernetes 1.35 = the minor these suites
-          # are certified on; the image is the kind v0.33.0 build (the digest is
-          # what selects an image built for that kind release). The values are
-          # e2e/kind-version.sh's (#1251); //e2e:kind_pin_test fails on drift.
-          version: v0.33.0
-          kubectl_version: v1.35.8
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: ${{ env.KIND_CLUSTER }}
 
       - name: Load images into kind
         run: |
@@ -319,20 +319,12 @@ jobs:
       - name: Load images into docker
         run: docker load -i /tmp/aether-images.tar
 
-      - name: Setup kind
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+      # kind, kubectl and the node image from e2e/kind-version.sh (#1251), the
+      # one pin every e2e surface shares; the action creates the cluster.
+      - name: Setup kind (pinned)
+        uses: ./.github/actions/setup-kind
         with:
-          cluster_name: aether-conformance-mesh
-          # kind binary, node image and kubectl pinned explicitly (#1221): the
-          # action's defaults move with its releases (v1.15.0: kind v0.33.0 ->
-          # Kubernetes 1.37, kubectl v1.37.0), so a Kubernetes bump stays a
-          # separate, visible change. Kubernetes 1.35 = the minor these suites
-          # are certified on; the image is the kind v0.33.0 build (the digest is
-          # what selects an image built for that kind release). The values are
-          # e2e/kind-version.sh's (#1251); //e2e:kind_pin_test fails on drift.
-          version: v0.33.0
-          kubectl_version: v1.35.8
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: ${{ env.KIND_CLUSTER }}
 
       - name: Load images into kind
         run: |
@@ -461,51 +453,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download images artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Run e2e/multicluster_waypoint.sh
+        uses: ./.github/actions/run-e2e-script
         with:
-          name: aether-images
-          path: /tmp
-
-      - name: Load images into docker
-        run: docker load -i /tmp/aether-images.tar
-
-      - name: Bring up the two-cluster waypoint environment
-        env:
-          WAYPOINT_SKIP_BUILD: "1"
-        run: ./e2e/multicluster_waypoint.sh up
-
-      - name: Verify cross-cluster waypoint call
-        id: verify
-        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
-        run: ./e2e/multicluster_waypoint.sh verify
-
-      - name: Collect diagnostics on failure
-        if: failure() || steps.verify.outcome == 'failure'
-        run: |
-          mkdir -p /tmp/waypoint-logs
-          for c in a b; do
-            echo "=== cluster $c: all pods ===" | tee -a /tmp/waypoint-logs/pods.txt
-            kubectl --context "kind-$c" get pods -A -o wide 2>&1 | tee -a /tmp/waypoint-logs/pods.txt || true
-            kind export logs "/tmp/waypoint-logs/$c" --name "$c" || true
-            kubectl --context "kind-$c" -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=200 > "/tmp/waypoint-logs/$c-agent.log" 2>&1 || true
-            kubectl --context "kind-$c" -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=200 > "/tmp/waypoint-logs/$c-proxy.log" 2>&1 || true
-            kubectl --context "kind-$c" -n spire-mgmt get pods -o wide > "/tmp/waypoint-logs/$c-spire.txt" 2>&1 || true
-          done
-          echo "=== shared registry (echo endpoint / node_ip) ==="
-          docker exec aether-shared-etcd etcdctl get --prefix /aether/v1/regions --keys-only 2>&1 | tee /tmp/waypoint-logs/registry-keys.txt || true
-
-      - name: Upload diagnostics
-        if: failure() || steps.verify.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: waypoint-e2e-logs
-          path: /tmp/waypoint-logs
-          if-no-files-found: ignore
-
-      - name: Tear down
-        if: always()
-        run: ./e2e/multicluster_waypoint.sh down || true
+          script: multicluster_waypoint.sh
+          skip-build-var: WAYPOINT_SKIP_BUILD
+          verify-description: Verify cross-cluster waypoint call
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          logs-dir: /tmp/waypoint-logs
+          artifact-name: waypoint-e2e-logs
+          diagnostics: |
+            mkdir -p /tmp/waypoint-logs
+            for c in a b; do
+              echo "=== cluster $c: all pods ===" | tee -a /tmp/waypoint-logs/pods.txt
+              kubectl --context "kind-$c" get pods -A -o wide 2>&1 | tee -a /tmp/waypoint-logs/pods.txt || true
+              kind export logs "/tmp/waypoint-logs/$c" --name "$c" || true
+              kubectl --context "kind-$c" -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=200 > "/tmp/waypoint-logs/$c-agent.log" 2>&1 || true
+              kubectl --context "kind-$c" -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=200 > "/tmp/waypoint-logs/$c-proxy.log" 2>&1 || true
+              kubectl --context "kind-$c" -n spire-mgmt get pods -o wide > "/tmp/waypoint-logs/$c-spire.txt" 2>&1 || true
+            done
+            echo "=== shared registry (echo endpoint / node_ip) ==="
+            docker exec aether-shared-etcd etcdctl get --prefix /aether/v1/regions --keys-only 2>&1 | tee /tmp/waypoint-logs/registry-keys.txt || true
 
   # --- Proposal 006 Phase 3: two-region etcd replicator failover e2e.
   # Two kind clusters with one etcd PER REGION, registrars cross-wired with
@@ -520,50 +488,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download images artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Run e2e/multicluster_replicator.sh
+        uses: ./.github/actions/run-e2e-script
         with:
-          name: aether-images
-          path: /tmp
-
-      - name: Load images into docker
-        run: docker load -i /tmp/aether-images.tar
-
-      - name: Bring up the two-region environment
-        env:
-          REPLICATOR_SKIP_BUILD: "1"
-        run: ./e2e/multicluster_replicator.sh up
-
-      - name: Verify replication + failover
-        id: verify
-        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
-        run: ./e2e/multicluster_replicator.sh verify
-
-      - name: Collect diagnostics on failure
-        if: failure() || steps.verify.outcome == 'failure'
-        run: |
-          mkdir -p /tmp/replicator-logs
-          for c in a b; do
-            echo "=== cluster $c: all pods ===" | tee -a /tmp/replicator-logs/pods.txt
-            kubectl --context "kind-$c" get pods -A -o wide 2>&1 | tee -a /tmp/replicator-logs/pods.txt || true
-            kind export logs "/tmp/replicator-logs/$c" --name "$c" || true
-            kubectl --context "kind-$c" -n aether-system logs -l app.kubernetes.io/component=registrar --tail=300 > "/tmp/replicator-logs/$c-registrar.log" 2>&1 || true
-            kubectl --context "kind-$c" -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=200 > "/tmp/replicator-logs/$c-agent.log" 2>&1 || true
-            echo "=== regional etcd region-$c keys ===" | tee -a /tmp/replicator-logs/registry-keys.txt
-            docker exec "aether-etcd-region-$c" etcdctl get --prefix /aether/v1/regions --keys-only 2>&1 | tee -a /tmp/replicator-logs/registry-keys.txt || true
-          done
-
-      - name: Upload diagnostics
-        if: failure() || steps.verify.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: replicator-e2e-logs
-          path: /tmp/replicator-logs
-          if-no-files-found: ignore
-
-      - name: Tear down
-        if: always()
-        run: ./e2e/multicluster_replicator.sh down || true
+          script: multicluster_replicator.sh
+          skip-build-var: REPLICATOR_SKIP_BUILD
+          verify-description: Verify replication + failover
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          logs-dir: /tmp/replicator-logs
+          artifact-name: replicator-e2e-logs
+          diagnostics: |
+            mkdir -p /tmp/replicator-logs
+            for c in a b; do
+              echo "=== cluster $c: all pods ===" | tee -a /tmp/replicator-logs/pods.txt
+              kubectl --context "kind-$c" get pods -A -o wide 2>&1 | tee -a /tmp/replicator-logs/pods.txt || true
+              kind export logs "/tmp/replicator-logs/$c" --name "$c" || true
+              kubectl --context "kind-$c" -n aether-system logs -l app.kubernetes.io/component=registrar --tail=300 > "/tmp/replicator-logs/$c-registrar.log" 2>&1 || true
+              kubectl --context "kind-$c" -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=200 > "/tmp/replicator-logs/$c-agent.log" 2>&1 || true
+              echo "=== regional etcd region-$c keys ===" | tee -a /tmp/replicator-logs/registry-keys.txt
+              docker exec "aether-etcd-region-$c" etcdctl get --prefix /aether/v1/regions --keys-only 2>&1 | tee -a /tmp/replicator-logs/registry-keys.txt || true
+            done
 
   # --- Proposal 034 Phases 1 + 1b: UDS delivery to pods.
   # ONE kind cluster, SPIRE off. Deploys a workload that serves only on a Unix
@@ -585,50 +529,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download images artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Run e2e/uds.sh
+        uses: ./.github/actions/run-e2e-script
         with:
-          name: aether-images
-          path: /tmp
-
-      - name: Load images into docker
-        run: docker load -i /tmp/aether-images.tar
-
-      - name: Bring up the UDS environment
-        env:
-          UDS_SKIP_BUILD: "1"
-        run: ./e2e/uds.sh up
-
-      - name: Verify UDS delivery, precedence, admission and drift
-        id: verify
-        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
-        run: ./e2e/uds.sh verify
-
-      - name: Collect diagnostics on failure
-        if: failure() || steps.verify.outcome == 'failure'
-        run: |
-          mkdir -p /tmp/uds-logs
-          kubectl --context kind-uds get pods -A -o wide 2>&1 | tee /tmp/uds-logs/pods.txt || true
-          kind export logs /tmp/uds-logs/kind --name uds || true
-          kubectl --context kind-uds get endpointpolicies -A -o yaml > /tmp/uds-logs/endpointpolicies.yaml 2>&1 || true
-          kubectl --context kind-uds -n aether-test get deploy,pods,svc -o wide > /tmp/uds-logs/workloads.txt 2>&1 || true
-          kubectl --context kind-uds -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=400 > /tmp/uds-logs/agent.log 2>&1 || true
-          kubectl --context kind-uds -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=200 > /tmp/uds-logs/proxy.log 2>&1 || true
-          kubectl --context kind-uds -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/uds-logs/mesh-dns.log 2>&1 || true
-          kubectl --context kind-uds -n aether-system logs deploy/aether-controller --all-containers --tail=200 > /tmp/uds-logs/controller.log 2>&1 || true
-          kubectl --context kind-uds -n aether-test logs -l app=uds-echo --tail=100 > /tmp/uds-logs/uds-echo.log 2>&1 || true
-
-      - name: Upload diagnostics
-        if: failure() || steps.verify.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: uds-e2e-logs
-          path: /tmp/uds-logs
-          if-no-files-found: ignore
-
-      - name: Tear down
-        if: always()
-        run: ./e2e/uds.sh down || true
+          script: uds.sh
+          skip-build-var: UDS_SKIP_BUILD
+          verify-description: Verify UDS delivery, precedence, admission and drift
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          logs-dir: /tmp/uds-logs
+          artifact-name: uds-e2e-logs
+          diagnostics: |
+            mkdir -p /tmp/uds-logs
+            kubectl --context kind-uds get pods -A -o wide 2>&1 | tee /tmp/uds-logs/pods.txt || true
+            kind export logs /tmp/uds-logs/kind --name uds || true
+            kubectl --context kind-uds get endpointpolicies -A -o yaml > /tmp/uds-logs/endpointpolicies.yaml 2>&1 || true
+            kubectl --context kind-uds -n aether-test get deploy,pods,svc -o wide > /tmp/uds-logs/workloads.txt 2>&1 || true
+            kubectl --context kind-uds -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=400 > /tmp/uds-logs/agent.log 2>&1 || true
+            kubectl --context kind-uds -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=200 > /tmp/uds-logs/proxy.log 2>&1 || true
+            kubectl --context kind-uds -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/uds-logs/mesh-dns.log 2>&1 || true
+            kubectl --context kind-uds -n aether-system logs deploy/aether-controller --all-containers --tail=200 > /tmp/uds-logs/controller.log 2>&1 || true
+            kubectl --context kind-uds -n aether-test logs -l app=uds-echo --tail=100 > /tmp/uds-logs/uds-echo.log 2>&1 || true
 
   # --- Proposal 039 Phase 1: the csi.aether.io CSI node plugin, on its own.
   # ONE kind cluster, SPIRE off, udsCsi.enabled=true. Asserts the kubelet
@@ -649,46 +569,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download images artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Run e2e/uds-csi.sh
+        uses: ./.github/actions/run-e2e-script
         with:
-          name: aether-images
-          path: /tmp
-
-      - name: Load images into docker
-        run: docker load -i /tmp/aether-images.tar
-
-      - name: Bring up the uds-csi environment
-        env:
-          UDS_CSI_SKIP_BUILD: "1"
-        run: ./e2e/uds-csi.sh up
-
-      - name: Verify registration, publish, FailedMount and plugin roll
-        id: verify
-        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
-        run: ./e2e/uds-csi.sh verify
-
-      - name: Collect diagnostics on failure
-        if: failure() || steps.verify.outcome == 'failure'
-        run: |
-          mkdir -p /tmp/uds-csi-logs
-          kubectl --context kind-uds-csi get pods -A -o wide 2>&1 | tee /tmp/uds-csi-logs/pods.txt || true
-          kind export logs /tmp/uds-csi-logs/kind --name uds-csi || true
-          kubectl --context kind-uds-csi get csinode,csidriver -o yaml > /tmp/uds-csi-logs/csi.yaml 2>&1 || true
-          kubectl --context kind-uds-csi -n aether-system logs -l app.kubernetes.io/component=uds-csi --tail=400 > /tmp/uds-csi-logs/uds-csi.log 2>&1 || true
-          kubectl --context kind-uds-csi -n aether-test get events --sort-by=.lastTimestamp > /tmp/uds-csi-logs/events.txt 2>&1 || true
-
-      - name: Upload diagnostics
-        if: failure() || steps.verify.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: uds-csi-e2e-logs
-          path: /tmp/uds-csi-logs
-          if-no-files-found: ignore
-
-      - name: Tear down
-        if: always()
-        run: ./e2e/uds-csi.sh down || true
+          script: uds-csi.sh
+          skip-build-var: UDS_CSI_SKIP_BUILD
+          verify-description: Verify registration, publish, FailedMount and plugin roll
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          logs-dir: /tmp/uds-csi-logs
+          artifact-name: uds-csi-e2e-logs
+          diagnostics: |
+            mkdir -p /tmp/uds-csi-logs
+            kubectl --context kind-uds-csi get pods -A -o wide 2>&1 | tee /tmp/uds-csi-logs/pods.txt || true
+            kind export logs /tmp/uds-csi-logs/kind --name uds-csi || true
+            kubectl --context kind-uds-csi get csinode,csidriver -o yaml > /tmp/uds-csi-logs/csi.yaml 2>&1 || true
+            kubectl --context kind-uds-csi -n aether-system logs -l app.kubernetes.io/component=uds-csi --tail=400 > /tmp/uds-csi-logs/uds-csi.log 2>&1 || true
+            kubectl --context kind-uds-csi -n aether-test get events --sort-by=.lastTimestamp > /tmp/uds-csi-logs/events.txt 2>&1 || true
 
   # --- Gateway API L4 routes on the mesh capture path (proposal 018 Phase 3b).
   #
@@ -718,57 +614,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download images artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Run e2e/l4routes.sh
+        uses: ./.github/actions/run-e2e-script
         with:
-          name: aether-images
-          path: /tmp
-
-      - name: Load images into docker
-        run: docker load -i /tmp/aether-images.tar
-
-      - name: Bring up the L4-routes environment
-        env:
-          L4_SKIP_BUILD: "1"
-        run: ./e2e/l4routes.sh up
-
-      - name: Verify TCPRoute split/drain/floor, TLSRoute SNI + fall-through, UDPRoute delivery
-        id: verify
-        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
-        run: ./e2e/l4routes.sh verify
-
-      - name: Collect diagnostics on failure
-        if: failure() || steps.verify.outcome == 'failure'
-        run: |
-          mkdir -p /tmp/l4-logs
-          kubectl --context kind-l4routes get pods -A -o wide 2>&1 | tee /tmp/l4-logs/pods.txt || true
-          kind export logs /tmp/l4-logs/kind --name l4routes || true
-          kubectl --context kind-l4routes get tcproutes -A -o yaml > /tmp/l4-logs/tcproutes.yaml 2>&1 || true
-          kubectl --context kind-l4routes get tlsroutes -A -o yaml > /tmp/l4-logs/tlsroutes.yaml 2>&1 || true
-          kubectl --context kind-l4routes get udproutes -A -o yaml > /tmp/l4-logs/udproutes.yaml 2>&1 || true
-          kubectl --context kind-l4routes -n aether-test get deploy,pods,svc -o wide > /tmp/l4-logs/workloads.txt 2>&1 || true
-          kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=400 > /tmp/l4-logs/agent.log 2>&1 || true
-          kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=300 > /tmp/l4-logs/proxy.log 2>&1 || true
-          kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/l4-logs/mesh-dns.log 2>&1 || true
-          kubectl --context kind-l4routes -n spire-mgmt logs -l app.kubernetes.io/name=agent --all-containers --tail=200 > /tmp/l4-logs/spire-agent.log 2>&1 || true
-          kubectl --context kind-l4routes -n aether-test logs -l app=l4-front --tail=100 > /tmp/l4-logs/l4-front.log 2>&1 || true
-          kubectl --context kind-l4routes -n aether-test logs -l app=l4tls-front --tail=100 > /tmp/l4-logs/l4tls-front.log 2>&1 || true
-          kubectl --context kind-l4routes -n aether-test logs -l app=l4udp-front --tail=100 > /tmp/l4-logs/l4udp-front.log 2>&1 || true
-          # The UDP leg's only voice when a backend is discarded rather than the
-          # data path being broken (#873/#874).
-          grep -i "UDPRoute input discarded" /tmp/l4-logs/agent.log > /tmp/l4-logs/udp-discards.log 2>&1 || true
-
-      - name: Upload diagnostics
-        if: failure() || steps.verify.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: l4-routes-e2e-logs
-          path: /tmp/l4-logs
-          if-no-files-found: ignore
-
-      - name: Tear down
-        if: always()
-        run: ./e2e/l4routes.sh down || true
+          script: l4routes.sh
+          skip-build-var: L4_SKIP_BUILD
+          verify-description: Verify TCPRoute split/drain/floor, TLSRoute SNI + fall-through, UDPRoute delivery
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          logs-dir: /tmp/l4-logs
+          artifact-name: l4-routes-e2e-logs
+          diagnostics: |
+            mkdir -p /tmp/l4-logs
+            kubectl --context kind-l4routes get pods -A -o wide 2>&1 | tee /tmp/l4-logs/pods.txt || true
+            kind export logs /tmp/l4-logs/kind --name l4routes || true
+            kubectl --context kind-l4routes get tcproutes -A -o yaml > /tmp/l4-logs/tcproutes.yaml 2>&1 || true
+            kubectl --context kind-l4routes get tlsroutes -A -o yaml > /tmp/l4-logs/tlsroutes.yaml 2>&1 || true
+            kubectl --context kind-l4routes get udproutes -A -o yaml > /tmp/l4-logs/udproutes.yaml 2>&1 || true
+            kubectl --context kind-l4routes -n aether-test get deploy,pods,svc -o wide > /tmp/l4-logs/workloads.txt 2>&1 || true
+            kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=400 > /tmp/l4-logs/agent.log 2>&1 || true
+            kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=300 > /tmp/l4-logs/proxy.log 2>&1 || true
+            kubectl --context kind-l4routes -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/l4-logs/mesh-dns.log 2>&1 || true
+            kubectl --context kind-l4routes -n spire-mgmt logs -l app.kubernetes.io/name=agent --all-containers --tail=200 > /tmp/l4-logs/spire-agent.log 2>&1 || true
+            kubectl --context kind-l4routes -n aether-test logs -l app=l4-front --tail=100 > /tmp/l4-logs/l4-front.log 2>&1 || true
+            kubectl --context kind-l4routes -n aether-test logs -l app=l4tls-front --tail=100 > /tmp/l4-logs/l4tls-front.log 2>&1 || true
+            kubectl --context kind-l4routes -n aether-test logs -l app=l4udp-front --tail=100 > /tmp/l4-logs/l4udp-front.log 2>&1 || true
+            # The UDP leg's only voice when a backend is discarded rather than the
+            # data path being broken (#873/#874).
+            grep -i "UDPRoute input discarded" /tmp/l4-logs/agent.log > /tmp/l4-logs/udp-discards.log 2>&1 || true
 
   # --- East-west QUIC (proposal 038 Phase 4): the per-pod HTTP/3 inbound on
   # UDP:18008 and the per-source quic: clusters — unconditional, every
@@ -797,54 +669,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download images artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Run e2e/eastwest-quic.sh
+        uses: ./.github/actions/run-e2e-script
         with:
-          name: aether-images
-          path: /tmp
-
-      - name: Load images into docker
-        run: docker load -i /tmp/aether-images.tar
-
-      - name: Bring up the east-west QUIC environment
-        env:
-          EWQ_SKIP_BUILD: "1"
-        run: ./e2e/eastwest-quic.sh up
-
-      - name: Verify demand-scoped twins with nothing listed, per-source HTTP/3 + XFCC identity, GAMMA weighted stays h2, identity across a client address change
-        id: verify
-        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
-        run: ./e2e/eastwest-quic.sh verify
-
-      - name: Collect diagnostics on failure
-        if: failure() || steps.verify.outcome == 'failure'
-        run: |
-          mkdir -p /tmp/ewq-logs
-          kubectl --context kind-eastwest-quic get pods -A -o wide 2>&1 | tee /tmp/ewq-logs/pods.txt || true
-          kind export logs /tmp/ewq-logs/kind --name eastwest-quic || true
-          kubectl --context kind-eastwest-quic get httproutes -A -o yaml > /tmp/ewq-logs/httproutes.yaml 2>&1 || true
-          kubectl --context kind-eastwest-quic -n aether-test get deploy,pods,svc -o wide > /tmp/ewq-logs/workloads.txt 2>&1 || true
-          kubectl --context kind-eastwest-quic -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=600 > /tmp/ewq-logs/agent.log 2>&1 || true
-          kubectl --context kind-eastwest-quic -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=400 > /tmp/ewq-logs/proxy.log 2>&1 || true
-          kubectl --context kind-eastwest-quic -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/ewq-logs/mesh-dns.log 2>&1 || true
-          kubectl --context kind-eastwest-quic -n spire-mgmt logs -l app.kubernetes.io/name=agent --all-containers --tail=200 > /tmp/ewq-logs/spire-agent.log 2>&1 || true
-          # The node proxy's admin (hostNetwork; see the script header): the
-          # quic: twins with their host counters, and the listeners.
-          docker exec eastwest-quic-control-plane curl -s --max-time 5 http://127.0.0.1:9901/clusters > /tmp/ewq-logs/envoy-clusters.txt 2>&1 || true
-          docker exec eastwest-quic-control-plane curl -s --max-time 5 http://127.0.0.1:9901/listeners > /tmp/ewq-logs/envoy-listeners.txt 2>&1 || true
-          grep -i "east-west QUIC" /tmp/ewq-logs/agent.log > /tmp/ewq-logs/quic-fanout.log 2>&1 || true
-
-      - name: Upload diagnostics
-        if: failure() || steps.verify.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: eastwest-quic-e2e-logs
-          path: /tmp/ewq-logs
-          if-no-files-found: ignore
-
-      - name: Tear down
-        if: always()
-        run: ./e2e/eastwest-quic.sh down || true
+          script: eastwest-quic.sh
+          skip-build-var: EWQ_SKIP_BUILD
+          verify-description: Verify demand-scoped twins with nothing listed, per-source HTTP/3 + XFCC identity, GAMMA weighted stays h2, identity across a client address change
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          logs-dir: /tmp/ewq-logs
+          artifact-name: eastwest-quic-e2e-logs
+          diagnostics: |
+            mkdir -p /tmp/ewq-logs
+            kubectl --context kind-eastwest-quic get pods -A -o wide 2>&1 | tee /tmp/ewq-logs/pods.txt || true
+            kind export logs /tmp/ewq-logs/kind --name eastwest-quic || true
+            kubectl --context kind-eastwest-quic get httproutes -A -o yaml > /tmp/ewq-logs/httproutes.yaml 2>&1 || true
+            kubectl --context kind-eastwest-quic -n aether-test get deploy,pods,svc -o wide > /tmp/ewq-logs/workloads.txt 2>&1 || true
+            kubectl --context kind-eastwest-quic -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=600 > /tmp/ewq-logs/agent.log 2>&1 || true
+            kubectl --context kind-eastwest-quic -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=400 > /tmp/ewq-logs/proxy.log 2>&1 || true
+            kubectl --context kind-eastwest-quic -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/ewq-logs/mesh-dns.log 2>&1 || true
+            kubectl --context kind-eastwest-quic -n spire-mgmt logs -l app.kubernetes.io/name=agent --all-containers --tail=200 > /tmp/ewq-logs/spire-agent.log 2>&1 || true
+            # The node proxy's admin (hostNetwork; see the script header): the
+            # quic: twins with their host counters, and the listeners.
+            docker exec eastwest-quic-control-plane curl -s --max-time 5 http://127.0.0.1:9901/clusters > /tmp/ewq-logs/envoy-clusters.txt 2>&1 || true
+            docker exec eastwest-quic-control-plane curl -s --max-time 5 http://127.0.0.1:9901/listeners > /tmp/ewq-logs/envoy-listeners.txt 2>&1 || true
+            grep -i "east-west QUIC" /tmp/ewq-logs/agent.log > /tmp/ewq-logs/quic-fanout.log 2>&1 || true
 
   # --- Auto-file when the NIGHTLY run fails.
   #

@@ -21,6 +21,13 @@
 #      .github/actions/setup-kind/, the action that reads the pin file itself.
 #   5. every e2e harness that runs `kind create cluster` sources the pin file
 #      and passes --image "$KIND_NODE_IMAGE"
+#   6. helm/kind-action is used ONLY by .github/actions/setup-kind, and that
+#      action reads e2e/kind-version.sh: a workflow cannot install kind any other
+#      way and so cannot pin a different one
+#   7. every workflow job that drives kind (a `kind ` command or an e2e/*.sh
+#      harness) installs it through setup-kind (directly or via
+#      .github/actions/run-e2e-script) — not the runner's preinstalled kind,
+#      whose default node image moves with the runner image
 set -euo pipefail
 
 fail=0
@@ -170,6 +177,48 @@ for f in "${e2e_files[@]}"; do
 done
 [ "$creators" -gt 0 ] || err "no e2e harness creates a kind cluster: the e2e glob in runfiles is empty or the check is stale"
 echo "checked $creators e2e harness(es) that create kind clusters"
+
+# --- 6. one installer.
+SETUP_KIND=.github/actions/setup-kind/action.yml
+for f in "${ci_files[@]}"; do
+	[ "$f" = "$SETUP_KIND" ] && continue
+	if grep -qE 'uses:[[:space:]]*helm/kind-action@' "$f"; then
+		err "$f: uses helm/kind-action directly; use ./.github/actions/setup-kind (it installs the pinned kind/kubectl/node image)"
+	fi
+done
+if [ -f "$SETUP_KIND" ]; then
+	grep -q 'e2e/kind-version.sh' "$SETUP_KIND" || err "$SETUP_KIND does not read e2e/kind-version.sh"
+else
+	err "$SETUP_KIND not in runfiles"
+fi
+
+# --- 7. every job that drives kind installs the pinned one.
+# Emits "<job>" for each job under `jobs:` that runs kind or an e2e harness but
+# never references setup-kind / run-e2e-script.
+unpinned_kind_jobs() {
+	awk '
+	function done_job() {
+		if (job != "" && drives && !pinned) print job
+		job = ""; drives = 0; pinned = 0
+	}
+	/^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+	in_jobs && /^[^[:space:]#]/ { done_job(); in_jobs = 0 }
+	in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { done_job(); job = $1; sub(/:$/, "", job); next }
+	job == "" || /^[[:space:]]*#/ { next }
+	/(^|[^A-Za-z0-9_-])kind (create|load|export|get|delete)[[:space:]]/ { drives = 1 }
+	/\.\/e2e\/[A-Za-z0-9_.-]+\.sh/ { drives = 1 }
+	/\.github\/actions\/(setup-kind|run-e2e-script)/ { pinned = 1 }
+	END { done_job() }' "$1"
+}
+jobs_checked=0
+for f in "${ci_files[@]}"; do
+	case "$f" in .github/workflows/*) ;; *) continue ;; esac
+	jobs_checked=$((jobs_checked + 1))
+	while IFS= read -r job; do
+		err "$f: job '$job' drives kind without .github/actions/setup-kind (it would run the runner's preinstalled kind and its default node image)"
+	done < <(unpinned_kind_jobs "$f")
+done
+echo "checked the kind-driving jobs of $jobs_checked workflow(s)"
 
 if [ "$fail" -ne 0 ]; then
 	echo "kind pin drift: bump e2e/kind-version.sh and every copy together (docs/runbook.md, \"Bumping the e2e Kubernetes version\")" >&2
