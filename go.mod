@@ -24,7 +24,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/etcd v0.44.0
-	github.com/uudashr/gocognit v1.2.1 // bazel-only: referenced from BUILD/.bzl, no Go import
+	github.com/uudashr/gocognit v1.2.2 // bazel-only: referenced from BUILD/.bzl, no Go import
 	github.com/vishvananda/netlink v1.3.1
 	go.etcd.io/etcd/api/v3 v3.7.2
 	go.etcd.io/etcd/client/v3 v3.7.2
