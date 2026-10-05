@@ -1,6 +1,12 @@
 load("@aether_registry//:registry.bzl", "image_reference")
 load("@rules_go//go:def.bzl", "go_test")
 
+# //e2e:kind_pin_test holds this config's node image to e2e/kind-version.sh.
+exports_files(
+    ["testdata/kind-config.yaml"],
+    visibility = ["//e2e:__pkg__"],
+)
+
 go_test(
     name = "e2e_test",
     size = "large",

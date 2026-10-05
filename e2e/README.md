@@ -4,6 +4,12 @@ Kind (and talos-main soak) harnesses for the mesh. Each script documents its
 own legs, knobs and gates in its header; `soak/`, `pressure/` and `spike/` have
 their own READMEs.
 
+Every harness that creates a kind cluster sources
+[`kind-version.sh`](kind-version.sh) and passes `--image "$KIND_NODE_IMAGE"`, so
+a local run and CI run the same Kubernetes; bumping it is one file
+([runbook](../docs/runbook.md#bumping-the-e2e-kubernetes-version)).
+`//e2e:kind_pin_test` enforces both.
+
 ## Rules for script authors
 
 ### No early-exit reader in a pipeline (SIGPIPE under `pipefail`)

@@ -4,7 +4,8 @@
 # (POD_SUBNET / SVC_SUBNET / CLUSTER_NAME) so the two clusters never overlap pod/service
 # CIDRs — cross-cluster endpoints share one registry, and colliding IPs there would be a
 # silent correctness bug. Override the placeholders with `sed`/`envsubst` (the script
-# does this) before `kind create cluster --config`.
+# does this) before `kind create cluster --config`. No node `image:` here: every
+# script passes `--image "$KIND_NODE_IMAGE"` from e2e/kind-version.sh (#1251).
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: CLUSTER_NAME

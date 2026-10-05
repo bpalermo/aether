@@ -1,4 +1,5 @@
 load("@rules_shell//shell:sh_library.bzl", "sh_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # The e2e harnesses, in range of the shellcheck aspect (#853). See
 # //scripts:scripts_shell for why these targets exist at all.
@@ -18,4 +19,21 @@ sh_library(
     name = "e2e_shell",
     srcs = glob(["*.sh"]),
     visibility = ["//visibility:private"],
+)
+
+# One Kubernetes for every kind e2e surface (#1251): e2e/kind-version.sh pins
+# the kind binary, the node image (with digest) and kubectl; this test fails when
+# the //test/e2e kind config, a workflow, a composite action or an e2e harness
+# carries a different value or bypasses the pin. Hermetic: it only reads files.
+sh_test(
+    name = "kind_pin_test",
+    size = "small",
+    srcs = ["kind_pin_test.sh"],
+    data = glob([
+        "*.sh",
+        "*.yaml",
+    ]) + [
+        "//:ci_definitions",
+        "//test/e2e:testdata/kind-config.yaml",
+    ],
 )

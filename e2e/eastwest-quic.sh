@@ -183,6 +183,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The pinned kind binary / node image / kubectl (#1251): one Kubernetes for every
+# e2e surface, local and CI alike.
+# shellcheck source=e2e/kind-version.sh
+. "$REPO_ROOT/e2e/kind-version.sh"
 # <registry>/<namespace> every aether image is tagged under, from the single
 # setting in bazel/registry/registry.bzl (proposal 040) -- never a literal.
 IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
@@ -357,7 +361,8 @@ create_cluster() {
 	if [ "${EWQ_WORKER:-0}" = "1" ]; then
 		printf '  - role: worker\n    labels:\n      topology.kubernetes.io/region: local\n      topology.kubernetes.io/zone: %s\n' "$CLUSTER" >>"$cfg"
 	fi
-	kind create cluster --config "$cfg" --wait 60s >/dev/null
+	kind_require_binary || die "kind binary does not match e2e/kind-version.sh (see above)"
+	kind create cluster --image "$KIND_NODE_IMAGE" --config "$cfg" --wait 60s >/dev/null
 	rm -f "$cfg"
 	if [ "${EWQ_WORKER:-0}" = "1" ]; then
 		# kind taints the control plane once a worker exists; the sources run there.
