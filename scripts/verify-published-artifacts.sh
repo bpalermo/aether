@@ -132,7 +132,11 @@
 #
 # `--recent` selects the commits itself: every PUSH HEAD on main from the last
 # day that is old enough to have published, newest-first. Used by the scheduled
-# sweep in .github/workflows/publish-verify.yaml.
+# sweep in .github/workflows/publish-verify.yaml, which also sets
+# RECENT_SINCE_LAST_GREEN=1 (#1281): the window then starts where the last green
+# scheduled sweep left off (minus an overlap), so a head is verified about twice
+# rather than at every one of a day's twelve sweeps; with no green sweep on
+# record it is the full day again.
 #
 # Push heads, not every commit (#975): publish runs once per push, for its head.
 # An atomic stack merge puts several commits on main in one push, and only the
@@ -194,6 +198,12 @@ fi
 # publish still in flight is a backstop people switch off.
 RECENT_WINDOW="${RECENT_WINDOW:-24 hours ago}"
 RECENT_GRACE="${RECENT_GRACE:-2 hours ago}"
+# With RECENT_SINCE_LAST_GREEN=1 (the scheduled sweep, #1281) the window starts
+# at the last green scheduled sweep's start minus the grace period minus this
+# overlap — never earlier than RECENT_WINDOW. Half an hour absorbs the gap
+# between a run's creation and its `git log`, and committer dates a little older
+# than the push.
+RECENT_OVERLAP_SECONDS="${RECENT_OVERLAP_SECONDS:-1800}"
 
 if [ "$1" = "--recent" ]; then
 	if [ "$#" -ne 1 ]; then
@@ -236,8 +246,31 @@ if [ "$1" = "--recent" ]; then
 	fi
 	[ -n "$main_head" ] || echo "::warning::--recent: main's head is unknown; no push head is treated as superseded"
 
+	# Read only what the last green scheduled sweep did not already verify
+	# (#1281; sweep_since in scripts/push-heads-lib.sh). Opt-in, because it
+	# needs GNU date and a scheduled-sweep history: publish-verify.yaml sets it,
+	# a hand-run `make check-published` reads the whole window as before.
+	since="$RECENT_WINDOW"
+	if [ "${RECENT_SINCE_LAST_GREEN:-0}" = 1 ]; then
+		last_green="$(github_last_green_sweep)" || last_green=""
+		# Exit 2 (inconclusive), never 1, if this date(1) cannot do the math.
+		if ! now_s="$(date -u +%s)" || ! window_s="$(date -u -d "$RECENT_WINDOW" +%s)" ||
+			! grace_at_s="$(date -u -d "$RECENT_GRACE" +%s)"; then
+			echo "::error::--recent: RECENT_SINCE_LAST_GREEN=1 needs GNU date to read '${RECENT_WINDOW}' and '${RECENT_GRACE}'" >&2
+			exit 2
+		fi
+		grace_s=$((now_s - grace_at_s))
+		since_s="$(sweep_since "$now_s" "$window_s" "$grace_s" "$RECENT_OVERLAP_SECONDS" "$last_green")"
+		since="$(date -u -d "@${since_s}" +%Y-%m-%dT%H:%M:%SZ)"
+		if [ "$since_s" = "$window_s" ]; then
+			echo "--recent: no green scheduled sweep to build on (last: ${last_green:-none on record}); reading the full window, since '${RECENT_WINDOW}'"
+		else
+			echo "--recent: the last green scheduled sweep started ${last_green} and verified every push head older than its grace period; reading since ${since} (that, minus '${RECENT_GRACE}', minus ${RECENT_OVERLAP_SECONDS}s overlap)"
+		fi
+	fi
+
 	mapfile -t window < <(git log "$main_ref" \
-		--since="$RECENT_WINDOW" --before="$RECENT_GRACE" --format=%H)
+		--since="$since" --before="$RECENT_GRACE" --format=%H)
 	recent=()
 	skipped=0
 	superseded=0
@@ -300,7 +333,7 @@ if [ "$1" = "--recent" ]; then
 		echo "::error::--recent: ${main_ref} has no push head older than '${RECENT_GRACE}' in the activity log" >&2
 		exit 2
 	fi
-	echo "--recent: ${#recent[@]} push head(s) on ${main_ref} since '${RECENT_WINDOW}', older than '${RECENT_GRACE}' (${skipped} non-head commit(s) skipped, ${superseded} superseded push head(s) skipped)"
+	echo "--recent: ${#recent[@]} push head(s) on ${main_ref} since '${since}', older than '${RECENT_GRACE}' (${skipped} non-head commit(s) skipped, ${superseded} superseded push head(s) skipped)"
 	set -- "${recent[@]}"
 fi
 
