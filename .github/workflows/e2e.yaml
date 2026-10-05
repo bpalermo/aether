@@ -38,7 +38,7 @@ on:
         description: "Run a single job (debugging)"
         type: choice
         default: all
-        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, l4-routes, eastwest-quic]
+        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, l4-routes, eastwest-quic]
   schedule:
     # Nightly at 04:17 UTC (off the hour to avoid contention).
     - cron: "17 4 * * *"
@@ -577,6 +577,42 @@ jobs:
             kubectl --context kind-uds-csi -n aether-system logs -l app.kubernetes.io/component=uds-csi --tail=400 > /tmp/uds-csi-logs/uds-csi.log 2>&1 || true
             kubectl --context kind-uds-csi -n aether-test get events --sort-by=.lastTimestamp > /tmp/uds-csi-logs/events.txt 2>&1 || true
 
+  # --- Proposal 027 ext_authz sidecar + its pod ordering (#1275).
+  # ONE kind cluster, SPIRE off, the chart's OPA preset (failureMode DENY) with
+  # the prober canary's allow-header policy on an extAuthz HTTPFilter. Asserts
+  # allow -> 200 / deny -> 403 decided by the sidecar, that `authz` is a started
+  # native sidecar the proxy container started after, and that a proxy roll
+  # whose sidecar image must be pulled again (evicted from the node first: the
+  # #1275 trigger) produces ZERO 403s on the allowed path and ZERO ext_authz
+  # errors, across a real hot-restart handoff. Harness: e2e/authz.sh.
+  authz:
+    needs: build
+    if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'authz'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run e2e/authz.sh
+        uses: ./.github/actions/run-e2e-script
+        with:
+          script: authz.sh
+          skip-build-var: AUTHZ_SKIP_BUILD
+          verify-description: Verify ext_authz decisions, sidecar ordering and an error-free proxy roll
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          logs-dir: /tmp/authz-logs
+          artifact-name: authz-e2e-logs
+          diagnostics: |
+            mkdir -p /tmp/authz-logs
+            kubectl --context kind-authz get pods -A -o wide 2>&1 | tee /tmp/authz-logs/pods.txt || true
+            kind export logs /tmp/authz-logs/kind --name authz || true
+            kubectl --context kind-authz -n aether-system get pods -l app.kubernetes.io/component=proxy -o yaml > /tmp/authz-logs/proxy-pods.yaml 2>&1 || true
+            kubectl --context kind-authz -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=300 > /tmp/authz-logs/proxy.log 2>&1 || true
+            kubectl --context kind-authz -n aether-system logs -l app.kubernetes.io/component=proxy -c authz --tail=300 > /tmp/authz-logs/authz.log 2>&1 || true
+            kubectl --context kind-authz -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=300 > /tmp/authz-logs/agent.log 2>&1 || true
+            kubectl --context kind-authz get httpfilters -A -o yaml > /tmp/authz-logs/httpfilters.yaml 2>&1 || true
+
   # --- Gateway API L4 routes on the mesh capture path (proposal 018 Phase 3b).
   #
   # All three route types (issue #868). TCPRoute: a weighted 75/25 split and
@@ -697,7 +733,7 @@ jobs:
   # rather than filing per night — three duplicate issues is how people learn to
   # ignore them, which is the very failure mode this exists to prevent.
   report-failure:
-    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, l4-routes, eastwest-quic]
+    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, l4-routes, eastwest-quic]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -726,6 +762,7 @@ jobs:
             replicator=${{ needs.replicator.result }}
             uds=${{ needs.uds.result }}
             uds-csi=${{ needs.uds-csi.result }}
+            authz=${{ needs.authz.result }}
             l4-routes=${{ needs.l4-routes.result }}
             eastwest-quic=${{ needs.eastwest-quic.result }}
         run: |
