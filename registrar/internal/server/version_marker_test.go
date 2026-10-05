@@ -172,3 +172,47 @@ func TestMarkVersion_FullChannelIsSkipped(t *testing.T) {
 	assert.Equal(t, 1, b.MarkVersion(func() string { return "2.0123456789abcdef" }), "retried on the next cycle")
 	assert.Zero(t, b.MarkVersion(func() string { return "2.0123456789abcdef" }))
 }
+
+// TestMarkVersion_CertifiesOnlyAnOrderedCache is the #1239 review's F2 scenario
+// with the marker: two publications on one endpoint (a register held between its
+// mutation and its broadcast, an unregister arriving meanwhile), then a no-op
+// revision and the sync's marker. With publications
+// interleaving, the watcher kept the removed endpoint under the older version,
+// and the marker then certified that cache as current for good. Serialized, the
+// cache matches every version it is handed, the marker's included.
+func TestMarkVersion_CertifiesOnlyAnOrderedCache(t *testing.T) {
+	snap := NewSnapshot()
+	snap.DiffAndReplaceAt(listing(map[string][]string{"ns/a": {"10.0.0.1"}, "ns/b": {"10.0.1.1"}}), Origin{Revision: 5})
+	b := NewBroadcaster(slog.New(slog.DiscardHandler), nil)
+	ch := b.SubscribeWith("w", []string{"ns/a"}, snap.Version)
+	cache := newAppliedCache(t, snap)
+
+	mutated, release, p1, p2 := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(p1)
+		publishRegister(b, snap, "ns/a", "10.0.0.2", func() { close(mutated); <-release })
+	}()
+	<-mutated
+	go func() {
+		defer close(p2)
+		publishRemove(b, snap, "ns/a", "10.0.0.2")
+	}()
+	// Give the unregister every chance to overtake the held register.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	<-p1
+	<-p2
+	// A no-op store revision (the write-behind flush landing): the version
+	// moves, nothing is broadcast.
+	b.Publish(func() []*registrarv1.WatchEndpointsResponse {
+		events, version, transitions := snap.DiffAndReplaceAt(listing(map[string][]string{"ns/a": {"10.0.0.1"}, "ns/b": {"10.0.1.1"}}), Origin{Revision: 6})
+		return stampVersion(append(events, transitions...), version)
+	})
+
+	assert.Equal(t, 1, b.MarkVersion(snap.Version))
+	for len(ch) > 0 {
+		cache.apply(<-ch)
+	}
+	assert.Equal(t, snap.Version(), cache.token, "the marker handed over the current version")
+	assert.Equal(t, map[string]bool{"10.0.0.1": true}, cache.eps["ns/a"], "and the cache it certifies is the snapshot's")
+}
