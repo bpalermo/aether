@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	commonlog "aethermesh.dev/common/log"
@@ -22,6 +23,27 @@ type watcher struct {
 	// services is the watch filter; nil means full watch (every service).
 	// A non-nil empty set watches nothing.
 	services map[string]struct{}
+	// sent is the last version this watcher's channel was given (nil = none
+	// recorded): the version of its initial exchange, of its last versioned
+	// batch event, or of a version marker. MarkVersion skips a watcher already
+	// there. Written by concurrent broadcasts, hence atomic; an out-of-order
+	// write only costs a redundant marker or a skipped one, never correctness.
+	sent atomic.Pointer[string]
+}
+
+// offer enqueues event without blocking and records its version, if it carries
+// one, as the watcher's sent version. It reports whether the event was enqueued
+// (false: the channel is full).
+func (w *watcher) offer(event *registrarv1.WatchEndpointsResponse) bool {
+	select {
+	case w.ch <- event:
+	default:
+		return false
+	}
+	if v := event.GetVersion(); v != "" {
+		w.sent.Store(&v)
+	}
+	return true
 }
 
 // Broadcaster fans out endpoint events to connected agent watch streams.
@@ -83,6 +105,10 @@ func NewBroadcaster(log *slog.Logger, metrics *Metrics) *Broadcaster {
 // full watch; empty = watch nothing) and returns a channel that will receive
 // endpoint events. The caller must call Unsubscribe when done.
 func (b *Broadcaster) Subscribe(id string, services []string) <-chan *registrarv1.WatchEndpointsResponse {
+	return b.subscribe(id, services).ch
+}
+
+func (b *Broadcaster) subscribe(id string, services []string) *watcher {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -108,7 +134,7 @@ func (b *Broadcaster) Subscribe(id string, services []string) <-chan *registrarv
 	}
 	b.metrics.filteredWatchers(context.Background(), b.filteredCountLocked())
 	b.log.Debug("watcher subscribed", "id", id, "filtered", w.services != nil, "services", len(services))
-	return w.ch
+	return w
 }
 
 // SubscribeWith subscribes like Subscribe and then runs start (the watch's
@@ -116,14 +142,71 @@ func (b *Broadcaster) Subscribe(id string, services []string) <-chan *registrarv
 // returned channel receives exactly the batches that start's snapshot does not
 // contain. start must only read in-memory state -- the snapshot is sent after
 // SubscribeWith returns, while new batches buffer on the channel -- and must not
-// publish. A buffer that overflows while the snapshot is still being sent closes
-// the channel, which ends the stream with DataLoss as for any slow watcher.
-func (b *Broadcaster) SubscribeWith(id string, services []string, start func()) <-chan *registrarv1.WatchEndpointsResponse {
+// publish. It returns the version its initial exchange hands the client, which
+// MarkVersion then treats as already sent. A buffer that overflows while the
+// snapshot is still being sent closes the channel, which ends the stream with
+// DataLoss as for any slow watcher.
+func (b *Broadcaster) SubscribeWith(id string, services []string, start func() string) <-chan *registrarv1.WatchEndpointsResponse {
 	b.publishMu.Lock()
 	defer b.publishMu.Unlock()
-	ch := b.Subscribe(id, services)
-	start()
-	return ch
+	w := b.subscribe(id, services)
+	version := start()
+	w.sent.Store(&version)
+	return w.ch
+}
+
+// MarkVersion hands every watcher that is not already there the snapshot's
+// current version (#1241), as a version-only SNAPSHOT_COMPLETE on its channel.
+//
+// The version moves without a batch reaching a watcher in two ways: a store
+// revision that changes no contents (a write-behind flush landing, a re-Put of
+// an identical endpoint), and a change to a service outside a filtered
+// watcher's filter. Its cache is current either way, but its resume token and
+// its last_version gauge stay behind, so the store-to-agent lag reads as lag
+// when nothing is stale.
+//
+// Correctness is the rule for a batch's last event (#1203): a version is handed
+// out only where the receiver holds everything it names. publishMu is taken for
+// WRITING, so no publication is between its snapshot mutation and its
+// broadcast: every batch the current version includes is already on every
+// channel, ahead of this marker, and a watcher that overflowed on one of them
+// has been closed. The version names the whole snapshot, and a filtered watcher
+// holds it for every service of its filter, which is what every token means. A
+// full channel is skipped, not force-resynced: a missing marker loses no event,
+// and the next call retries.
+//
+// The caller throttles: the syncer calls it once per sync cycle. It returns the
+// number of markers sent.
+func (b *Broadcaster) MarkVersion(current func() string) int {
+	b.publishMu.Lock()
+	defer b.publishMu.Unlock()
+	version := current()
+	if version == "" {
+		return 0
+	}
+	marker := &registrarv1.WatchEndpointsResponse{
+		Type:    registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE,
+		Version: version,
+	}
+
+	b.mu.RLock()
+	sent := 0
+	for _, w := range b.watchers {
+		if last := w.sent.Load(); last != nil && *last == version {
+			continue
+		}
+		if w.offer(marker) {
+			sent++
+		}
+	}
+	b.mu.RUnlock()
+
+	if sent > 0 {
+		b.metrics.eventsBroadcast(context.Background(), map[registrarv1.WatchEndpointsResponse_EventType]int64{
+			registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE: int64(sent),
+		})
+	}
+	return sent
 }
 
 // Publish runs mutate -- which applies a batch to the snapshot and returns the
@@ -228,17 +311,16 @@ func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 	broadcast := make(map[registrarv1.WatchEndpointsResponse_EventType]int64, 4)
 
 	send := func(id string, w *watcher, event *registrarv1.WatchEndpointsResponse) {
-		select {
-		case w.ch <- event:
+		if w.offer(event) {
 			broadcast[event.GetType()]++
-		default:
-			// This watcher's view has diverged — schedule a force-resync.
-			// The counter is the staleness alarm.
-			b.metrics.eventDropped(context.Background(), event.GetType().String())
-			b.log.Info("event overflowed slow watcher; forcing resync",
-				"id", id, "eventType", event.GetType().String())
-			dropped = append(dropped, droppedWatcher{id: id, w: w})
+			return
 		}
+		// This watcher's view has diverged — schedule a force-resync.
+		// The counter is the staleness alarm.
+		b.metrics.eventDropped(context.Background(), event.GetType().String())
+		b.log.Info("event overflowed slow watcher; forcing resync",
+			"id", id, "eventType", event.GetType().String())
+		dropped = append(dropped, droppedWatcher{id: id, w: w})
 	}
 
 	b.mu.RLock()

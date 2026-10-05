@@ -33,6 +33,7 @@ go_test(
         "cache_alias_test.go",
         "metrics_test.go",
         "registrar_test.go",
+        "version_marker_test.go",
         "watch_drain_test.go",
         "watch_filter_test.go",
         "watch_flap_test.go",

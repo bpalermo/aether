@@ -187,8 +187,14 @@ func (s *Syncer) sync(ctx context.Context) {
 		events = stampVersion(append(events, transitions...), version)
 		return events
 	})
+	// Hand the cycle's version to every watcher no batch carried it to (#1241):
+	// a no-op store revision, or a change outside a watcher's filter. Once per
+	// cycle, which is the throttle: a burst of store writes is one debounced
+	// sync, and a cycle that moved nothing sends nothing.
+	marked := s.broadcaster.MarkVersion(s.snapshot.Version)
 	state := s.snapshot.State()
 	span.SetAttributes(
+		attribute.Int("aether.sync.version_markers", marked),
 		attribute.Int("aether.sync.events", len(events)),
 		telemetry.AttrSnapshotVersion.String(version),
 		attrSnapshotGeneration.Int64(int64(state.Generation)),
