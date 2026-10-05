@@ -2248,7 +2248,9 @@ kubectl -n aether-system get pod <proxy-pod> -o jsonpath='{range .status.initCon
 ```
 
 The chart needs Kubernetes >= 1.29 for this and refuses to render with the sidecar enabled
-on an older cluster.
+on an older cluster. Kind e2e: `e2e/authz.sh` (nightly job `authz`). It evicts the OPA
+image from the node and rolls the proxy under load. Against the 2.4.8 layout that gave
+495 × 403 and 990 `ext_authz.error` in 4 s; against 2.4.9 it gave 0 and 0.
 
 ### A roll wedges both epochs after `starting workers` (#1050)
 
