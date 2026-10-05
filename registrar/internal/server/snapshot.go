@@ -7,12 +7,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/snapshotversion"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -51,61 +50,9 @@ func endpointDigest(ep *registryv1.ServiceEndpoint) [sha256.Size]byte {
 	return sha256.Sum256(b)
 }
 
-// Version format (issues #1193, #1203). The version is the resume token an
-// agent presents on reconnect; the server skips the snapshot when the token
-// names the contents it holds now. It is therefore a NAME OF THE CONTENTS, not
-// a count of writes, and it is comparable across replicas:
-//
-//   - "<rev>.<hash>": the contents are exactly the external registry's
-//     listing at store revision rev (a backend implementing
-//     registry.RevisionedLister: etcd).
-//   - "<rev>+<hash>": the contents started from the listing at rev but deviate
-//     from it -- a write-behind intent was overlaid, or an agent RPC was
-//     applied since.
-//   - "hash:<hash>": the backend has no store revision (kubernetes, where a
-//     listing is not a function of the list's resourceVersion: health depends
-//     on the clock and locality on a separate node list).
-//
-// <hash> is contentHashLen hex digits of a sha256 over the canonical contents
-// (sorted keys + deterministic proto encoding of each endpoint), and it ALONE
-// decides whether a client is current: a token is current iff its hash part
-// equals the current content hash. The revision is carried for the lag metrics
-// and for operators, never trusted for equality -- a rebuilt etcd restarts its
-// revisions at 1, and a binary that decodes a stored value differently derives
-// different contents at the same revision. No form parses as a bare integer, so
-// a pre-#1193 counter token never matches.
-const (
-	versionHashPrefix = "hash:"
-	versionCleanSep   = "."
-	versionDirtySep   = "+"
-	contentHashLen    = 16
-)
-
-// formatVersion renders the version for the given state; see the format above.
-func formatVersion(revision int64, dirty bool, contentHash string) string {
-	if revision <= 0 {
-		return versionHashPrefix + contentHash
-	}
-	rev := strconv.FormatInt(revision, 10)
-	if dirty {
-		return rev + versionDirtySep + contentHash
-	}
-	return rev + versionCleanSep + contentHash
-}
-
-// versionContentHash returns the content hash a version embeds: the part after
-// "hash:", or after the "." / "+" that follows the revision. A pre-#1193
-// counter version embeds none.
-func versionContentHash(version string) (string, bool) {
-	if h, ok := strings.CutPrefix(version, versionHashPrefix); ok {
-		return h, h != ""
-	}
-	if i := strings.IndexAny(version, versionCleanSep+versionDirtySep); i >= 0 {
-		h := version[i+1:]
-		return h, h != ""
-	}
-	return "", false
-}
+// The version format -- "<rev>.<hash>", "<rev>+<hash>", "hash:<hash>" -- is
+// documented, rendered and parsed in common/snapshotversion, which the agent
+// imports too, so the two sides cannot disagree on it (#1272).
 
 // Origin describes where a replacement state came from.
 type Origin struct {
@@ -143,7 +90,7 @@ type Snapshot struct {
 	// generation counts content changes: it moves only when contentHash does.
 	// Guarded by mu.
 	generation uint64
-	// version is the cached formatVersion of the fields above. Guarded by mu.
+	// version is the cached snapshotversion.Format of the fields above. Guarded by mu.
 	version string
 }
 
@@ -154,7 +101,7 @@ func NewSnapshot() *Snapshot {
 		serviceCounts: make(map[string]int),
 	}
 	s.contentHash = s.computeContentHashLocked()
-	s.version = formatVersion(0, false, s.contentHash)
+	s.version = snapshotversion.Format(0, false, s.contentHash)
 	return s
 }
 
@@ -193,7 +140,7 @@ func (s *Snapshot) computeContentHashLocked() string {
 		h.Write([]byte{0})
 		h.Write(e.digest[:])
 	}
-	return hex.EncodeToString(h.Sum(nil))[:contentHashLen]
+	return hex.EncodeToString(h.Sum(nil))[:snapshotversion.HashLen]
 }
 
 // refreshLocked recomputes the content hash after a mutation, advances the
@@ -209,7 +156,7 @@ func (s *Snapshot) refreshLocked(markDirty bool) {
 			s.dirty = true
 		}
 	}
-	s.version = formatVersion(s.revision, s.dirty, s.contentHash)
+	s.version = snapshotversion.Format(s.revision, s.dirty, s.contentHash)
 }
 
 // serviceCountLocked returns the number of endpoints stored for a service
@@ -300,13 +247,16 @@ func (s *Snapshot) resumeLocked(token string) Resume {
 	if token == "" {
 		return ResumeResend
 	}
-	if token == s.version {
+	// s.version always embeds s.contentHash (refreshLocked renders it from
+	// it), so comparing against the version is comparing against the hash.
+	switch snapshotversion.Compare(token, s.version) {
+	case snapshotversion.Same:
 		return ResumeCurrent
-	}
-	if h, ok := versionContentHash(token); ok && h == s.contentHash {
+	case snapshotversion.Renamed:
 		return ResumeRenamed
+	default:
+		return ResumeResend
 	}
-	return ResumeResend
 }
 
 // GetAll returns all endpoints organized by service name. The caller receives

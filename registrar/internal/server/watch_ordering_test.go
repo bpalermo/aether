@@ -78,6 +78,24 @@ func cacheHas(cache map[registryv1.Service_Protocol]map[string]map[string]bool, 
 	return cache[protocol][svc][ip]
 }
 
+// endpointDeliveries counts the events of a stream that hand the receiver the
+// endpoint ip of svc: a FULL_SNAPSHOT entry (the initial exchange) or an
+// ADDED/UPDATED event (a broadcast batch).
+func endpointDeliveries(events []*registrarv1.WatchEndpointsResponse, svc, ip string) int {
+	n := 0
+	for _, e := range events {
+		switch e.GetType() {
+		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
+			registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+			registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED:
+			if e.GetServiceName() == svc && e.GetEndpoint().GetIp() == ip {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 func newOrderingTestServer() *RegistrarServer {
 	snap := NewSnapshot()
 	snap.DiffAndReplaceAt(listing(map[string][]string{"ns/base": {"10.0.0.1"}}), Origin{Revision: 40})
@@ -138,18 +156,27 @@ func TestWatchEndpoints_ChangeDuringInitialExchangeIsDelivered(t *testing.T) {
 	}
 }
 
-// TestWatchEndpoints_PreSnapshotBatchCannotRegressTheToken (#1205): batch B is
-// applied to the snapshot but not yet broadcast when a later batch C lands and
-// a watch starts. B's broadcast carries B's version, which names contents
-// WITHOUT C. Had the watch subscribed and read the snapshot (B and C) before
-// B's broadcast, B would reach the stream after SNAPSHOT_COMPLETE and move the
-// agent's token back to a version its cache (which holds C) does not match.
+// TestWatchEndpoints_PreSnapshotBatchCannotRegressTheToken (#1205, #1271): a
+// watch starts while batch B's publication is in flight -- B is applied to the
+// snapshot, its broadcast still pending -- and batch C is queued behind it.
 //
-// The rule that prevents it: a batch's apply and its broadcast are one
-// publication (Broadcaster.Publish), and a watch's subscribe and snapshot read
-// happen with publications excluded (Broadcaster.SubscribeWith). B is therefore
-// either wholly before the watch start (in the snapshot, not delivered) or
-// wholly after (delivered, not in the snapshot) -- never both.
+// The rule under test: a batch's apply and its broadcast are one publication
+// (Broadcaster.Publish), and a watch's subscribe and snapshot read happen with
+// publications excluded (Broadcaster.SubscribeWith). Each batch is therefore
+// either wholly before the watch start (in the snapshot, not on the channel)
+// or wholly after (on the channel, not in the snapshot) -- never both. The
+// stream must end with the cache and the token matching the snapshot, and
+// carry each of B's and C's endpoints exactly once.
+//
+// The exactly-once assertion is the one with teeth (#1271). This test was
+// written when publications could interleave (#1205): then a B delivered on
+// top of a snapshot holding B and C carried B's older version and regressed
+// the token. Since publications are serialized (#1239 review, F2) C cannot
+// overtake B, so a SubscribeWith that stopped excluding publications no longer
+// moves the token -- B's broadcast carries the snapshot's own version -- but
+// it still hands the watch B twice: once in its snapshot, once on its channel
+// after the marker. Counting the deliveries is what fails if SubscribeWith
+// stops taking the publication lock.
 func TestWatchEndpoints_PreSnapshotBatchCannotRegressTheToken(t *testing.T) {
 	s := newOrderingTestServer()
 
@@ -180,7 +207,7 @@ func TestWatchEndpoints_PreSnapshotBatchCannotRegressTheToken(t *testing.T) {
 	// C lands while B's publication is open. Since publications are serialized
 	// (#1239 review, F2) it waits for B instead of overtaking it; before that it
 	// was published in full here. Either way the watch below must end on the
-	// snapshot's version.
+	// snapshot's version, holding C exactly once.
 	publishedC := make(chan error, 1)
 	go func() {
 		_, err := s.RegisterEndpoint(context.Background(), addReq("ns/c", "10.0.0.3", registryv1.Service_PROTOCOL_HTTP))
@@ -212,11 +239,16 @@ func TestWatchEndpoints_PreSnapshotBatchCannotRegressTheToken(t *testing.T) {
 	// Let anything buffered for the stream drain onto it.
 	time.Sleep(50 * time.Millisecond)
 
-	cache, token := agentCache(stream.received())
+	received := stream.received()
+	cache, token := agentCache(received)
 	assert.True(t, cacheHas(cache, registryv1.Service_PROTOCOL_HTTP, "ns/b", "10.0.0.2"))
 	assert.True(t, cacheHas(cache, registryv1.Service_PROTOCOL_HTTP, "ns/c", "10.0.0.3"))
 	assert.Equal(t, s.snapshot.Version(), token,
 		"a batch applied before the snapshot was read must not move the token off the snapshot's version")
+	assert.Equal(t, 1, endpointDeliveries(received, "ns/b", "10.0.0.2"),
+		"the in-flight batch must be in the watch's snapshot or on its channel, never both")
+	assert.Equal(t, 1, endpointDeliveries(received, "ns/c", "10.0.0.3"),
+		"the queued batch must be in the watch's snapshot or on its channel, never both")
 	cancel()
 	<-done
 }
