@@ -83,16 +83,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-cache: true
-          # Repository cache (#1001): keyed on everything that changes the
-          # fetched set, in the root workspace's own namespace. Restore only —
-          # ci.yaml's / main.yaml's `diff` is the one job that saves it
-          # (docs/runbook.md, "CI: external repository fetches").
-          cache-version: root-1
-          repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
-          cache-save: false
+        uses: ./.github/actions/setup-bazel
 
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh --config=lint --@aspect_rules_lint//lint:fail_on_violation //scripts:all //:format.check @buildifier_prebuilt//:buildifier @aspect_rules_lint//lint:shellcheck_bin
@@ -171,17 +162,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        uses: ./.github/actions/setup-bazel
         with:
-          bazelisk-cache: true
-          # Repository cache (#1001): the proxy workspace's own key and
-          # namespace — it used to hash the ROOT MODULE.bazel and share the
-          # root's key, so an Envoy-only cache could be restored into a root
-          # job (and vice versa).
-          cache-version: proxy-1
-          repository-cache: '["proxy/MODULE.bazel", "proxy/MODULE.bazel.lock"]'
-          # One saver per arch: the warm-up below fetches for all of //...,
-          # a superset of what every proxy job builds.
+          workspace: proxy
+          # The repository-cache SAVER (see .github/actions/setup-bazel): this
+          # job's warm-up fetches a superset of what every other job restores.
+          cache-save: true
 
       - name: Warm the Bazel repository cache (fetch + analysis of //..., retried)
         run: ../scripts/ci-bazel-warmup.sh --config=ci --config=${{ matrix.bazel_config }} //...

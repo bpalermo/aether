@@ -200,8 +200,12 @@ keep a flaky upstream from turning a job red:
   namespaces (`cache-version: root-1` / `proxy-1`). **Exactly one job per
   workflow saves** — `diff` in `ci.yaml` and `main.yaml` (the `main` entry is the
   one every PR falls back to), the `test`/`build-push` matrix per arch for the
-  proxy — because its warm-up fetches for all of `//...`; every other job sets
-  `cache-save: false`. The first job to finish used to save, so a job that
+  proxy — because its warm-up fetches for all of `//...`; every other job
+  restores only. All of it lives in one composite action,
+  [`.github/actions/setup-bazel`](../.github/actions/setup-bazel/action.yml):
+  a job picks `workspace: proxy` or the root default and, if it is the saver,
+  `cache-save: true` (the release and signing workflows keep explicit copies of
+  the same values). The first job to finish used to save, so a job that
   fetched a handful of repositories (or, before the namespaces, a *proxy* job)
   could write the entry every later job restored as an exact hit and never
   re-saved. That is how the 2026-09-27 `netns` failure fetched
