@@ -1,16 +1,32 @@
 load("@rules_shell//shell:sh_library.bzl", "sh_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # The soak driver's shell (churn.sh, sample-proxy-rss.sh, restart-watch.sh,
 # harness_test.sh, and newsa-client.sh -- POSIX sh, run by busybox inside the
 # new-SA step's pod), in range of the shellcheck aspect (#853). Its own package
 # for the same reason as //e2e/pressure; see //e2e:e2e_shell.
 #
-# harness_test.sh is run by hand, not as an sh_test: it needs jq from the host,
-# and the scripts it covers only ever run from a workstation.
-#
 # k6-mesh-soak.js is JavaScript and no linter here covers it.
 sh_library(
     name = "soak_shell",
     srcs = glob(["*.sh"]),
     visibility = ["//visibility:private"],
+)
+
+# The harness's offline parsing tests (#1265): restart-watch.sh against canned
+# `kubectl get pods -o json` through a fake kubectl, udscsi-window.awk against
+# canned watch lines. No cluster, no network. It used to be run by hand only,
+# for want of jq; jq is now the Bazel-pinned one (jq.bzl), so it runs in
+# `bazel test //...` like any other test. awk and coreutils come from the host,
+# as for every sh_test in this repository.
+sh_test(
+    name = "harness_test",
+    size = "small",
+    srcs = ["harness_test.sh"],
+    data = [
+        "restart-watch.sh",
+        "udscsi-window.awk",
+        "@jq_toolchains//:resolved_toolchain",
+    ] + glob(["testdata/**"]),
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )

@@ -5,10 +5,12 @@
 #   - udscsi-window.awk (#1243), the uds-csi step's plugin-down detector,
 #     against canned `kubectl get pods -w -o jsonpath` lines.
 #
-#   bash e2e/soak/harness_test.sh      # needs bash, jq, awk; exits non-zero on failure
+#   bazel test //e2e/soak:harness_test  # jq is the Bazel-pinned one
+#   bash e2e/soak/harness_test.sh       # by hand: needs bash, jq, awk on PATH
 #
-# Run by hand after editing either file: the soak runs from a workstation and
-# CI has no cluster to drive it against.
+# Exits non-zero on failure. Offline by construction, so it runs in CI as part
+# of `bazel test //...` even though the soak itself only runs from a
+# workstation against a real cluster.
 set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +19,15 @@ AWK_WINDOW="$HERE/udscsi-window.awk"
 FIX="$HERE/testdata/restart-watch"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+
+# Under Bazel, JQ_RLOCATIONPATH names the pinned jq in the runfiles; put it on
+# PATH as `jq`, which is what restart-watch.sh calls.
+if [ -n "${JQ_RLOCATIONPATH:-}" ]; then
+	mkdir -p "$TMP/bin"
+	ln -s "${TEST_SRCDIR:?}/${JQ_RLOCATIONPATH}" "$TMP/bin/jq"
+	PATH="$TMP/bin:$PATH"
+fi
+echo "jq: $(command -v jq) ($(jq --version))"
 
 FAILS=0
 pass() { echo "PASS  $*"; }
