@@ -126,7 +126,6 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260926.726d7ac.envoy")
 #   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
-    version = "1.40.0-dev.20260926.726d7ac.envoy",
     patch_strip = 1,
     patches = [
         "//bazel/patches:envoy-47743-udp-hot-restart-forwarding-netns.patch",
@@ -139,6 +138,7 @@ single_version_override(
         "//bazel/patches:envoy-aether1074-quic-persistent-info-lifetime.patch",
         "//bazel/patches:envoy-aether1126-forwarded-udp-worker-index.patch",
     ],
+    version = "1.40.0-dev.20260926.726d7ac.envoy",
 )
 
 ####################################################################################

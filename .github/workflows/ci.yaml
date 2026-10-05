@@ -221,7 +221,7 @@ jobs:
           repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
           cache-save: false
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
-        run: scripts/ci-bazel-warmup.sh --config=lint --@aspect_rules_lint//lint:fail_on_violation //scripts:all
+        run: scripts/ci-bazel-warmup.sh --config=lint --@aspect_rules_lint//lint:fail_on_violation //scripts:all @buildifier_prebuilt//:buildifier @aspect_rules_lint//lint:shellcheck_bin
 
       # First: is every script actually reachable by the aspect? The srcs are
       # per-package globs and a glob cannot cross a package boundary, so a script
@@ -229,6 +229,14 @@ jobs:
       # by simply not being in it — the vacuous-gate failure mode one level down.
       - name: Every root-workspace shell script is covered by an sh_* target
         run: scripts/check-shell-lint.sh
+
+      # The //proxy workspace is behind //.bazelignore, out of every aspect's
+      # reach, so its Starlark (buildifier lint) and shell (ShellCheck) are
+      # linted by a direct run of the same tools. The `proxy` workflow runs it
+      # on proxy/ changes; it is here too because a root change (a buildifier
+      # or ShellCheck bump, .shellcheckrc) can newly flag a proxy file.
+      - name: Lint the //proxy workspace's Starlark and shell
+        run: scripts/lint-proxy.sh
 
       # scripts/ci-bazel-warmup.sh (#1001) retries a repository-fetch failure
       # 3x with backoff and any other failure not at all. A stub bazel pins

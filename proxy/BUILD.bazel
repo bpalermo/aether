@@ -65,7 +65,7 @@ genrule(
         "MODULE.bazel",
     ],
     outs = ["image_metadata.txt"],
-    cmd = "$(location //bazel:image_metadata.sh) $(location MODULE.bazel) $(location .bazelrc) >$@",
+    cmd = "$(execpath //bazel:image_metadata.sh) $(execpath MODULE.bazel) $(execpath .bazelrc) >$@",
     # Undocumented genrule attr that makes the workspace status files inputs
     # (bazelbuild/bazel#4942). Envoy's own
     # //source/common/version:generate_version_linkstamp uses it for the same

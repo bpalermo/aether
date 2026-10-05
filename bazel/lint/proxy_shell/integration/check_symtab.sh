@@ -1,1 +1,0 @@
-../../../../proxy/integration/check_symtab.sh

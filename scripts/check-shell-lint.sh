@@ -25,8 +25,7 @@
 # glob cannot do is cross a package boundary: a script added to a directory with
 # no sh_* target — a new //e2e/foo, or one of //bazel's existing subpackages —
 # is silently outside the gate, and nothing about `make lint` passing would say
-# so. That is exactly the gap scripts/check-proxy-shell-lint.sh closes for the
-# //proxy bridge, and this is its root-workspace sibling.
+# so.
 #
 # So: enumerate the repository's shell from git, ask Bazel which files the sh_*
 # targets actually claim, and fail on any file in the first set and not the
@@ -34,9 +33,10 @@
 # `bazel build --config=lint --@aspect_rules_lint//lint:fail_on_violation //...`,
 # and .github/workflows/ci.yaml's `shell` job runs both.
 #
-# //proxy and //bazel/lint/proxy_shell are excluded here: that tree is a
-# separate bzlmod workspace reached through source symlinks, with its own target
-# and its own guard (#848). This check owns the root workspace's own shell.
+# //proxy is excluded here: it is a separate bzlmod workspace behind
+# //.bazelignore, which no aspect can reach. scripts/lint-proxy.sh runs
+# ShellCheck over its shell directly, discovering the files from git, so it has
+# no target set to fall out of. This check owns the root workspace's own shell.
 #
 # Usage: scripts/check-shell-lint.sh        (or: make check-shell-lint)
 set -euo pipefail
@@ -47,7 +47,7 @@ cd "$repo_root"
 bazel="${BAZEL:-bazel}"
 
 # A shell script is a `.sh` file or anything with a shell shebang. Same test as
-# check-proxy-shell-lint.sh: the aspect lints every src regardless of extension,
+# lint-proxy.sh: the aspect lints every src regardless of extension,
 # so coverage has to be judged the same way.
 is_shell() {
 	case "$1" in
@@ -61,7 +61,7 @@ is_shell() {
 declared=""
 while IFS= read -r f; do
 	case "$f" in
-	proxy/* | bazel/lint/proxy_shell/*) continue ;;
+	proxy/*) continue ;;
 	esac
 	# Symlinks are bridges into another workspace, never root shell of our own.
 	[ -f "$f" ] && [ ! -L "$f" ] || continue
@@ -81,7 +81,7 @@ covered="$(
 	"$bazel" query --noshow_progress --ui_event_filters=-info,-debug \
 		'kind("source file", labels(srcs, kind("sh_(binary|library|test)", //...)))' 2>/dev/null |
 		sed -e 's|^//:|/|' -e 's|^//||' -e 's|:|/|' |
-		grep -v '^bazel/lint/proxy_shell/' | sort -u
+		sort -u
 )"
 
 if [ -z "$covered" ]; then

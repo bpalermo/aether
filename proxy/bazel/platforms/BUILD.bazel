@@ -24,9 +24,9 @@ platform(
 platform(
     name = "rbe_buildbuddy_arm64",
     exec_properties = {
-        "dockerNetwork": "off",
-        "Pool": "",
         "Arch": "arm64",
+        "Pool": "",
+        "dockerNetwork": "off",
     },
     parents = ["@envoy//bazel/platforms/rbe:linux_arm64"],
     visibility = ["//visibility:public"],

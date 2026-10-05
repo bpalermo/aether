@@ -3,30 +3,24 @@
 # Gazelle (BUILD files), bzlmod (MODULE.bazel.lock), and go mod (go.sum) rather
 # than edited by hand. MODULE.bazel is intentionally left visible — it is
 # hand-edited, so its changes should stay in review (like go.mod).
+#
+# rules_lint's format multirun ALSO skips every file marked linguist-generated
+# (as it skips `rules-lint-ignored`), so the root BUILD files are formatted by
+# Gazelle, not by `make format`.
 BUILD.bazel linguist-generated=true
 BUILD linguist-generated=true
 MODULE.bazel.lock linguist-generated=true
 go.sum linguist-generated=true
 
-# The proxy/ tree is a separate Bazel module (its own MODULE.bazel, .bazelversion
-# and registry pins, Envoy-derived tooling; //.bazelignore excludes it from the
-# root build). The root formatter discovers files via `git ls-files`, which
-# ignores .bazelignore, so it would otherwise reformat proxy Starlark/shell and
-# fight the proxy's own conventions. rules_lint honors `rules-lint-ignored`, so
-# mark the whole tree out of the root format/lint.
-proxy/** rules-lint-ignored=true
-
-# //bazel/lint/proxy_shell holds nothing but source symlinks INTO that tree —
-# the bridge that lets the shellcheck aspect see proxy shell past
-# //.bazelignore (#848). They must inherit the exclusion above, for two
-# reasons. Formatting one is formatting a proxy file by another name, which the
-# line above deliberately declines to do; and shfmt refuses outright ("refusing
-# to atomically replace ... as it is not one already"), which failed
-# `make format` rather than skipping the file.
-#
-# This does NOT weaken the lint. `rules-lint-ignored` is consulted by the
-# format multirun's `git ls-files` discovery only; the shellcheck aspect runs
-# over an sh_library's srcs in the Bazel graph and never looks at
-# .gitattributes. Reaching these files with the linter and not the formatter is
-# exactly the intent.
-bazel/lint/proxy_shell/** rules-lint-ignored=true
+# The proxy/ tree is a separate Bazel module (its own MODULE.bazel,
+# .bazelversion and registry pins; //.bazelignore excludes it from the root
+# build), but its Starlark and shell are formatted by the ROOT formatter: the
+# format multirun discovers files with `git ls-files`, which ignores
+# .bazelignore, so `make format` / `make format-check` (and the `format` CI
+# jobs) reach proxy/ like any other directory. No Gazelle runs there, so its
+# BUILD files are hand-written, not generated: unmark them, or the multirun
+# would skip them (above) and buildifier would never see them. Lint is
+# scripts/lint-proxy.sh (buildifier lint + ShellCheck), since the lint aspects
+# cannot see past //.bazelignore.
+proxy/**/BUILD.bazel linguist-generated=false
+proxy/**/BUILD linguist-generated=false
