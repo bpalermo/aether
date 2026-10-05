@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -176,14 +177,26 @@ func TestPublish_ConcurrentPublicationsKeepEveryVersionHonest(t *testing.T) {
 		}
 	}()
 
+	// Backpressure, so the watcher can never overflow (a force-resync would
+	// close its channel and void the check): a publication emits at most 3
+	// events (two REMOVED and a SERVICE_REMOVED, or an ADDED and a
+	// SERVICE_ADDED), so with every publisher waiting for this much headroom
+	// before it publishes, all of them at once cannot fill the buffer whatever
+	// the scheduler does. The waits only space the publications out; they
+	// still run concurrently, which is what the check is about.
+	const publishers = 8
+	headroom := publishers * 3
 	ips := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}
 	var wg sync.WaitGroup
-	for g := range 8 {
+	for g := range publishers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			rng := rand.New(rand.NewPCG(uint64(g), 1239))
 			for range 200 {
+				for len(ch) > defaultChannelBuffer-headroom {
+					runtime.Gosched()
+				}
 				svc := fmt.Sprintf("ns/s%d", rng.IntN(2))
 				if rng.IntN(2) == 0 {
 					publishRegister(b, snap, svc, ips[rng.IntN(len(ips))], nil)
@@ -197,11 +210,14 @@ func TestPublish_ConcurrentPublicationsKeepEveryVersionHonest(t *testing.T) {
 	close(stop)
 	<-drained
 
-	require.Equal(t, 1, b.WatcherCount(), "the watcher kept up (an overflow would void the check)")
+	require.Equal(t, 1, b.WatcherCount(), "the watcher never overflowed (backpressure above)")
 	for _, e := range received {
 		cache.apply(e)
 	}
-	require.Positive(t, cache.checked)
+	// 1600 publications, about half of them non-empty: the check must have
+	// verified hundreds of versions, never passed having verified none.
+	t.Logf("verified %d versioned events", cache.checked)
+	require.GreaterOrEqual(t, cache.checked, 400, "versioned events verified")
 	held := NewSnapshot()
 	held.DiffAndReplace(cache.listing())
 	assert.Equal(t, snap.State().ContentHash, held.State().ContentHash, "the cache ends matching the snapshot")
