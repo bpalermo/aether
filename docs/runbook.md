@@ -57,6 +57,69 @@ There is no `make build-controller`; build it directly with
 > with `make load-proxy-image` only when you need a fresh proxy image. See
 > [`proxy/README.md`](../proxy/README.md) and proposal 010.
 
+### Bumping the Envoy pin
+
+The proxy's Envoy is ONE pin written in two files: the `envoy`/`envoy_api`
+versions (plus the envoy `single_version_override` that carries the patches, and
+the `.envoy`-suffixed sibling deps) in `proxy/MODULE.bazel`, and the
+envoyproxy/bazel-registry commit on `proxy/.bazelrc`'s `--registry=` line. The
+registry drops old snapshot directories as it moves on, so the version resolves
+only at a registry commit that still carries it (`proxy/README.md`, "Envoy
+version bumps", has the background and the traps).
+
+Two scripts own it:
+
+- **`scripts/check-envoy-pin.sh`** is the gate. Offline it asserts `envoy` ==
+  `envoy_api` == the override's version, that `proxy/.bazelrc` has exactly one
+  registry line and it names a full 40-hex commit (never a branch), and that no
+  other snapshot version is spelled out in either file. `--online` (CI's
+  `envoy-api-parity` job, which runs on every PR including proxy-only ones) also
+  asserts the pinned registry commit serves `modules/<m>/<v>/MODULE.bazel` for
+  `envoy`, `envoy_api` and every `.envoy` sibling, and that the snapshot's
+  `source.json` archives the Envoy commit whose short sha is in the version (the
+  workspace records only the short sha; the full one lives in that file).
+  `--self-test` is its offline harness (CI's `shell` job).
+- **`scripts/bump-envoy-pin.sh <envoy-commit | latest>`** is the maintainer tool.
+  It is never run in CI and never builds Envoy.
+
+The procedure:
+
+1. `scripts/bump-envoy-pin.sh latest` (or an Envoy commit a snapshot was cut
+   from). Dry run: it resolves the registry commit (the newest one that still
+   carries that snapshot), prints the rewrite of both files as one diff, flags any
+   `.envoy` module the new `envoy`/`envoy_api` request that the registry does not
+   serve at that commit (then it is not self-consistent there: wait, or pick the
+   commit by hand with the README's loop), and prints two reports:
+   - **the upstream `.bazelrc` diff** between the old and new Envoy commits,
+     restricted to the scopes `proxy/.bazelrc` mirrors (unconditional, `:linux`,
+     `:clang*`, `:libc++`). `~` changed, `-` removed, `+` added; `[mirrored]`
+     marks a flag `proxy/.bazelrc` sets. Every `[mirrored]` line and every `+`
+     line needs a decision in `proxy/.bazelrc`'s "UPSTREAM: module wiring"
+     section.
+   - **the carried-patch report**: each patch in `proxy/bazel/patches/`, in
+     `MODULE.bazel` order, applied to a sparse shallow checkout of the new Envoy
+     commit (and of the current one as a baseline, where all of them must say
+     `applies`). `applies` = still needed; `UPSTREAM` = reverse-applies cleanly,
+     the fix is in this Envoy, drop the patch (issue #980); `CONFLICT` = refresh
+     it against the new tree. A `CONFLICT` is not applied, so a later patch
+     stacked on it can report `CONFLICT` only because of it.
+2. Re-run with `--write`, then rewrite the pin's explanatory comment in
+   `proxy/.bazelrc` ("why this bump") by hand; the script moves the commit and
+   version it mentions but not the reasoning.
+3. Drop every `UPSTREAM` patch (the file, its `single_version_override` entry,
+   its comment block in `MODULE.bazel` and its `proxy/README.md` row) and refresh
+   every `CONFLICT` one.
+4. Refresh the lock and check resolution with the proxy workspace's own Bazel
+   (module resolution only, no Envoy build): `cd proxy && bazel mod graph
+   --depth=1 --lockfile_mode=update`, then `bazel mod explain @quiche @protobuf
+   @abseil-cpp`.
+5. `cd proxy && bazel test //bazel/patches:carried_patch_tests`.
+6. `scripts/check-envoy-pin.sh --online && scripts/check-envoy-api-parity.sh`
+   (a new Envoy minor can require bumping `go-control-plane/envoy`; the parity
+   script prints the command).
+7. One PR. Any change under `proxy/**` runs the hours-long proxy build on the PR
+   and `proxy-release` on merge, so keep unrelated edits out of it.
+
 ---
 
 ## 3. Test
