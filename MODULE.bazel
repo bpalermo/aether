@@ -49,6 +49,15 @@ bazel_dep(name = "rules_img_signer_cosign", version = "0.0.1")
 # module in the graph regardless. Same version the //proxy workspace pins.
 bazel_dep(name = "rules_shell", version = "0.8.0")
 
+# jq for the sh_tests that parse canned JSON (//scripts:stuck_runs_test,
+# //e2e/soak:harness_test): the prebuilt, checksummed jq release binary per
+# exec platform, so those tests need nothing from the host. Already in the graph
+# (aspect_rules_lint -> jq.bzl); this makes its toolchain repo visible here.
+bazel_dep(name = "jq.bzl", version = "0.6.0")
+
+jq_toolchains = use_extension("@jq.bzl//jq:extensions.bzl", "toolchains")
+use_repo(jq_toolchains, "jq_toolchains")
+
 # BuildBuddy RBE toolchain — provides the hosted-executor platform and a matching
 # Ubuntu CC toolchain for remote execution (--config=remote). aether is pure-Go,
 # but RBE actions still resolve a CC toolchain for the exec platform, which this

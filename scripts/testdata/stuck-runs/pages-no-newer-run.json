@@ -1,0 +1,88 @@
+{
+  "_comment": "pages queued 3 days at a commit main has moved past, but no NEWER pages run exists (path filter): report only, the deploy must not be dropped.",
+  "now": "2026-10-05T19:20:00Z",
+  "repository": "bpalermo/aether",
+  "runs": [
+    {
+      "id": 37000000001,
+      "name": "pages",
+      "workflow_id": 1002,
+      "path": ".github/workflows/pages.yaml",
+      "event": "push",
+      "status": "queued",
+      "conclusion": null,
+      "head_branch": "main",
+      "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+      "created_at": "2026-10-02T10:00:00Z",
+      "run_started_at": "2026-10-02T10:00:00Z",
+      "run_attempt": 1,
+      "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000001",
+      "head_repository": {
+        "full_name": "bpalermo/aether"
+      },
+      "repository": {
+        "full_name": "bpalermo/aether"
+      }
+    }
+  ],
+  "jobs": {
+    "37000000001": [
+      {
+        "name": "build",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-10-02T10:00:05Z",
+        "started_at": "2026-10-02T10:00:05Z"
+      }
+    ]
+  },
+  "branches": {
+    "main": "28b2680a28b2680a28b2680a28b2680a28b2680a"
+  },
+  "workflow_runs": {
+    "1002:main": [
+      {
+        "id": 37000000001,
+        "name": "pages",
+        "workflow_id": 1002,
+        "path": ".github/workflows/pages.yaml",
+        "event": "push",
+        "status": "queued",
+        "conclusion": null,
+        "head_branch": "main",
+        "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+        "created_at": "2026-10-02T10:00:00Z",
+        "run_started_at": "2026-10-02T10:00:00Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000001",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      },
+      {
+        "id": 36999999999,
+        "name": "pages",
+        "workflow_id": 1002,
+        "path": ".github/workflows/pages.yaml",
+        "event": "push",
+        "status": "completed",
+        "conclusion": "success",
+        "head_branch": "main",
+        "head_sha": "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
+        "created_at": "2026-10-01T10:00:00Z",
+        "run_started_at": "2026-10-01T10:00:00Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/36999999999",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      }
+    ]
+  }
+}

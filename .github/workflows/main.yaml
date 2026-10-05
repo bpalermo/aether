@@ -55,6 +55,7 @@ jobs:
   # impact set, because proxy/ is a sibling Bazel workspace outside `//...`.
   diff:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       has_any: ${{ steps.impacted.outputs.has_any }}
       has_unit: ${{ steps.impacted.outputs.has_unit }}
@@ -121,6 +122,7 @@ jobs:
     needs: diff
     if: needs.diff.outputs.has_any == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -207,6 +209,7 @@ jobs:
   refresh-pin-prs:
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: release
     permissions:
       # Nothing is built or written in the repo here. `issues: write` is only for
