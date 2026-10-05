@@ -128,12 +128,27 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 |---|---|---|
 | `proxy.authzSidecar.enabled` | `false` | Add a node-local authz gRPC sidecar (UDS) + a DISABLED ext_authz filter entry; zero effect until an `HTTPFilter` (extAuthz) opts a route/service in. |
 | `proxy.authzSidecar.opa.enabled` | `false` | Built-in OPA preset (opt-in). |
-| `proxy.authzSidecar.opa.image` | `openpolicyagent/opa:1.20.2-envoy-static` | OPA image. |
+| `proxy.authzSidecar.opa.image` | `openpolicyagent/opa:1.21.1-envoy-static` | OPA image. |
 | `proxy.authzSidecar.opa.policy` | `""` | Rego policy (ConfigMap-mounted); required when `opa.enabled`. |
 | `proxy.authzSidecar.image.{repository,tag,args}` | `""` / `[]` | Bring-your-own authz container (serves `envoy.service.auth.v3.Authorization` on `unix:///run/aether/authz/authz.sock`). |
 | `proxy.authzSidecar.timeout` | `200ms` | Per-check gRPC timeout. |
 | `proxy.authzSidecar.failureMode` | `DENY` | `DENY` (fail-closed, 403 when unreachable) or `ALLOW` (fail-open). |
 | `proxy.authzSidecar.resources` | `10m` / `32Mi` requests, `128Mi` memory limit | Sidecar resources (OPA preset and bring-your-own). No CPU limit on purpose: it is on the request path, and throttling becomes ext_authz timeouts — 403s under `DENY`. |
+
+**OPA 1.21 YAML change (chart 2.4.6, #1222).** The preset image moved from OPA 1.20.2
+to 1.21.1, which parses YAML under the 1.2 core schema everywhere OPA reads it
+(`--data`, bundles, config files, the `yaml.unmarshal` builtin): the bare words
+`yes`/`no`/`on`/`off`/`y`/`n` are now **strings**, not booleans (`true`/`false` are
+unchanged), and a YAML document with unreachable content is rejected. The preset
+itself hands OPA no YAML — only command-line flags and the `opa.policy` Rego file — so
+the chart needs no change. If your policy calls `yaml.unmarshal`, or you run your own
+OPA config/bundle/data YAML through a bring-your-own image on 1.21+, write booleans as
+`true`/`false` (or quote the word if you meant the string). The same release also types
+empty literals (`{}`, `[]`) as empty, so a policy that selects a key out of one, or
+compares a non-empty object/array to `{}`/`[]`, now fails to compile — use
+`count(x) == 0`. A policy that does not compile keeps the sidecar from serving, which
+under `failureMode: DENY` is a 403 on every opted-in route, so check it with
+`opa check` against the new image before upgrading.
 
 Envoy exports **no** `ext_authz` statistics until a route actually uses the filter
 (its OTLP stats sink only flushes counters that have been used). The prober chart's
