@@ -36,6 +36,7 @@ concurrency:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: release
     env:
       SMOKE_REGISTRY: quay.io

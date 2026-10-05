@@ -240,6 +240,48 @@ To check what a job restored, open its **Setup Bazel** step: `Cache hit for:
 setup-bazel-root-1-linux-x64-repository-<hash>` is an exact hit;
 `Successfully restored cache from …` with a different hash is the fallback.
 
+### Stuck workflow runs
+
+`publish.yaml`, `proxy-release.yml` and `pages.yaml` serialise on a concurrency
+group with `cancel-in-progress: false`, and GitHub keeps at most one *pending*
+run per group. A run whose job never gets a runner therefore blocks every later
+run of that workflow, silently: the later ones show `pending` with no jobs, and
+each newer one replaces the previous as `cancelled`. On 2026-10-05 a publish run
+sat `queued` for five hours this way, and a pages run queued since 2026-10-02 had
+held up every website deploy for three days. A job `timeout-minutes` does not
+help: it only counts once the job has started.
+
+`.github/workflows/stuck-runs.yaml` checks every 30 minutes
+(`scripts/stuck-runs.sh`). A run counts as stuck once it has been `pending` /
+`waiting` / `requested`, or has had a job sitting `queued`, for more than 60
+minutes. Every stuck run goes on one rolling issue, **CI: workflow runs stuck
+before they started**. The issue gets a new comment only when the set of stuck
+runs changes, and it is closed once nothing is stuck.
+
+The watchdog cancels a run only when the run is superseded. All of these must
+hold:
+
+- it is a `push` or `pull_request` run, on its first attempt, and not from a fork;
+- either its branch has been deleted, or both:
+  - its commit is no longer the head of its branch, and
+  - a newer run of the same workflow on that branch is queued, running, or has
+    succeeded.
+
+The newer-run condition is there for path-filtered workflows like `pages`: a
+newer commit on `main` does not mean a newer deploy is coming. The watchdog
+**never** cancels the run for the head of its branch, a re-run, or a
+scheduled or dispatched run. Those need a person:
+
+```bash
+gh run cancel <id>                       # or, if it will not cancel:
+gh api -X POST repos/bpalermo/aether/actions/runs/<id>/force-cancel
+gh run rerun <id>                        # the head's own run: run it again
+```
+
+To see what the watchdog would do without it cancelling or writing anything,
+dispatch it as a dry run: `gh workflow run stuck-runs.yaml -f dry_run=true`.
+A dispatch is a dry run unless you pass `dry_run=false`.
+
 ---
 
 ## 4. Format & lint

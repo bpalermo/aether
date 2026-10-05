@@ -1,0 +1,130 @@
+{
+  "_comment": "The 2026-10-05 publish incident: b1dc1c04 queued 5h (its job never got a runner) holding publish-main; the head 28b2680a waits pending. Cancel the superseded one, report the head.",
+  "now": "2026-10-05T19:20:00Z",
+  "repository": "bpalermo/aether",
+  "runs": [
+    {
+      "id": 37322742027,
+      "name": "publish",
+      "workflow_id": 1001,
+      "path": ".github/workflows/publish.yaml",
+      "event": "push",
+      "status": "queued",
+      "conclusion": null,
+      "head_branch": "main",
+      "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+      "created_at": "2026-10-05T14:11:44Z",
+      "run_started_at": "2026-10-05T14:11:44Z",
+      "run_attempt": 1,
+      "html_url": "https://github.com/bpalermo/aether/actions/runs/37322742027",
+      "head_repository": {
+        "full_name": "bpalermo/aether"
+      },
+      "repository": {
+        "full_name": "bpalermo/aether"
+      }
+    },
+    {
+      "id": 37344778036,
+      "name": "publish",
+      "workflow_id": 1001,
+      "path": ".github/workflows/publish.yaml",
+      "event": "push",
+      "status": "pending",
+      "conclusion": null,
+      "head_branch": "main",
+      "head_sha": "28b2680a28b2680a28b2680a28b2680a28b2680a",
+      "created_at": "2026-10-05T16:57:23Z",
+      "run_started_at": "2026-10-05T16:57:23Z",
+      "run_attempt": 1,
+      "html_url": "https://github.com/bpalermo/aether/actions/runs/37344778036",
+      "head_repository": {
+        "full_name": "bpalermo/aether"
+      },
+      "repository": {
+        "full_name": "bpalermo/aether"
+      }
+    }
+  ],
+  "jobs": {
+    "37322742027": [
+      {
+        "name": "publish",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-10-05T14:11:50Z",
+        "started_at": "2026-10-05T14:11:50Z"
+      }
+    ]
+  },
+  "branches": {
+    "main": "28b2680a28b2680a28b2680a28b2680a28b2680a"
+  },
+  "workflow_runs": {
+    "1001:main": [
+      {
+        "id": 37344778036,
+        "name": "publish",
+        "workflow_id": 1001,
+        "path": ".github/workflows/publish.yaml",
+        "event": "push",
+        "status": "pending",
+        "conclusion": null,
+        "head_branch": "main",
+        "head_sha": "28b2680a28b2680a28b2680a28b2680a28b2680a",
+        "created_at": "2026-10-05T16:57:23Z",
+        "run_started_at": "2026-10-05T16:57:23Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37344778036",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      },
+      {
+        "id": 37340666454,
+        "name": "publish",
+        "workflow_id": 1001,
+        "path": ".github/workflows/publish.yaml",
+        "event": "push",
+        "status": "completed",
+        "conclusion": "cancelled",
+        "head_branch": "main",
+        "head_sha": "cf47d9abcf47d9abcf47d9abcf47d9abcf47d9ab",
+        "created_at": "2026-10-05T16:25:03Z",
+        "run_started_at": "2026-10-05T16:25:03Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37340666454",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      },
+      {
+        "id": 37322742027,
+        "name": "publish",
+        "workflow_id": 1001,
+        "path": ".github/workflows/publish.yaml",
+        "event": "push",
+        "status": "queued",
+        "conclusion": null,
+        "head_branch": "main",
+        "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+        "created_at": "2026-10-05T14:11:44Z",
+        "run_started_at": "2026-10-05T14:11:44Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37322742027",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      }
+    ]
+  }
+}

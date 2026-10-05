@@ -1,0 +1,116 @@
+{
+  "_comment": "An in_progress run whose `test` job has waited 3h15m for a runner, on a PR branch whose head has a newer in_progress ci run: cancel.",
+  "now": "2026-10-05T19:20:00Z",
+  "repository": "bpalermo/aether",
+  "runs": [
+    {
+      "id": 37000000030,
+      "name": "ci",
+      "workflow_id": 1006,
+      "path": ".github/workflows/ci.yaml",
+      "event": "pull_request",
+      "status": "in_progress",
+      "conclusion": null,
+      "head_branch": "upgrade/a",
+      "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+      "created_at": "2026-10-05T16:00:00Z",
+      "run_started_at": "2026-10-05T16:00:00Z",
+      "run_attempt": 1,
+      "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000030",
+      "head_repository": {
+        "full_name": "bpalermo/aether"
+      },
+      "repository": {
+        "full_name": "bpalermo/aether"
+      }
+    },
+    {
+      "id": 37000000031,
+      "name": "ci",
+      "workflow_id": 1006,
+      "path": ".github/workflows/ci.yaml",
+      "event": "pull_request",
+      "status": "in_progress",
+      "conclusion": null,
+      "head_branch": "upgrade/a",
+      "head_sha": "28b2680a28b2680a28b2680a28b2680a28b2680a",
+      "created_at": "2026-10-05T19:00:00Z",
+      "run_started_at": "2026-10-05T19:00:00Z",
+      "run_attempt": 1,
+      "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000031",
+      "head_repository": {
+        "full_name": "bpalermo/aether"
+      },
+      "repository": {
+        "full_name": "bpalermo/aether"
+      }
+    }
+  ],
+  "jobs": {
+    "37000000030": [
+      {
+        "name": "changes",
+        "status": "completed",
+        "conclusion": null,
+        "created_at": "2026-10-05T16:00:05Z",
+        "started_at": "2026-10-05T16:00:05Z"
+      },
+      {
+        "name": "test",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-10-05T16:05:00Z",
+        "started_at": "2026-10-05T16:05:00Z"
+      }
+    ]
+  },
+  "branches": {
+    "upgrade/a": "28b2680a28b2680a28b2680a28b2680a28b2680a"
+  },
+  "workflow_runs": {
+    "1006:upgrade/a": [
+      {
+        "id": 37000000031,
+        "name": "ci",
+        "workflow_id": 1006,
+        "path": ".github/workflows/ci.yaml",
+        "event": "pull_request",
+        "status": "in_progress",
+        "conclusion": null,
+        "head_branch": "upgrade/a",
+        "head_sha": "28b2680a28b2680a28b2680a28b2680a28b2680a",
+        "created_at": "2026-10-05T19:00:00Z",
+        "run_started_at": "2026-10-05T19:00:00Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000031",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      },
+      {
+        "id": 37000000030,
+        "name": "ci",
+        "workflow_id": 1006,
+        "path": ".github/workflows/ci.yaml",
+        "event": "pull_request",
+        "status": "in_progress",
+        "conclusion": null,
+        "head_branch": "upgrade/a",
+        "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+        "created_at": "2026-10-05T16:00:00Z",
+        "run_started_at": "2026-10-05T16:00:00Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000030",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      }
+    ]
+  }
+}

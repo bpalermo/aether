@@ -52,6 +52,7 @@ jobs:
   # picomatch syntax and does not make the pattern an exclusion.
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       control_plane: ${{ steps.filter.outputs.control_plane }}
     steps:
@@ -75,6 +76,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.control_plane == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       has_any: ${{ steps.impacted.outputs.has_any }}
       has_unit: ${{ steps.impacted.outputs.has_unit }}
@@ -128,6 +130,7 @@ jobs:
     if: needs.changes.outputs.control_plane == 'true'
     # Any change under charts/<name>/ must bump that chart's Chart.yaml version.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -147,6 +150,7 @@ jobs:
     # audit is driven from the module graph + the Bazel graph instead. Cheap by
     # design: `go list -m all` plus greps, no bazel build.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       # The go tool runs as a subprocess of `bazel run`, so --repo_env does not
       # reach it; set the proxy in the environment.
@@ -185,6 +189,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.control_plane == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -334,6 +339,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.control_plane == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -374,6 +380,7 @@ jobs:
     # Envoy the proxy is built from (proxy/MODULE.bazel: envoy_api). Cheap, and
     # deliberately unconditional: either side can move on its own.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -400,6 +407,7 @@ jobs:
   # that skips is a required check that never reports.
   proxy-pin:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       # The aether-proxy image (image_reference("proxy"), bazel/registry/registry.bzl)
@@ -543,6 +551,7 @@ jobs:
     needs: [changes, diff]
     if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_any == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -623,6 +632,7 @@ jobs:
     needs: [changes, diff, test]
     if: needs.changes.outputs.control_plane == 'true' && (needs.diff.outputs.has_unit == 'true' || needs.diff.outputs.has_integration == 'true')
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -731,6 +741,7 @@ jobs:
     needs: [changes, diff]
     if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_unit == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -783,6 +794,7 @@ jobs:
     needs: [changes, diff, test]
     if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_integration == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -805,6 +817,7 @@ jobs:
     needs: [changes, diff, test]
     if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_e2e == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -873,6 +886,7 @@ jobs:
     if: always()
     needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, shell, format, test, race, netns, integration, e2e]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Fail if any control-plane job failed or was cancelled
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}

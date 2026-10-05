@@ -1,0 +1,91 @@
+# Stuck-run watchdog.
+#
+# publish.yaml (group publish-main), proxy-release.yml (proxy-release-main) and
+# pages.yaml (pages) serialise with `cancel-in-progress: false`, and GitHub keeps
+# at most ONE pending run per concurrency group. One run whose job never gets a
+# runner therefore blocks its group indefinitely and silently: on 2026-10-05 a
+# publish run for b1dc1c04 sat `queued` for five hours while eight later
+# publishes were replaced one by one as `cancelled`, and a pages run queued
+# since 2026-10-02 blocked every website deploy for three days. A job's
+# `timeout-minutes` cannot catch this — it starts counting when the job starts,
+# and these never started.
+#
+# Every 30 minutes this lists the runs that have been stuck before starting for
+# longer than the threshold (default 60 minutes; publish and proxy-release take
+# ~10), reports them on ONE rolling issue (the e2e.yaml `report-failure` shape),
+# and cancels a stuck run ONLY when it is a superseded run: a push or
+# pull_request run, first attempt, not from a fork, whose branch is gone, or
+# whose commit is no longer its branch's head AND a newer run of the same
+# workflow on that branch is queued, running or has succeeded. The head's own
+# run is never cancelled. The rules, and why each one is there, are in
+# scripts/stuck-runs.sh; //scripts:stuck_runs_test pins them on canned API JSON.
+#
+# A dispatch is a dry run unless dry_run=false: it lists what it would cancel
+# and the issue it would write, and writes nothing:
+#
+#   gh workflow run stuck-runs.yaml
+#
+# A pull request that changes the watchdog runs it as a dry run too, against the
+# live run list, so a change is exercised on real API data before it can act.
+name: stuck-runs
+
+on:
+  schedule:
+    # Every 30 minutes, off the hour and off the other crons (e2e 04:17,
+    # publish-verify :23).
+    - cron: "7,37 * * * *"
+  pull_request:
+    branches: [main, "upgrade/**"]
+    paths:
+      - .github/workflows/stuck-runs.yaml
+      - scripts/stuck-runs.sh
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only: cancel nothing, write no issue"
+        type: boolean
+        default: true
+      threshold_minutes:
+        description: "Minutes a run may sit before it counts as stuck"
+        type: string
+        default: "60"
+
+permissions:
+  contents: read
+
+# A newer tick supersedes an older one; this workflow writes nothing a half-run
+# could leave inconsistent (a cancel is idempotent, the issue is re-read). Per
+# ref, so a pull request's dry run never cancels main's scheduled tick.
+concurrency:
+  group: stuck-runs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # List runs and their jobs; cancel a superseded run.
+      actions: write
+      # The rolling report issue.
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Find, report and (when superseded) cancel stuck runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Only the schedule acts by default: a pull request is always a dry
+          # run, a dispatch unless dry_run=false.
+          DRY_RUN: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+          STUCK_THRESHOLD_MINUTES: ${{ inputs.threshold_minutes || '60' }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            scripts/stuck-runs.sh run --dry-run
+          else
+            scripts/stuck-runs.sh run
+          fi

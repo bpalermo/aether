@@ -29,6 +29,7 @@ permissions:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       proxy: ${{ steps.filter.outputs.proxy }}
     steps:
@@ -78,6 +79,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.proxy == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -157,6 +159,7 @@ jobs:
             runner: ubuntu-24.04-arm
             bazel_config: rbe-buildbuddy-arm64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -257,6 +260,7 @@ jobs:
     if: always()
     needs: [changes, shell, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Fail if any proxy job failed or was cancelled
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}

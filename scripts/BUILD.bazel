@@ -1,4 +1,5 @@
 load("@rules_shell//shell:sh_library.bzl", "sh_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # Every script in //scripts, declared so the shellcheck aspect in
 # //bazel/lint:linters.bzl has something to visit here (#853).
@@ -23,6 +24,20 @@ sh_library(
     name = "scripts_shell",
     srcs = glob(["*.sh"]),
     visibility = ["//visibility:private"],
+)
+
+# The stuck-runs watchdog (.github/workflows/stuck-runs.yaml): its decide logic
+# over canned GitHub API JSON, and its run mode end to end through a fake `gh`.
+# Hermetic: the Bazel-pinned jq, no network.
+sh_test(
+    name = "stuck_runs_test",
+    size = "small",
+    srcs = ["stuck_runs_test.sh"],
+    data = [
+        "stuck-runs.sh",
+        "@jq_toolchains//:resolved_toolchain",
+    ] + glob(["testdata/stuck-runs/*"]),
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
 # The verifier and the helper it sources, for //bazel/cosign:verify_image_signatures,

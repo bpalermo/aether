@@ -1,0 +1,290 @@
+{
+  "_comment": "Superseded-looking runs that are never cancelled: a re-run (attempt 2), a schedule run, a workflow_dispatch run, a fork PR, a branch whose head lookup failed (absent from branches).",
+  "now": "2026-10-05T19:20:00Z",
+  "repository": "bpalermo/aether",
+  "runs": [
+    {
+      "id": 37000000005,
+      "name": "publish",
+      "workflow_id": 1001,
+      "path": ".github/workflows/publish.yaml",
+      "event": "push",
+      "status": "queued",
+      "conclusion": null,
+      "head_branch": "main",
+      "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+      "created_at": "2026-09-20T10:00:00Z",
+      "run_started_at": "2026-10-05T17:00:00Z",
+      "run_attempt": 2,
+      "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000005",
+      "head_repository": {
+        "full_name": "bpalermo/aether"
+      },
+      "repository": {
+        "full_name": "bpalermo/aether"
+      }
+    },
+    {
+      "id": 37000000006,
+      "name": "e2e",
+      "workflow_id": 1005,
+      "path": ".github/workflows/e2e.yaml",
+      "event": "schedule",
+      "status": "queued",
+      "conclusion": null,
+      "head_branch": "main",
+      "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+      "created_at": "2026-10-05T04:17:00Z",
+      "run_started_at": "2026-10-05T04:17:00Z",
+      "run_attempt": 1,
+      "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000006",
+      "head_repository": {
+        "full_name": "bpalermo/aether"
+      },
+      "repository": {
+        "full_name": "bpalermo/aether"
+      }
+    },
+    {
+      "id": 37000000007,
+      "name": "publish",
+      "workflow_id": 1001,
+      "path": ".github/workflows/publish.yaml",
+      "event": "workflow_dispatch",
+      "status": "pending",
+      "conclusion": null,
+      "head_branch": "main",
+      "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+      "created_at": "2026-10-05T16:00:00Z",
+      "run_started_at": "2026-10-05T16:00:00Z",
+      "run_attempt": 1,
+      "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000007",
+      "head_repository": {
+        "full_name": "bpalermo/aether"
+      },
+      "repository": {
+        "full_name": "bpalermo/aether"
+      }
+    },
+    {
+      "id": 37000000008,
+      "name": "ci",
+      "workflow_id": 1006,
+      "path": ".github/workflows/ci.yaml",
+      "event": "pull_request",
+      "status": "queued",
+      "conclusion": null,
+      "head_branch": "feature",
+      "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+      "created_at": "2026-10-05T16:00:00Z",
+      "run_started_at": "2026-10-05T16:00:00Z",
+      "run_attempt": 1,
+      "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000008",
+      "head_repository": {
+        "full_name": "someone/aether"
+      },
+      "repository": {
+        "full_name": "bpalermo/aether"
+      }
+    },
+    {
+      "id": 37000000009,
+      "name": "ci",
+      "workflow_id": 1006,
+      "path": ".github/workflows/ci.yaml",
+      "event": "pull_request",
+      "status": "queued",
+      "conclusion": null,
+      "head_branch": "upgrade/x",
+      "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+      "created_at": "2026-10-05T16:00:00Z",
+      "run_started_at": "2026-10-05T16:00:00Z",
+      "run_attempt": 1,
+      "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000009",
+      "head_repository": {
+        "full_name": "bpalermo/aether"
+      },
+      "repository": {
+        "full_name": "bpalermo/aether"
+      }
+    }
+  ],
+  "jobs": {
+    "37000000005": [
+      {
+        "name": "j",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-10-05T17:00:00Z",
+        "started_at": "2026-10-05T17:00:00Z"
+      }
+    ],
+    "37000000006": [
+      {
+        "name": "j",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-10-05T04:17:00Z",
+        "started_at": "2026-10-05T04:17:00Z"
+      }
+    ],
+    "37000000008": [
+      {
+        "name": "j",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-10-05T16:00:00Z",
+        "started_at": "2026-10-05T16:00:00Z"
+      }
+    ],
+    "37000000009": [
+      {
+        "name": "j",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-10-05T16:00:00Z",
+        "started_at": "2026-10-05T16:00:00Z"
+      }
+    ]
+  },
+  "branches": {
+    "main": "28b2680a28b2680a28b2680a28b2680a28b2680a",
+    "feature": "dddd3333dddd3333dddd3333dddd3333dddd3333"
+  },
+  "workflow_runs": {
+    "1001:main": [
+      {
+        "id": 37000000099,
+        "name": "publish",
+        "workflow_id": 1001,
+        "path": ".github/workflows/publish.yaml",
+        "event": "push",
+        "status": "in_progress",
+        "conclusion": null,
+        "head_branch": "main",
+        "head_sha": "28b2680a28b2680a28b2680a28b2680a28b2680a",
+        "created_at": "2026-10-05T18:00:00Z",
+        "run_started_at": "2026-10-05T18:00:00Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000099",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      },
+      {
+        "id": 37000000005,
+        "name": "publish",
+        "workflow_id": 1001,
+        "path": ".github/workflows/publish.yaml",
+        "event": "push",
+        "status": "queued",
+        "conclusion": null,
+        "head_branch": "main",
+        "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+        "created_at": "2026-09-20T10:00:00Z",
+        "run_started_at": "2026-10-05T17:00:00Z",
+        "run_attempt": 2,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000005",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      },
+      {
+        "id": 37000000007,
+        "name": "publish",
+        "workflow_id": 1001,
+        "path": ".github/workflows/publish.yaml",
+        "event": "workflow_dispatch",
+        "status": "pending",
+        "conclusion": null,
+        "head_branch": "main",
+        "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+        "created_at": "2026-10-05T16:00:00Z",
+        "run_started_at": "2026-10-05T16:00:00Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000007",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      }
+    ],
+    "1005:main": [
+      {
+        "id": 37000000006,
+        "name": "e2e",
+        "workflow_id": 1005,
+        "path": ".github/workflows/e2e.yaml",
+        "event": "schedule",
+        "status": "queued",
+        "conclusion": null,
+        "head_branch": "main",
+        "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+        "created_at": "2026-10-05T04:17:00Z",
+        "run_started_at": "2026-10-05T04:17:00Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000006",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      }
+    ],
+    "1006:feature": [
+      {
+        "id": 37000000008,
+        "name": "ci",
+        "workflow_id": 1006,
+        "path": ".github/workflows/ci.yaml",
+        "event": "pull_request",
+        "status": "queued",
+        "conclusion": null,
+        "head_branch": "feature",
+        "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+        "created_at": "2026-10-05T16:00:00Z",
+        "run_started_at": "2026-10-05T16:00:00Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000008",
+        "head_repository": {
+          "full_name": "someone/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      }
+    ],
+    "1006:upgrade/x": [
+      {
+        "id": 37000000009,
+        "name": "ci",
+        "workflow_id": 1006,
+        "path": ".github/workflows/ci.yaml",
+        "event": "pull_request",
+        "status": "queued",
+        "conclusion": null,
+        "head_branch": "upgrade/x",
+        "head_sha": "b1dc1c04b1dc1c04b1dc1c04b1dc1c04b1dc1c04",
+        "created_at": "2026-10-05T16:00:00Z",
+        "run_started_at": "2026-10-05T16:00:00Z",
+        "run_attempt": 1,
+        "html_url": "https://github.com/bpalermo/aether/actions/runs/37000000009",
+        "head_repository": {
+          "full_name": "bpalermo/aether"
+        },
+        "repository": {
+          "full_name": "bpalermo/aether"
+        }
+      }
+    ]
+  }
+}

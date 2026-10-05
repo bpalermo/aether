@@ -736,6 +736,7 @@ jobs:
     needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, l4-routes, eastwest-quic]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       issues: write
