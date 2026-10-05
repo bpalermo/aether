@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -294,10 +295,13 @@ func TestPoolFallbackWhenAllSlotsBusy(t *testing.T) {
 func TestPooledConnRecycledAfterUpstreamRestart(t *testing.T) {
 	seen := &portRecorder{}
 
-	// The first upstream binds a kernel-chosen port and keeps the socket (#1199); the
-	// restart below has to reuse that port, so only it binds by address.
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	require.NoError(t, err)
+	// The first upstream binds a kernel-chosen port and keeps the socket (#1199). The
+	// restart below has to come back on that SAME port, and the port must never be free
+	// in between: another process took it in 2 of 80 runs of the #1237 stress
+	// (`bind: address already in use` on the restart). So the port is held by a
+	// placeholder for as long as the upstream is down (holdUDPPort), and every socket
+	// on it sets SO_REUSEPORT so the restart can join before the placeholder leaves.
+	pc := listenUDPReusePort(t, "127.0.0.1:0")
 	addr := pc.LocalAddr().String()
 	first := &dns.Server{PacketConn: pc, Handler: echoUpstream(seen)}
 	serveUpstream(t, first)
@@ -310,19 +314,47 @@ func TestPooledConnRecycledAfterUpstreamRestart(t *testing.T) {
 	require.Equal(t, 1, seen.distinct(), "one pooled socket so far")
 	before := seen.at(0)
 
+	placeholder := holdUDPPort(t, addr)
 	require.NoError(t, first.Shutdown())
 
-	// The dead upstream fails fast (ICMP port-unreachable on a connected socket), well
-	// inside the 2s forward timeout, and the reply is a non-authoritative SERVFAIL.
-	start := time.Now()
+	// The outcome, whatever the timing: a query to the dead upstream is a
+	// non-authoritative SERVFAIL, and the pooled socket it failed on is retired (an
+	// error recycle) rather than left in its slot.
 	resp := serve(s, query("google.com", dns.TypeA))
 	require.NotNil(t, resp)
 	assert.Equal(t, dns.RcodeServerFailure, resp.Rcode)
-	assert.Less(t, time.Since(start), forwardTimeout,
-		"a refused upstream must not burn the full forward timeout")
+	require.Positive(t, forwardCounts(t, reader, recyclesMetric)[recycleError],
+		"the failed exchange must retire the pooled socket")
 
-	// Same address comes back: the resolver must recover on the very next query.
-	serveUpstreamOn(t, addr, echoUpstream(seen))
+	// The speed: on a CONNECTED socket the kernel delivers the ICMP port-unreachable as
+	// ECONNREFUSED, so a dead upstream costs next to nothing, not the forward timeout.
+	// One query can still legitimately run into the timeout when the host drops that
+	// ICMP (most likely the host's ICMP rate limit, under 80 parallel race-instrumented
+	// test processes) -- which is how a single-shot "< forwardTimeout" bound flaked at
+	// 2.0007s (#1237). So it gets up to refusedAttempts dead-upstream queries, each on a
+	// freshly dialled pooled socket (the previous one was just retired), and one of them
+	// must come back in under HALF the timeout. A refusal takes microseconds, so that is
+	// all headroom. The check still fails when the pool stops surfacing the refusal:
+	// then EVERY attempt waits out its read deadline, forwardTimeout or more.
+	const refusedAttempts = 3
+	var took []time.Duration
+	for range refusedAttempts {
+		start := time.Now()
+		resp = serve(s, query("google.com", dns.TypeA))
+		took = append(took, time.Since(start))
+		require.NotNil(t, resp)
+		assert.Equal(t, dns.RcodeServerFailure, resp.Rcode)
+		if took[len(took)-1] < forwardTimeout/2 {
+			break
+		}
+	}
+	assert.Less(t, slices.Min(took), forwardTimeout/2,
+		"a refused upstream must not burn the forward timeout (attempts took %v)", took)
+
+	// Same address comes back: the resolver must recover on the very next query. The
+	// restart joins the placeholder's port before the placeholder lets go of it.
+	serveUpstream(t, &dns.Server{PacketConn: listenUDPReusePort(t, addr), Handler: echoUpstream(seen)})
+	require.NoError(t, placeholder.Close())
 	resp = serve(s, query("google.com", dns.TypeA))
 	require.NotNil(t, resp)
 	assert.Equal(t, dns.RcodeSuccess, resp.Rcode, "the resolver recovers without a restart")
@@ -470,15 +502,31 @@ func poolServer(t *testing.T, addr string) *Server {
 	return s
 }
 
-// serveUpstreamOn binds a UDP test upstream on a FIXED address and returns the server so
-// the test can shut it down mid-run (the upstream-restart case). Unlike startUpstream it
-// does not pick the port, because the restart has to land on the same one. Losing that
-// port to another process in the gap fails at once with the bind error.
-func serveUpstreamOn(t *testing.T, addr string, h dns.HandlerFunc) *dns.Server {
+// listenUDPReusePort binds a UDP socket on addr (port 0: kernel-chosen) with
+// SO_REUSEPORT, so the upstream-restart test can put several sockets on one port.
+func listenUDPReusePort(t *testing.T, addr string) net.PacketConn {
 	t.Helper()
-	srv := &dns.Server{Addr: addr, Net: "udp", Handler: h}
-	serveUpstream(t, srv)
-	return srv
+	lc := net.ListenConfig{Control: reusePortControl}
+	pc, err := lc.ListenPacket(context.Background(), "udp", addr)
+	require.NoError(t, err)
+	return pc
+}
+
+// holdUDPPort keeps addr's port bound while the test upstream on it is down, WITHOUT
+// receiving anything sent to it. The placeholder is a UDP socket CONNECTED to the
+// discard port: the kernel delivers only datagrams from its peer to a connected socket,
+// so a query from the resolver finds no socket and still gets the ICMP port-unreachable
+// that a really dead upstream produces, while no other process can bind the port. It
+// sets SO_REUSEPORT, so a restarted upstream can join the port before it is closed.
+func holdUDPPort(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	local, err := net.ResolveUDPAddr("udp", addr)
+	require.NoError(t, err)
+	d := net.Dialer{LocalAddr: local, Control: reusePortControl}
+	c, err := d.Dial("udp", "127.0.0.1:9")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
 }
 
 // withMaxQueries shrinks the per-socket query budget for one test and restores it.

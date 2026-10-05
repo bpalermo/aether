@@ -2,7 +2,6 @@ package meshdns
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -288,11 +287,25 @@ func TestLameDuckHandsOffToACoBoundSuccessor(t *testing.T) {
 		t.Skip("skipping the co-bound handoff test in short mode")
 	}
 	reader := installManualReader(t)
-	addr := reusablePort(t)
 	domain := "aether.internal"
 	records := map[string]string{"default/echo": "10.111.0.6"}
 
-	predecessor, stopPredecessor, predDone := startCoBound(t, domain, addr, "pred", records, 5*time.Second)
+	var (
+		predecessor     *Server
+		stopPredecessor context.CancelFunc
+		predDone        <-chan error
+	)
+	// The predecessor is the first resolver on the shared address, so its bind is the
+	// only one a port lost after freeDNSPort's probe can fail: it alone is retried on a
+	// fresh port (#1236), and a failed attempt's Start has already returned, so it
+	// records no lame-duck exit. The successor then co-binds an address the predecessor
+	// HOLDS, where EADDRINUSE can only mean a broken SO_REUSEPORT, so requireMarker
+	// fails it at once.
+	addr := onFreshDNSAddr(t, func(addr string) error {
+		predecessor, stopPredecessor, predDone = startCoBound(t, domain, addr, "pred", records, 5*time.Second)
+		return startFailure(t, waitStarted(predDone, fileExists(predecessor.readyMarker)),
+			"the predecessor never reported ready on %s", addr)
+	})
 	// The successor gets NO window of its own: it is not the subject here, and a
 	// window would make the test's own teardown wait out its deadline.
 	successor, _, succDone := startCoBound(t, domain, addr, "succ", records, 0)
@@ -461,16 +474,6 @@ func lameDuckSeriesOf(t *testing.T, attrs attribute.Set) lameDuckSeries {
 	require.True(t, ok, "every exit must carry its per-generation instance stamp (#736)")
 	require.NotEmpty(t, instance.Emit())
 	return lameDuckSeries{reason: reason.Emit(), instance: instance.Emit()}
-}
-
-// reusablePort picks a loopback port both servers can co-bind. It is chosen by binding
-// and releasing an ephemeral one — the classic small race, and acceptable here because
-// the alternative (a hard-coded port) collides with whatever else runs on the machine.
-// It must be free on TCP as well as UDP. Start binds both, and on a busy runner a port
-// that is free only for UDP can fail the TCP bind (#1177).
-func reusablePort(t *testing.T) string {
-	t.Helper()
-	return fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
 }
 
 // startCoBound launches one resolver on the shared SO_REUSEPORT address and returns it
