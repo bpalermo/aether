@@ -177,9 +177,15 @@ func TestWatchEndpoints_PreSnapshotBatchCannotRegressTheToken(t *testing.T) {
 	}()
 	<-applied
 
-	// C lands and is published in full while B's publication is open.
-	_, err := s.RegisterEndpoint(context.Background(), addReq("ns/c", "10.0.0.3", registryv1.Service_PROTOCOL_HTTP))
-	require.NoError(t, err)
+	// C lands while B's publication is open. Since publications are serialized
+	// (#1239 review, F2) it waits for B instead of overtaking it; before that it
+	// was published in full here. Either way the watch below must end on the
+	// snapshot's version.
+	publishedC := make(chan error, 1)
+	go func() {
+		_, err := s.RegisterEndpoint(context.Background(), addReq("ns/c", "10.0.0.3", registryv1.Service_PROTOCOL_HTTP))
+		publishedC <- err
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -193,6 +199,7 @@ func TestWatchEndpoints_PreSnapshotBatchCannotRegressTheToken(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	close(release)
 	<-publishedB
+	require.NoError(t, <-publishedC)
 
 	require.Eventually(t, func() bool {
 		for _, e := range stream.received() {

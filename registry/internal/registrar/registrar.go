@@ -123,6 +123,12 @@ type RegistrarRegistry struct {
 	// the stream's filter at SNAPSHOT_COMPLETE, emptied when a resend clears
 	// the cache.
 	held map[string]struct{}
+	// streamComplete is the set of services the current stream can still
+	// deliver whole (nil = every service): its filter at the open, less every
+	// service the filter has dropped since, whose entries were purged and whose
+	// earlier events are gone even if it comes back. completeStart holds only
+	// these (#1239 review, F1).
+	streamComplete map[string]struct{}
 
 	// wake cuts short the retry sleep between watch-stream attempts. Buffered
 	// with capacity 1 and written non-blocking, so a signal raised while the
@@ -267,6 +273,7 @@ func (r *RegistrarRegistry) SetServiceFilter(services []string) {
 	r.mu.Lock()
 	r.scope = scope
 	r.held = intersect(r.held, scope)
+	r.streamComplete = intersect(r.streamComplete, scope)
 	r.purgeExceptLocked(scope)
 	r.mu.Unlock()
 	r.filterMu.Unlock()
@@ -392,6 +399,9 @@ func (r *RegistrarRegistry) resumeFor(filter map[string]struct{}, token string) 
 	open := streamOpen{filter: filter, noToken: true}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Everything this stream is about to deliver starts from here: a purge
+	// before this point cannot have cost it an event.
+	r.streamComplete = filter
 	if token == "" {
 		r.held = make(map[string]struct{})
 		return open
@@ -1102,21 +1112,67 @@ func (r *RegistrarRegistry) consumeStream(ctx context.Context, stream registrarv
 
 // completeStart settles the cache at the SNAPSHOT_COMPLETE that ends a
 // stream's initial exchange: from here the cache holds the marker's version for
-// every service of the stream's filter that is still in scope.
+// every service the stream could deliver whole (streamComplete) that is still
+// in scope.
+//
+// Not the stream's whole filter: a service the filter dropped while this
+// exchange was being read was purged, and a stream keeps delivering after the
+// cancellation that drop caused, so if the service came back before the marker
+// the cache holds only the events after the purge. It is not held, and the next
+// stream asks for it again (#1239 review, F1).
 //
 // A full resend clears the cache at its first FULL_SNAPSHOT event, so a resend
 // with nothing in the filter clears nothing and would leave stale endpoints
-// standing under the new token. A stream opened without a token is always
-// resent unless the marker says it was extended, so its cache is cleared here
-// when no FULL_SNAPSHOT came. (A stream that presented last_version cannot tell
-// an empty resend from a renamed resume; that hole predates #1239.)
+// standing under the new token: it is cleared here instead (emptyResend).
 func (r *RegistrarRegistry) completeStart(open streamOpen, marker *registrarv1.WatchEndpointsResponse, snapshotCleared bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if open.noToken && !marker.GetExtended() && !snapshotCleared {
+	if !snapshotCleared && emptyResend(open, marker) {
 		r.cache = make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint)
 	}
-	r.held = intersect(open.filter, r.scope)
+	r.held = intersect(r.streamComplete, r.scope)
+}
+
+// emptyResend reports whether an initial exchange that carried no FULL_SNAPSHOT
+// was nevertheless a full resend -- of a filter with no endpoints at all -- as
+// told by its marker:
+//
+//   - extended: not a resend (the registrar honoured partial_resume);
+//   - no token presented: always a resend, from every registrar version;
+//   - the marker names the presented token: current;
+//   - the marker's content hash equals the token's: renamed (the registrar
+//     answers "renamed" only on equal hashes);
+//   - anything else: the registrar resent, because the token named other
+//     contents (#1239 review, P2). That includes a token or a marker without a
+//     content hash, which only a registrar older than #1193 sends, and which
+//     resumes only on an identical version.
+func emptyResend(open streamOpen, marker *registrarv1.WatchEndpointsResponse) bool {
+	switch {
+	case marker.GetExtended():
+		return false
+	case open.noToken:
+		return true
+	case marker.GetVersion() == open.lastVersion:
+		return false
+	}
+	tokenHash, ok := versionContentHash(open.lastVersion)
+	markerHash, markerOK := versionContentHash(marker.GetVersion())
+	return !ok || !markerOK || tokenHash != markerHash
+}
+
+// versionContentHash returns the content hash a registrar version embeds: the
+// part after "hash:", or after the "." / "+" that follows the store revision
+// (registrar/internal/server's version format, #1193). A pre-#1193 counter
+// version embeds none.
+func versionContentHash(version string) (string, bool) {
+	if h, ok := strings.CutPrefix(version, "hash:"); ok {
+		return h, h != ""
+	}
+	if i := strings.IndexAny(version, ".+"); i >= 0 {
+		h := version[i+1:]
+		return h, h != ""
+	}
+	return "", false
 }
 
 // handleStreamError classifies a stream.Recv error and returns the appropriate

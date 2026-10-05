@@ -2773,8 +2773,14 @@ Notes:
     current contents, and `resent` otherwise. One that predates it sees no token
     and resends: a one-release skew in either direction is safe, it only costs
     the resend.
-  - A service that leaves and re-enters the set while one stream is open is not
-    held (its endpoints were purged when it left), so it is re-requested.
+  - A service that leaves and re-enters the set while one stream is open,
+    including while its initial exchange is still arriving, is not held (its
+    endpoints were purged when it left, and the stream keeps delivering only
+    what came after), so it is re-requested.
+  - A resend of a filter with no endpoints carries no `FULL_SNAPSHOT` to clear
+    the cache with. The agent clears it at the marker when the marker's content
+    hash differs from the token it presented (`renamed` always has an equal
+    hash), or when it presented none.
   `resent` therefore still counts every agent and registrar restart and every
   stale token (a change landed while the stream was being re-opened), and on a
   registrar older than #1239 every growth. A `resent` step on every node at
@@ -2786,6 +2792,13 @@ Notes:
   older than #1204 keep the old token across a cut resend, so until the agent
   DaemonSet has rolled they are exposed to an empty cache on a reconnect that
   matches it. The window is milliseconds per reconnect.
+- Publications (an RPC's or a sync's snapshot change plus its broadcast) are
+  serialized: every watcher receives batches in the order they changed the
+  snapshot, each one contiguous. Before the #1239 review they ran concurrently,
+  and two on one endpoint (a register and an unregister, or two agents
+  registering it during a surge roll) could reach a watcher in reverse, leaving
+  it holding the endpoint under an older version (healed only by a resend on its
+  next reconnect).
 
 ### `504 UT` after exactly 15 s over an h2 mesh cluster to a terminating pod (#1104)
 

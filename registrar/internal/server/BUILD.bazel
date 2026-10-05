@@ -37,6 +37,7 @@ go_test(
         "logattr_test.go",
         "metrics_test.go",
         "partial_resume_test.go",
+        "publish_order_test.go",
         "replica_drain_test.go",
         "replica_overlay_test.go",
         "resume_test.go",

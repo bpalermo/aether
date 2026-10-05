@@ -34,17 +34,28 @@ type watcher struct {
 // fresh (filtered) snapshot — it must never silently miss an event and serve
 // stale endpoints until something else triggers a resync.
 type Broadcaster struct {
-	// publishMu orders publications against watch starts (#1205). A
-	// publication -- a snapshot mutation and the broadcast of the batch it
-	// produced -- holds it for reading, so publications still run concurrently
-	// with each other. A watch start -- Subscribe plus the snapshot read --
-	// holds it for writing. Every batch is therefore either wholly before a
-	// watch start (in the snapshot it reads, and broadcast before the watcher
-	// existed) or wholly after it (absent from that snapshot, and buffered on
-	// the watcher's channel): never in the snapshot AND on the channel, whose
-	// batch version would then name contents older than the snapshot's.
-	// Acquired before mu, never while holding it.
-	publishMu sync.RWMutex
+	// publishMu serializes publications with each other and with watch starts
+	// (#1205, #1239 review). A publication -- a snapshot mutation and the
+	// broadcast of the batch it produced -- and a watch start -- Subscribe plus
+	// the snapshot read -- each hold it exclusively.
+	//
+	// Against watch starts: every batch is either wholly before a watch start
+	// (in the snapshot it reads, and broadcast before the watcher existed) or
+	// wholly after it (absent from that snapshot, and buffered on the watcher's
+	// channel): never in the snapshot AND on the channel, whose batch version
+	// would then name contents older than the snapshot's.
+	//
+	// Against each other: batches reach every channel in the order they mutated
+	// the snapshot, and each batch contiguously. Held only for reading, two
+	// publications interleaved -- P1 mutates, P2 mutates and broadcasts, P1
+	// broadcasts -- so a watcher received REMOVED x (v2) then ADDED x (v1) and
+	// kept x under v1 while the snapshot had dropped it, or had one batch's
+	// unversioned events land after the other's versioned last event (#1203).
+	// Publications are an in-memory mutation and non-blocking channel sends,
+	// so serializing them costs nothing that matters.
+	//
+	// Lock order: publishMu, then Snapshot.mu or mu (never both at once).
+	publishMu sync.Mutex
 
 	mu       sync.RWMutex
 	watchers map[string]*watcher
@@ -121,9 +132,10 @@ func (b *Broadcaster) SubscribeWith(id string, services []string, start func()) 
 // mutation whose events are broadcast must go through Publish, or a watch
 // starting between the mutation and its broadcast receives the batch twice:
 // once in its snapshot and once, carrying an older version, after it.
+// Publications are serialized (see publishMu); mutate must not publish.
 func (b *Broadcaster) Publish(mutate func() []*registrarv1.WatchEndpointsResponse) {
-	b.publishMu.RLock()
-	defer b.publishMu.RUnlock()
+	b.publishMu.Lock()
+	defer b.publishMu.Unlock()
 	if events := mutate(); len(events) > 0 {
 		b.Broadcast(events)
 	}
