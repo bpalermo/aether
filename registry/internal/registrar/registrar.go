@@ -20,6 +20,7 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/serviceref"
+	"aethermesh.dev/common/snapshotversion"
 	"aethermesh.dev/common/spire"
 	"aethermesh.dev/common/telemetry"
 	"go.opentelemetry.io/otel"
@@ -1172,33 +1173,17 @@ func (r *RegistrarRegistry) completeStart(open streamOpen, marker *registrarv1.W
 //     contents (#1239 review, P2). That includes a token or a marker without a
 //     content hash, which only a registrar older than #1193 sends, and which
 //     resumes only on an identical version.
+//
+// The comparison is snapshotversion.Compare, the one the registrar classifies
+// the token with, so "renamed" here and there cannot disagree (#1272).
 func emptyResend(open streamOpen, marker *registrarv1.WatchEndpointsResponse) bool {
 	switch {
 	case marker.GetExtended():
 		return false
 	case open.noToken:
 		return true
-	case marker.GetVersion() == open.lastVersion:
-		return false
 	}
-	tokenHash, ok := versionContentHash(open.lastVersion)
-	markerHash, markerOK := versionContentHash(marker.GetVersion())
-	return !ok || !markerOK || tokenHash != markerHash
-}
-
-// versionContentHash returns the content hash a registrar version embeds: the
-// part after "hash:", or after the "." / "+" that follows the store revision
-// (registrar/internal/server's version format, #1193). A pre-#1193 counter
-// version embeds none.
-func versionContentHash(version string) (string, bool) {
-	if h, ok := strings.CutPrefix(version, "hash:"); ok {
-		return h, h != ""
-	}
-	if i := strings.IndexAny(version, ".+"); i >= 0 {
-		h := version[i+1:]
-		return h, h != ""
-	}
-	return "", false
+	return snapshotversion.Compare(open.lastVersion, marker.GetVersion()) == snapshotversion.Different
 }
 
 // handleStreamError classifies a stream.Recv error and returns the appropriate

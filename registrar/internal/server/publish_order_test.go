@@ -11,6 +11,7 @@ import (
 
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/snapshotversion"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,7 +98,7 @@ func (c *appliedCache) apply(e *registrarv1.WatchEndpointsResponse) {
 	c.token = e.GetVersion()
 	held := NewSnapshot()
 	held.DiffAndReplace(c.listing())
-	want, _ := versionContentHash(e.GetVersion())
+	want, _ := snapshotversion.ContentHash(e.GetVersion())
 	c.checked++
 	assert.Equal(c.t, want, held.State().ContentHash,
 		"version %s reached a cache that does not hold its contents (#1203)", e.GetVersion())

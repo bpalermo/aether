@@ -13,6 +13,7 @@ go_library(
         "//api/aether/registry/v1:registry",
         "//common/log",
         "//common/serviceref",
+        "//common/snapshotversion",
         "//common/spire",
         "//common/telemetry",
         "@io_opentelemetry_go_otel//:otel",
