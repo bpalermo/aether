@@ -116,50 +116,11 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		// Deletion already requested (CNI CHECK re-add, or ADD racing a delete):
 		// keep storage/xDS for drain, but never (re-)register the endpoint.
 		log.DebugContext(ctx, "pod is terminating; skipping endpoint registration")
-	} else {
-		serviceName, protocols, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cniPod)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to build endpoint: %v", err)
-		}
-		// Delegated liveness (EDS mode): a brand-new endpoint enters the registry
-		// UNHEALTHY — clients must not route to it until this node's proxy has
-		// seen the app pass its health check, at which point the liveness loop
-		// promotes it. A re-add of a known pod keeps the registration default
-		// (HEALTHY) so a CHECK can't yank a serving endpoint out of rotation.
-		if fresh && sEndpoint.GetHealthCheckMode() == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
-			sEndpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
-		}
-		// Registry unavailability must not block pod creation node-wide (a
-		// failed ADD fails the sandbox): the pod is already stored, so the
-		// reconciliation sweep registers it as soon as the registry answers.
-		regCtx, regSpan := startStepSpan(ctx, "cni_server.register_endpoint", cniPod)
-		// One registration per L4 class the pod's ports declare (proposal 037).
-		// A single-protocol pod -- every pod written before that proposal --
-		// loops once, so this is the pre-037 path unchanged. A pod serving both
-		// must appear under both keys; a partial registration leaves one
-		// listing without it, which surfaces as a cluster with no hosts rather
-		// than as an error.
-		err = s.registerUnderAll(regCtx, serviceName, protocols, sEndpoint)
-		telemetry.EndSpan(regSpan, err)
-		if err != nil {
-			log.ErrorContext(ctx, "failed to register endpoint; reconciliation sweep will retry",
-				"error", err, "service", serviceName)
-		}
+	} else if err := s.registerAddedPod(ctx, log, cniPod, fresh); err != nil {
+		return nil, err
 	}
 
-	// Subscribe to the pod's SVID via the SPIFFE Broker API, referencing the pod
-	// by namespace/name AND UID. SPIRE resolves and attests the pod itself, so no
-	// container PID is needed and every selector its Kubernetes attestor can
-	// produce (labels, image, sigstore) is usable in the registration entry. The
-	// reference resolves at request time, so this ADD can beat the pod into the
-	// kubelet's list — SubscribePod never blocks on the broker and retries.
-	if s.spireBridge != nil {
-		spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
-		ref := spire.PodRef{Namespace: cniPod.GetNamespace(), Name: cniPod.GetName(), UID: podUID}
-		if err = s.spireBridge.SubscribePod(cniPod.GetNetworkNamespace(), spiffeID, ref); err != nil {
-			log.ErrorContext(ctx, "failed to subscribe to SVID", "error", err, "spiffeID", spiffeID)
-		}
-	}
+	s.subscribePodSVID(ctx, log, cniPod, podUID)
 
 	// Update the xDS listener snapshot with the new pod
 	xdsCtx, xdsSpan := startStepSpan(ctx, "cni_server.xds_add_pod", cniPod)
@@ -169,8 +130,73 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, status.Errorf(codes.Internal, "failed to add listener: %v", err)
 	}
 
-	// Best-effort: wait for Envoy to ACK the listener configuration. A NACK
-	// (bad config, failed netns bind) surfaces here with Envoy's error detail.
+	s.waitListenerAdded(ctx, log, cniPod)
+
+	return &cniv1.AddPodResponse{
+		Result: cniv1.AddPodResponse_RESULT_SUCCESS,
+	}, nil
+}
+
+// registerAddedPod registers a just-stored, non-terminating pod's endpoint in
+// the service registry, once per L4 class its ports declare. fresh reports
+// whether this is a new CNI ADD (vs an idempotent re-add) and selects the
+// initial health of an EDS-mode endpoint. The returned error is a gRPC status
+// for the one fatal case (the endpoint cannot be built); a registry failure is
+// logged and left to the reconciliation sweep, never returned.
+func (s *CNIServer) registerAddedPod(ctx context.Context, log *slog.Logger, cniPod *cniv1.CNIPod, fresh bool) error {
+	serviceName, protocols, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cniPod)
+	if err != nil {
+		return status.Errorf(codes.Internal, "failed to build endpoint: %v", err)
+	}
+	// Delegated liveness (EDS mode): a brand-new endpoint enters the registry
+	// UNHEALTHY — clients must not route to it until this node's proxy has
+	// seen the app pass its health check, at which point the liveness loop
+	// promotes it. A re-add of a known pod keeps the registration default
+	// (HEALTHY) so a CHECK can't yank a serving endpoint out of rotation.
+	if fresh && sEndpoint.GetHealthCheckMode() == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
+		sEndpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+	}
+	// Registry unavailability must not block pod creation node-wide (a
+	// failed ADD fails the sandbox): the pod is already stored, so the
+	// reconciliation sweep registers it as soon as the registry answers.
+	regCtx, regSpan := startStepSpan(ctx, "cni_server.register_endpoint", cniPod)
+	// One registration per L4 class the pod's ports declare (proposal 037).
+	// A single-protocol pod -- every pod written before that proposal --
+	// loops once, so this is the pre-037 path unchanged. A pod serving both
+	// must appear under both keys; a partial registration leaves one
+	// listing without it, which surfaces as a cluster with no hosts rather
+	// than as an error.
+	err = s.registerUnderAll(regCtx, serviceName, protocols, sEndpoint)
+	telemetry.EndSpan(regSpan, err)
+	if err != nil {
+		log.ErrorContext(ctx, "failed to register endpoint; reconciliation sweep will retry",
+			"error", err, "service", serviceName)
+	}
+	return nil
+}
+
+// subscribePodSVID subscribes to the pod's SVID via the SPIFFE Broker API,
+// referencing the pod by namespace/name AND UID. SPIRE resolves and attests the
+// pod itself, so no container PID is needed and every selector its Kubernetes
+// attestor can produce (labels, image, sigstore) is usable in the registration
+// entry. The reference resolves at request time, so this ADD can beat the pod
+// into the kubelet's list — SubscribePod never blocks on the broker and
+// retries. Best-effort: a failure is logged. No-op without a SPIRE bridge.
+func (s *CNIServer) subscribePodSVID(ctx context.Context, log *slog.Logger, cniPod *cniv1.CNIPod, podUID string) {
+	if s.spireBridge == nil {
+		return
+	}
+	spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
+	ref := spire.PodRef{Namespace: cniPod.GetNamespace(), Name: cniPod.GetName(), UID: podUID}
+	if err := s.spireBridge.SubscribePod(cniPod.GetNetworkNamespace(), spiffeID, ref); err != nil {
+		log.ErrorContext(ctx, "failed to subscribe to SVID", "error", err, "spiffeID", spiffeID)
+	}
+}
+
+// waitListenerAdded is the best-effort wait, bounded by envoyAckTimeout, for
+// Envoy to ACK the pod's outbound listener. A NACK (bad config, failed netns
+// bind) surfaces here with Envoy's error detail and is logged at DEBUG.
+func (s *CNIServer) waitListenerAdded(ctx context.Context, log *slog.Logger, cniPod *cniv1.CNIPod) {
 	ackCtx, ackCancel := context.WithTimeout(ctx, envoyAckTimeout)
 	defer ackCancel()
 	waitCtx, waitSpan := startStepSpan(ackCtx, "cni_server.envoy_ack_wait", cniPod)
@@ -179,10 +205,6 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	if waitErr != nil {
 		log.DebugContext(ctx, "envoy did not ack listener", "listener", proxy.OutboundListenerName(cniPod), "error", waitErr)
 	}
-
-	return &cniv1.AddPodResponse{
-		Result: cniv1.AddPodResponse_RESULT_SUCCESS,
-	}, nil
 }
 
 // RemovePod handles CNI DEL requests for a pod.
@@ -242,37 +264,11 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
 	}
 
-	// Remove the per-pod listeners (best-effort): on failure the next snapshot
-	// rebuild — or an agent restart's load from the now-empty storage — drops them.
-	xdsCtx, xdsSpan := startStepSpan(bgCtx, "cni_server.xds_remove_pod", storedPod)
-	xdsErr := s.snapshotCache.RemovePod(xdsCtx, storedPod.GetNetworkNamespace())
-	telemetry.EndSpan(xdsSpan, xdsErr)
-	if xdsErr != nil {
-		log.ErrorContext(ctx, "failed to remove listener; snapshot rebuild will reconcile", "error", xdsErr, "netns", storedPod.GetNetworkNamespace())
-	}
-
-	// Deregister the endpoint (best-effort): the ghost sweep deregisters any
-	// endpoint with no live local pod, so a failure here (registrar rolling,
-	// shutdown) self-heals on the next sweep. Bounded so it can't hang the DEL.
-	if serviceName, ips, extractErr := registry.ExtractCNIPodInformation(storedPod); extractErr != nil {
-		log.ErrorContext(ctx, "failed to extract endpoint info; ghost sweep will reconcile", "error", extractErr)
-	} else {
-		unregCtx, unregCancel := context.WithTimeout(bgCtx, unregisterTimeout)
-		unregSpanCtx, unregSpan := startStepSpan(unregCtx, "cni_server.unregister_endpoints", storedPod)
-		unregErr := s.registry.UnregisterEndpoints(unregSpanCtx, serviceName, ips)
-		telemetry.EndSpan(unregSpan, unregErr)
-		unregCancel()
-		if unregErr != nil {
-			log.ErrorContext(ctx, "failed to unregister endpoints; ghost sweep will retry", "error", unregErr, "service", serviceName)
-		}
-	}
-
-	// Unsubscribe from SVID for this pod (best-effort; keyed by its netns).
-	if s.spireBridge != nil {
-		if unsubErr := s.spireBridge.UnsubscribePod(bgCtx, storedPod.GetNetworkNamespace()); unsubErr != nil {
-			log.ErrorContext(ctx, "failed to unsubscribe from SVID", "error", unsubErr, "netns", storedPod.GetNetworkNamespace())
-		}
-	}
+	// The remaining steps are best-effort (logged, never fatal), in this order:
+	// listeners, registry, SVID subscription.
+	s.removePodListeners(ctx, bgCtx, log, storedPod)
+	s.unregisterRemovedPod(ctx, bgCtx, log, storedPod)
+	s.unsubscribePodSVID(ctx, bgCtx, log, storedPod)
 	s.lifecycleMu.Unlock()
 
 	// The one line a served CNI DEL leaves. Without it a successful removal showed
@@ -281,10 +277,65 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	// snapshot timestamps (#799).
 	log.InfoContext(ctx, "pod removed: CNI DEL served", "netns", storedPod.GetNetworkNamespace(), "containerID", containerId)
 
-	// Best-effort: wait for Envoy to ACK removal of both per-pod listeners —
-	// the inbound listener also binds (and dials) inside the pod netns, so
-	// netns teardown must not race either of them. Uses the request ctx so it
-	// short-circuits on shutdown (the durable work above is already done).
+	s.waitListenersRemoved(ctx, log, storedPod)
+
+	return &cniv1.RemovePodResponse{
+		Result: cniv1.RemovePodResponse_RESULT_SUCCESS,
+	}, nil
+}
+
+// removePodListeners removes the per-pod listeners (best-effort): on failure
+// the next snapshot rebuild — or an agent restart's load from the now-empty
+// storage — drops them. opCtx carries the work (detached from cancellation by
+// the caller); logCtx carries the request's log/trace context.
+func (s *CNIServer) removePodListeners(logCtx, opCtx context.Context, log *slog.Logger, storedPod *cniv1.CNIPod) {
+	xdsCtx, xdsSpan := startStepSpan(opCtx, "cni_server.xds_remove_pod", storedPod)
+	xdsErr := s.snapshotCache.RemovePod(xdsCtx, storedPod.GetNetworkNamespace())
+	telemetry.EndSpan(xdsSpan, xdsErr)
+	if xdsErr != nil {
+		log.ErrorContext(logCtx, "failed to remove listener; snapshot rebuild will reconcile", "error", xdsErr, "netns", storedPod.GetNetworkNamespace())
+	}
+}
+
+// unregisterRemovedPod deregisters the pod's endpoint (best-effort): the ghost
+// sweep deregisters any endpoint with no live local pod, so a failure here
+// (registrar rolling, shutdown) self-heals on the next sweep. Bounded by
+// unregisterTimeout so it can't hang the DEL. opCtx carries the work; logCtx
+// carries the request's log/trace context.
+func (s *CNIServer) unregisterRemovedPod(logCtx, opCtx context.Context, log *slog.Logger, storedPod *cniv1.CNIPod) {
+	serviceName, ips, extractErr := registry.ExtractCNIPodInformation(storedPod)
+	if extractErr != nil {
+		log.ErrorContext(logCtx, "failed to extract endpoint info; ghost sweep will reconcile", "error", extractErr)
+		return
+	}
+	unregCtx, unregCancel := context.WithTimeout(opCtx, unregisterTimeout)
+	unregSpanCtx, unregSpan := startStepSpan(unregCtx, "cni_server.unregister_endpoints", storedPod)
+	unregErr := s.registry.UnregisterEndpoints(unregSpanCtx, serviceName, ips)
+	telemetry.EndSpan(unregSpan, unregErr)
+	unregCancel()
+	if unregErr != nil {
+		log.ErrorContext(logCtx, "failed to unregister endpoints; ghost sweep will retry", "error", unregErr, "service", serviceName)
+	}
+}
+
+// unsubscribePodSVID drops the pod's SVID subscription (best-effort; keyed by
+// its netns). No-op without a SPIRE bridge. opCtx carries the work; logCtx
+// carries the request's log/trace context.
+func (s *CNIServer) unsubscribePodSVID(logCtx, opCtx context.Context, log *slog.Logger, storedPod *cniv1.CNIPod) {
+	if s.spireBridge == nil {
+		return
+	}
+	if unsubErr := s.spireBridge.UnsubscribePod(opCtx, storedPod.GetNetworkNamespace()); unsubErr != nil {
+		log.ErrorContext(logCtx, "failed to unsubscribe from SVID", "error", unsubErr, "netns", storedPod.GetNetworkNamespace())
+	}
+}
+
+// waitListenersRemoved is the best-effort wait, bounded by envoyAckTimeout, for
+// Envoy to ACK removal of both per-pod listeners — the inbound listener also
+// binds (and dials) inside the pod netns, so netns teardown must not race
+// either of them. Takes the request ctx so it short-circuits on shutdown (the
+// durable work is already done by the time it runs).
+func (s *CNIServer) waitListenersRemoved(ctx context.Context, log *slog.Logger, storedPod *cniv1.CNIPod) {
 	ackCtx, ackCancel := context.WithTimeout(ctx, envoyAckTimeout)
 	defer ackCancel()
 	waitCtx, waitSpan := startStepSpan(ackCtx, "cni_server.envoy_ack_wait", storedPod)
@@ -296,10 +347,6 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	if waitErr != nil {
 		log.DebugContext(ctx, "envoy did not ack listener removal", "netns", storedPod.GetNetworkNamespace(), "error", waitErr)
 	}
-
-	return &cniv1.RemovePodResponse{
-		Result: cniv1.RemovePodResponse_RESULT_SUCCESS,
-	}, nil
 }
 
 // enhanceCNIPod enriches a CNIPod with annotations and labels retrieved from the Kubernetes API server.
