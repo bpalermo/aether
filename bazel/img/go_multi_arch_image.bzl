@@ -1,3 +1,5 @@
+"""go_multi_arch_image: a Go binary as a multi-arch (amd64/arm64) distroless image."""
+
 load("@aether_registry//:registry.bzl", "IMAGE_REGISTRY")
 load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@container_structure_test//:defs.bzl", "container_structure_test")
@@ -41,14 +43,17 @@ def go_multi_arch_image(name, binary, repository, registry = IMAGE_REGISTRY, bas
     correct, self-verifying IDs and `bazel run`/`bazel test` behaviour is
     unchanged.
 
-    Parameters:
-        name:  name of the image
-        binary:  go binary
+    Args:
+        name: name of the image
+        binary: go binary
         repository: image repository, from registry.bzl's image_repository()
         registry: image registry host (registry.bzl's IMAGE_REGISTRY; proposal
           040 -- do not pass a literal)
         base: base image
-        tars: additional image layers
+        container_test_configs: container-structure-test configs run against
+          the image (`:image_test`)
+        tars_layer: optional dict of in-image path -> binary label, shipped as
+          one extra layer (each binary is content-build-ID'd like the main one)
         extra_labels: image-specific OCI config labels merged on top of the
           shared provenance set (which callers cannot drop).
     """
