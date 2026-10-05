@@ -20,10 +20,13 @@
 # run is never cancelled. The rules, and why each one is there, are in
 # scripts/stuck-runs.sh; //scripts:stuck_runs_test pins them on canned API JSON.
 #
-# Dispatch with dry_run=true to see what it would do without cancelling or
-# writing anything:
+# A dispatch is a dry run unless dry_run=false: it lists what it would cancel
+# and the issue it would write, and writes nothing:
 #
-#   gh workflow run stuck-runs.yaml -f dry_run=true
+#   gh workflow run stuck-runs.yaml
+#
+# A pull request that changes the watchdog runs it as a dry run too, against the
+# live run list, so a change is exercised on real API data before it can act.
 name: stuck-runs
 
 on:
@@ -31,6 +34,11 @@ on:
     # Every 30 minutes, off the hour and off the other crons (e2e 04:17,
     # publish-verify :23).
     - cron: "7,37 * * * *"
+  pull_request:
+    branches: [main, "upgrade/**"]
+    paths:
+      - .github/workflows/stuck-runs.yaml
+      - scripts/stuck-runs.sh
   workflow_dispatch:
     inputs:
       dry_run:
@@ -46,9 +54,10 @@ permissions:
   contents: read
 
 # A newer tick supersedes an older one; this workflow writes nothing a half-run
-# could leave inconsistent (a cancel is idempotent, the issue is re-read).
+# could leave inconsistent (a cancel is idempotent, the issue is re-read). Per
+# ref, so a pull request's dry run never cancels main's scheduled tick.
 concurrency:
-  group: stuck-runs
+  group: stuck-runs-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -70,8 +79,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # Scheduled runs act; a dispatch defaults to a dry run.
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          # Only the schedule acts by default: a pull request is always a dry
+          # run, a dispatch unless dry_run=false.
+          DRY_RUN: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
           STUCK_THRESHOLD_MINUTES: ${{ inputs.threshold_minutes || '60' }}
         run: |
           if [ "$DRY_RUN" = "true" ]; then
