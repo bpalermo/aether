@@ -55,7 +55,16 @@ filegroup(
         ],
         allow_empty = True,
     ),
-    visibility = ["//e2e:__pkg__"],
+    visibility = [
+        "//bazel/actionlint:__pkg__",
+        "//e2e:__pkg__",
+    ],
+)
+
+# actionlint's configuration, for //bazel/actionlint.
+exports_files(
+    [".github/actionlint.yaml"],
+    visibility = ["//bazel/actionlint:__pkg__"],
 )
 
 # gazelle:prefix aethermesh.dev

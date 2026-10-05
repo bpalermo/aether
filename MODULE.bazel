@@ -317,6 +317,40 @@ http_archive(
     urls = ["https://github.com/oras-project/oras/releases/download/v1.3.4/oras_1.3.4_darwin_arm64.tar.gz"],
 )
 
+# actionlint: the GitHub Actions workflow linter, run over .github/ by
+# //bazel/actionlint (the `actionlint` job in ci.yaml, `make actionlint`), with
+# the same ShellCheck the lint aspects use. Official release archives, sha256
+# from actionlint_1.7.12_checksums.txt; //bazel/actionlint:actionlint_test fails
+# until EXPECTED moves with a bump.
+# ACTIONLINT_VERSION = "1.7.12"
+http_archive(
+    name = "actionlint_linux_amd64",
+    build_file_content = 'exports_files(["actionlint"])',
+    sha256 = "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+    urls = ["https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz"],
+)
+
+http_archive(
+    name = "actionlint_linux_arm64",
+    build_file_content = 'exports_files(["actionlint"])',
+    sha256 = "325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6",
+    urls = ["https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_arm64.tar.gz"],
+)
+
+http_archive(
+    name = "actionlint_darwin_amd64",
+    build_file_content = 'exports_files(["actionlint"])',
+    sha256 = "5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644",
+    urls = ["https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_darwin_amd64.tar.gz"],
+)
+
+http_archive(
+    name = "actionlint_darwin_arm64",
+    build_file_content = 'exports_files(["actionlint"])',
+    sha256 = "aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f",
+    urls = ["https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_darwin_arm64.tar.gz"],
+)
+
 pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
 
 pull(
