@@ -102,6 +102,56 @@ helm_template_test(
     },
 )
 
+# #1253: mesh-dns (every managed pod's resolver) has a 50m CPU request and NO
+# CPU limit -- at 25m/100m it was CFS-throttled in 8.7 % of periods at steady
+# state -- and GOMAXPROCS is pinned to 2 (what the Go runtime derived from the
+# old 100m limit) rather than scaling to the node's cores. Positional on the
+# container's resources block, which is followed directly by the pod's
+# `volumes:`; `limits:` carrying only memory proves there is no limits.cpu.
+MESH_DNS_NO_CPU_LIMIT = "resources:\\n\\s+limits:\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 50m\\n\\s+memory: 32Mi\\n\\s+volumes:\\n"
+
+helm_template_test(
+    name = "aether_mesh_dns_cpu_resources_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/mesh-dns-daemonset.yaml": [
+            MESH_DNS_NO_CPU_LIMIT,
+            "- name: GOMAXPROCS\\n\\s+value: \"2\"\\n",
+        ],
+    },
+)
+
+# An EMPTY limits.cpu is "no CPU limit" too: it is dropped, never rendered as
+# `cpu: ""` (which the apiserver rejects as a quantity).
+helm_template_test(
+    name = "aether_mesh_dns_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "agent.meshDnsDaemon.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/mesh-dns-daemonset.yaml": [
+            MESH_DNS_NO_CPU_LIMIT,
+        ],
+    },
+)
+
+# ...and an operator can still put a cap back.
+helm_template_test(
+    name = "aether_mesh_dns_cpu_limit_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "agent.meshDnsDaemon.resources.limits.cpu=200m",
+    ],
+    template_patterns = {
+        "aether/templates/mesh-dns-daemonset.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+cpu: 200m\\n\\s+memory: 64Mi\\n",
+        ],
+    },
+)
+
 # #1123: an agent pod start is time the node's proxy spends on no ADS stream.
 # Both of its images are digest-pinned, so they are pulled IfNotPresent (Always
 # only adds a registry round trip per container), and readiness is probed every

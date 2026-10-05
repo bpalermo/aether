@@ -118,6 +118,13 @@ spec:
             # resource.WithFromEnv(), so both are filterable per node/pod.
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "k8s.node.name=$(NODE_NAME),k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
+            {{- /* #1253: explicit, not derived from limits.cpu -- mesh-dns has no
+                   CPU limit by default (values.yaml agent.meshDnsDaemon.resources).
+                   0/empty omits it so the Go runtime picks GOMAXPROCS itself. */}}
+            {{- with .Values.agent.meshDnsDaemon.goMaxProcs }}
+            - name: GOMAXPROCS
+              value: {{ . | quote }}
+            {{- end }}
           # Pod-local readiness: passes only once THIS process has bound its
           # UDP+TCP listeners (it writes the marker after the sockets are up). With
           # maxSurge:1/maxUnavailable:0 this holds the predecessor pod until the
@@ -183,8 +190,29 @@ spec:
             # Writable scratch for the pod-local ready marker (root fs is read-only).
             - name: run-aether
               mountPath: /run/aether
+          {{- /* #1253: an empty limits.cpu (or requests.cpu) is dropped rather than
+                 rendered as `cpu: ""`, which the apiserver rejects as a quantity,
+                 so `--set agent.meshDnsDaemon.resources.limits.cpu=` means "no CPU
+                 limit" just like leaving the key out. */}}
+          {{- $res := dict }}
+          {{- range $kind, $list := (.Values.agent.meshDnsDaemon.resources | default dict) }}
+          {{- if kindIs "map" $list }}
+          {{- $kept := dict }}
+          {{- range $name, $q := $list }}
+          {{- if not (or (kindIs "invalid" $q) (eq (toString $q) "")) }}
+          {{- $_ := set $kept $name $q }}
+          {{- end }}
+          {{- end }}
+          {{- if $kept }}
+          {{- $_ := set $res $kind $kept }}
+          {{- end }}
+          {{- else if $list }}
+          {{- /* non-map keys (e.g. `claims`) pass through untouched */}}
+          {{- $_ := set $res $kind $list }}
+          {{- end }}
+          {{- end }}
           resources:
-            {{- toYaml .Values.agent.meshDnsDaemon.resources | nindent 12 }}
+            {{- toYaml $res | nindent 12 }}
       volumes:
         - name: cni-registry-dir
           hostPath:
