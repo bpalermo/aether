@@ -1,26 +1,20 @@
 # Machine-managed files: mark as generated so GitHub collapses them in pull
 # request diffs and excludes them from language statistics. They are produced by
-# Gazelle (BUILD files), bzlmod (MODULE.bazel.lock), and go mod (go.sum) rather
-# than edited by hand. MODULE.bazel is intentionally left visible — it is
-# hand-edited, so its changes should stay in review (like go.mod).
+# bzlmod (MODULE.bazel.lock) and go mod (go.sum) rather than edited by hand.
 #
-# rules_lint's format multirun ALSO skips every file marked linguist-generated
-# (as it skips `rules-lint-ignored`), so the root BUILD files are formatted by
-# Gazelle, not by `make format`.
-BUILD.bazel linguist-generated=true
-BUILD linguist-generated=true
-MODULE.bazel.lock linguist-generated=true
-go.sum linguist-generated=true
-
-# The proxy/ tree is a separate Bazel module (its own MODULE.bazel,
-# .bazelversion and registry pins; //.bazelignore excludes it from the root
-# build), but its Starlark and shell are formatted by the ROOT formatter: the
-# format multirun discovers files with `git ls-files`, which ignores
-# .bazelignore, so `make format` / `make format-check` (and the `format` CI
-# jobs) reach proxy/ like any other directory. No Gazelle runs there, so its
-# BUILD files are hand-written, not generated: unmark them, or the multirun
-# would skip them (above) and buildifier would never see them. Lint is
-# scripts/lint-proxy.sh (buildifier lint + ShellCheck), since the lint aspects
-# cannot see past //.bazelignore.
-proxy/**/BUILD.bazel linguist-generated=false
-proxy/**/BUILD linguist-generated=false
+# rules_lint's format multirun (`make format`, `make format-check`, the `format`
+# CI job) SKIPS every file whose `linguist-generated`, `gitlab-generated` or
+# `rules-lint-ignored` attribute is set — so nothing that is meant to be
+# formatted may be marked here. Anchor every pattern with a leading `/` unless
+# it really is meant to match at any depth: a bare `BUILD.bazel` matches the
+# basename in EVERY directory, and that line once hid all 151 BUILD files
+# outside proxy/ from buildifier (#1244).
+#
+# BUILD / BUILD.bazel are deliberately NOT listed. Gazelle writes the Go rules
+# in many of them, but every one also carries hand-written rules, comments,
+# `# keep`s and directives that need review, and buildifier formatting is
+# idempotent on Gazelle's own output, so `make format` is safe over all of them.
+# MODULE.bazel is hand-edited too (like go.mod).
+/MODULE.bazel.lock linguist-generated=true
+/proxy/MODULE.bazel.lock linguist-generated=true
+/go.sum linguist-generated=true
