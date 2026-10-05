@@ -664,11 +664,23 @@ func (c *SnapshotCache) udpClusterForLocked(svc string) string {
 		return ""
 	}
 	// entry.sni carries the backend's registered application port.
-	port, err := strconv.Atoi(entry.sni)
-	if err != nil || port <= 0 || port > 65535 {
+	if _, ok := entryPort(entry.sni); !ok {
 		return ""
 	}
 	return proxy.UDPClusterName(svc, c.meshDomain)
+}
+
+// entryPort parses a cluster entry's sni field (the destination port, rendered
+// by strconv.Itoa at build time) into a port. It parses at 16 bits, so a value
+// outside 1..65535 is REJECTED rather than narrowed: Atoi + uint32() would wrap
+// 2^32+80 to 80 and address the wrong port (CodeQL
+// go/incorrect-integer-conversion, #1220).
+func entryPort(sni string) (uint32, bool) {
+	p, err := strconv.ParseUint(sni, 10, 16)
+	if err != nil || p == 0 {
+		return 0, false
+	}
+	return uint32(p), true
 }
 
 // captureUDPClusters returns the UDP floor clusters for services with UDPRoute
@@ -720,8 +732,13 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 		// has no inbound mTLS hop, so udp_proxy must reach that app port directly (not
 		// the mesh inbound :18008 the shared bare-name EDS carries) — build an inline
 		// app-port UDP load assignment from the service's endpoints.
-		port, _ := strconv.Atoi(entry.sni)
-		la := proxy.UDPLoadAssignment(entry.loadAssignment, udpName, uint32(port))
+		port, ok := entryPort(entry.sni)
+		if !ok {
+			// Unreachable while udpClusterForLocked applies the same parse under
+			// the same lock; kept so a malformed port is skipped, never wrapped.
+			continue
+		}
+		la := proxy.UDPLoadAssignment(entry.loadAssignment, udpName, port)
 		// A published UDP cluster with no routable endpoint is a SILENT
 		// blackhole, and it is the shape #931 shipped in: udp_proxy takes the
 		// datagram, finds an empty healthy set (NewUDPServiceCluster sets
@@ -1470,11 +1487,8 @@ func primaryPortOf(entry clusterEntry) uint32 {
 	if entry.sni == "" {
 		return 0
 	}
-	p, err := strconv.Atoi(entry.sni)
-	if err != nil || p <= 0 || p > 65535 {
-		return 0
-	}
-	return uint32(p)
+	p, _ := entryPort(entry.sni)
+	return p
 }
 
 // tcpPortClustersLocked returns a TCP service's port-qualified clusters:
