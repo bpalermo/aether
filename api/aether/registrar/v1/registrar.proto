@@ -103,6 +103,12 @@ message WatchEndpointsResponse {
     // streamed (or immediately when the client was already up-to-date).
     // Carries the snapshot version; has no service_name/endpoint. Clients use
     // it to know their cache is complete before deriving config from it.
+    //
+    // Also sent after the initial exchange, as a version-only marker (#1241):
+    // the registrar's version moved with nothing for this watcher (a store
+    // revision that changed no contents, or a change outside its filter), and
+    // the watcher's cache holds that version. The client adopts the version
+    // as its resume token; there is nothing to apply.
     EVENT_TYPE_SNAPSHOT_COMPLETE = 5;
 
     // Service-catalog events: a service exists while it has at least one

@@ -211,8 +211,9 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 		resume         Resume
 		extended       bool
 	)
-	ch := s.broadcaster.SubscribeWith(watcherID, filterServices, func() {
+	ch := s.broadcaster.SubscribeWith(watcherID, filterServices, func() string {
 		events, catalog, currentVersion, resume, extended = s.snapshot.WatchStart(token, filterSet, have)
+		return currentVersion
 	})
 	defer s.broadcaster.Unsubscribe(watcherID, ch)
 	s.metrics.watchStarted(stream.Context(), resume, extended)
@@ -249,7 +250,8 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 	}
 
 	// Stream the incremental events buffered since the subscription, then
-	// live ones (fan-out indexed by service).
+	// live ones (fan-out indexed by service), and the version-only markers the
+	// syncer hands out (Broadcaster.MarkVersion, #1241).
 	return streamEvents(stream, ch)
 }
 

@@ -2705,21 +2705,39 @@ The replica-lag line settles at 0 between changes. A short climb during churn
 is the watch-to-sync debounce (200 ms). A replica that stays behind has a
 stalled sync loop: check `aether_registrar_sync_errors_total`.
 
-The agent line is an **upper bound**. An agent learns a revision only from an
-event that reaches it: the last event of a batch it is sent, or the
-`SNAPSHOT_COMPLETE` of a (re)connect. Two kinds of store write move the
-revision without sending it anything, so its gauge stays behind while its cache
-is current:
+The agent line settles to 0 between changes (#1241). An agent learns a revision
+from an event that reaches it: the last event of a batch it is sent, the
+`SNAPSHOT_COMPLETE` of a (re)connect, or a **version marker**. Two kinds of store
+write move the revision without sending an agent any endpoint event:
 
-- a write that changes no contents, such as a re-Put of an identical endpoint;
+- a write that changes no contents: a write-behind flush landing in etcd after
+  the RPC already applied it, a re-Put of an identical endpoint;
 - a change to a service outside a demand-scoped agent's watch filter.
 
-On kind, during one pod churn, both agents sat one revision behind for 11 s with
-identical contents, until the next real change. Read a gap as lag only if it
-persists **while** `aether_registrar_sync_events_total` shows changes the agent
-should have received. An agent that is actually stuck has a broken watch stream:
+At the end of every sync cycle the registrar sends each watch stream that is
+not already at the snapshot's version a version-only `SNAPSHOT_COMPLETE`
+carrying it (`Broadcaster.MarkVersion`). The cycle is the throttle: a burst of
+store writes is one debounced sync (200 ms), and a cycle that moved nothing sends
+nothing. Markers are counted in
+`aether_registrar_broadcast_events_total{aether_event_type="EVENT_TYPE_SNAPSHOT_COMPLETE"}`;
+the sync span carries `aether.sync.version_markers`. A marker is handed out
+under the same rule as a batch's version (#1203): the registrar holds every
+publication off while it sends them, so every batch the version includes is
+already ahead of the marker on the stream.
+
+So a gap that persists past a sync cycle (the poll interval at worst) is lag:
 check `aether_agent_registry_reconnects_total` and `watch_errors_total` on that
-agent.
+agent, and `aether_registrar_broadcast_dropped_events_total` (a full stream skips its
+marker and is retried next cycle; a dropped endpoint event force-resyncs it).
+
+Skew: a registrar older than #1241 sends no markers, and against it the line is
+only an upper bound (on kind, both agents sat one revision behind for 11 s with
+identical contents). An agent older than #1241 handles a marker the way it
+handles any `SNAPSHOT_COMPLETE` after its first: it adopts the version and
+re-derives its xDS from an unchanged cache (one debounced refresh per sync cycle
+that moved the version, until the agent DaemonSet has rolled). Alert on this
+line only once both are on #1241; `content_hash` agreement (below) is alertable
+regardless.
 
 **Divergence rule.** Two replicas reporting the **same**
 `aether_registrar_snapshot_revision`, with no write-behind intent pending

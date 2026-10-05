@@ -1077,12 +1077,19 @@ func (r *RegistrarRegistry) consumeStream(ctx context.Context, stream registrarv
 			return r.handleStreamError(ctx, err, lastVersion)
 		}
 
+		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE && catalogReplay == nil {
+			// A version marker (#1241): the registrar's version moved with
+			// nothing for this cache (a no-op store revision, or a change
+			// outside the filter), and the cache holds it. Adopt it; there is
+			// nothing to apply and nothing to re-derive. A registrar older than
+			// #1241 never sends one.
+			lastVersion = r.adoptVersion(ctx, event, lastVersion)
+			continue
+		}
+
 		// Clear cache before the first FULL_SNAPSHOT event to replace stale data.
 		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT && !snapshotCleared {
-			r.mu.Lock()
-			r.cache = make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint)
-			r.held = make(map[string]struct{})
-			r.mu.Unlock()
+			r.clearForResend()
 			snapshotCleared = true
 			// The cache no longer holds what the old token names. Drop it until
 			// this resend completes (SNAPSHOT_COMPLETE carries the new one): a
@@ -1091,23 +1098,42 @@ func (r *RegistrarRegistry) consumeStream(ctx context.Context, stream registrarv
 			// that reverted -- answers "current" onto an empty cache (#1203).
 			lastVersion = ""
 		}
-		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE && catalogReplay != nil {
+		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE {
 			r.completeStart(open, event, snapshotCleared)
 		}
 
 		r.handleCatalogEvent(ctx, event, &catalogReplay, connectVersion)
 		r.applyEvent(ctx, event)
 
-		// The registrar versions only the points at which this cache holds
-		// everything the version names: SNAPSHOT_COMPLETE and the last event
-		// of each batch it sends us (#1203). Adopting any non-empty version is
-		// therefore safe; an older registrar versions every event, which a
-		// stream cut can turn into a stale skip on reconnect (#1203).
-		if event.GetVersion() != "" {
-			lastVersion = event.GetVersion()
-			r.metrics.versionApplied(ctx, lastVersion)
-		}
+		lastVersion = r.adoptVersion(ctx, event, lastVersion)
 	}
+}
+
+// adoptVersion returns the event's version as the new resume token, or token
+// when the event carries none.
+//
+// The registrar versions only the points at which this cache holds everything
+// the version names: SNAPSHOT_COMPLETE (the initial one, and since #1241 the
+// version markers) and the last event of each batch it sends us (#1203).
+// Adopting any non-empty version is therefore safe; an older registrar versions
+// every event, which a stream cut can turn into a stale skip on reconnect
+// (#1203).
+func (r *RegistrarRegistry) adoptVersion(ctx context.Context, event *registrarv1.WatchEndpointsResponse, token string) string {
+	v := event.GetVersion()
+	if v == "" {
+		return token
+	}
+	r.metrics.versionApplied(ctx, v)
+	return v
+}
+
+// clearForResend empties the cache at the first FULL_SNAPSHOT event of a
+// resend; nothing in it is held at any token any more.
+func (r *RegistrarRegistry) clearForResend() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cache = make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint)
+	r.held = make(map[string]struct{})
 }
 
 // completeStart settles the cache at the SNAPSHOT_COMPLETE that ends a

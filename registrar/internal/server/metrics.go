@@ -90,7 +90,7 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, fmt.Errorf("watchers: %w", err)
 	}
 	if m.broadcastEvents, err = meter.Int64Counter("aether.registrar.broadcast.events",
-		metric.WithDescription("Endpoint events enqueued to agent watch streams")); err != nil {
+		metric.WithDescription("Endpoint events enqueued to agent watch streams; EVENT_TYPE_SNAPSHOT_COMPLETE counts the per-sync version markers (#1241)")); err != nil {
 		return nil, fmt.Errorf("broadcast events: %w", err)
 	}
 	if m.droppedEvents, err = meter.Int64Counter("aether.registrar.broadcast.dropped_events",
