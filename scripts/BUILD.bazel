@@ -56,3 +56,12 @@ exports_files(
     ["image-registry.sh"],
     visibility = ["//bazel/img:__pkg__"],
 )
+
+# publish-verify's superseded-commit decision (workflow_run path): which
+# finished publish runs it skips, and which it must keep verifying.
+sh_test(
+    name = "publish_verify_superseded_test",
+    size = "small",
+    srcs = ["publish_verify_superseded_test.sh"],
+    data = ["publish-verify-superseded.sh"],
+)
