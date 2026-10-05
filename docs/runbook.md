@@ -397,6 +397,24 @@ under a **shared trust domain** (shared upstream CA in `e2e/certs/`):
   over the mirror, lease-lapse failover when a region's registrar dies, and
   recovery (nightly CI: `e2e.yaml` replicator job).
 
+### Bumping the e2e Kubernetes version
+
+Every kind e2e surface runs the **same Kubernetes**: the nightly conformance
+jobs, the per-PR `//test/e2e`, the script-driven nightly suites and a local run
+of any `e2e/*.sh` harness (#1251). [`e2e/kind-version.sh`](../e2e/kind-version.sh)
+is the one place it is set: `KIND_VERSION` (the kind release),
+`KIND_NODE_IMAGE` (a `kindest/node` image from **that release's notes**, with its
+`@sha256` digest — node images are built per kind release) and
+`KUBECTL_VERSION` (the same Kubernetes patch). To bump, change those three, copy
+the node image into `test/e2e/testdata/kind-config.yaml` (the e2e framework
+reads a kind config, not a shell file), and run `bazel test //e2e:kind_pin_test`,
+which fails on any copy that disagrees — a kind config, a workflow's
+`helm/kind-action` value, or a harness that creates a cluster without
+`--image "$KIND_NODE_IMAGE"`. Locally the harnesses refuse a kind binary
+**older** than `KIND_VERSION` (`go install sigs.k8s.io/kind@<KIND_VERSION>`, or
+`KIND_ALLOW_SKEW=1` to try anyway) and only warn about a newer one;
+`KIND_NODE_IMAGE=<image>` overrides the node image for one run.
+
 ---
 
 ## 7. Installing on a real cluster

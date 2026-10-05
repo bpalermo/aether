@@ -929,8 +929,8 @@ jobs:
           # Kubernetes 1.37, kubectl v1.37.0), so a Kubernetes bump stays a
           # separate, visible change. Kubernetes 1.35 = the minor these suites
           # are certified on; the image is the kind v0.33.0 build (the digest is
-          # what selects an image built for that kind release). Keep in sync
-          # with test/e2e/testdata/kind-config.yaml and the other kind steps.
+          # what selects an image built for that kind release). The values are
+          # e2e/kind-version.sh's (#1251); //e2e:kind_pin_test fails on drift.
           # install_only: node_image is unused here; the cluster is created by
           # //test/e2e, whose kind config pins the same node image.
           version: v0.33.0
