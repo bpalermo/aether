@@ -61,9 +61,10 @@ jobs:
   #
   # Every step runs from the repository ROOT (no `working-directory: proxy`):
   # proxy/ is behind //.bazelignore, so the root's lint aspects cannot see it,
-  # and scripts/lint-proxy.sh runs buildifier's linter and ShellCheck on the
-  # files git lists instead; the root formatter (//:format) reaches proxy/
-  # directly, the same `git ls-files` way (see .gitattributes).
+  # and scripts/lint-proxy.sh runs ShellCheck on the files git lists instead;
+  # the root formatter (//:format) reaches proxy/ directly, the same
+  # `git ls-files` way (see .gitattributes), and its check also runs
+  # buildifier's linter (#1245).
   #
   # Cheap by construction — no toolchain, no C++, no Envoy — so it needs no RBE
   # and no BuildBuddy key, and it is a separate job from `test` rather than a
@@ -104,15 +105,15 @@ jobs:
       - name: The image registry is one setting
         run: scripts/check-registry-config.sh
 
-      # buildifier's linter over every proxy BUILD / MODULE.bazel / .bzl, and
-      # ShellCheck over every proxy shell script, both discovered from git — no
+      # ShellCheck over every proxy shell script, discovered from git — no
       # mirror to keep complete. Exit 2 if it finds nothing to lint.
-      - name: Lint the proxy workspace's Starlark and shell
+      - name: Lint the proxy workspace's shell
         run: scripts/lint-proxy.sh
 
       # The whole-repository format check (seconds), which since proxy/ left
-      # rules-lint-ignored includes proxy Starlark (buildifier) and shell
-      # (shfmt). Same language-set assertion as ci.yaml's `format` job.
+      # rules-lint-ignored includes proxy Starlark (buildifier format AND lint,
+      # #1245) and shell (shfmt). Same language-set assertion as ci.yaml's
+      # `format` job.
       - name: Check formatting (proxy/ included)
         run: |
           set +e
@@ -128,7 +129,7 @@ jobs:
             exit 1
           fi
           if [ "$rc" -ne 0 ]; then
-            echo "::error::formatting violations — run 'make format' and commit the result"
+            echo "::error::formatting or buildifier lint violations — run 'make format' (it also applies the mechanical lint fixes), fix any lint finding left, and commit the result"
             exit 1
           fi
 

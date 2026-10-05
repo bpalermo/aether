@@ -241,9 +241,9 @@ setup-bazel-root-1-linux-x64-repository-<hash>` is an exact hit;
 ## 4. Format & lint
 
 ```bash
-make format             # bazel run //:format        — gofumpt, buildifier, shfmt, buf (in place)
-make format-check       # bazel run //:format.check  — CI-friendly, fails on drift
-make lint               # bazel build --config=lint //...  — buf, buildifier, shellcheck aspects
+make format             # bazel run //:format        — gofumpt, buildifier (+ -lint=fix), shfmt, buf (in place)
+make format-check       # bazel run //:format.check  — CI-friendly, fails on drift AND on buildifier lint warnings
+make lint               # bazel build --config=lint //...  — buf, shellcheck, gocognit aspects
 ```
 
 After changing Go imports or adding/removing Go files, regenerate BUILD files:

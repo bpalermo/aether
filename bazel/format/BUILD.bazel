@@ -2,10 +2,40 @@ load("@aspect_rules_lint//format:defs.bzl", "format_multirun")
 
 package(default_visibility = ["//:__subpackages__"])
 
+# buildifier's LINTER rides the Starlark formatter, so `make format-check` (and
+# the `format` jobs in .github/workflows/ci.yaml and proxy.yml) report lint
+# warnings on every BUILD / MODULE.bazel / .bzl file git lists — proxy/
+# included, without building that workspace — and `make format` applies the
+# mechanical fixes (`-lint=fix`; it stays exit 0 on what it cannot fix, which
+# the check then reports).
+#
+# Not the lint aspect: rules_lint's buildifier aspect only visits bzl_library
+# targets and filegroups tagged "starlark", this repository has neither, and
+# BUILD files cannot be srcs of a target in another package — so under
+# `--config=lint` it linted nothing (#1245). It is no longer wired in.
+#
+# Warning set: buildifier's `default`. `all` adds only opt-in categories, and
+# the one with findings here is unsorted-dict-items (11 in 5 files: the chart's
+# per-template expectations, the amd64-then-arm64 select()s and an aspect's
+# attrs are written in an order that reads by component). Keep a category
+# off by spelling it here with the reason, not by `# buildifier: disable=`
+# sprinkled per line.
+_BUILDIFIER_WARNINGS = "-warnings=default"
+
 format_multirun(
     name = "format",
     go = "@aspect_rules_lint//format:gofumpt",
     protocol_buffer = "//bazel/lint:buf",
     shell = "@aspect_rules_lint//format:shfmt",
     starlark = "@buildifier_prebuilt//:buildifier",
+    starlark_check_args = [
+        "-mode=check",
+        "-lint=warn",
+        _BUILDIFIER_WARNINGS,
+    ],
+    starlark_fix_args = [
+        "-mode=fix",
+        "-lint=fix",
+        _BUILDIFIER_WARNINGS,
+    ],
 )

@@ -1095,7 +1095,7 @@ genrule(
     # matching the pattern, rather than silently republishing the bare version
     # under a second name.
     cmd = "sed -E 's/^(version:[[:space:]]*\"[0-9]+\\.[0-9]+\\.[0-9]+)\"$$/\\1-{GIT_COMMIT}\"/'" +
-          " $(location Chart.yaml) > $@ && grep -q -- '-{GIT_COMMIT}\"$$' $@",
+          " $(execpath Chart.yaml) > $@ && grep -q -- '-{GIT_COMMIT}\"$$' $@",
 )
 
 helm_chart(
