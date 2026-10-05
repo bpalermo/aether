@@ -920,9 +920,20 @@ jobs:
           bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //cni/cmd/cni-install:image_load
           bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //registrar/cmd/registrar:image_load
       - name: Setup kind
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           install_only: true
+          # kind binary, node image and kubectl pinned explicitly (#1221): the
+          # action's defaults move with its releases (v1.15.0: kind v0.33.0 ->
+          # Kubernetes 1.37, kubectl v1.37.0), so a Kubernetes bump stays a
+          # separate, visible change. Kubernetes 1.35 = the minor these suites
+          # are certified on; the image is the kind v0.33.0 build (the digest is
+          # what selects an image built for that kind release). Keep in sync
+          # with test/e2e/testdata/kind-config.yaml and the other kind steps.
+          # install_only: node_image is unused here; the cluster is created by
+          # //test/e2e, whose kind config pins the same node image.
+          version: v0.33.0
+          kubectl_version: v1.35.8
       - name: Run e2e tests
         run: |
           bazel test --config=ci \
