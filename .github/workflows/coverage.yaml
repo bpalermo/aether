@@ -1,0 +1,210 @@
+name: coverage
+
+# Line coverage of the unit suite, uploaded to GitHub's native code coverage
+# (GitHub Code Quality). docs/runbook.md, "Code coverage".
+#
+# Report-only for now: no ruleset requires this workflow and no threshold is
+# set. Code Quality has to be enabled in the repository's settings before
+# GitHub accepts an upload; until then the upload step is rejected, and that is
+# deliberately not a red job (see the `upload` job). Everything before the
+# upload runs and must pass regardless, and the report is kept as a workflow
+# artifact either way.
+#
+# Its own workflow rather than a job in ci.yaml, for three reasons:
+#   - `code-quality: write` stays out of the workflow that builds and tests
+#     every pull request;
+#   - GitHub compares a pull request's coverage with the default branch's
+#     latest upload, so this must also run on pushes to main, which ci.yaml
+#     does not (it is pull-request only, and main.yaml is its post-merge twin);
+#   - ci.yaml's legs run bazel-diff's impacted subset. Coverage cannot: a
+#     percentage over a different set of tests per pull request is not
+#     comparable with main's. This always runs the whole unit suite and lets
+#     Bazel's cache make that cheap (an unchanged test's coverage result is a
+#     remote cache hit).
+#
+# What is measured (scripts/coverage.sh holds the reasoning): every go_test not
+# tagged integration, requires-root or manual, over every first-party Go
+# component, with a zero-hit record for each file no test links, so untested
+# code lowers the number instead of vanishing from it. Not integration, e2e,
+# kind, netns or soak.
+#
+# The `coverage` job at the bottom is the one name a ruleset should require
+# once this gates. GitHub's "Restrict code coverage" rule does not wait for an
+# upload, so the check that uploads has to be required alongside it. A required
+# check must report on every pull request that can merge, hence the
+# `upgrade/**` base (stacked pull requests target the branch beneath them, as
+# ci.yaml and codeql.yaml allow for).
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+      - "upgrade/**"
+
+# Nothing at workflow level: each job states what it needs.
+permissions: {}
+
+# A newer push to the same pull request supersedes the older run. Runs on main
+# are never cancelled: each one is the baseline pull requests are compared with.
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Runs the repository's code with a read-only token; the upload is a separate
+  # job so that `code-quality: write` never sits next to a test binary.
+  report:
+    name: Report (unit suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      # Check out the repository.
+      contents: read
+    # The branch name is attacker-controlled text on a pull request: it reaches
+    # the build metadata through the environment, never interpolated into a
+    # script (actionlint `expression`, as in ci.yaml).
+    env:
+      BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+      COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      # The pull request's HEAD, not the merge commit GitHub checks out by
+      # default: the upload is attributed to the head commit, and the report's
+      # line numbers have to be that commit's.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Restores the repository cache and never saves it: the one saver per
+      # cache key is the `diff` job of ci.yaml / main.yaml, whose warm-up
+      # fetches for all of //... (.github/actions/setup-bazel).
+      - name: Setup Bazel
+        uses: ./.github/actions/setup-bazel
+      # --collect_code_coverage so analysis also resolves what only a coverage
+      # build needs (the coverage report generator and its Java runtime).
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh --config=remote --lockfile_mode=error --collect_code_coverage //...
+      # Compiles (instrumented) and the baseline actions go to BuildBuddy RBE;
+      # test EXECUTION stays on the runner, exactly as in ci.yaml:
+      # `--config=remote` sets `--strategy=TestRunner=local`, because the
+      # executor sandbox runs as root without privileged capabilities and the
+      # permission- and netns-sensitive tests fail there. `--config=remote`
+      # and not `--config=ci`: the lint aspects have their own jobs. Without
+      # the key (a fork's pull request) the same flags fall back to a local
+      # build.
+      - name: Coverage of the whole unit suite (remote build, local tests)
+        env:
+          OUT: ${{ runner.temp }}/coverage
+        run: |
+          scripts/coverage.sh --out "$OUT" -- \
+            --config=remote \
+            --lockfile_mode=error \
+            --color=yes \
+            --noshow_progress \
+            --noshow_loading_progress \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --build_metadata=ROLE=CI \
+            --build_metadata=VISIBILITY=PUBLIC \
+            --build_metadata=COMMIT_SHA="$COMMIT_SHA" \
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
+            --build_metadata=BRANCH_NAME="$BRANCH_NAME"
+      - name: Job summary
+        env:
+          OUT: ${{ runner.temp }}/coverage
+        run: |
+          {
+            echo "## Unit-test line coverage"
+            echo
+            echo "Commit \`$COMMIT_SHA\`. Every \`go_test\` not tagged \`integration\`, \`requires-root\` or \`manual\`, over all first-party Go; a file no test links counts as zero. The *tests-only* columns are the same run without those zero-hit records."
+            echo
+            cat "$OUT/summary.md"
+            echo
+            echo "<details><summary>$(wc -l <"$OUT/unrecorded.txt") tracked non-test .go file(s) not in the report (excluded by build constraints on linux/amd64)</summary>"
+            echo
+            echo '```'
+            cat "$OUT/unrecorded.txt"
+            echo '```'
+            echo
+            echo "</details>"
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Keep the report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-report
+          path: |
+            ${{ runner.temp }}/coverage/coverage.xml
+            ${{ runner.temp }}/coverage/coverage.lcov
+            ${{ runner.temp }}/coverage/tests-only.lcov
+            ${{ runner.temp }}/coverage/summary.md
+            ${{ runner.temp }}/coverage/unrecorded.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  # A fork's pull request gets a read-only token whatever is declared here, so
+  # the upload is skipped for it (the action would skip it too). The report job
+  # above still ran; the XML is in the artifact.
+  upload:
+    name: Upload to code coverage
+    needs: report
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Upload the report.
+      code-quality: write
+      # As in GitHub's documented workflow for this action. Nothing is checked
+      # out here.
+      contents: read
+    steps:
+      - name: Fetch the report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-report
+          path: ${{ runner.temp }}/coverage
+
+      # Attributed by the action to the pull request's head commit, or to the
+      # pushed commit on main. One report, one stable label: GitHub keeps the
+      # latest upload per branch, and a label that changed would start a second
+      # series instead of continuing this one.
+      #
+      # TODO(coverage gating): remove `continue-on-error` and the step after
+      # this one when the `coverage` check becomes required. Until Code Quality
+      # is enabled in the repository settings GitHub rejects every upload, and
+      # a workflow that can only be red teaches people to ignore it. This is
+      # the ONLY step allowed to fail: the report itself is produced, tested
+      # and kept by the `report` job, which is not softened in any way.
+      - name: Upload the Cobertura report
+        id: upload
+        continue-on-error: true
+        uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1.4.4
+        with:
+          file: ${{ runner.temp }}/coverage/coverage.xml
+          language: Go
+          label: code-coverage/unit
+
+      - name: The upload was not accepted (report-only until Code Quality is enabled)
+        if: ${{ steps.upload.outcome == 'failure' }}
+        run: |
+          echo "::warning title=Coverage upload rejected::GitHub did not accept the coverage report (see the 'Upload the Cobertura report' step). Nothing was recorded for this commit: no pull request comment, no baseline on main. Expected while GitHub Code Quality is not enabled for this repository (Settings > Code quality); the report is in the 'coverage-report' artifact. docs/runbook.md, 'Code coverage'."
+          {
+            echo "### Coverage upload rejected"
+            echo
+            echo "GitHub did not accept the report, so nothing was recorded for this commit. Expected until GitHub Code Quality is enabled in the repository settings; the Cobertura XML is in the \`coverage-report\` artifact."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  # The single check to require once coverage gates. `if: always()` so it
+  # reports even when a job above failed. The report must have succeeded; the
+  # upload may be skipped (a fork's pull request) but not failed or cancelled.
+  coverage:
+    if: always()
+    needs: [report, upload]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Fail unless the report was produced and the upload job did not fail
+        if: ${{ needs.report.result != 'success' || needs.upload.result == 'failure' || needs.upload.result == 'cancelled' }}
+        run: |
+          echo "::error::the coverage report was not produced, or the upload job failed or was cancelled"
+          exit 1

@@ -183,6 +183,92 @@ And a clean run is not evidence of absence: the detector only reports
 interleavings a test actually produced, so a race between two goroutines no test
 runs concurrently stays invisible no matter how often you run it.
 
+### Code coverage
+
+```bash
+make coverage                                   # the whole unit suite
+make coverage COVERAGE_FLAGS="--jobs=6"         # extra `bazel coverage` flags
+```
+
+`scripts/coverage.sh` writes `coverage-report/` (git-ignored): `coverage.lcov`,
+`coverage.xml` (Cobertura), `summary.md` (the per-component table) and
+`unrecorded.txt`. `.github/workflows/coverage.yaml` runs the same script on
+every pull request and on every push to `main`, puts the table in the job
+summary, keeps the files as the `coverage-report` artifact, and uploads the XML
+to GitHub's native code coverage (GitHub Code Quality) with
+`actions/upload-code-coverage`. GitHub reads **line** coverage only, from
+Cobertura XML only, keeps the latest upload per branch, and compares a pull
+request with `main`'s latest upload in a `github-code-quality[bot]` comment.
+
+**What the number is.** Line coverage of every `go_test` **not** tagged
+`integration`, `requires-root` or `manual` (97 of 101 when this was written),
+over all first-party Go. Integration, e2e, kind, netns and soak runs do not
+count yet, so code only they exercise reads as uncovered.
+
+- *The whole suite, every time.* `ci` tests bazel-diff's impacted subset;
+  coverage cannot, because a percentage over a different set of tests per pull
+  request is not comparable with `main`'s. Bazel caches each test's coverage
+  result, so an unchanged test is a cache hit (a second local run: 1 s, 0 of 97
+  tests executed).
+- *Components are derived, not listed.* Every top-level directory with a
+  `go_library` or `go_binary`, minus `api` (generated proto Go), `test` and
+  `e2e` (harnesses) and `bazel` (build tooling) — the `EXCLUDED` list in the
+  script. A new top-level component is measured from its first Go target with
+  no edit. `cmd/` mains are in: they are code.
+- *Untested code counts as zero.* By default `bazel coverage` instruments only
+  packages that have a test in the run. The script passes an
+  `--instrumentation_filter` over every component and makes every component
+  `go_library` a target, so rules_go's baseline action (`go tool cover` over the
+  sources the compile action would compile) gives each file no test links a
+  zero-hit record with the line set a measured run would have. Files excluded by
+  build constraints on linux/amd64 are absent, not uncovered; `unrecorded.txt`
+  lists them (three today). Anything else in that list is a file no `go_library`
+  has in its `srcs`: run `make gazelle`.
+- `_test.go` files are never instrumented.
+
+Baseline at introduction (2026-10-06, `main` at `56a330fc`): **77.82 %**
+(21 993 of 28 262 lines). The same run reads 77.96 % without the zero-hit
+records, and 78.91 % with Bazel's default instrumentation (27 853 lines): the
+honest denominator is 409 lines larger than the default one.
+
+**Run-to-run variation.** Four uncached runs covered 21 993, 21 994, 21 991
+and 21 989 lines: 77.80–77.82 %, a spread of 0.018 percentage points.
+Seventeen lines in six files are timing-dependent
+(`cni/internal/util/watcher.go`, `common/signals/signals.go`,
+`agent/internal/proxy/hotrestart/supervisor.go`,
+`agent/internal/meshdns/lameduck.go`, `agent/internal/xds/server/refresh.go`,
+`agent/internal/xds/cache/identitybinding.go`), so the widest gap two runs
+could show is 0.06 points. A future "maximum line coverage drop" threshold
+below roughly 0.1 would fail pull requests on noise. Cached results do not
+vary at all: a pull request that does not touch a test's inputs reuses
+`main`'s result for it.
+
+**Report-only, and what gating takes.** Nothing requires the workflow and no
+threshold is set. Three steps turn it into a gate, in this order:
+
+1. Enable GitHub Code Quality for the repository (Settings → Code quality).
+   Until then GitHub rejects the upload; the `upload` job's upload step is
+   `continue-on-error` and says so with a warning, and the job stays green.
+2. Remove that `continue-on-error` and the warning step after it (the `TODO` in
+   the workflow), so a rejected upload is red.
+3. Add the `coverage` check to the `main` ruleset's required status checks,
+   then add the ruleset's "Restrict code coverage" rule (minimum line coverage,
+   maximum line coverage drop). That rule does not wait for an upload to
+   finish, which is why the check that uploads has to be required with it.
+
+A fork's pull request is measured but not uploaded (read-only token); its
+report is in the artifact.
+
+**The upload was rejected, and Code Quality is enabled.** Read the step's
+error: HTTP 403 with "not authorized" is a missing `code-quality: write` on the
+job; a processing failure names what GitHub could not parse. Convert locally
+and look at the document:
+`scripts/lcov-to-cobertura.sh coverage-report/coverage.lcov`. The three things
+read from it are the root `line-rate`, each `<class filename=…>` (repo-relative;
+the converter refuses anything else) and each `<line number=… hits=…>`.
+`//scripts:lcov_to_cobertura_test` holds the converter to a golden file and
+`//scripts:coverage_test` holds the script's target selection.
+
 ### CI: external repository fetches (#1001)
 
 BuildBuddy caches **actions**, not **repository fetches**. Every external

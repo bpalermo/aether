@@ -51,6 +51,17 @@ test-integration:
 test-race:
 	@bazel test --test_output=errors --@rules_go//go/config:race //...
 
+# Line coverage of the unit suite over all first-party Go: LCOV, the Cobertura
+# XML GitHub's code coverage takes, and a per-component table, in
+# ./coverage-report (ignored by version control). The same script the `report`
+# job of .github/workflows/coverage.yaml runs. docs/runbook.md, "Code coverage".
+#
+#   make coverage
+#   make coverage COVERAGE_FLAGS="--jobs=6 --nocache_test_results"
+.PHONY: coverage
+coverage:
+	@scripts/coverage.sh $(if $(COVERAGE_FLAGS),-- $(COVERAGE_FLAGS))
+
 .PHONY: format
 format:
 	@bazel run //:format

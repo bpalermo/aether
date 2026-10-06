@@ -25,6 +25,11 @@ bazel test //agent/internal/xds/config:config_test
 bazel test --config=race //agent/internal/meshdns:all
 make test-race               # whole tree, same flag
 
+# Line coverage of the unit suite over all first-party Go (LCOV + Cobertura in
+# ./coverage-report); the same script .github/workflows/coverage.yaml uploads
+# from. Report-only. See docs/runbook.md, "Code coverage".
+make coverage                # or: scripts/coverage.sh [-- <bazel coverage flags>]
+
 # Build
 make build-agent             # or: bazel build //agent/cmd/agent/...
 make build-mesh-dns          # or: bazel build //agent/cmd/mesh-dns/...

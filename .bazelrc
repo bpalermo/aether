@@ -86,6 +86,24 @@ build:remote --modify_execution_info=DownloadBlob=+no-remote-exec
 # Race detector (usage: --config=race)
 test:race --@rules_go//go/config:race
 
+# Coverage report (usage: `make coverage`, i.e. scripts/coverage.sh, which adds
+# the two things that cannot be written here because they are derived by query:
+# --instrumentation_filter over every first-party component, and the target
+# list — the unit go_tests plus every component go_library, whose rules_go
+# baseline tracefile is what puts a file no test links into the report at zero).
+# docs/runbook.md, "Code coverage".
+coverage:coverage --combined_report=lcov
+# One failing test must not hide what the others would have reported; the
+# invocation still exits non-zero and the script then writes no report.
+coverage:coverage --keep_going
+coverage:coverage --test_output=errors
+# With --config=remote (CI) outputs stay remote unless they are top-level
+# (--remote_download_toplevel). The script reads the combined report and every
+# test's own tracefile, and a test whose result is a remote cache hit never ran
+# on the runner, so both must be fetched explicitly. No effect on a local build.
+coverage:coverage --experimental_fetch_all_coverage_outputs
+coverage:coverage --remote_download_regex=.*/(coverage\.dat|_coverage_report\.dat|_baseline_report\.dat)$
+
 # LLM-friendly output (usage: --config=llm)
 common:llm --color=no
 common:llm --curses=no

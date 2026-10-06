@@ -2,6 +2,14 @@
 # `actionlint` job in ci.yaml). Prefer fixing a finding, or a targeted
 # `# shellcheck disable=SCxxxx # <why>` on the line, to an entry here.
 paths:
+  .github/workflows/coverage.yaml:
+    ignore:
+      # `code-quality: write` is the scope actions/upload-code-coverage needs
+      # (GitHub Code Quality, public preview). actionlint 1.7.12, the latest
+      # release, predates it and has a closed list of scopes. Scoped to that
+      # one scope name: a misspelt permission elsewhere in the file still
+      # fails. Drop this entry when a pinned actionlint knows the scope.
+      - 'unknown permission scope "code-quality"\.'
   .github/workflows/publish-verify.yaml:
     ignore:
       # The rolling issue's printf format holds literal Markdown backticks in
