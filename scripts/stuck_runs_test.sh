@@ -13,6 +13,11 @@
 #      and logs every write: --dry-run must write NOTHING (no cancel, no issue);
 #      a real run cancels exactly the superseded run and opens one issue; the
 #      same stuck set again adds no comment; a clear tick closes the issue.
+#   3. a run GitHub refuses to cancel (#1301): cancel and force-cancel both 409,
+#      so it is reported ONCE as uncancellable, remembered in a hidden marker on
+#      the issue (read back even once the issue is closed), left out of the
+#      stuck set after that, and a NEW stuck run is still reported; a transient
+#      cancel failure is not remembered.
 #
 # Run: bazel test //scripts:stuck_runs_test (jq is the Bazel-pinned one), or
 #      bash scripts/stuck_runs_test.sh with jq on PATH.
@@ -103,6 +108,15 @@ api)
 	shift
 	if [ "$1" = "-X" ]; then
 		echo "WRITE cancel ${3}" >>"$FAKE_LOG"
+		# FAKE_CANCEL_409 / FAKE_CANCEL_500: run ids whose cancel AND force-cancel
+		# GitHub refuses (the #1301 zombie) / fails transiently.
+		id="${3#*/actions/runs/}"; id="${id%%/*}"
+		case " ${FAKE_CANCEL_409:-} " in *" $id "*)
+			echo "gh: Cannot cancel a workflow run that is not in progress (HTTP 409)" >&2; exit 1 ;;
+		esac
+		case " ${FAKE_CANCEL_500:-} " in *" $id "*)
+			echo "gh: Server Error (HTTP 500)" >&2; exit 1 ;;
+		esac
 		exit 0
 	fi
 	path="$1"
@@ -132,11 +146,21 @@ api)
 issue)
 	sub="$2"
 	case "$sub" in
-	list) cat "$FAKE_STATE/num" 2>/dev/null || true ;;
+	list)
+		# --state all: the newest issue, open or closed ($FAKE_STATE/last);
+		# otherwise the open one ($FAKE_STATE/num).
+		case " $* " in
+		*" --state all "*) cat "$FAKE_STATE/last" 2>/dev/null || true ;;
+		*) cat "$FAKE_STATE/num" 2>/dev/null || true ;;
+		esac ;;
 	create)
-		echo 7 >"$FAKE_STATE/num"
+		# A new issue: the next number (7 first), its own body, no comments yet.
+		n=$(($(cat "$FAKE_STATE/last" 2>/dev/null || echo 6) + 1))
+		echo "$n" >"$FAKE_STATE/num"
+		echo "$n" >"$FAKE_STATE/last"
+		rm -f "$FAKE_STATE/comments"
 		while [ $# -gt 0 ]; do [ "$1" = "--body-file" ] && cp "$2" "$FAKE_STATE/body"; shift; done
-		echo "WRITE issue create" >>"$FAKE_LOG" ;;
+		echo "WRITE issue create $n" >>"$FAKE_LOG" ;;
 	comment)
 		echo "WRITE issue comment $3" >>"$FAKE_LOG"
 		while [ $# -gt 0 ]; do
@@ -167,6 +191,7 @@ run_fake() { # run_fake <snapshot> [args...] -> log in $TMP/log
 	shift
 	: >"$TMP/log"
 	PATH="$TMP/bin:$PATH" FAKE_SNAPSHOT="$snap" FAKE_LOG="$TMP/log" FAKE_STATE="$TMP/state" \
+		FAKE_CANCEL_409="${FAKE_CANCEL_409:-}" FAKE_CANCEL_500="${FAKE_CANCEL_500:-}" \
 		GH_REPO=bpalermo/aether STUCK_NOW=2026-10-05T19:20:00Z RUN_URL=https://example.invalid/run \
 		GITHUB_STEP_SUMMARY="$TMP/summary" \
 		bash "$SCRIPT" run "$@" >"$TMP/out" 2>&1
@@ -185,7 +210,7 @@ fi
 run_fake "$FIX/publish-superseded.json"
 if grep -qx 'WRITE cancel repos/bpalermo/aether/actions/runs/37322742027/cancel' "$TMP/log" &&
 	[ "$(grep -c '^WRITE cancel' "$TMP/log")" -eq 1 ] &&
-	grep -qx 'WRITE issue create' "$TMP/log" &&
+	grep -qx 'WRITE issue create 7' "$TMP/log" &&
 	grep -q '37344778036' "$TMP/state/body" && grep -q 'CANCELLED' "$TMP/state/body"; then
 	pass "run: cancels only the superseded run, opens the issue naming both"
 else
@@ -222,6 +247,109 @@ if [ "$(writes)" -eq 0 ]; then
 	pass "run, nothing stuck and no issue: writes nothing"
 else
 	fail "run, nothing stuck and no issue: wrote something"
+fi
+
+# --- 3. a run GitHub will not cancel (#1301) ----------------------------------
+# deleted-branch.json is the real zombie: a proxy run queued since 2026-09-12 on
+# a deleted branch, whose cancel and force-cancel both answer HTTP 409.
+Z=34723047990
+ZMARK="<!-- stuck-runs-uncancellable: ${Z} -->"
+reset_state() {
+	rm -rf "$TMP/state"
+	mkdir -p "$TMP/state"
+}
+dump() { sed 's/^/    /' "$TMP/out" "$TMP/log"; }
+
+# The live state when this shipped: #7 open, already reporting the zombie under
+# the pre-#1301 marker, so the stuck set alone has NOT changed.
+reset_state
+echo 7 >"$TMP/state/num"
+echo 7 >"$TMP/state/last"
+printf 'old report\n\n<!-- stuck-runs: %s -->\n' "$Z" >"$TMP/state/body"
+
+FAKE_CANCEL_409="$Z" run_fake "$FIX/deleted-branch.json"
+if grep -qx "WRITE cancel repos/bpalermo/aether/actions/runs/${Z}/cancel" "$TMP/log" &&
+	grep -qx "WRITE cancel repos/bpalermo/aether/actions/runs/${Z}/force-cancel" "$TMP/log" &&
+	grep -qx 'WRITE issue comment 7' "$TMP/log" && ! grep -q '^WRITE issue close' "$TMP/log" &&
+	grep -aqF "uncancellable — needs GitHub support" "$TMP/state/comments" &&
+	grep -aqF -- "$ZMARK" "$TMP/state/comments"; then
+	pass "uncancellable, tick 1: cancel + force-cancel refused, reported once with the marker (same stuck set or not)"
+else
+	fail "uncancellable, tick 1"
+	dump
+fi
+
+FAKE_CANCEL_409="$Z" run_fake "$FIX/deleted-branch.json"
+if [ "$(grep -c '^WRITE cancel' "$TMP/log")" -eq 0 ] &&
+	grep -qx 'WRITE issue close 7' "$TMP/log" &&
+	grep -q 'stuck runs (threshold 60m): 0' "$TMP/out" && grep -q "^ignored ${Z} " "$TMP/out" &&
+	[ "$(tr '\0' '\n' <"$TMP/state/comments" | grep -cF -- "$ZMARK")" -ge 2 ]; then
+	pass "uncancellable, tick 2: not retried, not stuck, issue closed with the marker carried"
+else
+	fail "uncancellable, tick 2"
+	dump
+fi
+
+FAKE_CANCEL_409="$Z" run_fake "$FIX/deleted-branch.json"
+if [ "$(writes)" -eq 0 ] && grep -q "^ignored ${Z} " "$TMP/out"; then
+	pass "uncancellable, tick 3: remembered from the CLOSED issue, writes nothing"
+else
+	fail "uncancellable, tick 3"
+	dump
+fi
+
+FAKE_CANCEL_409="$Z" run_fake "$FIX/deleted-branch.json" --dry-run
+if [ "$(writes)" -eq 0 ] && ! grep -q "would cancel ${Z}" "$TMP/out" && grep -q 'DRY RUN: nothing stuck' "$TMP/out"; then
+	pass "uncancellable, dry run: reads the memory too"
+else
+	fail "uncancellable, dry run"
+	dump
+fi
+
+# A NEW stuck run while GitHub still lists the zombie: reported as usual, on a
+# new issue that carries the memory forward and does not count the zombie.
+"$JQ" -s '.[0] + {runs: (.[0].runs + .[1].runs), jobs: (.[0].jobs + .[1].jobs),
+	branches: (.[0].branches + .[1].branches), workflow_runs: (.[0].workflow_runs + .[1].workflow_runs)}' \
+	"$FIX/deleted-branch.json" "$FIX/head-run.json" >"$TMP/zombie-plus-new.json"
+FAKE_CANCEL_409="$Z" run_fake "$TMP/zombie-plus-new.json"
+if grep -qx 'WRITE issue create 8' "$TMP/log" && [ "$(grep -c '^WRITE cancel' "$TMP/log")" -eq 0 ] &&
+	grep -q '37000000004' "$TMP/state/body" && ! grep -q "^| \[${Z}\]" "$TMP/state/body" &&
+	grep -q "Not counted (already reported as uncancellable" "$TMP/state/body" &&
+	grep -qF -- "$ZMARK" "$TMP/state/body" && grep -qF -- '<!-- stuck-runs: 37000000004 -->' "$TMP/state/body"; then
+	pass "uncancellable + a new stuck run: the new one is reported, the zombie only carried"
+else
+	fail "uncancellable + a new stuck run"
+	dump
+	sed 's/^/    | /' "$TMP/state/body"
+fi
+
+# Once GitHub stops listing the zombie, the memory is dropped.
+run_fake "$FIX/empty.json"
+if grep -qx 'WRITE issue close 8' "$TMP/log" &&
+	! grep -aqF -- "stuck-runs-uncancellable" "$TMP/state/comments"; then
+	pass "uncancellable run gone: closes without carrying the marker"
+else
+	fail "uncancellable run gone"
+	dump
+fi
+
+# A transient failure (HTTP 500) is NOT uncancellable: no force-cancel, nothing
+# remembered, and the next tick tries the cancel again.
+reset_state
+FAKE_CANCEL_500="$Z" run_fake "$FIX/deleted-branch.json"
+if grep -qx "WRITE cancel repos/bpalermo/aether/actions/runs/${Z}/cancel" "$TMP/log" &&
+	! grep -q 'force-cancel' "$TMP/log" && grep -q 'cancel FAILED' "$TMP/state/body" &&
+	! grep -qF 'stuck-runs-uncancellable' "$TMP/state/body"; then
+	FAKE_CANCEL_500="$Z" run_fake "$FIX/deleted-branch.json"
+	if grep -qx "WRITE cancel repos/bpalermo/aether/actions/runs/${Z}/cancel" "$TMP/log"; then
+		pass "transient cancel failure: not remembered, retried next tick"
+	else
+		fail "transient cancel failure: not retried"
+		dump
+	fi
+else
+	fail "transient cancel failure"
+	dump
 fi
 
 echo

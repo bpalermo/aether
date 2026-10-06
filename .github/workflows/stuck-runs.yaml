@@ -17,7 +17,10 @@
 # pull_request run, first attempt, not from a fork, whose branch is gone, or
 # whose commit is no longer its branch's head AND a newer run of the same
 # workflow on that branch is queued, running or has succeeded. The head's own
-# run is never cancelled. The rules, and why each one is there, are in
+# run is never cancelled. A run GitHub refuses to cancel (cancel and
+# force-cancel both HTTP 409) is reported once as uncancellable, remembered in
+# a hidden marker on the issue, and not counted again (#1301). The rules, and
+# why each one is there, are in
 # scripts/stuck-runs.sh; //scripts:stuck_runs_test pins them on canned API JSON.
 #
 # A dispatch is a dry run unless dry_run=false: it lists what it would cancel
