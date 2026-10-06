@@ -46,14 +46,19 @@ import (
 
 const answerTTL = 30
 
-// forwardTimeout bounds EVERY stage of an upstream exchange (dial, write, read).
+// forwardTimeout bounds a forward to ONE upstream.
+//
+// Over UDP it is the whole budget of the forward, including the one re-send on a fresh
+// socket that a timed-out first try gets after forwardTryTimeout (issue #1254, see
+// forwardretry.go). Over TCP it bounds every stage of the exchange (dial, write, read),
+// as the forward clients' timeouts.
 //
 // miekg/dns already applies an implicit 2s default (its unexported dnsTimeout) when a
 // Client leaves DialTimeout/ReadTimeout/WriteTimeout at zero, so this pins the same
-// value — behaviour is unchanged, the bound is simply visible here and can no longer
-// move silently under a dependency bump. It matters: the CNI DNATs every managed pod's
-// :53 here, so a forward that outlives its deadline pins a serve goroutine, and enough
-// of those is exactly the bound-but-blind wedge the self-check watchdog exists to catch.
+// value: the bound is visible here and can no longer move silently under a dependency
+// bump. It matters: the CNI DNATs every managed pod's :53 here, so a forward that
+// outlives its deadline pins a serve goroutine, and enough of those is exactly the
+// bound-but-blind wedge the self-check watchdog exists to catch.
 const forwardTimeout = 2 * time.Second
 
 // snapshotFileMode is the permission for the persisted records snapshot.
@@ -121,7 +126,8 @@ type Server struct {
 	// relayed over TCP (the client already expects a large answer), and a UDP relay
 	// that comes back truncated is retried over TCP — see forward. They are kept as
 	// two clients rather than one whose Net is mutated, which would race across the
-	// concurrent serve goroutines.
+	// concurrent serve goroutines. udpClient only dials the pooled sockets: the UDP
+	// exchange itself runs on absolute deadlines (see exchangeUDP).
 	udpClient *dns.Client
 	tcpClient *dns.Client
 
@@ -804,15 +810,17 @@ func (s *Server) forward(w dns.ResponseWriter, r *dns.Msg) string {
 // when that upstream failed (the caller then tries the next). A truncated UDP reply is
 // re-fetched over TCP, the standard recursive-resolver escalation.
 //
-// Only the UDP leg is pooled (issue #674). TCP stays dial-per-query for two reasons: its
-// volume is negligible (TCP-arriving queries plus TC=1 retries), and on a STREAM conn
-// miekg/dns's ExchangeWithConn does not drain mismatched transaction IDs — it returns
-// ErrId — so a late reply left on a pooled TCP socket would poison the next query on it.
+// Only the UDP leg is pooled (issue #674) and only the UDP leg re-sends on a timeout
+// (issue #1254): a TCP query is not lost in transit, the stream retransmits it. TCP
+// stays dial-per-query for two reasons: its volume is negligible (TCP-arriving queries
+// plus TC=1 retries), and on a STREAM conn miekg/dns's ExchangeWithConn does not drain
+// mismatched transaction IDs — it returns ErrId — so a late reply left on a pooled TCP
+// socket would poison the next query on it.
 func (s *Server) exchange(r *dns.Msg, addr string, viaTCP bool) *dns.Msg {
 	if viaTCP {
 		return s.exchangeWith(s.tcpClient, r, addr)
 	}
-	resp := s.exchangeUDPPooled(r, addr)
+	resp := s.exchangeUDP(r, addr)
 	if resp == nil || !resp.Truncated {
 		return resp
 	}
