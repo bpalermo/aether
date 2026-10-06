@@ -461,6 +461,19 @@ which fails on any copy that disagrees — a kind config, a workflow's
 `KIND_ALLOW_SKEW=1` to try anyway) and only warn about a newer one;
 `KIND_NODE_IMAGE=<image>` overrides the node image for one run.
 
+### Bumping Go
+
+The Go toolchain is pinned once: `go_sdk.download(version = ...)` in
+`MODULE.bazel`, the SDK rules_go builds and tests everything with. The few CI
+steps that run a bare `go` outside Bazel (the nightly conformance suites'
+`go test`, the `cloud-provider-kind` install) get the same version from
+`actions/setup-go` with `go-version-file: go.mod`, so go.mod's `go` line (or a
+`toolchain` line, which setup-go prefers) must name the same full `X.Y.Z` (#1283).
+Bump both together and run `bazel test //e2e:go_pin_test`. It fails on a go.mod
+that disagrees with the SDK pin, a setup-go step with a literal `go-version` or
+`check-latest`, and any workflow job or composite action that runs `go` without
+setting it up first, which would leave it on the runner image's Go.
+
 ---
 
 ## 7. Installing on a real cluster

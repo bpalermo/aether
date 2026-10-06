@@ -127,6 +127,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The repository's Go, not the runner image's (#1283): go.mod names
+      # MODULE.bazel's go_sdk.download version (//e2e:go_pin_test keeps them
+      # equal). setup-go also exports GOTOOLCHAIN=local, so neither the
+      # cloud-provider-kind install nor the gateway-api checkout's go.mod can
+      # switch to a downloaded toolchain. No cache: the suite builds from the
+      # gateway-api checkout, which this repository's go.sum does not describe.
+      - name: Setup Go (go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
       - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
 
@@ -305,6 +317,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The repository's Go, not the runner image's (#1283): go.mod names
+      # MODULE.bazel's go_sdk.download version (//e2e:go_pin_test keeps them
+      # equal). setup-go also exports GOTOOLCHAIN=local, so neither the
+      # cloud-provider-kind install nor the gateway-api checkout's go.mod can
+      # switch to a downloaded toolchain. No cache: the suite builds from the
+      # gateway-api checkout, which this repository's go.sum does not describe.
+      - name: Setup Go (go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
 
       - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
