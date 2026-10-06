@@ -88,6 +88,33 @@ sh_test(
     ],
 )
 
+# scripts/materialize-generated-go.sh (the CodeQL workflow's first step) against
+# a throwaway git repository and a fake `bazel`: where the generated files land,
+# idempotence, --clean, and every refusal (a tracked path, an un-ignored path,
+# a file that does not look generated, a generated Go input that is not a
+# proto). Needs git on PATH and nothing else; the real Bazel + go build path is
+# `make go-build-plain` and the workflow's own run.
+sh_test(
+    name = "materialize_generated_go_test",
+    size = "small",
+    srcs = ["materialize_generated_go_test.sh"],
+    data = ["materialize-generated-go.sh"],
+)
+
+# scripts/codeql-go-diagnostics.sh, the gate between CodeQL's analysis and the
+# upload: SARIF fixtures in the shape of real runs with and without the
+# generated proto packages. Hermetic: the Bazel-pinned jq.
+sh_test(
+    name = "codeql_go_diagnostics_test",
+    size = "small",
+    srcs = ["codeql_go_diagnostics_test.sh"],
+    data = [
+        "codeql-go-diagnostics.sh",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
 # Where the scheduled sweep starts reading (#1281): from the last green
 # scheduled sweep, never earlier than the full window, the full window when
 # unsure.

@@ -1,0 +1,215 @@
+name: codeql
+
+# CodeQL code scanning, advanced setup. docs/runbook.md, "CodeQL code scanning".
+#
+# This replaces GitHub's "default setup" for one reason: default setup cannot
+# run a step before the scan, and this repository's Go does not resolve without
+# one. The six proto packages under //api/aether/... are Bazel outputs; nothing
+# generated is checked in. Default setup's Go autobuilder therefore reported
+# "6 packages could not be found" and analysed the 85 files that import them
+# (the gRPC and API surface, where remote input enters) without their types. It
+# also ran `go mod tidy -e`, which this repository forbids, and `make`, whose
+# default target is gazelle.
+#
+# The `go` job below copies the generated sources into the tree first
+# (scripts/materialize-generated-go.sh), builds the module with the plain go
+# command under CodeQL's tracer (scripts/go-build-plain.sh), and refuses to
+# upload a result whose extraction was incomplete
+# (scripts/codeql-go-diagnostics.sh).
+#
+# Parity with default setup, on purpose:
+#   - the same five languages and the same analysis categories
+#     (`/language:<language>`), so existing alerts and their dismissals keep
+#     matching instead of being closed and reopened as new;
+#   - the `default` query suite and the `remote` threat model
+#     (.github/codeql/codeql-config.yml);
+#   - C/C++, Python, JavaScript/TypeScript and Actions analysed without a build;
+#   - test files are not extracted for Go (CodeQL's default; nothing here sets
+#     CODEQL_EXTRACTOR_GO_OPTION_EXTRACT_TESTS).
+#
+# Every job analyses with `upload: never` and uploads in a step of its own. For
+# Go that ordering is the point: the diagnostics gate sits between the two, and
+# a partial analysis that reached code scanning would close every alert in the
+# code it failed to understand as "fixed". The other languages use the same
+# shape so there is one pattern to read, and the SARIF is kept as a workflow
+# artifact either way.
+#
+# Advanced and default setup are mutually exclusive: while default setup is
+# enabled in the repository's security settings, GitHub rejects the SARIF this
+# workflow uploads. Everything before the upload step still runs and must pass.
+#
+# Not a required check. The `main` ruleset requires `ci` and `proxy` only.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Weekly, as default setup was: new queries ship with CodeQL releases, so
+    # unchanged code is rescanned too. Monday 04:23 UTC, off the hour.
+    - cron: "23 4 * * 1"
+  workflow_dispatch: {}
+
+# Nothing at workflow level: each job states what it needs.
+permissions: {}
+
+# A newer push to the same pull request supersedes the scan of the older one.
+# Runs on main are never cancelled: each one is the record for its commit.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go:
+    name: Analyze (go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      # Upload the results (and CodeQL's status reports).
+      security-events: write
+      # Check out the repository.
+      contents: read
+      # CodeQL reads its own workflow run to report status.
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: No generated Go file is tracked
+        run: scripts/materialize-generated-go.sh --check-untracked
+
+      # Everything Bazel does happens BEFORE CodeQL is initialised. `init` arms
+      # a tracer that runs the Go extractor on every `go` process started in
+      # later steps, and rules_go starts plenty of them (the standard library,
+      # protoc-gen-go). None of that is this repository's code.
+      - name: Setup Bazel
+        uses: ./.github/actions/setup-bazel
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        run: scripts/ci-bazel-warmup.sh //api/...
+      # Local build on purpose: six protoc runs and two small Go plugins. No
+      # BuildBuddy key, so this job also works on a fork's pull request.
+      - name: Materialize the Bazel-generated Go sources
+        run: scripts/materialize-generated-go.sh
+
+      # The repository's Go, not the runner image's (#1283): go.mod names
+      # MODULE.bazel's go_sdk.download version (//e2e:go_pin_test keeps them
+      # equal). setup-go also exports GOTOOLCHAIN=local. No cache: a scan
+      # should not start from a build cache another run wrote.
+      - name: Setup Go (go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      # Untraced, and before `init` for the same reason as Bazel. With
+      # -mod=readonly the go command fetches only what go.sum already names.
+      - name: Download Go modules
+        env:
+          GOFLAGS: -mod=readonly
+          GOTOOLCHAIN: local
+        run: go mod download
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: go
+          build-mode: manual
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # The traced build, and the proof that the module builds with the plain
+      # go command at all: CodeQL's tracer runs the extractor before each
+      # `go build` and then lets the real build run, so a compile error fails
+      # this step. -mod=readonly, GOTOOLCHAIN=local; go.mod and go.sum must come
+      # out byte-identical.
+      - name: Build with the plain go command (traced by CodeQL)
+        run: scripts/go-build-plain.sh
+
+      - name: Perform CodeQL analysis
+        id: analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: "/language:go"
+          # Uploaded by the last step, after the gate.
+          upload: never
+          output: ${{ runner.temp }}/codeql-sarif
+
+      # Fails on any Go extraction error ("cannot find module providing package
+      # aethermesh.dev/api/...", an unresolved type) and on CodeQL's
+      # package-not-found diagnostic, read from the SARIF's
+      # toolExecutionNotifications, and checks that every materialized file is
+      # in the database.
+      - name: The Go extraction is complete (no missing packages)
+        env:
+          SARIF_DIR: ${{ runner.temp }}/codeql-sarif
+        run: scripts/codeql-go-diagnostics.sh "$SARIF_DIR"
+
+      - name: go.mod and go.sum are untouched
+        run: git diff --exit-code -- go.mod go.sum
+
+      - name: Keep the SARIF
+        if: ${{ !cancelled() && steps.analyze.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-sarif-go
+          path: ${{ runner.temp }}/codeql-sarif/*.sarif
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the results to code scanning
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: ${{ runner.temp }}/codeql-sarif
+          category: "/language:go"
+
+  # The languages CodeQL analyses from source, with no build. For C/C++ that is
+  # a deliberate choice, not a default: the C++ here is the //proxy workspace's
+  # Envoy extensions and patches, and building them means building Envoy.
+  buildless:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - actions
+          - c-cpp
+          - javascript-typescript
+          - python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        id: analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: "/language:${{ matrix.language }}"
+          upload: never
+          output: ${{ runner.temp }}/codeql-sarif
+
+      - name: Keep the SARIF
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: ${{ runner.temp }}/codeql-sarif/*.sarif
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the results to code scanning
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: ${{ runner.temp }}/codeql-sarif
+          category: "/language:${{ matrix.language }}"

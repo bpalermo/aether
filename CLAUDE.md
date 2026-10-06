@@ -50,6 +50,10 @@ make deps-audit              # or: scripts/go-deps-audit.sh — also a required
 # block so the pin survives; deleting the line lets the vulnerable version back
 # in. Bazel-only requires get a `// bazel-only:` annotation instead.
 
+# Copy the Bazel-generated proto Go into the tree (git-ignored) and build with the
+# plain go command — what CodeQL scans (.github/workflows/codeql.yaml; runbook)
+make go-build-plain          # make materialize-go / materialize-go-clean
+
 # Format code (Go, protobuf, Starlark, shell)
 make format                  # or: bazel run //:format
 make format-check            # Check only, no modifications

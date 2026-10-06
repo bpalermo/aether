@@ -10,6 +10,27 @@ tidy:
 deps-audit:
 	@scripts/go-deps-audit.sh
 
+# Copy the Bazel-generated Go (the proto packages under api/) into the source
+# tree, git-ignored, so the plain go command and anything built on it (CodeQL,
+# gopls without the Bazel packages driver) can resolve the whole module.
+# `make materialize-go-clean` removes them. docs/runbook.md, "CodeQL code
+# scanning".
+.PHONY: materialize-go
+materialize-go:
+	@scripts/materialize-generated-go.sh
+
+.PHONY: materialize-go-clean
+materialize-go-clean:
+	@scripts/materialize-generated-go.sh --clean
+
+# What the `go` job of .github/workflows/codeql.yaml proves on every PR: after
+# materializing, the module builds (and vets) with the plain go command,
+# -mod=readonly and GOTOOLCHAIN=local, without touching go.mod or go.sum. Uses
+# the Go SDK Bazel pins, whatever `go` is on PATH.
+.PHONY: go-build-plain
+go-build-plain: materialize-go
+	@PATH="$$(bazel run --noshow_progress --ui_event_filters=-info @rules_go//go -- env GOROOT)/bin:$$PATH" scripts/go-build-plain.sh --vet
+
 .PHONY: build
 build:
 	@bazel build //...

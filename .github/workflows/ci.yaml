@@ -309,6 +309,16 @@ jobs:
       - name: The image registry is one setting
         run: scripts/check-registry-config.sh
 
+      # Generated Go is a Bazel output and never a tracked file.
+      # scripts/materialize-generated-go.sh copies the *.pb.go files into the
+      # tree for CodeQL (.github/workflows/codeql.yaml) behind a .gitignore
+      # pattern; this fails if one is committed anyway (`git add -f`), where it
+      # would go stale next to the .proto it came from. git only, no Bazel.
+      # Here and not only in the codeql workflow because that workflow is not
+      # a required check.
+      - name: No generated Go file is tracked
+        run: scripts/materialize-generated-go.sh --check-untracked
+
       # Then: lint them. The target list comes from a query rather than being
       # written out here, so a new package's sh_library is covered the moment the
       # check above starts demanding one. The empty test is a query-failure

@@ -1,0 +1,22 @@
+# CodeQL configuration for .github/workflows/codeql.yaml (every language).
+# docs/runbook.md, "CodeQL code scanning".
+#
+# Parity with the default setup this replaced: the `default` query suite and
+# the `remote` threat model. Both are what CodeQL uses when nothing is said;
+# the threat model is spelled out so that a change to it is a reviewed diff
+# here and not a setting somebody toggled.
+#
+# No `queries:` key: naming a suite ADDS to the default one. The default suite
+# is what runs when the key is absent.
+#
+# No `paths-ignore:`. The generated *.pb.go files that
+# scripts/materialize-generated-go.sh puts in the tree must be IN the Go
+# database (their types are the point), and they produce no alert: the scans
+# this was introduced with had zero results in any generated file. GitHub
+# documents `paths` and `paths-ignore` for interpreted languages and for
+# analysis without a build; for a language that is built (Go here) they do not
+# narrow what is extracted. If a generated file ever does produce an alert,
+# prefer a `query-filters:` exclusion of that query over hiding the path.
+name: aether
+
+threat-models: remote
