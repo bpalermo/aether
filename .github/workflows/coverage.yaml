@@ -18,9 +18,12 @@ name: coverage
 #     does not (it is pull-request only, and main.yaml is its post-merge twin);
 #   - ci.yaml's legs run bazel-diff's impacted subset. Coverage cannot: a
 #     percentage over a different set of tests per pull request is not
-#     comparable with main's. This always runs the whole unit suite and lets
-#     Bazel's cache make that cheap (an unchanged test's coverage result is a
-#     remote cache hit).
+#     comparable with main's. This always runs the whole unit suite. The
+#     instrumented compiles are remote cache hits when nothing changed; the
+#     tests themselves re-run on the runner every time, because the BuildBuddy
+#     key CI uses may not write locally executed results to the remote cache
+#     (the same is true of ci.yaml's legs). docs/runbook.md has the timings
+#     and what would make the test results cache hits too.
 #
 # What is measured (scripts/coverage.sh holds the reasoning): every go_test not
 # tagged integration, requires-root or manual, over every first-party Go

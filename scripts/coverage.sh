@@ -22,7 +22,8 @@
 # requires-root test, which skips as a normal user. ALWAYS the whole set, never
 # bazel-diff's impacted subset: a percentage over a different set of tests per
 # pull request cannot be compared with main's. Bazel caches each test's
-# coverage result, so an unchanged test is a cache hit, not a re-run.
+# coverage result, so locally an unchanged test is a cache hit, not a re-run
+# (in CI only the compiles are: docs/runbook.md, "Code coverage").
 #
 # Components: every top-level directory that has a go_library or go_binary,
 # minus EXCLUDED below. Derived by query, so a new top-level component is

@@ -208,8 +208,8 @@ count yet, so code only they exercise reads as uncovered.
 - *The whole suite, every time.* `ci` tests bazel-diff's impacted subset;
   coverage cannot, because a percentage over a different set of tests per pull
   request is not comparable with `main`'s. Bazel caches each test's coverage
-  result, so an unchanged test is a cache hit (a second local run: 1 s, 0 of 97
-  tests executed).
+  result, so locally an unchanged test is a cache hit (a second run: 1 s, 0 of
+  97 tests executed). In CI only the compiles are; see "CI cost" below.
 - *Components are derived, not listed.* Every top-level directory with a
   `go_library` or `go_binary`, minus `api` (generated proto Go), `test` and
   `e2e` (harnesses) and `bazel` (build tooling) — the `EXCLUDED` list in the
@@ -238,10 +238,23 @@ Seventeen lines in six files are timing-dependent
 `agent/internal/proxy/hotrestart/supervisor.go`,
 `agent/internal/meshdns/lameduck.go`, `agent/internal/xds/server/refresh.go`,
 `agent/internal/xds/cache/identitybinding.go`), so the widest gap two runs
-could show is 0.06 points. A future "maximum line coverage drop" threshold
-below roughly 0.1 would fail pull requests on noise. Cached results do not
-vary at all: a pull request that does not touch a test's inputs reuses
-`main`'s result for it.
+could show is 0.06 points. The first two CI runs read 77.84 % and 77.81 %
+(21 998 and 21 991 lines; six `cni` lines are covered on the runner and not on
+a workstation). Because CI re-runs every test (next paragraph), a pull request
+and `main` are two independent samples of that noise: a future "maximum line
+coverage drop" threshold below roughly 0.1 would fail pull requests that
+changed nothing.
+
+**CI cost.** The `report` job took 13 min 5 s cold (every instrumented compile
+executed on RBE) and 5 min 6 s warm (3 642 remote cache hits, 97 tests
+executed on the runner). It never gets faster than the warm figure, because
+test results are not cached in CI: Bazel reports *"--remote_upload_local_results
+is set, but … the current account is not authorized to write local results to
+the remote cache"*, and test execution is local by design (`--config=remote`,
+`--strategy=TestRunner=local`). The same holds for every leg of `ci`; it is
+only visible here because this job runs the whole suite. Unchanged tests can
+become cache hits in CI only if it is given a key that may write local results
+(not tried; a pull request's run should not be the one allowed to write them).
 
 **Report-only, and what gating takes.** Nothing requires the workflow and no
 threshold is set. Three steps turn it into a gate, in this order:
@@ -259,9 +272,12 @@ threshold is set. Three steps turn it into a gate, in this order:
 A fork's pull request is measured but not uploaded (read-only token); its
 report is in the artifact.
 
-**The upload was rejected, and Code Quality is enabled.** Read the step's
-error: HTTP 403 with "not authorized" is a missing `code-quality: write` on the
-job; a processing failure names what GitHub could not parse. Convert locally
+**The upload was rejected.** While Code Quality is not enabled the step fails
+with `Coverage upload failed (HTTP 404): Not Found` (the upload endpoint does
+not exist for the repository), preceded by `Failed to send status report: HTTP
+Error 404`. With it enabled, read the step's error: HTTP 403 with "not
+authorized" is a missing `code-quality: write` on the job; a processing
+failure names what GitHub could not parse. Convert locally
 and look at the document:
 `scripts/lcov-to-cobertura.sh coverage-report/coverage.lcov`. The three things
 read from it are the root `line-rate`, each `<class filename=…>` (repo-relative;
