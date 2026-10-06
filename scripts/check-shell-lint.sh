@@ -93,7 +93,10 @@ fi
 status=0
 while IFS= read -r f; do
 	[ -n "$f" ] || continue
-	if ! printf '%s\n' "$covered" | grep -qxF "$f"; then
+	# A here-string, not `printf | grep -q`: under pipefail grep -q exits at its
+	# first match, printf can then die of SIGPIPE, and the pipeline's 141 reads
+	# as "not covered" (#1297).
+	if ! grep -qxF -- "$f" <<<"$covered"; then
 		echo "uncovered: $f is in no sh_* target, so the shellcheck aspect never sees it" >&2
 		echo "           fix: add it to the sh_library in $(dirname "$f")/BUILD.bazel," >&2
 		echo "                or create that package's sh_library if it has none" >&2
