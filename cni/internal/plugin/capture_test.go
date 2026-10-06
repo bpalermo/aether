@@ -48,7 +48,7 @@ func isCtDirectionReply(exprs []expr.Any) bool {
 // every locally-generated packet including the pod's own server replies; a
 // reply that reaches a mark rule under redirect-all is diverted to lo, hits the
 // 18001 LISTEN socket, and is reset -- every inbound connection to every pod
-// dies. The spike (e2e/spike/tproxy-phase0b.py, arm S1) proved this on a node;
+// dies. The TPROXY spike (e2e/spike/tproxy-phase0b.py arm S1, since removed; git history before 95788da5) proved this on a node;
 // this pins the order the proof depends on.
 //
 // It also pins: every accept precedes every mark (a mark rule followed by an
