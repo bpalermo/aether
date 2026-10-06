@@ -1152,6 +1152,7 @@ func (r *RegistrarRegistry) endStream(ctx context.Context, token string, inBatch
 	r.mu.Lock()
 	r.held = make(map[string]struct{})
 	r.mu.Unlock()
+	r.metrics.tokenDropped(ctx, tokenDropMidBatch)
 	if ctx.Err() == nil { // a shutdown stays quiet (#712)
 		r.log.InfoContext(ctx, "watch stream ended inside a batch; requesting a full snapshot on reconnect", "lastVersion", token)
 	}

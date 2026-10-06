@@ -2935,7 +2935,8 @@ already ahead of the marker on the stream.
 
 So a gap that persists past a sync cycle (the poll interval at worst) is lag:
 check `aether_agent_registry_reconnects_total` and `watch_errors_total` on that
-agent, and `aether_registrar_broadcast_dropped_events_total` (a full stream skips its
+agent (and `watch_token_drops_total`, the reconnects it chose to make full
+resends, #1269), and `aether_registrar_broadcast_dropped_events_total` (a full stream skips its
 marker and is retried next cycle; a dropped endpoint event force-resyncs it).
 
 Skew: a registrar older than #1241 sends no markers, and against it the line is
@@ -3028,10 +3029,18 @@ Notes:
   services it holds, whenever a stream ends after a live event that carried no
   version (a batch's versioned last event, a version marker or the initial
   `SNAPSHOT_COMPLETE` ends that state). The next stream is `resent`, logged as
-  `watch stream ended inside a batch; requesting a full snapshot on reconnect`.
+  `watch stream ended inside a batch; requesting a full snapshot on reconnect`
+  and counted in `aether_agent_registry_watch_token_drops_total{reason="midbatch"}`.
   That costs one resend per mid-batch cut, whatever ended the stream: a
   failure, a server drain, or a dependency-set change whose cancellation landed
-  inside a batch. A registrar older than #1203 versions every event, so its
+  inside a batch. Read the counter after a soak, against
+  `aether_registrar_watch_starts_total{resume="resent"}`: the suspected cost is a
+  batch whose own event changes the dependency set (a TCP service's
+  `SERVICE_ADDED`/`SERVICE_REMOVED` wakes the xDS cache, which re-asserts the
+  filter and cancels the stream before the rest of the batch arrives), which
+  would turn #1239's `current`/`extended` re-opens back into resends exactly at
+  dependency-set changes. A `midbatch` step on every node at each such change
+  is that case. A registrar older than #1203 versions every event, so its
   streams never end inside a batch. Agents older than #1269 keep the token and
   stay exposed to this case until the DaemonSet has rolled.
 - Publications (an RPC's or a sync's snapshot change plus its broadcast) are

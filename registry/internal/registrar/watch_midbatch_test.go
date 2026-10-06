@@ -17,6 +17,7 @@ import (
 	"aethermesh.dev/common/snapshotversion"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -439,6 +440,8 @@ func TestConsumeStream_MidBatchToken(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			ab := []string{"default/a", "default/b"}
 			r := heldAfterStart(t, ab...)
+			var reader *sdkmetric.ManualReader
+			r.metrics, reader = newTestClientMetrics(t)
 			open := r.resumeFor(serviceSet(ab), resumeToken)
 			require.Equal(t, resumeToken, open.lastVersion)
 			end := c.end
@@ -449,6 +452,12 @@ func TestConsumeStream_MidBatchToken(t *testing.T) {
 				events: append([]ev{marker(resumeToken)}, c.live...), err: end,
 			}, resumeToken, open)
 			assert.Equal(t, c.want, got)
+			drops, _ := metricValue(t, reader, "aether.agent.registry.watch_token_drops")
+			if c.want == "" {
+				assert.Equal(t, int64(1), drops, "the drop is counted")
+			} else {
+				assert.Zero(t, drops, "a kept token is not counted")
+			}
 
 			// What the next stream presents follows from the token alone.
 			next := r.resumeFor(serviceSet(ab), got)
