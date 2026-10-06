@@ -145,6 +145,23 @@ sh_test(
     ],
 )
 
+# The coverage gate (the `gate` job of .github/workflows/coverage.yaml):
+# scripts/coverage-compare.sh against a golden report and verdicts worked out
+# by hand, and scripts/coverage-baseline.sh (which run on main is the baseline)
+# through a fake `gh`. Hermetic: bash, awk, sort and the Bazel-pinned jq.
+sh_test(
+    name = "coverage_gate_test",
+    size = "small",
+    srcs = ["coverage_gate_test.sh"],
+    data = [
+        "coverage-baseline.sh",
+        "coverage-compare.sh",
+        "coverage-summary.sh",
+        "@jq_toolchains//:resolved_toolchain",
+    ] + glob(["testdata/coverage-gate/*"]),
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
 # Where the scheduled sweep starts reading (#1281): from the last green
 # scheduled sweep, never earlier than the full window, the full window when
 # unsure.

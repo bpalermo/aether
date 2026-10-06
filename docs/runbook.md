@@ -194,11 +194,11 @@ make coverage COVERAGE_FLAGS="--jobs=6"         # extra `bazel coverage` flags
 `coverage.xml` (Cobertura), `summary.md` (the per-component table) and
 `unrecorded.txt`. `.github/workflows/coverage.yaml` runs the same script on
 every pull request and on every push to `main`, puts the table in the job
-summary, keeps the files as the `coverage-report` artifact, and uploads the XML
-to GitHub's native code coverage (GitHub Code Quality) with
-`actions/upload-code-coverage`. GitHub reads **line** coverage only, from
-Cobertura XML only, keeps the latest upload per branch, and compares a pull
-request with `main`'s latest upload in a `github-code-quality[bot]` comment.
+summary and keeps the files as the `coverage-report` artifact (90 days). On a
+pull request its `gate` job then compares the total with `main`'s and fails the
+`coverage` check when it dropped by more than one percentage point: "The gate"
+below. The comparison is the repository's own, because GitHub's native code
+coverage is not available to it ("The native upload is parked").
 
 **What the number is.** Line coverage of every `go_test` **not** tagged
 `integration`, `requires-root` or `manual` (97 of 101 when this was written),
@@ -241,9 +241,9 @@ Seventeen lines in six files are timing-dependent
 could show is 0.06 points. The first two CI runs read 77.84 % and 77.81 %
 (21 998 and 21 991 lines; six `cni` lines are covered on the runner and not on
 a workstation). Because CI re-runs every test (next paragraph), a pull request
-and `main` are two independent samples of that noise: a future "maximum line
-coverage drop" threshold below roughly 0.1 would fail pull requests that
-changed nothing.
+and `main` are two independent samples of that noise: a `COVERAGE_MAX_DROP`
+below roughly 0.1 would fail pull requests that changed nothing. The default
+of 1.0 is sixteen times the widest gap.
 
 **CI cost.** The `report` job took 13 min 5 s cold (every instrumented compile
 executed on RBE) and 5 min 6 s warm (3 642 remote cache hits, 97 tests
@@ -256,37 +256,108 @@ only visible here because this job runs the whole suite. Unchanged tests can
 become cache hits in CI only if it is given a key that may write local results
 (not tried; a pull request's run should not be the one allowed to write them).
 
-**Report-only, and what gating takes.** Nothing requires the workflow and no
-threshold is set. Three steps turn it into a gate, in this order:
+**The gate.** On every pull request the `gate` job of the coverage workflow
+compares the pull request's total line coverage with a baseline from `main` and
+fails when it is more than `COVERAGE_MAX_DROP` percentage points lower (default
+**1.0**; a drop of exactly the threshold passes). The aggregate `coverage` job
+fails with it, so `coverage` is the one check to require. Only the total gates.
+The job summary also shows, for the reviewer and without gating: the two totals
+and their delta, a per-component table with each component's delta, and the
+coverage of every changed file (`git diff <baseline>...<head>`) that either
+report names, new and deleted files included. Patch coverage is deliberately
+not a gate: it punishes the pull request that touches old untested code.
 
-1. GitHub has to accept the upload. As of 2026-10-06 it does not: the upload
-   API answers HTTP 404 on pull requests and HTTP 500 on `main`, with no cause
-   named, and this repository (owned by a personal account) has no *Code
-   quality* page under Settings to enable anything on. Until that changes the
-   `upload` job's upload step is `continue-on-error` and says so with a
-   warning, and the job stays green.
-2. Remove that `continue-on-error` and the warning step after it (the `TODO` in
-   the workflow), so a rejected upload is red.
-3. Add the `coverage` check to the `main` ruleset's required status checks,
-   then add the ruleset's "Restrict code coverage" rule (minimum line coverage,
-   maximum line coverage drop). That rule does not wait for an upload to
-   finish, which is why the check that uploads has to be required with it.
+- *Which baseline.* `scripts/coverage-baseline.sh` takes the `coverage-report`
+  artifact of a **successful run of the coverage workflow on `main`** (a `push`
+  or a `workflow_dispatch` run, never a pull request's or a fork's):
+  1. the run for the pull request's **base commit**
+     (`github.event.pull_request.base.sha`). The ruleset keeps a branch up to
+     date with `main`, so this is normally `main`'s head and the delta is the
+     pull request's own. If that run is still going (a pull request pushed
+     right after a merge) the job waits up to ten minutes for it;
+  2. otherwise **`main`'s most recent** successful run whose artifact still
+     exists. The summary and the notice then say so and name the commit
+     (`main at 1a2b3c4d (main's latest report, not the base commit …)`). The
+     delta then also contains whatever `main` gained between the two commits.
+  3. none: the job **fails** with `Coverage gate: no baseline`. It never passes
+     with nothing to compare. Fix: run the workflow on `main` (*Actions >
+     coverage > Run workflow*, or `gh workflow run coverage.yaml --ref main`),
+     wait for it, re-run the failed job. Artifacts are kept 90 days, so this
+     only happens after a quarter with no push to `main`, or if every recent
+     run on `main` failed.
+- *Stacked pull requests.* A `gh stack` member's base is the `upgrade/**`
+  branch beneath it, a commit `main` never had, so it always takes path 2: it
+  is compared with `main`'s latest, **cumulatively** with the members beneath
+  it. That is the number that matters, because the stack lands on `main`: a
+  member cannot hide a drop behind the one below it, and conversely a stack
+  whose first member drops 0.8 and second 0.4 fails at the second, where the
+  total crosses the line. Add the tests there or split differently.
+- *The threshold.* One constant, `DEFAULT_MAX_DROP` in
+  `scripts/coverage-compare.sh`, overridden by the repository variable
+  `COVERAGE_MAX_DROP` (*Settings > Secrets and variables > Actions >
+  Variables*; `gh variable set COVERAGE_MAX_DROP --body 0.5`). A plain number
+  of percentage points between 0 and 100; unset or empty means the default,
+  and anything else (`1%`, `-1`, `one`) fails the job naming the value rather
+  than being ignored. `COVERAGE_MIN` is the same for an absolute floor on the
+  total, in percent; unset (today) means no floor. A relative gate alone lets
+  the number erode by up to a point per pull request, and the floor is what
+  stops that if it ever matters.
+- *Locally.* The same comparison, against any baseline you have:
+  `gh run download <run id> --name coverage-report --dir /tmp/base`, `make
+  coverage`, then `scripts/coverage-compare.sh --baseline
+  /tmp/base/coverage.lcov --head coverage-report/coverage.lcov`.
 
-A fork's pull request is measured but not uploaded (read-only token); its
-report is in the artifact.
+**The gate failed.** The `::error` on the run gives both totals, the line
+counts and the delta; the component and changed-file tables say where it came
+from.
 
-**The upload was rejected.** While Code Quality is not enabled the step fails
-with `Coverage upload failed (HTTP 404): Not Found` (the upload endpoint does
-not exist for the repository), preceded by `Failed to send status report: HTTP
-Error 404`. With it enabled, read the step's error: HTTP 403 with "not
-authorized" is a missing `code-quality: write` on the job; a processing
-failure names what GitHub could not parse. Convert locally
-and look at the document:
-`scripts/lcov-to-cobertura.sh coverage-report/coverage.lcov`. The three things
-read from it are the root `line-rate`, each `<class filename=…>` (repo-relative;
-the converter refuses anything else) and each `<line number=… hits=…>`.
-`//scripts:lcov_to_cobertura_test` holds the converter to a golden file and
-`//scripts:coverage_test` holds the script's target selection.
+- *Code lost its tests, or new code has none.* Add the tests. A new file no
+  test links counts at zero, which is the point.
+- *A test stopped running.* A `go_test` that gained `manual`, `integration` or
+  `requires-root`, or a deleted test target, drops out of the measured set
+  while its library's lines stay in the denominator.
+- *The drop is legitimate.* Deleting a large, well-tested package lowers the
+  percentage although nothing got worse: 1 000 fully covered lines removed
+  from today's tree is about −0.8 points. The lines columns of the tables show
+  that shape (lines and covered fall together). The escape hatch is the
+  threshold itself, and only the owner holds it: set `COVERAGE_MAX_DROP` high
+  enough for that pull request (`gh variable set COVERAGE_MAX_DROP --body 2.5`),
+  re-run the failed `gate` job, merge, and **restore it** (`gh variable delete
+  COVERAGE_MAX_DROP`). While raised it applies to every open pull request, so
+  keep the window short. The next pull request is compared with `main`'s new,
+  lower number; nothing has to be reset. There is deliberately no label or
+  commit-message bypass: those are things a pull request's author controls,
+  and a gate its subject can switch off is not one.
+- *`Coverage gate: no baseline`.* See path 3 above.
+- *`Coverage gate: malformed threshold`.* Fix or delete the variable it names.
+
+`//scripts:coverage_gate_test` holds the comparison to a golden report and to
+verdicts worked out by hand, and the baseline selection to a fake `gh`.
+
+**The one remaining owner step.** Nothing requires the workflow until
+`coverage` is added to the `main` ruleset's required status checks (next to
+`ci`, `proxy`, `codeql` and `CodeQL`). Do not add the ruleset's "Restrict code
+coverage" rule: it reads GitHub's native coverage, which has no data here.
+
+**The native upload is parked.** GitHub's native code coverage (GitHub Code
+Quality) is not available to this repository: as of 2026-10-06 the upload API
+answers HTTP 404 on pull requests and HTTP 500 on `main` even with
+`code-quality: write` granted, and a repository owned by a personal account has
+no *Code quality* page under Settings to enable anything on
+(actions/upload-code-coverage#16). The `upload` job is kept but runs only when
+the repository variable `CODE_COVERAGE_UPLOAD` is `true`; by default it is
+skipped, with no warning, and a skipped upload does not fail `coverage`. If
+GitHub enables the feature, set the variable. With it on, a rejected upload is
+red (there is no `continue-on-error`): `Coverage upload failed (HTTP 404): Not
+Found` means the endpoint still does not exist for the repository; HTTP 403
+with "not authorized" is a missing `code-quality: write` on the job; a
+processing failure names what GitHub could not parse. Convert locally and look
+at the document: `scripts/lcov-to-cobertura.sh coverage-report/coverage.lcov`.
+The three things read from it are the root `line-rate`, each `<class
+filename=…>` (repo-relative; the converter refuses anything else) and each
+`<line number=… hits=…>`. A fork's pull request is never uploaded (read-only
+token). `//scripts:lcov_to_cobertura_test` holds the converter to a golden file
+and `//scripts:coverage_test` holds the script's target selection.
 
 ### CI: external repository fetches (#1001)
 

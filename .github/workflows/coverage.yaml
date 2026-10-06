@@ -1,21 +1,30 @@
 name: coverage
 
-# Line coverage of the unit suite, uploaded to GitHub's native code coverage
-# (GitHub Code Quality). docs/runbook.md, "Code coverage".
+# Line coverage of the unit suite, and the gate on it. docs/runbook.md, "Code
+# coverage".
 #
-# Report-only for now: no ruleset requires this workflow and no threshold is
-# set. Code Quality has to be enabled in the repository's settings before
-# GitHub accepts an upload; until then the upload step is rejected, and that is
-# deliberately not a red job (see the `upload` job). Everything before the
-# upload runs and must pass regardless, and the report is kept as a workflow
-# artifact either way.
+# A pull request fails the `coverage` check when its total line coverage is
+# more than COVERAGE_MAX_DROP percentage points (default 1.0,
+# scripts/coverage-compare.sh) below the baseline: the report of this
+# workflow's run on main for the pull request's base commit, else main's
+# latest (scripts/coverage-baseline.sh). The comparison is ours, not GitHub's:
+# GitHub's native code coverage (Code Quality) does not accept uploads from
+# this repository, so the ruleset's "Restrict code coverage" rule would never
+# see data. The native upload is kept, parked behind the repository variable
+# CODE_COVERAGE_UPLOAD (see the `upload` job).
+#
+# Repository variables (Settings > Secrets and variables > Actions > Variables;
+# all optional, none set by this file):
+#   COVERAGE_MAX_DROP     maximum drop of the total, in percentage points.
+#   COVERAGE_MIN          minimum total, in percent. Unset: no minimum.
+#   CODE_COVERAGE_UPLOAD  `true` runs the `upload` job. Anything else: skipped.
 #
 # Its own workflow rather than a job in ci.yaml, for three reasons:
-#   - `code-quality: write` stays out of the workflow that builds and tests
-#     every pull request;
-#   - GitHub compares a pull request's coverage with the default branch's
-#     latest upload, so this must also run on pushes to main, which ci.yaml
-#     does not (it is pull-request only, and main.yaml is its post-merge twin);
+#   - `actions: read` and `code-quality: write` stay out of the workflow that
+#     builds and tests every pull request;
+#   - the baseline is main's own report, so this must also run on pushes to
+#     main, which ci.yaml does not (it is pull-request only, and main.yaml is
+#     its post-merge twin);
 #   - ci.yaml's legs run bazel-diff's impacted subset. Coverage cannot: a
 #     percentage over a different set of tests per pull request is not
 #     comparable with main's. This always runs the whole unit suite. The
@@ -31,10 +40,8 @@ name: coverage
 # code lowers the number instead of vanishing from it. Not integration, e2e,
 # kind, netns or soak.
 #
-# The `coverage` job at the bottom is the one name a ruleset should require
-# once this gates. GitHub's "Restrict code coverage" rule does not wait for an
-# upload, so the check that uploads has to be required alongside it. A required
-# check must report on every pull request that can merge, hence the
+# The `coverage` job at the bottom is the one name a ruleset requires. A
+# required check must report on every pull request that can merge, hence the
 # `upgrade/**` base (stacked pull requests target the branch beneath them, as
 # ci.yaml and codeql.yaml allow for).
 on:
@@ -45,19 +52,28 @@ on:
     branches:
       - main
       - "upgrade/**"
+  # How a missing baseline is repaired: run this on main (Actions > coverage >
+  # Run workflow, or `gh workflow run coverage.yaml --ref main`). A successful
+  # run on main is a baseline whether a push or this started it; a run on any
+  # other branch only produces its report.
+  workflow_dispatch: {}
 
 # Nothing at workflow level: each job states what it needs.
 permissions: {}
 
 # A newer push to the same pull request supersedes the older run. Runs on main
-# are never cancelled: each one is the baseline pull requests are compared with.
+# are never cancelled and never share a group: each one is the baseline of the
+# pull requests based on its commit, and GitHub keeps only ONE pending run per
+# concurrency group, so a shared group would drop the middle one of three quick
+# merges and leave that commit without a baseline.
 concurrency:
-  group: coverage-${{ github.ref }}
+  group: coverage-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Runs the repository's code with a read-only token; the upload is a separate
-  # job so that `code-quality: write` never sits next to a test binary.
+  # Runs the repository's code with a read-only token; the gate and the upload
+  # are separate jobs so that `actions: read` and `code-quality: write` never
+  # sit next to a test binary.
   report:
     name: Report (unit suite)
     runs-on: ubuntu-latest
@@ -73,8 +89,9 @@ jobs:
       COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       # The pull request's HEAD, not the merge commit GitHub checks out by
-      # default: the upload is attributed to the head commit, and the report's
-      # line numbers have to be that commit's.
+      # default: the gate compares this commit with its base, a native upload
+      # is attributed to the head commit, and the report's line numbers have
+      # to be that commit's.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,6 +148,10 @@ jobs:
             echo
             echo "</details>"
           } >>"$GITHUB_STEP_SUMMARY"
+      # 90 days (the most a public repository keeps): on main this artifact is
+      # the baseline pull requests are compared with, and it has to outlive a
+      # quiet period. When it has not, the gate says so and how to make a new
+      # one (`workflow_dispatch` above).
       - name: Keep the report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -142,15 +163,106 @@ jobs:
             ${{ runner.temp }}/coverage/summary.md
             ${{ runner.temp }}/coverage/unrecorded.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
+  # The gate. No test binary runs here: it reads two reports and compares them
+  # (scripts/coverage-compare.sh), which is why this job, not `report`, holds
+  # `actions: read`. A fork's pull request is gated too: its token can read.
+  #
+  # Which baseline (scripts/coverage-baseline.sh): main's run for the pull
+  # request's base commit; else main's most recent successful run. A stacked
+  # pull request (base `upgrade/**`) always gets the latter, because its base
+  # commit was never on main: the stack lands on main, so each member is
+  # measured against main, cumulatively with the members beneath it. No
+  # baseline at all fails the job with what to do about it.
+  gate:
+    name: Gate (drop against main)
+    needs: report
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # List main's runs of this workflow and download the baseline artifact.
+      actions: read
+      # Check out the scripts and the history `git diff` needs.
+      contents: read
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      # Full history: the changed-files table is a `git diff` between the
+      # baseline commit and the head.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch this pull request's report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-report
+          path: ${{ runner.temp }}/coverage
+      # Waits up to ten minutes for main's run of the base commit when it is
+      # still going (a pull request pushed right after a merge), rather than
+      # compare with an older commit.
+      - name: Find and fetch the baseline from main
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/coverage-baseline.sh --base-sha "$BASE_SHA" --out "$RUNNER_TEMP/baseline" --wait-seconds 600 >>"$GITHUB_OUTPUT"
+      # The thresholds are repository variables so the owner can tune them
+      # without a pull request; unset is empty, which the script reads as "the
+      # default" (and, for the minimum, "off"). A malformed value fails.
+      - name: Compare with the baseline
+        env:
+          COVERAGE_MAX_DROP: ${{ vars.COVERAGE_MAX_DROP }}
+          COVERAGE_MIN: ${{ vars.COVERAGE_MIN }}
+          BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
+          BASELINE_MATCH: ${{ steps.baseline.outputs.match }}
+          BASELINE_RUN_URL: ${{ steps.baseline.outputs.run_url }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ "$BASELINE_MATCH" = exact ]; then
+            label="main at ${BASELINE_SHA:0:8}"
+            source="the pull request's base commit"
+          else
+            label="main at ${BASELINE_SHA:0:8} (main's latest report, not the base commit ${BASE_SHA:0:8})"
+            source="main's most recent report: the base commit \`${BASE_SHA:0:8}\` (\`$BASE_REF\`) has no successful coverage run on main. For a stacked pull request that is by design, and the delta then covers the whole stack up to this member"
+          fi
+          args=(--baseline "$RUNNER_TEMP/baseline/coverage.lcov" --head "$RUNNER_TEMP/coverage/coverage.lcov" --baseline-label "$label")
+          # Informational only, so a diff that cannot be computed costs the
+          # table, not the gate.
+          if git diff --name-only --no-renames "$BASELINE_SHA...$HEAD_SHA" >"$RUNNER_TEMP/changed.txt"; then
+            args+=(--changed-files "$RUNNER_TEMP/changed.txt")
+          else
+            echo "::warning title=Coverage gate::could not diff $BASELINE_SHA...$HEAD_SHA; the changed-files table is left out"
+          fi
+          rc=0
+          scripts/coverage-compare.sh "${args[@]}" >"$RUNNER_TEMP/gate.md" || rc=$?
+          {
+            cat "$RUNNER_TEMP/gate.md"
+            echo "Baseline: [\`$BASELINE_SHA\`]($BASELINE_RUN_URL), $source. Head: \`$HEAD_SHA\`. Changed files are those of \`git diff ${BASELINE_SHA:0:8}...${HEAD_SHA:0:8}\`."
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  # PARKED: GitHub's native code coverage (Code Quality) is not available to
+  # this repository. The upload API answers HTTP 404 on pull requests and HTTP
+  # 500 on main even with `code-quality: write` granted, and a repository owned
+  # by a personal account has no settings page to enable it on
+  # (actions/upload-code-coverage#16). So this job runs only when the
+  # repository variable CODE_COVERAGE_UPLOAD is `true`; by default it is
+  # skipped, silently. Kept, permission block and all, so that turning it on is
+  # one variable if GitHub ever enables the feature. When it is on, a rejected
+  # upload is red: nothing softens it.
+  #
   # A fork's pull request gets a read-only token whatever is declared here, so
-  # the upload is skipped for it (the action would skip it too). The report job
-  # above still ran; the XML is in the artifact.
+  # the upload is skipped for it (the action would skip it too).
   upload:
     name: Upload to code coverage
     needs: report
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ vars.CODE_COVERAGE_UPLOAD == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -170,44 +282,50 @@ jobs:
       # pushed commit on main. One report, one stable label: GitHub keeps the
       # latest upload per branch, and a label that changed would start a second
       # series instead of continuing this one.
-      #
-      # TODO(coverage gating): remove `continue-on-error` and the step after
-      # this one when the `coverage` check becomes required. Until Code Quality
-      # is enabled in the repository settings GitHub rejects every upload, and
-      # a workflow that can only be red teaches people to ignore it. This is
-      # the ONLY step allowed to fail: the report itself is produced, tested
-      # and kept by the `report` job, which is not softened in any way.
       - name: Upload the Cobertura report
-        id: upload
-        continue-on-error: true
         uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1.4.4
         with:
           file: ${{ runner.temp }}/coverage/coverage.xml
           language: Go
           label: code-coverage/unit
 
-      - name: The upload was not accepted (report-only until Code Quality is enabled)
-        if: ${{ steps.upload.outcome == 'failure' }}
-        run: |
-          echo "::warning title=Coverage upload rejected::GitHub did not accept the coverage report (see the 'Upload the Cobertura report' step). Nothing was recorded for this commit: no pull request comment, no baseline on main. GitHub answers this upload with HTTP 404 on pull requests and HTTP 500 on main and names no cause; the repository (owned by a personal account) has no Code quality settings page, so the feature is most likely unavailable to it. The report is in the 'coverage-report' artifact. docs/runbook.md, 'Code coverage'."
-          {
-            echo "### Coverage upload rejected"
-            echo
-            echo "GitHub did not accept the report, so nothing was recorded for this commit. Expected until GitHub Code Quality is enabled in the repository settings; the Cobertura XML is in the \`coverage-report\` artifact."
-          } >>"$GITHUB_STEP_SUMMARY"
-
-  # The single check to require once coverage gates. `if: always()` so it
-  # reports even when a job above failed. The report must have succeeded; the
-  # upload may be skipped (a fork's pull request) but not failed or cancelled.
+  # The single check to require. `if: always()` so it reports even when a job
+  # above failed. The report must have succeeded. On a pull request the gate
+  # must have SUCCEEDED: skipped is not good enough there, because a skipped
+  # gate compared nothing. Off a pull request there is nothing to compare with
+  # and the gate is skipped by design. The upload is skipped unless it is
+  # switched on; switched on, it must not fail.
   coverage:
     if: always()
-    needs: [report, upload]
+    needs: [report, gate, upload]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
+    env:
+      EVENT: ${{ github.event_name }}
+      REPORT: ${{ needs.report.result }}
+      GATE: ${{ needs.gate.result }}
+      UPLOAD: ${{ needs.upload.result }}
     steps:
-      - name: Fail unless the report was produced and the upload job did not fail
-        if: ${{ needs.report.result != 'success' || needs.upload.result == 'failure' || needs.upload.result == 'cancelled' }}
+      - name: Fail unless the report was produced, the gate passed and the upload did not fail
         run: |
-          echo "::error::the coverage report was not produced, or the upload job failed or was cancelled"
-          exit 1
+          echo "report=$REPORT gate=$GATE upload=$UPLOAD event=$EVENT"
+          failed=0
+          if [ "$REPORT" != success ]; then
+            echo "::error::the coverage report was not produced (report: $REPORT)"
+            failed=1
+          fi
+          if [ "$EVENT" = pull_request ]; then
+            if [ "$GATE" != success ]; then
+              echo "::error::the coverage gate did not pass (gate: $GATE); see the 'Gate (drop against main)' job"
+              failed=1
+            fi
+          elif [ "$GATE" != skipped ] && [ "$GATE" != success ]; then
+            echo "::error::the coverage gate job ended as $GATE"
+            failed=1
+          fi
+          if [ "$UPLOAD" != skipped ] && [ "$UPLOAD" != success ]; then
+            echo "::error::the upload to GitHub code coverage was switched on (CODE_COVERAGE_UPLOAD) and ended as $UPLOAD"
+            failed=1
+          fi
+          exit "$failed"
