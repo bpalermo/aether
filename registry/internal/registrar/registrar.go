@@ -122,7 +122,7 @@ type RegistrarRegistry struct {
 	// resumes with last_version, a filter that grows past it asks for the
 	// missing services alone (partial_resume). Shrinks as the scope does, set to
 	// the stream's filter at SNAPSHOT_COMPLETE, emptied when a resend clears
-	// the cache.
+	// the cache or a stream ends inside a batch (the token is dropped, #1269).
 	held map[string]struct{}
 	// streamComplete is the set of services the current stream can still
 	// deliver whole (nil = every service): its filter at the open, less every
@@ -1059,7 +1059,8 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 // consumeStream reads events from the stream and updates the local cache.
 // lastVersion is the resume token the cache held when the stream was opened
 // (whatever open actually presented), and open how the stream was opened.
-// It returns the last version seen, for use as a resume token, and the error
+// It returns the last version seen, for use as a resume token (empty when the
+// stream ended inside a batch, see endStream), and the error
 // the stream ended with when that end was a genuine failure (nil when it was
 // an expected end: EOF, our own shutdown or filter re-assert, a forced resync,
 // or a server drain — see handleStreamError).
@@ -1071,11 +1072,16 @@ func (r *RegistrarRegistry) consumeStream(ctx context.Context, stream registrarv
 	// token); a current client keeps its catalog.
 	connectVersion := lastVersion
 	catalogReplay := make(map[string]struct{})
+	// inBatch: since the last versioned event, this stream has applied at least
+	// one live event that carried no version, so the cache is past what
+	// lastVersion names (#1269). See endStream.
+	inBatch := false
 
 	for {
 		event, err := stream.Recv()
 		if err != nil {
-			return r.handleStreamError(ctx, err, lastVersion)
+			token, failure := r.handleStreamError(ctx, err, lastVersion)
+			return r.endStream(ctx, token, inBatch), failure
 		}
 
 		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE && catalogReplay == nil {
@@ -1085,7 +1091,17 @@ func (r *RegistrarRegistry) consumeStream(ctx context.Context, stream registrarv
 			// nothing to apply and nothing to re-derive. A registrar older than
 			// #1241 never sends one.
 			lastVersion = r.adoptVersion(ctx, event, lastVersion)
+			inBatch = inBatch && event.GetVersion() == ""
 			continue
+		}
+		// Only live events (after the initial exchange's marker) can leave the
+		// cache past its token. Before the marker nothing is applied under the
+		// presented token: a resend drops the token at its first FULL_SNAPSHOT,
+		// an extension delivers only services outside held (resumeFor purges
+		// them again if the stream is cut), and catalog events are buffered
+		// until the marker swaps them in.
+		if catalogReplay == nil {
+			inBatch = event.GetVersion() == ""
 		}
 
 		// Clear cache before the first FULL_SNAPSHOT event to replace stale data.
@@ -1108,6 +1124,38 @@ func (r *RegistrarRegistry) consumeStream(ctx context.Context, stream registrarv
 
 		lastVersion = r.adoptVersion(ctx, event, lastVersion)
 	}
+}
+
+// endStream returns the resume token a stream that ended with token leaves
+// for the next one. inBatch says whether the stream ended after applying a
+// live event that carried no version, i.e. inside a batch whose versioned last
+// event never arrived (#1269).
+//
+// Such a cache holds the batch's prefix on top of what token names, so the
+// token no longer names the cache: the cache is token's contents plus some, but
+// not all, of the batch. Presenting it anyway is safe only while the registrar
+// has moved on, because then its hash differs and it resends. When the
+// registrar's contents return to the token's hash -- a change and its exact
+// reversal (ABA), or a reconnect to a peer replica whose snapshot never got the
+// change (a lost write-behind write) -- it answers current or renamed, or
+// extended for a partial resume, and the prefix stays in the cache for good.
+//
+// The token is therefore dropped, and held with it (the cache holds no service
+// at any version now), so the next stream is resent in full. That costs one
+// resend per stream cut mid-batch, including a dependency-set change whose
+// cancellation lands inside a batch. A registrar older than #1203 versions every
+// event, so its streams never end in a batch and keep their token.
+func (r *RegistrarRegistry) endStream(ctx context.Context, token string, inBatch bool) string {
+	if !inBatch || token == "" {
+		return token
+	}
+	r.mu.Lock()
+	r.held = make(map[string]struct{})
+	r.mu.Unlock()
+	if ctx.Err() == nil { // a shutdown stays quiet (#712)
+		r.log.InfoContext(ctx, "watch stream ended inside a batch; requesting a full snapshot on reconnect", "lastVersion", token)
+	}
+	return ""
 }
 
 // adoptVersion returns the event's version as the new resume token, or token

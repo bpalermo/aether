@@ -3014,10 +3014,26 @@ Notes:
 - The version is sent only where the receiver holds everything it names: on
   `SNAPSHOT_COMPLETE`, and on the last event of each broadcast batch per watcher
   (#1203). The agent also drops its token when a resend starts clearing its
-  cache. A stream cut mid-snapshot or mid-batch therefore resends in full. Agents
-  older than #1204 keep the old token across a cut resend, so until the agent
-  DaemonSet has rolled they are exposed to an empty cache on a reconnect that
-  matches it. The window is milliseconds per reconnect.
+  cache, so a stream cut mid-snapshot resends in full. Agents older than #1204
+  keep the old token across a cut resend, so until the agent DaemonSet has rolled
+  they are exposed to an empty cache on a reconnect that matches it. The window
+  is milliseconds per reconnect.
+- A stream cut **mid-batch** (#1269) leaves the batch's unversioned prefix
+  applied while the token still names the version before the batch. Presenting
+  that token is safe only while the registrar has moved on (its hash differs, so
+  it resends). If its contents return to the token's hash, a change and its exact
+  reversal or a reconnect to a peer replica that never got the change (a lost
+  write-behind write), it answers `current`, `renamed` or `extended` and the
+  prefix stays in the cache for good. So the agent drops its token, and the
+  services it holds, whenever a stream ends after a live event that carried no
+  version (a batch's versioned last event, a version marker or the initial
+  `SNAPSHOT_COMPLETE` ends that state). The next stream is `resent`, logged as
+  `watch stream ended inside a batch; requesting a full snapshot on reconnect`.
+  That costs one resend per mid-batch cut, whatever ended the stream: a
+  failure, a server drain, or a dependency-set change whose cancellation landed
+  inside a batch. A registrar older than #1203 versions every event, so its
+  streams never end inside a batch. Agents older than #1269 keep the token and
+  stay exposed to this case until the DaemonSet has rolled.
 - Publications (an RPC's or a sync's snapshot change plus its broadcast) are
   serialized: every watcher receives batches in the order they changed the
   snapshot, each one contiguous. Before the #1239 review they ran concurrently,

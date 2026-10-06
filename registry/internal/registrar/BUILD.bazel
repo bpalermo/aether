@@ -41,6 +41,7 @@ go_test(
         "watch_identity_race_test.go",
         "watch_identity_test.go",
         "watch_identity_wake_test.go",
+        "watch_midbatch_test.go",
         "watch_peer_identity_test.go",
         "watch_protocol_test.go",
         "watch_reconnect_test.go",
@@ -51,6 +52,7 @@ go_test(
     deps = [
         "//api/aether/registrar/v1:registrar",
         "//api/aether/registry/v1:registry",
+        "//common/snapshotversion",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
