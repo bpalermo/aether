@@ -139,6 +139,15 @@
 # last of them is ever built — the others have no artifacts by construction and
 # nothing can pin them. Commits in the window that were not a push head are
 # printed as `skip <sha> (not a push head ...)` so the narrowing is never silent.
+#
+# Nor a SUPERSEDED push head (#1282): one whose publish run did not succeed, on
+# a main that has since moved past it (scripts/publish-verify-superseded.sh, the
+# rule the workflow_run path applies, #1277). The newer push's publish carries
+# its change. It is printed as `skip <sha> (superseded push head ...)` with a
+# ::notice::; main's own head, a head whose publish succeeded and a head with no
+# publish run on record are always checked. The run list comes from `gh`
+# (PUBLISH_RUNS_FILE overrides it; `<sha> <conclusion>` per line) and main's
+# head from `git ls-remote origin` (MAIN_HEAD overrides it).
 # The push heads come from GitHub's activity log for refs/heads/main (see
 # scripts/push-heads-lib.sh for why that and not the list of publish runs); that
 # needs `gh` with a token (GH_TOKEN in Actions, `gh auth` locally), or
@@ -212,17 +221,34 @@ if [ "$1" = "--recent" ]; then
 		exit 2
 	fi
 
+	# Superseded push heads (#1282): the publish conclusion of each head, and
+	# main's head, for select_unsuperseded. Both fail closed — an unreadable run
+	# list or an unknown main head skips nothing (every head is checked).
+	runs_file="$(mktemp)"
+	trap 'rm -f "$heads_file" "$runs_file"' EXIT # widened below, as above
+	if ! github_publish_conclusions >"$runs_file"; then
+		echo "::warning::--recent: could not read main's publish runs; no push head is treated as superseded"
+		: >"$runs_file"
+	fi
+	main_head="${MAIN_HEAD:-}"
+	if [ -z "$main_head" ]; then
+		main_head="$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)" || main_head=""
+	fi
+	[ -n "$main_head" ] || echo "::warning::--recent: main's head is unknown; no push head is treated as superseded"
+
 	mapfile -t window < <(git log "$main_ref" \
 		--since="$RECENT_WINDOW" --before="$RECENT_GRACE" --format=%H)
 	recent=()
 	skipped=0
+	superseded=0
 	if [ "${#window[@]}" -gt 0 ]; then
 		if ! selection="$(printf '%s\n' "${window[@]}" | select_push_heads "$heads_file")"; then
 			exit 2
 		fi
+		heads_in_window=()
 		while read -r verdict sha; do
 			case "$verdict" in
-			check) recent+=("$sha") ;;
+			check) heads_in_window+=("$sha") ;;
 			skip)
 				skipped=$((skipped + 1))
 				echo "skip ${sha} (not a push head: publish never ran for it — $(git log -1 --format=%s "$sha"))"
@@ -233,24 +259,48 @@ if [ "$1" = "--recent" ]; then
 				;;
 			esac
 		done <<<"$selection"
+		if [ "${#heads_in_window[@]}" -gt 0 ]; then
+			selection="$(printf '%s\n' "${heads_in_window[@]}" | select_unsuperseded "$runs_file" "$main_head")"
+			while read -r verdict sha conclusion; do
+				case "$verdict" in
+				check) recent+=("$sha") ;;
+				superseded)
+					superseded=$((superseded + 1))
+					msg="${sha} was superseded: its publish run ended ${conclusion} and main has moved on to ${main_head:0:12}, whose publish carries the change. Not verified ($(git log -1 --format=%s "$sha"))."
+					echo "skip ${sha} (superseded push head: publish ${conclusion}, not main's head)"
+					echo "::notice title=superseded push head, not verified::${msg}"
+					if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+						printf '%s\n\n' "**Superseded, not verified.** ${msg}" >>"$GITHUB_STEP_SUMMARY"
+					fi
+					;;
+				*)
+					echo "::error::internal: unexpected superseded-selection line '${verdict} ${sha}'" >&2
+					exit 2
+					;;
+				esac
+			done <<<"$selection"
+		fi
 	fi
-	# An empty window — or one holding only stack intermediates — is a quiet day,
-	# not a pass. Fall back to the newest PUSH HEAD old enough to have published
-	# so a scheduled run ALWAYS checks something real and is always capable of
-	# failing (#853).
+	# An empty window — or one holding only stack intermediates and superseded
+	# heads — is a quiet day, not a pass. Fall back to the newest PUSH HEAD old
+	# enough to have published that was not superseded, so a scheduled run ALWAYS
+	# checks something real and is always capable of failing (#853).
 	if [ "${#recent[@]}" -eq 0 ]; then
 		if ! selection="$(git log "$main_ref" --before="$RECENT_GRACE" --format=%H -n 500 |
 			select_push_heads "$heads_file")"; then
 			exit 2
 		fi
-		fallback="$(printf '%s\n' "$selection" | sed -n 's/^check //p' | head -1)"
+		# `sed -n 1p` rather than `head -1`: it reads to the end, so nothing
+		# upstream dies of SIGPIPE under pipefail.
+		fallback="$(printf '%s\n' "$selection" | sed -n 's/^check //p' |
+			select_unsuperseded "$runs_file" "$main_head" | sed -n 's/^check //p' | sed -n 1p)"
 		[ -z "$fallback" ] || recent=("$fallback")
 	fi
 	if [ "${#recent[@]}" -eq 0 ]; then
 		echo "::error::--recent: ${main_ref} has no push head older than '${RECENT_GRACE}' in the activity log" >&2
 		exit 2
 	fi
-	echo "--recent: ${#recent[@]} push head(s) on ${main_ref} since '${RECENT_WINDOW}', older than '${RECENT_GRACE}' (${skipped} non-head commit(s) skipped)"
+	echo "--recent: ${#recent[@]} push head(s) on ${main_ref} since '${RECENT_WINDOW}', older than '${RECENT_GRACE}' (${skipped} non-head commit(s) skipped, ${superseded} superseded push head(s) skipped)"
 	set -- "${recent[@]}"
 fi
 
@@ -495,7 +545,7 @@ check_signature() {
 setting_file="$(mktemp)"
 pin_setting_file="$(mktemp)"
 # (--recent's trap covers its own file; this one covers both runs.)
-trap 'rm -f "$setting_file" "$pin_setting_file" "${heads_file:-}"' EXIT
+trap 'rm -f "$setting_file" "$pin_setting_file" "${heads_file:-}" "${runs_file:-}"' EXIT
 
 verify_commit() {
 	local ref="$1"

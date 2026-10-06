@@ -65,3 +65,15 @@ sh_test(
     srcs = ["publish_verify_superseded_test.sh"],
     data = ["publish-verify-superseded.sh"],
 )
+
+# The same decision applied to the scheduled sweep's push heads (#1282):
+# which heads `verify-published-artifacts.sh --recent` skips as superseded.
+sh_test(
+    name = "push_heads_superseded_test",
+    size = "small",
+    srcs = ["push_heads_superseded_test.sh"],
+    data = [
+        "publish-verify-superseded.sh",
+        "push-heads-lib.sh",
+    ],
+)
