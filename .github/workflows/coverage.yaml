@@ -189,7 +189,7 @@ jobs:
       - name: The upload was not accepted (report-only until Code Quality is enabled)
         if: ${{ steps.upload.outcome == 'failure' }}
         run: |
-          echo "::warning title=Coverage upload rejected::GitHub did not accept the coverage report (see the 'Upload the Cobertura report' step). Nothing was recorded for this commit: no pull request comment, no baseline on main. Expected while GitHub Code Quality is not enabled for this repository (Settings > Code quality); the report is in the 'coverage-report' artifact. docs/runbook.md, 'Code coverage'."
+          echo "::warning title=Coverage upload rejected::GitHub did not accept the coverage report (see the 'Upload the Cobertura report' step). Nothing was recorded for this commit: no pull request comment, no baseline on main. GitHub answers this upload with HTTP 404 on pull requests and HTTP 500 on main and names no cause; the repository (owned by a personal account) has no Code quality settings page, so the feature is most likely unavailable to it. The report is in the 'coverage-report' artifact. docs/runbook.md, 'Code coverage'."
           {
             echo "### Coverage upload rejected"
             echo
