@@ -38,7 +38,11 @@ name: codeql
 # enabled in the repository's security settings, GitHub rejects the SARIF this
 # workflow uploads. Everything before the upload step still runs and must pass.
 #
-# Not a required check. The `main` ruleset requires `ci` and `proxy` only.
+# The `codeql` job at the bottom is the one name a ruleset should require: it
+# fails when any language's job failed or was cancelled, so adding a language
+# never leaves it outside the gate. A required check must report on every pull
+# request that can merge, hence the `upgrade/**` base below (stacked pull
+# requests target the branch beneath them, as ci.yaml already allows for).
 on:
   push:
     branches:
@@ -46,6 +50,7 @@ on:
   pull_request:
     branches:
       - main
+      - "upgrade/**"
   schedule:
     # Weekly, as default setup was: new queries ship with CodeQL releases, so
     # unchanged code is rescanned too. Monday 04:23 UTC, off the hour.
@@ -156,7 +161,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # A fork's pull request gets a read-only token, so the upload would fail
+      # and fail the job with it. The analysis and (for Go) the gate above
+      # still ran; the SARIF is in the artifact.
       - name: Upload the results to code scanning
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: ${{ runner.temp }}/codeql-sarif
@@ -208,8 +217,28 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # A fork's pull request gets a read-only token, so the upload would fail
+      # and fail the job with it. The analysis and (for Go) the gate above
+      # still ran; the SARIF is in the artifact.
       - name: Upload the results to code scanning
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: ${{ runner.temp }}/codeql-sarif
           category: "/language:${{ matrix.language }}"
+
+  # The single check to require. `if: always()` so it reports even when a job
+  # above failed (a skipped check would satisfy a ruleset); a failed or
+  # cancelled language fails it.
+  codeql:
+    if: always()
+    needs: [go, buildless]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Fail if any CodeQL job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: |
+          echo "::error::a CodeQL job failed, was cancelled, or did not run"
+          exit 1
