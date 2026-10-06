@@ -22,7 +22,7 @@ import (
 // The pool keeps K already-connected UDP sockets per upstream and hands one to a query
 // that can take it without waiting. It is deliberately the smallest thing that removes
 // the dial: no ID demultiplexing, no reader goroutines, no waiter map. See
-// forwardPool.exchange for why it can only ever remove work, never add latency.
+// forwardPool.take for why it can only ever remove work, never add latency.
 
 // DefaultForwardPoolSize is the shipped number of pooled sockets per upstream,
 // overridable per-Server with WithForwardPoolSize (0 disables pooling entirely).
@@ -55,7 +55,7 @@ var (
 	// creates a conntrack entry that pins DNAT to ONE kube-dns backend pod for the life
 	// of the socket. When that backend rolls the entry survives, still pointing at a
 	// dead pod, and datagrams are black-holed with NO ICMP — the socket only ever shows
-	// a read timeout. Retire-on-error (see connSlot.exchange) catches that on the first
+	// a read timeout. Retire-on-error (see udpTry.finish) catches that on the first
 	// failed query, but the age budget is what guarantees a bounded self-heal even for
 	// a socket that is never used again, and what keeps long-lived sockets from pinning
 	// this node's whole forward load onto a single kube-dns replica.
@@ -73,7 +73,7 @@ var errPoolClosed = errors.New("mesh-DNS forward pool closed")
 
 // connSlot is ONE pooled connected UDP socket plus its rotation budget.
 //
-// mu is taken with TryLock ONLY (see forwardPool.exchange). A blocking Lock would put
+// mu is taken with TryLock ONLY (see forwardPool.take). A blocking Lock would put
 // another query's forwardTimeout-bounded upstream wait directly into THIS query's
 // latency, which is exactly the regression the pool exists to avoid; a busy slot is
 // skipped instead, and an all-busy pool falls back to the old dial-per-query path.
@@ -111,18 +111,17 @@ func newForwardPool(addr string, size int) *forwardPool {
 	return p
 }
 
-// exchangeUDPPooled runs one UDP exchange over a pooled socket, falling back to a fresh
-// dial when every slot is busy, when the slot's socket had to be retired, or when
-// pooling is disabled.
+// take hands the caller one pooled socket with its slot LOCKED, or reports false when
+// every slot is busy or the slot it locked could not produce a socket (its dial failed,
+// or the pool was closed underneath it). The caller then dials its own socket. The
+// locked slot travels with its socket in a udpTry, whose finish keeps or retires it.
 //
 // It NEVER blocks on a slot. The fallback is precisely the pre-#674 behaviour, so the
 // pool can only ever remove work from a query's path and never add latency to it: the
-// worst case for any individual query is the dial it would have paid anyway.
-func (s *Server) exchangeUDPPooled(r *dns.Msg, addr string) *dns.Msg {
-	p := s.poolFor(addr)
-	if p == nil { // pooling disabled, or the upstream is not in the current set
-		return s.exchangeWith(s.udpClient, r, addr)
-	}
+// worst case for any individual query is the dial it would have paid anyway. It gives
+// up after the FIRST slot it locks fails to produce a socket rather than walk the rest
+// of the pool: whatever broke that dial most likely breaks its siblings' too.
+func (p *forwardPool) take(s *Server) (udpTry, bool) {
 	start := p.next.Add(1)
 	n := uint64(len(p.slots))
 	for i := range p.slots {
@@ -130,43 +129,51 @@ func (s *Server) exchangeUDPPooled(r *dns.Msg, addr string) *dns.Msg {
 		if !sl.mu.TryLock() {
 			continue // busy: try the next socket rather than serialise behind it
 		}
-		resp, err := sl.exchange(p, s, r)
-		sl.mu.Unlock()
-		if err == nil {
-			return resp
+		c, err := sl.ensureConn(p, s)
+		if err != nil {
+			sl.mu.Unlock()
+			return udpTry{}, false
 		}
-		// The slot retired its socket. Take one cold dial rather than walk the rest of
-		// the pool: whatever broke this socket (upstream gone, conntrack black-hole)
-		// most likely broke its siblings too.
-		break
+		sl.left--
+		return udpTry{conn: c, slot: sl}, true
 	}
-	s.metrics.recordForwardDial(dialReasonFallback)
-	return s.exchangeWith(s.udpClient, r, addr)
+	return udpTry{}, false
 }
 
-// exchange runs ONE query on this slot's socket. The caller holds sl.mu, which is what
-// makes one-query-at-a-time per socket true and therefore makes ExchangeWithConn — whose
-// packet-conn path drains replies until the transaction ID matches — the right primitive
-// with no ID demultiplexing of our own.
+// udpTry is the socket ONE forward try runs on: a pooled slot's, held under that slot's
+// lock for exactly as long as the try reads from it, or a throwaway the try dialled for
+// itself (slot nil).
 //
-// ANY failure retires the socket; only a successful reply keeps it. An upstream that
-// went away surfaces two ways on a CONNECTED UDP socket: as ECONNREFUSED, from the ICMP
-// port-unreachable the kernel delivers to the socket when the port is closed, and as a
-// plain read timeout with no ICMP at all when a stale conntrack entry for the kube-dns
-// ClusterIP still DNATs at a dead pod. Neither socket may be reused, and telling them
-// apart buys nothing — the cost of being wrong is one extra dial.
-func (sl *connSlot) exchange(p *forwardPool, s *Server, r *dns.Msg) (*dns.Msg, error) {
-	c, err := sl.ensureConn(p, s)
-	if err != nil {
-		return nil, err
+// Holding the slot lock for the whole try is what makes one-query-at-a-time per socket
+// true, and therefore what lets the read loop (awaitReply) drain stray transaction IDs
+// with no ID demultiplexing of our own. The lock may be released by a DIFFERENT
+// goroutine from the one that took it: a first try that keeps listening after its
+// re-send went out (see Server.resend) finishes on its own goroutine, which sync.Mutex
+// permits.
+type udpTry struct {
+	conn *dns.Conn
+	slot *connSlot
+}
+
+// finish ends the try. A throwaway socket is always closed. A pooled one is kept only
+// when the try got its reply (err == nil) and is retired on ANY failure.
+//
+// An upstream that went away surfaces two ways on a CONNECTED UDP socket: as
+// ECONNREFUSED, from the ICMP port-unreachable the kernel delivers to the socket when
+// the port is closed, and as a plain read timeout with no ICMP at all when a stale
+// conntrack entry for the kube-dns ClusterIP still DNATs at a dead pod. Neither socket
+// may be reused, and telling them apart buys nothing: the cost of being wrong is one
+// extra dial. A pooled socket whose reply merely arrived LATE, after the re-send went
+// out, read that reply to the end and is healthy, so it is kept (#1254).
+func (t udpTry) finish(s *Server, err error) {
+	if t.slot == nil {
+		_ = t.conn.Close()
+		return
 	}
-	sl.left--
-	resp, _, err := s.udpClient.ExchangeWithConn(r, c)
 	if err != nil {
-		sl.retireConn(s, recycleError)
-		return nil, err
+		t.slot.retireConn(s, recycleError)
 	}
-	return resp, nil
+	t.slot.mu.Unlock()
 }
 
 // ensureConn returns this slot's socket, retiring and re-dialling it when the slot is

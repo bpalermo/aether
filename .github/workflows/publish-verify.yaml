@@ -43,6 +43,14 @@
 #     the sweep re-checks the last day of main every two hours and the gap still
 #     surfaces — a few hours late instead of immediately.
 #
+#     It starts where the last GREEN scheduled sweep left off, not a full day
+#     back every time (#1281): a fixed window verified every head about eleven
+#     times, and a busy day's 34-40 heads at 45 s-2 min each (registry lookups
+#     plus ~27 cosign verifications) ran three sweeps into the timeout, which
+#     reported nothing. With no green sweep within the day it reads the full
+#     day. Step timeouts keep an overrun a FAILED step (reported below), not a
+#     cancelled job (silent).
+#
 #     The sweep checks every PUSH HEAD in that window, not every commit (#975).
 #     publish runs once per push, for its head; an atomic stack merge (gh-stack
 #     #963 put five squash commits on main in one push headed by 4930733) leaves
@@ -50,8 +58,10 @@
 #     construction and nobody can pin them. The heads come from GitHub's
 #     activity log for refs/heads/main — the record of the push itself, NOT the
 #     list of publish runs, so a push whose publish run was cancelled or never
-#     created is still a head and still goes red. Skipped commits are printed by
-#     name. See scripts/push-heads-lib.sh.
+#     created is still a head and still goes red. A head whose publish was
+#     SUPERSEDED (did not succeed, main has moved on) is skipped with a notice,
+#     by the workflow_run path's rule (#1282, #1277). Skipped commits are
+#     printed by name. See scripts/push-heads-lib.sh.
 #
 #     The workflow_run path needs no such filter: the commit it verifies is the
 #     head of the publish run that just finished, a push head by definition.
@@ -91,7 +101,12 @@ jobs:
     runs-on: ubuntu-latest
     # Direct manifest lookups (#985) cost ~23 s per commit against ~13 s for
     # the old tag listing; a busy day's --recent sweep (14 heads) took 5m23s.
-    timeout-minutes: 30
+    # By 2026-10-04 a full-day sweep was 34-40 heads and ~30 min, and three in
+    # a row hit this limit (#1281). The sweep now reads only what the last
+    # green sweep did not verify, and the gate and cosign steps carry their own
+    # timeouts so an overrun FAILS a step and is reported; this job limit is
+    # the backstop above both (2 x 20 + ~5 min of setup and reporting).
+    timeout-minutes: 50
     permissions:
       contents: read
       # For the rolling failure issue below.
@@ -156,7 +171,12 @@ jobs:
       - name: Gate (verify the artifacts for this commit exist in the registry)
         id: verify
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.superseded.outputs.skip != 'true' }}
+        # A step timeout FAILS the step, so the issue step below reports it; a
+        # job timeout cancels the job, which used to report nothing (#1281).
+        timeout-minutes: 20
         env:
+          # --recent: start from the last green scheduled sweep (#1281).
+          RECENT_SINCE_LAST_GREEN: "1"
           # A publish run's head commit, a manually named commit, or --recent.
           TARGET: ${{ github.event.workflow_run.head_sha || github.event.inputs.commit }}
           TRIGGERING_RUN: ${{ github.event.workflow_run.html_url }}
@@ -208,8 +228,8 @@ jobs:
           bazelisk-cache: true
           # Repository cache (#1001): keyed on everything that changes the
           # fetched set, in the root workspace's own namespace. Restore only —
-          # main.yaml's `diff` is the one job that saves it (docs/runbook.md,
-          # "CI: external repository fetches").
+          # the savers are the `diff` jobs of ci.yaml and main.yaml, one per
+          # workflow (docs/runbook.md, "CI: external repository fetches").
           cache-version: root-1
           repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
           cache-save: false
@@ -221,6 +241,8 @@ jobs:
       - name: Verify the signatures (every index and every child manifest)
         id: cosign
         if: (success() || steps.verify.conclusion == 'failure') && steps.superseded.outputs.skip != 'true'
+        # As for the gate: an overrun fails this step and is reported (#1281).
+        timeout-minutes: 20
         env:
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
@@ -271,9 +293,18 @@ jobs:
       #
       # Gated on the verify step specifically: an infrastructure failure (no
       # network, bad checkout) must not file "nothing was published".
+      #
+      # A CANCELLED run reports too (#1281): three sweeps in a row hit the job
+      # timeout, concluded `cancelled`, and this step — then `failure()` only —
+      # stayed silent while the backstop verified nothing for a day. The step
+      # timeouts above turn an overrun into a failed step; `cancelled()` covers
+      # the job limit and anything else that stops a run before it can say
+      # whether the artifacts exist. Either way the body says it did not finish.
       - name: Open or update the missing-artifacts issue
-        if: failure() && (steps.verify.conclusion == 'failure' || steps.cosign.conclusion == 'failure') && github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' && (cancelled() || (failure() && (steps.verify.conclusion == 'failure' || steps.cosign.conclusion == 'failure')))
         env:
+          VERIFY_CONCLUSION: ${{ steps.verify.conclusion }}
+          COSIGN_CONCLUSION: ${{ steps.cosign.conclusion }}
           GH_TOKEN: ${{ github.token }}
           # `gh` infers the repository from git remotes; this job has a checkout,
           # but naming it explicitly is what #858 had to fix in e2e.yaml and it
@@ -289,11 +320,16 @@ jobs:
           # child) come from the cosign step (#925).
           unverified="$(sed -nE 's/^[[:space:]]*FAILED[[:space:]]+/UNVERIFIED /p' cosign.log 2>/dev/null || true)"
           missing="$(printf '%s\n%s\n' "$missing" "$unverified" | grep . || true)"
-          [ -n "$missing" ] || missing="(see the run log)"
+          lead="A commit on \`main\` is missing artifacts in the image registry (bazel/registry/registry.bzl) — never published, or published only in part. A deploy pinned to it will 404, and \`helm upgrade\` against its commit-suffixed chart tag cannot work."
+          if [ -z "$missing" ]; then
+            # Nothing recorded as missing: the check did not finish (#1281).
+            missing="(none recorded — the check did not finish: gate ${VERIFY_CONCLUSION:-not run}, signatures ${COSIGN_CONCLUSION:-not run}; see the run log)"
+            lead="publish-verify did not finish (a step timed out, the run was cancelled, or a lookup was inconclusive), so the commits it was to check are UNVERIFIED — a gap here would have gone unreported."
+          fi
 
           # shellcheck disable=SC2016 # literal Markdown code fences, nothing to expand
           body=$(printf '%s\n\n```\n%s\n```\n\n%s\n%s\n\n%s\n' \
-            "A commit on \`main\` is missing artifacts in the image registry (bazel/registry/registry.bzl) — never published, or published only in part. A deploy pinned to it will 404, and \`helm upgrade\` against its commit-suffixed chart tag cannot work." \
+            "$lead" \
             "$missing" \
             "Verification run: ${RUN_URL}" \
             "Publish run: ${TRIGGERING_RUN:-n/a}" \

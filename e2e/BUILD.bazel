@@ -37,3 +37,18 @@ sh_test(
         "//test/e2e:testdata/kind-config.yaml",
     ],
 )
+
+# One Go for CI (#1283): every workflow job or composite action that runs a bare
+# `go` sets it up with actions/setup-go from go.mod, and go.mod names exactly
+# MODULE.bazel's go_sdk.download version, so nothing builds with the runner
+# image's preinstalled Go. Hermetic: it only reads files.
+sh_test(
+    name = "go_pin_test",
+    size = "small",
+    srcs = ["go_pin_test.sh"],
+    data = [
+        "//:MODULE.bazel",
+        "//:ci_definitions",
+        "//:go.mod",
+    ],
+)

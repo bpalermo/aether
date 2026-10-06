@@ -39,7 +39,8 @@ filegroup(
 
 # The CI definitions, as data for the tests that police what they pin:
 # //e2e:kind_pin_test holds every kind / kubectl / node-image value in them to
-# e2e/kind-version.sh (#1251).
+# e2e/kind-version.sh (#1251), and //e2e:go_pin_test holds every Go toolchain
+# they set up to MODULE.bazel's go_sdk.download (#1283).
 filegroup(
     name = "ci_definitions",
     srcs = glob(
@@ -59,6 +60,16 @@ filegroup(
         "//bazel/actionlint:__pkg__",
         "//e2e:__pkg__",
     ],
+)
+
+# The two files that pin Go: go_sdk.download (the SDK) and go.mod (what
+# actions/setup-go reads). //e2e:go_pin_test keeps them equal (#1283).
+exports_files(
+    [
+        "MODULE.bazel",
+        "go.mod",
+    ],
+    visibility = ["//e2e:__pkg__"],
 )
 
 # actionlint's configuration, for //bazel/actionlint.

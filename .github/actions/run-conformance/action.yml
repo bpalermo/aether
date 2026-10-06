@@ -1,0 +1,272 @@
+# The body the two nightly Gateway API conformance jobs share
+# (.github/workflows/e2e.yaml: gateway-http, mesh-http; #1286). Steps: the
+# pinned Go, the images the `build` job saved, a kind cluster from the pinned
+# node image, Gateway API + aether CRDs, aether installed with the suite's
+# values, then the upstream suite run from a gateway-api checkout. After that,
+# the report artifact, diagnostics and teardown. What differs per suite is an
+# input. The job (its name, `if:`, `timeout-minutes`) stays in the workflow, so
+# `report-failure` still reads one result per suite and `only=<suite>` still
+# selects one job.
+#
+# The runner is committed at test/conformance/conformance_test.go but builds
+# only INSIDE a gateway-api checkout (the conformance package is a self-replace
+# module), so the suite checks out gateway-api@<gateway-api-version> and copies
+# the runner in.
+#
+# Requires the repository to be checked out first.
+name: Run a Gateway API conformance suite
+description: Stand up aether on a pinned kind cluster and run one upstream Gateway API conformance profile against it.
+
+inputs:
+  profile:
+    description: The conformance profile, for step names and logs (GATEWAY-HTTP, MESH-HTTP).
+    required: true
+  suite:
+    description: The Go test in test/conformance/conformance_test.go that runs the profile (`go test -run <suite>`).
+    required: true
+  cluster-name:
+    description: The kind cluster to create (and delete afterwards).
+    required: true
+  gateway-api-version:
+    description: The gateway-api release whose CRDs are installed and whose suite runs, e.g. v1.6.2.
+    required: true
+  install-description:
+    description: The aether install step's name in the log, e.g. "Install aether (edge, no SPIRE)".
+    required: true
+  helm-set:
+    description: >-
+      One `key=value` per line, each passed to `helm install` as `--set`, ahead
+      of the image overrides (which every suite gets: the kind-loaded :latest
+      images, digest cleared, pullPolicy Never). spire.enabled=false and
+      namespace.create=false are always set.
+    required: false
+    default: ""
+  ready-description:
+    description: The readiness step's name in the log.
+    required: true
+  wait-for-ready:
+    description: Shell run (bash -e) after the install; fails the suite when the control plane it needs never becomes Ready.
+    required: true
+  cloud-provider-kind:
+    description: >-
+      "true" = run cloud-provider-kind, which assigns docker-network IPs to type
+      LoadBalancer Services (the edge's per-Gateway LB Services ->
+      Gateway.status.addresses). Its log is /tmp/cloud-provider-kind.log.
+    required: false
+    default: "false"
+  report-file:
+    description: The suite's report file name (written to the runner temp directory, uploaded as report-artifact-name).
+    required: true
+  report-artifact-name:
+    description: Name of the conformance report artifact.
+    required: true
+  logs-dir:
+    description: Where the diagnostics write; uploaded as logs-artifact-name.
+    required: true
+  logs-artifact-name:
+    description: Name of the diagnostics artifact.
+    required: true
+  logs-when:
+    description: '"on-failure" (the default) collects and uploads diagnostics only when the suite or a step before it failed; "always" does it on every run.'
+    required: false
+    default: on-failure
+  diagnostics:
+    description: >-
+      Shell run (bash -e) after the common collection (kind export logs into
+      logs-dir, all pods): the suite-specific objects and component logs. Every
+      command should tolerate failure (`|| true`). LOGS_DIR and KIND_CLUSTER are
+      set.
+    required: true
+  soft:
+    description: '"true" = a suite failure does not fail the job (debugging only).'
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # The repository's Go, not the runner image's (#1283): go.mod names
+    # MODULE.bazel's go_sdk.download version (//e2e:go_pin_test keeps them
+    # equal). setup-go also exports GOTOOLCHAIN=local, so neither the
+    # cloud-provider-kind install nor the gateway-api checkout's go.mod can
+    # switch to a downloaded toolchain. No cache: the suite builds from the
+    # gateway-api checkout, which this repository's go.sum does not describe.
+    - name: Setup Go (go.mod)
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache: false
+
+    - name: Image registry (bazel/registry/registry.bzl)
+      shell: bash
+      run: scripts/image-registry.sh >> "$GITHUB_ENV"
+
+    - name: Download images artifact
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: aether-images
+        path: /tmp
+
+    - name: Load images into docker
+      shell: bash
+      run: docker load -i /tmp/aether-images.tar
+
+    # kind, kubectl and the node image from e2e/kind-version.sh (#1251), the
+    # one pin every e2e surface shares; the action creates the cluster.
+    - name: Setup kind (pinned)
+      uses: ./.github/actions/setup-kind
+      with:
+        cluster_name: ${{ inputs.cluster-name }}
+
+    - name: Load images into kind
+      shell: bash
+      env:
+        KIND_CLUSTER: ${{ inputs.cluster-name }}
+      run: |
+        for img in agent:latest mesh-dns:latest proxy-supervisor:latest uds-csi:latest cni-install:latest registrar:latest controller:latest; do
+          kind load docker-image "${IMAGE_REGISTRY}/${img}" --name "${KIND_CLUSTER}"
+        done
+
+    - name: Start cloud-provider-kind
+      if: inputs.cloud-provider-kind == 'true'
+      shell: bash
+      run: |
+        # Pinned: `@latest` let any upstream release change what this gate
+        # runs (and what runs under sudo) without a commit here. v0.12.0 is
+        # what @latest resolved to when it was pinned (2026-10-05).
+        go install sigs.k8s.io/cloud-provider-kind@v0.12.0
+        # shellcheck disable=SC2024 # the log is meant to be written as the runner user, not root
+        sudo "$(go env GOPATH)/bin/cloud-provider-kind" > /tmp/cloud-provider-kind.log 2>&1 &
+        echo "cloud-provider-kind started (pid $!)"
+
+    # Experimental channel (superset of standard): the edge agent's manager
+    # watches TCPRoute/TLSRoute, TLSRoute is experimental-only — without it the
+    # manager's watch fails and the edge container crash-loops. Server-side
+    # apply: the bundle is large; client-side apply flakes on AlreadyExists.
+    - name: Install Gateway API CRDs
+      shell: bash
+      env:
+        GATEWAY_API_VERSION: ${{ inputs.gateway-api-version }}
+      run: |
+        kubectl apply --server-side --force-conflicts -f \
+          "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml"
+        kubectl wait --for=condition=Established crd/gateways.gateway.networking.k8s.io --timeout=60s
+        kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
+
+    # The aether chart's edge-meshconfig template does a helm `lookup` for a
+    # config.aether.io/v1 MeshConfig, which requires the CRD at render time.
+    - name: Install aether CRDs (MeshConfig)
+      shell: bash
+      run: |
+        sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/crds/Chart.yaml
+        helm install aether-crds charts/crds \
+          --namespace default --wait --timeout 2m
+        kubectl wait --for=condition=Established crd/meshconfigs.config.aether.io --timeout=60s
+
+    # SPIRE off in both suites (the edge dials conformance backends over
+    # cleartext; the mesh suite runs cleartext mesh mode). Images are the
+    # kind-loaded :latest (digest cleared — it wins over tag otherwise).
+    - name: ${{ inputs.install-description }}
+      shell: bash
+      env:
+        HELM_SET: ${{ inputs.helm-set }}
+      run: |
+        sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/aether/Chart.yaml
+        # One array element per argument: the suite's values and the images'
+        # --set flags, built without relying on word splitting.
+        values=()
+        while IFS= read -r kv; do
+          if [ -n "$kv" ]; then values+=(--set "$kv"); fi
+        done <<<"$HELM_SET"
+        images=()
+        img() { images+=(--set "$1.image.repository=${IMAGE_REGISTRY}/$2" --set "$1.image.tag=latest" --set "$1.image.digest=" --set "$1.image.pullPolicy=Never"); }
+        img agent agent
+        img agent.meshDnsDaemon mesh-dns
+        img proxy.supervisor proxy-supervisor
+        img cniInstall cni-install
+        img registrar registrar
+        img controller controller
+        img udsCsi uds-csi
+        helm install aether charts/aether \
+          --namespace aether-system --create-namespace \
+          --set namespace.create=false \
+          --set spire.enabled=false \
+          "${values[@]}" \
+          "${images[@]}" \
+          --set proxy.image.pullPolicy=IfNotPresent
+        kubectl get gatewayclass aether -o yaml || true
+
+    - name: ${{ inputs.ready-description }}
+      shell: bash
+      env:
+        WAIT_FOR_READY: ${{ inputs.wait-for-ready }}
+      run: bash -e -c "$WAIT_FOR_READY"
+
+    - name: Check out gateway-api @ suite version
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: kubernetes-sigs/gateway-api
+        ref: ${{ inputs.gateway-api-version }}
+        path: gateway-api
+
+    - name: Drop in the aether runner + mesh overlay
+      shell: bash
+      run: |
+        cp test/conformance/conformance_test.go \
+          gateway-api/conformance/aether_conformance_test.go
+        cp test/conformance/mesh/manifests.yaml \
+          gateway-api/conformance/mesh/manifests.yaml
+
+    - name: Run ${{ inputs.profile }} conformance
+      id: conformance
+      working-directory: gateway-api/conformance
+      continue-on-error: ${{ inputs.soft == 'true' }}
+      shell: bash
+      env:
+        AETHER_CONFORMANCE: "1"
+        AETHER_CONFORMANCE_REPORT: ${{ runner.temp }}/${{ inputs.report-file }}
+        SUITE: ${{ inputs.suite }}
+      run: |
+        # Evidence: the toolchain the suite builds with (the pinned one, #1283).
+        go version
+        go test . \
+          -tags conformance \
+          -run "$SUITE" \
+          -v -timeout 60m
+
+    - name: Upload conformance report
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.report-artifact-name }}
+        path: ${{ runner.temp }}/${{ inputs.report-file }}
+        if-no-files-found: warn
+
+    - name: Collect logs${{ inputs.logs-when != 'always' && ' on failure' || '' }}
+      if: inputs.logs-when == 'always' || failure() || steps.conformance.outcome == 'failure'
+      shell: bash
+      env:
+        LOGS_DIR: ${{ inputs.logs-dir }}
+        KIND_CLUSTER: ${{ inputs.cluster-name }}
+        DIAGNOSTICS: ${{ inputs.diagnostics }}
+      run: |
+        mkdir -p "$LOGS_DIR"
+        kind export logs "$LOGS_DIR" --name "${KIND_CLUSTER}" || true
+        echo "=== all pods ==="
+        kubectl get pods -A -o wide || true
+        bash -e -c "$DIAGNOSTICS"
+
+    - name: Upload logs${{ inputs.logs-when != 'always' && ' on failure' || '' }}
+      if: inputs.logs-when == 'always' || failure() || steps.conformance.outcome == 'failure'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.logs-artifact-name }}
+        path: ${{ inputs.logs-dir }}
+        if-no-files-found: ignore
+
+    - name: Cleanup
+      if: always()
+      shell: bash
+      env:
+        KIND_CLUSTER: ${{ inputs.cluster-name }}
+      run: kind delete cluster --name "${KIND_CLUSTER}" || true

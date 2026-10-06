@@ -485,6 +485,19 @@ which fails on any copy that disagrees — a kind config, a workflow's
 `KIND_ALLOW_SKEW=1` to try anyway) and only warn about a newer one;
 `KIND_NODE_IMAGE=<image>` overrides the node image for one run.
 
+### Bumping Go
+
+The Go toolchain is pinned once: `go_sdk.download(version = ...)` in
+`MODULE.bazel`, the SDK rules_go builds and tests everything with. The few CI
+steps that run a bare `go` outside Bazel (the nightly conformance suites'
+`go test`, the `cloud-provider-kind` install) get the same version from
+`actions/setup-go` with `go-version-file: go.mod`, so go.mod's `go` line (or a
+`toolchain` line, which setup-go prefers) must name the same full `X.Y.Z` (#1283).
+Bump both together and run `bazel test //e2e:go_pin_test`. It fails on a go.mod
+that disagrees with the SDK pin, a setup-go step with a literal `go-version` or
+`check-latest`, and any workflow job or composite action that runs `go` without
+setting it up first, which would leave it on the runner image's Go.
+
 ---
 
 ## 7. Installing on a real cluster
@@ -618,12 +631,30 @@ artifacts by construction and cannot be deployed — pin the stack's head instea
 the `--recent` sweep skips them, printing `skip <sha> (not a push head …)`. It
 learns the heads from GitHub's activity log for `refs/heads/main`, so it needs
 `gh` authenticated (or `PUSH_HEADS_FILE=<file of full shas>`); a push whose
-publish run was cancelled or never started is still a head and still fails.
+publish run never started is still a head and still fails.
+
+**Superseded push heads are skipped (#1282).** A push head whose publish run
+did not succeed (`cancelled` by the next merge, or `failure`) on a `main` that
+has since moved past it was superseded: the newer push's publish built a tree
+that contains it. Both the `workflow_run` path (#1277) and the `--recent` sweep
+skip it with a `::notice::` naming the commit — `skip <sha> (superseded push
+head …)` in the log — instead of reporting its commit-addressed tags missing.
+`main`'s own head, a head whose publish succeeded and a head with no publish
+run on record are always checked. The rule is
+`scripts/publish-verify-superseded.sh decide`; the sweep reads the publish runs
+with `gh` (`PUBLISH_RUNS_FILE=<file of "<sha> <conclusion>">` overrides it) and
+`main`'s head with `git ls-remote` (`MAIN_HEAD` overrides it). Do not deploy a
+superseded commit: pin the head that superseded it.
 
 `publish-verify` runs the same check automatically after every publish run
-reaches a conclusion and every two hours over the push heads of the last day of `main`, and files
-(or comments on) the rolling **publish: artifacts missing for a commit on main**
-issue. If you see that issue: re-run the cancelled publish run — `gh run rerun
+reaches a conclusion and every two hours over the push heads of `main` that the
+last green scheduled sweep did not already verify — at most the last day,
+the whole day when no sweep has been green within it (#1281;
+`RECENT_SINCE_LAST_GREEN=1`, `sweep_since` in `scripts/push-heads-lib.sh`) — and
+files (or comments on) the rolling **publish: artifacts missing for a commit on
+main** issue. A sweep that times out or is cancelled files on the same issue,
+saying the check did not finish: before #1281 three timed-out sweeps in a row
+concluded `cancelled` and reported nothing. If you see that issue: re-run the cancelled publish run — `gh run rerun
 <id>`, which re-runs at that same commit — or, if the commit is not the one you
 need, deploy a later commit that did publish. Never push images or charts by
 hand: the release workflow is the only publisher.
@@ -1938,6 +1969,51 @@ the socket only ever sees a read timeout.
 This self-heals: any exchange error retires the socket, and every socket also expires on
 its own budget (a jittered ~30s, or 1000 queries). Symptoms are therefore a burst of
 `aether_mesh_dns_forward_conn_recycles_total{reason="error"}`, not a sustained outage.
+
+**Forward timeouts (#1254).** A pod's resolver gives up on a datagram after 1 s and
+sends it again (`timeout:1 attempts:3`), so the forwarder retries inside that window.
+For each upstream, in order:
+
+| step | bound | what happens |
+|---|---|---|
+| first try | 600 ms (`forwardTryTimeout`) | the query goes out on a pooled socket (or a fresh one when every slot is busy or pooling is off) |
+| one re-send | until 2 s from the start (`forwardTimeout`, the per-upstream budget) | only if the first try **timed out**: the query is sent once more on a freshly dialled socket (a new source port, so a new conntrack entry and possibly another kube-dns backend). The first socket keeps listening; the first reply from either socket is delivered and the other is read and dropped |
+| next upstream / SERVFAIL | | neither answered within 2 s |
+
+- A lost datagram costs about 0.6 s plus one round trip, inside the client's 1 s
+  window. Before, it cost 2 s and then a cold dial.
+- A black-holed upstream fails at 2 s with exactly one re-send. Before, a pooled socket
+  waited 2 s and its cold-dial fallback waited another 2 s, so 4 s per upstream. The
+  budget is per upstream: N dead upstreams still cost N x 2 s.
+- A reply that arrives within 2 s is accepted, as before. The change only makes answers
+  come sooner.
+- A first try that fails **fast** (ECONNREFUSED from an ICMP port-unreachable, a write
+  error) does not re-send. It works as before: the pooled socket is retired and the
+  query gets one cold dial (`forward_conn_dials_total{reason="fallback"}`).
+- A pooled socket whose reply came back after the re-send went out is healthy and is
+  kept. One that got nothing by 2 s is retired (`reason="error"`), because that is what a
+  stale conntrack entry looks like.
+- TCP queries and the TC=1 re-fetch over TCP do not re-send: TCP retransmits on its own.
+
+Both bounds are compile-time constants in `agent/internal/meshdns`, like the 2 s timeout
+before them. They follow the clients' resolv.conf timeout, so there is no flag and no chart
+value.
+
+How often the re-send fires, and why:
+
+```promql
+# Re-sends per forwarded query, by which reply was delivered:
+#   resend = the re-send answered (datagrams to the upstream are being lost)
+#   late   = the first try answered after 600 ms (the upstream is slow, not lossy)
+#   failed = nothing within 2 s (the upstream is down or black-holed)
+sum by (result) (rate(aether_mesh_dns_forward_retries_total[5m]))
+  / scalar(sum(rate(aether_mesh_dns_queries_total{result=~"forwarded|forward_error"}[5m])))
+```
+
+A steady `late` share means kube-dns answers slower than 600 ms. That is a kube-dns
+capacity problem, and every such query also pays an extra datagram and a dial
+(`forward_conn_dials_total{reason="retry"}`).
+
 If it does NOT settle:
 
 ```bash

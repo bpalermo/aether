@@ -68,6 +68,9 @@ type metrics struct {
 	// from 1.0 to near zero.
 	forwardDials    metric.Int64Counter
 	forwardRecycles metric.Int64Counter
+	// forwardRetries counts the re-sends a timed-out first UDP try makes (issue #1254),
+	// by which try's reply was delivered, or none.
+	forwardRetries metric.Int64Counter
 	// lameDuckExits / lameDuckDuration record the post-SIGTERM handoff window
 	// (issue #729): why it ended and how long the predecessor kept serving.
 	lameDuckExits    metric.Int64Counter
@@ -88,9 +91,11 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 	truncated := b.counter("aether.mesh_dns.responses_truncated_total",
 		"Upstream replies that came back truncated (TC=1) over UDP and were re-fetched over TCP")
 	forwardDials := b.counter("aether.mesh_dns.forward_conn_dials_total",
-		"Upstream UDP sockets opened by the forward path, by reason (pool_fill=a pooled slot was empty or its rotation budget was spent, fallback=every pooled slot was busy or the pooled socket had just been retired, so the query dialled its own). Divided by the forwarded query count this is the dials-per-query ratio the socket pool exists to drive from 1.0 to ~0")
+		"Upstream UDP sockets opened by the forward path, by reason (pool_fill=a pooled slot was empty or its rotation budget was spent, fallback=every pooled slot was busy or the pooled socket had just failed fast, so the query dialled its own, retry=the fresh socket a query re-sends on after its first try timed out, one per aether.mesh_dns.forward_retries_total). Divided by the forwarded query count this is the dials-per-query ratio the socket pool exists to drive from 1.0 to ~0")
 	forwardRecycles := b.counter("aether.mesh_dns.forward_conn_recycles_total",
 		"Pooled upstream sockets retired, by reason (rotated=its 30s/1000-query budget expired or the upstream was reconfigured, error=the exchange on it failed). A sustained non-zero error rate means the upstream is refusing or black-holing datagrams — classically a stale conntrack entry still DNAT'ing the kube-dns ClusterIP at a rolled-away backend pod, which shows only as read timeouts and never as ICMP")
+	forwardRetries := b.counter("aether.mesh_dns.forward_retries_total",
+		"UDP forwards whose first try got no reply within the 600ms per-try timeout and were sent ONE more time on a fresh socket, by result: which reply was delivered (resend=the re-send's, the signature of a lost datagram; late=the first try's own reply arriving after the re-send went out, a slow upstream; failed=neither within the 2s per-upstream budget, the query moves to the next upstream or is answered SERVFAIL). A steady resend rate means datagrams to the upstream are being lost; mostly late means the upstream is slower than the per-try timeout")
 	reloads := b.counter("aether.mesh_dns.snapshot_reloads_total",
 		"Attempts to read the record snapshot the agent writes, by result (success, missing=file absent, parse_error=corrupt, read_error=I/O failure)")
 	duration := b.histogram("aether.mesh_dns.query.duration",
@@ -155,6 +160,7 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 
 		forwardDials:    forwardDials,
 		forwardRecycles: forwardRecycles,
+		forwardRetries:  forwardRetries,
 
 		lameDuckExits:    lameDuckExits,
 		lameDuckDuration: lameDuckDuration,
@@ -271,6 +277,15 @@ func (m *metrics) recordForwardRecycle(reason string) {
 		return
 	}
 	m.forwardRecycles.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+// recordForwardRetry counts one re-send by which try's reply was delivered (see
+// retryResend / retryLate / retryFailed).
+func (m *metrics) recordForwardRetry(result string) {
+	if m == nil {
+		return
+	}
+	m.forwardRetries.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", result)))
 }
 
 // recordLameDuck records one completed lame-duck window: the exit reason on the counter
@@ -417,6 +432,20 @@ const (
 	// exactly the pre-#674 behaviour, which is why the pool can never add latency;
 	// a persistently high share of it means the pool is too small for the load.
 	dialReasonFallback = "fallback"
+	// dialReasonRetry is the fresh socket a forward re-sends its query on after the
+	// first try timed out (issue #1254). One per forward_retries_total increment.
+	dialReasonRetry = "retry"
+)
+
+const (
+	// retryResend: the re-send's reply was delivered. A lost datagram looks like this:
+	// the first try never answers, the re-send does in one RTT.
+	retryResend = "resend"
+	// retryLate: the FIRST try's reply arrived after the re-send went out and was
+	// delivered. The upstream was slow, not lossy, and the pooled socket is kept.
+	retryLate = "late"
+	// retryFailed: neither try got a reply within the per-upstream budget.
+	retryFailed = "failed"
 )
 
 const (
