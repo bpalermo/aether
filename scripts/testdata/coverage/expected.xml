@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE coverage SYSTEM "http://cobertura.sourceforge.net/xml/coverage-04.dtd">
+<coverage line-rate="0.4167" branch-rate="0" lines-covered="5" lines-valid="12" branches-covered="0" branches-valid="0" complexity="0" version="aether-lcov-to-cobertura-1" timestamp="1700000000">
+  <sources>
+    <source>.</source>
+  </sources>
+  <packages>
+    <package name="." line-rate="0.0000" branch-rate="0" complexity="0">
+      <classes>
+        <class name="main.go" filename="main.go" line-rate="0.0000" branch-rate="0" complexity="0">
+          <methods/>
+          <lines>
+            <line number="9" hits="0"/>
+          </lines>
+        </class>
+      </classes>
+    </package>
+    <package name="agent/internal/a" line-rate="0.2857" branch-rate="0" complexity="0">
+      <classes>
+        <class name="a.go" filename="agent/internal/a/a.go" line-rate="0.5000" branch-rate="0" complexity="0">
+          <methods/>
+          <lines>
+            <line number="10" hits="5"/>
+            <line number="11" hits="0"/>
+            <line number="12" hits="1"/>
+            <line number="13" hits="0"/>
+          </lines>
+        </class>
+        <class name="b.go" filename="agent/internal/a/b.go" line-rate="0.0000" branch-rate="0" complexity="0">
+          <methods/>
+          <lines>
+            <line number="1" hits="0"/>
+          </lines>
+        </class>
+        <class name="d.go" filename="agent/internal/a/d.go" line-rate="0.0000" branch-rate="0" complexity="0">
+          <methods/>
+          <lines>
+            <line number="5" hits="0"/>
+            <line number="6" hits="0"/>
+          </lines>
+        </class>
+      </classes>
+    </package>
+    <package name="agent/internal/a/b" line-rate="1.0000" branch-rate="0" complexity="0">
+      <classes>
+        <class name="c.go" filename="agent/internal/a/b/c.go" line-rate="1.0000" branch-rate="0" complexity="0">
+          <methods/>
+          <lines>
+            <line number="7" hits="4"/>
+          </lines>
+        </class>
+      </classes>
+    </package>
+    <package name="cni" line-rate="1.0000" branch-rate="0" complexity="0">
+      <classes>
+        <class name="z.go" filename="cni/z.go" line-rate="1.0000" branch-rate="0" complexity="0">
+          <methods/>
+          <lines>
+            <line number="100" hits="12345678901"/>
+          </lines>
+        </class>
+      </classes>
+    </package>
+    <package name="common/x&amp;y" line-rate="0.5000" branch-rate="0" complexity="0">
+      <classes>
+        <class name="q&lt;&quot;uo&apos;te&gt;.go" filename="common/x&amp;y/q&lt;&quot;uo&apos;te&gt;.go" line-rate="0.5000" branch-rate="0" complexity="0">
+          <methods/>
+          <lines>
+            <line number="2" hits="0"/>
+            <line number="3" hits="1"/>
+          </lines>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>

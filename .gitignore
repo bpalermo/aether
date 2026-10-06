@@ -43,3 +43,6 @@ secrets.yaml
 # job) fails if one is ever committed.
 /api/aether/**/*.pb.go
 /.materialized-generated-go
+
+# `make coverage` (scripts/coverage.sh) writes its report here.
+/coverage-report/

@@ -115,6 +115,36 @@ sh_test(
     env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
+# scripts/lcov-to-cobertura.sh (what turns Bazel's LCOV into the Cobertura XML
+# .github/workflows/coverage.yaml uploads) against a golden document, and
+# scripts/coverage-summary.sh against totals worked out by hand. Hermetic:
+# bash, awk, sort.
+sh_test(
+    name = "lcov_to_cobertura_test",
+    size = "small",
+    srcs = ["lcov_to_cobertura_test.sh"],
+    data = [
+        "coverage-summary.sh",
+        "lcov-to-cobertura.sh",
+    ] + glob(["testdata/coverage/*"]),
+)
+
+# scripts/coverage.sh (`make coverage`, the coverage workflow's `report` job)
+# against a throwaway repository and a fake `bazel`: which components and
+# targets it derives, what it asks `bazel coverage` for, and every refusal to
+# report on an empty set. Needs git on PATH and nothing else; the real run is
+# `make coverage`.
+sh_test(
+    name = "coverage_test",
+    size = "small",
+    srcs = ["coverage_test.sh"],
+    data = [
+        "coverage.sh",
+        "coverage-summary.sh",
+        "lcov-to-cobertura.sh",
+    ],
+)
+
 # Where the scheduled sweep starts reading (#1281): from the last green
 # scheduled sweep, never earlier than the full window, the full window when
 # unsure.
