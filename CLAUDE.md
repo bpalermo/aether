@@ -26,8 +26,10 @@ bazel test --config=race //agent/internal/meshdns:all
 make test-race               # whole tree, same flag
 
 # Line coverage of the unit suite over all first-party Go (LCOV + Cobertura in
-# ./coverage-report); the same script .github/workflows/coverage.yaml uploads
-# from. Report-only. See docs/runbook.md, "Code coverage".
+# ./coverage-report); the same script .github/workflows/coverage.yaml runs.
+# That workflow GATES pull requests: `coverage` fails when the total drops more
+# than 1.0 point below main's (scripts/coverage-compare.sh; repository variable
+# COVERAGE_MAX_DROP). See docs/runbook.md, "Code coverage".
 make coverage                # or: scripts/coverage.sh [-- <bazel coverage flags>]
 
 # Build

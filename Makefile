@@ -54,7 +54,9 @@ test-race:
 # Line coverage of the unit suite over all first-party Go: LCOV, the Cobertura
 # XML GitHub's code coverage takes, and a per-component table, in
 # ./coverage-report (ignored by version control). The same script the `report`
-# job of .github/workflows/coverage.yaml runs. docs/runbook.md, "Code coverage".
+# job of .github/workflows/coverage.yaml runs, whose `gate` job fails a pull
+# request that drops the total by more than a point (scripts/coverage-compare.sh
+# is that comparison). docs/runbook.md, "Code coverage".
 #
 #   make coverage
 #   make coverage COVERAGE_FLAGS="--jobs=6 --nocache_test_results"
