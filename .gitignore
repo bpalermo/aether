@@ -35,3 +35,11 @@ secrets.yaml
 
 # Local Claude Code scheduler state — never commit.
 .claude/scheduled_tasks.lock
+
+# Bazel-generated Go, copied into the tree by scripts/materialize-generated-go.sh
+# so a plain `go build ./...` (CodeQL) resolves the proto packages. Scoped to
+# the *.pb.go suffix under the proto tree: nothing hand-written carries that
+# name. `scripts/materialize-generated-go.sh --check-untracked` (the `shell` CI
+# job) fails if one is ever committed.
+/api/aether/**/*.pb.go
+/.materialized-generated-go

@@ -399,6 +399,93 @@ controller-runtime from 0.25.0 back to 0.9.7 (`k8s.io/apiextensions-apiserver`
 requires it). Delete any matching `go_deps.gazelle_override` in the same change,
 then `make tidy` and `make gazelle`.
 
+### CodeQL code scanning
+
+Code scanning is the advanced-setup workflow `.github/workflows/codeql.yaml`
+(push to `main`, every pull request, weekly), not GitHub's default setup. The
+two are mutually exclusive: with default setup enabled in the repository's
+security settings GitHub rejects this workflow's uploads, so default setup must
+stay **off**. It is not a required check (`main` requires `ci` and `proxy`).
+
+It exists because default setup cannot run a step before the scan. The proto
+packages under `api/aether/` are Bazel outputs with no `.go` file in the tree,
+so default setup's Go autobuilder reported *"6 packages could not be found"* and
+analysed the 85 files that import them, the gRPC and API surface, without their
+types. It also ran `go mod tidy -e` (forbidden, see above) and `make`.
+
+What the `Analyze (go)` job does, in order:
+
+1. `scripts/materialize-generated-go.sh` asks Bazel for every
+   `go_proto_library`, builds their `go_generated_srcs` output group and copies
+   the `.pb.go` / `_grpc.pb.go` files to `api/aether/<pkg>/v1/`, where their
+   import paths point. The copies are git-ignored (`/api/aether/**/*.pb.go`) and
+   listed in `.materialized-generated-go`. Bazel runs **before** CodeQL is
+   initialised so the tracer never sees rules_go's own `go` processes.
+2. `scripts/go-build-plain.sh` builds the module with the plain go command
+   under CodeQL's tracer: pinned Go from `go.mod`, `GOFLAGS=-mod=readonly`,
+   `GOTOOLCHAIN=local`, `GOOS=linux`, `CGO_ENABLED=0`. `go.mod` and `go.sum`
+   must come out untouched. The tracer extracts each package and then lets the
+   real build run, so this step is also the proof that the module compiles
+   outside Bazel.
+3. CodeQL analyses with `upload: never`.
+4. `scripts/codeql-go-diagnostics.sh` reads the SARIF and fails the job if the
+   extraction was incomplete (below).
+5. Only then are the results uploaded, under the same categories default setup
+   used (`/language:go`, `/language:c-cpp`, …), so existing alerts and
+   dismissals keep matching. Every job also keeps its SARIF as a
+   `codeql-sarif-<language>` workflow artifact.
+
+The other four languages (`actions`, `c-cpp`, `javascript-typescript`,
+`python`) are analysed from source with no build. Query suite `default`, threat
+model `remote` (`.github/codeql/codeql-config.yml`). Go test files are not
+scanned.
+
+**Locally:**
+
+```bash
+make materialize-go        # copy the generated Go into the tree (git-ignored)
+make go-build-plain        # materialize, then go build + go vet with the plain
+                           # go command and the Bazel-pinned SDK
+make materialize-go-clean  # remove the copies
+```
+
+The copies are inert for Bazel and Gazelle (no target lists them, and Gazelle
+skips a `.pb.go` that sits next to its `.proto`), but they go stale when a
+`.proto` changes: re-run `make materialize-go`, or clean them.
+
+**What is not built by the plain go command.** `scripts/go-build-plain.sh`
+holds the list with reasons, and fails when an entry starts building:
+
+| Package | Why | Scanned? |
+| --- | --- | --- |
+| `test/envoy_validate`, `test/envoy_validate/generate` | imports `agent/internal/...` from outside `agent/`; Bazel `visibility` allows it, Go's internal-package rule does not | yes: the script names them in a `go build` that must fail, which is enough for the tracer to extract them |
+| `test/mtlspool` (`go vet` only) | test-only package with the same imports | no (tests are not scanned) |
+
+Three more non-test files are never part of a Linux build and so are not in the
+database: `agent/internal/udscsi/mounter_other.go`,
+`common/file/dirsync_windows.go`, `common/file/fadvise_unspecified.go`.
+
+**"The Go extraction is complete" failed.** CodeQL does not fail a scan it could
+only half do, and a partial result uploads cleanly and then closes every alert
+in the code it did not understand as *fixed*. The step reads the SARIF's
+`runs[].invocations[].toolExecutionNotifications[]` and fails on any
+`go/diagnostics/extraction-errors` entry (an unresolved package or type) other
+than the allow-listed internal-package error in `test/envoy_validate`, on any
+`go/autobuilder/*` warning (the *"packages could not be found"* family), on an
+extracted `_test.go`, and when a materialized file is missing from the
+database. Nothing was uploaded; the SARIF artifact has the full list. The usual
+cause is a generated package the materialize step did not cover.
+
+**Adding a generated Go package.** A new `go_proto_library` anywhere in the root
+workspace is discovered by `bazel query`; nothing lists the targets by hand. If
+its import path is outside `api/aether/`, the script refuses to write it until
+`.gitignore` covers the destination: add a pattern scoped to `*.pb.go` in that
+directory, never a pattern that could match a hand-written file. Generated Go
+that is **not** a proto (a `genrule` output in a `go_library`'s `srcs`, a
+generated `embedsrcs` file) makes the script fail by name: teach it where the
+file belongs first. `scripts/materialize-generated-go.sh --check-untracked`
+(the `shell` CI job) fails if a generated file is ever committed.
+
 ---
 
 ## 5. Container images
