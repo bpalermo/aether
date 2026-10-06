@@ -39,6 +39,12 @@ build:ci --color=yes
 common:ci --noshow_progress
 common:ci --noshow_loading_progress
 common:ci --test_output=errors
+# A MODULE.bazel.lock that does not match MODULE.bazel fails CI instead of being
+# silently rewritten on the runner (#1284): the drift used to go unnoticed, and
+# every later local build "fixed" it into an unrelated diff. Bazel names the
+# stale entry and the fix: `bazel mod deps --lockfile_mode=update`, then commit
+# MODULE.bazel.lock. Local builds keep the default (update) mode.
+common:ci --lockfile_mode=error
 
 # BuildBuddy Remote Build Execution (opt-in: --config=remote, pulled in by
 # --config=ci). Compile + hermetic test actions run on BuildBuddy's hosted x64

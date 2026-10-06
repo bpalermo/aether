@@ -307,6 +307,30 @@ make gazelle
 make tidy               # bazel mod tidy
 ```
 
+### MODULE.bazel.lock in CI (#1284)
+
+CI runs with `--lockfile_mode=error` (`common:ci` in `.bazelrc`), so a change to
+`MODULE.bazel` (or a bump that moves a transitive module) without the matching
+`MODULE.bazel.lock` fails the job with Bazel's own message naming the stale
+entry. Fix it locally and commit the lock:
+
+```bash
+bazel mod deps --lockfile_mode=update
+```
+
+The one non-reproducible extension in the graph was rules_rust's `crate`, used by
+protobuf for its Rust bindings (nothing here builds Rust): `crate.from_specs()`
+without a lockfile re-resolved against live crates.io on every evaluation, so
+any `bazel mod` command or a stale digest rewrote the lock with newer crates. A
+patch on protobuf (`single_version_override` in `MODULE.bazel`) points it at
+`bazel/protobuf_crates/{Cargo.lock,Cargo.Bazel.lock}`; with both set the extension
+is reproducible and is not recorded in `MODULE.bazel.lock` at all. When a
+protobuf or rules_rust bump changes the specs or the cargo-bazel digest, any
+command that evaluates that extension (a `bazel mod` subcommand; a build of
+`//...` does not, it never loads `@crates`) fails with "The current `lockfile`
+is out of date for 'crates'"; repin with `CARGO_BAZEL_REPIN=1 bazel mod deps`
+and commit both files.
+
 ### Go dependency hygiene
 
 ```bash
