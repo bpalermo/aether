@@ -70,6 +70,23 @@
 # no issue; it prints what it would do. Needs GH_TOKEN (actions: write, issues:
 # write) and GH_REPO.
 #
+# UNCANCELLABLE RUNS
+#
+# GitHub can strand a run it then refuses to cancel: run 34723047990, a proxy
+# run queued since 2026-09-12 on a branch since deleted, answers both cancel and
+# force-cancel with HTTP 409 ("Cannot cancel a workflow run that is not in
+# progress"). Nothing in this repository can clear it, and re-reporting it every
+# tick kept the rolling issue open forever (#1301). So when a cancel AND the
+# force-cancel after it both come back 409, the run is reported ONCE as
+# "uncancellable — needs GitHub support" and remembered in a hidden marker,
+#   <!-- stuck-runs-uncancellable: <id>,<id> -->
+# carried in every report the watchdog writes (body, comment, closing comment).
+# Each tick reads it back from the newest issue with the title, open or closed,
+# and leaves those runs out of the stuck set, so the issue closes once nothing
+# else is stuck and a NEW stuck run is reported as usual. A remembered id is
+# carried only while GitHub still lists the run as stuck. Any other cancel
+# failure (a 5xx, a timeout) is not remembered: the next tick tries again.
+#
 # Exit 0 whether or not anything is stuck (the issue is the report); 2 when the
 # check itself cannot run.
 #
@@ -83,6 +100,10 @@ THRESHOLD="${STUCK_THRESHOLD_MINUTES:-60}"
 JQ="${JQ:-jq}"
 ISSUE_TITLE="CI: workflow runs stuck before they started"
 MARKER_PREFIX="<!-- stuck-runs:"
+# Not a prefix of MARKER_PREFIX ("-" after "stuck-runs", not ":"), so the
+# same-set check never mistakes one for the other.
+UNCANCELLABLE_PREFIX="<!-- stuck-runs-uncancellable:"
+UNCANCELLABLE_OUTCOME="uncancellable — needs GitHub support"
 
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
@@ -281,6 +302,51 @@ render_report() {
 	done
 	echo
 	echo "A run is cancelled only when it is a superseded push/pull_request run (its commit is no longer the head of its branch, first attempt, not a fork). The head's own run is never cancelled: unstick it by hand — \`gh run cancel <id>\` (or \`gh api -X POST repos/<repo>/actions/runs/<id>/force-cancel\`), then re-run it. See docs/runbook.md, \"Stuck workflow runs\"."
+	if grep -qF -- "$UNCANCELLABLE_OUTCOME" "$outcomes"; then
+		echo
+		echo "**${UNCANCELLABLE_OUTCOME}**: GitHub refused both the cancel and the force-cancel (HTTP 409). Nothing in this repository can clear such a run; ask GitHub support to remove it. It is reported this once and not counted as stuck again."
+	fi
+}
+
+# The runs remembered as uncancellable: every id in an UNCANCELLABLE_PREFIX
+# marker on the newest issue with the report's title, open or closed (a closed
+# one still carries its closing comment's marker). One id per line. Returns
+# non-zero when the issue cannot be read.
+read_uncancellable() {
+	local num
+	num="$(gh issue list --state all --limit 100 --search "in:title \"${ISSUE_TITLE}\"" \
+		--json number,title --jq "[.[] | select(.title == \"${ISSUE_TITLE}\")] | max_by(.number) | .number // empty")" ||
+		return 1
+	[ -n "$num" ] || return 0
+	gh issue view "$num" --json body,comments --jq '[.body, .comments[].body] | .[]' >"$SCRATCH/issue.txt" ||
+		return 1
+	# grep -o reads all of its input (never the early-exit `| grep -q` shape), and
+	# finding no marker is not an error.
+	{ grep -oE -- "${UNCANCELLABLE_PREFIX} [0-9,]+ -->" "$SCRATCH/issue.txt" || true; } |
+		grep -oE '[0-9]+' | sort -un || true
+}
+
+# cancel_run <repo> <id> <err file>: prints the outcome for the report.
+# Cancel; on a 409 (GitHub says the run is not in progress, though it lists it
+# as queued) try force-cancel; a 409 from that too is UNCANCELLABLE_OUTCOME.
+cancel_run() {
+	local repo="$1" id="$2" err="$3"
+	if gh api -X POST "repos/${repo}/actions/runs/${id}/cancel" >/dev/null 2>"$err"; then
+		echo "CANCELLED"
+		return 0
+	fi
+	if ! grep -qF 'HTTP 409' "$err"; then
+		echo "cancel FAILED"
+		return 0
+	fi
+	if gh api -X POST "repos/${repo}/actions/runs/${id}/force-cancel" >/dev/null 2>"$err.force"; then
+		echo "FORCE-CANCELLED (cancel was refused)"
+	elif grep -qF 'HTTP 409' "$err.force"; then
+		echo "$UNCANCELLABLE_OUTCOME"
+	else
+		echo "cancel FAILED"
+	fi
+	cat "$err.force" >>"$err"
 }
 
 cmd_run() {
@@ -295,27 +361,57 @@ cmd_run() {
 	tmp="$(scratch run)"
 
 	cmd_collect >"$tmp/snapshot.json"
-	cmd_decide <"$tmp/snapshot.json" >"$tmp/decisions.tsv"
+	cmd_decide <"$tmp/snapshot.json" >"$tmp/all.tsv"
+
+	# Runs already reported as uncancellable are not stuck any more, as far as
+	# this watchdog is concerned (see UNCANCELLABLE RUNS). Unreadable memory is
+	# not fatal: the run is reported again, which is the pre-#1301 behaviour.
+	if ! read_uncancellable >"$tmp/known"; then
+		echo "::warning::stuck-runs: could not read the uncancellable runs from the issue; reporting every stuck run"
+		: >"$tmp/known"
+	fi
+	# The ids as a variable, not a first file: `NR == FNR` misreads an EMPTY
+	# first file, and no memory is the common case.
+	local known_ids split_known='BEGIN { n = split(known, a, " "); for (i = 1; i <= n; i++) k[a[i]] = 1 }'
+	known_ids="$(paste -sd' ' "$tmp/known")"
+	awk -F'\t' -v known="$known_ids" "$split_known"' ($2 in k)' "$tmp/all.tsv" >"$tmp/ignored.tsv"
+	awk -F'\t' -v known="$known_ids" "$split_known"' !($2 in k)' "$tmp/all.tsv" >"$tmp/decisions.tsv"
+
 	local n
 	n="$(wc -l <"$tmp/decisions.tsv" | tr -d ' ')"
 	echo "stuck runs (threshold ${THRESHOLD}m): ${n}"
 	sed 's/^/  /' "$tmp/decisions.tsv"
+	local action id wf event branch sha status age why url
+	while IFS=$'\t' read -r action id wf event branch sha status age why url; do
+		echo "ignored ${id} (${wf}, ${branch}@${sha:0:8}): already reported as ${UNCANCELLABLE_OUTCOME}"
+	done <"$tmp/ignored.tsv"
 
 	: >"$tmp/outcomes"
-	local action id wf event branch sha status age why url
+	: >"$tmp/new-uncancellable"
+	local outcome
 	while IFS=$'\t' read -r action id wf event branch sha status age why url; do
 		[ "$action" = cancel ] || continue
 		if [ "$dry" -eq 1 ]; then
 			echo "DRY RUN: would cancel ${id} (${wf}, ${branch}@${sha:0:8}): ${why}"
 			echo "${id} would cancel (dry run)" >>"$tmp/outcomes"
-		elif gh api -X POST "repos/${repo}/actions/runs/${id}/cancel" >/dev/null 2>"$tmp/cancel.err"; then
-			echo "cancelled ${id} (${wf}, ${branch}@${sha:0:8}): ${why}"
-			echo "${id} CANCELLED" >>"$tmp/outcomes"
-		else
-			echo "::warning::stuck-runs: could not cancel ${id}: $(tr '\n' ' ' <"$tmp/cancel.err")"
-			echo "${id} cancel FAILED" >>"$tmp/outcomes"
+			continue
 		fi
+		outcome="$(cancel_run "$repo" "$id" "$tmp/cancel.err")"
+		case "$outcome" in
+		*CANCELLED*) echo "cancelled ${id} (${wf}, ${branch}@${sha:0:8}): ${outcome}: ${why}" ;;
+		*)
+			echo "::warning::stuck-runs: could not cancel ${id} (${outcome}): $(tr '\n' ' ' <"$tmp/cancel.err")"
+			[ "$outcome" = "$UNCANCELLABLE_OUTCOME" ] && echo "$id" >>"$tmp/new-uncancellable"
+			;;
+		esac
+		echo "${id} ${outcome}" >>"$tmp/outcomes"
 	done <"$tmp/decisions.tsv"
+
+	# The memory to carry forward: the remembered runs GitHub still lists as
+	# stuck, plus the ones that just refused. A run that is gone drops out.
+	local remember uncancellable_marker=""
+	remember="$(cut -f2 "$tmp/ignored.tsv" | cat - "$tmp/new-uncancellable" | sed '/^$/d' | sort -un | paste -sd, -)"
+	[ -z "$remember" ] || uncancellable_marker="${UNCANCELLABLE_PREFIX} ${remember} -->"
 
 	local ids marker
 	ids="$(cut -f2 "$tmp/decisions.tsv" | sort -n | paste -sd, -)"
@@ -323,12 +419,18 @@ cmd_run() {
 	if [ "$n" -gt 0 ]; then
 		{
 			render_report "$tmp/outcomes" <"$tmp/decisions.tsv"
+			if [ -s "$tmp/ignored.tsv" ]; then
+				echo
+				printf 'Not counted (already reported as %s): %s\n' "$UNCANCELLABLE_OUTCOME" \
+					"$(awk -F'\t' '{ printf "%s[%s](%s)", (NR > 1 ? ", " : ""), $2, $10 }' "$tmp/ignored.tsv")"
+			fi
 			echo
 			echo "Watchdog run: ${RUN_URL:-n/a}"
 			echo
 			echo "_Filed automatically by \`stuck-runs\` (.github/workflows/stuck-runs.yaml); this issue is reused while runs stay stuck, and closed once none are._"
 			echo
 			echo "$marker"
+			[ -z "$uncancellable_marker" ] || echo "$uncancellable_marker"
 		} >"$tmp/body.md"
 		if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then cat "$tmp/body.md" >>"$GITHUB_STEP_SUMMARY"; fi
 		while IFS=$'\t' read -r action id wf event branch sha status age why url; do
@@ -352,7 +454,12 @@ cmd_run() {
 		--json number,title --jq "[.[] | select(.title == \"${ISSUE_TITLE}\")] | .[0].number // empty")"
 	if [ "$n" -eq 0 ]; then
 		if [ -n "$num" ]; then
-			gh issue comment "$num" --body "Nothing is stuck any more (threshold ${THRESHOLD}m). Closing; the next stuck run opens a new issue. ${RUN_URL:-}"
+			local closing="Nothing is stuck any more (threshold ${THRESHOLD}m). Closing; the next stuck run opens a new issue. ${RUN_URL:-}"
+			if [ -n "$uncancellable_marker" ]; then
+				# The closed issue is where the next tick reads the memory from.
+				closing="${closing}"$'\n\n'"Still listed by GitHub but not counted (${UNCANCELLABLE_OUTCOME}): ${remember//,/, }"$'\n\n'"${uncancellable_marker}"
+			fi
+			gh issue comment "$num" --body "$closing"
 			gh issue close "$num"
 			echo "closed #${num}"
 		fi
@@ -362,12 +469,13 @@ cmd_run() {
 		gh issue create --title "$ISSUE_TITLE" --body-file "$tmp/body.md"
 		return 0
 	fi
-	# Same set of stuck runs as the last report: say nothing new.
+	# Same set of stuck runs as the last report: say nothing new — unless a run
+	# just turned out uncancellable, which is reported (once) regardless.
 	local last
 	last="$(gh issue view "$num" --json body,comments \
 		--jq '[.body, .comments[].body] | map(select(contains("'"${MARKER_PREFIX}"'"))) | last // ""' |
 		grep -oF -- "$marker" || true)"
-	if [ -n "$last" ]; then
+	if [ -n "$last" ] && [ ! -s "$tmp/new-uncancellable" ]; then
 		echo "#${num} already reports this set of stuck runs"
 		return 0
 	fi
