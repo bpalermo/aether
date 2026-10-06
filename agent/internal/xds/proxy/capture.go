@@ -246,7 +246,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		// decision is a chain match on the restored destination or the
 		// ORIGINAL_DST passthrough. On a diverted flow SO_ORIGINAL_DST succeeds
 		// -- the flow is conntrack-tracked, just not NATed -- and returns the
-		// same VIP:port getsockname would (e2e/spike/tproxy-phase0b.py T1).
+		// same VIP:port getsockname would (the TPROXY spike, e2e/spike/tproxy-phase0b.py T1, removed after it was superseded by the in-tree netns test; see git history before 95788da5).
 		UseOriginalDst:                wrapperspb.Bool(false),
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		StatPrefix:                    fmt.Sprintf("capture_%s", cniPod.GetName()),

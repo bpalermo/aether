@@ -17,7 +17,7 @@ package plugin
 // Locally, `unshare -Urn --map-root-user <binary> -test.v` is root enough (see
 // the BUILD file).
 //
-// This is the in-tree successor of e2e/spike/tproxy-phase0b.py, which measured
+// This is the in-tree successor of the TPROXY spike (e2e/spike/tproxy-phase0b.py, removed; git history before 95788da5), which measured
 // the same arms on a Talos node before any of this was written.
 
 import (

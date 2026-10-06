@@ -2935,7 +2935,8 @@ already ahead of the marker on the stream.
 
 So a gap that persists past a sync cycle (the poll interval at worst) is lag:
 check `aether_agent_registry_reconnects_total` and `watch_errors_total` on that
-agent, and `aether_registrar_broadcast_dropped_events_total` (a full stream skips its
+agent (and `watch_token_drops_total`, the reconnects it chose to make full
+resends, #1269), and `aether_registrar_broadcast_dropped_events_total` (a full stream skips its
 marker and is retried next cycle; a dropped endpoint event force-resyncs it).
 
 Skew: a registrar older than #1241 sends no markers, and against it the line is
@@ -3014,10 +3015,34 @@ Notes:
 - The version is sent only where the receiver holds everything it names: on
   `SNAPSHOT_COMPLETE`, and on the last event of each broadcast batch per watcher
   (#1203). The agent also drops its token when a resend starts clearing its
-  cache. A stream cut mid-snapshot or mid-batch therefore resends in full. Agents
-  older than #1204 keep the old token across a cut resend, so until the agent
-  DaemonSet has rolled they are exposed to an empty cache on a reconnect that
-  matches it. The window is milliseconds per reconnect.
+  cache, so a stream cut mid-snapshot resends in full. Agents older than #1204
+  keep the old token across a cut resend, so until the agent DaemonSet has rolled
+  they are exposed to an empty cache on a reconnect that matches it. The window
+  is milliseconds per reconnect.
+- A stream cut **mid-batch** (#1269) leaves the batch's unversioned prefix
+  applied while the token still names the version before the batch. Presenting
+  that token is safe only while the registrar has moved on (its hash differs, so
+  it resends). If its contents return to the token's hash, a change and its exact
+  reversal or a reconnect to a peer replica that never got the change (a lost
+  write-behind write), it answers `current`, `renamed` or `extended` and the
+  prefix stays in the cache for good. So the agent drops its token, and the
+  services it holds, whenever a stream ends after a live event that carried no
+  version (a batch's versioned last event, a version marker or the initial
+  `SNAPSHOT_COMPLETE` ends that state). The next stream is `resent`, logged as
+  `watch stream ended inside a batch; requesting a full snapshot on reconnect`
+  and counted in `aether_agent_registry_watch_token_drops_total{reason="midbatch"}`.
+  That costs one resend per mid-batch cut, whatever ended the stream: a
+  failure, a server drain, or a dependency-set change whose cancellation landed
+  inside a batch. Read the counter after a soak, against
+  `aether_registrar_watch_starts_total{resume="resent"}`: the suspected cost is a
+  batch whose own event changes the dependency set (a TCP service's
+  `SERVICE_ADDED`/`SERVICE_REMOVED` wakes the xDS cache, which re-asserts the
+  filter and cancels the stream before the rest of the batch arrives), which
+  would turn #1239's `current`/`extended` re-opens back into resends exactly at
+  dependency-set changes. A `midbatch` step on every node at each such change
+  is that case. A registrar older than #1203 versions every event, so its
+  streams never end inside a batch. Agents older than #1269 keep the token and
+  stay exposed to this case until the DaemonSet has rolled.
 - Publications (an RPC's or a sync's snapshot change plus its broadcast) are
   serialized: every watcher receives batches in the order they changed the
   snapshot, each one contiguous. Before the #1239 review they ran concurrently,

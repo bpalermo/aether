@@ -6,11 +6,16 @@ import (
 	"strconv"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
 // meterName identifies this instrumentation scope in metric backends.
 const meterName = "aether/registry-registrar"
+
+// tokenDropMidBatch is the reason label of a resume token dropped because the
+// watch stream ended inside a batch (#1269).
+const tokenDropMidBatch = "midbatch"
 
 // clientMetrics holds the watch-stream instruments. All methods are
 // nil-receiver-safe so the client runs unchanged when telemetry is disabled.
@@ -29,6 +34,7 @@ type clientMetrics struct {
 	watchErrors   metric.Int64Counter
 	lastVersion   metric.Int64Gauge
 	malformedKeys metric.Int64Counter
+	tokenDrops    metric.Int64Counter
 }
 
 // newClientMetrics registers the watch-stream instruments on the given meter.
@@ -51,6 +57,10 @@ func newClientMetrics(meter metric.Meter) (*clientMetrics, error) {
 	if m.malformedKeys, err = meter.Int64Counter("aether.agent.registry.malformed_keys",
 		metric.WithDescription("Streamed endpoint events dropped because the service key was not a namespace-qualified <ns>/<sa> (a backend keying bug; otherwise 0)")); err != nil {
 		return nil, fmt.Errorf("malformed keys: %w", err)
+	}
+	if m.tokenDrops, err = meter.Int64Counter("aether.agent.registry.watch_token_drops",
+		metric.WithDescription("Resume tokens this agent dropped at the end of a watch stream, so that its next stream is resent in full, by reason (midbatch: the stream ended inside a batch, #1269)")); err != nil {
+		return nil, fmt.Errorf("watch token drops: %w", err)
 	}
 
 	return m, nil
@@ -75,6 +85,13 @@ func (m *clientMetrics) malformedKey(ctx context.Context) {
 		return
 	}
 	m.malformedKeys.Add(ctx, 1)
+}
+
+func (m *clientMetrics) tokenDropped(ctx context.Context, reason string) {
+	if m == nil {
+		return
+	}
+	m.tokenDrops.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
 }
 
 func (m *clientMetrics) versionApplied(ctx context.Context, version string) {
