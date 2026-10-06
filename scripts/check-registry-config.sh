@@ -112,7 +112,10 @@ else
 fi
 for ws in MODULE.bazel:bazel/registry proxy/MODULE.bazel:../bazel/registry; do
 	mod="${ws%%:*}" want="${ws#*:}"
-	if tr -d ' \n\t' <"$mod" | grep -qF "local_path_override(module_name=\"aether_registry\",path=\"${want}\",)"; then
+	# Read the whole file into a variable first: `tr … | grep -q` under pipefail
+	# gets SIGPIPE once the file outgrows the 64 KiB pipe buffer (#1307).
+	squashed=$(tr -d ' \n\t' <"$mod")
+	if grep -qF -- "local_path_override(module_name=\"aether_registry\",path=\"${want}\",)" <<<"$squashed"; then
 		echo "ok: ${mod} overrides aether_registry onto ${want}"
 	else
 		bad "${mod} does not override aether_registry onto ${want} (local_path_override) — that workspace would not load the one registry setting"
