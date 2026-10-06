@@ -313,9 +313,12 @@ func TestOnFreshDNSAddrRetriesALostPort(t *testing.T) {
 		}
 		return startReusePortServer(t, addr, map[string]string{})
 	})
-	require.Len(t, tried, 2, "the lost port is retried exactly once")
-	assert.NotEqual(t, tried[0], addr, "the retry runs on a fresh port")
-	assert.Equal(t, tried[1], addr, "the address returned is the one the resolver bound")
+	// At least one retry, not exactly one: a parallel test process can take the NEXT
+	// fresh port in the same window too (#1299), and the helper retrying that one as well
+	// is it working, not failing.
+	require.GreaterOrEqual(t, len(tried), 2, "the lost port is retried")
+	assert.NotEqual(t, tried[0], addr, "the retry runs on a fresh port, not the held one")
+	assert.Equal(t, tried[len(tried)-1], addr, "the address returned is the one the resolver bound")
 }
 
 // startReusePortServer starts a reuse-port Server bound to addr with the given records
@@ -350,9 +353,10 @@ func TestReadyMarkerWrittenOnStartRemovedOnCancel(t *testing.T) {
 		cancel context.CancelFunc
 		errc   <-chan error
 	)
-	// Once the resolver answers over UDP its listeners are bound, so the marker
-	// (written right after buildServers) must exist. A port lost before the bind is
-	// retried on a fresh one (#1236).
+	// Wait on THIS resolver's own ready marker (written right after buildServers), never
+	// on "something answers on addr": a resolver in another test process co-bound to the
+	// same port via SO_REUSEPORT can answer that before this one has bound (#1300). A
+	// port lost before the bind is retried on a fresh one (#1236).
 	onFreshDNSAddr(t, func(addr string) error {
 		s := NewServerWithOptions("aether.internal", addr, "", slog.New(slog.DiscardHandler),
 			WithReusePort(true), WithReadyMarker(marker))
@@ -360,7 +364,7 @@ func TestReadyMarkerWrittenOnStartRemovedOnCancel(t *testing.T) {
 		ctx, cancel = context.WithCancel(context.Background())
 		t.Cleanup(cancel)
 		errc = startServer(ctx, s)
-		return startFailure(t, waitStarted(errc, udpAnswers(addr)), "resolver did not bind %s", addr)
+		return startFailure(t, waitStarted(errc, fileExists(marker)), "resolver did not bind %s", addr)
 	})
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(marker)
@@ -516,15 +520,6 @@ func onFreshDNSAddr(t *testing.T, start func(addr string) error) string {
 	}
 	t.Fatalf("the resolver lost its port %d times in a row: %v", bindAttempts, err)
 	return ""
-}
-
-// udpAnswers reports whether a UDP query to addr gets an answer, i.e. a server is bound.
-func udpAnswers(addr string) func() bool {
-	c := &dns.Client{Net: "udp", Timeout: 200 * time.Millisecond}
-	return func() bool {
-		_, _, err := c.Exchange(query("echo.default.aether.internal.", dns.TypeA), addr)
-		return err == nil
-	}
 }
 
 // fileExists reports whether path exists, e.g. a resolver's ready marker.
