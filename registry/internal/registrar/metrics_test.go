@@ -55,6 +55,7 @@ func TestClientMetrics_NilReceiverSafe(t *testing.T) {
 	ctx := context.Background()
 	m.streamReconnected(ctx)
 	m.streamFailed(ctx)
+	m.tokenDropped(ctx, tokenDropMidBatch)
 	m.versionApplied(ctx, "3")
 }
 
@@ -65,6 +66,7 @@ func TestClientMetrics_Recording(t *testing.T) {
 	m.streamReconnected(ctx)
 	m.streamReconnected(ctx)
 	m.streamFailed(ctx)
+	m.tokenDropped(ctx, tokenDropMidBatch)
 	m.versionApplied(ctx, "12")
 	m.versionApplied(ctx, "not-a-number") // ignored
 
@@ -73,6 +75,9 @@ func TestClientMetrics_Recording(t *testing.T) {
 	}
 	if got, _ := metricValue(t, reader, "aether.agent.registry.watch_errors"); got != 1 {
 		t.Errorf("watch_errors = %d, want 1", got)
+	}
+	if got, _ := metricValue(t, reader, "aether.agent.registry.watch_token_drops"); got != 1 {
+		t.Errorf("watch_token_drops = %d, want 1", got)
 	}
 	if got, _ := metricValue(t, reader, "aether.agent.registry.last_version"); got != 12 {
 		t.Errorf("last_version = %d, want 12", got)
