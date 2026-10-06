@@ -59,10 +59,27 @@ func startServe(t *testing.T, ctx context.Context) (ServeConfig, <-chan error) {
 	done := make(chan error, 1)
 	go func() { done <- Serve(ctx, cfg, d, discard()) }()
 
+	// Probe only stats the path, and the stale socket file above passes it
+	// before Serve has replaced it with a listener (#1273): a dial in that
+	// window is refused, or finds no file mid-replacement. Wait until both
+	// sockets ACCEPT a connection, which only Serve's own listeners do.
 	require.Eventually(t, func() bool {
-		return Probe(cfg.CSISocket) == nil && Probe(cfg.RegistrationSocket) == nil
-	}, 5*time.Second, 10*time.Millisecond, "both sockets must come up")
+		return Probe(cfg.CSISocket) == nil && Probe(cfg.RegistrationSocket) == nil &&
+			accepts(cfg.CSISocket) && accepts(cfg.RegistrationSocket)
+	}, 5*time.Second, 10*time.Millisecond, "both sockets must come up and accept connections")
 	return cfg, done
+}
+
+// accepts reports whether a unix socket at path has a listener behind it. The
+// kernel completes connect() once listen() has run, before the gRPC server's
+// Accept, so this cannot block on Serve.
+func accepts(path string) bool {
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func TestRegistration_GetInfo(t *testing.T) {
