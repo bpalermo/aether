@@ -405,7 +405,12 @@ Code scanning is the advanced-setup workflow `.github/workflows/codeql.yaml`
 (push to `main`, every pull request, weekly), not GitHub's default setup. The
 two are mutually exclusive: with default setup enabled in the repository's
 security settings GitHub rejects this workflow's uploads, so default setup must
-stay **off**. It is not a required check (`main` requires `ci` and `proxy`).
+stay **off**. Its last job, `codeql`, aggregates every language's job and is the
+one name to require in the `main` ruleset (next to `ci` and `proxy`); it also
+runs on pull requests whose base is `upgrade/**`, so a `gh stack` member can
+report it. A status check only says the scan ran: blocking on *findings* is the
+ruleset's separate "Require code scanning results" rule. A fork's pull request
+is analysed but not uploaded (read-only token).
 
 It exists because default setup cannot run a step before the scan. The proto
 packages under `api/aether/` are Bazel outputs with no `.go` file in the tree,
