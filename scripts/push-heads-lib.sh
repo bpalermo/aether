@@ -155,3 +155,48 @@ select_unsuperseded() {
 		fi
 	done
 }
+
+# ---------------------------------------------------------------------------
+# WHERE THE SCHEDULED SWEEP STARTS READING (#1281)
+#
+# The sweep runs every two hours over a one-day window, so with a fixed window
+# every push head was looked up and cosign-verified ~11 times, and one sweep's
+# cost grew with the whole day's merges: 34-40 heads on 2026-10-04 at ~45 s each
+# (24 s of registry lookups, 27 cosign verifications) filled the 30-minute
+# budget, and a registry ~2.6x slower on 10-05 (51 s of lookups, 2.5 s per
+# verification) took three sweeps past it. A head the last GREEN scheduled sweep
+# already verified need not be verified again, so the sweep reads from that
+# sweep's start minus the grace period (it looked at everything older than that)
+# minus an overlap, and never further back than the full window. No green sweep
+# on record, or an unreadable one, reads the full window: fail closed.
+
+# sweep_since <now> <window start> <grace s> <overlap s> [<last green start>]
+#
+# All epochs except the last argument (ISO 8601, as the API gives it). Prints the
+# epoch to read from. Pure apart from `date` parsing the timestamp.
+sweep_since() {
+	local now="$1" window="$2" grace="$3" overlap="$4" last="${5:-}" a
+	if [ -z "$last" ] || ! a="$(date -u -d "$last" +%s 2>/dev/null)" || [ "$a" -gt "$now" ]; then
+		printf '%s\n' "$window"
+		return
+	fi
+	a=$((a - grace - overlap))
+	if [ "$a" -gt "$window" ]; then
+		printf '%s\n' "$a"
+	else
+		printf '%s\n' "$window"
+	fi
+}
+
+# The start (created_at) of the newest scheduled publish-verify run on main that
+# concluded success, or nothing. LAST_GREEN_SWEEP, when set (even empty), is used
+# INSTEAD of the API.
+github_last_green_sweep() {
+	local repo="${GITHUB_REPOSITORY:-bpalermo/aether}"
+	if [ -n "${LAST_GREEN_SWEEP+set}" ]; then
+		printf '%s\n' "$LAST_GREEN_SWEEP"
+		return
+	fi
+	gh api "/repos/${repo}/actions/workflows/publish-verify.yaml/runs?event=schedule&branch=main&status=success&per_page=1" \
+		-q '.workflow_runs[0].created_at // empty'
+}

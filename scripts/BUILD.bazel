@@ -77,3 +77,16 @@ sh_test(
         "push-heads-lib.sh",
     ],
 )
+
+# Where the scheduled sweep starts reading (#1281): from the last green
+# scheduled sweep, never earlier than the full window, the full window when
+# unsure.
+sh_test(
+    name = "sweep_since_test",
+    size = "small",
+    srcs = ["sweep_since_test.sh"],
+    data = [
+        "publish-verify-superseded.sh",
+        "push-heads-lib.sh",
+    ],
+)

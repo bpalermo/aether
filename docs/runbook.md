@@ -610,9 +610,14 @@ with `gh` (`PUBLISH_RUNS_FILE=<file of "<sha> <conclusion>">` overrides it) and
 superseded commit: pin the head that superseded it.
 
 `publish-verify` runs the same check automatically after every publish run
-reaches a conclusion and every two hours over the push heads of the last day of `main`, and files
-(or comments on) the rolling **publish: artifacts missing for a commit on main**
-issue. If you see that issue: re-run the cancelled publish run — `gh run rerun
+reaches a conclusion and every two hours over the push heads of `main` that the
+last green scheduled sweep did not already verify — at most the last day,
+the whole day when no sweep has been green within it (#1281;
+`RECENT_SINCE_LAST_GREEN=1`, `sweep_since` in `scripts/push-heads-lib.sh`) — and
+files (or comments on) the rolling **publish: artifacts missing for a commit on
+main** issue. A sweep that times out or is cancelled files on the same issue,
+saying the check did not finish: before #1281 three timed-out sweeps in a row
+concluded `cancelled` and reported nothing. If you see that issue: re-run the cancelled publish run — `gh run rerun
 <id>`, which re-runs at that same commit — or, if the commit is not the one you
 need, deploy a later commit that did publish. Never push images or charts by
 hand: the release workflow is the only publisher.
