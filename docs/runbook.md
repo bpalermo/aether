@@ -278,6 +278,18 @@ gh api -X POST repos/bpalermo/aether/actions/runs/<id>/force-cancel
 gh run rerun <id>                        # the head's own run: run it again
 ```
 
+GitHub can strand a run it then refuses to cancel. Run 34723047990, a `proxy`
+run queued since 2026-09-12 on a branch that was later deleted, answers both
+cancel and force-cancel with HTTP 409 ("Cannot cancel a workflow run that is
+not in progress"). Nothing in this repository can clear a run like that (#1301).
+When a cancel and the force-cancel after it both return 409, the watchdog
+reports the run once as **uncancellable — needs GitHub support**. It records the
+run ID in a hidden `<!-- stuck-runs-uncancellable: … -->` marker on the issue
+and stops counting the run as stuck. Each check reads the marker back from the
+newest issue with that title, even a closed one, so the issue can close and new
+stuck runs are still reported. The ID drops out of the marker once GitHub stops
+listing the run. To have such a run removed, open a GitHub support ticket.
+
 To see what the watchdog would do without it cancelling or writing anything,
 dispatch it as a dry run: `gh workflow run stuck-runs.yaml -f dry_run=true`.
 A dispatch is a dry run unless you pass `dry_run=false`.
