@@ -594,12 +594,30 @@ artifacts by construction and cannot be deployed — pin the stack's head instea
 the `--recent` sweep skips them, printing `skip <sha> (not a push head …)`. It
 learns the heads from GitHub's activity log for `refs/heads/main`, so it needs
 `gh` authenticated (or `PUSH_HEADS_FILE=<file of full shas>`); a push whose
-publish run was cancelled or never started is still a head and still fails.
+publish run never started is still a head and still fails.
+
+**Superseded push heads are skipped (#1282).** A push head whose publish run
+did not succeed (`cancelled` by the next merge, or `failure`) on a `main` that
+has since moved past it was superseded: the newer push's publish built a tree
+that contains it. Both the `workflow_run` path (#1277) and the `--recent` sweep
+skip it with a `::notice::` naming the commit — `skip <sha> (superseded push
+head …)` in the log — instead of reporting its commit-addressed tags missing.
+`main`'s own head, a head whose publish succeeded and a head with no publish
+run on record are always checked. The rule is
+`scripts/publish-verify-superseded.sh decide`; the sweep reads the publish runs
+with `gh` (`PUBLISH_RUNS_FILE=<file of "<sha> <conclusion>">` overrides it) and
+`main`'s head with `git ls-remote` (`MAIN_HEAD` overrides it). Do not deploy a
+superseded commit: pin the head that superseded it.
 
 `publish-verify` runs the same check automatically after every publish run
-reaches a conclusion and every two hours over the push heads of the last day of `main`, and files
-(or comments on) the rolling **publish: artifacts missing for a commit on main**
-issue. If you see that issue: re-run the cancelled publish run — `gh run rerun
+reaches a conclusion and every two hours over the push heads of `main` that the
+last green scheduled sweep did not already verify — at most the last day,
+the whole day when no sweep has been green within it (#1281;
+`RECENT_SINCE_LAST_GREEN=1`, `sweep_since` in `scripts/push-heads-lib.sh`) — and
+files (or comments on) the rolling **publish: artifacts missing for a commit on
+main** issue. A sweep that times out or is cancelled files on the same issue,
+saying the check did not finish: before #1281 three timed-out sweeps in a row
+concluded `cancelled` and reported nothing. If you see that issue: re-run the cancelled publish run — `gh run rerun
 <id>`, which re-runs at that same commit — or, if the commit is not the one you
 need, deploy a later commit that did publish. Never push images or charts by
 hand: the release workflow is the only publisher.
