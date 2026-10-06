@@ -1,0 +1,58 @@
+# The whole-repository format check (`bazel run //:format.check`, what `make
+# format-check` runs), shared by ci.yaml's `format` job and proxy.yml's `lint`
+# job (#1286). Since proxy/ left rules-lint-ignored the check covers proxy
+# Starlark (buildifier format AND lint, #1245) and shell (shfmt) as well.
+#
+# The formatter prints one "Formatted <language>" line per configured language,
+# and its exit code says nothing about how much it inspected. So the action
+# asserts the set of languages it actually ran, not just the status: a language
+# dropped from bazel/format/BUILD.bazel would otherwise leave the job green while
+# checking less than it claims (the #853 shape the shell job guards against with
+# its empty-query tripwire).
+#
+# Requires the repository to be checked out and Bazel set up
+# (./.github/actions/setup-bazel).
+name: Check formatting (aether)
+description: Run //:format.check and fail unless it passed AND ran for every expected language.
+
+inputs:
+  languages:
+    description: >-
+      One language per line, exactly as the formatter names it in its
+      "Formatted <language> in" line (e.g. Starlark, Go, Shell, Protocol
+      Buffer). Each must appear in the output.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check formatting
+      shell: bash
+      env:
+        LANGUAGES: ${{ inputs.languages }}
+      run: |
+        set +e
+        out="$(bazel run //:format.check 2>&1)"
+        rc=$?
+        printf '%s\n' "$out"
+        expected=()
+        while IFS= read -r lang; do
+          if [ -n "$lang" ]; then expected+=("$lang"); fi
+        done <<<"$LANGUAGES"
+        if [ "${#expected[@]}" -eq 0 ]; then
+          echo "::error::format-check: the languages input is empty, so nothing would be asserted"
+          exit 1
+        fi
+        missing=()
+        for lang in "${expected[@]}"; do
+          grep -qF "Formatted $lang in" <<<"$out" || missing+=("$lang")
+        done
+        if [ "${#missing[@]}" -ne 0 ]; then
+          printf '::error::the formatter never ran for: %s — refusing to pass a format gate that checked less than it claims (#853)\n' "${missing[*]}"
+          exit 1
+        fi
+        if [ "$rc" -ne 0 ]; then
+          echo "::error::formatting or buildifier lint violations — run 'make format' (it also applies the mechanical lint fixes), fix any lint finding left, and commit the result"
+          exit 1
+        fi
+        echo "formatter ran for all ${#expected[@]} expected language(s): ${expected[*]}"

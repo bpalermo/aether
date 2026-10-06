@@ -228,8 +228,8 @@ jobs:
           bazelisk-cache: true
           # Repository cache (#1001): keyed on everything that changes the
           # fetched set, in the root workspace's own namespace. Restore only —
-          # main.yaml's `diff` is the one job that saves it (docs/runbook.md,
-          # "CI: external repository fetches").
+          # the savers are the `diff` jobs of ci.yaml and main.yaml, one per
+          # workflow (docs/runbook.md, "CI: external repository fetches").
           cache-version: root-1
           repository-cache: '["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"]'
           cache-save: false

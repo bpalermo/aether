@@ -105,26 +105,14 @@ jobs:
 
       # The whole-repository format check (seconds), which since proxy/ left
       # rules-lint-ignored includes proxy Starlark (buildifier format AND lint,
-      # #1245) and shell (shfmt). Same language-set assertion as ci.yaml's
-      # `format` job.
+      # #1245) and shell (shfmt). Same action as ci.yaml's `format` job; only the
+      # two languages proxy/ has are asserted here.
       - name: Check formatting (proxy/ included)
-        run: |
-          set +e
-          out="$(bazel run //:format.check 2>&1)"
-          rc=$?
-          printf '%s\n' "$out"
-          missing=()
-          for lang in Starlark Shell; do
-            grep -qF "Formatted $lang in" <<<"$out" || missing+=("$lang")
-          done
-          if [ "${#missing[@]}" -ne 0 ]; then
-            printf '::error::the formatter never ran for: %s — refusing to pass a format gate that checked less than it claims (#853)\n' "${missing[*]}"
-            exit 1
-          fi
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::formatting or buildifier lint violations — run 'make format' (it also applies the mechanical lint fixes), fix any lint finding left, and commit the result"
-            exit 1
-          fi
+        uses: ./.github/actions/format-check
+        with:
+          languages: |
+            Starlark
+            Shell
 
       # `--config=lint` plus fail_on_violation, NOT `--config=ci` — that pulls
       # in `--config=remote` and would need the BuildBuddy key for a job that

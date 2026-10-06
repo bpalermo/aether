@@ -27,7 +27,10 @@
 #   7. every workflow job that drives kind (a `kind ` command or an e2e/*.sh
 #      harness) installs it through setup-kind (directly or via
 #      .github/actions/run-e2e-script) — not the runner's preinstalled kind,
-#      whose default node image moves with the runner image
+#      whose default node image moves with the runner image. The same holds
+#      for every composite action that drives kind (run-e2e-script,
+#      run-conformance), since a job that calls one has no kind command of its
+#      own
 set -euo pipefail
 
 fail=0
@@ -219,6 +222,26 @@ for f in "${ci_files[@]}"; do
 	done < <(unpinned_kind_jobs "$f")
 done
 echo "checked the kind-driving jobs of $jobs_checked workflow(s)"
+
+# A composite action that drives kind is held to the same rule as a job (a job
+# that reaches kind only through such an action, e.g. run-conformance, has no
+# kind command of its own for the loop above to see). setup-kind is exempt: it
+# is the installer.
+actions_checked=0
+for f in "${ci_files[@]}"; do
+	case "$f" in
+	"$SETUP_KIND") continue ;;
+	.github/actions/*) ;;
+	*) continue ;;
+	esac
+	actions_checked=$((actions_checked + 1))
+	code=$(grep -vE '^[[:space:]]*#' "$f" || true)
+	if grep -qE '(^|[^A-Za-z0-9_-])kind (create|load|export|get|delete)[[:space:]]|\./e2e/[A-Za-z0-9_.$-]+' <<<"$code" &&
+		! grep -qE 'uses:[[:space:]]*\./\.github/actions/(setup-kind|run-e2e-script)' <<<"$code"; then
+		err "$f: drives kind without .github/actions/setup-kind (it would run the runner's preinstalled kind and its default node image)"
+	fi
+done
+echo "checked $actions_checked composite action(s)"
 
 if [ "$fail" -ne 0 ]; then
 	echo "kind pin drift: bump e2e/kind-version.sh and every copy together (docs/runbook.md, \"Bumping the e2e Kubernetes version\")" >&2

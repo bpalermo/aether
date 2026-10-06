@@ -370,31 +370,16 @@ jobs:
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh //:format.check
 
-      # The formatter prints one "Formatted <language>" line per configured
-      # language and its exit code says nothing about how much it inspected. So
-      # assert the set of languages it actually ran, not just the status: a
-      # language dropped from bazel/format/BUILD.bazel would otherwise leave this
-      # job green while checking less than it claims — the #853 shape the shell
-      # job guards against with its empty-query tripwire.
+      # Every language bazel/format/BUILD.bazel configures; the action fails if
+      # the formatter did not report running for one of them (#853).
       - name: Check formatting
-        run: |
-          set +e
-          out="$(bazel run //:format.check 2>&1)"
-          rc=$?
-          printf '%s\n' "$out"
-          missing=()
-          for lang in Starlark Go Shell "Protocol Buffer"; do
-            grep -qF "Formatted $lang in" <<<"$out" || missing+=("$lang")
-          done
-          if [ "${#missing[@]}" -ne 0 ]; then
-            printf '::error::the formatter never ran for: %s — refusing to pass a format gate that checked less than it claims (#853)\n' "${missing[*]}"
-            exit 1
-          fi
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::formatting or buildifier lint violations — run 'make format' (it also applies the mechanical lint fixes), fix any lint finding left, and commit the result"
-            exit 1
-          fi
-          echo "formatter ran for all 4 configured languages"
+        uses: ./.github/actions/format-check
+        with:
+          languages: |
+            Starlark
+            Go
+            Shell
+            Protocol Buffer
 
   envoy-api-parity:
     needs: changes
