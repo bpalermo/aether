@@ -259,9 +259,12 @@ become cache hits in CI only if it is given a key that may write local results
 **Report-only, and what gating takes.** Nothing requires the workflow and no
 threshold is set. Three steps turn it into a gate, in this order:
 
-1. Enable GitHub Code Quality for the repository (Settings → Code quality).
-   Until then GitHub rejects the upload; the `upload` job's upload step is
-   `continue-on-error` and says so with a warning, and the job stays green.
+1. GitHub has to accept the upload. As of 2026-10-06 it does not: the upload
+   API answers HTTP 404 on pull requests and HTTP 500 on `main`, with no cause
+   named, and this repository (owned by a personal account) has no *Code
+   quality* page under Settings to enable anything on. Until that changes the
+   `upload` job's upload step is `continue-on-error` and says so with a
+   warning, and the job stays green.
 2. Remove that `continue-on-error` and the warning step after it (the `TODO` in
    the workflow), so a rejected upload is red.
 3. Add the `coverage` check to the `main` ruleset's required status checks,
