@@ -65,7 +65,7 @@ var builtinDivertExcludedRanges = []netip.Prefix{
 //     divert alone delivers to it.
 //
 // Every fact above was measured on a Talos node before this was written:
-// e2e/spike/tproxy-phase0b.py.
+// the TPROXY spike (e2e/spike/tproxy-phase0b.py, removed; git history before 95788da5).
 func installCaptureDivert(netnsPath string, redirectAll bool, excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
 	return withPodNetns(netnsPath, func() error {
 		if err := programCaptureDivert(redirectAll, excludePorts, excludeRanges, logger); err != nil {
