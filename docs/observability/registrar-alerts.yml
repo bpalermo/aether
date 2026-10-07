@@ -1,0 +1,104 @@
+# Prometheus alerting rules for the registrar's snapshot identity (#1193, #1322).
+#
+# Every registrar replica serves an endpoint snapshot listed from etcd at one
+# store revision. The listing is a pure function of the revision, so two
+# replicas at the SAME aether_registrar_snapshot_revision must report the SAME
+# content_hash on aether_registrar_snapshot_content. A different hash at one
+# revision means a replica is not serving what the store holds.
+#
+# Install: merge into the Prometheus helm values under
+#   serverFiles:
+#     alerting_rules.yml:
+#       groups: [...]
+# See README.md in this directory. Deployed from
+# bpalermo/k8s-talos-main -> clusters/talos-main/prometheus/values.yaml, where
+# promtool unit tests (clusters/talos-main/prometheus/rules_test.yaml) run this
+# expression in CI. This repo has no promtool in its build.
+
+groups:
+  - name: aether-registrar
+    rules:
+      # THE OBVIOUS EXPRESSION IS WRONG (#1322):
+      #     count(count by (content_hash) (aether_registrar_snapshot_content)) > 1
+      #       and on() (max(aether_registrar_snapshot_revision)
+      #                 == min(aether_registrar_snapshot_revision))
+      #       and on() (max(aether_registrar_writebehind_queue_depth) == 0)
+      # It has two faults.
+      #
+      # 1. It false-positives on every content change. The hash is a LABEL, so a
+      #    change ends one series and starts another. The registrar stops
+      #    exporting the old one, but OTLP has no staleness marker, so Prometheus
+      #    keeps answering instant queries with the old series' last sample for
+      #    its 5-minute lookback. For those 5 minutes each replica shows two
+      #    hashes. On an 8 h soak with no divergence this read true in 108 of
+      #    1,920 samples.
+      # 2. It can never fire on a registrar that has not queued a write-behind
+      #    op. aether_registrar_writebehind_queue_depth is recorded when an op is
+      #    queued or flushed, so until the first one the series does not exist,
+      #    `max()` of nothing is empty, and `and on()` with an empty side is empty.
+      #
+      # What this expression does instead, inside out:
+      #
+      #   timestamp(content) == max without (content_hash) (timestamp(content))
+      #     keeps, per replica, only the content series whose sample is the
+      #     NEWEST. A superseded hash is still inside the lookback, but its last
+      #     sample is older than the current hash's, so it drops out. A replica
+      #     is "every label except content_hash", so this does not depend on what
+      #     the pipeline calls the replica label (`node` on talos-main).
+      #   revision * ... group_right
+      #     gives that one series per replica the replica's revision as its value.
+      #   count_values by (job, content_hash) ("revision", ...)
+      #     turns the revision into a label: one series per (revision, hash).
+      #   count by (job, revision) (...) > 1
+      #     more than one hash at ONE revision. A replica that lags a revision is
+      #     at a different revision and is not compared.
+      #   unless ... queue_depth > 0
+      #     a pending write-behind intent is overlaid on the listing (version
+      #     `<rev>+<hash>`), so that replica is legitimately ahead of its
+      #     revision. `unless ... > 0` is quiet only when a depth above zero is
+      #     actually reported, so a missing series does not disable the rule.
+      #
+      # for: 3m. An agent RPC applied between two syncs changes a replica's
+      # contents before its revision moves (at most the 200 ms sync debounce), and
+      # one export can land in that window. Three minutes is more than two 60 s
+      # exports. A real divergence does not heal by itself.
+      #
+      # etcd backend only: the kubernetes backend reports no revision, so this
+      # expression returns nothing there.
+      - alert: AetherRegistrarSnapshotDiverged
+        expr: |
+          count by (job, revision) (
+            count_values by (job, content_hash) (
+              "revision",
+              aether_registrar_snapshot_revision
+              * ignoring (content_hash) group_right ()
+              (
+                aether_registrar_snapshot_content
+                and
+                (
+                  timestamp(aether_registrar_snapshot_content)
+                  == ignoring (content_hash) group_left ()
+                  max without (content_hash) (timestamp(aether_registrar_snapshot_content))
+                )
+              )
+            )
+          ) > 1
+          unless on (job) (max by (job) (aether_registrar_writebehind_queue_depth) > 0)
+        for: 3m
+        labels:
+          severity: warning
+          component: aether-registrar
+        annotations:
+          summary: "registrar replicas serve {{ $value }} different endpoint sets at store revision {{ $labels.revision }}"
+          description: >-
+            Registrar replicas report the same aether_registrar_snapshot_revision
+            ({{ $labels.revision }}) with different content_hash labels on
+            aether_registrar_snapshot_content, and no write-behind intent is
+            pending. The listing is a pure function of the revision, so at least
+            one replica is not serving what the store holds, and the agents
+            watching it program different endpoints from the rest of the fleet.
+            Compare `aether_registrar_snapshot_content` per replica, then the
+            registrar logs for sync errors and
+            `aether_registrar_sync_errors_total`. Restarting the odd replica
+            makes it list again, but keep its logs first: this is a bug, see
+            docs/runbook.md, "Stored vs in place vs applied".
