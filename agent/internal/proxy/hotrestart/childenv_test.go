@@ -76,8 +76,8 @@ func TestChildEnv(t *testing.T) {
 
 // TestBuildEnvoyCmdExportsRestartEpoch pins the two halves of the contract on
 // the command the supervisor actually starts: the child keeps the supervisor's
-// environment (the access log already reads POD_NAME-style variables from it),
-// and it carries its own --restart-epoch as AETHER_RESTART_EPOCH even when the
+// environment (ordinary inheritance: nothing the supervisor was started with is
+// dropped), and it carries its own --restart-epoch as AETHER_RESTART_EPOCH even when the
 // supervisor inherited another value (issue #1333).
 func TestBuildEnvoyCmdExportsRestartEpoch(t *testing.T) {
 	t.Setenv(RestartEpochEnv, "99")

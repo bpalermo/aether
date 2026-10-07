@@ -983,10 +983,14 @@ func (s *Supervisor) watchConfig(ctx context.Context, trigger chan<- struct{}) {
 const configValidateTimeout = 30 * time.Second
 
 // validateConfig runs `envoy --mode validate` against the (changed) bootstrap
-// in the exact environment the real fork would use — same binary, same
-// container, same cgroup/namespace context — so environment-dependent
-// bootstrap failures (the class that docker-side validation cannot catch)
-// are detected before the serving epoch is put at risk. ExtraArgs are passed
+// in the context the real fork would use — same binary, same container, same
+// cgroup/namespace context, the supervisor's own environment — so
+// environment-dependent bootstrap failures (the class that docker-side
+// validation cannot catch) are detected before the serving epoch is put at
+// risk. One difference: a serving child also gets RestartEpochEnv
+// (buildEnvoyCmd), which a validation run has no epoch to set. Nothing in the
+// bootstrap may depend on it; it is read only by access-log format strings,
+// which render "-" when it is unset. ExtraArgs are passed
 // through because the config may reference --service-cluster/--service-node.
 func (s *Supervisor) validateConfig(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, configValidateTimeout)
