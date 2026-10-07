@@ -39,7 +39,7 @@ mkdir -p "$TMP/bin"
 index="sha256:$(printf '1%.0s' {1..64})"
 kid_a="sha256:$(printf 'a%.0s' {1..64})"
 kid_b="sha256:$(printf 'b%.0s' {1..64})"
-repo=aethermesh/proxy
+repo=acme/widget
 ref="quay.io/${repo}@${index}"
 token_url="https://quay.io/v2/auth?service=quay.io&scope=repository:${repo}:pull"
 index_url="https://quay.io/v2/${repo}/manifests/${index}"
@@ -130,8 +130,8 @@ fi
 case "$line" in
 ok) echo '[{"critical":{}}]' ;;
 flake)
-	echo 'Error: GET https://quay.io/v2/aethermesh/proxy/referrers/sha256:x: unexpected status code 502 Bad Gateway' >&2
-	echo 'error during command execution: GET https://quay.io/v2/aethermesh/proxy/referrers/sha256:x: unexpected status code 502 Bad Gateway' >&2
+	echo 'Error: GET https://quay.io/v2/acme/widget/referrers/sha256:x: unexpected status code 502 Bad Gateway' >&2
+	echo 'error during command execution: GET https://quay.io/v2/acme/widget/referrers/sha256:x: unexpected status code 502 Bad Gateway' >&2
 	exit 1
 	;;
 nosig)
@@ -282,7 +282,7 @@ check "not an index: one request, no wait" test "$(asked "$index_url" curl.log):
 # --- cosign ----------------------------------------------------------------------
 run 0 "one failed cosign verify is re-run and the run passes" "" "" "flake"
 check "cosign flake: says it is retrying, and why" \
-	has "  retrying index ${ref} in 2s (attempt 1 of 3 failed: error during command execution: GET https://quay.io/v2/aethermesh/proxy/referrers/sha256:x: unexpected status code 502 Bad Gateway)" "$TMP/out"
+	has "  retrying index ${ref} in 2s (attempt 1 of 3 failed: error during command execution: GET https://quay.io/v2/acme/widget/referrers/sha256:x: unexpected status code 502 Bad Gateway)" "$TMP/out"
 check "cosign flake: the verified line says it took two" has "  verified index ${ref} (attempt 2 of 3)" "$TMP/out"
 check "cosign flake: four cosign runs, one wait" test "$(wc -l <"$TMP/fake/cosign.log"):$(waits)" = "4:2 "
 check "cosign flake: no FAILED line for the issue to pick up" lacks 'FAILED' "$TMP/out"
@@ -290,7 +290,7 @@ check "cosign flake: no FAILED line for the issue to pick up" lacks 'FAILED' "$T
 # The index verifies, the first child fails three times, the second verifies.
 run 1 "a child that never verifies is FAILED after three attempts" "" "" "ok,flake,nosig,flake"
 check "child: FAILED with cosign's last line and the attempts" \
-	has "  FAILED   child quay.io/${repo}@${kid_a}: error during command execution: GET https://quay.io/v2/aethermesh/proxy/referrers/sha256:x: unexpected status code 502 Bad Gateway (3 attempt(s))" "$TMP/out"
+	has "  FAILED   child quay.io/${repo}@${kid_a}: error during command execution: GET https://quay.io/v2/acme/widget/referrers/sha256:x: unexpected status code 502 Bad Gateway (3 attempt(s))" "$TMP/out"
 check "child: 2 s then 4 s" test "$(waits)" = "2 4 "
 check "child: the other child was still checked" has "  verified child quay.io/${repo}@${kid_b}" "$TMP/out"
 check "child: the tally" has 'FAIL: 1 manifest(s) did not verify, 2 did, across 1 index(es)' "$TMP/out"
