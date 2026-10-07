@@ -61,6 +61,39 @@ Usage:
 {{- end -}}
 {{- end -}}
 
+{{/*
+A container's `resources` block with empty quantities dropped (#1253, #1321).
+Takes the container's `resources` dict and renders it as YAML.
+
+An empty or null quantity is omitted rather than rendered as `cpu: ""`, which
+the apiserver rejects as a quantity. So `--set <x>.resources.limits.cpu=` (or
+`limits: {cpu: null}` in a values file) means "no CPU limit", exactly like
+leaving the key out, and a `limits:`/`requests:` map left with no entries is
+dropped too. Non-map keys (e.g. `claims`) pass through untouched.
+Usage:
+  resources:
+    {{- include "aether.resources" .Values.udsCsi.resources | nindent 12 }}
+*/}}
+{{- define "aether.resources" -}}
+{{- $res := dict -}}
+{{- range $kind, $list := (. | default dict) -}}
+{{- if kindIs "map" $list -}}
+{{- $kept := dict -}}
+{{- range $name, $q := $list -}}
+{{- if not (or (kindIs "invalid" $q) (eq (toString $q) "")) -}}
+{{- $_ := set $kept $name $q -}}
+{{- end -}}
+{{- end -}}
+{{- if $kept -}}
+{{- $_ := set $res $kind $kept -}}
+{{- end -}}
+{{- else if $list -}}
+{{- $_ := set $res $kind $list -}}
+{{- end -}}
+{{- end -}}
+{{- toYaml $res -}}
+{{- end -}}
+
 {{/* Chart label value (name-version). */}}
 {{- define "aether.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}

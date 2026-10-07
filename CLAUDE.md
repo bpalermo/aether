@@ -58,7 +58,11 @@ make deps-audit              # or: scripts/go-deps-audit.sh — also a required
 # in. Bazel-only requires get a `// bazel-only:` annotation instead.
 
 # Copy the Bazel-generated proto Go into the tree (git-ignored) and build with the
-# plain go command — what CodeQL scans (.github/workflows/codeql.yaml; runbook)
+# plain go command — what CodeQL scans (.github/workflows/codeql.yaml; runbook).
+# It is `go build ./...` + `go vet ./...` over the WHOLE module with no excluded
+# package, and the CodeQL gate allows no extraction error. Bazel's `visibility`
+# does not enforce Go's internal-package rule, so a package that imports
+# `<tree>/internal/...` must live under `<tree>/` (#1311) — never add an exclusion.
 make go-build-plain          # make materialize-go / materialize-go-clean
 
 # Format code (Go, protobuf, Starlark, shell)
@@ -151,6 +155,7 @@ There is no top-level `cmd/`: each component owns its own (`agent/cmd/`, `cni/cm
 - **`common/apis/config/v1/`** - Kubernetes CRD Go types (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`) wrapping the `aether/config/v1` protos with deepcopy/jsonshim glue.
 - **`common/constants/`** - Shared Kubernetes labels, annotations (prefixes `aether.io/`, `endpoint.aether.io/`, `config.aether.io/`, `capture.aether.io/`), and registry/proxy/endpoint constants.
 - **`common/file/`** - Atomic file write utilities with platform-specific fadvise support.
+- **`agent/test/`** - Test harnesses that drive the agent's xDS generators against the real pinned Envoy, kept under `agent/` because they import `agent/internal/xds/...` (Go's internal-package rule; they lived in top-level `test/` until #1311). `envoy_validate/` runs `envoy --mode validate` over aether-generated bootstraps (`generate/` writes them to disk; `validate-built-proxy.sh` re-runs the gate against a locally built proxy, which `proxy.yml` does); `mtlspool/` runs live two-identity mTLS / QUIC pools; `envoybin/` locates the pinned binary in runfiles. Tagged `envoy-validate` (no Docker), part of the unit leg. Not product code: `scripts/coverage.sh` excludes the subtree (`EXCLUDED_SUBTREES`). Top-level `test/` keeps what imports no `internal/` package (`test/e2e`, `test/conformance`).
 
 ### Data-plane ports
 

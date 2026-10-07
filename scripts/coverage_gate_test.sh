@@ -16,6 +16,10 @@
 #     verdict both ways, and a malformed one is refused instead of ignored;
 #   - a missing or empty baseline is exit 2 with what to do about it, never a
 #     pass, and writes no report;
+#   - the "largest per-file drops" table (#1319): which files it names when
+#     no changed file is measured (a BUILD-only cause), its order and its cut
+#     at --top-drops, files that left the report, that it is open on a failed
+#     gate, collapsed on a drop within the threshold and absent otherwise;
 #   - the tables that do not gate: components and changed files that only one
 #     side has, paths in neither report, per-line merging of concatenated
 #     tracefiles, and agreement with scripts/coverage-summary.sh on the total.
@@ -150,6 +154,13 @@ check "golden: an unchanged file is not listed" lacks '| `cni/p.go` |' "$TMP/out
 check "golden: paths in neither report are counted, not listed" \
 	has '2 changed path(s) are in neither report' "$TMP/out"
 check "golden: a test file is not listed" lacks 'a_test.go' "$TMP/out"
+# The drops, whatever the diff touched: gone.go lost its 4 covered lines with
+# the file, a.go 1, and legacy/old.go (not in changed.txt) 1 with the file. The
+# tie at 1 is broken by path.
+check "golden: the largest drops, in order" test "$(grep -A 5 -F '| File | Baseline covered / lines |' "$TMP/out" | tail -n 4 | tr '\n' '~')" = \
+	'| `agent/gone.go` | 4 / 4 | removed | -4 |~| `agent/a.go` | 8 / 10 | 7 / 10 | -1 |~| `legacy/old.go` | 1 / 2 | removed | -1 |~| **3 file(s)** | | | **-6** |~'
+check "golden: a failed gate shows the drops open" has '### Largest per-file drops' "$TMP/out"
+check "golden: a file that gained covered lines is not a drop" lacks '| `cni/p.go` |' "$TMP/out"
 
 # --- the verdict -----------------------------------------------------------------
 # A 200-line baseline at 80.00%: one line is half a point.
@@ -166,10 +177,17 @@ check "equal: the notice says +0.000 points" \
 	has '::notice title=Coverage gate passed::line coverage 80.00% (160 of 200 lines) against 80.00% for the baseline main (160 of 200 lines): +0.000 points; maximum drop 1.0 points (the default), no minimum' "$TMP/err"
 check "equal: the report says passed" has '## Coverage gate: passed' "$TMP/out"
 check "equal: no changed-files section without --changed-files" lacks '### Changed files' "$TMP/out"
+check "equal: no drops section" lacks 'Largest per-file drops' "$TMP/out"
 
 compare 0 "a drop within the threshold passes (-0.5)" -- "${B[@]}" --head "$TMP/small.lcov"
 check "small drop: the notice carries the delta" has '79.50% (159 of 200 lines)' "$TMP/err"
 check "small drop: -0.500 points" has ': -0.500 points;' "$TMP/err"
+check "small drop: the drops are collapsed" \
+	has '<summary>Largest per-file drops: 1 file(s), 1 covered line(s)</summary>' "$TMP/out"
+check "small drop: the collapsed section is opened and closed" \
+	test "$(grep -cx -e '<details>' -e '</details>' "$TMP/out")" = 2
+check "small drop: no open heading" lacks '### Largest per-file drops' "$TMP/out"
+check "small drop: the file is named" has '| `agent/a.go` | 120 / 150 | 119 / 150 | -1 |' "$TMP/out"
 
 compare 0 "a drop of exactly the threshold passes (-1.0)" -- "${B[@]}" --head "$TMP/exact.lcov"
 check "exact: -1.000 points" has ': -1.000 points;' "$TMP/err"
@@ -181,15 +199,79 @@ check "beyond: the report says FAILED" has '## Coverage gate: FAILED' "$TMP/out"
 check "beyond: the report says by how much" \
 	has 'Total line coverage dropped by **1.500 points**, more than the **1.0** allowed.' "$TMP/out"
 check "beyond: the report points at the runbook" has 'The gate failed' "$TMP/out"
+check "beyond: the drops are open, not collapsed" has '### Largest per-file drops' "$TMP/out"
+check "beyond: no <details>" lacks 'details>' "$TMP/out"
+check "beyond: the file is named" has '| `agent/a.go` | 120 / 150 | 117 / 150 | -3 |' "$TMP/out"
 
 compare 0 "a rise passes (+5.0)" -- "${B[@]}" --head "$TMP/rise.lcov"
 check "rise: +5.000 points" has ': +5.000 points;' "$TMP/err"
+check "rise: no drops section" lacks 'Largest per-file drops' "$TMP/out"
 
 # Deleting well-tested code lowers the percentage with no test removed: 40
 # fully covered lines gone, 120 of 160 = 75.00%.
 mk "$TMP/deleted.lcov" agent/a.go:150:120 cni/p.go:10:0
 compare 1 "deleting covered code is a drop like any other" -- "${B[@]}" --head "$TMP/deleted.lcov"
 check "deleted: the line counts show it" has '| **Delta** | -40 | -40 | **-5.000 points** |' "$TMP/out"
+check "deleted: the file that lost them is named" has '| `cni/p.go` | 40 / 50 | 0 / 10 | -40 |' "$TMP/out"
+
+# --- the largest per-file drops (#1319) ------------------------------------------
+# The case the table exists for: a test target disabled in a BUILD file. No Go
+# file changed, so the changed-files table is empty; agent/b.go and agent/c.go
+# kept their lines and lost their coverage. 160 of 200 -> 149 of 200.
+mk "$TMP/build-base.lcov" agent/a.go:100:80 agent/b.go:40:30 agent/c.go:10:10 cni/p.go:50:40
+mk "$TMP/build-head.lcov" agent/a.go:100:80 agent/b.go:40:20 agent/c.go:10:9 cni/p.go:50:40
+echo agent/BUILD.bazel >"$TMP/build-only.txt"
+compare 1 "a BUILD-only change that drops coverage fails" -- \
+	--baseline "$TMP/build-base.lcov" --head "$TMP/build-head.lcov" --changed-files "$TMP/build-only.txt"
+check "BUILD-only: the changed-files table has nothing" has 'None of the changed files is in either report.' "$TMP/out"
+check "BUILD-only: the drops name the files, largest first" test "$(grep -A 4 -F '| File | Baseline covered / lines |' "$TMP/out" | tail -n 3 | tr '\n' '~')" = \
+	'| `agent/b.go` | 30 / 40 | 20 / 40 | -10 |~| `agent/c.go` | 10 / 10 | 9 / 10 | -1 |~| **2 file(s)** | | | **-11** |~'
+check "BUILD-only: unchanged files are not listed" lacks '| `agent/a.go` |' "$TMP/out"
+
+# Twelve files losing 12, 11, ... 1 covered lines (f01 the most), one that
+# gains, one that grows without losing a covered line, one that leaves the
+# report with covered lines and one that leaves it with none.
+base=() head=()
+for i in 01 02 03 04 05 06 07 08 09 10 11 12; do
+	base+=("pkg/f$i.go:20:20")
+	head+=("pkg/f$i.go:20:$((7 + 10#$i))")
+done
+mk "$TMP/many-base.lcov" "${base[@]}" pkg/gain.go:20:10 pkg/grow.go:20:10 pkg/left.go:9:5 pkg/dead.go:6:0
+mk "$TMP/many-head.lcov" "${head[@]}" pkg/gain.go:20:15 pkg/grow.go:40:10
+M=(--baseline "$TMP/many-base.lcov" --head "$TMP/many-head.lcov")
+# rows <n>: the first <n> file names of the drops table, in order.
+rows() { grep -A "$(($1 + 1))" -F '| File | Baseline covered / lines |' "$TMP/out" | tail -n "$1" | sed -E 's/^\| `([^`]*)`.*/\1/' | tr '\n' ' '; }
+compare 1 "many drops fail the gate" -- "${M[@]}"
+# Losses: f01 12, f02 11, f03 10, f04 9, f05 8, f06 7, f07 6, then left.go and
+# f08 at 5 (path breaks the tie: pkg/f08.go < pkg/left.go), f09 4: ten rows.
+check "many: the default is the ten largest, by covered lines lost, then path" test "$(rows 10)" = \
+	'pkg/f01.go pkg/f02.go pkg/f03.go pkg/f04.go pkg/f05.go pkg/f06.go pkg/f07.go pkg/f08.go pkg/left.go pkg/f09.go '
+check "many: a file that left the report says so" has '| `pkg/left.go` | 5 / 9 | removed | -5 |' "$TMP/out"
+# 14 files: the twelve, left.go and dead.go; 12+...+1 + 5 = 83 covered lines.
+check "many: the total row counts every drop, shown or not" has '| **14 file(s)** | | | **-83** |' "$TMP/out"
+# Not shown: f10 3, f11 2, f12 1, dead.go 0.
+check "many: says how many are not shown" has '4 of them are not shown (6 covered line(s) between them).' "$TMP/out"
+check "many: the eleventh is not listed" lacks '| `pkg/f10.go` |' "$TMP/out"
+check "many: a file that gained is not a drop" lacks 'pkg/gain.go' "$TMP/out"
+check "many: a file that grew without losing a covered line is not a drop" lacks 'pkg/grow.go' "$TMP/out"
+
+compare 1 "--top-drops 3" -- "${M[@]}" --top-drops 3
+check "top 3: the three largest" test "$(rows 3)" = 'pkg/f01.go pkg/f02.go pkg/f03.go '
+check "top 3: the fourth is not listed" lacks '| `pkg/f04.go` |' "$TMP/out"
+check "top 3: eleven not shown" has '11 of them are not shown (50 covered line(s) between them).' "$TMP/out"
+compare 1 "--top-drops 14 shows them all" -- "${M[@]}" --top-drops 14
+check "top 14: a file that left with no covered line is last, at 0" \
+	test "$(grep -B 1 -F '| **14 file(s)**' "$TMP/out" | head -n 1)" = '| `pkg/dead.go` | 0 / 6 | removed | 0 |'
+check "top 14: nothing is hidden" lacks 'are not shown' "$TMP/out"
+for bad in 0 -1 abc 1.5 ''; do
+	compare 2 "a malformed --top-drops is refused: '$bad'" -- "${M[@]}" --top-drops "$bad"
+done
+
+# The total can fall with no file losing a covered line: lines were added.
+mk "$TMP/added.lcov" agent/a.go:150:120 cni/p.go:50:40 agent/new.go:20:0 # 160 of 220 = 72.73%
+compare 1 "uncovered new code is a drop with no per-file drop" -- "${B[@]}" --head "$TMP/added.lcov"
+check "added: says why the table is empty" has 'No file lost covered lines or left the report' "$TMP/out"
+check "added: no empty table" lacks '| File | Baseline covered / lines |' "$TMP/out"
 
 # --- the thresholds --------------------------------------------------------------
 compare 0 "COVERAGE_MAX_DROP=2 lets a 1.5-point drop through" COVERAGE_MAX_DROP=2 -- "${B[@]}" --head "$TMP/beyond.lcov"

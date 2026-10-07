@@ -147,12 +147,12 @@ bazel test //... --test_arg=-test.short
 
 ### `envoy --mode validate`: the released proxy or the one a PR builds
 
-`//test/envoy_validate` runs `envoy --mode validate` over aether-generated
-configs, and it has two modes. **Default** (`bazel test //test/envoy_validate/...`,
+`//agent/test/envoy_validate` runs `envoy --mode validate` over aether-generated
+configs, and it has two modes. **Default** (`bazel test //agent/test/envoy_validate/...`,
 what the `ci` workflow runs): the binary is `@pinned_envoy_linux_<arch>`, lifted
 by `//bazel/proxy_pin` from the aether-proxy image `charts/aether/values.yaml`
 pins — the proxy the mesh deploys today (#709). **Built proxy**
-(`test/envoy_validate/validate-built-proxy.sh <envoy-binary>`): the script points
+(`agent/test/envoy_validate/validate-built-proxy.sh <envoy-binary>`): the script points
 `--override_repository` for the host arch's pinned repo at a local repo whose
 `envoy` symlinks to the given binary, so the same tests validate against an
 Envoy built elsewhere — typically the `//proxy` workspace's `//:envoy`. Bazel
@@ -215,6 +215,15 @@ count yet, so code only they exercise reads as uncovered.
   `e2e` (harnesses) and `bazel` (build tooling) — the `EXCLUDED` list in the
   script. A new top-level component is measured from its first Go target with
   no edit. `cmd/` mains are in: they are code.
+- *One subtree of a component is out too:* `agent/test` (`EXCLUDED_SUBTREES`).
+  It holds the Envoy-driven harnesses (`envoy_validate`, its generator,
+  `mtlspool`, `envoybin`), which import `agent/internal/...` and therefore have
+  to sit under `agent/` (#1311); before that they were in `test/` and excluded
+  with it. Their two non-test files (the config builders and the generator's
+  `main`) are fixtures, not product code, so they stay out of the denominator
+  and the move changed no number. Their tests run like any other unit test, and
+  the `agent/internal/...` lines those tests execute count. A subtree entry
+  that no longer exists fails the run.
 - *Untested code counts as zero.* By default `bazel coverage` instruments only
   packages that have a test in the run. The script passes an
   `--instrumentation_filter` over every component and makes every component
@@ -233,14 +242,20 @@ honest denominator is 409 lines larger than the default one.
 
 **Run-to-run variation.** Four uncached runs covered 21 993, 21 994, 21 991
 and 21 989 lines: 77.80–77.82 %, a spread of 0.018 percentage points.
-Seventeen lines in six files are timing-dependent
+Seventeen lines in six files were timing-dependent in those runs
 (`cni/internal/util/watcher.go`, `common/signals/signals.go`,
 `agent/internal/proxy/hotrestart/supervisor.go`,
 `agent/internal/meshdns/lameduck.go`, `agent/internal/xds/server/refresh.go`,
 `agent/internal/xds/cache/identitybinding.go`), so the widest gap two runs
 could show is 0.06 points. The first two CI runs read 77.84 % and 77.81 %
-(21 998 and 21 991 lines; six `cni` lines are covered on the runner and not on
-a workstation). Because CI re-runs every test (next paragraph), a pull request
+(21 998 and 21 991 lines). Six of the runner's extra lines were
+`watcher.go`'s closed-`Errors` exit (lines 119–121 and 135–137): `Close`
+leaves the watch goroutine with three ready `select` arms and the scheduler
+picks, which it did on the runner in every run, in about a third of plain
+`go test` runs on the workstation and never under Bazel there — a scheduling
+difference, not a privilege or kernel one (#1315). `watcher_loop_test.go` now
+takes each exit of that loop deterministically, so `watcher.go` is out of the
+timing-dependent set. Because CI re-runs every test (next paragraph), a pull request
 and `main` are two independent samples of that noise: a `COVERAGE_MAX_DROP`
 below roughly 0.1 would fail pull requests that changed nothing. The default
 of 1.0 is sixteen times the widest gap.
@@ -264,7 +279,11 @@ fails with it, so `coverage` is the one check to require. Only the total gates.
 The job summary also shows, for the reviewer and without gating: the two totals
 and their delta, a per-component table with each component's delta, and the
 coverage of every changed file (`git diff <baseline>...<head>`) that either
-report names, new and deleted files included. Patch coverage is deliberately
+report names, new and deleted files included. When the total dropped it adds
+the **largest per-file drops**: the ten files (`--top-drops`) whose covered-line
+count fell most, whatever the diff touched, and the files that left the report
+(`removed`) — open when the gate fails, collapsed when the drop is within the
+threshold, absent when nothing dropped. Patch coverage is deliberately
 not a gate: it punishes the pull request that touches old untested code.
 
 - *Which baseline.* `scripts/coverage-baseline.sh` takes the `coverage-report`
@@ -309,13 +328,17 @@ not a gate: it punishes the pull request that touches old untested code.
 
 **The gate failed.** The `::error` on the run gives both totals, the line
 counts and the delta; the component and changed-file tables say where it came
-from.
+from. When no measured file changed (the changed-files table reads `None of the
+changed files is in either report`), read **Largest per-file drops**: it names
+the files that lost covered lines although the diff did not touch them.
 
 - *Code lost its tests, or new code has none.* Add the tests. A new file no
   test links counts at zero, which is the point.
 - *A test stopped running.* A `go_test` that gained `manual`, `integration` or
   `requires-root`, or a deleted test target, drops out of the measured set
-  while its library's lines stay in the denominator.
+  while its library's lines stay in the denominator. No Go file changes, so
+  only the per-file drops table shows which files that test was covering
+  (#1319).
 - *The drop is legitimate.* Deleting a large, well-tested package lowers the
   percentage although nothing got worse: 1 000 fully covered lines removed
   from today's tree is about −0.8 points. The lines columns of the tables show
@@ -603,11 +626,11 @@ What the `Analyze (go)` job does, in order:
    listed in `.materialized-generated-go`. Bazel runs **before** CodeQL is
    initialised so the tracer never sees rules_go's own `go` processes.
 2. `scripts/go-build-plain.sh` builds the module with the plain go command
-   under CodeQL's tracer: pinned Go from `go.mod`, `GOFLAGS=-mod=readonly`,
-   `GOTOOLCHAIN=local`, `GOOS=linux`, `CGO_ENABLED=0`. `go.mod` and `go.sum`
-   must come out untouched. The tracer extracts each package and then lets the
-   real build run, so this step is also the proof that the module compiles
-   outside Bazel.
+   under CodeQL's tracer: one `go build ./...` over the whole module, pinned Go
+   from `go.mod`, `GOFLAGS=-mod=readonly`, `GOTOOLCHAIN=local`, `GOOS=linux`,
+   `CGO_ENABLED=0`. `go.mod` and `go.sum` must come out untouched. The tracer
+   extracts each package and then lets the real build run, so this step is also
+   the proof that the module compiles outside Bazel.
 3. CodeQL analyses with `upload: never`.
 4. `scripts/codeql-go-diagnostics.sh` reads the SARIF and fails the job if the
    extraction was incomplete (below).
@@ -634,26 +657,38 @@ The copies are inert for Bazel and Gazelle (no target lists them, and Gazelle
 skips a `.pb.go` that sits next to its `.proto`), but they go stale when a
 `.proto` changes: re-run `make materialize-go`, or clean them.
 
-**What is not built by the plain go command.** `scripts/go-build-plain.sh`
-holds the list with reasons, and fails when an entry starts building:
+**Nothing is excluded from the plain build.** `scripts/go-build-plain.sh` runs
+`go build ./...` (and, with `--vet`, `go vet ./...`, which also type-checks
+every `_test.go`) over the whole module: no package list, no exception.
+`//scripts:go_build_plain_test` holds it to exactly those two invocations.
 
-| Package | Why | Scanned? |
-| --- | --- | --- |
-| `test/envoy_validate`, `test/envoy_validate/generate` | imports `agent/internal/...` from outside `agent/`; Bazel `visibility` allows it, Go's internal-package rule does not | yes: the script names them in a `go build` that must fail, which is enough for the tracer to extract them |
-| `test/mtlspool` (`go vet` only) | test-only package with the same imports | no (tests are not scanned) |
+Bazel does not enforce Go's internal-package rule (`visibility` is its own,
+looser mechanism), so a package outside `agent/` can import
+`agent/internal/...` and stay green in Bazel while the go command, gopls and
+CodeQL's extractor refuse it (*"use of internal package ... not allowed"*).
+That was the case for `test/envoy_validate`, its generator and `test/mtlspool`
+until #1311 moved them to `agent/test/`, and it is the only way such a failure
+is fixed: move the importer under the tree whose `internal/` it uses (or give
+it a non-internal package to import). Do not exclude it from the build and do
+not allow its extraction error.
 
-Three more non-test files are never part of a Linux build and so are not in the
-database: `agent/internal/udscsi/mounter_other.go`,
-`common/file/dirsync_windows.go`, `common/file/fadvise_unspecified.go`.
+What `./...` leaves out is decided by build constraints in the files
+themselves, never by a list. Three non-test files are never part of a Linux
+build and so are not in the database: `agent/internal/udscsi/mounter_other.go`,
+`common/file/dirsync_windows.go`, `common/file/fadvise_unspecified.go`. And
+`test/conformance` holds one `_test.go` behind `//go:build conformance`: it is
+compiled inside the upstream gateway-api module, not this one (its README), so
+the directory is not a package here for the go command or for Bazel.
 
 **"The Go extraction is complete" failed.** CodeQL does not fail a scan it could
 only half do, and a partial result uploads cleanly and then closes every alert
 in the code it did not understand as *fixed*. The step reads the SARIF's
 `runs[].invocations[].toolExecutionNotifications[]` and fails on any
-`go/diagnostics/extraction-errors` entry (an unresolved package or type) other
-than the allow-listed internal-package error in `test/envoy_validate`, on any
-`go/autobuilder/*` warning (the *"packages could not be found"* family), on an
-extracted `_test.go`, and when a materialized file is missing from the
+`go/diagnostics/extraction-errors` entry (an unresolved package or type, an
+internal-package violation): there is no allow-list, and
+`//scripts:codeql_go_diagnostics_test` fails if one comes back. It also fails
+on any `go/autobuilder/*` warning (the *"packages could not be found"* family),
+on an extracted `_test.go`, and when a materialized file is missing from the
 database. Nothing was uploaded; the SARIF artifact has the full list. The usual
 cause is a generated package the materialize step did not cover.
 
@@ -1664,7 +1699,7 @@ the agent for it by name over ODCDS; the agent checks the name (destination in t
 dependency set, source a ServiceAccount with a pod on the node), records
 the pair and publishes the twin with its own load assignment; the paused request
 resumes on it, over HTTP/3. That costs one local round trip. It was 17–24 ms in
-`//test/mtlspool`'s `TestOnDemandQUICTwinPerPair`, and every later request from
+`//agent/test/mtlspool`'s `TestOnDemandQUICTwinPerPair`, and every later request from
 the pair skips it. A connection with no identity stamp (stamped before the trust
 domain was known) takes `on_no_match`, the h2 cluster. A GAMMA (HTTPRoute) rule
 whose single backendRef is the parent rides QUIC too; a weighted split stays h2
@@ -1718,7 +1753,7 @@ persisted pairs carry over; the re-statement is read two ways:
   the life of the process and answers every later request for the name "already
   subscribed, skipping", so a subscribed twin answered absent is **stranded**: every
   request from that pair 503s `NC` at the 2 s `on_demand` timeout until the proxy
-  restarts. `//test/mtlspool`'s `TestOnDemandQUICSubscribedTwinsServedAfterAgentRestart/strand_control`
+  restarts. `//agent/test/mtlspool`'s `TestOnDemandQUICSubscribedTwinsServedAfterAgentRestart/strand_control`
   shows it.
 
 The agent logs one line per fresh stream: `fresh xDS stream re-stated QUIC twins:
@@ -1801,7 +1836,7 @@ name is skipped inside the proxy and never reaches the agent. The pair is then
 Until #1036 this was reachable on every Deployment roll. A pair was *forgotten* when
 its source ServiceAccount's last pod left the node, or when its destination left the
 dependency set (or, before #979, the allow-list). The next pod of that ServiceAccount on the node
-then routed to a name Envoy would never ask for again. `//test/mtlspool`
+then routed to a name Envoy would never ask for again. `//agent/test/mtlspool`
 `TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control` reproduces
 it: `status=503 … in 2.000099268s`, and no CDS request reaches the control plane.
 
@@ -1984,7 +2019,7 @@ sum(rate(envoy_cluster_upstream_rq_total{aether_cluster=~".*@.*"}[5m]))
 
 A connection count that grows with app connections (k6 VUs, a client's pool size)
 rather than with SAs × workers × endpoints means a twin started pooling per
-downstream connection again. `//test/mtlspool` `TestQUICTwinUpstreamConnections`
+downstream connection again. `//agent/test/mtlspool` `TestQUICTwinUpstreamConnections`
 reproduces both shapes: 12 app connections open 1 QUIC connection (one worker), 4
 (four workers), or 12 (option forced on). The same counts hold on the h2 path, whose
 pool key has carried the source identity instead of the downstream connection since
@@ -2085,7 +2120,7 @@ response, so only a *late* twin — a new local ServiceAccount — is hit. Fixed
 #1008: `proxy.QUICClusterFrom` points the twin at its own EDS name and the cache
 publishes the base's `ClusterLoadAssignment` under it
 (`proxy.LoadAssignmentAlias`). Seeing this again means that pairing broke;
-`//test/mtlspool`'s `TestLateQUICTwin*` pair reproduces it against the pinned
+`//agent/test/mtlspool`'s `TestLateQUICTwin*` pair reproduces it against the pinned
 proxy (the negative control times out at ~15 s by design).
 
 **Invariant.** A delta-ADS subscriber must never share a resource name with an
@@ -2120,8 +2155,8 @@ Three gates keep it that way:
 
 - `//agent/internal/xds/cache` `TestNoNonDefaultClusterSharesTheBareServiceEDSName`
   and `TestLate{PortAlias,TCPFloor}SubscribesToItsOwnEDSResource`.
-- `//test/envoy_validate` `ClustersSharingServiceEDSName`, over every fixture.
-- `//test/mtlspool` `TestLate{PortAlias,TCPFloor,QUICTwin}*`, against the
+- `//agent/test/envoy_validate` `ClustersSharingServiceEDSName`, over every fixture.
+- `//agent/test/mtlspool` `TestLate{PortAlias,TCPFloor,QUICTwin}*`, against the
   pinned proxy, each with a shared-name negative control that must time out at
   ~15 s.
 
@@ -2452,6 +2487,78 @@ To put a cap back, set `agent.meshDnsDaemon.resources.limits.cpu` (an empty valu
 renders no limit) and consider `agent.meshDnsDaemon.goMaxProcs=0`, which hands
 `GOMAXPROCS` back to the Go runtime to derive from that limit.
 
+### uds-csi CPU throttling (and the controller's and registrar's CPU limits)
+
+The `csi.aether.io` plugin serves `NodePublishVolume` / `NodeUnpublishVolume`, so a
+CFS-throttled period on it is added to the start (or the termination) of a UDS pod
+on that node. Until chart 2.4.10 it ran with a `5m` request and a `100m` limit, and
+the 2026-10-06 8 h soak — the first with cAdvisor scraped — showed it throttled in
+**57.6 %** of the periods it ran in (20,248 of 35,169, 15 pods, #1321) while using
+11–23 CPU-seconds per pod over the whole run. Same mechanism as mesh-dns above: an
+average far under the limit, delivered in bursts (a publish; and every 30 s the
+liveness probe, a second Go process inside the same cgroup) that spend a period's
+10 ms of quota and park the container until the next one. Since #1321 it keeps the
+`5m` request and has **no CPU limit** by default, with `GOMAXPROCS=2` pinned in the
+chart (`udsCsi.goMaxProcs`).
+
+The same soak measured the controller at 1.0 % and the registrar at 1.5 %. Their
+`100m` limits were **kept**: neither is on a request path (a throttled period is
+under 100 ms on an admission call with a 5 s timeout, or on an endpoint update on
+its way to the agents), the registrar's `requests == limits` is what makes it QoS
+Guaranteed, and both derive `GOMAXPROCS` from `limits.cpu`. The reasoning is next to
+`controller.resources` and `registrar.resources` in `charts/aether/values.yaml`.
+
+Fraction of CFS periods throttled, per container, over a window (cAdvisor; set the
+range to the run you are grading):
+
+```promql
+sum by (container) (increase(container_cpu_cfs_throttled_periods_total{namespace="aether-system", container!=""}[8h]))
+  / sum by (container) (increase(container_cpu_cfs_periods_total{namespace="aether-system", container!=""}[8h]))
+```
+
+Per uds-csi pod, as a rate, with the time parked and the CPU actually used:
+
+```promql
+# Fraction of CFS periods throttled, per uds-csi pod
+sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace="aether-system", container="uds-csi"}[30m]))
+  / sum by (pod) (rate(container_cpu_cfs_periods_total{namespace="aether-system", container="uds-csi"}[30m]))
+
+# Seconds parked per second
+sum by (pod) (rate(container_cpu_cfs_throttled_seconds_total{namespace="aether-system", container="uds-csi"}[30m]))
+
+# CPU actually used, millicores
+1000 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="aether-system", container="uds-csi"}[30m]))
+```
+
+**A container with no CPU limit has no `container_cpu_cfs_*` series at all** —
+cAdvisor only exports them for a cgroup with a quota — so after #1321 the uds-csi
+queries return *no data*, not `0`, and the first query simply stops listing
+`uds-csi` (as it does not list `agent`, `mesh-dns` or `proxy`). Read "no data" as the
+pass, but prove the scrape is alive with the usage query, which must still return
+one series per pod, and confirm the limit is really gone:
+
+```promql
+# Expect: empty. Any series here is a uds-csi container that still has a quota
+# (an old pod not yet rolled, or an operator-set limits.cpu).
+count by (pod) (container_cpu_cfs_periods_total{namespace="aether-system", container="uds-csi"})
+```
+
+```bash
+kubectl get ds -n aether-system aether-uds-csi \
+  -o jsonpath='{.spec.template.spec.containers[0].resources}{"\n"}'   # no limits.cpu
+```
+
+With no quota, what can still make the plugin wait is node contention, where its
+`5m` request is its CFS weight. The cgroup's `cpu.pressure` shows that; read it with
+the node-debug recipe in the mesh-dns section above, with
+`app.kubernetes.io/component=uds-csi` and container name `uds-csi` (the image is
+distroless too). A `some avg60` that stays above zero is the signal to raise
+`udsCsi.resources.requests.cpu`.
+
+To put a cap back, set `udsCsi.resources.limits.cpu` (an empty value renders no
+limit) and consider `udsCsi.goMaxProcs=0`, which hands `GOMAXPROCS` back to the Go
+runtime to derive from that limit.
+
 ### What the proxy supervisor does on SIGTERM (`kubectl delete pod`, drain, eviction)
 
 The `aether-proxy` pod is `hostNetwork` with `maxSurge: 1`, so the node's Envoy is a
@@ -2688,6 +2795,29 @@ be later than that:
 ```bash
 kubectl -n aether-system get pod <proxy-pod> -o jsonpath='{range .status.initContainerStatuses[?(@.name=="authz")]}authz started={.started} at {.state.running.startedAt}{"\n"}{end}{range .status.containerStatuses[?(@.name=="proxy")]}proxy at {.state.running.startedAt}{"\n"}{end}'
 ```
+
+**Which `ext_authz` counters exist (#1325).** In Prometheus the filter's counters are
+`envoy_http_<stat_prefix>_ext_authz_<name>_total` (`capture_http` is the capture
+listener's prefix). A missing series means the event never happened on that proxy. It
+does not mean the stat is filtered:
+
+- Envoy's OTLP stats sink exports a counter only after it was first incremented. So
+  `ok`, `denied` and `error` exist only for nodes whose proxy has run a check with that
+  result. On talos-main that is the node carrying the canary. The first sample appears at
+  its value, and `increase()` reads 0 for that first jump. An alert on these needs the
+  "present now, absent 10 minutes ago" arm next to `increase()`:
+  `sum(m unless m offset 10m) > 0`.
+- `failure_mode_allowed` is incremented only when the filter runs fail-open
+  (`proxy.authzSidecar.failureMode: ALLOW`, `--authz-sidecar-failure-mode-allow`). With the
+  default `DENY` the series never exists.
+- There is **no `timeout` counter**. Envoy's HTTP `ext_authz` filter does not define one
+  (checked at the pinned Envoy, `ALL_EXT_AUTHZ_FILTER_STATS` in
+  `source/extensions/filters/http/ext_authz/ext_authz.h`). A check that exceeds
+  `proxy.authzSidecar.timeout` is counted in `error`. Do not gate on
+  `…_ext_authz_timeout_total`: it reads as a clean zero forever.
+- Neither the proxy's `stats_matcher` (an exclusion list,
+  `charts/aether/templates/agent-proxy-configmap.yaml`) nor the collector drops any
+  `ext_authz` stat.
 
 The chart needs Kubernetes >= 1.29 for this and refuses to render with the sidecar enabled
 on an older cluster. Kind e2e: `e2e/authz.sh` (nightly job `authz`). It evicts the OPA
@@ -3146,7 +3276,7 @@ interval). The longer the agent was away, the longer the proxy waits after it is
 Since #1103 the bootstrap's `ads_config` carries
 `retry_policy.retry_back_off {base_interval: 0.1s, max_interval: 1s}`, so the proxy
 reconnects within 1 s of the agent serving. Checked by
-`//test/envoy_validate:envoy_validate_test` (`TestNodeProxyADSReconnectBackoffIsBounded`)
+`//agent/test/envoy_validate:envoy_validate_test` (`TestNodeProxyADSReconnectBackoffIsBounded`)
 and `//charts/aether:aether_proxy_bootstrap_ads_reconnect_backoff_test`; the kind proof
 is `e2e/drain-propagation.sh`.
 
@@ -3202,11 +3332,26 @@ aether_registrar_store_revision - aether_registrar_snapshot_revision
 # applied: how far the fleet's agents trail the store (worst agent)
 max(aether_registrar_store_revision) - min(aether_agent_registry_last_version)
 
-# divergence: more than one endpoint set while every replica is on the same
-# revision and none has a write-behind intent pending. MUST be empty.
-count(count by (content_hash) (aether_registrar_snapshot_content)) > 1
-  and on() (max(aether_registrar_snapshot_revision) == min(aether_registrar_snapshot_revision))
-  and on() (max(aether_registrar_writebehind_queue_depth) == 0)
+# divergence: more than one endpoint set at ONE revision, with no write-behind
+# intent pending. MUST be empty. Each replica's current hash is the content
+# series with the newest sample (see "Divergence rule" below for why).
+count by (job, revision) (
+  count_values by (job, content_hash) (
+    "revision",
+    aether_registrar_snapshot_revision
+    * ignoring (content_hash) group_right ()
+    (
+      aether_registrar_snapshot_content
+      and
+      (
+        timestamp(aether_registrar_snapshot_content)
+        == ignoring (content_hash) group_left ()
+        max without (content_hash) (timestamp(aether_registrar_snapshot_content))
+      )
+    )
+  )
+) > 1
+unless on (job) (max by (job) (aether_registrar_writebehind_queue_depth) > 0)
 ```
 
 The replica-lag line settles at 0 between changes. A short climb during churn
@@ -3254,9 +3399,64 @@ regardless.
 **same** `content_hash` label on `aether_registrar_snapshot_content`. The same
 revision with a different `content_hash` is a bug: the listing is a pure function
 of the revision, so two replicas that disagree are not serving what the store
-holds. `aether_registrar_snapshot_content` exports exactly one series per
-replica, the current hash. A superseded hash stops being exported rather than
-accumulating.
+holds. The registrar exports exactly one `aether_registrar_snapshot_content`
+series per replica, the current hash, and stops exporting a superseded one.
+
+**Prometheus still shows the superseded hash for 5 minutes (#1322).** The hash is
+a label, so a content change ends one series and starts another. OTLP carries no
+staleness marker for a series that is no longer exported, so an instant query
+keeps returning the old series' last sample for the whole lookback window. After
+every content change each replica therefore shows two hashes for 5 minutes. Any
+expression that counts hashes over the bare selector reads that as a divergence.
+The expression this section carried until #1322 did:
+
+```promql
+# WRONG: do not use. True for 5 minutes after every content change.
+count(count by (content_hash) (aether_registrar_snapshot_content)) > 1
+  and on() (max(aether_registrar_snapshot_revision) == min(aether_registrar_snapshot_revision))
+  and on() (max(aether_registrar_writebehind_queue_depth) == 0)
+```
+
+On the 8 h soak of 2026-10-06 (66 revisions, no divergence) it returned a sample
+at 108 of the 1,920 15-second steps (386 for its first two clauses alone), and
+the expression above returned none.
+It had a second fault: `aether_registrar_writebehind_queue_depth` is recorded only
+when an intent is queued or flushed, so on a registrar that has never queued one
+the series is missing, the last clause is empty, and the whole expression can
+never be true.
+
+How the expression above avoids both:
+
+- `timestamp(content) == max without (content_hash) (timestamp(content))` keeps,
+  per replica, only the content series whose sample is the newest. The
+  superseded series is inside the lookback, but its last sample is older. A
+  replica is "every label except `content_hash`", so the expression does not
+  depend on the name of the replica label (`node` carries the pod name on
+  talos-main).
+- Multiplying by `aether_registrar_snapshot_revision` gives that series the
+  replica's revision as its value, and `count_values` turns the value into a
+  `revision` label. The outer `count by (job, revision)` is then the number of
+  distinct hashes at one revision. A replica that lags is at another revision
+  and is not compared.
+- `unless ... > 0` is quiet only when some replica reports a pending intent. A
+  missing queue-depth series does not disable the check.
+
+To read the pairs by hand, use the same filter:
+
+```promql
+# one row per replica: value = revision, content_hash = what it serves there
+aether_registrar_snapshot_revision
+  * ignoring (content_hash) group_right ()
+  (aether_registrar_snapshot_content
+   and (timestamp(aether_registrar_snapshot_content)
+        == ignoring (content_hash) group_left ()
+        max without (content_hash) (timestamp(aether_registrar_snapshot_content))))
+```
+
+The alert is `AetherRegistrarSnapshotDiverged`
+(`docs/observability/registrar-alerts.yml`, `for: 3m`). Its promtool tests are in
+the GitOps repo (`clusters/talos-main/prometheus/rules_test.yaml`), one of which
+is a content change with the old series stale but inside the lookback.
 
 Notes:
 
@@ -3267,7 +3467,13 @@ Notes:
   the list RV moves on every write anywhere in the cluster. So that backend does
   not implement `registry.RevisionedLister`, and `store_revision`,
   `snapshot_revision` and the agent's `last_version` are not reported. The
-  content-hash gauge and the divergence check above still apply.
+  content-hash gauge is still exported, but the divergence expression above
+  returns nothing there: it compares replicas at one revision, and there is no
+  revision. Two kubernetes-backend replicas can also differ for a moment
+  legitimately, because health derives from each replica's clock. Read each
+  replica's current hash with the newest-sample filter above (drop the
+  revision multiplication) and treat only a disagreement that persists across
+  several sync cycles as a finding.
 - `aether_registrar_snapshot_version` keeps its pre-#1193 series name but is now
   the snapshot **generation**: a per-process count of content changes. It moves
   only when the served endpoint set changes, and it is not comparable across
@@ -3897,7 +4103,7 @@ that caught #829. It is the fail-**open** direction.
 sum by (node) (increase(aether_agent_identity_cluster_unpinned_total[1h]))
 ```
 
-The config-shape half is a build-time gate: `//test/envoy_validate` asserts every upstream
+The config-shape half is a build-time gate: `//agent/test/envoy_validate` asserts every upstream
 TLS context in a generated bootstrap carries a non-empty `match_typed_subject_alt_names`.
 `envoy --mode validate` **accepts** an unpinned context, so validation passing says nothing
 about it.
@@ -4032,7 +4238,7 @@ cluster, and a tick could not be assigned to a cluster kind (#1007).
 - **Cardinality** is one key per cluster (services × raw-TCP ports), never per endpoint
   or per source.
 - **HTTP queries are unaffected**: an exact `<ns>/<svc>` or `<ns>/<svc>(@.*)?` selector
-  cannot match an L4 key. `//test/envoy_validate` runs the chart's own tag regex over the
+  cannot match an L4 key. `//agent/test/envoy_validate` runs the chart's own tag regex over the
   keys, after Envoy's sanitization, and pins that.
 
 ```promql
@@ -4906,7 +5112,7 @@ identity`.
 > downstream connection id into the hash instead — one pool per downstream
 > connection, so there is nothing to share.
 >
-> `//test/mtlspool` runs the real pinned proxy with two source ServiceAccounts
+> `//agent/test/mtlspool` runs the real pinned proxy with two source ServiceAccounts
 > on one node and measures the identity the destination verifies. With the flag
 > on, each source is verified as itself on its own upstream connection. With it
 > off — the only change — **every** request from the second source is verified
@@ -5011,7 +5217,7 @@ Two things follow, and they are the point of the change:
 > to `Hashable`. Reverting the factory while the flag stays off re-opens the
 > #831 leak — a pooled connection carries another workload's client
 > certificate, the handshake succeeds, and the destination stamps the wrong
-> identity into XFCC. It fails **open**. `//test/mtlspool` reproduces it as a
+> identity into XFCC. It fails **open**. `//agent/test/mtlspool` reproduces it as a
 > negative control and would go green-for-the-wrong-reason if the pair were
 > broken; read its `TestSharedPoolLeaksSourceIdentity` before touching either.
 
@@ -5110,7 +5316,7 @@ advertises for *peer*-initiated streams. The governing limit is the agent's
 > `TestMeshCertSelectorSDSSourceIsNotSharedWithAnyStaticSecret`
 > (`agent/internal/xds/proxy`) fails the build if any builder does.
 
-**The gate.** `//test/mtlspool`'s
+**The gate.** `//agent/test/mtlspool`'s
 `TestOnDemandCertificateResolvesWhenAlreadyStaticallyReferenced` runs the pinned
 proxy against a real delta-ADS control plane with the source identity referenced
 *both* ways, and asserts the request **completes within a bound**. It was red
@@ -5138,7 +5344,7 @@ present the new certificate; connections already established keep the one they
 handshook with, which is correct. SPIRE rotates on a ~4 h TTL, so a 60–75 minute
 deploy validation crosses no rotation while an 8 h soak crosses about two — i.e.
 a rotation defect would first appear as a soak going quiet several hours in,
-with no error anywhere. `//test/mtlspool`'s
+with no error anywhere. `//agent/test/mtlspool`'s
 `TestRotatedSVIDIsPickedUpOverTheSelectorStream` is the build-time gate for it:
 it republishes every SVID under a new snapshot version and requires the
 destination to verify a different certificate SERIAL for the same SPIFFE ID

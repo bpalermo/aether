@@ -315,7 +315,7 @@ func TestVirtualHostVhostsMergeSharedDomains(t *testing.T) {
 //
 // The flag's absence is only safe together with that hashable key, so this
 // asserts the pair rather than just the flag. The runtime proof is
-// //test/mtlspool.
+// //agent/test/mtlspool.
 func TestPerDownstreamConnectionPool(t *testing.T) {
 	// The setting was a property of the PROXY ROLE (node vs edge); it is now a
 	// property of neither, so there is one cluster shape to check.

@@ -222,7 +222,8 @@ sidecar), makes no API calls (no RBAC, no token) and does not involve SPIRE.
 | `udsCsi.inodes` | `64` | Inode cap (`nr_inodes`) of each per-pod tmpfs: files, sockets and directories, its root directory included (#1107). Without it the kernel default is half the node's RAM pages' worth, far past anything `size` bounds. At least `8`; the chart refuses less. |
 | `udsCsi.debug` | `false` | Debug logging for this daemon only; the global `debug` does not reach it. |
 | `udsCsi.nodeSelector` / `udsCsi.tolerations` | `{}` / `[]` | Extra scheduling constraints. The `aether.io/agent-not-ready` toleration is always rendered. |
-| `udsCsi.resources.{requests,limits}` | cpu `5m`/`100m`, mem `16Mi`/`32Mi` | |
+| `udsCsi.resources.{requests,limits}` | requests cpu `5m` / mem `16Mi`; limits mem `32Mi`, **no CPU limit** | No CPU limit by design (#1321, chart 2.4.10; was a `100m` limit). The plugin serves `NodePublishVolume`/`NodeUnpublishVolume`, on the start and termination path of every UDS pod: at `5m`/`100m` it averaged under 1m yet was CFS-throttled in 57.6 % of the 100 ms periods it ran in, because its CPU comes in bursts (a publish, and the 30 s exec liveness probe, a second Go process in the same cgroup). The `5m` request is unchanged: it is several times the measured average and is reserved on every node. QoS was and stays Burstable. Set `limits.cpu` to put a cap back (and see `goMaxProcs`); an empty `limits.cpu` renders no limit. No `GOMEMLIMIT` is set for this container. How to measure throttling: [`runbook.md`](./runbook.md) § *uds-csi CPU throttling*. |
+| `udsCsi.goMaxProcs` | `2` | Rendered as the uds-csi container's `GOMAXPROCS` env var (#1321); the exec liveness probe inherits it. The Go runtime derives it from the CPU limit with a floor of 2 — so 2 is what the old `100m` limit gave — and without a limit it would scale to the node's core count. `0` (or empty) omits the env var and lets the Go runtime choose. |
 
 ### `registrar`
 
@@ -236,7 +237,7 @@ sidecar), makes no API calls (no RBAC, no token) and does not involve SPIRE.
 | `registrar.etcd.endpoints` | `[]` | etcd client endpoints (etcd backend). |
 | `registrar.peerEtcd` | `[]` | Cross-region replication (006 Phase 2), one entry per peer region: `"<region>=<endpoint>[,<endpoint>...]"`. The leader registrar mirrors this region's own registry subtree verbatim into each peer's etcd under an **origin-heartbeat lease** (TTL ~30s): if this region dies, its mirror expires on the peers — whole-region failover cleanup with no peer-side GC. Requires the etcd backend + a non-default `region`. |
 | `registrar.service.{port,targetPort}` | `443` / `8443` | gRPC service ports. |
-| `registrar.image.*` / `registrar.resources.*` | placeholders / cpu `100m`, mem `64Mi` | |
+| `registrar.image.*` / `registrar.resources.*` | placeholders / cpu `100m`, mem `64Mi` (requests = limits) | The CPU limit is kept on purpose (#1321): 1.5 % of CFS periods throttled on the 2026-10-06 soak, not on a request path, and `requests == limits` keeps the pod QoS Guaranteed. `GOMAXPROCS` is derived from `limits.cpu`. |
 
 ### `controller`
 
@@ -253,7 +254,7 @@ sidecar), makes no API calls (no RBAC, no token) and does not involve SPIRE.
 | `controller.webhook.identityGate.pullPolicy` | `IfNotPresent` | The agent image is digest-pinned and already pulled by the agent DaemonSet. |
 | `controller.webhook.identityGate.timeout` | `""` (wait forever) | Go duration after which the init container gives up (exit 1; the kubelet retries with backoff). Empty = fail closed: the pod stays in `Init` until the SVID exists. |
 | `controller.webhook.identityGate.resources` | req cpu `5m` mem `16Mi`, limit mem `64Mi` | Init container resources; an empty value leaves that entry unset. |
-| `controller.image.*` / `controller.resources.*` | placeholders / cpu `50m`, mem `64Mi` | |
+| `controller.image.*` / `controller.resources.*` | placeholders / requests cpu `50m`, mem `64Mi`; limits cpu `100m`, mem `64Mi` | The CPU limit is kept on purpose (#1321): 1.0 % of CFS periods throttled on the 2026-10-06 soak, and a throttled period adds under 100 ms to an admission call with a 5 s timeout. `GOMAXPROCS` is derived from `limits.cpu`. |
 
 ### `edge` — north-south ingress gateway (proposals 003/018/021/028)
 

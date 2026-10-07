@@ -1,0 +1,130 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+
+# Arch-appropriate Envoy binary, selected at analysis time.
+#
+# This is the binary the mesh actually deploys, not a stock Envoy release:
+# //bazel/proxy_pin:extensions.bzl extracts /usr/local/bin/envoy from the
+# aether-proxy image at the digest //charts/aether:values.yaml pins. The custom
+# proxy compiles most upstream extensions out, so validating against stock Envoy
+# passes configs the real proxy would NACK (#709). Moving the chart pin moves
+# this gate; there is no version to keep in sync here.
+#
+# validate-built-proxy.sh swaps the host-arch repo for a locally built Envoy
+# (--override_repository) so a proxy/ PR is validated against the proxy it
+# builds; proxy.yml runs it. Without that flag nothing here changes.
+alias(
+    name = "envoy_bin",
+    actual = select({
+        "@platforms//cpu:x86_64": "@pinned_envoy_linux_amd64//:envoy",
+        "@platforms//cpu:aarch64": "@pinned_envoy_linux_arm64//:envoy",
+    }),
+)
+
+go_library(
+    name = "envoy_validate",
+    srcs = ["builders.go"],
+    importpath = "aethermesh.dev/agent/test/envoy_validate",
+    visibility = ["//agent/test/envoy_validate:__subpackages__"],
+    deps = [
+        "//agent/internal/xds/config",
+        "//agent/internal/xds/proxy",
+        "//api/aether/cni/v1:cni",
+        "//api/aether/config/v1:config",
+        "//common/constants/annotations",
+        "//common/constants/mesh",
+        "//common/extensionfilter",
+        "//common/udspath",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/bootstrap/v3:bootstrap",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/common/mutation_rules/v3:mutation_rules",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/access_loggers/open_telemetry/v3:open_telemetry",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_mutation/v3:header_mutation",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/router/v3:router",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/tcp_proxy/v3:tcp_proxy",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/quic/v3:quic",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/upstreams/http/v3:http",
+        "@org_golang_google_protobuf//encoding/protojson",
+        "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//types/known/anypb",
+        "@org_golang_google_protobuf//types/known/durationpb",
+        "@org_golang_google_protobuf//types/known/wrapperspb",
+    ],
+)
+
+# Runs "envoy --mode validate" over aether-generated bootstrap configs.
+#
+# What it catches (examples from production incidents):
+#   - ORIGINAL_DST cluster with ROUND_ROBIN lb_policy (CDS NACK)
+#   - Listener with no address field (LDS NACK)
+#   - Malformed or missing SAN in TLS validation context
+#   - Unknown TypedConfig @type URL / missing extension
+#
+# Run with:
+#   bazel test //agent/test/envoy_validate:envoy_validate_test
+#   bazel test //agent/test/envoy_validate:envoy_validate_test --test_output=all
+#
+# Tagged "envoy-validate" (not "integration") — no Docker daemon required.
+# size=small: 3 Envoy validation processes, ~3-5 s wall time (measured 3.1 s).
+go_test(
+    name = "envoy_validate_test",
+    size = "small",
+    srcs = [
+        "ads_reconnect_test.go",
+        "capture_transparent_test.go",
+        "identity_test.go",
+        "l4_observability_test.go",
+        "validate_test.go",
+    ],
+    data = [
+        ":envoy_bin",
+        # The aether.cluster stats-tag regex the L4 stat keys must survive (#1023).
+        "//charts/aether:templates/agent-proxy-configmap.yaml",
+    ] + glob(["testdata/**"]),
+    embed = [":envoy_validate"],
+    tags = [
+        "envoy-validate",
+        # The Envoy binary reads /proc on startup; run outside strict sandbox.
+        "no-sandbox",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
+    deps = [
+        "//agent/internal/xds/config",
+        "//agent/internal/xds/proxy",
+        "//common/constants/mesh",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/bootstrap/v3:bootstrap",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/tcp_proxy/v3:tcp_proxy",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/udp/udp_proxy/v3:udp_proxy",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/matching/common_inputs/network/v3:network",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/quic/v3:quic",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3:filter_state_override",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3:on_demand_secret",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/upstreams/http/v3:http",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_protobuf//encoding/protojson",
+        "@org_golang_google_protobuf//types/known/anypb",
+        "@org_golang_google_protobuf//types/known/durationpb",
+        "@org_golang_google_protobuf//types/known/wrapperspb",
+    ],
+)
+
+# validate-built-proxy.sh, in range of the shellcheck aspect (#853).
+sh_library(
+    name = "envoy_validate_shell",
+    srcs = glob(["*.sh"]),
+    visibility = ["//visibility:private"],
+)

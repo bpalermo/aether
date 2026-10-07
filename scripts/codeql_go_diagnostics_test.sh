@@ -70,7 +70,11 @@ GOOD=(
 	"raw:go/baseline/expected-extracted-files|none|"
 	"raw:cli/build-mode|none|"
 )
-INTERNAL="err:Extraction failed in test/envoy_validate/builders.go with error use of internal package aethermesh.dev/agent/internal/xds/config not allowed"
+# The one error this gate used to allow (#1310), from when envoy_validate lived
+# outside agent/. Kept as a fixture at both its old and its new path: neither
+# may pass (#1311).
+INTERNAL_OLD="err:Extraction failed in test/envoy_validate/builders.go with error use of internal package aethermesh.dev/agent/internal/xds/config not allowed"
+INTERNAL_NEW="err:Extraction failed in agent/test/envoy_validate/builders.go with error use of internal package aethermesh.dev/cni/internal/plugin not allowed"
 
 # expect_ok <name>: the gate passes. expect_fail <name> <substring>: it fails and says so.
 expect_ok() {
@@ -95,13 +99,27 @@ expect_fail() {
 sarif clean "${GOOD[@]}"
 expect_ok clean
 
-sarif allowed "${GOOD[@]}" "ok:test/envoy_validate/builders.go" "$INTERNAL"
-expect_ok allowed
-out="$(bash "$SCRIPT" "$TMP/allowed.sarif" "$MANIFEST" 2>&1)"
-if [[ "$out" == *"5 Go file(s) extracted (2 generated), 1 allowed extraction error(s)"* ]]; then
-	pass "the summary counts Go files, generated files and allowed errors"
+sarif moved "${GOOD[@]}" "ok:agent/test/envoy_validate/builders.go"
+expect_ok moved
+out="$(bash "$SCRIPT" "$TMP/moved.sarif" "$MANIFEST" 2>&1)"
+if [[ "$out" == *"5 Go file(s) extracted (2 generated), no extraction error is allowed"* ]]; then
+	pass "the summary counts Go files and generated files, and says nothing is allowed"
 else
 	fail "unexpected summary: $out"
+fi
+
+# The allow-list is empty. The error #1310 allowed fails now, at the old path
+# and at the new one, alone and next to a healthy extraction of the same file.
+sarif formerly_allowed "${GOOD[@]}" "ok:test/envoy_validate/builders.go" "$INTERNAL_OLD"
+expect_fail formerly_allowed "1 Go extraction error(s)"
+expect_fail formerly_allowed "do not add an exception here"
+sarif internal_new_path "${GOOD[@]}" "ok:agent/test/envoy_validate/builders.go" "$INTERNAL_NEW"
+expect_fail internal_new_path "1 Go extraction error(s)"
+# ...and the script has no mechanism left to allow one with.
+if grep -Eiq '^[[:space:]]*(ALLOWED|ALLOW[A-Z_]*)=|grep -E?v' "$SCRIPT"; then
+	fail "codeql-go-diagnostics.sh filters extraction errors again; the allow-list must stay empty (#1311)"
+else
+	pass "codeql-go-diagnostics.sh has no extraction-error filter"
 fi
 
 # The measured failure: a proto package that is not in the tree.
@@ -115,14 +133,14 @@ expect_fail missing_proto "a generated proto package did not resolve"
 sarif other_error "${GOOD[@]}" "err:Extraction failed in common/log/log.go with error could not import fmt (no metadata for fmt)"
 expect_fail other_error "1 Go extraction error(s)"
 
-# The allow-list is anchored: the same rule violation anywhere else is an error,
-# and so is a different error in the allowed directory.
+# The same rule violation anywhere else, another error in the formerly allowed
+# directory, and both kinds together: each one counts.
 sarif internal_elsewhere "${GOOD[@]}" "err:Extraction failed in prober/internal/x.go with error use of internal package aethermesh.dev/agent/internal/xds/config not allowed"
 expect_fail internal_elsewhere "1 Go extraction error(s)"
-sarif other_in_allowed_dir "${GOOD[@]}" "err:Extraction failed in test/envoy_validate/builders.go with error undefined: registryv1.Service"
-expect_fail other_in_allowed_dir "1 Go extraction error(s)"
-sarif allowed_plus_real "${GOOD[@]}" "$INTERNAL" "err:Extraction failed in common/log/log.go with error undefined: x"
-expect_fail allowed_plus_real "1 Go extraction error(s)"
+sarif other_in_moved_dir "${GOOD[@]}" "err:Extraction failed in agent/test/envoy_validate/builders.go with error undefined: registryv1.Service"
+expect_fail other_in_moved_dir "1 Go extraction error(s)"
+sarif internal_plus_other "${GOOD[@]}" "$INTERNAL_OLD" "err:Extraction failed in common/log/log.go with error undefined: x"
+expect_fail internal_plus_other "2 Go extraction error(s)"
 
 # The default-setup diagnostic itself, should a CodeQL emit it in this mode.
 sarif package_not_found "${GOOD[@]}" "raw:go/autobuilder/package-not-found|warning|6 packages could not be found: aethermesh.dev/api/aether/config/v1"

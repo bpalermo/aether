@@ -233,7 +233,7 @@ buildbuddy.platform(buildbuddy_container_image = "UBUNTU22_04_IMAGE")
 use_repo(buildbuddy, "buildbuddy_toolchain")
 
 # ---------------------------------------------------------------------------
-# Envoy binary for //test/envoy_validate ("envoy --mode validate" over
+# Envoy binary for //agent/test/envoy_validate ("envoy --mode validate" over
 # aether-generated bootstrap configs).
 #
 # NOT a stock Envoy release asset: the deployed proxy is a custom build (see the

@@ -151,15 +151,15 @@ about Envoy.** Do not try to match it against the pin — it will never agree, a
 the disagreement is not a bug (aether #837).
 
 You do not have to take that on inference. The pinned-Envoy target — today
-`//test/envoy_validate:envoy_bin`, via `//bazel/proxy_pin`; #841 factors it out,
+`//agent/test/envoy_validate:envoy_bin`, via `//bazel/proxy_pin`; #841 factors it out,
 so `bazel query` for it if the label has moved — is the Envoy binary extracted
 from the **published** `aether-proxy` image at the digest
 `charts/aether/values.yaml` pins. You can ask it directly, locally, with no
 cluster:
 
 ```console
-$ bazel build //test/envoy_validate:envoy_bin
-$ "$(bazel info output_base)/$(bazel cquery --output=files //test/envoy_validate:envoy_bin)" --version
+$ bazel build //agent/test/envoy_validate:envoy_bin
+$ "$(bazel info output_base)/$(bazel cquery --output=files //agent/test/envoy_validate:envoy_bin)" --version
 envoy  version: cff8beb87eb685a44e00cf70c1a534695039da1b/1.40.0-dev/Clean/RELEASE/BoringSSL
 ```
 
@@ -310,7 +310,7 @@ the `1.40.0-dev.20260926.726d7ac.envoy` snapshot.
 
 Nothing in the root workspace needs re-pinning alongside it any more. The root
 `MODULE.bazel` used to carry `@envoy_binary_linux_*`, a stock Envoy release asset
-that `//test/envoy_validate` ran `envoy --mode validate` with, and that pin had to
+that `//agent/test/envoy_validate` ran `envoy --mode validate` with, and that pin had to
 move in step. #709 replaced it: `//bazel/proxy_pin` now lifts
 `/usr/local/bin/envoy` out of the aether-proxy image at the digest
 `charts/aether/values.yaml` pins, so the validate gate follows the chart pin — and

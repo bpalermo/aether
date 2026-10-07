@@ -1,0 +1,83 @@
+{
+  "pass": false,
+  "executions": [
+    {
+      "label": "mesh/svc-1",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 9,
+      "per_backend": true,
+      "duration_ms": 150000,
+      "elapsed_ms": 150764,
+      "pass": false,
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.14:8443",
+        "10.10.3.22:8443"
+      ],
+      "error": "backend 10.10.1.14:8443: awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\"\nbackend 10.10.3.22:8443: awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\"",
+      "backend_errors": [
+        {
+          "backend": "10.10.1.14:8443",
+          "error": "awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\""
+        },
+        {
+          "backend": "10.10.3.22:8443",
+          "error": "awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\""
+        }
+      ]
+    },
+    {
+      "label": "mesh/echo",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 9,
+      "per_backend": true,
+      "duration_ms": 150000,
+      "elapsed_ms": 150764,
+      "pass": false,
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.14:8443",
+        "10.10.3.22:8443"
+      ],
+      "error": "backend 10.10.1.14:8443: awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\"\nbackend 10.10.3.22:8443: awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\"",
+      "backend_errors": [
+        {
+          "backend": "10.10.1.14:8443",
+          "error": "awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\""
+        },
+        {
+          "backend": "10.10.3.22:8443",
+          "error": "awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\""
+        }
+      ]
+    },
+    {
+      "label": "mesh/uds-echo",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 3,
+      "per_backend": true,
+      "duration_ms": 150000,
+      "elapsed_ms": 150764,
+      "pass": false,
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.14:8443",
+        "10.10.3.22:8443"
+      ],
+      "error": "backend 10.10.1.14:8443: awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\"\nbackend 10.10.3.22:8443: awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\"",
+      "backend_errors": [
+        {
+          "backend": "10.10.1.14:8443",
+          "error": "awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\""
+        },
+        {
+          "backend": "10.10.3.22:8443",
+          "error": "awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\""
+        }
+      ]
+    }
+  ]
+}
