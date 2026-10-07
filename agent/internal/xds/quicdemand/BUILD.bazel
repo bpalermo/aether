@@ -7,10 +7,7 @@ go_library(
         "requests.go",
     ],
     importpath = "aethermesh.dev/agent/internal/xds/quicdemand",
-    visibility = [
-        "//agent:__subpackages__",
-        "//test:__subpackages__",  # mtlspool: the live #1033 gate runs the agent's classifier
-    ],
+    visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/internal/xds/proxy",
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",

@@ -97,7 +97,7 @@ const (
 // Envoy builds a mux PER non-ADS subscription, so this is not one extra stream
 // but ONE STREAM PER SECRET NAME the selector resolves — i.e. per identity
 // actually originating traffic on this node, appearing lazily on first use.
-// Observed directly in //test/mtlspool (one gRPC stream per name, each with its
+// Observed directly in //agent/test/mtlspool (one gRPC stream per name, each with its
 // own version/nonce sequence). Each carries exactly one resource, so the SotW
 // re-send on a secret version bump is one certificate, not the node's set.
 //
@@ -207,7 +207,7 @@ func sdsSecretConfigFrom(secretName string, source *corev3.ConfigSource) *transp
 // branch is defence in depth, not a live path: NewInboundListener already
 // refuses with ErrNoTrustDomain before reaching here on the mTLS path, so the
 // only reachable "no trust domain" outcome is a skipped pod with a WARN naming
-// it, never a silently unpinned listener. //test/envoy_validate asserts the
+// it, never a silently unpinned listener. //agent/test/envoy_validate asserts the
 // shape over the generated bootstrap bytes so a future caller that bypasses
 // that guard fails the build instead of shipping an unpinned inbound.
 func DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain string) *corev3.TransportSocket {
@@ -264,7 +264,7 @@ func downstreamTLSContext(tlsCertificateSecretName, validationContextName, trust
 //   - enable_early_data: false, EXPLICITLY. 0-RTT data arrives before the
 //     client certificate is validated at all. R4.
 //
-// //test/envoy_validate asserts both falses are PRESENT on every QUIC chain
+// //agent/test/envoy_validate asserts both falses are PRESENT on every QUIC chain
 // that requires a client certificate; an absent field is Envoy's default, and
 // a default is not a contract.
 func InboundQUICTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain string) *corev3.TransportSocket {

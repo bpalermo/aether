@@ -199,7 +199,7 @@ jobs:
             //...
 
       # Validate the agent's generated Envoy config against the proxy THIS PR
-      # builds, not the released one. By default //test/envoy_validate (root
+      # builds, not the released one. By default //agent/test/envoy_validate (root
       # workspace, `ci` workflow) runs the binary lifted from the chart-pinned
       # aether-proxy image, so a PR that compiles an extension out or changes a
       # carried patch was checked against the previous release and its NACKs
@@ -234,12 +234,12 @@ jobs:
       # `envoy under validation: <path> (version: ...)` per test.
       - name: Warm the root Bazel repository cache (envoy_validate deps, retried)
         working-directory: .
-        run: scripts/ci-bazel-warmup.sh "--repository_cache=$RUNNER_TEMP/root-repo-cache" //test/envoy_validate:envoy_validate
+        run: scripts/ci-bazel-warmup.sh "--repository_cache=$RUNNER_TEMP/root-repo-cache" //agent/test/envoy_validate:envoy_validate
 
       - name: envoy_validate against the built proxy (${{ matrix.arch }})
         working-directory: .
         timeout-minutes: 30
-        run: test/envoy_validate/validate-built-proxy.sh "$RUNNER_TEMP/envoy" "--repository_cache=$RUNNER_TEMP/root-repo-cache"
+        run: agent/test/envoy_validate/validate-built-proxy.sh "$RUNNER_TEMP/envoy" "--repository_cache=$RUNNER_TEMP/root-repo-cache"
 
   # Single required status check — symmetric with the control-plane `ci` gate.
   # Always runs so it reports on every PR (including control-plane-only PRs where

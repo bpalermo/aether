@@ -8,8 +8,8 @@
 // deploys (custom build, most upstream extensions compiled out — see #709).
 // To run the test:
 //
-//	bazel test //test/envoy_validate:envoy_validate_test
-//	bazel test //test/envoy_validate:envoy_validate_test --test_output=all
+//	bazel test //agent/test/envoy_validate:envoy_validate_test
+//	bazel test //agent/test/envoy_validate:envoy_validate_test --test_output=all
 //
 // What the test catches (examples from production incidents):
 //   - ORIGINAL_DST cluster with ROUND_ROBIN lb_policy      → CDS NACK, exit 1

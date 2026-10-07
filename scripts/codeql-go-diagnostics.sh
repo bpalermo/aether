@@ -17,10 +17,11 @@
 # diagnostics as `runs[].invocations[].toolExecutionNotifications[]`, each with
 # a stable `descriptor.id`. Three checks:
 #
-#   1. no `go/diagnostics/extraction-errors` notification, except the ones on
-#      the allow-list below. That is the diagnostic a traced build produces when
-#      a package cannot be resolved or type-checked ("cannot find module
-#      providing package aethermesh.dev/api/...", "undefined: cniv1.CNIPod").
+#   1. no `go/diagnostics/extraction-errors` notification at all. That is the
+#      diagnostic a traced build produces when a package cannot be resolved or
+#      type-checked ("cannot find module providing package
+#      aethermesh.dev/api/...", "undefined: cniv1.CNIPod", "use of internal
+#      package ... not allowed").
 #   2. no `go/autobuilder/*` notification at warning or error level. That
 #      family holds `go/autobuilder/package-not-found`, the "N packages could
 #      not be found" message itself; the manual build mode does not normally
@@ -31,11 +32,13 @@
 #      argument, default .materialized-generated-go) is among the
 #      `go/diagnostics/successfully-extracted-files`.
 #
-# The allow-list is the two packages scripts/go-build-plain.sh documents as
-# unbuildable by the plain go command: test/envoy_validate imports
-# agent/internal/... from outside agent/, which Bazel permits and Go's
-# internal-package rule does not. Their files are extracted and analysed; the
-# extractor records the rule violation once per file.
+# There is no allow-list, and there must not be one: an extraction error means
+# a file was analysed without its types, whatever the reason. The one entry
+# this script once had (test/envoy_validate importing agent/internal/... from
+# outside agent/, which Bazel permits and Go's internal-package rule does not)
+# was removed by fixing the package: #1311 moved it under agent/. Do the same
+# for the next one. //scripts:codeql_go_diagnostics_test fails if an exception
+# is reintroduced.
 set -euo pipefail
 
 JQ="${JQ:-jq}"
@@ -59,10 +62,6 @@ elif [ -f "$input" ]; then
 fi
 [ "${#sarifs[@]}" -gt 0 ] || die "no SARIF file at $input"
 [ -f "$manifest" ] || die "no materialize manifest at $manifest (run scripts/materialize-generated-go.sh)"
-
-# An extraction error that is expected, as an anchored regular expression over
-# the notification's message.
-ALLOWED='^Extraction failed in test/envoy_validate/[^ ]+ with error use of internal package aethermesh\.dev/agent/internal/[^ ]+ not allowed$'
 
 # One line per notification of the Go extractor: "<id>\t<level>\t<uri>\t<message>".
 notifications="$(
@@ -98,18 +97,15 @@ show() {
 	return 0
 }
 
-# --- 1. extraction errors.
-unexpected=""
-allowed_n=0
+# --- 1. extraction errors: every one of them fails the gate.
 if [ -n "$errors" ]; then
-	unexpected="$(grep -Ev -- "$ALLOWED" <<<"$errors" || true)"
-	allowed_n="$(grep -Ec -- "$ALLOWED" <<<"$errors" || true)"
-fi
-if [ -n "$unexpected" ]; then
-	err "$(grep -c '' <<<"$unexpected") Go extraction error(s): the database is partial, and so is every result computed from it"
-	show "$unexpected"
-	if grep 'aethermesh\.dev/api/' <<<"$unexpected" >/dev/null; then
+	err "$(grep -c '' <<<"$errors") Go extraction error(s): the database is partial, and so is every result computed from it"
+	show "$errors"
+	if grep 'aethermesh\.dev/api/' <<<"$errors" >/dev/null; then
 		echo "  -> a generated proto package did not resolve: scripts/materialize-generated-go.sh did not run, or a new go_proto_library is not covered (docs/runbook.md, \"CodeQL code scanning\")" >&2
+	fi
+	if grep 'use of internal package' <<<"$errors" >/dev/null; then
+		echo "  -> a package imports another tree's internal/ package: Bazel's visibility allows it, the go command does not. Move the importer under that tree (#1311); do not add an exception here" >&2
 	fi
 fi
 
@@ -142,7 +138,7 @@ if [ -n "$missing" ]; then
 	show "${missing%$'\n'}"
 fi
 
-echo "codeql-go-diagnostics: $n_go Go file(s) extracted ($n_generated generated), $allowed_n allowed extraction error(s) in test/envoy_validate"
+echo "codeql-go-diagnostics: $n_go Go file(s) extracted ($n_generated generated), no extraction error is allowed"
 if [ "$fail" -ne 0 ]; then
 	die "the Go analysis is incomplete; nothing from this run should be uploaded"
 fi

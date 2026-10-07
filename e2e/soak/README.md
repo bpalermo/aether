@@ -432,7 +432,7 @@ done
 A stranded-twin hit reads as a burst of `NC` rows for one `pod_name` that does not
 stop until that node's proxy is rolled. Each row has `duration_ms` ≈ 2000, and there
 is no `observed east-west QUIC pair` or refusal line on the agent for that twin. The
-live red reading is `//test/mtlspool`
+live red reading is `//agent/test/mtlspool`
 `TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control`: `status=503
 … in 2.000099268s`, with no CDS request reaching the control plane. Troubleshoot it
 with the runbook, "Stranded twin: 503 NC at 2 s for a source that came back (#1036)".
@@ -1474,7 +1474,7 @@ destination endpoint)**, not one per app connection (see the runbook, "HTTP/3
 per-request cost"); a count that tracks k6 VUs is a regression of #1021.
 
 Do **not** measure this against talos-main with synthetic load outside a soak: the
-harness form of the same comparison is `//test/mtlspool` `TestQUICRequestCPU`
+harness form of the same comparison is `//agent/test/mtlspool` `TestQUICRequestCPU`
 (`--test_env=AETHER_QUIC_COST=1`), which prints loaded-minus-idle CPU per request
 for h2 and for each inbound UDP option.
 

@@ -420,7 +420,7 @@ jobs:
   # release silently kept deploying the Envoy v1.39.0 index). Deliberately
   # unconditional — no `if`, no path filter: the pin can rot without
   # values.yaml changing (tags are mutable), //bazel/proxy_pin reads these same
-  # lines to pick the binary //test/envoy_validate runs, and a required check
+  # lines to pick the binary //agent/test/envoy_validate runs, and a required check
   # that skips is a required check that never reports.
   proxy-pin:
     runs-on: ubuntu-latest

@@ -130,7 +130,7 @@ func XDSConfigSourceADS() *corev3.ConfigSource {
 //
 // Envoy's own default is 15s, so passing 15s is a PIN rather than a behaviour
 // change — it makes the value protocol-visible, assertable in
-// //test/envoy_validate, and immune to an upstream default drift.
+// //agent/test/envoy_validate, and immune to an upstream default drift.
 //
 // Keep d a CONSTANT even though, for RDS specifically, it is the one field Envoy
 // normalises out of the provider-reuse hash (see the determinism contract above

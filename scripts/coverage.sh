@@ -29,6 +29,15 @@
 # minus EXCLUDED below. Derived by query, so a new top-level component is
 # measured the day it gets its first Go target, with no edit here.
 #
+# Minus EXCLUDED_SUBTREES too: test harnesses that have to live INSIDE a
+# component. //agent/test (the `envoy --mode validate` config builders, their
+# generator, the pinned-Envoy locator) imports agent/internal/..., and Go's
+# internal-package rule only allows that from under agent/ (#1311); until then
+# it was //test, excluded above. It is still not product code: nothing in it is
+# linked into a shipped binary, and counting it would move the agent's
+# percentage with the size of a test fixture. Its go_test targets run like any
+# other unit test, and what they exercise in agent/internal/... counts.
+#
 # The denominator: `bazel coverage` instruments, by default, only the packages
 # that have a test in the run, so code nobody tests is not in the report at
 # all and the percentage flatters. Two things fix that:
@@ -46,8 +55,8 @@
 #
 # Not instrumented: _test.go files (Bazel's default, --noinstrument_test_targets)
 # and everything outside the components, which the filter excludes by
-# construction: generated proto Go (//api), test harnesses (//test, //e2e) and
-# build tooling (//bazel).
+# construction: generated proto Go (//api), test harnesses (//test, //e2e,
+# //agent/test) and build tooling (//bazel).
 #
 # unrecorded.txt lists tracked non-test .go files under a component that the
 # report does not name at all. The only expected members are files excluded on
@@ -62,6 +71,9 @@ set -euo pipefail
 # Top-level directories whose Go is not product code. Everything else that has
 # a Go target is a component.
 EXCLUDED='api bazel e2e test'
+# Directories below a component whose Go is not product code either. Each must
+# exist (a stale entry fails the run) and must sit under a component.
+EXCLUDED_SUBTREES='agent/test'
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
@@ -123,7 +135,30 @@ if [ ! -s "$work/components" ]; then
 fi
 component_re="$(paste -sd '|' "$work/components")"
 component_universe="$(sed 's|.*|//&/...|' "$work/components" | paste -sd '+' | sed 's|+| + |g')"
-echo ">> components: $(paste -sd ' ' "$work/components") (excluded: $EXCLUDED)"
+: >"$work/subtrees"
+for sub in $EXCLUDED_SUBTREES; do
+	if [ ! -d "$sub" ]; then
+		echo "coverage: excluded subtree $sub does not exist: drop it from EXCLUDED_SUBTREES" >&2
+		exit 1
+	fi
+	if ! grep -qxF -- "${sub%%/*}" "$work/components"; then
+		echo "coverage: excluded subtree $sub is not under a component (components: $(paste -sd ' ' "$work/components")): drop it from EXCLUDED_SUBTREES" >&2
+		exit 1
+	fi
+	printf '%s\n' "$sub" >>"$work/subtrees"
+done
+filter="^//(${component_re})[/:]"
+# Never matches a path: the neutral value when there is no excluded subtree.
+subtree_re='^$'
+if [ -s "$work/subtrees" ]; then
+	subtree_alt="$(paste -sd '|' "$work/subtrees")"
+	subtree_re="^([.]/)?(${subtree_alt})/"
+	# A leading '-' is Bazel's syntax for an exclusion in --instrumentation_filter.
+	filter="${filter},-^//(${subtree_alt})[/:]"
+	# `+` and `-` associate left with equal precedence: (a + b) - c - d.
+	component_universe="${component_universe}$(sed 's|.*| - //&/...|' "$work/subtrees" | tr -d '\n')"
+fi
+echo ">> components: $(paste -sd ' ' "$work/components") (excluded: $EXCLUDED; excluded subtrees: ${EXCLUDED_SUBTREES:-none})"
 
 # --- targets ----------------------------------------------------------------
 query "$work/tests" 'kind("go_test", //...) except attr("tags", "[\[ ](integration|requires-root|manual)[,\]]", //...)'
@@ -142,7 +177,7 @@ echo ">> targets: $(wc -l <"$work/tests") unit go_test, $(wc -l <"$work/librarie
 # A failing test fails the report: coverage of a suite that did not pass is not
 # the number main's is compared with.
 "$bazel" coverage --config=coverage \
-	"--instrumentation_filter=^//(${component_re})[/:]" \
+	"--instrumentation_filter=${filter}" \
 	${bazel_flags[@]+"${bazel_flags[@]}"} \
 	--target_pattern_file="$work/targets"
 
@@ -155,11 +190,12 @@ if [ ! -s "$combined" ]; then
 fi
 
 # --- collect ----------------------------------------------------------------
-# Keep only component records. The instrumentation filter already limits the
-# report to them; this makes that a property of the output, not of a flag.
+# Keep only component records, less the excluded subtrees. The instrumentation
+# filter already limits the report to them; this makes that a property of the
+# output, not of a flag.
 keep_components() { # lcov -> stdout
-	awk -v re="^([.]/)?(${component_re})/" '
-		/^SF:/ { keep = (substr($0, 4) ~ re) }
+	awk -v re="^([.]/)?(${component_re})/" -v drop="$subtree_re" '
+		/^SF:/ { keep = (substr($0, 4) ~ re && substr($0, 4) !~ drop) }
 		keep { print }
 		/^end_of_record$/ { keep = 0 }
 	' "$1"
@@ -193,7 +229,7 @@ scripts/lcov-to-cobertura.sh --timestamp "$timestamp" "$out/coverage.lcov" >"$ou
 scripts/coverage-summary.sh "$out/coverage.lcov" "$out/tests-only.lcov" >"$out/summary.md"
 
 sed -n 's/^SF://p' "$out/coverage.lcov" | sed 's|^\./||' | sort -u >"$work/recorded"
-git ls-files -- '*.go' | grep -E "^(${component_re})/" | grep -v '_test\.go$' | sort -u >"$work/tracked" || true
+git ls-files -- '*.go' | grep -E "^(${component_re})/" | grep -Ev -- "$subtree_re" | grep -v '_test\.go$' | sort -u >"$work/tracked" || true
 comm -23 "$work/tracked" "$work/recorded" >"$out/unrecorded.txt"
 
 cat "$out/summary.md"
