@@ -39,6 +39,21 @@
 # Every ref and every child is checked even after a failure, so one run names
 # every unsigned manifest rather than the first.
 #
+# TRANSIENT ANSWERS ARE RETRIED (#1316). One 502 from the registry's token
+# endpoint ended run 37522284996 with a Python traceback and filed "UNVERIFIED"
+# for artifacts that were fine. Two layers, both bounded:
+#   - the registry lookups made here (the pull token, the child walk) retry
+#     inside scripts/registry-lib.sh (registry__fetch_json: no answer, 408, 429,
+#     5xx, a 200 that is not JSON), and say what was asked and what came back;
+#   - a `cosign verify` that fails is run again, up to VERIFY_ATTEMPTS times in
+#     all, unless cosign said the signature it FETCHED does not match the
+#     identity: that answer cannot change. "no signatures found" IS retried: it
+#     is also what a failed lookup under cosign can read as. A run spends at
+#     most VERIFY_RETRY_BUDGET re-runs in all, so a commit that really is
+#     unsigned costs seconds, not the step timeout.
+# A manifest that still fails is FAILED with cosign's last error line and the
+# number of attempts.
+#
 # ENVIRONMENT
 #
 #   COSIGN               cosign binary (default: `cosign` on PATH). Set by
@@ -50,6 +65,13 @@
 #   REGISTRY_USERNAME, REGISTRY_PASSWORD
 #                        optional; public packages read anonymously
 #                        (scripts/registry-lib.sh).
+#   VERIFY_ATTEMPTS      `cosign verify` runs per manifest, at most (default 3)
+#   VERIFY_RETRY_INTERVAL
+#                        seconds before the first re-run, doubled for each
+#                        further one (default 2: 2 s, then 4 s)
+#   VERIFY_RETRY_BUDGET  re-runs one invocation may spend in all (default 12)
+#   REGISTRY_FETCH_ATTEMPTS, REGISTRY_FETCH_INTERVAL
+#                        the same for the registry lookups (registry-lib.sh)
 #
 # READ-ONLY. cosign verify and registry GETs only; nothing here can sign, push
 # or delete.
@@ -96,23 +118,58 @@ if ! command -v "$cosign_bin" >/dev/null 2>&1; then
 	exit 2
 fi
 
+attempts="${VERIFY_ATTEMPTS:-3}"
+interval="${VERIFY_RETRY_INTERVAL:-2}"
+budget="${VERIFY_RETRY_BUDGET:-12}"
+for knob in "$attempts" "$interval" "$budget"; do
+	if ! [[ "$knob" =~ ^[0-9]+$ ]]; then
+		echo "::error::VERIFY_ATTEMPTS, VERIFY_RETRY_INTERVAL and VERIFY_RETRY_BUDGET must be whole numbers (got '${knob}')" >&2
+		exit 2
+	fi
+done
+[ "$attempts" -ge 1 ] || attempts=1
+
 verified=0
 failed=0
 
+# Did cosign fetch a signature and reject it? The one failure another attempt
+# cannot change: the certificate's identity or issuer is not the one asked for
+# (cosign v3.1.2: "no matching attestations: failed to verify certificate
+# identity: no matching CertificateIdentity found, ..."; cosign 2 said "none of
+# the expected identities matched"). Everything else is retried.
+is_identity_mismatch() {
+	grep -E 'no matching CertificateIdentity found|none of the expected identities matched' "$1" >/dev/null
+}
+
 verify_one() {
-	local what="$1" ref="$2" err
+	local what="$1" ref="$2" err i=1 wait="$interval" last
 	err="$(mktemp)"
-	if "$cosign_bin" verify \
-		--certificate-identity-regexp "$identity" \
-		--certificate-oidc-issuer "$issuer" \
-		"$ref" >/dev/null 2>"$err"; then
-		echo "  verified ${what} ${ref}"
-		verified=$((verified + 1))
-	else
-		echo "  FAILED   ${what} ${ref}: $(tail -1 "$err")"
-		echo "::error::signature did not verify: ${what} ${ref}"
-		failed=$((failed + 1))
-	fi
+	while :; do
+		if "$cosign_bin" verify \
+			--certificate-identity-regexp "$identity" \
+			--certificate-oidc-issuer "$issuer" \
+			"$ref" >/dev/null 2>"$err"; then
+			if [ "$i" -gt 1 ]; then
+				echo "  verified ${what} ${ref} (attempt ${i} of ${attempts})"
+			else
+				echo "  verified ${what} ${ref}"
+			fi
+			verified=$((verified + 1))
+			break
+		fi
+		last="$(tail -1 "$err" | tr -c '[:print:]' ' ' | sed 's/ *$//')"
+		if is_identity_mismatch "$err" || [ "$i" -ge "$attempts" ] || [ "$budget" -le 0 ]; then
+			echo "  FAILED   ${what} ${ref}: ${last:-cosign printed nothing} (${i} attempt(s))"
+			echo "::error::signature did not verify: ${what} ${ref}"
+			failed=$((failed + 1))
+			break
+		fi
+		budget=$((budget - 1))
+		echo "  retrying ${what} ${ref} in ${wait}s (attempt ${i} of ${attempts} failed: ${last:-cosign printed nothing})"
+		sleep "$wait"
+		wait=$((wait * 2))
+		i=$((i + 1))
+	done
 	rm -f "$err"
 }
 
@@ -129,11 +186,11 @@ for ref in "${refs[@]}"; do
 	verify_one index "$ref"
 
 	if ! tok="$(registry_registry_token "$repo")" || [ -z "$tok" ]; then
-		echo "::error::could not obtain a pull token for ${repo}" >&2
+		echo "::error::could not obtain a pull token for ${repo} on ${REGISTRY_HOST} (the registry-lib line above says what the token endpoint answered)" >&2
 		exit 2
 	fi
 	if ! children="$(registry_index_children "$repo" "$digest" "$tok")" || [ -z "$children" ]; then
-		echo "::error::could not enumerate the child manifests of ${ref} (not an index, or no children)" >&2
+		echo "::error::could not enumerate the child manifests of ${ref} (not an index, no children, or the lookup failed: see any registry-lib line above)" >&2
 		exit 2
 	fi
 	n_children=0

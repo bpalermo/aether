@@ -368,3 +368,21 @@ jobs:
           else
             gh issue create --title "$title" --body "$body"
           fi
+
+      # The other half of the rolling issue (#1316): a GREEN run for main's
+      # head, or a green sweep, closes it with a comment naming this run. Run
+      # 37522284996 filed the issue for one 502 from the registry, the next
+      # three runs were green, and it stayed open saying UNVERIFIED. Which
+      # green runs count (never a superseded skip, never a manual run) is
+      # scripts/publish-verify-close-issue.sh; //scripts:publish_verify_close_issue_test.
+      - name: Close the missing-artifacts issue (a green run for main's head, or a green sweep)
+        if: success() && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET: ${{ github.event.workflow_run.head_sha }}
+          SUPERSEDED: ${{ steps.superseded.outputs.skip }}
+          VERIFY_CONCLUSION: ${{ steps.verify.conclusion }}
+          COSIGN_CONCLUSION: ${{ steps.cosign.conclusion }}
+        run: ./scripts/publish-verify-close-issue.sh

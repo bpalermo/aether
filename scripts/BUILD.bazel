@@ -76,6 +76,34 @@ sh_test(
     data = ["publish-verify-superseded.sh"],
 )
 
+# The other half of publish-verify's rolling issue (#1316): which green runs
+# close it (main's head, the sweep) and which must leave it open, the decision
+# as literals and the step through a fake `gh`. The workflow is data so the
+# test can hold the script's issue title, and the step that runs it, to the
+# YAML.
+sh_test(
+    name = "publish_verify_close_issue_test",
+    size = "small",
+    srcs = ["publish_verify_close_issue_test.sh"],
+    data = [
+        "publish-verify-close-issue.sh",
+        "//:ci_definitions",
+    ],
+)
+
+# The signature verifier against answers that are not answers (#1316): a 5xx,
+# an empty or HTML 200, a truncated index, no connection, a `cosign verify`
+# that fails once. Fake `curl`, `cosign` and `sleep`; no network, no waiting.
+sh_test(
+    name = "verify_image_signatures_test",
+    size = "small",
+    srcs = ["verify_image_signatures_test.sh"],
+    data = [
+        "registry-lib.sh",
+        "verify-image-signatures.sh",
+    ],
+)
+
 # The same decision applied to the scheduled sweep's push heads (#1282):
 # which heads `verify-published-artifacts.sh --recent` skips as superseded.
 sh_test(

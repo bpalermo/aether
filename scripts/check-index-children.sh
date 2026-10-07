@@ -69,6 +69,9 @@ want_refused "not JSON" 'not json'
 index_doc="{\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[{\"digest\":\"$a\"},{\"digest\":\"$b\"}]}"
 asked="$(mktemp)"
 trap 'rm -f "$asked"' EXIT
+# The fake below fails without naming an HTTP status, which the lookup retries
+# (#1316). Retry at once: what is tested here is which host is asked.
+export REGISTRY_FETCH_INTERVAL=0
 # A fake curl: records the URL, serves the index only on $SERVED_ON.
 curl() {
 	local url="" x
