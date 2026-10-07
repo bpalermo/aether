@@ -118,11 +118,22 @@ jobs:
   # target (compile + lint on BuildBuddy RBE), run the impacted unit tests
   # (--config=ci implies --config=remote, which pins TestRunner to the local
   # strategy — tests must NOT run remotely), then the five linkage guards.
+  #
+  # `environment: main` (#1314): that environment's BUILDBUDDY_ORG_API_KEY is a
+  # Read+Write BuildBuddy key, and it shadows the repository-level secret of the
+  # same name, which is CAS-only. Tests execute on the runner, so their results
+  # are "local results"; only a Read+Write key may store them in the action
+  # cache. This job, on main, is therefore what lets a pull request's `test`
+  # leg (CAS-only key: it can read those entries, never write them) skip a test
+  # whose inputs did not change. The environment admits the `main` branch only,
+  # so no pull request run can obtain the key; it holds nothing that publishes
+  # (those credentials are in `release`).
   test:
     needs: diff
     if: needs.diff.outputs.has_any == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    environment: main
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

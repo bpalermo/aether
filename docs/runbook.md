@@ -267,9 +267,23 @@ test results are not cached in CI: Bazel reports *"--remote_upload_local_results
 is set, but … the current account is not authorized to write local results to
 the remote cache"*, and test execution is local by design (`--config=remote`,
 `--strategy=TestRunner=local`). The same holds for every leg of `ci`; it is
-only visible here because this job runs the whole suite. Unchanged tests can
-become cache hits in CI only if it is given a key that may write local results
-(not tried; a pull request's run should not be the one allowed to write them).
+only visible here because this job runs the whole suite.
+
+Since #1314 the jobs that run on `main` write those results and pull requests
+read them. Two BuildBuddy keys share one secret name, `BUILDBUDDY_ORG_API_KEY`:
+the repository-level secret is a **CAS-only** key (it may upload inputs and
+outputs, never an action result: the right type for a pull request, which could
+otherwise store a forged "test passed" that `main` would later trust), and the
+`main` **environment** holds a **Read+Write** key that shadows it. `main.yaml`'s
+`test` job and this workflow's `report` job on `main` declare
+`environment: main`; the environment admits the `main` branch only, so a pull
+request's run cannot obtain the key. (`release` holds a Read+Write key too, for
+the publishing builds, next to the registry credentials; test jobs stay out of
+it.) What to expect: on `main` the warning above is gone; on a pull request it
+remains (that run still cannot write) and Bazel reports the unchanged tests as
+`(cached)` / `remote cache hit`. Two caveats: a coverage result is reused only
+by another coverage run, and `race` runs nowhere on `main`, so a pull request's
+`race` leg still executes every impacted test.
 
 **The gate.** On every pull request the `gate` job of the coverage workflow
 compares the pull request's total line coverage with a baseline from `main` and
