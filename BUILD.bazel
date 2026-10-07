@@ -41,6 +41,8 @@ filegroup(
 # //e2e:kind_pin_test holds every kind / kubectl / node-image value in them to
 # e2e/kind-version.sh (#1251), and //e2e:go_pin_test holds every Go toolchain
 # they set up to MODULE.bazel's go_sdk.download (#1283).
+# //scripts:publish_verify_close_issue_test holds publish-verify.yaml's rolling
+# issue title to the script that closes it (#1316).
 filegroup(
     name = "ci_definitions",
     srcs = glob(
@@ -59,6 +61,7 @@ filegroup(
     visibility = [
         "//bazel/actionlint:__pkg__",
         "//e2e:__pkg__",
+        "//scripts:__pkg__",
     ],
 )
 

@@ -974,6 +974,26 @@ concluded `cancelled` and reported nothing. If you see that issue: re-run the ca
 need, deploy a later commit that did publish. Never push images or charts by
 hand: the release workflow is the only publisher.
 
+**The issue closes itself (#1316).** A green run for `main`'s head, or a green
+scheduled sweep, closes it with one comment naming the run
+(`scripts/publish-verify-close-issue.sh`). A green run for a commit `main` has
+moved past, a superseded skip and a manual run leave it open. So an open issue
+means no run has verified the head since the failure; a closed one names the
+run that did.
+
+**A registry hiccup is retried, not reported (#1316).** Run 37522284996 died in
+the signature pass on one 502 from quay.io's token endpoint, with a Python
+traceback, and filed the issue as UNVERIFIED for artifacts that were fine. The
+pull-token and child-manifest lookups now retry a missing answer, a 408, 429 or
+5xx and a 200 that is not JSON (four attempts, 2 s doubling;
+`REGISTRY_FETCH_ATTEMPTS`, `REGISTRY_FETCH_INTERVAL`), and a failed
+`cosign verify` is re-run (three attempts; `VERIFY_ATTEMPTS`, at most
+`VERIFY_RETRY_BUDGET` re-runs per invocation) unless cosign fetched a signature
+whose identity is another's. A lookup that still fails prints one
+`registry-lib: GET <url> answered HTTP <status>; giving up after 4 attempt(s)`
+line (or how the body starts) in place of the traceback; a 401, 403 or 404 is
+the registry's answer and is not retried.
+
 **It asks for each tag by name (#985).** Every coordinate is checked with
 `HEAD /v2/<repo>/manifests/<tag>`. No tag list is read. The old scan paged
 through every tag, and a sweep that overlapped a publish reported a present

@@ -85,10 +85,111 @@ registry_registry_token() {
 			echo "registry-lib: credentials are for ${cred_host:-an unknown host}; reading ${REGISTRY_HOST} anonymously" >&2
 		fi
 	fi
+	local body
 	if [ -n "${REGISTRY_PASSWORD:-}" ] && [ -n "$cred_host" ] && [ "$REGISTRY_HOST" = "$cred_host" ]; then
-		curl -fsS -u "${REGISTRY_USERNAME:-x}:${REGISTRY_PASSWORD}" "$url" | registry__json_str token
+		body="$(registry__fetch_json token "$url" -u "${REGISTRY_USERNAME:-x}:${REGISTRY_PASSWORD}")" || return 1
 	else
-		curl -fsS "$url" | registry__json_str token
+		body="$(registry__fetch_json token "$url")" || return 1
+	fi
+	printf '%s' "$body" | registry__json_str token
+}
+
+# GET a URL that must answer a JSON document, retrying what a registry gets
+# over by itself (#1316).
+#
+# publish-verify run 37522284996 died in the signature pass with a bare Python
+# traceback (`JSONDecodeError: Expecting value`): quay.io answered ONE token
+# request with a 502, `curl -f` printed nothing, and the JSON reader was handed
+# an empty string. The next three runs passed. One transient answer must not
+# end a verification, and when a lookup does fail the line must say what was
+# asked and what came back, not where Python stopped.
+#
+# RETRIED, up to REGISTRY_FETCH_ATTEMPTS times in all (default 4), waiting
+# REGISTRY_FETCH_INTERVAL seconds (default 2) and doubling each time (2 + 4 + 8
+# = 14 s at the defaults):
+#   - no HTTP answer at all (no connection, a timeout, a truncated transfer);
+#   - 408, 429 and every 5xx;
+#   - a 200 whose body is not the JSON asked for: empty, cut short, an HTML
+#     error page from a proxy in front of the registry.
+# NOT retried -- the registry's own, final answer: any other 4xx (401, 403, 404).
+#
+# On failure, ONE line on stderr names the URL and the HTTP status, or curl's
+# own error, or how the body starts (never for a token reply: its bytes are not
+# for a log), and the attempt count. Nothing on stdout. A retry prints its own
+# line, so a run that needed one says so.
+#
+# <kind> is what the body must be:
+#   token  a JSON object with a non-empty string `token`
+#   json   any JSON document (the caller checks its shape)
+#
+# Usage: registry__fetch_json <kind> <url> [curl arguments...]  -> the body on stdout
+#   0  the body   1  no usable answer
+registry__fetch_json() {
+	local kind="$1" url="$2"
+	shift 2
+	local attempts="${REGISTRY_FETCH_ATTEMPTS:-4}" wait="${REGISTRY_FETCH_INTERVAL:-2}"
+	local i=1 rc body status why final errf
+	errf="$(mktemp)"
+	while :; do
+		rc=0 final=0
+		body="$(curl -fsS "$@" "$url" 2>"$errf")" || rc=$?
+		if [ "$rc" = 0 ]; then
+			if printf '%s' "$body" | registry__json_is "$kind"; then
+				rm -f "$errf"
+				printf '%s' "$body"
+				return 0
+			fi
+			why="answered 200 with a body that is not $(registry__kind_name "$kind") ($(registry__body_start "$kind" "$body"))"
+		else
+			# `curl -f` reports an HTTP error as exit 22 and names the status.
+			status="$(sed -nE 's/.*returned error: ([0-9]{3}).*/\1/p' "$errf" | tail -1)"
+			if [ -n "$status" ]; then
+				why="answered HTTP ${status}"
+				case "$status" in
+				408 | 429 | 5??) ;;
+				*) final=1 ;;
+				esac
+			else
+				why="got no HTTP answer (curl exit ${rc}: $(tail -1 "$errf" | tr -c '[:print:]' ' ' | sed 's/ *$//'))"
+			fi
+		fi
+		if [ "$final" = 1 ]; then
+			echo "registry-lib: GET ${url} ${why}; not retried (the registry's own answer)" >&2
+			break
+		fi
+		if [ "$i" -ge "$attempts" ]; then
+			echo "registry-lib: GET ${url} ${why}; giving up after ${i} attempt(s)" >&2
+			break
+		fi
+		echo "registry-lib: GET ${url} ${why}; attempt ${i} of ${attempts}, retrying in ${wait}s" >&2
+		sleep "$wait"
+		wait=$((wait * 2))
+		i=$((i + 1))
+	done
+	rm -f "$errf"
+	return 1
+}
+
+registry__kind_name() {
+	case "$1" in
+	token) printf 'a JSON object with a token' ;;
+	*) printf 'JSON' ;;
+	esac
+}
+
+# How a body that could not be used starts, for the error line: its size and
+# its first 80 bytes with everything unprintable replaced, so a binary or
+# multi-line reply cannot write log lines of its own. A token reply is never
+# quoted, whatever it holds.
+registry__body_start() {
+	local kind="$1" body="$2" size
+	size="$(printf '%s' "$body" | wc -c | tr -d ' ')"
+	if [ -z "$body" ]; then
+		printf 'empty'
+	elif [ "$kind" = token ]; then
+		printf '%s bytes, not shown' "$size"
+	else
+		printf "%s bytes, starts '%s'" "$size" "$(printf '%s' "$body" | head -c 80 | tr -c '[:print:]' '?')"
 	fi
 }
 
@@ -236,8 +337,10 @@ registry_tag_exists() {
 registry_any_tag() {
 	local repo="$1" tok="$2"
 	registry__host_ok || return 2
-	curl -fsS -H "Authorization: Bearer $tok" \
-		"https://${REGISTRY_HOST}/v2/${repo}/tags/list?n=1" | registry__json_tags | head -1
+	local body
+	body="$(registry__fetch_json json "https://${REGISTRY_HOST}/v2/${repo}/tags/list?n=1" \
+		-H "Authorization: Bearer $tok")" || return 1
+	printf '%s' "$body" | registry__json_tags | head -1
 }
 
 # Resolve a tag to the digest the registry itself reports for it.
@@ -278,9 +381,9 @@ registry_manifest_digest() {
 registry_index_children() {
 	local repo="$1" digest="$2" tok="$3" body
 	registry__host_ok || return 2
-	body="$(curl -fsS -H "Authorization: Bearer $tok" \
-		-H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
-		"https://${REGISTRY_HOST}/v2/${repo}/manifests/${digest}")" || return 1
+	body="$(registry__fetch_json json "https://${REGISTRY_HOST}/v2/${repo}/manifests/${digest}" \
+		-H "Authorization: Bearer $tok" \
+		-H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json')" || return 1
 	printf '%s' "$body" | registry__json_children
 }
 
@@ -621,6 +724,23 @@ registry__json_str() {
 
 registry__json_tags() {
 	python3 -c 'import sys,json;[print(t) for t in (json.load(sys.stdin).get("tags") or [])]'
+}
+
+# Is the document on stdin what registry__fetch_json was asked for? Exits 0 or
+# 1 and prints nothing either way: a body that does not parse is an answer to
+# report, not a traceback.
+registry__json_is() {
+	python3 -c '
+import json, sys
+try:
+    doc = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+except ValueError:
+    sys.exit(1)
+if sys.argv[1] == "token":
+    tok = doc.get("token") if isinstance(doc, dict) else None
+    sys.exit(0 if isinstance(tok, str) and tok else 1)
+sys.exit(0)
+' "$1"
 }
 
 # Child digests of an index document on stdin. Exits 1 on anything that is not
