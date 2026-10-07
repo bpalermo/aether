@@ -318,9 +318,29 @@ non-integer value fails the render instead of crash-looping every proxy pod.
 Renders the integer when > 0, else the empty string.
 */}}
 {{- define "aether.proxy.concurrency" -}}
-{{- $s := toString (.Values.proxy.concurrency | default 0) -}}
+{{- include "aether.envoyConcurrency" (dict "key" "proxy.concurrency" "value" .Values.proxy.concurrency) -}}
+{{- end -}}
+
+{{/*
+edge.concurrency, validated (#1344): the same contract as proxy.concurrency,
+for the edge Deployment's `envoy` container. 0 renders nothing (one worker per
+core); a negative or non-integer value fails the render.
+*/}}
+{{- define "aether.edge.concurrency" -}}
+{{- include "aether.envoyConcurrency" (dict "key" "edge.concurrency" "value" .Values.edge.concurrency) -}}
+{{- end -}}
+
+{{/*
+The one validator behind both: takes (dict "key" <values path, for the error>
+"value" <the value>) and renders the integer when > 0, else the empty string.
+Only an unset (null) value reads as 0. `default 0` would also swallow `false`
+and the empty string, turning a mistyped value into "one worker per core"
+instead of an error.
+*/}}
+{{- define "aether.envoyConcurrency" -}}
+{{- $s := ternary "0" (toString .value) (kindIs "invalid" .value) -}}
 {{- if not (regexMatch "^[0-9]+$" $s) -}}
-{{- fail (printf "proxy.concurrency must be a non-negative integer, got %q" $s) -}}
+{{- fail (printf "%s must be a non-negative integer, got %q" .key $s) -}}
 {{- end -}}
 {{- if gt (atoi $s) 0 -}}
 {{- atoi $s -}}
