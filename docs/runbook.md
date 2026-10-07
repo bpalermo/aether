@@ -242,14 +242,20 @@ honest denominator is 409 lines larger than the default one.
 
 **Run-to-run variation.** Four uncached runs covered 21 993, 21 994, 21 991
 and 21 989 lines: 77.80–77.82 %, a spread of 0.018 percentage points.
-Seventeen lines in six files are timing-dependent
+Seventeen lines in six files were timing-dependent in those runs
 (`cni/internal/util/watcher.go`, `common/signals/signals.go`,
 `agent/internal/proxy/hotrestart/supervisor.go`,
 `agent/internal/meshdns/lameduck.go`, `agent/internal/xds/server/refresh.go`,
 `agent/internal/xds/cache/identitybinding.go`), so the widest gap two runs
 could show is 0.06 points. The first two CI runs read 77.84 % and 77.81 %
-(21 998 and 21 991 lines; six `cni` lines are covered on the runner and not on
-a workstation). Because CI re-runs every test (next paragraph), a pull request
+(21 998 and 21 991 lines). Six of the runner's extra lines were
+`watcher.go`'s closed-`Errors` exit (lines 119–121 and 135–137): `Close`
+leaves the watch goroutine with three ready `select` arms and the scheduler
+picks, which it did on the runner in every run, in about a third of plain
+`go test` runs on the workstation and never under Bazel there — a scheduling
+difference, not a privilege or kernel one (#1315). `watcher_loop_test.go` now
+takes each exit of that loop deterministically, so `watcher.go` is out of the
+timing-dependent set. Because CI re-runs every test (next paragraph), a pull request
 and `main` are two independent samples of that noise: a `COVERAGE_MAX_DROP`
 below roughly 0.1 would fail pull requests that changed nothing. The default
 of 1.0 is sixteen times the widest gap.
