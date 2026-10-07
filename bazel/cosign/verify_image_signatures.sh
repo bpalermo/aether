@@ -29,15 +29,23 @@ set -e
 
 COSIGN="$(rlocation "${COSIGN_RLOCATIONPATH:?set by the BUILD target}")"
 script="$(rlocation "${VERIFY_SCRIPT_RLOCATIONPATH:?set by the BUILD target}")"
-for x in "$COSIGN" "$script"; do
+registry_bzl="$(rlocation "${REGISTRY_BZL_RLOCATIONPATH:?set by the BUILD target}")"
+for x in "$COSIGN" "$script" "$registry_bzl"; do
 	if [ -z "$x" ] || [ ! -e "$x" ]; then
-		echo "ERROR: missing runfile (${COSIGN_RLOCATIONPATH} / ${VERIFY_SCRIPT_RLOCATIONPATH})" >&2
+		echo "ERROR: missing runfile (${COSIGN_RLOCATIONPATH} / ${VERIFY_SCRIPT_RLOCATIONPATH} / ${REGISTRY_BZL_RLOCATIONPATH})" >&2
 		exit 2
 	fi
 done
 export COSIGN
+# The registry setting (#1338). registry-lib.sh runs scripts/image-registry.sh
+# while it is being sourced, and that script looks for
+# ../bazel/registry/registry.bzl beside itself. In runfiles the setting is in
+# its own repository (@aether_registry), so name it. A caller's own
+# IMAGE_REGISTRY_BZL wins.
+export IMAGE_REGISTRY_BZL="${IMAGE_REGISTRY_BZL:-$registry_bzl}"
 
 cd "${BUILD_WORKING_DIRECTORY:-.}"
-# The script sources registry-lib.sh from its own directory; in runfiles that is the
-# sibling this target's data puts next to it.
+# The script sources registry-lib.sh from its own directory, and that runs
+# image-registry.sh from the same one; in runfiles both are the siblings this
+# target's data puts next to it.
 exec bash "$script" "$@"

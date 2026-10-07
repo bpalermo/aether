@@ -61,10 +61,16 @@ exports_files(
 )
 
 # The registry setting reader (proposal 040), for //bazel/img:registry_test,
-# which pins it against the Starlark helpers in bazel/registry/registry.bzl.
+# which pins it against the Starlark helpers in bazel/registry/registry.bzl,
+# and for //bazel/cosign:verify_image_signatures: registry-lib.sh runs it when
+# it is sourced, so every target with registry-lib.sh in its data needs this
+# file too (#1338).
 exports_files(
     ["image-registry.sh"],
-    visibility = ["//bazel/img:__pkg__"],
+    visibility = [
+        "//bazel/cosign:__pkg__",
+        "//bazel/img:__pkg__",
+    ],
 )
 
 # publish-verify's superseded-commit decision (workflow_run path): which
@@ -87,6 +93,7 @@ sh_test(
     srcs = ["publish_verify_close_issue_test.sh"],
     data = [
         "publish-verify-close-issue.sh",
+        "publish-verify-control-issue.sh",
         "//:ci_definitions",
     ],
 )
@@ -94,11 +101,17 @@ sh_test(
 # The signature verifier against answers that are not answers (#1316): a 5xx,
 # an empty or HTML 200, a truncated index, no connection, a `cosign verify`
 # that fails once. Fake `curl`, `cosign` and `sleep`; no network, no waiting.
+# Also the tag listing and the sign step's lookup around it (#1337), and that
+# sourcing registry-lib.sh is silent (#1338). `moderate`: every case sources
+# the library, which runs image-registry.sh ten times (~0.5 s), and there are
+# about sixty cases -- half of `small`'s 60 s on an idle machine.
 sh_test(
     name = "verify_image_signatures_test",
     size = "small",
+    timeout = "moderate",
     srcs = ["verify_image_signatures_test.sh"],
     data = [
+        "image-registry.sh",
         "registry-lib.sh",
         "verify-image-signatures.sh",
     ],
