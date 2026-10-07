@@ -2667,16 +2667,51 @@ kubectl get ds -n aether-system aether-agent \
   -o jsonpath='{.spec.template.spec.initContainers[0].resources}{"\n"}'   # no limits.cpu
 ```
 
-The other init containers, checked in the same pass and left alone: the proxy pod's
-`install-supervisor` renders **no `resources` at all** (no limit, so nothing to
-throttle, but also no request: it runs at the minimum CFS weight and is invisible to
-request accounting; ≤ 1 s wall on talos-main), the `authz` native sidecar has a `10m`
-request and no CPU limit, and the webhook-injected `aether-identity-ready` has a `5m`
-request and no CPU limit (`controller.webhook.identityGate.resources`, `limits.cpu:
-""`). The edge pod's `agent` container has no CPU limit either, so its `GOMAXPROCS` is
-pinned in the chart (`edge.goMaxProcs`, default 2, #1335) like the node agent's; the
-edge `envoy` container takes no `--concurrency` and so sizes its workers to the node's
-cores.
+The other init containers, checked in the same pass: the proxy pod's
+`install-supervisor` rendered **no `resources` at all** until chart 2.4.13 (no limit,
+so nothing to throttle, but also no request: it ran at the minimum CFS weight and was
+invisible to request accounting; ≤ 1 s wall on talos-main). Since #1344 it has a
+`100m` / `32Mi` request, a `64Mi` memory limit and no CPU limit
+(`proxy.supervisor.resources`); the self-copy it does costs about 50 ms of CPU and
+peaks at 14 MB RSS (a workstation build of the binary, `/usr/bin/time -v`). The
+`authz` native sidecar has a `10m` request and no CPU limit, and the webhook-injected
+`aether-identity-ready` has a `5m` request and no CPU limit
+(`controller.webhook.identityGate.resources`, `limits.cpu: ""`). The edge pod's
+`agent` container has no CPU limit either, so its `GOMAXPROCS` is pinned in the chart
+(`edge.goMaxProcs`, default 2, #1335) like the node agent's.
+
+```bash
+kubectl get ds -n aether-system aether-proxy \
+  -o jsonpath='{.spec.template.spec.initContainers[0].resources}{"\n"}'   # requests, limits.memory, no limits.cpu
+```
+
+### Edge Envoy worker count
+
+Until chart 2.4.13 the edge `envoy` container was started without `--concurrency`, so
+it ran one worker per node core (4 on talos-main) for about 12m of CPU on average.
+Since #1344 the chart passes `--concurrency` from `edge.concurrency` (default `2`, the
+node proxies' count on talos-main; `0` omits the flag). Unlike `proxy.concurrency`,
+changing it is an ordinary rolling update of the edge Deployment: there is no hot
+restart and nothing shared between the old and the new replica.
+
+To read the count a running edge Envoy actually has, before and after the upgrade
+(the first is the pod spec, the second is Envoy's own gauge in the OTLP stats; expect
+one series per edge replica, each equal to `edge.concurrency`, or to the node's core
+count when it is `0`):
+
+```bash
+kubectl get deploy -n aether-ingress aether-edge \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="envoy")].command}{"\n"}'
+```
+
+```promql
+envoy_server_concurrency{job="aether-edge-proxy"}
+```
+
+A worker count that is too low shows up as the edge Envoy's CPU approaching
+`edge.concurrency` whole cores
+(`sum by (pod) (rate(container_cpu_usage_seconds_total{container="envoy", namespace="aether-ingress"}[5m]))`);
+at 12m it is three orders of magnitude away.
 
 ### What the proxy supervisor does on SIGTERM (`kubectl delete pod`, drain, eviction)
 

@@ -323,6 +323,92 @@ helm_template_absent_test(
     ],
 )
 
+# #1344: the edge `envoy` container is started with a fixed worker count
+# (edge.concurrency, default 2) instead of one worker per node core. The edge
+# runs Envoy directly (no supervisor), so the flag is two plain entries of the
+# container's `command`, right after `--service-node $(POD_NAME)`.
+helm_template_test(
+    name = "aether_edge_concurrency_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+    template_patterns = {
+        "aether/templates/edge-deployment.yaml": [
+            "- \"--service-node\"\\n\\s+- \"\\$\\(POD_NAME\\)\"\\n\\s+- \"--concurrency\"\\n\\s+- \"2\"\\n\\s+env:\\n",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "aether_edge_concurrency_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.concurrency=4",
+    ],
+    template_patterns = {
+        "aether/templates/edge-deployment.yaml": [
+            "- \"--concurrency\"\\n\\s+- \"4\"\\n\\s+env:\\n",
+        ],
+    },
+)
+
+# edge.concurrency=0 passes no flag: Envoy runs one worker per core, as every
+# chart before 2.4.13 did.
+helm_template_absent_test(
+    name = "aether_edge_concurrency_off_test",
+    absent = [
+        "--concurrency",
+    ],
+    chart = ":aether",
+    control = "- \"--service-node\"",
+    opts = [
+        "--show-only",
+        "templates/edge-deployment.yaml",
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.concurrency=0",
+    ],
+)
+
+# Guard: edge.concurrency is the edge's only. The node proxy's worker count
+# stays proxy.concurrency (default 0: no flag), whatever the edge runs with.
+helm_template_absent_test(
+    name = "aether_edge_concurrency_leaves_proxy_alone_test",
+    absent = [
+        "--concurrency",
+    ],
+    chart = ":aether",
+    control = "--envoy-arg=--drain-strategy",
+    opts = [
+        "--show-only",
+        "templates/agent-proxy-daemonset.yaml",
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.concurrency=4",
+    ],
+)
+
+# A value Envoy would reject fails the render instead of crash-looping every
+# edge replica.
+helm_template_fail_test(
+    name = "aether_edge_concurrency_invalid_test",
+    chart = ":aether",
+    expected_message = "edge.concurrency must be a non-negative integer",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.concurrency=-1",
+    ],
+)
+
 # #1123: an agent pod start is time the node's proxy spends on no ADS stream.
 # Both of its images are digest-pinned, so they are pulled IfNotPresent (Always
 # only adds a registry round trip per container), and readiness is probed every
@@ -687,6 +773,78 @@ helm_template_absent_test(
         "--show-only",
         "templates/agent-proxy-daemonset.yaml",
     ],
+)
+
+# #1344: install-supervisor (the proxy pod's init container, on every proxy pod
+# start) used to render no `resources` at all: no request, so the minimum CFS
+# weight on a busy node and nothing in request accounting. It now has a 100m /
+# 32Mi request, a memory limit and NO CPU limit (proxy.supervisor.resources).
+# Positional on that init container: the block follows its only volumeMount and,
+# with the authz sidecar off (default), is followed directly by the pod's
+# `containers:`. `limits:` carrying only memory proves there is no limits.cpu.
+INSTALL_SUPERVISOR_RESOURCES = "- name: supervisor-bin\\n\\s+mountPath: /opt/aether\\n\\s+resources:\\n\\s+limits:\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 100m\\n\\s+memory: 32Mi\\n\\s+containers:\\n"
+
+helm_template_test(
+    name = "aether_install_supervisor_resources_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            INSTALL_SUPERVISOR_RESOURCES,
+        ],
+    },
+)
+
+# An EMPTY limits.cpu is "no CPU limit" too: it is dropped (aether.resources),
+# never rendered as `cpu: ""` (which the apiserver rejects as a quantity).
+helm_template_test(
+    name = "aether_install_supervisor_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.supervisor.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            INSTALL_SUPERVISOR_RESOURCES,
+        ],
+    },
+)
+
+# ...and an operator can change the request or put a cap on.
+helm_template_test(
+    name = "aether_install_supervisor_resources_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.supervisor.resources.requests.cpu=20m",
+        "--set",
+        "proxy.supervisor.resources.limits.cpu=1",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- name: supervisor-bin\\n\\s+mountPath: /opt/aether\\n\\s+resources:\\n\\s+limits:\\n\\s+cpu: 1\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 20m\\n\\s+memory: 32Mi\\n\\s+containers:\\n",
+        ],
+    },
+)
+
+# With the authz native sidecar on, the block still belongs to
+# install-supervisor: it sits between that container's mount and `- name: authz`.
+helm_template_test(
+    name = "aether_install_supervisor_resources_with_authz_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set",
+        "proxy.authzSidecar.opa.enabled=true",
+        "--set",
+        "proxy.authzSidecar.opa.policy=package envoy.authz",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- name: supervisor-bin\\n\\s+mountPath: /opt/aether\\n\\s+resources:\\n\\s+limits:\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 100m\\n\\s+memory: 32Mi\\n(\\s+#[^\\n]*\\n)*\\s+- name: authz\\n",
+        ],
+    },
 )
 
 helm_template_test(

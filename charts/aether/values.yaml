@@ -634,6 +634,35 @@ proxy:
       digest: "{@//agent/cmd/proxy-supervisor:image_push.digest}"
       tag: ""
       pullPolicy: Always
+    # Resources of the install-supervisor init container (#1344). It runs on
+    # EVERY proxy pod start, ahead of the proxy: it copies the supervisor (itself,
+    # ~16 MB) and the proxy-ready prober onto the pod's shared volume and exits.
+    # Until chart 2.4.13 it rendered no `resources` at all: nothing throttled
+    # it, but with no request it ran at the minimum CFS weight -- on a node
+    # whose cores are saturated by a proxy handoff (#1093), which is exactly
+    # when a proxy pod starts -- and was invisible to request accounting.
+    #
+    # requests 100m / 32Mi: the same request as cni-install, the agent pod's
+    # init container of the same kind (one short burst, then exit). Measured on
+    # a workstation build of the binary: the self-copy takes ~50 ms of CPU and
+    # peaks at ~14 MB RSS, and still completes in an 8 MB memory cgroup (the
+    # copy streams; the page cache it dirties is reclaimable). An init
+    # container's request only counts toward the pod's effective request where
+    # it exceeds the app containers' sum (the proxy's 500m / 512Mi), so this
+    # reserves nothing more on the node; it is the container's CFS weight while
+    # it runs.
+    #
+    # NO CPU limit, deliberately: a quota is what stretched cni-install's
+    # 50-80 ms of work to 500-800 ms (#1335). The 64Mi memory limit is a
+    # backstop, about 4x the measured peak. No GOMAXPROCS pin: the work is
+    # single-threaded and the process exits within the second. To add a cap,
+    # set limits.cpu; an empty value means "no limit".
+    resources:
+      requests:
+        cpu: 100m
+        memory: 32Mi
+      limits:
+        memory: 64Mi
   logLevel: info
   # Emit Envoy's own application logs as one JSON object per line (bootstrap
   # application_log_config). Set false for Envoy's default text format.
@@ -999,6 +1028,24 @@ edge:
   # GOMAXPROCS back to the Go runtime (e.g. alongside an explicit CPU limit,
   # which the runtime then honours).
   goMaxProcs: 2
+  # Envoy worker thread count for the edge pod's `envoy` container (#1344), the
+  # same shape as proxy.concurrency (#1093): N > 0 passes `--concurrency N`,
+  # 0 passes no flag and Envoy runs one worker per node core -- what every chart
+  # before 2.4.13 did (4 workers on a 4-core talos-main node).
+  #
+  # Default 2, the count the node proxies run with on talos-main since #1093.
+  # The edge Envoy averages about 12m of CPU there, so two workers are far from
+  # a ceiling, and each worker it does not start is a thread's idle wake-ups and
+  # per-worker memory (connection pools, thread-local stats and config) saved.
+  # Raise it for an edge that terminates real traffic volume: a worker is one
+  # core's worth of TLS and HTTP work at most.
+  #
+  # Unlike proxy.concurrency, changing it is an ordinary rolling update: the
+  # edge has no hot restart and no shared reuse-port socket group across pods,
+  # so none of #1136's caveats apply. Each new replica simply starts with the
+  # new count behind its readiness probe.
+  # Must be a non-negative integer; the chart refuses to render otherwise.
+  concurrency: 2
   # Envoy overload manager on the fixed_heap monitor (edge-configmap.yaml), the
   # same monitor the node proxy uses. The unprivileged edge pod COULD use
   # cgroup_memory, but fixed_heap keeps parity and is independent of the cgroup

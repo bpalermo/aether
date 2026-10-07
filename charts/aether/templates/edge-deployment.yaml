@@ -262,6 +262,14 @@ spec:
             - "aether-edge"
             - "--service-node"
             - "$(POD_NAME)"
+            {{- /* #1344: a fixed worker count instead of one worker per node
+                   core (edge.concurrency; 0 omits the flag). Envoy is this
+                   container's command, with no supervisor in between, so the
+                   flag goes straight onto its command line. */}}
+            {{- with include "aether.edge.concurrency" . }}
+            - "--concurrency"
+            - "{{ . }}"
+            {{- end }}
           env:
             - name: POD_NAME
               valueFrom:
