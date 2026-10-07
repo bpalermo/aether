@@ -1,6 +1,6 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_template_absent_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_template_absent_test", "helm_template_match_test")
 
 # prober Helm chart (published to chart_registry_url("prober"); see @aether_registry//:registry.bzl).
 #
@@ -78,5 +78,187 @@ helm_template_absent_test(
     opts = [
         "--set",
         "resources.limits.memory=null",
+    ],
+)
+
+# #1361: the prober container's resources render through prober.resources, not
+# plain `toYaml`, which rendered `cpu: ""` for `--set resources.limits.cpu=`
+# (the apiserver rejects that as a quantity). The block is the last thing in the
+# DaemonSet, so each pattern is anchored on the securityContext line before it.
+PROBER_PRE = "drop:\\n\\s+- ALL\\n\\s+resources:\\n"
+
+PROBER_NO_CPU_LIMIT = PROBER_PRE + "\\s+limits:\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 100m\\n\\s+memory: 32Mi\\s*$"
+
+# Guard: the default is a memory limit and no CPU limit (#735).
+helm_template_test(
+    name = "prober_default_resources_test",
+    chart = ":prober",
+    template_patterns = {
+        "prober/templates/daemonset.yaml": [PROBER_NO_CPU_LIMIT],
+    },
+)
+
+# An EMPTY limits.cpu is "no CPU limit": the key is dropped.
+helm_template_test(
+    name = "prober_empty_cpu_limit_test",
+    chart = ":prober",
+    opts = [
+        "--set",
+        "resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "prober/templates/daemonset.yaml": [PROBER_NO_CPU_LIMIT],
+    },
+)
+
+# An emptied request is dropped the same way.
+helm_template_test(
+    name = "prober_empty_cpu_request_test",
+    chart = ":prober",
+    opts = [
+        "--set",
+        "resources.requests.cpu=",
+    ],
+    template_patterns = {
+        "prober/templates/daemonset.yaml": [
+            PROBER_PRE + "\\s+limits:\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+memory: 32Mi\\s*$",
+        ],
+    },
+)
+
+# Guard: a CPU limit the operator sets still renders.
+helm_template_test(
+    name = "prober_cpu_limit_override_test",
+    chart = ":prober",
+    opts = [
+        "--set",
+        "resources.limits.cpu=1",
+    ],
+    template_patterns = {
+        "prober/templates/daemonset.yaml": [
+            PROBER_PRE + "\\s+limits:\\n\\s+cpu: 1\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 100m\\n\\s+memory: 32Mi\\s*$",
+        ],
+    },
+)
+
+# #1362: the two authz-canary containers take their resources from values
+# (authzCanary.echo.resources, authzCanary.resources) through prober.resources;
+# they were literals. Both blocks are followed by the same securityContext, so
+# each pattern is anchored on the line BEFORE its block: the echo container's
+# preStop `seconds: 5`, the curl container's script ending in `done`.
+#
+# These are helm_template_match_test, not helm_template_test: authz-canary.yaml
+# renders five documents, and rules_helm's `template_patterns` only ever search
+# the one helm prints last for a template (the HTTPFilter), never the two
+# Deployments. helm_template_match_test searches the whole render.
+AUTHZ_CANARY_OPTS = [
+    "--set",
+    "authzCanary.enabled=true",
+]
+
+AUTHZ_ECHO_PRE = "seconds: 5\\n\\s+resources:\\n"
+
+AUTHZ_CURL_PRE = "done\\n\\s+resources:\\n"
+
+AUTHZ_CANARY_POST = "\\s+securityContext:\\n\\s+allowPrivilegeEscalation: false\\n"
+
+AUTHZ_ECHO_DEFAULT = AUTHZ_ECHO_PRE + "\\s+limits:\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 10m\\n\\s+memory: 32Mi\\n" + AUTHZ_CANARY_POST
+
+AUTHZ_CURL_DEFAULT = AUTHZ_CURL_PRE + "\\s+limits:\\n\\s+memory: 32Mi\\n\\s+requests:\\n\\s+cpu: 10m\\n\\s+memory: 16Mi\\n" + AUTHZ_CANARY_POST
+
+# The defaults are the former literals.
+helm_template_match_test(
+    name = "prober_authz_canary_default_resources_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS,
+    patterns = [
+        AUTHZ_ECHO_DEFAULT,
+        AUTHZ_CURL_DEFAULT,
+    ],
+)
+
+# An emptied CPU limit renders no `cpu` key, per container. The other
+# container's block must stay at its default.
+helm_template_match_test(
+    name = "prober_authz_echo_empty_cpu_limit_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS + [
+        "--set",
+        "authzCanary.echo.resources.limits.cpu=",
+    ],
+    patterns = [
+        AUTHZ_ECHO_DEFAULT,
+        AUTHZ_CURL_DEFAULT,
+    ],
+)
+
+helm_template_match_test(
+    name = "prober_authz_curl_empty_cpu_limit_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS + [
+        "--set",
+        "authzCanary.resources.limits.cpu=",
+    ],
+    patterns = [
+        AUTHZ_ECHO_DEFAULT,
+        AUTHZ_CURL_DEFAULT,
+    ],
+)
+
+# An emptied request is dropped too (on the literals it could not be removed).
+helm_template_match_test(
+    name = "prober_authz_echo_empty_cpu_request_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS + [
+        "--set",
+        "authzCanary.echo.resources.requests.cpu=",
+    ],
+    patterns = [
+        AUTHZ_ECHO_PRE + "\\s+limits:\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+memory: 32Mi\\n" + AUTHZ_CANARY_POST,
+        AUTHZ_CURL_DEFAULT,
+    ],
+)
+
+helm_template_match_test(
+    name = "prober_authz_curl_empty_cpu_request_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS + [
+        "--set",
+        "authzCanary.resources.requests.cpu=",
+    ],
+    patterns = [
+        AUTHZ_ECHO_DEFAULT,
+        AUTHZ_CURL_PRE + "\\s+limits:\\n\\s+memory: 32Mi\\n\\s+requests:\\n\\s+memory: 16Mi\\n" + AUTHZ_CANARY_POST,
+    ],
+)
+
+# A value the operator sets renders, on the container it was set for only.
+helm_template_match_test(
+    name = "prober_authz_echo_resources_override_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS + [
+        "--set",
+        "authzCanary.echo.resources.limits.cpu=200m",
+        "--set",
+        "authzCanary.echo.resources.requests.memory=48Mi",
+    ],
+    patterns = [
+        AUTHZ_ECHO_PRE + "\\s+limits:\\n\\s+cpu: 200m\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 10m\\n\\s+memory: 48Mi\\n" + AUTHZ_CANARY_POST,
+        AUTHZ_CURL_DEFAULT,
+    ],
+)
+
+helm_template_match_test(
+    name = "prober_authz_curl_resources_override_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS + [
+        "--set",
+        "authzCanary.resources.limits.cpu=100m",
+        "--set",
+        "authzCanary.resources.requests.memory=24Mi",
+    ],
+    patterns = [
+        AUTHZ_ECHO_DEFAULT,
+        AUTHZ_CURL_PRE + "\\s+limits:\\n\\s+cpu: 100m\\n\\s+memory: 32Mi\\n\\s+requests:\\n\\s+cpu: 10m\\n\\s+memory: 24Mi\\n" + AUTHZ_CANARY_POST,
     ],
 )
