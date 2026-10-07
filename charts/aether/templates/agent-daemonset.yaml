@@ -93,8 +93,11 @@ spec:
               mountPath: /host{{ .Values.cni.binDir }}
             - name: cni-conf-dir
               mountPath: /host{{ .Values.cni.confDir }}
+          {{- /* #1335: no CPU limit by default (values.yaml, cniInstall.resources);
+                 an empty limits.cpu renders "no limit" just like leaving the
+                 key out (aether.resources). */}}
           resources:
-            {{- toYaml .Values.cniInstall.resources | nindent 12 }}
+            {{- include "aether.resources" .Values.cniInstall.resources | nindent 12 }}
       containers:
         - name: agent
           image: {{ include "aether.image" .Values.agent.image | quote }}
