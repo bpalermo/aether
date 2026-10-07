@@ -79,7 +79,7 @@ bazel run //bazel/cosign:verify_image_signatures -- --single quay.io/aethermesh/
 ```bash
 gh attestation verify oci://quay.io/aethermesh/agent@sha256:<digest> \
   --repo bpalermo/aether \
-  --signer-workflow bpalermo/aether/.github/workflows/publish.yaml \
+  --signer-workflow github.com/bpalermo/aether/.github/workflows/publish.yaml \
   --source-digest <full git sha>
 ```
 
@@ -95,7 +95,7 @@ A chart is verified the same way, with its own reference:
 ```bash
 gh attestation verify oci://quay.io/aethermesh/chart-aether@sha256:<digest> \
   --repo bpalermo/aether \
-  --signer-workflow bpalermo/aether/.github/workflows/publish.yaml
+  --signer-workflow github.com/bpalermo/aether/.github/workflows/publish.yaml
 ```
 
 The provenance covers the digest a tag resolves to: an image index, or a chart
