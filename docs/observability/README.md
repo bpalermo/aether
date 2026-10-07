@@ -91,30 +91,43 @@ These expressions have **promtool unit tests** in the GitOps repo
 
 Every registrar replica serves an endpoint snapshot listed from etcd at one store
 revision, and the listing is a pure function of that revision. Two replicas at the same
-`aether_registrar_snapshot_revision` must therefore report the same `content_hash` on
-`aether_registrar_snapshot_content` (#1193).
+`aether_registrar_snapshot_revision` must therefore report the same value of
+`aether_registrar_snapshot_content_hash` (#1193, #1329).
 
 | Alert | Severity | Catches |
 |---|---|---|
 | `AetherRegistrarSnapshotDiverged` | warning | two replicas at one revision serving different endpoint sets, with no write-behind intent pending |
 
-### Why it does not count hashes over the bare selector
+### The hash is the gauge's value
 
-`content_hash` is a label, so a content change ends one series and starts another. The
-registrar stops exporting the old one, but OTLP has no staleness marker, so Prometheus
-returns the old series' last sample for its 5-minute lookback. For those 5 minutes every
-replica shows two hashes, and `count by (content_hash) (...)` reads that as a divergence
-(#1322: 108 of 1,920 samples on a soak with none). The rule keeps, per replica, only the
-content series whose `timestamp()` is the newest, and compares replicas per revision.
-The file's comments walk through the expression, and `docs/runbook.md` ("Stored vs in
-place vs applied") has the query for reading the pairs by hand.
+`aether_registrar_snapshot_content_hash` is the first 13 hex digits (52 bits) of the
+content hash in the snapshot version, as an integer; a float64 holds it exactly. One
+series per replica and no label that changes, so a content change moves the value and
+leaves nothing behind in Prometheus's lookback. The rule is then a plain count of
+distinct values per `(job, revision)`: no `timestamp()` filter, and no dependence on the
+two metrics' timestamps (the file's comments say how they arrive). 52 bits is a
+divergence check between a few replicas (two different endpoint sets collide with
+probability 2^-52), not an identifier.
 
-Its promtool tests are in the GitOps repo too: same revision and same hash (quiet), same
-revision and different hash (fires), a content change with the old series stale but
-inside the lookback (quiet, and the old expression is pinned to return a sample there),
-a replica one revision behind (quiet), and a pending write-behind intent (quiet).
+### Deprecated: `aether_registrar_snapshot_content{content_hash}`
 
-etcd backend only: the kubernetes backend reports no revision.
+The hash used to be a label on an info gauge. A superseded hash stayed visible for the
+5-minute lookback because OTLP has no staleness marker, and a count over the bare
+selector read that as a divergence (#1322: 108 of 1,920 samples on a soak with none);
+#1328 filtered on `timestamp()` to cope. The labelled metric is still exported for one
+release and is removed in the next. While registrar replicas of both images can run,
+keep the #1328 expression as a second `or` arm (`docs/runbook.md`, "Stored vs in place
+vs applied", has the text and the order of work): a rule on the new metric alone cannot
+see a replica on the older image.
+
+Its promtool tests are in the GitOps repo: same revision and same hash (quiet), same
+revision and different hash (fires after 3m), both replicas changing hash together
+(quiet at every step), a replica one revision behind (quiet), a pending write-behind
+intent (quiet), and replicas that export only the labelled metric (still caught by the
+transitional arm).
+
+etcd backend only: the kubernetes backend reports no revision, so the rule returns
+nothing there. The gauge itself is reported on both backends.
 
 ## Installing
 

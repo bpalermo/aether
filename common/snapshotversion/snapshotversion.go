@@ -45,6 +45,11 @@ const (
 	DirtySep = "+"
 	// HashLen is the number of hex digits of the content hash.
 	HashLen = 16
+	// ValueHexLen is the number of leading hex digits of the content hash that
+	// ContentHashValue keeps: 13 digits = ValueBits bits.
+	ValueHexLen = 13
+	// ValueBits is the width of a ContentHashValue.
+	ValueBits = 4 * ValueHexLen
 )
 
 // Format renders the version for the given state; see the format above. A
@@ -73,6 +78,40 @@ func ContentHash(version string) (string, bool) {
 		return h, h != ""
 	}
 	return "", false
+}
+
+// ContentHashValue is the content hash as a number a float64 holds exactly: its
+// first ValueHexLen hex digits (the top 52 bits of the 64 the hash carries),
+// as a non-negative integer below 2^52. It is what the registrar exports as the
+// VALUE of aether.registrar.snapshot.content_hash (#1329), so that a metrics
+// backend that stores float64 samples (Prometheus) can compare two replicas'
+// hashes with no label that would outlive a superseded hash.
+//
+// Bit budget. A float64 has a 53-bit significand, so every integer in
+// [0, 2^53] is exact and 53 bits would fit. 52 are kept because that is a
+// whole number of hex digits: the value printed as %013x IS the first 13
+// digits of the hash in the version string, which an operator can match by
+// eye. The 12 bits dropped cost nothing that matters here: the value is a
+// divergence detector between a handful of replicas at one revision, not a
+// global identifier. Two replicas serving DIFFERENT contents report the same
+// value with probability 2^-52 (about 2.2e-16) per compared pair; the resume
+// token keeps using all HashLen digits.
+//
+// It takes a content hash (State.ContentHash, or the result of ContentHash),
+// not a version. ok is false when the argument is shorter than ValueHexLen or
+// is not hex; a caller exporting a gauge then reports nothing rather than a
+// made-up value.
+func ContentHashValue(contentHash string) (value int64, ok bool) {
+	if len(contentHash) < ValueHexLen {
+		return 0, false
+	}
+	// ParseUint, not ParseInt: a sign is not a hex digit. 52 bits always fit
+	// an int64.
+	v, err := strconv.ParseUint(contentHash[:ValueHexLen], 16, ValueBits)
+	if err != nil {
+		return 0, false
+	}
+	return int64(v), true
 }
 
 // Relation is how a presented token relates to a current version.

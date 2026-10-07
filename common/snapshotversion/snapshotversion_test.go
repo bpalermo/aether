@@ -118,3 +118,67 @@ func TestRelation_String(t *testing.T) {
 	assert.Equal(t, "renamed", Renamed.String())
 	assert.Equal(t, "different", Different.String())
 }
+
+// TestContentHashValue: the value is the first 13 hex digits of the hash as an
+// integer -- 52 bits, which a float64 (what Prometheus stores) holds exactly.
+func TestContentHashValue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		hash   string
+		want   int64
+		wantOK bool
+	}{
+		{"top 13 digits", h1, 0x0123456789abc, true},
+		{"other hash", h2, 0xfedcba9876543, true},
+		{"dropped digits do not matter", "0123456789abcfff", 0x0123456789abc, true},
+		{"all zero", "0000000000000000", 0, true},
+		{"largest", "ffffffffffffffff", 1<<52 - 1, true},
+		{"exactly 13 digits", "0123456789abc", 0x0123456789abc, true},
+		{"upper case hex", "0123456789ABCDEF", 0x0123456789abc, true},
+		{"too short", "0123456789ab", 0, false},
+		{"empty", "", 0, false},
+		{"not hex", "0123456789abXdef", 0, false},
+		{"a sign is not a hex digit", "-123456789abcdef", 0, false},
+		{"a version is not a hash", "42." + h1, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ContentHashValue(tc.hash)
+			assert.Equal(t, tc.wantOK, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestContentHashValue_Float64Exact: every value survives the round trip
+// through a float64, including the largest and its neighbour -- the property
+// the 52-bit budget exists for. 2^53+1 is the first integer that does not.
+func TestContentHashValue_Float64Exact(t *testing.T) {
+	assert.Equal(t, 52, ValueBits)
+	for _, h := range []string{h1, h2, "ffffffffffffffff", "ffffffffffffefff", "0000000000001000"} {
+		v, ok := ContentHashValue(h)
+		assert.True(t, ok)
+		assert.GreaterOrEqual(t, v, int64(0))
+		assert.Less(t, v, int64(1)<<ValueBits)
+		assert.Equal(t, v, int64(float64(v)), "hash %s", h)
+	}
+	a, _ := ContentHashValue("ffffffffffffffff")
+	b, _ := ContentHashValue("ffffffffffffefff")
+	assert.NotEqual(t, float64(a), float64(b), "adjacent values stay distinct as float64")
+
+	beyond := int64(1)<<53 + 1
+	assert.NotEqual(t, beyond, int64(float64(beyond)), "the budget is real: 2^53+1 is not a float64")
+}
+
+// TestContentHashValue_FromVersion: every version form yields the same value
+// through the one parser (ContentHash), so a reader holding only a version
+// string can reproduce the gauge.
+func TestContentHashValue_FromVersion(t *testing.T) {
+	want, _ := ContentHashValue(h1)
+	for _, version := range []string{Format(42, false, h1), Format(42, true, h1), Format(0, false, h1)} {
+		h, ok := ContentHash(version)
+		assert.True(t, ok, version)
+		got, ok := ContentHashValue(h)
+		assert.True(t, ok, version)
+		assert.Equal(t, want, got, version)
+	}
+}
