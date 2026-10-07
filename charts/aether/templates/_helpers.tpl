@@ -333,9 +333,12 @@ core); a negative or non-integer value fails the render.
 {{/*
 The one validator behind both: takes (dict "key" <values path, for the error>
 "value" <the value>) and renders the integer when > 0, else the empty string.
+Only an unset (null) value reads as 0. `default 0` would also swallow `false`
+and the empty string, turning a mistyped value into "one worker per core"
+instead of an error.
 */}}
 {{- define "aether.envoyConcurrency" -}}
-{{- $s := toString (.value | default 0) -}}
+{{- $s := ternary "0" (toString .value) (kindIs "invalid" .value) -}}
 {{- if not (regexMatch "^[0-9]+$" $s) -}}
 {{- fail (printf "%s must be a non-negative integer, got %q" .key $s) -}}
 {{- end -}}

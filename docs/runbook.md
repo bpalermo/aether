@@ -2711,7 +2711,7 @@ envoy_server_concurrency{job="aether-edge-proxy"}
 A worker count that is too low shows up as the edge Envoy's CPU approaching
 `edge.concurrency` whole cores
 (`sum by (pod) (rate(container_cpu_usage_seconds_total{container="envoy", namespace="aether-ingress"}[5m]))`);
-at 12m it is three orders of magnitude away.
+at 12m it is over two orders of magnitude away.
 
 ### What the proxy supervisor does on SIGTERM (`kubectl delete pod`, drain, eviction)
 

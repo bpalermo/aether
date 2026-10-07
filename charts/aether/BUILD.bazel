@@ -409,6 +409,30 @@ helm_template_fail_test(
     ],
 )
 
+# `false` (and the empty string) is not "0": a mistyped value must fail the
+# render, not quietly restore one worker per core.
+helm_template_fail_test(
+    name = "aether_edge_concurrency_false_test",
+    chart = ":aether",
+    expected_message = "edge.concurrency must be a non-negative integer",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.concurrency=false",
+    ],
+)
+
+helm_template_fail_test(
+    name = "aether_proxy_concurrency_false_test",
+    chart = ":aether",
+    expected_message = "proxy.concurrency must be a non-negative integer",
+    opts = [
+        "--set",
+        "proxy.concurrency=false",
+    ],
+)
+
 # #1123: an agent pod start is time the node's proxy spends on no ADS stream.
 # Both of its images are digest-pinned, so they are pulled IfNotPresent (Always
 # only adds a registry round trip per container), and readiness is probed every
