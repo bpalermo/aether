@@ -539,13 +539,44 @@ udsCsi:
   # publishable as soon as the node admits it.
   nodeSelector: {}
   tolerations: []
+  # CPU: a 5m REQUEST and deliberately NO CPU LIMIT (#1321), the same call as
+  # the agent (#1116), mesh-dns (#1253) and the authz sidecar. The plugin serves
+  # NodePublishVolume / NodeUnpublishVolume, so its latency is on the start (and
+  # the termination) path of every UDS pod. At the old 5m request / 100m limit
+  # it used 11-23 CPU-seconds per pod over an 8 h soak (under 1m on average) and
+  # was STILL CFS-throttled in 57.6 % of the 100 ms periods it ran in (cAdvisor,
+  # talos 2026-10-06: 20,248 throttled of 35,169 periods, 15 pods). All of its
+  # CPU is bursts: a publish (mkdir, mount, bind), and every 30 s the liveness
+  # probe, which is a whole second Go process (`/uds-csi --probe`) started
+  # inside THIS container's cgroup. A burst past 10 ms in a period parks the
+  # container, the RPC in flight included, until the next period.
+  #
+  # The request is unchanged: 5m is already several times the measured average,
+  # and it is what the scheduler reserves on every node, UDS workload or not.
+  # It is also the CFS weight under contention, and there 5m is small (1:100
+  # against the proxy's 500m); a request sized to win that contest would
+  # reserve far more than this plugin uses, on every node, for a case nobody
+  # has measured. If cpu.pressure shows the plugin waiting on a saturated node
+  # (docs/runbook.md, "uds-csi CPU throttling"), raise it then. The pod was
+  # already QoS Burstable (requests != limits), so no
+  # QoS class changes. Memory is unchanged and this daemon sets no GOMEMLIMIT.
+  # To restore a cap, set limits.cpu (and see goMaxProcs below); an empty
+  # limits.cpu renders no CPU limit.
   resources:
     requests:
       cpu: 5m
       memory: 16Mi
     limits:
-      cpu: 100m
       memory: 32Mi
+  # GOMAXPROCS for the uds-csi container, set as an explicit env var (#1321).
+  # Since Go 1.25 the runtime derives GOMAXPROCS from the cgroup CPU limit with
+  # a floor of 2, so under the old 100m limit this daemon already ran with 2;
+  # with the limit gone it would scale to the node's core count -- and so would
+  # every 30 s liveness-probe process, which inherits this env var -- for work
+  # that is one gRPC call and a handful of syscalls. 2 keeps today's runtime
+  # behaviour exactly. 0 (or empty) omits the env var and hands GOMAXPROCS back
+  # to the Go runtime.
+  goMaxProcs: 2
 
 # Per-node Envoy proxy DaemonSet. Disable to deploy only the agent.
 #
@@ -986,6 +1017,17 @@ registrar:
   # Empty = chart default: a soft hostname spread across the replicas
   # (maxSkew 1, ScheduleAnyway). Set to replace the default entirely.
   topologySpreadConstraints: []
+  # The CPU limit STAYS here, reviewed with the same data that removed it from
+  # uds-csi (#1321): on the 2026-10-06 8 h soak the registrar was CFS-throttled
+  # in 1.5 % of its periods (uds-csi: 57.6 %). A throttled period delays an
+  # endpoint update on its way to the agents by less than 100 ms; it is not on
+  # a request path. Against that, requests == limits makes this pod QoS
+  # Guaranteed (last in the kubelet's node-pressure eviction order), which
+  # dropping limits.cpu would give up, and GOMAXPROCS is derived from
+  # limits.cpu (registrar-deployment.yaml: 1 at 100m), so without a limit it
+  # would follow the node's core count. Revisit if the throttled fraction
+  # grows with the fleet (docs/runbook.md, "uds-csi CPU throttling", has the
+  # query): raise requests and limits together to keep Guaranteed.
   resources:
     requests:
       cpu: 100m
@@ -1114,6 +1156,16 @@ controller:
         limits:
           cpu: ""
           memory: 64Mi
+  # The CPU limit STAYS here, reviewed with the same data that removed it from
+  # uds-csi (#1321): on the 2026-10-06 8 h soak the controller was
+  # CFS-throttled in 1.0 % of its periods (uds-csi: 57.6 %). Its
+  # latency-relevant work is the admission webhooks, where a throttled period
+  # adds less than 100 ms to a call the apiserver allows 5 s for
+  # (controller-webhook.yaml, timeoutSeconds). GOMAXPROCS is derived from
+  # limits.cpu (controller-deployment.yaml: 1 at 100m), so without a limit it
+  # would follow the node's core count. Revisit if the throttled fraction
+  # grows with pod-creation rate (docs/runbook.md, "uds-csi CPU throttling",
+  # has the query): raise limits.cpu before removing it.
   resources:
     requests:
       cpu: 50m
