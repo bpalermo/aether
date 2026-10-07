@@ -36,6 +36,7 @@ go_test(
         "adminidentity_test.go",
         "adminprobe_test.go",
         "adminreverify_test.go",
+        "childenv_test.go",
         "concurrencychange_test.go",
         "coordination_test.go",
         "crash_test.go",
