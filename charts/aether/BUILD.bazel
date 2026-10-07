@@ -152,6 +152,73 @@ helm_template_test(
     },
 )
 
+# #1321: uds-csi (NodePublish/NodeUnpublish, on the pod-start path of every UDS
+# pod) keeps its 5m CPU request and has NO CPU limit -- at 5m/100m it was
+# CFS-throttled in 57.6 % of its active periods while averaging under 1m -- and
+# GOMAXPROCS is pinned to 2 (what the Go runtime derived from the old 100m
+# limit) rather than scaling to the node's cores. Positional on the container's
+# resources block, which is followed directly by the pod's `volumes:`;
+# `limits:` carrying only memory proves there is no limits.cpu.
+UDS_CSI_NO_CPU_LIMIT = "resources:\\n\\s+limits:\\n\\s+memory: 32Mi\\n\\s+requests:\\n\\s+cpu: 5m\\n\\s+memory: 16Mi\\n\\s+volumes:\\n"
+
+helm_template_test(
+    name = "aether_uds_csi_cpu_resources_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/uds-csi-daemonset.yaml": [
+            UDS_CSI_NO_CPU_LIMIT,
+            "- name: GOMAXPROCS\\n\\s+value: \"2\"\\n",
+        ],
+    },
+)
+
+# An EMPTY limits.cpu is "no CPU limit" too: it is dropped (aether.resources),
+# never rendered as `cpu: ""` (which the apiserver rejects as a quantity).
+helm_template_test(
+    name = "aether_uds_csi_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "udsCsi.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/uds-csi-daemonset.yaml": [
+            UDS_CSI_NO_CPU_LIMIT,
+        ],
+    },
+)
+
+# ...and an operator can still put a cap back.
+helm_template_test(
+    name = "aether_uds_csi_cpu_limit_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "udsCsi.resources.limits.cpu=200m",
+    ],
+    template_patterns = {
+        "aether/templates/uds-csi-daemonset.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+cpu: 200m\\n\\s+memory: 32Mi\\n\\s+requests:\\n\\s+cpu: 5m\\n",
+        ],
+    },
+)
+
+# udsCsi.goMaxProcs=0 hands GOMAXPROCS back to the Go runtime: no env var.
+helm_template_absent_test(
+    name = "aether_uds_csi_gomaxprocs_off_test",
+    absent = [
+        "name: GOMAXPROCS",
+    ],
+    chart = ":aether",
+    control = "name: NODE_NAME",
+    opts = [
+        "--show-only",
+        "templates/uds-csi-daemonset.yaml",
+        "--set",
+        "udsCsi.goMaxProcs=0",
+    ],
+)
+
 # #1123: an agent pod start is time the node's proxy spends on no ADS stream.
 # Both of its images are digest-pinned, so they are pulled IfNotPresent (Always
 # only adds a registry round trip per container), and readiness is probed every

@@ -2453,6 +2453,78 @@ To put a cap back, set `agent.meshDnsDaemon.resources.limits.cpu` (an empty valu
 renders no limit) and consider `agent.meshDnsDaemon.goMaxProcs=0`, which hands
 `GOMAXPROCS` back to the Go runtime to derive from that limit.
 
+### uds-csi CPU throttling (and the controller's and registrar's CPU limits)
+
+The `csi.aether.io` plugin serves `NodePublishVolume` / `NodeUnpublishVolume`, so a
+CFS-throttled period on it is added to the start (or the termination) of a UDS pod
+on that node. Until chart 2.4.10 it ran with a `5m` request and a `100m` limit, and
+the 2026-10-06 8 h soak — the first with cAdvisor scraped — showed it throttled in
+**57.6 %** of the periods it ran in (20,248 of 35,169, 15 pods, #1321) while using
+11–23 CPU-seconds per pod over the whole run. Same mechanism as mesh-dns above: an
+average far under the limit, delivered in bursts (a publish; and every 30 s the
+liveness probe, a second Go process inside the same cgroup) that spend a period's
+10 ms of quota and park the container until the next one. Since #1321 it keeps the
+`5m` request and has **no CPU limit** by default, with `GOMAXPROCS=2` pinned in the
+chart (`udsCsi.goMaxProcs`).
+
+The same soak measured the controller at 1.0 % and the registrar at 1.5 %. Their
+`100m` limits were **kept**: neither is on a request path (a throttled period is
+under 100 ms on an admission call with a 5 s timeout, or on an endpoint update on
+its way to the agents), the registrar's `requests == limits` is what makes it QoS
+Guaranteed, and both derive `GOMAXPROCS` from `limits.cpu`. The reasoning is next to
+`controller.resources` and `registrar.resources` in `charts/aether/values.yaml`.
+
+Fraction of CFS periods throttled, per container, over a window (cAdvisor; set the
+range to the run you are grading):
+
+```promql
+sum by (container) (increase(container_cpu_cfs_throttled_periods_total{namespace="aether-system", container!=""}[8h]))
+  / sum by (container) (increase(container_cpu_cfs_periods_total{namespace="aether-system", container!=""}[8h]))
+```
+
+Per uds-csi pod, as a rate, with the time parked and the CPU actually used:
+
+```promql
+# Fraction of CFS periods throttled, per uds-csi pod
+sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace="aether-system", container="uds-csi"}[30m]))
+  / sum by (pod) (rate(container_cpu_cfs_periods_total{namespace="aether-system", container="uds-csi"}[30m]))
+
+# Seconds parked per second
+sum by (pod) (rate(container_cpu_cfs_throttled_seconds_total{namespace="aether-system", container="uds-csi"}[30m]))
+
+# CPU actually used, millicores
+1000 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="aether-system", container="uds-csi"}[30m]))
+```
+
+**A container with no CPU limit has no `container_cpu_cfs_*` series at all** —
+cAdvisor only exports them for a cgroup with a quota — so after #1321 the uds-csi
+queries return *no data*, not `0`, and the first query simply stops listing
+`uds-csi` (as it does not list `agent`, `mesh-dns` or `proxy`). Read "no data" as the
+pass, but prove the scrape is alive with the usage query, which must still return
+one series per pod, and confirm the limit is really gone:
+
+```promql
+# Expect: empty. Any series here is a uds-csi container that still has a quota
+# (an old pod not yet rolled, or an operator-set limits.cpu).
+count by (pod) (container_cpu_cfs_periods_total{namespace="aether-system", container="uds-csi"})
+```
+
+```bash
+kubectl get ds -n aether-system aether-uds-csi \
+  -o jsonpath='{.spec.template.spec.containers[0].resources}{"\n"}'   # no limits.cpu
+```
+
+With no quota, what can still make the plugin wait is node contention, where its
+`5m` request is its CFS weight. The cgroup's `cpu.pressure` shows that; read it with
+the node-debug recipe in the mesh-dns section above, with
+`app.kubernetes.io/component=uds-csi` and container name `uds-csi` (the image is
+distroless too). A `some avg60` that stays above zero is the signal to raise
+`udsCsi.resources.requests.cpu`.
+
+To put a cap back, set `udsCsi.resources.limits.cpu` (an empty value renders no
+limit) and consider `udsCsi.goMaxProcs=0`, which hands `GOMAXPROCS` back to the Go
+runtime to derive from that limit.
+
 ### What the proxy supervisor does on SIGTERM (`kubectl delete pod`, drain, eviction)
 
 The `aether-proxy` pod is `hostNetwork` with `maxSurge: 1`, so the node's Envoy is a
