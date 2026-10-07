@@ -219,6 +219,110 @@ helm_template_absent_test(
     ],
 )
 
+# #1335: cni-install (the agent pod's init container, on every agent pod start)
+# keeps its 100m CPU request and has NO CPU limit. Its work is at most 50-80 ms
+# of CPU (byte-comparing the plugin already on the host with the one in the
+# image); under a 100m quota -- 10 ms per 100 ms period -- that took 500-800 ms
+# on all 40 agent starts measured, always a multiple of ~100 ms. Positional on the init container:
+# its resources block is followed directly by the pod's `containers:` (the
+# agent container's is followed by `volumes:`), and `limits:` carrying only
+# memory proves there is no limits.cpu.
+CNI_INSTALL_NO_CPU_LIMIT = "resources:\\n\\s+limits:\\n\\s+memory: 32Mi\\n\\s+requests:\\n\\s+cpu: 100m\\n\\s+memory: 32Mi\\n\\s+containers:\\n"
+
+helm_template_test(
+    name = "aether_cni_install_cpu_resources_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            CNI_INSTALL_NO_CPU_LIMIT,
+        ],
+    },
+)
+
+# An EMPTY limits.cpu is "no CPU limit" too: it is dropped (aether.resources),
+# never rendered as `cpu: ""` (which the apiserver rejects as a quantity).
+helm_template_test(
+    name = "aether_cni_install_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "cniInstall.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            CNI_INSTALL_NO_CPU_LIMIT,
+        ],
+    },
+)
+
+# ...and an operator can still put a cap back.
+helm_template_test(
+    name = "aether_cni_install_cpu_limit_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "cniInstall.resources.limits.cpu=500m",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+cpu: 500m\\n\\s+memory: 32Mi\\n\\s+requests:\\n\\s+cpu: 100m\\n\\s+memory: 32Mi\\n\\s+containers:\\n",
+        ],
+    },
+)
+
+# #1335: the edge's `agent` container (the `agent edge` control plane) has no
+# CPU limit either, so GOMAXPROCS is pinned like the node agent's (#1116)
+# rather than left to follow the node's core count. Envoy is not a Go process:
+# exactly one GOMAXPROCS in the Deployment, on the container that also carries
+# GOMEMLIMIT.
+helm_template_test(
+    name = "aether_edge_gomaxprocs_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+    template_patterns = {
+        "aether/templates/edge-deployment.yaml": [
+            "- name: GOMEMLIMIT\\n\\s+value: \"241591910\"\\n\\s+- name: GOMAXPROCS\\n\\s+value: \"2\"\\n",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "aether_edge_gomaxprocs_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.goMaxProcs=4",
+    ],
+    template_patterns = {
+        "aether/templates/edge-deployment.yaml": [
+            "- name: GOMAXPROCS\\n\\s+value: \"4\"\\n",
+        ],
+    },
+)
+
+# edge.goMaxProcs=0 hands GOMAXPROCS back to the Go runtime: no env var.
+helm_template_absent_test(
+    name = "aether_edge_gomaxprocs_off_test",
+    absent = [
+        "name: GOMAXPROCS",
+    ],
+    chart = ":aether",
+    control = "name: GOMEMLIMIT",
+    opts = [
+        "--show-only",
+        "templates/edge-deployment.yaml",
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.goMaxProcs=0",
+    ],
+)
+
 # #1123: an agent pod start is time the node's proxy spends on no ADS stream.
 # Both of its images are digest-pinned, so they are pulled IfNotPresent (Always
 # only adds a registry round trip per container), and readiness is probed every

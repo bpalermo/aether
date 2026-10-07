@@ -187,6 +187,14 @@ spec:
             - name: GOMEMLIMIT
               value: {{ . | quote }}
             {{- end }}
+            {{- /* #1335: explicit, like the node agent's (#1116) -- this
+                   container has no CPU limit (values.yaml edge.resources), so
+                   the Go runtime would size itself to the node's cores. 0/empty
+                   omits it so the Go runtime picks GOMAXPROCS itself. */}}
+            {{- with .Values.edge.goMaxProcs }}
+            - name: GOMAXPROCS
+              value: {{ . | quote }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 8080
