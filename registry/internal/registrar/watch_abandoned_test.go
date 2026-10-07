@@ -366,3 +366,38 @@ func TestConsumeStream_AbandonedResendLog(t *testing.T) {
 		assert.Contains(t, out, field)
 	}
 }
+
+// TestConsumeStream_AbandonedResendShutdown: a shutdown is never an abandoned
+// resend, whatever error the stream's last Recv returned. A forced resync is
+// classified before the context is looked at, so it needs its own guard; its
+// token is still dropped, as on any DataLoss.
+func TestConsumeStream_AbandonedResendShutdown(t *testing.T) {
+	ends := map[string]error{
+		"forced resync": status.Error(codes.DataLoss, "watch stream overflowed"),
+		"eof":           io.EOF,
+		"unavailable":   status.Error(codes.Unavailable, "connection reset"),
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			filter := []string{"default/a", "default/b"}
+			r, logs := newLoggingRegistry(t, nil)
+			r.SetServiceFilter(filter)
+			var reader *sdkmetric.ManualReader
+			r.metrics, reader = newTestClientMetrics(t)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			got, failure := r.consumeStream(ctx, &fakeWatchStream{
+				events: []*registrarv1.WatchEndpointsResponse{
+					epEvent(registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT, "default/a", "10.0.0.1", ""),
+				},
+				err: end,
+			}, "", r.resumeFor(serviceSet(filter), ""))
+
+			assert.Empty(t, got)
+			assert.NoError(t, failure)
+			assert.Nil(t, counterByReason(t, reader, abandonedMetric), "a shutdown is not counted")
+			assert.NotContains(t, logs.String(), abandonedLog)
+		})
+	}
+}

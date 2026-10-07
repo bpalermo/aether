@@ -1190,9 +1190,11 @@ func (r *RegistrarRegistry) endStream(ctx context.Context, token string, inBatch
 // registrar's watch_starts{resume="resent"} counts both streams, and until
 // this report nothing on the agent said why there were two (#1324).
 func (r *RegistrarRegistry) abandonedResend(ctx context.Context, token, reason string, beforeMarker bool, open streamOpen, received int, openFor time.Duration) {
-	if !beforeMarker || token != "" || reason == "" {
-		// A kept token resumes; an empty reason is our own shutdown, which
-		// stays quiet (#712) and has no next stream.
+	if !beforeMarker || token != "" || reason == "" || ctx.Err() != nil {
+		// A kept token resumes. Our own shutdown stays quiet (#712) and has no
+		// next stream: it is an empty reason, or a cancelled context whatever
+		// the stream's last error was (handleStreamError classifies a forced
+		// resync before it looks at the context).
 		return
 	}
 	r.metrics.resendAbandoned(ctx, reason)
