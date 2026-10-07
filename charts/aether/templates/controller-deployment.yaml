@@ -183,7 +183,7 @@ spec:
               readOnly: true
             {{- end }}
           resources:
-            {{- toYaml .Values.controller.resources | nindent 12 }}
+            {{- include "aether.resources" .Values.controller.resources | nindent 12 }}
       volumes:
         {{- if .Values.controller.webhook.spire }}
         - name: workload-socket

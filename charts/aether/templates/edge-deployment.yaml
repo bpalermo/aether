@@ -246,7 +246,7 @@ spec:
               readOnly: true
             {{- end }}
           resources:
-            {{- toYaml .Values.edge.resources | nindent 12 }}
+            {{- include "aether.resources" .Values.edge.resources | nindent 12 }}
         # Public-facing Envoy. Plain entrypoint (no supervisor): the edge has no
         # node-local state to preserve across restarts.
         - name: envoy
@@ -372,7 +372,7 @@ spec:
               readOnly: true
             {{- end }}
           resources:
-            {{- toYaml .Values.edge.resources | nindent 12 }}
+            {{- include "aether.resources" .Values.edge.resources | nindent 12 }}
       volumes:
         # Pod-local: the agent serves xDS on /run/aether/xds.sock, Envoy dials it.
         - name: xds-sock

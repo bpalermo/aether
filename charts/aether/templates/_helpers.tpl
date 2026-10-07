@@ -70,6 +70,8 @@ the apiserver rejects as a quantity. So `--set <x>.resources.limits.cpu=` (or
 `limits: {cpu: null}` in a values file) means "no CPU limit", exactly like
 leaving the key out, and a `limits:`/`requests:` map left with no entries is
 dropped too. Non-map keys (e.g. `claims`) pass through untouched.
+Every container in this chart renders its resources through this helper
+(#1355): a plain `toYaml` on a resources value brings `cpu: ""` back.
 Usage:
   resources:
     {{- include "aether.resources" .Values.udsCsi.resources | nindent 12 }}

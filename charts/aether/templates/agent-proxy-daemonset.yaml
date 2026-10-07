@@ -199,7 +199,7 @@ spec:
             {{- end }}
           {{- with $authz.resources }}
           resources:
-            {{- toYaml . | nindent 12 }}
+            {{- include "aether.resources" . | nindent 12 }}
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -354,7 +354,7 @@ spec:
             successThreshold: 1
           {{- with .Values.proxy.resources }}
           resources:
-            {{- toYaml . | nindent 12 }}
+            {{- include "aether.resources" . | nindent 12 }}
           {{- end }}
           securityContext:
             privileged: true
