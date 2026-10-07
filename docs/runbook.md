@@ -3813,6 +3813,60 @@ authz, xDS or collector clusters (their h2 peer is not an aether proxy; a gRPC s
 answers frequent PINGs with `GOAWAY too_many_pings`). The kind proof is
 `e2e/eastwest-quic-deadpeer.sh verify-h2`.
 
+### An HTTP/1.1 client gets a reset on a reused keep-alive connection (#1350)
+
+The proxy's HTTP connection managers have two downstream idle timeouts, chosen by who
+the downstream is (Go constants in `agent/internal/xds/proxy/networkfilter.go`; not a
+chart value):
+
+| Listener | Downstream | Idle timeout |
+|---|---|---|
+| mesh inbound (18008, TCP and QUIC; stat prefix `inbound`) | a peer proxy | **5 min** (`peerFacingIdleTimeout`) |
+| per-pod capture chain and per-pod outbound (18001 / 18081; `capture_http`, `outbound_http`) | the pod's application | **1 h** (`appFacingIdleTimeout`) |
+| edge gateway listeners | an external client | **1 h** (`edgeDefaultIdleTimeout`; per-Gateway listeners take `EdgeConfig` `idleTimeout`) |
+
+The rule on the app-facing side: **the server's idle timeout must exceed the client's,
+because HTTP/1.1 has no GOAWAY.** A server that closes an idle kept-alive connection
+cannot tell the client first, so a request the client writes onto that connection at
+the same instant is lost. A client that retries on a reused-connection failure (Go's
+`net/http`, so k6; browsers) hides it; one that does not (an Envoy-based client, many
+plain HTTP/1 pools) reports a reset. With 1 h on the proxy, an ordinary client (idle
+timeout 30-120 s) always closes first. HTTP/2 and HTTP/3 are not affected: the idle
+timeout drains them with a GOAWAY.
+
+The inbound side is the other way round on purpose. Its client is a peer proxy that
+idles its pools out at 30 s (`config.UpstreamIdleTimeout`), so 5 min already exceeds
+it, and it is short because the 1 h default once let a peer's leaked connections pin
+~7k inbound connections on one listener.
+
+Before #1350 both sides had 5 min, and the signature was: one client-side
+`connection_termination` / reset before headers in a few hundred thousand HTTP/1.1
+requests, **no access-log row on either side** (the request never reached the HTTP
+layer), and `envoy_http_capture_http_downstream_cx_idle_timeout_total` ticking on the
+source node within seconds of it. If you see that again:
+
+- On a proxy with the fix, `…_capture_http_downstream_cx_idle_timeout_total` and
+  `…_outbound_http_downstream_cx_idle_timeout_total` should barely move. If they
+  move, either a client really does hold a connection idle for an hour, or the node
+  proxy is under memory pressure: its overload manager (`proxy.overload`, on by
+  default) scales this very timer down toward 2 s between 85 % and 95 % of the heap
+  budget and disables keep-alive at 90 %. Check Envoy's
+  `overload.envoy.overload_actions.reduce_timeouts.scale_percent` and
+  `overload.envoy.overload_actions.disable_http_keepalive.active` first.
+- A load driver or client you control should set its own idle timeout **below** the
+  proxy's, and retry an idempotent request on a reused-connection failure.
+
+The cost of 1 h: a connection an application leaks (opens and never closes or uses)
+stays on the proxy for up to an hour instead of 5 minutes. Nothing caps downstream
+connections per listener; the overload manager above is what reclaims them. Watch
+`envoy_http_capture_http_downstream_cx_active` per node if a workload is suspected of
+leaking.
+
+The gate is `TestDownstreamIdleTimeoutFollowsWhoTheDownstreamIs` in
+`//agent/test/envoy_validate`: it reads both values off the generated config and
+fails on an HTTP connection manager it cannot classify. There is no timing test: with
+a 1 h timeout the race cannot be reproduced in CI.
+
 ### Envoy SIGBUS/SEGV in `QuicConnection` after an h3 cluster removal (#1074)
 
 Symptom: the proxy container restarts with a SIGBUS or SIGSEGV whose backtrace ends in

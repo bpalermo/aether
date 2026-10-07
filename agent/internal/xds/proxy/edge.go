@@ -123,7 +123,7 @@ func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort ui
 		// uses a catch-all "*" domain so port handling is irrelevant for matching; we
 		// deliberately do NOT strip the host-port so the 301 Location preserves the
 		// client's original authority.
-		hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", buildEdgeRedirectRouteConfig())
+		hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", buildEdgeRedirectRouteConfig(), edgeDefaultIdleTimeout)
 		hcm.GetRouteConfig().Name = name // unique inline config name avoids any residual collision
 		// The redirect listener is edge-facing too: apply the same hardening
 		// (use_remote_address, header-underscore rejection, timeouts, h2 caps).
@@ -144,7 +144,7 @@ func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort ui
 	// receives the original ported authority (HTTPRouteHostnameIntersection), so the
 	// port must be ignored for matching but PRESERVED on the forwarded request.
 	routeName := EdgeGatewayRouteName(namespace, gatewayName)
-	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
+	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil, edgeDefaultIdleTimeout)
 	// Geo filters (proposal 028): the reserved-namespace strip + (optionally) the
 	// geoip filter, ahead of routing so HTTPRoute header matches see the emitted
 	// values. xffTrustedHops keeps the HCM's client-address semantics in lockstep
@@ -173,7 +173,7 @@ func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort ui
 func BuildEdgeGatewayHTTPSListener(namespace, gatewayName string, internalPort uint32, tlsSecretNames []string, geoFilters []*http_connection_managerv3.HttpFilter, edgeCfg *configv1.EdgeConfigSpec) *listenerv3.Listener {
 	name := EdgeGatewayListenerName(namespace, gatewayName, internalPort)
 	routeName := EdgeGatewayRouteName(namespace, gatewayName)
-	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
+	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil, edgeDefaultIdleTimeout)
 	prefix := append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, geoFilters...)
 	hcm.HttpFilters = append(prefix, hcm.HttpFilters...)
 	// Envoy edge best-practices from the effective EdgeConfig (proposal 029):
@@ -385,7 +385,7 @@ func BuildEdgeTLSPassthroughListener(port uint32, rules []L4ServiceRoute) *liste
 // presenting one of those SDS-served certs selected by SNI; otherwise the edge
 // serves plain HTTP. Either way the upstream (edge -> pod) hop stays mTLS.
 func BuildEdgeListener(name string, port uint32, tlsSecretNames []string) *listenerv3.Listener {
-	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
+	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil, edgeDefaultIdleTimeout)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
 	// Port-agnostic hostname matching is handled by the route config's
 	// ignore_port_in_host_matching (see BuildEdgeRouteConfiguration), NOT
@@ -415,7 +415,7 @@ func BuildEdgeListener(name string, port uint32, tlsSecretNames []string) *liste
 // request to its https URL (used alongside the TLS listener when downstream TLS
 // is enabled).
 func BuildEdgeRedirectListener(port uint32) *listenerv3.Listener {
-	hcm := buildHTTPConnectionManager(EdgeRedirectListenerName, ReporterSource, "", "", buildEdgeRedirectRouteConfig())
+	hcm := buildHTTPConnectionManager(EdgeRedirectListenerName, ReporterSource, "", "", buildEdgeRedirectRouteConfig(), edgeDefaultIdleTimeout)
 	filterChain := &listenerv3.FilterChain{
 		Name:    EdgeRedirectListenerName,
 		Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
@@ -431,7 +431,10 @@ func BuildEdgeRedirectListener(port uint32) *listenerv3.Listener {
 // listeners are bound (the public listeners move to per-Gateway internal ports
 // under proposal 021 Phase 2, so probing :443 there fails).
 func BuildEdgeReadinessListener(port uint32) *listenerv3.Listener {
-	hcm := buildHTTPConnectionManager(EdgeReadinessListenerName, ReporterSource, "", "", buildEdgeReadinessRouteConfig())
+	// The only downstream is the kubelet's readiness probe, which opens a
+	// connection per probe and never reuses one, so the idle timeout decides
+	// nothing here. Left at the 5 minutes it had before aether#1350.
+	hcm := buildHTTPConnectionManager(EdgeReadinessListenerName, ReporterSource, "", "", buildEdgeReadinessRouteConfig(), peerFacingIdleTimeout)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
 	filterChain := &listenerv3.FilterChain{
 		Name:    EdgeReadinessListenerName,

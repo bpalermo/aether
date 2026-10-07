@@ -139,7 +139,7 @@ func buildInboundCleartextFilterChain(cniPod *cniv1.CNIPod, emitStatsPod bool, e
 	defaultPort := AppPortFromPod(cniPod)
 	rc := buildInboundRouteConfiguration(AppClusterName(cniPod, defaultPort))
 	applyInboundFilter(rc, inboundFilter)
-	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc)
+	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc, peerFacingIdleTimeout)
 	filters := []*http_connection_managerv3.HttpFilter{
 		buildLivenessHealthCheckFilter(),
 		buildReadinessHealthCheckFilter(HealthProbeClusterName(cniPod)),
@@ -286,7 +286,7 @@ func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16,
 func buildInboundHCM(cniPod *cniv1.CNIPod, chainPort uint16, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *http_connection_managerv3.HttpConnectionManager {
 	rc := buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort))
 	applyInboundFilter(rc, inboundFilter)
-	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc)
+	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc, peerFacingIdleTimeout)
 	// Liveness/readiness are answered locally before the router; everything else
 	// passes through to the pod's application. The stats filter sits after the
 	// health-check filters (so locally-answered probe requests are not counted)

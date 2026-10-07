@@ -1808,6 +1808,70 @@ func ListenersNamingRetiredSourceKey(bootstrapJSON []byte) ([]string, int, error
 	return naming, len(listeners), nil
 }
 
+// HCMIdleTimeout is one HTTP connection manager in a generated bootstrap and
+// the downstream idle timeout it carries.
+type HCMIdleTimeout struct {
+	// Listener and Chain name where the HCM sits; StatPrefix is the HCM's own
+	// stat_prefix, which is what names its kind ("inbound", "capture_http",
+	// "outbound_http", an edge listener's name).
+	Listener, Chain, StatPrefix string
+	// Set is false when common_http_protocol_options.idle_timeout is absent,
+	// i.e. when the HCM runs on Envoy's default instead of a stated value.
+	Set bool
+	// Idle is the stated timeout; zero when !Set.
+	Idle time.Duration
+}
+
+// HCMIdleTimeouts returns every HTTP connection manager on every static
+// listener of a generated bootstrap (filter chains and default chain) with its
+// downstream idle timeout (aether#1350).
+//
+// It reads the bytes handed to `envoy --mode validate`, so the values are the
+// ones Envoy accepted. Envoy accepts ANY idle timeout: a peer-facing value on
+// an app-facing listener validates, serves, and resets one HTTP/1.1 request in
+// a few hundred thousand, so this is a property only an assertion can hold.
+func HCMIdleTimeouts(bootstrapJSON []byte) ([]HCMIdleTimeout, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+	var out []HCMIdleTimeout
+	for _, l := range bs.GetStaticResources().GetListeners() {
+		chains := append([]*listenerv3.FilterChain{}, l.GetFilterChains()...)
+		if fc := l.GetDefaultFilterChain(); fc != nil {
+			chains = append(chains, fc)
+		}
+		for _, fc := range chains {
+			found, err := chainHCMIdleTimeouts(l.GetName(), fc)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, found...)
+		}
+	}
+	return out, nil
+}
+
+// chainHCMIdleTimeouts is HCMIdleTimeouts for one filter chain.
+func chainHCMIdleTimeouts(listener string, fc *listenerv3.FilterChain) ([]HCMIdleTimeout, error) {
+	var out []HCMIdleTimeout
+	for _, f := range fc.GetFilters() {
+		hcm := &http_connection_managerv3.HttpConnectionManager{}
+		if f.GetTypedConfig() == nil || !f.GetTypedConfig().MessageIs(hcm) {
+			continue
+		}
+		if err := f.GetTypedConfig().UnmarshalTo(hcm); err != nil {
+			return nil, fmt.Errorf("%s/%s: unmarshal HCM: %w", listener, fc.GetName(), err)
+		}
+		e := HCMIdleTimeout{Listener: listener, Chain: fc.GetName(), StatPrefix: hcm.GetStatPrefix()}
+		if d := hcm.GetCommonHttpProtocolOptions().GetIdleTimeout(); d != nil {
+			e.Set, e.Idle = true, d.AsDuration()
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
 // marshalBootstrap serialises a Bootstrap proto to protojson, stripping
 // custom extensions that require the proxy-workspace Envoy binary.
 func marshalBootstrap(bs *bootstrapv3.Bootstrap) ([]byte, error) {

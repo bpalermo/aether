@@ -44,7 +44,7 @@ func BuildEdgeGatewayHTTP3Listener(namespace, gatewayName string, internalPort u
 	name := EdgeGatewayH3ListenerName(namespace, gatewayName, internalPort)
 	routeName := EdgeGatewayRouteName(namespace, gatewayName)
 
-	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
+	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil, edgeDefaultIdleTimeout)
 	hcm.CodecType = http_connection_managerv3.HttpConnectionManager_HTTP3
 	hcm.Http3ProtocolOptions = &corev3.Http3ProtocolOptions{}
 	prefix := append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, geoFilters...)

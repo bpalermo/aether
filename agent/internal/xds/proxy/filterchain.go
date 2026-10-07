@@ -22,7 +22,7 @@ import (
 // sourceSpiffeID is the originating pod's SPIFFE ID, stamped into filter state
 // alongside the netns (see SourceIdentityCertMapperFilterStateKey).
 func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
-	hcm := buildHTTPConnectionManager("outbound_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil)
+	hcm := buildHTTPConnectionManager("outbound_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil, appFacingIdleTimeout)
 
 	// strip_any_host_port stays OFF: the authority port is a first-class routing
 	// selector (FQDN:port → that port's cluster, proposal 005). The default-port
