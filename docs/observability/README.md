@@ -87,6 +87,35 @@ These expressions have **promtool unit tests** in the GitOps repo
 (`clusters/talos-main/prometheus/rules_test.yaml`, run by CI), including a node whose
 `chained` series is omitted entirely — the case `absent()` misses.
 
+## Registrar snapshot divergence (`registrar-alerts.yml`)
+
+Every registrar replica serves an endpoint snapshot listed from etcd at one store
+revision, and the listing is a pure function of that revision. Two replicas at the same
+`aether_registrar_snapshot_revision` must therefore report the same `content_hash` on
+`aether_registrar_snapshot_content` (#1193).
+
+| Alert | Severity | Catches |
+|---|---|---|
+| `AetherRegistrarSnapshotDiverged` | warning | two replicas at one revision serving different endpoint sets, with no write-behind intent pending |
+
+### Why it does not count hashes over the bare selector
+
+`content_hash` is a label, so a content change ends one series and starts another. The
+registrar stops exporting the old one, but OTLP has no staleness marker, so Prometheus
+returns the old series' last sample for its 5-minute lookback. For those 5 minutes every
+replica shows two hashes, and `count by (content_hash) (...)` reads that as a divergence
+(#1322: 108 of 1,920 samples on a soak with none). The rule keeps, per replica, only the
+content series whose `timestamp()` is the newest, and compares replicas per revision.
+The file's comments walk through the expression, and `docs/runbook.md` ("Stored vs in
+place vs applied") has the query for reading the pairs by hand.
+
+Its promtool tests are in the GitOps repo too: same revision and same hash (quiet), same
+revision and different hash (fires), a content change with the old series stale but
+inside the lookback (quiet, and the old expression is pinned to return a sample there),
+a replica one revision behind (quiet), and a pending write-behind intent (quiet).
+
+etcd backend only: the kubernetes backend reports no revision.
+
 ## Installing
 
 There is **no Prometheus operator** on `talos-main` (no `PrometheusRule` CRD) and the
@@ -100,6 +129,7 @@ serverFiles:
     groups:
       # contents of mesh-dns-alerts.yml
       # contents of agent-cni-alerts.yml
+      # contents of registrar-alerts.yml
 ```
 
 `prometheus.yml`'s `rule_files` **already** lists `/etc/config/alerting_rules.yml` — the

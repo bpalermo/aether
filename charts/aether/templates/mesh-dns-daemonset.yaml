@@ -193,26 +193,9 @@ spec:
           {{- /* #1253: an empty limits.cpu (or requests.cpu) is dropped rather than
                  rendered as `cpu: ""`, which the apiserver rejects as a quantity,
                  so `--set agent.meshDnsDaemon.resources.limits.cpu=` means "no CPU
-                 limit" just like leaving the key out. */}}
-          {{- $res := dict }}
-          {{- range $kind, $list := (.Values.agent.meshDnsDaemon.resources | default dict) }}
-          {{- if kindIs "map" $list }}
-          {{- $kept := dict }}
-          {{- range $name, $q := $list }}
-          {{- if not (or (kindIs "invalid" $q) (eq (toString $q) "")) }}
-          {{- $_ := set $kept $name $q }}
-          {{- end }}
-          {{- end }}
-          {{- if $kept }}
-          {{- $_ := set $res $kind $kept }}
-          {{- end }}
-          {{- else if $list }}
-          {{- /* non-map keys (e.g. `claims`) pass through untouched */}}
-          {{- $_ := set $res $kind $list }}
-          {{- end }}
-          {{- end }}
+                 limit" just like leaving the key out (aether.resources). */}}
           resources:
-            {{- toYaml $res | nindent 12 }}
+            {{- include "aether.resources" .Values.agent.meshDnsDaemon.resources | nindent 12 }}
       volumes:
         - name: cni-registry-dir
           hostPath:
