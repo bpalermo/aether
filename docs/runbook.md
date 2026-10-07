@@ -3430,22 +3430,13 @@ aether_registrar_store_revision - aether_registrar_snapshot_revision
 max(aether_registrar_store_revision) - min(aether_agent_registry_last_version)
 
 # divergence: more than one endpoint set at ONE revision, with no write-behind
-# intent pending. MUST be empty. Each replica's current hash is the content
-# series with the newest sample (see "Divergence rule" below for why).
+# intent pending. MUST be empty. See "Divergence rule" below.
 count by (job, revision) (
-  count_values by (job, content_hash) (
-    "revision",
-    aether_registrar_snapshot_revision
-    * ignoring (content_hash) group_right ()
-    (
-      aether_registrar_snapshot_content
-      and
-      (
-        timestamp(aether_registrar_snapshot_content)
-        == ignoring (content_hash) group_left ()
-        max without (content_hash) (timestamp(aether_registrar_snapshot_content))
-      )
-    )
+  count_values by (job, revision) (
+    "hash",
+    aether_registrar_snapshot_content_hash
+    * ignoring (revision) group_left (revision)
+    count_values without () ("revision", aether_registrar_snapshot_revision)
   )
 ) > 1
 unless on (job) (max by (job) (aether_registrar_writebehind_queue_depth) > 0)
@@ -3488,73 +3479,132 @@ identical contents). An agent older than #1241 handles a marker the way it
 handles any `SNAPSHOT_COMPLETE` after its first: it adopts the version and
 re-derives its xDS from an unchanged cache (one debounced refresh per sync cycle
 that moved the version, until the agent DaemonSet has rolled). Alert on this
-line only once both are on #1241; `content_hash` agreement (below) is alertable
+line only once both are on #1241; content-hash agreement (below) is alertable
 regardless.
 
 **Divergence rule.** Two replicas reporting the **same**
 `aether_registrar_snapshot_revision`, with no write-behind intent pending
 (`aether_registrar_writebehind_queue_depth == 0` on both), must report the
-**same** `content_hash` label on `aether_registrar_snapshot_content`. The same
-revision with a different `content_hash` is a bug: the listing is a pure function
-of the revision, so two replicas that disagree are not serving what the store
-holds. The registrar exports exactly one `aether_registrar_snapshot_content`
-series per replica, the current hash, and stops exporting a superseded one.
+**same** value of `aether_registrar_snapshot_content_hash`. The same revision
+with a different hash is a bug: the listing is a pure function of the revision,
+so two replicas that disagree are not serving what the store holds.
 
-**Prometheus still shows the superseded hash for 5 minutes (#1322).** The hash is
-a label, so a content change ends one series and starts another. OTLP carries no
-staleness marker for a series that is no longer exported, so an instant query
-keeps returning the old series' last sample for the whole lookback window. After
-every content change each replica therefore shows two hashes for 5 minutes. Any
-expression that counts hashes over the bare selector reads that as a divergence.
-The expression this section carried until #1322 did:
+`aether_registrar_snapshot_content_hash` (#1329) carries the hash as the gauge's
+**value**: the first 13 hex digits of the `<hash>` in the snapshot version, as an
+integer. That is 52 bits. A float64 holds every integer up to 2^53 exactly, so 53
+would fit; 52 is a whole number of hex digits, which keeps the value readable
+against a version string:
 
-```promql
-# WRONG: do not use. True for 5 minutes after every content change.
-count(count by (content_hash) (aether_registrar_snapshot_content)) > 1
-  and on() (max(aether_registrar_snapshot_revision) == min(aether_registrar_snapshot_revision))
-  and on() (max(aether_registrar_writebehind_queue_depth) == 0)
+```sh
+printf '%013x\n' 20015998343868   # -> 0123456789abc, the start of <hash>
 ```
 
-On the 8 h soak of 2026-10-06 (66 revisions, no divergence) it returned a sample
-at 108 of the 1,920 15-second steps (386 for its first two clauses alone), and
-the expression above returned none.
-It had a second fault: `aether_registrar_writebehind_queue_depth` is recorded only
-when an intent is queued or flushed, so on a registrar that has never queued one
-the series is missing, the last clause is empty, and the whole expression can
-never be true.
+The 12 bits it drops do not matter for this use. The gauge answers one question,
+"do the replicas at this revision agree", between a handful of replicas; two
+replicas serving different contents report the same value with probability
+2^-52 (about 2.2e-16). It is not an identifier to look contents up by, and the
+resume token still compares all 16 digits. Each replica has one series, with no
+label that changes, in every version form (`<rev>.<hash>`, `<rev>+<hash>`,
+`hash:<hash>`).
 
-How the expression above avoids both:
+How the expression above works:
 
-- `timestamp(content) == max without (content_hash) (timestamp(content))` keeps,
-  per replica, only the content series whose sample is the newest. The
-  superseded series is inside the lookback, but its last sample is older. A
-  replica is "every label except `content_hash`", so the expression does not
-  depend on the name of the replica label (`node` carries the pod name on
-  talos-main).
-- Multiplying by `aether_registrar_snapshot_revision` gives that series the
-  replica's revision as its value, and `count_values` turns the value into a
-  `revision` label. The outer `count by (job, revision)` is then the number of
-  distinct hashes at one revision. A replica that lags is at another revision
-  and is not compared.
-- `unless ... > 0` is quiet only when some replica reports a pending intent. A
-  missing queue-depth series does not disable the check.
+- `count_values without () ("revision", aether_registrar_snapshot_revision)`
+  turns each replica's revision into a `revision` label. `without ()` keeps all
+  of the series' labels, so the expression does not depend on the name of the
+  replica label (`node` carries the pod name on talos-main).
+- Multiplying the hash gauge by that (`ignoring (revision) group_left
+  (revision)`) gives one series per replica: value = hash, labelled with the
+  replica's revision. A replica with no revision has no match and drops out.
+- `count_values by (job, revision) ("hash", ...)` is one series per distinct
+  hash at one revision, and the outer `count` is how many there are. A replica
+  that lags is at another revision and is not compared.
+- `unless ... > 0` is quiet only when some replica reports a pending intent.
+  `aether_registrar_writebehind_queue_depth` is recorded only when an intent is
+  queued or flushed, so on a registrar that never queued one the series is
+  missing; `unless` on a missing series changes nothing, where `and on() (... ==
+  0)` would have made the expression unable to fire.
 
-To read the pairs by hand, use the same filter:
+**Timestamps do not matter to it.** The registrar observes the revision and the
+hash in one callback from one read of the snapshot, so the pair in an export
+always belongs to the same contents. The OTel SDK stamps each instrument's data
+point separately (`timestamp()` of two registrar gauges differed by at most 4 ms
+over 24 h on talos-main), both travel in one OTLP request, the collector's batch
+processor does not split a request, and Prometheus's OTLP receiver commits a
+request as one append. The expression matches the two metrics on labels, so it
+needs none of that to be exact. A pipeline that did deliver them separately
+could pair a new revision with the previous hash for one evaluation, on one
+replica; the alert's `for: 3m` (kept from #1328 for the RPC-between-syncs
+window) covers it.
+
+To read the pairs by hand:
 
 ```promql
-# one row per replica: value = revision, content_hash = what it serves there
-aether_registrar_snapshot_revision
-  * ignoring (content_hash) group_right ()
-  (aether_registrar_snapshot_content
-   and (timestamp(aether_registrar_snapshot_content)
-        == ignoring (content_hash) group_left ()
-        max without (content_hash) (timestamp(aether_registrar_snapshot_content))))
+# one row per replica: value = the hash, revision label = where it serves it
+aether_registrar_snapshot_content_hash
+  * ignoring (revision) group_left (revision)
+  count_values without () ("revision", aether_registrar_snapshot_revision)
 ```
 
 The alert is `AetherRegistrarSnapshotDiverged`
 (`docs/observability/registrar-alerts.yml`, `for: 3m`). Its promtool tests are in
-the GitOps repo (`clusters/talos-main/prometheus/rules_test.yaml`), one of which
-is a content change with the old series stale but inside the lookback.
+the GitOps repo (`clusters/talos-main/prometheus/rules_test.yaml`).
+
+**Deprecated: `aether_registrar_snapshot_content{content_hash}`.** Until #1329
+the hash was a label on an info gauge (always 1). A content change ended one
+series and started another, OTLP carries no staleness marker for a series that
+is no longer exported, and Prometheus kept returning the superseded hash for its
+5-minute lookback, so each replica showed two hashes after every change (#1322).
+Counting hashes over the bare selector read that as a divergence: on the 8 h
+soak of 2026-10-06 (66 revisions, none diverged) it was true at 108 of 1,920
+15-second steps. #1328 worked around it by keeping, per replica, the series
+whose `timestamp()` is the newest. The value gauge has no label to go stale and
+needs no such filter.
+
+The labelled metric is still exported by the release that introduced the value
+gauge and is removed in the release after it. That one release exists for the
+upgrade. A rule on the new metric cannot see a replica still on the older image
+(it would compare the new replicas among themselves and miss a divergence
+against the old one), so while both images can run, keep the #1328 expression as
+a second arm. Both arms return `{job, revision}`, so `or` yields one alert:
+
+```promql
+(
+  count by (job, revision) (
+    count_values by (job, revision) (
+      "hash",
+      aether_registrar_snapshot_content_hash
+      * ignoring (revision) group_left (revision)
+      count_values without () ("revision", aether_registrar_snapshot_revision)
+    )
+  ) > 1
+  or
+  # transitional (#1328): every replica, old image or new, still exports this
+  count by (job, revision) (
+    count_values by (job, content_hash) (
+      "revision",
+      aether_registrar_snapshot_revision
+      * ignoring (content_hash) group_right ()
+      (
+        aether_registrar_snapshot_content
+        and
+        (
+          timestamp(aether_registrar_snapshot_content)
+          == ignoring (content_hash) group_left ()
+          max without (content_hash) (timestamp(aether_registrar_snapshot_content))
+        )
+      )
+    )
+  ) > 1
+)
+unless on (job) (max by (job) (aether_registrar_writebehind_queue_depth) > 0)
+```
+
+Order of work: deploy that rule (it is correct against any mix of images),
+upgrade the registrar, then drop the second arm, and only then take the release
+that removes `aether_registrar_snapshot_content`. Check before dropping it:
+`count(aether_registrar_snapshot_content_hash) == count(aether_registrar_snapshot_revision)`
+(every replica that reports a revision reports the value gauge).
 
 Notes:
 
@@ -3565,13 +3615,15 @@ Notes:
   the list RV moves on every write anywhere in the cluster. So that backend does
   not implement `registry.RevisionedLister`, and `store_revision`,
   `snapshot_revision` and the agent's `last_version` are not reported. The
-  content-hash gauge is still exported, but the divergence expression above
+  content-hash gauge is still exported there, but the divergence expression above
   returns nothing there: it compares replicas at one revision, and there is no
   revision. Two kubernetes-backend replicas can also differ for a moment
   legitimately, because health derives from each replica's clock. Read each
-  replica's current hash with the newest-sample filter above (drop the
-  revision multiplication) and treat only a disagreement that persists across
-  several sync cycles as a finding.
+  replica's current hash straight from
+  `aether_registrar_snapshot_content_hash` (it is reported on this backend too:
+  it names the contents, with or without a revision) and treat only a
+  disagreement that persists across several sync cycles as a finding. It is not
+  alerted on.
 - `aether_registrar_snapshot_version` keeps its pre-#1193 series name but is now
   the snapshot **generation**: a per-process count of content changes. It moves
   only when the served endpoint set changes, and it is not comparable across
