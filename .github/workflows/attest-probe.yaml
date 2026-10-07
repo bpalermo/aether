@@ -29,16 +29,14 @@ jobs:
       CHART: quay.io/aethermesh/chart-crds
       CHART_DIGEST: sha256:667b64f33cc12d3f0048906ca25ead2d1fd70df6607255ee448ab8a42065d706
       IMAGE: quay.io/aethermesh/agent
+      IMAGE_DIGEST: sha256:ac606f1ef1895a2461d14e85e98dcf51e7f2f94537d2ca52b58c51a81afa5f20
       PREDICATE_TYPE: https://aethermesh.dev/attestation/probe/v1
     steps:
       - name: Subjects
         run: |
           set -euo pipefail
-          image_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${IMAGE}:latest")"
-          [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "IMAGE_DIGEST=${image_digest}" >> "$GITHUB_ENV"
           {
-            echo "${image_digest#sha256:}  ${IMAGE}"
+            echo "${IMAGE_DIGEST#sha256:}  ${IMAGE}"
             echo "${CHART_DIGEST#sha256:}  ${CHART}"
           } > subjects.sha256
           cat subjects.sha256
