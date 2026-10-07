@@ -221,26 +221,58 @@ func buildSetFilterState(objectKey, factoryKey string, inlineStringFormatString 
 	return networkFilter("envoy.filters.network.set_filter_state", filter)
 }
 
-// downstreamIdleTimeout bounds idle downstream connections on the per-pod HCMs
-// (inbound mesh mTLS conns from peer proxies, and app→proxy conns on the
-// outbound listener). It is the server-side backstop to the upstream
-// config.UpstreamIdleTimeout: peers reclaim their idle conns at 30s, so this
-// only catches clients that don't (Envoy's default is 1 hour, which let a
-// peer's leaked upstream conns pin ~7k inbound conns per listener). Kept well
-// above the upstream timeout so the client side always disconnects first.
-const downstreamIdleTimeout = 5 * time.Minute
+// The HTTP connection managers' downstream idle timeout
+// (common_http_protocol_options.idle_timeout) depends on WHO the downstream is.
+// One constant used to serve both sides, and it was right for only one of them
+// (aether#1350).
+const (
+	// peerFacingIdleTimeout is for an HCM whose downstream is a PEER PROXY: the
+	// per-pod mesh inbound (TCP and QUIC, mTLS or cleartext). It is the
+	// server-side backstop to the upstream config.UpstreamIdleTimeout: peers
+	// reclaim their idle connections at 30s, so this only catches peers that do
+	// not (Envoy's default is 1 hour, which let a peer's leaked upstream
+	// connections pin ~7k inbound connections per listener). Kept well above
+	// the upstream timeout so the client side always disconnects first.
+	peerFacingIdleTimeout = 5 * time.Minute
+
+	// appFacingIdleTimeout is for an HCM whose downstream is the LOCAL
+	// APPLICATION: the per-pod capture chain (capture_http) and the per-pod
+	// outbound listener (outbound_http). Here the proxy is the server of a
+	// client it does not control, and the rule is that the server's idle
+	// timeout must EXCEED the client's: HTTP/1.1 has no GOAWAY, so a request
+	// written onto a kept-alive connection the proxy is closing at that instant
+	// is lost, and a client that does not retry on a reused-connection failure
+	// sees a reset (1 request in 270,000 under an Envoy-based load driver,
+	// aether#1350). Ordinary clients idle their connections out after 30-120s;
+	// the ones 5 minutes did not exceed are those that keep a spare connection
+	// for as long as the server lets them.
+	//
+	// 1 hour is Envoy's own default, stated explicitly so that it is a decision
+	// and a test can pin it. The cost: a connection an application leaks lives
+	// on the proxy for up to an hour instead of 5 minutes. Nothing caps
+	// downstream connections per listener; the node proxy's overload manager
+	// (chart, proxy.overload) is what reclaims them under memory pressure, by
+	// scaling this very timer down to 2s (reduce_timeouts,
+	// HTTP_DOWNSTREAM_CONNECTION_IDLE) and disabling keep-alive.
+	appFacingIdleTimeout = time.Hour
+)
 
 // buildHTTPConnectionManager creates an HTTP connection manager for processing HTTP traffic.
 // It includes a router HTTP filter and uses the provided route configuration.
 // If routeConfig is nil, routes will be retrieved via RDS. reporter tags the OTel
 // access logger (ReporterSource for egress, ReporterDestination for inbound); the
 // logger is attached only when access logging is enabled (buildAccessLog → nil).
-func buildHTTPConnectionManager(name, reporter, podName, podNamespace string, routeConfig *routev3.RouteConfiguration) *http_connection_managerv3.HttpConnectionManager {
+//
+// idleTimeout is the downstream connection idle timeout. It has no default on
+// purpose: the right value depends on who the downstream is, so every caller
+// says which (peerFacingIdleTimeout, appFacingIdleTimeout, or the edge's own
+// edgeDefaultIdleTimeout).
+func buildHTTPConnectionManager(name, reporter, podName, podNamespace string, routeConfig *routev3.RouteConfiguration, idleTimeout time.Duration) *http_connection_managerv3.HttpConnectionManager {
 	return &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: name,
 		CodecType:  http_connection_managerv3.HttpConnectionManager_AUTO,
 		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{
-			IdleTimeout: durationpb.New(downstreamIdleTimeout),
+			IdleTimeout: durationpb.New(idleTimeout),
 		},
 		AccessLog: buildAccessLog(reporter, podName, podNamespace),
 		Tracing:   buildTracing(),

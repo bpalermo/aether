@@ -79,6 +79,7 @@ go_test(
         "ads_reconnect_test.go",
         "capture_transparent_test.go",
         "identity_test.go",
+        "idle_timeout_test.go",
         "l4_observability_test.go",
         "validate_test.go",
     ],

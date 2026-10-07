@@ -119,6 +119,7 @@ go_test(
         "healthgateway_test.go",
         "http3_test.go",
         "httpfilter_test.go",
+        "idletimeout_test.go",
         "inbound_port_test.go",
         "inboundready_test.go",
         "inboundtcp_test.go",
@@ -222,6 +223,7 @@ go_test(
         "ingress_quic_test.go",
         "quic_outbound_test.go",
         "l4observability_test.go",
+        "idletimeout_test.go",
     ],
     deps = [
         "//agent/internal/xds/config",

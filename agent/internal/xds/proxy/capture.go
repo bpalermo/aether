@@ -377,7 +377,7 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService, sourceSpiffeID strin
 // In scoped (non-redirect-all) mode the chain stays a catch-all: only mesh
 // ClusterIPs are captured (all cleartext HTTP) and there is no passthrough fallback.
 func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, scopeToCleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
-	hcm := buildHTTPConnectionManager("capture_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil)
+	hcm := buildHTTPConnectionManager("capture_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil, appFacingIdleTimeout)
 
 	prefix := []*http_connection_managerv3.HttpFilter{
 		readinessHttpFilter(),
