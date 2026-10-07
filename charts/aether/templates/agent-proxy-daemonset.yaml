@@ -94,6 +94,11 @@ spec:
           volumeMounts:
             - name: supervisor-bin
               mountPath: /opt/aether
+          {{- /* #1344: a request and no CPU limit (it used to render no
+                 resources at all). An empty limits.cpu renders no limit, just
+                 like leaving the key out (aether.resources). */}}
+          resources:
+            {{- include "aether.resources" .Values.proxy.supervisor.resources | nindent 12 }}
         {{- if .Values.proxy.authzSidecar.enabled }}
         {{- $authz := .Values.proxy.authzSidecar }}
         {{- $authzDefaultProbe := and $authz.startupProbe.enabled (empty $authz.startupProbe.override) }}
