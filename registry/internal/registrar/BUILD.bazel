@@ -36,6 +36,7 @@ go_test(
         "metrics_test.go",
         "registrar_test.go",
         "version_marker_test.go",
+        "watch_abandoned_test.go",
         "watch_drain_test.go",
         "watch_filter_test.go",
         "watch_flap_test.go",
