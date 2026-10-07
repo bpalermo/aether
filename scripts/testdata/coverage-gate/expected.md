@@ -33,3 +33,14 @@ If the drop is legitimate (deleting well-tested code lowers the percentage too),
 
 2 changed path(s) are in neither report (tests, non-Go files, generated code, or files excluded by build constraints).
 
+### Largest per-file drops
+
+The files whose covered-line count fell most between the baseline and this pull request, whatever the diff touched (a test disabled in a BUILD file changes no Go file). `removed`: the file is no longer in the report.
+
+| File | Baseline covered / lines | Covered / lines | Covered lines |
+| --- | ---: | ---: | ---: |
+| `agent/gone.go` | 4 / 4 | removed | -4 |
+| `agent/a.go` | 8 / 10 | 7 / 10 | -1 |
+| `legacy/old.go` | 1 / 2 | removed | -1 |
+| **3 file(s)** | | | **-6** |
+
