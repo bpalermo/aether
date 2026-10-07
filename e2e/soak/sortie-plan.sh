@@ -27,16 +27,21 @@
 #                       does not resolve names). Omitted: no stats block.
 #   --floor-pct P       2xx rate floor, percent of the planned rate (99)
 #   --scenario NAME     scenario name = report label prefix = statsd level (mesh)
-#   --idle-strategy S   Nighthawk's sequencer idle strategy: SLEEP (default),
-#                       POLL or SPIN. See proposal 042, "CPU and memory", before
-#                       changing it.
+#   --idle-strategy S   Nighthawk's sequencer idle strategy: WAIT (default),
+#                       SLEEP, POLL or SPIN. WAIT blocks a worker until its next
+#                       request is due (sortie 94cf103 and newer); the other
+#                       three never block and cost 0.2 to 1 core per worker
+#                       thread whatever the rate. See proposal 042, "CPU and
+#                       memory", before changing it.
 #   --max-pending N     Nighthawk's --max-pending-requests per worker: how many
 #                       due requests may wait for a connection before the next
-#                       is refused as pool_overflow (16). It is what lets the
-#                       engine run under its CPU limit: a throttled worker
-#                       releases the requests that came due while it was off
-#                       CPU together, and with the engine's default queue those
-#                       were refused (proposal 042, "CPU and memory").
+#                       is refused as pool_overflow. Omitted by default: the
+#                       engine's own queue. It was what let the engine hold its
+#                       rate under a CPU limit while it could only SLEEP; under
+#                       WAIT nothing throttles the engine, and a pool_overflow
+#                       is to be seen, not queued away.
+#   --no-latency        leave the two latency carriers out of the thresholds
+#                       (see the template at the end of this file).
 #
 # Needs bash and awk only: //e2e/soak:harness_test runs it offline.
 set -uo pipefail
@@ -52,8 +57,9 @@ DNS=""
 STATSD=""
 FLOOR_PCT=99
 SCENARIO=mesh
-IDLE=SLEEP
-MAX_PENDING=16
+IDLE=WAIT
+MAX_PENDING=""
+LATENCY=1
 # One execution per target runs at once on every engine; the chart's
 # engine.maxConcurrentExecutions (sortie-values.yaml) must cover the list.
 MAX_TARGETS=16
@@ -89,6 +95,7 @@ while [ $# -gt 0 ]; do
 		esac
 		shift 2
 		;;
+	--no-latency) LATENCY=0 && shift ;;
 	*) die "unknown option '$1'" ;;
 	esac
 done
@@ -158,10 +165,12 @@ esac
 case "$SCENARIO" in
 '' | *[!a-z0-9_]*) die "--scenario must be [a-z0-9_], got '$SCENARIO'" ;;
 esac
-is_pos_int "$MAX_PENDING" || die "--max-pending must be a positive integer, got '$MAX_PENDING'"
+if [ -n "$MAX_PENDING" ]; then
+	is_pos_int "$MAX_PENDING" || die "--max-pending must be a positive integer, got '$MAX_PENDING'"
+fi
 case "$IDLE" in
-SLEEP | POLL | SPIN) ;;
-*) die "--idle-strategy must be SLEEP, POLL or SPIN, got '$IDLE'" ;;
+WAIT | SLEEP | POLL | SPIN) ;;
+*) die "--idle-strategy must be WAIT, SLEEP, POLL or SPIN, got '$IDLE'" ;;
 esac
 if [ -n "$STATSD" ]; then
 	printf '%s\n' "$STATSD" | awk -F'[.:]' '
@@ -204,7 +213,9 @@ scenarios:
     pool: nodes
     protocol: http1
     concurrency: "$CONCURRENCY"
-    max_pending_requests: $MAX_PENDING
+EOF
+[ -n "$MAX_PENDING" ] && echo "    max_pending_requests: $MAX_PENDING"
+cat <<EOF
     headers:
       - "User-Agent: aether-soak-sortie"
     executor:
@@ -213,22 +224,20 @@ scenarios:
       duration: $DURATION
       per_backend: true
       open_loop: true
-    # Nighthawk's sequencer SPINS between requests by default: one core per
-    # worker thread, eight per node for this plan. SLEEP hands the core back.
+    # Between requests a Nighthawk worker thread SPINS by default: one core per
+    # worker, eight per node for this plan, whatever the rate. WAIT blocks until
+    # the rate limiter says the next request is due (waking at least every 5 ms
+    # to see whether the run should end), so eight workers at 60 rps cost tens
+    # of millicores. sortie has no schema field for it; it goes through the
+    # template.
+    #
+    # Nothing else is templated. sortie turns Nighthawk's default failure
+    # predicates off itself (an execution goes the distance: a 503 is a number
+    # in the report, not the end of that target's load), so the plan no longer
+    # lifts them.
     nighthawk_template:
       sequencer_idle_strategy:
         value: $IDLE
-      # Nighthawk ENDS an execution at the first http_4xx, http_5xx,
-      # pool_connection_failure or stream_reset (its default failure
-      # predicates), and the report then carries an error and no counters: one
-      # 503 during a roll would stop that target for the rest of the soak and
-      # hide what it was. A soak counts failures; the thresholds below judge
-      # them. These limits are never reached.
-      failure_predicates:
-        benchmark.http_4xx: 1000000000000
-        benchmark.http_5xx: 1000000000000
-        benchmark.pool_connection_failure: 1000000000000
-        benchmark.stream_resets: 1000000000000
     targets:
 EOF
 printf '%s\n' "$SHARES" | awk -F'\t' '{ printf "      - {name: %s, url: \"%s\", weight: %d}  # %d rps per node\n", $1, $3, $2, $2 }'
@@ -244,7 +253,16 @@ cat <<EOF
       - "counter:benchmark.pool_overflow == 0"
       # $FLOOR_PCT% of the smallest share x $BACKENDS nodes.
       - "rate:benchmark.http_2xx >= $FLOOR"
-      # Not a gate: it puts the pool's 2xx total into the JSON report, which
-      # otherwise carries no request count.
-      - "counter:benchmark.http_2xx > 0"
 EOF
+if [ "$LATENCY" = 1 ]; then
+	cat <<EOF
+      # Latency CARRIERS, not gates. The JSON report holds counters (totals,
+      # and results per backend) but no statistic; one gets into it only as a
+      # threshold's "actual", one value per backend. A bound of a minute is not
+      # reached by a mesh that answers at all, and one that does not has failed
+      # the rate floor long before. sortie-gate.sh prints the values and judges
+      # nothing by them.
+      - "latency_2xx.p50 < 60s"
+      - "latency_2xx.p99 < 60s"
+EOF
+fi

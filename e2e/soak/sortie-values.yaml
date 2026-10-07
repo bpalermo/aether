@@ -5,19 +5,25 @@
 # values that belong to a run on the command line: the plan (--set-file), the
 # report's file name, and job.enabled. Nothing here is per run.
 #
-# Pinned by DIGEST, both images. The chart pins the driver image itself but
-# names the engine by tag; the digests below are the multi-arch indexes of
-#   quay.io/sortie/sortie:dev-b71b37ea7e7e02779b0bcf0592fb46b8386a62fc
-#   quay.io/sortie/engine:dev-b71b37ea7e7e02779b0bcf0592fb46b8386a62fc
-# verified 2026-10-06 with cosign v3.0.6 (index and both per-arch manifests):
+# Pinned by DIGEST, all three: the two images below and the chart (run.sh,
+# SORTIE_CHART_DIGEST). They are sortie 94cf1035d7aa7d1d36d86866e41d653ff2fa5c02,
+# chart version 0.1.0-94cf1035d7aa7d1d36d86866e41d653ff2fa5c02. A published chart
+# already defaults both image refs to these digests; they are repeated here so
+# the pin is in this repository, where a bump is a reviewed diff.
+#
+# Verified 2026-10-07 with cosign v3.1.2 (the version //bazel/cosign pins), the
+# chart, and the index and both per-arch manifests of each image, bound to that
+# commit (--certificate-github-workflow-sha):
 #   cosign verify \
 #     --certificate-identity-regexp '^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-#     quay.io/sortie/engine@sha256:...
-# Bump the three together (the two digests and SORTIE_CHART in run.sh), and
-# re-verify: cosign 3 or newer, an older client reports "no signatures found".
+#     quay.io/sortie/chart-sortie@sha256:f5007911c7e0e204ff97bdeeec88bd2e5a135fcd08eb9bb0dea96be0dbd4cc7c
+# run.sh repeats that for the chart and for every image the release renders, on
+# every run (its pre-flight; see --verify in its header). Bump the three
+# together. cosign 3 or newer: the signatures are OCI referrers, and an older
+# client reports "no signatures found" for a signed artifact.
 image:
-  ref: quay.io/sortie/sortie@sha256:f319b4f21a81a441d4d1767195ad6d05d991e8ad83eca8b786fae11807a497f8
+  ref: quay.io/sortie/sortie@sha256:6a2dc1f74f05cea126191f0bb886772ec3b3d918c09ad42bf86bd735d5d8813e
 
 engine:
   enabled: true
@@ -25,14 +31,14 @@ engine:
   # which the plan's `dns:` pool resolves into one backend per node.
   kind: DaemonSet
   image:
-    ref: quay.io/sortie/engine@sha256:ba56cbb041370ea34a6092fea08fa1bdc612f9496d25a0efa4be6120d31b50f5
+    ref: quay.io/sortie/engine@sha256:d6ea5aca3fe0f93c2d02cc9ac0376bf34c66efe3bd196f08ba9a9e44454121cf
   # One execution per target runs at once on every engine. sortie-plan.sh
   # refuses a targets file longer than this.
   maxConcurrentExecutions: 16
   # Created by run.sh (the chart only references it). Same class and same reason
   # as the k6 runner: a DaemonSet pod cannot move, so without it the loader is
   # the scheduler's victim when a surging aether-proxy pod needs room, and that
-  # node's half of the run is lost (2026-09-19).
+  # node's share of the run is lost (2026-09-19).
   priorityClassName: aether-soak-loader
   podLabels:
     # REQUIRED, exactly as on the k6 runner: the engine opens the connections,
@@ -54,27 +60,38 @@ engine:
           - matchExpressions:
               - key: node-role.kubernetes.io/control-plane
                 operator: DoesNotExist
-  # CPU: the k6 runner's own budget (100m / 400m), and the limit is load-bearing.
-  # An engine worker thread never blocks between requests: Nighthawk's sequencer
-  # spins (default), polls a 25 us timer, or sleeps 50 us at a time (SLEEP, what
-  # the plan asks for), so each of the eight worker threads costs ~0.2 core
-  # WHATEVER its rate -- 1.7 cores per node unthrottled, measured on kind, on
-  # 4-vCPU nodes that are already CPU-tight at proxy handoffs (#1093). Under
-  # the limit the engine holds its rate only because the plan queues due
-  # requests (max_pending_requests, sortie-plan.sh): with the engine's default
-  # queue the same limit produced pool_overflow on every target. The price is
-  # client-side latency inflated by up to a CFS period; the soak does not gate
-  # on sortie's latency. See proposal 042, "CPU and memory".
+  # CPU: a request for what the engine uses, and NO limit.
   #
-  # Memory: ~300Mi with eight executions running, ~550Mi after the first
-  # --progress snapshot, ~730Mi peak while the final report is assembled
-  # (kind). 512Mi OOM-killed both engines 60 s into the first run.
+  # The plan asks for the WAIT idle strategy (sortie-plan.sh): a worker thread
+  # blocks until its next request is due, so the eight workers of this plan cost
+  # 0.125-0.14 core per engine at 60 rps on kind (15 min, cgroup cpu.stat) -- not
+  # the 1.7 cores the same engine took while it could only SLEEP, which is what
+  # the old 400m limit was for. The request is that, rounded up; talos-main's
+  # CPUs have not been read yet.
+  # With the limit gone nothing throttles the engine, so the plan no longer
+  # queues due requests either (max_pending_requests), and sortie's latency is
+  # the mesh's again instead of the CFS period's.
+  #
+  # Why not keep a limit as a guard rail: any limit can throttle, and a
+  # throttled load generator reports its own scheduling delay as the target's
+  # latency. Measured: even at 400m, four times what it uses, the engine was
+  # throttled in 17-20 CFS periods at the start of every run and each execution
+  # ran 0.8 s short. An engine that is not cheap (a plan rendered with SPIN)
+  # shows in the node's CPU, where it is looked for; under a limit it would
+  # show as pool_overflow and as latency, where it would be read as the mesh.
+  # See proposal 042, "CPU and memory".
+  #
+  # Memory is the engine's latency histograms: ~37Mi per worker per execution.
+  # On kind: 300Mi with the eight executions running, flat over 15 minutes;
+  # ~600Mi for the instant the final reports are assembled; 270-290Mi held
+  # afterwards (sortie's own figures: 421Mi / 722Mi / 340-400Mi). --progress
+  # adds nothing to it any more (see `args`). The limit is for the peak: 512Mi
+  # is below it and kills the engine as the run ends.
   resources:
     requests:
-      cpu: 100m
+      cpu: 150m
       memory: 384Mi
     limits:
-      cpu: 400m
       memory: 1Gi
 
 # The sortie pod itself: it only drives the engines over gRPC (pod IP :8443) and
@@ -82,13 +99,25 @@ engine:
 # it resolves the headless Service through cluster DNS and its control channel
 # is not part of the traffic under test.
 #
-# No `--progress`, on purpose. A progress snapshot makes every engine copy its
-# statistics: on kind the first one took an engine from ~300Mi to ~550Mi for
-# the rest of the run (and OOM-killed it under a 512Mi limit), and it is a CPU
-# burst inside the engine's own 400m quota, which cost a pool_overflow on two
-# targets. The live view is the statsd series; the pod log is the final summary.
+# `--progress 60s`: every minute the pod's log gets one line per execution and
+# backend (`mesh/svc-1  10.0.0.11:8443  5m0s  http_2xx 2700 ...  mean X max Y`),
+# which is the run's liveness in `kubectl logs` and, saved as sortie.log, a
+# one-minute timeline of every counter per target and node -- the nearest thing
+# left to the k6 AETHER_FAIL lines. A snapshot no longer copies histograms, so
+# it costs no memory (kind, 15 min: 299.9 -> 301.8Mi, the same as without).
+# It is not free in CPU: one snapshot of eight executions is a burst of about
+# 0.6 CPU-second in each engine, +10m averaged over a minute (+19m at 30 s).
+# Hence a minute, not the 5 s sortie's own examples use.
 args:
   - run
+  - --progress
+  - 60s
+
+# The run's single point of failure gets the engines' PriorityClass too: one
+# sortie pod drives every engine, and if it is preempted every execution is
+# cancelled and the run is reported cancelled, not evaluated. It preempts
+# nothing (preemptionPolicy: Never); it is only no longer the first victim.
+priorityClassName: aether-soak-loader
 
 job:
   backoffLimit: 0

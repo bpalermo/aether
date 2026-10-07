@@ -12,6 +12,11 @@
 # saves what exists and says so). Without --wait it saves now, whatever state
 # the run is in -- run it by hand mid-run for a snapshot of the logs.
 #
+# A Job still running two minutes past its planned end gets one SORTIE_OVERDUE
+# line in the log: sortie waits without limit for an engine whose node has gone
+# silent, and until that engine answers there is no report (proposal 042,
+# "Risks").
+#
 # What it writes into RUN_DIR:
 #   report.json        the sortie JSON report, read off the report PVC through a
 #                      short-lived reader pod (`kubectl exec` is denied on
@@ -80,9 +85,20 @@ STATE="$(job_state)"
 if [ "$WAIT" = 1 ]; then
 	DEADLINE=$((T_LOAD + DURATION_S + 1200))
 	log "waiting for job/$JOB (plan ${DURATION_S}s; giving up at $(date -u -d "@$DEADLINE" +%FT%TZ))"
+	OVERDUE_SAID=0
 	while [ "$STATE" = active ] && [ "$(date +%s)" -lt "$DEADLINE" ]; do
 		sleep 30
 		STATE="$(job_state)"
+		# A run ends within seconds of its duration. One that is still going two
+		# minutes later is waiting for an engine that will not answer: sortie
+		# (94cf103) has no deadline on a backend, and a node that goes SILENT
+		# (frozen, powered off, partitioned: no FIN, no RST) is not a lost
+		# backend to it. On kind, a node paused for 20 minutes held the Job for
+		# 20 minutes. Say so once, while someone can still look.
+		if [ "$STATE" = active ] && [ "$OVERDUE_SAID" = 0 ] && [ "$(date +%s)" -gt $((T_LOAD + DURATION_S + 120)) ]; then
+			OVERDUE_SAID=1
+			log "SORTIE_OVERDUE job/$JOB is still running $(($(date +%s) - T_LOAD - DURATION_S))s past its planned end: sortie is waiting for an engine that does not answer (a silent node?). Check: kubectl --context $CTX get nodes; kubectl --context $CTX -n $NS get pods -l app.kubernetes.io/component=engine -o wide. The report is written only when that engine answers; the other nodes' counters so far are the progress lines of the sortie pod's log"
+		fi
 	done
 fi
 log "job/$JOB state=$STATE"
@@ -102,7 +118,7 @@ done <"$DIR/engines-end.tsv"
 log "saved sortie.log ($(wc -l <"$DIR/sortie.log" 2>/dev/null || echo 0) lines), job.json, $(wc -l <"$DIR/engines-end.tsv" | tr -d ' ') engine log(s)"
 
 if [ "$STATE" = active ]; then
-	log "SORTIE_SAVE_INCOMPLETE the run has not finished: logs saved, no report yet (run sortie-save.sh --dir $DIR again when it has)"
+	log "SORTIE_SAVE_INCOMPLETE the run has not finished: logs saved, no report yet (run sortie-save.sh --dir $DIR again when it has). If it is past its planned end, sortie is waiting for an engine on a silent node and will wait until it answers; sortie.log holds each target's cumulative counters per node up to its last progress line, which is all the loader evidence there is until then"
 	exit 1
 fi
 
