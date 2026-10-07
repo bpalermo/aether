@@ -3,6 +3,7 @@ package proxy
 import (
 	"testing"
 
+	accesslogv3 "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	otelaccesslogv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/open_telemetry/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -169,4 +170,64 @@ func TestAccessLogCarriesVerifiedPeerIdentity(t *testing.T) {
 		assert.Contains(t, dst, key)
 		assert.Contains(t, src, key)
 	}
+}
+
+// accessLogAttrs decodes an OTel access logger's attribute list, in order.
+func accessLogAttrs(t *testing.T, logs []*accesslogv3.AccessLog) (keys []string, attrs map[string]string) {
+	t.Helper()
+	require.Len(t, logs, 1)
+	var cfg otelaccesslogv3.OpenTelemetryAccessLogConfig
+	require.NoError(t, proto.Unmarshal(logs[0].GetTypedConfig().GetValue(), &cfg))
+	attrs = map[string]string{}
+	for _, kv := range cfg.GetAttributes().GetValues() {
+		keys = append(keys, kv.GetKey())
+		attrs[kv.GetKey()] = kv.GetValue().GetStringValue()
+	}
+	return keys, attrs
+}
+
+// TestAccessLogCarriesGenerationAndConnectionTiming pins the exact format
+// strings of the #1333 fields, on both reporters.
+//
+// The strings are the whole contract. `envoy --mode validate` accepts any
+// time-point name (an unknown one is a dynamic time point nothing sets, and
+// renders "-" forever), so the only two things that stand between a typo and a
+// permanently empty column are this test, which says what the names ARE, and
+// //agent/test/mtlspool TestAccessLogConnectionTiming, which shows the pinned
+// Envoy renders these names as numbers on a TLS and on a QUIC connection.
+func TestAccessLogCarriesGenerationAndConnectionTiming(t *testing.T) {
+	t.Cleanup(func() { SetAccessLogConfig(AccessLogConfig{}) })
+	SetAccessLogConfig(AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+
+	want := map[string]string{
+		// The supervisor's variable (hotrestart.RestartEpochEnv). Unset renders "-".
+		"proxy_epoch":   "%ENVIRONMENT(AETHER_RESTART_EPOCH)%",
+		"connection_id": "%CONNECTION_ID%",
+		"ds_cx_age_ms":  "%COMMON_DURATION(DS_CX_BEG:DS_RX_BEG:ms)%",
+		"ds_hs_ms":      "%COMMON_DURATION(DS_CX_BEG:DS_HS_END:ms)%",
+		"us_tx_beg_ms":  "%COMMON_DURATION(DS_RX_BEG:US_TX_BEG:ms)%",
+	}
+	for _, reporter := range []string{ReporterSource, ReporterDestination} {
+		keys, attrs := accessLogAttrs(t, buildAccessLog(reporter, "pod-a", "aether-test"))
+		for key, op := range want {
+			assert.Equal(t, op, attrs[key], "reporter %s: field %s", reporter, key)
+		}
+		assert.Len(t, attrs, len(keys), "reporter %s: an attribute key is repeated: %v", reporter, keys)
+	}
+}
+
+// TestL4AccessLogCarriesGeneration: the connection-level log names the
+// generation too, and only that. The request-anchored durations have no
+// meaning on a tcp_proxy record (there is no request), and connection_id is
+// left out with them rather than added to a stream where nothing joins on it.
+func TestL4AccessLogCarriesGeneration(t *testing.T) {
+	t.Cleanup(func() { SetAccessLogConfig(AccessLogConfig{}) })
+	SetAccessLogConfig(AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+
+	keys, attrs := accessLogAttrs(t, buildL4AccessLog("pod-a", "aether-test"))
+	assert.Equal(t, "%ENVIRONMENT(AETHER_RESTART_EPOCH)%", attrs["proxy_epoch"])
+	for _, key := range []string{"connection_id", "ds_cx_age_ms", "ds_hs_ms", "us_tx_beg_ms"} {
+		assert.NotContains(t, attrs, key)
+	}
+	assert.Len(t, attrs, len(keys), "an attribute key is repeated: %v", keys)
 }

@@ -23,7 +23,10 @@ alias(
 
 go_library(
     name = "envoy_validate",
-    srcs = ["builders.go"],
+    srcs = [
+        "accesslog_fields.go",
+        "builders.go",
+    ],
     importpath = "aethermesh.dev/agent/test/envoy_validate",
     visibility = ["//agent/test/envoy_validate:__subpackages__"],
     deps = [
@@ -35,6 +38,7 @@ go_library(
         "//common/constants/mesh",
         "//common/extensionfilter",
         "//common/udspath",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/accesslog/v3:accesslog",
         "@com_github_envoyproxy_go_control_plane_envoy//config/bootstrap/v3:bootstrap",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//config/common/mutation_rules/v3:mutation_rules",
@@ -76,6 +80,7 @@ go_test(
     name = "envoy_validate_test",
     size = "small",
     srcs = [
+        "accesslog_fields_test.go",
         "ads_reconnect_test.go",
         "capture_transparent_test.go",
         "identity_test.go",
