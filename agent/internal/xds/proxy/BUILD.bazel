@@ -235,6 +235,7 @@ go_test(
         "//common/constants/mesh",
         "//common/gammaproject",
         "@com_github_cncf_xds_go//xds/type/v3:type",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/accesslog/v3:accesslog",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//config/common/mutation_rules/v3:mutation_rules",
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",

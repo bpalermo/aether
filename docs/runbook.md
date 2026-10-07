@@ -3282,6 +3282,83 @@ is CPU headroom, not a longer timeout. Note also that 1 s is the kernel's initia
 retransmit timeout, so a single dropped SYN cannot be recovered inside it (tracked on
 #1093).
 
+### Reading a hot-restart overlap (#1333)
+
+During a proxy roll two Envoy generations serve the node at once: the parent
+drains while the child takes new connections. The stats cannot tell them apart;
+the access log can.
+
+**What the stats do during the overlap** (pinned Envoy; the first three were
+also seen in worker-04's raw samples at the 2026-10-06 20:39Z roll):
+
+- **The parent stops exporting when the child starts.** The child's start makes
+  the parent shut its admin down, and that step cancels the parent's stat-flush
+  timer. The parent does not flush at exit either. From then on every exported
+  sample is the child's. Expect one missing flush interval at the switch.
+- **The child's first counter sample contains the parent's delta.** The child
+  pulls the parent's counter deltas and adds them to its own, so a counter keeps
+  rising across the roll and nothing in it says which generation counted what.
+- **`envoy_server_uptime` roughly doubles** while the parent lives. It is an
+  accumulated gauge: the child's value plus the parent's. Every gauge that
+  accumulates does the same (active connections, active requests), then drops
+  back when the parent exits. A step down at parent exit is the merge ending,
+  not a loss.
+- **Connections are the one thing the gauges split.**
+  `envoy_server_parent_connections` is what the parent still holds, and
+  `envoy_server_total_connections` is both generations, so the child's
+  connections are `envoy_server_total_connections - envoy_server_parent_connections`.
+- **Histogram samples the parent records during the overlap are not exported.**
+  This one is inferred from the Envoy source (histograms are not part of the
+  parent-to-child transfer), not measured.
+
+So a metric label naming the pod or the epoch separates nothing: there is only
+ever one exporter, and its numbers already include the other generation's. It
+would also create about 4,150 new series per node per roll.
+
+**What the access log says instead.** Every HTTP access-log row
+(`log_name:aether_access_logs`, both reporters) carries:
+
+| field | is | reads `-` when |
+|---|---|---|
+| `proxy_epoch` | the hot-restart epoch of the Envoy process that wrote the row; the same number as `envoy_server_hot_restart_epoch`. Within one overlap the lower number is the parent | the proxy's supervisor predates the field (it exports `AETHER_RESTART_EPOCH` to each Envoy child) |
+| `connection_id` | Envoy's id for the downstream connection the request rode. Unique within one Envoy process only: pair it with `node_name` and `proxy_epoch`. A small counter for a TCP connection, a 64-bit number for a QUIC one | never (`0` = no id) |
+| `ds_cx_age_ms` | how old that connection was when the request started: from Envoy accepting it to the request's first byte. Small = the request paid for a new connection, large = reuse | never |
+| `ds_hs_ms` | from accepting the connection to the end of its TLS handshake. A property of the connection, repeated on every row that rode it | the downstream is not TLS: every `reporter:source` row (the application speaks cleartext to its proxy) and a cleartext inbound |
+| `us_tx_beg_ms` | from the request's first byte to the first byte sent upstream: routing, plus waiting for an upstream connection (a new upstream handshake shows up here) | nothing was sent upstream (local reply, no healthy upstream, connect failure) |
+
+The L4 stream (`log_name:aether_l4_access_logs`) carries `proxy_epoch` only. An
+L4 record is written when the connection closes, so there it names the
+generation that held the connection.
+
+```logsql
+# Which generation served, or failed, the requests of a roll window on one node
+log_name:aether_access_logs AND reporter:destination AND node_name:"main-worker-04" AND _time:[<start>, <end>]
+  | stats by (proxy_epoch, response_code, response_flags) count()
+
+# Requests that paid for a new inbound connection and a slow handshake
+log_name:aether_access_logs AND reporter:destination AND ds_cx_age_ms:<50 AND ds_hs_ms:>=100
+  | stats by (node_name, proxy_epoch, protocol) count(), max(ds_hs_ms)
+
+# Failures per connection, not per request: N rows sharing one connection are one event
+log_name:aether_access_logs AND reporter:destination AND response_flags:!"-"
+  | stats by (node_name, proxy_epoch, connection_id) count()
+```
+
+**What these fields cannot tell you.** Time spent before Envoy read the packet.
+Envoy takes no kernel receive timestamp, so `ds_cx_age_ms` and `ds_hs_ms` start
+when a worker accepted the connection (for QUIC, when it created the session
+from the first datagram it read), not when the peer sent its SYN or first
+datagram. A request that waited in a socket queue on an established connection
+while the workers were starved shows normal values on the destination row and a
+long `duration_ms` on the source row. For that gap, compare the two sides'
+`start_time` on one `x_request_id`, and read node CPU and run-queue data (see
+"A node stalls for seconds during a handoff (#1093)" above).
+
+The time-point names behind the three durations are checked against the pinned
+Envoy by a live test (`//agent/test/mtlspool`, `TestAccessLogConnectionTiming`),
+on an mTLS connection and on an HTTP/3 one. `envoy --mode validate` cannot do
+it: Envoy accepts a time-point name it does not know and renders `-`.
+
 ### Envoy's UDP dropped-datagram counter after a hot restart (#1353)
 
 **Do not gate or alert on it across a proxy roll.** The stat
@@ -4643,7 +4720,8 @@ TCPRoute-weighted chains, the any-port shim, TLSRoute SNI chains and the scoped-
   `upstream_local_address`, `requested_server_name` (SNI), `upstream_peer_uri_san`,
   `response_flags`, `upstream_transport_failure_reason`,
   `connection_termination_details`, `start_time`, `duration_ms`, `bytes_received`,
-  `bytes_sent`. The node is Envoy's resource attribute `node_name`.
+  `bytes_sent`, `proxy_epoch` (the proxy generation that held the connection; see
+  "Reading a hot-restart overlap"). The node is Envoy's resource attribute `node_name`.
 
 ```
 # Every failed L4 connection

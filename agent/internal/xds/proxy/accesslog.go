@@ -30,6 +30,13 @@ const (
 	// aether_stats `reporter` label.
 	ReporterSource      = "source"
 	ReporterDestination = "destination"
+
+	// restartEpochEnv is the environment variable the proxy supervisor starts
+	// every Envoy child with: that child's --restart-epoch
+	// (agent/internal/proxy/hotrestart, issue #1333). The name is spelled here
+	// too because the agent and the supervisor are separate binaries in
+	// separate images, and the agent must not link the supervisor.
+	restartEpochEnv = "AETHER_RESTART_EPOCH"
 )
 
 // AccessLogConfig is the global access-log configuration. It is set ONCE at agent
@@ -120,6 +127,10 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 			// See e2e/soak/README.md "Benign DC" for the grading rule.
 			kv("upstream_rx_ms", "%COMMON_DURATION(US_RX_BEG:US_RX_END:ms)%"),
 			kv("downstream_tx_end_ms", "%COMMON_DURATION(US_RX_BEG:DS_TX_END:ms)%"),
+			// Which proxy generation wrote the line (#1333); what the connection
+			// the request rode had cost is appended below
+			// (connectionTimingFields).
+			generationField(),
 			kv("upstream_service_time", "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"),
 			kv("x_forwarded_for", "%REQ(X-FORWARDED-FOR)%"),
 			kv("user_agent", "%REQ(USER-AGENT)%"),
@@ -185,6 +196,7 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 			kv("rbac_shadow_policy", "%DYNAMIC_METADATA(envoy.filters.http.rbac:aether_audit_shadow_effective_policy_id)%"),
 		}},
 	}
+	otelCfg.Attributes.Values = append(otelCfg.Attributes.Values, connectionTimingFields()...)
 	// Appended rather than inlined above: the field is reporter-dependent, and
 	// keeping the common set one flat literal keeps that list readable.
 	otelCfg.Attributes.Values = append(otelCfg.Attributes.Values, peerIdentityFields(reporter)...)
@@ -274,6 +286,11 @@ func buildL4AccessLog(podName, podNamespace string) []*accesslogv3.AccessLog {
 			kv("duration_ms", "%DURATION%"),
 			kv("bytes_received", "%BYTES_RECEIVED%"),
 			kv("bytes_sent", "%BYTES_SENT%"),
+			// The proxy generation that wrote the record (#1333). An L4 record
+			// is written when the connection closes, so across a hot restart
+			// this names the generation that HELD the connection: the draining
+			// parent for every connection accepted before the roll.
+			generationField(),
 		}},
 	}
 
@@ -308,6 +325,65 @@ func l4LogWorthyFilter() *accesslogv3.AccessLogFilter {
 				},
 			},
 		},
+	}
+}
+
+// generationField is proxy_epoch: the hot-restart epoch of the Envoy process
+// that wrote the line, the same number as envoy_server_hot_restart_epoch.
+//
+// It exists because the stats cannot say it. A hot-restart parent stops
+// flushing to stat sinks the moment its child starts, and the child's exported
+// values already contain the parent's, so no metric label separates the two
+// generations during the overlap (#1333). An access-log line is written by one
+// process, so "which generation served, or reset, this request" is a lookup.
+//
+// %ENVIRONMENT(...)% is read ONCE, when the formatter is built (getenv in
+// EnvironmentFormatter's constructor), so it costs nothing per line and cannot
+// change under a running process. It renders "-" when the variable is unset:
+// an agent that ships this format to a proxy whose supervisor predates the
+// variable logs "-" and nothing else changes.
+func generationField() *otlpcommonv1.KeyValue {
+	return kv("proxy_epoch", "%ENVIRONMENT("+restartEpochEnv+")%")
+}
+
+// connectionTimingFields says what the downstream connection had cost before
+// this request, per request, on both reporters (#1333):
+//
+//   - connection_id: Envoy's id for the downstream connection, unique within
+//     one Envoy process (so pair it with proxy_epoch and the node). Lines
+//     sharing it rode one connection, which is what turns "N requests failed"
+//     into "one connection failed".
+//   - ds_cx_age_ms: how old that connection was when this request started
+//     (DS_CX_BEG, when Envoy accepted it, to DS_RX_BEG, the request's first
+//     byte). Small = the request paid for a new connection; large = reuse.
+//   - ds_hs_ms: accept to the end of the downstream TLS handshake. A property
+//     of the connection, so every line on one connection_id repeats it. "-"
+//     where the downstream is not TLS: every source-reporter line (the local
+//     application speaks cleartext to its proxy) and a cleartext inbound.
+//   - us_tx_beg_ms: the request's first byte to the first byte sent upstream,
+//     i.e. routing plus waiting for an upstream connection (a new upstream
+//     handshake lands here). "-" when nothing was sent upstream (local reply,
+//     no healthy upstream, connect failure).
+//
+// The time-point names are checked against the pinned Envoy by
+// //agent/test/mtlspool (TestAccessLogConnectionTiming), not by
+// `envoy --mode validate`: CommonDurationFormatter resolves a name it does not
+// know as a dynamic time point that nothing ever sets, so a typo is accepted
+// and renders "-" on every line forever. Two more things it does at the pin:
+// "-" whenever either end is unset or the end precedes the start, never a
+// bogus 0; and DS_CX_BEG falls back to the request start when the connection
+// start is unknown, so ds_cx_age_ms would read 0 (not "-") there.
+//
+// What none of these can show: time a SYN or a datagram waited in the kernel
+// before Envoy read it. Envoy takes no kernel receive timestamp, so DS_CX_BEG
+// is when Envoy's worker accepted the connection (for QUIC, when it created
+// the session from the first packet it read), not when the peer sent.
+func connectionTimingFields() []*otlpcommonv1.KeyValue {
+	return []*otlpcommonv1.KeyValue{
+		kv("connection_id", "%CONNECTION_ID%"),
+		kv("ds_cx_age_ms", "%COMMON_DURATION(DS_CX_BEG:DS_RX_BEG:ms)%"),
+		kv("ds_hs_ms", "%COMMON_DURATION(DS_CX_BEG:DS_HS_END:ms)%"),
+		kv("us_tx_beg_ms", "%COMMON_DURATION(DS_RX_BEG:US_TX_BEG:ms)%"),
 	}
 }
 
