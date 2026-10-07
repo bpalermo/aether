@@ -13,7 +13,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "aether.registrar.labels" . | nindent 8 }}
+        {{- include "aether.registrar.podLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "aether.registrar.serviceAccountName" . }}
       # Tolerate the aether startup taint: the registrar is an aether-system

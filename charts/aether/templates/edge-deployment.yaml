@@ -49,8 +49,16 @@ spec:
         # via the annotation the CNI DOES honor. (Scoped :18081 redirect is harmless:
         # the edge dials :443/:4317 and backend :18008, never a mesh :18081.)
         capture.aether.io/redirect-all: "false"
+        # The edge's Envoy is started with a plain `envoy -c` (no supervisor, no
+        # file watcher), so a changed bootstrap reaches it only when the pod is
+        # replaced. This is what replaces it: until chart 2.4.15 the
+        # chart-version label on the pod template rolled the edge on every
+        # release (#1363). The checksum is of the ConfigMap's DATA only: its
+        # labels carry the chart version, which must not roll anything.
+        {{- $edgeConfig := include (print $.Template.BasePath "/edge-configmap.yaml") . | fromYaml }}
+        checksum/edge-config: {{ required "edge-configmap.yaml rendered no data to checksum" $edgeConfig.data | toYaml | sha256sum }}
       labels:
-        {{- include "aether.edge.labels" . | nindent 8 }}
+        {{- include "aether.edge.podLabels" . | nindent 8 }}
         # The edge is an ingress gateway, not a mesh workload: no per-pod proxy.
         # It runs in its own (non-aether-system) namespace, so the CNI plugin no
         # longer skips it by namespace — this label is what keeps the agent's

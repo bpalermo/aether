@@ -136,7 +136,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | `proxy.authzSidecar.enabled` | `false` | Add a node-local authz gRPC sidecar (UDS) + a DISABLED ext_authz filter entry; zero effect until an `HTTPFilter` (extAuthz) opts a route/service in. |
 | `proxy.authzSidecar.opa.enabled` | `false` | Built-in OPA preset (opt-in). |
 | `proxy.authzSidecar.opa.image` | `openpolicyagent/opa:1.21.1-envoy-static` | OPA image. |
-| `proxy.authzSidecar.opa.policy` | `""` | Rego policy (ConfigMap-mounted); required when `opa.enabled`. |
+| `proxy.authzSidecar.opa.policy` | `""` | Rego policy (ConfigMap-mounted); required when `opa.enabled`. OPA reads it once, at start, so a changed policy **rolls the proxy DaemonSet** (a hot restart on every node): the pod template carries `checksum/opa-policy`, the sha256 of this text (chart 2.4.15, #1363). Before 2.4.15 a policy changed without a chart version change was not applied until the next roll. |
 | `proxy.authzSidecar.image.{repository,tag,args}` | `""` / `[]` | Bring-your-own authz container (serves `envoy.service.auth.v3.Authorization` on `unix:///run/aether/authz/authz.sock`). |
 | `proxy.authzSidecar.timeout` | `200ms` | Per-check gRPC timeout. |
 | `proxy.authzSidecar.failureMode` | `DENY` | `DENY` (fail-closed, 403 when unreachable) or `ALLOW` (fail-open). |
