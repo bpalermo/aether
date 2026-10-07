@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Before you change anything
+
+`AGENTS.md` § *Rules for agents* is the checklist for every change in this
+repository (lint and test commands, what must never be printed or pushed, what a
+chart or workflow change obliges you to do, how pull requests are stacked and
+merged). `.claude/agents/` holds role agents for the recurring kinds of work:
+`aether-adversarial-reviewer`, `aether-investigator`, `aether-ci-engineer`,
+`aether-chart-engineer`, `aether-flake-fixer`.
+
 ## What is Aether
 
 Aether is a Kubernetes service mesh data plane built in Go. It runs an **agent** (DaemonSet) on each node that manages an Envoy xDS control plane and a CNI plugin for transparent traffic interception. Services are registered in a pluggable registry (Kubernetes or etcd), and the agent generates Envoy configuration (listeners, clusters, endpoints, routes) for local pods.
