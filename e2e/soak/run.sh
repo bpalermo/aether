@@ -22,12 +22,16 @@
 # What it writes to the cluster, in order:
 #   1. PriorityClass aether-soak-loader (cluster-scoped; same object
 #      k6-runner.yaml defines) and PVC sortie-soak-reports in the test namespace.
+#      The class is applied again before the engines and again before the Job,
+#      and read back each time: `kubectl delete -f k6-runner.yaml` deletes it,
+#      and a pod naming a class that does not exist is refused at admission.
 #   2. Helm release <release> (default `soak`) of the sortie chart in the test
 #      namespace, engines only: DaemonSet <release>-sortie-engine (mesh-managed
 #      pods, one per worker node), headless Service <release>-sortie-engine-nodes,
 #      ServiceAccount <release>-sortie.
 #   3. The same release upgraded with the plan: a ConfigMap and a Job
-#      (<release>-sortie-<hash>), whose one pod drives every engine.
+#      (<release>-sortie-<hash>), whose one pod drives every engine. That pod
+#      carries the PriorityClass too: it is the run's single point of failure.
 #   4. soak only: what churn.sh does (rollout restarts, the new-SA and uds-csi
 #      steps, the SHRINK). e2e with --rolls: two rollout restarts.
 # Nothing else. sortie-teardown.sh removes 2 and 3.
@@ -62,9 +66,24 @@
 #   --skip-anyport        soak only: skip anyport-probe.sh (README step 0c)
 #   --skip-newsa          soak only: skip churn.sh --new-sa-once (README step 0d)
 #   --preflight           run the pre-flight, print the result, exit
+#   --verify              REQUIRE the provenance check: abort when cosign is not
+#                         available. Without the flag the check still runs
+#                         whenever cosign is found, and a run without cosign
+#                         goes ahead with a `NOT VERIFIED` line.
+#   --no-verify           skip the provenance check (say why in the grade)
+#
+# Provenance: the pre-flight pulls the chart by its pinned digest, renders it
+# with the values of this run, and verifies the chart and every image the
+# release would run -- each must be a digest reference -- with cosign against
+# sortie's publish workflow identity (keyless; the signatures are OCI
+# referrers, so cosign 3 or newer: an older one reports "no signatures found").
+# cosign is SOAK_COSIGN, else `cosign` on PATH. The repository's pinned one
+# (//bazel/cosign), from the repository root:
+#   bazel build @rules_img_signer_cosign//cosign
+#   export SOAK_COSIGN="$PWD/$(bazel cquery --output=files @rules_img_signer_cosign//cosign 2>/dev/null)"
 #
 # Environment: SOAK_ENGINE_SETTLE (30) seconds between the engines turning Ready
-# and the first request; SOAK_STATSD_SERVICE (o11y/otel-scraper);
+# and the first request; SOAK_STATSD_SERVICE (o11y/otel-scraper); SOAK_COSIGN;
 # SOAK_SORTIE_MAX_PENDING / SOAK_SORTIE_IDLE_STRATEGY pass through to
 # sortie-plan.sh; SOAK_READER_IMAGE (sortie-save.sh). churn.sh, restart-watch.sh
 # and sample-proxy-rss.sh keep their own SOAK_* knobs, except the three log
@@ -74,17 +93,23 @@
 # are detached with `nohup setsid`, but a parent that is itself reaped (a
 # subagent) takes the foreground part of this script with it.
 #
-# Needs kubectl, helm (3.13+: it pulls the chart by digest), jq, awk.
+# Needs kubectl, helm (3.13+: it pulls the chart by digest), jq, awk; cosign 3+
+# for the provenance check.
 set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # The chart, by digest (the OCI manifest's). Bump with the two image digests in
 # sortie-values.yaml; the version is here for the reader, the digest is what is
-# pulled.
+# pulled. sortie 94cf1035d7aa7d1d36d86866e41d653ff2fa5c02.
 SORTIE_CHART="${SORTIE_CHART:-oci://quay.io/sortie/chart-sortie}"
-SORTIE_CHART_VERSION="0.1.0-b71b37ea7e7e02779b0bcf0592fb46b8386a62fc"
-SORTIE_CHART_DIGEST="${SORTIE_CHART_DIGEST:-sha256:c8f0ecf165ad76df01a01fcd6e63cd54e0ba1959b3813412534c3c62609e67f3}"
+SORTIE_CHART_VERSION="0.1.0-94cf1035d7aa7d1d36d86866e41d653ff2fa5c02"
+SORTIE_CHART_DIGEST="${SORTIE_CHART_DIGEST:-sha256:f5007911c7e0e204ff97bdeeec88bd2e5a135fcd08eb9bb0dea96be0dbd4cc7c}"
+# Who must have signed the chart and the images: sortie's publish workflow, on
+# main, through GitHub Actions' OIDC issuer (keyless).
+SORTIE_SIGNER_IDENTITY='^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$'
+SORTIE_SIGNER_ISSUER='https://token.actions.githubusercontent.com'
+COSIGN="${SOAK_COSIGN:-cosign}"
 
 MODE=""
 CTX=""
@@ -105,12 +130,14 @@ ROLLS=0
 SKIP_ANYPORT=0
 SKIP_NEWSA=0
 PREFLIGHT_ONLY=0
+VERIFY=auto
 ENGINE_SETTLE="${SOAK_ENGINE_SETTLE:-30}"
 PRIORITY_CLASS="aether-soak-loader"
+PRIORITY_VALUE=1000
 PVC="sortie-soak-reports"
 
 usage() {
-	echo "usage: run.sh {e2e|soak} --context NAME [--label TEXT] [--out DIR] [--preflight] ... (see the header of $0)" >&2
+	echo "usage: run.sh {e2e|soak} --context NAME [--label TEXT] [--out DIR] [--preflight] [--verify|--no-verify] ... (see the header of $0)" >&2
 	exit 2
 }
 
@@ -151,6 +178,8 @@ while [ $# -gt 0 ]; do
 	--skip-anyport) SKIP_ANYPORT=1 && shift ;;
 	--skip-newsa) SKIP_NEWSA=1 && shift ;;
 	--preflight) PREFLIGHT_ONLY=1 && shift ;;
+	--verify) VERIFY=require && shift ;;
+	--no-verify) VERIFY=off && shift ;;
 	*)
 		echo "run.sh: unknown option '$1'" >&2
 		usage
@@ -203,6 +232,114 @@ pf_fail() {
 	PF_FAILS=$((PF_FAILS + 1))
 }
 
+# priority_class_state: ok | absent | mismatch <what it is>. The class is
+# cluster-scoped and not the chart's to own, and k6-runner.yaml holds a copy of
+# it: `kubectl delete -f k6-runner.yaml` takes it from under the engines.
+priority_class_state() {
+	local j
+	j="$(k get priorityclass "$PRIORITY_CLASS" -o json 2>/dev/null)" || {
+		echo absent
+		return
+	}
+	printf '%s' "$j" | jq -r --argjson v "$PRIORITY_VALUE" '
+		(.preemptionPolicy // "PreemptLowerPriority") as $p
+		| if .value == $v and $p == "Never" and (.globalDefault // false) == false then "ok"
+		  else "mismatch value=\(.value) preemptionPolicy=\($p) globalDefault=\(.globalDefault // false)" end'
+}
+
+# ensure_priority_class: (re-)create it and read it back. Called before the
+# engines and again before the Job -- a pod that names a PriorityClass which
+# does not exist is REFUSED at admission, so a class deleted in between would
+# leave a DaemonSet that cannot replace a pod, or a Job that never gets one.
+ensure_priority_class() {
+	local state
+	k apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: $PRIORITY_CLASS
+  labels:
+    app.kubernetes.io/part-of: aether-soak
+value: $PRIORITY_VALUE
+preemptionPolicy: Never
+globalDefault: false
+description: "aether soak load generator: outranks the priority-0 test workloads as a preemption victim, preempts nothing."
+EOF
+	state="$(priority_class_state)"
+	[ "$state" = ok ] || die "priorityclass/$PRIORITY_CLASS is '$state' after applying it, want value=$PRIORITY_VALUE preemptionPolicy=Never (its value and policy are immutable: something else owns a different class of that name)"
+}
+
+# provenance: pull the chart by digest, render it with this run's values, and
+# verify the chart and every image the release would run. The chart is pulled
+# ONCE, here; the run installs this very file.
+CHART_TMP=""
+CHART_TGZ=""
+VERIFIED="no"
+provenance() {
+	local rendered images ref n bad="" ver major
+	CHART_TMP="$(mktemp -d "${TMPDIR:-/tmp}/sortie-chart.XXXXXX")" || {
+		pf_fail "mktemp failed"
+		return
+	}
+	if ! h pull "$SORTIE_CHART@$SORTIE_CHART_DIGEST" -d "$CHART_TMP" >"$CHART_TMP/pull.log" 2>&1; then
+		pf_fail "could not pull $SORTIE_CHART@$SORTIE_CHART_DIGEST: $(tail -n 1 "$CHART_TMP/pull.log")"
+		return
+	fi
+	CHART_TGZ="$(find "$CHART_TMP" -name '*.tgz' | sort | sed -n '1p')"
+	if [ -z "$CHART_TGZ" ]; then
+		pf_fail "the chart pull left no .tgz"
+		return
+	fi
+	if ! rendered="$(helm template "$RELEASE" "$CHART_TGZ" -n "$NS" "${VALUES[@]}" 2>&1)"; then
+		pf_fail "the chart does not render with these values: $(printf '%s\n' "$rendered" | tail -n 1)"
+		return
+	fi
+	images="$(printf '%s\n' "$rendered" | awk '$1 == "image:" { gsub(/"/, "", $2); print $2 }' | sort -u)"
+	n="$(printf '%s\n' "$images" | grep -c .)"
+	for ref in $images; do
+		case "$ref" in *@sha256:*) ;; *) bad="$bad $ref" ;; esac
+	done
+	if [ "$n" -lt 2 ] || [ -n "$bad" ]; then
+		pf_fail "the release must run two images, both by digest; rendered $n, not pinned:${bad:- none}"
+		return
+	fi
+	pf_ok "chart $SORTIE_CHART_VERSION pulled by digest ($SORTIE_CHART_DIGEST); the release runs $n images, each a digest reference"
+
+	if [ "$VERIFY" = off ]; then
+		log "preflight note  provenance NOT VERIFIED: --no-verify"
+		return
+	fi
+	if ! command -v "$COSIGN" >/dev/null 2>&1; then
+		if [ "$VERIFY" = require ]; then
+			pf_fail "--verify: cosign ('$COSIGN') is not available. Put cosign 3+ on PATH or point SOAK_COSIGN at one (the repository's pinned cosign: see the header of run.sh)"
+		else
+			log "preflight note  provenance NOT VERIFIED: cosign ('$COSIGN') is not available. The chart and both images are still pulled by digest, but their signatures were not checked. Put cosign 3+ on PATH or point SOAK_COSIGN at one (the repository's pinned cosign: see the header of run.sh); --verify makes its absence an error"
+		fi
+		return
+	fi
+	ver="$("$COSIGN" version 2>&1 | awk '$1 == "GitVersion:" {print $2}')"
+	major="${ver#v}"
+	major="${major%%.*}"
+	case "$major" in
+	'' | *[!0-9]*) major=0 ;;
+	esac
+	if [ "$major" -lt 3 ]; then
+		pf_fail "cosign '${ver:-unknown version}' is older than 3: sortie's signatures are OCI referrers, which it does not look up, and its 'no signatures found' would say nothing about them"
+		return
+	fi
+	for ref in "${SORTIE_CHART#oci://}@$SORTIE_CHART_DIGEST" $images; do
+		if ! "$COSIGN" verify --certificate-identity-regexp "$SORTIE_SIGNER_IDENTITY" \
+			--certificate-oidc-issuer "$SORTIE_SIGNER_ISSUER" "$ref" >/dev/null 2>"$CHART_TMP/cosign.err"; then
+			pf_fail "cosign could not verify $ref against sortie's publish workflow: $(tail -n 1 "$CHART_TMP/cosign.err")"
+			bad=1
+		fi
+	done
+	if [ -z "$bad" ]; then
+		VERIFIED="cosign-$ver"
+		pf_ok "provenance: the chart and $n images are signed by sortie's publish workflow on main (cosign $ver, keyless)"
+	fi
+}
+
 preflight() {
 	local tool
 	for tool in kubectl helm jq awk; do
@@ -221,6 +358,18 @@ preflight() {
 		return
 	fi
 	pf_ok "plan: $(printf '%s\n' "$shares" | awk -F'\t' '{printf "%s%s=%d", (NR > 1 ? " " : ""), $1, $2}') rps per node"
+
+	provenance
+
+	# The PriorityClass both the engines and the sortie pod name. Read-only here
+	# (a pre-flight changes nothing); the run applies it and reads it back.
+	local pcs
+	pcs="$(priority_class_state)"
+	case "$pcs" in
+	ok) pf_ok "priorityclass/$PRIORITY_CLASS exists (value $PRIORITY_VALUE, preempts nothing)" ;;
+	absent) pf_ok "priorityclass/$PRIORITY_CLASS is absent; the run creates it" ;;
+	*) pf_fail "priorityclass/$PRIORITY_CLASS exists but is not the soak's ($pcs; want value=$PRIORITY_VALUE preemptionPolicy=Never)" ;;
+	esac
 
 	# Every aether pod Running with every container ready, compared as numbers
 	# (pods-not-ready.awk; the old awk back-reference flagged every pod, #1323).
@@ -256,7 +405,7 @@ preflight() {
 		pf_ok "no sortie run exists for release '$RELEASE'"
 	fi
 	if k -n "$NS" get ds k6-soak-loader >/dev/null 2>&1; then
-		log "preflight note  the k6 runner (ds/k6-soak-loader) is up: this is a side-by-side run, and the node carries both loads"
+		log "preflight note  the k6 runner (ds/k6-soak-loader) is up: this is a side-by-side run, and the node carries both loads. Take it down with \`kubectl -n $NS delete ds/k6-soak-loader\`, NEVER \`kubectl delete -f k6-runner.yaml\`: that file also deletes priorityclass/$PRIORITY_CLASS, which the engines and the sortie pod name"
 	fi
 
 	if ! SOAK_CONTEXT="$CTX" bash "$HERE/restart-watch.sh" --context "$CTX" --preflight >/dev/null 2>&1; then
@@ -299,32 +448,27 @@ preflight() {
 
 if [ -e "$OUT/run.env" ]; then die "$OUT already holds a run (run.env exists); pass a fresh --out"; fi
 log "run.sh $MODE context=$CTX namespace=$NS release=$RELEASE label=$LABEL out=$OUT"
+trap '[ -n "$CHART_TMP" ] && rm -rf "$CHART_TMP"' EXIT
 preflight
 if [ "$PF_FAILS" -gt 0 ]; then die "pre-flight failed ($PF_FAILS); nothing was started"; fi
 log "PREFLIGHT PASSED"
 if [ "$PREFLIGHT_ONLY" = 1 ]; then exit 0; fi
-mkdir -p "$OUT" || die "cannot create $OUT"
+mkdir -p "$OUT/chart" || die "cannot create $OUT"
+# The chart the pre-flight pulled (and verified) is the one that is installed.
+mv "$CHART_TGZ" "$CHART_TMP/pull.log" "$OUT/chart/" || die "could not keep the chart in $OUT/chart"
+CHART_TGZ="$OUT/chart/$(basename "$CHART_TGZ")"
+log "chart $SORTIE_CHART $SORTIE_CHART_VERSION @$SORTIE_CHART_DIGEST verified=$VERIFIED"
 
 # --------------------------------------------------------------------- engines
 # The chart only references these two; they are ours to create.
+ensure_priority_class
 if [ -z "$STORAGE_CLASS" ]; then
 	STORAGE_CLASS="$(k get storageclass -o json | jq -r '
 		[.items[] | select(.metadata.annotations["storageclass.kubernetes.io/is-default-class"] == "true") | .metadata.name] as $d
 		| if ($d | length) == 1 then $d[0] elif (.items | length) == 1 then .items[0].metadata.name else "" end')"
 	[ -n "$STORAGE_CLASS" ] || die "no default StorageClass and more than one to choose from: pass --storage-class"
 fi
-k apply -f - >/dev/null <<EOF || die "could not apply the PriorityClass and the report PVC"
-apiVersion: scheduling.k8s.io/v1
-kind: PriorityClass
-metadata:
-  name: $PRIORITY_CLASS
-  labels:
-    app.kubernetes.io/part-of: aether-soak
-value: 1000
-preemptionPolicy: Never
-globalDefault: false
-description: "aether soak load generator: outranks the priority-0 test workloads as a preemption victim, preempts nothing."
----
+k apply -f - >/dev/null <<EOF || die "could not apply the report PVC"
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -339,14 +483,7 @@ spec:
     requests:
       storage: 64Mi
 EOF
-log "applied priorityclass/$PRIORITY_CLASS and pvc/$PVC (storage class $STORAGE_CLASS)"
-
-CHART="$OUT/chart"
-mkdir -p "$CHART"
-h pull "$SORTIE_CHART@$SORTIE_CHART_DIGEST" -d "$CHART" >"$CHART/pull.log" 2>&1 || die "could not pull $SORTIE_CHART@$SORTIE_CHART_DIGEST (see $CHART/pull.log)"
-CHART_TGZ="$(find "$CHART" -name '*.tgz' | head -n1)"
-[ -n "$CHART_TGZ" ] || die "the chart pull left no .tgz in $CHART"
-log "chart $SORTIE_CHART $SORTIE_CHART_VERSION @$SORTIE_CHART_DIGEST"
+log "applied priorityclass/$PRIORITY_CLASS (value $PRIORITY_VALUE, read back) and pvc/$PVC (storage class $STORAGE_CLASS)"
 
 # Engines FIRST and alone: the plan's dns pool is resolved once, when the run
 # starts, and takes the first non-empty answer -- a Job started beside a
@@ -414,9 +551,15 @@ BACKENDS=$BACKENDS
 DURATION_S=$DURATION_S
 REPORT_FILE=$REPORT_FILE
 STATSD=$STATSD
+SORTIE_CHART_VERSION=$SORTIE_CHART_VERSION
+SORTIE_CHART_DIGEST=$SORTIE_CHART_DIGEST
+VERIFIED=$VERIFIED
 EOF
 
 # ------------------------------------------------------------------------ load
+# Again, and read back: the 30 s above is long enough for a `kubectl delete -f
+# k6-runner.yaml` to have taken the class, and the Job's pod names it.
+ensure_priority_class
 h upgrade "$RELEASE" "$CHART_TGZ" -n "$NS" "${VALUES[@]}" --set job.enabled=true \
 	--set-file "plan=$OUT/plan.yaml" --set "report.path=$REPORT_FILE" >"$OUT/helm-run.log" 2>&1 ||
 	die "helm upgrade with the plan failed (see $OUT/helm-run.log)"
@@ -439,6 +582,14 @@ T_LOAD="$(date +%s)"
 	echo "T_LOAD=$T_LOAD"
 } >>"$OUT/run.env"
 [ "$PHASE" = Running ] || die "the sortie pod of job/$JOB is '$PHASE', not Running (kubectl -n $NS describe job/$JOB)"
+# One sortie pod drives every engine: if it is preempted the whole run is
+# cancelled, not one node's share of it. It can move, but a run cannot.
+POD_PRIO="$(k -n "$NS" get pods -l "job-name=$JOB" -o jsonpath='{.items[0].spec.priorityClassName}={.items[0].spec.priority}' 2>/dev/null)"
+if [ "$POD_PRIO" = "$PRIORITY_CLASS=$PRIORITY_VALUE" ]; then
+	log "sortie pod priority: $POD_PRIO"
+else
+	log "WARNING the sortie pod's priority is '$POD_PRIO', not $PRIORITY_CLASS=$PRIORITY_VALUE: it is the first victim when a node fills up, and losing it cancels the run"
+fi
 log "LOAD STARTED job=$JOB rate=$RATE rps per node x $BACKENDS nodes for ${DURATION_S}s (ends ~$(date -u -d "@$((T_LOAD + DURATION_S))" +%FT%TZ))"
 
 # The saver first: whatever happens next, the report is copied out when the run

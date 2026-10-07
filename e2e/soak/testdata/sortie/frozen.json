@@ -1,5 +1,5 @@
 {
-  "pass": false,
+  "pass": true,
   "executions": [
     {
       "label": "mesh/svc-1",
@@ -56,7 +56,7 @@
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": true,
-          "actual": "17.999760003199956"
+          "actual": "8.03618558765176"
         },
         {
           "expr": "latency_2xx.p50 < 60s",
@@ -72,14 +72,14 @@
         }
       ],
       "totals": {
-        "benchmark.http_2xx": 2700
+        "benchmark.http_2xx": 1766
       },
       "results": [
         {
           "backend": "10.10.1.14:8443",
-          "elapsed_ms": 150002,
+          "elapsed_ms": 289510,
           "counters": {
-            "benchmark.http_2xx": 1350
+            "benchmark.http_2xx": 416
           }
         },
         {
@@ -189,7 +189,7 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
-      "pass": false,
+      "pass": true,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
         "10.10.1.14:8443",
@@ -211,8 +211,8 @@
         {
           "expr": "counter:benchmark.stream_resets == 0",
           "scope": "pool",
-          "pass": false,
-          "actual": "12"
+          "pass": true,
+          "actual": "0"
         },
         {
           "expr": "counter:benchmark.pool_connection_failure == 0",
@@ -235,8 +235,8 @@
         {
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
-          "pass": false,
-          "actual": "5.9199210677190965"
+          "pass": true,
+          "actual": "5.999920001066652"
         },
         {
           "expr": "latency_2xx.p50 < 60s",
@@ -251,21 +251,8 @@
           "actual": "2.235519ms, 2.771455ms"
         }
       ],
-      "failures": [
-        {
-          "backend": "10.10.3.22:8443",
-          "counters": {
-            "benchmark.stream_resets": 12,
-            "benchmark.stream_resets_before_headers": 12,
-            "benchmark.stream_resets_connection_termination": 12
-          }
-        }
-      ],
       "totals": {
-        "benchmark.http_2xx": 888,
-        "benchmark.stream_resets": 12,
-        "benchmark.stream_resets_before_headers": 12,
-        "benchmark.stream_resets_connection_termination": 12
+        "benchmark.http_2xx": 900
       },
       "results": [
         {
@@ -279,10 +266,7 @@
           "backend": "10.10.3.22:8443",
           "elapsed_ms": 150002,
           "counters": {
-            "benchmark.http_2xx": 438,
-            "benchmark.stream_resets": 12,
-            "benchmark.stream_resets_before_headers": 12,
-            "benchmark.stream_resets_connection_termination": 12
+            "benchmark.http_2xx": 450
           }
         }
       ]

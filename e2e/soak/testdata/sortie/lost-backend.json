@@ -9,7 +9,7 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
-      "pass": true,
+      "pass": false,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
         "10.10.1.14:8443",
@@ -56,38 +56,37 @@
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": true,
-          "actual": "17.999760003199956"
+          "actual": "8.999880001599978"
         },
         {
           "expr": "latency_2xx.p50 < 60s",
           "scope": "per-backend",
           "pass": true,
-          "actual": "1.832511ms, 2.153599ms"
+          "actual": "2.153599ms"
         },
         {
           "expr": "latency_2xx.p99 < 60s",
           "scope": "per-backend",
           "pass": true,
-          "actual": "2.235519ms, 2.771455ms"
+          "actual": "2.771455ms"
         }
       ],
       "totals": {
-        "benchmark.http_2xx": 2700
+        "benchmark.http_2xx": 1350
       },
       "results": [
-        {
-          "backend": "10.10.1.14:8443",
-          "elapsed_ms": 150002,
-          "counters": {
-            "benchmark.http_2xx": 1350
-          }
-        },
         {
           "backend": "10.10.3.22:8443",
           "elapsed_ms": 150002,
           "counters": {
             "benchmark.http_2xx": 1350
           }
+        }
+      ],
+      "backend_errors": [
+        {
+          "backend": "10.10.1.14:8443",
+          "error": "awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\""
         }
       ]
     },
@@ -99,7 +98,7 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
-      "pass": true,
+      "pass": false,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
         "10.10.1.14:8443",
@@ -115,8 +114,8 @@
         {
           "expr": "counter:benchmark.http_5xx == 0",
           "scope": "pool",
-          "pass": true,
-          "actual": "0"
+          "pass": false,
+          "actual": "3"
         },
         {
           "expr": "counter:benchmark.stream_resets == 0",
@@ -146,38 +145,47 @@
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": true,
-          "actual": "17.993093425420994"
+          "actual": "8.97988026826309"
         },
         {
           "expr": "latency_2xx.p50 < 60s",
           "scope": "per-backend",
           "pass": true,
-          "actual": "1.832511ms, 2.153599ms"
+          "actual": "2.153599ms"
         },
         {
           "expr": "latency_2xx.p99 < 60s",
           "scope": "per-backend",
           "pass": true,
-          "actual": "2.235519ms, 2.771455ms"
+          "actual": "2.771455ms"
+        }
+      ],
+      "failures": [
+        {
+          "backend": "10.10.3.22:8443",
+          "counters": {
+            "benchmark.http_5xx": 3
+          }
         }
       ],
       "totals": {
-        "benchmark.http_2xx": 2699
+        "benchmark.http_2xx": 1347,
+        "benchmark.http_5xx": 3
       },
       "results": [
-        {
-          "backend": "10.10.1.14:8443",
-          "elapsed_ms": 150002,
-          "counters": {
-            "benchmark.http_2xx": 1350
-          }
-        },
         {
           "backend": "10.10.3.22:8443",
           "elapsed_ms": 150002,
           "counters": {
-            "benchmark.http_2xx": 1349
+            "benchmark.http_2xx": 1347,
+            "benchmark.http_5xx": 3
           }
+        }
+      ],
+      "backend_errors": [
+        {
+          "backend": "10.10.1.14:8443",
+          "error": "awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\""
         }
       ]
     },
@@ -211,8 +219,8 @@
         {
           "expr": "counter:benchmark.stream_resets == 0",
           "scope": "pool",
-          "pass": false,
-          "actual": "12"
+          "pass": true,
+          "actual": "0"
         },
         {
           "expr": "counter:benchmark.pool_connection_failure == 0",
@@ -236,54 +244,37 @@
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": false,
-          "actual": "5.9199210677190965"
+          "actual": "2.999960000533326"
         },
         {
           "expr": "latency_2xx.p50 < 60s",
           "scope": "per-backend",
           "pass": true,
-          "actual": "1.832511ms, 2.153599ms"
+          "actual": "2.153599ms"
         },
         {
           "expr": "latency_2xx.p99 < 60s",
           "scope": "per-backend",
           "pass": true,
-          "actual": "2.235519ms, 2.771455ms"
-        }
-      ],
-      "failures": [
-        {
-          "backend": "10.10.3.22:8443",
-          "counters": {
-            "benchmark.stream_resets": 12,
-            "benchmark.stream_resets_before_headers": 12,
-            "benchmark.stream_resets_connection_termination": 12
-          }
+          "actual": "2.771455ms"
         }
       ],
       "totals": {
-        "benchmark.http_2xx": 888,
-        "benchmark.stream_resets": 12,
-        "benchmark.stream_resets_before_headers": 12,
-        "benchmark.stream_resets_connection_termination": 12
+        "benchmark.http_2xx": 450
       },
       "results": [
         {
-          "backend": "10.10.1.14:8443",
+          "backend": "10.10.3.22:8443",
           "elapsed_ms": 150002,
           "counters": {
             "benchmark.http_2xx": 450
           }
-        },
+        }
+      ],
+      "backend_errors": [
         {
-          "backend": "10.10.3.22:8443",
-          "elapsed_ms": 150002,
-          "counters": {
-            "benchmark.http_2xx": 438,
-            "benchmark.stream_resets": 12,
-            "benchmark.stream_resets_before_headers": 12,
-            "benchmark.stream_resets_connection_termination": 12
-          }
+          "backend": "10.10.1.14:8443",
+          "error": "awaiting execution response: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = \"error reading from server: EOF\", received prior goaway: code: NO_ERROR, debug data: \"Server shutdown\""
         }
       ]
     }

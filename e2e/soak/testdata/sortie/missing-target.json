@@ -8,7 +8,7 @@
       "rate": 9,
       "per_backend": true,
       "duration_ms": 150000,
-      "elapsed_ms": 155261,
+      "elapsed_ms": 150764,
       "pass": true,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
@@ -56,13 +56,38 @@
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": true,
-          "actual": "17.989706068441897"
+          "actual": "17.999760003199956"
         },
         {
-          "expr": "counter:benchmark.http_2xx > 0",
-          "scope": "pool",
+          "expr": "latency_2xx.p50 < 60s",
+          "scope": "per-backend",
           "pass": true,
-          "actual": "2685"
+          "actual": "1.832511ms, 2.153599ms"
+        },
+        {
+          "expr": "latency_2xx.p99 < 60s",
+          "scope": "per-backend",
+          "pass": true,
+          "actual": "2.235519ms, 2.771455ms"
+        }
+      ],
+      "totals": {
+        "benchmark.http_2xx": 2700
+      },
+      "results": [
+        {
+          "backend": "10.10.1.14:8443",
+          "elapsed_ms": 150002,
+          "counters": {
+            "benchmark.http_2xx": 1350
+          }
+        },
+        {
+          "backend": "10.10.3.22:8443",
+          "elapsed_ms": 150002,
+          "counters": {
+            "benchmark.http_2xx": 1350
+          }
         }
       ]
     },
@@ -73,7 +98,7 @@
       "rate": 9,
       "per_backend": true,
       "duration_ms": 150000,
-      "elapsed_ms": 155414,
+      "elapsed_ms": 150764,
       "pass": true,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
@@ -121,13 +146,38 @@
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": true,
-          "actual": "17.9846200063036"
+          "actual": "17.993093425420994"
         },
         {
-          "expr": "counter:benchmark.http_2xx > 0",
-          "scope": "pool",
+          "expr": "latency_2xx.p50 < 60s",
+          "scope": "per-backend",
           "pass": true,
-          "actual": "2684"
+          "actual": "1.832511ms, 2.153599ms"
+        },
+        {
+          "expr": "latency_2xx.p99 < 60s",
+          "scope": "per-backend",
+          "pass": true,
+          "actual": "2.235519ms, 2.771455ms"
+        }
+      ],
+      "totals": {
+        "benchmark.http_2xx": 2699
+      },
+      "results": [
+        {
+          "backend": "10.10.1.14:8443",
+          "elapsed_ms": 150002,
+          "counters": {
+            "benchmark.http_2xx": 1350
+          }
+        },
+        {
+          "backend": "10.10.3.22:8443",
+          "elapsed_ms": 150002,
+          "counters": {
+            "benchmark.http_2xx": 1349
+          }
         }
       ]
     }

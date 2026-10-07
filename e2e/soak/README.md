@@ -32,7 +32,17 @@ through a headless Service and drives each at 60 rps. The eight targets of
 `sortie-targets.txt` are eight concurrent executions per engine: **9 rps to each of the
 six mesh targets, 3 rps to each of the two UDS targets**, per node (k6: ~9.5 and ~1.5).
 The loader's identity is the ServiceAccount `soak-sortie`, not `default`, and its
-requests carry `User-Agent: aether-soak-sortie`.
+requests carry `User-Agent: aether-soak-sortie`. Engines and the sortie pod both run in
+the PriorityClass `aether-soak-loader`.
+
+**What an engine costs.** About **0.13 core and 300 MiB per node** while the run is on
+(kind, 15 minutes; talos-main has not been read yet), and ~600 MiB for the instant the
+final report is assembled. The plan asks for Nighthawk's `WAIT` idle
+strategy, in which a worker thread blocks until its next request is due, so the engine
+has a CPU request (150m) and **no CPU limit**: nothing throttles it, it sends every
+request on time, and its latency numbers are the mesh's. Up to sortie b71b37e the same
+engine cost 1.7 cores and ran under a 400m limit that put the CFS period into every
+latency number; proposal 042, "CPU and memory", has both tables.
 
 **Launch — from the MAIN session** (the churn driver, the watchdog and the saver are
 detached, but the kickoff itself must not be reaped half-way):
@@ -54,18 +64,51 @@ e2e/soak/run.sh soak --context talos-main --label "nightly-1007/2.5.0-abc1234" -
 ```
 
 `run.sh` does, in order: the pre-flight (context answers; the plan's shares are whole;
+**provenance**, below; the PriorityClass is the soak's or absent;
 **every `aether-system` pod Running with every container ready, compared as numbers**;
 every target's mesh Service exists; no run already exists for the release; the
 watchdog can take a baseline; in soak mode also `churn.sh --preflight`,
-`anyport-probe.sh` and `churn.sh --new-sa-once`) → the PriorityClass and the report
-PVC → the engines **alone**, waiting for the DaemonSet and for the headless Service to
-list every one → 30 s for the mesh to take the new pods in → the plan
-(`sortie-plan.sh`, with the statsd collector's cluster IP resolved now) → the Job →
-the saver → the churn driver (soak) → the restart watchdog → `…_KICKOFF_DONE`. Any
-failed step prints `ABORT <why>` and exits 1; nothing after it is started.
+`anyport-probe.sh` and `churn.sh --new-sa-once`) → the PriorityClass (applied, read
+back) and the report PVC → the engines **alone**, waiting for the DaemonSet and for the
+headless Service to list every one → 30 s for the mesh to take the new pods in → the
+plan (`sortie-plan.sh`, with the statsd collector's cluster IP resolved now) → the
+PriorityClass again → the Job → the saver → the churn driver (soak) → the restart
+watchdog → `…_KICKOFF_DONE`. Any failed step prints `ABORT <why>` and exits 1; nothing
+after it is started.
 
 It does **not** deploy aether. That stays a separate, explicitly authorized
 `helm upgrade` (and gotcha 5 still applies to it).
+
+**Provenance.** The chart and both images are pinned by digest (`run.sh`,
+`sortie-values.yaml`) and signed by sortie's publish workflow: cosign, keyless, the
+signature an OCI referrer of the manifest it signs. The pre-flight pulls the chart by
+its digest, renders it with the run's values, refuses any image that is not a digest
+reference, and verifies the chart and every rendered image:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  quay.io/sortie/chart-sortie@sha256:f5007911c7e0e204ff97bdeeec88bd2e5a135fcd08eb9bb0dea96be0dbd4cc7c
+# the same for quay.io/sortie/sortie@sha256:6a2dc1f7… and quay.io/sortie/engine@sha256:d6ea5aca…
+# (sortie-values.yaml); add --certificate-github-workflow-sha <commit> to bind them to one commit.
+```
+
+It runs whenever a cosign is found: `SOAK_COSIGN`, else `cosign` on `PATH`. The
+repository's pinned one (`//bazel/cosign`, v3.1.2) is
+
+```bash
+bazel build @rules_img_signer_cosign//cosign
+export SOAK_COSIGN="$PWD/$(bazel cquery --output=files @rules_img_signer_cosign//cosign 2>/dev/null)"
+```
+
+Without one the run goes ahead and says `provenance NOT VERIFIED` (the digests still
+pin what is pulled); `--verify` turns that into an abort, `--no-verify` skips the check.
+**cosign 3 or newer**: an older client does not look up referrers and reports `no
+signatures found` for a signed artifact, so the pre-flight refuses it instead of
+believing it. When bumping sortie, change the three digests together and verify the
+index **and both per-arch manifests** of each image by hand once; the pre-flight
+verifies what the cluster is told to pull, which is the index.
 
 **What it writes to the cluster:** `priorityclass/aether-soak-loader` and
 `pvc/sortie-soak-reports`; the Helm release `soak` in `aether-test`
@@ -77,11 +120,12 @@ soak mode, what `churn.sh` does. Nothing else.
 
 | file | what |
 |---|---|
-| `run.env` | the run's facts: tag, context, release, backends, duration, Job, report path |
+| `run.env` | the run's facts: tag, context, release, backends, duration, Job, report path, the chart digest and whether it was verified |
 | `plan.yaml`, `shares.tsv` | the plan as run, and `target<TAB>rps per node<TAB>url` |
-| `engines.tsv` | `podIP<TAB>node<TAB>pod` at launch. **The report names backends by pod IP; this is the only map to nodes** |
+| `engines.tsv` | `podIP<TAB>node<TAB>pod` at launch. **The report and the live series name backends by pod IP; this is the only map to nodes** |
+| `chart/` | the chart archive that was verified and installed |
 | `churn.log`, `restart-watch.log`, `proxy-rss.tsv` | what used to be `/tmp/soak-churn.log`, `/tmp/soak-restart-watch.log`, `/tmp/soak-proxy-rss.tsv`. **Every `/tmp/soak-*` path below in this README is that file in the run directory** when the run was started by `run.sh` |
-| `save.log`, then `report.json`, `sortie.log`, `job.json`, `engine-*.log`, `SAVED` | written by the saver when the Job finishes |
+| `save.log`, then `report.json`, `sortie.log`, `job.json`, `engine-*.log`, `SAVED` | written by the saver when the Job finishes. `sortie.log` holds a progress line per target and node every 60 s, then the readable summary |
 
 **Save, grade, tear down — in that order.**
 
@@ -97,18 +141,62 @@ also stays on the PVC (`/var/run/sortie/<run tag>.json`), which teardown keeps.
 `job=failed` only means a threshold failed (sortie exits 1): the report is saved
 either way.
 
-**Reading the gate.**
+### The first short e2e on talos-main
+
+Phase 1 of the cut-over, k6 not running. From the repository root, on `main`:
+
+```bash
+OUT=~/aether-soak-logs/$(date -u +%m%d)-sortie-e2e
+
+# 0. Optional, recommended: the pinned cosign, and --verify to insist on it.
+bazel build @rules_img_signer_cosign//cosign
+export SOAK_COSIGN="$PWD/$(bazel cquery --output=files @rules_img_signer_cosign//cosign 2>/dev/null)"
+
+# 1. Read-only: every check, nothing written to the cluster.
+e2e/soak/run.sh e2e --context talos-main --preflight --verify
+
+# 2. The run. 15 minutes of load; add --rolls for the second run, not the first.
+e2e/soak/run.sh e2e --context talos-main --out "$OUT" --verify
+
+# 3. Wait for the saver (load + about a minute), then grade and tear down.
+until grep -q 'SORTIE_SAVE' "$OUT/save.log"; do sleep 30; done; tail -1 "$OUT/save.log"
+e2e/soak/sortie-gate.sh --dir "$OUT" --per-node
+grep ' SUMMARY ' "$OUT/restart-watch.log"
+e2e/soak/sortie-teardown.sh --dir "$OUT"
+```
+
+What each step writes to the cluster:
+
+| step | writes |
+|---|---|
+| `run.sh … --preflight` | nothing. It pulls the chart to a local temporary directory and reads the cluster |
+| `run.sh e2e` | `priorityclass/aether-soak-loader` (cluster-scoped; absent on talos-main as of 2026-10-07, so the first run creates it, and later ones find it), `pvc/sortie-soak-reports` (64Mi, `aether-test`, the cluster's default or only StorageClass), then the Helm release `soak` in `aether-test`: `serviceaccount/soak-sortie`, `daemonset/soak-sortie-engine` (five mesh-managed pods, one per worker), `service/soak-sortie-engine-nodes` (headless), and 30 s later a plan ConfigMap and `job/soak-sortie-<hash>` (one pod). With `--statsd auto` the engines also send statsd to `o11y/otel-scraper`, which lands as `sortie_mesh_*` series in Prometheus |
+| `… --rolls` | additionally `rollout restart daemonset/aether-agent` at T+3m and `daemonset/aether-proxy` at T+8m, in `aether-system` |
+| the saver (armed by `run.sh`) | one pod, `soak-report-reader`, for a few seconds: it mounts the PVC read-only and prints the report |
+| `sortie-gate.sh` | nothing; it reads the run directory |
+| `sortie-teardown.sh` | uninstalls the release (engines, Service, ServiceAccount, Job, ConfigMap). **Keeps** the PVC (`--purge` deletes it) and the PriorityClass |
+
+What that run is for is in proposal 042, "Unverified until the talos run": the engine's
+CPU on those nodes (`kubectl top pod -n aether-test -l app.kubernetes.io/component=engine`
+against the 150m request), five backends on five nodes, the per-backend series, the
+`soak-sortie` identity's first requests with SPIRE on, and the PVC.
+
+### Reading the gate
 
 ```
-PASS  svc-1  rate=45/45rps http_2xx=1377000 backends=5/5  failures=none
-FAIL  uds-echo  rate=14.99/15rps http_2xx=458985 backends=5/5  -- failures stream_resets=12 [main-worker-04=12] stream_resets_before_headers=12 [main-worker-04=12]
-VERDICT FAIL targets=8 passed=7 failed=1 backends=5 report_pass=false
+PASS  svc-1  rate=45/45rps http_2xx=1377000/1377000 backends=5/5  failures=none  lat p50<=2.4ms p99<=6.1ms
+FAIL  uds-echo  rate=14.99/15rps http_2xx=458985/459000 backends=5/5  -- failures stream_resets=12 [main-worker-04=12] stream_resets_before_headers=12 [main-worker-04=12]  lat p50<=2.6ms p99<=7ms
+VERDICT FAIL targets=8 passed=7 failed=1 backends=5 lost_backends=0 report_pass=false
 ```
 
-A target passes only if it is in the report, ran without an execution error for its
-whole duration, ran on every engine that was ready at launch, has **zero** in every
-failure class on every node, held 99 % of its own rate, and failed no plan threshold.
-The classes (the zero-failure set) and what each means:
+`http_2xx=<counted>/<planned>` is the pool's total against `share × nodes × duration`;
+`backends=<returned a clean result>/<expected>`. `--per-node` adds one `NODE` line per
+target and backend with the same numbers for that node.
+
+A target passes only if it is in the report, lost no backend, ran for its whole
+duration on every engine that was ready at launch, has **zero** in every failure class
+on every node, held 99 % of its own rate **on every node**, and failed no plan
+threshold. The classes (the zero-failure set) and what each means:
 
 | counter | a request that | the k6 class it replaces |
 |---|---|---|
@@ -127,48 +215,128 @@ floor catches a target that stops answering, the prober catches the rest).
   be attributed, per target, per class, per node — from the access logs
   (`client_sa soak-sortie`, `user_agent aether-soak-sortie`) and the roll brackets in
   `churn.log`. It is not by itself a failed soak. The prober stays authoritative.
-- **`pool_overflow` is the harness, not the mesh.** The engine runs under a 400m CPU
-  limit that it would otherwise exceed four times over (its worker threads never
-  block), and holds its rate only by queueing due requests. Overflow with no `http_5xx`
-  or `stream_resets` beside it means the limit is too tight for that node: fix that
-  before reading anything else in the report. Proposal 042, "CPU and memory".
-- **`error: … nighthawk reported failure`** with no counters: an execution was ended
-  by one of Nighthawk's default failure predicates (the first 4xx, 5xx, connection
-  failure or reset stops it). `sortie-plan.sh` lifts all four, so seeing this means a
-  plan that was not rendered by it.
-- **`error: … execution cancelled`** on every target: the sortie pod was stopped (an
-  upgrade or a forced teardown mid-run). **`error: … EOF`**: an engine died — look for
-  it in `restart-watch.log` (an OOMKill shows there) and in `engines-end.tsv`.
+- **An execution goes the distance.** A 503 is a number in the report, not the end of
+  that target's load: sortie turns Nighthawk's stop-at-first-failure predicates off
+  itself, and the plan no longer has to. A target that failed for 90 s reads
+  `http_5xx=…` on each node and keeps its full count for the rest of the run.
+- **`LOST BACKEND <node> (<ip>:8443)`**: that engine did not finish — its pod was
+  deleted or evicted, its node shut down, it was OOM-killed. Every target fails **for
+  that node** and the line goes on to say how the others did (`survivors
+  main-worker-02=ok …`): their counters are whole and are judged as usual. A `LOST`
+  line before the verdict carries what sortie said about it, once. One lost engine is
+  one node's share of the run, not the run; look for it in `restart-watch.log` (an
+  OOMKill shows there) and compare `engines.tsv` with `engines-end.tsv` (a replaced pod
+  has a new name and IP, and was never driven).
+
+  ```
+  FAIL  svc-1  rate=36/45rps http_2xx=1101600/1377000 backends=4/5  -- LOST BACKEND main-worker-03 (10.244.3.17:8443) [returned nothing] | survivors main-worker-01=ok main-worker-02=ok main-worker-04=ok main-worker-05=ok
+  LOST  main-worker-03 (10.244.3.17:8443)  targets=8  error: awaiting execution response: rpc error: code = Unavailable …
+  ```
+
+  The plan's own rate floor does **not** catch this for the 9 rps targets (four nodes at
+  9 rps clear "99 % of 3 rps × 5 nodes"); the gate fails them on `backend_errors`.
+- **`SORTIE_OVERDUE` in `save.log`, and no report: a node went SILENT.** This is the
+  one failure a lost backend is *not*. An engine whose node freezes, loses power or is
+  partitioned closes nothing, and sortie (94cf103) waits for it without limit: on kind
+  a paused node held the Job for 20 minutes, until it was thawed. The run ends within
+  seconds of its duration, so the saver logs `SORTIE_OVERDUE` once the Job is two
+  minutes late. Find the node (`kubectl get nodes`; the engine pods `-o wide`). If it
+  comes back, sortie takes its late answer and the gate reads `ran off plan (…s) on
+  [<node>=…s]` for it, with the other nodes whole. If it does not, **there is no
+  report**: stopping the sortie pod cancels the run and a cancelled run is not
+  evaluated. What is left is `sortie.log` (each target's cumulative counters per node,
+  as of the last one-minute progress line), the per-node statsd series, and the access
+  logs. A sortie defect, open; proposal 042, "Risks".
+- **`rate below 99% of 9 rps on [main-worker-02=8.73]`**: that node sent or completed
+  fewer requests than planned. With failure counters beside it, the failures are why.
+  Alone, the engine on that node was slow to send or the target slow to answer: read
+  that node's CPU first.
+- **`pool_overflow` is the harness, not the mesh.** The engine refused its own request
+  because the previous one had not been sent yet. It has no CPU limit, so this now
+  means the *node* could not give it the tenth of a core it needs — a finding about the
+  node at that moment, to be placed against the roll brackets like any other. (Up to
+  sortie b71b37e the engine ran under a 400m limit and overflow meant the limit; the
+  plan queued requests to hide it. Both are gone.)
+- **`error: … execution cancelled`** on every target, no counters: the sortie pod was
+  stopped (an upgrade or a forced teardown mid-run, or it was evicted).
 - **`backends 4/5`**: an engine was not ready when the run started; that node was
   never driven. `run.sh` refuses to start in that state, so this means the pool
   changed between its check and the Job's own resolution.
-- **Do not grade on sortie's latency.** It includes the CPU limit's throttle.
+- **`OLD-FORMAT sortie report`, exit 2**: the report was written by a sortie older than
+  94cf103 (no per-backend `results`). The gate does not grade it; use the
+  `sortie-gate.sh` of the commit that ran it.
+- **Latency (`lat p50<=… p99<=…`) is a soft signal, not a gate.** It is the worst
+  node's, per target, taken from two thresholds the plan carries only so the numbers
+  reach the report (`latency_2xx.p50|p99 < 60s`). With no CPU limit on the engine it
+  measures the mesh and not the CFS period — on kind p99 is 2–4 ms where the throttled
+  engine read 20–100 ms — so a p99 that moves between runs, or during a roll (the
+  cumulative `mean`/`max` on each minute's progress line in `sortie.log`), is now worth
+  a look. Nothing fails on it until
+  talos-main has shown what it looks like there.
 - **The k6 benign `DC` (#1009) should not exist for this loader.** Envoy's client does
   not close first after a complete response. A 200 / `DC` / full-bytes row with
   `client_sa soak-sortie` is a finding to report, not a baseline to subtract.
 
-**Live view.** With `--statsd auto` (the default) each engine flushes its counters every
-5 s to the statsd receiver of `o11y/otel-scraper` (`run.sh` resolves the cluster IP at
-launch; the sink takes no names). They land in Prometheus as `job="statsd"`:
+### Live view
+
+With `--statsd auto` (the default) each engine flushes its counters every 5 s to the
+statsd receiver of `o11y/otel-scraper` (`run.sh` resolves the cluster IP at launch; the
+sink takes no names). They land in Prometheus as `job="statsd"`, **one series per
+target, per node, per worker thread**:
+
+```
+sortie_mesh_<target>_<backend>_cluster_<worker>_benchmark_http_2xx_total
+sortie_mesh_svc_1_10_244_3_17_cluster_0_benchmark_http_2xx_total
+```
+
+(statsd: `sortie.mesh.<target>.<backend>.cluster.<worker>.benchmark.http_2xx`.)
+`<target>` has `-` as `_`; `<backend>` is the engine's **pod IP** with `.` as `_`;
+`<worker>` is `0` (one worker per target). The receiver attaches no labels, so the
+node is in the metric name and nowhere else. To put a name on it:
+
+```bash
+# podIP as it appears in the series name, and its node -- from the run directory
+awk -F'\t' '{ ip = $1; gsub(/\./, "_", ip); print ip, $2 }' "$OUT/engines.tsv"
+# or live
+kubectl --context talos-main -n aether-test get pods -l app.kubernetes.io/component=engine \
+  -o custom-columns=IP:.status.podIP,NODE:.spec.nodeName
+```
 
 ```promql
-# requests per second per target -- is the load flowing?
-sum by (__name__) (rate({__name__=~"sortie_mesh_.*_benchmark_http_2xx_total"}[1m]))
-# any failure class, ever. No series on a clean run (they are born on first
-# occurrence: the counter rule under "Grading" applies).
+# requests per second per target, summed over the nodes -- is the load flowing?
+# (label_replace turns the name into a `target` label; the backend is the IP part.)
+sum by (target) (label_replace(
+  rate({__name__=~"sortie_mesh_.*_cluster_0_benchmark_http_2xx_total"}[1m]),
+  "target", "$1", "__name__", "sortie_mesh_(.*)_[0-9]+_[0-9]+_[0-9]+_[0-9]+_cluster_0_.*"))
+# one node's share: put its IP in the name
+rate({__name__=~"sortie_mesh_.*_10_244_3_17_cluster_0_benchmark_http_2xx_total"}[1m])
+# any failure class, ever, with the node in the name. No series on a clean run (they
+# are born on first occurrence: the counter rule under "Grading" applies).
 {__name__=~"sortie_mesh_.*_benchmark_(http_[45]xx|stream_resets.*|pool_.*)_total"}
 ```
 
-**These series are one per target, not one per node and not the fleet sum**: every
-engine sends the same names and the receiver keeps no sender, so on kind two engines
-read as one engine's worth. Use them to see that the load is up and that a class just
-moved; grade from the report.
+**The per-node series add up to the report.** On kind, at the end of a 15-minute run,
+the sum over the two engines of `…_http_2xx_total` equalled the report's `totals` for
+every one of the eight targets. Up to sortie b71b37e every engine wrote the same name
+and five engines read as one; that caveat is gone. Two things remain: a new engine pod
+is a new IP, so **every run starts new series** (and a replaced pod's series simply
+stop), and the collector forgets a series 15 minutes after its last sample. Grade from
+the report; use the series to see the load is up, on which node a class moved, and
+when.
+
+### Side by side with k6, and stopping early
 
 **Side by side with k6** (proposal 042, phase 2): both may run at once — `run.sh` notes
 it — and the node then carries both loads. Tear the k6 runner down with
 `kubectl -n aether-test delete ds/k6-soak-loader`, **not** `kubectl delete -f
 k6-runner.yaml`: that file also owns the `aether-soak-loader` PriorityClass the engines
-reference.
+and the sortie pod reference, and a pod that names a PriorityClass which does not exist
+is **refused at admission** — the engines already running keep running, but an engine
+that has to be replaced, or a Job created afterwards, gets no pod. `run.sh` protects
+its own kickoff (it applies the class and reads it back before the engines and again
+before the Job, and its pre-flight refuses a class of that name with another value);
+it cannot protect a run already in flight. If it happens mid-run:
+`kubectl apply -f` the PriorityClass half of `k6-runner.yaml` again at once.
 
 **Stopping a run early:** `sortie-teardown.sh --dir "$OUT" --force` (sortie cancels its
 engines' executions on SIGTERM; the run is then reported cancelled, not evaluated),
@@ -878,7 +1046,9 @@ the pod exists, and after that it cannot be placed.
 - **The loader gate (proposal 042)** — `sortie-gate.sh --dir <run dir>`: every target
   `PASS`, or every `FAIL` class attributed per node to a roll bracket from the access
   logs, exactly as a non-zero k6 `http_req_failed` was. `pool_overflow` is the load
-  generator falling behind, never a mesh failure. See "Load driver: sortie".
+  generator falling behind, never a mesh failure, and a `LOST BACKEND` is one node's
+  share of the loader, not the run: the other nodes are graded as usual. See "Load
+  driver: sortie".
 - **The restart gate (#1242)** — 0 new container restarts in `aether-system`,
   `aether-ingress` and `aether-test` over T0 → T0+8h: the watchdog's `SUMMARY` line
   reads `verdict=PASS new_restarts=0`. See "The restart gate".
@@ -988,8 +1158,9 @@ keep it well under the 12-minute roll spacing. `k6-soak-loader` restarts once af
 exits at ~T0+8h26m by design, which is why the watchdog stops at T0+8h. The sortie
 loader has no such trap: its Job pod finishes and is not restarted, and its engines
 keep running. An engine restart IS a finding (on kind, a 512Mi limit OOM-killed both
-engines 60 s into a run and the watchdog named them), and it also fails every target
-of the run with an execution `error`.
+engines 60 s into a run and the watchdog named them), and it fails every target of the
+run for that node: the gate's `LOST BACKEND` line. An engine pod that is deleted and
+replaced is not a restart and the watchdog does not see it; the gate does.
 
 `run.sh` starts the watchdog itself, **at T0** — right after the churn driver in soak
 mode, right after the load in e2e mode. The workstation wrapper it replaces started it
@@ -1842,9 +2013,10 @@ Each of these invalidated a real run:
    digest. Use `helm get values <rel> -n <ns> -o yaml > /tmp/v.yaml` then `-f /tmp/v.yaml`.
 6. **k6 needs 1Gi.** At 256Mi runners OOM-restart ~3-5h into the 7h40m run, fragmenting
    the summary. The sortie engine's numbers are its own (kind: ~300Mi running eight
-   executions, ~730Mi peak while the final report is assembled; a 512Mi limit killed it
-   at the first `--progress` snapshot, which is why the values pass no `--progress`),
-   and an engine that dies fails EVERY target of the run, not one node's share.
+   executions, flat; ~600Mi for the instant the final report is assembled, which is what
+   the 1Gi limit is for — 512Mi kills the engine as the run ends), and an engine that
+   dies loses its node's share of the run, all eight targets of it, while the other
+   nodes are graded as usual.
 7. **`echo` must be multi-replica and spread, or the mesh_dns tier is not a mesh
    signal.** It is the *only* target of that tier, so its own health is
    indistinguishable from the mesh's. On 2026-09-02 it was a single replica that
@@ -1897,9 +2069,10 @@ Each of these invalidated a real run:
 - `run.sh` — the one kickoff (proposal 042, #1323): `e2e` and `soak` modes, explicit
   `--context`. See "Load driver: sortie".
 - `sortie-values.yaml` — Helm values for the sortie chart: the engine DaemonSet, its
-  mesh label and upstreams annotation, the PriorityClass, resources, and both images by
-  digest. The chart's digest is in `run.sh`. Bump the three together and re-verify the
-  signatures (the command is in the file's header).
+  mesh label and upstreams annotation, the PriorityClass (engines and the sortie pod),
+  resources (a CPU request, no CPU limit), `--progress 60s`, and both images by digest.
+  The chart's digest is in `run.sh`. Bump the three together and re-verify the
+  signatures (the command is in the file's header; `run.sh` repeats it on every run).
 - `sortie-targets.txt` — the eight targets and their weights. `sortie-plan.sh` renders
   the plan of either profile from it and refuses shares that are not whole requests per
   second.
@@ -1956,7 +2129,9 @@ Each of these invalidated a real run:
   > `k6-mesh-soak.js`.
 - `k6-runner.yaml` — the 5-node k6 runner DaemonSet. **Retired after the cut-over**, with
   the script above. It also defines the `aether-soak-loader` PriorityClass, which
-  `run.sh` applies for the sortie engines too.
+  `run.sh` applies for the sortie engines and the sortie pod too — so **never
+  `kubectl delete -f` this file while sortie is installed** (see "Side by side with
+  k6").
 - `churn.sh` — the 33-roll churn driver (incl. the two uds-csi steps) plus the two
   new-ServiceAccount steps, the no-roll window and the demand-set shrink; takes a build
   label for the log header.
@@ -1965,10 +2140,14 @@ Each of these invalidated a real run:
 - `restart-watch.sh` — the restart watchdog (#1242). See "The restart gate".
 - `harness_test.sh` + `testdata/` — dry tests for `restart-watch.sh` (canned
   `kubectl get pods -o json` through a fake kubectl, including a refused call and a
-  non-List answer), `udscsi-window.awk`, `sortie-gate.sh` (canned sortie reports:
-  clean, stream resets on one target, a missing target, `pool_overflow`, a dead
-  engine, a short pool), `sortie-plan.sh` (shares and both profiles) and
-  `pods-not-ready.awk` (with the old expression as the red reading). No cluster; needs
+  non-List answer), `udscsi-window.awk`, `sortie-gate.sh` (canned sortie reports in
+  the 94cf103 format: clean, stream resets on one target, a missing target,
+  `pool_overflow`, a lost backend, every backend lost, a node that froze and thawed,
+  failures and a slow node on one backend only, a cancelled run, a short pool, and an
+  old-format report, which is refused),
+  `sortie-plan.sh` (shares and both profiles), the pins and the PriorityClass in
+  `sortie-values.yaml` / `run.sh`, and `pods-not-ready.awk` (with the old expression
+  as the red reading). No cluster; needs
   bash, jq and awk. Run `bash e2e/soak/harness_test.sh` after editing any of them;
   `bazel test //e2e/soak:harness_test` runs it with the pinned jq.
 - `newsa-client.sh` — the new-SA step's workload (busybox `sh` + `curl` in the pod,
