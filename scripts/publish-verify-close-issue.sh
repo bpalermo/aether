@@ -23,9 +23,23 @@
 #     opens the issue either;
 #   - main's head unknown, or a malformed sha (fail closed: keep).
 #
+# THE CONTROL'S ISSUES TOO (#1340). The expected-red control has rolling
+# issues of its own, one per way it can fail
+# (scripts/publish-verify-control-issue.sh). #1340 was filed for one 502 from
+# the registry and nothing closed it either. They close on a different rule,
+# because the control does not depend on the commit under verification: ANY
+# `workflow_run` or `schedule` run whose control recorded `ok` -- it went red
+# as expected -- closes every open control issue, whatever that run's gate
+# decided about the artifacts issue (a superseded commit, an older commit).
+# The verdict is read from the file the control wrote; no verdict on record
+# keeps them open (fail closed). The step this script runs in is gated on
+# `success()`, so it does not run at all when the control failed.
+#
 #   scripts/publish-verify-close-issue.sh decide <event> <commit> <main head> \
 #       <superseded: true|false|""> <gate conclusion> <signatures conclusion>
 #     prints `close` or `keep: <why>` (pure; the test drives this)
+#   scripts/publish-verify-close-issue.sh decide-control <event> <control verdict>
+#     the same for the control's issues (pure)
 #   scripts/publish-verify-close-issue.sh
 #     the workflow step. Reads GITHUB_EVENT_NAME, TARGET, SUPERSEDED,
 #     VERIFY_CONCLUSION, COSIGN_CONCLUSION and RUN_URL; resolves main's head
@@ -33,6 +47,8 @@
 #     `issues: write` and GH_REPO, the same as the step that opens the issue.
 #     Closes every OPEN issue whose title is exactly ISSUE_TITLE with a one-line
 #     comment naming the run. No open issue is the normal case and says so.
+#     Then the control's issues, by the recorded verdict
+#     (`publish-verify-control-issue.sh verdict` / `titles`).
 #
 # NEVER FAILS THE RUN. A green verification must not go red because the issue
 # API hiccuped: a failed listing or close is a ::warning::, exit 0, and the
@@ -72,6 +88,55 @@ decide() {
 	fi
 }
 
+# The control's issues: close on any automatic run whose control went red as
+# expected. <verdict> is what the control recorded (ok | green | wrong |
+# inconclusive | unknown).
+decide_control() {
+	local event="$1" verdict="$2"
+	if [ "$event" != workflow_run ] && [ "$event" != schedule ]; then
+		echo "keep: a ${event:-<no event>} run never opens or closes the issue"
+	elif [ "$verdict" != ok ]; then
+		echo "keep: this run's control did not go red as expected (recorded: ${verdict:-nothing})"
+	else
+		echo close
+	fi
+}
+
+# close_titled <title> <comment>: close every OPEN issue whose title is exactly
+# <title>. Never fails: an issue-API error is a ::warning::.
+close_titled() {
+	local title="$1" comment="$2" numbers num
+	# `in:title` is a word search, so match the title exactly before touching
+	# anything: an issue that merely quotes it is not this one.
+	if ! numbers="$(gh issue list --state open --search "in:title \"${title}\"" -L 20 \
+		--json number,title -q ".[] | select(.title == \"${title}\") | .number")"; then
+		echo "::warning title=publish-verify::could not list open issues, so \"${title}\" was not closed; the next green run will try again"
+		return 0
+	fi
+	if [ -z "$numbers" ]; then
+		echo "no open \"${title}\" issue; nothing to close"
+		return 0
+	fi
+	while read -r num; do
+		[[ "$num" =~ ^[0-9]+$ ]] || continue
+		if gh issue close "$num" --reason completed --comment "$comment"; then
+			echo "closed #${num}"
+		else
+			echo "::warning title=publish-verify::could not close #${num}; the next green run will try again"
+		fi
+	done <<<"$numbers"
+}
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ "${1:-}" = decide-control ]; then
+	[ "$#" -eq 3 ] || {
+		echo "usage: $0 decide-control <event> <control verdict>" >&2
+		exit 2
+	}
+	decide_control "$2" "$3"
+	exit 0
+fi
 if [ "${1:-}" = decide ]; then
 	[ "$#" -eq 7 ] || {
 		echo "usage: $0 decide <event> <commit> <main head> <superseded> <gate conclusion> <signatures conclusion>" >&2
@@ -94,31 +159,26 @@ fi
 
 verdict="$(decide "$event" "$target" "$head" "${SUPERSEDED:-}" "${VERIFY_CONCLUSION:-}" "${COSIGN_CONCLUSION:-}")"
 echo "event ${event:-<none>}, commit ${target:-<none>}, main head ${head:-<not needed>}: ${verdict}"
-[ "$verdict" = close ] || exit 0
-
-if [ "$event" = schedule ]; then
-	what="the scheduled sweep verified every push head it covers"
-else
-	what="main's head ${target:0:12} is published and its signatures verify"
-fi
-comment="Closed by a green publish-verify run: ${what}. ${RUN_URL:-run URL not recorded}"
-
-# `in:title` is a word search, so match the title exactly before touching
-# anything: an issue that merely quotes it is not this one.
-if ! numbers="$(gh issue list --state open --search "in:title \"${ISSUE_TITLE}\"" -L 20 \
-	--json number,title -q ".[] | select(.title == \"${ISSUE_TITLE}\") | .number")"; then
-	echo "::warning title=publish-verify::could not list open issues, so \"${ISSUE_TITLE}\" was not closed; the next green run will try again"
-	exit 0
-fi
-if [ -z "$numbers" ]; then
-	echo "no open \"${ISSUE_TITLE}\" issue; nothing to close"
-	exit 0
-fi
-while read -r num; do
-	[[ "$num" =~ ^[0-9]+$ ]] || continue
-	if gh issue close "$num" --reason completed --comment "$comment"; then
-		echo "closed #${num}"
+if [ "$verdict" = close ]; then
+	if [ "$event" = schedule ]; then
+		what="the scheduled sweep verified every push head it covers"
 	else
-		echo "::warning title=publish-verify::could not close #${num}; the next green run will try again"
+		what="main's head ${target:0:12} is published and its signatures verify"
 	fi
-done <<<"$numbers"
+	close_titled "$ISSUE_TITLE" "Closed by a green publish-verify run: ${what}. ${RUN_URL:-run URL not recorded}"
+fi
+
+# The expected-red control's issues (#1340). A verdict or a title list that
+# cannot be read keeps them open.
+control="$("${here}/publish-verify-control-issue.sh" verdict)" || control=""
+control_verdict="$(decide_control "$event" "$control")"
+echo "expected-red control (recorded: ${control:-nothing}): ${control_verdict}"
+[ "$control_verdict" = close ] || exit 0
+if ! titles="$("${here}/publish-verify-control-issue.sh" titles)" || [ -z "$titles" ]; then
+	echo "::warning title=publish-verify::could not read the control's issue titles; its issues were not closed"
+	exit 0
+fi
+while read -r control_title; do
+	[ -n "$control_title" ] || continue
+	close_titled "$control_title" "Closed by a publish-verify run whose expected-red control went red as expected: the gate was shown to fail on a never-published commit. ${RUN_URL:-run URL not recorded}"
+done <<<"$titles"

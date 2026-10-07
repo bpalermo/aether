@@ -19,6 +19,12 @@
 #       * a verifier that reports one artifact present;
 #       * a verifier that prints a perfect red but exits 0;
 #       * a verifier that could not complete (exit 2) -> inconclusive, 2.
+#   - THE VERDICT (#1340): each of those ends records which it was -- ok,
+#     green, wrong, inconclusive -- for the issue steps, so a registry that
+#     could not be read is never filed as a control that went green;
+#   - THE RE-RUN (#1340): a verifier that exits 2 is run again (three runs,
+#     10 s then 20 s), so a transient never reaches the issue; one that exited
+#     0 or 1 has answered and is NOT run again.
 #     A hand-written CORRECT red is accepted, so each rejection above is for its
 #     own defect and not because every stub is rejected.
 #   - the real verifier on unreadable repositories, or behind a lookup that
@@ -52,6 +58,14 @@ cd "$(dirname "$0")/.." || exit 2
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+
+# Where the control records its verdict, and ONE verifier run per case: the
+# cases below that expect "inconclusive" get it from a verifier that can never
+# complete, and running each of those three times would only take longer. The
+# re-run has its own cases at the end, on the defaults.
+export CONTROL_RESULT_FILE="$tmp/control.result"
+export CONTROL_ATTEMPTS=1
+unset CONTROL_RETRY_INTERVAL
 
 # --- the fake registry -------------------------------------------------------
 reg="$tmp/registry"
@@ -163,7 +177,7 @@ post_base="$(base_with "$post_bzl" "a tree from after the Quay cut-over")"
 # counts right (22 lines, 13 witnesses) so exactly ONE defect is under test.
 stub() {
 	local name="$1" body="$2"
-	printf '#!/usr/bin/env bash\nsha="$1"\n%s\n' "$body" >"$tmp/$name"
+	printf '#!/usr/bin/env bash\nsha="$1"\necho run >>"${STUB_CALLS:-/dev/null}"\n%s\n' "$body" >"$tmp/$name"
 	chmod +x "$tmp/$name"
 }
 sigs='for i in $(seq 1 9); do echo "  MISSING ${STUB_PREFIX}/r$i signature for *-${sha} (no image to sign)"; done'
@@ -197,10 +211,49 @@ stub no-witness 'for i in $(seq 1 13); do echo "  MISSING ${STUB_PREFIX}/r$i:*-$
 '"$sigs"'
 echo "FAIL: 22 of 22 artifact(s) missing across 1 commit(s)"; exit 1'
 
+# Exits 2 on its first run, then prints the correct red: a registry transient
+# that the next run does not see.
+stub flaky 'if [ "$(wc -l <"$STUB_CALLS")" -le 1 ]; then echo "registry-lib: GET https://quay.io/v2/auth answered HTTP 502; giving up after 4 attempt(s)" >&2; echo "::error::could not obtain a pull token for x" >&2; exit 2; fi
+for i in $(seq 1 13); do echo "  MISSING ${STUB_PREFIX}/r$i:*-${sha} (looked up directly: 404; witness dev: 200)"; done
+'"$sigs"'
+echo ""
+echo "FAIL: 22 of 22 artifact(s) missing across 1 commit(s)"; exit 1'
+
+# sleep: record the wait, do not wait (the re-run cases only).
+mkdir -p "$tmp/bin"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" >>"$SLEEP_LOG"\n' >"$tmp/bin/sleep"
+chmod +x "$tmp/bin/sleep"
+
 # --- cases -------------------------------------------------------------------
 control=scripts/publish-verify-control.sh
 fail=0
 n=0
+
+# expect_verdict <want>: what the case just run recorded for the issue steps.
+expect_verdict() {
+	local want="$1" got
+	got="$(sed -n 1p "$CONTROL_RESULT_FILE" 2>/dev/null)"
+	n=$((n + 1))
+	if [ "$got" = "$want" ]; then
+		printf '  ok    …recorded as %s\n' "$got"
+	else
+		printf '  FAIL  …recorded as %s, want %s\n' "${got:-nothing}" "$want"
+		fail=1
+	fi
+}
+# expect <what> <command...>: one more assertion about the case just run.
+expect() {
+	local what="$1"
+	shift
+	n=$((n + 1))
+	if "$@"; then
+		printf '  ok    …%s\n' "$what"
+	else
+		printf '  FAIL  …%s\n' "$what"
+		sed 's/^/        | /' "$tmp/out" | tail -8
+		fail=1
+	fi
+}
 
 expect_rc() {
 	local name="$1" want="$2"
@@ -221,6 +274,7 @@ expect_rc() {
 #    accepts it. The verifier's own summary is checked too, not just the verdict.
 expect_rc "real verifier, commit absent from a non-empty registry: control accepts" 0 \
 	env VERIFIER="$reg/verify-published-artifacts.sh" "$control" HEAD
+expect_verdict ok
 n=$((n + 1))
 if grep -qxF '  | FAIL: 22 of 22 artifact(s) missing across 1 commit(s)' "$tmp/out"; then
 	printf '  ok    the real verifier printed FAIL: 22 of 22\n'
@@ -244,16 +298,20 @@ fi
 # 3. The vacuous gate: prints MISSING, exits 0.
 expect_rc "mutated verifier that no longer counts MISSING: control rejects" 1 \
 	env VERIFIER="$mut/verify-published-artifacts.sh" "$control" HEAD
+expect_verdict green
 # 4-5. Nothing readable, or a lookup that 404s everything: the real verifier
 #      refuses to call that red (no witness -> exit 2), so the control is
 #      inconclusive rather than accepting a red that proves nothing (#985).
 expect_rc "real verifier on UNREADABLE repositories: never a red, control inconclusive" 2 \
 	env FAKE_EMPTY=1 VERIFIER="$reg/verify-published-artifacts.sh" "$control" HEAD
+expect_verdict inconclusive
+expect "the record quotes the verifier's own reason" grep -qF 'lists no tags' "$CONTROL_RESULT_FILE"
 expect_rc "real verifier whose lookup 404s EVERY tag: never a red, control inconclusive" 2 \
 	env FAKE_BROKEN=1 VERIFIER="$reg/verify-published-artifacts.sh" "$control" HEAD
 # 6. The same red, printed with no witness behind its absences.
 expect_rc "absences without a witness: control rejects" 1 \
 	env VERIFIER="$tmp/no-witness" "$control" HEAD
+expect_verdict wrong
 # 7-11. Wrong reds, a green, an inconclusive run, and the correct red.
 expect_rc "a MISSING line names another commit: control rejects" 1 \
 	env VERIFIER="$tmp/other-sha" "$control" HEAD
@@ -261,12 +319,16 @@ expect_rc "one artifact reported present: control rejects" 1 \
 	env VERIFIER="$tmp/one-present" "$control" HEAD
 expect_rc "perfect red output but exit 0: control rejects" 1 \
 	env VERIFIER="$tmp/exit-zero" "$control" HEAD
+expect_verdict green
 expect_rc "verifier could not complete: control is inconclusive" 2 \
 	env VERIFIER="$tmp/inconclusive" "$control" HEAD
+expect_verdict inconclusive
 expect_rc "hand-written correct red: control accepts" 0 \
 	env VERIFIER="$tmp/right-red" "$control" HEAD
+expect_verdict ok
 expect_rc "a perfect red on the OTHER registry (${other_prefix}): control rejects" 1 \
 	env VERIFIER="$tmp/wrong-registry" "$control" HEAD
+expect_verdict wrong
 
 # 12-15. The split, with the REAL verifier (proposal 040). A control on a POST
 #        tree is red on quay.io, each MISSING line naming that registry (the
@@ -302,8 +364,60 @@ split_case "real verifier, control on a POST-cut-over tree: red on ${post_prefix
 expect_rc "real verifier, POST tree, only ${pre_prefix%%/*} readable: inconclusive, never a red from the old registry" 2 \
 	env FAKE_ONLY_HOST="${pre_prefix%%/*}" VERIFIER="$reg/verify-published-artifacts.sh" "$control" "$post_base"
 
-if [ "$n" -ne 18 ]; then
-	echo "::error::ran ${n} cases, expected 18 -- a gate that checks nothing passes" >&2
+# 16-20. The re-run (#1340), on the DEFAULTS (three runs, 10 s then 20 s), with
+#        a sleep that records instead of waiting. Only exit 2 is run again.
+rerun() {
+	local name="$1" want="$2" verifier="$3"
+	: >"$tmp/calls"
+	: >"$tmp/sleeps"
+	expect_rc "$name" "$want" env -u CONTROL_ATTEMPTS PATH="$tmp/bin:$PATH" SLEEP_LOG="$tmp/sleeps" \
+		STUB_CALLS="$tmp/calls" VERIFIER="$verifier" "$control" HEAD
+}
+ran() { [ "$(wc -l <"$tmp/calls") run(s), waits: $(tr '\n' ' ' <"$tmp/sleeps")" = "$1" ]; }
+rerun "a verifier that cannot complete ONCE (a registry transient): run again, control accepts" 0 "$tmp/flaky"
+expect_verdict ok
+expect "two runs, one wait of 10 s" ran "2 run(s), waits: 10 "
+expect "the log says it ran again, and why" grep -qxF \
+	'expected-red control: the verifier could not complete (exit 2) on attempt 1 of 3; running it again in 10s' "$tmp/out"
+rerun "a verifier that can NEVER complete: three runs, then inconclusive" 2 "$tmp/inconclusive"
+expect_verdict inconclusive
+expect "three runs, 10 s then 20 s" ran "3 run(s), waits: 10 20 "
+expect "the record says how many attempts, and quotes the verifier" bash -c \
+	'grep -qF "on any of 3 attempt(s)" "$1" && grep -qxF "could not list tags for x" "$1"' _ "$CONTROL_RESULT_FILE"
+rerun "a verifier that PASSED the control commit is not asked again" 1 "$tmp/exit-zero"
+expect_verdict green
+expect "one run, no wait" ran "1 run(s), waits: "
+rerun "a red for the wrong reason is not asked again" 1 "$tmp/other-sha"
+expect_verdict wrong
+expect "one run, no wait" ran "1 run(s), waits: "
+rerun "the correct red is not asked again" 0 "$tmp/right-red"
+expect "one run, no wait" ran "1 run(s), waits: "
+# The knobs: a malformed one is refused before anything runs.
+: >"$tmp/calls"
+expect_rc "a malformed CONTROL_ATTEMPTS is refused, inconclusive" 2 \
+	env CONTROL_ATTEMPTS=lots STUB_CALLS="$tmp/calls" VERIFIER="$tmp/right-red" "$control" HEAD
+expect "the verifier never ran" test ! -s "$tmp/calls"
+# Outside Actions, with nowhere named, the control records nothing.
+rm -f "$CONTROL_RESULT_FILE"
+expect_rc "with no CONTROL_RESULT_FILE and no RUNNER_TEMP the control still runs" 0 \
+	env -u CONTROL_RESULT_FILE -u RUNNER_TEMP VERIFIER="$tmp/right-red" "$control" HEAD
+expect "and records nothing" test ! -e "$tmp/control.result"
+# A verdict from an earlier run never outlives a control that dies half-way.
+printf 'ok\n' >"$CONTROL_RESULT_FILE"
+printf '#!/usr/bin/env bash\nkill -9 "$PPID"\n' >"$tmp/killer"
+chmod +x "$tmp/killer"
+n=$((n + 1))
+# (In a shell of its own, so "Killed" is that shell's line and lands in the log.)
+bash -c 'env VERIFIER="$1" "$2" HEAD; true' _ "$tmp/killer" "$control" >"$tmp/out" 2>&1
+if [ ! -e "$CONTROL_RESULT_FILE" ]; then
+	printf '  ok    a control killed mid-run leaves NO verdict (not the one an earlier run left)\n'
+else
+	printf '  FAIL  a control killed mid-run left a verdict: %s\n' "$(sed -n 1p "$CONTROL_RESULT_FILE")"
+	fail=1
+fi
+
+if [ "$n" -ne 48 ]; then
+	echo "::error::ran ${n} cases, expected 48 -- a gate that checks nothing passes" >&2
 	exit 2
 fi
 if [ "$fail" -ne 0 ]; then

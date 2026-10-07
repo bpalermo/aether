@@ -214,22 +214,37 @@ registry__body_start() {
 # only to DISCOVER tags whose names you do not know; to ask whether a known tag
 # exists, use registry_tag_exists below.
 #
+# EVERY PAGE GOES THROUGH registry__fetch_json (#1337), like the token and
+# child-manifest lookups: no answer, 408, 429, a 5xx and a 200 that is not JSON
+# are retried there, 401/403/404 are not, and a page that still fails is one
+# `registry-lib: GET <url> ...` line naming the URL and the status. It used to
+# be `curl -f | python`: an empty reply was a bare traceback (#1316's shape) and
+# the walk carried on with the pages it had. A listing that cannot be completed
+# now prints NOTHING and returns 1 -- part of a listing must never be readable
+# as all of it (#875).
+#
 # Usage: registry_all_tags <repo> <token>   -> one tag per line on stdout
+#   0  every page was read   1  a page could not be read (nothing on stdout)
 registry_all_tags() {
-	local repo="$1" tok="$2" last="" hdr body url
+	local repo="$1" tok="$2" last="" hdr body url page tags=""
 	registry__host_ok || return 2
 	hdr="$(mktemp)"
 	while :; do
 		url="https://${REGISTRY_HOST}/v2/${repo}/tags/list?n=1000"
 		[ -n "$last" ] && url="${url}&last=${last}"
-		body="$(curl -fsS -D "$hdr" -H "Authorization: Bearer $tok" "$url")"
-		printf '%s' "$body" | registry__json_tags
+		if ! body="$(registry__fetch_json json "$url" -D "$hdr" -H "Authorization: Bearer $tok")"; then
+			rm -f "$hdr"
+			return 1
+		fi
+		page="$(printf '%s' "$body" | registry__json_tags)"
+		[ -z "$page" ] || tags="${tags}${page}"$'\n'
 		# No rel="next" means this was the final page.
 		grep -qi '^link:.*rel="next"' "$hdr" || break
-		last="$(printf '%s' "$body" | registry__json_tags | tail -1)"
+		last="$(printf '%s\n' "$page" | tail -1)"
 		[ -n "$last" ] || break
 	done
 	rm -f "$hdr"
+	printf '%s' "$tags"
 }
 
 # Resolve the commit-suffixed tag (`<tag>-<full sha>`) a publish JUST pushed,
@@ -255,6 +270,16 @@ registry_all_tags() {
 #     found in 100" is the pagination regressing (#875), and the two must never
 #     look the same.
 #
+#   - THIS LOOP IS THE RETRY, AND THE ONLY ONE (#1337). registry_all_tags
+#     retries each page by itself (registry__fetch_json: 4 requests, 2 + 4 + 8
+#     s). Nested under 13 listings that is 13 x 14 s on top of the 12 x 5 s
+#     here: 242 s of waiting on one repository when the registry is down,
+#     where this loop alone is 60 s. So a listing made HERE asks each page
+#     once (REGISTRY_COMMIT_TAG_FETCH_ATTEMPTS, default 1): a page that fails
+#     ends that listing, the line below says the listing FAILED (never
+#     "scanned 0 tags"), and the next listing is the retry. Worst case: 13
+#     listings and 60 s of waiting, what it was before a page could retry.
+#
 # Progress and the final ::error:: go to stderr; only the tag goes to stdout.
 #
 # Usage: registry_commit_tag <repo> <token> <commit>  -> the tag on stdout
@@ -263,21 +288,32 @@ registry_commit_tag() {
 	local repo="$1" tok="$2" commit="$3"
 	local attempts="${REGISTRY_COMMIT_TAG_ATTEMPTS:-13}"
 	local interval="${REGISTRY_COMMIT_TAG_INTERVAL:-5}"
-	local i=1 tags n_tags tag
+	local page_attempts="${REGISTRY_COMMIT_TAG_FETCH_ATTEMPTS:-1}"
+	local i=1 tags n_tags tag scanned
 	while :; do
-		tags="$(registry_all_tags "$repo" "$tok")"
-		n_tags="$(printf '%s\n' "$tags" | grep -c . || true)"
+		# Assigned INSIDE the substitution's subshell: it reaches
+		# registry__fetch_json and nothing outside this one listing.
+		if tags="$(
+			REGISTRY_FETCH_ATTEMPTS="$page_attempts"
+			registry_all_tags "$repo" "$tok"
+		)"; then
+			n_tags="$(printf '%s\n' "$tags" | grep -c . || true)"
+			scanned="scanned ${n_tags} tags"
+		else
+			# (registry_all_tags prints nothing when it fails: no tags to scan.)
+			scanned="the listing FAILED: see the registry-lib line above"
+		fi
 		tag="$(printf '%s\n' "$tags" | { grep -E -- "-${commit}$" || true; } | head -1)"
 		if [ -n "$tag" ]; then
-			echo "resolved ${repo}: ${tag} (scanned ${n_tags} tags, listing ${i}/${attempts})" >&2
+			echo "resolved ${repo}: ${tag} (${scanned}, listing ${i}/${attempts})" >&2
 			printf '%s\n' "$tag"
 			return 0
 		fi
 		if [ "$i" -ge "$attempts" ]; then
-			echo "::error::no tag ending in -${commit} in ${repo} (scanned ${n_tags} tags); still absent after ${attempts} listing(s) ${interval}s apart -- refusing to sign a tag that is not this commit" >&2
+			echo "::error::no tag ending in -${commit} in ${repo} (${scanned}); still absent after ${attempts} listing(s) ${interval}s apart -- refusing to sign a tag that is not this commit" >&2
 			return 1
 		fi
-		echo "no tag ending in -${commit} in ${repo} yet (scanned ${n_tags} tags, listing ${i}/${attempts}); the listing can lag the push, re-listing in ${interval}s" >&2
+		echo "no tag ending in -${commit} in ${repo} yet (${scanned}, listing ${i}/${attempts}); the listing can lag the push, re-listing in ${interval}s" >&2
 		sleep "$interval"
 		i=$((i + 1))
 	done
@@ -722,8 +758,18 @@ registry__json_str() {
 	python3 -c 'import sys,json;print(json.load(sys.stdin)[sys.argv[1]])' "$1"
 }
 
+# The `tags` of a tags/list page on stdin, one per line. Prints nothing for a
+# JSON document that is not an object holding a list of tags (the callers have
+# been through registry__fetch_json, so the document does parse).
 registry__json_tags() {
-	python3 -c 'import sys,json;[print(t) for t in (json.load(sys.stdin).get("tags") or [])]'
+	python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+tags = doc.get("tags") if isinstance(doc, dict) else None
+for t in tags if isinstance(tags, list) else []:
+    if isinstance(t, str):
+        print(t)
+'
 }
 
 # Is the document on stdin what registry__fetch_json was asked for? Exits 0 or
