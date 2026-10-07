@@ -1187,6 +1187,23 @@ controller:
     #     (or an equivalent) granting the controller the webhook Service DNS name
     #     in its dnsNames, else the apiserver's TLS hostname check fails.
     spire: false
+    # Rotation of the self-signed pair (spire=false only; #1364). The CA and the
+    # serving certificate are generated once, valid for ten years, and every
+    # upgrade reuses the Secret it finds, so an upgrade does not touch them.
+    # Set this to any new value (a date is a good one) to generate a new pair
+    # on the next upgrade. The value is stamped on the Secret
+    # (aether.io/webhook-cert-rotation), so a later upgrade with the same value
+    # reuses the new pair; clearing it rotates nothing, and neither does
+    # putting the same value back later (the stamp stays). After the rotating
+    # upgrade the webhooks trust both the old CA and the new one, and the
+    # controller loads the new certificate without a restart. Rotate in a quiet
+    # moment all the same: the Secret is patched before the webhook
+    # configurations, and an upgrade that fails in between leaves the webhooks
+    # failing open until it completes (docs/runbook.md). Empty = never rotate.
+    # `helm template` cannot see the cluster and generates a new pair on every
+    # render whatever this is: see docs/runbook.md, "Rendering the chart
+    # reproducibly".
+    certRotation: ""
     # When spire=true, have the chart create the controller's ClusterSPIFFEID with
     # the webhook Service DNS SANs, so SPIRE mode works without a manual entry.
     clusterSpiffeID:

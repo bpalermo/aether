@@ -6,9 +6,50 @@ Webhook serving trust (controller.webhook.spire — decoupled from mesh SPIRE):
     so no Secret is rendered and caBundle starts empty (failurePolicy: Ignore keeps
     the webhook fail-open until the controller injects the bundle).
 
-  controller.webhook.spire=false (default) — a Helm self-signed cert (generated
-    once, reused on upgrade via lookup) is rendered as a Secret and its CA baked
-    into caBundle. Validates out of the box, independent of mesh SPIRE.
+  controller.webhook.spire=false (default) — a Helm self-signed CA and serving
+    certificate, rendered as a Secret, with the CA baked into caBundle. Validates
+    out of the box, independent of mesh SPIRE.
+
+The self-signed pair is generated ONCE and reused (#1364). An install or upgrade
+looks the Secret up in the cluster and renders the certificate it finds, so an
+upgrade changes neither the Secret's data nor any caBundle. It generates a new
+pair only when:
+
+  - there is no Secret (a first install, or the Secret was deleted);
+  - the Secret is incomplete (any of ca.crt / tls.crt / tls.key missing or
+    empty): a half-written Secret is replaced, not rendered back half-empty;
+  - controller.webhook.certRotation is set to a value other than the one the
+    Secret was generated for (the aether.io/webhook-cert-rotation annotation).
+    Changing the value rotates once; leaving it, or clearing it, rotates nothing.
+    A reused Secret keeps its annotation when the value is cleared, so putting
+    the same value back later (a reverted values change) does not rotate again.
+
+A found Secret is always for the current names: the certificate's two SANs are
+<service>.<namespace>.svc[.cluster.local], and the Secret is looked up as
+<service>-cert in <namespace>, so another service name or namespace is another
+Secret (not found, so generated).
+
+A rotation is one upgrade, and it narrows the window in which the webhooks
+cannot verify the controller's certificate without closing it: caBundle carries
+the new CA AND the one being replaced, so the OLD certificate keeps verifying
+after the upgrade, until the controller has picked the new one up from its
+mounted Secret (controller-runtime's certwatcher, no restart). The next upgrade
+renders the new CA alone.
+What is left open: the Secret and the webhook configurations are separate
+objects, and Helm patches the Secret first. A controller that loads the new
+certificate before the webhook configurations are patched (a pod that starts in
+between, or an upgrade that fails in between) serves a certificate the old
+caBundle does not verify; the webhooks then fail open (failurePolicy: Ignore)
+until the upgrade completes. Closing that needs the new CA trusted one upgrade
+before the new certificate is served, which this chart does not do.
+
+THE EXCEPTION: `lookup` returns nothing without a cluster, so `helm template`
+and a client-side `--dry-run` generate a new pair on every render. Two renders
+then differ in exactly the Secret's three values and the webhooks' caBundle. To
+diff rendered manifests, mask those or render with controller.webhook.spire=true
+(docs/runbook.md, "Rendering the chart reproducibly").
+//charts/aether:aether_reproducible_masked_test pins that these are the only
+render-time values in the chart.
 */}}
 {{- $svc := include "aether.controller.webhookServiceName" . -}}
 {{- $ns := include "aether.namespace" . -}}
@@ -17,30 +58,62 @@ Webhook serving trust (controller.webhook.spire — decoupled from mesh SPIRE):
 {{- $cn := printf "%s.%s.svc" $svc $ns -}}
 {{- $altNames := list $cn (printf "%s.%s.svc.cluster.local" $svc $ns) -}}
 {{- $secretName := printf "%s-cert" $svc -}}
+{{- $rotation := toString (default "" .Values.controller.webhook.certRotation) -}}
 {{- $existing := lookup "v1" "Secret" $ns $secretName -}}
+{{- $have := dict -}}
+{{- $generatedFor := "" -}}
+{{- if $existing -}}
+{{- $have = default (dict) $existing.data -}}
+{{- $generatedFor = toString (dig "metadata" "annotations" "aether.io/webhook-cert-rotation" "" $existing) -}}
+{{- end -}}
+{{- $complete := and (index $have "ca.crt") (index $have "tls.crt") (index $have "tls.key") -}}
+{{- $rotate := and $rotation (ne $rotation $generatedFor) -}}
+{{- $secretCA := "" -}}
 {{- $tlsCert := "" -}}
 {{- $tlsKey := "" -}}
-{{- if and $existing $existing.data (index $existing.data "ca.crt") -}}
-{{- $caBundle = index $existing.data "ca.crt" -}}
-{{- $tlsCert = index $existing.data "tls.crt" -}}
-{{- $tlsKey = index $existing.data "tls.key" -}}
+{{- /* What the Secret is stamped with: the value it was generated for. */ -}}
+{{- $stamp := $rotation -}}
+{{- if and $complete (not $rotate) -}}
+{{- if not $rotation -}}
+{{- $stamp = $generatedFor -}}
+{{- end -}}
+{{- $secretCA = index $have "ca.crt" -}}
+{{- $tlsCert = index $have "tls.crt" -}}
+{{- $tlsKey = index $have "tls.key" -}}
+{{- $caBundle = $secretCA -}}
 {{- else -}}
 {{- $ca := genCA "aether-controller-ca" 3650 -}}
 {{- $cert := genSignedCert $cn nil $altNames 3650 $ca -}}
-{{- $caBundle = $ca.Cert | b64enc -}}
+{{- $secretCA = $ca.Cert | b64enc -}}
 {{- $tlsCert = $cert.Cert | b64enc -}}
 {{- $tlsKey = $cert.Key | b64enc -}}
+{{- /* Keep trusting the CA being replaced until the controller has loaded the
+       new certificate. Only a value that decodes to a PEM certificate is
+       carried over; anything else would make the whole bundle unparseable. */ -}}
+{{- $oldCA := "" -}}
+{{- with index $have "ca.crt" -}}
+{{- $oldCA = b64dec . -}}
+{{- end -}}
+{{- if and (hasPrefix "-----BEGIN CERTIFICATE-----" $oldCA) (hasSuffix "-----END CERTIFICATE-----" (trim $oldCA)) -}}
+{{- $caBundle = printf "%s\n%s\n" (trim $ca.Cert) (trim $oldCA) | b64enc -}}
+{{- else -}}
+{{- $caBundle = $secretCA -}}
+{{- end -}}
 {{- end }}
 apiVersion: v1
 kind: Secret
 metadata:
   name: {{ $secretName }}
   namespace: {{ $ns }}
+  {{- if $stamp }}
+  annotations:
+    aether.io/webhook-cert-rotation: {{ $stamp | quote }}
+  {{- end }}
   labels:
     {{- include "aether.controller.labels" . | nindent 4 }}
 type: kubernetes.io/tls
 data:
-  ca.crt: {{ $caBundle }}
+  ca.crt: {{ $secretCA }}
   tls.crt: {{ $tlsCert }}
   tls.key: {{ $tlsKey }}
 ---
