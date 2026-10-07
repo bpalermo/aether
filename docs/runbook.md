@@ -273,7 +273,11 @@ fails with it, so `coverage` is the one check to require. Only the total gates.
 The job summary also shows, for the reviewer and without gating: the two totals
 and their delta, a per-component table with each component's delta, and the
 coverage of every changed file (`git diff <baseline>...<head>`) that either
-report names, new and deleted files included. Patch coverage is deliberately
+report names, new and deleted files included. When the total dropped it adds
+the **largest per-file drops**: the ten files (`--top-drops`) whose covered-line
+count fell most, whatever the diff touched, and the files that left the report
+(`removed`) — open when the gate fails, collapsed when the drop is within the
+threshold, absent when nothing dropped. Patch coverage is deliberately
 not a gate: it punishes the pull request that touches old untested code.
 
 - *Which baseline.* `scripts/coverage-baseline.sh` takes the `coverage-report`
@@ -318,13 +322,17 @@ not a gate: it punishes the pull request that touches old untested code.
 
 **The gate failed.** The `::error` on the run gives both totals, the line
 counts and the delta; the component and changed-file tables say where it came
-from.
+from. When no measured file changed (the changed-files table reads `None of the
+changed files is in either report`), read **Largest per-file drops**: it names
+the files that lost covered lines although the diff did not touch them.
 
 - *Code lost its tests, or new code has none.* Add the tests. A new file no
   test links counts at zero, which is the point.
 - *A test stopped running.* A `go_test` that gained `manual`, `integration` or
   `requires-root`, or a deleted test target, drops out of the measured set
-  while its library's lines stay in the denominator.
+  while its library's lines stay in the denominator. No Go file changes, so
+  only the per-file drops table shows which files that test was covering
+  (#1319).
 - *The drop is legitimate.* Deleting a large, well-tested package lowers the
   percentage although nothing got worse: 1 000 fully covered lines removed
   from today's tree is about −0.8 points. The lines columns of the tables show
