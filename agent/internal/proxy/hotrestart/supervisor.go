@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -982,10 +983,14 @@ func (s *Supervisor) watchConfig(ctx context.Context, trigger chan<- struct{}) {
 const configValidateTimeout = 30 * time.Second
 
 // validateConfig runs `envoy --mode validate` against the (changed) bootstrap
-// in the exact environment the real fork would use — same binary, same
-// container, same cgroup/namespace context — so environment-dependent
-// bootstrap failures (the class that docker-side validation cannot catch)
-// are detected before the serving epoch is put at risk. ExtraArgs are passed
+// in the context the real fork would use — same binary, same container, same
+// cgroup/namespace context, the supervisor's own environment — so
+// environment-dependent bootstrap failures (the class that docker-side
+// validation cannot catch) are detected before the serving epoch is put at
+// risk. One difference: a serving child also gets RestartEpochEnv
+// (buildEnvoyCmd), which a validation run has no epoch to set. Nothing in the
+// bootstrap may depend on it; it is read only by access-log format strings,
+// which render "-" when it is unset. ExtraArgs are passed
 // through because the config may reference --service-cluster/--service-node.
 func (s *Supervisor) validateConfig(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, configValidateTimeout)
@@ -1020,9 +1025,43 @@ func (s *Supervisor) buildEnvoyCmd(epoch int) *exec.Cmd {
 	args = append(args, s.cfg.ExtraArgs...)
 
 	cmd := exec.Command(s.cfg.EnvoyPath, args...)
+	cmd.Env = childEnv(os.Environ(), epoch)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd
+}
+
+// RestartEpochEnv is the environment variable every Envoy child is started
+// with: the --restart-epoch value of that child, the same number Envoy exports
+// as server.hot_restart_epoch. It is there for an Envoy format string to read:
+// %ENVIRONMENT(AETHER_RESTART_EPOCH)% in an access-log format makes each row
+// name the generation that wrote it (issue #1333). During a hot-restart
+// overlap that is the only per-generation signal available: the parent stops
+// flushing stats to sinks the moment the child starts.
+//
+// The exported number is always the child's effective epoch. --restart-epoch
+// cannot be given a second time through ExtraArgs to disagree with it: Envoy
+// refuses a repeated flag ("Argument already set!"), so such a child never
+// starts.
+const RestartEpochEnv = "AETHER_RESTART_EPOCH"
+
+// childEnv returns the environment for the Envoy child at the given restart
+// epoch: everything in environ (the supervisor's own environment, which the
+// child has always inherited) with RestartEpochEnv set to epoch. Any
+// RestartEpochEnv already in environ is dropped rather than left for the
+// kernel or the libc to pick between two entries, so a value the supervisor
+// itself inherited (a pod spec, a wrapper, a parent supervisor) can never
+// name the wrong generation.
+func childEnv(environ []string, epoch int) []string {
+	const prefix = RestartEpochEnv + "="
+	out := make([]string, 0, len(environ)+1)
+	for _, kv := range environ {
+		if strings.HasPrefix(kv, prefix) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, prefix+strconv.Itoa(epoch))
 }
 
 // currentEpoch returns the highest (newest) epoch started so far.
