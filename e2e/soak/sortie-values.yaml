@@ -66,11 +66,14 @@ engine:
   # blocks until its next request is due, so the eight workers of this plan cost
   # 0.125-0.14 core per engine at 60 rps on kind (15 min, cgroup cpu.stat) -- not
   # the 1.7 cores the same engine took while it could only SLEEP, which is what
-  # the old 400m limit was for. The request is that, rounded up; talos-main's
-  # CPUs have not been read yet.
-  # With the limit gone nothing throttles the engine, so the plan no longer
-  # queues due requests either (max_pending_requests), and sortie's latency is
-  # the mesh's again instead of the CFS period's.
+  # the old 400m limit was for. The request is that, rounded up; on talos-main it
+  # read 127-135m and 302-321 MiB per engine (2026-10-07, two 15-minute runs).
+  # With the limit gone nothing throttles the engine, and sortie's latency is
+  # the mesh's again instead of the CFS period's. The plan still carries a
+  # client queue (max_pending_requests, sortie-plan.sh), for a different
+  # reason: on talos-main a node stalls for a second now and then, and an
+  # open-loop engine with no queue refuses the requests that fall due together
+  # (6 pool_overflow in 270,000 on 2026-10-07; none with a queue).
   #
   # Why not keep a limit as a guard rail: any limit can throttle, and a
   # throttled load generator reports its own scheduling delay as the target's
