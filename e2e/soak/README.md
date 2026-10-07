@@ -36,13 +36,28 @@ requests carry `User-Agent: aether-soak-sortie`. Engines and the sortie pod both
 the PriorityClass `aether-soak-loader`.
 
 **What an engine costs.** About **0.13 core and 300 MiB per node** while the run is on
-(kind, 15 minutes; talos-main has not been read yet), and ~600 MiB for the instant the
-final report is assembled. The plan asks for Nighthawk's `WAIT` idle
+(talos-main, 2026-10-07, two 15-minute runs: 127–135m and 302–321 MiB per pod; kind read
+the same), and ~600 MiB for the instant the final report is assembled. The plan asks for Nighthawk's `WAIT` idle
 strategy, in which a worker thread blocks until its next request is due, so the engine
 has a CPU request (150m) and **no CPU limit**: nothing throttles it, it sends every
 request on time, and its latency numbers are the mesh's. Up to sortie b71b37e the same
 engine cost 1.7 cores and ran under a 400m limit that put the CFS period into every
 latency number; proposal 042, "CPU and memory", has both tables.
+
+**The client queue.** The plan carries `max_pending_requests: 18` — per worker thread,
+so per target per engine: how many due requests may wait for a connection before the
+engine's own pool refuses the next one (`pool_overflow`, a request never sent).
+`sortie-plan.sh` sizes it as *the largest share × a stall budget of 2 s* (9 rps × 2 s),
+so it follows `--rate`. With **no** queue (the engine's default, and this plan's until
+the first talos run) the pool lets one request wait and refuses the second: 6 requests
+in 270,000 on talos-main, on the two nodes that had a ~1 s stall; with a queue of 16,
+none, under an agent and a proxy roll. `connections` is not set and need not be: the
+engine's default is 100 connections per worker, so a slow *answer* just takes another
+connection — what fills the queue is several requests due at once with no connection
+ready. `SOAK_SORTIE_MAX_PENDING=<n>` fixes the number, `SOAK_SORTIE_MAX_PENDING=0`
+turns the queue off (an experiment: expect `driver saturated` lines),
+`SOAK_SORTIE_STALL_BUDGET=<seconds>` changes the budget. The reasoning and the engine
+defaults are in `sortie-plan.sh`'s header and proposal 042, "The client queue".
 
 **Launch — from the MAIN session** (the churn driver, the watchdog and the saver are
 detached, but the kickoff itself must not be reaped half-way):
@@ -176,17 +191,17 @@ What each step writes to the cluster:
 | `sortie-gate.sh` | nothing; it reads the run directory |
 | `sortie-teardown.sh` | uninstalls the release (engines, Service, ServiceAccount, Job, ConfigMap). **Keeps** the PVC (`--purge` deletes it) and the PriorityClass |
 
-What that run is for is in proposal 042, "Unverified until the talos run": the engine's
-CPU on those nodes (`kubectl top pod -n aether-test -l app.kubernetes.io/component=engine`
-against the 150m request), five backends on five nodes, the per-backend series, the
-`soak-sortie` identity's first requests with SPIRE on, and the PVC.
+Both runs were made on 2026-10-07 (`~/aether-soak-logs/1007-sortie-e2e-1` and `-2`);
+what they verified, what they found (the client queue) and what is still open are in
+proposal 042, "Verified on talos-main".
 
 ### Reading the gate
 
 ```
 PASS  svc-1  rate=45/45rps http_2xx=1377000/1377000 backends=5/5  failures=none  lat p50<=2.4ms p99<=6.1ms
 FAIL  uds-echo  rate=14.99/15rps http_2xx=458985/459000 backends=5/5  -- failures stream_resets=12 [main-worker-04=12] stream_resets_before_headers=12 [main-worker-04=12]  lat p50<=2.6ms p99<=7ms
-VERDICT FAIL targets=8 passed=7 failed=1 backends=5 lost_backends=0 report_pass=false
+FAIL  svc-4  rate=45/45rps http_2xx=40498/40500 backends=5/5  -- driver saturated: 2 request(s) not sent [main-worker-03=2] (pool_overflow: the engine refused them itself; not a mesh error)  lat p50<=15ms p99<=124ms
+VERDICT FAIL targets=8 passed=6 failed=2 backends=5 lost_backends=0 report_pass=false
 ```
 
 `http_2xx=<counted>/<planned>` is the pool's total against `share × nodes × duration`;
@@ -203,7 +218,7 @@ threshold. The classes (the zero-failure set) and what each means:
 | `http_4xx`, `http_5xx` | got a complete response with that status | `http_4xx`, `http_5xx` |
 | `stream_resets` (+ `_before_headers`, `_incomplete_body`, `_<reason>`) | had its stream reset; the refinements say when and why | `proto`, and any cut response |
 | `pool_connection_failure`, `pool_failure_*` | never got a connection (refused, or `pool_failure_timeout`: connect timed out) | `conn`, `timeout` |
-| `pool_overflow` | was refused by the **engine's own** pool: the load generator fell behind | — (see below) |
+| `pool_overflow` | was **never sent**: the engine's own pool refused it because its client queue was full. Printed as `driver saturated: N request(s) not sent`, not under `failures` | — (see below) |
 
 The counters overlap — one reset is counted in `stream_resets`, in one phase and in one
 reason — so they are listed, never summed. There is no `dns` class (a target is
@@ -251,12 +266,18 @@ floor catches a target that stops answering, the prober catches the rest).
   fewer requests than planned. With failure counters beside it, the failures are why.
   Alone, the engine on that node was slow to send or the target slow to answer: read
   that node's CPU first.
-- **`pool_overflow` is the harness, not the mesh.** The engine refused its own request
-  because the previous one had not been sent yet. It has no CPU limit, so this now
-  means the *node* could not give it the tenth of a core it needs — a finding about the
-  node at that moment, to be placed against the roll brackets like any other. (Up to
-  sortie b71b37e the engine ran under a 400m limit and overflow meant the limit; the
-  plan queued requests to hide it. Both are gone.)
+- **`driver saturated: N request(s) not sent [<node>=N]` is `pool_overflow`, and it is
+  the driver, not the mesh.** Those requests never left the engine: more of them were
+  due at once, with no connection ready, than the client queue holds (18 per target per
+  node), which takes a stall on **that node** longer than the plan's budget (2 s at
+  9 rps). It still fails the target, for a different reason than a 503 does: the run is
+  **not valid for that target on that node** — it sent fewer requests than planned, so
+  its zeros cover less than the plan says. Do not count it as a data-plane failure and
+  do not look for it in the access logs (there is no row for a request that was not
+  sent). Do place it: which node, and what was happening there (the roll brackets, the
+  node's CPU, the ~1 s `max` on that execution's progress lines in `sortie.log`). A
+  stall that long is a finding about the node. When a target has a mesh class too, the
+  line carries both, apart: `failures http_5xx=2 [...] | driver saturated: 1 ...`.
 - **`error: … execution cancelled`** on every target, no counters: the sortie pod was
   stopped (an upgrade or a forced teardown mid-run, or it was evicted).
 - **`backends 4/5`**: an engine was not ready when the run started; that node was
@@ -268,14 +289,73 @@ floor catches a target that stops answering, the prober catches the rest).
 - **Latency (`lat p50<=… p99<=…`) is a soft signal, not a gate.** It is the worst
   node's, per target, taken from two thresholds the plan carries only so the numbers
   reach the report (`latency_2xx.p50|p99 < 60s`). With no CPU limit on the engine it
-  measures the mesh and not the CFS period — on kind p99 is 2–4 ms where the throttled
-  engine read 20–100 ms — so a p99 that moves between runs, or during a roll (the
-  cumulative `mean`/`max` on each minute's progress line in `sortie.log`), is now worth
-  a look. Nothing fails on it until
-  talos-main has shown what it looks like there.
-- **The k6 benign `DC` (#1009) should not exist for this loader.** Envoy's client does
-  not close first after a complete response. A 200 / `DC` / full-bytes row with
-  `client_sa soak-sortie` is a finding to report, not a baseline to subtract.
+  no longer measures the CFS period (on kind p99 is 2–4 ms where the throttled engine
+  read 20–100 ms), but it is the **client's** number, not the mesh's: it includes the
+  engine's own connection wait and scheduling. On talos-main (run 1, no rolls, per
+  node) sortie read p50 8–17 ms where Envoy's source-side `duration_ms` read 7–9 ms,
+  and p99 80–140 ms against 66–78 ms: a few ms high at the median, tens of ms at the
+  tail. Under two rolls (run 2) the worst node's p99 was 153–207 ms per target against
+  106 ms in the access logs. So read a p99 that moves between runs, or during a roll
+  (the cumulative `mean`/`max` on each minute's progress line in `sortie.log`), as a
+  reason to look, and take the number itself from the access logs (below). Nothing
+  fails on it.
+- **A `200` / `DC` row is rare for this loader, and not yet a baseline.** One was seen
+  in the 269,992 rows of the run with rolls and none in the run without; see the
+  cross-check below for what it was. Report each one; do not subtract them.
+
+### The mesh's own numbers: the access-log cross-check
+
+The gate reads the driver's report. The mesh logged the same requests from its side
+(the source proxy on each node), and that is both the cross-check of the gate and where
+the latency number comes from. In VictoriaLogs (LogsQL; through Grafana's datasource
+proxy, uid `victorialogs` — not Loki), with `<start>`/`<end>` from `run.env`'s `T_LOAD`
+and `DURATION_S`, a minute wide on each side:
+
+```
+# 1. Outcome. Every row must be 200 with no response flag.
+log_name:aether_access_logs reporter:source user_agent:"aether-soak-sortie" _time:[<start>, <end>]
+  | stats by (response_code, response_flags) count() n
+
+# 2. Latency per node, as Envoy measured it.
+log_name:aether_access_logs reporter:source user_agent:"aether-soak-sortie" _time:[<start>, <end>]
+  | stats by (node_name) count() n, quantile(0.5, duration_ms) p50, quantile(0.99, duration_ms) p99, quantile(0.999, duration_ms) p999, max(duration_ms) mx
+```
+
+What the two talos-main runs of 2026-10-07 read (15 minutes, 5 nodes, 270,000 planned):
+
+| | rows, whole run | codes and flags | p50 | p99 | p99.9 | max | over 500 ms |
+|---|---|---|---|---|---|---|---|
+| run 1, no rolls, no client queue | 269,994 | all `200`, no flag | 7–9 ms | 66–78 ms | 259–332 ms | 0.85–1.2 s | 89 |
+| run 2, agent + proxy roll, queue 16 | 269,992 | 269,991 `200` with no flag, one `200` `DC` | 7 ms | 106 ms | 458 ms | 1.455 s | 168 |
+
+(Run 1's row count is the plan's 270,000 less the 6 requests the driver did not send.
+The quantiles were taken over a slightly narrower window, 269,765 and 269,934 rows;
+run 1's ranges are per node, run 2's are over all nodes.)
+
+Reading it:
+
+- **Row count against the gate.** The rows are the requests that reached the proxy, so
+  they should match the gate's `http_2xx` total to within the requests in flight at
+  either edge of the window and the log pipeline's own loss. A `driver saturated`
+  request has no row: it was never sent.
+- **Anything that is not `200` with flag `-`** is a mesh-side outcome the gate should
+  also show (a `5xx`, a reset); if the gate is clean and the logs are not, or the
+  reverse, that disagreement is the finding.
+- **The one `DC` row** (run 2): `200`, `downstream_remote_disconnect`, 11:09:38Z =
+  T+10m08s, on main-worker-04, to `echo`, 16 s before the proxy roll finished. It is a
+  **complete** response (799 bytes sent, the size of every other `echo` response;
+  upstream answered in 67 ms, 78 ms in all), and the engine counted no reset and no
+  failure for it. It was the only request on a second connection the engine had just
+  opened because its usual one was busy with a 149 ms response; the engine then closed
+  that connection. It is **not** an end-of-run artifact (the run ended four minutes
+  later) and there was one, not one per engine. Why Envoy saw the close before it
+  considered the response done is unexplained — the k6 `DC` of #1009 was the same
+  signature (a full body, then the client closes) — so treat a row like it as benign
+  only when all of that holds (`200`, full `bytes_sent`, no engine-side counter), and
+  count them per run.
+- **The long tail is the node, and it is why the plan has a client queue.** 89 and 168
+  requests took over half a second and the longest 1.2 s and 1.455 s, with every one
+  answered `200`. Those are the stalls the queue is sized for.
 
 ### Live view
 

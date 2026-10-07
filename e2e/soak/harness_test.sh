@@ -251,12 +251,17 @@ expect "$P" "plan soak: HTTP/1.1, as k6 drove it" '^    protocol: http1$' 1
 expect "$P" "plan soak: the dns pool" '^    dns: soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443$' 1
 expect "$P" "plan soak: 8 targets" '^      - \{name: ' 8
 expect "$P" "plan soak: a worker WAITs for its next request (no spinning, no polling)" '^        value: WAIT$' 1
-# The three workarounds sortie 94cf103 retired. Each was load-bearing against
-# b71b37e, and each would now hide something: lifted predicates are sortie's
-# own default, a pending queue papers over a throttled engine, and the 2xx
-# total is in the report's `totals`.
+# Two workarounds sortie 94cf103 retired. Each was load-bearing against b71b37e,
+# and each would now hide something: lifted predicates are sortie's own default,
+# and the 2xx total is in the report's `totals`.
 expect "$P" "plan soak: no failure_predicates (sortie turns the defaults off itself)" 'failure_predicates|1000000000000' 0
-expect "$P" "plan soak: no pending queue unless asked (no CPU limit to queue behind)" 'max_pending_requests' 0
+# The client queue is NOT one of them. It left with the CPU limit and came back
+# with the first talos run: with none, a request that falls due while another
+# still waits for a connection is refused by the engine (pool_overflow). The
+# default is sized, not picked: the largest share x a 2 s stall budget.
+expect "$P" "plan soak: a client queue by default, 9 rps x 2 s" '^    max_pending_requests: 18$' 1
+expect "$P" "plan soak: the queue says where its size comes from" '^    # The client queue: the largest share, 9 rps per worker, x a stall budget of 2 s\.$' 1
+expect "$P" "plan soak: connections is left at the engine's default (100 per worker; not the limit)" '^    connections:' 0
 expect "$P" "plan soak: no http_2xx carrier threshold (the report has totals)" 'counter:benchmark.http_2xx' 0
 expect "$P" "plan soak: nighthawk_template carries the idle strategy and nothing else" '^      [a-z_]+:$' 1
 expect "$P" "plan soak: latency rides in the report as two carriers, a minute wide" '^      - "latency_2xx\.p(50|99) < 60s"$' 2
@@ -273,9 +278,23 @@ expect "$P" "plan e2e: floor follows the backend count" '"rate:benchmark.http_2x
 expect "$P" "plan e2e: statsd address templated in" '^    address: "10.106.234.157:8125"$' 1
 P="$TMP/plan-knobs.yaml"
 bash "$PLAN" render --profile e2e --backends 2 --dns x.y.svc.cluster.local:8443 --max-pending 16 --idle-strategy SLEEP --no-latency >"$P"
-expect "$P" "plan knobs: --max-pending is still there for a run that needs it" '^    max_pending_requests: 16$' 1
+expect "$P" "plan knobs: --max-pending overrides the sized queue" '^    max_pending_requests: 16$' 1
 expect "$P" "plan knobs: --idle-strategy SLEEP" '^        value: SLEEP$' 1
 expect "$P" "plan knobs: --no-latency drops the carriers" 'latency_2xx' 0
+P="$TMP/plan-noqueue.yaml"
+bash "$PLAN" render --profile e2e --backends 2 --dns x.y.svc.cluster.local:8443 --max-pending 0 >"$P"
+expect "$P" "plan queue: --max-pending 0 writes no queue (the engine's default, for experiments)" '^    max_pending_requests' 0
+expect "$P" "plan queue: ... and the plan says it is off" '^    # The client queue: off \(--max-pending 0\)' 1
+expect "$P" "plan queue: off or on, pool_overflow stays in the zero-failure set" '"counter:benchmark.pool_overflow == 0"' 1
+P="$TMP/plan-budget.yaml"
+bash "$PLAN" render --profile e2e --backends 2 --dns x.y.svc.cluster.local:8443 --rate 120 --stall-budget 3 >"$P"
+expect "$P" "plan queue: it follows the rate and the budget (18 rps x 3 s)" '^    max_pending_requests: 54$' 1
+printf 'a http://a.ns.aether.internal:18081/ 2\nb http://b.ns.aether.internal:18081/ 1\n' >"$TMP/t21.txt"
+P="$TMP/plan-conc.yaml"
+bash "$PLAN" render --profile e2e --backends 2 --dns x.y.svc.cluster.local:8443 --targets "$TMP/t21.txt" --rate 60 --concurrency 2 >"$P"
+expect "$P" "plan queue: it is per worker thread (40 rps over 2 workers x 2 s)" '^    max_pending_requests: 40$' 1
+plan_err "a stall budget of 0 is refused (--max-pending 0 is how to turn the queue off)" 'stall-budget must be whole seconds' render --profile e2e --backends 2 --dns x:8443 --stall-budget 0
+plan_err "a queue that is not a number is refused" 'max-pending must be a positive integer, or 0' render --profile e2e --backends 2 --dns x:8443 --max-pending many
 plan_err "an unknown idle strategy is refused" 'WAIT, SLEEP, POLL or SPIN' render --profile e2e --backends 2 --dns x:8443 --idle-strategy BLOCK
 plan_err "a statsd NAME is refused (the sink does not resolve)" 'IPv4 literal' render --profile e2e --backends 2 --dns x:8443 --statsd otel-scraper.o11y.svc:8125
 plan_err "an unknown profile is refused" 'profile must be e2e or soak' render --profile nightly --backends 2 --dns x:8443
@@ -338,9 +357,26 @@ run_gate pool-overflow "$G"
 rc=$?
 show "gate: pool_overflow (the client refused its own requests)" "$G"
 if [ "$rc" -eq 1 ]; then pass "gate overflow: exit 1"; else fail "gate overflow: exit $rc, want 1"; fi
-expect "$G" "gate overflow: per-node counts" '^FAIL  echo .* -- failures pool_overflow=271 \[main-worker-01=130 main-worker-02=141\]' 1
+expect "$G" "gate overflow: per-node counts, as the driver's own (not under 'failures')" '^FAIL  echo .* -- driver saturated: 271 request\(s\) not sent \[main-worker-01=130 main-worker-02=141\] \(pool_overflow: ' 1
 expect "$G" "gate overflow: the target's OWN rate floor, per node (16.19 rps passes the plan-wide 5.94)" 'rate below 99% of 9 rps on \[main-worker-01=8.13 main-worker-02=8.06\]' 1
 expect "$G" "gate overflow: only that target" '^FAIL ' 1
+
+# The first talos-main run (2026-10-07, no client queue): 6 requests in 270,000
+# refused by the engine's own pool, on two nodes, every other class zero and
+# every rate floor held. The shape is that report's; the second target adds a
+# real mesh failure on the same node to show the two are worded apart.
+G="$TMP/gate-saturated.log"
+run_gate driver-saturated "$G" --per-node
+rc=$?
+show "gate: the driver was saturated (pool_overflow only), and beside a mesh failure" "$G"
+if [ "$rc" -eq 1 ]; then pass "gate saturated: exit 1 (requests not sent: the run is not valid for that target)"; else fail "gate saturated: exit $rc, want 1"; fi
+expect "$G" "gate saturated: said in words, with the node, and not as a mesh failure" '^FAIL  svc-1  rate=17.98/18rps http_2xx=2697/2700 backends=2/2  -- driver saturated: 3 request\(s\) not sent \[main-worker-02=3\] \(pool_overflow: the engine refused them itself; not a mesh error\)  lat ' 1
+expect "$G" "gate saturated: a target whose only class is pool_overflow has no 'failures' list" '^FAIL  svc-1 .* failures ' 0
+expect "$G" "gate saturated: the zero-failure threshold it tripped is not repeated" '^FAIL  svc-1 .*thresholds failed' 0
+expect "$G" "gate saturated: beside a mesh failure, each is named on its own" '^FAIL  echo .* -- failures http_5xx=2 \[main-worker-01=2\] \| driver saturated: 1 request\(s\) not sent \[main-worker-01=1\] ' 1
+expect "$G" "gate saturated: the NODE line keeps the raw counter" '^NODE  svc-1  main-worker-02  http_2xx=1347/1350 rate=8.98/9rps .* failures pool_overflow=3$' 1
+expect "$G" "gate saturated: the third target passes" '^PASS  uds-echo ' 1
+expect "$G" "gate saturated: verdict" '^VERDICT FAIL targets=3 passed=1 failed=2 backends=2 lost_backends=0 report_pass=false$' 1
 
 # A lost backend (one engine went away mid-run; the kind run deleted its pod).
 # sortie 94cf103 names it in backend_errors and reports the other node whole:

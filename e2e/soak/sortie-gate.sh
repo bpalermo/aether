@@ -36,6 +36,14 @@
 #              pool_overflow. The counters OVERLAP (a reset is in stream_resets
 #              and in one phase and one reason counter): they are listed per
 #              node, never summed across classes.
+#   saturated  pool_overflow is in that set and fails the target, but it is
+#              said in words, apart from the mesh's classes: `driver saturated:
+#              N request(s) not sent [node=N]`. The engine's own pool refused
+#              them because its client queue (the plan's max_pending_requests)
+#              was full: that node stalled for longer than the plan's stall
+#              budget. The requests never reached the mesh, so this is not a
+#              data-plane failure; it is that target's run on that node being
+#              short of what it was meant to send.
 #   rate       EVERY backend's 2xx rate (its http_2xx over its own elapsed time)
 #              is at least --floor-pct (99) of the target's share. The plan can
 #              only carry one floor for the whole scenario and judges it against
@@ -153,6 +161,10 @@ jq -r --argjson shares "$SHARES_JSON" --argjson nodes "$NODES" --argjson n "$BAC
 	               p50: ($p50[$i] // null), p99: ($p99[$i] // null)} ] as $res
 	        | ([$res[] | select(.lost | not)]) as $surv
 	        | ([$res[] | .node as $nd | .fail[] | {c: .c, b: $nd, v: .v}]) as $fail
+	        # pool_overflow apart from the rest: the driver`s own refusals are not
+	        # a class of mesh failure and are worded differently.
+	        | ([$fail[] | select(.c == "pool_overflow")]) as $sat
+	        | ([$fail[] | select(.c != "pool_overflow")]) as $mesh
 	        | ($s.rps * $n) as $planned
 	        | (if ($res | length) > 0 then ([$res[] | .rate // 0] | add) else null end) as $rate
 	        | ($e.totals["benchmark.http_2xx"] // ([$res[].count] | add) // null) as $count
@@ -171,8 +183,11 @@ jq -r --argjson shares "$SHARES_JSON" --argjson nodes "$NODES" --argjson n "$BAC
 	                "ran off plan (\($dur)s) on [" + ([$surv[] | select(.off) | "\(.node)=\(.secs | r2)s"] | join(" ")) + "]"
 	              else empty end),
 	             (if ($dispatched | length) != $n then "backends \($dispatched | length)/\($n)" else empty end),
-	             (if ($fail | length) > 0 then
-	                "failures " + ($fail | group_by(.c) | map("\(.[0].c)=\(map(.v) | add) [" + (map("\(.b)=\(.v)") | join(" ")) + "]") | join(" "))
+	             (if ($mesh | length) > 0 then
+	                "failures " + ($mesh | group_by(.c) | map("\(.[0].c)=\(map(.v) | add) [" + (map("\(.b)=\(.v)") | join(" ")) + "]") | join(" "))
+	              else empty end),
+	             (if ($sat | length) > 0 then
+	                "driver saturated: \([$sat[].v] | add) request(s) not sent [" + ($sat | map("\(.b)=\(.v)") | join(" ")) + "] (pool_overflow: the engine refused them itself; not a mesh error)"
 	              else empty end),
 	             (if ([$surv[] | select(.short)] | length) > 0 then
 	                "rate below \($floor)% of \($s.rps) rps on [" + ([$surv[] | select(.short) | "\(.node)=" + (if .rate == null then "?" else (.rate | r2 | tostring) end)] | join(" ")) + "]"

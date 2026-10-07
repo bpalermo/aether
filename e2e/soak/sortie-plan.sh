@@ -33,15 +33,52 @@
 #                       three never block and cost 0.2 to 1 core per worker
 #                       thread whatever the rate. See proposal 042, "CPU and
 #                       memory", before changing it.
-#   --max-pending N     Nighthawk's --max-pending-requests per worker: how many
-#                       due requests may wait for a connection before the next
-#                       is refused as pool_overflow. Omitted by default: the
-#                       engine's own queue. It was what let the engine hold its
-#                       rate under a CPU limit while it could only SLEEP; under
-#                       WAIT nothing throttles the engine, and a pool_overflow
-#                       is to be seen, not queued away.
+#   --max-pending N     the client queue, Nighthawk's --max-pending-requests,
+#                       per worker thread: how many due requests may wait for a
+#                       connection before the next is refused by the engine's
+#                       own pool (pool_overflow, a request never sent). Default:
+#                       the largest share per worker x --stall-budget, 18 for
+#                       this plan (9 rps x 2 s). 0 writes no queue at all (the
+#                       engine's default; for experiments). See "The client
+#                       queue" below.
+#   --stall-budget S    whole seconds of stall the default queue must absorb (2)
 #   --no-latency        leave the two latency carriers out of the thresholds
 #                       (see the template at the end of this file).
+#
+# The client queue. An open-loop engine sends on a schedule, whether or not the
+# previous request has been answered. What the engine does with a request that
+# falls due and finds no idle connection (engine source at sortie 94cf103):
+#   - it opens another connection, up to `connections` per worker. The plan does
+#     not set it, sortie then passes none, and Nighthawk's default is 100 (HTTP/1,
+#     per worker thread = per target per engine here). A target at 9 rps would
+#     need every request stalled for 11 s to reach it: it is not the limit and
+#     the plan leaves it alone.
+#   - until that connection is up, the request is PENDING. `max_pending_requests`
+#     caps how many may be pending at once, and its default is 0, "no client side
+#     queuing": the engine then programs its pool's pending circuit breaker at 1,
+#     so a second request falling due while one is still waiting for a
+#     connection is refused. That is pool_overflow: the request is never sent.
+# So a slow ANSWER costs a connection and nothing else, and what overflows is a
+# moment in which several requests are due at once and no connection is ready
+# for them: the node did not complete new connections, or did not run the
+# worker thread, for longer than the gap between two requests (111 ms at 9 rps),
+# and the backlog then arrives together. On kind (20 idle cores) that never
+# happened and the queue was dropped as a crutch of the CPU-limited engine. On
+# talos-main it happened 6 times in 270,000 requests with no queue, and never
+# with one of 16 under an agent and a proxy roll (2026-10-07, proposal 042,
+# "Verified on talos-main"); k6 absorbed the same moments with spare VUs.
+#
+# The queue is sized for a stall, not picked: a worker at R rps has at most
+# R x S requests due after S seconds in which none could start, so the default
+# is ceil(largest share per worker x stall budget). 2 s is the budget: the
+# longest response the mesh logged in those two runs was 1.455 s, and 16 (1.8 s
+# at 9 rps) was enough. sortie carries the field per scenario, not per target,
+# so one number serves all targets and is written for the largest share; a
+# 3 rps target gets the same queue and so a longer budget (6 s), which hides
+# nothing: a request the queue could not hold is still pool_overflow, and one
+# that waits is sent late, not lost.
+# pool_overflow stays in the zero-failure set and now reads: the driver was
+# saturated beyond the stall budget on that node, and N requests were not sent.
 #
 # Needs bash and awk only: //e2e/soak:harness_test runs it offline.
 set -uo pipefail
@@ -59,6 +96,7 @@ FLOOR_PCT=99
 SCENARIO=mesh
 IDLE=WAIT
 MAX_PENDING=""
+STALL_BUDGET=2
 LATENCY=1
 # One execution per target runs at once on every engine; the chart's
 # engine.maxConcurrentExecutions (sortie-values.yaml) must cover the list.
@@ -77,7 +115,7 @@ render | shares) ;;
 esac
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--targets | --rate | --concurrency | --profile | --duration | --backends | --dns | --statsd | --floor-pct | --scenario | --idle-strategy | --max-pending)
+	--targets | --rate | --concurrency | --profile | --duration | --backends | --dns | --statsd | --floor-pct | --scenario | --idle-strategy | --max-pending | --stall-budget)
 		[ $# -ge 2 ] || die "$1 needs a value"
 		case "$1" in
 		--targets) TARGETS="$2" ;;
@@ -92,6 +130,7 @@ while [ $# -gt 0 ]; do
 		--scenario) SCENARIO="$2" ;;
 		--idle-strategy) IDLE="$2" ;;
 		--max-pending) MAX_PENDING="$2" ;;
+		--stall-budget) STALL_BUDGET="$2" ;;
 		esac
 		shift 2
 		;;
@@ -165,9 +204,23 @@ esac
 case "$SCENARIO" in
 '' | *[!a-z0-9_]*) die "--scenario must be [a-z0-9_], got '$SCENARIO'" ;;
 esac
-if [ -n "$MAX_PENDING" ]; then
-	is_pos_int "$MAX_PENDING" || die "--max-pending must be a positive integer, got '$MAX_PENDING'"
-fi
+is_pos_int "$STALL_BUDGET" || die "--stall-budget must be whole seconds, a positive integer, got '$STALL_BUDGET'"
+# The client queue (see the header): asked for, off (0), or sized for the stall
+# budget from the largest share per worker thread.
+QUEUE_WHY=""
+case "$MAX_PENDING" in
+0) QUEUE_WHY="off (--max-pending 0): the engine's default, no client queue" ;;
+'')
+	MAX_PENDING="$(printf '%s\n' "$SHARES" | awk -F'\t' -v c="$CONCURRENCY" -v s="$STALL_BUDGET" '
+		$2 > max { max = $2 }
+		END { print max / c * s }')"
+	QUEUE_WHY="the largest share, $((MAX_PENDING / STALL_BUDGET)) rps per worker, x a stall budget of $STALL_BUDGET s"
+	;;
+*)
+	is_pos_int "$MAX_PENDING" || die "--max-pending must be a positive integer, or 0 for no client queue, got '$MAX_PENDING'"
+	QUEUE_WHY="--max-pending $MAX_PENDING"
+	;;
+esac
 case "$IDLE" in
 WAIT | SLEEP | POLL | SPIN) ;;
 *) die "--idle-strategy must be WAIT, SLEEP, POLL or SPIN, got '$IDLE'" ;;
@@ -214,7 +267,14 @@ scenarios:
     protocol: http1
     concurrency: "$CONCURRENCY"
 EOF
-[ -n "$MAX_PENDING" ] && echo "    max_pending_requests: $MAX_PENDING"
+# The client queue, per worker thread: due requests that may wait for a
+# connection before the next is refused as pool_overflow (never sent).
+if [ "$MAX_PENDING" = 0 ]; then
+	echo "    # The client queue: $QUEUE_WHY."
+else
+	echo "    # The client queue: $QUEUE_WHY."
+	echo "    max_pending_requests: $MAX_PENDING"
+fi
 cat <<EOF
     headers:
       - "User-Agent: aether-soak-sortie"
@@ -250,6 +310,9 @@ cat <<EOF
       - "counter:benchmark.stream_resets == 0"
       - "counter:benchmark.pool_connection_failure == 0"
       - "counter:benchmark.pool_failure_timeout == 0"
+      # pool_overflow is the DRIVER: a request its own pool refused because the
+      # client queue was full. Not sent, so not a mesh error -- and not a valid
+      # run for that target on that node either.
       - "counter:benchmark.pool_overflow == 0"
       # $FLOOR_PCT% of the smallest share x $BACKENDS nodes.
       - "rate:benchmark.http_2xx >= $FLOOR"

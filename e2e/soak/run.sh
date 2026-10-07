@@ -84,8 +84,10 @@
 #
 # Environment: SOAK_ENGINE_SETTLE (30) seconds between the engines turning Ready
 # and the first request; SOAK_STATSD_SERVICE (o11y/otel-scraper); SOAK_COSIGN;
-# SOAK_SORTIE_MAX_PENDING / SOAK_SORTIE_IDLE_STRATEGY pass through to
-# sortie-plan.sh; SOAK_READER_IMAGE (sortie-save.sh). churn.sh, restart-watch.sh
+# SOAK_SORTIE_MAX_PENDING (the client queue: a number, or 0 for none; unset, the
+# plan sizes it for SOAK_SORTIE_STALL_BUDGET seconds, default 2) and
+# SOAK_SORTIE_IDLE_STRATEGY pass through to sortie-plan.sh;
+# SOAK_READER_IMAGE (sortie-save.sh). churn.sh, restart-watch.sh
 # and sample-proxy-rss.sh keep their own SOAK_* knobs, except the three log
 # paths, which this script points into the run directory.
 #
@@ -532,6 +534,7 @@ PLAN_ARGS=(render --profile "$MODE" --targets "$TARGETS" --rate "$RATE" --backen
 [ -n "$DURATION" ] && PLAN_ARGS+=(--duration "$DURATION")
 [ -n "$STATSD" ] && PLAN_ARGS+=(--statsd "$STATSD")
 [ -n "${SOAK_SORTIE_MAX_PENDING:-}" ] && PLAN_ARGS+=(--max-pending "$SOAK_SORTIE_MAX_PENDING")
+[ -n "${SOAK_SORTIE_STALL_BUDGET:-}" ] && PLAN_ARGS+=(--stall-budget "$SOAK_SORTIE_STALL_BUDGET")
 [ -n "${SOAK_SORTIE_IDLE_STRATEGY:-}" ] && PLAN_ARGS+=(--idle-strategy "$SOAK_SORTIE_IDLE_STRATEGY")
 bash "$HERE/sortie-plan.sh" "${PLAN_ARGS[@]}" >"$OUT/plan.yaml" || die "could not render the plan"
 bash "$HERE/sortie-plan.sh" shares --targets "$TARGETS" --rate "$RATE" >"$OUT/shares.tsv" || die "could not render the share table"
