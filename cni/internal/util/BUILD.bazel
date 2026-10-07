@@ -14,9 +14,13 @@ go_library(
 go_test(
     name = "util_test",
     size = "small",
-    srcs = ["watcher_test.go"],
+    srcs = [
+        "watcher_loop_test.go",
+        "watcher_test.go",
+    ],
+    embed = [":util"],
     deps = [
-        ":util",
+        "@com_github_fsnotify_fsnotify//:fsnotify",
         "@com_github_stretchr_testify//require",
     ],
 )
