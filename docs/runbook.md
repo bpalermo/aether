@@ -2559,6 +2559,74 @@ To put a cap back, set `udsCsi.resources.limits.cpu` (an empty value renders no
 limit) and consider `udsCsi.goMaxProcs=0`, which hands `GOMAXPROCS` back to the Go
 runtime to derive from that limit.
 
+### cni-install CPU limit (an init container cAdvisor never sees)
+
+`cni-install` is the agent pod's init container: it runs ahead of the agent on every
+agent pod start (a roll, a node boot, a crash restart). Until chart 2.4.12 it had
+request = limit = `100m` CPU. Since #1335 it keeps the `100m` request and has **no CPU
+limit**.
+
+**The throttling could not be read from metrics, and it will not be for any
+sub-second init container.** On talos-main (2026-10-07, cAdvisor scraped every ~60 s
+for the `aether-.*` namespaces) there is no `container_cpu_cfs_*` and no
+`container_cpu_usage_seconds_total` series for `container="cni-install"` at all — nor
+for the proxy pod's `install-supervisor` — in the 45 h cAdvisor had been scraped,
+eight agent rolls included: the container's cgroup lives for under a second and never
+meets a scrape. kube-state-metrics exports only
+`kube_pod_init_container_status_restarts_total` there (no `..._state_started`), and
+`kubectl` shows `startedAt`/`finishedAt` at one-second resolution and no CPU time. So
+the evidence is the installer's own log timestamps (nanosecond, in VictoriaLogs), and
+the CPU figure below is an **inference**, not a counter.
+
+What it does (`cni/internal/install`): Go start-up, then for the plugin binary a
+byte-for-byte compare of the copy already on the host against the one in the image
+(#1123: an unchanged plugin is not rewritten), then a few small conflist reads. On
+that path it writes nothing, and the timings below say the wait is the quota rather
+than the reads: disk latency does not come in 100 ms units. All 40 agent starts of
+2026-10-05..07 (8 rolls × 5 nodes) took the unchanged path:
+
+| First log line → last, 40 starts | |
+|---|---|
+| min / median / max | 496 ms / 598 ms / 802 ms |
+| "running CNI installer" → "already installed and unchanged" (the compare) | 400–700 ms |
+| every other gap between consecutive lines | ~0–10 ms or ~90–100 ms |
+
+Every total is a multiple of ~100 ms (500, 600, 700, 800) and every gap is either
+nothing or a whole CFS period: the process spends its 10 ms of quota, is parked until
+the next 100 ms period, and repeats. Five to eight periods at 10 ms each bounds the
+work at 50–80 ms of CPU, so roughly half a second of each agent start was the quota
+(estimated; Go start-up before the first log line is not visible and is throttled the
+same way). A start that actually rewrites the plugin (a new CNI build: copy, fsync,
+directory sync) was not in the sample and can only be longer.
+
+To repeat the measurement on any chart version (LogsQL, VictoriaLogs; group the lines
+by `k8s.pod.name` and subtract the first `timestamp` from the last):
+
+```logsql
+_time:48h "cni-install" ("installing CNI binaries" OR "running CNI installer" OR "not rewriting it" OR "CNI binaries installed")
+  | sort by (_time) | fields _time, _msg, k8s.pod.name, k8s.node.name
+```
+
+After 2.4.12 the totals should fall to tens of milliseconds with no ~100 ms steps (not
+yet measured on a cluster when this was written). If the steps are still there, check
+that the limit is really gone:
+
+```bash
+kubectl get ds -n aether-system aether-agent \
+  -o jsonpath='{.spec.template.spec.initContainers[0].resources}{"\n"}'   # no limits.cpu
+```
+
+The other init containers, checked in the same pass and left alone: the proxy pod's
+`install-supervisor` renders **no `resources` at all** (no limit, so nothing to
+throttle, but also no request: it runs at the minimum CFS weight and is invisible to
+request accounting; ≤ 1 s wall on talos-main), the `authz` native sidecar has a `10m`
+request and no CPU limit, and the webhook-injected `aether-identity-ready` has a `5m`
+request and no CPU limit (`controller.webhook.identityGate.resources`, `limits.cpu:
+""`). The edge pod's `agent` container has no CPU limit either, so its `GOMAXPROCS` is
+pinned in the chart (`edge.goMaxProcs`, default 2, #1335) like the node agent's; the
+edge `envoy` container takes no `--concurrency` and so sizes its workers to the node's
+cores.
+
 ### What the proxy supervisor does on SIGTERM (`kubectl delete pod`, drain, eviction)
 
 The `aether-proxy` pod is `hostNetwork` with `maxSurge: 1`, so the node's Envoy is a

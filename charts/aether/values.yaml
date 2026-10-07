@@ -460,12 +460,32 @@ cniInstall:
     # IfNotPresent for the same reason as agent.image (#1123): digest-pinned,
     # and this init container sits on every agent pod start.
     pullPolicy: IfNotPresent
+  # No CPU limit (#1335; was request = limit = 100m until chart 2.4.12). This
+  # init container runs on EVERY agent pod start, ahead of the agent, and its
+  # work is one short CPU burst: Go start-up, then a byte-for-byte compare of
+  # the plugin already on the host against the one in the image (#1123's
+  # "unchanged; not rewriting it" path), then a few small conflist reads. A
+  # 100m quota is 10 ms of CPU per 100 ms CFS period, so the burst was parked
+  # once per period: on talos-main all 40 agent starts of 2026-10-05..07 (8
+  # rolls x 5 nodes, every one on the unchanged path) took 496-802 ms from the
+  # installer's first log line to its last (median 598 ms), always a multiple
+  # of ~100 ms, for at most 50-80 ms of CPU -- about half a second of pure
+  # delay per agent start, on the path #1123 shortened. (Inferred from log
+  # timestamps, not read from cAdvisor: a sub-second init container never
+  # meets a 60 s scrape, so it has no container_cpu_cfs_* series at all.
+  # docs/runbook.md, "cni-install CPU limit".)
+  #
+  # The 100m request stays: an init container's request only counts toward the
+  # pod's effective request where it exceeds the sum of the app containers'
+  # (the agent's 200m), so it costs the node nothing, and it is the container's
+  # CFS weight while it runs. The pod was already QoS Burstable. No GOMAXPROCS
+  # pin: the work is single-threaded and the process exits within the second.
+  # To put a cap back, set limits.cpu; an empty value means "no limit".
   resources:
     requests:
       cpu: 100m
       memory: 32Mi
     limits:
-      cpu: 100m
       memory: 32Mi
 
 # The csi.aether.io CSI node plugin (proposal 039): the mesh-owned carrier for a
@@ -964,6 +984,21 @@ edge:
       memory: 128Mi
     limits:
       memory: 256Mi
+  # GOMAXPROCS for the edge pod's `agent` container (the `agent edge` control
+  # plane), set as an explicit env var (#1335) exactly like agent.goMaxProcs
+  # (#1116). `resources` above carries no CPU limit, and since Go 1.25 the
+  # runtime derives GOMAXPROCS from the cgroup CPU limit, so without this it
+  # follows the node's core count (and the GC's background workers with it).
+  # Measured on talos-main (cAdvisor, 2 replicas, the 45 h to 2026-10-07, light
+  # edge traffic): the container averaged 1.8m and its busiest 5 minutes were
+  # 4.4m -- well under
+  # one percent of ONE core -- so 2 is not a ceiling it can feel; it is the
+  # node agent's value, and leaves a P for a snapshot build next to the Gateway
+  # API watches and the xDS stream. The `envoy` container is not a Go process
+  # and is unaffected. Set to 0 (or empty) to omit the env var and hand
+  # GOMAXPROCS back to the Go runtime (e.g. alongside an explicit CPU limit,
+  # which the runtime then honours).
+  goMaxProcs: 2
   # Envoy overload manager on the fixed_heap monitor (edge-configmap.yaml), the
   # same monitor the node proxy uses. The unprivileged edge pod COULD use
   # cgroup_memory, but fixed_heap keeps parity and is independent of the cgroup
