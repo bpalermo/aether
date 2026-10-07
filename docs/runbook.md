@@ -3282,6 +3282,47 @@ is CPU headroom, not a longer timeout. Note also that 1 s is the kernel's initia
 retransmit timeout, so a single dropped SYN cannot be recovered inside it (tracked on
 #1093).
 
+### Envoy's UDP dropped-datagram counter after a hot restart (#1353)
+
+**Do not gate or alert on it across a proxy roll.** The stat
+`listener.<prefix>.udp.downstream_rx_datagram_dropped`, and the warning
+`Kernel dropped N datagram(s)` in the proxy log, over-report after every hot
+restart that follows a real drop.
+
+**Why.** Envoy derives the count from `SO_RXQ_OVFL`, which the kernel keeps for
+the lifetime of the **socket**. Envoy's own running total starts at 0 in each
+**process**. A hot-restarted child inherits the parent's UDP sockets, so at its
+first read it reports the socket's whole history as new drops. That first read
+is when the parent exits.
+
+**Measured** (kind, the pinned proxy image, during the #1332 experiment):
+
+- A roll with 743 real kernel drops: the stat read 1486, and the child logged
+  731 + 12 at parent exit.
+- The next roll, with 0 real drops: the child still logged `Kernel dropped 273`
+  and `21`, and the stat read 294.
+
+So a non-zero value after a roll says only that this socket dropped a datagram
+at some point since it was bound. It does not say the roll dropped anything.
+
+**What to read instead.** The kernel's own counters in the pod's network
+namespace, taken before and after the window you care about:
+
+```bash
+# Per-socket drops (last column) for the QUIC inbound port:
+nsenter --net=/proc/<pid of a process in the pod>/ns/net cat /proc/net/udp | awk 'NR==1 || $2 ~ /:4658$/'   # 0x4658 = 18008
+# Namespace-wide receive-buffer overflows:
+nsenter --net=/proc/<pid>/ns/net nstat -az UdpRcvbufErrors
+```
+
+Both are cumulative as well, but they are read by you at two instants, so the
+difference is the window's drops.
+
+Nothing in this repository or in the talos-main alert rules uses the Envoy stat
+today. A larger receive buffer is not the fix for drops during a starved
+handoff: see #1332 (it removes the drops and changes neither the slow requests
+nor the failures) and "Sizing nodes for a proxy hot restart" above.
+
 ### Source h3 requests die on a stateless reset at a destination's roll (#1054)
 
 Symptom, per roll of a node's proxy: **source** proxies on other nodes log a few
