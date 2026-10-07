@@ -162,7 +162,7 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 			//     #686/#825) or if an upstream connection carrying another
 			//     source's certificate were reused for this stream (issue #831 —
 			//     prevented since #842 by this same key's hash partitioning the
-			//     upstream pool, and demonstrated in //test/mtlspool).
+			//     upstream pool, and demonstrated in //agent/test/mtlspool).
 			//   - "-" here on a source-reporter line means the chain stamped no
 			//     identity at all, i.e. the trust domain was still unknown when
 			//     the listener was generated (#819).

@@ -8,6 +8,11 @@
 #   - the components are derived from the Go targets, minus the excluded
 #     top-level directories (api, bazel, e2e, test): the instrumentation filter
 #     and the library universe name exactly the rest;
+#   - an excluded subtree of a component (agent/test: harnesses that Go's
+#     internal-package rule keeps under agent/, #1311) is subtracted from the
+#     filter and from the library universe, its records are dropped from the
+#     report and its files from unrecorded.txt, while its tests still run; an
+#     entry that no longer exists is refused;
 #   - the invocation: --config=coverage, the derived filter, the caller's flags
 #     passed through, and a target list that is the unit tests plus every
 #     component go_library plus any go_binary with sources of its own;
@@ -141,20 +146,23 @@ reset_fake() {
 //agent/a:a
 //agent/cmd/x:x
 //agent/cmd/x:x_lib
+//agent/test/h:h
 //api/v1:v1
 //bazel/tool:tool
 //cni/p:p
 //e2e/echo:echo
 //test/h:h
 EOF
-	printf '%s\n' '//agent/a:a_test' '//bazel/tool:tool_test' '//cni/p:p_test' >"$FAKE/tests"
+	printf '%s\n' '//agent/a:a_test' '//agent/test/h:h_test' '//bazel/tool:tool_test' '//cni/p:p_test' >"$FAKE/tests"
 	printf '%s\n' '//agent/a:a' '//agent/cmd/x:x_lib' '//cni/p:p' >"$FAKE/libraries"
 	printf '%s\n' '//agent/cmd/x:x' >"$FAKE/binaries"
-	mkdir -p "$FAKE/out/_coverage" "$FAKE/testlogs/agent/a/a_test" \
+	mkdir -p "$FAKE/out/_coverage" "$FAKE/testlogs/agent/a/a_test" "$FAKE/testlogs/agent/test/h/h_test" \
 		"$FAKE/testlogs/bazel/tool/tool_test" "$FAKE/testlogs/cni/p/p_test"
 	# The combined report: two component files measured, one at zero (the
-	# baseline of a library no test links), and two records that are not
-	# component code and must not survive.
+	# baseline of a library no test links), and three records that are not
+	# component code and must not survive: generated Go, a bazel-out source,
+	# and a harness file in the excluded subtree (which the filter keeps out of
+	# a real report; the script must not depend on that).
 	cat >"$FAKE/out/_coverage/_coverage_report.dat" <<'EOF'
 SF:agent/a/a.go
 DA:1,2
@@ -168,6 +176,14 @@ DA:11,0
 DA:12,0
 LH:0
 LF:3
+end_of_record
+SF:agent/test/h/h.go
+DA:1,7
+DA:2,7
+DA:3,7
+DA:4,7
+LH:4
+LF:4
 end_of_record
 SF:api/v1/x.pb.go
 DA:1,9
@@ -187,14 +203,18 @@ end_of_record
 EOF
 	printf 'SF:agent/a/a.go\nDA:1,2\nDA:2,0\nLH:1\nLF:2\nend_of_record\n' >"$FAKE/testlogs/agent/a/a_test/coverage.dat"
 	: >"$FAKE/testlogs/bazel/tool/tool_test/coverage.dat"
+	# The harness's own test: it exercises component code (a.go) and, were it
+	# instrumented, its own package.
+	printf 'SF:agent/a/a.go\nDA:1,1\nDA:2,0\nLH:1\nLF:2\nend_of_record\nSF:agent/test/h/h.go\nDA:1,7\nLH:1\nLF:1\nend_of_record\n' >"$FAKE/testlogs/agent/test/h/h_test/coverage.dat"
 	printf 'SF:cni/p/p.go\nDA:5,1\nLH:1\nLF:1\nend_of_record\n' >"$FAKE/testlogs/cni/p/p_test/coverage.dat"
 }
 
 (
 	cd "$REPO" || exit 1
 	git init -q .
-	mkdir -p agent/a agent/cmd/x cni/p bazel/tool
-	for f in agent/a/a.go agent/a/a_test.go agent/a/a_windows.go agent/cmd/x/main.go cni/p/p.go bazel/tool/main.go; do
+	mkdir -p agent/a agent/cmd/x agent/test/h cni/p bazel/tool
+	for f in agent/a/a.go agent/a/a_test.go agent/a/a_windows.go agent/cmd/x/main.go agent/test/h/h.go agent/test/h/gen/main.go agent/test/h/h_test.go cni/p/p.go bazel/tool/main.go; do
+		mkdir -p "$(dirname "$f")"
 		echo 'package p' >"$f"
 	done
 	echo '/coverage-report/' >.gitignore
@@ -217,17 +237,17 @@ else
 fi
 
 check "instrumentation filter names exactly the components" \
-	grep -qxF -- '--instrumentation_filter=^//(agent|cni)[/:]' "$FAKE/calls"
-check "library universe is the components" \
-	grep -qxF -- 'kind("go_library", //agent/... + //cni/...)' "$FAKE/calls"
-check "binary query is scoped to the components" \
-	grep -qxF -- 'attr("srcs", "\.go", kind("go_binary", //agent/... + //cni/...))' "$FAKE/calls"
+	grep -qxF -- '--instrumentation_filter=^//(agent|cni)[/:],-^//(agent/test)[/:]' "$FAKE/calls"
+check "library universe is the components less the excluded subtree" \
+	grep -qxF -- 'kind("go_library", //agent/... + //cni/... - //agent/test/...)' "$FAKE/calls"
+check "binary query is scoped to the components less the excluded subtree" \
+	grep -qxF -- 'attr("srcs", "\.go", kind("go_binary", //agent/... + //cni/... - //agent/test/...))' "$FAKE/calls"
 check "runs bazel coverage --config=coverage" \
 	test "$(grep -A2 -xF -- '--- coverage' "$FAKE/calls" | tr '\n' ' ')" = '--- coverage coverage --config=coverage '
 check "the caller's flags are passed through" grep -qxF -- '--some_flag' "$FAKE/calls"
 printf '%s\n' '//agent/a:a' '//agent/a:a_test' '//agent/cmd/x:x' '//agent/cmd/x:x_lib' \
-	'//bazel/tool:tool_test' '//cni/p:p' '//cni/p:p_test' >"$TMP/want_targets"
-check "targets = unit tests + component libraries + binaries with srcs" \
+	'//agent/test/h:h_test' '//bazel/tool:tool_test' '//cni/p:p' '//cni/p:p_test' >"$TMP/want_targets"
+check "targets = unit tests (the excluded subtree's too) + component libraries + binaries with srcs" \
 	diff -u "$TMP/want_targets" "$FAKE/targets_seen"
 
 for f in coverage.lcov coverage.xml tests-only.lcov summary.md unrecorded.txt; do
@@ -235,6 +255,11 @@ for f in coverage.lcov coverage.xml tests-only.lcov summary.md unrecorded.txt; d
 done
 check "generated proto Go is not in the report" lacks 'api/v1/x.pb.go' "$OUT/coverage.lcov"
 check "a bazel-out source is not in the report" lacks 'bazel-out/' "$OUT/coverage.lcov"
+check "an excluded-subtree file is not in the report" lacks 'agent/test/' "$OUT/coverage.lcov"
+check "an excluded-subtree file is not in the tests-only tracefile" lacks 'agent/test/' "$OUT/tests-only.lcov"
+check "what the excluded subtree's test covers in a component is kept" \
+	test "$(grep -c '^SF:agent/a/a.go$' "$OUT/tests-only.lcov")" = 2
+check "the log names the excluded subtree" has 'excluded subtrees: agent/test' "$TMP/log"
 check "the zero-hit file is in the report" has 'SF:agent/cmd/x/main.go' "$OUT/coverage.lcov"
 check "the zero-hit file is not in the tests-only tracefile" lacks 'agent/cmd/x/main.go' "$OUT/tests-only.lcov"
 # a.go 2 lines (1 hit), main.go 3 lines (0), p.go 1 line (1): 6 lines, 2 covered.
@@ -245,6 +270,8 @@ check "Cobertura names files repo-relative" has 'filename="agent/cmd/x/main.go"'
 check "summary: agent 20.00% with the zero-hit file, 50.00% without" \
 	has '| `agent` | 2 | 5 | 1 | 20.00% | 2 | 1 | 50.00% |' "$OUT/summary.md"
 check "summary: total" has '| **Total** | 3 | 6 | 2 | **33.33%** | 3 | 2 | 66.67% |' "$OUT/summary.md"
+# agent/test/h/h.go and agent/test/h/gen/main.go are tracked, non-test and
+# unrecorded, and must not be listed: they are not component code.
 check "unrecorded.txt is the one tracked component file with no record" \
 	test "$(cat "$OUT/unrecorded.txt")" = 'agent/a/a_windows.go'
 
@@ -266,6 +293,18 @@ refuse "an empty library list" "the libraries query returned nothing" run --out 
 reset_fake
 printf '%s\n' '//api/v1:v1' '//test/h:h' >"$FAKE/go_targets"
 refuse "no component at all" "no first-party Go component found" run --out "$TMP/r4"
+
+# A stale excluded subtree is refused, not silently skipped: the subtraction in
+# the query would otherwise be an error nobody reads, or worse, nothing.
+reset_fake
+mv "$REPO/agent/test" "$REPO/agent/test.moved"
+refuse "an excluded subtree that does not exist" "excluded subtree agent/test does not exist" run --out "$TMP/r4a"
+check "a stale excluded subtree runs no coverage" lacks '--- coverage' "$FAKE/calls"
+mv "$REPO/agent/test.moved" "$REPO/agent/test"
+reset_fake
+grep -v '^//agent/' "$FAKE/go_targets" >"$FAKE/go_targets.new"
+mv "$FAKE/go_targets.new" "$FAKE/go_targets"
+refuse "an excluded subtree outside every component" "excluded subtree agent/test is not under a component" run --out "$TMP/r4b"
 
 reset_fake
 touch "$FAKE/coverage_fails"

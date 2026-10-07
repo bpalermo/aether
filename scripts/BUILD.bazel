@@ -101,6 +101,17 @@ sh_test(
     data = ["materialize-generated-go.sh"],
 )
 
+# scripts/go-build-plain.sh against a throwaway git repository and a fake `go`
+# that records its arguments: the build is one `go build ./...` (and one
+# `go vet ./...`) over the whole module with no excluded package, and a package
+# the go command refuses fails it (#1311). Needs git on PATH and nothing else.
+sh_test(
+    name = "go_build_plain_test",
+    size = "small",
+    srcs = ["go_build_plain_test.sh"],
+    data = ["go-build-plain.sh"],
+)
+
 # scripts/codeql-go-diagnostics.sh, the gate between CodeQL's analysis and the
 # upload: SARIF fixtures in the shape of real runs with and without the
 # generated proto packages. Hermetic: the Bazel-pinned jq.

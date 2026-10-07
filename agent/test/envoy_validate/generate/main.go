@@ -2,12 +2,12 @@
 // files into --out for offline inspection or CI artifact storage.
 //
 // The bootstrap configs are the same as those validated by
-// //test/envoy_validate:envoy_validate_test.  Running the generator standalone
+// //agent/test/envoy_validate:envoy_validate_test.  Running the generator standalone
 // is useful for inspecting the produced JSON before changing the proxy builders.
 //
 // Usage:
 //
-//	bazel run //test/envoy_validate/generate -- --out /tmp/envoy-validate
+//	bazel run //agent/test/envoy_validate/generate -- --out /tmp/envoy-validate
 package main
 
 import (
@@ -16,7 +16,7 @@ import (
 	"os"
 	"path/filepath"
 
-	envoy_validate "aethermesh.dev/test/envoy_validate"
+	envoy_validate "aethermesh.dev/agent/test/envoy_validate"
 )
 
 func main() {

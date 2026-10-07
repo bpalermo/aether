@@ -32,7 +32,7 @@ const (
 	// cluster (the netns- or aether.source-keyed matcher), matches nothing and
 	// takes OnNoMatch — the AGENT'S OWN SVID,
 	// spiffe://<td>/ns/aether-system/sa/aether-agent (#825) — so a rollback
-	// below 0.93.0 is no longer hitless. //test/envoy_validate asserts the
+	// below 0.93.0 is no longer hitless. //agent/test/envoy_validate asserts the
 	// retired name appears in no listener of any fixture.
 	//
 	// The netns key (networkNamespaceFilterStateKey) is NOT retired with it: it
@@ -88,7 +88,7 @@ const (
 	//     through envoy.matching.inputs.filter_state, which reads
 	//     serializeAsString() — again the StringAccessor surface.
 	//
-	// EXPORTED so the out-of-tree runtime harness (//test/mtlspool) stamps the
+	// EXPORTED so the out-of-tree runtime harness (//agent/test/mtlspool) stamps the
 	// same key production does rather than re-spelling the literal.
 	SourceIdentityCertMapperFilterStateKey = "envoy.tls.certificate_mappers.on_demand_secret"
 

@@ -24,8 +24,8 @@ alias(
 go_library(
     name = "envoy_validate",
     srcs = ["builders.go"],
-    importpath = "aethermesh.dev/test/envoy_validate",
-    visibility = ["//test/envoy_validate:__subpackages__"],
+    importpath = "aethermesh.dev/agent/test/envoy_validate",
+    visibility = ["//agent/test/envoy_validate:__subpackages__"],
     deps = [
         "//agent/internal/xds/config",
         "//agent/internal/xds/proxy",
@@ -67,8 +67,8 @@ go_library(
 #   - Unknown TypedConfig @type URL / missing extension
 #
 # Run with:
-#   bazel test //test/envoy_validate:envoy_validate_test
-#   bazel test //test/envoy_validate:envoy_validate_test --test_output=all
+#   bazel test //agent/test/envoy_validate:envoy_validate_test
+#   bazel test //agent/test/envoy_validate:envoy_validate_test --test_output=all
 #
 # Tagged "envoy-validate" (not "integration") — no Docker daemon required.
 # size=small: 3 Envoy validation processes, ~3-5 s wall time (measured 3.1 s).

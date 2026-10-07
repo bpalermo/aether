@@ -49,8 +49,8 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/test/envoybin"
 	meshconst "aethermesh.dev/common/constants/mesh"
-	"aethermesh.dev/test/envoybin"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"

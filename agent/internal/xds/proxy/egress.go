@@ -141,7 +141,7 @@ func UDPClusterName(serviceName, meshDomain string) string {
 // Cardinality: one key per CLUSTER, never per endpoint or per source --
 // bounded by services x raw-TCP ports, the same set the cluster names already
 // are. The keys carry no dot, so the chart's tag regex `^cluster\.(([^.]+)\.)`
-// captures each one whole (pinned by //test/envoy_validate against the chart's
+// captures each one whole (pinned by //agent/test/envoy_validate against the chart's
 // own regex, after Envoy's sanitization). The HTTP keys ("<ns>/<svc>",
 // "<ns>/<svc>@<ns>/<sa>") are untouched, and a query selecting an HTTP
 // service by exact key or by `<ns>/<svc>(@.*)?` cannot match an L4 key.
@@ -457,7 +457,7 @@ func subsetKeyCombos(keys []string) [][]string {
 // second half of issue #842. The flag gave every downstream connection its own
 // upstream pool, which is what kept a node proxy hosting many workload
 // identities from handing source B a pooled connection carrying source A's
-// client certificate (#831, reproduced by //test/mtlspool's negative control).
+// client certificate (#831, reproduced by //agent/test/mtlspool's negative control).
 // It bought that correctness by making upstream h2 multiplexing across sources
 // impossible: one upstream connection and one full mTLS handshake per
 // downstream connection, forever.
@@ -472,7 +472,7 @@ func subsetKeyCombos(keys []string) [][]string {
 //
 // THE TWO ARE A PAIR. Removing the flag without the hashable filter state
 // re-opens the leak, and it fails OPEN: XFCC reports the wrong caller and
-// nothing errors. //test/mtlspool asserts both directions.
+// nothing errors. //agent/test/mtlspool asserts both directions.
 func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []string) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name: name,

@@ -28,14 +28,14 @@
 //     subscribed, skipping" (od_cds_api_impl.cc, XdstpOdcdsSubscriptionsManager).
 //     Answering such a name absent does not make Envoy drop the subscription;
 //     it strands the pair: every request 503s at the on_demand timeout until the
-//     proxy restarts (seen live in //test/mtlspool). So a re-subscribed twin is
+//     proxy restarts (seen live in //agent/test/mtlspool). So a re-subscribed twin is
 //     served if the pair is valid.
 //
 // A named subscription on a LATER request of the stream, for a twin the proxy
 // does not hold, is the on_demand HTTP filter asking for a twin a request just
 // routed to: first use.
 //
-// It is its own package so the live gate (//test/mtlspool) runs the agent's
+// It is its own package so the live gate (//agent/test/mtlspool) runs the agent's
 // classification rather than a copy of it.
 package quicdemand
 

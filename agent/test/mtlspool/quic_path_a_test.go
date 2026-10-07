@@ -17,7 +17,7 @@ package mtlspool
 // These tests run the ORIGINAL path-A configuration: the destination presents
 // the URI-only SVID shape (pki.leaf) and the twins dial the bare port SNI.
 //
-// Expected state per binary (//test/envoybin:envoy_bin is the image the chart
+// Expected state per binary (//agent/test/envoybin:envoy_bin is the image the chart
 // pins):
 //
 //	                                         pin without #47740   pin with #47740

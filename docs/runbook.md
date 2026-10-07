@@ -147,12 +147,12 @@ bazel test //... --test_arg=-test.short
 
 ### `envoy --mode validate`: the released proxy or the one a PR builds
 
-`//test/envoy_validate` runs `envoy --mode validate` over aether-generated
-configs, and it has two modes. **Default** (`bazel test //test/envoy_validate/...`,
+`//agent/test/envoy_validate` runs `envoy --mode validate` over aether-generated
+configs, and it has two modes. **Default** (`bazel test //agent/test/envoy_validate/...`,
 what the `ci` workflow runs): the binary is `@pinned_envoy_linux_<arch>`, lifted
 by `//bazel/proxy_pin` from the aether-proxy image `charts/aether/values.yaml`
 pins — the proxy the mesh deploys today (#709). **Built proxy**
-(`test/envoy_validate/validate-built-proxy.sh <envoy-binary>`): the script points
+(`agent/test/envoy_validate/validate-built-proxy.sh <envoy-binary>`): the script points
 `--override_repository` for the host arch's pinned repo at a local repo whose
 `envoy` symlinks to the given binary, so the same tests validate against an
 Envoy built elsewhere — typically the `//proxy` workspace's `//:envoy`. Bazel
@@ -215,6 +215,15 @@ count yet, so code only they exercise reads as uncovered.
   `e2e` (harnesses) and `bazel` (build tooling) — the `EXCLUDED` list in the
   script. A new top-level component is measured from its first Go target with
   no edit. `cmd/` mains are in: they are code.
+- *One subtree of a component is out too:* `agent/test` (`EXCLUDED_SUBTREES`).
+  It holds the Envoy-driven harnesses (`envoy_validate`, its generator,
+  `mtlspool`, `envoybin`), which import `agent/internal/...` and therefore have
+  to sit under `agent/` (#1311); before that they were in `test/` and excluded
+  with it. Their two non-test files (the config builders and the generator's
+  `main`) are fixtures, not product code, so they stay out of the denominator
+  and the move changed no number. Their tests run like any other unit test, and
+  the `agent/internal/...` lines those tests execute count. A subtree entry
+  that no longer exists fails the run.
 - *Untested code counts as zero.* By default `bazel coverage` instruments only
   packages that have a test in the run. The script passes an
   `--instrumentation_filter` over every component and makes every component
@@ -611,11 +620,11 @@ What the `Analyze (go)` job does, in order:
    listed in `.materialized-generated-go`. Bazel runs **before** CodeQL is
    initialised so the tracer never sees rules_go's own `go` processes.
 2. `scripts/go-build-plain.sh` builds the module with the plain go command
-   under CodeQL's tracer: pinned Go from `go.mod`, `GOFLAGS=-mod=readonly`,
-   `GOTOOLCHAIN=local`, `GOOS=linux`, `CGO_ENABLED=0`. `go.mod` and `go.sum`
-   must come out untouched. The tracer extracts each package and then lets the
-   real build run, so this step is also the proof that the module compiles
-   outside Bazel.
+   under CodeQL's tracer: one `go build ./...` over the whole module, pinned Go
+   from `go.mod`, `GOFLAGS=-mod=readonly`, `GOTOOLCHAIN=local`, `GOOS=linux`,
+   `CGO_ENABLED=0`. `go.mod` and `go.sum` must come out untouched. The tracer
+   extracts each package and then lets the real build run, so this step is also
+   the proof that the module compiles outside Bazel.
 3. CodeQL analyses with `upload: never`.
 4. `scripts/codeql-go-diagnostics.sh` reads the SARIF and fails the job if the
    extraction was incomplete (below).
@@ -642,26 +651,38 @@ The copies are inert for Bazel and Gazelle (no target lists them, and Gazelle
 skips a `.pb.go` that sits next to its `.proto`), but they go stale when a
 `.proto` changes: re-run `make materialize-go`, or clean them.
 
-**What is not built by the plain go command.** `scripts/go-build-plain.sh`
-holds the list with reasons, and fails when an entry starts building:
+**Nothing is excluded from the plain build.** `scripts/go-build-plain.sh` runs
+`go build ./...` (and, with `--vet`, `go vet ./...`, which also type-checks
+every `_test.go`) over the whole module: no package list, no exception.
+`//scripts:go_build_plain_test` holds it to exactly those two invocations.
 
-| Package | Why | Scanned? |
-| --- | --- | --- |
-| `test/envoy_validate`, `test/envoy_validate/generate` | imports `agent/internal/...` from outside `agent/`; Bazel `visibility` allows it, Go's internal-package rule does not | yes: the script names them in a `go build` that must fail, which is enough for the tracer to extract them |
-| `test/mtlspool` (`go vet` only) | test-only package with the same imports | no (tests are not scanned) |
+Bazel does not enforce Go's internal-package rule (`visibility` is its own,
+looser mechanism), so a package outside `agent/` can import
+`agent/internal/...` and stay green in Bazel while the go command, gopls and
+CodeQL's extractor refuse it (*"use of internal package ... not allowed"*).
+That was the case for `test/envoy_validate`, its generator and `test/mtlspool`
+until #1311 moved them to `agent/test/`, and it is the only way such a failure
+is fixed: move the importer under the tree whose `internal/` it uses (or give
+it a non-internal package to import). Do not exclude it from the build and do
+not allow its extraction error.
 
-Three more non-test files are never part of a Linux build and so are not in the
-database: `agent/internal/udscsi/mounter_other.go`,
-`common/file/dirsync_windows.go`, `common/file/fadvise_unspecified.go`.
+What `./...` leaves out is decided by build constraints in the files
+themselves, never by a list. Three non-test files are never part of a Linux
+build and so are not in the database: `agent/internal/udscsi/mounter_other.go`,
+`common/file/dirsync_windows.go`, `common/file/fadvise_unspecified.go`. And
+`test/conformance` holds one `_test.go` behind `//go:build conformance`: it is
+compiled inside the upstream gateway-api module, not this one (its README), so
+the directory is not a package here for the go command or for Bazel.
 
 **"The Go extraction is complete" failed.** CodeQL does not fail a scan it could
 only half do, and a partial result uploads cleanly and then closes every alert
 in the code it did not understand as *fixed*. The step reads the SARIF's
 `runs[].invocations[].toolExecutionNotifications[]` and fails on any
-`go/diagnostics/extraction-errors` entry (an unresolved package or type) other
-than the allow-listed internal-package error in `test/envoy_validate`, on any
-`go/autobuilder/*` warning (the *"packages could not be found"* family), on an
-extracted `_test.go`, and when a materialized file is missing from the
+`go/diagnostics/extraction-errors` entry (an unresolved package or type, an
+internal-package violation): there is no allow-list, and
+`//scripts:codeql_go_diagnostics_test` fails if one comes back. It also fails
+on any `go/autobuilder/*` warning (the *"packages could not be found"* family),
+on an extracted `_test.go`, and when a materialized file is missing from the
 database. Nothing was uploaded; the SARIF artifact has the full list. The usual
 cause is a generated package the materialize step did not cover.
 
@@ -1652,7 +1673,7 @@ the agent for it by name over ODCDS; the agent checks the name (destination in t
 dependency set, source a ServiceAccount with a pod on the node), records
 the pair and publishes the twin with its own load assignment; the paused request
 resumes on it, over HTTP/3. That costs one local round trip. It was 17–24 ms in
-`//test/mtlspool`'s `TestOnDemandQUICTwinPerPair`, and every later request from
+`//agent/test/mtlspool`'s `TestOnDemandQUICTwinPerPair`, and every later request from
 the pair skips it. A connection with no identity stamp (stamped before the trust
 domain was known) takes `on_no_match`, the h2 cluster. A GAMMA (HTTPRoute) rule
 whose single backendRef is the parent rides QUIC too; a weighted split stays h2
@@ -1706,7 +1727,7 @@ persisted pairs carry over; the re-statement is read two ways:
   the life of the process and answers every later request for the name "already
   subscribed, skipping", so a subscribed twin answered absent is **stranded**: every
   request from that pair 503s `NC` at the 2 s `on_demand` timeout until the proxy
-  restarts. `//test/mtlspool`'s `TestOnDemandQUICSubscribedTwinsServedAfterAgentRestart/strand_control`
+  restarts. `//agent/test/mtlspool`'s `TestOnDemandQUICSubscribedTwinsServedAfterAgentRestart/strand_control`
   shows it.
 
 The agent logs one line per fresh stream: `fresh xDS stream re-stated QUIC twins:
@@ -1789,7 +1810,7 @@ name is skipped inside the proxy and never reaches the agent. The pair is then
 Until #1036 this was reachable on every Deployment roll. A pair was *forgotten* when
 its source ServiceAccount's last pod left the node, or when its destination left the
 dependency set (or, before #979, the allow-list). The next pod of that ServiceAccount on the node
-then routed to a name Envoy would never ask for again. `//test/mtlspool`
+then routed to a name Envoy would never ask for again. `//agent/test/mtlspool`
 `TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control` reproduces
 it: `status=503 … in 2.000099268s`, and no CDS request reaches the control plane.
 
@@ -1972,7 +1993,7 @@ sum(rate(envoy_cluster_upstream_rq_total{aether_cluster=~".*@.*"}[5m]))
 
 A connection count that grows with app connections (k6 VUs, a client's pool size)
 rather than with SAs × workers × endpoints means a twin started pooling per
-downstream connection again. `//test/mtlspool` `TestQUICTwinUpstreamConnections`
+downstream connection again. `//agent/test/mtlspool` `TestQUICTwinUpstreamConnections`
 reproduces both shapes: 12 app connections open 1 QUIC connection (one worker), 4
 (four workers), or 12 (option forced on). The same counts hold on the h2 path, whose
 pool key has carried the source identity instead of the downstream connection since
@@ -2073,7 +2094,7 @@ response, so only a *late* twin — a new local ServiceAccount — is hit. Fixed
 #1008: `proxy.QUICClusterFrom` points the twin at its own EDS name and the cache
 publishes the base's `ClusterLoadAssignment` under it
 (`proxy.LoadAssignmentAlias`). Seeing this again means that pairing broke;
-`//test/mtlspool`'s `TestLateQUICTwin*` pair reproduces it against the pinned
+`//agent/test/mtlspool`'s `TestLateQUICTwin*` pair reproduces it against the pinned
 proxy (the negative control times out at ~15 s by design).
 
 **Invariant.** A delta-ADS subscriber must never share a resource name with an
@@ -2108,8 +2129,8 @@ Three gates keep it that way:
 
 - `//agent/internal/xds/cache` `TestNoNonDefaultClusterSharesTheBareServiceEDSName`
   and `TestLate{PortAlias,TCPFloor}SubscribesToItsOwnEDSResource`.
-- `//test/envoy_validate` `ClustersSharingServiceEDSName`, over every fixture.
-- `//test/mtlspool` `TestLate{PortAlias,TCPFloor,QUICTwin}*`, against the
+- `//agent/test/envoy_validate` `ClustersSharingServiceEDSName`, over every fixture.
+- `//agent/test/mtlspool` `TestLate{PortAlias,TCPFloor,QUICTwin}*`, against the
   pinned proxy, each with a shared-name negative control that must time out at
   ~15 s.
 
@@ -3229,7 +3250,7 @@ interval). The longer the agent was away, the longer the proxy waits after it is
 Since #1103 the bootstrap's `ads_config` carries
 `retry_policy.retry_back_off {base_interval: 0.1s, max_interval: 1s}`, so the proxy
 reconnects within 1 s of the agent serving. Checked by
-`//test/envoy_validate:envoy_validate_test` (`TestNodeProxyADSReconnectBackoffIsBounded`)
+`//agent/test/envoy_validate:envoy_validate_test` (`TestNodeProxyADSReconnectBackoffIsBounded`)
 and `//charts/aether:aether_proxy_bootstrap_ads_reconnect_backoff_test`; the kind proof
 is `e2e/drain-propagation.sh`.
 
@@ -4056,7 +4077,7 @@ that caught #829. It is the fail-**open** direction.
 sum by (node) (increase(aether_agent_identity_cluster_unpinned_total[1h]))
 ```
 
-The config-shape half is a build-time gate: `//test/envoy_validate` asserts every upstream
+The config-shape half is a build-time gate: `//agent/test/envoy_validate` asserts every upstream
 TLS context in a generated bootstrap carries a non-empty `match_typed_subject_alt_names`.
 `envoy --mode validate` **accepts** an unpinned context, so validation passing says nothing
 about it.
@@ -4191,7 +4212,7 @@ cluster, and a tick could not be assigned to a cluster kind (#1007).
 - **Cardinality** is one key per cluster (services × raw-TCP ports), never per endpoint
   or per source.
 - **HTTP queries are unaffected**: an exact `<ns>/<svc>` or `<ns>/<svc>(@.*)?` selector
-  cannot match an L4 key. `//test/envoy_validate` runs the chart's own tag regex over the
+  cannot match an L4 key. `//agent/test/envoy_validate` runs the chart's own tag regex over the
   keys, after Envoy's sanitization, and pins that.
 
 ```promql
@@ -5065,7 +5086,7 @@ identity`.
 > downstream connection id into the hash instead — one pool per downstream
 > connection, so there is nothing to share.
 >
-> `//test/mtlspool` runs the real pinned proxy with two source ServiceAccounts
+> `//agent/test/mtlspool` runs the real pinned proxy with two source ServiceAccounts
 > on one node and measures the identity the destination verifies. With the flag
 > on, each source is verified as itself on its own upstream connection. With it
 > off — the only change — **every** request from the second source is verified
@@ -5170,7 +5191,7 @@ Two things follow, and they are the point of the change:
 > to `Hashable`. Reverting the factory while the flag stays off re-opens the
 > #831 leak — a pooled connection carries another workload's client
 > certificate, the handshake succeeds, and the destination stamps the wrong
-> identity into XFCC. It fails **open**. `//test/mtlspool` reproduces it as a
+> identity into XFCC. It fails **open**. `//agent/test/mtlspool` reproduces it as a
 > negative control and would go green-for-the-wrong-reason if the pair were
 > broken; read its `TestSharedPoolLeaksSourceIdentity` before touching either.
 
@@ -5269,7 +5290,7 @@ advertises for *peer*-initiated streams. The governing limit is the agent's
 > `TestMeshCertSelectorSDSSourceIsNotSharedWithAnyStaticSecret`
 > (`agent/internal/xds/proxy`) fails the build if any builder does.
 
-**The gate.** `//test/mtlspool`'s
+**The gate.** `//agent/test/mtlspool`'s
 `TestOnDemandCertificateResolvesWhenAlreadyStaticallyReferenced` runs the pinned
 proxy against a real delta-ADS control plane with the source identity referenced
 *both* ways, and asserts the request **completes within a bound**. It was red
@@ -5297,7 +5318,7 @@ present the new certificate; connections already established keep the one they
 handshook with, which is correct. SPIRE rotates on a ~4 h TTL, so a 60–75 minute
 deploy validation crosses no rotation while an 8 h soak crosses about two — i.e.
 a rotation defect would first appear as a soak going quiet several hours in,
-with no error anywhere. `//test/mtlspool`'s
+with no error anywhere. `//agent/test/mtlspool`'s
 `TestRotatedSVIDIsPickedUpOverTheSelectorStream` is the build-time gate for it:
 it republishes every SVID under a new snapshot version and requires the
 destination to verify a different certificate SERIAL for the same SPIFFE ID

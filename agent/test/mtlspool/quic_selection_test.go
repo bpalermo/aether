@@ -34,7 +34,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
-	"aethermesh.dev/test/envoybin"
+	"aethermesh.dev/agent/test/envoybin"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"

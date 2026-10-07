@@ -34,10 +34,7 @@ go_library(
         "waypoint.go",
     ],
     importpath = "aethermesh.dev/agent/internal/xds/proxy",
-    visibility = [
-        "//agent:__subpackages__",
-        "//test:__subpackages__",  # envoy_validate bootstrap generator
-    ],
+    visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/internal/xds/config",
         "//agent/internal/xds/xdsconst",

@@ -9,7 +9,7 @@ load("//bazel/helm:defs.bzl", "chart_push", "helm_template_absent_test", "helm_t
 # argv the supervisor is handed, and //agent/internal/supervisorcmd asserts every
 # flag in it exists on the command (#772). A rename there would otherwise only
 # surface as every proxy pod failing to start at rollout time.
-# agent-proxy-configmap.yaml is exported so //test/envoy_validate can run its
+# agent-proxy-configmap.yaml is exported so //agent/test/envoy_validate can run its
 # aether.cluster stats-tag regex over the per-kind L4 stat keys (#1023): a
 # regex edit that cut "tcp:<ns>/<svc>:<port>" short would silently merge L4
 # series again.
@@ -531,7 +531,7 @@ helm_template_test(
 # #1103: the proxy's ADS reconnect backoff is capped at 1 s. While the stream to
 # the node agent is down the proxy routes on stale endpoints (DRAINING hosts
 # included), and Envoy's 500 ms / 30 s default kept a proxy blind 8.4 s after
-# its restarted agent was serving again. //test/envoy_validate checks the values
+# its restarted agent was serving again. //agent/test/envoy_validate checks the values
 # and that Envoy accepts them; this pins them in the packaged chart.
 helm_template_test(
     name = "aether_proxy_bootstrap_ads_reconnect_backoff_test",

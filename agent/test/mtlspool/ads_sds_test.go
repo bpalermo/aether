@@ -1,4 +1,4 @@
-// This file is the half of //test/mtlspool that issue #842 shipped without,
+// This file is the half of //agent/test/mtlspool that issue #842 shipped without,
 // and it is the reason rev228 reached a cluster.
 //
 // harness_test.go proves pool partitioning against a real Envoy, but it serves
@@ -53,7 +53,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
-	"aethermesh.dev/test/envoybin"
+	"aethermesh.dev/agent/test/envoybin"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
