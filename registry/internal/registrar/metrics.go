@@ -17,6 +17,25 @@ const meterName = "aether/registry-registrar"
 // watch stream ended inside a batch (#1269).
 const tokenDropMidBatch = "midbatch"
 
+// Reason labels of an abandoned resend (#1334): what ended a watch stream
+// before the SNAPSHOT_COMPLETE of its initial exchange. Our own shutdown has no
+// reason and is not counted.
+const (
+	// streamEndFilterChange: the dependency set changed and SetServiceFilter
+	// cancelled the stream to re-assert the new filter.
+	streamEndFilterChange = "filter_change"
+	// streamEndServerDrain: the registrar drained (a graceful GOAWAY, #718).
+	streamEndServerDrain = "server_drain"
+	// streamEndForcedResync: the registrar force-resynced this watcher
+	// (DataLoss: its event buffer overflowed).
+	streamEndForcedResync = "forced_resync"
+	// streamEndEOF: the registrar ended the stream cleanly.
+	streamEndEOF = "eof"
+	// streamEndError: the stream failed (also counted in watch_errors unless
+	// it was a startup handshake transient).
+	streamEndError = "error"
+)
+
 // clientMetrics holds the watch-stream instruments. All methods are
 // nil-receiver-safe so the client runs unchanged when telemetry is disabled.
 //
@@ -35,6 +54,8 @@ type clientMetrics struct {
 	lastVersion   metric.Int64Gauge
 	malformedKeys metric.Int64Counter
 	tokenDrops    metric.Int64Counter
+	// resendsAbandoned: see RegistrarRegistry.abandonedResend.
+	resendsAbandoned metric.Int64Counter
 }
 
 // newClientMetrics registers the watch-stream instruments on the given meter.
@@ -61,6 +82,10 @@ func newClientMetrics(meter metric.Meter) (*clientMetrics, error) {
 	if m.tokenDrops, err = meter.Int64Counter("aether.agent.registry.watch_token_drops",
 		metric.WithDescription("Resume tokens this agent dropped at the end of a watch stream, so that its next stream is resent in full, by reason (midbatch: the stream ended inside a batch, #1269)")); err != nil {
 		return nil, fmt.Errorf("watch token drops: %w", err)
+	}
+	if m.resendsAbandoned, err = meter.Int64Counter("aether.agent.registry.watch_resends_abandoned",
+		metric.WithDescription("Watch streams that ended before the SNAPSHOT_COMPLETE of their initial exchange and left no resume token, so the full snapshot the registrar was sending was abandoned and the next stream is resent in full again, by what ended the stream (filter_change: a dependency-set change re-asserted the watch filter; server_drain; forced_resync; eof; error) (#1334)")); err != nil {
+		return nil, fmt.Errorf("watch resends abandoned: %w", err)
 	}
 
 	return m, nil
@@ -92,6 +117,13 @@ func (m *clientMetrics) tokenDropped(ctx context.Context, reason string) {
 		return
 	}
 	m.tokenDrops.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+func (m *clientMetrics) resendAbandoned(ctx context.Context, reason string) {
+	if m == nil {
+		return
+	}
+	m.resendsAbandoned.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
 }
 
 func (m *clientMetrics) versionApplied(ctx context.Context, version string) {

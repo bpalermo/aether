@@ -46,6 +46,13 @@ type modelRegistrar struct {
 	rev      int64
 	contents map[string]map[string]struct{} // service -> IPs
 	outcomes []string
+	// requests are the watch requests received, in order (index = stream).
+	requests []*registrarv1.WatchEndpointsRequest
+
+	// beforeMarker, when set, runs after stream n's (1-based) initial events
+	// are sent and before its SNAPSHOT_COMPLETE: a test holds the initial
+	// exchange open there (#1334). Set before the server starts.
+	beforeMarker func(ctx context.Context, n int)
 
 	live chan modelStep
 }
@@ -147,6 +154,12 @@ func (m *modelRegistrar) outcomeLog() []string {
 	return slices.Clone(m.outcomes)
 }
 
+func (m *modelRegistrar) requestLog() []*registrarv1.WatchEndpointsRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.requests)
+}
+
 func (m *modelRegistrar) WatchEndpoints(req *registrarv1.WatchEndpointsRequest, stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse]) error {
 	var filter map[string]struct{}
 	if req.GetFilter() != nil {
@@ -175,6 +188,8 @@ func (m *modelRegistrar) WatchEndpoints(req *registrarv1.WatchEndpointsRequest, 
 		}
 	}
 	m.outcomes = append(m.outcomes, outcome)
+	m.requests = append(m.requests, req)
+	n := len(m.outcomes)
 	var sends []*registrarv1.WatchEndpointsResponse
 	if outcome == "resent" || outcome == "extended" {
 		for svc, ips := range m.contents {
@@ -189,13 +204,18 @@ func (m *modelRegistrar) WatchEndpoints(req *registrarv1.WatchEndpointsRequest, 
 		}
 	}
 	m.mu.Unlock()
-	sends = append(sends, &registrarv1.WatchEndpointsResponse{
-		Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, Version: current, Extended: extended,
-	})
 	for _, e := range sends {
 		if err := stream.Send(e); err != nil {
 			return err
 		}
+	}
+	if m.beforeMarker != nil {
+		m.beforeMarker(stream.Context(), n)
+	}
+	if err := stream.Send(&registrarv1.WatchEndpointsResponse{
+		Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, Version: current, Extended: extended,
+	}); err != nil {
+		return err
 	}
 
 	for {

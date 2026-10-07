@@ -1076,13 +1076,21 @@ func (r *RegistrarRegistry) consumeStream(ctx context.Context, stream registrarv
 	// one live event that carried no version, so the cache is past what
 	// lastVersion names (#1269). See endStream.
 	inBatch := false
+	// For the abandoned-resend report only (abandonedResend).
+	opened := time.Now()
+	received := 0
 
 	for {
 		event, err := stream.Recv()
 		if err != nil {
-			token, failure := r.handleStreamError(ctx, err, lastVersion)
+			token, reason, failure := r.handleStreamError(ctx, err, lastVersion)
+			// catalogReplay is still set: the stream ended before its initial
+			// exchange's marker. inBatch is false then by construction, so
+			// endStream leaves the token alone.
+			r.abandonedResend(ctx, token, reason, catalogReplay != nil, open, received, time.Since(opened))
 			return r.endStream(ctx, token, inBatch), failure
 		}
+		received++
 
 		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE && catalogReplay == nil {
 			// A version marker (#1241): the registrar's version moved with
@@ -1157,6 +1165,47 @@ func (r *RegistrarRegistry) endStream(ctx context.Context, token string, inBatch
 		r.log.InfoContext(ctx, "watch stream ended inside a batch; requesting a full snapshot on reconnect", "lastVersion", token)
 	}
 	return ""
+}
+
+// abandonedResend reports a stream that ended before the SNAPSHOT_COMPLETE of
+// its initial exchange AND left no resume token (#1334): the registrar was
+// resending this stream the whole filtered snapshot, that resend is lost, and
+// the next stream is resent in full again. token is what the stream leaves for
+// the next one, reason what ended it (handleStreamError), and beforeMarker
+// whether it ended before that marker at all.
+//
+// The token is empty here in two ways. The stream was opened with none (the
+// process's first stream, or one after a dropped token) and no marker ever
+// supplied one. Or it presented a token the registrar no longer honoured, and
+// the resend's first FULL_SNAPSHOT dropped it (#1203). Neither is a "token
+// drop" in watch_token_drops' sense: that counts a non-empty token given up
+// AFTER a completed start, and the two never count the same stream (a stream
+// is inside a batch only after its marker).
+//
+// A stream that ends before its marker with its token intact is not reported:
+// the registrar was answering current, renamed or extended, nothing was
+// resent, and the next stream resumes from the same token.
+//
+// This changes nothing about the stream or the cache. It exists because the
+// registrar's watch_starts{resume="resent"} counts both streams, and until
+// this report nothing on the agent said why there were two (#1324).
+func (r *RegistrarRegistry) abandonedResend(ctx context.Context, token, reason string, beforeMarker bool, open streamOpen, received int, openFor time.Duration) {
+	if !beforeMarker || token != "" || reason == "" {
+		// A kept token resumes; an empty reason is our own shutdown, which
+		// stays quiet (#712) and has no next stream.
+		return
+	}
+	r.metrics.resendAbandoned(ctx, reason)
+	r.filterMu.Lock()
+	nextFilter := r.filterServices
+	r.filterMu.Unlock()
+	r.log.InfoContext(ctx, "watch stream ended before its first SNAPSHOT_COMPLETE with no resume token; the snapshot it was being sent is abandoned and the next stream is resent in full",
+		"reason", reason,
+		"eventsReceived", received,
+		"openFor", openFor.Round(time.Millisecond).String(),
+		"tokenPresented", !open.noToken || open.partial != nil,
+		"filtered", open.filter != nil, "filterServices", len(open.filter),
+		"nextFiltered", nextFilter != nil, "nextFilterServices", len(nextFilter))
 }
 
 // adoptVersion returns the event's version as the new resume token, or token
@@ -1236,10 +1285,11 @@ func emptyResend(open streamOpen, marker *registrarv1.WatchEndpointsResponse) bo
 }
 
 // handleStreamError classifies a stream.Recv error and returns the appropriate
-// resume token plus the error to fail on — nil for every end that is not a
-// failure, so the caller neither logs at ERROR, nor counts watch_errors, nor
-// pays the reconnect backoff.
-func (r *RegistrarRegistry) handleStreamError(ctx context.Context, err error, lastVersion string) (string, error) {
+// resume token, the reason the stream ended (one of the streamEnd constants;
+// empty for our own shutdown), and the error to fail on — nil for every end
+// that is not a failure, so the caller neither logs at ERROR, nor counts
+// watch_errors, nor pays the reconnect backoff.
+func (r *RegistrarRegistry) handleStreamError(ctx context.Context, err error, lastVersion string) (string, string, error) {
 	switch {
 	case status.Code(err) == codes.DataLoss:
 		// DataLoss means the registrar force-resynced this watcher (its
@@ -1249,18 +1299,22 @@ func (r *RegistrarRegistry) handleStreamError(ctx context.Context, err error, la
 		// current contents while events were dropped. Clear the resume token
 		// so the reconnect receives a full snapshot.
 		r.log.InfoContext(ctx, "registrar forced a resync; requesting full snapshot on reconnect")
-		return "", nil
+		return "", streamEndForcedResync, nil
 
 	case status.Code(err) == codes.Canceled && ctx.Err() == nil:
 		// The stream was cancelled locally (SetServiceFilter
 		// re-asserting a changed filter), not a registrar failure.
 		r.log.DebugContext(ctx, "watch stream ended for filter re-assertion")
-		return lastVersion, nil
+		return lastVersion, streamEndFilterChange, nil
 
-	case err == io.EOF || ctx.Err() != nil:
-		// A clean end of stream, or our own shutdown: the cancellation IS
-		// the shutdown (kept quiet by #712).
-		return lastVersion, nil
+	case ctx.Err() != nil:
+		// Our own shutdown: the cancellation IS the shutdown (kept quiet by
+		// #712).
+		return lastVersion, "", nil
+
+	case err == io.EOF:
+		// A clean end of stream.
+		return lastVersion, streamEndEOF, nil
 
 	case isServerDrainGoaway(err):
 		// The registrar is draining for a roll and sent a graceful GOAWAY;
@@ -1268,10 +1322,10 @@ func (r *RegistrarRegistry) handleStreamError(ctx context.Context, err error, la
 		// reconnect straight away: no ERROR, no watch_errors, no backoff
 		// (issue #718).
 		r.log.InfoContext(ctx, "watch stream closed by server drain; reconnecting", "server_drain", true, "error", err)
-		return lastVersion, nil
+		return lastVersion, streamEndServerDrain, nil
 	}
 
-	return lastVersion, err
+	return lastVersion, streamEndError, err
 }
 
 // handleCatalogEvent processes SERVICE_ADDED, SERVICE_REMOVED, and SNAPSHOT_COMPLETE
