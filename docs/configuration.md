@@ -181,8 +181,8 @@ decision every cycle — see `charts/prober/values.yaml`.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `cniInstall.image.*` | repo+digest placeholders, `pullPolicy: Always` | Digest-pinned image. |
-| `cniInstall.resources.{requests,limits}` | cpu `100m`, mem `32Mi` | |
+| `cniInstall.image.*` | repo+digest placeholders, `pullPolicy: IfNotPresent` | Digest-pinned image. |
+| `cniInstall.resources.{requests,limits}` | requests cpu `100m` / mem `32Mi`; limits mem `32Mi`, **no CPU limit** | No CPU limit by design (#1335, chart 2.4.12; was a `100m` limit). The init container runs on every agent pod start, and its work is one short CPU burst (Go start-up plus a byte compare of the plugin on the host against the image's) that a `100m` quota — 10 ms per 100 ms period — stretched to 500–800 ms on all 40 agent starts measured on talos-main, always a multiple of ~100 ms, for at most 50–80 ms of CPU. The request costs the node nothing (the agent container's `200m` is the pod's effective request). To restore a cap set `limits.cpu`; an empty value (`--set cniInstall.resources.limits.cpu=`) renders no limit rather than an invalid quantity. See `docs/runbook.md`, "cni-install CPU limit". |
 
 `cniInstall.otlpEndpoint` and `cniInstall.pinOTLPEndpoint` were removed in chart
 `2.4.0` (#1166): the CNI plugin binary exports no telemetry of its own. It reports
@@ -293,7 +293,8 @@ over mTLS and routes external traffic via the Gateway API. Disabled by default.
 | `edge.overload.maxHeapSizeBytes` | `201326592` (192Mi) | Keep at ~75% of `edge.resources.limits.memory`. |
 | `edge.spire.clusterSpiffeID.create` | `true` | Create the edge's `ClusterSPIFFEID` (when `spire.enabled`) so SPIRE issues the edge pod its SVID. |
 | `edge.spire.clusterSpiffeID.className` | `""` | spire-controller-manager class name; required when `create=true` (empty = not rendered; manage the `ClusterSPIFFEID` yourself). |
-| `edge.resources.{requests,limits}` | cpu `200m`, mem `128Mi`/`256Mi` | |
+| `edge.resources.{requests,limits}` | requests cpu `200m` / mem `128Mi`; limits mem `256Mi`, no CPU limit | Applied to **both** containers of the edge pod (`agent` and `envoy`). |
+| `edge.goMaxProcs` | `2` | Rendered as the edge `agent` container's `GOMAXPROCS` env var (#1335), the same shape as `agent.goMaxProcs` (#1116). The container has no CPU limit, so the Go runtime would otherwise size itself to the node's core count; it averages under 2m of CPU (4.4m over its busiest 5 minutes on talos-main), so 2 is not a constraint. The `envoy` container is not a Go process. `0` (or empty) omits the env var and lets the Go runtime choose, e.g. when you set an explicit CPU limit. |
 
 #### `edge.config` — the fleet-default `EdgeConfig` (proposal 029)
 
