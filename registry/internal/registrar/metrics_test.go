@@ -56,6 +56,7 @@ func TestClientMetrics_NilReceiverSafe(t *testing.T) {
 	m.streamReconnected(ctx)
 	m.streamFailed(ctx)
 	m.tokenDropped(ctx, tokenDropMidBatch)
+	m.resendAbandoned(ctx, streamEndFilterChange)
 	m.versionApplied(ctx, "3")
 }
 
