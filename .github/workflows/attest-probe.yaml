@@ -1,0 +1,77 @@
+# TEMPORARY -- removed before this pull request merges.
+#
+# Proves, before publish.yaml depends on it on main, that this repository can
+# store an artifact attestation and that `gh attestation verify oci://` finds it
+# for artifacts that live on quay.io: one image index and one Helm chart.
+#
+# It attests with a CUSTOM predicate, not SLSA provenance, so nothing here
+# claims this run built a released artifact, and it deletes what it stored.
+name: attest-probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/attest-probe.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      CHART: quay.io/aethermesh/chart-crds
+      CHART_DIGEST: sha256:667b64f33cc12d3f0048906ca25ead2d1fd70df6607255ee448ab8a42065d706
+      IMAGE: quay.io/aethermesh/agent
+      PREDICATE_TYPE: https://aethermesh.dev/attestation/probe/v1
+    steps:
+      - name: Subjects
+        run: |
+          set -euo pipefail
+          image_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${IMAGE}:latest")"
+          [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "IMAGE_DIGEST=${image_digest}" >> "$GITHUB_ENV"
+          {
+            echo "${image_digest#sha256:}  ${IMAGE}"
+            echo "${CHART_DIGEST#sha256:}  ${CHART}"
+          } > subjects.sha256
+          cat subjects.sha256
+      - name: Attest (custom predicate)
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: subjects.sha256
+          predicate-type: ${{ env.PREDICATE_TYPE }}
+          predicate: '{"probe": true}'
+      - name: Verify from GitHub by the registry's digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh --version
+          for ref in "${IMAGE}@${IMAGE_DIGEST}" "${CHART}@${CHART_DIGEST}"; do
+            ok=0
+            for attempt in 1 2 3 4; do
+              if gh attestation verify "oci://${ref}" \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/attest-probe.yaml" \
+                --predicate-type "$PREDICATE_TYPE"; then
+                ok=1
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+            [ "$ok" -eq 1 ] || { echo "::error::not verifiable: ${ref}"; exit 1; }
+          done
+      - name: Delete the probe attestation
+        if: always() && steps.attest.outputs.attestation-id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+        run: gh api -X DELETE "repos/${GITHUB_REPOSITORY}/attestations/${ATTESTATION_ID}"
