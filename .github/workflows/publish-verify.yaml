@@ -345,29 +345,19 @@ jobs:
 
       # A failed control is a different defect from a missing artifact: the gate
       # itself can no longer be trusted to go red. It gets its own rolling issue
-      # so it is never folded into, or mistaken for, "artifacts missing". An
-      # inconclusive control (exit 2, registry unreadable) lands here too; the
-      # run log says which.
+      # so it is never folded into, or mistaken for, "artifacts missing". The
+      # title and the body say WHICH failure it was (#1340): the control went
+      # GREEN (a vacuous gate), went red for the wrong reason, or was
+      # inconclusive (exit 2: the registry stayed unreadable through the
+      # control's own re-runs). scripts/publish-verify-control-issue.sh, from
+      # the verdict the control step recorded.
       - name: Open or update the vacuous-gate issue
         if: ${{ !cancelled() && steps.control.conclusion == 'failure' && github.event_name != 'workflow_dispatch' }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          title="publish-verify: the expected-red control did not go red"
-          body=$(printf '%s\n\n%s\n\n%s\n' \
-            "publish-verify's expected-red control handed the verifier a commit that was never published and did not get back exit 1 with every artifact MISSING for that commit — or could not read the registry at all. Until this is fixed a green publish-verify run proves nothing (#930, #853)." \
-            "Run: ${RUN_URL}" \
-            "_Filed automatically by \`publish-verify\`; reused for consecutive failures. Reproduce with \`scripts/publish-verify-control.sh\`; the offline check is \`scripts/check-publish-verify-control.sh\`._")
-          num=$(gh issue list --state open --search "in:title \"${title}\"" -L 1 --json number -q '.[0].number // empty')
-          if [ -n "$num" ]; then
-            gh issue comment "$num" --body "$body"
-            echo "commented on #$num"
-          else
-            gh issue create --title "$title" --body "$body"
-          fi
+        run: ./scripts/publish-verify-control-issue.sh
 
       # The other half of the rolling issue (#1316): a GREEN run for main's
       # head, or a green sweep, closes it with a comment naming this run. Run
@@ -375,6 +365,8 @@ jobs:
       # three runs were green, and it stayed open saying UNVERIFIED. Which
       # green runs count (never a superseded skip, never a manual run) is
       # scripts/publish-verify-close-issue.sh; //scripts:publish_verify_close_issue_test.
+      # The same step closes the control's issues above, on any green run:
+      # its control went red as expected (#1340).
       - name: Close the missing-artifacts issue (a green run for main's head, or a green sweep)
         if: success() && github.event_name != 'workflow_dispatch'
         env:

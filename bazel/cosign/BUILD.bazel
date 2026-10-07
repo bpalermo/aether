@@ -14,6 +14,33 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 _COSIGN = "@rules_img_signer_cosign//cosign"
 
+# The registry setting. A module of its own (MODULE.bazel), so in runfiles it is
+# NOT at bazel/registry/registry.bzl, where scripts/image-registry.sh looks by
+# default: verify_image_signatures.sh hands it over as IMAGE_REGISTRY_BZL.
+_REGISTRY_BZL = "@aether_registry//:registry.bzl"
+
+# What verify_image_signatures.sh runs, directly or not. registry-lib.sh is
+# sourced by the script, and runs image-registry.sh (which parses registry.bzl)
+# while it is being sourced: all three are runfiles, or every run begins with
+# "image-registry.sh: No such file or directory" and the library has no host
+# and no repository list (#1338).
+_VERIFY_DATA = [
+    _COSIGN,
+    _REGISTRY_BZL,
+    "//scripts:image-registry.sh",
+    "//scripts:registry-lib.sh",
+    "//scripts:verify-image-signatures.sh",
+]
+
+# What verify_image_signatures.sh reads to find its runfiles. `bazel run` sets
+# it from the target; :verify_image_signatures_test runs that target as data,
+# where nothing does, so it sets the same values.
+_VERIFY_ENV = {
+    "COSIGN_RLOCATIONPATH": "$(rlocationpath %s)" % _COSIGN,
+    "REGISTRY_BZL_RLOCATIONPATH": "$(rlocationpath %s)" % _REGISTRY_BZL,
+    "VERIFY_SCRIPT_RLOCATIONPATH": "$(rlocationpath //scripts:verify-image-signatures.sh)",
+}
+
 # bazel run //bazel/cosign -- <args>
 sh_binary(
     name = "cosign",
@@ -28,16 +55,24 @@ sh_binary(
 sh_binary(
     name = "verify_image_signatures",
     srcs = ["verify_image_signatures.sh"],
-    data = [
-        _COSIGN,
-        "//scripts:registry-lib.sh",
-        "//scripts:verify-image-signatures.sh",
-    ],
-    env = {
-        "COSIGN_RLOCATIONPATH": "$(rlocationpath %s)" % _COSIGN,
-        "VERIFY_SCRIPT_RLOCATIONPATH": "$(rlocationpath //scripts:verify-image-signatures.sh)",
-    },
+    data = _VERIFY_DATA,
+    env = _VERIFY_ENV,
     visibility = ["//visibility:public"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# The target above, run from its own runfiles the way `bazel run` runs it, with
+# a fake cosign and a fake curl: nothing on stderr when the library is sourced,
+# and the registry setting really is readable there (#1338). Network-free.
+sh_test(
+    name = "verify_image_signatures_test",
+    size = "small",
+    srcs = ["verify_image_signatures_test.sh"],
+    data = [":verify_image_signatures"] + _VERIFY_DATA,
+    env = _VERIFY_ENV | {
+        "IMAGE_REGISTRY_SH_RLOCATIONPATH": "$(rlocationpath //scripts:image-registry.sh)",
+        "TARGET_RLOCATIONPATH": "$(rlocationpath :verify_image_signatures)",
+    },
     deps = ["@bazel_tools//tools/bash/runfiles"],
 )
 

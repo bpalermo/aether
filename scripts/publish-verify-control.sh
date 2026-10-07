@@ -60,6 +60,31 @@
 #      wrong reason: the gate would be checking where the commit never
 #      published.
 #
+# AN INCONCLUSIVE VERIFIER IS RUN AGAIN (#1340)
+#
+# Run 37586580592 filed "the expected-red control did not go red" for one 502
+# from the registry's token endpoint: the verifier exited 2, the control said
+# inconclusive, and the next five runs were fine. The verifier's lookups retry
+# by themselves now (registry__fetch_json for the pull token and the witness
+# listing, #1336; `curl --retry` for the tag HEADs), but an outage longer than
+# one lookup's few seconds still ends it with exit 2. So a verifier that exits
+# 2 is run again, whole: CONTROL_ATTEMPTS runs in all (default 3), waiting
+# CONTROL_RETRY_INTERVAL seconds (default 10) and doubling: 10 s, then 20 s.
+# ONLY exit 2 is re-run. A verifier that PASSED the control commit (0), or went
+# red (1), has answered, and asking again could only hide the answer.
+#
+# THE VERDICT IS RECORDED for the issue steps of publish-verify.yaml
+# (scripts/publish-verify-control-issue.sh, scripts/publish-verify-close-issue.sh):
+# a file whose first line is one of
+#   ok            red for the right reason (exit 0)
+#   green         the verifier exited 0: the gate is vacuous (exit 1)
+#   wrong         red, or some other exit, but not for the right reason (exit 1)
+#   inconclusive  no verdict could be reached (exit 2)
+# followed by the lines this script printed as errors. The path is
+# `publish-verify-control-issue.sh result-file`: $CONTROL_RESULT_FILE, else
+# $RUNNER_TEMP/publish-verify-control.result; a run by hand outside Actions
+# records nothing.
+#
 # USAGE
 #
 #   scripts/publish-verify-control.sh [<base-commit-ish>]
@@ -71,13 +96,44 @@
 # EXIT CODES
 #   0  the verifier went red, for the right reason: the gate can fail
 #   1  it did NOT — the gate is vacuous or partially blind; do not trust a green
-#   2  inconclusive (verifier exit 2, no base commit)
+#   2  inconclusive (verifier exit 2 on every attempt, no base commit)
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/registry-lib.sh
 . "${here}/registry-lib.sh"
 verifier="${VERIFIER:-${here}/verify-published-artifacts.sh}"
+
+# The verdict file (see THE VERDICT IS RECORDED above). Removed first, so a
+# control that dies half-way leaves no verdict rather than an older one.
+result_file="$("${here}/publish-verify-control-issue.sh" result-file)"
+[ -z "$result_file" ] || rm -f "$result_file"
+summary=""
+# error <text>: an error annotation, kept for the verdict file too.
+error() {
+	echo "::error::expected-red control: $*" >&2
+	summary="${summary}$*"$'\n'
+}
+# finish <verdict> <exit code>: record the verdict and leave.
+finish() {
+	if [ -n "$result_file" ]; then
+		{
+			printf '%s\n' "$1"
+			printf '%s' "$summary"
+		} >"$result_file" || echo "::warning::expected-red control: could not record the verdict in ${result_file}"
+	fi
+	exit "$2"
+}
+
+attempts="${CONTROL_ATTEMPTS:-3}"
+interval="${CONTROL_RETRY_INTERVAL:-10}"
+for knob in "$attempts" "$interval"; do
+	if ! [[ "$knob" =~ ^[0-9]+$ ]]; then
+		error "CONTROL_ATTEMPTS and CONTROL_RETRY_INTERVAL must be whole numbers (got '${knob}')"
+		finish inconclusive 2
+	fi
+done
+[ "$attempts" -ge 1 ] || attempts=1
 
 base="${1:-}"
 if [ -z "$base" ]; then
@@ -89,8 +145,8 @@ if [ -z "$base" ]; then
 	done
 fi
 if [ -z "$base" ] || ! base_sha="$(git rev-parse --verify --quiet "${base}^{commit}")"; then
-	echo "::error::expected-red control: no base commit to build the control on (${base:-none})" >&2
-	exit 2
+	error "no base commit to build the control on (${base:-none})"
+	finish inconclusive 2
 fi
 
 # Fixed identity and dates: the sha is a pure function of the base.
@@ -116,8 +172,8 @@ base_bzl="$(mktemp)"
 if ! registry_setting_at "$base_sha" "$base_bzl" ||
 	! want_prefix="$(IMAGE_REGISTRY_BZL="$base_bzl" "${here}/image-registry.sh" prefix)"; then
 	rm -f "$base_bzl"
-	echo "::error::expected-red control: cannot read the registry setting (${REGISTRY_SETTING_PATHS[*]}) as of ${base_sha}" >&2
-	exit 2
+	error "cannot read the registry setting (${REGISTRY_SETTING_PATHS[*]}) as of ${base_sha}"
+	finish inconclusive 2
 fi
 rm -f "$base_bzl"
 
@@ -130,18 +186,31 @@ trap 'rm -f "$log"' EXIT
 
 # The control's red must not land in the job summary as a publish failure, and
 # nothing it prints may be mistaken for the gate's own verify.log.
-rc=0
 # PROXY_PIN_CHECK=0: the control asserts EXACTLY the 22 per-commit coordinates;
 # the constructed commit pins main's (signed, present) aether-proxy digest,
 # which is not what this control is about — see verify-published-artifacts.sh
 # step 5 and case 7 of scripts/check-publish-verify-control.sh for the proxy
 # pin's own red.
-env -u GITHUB_STEP_SUMMARY PROXY_PIN_CHECK=0 "$verifier" "$control" >"$log" 2>&1 || rc=$?
-sed 's/^/  | /' "$log"
+#
+# Run again ONLY on exit 2 (see AN INCONCLUSIVE VERIFIER IS RUN AGAIN above).
+attempt=1
+wait="$interval"
+while :; do
+	rc=0
+	env -u GITHUB_STEP_SUMMARY PROXY_PIN_CHECK=0 "$verifier" "$control" >"$log" 2>&1 || rc=$?
+	sed 's/^/  | /' "$log"
+	if [ "$rc" -ne 2 ] || [ "$attempt" -ge "$attempts" ]; then
+		break
+	fi
+	echo "expected-red control: the verifier could not complete (exit 2) on attempt ${attempt} of ${attempts}; running it again in ${wait}s"
+	sleep "$wait"
+	wait=$((wait * 2))
+	attempt=$((attempt + 1))
+done
 
 bad=0
 fail() {
-	echo "::error::expected-red control: $*" >&2
+	error "$@"
 	bad=1
 }
 
@@ -151,8 +220,12 @@ case "$rc" in
 	fail "the verifier PASSED a commit that was never published — the gate is vacuous"
 	;;
 2)
-	echo "::error::expected-red control: INCONCLUSIVE — the verifier could not complete (exit 2); a red caused by an unreadable registry proves nothing about detection" >&2
-	exit 2
+	error "INCONCLUSIVE — the verifier could not complete (exit 2) on any of ${attempt} attempt(s); a red caused by an unreadable registry proves nothing about detection"
+	# Why, in the verifier's own words: its errors and the registry library's
+	# lines (which name the URL and the status, never a token), for the issue.
+	why="$(grep -E '^(::error::|registry-lib: |registry_tag_exists: |registry_referrers: )' "$log" | sed 's/^::error:://' | tail -n 5 || true)"
+	[ -z "$why" ] || summary="${summary}the verifier's last attempt said:"$'\n'"${why}"$'\n'
+	finish inconclusive 2
 	;;
 *)
 	fail "the verifier exited ${rc}; only 1 (missing) is the expected red"
@@ -198,6 +271,12 @@ fi
 
 if [ "$bad" -ne 0 ]; then
 	echo "expected-red control: FAILED — do not trust a green publish-verify until this is fixed"
-	exit 1
+	# Two different defects (#1340): a verifier that PASSED the commit is a
+	# vacuous gate; one that went red for the wrong reason is partly blind.
+	if [ "$rc" -eq 0 ]; then
+		finish green 1
+	fi
+	finish wrong 1
 fi
 echo "expected-red control: OK — verifier exited 1 with ${n_missing}/${expected} MISSING, all naming ${control}"
+finish ok 0

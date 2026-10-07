@@ -17,7 +17,13 @@
 #     an index) are NOT retried;
 #   - a failed `cosign verify` is re-run, except an identity mismatch, within a
 #     per-run budget, and a manifest that keeps failing is FAILED with cosign's
-#     last line and the attempt count while the others are still checked.
+#     last line and the attempt count while the others are still checked;
+#   - the tag listing (registry_all_tags, #1337) rides the same retry, page by
+#     page, prints nothing when a page cannot be read, and under
+#     registry_commit_tag's own 13 listings each page is asked ONCE, so the
+#     two retries do not multiply (60 s of waiting, not 242 s);
+#   - sourcing registry-lib.sh says nothing on stderr (#1338): the setting
+#     reader it calls at source time, scripts/image-registry.sh, is beside it.
 #
 # Run: bazel test //scripts:verify_image_signatures_test
 # shellcheck disable=SC2016 # single-quoted $names belong to the fakes' own shells.
@@ -25,7 +31,7 @@ set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$HERE/verify-image-signatures.sh"
-for f in "$SCRIPT" "$HERE/registry-lib.sh"; do
+for f in "$SCRIPT" "$HERE/registry-lib.sh" "$HERE/image-registry.sh"; do
 	[ -f "$f" ] || {
 		echo "FAIL: $f not found"
 		exit 1
@@ -43,23 +49,44 @@ repo=acme/widget
 ref="quay.io/${repo}@${index}"
 token_url="https://quay.io/v2/auth?service=quay.io&scope=repository:${repo}:pull"
 index_url="https://quay.io/v2/${repo}/manifests/${index}"
+commit="0123456789abcdef0123456789abcdef01234567"
+tags_url="https://quay.io/v2/${repo}/tags/list?n=1000"
+tags_url2="${tags_url}&last=b"
+bearer="b34r3r-t0k3n-bytes"
+
+# The registry setting registry-lib.sh reads at source time, through
+# scripts/image-registry.sh (#1338). A fixture, so the test does not depend on
+# where Bazel puts the real one.
+cat >"$TMP/registry.bzl" <<'BZL'
+IMAGE_REGISTRY = "quay.io"
+IMAGE_NAMESPACE = "acme"
+IMAGE_NAME_OVERRIDES = {}
+CHART_REPOSITORY_PREFIX = "chart-"
+SIGNATURE_LAYOUT = "referrer"
+BZL
 
 # --- the fakes -------------------------------------------------------------------
-# curl: each request takes the next line of $FAKE/token.seq or
-# $FAKE/manifest.seq (by URL); with none left it answers correctly. A line is
+# curl: each request takes the next line of $FAKE/token.seq, $FAKE/manifest.seq
+# or $FAKE/tags.seq (by URL); with none left it answers correctly. The tag
+# listing is two pages: `a b` with a `Link: rel="next"` header (written to the
+# -D file), then, for `last=b`, `c dev-<$FAKE_COMMIT>`. A line is
 #   <http status>            an error status: with -f, exit 22 and curl's own
 #                            "The requested URL returned error: <status>"
 #   000                      no connection: exit 7
-#   200 <empty|html|cut|notoken|manifest|secret>
+#   200 <empty|html|cut|notoken|manifest|secret|array>
 #                            a 200 with that body instead of the right one
 # Every URL asked is appended to $FAKE/curl.log.
 cat >"$TMP/bin/curl" <<'FAKE'
 #!/usr/bin/env bash
 set -uo pipefail
-url="" fail=0
+url="" fail=0 hdr=/dev/null link=""
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-	-H | -u | -o | -D | -w | --retry) shift ;;
+	-D)
+		hdr="$2"
+		shift
+		;;
+	-H | -u | -o | -w | --retry) shift ;;
 	-f*) fail=1 ;;
 	https://*) url="$1" ;;
 	esac
@@ -69,6 +96,8 @@ printf '%s\n' "$url" >>"$FAKE/curl.log"
 case "$url" in
 */v2/auth\?*) seq="$FAKE/token.seq" good='{"token":"fake"}' ;;
 */manifests/sha256:*) seq="$FAKE/manifest.seq" good="$(cat "$FAKE/index.json")" ;;
+*/tags/list\?n=1000) seq="$FAKE/tags.seq" good='{"name":"acme/widget","tags":["a","b"]}' link=1 ;;
+*/tags/list\?n=1000\&last=b) seq="$FAKE/tags.seq" good="{\"tags\":[\"c\",\"dev-${FAKE_COMMIT:-none}\"]}" ;;
 *)
 	echo "fake curl: unexpected url ${url}" >&2
 	exit 2
@@ -80,6 +109,7 @@ if [ -s "$seq" ]; then
 	sed -i 1d "$seq"
 fi
 read -r code body <<<"${line:-200 good}"
+printf 'HTTP/2 %s\r\n' "$code" >"$hdr"
 case "$code" in
 000)
 	echo "curl: (7) Failed to connect to quay.io port 443 after 21 ms: Could not connect to server" >&2
@@ -96,7 +126,11 @@ case "$code" in
 	;;
 esac
 case "$body" in
-good) printf '%s\n' "$good" ;;
+good)
+	[ -z "$link" ] || printf 'link: <%s&last=b>; rel="next"\r\n' "${url#https://quay.io}" >>"$hdr"
+	printf '%s\n' "$good"
+	;;
+array) printf '["a","b"]\n' ;;
 empty) ;;
 html) printf '<html>\n<head><title>502 Bad Gateway</title></head>\n<body>nginx</body></html>\n' ;;
 cut) printf '%s' "${good:0:24}" ;;
@@ -189,11 +223,25 @@ run() {
 	[ -z "$4" ] || tr ',' '\n' <<<"$4" >"$TMP/fake/manifest.seq"
 	[ -z "$5" ] || tr ',' '\n' <<<"$5" >"$TMP/fake/cosign.seq"
 	shift 5
-	env -u REGISTRY_USERNAME -u REGISTRY_PASSWORD -u REGISTRY_FETCH_ATTEMPTS -u REGISTRY_FETCH_INTERVAL \
-		-u VERIFY_ATTEMPTS -u VERIFY_RETRY_INTERVAL -u VERIFY_RETRY_BUDGET -u CERT_IDENTITY_REGEXP \
-		PATH="$TMP/bin:$PATH" FAKE="$TMP/fake" COSIGN="$TMP/bin/cosign" REGISTRY_HOST=quay.io "$@" \
+	env "${CLEAN_ENV[@]}" COSIGN="$TMP/bin/cosign" "$@" \
 		bash "$SCRIPT" "$ref" >"$TMP/out" 2>"$TMP/err"
 	rc=$?
+	judge "$want" "$name" "$rc"
+}
+
+# The environment every case starts from: no knob inherited from the caller,
+# the fakes first on PATH, the fixture as the registry setting.
+CLEAN_ENV=(
+	-u REGISTRY_USERNAME -u REGISTRY_PASSWORD -u REGISTRY_FETCH_ATTEMPTS -u REGISTRY_FETCH_INTERVAL
+	-u REGISTRY_COMMIT_TAG_ATTEMPTS -u REGISTRY_COMMIT_TAG_INTERVAL -u REGISTRY_COMMIT_TAG_FETCH_ATTEMPTS
+	-u VERIFY_ATTEMPTS -u VERIFY_RETRY_INTERVAL -u VERIFY_RETRY_BUDGET -u CERT_IDENTITY_REGEXP
+	-u IMAGE_REGISTRY_HOST -u REGISTRY_CREDENTIAL_HOST
+	"PATH=$TMP/bin:$PATH" "FAKE=$TMP/fake" "FAKE_COMMIT=$commit" REGISTRY_HOST=quay.io
+	"IMAGE_REGISTRY_BZL=$TMP/registry.bzl"
+)
+
+judge() {
+	local want="$1" name="$2" rc="$3"
 	if [ "$rc" -ne "$want" ]; then
 		fail "$name: exit $rc, wanted $want"
 		return
@@ -203,7 +251,38 @@ run() {
 		fail "$name: a Python traceback reached the log"
 		return
 	fi
+	# Nor a library that could not find its own sibling (#1338).
+	if grep -q 'No such file or directory' "$TMP/out" "$TMP/err"; then
+		fail "$name: registry-lib.sh could not run something it sources or calls"
+		return
+	fi
 	pass "$name"
+}
+
+# lib <want exit> <name> <tags seq> <shell using registry-lib.sh> [VAR=value...]
+# Source the library the way a workflow step does and run one line against it.
+lib() {
+	local want="$1" name="$2" code="$4" rc
+	rm -rf "$TMP/fake"
+	mkdir -p "$TMP/fake"
+	[ -z "$3" ] || tr ',' '\n' <<<"$3" >"$TMP/fake/tags.seq"
+	shift 4
+	env "${CLEAN_ENV[@]}" LIB="$HERE/registry-lib.sh" "$@" \
+		bash -c 'set -euo pipefail; . "$LIB"; '"$code" >"$TMP/out" 2>"$TMP/err"
+	rc=$?
+	judge "$want" "$name" "$rc"
+}
+# <n> copies of one answer, comma-separated.
+times() {
+	local n="$1" out="" i
+	for ((i = 0; i < n; i++)); do out="${out}${out:+,}$2"; done
+	printf '%s' "$out"
+}
+# The waits added up, in seconds.
+sum_waits() {
+	local total=0 w
+	[ ! -f "$TMP/fake/sleep.log" ] || while read -r w; do total=$((total + w)); done <"$TMP/fake/sleep.log"
+	echo "$total"
 }
 
 # --- nothing goes wrong ----------------------------------------------------------
@@ -321,6 +400,98 @@ run 0 "VERIFY_ATTEMPTS and VERIFY_RETRY_INTERVAL are honoured" "" "" "flake,flak
 check "4 attempts from 1 s: 1, 2, 4" test "$(waits)" = "1 2 4 "
 run 2 "a malformed VERIFY_ATTEMPTS is refused" "" "" "" VERIFY_ATTEMPTS=lots
 check "malformed: no cosign run" test ! -e "$TMP/fake/cosign.log"
+
+# --- sourcing the library (#1338) --------------------------------------------------
+# registry-lib.sh runs scripts/image-registry.sh at source time, for the host
+# and the repository list. With the reader beside it, sourcing is silent and
+# the lists are filled; under `bazel run //bazel/cosign:verify_image_signatures`
+# it was missing from the runfiles and every log began with bash's "No such file
+# or directory" (//bazel/cosign:verify_image_signatures_test runs that target).
+lib 0 "sourcing registry-lib.sh resolves the setting" "" \
+	'echo "host=${REGISTRY_HOST} repos=${#REGISTRY_IMAGE_REPOS[@]} first=${REGISTRY_IMAGE_REPOS[0]}"' REGISTRY_HOST=
+check "source: nothing on stderr" test ! -s "$TMP/err"
+check "source: the host and the nine repositories come from the setting" \
+	test "$(cat "$TMP/out")" = "host=quay.io repos=9 first=acme/agent"
+
+# --- the tag listing (#1337) -------------------------------------------------------
+list='registry_all_tags acme/widget "$BEARER"'
+lib 0 "the listing walks both pages" "" "$list" BEARER="$bearer"
+check "listing: every tag of both pages, in order" test "$(tr '\n' ' ' <"$TMP/out")" = "a b c dev-${commit} "
+check "listing: one request per page" test "$(asked "$tags_url" curl.log) $(asked "$tags_url2" curl.log)" = "1 1"
+check "listing: nothing on stderr" test ! -s "$TMP/err"
+
+lib 0 "#1337: one 502 for the first page is retried and the listing is complete" "502" "$list" BEARER="$bearer"
+check "listing 502: the retry names the URL, the status and the wait" \
+	has "registry-lib: GET ${tags_url} answered HTTP 502; attempt 1 of 4, retrying in 2s" "$TMP/err"
+check "listing 502: all four tags" test "$(wc -l <"$TMP/out")" = 4
+check "listing 502: the page was asked twice, one wait of 2 s" test "$(asked "$tags_url" curl.log):$(waits)" = "2:2 "
+
+# The first page answers; the second is empty, then HTML, then has no connection.
+lib 0 "an empty 200, an HTML 200 and no connection on the SECOND page are retried" \
+	"200 good,200 empty,200 html,000" "$list" BEARER="$bearer"
+check "listing page 2: says the body was empty, not a traceback" \
+	has "registry-lib: GET ${tags_url2} answered 200 with a body that is not JSON (empty); attempt 1 of 4" "$TMP/err"
+check "listing page 2: four requests for it, 2 s, 4 s, 8 s" test "$(asked "$tags_url2" curl.log):$(waits)" = "4:2 4 8 "
+check "listing page 2: all four tags" test "$(tr '\n' ' ' <"$TMP/out")" = "a b c dev-${commit} "
+
+lib 1 "a listing that keeps answering HTML fails, with one line in place of the traceback" "$(times 4 '200 html')" "$list" BEARER="$bearer"
+check "listing html: the final line names the URL and how the body starts" \
+	has "registry-lib: GET ${tags_url} answered 200 with a body that is not JSON (76 bytes, starts '<html>?<head><title>502 Bad Gateway</title></head>?<body>nginx</body></html>'); giving up after 4 attempt(s)" "$TMP/err"
+check "listing html: bounded at four requests and three waits" test "$(asked "$tags_url" curl.log):$(waits)" = "4:2 4 8 "
+check "listing html: nothing on stdout" test ! -s "$TMP/out"
+
+lib 1 "a second page that keeps answering 503 fails the WHOLE listing" "200 good,$(times 4 503)" "$list" BEARER="$bearer"
+check "listing page 2 down: the final line names that page and the status" \
+	has "registry-lib: GET ${tags_url2} answered HTTP 503; giving up after 4 attempt(s)" "$TMP/err"
+check "listing page 2 down: the first page's tags are NOT printed as the listing" test ! -s "$TMP/out"
+
+for code in 401 403 404; do
+	lib 1 "a ${code} for the listing is the registry's answer: not retried" "$code" "$list" BEARER="$bearer"
+	check "listing ${code}: one request, no wait" test "$(asked "$tags_url" curl.log):$(waits)" = "1:"
+	check "listing ${code}: says so" has "registry-lib: GET ${tags_url} answered HTTP ${code}; not retried" "$TMP/err"
+done
+for code in 408 429 500; do
+	lib 0 "a ${code} for the listing is retried" "$code" "$list" BEARER="$bearer"
+	check "listing ${code}: two requests" test "$(asked "$tags_url" curl.log)" = 2
+done
+
+lib 0 "a JSON document that is not a tag list lists nothing, without a traceback" "200 array" "$list" BEARER="$bearer"
+check "listing array: nothing on stdout" test ! -s "$TMP/out"
+
+lib 1 "the pull token never reaches the log" "502,200 html,000,502" "$list" BEARER="$bearer"
+check "token: not on stderr" lacks "$bearer" "$TMP/err"
+check "token: not on stdout" lacks "$bearer" "$TMP/out"
+
+# --- the sign step's lookup: 13 listings around the listing's own retry (#1337) ----
+# registry_commit_tag re-lists 13 times, 5 s apart, because the listing can lag
+# the push. Each listing it makes asks a page ONCE: the 13 listings are the
+# retry. Against a registry that is down that is 13 requests and 60 s of
+# waiting, exactly what it was before a page could retry; with the page retry
+# left on underneath it would be 52 requests and 242 s.
+find_tag='registry_commit_tag acme/widget "$BEARER" "$FAKE_COMMIT"'
+lib 0 "sign step: the commit's tag is found on the first listing" "" "$find_tag" BEARER="$bearer"
+check "sign step: only the tag on stdout" test "$(cat "$TMP/out")" = "dev-${commit}"
+check "sign step: says how many tags it scanned" has "resolved ${repo}: dev-${commit} (scanned 4 tags, listing 1/13)" "$TMP/err"
+
+lib 0 "sign step: a 502 fails one listing and the next one finds the tag" "502" "$find_tag" BEARER="$bearer"
+check "sign step 502: the miss says the listing FAILED, not 'scanned 0 tags'" \
+	has "no tag ending in -${commit} in ${repo} yet (the listing FAILED: see the registry-lib line above, listing 1/13); the listing can lag the push, re-listing in 5s" "$TMP/err"
+check "sign step 502: the page was not retried underneath (one 5 s wait, no 2 s)" test "$(waits)" = "5 "
+check "sign step 502: found on the second listing" has "(scanned 4 tags, listing 2/13)" "$TMP/err"
+check "sign step 502: the registry's answer is named" has "registry-lib: GET ${tags_url} answered HTTP 502; giving up after 1 attempt(s)" "$TMP/err"
+
+lib 1 "sign step: a registry that stays down is 13 listings, then the error" "$(times 60 502)" "$find_tag" BEARER="$bearer"
+check "down: 13 requests, one per listing" test "$(asked "$tags_url" curl.log)" = 13
+check "down: twelve waits of 5 s and nothing else: 60 s" test "$(sort -u "$TMP/fake/sleep.log" | tr '\n' ' '):$(wc -l <"$TMP/fake/sleep.log"):$(sum_waits)" = "5 :12:60"
+check "down: the final error says the listing failed" \
+	has "::error::no tag ending in -${commit} in ${repo} (the listing FAILED: see the registry-lib line above); still absent after 13 listing(s) 5s apart" "$TMP/err"
+check "down: nothing on stdout" test ! -s "$TMP/out"
+check "down: no token in the log" lacks "$bearer" "$TMP/err"
+
+# What the default avoids: the page retry left on under the 13 listings.
+lib 1 "sign step: with the page retry nested underneath it is 52 requests" "$(times 60 502)" "$find_tag" \
+	BEARER="$bearer" REGISTRY_COMMIT_TAG_FETCH_ATTEMPTS=4
+check "nested: 52 requests and 242 s of waiting" test "$(asked "$tags_url" curl.log):$(sum_waits)" = "52:242"
 
 echo
 if [ "$FAILS" -ne 0 ]; then

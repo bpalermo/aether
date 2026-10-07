@@ -1006,7 +1006,12 @@ pull-token and child-manifest lookups now retry a missing answer, a 408, 429 or
 whose identity is another's. A lookup that still fails prints one
 `registry-lib: GET <url> answered HTTP <status>; giving up after 4 attempt(s)`
 line (or how the body starts) in place of the traceback; a 401, 403 or 404 is
-the registry's answer and is not retried.
+the registry's answer and is not retried. The tag listing (`registry_all_tags`)
+retries each page the same way (#1337) and prints nothing if a page cannot be
+read. `publish.yaml`'s sign step lists through `registry_commit_tag`, whose 13
+listings 5 s apart are already a retry, so there each page is asked once
+(`REGISTRY_COMMIT_TAG_FETCH_ATTEMPTS`): 60 s of waiting at worst per
+repository, not the 242 s of the two retries nested.
 
 **It asks for each tag by name (#985).** Every coordinate is checked with
 `HEAD /v2/<repo>/manifests/<tag>`. No tag list is read. The old scan paged
@@ -1032,9 +1037,19 @@ it is looked up through. That is how the gate lost its only demonstrated red
 state (#929). The two steps read **Expected-red control** and **Gate** in the
 log. A control's `MISSING` lines are expected and never reach `verify.log` or
 the job summary. If the control fails, the gate still runs, and the run files
-(or comments on) its own rolling issue, **publish-verify: the expected-red
-control did not go red**. Until that issue is fixed, a green gate proves
-nothing. Exit 2 (registry unreadable) is inconclusive, and it fails the run too.
+(or comments on) a rolling issue whose title says which failure it was (#1340,
+`scripts/publish-verify-control-issue.sh`): **publish-verify: the expected-red
+control went GREEN** (the verifier passed a never-published commit: the gate is
+vacuous, a real defect), **… went red for the wrong reason** (part of the gate
+cannot fail), or **… was inconclusive** (exit 2: the registry could not be
+read; no verdict on the gate either way). The body quotes what the control
+said. An inconclusive verifier is run again first, three runs in all, 10 s then
+20 s apart (`CONTROL_ATTEMPTS`, `CONTROL_RETRY_INTERVAL`), so one bad answer
+from the registry files nothing; a verifier that exited 0 or 1 is never asked
+twice. Any later run whose control goes red as expected closes every open
+control issue with a comment naming the run
+(`scripts/publish-verify-close-issue.sh`). While a GREEN or wrong-reason issue
+is open, a green gate proves nothing. An inconclusive control fails the run too.
 Reproduce with `scripts/publish-verify-control.sh [<base>]`. The offline check,
 `scripts/check-publish-verify-control.sh`, runs in `ci`'s `shell` job. It drives
 the real verifier against a fake registry and shows the control rejects a
