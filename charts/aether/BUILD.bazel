@@ -270,6 +270,258 @@ helm_template_test(
     },
 )
 
+# #1355: EVERY container's resources go through aether.resources, not only the
+# four above (and install-supervisor, below). The seven that still used plain
+# `toYaml` rendered `cpu: ""` for `--set <x>.resources.limits.cpu=`, which the
+# apiserver rejects as a quantity. One test per container: with the CPU limit
+# emptied, `limits:` carries memory only. Each pattern is positional (it ends on
+# the line that follows that container's block), so it cannot be satisfied by
+# another container of the same pod.
+
+# The node agent: followed by the pod's `volumes:` (cni-install's block is
+# followed by `containers:`).
+helm_template_test(
+    name = "aether_agent_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "agent.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+memory: 128Mi\\n\\s+requests:\\n\\s+cpu: 200m\\n\\s+memory: 96Mi\\n\\s+volumes:\\n",
+        ],
+    },
+)
+
+# The proxy: followed by its privileged securityContext (install-supervisor's
+# block is followed by `containers:` or by the authz sidecar).
+PROXY_NO_CPU_LIMIT = "resources:\\n\\s+limits:\\n\\s+memory: 512Mi\\n\\s+requests:\\n\\s+cpu: 500m\\n\\s+memory: 512Mi\\n\\s+securityContext:\\n\\s+privileged: true\\n"
+
+helm_template_test(
+    name = "aether_proxy_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            PROXY_NO_CPU_LIMIT,
+        ],
+    },
+)
+
+# The same block from a values file that nulls the quantity renders the same.
+helm_template_test(
+    name = "aether_proxy_null_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set-json",
+        "proxy.resources.limits={\"cpu\":null}",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            PROXY_NO_CPU_LIMIT,
+        ],
+    },
+)
+
+# Every limit emptied: no `limits:` key at all (an empty map is dropped), the
+# requests stay.
+helm_template_test(
+    name = "aether_proxy_no_limits_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.resources.limits.memory=",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "failureThreshold: 3\\n\\s+successThreshold: 1\\n\\s+resources:\\n\\s+requests:\\n\\s+cpu: 500m\\n\\s+memory: 512Mi\\n\\s+securityContext:\\n\\s+privileged: true\\n",
+        ],
+    },
+)
+
+# An emptied REQUEST is dropped the same way.
+helm_template_test(
+    name = "aether_proxy_empty_cpu_request_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.resources.requests.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+memory: 512Mi\\n\\s+requests:\\n\\s+memory: 512Mi\\n\\s+securityContext:\\n\\s+privileged: true\\n",
+        ],
+    },
+)
+
+# ...and an operator can still set a cap.
+helm_template_test(
+    name = "aether_proxy_cpu_limit_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.resources.limits.cpu=2",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+cpu: 2\\n\\s+memory: 512Mi\\n\\s+requests:\\n\\s+cpu: 500m\\n\\s+memory: 512Mi\\n\\s+securityContext:\\n\\s+privileged: true\\n",
+        ],
+    },
+)
+
+# The authz native sidecar: followed by its own securityContext
+# (allowPrivilegeEscalation first; the proxy's starts with `privileged`).
+AUTHZ_SIDECAR_OPTS = [
+    "--kube-version",
+    "1.33.0",
+    "--set",
+    "proxy.authzSidecar.enabled=true",
+    "--set",
+    "proxy.authzSidecar.opa.enabled=true",
+    "--set",
+    "proxy.authzSidecar.opa.policy=package envoy.authz",
+]
+
+helm_template_test(
+    name = "aether_authz_sidecar_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = AUTHZ_SIDECAR_OPTS + [
+        "--set",
+        "proxy.authzSidecar.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+memory: 128Mi\\n\\s+requests:\\n\\s+cpu: 10m\\n\\s+memory: 32Mi\\n\\s+securityContext:\\n\\s+allowPrivilegeEscalation: false\\n",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "aether_authz_sidecar_cpu_limit_override_test",
+    chart = ":aether",
+    opts = AUTHZ_SIDECAR_OPTS + [
+        "--set",
+        "proxy.authzSidecar.resources.limits.cpu=500m",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+cpu: 500m\\n\\s+memory: 128Mi\\n\\s+requests:\\n\\s+cpu: 10m\\n\\s+memory: 32Mi\\n\\s+securityContext:\\n\\s+allowPrivilegeEscalation: false\\n",
+        ],
+    },
+)
+
+# The controller KEEPS its CPU limit by default (values.yaml says why); this
+# only proves that an operator who empties it gets a manifest the apiserver
+# accepts. Followed by the pod's `volumes:`.
+helm_template_test(
+    name = "aether_controller_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 50m\\n\\s+memory: 64Mi\\n\\s+volumes:\\n",
+        ],
+    },
+)
+
+# Guard: the default still carries the 100m limit GOMAXPROCS is derived from.
+helm_template_test(
+    name = "aether_controller_cpu_limit_kept_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/controller-deployment.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+cpu: 100m\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 50m\\n\\s+memory: 64Mi\\n\\s+volumes:\\n",
+        ],
+    },
+)
+
+# The registrar, likewise: limit kept by default, an emptied one is dropped.
+helm_template_test(
+    name = "aether_registrar_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "registrar.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/registrar-deployment.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 100m\\n\\s+memory: 64Mi\\n\\s+volumes:\\n",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "aether_registrar_cpu_limit_kept_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/registrar-deployment.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+cpu: 100m\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 100m\\n\\s+memory: 64Mi\\n\\s+volumes:\\n",
+        ],
+    },
+)
+
+# The edge pod: `edge.resources` is applied to BOTH containers. The `agent`
+# container's block is followed by the comment that introduces the `envoy`
+# container, the `envoy` container's by the pod's `volumes:`.
+EDGE_NO_CPU_LIMIT = "resources:\\n\\s+limits:\\n\\s+memory: 256Mi\\n\\s+requests:\\n\\s+cpu: 200m\\n\\s+memory: 128Mi\\n"
+
+helm_template_test(
+    name = "aether_edge_agent_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/edge-deployment.yaml": [
+            EDGE_NO_CPU_LIMIT + "(\\s+#[^\\n]*\\n)+\\s+- name: envoy\\n",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "aether_edge_envoy_empty_cpu_limit_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.resources.limits.cpu=",
+    ],
+    template_patterns = {
+        "aether/templates/edge-deployment.yaml": [
+            EDGE_NO_CPU_LIMIT + "\\s+volumes:\\n",
+        ],
+    },
+)
+
+# ...and a cap set on the edge reaches both containers.
+helm_template_test(
+    name = "aether_edge_cpu_limit_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.resources.limits.cpu=1",
+    ],
+    template_patterns = {
+        "aether/templates/edge-deployment.yaml": [
+            "resources:\\n\\s+limits:\\n\\s+cpu: 1\\n\\s+memory: 256Mi\\n\\s+requests:\\n\\s+cpu: 200m\\n\\s+memory: 128Mi\\n(\\s+#[^\\n]*\\n)+\\s+- name: envoy\\n",
+            "resources:\\n\\s+limits:\\n\\s+cpu: 1\\n\\s+memory: 256Mi\\n\\s+requests:\\n\\s+cpu: 200m\\n\\s+memory: 128Mi\\n\\s+volumes:\\n",
+        ],
+    },
+)
+
 # #1335: the edge's `agent` container (the `agent edge` control plane) has no
 # CPU limit either, so GOMAXPROCS is pinned like the node agent's (#1116)
 # rather than left to follow the node's core count. Envoy is not a Go process:

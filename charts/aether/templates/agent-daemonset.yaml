@@ -300,7 +300,7 @@ spec:
               readOnly: true
             {{- end }}
           resources:
-            {{- toYaml .Values.agent.resources | nindent 12 }}
+            {{- include "aether.resources" .Values.agent.resources | nindent 12 }}
       volumes:
         - name: run-dir
           hostPath:

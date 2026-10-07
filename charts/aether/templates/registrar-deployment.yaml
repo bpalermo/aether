@@ -145,7 +145,7 @@ spec:
               readOnly: true
           {{- end }}
           resources:
-            {{- toYaml .Values.registrar.resources | nindent 12 }}
+            {{- include "aether.resources" .Values.registrar.resources | nindent 12 }}
       {{- if .Values.spire.enabled }}
       volumes:
         - name: workload-socket
