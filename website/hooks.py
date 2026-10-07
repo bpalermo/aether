@@ -75,6 +75,7 @@ STATIC_PAGES: dict[str, tuple[str, tuple[str, ...]]] = {
     "docs/getting-started.md": ("docs/getting-started.md", ("Table of contents",)),
     "docs/workload-requirements.md": ("docs/workloads.md", ()),
     "docs/configuration.md": ("docs/configuration.md", ()),
+    "docs/verifying-releases.md": ("docs/verifying-releases.md", ()),
     "charts/README.md": ("docs/charts.md", ()),
     "docs/observability/README.md": ("docs/observability.md", ()),
     "docs/registry-backend-evolution.md": ("docs/registry.md", ()),

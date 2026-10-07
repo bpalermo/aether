@@ -16,6 +16,13 @@
 #
 #   bazel run //bazel/cosign:verify_image_signatures -- <ref> [<ref>...]
 #   bazel run //bazel/cosign:verify_image_signatures -- --file <refs, one per line>
+#   bazel run //bazel/cosign:verify_image_signatures -- --single [--file <file> | <ref>...]
+#
+# `--single` is for artefacts that are ONE manifest and not an index: the Helm
+# charts (publish.yaml signs each chart manifest, without `--recursive`). The
+# ref itself is verified and no child walk is made. It is a statement about the
+# refs, not a way to skip the walk: a ref that turns out to BE an index fails,
+# because its children would otherwise go unchecked (#925).
 #
 # That is how CI runs it and how to run it by hand: the target exports COSIGN as
 # the Bazel-pinned cosign (the rules_img_signer_cosign bazel_dep's release
@@ -94,10 +101,16 @@ cosign_bin="${COSIGN:-cosign}"
 identity="${CERT_IDENTITY_REGEXP:-^https://github\.com/${GITHUB_REPOSITORY:-bpalermo/aether}/\.github/workflows/publish\.yaml@}"
 issuer="${CERT_OIDC_ISSUER:-https://token.actions.githubusercontent.com}"
 
+single=0
+if [ "${1:-}" = "--single" ]; then
+	single=1
+	shift
+fi
+
 refs=()
 if [ "${1:-}" = "--file" ]; then
 	if [ "$#" -ne 2 ] || [ ! -r "$2" ]; then
-		echo "usage: $(basename "$0") --file <readable file of refs>" >&2
+		echo "usage: $(basename "$0") [--single] --file <readable file of refs>" >&2
 		exit 2
 	fi
 	while read -r line; do
@@ -183,6 +196,19 @@ for ref in "${refs[@]}"; do
 	digest="${BASH_REMATCH[5]}"
 
 	echo "${ref}"
+	if [ "$single" -eq 1 ]; then
+		verify_one manifest "$ref"
+		if ! tok="$(registry_registry_token "$repo")" || [ -z "$tok" ]; then
+			echo "::error::could not obtain a pull token for ${repo} on ${REGISTRY_HOST} (the registry-lib line above says what the token endpoint answered)" >&2
+			exit 2
+		fi
+		# registry_index_children succeeds only for an index that lists children.
+		if children="$(registry_index_children "$repo" "$digest" "$tok" 2>/dev/null)" && [ -n "$children" ]; then
+			echo "::error::${ref} is an index, not a single manifest: verify it without --single so its children are checked" >&2
+			exit 2
+		fi
+		continue
+	fi
 	verify_one index "$ref"
 
 	if ! tok="$(registry_registry_token "$repo")" || [ -z "$tok" ]; then
@@ -206,4 +232,8 @@ if [ "$failed" -gt 0 ]; then
 	echo "FAIL: ${failed} manifest(s) did not verify, ${verified} did, across ${#refs[@]} index(es)"
 	exit 1
 fi
-echo "PASS: ${verified} manifest(s) verified (${#refs[@]} index(es) + their children)"
+if [ "$single" -eq 1 ]; then
+	echo "PASS: ${verified} single manifest(s) verified"
+else
+	echo "PASS: ${verified} manifest(s) verified (${#refs[@]} index(es) + their children)"
+fi

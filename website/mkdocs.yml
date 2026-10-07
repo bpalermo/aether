@@ -128,6 +128,7 @@ nav:
       - Workload requirements: docs/workloads.md
       - Configuration: docs/configuration.md
       - Charts: docs/charts.md
+      - Verifying a release: docs/verifying-releases.md
       - Observability: docs/observability.md
       - Registry backends: docs/registry.md
   - Development:

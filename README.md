@@ -126,7 +126,9 @@ Every image and chart is published by CI to the `aethermesh` organisation on
 `quay.io/aethermesh/<component>` (`agent`, `mesh-dns`, `proxy-supervisor`,
 `cni-install`, `registrar`, `controller`, `prober`, `udsecho`, `proxy`), charts as
 `oci://quay.io/aethermesh/chart-<name>` (`crds`, `aether`, `prober`, `udsecho`),
-each signed keyless with cosign (the signature is an OCI 1.1 referrer):
+each signed keyless with cosign (the signature is an OCI 1.1 referrer) and
+carrying SLSA build provenance as a GitHub artifact attestation; see
+[Verifying a release](docs/verifying-releases.md):
 
 ```bash
 helm upgrade --install aether-crds oci://quay.io/aethermesh/chart-crds --version <X.Y.Z>-<full git sha>

@@ -117,6 +117,21 @@ sh_test(
     ],
 )
 
+# Which chart references one commit's publish is signed and attested under
+# (publish.yaml, "Sign published charts"): a throwaway git history, a fake
+# `curl` as the registry. A list one chart short would sign less than it reads
+# as, so a tag that does not resolve must fail with no partial output.
+sh_test(
+    name = "published_chart_refs_test",
+    size = "small",
+    srcs = ["published_chart_refs_test.sh"],
+    data = [
+        "image-registry.sh",
+        "published-chart-refs.sh",
+        "registry-lib.sh",
+    ],
+)
+
 # The same decision applied to the scheduled sweep's push heads (#1282):
 # which heads `verify-published-artifacts.sh --recent` skips as superseded.
 sh_test(

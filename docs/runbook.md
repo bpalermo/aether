@@ -1217,6 +1217,28 @@ fallback tags) and leaves the repository. The run summary is a table:
 --recursive` — the multi-arch **index and each per-architecture child
 manifest**.
 
+The user-facing commands (signature and provenance, images and charts) are in
+[Verifying a release](verifying-releases.md); this section is how it is built.
+
+**Charts are signed as well, and everything gets build provenance.** After the
+images, `publish.yaml` signs each chart manifest (`cosign sign`, no
+`--recursive`: a chart is one manifest). The references come from
+`scripts/published-chart-refs.sh <sha>`: every chart of `REGISTRY_CHARTS` under
+its `X.Y.Z-<sha>` tag, plus aether's bare `X.Y.Z` tag, each resolved to a digest
+right after the push. The run verifies them with
+`verify_image_signatures -- --single --file signed-charts.txt` (`--single`:
+no child walk, and a ref that turns out to be an index is refused). Then
+`actions/attest` writes ONE SLSA v1 provenance statement whose subjects are
+every signed image index and chart manifest, stored in the repository's
+attestation store on GitHub (not in the registry: `push-to-registry` is off),
+and the last step runs `gh attestation verify oci://<ref>` for each subject
+with the workflow and the commit pinned. A failure in any of these fails the
+publish run after the artifacts are pushed, like a failed image signature
+does: re-run the workflow, which signs and attests the same digests again.
+The post-publish sweep (`publish-verify`) does not look at chart signatures or
+attestations yet. The proxy image (`proxy-release.yml`) is signed but not
+attested yet.
+
 **Getting cosign: `bazel run //bazel/cosign`.** There is one cosign for this
 repository, in CI and on a workstation: the official release binary that the
 `rules_img_signer_cosign` bazel_dep (`MODULE.bazel`) downloads for the current

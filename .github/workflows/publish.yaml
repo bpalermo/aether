@@ -12,8 +12,13 @@ permissions:
   # signer exchanges this OIDC token with Fulcio for a short-lived certificate
   # bound to this workflow's identity, so NO private key exists to store or
   # rotate. Without it the sign step fails closed rather than signing with
-  # something weaker.
+  # something weaker. The provenance attestation (the Attest step) signs with a
+  # certificate from the same exchange.
   id-token: write
+  # Store the SLSA build-provenance attestation in this repository's
+  # attestation store (actions/attest). It is the only write this workflow makes
+  # to GitHub; everything else it publishes goes to the registry.
+  attestations: write
 
 # Serialise publishes (#692). Every run pushes the *same* mutable chart tags
 # (`charts/aether:<Chart.yaml version>` in particular, which does not change per
@@ -296,6 +301,49 @@ jobs:
           fi
           echo "signed ${signed} image(s)"
 
+      # The charts are signed too: one cosign signature per chart manifest, the
+      # same keyless identity as the images. Until this step only the images were
+      # signed, so `helm pull` had nothing to check a chart against -- and the
+      # chart is what names the image digests.
+      #
+      # WHICH references: scripts/published-chart-refs.sh, from REGISTRY_CHARTS
+      # and each Chart.yaml at this commit -- every chart's `X.Y.Z-<sha>` tag, and
+      # aether's bare `X.Y.Z` tag as well (a different Chart.yaml, so a different
+      # digest, and the one `helm pull --version X.Y.Z` resolves). By DIGEST, read
+      # from the registry right after the push above; this job is serialised
+      # (`concurrency` above), so no other publish can move a tag in between.
+      #
+      # No `--recursive`: a chart is a single manifest, not an index.
+      - name: Sign published charts (keyless)
+        env:
+          COSIGN_YES: "true"
+          COMMIT: ${{ github.sha }}
+          REGISTRY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # The script prints nothing on stdout unless EVERY tag resolved.
+          scripts/published-chart-refs.sh "$COMMIT" > chart-refs.txt
+          if [ ! -s chart-refs.txt ]; then
+            echo "::error::no chart references resolved -- nothing to sign"
+            exit 1
+          fi
+
+          signed=0
+          while read -r ref; do
+            echo "signing ${ref}"
+            bazel run //bazel/cosign -- sign --yes "$ref"
+            echo "$ref" >> signed-charts.txt
+            signed=$((signed + 1))
+          done < chart-refs.txt
+
+          if [ "$signed" -ne "$(wc -l < chart-refs.txt)" ]; then
+            echo "::error::signed ${signed} of $(wc -l < chart-refs.txt) chart manifests"
+            exit 1
+          fi
+          echo "signed ${signed} chart manifest(s)"
+
       # Prove the signatures are actually there AND verifiable. Without this the
       # sign step could succeed while attaching something nothing can verify, and
       # nobody would find out until an admission controller began rejecting
@@ -333,3 +381,113 @@ jobs:
           CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
           CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
             bazel run //bazel/cosign:verify_image_signatures -- --file signed-images.txt
+
+      # The charts' signatures, held to the same bar: the exact digests the sign
+      # step recorded, the same identity and issuer. `--single` because a chart
+      # is one manifest with no children to walk; the script refuses a ref that
+      # turns out to be an index rather than skip its children.
+      - name: Verify the chart signatures
+        env:
+          REGISTRY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -s signed-charts.txt ]; then
+            echo "::error::no signed charts were recorded -- the sign step signed nothing"
+            exit 1
+          fi
+          CERT_IDENTITY_REGEXP="^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
+          CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com \
+            bazel run //bazel/cosign:verify_image_signatures -- --single --file signed-charts.txt
+
+      # SLSA build provenance, as a GitHub artifact attestation.
+      #
+      # A cosign signature says "publish.yaml of this repository signed this
+      # digest". Provenance says how the digest came to be: which commit, which
+      # workflow file at which ref, which run, on which runner. One in-toto
+      # statement (predicate https://slsa.dev/provenance/v1) names every image
+      # index and every chart manifest this run pushed, signed with a Fulcio
+      # certificate for this job's OIDC identity and logged in the public Rekor.
+      #
+      # WHERE IT LIVES: in this repository's attestation store on GitHub, looked
+      # up by digest -- not in the registry (`push-to-registry` is off). The
+      # artifacts are on quay.io and that is fine: an attestation is bound to a
+      # digest, not to a location. Verify with
+      #   gh attestation verify oci://<ref> --repo <owner>/<repo>
+      # (docs/verifying-releases.md). An in-cluster admission controller looks
+      # in the registry instead and would not find it; nothing here needs that
+      # yet, and turning `push-to-registry` on is the change if it ever does.
+      #
+      # SUBJECTS: the two files the sign steps wrote, so what is attested is
+      # exactly what was signed and verified above -- the image INDEX digests
+      # (what a tag resolves to) and the chart manifests. The per-architecture
+      # children of an index are signed but are not attestation subjects.
+      #
+      # After the signature checks on purpose: nothing is attested that did not
+      # verify.
+      - name: Provenance subjects
+        run: |
+          set -euo pipefail
+
+          # `<hex digest>  <registry>/<repository>`: the sha256sum format
+          # actions/attest reads. The name carries no tag, as GitHub's own
+          # container guidance has it; the digest is the identity.
+          cat signed-images.txt signed-charts.txt |
+            sed -nE 's|^(.+)@sha256:([0-9a-f]{64})$|\2  \1|p' > provenance-subjects.sha256
+          want="$(cat signed-images.txt signed-charts.txt | wc -l)"
+          got="$(wc -l < provenance-subjects.sha256)"
+          if [ "$got" -eq 0 ] || [ "$got" -ne "$want" ]; then
+            echo "::error::${got} provenance subject(s) from ${want} signed reference(s)"
+            exit 1
+          fi
+          echo "${got} provenance subject(s):"
+          cat provenance-subjects.sha256
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: provenance-subjects.sha256
+
+      # Prove the attestation can be found and verified the way a user would, for
+      # EVERY subject: fetched from GitHub by the digest the registry serves,
+      # signed by this workflow file of this repository, built from this commit.
+      # Same reason as the signature checks: an attest step that succeeds while
+      # storing something nobody can verify is found out by the first person who
+      # tries.
+      - name: Verify the provenance attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          verified=0
+          while read -r ref; do
+            ok=0
+            # The attestation API can trail the upload by a moment.
+            for attempt in 1 2 3 4; do
+              if gh attestation verify "oci://${ref}" \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/publish.yaml" \
+                --source-digest "$COMMIT" \
+                --predicate-type https://slsa.dev/provenance/v1 > /dev/null; then
+                ok=1
+                break
+              fi
+              echo "  attestation for ${ref} not verifiable yet (attempt ${attempt} of 4)"
+              sleep $((attempt * 5))
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "::error::no verifiable provenance attestation for ${ref}"
+              exit 1
+            fi
+            echo "  verified provenance of ${ref}"
+            verified=$((verified + 1))
+          done < <(cat signed-images.txt signed-charts.txt)
+
+          if [ "$verified" -eq 0 ]; then
+            echo "::error::verified no attestation"
+            exit 1
+          fi
+          echo "verified the provenance of ${verified} artifact(s)"
