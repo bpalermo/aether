@@ -3309,10 +3309,12 @@ at some point since it was bound. It does not say the roll dropped anything.
 namespace, taken before and after the window you care about:
 
 ```bash
+# On the node. PID is any process of the pod (its pause container will do).
+PID=12345
 # Per-socket drops (last column) for the QUIC inbound port:
-nsenter --net=/proc/<pid of a process in the pod>/ns/net cat /proc/net/udp | awk 'NR==1 || $2 ~ /:4658$/'   # 0x4658 = 18008
+nsenter --net="/proc/${PID}/ns/net" cat /proc/net/udp | awk 'NR==1 || $2 ~ /:4658$/'   # 0x4658 = 18008
 # Namespace-wide receive-buffer overflows:
-nsenter --net=/proc/<pid>/ns/net nstat -az UdpRcvbufErrors
+nsenter --net="/proc/${PID}/ns/net" nstat -az UdpRcvbufErrors
 ```
 
 Both are cumulative as well, but they are read by you at two instants, so the
