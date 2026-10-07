@@ -3464,7 +3464,8 @@ already ahead of the marker on the stream.
 So a gap that persists past a sync cycle (the poll interval at worst) is lag:
 check `aether_agent_registry_reconnects_total` and `watch_errors_total` on that
 agent (and `watch_token_drops_total`, the reconnects it chose to make full
-resends, #1269), and `aether_registrar_broadcast_dropped_events_total` (a full stream skips its
+resends, #1269, and `watch_resends_abandoned_total`, the resends cut before
+their marker, #1334), and `aether_registrar_broadcast_dropped_events_total` (a full stream skips its
 marker and is retried next cycle; a dropped endpoint event force-resyncs it).
 
 Skew: a registrar older than #1241 sends no markers, and against it the line is
@@ -3632,6 +3633,64 @@ Notes:
   is that case. A registrar older than #1203 versions every event, so its
   streams never end inside a batch. Agents older than #1269 keep the token and
   stay exposed to this case until the DaemonSet has rolled.
+- A stream that ends **before its first `SNAPSHOT_COMPLETE` with no resume
+  token** (#1334) abandons the full snapshot the registrar was sending it, and
+  the next stream is `resent` in full again: two `resent` for one cause. It is
+  not a token drop (there was no token to drop, so `watch_token_drops` stays
+  flat) and it is correct (the abandoned half is never announced as complete;
+  the second resend clears and rebuilds the cache). It is only wasted work, and
+  it was invisible: on the 2026-10-06 soak it showed as 6 `resent` at an agent
+  roll where 5 were expected (#1324). The agent now logs it at INFO as
+  `watch stream ended before its first SNAPSHOT_COMPLETE with no resume token;
+  the snapshot it was being sent is abandoned and the next stream is resent in
+  full` and counts it in
+  `aether_agent_registry_watch_resends_abandoned_total{reason}`, where `reason`
+  is what ended the stream:
+  - `filter_change`: the dependency set changed while the snapshot was arriving
+    and the agent re-opened the stream to assert the new filter. This is the
+    #1324 case. At start-up the first stream already carries the local pods'
+    dependency set (the xDS `PreListen` asserts it ahead of the identity hold),
+    but the set keeps growing for a few seconds as the agent's informers sync
+    (the mesh-Service projection's TCP services, GAMMA and L4 route backends,
+    chain filters, imported config) and, on a surge standby, at the takeover
+    (the previous agent's persisted observed upstreams, the overlap's CNI
+    ADD/DEL, then the clusters the reconnecting proxy reports it holds). A
+    change that lands after the marker costs an `extended` or `current`
+    re-open; one that lands inside the first exchange costs this.
+  - `server_drain`, `eof`, `forced_resync`, `error`: the registrar drained,
+    closed, force-resynced or failed the stream mid-snapshot.
+  The same line carries `eventsReceived` and `openFor` (how far the stream got),
+  `filterServices` and `nextFilterServices` (the abandoned stream's filter size
+  and the one that superseded it) and `tokenPresented` (true when the stream
+  did present a token, the registrar resent past it, and the cut landed inside
+  that resend: #1203 drops the token at the first `FULL_SNAPSHOT`). A stream
+  that ends before its marker with its token intact is not counted: nothing
+  was being resent, and the next stream resumes.
+
+  Read it against the registrar's resends over the same window:
+
+  ```promql
+  # Abandoned resends per node, by what ended the stream. max_over_time, not
+  # increase(): the typical one happens in an agent's first second, so its
+  # series is born at 1 and increase() reads 0 for it.
+  sum by (node, reason) (max_over_time(aether_agent_registry_watch_resends_abandoned_total[30m]))
+
+  # Full resends the registrar served in the window.
+  sum(increase(aether_registrar_watch_starts_total{resume="resent"}[30m]))
+  ```
+
+  Each abandoned resend accounts for at most one `resent` beyond the expected
+  ones (one per agent start, one per agent per registrar it reconnects to with a
+  stale token, one per `watch_token_drops`); "at most" because a stream
+  cancelled before the registrar began serving it was never counted there. A
+  non-zero `filter_change` at agent rolls is the known start-up race and costs
+  one filtered snapshot send per count. `filter_change` on every node at every
+  roll, or outside rolls, means dependency-set changes are landing inside
+  resends as a rule (check `eventsReceived`/`openFor`: a registrar that takes
+  seconds to finish an initial exchange widens the window). Any other reason
+  that keeps counting is a registrar that cannot complete an initial exchange:
+  read it with `aether_agent_registry_watch_errors_total` and the registrar's
+  own log.
 - Publications (an RPC's or a sync's snapshot change plus its broadcast) are
   serialized: every watcher receives batches in the order they changed the
   snapshot, each one contiguous. Before the #1239 review they ran concurrently,
