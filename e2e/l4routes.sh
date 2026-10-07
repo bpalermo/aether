@@ -82,7 +82,7 @@
 #
 # UDP RIDES THE MESH IN PLAINTEXT. mTLS is a TCP/TLS construct and there is no
 # DTLS; the "udp:" clusters carry no transport socket at all (asserted in
-# //test/envoy_validate, #876). Nothing here expects or asserts mTLS on the UDP
+# //agent/test/envoy_validate, #876). Nothing here expects or asserts mTLS on the UDP
 # leg, and a passing T3 is NOT evidence of an authenticated UDP path.
 #
 # T3 ASSERTS DELIVERY, AND UNTIL #931 THAT DID NOT WORK AT ALL.

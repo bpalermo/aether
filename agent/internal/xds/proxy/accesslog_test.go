@@ -72,7 +72,7 @@ func TestBuildAccessLogEnabled(t *testing.T) {
 	// response byte, so a DC line shows whether the upstream FIN had landed
 	// (upstream_rx_ms) and whether the response finished downstream
 	// (downstream_tx_end_ms). The exact operator strings are the contract the
-	// soak grader's benign-DC rule reads; //test/envoy_validate proves the
+	// soak grader's benign-DC rule reads; //agent/test/envoy_validate proves the
 	// pinned Envoy accepts them.
 	assert.Equal(t, "%COMMON_DURATION(US_RX_BEG:US_RX_END:ms)%", attrs["upstream_rx_ms"])
 	assert.Equal(t, "%COMMON_DURATION(US_RX_BEG:DS_TX_END:ms)%", attrs["downstream_tx_end_ms"])

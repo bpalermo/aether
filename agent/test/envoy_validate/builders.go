@@ -348,7 +348,7 @@ func buildQUICOutboundBootstrap() (*bootstrapv3.Bootstrap, error) {
 // name would otherwise surface in production only as every connection quietly
 // presenting the mapper's default_value. What validation cannot see is whether
 // the filter-state object actually arrives on the upstream connection; that is
-// //test/mtlspool's job.
+// //agent/test/mtlspool's job.
 func newPerSourceServiceCluster(clusterName, td, namespace, svcName string) *clusterv3.Cluster {
 	nodeID := fmt.Sprintf(nodeSpiffeIDFmt, td)
 	validationCtxName := fmt.Sprintf("spiffe://%s", td)
@@ -518,7 +518,7 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 // These three bootstraps are the per-PR half of #868's coverage. The nightly
 // kind harness exercises the L4 data path; what a real Envoy accepts is checked
 // here, because it is cheap, needs no cluster, and gates every PR
-// (scripts/ci-impacted-targets.sh classifies //test/envoy_validate as a unit
+// (scripts/ci-impacted-targets.sh classifies //agent/test/envoy_validate as a unit
 // target).
 //
 // The three shapes and why each is worth an Envoy's opinion:
@@ -1467,7 +1467,7 @@ func QUICUpstreamsWithSessionCache(bootstrapJSON []byte) ([]string, error) {
 // that sets connection_pool_per_downstream_connection (aether#1021). A twin
 // carries ONE identity, so the option buys no isolation and only multiplies
 // upstream QUIC connections by the number of downstream (app -> proxy)
-// connections: //test/mtlspool's TestQUICTwinUpstreamConnections measured 12
+// connections: //agent/test/mtlspool's TestQUICTwinUpstreamConnections measured 12
 // QUIC connections for 12 downstream connections with it on, 1 with it off.
 func QUICUpstreamsPoolingPerDownstream(bootstrapJSON []byte) ([]string, error) {
 	var bs bootstrapv3.Bootstrap

@@ -427,7 +427,7 @@ func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain, meshDomain string
 // downstream server traffic"), while its QUIC CLIENT sockets always ask for it
 // (envoy_quic_utils.cc createConnectionSocket), so before this the upstream
 // half of every mesh HTTP/3 connection read with GRO and the inbound half did
-// not. //test/mtlspool TestQUICRequestCPU, 10k paced requests x 2 repetitions
+// not. //agent/test/mtlspool TestQUICRequestCPU, 10k paced requests x 2 repetitions
 // against the pinned proxy: destination-side CPU per request 0.757 -> 0.675 ms
 // (-11 %), both proxies 1.692 -> 1.602 ms (-5 %). Falls back to non-GRO reads
 // where the kernel lacks UDP_GRO (Linux < 5.0), with a warning.

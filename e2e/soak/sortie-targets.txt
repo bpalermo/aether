@@ -1,0 +1,28 @@
+# The soak's load targets (proposal 042): one line per target, `name url weight`.
+#
+# sortie-plan.sh turns this into the plan's `scenario.targets` and into the
+# per-target share table sortie-gate.sh grades against. Each target is its own
+# concurrent execution on every engine (own rate limiter, connection pool,
+# counters, histograms) at `rate x weight / sum(weights)` requests per second
+# PER NODE, which must come out a whole number: at the soak's 60 rps per node,
+# weights 3:1 over six mesh targets and two UDS targets are 9 rps and 3 rps.
+#
+# Same eight targets, same order and same spelling as k6-mesh-soak.js drove
+# (plain HTTP/1.1 to the pod-local outbound listener, :18081, by qualified mesh
+# name). `name` is the label in the report (`mesh/<name>`) and in the statsd
+# prefix, so keep it [a-z0-9-].
+#
+# The TCP-delivered mesh services. mixed-svc is the proposal-037 multi-protocol
+# service (HTTP :8080 primary + raw TCP :9000); echo is also the prober's
+# mesh_dns target.
+svc-1       http://svc-1.aether-test.aether.internal:18081/       3
+svc-2       http://svc-2.aether-test.aether.internal:18081/       3
+svc-3       http://svc-3.aether-test.aether.internal:18081/       3
+svc-4       http://svc-4.aether-test.aether.internal:18081/       3
+echo        http://echo.aether-test.aether.internal:18081/        3
+mixed-svc   http://mixed-svc.aether-test.aether.internal:18081/   3
+# The UDS-delivered services (proposals 034/039, charts/udsecho): uds-echo
+# declares its socket with the pod annotation, uds-cr-echo through an
+# EndpointPolicy.
+uds-echo    http://uds-echo.aether-test.aether.internal:18081/    1
+uds-cr-echo http://uds-cr-echo.aether-test.aether.internal:18081/ 1

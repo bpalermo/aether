@@ -43,7 +43,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
-	"aethermesh.dev/test/envoybin"
+	"aethermesh.dev/agent/test/envoybin"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -494,7 +494,7 @@ func udpVariants() []udpVariant {
 // (10000), AETHER_QUIC_COST_RPS (250), AETHER_QUIC_COST_CONNS (8),
 // AETHER_QUIC_COST_REPS (2; variants are interleaved per repetition).
 //
-//	bazel test //test/mtlspool:mtlspool_test --test_filter=TestQUICRequestCPU \
+//	bazel test //agent/test/mtlspool:mtlspool_test --test_filter=TestQUICRequestCPU \
 //	  --test_env=AETHER_QUIC_COST=1 --test_output=all --test_timeout=3600
 func TestQUICRequestCPU(t *testing.T) {
 	if os.Getenv("AETHER_QUIC_COST") == "" {

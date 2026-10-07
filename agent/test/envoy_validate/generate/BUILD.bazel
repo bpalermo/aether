@@ -3,9 +3,9 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library")
 go_library(
     name = "generate_lib",
     srcs = ["main.go"],
-    importpath = "aethermesh.dev/test/envoy_validate/generate",
+    importpath = "aethermesh.dev/agent/test/envoy_validate/generate",
     visibility = ["//visibility:private"],
-    deps = ["//test/envoy_validate"],
+    deps = ["//agent/test/envoy_validate"],
 )
 
 go_binary(

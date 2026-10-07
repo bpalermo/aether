@@ -9,7 +9,7 @@
 // sync here.
 //
 // A target that calls Path must declare the architecture-appropriate binary in
-// its `data`, e.g. data = ["//test/envoybin:envoy_bin"].
+// its `data`, e.g. data = ["//agent/test/envoybin:envoy_bin"].
 package envoybin
 
 import (

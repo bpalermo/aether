@@ -1,6 +1,6 @@
 """Extracts the Envoy binary from the chart-pinned aether-proxy image.
 
-`//test/envoy_validate` runs `envoy --mode validate` over aether-generated
+`//agent/test/envoy_validate` runs `envoy --mode validate` over aether-generated
 bootstrap configs. That gate is only meaningful against the binary the mesh
 actually runs: the custom proxy (//proxy workspace) compiles a large set of
 upstream extensions *out* (`_DROPPED` in
@@ -124,13 +124,13 @@ def _parse_proxy_pin(mctx):
         fail((
             "{label}: could not find the aether-proxy image pin. Expected a line " +
             "`repository: {want}` (image_reference(\"proxy\") in " +
-            "@aether_registry//:registry.bzl). //test/envoy_validate validates against " +
+            "@aether_registry//:registry.bzl). //agent/test/envoy_validate validates against " +
             "the Envoy inside that image, so the pin cannot be guessed (aether #709)."
         ).format(label = _VALUES_LABEL, want = image_reference("proxy")))
     if digest == None:
         fail((
             "{label}: found `repository: {repo}` but no `digest:` key inside the " +
-            "same image mapping. //test/envoy_validate pulls the proxy image by " +
+            "same image mapping. //agent/test/envoy_validate pulls the proxy image by " +
             "digest; a tag-only pin is not accepted (aether #709)."
         ).format(label = _VALUES_LABEL, repo = repository))
     if not _is_sha256_digest(digest):
@@ -327,6 +327,6 @@ pinned_proxy = module_extension(
 
 Each repo exposes `:envoy` — /usr/local/bin/envoy lifted out of the aether-proxy
 image at the digest //charts/aether:values.yaml pins. Used by
-//test/envoy_validate so the `envoy --mode validate` gate runs the exact binary
+//agent/test/envoy_validate so the `envoy --mode validate` gate runs the exact binary
 the mesh deploys.""",
 )

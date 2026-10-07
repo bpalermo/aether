@@ -14,12 +14,12 @@ alias(
         "@platforms//cpu:x86_64": "@pinned_envoy_linux_amd64//:envoy",
         "@platforms//cpu:aarch64": "@pinned_envoy_linux_arm64//:envoy",
     }),
-    visibility = ["//test:__subpackages__"],
+    visibility = ["//agent/test:__subpackages__"],
 )
 
 go_library(
     name = "envoybin",
     srcs = ["envoybin.go"],
-    importpath = "aethermesh.dev/test/envoybin",
-    visibility = ["//test:__subpackages__"],
+    importpath = "aethermesh.dev/agent/test/envoybin",
+    visibility = ["//agent/test:__subpackages__"],
 )

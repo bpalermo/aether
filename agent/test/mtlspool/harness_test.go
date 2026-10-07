@@ -26,7 +26,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
-	"aethermesh.dev/test/envoybin"
+	"aethermesh.dev/agent/test/envoybin"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -86,7 +86,7 @@ const (
 	// sdsClusterName is the static cluster the harness points every SDS config
 	// source at. Production uses `ads: {}` (the agent's own stream); the harness
 	// has no ADS, so the sources are rewritten to an explicit api_config_source
-	// (rewriteSDSToHarness) — the same substitution //test/envoy_validate makes,
+	// (rewriteSDSToHarness) — the same substitution //agent/test/envoy_validate makes,
 	// and the only deviation from production config in this file.
 	sdsClusterName = "sds_cluster"
 

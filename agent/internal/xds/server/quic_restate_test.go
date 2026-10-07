@@ -124,7 +124,7 @@ func TestOnDemandObserver_FreshStreamHeldTwinsAdmitNothing(t *testing.T) {
 // by a request that routed to it, and Envoy never re-sends it (its ODCDS
 // manager answers every later request for the name "already subscribed,
 // skipping"). Answering it absent would strand the pair -- every request 503s
-// at the on_demand timeout; //test/mtlspool shows it -- so a valid pair is
+// at the on_demand timeout; //agent/test/mtlspool shows it -- so a valid pair is
 // admitted. Held-only twins in the same request still admit nothing.
 func TestOnDemandObserver_FreshStreamResubscribedTwinsAreServed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

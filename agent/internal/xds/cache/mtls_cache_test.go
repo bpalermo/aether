@@ -322,7 +322,7 @@ func TestCachedMTLSClusterInvalidatedOnSANNamespaceChange(t *testing.T) {
 // #842 put the identity in the key where it belongs (envoy.hashable_string) and
 // took the flag off. So the invariant is inverted, and its two halves must be
 // checked TOGETHER — the flag's absence is safe only because the identity is
-// hashable, and //test/mtlspool proves the pair end to end against a real
+// hashable, and //agent/test/mtlspool proves the pair end to end against a real
 // Envoy. A cluster that had neither would be the #831 leak.
 func TestNodeProxyPerSourceClustersPoolPerDownstreamConnection(t *testing.T) {
 	c := newTestCache("node-1")

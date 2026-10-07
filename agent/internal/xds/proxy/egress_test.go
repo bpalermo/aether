@@ -31,7 +31,7 @@ func TestNewServiceCluster(t *testing.T) {
 	// pods of the same ServiceAccount can share an upstream h2 connection. The
 	// flag is what made cross-source certificate reuse impossible BEFORE that,
 	// so its absence is only safe together with
-	// SourceIdentityCertMapperFilterStateKey — //test/mtlspool asserts the pair.
+	// SourceIdentityCertMapperFilterStateKey — //agent/test/mtlspool asserts the pair.
 	assert.False(t, c.GetConnectionPoolPerDownstreamConnection(),
 		"pools partition by source identity (#842), not by downstream connection")
 	require.NotNil(t, c.GetEdsClusterConfig().GetEdsConfig())
@@ -596,7 +596,7 @@ func TestClusterNamesStrict(t *testing.T) {
 // This is the whole of the #842 rev228 fix, and it is a shape a reader will be
 // tempted to "simplify" — every other SDS reference on this proxy is `ads: {}`,
 // and this one looks gratuitously different. It is not. See
-// meshCertSelectorSDSSource for why, and //test/mtlspool's
+// meshCertSelectorSDSSource for why, and //agent/test/mtlspool's
 // TestOnDemandCertificateResolvesWhenAlreadyStaticallyReferenced for the
 // runtime proof against a real Envoy.
 func assertCertSelectorSDSSource(t *testing.T, src *corev3.ConfigSource) {
