@@ -2438,6 +2438,78 @@ To put a cap back, set `agent.meshDnsDaemon.resources.limits.cpu` (an empty valu
 renders no limit) and consider `agent.meshDnsDaemon.goMaxProcs=0`, which hands
 `GOMAXPROCS` back to the Go runtime to derive from that limit.
 
+### uds-csi CPU throttling (and the controller's and registrar's CPU limits)
+
+The `csi.aether.io` plugin serves `NodePublishVolume` / `NodeUnpublishVolume`, so a
+CFS-throttled period on it is added to the start (or the termination) of a UDS pod
+on that node. Until chart 2.4.10 it ran with a `5m` request and a `100m` limit, and
+the 2026-10-06 8 h soak — the first with cAdvisor scraped — showed it throttled in
+**57.6 %** of the periods it ran in (20,248 of 35,169, 15 pods, #1321) while using
+11–23 CPU-seconds per pod over the whole run. Same mechanism as mesh-dns above: an
+average far under the limit, delivered in bursts (a publish; and every 30 s the
+liveness probe, a second Go process inside the same cgroup) that spend a period's
+10 ms of quota and park the container until the next one. Since #1321 it keeps the
+`5m` request and has **no CPU limit** by default, with `GOMAXPROCS=2` pinned in the
+chart (`udsCsi.goMaxProcs`).
+
+The same soak measured the controller at 1.0 % and the registrar at 1.5 %. Their
+`100m` limits were **kept**: neither is on a request path (a throttled period is
+under 100 ms on an admission call with a 5 s timeout, or on an endpoint update on
+its way to the agents), the registrar's `requests == limits` is what makes it QoS
+Guaranteed, and both derive `GOMAXPROCS` from `limits.cpu`. The reasoning is next to
+`controller.resources` and `registrar.resources` in `charts/aether/values.yaml`.
+
+Fraction of CFS periods throttled, per container, over a window (cAdvisor; set the
+range to the run you are grading):
+
+```promql
+sum by (container) (increase(container_cpu_cfs_throttled_periods_total{namespace="aether-system", container!=""}[8h]))
+  / sum by (container) (increase(container_cpu_cfs_periods_total{namespace="aether-system", container!=""}[8h]))
+```
+
+Per uds-csi pod, as a rate, with the time parked and the CPU actually used:
+
+```promql
+# Fraction of CFS periods throttled, per uds-csi pod
+sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace="aether-system", container="uds-csi"}[30m]))
+  / sum by (pod) (rate(container_cpu_cfs_periods_total{namespace="aether-system", container="uds-csi"}[30m]))
+
+# Seconds parked per second
+sum by (pod) (rate(container_cpu_cfs_throttled_seconds_total{namespace="aether-system", container="uds-csi"}[30m]))
+
+# CPU actually used, millicores
+1000 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="aether-system", container="uds-csi"}[30m]))
+```
+
+**A container with no CPU limit has no `container_cpu_cfs_*` series at all** —
+cAdvisor only exports them for a cgroup with a quota — so after #1321 the uds-csi
+queries return *no data*, not `0`, and the first query simply stops listing
+`uds-csi` (as it does not list `agent`, `mesh-dns` or `proxy`). Read "no data" as the
+pass, but prove the scrape is alive with the usage query, which must still return
+one series per pod, and confirm the limit is really gone:
+
+```promql
+# Expect: empty. Any series here is a uds-csi container that still has a quota
+# (an old pod not yet rolled, or an operator-set limits.cpu).
+count by (pod) (container_cpu_cfs_periods_total{namespace="aether-system", container="uds-csi"})
+```
+
+```bash
+kubectl get ds -n aether-system aether-uds-csi \
+  -o jsonpath='{.spec.template.spec.containers[0].resources}{"\n"}'   # no limits.cpu
+```
+
+With no quota, what can still make the plugin wait is node contention, where its
+`5m` request is its CFS weight. The cgroup's `cpu.pressure` shows that; read it with
+the node-debug recipe in the mesh-dns section above, with
+`app.kubernetes.io/component=uds-csi` and container name `uds-csi` (the image is
+distroless too). A `some avg60` that stays above zero is the signal to raise
+`udsCsi.resources.requests.cpu`.
+
+To put a cap back, set `udsCsi.resources.limits.cpu` (an empty value renders no
+limit) and consider `udsCsi.goMaxProcs=0`, which hands `GOMAXPROCS` back to the Go
+runtime to derive from that limit.
+
 ### What the proxy supervisor does on SIGTERM (`kubectl delete pod`, drain, eviction)
 
 The `aether-proxy` pod is `hostNetwork` with `maxSurge: 1`, so the node's Envoy is a
@@ -2674,6 +2746,29 @@ be later than that:
 ```bash
 kubectl -n aether-system get pod <proxy-pod> -o jsonpath='{range .status.initContainerStatuses[?(@.name=="authz")]}authz started={.started} at {.state.running.startedAt}{"\n"}{end}{range .status.containerStatuses[?(@.name=="proxy")]}proxy at {.state.running.startedAt}{"\n"}{end}'
 ```
+
+**Which `ext_authz` counters exist (#1325).** In Prometheus the filter's counters are
+`envoy_http_<stat_prefix>_ext_authz_<name>_total` (`capture_http` is the capture
+listener's prefix). A missing series means the event never happened on that proxy. It
+does not mean the stat is filtered:
+
+- Envoy's OTLP stats sink exports a counter only after it was first incremented. So
+  `ok`, `denied` and `error` exist only for nodes whose proxy has run a check with that
+  result. On talos-main that is the node carrying the canary. The first sample appears at
+  its value, and `increase()` reads 0 for that first jump. An alert on these needs the
+  "present now, absent 10 minutes ago" arm next to `increase()`:
+  `sum(m unless m offset 10m) > 0`.
+- `failure_mode_allowed` is incremented only when the filter runs fail-open
+  (`proxy.authzSidecar.failureMode: ALLOW`, `--authz-sidecar-failure-mode-allow`). With the
+  default `DENY` the series never exists.
+- There is **no `timeout` counter**. Envoy's HTTP `ext_authz` filter does not define one
+  (checked at the pinned Envoy, `ALL_EXT_AUTHZ_FILTER_STATS` in
+  `source/extensions/filters/http/ext_authz/ext_authz.h`). A check that exceeds
+  `proxy.authzSidecar.timeout` is counted in `error`. Do not gate on
+  `…_ext_authz_timeout_total`: it reads as a clean zero forever.
+- Neither the proxy's `stats_matcher` (an exclusion list,
+  `charts/aether/templates/agent-proxy-configmap.yaml`) nor the collector drops any
+  `ext_authz` stat.
 
 The chart needs Kubernetes >= 1.29 for this and refuses to render with the sidecar enabled
 on an older cluster. Kind e2e: `e2e/authz.sh` (nightly job `authz`). It evicts the OPA
@@ -3188,11 +3283,26 @@ aether_registrar_store_revision - aether_registrar_snapshot_revision
 # applied: how far the fleet's agents trail the store (worst agent)
 max(aether_registrar_store_revision) - min(aether_agent_registry_last_version)
 
-# divergence: more than one endpoint set while every replica is on the same
-# revision and none has a write-behind intent pending. MUST be empty.
-count(count by (content_hash) (aether_registrar_snapshot_content)) > 1
-  and on() (max(aether_registrar_snapshot_revision) == min(aether_registrar_snapshot_revision))
-  and on() (max(aether_registrar_writebehind_queue_depth) == 0)
+# divergence: more than one endpoint set at ONE revision, with no write-behind
+# intent pending. MUST be empty. Each replica's current hash is the content
+# series with the newest sample (see "Divergence rule" below for why).
+count by (job, revision) (
+  count_values by (job, content_hash) (
+    "revision",
+    aether_registrar_snapshot_revision
+    * ignoring (content_hash) group_right ()
+    (
+      aether_registrar_snapshot_content
+      and
+      (
+        timestamp(aether_registrar_snapshot_content)
+        == ignoring (content_hash) group_left ()
+        max without (content_hash) (timestamp(aether_registrar_snapshot_content))
+      )
+    )
+  )
+) > 1
+unless on (job) (max by (job) (aether_registrar_writebehind_queue_depth) > 0)
 ```
 
 The replica-lag line settles at 0 between changes. A short climb during churn
@@ -3240,9 +3350,64 @@ regardless.
 **same** `content_hash` label on `aether_registrar_snapshot_content`. The same
 revision with a different `content_hash` is a bug: the listing is a pure function
 of the revision, so two replicas that disagree are not serving what the store
-holds. `aether_registrar_snapshot_content` exports exactly one series per
-replica, the current hash. A superseded hash stops being exported rather than
-accumulating.
+holds. The registrar exports exactly one `aether_registrar_snapshot_content`
+series per replica, the current hash, and stops exporting a superseded one.
+
+**Prometheus still shows the superseded hash for 5 minutes (#1322).** The hash is
+a label, so a content change ends one series and starts another. OTLP carries no
+staleness marker for a series that is no longer exported, so an instant query
+keeps returning the old series' last sample for the whole lookback window. After
+every content change each replica therefore shows two hashes for 5 minutes. Any
+expression that counts hashes over the bare selector reads that as a divergence.
+The expression this section carried until #1322 did:
+
+```promql
+# WRONG: do not use. True for 5 minutes after every content change.
+count(count by (content_hash) (aether_registrar_snapshot_content)) > 1
+  and on() (max(aether_registrar_snapshot_revision) == min(aether_registrar_snapshot_revision))
+  and on() (max(aether_registrar_writebehind_queue_depth) == 0)
+```
+
+On the 8 h soak of 2026-10-06 (66 revisions, no divergence) it returned a sample
+at 108 of the 1,920 15-second steps (386 for its first two clauses alone), and
+the expression above returned none.
+It had a second fault: `aether_registrar_writebehind_queue_depth` is recorded only
+when an intent is queued or flushed, so on a registrar that has never queued one
+the series is missing, the last clause is empty, and the whole expression can
+never be true.
+
+How the expression above avoids both:
+
+- `timestamp(content) == max without (content_hash) (timestamp(content))` keeps,
+  per replica, only the content series whose sample is the newest. The
+  superseded series is inside the lookback, but its last sample is older. A
+  replica is "every label except `content_hash`", so the expression does not
+  depend on the name of the replica label (`node` carries the pod name on
+  talos-main).
+- Multiplying by `aether_registrar_snapshot_revision` gives that series the
+  replica's revision as its value, and `count_values` turns the value into a
+  `revision` label. The outer `count by (job, revision)` is then the number of
+  distinct hashes at one revision. A replica that lags is at another revision
+  and is not compared.
+- `unless ... > 0` is quiet only when some replica reports a pending intent. A
+  missing queue-depth series does not disable the check.
+
+To read the pairs by hand, use the same filter:
+
+```promql
+# one row per replica: value = revision, content_hash = what it serves there
+aether_registrar_snapshot_revision
+  * ignoring (content_hash) group_right ()
+  (aether_registrar_snapshot_content
+   and (timestamp(aether_registrar_snapshot_content)
+        == ignoring (content_hash) group_left ()
+        max without (content_hash) (timestamp(aether_registrar_snapshot_content))))
+```
+
+The alert is `AetherRegistrarSnapshotDiverged`
+(`docs/observability/registrar-alerts.yml`, `for: 3m`). Its promtool tests are in
+the GitOps repo (`clusters/talos-main/prometheus/rules_test.yaml`), one of which
+is a content change with the old series stale but inside the lookback.
 
 Notes:
 
@@ -3253,7 +3418,13 @@ Notes:
   the list RV moves on every write anywhere in the cluster. So that backend does
   not implement `registry.RevisionedLister`, and `store_revision`,
   `snapshot_revision` and the agent's `last_version` are not reported. The
-  content-hash gauge and the divergence check above still apply.
+  content-hash gauge is still exported, but the divergence expression above
+  returns nothing there: it compares replicas at one revision, and there is no
+  revision. Two kubernetes-backend replicas can also differ for a moment
+  legitimately, because health derives from each replica's clock. Read each
+  replica's current hash with the newest-sample filter above (drop the
+  revision multiplication) and treat only a disagreement that persists across
+  several sync cycles as a finding.
 - `aether_registrar_snapshot_version` keeps its pre-#1193 series name but is now
   the snapshot **generation**: a per-process count of content changes. It moves
   only when the served endpoint set changes, and it is not comparable across

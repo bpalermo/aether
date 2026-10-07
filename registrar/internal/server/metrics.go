@@ -263,7 +263,10 @@ const attrContentHashLabel = attribute.Key("content_hash")
 //     content_hash. It is observed (not recorded) so exactly ONE series per
 //     replica is exported at a time: an asynchronous instrument reports only
 //     the attribute sets of its latest callback, so a superseded hash stops
-//     being exported instead of accumulating. Two replicas reporting the same
+//     being exported instead of accumulating. Prometheus still returns the
+//     superseded series for its 5-minute lookback (OTLP has no staleness
+//     marker), so a query must take the series with the newest sample per
+//     replica (docs/runbook.md, #1322). Two replicas reporting the same
 //     snapshot_revision with different content_hash (and no write-behind
 //     intent pending) diverged: that is a bug.
 //

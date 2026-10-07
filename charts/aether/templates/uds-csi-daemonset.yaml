@@ -75,6 +75,15 @@ spec:
                 fieldRef:
                   apiVersion: v1
                   fieldPath: spec.nodeName
+            {{- /* #1321: explicit, not derived from limits.cpu -- uds-csi has no
+                   CPU limit by default (values.yaml udsCsi.resources). The exec
+                   liveness probe below is a second Go process in this container
+                   and inherits it. 0/empty omits it so the Go runtime picks
+                   GOMAXPROCS itself. */}}
+            {{- with .Values.udsCsi.goMaxProcs }}
+            - name: GOMAXPROCS
+              value: {{ . | quote }}
+            {{- end }}
           # The binary's own --probe mode: exit 0 iff the CSI socket exists. A
           # plugin that lost its socket (someone cleaned the plugins dir) is
           # restarted, and a restart re-creates both sockets and re-registers.
@@ -119,8 +128,10 @@ spec:
             # The registration socket the kubelet's plugin watcher discovers.
             - name: registration-dir
               mountPath: {{ $kubeletRoot }}/plugins_registry
+          {{- /* #1321: an empty limits.cpu is "no CPU limit", never `cpu: ""`
+                 (aether.resources). */}}
           resources:
-            {{- toYaml .Values.udsCsi.resources | nindent 12 }}
+            {{- include "aether.resources" .Values.udsCsi.resources | nindent 12 }}
       volumes:
         - name: kubelet-pods
           hostPath:
