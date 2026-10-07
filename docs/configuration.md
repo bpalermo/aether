@@ -753,7 +753,7 @@ against a chart before upgrading, read them back and render (never
 
 ```sh
 helm get values prober -n <namespace> -o yaml > values.yaml
-helm template prober <chart> -n <namespace> -f values.yaml | grep -n -E '^\s+(cpu|memory): (""|null)?$'
+helm template prober <chart> -n <namespace> -f values.yaml | grep -n -E '^[[:space:]]+(cpu|memory): (""|null)?$'
 ```
 
 No output means no container carries an empty quantity.

@@ -244,8 +244,12 @@ fi
 rc=0
 while IFS= read -r pattern; do
   [[ -z "$pattern" ]] && continue
-  # -z: the whole render is one record, so a pattern can span lines.
-  grep -Pzq -- "$pattern" <<<"$output"
+  # Matched by bash itself (POSIX ERE, the C library's regcomp), so the test
+  # needs no particular grep: BSD grep has no -P. ERE has no escape for a line
+  # break or for whitespace, so the two the patterns use are translated here.
+  ere="${pattern//\\\\n/$'\\n'}"
+  ere="${ere//\\\\s/[[:space:]]}"
+  [[ "$output" =~ $ere ]]
   case $? in
   0) ;;
   1)
@@ -254,7 +258,7 @@ while IFS= read -r pattern; do
     rc=1
     ;;
   *)
-    echo "FAIL: grep could not evaluate the pattern (not a valid PCRE?):" >&2
+    echo "FAIL: the pattern is not a valid extended regular expression:" >&2
     echo "  $pattern" >&2
     rc=1
     ;;
@@ -307,10 +311,15 @@ helm_template_match_test = rule(
 rules_helm's `template_patterns` are matched per template file, and its runner
 keeps one document per `# Source:` path: for a template that renders several
 documents (`---`), only the one helm prints last is searched, so a pattern for
-any earlier document can never match. This rule matches each pattern (a PCRE,
-`grep -Pz`) against the entire render instead, so a pattern can pin a block in
-any document and can span lines (`\\n`). Anchor a pattern on the lines around
-the block it is about, since nothing scopes it to one file.
+any earlier document can never match. This rule matches each pattern against
+the entire render instead, so a pattern can pin a block in any document and
+can span lines. Anchor a pattern on the lines around the block it is about,
+since nothing scopes it to one file.
+
+A pattern is a POSIX extended regular expression, matched by bash (`[[ =~ ]]`),
+plus two escapes the runner translates: `\\n` (a line break) and `\\s`
+(`[[:space:]]`; not usable inside a bracket expression). No Perl syntax: no
+`\\d`, no lazy quantifiers, no lookaround.
 """,
     implementation = _helm_template_match_test_impl,
     test = True,
@@ -324,7 +333,7 @@ the block it is about, since nothing scopes it to one file.
             doc = "Additional arguments to pass to `helm template` (e.g. `--set` pairs).",
         ),
         "patterns": attr.string_list(
-            doc = "PCRE patterns, each of which must match somewhere in the render. One line each; `\\n` for a line break.",
+            doc = "Extended regular expressions, each of which must match somewhere in the render. One line each; `\\n` for a line break, `\\s` for whitespace.",
             mandatory = True,
         ),
     },
