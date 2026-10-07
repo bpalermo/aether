@@ -74,10 +74,19 @@ jobs:
   # Runs the repository's code with a read-only token; the gate and the upload
   # are separate jobs so that `actions: read` and `code-quality: write` never
   # sit next to a test binary.
+  #
+  # On main (a push or a manual run there) the job runs in the `main`
+  # environment, whose BUILDBUDDY_ORG_API_KEY is a Read+Write key (#1314): the
+  # whole unit suite's coverage results are stored in the action cache, and a
+  # pull request's run (repository-level CAS-only key: read, never write) reuses
+  # every test whose inputs it did not change. A pull request must not name the
+  # environment at all: it admits the `main` branch only, and GitHub would fail
+  # the job. An empty name means no environment.
   report:
     name: Report (unit suite)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    environment: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'main' || '' }}
     permissions:
       # Check out the repository.
       contents: read
