@@ -75,6 +75,11 @@ telemetry:
 # open-loop and rate-bounded (probe.rate × number of targets) so it cannot run away.
 # The memory limit stays — GOMEMLIMIT is rendered at 90% of it. Re-add limits.cpu here only with a
 # quota that cannot bind (>= 1), never a fraction of a core.
+#
+# To remove a default request or limit, set it to null or to an empty value
+# (`--set resources.limits.memory=null`, `--set resources.requests.cpu=`): the
+# key is left out of the pod spec instead of rendering as `cpu: ""`
+# (prober.resources, #1361).
 resources:
   requests:
     cpu: 100m
@@ -109,6 +114,25 @@ authzCanary:
     expect: "200"
   deny:
     expect: "403"
+  # Resources of the client (`curl`) container: a shell loop that runs two curls
+  # every `interval` seconds. Written into the template before chart 1.0.4
+  # (#1362); these defaults are those values. No CPU limit by default. An empty
+  # or null value removes a key, as for `resources` above.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      memory: 32Mi
   echo:
     replicas: 2
     image: gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb7396722956640221e856b8e8cf44179da131d5bd6fc27a4f0cb91f60c237c3
+    # Resources of each echo replica's container. Written into the template
+    # before chart 1.0.4 (#1362); these defaults are those values. No CPU limit
+    # by default. An empty or null value removes a key.
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 64Mi

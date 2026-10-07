@@ -113,11 +113,7 @@ spec:
               sleep:
                 seconds: 5
           resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              memory: 64Mi
+            {{- include "prober.resources" .Values.authzCanary.echo.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -196,11 +192,7 @@ spec:
                 sleep {{ .Values.authzCanary.interval }}
               done
           resources:
-            requests:
-              cpu: 10m
-              memory: 16Mi
-            limits:
-              memory: 32Mi
+            {{- include "prober.resources" .Values.authzCanary.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
