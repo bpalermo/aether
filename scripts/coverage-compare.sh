@@ -7,7 +7,7 @@
 #
 #   scripts/coverage-compare.sh --baseline <main.lcov> --head <pr.lcov>
 #       [--baseline-label <text>] [--changed-files <list>]
-#       [--max-drop <points>] [--min <percent>]
+#       [--max-drop <points>] [--min <percent>] [--top-drops <n>]
 #
 # Both inputs are the `coverage.lcov` scripts/coverage.sh writes: the whole unit
 # suite, with a zero-hit record for every first-party file no test links.
@@ -31,7 +31,16 @@
 #   - with --changed-files (one repo-relative path per line: what
 #     `git diff --name-only` prints), the coverage of each of those files that
 #     either report names, with its delta. Paths neither report names (tests,
-#     non-Go files, generated code) are counted, not listed.
+#     non-Go files, generated code) are counted, not listed;
+#   - when the total dropped, the --top-drops (default DEFAULT_TOP_DROPS) files
+#     whose COVERED-LINE COUNT fell most, whatever the diff touched, and the
+#     files that left the report altogether (`removed`). This is the table that
+#     names the cause when no measured file changed (#1319): a test disabled or
+#     dropped in a BUILD file changes no Go file, so the changed-files table is
+#     empty and only a component's delta hints at it. Ranked by covered lines
+#     lost, then by path; a line says how many more there are. Open when the
+#     gate fails, collapsed (<details>) when the drop is within the threshold,
+#     absent when the total did not drop: a clean pull request stays short.
 # Patch coverage is deliberately not a gate: it punishes the pull request that
 # touches old untested code and rewards the one that leaves it alone.
 #
@@ -56,6 +65,9 @@ export LC_ALL=C
 # much a single pull request may cost.
 DEFAULT_MAX_DROP=1.0
 
+# How many rows the "largest per-file drops" table shows at most.
+DEFAULT_TOP_DROPS=10
+
 baseline=""
 head=""
 label="main"
@@ -64,6 +76,7 @@ max_drop="${COVERAGE_MAX_DROP:-}"
 max_drop_source="the repository variable COVERAGE_MAX_DROP"
 min="${COVERAGE_MIN:-}"
 min_source="the repository variable COVERAGE_MIN"
+top_drops="$DEFAULT_TOP_DROPS"
 
 # One `::error` on stderr and exit 2: the gate was not evaluated.
 refuse() { # title, message
@@ -73,7 +86,7 @@ refuse() { # title, message
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-	--baseline | --head | --baseline-label | --changed-files | --max-drop | --min)
+	--baseline | --head | --baseline-label | --changed-files | --max-drop | --min | --top-drops)
 		[ "$#" -ge 2 ] || refuse "Coverage gate: usage" "$1 needs a value"
 		case "$1" in
 		--baseline) baseline="$2" ;;
@@ -88,6 +101,7 @@ while [ "$#" -gt 0 ]; do
 			min="$2"
 			min_source="--min"
 			;;
+		--top-drops) top_drops="$2" ;;
 		esac
 		shift 2
 		;;
@@ -111,6 +125,8 @@ if [ -n "$min" ]; then
 	is_threshold "$min" ||
 		refuse "Coverage gate: malformed threshold" "the minimum coverage from $min_source is '$min': it must be a plain percentage between 0 and 100 (for example 75), or unset for no minimum. docs/runbook.md, 'Code coverage'."
 fi
+[[ "$top_drops" =~ ^[1-9][0-9]{0,3}$ ]] ||
+	refuse "Coverage gate: usage" "--top-drops is '$top_drops': it must be a whole number of rows between 1 and 9999"
 
 [ -f "$baseline" ] ||
 	refuse "Coverage gate: no baseline" "there is no baseline report to compare with ($baseline does not exist), so the gate cannot pass. Re-run the coverage workflow on main (Actions > coverage > Run workflow, or: gh workflow run coverage.yaml --ref main), then re-run this job. docs/runbook.md, 'Code coverage'."
@@ -166,8 +182,26 @@ else
 	: >"$work/changed"
 fi
 
+# Every file that lost covered lines, and every file only the baseline names:
+# "<covered lines lost>\t<file>\t<baseline covered>\t<baseline lines>\t<covered>\t<lines>",
+# the last two "-" for a file that left the report. Largest loss first, then by
+# path, so the order (and the cut at --top-drops) is the same on every run.
+awk -F '\t' '
+	phase == 1 { lines[$1] = $2; covered[$1] = $3; next }
+	{
+		in_head[$1] = 1
+		if (($1 in covered) && $3 < covered[$1])
+			printf "%d\t%s\t%d\t%d\t%d\t%d\n", covered[$1] - $3, $1, covered[$1], lines[$1], $3, $2
+	}
+	END {
+		for (f in covered)
+			if (!(f in in_head)) printf "%d\t%s\t%d\t%d\t-\t-\n", covered[f], f, covered[f], lines[f]
+	}
+' phase=1 "$work/base" phase=2 "$work/head" | sort -t "$(printf '\t')" -k1,1nr -k2,2 >"$work/drops"
+
 awk -F '\t' \
 	-v label="$label" \
+	-v top="$top_drops" \
 	-v max_drop="$max_drop" -v max_drop_source="$max_drop_source" \
 	-v min="$min" -v min_source="$min_source" \
 	-v with_changed="$([ -n "$changed" ] && echo 1 || echo 0)" \
@@ -216,6 +250,13 @@ awk -F '\t' \
 		reported++
 		f_base_lines += b_lines[$1]; f_base_covered += b_covered[$1]
 		f_head_lines += h_lines[$1]; f_head_covered += h_covered[$1]
+	}
+	phase == 5 {
+		drops++
+		drop_lines += $1
+		if (drops > top) { more++; more_lines += $1; next }
+		drop_rows = drop_rows sprintf("| `%s` | %d / %d | %s | %s |\n", $2, $3, $4, \
+			($5 == "-") ? "removed" : $5 " / " $6, $1 ? signed(-$1) : "0")
 	}
 	END {
 		base = rate(tb_covered, tb_lines)
@@ -267,6 +308,28 @@ awk -F '\t' \
 				printf "%d changed path(s) are in neither report (tests, non-Go files, generated code, or files excluded by build constraints).\n\n", unreported
 		}
 
+		# Only when the total fell. 1e-9 as above: equal reports are not a drop.
+		if (delta < -1e-9) {
+			if (!drops) {
+				print "### Largest per-file drops\n"
+				print "No file lost covered lines or left the report: the total fell because lines were added that no test covers.\n"
+			} else {
+				if (failed)
+					print "### Largest per-file drops\n"
+				else
+					printf "<details>\n<summary>Largest per-file drops: %d file(s), %d covered line(s)</summary>\n\n", drops, drop_lines
+				print "The files whose covered-line count fell most between the baseline and this pull request, whatever the diff touched (a test disabled in a BUILD file changes no Go file). `removed`: the file is no longer in the report.\n"
+				print "| File | Baseline covered / lines | Covered / lines | Covered lines |"
+				print "| --- | ---: | ---: | ---: |"
+				printf "%s", drop_rows
+				printf "| **%d file(s)** | | | **%s** |\n\n", drops, drop_lines ? signed(-drop_lines) : "0"
+				if (more)
+					printf "%d of them are not shown (%d covered line(s) between them).\n\n", more, more_lines
+				if (!failed)
+					print "</details>\n"
+			}
+		}
+
 		print (failed ? "fail" : "pass") >verdict
 		if (dropped && below)
 			print "line coverage dropped and is below the minimum: " numbers "; " limits >verdict
@@ -277,7 +340,7 @@ awk -F '\t' \
 		else
 			print "line coverage " numbers "; " limits >verdict
 	}
-' phase=1 "$work/base" phase=2 "$work/head" phase=3 "$work/components" phase=4 "$work/changed"
+' phase=1 "$work/base" phase=2 "$work/head" phase=3 "$work/components" phase=4 "$work/changed" phase=5 "$work/drops"
 
 {
 	read -r status
