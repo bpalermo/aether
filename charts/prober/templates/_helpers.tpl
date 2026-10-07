@@ -56,6 +56,42 @@ nothing for the rest of it (the 2026-10-04 agent OOMKills).
 {{- end -}}
 
 {{/*
+A container's `resources` block with empty quantities dropped (#1361; a copy of
+the aether chart's aether.resources, the charts are packaged separately).
+Takes the container's `resources` dict and renders it as YAML.
+
+An empty or null quantity is omitted rather than rendered as `cpu: ""`, which
+the apiserver rejects as a quantity. So `--set resources.limits.cpu=` (or
+`limits: {cpu: null}` in a values file) means "no CPU limit", exactly like
+leaving the key out, and a `limits:`/`requests:` map left with no entries is
+dropped too. Non-map keys (e.g. `claims`) pass through untouched.
+Every container in this chart renders its resources through this helper: a
+plain `toYaml` on a resources value brings `cpu: ""` back.
+Usage:
+  resources:
+    {{- include "prober.resources" .Values.resources | nindent 12 }}
+*/}}
+{{- define "prober.resources" -}}
+{{- $res := dict -}}
+{{- range $kind, $list := (. | default dict) -}}
+{{- if kindIs "map" $list -}}
+{{- $kept := dict -}}
+{{- range $name, $q := $list -}}
+{{- if not (or (kindIs "invalid" $q) (eq (toString $q) "")) -}}
+{{- $_ := set $kept $name $q -}}
+{{- end -}}
+{{- end -}}
+{{- if $kept -}}
+{{- $_ := set $res $kind $kept -}}
+{{- end -}}
+{{- else if $list -}}
+{{- $_ := set $res $kind $list -}}
+{{- end -}}
+{{- end -}}
+{{- toYaml $res -}}
+{{- end -}}
+
+{{/*
 ServiceAccount name.
 */}}
 {{- define "prober.serviceAccountName" -}}

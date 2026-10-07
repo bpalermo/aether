@@ -734,6 +734,30 @@ limit** on purpose: the limit is a CFS quota, which quantises probe latency in
 ~100 ms steps, and at the previous `50m` limit that was the dominant term in the
 published SLI (#735). The memory limit stays — `GOMEMLIMIT` is rendered at 90 % of it (chart 1.0.2; it used to be the whole limit).
 
+**Resources.** Three containers, three values keys (chart 1.0.4):
+
+| Key | Default | Container |
+|---|---|---|
+| `resources.{requests,limits}` | requests cpu `100m` / mem `32Mi`; limits mem `64Mi`, **no CPU limit** | `prober`, the DaemonSet's only container (see above for why it has no CPU limit). |
+| `authzCanary.resources.{requests,limits}` | requests cpu `10m` / mem `16Mi`; limits mem `32Mi`, no CPU limit | `curl`, the canary client (Deployment `authz-canary`). Only rendered with `authzCanary.enabled`. Written into the template before chart 1.0.4 (#1362). |
+| `authzCanary.echo.resources.{requests,limits}` | requests cpu `10m` / mem `32Mi`; limits mem `64Mi`, no CPU limit | `echo`, the canary's target (Deployment `authz-echo`, `authzCanary.echo.replicas` pods). Only rendered with `authzCanary.enabled`. Written into the template before chart 1.0.4 (#1362). |
+
+To remove a default request or limit, set it to `null` or to an empty value
+(`--set resources.limits.memory=null`, `--set authzCanary.resources.requests.cpu=`,
+or `limits: {memory: null}` in a values file): the key is left out of the pod
+spec. Before chart 1.0.4 an emptied quantity on `resources` rendered as
+`cpu: ""`, which the apiserver rejects (#1361). Removing the prober's
+`limits.memory` also removes its `GOMEMLIMIT`. To check a release's values
+against a chart before upgrading, read them back and render (never
+`--reuse-values`):
+
+```sh
+helm get values prober -n <namespace> -o yaml > values.yaml
+helm template prober <chart> -n <namespace> -f values.yaml | grep -n -E '^\s+(cpu|memory): (""|null)?$'
+```
+
+No output means no container carries an empty quantity.
+
 ---
 
 ## 4. Labels & annotations
