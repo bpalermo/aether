@@ -95,6 +95,7 @@ REQUIRED_FILES = (
     "docs/workloads/index.html",
     "docs/configuration/index.html",
     "docs/charts/index.html",
+    "docs/verifying-releases/index.html",
     "docs/observability/index.html",
     "docs/registry/index.html",
     # Development.

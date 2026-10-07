@@ -493,6 +493,34 @@ lib 1 "sign step: with the page retry nested underneath it is 52 requests" "$(ti
 	BEARER="$bearer" REGISTRY_COMMIT_TAG_FETCH_ATTEMPTS=4
 check "nested: 52 requests and 242 s of waiting" test "$(asked "$tags_url" curl.log):$(sum_waits)" = "52:242"
 
+# --- --single: a Helm chart is one manifest, not an index -------------------------
+# single <want exit> <name> <manifest seq> <cosign seq>
+single() {
+	local want="$1" name="$2" rc
+	rm -rf "$TMP/fake"
+	mkdir -p "$TMP/fake"
+	printf '{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"%s"},{"digest":"%s"}]}' \
+		"$kid_a" "$kid_b" >"$TMP/fake/index.json"
+	[ -z "$3" ] || tr ',' '\n' <<<"$3" >"$TMP/fake/manifest.seq"
+	[ -z "$4" ] || tr ',' '\n' <<<"$4" >"$TMP/fake/cosign.seq"
+	env "${CLEAN_ENV[@]}" COSIGN="$TMP/bin/cosign" \
+		bash "$SCRIPT" --single "$ref" >"$TMP/out" 2>"$TMP/err"
+	rc=$?
+	judge "$want" "$name" "$rc"
+}
+single 0 "--single: one manifest verifies with no child walk" "200 manifest" ""
+check "--single: exactly one cosign run, on the ref itself" test "$(cat "$TMP/fake/cosign.log")" = "$ref"
+check "--single: the PASS line says single manifests" has 'PASS: 1 single manifest(s) verified' "$TMP/out"
+check "--single: nothing claims children were walked" lacks 'child manifest(s) walked' "$TMP/out"
+
+single 2 "--single: a ref that is an index is refused, not half-verified" "" ""
+check "--single on an index: says why" has "is an index, not a single manifest" "$TMP/err"
+check "--single on an index: nothing says PASS" lacks 'PASS' "$TMP/out"
+
+single 1 "--single: an unsigned manifest fails" "200 manifest" "nosig,nosig,nosig"
+check "--single unsigned: FAILED names the ref" has "FAILED   manifest ${ref}" "$TMP/out"
+check "--single unsigned: nothing says PASS" lacks 'PASS' "$TMP/out"
+
 echo
 if [ "$FAILS" -ne 0 ]; then
 	echo "$FAILS check(s) failed"
