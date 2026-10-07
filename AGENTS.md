@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides concise, high-signal guidance for OpenCode agents working in the Aether repository.
+This file provides concise, high-signal guidance for coding agents working in the Aether repository. Start with **Rules for agents** below; role-specific agents live in `.claude/agents/`.
 
 ## Quick Start
 
@@ -113,6 +113,95 @@ hygiene*.
   (`--spire-enabled=true`); use `--spire-enabled=false` to disable. The
   **controller** is the exception: its `--spire-enabled` defaults to `false` (it
   serves the webhook with the Helm self-signed cert unless SPIRE is turned on).
+
+## Rules for agents
+
+One place for the rules every brief used to repeat. They apply to people too;
+an agent has no other way to learn them. The role agents in `.claude/agents/`
+assume this section has been read.
+
+**Build, lint, test**
+- Lint exactly as CI does: `bazel build --config=lint --@aspect_rules_lint//lint:fail_on_violation //...`.
+  **Never run `--config=ci` locally**: it implies `--config=remote` and needs
+  the BuildBuddy key CI passes on the command line.
+- `make format-check` before pushing (it also runs buildifier's linter on every
+  BUILD and `.bzl` file). `make actionlint` when a workflow or a composite
+  action changed. `scripts/check-shell-lint.sh` when a script was added.
+- The race detector goes on the `go_test` targets you touched
+  (`bazel test --config=race //pkg:pkg_test`), never on a wildcard that includes
+  image targets: that fails in analysis (cgo is off for images).
+- Do not build the `proxy/` workspace locally unless the task is about it: it is
+  Envoy. Its checks run in the `proxy` workflow.
+- A plain `go build ./...` needs the generated proto sources first:
+  `make materialize-go`, then `make go-build-plain`, then `make materialize-go-clean`.
+
+**Secrets and releases**
+- Never print, `cat` or paste `user.bazelrc`, `proxy/user.bazelrc` or
+  `~/.bazelrc`: they hold the BuildBuddy key. Never handle registry credentials.
+- Never push an image or a chart by hand. `publish.yaml` and `proxy-release.yml`
+  are the only publishers; leave both alone unless the task names them.
+- Never dismiss a code-scanning alert, and never work around one by reshaping
+  code so the scanner stops seeing it. Report it. One known false positive:
+  any edit to `.github/workflows/publish-verify.yaml` can re-raise
+  `actions/untrusted-checkout`, and code scanning is a required check, so that
+  pull request waits for the owner. Prefer changing the scripts that workflow
+  calls over changing its YAML.
+
+**Changes that carry an obligation**
+- Anything under `charts/` needs a bump of that chart's `Chart.yaml` (CI
+  enforces it). Read the version on `origin/main` first: two open chart pull
+  requests collide, and the second to merge takes the next patch number.
+- A chart test is `helm_template_test` in the chart's `BUILD.bazel`; write it
+  first and see it fail against the unchanged chart.
+- Removing a CPU limit from a Go container means deciding `GOMAXPROCS` in the
+  same change (without a limit the runtime sizes to the node's cores); see the
+  agent, mesh-dns and uds-csi values for the pattern.
+- New Go code needs tests: the `coverage` workflow fails a pull request whose
+  total line coverage drops by more than 1.0 point against `main`.
+- Protos are edition 2023 (never proto3) and change additively; an agent and a
+  registrar one release apart must keep working.
+
+**Workflows**
+- Every action pinned by full commit SHA with the version in a trailing
+  comment; `timeout-minutes` on every job; `permissions` per job, least
+  privilege; no `${{ }}` inside a `run:` script except through `env:`.
+- Kind, Bazel, conformance and format steps go through the composite actions in
+  `.github/actions/`; the pin tests (`//e2e:kind_pin_test`, `//e2e:go_pin_test`)
+  fail a workflow that bypasses them.
+- The API cannot update a branch that touches `.github/workflows` without the
+  `workflow` token scope: rebase over git and `push --force-with-lease`.
+
+**Pull requests**
+- One concern per pull request. Never merge your own unless told to; never
+  `--admin`; squash only. Required on `main`: `ci`, `proxy`, `codeql`, and the
+  code-scanning app's `CodeQL`.
+- Pull requests that would each rewrite the same lock or manifest file
+  (`MODULE.bazel.lock`, `go.sum`, a `Chart.yaml`, one workflow file) are a
+  stack: use the `gh stack` extension, with branches named `upgrade/<slug>`
+  (the only pattern whose stacked pull requests get the gates). A stack merges
+  with `gh stack merge`, never `gh pr merge`, and needs `gh stack sync` first
+  when `main` has moved.
+- A check that failed with no step run (no runner, a registry 502) is
+  infrastructure: say so and re-run it; do not "fix" the pull request.
+- Agent-authored commits end with the session's attribution trailers, and the
+  pull request body says an agent wrote it.
+
+**Tests and findings**
+- A test-only task never changes production code and never removes a test case.
+  A flaky-test fix is proven twice: a stress run with zero failures, and a
+  temporary mutation showing the test can still fail.
+- One issue per finding, with the evidence in it; never an umbrella issue. Do
+  not comment on `envoyproxy/envoy`.
+- Separate what you measured from what you inferred, and say what you could
+  not verify.
+
+**Clusters**
+- Experiments run on kind, with the pinned version (`e2e/kind-version.sh`
+  refuses an older binary); put the kube context back where you found it
+  afterwards.
+- A shared cluster is read-only unless the owner authorised that specific
+  write. A helm upgrade, a rollout or a delete is never implied by a task.
+- The platform's GitOps repository takes pull requests; its owner merges them.
 
 ## Git Workflow
 
