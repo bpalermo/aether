@@ -1,0 +1,37 @@
+{
+  "pass": false,
+  "executions": [
+    {
+      "label": "mesh/svc-1",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 9,
+      "per_backend": true,
+      "duration_ms": 120000,
+      "elapsed_ms": 60154,
+      "pass": false,
+      "error": "backend 10.10.1.14:8443: awaiting execution response: rpc error: code = Unavailable desc = error reading from server: EOF",
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.14:8443",
+        "10.10.3.22:8443"
+      ]
+    },
+    {
+      "label": "mesh/uds-echo",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 3,
+      "per_backend": true,
+      "duration_ms": 120000,
+      "elapsed_ms": 60155,
+      "pass": false,
+      "error": "backend 10.10.1.14:8443: awaiting execution response: rpc error: code = Unavailable desc = error reading from server: EOF",
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.14:8443",
+        "10.10.3.22:8443"
+      ]
+    }
+  ]
+}

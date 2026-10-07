@@ -1,0 +1,8 @@
+aether-agent-k9jnh                   1/1   Running   0     2m19s
+aether-agent-zvtb6                   1/1   Running   0     2m19s
+aether-controller-5844cc46df-bjz2j   1/1   Running   0     2m19s
+aether-mesh-dns-c7s8t                1/1   Running   0     2m19s
+aether-proxy-sqmpd                   2/2   Running   0     2m19s
+aether-proxy-tw46j                   2/2   Running   1 (3h ago)   2m19s
+aether-registrar-8f6c47bcd-9xrhw     1/1   Running   0     2m19s
+aether-uds-csi-2gzv8                 10/10   Running   0     2m19s
