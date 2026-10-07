@@ -1,0 +1,214 @@
+{
+  "pass": false,
+  "executions": [
+    {
+      "label": "mesh/svc-1",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 9,
+      "per_backend": true,
+      "duration_ms": 150000,
+      "elapsed_ms": 155261,
+      "pass": true,
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.14:8443",
+        "10.10.3.22:8443"
+      ],
+      "thresholds": [
+        {
+          "expr": "counter:benchmark.http_4xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.http_5xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.stream_resets == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_connection_failure == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_failure_timeout == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_overflow == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "rate:benchmark.http_2xx >= 5.94",
+          "scope": "pool",
+          "pass": true,
+          "actual": "17.989706068441897"
+        },
+        {
+          "expr": "counter:benchmark.http_2xx > 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "2685"
+        }
+      ]
+    },
+    {
+      "label": "mesh/echo",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 9,
+      "per_backend": true,
+      "duration_ms": 150000,
+      "elapsed_ms": 155414,
+      "pass": false,
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.14:8443",
+        "10.10.3.22:8443"
+      ],
+      "thresholds": [
+        {
+          "expr": "counter:benchmark.http_4xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.http_5xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.stream_resets == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_connection_failure == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_failure_timeout == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_overflow == 0",
+          "scope": "pool",
+          "pass": false,
+          "actual": "271"
+        },
+        {
+          "expr": "rate:benchmark.http_2xx >= 5.94",
+          "scope": "pool",
+          "pass": true,
+          "actual": "16.193"
+        },
+        {
+          "expr": "counter:benchmark.http_2xx > 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "2417"
+        }
+      ],
+      "failures": [
+        {
+          "backend": "10.10.1.14:8443",
+          "counters": {
+            "benchmark.pool_overflow": 130
+          }
+        },
+        {
+          "backend": "10.10.3.22:8443",
+          "counters": {
+            "benchmark.pool_overflow": 141
+          }
+        }
+      ]
+    },
+    {
+      "label": "mesh/uds-echo",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 3,
+      "per_backend": true,
+      "duration_ms": 150000,
+      "elapsed_ms": 155112,
+      "pass": true,
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.14:8443",
+        "10.10.3.22:8443"
+      ],
+      "thresholds": [
+        {
+          "expr": "counter:benchmark.http_4xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.http_5xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.stream_resets == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_connection_failure == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_failure_timeout == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_overflow == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "rate:benchmark.http_2xx >= 5.94",
+          "scope": "pool",
+          "pass": true,
+          "actual": "5.989823067898783"
+        },
+        {
+          "expr": "counter:benchmark.http_2xx > 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "894"
+        }
+      ]
+    }
+  ]
+}

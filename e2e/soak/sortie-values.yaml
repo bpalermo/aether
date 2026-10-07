@@ -1,0 +1,120 @@
+# Helm values for the soak's load driver (proposal 042): the sortie chart,
+# oci://quay.io/sortie/chart-sortie, with one engine per worker node.
+#
+# run.sh installs this in two steps (engines alone, then the run), and sets the
+# values that belong to a run on the command line: the plan (--set-file), the
+# report's file name, and job.enabled. Nothing here is per run.
+#
+# Pinned by DIGEST, both images. The chart pins the driver image itself but
+# names the engine by tag; the digests below are the multi-arch indexes of
+#   quay.io/sortie/sortie:dev-b71b37ea7e7e02779b0bcf0592fb46b8386a62fc
+#   quay.io/sortie/engine:dev-b71b37ea7e7e02779b0bcf0592fb46b8386a62fc
+# verified 2026-10-06 with cosign v3.0.6 (index and both per-arch manifests):
+#   cosign verify \
+#     --certificate-identity-regexp '^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     quay.io/sortie/engine@sha256:...
+# Bump the three together (the two digests and SORTIE_CHART in run.sh), and
+# re-verify: cosign 3 or newer, an older client reports "no signatures found".
+image:
+  ref: quay.io/sortie/sortie@sha256:f319b4f21a81a441d4d1767195ad6d05d991e8ad83eca8b786fae11807a497f8
+
+engine:
+  enabled: true
+  # One engine per node behind the headless Service <release>-sortie-engine-nodes,
+  # which the plan's `dns:` pool resolves into one backend per node.
+  kind: DaemonSet
+  image:
+    ref: quay.io/sortie/engine@sha256:ba56cbb041370ea34a6092fea08fa1bdc612f9496d25a0efa4be6120d31b50f5
+  # One execution per target runs at once on every engine. sortie-plan.sh
+  # refuses a targets file longer than this.
+  maxConcurrentExecutions: 16
+  # Created by run.sh (the chart only references it). Same class and same reason
+  # as the k6 runner: a DaemonSet pod cannot move, so without it the loader is
+  # the scheduler's victim when a surging aether-proxy pod needs room, and that
+  # node's half of the run is lost (2026-09-19).
+  priorityClassName: aether-soak-loader
+  podLabels:
+    # REQUIRED, exactly as on the k6 runner: the engine opens the connections,
+    # so it is the pod that has to be mesh-managed. Without this label there is
+    # no ndots injection and no per-pod CNI capture or :53 DNAT, mesh DNS never
+    # resolves, and the whole run is invalid (the 2026-07-19 soak).
+    aether.io/managed: "true"
+    app.kubernetes.io/part-of: aether-soak
+  podAnnotations:
+    # Pre-warm the node's clusters so the first requests are not cold-service
+    # misses. The k6 runner's list, unchanged: bare names are qualified with the
+    # pod's namespace (#636), and svc-5 is declared but never driven on purpose
+    # (it is the churn driver's SHRINK target).
+    config.aether.io/upstreams: "echo,svc-1,svc-2,svc-3,svc-4,svc-5,mixed-svc,uds-echo,uds-cr-echo"
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
+  # CPU: the k6 runner's own budget (100m / 400m), and the limit is load-bearing.
+  # An engine worker thread never blocks between requests: Nighthawk's sequencer
+  # spins (default), polls a 25 us timer, or sleeps 50 us at a time (SLEEP, what
+  # the plan asks for), so each of the eight worker threads costs ~0.2 core
+  # WHATEVER its rate -- 1.7 cores per node unthrottled, measured on kind, on
+  # 4-vCPU nodes that are already CPU-tight at proxy handoffs (#1093). Under
+  # the limit the engine holds its rate only because the plan queues due
+  # requests (max_pending_requests, sortie-plan.sh): with the engine's default
+  # queue the same limit produced pool_overflow on every target. The price is
+  # client-side latency inflated by up to a CFS period; the soak does not gate
+  # on sortie's latency. See proposal 042, "CPU and memory".
+  #
+  # Memory: ~300Mi with eight executions running, ~550Mi after the first
+  # --progress snapshot, ~730Mi peak while the final report is assembled
+  # (kind). 512Mi OOM-killed both engines 60 s into the first run.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+    limits:
+      cpu: 400m
+      memory: 1Gi
+
+# The sortie pod itself: it only drives the engines over gRPC (pod IP :8443) and
+# writes the report. It is NOT mesh-managed -- no aether.io/managed label -- so
+# it resolves the headless Service through cluster DNS and its control channel
+# is not part of the traffic under test.
+#
+# No `--progress`, on purpose. A progress snapshot makes every engine copy its
+# statistics: on kind the first one took an engine from ~300Mi to ~550Mi for
+# the rest of the run (and OOM-killed it under a 512Mi limit), and it is a CPU
+# burst inside the engine's own 400m quota, which cost a pool_overflow on two
+# targets. The live view is the statsd series; the pod log is the final summary.
+args:
+  - run
+
+job:
+  backoffLimit: 0
+  # Keep the finished Job and its pod (the readable summary is the pod's log)
+  # until sortie-teardown.sh removes them, AFTER sortie-save.sh has copied both.
+  ttlSecondsAfterFinished: null
+
+report:
+  # path is set per run by run.sh: /var/run/sortie/<run tag>.json
+  format: json
+  volume:
+    persistentVolumeClaim:
+      claimName: sortie-soak-reports
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  # The report volume has to be writable by the non-root user.
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
