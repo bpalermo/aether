@@ -83,6 +83,12 @@ A render cannot read the previous manifest, so this asks what it can see:
     last test lets a first install of THIS chart that failed for any other
     reason, a `--wait` timeout say, be retried with the same command.
 Then it stops, with the one command that makes the upgrade safe.
+
+It is also asked BEFORE aether.namespace.assertCreatable when namespace.create
+is true: the failed installs it is about were made with namespace.create=true,
+and a retry of that same command must get this message, with `keep` in it, and
+not first a "cannot create" one that sends the operator to namespace.create=false
+and into a second failure (#1405).
 Usage: include "aether.namespace.assertUpgradeKeeps" .
 */}}
 {{- define "aether.namespace.assertUpgradeKeeps" -}}
@@ -101,7 +107,7 @@ Usage: include "aether.namespace.assertUpgradeKeeps" .
 {{- end -}}
 {{- $marker := dig "metadata" "annotations" "aether.io/release-namespace-rendered" "" (lookup "v1" "ServiceAccount" $ns (include "aether.agent.serviceAccountName" .) | default (dict)) | toString -}}
 {{- if and (gt $revisions 0) (eq $deployed 0) (ne $marker "false") -}}
-{{- fail (printf "release %q has never been deployed successfully (none of its %d revisions is 'deployed'), and the failed first install of an aether chart older than 2.4.21 lists the namespace %q in its manifest: this render does not include that Namespace, so Helm could DELETE it, with every pod in it, on this upgrade. Protect the namespace, then run the same command again: kubectl annotate namespace %s helm.sh/resource-policy=keep (and label it for Pod Security admission: kubectl label namespace %s --overwrite pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged). See docs/runbook.md, \"Recovering from a failed first install\"." .Release.Name $revisions $ns $ns $ns) -}}
+{{- fail (printf "release %q has never been deployed successfully (none of its %d revisions is 'deployed'), and the failed first install of an aether chart older than 2.4.21 lists the namespace %q in its manifest: this render does not include that Namespace, so Helm could DELETE it, with every pod in it, on this upgrade. Protect the namespace, then run the same command again (without namespace.create=true, if you pass it: a chart cannot create the namespace its own release is stored in): kubectl annotate namespace %s helm.sh/resource-policy=keep (and label it for Pod Security admission: kubectl label namespace %s --overwrite pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged). See docs/runbook.md, \"Recovering from a failed first install\"." .Release.Name $revisions $ns $ns $ns) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

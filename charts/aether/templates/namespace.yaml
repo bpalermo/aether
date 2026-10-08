@@ -25,6 +25,11 @@
 */ -}}
 {{- $ns := include "aether.namespace" . -}}
 {{- if .Values.namespace.create -}}
+{{- /* A retry over a failed first install of an older chart gets the message
+       with `keep` in it first (see aether.namespace.assertUpgradeKeeps). */ -}}
+{{- if and (eq $ns .Release.Namespace) (not (include "aether.namespace.ownedByRelease" (dict "ctx" . "name" $ns))) -}}
+{{- include "aether.namespace.assertUpgradeKeeps" . -}}
+{{- end -}}
 {{- include "aether.namespace.assertCreatable" (dict "ctx" . "name" $ns "value" "namespace.create" "waysOut" (printf "leave namespace.create at its default (false), install with --create-namespace and label the namespace for Pod Security admission yourself (kubectl label namespace %s pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged), or store the release in another namespace (helm -n <other> ... --set namespace.name=%s)" $ns $ns)) -}}
 {{- end -}}
 {{- if eq (include "aether.namespace.rendered" .) "true" }}

@@ -47,7 +47,8 @@
 #        release that was never deployed, whose failed revision lists a
 #        Namespace it does not own: upgrading it would make Helm delete the
 #        namespace. The upgrade is refused with the fix in the message
-#        (`kubectl annotate namespace ... helm.sh/resource-policy=keep`), the
+#        (`kubectl annotate namespace ... helm.sh/resource-policy=keep`),
+#        whether or not the retry still asks for namespace.create=true, the
 #        namespace is untouched, and after that command the same upgrade goes
 #        through with the namespace kept. For the aether chart and for the
 #        prober chart, which carries a copy of the guard.
@@ -294,13 +295,12 @@ documented_helm_install() {
 		"${args[@]}" "$@"
 }
 
-# RELEASE_NS: where the release record is stored, when that is not $NS.
-release_field() { hc list -n "${RELEASE_NS:-$NS}" -a --filter "^${RELEASE}\$" -o json | jq -r ".[0].$1 // empty"; }
+release_field() { hc list -n "$NS" -a --filter "^${RELEASE}\$" -o json | jq -r ".[0].$1 // empty"; }
 ns_uid() { kc get ns "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null || true; }
 ns_phase() { kc get ns "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true; }
 ns_annotation() { kc get ns "$NS" -o json | jq -r --arg k "$1" '.metadata.annotations[$k] // empty'; }
 # How many Namespace documents the release's stored manifest holds.
-manifest_namespaces() { hc get manifest "$RELEASE" -n "${RELEASE_NS:-$NS}" | grep -c '^kind: Namespace' || true; }
+manifest_namespaces() { hc get manifest "$RELEASE" -n "$NS" | grep -c '^kind: Namespace' || true; }
 refused_pods() { kc -n "$NS" get events --field-selector reason=FailedCreate -o name 2>/dev/null | grep -c . || true; }
 
 wait_ready() {
@@ -468,8 +468,7 @@ verify_upgrade_safety() {
 # namespace.
 #
 # guard_leg <label> <install function> <arguments of the failing first install...>
-# with RELEASE, NS (and RELEASE_NS when the release is stored elsewhere) set by
-# the caller.
+# with RELEASE and NS set by the caller.
 guard_leg() {
 	local label="$1" install="$2" uid out
 	shift 2
@@ -482,17 +481,26 @@ guard_leg() {
 	uid="$(ns_uid)"
 	ok "$label: a failed first install whose manifest lists a Namespace the release no longer owns (uid $uid)"
 
-	if out="$("$install" 2>&1)"; then
+	# Two retries, both refused by the SAME message (the one with the fix in
+	# it): the command that failed, unchanged, which still asks for
+	# namespace.create=true (#1405: the operator must not have to get past a
+	# "cannot create" error first to learn about `keep`), and the command with
+	# the default.
+	local how
+	for how in "--set namespace.create=true" ""; do
+		# shellcheck disable=SC2086 # $how is zero or two words on purpose
+		if out="$("$install" $how 2>&1)"; then
+			sleep 5
+			die "$label: the upgrade over the failed first install ($how) was NOT refused (namespace now: uid '$(ns_uid)', phase '$(ns_phase)')"
+		fi
+		case "$out" in
+		*"has never been deployed successfully"*"helm.sh/resource-policy=keep"*) ;;
+		*) die "$label: the upgrade ($how) failed, but not with the guard's message: $out" ;;
+		esac
 		sleep 5
-		die "$label: the upgrade over the failed first install was NOT refused (namespace now: uid '$(ns_uid)', phase '$(ns_phase)')"
-	fi
-	case "$out" in
-	*"has never been deployed successfully"*"helm.sh/resource-policy=keep"*) ;;
-	*) die "$label: the upgrade failed, but not with the guard's message: $out" ;;
-	esac
-	sleep 5
-	[ "$(ns_uid)" = "$uid" ] && [ "$(ns_phase)" = "Active" ] || die "$label: THE NAMESPACE WAS DELETED by a refused upgrade (uid $uid -> '$(ns_uid)', phase '$(ns_phase)')"
-	ok "$label: the upgrade is refused and names the fix; namespace untouched"
+		[ "$(ns_uid)" = "$uid" ] && [ "$(ns_phase)" = "Active" ] || die "$label: THE NAMESPACE WAS DELETED by a refused upgrade (uid $uid -> '$(ns_uid)', phase '$(ns_phase)')"
+	done
+	ok "$label: the upgrade is refused and names the fix, with and without namespace.create=true; namespace untouched"
 
 	# What the message says to do.
 	kc annotate namespace "$NS" helm.sh/resource-policy=keep >/dev/null
@@ -504,35 +512,37 @@ guard_leg() {
 	ok "$label: marked keep, the same command upgrades; namespace kept (uid $uid), no longer in the manifest"
 }
 
-# The aether chart: the Namespace gets into the manifest of a first install
-# because the release already owns it (the chart reads that from the cluster).
-aether_guard_leg() {
+# Both charts: the release is stored in the namespace itself and asks for
+# namespace.create=true, as the failed installs of the older charts did. The
+# Namespace gets into the first manifest because the release already owns it
+# (the charts read that from the cluster when namespace.create is set).
+preown_namespace() {
 	kc create namespace "$NS" >/dev/null
 	kc label namespace "$NS" app.kubernetes.io/managed-by=Helm >/dev/null
 	kc annotate namespace "$NS" "meta.helm.sh/release-name=$RELEASE" "meta.helm.sh/release-namespace=$NS" >/dev/null
-	guard_leg "aether" documented_helm_install --set-string agent.image.pullPolicy=Bogus
 }
 
-# The prober chart carries a copy of the guard (#1405). It reads the cluster on
-# an upgrade only, so here the Namespace gets into the first manifest the
-# supported way: namespace.create=true with the release stored in another
-# namespace. Its image reference is a package-time placeholder in the source
-# tree, so its pod never starts; nothing here needs it to. The pull policy is
-# always passed: an upgrade given no values at all reuses the previous
-# revision's, and the first revision's is the one the API rejects.
+aether_guard_leg() {
+	preown_namespace
+	guard_leg "aether" documented_helm_install --set namespace.create=true --set-string agent.image.pullPolicy=Bogus
+}
+
+# The prober chart carries a copy of the guard (#1405). Its image reference is
+# a package-time placeholder in the source tree, so its pod never starts;
+# nothing here needs it to. The pull policy is always passed, so that no retry
+# reuses the first revision's, which is the one the API rejects.
 PROBER_NS="first-install-prober"
-PROBER_RELEASE_NS="first-install-prober-release"
 prober_install() {
-	hc upgrade --install prober "$CHARTS/prober" --namespace "$PROBER_RELEASE_NS" --create-namespace \
-		--set "namespace.name=$PROBER_NS" --set image.pullPolicy=IfNotPresent "$@"
+	hc upgrade --install prober "$CHARTS/prober" --namespace "$PROBER_NS" --set image.pullPolicy=IfNotPresent "$@"
 }
 prober_reset() {
-	hc uninstall prober -n "$PROBER_RELEASE_NS" >/dev/null 2>&1 || true
-	kc delete ns "$PROBER_NS" "$PROBER_RELEASE_NS" --wait=true --timeout=120s >/dev/null 2>&1 || true
+	hc uninstall prober -n "$PROBER_NS" >/dev/null 2>&1 || true
+	kc delete ns "$PROBER_NS" --wait=true --timeout=120s >/dev/null 2>&1 || true
 }
 prober_guard_leg() {
-	local RELEASE=prober NS="$PROBER_NS" RELEASE_NS="$PROBER_RELEASE_NS"
+	local RELEASE=prober NS="$PROBER_NS"
 	prober_reset
+	preown_namespace
 	guard_leg "prober" prober_install --set namespace.create=true --set-string image.pullPolicy=Bogus
 	prober_reset
 }

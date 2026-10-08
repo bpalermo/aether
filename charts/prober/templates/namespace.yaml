@@ -18,6 +18,10 @@
 */ -}}
 {{- $ns := include "prober.namespace" . -}}
 {{- if and .Values.namespace.create (eq $ns .Release.Namespace) (not (include "prober.namespace.ownedByRelease" .)) -}}
+{{- /* A retry over a failed first install of an older chart, which was made
+       with namespace.create=true, gets the message with `keep` in it first,
+       not a "cannot create" one that leads into a second failure (#1405). */ -}}
+{{- include "prober.namespace.assertUpgradeKeeps" . -}}
 {{- fail (printf "namespace.create=true cannot create %q: it is the namespace this release is stored in, and Helm writes the release record there before it creates anything the chart renders, so no helm command can install this. Either leave namespace.create at its default (false) and pass --create-namespace (or create the namespace yourself), or store the release in another namespace (helm -n <other> ... --set namespace.name=%s)." $ns $ns) -}}
 {{- end -}}
 {{- if eq (include "prober.namespace.rendered" .) "true" }}
