@@ -595,14 +595,26 @@ func (s *Supervisor) sampleStalls(ctx context.Context) {
 
 	ticker := time.NewTicker(s.cfg.StallSampleInterval)
 	defer ticker.Stop()
+	driveStallSampler(ctx, s.done, ticker.C, time.Now, sampler.tick)
+}
+
+// driveStallSampler calls tick once per wake-up until ctx or done ends, with
+// the time on clock when it runs, NOT the time the wake-up carries. A
+// time.Ticker delivers the time the tick was due. The supervisor shares the
+// proxy container's cgroup, so what starves Envoy can keep this goroutine off
+// the CPU for seconds, and the tick it then receives is that stale, while what
+// it reads from /proc is the state now. Every interval the sampler works out
+// (a window's span, where a runqueue wait began, the consumers' baseline) is
+// measured from the time of the reading.
+func driveStallSampler(ctx context.Context, done <-chan struct{}, wake <-chan time.Time, clock func() time.Time, tick func(time.Time)) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.done:
+		case <-done:
 			return
-		case now := <-ticker.C:
-			sampler.tick(now)
+		case <-wake:
+			tick(clock())
 		}
 	}
 }
