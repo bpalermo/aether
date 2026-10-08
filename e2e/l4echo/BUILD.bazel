@@ -47,9 +47,11 @@ go_multi_arch_image(
 #
 # Still not a release artifact: no chart, publish step or verifier references it.
 # Placeholder defaults, never a real registry: rules_img renders the push
-# metadata at BUILD time and rejects an empty registry, and CI's impacted-target
-# build (bazel-diff) builds labels explicitly, so `manual` does not keep this
-# target out of it. `invalid.` is reserved (RFC 2606) and resolves nowhere; the
+# metadata at BUILD time and rejects an empty registry. CI's impacted-target
+# build (bazel-diff) names labels explicitly, where `manual` does not apply, and
+# it used to build this target that way; since #1438 its build list leaves
+# `manual` targets out, so the defaults only serve a build of this label by hand
+# without the flags. `invalid.` is reserved (RFC 2606) and resolves nowhere; the
 # workflow overrides all three flags on `bazel run`.
 string_flag(
     name = "smoke_registry",
