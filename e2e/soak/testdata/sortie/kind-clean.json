@@ -1,0 +1,665 @@
+{
+  "pass": true,
+  "executions": [
+    {
+      "label": "mesh/tcp-a",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 9,
+      "per_backend": true,
+      "duration_ms": 300000,
+      "elapsed_ms": 300785,
+      "started_at": "2026-10-07T23:26:33.393Z",
+      "ended_at": "2026-10-07T23:31:34.178Z",
+      "pass": true,
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.9:8443",
+        "10.10.2.7:8443"
+      ],
+      "thresholds": [
+        {
+          "expr": "counter:benchmark.http_4xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.http_5xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.stream_resets == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_connection_failure == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_failure_timeout == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_overflow == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.http_inflight_lost == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "rate:benchmark.http_2xx >= 5.94",
+          "scope": "pool",
+          "pass": true,
+          "actual": "17.999880244936744"
+        }
+      ],
+      "totals": {
+        "benchmark.http_2xx": 5400
+      },
+      "results": [
+        {
+          "backend": "10.10.1.9:8443",
+          "elapsed_ms": 300001,
+          "started_at": "2026-10-07T23:26:33.992Z",
+          "counters": {
+            "benchmark.http_2xx": 2700
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 2024726,
+              "pstdev": 1543048,
+              "min": 671936,
+              "max": 79745023,
+              "p50": 2045439,
+              "p90": 2230015,
+              "p99": 2555135,
+              "p99.9": 9028607
+            },
+            "benchmark_http_client.queue_to_connect": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 42886,
+              "pstdev": 17761,
+              "min": 10640,
+              "max": 716543,
+              "p50": 44087,
+              "p90": 52131,
+              "p99": 82767,
+              "p99.9": 166495
+            },
+            "benchmark_http_client.request_to_response": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 2023483,
+              "pstdev": 1542970,
+              "min": 671520,
+              "max": 79740927,
+              "p50": 2044095,
+              "p90": 2228735,
+              "p99": 2554367,
+              "p99.9": 9027071
+            },
+            "benchmark_http_client.response_body_size": {
+              "count": 2700,
+              "unit": "raw",
+              "mean": 19,
+              "pstdev": 0,
+              "min": 19,
+              "max": 19
+            },
+            "benchmark_http_client.response_header_size": {
+              "count": 2700,
+              "unit": "raw",
+              "mean": 174,
+              "pstdev": 0,
+              "min": 174,
+              "max": 174
+            },
+            "sequencer.callback": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 2190757,
+              "pstdev": 1547513,
+              "min": 712544,
+              "max": 79896575,
+              "p50": 2222335,
+              "p90": 2402175,
+              "p99": 2750335,
+              "p99.9": 9691135
+            }
+          }
+        },
+        {
+          "backend": "10.10.2.7:8443",
+          "elapsed_ms": 300001,
+          "started_at": "2026-10-07T23:26:33.998Z",
+          "counters": {
+            "benchmark.http_2xx": 2700
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 1791085,
+              "pstdev": 969041,
+              "min": 610400,
+              "max": 48721919,
+              "p50": 1799295,
+              "p90": 2025791,
+              "p99": 2235647,
+              "p99.9": 7904255
+            },
+            "benchmark_http_client.queue_to_connect": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 40386,
+              "pstdev": 16020,
+              "min": 13277,
+              "max": 730079,
+              "p50": 40901,
+              "p90": 48275,
+              "p99": 62261,
+              "p99.9": 126087
+            },
+            "benchmark_http_client.request_to_response": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 1790005,
+              "pstdev": 968990,
+              "min": 609952,
+              "max": 48719871,
+              "p50": 1798335,
+              "p90": 2024639,
+              "p99": 2234367,
+              "p99.9": 7903231
+            },
+            "benchmark_http_client.response_body_size": {
+              "count": 2700,
+              "unit": "raw",
+              "mean": 19,
+              "pstdev": 0,
+              "min": 19,
+              "max": 19
+            },
+            "benchmark_http_client.response_header_size": {
+              "count": 2700,
+              "unit": "raw",
+              "mean": 174.0003703703708,
+              "pstdev": 0.019241444752389782,
+              "min": 174,
+              "max": 175
+            },
+            "sequencer.callback": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 1951936,
+              "pstdev": 975489,
+              "min": 662944,
+              "max": 48857087,
+              "p50": 1965887,
+              "p90": 2200319,
+              "p99": 2439039,
+              "p99.9": 8044799
+            }
+          }
+        }
+      ]
+    },
+    {
+      "label": "mesh/tcp-b",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 9,
+      "per_backend": true,
+      "duration_ms": 300000,
+      "elapsed_ms": 300777,
+      "started_at": "2026-10-07T23:26:33.393Z",
+      "ended_at": "2026-10-07T23:31:34.170Z",
+      "pass": true,
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.9:8443",
+        "10.10.2.7:8443"
+      ],
+      "thresholds": [
+        {
+          "expr": "counter:benchmark.http_4xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.http_5xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.stream_resets == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_connection_failure == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_failure_timeout == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_overflow == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.http_inflight_lost == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "rate:benchmark.http_2xx >= 5.94",
+          "scope": "pool",
+          "pass": true,
+          "actual": "17.999876739184074"
+        }
+      ],
+      "totals": {
+        "benchmark.http_2xx": 5400
+      },
+      "results": [
+        {
+          "backend": "10.10.1.9:8443",
+          "elapsed_ms": 300001,
+          "started_at": "2026-10-07T23:26:33.996Z",
+          "counters": {
+            "benchmark.http_2xx": 2700
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 1865499,
+              "pstdev": 421850,
+              "min": 588704,
+              "max": 12847615,
+              "p50": 1891327,
+              "p90": 2192639,
+              "p99": 2455551,
+              "p99.9": 6339583
+            },
+            "benchmark_http_client.queue_to_connect": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 39567,
+              "pstdev": 17327,
+              "min": 12919,
+              "max": 806655,
+              "p50": 40589,
+              "p90": 47253,
+              "p99": 66883,
+              "p99.9": 103571
+            },
+            "benchmark_http_client.request_to_response": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 1864265,
+              "pstdev": 421763,
+              "min": 588224,
+              "max": 12846079,
+              "p50": 1890111,
+              "p90": 2191359,
+              "p99": 2454271,
+              "p99.9": 6338303
+            },
+            "benchmark_http_client.response_body_size": {
+              "count": 2700,
+              "unit": "raw",
+              "mean": 19,
+              "pstdev": 0,
+              "min": 19,
+              "max": 19
+            },
+            "benchmark_http_client.response_header_size": {
+              "count": 2700,
+              "unit": "raw",
+              "mean": 174.00037037037055,
+              "pstdev": 0.019241444752386393,
+              "min": 174,
+              "max": 175
+            },
+            "sequencer.callback": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 2010545,
+              "pstdev": 437031,
+              "min": 639360,
+              "max": 13028351,
+              "p50": 2040127,
+              "p90": 2348927,
+              "p99": 2585855,
+              "p99.9": 6921727
+            }
+          }
+        },
+        {
+          "backend": "10.10.2.7:8443",
+          "elapsed_ms": 300002,
+          "started_at": "2026-10-07T23:26:33.993Z",
+          "counters": {
+            "benchmark.http_2xx": 2700
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 2374805,
+              "pstdev": 472653,
+              "min": 813600,
+              "max": 15718399,
+              "p50": 2420735,
+              "p90": 2677119,
+              "p99": 3028095,
+              "p99.9": 7492351
+            },
+            "benchmark_http_client.queue_to_connect": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 66936,
+              "pstdev": 21716,
+              "min": 18810,
+              "max": 904799,
+              "p50": 65835,
+              "p90": 76803,
+              "p99": 119475,
+              "p99.9": 186711
+            },
+            "benchmark_http_client.request_to_response": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 2373435,
+              "pstdev": 472565,
+              "min": 812832,
+              "max": 15717375,
+              "p50": 2419199,
+              "p90": 2675839,
+              "p99": 3026431,
+              "p99.9": 7491071
+            },
+            "benchmark_http_client.response_body_size": {
+              "count": 2700,
+              "unit": "raw",
+              "mean": 19,
+              "pstdev": 0,
+              "min": 19,
+              "max": 19
+            },
+            "benchmark_http_client.response_header_size": {
+              "count": 2700,
+              "unit": "raw",
+              "mean": 174.00037037037055,
+              "pstdev": 0.019241444752386393,
+              "min": 174,
+              "max": 175
+            },
+            "sequencer.callback": {
+              "count": 2700,
+              "unit": "ns",
+              "mean": 2598760,
+              "pstdev": 493472,
+              "min": 928928,
+              "max": 15937535,
+              "p50": 2653951,
+              "p90": 2915327,
+              "p99": 3242495,
+              "p99.9": 8682495
+            }
+          }
+        }
+      ]
+    },
+    {
+      "label": "mesh/uds-echo",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 3,
+      "per_backend": true,
+      "duration_ms": 300000,
+      "elapsed_ms": 300771,
+      "started_at": "2026-10-07T23:26:33.393Z",
+      "ended_at": "2026-10-07T23:31:34.164Z",
+      "pass": true,
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.9:8443",
+        "10.10.2.7:8443"
+      ],
+      "thresholds": [
+        {
+          "expr": "counter:benchmark.http_4xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.http_5xx == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.stream_resets == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_connection_failure == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_failure_timeout == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.pool_overflow == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "counter:benchmark.http_inflight_lost == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
+          "expr": "rate:benchmark.http_2xx >= 5.94",
+          "scope": "pool",
+          "pass": true,
+          "actual": "5.999962589993253"
+        }
+      ],
+      "totals": {
+        "benchmark.http_2xx": 1800
+      },
+      "results": [
+        {
+          "backend": "10.10.1.9:8443",
+          "elapsed_ms": 300001,
+          "started_at": "2026-10-07T23:26:34.005Z",
+          "counters": {
+            "benchmark.http_2xx": 900
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 900,
+              "unit": "ns",
+              "mean": 1834329,
+              "pstdev": 340081,
+              "min": 638592,
+              "max": 6970367,
+              "p50": 1872703,
+              "p90": 2080447,
+              "p99": 2394495,
+              "p99.9": 6970367
+            },
+            "benchmark_http_client.queue_to_connect": {
+              "count": 900,
+              "unit": "ns",
+              "mean": 43142,
+              "pstdev": 25538,
+              "min": 14996,
+              "max": 746687,
+              "p50": 42637,
+              "p90": 50577,
+              "p99": 81659,
+              "p99.9": 746687
+            },
+            "benchmark_http_client.request_to_response": {
+              "count": 900,
+              "unit": "ns",
+              "mean": 1833315,
+              "pstdev": 339983,
+              "min": 638016,
+              "max": 6969087,
+              "p50": 1871551,
+              "p90": 2079359,
+              "p99": 2393215,
+              "p99.9": 6969087
+            },
+            "benchmark_http_client.response_body_size": {
+              "count": 900,
+              "unit": "raw",
+              "mean": 73,
+              "pstdev": 0,
+              "min": 73,
+              "max": 73
+            },
+            "benchmark_http_client.response_header_size": {
+              "count": 900,
+              "unit": "raw",
+              "mean": 137,
+              "pstdev": 0,
+              "min": 137,
+              "max": 137
+            },
+            "sequencer.callback": {
+              "count": 900,
+              "unit": "ns",
+              "mean": 1991494,
+              "pstdev": 363719,
+              "min": 696416,
+              "max": 7198975,
+              "p50": 2034431,
+              "p90": 2252927,
+              "p99": 2584319,
+              "p99.9": 7198975
+            }
+          }
+        },
+        {
+          "backend": "10.10.2.7:8443",
+          "elapsed_ms": 300001,
+          "started_at": "2026-10-07T23:26:33.998Z",
+          "counters": {
+            "benchmark.http_2xx": 900
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 900,
+              "unit": "ns",
+              "mean": 1826096,
+              "pstdev": 361058,
+              "min": 628864,
+              "max": 7801855,
+              "p50": 1867071,
+              "p90": 2054079,
+              "p99": 2421375,
+              "p99.9": 7801855
+            },
+            "benchmark_http_client.queue_to_connect": {
+              "count": 900,
+              "unit": "ns",
+              "mean": 41133,
+              "pstdev": 29666,
+              "min": 9556,
+              "max": 866815,
+              "p50": 41815,
+              "p90": 48309,
+              "p99": 57783,
+              "p99.9": 866815
+            },
+            "benchmark_http_client.request_to_response": {
+              "count": 900,
+              "unit": "ns",
+              "mean": 1824933,
+              "pstdev": 360980,
+              "min": 628480,
+              "max": 7800831,
+              "p50": 1865855,
+              "p90": 2052927,
+              "p99": 2420223,
+              "p99.9": 7800831
+            },
+            "benchmark_http_client.response_body_size": {
+              "count": 900,
+              "unit": "raw",
+              "mean": 73,
+              "pstdev": 0,
+              "min": 73,
+              "max": 73
+            },
+            "benchmark_http_client.response_header_size": {
+              "count": 900,
+              "unit": "raw",
+              "mean": 137,
+              "pstdev": 0,
+              "min": 137,
+              "max": 137
+            },
+            "sequencer.callback": {
+              "count": 900,
+              "unit": "ns",
+              "mean": 1997067,
+              "pstdev": 395626,
+              "min": 685152,
+              "max": 8836095,
+              "p50": 2043967,
+              "p90": 2240511,
+              "p99": 2622463,
+              "p99.9": 8836095
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

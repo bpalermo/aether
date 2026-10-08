@@ -9,6 +9,8 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
+      "started_at": "2026-10-07T11:42:08.412Z",
+      "ended_at": "2026-10-07T11:44:39.176Z",
       "pass": false,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
@@ -53,22 +55,16 @@
           "actual": "0"
         },
         {
+          "expr": "counter:benchmark.http_inflight_lost == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": true,
           "actual": "17.733096892041438"
-        },
-        {
-          "expr": "latency_2xx.p50 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "1.832511ms, 2.153599ms"
-        },
-        {
-          "expr": "latency_2xx.p99 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "2.235519ms, 2.771455ms"
         }
       ],
       "failures": [
@@ -87,16 +83,46 @@
         {
           "backend": "10.10.1.14:8443",
           "elapsed_ms": 150002,
+          "started_at": "2026-10-07T11:42:08.924Z",
           "counters": {
             "benchmark.http_2xx": 1350
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 1350,
+              "unit": "ns",
+              "mean": 1905811,
+              "pstdev": 134336,
+              "min": 1301083,
+              "max": 5141694,
+              "p50": 1832511,
+              "p90": 2034015,
+              "p99": 2235519,
+              "p99.9": 3576830
+            }
           }
         },
         {
           "backend": "10.10.3.22:8443",
           "elapsed_ms": 150002,
+          "started_at": "2026-10-07T11:42:08.933Z",
           "counters": {
             "benchmark.http_2xx": 1310,
             "benchmark.http_5xx": 40
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 1310,
+              "unit": "ns",
+              "mean": 2239743,
+              "pstdev": 205952,
+              "min": 1529055,
+              "max": 6374346,
+              "p50": 2153599,
+              "p90": 2462527,
+              "p99": 2771455,
+              "p99.9": 4434328
+            }
           }
         }
       ]
@@ -109,6 +135,8 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
+      "started_at": "2026-10-07T11:42:08.415Z",
+      "ended_at": "2026-10-07T11:44:39.179Z",
       "pass": true,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
@@ -153,22 +181,16 @@
           "actual": "0"
         },
         {
+          "expr": "counter:benchmark.http_inflight_lost == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": true,
           "actual": "17.666431114251807"
-        },
-        {
-          "expr": "latency_2xx.p50 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "2.9ms, 2.153599ms"
-        },
-        {
-          "expr": "latency_2xx.p99 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "1.25s, 2.771455ms"
         }
       ],
       "totals": {
@@ -178,15 +200,45 @@
         {
           "backend": "10.10.1.14:8443",
           "elapsed_ms": 150002,
+          "started_at": "2026-10-07T11:42:08.927Z",
           "counters": {
             "benchmark.http_2xx": 1300
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 1300,
+              "unit": "ns",
+              "mean": 3016000,
+              "pstdev": 415700000,
+              "min": 2059000,
+              "max": 2875000000,
+              "p50": 2900000,
+              "p90": 626450000,
+              "p99": 1250000000,
+              "p99.9": 2000000000
+            }
           }
         },
         {
           "backend": "10.10.3.22:8443",
           "elapsed_ms": 150002,
+          "started_at": "2026-10-07T11:42:08.936Z",
           "counters": {
             "benchmark.http_2xx": 1350
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 1350,
+              "unit": "ns",
+              "mean": 2239743,
+              "pstdev": 205952,
+              "min": 1529055,
+              "max": 6374346,
+              "p50": 2153599,
+              "p90": 2462527,
+              "p99": 2771455,
+              "p99.9": 4434328
+            }
           }
         }
       ]
@@ -199,6 +251,8 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
+      "started_at": "2026-10-07T11:42:08.418Z",
+      "ended_at": "2026-10-07T11:44:39.182Z",
       "pass": true,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
@@ -243,22 +297,16 @@
           "actual": "0"
         },
         {
+          "expr": "counter:benchmark.http_inflight_lost == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": true,
           "actual": "5.999920001066652"
-        },
-        {
-          "expr": "latency_2xx.p50 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "1.832511ms, 2.153599ms"
-        },
-        {
-          "expr": "latency_2xx.p99 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "2.235519ms, 2.771455ms"
         }
       ],
       "totals": {
@@ -268,15 +316,45 @@
         {
           "backend": "10.10.1.14:8443",
           "elapsed_ms": 150002,
+          "started_at": "2026-10-07T11:42:08.930Z",
           "counters": {
             "benchmark.http_2xx": 450
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 450,
+              "unit": "ns",
+              "mean": 1905811,
+              "pstdev": 134336,
+              "min": 1301083,
+              "max": 5141694,
+              "p50": 1832511,
+              "p90": 2034015,
+              "p99": 2235519,
+              "p99.9": 3576830
+            }
           }
         },
         {
           "backend": "10.10.3.22:8443",
           "elapsed_ms": 150002,
+          "started_at": "2026-10-07T11:42:08.939Z",
           "counters": {
             "benchmark.http_2xx": 450
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 450,
+              "unit": "ns",
+              "mean": 2239743,
+              "pstdev": 205952,
+              "min": 1529055,
+              "max": 6374346,
+              "p50": 2153599,
+              "p90": 2462527,
+              "p99": 2771455,
+              "p99.9": 4434328
+            }
           }
         }
       ]

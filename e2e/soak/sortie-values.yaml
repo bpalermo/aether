@@ -6,24 +6,25 @@
 # report's file name, and job.enabled. Nothing here is per run.
 #
 # Pinned by DIGEST, all three: the two images below and the chart (run.sh,
-# SORTIE_CHART_DIGEST). They are sortie 94cf1035d7aa7d1d36d86866e41d653ff2fa5c02,
-# chart version 0.1.0-94cf1035d7aa7d1d36d86866e41d653ff2fa5c02. A published chart
+# SORTIE_CHART_DIGEST). They are sortie 9fcbb81afaeab77f6f16bacd3ed43d94a65d9fd8,
+# chart version 0.1.0-9fcbb81afaeab77f6f16bacd3ed43d94a65d9fd8. A published chart
 # already defaults both image refs to these digests; they are repeated here so
 # the pin is in this repository, where a bump is a reviewed diff.
 #
 # Verified 2026-10-07 with cosign v3.1.2 (the version //bazel/cosign pins), the
 # chart, and the index and both per-arch manifests of each image, bound to that
-# commit (--certificate-github-workflow-sha):
+# commit (--certificate-github-workflow-sha; the same chart digest bound to the
+# previous pin's commit is refused):
 #   cosign verify \
 #     --certificate-identity-regexp '^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-#     quay.io/sortie/chart-sortie@sha256:f5007911c7e0e204ff97bdeeec88bd2e5a135fcd08eb9bb0dea96be0dbd4cc7c
+#     quay.io/sortie/chart-sortie@sha256:10f6c84b9f5dc1a93dd9dd6ad1ab6196130a6f7cbc69dff82258b25700606913
 # run.sh repeats that for the chart and for every image the release renders, on
 # every run (its pre-flight; see --verify in its header). Bump the three
 # together. cosign 3 or newer: the signatures are OCI referrers, and an older
 # client reports "no signatures found" for a signed artifact.
 image:
-  ref: quay.io/sortie/sortie@sha256:6a2dc1f74f05cea126191f0bb886772ec3b3d918c09ad42bf86bd735d5d8813e
+  ref: quay.io/sortie/sortie@sha256:0a04580af9cc857cf70313c0522fed457ba657e75af5f198aaa467ebdd69c0f9
 
 engine:
   enabled: true
@@ -31,10 +32,19 @@ engine:
   # which the plan's `dns:` pool resolves into one backend per node.
   kind: DaemonSet
   image:
-    ref: quay.io/sortie/engine@sha256:d6ea5aca3fe0f93c2d02cc9ac0376bf34c66efe3bd196f08ba9a9e44454121cf
+    ref: quay.io/sortie/engine@sha256:99d5058c565764bd952f2c081b5ea6ee7978a6a3f610f431f63a958acf7fb478
   # One execution per target runs at once on every engine. sortie-plan.sh
-  # refuses a targets file longer than this.
+  # refuses a targets file longer than this (its MAX_TARGETS), which is why the
+  # chart's own default is repeated here. Since sortie 1374999 an engine at this
+  # cap REFUSES the start and sortie stops the whole stage on every node, where
+  # it used to run whichever targets won the race for the last slots.
   maxConcurrentExecutions: 16
+  # The engine's name in the live (statsd) series is its NODE's, not its pod IP:
+  # the plan asks for `stats.backend: name` (sortie-plan.sh) and this hands each
+  # engine its name (--backend-name, through the downward API). The series are
+  # then the same on every run (sortie 0fc5746). The two settings travel
+  # together: an engine without a name refuses an execution of such a plan.
+  backendNameFrom: node
   # Created by run.sh (the chart only references it). Same class and same reason
   # as the k6 runner: a DaemonSet pod cannot move, so without it the loader is
   # the scheduler's victim when a surging aether-proxy pod needs room, and that
@@ -62,7 +72,8 @@ engine:
                 operator: DoesNotExist
   # CPU: a request for what the engine uses, and NO limit.
   #
-  # The plan asks for the WAIT idle strategy (sortie-plan.sh): a worker thread
+  # sortie asks the engine for the WAIT idle strategy (its default since
+  # 7f338df; the plan no longer has to): a worker thread
   # blocks until its next request is due, so the eight workers of this plan cost
   # 0.125-0.14 core per engine at 60 rps on kind (15 min, cgroup cpu.stat) -- not
   # the 1.7 cores the same engine took while it could only SLEEP, which is what
@@ -106,7 +117,8 @@ engine:
 # backend (`mesh/svc-1  10.0.0.11:8443  5m0s  http_2xx 2700 ...  mean X max Y`),
 # which is the run's liveness in `kubectl logs` and, saved as sortie.log, a
 # one-minute timeline of every counter per target and node -- the nearest thing
-# left to the k6 AETHER_FAIL lines. A snapshot no longer copies histograms, so
+# left to the k6 AETHER_FAIL lines. With or without it, sortie 9fcbb81 prints one
+# `PASS|FAIL|SKIP <label> (...)` line per execution as it finishes. A snapshot no longer copies histograms, so
 # it costs no memory (kind, 15 min: 299.9 -> 301.8Mi, the same as without).
 # It is not free in CPU: one snapshot of eight executions is a burst of about
 # 0.6 CPU-second in each engine, +10m averaged over a minute (+19m at 30 s).
@@ -130,6 +142,10 @@ job:
 
 report:
   # path is set per run by run.sh: /var/run/sortie/<run tag>.json
+  # stream too: <run tag>.jsonl beside it (sortie's --results-stream), one line
+  # per execution as it finishes. sortie APPENDS to that file and never
+  # truncates it, so it must be a file of this run's own: the run tag is in the
+  # name, and run.sh refuses a run directory that already holds a run.
   format: json
   volume:
     persistentVolumeClaim:

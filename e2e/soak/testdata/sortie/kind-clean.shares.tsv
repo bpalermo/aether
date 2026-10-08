@@ -1,0 +1,3 @@
+tcp-a	9	http://tcp-echo.aether-test.aether.internal:18081/
+tcp-b	9	http://tcp-echo.aether-test.aether.internal:18081/
+uds-echo	3	http://uds-echo.aether-test.aether.internal:18081/

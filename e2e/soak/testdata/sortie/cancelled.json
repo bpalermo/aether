@@ -9,13 +9,15 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
+      "started_at": "2026-10-07T11:42:08.412Z",
+      "ended_at": "2026-10-07T11:44:39.176Z",
       "pass": false,
+      "error": "execution cancelled",
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
         "10.10.1.14:8443",
         "10.10.3.22:8443"
-      ],
-      "error": "execution cancelled"
+      ]
     },
     {
       "label": "mesh/echo",
@@ -25,13 +27,15 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
+      "started_at": "2026-10-07T11:42:08.415Z",
+      "ended_at": "2026-10-07T11:44:39.179Z",
       "pass": false,
+      "error": "execution cancelled",
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
         "10.10.1.14:8443",
         "10.10.3.22:8443"
-      ],
-      "error": "execution cancelled"
+      ]
     },
     {
       "label": "mesh/uds-echo",
@@ -41,13 +45,15 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
+      "started_at": "2026-10-07T11:42:08.418Z",
+      "ended_at": "2026-10-07T11:44:39.182Z",
       "pass": false,
+      "error": "execution cancelled",
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
         "10.10.1.14:8443",
         "10.10.3.22:8443"
-      ],
-      "error": "execution cancelled"
+      ]
     }
   ]
 }

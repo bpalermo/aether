@@ -11,7 +11,8 @@
 # kickoff that aborted half-way); say why in the grade.
 #
 # Kept on purpose:
-#   pvc/sortie-soak-reports   every run's JSON report (one small file each), so a
+#   pvc/sortie-soak-reports   every run's JSON report and results stream (two small
+#                             files each, <run tag>.json and .jsonl), so a
 #                             report survives even a lost run directory. --purge
 #                             deletes it.
 #   priorityclass/aether-soak-loader   cluster-scoped, shared with k6-runner.yaml.

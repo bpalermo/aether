@@ -8,6 +8,12 @@ whose node has gone silent ("Risks", 5).
 Phase 1, the short e2e on talos-main, ran twice on 2026-10-07 ("Verified on
 talos-main"): the driver works there, and it needs a client queue, which the
 plan now carries by default ("The client queue").
+The harness then moved to sortie 9fcbb81 (2026-10-07, "What sortie 9fcbb81
+changed"): that defect is fixed, a request still in flight when a run ends is
+counted, a stage that was not run is marked as such, the report carries
+latency and timestamps, and each execution's result is also written as it
+finishes. Proven on kind; **the talos runs above were made with 94cf103 and
+have not been repeated with 9fcbb81**.
 **Author:** Bruno Palermo
 **Date:** 2026-10-06
 **Related:** #1323 (the kickoff lived outside the repository and had two
@@ -105,7 +111,9 @@ the churn schedule, the watchdog or the access-log gates changes.
   signed by sortie's publish workflow (cosign, keyless, the signature an OCI
   referrer), and the chart defaults both image references to digests. They were
   verified by hand with the repository's pinned cosign (v3.1.2): the chart, and
-  the index and both per-arch manifests of each image, bound to commit 94cf103.
+  the index and both per-arch manifests of each image, bound to commit 9fcbb81
+  (and before it 94cf103; the 9fcbb81 chart digest bound to the 94cf103 commit
+  is refused, which is the check doing its work).
   `run.sh` repeats the check in its pre-flight on every run, against what the
   release actually renders (`--verify` makes a missing cosign an abort).
 
@@ -118,7 +126,7 @@ the churn schedule, the watchdog or the access-log gates changes.
 | protocol | HTTP/1.1 cleartext to `:18081` (k6 speaks h2 only over TLS) | `protocol: http1`, same URLs |
 | targets | one random draw per request: 95 % uniform over six mesh targets, 5 % uniform over two UDS targets | eight concurrent executions, each paced on its own |
 | concurrency | 60–180 VUs, one keep-alive connection each | one worker thread per target, which waits for its next request (`WAIT`); connections as the rate needs them (a handful) |
-| request timeout | 60 s (k6 default) | none: see "What is lost" |
+| request timeout | 60 s (k6 default) | none per request; a request still unanswered 30 s after the run ends is counted (`http_inflight_lost`, since sortie 1178261): see "What is lost" |
 | DNS | a lookup per new connection | once per execution, at start |
 | verdict | `http_req_failed`, printed at exit | thresholds, per target, in a JSON report |
 
@@ -133,7 +141,8 @@ counters `== 0`, per target, on every node.
 |---|---|---|
 | `http_4xx`, `http_5xx` | `benchmark.http_4xx`, `benchmark.http_5xx` | a complete response with that status |
 | `conn` | `benchmark.pool_connection_failure` (+ `pool_failure_local_…` / `pool_failure_remote_connection_failure`) | never got a connection |
-| `timeout` | `benchmark.pool_failure_timeout` | **connect** timeout only; there is no response timeout |
+| `timeout` | `benchmark.pool_failure_timeout` | **connect** timeout only; there is no per-request response timeout |
+| — (k6 failed it at 60 s) | `benchmark.http_inflight_lost` | sent, or queued for a connection, and with **no outcome** when the run was over and the request timeout (30 s, the engine's default) had passed after it. Not a reset, not a status, in no other counter (sortie 1178261; before it such a request was counted nowhere). The gate words it `in flight at the end: N request(s) with no outcome` |
 | `proto`, and any mid-response cut | `benchmark.stream_resets` (+ `_before_headers`, `_incomplete_body`, `_<reason>`) | the reason counters name Envoy's `StreamResetReason` |
 | — | `benchmark.pool_overflow` | the client refused its own request, which was never sent: the driver saturated beyond its client queue ("The client queue"), never the mesh's failure. The gate words it `driver saturated: N request(s) not sent`. No k6 equivalent (k6 reports `dropped_iterations`) |
 | `dns` | — | no per-request class: a name that does not resolve fails the whole execution with an `error`, before any request |
@@ -161,15 +170,34 @@ the execution ran 240.06 s on both nodes and the gate read `FAIL uds-cr-echo
 rate=3.7/6rps http_2xx=888/1440 … http_5xx=552 [sortie-worker=276
 sortie-worker2=276]`, with the seven other targets `PASS`.
 
-Three things the gate adds that k6's `rate<0.01` never had:
+Four things the gate adds that k6's `rate<0.01` never had:
 
-- **A rate floor per target, per node.** Each backend's `http_2xx` over its own
-  elapsed time must be at least 99 % of the target's share. Zero failures with
-  nothing sent is otherwise a pass. The plan can carry only one floor for the
-  whole scenario (the smallest share's, 3 rps × nodes) and sortie judges it
-  against the pool's total; `sortie-gate.sh` applies each target's own floor to
-  each node from the report's per-backend `results`, so one slow node is named
-  instead of being averaged away.
+- **A count floor per target, per node.** Each backend's `http_2xx` must be
+  within 99 % and 101 % of what the plan asked of it: the target's share × the
+  **configured** duration. Zero failures with nothing sent is otherwise a pass.
+  The plan can carry only one floor for the whole scenario (the smallest
+  share's, 3 rps × nodes) and sortie judges it against the pool's total;
+  `sortie-gate.sh` applies each target's own floor to each node from the
+  report's per-backend `results`, so one slow node is named instead of being
+  averaged away. Until 9fcbb81 this was a *rate* over the backend's own elapsed
+  time. That time is fixed when the run stops and can read a hair under the
+  duration (899,999 ms of 900,000 on talos-main), which only flatters a rate —
+  and a backend that stopped at 96 % of the run, at exactly its share, had a
+  perfect rate. A count against the plan has neither problem, and it is a range
+  because a late-woken `WAIT` worker ends a run one request short — sortie's
+  own README reports 999 of 1,000 in about one short run in four on a busy
+  machine and asks for "a range with some slack, not an equality". The second
+  talos run read 40,497–40,500 of 40,500 per 9 rps target with every failure
+  class at zero ("Verified on talos-main"): that, or requests still in flight
+  when the run stopped, which 94cf103 counted nowhere — its reports cannot say
+  which. 1 % is 81 requests of a 9 rps target's 15 minutes, 2,754 of its
+  8h30m.
+- **A stage that was not run fails.** sortie marks an execution it never
+  attempted `"not_run": true` (a stage after one that an engine refused at its
+  execution cap); it has no counters, so every failure class reads zero. The
+  gate fails it by name, counts it in the verdict, and cross-checks the sortie
+  pod's own log for `SKIP` lines and a `K not run` summary. This plan is a
+  single stage, so the case is a guard, not an expectation.
 - **The pool is checked.** The gate requires every execution to have been
   dispatched to exactly the number of engines that were ready at launch. A node
   missing from the pool fails the run instead of shrinking it.
@@ -185,9 +213,12 @@ rate, the 2xx total against the planned count, the worst node's p50 and p99,
 and for a failure the class, the count and the **node** (the report names
 backends by pod IP; `run.sh` records the IP → node map at launch). `--per-node`
 adds a line per target and node. That replaces the k6 "by target" table and adds
-the node, which k6 could only give per runner log. It reads `results`, `totals`
-and `backend_errors`, and refuses a report that has none of them (one written
-by a sortie older than 94cf103) rather than reading its counters as zero.
+the node, which k6 could only give per runner log. It reads `results` (with
+each backend's `statistics` for the latency), `totals`, `backend_errors`,
+`not_run` and `started_at` / `ended_at`, and refuses a report without `results`
+(a sortie older than 94cf103) or without `started_at` (older than 9fcbb81,
+which did not count requests in flight) rather than reading counters that were
+never counted as zero.
 
 A `FAIL` line is what k6's non-zero `http_req_failed` was: the list of what has
 to be attributed from the access logs and the roll brackets, not by itself a
@@ -225,11 +256,15 @@ failed soak. The 2026-09-30 run had 147 k6 failures, 141 of them before T0.
   at the start. Mesh DNS is exercised 8 times per node per run by the loader,
   not continuously. The prober's `mesh_dns` tier (which resolves on every probe)
   is and stays the DNS SLI; the loader was never the authority for it.
-- **A response timeout.** A request that never gets an answer is not a failure
-  under sortie: it waits until the run and its drain end. k6 failed it at 60 s.
-  The rate floor catches a target that stops answering wholesale; a single hung
-  request is invisible to the loader. The prober's 2 s budget is the instrument
-  for that, as it already was.
+- **A per-request response timeout.** A request that never gets an answer
+  waits until the run ends and for the request timeout (30 s) after it. k6
+  failed it at 60 s. Since sortie 1178261 it is then counted, in
+  `http_inflight_lost`, and the gate fails the target on it; until then it was
+  in no counter at all and a single hung request was invisible to the loader.
+  What is still lost is *when*: it is one number at the end of the run, not a
+  failure 60 s after the request. The count floor catches a target that stops
+  answering wholesale, and the prober's 2 s budget remains the instrument for
+  the moment it happens.
 - **The verbatim, timestamped failure sample** (`AETHER_FAIL`). What is left is
   a one-minute timeline per target and node (the progress lines), not a line
   per failure.
@@ -293,7 +328,10 @@ of the rate: a 3 rps target costs what a 9 rps one does. Eight targets are
 eight worker threads per node. sortie 94cf103 adds a fourth strategy, `WAIT`,
 which blocks until the rate limiter says the next request is due and wakes at
 least every 5 ms to see whether the run should end. That wake-up is the floor
-that is left: about 14 millicores per worker here.
+that is left: about 14 millicores per worker here. In 94cf103 `WAIT` was
+opt-in, through `nighthawk_template`, and the plan asked for it; since sortie
+7f338df it is sortie's default and the plan no longer says anything
+(`sortie-plan.sh --idle-strategy` still can, for an experiment).
 
 Measured on kind (two worker nodes, 20-core workstation, the engine
 container's cgroup `cpu.stat` and `memory.*`, the plan's 60 rps per node over
@@ -352,7 +390,8 @@ the engine's default.
 
 What the two fields are, read from the engine source at sortie 94cf103
 (`engine/source/client/options_impl.h`, `process_bootstrap.cc`,
-`benchmark_client_impl.cc`) rather than assumed:
+`benchmark_client_impl.cc`) rather than assumed, and unchanged at 9fcbb81 (the
+two defaults in `options_impl.h` were read again):
 
 | plan field | Nighthawk | default | what it caps |
 |---|---|---|---|
@@ -426,14 +465,20 @@ adds nothing visible to the measurement. The first version's 15-minute run,
 (from the statsd histogram: 16 % of its requests took longer than 10 ms, and
 its mean was 9.4 ms against 2.0–2.1 ms now) — the CFS period, not the mesh.
 
-**So sortie's latency is now usable as a soft signal**, and the plan carries it
-into the report: two thresholds, `latency_2xx.p50 < 60s` and `latency_2xx.p99
-< 60s`, which cannot fail on a mesh that answers at all and exist only because
-the JSON report holds counters and no statistics (a statistic gets into it as a
-threshold's `actual`, one value per backend). `sortie-gate.sh` prints the worst
-node's p50 and p99 per target and judges nothing by them. It is **not a gate**
+**So sortie's latency is now usable as a soft signal**, and the report carries
+it: since sortie 1b3d404 each backend's entry in `results` has its
+`statistics` (`benchmark_http_client.latency_2xx` with count, mean, min, max,
+p50, p90, p99 and p99.9, in nanoseconds). `sortie-gate.sh` prints the worst
+node's p50, p99 and max per target from there and judges nothing by them.
+Until then the plan carried two thresholds, `latency_2xx.p50 < 60s` and
+`latency_2xx.p99 < 60s`, only because a statistic could reach the report no
+other way than as a threshold's `actual`; they could not fail on a mesh that
+answers at all, and they are **removed, not replaced**. Latency is not a gate
 until talos-main has shown what the numbers look like there, under rolls, on
-nodes that are busy: on kind p99 is flat at 2–4 ms with nothing else running.
+nodes that are busy: on kind p99 is flat at 2–4 ms with nothing else running,
+and the first talos runs read 115–207 ms. When there is a number to defend,
+the place for it is a real threshold in the plan (`latency_2xx.p99 < …`),
+which sortie judges per backend.
 
 **Memory** is the engine's latency histograms, about 37 MiB per worker per
 execution. On kind, same plan: 300 MiB with eight executions running, flat for
@@ -488,25 +533,35 @@ sortie.<scenario>.<target>.<backend>.cluster.<worker>.benchmark.http_2xx        
 sortie.<scenario>.<target>.<backend>.cluster.<worker>.benchmark_http_client.latency_2xx  timer, ms
 ```
 
-and as they arrive in Prometheus (verified on kind against a collector with
-talos-main's receiver and processor settings, read from the GitOps values):
+and as they arrive in Prometheus (the path was verified on kind with 94cf103
+against a collector with talos-main's receiver and processor settings, read
+from the GitOps values; with 9fcbb81 the names were read off the wire only):
 
 ```
 sortie_mesh_<target>_<backend>_cluster_0_benchmark_http_2xx_total
 sortie_mesh_<target>_<backend>_cluster_0_benchmark_pool_overflow_total     (exists once non-zero)
 sortie_mesh_<target>_<backend>_cluster_0_benchmark_http_client_latency_2xx_{bucket,sum,count}
 sortie_mesh_<target>_<backend>_cluster_0_upstream_rq_total   … and Envoy's other cluster counters
-sortie_mesh_svc_1_10_244_3_17_cluster_0_benchmark_http_2xx_total           (an example)
+sortie_mesh_svc_1_main_worker_03_cluster_0_benchmark_http_2xx_total        (an example)
 ```
 
-`<scenario>` is `mesh`; `<target>` has `-` as `_`; **`<backend>` is the
-engine's pod IP with `.` as `_`** (`10.244.3.17` → `10_244_3_17`); `cluster_0`
-is worker 0, the only one per target. The receiver attaches no labels and does
-not expose the sender, so the node is in the metric *name* and nowhere else.
-The map from that IP to a node is `engines.tsv` in the run directory (`podIP`,
-node, pod, written at launch) or `kubectl -n aether-test get pods -l
-app.kubernetes.io/component=engine -o wide`; the README has both as commands,
-and the PromQL that folds the name back into a `target` label.
+`<scenario>` is `mesh`; `<target>` has `-` as `_`; `cluster_0` is worker 0, the
+only one per target. **`<backend>` is the engine's node, by name**, lowercased
+and reduced to `[a-z0-9_]` (`main-worker-03` → `main_worker_03`). That is
+sortie 0fc5746: the plan's stats block says `backend: name`, sortie sends a
+placeholder where the name goes, and each engine puts in the name it was
+started with (`--backend-name`), which the chart takes from the node
+(`engine.backendNameFrom: node`, set in `sortie-values.yaml`). Up to 94cf103
+`<backend>` was the engine's pod IP (`10_244_3_17`), the map from it to a node
+was `engines.tsv`, and every install of the engines wrote a new set of names.
+The receiver attaches no labels and does not expose the sender, so the node is
+still in the metric *name* and nowhere else — but it is a name that means
+something and does not change. Two consequences of sortie not knowing the
+names: an engine started without one refuses the execution (so the two
+settings are pinned together by the harness test), and nothing checks that two
+nodes' names stay distinct once reduced to `[a-z0-9_]` (talos-main's
+`main-worker-01` … `-05` do). The **report** is unchanged: it names a backend
+by pod IP and port, and the gate maps that through `engines.tsv`.
 
 **The per-node series sum to the report.** With sortie b71b37e the names
 carried no backend, every engine wrote the same series, and two engines read as
@@ -525,13 +580,10 @@ UDP, a collector restart zeroes them, and the report is a file.
 
 What it costs: 33 metric families per target and backend (two of them
 histograms of 16 buckets), 528 for the kind run, and so about **1,320 families,
-some 2,800 series, on five nodes**. And because the backend is a pod IP, every
-install of the engines writes *new* names: each run adds that many series to
-Prometheus, which the previous one stops updating (the collector forgets a
-series 15 minutes after its last sample). Whether that churn matters at
-talos-main's retention is a question for the first runs there; if it does, the
-remedy is a relabel in the collector that lifts the IP out of the name into a
-label, not a change here.
+some 2,800 series, on five nodes** — once. While the backend was a pod IP every
+install of the engines wrote that many *new* names, which the previous run
+stopped updating; named by node, a run writes the names the last one wrote.
+(Counted with 94cf103; `http_inflight_lost` adds a family when it is non-zero.)
 
 **Dashboard.** `aether-k6` (read 2026-10-06) is built on `k6_*` series keyed by
 `testrun_name` — `k6_http_reqs_total`, `k6_http_req_failed_total`,
@@ -566,6 +618,26 @@ them.
 - `sortie-teardown.sh` refuses to uninstall without `SAVED` (`--force`
   overrides), and keeps the PVC unless `--purge`.
 - The Job has no TTL, so the pod and its log stay until teardown.
+- **The results stream** (sortie 9fcbb81): beside the report, on the same PVC,
+  sortie appends one line of JSON per execution as it finishes
+  (`/var/run/sortie/<run tag>.jsonl`; `--results-stream`, the chart's
+  `report.stream`), synced to disk line by line. It is what exists if the
+  sortie pod dies before the report is written — risk 4's eight lost hours, in
+  the case where the executions had finished. The saver copies it out
+  (`results.jsonl`) whether or not there is a report, and `sortie-gate.sh
+  --stream` grades it. sortie appends to that file and never truncates it, so
+  `run.sh` names it by run tag (a file of the run's own) and the gate fails a
+  label that occurs twice; a run that died mid-write leaves a last line that
+  does not parse, which the saver counts and the gate skips — the execution it
+  was about is then missing, which is a FAIL. With this plan every execution
+  ends at the same moment, so the stream is written seconds before the report;
+  it protects that window, and any later plan with stages.
+- **When the run was.** Every execution in the report has `started_at` and
+  `ended_at` (sortie's clock) and every backend its own `started_at` (the
+  engine's clock, when its first worker started). The saver writes them as
+  `times.tsv` and the gate prints one `WINDOW` line, so a failure can be set
+  beside the `ROLLED` lines of `churn.log` without reconstructing the start
+  from `T_LOAD`.
 
 ## What is in the repository now (#1323)
 
@@ -609,6 +681,93 @@ Progress lines also carry the execution label now (`mesh/svc-1  10.0.0.11:8443
 …`), which is what makes them usable as the per-target, per-node timeline the
 k6 `AETHER_FAIL` lines used to be the only source of.
 
+## What sortie 9fcbb81 changed
+
+The second bump, 94cf103 → 9fcbb81 (eight commits on sortie main, all of
+2026-10-07). Every name below was read in the sortie source at that commit
+(`internal/report/report.go`, `internal/run/run.go`, `internal/compile/`,
+`api/sortie/plan/v1/plan.proto`, the chart) before the harness used it.
+
+**What the harness dropped, because sortie now does it:**
+
+| the harness did | why | sortie commit | the harness now |
+|---|---|---|---|
+| `nighthawk_template.sequencer_idle_strategy: WAIT` in every plan | `WAIT` was opt-in and the engine's default costs a core per worker | 7f338df: `WAIT` is sortie's default; a strategy named in the template is left alone | nothing is templated. `--idle-strategy` / `SOAK_SORTIE_IDLE_STRATEGY` still write the template, for an experiment |
+| two thresholds that could not fail, `latency_2xx.p50 < 60s` and `latency_2xx.p99 < 60s` (and `sortie-plan.sh --no-latency` to drop them) | the report held no statistic; a threshold's `actual` was the only way in | 1b3d404: `results[].statistics` | both removed, the flag with them; the gate reads the statistics and prints p50, p99 and max. No latency threshold replaces them yet |
+| statsd series named by pod IP, with `engines.tsv` as the only map to a node, and ~2,800 new series per install of the engines | sortie knew a backend only by its address | 0fc5746: `stats.backend: name` and the chart's `engine.backendNameFrom` | the plan asks for `backend: name`, the values file for `backendNameFrom: node`: the series carry the node's name and are the same on every run |
+| the saver's `SORTIE_OVERDUE` line at two minutes, the only notice that sortie was waiting for a silent node without limit; the gate's `ran off plan` as the only thing that failed a thawed one | sortie had no deadline on a backend | 76f699b: a backend that has not answered `duration + timeout + drain + 2 min` after dispatch is given up on and reported; one whose own account runs far past the plan is failed, its counters kept | `SORTIE_OVERDUE` moves to five minutes and means sortie itself is stuck. The gate's own 5 % check stays: it is tighter than sortie's two minutes |
+
+**What stays, and why:**
+
+- **`max_pending_requests`.** The engine's default is still 0 ("no client side
+  queuing") and sortie still passes the field only when the plan sets it
+  (`options_impl.h`, `compile.go` at 9fcbb81). Nothing better to default to;
+  the sized queue stays.
+- **No CPU limit, a 150m request.** These were never workarounds for sortie;
+  the chart sets no resources and the values file's are the harness's.
+- **`engine.maxConcurrentExecutions: 16`.** It is the chart's own default and
+  was at 94cf103 too, so it is redundant — and kept, because
+  `sortie-plan.sh` refuses a targets file longer than that number and the two
+  should be read in one place.
+
+**What the harness gained:**
+
+| sortie 9fcbb81 | commit | the harness |
+|---|---|---|
+| an HTTP run waits for its in-flight requests, up to the request timeout, before it reads the counters; what is still open then is `benchmark.http_inflight_lost` (not a reset, not a default failure predicate). The engine's elapsed time is fixed at stop | 1178261 | `counter:benchmark.http_inflight_lost == 0` in the plan; in the gate's zero-failure set, worded apart (`in flight at the end: N request(s) with no outcome`); the count is judged as a 99–101 % range against the configured duration |
+| a start refused at an engine's execution cap (`RESOURCE_EXHAUSTED`) stops the whole stage on every backend; later stages are `SKIP` in the text and `"not_run": true` in the JSON; the summary reads `N/M executions passed, K not run` | 1374999 | the gate fails a `not_run` execution by name, counts it (`not_run=K`), reads the pod's log for `SKIP` and `K not run` as a second witness, and words a refused stage `REFUSED AT THE EXECUTION CAP` instead of calling the refusing engines lost |
+| `started_at` / `ended_at` per execution, `results[].started_at` per backend | 9fcbb81 | `times.tsv` in the run directory, a `WINDOW` line from the gate; a report without `started_at` is refused as old |
+| a `PASS`/`FAIL`/`SKIP` line on stderr per finished execution | 9fcbb81 | in `sortie.log`, with or without `--progress` |
+| `sortie run --results-stream FILE`, the chart's `report.stream`: one JSON line per finished execution, appended, never truncated | 9fcbb81 | `run.sh` sets it to a file of the run's own; the saver copies it out; `sortie-gate.sh --stream` grades it, skipping lines that do not parse and failing a label listed twice ("Report durability") |
+
+**Not used:** the TCP work of 83d7d47 (reconnect with backoff,
+`tcp.max_messages_per_connection`, `benchmark.tcp_reconnects` /
+`tcp_connections_rotated` / `tcp_connections_opened` / `tcp_connect_failures` /
+`tcp_unavailable` / `tcp_inflight_lost` / `tcp_echo_mismatch`,
+`benchmark_tcp.connect_latency`). The `mp-dialer` and `udp-dialer` legs stay
+as they are until sortie can do what they do. What is still missing there, by
+sortie's own account: an upstream idle-timeout option, telling a remote close
+from a local one, UDP socket rotation, and per-target overrides in a scenario
+that mixes schemes — the last is what would let a raw-TCP target sit beside the
+eight HTTP ones in the one `mesh` scenario. A separate TCP *scenario* against
+`mixed-svc`'s raw port is now straightforward to write (an exact-echo target,
+`expect_echo: true`, a reconnect that survives a roll, rotation to keep
+connection setup in the measurement) and is left as a follow-up: scenarios run
+one after another, not side by side, so it would be a second run, not a ninth
+target.
+
+## Evidence on kind (2026-10-07, sortie 9fcbb81)
+
+The same three-node kind cluster shape as below (pinned kind v0.33.0, one
+control plane and two workers, on a kubeconfig of its own), aether from this
+tree as `e2e/uds.sh up` installs it (SPIRE off, `uds-echo`, `uds-cr-echo`,
+`tcp-echo`), and the committed values and plan with the same stand-in targets
+file (six 9 rps targets on `tcp-echo`, the two UDS targets at 3 rps). In place
+of a collector, a UDP listener as `o11y/otel-scraper` that prints what arrives:
+it shows the names on the wire and nothing about Prometheus. Every run went
+through `run.sh e2e --verify` (`verified=cosign-v3.1.2`).
+
+| run | result |
+|---|---|
+| 5 min, the committed values | pool resolved to 2 backends; 2,700 of 2,700 2xx per 9 rps target on each node, 900 of 900 per 3 rps target: **43,200 of 43,200**; every failure class 0, `http_inflight_lost` among them (the threshold is in the report, `actual 0`); each backend's elapsed time 300,001–300,002 ms and each execution's 300.77–300.80 s, so nothing was in flight long enough to show; latency from `statistics`: p50 1.8–2.5 ms, p99 2.2–3.0 ms, max 6.6–79.7 ms; `VERDICT PASS targets=8 passed=8 failed=0 not_run=0 backends=2 lost_backends=0`; watchdog `verdict=PASS new_restarts=0`; `SORTIE_SAVED … not_run=0 window=…23:26:33.393Z..…23:31:34.192Z stream_executions=8`. The Job ran `--results-stream /var/run/sortie/<run tag>.jsonl`; the stream's eight lines are the report's eight executions, object for object (both compacted with `jq -c` and compared: identical). The engines ran `--backend-name $(SORTIE_BACKEND_NAME)` from `spec.nodeName`, and the datagrams on the wire were named `sortie.mesh.tcp_d.sortie_worker.cluster.0.…` |
+| the engines capped below the plan (`engine.maxConcurrentExecutions: 4`, eight targets) | sortie 1374999: the Job failed five seconds after it started, every execution with `error: backend … refused a start because the engine is at its cap of 4 concurrent executions, and this scenario starts 8 at once on every backend … Raise the engine's --max-concurrent-executions … to at least 8`; nothing ran (the report's window is 49 ms). `run.sh` aborted (`the sortie pod … is 'Failed', not Running`) before arming the saver, which then saved the report and the stream by hand; the gate fails all eight. This run is why the gate now words a refused stage `REFUSED AT THE EXECUTION CAP` (it first listed the refusing engines as lost backends) and why the abort says how to read the report |
+| a three-stage staircase of five targets against the same capped engines (a plan written by hand; `run.sh` cannot render one) | the real `not_run`: stage 1 refused as above on all five targets; the ten executions of stages 2 and 3 are `"not_run": true` with `elapsed_ms: 0`, no `started_at`, no counters, and `error: not run: mesh/stage-1 was refused …`; the pod's log has a `SKIP` line for each, twice (as each "finishes" and in the summary), and ends `FAIL  0/5 executions passed, 10 not run`. The saver: `SORTIE_SAVED … executions=15 pass=false not_run=10 … stream_executions=15`. One target's three stages and the log's lines about them are the test fixture `kind-not-run.*` |
+| 11 min with `--rolls` (agent roll at T+3m, proxy roll at T+8m) | both `ROLLED` (23:41:50Z and 23:47:27Z, inside `WINDOW dispatched=…23:38:41.939Z ended=…23:49:42.701Z`, which is what the line is for); 5,940 of 5,940 per 9 rps target and 1,980 of 1,980 per 3 rps target on both nodes, 79,200 of 79,200; every failure class 0, `http_inflight_lost` 0; p99 ≤ 3.8 ms, max ≤ 80 ms; `VERDICT PASS`; watchdog `verdict=PASS new_restarts=0` |
+| 2 min, and the node that holds **the sortie pod** frozen (`docker pause`) from T+46 s for ten minutes — a mistake in the test (the report PV pins the sortie pod to one worker, and that was the one paused), kept because of what it showed | the driver froze with its node, so nothing could end the run; the saver said `SORTIE_OVERDUE` at five minutes; the pod was evicted with the node and its log lost (`sortie.log`: nothing). On the thaw sortie applied its backend deadline at once (`no result 4m31s after dispatch, for an execution planned to last 2m0s: the backend went silent or is far behind`) — to the frozen node's engine on all eight targets, and on four of the eight **also to the healthy node's engine**, whose complete results (1,080 of 1,080) were waiting unread — and wrote the report and the stream before it was killed: `SORTIE_SAVED … job=failed executions=8 … stream_executions=8`, gate `VERDICT FAIL … lost_backends=2`. Risk 4 in a new light: a frozen driver node costs the run, but no longer everything it recorded |
+| 2 min, and the **other** worker frozen from T+45 s — the node with an engine and, as it happened, every target pod, but not the sortie pod; never thawed until the Job had ended | sortie 76f699b: the Job ended at T+307 s **with the node still frozen**, the report written 301.08 s after dispatch (181 s past the planned end: 151 s of deadline, 30 s for a cancellation the frozen engine could not answer). The frozen engine is in `backend_errors` on all eight executions (`no result 4m31s after dispatch, for an execution planned to last 2m0s: the backend went silent or is far behind (… the service did not answer the cancellation within 30s)`) and returned nothing; the other node is reported whole and judged: `FAIL tcp-a rate=3.44/18rps http_2xx=413/2160 backends=1/2 -- LOST BACKEND sortie-worker (10.10.1.17:8443) [returned nothing] \| survivors sortie-worker2=FAIL \| failures http_5xx=667 [sortie-worker2=667] \| http_2xx below 99% of the planned 1080 on [sortie-worker2=413]` — 413 + 667 = 1,080: every request that node was asked for has an outcome (the targets were on the frozen node, and the mesh answered for them with 5xx), `http_inflight_lost` 0. `VERDICT FAIL targets=8 passed=0 failed=8 not_run=0 backends=2 lost_backends=1`; no `SORTIE_OVERDUE`. With 94cf103 this run had no end and no report |
+
+The engine with `WAIT` as sortie's default and nothing in the plan: **0.09–0.11
+core per engine** (cgroup `cpu.stat`, a 40 s and a 60 s window with a progress
+snapshot and a proxy roll in it), `nr_throttled` 0, 301 MiB while running. That
+is at or under what 94cf103 read with `WAIT` templated (0.11–0.14).
+
+**Not run against 9fcbb81:** a 15-minute run (5 and 11 minutes here); the
+deliberate-failure run (a Deployment scaled to zero); an engine pod deleted
+mid-run; the collector with talos-main's statsd receiver settings, and so the
+series' names in Prometheus and their sum against the report; a real
+`http_inflight_lost` (it needs a target that holds a request open across the
+end of a run for more than 30 s; the fixture for it is canned from the schema).
+
 ## Evidence on kind (2026-10-07, sortie 94cf103)
 
 A three-node kind cluster (pinned kind v0.33.0, one control plane and two
@@ -650,12 +809,15 @@ restart; it says nothing about what a roll costs on talos-main.
    pacing at soak length, the final report's size and assembly time, 510
    progress snapshots. The first sortie soak (phase 3) is the measurement; the
    k6 files stay until it has passed.
-3. **The engine has no CPU limit.** It costs 0.11–0.14 core on kind because the
-   plan asks for `WAIT`; nothing but the plan keeps it there. A plan rendered
-   with another idle strategy, or a sortie bump that changed what `WAIT` means,
-   would cost up to eight cores on a four-core node and starve the proxy under
-   test. `sortie-plan.sh` defaults to `WAIT` and the test suite pins the
-   rendered value. talos-main read 127–135m per engine (2026-10-07).
+3. **The engine has no CPU limit.** It costs 0.11–0.14 core on kind because a
+   worker waits (`WAIT`); nothing else keeps it there. Since sortie 7f338df
+   that is sortie's default and no longer the plan's doing, so what keeps it is
+   the pin: a plan rendered with another idle strategy (`--idle-strategy`), or
+   a sortie bump that changed the default back, would cost up to eight cores on
+   a four-core node and starve the proxy under test. The test suite pins that
+   the plan templates nothing; **the engine's CPU has to be read again at every
+   sortie bump**, and has not been read on talos for 9fcbb81 (94cf103 read
+   127–135m per engine, 2026-10-07).
 4. **One sortie pod is a single point of failure for the run.** If it is
    evicted or its node drains, every execution is cancelled and reported
    `cancelled`, not evaluated: 8 h gone. k6 runners failed independently. It
@@ -670,7 +832,8 @@ restart; it says nothing about what a roll costs on talos-main.
    run, not from the reboot on; the access logs carry what that node did send.
    That is the engine that goes away *audibly*: its pod is deleted or its node
    shuts down, the connection closes, and sortie names it. **A node that goes
-   silent is worse, and sortie 94cf103 does not handle it.** A node that
+   silent was worse, and sortie 94cf103 did not handle it; 9fcbb81 does** (the
+   paragraph after this one). With 94cf103: a node that
    freezes, loses power or is partitioned sends no FIN and no RST; sortie has no
    deadline on a backend's answer and no keepalive, so it waits. On kind, with
    one node paused, the Job was still running 20 minutes after the pause (19
@@ -684,15 +847,33 @@ restart; it says nothing about what a roll costs on talos-main.
    sortie pod's log are each target's cumulative counters per node, up to one
    minute old, and the statsd series and the access logs are unaffected. The fix
    is sortie's: give up on a backend some grace after its execution's duration
-   (and report it in `backend_errors`), or keep the connection alive. It goes to
-   the sortie session with this PR.
+   (and report it in `backend_errors`), or keep the connection alive. It went
+   to the sortie session with that PR.
+   **Since sortie 76f699b (in the 9fcbb81 pin) it is fixed, the first way.**
+   Every backend has a deadline counted from dispatch — the duration, the
+   request timeout (30 s), the engine's drain (1 s) and two minutes of grace:
+   151 s past the planned end for this plan. A backend that has not answered
+   by then is cancelled, given 30 s to answer the cancellation, and named in
+   `backend_errors` as silent, and the report is written with the other nodes
+   whole; a backend that answers with an execution far longer than planned is
+   failed too, its counters kept. A node that hard-fails mid-soak therefore
+   costs that node's share and three minutes, not the report. **Measured on
+   kind** ("Evidence on kind (2026-10-07, sortie 9fcbb81)"): with one node
+   frozen from T+45 s of a 120 s plan and never thawed, the report was written
+   181 s past the planned end. What is left of the risk is the driver's own
+   node: the report PV pins the sortie pod to one worker, and if *that* node
+   freezes nothing ends the run (the same test, aimed wrong, showed it). It is
+   risk 4, and one node in five.
 6. **A node that joins or a pod that is replaced mid-run gets no load.** The
    pool is fixed at start. An engine pod that is deleted and recreated (a node
    drain) is a new IP the run never drives.
-7. **No response timeout** (above): a class of failure k6 counted is now
-   invisible to the loader.
-8. **Series churn.** Per-node statsd names carry the pod IP, so every install
-   of the engines writes ~2,800 new series on five nodes ("Telemetry").
+7. **No per-request response timeout** (above): a request that hangs is
+   counted only when the run ends (`http_inflight_lost`, since 9fcbb81), not
+   when it should have been answered.
+8. **Series churn** — retired with 9fcbb81: the statsd names carry the node's
+   name, not the pod IP, so a run writes the series the previous one wrote
+   ("Telemetry"). What replaces it as an unknown is how Prometheus shows two
+   runs on one series: each run's counters start at zero.
 
 ## Cut-over
 
@@ -787,6 +968,12 @@ the README, "The mesh's own numbers").
 
 **Still open:**
 
+- **sortie 9fcbb81 on talos-main at all.** Everything in this section was
+  measured with 94cf103. The next short e2e is the first run there of: the
+  in-flight wait at the end of a run and `http_inflight_lost`; the count range;
+  the node-named statsd series arriving in the real `otel-scraper`; the results
+  stream on `openebs-hostpath`; the engine's CPU with `WAIT` as sortie's
+  default rather than the plan's.
 - **The default queue itself.** Run 2 used 16; the plan now renders 18. And a
   no-roll run that PASSES, which phase 1's exit asks for.
 - **Anything past 15 minutes**, and the 8 h run (risk 2).
@@ -801,18 +988,19 @@ the README, "The mesh's own numbers").
 
 ## Open questions
 
-- **Should `WAIT` be sortie's default?** It is opt-in, through
-  `nighthawk_template`, with no schema field. For a rate of a few requests per
-  second per worker it is the only strategy that does not cost a core, and here
-  it measured no worse than `SLEEP` for pacing or latency. sortie's README
-  keeps `SPIN` for high rates ("a spinning worker releases each request closer
-  to its time"). A default that depends on the rate — or a schema field — would
-  remove the last template line from this plan. Until then the harness pins it
-  and tests the rendered plan.
-- **sortie: a deadline on a backend.** A backend whose node goes silent holds
-  the whole run's report for as long as it stays silent (risk 5). Found on kind
-  with 94cf103; it goes to the sortie session. Until it is fixed, a hard node
-  failure during a soak is the one event that still voids the loader's report.
+- ~~Should `WAIT` be sortie's default?~~ **Answered by sortie 7f338df: it
+  is.** The last template line is gone from the plan.
+- ~~sortie: a deadline on a backend.~~ **Answered by sortie 76f699b** (risk 5).
+- ~~Latency in the JSON report.~~ **Answered by sortie 1b3d404**; the two
+  always-true carrier thresholds are removed.
+- **A latency threshold that can fail.** The carriers are gone and nothing
+  judges latency. The first 9fcbb81 runs on talos give the numbers (per node,
+  with and without rolls) from which a real `latency_2xx.p99 < …` could be
+  set — or the decision that the access logs stay the only latency gate.
+- **A structured marker for a stage refused at the execution cap.** The JSON
+  marks the stages after it (`not_run`) but the refused stage itself only by
+  the text of its `error`; the gate matches that text to avoid calling the
+  refusing engines lost. A field would be sturdier. For the sortie session.
 - **h2 and h3 under concurrent executions are untested** — by sortie
   ("concurrent executions are tested over HTTP/1; the other protocols and modes
   have not been run concurrently") and by this harness, which drives HTTP/1.1
@@ -821,10 +1009,7 @@ the README, "The mesh's own numbers").
 - **OTLP is absent.** The live path is statsd over UDP into the collector's
   statsd receiver, names without labels. An OTLP sink (Envoy's aborts the
   engine) or DogStatsD tags for scenario / target / backend would give labels
-  instead of 2,800 name-encoded series per run.
-- **Latency in the JSON report.** It holds counters only; the plan carries two
-  always-true latency thresholds so p50 and p99 reach it. Per-backend
-  statistics in `results` would retire them.
+  instead of 2,800 name-encoded series.
 - **What a progress snapshot costs.** About 0.6 CPU-second per engine for
   eight executions ("CPU and memory"). sortie's README says a snapshot allocates
   no histogram and costs no memory, which holds here; it says nothing about

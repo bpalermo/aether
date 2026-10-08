@@ -27,12 +27,13 @@
 #                       does not resolve names). Omitted: no stats block.
 #   --floor-pct P       2xx rate floor, percent of the planned rate (99)
 #   --scenario NAME     scenario name = report label prefix = statsd level (mesh)
-#   --idle-strategy S   Nighthawk's sequencer idle strategy: WAIT (default),
-#                       SLEEP, POLL or SPIN. WAIT blocks a worker until its next
-#                       request is due (sortie 94cf103 and newer); the other
-#                       three never block and cost 0.2 to 1 core per worker
-#                       thread whatever the rate. See proposal 042, "CPU and
-#                       memory", before changing it.
+#   --idle-strategy S   an EXPERIMENT: Nighthawk's sequencer idle strategy,
+#                       SLEEP, POLL or SPIN (or WAIT, spelled out). Not given,
+#                       the plan says nothing and sortie asks for WAIT itself
+#                       (its default since 7f338df): a worker blocks until its
+#                       next request is due. The other three never block and
+#                       cost 0.2 to 1 core per worker thread whatever the rate.
+#                       See proposal 042, "CPU and memory", before using it.
 #   --max-pending N     the client queue, Nighthawk's --max-pending-requests,
 #                       per worker thread: how many due requests may wait for a
 #                       connection before the next is refused by the engine's
@@ -42,12 +43,21 @@
 #                       engine's default; for experiments). See "The client
 #                       queue" below.
 #   --stall-budget S    whole seconds of stall the default queue must absorb (2)
-#   --no-latency        leave the two latency carriers out of the thresholds
-#                       (see the template at the end of this file).
+#
+# What the plan no longer carries, because sortie 9fcbb81 does it itself:
+#   - the idle strategy (nighthawk_template): WAIT is sortie's default (7f338df);
+#   - two latency "carrier" thresholds (latency_2xx.p50|p99 < 60s): they could
+#     not fail, and existed only to get the numbers into the report. The report
+#     now holds each backend's latency statistics (1b3d404); sortie-gate.sh
+#     reads them there.
+# What it gained: `counter:benchmark.http_inflight_lost == 0` (1178261) and, with
+# --statsd, `backend: name` (0fc5746): the live series are named by node.
 #
 # The client queue. An open-loop engine sends on a schedule, whether or not the
 # previous request has been answered. What the engine does with a request that
-# falls due and finds no idle connection (engine source at sortie 94cf103):
+# falls due and finds no idle connection (engine source; the same at sortie
+# 94cf103 and 9fcbb81: options_impl.h defaults connections to 100 and
+# max_pending_requests to 0, and sortie passes neither unless the plan does):
 #   - it opens another connection, up to `connections` per worker. The plan does
 #     not set it, sortie then passes none, and Nighthawk's default is 100 (HTTP/1,
 #     per worker thread = per target per engine here). A target at 9 rps would
@@ -94,10 +104,9 @@ DNS=""
 STATSD=""
 FLOOR_PCT=99
 SCENARIO=mesh
-IDLE=WAIT
+IDLE=""
 MAX_PENDING=""
 STALL_BUDGET=2
-LATENCY=1
 # One execution per target runs at once on every engine; the chart's
 # engine.maxConcurrentExecutions (sortie-values.yaml) must cover the list.
 MAX_TARGETS=16
@@ -134,7 +143,6 @@ while [ $# -gt 0 ]; do
 		esac
 		shift 2
 		;;
-	--no-latency) LATENCY=0 && shift ;;
 	*) die "unknown option '$1'" ;;
 	esac
 done
@@ -222,7 +230,7 @@ case "$MAX_PENDING" in
 	;;
 esac
 case "$IDLE" in
-WAIT | SLEEP | POLL | SPIN) ;;
+'' | WAIT | SLEEP | POLL | SPIN) ;;
 *) die "--idle-strategy must be WAIT, SLEEP, POLL or SPIN, got '$IDLE'" ;;
 esac
 if [ -n "$STATSD" ]; then
@@ -256,6 +264,13 @@ if [ -n "$STATSD" ]; then
 stats:
   flush_interval: 5s
   prefix: sortie
+  # Each engine names itself in its series (its --backend-name, which the chart
+  # takes from the NODE: engine.backendNameFrom in sortie-values.yaml), so a run
+  # writes sortie.$SCENARIO.<target>.<node>.cluster... -- the same names on every
+  # run. By address, sortie's default, they carried the pod IP and every install
+  # of the engines started a new set of series. An engine with no name REFUSES
+  # the execution, so the two settings travel together (harness_test.sh).
+  backend: name
   statsd:
     address: "$STATSD"
 EOF
@@ -284,20 +299,23 @@ cat <<EOF
       duration: $DURATION
       per_backend: true
       open_loop: true
-    # Between requests a Nighthawk worker thread SPINS by default: one core per
-    # worker, eight per node for this plan, whatever the rate. WAIT blocks until
-    # the rate limiter says the next request is due (waking at least every 5 ms
-    # to see whether the run should end), so eight workers at 60 rps cost tens
-    # of millicores. sortie has no schema field for it; it goes through the
-    # template.
-    #
-    # Nothing else is templated. sortie turns Nighthawk's default failure
-    # predicates off itself (an execution goes the distance: a 503 is a number
-    # in the report, not the end of that target's load), so the plan no longer
-    # lifts them.
+    # Nothing is templated. sortie turns Nighthawk's default failure predicates
+    # off itself (an execution goes the distance: a 503 is a number in the
+    # report, not the end of that target's load), and asks for the WAIT idle
+    # strategy itself: a worker thread blocks until its next request is due
+    # instead of spinning for it, so eight workers at 60 rps cost tens of
+    # millicores, not eight cores.
+EOF
+if [ -n "$IDLE" ]; then
+	cat <<EOF
+    # --idle-strategy $IDLE: an experiment. Anything but WAIT costs 0.2 to 1 core
+    # per worker thread, on an engine that has no CPU limit.
     nighthawk_template:
       sequencer_idle_strategy:
         value: $IDLE
+EOF
+fi
+cat <<EOF
     targets:
 EOF
 printf '%s\n' "$SHARES" | awk -F'\t' '{ printf "      - {name: %s, url: \"%s\", weight: %d}  # %d rps per node\n", $1, $3, $2, $2 }'
@@ -314,18 +332,11 @@ cat <<EOF
       # client queue was full. Not sent, so not a mesh error -- and not a valid
       # run for that target on that node either.
       - "counter:benchmark.pool_overflow == 0"
+      # Sent, or queued for a connection, and still without an outcome when the
+      # run was over and the request timeout (the engine's 30 s; the plan sets
+      # none) had passed after it. Not a reset and not a status: such a request
+      # is in no other counter, and the engine does not fail a run for it.
+      - "counter:benchmark.http_inflight_lost == 0"
       # $FLOOR_PCT% of the smallest share x $BACKENDS nodes.
       - "rate:benchmark.http_2xx >= $FLOOR"
 EOF
-if [ "$LATENCY" = 1 ]; then
-	cat <<EOF
-      # Latency CARRIERS, not gates. The JSON report holds counters (totals,
-      # and results per backend) but no statistic; one gets into it only as a
-      # threshold's "actual", one value per backend. A bound of a minute is not
-      # reached by a mesh that answers at all, and one that does not has failed
-      # the rate floor long before. sortie-gate.sh prints the values and judges
-      # nothing by them.
-      - "latency_2xx.p50 < 60s"
-      - "latency_2xx.p99 < 60s"
-EOF
-fi
