@@ -827,9 +827,10 @@ The fourth bump, f0750ec → 96e6bfb (three commits on sortie main, all
 2026-10-08: 6d801c0, 6a0a866, 96e6bfb). Read in the sortie source: the diff
 between the two commits touches no file under `internal/`, `api/`, `charts/`,
 `main.go` or `go.mod`. So **no flag, no field of the JSON report or of the
-results stream, no exit code and no chart value changed**, and the chart pulled
-by its two digests differs in three lines: its version, and the two default
-image references. The harness's scripts and fixtures are unchanged by this
+results stream, no exit code and no key of the chart's values changed**: the
+values the harness sets mean what they meant. The packaged chart, pulled by its
+two digests, differs in three generated lines: its version, and the defaults
+of the two image references (which the harness overrides by digest). The harness's scripts and fixtures are unchanged by this
 bump; only the pins and what the documents say about them moved.
 
 | sortie | what it is | the harness |
