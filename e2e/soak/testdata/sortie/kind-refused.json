@@ -1,0 +1,89 @@
+{
+  "pass": false,
+  "executions": [
+    {
+      "label": "mesh/tcp-a/stage-1",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 3,
+      "per_backend": true,
+      "duration_ms": 20000,
+      "elapsed_ms": 45,
+      "started_at": "2026-10-08T11:11:52.733Z",
+      "ended_at": "2026-10-08T11:11:52.778Z",
+      "pass": false,
+      "refused": "execution_cap",
+      "error": "backend 10.10.2.12:8443 refused a start because the engine is at its cap of 4 concurrent executions, and this scenario starts 5 at once on every backend, one per target; nothing was left running, the executions that had started were stopped. Raise the engine's --max-concurrent-executions (engine.maxConcurrentExecutions in the chart) to at least 5: this stage does not fit the cap even on an idle engine (the service refused the start: it is at its cap of 4 concurrent executions (rpc error: code = ResourceExhausted desc = Busy: 4 executions are running, the maximum this service allows (--max-concurrent-executions).))",
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.10:8443",
+        "10.10.2.12:8443"
+      ]
+    },
+    {
+      "label": "mesh/tcp-c/stage-1",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 3,
+      "per_backend": true,
+      "duration_ms": 20000,
+      "elapsed_ms": 9,
+      "started_at": "2026-10-08T11:11:52.733Z",
+      "ended_at": "2026-10-08T11:11:52.742Z",
+      "pass": false,
+      "refused": "execution_cap",
+      "error": "backend 10.10.2.12:8443 refused a start because the engine is at its cap of 4 concurrent executions, and this scenario starts 5 at once on every backend, one per target; nothing was left running, the executions that had started were stopped. Raise the engine's --max-concurrent-executions (engine.maxConcurrentExecutions in the chart) to at least 5: this stage does not fit the cap even on an idle engine (the service refused the start: it is at its cap of 4 concurrent executions (rpc error: code = ResourceExhausted desc = Busy: 4 executions are running, the maximum this service allows (--max-concurrent-executions).))",
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.10:8443",
+        "10.10.2.12:8443"
+      ],
+      "backend_errors": [
+        {
+          "backend": "10.10.1.10:8443",
+          "error": "the service refused the start: it is at its cap of 4 concurrent executions (rpc error: code = ResourceExhausted desc = Busy: 4 executions are running, the maximum this service allows (--max-concurrent-executions).)",
+          "refused": "execution_cap"
+        },
+        {
+          "backend": "10.10.2.12:8443",
+          "error": "the service refused the start: it is at its cap of 4 concurrent executions (rpc error: code = ResourceExhausted desc = Busy: 4 executions are running, the maximum this service allows (--max-concurrent-executions).)",
+          "refused": "execution_cap"
+        }
+      ]
+    },
+    {
+      "label": "mesh/tcp-c/stage-2",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 6,
+      "per_backend": true,
+      "duration_ms": 20000,
+      "elapsed_ms": 0,
+      "pass": false,
+      "not_run": true,
+      "error": "not run: mesh/stage-1 was refused because the engine on backend 10.10.2.12:8443 was at its cap of 4 concurrent executions, and the stages after a refused one are not attempted",
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.10:8443",
+        "10.10.2.12:8443"
+      ]
+    },
+    {
+      "label": "mesh/tcp-c/stage-3",
+      "scenario": "mesh",
+      "pool": "nodes",
+      "rate": 9,
+      "per_backend": true,
+      "duration_ms": 20000,
+      "elapsed_ms": 0,
+      "pass": false,
+      "not_run": true,
+      "error": "not run: mesh/stage-1 was refused because the engine on backend 10.10.2.12:8443 was at its cap of 4 concurrent executions, and the stages after a refused one are not attempted",
+      "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
+      "backends": [
+        "10.10.1.10:8443",
+        "10.10.2.12:8443"
+      ]
+    }
+  ]
+}

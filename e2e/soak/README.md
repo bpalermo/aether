@@ -104,13 +104,19 @@ reference, and verifies the chart and every rendered image:
 cosign verify \
   --certificate-identity-regexp '^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  quay.io/sortie/chart-sortie@sha256:10f6c84b9f5dc1a93dd9dd6ad1ab6196130a6f7cbc69dff82258b25700606913
-# the same for quay.io/sortie/sortie@sha256:0a04580a… and quay.io/sortie/engine@sha256:99d5058c…
+  quay.io/sortie/chart-sortie@sha256:b1f0a6d5f838a4d76357b7438f8557cc3b74e37035918aa8ca4a490cd75e45ef
+# the same for quay.io/sortie/sortie@sha256:3d9a9b67… and quay.io/sortie/engine@sha256:d0fbc860…
 # (sortie-values.yaml); add --certificate-github-workflow-sha <commit> to bind them to one commit.
 ```
 
-The pin is sortie `9fcbb81afaeab77f6f16bacd3ed43d94a65d9fd8`, chart
-`0.1.0-9fcbb81afaeab77f6f16bacd3ed43d94a65d9fd8`.
+The pin is sortie `f0750ecf407c1bc50e6740b4b16a3b61964649e0`, chart
+`0.1.0-f0750ecf407c1bc50e6740b4b16a3b61964649e0`. **All three digests change with every
+sortie commit**, the engine's too, whether or not the engine changed: each image's
+config carries the commit (`org.opencontainers.image.revision`), so the config, both
+per-arch manifests and the index are new while the layers are not. From 9fcbb81 to
+f0750ec the engine's 22 layers are the same on both architectures, digest for digest,
+and its index went from `sha256:99d5058c…` to `sha256:d0fbc860…`. Pin what the new
+chart names; "the engine is unchanged" says nothing about its digest.
 
 It runs whenever a cosign is found: `SOAK_COSIGN`, else `cosign` on `PATH`. The
 repository's pinned one (`//bazel/cosign`, v3.1.2) is
@@ -155,8 +161,12 @@ e2e/soak/sortie-gate.sh --dir "$OUT"     # one PASS/FAIL line per target, then V
 e2e/soak/sortie-teardown.sh --dir "$OUT" # refuses unless $OUT/SAVED exists
 ```
 
-The saver is armed at load start and needs nothing; `sortie-save.sh --dir "$OUT"` by
-hand saves the logs at any time, and the report once the Job has finished. The report
+The saver is armed as soon as the Job exists, before `run.sh` first looks at its pod,
+and needs nothing: a Job that ends at once (a stage refused at the execution cap, a
+plan sortie rejects) still aborts the kickoff, but the abort waits for the saver and
+says `what it wrote is saved` with the saver's last line, or `its REPORT COULD NOT BE
+SAVED` with what the saver did get (#1387). `sortie-save.sh --dir
+"$OUT"` by hand saves the logs at any time, and the report once the Job has finished. The report
 also stays on the PVC (`/var/run/sortie/<run tag>.json`), which teardown keeps.
 `job=failed` only means a threshold failed (sortie exits 1): the report is saved
 either way.
@@ -196,24 +206,20 @@ What each step writes to the cluster:
 | `sortie-gate.sh` | nothing; it reads the run directory |
 | `sortie-teardown.sh` | uninstalls the release (engines, Service, ServiceAccount, Job, ConfigMap). **Keeps** the PVC (`--purge` deletes it) and the PriorityClass |
 
-Both runs were made on 2026-10-07 (`~/aether-soak-logs/1007-sortie-e2e-1` and `-2`),
-**with sortie 94cf103**; what they verified, what they found (the client queue) and
-what is still open are in proposal 042, "Verified on talos-main". The harness has
-since moved to sortie 9fcbb81 (proposal 042, "What sortie 9fcbb81 changed"), which has
-run on kind only. The next no-roll run above is its first on talos-main; beyond the
-gate's verdict, read from it:
+Five runs have been made this way on talos-main, all recorded in proposal 042,
+"Verified on talos-main": three short ones with sortie 94cf103 on 2026-10-07
+(`~/aether-soak-logs/1007-sortie-e2e-1`, `-2`, `-3`), and with sortie 9fcbb81 on
+2026-10-08 a short one (`1008-sortie-e2e-9fcbb81`, PASS 8 of 8) and the first 8-hour
+soak (`1008-sortie-soak`, gate PASS, 9,180,000 of 9,180,000). **The current pin,
+f0750ec, has run on kind only** (proposal 042, "What sortie f0750ec changed"). Its
+first run on talos-main is the next one; beyond the gate's verdict, read from it:
 
-- `SORTIE_SAVED … not_run=0 … stream_executions=8` in `save.log`, and that
-  `results.jsonl` has eight lines (the report PVC is `openebs-hostpath` here; kind
-  used `local-path`);
-- each engine pod's CPU against the 150m request (`WAIT` is now sortie's default, not
-  the plan's doing): `kubectl --context talos-main -n aether-test top pods -l
-  app.kubernetes.io/component=engine` mid-run;
-- that the run ends within seconds of its 900 s, or up to 30 s later with requests in
-  flight (`WINDOW … ended=`), and what `http_inflight_lost` reads;
-- the live series by node name in Prometheus
-  (`{__name__=~"sortie_mesh_.*_main_worker_.*_benchmark_http_2xx_total"}`), five per
-  target.
+- `SORTIE_SAVED … not_run=0 … stream_executions=8` in `save.log`;
+- each engine pod's CPU against the 150m request: `kubectl --context talos-main -n
+  aether-test top pods -l app.kubernetes.io/component=engine` mid-run. The engine's
+  layers are those of 9fcbb81, so no change is expected; it is read at every bump
+  all the same (proposal 042, risk 3);
+- that the run ends within seconds of its duration (`WINDOW … ended=`).
 
 ### Reading the gate
 
@@ -276,9 +282,18 @@ target that stops answering, and the prober catches the rest.
   This plan is one stage of eight executions, so it should never happen here. The
   refused stage itself reads `REFUSED AT THE EXECUTION CAP, nothing of this stage ran:
   backend … refused a start because the engine is at its cap of 16 concurrent
-  executions …` on every target, the Job fails within seconds, and `run.sh` aborts
-  with `the sortie pod … is 'Failed', not Running` before it arms the saver: run
-  `sortie-save.sh --dir "$OUT"` by hand, then the gate.
+  executions … [refused by: <node> …]` on every target, and the engines it names are
+  **not** lost backends. The gate knows a refusal by a field, not by that wording:
+  since sortie f0750ec the report (and the results stream) carries `"refused":
+  "execution_cap"` on every execution of the stage and on each `backend_errors` entry
+  that is an engine which refused; an entry without it is a backend that really was
+  lost, and is named `LOST BACKEND` even inside a refused stage. The error text is
+  still read for one case only, a report with no such field at all, which is a report
+  of sortie 9fcbb81 (that pin's reports, the talos-main runs of 2026-10-08 among them,
+  are still graded with this gate). The Job fails within seconds and `run.sh` aborts
+  with `the sortie pod … is 'Failed', not Running … what it wrote is saved`: the saver
+  was armed first and has already copied the report and the stream out (#1387), so go
+  straight to the gate.
 
 - **A `FAIL` line is what a non-zero `http_req_failed` was**: the list of what has to
   be attributed, per target, per class, per node — from the access logs
@@ -325,7 +340,15 @@ target that stops answering, and the prober catches the rest.
   sortie itself is stuck — or its **own** node is the frozen one (the same test, aimed
   at the wrong node: nothing ends the run until the node thaws, and the pod's log goes
   with the pod if the node is gone long enough to evict it). What exists then is the
-  results stream and, once sortie wakes, the report, both on the PVC.
+  results stream and, once sortie wakes, the report, both on the PVC. A sortie that
+  wakes past the deadline no longer blames the healthy nodes for it: with 9fcbb81 it
+  called the other node's engine silent on four of eight executions although its
+  complete results were waiting; since f0750ec an answer that is already there, or
+  arrives within 10 s of the deadline being noticed, is taken. On kind, twice (the
+  driver's node frozen from T+46 s to T+300 s, and for ten minutes): the healthy
+  node's results were taken on 16 of 16 executions, and only the frozen node's own
+  engine failed (`reported an execution of 5m1s for one planned to last 2m0s: it
+  stalled`).
 - **`http_2xx below 99% of the planned 8100 on [main-worker-02=7857]`**: that node
   completed fewer requests than the plan asked of it. With failure counters beside
   it, the failures are why. Alone, the engine on that node was slow to send or the
@@ -461,20 +484,38 @@ sum by (target) (label_replace(
   "target", "$1", "__name__", "sortie_mesh_(.*)_main_worker_[0-9]+_cluster_0_.*"))
 # one node's share: put its name in the selector
 rate({__name__=~"sortie_mesh_.*_main_worker_03_cluster_0_benchmark_http_2xx_total"}[1m])
-# any failure class, ever, with the node in the name. No series on a clean run (they
-# are born on first occurrence: the counter rule under "Grading" applies).
+# did a failure class move DURING this run, and on which node? Over the run's own
+# window, ending at its end (<run> = the run's length, e.g. 15m or 8h30m):
+increase({__name__=~"sortie_mesh_.*_benchmark_(http_[45]xx|http_inflight_lost|stream_resets.*|pool_.*)_total"}[<run>]) > 0
+# ... and, because a failure series is born at its first count, which increase()
+# reads as 0 (the counter rule under "Grading"): the series that did not exist when
+# the run started. A series listed here that DID exist then is an earlier run's.
 {__name__=~"sortie_mesh_.*_benchmark_(http_[45]xx|http_inflight_lost|stream_resets.*|pool_.*)_total"}
+  unless ({__name__=~"sortie_mesh_.*_benchmark_.*_total"} offset <run>)
 ```
 
-**The per-node series add up to the report.** On kind, at the end of a 15-minute run
-with sortie 94cf103, the sum over the two engines of `…_http_2xx_total` equalled the
-report's `totals` for every one of the eight targets. With 9fcbb81 the names were read
-off the wire on kind (`sortie.mesh.tcp_d.sortie_worker.cluster.0.…`); **they have not
-been read in talos-main's Prometheus yet**, and the first run there is also the first
-that can say whether a run's series continue the previous run's (the collector forgets
-a series 15 minutes after its last sample, and each run's counters start at zero).
-Grade from the report; use the series to see the load is up, on which node a class
-moved, and when.
+**A total on these series is never one run's count. Read them with `rate()` or
+`increase()`.** The series are the same on every run, and the engine does not send
+totals: every 5 s it sends what each counter gained since its last flush (on kind's
+wire, one 9 rps target on one node: `40|c 45|c 45|c … 44|c 5|c`, which add up to the
+report's 540, and the next run begins `40|c 45|c …` again on the same name). The
+collector adds them up. So a series the collector still holds **carries on from the
+last run's total**, and it starts again from zero only when the collector had expired
+it (talos-main's forgets a series about 15 minutes after its last sample) or was
+itself restarted, which can also happen in the middle of a run. All of it has been
+seen on talos-main, on `sortie_mesh_svc_1_main_worker_03_cluster_0_benchmark_http_2xx_total`
+(2026-10-08): the short run left it at 7,739; the soak, 21 minutes later, began again
+from zero; and at the end of the soak it read **241,808** where the report has
+**275,400**, with one reset inside the run. `increase()` over the run's window read
+274,864. The absolute value is an accident of when the collector last forgot the
+series; a rate or an increase is not.
+
+The series do add up to the report when nothing was carried over or lost: on kind, at
+the end of a first 15-minute run with sortie 94cf103, the sum over the two engines of
+`…_http_2xx_total` equalled the report's `totals` for every one of the eight targets.
+That is a check of the path, not a way to grade. **Grade from the report**; nothing
+in `sortie-gate.sh` or in "Grading" below reads these series. Use them to see that the
+load is up, on which node a class moved, and when.
 
 ### The results stream
 
@@ -2325,13 +2366,19 @@ Each of these invalidated a real run:
 - `restart-watch.sh` — the restart watchdog (#1242). See "The restart gate".
 - `harness_test.sh` + `testdata/` — dry tests for `restart-watch.sh` (canned
   `kubectl get pods -o json` through a fake kubectl, including a refused call and a
-  non-List answer), `udscsi-window.awk`, `sortie-gate.sh` (canned sortie reports in
+  non-List answer, and a TERM before every command it runs and during every kubectl
+  call: exit 143 and no process left behind, #1386), `udscsi-window.awk`,
+  `sortie-gate.sh` (canned sortie reports in
   the 9fcbb81 format: clean, stream resets on one target, a missing target,
   `pool_overflow`, a lost backend, every backend lost, a node that froze and thawed,
   failures and a slow node on one backend only, a cancelled run, a short pool,
-  `http_inflight_lost`, a stage refused at the execution cap with two stages not run,
-  a results stream whose last line is cut short, two real kind reports, and two
+  `http_inflight_lost`, a stage refused at the execution cap with two stages not run
+  (the 9fcbb81 report, known by its text, and the f0750ec one, known by its `refused`
+  field, with a lost backend beside a refusal),
+  a results stream whose last line is cut short, real kind reports, and two
   old-format reports, which are refused), `sortie-save.sh` (its `--times`, and the save against a fake kubectl),
+  `run.sh` itself up to a Job that has already ended (fake kubectl and helm: the saver
+  is armed first and the short run's report is in the run directory, #1387),
   `sortie-plan.sh` (shares and both profiles), the pins and the PriorityClass in
   `sortie-values.yaml` / `run.sh`, and `pods-not-ready.awk` (with the old expression
   as the red reading). No cluster; needs
