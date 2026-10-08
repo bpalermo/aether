@@ -1465,6 +1465,112 @@ one node at a time like a DaemonSet roll:
   the pod template and the sidecar's arguments gain `--watch`). See *Changing
   the OPA policy* under the ext_authz sidecar.
 
+#### An agent image change also rolls the controller (#1428)
+
+The controller's pod template names the **agent** image: the egress identity
+gate's init container runs `/identity-ready`, which ships as a layer of the
+agent image, and the controller is told which image to inject with
+`--identity-gate-image` (default: `agent.image`). A new agent image digest is
+therefore a new controller argument, and the controller Deployment rolls with
+the agent DaemonSet even when the controller's own image did not change. This
+is accepted, not a defect: the node's agent pod runs the same image, so the
+init container normally finds it in the node's image cache, and the alternative
+(an image of its own for `identity-ready`) would give that up to save a
+controller roll.
+
+"Normally", not always. During an upgrade the controller and the agent
+DaemonSet roll independently: a controller replica that already has the new
+digest can admit a pod onto a node whose agent has not been replaced yet, and
+that pod's init container then pulls the new agent image itself
+(`pullPolicy: IfNotPresent`) before it can start. The same holds on a node
+that has just joined. The cost is one image pull on that pod's start, once
+per node.
+
+Three things follow:
+
+- A controller roll replaces two replicas behind a Service one at a time
+  (surge 1, none unavailable) and does not touch running mesh pods. A pod
+  keeps the init container image it was admitted with; only pods admitted
+  afterwards get the new one.
+- `controller.webhook.identityGate.image.*` pointed at a fixed mirror tag
+  removes the coupling, at the price of keeping that mirror in step with the
+  agent image yourself.
+- The argument is not passed at all when the gate is off: `spire.enabled=false`,
+  `controller.webhook.identityGate.enabled=false`, or no mutating webhook
+  (`namespaceInjection` and `injectPodNdots` both off, chart >= 2.4.20, #1432).
+  In those releases an agent image change does not roll the controller.
+
+To see the coupling on a cluster (the two digests are the same):
+
+```bash
+kubectl -n aether-system get deploy aether-controller \
+  -o jsonpath='{range .spec.template.spec.containers[0].args[*]}{@}{"\n"}{end}' | grep identity-gate-image=
+kubectl -n aether-system get ds aether-agent -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+```
+
+#### Chart 2.4.20: the registrar, the controller and the edge roll once (#1434)
+
+The upgrade that crosses 2.4.20 changes the pod template of the three
+Deployments that run two replicas, so each rolls once, on Kubernetes >= 1.27:
+
+| Deployment | What changes in its pod template |
+| --- | --- |
+| registrar | its spread constraint gains `matchLabelKeys: [pod-template-hash]` |
+| edge (when enabled) | the same |
+| controller | its default affinity (two preferred anti-affinity terms: its own replicas, the registrars' node) is gone; a spread constraint with `matchLabelKeys` keeps its replicas apart. A `controller.affinity` you set is rendered as before |
+| controller, only with `namespaceInjection` and `injectPodNdots` both off | additionally `--identity-gate=true` and the gate's flags become `--identity-gate=false` (#1432) |
+
+No DaemonSet changes. Below Kubernetes 1.27 the registrar and the edge render
+exactly as before and only the controller rolls.
+
+What it is for: the registrar and the edge already had a soft spread
+constraint, and both registrar replicas were still found on one node of a
+five-worker cluster. Two things defeated it, measured on kind (Kubernetes
+1.35, a tainted control plane plus workers, stand-in pods carrying the chart's
+scheduling fields, the three Deployments rolled together twenty times;
+rollouts that ended with both replicas of a Deployment on one node, as
+controller / edge / registrar):
+
+| Pod templates | 2 workers | 3 workers |
+| --- | --- | --- |
+| chart 2.4.18 | 8 / 5 / 10 | 1 / 0 / 5 |
+| 2.4.18 without the controller's "off the registrars' node" term | 0 / 6 / 2 | 0 / 0 / 1 |
+| `matchLabelKeys` added, that term kept | 9 / 0 / 11 | 1 / 0 / 3 |
+| chart 2.4.20: `matchLabelKeys` added, that term gone | 0 / 0 / 0 | 0 / 0 / 0 |
+
+- The controller's default affinity preferred nodes without a registrar. The
+  scheduler applies a preferred anti-affinity term in both directions, so
+  every new registrar was also pushed off the nodes that held a controller,
+  with the same weight as its own spread constraint pulled it onto an empty
+  one. The two cancelled, and the tie fell to the scheduler's other scores.
+- Without `matchLabelKeys` the constraint counted the pods of the ReplicaSet
+  being rolled away beside the new ones.
+
+The default stays a preference (`<component>.nodeSpread: soft`); `required`
+makes it a rule, and `none` removes it (`docs/configuration.md`). If you set
+`controller.affinity` to keep the controller off the registrars' node, expect
+the third row (`matchLabelKeys` added, that term kept): the constraint still
+has `matchLabelKeys`, and the term cancels it as before.
+
+Nothing moves a running pod, before or after the upgrade: a spread constraint
+acts when a pod is scheduled. The roll this upgrade causes is what re-places
+the replicas. To see where they are, before and after:
+
+```bash
+kubectl get pods -A \
+  -l 'app.kubernetes.io/part-of=aether,app.kubernetes.io/component in (registrar,controller,edge)' \
+  -o 'custom-columns=COMPONENT:.metadata.labels.app\.kubernetes\.io/component,POD:.metadata.name,NODE:.spec.nodeName' \
+  --sort-by='.metadata.labels.app\.kubernetes\.io/component'
+# The constraint each Deployment carries:
+kubectl get deploy -A -l app.kubernetes.io/part-of=aether \
+  -o custom-columns=NAME:.metadata.name,SPREAD:.spec.template.spec.topologySpreadConstraints
+```
+
+Two replicas of one component on the same node after the roll means the
+preference lost to the scheduler's other scores (or only one node had room).
+`kubectl -n aether-system rollout restart deploy/aether-registrar` schedules
+them again; `registrar.nodeSpread=required` stops it happening.
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod
@@ -4933,17 +5039,43 @@ kubectl get mutatingwebhookconfiguration,validatingwebhookconfiguration \
 An entry at `0` is a webhook the apiserver cannot call; with
 `failurePolicy: Ignore` it is skipped silently, so pods in an
 `aether.io/managed` namespace come up outside the mesh and without the
-identity gate. What the controller does without the permission was read from
-its code and not reproduced on a cluster: the injector reads the configuration
-through the manager's cache, whose informer can never list it, so the read
-waits instead of failing. Expect client-go's
-`Failed to watch ... mutatingwebhookconfigurations is forbidden` lines on the
-leader, **no** `webhook caBundle injection failed` line, and the leader replica
-NotReady on its `cache-sync` check. Upgrading to a chart with the fix adds the
-rule; the leader's informer then syncs on its next retry and the injector logs
-`injected SPIRE trust bundle into mutating webhook caBundle`. If it does not
-within a few minutes, restart the controller (a decision for the cluster's
-owner; the webhooks fail open while no replica answers):
+identity gate.
+
+What the controller's leader does when it cannot read or write a webhook
+configuration (since #1431; reproduced in the controller's tests against a real
+informer cache, not on a cluster):
+
+- It logs `webhook caBundle injection failed` at ERROR, once per attempt, with
+  the object in `kind` and `webhookConfig`, the step in `reason` (`get`,
+  `update`, or `trust_bundle` when SPIRE gave an SVID but no bundle), the
+  apiserver's error, and `retryIn`.
+- It counts the attempt in `aether.controller.webhook.cabundle_injection_failures`
+  (Prometheus: `aether_controller_webhook_cabundle_injection_failures_total`),
+  by `kind` (`validating`, `mutating`) and `reason`. Expected to stay 0.
+- It retries with a backoff that doubles from 1 s to 1 min, so a permission that
+  appears is picked up within a minute, with no restart and no trust-bundle
+  rotation needed.
+- The two configurations are independent: the one that works keeps following
+  SPIRE trust-bundle rotations while the other fails.
+- The leader **stays Ready**. Leaving the webhook Service would not help the
+  webhook whose caBundle is missing (the apiserver cannot verify any replica
+  for it) and would take the working webhook's endpoint away. The log line and
+  the counter are the signal, not readiness.
+
+The injector reads the two objects from the apiserver directly, by name, and
+needs only `get` and `update` on them; the `list` and `watch` the chart also
+grants are no longer used by it.
+
+A controller built before #1431 behaved differently in the same state: it read
+through the manager's cache, whose informer could never list the configuration,
+so the read waited instead of failing. That leader logs client-go's
+`Failed to watch ... mutatingwebhookconfigurations is forbidden` lines and
+**no** `webhook caBundle injection failed` line, stops refreshing the
+*validating* webhook's caBundle on a trust-bundle rotation too, and is NotReady
+on its `cache-sync` check. Adding the rule lets its informer sync on the next
+retry; if the bundle does not appear within a few minutes, restart the
+controller (a decision for the cluster's owner; the webhooks fail open while no
+replica answers):
 
 ```bash
 kubectl -n "$NS" rollout restart deploy -l app.kubernetes.io/name=aether-controller
