@@ -5,14 +5,23 @@ load("@rules_go//go:def.bzl", "go_test")
 # (#1407, #1408, #1409). The rules in the check were measured on this binary;
 # this is what notices when a pin bump changes the parser.
 #
-# About 60 `envoy --mode validate` runs and two short serving ones, ~4 s wall
-# time (measured 4.3 s).
+# It also holds the supervisor's prediction of Envoy's default worker count
+# (hotrestart.EnvoyDefaultConcurrency, #1442) against the count the pinned
+# Envoy really runs, under a narrowed CPU affinity and, where an unprivileged
+# test can get a cgroup with a CPU quota (a systemd user session), under a CPU
+# limit. That last test skips where it cannot, CI included.
+#
+# About 60 `envoy --mode validate` runs and a dozen short serving ones, ~7 s
+# wall time.
 #
 # Tagged "envoy-validate" (not "integration"): no Docker daemon required.
 go_test(
     name = "envoyargs_test",
     size = "small",
-    srcs = ["envoyargs_test.go"],
+    srcs = [
+        "cpucount_linux_test.go",
+        "envoyargs_test.go",
+    ],
     # Gazelle does not manage `data` -- keep this by hand.
     data = ["//agent/test/envoybin:envoy_bin"],
     tags = [

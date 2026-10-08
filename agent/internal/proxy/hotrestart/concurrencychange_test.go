@@ -47,9 +47,7 @@ func newSuccessorSupervisor(t *testing.T, f *fakeAdminServer, successorConcurren
 		cfg.ExtraArgs = append(cfg.ExtraArgs, "--concurrency", strconv.Itoa(successorConcurrency))
 	}
 	s := New(cfg, slog.New(slog.DiscardHandler), nil)
-	s.onlineCPUs = func() (int, error) {
-		return 0, errors.New("onlineCPUs must not be consulted with an explicit --concurrency")
-	}
+	s.cpus = &fakeCPUs{onlineErr: errors.New("the CPU sources must not be consulted with an explicit --concurrency")}
 	writeRawState(t, s, predecessorEpoch, 0)
 	return s
 }
@@ -121,21 +119,21 @@ func TestConcurrencyDefaultComparesOnlineCPUs(t *testing.T) {
 	t.Run("default equals the predecessor's count", func(t *testing.T) {
 		f := newPredecessor(t, 4)
 		s := newSuccessorSupervisor(t, f, 0)
-		s.onlineCPUs = func() (int, error) { return 4, nil }
+		s.cpus = &fakeCPUs{online: 4}
 		initStartEpochWithin(t, s, 10*time.Second)
 		assertHotRestart(t, s, f)
 	})
 	t.Run("default differs from the predecessor's explicit count", func(t *testing.T) {
 		f := newPredecessor(t, 2)
 		s := newSuccessorSupervisor(t, f, 0)
-		s.onlineCPUs = func() (int, error) { return 4, nil }
+		s.cpus = &fakeCPUs{online: 4}
 		initStartEpochWithin(t, s, 10*time.Second)
 		assertFreshAfterDrain(t, s, f)
 	})
 	t.Run("default unknown", func(t *testing.T) {
 		f := newPredecessor(t, 2)
 		s := newSuccessorSupervisor(t, f, 0)
-		s.onlineCPUs = func() (int, error) { return 0, errors.New("no sysfs") }
+		s.cpus = &fakeCPUs{onlineErr: errors.New("no sysfs")}
 		initStartEpochWithin(t, s, 10*time.Second)
 		assertHotRestart(t, s, f)
 	})
