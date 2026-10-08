@@ -41,9 +41,11 @@
 // Nothing else in the image moves: the descriptor is exactly 20 bytes wide, the
 // same width as a SHA-1 digest, so the note is patched in place.
 //
-// Release traceability does not live in this note. It lives in the `--stamp`
-// x_defs version information and in the image tags; the ELF note is the
-// symbolizer's key and nothing else.
+// Release traceability does not live in this note: which commit built a binary
+// is answered by its image's signature, provenance and `dev-<sha>` tag. The
+// note is the symbolizer's key and, since #1378, the version each component
+// reports about itself (//common/buildinfo reads it from the running
+// executable), so that an unchanged binary keeps its version across commits.
 package main
 
 import (

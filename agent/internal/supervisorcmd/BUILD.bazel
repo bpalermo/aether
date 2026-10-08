@@ -7,6 +7,7 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/internal/proxy/hotrestart",
+        "//common/buildinfo",
         "//common/file",
         "//common/log",
         "@com_github_spf13_cobra//:cobra",
@@ -19,12 +20,14 @@ go_test(
     srcs = [
         "flags_test.go",
         "supervisor_test.go",
+        "version_test.go",
     ],
     # TestFlagsCoverTheChartContract reads the argv the chart actually passes.
     # Gazelle does not manage `data` — keep this by hand.
     data = ["//charts/aether:templates/agent-proxy-daemonset.yaml"],
     embed = [":supervisorcmd"],
     deps = [
+        "//common/buildinfo",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

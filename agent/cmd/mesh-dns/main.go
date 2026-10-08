@@ -30,6 +30,7 @@ import (
 
 	"aethermesh.dev/agent/constants"
 	"aethermesh.dev/agent/internal/meshdns"
+	"aethermesh.dev/common/buildinfo"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/common/log"
 	"aethermesh.dev/common/signals"
@@ -37,8 +38,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Version is set at build time via -ldflags (Bazel x_defs).
-var Version = "dev"
+// Version is the version this component reports (OTel service.version and
+// `--version`): the running binary's own GNU build ID, read from its ELF
+// (//common/buildinfo), not a value linked in from the commit (#1378).
+var Version = buildinfo.Version()
 
 // reloadDebounce coalesces a flurry of fsnotify events (an atomic rename is several
 // ops back-to-back) into a single snapshot reload.
@@ -86,10 +89,14 @@ func rootCmd() *cobra.Command {
 			"off hitlessly, and reloads records from the snapshot file via fsnotify. No Kubernetes API " +
 			"access — records come only from the file.",
 		SilenceUsage: true,
+		// `--version` (#1429): cobra adds the flag because Version is set.
+		Version: Version,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context())
 		},
 	}
+
+	cmd.SetVersionTemplate(buildinfo.Describe("mesh-dns") + "\n")
 
 	f := cmd.Flags()
 	f.StringVar(&snapshotPath, "snapshot-path", constants.DefaultMeshDNSSnapshotPath, "Host-persistent mesh-DNS record snapshot file the agent writes and this daemon watches")

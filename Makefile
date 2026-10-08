@@ -184,7 +184,8 @@ push-registrar-image:
 load-all: load-agent-image load-mesh-dns-image load-proxy-supervisor-image load-uds-csi-image load-cni-install-image load-registrar-image
 
 # Every push target passes --stamp so the released artifacts carry the git
-# version information (charts, x_defs). The GNU build-IDs do NOT depend on it:
+# version information (chart versions, image tags). No binary links it (#1378),
+# and the GNU build-IDs do NOT depend on it:
 # //bazel/buildid derives each one from the binary's own content (#651, #653),
 # in every build configuration.
 .PHONY: push-all

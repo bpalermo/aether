@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	crdv1 "aethermesh.dev/common/apis/config/v1"
+	"aethermesh.dev/common/buildinfo"
 	"aethermesh.dev/common/manager"
 	"aethermesh.dev/common/spire"
 	"aethermesh.dev/controller/internal/edgeconfig"
@@ -56,8 +57,10 @@ type readyzAdder interface {
 	AddReadyzCheck(name string, check healthz.Checker) error
 }
 
-// Version is set at build time via -ldflags (Bazel x_defs).
-var Version = "dev"
+// Version is the version this component reports (OTel service.version and
+// `--version`): the running binary's own GNU build ID, read from its ELF
+// (//common/buildinfo), not a value linked in from the commit (#1378).
+var Version = buildinfo.Version()
 
 var (
 	cfg = NewControllerConfig()
@@ -86,6 +89,11 @@ func GetCommand() *cobra.Command {
 }
 
 func init() {
+	// `--version` (#1429). Cobra answers it before any hook runs, so it needs
+	// no configuration file and no cluster.
+	rootCmd.Version = Version
+	rootCmd.SetVersionTemplate(buildinfo.Describe("controller") + "\n")
+
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 	rootCmd.Flags().StringVar(&cfg.MeshConfigMapName, "mesh-config-configmap", cfg.MeshConfigMapName, "Name of the ConfigMap the MeshConfig reconciler projects into (in each MeshConfig's own namespace)")
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Serve the validating webhook with a SPIRE X.509 SVID and inject the SPIRE trust bundle into the webhook caBundle (instead of a static cert)")

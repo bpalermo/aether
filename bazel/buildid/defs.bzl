@@ -26,8 +26,12 @@ Properties:
   * **unconditional** — a content hash needs no workspace status, so there is no
     `--stamp` gating and no `ctx.info_file` input. Dev, PR-CI and release builds
     all produce correct, self-verifying IDs, and the action's cache key is just
-    (input binary, tool). Release traceability lives in the `--stamp` x_defs
-    version information and the image tags, not in the ELF note.
+    (input binary, tool). Which commit built a binary is answered outside
+    it, by its image's signature, provenance and `dev-<sha>` tag (#1378).
+
+Since #1378 the note is also the version each component reports about itself
+(OTel `service.version`, `--version`, the CSI plugin's `vendor_version`):
+`//common/buildinfo` reads it from the running executable.
 
 `build_id_check` is the guard: it fails the build if a released binary has no
 build-ID note, if a note does not match the hash recomputed from that binary's

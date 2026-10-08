@@ -3,13 +3,16 @@ package cmd
 import (
 	"fmt"
 
+	"aethermesh.dev/common/buildinfo"
 	"aethermesh.dev/common/log"
 	"aethermesh.dev/prober/internal/prober"
 	"github.com/spf13/cobra"
 )
 
-// Version is stamped at build time (see BUILD.bazel x_defs).
-var Version = "dev"
+// Version is the version this component reports (OTel service.version and
+// `--version`): the running binary's own GNU build ID, read from its ELF
+// (//common/buildinfo), not a value linked in from the commit (#1378).
+var Version = buildinfo.Version()
 
 // GetCommand builds the prober root command.
 func GetCommand() *cobra.Command {
@@ -21,6 +24,8 @@ func GetCommand() *cobra.Command {
 			"pass/fail SLI, capturing the connection-level failures the proxy-emitted " +
 			"aether_stats metric is structurally blind to during hot restarts.",
 		SilenceUsage: true,
+		// `--version` (#1429): cobra adds the flag because Version is set.
+		Version: Version,
 		RunE: func(c *cobra.Command, _ []string) error {
 			// //common/log (slog), not controller-runtime's zap wrapper: that
 			// import was the prober's second path to controller-runtime and a
@@ -37,6 +42,8 @@ func GetCommand() *cobra.Command {
 			return p.Run(c.Context())
 		},
 	}
+
+	cmd.SetVersionTemplate(buildinfo.Describe("prober") + "\n")
 
 	f := cmd.Flags()
 	f.StringVar(&cfg.Egress, "egress", cfg.Egress, "local mesh egress listener host:port")
