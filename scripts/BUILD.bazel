@@ -53,7 +53,9 @@ sh_test(
 # The image-digest check (#1378) against a fake `bazel` that "builds" two images
 # from the workspace-status script it is handed: stable digests pass; a digest
 # that follows the commit, a tag that does not, a status that never reaches the
-# build, an empty query and a status script with no STABLE_GIT_COMMIT each fail.
+# build, an action under an image that takes a status file, a query or action
+# query that fails or comes back empty, and a status script that fails or has no
+# STABLE_GIT_COMMIT each fail.
 # The check itself builds the real images twice and cannot run inside a test
 # (it runs Bazel); CI's `test` job runs it as a step.
 sh_test(

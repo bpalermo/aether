@@ -206,9 +206,12 @@ check-build-id:
 		cat bazel-bin/bazel/buildid/release_build_ids.txt; \
 	done
 
-# Fail if any image's digest depends on the commit (#1378): builds every image
-# index twice under --stamp, as two made-up commits, and compares the digests.
-# Seconds once the images are built. Also a step of CI's `test` job.
+# Fail if the digest of a Go image of this workspace depends on the commit
+# (#1378): no action under an image index may take a workspace-status file
+# (bazel aquery), and every index is built twice under --stamp, as two made-up
+# commits, and the digests compared. The proxy image (the nested proxy/
+# workspace) is out of scope: it carries the commit on purpose. Seconds once
+# the images are built. Also a step of CI's `test` job.
 .PHONY: check-image-digests
 check-image-digests:
 	@scripts/check-image-digest-stability.sh

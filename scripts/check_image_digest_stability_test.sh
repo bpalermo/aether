@@ -18,6 +18,12 @@
 #   7. no-digest      a build that writes no digest                -> exit 1
 #   8. the real status script reports no STABLE_GIT_COMMIT         -> exit 1
 #   9. the real status script fails                                -> exit 1
+#  10. status-input   an action under an image takes a status file  -> exit 1,
+#                     naming the action, although both builds agree on every
+#                     digest (the volatile-key case the builds cannot see)
+#  11. aquery-fails   the action query prints, then fails           -> exit 1
+#  12. aquery-blind   the action query reports no push              -> exit 1
+#                     (it saw no status input at all; not believed)
 #
 # Run: bazel test //scripts:check_image_digest_stability_test, or
 #      bash scripts/check_image_digest_stability_test.sh
@@ -103,6 +109,22 @@ build)
 		echo "{\"tags\":[\"dev\",\"$tag\"]}" >"$bin/$p/image_push.json"
 	done
 	;;
+aquery)
+	# `--output=text` blocks, as Bazel prints them. Every push reads the status;
+	# so does Bazel's own build-info target.
+	[ "$FAKE_MODE" = aquery-blind ] && exit 0
+	for p in "${pkgs[@]}"; do
+		printf "action 'Expanding template'\n  Mnemonic: ExpandTemplate\n  Target: //%s:image_push\n  Inputs: [bazel-out/stable-status.txt, bazel-out/volatile-status.txt]\n\n" "$p"
+	done
+	printf "action 'Translating volatile BuildInfo file'\n  Mnemonic: TranslateBuildInfo\n  Target: @bazel_tools//tools/build_defs/build_info:cc_build_info\n  Inputs: [bazel-out/volatile-status.txt]\n\n"
+	if [ "$FAKE_MODE" = status-input ]; then
+		printf "action 'GoLink other/cmd/binary'\n  Mnemonic: GoLink\n  Target: //other/cmd:binary\n  Inputs: [bazel-out/volatile-status.txt]\n\n"
+	fi
+	if [ "$FAKE_MODE" = aquery-fails ]; then
+		echo "fake bazel: aquery died half way" >&2
+		exit 3
+	fi
+	;;
 cquery)
 	for p in "${pkgs[@]}"; do
 		echo "$bin/$p/image_index_digest"
@@ -153,7 +175,8 @@ expect() { # expect <name> <mode> <want rc> <must contain>... [-- <must not cont
 write_status "STABLE_GIT_COMMIT $HEAD_SHA" "GIT_COMMIT $HEAD_SHA"
 
 expect "stable digests and tags that follow the commit pass" ok 0 \
-	"OK: 2 of 2 image digests" "ok: //agent/cmd/agent:image_index sha256:" -- "FAIL"
+	"2 of 2 image digests" "ok: //agent/cmd/agent:image_index sha256:" \
+	"ok: no action under the 2 image indexes takes a workspace-status file (the 2 pushes do" -- "FAIL"
 expect "a digest that follows the commit fails, and only that image is named" stamped 1 \
 	"FAIL: //other/image:image_index: the digest depends on the commit" "ok: //agent/cmd/agent:image_index" "1 check(s) failed" \
 	-- "FAIL: //agent/cmd/agent"
@@ -167,6 +190,14 @@ expect "a query that prints one image and then fails is not believed" query-fail
 	"the image_index query failed (exit 3)" "query died half way" -- "OK:" "building"
 expect "a build that writes no digest fails" no-digest 1 \
 	"no digest read" -- "OK:"
+
+expect "an action under an image that takes a status file fails, though the digests agree" status-input 1 \
+	"//other/cmd:binary: its GoLink action takes a workspace-status file" "ok: //other/image:image_index sha256:" "1 check(s) failed" \
+	-- "OK:" "cc_build_info:" "image_push: its"
+expect "an action query that prints and then fails is not believed" aquery-fails 1 \
+	"the action query failed (exit 3)" "aquery died half way" -- "OK:" "building"
+expect "an action query that reports no push is not believed" aquery-blind 1 \
+	"does not report //agent/cmd/agent:image_push reading the workspace status" -- "OK:"
 
 write_status "STABLE_GIT_VERSION v1" "GIT_COMMIT $HEAD_SHA"
 expect "a real status script with no STABLE_GIT_COMMIT fails" ok 1 \

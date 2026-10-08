@@ -36,9 +36,10 @@ IMAGE_SOURCE_URL = "https://github.com/bpalermo/aether"
 # only tags, referrers, signatures and attestations sit outside the digest.
 #
 # scripts/check-image-digest-stability.sh (CI's `test` job, or
-# `make check-image-digests`) builds every index as two different commits and
-# fails if a digest differs, so a commit-derived value cannot come back here, or
-# into a binary, unnoticed.
+# `make check-image-digests`) fails if any action under an index built by this
+# macro takes a workspace-status file, and builds every such index as two
+# different commits and fails if a digest differs, so a commit-derived value
+# cannot come back here, or into a binary, unnoticed.
 _PROVENANCE = {
     "org.opencontainers.image.source": IMAGE_SOURCE_URL,
 }
