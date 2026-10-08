@@ -1229,6 +1229,23 @@ fallback tags) and leaves the repository. The run summary is a table:
 --recursive` — the multi-arch **index and each per-architecture child
 manifest**.
 
+**Each digest is signed and attested once (#1378).** A digest can be published
+by more than one run: a re-run of the workflow, or a later commit that did not
+change that image. `scripts/publish-sign.sh` asks first whether the index and
+every child already verify under this workflow's identity (the registry's
+referrers index, then the same `verify_image_signatures` the verify step runs)
+and signs only what does not; a question that goes unanswered is answered by
+signing. `scripts/publish-provenance.sh subjects` asks GitHub's attestation
+store whether the digest has provenance that verifies as this workflow and
+hands `actions/attest` only the digests that have none; there an unanswered
+lookup **fails the step**, and when nothing is new the attest step is skipped
+with a `::notice::`. Nothing is skipped in the checks: every reference, signed
+or attested now or before, goes through both verify steps. The run summary
+lists every artifact with its digest, whether the digest is new, the commit its
+provenance names and the tag: that is the list of what a deploy of that commit
+rolls. `//scripts:publish_sign_test` and `//scripts:publish_provenance_test`
+hold the logic and the workflow's wiring.
+
 The user-facing commands (signature and provenance, images and charts) are in
 [Verifying a release](verifying-releases.md); this section is how it is built.
 
@@ -1241,12 +1258,16 @@ right after the push. The run verifies them with
 `verify_image_signatures -- --single --file signed-charts.txt` (`--single`:
 no child walk, and a ref that turns out to be an index is refused). Then
 `actions/attest` writes ONE SLSA v1 provenance statement whose subjects are
-every signed image index and chart manifest, stored in the repository's
+the image indexes and chart manifests that had no provenance yet (every chart,
+and each image whose digest is new), stored in the repository's
 attestation store on GitHub (not in the registry: `push-to-registry` is off),
-and the last step runs `gh attestation verify oci://<ref>` for each subject
-with the workflow and the commit pinned. A failure in any of these fails the
-publish run after the artifacts are pushed, like a failed image signature
-does: re-run the workflow, which signs and attests the same digests again.
+and the last step runs `gh attestation verify oci://<ref>` for every
+reference with the workflow pinned: with `--source-digest <commit>` as well for
+a digest this run attested, without it for one attested by an earlier commit
+(its provenance names that commit, and the step prints it). A failure in any of
+these fails the publish run after the artifacts are pushed, like a failed image
+signature does: re-run the workflow, which signs and attests only what the
+failed run left unsigned or unattested.
 The post-publish sweep (`publish-verify`) does not look at chart signatures or
 attestations yet. The proxy image (`proxy-release.yml`) is signed but not
 attested yet.

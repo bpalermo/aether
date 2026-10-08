@@ -221,85 +221,29 @@ jobs:
         env:
           COSIGN_YES: "true"
           COMMIT: ${{ github.sha }}
-          # Registry READS (tag lookups, digests) with the robot rather than
-          # anonymously, so a repository that is not public yet cannot make this
-          # step lie; cosign's own push uses the Docker login above.
+          # Registry READS (tag lookups, digests, referrers) with the robot
+          # rather than anonymously, so a repository that is not public yet
+          # cannot make this step lie; cosign's own push uses the Docker login
+          # above.
           REGISTRY_USERNAME: ${{ secrets.QUAY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # The registry-read helpers and, crucially, the list of published image
-          # repositories live in ONE place, shared with the #880 verifier that
-          # later asserts these same artifacts landed. Two copies of the repo
-          # list could drift, and a verifier missing a repo would pass while that
-          # image was never published at all.
-          #
-          # registry_all_tags() paginates. It was written after this step failed
-          # on e3b58e6 by reading 100 of 667 tags (#875) -- the tag existed and
-          # the lookup could not see it, so a correct step reported the images
-          # unpublished. See scripts/registry-lib.sh for the full story.
-          # shellcheck source=scripts/registry-lib.sh
-          . ./scripts/registry-lib.sh
-
-          # A missing entry in REGISTRY_IMAGE_REPOS silently ships an UNSIGNED
-          # image, so the verify step below re-reads this same list.
-          repos=("${REGISTRY_IMAGE_REPOS[@]}")
-          if [ "${#repos[@]}" -eq 0 ]; then
-            echo "::error::no image repositories (scripts/image-registry.sh could not read bazel/registry/registry.bzl)"
-            exit 1
-          fi
-
-          signed=0
-          for repo in "${repos[@]}"; do
-            tok="$(registry_registry_token "$repo")"
-
-            # The commit-suffixed tag (`<tag>-<full sha>`) is the only immutable
-            # one -- `dev` is rewritten by every publish (#692).
-            #
-            # registry_commit_tag re-lists for ~60 s, since this job pushed the
-            # tag seconds ago and the listing can lag the push, and prints every
-            # miss with its scan size. On a final miss it prints the
-            # "::error::no tag ending in -<sha> in <repo> (scanned N tags)" line
-            # and returns 1. It replaced an inline `grep | head` that, under
-            # `set -euo pipefail`, ended this step with NO output when nothing
-            # matched -- before the error line meant to explain it (#1046).
-            if ! tag="$(registry_commit_tag "$repo" "$tok" "$COMMIT")"; then
-              exit 1
-            fi
-
-            # Resolve each image's INDEX DIGEST rather than signing a tag. Signing
-            # a tag re-resolves it inside cosign, which is a TOCTOU window against
-            # a mutable tag; the digest is what was actually published.
-            #
-            # `|| true`: the helper is a `curl -f | tr | sed | head` pipeline, so
-            # under pipefail a failed HEAD would end the step here, before the
-            # error line below that names the reference (#1046).
-            digest="$(registry_manifest_digest "$repo" "$tag" "$tok" || true)"
-            if [ -z "$digest" ]; then
-              echo "::error::could not resolve a digest for ${REGISTRY_HOST}/${repo}:${tag}"
-              exit 1
-            fi
-
-            echo "signing ${REGISTRY_HOST}/${repo}@${digest} (from ${tag})"
-            bazel run //bazel/cosign -- sign --yes --recursive "${REGISTRY_HOST}/${repo}@${digest}"
-            # Hand the EXACT reference to the verify step. It must not re-resolve
-            # the list itself: a second copy of the repo list can drift from this
-            # one, and re-resolving a tag would let verify pass against something
-            # other than what was signed.
-            echo "${REGISTRY_HOST}/${repo}@${digest}" >> signed-images.txt
-            signed=$((signed + 1))
-          done
-
-          # A loop that signs nothing must not report success. This is the same
-          # class of defect as the shellcheck aspect that linted zero files
-          # (#853): a step that passes because it did nothing is worse than a
-          # failing one.
-          if [ "$signed" -ne "${#repos[@]}" ]; then
-            echo "::error::signed ${signed} of ${#repos[@]} images"
-            exit 1
-          fi
-          echo "signed ${signed} image(s)"
+        # ONLY WHAT IS NOT SIGNED ALREADY (#1378). scripts/publish-sign.sh
+        # resolves each image of REGISTRY_IMAGE_REPOS (scripts/registry-lib.sh,
+        # the list the #880 verifier reads too) from its `<tag>-<full sha>` tag
+        # to its index digest, then asks whether that digest -- the index AND
+        # every child manifest -- already verifies under this workflow's
+        # identity and issuer. Yes: nothing is signed, the line says since
+        # when. No, or the question went unanswered: `cosign sign --recursive`,
+        # as before. An image whose content did not change keeps its digest
+        # from one commit to the next, and a re-run of this workflow meets the
+        # digests it signed the first time; neither may add one more signature
+        # to the same manifest.
+        #
+        # Every reference, signed now or before, goes to signed-images.txt, and
+        # the verify step below verifies every line of it: the skip decides what
+        # is signed, never whether the run is good. The logic and its failure
+        # paths are held by //scripts:publish_sign_test.
+        run: scripts/publish-sign.sh images "$COMMIT" signed-images.txt
 
       # The charts are signed too: one cosign signature per chart manifest, the
       # same keyless identity as the images. Until this step only the images were
@@ -313,6 +257,13 @@ jobs:
       # from the registry right after the push above; this job is serialised
       # (`concurrency` above), so no other publish can move a tag in between.
       #
+      # The same rule as the images: a chart manifest that already verifies is
+      # not signed again. In practice every chart manifest is new with every
+      # commit -- the `X.Y.Z-<sha>` version carries the commit, and so does the
+      # `appVersion` (`git describe`) of every chart, aether's bare `X.Y.Z`
+      # one included -- so every publish signs and attests all of them, and the
+      # skip is what a RE-RUN of the same commit meets.
+      #
       # No `--recursive`: a chart is a single manifest, not an index.
       - name: Sign published charts (keyless)
         env:
@@ -320,29 +271,7 @@ jobs:
           COMMIT: ${{ github.sha }}
           REGISTRY_USERNAME: ${{ secrets.QUAY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # The script prints nothing on stdout unless EVERY tag resolved.
-          scripts/published-chart-refs.sh "$COMMIT" > chart-refs.txt
-          if [ ! -s chart-refs.txt ]; then
-            echo "::error::no chart references resolved -- nothing to sign"
-            exit 1
-          fi
-
-          signed=0
-          while read -r ref; do
-            echo "signing ${ref}"
-            bazel run //bazel/cosign -- sign --yes "$ref"
-            echo "$ref" >> signed-charts.txt
-            signed=$((signed + 1))
-          done < chart-refs.txt
-
-          if [ "$signed" -ne "$(wc -l < chart-refs.txt)" ]; then
-            echo "::error::signed ${signed} of $(wc -l < chart-refs.txt) chart manifests"
-            exit 1
-          fi
-          echo "signed ${signed} chart manifest(s)"
+        run: scripts/publish-sign.sh charts "$COMMIT" signed-charts.txt
 
       # Prove the signatures are actually there AND verifiable. Without this the
       # sign step could succeed while attaching something nothing can verify, and
@@ -407,8 +336,9 @@ jobs:
       # digest". Provenance says how the digest came to be: which commit, which
       # workflow file at which ref, which run, on which runner. One in-toto
       # statement (predicate https://slsa.dev/provenance/v1) names every image
-      # index and every chart manifest this run pushed, signed with a Fulcio
-      # certificate for this job's OIDC identity and logged in the public Rekor.
+      # index and every chart manifest this run was the FIRST to push, signed
+      # with a Fulcio certificate for this job's OIDC identity and logged in the
+      # public Rekor.
       #
       # WHERE IT LIVES: in this repository's attestation store on GitHub, looked
       # up by digest -- not in the registry (`push-to-registry` is off). The
@@ -419,75 +349,56 @@ jobs:
       # in the registry instead and would not find it; nothing here needs that
       # yet, and turning `push-to-registry` on is the change if it ever does.
       #
-      # SUBJECTS: the two files the sign steps wrote, so what is attested is
-      # exactly what was signed and verified above -- the image INDEX digests
-      # (what a tag resolves to) and the chart manifests. The per-architecture
-      # children of an index are signed but are not attestation subjects.
+      # SUBJECTS: ONLY THE DIGESTS THAT HAVE NO PROVENANCE YET (#1378, the
+      # owner's decision: "only new digests"). scripts/publish-provenance.sh
+      # reads the two files the sign steps wrote -- the image INDEX digests
+      # (what a tag resolves to) and the chart manifests; the per-architecture
+      # children of an index are signed but are not attestation subjects -- and
+      # asks GitHub's attestation store about each digest. One that already has
+      # an attestation verifying as this workflow is skipped: its provenance
+      # names the commit that built it FIRST, which is the true statement about
+      # an image whose content did not change. A lookup that goes unanswered
+      # fails the step; it is never read as "attested".
       #
       # After the signature checks on purpose: nothing is attested that did not
       # verify.
       - name: Provenance subjects
-        run: |
-          set -euo pipefail
+        id: provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/publish-provenance.sh subjects signed-images.txt signed-charts.txt
 
-          # `<hex digest>  <registry>/<repository>`: the sha256sum format
-          # actions/attest reads. The name carries no tag, as GitHub's own
-          # container guidance has it; the digest is the identity.
-          cat signed-images.txt signed-charts.txt |
-            sed -nE 's|^(.+)@sha256:([0-9a-f]{64})$|\2  \1|p' > provenance-subjects.sha256
-          want="$(cat signed-images.txt signed-charts.txt | wc -l)"
-          got="$(wc -l < provenance-subjects.sha256)"
-          if [ "$got" -eq 0 ] || [ "$got" -ne "$want" ]; then
-            echo "::error::${got} provenance subject(s) from ${want} signed reference(s)"
-            exit 1
-          fi
-          echo "${got} provenance subject(s):"
-          cat provenance-subjects.sha256
-
+      # Skipped when no digest is new: an empty checksums file names no
+      # subject and must not reach actions/attest. In practice that is a RE-RUN
+      # of a commit already published (every chart is new with every commit,
+      # so a first run always has subjects). The step above says so in a
+      # ::notice::, so "attested nothing" is never silent. An output that was
+      # never written is not '0': the step then runs rather than being skipped.
       - name: Attest build provenance
+        if: steps.provenance.outputs.subjects != '0'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: provenance-subjects.sha256
 
       # Prove the attestation can be found and verified the way a user would, for
-      # EVERY subject: fetched from GitHub by the digest the registry serves,
-      # signed by this workflow file of this repository, built from this commit.
-      # Same reason as the signature checks: an attest step that succeeds while
-      # storing something nobody can verify is found out by the first person who
-      # tries.
+      # EVERY artifact, attested by this run or skipped: fetched from GitHub by
+      # the digest the registry serves and signed by this workflow file of this
+      # repository. A digest this run attested must also name THIS commit; an
+      # unchanged one names the older commit that built it, so no commit is
+      # pinned for it and the line prints the one it names. Same reason as the
+      # signature checks: an attest step that succeeds while storing something
+      # nobody can verify is found out by the first person who tries.
       - name: Verify the provenance attestations
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT: ${{ github.sha }}
-        run: |
-          set -euo pipefail
+        run: scripts/publish-provenance.sh verify "$COMMIT"
 
-          verified=0
-          while read -r ref; do
-            ok=0
-            # The attestation API can trail the upload by a moment.
-            for attempt in 1 2 3 4; do
-              if gh attestation verify "oci://${ref}" \
-                --repo "$GITHUB_REPOSITORY" \
-                --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/publish.yaml" \
-                --source-digest "$COMMIT" \
-                --predicate-type https://slsa.dev/provenance/v1 > /dev/null; then
-                ok=1
-                break
-              fi
-              echo "  attestation for ${ref} not verifiable yet (attempt ${attempt} of 4)"
-              sleep $((attempt * 5))
-            done
-            if [ "$ok" -ne 1 ]; then
-              echo "::error::no verifiable provenance attestation for ${ref}"
-              exit 1
-            fi
-            echo "  verified provenance of ${ref}"
-            verified=$((verified + 1))
-          done < <(cat signed-images.txt signed-charts.txt)
-
-          if [ "$verified" -eq 0 ]; then
-            echo "::error::verified no attestation"
-            exit 1
-          fi
-          echo "verified the provenance of ${verified} artifact(s)"
+      # What this publish changed, for whoever deploys it: one row per image
+      # and chart with its digest, whether the digest is new, the commit its
+      # provenance names and the tag it was pushed under. A workload rolls only
+      # when a digest it pins is new.
+      - name: Summary of new and unchanged digests
+        env:
+          COMMIT: ${{ github.sha }}
+        run: scripts/publish-provenance.sh summary "$COMMIT" signed-images.txt.state signed-charts.txt.state >> "$GITHUB_STEP_SUMMARY"
