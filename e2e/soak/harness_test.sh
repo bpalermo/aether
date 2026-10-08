@@ -1310,6 +1310,9 @@ case "$args" in
 			"$FAKE_REAL_SLEEP" 0.02
 		done
 		"$FAKE_REAL_SLEEP" 0.2
+		# As for FAKE_TERM_AT_CALL: is the driver (the session leader) still
+		# there, 200 ms after it said it was waiting for this call?
+		if kill -0 "$(ps -o sid= -p "$$" | tr -d ' ')" 2>/dev/null; then : >"$FAKE_STATE/hang-waited-for"; fi
 	fi
 	echo restarted
 	;;
@@ -1655,11 +1658,11 @@ wait "$cpid"
 rc=$?
 left=$(survivors "$csid")
 after=$(awk '/ STOP: still waiting after 20s for: / { s = 1 } s && / ROLLED / { n++ } END { print n + 0 }' "$R/churn.log" 2>/dev/null)
-if [ -n "$key" ] && [ -e "$R/term-at" ] && [ "$rc" -eq 143 ] && [ -z "$left" ] &&
+if [ -n "$key" ] && [ -e "$R/term-at" ] && [ "$rc" -eq 143 ] && [ -z "$left" ] && [ -e "$R/hang-waited-for" ] &&
 	[ "$(grep -c ' STOP: still waiting after 20s for: ' "$R/churn.log")" -eq 1 ] && [ "$after" -eq 3 ]; then
-	pass "churn term: a stop during the TRIPLE waits for rolls that take longer than 100 tries: it says so once, all three are logged, and only then does the driver exit (143, no process left)"
+	pass "churn term: a stop during the TRIPLE waits for rolls that take longer than 100 tries: it says so once, the driver is still there when they return, all three are logged, and only then does it exit (143, no process left)"
 else
-	fail "churn term: a stop with three rolls that do not return (point '${key:-not traced}'): exit $rc, left behind: ${left:-nothing}, ROLLED after the STOP line: $after, log tail: $(tail -n 4 "$R/churn.log" 2>/dev/null | tr '\n' '|')"
+	fail "churn term: a stop with three rolls that do not return (point '${key:-not traced}'): exit $rc, left behind: ${left:-nothing}, the driver was $([ -e "$R/hang-waited-for" ] && echo "still there" || echo "GONE") when the rolls returned, ROLLED after the STOP line: $after, log tail: $(tail -n 4 "$R/churn.log" 2>/dev/null | tr '\n' '|')"
 fi
 
 # ... and INSIDE a command: TERM while a kubectl call is in the foreground, sent
