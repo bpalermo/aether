@@ -18,18 +18,24 @@ load("//bazel/buildid:defs.bzl", "content_build_id")
 # base does carry one -- found `org.opencontainers.image.source` pointing at
 # GoogleContainerTools/distroless. A confidently wrong answer, which is worse
 # than an absent one. Setting `source` explicitly OVERRIDES that inherited value.
-#
-# `revision` is a fixed string, not a clock: it does not touch the zero
-# timestamps or the `bazel bu…` history entries, which stay exactly as they are.
 IMAGE_SOURCE_URL = "https://github.com/bpalermo/aether"
 
-# `{{.STABLE_GIT_COMMIT}}` is a Go template expanded by rules_img from the
-# workspace status (bazel/workspace_status.sh). STABLE_, not the pre-existing
-# volatile GIT_COMMIT, so the expansion is part of the action's cache key --
-# see the comment on that key in workspace_status.sh.
+# NOTHING HERE MAY DEPEND ON THE COMMIT (#1378).
+#
+# #837 also put `org.opencontainers.image.revision` here, as a config label, a
+# manifest annotation and an index annotation. Each of the three is part of the
+# JSON document it sits in, so each one alone gave every image a new index
+# digest with every commit (measured: 0 of 10 digests survived a docs-only
+# commit, with any single one of them left in). The charts pin index digests, so
+# every deploy rolled every workload, the node proxy included.
+#
+# An image is now a function of what is in it. Which commit built a digest is
+# answered by things that are NOT part of the digest: the cosign signature's
+# certificate, the provenance attestation and the per-commit `dev-<sha>` tag
+# (docs/verifying-releases.md). There is no annotation placement that is free:
+# only tags, referrers, signatures and attestations sit outside the digest.
 _PROVENANCE = {
     "org.opencontainers.image.source": IMAGE_SOURCE_URL,
-    "org.opencontainers.image.revision": "{{.STABLE_GIT_COMMIT}}",
 }
 
 def go_multi_arch_image(name, binary, repository, registry = IMAGE_REGISTRY, base = "@distroless_static", container_test_configs = ["testdata/container_test.yaml"], tars_layer = None, extra_labels = {}):
@@ -116,16 +122,11 @@ def go_multi_arch_image(name, binary, repository, registry = IMAGE_REGISTRY, bas
             compress = "zstd",  # Use zstd compression (optional, uses global default otherwise)
         )
 
-    # `stamp = "force"` rather than the default "auto" (#837). "auto" defers to
-    # Bazel's --stamp, which only the publish workflow and the Makefile push
-    # targets pass; everywhere else the `{{.STABLE_GIT_COMMIT}}` placeholder
-    # would be baked in LITERALLY, so a `bazel run …:image_load` image would
-    # claim a revision of "{{.STABLE_GIT_COMMIT}}". "force" makes the label
-    # correct in every build configuration -- dev, PR CI and release alike --
-    # at the cost of the tiny ExpandTemplate action taking stable-status.txt as
-    # an input. volatile-status.txt (BUILD_TIMESTAMP) is also an input but is
-    # constant-metadata to Bazel, so it never invalidates anything: two builds
-    # at the same commit still produce a byte-identical image.
+    # No `stamp` (#1378). The labels and annotations hold no template, so
+    # rules_img gives these actions no workspace-status input at all and the
+    # config, the manifest and the index are identical in every build
+    # configuration: `--stamp` or not, at this commit or the next. #837 set
+    # `stamp = "force"` here for the `revision` label, which is gone.
     image_manifest(
         name = "image_manifest",
         base = base,
@@ -134,7 +135,6 @@ def go_multi_arch_image(name, binary, repository, registry = IMAGE_REGISTRY, bas
         entrypoint = [entrypoint],
         labels = labels,
         annotations = _PROVENANCE,
-        stamp = "force",
     )
 
     image_index(
@@ -145,11 +145,10 @@ def go_multi_arch_image(name, binary, repository, registry = IMAGE_REGISTRY, bas
             "@rules_go//go/toolchain:linux_arm64",
         ],
         visibility = ["//visibility:private"],
-        # The index is the artifact the chart pins, so it carries the provenance
+        # The index is the artifact the chart pins, so it carries the source
         # too: a tool that reads only the top-level descriptor never has to walk
-        # into a per-platform manifest to answer "which commit is this?".
+        # into a per-platform manifest to answer "whose image is this?".
         annotations = _PROVENANCE,
-        stamp = "force",
     )
 
     # image_load uses image_index so the platform transition builds the Go
@@ -194,9 +193,18 @@ def go_multi_arch_image(name, binary, repository, registry = IMAGE_REGISTRY, bas
         visibility = ["//visibility:public"],
         registry = registry,
         repository = repository,
+        # The per-commit tag is where the commit lives now (#1378): a tag is not
+        # part of the digest, so `dev-<sha>` can point a new commit at an
+        # unchanged image. It reads the STABLE key, so the value it prints is
+        # the one that re-runs this expansion. Bazel does not re-run an action
+        # for a volatile key: with the volatile `.GIT_COMMIT` here the tag still
+        # followed the commit, but only because a STABLE_ key changed in the
+        # same status; with no commit-derived STABLE_ key a warm Bazel server
+        # kept the PREVIOUS commit's tag (both measured). See the key's comment
+        # in bazel/workspace_status.sh.
         tag_list = [
             "{{if (eq .GIT_BRANCH \"main\")}}dev{{else}}{{.tag}}{{end}}",
-            "{{if .GIT_COMMIT}}{{.tag}}-{{.GIT_COMMIT}}{{end}}",
+            "{{if .STABLE_GIT_COMMIT}}{{.tag}}-{{.STABLE_GIT_COMMIT}}{{end}}",
         ],
         build_settings = {
             "tag": ":release_tag",
