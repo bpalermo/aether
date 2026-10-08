@@ -11,6 +11,7 @@ go_library(
     visibility = ["//controller:__subpackages__"],
     deps = [
         "//common/apis/config/v1:config",
+        "//common/buildinfo",
         "//common/constants/mesh",
         "//common/manager",
         "//common/spire",
@@ -42,9 +43,11 @@ go_test(
         "config_test.go",
         "identitygate_test.go",
         "spire_identity_test.go",
+        "version_test.go",
     ],
     embed = [":cmd"],
     deps = [
+        "//common/buildinfo",
         "//common/spire",
         "//common/spire/spiretest",
         "@com_github_stretchr_testify//assert",

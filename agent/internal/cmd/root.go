@@ -54,6 +54,7 @@ import (
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	configv1 "aethermesh.dev/api/aether/config/v1"
 	configapisv1 "aethermesh.dev/common/apis/config/v1"
+	"aethermesh.dev/common/buildinfo"
 	"aethermesh.dev/common/config"
 	"aethermesh.dev/common/manager"
 	"aethermesh.dev/common/must"
@@ -83,8 +84,10 @@ const (
 	name = "aether-agent"
 )
 
-// Version is set at build time via -ldflags (Bazel x_defs).
-var Version = "dev"
+// Version is the version this component reports (OTel service.version and
+// `--version`): the running binary's own GNU build ID, read from its ELF
+// (//common/buildinfo), not a value linked in from the commit (#1378).
+var Version = buildinfo.Version()
 
 var (
 	cfg = NewAgentConfig()
@@ -121,6 +124,11 @@ func GetCommand() *cobra.Command {
 }
 
 func init() {
+	// `--version` (#1429). Cobra answers it before any hook runs, so it needs
+	// no configuration file and no cluster.
+	rootCmd.Version = Version
+	rootCmd.SetVersionTemplate(buildinfo.Describe("agent") + "\n")
+
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 	registerSharedFlags(rootCmd, true)
 

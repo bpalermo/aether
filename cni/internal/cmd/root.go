@@ -6,6 +6,7 @@ import (
 
 	"aethermesh.dev/cni/internal/constants"
 	"aethermesh.dev/cni/internal/install"
+	"aethermesh.dev/common/buildinfo"
 	"aethermesh.dev/common/log"
 	"github.com/spf13/cobra"
 )
@@ -33,6 +34,12 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
+	// `--version` (#1429): this binary's GNU build ID, read from its own ELF
+	// (//common/buildinfo). Cobra answers it before any hook runs, so nothing
+	// is copied to the host.
+	rootCmd.Version = buildinfo.Version()
+	rootCmd.SetVersionTemplate(buildinfo.Describe("cni-install") + "\n")
+
 	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
 	rootCmd.Flags().StringVar(&cfg.CNIBinSourceDir, "cni-bin-dir", constants.DefaultCNIBinDir, "Directory from where the CNI binaries should be copied")
 	rootCmd.Flags().StringVar(&cfg.CNIBinTargetDir, "cni-bin-target-dir", constants.DefaultHostCNIBinDir, "Directory into which to copy the CNI binaries")

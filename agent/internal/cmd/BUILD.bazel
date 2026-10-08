@@ -37,6 +37,7 @@ go_library(
         "//api/aether/cni/v1:cni",
         "//api/aether/config/v1:config",
         "//common/apis/config/v1:config",
+        "//common/buildinfo",
         "//common/config",
         "//common/constants/mesh",
         "//common/log",
@@ -80,6 +81,7 @@ go_test(
         "readiness_test.go",
         "root_test.go",
         "spire_identity_test.go",
+        "version_test.go",
     ],
     # keep: chart_flags_test.go reads the agent DaemonSet template as test data
     # and asserts every flag it passes exists on the command (proposal 036,
@@ -92,6 +94,7 @@ go_test(
         "//agent/internal/node",
         "//agent/internal/ownership",
         "//agent/internal/xds/config",
+        "//common/buildinfo",
         "//common/spire",
         "//common/spire/spiretest",
         "@com_github_stretchr_testify//assert",

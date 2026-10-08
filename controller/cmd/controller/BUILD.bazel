@@ -17,9 +17,6 @@ go_binary(
     name = "controller",
     embed = [":controller_lib"],
     visibility = ["//visibility:public"],
-    x_defs = {
-        "aethermesh.dev/controller/internal/cmd.Version": "{STABLE_GIT_VERSION}",
-    },
 )
 
 go_multi_arch_image(

@@ -184,7 +184,8 @@ push-registrar-image:
 load-all: load-agent-image load-mesh-dns-image load-proxy-supervisor-image load-uds-csi-image load-cni-install-image load-registrar-image
 
 # Every push target passes --stamp so the released artifacts carry the git
-# version information (charts, x_defs). The GNU build-IDs do NOT depend on it:
+# version information (chart versions, image tags). No binary links it (#1378),
+# and the GNU build-IDs do NOT depend on it:
 # //bazel/buildid derives each one from the binary's own content (#651, #653),
 # in every build configuration.
 .PHONY: push-all
@@ -193,10 +194,17 @@ push-all: push-agent-image push-mesh-dns-image push-proxy-supervisor-image push-
 # Print (and assert) the GNU build-ID of every binary that ships in a released
 # image. Each must hash that binary's own content and no two may be equal — the
 # collision that made Pyroscope symbol upload unsafe (#653).
+#
+# Both published architectures, whatever machine runs it: a build ID is the hash
+# of one binary, so the amd64 and arm64 builds of a component have different
+# IDs, and a pod on an arm64 node reports the arm64 one (#1378).
 .PHONY: check-build-id
 check-build-id:
-	@bazel build //bazel/buildid:release_build_ids
-	@cat bazel-bin/bazel/buildid/release_build_ids.txt
+	@for arch in amd64 arm64; do \
+		bazel build --platforms=@rules_go//go/toolchain:linux_$$arch //bazel/buildid:release_build_ids || exit 1; \
+		echo "== linux/$$arch"; \
+		cat bazel-bin/bazel/buildid/release_build_ids.txt; \
+	done
 
 # Did a commit on main actually publish? Read-only registry query — no
 # credentials needed for our public packages, and it cannot push anything.
