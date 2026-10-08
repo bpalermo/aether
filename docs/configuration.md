@@ -24,7 +24,7 @@ Configuration has **two layers**:
 | Key | Default | Purpose |
 |---|---|---|
 | `nameOverride` / `fullnameOverride` | `""` | Override the chart name / fully-qualified resource name. |
-| `namespace.create` | `true` | Create the release namespace with privileged pod-security labels (the agent needs `hostNetwork` + `NET_ADMIN`). |
+| `namespace.create` | `true` | Create the release namespace with privileged pod-security labels (the agent needs `hostNetwork` + `NET_ADMIN`). With `true`, do **not** pass `--create-namespace` (a first install fails with `namespaces "…" already exists`); the namespace must exist beforehand carrying Helm's ownership metadata, see [Getting started](./getting-started.md#install). With `false`, pass `--create-namespace` or create the namespace yourself, and label it `pod-security.kubernetes.io/enforce: privileged` where Pod Security admission is enforced: nothing else will (#1384). |
 | `namespace.name` | `""` | Namespace all resources deploy into (defaults to the release namespace). |
 | `clusterName` | `talos-main` | Cluster name passed to agent + registrar (`--cluster-name`); used in registry keys. |
 | `controlCluster` | `""` | Cross-cluster config authority (026 EM3). Set to a cluster name → only that cluster's registrar exports GAMMA config and everyone imports only from it. Empty = federated (any peer, highest-version wins). |

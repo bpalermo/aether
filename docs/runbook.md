@@ -856,8 +856,17 @@ helm upgrade --install aether-crds oci://quay.io/aethermesh/chart-crds \
 # 2) then the system. Prefer this commit-pinned chart tag over the bare
 #    `--version <X.Y.Z>`: the bare tag is mutable and re-pushed by every publish,
 #    the commit tag never is (#692).
+#    No --create-namespace: the chart creates the namespace (namespace.create=true)
+#    and the two collide on a first install (#1384). On a FIRST install the
+#    namespace must already exist, marked for the release, so run this once before:
+#      kubectl create namespace aether-system
+#      kubectl label namespace aether-system app.kubernetes.io/managed-by=Helm
+#      kubectl annotate namespace aether-system \
+#        meta.helm.sh/release-name=aether meta.helm.sh/release-namespace=aether-system
+#    (see getting-started.md, "Install"; with namespace.create=false you create
+#    and label the namespace yourself instead).
 helm upgrade --install aether oci://quay.io/aethermesh/chart-aether \
-  --version "$AETHER_VERSION" -n aether-system --create-namespace \
+  --version "$AETHER_VERSION" -n aether-system \
   --set clusterName=my-cluster --set meshDomain=aether.internal
 
 # 3) ALWAYS assert what actually landed. The chart's appVersion is the commit
