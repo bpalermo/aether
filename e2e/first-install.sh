@@ -294,12 +294,13 @@ documented_helm_install() {
 		"${args[@]}" "$@"
 }
 
-release_field() { hc list -n "$NS" -a --filter "^${RELEASE}\$" -o json | jq -r ".[0].$1 // empty"; }
+# RELEASE_NS: where the release record is stored, when that is not $NS.
+release_field() { hc list -n "${RELEASE_NS:-$NS}" -a --filter "^${RELEASE}\$" -o json | jq -r ".[0].$1 // empty"; }
 ns_uid() { kc get ns "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null || true; }
 ns_phase() { kc get ns "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true; }
 ns_annotation() { kc get ns "$NS" -o json | jq -r --arg k "$1" '.metadata.annotations[$k] // empty'; }
 # How many Namespace documents the release's stored manifest holds.
-manifest_namespaces() { hc get manifest "$RELEASE" -n "$NS" | grep -c '^kind: Namespace' || true; }
+manifest_namespaces() { hc get manifest "$RELEASE" -n "${RELEASE_NS:-$NS}" | grep -c '^kind: Namespace' || true; }
 refused_pods() { kc -n "$NS" get events --field-selector reason=FailedCreate -o name 2>/dev/null | grep -c . || true; }
 
 wait_ready() {
@@ -460,20 +461,20 @@ verify_upgrade_safety() {
 # a Namespace the release does not own and nothing protects. That is what a
 # first install of a chart older than this one left behind when it was run with
 # --create-namespace ("already exists"). Helm upgrades from the failed revision,
-# and an object that left the manifest is deleted. Rebuilt here with this chart:
-# a first install over a namespace the release owns (so the Namespace is in the
-# manifest) that fails because the API server rejects one workload (an
-# imagePullPolicy it does not know), after which the ownership annotations and
-# `keep` are taken off the namespace.
+# and an object that left the manifest is deleted. Rebuilt here with this
+# chart: a first install whose manifest holds the Namespace and which fails
+# because the API server rejects one workload (an imagePullPolicy it does not
+# know), after which the ownership annotations and `keep` are taken off the
+# namespace.
 #
-# guard_leg <label> <release> <namespace> <install function> <the value that fails the first install>
+# guard_leg <label> <install function> <arguments of the failing first install...>
+# with RELEASE, NS (and RELEASE_NS when the release is stored elsewhere) set by
+# the caller.
 guard_leg() {
-	local label="$1" RELEASE="$2" NS="$3" install="$4" bad="$5" uid out
-	kc create namespace "$NS" >/dev/null
-	kc label namespace "$NS" app.kubernetes.io/managed-by=Helm >/dev/null
-	kc annotate namespace "$NS" "meta.helm.sh/release-name=$RELEASE" "meta.helm.sh/release-namespace=$NS" >/dev/null
-	if out="$("$install" --set-string "$bad" 2>&1)"; then
-		die "$label: the first install with $bad succeeded; this leg needs it to fail"
+	local label="$1" install="$2" uid out
+	shift 2
+	if out="$("$install" "$@" 2>&1)"; then
+		die "$label: the first install with $* succeeded; this leg needs it to fail"
 	fi
 	[ "$(release_field status)" = "failed" ] || die "$label: the release is '$(release_field status)' after the rejected first install, want failed: $out"
 	[ "$(manifest_namespaces)" = "1" ] || die "$label: the failed revision's manifest does not list the Namespace"
@@ -503,25 +504,46 @@ guard_leg() {
 	ok "$label: marked keep, the same command upgrades; namespace kept (uid $uid), no longer in the manifest"
 }
 
-# The prober chart carries a copy of the same guard (#1405). Its image
-# reference is a package-time placeholder in the source tree, so its pod never
-# starts; nothing here needs it to.
+# The aether chart: the Namespace gets into the manifest of a first install
+# because the release already owns it (the chart reads that from the cluster).
+aether_guard_leg() {
+	kc create namespace "$NS" >/dev/null
+	kc label namespace "$NS" app.kubernetes.io/managed-by=Helm >/dev/null
+	kc annotate namespace "$NS" "meta.helm.sh/release-name=$RELEASE" "meta.helm.sh/release-namespace=$NS" >/dev/null
+	guard_leg "aether" documented_helm_install --set-string agent.image.pullPolicy=Bogus
+}
+
+# The prober chart carries a copy of the guard (#1405). It reads the cluster on
+# an upgrade only, so here the Namespace gets into the first manifest the
+# supported way: namespace.create=true with the release stored in another
+# namespace. Its image reference is a package-time placeholder in the source
+# tree, so its pod never starts; nothing here needs it to. The pull policy is
+# always passed: an upgrade given no values at all reuses the previous
+# revision's, and the first revision's is the one the API rejects.
 PROBER_NS="first-install-prober"
-# The pull policy is always passed: an upgrade given no values at all reuses the
-# previous revision's, and the first revision's is the one the API rejects.
-prober_install() { hc upgrade --install prober "$CHARTS/prober" --namespace "$PROBER_NS" --set image.pullPolicy=IfNotPresent "$@"; }
+PROBER_RELEASE_NS="first-install-prober-release"
+prober_install() {
+	hc upgrade --install prober "$CHARTS/prober" --namespace "$PROBER_RELEASE_NS" --create-namespace \
+		--set "namespace.name=$PROBER_NS" --set image.pullPolicy=IfNotPresent "$@"
+}
+prober_reset() {
+	hc uninstall prober -n "$PROBER_RELEASE_NS" >/dev/null 2>&1 || true
+	kc delete ns "$PROBER_NS" "$PROBER_RELEASE_NS" --wait=true --timeout=120s >/dev/null 2>&1 || true
+}
+prober_guard_leg() {
+	local RELEASE=prober NS="$PROBER_NS" RELEASE_NS="$PROBER_RELEASE_NS"
+	prober_reset
+	guard_leg "prober" prober_install --set namespace.create=true --set-string image.pullPolicy=Bogus
+	prober_reset
+}
 
 verify_failed_install_guard() {
 	log "vii. a failed first install that lists an unowned Namespace cannot be upgraded into deleting it"
 	# The aether chart does not render without its CRDs (documented step 1; (iv)
 	# runs the same command again).
 	hc upgrade --install aether-crds "$CHARTS/crds" --wait --timeout 2m >/dev/null || die "the crds chart did not install"
-	guard_leg "aether" "$RELEASE" "$NS" documented_helm_install agent.image.pullPolicy=Bogus
-	hc uninstall prober -n "$PROBER_NS" >/dev/null 2>&1 || true
-	kc delete ns "$PROBER_NS" --wait=true --timeout=120s >/dev/null 2>&1 || true
-	guard_leg "prober" prober "$PROBER_NS" prober_install image.pullPolicy=Bogus
-	hc uninstall prober -n "$PROBER_NS" >/dev/null 2>&1 || true
-	kc delete ns "$PROBER_NS" --wait=false >/dev/null 2>&1 || true
+	aether_guard_leg
+	prober_guard_leg
 }
 
 verify() {

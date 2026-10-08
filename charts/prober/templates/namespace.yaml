@@ -9,7 +9,7 @@
   release is stored in; that combination fails the render (the same rule as the
   aether chart, #1403).
 
-  A live Namespace this release already owns is rendered whatever
+  On an upgrade, a live Namespace this release already owns is rendered whatever
   namespace.create says, and carries helm.sh/resource-policy: keep: dropping it
   from the manifest would otherwise make Helm delete the namespace and the pods
   in it. `helm uninstall` therefore leaves the namespace behind. When it is not
