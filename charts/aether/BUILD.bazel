@@ -3066,6 +3066,360 @@ helm_template_absent_test(
     ]
 ]
 
+# --- Replicas spread across nodes (#1434) -------------------------------------
+#
+# The registrar, the controller and the edge each run two replicas, and each
+# pod template carries one spread constraint over kubernetes.io/hostname,
+# rendered by `aether.nodeSpread` from `<component>.nodeSpread`
+# (soft | required | none). The registrar and the edge had a soft constraint
+# before; it counted the pods of the ReplicaSet being rolled away together with
+# the new ones. The controller had a preferred pod anti-affinity term instead,
+# with the same blind spot. `matchLabelKeys: [pod-template-hash]` makes the
+# constraint count the new ReplicaSet alone. (The larger cause of replicas
+# sharing a node was the controller's default affinity: see
+# aether_controller_default_affinity_test.)
+
+# One constraint: skew, key, mode, the component's selector labels, then
+# whatever the mode adds, up to the pod-spec key that follows the block.
+NODE_SPREAD = "\\n      topologySpreadConstraints:\\n        - maxSkew: 1\\n          topologyKey: kubernetes\\.io/hostname\\n          whenUnsatisfiable: %s\\n          labelSelector:\\n            matchLabels:\\n              app\\.kubernetes\\.io/name: aether-%s\\n              app\\.kubernetes\\.io/instance: release-name\\n              app\\.kubernetes\\.io/component: %s\\n%s      %s:\\n"
+
+PER_REPLICA_SET = "          matchLabelKeys:\\n            - pod-template-hash\\n"
+
+# Component, and the pod-spec key its template renders right after the block.
+NODE_SPREAD_COMPONENTS = [
+    ("registrar", "containers"),
+    ("controller", "containers"),
+    ("edge", "securityContext"),
+]
+
+# The default: soft, and per ReplicaSet. A fixed --kube-version, so the test
+# does not follow the Kubernetes version built into the helm binary.
+[
+    helm_template_match_test(
+        name = "aether_node_spread_default_%s_test" % component,
+        chart = ":aether",
+        document_patterns = {
+            "Deployment/release-name-aether-%s" % component: [
+                NODE_SPREAD % ("ScheduleAnyway", component, component, PER_REPLICA_SET, next_key),
+            ],
+        },
+        opts = [
+            "--kube-version",
+            "1.33.0",
+            "--set",
+            "edge.enabled=true",
+        ],
+    )
+    for component, next_key in NODE_SPREAD_COMPONENTS
+]
+
+# An operator override, `required`: DoNotSchedule, and nodes whose taints the
+# pod does not tolerate are left out of the count. Without that, a
+# control-plane node nothing can land on counts as an empty node for ever, and
+# a third replica on a two-worker cluster stays Pending.
+[
+    helm_template_match_test(
+        name = "aether_node_spread_required_%s_test" % component,
+        chart = ":aether",
+        document_patterns = {
+            "Deployment/release-name-aether-%s" % component: [
+                NODE_SPREAD % (
+                    "DoNotSchedule",
+                    component,
+                    component,
+                    "          nodeTaintsPolicy: Honor\\n" + PER_REPLICA_SET,
+                    next_key,
+                ),
+            ],
+        },
+        opts = [
+            "--kube-version",
+            "1.33.0",
+            "--set",
+            "edge.enabled=true",
+            "--set",
+            "%s.nodeSpread=required" % component,
+        ],
+    )
+    for component, next_key in NODE_SPREAD_COMPONENTS
+]
+
+# The off switch: no constraint on any of the three, and nothing else that
+# would keep replicas apart in its place. The control string is the registrar's
+# toleration comment, which every render of the Deployment carries.
+helm_template_absent_test(
+    name = "aether_node_spread_none_test",
+    absent = [
+        # With the colon: the key, not the comments that name the value.
+        "topologySpreadConstraints:",
+        "pod-template-hash",
+        "podAntiAffinity",
+    ],
+    chart = ":aether",
+    control = "# Tolerate the aether startup taint: the registrar is an aether-system",
+    opts = [
+        "--kube-version",
+        "1.33.0",
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "registrar.nodeSpread=none",
+        "--set",
+        "controller.nodeSpread=none",
+        "--set",
+        "edge.nodeSpread=none",
+    ],
+)
+
+# A value the chart rejects. `off` is the trap: unquoted in a values file it is
+# the YAML boolean false, which a `default` would have turned back into soft.
+[
+    helm_template_fail_test(
+        name = "aether_node_spread_invalid_%s_test" % name,
+        chart = ":aether",
+        expected_message = "registrar.nodeSpread must be one of soft, required, none",
+        opts = [
+            "--set-json",
+            "registrar.nodeSpread=%s" % value,
+        ],
+    )
+    for name, value in [
+        ("word", "\"hard\""),
+        ("yaml_off", "false"),
+    ]
+]
+
+# The user's constraints REPLACE the chart's, whatever nodeSpread says: the
+# block is theirs alone, with no hostname constraint merged in beside it.
+USER_SPREAD = "[{\"maxSkew\":2,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"DoNotSchedule\"}]"
+
+[
+    helm_template_match_test(
+        name = "aether_node_spread_user_replaces_%s_test" % component,
+        chart = ":aether",
+        document_patterns = {
+            "Deployment/release-name-aether-%s" % component: [
+                "\\n      topologySpreadConstraints:\\n        - maxSkew: 2\\n          topologyKey: topology\\.kubernetes\\.io/zone\\n          whenUnsatisfiable: DoNotSchedule\\n      %s:\\n" % next_key,
+            ],
+        },
+        opts = [
+            "--kube-version",
+            "1.33.0",
+            "--set",
+            "edge.enabled=true",
+            "--set",
+            "%s.nodeSpread=required" % component,
+            "--set-json",
+            "%s.topologySpreadConstraints=%s" % (component, USER_SPREAD),
+        ],
+    )
+    for component, next_key in NODE_SPREAD_COMPONENTS
+]
+
+# matchLabelKeys is on by default from Kubernetes 1.27. Below it the soft
+# constraint renders without the field (for the registrar and the edge that is
+# the constraint as it was before #1434)...
+[
+    helm_template_match_test(
+        name = "aether_node_spread_old_kube_%s_test" % component,
+        chart = ":aether",
+        document_patterns = {
+            "Deployment/release-name-aether-%s" % component: [
+                NODE_SPREAD % ("ScheduleAnyway", component, component, "", next_key),
+            ],
+        },
+        opts = [
+            "--kube-version",
+            "1.26.15",
+            "--set",
+            "edge.enabled=true",
+        ],
+    )
+    for component, next_key in NODE_SPREAD_COMPONENTS
+]
+
+# ...and `required` is refused: without the field a rollout counts the old
+# ReplicaSet's pods, so DoNotSchedule would not keep the new replicas apart,
+# which is the one thing `required` is asked for.
+helm_template_fail_test(
+    name = "aether_node_spread_required_old_kube_test",
+    chart = ":aether",
+    expected_message = "controller.nodeSpread=required requires Kubernetes >= 1.27",
+    opts = [
+        "--kube-version",
+        "1.26.15",
+        "--set",
+        "controller.nodeSpread=required",
+    ],
+)
+
+# The controller has no affinity by default. Until 2.4.20 it had two preferred
+# anti-affinity terms: its own replicas (now the spread constraint) and the
+# registrars' node. The scheduler applies a preferred anti-affinity term in
+# both directions, so the second one pushed every new registrar off the nodes
+# holding a controller as hard as the registrar's own spread pulled it there.
+# On kind (a control plane and two workers, the three Deployments rolled
+# together twenty times) that left both registrars on one node after 10
+# rollouts and both controllers after 8; with the term gone and the
+# constraint above, after none. The tolerations are followed directly by the
+# spread constraint...
+helm_template_match_test(
+    name = "aether_controller_default_affinity_test",
+    chart = ":aether",
+    document_patterns = {
+        "Deployment/release-name-aether-controller": [
+            "\\n      tolerations:\\n        - key: aether\\.io/agent-not-ready\\n          operator: Exists\\n          effect: NoSchedule\\n" + COMMENTS + "      topologySpreadConstraints:\\n",
+        ],
+    },
+)
+
+# ...and no object of the release (the edge included) carries an affinity.
+helm_template_absent_test(
+    name = "aether_no_default_affinity_test",
+    absent = [
+        "affinity:",
+        "podAntiAffinity",
+    ],
+    chart = ":aether",
+    control = "topologySpreadConstraints:",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+# An operator's controller.affinity is rendered as given, and does not touch
+# the spread.
+helm_template_match_test(
+    name = "aether_controller_affinity_user_replaces_test",
+    chart = ":aether",
+    document_patterns = {
+        "Deployment/release-name-aether-controller": [
+            "\\n      affinity:\\n        nodeAffinity:\\n          requiredDuringSchedulingIgnoredDuringExecution:\\n            nodeSelectorTerms:\\n\\s+- matchExpressions:\\n\\s+- key: pool\\n\\s+operator: Exists\\n" + COMMENTS + "      topologySpreadConstraints:\\n        - maxSkew: 1\\n",
+        ],
+    },
+    opts = [
+        "--set-json",
+        "controller.affinity={\"nodeAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":{\"nodeSelectorTerms\":[{\"matchExpressions\":[{\"key\":\"pool\",\"operator\":\"Exists\"}]}]}}}",
+    ],
+)
+
+# --- The identity-gate flags follow the mutating webhook (#1432) --------------
+#
+# The gate is an init container the /mutate webhook injects. With
+# namespaceInjection and injectPodNdots both off no MutatingWebhookConfiguration
+# renders, nothing calls /mutate, and the controller used to be passed
+# --identity-gate=true and the gate's image all the same. It now reads
+# `aether.controller.mutatingWebhook` like everything else that depends on that
+# object (#1411). Both certificate sources: the flags do not depend on it.
+[
+    helm_template_absent_test(
+        name = "aether_identity_gate_no_mutating_webhook_%s_test" % cell,
+        absent = [
+            "--identity-gate=true",
+            "--identity-gate-image",
+            "--identity-gate-workload-socket",
+            "--identity-gate-memory-limit",
+        ],
+        chart = ":aether",
+        control = "- \"--identity-gate=false\"",
+        opts = [
+            "--set",
+            "controller.webhook.spire=%s" % webhook_spire,
+            "--set",
+            "controller.namespaceInjection=false",
+            "--set",
+            "controller.injectPodNdots=false",
+        ],
+    )
+    for cell, webhook_spire in [
+        ("self_signed", "false"),
+        ("spire", "true"),
+    ]
+]
+
+# The guard: with either switch on the webhook renders and the gate stays on
+# (both on is aether_identity_gate_default_test).
+[
+    helm_template_match_test(
+        name = "aether_identity_gate_%s_test" % cell,
+        chart = ":aether",
+        document_patterns = {
+            "Deployment/release-name-aether-controller": [
+                "\\n\\s+- \"--identity-gate=true\"\\n\\s+- \"--identity-gate-image=",
+            ],
+        },
+        opts = [
+            "--set",
+            "controller.namespaceInjection=%s" % namespace_injection,
+            "--set",
+            "controller.injectPodNdots=%s" % inject_pod_ndots,
+        ],
+    )
+    for cell, namespace_injection, inject_pod_ndots in [
+        ("namespace_injection_only", "true", "false"),
+        ("ndots_only", "false", "true"),
+    ]
+]
+
+# --- A SPIRE-served webhook on a mesh without mTLS (#1412) --------------------
+#
+# `spire.enabled=false` turns mesh mTLS off; it does not say SPIRE is absent.
+# `controller.webhook.spire=true` asks only for the webhook's certificate to be
+# the controller's SVID. The pair is supported (a GitOps tool that renders with
+# `helm template` gets a new self-signed CA on every sync, so a cleartext mesh
+# has no other stable webhook certificate) and renders coherently: the
+# controller is the one SPIRE client...
+helm_template_match_test(
+    name = "aether_webhook_spire_without_mesh_spire_test",
+    chart = ":aether",
+    document_patterns = {
+        "DaemonSet/release-name-aether-agent": [
+            "\\n\\s+- \"--spire-enabled=false\"\\n",
+        ],
+        "Deployment/release-name-aether-controller": [
+            # No SVID will ever come for a mesh pod, so no gate; the webhook
+            # flags follow directly.
+            "\\n\\s+- \"--identity-gate=false\"\\n\\s+- \"--spire-enabled=true\"\\n\\s+- \"--spire-workload-socket=/run/secrets/workload-spiffe-uds/socket\"\\n",
+            "\\n\\s+- \"--webhook-config-name=release-name-aether-controller-default\"\\n",
+            "\\n            - name: workload-socket\\n              mountPath: /run/secrets/workload-spiffe-uds\\n              readOnly: true\\n",
+            "\\n      volumes:\\n        - name: workload-socket\\n          csi:\\n            driver: \"csi\\.spiffe\\.io\"\\n            readOnly: true$",
+        ],
+        "Deployment/release-name-aether-registrar": [
+            "\\n\\s+- \"--spire-enabled=false\"\\n",
+        ],
+    },
+    opts = [
+        "--set",
+        "spire.enabled=false",
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+)
+
+# ...and nothing else is wired to it: no broker socket for the agent, no
+# Workload API volume on the agent, the proxy or the registrar (theirs is
+# written `driver: csi.spiffe.io`, unquoted; the controller's, the control
+# string, is quoted), and no self-signed Secret.
+helm_template_absent_test(
+    name = "aether_webhook_spire_without_mesh_spire_absent_test",
+    absent = [
+        "spire-broker-socket",
+        "name: spire-workload-socket",
+        "driver: csi.spiffe.io",
+        "--identity-gate=true",
+        "kind: Secret",
+    ],
+    chart = ":aether",
+    control = "driver: \"csi.spiffe.io\"",
+    opts = [
+        "--set",
+        "spire.enabled=false",
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+)
+
 # Commit-pinned second packaging of the SAME chart (#692).
 #
 # chart_push tags with the packaged chart's `version:`, so the chart above
