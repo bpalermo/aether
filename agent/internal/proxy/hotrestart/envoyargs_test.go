@@ -162,6 +162,16 @@ func TestCheckExtraArgsRefusesSpellingsEnvoyDoesNotParse(t *testing.T) {
 		assert.Contains(t, err.Error(), "Couldn't find match for argument", "%v", tc.args)
 	}
 
+	// A flag that takes no value is told to go alone. "--envoy-arg=true" as a
+	// second item would be refused by Envoy too.
+	for _, flag := range envoySwitchFlags {
+		err := CheckExtraArgs([]string{flag + "=true"})
+		require.Error(t, err, flag)
+		assert.Contains(t, err.Error(), flag+" takes no value: pass it alone, as the one item --envoy-arg="+flag, flag)
+		assert.NotContains(t, err.Error(), "--envoy-arg=true", flag)
+		assert.NotContains(t, err.Error(), "two items", flag)
+	}
+
 	// Not a flag spelled with "=": a value that contains one, and a value that
 	// only starts with a dash.
 	for _, args := range [][]string{

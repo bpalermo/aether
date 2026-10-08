@@ -389,14 +389,41 @@ func checkArgSpellings(args []string) error {
 		if spelling == spelledGlued {
 			what = "a value glued to a short flag"
 		}
+		refused := fmt.Sprintf("--envoy-arg %s: the pinned Envoy does not accept %s (it answers \"Couldn't find "+
+			"match for argument\"), so every fork would fail", a, what)
+		if slices.Contains(envoySwitchFlags, name) {
+			return fmt.Errorf("%s. %s takes no value: pass it alone, as the one item --envoy-arg=%s", refused, name, name)
+		}
 		if value == "" {
 			value = "<value>"
 		}
-		return fmt.Errorf("--envoy-arg %s: the pinned Envoy does not accept %s (it answers \"Couldn't find "+
-			"match for argument\"), so every fork would fail. Pass the flag and its value as two items: "+
-			"--envoy-arg=%s --envoy-arg=%s (a flag that takes no value goes alone)", a, what, name, value)
+		return fmt.Errorf("%s. Pass the flag and its value as two items: --envoy-arg=%s --envoy-arg=%s",
+			refused, name, value)
 	}
 	return nil
+}
+
+// envoySwitchFlags are the pinned Envoy's flags that take no value (its
+// TCLAP::SwitchArg options in source/server/options_impl.cc), less the ones
+// reservedEnvoyFlags refuses first. checkArgSpellings uses the list only to
+// word its advice: for these the fix for "--flag=true" is the flag alone, and
+// a second item "true" would be refused by Envoy as well. A flag missing from
+// the list gets the two-item advice. //agent/test/envoyargs checks each one
+// against the binary.
+var envoySwitchFlags = []string{
+	envoyFlagSkipHotRestartStats,
+	"--skip-hot-restart-on-no-parent",
+	"--allow-unknown-fields",
+	"--allow-unknown-static-fields",
+	"--reject-unknown-dynamic-fields",
+	"--ignore-unknown-dynamic-fields",
+	"--skip-deprecated-logs",
+	"--log-stacktrace-single-entry",
+	"--log-format-escaped",
+	"--enable-fine-grain-logging",
+	"--enable-mutex-tracing",
+	"--cpuset-threads",
+	"--enable-core-dump",
 }
 
 // maxConcurrency bounds a --concurrency value. Envoy reads a uint32; nothing

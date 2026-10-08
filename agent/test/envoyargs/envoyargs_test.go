@@ -179,6 +179,43 @@ func TestEnvoyAcceptsWhatTheCheckAccepts(t *testing.T) {
 	}
 }
 
+// TestEnvoySwitchFlagsTakeNoValue: for a flag that takes no value the check's
+// advice for "--flag=true" is the flag alone, not two items. That is only right
+// while the pinned Envoy takes each of these alone and refuses a value item
+// after it. The list is Envoy's SwitchArg options that the check does not
+// reserve (hotrestart.envoySwitchFlags).
+func TestEnvoySwitchFlagsTakeNoValue(t *testing.T) {
+	envoy, bootstrap := pinnedEnvoy(t), writeBootstrap(t)
+
+	for _, flag := range []string{
+		"--skip-hot-restart-parent-stats",
+		"--skip-hot-restart-on-no-parent",
+		"--allow-unknown-fields",
+		"--allow-unknown-static-fields",
+		"--reject-unknown-dynamic-fields",
+		"--ignore-unknown-dynamic-fields",
+		"--skip-deprecated-logs",
+		"--log-stacktrace-single-entry",
+		"--log-format-escaped",
+		"--enable-fine-grain-logging",
+		"--enable-mutex-tracing",
+		"--cpuset-threads",
+		"--enable-core-dump",
+	} {
+		t.Run(flag, func(t *testing.T) {
+			err := hotrestart.CheckExtraArgs([]string{flag + "=true"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "takes no value: pass it alone",
+				"%s is missing from hotrestart.envoySwitchFlags, so the error advises a second item Envoy refuses", flag)
+
+			accepted, out := validate(t, envoy, bootstrap, flag)
+			assert.True(t, accepted, "the pinned Envoy does not take %s alone:\n%s", flag, out)
+			accepted, out = validate(t, envoy, bootstrap, flag, "true")
+			assert.False(t, accepted, "the pinned Envoy takes a value after %s now:\n%s", flag, out)
+		})
+	}
+}
+
 // TestCheckIsStricterThanEnvoyOnPurpose lists what the check refuses although
 // the pinned Envoy's parser accepts it. Each is deliberate: Envoy starts, and
 // then does not do what the supervisor needs. The test pins that Envoy still

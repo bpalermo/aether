@@ -461,7 +461,11 @@ pinned Envoy was measured to do. Besides the flags above it refuses:
   only, the flag in one argument and its value in the next. `--concurrency=2`,
   `--service-node=n1`, `-l=info` and `-linfo` all answer `Couldn't find match for
   argument`. Write `--envoy-arg=--concurrency --envoy-arg=2`, as the chart does.
-  The error shows the two items for the argument it refused.
+  The error shows the two items for the argument it refused. A flag that takes no
+  value goes alone: `--skip-hot-restart-parent-stats=true` is refused too, and the
+  fix is the single item `--envoy-arg=--skip-hot-restart-parent-stats` (a second
+  item `true` would be refused by Envoy). The error says so for the pinned Envoy's
+  valueless flags.
 - **Flags that break a handoff or stop Envoy from serving.** The supervisor does
   not pass these, so they are not repeats, and Envoy would start:
 
