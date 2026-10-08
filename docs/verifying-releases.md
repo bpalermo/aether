@@ -121,10 +121,12 @@ attestation subject, so verify provenance against the index digest.
 ## Which commit built this digest
 
 Three things bind a digest to a commit, and none of them is inside the image.
-Do not look for the commit in the image itself: the
-`org.opencontainers.image.revision` label is going away (#1378), because a
-label is part of the digest, and a commit in the digest is what made every
-image change with every commit and every deploy roll every workload.
+Do not look for the commit in the image itself: the Go images (every image
+except `proxy`) no longer have the `org.opencontainers.image.revision` label
+(#1378), because a label is part of the digest, and a commit in the digest is
+what made every image change with every commit and every deploy roll every
+workload. The `proxy` image is built separately and still carries that label,
+with the Envoy pin beside it; its commit can be read from the image as well.
 
 | Where | What it names | How to read it |
 | --- | --- | --- |
