@@ -151,8 +151,15 @@ assume this section has been read.
 - Anything under `charts/` needs a bump of that chart's `Chart.yaml` (CI
   enforces it). Read the version on `origin/main` first: two open chart pull
   requests collide, and the second to merge takes the next patch number.
-- A chart test is `helm_template_test` in the chart's `BUILD.bazel`; write it
-  first and see it fail against the unchanged chart.
+- A chart test goes in the chart's `BUILD.bazel`; write it first and see it
+  fail against the unchanged chart. "Writing a template test" in
+  `charts/README.md` says which rule to use. In `charts/aether`, rules_helm's
+  `helm_template_test` must pass `--set controller.webhook.spire=true` (a guard
+  test enforces it, so no log holds the generated webhook key); any other
+  assertion that something IS rendered uses the masked
+  `helm_template_match_test`, whose `document_patterns` also reaches every
+  document of a multi-document template. An off switch is still
+  `helm_template_absent_test` and a rejected value `helm_template_fail_test`.
 - Removing a CPU limit from a Go container means deciding `GOMAXPROCS` in the
   same change (without a limit the runtime sizes to the node's cores); see the
   agent, mesh-dns and uds-csi values for the pattern.
@@ -181,6 +188,10 @@ assume this section has been read.
   (the only pattern whose stacked pull requests get the gates). A stack merges
   with `gh stack merge`, never `gh pr merge`, and needs `gh stack sync` first
   when `main` has moved.
+- `main` requires every review conversation to be resolved, and Copilot
+  reviews every pull request. Read each thread, fix it or answer with the
+  reason, then resolve it. Two rounds at most: after that, hand back and name
+  the threads still open.
 - A check that failed with no step run (no runner, a registry 502) is
   infrastructure: say so and re-run it; do not "fix" the pull request.
 - Agent-authored commits end with the session's attribution trailers, and the
@@ -192,6 +203,10 @@ assume this section has been read.
   temporary mutation showing the test can still fail.
 - One issue per finding, with the evidence in it; never an umbrella issue. Do
   not comment on `envoyproxy/envoy`.
+- An issue gets its labels when it is filed: a kind (`bug`, `enhancement`,
+  `documentation`), an area (`chart`, `proxy`, `controller`, `observability`, `soak`,
+  `ci`),
+  and `minor`, `blocked` or `parked` where they apply.
 - Separate what you measured from what you inferred, and say what you could
   not verify.
 

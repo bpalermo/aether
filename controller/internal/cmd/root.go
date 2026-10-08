@@ -301,8 +301,9 @@ func wireNodeTaintGuard(m ctrl.Manager, agentNamespace string) error {
 
 // wireCABundleInjector registers the CA bundle injector when SPIRE is enabled.
 // In SPIRE mode the webhook presents an SVID, so the apiserver must trust the
-// SPIRE CA: keep the ValidatingWebhookConfiguration caBundle in sync with the
-// rotating trust bundle.
+// SPIRE CA: keep the caBundle of the ValidatingWebhookConfiguration (and of the
+// MutatingWebhookConfiguration, when one is rendered) in sync with the rotating
+// trust bundle.
 //
 // The source may not hold an SVID yet (issue #740). The injector handles that by
 // deferring: it logs the first attempt at INFO and injects on the Updated() wake
@@ -311,13 +312,10 @@ func wireCABundleInjector(m ctrl.Manager, spireSource *spire.WaitingSource) erro
 	if !cfg.SpireEnabled || spireSource == nil {
 		return nil
 	}
-	injector := &meshconfig.CABundleInjector{
-		Client:                    m.GetClient(),
-		Source:                    spireSource,
-		WebhookConfigName:         cfg.WebhookConfigName,
-		MutatingWebhookConfigName: cfg.MutatingWebhookConfigName,
-		Log:                       l,
-	}
+	// Reads go through the manager's API reader, never its informer cache: a
+	// cached read waits without a deadline for an informer that may never sync,
+	// which hung the injector for the life of the leader (issue #1431).
+	injector := meshconfig.NewCABundleInjector(m, spireSource, cfg.WebhookConfigName, cfg.MutatingWebhookConfigName, l)
 	if err := m.Add(injector); err != nil {
 		return fmt.Errorf("failed to add caBundle injector: %w", err)
 	}
