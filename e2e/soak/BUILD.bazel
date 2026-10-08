@@ -33,13 +33,14 @@ sh_library(
 # call with a TERM during it (#1419: about 500 short runs, several at a time);
 # sample-proxy-rss.sh, a TERM during each of its calls; and run.sh up to a Job
 # that has already ended (#1387). Those need setsid, timeout, ps and nproc from
-# the host. The stop sweeps are most of this test's time (about a minute on
-# eight cores, three CPU-minutes), hence the timeout. prober-grade.sh (#1390)
-# runs against canned Prometheus query responses.
+# the host. The stop sweeps are most of this test's time (about three
+# CPU-minutes: 45 s on CI's runner, 70 s on four cores, 90 s on two), hence the
+# timeout: `moderate`, 300 s. prober-grade.sh (#1390) runs against canned
+# Prometheus query responses.
 sh_test(
     name = "harness_test",
     size = "small",
-    timeout = "long",
+    timeout = "moderate",
     srcs = ["harness_test.sh"],
     data = [
         "churn.sh",

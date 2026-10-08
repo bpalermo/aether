@@ -56,7 +56,8 @@
 #            both are counted whole, as above.
 #   LOGS     with --logs-file / --logs-url: AETHER_PROBE_FAIL lines in the
 #            window (one per failed probe, plus the `suppressed` counts of the
-#            capped minutes) against the counters, per tier and result
+#            capped minutes) against the counters, per tier and result:
+#            match, MISMATCH, or UNPROVEN (see "A suppressed summary" below)
 #   VERDICT  prober=, unpinned=, logs=
 #
 # PROBER verdict:
@@ -99,9 +100,21 @@
 # before them: a failure in the seconds before T0 that was exported after it is
 # counted in the window. The prober exports once a minute.
 #
+# A suppressed summary. A detail line's `t` is the failure's own time. A
+# `suppressed` summary's `t` is when its window was CLOSED: the failures it
+# counts happened before that, in the at most two `window_s` (2 x 60 s) before
+# it -- the cap's window opens at a failure and is closed by the first
+# once-a-minute flush that finds it a minute old. So a summary closed within
+# two minutes after either end of the run's window may count failures on both
+# sides of that end, and nothing on the line says how many on each. Such a
+# summary is printed (`LOGS    boundary:`) and kept out of the sum; when the
+# counters lie between the sum without it and the sum with it, the row is
+# UNPROVEN, not a match and not a MISMATCH. --logs-url asks the store for two
+# minutes past the window's end, so that a summary closed there is seen at all.
+#
 # Exit: 0 every verdict PASS (and the logs match, when asked); 1 a FAIL; 2
-# UNPROVEN, a log count that does not match, a query that failed, or unusable
-# arguments. Needs bash, jq, date and curl (or kubectl). PROBER_GRADE_CURL and
+# UNPROVEN, a log count that does not match or cannot be told, a query that
+# failed, or unusable arguments. Needs bash, jq, date and curl (or kubectl). PROBER_GRADE_CURL and
 # PROBER_GRADE_KUBECTL replace them (the test hooks); //e2e/soak:harness_test
 # runs it on canned query responses.
 set -uo pipefail
@@ -111,6 +124,10 @@ UNPINNED_METRIC="aether_agent_identity_cluster_unpinned_total"
 # A series whose last sample is older than this at the window's end has ended
 # (Prometheus's own lookback for an instant query).
 STALE_S=300
+# How long after a failure its `suppressed` summary can be written: two of the
+# prober's fail-log windows (prober/internal/prober/faillog.go, failLogWindow).
+# The log store is asked for this much past the window's end.
+LOG_EDGE_S=120
 
 DIR="" START="" END="" WINDOW="" PROM_URL="" PROM_SVC="" CTX="" MATCH="" NODE_LABEL="node"
 LOGS_FILE="" LOGS_URL="" LOGS_QUERY='"AETHER_PROBE_FAIL"'
@@ -338,30 +355,45 @@ if [ -n "$LOGS_FILE" ] || [ -n "$LOGS_URL" ]; then
 	else
 		LOGS_FROM="${LOGS_URL%/}/select/logsql/query  $LOGS_QUERY"
 		if ! "$CURL" -fsS --max-time 300 --get "${LOGS_URL%/}/select/logsql/query" --data-urlencode "query=$LOGS_QUERY" \
-			--data-urlencode "start=$START_S" --data-urlencode "end=$END_S" >"$TMPD/logs.raw" 2>"$TMPD/err"; then
+			--data-urlencode "start=$START_S" --data-urlencode "end=$((END_S + LOG_EDGE_S))" >"$TMPD/logs.raw" 2>"$TMPD/err"; then
 			echo "LOGS    verdict=UNPROVEN the log query failed: $(tr '\n' ' ' <"$TMPD/err" | cut -c1-300)"
 			L_VERDICT="UNPROVEN"
 		fi
 	fi
 	if [ "$L_VERDICT" = "not-checked" ]; then
 		# A line is the prober's own (`AETHER_PROBE_FAIL {...}`), or a JSON
-		# record whose _msg is that. Lines outside the window are not counted.
+		# record whose _msg is that. A detail line counts when its `t` is in the
+		# window. A summary counts when the whole span it can cover is (`from`,
+		# two of its own window_s before `t`); one whose span crosses an end of
+		# the window is a boundary summary: see the header.
 		# shellcheck disable=SC2016
 		jq -R -r -n --slurpfile series "$TMPD/p.json" --argjson start "$START_S" --argjson end "$END_S" --arg from "$LOGS_FROM" '
 		def n: if . == floor then floor else . end;
+		def iso: floor | todate;
 		[ inputs | ((fromjson? | objects | ._msg) // .) | select(type == "string")
 		  | (index("AETHER_PROBE_FAIL ")) as $i | select($i != null) | .[$i + 18:] | fromjson? | objects
 		  | ((.t // "") | sub("\\.[0-9]+Z$"; "Z") | (fromdateiso8601? // null)) as $t
-		  | select($t != null and $t >= $start and $t <= $end) ] as $lines
-		| ($lines | group_by([.tier, .result]) | map({key: "\(.[0].tier) \(.[0].result)",
-		    value: {lines: (map(select(has("suppressed") | not)) | length), suppressed: (map(.suppressed // 0) | add)}}) | from_entries) as $log
+		  | select($t != null) | . + {T: $t} ] as $all
+		| ($all | map(select((has("suppressed") | not) and .T >= $start and .T <= $end))) as $lines
+		| ($all | map(select(has("suppressed")) | . + {from: (.T - 2 * (.window_s // 60))})) as $sums
+		| ($sums | map(select(.from >= $start and .T <= $end))) as $in
+		| ($sums | map(select((.from < $start and .T > $start) or (.from < $end and .T > $end)))) as $edge
+		| def bykey(f): group_by([.tier, .result]) | map({key: "\(.[0].tier) \(.[0].result)", value: f}) | from_entries;
+		  ($lines | bykey(length)) as $nl
+		| ($in | bykey(map(.suppressed) | add)) as $ns
+		| ($edge | bykey(map(.suppressed) | add)) as $ne
 		| ($series[0] | map(select((.labels.result // "-") != "success")) | group_by([.labels.tier, .labels.result])
 		    | map({key: "\(.[0].labels.tier) \(.[0].labels.result)", value: (map(.inc) | add)}) | from_entries) as $ctr
-		| ([($log | keys[]), ($ctr | to_entries[] | select(.value > 0) | .key)] | unique) as $keys
-		| ($keys | map(. as $k | {k: $k, lines: ($log[$k].lines // 0), suppressed: ($log[$k].suppressed // 0), counters: ($ctr[$k] // 0)}
-		    | .ok = (.lines + .suppressed == .counters))) as $rows
-		| ( $rows[] | "LOGS    tier=\(.k | split(" ")[0]) result=\(.k | split(" ")[1]) lines=\(.lines) suppressed=\(.suppressed) counters=\(.counters | n) \(if .ok then "match" else "MISMATCH" end)" ),
-		  "LOGS    verdict=\(if all($rows[]; .ok) then "MATCH" else "MISMATCH" end) lines=\($rows | map(.lines) | add // 0) suppressed=\($rows | map(.suppressed) | add // 0) counters=\($rows | map(.counters) | add // 0 | n)  (\($from))"
+		| ([($nl | keys[]), ($ns | keys[]), ($ne | keys[]), ($ctr | to_entries[] | select(.value > 0) | .key)] | unique) as $keys
+		| ($keys | map(. as $k | {k: $k, lines: ($nl[$k] // 0), suppressed: ($ns[$k] // 0), boundary: ($ne[$k] // 0), counters: ($ctr[$k] // 0)}
+		    | (.lines + .suppressed) as $lo
+		    | .is = (if .boundary == 0 then (if $lo == .counters then "match" else "MISMATCH" end)
+		             elif .counters >= $lo and .counters <= $lo + .boundary then "UNPROVEN"
+		             else "MISMATCH" end))) as $rows
+		| ( $edge[] | "LOGS    boundary: tier=\(.tier) result=\(.result) pod=\(.pod // "-") suppressed=\(.suppressed) closed=\(.T | iso) covers=\(.from | iso)..\(.T | iso)  (it may count failures on both sides of the \(if .from < $start and .T > $start then "start" else "end" end) of the window: not in the sum)" ),
+		  ( $rows[] | "LOGS    tier=\(.k | split(" ")[0]) result=\(.k | split(" ")[1]) lines=\(.lines) suppressed=\(.suppressed)\(if .boundary > 0 then " boundary=\(.boundary)" else "" end) counters=\(.counters | n) \(.is)"
+		    + (if .is == "UNPROVEN" then "  (the logs say between \(.lines + .suppressed) and \(.lines + .suppressed + .boundary))" else "" end) ),
+		  "LOGS    verdict=\(if any($rows[]; .is == "MISMATCH") then "MISMATCH" elif any($rows[]; .is == "UNPROVEN") then "UNPROVEN" else "MATCH" end) lines=\($rows | map(.lines) | add // 0) suppressed=\($rows | map(.suppressed) | add // 0) boundary=\($rows | map(.boundary) | add // 0) counters=\($rows | map(.counters) | add // 0 | n)  (\($from))"
 		' "$TMPD/logs.raw" >"$TMPD/l.out" || die "could not read the log lines"
 		cat "$TMPD/l.out"
 		L_VERDICT="$(sed -n 's/^LOGS    verdict=\([A-Z]*\) .*/\1/p' "$TMPD/l.out")"

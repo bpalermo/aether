@@ -519,9 +519,15 @@ restore_shrink() {
 # takes the signal with this shell's handler and then drops it. The sampler
 # traps TERM and exits once its kubectl call has returned; the watch is kubectl
 # itself and dies; a TRIPLE's roll ignores TERM and ends when its `rollout
-# restart` has returned, so this waits for it. STOP_CHILDREN_TRIES bounds the
-# wait (20 s): a kubectl that hangs past that is left, and named in the log.
-STOP_CHILDREN_TRIES=100
+# restart` has returned, so this waits for it.
+#
+# It returns only when the list is empty: the driver never exits ahead of a
+# child. A kubectl call that does not return (none of these has a request
+# timeout) therefore holds the driver, and that is the lesser harm: a driver
+# that is still there shows in `pgrep`, and a roll it had left behind would
+# not. After STOP_CHILDREN_SAY tries (20 s) it names what it is waiting for in
+# the log, once.
+STOP_CHILDREN_SAY=100
 stop_children() {
 	local pid tries=0 left
 	while :; do
@@ -531,10 +537,11 @@ stop_children() {
 		done
 		if [ -z "$left" ]; then return 0; fi
 		tries=$((tries + 1))
-		if [ "$tries" -ge "$STOP_CHILDREN_TRIES" ]; then break; fi
+		if [ "$tries" -eq "$STOP_CHILDREN_SAY" ]; then
+			log "STOP: still waiting after $((STOP_CHILDREN_SAY / 5))s for:$left -- the driver exits when they have ended (ps -o pid,args -p <pid>; kill by hand a call that will never return)"
+		fi
 		nap_brief 0.2
 	done
-	log "STOP: still running after $((STOP_CHILDREN_TRIES / 5))s, left behind:$left -- look at them (ps -o pid,args -p <pid>)"
 }
 
 # Fail fast (#951): the first failure ends the run, loudly. Queued RSS samplers are

@@ -1106,9 +1106,12 @@ in the background (a queued RSS sampler, a uds-csi step's plugin watch) and wait
 a TRIPLE's rolls that are already under way; exits 143. No process of the driver is
 left, and nothing more is rolled. Between rolls it waits without a child process
 (`lib-wait.sh`: `read -t` on a private fifo, in two-second slices), so the TERM is
-taken within two seconds. The one thing it waits out is a foreground call: the longest
-are the uds-csi step's `rollout status` (`SOAK_UDSCSI_TIMEOUT`, 600 s) and its
-`wait --for=delete` (300 s).
+taken within two seconds. What it waits out is a call: one in the foreground (the
+longest are the uds-csi step's `rollout status`, `SOAK_UDSCSI_TIMEOUT`, 600 s, and its
+`wait --for=delete`, 300 s), and those of its children. **It never exits ahead of a
+child**: a sampler's or a TRIPLE roll's `kubectl` call that does not return holds the
+driver, and after 20 s the log says which (`STOP: still waiting after 20s for: <pids>`).
+A driver that is still there can be seen; a roll it had left behind could not.
 
 Until #1419 none of that held. The driver slept in the foreground, and bash runs a trap
 only once the foreground child has ended, so a TERM took effect at the next roll: up
@@ -1259,7 +1262,14 @@ the sample that creates a series. The prober logged 40 `AETHER_PROBE_FAIL` lines
 - `--logs-file <file>` (prober log lines, e.g. `kubectl logs` of each prober pod) or
   `--logs-url <VictoriaLogs base URL>` with `--logs-query` adds the cross-check: the
   `AETHER_PROBE_FAIL` lines inside the window, plus the `suppressed` counts of capped
-  minutes, against the counters, per tier and result (`LOGS … match|MISMATCH`).
+  minutes, against the counters, per tier and result (`LOGS … match|MISMATCH|UNPROVEN`).
+  A detail line carries the failure's own time. A `suppressed` summary carries the
+  time its minute was **closed**, up to two minutes after the failures it counts. One
+  that was closed within two minutes after T0 or after T0+8h may therefore count
+  failures on both sides of that end: it is printed as `LOGS    boundary:` and left
+  out of the sum, and the row is `UNPROVEN` when the counters lie between the sum
+  without it and the sum with it. `--logs-url` asks for two minutes past the window's
+  end, so that such a summary is seen; with `--logs-file`, export that far.
 - Exit 0: every verdict `PASS`. Exit 1: a `FAIL`. Exit 2: `UNPROVEN`, a log count that
   does not match, or a query that failed (a failed query is never read as a zero).
 - The two ends are the last values Prometheus has at or before T0 and T0+8h. The prober

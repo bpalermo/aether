@@ -1301,6 +1301,16 @@ case "$args" in
 *" get nodes "*) printf 'node-1 True \nnode-2 True \n' ;;
 *" rollout restart "*)
 	case "$args" in *aether-uds-csi*) : >"$FAKE_STATE/csi-restarted" ;; esac
+	# FAKE_HANG_AT=<second after T0>: a restart made at that second does not
+	# return until the driver's log says it is waiting for its children (or
+	# 20 s have gone by: then the test fails on what the log does not say).
+	if [ "${FAKE_HANG_AT:-}" = "$((now - FAKE_EPOCH))" ]; then
+		for _ in $(seq 1 1000); do
+			if grep -q 'STOP: still waiting' "$SOAK_CHURN_LOG" 2>/dev/null; then break; fi
+			"$FAKE_REAL_SLEEP" 0.02
+		done
+		"$FAKE_REAL_SLEEP" 0.2
+	fi
 	echo restarted
 	;;
 *" rollout status "* | *" scale "* | *" delete "* | *" wait --for=delete "*) echo done ;;
@@ -1395,14 +1405,27 @@ read() {
 	builtin read "$@"
 }
 # A trace of the main shell's commands (CH_TRACE: number, line, command), and a
-# TERM before the k-th (CH_TERM_AT), noted in term-at with the clock.
+# TERM before one of them (CH_TERM_AT), noted in term-at with the clock.
+#
+# CH_TERM_AT names a code point, not a count: "<queued><TAB><line><TAB><command>",
+# the first time the main shell is about to run that command on that line
+# (<queued>: 1 once an RSS sampler has been queued, else 0). A count does not
+# name the same command in two runs: the uds-csi step polls for another process
+# (the plugin watch) and goes round a loop a number of times that depends on
+# the machine, so "the 277th command" of one run was past the end of another
+# (seen in CI: `exit 0; no TERM was sent`).
 __ch_n=0
+__ch_q=0
+__ch_sent=""
 __ch_hook() {
 	[ "$BASHPID" = "$$" ] || return 0
 	case "${FUNCNAME[1]:-}" in printf | read) return 0 ;; esac
 	__ch_n=$((__ch_n + 1))
-	if [ -n "${CH_TRACE:-}" ]; then builtin printf '%s\t%s\t%s\n' "$__ch_n" "$2" "${1//$'\n'/ }" >>"$CH_TRACE"; fi
-	if [ "$__ch_n" = "${CH_TERM_AT:-0}" ]; then
+	local __cmd="${1//[$'\n\t']/ }"
+	case "$__cmd" in 'log "RSS SAMPLE queued'*) __ch_q=1 ;; esac
+	if [ -n "${CH_TRACE:-}" ]; then builtin printf '%s\t%s\t%s\n' "$__ch_n" "$2" "$__cmd" >>"$CH_TRACE"; fi
+	if [ -z "$__ch_sent" ] && [ -n "${CH_TERM_AT:-}" ] && [ "$__ch_q"$'\t'"$2"$'\t'"$__cmd" = "$CH_TERM_AT" ]; then
+		__ch_sent=1
 		local __c
 		builtin read -r __c <"$FAKE_CLOCK"
 		echo "$__ch_n $__c" >"$FAKE_STATE/term-at"
@@ -1525,27 +1548,43 @@ CJ="$(nproc 2>/dev/null || echo 2)"
 pool() { while [ "$(jobs -pr | grep -c '')" -ge "$CJ" ]; do wait -n; done; }
 # churn_one <dir> <what> <mode> [VAR=value ...]: one run that is sent a TERM.
 # Writes <dir>/result: empty when it stopped cleanly, else what was wrong.
+#
+# With CHURN_MAY_MISS set (the sweep), a run that ends by itself (exit 0,
+# nothing left) without having come to its TERM point is not a TERM that was
+# mishandled: the point is on a branch this run did not take (a poll that had
+# its answer the first time round). It is run again, three times at most, and
+# then written to <dir>/unreached: the sweep counts those apart and bounds them.
 churn_one() {
-	local dir="$1" what="$2" rc left bad="" clock
+	local dir="$1" what="$2" rc left bad clock try
 	shift 2
-	churn_start "$dir" "$@"
-	wait "$cpid"
-	rc=$?
-	left=$(survivors "$csid")
-	[ "$rc" -eq 143 ] || bad="$bad exit $rc;"
-	[ -z "$left" ] || bad="$bad left behind: $left;"
-	if read -r _ clock <"$dir/term-at" 2>/dev/null; then
-		[ "$(cat "$dir/clock")" = "$clock" ] || bad="$bad the schedule went on after the TERM (clock $clock -> $(cat "$dir/clock"));"
-		if [ -n "${EXPECT_WAITED:-}" ] && [ ! -e "$dir/waited-for" ]; then bad="$bad the call in the foreground was NOT waited for;"; fi
-	else
-		bad="$bad no TERM was sent;"
-	fi
+	for try in 1 2 3; do
+		bad=""
+		churn_start "$dir" "$@"
+		wait "$cpid"
+		rc=$?
+		left=$(survivors "$csid")
+		if [ -n "${CHURN_MAY_MISS:-}" ] && [ "$rc" -eq 0 ] && [ -z "$left" ] && [ ! -e "$dir/term-at" ]; then
+			if [ "$try" -lt 3 ]; then continue; fi
+			echo "  $what" >"$dir/unreached"
+			break
+		fi
+		[ "$rc" -eq 143 ] || bad="$bad exit $rc;"
+		[ -z "$left" ] || bad="$bad left behind: $left;"
+		if read -r _ clock <"$dir/term-at" 2>/dev/null; then
+			[ "$(cat "$dir/clock")" = "$clock" ] || bad="$bad the schedule went on after the TERM (clock $clock -> $(cat "$dir/clock"));"
+			if [ -n "${EXPECT_WAITED:-}" ] && [ ! -e "$dir/waited-for" ]; then bad="$bad the call in the foreground was NOT waited for;"; fi
+		else
+			bad="$bad no TERM was sent;"
+		fi
+		break
+	done
 	if [ -n "$bad" ]; then echo "  $what:$bad" >"$dir/result"; else : >"$dir/result"; fi
 }
 : >"$TMP/churn-seen"
 SWEPT=0
+SWEEP_UNREACHED_MAX=12
 sweep() { # sweep <name> <mode> [VAR=value ...]
-	local name="$1" mode="$2" k n
+	local name="$1" mode="$2" k n point key
 	shift 2
 	churn_start "$TMP/tr-$name" "$mode" CH_TRACE="$TMP/tr-$name.tsv" "$@"
 	wait "$cpid"
@@ -1553,13 +1592,17 @@ sweep() { # sweep <name> <mode> [VAR=value ...]
 	awk -F'\t' -v seenf="$TMP/churn-seen" '
 		BEGIN { while ((getline l < seenf) > 0) seen[l] = 1 }
 		$3 ~ /^log "RSS SAMPLE queued/ { queued = 1 }
-		{ key = queued "\t" $2 "\t" $3 }
-		!seen[key]++ { print $1; print key >> seenf }' "$TMP/tr-$name.tsv" >"$TMP/points-$name"
+		{ key = (queued + 0) "\t" $2 "\t" $3 }
+		!seen[key]++ { print $1 "\t" key; print key >> seenf }' "$TMP/tr-$name.tsv" >"$TMP/points-$name"
 	n=$(grep -c '' "$TMP/points-$name")
 	echo "      churn term sweep, $name: $(grep -c '' "$TMP/tr-$name.tsv") commands traced, $n points not swept yet"
-	while read -r k; do
+	# k is the command's number in the traced run and only names the run's
+	# directory; the TERM point is the key (see the hook).
+	while IFS= read -r point; do
+		k="${point%%$'\t'*}"
+		key="${point#*$'\t'}"
 		pool
-		churn_one "$TMP/sw-$name-$k" "$name, TERM before command $k, \`$(awk -F'\t' -v k="$k" '$1 == k {print $3 " (line " $2 ")"; exit}' "$TMP/tr-$name.tsv")\`" "$mode" CH_TERM_AT="$k" "$@" &
+		CHURN_MAY_MISS=1 churn_one "$TMP/sw-$name-$k" "$name, TERM before \`${key#*$'\t'*$'\t'}\` (line $(cut -f2 <<<"$key"), command $k of the traced run)" "$mode" CH_TERM_AT="$key" "$@" &
 	done <"$TMP/points-$name"
 	wait
 	SWEPT=$((SWEPT + n))
@@ -1569,10 +1612,19 @@ sweep newsa --new-sa-once
 sweep udscsi --uds-csi-once
 bad=$(cat "$TMP"/sw-*/result 2>/dev/null)
 nres=$(find "$TMP" -path '*/sw-*/result' | grep -c '')
-if [ "$SWEPT" -ge 300 ] && [ "$nres" -eq "$SWEPT" ] && [ -z "$bad" ]; then
-	pass "churn term sweep: TERM before each of $SWEPT commands (the schedule, a TRIPLE, the SHRINK, a new-SA step, a uds-csi step, with and without a queued RSS sampler): exit 143, no process left, the schedule stops, every time"
+unreached=$(cat "$TMP"/sw-*/unreached 2>/dev/null)
+nun=$(find "$TMP" -path '*/sw-*/unreached' | grep -c '')
+# Not reached again in three runs: a point on a branch only some runs take.
+# Those are the polls of the uds-csi step, a handful of commands; more than
+# that, and the sweep is no longer sweeping what it traced.
+if [ "$nun" -gt 0 ]; then
+	echo "      churn term sweep: $nun traced point(s) not reached again in three runs (a branch only some runs take):"
+	echo "$unreached"
+fi
+if [ "$SWEPT" -ge 300 ] && [ "$nres" -eq "$SWEPT" ] && [ -z "$bad" ] && [ "$nun" -le "$SWEEP_UNREACHED_MAX" ]; then
+	pass "churn term sweep: TERM before each of $((SWEPT - nun)) commands (the schedule, a TRIPLE, the SHRINK, a new-SA step, a uds-csi step, with and without a queued RSS sampler): exit 143, no process left, the schedule stops, every time"
 else
-	fail "churn term sweep: $nres of $SWEPT runs reported (300 or more expected); not handled cleanly:
+	fail "churn term sweep: $nres of $SWEPT runs reported (300 or more expected), $nun point(s) not reached (at most $SWEEP_UNREACHED_MAX); not handled cleanly:
 $(echo "$bad" | head -n 12)"
 fi
 # Two of those runs, looked at: a stop undoes what the driver had in hand.
@@ -1583,10 +1635,31 @@ else
 	fail "churn term: TERM inside the SHRINK window (command '${k:-not traced}'): its scale calls were '$(grep ' scale ' "$TMP/sw-full-$k/calls.tsv" 2>/dev/null | tr '\n' '|')'"
 fi
 k=$(awk -F'\t' '$3 == "nap 10" {print $1; exit}' "$TMP/tr-newsa.tsv")
-if [ -n "$k" ] && [ "$(grep -c ' delete deployment/sa-new-[0-9]* configmap/sa-new-[0-9]* serviceaccount/sa-new-[0-9]* ' "$TMP/sw-newsa-$k/calls.tsv")" -eq 1 ]; then
+if [ -n "$k" ] && [ -e "$TMP/sw-newsa-$k/term-at" ] && [ "$(grep -c ' delete deployment/sa-new-[0-9]* configmap/sa-new-[0-9]* serviceaccount/sa-new-[0-9]* ' "$TMP/sw-newsa-$k/calls.tsv")" -eq 1 ]; then
 	pass "churn term: TERM inside a new-SA step deletes the step's three objects before the driver exits"
 else
 	fail "churn term: TERM inside a new-SA step (command '${k:-not traced}'): last call '$(tail -n 1 "$TMP/sw-newsa-$k/calls.tsv" 2>/dev/null)'"
+fi
+
+# A stop waits for a child for as long as the child takes. The TRIPLE's three
+# `rollout restart` calls are made to hang here (FAKE_HANG_AT: until the
+# driver's log says it is waiting for them, so no time is guessed), and the
+# TERM comes once all three are under way. RED with a bounded wait: after its
+# 100 tries the driver said `left behind` and exited ahead of three rolls that
+# were still in flight, whose ROLLED lines then landed in the log of a driver
+# that was gone.
+key=$(awk -F'\t' '$3 ~ /^log "RSS SAMPLE queued/ { q = 1 } !f && $3 == "wait \"$t_agent\"" { print q + 0 "\t" $2 "\t" $3; f = 1 }' "$TMP/tr-full.tsv")
+R="$TMP/churn-stopwait"
+churn_start "$R" full SOAK_NEWSA=0 SOAK_UDSCSI=0 FAKE_HANG_AT=18000 CH_TERM_AT="$key"
+wait "$cpid"
+rc=$?
+left=$(survivors "$csid")
+after=$(awk '/ STOP: still waiting after 20s for: / { s = 1 } s && / ROLLED / { n++ } END { print n + 0 }' "$R/churn.log" 2>/dev/null)
+if [ -n "$key" ] && [ -e "$R/term-at" ] && [ "$rc" -eq 143 ] && [ -z "$left" ] &&
+	[ "$(grep -c ' STOP: still waiting after 20s for: ' "$R/churn.log")" -eq 1 ] && [ "$after" -eq 3 ]; then
+	pass "churn term: a stop during the TRIPLE waits for rolls that take longer than 100 tries: it says so once, all three are logged, and only then does the driver exit (143, no process left)"
+else
+	fail "churn term: a stop with three rolls that do not return (point '${key:-not traced}'): exit $rc, left behind: ${left:-nothing}, ROLLED after the STOP line: $after, log tail: $(tail -n 4 "$R/churn.log" 2>/dev/null | tr '\n' '|')"
 fi
 
 # ... and INSIDE a command: TERM while a kubectl call is in the foreground, sent
@@ -1671,12 +1744,15 @@ mkdir -p "$TMP/grade-bin"
 cat >"$TMP/grade-bin/curl" <<'EOF'
 #!/usr/bin/env bash
 # curl -fsS --max-time N --get URL --data-urlencode query=Q --data-urlencode time=T
+# (the log store's: ... start=S ... end=E, logged as S..E)
 url="" q="" t=""
 for a in "$@"; do
 	case "$a" in
 	http*) url="$a" ;;
 	query=*) q="${a#query=}" ;;
 	time=*) t="${a#time=}" ;;
+	start=*) t="${a#start=}..$t" ;;
+	end=*) t="$t${a#end=}" ;;
 	esac
 done
 printf '%s\t%s\t%s\n' "$url" "$t" "$q" >>"$FAKE_PROM_LOG"
@@ -1774,12 +1850,37 @@ run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-fil
 expect "$G" "grade logs: two lines short is a MISMATCH, with both numbers" '^LOGS    tier=mesh_dns result=timeout lines=37 suppressed=1 counters=40 MISMATCH$' 1
 expect "$G" "grade logs: ... in the verdict too" '^VERDICT prober=FAIL unpinned=PASS logs=MISMATCH$' 1
 run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-url http://logs.example:9428 --logs-query '"AETHER_PROBE_FAIL" AND k8s.namespace.name:aether-test'
-expect "$G" "grade logs: from a log store (one JSON record a line, the prober's line in _msg)" '^LOGS    verdict=MATCH lines=39 suppressed=1 counters=40 ' 1
-if grep -q "^http://logs.example:9428/select/logsql/query	.*	\"AETHER_PROBE_FAIL\" AND k8s.namespace.name:aether-test\$" "$TMP/grade-queries.tsv"; then
-	pass "grade logs: the log query is the one it was given, at the URL it was given"
+expect "$G" "grade logs: from a log store (one JSON record a line, the prober's line in _msg)" '^LOGS    verdict=MATCH lines=39 suppressed=1 boundary=0 counters=40 ' 1
+if grep -q "^http://logs.example:9428/select/logsql/query	$GT0\.\.$((GT0 + 28800 + 120))	\"AETHER_PROBE_FAIL\" AND k8s.namespace.name:aether-test\$" "$TMP/grade-queries.tsv"; then
+	pass "grade logs: the log query is the one it was given, at the URL it was given, from T0 to two minutes past the window's end (a summary closed there counts failures inside it)"
 else
 	fail "grade logs: the log store was asked: $(grep logsql "$TMP/grade-queries.tsv")"
 fi
+# A `suppressed` summary carries the time its window was CLOSED, not the times
+# of the failures it counts (review of #1458). Closed 30 s after the window's
+# end, the one suppressed failure of this fixture may lie on either side of the
+# end. RED before: the summary was dropped for its `t` and the row read
+# `lines=39 suppressed=0 counters=40 MISMATCH` -- a mismatch that is not one.
+sed 's/"t":"2026-10-08T02:16:10.000Z"\(.*"suppressed":1\)/"t":"2026-10-08T08:10:30.000Z"\1/' "$GF/born/prober.log" >"$TMP/grade-edge-end.log"
+run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-file "$TMP/grade-edge-end.log"
+expect "$G" "grade logs: a summary closed 30 s after the window's end is a boundary summary, named with the span it can cover" '^LOGS    boundary: tier=mesh_dns result=timeout pod=prober-d suppressed=1 closed=2026-10-08T08:10:30Z covers=2026-10-08T08:08:30Z\.\.2026-10-08T08:10:30Z  \(it may count failures on both sides of the end of the window: not in the sum\)$' 1
+expect "$G" "grade logs: ... and the row is UNPROVEN with both bounds, not a MISMATCH" '^LOGS    tier=mesh_dns result=timeout lines=39 suppressed=0 boundary=1 counters=40 UNPROVEN  \(the logs say between 39 and 40\)$' 1
+expect "$G" "grade logs: ... in the verdict too" '^VERDICT prober=FAIL unpinned=PASS logs=UNPROVEN$' 1
+# ... and closed 30 s after the window's START, a summary of five failures from
+# before T0. RED before: all five were added, `suppressed=6 counters=40 MISMATCH`.
+{
+	cat "$GF/born/prober.log"
+	echo 'AETHER_PROBE_FAIL {"t":"2026-10-08T00:10:30.000Z","tier":"mesh_dns","result":"timeout","suppressed":5,"window_s":60,"pod":"prober-d","node":"worker-04"}'
+} >"$TMP/grade-edge-start.log"
+run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-file "$TMP/grade-edge-start.log"
+expect "$G" "grade logs: a summary closed 30 s after the window's start is not added to the sum" '^LOGS    tier=mesh_dns result=timeout lines=39 suppressed=1 boundary=5 counters=40 UNPROVEN  \(the logs say between 40 and 45\)$' 1
+expect "$G" "grade logs: ... it is named as the start's" '^LOGS    boundary: .* suppressed=5 closed=2026-10-08T00:10:30Z covers=2026-10-08T00:08:30Z\.\.2026-10-08T00:10:30Z  \(it may count failures on both sides of the start of the window' 1
+# A boundary summary excuses only what it can hold: two detail lines short and
+# one boundary failure is still a MISMATCH.
+grep -v '2026-10-08T05:28:0[56]' "$TMP/grade-edge-end.log" >"$TMP/grade-edge-short.log"
+run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-file "$TMP/grade-edge-short.log"
+expect "$G" "grade logs: a count the boundary summary cannot explain is still a MISMATCH (37 + at most 1 against 40)" '^LOGS    tier=mesh_dns result=timeout lines=37 suppressed=0 boundary=1 counters=40 MISMATCH$' 1
+expect "$G" "grade logs: ... in the verdict too" '^VERDICT prober=FAIL unpinned=PASS logs=MISMATCH$' 1
 
 G="$TMP/grade-clean.log"
 run_grade clean "$G" --start 2026-10-08T00:10:00Z --window 8h --prometheus http://prom.example:9090
