@@ -3707,15 +3707,23 @@ envoy thread stall   epoch=210 pid=15 windowMs=1000 thresholdMs=200
 ```
 
 (An illustration of the format, not a line from a cluster: the fields have not run on
-talos-main yet. The cgroup names are shortened here; the line carries each pod's whole
+a cluster yet. The cgroup names are shortened here; the line carries each pod's whole
 UID, and a path longer than 64 bytes keeps its tail behind `...`.)
 
 | field | meaning |
 |---|---|
 | `topCgroups` | The cgroups that used the most CPU time, largest first, as `<cgroup path>=<n>ms`. At most `--stall-top-consumers` entries (default 5, at most 20; 0 turns the consumer sampling off; the chart does not pass the flag, so the default applies). CPU time, not wall time: on a 4-core node one second holds up to 4000 ms. |
-| `topCgroupsOverMs` | The interval the figures cover. It is the stall, not the window: a thread that waited 5 s is reported in the second its wait ended, and the consumers are taken over those 5 s (rounded out to the one-second samples). The field is the interval actually measured, so compare it with the thread's `runq=`: the supervisor keeps 32 cgroup samples (about 32 s) and 4 process scans, and a wait longer than that history is measured from the oldest sample kept. A `topCgroupsOverMs` shorter than `runq=` therefore means the figures cover only the END of the stall. |
-| `topProcs`, `topProcsOverMs` | The same per process, as `<comm>(<pid>)=<n>ms`. Only when the proxy pod shares the host PID namespace, which the chart does not ask for; otherwise the field says so. |
+| `topCgroupsOverMs` | The interval the figures cover, ending when the line is logged. It is the stall, not the window, and it starts where the wait BEGAN: the kernel charges a wait when it ends, so a thread that waited 5 s is reported in the second its wait ended, and a 500 ms wait seen 100 ms into a window began 400 ms before that window. The supervisor works the start out for each starved thread (the tick it saw the wait on, minus the wait) and takes the consumers from the last one-second sample at or before the earliest such start, so the field is usually a whole number of seconds and can be longer than both `windowMs` and `runq=` (that 500 ms wait is reported with 2000). Never less than the window. |
+| `topCgroupsTruncated` | On the line, as `true`, only when the stall began before the oldest sample kept: the supervisor keeps 32 cgroup samples (about 32 s; fewer right after it starts) and 4 process scans. The figures then cover only the END of the stall, the last `topCgroupsOverMs` of it. Absent: the whole stall is covered. |
+| `topProcs`, `topProcsOverMs`, `topProcsTruncated` | The same per process, as `<comm>(<pid>)=<n>ms`. Only when the proxy pod shares the host PID namespace, which the chart does not ask for; otherwise the field says so. |
 | `unavailable: <reason>` | The value of `topCgroups` or `topProcs` when that source could not be read (no cgroup v2, only the container's own cgroup visible, a scan over its 250 ms budget, no earlier sample yet). The stall line is logged regardless. |
+
+No figure is larger than the interval on every CPU of the node. That count is the node's
+online CPUs (`/sys/devices/system/cpu/online`), not the CPUs the proxy container may run
+on: under a cpuset those differ, and the smaller one would cut real usage down. The
+`envoy thread-stall sampler running` line at startup carries it as `nodeCPUs`; when the
+file cannot be read it says `unknown (...)` instead and the figures are not capped by a
+CPU count at all (a cgroup is still held to what its parent used).
 
 How to read `topCgroups`:
 
@@ -3733,7 +3741,14 @@ How to read `topCgroups`:
   The proxy's own pod is in the list like any other.
 - A pod created in the last 10 s may not have its own entry yet: the supervisor lists
   the cgroup directories every 10 s and reads only the known ones in between, so the
-  new pod's time is in its parent's entry (`/kubepods/burstable`) until then.
+  new pod's time is in its parent's entry (`/kubepods/burstable`) until then. The 10 s
+  hold while the node is starved too: every tenth starved second the line is made from a
+  fresh listing, so a pod created during a long incident appears on it. On that one line
+  the new pod's figure is an upper bound (its usage since it was created, held to what
+  its parent used in the interval); it is exact once the interval starts at or after
+  that listing, which for a one-second stall is the next line. If that listing
+  runs past the 250 ms budget, that one line says `unavailable` and the next reads the
+  known cgroups again.
 - `cpu.stat` is kept by the kernel, so the figures include processes that lived and died
   inside the interval (an exec probe, a container start), which a process list misses.
 
@@ -3749,7 +3764,7 @@ service.name:aether-proxy "envoy thread stall" "[starved]" "/podruntime/kubelet=
 
 The second query counts the starved seconds in which the kubelet was one of the top five
 consumers on each node. That is the question #1389 had to leave as an inference: on
-main-worker-04 the hot seconds sat on a 30 s phase that followed the kubelet and cAdvisor
+one worker node the hot seconds sat on a 30 s phase that followed the kubelet and cAdvisor
 scrapes, and nothing recorded CPU per consumer at one-second resolution to say the
 kubelet was what burned it. With these fields each of those seconds names its consumers:
 `/podruntime/kubelet` at the top with several hundred ms on the :12/:42 seconds confirms
@@ -3761,7 +3776,8 @@ sample is one `cpu.stat` per cgroup down to pod level, read once a second whethe
 anything is starved (a delta needs a "before", and a stall is only known when it is
 over). 134 cgroups took 2.6 ms and 402 system calls (open, read, close per file), so
 about 0.3% of one core for a node with ~110 pods. Listing the directories is dearer
-than reading the files (126 directories: about 7 ms) and is done every 10 s. The
+than reading the files (126 directories: about 7 ms) and is done every 10 s, starved or
+not, together with one read of the node's online-CPU list. The
 process scan is one `/proc/<pid>/stat` per process, about 22 µs each: 300 processes are
 about 300 files, 907 system calls and 6.6 ms. It runs every 10 s for a baseline and once
 more for each starved window, and not at all without the host PID namespace. A scan that

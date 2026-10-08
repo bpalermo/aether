@@ -9,7 +9,6 @@ import (
 	"math"
 	"os"
 	"path"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -54,7 +53,10 @@ import (
 //     directories costs more than reading the files, so the set of cgroups is
 //     listed every cgroupListInterval and reused in between: a pod created
 //     since the last listing is counted in its parent's entry until the next
-//     one.
+//     one. The interval holds in a starved window too (a node starved for a
+//     minute would otherwise never see the pods created in it): the sample a
+//     stall line is made from is then the listing, inside the same scan
+//     budget.
 //   - processes: a full /proc scan is several times dearer (one file per
 //     process), so the rolling baseline is taken every procBaselineInterval and
 //     a second scan only when a window reports a starved thread. The delta then
@@ -99,9 +101,10 @@ const (
 	procHistoryLen   = 4
 	// consumerScanBudget is the wall time one scan may take before it is
 	// abandoned, so a slow /proc or cgroupfs cannot hold the stall line back.
-	// It is checked before every file and once after the last, so a scan
-	// overruns it by at most one read (or one directory listing), and a scan
-	// that finished late is not reported either.
+	// It is checked before every file, before every directory listing and
+	// once after the last, so a scan overruns it by at most one read or one
+	// listing (never one on top of the other), and a scan that finished late
+	// is not reported either.
 	consumerScanBudget = 250 * time.Millisecond
 
 	// Names are truncated so N entries bound the line. A cgroup path keeps its
@@ -122,6 +125,10 @@ const (
 	attrTopCgroupsOverMs = "topCgroupsOverMs"
 	attrTopProcs         = "topProcs"
 	attrTopProcsOverMs   = "topProcsOverMs"
+	// The truncated fields are on the line (as true) only when the stall
+	// began before the oldest sample kept, so the figures cover its END only.
+	attrTopCgroupsTruncated = "topCgroupsTruncated"
+	attrTopProcsTruncated   = "topProcsTruncated"
 )
 
 var (
@@ -359,8 +366,9 @@ func parseCgroupUsage(b []byte) (uint64, error) {
 // A cgroup the earlier sample knew of but could not read is neither: its
 // counter is its lifetime's, so it gets no entry and what it used stays in its
 // parent's (nothing below it gets one either). And whatever went wrong with a
-// baseline, no cgroup can have used more than the interval on every CPU, so
-// each delta is held to that as well as to its parent's.
+// baseline, no cgroup can have used more than the interval on every CPU of the
+// node, so each delta is held to that as well as to its parent's. ncpu is the
+// NODE's CPU count (cpuConsumers.ncpu); 0, not known, holds nothing.
 func cgroupDeltas(base, cur cgroupSample, ncpu int) ([]consumer, error) {
 	baseRoot, ok := base.usage["/"]
 	if !ok {
@@ -520,8 +528,9 @@ func ticksToUsec(utime, stime uint64) uint64 {
 // it is not new, and charging it as new would put its whole lifetime's CPU on
 // the line. (Failing the whole scan instead would let one entry that is never
 // readable turn the field off for good.) And whatever the cause, no process can
-// have used more than the interval on every CPU, so each figure is held to
-// that: a wrong baseline can then mislead by at most what was possible.
+// have used more than the interval on every CPU of the node, so each figure is
+// held to that: a wrong baseline can then mislead by at most what was possible
+// (ncpu as in cgroupDeltas: the node's count, 0 holds nothing).
 func procDeltas(base, cur procSample, ncpu int) []consumer {
 	limit := uint64(math.MaxUint64)
 	if span := cur.at.Sub(base.at); span > 0 && ncpu > 0 {
@@ -559,22 +568,30 @@ func (h *sampleHistory[S]) push(s S) {
 	h.samples = append(h.samples, s)
 }
 
-// baseline returns the newest sample taken at or before since — the latest
-// "before" that still covers the whole stall — or the oldest one kept (so only
-// the END of the stall is covered, and the reported interval is shorter than
-// the stall) when the
-// stall began before all of them.
-func (h *sampleHistory[S]) baseline(since time.Time) (S, bool) {
+// baseline returns the newest sample taken at or before since: the latest
+// "before" that still covers the whole stall. When the stall began before all
+// of them it returns the oldest one kept with truncated set: only the END of
+// the stall is covered, and the reported interval is shorter than the stall.
+func (h *sampleHistory[S]) baseline(since time.Time) (base S, truncated, ok bool) {
 	if len(h.samples) == 0 {
-		var zero S
-		return zero, false
+		return base, false, false
 	}
 	for _, s := range slices.Backward(h.samples) {
 		if !s.when().After(since) {
-			return s, true
+			return s, false, true
 		}
 	}
-	return h.samples[0], true
+	return h.samples[0], true, true
+}
+
+// topList is one source's part of a stall line.
+type topList struct {
+	consumers []consumer
+	// over is the interval the figures were taken over; truncated says it
+	// starts after the stall did.
+	over      time.Duration
+	truncated bool
+	err       error
 }
 
 // cpuConsumers samples the two sources and reports the top consumers of a
@@ -587,8 +604,16 @@ type cpuConsumers struct {
 	topN       int
 	// clock is the wall clock the scan budget is measured on.
 	clock func() time.Time
-	// ncpu bounds one process's CPU time over an interval.
-	ncpu int
+	// ncpu is the NODE's online CPU count (onlineCPUsPath), which bounds what
+	// any consumer can have used over an interval; 0 when it could not be
+	// read (ncpuErr says why), and then nothing is bounded by it. It is not
+	// runtime.NumCPU: that is the CPUs THIS process may run on, and both
+	// sources are node-wide, so under a cpuset it would cut real usage down
+	// and leave the wrong consumers on top. Read again every
+	// cgroupListInterval (ncpuReadAt), for a CPU brought online later.
+	ncpu       int
+	ncpuErr    error
+	ncpuReadAt time.Time
 
 	cgroups sampleHistory[cgroupSample]
 	procs   sampleHistory[procSample]
@@ -617,7 +642,6 @@ func newCPUConsumers(fs statFS, procRoot, cgroupRoot string, topN int) *cpuConsu
 		cgroupRoot: cgroupRoot,
 		topN:       min(topN, maxStallTopConsumers),
 		clock:      time.Now,
-		ncpu:       runtime.NumCPU(),
 		cgroups:    sampleHistory[cgroupSample]{limit: cgroupHistoryLen},
 		procs:      sampleHistory[procSample]{limit: procHistoryLen},
 	}
@@ -633,11 +657,45 @@ func nodeCPUConsumers(topN int) *cpuConsumers {
 	return newCPUConsumers(&osStatFS{}, "/proc", "/sys/fs/cgroup", topN)
 }
 
+// refreshNodeCPUs reads the node's online CPU count when the last reading is
+// cgroupListInterval old. A count that cannot be read or parsed is no count:
+// the deltas are then not held to "the interval on every CPU" at all, which is
+// better than holding them to a number that describes something else.
+func (c *cpuConsumers) refreshNodeCPUs(now time.Time) {
+	if !c.ncpuReadAt.IsZero() && now.Sub(c.ncpuReadAt) < cgroupListInterval {
+		return
+	}
+	c.ncpuReadAt = now
+	c.ncpu, c.ncpuErr = 0, nil
+	b, err := c.fs.readFile(onlineCPUsPath)
+	if err == nil {
+		c.ncpu, err = parseCPUList(strings.TrimSpace(string(b)))
+	}
+	if err != nil {
+		c.ncpu, c.ncpuErr = 0, err
+	}
+}
+
+// nodeCPUs is the node's CPU count as the startup line reports it: the number,
+// or why there is none and what that means for the figures.
+func (c *cpuConsumers) nodeCPUs(now time.Time) any {
+	c.refreshNodeCPUs(now)
+	if c.ncpuErr != nil {
+		return "unknown (" + c.ncpuErr.Error() + "): consumer figures are not capped at the interval on every CPU"
+	}
+	return c.ncpu
+}
+
+// cgroupListDue reports whether the cgroup directories are to be listed again.
+func (c *cpuConsumers) cgroupListDue(now time.Time) bool {
+	return now.Sub(c.cgroupListedAt) >= cgroupListInterval
+}
+
 // roll takes the rolling baselines: cgroups every call (once per window),
 // processes every procBaselineInterval.
 func (c *cpuConsumers) roll(now time.Time) {
-	relist := now.Sub(c.cgroupListedAt) >= cgroupListInterval
-	if s, err := c.sampleCgroups(now, relist); err == nil {
+	c.refreshNodeCPUs(now)
+	if s, err := c.sampleCgroups(now, c.cgroupListDue(now)); err == nil {
 		c.cgroups.push(s)
 	}
 	if c.procsVisible() != nil || now.Sub(c.lastProcAt) < procBaselineInterval {
@@ -654,11 +712,18 @@ func (c *cpuConsumers) roll(now time.Time) {
 // least that old. Two epochs starved in the same window (a handoff) each get
 // the consumers over their own stall. A source that cannot be reported says so
 // in its own field.
+//
+// The cgroups are those of the baseline, which is what makes a delta exact,
+// except when the listing is due: a node starved in every window never rolls,
+// so without a listing here the set would never be refreshed for as long as the
+// incident lasts, and every pod created in it would stay inside its parent's
+// entry. The listing is paid once per cgroupListInterval (not per line), inside
+// this sample's one scan budget; a cgroup it finds is "first listed inside the
+// interval" to cgroupDeltas, held to what its parent has left. If the listing
+// fails, this one line has no cgroups and the next reads the known set again.
 func (c *cpuConsumers) report(now time.Time, spans ...time.Duration) [][]any {
-	// The cgroups the baseline has, not a new listing: the stall line is not
-	// the place to pay for one, and the same set on both sides is what makes
-	// the delta exact.
-	cg, cgErr := c.sampleCgroups(now, false)
+	c.refreshNodeCPUs(now)
+	cg, cgErr := c.sampleCgroups(now, c.cgroupListDue(now))
 	var ps procSample
 	procErr := c.procsVisible()
 	if procErr == nil {
@@ -668,11 +733,9 @@ func (c *cpuConsumers) report(now time.Time, spans ...time.Duration) [][]any {
 	out := make([][]any, 0, len(spans))
 	for _, span := range spans {
 		since := now.Add(-span)
-		attrs := make([]any, 0, 8)
-		top, over, err := c.cgroupTop(cg, cgErr, since)
-		attrs = appendTop(attrs, attrTopCgroups, attrTopCgroupsOverMs, top, over, err)
-		top, over, err = c.procTop(ps, procErr, since)
-		out = append(out, appendTop(attrs, attrTopProcs, attrTopProcsOverMs, top, over, err))
+		attrs := make([]any, 0, 10)
+		attrs = appendTop(attrs, attrTopCgroups, attrTopCgroupsOverMs, attrTopCgroupsTruncated, c.cgroupTop(cg, cgErr, since))
+		out = append(out, appendTop(attrs, attrTopProcs, attrTopProcsOverMs, attrTopProcsTruncated, c.procTop(ps, procErr, since)))
 	}
 
 	if cgErr == nil {
@@ -687,37 +750,45 @@ func (c *cpuConsumers) report(now time.Time, spans ...time.Duration) [][]any {
 	return out
 }
 
-func (c *cpuConsumers) cgroupTop(cur cgroupSample, err error, since time.Time) ([]consumer, time.Duration, error) {
+func (c *cpuConsumers) cgroupTop(cur cgroupSample, err error, since time.Time) topList {
 	if err != nil {
-		return nil, 0, err
+		return topList{err: err}
 	}
-	base, ok := c.cgroups.baseline(since)
+	base, truncated, ok := c.cgroups.baseline(since)
 	if !ok {
-		return nil, 0, errNoBaseline
+		return topList{err: errNoBaseline}
 	}
 	all, err := cgroupDeltas(base, cur, c.ncpu)
 	if err != nil {
-		return nil, 0, err
+		return topList{err: err}
 	}
-	return topConsumers(all, c.topN), cur.at.Sub(base.at), nil
+	return topList{consumers: topConsumers(all, c.topN), over: cur.at.Sub(base.at), truncated: truncated}
 }
 
-func (c *cpuConsumers) procTop(cur procSample, err error, since time.Time) ([]consumer, time.Duration, error) {
+func (c *cpuConsumers) procTop(cur procSample, err error, since time.Time) topList {
 	if err != nil {
-		return nil, 0, err
+		return topList{err: err}
 	}
-	base, ok := c.procs.baseline(since)
+	base, truncated, ok := c.procs.baseline(since)
 	if !ok {
-		return nil, 0, errNoBaseline
+		return topList{err: errNoBaseline}
 	}
-	return topConsumers(procDeltas(base, cur, c.ncpu), c.topN), cur.at.Sub(base.at), nil
+	return topList{
+		consumers: topConsumers(procDeltas(base, cur, c.ncpu), c.topN),
+		over:      cur.at.Sub(base.at),
+		truncated: truncated,
+	}
 }
 
-func appendTop(attrs []any, key, overKey string, top []consumer, over time.Duration, err error) []any {
-	if err != nil {
-		return append(attrs, key, "unavailable: "+err.Error())
+func appendTop(attrs []any, key, overKey, truncatedKey string, t topList) []any {
+	if t.err != nil {
+		return append(attrs, key, "unavailable: "+t.err.Error())
 	}
-	return append(attrs, key, formatConsumers(top), overKey, over.Milliseconds())
+	attrs = append(attrs, key, formatConsumers(t.consumers), overKey, t.over.Milliseconds())
+	if t.truncated {
+		attrs = append(attrs, truncatedKey, true)
+	}
+	return attrs
 }
 
 // scanBudget is one scan's deadline.
@@ -842,16 +913,32 @@ func (c *cpuConsumers) cgroupUsage(rel string) (uint64, error) {
 	return parseCgroupUsage(b)
 }
 
-// walkCgroups samples the children of dir, at depth, and theirs.
-func (c *cpuConsumers) walkCgroups(s *cgroupSample, dir string, depth int, budget *scanBudget) error {
+// cgroupChildren lists the cgroups directly below dir for a walk that has
+// sampled s so far.
+func (c *cpuConsumers) cgroupChildren(s *cgroupSample, dir string, budget *scanBudget) ([]string, error) {
+	// Before every listing, not only before every file: the read of dir's own
+	// cpu.stat may be what used the budget up, and a directory listing is the
+	// dearer of the two calls to make on top of it.
+	if budget.spent() {
+		return nil, errScanBudget
+	}
 	names, more, err := c.fs.subdirs(path.Join(c.cgroupRoot, dir), cgroupMaxCount)
 	if err != nil {
 		// Removed since its parent listed it, or not ours to list: it stays
 		// a single entry.
-		return nil
+		return nil, nil
 	}
 	if more || len(s.usage)+len(s.unknown)+len(names) > cgroupMaxCount {
-		return fmt.Errorf("%w (more than %d cgroups)", errTooMany, cgroupMaxCount)
+		return nil, fmt.Errorf("%w (more than %d cgroups)", errTooMany, cgroupMaxCount)
+	}
+	return names, nil
+}
+
+// walkCgroups samples the children of dir, at depth, and theirs.
+func (c *cpuConsumers) walkCgroups(s *cgroupSample, dir string, depth int, budget *scanBudget) error {
+	names, err := c.cgroupChildren(s, dir, budget)
+	if err != nil {
+		return err
 	}
 	for _, name := range names {
 		if budget.spent() {

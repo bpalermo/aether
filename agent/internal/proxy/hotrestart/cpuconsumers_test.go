@@ -666,7 +666,8 @@ func TestProcessConsumersNeedTheHostPIDNamespace(t *testing.T) {
 			assert.Equal(t, "unavailable: /proc shows only this pod's PID namespace (no hostPID)", got[attrTopProcs])
 			assert.NotContains(t, got, attrTopProcsOverMs)
 			assert.Zero(t, fs.lists, "/proc is never listed")
-			assert.LessOrEqual(t, fs.reads, 4, "one probe of /proc/2/stat, then only the cgroup root")
+			assert.LessOrEqual(t, fs.reads, 7,
+				"one probe of /proc/2/stat, then per call only the cgroup root and (the calls being a minute apart) the node's CPU list")
 		})
 	}
 }
@@ -888,7 +889,7 @@ func TestConsumerBoundIsTheNodesCPUCount(t *testing.T) {
 
 func TestSampleHistory(t *testing.T) {
 	h := sampleHistory[cgroupSample]{limit: 3}
-	_, ok := h.baseline(consumersT0)
+	_, _, ok := h.baseline(consumersT0)
 	assert.False(t, ok, "no sample yet")
 	for i := range 5 {
 		h.push(cgroupSample{at: consumersT0.Add(time.Duration(i) * time.Second)})
@@ -900,9 +901,10 @@ func TestSampleHistory(t *testing.T) {
 		3500 * time.Millisecond: 3 * time.Second, // the newest one before it
 		time.Second:             2 * time.Second, // before all of them: the oldest
 	} {
-		got, ok := h.baseline(consumersT0.Add(since))
+		got, truncated, ok := h.baseline(consumersT0.Add(since))
 		require.True(t, ok)
 		assert.Equal(t, consumersT0.Add(want), got.at, "since=%v", since)
+		assert.Equal(t, want > since, truncated, "since=%v: truncated only when the baseline is after it", since)
 	}
 }
 
@@ -1335,6 +1337,34 @@ func TestOSStatFSReadsTheLiveFilesystems(t *testing.T) {
 	assert.Contains(t, got, attrTopCgroups)
 	assert.Contains(t, got, attrTopProcs)
 	t.Logf("live report: %v", got)
+
+	// The node's CPU count, through the same reader, agrees with the
+	// supervisor's other reading of that file where the sandbox shows it. It
+	// is at least the CPUs this process may run on, never fewer.
+	if want, err := readOnlineCPUs(); err == nil {
+		assert.Equal(t, want, c.nodeCPUs(time.Now().Add(time.Hour)))
+		assert.GreaterOrEqual(t, c.ncpu, runtime.NumCPU())
+	} else {
+		assert.Contains(t, c.nodeCPUs(time.Now().Add(time.Hour)), "unknown (")
+	}
+}
+
+// TestNodeCPUsSaysWhenTheFiguresAreNotCapped: the startup line carries the
+// node's CPU count, or says in words that there is none to cap the figures by.
+func TestNodeCPUsSaysWhenTheFiguresAreNotCapped(t *testing.T) {
+	fs := newFakeStatFS()
+	fs.files[onlineCPUsPath] = "0-7\n"
+	c := newTestConsumers(fs, 5)
+	assert.Equal(t, 8, c.nodeCPUs(consumersT0))
+
+	// Read again only when the interval is up, and then believed: a count that
+	// can no longer be read is not carried over.
+	delete(fs.files, onlineCPUsPath)
+	assert.Equal(t, 8, c.nodeCPUs(consumersT0.Add(cgroupListInterval-time.Second)))
+	assert.Equal(t,
+		"unknown (no such file or directory): consumer figures are not capped at the interval on every CPU",
+		c.nodeCPUs(consumersT0.Add(cgroupListInterval)))
+	assert.Zero(t, c.ncpu)
 }
 
 // TestStallLineFirstWindowHasABaseline: the baseline is taken when the first

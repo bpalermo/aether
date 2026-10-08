@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -120,13 +121,20 @@ type sampledThread struct {
 	//   wrk:worker_1[starved] cpu=0ms runq=5803ms   windowMs=1099
 	span          time.Duration
 	cpuNs, runqNs uint64
-	blocked       time.Duration
-	uninterrupt   time.Duration // the part of blocked spent in state D
-	wchans        map[string]time.Duration
+	// runqSince is the earliest moment a runqueue wait charged in this window
+	// can have begun: the tick a delta was seen on, minus the delta. Because
+	// the wait is charged when it ends, that is before the window's start
+	// whenever the wait was already running when the window opened (a 500 ms
+	// wait seen 100 ms in began 400 ms earlier). Zero: nothing charged.
+	runqSince   time.Time
+	blocked     time.Duration
+	uninterrupt time.Duration // the part of blocked spent in state D
+	wchans      map[string]time.Duration
 }
 
 func (t *sampledThread) resetWindow() {
 	t.span, t.cpuNs, t.runqNs, t.blocked, t.uninterrupt = 0, 0, 0, 0, 0
+	t.runqSince = time.Time{}
 	clear(t.wchans)
 }
 
@@ -269,6 +277,15 @@ func (s *stallSampler) sampleThread(pid, tid int, t *sampledThread, now time.Tim
 	t.span += elapsed
 	t.cpuNs += dCPU
 	t.runqNs += dRunq
+	if dRunq > 0 {
+		// The wait ended at or before this tick, so it began no later than the
+		// tick minus its length. (It may have ended up to one tick earlier;
+		// the consumers' baseline is the sample at or BEFORE the start asked
+		// for, which takes that in.)
+		if began := now.Add(-nsDuration(dRunq)); t.runqSince.IsZero() || began.Before(t.runqSince) {
+			t.runqSince = began
+		}
+	}
 	if off := elapsed - time.Duration(dCPU+dRunq); off > 0 {
 		s.chargeSleep(pid, tid, t, st.state, off)
 	}
@@ -310,6 +327,15 @@ func counterDelta(cur, prev uint64) uint64 {
 		return 0
 	}
 	return cur - prev
+}
+
+// nsDuration converts a nanosecond count read from the kernel to a Duration,
+// saturating: a garbled counter must not wrap into a negative length.
+func nsDuration(ns uint64) time.Duration {
+	if ns > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return time.Duration(ns)
 }
 
 // threadVerdict is one flagged thread in a window.
@@ -368,6 +394,29 @@ type flaggedEpoch struct {
 	// starved is the longest runqueue wait of a starved thread, 0 when none
 	// was starved.
 	starved time.Duration
+	// starvedSince is the earliest a starved thread's wait can have begun
+	// (sampledThread.runqSince); it may be before the window.
+	starvedSince time.Time
+}
+
+// noteStarved folds one starved thread into the line: its wait, and the
+// earliest moment that wait can have begun (zero: not known).
+func (f *flaggedEpoch) noteStarved(runq time.Duration, since time.Time) {
+	f.starved = max(f.starved, runq)
+	if !since.IsZero() && (f.starvedSince.IsZero() || since.Before(f.starvedSince)) {
+		f.starvedSince = since
+	}
+}
+
+// stall is the interval to name the consumers over for this line, ending at
+// now (the window's close): from the earliest start of a starved thread's wait,
+// and never less than the window or than the wait itself.
+func (f flaggedEpoch) stall(now time.Time, wall time.Duration) time.Duration {
+	d := max(wall, f.starved)
+	if !f.starvedSince.IsZero() {
+		d = max(d, now.Sub(f.starvedSince))
+	}
+	return d
 }
 
 func (s *stallSampler) closeWindow(now time.Time) {
@@ -385,7 +434,7 @@ func (s *stallSampler) closeWindow(now time.Time) {
 		line.epoch, line.pid = epoch, e.pid
 		lines = append(lines, line)
 		if line.starved > 0 {
-			stalls = append(stalls, max(wall, line.starved))
+			stalls = append(stalls, line.stall(now, wall))
 		}
 	}
 	tops := s.topConsumers(now, stalls)
@@ -415,7 +464,9 @@ func (s *stallSampler) closeWindow(now time.Time) {
 // over that line's own stall: a runqueue wait is charged when it ends, so a
 // thread that waited 5 s is reported in one window and its consumers are taken
 // over those 5 s, while another epoch that waited 300 ms in the same window
-// gets the window's. The sources are sampled once for all of them. Only a
+// gets the window's. A stall is measured from where its wait began
+// (flaggedEpoch.stall), which can be in an earlier window than the one that
+// reports it. The sources are sampled once for all of them. Only a
 // starved thread is waiting for a CPU, so a window with none just rolls the
 // baseline: a blocked thread is asleep in the kernel and a busy one is itself
 // the consumer, and neither line gains anything from the list.
@@ -443,7 +494,7 @@ func (s *stallSampler) closeEpochWindow(e *sampledEpoch) (line flaggedEpoch) {
 			line.threads = append(line.threads, v.String())
 			line.span = max(line.span, t.span)
 			if slices.Contains(v.classes, stallStarved) {
-				line.starved = max(line.starved, v.runq)
+				line.noteStarved(v.runq, t.runqSince)
 			}
 			for _, class := range v.classes {
 				s.metrics.envoyThreadStalled(class)
@@ -531,13 +582,16 @@ func (s *Supervisor) sampleStalls(ctx context.Context) {
 		threshold = DefaultStallThreshold
 	}
 	sampler := newStallSampler(procReader{root: "/proc"}, threshold, s.log, s.metrics, s.childPIDs, s.stallLogContext)
-	topN := 0
+	attrs := []any{"interval", s.cfg.StallSampleInterval, "threshold", threshold, "window", stallWindow}
 	if sampler.consumers = nodeCPUConsumers(s.cfg.StallTopConsumers); sampler.consumers != nil {
-		topN = sampler.consumers.topN // the bounded value the lines will carry
+		attrs = append(attrs,
+			"topConsumers", sampler.consumers.topN, // the bounded value the lines will carry
+			// What the figures are capped by, or that they are not.
+			"nodeCPUs", sampler.consumers.nodeCPUs(time.Now()))
+	} else {
+		attrs = append(attrs, "topConsumers", 0)
 	}
-	s.log.InfoContext(ctx, "envoy thread-stall sampler running",
-		"interval", s.cfg.StallSampleInterval, "threshold", threshold, "window", stallWindow,
-		"topConsumers", topN)
+	s.log.InfoContext(ctx, "envoy thread-stall sampler running", attrs...)
 
 	ticker := time.NewTicker(s.cfg.StallSampleInterval)
 	defer ticker.Stop()
