@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The soak's ONE kickoff (proposal 042, #1323): pre-flight -> engines -> load ->
-# churn driver (soak) -> restart watchdog AT T0 -> saver armed. It replaces the
+# saver armed -> churn driver (soak) -> restart watchdog AT T0. It replaces the
 # workstation scripts that used to do this from outside the repository
 # (nightly-soak-*.sh, soak-kickoff-*.sh, save-k6.sh, run-e2e-short.sh).
 #
@@ -112,10 +112,10 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # The chart, by digest (the OCI manifest's). Bump with the two image digests in
 # sortie-values.yaml; the version is here for the reader, the digest is what is
-# pulled. sortie 9fcbb81afaeab77f6f16bacd3ed43d94a65d9fd8.
+# pulled. sortie f0750ecf407c1bc50e6740b4b16a3b61964649e0.
 SORTIE_CHART="${SORTIE_CHART:-oci://quay.io/sortie/chart-sortie}"
-SORTIE_CHART_VERSION="0.1.0-9fcbb81afaeab77f6f16bacd3ed43d94a65d9fd8"
-SORTIE_CHART_DIGEST="${SORTIE_CHART_DIGEST:-sha256:10f6c84b9f5dc1a93dd9dd6ad1ab6196130a6f7cbc69dff82258b25700606913}"
+SORTIE_CHART_VERSION="0.1.0-f0750ecf407c1bc50e6740b4b16a3b61964649e0"
+SORTIE_CHART_DIGEST="${SORTIE_CHART_DIGEST:-sha256:b1f0a6d5f838a4d76357b7438f8557cc3b74e37035918aa8ca4a490cd75e45ef}"
 # Who must have signed the chart and the images: sortie's publish workflow, on
 # main, through GitHub Actions' OIDC issuer (keyless).
 SORTIE_SIGNER_IDENTITY='^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$'
@@ -146,6 +146,9 @@ ENGINE_SETTLE="${SOAK_ENGINE_SETTLE:-30}"
 PRIORITY_CLASS="aether-soak-loader"
 PRIORITY_VALUE=1000
 PVC="sortie-soak-reports"
+# How long an aborting kickoff waits for the saver to finish with a Job that has
+# already ended (seconds; the saver itself goes on detached either way).
+ABORT_SAVE_WAIT=120
 
 usage() {
 	echo "usage: run.sh {e2e|soak} --context NAME [--label TEXT] [--out DIR] [--preflight] [--verify|--no-verify] ... (see the header of $0)" >&2
@@ -587,6 +590,23 @@ for _ in $(seq 1 30); do
 	sleep 2
 done
 [ -n "$JOB" ] || die "the release has no Job after the upgrade"
+# The saver FIRST, the moment the Job has a name and before anything looks at
+# its pod: whatever happens next -- to the run, or to this kickoff, which may
+# spend three minutes below waiting for the pod -- the report and the results
+# stream are copied out when the Job ends, before anyone tears it down. That
+# includes the run that is over already (#1387): a Job that ends before the
+# check below (a stage refused at an engine's execution cap, a plan sortie
+# rejects) used to abort the kickoff with the saver not yet armed, and that
+# short run's report was the one thing that said why.
+# T_JOB stands in for T_LOAD in the saver, which reads run.env once, now: its
+# clock for "overdue" then starts up to those three minutes early, well inside
+# its twenty of margin.
+{
+	echo "JOB=$JOB"
+	echo "T_JOB=$(date +%s)"
+} >>"$OUT/run.env"
+nohup setsid bash "$HERE/sortie-save.sh" --dir "$OUT" --wait >"$OUT/save.log" 2>&1 </dev/null &
+log "saver armed (log $OUT/save.log)"
 PHASE=""
 for _ in $(seq 1 90); do
 	PHASE="$(k -n "$NS" get pods -l "job-name=$JOB" -o jsonpath='{.items[0].status.phase}' 2>/dev/null)"
@@ -594,14 +614,37 @@ for _ in $(seq 1 90); do
 	sleep 2
 done
 T_LOAD="$(date +%s)"
-{
-	echo "JOB=$JOB"
-	echo "T_LOAD=$T_LOAD"
-} >>"$OUT/run.env"
-# A pod that has already ended refused to run the plan: sortie 9fcbb81 stops a
-# stage at once when an engine is at its execution cap, where an older one ran
-# whichever targets got a slot. Its report says why; the saver was not armed.
-[ "$PHASE" = Running ] || die "the sortie pod of job/$JOB is '$PHASE', not Running (kubectl -n $NS describe job/$JOB). If it ran and failed at once, its report says why: sortie-save.sh --dir $OUT, then sortie-gate.sh --dir $OUT"
+echo "T_LOAD=$T_LOAD" >>"$OUT/run.env"
+if [ "$PHASE" != Running ]; then
+	SAVED_LINE=""
+	case "$PHASE" in
+	Succeeded | Failed)
+		# It has ended: the saver is copying it out now (a reader pod per file,
+		# seconds each; a Job not yet marked finished costs it one 30 s poll).
+		# Wait for its last word, so that the abort can say what there is.
+		for _ in $(seq 1 "$ABORT_SAVE_WAIT"); do
+			SAVED_LINE="$(grep -E ' SORTIE_(SAVED|SAVE_FAILED|SAVE_INCOMPLETE) ' "$OUT/save.log" 2>/dev/null | tail -n 1)"
+			[ -n "$SAVED_LINE" ] && break
+			sleep 1
+		done
+		;;
+	esac
+	WHAT="the sortie pod of job/$JOB is '${PHASE:-absent}', not Running (kubectl -n $NS describe job/$JOB)"
+	case "$SAVED_LINE" in
+	*" SORTIE_SAVED "*)
+		die "$WHAT. It ran and ended at once, and what it wrote is saved -- its report says why: sortie-gate.sh --dir $OUT   [saver: ${SAVED_LINE#* }]"
+		;;
+	"")
+		die "$WHAT. The saver is armed and copies out whatever the run writes when the Job ends: watch $OUT/save.log for SORTIE_SAVE, then sortie-gate.sh --dir $OUT (or sortie-teardown.sh --dir $OUT --force to give up on it)"
+		;;
+	*)
+		# SORTIE_SAVE_FAILED / _INCOMPLETE: no report came out. The saver's own
+		# line says what did (the logs; the results stream, with the command
+		# that grades it) and what is still on the PVC.
+		die "$WHAT. It ended at once and its REPORT COULD NOT BE SAVED; what the saver says there is, and how to read it: ${SAVED_LINE#* }"
+		;;
+	esac
+fi
 # One sortie pod drives every engine: if it is preempted the whole run is
 # cancelled, not one node's share of it. It can move, but a run cannot.
 POD_PRIO="$(k -n "$NS" get pods -l "job-name=$JOB" -o jsonpath='{.items[0].spec.priorityClassName}={.items[0].spec.priority}' 2>/dev/null)"
@@ -611,11 +654,6 @@ else
 	log "WARNING the sortie pod's priority is '$POD_PRIO', not $PRIORITY_CLASS=$PRIORITY_VALUE: it is the first victim when a node fills up, and losing it cancels the run"
 fi
 log "LOAD STARTED job=$JOB rate=$RATE rps per node x $BACKENDS nodes for ${DURATION_S}s (ends ~$(date -u -d "@$((T_LOAD + DURATION_S))" +%FT%TZ))"
-
-# The saver first: whatever happens next, the report is copied out when the run
-# ends, before anyone tears it down.
-nohup setsid bash "$HERE/sortie-save.sh" --dir "$OUT" --wait >"$OUT/save.log" 2>&1 </dev/null &
-log "saver armed (log $OUT/save.log)"
 
 start_watchdog() {
 	# $1 = duration, $2 = interval. AT T0, not after the kickoff returns (#1323).

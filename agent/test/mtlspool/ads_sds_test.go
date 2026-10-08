@@ -45,7 +45,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,7 +70,6 @@ import (
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -344,14 +342,12 @@ func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, opts adsOptions) *
 		t.Fatalf("locate envoy: %v", err)
 	}
 
-	portA, portB, adminPort := freePort(t), freePort(t), freePort(t)
-
 	listeners := []types.Resource{
-		sourceListener("source_a", spiffeSourceA, portA, true),
-		sourceListener("source_b", spiffeSourceB, portB, true),
+		sourceListener("source_a", spiffeSourceA, envoyPicksPort, true),
+		sourceListener("source_b", spiffeSourceB, envoyPicksPort, true),
 	}
 	for i, id := range opts.staticallyReferenced {
-		listeners = append(listeners, inboundListener(t, fmt.Sprintf("inbound_%d", i), id, freePort(t)))
+		listeners = append(listeners, inboundListener(t, fmt.Sprintf("inbound_%d", i), id, envoyPicksPort))
 	}
 
 	mesh := newMeshCluster(t, destAddr)
@@ -365,32 +361,29 @@ func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, opts adsOptions) *
 		resourcev3.SecretType:   secretResources(t, p, []string{spiffeSourceA, spiffeSourceB, spiffeNode}),
 	})
 
-	launchEnvoyOverADS(t, bin, cp, adminPort)
+	e := launchEnvoyOverADS(t, bin, cp)
 
-	h := &adsProxyHandle{
+	// The listeners arrive over LDS, so reading their addresses back also
+	// proves the stream is up.
+	return &adsProxyHandle{
 		proxyHandle: &proxyHandle{
-			addrA: fmt.Sprintf("127.0.0.1:%d", portA),
-			addrB: fmt.Sprintf("127.0.0.1:%d", portB),
+			addrA: e.listenerAddr(t, "source_a"),
+			addrB: e.listenerAddr(t, "source_b"),
 		},
-		adminAddr: fmt.Sprintf("127.0.0.1:%d", adminPort),
+		adminAddr: e.admin,
 		cp:        cp,
 	}
-	// The listeners arrive over LDS, so this also proves the stream is up.
-	waitListening(t, h.addrA)
-	waitListening(t, h.addrB)
-	return h
 }
 
 // launchEnvoyOverADS runs the pinned proxy against a production-shaped
 // bootstrap: nothing but the ADS cluster in static_resources, CDS and LDS over
-// one delta-ADS stream to cp, admin on 127.0.0.1:adminPort. The process is
-// killed at test cleanup.
-func launchEnvoyOverADS(t *testing.T, bin string, cp *adsControlPlane, adminPort int) {
+// one delta-ADS stream to cp, and the admin endpoint launchEnvoy adds. The
+// process is killed at test cleanup.
+func launchEnvoyOverADS(t *testing.T, bin string, cp *adsControlPlane) *envoyProc {
 	t.Helper()
 
 	bs := &bootstrapv3.Bootstrap{
-		Node:  &corev3.Node{Id: envoyNodeID, Cluster: "aether"},
-		Admin: &bootstrapv3.Admin{Address: socketAddress("127.0.0.1", adminPort)},
+		Node: &corev3.Node{Id: envoyNodeID, Cluster: "aether"},
 		DynamicResources: &bootstrapv3.Bootstrap_DynamicResources{
 			AdsConfig: &corev3.ApiConfigSource{
 				ApiType:             corev3.ApiConfigSource_DELTA_GRPC,
@@ -409,27 +402,8 @@ func launchEnvoyOverADS(t *testing.T, bin string, cp *adsControlPlane, adminPort
 		},
 	}
 
-	data, err := protojson.MarshalOptions{Multiline: true, Indent: "  ", UseProtoNames: true}.Marshal(bs)
-	if err != nil {
-		t.Fatalf("marshal bootstrap: %v", err)
-	}
-	path := filepath.Join(t.TempDir(), "bootstrap-ads.json")
-	writeFile(t, path, data)
-	t.Logf("ADS bootstrap: %s (xds socket %s)", path, cp.socketPath)
-
-	cmd := exec.Command(bin, "-c", path,
-		"--concurrency", "1",
-		"--use-dynamic-base-id",
-		"--log-level", "warn")
-	cmd.Stdout = &testWriter{t: t, prefix: "envoy"}
-	cmd.Stderr = &testWriter{t: t, prefix: "envoy"}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start envoy: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+	t.Logf("xds socket %s", cp.socketPath)
+	return launchEnvoy(t, bin, "envoy", bs, nil, "--concurrency", "1")
 }
 
 // setMaxRequestsPerConnection sets the cluster's upstream

@@ -1,0 +1,48 @@
+{{- /*
+Secrets whose kind a line pattern cannot read, and one document with no kind
+at all. The mask does not recognise them; it masks them because nothing says
+they are something else. The last two documents are the control: ConfigMaps
+with a plain kind line, whose data stays readable.
+*/ -}}
+apiVersion: v1
+kind: &anchored-kind Secret
+metadata:
+  name: {{ .Release.Name }}-anchored
+data:
+  token: FORBIDDEN-anchored-token
+---
+apiVersion: v1
+kind: !!str Secret
+metadata:
+  name: {{ .Release.Name }}-tagged
+stringData:
+  token: FORBIDDEN-tagged-token
+---
+apiVersion: v1
+metadata:
+  name: {{ .Release.Name }}-aliased
+  labels:
+    what: &what Secret
+kind: *what
+binaryData:
+  token: FORBIDDEN-aliased-token
+---
+apiVersion: v1
+metadata:
+  name: {{ .Release.Name }}-kindless
+data:
+  token: FORBIDDEN-kindless-token
+---
+apiVersion: v1
+kind: "ConfigMap" # a plain kind line: quoted, with a comment
+metadata:
+  name: {{ .Release.Name }}-plain-config
+data:
+  greeting: VISIBLE-plain-config-value
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-binary-config
+binaryData:
+  blob: VISIBLE-binary-config-value

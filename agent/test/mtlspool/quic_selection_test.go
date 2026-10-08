@@ -27,7 +27,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -44,7 +43,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/encoding/protojson"
 )
 
 const (
@@ -196,7 +194,6 @@ func startEnvoyQUICWith(t *testing.T, p *pki, h2Addr, h3Addr string, arms map[st
 		t.Skipf("locate envoy: %v", err)
 	}
 	sdsAddr := startSDS(t, p, []string{spiffeSourceA, spiffeSourceB, spiffeNode})
-	portA, portB := freePort(t), freePort(t)
 	bs := &bootstrapv3.Bootstrap{
 		Node: &corev3.Node{Id: envoyNodeID, Cluster: "aether"},
 		StaticResources: &bootstrapv3.Bootstrap_StaticResources{
@@ -206,33 +203,17 @@ func startEnvoyQUICWith(t *testing.T, p *pki, h2Addr, h3Addr string, arms map[st
 				quicTwinWith(t, quicTwinB, spiffeSourceB, h3Addr, o),
 			},
 			Listeners: []*listenerv3.Listener{
-				selectingSourceListener(t, "source_a", spiffeSourceA, portA, arms),
-				selectingSourceListener(t, "source_b", spiffeSourceB, portB, arms),
+				selectingSourceListener(t, "source_a", spiffeSourceA, envoyPicksPort, arms),
+				selectingSourceListener(t, "source_b", spiffeSourceB, envoyPicksPort, arms),
 			},
 		},
 		LayeredRuntime: o.layeredRuntime(),
 	}
-	data, err := protojson.MarshalOptions{Multiline: true, Indent: "  ", UseProtoNames: true}.Marshal(bs)
-	require.NoError(t, err)
-	path := filepath.Join(t.TempDir(), "bootstrap-quic.json")
-	writeFile(t, path, data)
-	t.Logf("bootstrap: %s", path)
-	args := append([]string{"-c", path, "--concurrency", "1", "--use-dynamic-base-id", "--log-level", "warn"}, o.extraArgs...)
-	cmd := exec.Command(bin, args...)
-	cmd.Stdout = o.output(t)
-	cmd.Stderr = o.output(t)
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-	h := &proxyHandle{
-		addrA: fmt.Sprintf("127.0.0.1:%d", portA),
-		addrB: fmt.Sprintf("127.0.0.1:%d", portB),
+	e := launchEnvoy(t, bin, "quic", bs, o.output(t), append([]string{"--concurrency", "1"}, o.extraArgs...)...)
+	return &proxyHandle{
+		addrA: e.listenerAddr(t, "source_a"),
+		addrB: e.listenerAddr(t, "source_b"),
 	}
-	waitListening(t, h.addrA)
-	waitListening(t, h.addrB)
-	return h
 }
 
 func selectionArms() map[string]string {

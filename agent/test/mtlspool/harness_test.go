@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +29,7 @@ import (
 	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	"aethermesh.dev/agent/test/envoybin"
+	adminv3 "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -750,71 +753,295 @@ func startEnvoy(t *testing.T, p *pki, destAddr string, hashable bool) *proxyHand
 
 	sdsAddr := startSDS(t, p, []string{spiffeSourceA, spiffeSourceB, spiffeNode})
 
-	portA, portB := freePort(t), freePort(t)
 	bs := &bootstrapv3.Bootstrap{
 		Node: &corev3.Node{Id: envoyNodeID, Cluster: "aether"},
 		StaticResources: &bootstrapv3.Bootstrap_StaticResources{
 			Clusters: []*clusterv3.Cluster{meshCluster(t, destAddr), sdsCluster(sdsAddr)},
 			Listeners: []*listenerv3.Listener{
-				sourceListener("source_a", spiffeSourceA, portA, hashable),
-				sourceListener("source_b", spiffeSourceB, portB, hashable),
+				sourceListener("source_a", spiffeSourceA, envoyPicksPort, hashable),
+				sourceListener("source_b", spiffeSourceB, envoyPicksPort, hashable),
 			},
 		},
 	}
+	t.Logf("source identity factory=%s", factoryKeyLabel(hashable))
 
+	e := launchEnvoy(t, bin, "envoy", bs, nil, "--concurrency", "1")
+	return &proxyHandle{
+		addrA: e.listenerAddr(t, "source_a"),
+		addrB: e.listenerAddr(t, "source_b"),
+	}
+}
+
+// envoyPicksPort is the port every Envoy listener and admin endpoint in this
+// package is configured with: 0, so the kernel assigns the port inside
+// Envoy's own bind(2) and the harness reads it back from the admin endpoint
+// (envoyProc.listenerAddr).
+//
+// The harness used to pick the number itself: listen on 127.0.0.1:0, close,
+// and write the number into the bootstrap. Between that close and Envoy's bind
+// (a process start and a config load later) the port belonged to nobody, and a
+// test process running in parallel could be handed it (#1377). Three outcomes
+// were seen under 16 parallel runs:
+//
+//   - Envoy's bind failed with "Address already in use" and the test waited
+//     30 s to say "envoy never listened";
+//   - the same on the HTTP/3 listener: the probe was TCP-only, and that
+//     listener binds the number on UDP, which nothing had checked;
+//   - the other process was another Envoy. Both set SO_REUSEPORT, so the bind
+//     succeeded, listen(2) then failed, and the wait for "something accepts on
+//     this port" was satisfied by the other test's proxy. The test went on to
+//     send its requests to a proxy that was not its own.
+const envoyPicksPort = 0
+
+// envoyWait bounds each wait on a discrete Envoy startup event (the admin
+// address file, a listener appearing, a listener accepting). Every wait
+// returns the moment its event happens, and ends at once if the process exits,
+// so the width costs a healthy run nothing.
+const envoyWait = 30 * time.Second
+
+// envoyProc is one running Envoy started by launchEnvoy.
+type envoyProc struct {
+	label string
+	pid   int
+	// admin is the admin endpoint's bound address.
+	admin string
+	// exited is closed once the process has been reaped; waitErr is its exit
+	// status and is only read after that.
+	exited  chan struct{}
+	waitErr error
+	// tail is the end of what the process wrote to stdout and stderr, for the
+	// message of a startup wait that fails.
+	tail *tailBuffer
+	// udp names the bootstrap's static UDP listeners. The admin endpoint
+	// reports a bound address without its protocol, so listenerAddr takes it
+	// from the config. A listener delivered over LDS is treated as TCP; the
+	// package has no UDP one.
+	udp map[string]bool
+}
+
+// launchEnvoy writes bs to disk and runs the pinned proxy against it. The
+// process is killed at test cleanup.
+//
+// It owns the admin endpoint: bs.Admin is set to 127.0.0.1 with
+// envoyPicksPort, and Envoy reports the address it bound through
+// --admin-address-path, which launchEnvoy waits for. Listener addresses are
+// then read from that endpoint (listenerAddr), so no port number is chosen
+// before the process that binds it exists.
+//
+// out receives Envoy's stdout and stderr; nil sends them to the test log under
+// label. args are appended to the command line.
+func launchEnvoy(t *testing.T, bin, label string, bs *bootstrapv3.Bootstrap, out io.Writer, args ...string) *envoyProc {
+	t.Helper()
+
+	requireExclusiveUDPBinds(t, bs)
+	bs.Admin = &bootstrapv3.Admin{Address: socketAddress("127.0.0.1", envoyPicksPort)}
 	data, err := protojson.MarshalOptions{Multiline: true, Indent: "  ", UseProtoNames: true}.Marshal(bs)
 	if err != nil {
 		t.Fatalf("marshal bootstrap: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "bootstrap.json")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bootstrap-"+label+".json")
 	writeFile(t, path, data)
-	t.Logf("bootstrap: %s (source identity factory=%s)", path, factoryKeyLabel(hashable))
+	adminPath := filepath.Join(dir, "admin-address-"+label)
+	t.Logf("%s bootstrap: %s", label, path)
 
-	cmd := exec.Command(bin, "-c", path,
-		"--concurrency", "1",
-		"--use-dynamic-base-id",
-		"--log-level", "warn")
-	cmd.Stdout = &testWriter{t: t, prefix: "envoy"}
-	cmd.Stderr = &testWriter{t: t, prefix: "envoy"}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start envoy: %v", err)
+	if out == nil {
+		out = &testWriter{t: t, prefix: label}
 	}
+	e := &envoyProc{label: label, exited: make(chan struct{}), tail: &tailBuffer{max: 4 << 10}, udp: map[string]bool{}}
+	for _, l := range bs.GetStaticResources().GetListeners() {
+		if l.GetAddress().GetSocketAddress().GetProtocol() == corev3.SocketAddress_UDP {
+			e.udp[l.GetName()] = true
+		}
+	}
+	cmd := exec.Command(bin, append([]string{
+		"-c", path,
+		"--use-dynamic-base-id",
+		"--log-level", "warn",
+		"--admin-address-path", adminPath,
+	}, args...)...)
+	// One writer for both streams: os/exec then serialises the writes itself.
+	w := io.MultiWriter(out, e.tail)
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %s: %v", label, err)
+	}
+	e.pid = cmd.Process.Pid
+	go func() {
+		e.waitErr = cmd.Wait()
+		close(e.exited)
+	}()
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		<-e.exited
 	})
 
-	h := &proxyHandle{
-		addrA: fmt.Sprintf("127.0.0.1:%d", portA),
-		addrB: fmt.Sprintf("127.0.0.1:%d", portB),
-	}
-	waitListening(t, h.addrA)
-	waitListening(t, h.addrB)
-	return h
+	e.await(t, func() string { return "write its admin address to " + adminPath }, func() bool {
+		b, err := os.ReadFile(adminPath)
+		if err != nil {
+			return false
+		}
+		addr := strings.TrimSpace(string(b))
+		if !boundHostPort(addr) {
+			return false
+		}
+		e.admin = addr
+		return true
+	})
+	return e
 }
 
-func waitListening(t *testing.T, addr string) {
+// requireExclusiveUDPBinds fails the test if a static UDP listener asks the
+// kernel for a port while leaving SO_REUSEPORT on (Envoy's default).
+//
+// For TCP an unspecified port is never one that is already bound. For UDP that
+// holds only without SO_REUSEPORT: Linux lets a port-0 UDP bind land on a port
+// another SO_REUSEPORT socket of the same user already holds (measured on the
+// 6.8 kernel this was written on: 2098 of 300000 binds against 200 held
+// sockets, which is uniformly at random; 0 of 300000 for TCP). Two test
+// processes' QUIC listeners would then share a port and split each other's
+// packets. With reuse_port off the bind is exclusive both ways: the kernel
+// does not hand out a port in use, and nothing can join it later.
+//
+// Every UDP listener in this package runs in a single-worker Envoy, where
+// reuse_port changes nothing else: there is one socket either way.
+func requireExclusiveUDPBinds(t *testing.T, bs *bootstrapv3.Bootstrap) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
-		if err == nil {
-			_ = c.Close()
+	for _, l := range bs.GetStaticResources().GetListeners() {
+		sa := l.GetAddress().GetSocketAddress()
+		if sa.GetProtocol() != corev3.SocketAddress_UDP || sa.GetPortValue() != envoyPicksPort {
+			continue
+		}
+		if l.GetEnableReusePort() == nil || l.GetEnableReusePort().GetValue() {
+			t.Fatalf("UDP listener %q binds port 0 with reuse_port on: the kernel may assign it a port "+
+				"another test's listener already holds (see requireExclusiveUDPBinds)", l.GetName())
+		}
+	}
+}
+
+// boundHostPort reports whether addr is host:port with a real port.
+func boundHostPort(addr string) bool {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n > 0
+}
+
+// await polls cond until it holds. It fails the test at once if Envoy exits
+// first, and after envoyWait otherwise. Both messages carry the end of Envoy's
+// own output, which is where a failed bind or a rejected bootstrap is
+// explained. what names the event, and is called only to build the message.
+func (e *envoyProc) await(t *testing.T, what func() string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(envoyWait)
+	for {
+		if cond() {
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-e.exited:
+			t.Fatalf("%s exited (%v) before it could %s; its last output:\n%s", e.label, e.waitErr, what(), e.tail)
+		case <-time.After(50 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not %s within %s; its last output:\n%s", e.label, what(), envoyWait, e.tail)
+		}
 	}
-	t.Fatalf("envoy never listened on %s", addr)
 }
 
-func freePort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// listeners reads the proxy's active listeners and the addresses they are
+// bound to. /listeners reports the socket's own local address, so a listener
+// configured with envoyPicksPort shows the port the kernel assigned.
+func (e *envoyProc) listeners() ([]*adminv3.ListenerStatus, error) {
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get("http://" + e.admin + "/listeners?format=json")
 	if err != nil {
-		t.Fatalf("reserve port: %v", err)
+		return nil, err
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var ls adminv3.Listeners
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(body, &ls); err != nil {
+		return nil, fmt.Errorf("decode %q: %w", body, err)
+	}
+	return ls.GetListenerStatuses(), nil
+}
+
+// listenerAddr waits until the proxy has the named listener (a static one is
+// there as soon as the admin endpoint answers; one delivered over LDS when it
+// has warmed) and returns the address it is bound to. Unless the listener is
+// one of the bootstrap's UDP listeners, it also waits until a TCP connection
+// to that address is accepted.
+func (e *envoyProc) listenerAddr(t *testing.T, name string) string {
+	t.Helper()
+	var (
+		bound *corev3.SocketAddress
+		state string
+	)
+	e.await(t, func() string {
+		return fmt.Sprintf("bind listener %q (admin /listeners: %s)", name, state)
+	}, func() bool {
+		ls, err := e.listeners()
+		if err != nil {
+			state = err.Error()
+			return false
+		}
+		names := make([]string, 0, len(ls))
+		for _, l := range ls {
+			names = append(names, l.GetName())
+			if sa := l.GetLocalAddress().GetSocketAddress(); l.GetName() == name && sa.GetPortValue() > 0 {
+				bound = sa
+				return true
+			}
+		}
+		state = fmt.Sprintf("has %v", names)
+		return false
+	})
+	addr := net.JoinHostPort(bound.GetAddress(), strconv.Itoa(int(bound.GetPortValue())))
+	if e.udp[name] {
+		// Nothing to dial: the socket is bound, and a datagram sent before the
+		// worker reads it waits in the socket buffer.
+		return addr
+	}
+	e.await(t, func() string { return fmt.Sprintf("accept on listener %q (%s)", name, addr) }, func() bool {
+		c, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		_ = c.Close()
+		return true
+	})
+	return addr
+}
+
+// tailBuffer keeps the last max bytes written to it.
+type tailBuffer struct {
+	mu  sync.Mutex
+	max int
+	buf []byte
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, p...)
+	if over := len(b.buf) - b.max; over > 0 {
+		b.buf = append(b.buf[:0], b.buf[over:]...)
+	}
+	return len(p), nil
+}
+
+func (b *tailBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.buf) == 0 {
+		return "(none)"
+	}
+	return string(b.buf)
 }
 
 type testWriter struct {

@@ -1,0 +1,7 @@
+# Not secrets: fixed strings the tests look for. Every value that a Secret
+# document carries starts with FORBIDDEN, so "no test output contains
+# FORBIDDEN" is the whole masking assertion; VISIBLE marks what must survive.
+replicas: 2
+
+# true makes templates/broken.yaml render invalid YAML (see that file).
+broken: false

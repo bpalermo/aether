@@ -1,0 +1,76 @@
+# Input for //bazel/helm:upstream_template_test_opts_selftest. Not a BUILD file:
+# nothing loads it. One call passes the option; the guard must name every other.
+
+helm_template_test(
+    name = "passes_it",
+    chart = ":chart",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+)
+
+helm_template_test(
+    name = "no_opts",
+    chart = ":chart",
+)
+
+# The text of the option, quotes and comma included, in a comment.
+helm_template_test(
+    name = "only_in_a_comment",
+    chart = ":chart",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        # "--set",
+        # "controller.webhook.spire=true",
+    ],
+)
+
+# ...before the list...
+helm_template_test(
+    name = "comment_before_opts",
+    chart = ":chart",
+    # "--set",
+    "controller.webhook.spire=true",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+# ...and as an element of another attribute.
+helm_template_test(
+    name = "in_another_attribute",
+    chart = ":chart",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+    template_patterns = {
+        "chart/templates/a.yaml": [
+            "--set",
+            "controller.webhook.spire=true",
+        ],
+    },
+)
+
+# An element of opts, but not the value of a --set.
+helm_template_test(
+    name = "after_another_flag",
+    chart = ":chart",
+    opts = [
+        "--set-string",
+        "controller.webhook.spire=true",
+    ],
+)
+
+helm_template_test(
+    name = "set_of_something_else",
+    chart = ":chart",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "controller.webhook.spire=true",
+    ],
+)

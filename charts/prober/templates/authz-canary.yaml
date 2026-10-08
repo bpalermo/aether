@@ -30,7 +30,7 @@ metadata:
   name: authz-canary
   namespace: {{ $ns }}
   labels:
-    {{- include "prober.labels" . | nindent 4 }}
+    {{- include "prober.authzCanary.labels" . | nindent 4 }}
 ---
 # The target's ServiceAccount IS its mesh identity and its mesh service name: the
 # agent registers a pod under its ServiceAccount, and the registrar generates (and
@@ -45,7 +45,7 @@ metadata:
   name: authz-echo
   namespace: {{ $ns }}
   labels:
-    {{- include "prober.labels" . | nindent 4 }}
+    {{- include "prober.authzCanary.labels" . | nindent 4 }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -53,7 +53,7 @@ metadata:
   name: authz-echo
   namespace: {{ $ns }}
   labels:
-    {{- include "prober.labels" . | nindent 4 }}
+    {{- include "prober.authzCanary.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.authzCanary.echo.replicas }}
   strategy:
@@ -128,7 +128,7 @@ metadata:
   name: authz-canary
   namespace: {{ $ns }}
   labels:
-    {{- include "prober.labels" . | nindent 4 }}
+    {{- include "prober.authzCanary.labels" . | nindent 4 }}
 spec:
   scope: SCOPE_CHAIN
   targetRefs:
@@ -144,7 +144,7 @@ metadata:
   name: authz-canary
   namespace: {{ $ns }}
   labels:
-    {{- include "prober.labels" . | nindent 4 }}
+    {{- include "prober.authzCanary.labels" . | nindent 4 }}
 spec:
   replicas: 1
   selector:

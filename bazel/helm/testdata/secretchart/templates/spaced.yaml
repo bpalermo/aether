@@ -1,0 +1,9 @@
+{{- /* Valid YAML: whitespace before the colon of a key, quoted keys. */ -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-spaced
+data :
+  token : FORBIDDEN-spaced-token
+"stringData" :
+  password: FORBIDDEN-spaced-password

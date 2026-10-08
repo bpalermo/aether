@@ -36,7 +36,6 @@ package mtlspool
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -293,14 +292,12 @@ func runLateTwin(t *testing.T, sharedEDSName bool, window time.Duration) lateTwi
 
 	dest := startH2CDestination(t)
 	f := newTwinFixture(t, dest, sharedEDSName)
-	port, adminPort := freePort(t), freePort(t)
-	listener := clusterHeaderListener(port)
+	listener := clusterHeaderListener(envoyPicksPort)
 
 	cp := startADSControlPlane(t, f.resources(t, listener, twinSourceA))
-	launchEnvoyOverADS(t, bin, cp, adminPort)
-	h := &adsProxyHandle{adminAddr: fmt.Sprintf("127.0.0.1:%d", adminPort), cp: cp}
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	waitListening(t, addr)
+	e := launchEnvoyOverADS(t, bin, cp)
+	h := &adsProxyHandle{adminAddr: e.admin, cp: cp}
+	addr := e.listenerAddr(t, listener.GetName())
 
 	twinA := proxy.QUICClusterName(twinDestSvc, twinDomain, proxy.SourceSAKeyFromSpiffeID(twinSourceA))
 	twinB := proxy.QUICClusterName(twinDestSvc, twinDomain, proxy.SourceSAKeyFromSpiffeID(twinSourceB))

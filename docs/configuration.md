@@ -445,6 +445,17 @@ literally): `--envoy-path`
 `--admin-address` (`127.0.0.1:9901`), `--install-path`,
 `--install-readiness-path`, `--otlp-endpoint`.
 
+`--envoy-arg` cannot repeat an Envoy flag the supervisor passes itself: `-c` /
+`--config-path` (set from `--config`), `--base-id` (from `--base-id`, chart
+`proxy.hotRestart.baseId`), `--drain-time-s` (from `--drain-time`, chart
+`proxy.hotRestart.drainTime`), `--parent-shutdown-time-s` (from
+`--parent-shutdown-time`, chart `proxy.hotRestart.parentShutdownTime`),
+`--restart-epoch`, `--admin-address-path` and `--mode`. Envoy refuses a flag
+given twice (`Argument already set!`), so each of these, in the `--flag value` or
+the `--flag=value` spelling, is a startup error that names the flag instead of a
+failure of every fork. `--concurrency` is allowed once (the chart passes it for
+`proxy.concurrency`); a second one is refused the same way.
+
 `--termination-grace` is the pod's own `terminationGracePeriodSeconds` (the chart
 passes the same value it sets on the pod spec; `180s` as deployed). The supervisor
 cannot read it from the API, and it is the only non-arbitrary bound on how long a
@@ -758,6 +769,23 @@ helm template prober <chart> -n <namespace> -f values.yaml | grep -n -E '^[[:spa
 ```
 
 No output means no container carries an empty quantity.
+
+**Images of the authz canary** (only rendered with `authzCanary.enabled`):
+
+| Key | Default | Notes |
+|---|---|---|
+| `authzCanary.image` | `curlimages/curl@sha256:58adaa4e…6777` (the multi-arch index of `curlimages/curl:8.22.0`) | The client: needs `/bin/sh`, `curl` and `date`. Pinned by digest since chart 1.0.5 (#1374); it was the tag. Nothing refreshes the pin automatically: see [`runbook.md`](./runbook.md), "The prober chart". The container has no liveness probe on purpose: a canary that stops shows up as the `ext_authz` counters no longer increasing. |
+| `authzCanary.echo.image` | `gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb739672…37c3` | The target. |
+
+**Labels** (chart 1.0.5). The prober pods carry the DaemonSet's selector labels
+(`app.kubernetes.io/name`, `instance`, `component: prober`), `part-of`,
+`managed-by` and `aether.io/managed`; `helm.sh/chart` and
+`app.kubernetes.io/version` are on the DaemonSet object only, so a chart release
+no longer rolls the prober by itself (#1372). The canary's objects carry
+`app.kubernetes.io/component: authz-canary` on their own metadata, not
+`prober` (#1373); its pods carry `app: authz-canary` / `app: authz-echo` as
+before. What the upgrade to 1.0.5 rolls, and how to check it:
+[`runbook.md`](./runbook.md), "The prober chart".
 
 ---
 

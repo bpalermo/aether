@@ -32,7 +32,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -56,7 +55,6 @@ import (
 	udpwriterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/udp_packet_writer/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -72,9 +70,10 @@ type costProxy struct {
 	addrs map[string]string // listener name -> address
 }
 
-// runEnvoy writes bs, runs the pinned proxy with the given worker count and an
-// admin endpoint, and waits for every TCP listener named in tcpListeners.
-func runEnvoy(t *testing.T, label string, bs *bootstrapv3.Bootstrap, concurrency int, tcpListeners map[string]string) *costProxy {
+// runEnvoy runs the pinned proxy on bs with the given worker count and an
+// admin endpoint, and reads back the address each named listener bound (for a
+// TCP listener, once it accepts).
+func runEnvoy(t *testing.T, label string, bs *bootstrapv3.Bootstrap, concurrency int, listeners ...string) *costProxy {
 	t.Helper()
 	bin, err := envoybin.Path()
 	if err != nil {
@@ -84,24 +83,10 @@ func runEnvoy(t *testing.T, label string, bs *bootstrapv3.Bootstrap, concurrency
 		}
 		t.Fatalf("locate envoy: %v", err)
 	}
-	adminPort := freePort(t)
-	bs.Admin = &bootstrapv3.Admin{Address: socketAddress("127.0.0.1", adminPort)}
-	data, err := protojson.MarshalOptions{Multiline: true, Indent: "  ", UseProtoNames: true}.Marshal(bs)
-	require.NoError(t, err)
-	path := filepath.Join(t.TempDir(), "bootstrap-"+label+".json")
-	writeFile(t, path, data)
-	cmd := exec.Command(bin, "-c", path, "--concurrency", strconv.Itoa(concurrency), "--use-dynamic-base-id", "--log-level", "warn")
-	cmd.Stdout = &testWriter{t: t, prefix: label}
-	cmd.Stderr = &testWriter{t: t, prefix: label}
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-	p := &costProxy{pid: cmd.Process.Pid, admin: fmt.Sprintf("127.0.0.1:%d", adminPort), addrs: tcpListeners}
-	waitListening(t, p.admin)
-	for _, addr := range tcpListeners {
-		waitListening(t, addr)
+	e := launchEnvoy(t, bin, label, bs, nil, "--concurrency", strconv.Itoa(concurrency))
+	p := &costProxy{pid: e.pid, admin: e.admin, addrs: map[string]string{}}
+	for _, name := range listeners {
+		p.addrs[name] = e.listenerAddr(t, name)
 	}
 	return p
 }
@@ -152,12 +137,11 @@ func startCostSource(t *testing.T, p *pki, h2Addr, h3Addr string, concurrency in
 	if mutateTwin != nil {
 		mutateTwin(twin)
 	}
-	port := freePort(t)
 	var l *listenerv3.Listener
 	if viaTwin {
-		l = selectingSourceListener(t, "source_a", spiffeSourceA, port, map[string]string{spiffeSourceA: quicTwinA})
+		l = selectingSourceListener(t, "source_a", spiffeSourceA, envoyPicksPort, map[string]string{spiffeSourceA: quicTwinA})
 	} else {
-		l = sourceListener("source_a", spiffeSourceA, port, true)
+		l = sourceListener("source_a", spiffeSourceA, envoyPicksPort, true)
 	}
 	bs := &bootstrapv3.Bootstrap{
 		Node: &corev3.Node{Id: envoyNodeID, Cluster: "aether"},
@@ -166,7 +150,7 @@ func startCostSource(t *testing.T, p *pki, h2Addr, h3Addr string, concurrency in
 			Listeners: []*listenerv3.Listener{l},
 		},
 	}
-	return runEnvoy(t, "source", bs, concurrency, map[string]string{"source_a": fmt.Sprintf("127.0.0.1:%d", port)})
+	return runEnvoy(t, "source", bs, concurrency, "source_a")
 }
 
 // TestQUICTwinUpstreamConnections: N keep-alive downstream connections from ONE
@@ -294,18 +278,30 @@ func destTLS(t *testing.T, p *pki, alpn string) *tlsv3.DownstreamTlsContext {
 	}
 }
 
+// quicListenerAddress is where the harness's HTTP/3 listeners bind: loopback
+// UDP, on a port the kernel picks.
+func quicListenerAddress() *corev3.Address {
+	return &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
+		Protocol: corev3.SocketAddress_UDP, Address: "127.0.0.1",
+		PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: envoyPicksPort},
+	}}}
+}
+
 // startCostDestination runs a destination Envoy with an h2 mTLS TCP listener
-// and an HTTP/3 listener on the same port number, the latter carrying udp as
-// its udp_listener_config.
+// and an HTTP/3 listener, the latter carrying udp as its udp_listener_config.
+//
+// Production serves both on one port number (18008). Here each listener gets
+// its own from the kernel: the two are separate sockets either way, and
+// nothing in the upstream clusters depends on the numbers being equal (the
+// h2 cluster and the QUIC twin each take their own address).
 func startCostDestination(t *testing.T, p *pki, udp *listenerv3.UdpListenerConfig) (h2Addr, h3Addr string, proxyHandle *costProxy) {
 	t.Helper()
-	port := freePort(t)
 	tcpHCM := directResponseHCM("dest_h2", hcmv3.HttpConnectionManager_AUTO)
 	h3HCM := directResponseHCM("dest_h3", hcmv3.HttpConnectionManager_HTTP3)
 	h3HCM.Http3ProtocolOptions = &corev3.Http3ProtocolOptions{}
 	tcp := &listenerv3.Listener{
 		Name:    "dest_h2",
-		Address: socketAddress("127.0.0.1", port),
+		Address: socketAddress("127.0.0.1", envoyPicksPort),
 		FilterChains: []*listenerv3.FilterChain{{
 			Filters: []*listenerv3.Filter{{Name: "envoy.filters.network.http_connection_manager", ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: config.TypedConfig(tcpHCM)}}},
 			TransportSocket: &corev3.TransportSocket{
@@ -315,12 +311,11 @@ func startCostDestination(t *testing.T, p *pki, udp *listenerv3.UdpListenerConfi
 		}},
 	}
 	h3 := &listenerv3.Listener{
-		Name: "dest_h3",
-		Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
-			Protocol: corev3.SocketAddress_UDP, Address: "127.0.0.1",
-			PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: uint32(port)},
-		}}},
-		EnableReusePort:   wrapperspb.Bool(true),
+		Name:    "dest_h3",
+		Address: quicListenerAddress(),
+		// Off so the kernel-assigned UDP port is this listener's alone; see
+		// requireExclusiveUDPBinds. This Envoy runs one worker.
+		EnableReusePort:   wrapperspb.Bool(false),
 		UdpListenerConfig: udp,
 		FilterChains: []*listenerv3.FilterChain{{
 			Filters: []*listenerv3.Filter{{Name: "envoy.filters.network.http_connection_manager", ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: config.TypedConfig(h3HCM)}}},
@@ -338,8 +333,8 @@ func startCostDestination(t *testing.T, p *pki, udp *listenerv3.UdpListenerConfi
 		Node:            &corev3.Node{Id: "dest", Cluster: "aether"},
 		StaticResources: &bootstrapv3.Bootstrap_StaticResources{Listeners: []*listenerv3.Listener{tcp, h3}},
 	}
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	return addr, addr, runEnvoy(t, "dest", bs, 1, map[string]string{"dest_h2": addr})
+	dst := runEnvoy(t, "dest", bs, 1, "dest_h2", "dest_h3")
+	return dst.addrs["dest_h2"], dst.addrs["dest_h3"], dst
 }
 
 // udpVariant is one udp_listener_config under measurement.

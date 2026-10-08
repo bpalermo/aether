@@ -1,6 +1,7 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url", "image_reference")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_reproducible_test", "helm_template_value_changes_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test", "helm_template_reproducible_test", "helm_template_value_changes_test")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
@@ -78,9 +79,93 @@ helm_lint_test(
     chart = ":aether",
 )
 
-helm_template_test(
+# The chart renders at default values, and into these objects. Not rules_helm's
+# helm_template_test: that runner prints the whole render into the test log,
+# passing or failing, and the default render holds the webhook's generated
+# private key (#1382). See "What a chart test may print" below.
+helm_template_match_test(
     name = "aether_template_test",
     chart = ":aether",
+    document_patterns = {
+        document: ["\\nmetadata:\\n"]
+        for document in [
+            "DaemonSet/release-name-aether-agent",
+            "DaemonSet/aether-proxy",
+            "DaemonSet/release-name-aether-mesh-dns",
+            "DaemonSet/release-name-aether-uds-csi",
+            "Deployment/release-name-aether-registrar",
+            "Deployment/release-name-aether-controller",
+            "Service/release-name-aether-registrar",
+            "Service/release-name-aether-controller-webhook",
+            "ConfigMap/aether-proxy-config",
+            "CSIDriver/csi.aether.io",
+            "MeshConfig/default",
+        ]
+    },
+)
+
+# --- What a chart test may print (#1382) --------------------------------------
+#
+# With default values this chart generates the controller's self-signed webhook
+# certificate at render time, so the default render holds a private key (a
+# throwaway one: no cluster ever sees it). Two rules follow.
+#
+#  1. A test on rules_helm's `helm_template_test` passes
+#     `--set controller.webhook.spire=true`. That runner prints the whole render
+#     into the test log whether the test passes or fails; with the SPIRE-served
+#     webhook the chart renders no Secret at all (the two absence tests below).
+#     The switch changes controller-deployment.yaml (its webhook-serving flags,
+#     volume and mount), controller-rbac.yaml and controller-webhook.yaml and no
+#     other template, so a test of anything else renders what it rendered before.
+#     :aether_upstream_template_tests_render_no_secret_test fails a target that
+#     forgets the option.
+#  2. A test that needs the default webhook path (the Secret, the caBundle, a
+#     mesh without SPIRE), or a document that is not the last one of its
+#     template (#1371), uses `helm_template_match_test`, which prints a bounded
+#     excerpt with Secret data masked, or one of the other //bazel/helm rules,
+#     none of which prints a render.
+sh_test(
+    name = "aether_upstream_template_tests_render_no_secret_test",
+    size = "small",
+    srcs = ["//bazel/helm:upstream_template_test_opts_test.sh"],
+    args = [
+        "$(rootpath BUILD.bazel)",
+        "controller.webhook.spire=true",
+    ],
+    data = ["BUILD.bazel"],
+)
+
+# The premise of rule 1: with the SPIRE-served webhook nothing in the render is
+# a Secret, at default values...
+helm_template_absent_test(
+    name = "aether_webhook_spire_no_secret_test",
+    absent = ["kind: Secret"],
+    chart = ":aether",
+    control = "kind: ValidatingWebhookConfiguration",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+)
+
+# ...and with every optional component rendered too.
+helm_template_absent_test(
+    name = "aether_webhook_spire_no_secret_all_enabled_test",
+    absent = ["kind: Secret"],
+    chart = ":aether",
+    control = "kind: ValidatingWebhookConfiguration",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set",
+        "otel.enabled=true",
+        "--set",
+        "otel.endpoint=otel-collector.observability.svc:4317",
+    ],
 )
 
 # #1363: a chart release must not roll pods whose spec did not change. Each
@@ -134,6 +219,8 @@ helm_template_test(
     opts = [
         "--set",
         "edge.enabled=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/" + template + ".yaml": [
@@ -168,6 +255,8 @@ helm_template_test(
     opts = [
         "--set",
         "edge.enabled=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/edge-deployment.yaml": [
@@ -210,6 +299,8 @@ helm_template_test(
     opts = OPA_ON + [
         "--set-string",
         "proxy.authzSidecar.opa.policy=package x",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -224,6 +315,8 @@ helm_template_test(
     opts = OPA_ON + [
         "--set-string",
         "proxy.authzSidecar.opa.policy=package y",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -366,6 +459,10 @@ helm_template_absent_test(
 helm_template_test(
     name = "aether_agent_cpu_resources_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
             "resources:\\n\\s+limits:\\n\\s+memory: \\S+\\n\\s+requests:\\n\\s+cpu: 200m\\n\\s+memory: \\S+\\n\\s+volumes:\\n",
@@ -385,6 +482,10 @@ MESH_DNS_NO_CPU_LIMIT = "resources:\\n\\s+limits:\\n\\s+memory: 64Mi\\n\\s+reque
 helm_template_test(
     name = "aether_mesh_dns_cpu_resources_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/mesh-dns-daemonset.yaml": [
             MESH_DNS_NO_CPU_LIMIT,
@@ -401,6 +502,8 @@ helm_template_test(
     opts = [
         "--set",
         "agent.meshDnsDaemon.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/mesh-dns-daemonset.yaml": [
@@ -416,6 +519,8 @@ helm_template_test(
     opts = [
         "--set",
         "agent.meshDnsDaemon.resources.limits.cpu=200m",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/mesh-dns-daemonset.yaml": [
@@ -436,6 +541,10 @@ UDS_CSI_NO_CPU_LIMIT = "resources:\\n\\s+limits:\\n\\s+memory: 32Mi\\n\\s+reques
 helm_template_test(
     name = "aether_uds_csi_cpu_resources_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/uds-csi-daemonset.yaml": [
             UDS_CSI_NO_CPU_LIMIT,
@@ -452,6 +561,8 @@ helm_template_test(
     opts = [
         "--set",
         "udsCsi.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/uds-csi-daemonset.yaml": [
@@ -467,6 +578,8 @@ helm_template_test(
     opts = [
         "--set",
         "udsCsi.resources.limits.cpu=200m",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/uds-csi-daemonset.yaml": [
@@ -504,6 +617,10 @@ CNI_INSTALL_NO_CPU_LIMIT = "resources:\\n\\s+limits:\\n\\s+memory: 32Mi\\n\\s+re
 helm_template_test(
     name = "aether_cni_install_cpu_resources_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
             CNI_INSTALL_NO_CPU_LIMIT,
@@ -519,6 +636,8 @@ helm_template_test(
     opts = [
         "--set",
         "cniInstall.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
@@ -534,6 +653,8 @@ helm_template_test(
     opts = [
         "--set",
         "cniInstall.resources.limits.cpu=500m",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
@@ -558,6 +679,8 @@ helm_template_test(
     opts = [
         "--set",
         "agent.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
@@ -576,6 +699,8 @@ helm_template_test(
     opts = [
         "--set",
         "proxy.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -591,6 +716,8 @@ helm_template_test(
     opts = [
         "--set-json",
         "proxy.resources.limits={\"cpu\":null}",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -607,6 +734,8 @@ helm_template_test(
     opts = [
         "--set",
         "proxy.resources.limits.memory=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -622,6 +751,8 @@ helm_template_test(
     opts = [
         "--set",
         "proxy.resources.requests.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -637,6 +768,8 @@ helm_template_test(
     opts = [
         "--set",
         "proxy.resources.limits.cpu=2",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -664,6 +797,8 @@ helm_template_test(
     opts = AUTHZ_SIDECAR_OPTS + [
         "--set",
         "proxy.authzSidecar.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -678,6 +813,8 @@ helm_template_test(
     opts = AUTHZ_SIDECAR_OPTS + [
         "--set",
         "proxy.authzSidecar.resources.limits.cpu=500m",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -695,6 +832,8 @@ helm_template_test(
     opts = [
         "--set",
         "controller.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/controller-deployment.yaml": [
@@ -707,6 +846,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_controller_cpu_limit_kept_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/controller-deployment.yaml": [
             "resources:\\n\\s+limits:\\n\\s+cpu: 100m\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 50m\\n\\s+memory: 64Mi\\n\\s+volumes:\\n",
@@ -721,6 +864,8 @@ helm_template_test(
     opts = [
         "--set",
         "registrar.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/registrar-deployment.yaml": [
@@ -732,6 +877,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_registrar_cpu_limit_kept_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/registrar-deployment.yaml": [
             "resources:\\n\\s+limits:\\n\\s+cpu: 100m\\n\\s+memory: 64Mi\\n\\s+requests:\\n\\s+cpu: 100m\\n\\s+memory: 64Mi\\n\\s+volumes:\\n",
@@ -752,6 +901,8 @@ helm_template_test(
         "edge.enabled=true",
         "--set",
         "edge.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/edge-deployment.yaml": [
@@ -768,6 +919,8 @@ helm_template_test(
         "edge.enabled=true",
         "--set",
         "edge.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/edge-deployment.yaml": [
@@ -785,6 +938,8 @@ helm_template_test(
         "edge.enabled=true",
         "--set",
         "edge.resources.limits.cpu=1",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/edge-deployment.yaml": [
@@ -805,6 +960,8 @@ helm_template_test(
     opts = [
         "--set",
         "edge.enabled=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/edge-deployment.yaml": [
@@ -821,6 +978,8 @@ helm_template_test(
         "edge.enabled=true",
         "--set",
         "edge.goMaxProcs=4",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/edge-deployment.yaml": [
@@ -857,6 +1016,8 @@ helm_template_test(
     opts = [
         "--set",
         "edge.enabled=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/edge-deployment.yaml": [
@@ -873,6 +1034,8 @@ helm_template_test(
         "edge.enabled=true",
         "--set",
         "edge.concurrency=4",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/edge-deployment.yaml": [
@@ -964,6 +1127,10 @@ helm_template_fail_test(
 helm_template_test(
     name = "aether_agent_restart_fast_path_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
             "- name: cni-install\\n\\s+image: \\S+\\n\\s+imagePullPolicy: IfNotPresent\\n",
@@ -979,6 +1146,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_agent_update_strategy_default_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
             "updateStrategy:\\n\\s+type: RollingUpdate\\n\\s+rollingUpdate:\\n(\\s+#.*\\n)*\\s+maxSurge: 0\\n\\s+maxUnavailable: 1\\n",
@@ -992,6 +1163,8 @@ helm_template_test(
     opts = [
         "--set",
         "agent.updateStrategy.surge=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
@@ -1060,6 +1233,10 @@ helm_template_absent_test(
 helm_template_test(
     name = "aether_agent_gomemlimit_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
             "requests:\\n\\s+cpu: 200m\\n\\s+memory: 96Mi\\n",
@@ -1076,6 +1253,8 @@ helm_template_test(
     opts = [
         "--set",
         "agent.resources.limits.memory=256Mi",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
@@ -1092,6 +1271,8 @@ helm_template_test(
     opts = [
         "--set",
         "agent.resources.limits.memory=1.5Gi",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
@@ -1135,6 +1316,8 @@ helm_template_test(
     opts = [
         "--set",
         "edge.enabled=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/registrar-deployment.yaml": [
@@ -1177,6 +1360,10 @@ helm_template_absent_test(
 helm_template_test(
     name = "aether_proxy_net_admin_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
             "- NET_ADMIN",
@@ -1192,6 +1379,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_proxy_supervisor_image_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
             image_reference("proxy-supervisor") + "@sha256:",
@@ -1209,6 +1400,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_proxy_skip_parent_stats_off_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
             "- \"--envoy-arg=gradual\"\\n\\s+env:\\n",
@@ -1223,6 +1418,8 @@ helm_template_test(
     opts = [
         "--set",
         "proxy.hotRestart.skipParentStats=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1240,6 +1437,8 @@ helm_template_test(
     opts = [
         "--set",
         "proxy.hotRestart.hotRestartOnConcurrencyChange=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1258,6 +1457,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_proxy_bootstrap_cds_lds_wait_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-proxy-configmap.yaml": [
             "cds_config:\\n\\s+ads: \\{\\}\\n\\s+initial_fetch_timeout: 0s\\n",
@@ -1274,6 +1477,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_proxy_bootstrap_ads_reconnect_backoff_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-proxy-configmap.yaml": [
             "ads_config:\\n\\s+api_type: DELTA_GRPC\\n\\s+grpc_services:\\n\\s+- envoy_grpc:\\n\\s+cluster_name: agent_xds\\n\\s+retry_policy:\\n\\s+retry_back_off:\\n\\s+base_interval: 0.1s\\n\\s+max_interval: 1s\\n",
@@ -1286,6 +1493,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_proxy_drain_strategy_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
             "- \"--envoy-arg=--drain-strategy\"\\n\\s+- \"--envoy-arg=gradual\"",
@@ -1301,6 +1512,8 @@ helm_template_test(
     opts = [
         "--set",
         "proxy.concurrency=2",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1335,6 +1548,10 @@ INSTALL_SUPERVISOR_RESOURCES = "- name: supervisor-bin\\n\\s+mountPath: /opt/aet
 helm_template_test(
     name = "aether_install_supervisor_resources_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
             INSTALL_SUPERVISOR_RESOURCES,
@@ -1350,6 +1567,8 @@ helm_template_test(
     opts = [
         "--set",
         "proxy.supervisor.resources.limits.cpu=",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1367,6 +1586,8 @@ helm_template_test(
         "proxy.supervisor.resources.requests.cpu=20m",
         "--set",
         "proxy.supervisor.resources.limits.cpu=1",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1387,6 +1608,8 @@ helm_template_test(
         "proxy.authzSidecar.opa.enabled=true",
         "--set",
         "proxy.authzSidecar.opa.policy=package envoy.authz",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1401,6 +1624,8 @@ helm_template_test(
     opts = [
         "--set",
         "proxy.hotRestart.drainStrategy=immediate",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1423,6 +1648,10 @@ helm_template_fail_test(
 helm_template_test(
     name = "aether_agent_quic_idle_timeout_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
             "- \"--east-west-quic-idle-timeout=8s\"",
@@ -1439,6 +1668,8 @@ helm_template_test(
         "agent.eastWestQuicIdleTimeout=20s",
         "--set",
         "proxy.hotRestart.parentShutdownTime=1m",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
@@ -1491,6 +1722,10 @@ helm_template_fail_test(
 helm_template_test(
     name = "aether_spire_broker_socket_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
             "--spire-broker-socket=/run/spire/broker-sockets/broker.sock",
@@ -1507,6 +1742,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_identity_gate_default_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/controller-deployment.yaml": [
             "--identity-gate=true",
@@ -1526,6 +1765,8 @@ helm_template_test(
     opts = [
         "--set",
         "controller.webhook.identityGate.enabled=false",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/controller-deployment.yaml": [
@@ -1536,18 +1777,21 @@ helm_template_test(
 
 # ...and so does a mesh without SPIRE, whatever the knob says: no SVID would ever
 # come, and every mesh pod would be held in Init forever.
-helm_template_test(
+# On the masked rule (see "What a chart test may print"): a mesh without SPIRE
+# cannot also be rendered with the SPIRE-served webhook, so this render holds
+# the generated webhook key.
+helm_template_match_test(
     name = "aether_identity_gate_no_spire_test",
     chart = ":aether",
+    document_patterns = {
+        "Deployment/release-name-aether-controller": [
+            "\\n\\s+- \"--identity-gate=false\"\\n",
+        ],
+    },
     opts = [
         "--set",
         "spire.enabled=false",
     ],
-    template_patterns = {
-        "aether/templates/controller-deployment.yaml": [
-            "--identity-gate=false",
-        ],
-    },
 )
 
 # A timeout and an image override reach the controller verbatim.
@@ -1561,6 +1805,8 @@ helm_template_test(
         "controller.webhook.identityGate.image.repository=mirror.example/aether/agent",
         "--set",
         "controller.webhook.identityGate.image.tag=v1",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/controller-deployment.yaml": [
@@ -1588,6 +1834,8 @@ helm_template_test(
         # Lower case on purpose: the pre-#770 template rendered fail-closed here.
         "--set",
         "proxy.authzSidecar.failureMode=allow",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
@@ -1654,6 +1902,8 @@ helm_template_test(
         "proxy.authzSidecar.opa.enabled=true",
         "--set",
         "proxy.authzSidecar.opa.policy=package envoy.authz",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1680,6 +1930,8 @@ helm_template_test(
         "proxy.authzSidecar.image.repository=example.com/authz",
         "--set",
         "proxy.authzSidecar.image.tag=1.0",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1705,6 +1957,8 @@ helm_template_test(
         "proxy.authzSidecar.image.tag=1.0",
         "--set-json",
         "proxy.authzSidecar.startupProbe.override={\"exec\":{\"command\":[\"/authz\",\"healthcheck\"]},\"periodSeconds\":3}",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1794,6 +2048,8 @@ helm_template_test(
         "1.29.0-eks-1",
         "--set",
         "proxy.authzSidecar.enabled=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1809,6 +2065,8 @@ helm_template_test(
     opts = [
         "--kube-version",
         "1.28.15",
+        "--set",
+        "controller.webhook.spire=true",
     ],
 )
 
@@ -1820,6 +2078,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_agent_registrar_address_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
             "- \"--registrar-address=[a-z0-9-]+-registrar\\.[a-z0-9-]+\\.svc:443\"",
@@ -1840,6 +2102,8 @@ helm_template_test(
         "registrar.service.port=9443",
         "--set",
         "edge.enabled=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
@@ -1864,6 +2128,8 @@ helm_template_test(
     opts = [
         "--set",
         "meshDomain=mesh.example",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/registrar-deployment.yaml": [
@@ -1925,6 +2191,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_proxy_shutdown_drain_immediately_off_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
             "- \"--termination-grace=180s\"\\n\\s+- \"--envoy-arg=-l\"",
@@ -1939,6 +2209,8 @@ helm_template_test(
     opts = [
         "--set",
         "proxy.shutdownDrainImmediately=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
@@ -1952,6 +2224,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_cni_dirs_default_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
             "- \"--cni-bin-target-dir=/host/opt/cni/bin\"",
@@ -1974,6 +2250,8 @@ helm_template_test(
         "cni.binDir=/var/lib/cni/bin",
         "--set",
         "cni.confDir=/var/lib/rancher/k3s/agent/etc/cni/net.d",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/agent-daemonset.yaml": [
@@ -1993,6 +2271,10 @@ helm_template_test(
 helm_template_test(
     name = "aether_uds_csi_default_on_test",
     chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
     template_patterns = {
         "aether/templates/uds-csi-daemonset.yaml": [
             "kind: DaemonSet",
@@ -2041,6 +2323,8 @@ helm_template_test(
     opts = [
         "--set",
         "udsCsi.root=/run/mesh/uds/",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/uds-csi-daemonset.yaml": [
@@ -2089,6 +2373,8 @@ helm_template_test(
     opts = [
         "--set",
         "udsCsi.enabled=true",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/uds-csi-daemonset.yaml": [
@@ -2142,6 +2428,8 @@ helm_template_test(
         "udsCsi.size=512Ki",
         "--set",
         "udsCsi.inodes=1000000",
+        "--set",
+        "controller.webhook.spire=true",
     ],
     template_patterns = {
         "aether/templates/uds-csi-daemonset.yaml": [
@@ -2178,6 +2466,462 @@ helm_template_fail_test(
         "udsCsi.enabled=true",
         "--set",
         "udsCsi.kubeletRoot=var/lib/kubelet",
+    ],
+)
+
+# --- The templates that render several documents (#1371) ----------------------
+#
+# rules_helm's helm_template_test keeps one document per template file, the one
+# helm prints last, and helm prints a release's objects sorted by kind. For
+# these seven templates that left every document but one out of reach:
+#
+#   agent-rbac.yaml            ClusterRole, [ClusterRoleBinding]
+#   agent-serviceaccount.yaml  ServiceAccount (agent), [ServiceAccount (proxy)]
+#   controller-rbac.yaml       2 ClusterRoles, 2 ClusterRoleBindings, Role, [RoleBinding]
+#   controller-webhook.yaml    Secret, MutatingWebhookConfiguration, [ValidatingWebhookConfiguration]
+#   registrar-rbac.yaml        ClusterRole, ClusterRoleBinding, Role, [RoleBinding]
+#   edge-rbac.yaml             ClusterRole, [ClusterRoleBinding]
+#   edge-httproute.yaml        one HTTPRoute per edge.gateway.httpRoutes entry, [the last by name]
+#
+# ([..] is the one a template_patterns entry would have searched; none of the
+# seven had one.) The tests below name the DOCUMENT they are about.
+#
+# A pattern for a rule allows comment lines between its keys: the templates
+# explain each grant in place and helm keeps the comments.
+
+# What a binding must say: the role it grants and the one ServiceAccount, in
+# the release namespace, it grants it to.
+BINDING = "\\nroleRef:\\n  apiGroup: rbac\\.authorization\\.k8s\\.io\\n  kind: %s\\n  name: %s\\nsubjects:\\n  - kind: ServiceAccount\\n    name: %s\\n    namespace: %s$"
+
+# One RBAC rule, as rendered: apiGroups, resources, verbs, with comments allowed
+# between them.
+RULE = "\\n  - apiGroups: \\[%s\\]\\n(\\s+#[^\\n]*\\n)*    resources: \\[%s\\]\\n(\\s+#[^\\n]*\\n)*    verbs: \\[%s\\]"
+
+# The verb lists, in the two orders the templates write them.
+READ = "\"list\", \"get\", \"watch\""
+
+READ_PATCH = READ + ", \"patch\""
+
+READ_WRITE_DELETE = READ + ", \"create\", \"update\", \"patch\", \"delete\""
+
+GET_LIST_WATCH = "\"get\", \"list\", \"watch\""
+
+GET_LIST_WATCH_PATCH = GET_LIST_WATCH + ", \"patch\""
+
+GET_LIST_WATCH_UPDATE = GET_LIST_WATCH + ", \"update\", \"patch\""
+
+GET_LIST_WATCH_WRITE = GET_LIST_WATCH + ", \"create\", \"update\", \"patch\""
+
+# The node agent. The eviction grant is in the CORE group on purpose (a
+# "policy" grant 403s every eviction, found by a node-reboot test); the node
+# patch is what removes the startup taint; gamma and UDS delivery are on by
+# default and each brings its own reads.
+helm_template_match_test(
+    name = "aether_agent_rbac_test",
+    chart = ":aether",
+    document_patterns = {
+        "ClusterRole/release-name-aether-agent-default": [
+            RULE % ("\"\"", "\"pods\"", READ),
+            RULE % ("\"\"", "\"pods/eviction\"", "\"create\""),
+            RULE % ("\"\"", "\"events\"", "\"create\""),
+            RULE % ("\"\"", "\"nodes\"", READ_PATCH),
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"httproutes\", \"grpcroutes\"", READ),
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"httproutes/status\", \"grpcroutes/status\"", "\"get\", \"update\", \"patch\""),
+            RULE % ("\"config\\.aether\\.io\"", "\"httpfilters\"", READ),
+            RULE % ("\"config\\.aether\\.io\"", "\"endpointpolicies\"", READ),
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"tcproutes\", \"tlsroutes\", \"udproutes\"", READ),
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"tcproutes/status\", \"tlsroutes/status\", \"udproutes/status\"", "\"get\", \"update\", \"patch\""),
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"referencegrants\"", READ),
+            RULE % ("\"\"", "\"services\"", READ) + "$",
+        ],
+        "ClusterRoleBinding/release-name-aether-agent-default": [
+            BINDING % ("ClusterRole", "release-name-aether-agent-default", "release-name-aether-agent", "default"),
+        ],
+    },
+)
+
+# An operator override: the binding's subject follows the release namespace.
+helm_template_match_test(
+    name = "aether_agent_rbac_namespace_test",
+    chart = ":aether",
+    document_patterns = {
+        "ClusterRoleBinding/release-name-aether-agent-default": [
+            BINDING % ("ClusterRole", "release-name-aether-agent-default", "release-name-aether-agent", "mesh-ops"),
+        ],
+        "ServiceAccount/release-name-aether-agent": [
+            "\\nmetadata:\\n  name: release-name-aether-agent\\n  namespace: mesh-ops\\n",
+        ],
+        "ServiceAccount/aether-proxy": [
+            "\\nmetadata:\\n  name: aether-proxy\\n  namespace: mesh-ops\\n",
+        ],
+    },
+    opts = [
+        "--set",
+        "namespace.name=mesh-ops",
+    ],
+)
+
+# The off switches: without gamma the agent reads no HTTPRoute, GRPCRoute or
+# HTTPFilter, and without UDS delivery no EndpointPolicy. The L4 route types
+# stay (they are unconditional).
+helm_template_absent_test(
+    name = "aether_agent_rbac_gamma_and_uds_off_test",
+    absent = [
+        "httproutes",
+        "grpcroutes",
+        "httpfilters",
+        "endpointpolicies",
+    ],
+    chart = ":aether",
+    control = "    resources: [\"tcproutes\", \"tlsroutes\", \"udproutes\"]",
+    opts = [
+        "--show-only",
+        "templates/agent-rbac.yaml",
+        "--set",
+        "agent.gamma=false",
+        "--set",
+        "udsCsi.enabled=false",
+    ],
+)
+
+# The two ServiceAccounts of agent-serviceaccount.yaml. The proxy's has a FIXED
+# name (it is the proxy's SPIFFE identity, whatever the release is called).
+helm_template_match_test(
+    name = "aether_agent_service_accounts_test",
+    chart = ":aether",
+    document_patterns = {
+        "ServiceAccount/release-name-aether-agent": [
+            "\\nmetadata:\\n  name: release-name-aether-agent\\n  namespace: default\\n",
+            "\\n    app\\.kubernetes\\.io/component: agent\\n",
+        ],
+        "ServiceAccount/aether-proxy": [
+            "\\nmetadata:\\n  name: aether-proxy\\n  namespace: default\\n",
+            "\\n    app\\.kubernetes\\.io/component: proxy\\n",
+        ],
+    },
+)
+
+# Without the proxy there is no proxy ServiceAccount; the agent's stays.
+helm_template_absent_test(
+    name = "aether_proxy_service_account_off_test",
+    absent = [
+        "aether-proxy",
+        "component: proxy",
+    ],
+    chart = ":aether",
+    control = "  name: release-name-aether-agent",
+    opts = [
+        "--show-only",
+        "templates/agent-serviceaccount.yaml",
+        "--set",
+        "proxy.enabled=false",
+    ],
+)
+
+# The controller: six documents. The node patch re-arms the agent-not-ready
+# taint; the ConfigMap write is cluster-wide because a MeshConfig's projected
+# ConfigMap lives in the MeshConfig's own namespace; the Role is leader election.
+helm_template_match_test(
+    name = "aether_controller_rbac_test",
+    chart = ":aether",
+    document_patterns = {
+        "ClusterRole/release-name-aether-controller-default": [
+            RULE % ("\"\"", "\"nodes\"", GET_LIST_WATCH_PATCH),
+            RULE % ("\"\"", "\"pods\"", GET_LIST_WATCH),
+            RULE % ("\"config\\.aether\\.io\"", "\"meshconfigs\"", GET_LIST_WATCH),
+            RULE % ("\"config\\.aether\\.io\"", "\"meshconfigs/status\"", "\"get\", \"update\", \"patch\""),
+            RULE % ("\"config\\.aether\\.io\"", "\"httpfilters\"", "\"get\", \"list\""),
+            RULE % ("\"config\\.aether\\.io\"", "\"edgeconfigs\"", "\"get\", \"list\""),
+            # The last rule at default values: no webhook-configuration grant
+            # with the self-signed webhook.
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"httproutes\"", GET_LIST_WATCH) + "$",
+        ],
+        "ClusterRole/release-name-aether-controller-default-meshconfig": [
+            "\\nrules:" + RULE % ("\"\"", "\"configmaps\"", GET_LIST_WATCH_WRITE) + "$",
+        ],
+        "ClusterRoleBinding/release-name-aether-controller-default": [
+            BINDING % ("ClusterRole", "release-name-aether-controller-default", "release-name-aether-controller", "default"),
+        ],
+        "ClusterRoleBinding/release-name-aether-controller-default-meshconfig": [
+            BINDING % ("ClusterRole", "release-name-aether-controller-default-meshconfig", "release-name-aether-controller", "default"),
+        ],
+        "Role/release-name-aether-controller": [
+            "\\nmetadata:\\n  name: release-name-aether-controller\\n  namespace: default\\n",
+            RULE % ("\"coordination\\.k8s\\.io\"", "\"leases\"", GET_LIST_WATCH_WRITE),
+            RULE % ("\"\"", "\"events\"", "\"create\", \"patch\"") + "$",
+        ],
+        "RoleBinding/release-name-aether-controller": [
+            "\\nmetadata:\\n  name: release-name-aether-controller\\n  namespace: default\\n",
+            BINDING % ("Role", "release-name-aether-controller", "release-name-aether-controller", "default"),
+        ],
+    },
+)
+
+# With the SPIRE-served webhook the controller patches the caBundle of the
+# webhook configurations itself, so it may update both kinds (pod ndots
+# injection, which renders the mutating one, is on by default).
+helm_template_match_test(
+    name = "aether_controller_rbac_webhook_spire_test",
+    chart = ":aether",
+    document_patterns = {
+        "ClusterRole/release-name-aether-controller-default": [
+            RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"validatingwebhookconfigurations\"", GET_LIST_WATCH_UPDATE) +
+            RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"mutatingwebhookconfigurations\"", GET_LIST_WATCH_UPDATE) + "$",
+        ],
+    },
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+)
+
+# The registrar: the Service write is what the mesh-Service VIP generator
+# needs; MCS is off by default, so nothing multicluster is granted.
+helm_template_match_test(
+    name = "aether_registrar_rbac_test",
+    chart = ":aether",
+    document_patterns = {
+        "ClusterRole/release-name-aether-registrar-default": [
+            RULE % ("\"\"", "\"pods\"", READ),
+            RULE % ("\"\"", "\"nodes\"", READ),
+            RULE % ("\"\"", "\"services\"", READ_WRITE_DELETE) + "$",
+        ],
+        "ClusterRoleBinding/release-name-aether-registrar-default": [
+            BINDING % ("ClusterRole", "release-name-aether-registrar-default", "release-name-aether-registrar", "default"),
+        ],
+        "Role/release-name-aether-registrar": [
+            "\\nmetadata:\\n  name: release-name-aether-registrar\\n  namespace: default\\n",
+            RULE % ("\"coordination\\.k8s\\.io\"", "\"leases\"", GET_LIST_WATCH_WRITE),
+            RULE % ("\"\"", "\"events\"", "\"create\", \"patch\"") + "$",
+        ],
+        "RoleBinding/release-name-aether-registrar": [
+            BINDING % ("Role", "release-name-aether-registrar", "release-name-aether-registrar", "default"),
+        ],
+    },
+)
+
+# registrar.enableMCS grants the MCS-API objects and the route config the
+# cross-cluster export reads.
+helm_template_match_test(
+    name = "aether_registrar_rbac_mcs_test",
+    chart = ":aether",
+    document_patterns = {
+        "ClusterRole/release-name-aether-registrar-default": [
+            RULE % ("\"multicluster\\.x-k8s\\.io\"", "\"serviceexports\"", READ),
+            RULE % ("\"multicluster\\.x-k8s\\.io\"", "\"serviceexports/status\"", "\"get\", \"update\", \"patch\""),
+            RULE % ("\"multicluster\\.x-k8s\\.io\"", "\"serviceimports\"", READ_WRITE_DELETE),
+            RULE % ("\"multicluster\\.x-k8s\\.io\"", "\"serviceimports/status\"", "\"get\", \"update\", \"patch\""),
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"httproutes\", \"grpcroutes\", \"referencegrants\"", READ),
+            RULE % ("\"config\\.aether\\.io\"", "\"httpfilters\"", READ) + "$",
+        ],
+    },
+    opts = [
+        "--set",
+        "registrar.enableMCS=true",
+    ],
+)
+
+# The edge: cluster-wide Gateway API reads and status writes, the per-Gateway
+# LoadBalancer Services, and by default NO Secret access; the binding's subject
+# is in the EDGE namespace, not the release's.
+helm_template_match_test(
+    name = "aether_edge_rbac_test",
+    chart = ":aether",
+    document_patterns = {
+        "ClusterRole/release-name-aether-edge": [
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"gateways\", \"httproutes\", \"tcproutes\", \"tlsroutes\"", GET_LIST_WATCH),
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"gateways/status\", \"httproutes/status\", \"tcproutes/status\", \"tlsroutes/status\"", "\"get\", \"update\", \"patch\""),
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"gatewayclasses\"", GET_LIST_WATCH),
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"gatewayclasses/status\"", "\"get\", \"update\", \"patch\""),
+            RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"referencegrants\"", GET_LIST_WATCH),
+            RULE % ("\"config\\.aether\\.io\"", "\"edgeconfigs\"", GET_LIST_WATCH),
+            # Two grants on Services: the read that resolves backendRefs, and
+            # (last, without downstream TLS) the write for the per-Gateway ones.
+            RULE % ("\"\"", "\"services\"", GET_LIST_WATCH),
+            RULE % ("\"\"", "\"namespaces\"", GET_LIST_WATCH),
+            RULE % ("\"\"", "\"services\"", "\"create\", \"update\", \"patch\", \"delete\"") + "$",
+        ],
+        "ClusterRoleBinding/release-name-aether-edge": [
+            BINDING % ("ClusterRole", "release-name-aether-edge", "release-name-aether-edge", "aether-ingress"),
+        ],
+    },
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+# Downstream TLS is what lets the edge read Secrets (the listeners' certificates).
+helm_template_match_test(
+    name = "aether_edge_rbac_tls_test",
+    chart = ":aether",
+    document_patterns = {
+        "ClusterRole/release-name-aether-edge": [
+            RULE % ("\"\"", "\"secrets\"", GET_LIST_WATCH) + "$",
+        ],
+    },
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+    ],
+)
+
+# One HTTPRoute per edge.gateway.httpRoutes entry, each parented to the chart's
+# Gateway, with its rules passed through and hostnames only where given.
+helm_template_match_test(
+    name = "aether_edge_httproutes_test",
+    chart = ":aether",
+    document_patterns = {
+        "HTTPRoute/api": [
+            "\\nmetadata:\\n  name: api\\n  namespace: aether-ingress\\n",
+            "\\nspec:\\n  parentRefs:\\n    - name: release-name-aether-edge\\n  hostnames:\\n    - api\\.example\\n  rules:\\n    - backendRefs:\\n      - name: api-backend\\n        port: 8080$",
+        ],
+        "HTTPRoute/web": [
+            "\\nmetadata:\\n  name: web\\n  namespace: aether-ingress\\n",
+            "\\nspec:\\n  parentRefs:\\n    - name: release-name-aether-edge\\n  rules:\\n    - backendRefs:\\n      - name: web-backend\\n        port: 80$",
+        ],
+    },
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.gateway.httpRoutes[0].name=api",
+        "--set",
+        "edge.gateway.httpRoutes[0].hostnames[0]=api.example",
+        "--set",
+        "edge.gateway.httpRoutes[0].rules[0].backendRefs[0].name=api-backend",
+        "--set",
+        "edge.gateway.httpRoutes[0].rules[0].backendRefs[0].port=8080",
+        "--set",
+        "edge.gateway.httpRoutes[1].name=web",
+        "--set",
+        "edge.gateway.httpRoutes[1].rules[0].backendRefs[0].name=web-backend",
+        "--set",
+        "edge.gateway.httpRoutes[1].rules[0].backendRefs[0].port=80",
+    ],
+)
+
+# None declared (the default), none rendered.
+helm_template_absent_test(
+    name = "aether_edge_httproutes_default_test",
+    absent = ["kind: HTTPRoute"],
+    chart = ":aether",
+    control = "kind: Gateway",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+# Comment lines, which the templates put between and inside the entries.
+COMMENTS = "(\\s+#[^\\n]*\\n)*"
+
+# A webhook entry: its name, then `failurePolicy: Ignore` (a pod webhook that
+# fails closed is a cluster-wide outage, and a config webhook that does wedges
+# every write while the controller rolls), a 5s timeout, and whatever selector
+# scopes it, up to the clientConfig that reaches the controller's Service on
+# the path given, with a non-empty caBundle (the self-signed default).
+WEBHOOK = "  - name: %s\\n    admissionReviewVersions: \\[\"v1\"\\]\\n    sideEffects: None\\n" + COMMENTS + "    failurePolicy: Ignore\\n    timeoutSeconds: 5\\n%s    clientConfig:\\n      service:\\n        name: release-name-aether-controller-webhook\\n        namespace: default\\n        path: %s\\n        port: 443\\n      caBundle: [A-Za-z0-9+/=]+\\n    rules:\\n"
+
+# `reinvocationPolicy: Never`, then the selector that scopes a pod webhook.
+POD_SELECTOR = "    reinvocationPolicy: Never\\n" + COMMENTS + "    %s:\\n      matchLabels:\\n        aether\\.io/managed: \"true\"\\n"
+
+# The one rule of a pod webhook: pod CREATE, nothing else.
+POD_RULE = "      - apiGroups: \\[\"\"\\]\\n        apiVersions: \\[\"v1\"\\]\\n        operations: \\[\"CREATE\"\\]\\n        resources: \\[\"pods\"\\]\\n        scope: \"Namespaced\""
+
+# Every pod of a managed NAMESPACE...
+NAMESPACE_INJECT_SELECTOR = POD_SELECTOR % "namespaceSelector"
+
+NAMESPACE_INJECT_WEBHOOK = WEBHOOK % ("namespace-inject\\.pods\\.aether\\.io", NAMESPACE_INJECT_SELECTOR, "/mutate") + POD_RULE
+
+# ...and pods already labeled, by OBJECT selector.
+NDOTS_SELECTOR = POD_SELECTOR % "objectSelector"
+
+NDOTS_WEBHOOK = WEBHOOK % ("ndots\\.pods\\.aether\\.io", NDOTS_SELECTOR, "/mutate") + POD_RULE
+
+VALIDATE_WEBHOOK = WEBHOOK % ("validate\\.config\\.aether\\.io", "", "/validate")
+
+# The start of a configuration's `webhooks:` list: what follows is its FIRST entry.
+WEBHOOKS = "\\nwebhooks:\\n" + COMMENTS
+
+# The three documents of controller-webhook.yaml at default values. The Secret
+# is matched on its shape, never on its content, and nothing here can print it
+# (//bazel/helm:template_rules_test).
+helm_template_match_test(
+    name = "aether_webhook_documents_test",
+    chart = ":aether",
+    document_patterns = {
+        "Secret/release-name-aether-controller-webhook-cert": [
+            "\\nmetadata:\\n  name: release-name-aether-controller-webhook-cert\\n  namespace: default\\n",
+            "\\ntype: kubernetes\\.io/tls\\ndata:\\n  ca\\.crt: [A-Za-z0-9+/=]+\\n  tls\\.crt: [A-Za-z0-9+/=]+\\n  tls\\.key: [A-Za-z0-9+/=]+$",
+        ],
+        # Exactly two entries: namespace injection, then ndots.
+        "MutatingWebhookConfiguration/release-name-aether-controller-default-pod-ndots": [
+            WEBHOOKS + NAMESPACE_INJECT_WEBHOOK + "\\n" + COMMENTS + NDOTS_WEBHOOK + "$",
+        ],
+        "ValidatingWebhookConfiguration/release-name-aether-controller-default": [
+            WEBHOOKS + VALIDATE_WEBHOOK,
+            "resources: \\[\"meshconfigs\"\\]\\n        scope: \"Cluster\"\\n",
+            "resources: \\[\"httpfilters\"\\]\\n        scope: \"Namespaced\"\\n",
+            "resources: \\[\"edgeconfigs\"\\]\\n        scope: \"Namespaced\"\\n",
+            "resources: \\[\"endpointpolicies\"\\]\\n        scope: \"Namespaced\"\\n",
+            "apiGroups: \\[\"gateway\\.networking\\.k8s\\.io\"\\]\\n        apiVersions: \\[\"v1\"\\]\\n        operations: \\[\"CREATE\", \"UPDATE\"\\]\\n        resources: \\[\"httproutes\"\\]\\n        scope: \"Namespaced\"$",
+        ],
+    },
+)
+
+# An operator override: namespace injection off leaves the ndots webhook as the
+# configuration's only entry...
+helm_template_match_test(
+    name = "aether_webhook_ndots_only_test",
+    chart = ":aether",
+    document_patterns = {
+        "MutatingWebhookConfiguration/release-name-aether-controller-default-pod-ndots": [
+            WEBHOOKS + NDOTS_WEBHOOK + "$",
+        ],
+    },
+    opts = [
+        "--set",
+        "controller.namespaceInjection=false",
+    ],
+)
+
+# ...and ndots off leaves namespace injection.
+helm_template_match_test(
+    name = "aether_webhook_namespace_injection_only_test",
+    chart = ":aether",
+    document_patterns = {
+        "MutatingWebhookConfiguration/release-name-aether-controller-default-pod-ndots": [
+            WEBHOOKS + NAMESPACE_INJECT_WEBHOOK + "$",
+        ],
+    },
+    opts = [
+        "--set",
+        "controller.injectPodNdots=false",
+    ],
+)
+
+# The off switch: with both off there is no mutating configuration at all; the
+# validating one and the certificate stay.
+helm_template_absent_test(
+    name = "aether_webhook_mutating_off_test",
+    absent = [
+        "kind: MutatingWebhookConfiguration",
+        "pods.aether.io",
+    ],
+    chart = ":aether",
+    control = "kind: ValidatingWebhookConfiguration",
+    opts = [
+        "--show-only",
+        "templates/controller-webhook.yaml",
+        "--set",
+        "controller.namespaceInjection=false",
+        "--set",
+        "controller.injectPodNdots=false",
     ],
 )
 
