@@ -123,7 +123,8 @@ func TestCABundleInjectorDefersUntilTheSVIDArrives(t *testing.T) {
 
 	c := newWebhookClient(t)
 	injector := &CABundleInjector{
-		Client:            c,
+		Reader:            c,
+		Writer:            c,
 		Source:            src,
 		WebhookConfigName: testWebhookConfigName,
 		Log:               log,
@@ -136,6 +137,10 @@ func TestCABundleInjectorDefersUntilTheSVIDArrives(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return logs.level(t, "webhook caBundle injection deferred until this workload has an SVID") == "INFO"
 	}, 30*time.Second, 10*time.Millisecond, "logs:\n%s", logs.String())
+	// (The injector has one failure message since #1431; the pre-#1431 name of
+	// the first-attempt line is kept here so neither spelling can come back.)
+	assert.Empty(t, logs.level(t, msgInjectionFailed),
+		"a missing SVID is a wait, not an error to report")
 	assert.Empty(t, logs.level(t, "initial webhook caBundle injection failed"),
 		"a missing SVID is a wait, not an error to report")
 	assert.Empty(t, caBundle(t, c), "nothing can be injected before the trust bundle exists")
