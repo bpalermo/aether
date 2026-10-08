@@ -623,8 +623,10 @@ with `label_replace`), one stat per zero-failure class
 the selector of the README's "Live view",
 with the dashboard's range set to the run, PLUS the series born inside the
 range, which `increase()` reads as 0: for each class the stat is
-`sum(increase(m[$__range])) + sum(m unless m offset $__range)`, so a first
-failure cannot look clean), and p95 per target from the latency
+`sum(increase(m[$__range]) and m offset $__range) + sum(m unless m offset $__range)`:
+`increase()` only for a series that already existed at the start of the
+range, the current value only for one born inside it, so a first failure
+cannot look clean and a new series is not counted twice), and p95 per target from the latency
 histogram, which is the mesh's latency now that the engine is not throttled.
 Every panel and any alert on these series is a `rate()` or an `increase()`,
 never the series' value (#1420): named by node, a failure series outlives the
