@@ -626,11 +626,17 @@ shrink() {
 		abort "SHRINK could not read $SHRINK_NS/$SHRINK_TARGET"
 	fi
 	log "SHRINK begin $SHRINK_NS/$SHRINK_TARGET replicas=$prev -> 0 for ${SHRINK_SECONDS}s (demand-set shrink, #682)"
+	# Before the call, not after it: a TERM that arrives during the call is taken
+	# when the call has returned, and the cluster has the scale by then. The
+	# stop (and the EXIT trap) restore whatever SHRINK_PREV names.
+	SHRINK_PREV="$prev"
 	if ! k -n "$SHRINK_NS" scale "$SHRINK_TARGET" --replicas=0 >>"$LOG" 2>&1; then
-		log "SHRINK FAILED to scale $SHRINK_NS/$SHRINK_TARGET down; leaving it at $prev"
+		# A call that failed may have been applied all the same (a timeout):
+		# SHRINK_PREV stays set, and the abort's EXIT trap scales back to it.
+		# Restoring a value that is already there changes nothing.
+		log "SHRINK FAILED to scale $SHRINK_NS/$SHRINK_TARGET down; restoring it to $prev in case the call was applied"
 		abort "SHRINK could not scale $SHRINK_NS/$SHRINK_TARGET down"
 	fi
-	SHRINK_PREV="$prev"
 	nap "$SHRINK_SECONDS"
 	restore_shrink || abort "SHRINK could not restore $SHRINK_NS/$SHRINK_TARGET"
 }

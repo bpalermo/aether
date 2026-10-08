@@ -1316,6 +1316,14 @@ case "$args" in
 	fi
 	echo restarted
 	;;
+*" scale "*"--replicas=0")
+	# FAKE_FAIL_SCALE_DOWN=1: the scale to zero is refused (exit 1).
+	if [ -n "${FAKE_FAIL_SCALE_DOWN:-}" ]; then
+		echo "error: the server was unable to return a response in the time allotted" >&2
+		exit 1
+	fi
+	echo done
+	;;
 *" rollout status "* | *" scale "* | *" delete "* | *" wait --for=delete "*) echo done ;;
 *"-o jsonpath={.spec.replicas}"*) printf 3 ;;
 *" create configmap "*) printf 'apiVersion: v1\nkind: ConfigMap\n' ;;
@@ -1700,6 +1708,33 @@ if [ "$INCALL" -ge 40 ] && [ "$nres" -eq "$INCALL" ] && [ -z "$bad" ]; then
 else
 	fail "churn term in a call: $nres of $INCALL runs reported (40 or more expected); not handled cleanly:
 $(echo "$bad" | head -n 12)"
+fi
+
+# One of those runs, looked at (review of #1458): TERM during the SHRINK's
+# scale-to-zero call itself. The trap runs when the call has returned, and the
+# cluster has the scale by then. RED before: SHRINK_PREV was set only after the
+# call, so the stop had nothing to restore and exited 143 with the target at 0
+# (no `--replicas=3` call, no `SHRINK done` line).
+k=$(awk -F'\t' '!f && $2 ~ / scale deployment\/svc-5 --replicas=0$/ { print NR; f = 1 }' "$TMP/ic-full/calls.tsv")
+R="$TMP/sw-ic-full-$k"
+if [ -n "$k" ] && [ -e "$R/term-at" ] && [ "$(grep -c ' scale deployment/svc-5 --replicas=3$' "$R/calls.tsv")" -eq 1 ] && grep -q ' SHRINK done aether-test/deployment/svc-5 restored to replicas=3$' "$R/churn.log"; then
+	pass "churn term in a call: TERM during the SHRINK's scale-to-zero call still restores the replicas before the driver exits"
+else
+	fail "churn term in a call: TERM during the scale to zero (call '${k:-not found}'): its scale calls were '$(grep ' scale ' "$R/calls.tsv" 2>/dev/null | cut -f2 | tr '\n' '|')', log tail: $(tail -n 2 "$R/churn.log" 2>/dev/null | tr '\n' '|')"
+fi
+# A scale to zero that fails may have been applied all the same (a call that
+# timed out): the driver restores, then aborts. RED before: `leaving it at 3`,
+# and no restore.
+R="$TMP/churn-scale-refused"
+churn_start "$R" full SOAK_NEWSA=0 SOAK_UDSCSI=0 SOAK_PROXY_RSS=0 FAKE_FAIL_SCALE_DOWN=1
+wait "$cpid"
+rc=$?
+left=$(survivors "$csid")
+if [ "$rc" -eq 1 ] && [ -z "$left" ] && [ "$(grep -c ' scale deployment/svc-5 --replicas=3$' "$R/calls.tsv")" -eq 1 ] &&
+	grep -q ' SHRINK done aether-test/deployment/svc-5 restored to replicas=3$' "$R/churn.log" && grep -q ' CHURN ABORTED: SHRINK could not scale ' "$R/churn.log"; then
+	pass "churn: a scale to zero that fails is restored all the same, and the run aborts (exit 1)"
+else
+	fail "churn: a failed scale to zero: exit $rc, left behind: ${left:-nothing}, scale calls '$(grep ' scale ' "$R/calls.tsv" 2>/dev/null | cut -f2 | tr '\n' '|')', log tail: $(tail -n 3 "$R/churn.log" 2>/dev/null | tr '\n' '|')"
 fi
 
 # The sampler alone, as churn.sh queues it and as run.sh starts it: TERM during
