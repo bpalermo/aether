@@ -3,6 +3,7 @@ package hotrestart
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -142,19 +143,31 @@ func (s *Supervisor) successorConcurrency() (int, error) {
 	return s.onlineCPUs()
 }
 
-// concurrencyArg extracts --concurrency from an Envoy argv.
+// concurrencyArg extracts --concurrency from an Envoy argv: the worker count
+// an Envoy started with it will run, and whether the flag is there at all.
 //
 // A --concurrency given more than once is errRepeatedConcurrency, not "the
 // last one wins": Envoy's parser does not keep the last, it refuses the command
 // line ("PARSE ERROR: Argument: (--concurrency) Argument already set!"), so no
 // Envoy ever runs with either value (issue #1375). The repeat is reported
-// before any value is looked at. CheckExtraArgs turns it into a startup
-// failure, so a supervisor started through the command never sees it here.
+// before any value is looked at.
+//
+// The --concurrency=N spelling is errConcurrencyEquals: the pinned Envoy does
+// not parse it ("Couldn't find match for argument", issue #1407), so no Envoy
+// runs with N. It still counts towards a repeat.
+//
+// The value is the next argument, whatever it looks like, as it is for Envoy;
+// parseConcurrencyValue says what Envoy does with each kind of value (issue
+// #1408). "0" is one worker.
+//
+// CheckExtraArgs turns every error here into a startup failure, so a
+// supervisor started through the command never sees one at a handoff.
 func concurrencyArg(args []string) (n int, explicit bool, err error) {
 	var (
 		v       string
 		seen    int
 		noValue bool
+		equals  bool
 	)
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; {
@@ -166,7 +179,7 @@ func concurrencyArg(args []string) (n int, explicit bool, err error) {
 				v = args[i+1]
 			}
 		case strings.HasPrefix(a, envoyFlagConcurrency+"="):
-			v = strings.TrimPrefix(a, envoyFlagConcurrency+"=")
+			equals = true
 		default:
 			continue
 		}
@@ -177,12 +190,15 @@ func concurrencyArg(args []string) (n int, explicit bool, err error) {
 		return 0, false, nil
 	case seen > 1:
 		return 0, false, fmt.Errorf("%w (%d times)", errRepeatedConcurrency, seen)
+	case equals:
+		return 0, false, errConcurrencyEquals
 	case noValue:
-		return 0, false, fmt.Errorf("--concurrency without a value")
+		return 0, false, errors.New("--concurrency is the last argument and has no value " +
+			`(Envoy: "Missing a value for this argument!")`)
 	}
-	parsed, perr := strconv.Atoi(v)
-	if perr != nil || parsed <= 0 {
-		return 0, false, fmt.Errorf("--concurrency %q is not a positive integer", v)
+	parsed, err := parseConcurrencyValue(v)
+	if err != nil {
+		return 0, false, err
 	}
 	return parsed, true, nil
 }
