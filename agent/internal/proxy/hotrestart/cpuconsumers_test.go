@@ -1450,6 +1450,50 @@ func TestStallLineFirstWindowHasABaseline(t *testing.T) {
 	assert.EqualValues(t, 1000, recs[0][attrTopCgroupsOverMs])
 }
 
+// TestStallLineCoversAWaitSeenLate: under the contention this line is for, the
+// supervisor is descheduled too. A wait that ended while it was not looking is
+// seen ticks later, and "the tick minus its length" is then later than the
+// wait began by however long the supervisor was away. The line's consumers
+// must still reach back to where the wait can have begun.
+func TestStallLineCoversAWaitSeenLate(t *testing.T) {
+	proc := newFakeProc(t)
+	logs := &capturedLog{}
+	s := newTestStallSampler(proc, logs, nil, map[int]int{testEpoch: testPID})
+	s.interval = 100 * time.Millisecond
+	fs := newFakeStatFS()
+	fs.talosNode()
+	s.consumers = newTestConsumers(fs, 5)
+
+	proc.thread(testPID, testPID, "envoy", 'S', 0, 0, "do_epoll_wait")
+	t0 := consumersT0
+	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+	for ms := 0; ms <= 1000; ms += 100 {
+		s.tick(at(ms))
+	}
+	// The thread starts waiting at 1 s. From 1 s to 2 s the kubelet holds the
+	// CPUs; nothing is charged to the thread until the wait ends.
+	fs.cgroup("/podruntime/kubelet", 900*time.Millisecond)
+	fs.cgroup("/podruntime", 900*time.Millisecond)
+	fs.cgroup("/", 900*time.Millisecond)
+	for ms := 1100; ms <= 3900; ms += 100 {
+		s.tick(at(ms))
+	}
+	require.Empty(t, logs.records(t, "envoy thread stall"))
+
+	// The supervisor is away from 3.9 s to 6 s. The wait ends at 4 s, three
+	// seconds long, and is seen at 6 s.
+	proc.thread(testPID, testPID, "envoy", 'R', 0, 3*time.Second, "")
+	fs.cgroup("/init", 50*time.Millisecond)
+	fs.cgroup("/", 950*time.Millisecond)
+	s.tick(at(6000))
+
+	recs := logs.records(t, "envoy thread stall")
+	require.Len(t, recs, 1)
+	assert.Equal(t, "/podruntime/kubelet=900ms /init=50ms", recs[0][attrTopCgroups],
+		"from the sample at 1 s, where the wait began; 6 s minus 3 s would start at 3 s, after the kubelet's second")
+	assert.EqualValues(t, 5000, recs[0][attrTopCgroupsOverMs])
+}
+
 // TestStallLineCoversAWaitThatBeganBeforeTheWindow: the kernel charges a
 // runqueue wait when it ends, and the sampler sees it on the next tick. A
 // 500 ms wait seen 100 ms into a window began 400 ms before that window, in a

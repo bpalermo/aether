@@ -157,8 +157,12 @@ type sampledEpoch struct {
 
 // stallSampler is driven by tick; Supervisor.sampleStalls owns the timer.
 type stallSampler struct {
-	proc      procReader
-	window    time.Duration
+	proc   procReader
+	window time.Duration
+	// interval is how often tick is meant to be called (0 = not known). A
+	// tick that comes later than that was late by the difference, and what it
+	// finds charged may have been charged that much earlier.
+	interval  time.Duration
 	threshold time.Duration
 	log       *slog.Logger
 	metrics   *SupervisorMetrics
@@ -281,8 +285,16 @@ func (s *stallSampler) sampleThread(pid, tid int, t *sampledThread, now time.Tim
 		// The wait ended at or before this tick, so it began no later than the
 		// tick minus its length. (It may have ended up to one tick earlier;
 		// the consumers' baseline is the sample at or BEFORE the start asked
-		// for, which takes that in.)
-		if began := now.Add(-nsDuration(dRunq)); t.runqSince.IsZero() || began.Before(t.runqSince) {
+		// for, which takes that in.) A tick that is late, because the
+		// supervisor was waiting for a CPU like the thread it watches, may be
+		// seeing a wait that ended as long ago as it is late: go back that
+		// much further. Too early an interval dilutes the figures; too late
+		// a one leaves out whoever caused the wait.
+		began := now.Add(-nsDuration(dRunq))
+		if s.interval > 0 && elapsed > s.interval {
+			began = began.Add(s.interval - elapsed)
+		}
+		if t.runqSince.IsZero() || began.Before(t.runqSince) {
 			t.runqSince = began
 		}
 	}
@@ -582,6 +594,7 @@ func (s *Supervisor) sampleStalls(ctx context.Context) {
 		threshold = DefaultStallThreshold
 	}
 	sampler := newStallSampler(procReader{root: "/proc"}, threshold, s.log, s.metrics, s.childPIDs, s.stallLogContext)
+	sampler.interval = s.cfg.StallSampleInterval
 	attrs := []any{"interval", s.cfg.StallSampleInterval, "threshold", threshold, "window", stallWindow}
 	if sampler.consumers = nodeCPUConsumers(s.cfg.StallTopConsumers); sampler.consumers != nil {
 		attrs = append(attrs,
