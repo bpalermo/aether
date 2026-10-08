@@ -112,12 +112,12 @@ spec:
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             - "--spire-wait-warn-after={{ .Values.spire.waitWarnAfter }}"
             - "--webhook-config-name={{ include "aether.controller.clusterScopedName" . }}"
-            {{- if or .Values.controller.namespaceInjection .Values.controller.injectPodNdots }}
+            {{- if include "aether.controller.mutatingWebhook" . }}
             # Same condition controller-webhook.yaml renders the
             # MutatingWebhookConfiguration under: with either knob on, its
             # caBundle starts empty and only the controller patches it; left
             # unpatched, namespace injection and the identity gate fail silently.
-            - "--mutating-webhook-config-name={{ include "aether.controller.clusterScopedName" . }}-pod-ndots"
+            - "--mutating-webhook-config-name={{ include "aether.controller.mutatingWebhookName" . }}"
             {{- end }}
             {{- end }}
           ports:

@@ -491,6 +491,37 @@ app.kubernetes.io/version: {{ . | quote }}
 {{- define "aether.controller.webhookServiceName" -}}
 {{- printf "%s-webhook" (include "aether.controller.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+{{/*
+"The pod-mutating webhook exists": non-empty ("true") when the chart renders the
+MutatingWebhookConfiguration, empty when it does not. It has two entries, one
+per switch, so it renders when EITHER is on.
+
+Everything that depends on that object existing asks this helper and nothing
+else (#1411: the RBAC rule used to ask injectPodNdots alone, so namespace
+injection without ndots told the controller to patch an object it had no
+permission to read):
+
+  controller-webhook.yaml     renders the MutatingWebhookConfiguration
+  controller-deployment.yaml  passes --mutating-webhook-config-name (SPIRE-served
+                              webhook only: its caBundle starts empty and the
+                              controller fills it)
+  controller-rbac.yaml        grants mutatingwebhookconfigurations (same)
+
+//charts/aether:aether_mutating_webhook_*_test render every combination.
+
+Use it as `{{ if include "aether.controller.mutatingWebhook" . }}`.
+*/}}
+{{- define "aether.controller.mutatingWebhook" -}}
+{{- if or .Values.controller.namespaceInjection .Values.controller.injectPodNdots -}}true{{- end -}}
+{{- end -}}
+{{/*
+Its name, for the object and for the flag that tells the controller which one to
+patch. "-pod-ndots" is historical (it also carries namespace injection);
+renaming it would delete and recreate the object on upgrade.
+*/}}
+{{- define "aether.controller.mutatingWebhookName" -}}
+{{- include "aether.controller.clusterScopedName" . }}-pod-ndots
+{{- end -}}
 {{- define "aether.controller.selectorLabels" -}}
 app.kubernetes.io/name: aether-controller
 app.kubernetes.io/instance: {{ .Release.Name }}
