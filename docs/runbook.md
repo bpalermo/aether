@@ -4711,17 +4711,43 @@ kubectl get mutatingwebhookconfiguration,validatingwebhookconfiguration \
 An entry at `0` is a webhook the apiserver cannot call; with
 `failurePolicy: Ignore` it is skipped silently, so pods in an
 `aether.io/managed` namespace come up outside the mesh and without the
-identity gate. What the controller does without the permission was read from
-its code and not reproduced on a cluster: the injector reads the configuration
-through the manager's cache, whose informer can never list it, so the read
-waits instead of failing. Expect client-go's
-`Failed to watch ... mutatingwebhookconfigurations is forbidden` lines on the
-leader, **no** `webhook caBundle injection failed` line, and the leader replica
-NotReady on its `cache-sync` check. Upgrading to a chart with the fix adds the
-rule; the leader's informer then syncs on its next retry and the injector logs
-`injected SPIRE trust bundle into mutating webhook caBundle`. If it does not
-within a few minutes, restart the controller (a decision for the cluster's
-owner; the webhooks fail open while no replica answers):
+identity gate.
+
+What the controller's leader does when it cannot read or write a webhook
+configuration (since #1431; reproduced in the controller's tests against a real
+informer cache, not on a cluster):
+
+- It logs `webhook caBundle injection failed` at ERROR, once per attempt, with
+  the object in `kind` and `webhookConfig`, the step in `reason` (`get`,
+  `update`, or `trust_bundle` when SPIRE gave an SVID but no bundle), the
+  apiserver's error, and `retryIn`.
+- It counts the attempt in `aether.controller.webhook.cabundle_injection_failures`
+  (Prometheus: `aether_controller_webhook_cabundle_injection_failures_total`),
+  by `kind` (`validating`, `mutating`) and `reason`. Expected to stay 0.
+- It retries with a backoff that doubles from 1 s to 1 min, so a permission that
+  appears is picked up within a minute, with no restart and no trust-bundle
+  rotation needed.
+- The two configurations are independent: the one that works keeps following
+  SPIRE trust-bundle rotations while the other fails.
+- The leader **stays Ready**. Leaving the webhook Service would not help the
+  webhook whose caBundle is missing (the apiserver cannot verify any replica
+  for it) and would take the working webhook's endpoint away. The log line and
+  the counter are the signal, not readiness.
+
+The injector reads the two objects from the apiserver directly, by name, and
+needs only `get` and `update` on them; the `list` and `watch` the chart also
+grants are no longer used by it.
+
+A controller built before #1431 behaved differently in the same state: it read
+through the manager's cache, whose informer could never list the configuration,
+so the read waited instead of failing. That leader logs client-go's
+`Failed to watch ... mutatingwebhookconfigurations is forbidden` lines and
+**no** `webhook caBundle injection failed` line, stops refreshing the
+*validating* webhook's caBundle on a trust-bundle rotation too, and is NotReady
+on its `cache-sync` check. Adding the rule lets its informer sync on the next
+retry; if the bundle does not appear within a few minutes, restart the
+controller (a decision for the cluster's owner; the webhooks fail open while no
+replica answers):
 
 ```bash
 kubectl -n "$NS" rollout restart deploy -l app.kubernetes.io/name=aether-controller
