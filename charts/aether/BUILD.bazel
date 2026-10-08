@@ -2658,8 +2658,9 @@ helm_template_match_test(
 )
 
 # With the SPIRE-served webhook the controller patches the caBundle of the
-# webhook configurations itself, so it may update both kinds (pod ndots
-# injection, which renders the mutating one, is on by default).
+# webhook configurations itself, so it may update both kinds (the mutating one
+# renders by default; every combination of the switches that decide it is in
+# the aether_mutating_webhook_*_test truth table below, #1411).
 helm_template_match_test(
     name = "aether_controller_rbac_webhook_spire_test",
     chart = ":aether",
@@ -2924,6 +2925,111 @@ helm_template_absent_test(
         "controller.injectPodNdots=false",
     ],
 )
+
+# --- "The mutating webhook exists" is one condition (#1411) -------------------
+#
+# Three things follow it: the MutatingWebhookConfiguration renders; with the
+# SPIRE-served webhook the controller is told its name
+# (--mutating-webhook-config-name), because its caBundle starts empty and only
+# the controller fills it; and the controller is granted the right to. The RBAC
+# rule used to follow injectPodNdots alone while the other two followed
+# "namespaceInjection OR injectPodNdots", so with namespace injection alone the
+# controller was told to maintain an object it could not read. All three now
+# read `aether.controller.mutatingWebhook`. The tests below are the truth table
+# {SPIRE-served webhook} x {namespaceInjection} x {injectPodNdots}: in every
+# cell the three agree.
+
+# The grant, as the ClusterRole's last two rules.
+WEBHOOK_CA_RBAC = (
+    RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"validatingwebhookconfigurations\"", GET_LIST_WATCH_UPDATE) +
+    RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"mutatingwebhookconfigurations\"", GET_LIST_WATCH_UPDATE) + "$"
+)
+
+# The flag, naming the configuration this release renders, as the container's
+# last argument.
+WEBHOOK_CA_FLAGS = "\\n\\s+- \"--webhook-config-name=release-name-aether-controller-default\"\\n" + COMMENTS + "\\s+- \"--mutating-webhook-config-name=release-name-aether-controller-default-pod-ndots\"\\n\\s+ports:\\n"
+
+# SPIRE-served, and the configuration renders (three cells). Its entries carry
+# no caBundle: `rules:` follows the Service reference directly.
+[
+    helm_template_match_test(
+        name = "aether_mutating_webhook_spire_%s_test" % cell,
+        chart = ":aether",
+        document_patterns = {
+            "ClusterRole/release-name-aether-controller-default": [WEBHOOK_CA_RBAC],
+            "Deployment/release-name-aether-controller": [WEBHOOK_CA_FLAGS],
+            "MutatingWebhookConfiguration/release-name-aether-controller-default-pod-ndots": [
+                WEBHOOKS + "  - name: %s\\n" % first_webhook,
+                "\\n        path: /mutate\\n        port: 443\\n    rules:\\n",
+            ],
+        },
+        opts = [
+            "--set",
+            "controller.webhook.spire=true",
+            "--set",
+            "controller.namespaceInjection=%s" % namespace_injection,
+            "--set",
+            "controller.injectPodNdots=%s" % inject_pod_ndots,
+        ],
+    )
+    for cell, namespace_injection, inject_pod_ndots, first_webhook in [
+        ("both", "true", "true", "namespace-inject\\.pods\\.aether\\.io"),
+        # The cell #1411 is about: no grant was rendered here.
+        ("namespace_injection_only", "true", "false", "namespace-inject\\.pods\\.aether\\.io"),
+        ("ndots_only", "false", "true", "ndots\\.pods\\.aether\\.io"),
+    ]
+]
+
+# SPIRE-served, both off: no configuration, no flag, no grant. The validating
+# configuration is still the controller's to patch (the control string).
+helm_template_absent_test(
+    name = "aether_mutating_webhook_spire_off_test",
+    absent = [
+        "kind: MutatingWebhookConfiguration",
+        "--mutating-webhook-config-name",
+        "mutatingwebhookconfigurations",
+    ],
+    chart = ":aether",
+    control = "resources: [\"validatingwebhookconfigurations\"]",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+        "--set",
+        "controller.namespaceInjection=false",
+        "--set",
+        "controller.injectPodNdots=false",
+    ],
+)
+
+# Self-signed (the default), all four cells: helm bakes the CA into every
+# caBundle, so the controller is given neither flag and neither grant whatever
+# the two switches say. (Whether the configuration itself renders in these
+# cells is aether_webhook_documents_test and the three tests after it.)
+[
+    helm_template_absent_test(
+        name = "aether_mutating_webhook_self_signed_%s_test" % cell,
+        absent = [
+            "--webhook-config-name",
+            "--mutating-webhook-config-name",
+            "validatingwebhookconfigurations",
+            "mutatingwebhookconfigurations",
+        ],
+        chart = ":aether",
+        control = "kind: ValidatingWebhookConfiguration",
+        opts = [
+            "--set",
+            "controller.namespaceInjection=%s" % namespace_injection,
+            "--set",
+            "controller.injectPodNdots=%s" % inject_pod_ndots,
+        ],
+    )
+    for cell, namespace_injection, inject_pod_ndots in [
+        ("both", "true", "true"),
+        ("namespace_injection_only", "true", "false"),
+        ("ndots_only", "false", "true"),
+        ("off", "false", "false"),
+    ]
+]
 
 # Commit-pinned second packaging of the SAME chart (#692).
 #

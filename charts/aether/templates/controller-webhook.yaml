@@ -181,12 +181,12 @@ webhooks:
         operations: ["CREATE", "UPDATE"]
         resources: ["httproutes"]
         scope: "Namespaced"
-{{- if or .Values.controller.namespaceInjection .Values.controller.injectPodNdots }}
+{{- if include "aether.controller.mutatingWebhook" . }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
-  name: {{ include "aether.controller.clusterScopedName" . }}-pod-ndots
+  name: {{ include "aether.controller.mutatingWebhookName" . }}
   labels:
     {{- include "aether.controller.labels" . | nindent 4 }}
 webhooks:
