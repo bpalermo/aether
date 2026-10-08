@@ -139,6 +139,24 @@ check "a stamped chart has no bare tag asked of the registry" \
 	test "$(grep -c '/chart-crds/manifests/' "$TMP/fake/curl.log")" = 1
 check "no waiting when everything is there" test ! -e "$TMP/fake/sleep.log"
 
+# --tags: the same references, each with the tag it was resolved from, for the
+# publish summary (#1378). Run through `env` so the flag is one more argument.
+(
+	cd "$TMP/repo" || exit 99
+	rm -rf "$TMP/fake" && mkdir -p "$TMP/fake"
+	env -u REGISTRY_USERNAME -u REGISTRY_PASSWORD -u IMAGE_REGISTRY_HOST -u REGISTRY_CREDENTIAL_HOST \
+		"PATH=$TMP/bin:$PATH" "FAKE=$TMP/fake" "IMAGE_REGISTRY_BZL=$TMP/registry.bzl" \
+		bash "$SCRIPT" --tags "$sha" >"$TMP/out" 2>"$TMP/err"
+)
+check "--tags: exit 0" test "$?" = 0
+check "--tags: five lines, one per tag" test "$(wc -l <"$TMP/out")" = 5
+check "--tags: aether's commit tag beside its reference" \
+	has "quay.io/acme/chart-aether@$(digest_of "acme/chart-aether:2.4.12-${sha}") 2.4.12-${sha}" "$TMP/out"
+check "--tags: aether's bare tag beside its reference" \
+	has "quay.io/acme/chart-aether@$(digest_of "acme/chart-aether:2.4.12") 2.4.12" "$TMP/out"
+check "--tags: a stamped chart" \
+	has "quay.io/acme/chart-crds@$(digest_of "acme/chart-crds:1.3.0-${sha}") 1.3.0-${sha}" "$TMP/out"
+
 run 1 "a chart tag the registry does not serve fails the script" "$sha" "acme/chart-prober:1.0.4-${sha}"
 check "missing: the error names the tag and the attempts" \
 	says "::error::could not resolve a digest for quay.io/acme/chart-prober:1.0.4-${sha} (6 attempt(s))" "$TMP/err"

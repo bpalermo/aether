@@ -19,7 +19,11 @@
 # A tag that does not resolve within the retries fails the script: a list that
 # is one chart short would sign and attest less than it reads as (#853).
 #
-# Usage: scripts/published-chart-refs.sh <full 40-char sha>
+# Usage: scripts/published-chart-refs.sh [--tags] <full 40-char sha>
+#
+# --tags prints `<reference> <tag>` instead, one line per TAG (so a digest two
+# tags resolve to is listed twice): what scripts/publish-sign.sh reads, so the
+# publish summary can say which tag each digest was pushed under (#1378).
 #
 # Environment: REGISTRY_USERNAME / REGISTRY_PASSWORD (optional; registry-lib.sh),
 #   CHART_REF_ATTEMPTS (default 6), CHART_REF_INTERVAL seconds (default 5).
@@ -29,9 +33,14 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/registry-lib.sh
 . "${here}/registry-lib.sh"
 
+with_tags=0
+if [ "${1:-}" = "--tags" ]; then
+	with_tags=1
+	shift
+fi
 sha="${1:-}"
 if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-	echo "usage: $(basename "$0") <full 40-char commit sha>" >&2
+	echo "usage: $(basename "$0") [--tags] <full 40-char commit sha>" >&2
 	exit 2
 fi
 if [ "${#REGISTRY_CHARTS[@]}" -eq 0 ] || [ -z "${REGISTRY_HOST:-}" ]; then
@@ -69,6 +78,7 @@ resolve() {
 }
 
 refs=()
+tagged=()
 for chart in "${REGISTRY_CHARTS[@]}"; do
 	repo="$(registry_chart_repo "$chart")"
 	version="$(chart_version "$chart")"
@@ -84,7 +94,12 @@ for chart in "${REGISTRY_CHARTS[@]}"; do
 		ref="$(resolve "$repo" "$tag")" || exit 1
 		echo "  ${REGISTRY_HOST}/${repo}:${tag} -> ${ref##*@}" >&2
 		refs+=("$ref")
+		tagged+=("${ref} ${tag}")
 	done
 done
 
-printf '%s\n' "${refs[@]}" | awk '!seen[$0]++'
+if [ "$with_tags" -eq 1 ]; then
+	printf '%s\n' "${tagged[@]}"
+else
+	printf '%s\n' "${refs[@]}" | awk '!seen[$0]++'
+fi
