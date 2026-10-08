@@ -1,5 +1,5 @@
 # Nightly e2e — conformance (GATEWAY-HTTP + MESH-HTTP), waypoint, replicator, uds,
-# uds-csi, l4-routes, eastwest-quic.
+# uds-csi, authz, l4-routes, eastwest-quic, first-install.
 #
 # Consolidates the former conformance.yaml, waypoint-e2e.yaml, and
 # replicator-e2e.yaml into ONE workflow: a single bazel `build` job builds the
@@ -19,7 +19,7 @@
 #
 # ONE Kubernetes everywhere (#1251): every job gets kind + kubectl + the node
 # image from .github/actions/setup-kind, which reads e2e/kind-version.sh — the
-# file the local harnesses source too. The six script-driven jobs share their
+# file the local harnesses source too. The script-driven jobs share their
 # body through .github/actions/run-e2e-script (up -> verify -> diagnostics ->
 # down); each stays its own job rather than a matrix leg so `report-failure`
 # names the suite that failed, `only=<suite>` selects it, and its check name and
@@ -40,7 +40,7 @@ on:
         description: "Run a single job (debugging)"
         type: choice
         default: all
-        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, l4-routes, eastwest-quic]
+        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, l4-routes, eastwest-quic, first-install]
   schedule:
     # Nightly at 04:17 UTC (off the hour to avoid contention).
     - cron: "17 4 * * *"
@@ -519,6 +519,50 @@ jobs:
             docker exec eastwest-quic-control-plane curl -s --max-time 5 http://127.0.0.1:9901/listeners > /tmp/ewq-logs/envoy-listeners.txt 2>&1 || true
             grep -i "east-west QUIC" /tmp/ewq-logs/agent.log > /tmp/ewq-logs/quic-fanout.log 2>&1 || true
 
+  # --- The documented first install, with the chart's default values (#1404).
+  # Every other job passes `namespace.create=false` and a set of feature
+  # switches, so nothing installed the chart the way docs/getting-started.md
+  # says: a default that no helm command could install (#1403) went unnoticed.
+  # ONE kind cluster whose API server enforces Pod Security `baseline` by
+  # default, SPIRE installed as the documented prerequisite, then the documented
+  # commands: the crds chart, `kubectl create namespace` + the three
+  # pod-security labels, one `helm upgrade --install ... --create-namespace`
+  # with default values (only the image coordinates point at this build), and
+  # the same command again. Asserts the docs give those commands, that the
+  # cluster does refuse the agent's kind of pod without the labels, that every
+  # workload becomes Ready with no pod refused, that namespace.create=true for
+  # the release's own namespace fails the render and leaves nothing behind, and
+  # that a release which owns its namespace (the pre-2.4.21 default) keeps it
+  # across an upgrade. Harness: e2e/first-install.sh.
+  first-install:
+    needs: build
+    if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'first-install'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run e2e/first-install.sh
+        uses: ./.github/actions/run-e2e-script
+        with:
+          script: first-install.sh
+          skip-build-var: FIRST_INSTALL_SKIP_BUILD
+          verify-description: Verify the documented first install with default values, one upgrade, and that no upgrade deletes the namespace
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          logs-dir: /tmp/first-install-logs
+          artifact-name: first-install-e2e-logs
+          diagnostics: |
+            mkdir -p /tmp/first-install-logs
+            kubectl --context kind-first-install get pods -A -o wide 2>&1 | tee /tmp/first-install-logs/pods.txt || true
+            kind export logs /tmp/first-install-logs/kind --name first-install || true
+            helm --kube-context kind-first-install list -A -a > /tmp/first-install-logs/releases.txt 2>&1 || true
+            kubectl --context kind-first-install get namespaces -o yaml > /tmp/first-install-logs/namespaces.yaml 2>&1 || true
+            kubectl --context kind-first-install -n aether-system get ds,deploy -o wide > /tmp/first-install-logs/workloads.txt 2>&1 || true
+            kubectl --context kind-first-install -n aether-system get events --sort-by=.lastTimestamp > /tmp/first-install-logs/events.txt 2>&1 || true
+            kubectl --context kind-first-install -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=300 > /tmp/first-install-logs/agent.log 2>&1 || true
+            kubectl --context kind-first-install -n spire-mgmt logs -l app.kubernetes.io/name=agent --all-containers --tail=200 > /tmp/first-install-logs/spire-agent.log 2>&1 || true
+
   # --- Auto-file when the NIGHTLY run fails.
   #
   # This suite sat red for three consecutive nights (07-23..07-25) before anyone
@@ -531,7 +575,7 @@ jobs:
   # rather than filing per night — three duplicate issues is how people learn to
   # ignore them, which is the very failure mode this exists to prevent.
   report-failure:
-    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, l4-routes, eastwest-quic]
+    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, l4-routes, eastwest-quic, first-install]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -564,6 +608,7 @@ jobs:
             authz=${{ needs.authz.result }}
             l4-routes=${{ needs.l4-routes.result }}
             eastwest-quic=${{ needs.eastwest-quic.result }}
+            first-install=${{ needs.first-install.result }}
         run: |
           set -euo pipefail
           title="Nightly e2e failing"
