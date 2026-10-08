@@ -25,6 +25,7 @@
   chart for the `keep` command once.
 */ -}}
 {{- $ns := include "aether.namespace" . -}}
+{{- include "aether.namespace.assertNoneLeftBehind" . -}}
 {{- if .Values.namespace.create -}}
 {{- /* A retry over a failed first install of an older chart gets the message
        with `keep` in it first (see aether.namespace.assertUpgradeKeeps). */ -}}

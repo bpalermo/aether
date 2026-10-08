@@ -90,7 +90,30 @@ Namespace, and is asked for the `keep` command once.
 {{- if and $live (ne (dig "metadata" "annotations" "helm.sh/resource-policy" "" $live | toString) "keep") -}}
 {{- $marker := dig "metadata" "annotations" "aether.io/release-namespace-rendered" "" (lookup "v1" "ServiceAccount" $ns (include "prober.serviceAccountName" .) | default (dict)) | toString -}}
 {{- if ne $marker "false" -}}
-{{- fail (printf "this upgrade of release %q does not render the namespace %q, and the chart cannot see that the previous revision did not either (it was written by a prober chart older than 1.0.6, or it rendered the Namespace). If the previous manifest lists the Namespace, Helm could DELETE it, with every pod in it. Protect the namespace, then run the same command again (without namespace.create=true, if you pass it: a chart cannot create the namespace its own release is stored in): kubectl annotate namespace %s helm.sh/resource-policy=keep (harmless if the release never rendered the namespace, and needed once only)." .Release.Name $ns $ns) -}}
+{{- fail (printf "this upgrade of release %q does not render the namespace %q, and the chart cannot see that the previous revision did not either (it was written by a prober chart older than 1.0.6, or it rendered the Namespace, or a first install failed before it wrote the ServiceAccount). If the previous manifest lists the Namespace, Helm could DELETE it, with every pod in it. Protect the namespace, then run the same command again (without namespace.create=true, if you pass it: a chart cannot create the namespace its own release is stored in): kubectl annotate namespace %s helm.sh/resource-policy=keep (harmless if the release never rendered the namespace, and needed once only)." .Release.Name $ns $ns) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Fails an upgrade that would move the release to another namespace and leave a
+Namespace it owns behind, unprotected (a copy of
+aether.namespace.assertNoneLeftBehind; the reasoning is there). It lists the
+cluster's namespaces, so it is asked only when the values could name a namespace
+other than the release's own (namespace.name set, or namespace.create): an
+operator limited to one namespace, upgrading with the defaults, is not refused
+for a list they may not make. What that leaves out: a release that rendered a
+namespace and is then upgraded with BOTH values back at their defaults.
+*/}}
+{{- define "prober.namespace.assertNoneLeftBehind" -}}
+{{- if and .Release.IsUpgrade (or .Values.namespace.name .Values.namespace.create) -}}
+{{- $ns := include "prober.namespace" . -}}
+{{- range (lookup "v1" "Namespace" "" "" | default (dict)).items | default (list) -}}
+{{- $a := dig "metadata" "annotations" (dict) . | default (dict) -}}
+{{- $name := dig "metadata" "name" "" . -}}
+{{- if and (ne $name $ns) (eq (get $a "meta.helm.sh/release-name" | toString) $.Release.Name) (eq (get $a "meta.helm.sh/release-namespace" | toString) $.Release.Namespace) (ne (get $a "helm.sh/resource-policy" | toString) "keep") -}}
+{{- fail (printf "release %q owns the namespace %q, which this upgrade no longer renders (namespace.name now names another one): Helm would DELETE it, with everything in it. If that is not what you want, protect it and run the same command again: kubectl annotate namespace %s helm.sh/resource-policy=keep (and delete it yourself afterwards if it should go)." $.Release.Name $name $name) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

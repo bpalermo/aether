@@ -1544,7 +1544,12 @@ namespace.name=aether-system`).
 
 **A first install that failed for another reason** (a `--wait` that timed out)
 is retried with the same command: `helm upgrade --install` upgrades the failed
-release in place.
+release in place. If it failed very early, before the agent ServiceAccount was
+written (one of that name already existed, say), the retry may ask once for
+`kubectl annotate namespace aether-system helm.sh/resource-policy=keep`: without
+the mark that ServiceAccount carries, the chart cannot see that the failed
+revision rendered no namespace, and it refuses rather than risk a delete. The
+command is safe to run; nothing is deleted either way.
 
 ### Which workloads a chart upgrade rolls (#1363)
 
@@ -1791,6 +1796,23 @@ them again; `registrar.nodeSpread=required` stops it happening.
 
 #### Chart 2.4.21: the chart no longer creates the release's namespace by default (#1403)
 
+> **Before upgrading a release that an older chart installed with
+> `namespace.create=false`, run this once** (it is what every install that
+> passed `--set namespace.create=false`, or whose values file says so, is):
+>
+> ```bash
+> kubectl annotate namespace aether-system helm.sh/resource-policy=keep
+> # the prober chart, before its first upgrade to 1.0.6 (its default was
+> # already namespace.create=false, so this is every prober release):
+> kubectl annotate namespace <prober namespace> helm.sh/resource-policy=keep
+> ```
+>
+> Without it the first upgrade is **refused** with a message naming that
+> command; nothing is changed and nothing is deleted. Under a GitOps controller
+> that drives Helm the symptom is a release that fails to upgrade, with that
+> message, until the namespace is annotated. A release installed with the old
+> default (`namespace.create=true`) needs nothing.
+
 `namespace.create` defaults to `false`. No workload rolls: no pod template
 changed. What the first upgrade to 2.4.21 does depends on what the chart can
 see on the live namespace, and in no case does it let Helm delete it:
@@ -1860,6 +1882,12 @@ Consequences to know:
 - A release whose only revision is a **failed** first install of an older chart
   gets the same refusal and the same command; see "Recovering from a failed
   first install".
+- Moving a release to another namespace (`namespace.name`, or `edge.namespace`,
+  changed on an upgrade) is refused while a namespace the release owns would be
+  left behind unprotected: Helm would delete it with everything in it. The
+  message names it; annotate it with `helm.sh/resource-policy=keep`, upgrade,
+  and delete the old namespace yourself if it should go. The prober chart
+  checks this when `namespace.name` or `namespace.create` is set.
 
 #### The prober chart (#1372, #1373, #1374)
 

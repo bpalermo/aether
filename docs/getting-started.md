@@ -247,7 +247,9 @@ those three labels. Asking for it in the release's own namespace fails the
 render with the two ways out. See
 [`namespace.create`](./configuration.md#1-chart-values-chartsaether), and
 [`runbook.md`](./runbook.md), "Recovering from a failed first install" if an
-install went wrong.
+install went wrong (a retry after a very early failure may ask once for
+`kubectl annotate namespace aether-system helm.sh/resource-policy=keep`; it is
+safe to run).
 
 > **Upgrading a release installed before chart 2.4.21.** If it was installed
 > with the old default (or `namespace.create=true`): nothing to do, and no value

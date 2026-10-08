@@ -17,6 +17,7 @@
   would still delete it.
 */ -}}
 {{- $ns := include "prober.namespace" . -}}
+{{- include "prober.namespace.assertNoneLeftBehind" . -}}
 {{- if and .Values.namespace.create (eq $ns .Release.Namespace) (not (include "prober.namespace.ownedByRelease" .)) -}}
 {{- /* A retry over a failed first install of an older chart, which was made
        with namespace.create=true, gets the message with `keep` in it first,

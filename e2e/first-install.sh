@@ -51,7 +51,9 @@
 #        (what a namespace rendered by an older chart looks like when its
 #        annotations were lost before the first upgrade); the chart recognises
 #        the namespace by its chart labels and keeps rendering it. The prober
-#        chart gets the same case in (vii).
+#        chart gets the same case in (vii), and one more: a release that
+#        rendered one namespace and is upgraded with namespace.name naming
+#        another is refused until the old namespace is marked keep.
 #   vii. the failed first install — run before (iv), on the empty cluster. A
 #        release that was never deployed, whose failed revision lists a
 #        Namespace it does not own: upgrading it would make Helm delete the
@@ -622,6 +624,33 @@ prober_drift_leg() {
 	kc delete ns "$PROBER_NS" "$PROBER_RELEASE_NS" --wait=true --timeout=120s >/dev/null 2>&1 || true
 }
 
+# A release that rendered namespace A is upgraded with namespace.name=B: A
+# leaves the manifest, and Helm would delete it. Refused, naming the `keep`
+# command for A; after it the upgrade goes through and A is still there.
+prober_migration_leg() {
+	local old="$PROBER_NS" new="$PROBER_NS-moved" uid out
+	local NS="$old"
+	out="$(prober_elsewhere_install --set namespace.create=true 2>&1)" || die "prober: installing with namespace.create=true from another namespace failed: $out"
+	kc annotate namespace "$old" helm.sh/resource-policy- >/dev/null
+	uid="$(ns_uid)"
+	if out="$(prober_elsewhere_install --set namespace.create=true --set "namespace.name=$new" 2>&1)"; then
+		sleep 5
+		die "prober: moving the release to another namespace was NOT refused (the old one now: uid '$(ns_uid)', phase '$(ns_phase)')"
+	fi
+	case "$out" in
+	*"owns the namespace \"$old\""*"kubectl annotate namespace $old helm.sh/resource-policy=keep"*) ;;
+	*) die "prober: the move failed, but not with the command that protects the old namespace: $out" ;;
+	esac
+	kc annotate namespace "$old" helm.sh/resource-policy=keep >/dev/null
+	out="$(prober_elsewhere_install --set namespace.create=true --set "namespace.name=$new" 2>&1)" || die "prober: the move still fails after the old namespace was marked keep: $out"
+	sleep 5
+	[ "$(ns_uid)" = "$uid" ] && [ "$(ns_phase)" = "Active" ] || die "prober: THE OLD NAMESPACE WAS DELETED by the move (uid $uid -> '$(ns_uid)', phase '$(ns_phase)')"
+	[ "$(kc get ns "$new" -o jsonpath='{.status.phase}' 2>/dev/null || true)" = "Active" ] || die "prober: the new namespace $new was not created"
+	ok "prober: a move to another namespace is refused until the old one is marked keep; then both exist (old uid $uid)"
+	hc uninstall prober -n "$PROBER_RELEASE_NS" >/dev/null 2>&1 || true
+	kc delete ns "$old" "$new" "$PROBER_RELEASE_NS" --wait=true --timeout=120s >/dev/null 2>&1 || true
+}
+
 verify_failed_install_guard() {
 	log "vii. a failed first install that lists an unowned Namespace cannot be upgraded into deleting it"
 	# The aether chart does not render without its CRDs (documented step 1; (iv)
@@ -630,6 +659,7 @@ verify_failed_install_guard() {
 	aether_guard_leg
 	prober_guard_leg
 	prober_drift_leg
+	prober_migration_leg
 }
 
 verify() {
