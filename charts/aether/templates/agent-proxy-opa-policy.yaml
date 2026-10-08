@@ -3,7 +3,11 @@
 {{- fail "proxy.authzSidecar.opa.policy is required when the OPA preset is enabled" }}
 {{- end }}
 # Rego policy for the OPA authz sidecar (proposal 027). Mounted read-only at
-# /policy/policy.rego in the sidecar container.
+# /policy/policy.rego in the sidecar container, which watches it (#1383): a
+# change to this ConfigMap is loaded by each running sidecar when its node's
+# kubelet delivers it (asynchronously per node, no guaranteed bound), with no
+# pod restart and no staging. Nothing validates it on the way; see
+# docs/runbook.md, "Changing the OPA policy".
 apiVersion: v1
 kind: ConfigMap
 metadata:

@@ -2,7 +2,7 @@
 # the masking has to recognise, in a template with several documents. Never
 # published. Every Secret value in it starts with FORBIDDEN.
 load("@rules_helm//helm:defs.bzl", "helm_chart")
-load("//bazel/helm:defs.bzl", "helm_pod_template_version_runner", "helm_template_absent_runner", "helm_template_fail_runner", "helm_template_match_runner", "helm_template_match_test", "helm_template_reproducible_runner", "helm_template_value_changes_runner")
+load("//bazel/helm:defs.bzl", "helm_pod_template_version_runner", "helm_template_absent_runner", "helm_template_fail_runner", "helm_template_match_runner", "helm_template_match_test", "helm_template_reproducible_runner", "helm_template_value_changes_runner", "helm_template_value_ignored_runner")
 
 helm_chart(
     name = "secretchart",
@@ -222,6 +222,60 @@ helm_template_value_changes_runner(
     ],
     chart = ":secretchart",
     key = "tls.key:",
+    visibility = RUN_BY,
+)
+
+# The ignored-value test: a template that DOES follow the changed value (the
+# Deployment's replicas, in the template that also holds the Secrets)...
+helm_template_value_ignored_runner(
+    name = "failing_value_ignored_differs",
+    changed_opts = [
+        "--set",
+        "replicas=3",
+    ],
+    chart = ":secretchart",
+    templates = ["templates/multi.yaml"],
+    visibility = RUN_BY,
+)
+
+# ...and changed values that change nothing anywhere, which must not pass.
+helm_template_value_ignored_runner(
+    name = "failing_value_ignored_no_effect",
+    changed_opts = [
+        "--set",
+        "unused=FORBIDDEN-unused-value",
+    ],
+    chart = ":secretchart",
+    templates = ["templates/multi.yaml"],
+    visibility = RUN_BY,
+)
+
+# ...and a render that differs by itself (templates/random.yaml), where a
+# changed whole render would be no evidence that the values did anything.
+helm_template_value_ignored_runner(
+    name = "failing_value_ignored_unreproducible",
+    changed_opts = [
+        "--set",
+        "unused=FORBIDDEN-unused-value",
+    ],
+    chart = ":secretchart",
+    opts = [
+        "--set",
+        "random=true",
+    ],
+    templates = ["templates/multi.yaml"],
+    visibility = RUN_BY,
+)
+
+# ...also when it is the CHANGED values that make it differ by itself.
+helm_template_value_ignored_runner(
+    name = "failing_value_ignored_changed_unreproducible",
+    changed_opts = [
+        "--set",
+        "random=true",
+    ],
+    chart = ":secretchart",
+    templates = ["templates/multi.yaml"],
     visibility = RUN_BY,
 )
 
