@@ -206,14 +206,33 @@ helm upgrade --install aether-crds \
   oci://quay.io/aethermesh/chart-crds \
   --version "$VERSION"
 
-# 2) The system: agent + proxy + mesh-dns + registrar + controller.
+# 2) FIRST INSTALL ONLY: the namespace, marked as belonging to the release so the
+#    chart adopts it (skip this on an upgrade).
+kubectl create namespace aether-system
+kubectl label namespace aether-system app.kubernetes.io/managed-by=Helm
+kubectl annotate namespace aether-system \
+  meta.helm.sh/release-name=aether meta.helm.sh/release-namespace=aether-system
+
+# 3) The system: agent + proxy + mesh-dns + registrar + controller.
 helm upgrade --install aether \
   oci://quay.io/aethermesh/chart-aether \
   --version "$VERSION" \
-  --namespace aether-system --create-namespace \
+  --namespace aether-system \
   --set clusterName=my-cluster \
   --set meshDomain=aether.internal
 ```
+
+The chart owns the `aether-system` namespace (`namespace.create=true`, the
+default): it renders the `Namespace` itself so that it carries the privileged
+pod-security labels the agent needs, which is why the command has no
+`--create-namespace` — with that flag Helm creates the namespace first and the
+install then fails with `namespaces "aether-system" already exists` (#1384).
+Helm also keeps the release record in that namespace, so on a first install it
+has to exist before the chart can create it; step 2 creates it empty with
+Helm's ownership label and annotations, and the chart takes it over and labels
+it. Without step 2 the install fails with `namespaces "aether-system" not
+found`. To create and label the namespace yourself instead, see
+[`namespace.create`](./configuration.md#1-chart-values-chartsaether).
 
 Charts and images are published to the `aethermesh` organisation on quay.io:
 charts as `quay.io/aethermesh/chart-<name>`, images as

@@ -132,9 +132,18 @@ carrying SLSA build provenance as a GitHub artifact attestation; see
 
 ```bash
 helm upgrade --install aether-crds oci://quay.io/aethermesh/chart-crds --version <X.Y.Z>-<full git sha>
+# First install only: the namespace, marked so the chart adopts it.
+kubectl create namespace aether-system
+kubectl label namespace aether-system app.kubernetes.io/managed-by=Helm
+kubectl annotate namespace aether-system \
+  meta.helm.sh/release-name=aether meta.helm.sh/release-namespace=aether-system
 helm upgrade --install aether oci://quay.io/aethermesh/chart-aether --version <X.Y.Z>-<full git sha> \
-  -n aether-system --create-namespace
+  -n aether-system
 ```
+
+The chart owns the `aether-system` namespace (it sets the pod-security labels the
+agent needs), so the command passes no `--create-namespace`; see
+[Getting started](docs/getting-started.md#install).
 
 The charts moved from ghcr.io at **1.0.0** — a major bump, because the default
 image repositories changed; see [Getting started](docs/getting-started.md) for the
