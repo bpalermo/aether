@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -199,7 +200,9 @@ func TestEnvoyArgAllowsWhatIsNotReserved(t *testing.T) {
 // last one, it refuses the command line (#1375).
 func TestEnvoyArgConcurrencyOnceOnly(t *testing.T) {
 	require.NoError(t, checkEnvoyArgs([]string{"-l", "info", "--concurrency", "2"}))
-	require.NoError(t, checkEnvoyArgs([]string{"--concurrency=2", "-l", "info"}))
+	// Until #1407 this line required --concurrency=2 to be accepted. The pinned
+	// Envoy does not parse that spelling, so one of them is refused as well.
+	require.Error(t, checkEnvoyArgs([]string{"--concurrency=2", "-l", "info"}))
 
 	for name, args := range map[string][]string{
 		"separate, separate":    {"--concurrency", "2", "-l", "info", "--concurrency", "4"},
@@ -223,15 +226,109 @@ func TestEnvoyArgConcurrencyOnceOnly(t *testing.T) {
 	}
 }
 
+// TestEnvoyArgRejectsSpellingsEnvoyDoesNotParse is #1407. The pinned Envoy
+// accepts a flag and its value as two arguments only; "--flag=value",
+// "-f=value" and "-fvalue" answer "Couldn't find match for argument" on every
+// fork. --envoy-arg=--concurrency=2 used to pass this check. Each is a startup
+// error that shows the two items to pass instead.
+func TestEnvoyArgRejectsSpellingsEnvoyDoesNotParse(t *testing.T) {
+	for _, tc := range []struct {
+		arg, twoItems string
+	}{
+		{"--concurrency=2", "--envoy-arg=--concurrency --envoy-arg=2"},
+		{"--service-node=n1", "--envoy-arg=--service-node --envoy-arg=n1"},
+		{"--service-cluster=aether-proxy", "--envoy-arg=--service-cluster --envoy-arg=aether-proxy"},
+		{"--drain-strategy=immediate", "--envoy-arg=--drain-strategy --envoy-arg=immediate"},
+		{"--log-level=debug", "--envoy-arg=--log-level --envoy-arg=debug"},
+		{"-l=debug", "--envoy-arg=-l --envoy-arg=debug"},
+		{"-ldebug", "--envoy-arg=-l --envoy-arg=debug"},
+		{"--stats-tag=a:b", "--envoy-arg=--stats-tag --envoy-arg=a:b"},
+	} {
+		t.Run(tc.arg, func(t *testing.T) {
+			err := checkEnvoyArgs([]string{tc.arg})
+			require.Error(t, err, "%s must be refused at startup: the pinned Envoy does not parse it", tc.arg)
+			assert.Contains(t, err.Error(), tc.arg, "the error must name the argument")
+			assert.Contains(t, err.Error(), tc.twoItems, "the error must show the accepted two-item form")
+		})
+	}
+	// The accepted spelling of the same flags.
+	require.NoError(t, checkEnvoyArgs([]string{
+		"--concurrency", "2", "--service-node", "n1", "--service-cluster", "aether-proxy",
+		"--drain-strategy", "immediate", "-l", "debug", "--stats-tag", "a:b=c",
+	}))
+}
+
+// TestEnvoyArgRejectsABadConcurrencyValue is #1408: a lone --concurrency with a
+// missing or unusable value passed this check and surfaced only at a handoff,
+// as "successor worker count unknown". What the pinned Envoy does with each
+// value is recorded on hotrestart.parseConcurrencyValue.
+func TestEnvoyArgRejectsABadConcurrencyValue(t *testing.T) {
+	for name, args := range map[string][]string{
+		"last argument, no value": {"-l", "info", "--concurrency"},
+		"not a number":            {"--concurrency", "x"},
+		"negative":                {"--concurrency", "-1"},
+		"value is another flag":   {"--concurrency", "--skip-hot-restart-parent-stats"},
+		"value is a short flag":   {"--concurrency", "-l", "info"},
+		"empty":                   {"--concurrency", ""},
+		"fraction":                {"--concurrency", "1.5"},
+		"above uint32":            {"--concurrency", "4294967296"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := checkEnvoyArgs(args)
+			require.Error(t, err, "%v must be refused at startup", args)
+			assert.Contains(t, err.Error(), "--concurrency")
+			assert.Contains(t, err.Error(), "proxy.concurrency", "the error must name the chart value that owns the flag")
+		})
+	}
+	// 0 is not an error: Envoy runs one worker for it.
+	require.NoError(t, checkEnvoyArgs([]string{"--concurrency", "0"}))
+	require.NoError(t, checkEnvoyArgs([]string{"--concurrency", "4"}))
+}
+
+// TestEnvoyArgRejectsFlagsThatBreakAHandoff is #1409: Envoy flags the
+// supervisor does not pass, so they are no repeat, but that defeat what it
+// controls. --use-dynamic-base-id makes Envoy ignore the fixed --base-id (and
+// Envoy refuses it at any epoch above 0); the others are classified in
+// hotrestart.reservedEnvoyFlags. Each error says why.
+func TestEnvoyArgRejectsFlagsThatBreakAHandoff(t *testing.T) {
+	for flag, why := range map[string]string{
+		"--use-dynamic-base-id": "proxy.hotRestart.baseId",
+		"--disable-hot-restart": "neither drained nor stopped",
+		"--socket-path":         "cannot hand off",
+		"--hot-restart-version": "without serving",
+		"--version":             "without serving",
+		"--help":                "without serving",
+		"-h":                    "without serving",
+		"--":                    "ignores every argument after it",
+		"--ignore_rest":         "ignores every argument after it",
+	} {
+		t.Run(flag, func(t *testing.T) {
+			err := checkEnvoyArgs([]string{"-l", "info", flag, "x"})
+			require.Error(t, err, "%s must be refused at startup", flag)
+			assert.Contains(t, err.Error(), flag, "the error must name the flag")
+			assert.Contains(t, err.Error(), why, "the error must say why")
+		})
+	}
+	// Left alone on purpose: --base-id-path only writes the base id to a file,
+	// and --skip-hot-restart-parent-stats is a chart value.
+	require.NoError(t, checkEnvoyArgs([]string{
+		"--base-id-path", "/tmp/base-id", "--skip-hot-restart-parent-stats", "--skip-hot-restart-on-no-parent",
+	}))
+}
+
 // envoyArgItem matches one `- "--envoy-arg=<token>"` list item of the template.
 var envoyArgItem = regexp.MustCompile(`(?m)^\s*-\s*"--envoy-arg=(.*)"\s*$`)
 
-// TestChartEnvoyArgsPassTheCheck: every --envoy-arg the chart can render — all
-// the conditional branches at once, which is more than any one set of values
-// produces — goes through the startup check. A chart that passed a flag the
-// supervisor reserves, or --concurrency twice, would take down every proxy pod
-// at its next start; this fails first.
-func TestChartEnvoyArgsPassTheCheck(t *testing.T) {
+// chartEnvoyArgs returns every --envoy-arg item of the DaemonSet template, all
+// conditional branches at once, which is more than any one set of values
+// produces.
+//
+// The items are template source, not a render. That only matters for the value
+// after --concurrency, which the check reads (#1408): the template action
+// there (`{{ . }}`, the validated proxy.concurrency) is replaced by a number,
+// as a render would. Every other value is an opaque string to the check.
+func chartEnvoyArgs(t *testing.T) []string {
+	t.Helper()
 	raw, err := os.ReadFile(findRepoFile(t, chartDaemonSet))
 	require.NoError(t, err, "reading the proxy DaemonSet template")
 
@@ -243,6 +340,22 @@ func TestChartEnvoyArgsPassTheCheck(t *testing.T) {
 	// passes at least -l, the three --service-* pairs, --drain-strategy and the
 	// optional --concurrency.
 	require.GreaterOrEqual(t, len(args), 12, "only %d --envoy-arg items found in %s: %v", len(args), chartDaemonSet, args)
+
+	at := slices.Index(args, "--concurrency")
+	require.GreaterOrEqual(t, at, 0, "the chart's proxy.concurrency pass-through was not scanned")
+	require.Less(t, at+1, len(args), "the chart passes --concurrency as its last --envoy-arg, with no value")
+	require.Regexp(t, `^\{\{.*\}\}$`, args[at+1],
+		"the item after --concurrency is no longer a template action; this test stands a number in for it")
+	args[at+1] = "2"
+	return args
+}
+
+// TestChartEnvoyArgsPassTheCheck: every --envoy-arg the chart can render goes
+// through the startup check. A chart that passed a flag the supervisor
+// reserves, --concurrency twice, or a flag and its value in one item, would
+// take down every proxy pod at its next start; this fails first.
+func TestChartEnvoyArgsPassTheCheck(t *testing.T) {
+	args := chartEnvoyArgs(t)
 	require.Contains(t, args, "--concurrency", "the chart's proxy.concurrency pass-through was not scanned")
 
 	require.NoError(t, checkEnvoyArgs(args), "the chart renders an --envoy-arg the supervisor refuses: %v", args)
@@ -251,4 +364,27 @@ func TestChartEnvoyArgsPassTheCheck(t *testing.T) {
 	// Control: the same list with a reserved flag added is refused, so the
 	// assertion above can fail.
 	require.Error(t, checkEnvoyArgs(append(args, "--base-id", "1")))
+}
+
+// TestChartEnvoyArgFlagsAreAllowedOnce: the pinned Envoy refuses any flag given
+// twice, so each flag the chart passes through --envoy-arg can be passed once
+// and no more. This reads the flags off the template, so a flag the chart
+// starts passing has to be added to hotrestart.onceEnvoyFlags (or be reserved)
+// before a second one of it can reach a fork.
+func TestChartEnvoyArgFlagsAreAllowedOnce(t *testing.T) {
+	args := chartEnvoyArgs(t)
+	flags := 0
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		flags++
+		err := checkEnvoyArgs(append(slices.Clone(args), a, "x"))
+		require.Error(t, err, "the chart passes %s; a second one must be refused at startup", a)
+		assert.Contains(t, err.Error(), a)
+		assert.Contains(t, err.Error(), "more than once")
+	}
+	// Control: -l, three --service-*, --drain-strategy, --concurrency and
+	// --skip-hot-restart-parent-stats.
+	require.GreaterOrEqual(t, flags, 7, "only %d flags found among the chart's --envoy-arg items: %v", flags, args)
 }

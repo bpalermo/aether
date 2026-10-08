@@ -240,7 +240,9 @@ func TestConcurrencyArg(t *testing.T) {
 		{args: nil},
 		{args: []string{"-l", "info"}},
 		{args: []string{"--concurrency", "2"}, n: 2, explicit: true},
-		{args: []string{"--concurrency=4"}, n: 4, explicit: true},
+		// The pinned Envoy does not parse --concurrency=N (#1407), so no Envoy
+		// runs with that count. Until #1407 this case expected 4.
+		{args: []string{"--concurrency=4"}, wantErr: true},
 		{args: []string{"-l", "info", "--concurrency", "2", "--service-node", "n1"}, n: 2, explicit: true},
 		// Envoy refuses a repeated --concurrency; it does not keep the last
 		// (#1375). So there is no worker count to report.
@@ -255,8 +257,27 @@ func TestConcurrencyArg(t *testing.T) {
 		{args: []string{"--concurrency", "--concurrency"}, wantErr: true, repeated: true},
 		{args: []string{"--concurrency"}, wantErr: true},
 		{args: []string{"-l", "info", "--concurrency"}, wantErr: true},
-		{args: []string{"--concurrency", "0"}, wantErr: true},
+		// Envoy runs ONE worker for 0 (max(1, value); measured, #1408). Until
+		// #1408 this case expected an error.
+		{args: []string{"--concurrency", "0"}, n: 1, explicit: true},
 		{args: []string{"--concurrency=x"}, wantErr: true},
+		{args: []string{"--concurrency", "02"}, n: 2, explicit: true},
+		// What Envoy refuses, or reads as a count the supervisor cannot know
+		// (parseConcurrencyValue has the measurements).
+		{args: []string{"--concurrency", "x"}, wantErr: true},
+		{args: []string{"--concurrency", ""}, wantErr: true},
+		{args: []string{"--concurrency", "-1"}, wantErr: true},
+		{args: []string{"--concurrency", "+2"}, wantErr: true},
+		{args: []string{"--concurrency", " 2"}, wantErr: true},
+		{args: []string{"--concurrency", "2 "}, wantErr: true},
+		{args: []string{"--concurrency", "1.5"}, wantErr: true},
+		{args: []string{"--concurrency", "4294967296"}, wantErr: true},
+		{args: []string{"--concurrency", "2147483648"}, wantErr: true},
+		{args: []string{"--concurrency", "2147483647"}, n: 2147483647, explicit: true},
+		// The next argument is the value even when it is a flag: Envoy reads
+		// "-l" as the count and refuses it.
+		{args: []string{"--concurrency", "-l", "info"}, wantErr: true},
+		{args: []string{"--concurrency", "--skip-hot-restart-parent-stats"}, wantErr: true},
 	} {
 		n, explicit, err := concurrencyArg(tc.args)
 		if tc.wantErr {
