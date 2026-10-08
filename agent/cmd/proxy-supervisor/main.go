@@ -30,12 +30,15 @@ import (
 	"os"
 
 	"aethermesh.dev/agent/internal/supervisorcmd"
+	"aethermesh.dev/common/buildinfo"
 	"aethermesh.dev/common/signals"
 )
 
-// Version is set at build time via -ldflags (Bazel x_defs). It becomes the OTel
-// service.version on the supervisor's pushed hot-restart metrics.
-var Version = "dev"
+// Version becomes the OTel service.version on the supervisor's pushed
+// hot-restart metrics and what `--version` prints: the running binary's own GNU
+// build ID, read from its ELF (//common/buildinfo), not a value linked in from
+// the commit (#1378).
+var Version = buildinfo.Version()
 
 func main() {
 	// //common/signals rather than ctrl.SetupSignalHandler() (#777): identical

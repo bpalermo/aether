@@ -735,6 +735,50 @@ the full agent, so it gets the slim `/mesh-dns` binary alone (~7Mi vs the agent'
 The `controller` image is not in `load-all`; load it with
 `bazel run //controller/cmd/controller:image_load`.
 
+### Which build is this binary (`--version`, #1378, #1429)
+
+Every component with a command line answers `--version` and exits without
+starting anything: `agent`, `registrar`, `controller`, `prober`,
+`proxy-supervisor`, `mesh-dns` and `uds-csi`. The stdlib-only probe binaries
+(`proxy-ready`, `agent-ready`, `mesh-dns-ready`, `identity-ready`) and the CNI
+plugin have no such flag.
+
+```console
+$ kubectl -n aether-system exec ds/aether-agent -c agent -- /agent --version
+agent build-id bbf3ba6860da40c812de4d2317532ec7d5f17ec0
+package aethermesh.dev/agent/cmd/agent
+go1.27.1 linux/amd64
+```
+
+The build ID is the binary's GNU build-ID note, which `//bazel/buildid` derives
+from the binary's own bytes. It is the same value:
+
+- `readelf -n <binary>` prints as `Build ID`;
+- the component reports as OTel `service.version` (and `uds-csi` as its CSI
+  `vendor_version`, visible in its `starting` log line);
+- the continuous profiler files that binary's symbols under;
+- `make check-build-id` prints for a checkout.
+
+It is **not** a commit. No binary has the commit linked in any more: a version
+taken from the commit made every binary, and so every image, different from one
+commit to the next even when its code had not changed. Two consequences:
+
+- Two pods reporting the same `service.version` run byte-identical binaries,
+  whatever commits their images were published from; a `service.version` that
+  changes across a deploy means that component's code really changed.
+- To go from a build ID to source, find the commit whose build produced it:
+  `make check-build-id` at a candidate commit, or the image's provenance (see
+  [verifying-releases.md](verifying-releases.md)). The chart's `appVersion`
+  still names the commit the chart was packaged from.
+
+There is no module line because a Bazel build records the main package and
+every dependency's version, but no version for the main module itself
+(`go version -m <binary>` shows the same). A binary run outside an image
+(`bazel run //agent/cmd/agent`) reports the build ID the Go linker wrote, which
+under rules_go is one constant shared by every binary; only the binaries inside
+an image have a content-derived one. A binary with no readable note reports
+`dev`.
+
 ---
 
 ## 6. Local multi-cluster end-to-end (proposal 026)

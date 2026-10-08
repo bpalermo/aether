@@ -14,6 +14,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//agent/internal/supervisorcmd",
+        "//common/buildinfo",
         "//common/signals",
     ],
 )
@@ -22,9 +23,6 @@ go_binary(
     name = "proxy-supervisor",
     embed = [":proxy-supervisor_lib"],
     visibility = ["//visibility:public"],
-    x_defs = {
-        "aethermesh.dev/agent/cmd/proxy-supervisor.Version": "{STABLE_GIT_VERSION}",
-    },
 )
 
 # Dedicated image for the aether-proxy pod's install-supervisor initContainer
