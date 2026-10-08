@@ -3420,6 +3420,190 @@ helm_template_absent_test(
     ],
 )
 
+# --- Who creates the release namespace (#1403) --------------------------------
+#
+# Helm stores the release record in the release namespace before it creates
+# anything the chart renders, so a chart that renders that same Namespace cannot
+# be installed by any one helm command: `--create-namespace` collides with it
+# ("already exists"), without the flag there is nowhere to store the release
+# ("not found"), and a namespace made with kubectl is refused ("invalid
+# ownership metadata"). So namespace.create defaults to false, and true is only
+# for a release stored in a DIFFERENT namespace.
+#
+# These renders have no cluster, so `lookup` finds nothing: they cover what a
+# first install renders. The other half (a live Namespace this release already
+# owns keeps being rendered, whatever namespace.create says, so an upgrade
+# cannot delete it) needs a cluster and is e2e/first-install.sh.
+NAMESPACE_CONFLICT = "is the namespace this release is stored in"
+
+# The default: no Namespace, wherever the release is stored.
+helm_template_absent_test(
+    name = "aether_namespace_default_not_rendered_test",
+    absent = ["kind: Namespace"],
+    chart = ":aether",
+    control = "kind: DaemonSet",
+    opts = [
+        "--namespace",
+        "aether-system",
+    ],
+)
+
+# The combination no helm command can install fails the render, naming the ways
+# out...
+[
+    helm_template_fail_test(
+        name = "aether_namespace_create_release_namespace_fails_%s_test" % part,
+        chart = ":aether",
+        expected_message = message,
+        opts = [
+            "--namespace",
+            "aether-system",
+            "--set",
+            "namespace.create=true",
+        ],
+    )
+    for part, message in [
+        (
+            "reason",
+            "namespace.create=true cannot create \"aether-system\": it " + NAMESPACE_CONFLICT,
+        ),
+        ("way_out_default", "leave namespace.create at its default (false)"),
+        ("way_out_labels", "kubectl label namespace aether-system pod-security.kubernetes.io/enforce=privileged"),
+        ("way_out_elsewhere", "store the release in another namespace"),
+    ]
+]
+
+# ...also when namespace.name spells the release namespace out.
+helm_template_fail_test(
+    name = "aether_namespace_create_named_release_namespace_fails_test",
+    chart = ":aether",
+    expected_message = "namespace.create=true cannot create \"mesh-ops\": it " + NAMESPACE_CONFLICT,
+    opts = [
+        "--namespace",
+        "mesh-ops",
+        "--set",
+        "namespace.create=true",
+        "--set",
+        "namespace.name=mesh-ops",
+    ],
+)
+
+# The one case namespace.create=true works: the release is stored somewhere
+# else. The Namespace renders with the privileged pod-security labels the agent,
+# proxy, CNI and CSI pods need, and with helm.sh/resource-policy: keep, so no
+# later change of values (or of this chart's default) can make Helm delete the
+# namespace and every pod in it.
+helm_template_match_test(
+    name = "aether_namespace_create_other_release_namespace_test",
+    chart = ":aether",
+    document_patterns = {
+        "Namespace/aether-system": [
+            "\\nkind: Namespace\\nmetadata:\\n  name: aether-system\\n  annotations:\\n    helm\\.sh/resource-policy: keep\\n  labels:\\n    pod-security\\.kubernetes\\.io/audit: privileged\\n    pod-security\\.kubernetes\\.io/enforce: privileged\\n    pod-security\\.kubernetes\\.io/warn: privileged\\n",
+            "\\n    app\\.kubernetes\\.io/managed-by: Helm\\n",
+        ],
+        # Everything else still lands in the created namespace.
+        "DaemonSet/release-name-aether-agent": ["\\nmetadata:\\n  name: release-name-aether-agent\\n  namespace: aether-system\\n"],
+    },
+    opts = [
+        "--namespace",
+        "releases",
+        "--set",
+        "namespace.create=true",
+        "--set",
+        "namespace.name=aether-system",
+    ],
+)
+
+# The agent ServiceAccount records whether the render included the Namespace.
+# The next upgrade reads it back (aether.namespace.assertUpgradeKeeps): "false"
+# says the stored manifest holds no Namespace for Helm to delete, so a first
+# install of THIS chart that failed for an unrelated reason is retried with the
+# same command, while a failed first install of an older chart (no annotation)
+# is refused until the namespace is protected.
+[
+    helm_template_match_test(
+        name = "aether_namespace_rendered_marker_%s_test" % name,
+        chart = ":aether",
+        document_patterns = {
+            "ServiceAccount/release-name-aether-agent": [
+                "\\nmetadata:\\n  name: release-name-aether-agent\\n  namespace: aether-system\\n",
+                "\\n    aether\\.io/release-namespace-rendered: \"%s\"" % rendered,
+            ],
+        },
+        opts = opts,
+    )
+    for name, rendered, opts in [
+        (
+            "default",
+            "false",
+            [
+                "--namespace",
+                "aether-system",
+            ],
+        ),
+        (
+            "created",
+            "true",
+            [
+                "--namespace",
+                "releases",
+                "--set",
+                "namespace.create=true",
+                "--set",
+                "namespace.name=aether-system",
+            ],
+        ),
+    ]
+]
+
+# Guard: the edge namespace is a second Namespace the chart creates, in which
+# the release is NOT stored, so it renders as before (baseline, no keep) with
+# the release in aether-system and namespace.create at its default...
+helm_template_match_test(
+    name = "aether_edge_namespace_still_rendered_test",
+    chart = ":aether",
+    document_patterns = {
+        "Namespace/aether-ingress": [
+            "\\nkind: Namespace\\nmetadata:\\n  name: aether-ingress\\n  labels:\\n",
+            "\\n    pod-security\\.kubernetes\\.io/enforce: baseline\\n    pod-security\\.kubernetes\\.io/audit: baseline\\n    pod-security\\.kubernetes\\.io/warn: baseline\\n",
+        ],
+    },
+    opts = [
+        "--namespace",
+        "aether-system",
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+# ...and it is the only Namespace in that render: nothing privileged.
+helm_template_absent_test(
+    name = "aether_edge_namespace_is_the_only_namespace_test",
+    absent = ["pod-security.kubernetes.io/enforce: privileged"],
+    chart = ":aether",
+    control = "kind: Namespace",
+    opts = [
+        "--namespace",
+        "aether-system",
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+# The same trap one namespace over: a release stored in the edge namespace
+# cannot create it either.
+helm_template_fail_test(
+    name = "aether_edge_namespace_release_namespace_fails_test",
+    chart = ":aether",
+    expected_message = "edge.namespaceCreate=true cannot create \"aether-ingress\": it " + NAMESPACE_CONFLICT,
+    opts = [
+        "--namespace",
+        "aether-ingress",
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
 # Commit-pinned second packaging of the SAME chart (#692).
 #
 # chart_push tags with the packaged chart's `version:`, so the chart above

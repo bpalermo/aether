@@ -1,8 +1,11 @@
 {{- if and .Values.edge.enabled .Values.edge.namespaceCreate }}
+{{- /* A release stored in the edge namespace cannot create it either (#1403). */ -}}
+{{- $ns := include "aether.edge.namespace" . -}}
+{{- include "aether.namespace.assertCreatable" (dict "ctx" . "name" $ns "value" "edge.namespaceCreate" "waysOut" (printf "set edge.namespaceCreate=false and create the namespace yourself (label it pod-security.kubernetes.io/enforce=baseline), give the edge its own namespace (edge.namespace), or store the release in another namespace (helm -n <other> ...; not %s)" $ns)) }}
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ include "aether.edge.namespace" . }}
+  name: {{ $ns }}
   labels:
     # The edge is an unprivileged ingress gateway (runs non-root, drops ALL caps,
     # adds only NET_BIND_SERVICE) — baseline PSA, unlike the privileged

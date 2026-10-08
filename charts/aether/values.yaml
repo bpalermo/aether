@@ -28,10 +28,29 @@ nameOverride: ""
 fullnameOverride: ""
 
 # Namespace all aether resources deploy into. Defaults to the release namespace.
-# Rendered with privileged pod-security labels (required by the agent's
-# hostNetwork + NET_ADMIN privileges) when create is true.
+#
+# create: false (the default since 2.4.21, #1403): the chart does not render the
+# Namespace. Create it with `helm ... --create-namespace` or beforehand, and on a
+# cluster that enforces Pod Security admission label it yourself BEFORE the
+# install, or the agent, proxy, mesh-dns and uds-csi pods are refused (they need
+# hostNetwork, hostPath and NET_ADMIN):
+#   kubectl label namespace aether-system \
+#     pod-security.kubernetes.io/enforce=privileged \
+#     pod-security.kubernetes.io/audit=privileged \
+#     pod-security.kubernetes.io/warn=privileged
+#
+# create: true renders the Namespace with those labels. It works ONLY when the
+# release is stored in a different namespace (`helm -n <other> --set
+# namespace.name=aether-system`): Helm writes the release record into the release
+# namespace before it creates anything the chart renders, so for the release's
+# own namespace the render fails with the ways out.
+#
+# Upgrading a release that was installed while this defaulted to true: nothing
+# to do. A Namespace the release already owns is rendered whatever this says, and
+# carries helm.sh/resource-policy: keep, so Helm never deletes it (not on an
+# upgrade, and not on `helm uninstall`: delete it yourself then).
 namespace:
-  create: true
+  create: false
   name: ""
 
 # Cluster name passed to the agent and registrar (`--cluster-name`).

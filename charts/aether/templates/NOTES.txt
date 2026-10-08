@@ -7,6 +7,20 @@ System config:
 
 Components: agent (+ Envoy proxy), registrar, controller.
 CRD: install //charts/crds first (the MeshConfig CRD).
+{{- $ns := include "aether.namespace" . }}
+{{- $enforce := dig "metadata" "labels" "pod-security.kubernetes.io/enforce" "" (lookup "v1" "Namespace" "" $ns | default (dict)) }}
+{{- if and (eq (include "aether.namespace.rendered" .) "false") (ne $enforce "privileged") }}
+
+NAMESPACE NOTE: "{{ $ns }}" was not labelled
+pod-security.kubernetes.io/enforce=privileged when this was rendered, and the
+chart does not create or label the release's namespace (#1403). On a cluster
+that enforces Pod Security admission the agent, proxy, mesh-dns and uds-csi
+pods are refused until you run:
+
+  kubectl label namespace {{ $ns }} pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
+
+Refusals show as: kubectl -n {{ $ns }} get events --field-selector reason=FailedCreate
+{{- end }}
 {{- if .Values.spire.enabled }}
 
 UPGRADE ORDER (issue #815, applies to chart 0.92.28 and newer):

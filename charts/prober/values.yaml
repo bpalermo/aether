@@ -5,6 +5,14 @@ fullnameOverride: ""
 
 # Namespace the prober DaemonSet is deployed into. Must be a namespace whose pods
 # are mesh-managed so the CNI plumbs the local egress listener (e.g. aether-test).
+# Defaults to the release namespace; create it with `--create-namespace` or
+# beforehand.
+# create: true renders the Namespace, which works ONLY when the release is
+# stored in a different namespace (`helm -n <other> --set namespace.name=...`).
+# For the release's own namespace it fails the render (#1405): Helm writes the
+# release record there before it creates anything the chart renders. A Namespace
+# the chart rendered carries helm.sh/resource-policy: keep and is never deleted
+# by Helm, not by an upgrade and not by `helm uninstall`.
 namespace:
   create: false
   name: ""

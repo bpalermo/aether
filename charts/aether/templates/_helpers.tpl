@@ -21,6 +21,113 @@ registrar and controller objects get distinct names within one release.
 {{- end -}}
 
 {{/*
+"true" when the live Namespace `name` belongs to THIS Helm release, i.e. carries
+the two ownership annotations Helm stamps on every object it creates or adopts.
+That is the case for a release installed while namespace.create still defaulted
+to true (chart 2.4.x and older).
+
+It is what makes the namespace templates upgrade-safe (#1403): a Namespace the
+release owns is in the release's stored manifest, and Helm DELETES an object
+that was in the previous manifest and is not in the new one — here, the
+namespace with every aether pod in it. So an owned Namespace keeps being
+rendered whatever the values say.
+
+`lookup` returns nothing without a cluster (`helm template`, a client-side
+`--dry-run`), so this is "" there: such a render shows what a first install
+would get.
+Usage: include "aether.namespace.ownedByRelease" (dict "ctx" . "name" $ns)
+*/}}
+{{- define "aether.namespace.ownedByRelease" -}}
+{{- $annotations := dig "metadata" "annotations" (dict) (lookup "v1" "Namespace" "" .name | default (dict)) | default (dict) -}}
+{{- if and (eq (get $annotations "meta.helm.sh/release-name" | toString) .ctx.Release.Name) (eq (get $annotations "meta.helm.sh/release-namespace" | toString) .ctx.Release.Namespace) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+"true" or "false": does this render include the release's Namespace? True when
+namespace.create asks for it, or when the live one already belongs to the
+release (see aether.namespace.ownedByRelease). Also stamped on the agent
+ServiceAccount as aether.io/release-namespace-rendered, which
+aether.namespace.assertUpgradeKeeps reads on the next upgrade.
+*/}}
+{{- define "aether.namespace.rendered" -}}
+{{- if or .Values.namespace.create (include "aether.namespace.ownedByRelease" (dict "ctx" . "name" (include "aether.namespace" .))) -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
+Fails an upgrade that could make Helm delete the namespace although this render
+does not include it (#1403).
+
+The one way that happens: the release has NO deployed revision, and its failed
+revision lists the Namespace without owning it. That is what a first install of
+a chart older than 2.4.21 with `--create-namespace` leaves behind (Helm made the
+namespace, the chart's own Namespace then failed with "already exists", and
+everything else, pods included, was created anyway). With no deployed revision
+Helm upgrades from the failed one, finds the Namespace gone from the new
+manifest, and deletes it: ownership annotations are not consulted for a delete,
+only helm.sh/resource-policy on the live object.
+
+A render cannot read the previous manifest, so this asks what it can see:
+  - an upgrade, of a release none of whose revisions is `deployed` (Helm's
+    release Secrets carry the status as a label; another storage driver shows
+    no Secret and is not judged);
+  - the live namespace is neither owned by the release (then it is rendered)
+    nor already marked helm.sh/resource-policy: keep;
+  - the agent ServiceAccount was not last written by a chart that itself left
+    the Namespace out (aether.io/release-namespace-rendered: "false"). That
+    last test lets a first install of THIS chart that failed for any other
+    reason, a `--wait` timeout say, be retried with the same command.
+Then it stops, with the one command that makes the upgrade safe.
+Usage: include "aether.namespace.assertUpgradeKeeps" .
+*/}}
+{{- define "aether.namespace.assertUpgradeKeeps" -}}
+{{- $ns := include "aether.namespace" . -}}
+{{- $live := lookup "v1" "Namespace" "" $ns | default (dict) -}}
+{{- if and .Release.IsUpgrade $live (ne (dig "metadata" "annotations" "helm.sh/resource-policy" "" $live | toString) "keep") -}}
+{{- $revisions := 0 -}}
+{{- $deployed := 0 -}}
+{{- range (lookup "v1" "Secret" .Release.Namespace "" | default (dict)).items | default (list) -}}
+{{- if and (eq (toString .type) "helm.sh/release.v1") (eq (dig "metadata" "labels" "name" "" . | toString) $.Release.Name) -}}
+{{- $revisions = add1 $revisions -}}
+{{- if eq (dig "metadata" "labels" "status" "" . | toString) "deployed" -}}
+{{- $deployed = add1 $deployed -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $marker := dig "metadata" "annotations" "aether.io/release-namespace-rendered" "" (lookup "v1" "ServiceAccount" $ns (include "aether.agent.serviceAccountName" .) | default (dict)) | toString -}}
+{{- if and (gt $revisions 0) (eq $deployed 0) (ne $marker "false") -}}
+{{- fail (printf "release %q has never been deployed successfully (none of its %d revisions is 'deployed'), and the failed first install of an aether chart older than 2.4.21 lists the namespace %q in its manifest: this render does not include that Namespace, so Helm could DELETE it, with every pod in it, on this upgrade. Protect the namespace, then run the same command again: kubectl annotate namespace %s helm.sh/resource-policy=keep (and label it for Pod Security admission: kubectl label namespace %s pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged). See docs/runbook.md, \"Recovering from a failed first install\"." .Release.Name $revisions $ns $ns $ns) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Fails the render when the chart is asked to create the namespace its own release
+is stored in (#1403). Helm writes the release record into the release namespace
+before it creates anything the chart renders, so that combination cannot be
+installed by any helm command: with --create-namespace the chart's Namespace
+collides with the one Helm just made ("already exists"), without it there is
+nowhere to put the release ("not found"), and a namespace made with kubectl is
+refused ("invalid ownership metadata"). Failing here says so, with the ways out,
+instead of leaving a failed release behind.
+
+A Namespace the release already owns is the exception (an install from before
+the default changed, or a namespace pre-created with Helm's ownership metadata):
+that one is adopted or simply kept.
+Usage: include "aether.namespace.assertCreatable" (dict "ctx" . "name" $ns "value" "namespace.create" "waysOut" "...")
+*/}}
+{{- define "aether.namespace.assertCreatable" -}}
+{{- if and (eq .name .ctx.Release.Namespace) (not (include "aether.namespace.ownedByRelease" .)) -}}
+{{- fail (printf "%s=true cannot create %q: it is the namespace this release is stored in, and Helm writes the release record there before it creates anything the chart renders, so no helm command can install this. Either %s. See docs/getting-started.md, \"Install\"." .value .name .waysOut) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 GOMEMLIMIT for a Go container, as an integer byte count: 90% of the container's
 memory limit. Takes the container's `resources` dict; renders "" (the caller
 omits the env var) when no memory limit is set.

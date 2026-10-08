@@ -1,6 +1,6 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_match_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test")
 
 # prober Helm chart (published to chart_registry_url("prober"); see @aether_registry//:registry.bzl).
 #
@@ -37,6 +37,108 @@ helm_template_test(
     name = "prober_template_test",
     chart = ":prober",
 )
+
+# --- Who creates the namespace (#1405) ----------------------------------------
+#
+# The same rule as //charts/aether (#1403): Helm stores the release record in
+# the release namespace before it creates anything the chart renders, so
+# namespace.create=true can only create a namespace the release is NOT stored
+# in. These renders have no cluster (`lookup` finds nothing), so they cover a
+# first install; a live Namespace the release already owns keeps being rendered.
+
+# The default: no Namespace.
+helm_template_absent_test(
+    name = "prober_namespace_default_not_rendered_test",
+    absent = ["kind: Namespace"],
+    chart = ":prober",
+    control = "kind: DaemonSet",
+    opts = [
+        "--namespace",
+        "aether-test",
+    ],
+)
+
+# The combination no helm command can install fails the render, naming the ways
+# out.
+[
+    helm_template_fail_test(
+        name = "prober_namespace_create_release_namespace_fails_%s_test" % part,
+        chart = ":prober",
+        expected_message = message,
+        opts = [
+            "--namespace",
+            "aether-test",
+            "--set",
+            "namespace.create=true",
+        ],
+    )
+    for part, message in [
+        ("reason", "namespace.create=true cannot create \"aether-test\": it is the namespace this release is stored in"),
+        ("way_out_default", "leave namespace.create at its default (false) and pass --create-namespace"),
+        ("way_out_elsewhere", "store the release in another namespace"),
+    ]
+]
+
+# The one case it works: the release is stored somewhere else. The Namespace
+# carries helm.sh/resource-policy: keep, so turning namespace.create off again
+# cannot make Helm delete the namespace and the pods in it.
+helm_template_match_test(
+    name = "prober_namespace_create_other_release_namespace_test",
+    chart = ":prober",
+    document_patterns = {
+        "Namespace/aether-test": [
+            "\\nkind: Namespace\\nmetadata:\\n  name: aether-test\\n  annotations:\\n    helm\\.sh/resource-policy: keep\\n  labels:\\n",
+            "\\n    app\\.kubernetes\\.io/managed-by: Helm\\n",
+        ],
+        "DaemonSet/release-name-prober": ["\\nmetadata:\\n  name: release-name-prober\\n  namespace: aether-test\\n"],
+    },
+    opts = [
+        "--namespace",
+        "releases",
+        "--set",
+        "namespace.create=true",
+        "--set",
+        "namespace.name=aether-test",
+    ],
+)
+
+# The ServiceAccount records whether the render included the Namespace, for the
+# next upgrade to read back (prober.namespace.assertUpgradeKeeps; the reasoning
+# is with //charts/aether:aether_namespace_rendered_marker_default_test).
+[
+    helm_template_match_test(
+        name = "prober_namespace_rendered_marker_%s_test" % name,
+        chart = ":prober",
+        document_patterns = {
+            "ServiceAccount/release-name-prober": [
+                "\\n    aether\\.io/release-namespace-rendered: \"%s\"" % rendered,
+            ],
+        },
+        opts = opts,
+    )
+    for name, rendered, opts in [
+        (
+            "default",
+            "false",
+            [
+                "--namespace",
+                "aether-test",
+            ],
+        ),
+        (
+            "created",
+            "true",
+            [
+                "--namespace",
+                "releases",
+                "--set",
+                "namespace.create=true",
+                "--set",
+                "namespace.name=aether-test",
+            ],
+        ),
+    ]
+]
 
 # 2026-10-04 (aether agent OOMKills): GOMEMLIMIT must sit BELOW the cgroup
 # limit, never equal to it (`resourceFieldRef: limits.memory` was the whole

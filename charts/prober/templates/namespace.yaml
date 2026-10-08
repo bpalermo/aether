@@ -1,8 +1,34 @@
-{{- if .Values.namespace.create }}
+{{- /*
+  The namespace the prober deploys into (#1405). Not rendered by default: Helm
+  (--create-namespace) or the operator creates it, and it must be one whose pods
+  are mesh-managed.
+
+  namespace.create=true works only for a release stored in ANOTHER namespace.
+  Helm writes the release record into the release namespace before it creates
+  anything the chart renders, so a chart cannot create the namespace its own
+  release is stored in; that combination fails the render (the same rule as the
+  aether chart, #1403).
+
+  A live Namespace this release already owns is rendered whatever
+  namespace.create says, and carries helm.sh/resource-policy: keep: dropping it
+  from the manifest would otherwise make Helm delete the namespace and the pods
+  in it. `helm uninstall` therefore leaves the namespace behind. When it is not
+  rendered, prober.namespace.assertUpgradeKeeps refuses the one upgrade that
+  would still delete it.
+*/ -}}
+{{- $ns := include "prober.namespace" . -}}
+{{- if and .Values.namespace.create (eq $ns .Release.Namespace) (not (include "prober.namespace.ownedByRelease" .)) -}}
+{{- fail (printf "namespace.create=true cannot create %q: it is the namespace this release is stored in, and Helm writes the release record there before it creates anything the chart renders, so no helm command can install this. Either leave namespace.create at its default (false) and pass --create-namespace (or create the namespace yourself), or store the release in another namespace (helm -n <other> ... --set namespace.name=%s)." $ns $ns) -}}
+{{- end -}}
+{{- if eq (include "prober.namespace.rendered" .) "true" }}
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ include "prober.namespace" . }}
+  name: {{ $ns }}
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     {{- include "prober.labels" . | nindent 4 }}
+{{- else -}}
+{{- include "prober.namespace.assertUpgradeKeeps" . -}}
 {{- end }}
