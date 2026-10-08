@@ -1447,6 +1447,108 @@ hot-restarts Envoy in place when the kubelet delivers the new ConfigMap, without
 replacing the pod. That reaches every node within the kubelet's sync period, not
 one node at a time like a DaemonSet roll.
 
+### Rendering the chart reproducibly (#1364)
+
+Two `helm template` renders of the `aether` chart with the same values are
+byte-identical, with **one exception**: with the default
+`controller.webhook.spire=false` the chart generates the controller's
+self-signed webhook CA and serving certificate, and a render without a cluster
+generates a new pair every time. The lines that differ are exactly six: the
+Secret's `ca.crt`, `tls.crt` and `tls.key`, and the `caBundle` of the three
+webhooks. Nothing else in the chart is generated at render time
+(`//charts/aether:aether_reproducible_masked_test` fails if that stops being
+true).
+
+To compare two renders (two chart versions, two values files, a change under
+review), mask those six lines on both sides:
+
+```bash
+mask() { sed -E 's/^([[:space:]]*(ca\.crt|tls\.crt|tls\.key|caBundle):).*$/\1 <masked>/'; }
+helm template aether "$OLD_CHART" -n aether-system -f values.yaml | mask > before.yaml
+helm template aether "$NEW_CHART" -n aether-system -f values.yaml | mask > after.yaml
+diff before.yaml after.yaml
+```
+
+or render both sides with `--set controller.webhook.spire=true`, which renders
+no certificate at all. That is only a way to diff, not a way to run: it also
+drops the Secret and adds the controller's SPIRE flags, and it renders the
+controller's `ClusterSPIFFEID` only when
+`controller.webhook.clusterSpiffeID.className` is set (empty by default), so the
+flag alone does not give the controller a usable SPIRE identity. Use the mask
+when the change under review touches the webhook.
+
+**A real install or upgrade is not affected.** `helm upgrade` looks the Secret
+up in the cluster and renders the certificate it finds, so an upgrade changes
+neither the Secret's data nor any `caBundle`, and the controller keeps serving
+the same certificate. (The Secret object is still patched by each release,
+because its `helm.sh/chart` label changes; its data is not.) What does not look
+the Secret up, and therefore shows a new certificate every time:
+
+- `helm template`, a client-side `helm upgrade --dry-run`, and `helm diff`
+  unless it is run with `--dry-run=server`. Use the mask, or the server-side
+  dry run.
+- A GitOps tool that renders with `helm template` and applies the result (Argo
+  CD). It would apply a new CA on every sync: serve the webhook with SPIRE
+  there (`controller.webhook.spire=true` **and** a
+  `controller.webhook.clusterSpiffeID.className`, or a `ClusterSPIFFEID` of your
+  own that grants the controller the webhook Service's DNS names; see
+  `docs/configuration.md`). Flux's helm-controller runs a real upgrade and is
+  not affected.
+
+To check on a cluster that an upgrade left the certificate alone, hash it
+before and after (never print it):
+
+```bash
+kubectl -n aether-system get secret aether-controller-webhook-cert \
+  -o jsonpath='{.data}' | sha256sum
+kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration \
+  -l app.kubernetes.io/name=aether-controller \
+  -o jsonpath='{range .items[*].webhooks[*]}{.clientConfig.caBundle}{"\n"}{end}' | sha256sum
+```
+
+The chart generates a new pair in three cases only:
+
+| Case | What the upgrade does |
+| --- | --- |
+| No Secret (first install, or you deleted it) | new CA and certificate; `caBundle` = the new CA |
+| The Secret has an empty or missing `ca.crt`, `tls.crt` or `tls.key` | new CA and certificate. Until chart 2.4.16 only a missing `ca.crt` did that: with an empty `tls.key` every upgrade **failed** with `Secret "aether-controller-webhook-cert" is invalid: data[tls.key]: Required value` until someone deleted the Secret |
+| `controller.webhook.certRotation` set to a value the Secret was not generated for | new CA and certificate, the value stamped on the Secret as `aether.io/webhook-cert-rotation` |
+
+**Rotating.** The pair is valid for ten years and nothing renews it. To rotate,
+set `controller.webhook.certRotation` to a new value and upgrade:
+
+```bash
+helm get values aether -n aether-system -o yaml > values.yaml   # never --reuse-values
+helm upgrade aether oci://quay.io/aethermesh/chart-aether --version "$AETHER_VERSION" \
+  -n aether-system -f values.yaml --set-string controller.webhook.certRotation="$(date +%F)"
+```
+
+Afterwards leave the value set or remove it: neither rotates again, and the
+Secret keeps its stamp when the value is removed, so putting the same value back
+later (a reverted values change) does not rotate either. Only a *different,
+non-empty* value does.
+
+After that upgrade the webhooks trust both CAs (`caBundle` holds the new one
+and the one being replaced), so the certificate the controller is still serving
+keeps verifying. The controller reloads the new certificate from its mounted
+Secret by itself, once the kubelet has synced the volume (a minute or two);
+`kubectl -n aether-system rollout restart deployment/aether-controller` does it
+at once. The next upgrade renders the new CA alone, so do not run it before the
+controller has reloaded. If it does happen, the webhooks fail open
+(`failurePolicy: Ignore`) until the reload: pods admitted in that window are
+not mutated (no mesh injection, no `ndots`, no identity gate).
+
+The rotation is not gap-free, so do it in a quiet moment and check the upgrade
+succeeded. The Secret and the webhook configurations are separate objects and
+Helm patches the Secret first (its kind order). Normally the webhook
+configurations follow within the same upgrade, long before the kubelet delivers
+the new Secret to a running pod. But if the upgrade fails in between, or a
+controller pod starts in between, that controller serves the new certificate
+while the webhooks still trust only the old CA, and they fail open until the
+upgrade completes. If an upgrade with a new `certRotation` fails, re-run it
+before anything else. Closing the gap needs the new CA trusted one upgrade
+before the new certificate is served; the chart does not stage that.
+
 ### Pre-flight: node headroom before a roll (#812)
 
 Do this **before** any `helm upgrade` that rolls the DaemonSets. A roll is a

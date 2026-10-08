@@ -1,6 +1,6 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url", "image_reference")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_value_changes_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_reproducible_test", "helm_template_value_changes_test")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
@@ -245,6 +245,113 @@ helm_template_absent_test(
     opts = [
         "--show-only",
         "templates/agent-proxy-daemonset.yaml",
+    ],
+)
+
+# #1364: `helm template` is reproducible, with one documented exception. With
+# default values the chart generates the controller's self-signed webhook CA
+# and serving certificate at render time. An upgrade reuses the Secret it
+# finds in the cluster (`lookup`), but a render without a cluster has nothing
+# to look up and generates a new pair every time. Those values are exactly six
+# lines (the Secret's three keys and the three webhooks' caBundle); with them
+# masked, or with controller.webhook.spire=true, two renders are byte-identical.
+# A new render-time value (a random string, a timestamp) fails these.
+WEBHOOK_CERT_KEYS = [
+    "ca.crt",
+    "tls.crt",
+    "tls.key",
+    "caBundle",
+]
+
+helm_template_reproducible_test(
+    name = "aether_reproducible_masked_test",
+    chart = ":aether",
+    masked_keys = WEBHOOK_CERT_KEYS,
+    masked_lines = 6,
+)
+
+helm_template_reproducible_test(
+    name = "aether_reproducible_all_enabled_masked_test",
+    chart = ":aether",
+    masked_keys = WEBHOOK_CERT_KEYS,
+    masked_lines = 6,
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set",
+        "otel.enabled=true",
+        "--set",
+        "otel.endpoint=otel-collector.observability.svc:4317",
+    ],
+)
+
+# No mask at all: the SPIRE-served webhook renders no certificate.
+helm_template_reproducible_test(
+    name = "aether_reproducible_webhook_spire_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+)
+
+# #1364: controller.webhook.certRotation is stamped on the Secret, which is how
+# the next upgrade knows the certificate it finds was generated for that value
+# (and reuses it). The reuse itself needs a cluster: see the runbook.
+# The presence check is the absence rule's `control` string, on purpose. The
+# Secret is the first of the template's three documents, which rules_helm's
+# template_patterns never searches; and helm_template_match_test, like
+# helm_template_test, prints the whole render when it fails, which here includes
+# the generated tls.key. This rule prints only its own messages.
+helm_template_absent_test(
+    name = "aether_webhook_cert_rotation_stamp_test",
+    absent = [
+        "aether.io/webhook-cert-rotation: \"\"",
+    ],
+    chart = ":aether",
+    control = "    aether.io/webhook-cert-rotation: \"2026-10\"",
+    opts = [
+        "--show-only",
+        "templates/controller-webhook.yaml",
+        "--set-string",
+        "controller.webhook.certRotation=2026-10",
+    ],
+)
+
+# Unset (the default): no annotation, so the Secret's metadata is what it was.
+helm_template_absent_test(
+    name = "aether_webhook_cert_rotation_off_test",
+    absent = [
+        "aether.io/webhook-cert-rotation",
+        "  annotations:",
+    ],
+    chart = ":aether",
+    control = "kind: Secret",
+    opts = [
+        "--show-only",
+        "templates/controller-webhook.yaml",
+    ],
+)
+
+# With the SPIRE-served webhook there is no Secret to rotate, whatever the value.
+helm_template_absent_test(
+    name = "aether_webhook_cert_rotation_spire_test",
+    absent = [
+        "aether.io/webhook-cert-rotation",
+        "kind: Secret",
+        "caBundle:",
+    ],
+    chart = ":aether",
+    control = "kind: ValidatingWebhookConfiguration",
+    opts = [
+        "--show-only",
+        "templates/controller-webhook.yaml",
+        "--set",
+        "controller.webhook.spire=true",
+        "--set-string",
+        "controller.webhook.certRotation=2026-10",
     ],
 )
 
