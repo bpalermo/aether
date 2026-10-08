@@ -46,7 +46,7 @@ substitutes at package time, so packaged charts are pinned to a concrete digest.
 | Field | Value | Notes |
 | --- | --- | --- |
 | Chart `version` | e.g. `0.8.0-{GIT_COMMIT}` (crds), `0.3.0-{GIT_COMMIT}` (prober) | SemVer pre-release; commit becomes the OCI tag (dash-separated — `+build` metadata would be rewritten to `_` by helm). The `aether` chart is published **twice**: under its plain `Chart.yaml` version (`<version>`, what Flux and the deploy procedure consume) *and* — via `:aether_commit`, whose `Chart.yaml` is derived from the same file — under `<version>-{GIT_COMMIT}`, so every commit's chart stays addressable after the mutable bare tag has moved on (#692). Bump the chart's `version:` on any change to its templates/values (enforced in CI). These versions move on nearly every release: read the live value from each chart's `Chart.yaml`, or from the version the publish workflow prints. |
-| Chart `appVersion` | `{STABLE_GIT_VERSION}` | `git describe` value — matches the binaries' embedded `Version`. |
+| Chart `appVersion` | `{STABLE_GIT_VERSION}` | `git describe` value: the commit the chart was packaged from. It is **not** what a binary reports about itself. A component's `--version` and its OTel `service.version` are that binary's GNU build ID, which changes only when the binary does (#1378, #1429); the runbook's "Which build is this binary" maps one to the other. |
 | Image refs | `repo@sha256:…` | Pinned to the exact built digest (strongest form). |
 
 The `{...}` placeholders in `Chart.yaml` are filled from the workspace status

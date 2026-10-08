@@ -104,19 +104,30 @@ reference, and verifies the chart and every rendered image:
 cosign verify \
   --certificate-identity-regexp '^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  quay.io/sortie/chart-sortie@sha256:b1f0a6d5f838a4d76357b7438f8557cc3b74e37035918aa8ca4a490cd75e45ef
-# the same for quay.io/sortie/sortie@sha256:3d9a9b67… and quay.io/sortie/engine@sha256:d0fbc860…
-# (sortie-values.yaml); add --certificate-github-workflow-sha <commit> to bind them to one commit.
+  quay.io/sortie/chart-sortie@sha256:b30a426618e79621177affd1d53bc8738925006060949150ce906010808abc89
+# the same for quay.io/sortie/sortie@sha256:490dfbd6… and quay.io/sortie/engine@sha256:65392801…
+# (sortie-values.yaml).
 ```
 
-The pin is sortie `f0750ecf407c1bc50e6740b4b16a3b61964649e0`, chart
-`0.1.0-f0750ecf407c1bc50e6740b4b16a3b61964649e0`. **All three digests change with every
-sortie commit**, the engine's too, whether or not the engine changed: each image's
-config carries the commit (`org.opencontainers.image.revision`), so the config, both
-per-arch manifests and the index are new while the layers are not. From 9fcbb81 to
-f0750ec the engine's 22 layers are the same on both architectures, digest for digest,
-and its index went from `sha256:99d5058c…` to `sha256:d0fbc860…`. Pin what the new
-chart names; "the engine is unchanged" says nothing about its digest.
+The pin is sortie `96e6bfb97713483c725bfa516d2dc7e4db719f1f`, chart
+`0.1.0-96e6bfb97713483c725bfa516d2dc7e4db719f1f`. **The chart's and the driver's digests
+change with every sortie commit; the engine's changes only when the engine does.** Up to
+f0750ec every image carried its commit as a label (`org.opencontainers.image.revision`),
+so all three moved every time and an unchanged engine still had to be re-pinned. sortie
+6d801c0 removed the label. Read from the registry over the four commits f0750ec..96e6bfb:
+the chart and the driver have four digests; the engine has three (`sha256:d0fbc860…`,
+then `sha256:94bde035…` for the same 22 layers without the label, then
+`sha256:65392801…` at 6a0a866, which changed the engine, **and again at 96e6bfb**, which
+did not). At a bump, take all three from the new chart; the engine's may be the one
+already pinned.
+
+sortie signs a digest once, at the commit that first published it. So
+`--certificate-github-workflow-sha <commit>` binds the chart and the driver to the pin's
+commit, and the engine to the commit that last changed it: `6a0a866ddc34…` for this pin.
+Bound to `96e6bfb…` the engine is refused (`expected GithubWorkflowSHA to be "96e6bfb…",
+got "6a0a866…"`), and that is not a bad pin: the refusal names the commit that did sign
+it, which is how to find it (cosign v3.1.2 prints no commit for a signature it accepts).
+The pre-flight checks the signer, not the commit.
 
 It runs whenever a cosign is found: `SOAK_COSIGN`, else `cosign` on `PATH`. The
 repository's pinned one (`//bazel/cosign`, v3.1.2) is
@@ -211,14 +222,17 @@ Five runs have been made this way on talos-main, all recorded in proposal 042,
 (`~/aether-soak-logs/1007-sortie-e2e-1`, `-2`, `-3`), and with sortie 9fcbb81 on
 2026-10-08 a short one (`1008-sortie-e2e-9fcbb81`, PASS 8 of 8) and the first 8-hour
 soak (`1008-sortie-soak`, gate PASS, 9,180,000 of 9,180,000). **The current pin,
-f0750ec, has run on kind only** (proposal 042, "What sortie f0750ec changed"). Its
-first run on talos-main is the next one; beyond the gate's verdict, read from it:
+96e6bfb, has run on kind only**, as had f0750ec before it (proposal 042, "What sortie
+96e6bfb changed"). Its first run on talos-main is the next one; beyond the gate's
+verdict, read from it:
 
 - `SORTIE_SAVED … not_run=0 … stream_executions=8` in `save.log`;
 - each engine pod's CPU against the 150m request: `kubectl --context talos-main -n
-  aether-test top pods -l app.kubernetes.io/component=engine` mid-run. The engine's
-  layers are those of 9fcbb81, so no change is expected; it is read at every bump
-  all the same (proposal 042, risk 3);
+  aether-test top pods -l app.kubernetes.io/component=engine` mid-run. This pin's
+  engine is a new binary (sortie 6a0a866: a lock around the construction of each
+  execution's options); on kind it read 0.10–0.11 core and 301–302 MiB per engine,
+  where the previous one read 0.09–0.11 and 301. It is read at every bump (proposal
+  042, risk 3);
 - that the run ends within seconds of its duration (`WINDOW … ended=`).
 
 ### Reading the gate

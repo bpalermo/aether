@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"aethermesh.dev/agent/internal/proxy/hotrestart"
+	"aethermesh.dev/common/buildinfo"
 	"aethermesh.dev/common/file"
 	"aethermesh.dev/common/log"
 	"github.com/spf13/cobra"
@@ -54,8 +55,10 @@ type config struct {
 	version              string
 }
 
-// New returns the `proxy-supervisor` command. version is stamped into the OTel
-// service.version on the supervisor's pushed hot-restart metrics.
+// New returns the `proxy-supervisor` command. version becomes the OTel
+// service.version on the supervisor's pushed hot-restart metrics; the caller
+// passes the binary's own build ID (//common/buildinfo), which is also what
+// `--version` prints (#1429).
 //
 // //agent/cmd/proxy-supervisor runs it as its root command. It was also an
 // `agent proxy-supervisor` alias until that was removed after #772.
@@ -67,8 +70,12 @@ func New(version string) *cobra.Command {
 		Short:        "Supervises the Envoy proxy with hot-restart support.",
 		Long:         "Runs as the aether-proxy container entrypoint, forking and hot-restarting Envoy across restart epochs so bootstrap-config and binary upgrades happen without dropping connections.",
 		SilenceUsage: true,
-		RunE:         cfg.run,
+		// Cobra adds `--version` because Version is set, and answers it before
+		// RunE: no Envoy is forked and no file is touched.
+		Version: version,
+		RunE:    cfg.run,
 	}
+	cmd.SetVersionTemplate(buildinfo.Describe("proxy-supervisor") + "\n")
 
 	bindFlags(cmd, cfg)
 	return cmd
@@ -217,5 +224,6 @@ func bindFlags(cmd *cobra.Command, c *config) {
 	f.BoolVar(&c.supervisor.HotRestartOnConcurrencyChange, "hot-restart-on-concurrency-change", false, "Hot-restart from a live predecessor even when its Envoy worker count differs from the --concurrency this supervisor's Envoy will run with. By default such a predecessor is drained (graceful drain over --drain-time, then stopped) and a fresh Envoy started at epoch 0, because a hot restart across a worker-count change re-steers the predecessor's QUIC connections by the new count and resets about half of them (#1136)")
 	f.DurationVar(&c.supervisor.StallSampleInterval, "stall-sample-interval", hotrestart.DefaultStallSampleInterval, "Envoy thread-stall sampler interval (#1093): reads each Envoy main/worker thread's schedstat and wchan from /proc and logs 'envoy thread stall' when one is starved of CPU, blocked or busy for --stall-threshold within a second, with the node's CPU/softirq/PSI picture for that second; 0 disables")
 	f.DurationVar(&c.supervisor.StallThreshold, "stall-threshold", hotrestart.DefaultStallThreshold, "Per-second starved/blocked/busy time that makes the thread-stall sampler report an Envoy thread (default: Envoy's worker watchdog miss threshold)")
+	f.IntVar(&c.supervisor.StallTopConsumers, "stall-top-consumers", hotrestart.DefaultStallTopConsumers, "How many CPU consumers a [starved] 'envoy thread stall' line names over the stall (#1392): topCgroups from cgroup v2 cpu.stat deltas (the node's hierarchy, which a privileged container sees), and topProcs from /proc/<pid>/stat deltas where the pod shares the host PID namespace. At most 20; 0 turns the consumer sampling off")
 	f.StringVar(&c.telemetry.OTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint for hot-restart lifecycle metrics push (e.g. collector:4317); empty disables telemetry")
 }

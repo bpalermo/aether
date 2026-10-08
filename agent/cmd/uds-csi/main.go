@@ -23,16 +23,21 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"aethermesh.dev/agent/internal/udscsi"
+	"aethermesh.dev/common/buildinfo"
 	"aethermesh.dev/common/log"
 	"aethermesh.dev/common/signals"
 )
 
-// Version is set at build time via -ldflags (Bazel x_defs). It is what
-// GetPluginInfo reports as vendor_version.
-var Version = "dev"
+// Version is what GetPluginInfo reports as vendor_version, what the startup
+// log line carries and what `--version` prints: the running binary's own GNU
+// build ID, read from its ELF (//common/buildinfo), not a value linked in from
+// the commit (#1378). The CSI spec makes vendor_version a required string that
+// is opaque to the kubelet and at most 128 bytes long; 40 hex characters fit.
+var Version = buildinfo.Version()
 
 type options struct {
 	kubeletRoot        string
@@ -44,6 +49,7 @@ type options struct {
 	inodes             int64
 	debug              bool
 	probe              bool
+	version            bool
 }
 
 // newFlagSet binds every flag to o. //agent/cmd/uds-csi:uds-csi_test asserts
@@ -66,6 +72,8 @@ func newFlagSet(o *options) *flag.FlagSet {
 	fs.BoolVar(&o.debug, "debug", false, "Enable debug-level logging")
 	fs.BoolVar(&o.probe, "probe", false,
 		"Liveness probe mode: exit 0 iff the CSI socket exists, then exit (no server)")
+	fs.BoolVar(&o.version, "version", false,
+		"Print this binary's build ID, main package and Go toolchain, then exit (no server)")
 	return fs
 }
 
@@ -87,9 +95,13 @@ func parseFlags(args []string) (*options, error) {
 	return o, nil
 }
 
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, stdout io.Writer) error {
 	o, err := parseFlags(args)
 	if err != nil {
+		return err
+	}
+	if o.version {
+		_, err := fmt.Fprintln(stdout, buildinfo.Describe("uds-csi"))
 		return err
 	}
 	if o.probe {
@@ -126,7 +138,7 @@ func main() {
 	ctx, stop := signals.NotifyContext(context.Background())
 	defer stop()
 
-	if err := run(ctx, os.Args[1:]); err != nil {
+	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "uds-csi:", err)
 		os.Exit(1)
 	}
