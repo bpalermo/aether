@@ -817,6 +817,10 @@ type envoyProc struct {
 	// from the config. A listener delivered over LDS is treated as TCP; the
 	// package has no UDP one.
 	udp map[string]bool
+	// mappedSharedMemory is every hot-restart region the live process was
+	// seen to map (noteMappedSharedMemory); empty for a process started as
+	// launchEnvoy starts it.
+	mappedSharedMemory []string
 }
 
 // launchEnvoy writes bs to disk and runs the pinned proxy against it. The
@@ -827,6 +831,23 @@ type envoyProc struct {
 // --admin-address-path, which launchEnvoy waits for. Listener addresses are
 // then read from that endpoint (listenerAddr), so no port number is chosen
 // before the process that binds it exists.
+//
+// Hot restart is off (--disable-hot-restart). With it on, Envoy creates a
+// shared-memory file, /dev/shm/envoy_shared_memory_<base id * 10>, when it
+// starts, and never removes it: not on a clean exit, not on SIGTERM, and it
+// cannot on the SIGKILL the cleanup below sends. The only unlink in Envoy is
+// by the next epoch-0 start with the same base id. This launcher used to pass
+// --use-dynamic-base-id, a random 28-bit id per process, so no later start
+// ever had the same one and each of the package's Envoys (37 in one run) left
+// a file behind for good, in a filesystem that is memory (#1446). Nothing here
+// tests hot restart: no test starts a second epoch, and the proxy_epoch access
+// log field reads an environment variable, not --restart-epoch. Without hot
+// restart there is no shared region and no base id to collide on, so any
+// number of Envoys still run side by side, which was the dynamic id's purpose.
+//
+// The cleanup checks that the process left no region behind
+// (requireNoSharedMemoryLeft), so a command line that turns hot restart back
+// on fails the test that used it.
 //
 // out receives Envoy's stdout and stderr; nil sends them to the test log under
 // label. args are appended to the command line.
@@ -843,6 +864,7 @@ func launchEnvoy(t *testing.T, bin, label string, bs *bootstrapv3.Bootstrap, out
 	path := filepath.Join(dir, "bootstrap-"+label+".json")
 	writeFile(t, path, data)
 	adminPath := filepath.Join(dir, "admin-address-"+label)
+	baseIDPath := filepath.Join(dir, "base-id-"+label)
 	t.Logf("%s bootstrap: %s", label, path)
 
 	if out == nil {
@@ -856,9 +878,12 @@ func launchEnvoy(t *testing.T, bin, label string, bs *bootstrapv3.Bootstrap, out
 	}
 	cmd := exec.Command(bin, append([]string{
 		"-c", path,
-		"--use-dynamic-base-id",
+		"--disable-hot-restart",
 		"--log-level", "warn",
 		"--admin-address-path", adminPath,
+		// Written only by an Envoy that attached a hot-restart region, so
+		// with the flag above it never is; requireNoSharedMemoryLeft reads it.
+		"--base-id-path", baseIDPath,
 	}, args...)...)
 	// One writer for both streams: os/exec then serialises the writes itself.
 	w := io.MultiWriter(out, e.tail)
@@ -874,6 +899,7 @@ func launchEnvoy(t *testing.T, bin, label string, bs *bootstrapv3.Bootstrap, out
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		<-e.exited
+		e.requireNoSharedMemoryLeft(t, baseIDPath)
 	})
 
 	e.await(t, func() string { return "write its admin address to " + adminPath }, func() bool {
@@ -888,7 +914,74 @@ func launchEnvoy(t *testing.T, bin, label string, bs *bootstrapv3.Bootstrap, out
 		e.admin = addr
 		return true
 	})
+	e.noteMappedSharedMemory()
 	return e
+}
+
+// sharedMemoryPrefix is where Envoy's hot-restart region lives: it calls
+// shm_open("/envoy_shared_memory_<base id * 10>"), and on Linux that is a file
+// of this name.
+const sharedMemoryPrefix = "/dev/shm/envoy_shared_memory_"
+
+// noteMappedSharedMemory records the hot-restart regions the running process
+// maps, from /proc/<pid>/maps. Envoy attaches the region before it starts the
+// admin endpoint, so by the time launchEnvoy calls this the mapping is there
+// if it ever will be. It is the kernel's account, and does not depend on what
+// Envoy chooses to report.
+func (e *envoyProc) noteMappedSharedMemory() {
+	maps, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", e.pid))
+	if err != nil {
+		return // already gone; the base id file still covers it
+	}
+	for _, line := range strings.Split(string(maps), "\n") {
+		if f := strings.Fields(line); len(f) >= 6 && strings.HasPrefix(f[5], sharedMemoryPrefix) {
+			e.mappedSharedMemory = append(e.mappedSharedMemory, f[5])
+		}
+	}
+}
+
+// requireNoSharedMemoryLeft fails the test if the stopped Envoy left a
+// hot-restart shared-memory file behind, and removes the file so that the
+// failing run does not leak it as well.
+//
+// It looks only for this process's own region, never at how many such files
+// exist: other test processes on the machine start and stop Envoys at the
+// same time, and a count would see theirs. The region is known two ways. An
+// Envoy with hot restart on writes its base id to --base-id-path the moment
+// it has attached the region (one with hot restart off writes nothing), and
+// the file's name is that id times ten. And noteMappedSharedMemory saw what
+// the live process mapped.
+//
+// A test that does need hot restart has to remove the regions of the epochs
+// it started before this runs.
+func (e *envoyProc) requireNoSharedMemoryLeft(t *testing.T, baseIDPath string) {
+	t.Helper()
+	regions := map[string]bool{}
+	for _, r := range e.mappedSharedMemory {
+		regions[r] = true
+	}
+	switch b, err := os.ReadFile(baseIDPath); {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		t.Errorf("%s: read the base id it wrote: %v", e.label, err)
+	default:
+		id, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32)
+		if err != nil {
+			t.Errorf("%s wrote a base id that is not a number (%q): it ran with hot restart on, "+
+				"and the shared memory it created cannot be found to remove it", e.label, b)
+			break
+		}
+		regions[sharedMemoryPrefix+strconv.FormatUint(id*10, 10)] = true
+	}
+	for r := range regions {
+		if _, err := os.Stat(r); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		t.Errorf("%s left its hot-restart shared memory behind: %s (removed now). Nothing ever removes "+
+			"that file, so every run adds one. An Envoy that is not under a hot-restart test runs with "+
+			"--disable-hot-restart and creates none (see launchEnvoy)", e.label, r)
+		_ = os.Remove(r)
+	}
 }
 
 // requireExclusiveUDPBinds fails the test if a static UDP listener asks the
