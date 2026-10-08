@@ -44,8 +44,11 @@ import (
 // with the node's own CPU picture for the same second (busy/irq/softirq/steal
 // shares, the hottest CPU's irq+softirq share, and the PSI cpu-some and irq-full
 // stall time), so a stall every process on the node shares is told apart from
-// one only Envoy has. The aether.supervisor.envoy_thread_stalls counter carries
-// the same classification for grading a soak.
+// one only Envoy has. A line with a starved thread also names the top CPU
+// consumers on the node over the stall (cpuconsumers.go, #1392): "the node was
+// out of CPU" is where two investigations had to stop. The
+// aether.supervisor.envoy_thread_stalls counter carries the same classification
+// for grading a soak.
 //
 // The threshold defaults to 200 ms, Envoy's own worker watchdog miss threshold,
 // so a stall Envoy counts is a stall this attributes.
@@ -155,6 +158,9 @@ type stallSampler struct {
 	targets func() map[int]int
 	// logContext returns extra attributes for a stall line (handoff state).
 	logContext func() []any
+	// consumers names who had the CPU over a starved window (cpuconsumers.go,
+	// #1392); nil when --stall-top-consumers is 0.
+	consumers *cpuConsumers
 
 	epochs      map[int]*sampledEpoch
 	windowStart time.Time
@@ -188,6 +194,9 @@ func (s *stallSampler) tick(now time.Time) {
 	if s.windowStart.IsZero() {
 		s.windowStart = now
 		s.readNode()
+		if s.consumers != nil {
+			s.consumers.roll(now)
+		}
 	}
 
 	targets := s.targets()
@@ -350,24 +359,50 @@ func (s *stallSampler) classify(t *sampledThread) (threadVerdict, bool) {
 	return v, len(v.classes) > 0
 }
 
+// flaggedEpoch is one epoch's stall line for a window.
+type flaggedEpoch struct {
+	epoch, pid int
+	threads    []string
+	// span is the longest wall time a flagged thread's deltas cover.
+	span time.Duration
+	// starved is the longest runqueue wait of a starved thread, 0 when none
+	// was starved.
+	starved time.Duration
+}
+
 func (s *stallSampler) closeWindow(now time.Time) {
 	wall := now.Sub(s.windowStart)
 	node := s.nodeAttrs()
 
+	var lines []flaggedEpoch
+	var stalls []time.Duration // one per starved line, in line order
 	for _, epoch := range slices.Sorted(maps.Keys(s.epochs)) {
 		e := s.epochs[epoch]
-		flagged, span := s.closeEpochWindow(e)
-		if len(flagged) == 0 {
+		line := s.closeEpochWindow(e)
+		if len(line.threads) == 0 {
 			continue
 		}
+		line.epoch, line.pid = epoch, e.pid
+		lines = append(lines, line)
+		if line.starved > 0 {
+			stalls = append(stalls, max(wall, line.starved))
+		}
+	}
+	tops := s.topConsumers(now, stalls)
+
+	for _, line := range lines {
 		attrs := []any{
-			"epoch", epoch,
-			"pid", e.pid,
-			"windowMs", max(wall, span).Milliseconds(),
+			"epoch", line.epoch,
+			"pid", line.pid,
+			"windowMs", max(wall, line.span).Milliseconds(),
 			"thresholdMs", s.threshold.Milliseconds(),
-			"threads", flagged,
+			"threads", line.threads,
 		}
 		attrs = append(attrs, node...)
+		if line.starved > 0 && len(tops) > 0 {
+			attrs = append(attrs, tops[0]...)
+			tops = tops[1:]
+		}
 		if s.logContext != nil {
 			attrs = append(attrs, s.logContext()...)
 		}
@@ -376,25 +411,47 @@ func (s *stallSampler) closeWindow(now time.Time) {
 	s.windowStart = now
 }
 
+// topConsumers returns who had the CPU, once per starved line, each measured
+// over that line's own stall: a runqueue wait is charged when it ends, so a
+// thread that waited 5 s is reported in one window and its consumers are taken
+// over those 5 s, while another epoch that waited 300 ms in the same window
+// gets the window's. The sources are sampled once for all of them. Only a
+// starved thread is waiting for a CPU, so a window with none just rolls the
+// baseline: a blocked thread is asleep in the kernel and a busy one is itself
+// the consumer, and neither line gains anything from the list.
+func (s *stallSampler) topConsumers(now time.Time, stalls []time.Duration) [][]any {
+	if s.consumers == nil {
+		return nil
+	}
+	if len(stalls) == 0 {
+		s.consumers.roll(now)
+		return nil
+	}
+	return s.consumers.report(now, stalls...)
+}
+
 // closeEpochWindow classifies and resets every sampled thread of one epoch,
-// counts the flagged ones and returns their descriptions and the longest span a
-// flagged thread's deltas cover.
-func (s *stallSampler) closeEpochWindow(e *sampledEpoch) (flagged []string, span time.Duration) {
+// counts the flagged ones and returns their descriptions, the longest span a
+// flagged thread's deltas cover and the longest wait of a starved one.
+func (s *stallSampler) closeEpochWindow(e *sampledEpoch) (line flaggedEpoch) {
 	for _, tid := range slices.Sorted(maps.Keys(e.threads)) {
 		t := e.threads[tid]
 		if t.skip {
 			continue
 		}
 		if v, ok := s.classify(t); ok {
-			flagged = append(flagged, v.String())
-			span = max(span, t.span)
+			line.threads = append(line.threads, v.String())
+			line.span = max(line.span, t.span)
+			if slices.Contains(v.classes, stallStarved) {
+				line.starved = max(line.starved, v.runq)
+			}
 			for _, class := range v.classes {
 				s.metrics.envoyThreadStalled(class)
 			}
 		}
 		t.resetWindow()
 	}
-	return flagged, span
+	return line
 }
 
 // readNode refreshes the node CPU and PSI baselines.
@@ -474,8 +531,13 @@ func (s *Supervisor) sampleStalls(ctx context.Context) {
 		threshold = DefaultStallThreshold
 	}
 	sampler := newStallSampler(procReader{root: "/proc"}, threshold, s.log, s.metrics, s.childPIDs, s.stallLogContext)
+	topN := 0
+	if sampler.consumers = nodeCPUConsumers(s.cfg.StallTopConsumers); sampler.consumers != nil {
+		topN = sampler.consumers.topN // the bounded value the lines will carry
+	}
 	s.log.InfoContext(ctx, "envoy thread-stall sampler running",
-		"interval", s.cfg.StallSampleInterval, "threshold", threshold, "window", stallWindow)
+		"interval", s.cfg.StallSampleInterval, "threshold", threshold, "window", stallWindow,
+		"topConsumers", topN)
 
 	ticker := time.NewTicker(s.cfg.StallSampleInterval)
 	defer ticker.Stop()

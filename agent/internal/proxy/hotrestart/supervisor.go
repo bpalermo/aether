@@ -165,6 +165,10 @@ type Config struct {
 	// stay on a CPU within a one-second window before the sampler reports it
 	// (0 = DefaultStallThreshold, Envoy's worker watchdog miss threshold).
 	StallThreshold time.Duration
+	// StallTopConsumers is how many CPU consumers (cgroups, and processes
+	// where /proc shows the node's) a [starved] stall line names (#1392,
+	// cpuconsumers.go), at most 20. 0 turns the consumer sampling off.
+	StallTopConsumers int
 	// PodName is this proxy pod's name (optional). It is folded into the
 	// per-supervisor admin identity (see adminidentity.go) only so a log line
 	// about a FOREIGN Envoy answering the node-shared admin address can name
