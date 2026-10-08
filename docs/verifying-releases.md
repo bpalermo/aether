@@ -88,7 +88,9 @@ gh attestation verify oci://quay.io/aethermesh/agent@sha256:<digest> \
   repository would do.
 - `--source-digest` pins the commit. Leave it out to accept any commit of the
   repository, and read the commit from the output instead
-  (`--format json`, `.[].verificationResult.statement.predicate`).
+  (`--format json`, `.[].verificationResult.statement.predicate`). For an
+  **image**, the commit is the one that first built that digest, which is not
+  necessarily the one you deployed: see "Which commit built this digest" below.
 
 A chart is verified the same way, with its own reference:
 
@@ -101,6 +103,51 @@ gh attestation verify oci://quay.io/aethermesh/chart-aether@sha256:<digest> \
 The provenance covers the digest a tag resolves to: an image index, or a chart
 manifest. A per-architecture image manifest has a signature but is not an
 attestation subject, so verify provenance against the index digest.
+
+## Which commit built this digest
+
+An image does not say. Nothing in an aether image depends on the commit: no
+label, no annotation and no version linked into a binary (#1378). That is what
+lets an image whose content did not change keep its digest from one commit to
+the next, so that a deploy rolls only the components that changed. A label or
+an annotation is part of the JSON document it sits in, and so of the digest;
+the commit has to live outside it. Three things outside it bind a digest to a
+commit:
+
+| Where | What it names | How to read it |
+| --- | --- | --- |
+| The cosign signature's certificate | the commit of the workflow run that signed this digest | `cosign verify … -o json`, the certificate's `githubWorkflowSha` (or pin it: `--certificate-github-workflow-sha <full git sha>`) |
+| The provenance attestation | the commit, workflow file, run and runner that **built** this digest | `gh attestation verify … --format json`, or pin it with `--source-digest <full git sha>` |
+| The per-commit tag `dev-<full git sha>` | the digest that commit's publish produced | `crane digest quay.io/aethermesh/agent:dev-<full git sha>` |
+
+They answer different questions once digests are stable.
+
+- **The tag goes from a commit to a digest**, and every published commit has
+  one. Many tags can name one digest: if commits A, B and C did not change the
+  agent, `dev-A`, `dev-B` and `dev-C` all resolve to the same agent digest.
+  "Which digest does commit C deploy" is always answerable this way.
+- **The provenance goes from a digest to the commit that first built it.**
+  Publishing attests a digest only when it is new, so an unchanged image's
+  provenance names the **first** commit that produced that digest (A above), not
+  the commit you deployed (C). `gh attestation verify --source-digest C` on an
+  image that C did not change therefore **fails**, and that is the expected
+  result, not a broken release: verify without `--source-digest` and read the
+  commit from the output, or pin the commit on the **chart**, which is new for
+  every commit and is attested every time.
+- The same holds for the signature: an unchanged digest keeps the signature it
+  already has.
+
+So, to establish that what runs is what commit C published:
+
+1. Verify the chart at C: `crane digest quay.io/aethermesh/chart-aether:<X.Y.Z>-<C>`,
+   then `cosign verify` and `gh attestation verify --source-digest <C>` on that
+   chart digest. The chart is per-commit and pins every image by digest.
+2. For any image it pins, verify the signature and the provenance of the digest
+   as above, without pinning the commit: the output names the earlier commit
+   that built it, which is in C's history.
+
+A binary's own `--version` is its build ID, not a commit: see the runbook, "Which
+build is this binary".
 
 ## What this does and does not establish
 

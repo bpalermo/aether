@@ -80,3 +80,41 @@ sh_test(
         "@aether_registry//:registry.bzl",
     ],
 )
+
+# Every image this repository builds. //bazel/img:digest_stability_test reads
+# each one's index.
+_IMAGE_PACKAGES = [
+    "//agent/cmd/agent",
+    "//agent/cmd/mesh-dns",
+    "//agent/cmd/proxy-supervisor",
+    "//agent/cmd/uds-csi",
+    "//cni/cmd/cni-install",
+    "//controller/cmd/controller",
+    "//e2e/l4echo",
+    "//e2e/udsecho",
+    "//prober/cmd/prober",
+    "//registrar/cmd/registrar",
+]
+
+exports_files(
+    ["go_multi_arch_image.bzl"],
+    visibility = ["//visibility:private"],
+)
+
+# An image's digest must not depend on the commit, and the per-commit tag must
+# still follow it (#1378). See the script's header for what each check holds.
+sh_test(
+    name = "digest_stability_test",
+    size = "small",
+    srcs = ["digest_stability_test.sh"],
+    args = [
+        "$(rootpath //bazel:workspace_status.sh)",
+        "$(rootpath go_multi_arch_image.bzl)",
+    ] + ["$(rootpath {}:image_index)".format(p) for p in _IMAGE_PACKAGES],
+    data = [
+        "go_multi_arch_image.bzl",
+        "//bazel:workspace_status.sh",
+        "@jq_toolchains//:resolved_toolchain",
+    ] + [p + ":image_index" for p in _IMAGE_PACKAGES],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)

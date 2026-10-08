@@ -1428,19 +1428,53 @@ Since chart **2.4.15** the chart itself no longer puts the release into a pod
 template: a `helm upgrade` rolls a workload only when that workload's pod
 template changed (an image digest, a flag, a resource, a volume).
 
-**That is not yet "only the component that changed".** Every image this
-repository builds gets a new digest with every commit, whether or not its
-content changed: the image carries the commit as its
-`org.opencontainers.image.revision` label (#837) and the binaries are stamped
-with the version. On talos-main all seven in-repo image digests (agent,
-cni-install, proxy-supervisor, mesh-dns, uds-csi, registrar, controller) changed
-in each of the four deploys from revision 276 to 279, including one whose
-commits touched only the registrar, tests and scripts. Every workload runs at
-least one of those images (the proxy DaemonSet through its `install-supervisor`
-init container), so a deploy of a new commit still rolls everything. What
-2.4.15 removes is the chart's own share: an upgrade that changes the chart
-version but not the images (the same commit's images under a re-cut chart, a
-values-only change) no longer rolls anything it did not change.
+**And an image changes only when what is in it changes (#1378).** Until #1378
+every image this repository builds got a new digest with every commit, whether
+or not its content changed: the image carried the commit as its
+`org.opencontainers.image.revision` label and annotations (#837), and seven
+binaries had the commit linked in as their version. On a test cluster all seven
+in-repo image digests changed in each of four consecutive deploys, including one
+whose commits touched only the registrar, tests and scripts; and since every
+workload runs at least one of those images, a deploy of any new commit rolled
+everything, the node proxy included.
+
+Neither is true any more. No image and no binary carries the commit, so the same
+inputs build the same digest at any commit (CI builds every image under two
+different commits and fails on a difference), the chart pins the same digest,
+and the pod template does not change. What a deploy of a new commit rolls:
+
+| The commits changed | Rolls | Does not roll |
+| --- | --- | --- |
+| docs, tests, CI, scripts only | nothing | everything |
+| the agent only (`agent/` code outside the other binaries) | the agent DaemonSet, the edge Deployment (it runs the agent image) and the controller (its identity-gate init container image defaults to the agent image, which is a flag in the controller's pod template) | the node proxy: **no Envoy hot restart**; mesh-dns, uds-csi, the registrar |
+| one other component only (the registrar, mesh-dns, uds-csi, the controller, the proxy supervisor, cni-install) | the workloads that run that image: the proxy DaemonSet for the supervisor, the agent DaemonSet for cni-install (its init container) | the rest |
+| the chart only (templates, values) | only the workloads whose pod template changed | the rest |
+| a package under `common/` (or `api/`, or a dependency or toolchain pin) | every workload whose image links it, which for a widely used package is all of them | workloads whose images do not link it |
+
+Two things follow from "a function of what is in it":
+
+- "Did this deploy change component X" has an exact answer before the deploy:
+  compare the digest the new chart pins for X with the one that is running.
+  `bazel query 'rdeps(//..., //common/foo)'` restricted to the image targets
+  says which images a source change reaches.
+- A proxy roll now means the supervisor image (or the proxy image, a static pin
+  in the chart) really changed. The headroom pre-flight below is for those
+  deploys, not for every deploy.
+
+**The first deploy from a commit that has #1378 rolls everything one last time**:
+removing the label, the annotations and the linked version changes every
+digest once. Plan it like any full roll. The same holds for a rollback across
+that commit.
+
+The images no longer say which commit built them; three things outside the
+digest do (the signature's certificate, the provenance attestation and the
+`dev-<sha>` tag). See [verifying-releases.md](verifying-releases.md), "Which
+commit built this digest". A component's own `--version` and `service.version`
+are its binary's build ID, not a commit (section 5).
+
+What chart 2.4.15 removed is the chart's own share of this: an upgrade that
+changes the chart version but not the images (a re-cut chart, a values-only
+change) rolls nothing it did not change.
 
 Until 2.4.15 every pod template carried `helm.sh/chart: aether-<version>` and
 `app.kubernetes.io/version: <appVersion>`. The chart version changes with every

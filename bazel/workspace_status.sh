@@ -3,14 +3,21 @@
 # If their values changes, a target may still include
 # a stale value from a previous build.
 echo "STABLE_GIT_VERSION $(git describe --tags --always --long --dirty --abbrev=40 2>/dev/null || echo 'unknown')"
-# STABLE_ on purpose (#837). This is what every published image carries as
-# `org.opencontainers.image.revision`, so it MUST invalidate the image config
-# when the commit changes -- a volatile key would let a cached config blob
-# re-publish the PREVIOUS commit's sha, which is a confidently wrong provenance
-# answer rather than a missing one. Being stable costs nothing: the value is
-# identical for every build at a given commit, so the remote cache still hits
-# across machines, and only the (tiny) config/manifest actions re-run between
-# commits -- never a layer, a compile or a link.
+# STABLE_ on purpose, and DO NOT REMOVE IT (#1378). No image and no binary
+# carries the commit any more, so an unchanged image keeps its digest from one
+# commit to the next. What still must change with every commit is what NAMES a
+# build: the per-commit image tag (`dev-<sha>`, bazel/img/go_multi_arch_image.bzl)
+# and the charts' `X.Y.Z-<sha>` version. Those are written by actions that take
+# stable-status.txt as an input, and a change to a STABLE_ key is the only thing
+# in this file that re-runs an action. Without a commit-derived STABLE_ key a
+# warm Bazel server re-uses the previous commit's result and publishes commit
+# B's artifacts under commit A's tag and chart version (measured during the
+# #1378 scoping). The volatile GIT_COMMIT below cannot do this job.
+#
+# It costs nothing: the value is the same for every build at a commit, so the
+# remote cache still hits across machines, and between commits only the push
+# specs and the chart packages re-run, never a layer, a compile or a link.
+# //bazel/img:digest_stability_test fails if this key goes away.
 echo "STABLE_GIT_COMMIT $(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
 echo "BUILD_TIMESTAMP $(date +%s)"
 echo "GIT_COMMIT $(git rev-parse HEAD 2>/dev/null || echo 'unknown')"

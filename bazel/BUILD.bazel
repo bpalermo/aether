@@ -15,6 +15,14 @@ load("@rules_shell//shell:sh_library.bzl", "sh_library")
 # would silently stop at each BUILD.bazel rather than reaching into them. If one
 # of them ever gains a script it needs its own target, which is what
 # scripts/check-shell-lint.sh is there to notice.
+# The status script as a file, for //bazel/img:digest_stability_test, which runs
+# it in a scratch git repository to hold it to the one property the release
+# depends on (#1378): it emits a commit-derived STABLE_ key.
+exports_files(
+    ["workspace_status.sh"],
+    visibility = ["//bazel/img:__pkg__"],
+)
+
 sh_library(
     name = "bazel_shell",
     srcs = glob(["*.sh"]),
