@@ -12,7 +12,9 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "prober.labels" . | nindent 8 }}
+        {{- /* podLabels, never labels: nothing that names the release may sit
+               on the pod template, or every release rolls every prober (#1372). */}}
+        {{- include "prober.podLabels" . | nindent 8 }}
         # Mesh injection: the CNI intercepts this pod and the agent plumbs the
         # per-pod egress listener at {{ .Values.probe.egress }}.
         aether.io/managed: "true"

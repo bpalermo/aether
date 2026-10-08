@@ -1,6 +1,6 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_template_absent_test", "helm_template_match_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_match_test")
 
 # prober Helm chart (published to chart_registry_url("prober"); see @aether_registry//:registry.bzl).
 #
@@ -260,5 +260,146 @@ helm_template_match_test(
     patterns = [
         AUTHZ_ECHO_DEFAULT,
         AUTHZ_CURL_PRE + "\\s+limits:\\n\\s+cpu: 100m\\n\\s+memory: 32Mi\\n\\s+requests:\\n\\s+cpu: 10m\\n\\s+memory: 24Mi\\n" + AUTHZ_CANARY_POST,
+    ],
+)
+
+# #1372: no pod template depends on the chart version or the appVersion. The
+# prober DaemonSet's pod template carried `helm.sh/chart: prober-<version>` and
+# `app.kubernetes.io/version` (prober.labels), and this chart's version carries
+# the commit, so every release rolled every prober pod. The same test asserts
+# each workload OBJECT still carries `helm.sh/chart: prober-<version>`.
+helm_pod_template_version_test(
+    name = "prober_pod_template_version_test",
+    chart = ":prober",
+    workloads = 1,
+)
+
+# ...with the authz canary's two Deployments rendered too.
+helm_pod_template_version_test(
+    name = "prober_pod_template_version_authz_canary_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS,
+    workloads = 3,
+)
+
+# #1372: what the pod template carries instead, exactly: the three selector
+# labels, part-of, managed-by and the mesh-injection label. Positional: the
+# pattern starts at `template:` -> `metadata:` -> `labels:` and ends at the key
+# that follows the labels.
+helm_template_test(
+    name = "prober_pod_labels_test",
+    chart = ":prober",
+    template_patterns = {
+        "prober/templates/daemonset.yaml": [
+            "\\n  template:\\n    metadata:\\n      labels:" +
+            "\\n        app.kubernetes.io/name: prober" +
+            "\\n        app.kubernetes.io/instance: \\S+" +
+            "\\n        app.kubernetes.io/component: prober" +
+            "\\n        app.kubernetes.io/part-of: aether" +
+            "\\n        app.kubernetes.io/managed-by: Helm" +
+            "\\n(\\s+#[^\\n]*\\n)+        aether.io/managed: \"true\"\\n      annotations:",
+        ],
+    },
+)
+
+# #1372 guard: a selector is immutable on upgrade, so the DaemonSet's stays
+# exactly the three labels it was and never gains a version-carrying one.
+# Positional: `matchLabels:` is followed by the three labels and then by a key
+# one level up. The prober's own objects keep `component: prober` on their
+# metadata (#1373 moves only the canary objects off it).
+helm_template_test(
+    name = "prober_selector_labels_test",
+    chart = ":prober",
+    template_patterns = {
+        "prober/templates/daemonset.yaml": [
+            "\\n  selector:\\n    matchLabels:\\n      app.kubernetes.io/name: prober" +
+            "\\n      app.kubernetes.io/instance: \\S+\\n      app.kubernetes.io/component: prober\\n  \\S",
+            "kind: DaemonSet\\nmetadata:\\n  name: \\S+\\n  namespace: \\S+\\n  labels:\\n    helm.sh/chart: prober-\\S+" +
+            "\\n    app.kubernetes.io/name: prober\\n    app.kubernetes.io/instance: \\S+\\n    app.kubernetes.io/component: prober\\n",
+        ],
+        "prober/templates/serviceaccount.yaml": [
+            "\\n    app.kubernetes.io/component: prober\\n",
+        ],
+    },
+)
+
+# #1372/#1373 guard: the two canary Deployments select on `app` alone, and their
+# pod templates carry `app` and the mesh-injection label and nothing else. A
+# Deployment's selector is immutable, and no label change may reach these pods.
+helm_template_match_test(
+    name = "prober_authz_canary_selectors_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS,
+    patterns = [
+        "\\n  selector:\\n    matchLabels: \\{app: " + app + "\\}\\n  template:\\n    metadata:\\n      labels:" +
+        "\\n        app: " + app + "\\n        aether.io/managed: \"true\"\\n      annotations:"
+        for app in [
+            "authz-echo",
+            "authz-canary",
+        ]
+    ],
+)
+
+# #1373: the five authz-canary objects carry their own component on their
+# metadata. They used prober.labels, so `-l app.kubernetes.io/component=prober`
+# (the prober DaemonSet's selector labels) counted them as the prober. Each
+# pattern names one object by kind and name; `name` and `instance` stay the
+# release's.
+helm_template_match_test(
+    name = "prober_authz_canary_labels_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS,
+    patterns = [
+        "kind: " + kind + "\\nmetadata:\\n  name: " + name + "\\n  namespace: \\S+\\n  labels:" +
+        "\\n    helm.sh/chart: prober-\\S+" +
+        "\\n    app.kubernetes.io/name: prober" +
+        "\\n    app.kubernetes.io/instance: \\S+" +
+        "\\n    app.kubernetes.io/component: authz-canary" +
+        "\\n    app.kubernetes.io/part-of: aether" +
+        "\\n    app.kubernetes.io/managed-by: Helm\\n"
+        for kind, name in [
+            ("ServiceAccount", "authz-canary"),
+            ("ServiceAccount", "authz-echo"),
+            ("Deployment", "authz-echo"),
+            ("HTTPFilter", "authz-canary"),
+            ("Deployment", "authz-canary"),
+        ]
+    ],
+)
+
+# Guard: with the canary off (the default) none of its objects render.
+helm_template_absent_test(
+    name = "prober_authz_canary_off_test",
+    absent = [
+        "authz-canary",
+        "authz-echo",
+        "curlimages",
+    ],
+    chart = ":prober",
+    control = "kind: DaemonSet",
+)
+
+# #1374: the canary's client image is pinned by digest, like its echo image (a
+# tag can be re-pushed). Anchored on the container name before it and the
+# `command:` line after it.
+helm_template_match_test(
+    name = "prober_authz_canary_image_digest_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS,
+    patterns = [
+        "\\n        - name: curl\\n          image: \"curlimages/curl@sha256:[0-9a-f]{64}\"\\n          command:",
+    ],
+)
+
+# Guard: an image the operator sets renders as given.
+helm_template_match_test(
+    name = "prober_authz_canary_image_override_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS + [
+        "--set",
+        "authzCanary.image=registry.example/curl:1",
+    ],
+    patterns = [
+        "\\n        - name: curl\\n          image: \"registry.example/curl:1\"\\n          command:",
     ],
 )

@@ -106,20 +106,57 @@ Chart label value (name-version).
 {{- end -}}
 
 {{/*
-Selector labels (immutable subset).
+Labels, in three sets (#1372; the same split as the aether chart's, #1363):
+
+  prober.selectorLabels  name + instance + component. Immutable: they are the
+                         DaemonSet's selector.
+  prober.podLabels       the selector labels + part-of + managed-by. What the
+                         POD TEMPLATE carries. Nothing here may change from one
+                         release to the next: a pod template that changes rolls
+                         every prober pod.
+  prober.labels          the pod labels + helm.sh/chart + app.kubernetes.io/
+                         version. What an OBJECT carries on its own metadata
+                         (the DaemonSet, the ServiceAccount, the Namespace).
+
+Until chart 1.0.5 the pod template used `labels`, and this chart's version
+carries the commit, so every release rolled every prober pod.
+//charts/prober:prober_pod_template_version_test renders the chart at two
+versions and fails if a pod template differs.
 */}}
 {{- define "prober.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "prober.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: prober
 {{- end -}}
-
-{{/*
-Common labels.
-*/}}
+{{- define "prober.podLabels" -}}
+{{ include "prober.selectorLabels" . }}
+app.kubernetes.io/part-of: aether
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
 {{- define "prober.labels" -}}
 helm.sh/chart: {{ include "prober.chart" . }}
-{{ include "prober.selectorLabels" . }}
+{{ include "prober.podLabels" . }}
+{{- with .Chart.AppVersion }}
+app.kubernetes.io/version: {{ . | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Labels of the authz-canary OBJECTS (its two ServiceAccounts, two Deployments
+and the HTTPFilter), on their own metadata (#1373). The same as prober.labels
+except for the component: with `component: prober` the canary objects matched
+the prober DaemonSet's selector labels, so `-l app.kubernetes.io/component=prober`
+counted them as the prober.
+
+Object metadata only. The canary Deployments select on `app: authz-echo` /
+`app: authz-canary` and their pod templates carry that label and nothing from
+here: a Deployment's selector is immutable, and nothing here may reach a pod.
+*/}}
+{{- define "prober.authzCanary.labels" -}}
+helm.sh/chart: {{ include "prober.chart" . }}
+app.kubernetes.io/name: {{ include "prober.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: authz-canary
 app.kubernetes.io/part-of: aether
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- with .Chart.AppVersion }}

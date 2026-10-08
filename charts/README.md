@@ -138,6 +138,9 @@ new commit still rolls everything: see the runbook. To see which release a pod
 belongs to, read its owner
 (`kubectl get ds,deploy -A -l app.kubernetes.io/part-of=aether -L helm.sh/chart,app.kubernetes.io/version`)
 or `helm list -A`. See `docs/runbook.md`, "Which workloads a chart upgrade rolls".
+The `prober` chart follows the same rule since 1.0.5 (#1372), and its authz
+canary's objects carry `app.kubernetes.io/component: authz-canary` instead of
+the prober's component (#1373).
 
 ## Publish to Quay (OCI)
 
