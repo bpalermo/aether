@@ -159,10 +159,11 @@ func concurrencyArg(args []string) (n int, explicit bool, err error) {
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; {
 		case a == envoyFlagConcurrency:
-			// The next argument is the value, whatever it looks like.
-			i++
-			if noValue = i >= len(args); !noValue {
-				v = args[i]
+			// The next argument is the value. It is read but not skipped, so
+			// a --concurrency standing where a value should be is still
+			// counted as a repeat.
+			if noValue = i+1 >= len(args); !noValue {
+				v = args[i+1]
 			}
 		case strings.HasPrefix(a, envoyFlagConcurrency+"="):
 			v = strings.TrimPrefix(a, envoyFlagConcurrency+"=")

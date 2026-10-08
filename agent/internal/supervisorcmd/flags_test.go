@@ -210,6 +210,9 @@ func TestEnvoyArgConcurrencyOnceOnly(t *testing.T) {
 		"three times":           {"--concurrency", "1", "--concurrency", "2", "--concurrency", "3"},
 		"second one is invalid": {"--concurrency", "2", "--concurrency", "x"},
 		"first one is invalid":  {"--concurrency", "x", "--concurrency", "2"},
+		// A second --concurrency standing where the first one's value should be.
+		"adjacent, separate": {"--concurrency", "--concurrency", "2"},
+		"adjacent, equals":   {"--concurrency", "--concurrency=4"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := checkEnvoyArgs(args)
