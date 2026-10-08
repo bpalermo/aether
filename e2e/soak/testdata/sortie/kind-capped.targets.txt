@@ -1,0 +1,9 @@
+# kind stand-in for sortie-targets.txt: the same shape (six 9 rps targets, two 3 rps UDS targets)
+tcp-a       http://tcp-echo.aether-test.aether.internal:18081/    3
+tcp-b       http://tcp-echo.aether-test.aether.internal:18081/    3
+tcp-c       http://tcp-echo.aether-test.aether.internal:18081/    3
+tcp-d       http://tcp-echo.aether-test.aether.internal:18081/    3
+tcp-e       http://tcp-echo.aether-test.aether.internal:18081/    3
+tcp-f       http://tcp-echo.aether-test.aether.internal:18081/    3
+uds-echo    http://uds-echo.aether-test.aether.internal:18081/    1
+uds-cr-echo http://uds-cr-echo.aether-test.aether.internal:18081/ 1

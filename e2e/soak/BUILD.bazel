@@ -24,9 +24,16 @@ sh_library(
 # for want of jq; jq is now the Bazel-pinned one (jq.bzl), so it runs in
 # `bazel test //...` like any other test. awk and coreutils come from the host,
 # as for every sh_test in this repository.
+#
+# It also runs two of the scripts for real, against fakes: restart-watch.sh, once
+# per command it executes up to its first wait, with a TERM before that command
+# (#1386: about 130 short runs, which is most of this test's time, hence the
+# timeout), and run.sh up to a Job that has already ended (#1387). Those need
+# setsid, timeout and ps from the host.
 sh_test(
     name = "harness_test",
     size = "small",
+    timeout = "moderate",
     srcs = ["harness_test.sh"],
     data = [
         "pods-not-ready.awk",

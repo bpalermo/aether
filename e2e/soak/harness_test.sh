@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Dry tests for the soak harness's parsing logic -- no cluster, no network:
 #   - restart-watch.sh (#1242) against canned `kubectl get pods -o json`
-#     fixtures in testdata/restart-watch/, through a fake kubectl;
+#     fixtures in testdata/restart-watch/, through a fake kubectl; and its stop
+#     (#1386): a TERM before every command it runs up to its first wait, and
+#     during every kubectl call, must end it with exit 143 and leave no process
+#     in its session;
 #   - udscsi-window.awk (#1243), the uds-csi step's plugin-down detector,
 #     against canned `kubectl get pods -w -o jsonpath` lines;
 #   - pods-not-ready.awk (#1323), the kickoff's readiness check, against canned
@@ -18,15 +21,22 @@
 #     froze and answered late, failures and a slow node on one backend only, a
 #     cancelled run, a short pool, requests still in flight at the end
 #     (http_inflight_lost), the count judged as a range, a stage refused at the
-#     execution cap with the stages after it not run, a results stream with a
-#     broken last line and one holding two runs, and two old-format reports,
-#     which are refused. The kind-* files are REAL: trimmed from kind runs of
-#     this harness against sortie 9fcbb81 (a clean run, its results stream, a
-#     capped staircase and the sortie pod's log of it). The others are canned:
-#     the shape is sortie's, the numbers are made up;
+#     execution cap with the stages after it not run (known by sortie f0750ec's
+#     `refused` field, and for a 9fcbb81 report by its text), a results stream
+#     with a broken last line and one holding two runs, and two old-format
+#     reports, which are refused. The kind-* files are REAL: trimmed from kind
+#     runs of this harness against sortie 9fcbb81 (kind-clean, kind-results-
+#     stream, kind-not-run: a clean run, its results stream, a capped staircase
+#     and the sortie pod's log of it) and against sortie f0750ec (kind-refused:
+#     the same staircase, report, stream and log; kind-capped: eight targets
+#     against engines capped at 4, the whole report and stream). The others
+#     are canned: the shape is sortie's, the numbers are made up;
 #   - sortie-save.sh: its offline --times, and the save itself against a fake
 #     kubectl (both files, a stream with a broken last line and no report, a
 #     download that breaks off, a reader pod that cannot be deleted);
+#   - run.sh, run (#1387): the kickoff against a fake kubectl and a fake helm,
+#     up to a Job whose pod has already ended; the saver must have been armed
+#     first and the run directory must hold that run's report and stream;
 #   - sortie-values.yaml and run.sh, read: the three digest pins, no CPU limit
 #     on the engine, the PriorityClass on the engines AND the sortie pod, and
 #     the engine's name taken from its node.
@@ -74,6 +84,20 @@ while [ $# -gt 0 ]; do
 	*) shift ;;
 	esac
 done
+# FAKE_TERM_AT_CALL=n: on the n-th call of the run, send TERM to the caller's
+# session leader (the watchdog, started under setsid), stay in the foreground
+# for another 50 ms, and then note whether the watchdog is still there: one
+# that waited for this call is, one that died under it is not.
+if [ -n "${FAKE_TERM_AT_CALL:-}" ]; then
+	calls=$(($(cat "$FAKE_STATE/calls" 2>/dev/null || echo 0) + 1))
+	echo "$calls" >"$FAKE_STATE/calls"
+	if [ "$calls" -eq "$FAKE_TERM_AT_CALL" ]; then
+		leader="$(ps -o sid= -p "$$" | tr -d ' ')"
+		kill -TERM "$leader"
+		sleep 0.05
+		if kill -0 "$leader" 2>/dev/null; then : >"$FAKE_STATE/waited-for"; fi
+	fi
+fi
 cf="$FAKE_STATE/$ns.count"
 n=$(cat "$cf" 2>/dev/null || echo 0)
 echo $((n + 1)) >"$cf"
@@ -158,23 +182,179 @@ expect "$L" "nobase: ERROR per try" ' ERROR kubectl failed: ns=aether-system bas
 expect "$L" "nobase: no ok line" ' ok ' 0
 expect "$L" "nobase: summary says why" ' SUMMARY restart-watch verdict=UNPROVEN reason=no-baseline tries=2 ' 1
 
-# --- restart-watch: stopped early -----------------------------------------------
+# --- restart-watch: stopped early, and nothing left behind (#1386) --------------
+# The watchdog is started as run.sh starts it, under setsid, so everything it
+# forks is in a session of its own and "did it leave a process behind?" is a
+# question `ps` can answer: after it has exited, that session must be empty.
+#
+# start_watch <log> [restart-watch args...]: starts it in the background on the
+# `clean` fixtures, an hour between samples, and leaves $wpid (to signal and
+# wait for; a `timeout` that ends a watchdog which never exits, so a broken
+# script fails this test instead of hanging it) and $wsid (the session).
+start_watch() {
+	local logf="$1"
+	shift
+	# A fresh log every time: a log that exists is archived first, which is one
+	# more command, and the sweep below counts commands.
+	rm -rf "$TMP/state" "$TMP/watch.pid" "$logf" "$logf".*.prev && mkdir -p "$TMP/state"
+	# shellcheck disable=SC2016 # $$ and $@ are the inner shell's
+	FAKE_DIR="$FIX/clean" FAKE_STATE="$TMP/state" RESTART_WATCH_KUBECTL="$TMP/kubectl" \
+		timeout -s KILL 10 setsid bash -c 'echo "$$" >"$1"; shift; exec bash "$@"' _ "$TMP/watch.pid" \
+		"$WATCH" --context fake --interval 3600 --duration 2h --log "$logf" "$@" &
+	wpid=$!
+	for _ in $(seq 1 100); do
+		[ -s "$TMP/watch.pid" ] && break
+		sleep 0.02
+	done
+	wsid=$(cat "$TMP/watch.pid" 2>/dev/null)
+}
+# session_left <sid>: what is still running in that session, "pid args" per line.
+session_left() { ps -e -o sid=,pid=,args= | awk -v s="$1" '$1 == s { $1 = ""; sub(/^ +/, ""); print }'; }
+# survivors <sid>: prints what the watchdog left behind, and kills it (an orphan
+# `sleep 3599` holds this test's stdout open for an hour: that was the symptom).
+# A child that was just ending may take a moment to go; one that is still there
+# after half a second was left behind. (Half a second, not more: the watchdog
+# waits in two-second slices, and a two-second sleep left behind must not get
+# the time to end by itself and pass for nothing.)
+survivors() {
+	local left=""
+	for _ in $(seq 1 10); do
+		left=$(session_left "$1")
+		[ -z "$left" ] && return 0
+		sleep 0.05
+	done
+	echo "$left"
+	echo "$left" | awk '{print $1}' | xargs -r kill -KILL 2>/dev/null
+}
+if [ -z "$(ps -e -o sid=,pid=,args= 2>/dev/null)" ] || ! command -v setsid >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
+	fail "term: this test needs ps (procps), setsid and timeout to see what the watchdog leaves behind"
+fi
+
 L="$TMP/term.log"
-rm -rf "$TMP/state" && mkdir -p "$TMP/state"
-FAKE_DIR="$FIX/clean" FAKE_STATE="$TMP/state" RESTART_WATCH_KUBECTL="$TMP/kubectl" \
-	bash "$WATCH" --context fake --interval 3600 --duration 2h --log "$L" &
-wpid=$!
+start_watch "$L"
 for _ in $(seq 1 50); do
 	if grep -q ' BASELINE count=' "$L" 2>/dev/null; then break; fi
 	sleep 0.1
 done
 t0=$(date +%s)
-kill -TERM "$wpid"
+kill -TERM "$wsid"
 wait "$wpid"
 rc=$?
 show "TERM mid-interval" "$L"
 if [ "$rc" -eq 143 ] && [ $(($(date +%s) - t0)) -lt 5 ]; then pass "term: exits 143 at once"; else fail "term: exit $rc after $(($(date +%s) - t0))s"; fi
 expect "$L" "term: verdict UNPROVEN ended=TERM" ' SUMMARY restart-watch verdict=UNPROVEN new_restarts=0 containers=0 samples=0 error_samples=0 baseline=1 ended=TERM ' 1
+left=$(survivors "$wsid")
+if [ -z "$left" ]; then pass "term: no process of the watchdog is left"; else fail "term: left behind: $left"; fi
+
+# TERM at EVERY point. A trap runs between two commands, so the points that
+# matter are the command boundaries, and they can be enumerated instead of
+# guessed at with a timer: a DEBUG trap (loaded through BASH_ENV, into
+# restart-watch.sh only) counts the commands the main shell runs and sends it
+# TERM before the k-th. One traced run finds N, the command that is the first
+# wait between samples (`read -r -t`; in the old script, `wait`); then k = 1..N,
+# each a run of its own. Every one must exit 143 and leave nothing. The old
+# script fails at k = N-1, before `SLEEP_PID=$!`, every time (the sleep is
+# running and its PID is not yet where the trap looks), and in some runs at
+# k = N as well, before `wait "$SLEEP_PID"` (the trap's kill is sent and the
+# sleep is still there afterwards).
+cat >"$TMP/term-hook.sh" <<'EOF'
+case "${0##*/}" in restart-watch.sh) ;; *) return 0 ;; esac
+__rw_n=0
+__rw_hook() {
+	[ "$BASHPID" = "$$" ] || return 0
+	__rw_n=$((__rw_n + 1))
+	if [ -n "${RW_TRACE:-}" ]; then printf '%s\t%s\n' "$__rw_n" "$1" >>"$RW_TRACE"; fi
+	if [ "$__rw_n" = "${RW_TERM_AT:-0}" ]; then kill -TERM "$$"; fi
+	return 0
+}
+set -T
+trap '__rw_hook "$BASH_COMMAND"' DEBUG
+EOF
+: >"$TMP/term-trace.tsv"
+BASH_ENV="$TMP/term-hook.sh" RW_TRACE="$TMP/term-trace.tsv" start_watch "$TMP/term-trace.log" --namespaces aether-ingress
+for _ in $(seq 1 100); do
+	if cut -f2 "$TMP/term-trace.tsv" 2>/dev/null | grep -qE '^(read -r -t|wait) '; then break; fi
+	sleep 0.1
+done
+kill -TERM "$wsid"
+wait "$wpid"
+survivors "$wsid" >/dev/null
+N=$(awk -F'\t' '$2 ~ /^(read -r -t|wait) / {print $1; exit}' "$TMP/term-trace.tsv")
+if [ "${N:-0}" -ge 30 ]; then
+	pass "term sweep: the watchdog runs $N commands up to its first wait between samples"
+else
+	fail "term sweep: could not trace the watchdog up to its first wait between samples (N='${N:-}'): the sweep below proves nothing"
+	N=0
+fi
+bad="" nbad=0
+for k in $(seq 1 "$N"); do
+	BASH_ENV="$TMP/term-hook.sh" RW_TERM_AT="$k" start_watch "$TMP/term-sweep.log" --namespaces aether-ingress
+	wait "$wpid"
+	rc=$?
+	left=$(survivors "$wsid")
+	if [ "$rc" -ne 143 ] || [ -n "$left" ]; then
+		nbad=$((nbad + 1))
+		bad="$bad
+  TERM before command $k, \`$(awk -F'\t' -v k="$k" '$1 == k {print $2; exit}' "$TMP/term-trace.tsv")\`: exit $rc, left behind: ${left:-nothing}"
+		# A watchdog that no longer stops costs 10 s a try: three are enough to say so.
+		if [ "$nbad" -ge 3 ]; then
+			bad="$bad
+  (stopped after three)"
+			break
+		fi
+	fi
+done
+if [ "$N" -eq 0 ]; then
+	:
+elif [ -z "$bad" ]; then
+	pass "term sweep: TERM before each of the $N commands: exit 143 and no process left, every time"
+else
+	fail "term sweep: a TERM at these points was not handled cleanly:$bad"
+fi
+# ... and INSIDE a command: TERM while a kubectl call is in the foreground. The
+# fake sends it itself, to the watchdog (its session's leader), on its n-th call
+# and then takes another 50 ms to answer: the three calls of the baseline, and
+# the three of the first sample. The trap must wait for the call (a kubectl
+# killed with the shell would be the orphan) and then end the run.
+#
+# Sent by the fake and not by a timer, on purpose. A timer was tried, and twice
+# in 1,680 runs it showed something else: bash 5.2.21 can lose a trapped signal
+# that lands while it is expanding a `$(...)` -- `trap: line 2: unexpected EOF
+# while looking for matching ')'`, the handler is not run, and the script goes
+# on as if nothing had been sent. That is bash's, it orphans nothing, and a
+# test that met it at random would fail for no fault of the watchdog's.
+waited_word() { if [ -e "$TMP/state/waited-for" ]; then echo "waited for"; else echo "NOT waited for"; fi; }
+bad=""
+for n in 1 2 3 4 5 6; do
+	FAKE_TERM_AT_CALL="$n" start_watch "$TMP/term-call.log" --interval 0 --samples 3
+	wait "$wpid"
+	rc=$?
+	left=$(survivors "$wsid")
+	if [ "$rc" -ne 143 ] || [ -n "$left" ] || ! grep -q ' SUMMARY restart-watch verdict=UNPROVEN .* ended=TERM ' "$TMP/term-call.log" ||
+		[ "$(cat "$TMP/state/calls" 2>/dev/null)" != "$n" ] || [ ! -e "$TMP/state/waited-for" ]; then
+		bad="$bad
+  TERM during kubectl call $n: exit $rc, calls made: $(cat "$TMP/state/calls" 2>/dev/null), the call was $(waited_word), left behind: ${left:-nothing}, last line: $(tail -n 1 "$TMP/term-call.log")"
+	fi
+done
+if [ -z "$bad" ]; then
+	pass "term in a call: TERM during each of 6 kubectl calls: that call is waited for, no further one is made, SUMMARY ended=TERM, exit 143, no process left"
+else
+	fail "term in a call:$bad"
+fi
+# The same during --preflight, which has no log and so only the trap of the
+# script's first lines: without it TERM kills the shell where it stands, and the
+# kubectl it was waiting for (up to its 20 s request timeout) lives on.
+start_watch "$TMP/term-preflight.log" --preflight
+if wait "$wpid"; then pass "term in preflight: (control) --preflight on these fixtures exits 0"; else fail "term in preflight: the control run did not exit 0"; fi
+FAKE_TERM_AT_CALL=2 start_watch "$TMP/term-preflight.log" --preflight
+wait "$wpid"
+rc=$?
+left=$(survivors "$wsid")
+if [ "$rc" -eq 143 ] && [ -z "$left" ] && [ -e "$TMP/state/waited-for" ] && [ "$(cat "$TMP/state/calls")" = 2 ]; then
+	pass "term in preflight: TERM during a kubectl call of --preflight: the call is waited for, exit 143, no process left"
+else
+	fail "term in preflight: exit $rc, calls made: $(cat "$TMP/state/calls" 2>/dev/null), the call was $(waited_word), left behind: ${left:-nothing}"
+fi
 
 # --- restart-watch: the log is the source of truth; a prior run is archived ---
 L="$TMP/archive.log"
@@ -571,6 +751,79 @@ run_gate clean "$G" --log "$TMP/clean.log"
 rc=$?
 if [ "$rc" -eq 0 ] && grep -q '^VERDICT PASS .* not_run=0 ' "$G"; then pass "gate: a log with 'N/N executions passed' and no SKIP leaves a clean report PASS"; else fail "gate: clean report + clean log gave exit $rc: $(tail -n 1 "$G")"; fi
 
+# --- what sortie f0750ec added: "refused": "execution_cap", each seen RED -------
+# The refused stage is MARKED now, where 9fcbb81 only worded it: the field is on
+# every execution of the stage and on each backend_errors entry that is an
+# engine which refused. The gate reads the field. The kind-not-run.* fixture
+# above is the 9fcbb81 report and has no such field anywhere: it is what keeps
+# the one fallback honest (the error text, read only when the field is absent),
+# because that pin's reports are still graded with this gate.
+if jq -e '[.. | objects | select(has("refused"))] | length == 0' "$SF/kind-not-run.json" >/dev/null; then
+	pass "gate refused: the 9fcbb81 fixture has no 'refused' field (so the tests above are the text fallback's)"
+else
+	fail "gate refused: kind-not-run.json carries a 'refused' field: it no longer exercises the fallback"
+fi
+# REAL: the same staircase on kind against sortie f0750ec, cut to four of its
+# fifteen executions and the pod log's lines about them. tcp-c/stage-1 lists
+# both engines in backend_errors, each marked; tcp-a/stage-1 was started and
+# then stopped with the stage, and lists none.
+G="$TMP/gate-refused.log"
+bash "$GATE" --report "$SF/kind-refused.json" --shares "$SF/kind-refused.shares.tsv" --backends 2 \
+	--engines "$SF/kind-refused.engines.tsv" --log "$SF/kind-refused.log" --per-node >"$G" 2>&1
+rc=$?
+show "gate: a stage refused at the execution cap, marked by sortie f0750ec (a real report)" "$G"
+if [ "$rc" -eq 1 ]; then pass "gate refused: exit 1"; else fail "gate refused: exit $rc, want 1"; fi
+expect "$G" "gate refused: the stage says so, and names the engines that refused, by node" '^FAIL  tcp-c/stage-1  .* -- REFUSED AT THE EXECUTION CAP, nothing of this stage ran: backend 10\.10\.2\.12:8443 refused a start .* \[refused by: sortie-worker sortie-worker2\]$' 1
+expect "$G" "gate refused: an execution of that stage with no backend_errors is refused too (it was stopped with the stage)" '^FAIL  tcp-a/stage-1  .* -- REFUSED AT THE EXECUTION CAP, nothing of this stage ran: [^[]*$' 1
+expect "$G" "gate refused: the stages after it are NOT RUN" '^FAIL  tcp-c/stage-[23]  -- NOT RUN: ' 2
+expect "$G" "gate refused: per node, the engine refused; it was not lost" '^NODE  tcp-c/stage-1  sortie-worker2?  REFUSED the start: the engine was at its execution cap$' 2
+expect "$G" "gate refused: no engine is called lost" '(LOST BACKEND|^LOST |LOST, returned nothing)' 0
+expect "$G" "gate refused: verdict (10 not run: the whole run's, from the log)" '^VERDICT FAIL targets=4 passed=0 failed=4 not_run=10 backends=2 lost_backends=0 report_pass=false$' 1
+# RED for "the field, not the text": the same report with every error reworded,
+# so that nothing in it matches what the gate used to look for. The gate of
+# 9fcbb81 read this as two LOST backends and `error: ...`.
+jq '(.executions[] | select(.refused != null) | .error) = "no slot was free on a backend"
+	| (.executions[].backend_errors[]? | .error) = "start turned down"' "$SF/kind-refused.json" >"$TMP/refused-reworded.json"
+G="$TMP/gate-refused-reworded.log"
+bash "$GATE" --report "$TMP/refused-reworded.json" --shares "$SF/kind-refused.shares.tsv" --backends 2 --engines "$SF/kind-refused.engines.tsv" >"$G" 2>&1
+show "gate: the same refusal with its error text reworded (only the field says it)" "$G"
+expect "$G" "gate refused: read from the FIELD -- reworded errors change nothing (RED: by text these were lost backends)" '^FAIL  tcp-[ac]/stage-1  .* -- REFUSED AT THE EXECUTION CAP, nothing of this stage ran: no slot was free on a backend' 2
+expect "$G" "gate refused: ... and still no engine is called lost" '^VERDICT FAIL targets=4 passed=0 failed=4 not_run=2 backends=2 lost_backends=0 ' 1
+# A backend that really was lost, beside one that refused, in the same refused
+# execution: the entry without the mark is a lost backend and is named as one.
+# (Canned: the real report with one entry's mark taken off and its error
+# replaced. RED: a gate that treats every entry of a refused stage as a refusal,
+# as the text match had to, hides the lost engine.)
+jq '(.executions[] | select(.label == "mesh/tcp-c/stage-1") | .backend_errors[] | select(.backend == "10.10.1.10:8443"))
+	|= (del(.refused) | .error = "awaiting execution response: rpc error: code = Unavailable desc = error reading from server: EOF")' \
+	"$SF/kind-refused.json" >"$TMP/refused-and-lost.json"
+G="$TMP/gate-refused-lost.log"
+bash "$GATE" --report "$TMP/refused-and-lost.json" --shares "$SF/kind-refused.shares.tsv" --backends 2 --engines "$SF/kind-refused.engines.tsv" --per-node >"$G" 2>&1
+show "gate: one engine refused and another was lost, in the same stage" "$G"
+expect "$G" "gate refused: the unmarked entry is a LOST backend, the marked one a refusal" '^FAIL  tcp-c/stage-1  .* -- REFUSED AT THE EXECUTION CAP, .* \[refused by: sortie-worker2\] \| LOST BACKEND sortie-worker \(10\.10\.1\.10:8443\) \[returned nothing\]$' 1
+expect "$G" "gate refused: ... listed once before the verdict, with what sortie said" '^LOST  sortie-worker \(10\.10\.1\.10:8443\)  targets=1  error: awaiting execution response: ' 1
+expect "$G" "gate refused: ... and counted" '^VERDICT FAIL targets=4 passed=0 failed=4 not_run=2 backends=2 lost_backends=1 ' 1
+expect "$G" "gate refused: per node, one of each" '^NODE  tcp-c/stage-1  sortie-worker(  LOST, returned nothing|2  REFUSED the start: .*)$' 2
+# The results stream carries the same field (each line is the execution's object
+# in the report): REAL, the same four executions as sortie appended them.
+G="$TMP/gate-refused-stream.log"
+bash "$GATE" --stream "$SF/kind-refused-stream.jsonl" --shares "$SF/kind-refused.shares.tsv" --backends 2 --engines "$SF/kind-refused.engines.tsv" >"$G" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then pass "gate refused: the results stream is graded the same way (exit 1)"; else fail "gate refused: stream gave exit $rc, want 1"; fi
+expect "$G" "gate refused: from the stream, the stage is refused by its field" '^FAIL  tcp-[ac]/stage-1  .* -- REFUSED AT THE EXECUTION CAP, ' 2
+expect "$G" "gate refused: from the stream, verdict" '^VERDICT FAIL targets=4 passed=0 failed=4 not_run=2 backends=2 lost_backends=0 report_pass=absent source=stream skipped_lines=0$' 1
+# The 9fcbb81 report, by its text: unchanged, and its engine is named the same way.
+G="$TMP/gate-notrun-fallback.log"
+bash "$GATE" --report "$SF/kind-not-run.json" --shares "$SF/kind-not-run.shares.tsv" --backends 2 --engines "$SF/kind-not-run.engines.tsv" >"$G" 2>&1
+expect "$G" "gate refused: a 9fcbb81 report (no field) is still read by its error text, and names the engine" '^FAIL  tcp-a/stage-1  .* -- REFUSED AT THE EXECUTION CAP, .* \[refused by: sortie-worker\]$' 1
+# ... but ONLY when the field is absent: an execution that carries a `refused`
+# the gate does not know is not second-guessed from its text.
+jq '(.executions[0].refused) = "something_new"' "$SF/kind-not-run.json" >"$TMP/refused-unknown.json"
+G="$TMP/gate-refused-unknown.log"
+bash "$GATE" --report "$TMP/refused-unknown.json" --shares "$SF/kind-not-run.shares.tsv" --backends 2 --engines "$SF/kind-not-run.engines.tsv" >"$G" 2>&1
+expect "$G" "gate refused: the text fallback is for a report WITHOUT the field only" '^FAIL  tcp-a/stage-1  .*REFUSED AT THE EXECUTION CAP' 0
+expect "$G" "gate refused: ... such an execution still fails, on what its backends report" '^FAIL  tcp-a/stage-1  .* -- LOST BACKEND sortie-worker ' 1
+
 # The count is judged as a RANGE against the plan (share x the configured
 # duration), 99 %..101 %, not as a rate over the backend's own elapsed time and
 # not as an equality: the engine fixes its elapsed time when the run stops and
@@ -700,7 +953,12 @@ case "$args" in
 	[ -e "$FAKE_SAVE/stuck" ] && exit 1
 	rm -f "$FAKE_SAVE/reading"
 	;;
-*" apply -f -"*) sed -n 's/.*command: \["cat", "\/report\/\(.*\)"\].*/\1/p' >"$FAKE_SAVE/reading" ;;
+*" apply -f -"*)
+	# Which file the reader pod was made to print: any *.jsonl is the PVC's
+	# r.jsonl and any *.json its r.json (run.sh names both by run tag).
+	sed -n 's/.*command: \["cat", "\/report\/\(.*\)"\].*/\1/p' |
+		sed -e 's/^.*\.jsonl$/r.jsonl/' -e 's/^.*\.json$/r.json/' >"$FAKE_SAVE/reading"
+	;;
 *" get pod soak-report-reader -o jsonpath="*) if [ -e "$FAKE_SAVE/pvc/$reading" ]; then printf Succeeded; else printf Failed; fi ;;
 *" get pod soak-report-reader"*) [ -e "$FAKE_SAVE/stuck" ] ;;
 *" logs soak-report-reader"*)
@@ -797,6 +1055,124 @@ run_save nopod
 if [ "$src" -eq 0 ] && [ -e "$SD/SAVED" ] && [ ! -e "$SD/sortie.log" ]; then pass "save no sortie pod: the report is saved, and no sortie.log is invented"; else fail "save no sortie pod: exit $src"; fi
 expect "$SL" "save no sortie pod: says the log is lost" ' the sortie pod of job/soak-sortie-abc is gone: no sortie\.log ' 1
 expect "$SL" "save no sortie pod: no shell error about the missing log" 'No such file or directory' 0
+
+# --- run.sh: a Job that has ended before the kickoff looks at it (#1387) --------
+# The kickoff itself, run: `run.sh e2e` against a fake kubectl and a fake helm,
+# up to its first look at the sortie pod, which is already `Failed` -- what a
+# stage refused at an engine's execution cap does within a second of starting.
+# run.sh used to abort there with the saver not yet armed, and that short run's
+# report and results stream stayed on the PVC. Now the saver is armed first, the
+# abort waits for it, and the run directory holds both files. On the fake PVC:
+# the REAL report and stream of exactly that run on kind (sortie f0750ec, eight
+# targets against engines capped at 4), so the last step is the gate grading
+# what the kickoff saved.
+mkdir -p "$TMP/runbin" "$TMP/run.fake"
+cat >"$TMP/runbin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+# What run.sh asks of the cluster; everything else is the saver's, and goes to
+# the saver's fake.
+args="$*"
+case "$args" in
+*" get --raw /readyz") ;;
+*" get priorityclass "*) echo '{"value":1000,"preemptionPolicy":"Never","globalDefault":false}' ;;
+*" get pods --no-headers") cat "$FAKE_RUN/pods.txt" ;;
+*" get svc "*) ;;
+*" get jobs -l "*" -o name") ;;
+*" get jobs -l "*" -o jsonpath="*) printf 'soak-sortie-abc' ;;
+*" get ds k6-soak-loader") exit 1 ;;
+*" get pods -o json") echo '{"items":[]}' ;;
+"--context fake apply -f -") cat >/dev/null ;;
+*" get storageclass -o json") echo '{"items":[{"metadata":{"name":"standard"}}]}' ;;
+*" rollout status "*) ;;
+*" get ds soak-sortie-engine -o jsonpath="*) printf '2 2\n' ;;
+*" get pods -l app.kubernetes.io/instance=soak,app.kubernetes.io/component=engine -o jsonpath="*)
+	printf '10.10.1.10\tsortie-worker\tsoak-sortie-engine-7f9g2\n10.10.2.12\tsortie-worker2\tsoak-sortie-engine-gb7x4\n'
+	;;
+*" get endpointslices "*) echo '{"items":[{"endpoints":[{"conditions":{"ready":true},"addresses":["10.10.1.10"]},{"conditions":{"ready":true},"addresses":["10.10.2.12"]}]}]}' ;;
+*" get pods -l job-name=soak-sortie-abc -o jsonpath={.items[0].status.phase}")
+	# The kickoff's look at the pod. Was the saver armed by now?
+	if [ -e "$FAKE_RUN_OUT/save.log" ]; then : >"$FAKE_RUN/armed-before-first-look"; fi
+	cat "$FAKE_RUN/phase"
+	;;
+*) exec "$FAKE_SAVE_KUBECTL" "$@" ;;
+esac
+EOF
+cat >"$TMP/runbin/helm" <<'EOF'
+#!/usr/bin/env bash
+# pull: leave a chart archive in the -d directory (the last argument).
+# template: two images, both by digest. upgrade: nothing.
+case "$*" in
+*" pull "*) : >"${*: -1}/chart-sortie.tgz" ;;
+"template "*) printf 'image: "quay.io/sortie/sortie@sha256:%064d"\nimage: "quay.io/sortie/engine@sha256:%064d"\n' 1 2 ;;
+*" upgrade "*) ;;
+*)
+	echo "fake helm: unexpected call: $*" >&2
+	exit 1
+	;;
+esac
+EOF
+chmod +x "$TMP/runbin/kubectl" "$TMP/runbin/helm"
+cp "$PF/pods-ready.txt" "$TMP/run.fake/pods.txt"
+printf Failed >"$TMP/run.fake/phase"
+# run_abort <name>: the kickoff against the fake PVC $TMP/save-run-<name>.fake/pvc;
+# leaves $RO (the run directory), $RL (run.sh's output) and $rc.
+run_abort() {
+	RO="$TMP/run-out-$1"
+	RL="$TMP/run-$1.log"
+	rm -f "$TMP/run.fake/armed-before-first-look"
+	PATH="$TMP/runbin:$PATH" FAKE_RUN="$TMP/run.fake" FAKE_RUN_OUT="$RO" FAKE_SAVE="$TMP/save-run-$1.fake" FAKE_SAVE_KUBECTL="$TMP/kubectl-save" \
+		SOAK_ENGINE_SETTLE=0 bash "$HERE/run.sh" e2e --context fake --out "$RO" --no-verify --statsd off --duration 120s \
+		--targets "$SF/kind-capped.targets.txt" >"$RL" 2>&1
+	rc=$?
+}
+mkdir -p "$TMP/save-run-both.fake/pvc"
+cp "$SF/kind-capped.json" "$TMP/save-run-both.fake/pvc/r.json"
+cp "$SF/kind-capped-stream.jsonl" "$TMP/save-run-both.fake/pvc/r.jsonl"
+run_abort both
+show "run.sh e2e: the sortie pod has already ended when the kickoff looks" "$RL"
+if [ -r "$RO/save.log" ]; then show "... and the saver it armed" "$RO/save.log"; fi
+if [ "$rc" -eq 1 ]; then pass "run abort: the kickoff still aborts (exit 1)"; else fail "run abort: exit $rc, want 1"; fi
+expect "$RL" "run abort: it got as far as the Job (the fakes answered every call before it)" ' ENGINES READY backends=2 ' 1
+if [ -e "$TMP/run.fake/armed-before-first-look" ]; then
+	pass "run abort: the saver was armed before the kickoff's FIRST look at the pod (RED before #1387: it was armed after the check, so never)"
+else
+	fail "run abort: the saver's log did not exist yet when the kickoff first asked for the pod's phase"
+fi
+armed=$(grep -n ' saver armed ' "$RL" | head -n 1 | cut -d: -f1)
+abort=$(grep -n ' ABORT the sortie pod of job/soak-sortie-abc is .Failed., not Running' "$RL" | head -n 1 | cut -d: -f1)
+if [ -n "$armed" ] && [ -n "$abort" ] && [ "$armed" -lt "$abort" ]; then
+	pass "run abort: ... and says so before it aborts"
+else
+	fail "run abort: 'saver armed' at line '${armed:-none}', the abort at line '${abort:-none}': the saver must be armed first"
+fi
+expect "$RL" "run abort: the abort says the run is saved and how to read it, with the saver's own last line" ' ABORT .* what it wrote is saved -- its report says why: sortie-gate\.sh --dir .*\[saver: SORTIE_SAVED dir=.* job=complete executions=8 pass=false not_run=0 .* stream_executions=8\]$' 1
+# Armed that early, the saver has no T_LOAD yet: it must count from T_JOB, not from 1970.
+expect "$RO/save.log" "run abort: the saver, armed before the load started, still has a clock (T_JOB)" " waiting for job/soak-sortie-abc \(plan 120s; giving up at $(date -u +%Y)-" 1
+expect "$RO/run.env" "run abort: run.env has the Job, when it was found, and the load's start, once each" '^(JOB|T_JOB|T_LOAD)=' 3
+if [ -e "$RO/SAVED" ] && cmp -s "$RO/report.json" "$SF/kind-capped.json" && cmp -s "$RO/results.jsonl" "$SF/kind-capped-stream.jsonl"; then
+	pass "run abort: the short run's report and results stream are in the run directory, byte for byte"
+else
+	fail "run abort: the run directory does not hold the report and the stream (SAVED, report.json or results.jsonl is missing, or differs from the PVC)"
+fi
+G="$TMP/gate-run-abort.log"
+bash "$GATE" --dir "$RO" >"$G" 2>&1
+rc=$?
+show "... and the gate on what the aborted kickoff saved" "$G"
+if [ "$rc" -eq 1 ]; then pass "run abort: the gate grades it (exit 1)"; else fail "run abort: the gate gave exit $rc, want 1"; fi
+expect "$G" "run abort: every target says why the Job died at once" '^FAIL  (tcp-[a-f]|uds-echo|uds-cr-echo)  .* -- REFUSED AT THE EXECUTION CAP, nothing of this stage ran: ' 8
+expect "$G" "run abort: verdict" '^VERDICT FAIL targets=8 passed=0 failed=8 not_run=0 backends=2 lost_backends=0 report_pass=false$' 1
+# The same abort when the report could NOT be saved (the pod died before it
+# wrote one: only the results stream is on the PVC). The abort must not say the
+# report is saved, nor send the reader to `sortie-gate.sh --dir`, which refuses
+# a directory with a stream and no report: it passes on what the saver said.
+mkdir -p "$TMP/save-run-stream.fake/pvc"
+cp "$SF/kind-capped-stream.jsonl" "$TMP/save-run-stream.fake/pvc/r.jsonl"
+run_abort stream
+show "run.sh e2e: the pod has ended and left a results stream but no report" "$RL"
+if [ "$rc" -eq 1 ] && [ ! -e "$RO/SAVED" ]; then pass "run abort, no report: exit 1 and no SAVED"; else fail "run abort, no report: exit $rc, and SAVED exists or the exit is wrong"; fi
+expect "$RL" "run abort, no report: the abort does not claim a saved report" ' ABORT .*what it wrote is saved' 0
+expect "$RL" "run abort, no report: it says the report could not be saved and passes on the saver's line, with the command that grades the stream" ' ABORT .* is .Failed., not Running .* its REPORT COULD NOT BE SAVED; .*: SORTIE_SAVE_FAILED no report .* the results stream IS saved: 8 execution\(s\) .* sortie-gate\.sh --dir .* --stream ' 1
+if cmp -s "$RO/results.jsonl" "$SF/kind-capped-stream.jsonl"; then pass "run abort, no report: the results stream is in the run directory"; else fail "run abort, no report: results.jsonl is missing or differs"; fi
 
 # A real report: the kind run of 2026-10-07 with sortie 9fcbb81 through run.sh
 # e2e (two engines, 5 minutes, 43,200 of 43,200 requests), three of its eight

@@ -61,8 +61,21 @@
 #   --preflight        take the baseline only, print it to stderr, exit 0 (or 2
 #                      if it cannot be taken). Writes no log.
 #
-# Needs kubectl and jq. RESTART_WATCH_KUBECTL replaces kubectl (the test hook).
+# TERM and INT end it at once (exit 143 / 130) and leave no process behind
+# (#1386): between samples it waits without a child process, and a call that is
+# in the foreground when the signal arrives (kubectl, at most its 20 s request
+# timeout) is waited for, not orphaned.
+#
+# Needs bash 4.2+, kubectl and jq. RESTART_WATCH_KUBECTL replaces kubectl (the
+# test hook).
 set -uo pipefail
+
+# From the first line: with a trap set, bash takes a signal between commands,
+# after the foreground child has ended. Untrapped, TERM kills the shell where it
+# stands and the child it was waiting for lives on. Replaced below, once there
+# is a log to write a SUMMARY to.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 CTX="${SOAK_CONTEXT:-talos-main}"
 NAMESPACES="${SOAK_RESTART_NAMESPACES:-aether-system aether-ingress aether-test}"
@@ -287,6 +300,57 @@ finish() {
 	done
 }
 
+# The wait between samples has NO child process (#1386). It used to be
+# `sleep N & SLEEP_PID=$!; wait "$SLEEP_PID"`, with a trap that killed
+# $SLEEP_PID, and a TERM at the wrong moment left the sleep behind, holding its
+# caller's stdout open for up to an interval (seen: a `sleep 3599`). Two such
+# moments were found. Between the first two commands SLEEP_PID is still empty
+# and the trap kills nothing. And right after them the trap does send its
+# `kill` and the sleep is sometimes still there afterwards -- presumably the
+# signal reached the child before it had become `sleep`, while it was still a
+# copy of this shell with this shell's handler for TERM. A kill that can miss
+# is not made surer by sending it from somewhere else, so there is nothing to
+# kill: the wait is `read -t` on a fifo nobody writes to. fd 9 is
+# that fifo, opened read-write (the open does not block, the read never sees
+# end-of-file) and unlinked at once.
+NAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/restart-watch.XXXXXX")" || NAP_DIR=""
+if [ -z "$NAP_DIR" ] || ! mkfifo "$NAP_DIR/nap" || ! exec 9<>"$NAP_DIR/nap"; then
+	echo "restart-watch.sh: cannot make the fifo it waits on (mktemp -d and mkfifo under ${TMPDIR:-/tmp})" >&2
+	exit 2
+fi
+rm -rf "$NAP_DIR"
+
+# nap_until EPOCH_SECONDS: wait, interruptibly, until then. bash runs a trap
+# that arrives during `read` at once, and the TERM/INT traps exit.
+#
+# In slices of NAP_SLICE seconds, never one long read. Whatever bash is doing
+# when a signal arrives, the trap is run no later than the end of the builtin
+# in hand; a slice makes that at most NAP_SLICE seconds, where one read of the
+# whole interval would make it the interval.
+NAP_SLICE=2
+nap_until() {
+	local now left rc
+	while
+		printf -v now '%(%s)T' -1
+		left=$(($1 - now))
+		[ "$left" -gt 0 ]
+	do
+		if [ "$left" -gt "$NAP_SLICE" ]; then left=$NAP_SLICE; fi
+		read -r -t "$left" -u 9 _
+		rc=$?
+		# Above 128 is the timeout: the one way this read ends, since nothing
+		# writes to the fifo. Anything else means fd 9 is no longer that fifo:
+		# a foreground sleep then (a trap waits it out, at most a slice),
+		# rather than a loop that spins.
+		if [ "$rc" -le 128 ]; then sleep "$left"; fi
+	done
+}
+nap() {
+	local now
+	printf -v now '%(%s)T' -1
+	nap_until $((now + $1))
+}
+
 # Baseline, with a few retries: a watchdog that cannot see the cluster at T0
 # has nothing to compare against, so it refuses to run rather than log "ok".
 baseline_or_die() {
@@ -297,7 +361,7 @@ baseline_or_die() {
 			exit 2
 		fi
 		try=$((try + 1))
-		sleep "$BASELINE_RETRY_DELAY"
+		nap "$BASELINE_RETRY_DELAY"
 	done
 }
 
@@ -316,30 +380,19 @@ STARTED=$(date -u +%FT%TZ)
 START_S=$(date +%s)
 END_S=$((START_S + DURATION_S))
 out "restart-watch start context=$CTX namespaces=${NAMESPACES// /,} interval=${INTERVAL}s duration=${DURATION_S}s"
+# From here on a TERM or an INT ends the run with a SUMMARY line (ended=TERM|INT,
+# never PASS), the baseline included.
+trap 'finish TERM; exit 143' TERM
+trap 'finish INT; exit 130' INT
 baseline_or_die
-
-# `sleep & wait` so TERM/INT are handled at once, not after the sleep.
-SLEEP_PID=""
-stop() {
-	if [ -n "$SLEEP_PID" ]; then kill "$SLEEP_PID" 2>/dev/null; fi
-	finish "$1"
-}
 trap 'finish complete' EXIT
-trap 'stop TERM; exit 143' TERM
-trap 'stop INT; exit 130' INT
 
 next=$START_S
 while :; do
 	next=$((next + INTERVAL))
-	now=$(date +%s)
 	target=$next
 	if [ "$target" -gt "$END_S" ]; then target=$END_S; fi
-	if [ "$target" -gt "$now" ]; then
-		sleep $((target - now)) &
-		SLEEP_PID=$!
-		wait "$SLEEP_PID"
-		SLEEP_PID=""
-	fi
+	nap_until "$target"
 	take_sample
 	if [ "$(date +%s)" -ge "$END_S" ]; then break; fi
 	if [ "$MAX_SAMPLES" -gt 0 ] && [ "$SAMPLES" -ge "$MAX_SAMPLES" ]; then break; fi

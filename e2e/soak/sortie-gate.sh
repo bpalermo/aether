@@ -19,6 +19,9 @@
 #   started_at, ended_at   when sortie began dispatching the execution and when
 #                   its last backend had answered or been given up on
 #   not_run         the execution was never attempted
+#   refused         (sortie f0750ec) "execution_cap": the execution belongs to a
+#                   stage an engine refused at its execution cap; also on the
+#                   backend_errors entries of the engines that refused
 # A report whose executions have no `started_at` is from an older sortie, which
 # did not count the requests still in flight at the end of a run: the gate says
 # so and exits 2, it does not grade it.
@@ -44,9 +47,14 @@
 #              (`not_run=K`). With --dir (or --log) it also reads the sortie
 #              pod's log: a `SKIP` line there, or a summary with `K not run`,
 #              K > 0, fails the gate even if the report does not show it. The
-#              refused stage itself has an `error` and fails on it, worded
-#              `REFUSED AT THE EXECUTION CAP`: the engines it names refused a
-#              start, they were not lost.
+#              refused stage itself fails as `REFUSED AT THE EXECUTION CAP`,
+#              with the engines that refused named (`[refused by: <node> ...]`):
+#              they were not lost. It is known by sortie's own mark, `"refused":
+#              "execution_cap"` on the execution and on those engines' entries
+#              in backend_errors (sortie f0750ec). An entry without the mark is
+#              a lost backend, in a refused stage too. A report with no such
+#              field anywhere is sortie 9fcbb81's, which worded a refusal and
+#              did not mark it: only there is the error text read instead.
 #   lost       no backend is in `backend_errors`. A lost backend FAILS the
 #              target and is named, with its node; the others are still judged,
 #              each on its own counters, and the line says how they did.
@@ -224,10 +232,20 @@ jq -r --argjson shares "$SHARES_JSON" --argjson nodes "$NODES" --argjson n "$BAC
 	--arg haslog "$LOG" '
 	def zero_set: test("^benchmark\\.(http_4xx|http_5xx|grpc_error|stream_resets|pool_connection_failure|pool_failure_|pool_overflow|http_inflight_lost)");
 	# A stage refused at an engine`s execution cap: sortie stopped it on every
-	# backend, and its error says so. The backends it lists are the ones that
-	# refused, not lost ones. (The report has no field for it, only this text:
-	# an error worded otherwise is graded as any other and still fails.)
-	def capped: (.error // "") | test("refused a start because the engine is at ");
+	# backend. Since sortie f0750ec the report SAYS so, in a field: "refused":
+	# "execution_cap" on every execution of that stage, and on each entry of
+	# backend_errors that is an engine which refused (an entry without it is a
+	# backend that was lost, refused stage or not). The field is what is read.
+	# The error TEXT is read only for an execution that has no such field at
+	# all, which is the report of sortie 9fcbb81: that pin`s reports are still
+	# graded here (the talos-main runs of 2026-10-08 are its), and it marked a
+	# refusal in no other way. There, every backend the refused execution lists
+	# is taken to have refused, as sortie 9fcbb81 listed no other kind.
+	def says_refused: (.refused // "") == "execution_cap";
+	def old_shape_refused: (has("refused") | not) and ((.error // "") | test("refused a start because the engine is at "));
+	def capped: says_refused or old_shape_refused;
+	# One entry of an execution`s backend_errors: did that engine refuse, or was it lost?
+	def refused_by($e): says_refused or ($e | old_shape_refused);
 	def ip: sub(":[0-9]+$"; "");
 	def node: (ip) as $ip | ($nodes[$ip] // $ip);
 	def r2: (. * 100 | round / 100);
@@ -253,7 +271,10 @@ jq -r --argjson shares "$SHARES_JSON" --argjson nodes "$NODES" --argjson n "$BAC
 	         why: ["NOT RUN: sortie never attempted it, so it has no counters and its zeros mean nothing (" + ($e.error // "no reason given") + ")"]}
 	      else
 	        ($e.backends // []) as $dispatched
-	        | ($e.backend_errors // []) as $berr
+	        # backend_errors, in two: the backends that were lost, and the engines
+	        # that refused a start at their execution cap (not lost).
+	        | ([($e.backend_errors // [])[] | select(refused_by($e) | not)]) as $berr
+	        | ([($e.backend_errors // [])[] | select(refused_by($e))]) as $refb
 	        | ([$berr[].backend]) as $lostaddrs
 	        | (($e.duration_ms // 0) / 1000) as $dur
 	        | ($s.rps * $dur) as $plan1
@@ -285,9 +306,11 @@ jq -r --argjson shares "$SHARES_JSON" --argjson nodes "$NODES" --argjson n "$BAC
 	           + [$e.thresholds[]? | select(.pass == false) | select(.expr | sub("^counter:"; "") | zero_set)
 	              | select(($fail | length) == 0) | "\(.expr) (actual \(.actual))"]) as $thr
 	        | ($e | capped) as $cap
-	        | ([ (if $cap then "REFUSED AT THE EXECUTION CAP, nothing of this stage ran: \($e.error)" else empty end),
-	             (if $cap then empty else $berr[] | "LOST BACKEND \(.backend | node) (\(.backend))"
-	                + (if (.backend as $b | $res | any(.b == $b)) then " [counters reported]" else " [returned nothing]" end) end),
+	        | ([ (if $cap then "REFUSED AT THE EXECUTION CAP, nothing of this stage ran: \($e.error // "no reason given")"
+	                + (if ($refb | length) > 0 then " [refused by: " + ($refb | map(.backend | node) | join(" ")) + "]" else "" end)
+	              else empty end),
+	             ($berr[] | "LOST BACKEND \(.backend | node) (\(.backend))"
+	                + (if (.backend as $b | $res | any(.b == $b)) then " [counters reported]" else " [returned nothing]" end)),
 	             (if $cap then empty
 	              elif ($berr | length) > 0 and ($surv | length) > 0 then
 	                "survivors " + ($surv | map("\(.node)=" + (if (.fail | length) == 0 and (.short | not) and (.over | not) and (.off | not) then "ok" else "FAIL" end)) | join(" "))
@@ -329,7 +352,8 @@ jq -r --argjson shares "$SHARES_JSON" --argjson nodes "$NODES" --argjson n "$BAC
 	                             + (if .p50 == null and .p99 == null then "" else " p50=\(.p50 | fmt_ms) p99=\(.p99 | fmt_ms) max=\(.max | fmt_ms)" end)
 	                             + (if (.fail | length) == 0 then " failures=none" else " failures " + (.fail | map("\(.c)=\(.v)") | join(" ")) end)
 	                             + (if .lost then " LOST" else "" end)]
-	                  + [$berr[] | select(.backend as $b | $res | any(.b == $b) | not) | "NODE  \($s.name)  \(.backend | node)  LOST, returned nothing"])}
+	                  + [$berr[] | select(.backend as $b | $res | any(.b == $b) | not) | "NODE  \($s.name)  \(.backend | node)  LOST, returned nothing"]
+	                  + [$refb[] | "NODE  \($s.name)  \(.backend | node)  REFUSED the start: the engine was at its execution cap"])}
 	      end ] as $rows
 	| ([.executions[].label] | unique - $want) as $extra
 	# Every execution sortie marked not_run, in the share table or not.
@@ -349,7 +373,7 @@ jq -r --argjson shares "$SHARES_JSON" --argjson nodes "$NODES" --argjson n "$BAC
 	  $logfail[],
 	  # Each lost backend once, with what sortie said about it: the error is the
 	  # same for every target of an engine that went away.
-	  ([.executions[] | select(capped | not) | (.backend_errors // [])[]] | group_by(.backend)[]
+	  ([.executions[] as $e | ($e.backend_errors // [])[] | select(refused_by($e) | not)] | group_by(.backend)[]
 	   | "LOST  \(.[0].backend | node) (\(.[0].backend))  targets=\(length)  error: \(.[0].error)"),
 	  # When the run was, to line it up with rolls: sortie`s own clock for the
 	  # dispatch bracket, each engine`s for when its first worker started.
@@ -365,7 +389,7 @@ jq -r --argjson shares "$SHARES_JSON" --argjson nodes "$NODES" --argjson n "$BAC
 	  ("VERDICT " + (if ([$rows[] | select(.ok | not)] | length) == 0 and ($extra | length) == 0 and $notrun == 0 and ($logfail | length) == 0 then "PASS" else "FAIL" end)
 	   + " targets=\($rows | length) passed=\([$rows[] | select(.ok)] | length) failed=\(([$rows[] | select(.ok | not)] | length) + ($extra | length))"
 	   + " not_run=\([$notrun, $lognotrun] | max)"
-	   + " backends=\($n) lost_backends=\([.executions[] | select(capped | not) | (.backend_errors // [])[].backend] | unique | length)"
+	   + " backends=\($n) lost_backends=\([.executions[] as $e | ($e.backend_errors // [])[] | select(refused_by($e) | not) | .backend] | unique | length)"
 	   + " report_pass=\(if .pass == null then "absent" else .pass end)"
 	   + (if .source == "stream" then " source=stream skipped_lines=\(.skipped_lines)" else "" end))
 	' "$DOC" >"$OUT" || die "could not evaluate '$SOURCE'"
