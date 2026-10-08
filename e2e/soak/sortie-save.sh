@@ -109,7 +109,8 @@ CTX="" NS="" RELEASE="" PVC="" JOB="" T_LOAD="" DURATION_S="" REPORT_FILE="" STR
 	exit 2
 }
 
-k() { kubectl --context "$CTX" -n "$NS" "$@"; }
+# SORTIE_SAVE_KUBECTL: another kubectl (harness_test.sh passes a fake one).
+k() { "${SORTIE_SAVE_KUBECTL:-kubectl}" --context "$CTX" -n "$NS" "$@"; }
 log() { echo "$(date -u +%FT%TZ) $*"; }
 
 # job_state: complete | failed | active | gone
@@ -172,13 +173,33 @@ if [ "$STATE" = active ]; then
 	exit 1
 fi
 
-# read_pvc_file BASENAME DEST: print one file of the report PVC through a reader
-# pod and keep it as DEST.tmp. The reader lands on the PV's node by the volume's
-# own node affinity; it is not mesh-managed. Returns 0 when the pod succeeded.
+# reader_gone: delete the reader pod and make sure its name is free again. Every
+# wait is bounded: the reader lands on the PV's node, and a pod on a node that
+# does not answer is never confirmed deleted by its kubelet -- an unbounded
+# `--wait` there would hold the saver for ever, before it has said anything.
+# Returns 0 when no pod of that name is left.
 READER="$RELEASE-report-reader"
+reader_gone() {
+	k delete pod "$READER" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 && return 0
+	k delete pod "$READER" --ignore-not-found --force --grace-period=0 --wait=true --timeout=30s >/dev/null 2>&1 && return 0
+	! k get pod "$READER" >/dev/null 2>&1
+}
+
+# read_pvc_file BASENAME DEST: print one file of the report PVC through a reader
+# pod and keep it as DEST.tmp, with what went wrong in DEST.err. The reader
+# lands on the PV's node by the volume's own node affinity; it is not
+# mesh-managed. Returns 0 only when the pod succeeded AND its whole output was
+# downloaded: a `kubectl logs` that broke off half-way leaves what looks like a
+# shorter file, and that must not replace a good copy.
 read_pvc_file() {
-	local file="$1" dest="$2" phase=""
-	k delete pod "$READER" --ignore-not-found --wait=true >/dev/null 2>&1
+	local file="$1" dest="$2" phase="" got=0
+	RPHASE=""
+	rm -f "$dest.tmp" "$dest.err"
+	if ! reader_gone; then
+		RPHASE="stuck"
+		echo "an earlier pod/$READER could not be deleted within 90 s (is the node that holds pvc/$PVC answering?)" >"$dest.err"
+		return 1
+	fi
 	k apply -f - >/dev/null <<EOF
 apiVersion: v1
 kind: Pod
@@ -215,10 +236,19 @@ EOF
 		case "$phase" in Succeeded | Failed) break ;; esac
 		sleep 2
 	done
-	k logs "$READER" >"$dest.tmp" 2>"$dest.err"
-	k delete pod "$READER" --ignore-not-found --wait=true >/dev/null 2>&1
-	RPHASE="$phase"
-	[ "$phase" = Succeeded ]
+	RPHASE="${phase:-absent}"
+	if k logs "$READER" >"$dest.tmp" 2>"$dest.err"; then
+		got=1
+	else
+		echo "kubectl logs pod/$READER did not complete: the download is not whole" >>"$dest.err"
+	fi
+	# A reader that failed printed why (`cat: can't open ...`) where the file
+	# would have been: that is the reason, not a download.
+	if [ "$phase" != Succeeded ] && [ -s "$dest.tmp" ]; then
+		echo "the reader said: $(head -c 200 "$dest.tmp" | tr '\n' ' ')" >>"$dest.err"
+	fi
+	reader_gone || log "pod/$READER could not be deleted within 90 s; sortie-teardown.sh removes it"
+	[ "$phase" = Succeeded ] && [ "$got" = 1 ]
 }
 
 # The results stream first: when the report is missing it is the only record.
@@ -236,8 +266,9 @@ if [ -n "$STREAM_FILE" ]; then
 		[ "$STREAM_N" -gt 0 ] && STREAM_OK=1
 		log "saved results.jsonl (the results stream): $STREAM_N execution(s)$([ "$STREAM_BAD" -gt 0 ] && echo ", $STREAM_BAD line(s) that do not parse -- an unfinished last line; sortie-gate.sh skips them")"
 	else
+		# Whatever came down is not the file. A copy saved earlier stays.
 		rm -f "$DIR/results.jsonl.tmp"
-		log "the results stream could not be read off pvc/$PVC (reader pod '$RPHASE': $(head -c 200 "$DIR/results.jsonl.err" 2>/dev/null | tr '\n' ' '))"
+		log "the results stream could not be read off pvc/$PVC (reader pod '$RPHASE': $(head -c 200 "$DIR/results.jsonl.err" 2>/dev/null | tr '\n' ' '))$([ -s "$DIR/results.jsonl" ] && echo "; the results.jsonl saved earlier is kept")"
 	fi
 fi
 
@@ -254,5 +285,5 @@ if [ "$STREAM_OK" = 1 ]; then
 	log "SORTIE_SAVE_FAILED no report (reader pod '$RPHASE': $(head -c 200 "$DIR/report.json.err" 2>/dev/null | tr '\n' ' ')), but the results stream IS saved: $STREAM_N execution(s) the run recorded before it ended. Grade them with: sortie-gate.sh --dir $DIR --stream $DIR/results.jsonl   -- and do not tear down with --purge: both files are still on pvc/$PVC"
 	exit 1
 fi
-log "SORTIE_SAVE_FAILED the reader pod ended '$RPHASE' and $DIR/report.json.tmp is not a sortie report ($(head -c 200 "$DIR/report.json.err" 2>/dev/null | tr '\n' ' ')); the logs above ARE saved, the report is still on pvc/$PVC at $REPORT_FILE -- do not tear down with --purge"
+log "SORTIE_SAVE_FAILED no report: the reader pod ended '$RPHASE' and what it printed is not a sortie report ($(head -c 300 "$DIR/report.json.err" 2>/dev/null | tr '\n' ' ')); the logs above ARE saved, and whatever the run wrote is still on pvc/$PVC ($REPORT_FILE) -- do not tear down with --purge"
 exit 1

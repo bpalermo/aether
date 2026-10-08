@@ -678,6 +678,124 @@ if [ "$(grep -c . "$T")" -eq 4 ]; then pass "times: ... and nothing else is prin
 bash "$SAVE" --times "$SF/kind-not-run.json" >"$T"
 expect "$T" "times: a stage that was not run has no times and says so" '^mesh/tcp-a/stage-[23]	-	-	0	-	-	not_run$' 2
 
+# --- sortie-save.sh against a fake kubectl ---------------------------------------
+# What the saver does with the two files of the report PVC. The fake serves a
+# finished Job, a sortie pod, and a reader pod that prints whichever file of
+# $FAKE_SAVE/pvc/ it was created to `cat`: phase Failed when the file is not
+# there, a `logs` that breaks off after 300 bytes when $FAKE_SAVE/break-<file>
+# exists, and a pod that cannot be deleted while $FAKE_SAVE/stuck exists.
+cat >"$TMP/kubectl-save" <<'EOF'
+#!/usr/bin/env bash
+args="$*"
+reading="$(cat "$FAKE_SAVE/reading" 2>/dev/null)"
+case "$args" in
+*" get job "*) echo '{"status":{"conditions":[{"type":"Complete","status":"True"}]}}' ;;
+*" get pods -l job-name="*) [ -e "$FAKE_SAVE/no-sortie-pod" ] || printf 'soak-sortie-abc-xyz' ;;
+*" get pod soak-sortie-abc-xyz "*) echo '{}' ;;
+*" logs soak-sortie-abc-xyz "*) printf '  PASS mesh/tcp-a (scenario mesh, 5m0.785s)\n\nPASS  3/3 executions passed\n' ;;
+*" get pods -l app.kubernetes.io/instance="*) echo '{"items":[]}' ;;
+*" delete pod soak-report-reader "*)
+	[ -e "$FAKE_SAVE/stuck" ] && exit 1
+	rm -f "$FAKE_SAVE/reading"
+	;;
+*" apply -f -"*) sed -n 's/.*command: \["cat", "\/report\/\(.*\)"\].*/\1/p' >"$FAKE_SAVE/reading" ;;
+*" get pod soak-report-reader -o jsonpath="*) if [ -e "$FAKE_SAVE/pvc/$reading" ]; then printf Succeeded; else printf Failed; fi ;;
+*" get pod soak-report-reader"*) [ -e "$FAKE_SAVE/stuck" ] ;;
+*" logs soak-report-reader"*)
+	if [ -e "$FAKE_SAVE/break-$reading" ]; then
+		head -c 300 "$FAKE_SAVE/pvc/$reading"
+		echo "error: unexpected EOF" >&2
+		exit 1
+	fi
+	cat "$FAKE_SAVE/pvc/$reading" 2>/dev/null || echo "cat: can't open '/report/$reading': No such file or directory"
+	;;
+*)
+	echo "fake kubectl: unexpected call: $args" >&2
+	exit 1
+	;;
+esac
+EOF
+chmod +x "$TMP/kubectl-save"
+# run_save <name> [files to put on the fake PVC as r.json / r.jsonl ...]: a fresh
+# run directory and PVC per case; prints nothing, leaves $SD (the run directory),
+# $SL (the saver's output) and $src (its exit status).
+run_save() {
+	local name="$1"
+	SD="$TMP/save-$name"
+	SL="$TMP/save-$name.log"
+	export FAKE_SAVE="$TMP/save-$name.fake"
+	mkdir -p "$SD" "$FAKE_SAVE/pvc"
+	printf 'CTX=fake\nNS=aether-test\nRELEASE=soak\nPVC=sortie-soak-reports\nJOB=soak-sortie-abc\nT_LOAD=1\nDURATION_S=1\nREPORT_FILE=/var/run/sortie/r.json\nSTREAM_FILE=/var/run/sortie/r.jsonl\n' >"$SD/run.env"
+	SORTIE_SAVE_KUBECTL="$TMP/kubectl-save" bash "$SAVE" --dir "$SD" >"$SL" 2>&1
+	src=$?
+}
+SAVE="$HERE/sortie-save.sh"
+
+# The report and the stream are both there: both saved, SAVED written.
+mkdir -p "$TMP/save-both.fake/pvc"
+cp "$SF/kind-clean.json" "$TMP/save-both.fake/pvc/r.json"
+jq -c '.executions[]' "$SF/kind-clean.json" >"$TMP/save-both.fake/pvc/r.jsonl"
+run_save both
+show "saver: a report and a results stream on the PVC" "$SL"
+if [ "$src" -eq 0 ] && [ -e "$SD/SAVED" ]; then pass "save both: exit 0 and SAVED"; else fail "save both: exit $src, SAVED $([ -e "$SD/SAVED" ] && echo written || echo missing)"; fi
+if cmp -s "$SD/results.jsonl" "$TMP/save-both.fake/pvc/r.jsonl" && cmp -s "$SD/report.json" "$SF/kind-clean.json"; then pass "save both: results.jsonl and report.json are the PVC's files, byte for byte"; else fail "save both: a saved file differs from the PVC's"; fi
+expect "$SL" "save both: the stream is counted" ' saved results\.jsonl \(the results stream\): 3 execution\(s\)$' 1
+expect "$SL" "save both: SORTIE_SAVED says what was not run, when the run was, and what the stream holds" ' SORTIE_SAVED dir=.* job=complete executions=3 pass=true not_run=0 window=2026-10-07T23:26:33\.393Z\.\.2026-10-07T23:31:34\.178Z stream_executions=3$' 1
+expect "$SD/times.tsv" "save both: times.tsv, one row per execution and backend" '^mesh/(tcp-a|tcp-b|uds-echo)	2026-10-07T23:26:33\.393Z	' 6
+expect "$SD/sortie.log" "save both: the sortie pod's log is saved" '^PASS  3/3 executions passed$' 1
+
+# The pod died before the report: only the stream is on the PVC, and its last
+# line is cut short. It is saved as it is, counted, and the saver says how to
+# grade it -- and does NOT write SAVED, so a teardown still asks.
+mkdir -p "$TMP/save-stream.fake/pvc"
+cp "$SF/kind-results-stream.jsonl" "$TMP/save-stream.fake/pvc/r.jsonl"
+run_save stream
+show "saver: a results stream with a broken last line, and no report" "$SL"
+if [ "$src" -eq 1 ] && [ ! -e "$SD/SAVED" ]; then pass "save stream-only: exit 1 and no SAVED"; else fail "save stream-only: exit $src, SAVED $([ -e "$SD/SAVED" ] && echo written || echo missing)"; fi
+if cmp -s "$SD/results.jsonl" "$SF/kind-results-stream.jsonl"; then pass "save stream-only: the stream is kept as it is on the PVC, broken line and all"; else fail "save stream-only: results.jsonl differs from the PVC's"; fi
+expect "$SL" "save stream-only: whole and broken lines are counted apart" ' saved results\.jsonl \(the results stream\): 2 execution\(s\), 1 line\(s\) that do not parse ' 1
+expect "$SL" "save stream-only: says the stream is what there is, and how to grade it" " SORTIE_SAVE_FAILED no report \(reader pod 'Failed': the reader said: cat: can't open '/report/r\.json': No such file or directory +\), but the results stream IS saved: 2 execution\(s\) .* sortie-gate\.sh --dir .* --stream " 1
+expect "$SD/times.tsv" "save stream-only: times.tsv comes from the stream" '^mesh/tcp-[ab]	' 4
+if [ ! -e "$SD/report.json" ]; then pass "save stream-only: no report.json is invented"; else fail "save stream-only: a report.json exists"; fi
+
+# The download of the stream breaks off half-way (kubectl logs fails). What came
+# down looks like a shorter stream; it must not replace the copy saved before.
+mkdir -p "$TMP/save-break.fake/pvc" "$TMP/save-break"
+cp "$SF/kind-clean.json" "$TMP/save-break.fake/pvc/r.json"
+jq -c '.executions[]' "$SF/kind-clean.json" >"$TMP/save-break.fake/pvc/r.jsonl"
+cp "$TMP/save-break.fake/pvc/r.jsonl" "$TMP/save-break/results.jsonl"
+: >"$TMP/save-break.fake/break-r.jsonl"
+run_save break
+show "saver: the stream's download breaks off" "$SL"
+if cmp -s "$SD/results.jsonl" "$TMP/save-break.fake/pvc/r.jsonl" && [ ! -e "$SD/results.jsonl.tmp" ]; then pass "save broken download: the earlier results.jsonl is kept, the partial one is not promoted"; else fail "save broken download: results.jsonl was replaced by a partial download"; fi
+expect "$SL" "save broken download: said, with the reason" ' the results stream could not be read off pvc/.*did not complete: the download is not whole.*; the results\.jsonl saved earlier is kept$' 1
+expect "$SL" "save broken download: the report is still saved" ' SORTIE_SAVED .* stream_executions=0$' 1
+
+# A reader pod that cannot be deleted (its node does not answer): every wait is
+# bounded, so the saver says so and ends instead of hanging on `--wait`.
+mkdir -p "$TMP/save-stuck.fake/pvc"
+cp "$SF/kind-clean.json" "$TMP/save-stuck.fake/pvc/r.json"
+: >"$TMP/save-stuck.fake/stuck"
+t0=$(date +%s)
+run_save stuck
+show "saver: a reader pod that cannot be deleted" "$SL"
+if [ "$src" -eq 1 ] && [ ! -e "$SD/SAVED" ] && [ $(($(date +%s) - t0)) -lt 30 ]; then pass "save stuck reader: exit 1, no SAVED, no hang"; else fail "save stuck reader: exit $src after $(($(date +%s) - t0))s"; fi
+expect "$SL" "save stuck reader: says the reader could not be deleted, and where to look, for the stream and for the report" 'an earlier pod/soak-report-reader could not be deleted within 90 s \(is the node that holds pvc/sortie-soak-reports answering\?\)' 2
+expect "$SL" "save stuck reader: SORTIE_SAVE_FAILED, and the PVC is not to be purged" " SORTIE_SAVE_FAILED no report: the reader pod ended 'stuck' .* do not tear down with --purge\$" 1
+grep -c -- '--timeout=' "$SAVE" >"$TMP/timeouts.n"
+if [ "$(cat "$TMP/timeouts.n")" -ge 2 ] && ! grep -E 'delete pod .*--wait=true' "$SAVE" | grep -vq -- '--timeout='; then pass "save: every waiting delete of the reader pod has a timeout"; else fail "save: a 'delete pod --wait=true' without --timeout"; fi
+
+# The sortie pod is gone (evicted with its node, as on kind when the driver's
+# node was frozen): no log, and the PVC is still read.
+mkdir -p "$TMP/save-nopod.fake/pvc"
+cp "$SF/kind-clean.json" "$TMP/save-nopod.fake/pvc/r.json"
+jq -c '.executions[]' "$SF/kind-clean.json" >"$TMP/save-nopod.fake/pvc/r.jsonl"
+: >"$TMP/save-nopod.fake/no-sortie-pod"
+run_save nopod
+if [ "$src" -eq 0 ] && [ -e "$SD/SAVED" ] && [ ! -e "$SD/sortie.log" ]; then pass "save no sortie pod: the report is saved, and no sortie.log is invented"; else fail "save no sortie pod: exit $src"; fi
+expect "$SL" "save no sortie pod: says the log is lost" ' the sortie pod of job/soak-sortie-abc is gone: no sortie\.log ' 1
+expect "$SL" "save no sortie pod: no shell error about the missing log" 'No such file or directory' 0
+
 # A real report: the kind run of 2026-10-07 with sortie 9fcbb81 through run.sh
 # e2e (two engines, 5 minutes, 43,200 of 43,200 requests), three of its eight
 # targets. Nothing in it is made up; it is what the gate has to read.
