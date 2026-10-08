@@ -1420,7 +1420,7 @@ mark the namespace first:
 
 ```bash
 kubectl annotate namespace aether-system helm.sh/resource-policy=keep
-kubectl label namespace aether-system \
+kubectl label namespace aether-system --overwrite \
   pod-security.kubernetes.io/enforce=privileged \
   pod-security.kubernetes.io/audit=privileged \
   pod-security.kubernetes.io/warn=privileged
@@ -1437,10 +1437,11 @@ or newer; an existing namespace can stay.
 newer on a cluster that enforces Pod Security admission, namespace not
 labelled. The install notes print a `NAMESPACE NOTE`, and the events say
 `violates PodSecurity "baseline:latest"`. Label the namespace; nothing has to be
-reinstalled:
+reinstalled (`--overwrite` because the namespace may already carry another
+level):
 
 ```bash
-kubectl label namespace aether-system \
+kubectl label namespace aether-system --overwrite \
   pod-security.kubernetes.io/enforce=privileged \
   pod-security.kubernetes.io/audit=privileged \
   pod-security.kubernetes.io/warn=privileged

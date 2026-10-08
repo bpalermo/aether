@@ -235,7 +235,8 @@ that does not enforce Pod Security admission, step 3 alone is a complete
 install. If you skip step 2 on a cluster that does, the release still deploys
 but the four DaemonSets have no pods; the install notes say so, the refusals are
 `kubectl -n aether-system get events --field-selector reason=FailedCreate`, and
-running the `kubectl label` command afterwards, then `kubectl -n aether-system
+running the `kubectl label` command afterwards (with `--overwrite` if the
+namespace already carries another level), then `kubectl -n aether-system
 rollout restart daemonset`, is enough: nothing has to be reinstalled
 ([`runbook.md`](./runbook.md), "Recovering from a failed first install").
 

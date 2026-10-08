@@ -533,7 +533,9 @@ jobs:
   # workload becomes Ready with no pod refused, that namespace.create=true for
   # the release's own namespace fails the render and leaves nothing behind, and
   # that a release which owns its namespace (the pre-2.4.21 default) keeps it
-  # across an upgrade. Harness: e2e/first-install.sh.
+  # across an upgrade, and that a failed first install whose manifest lists a
+  # Namespace it does not own (aether and prober charts) cannot be upgraded
+  # into deleting it. Harness: e2e/first-install.sh.
   first-install:
     needs: build
     if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'first-install'

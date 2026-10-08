@@ -12,12 +12,13 @@ CRD: install //charts/crds first (the MeshConfig CRD).
 {{- if and (eq (include "aether.namespace.rendered" .) "false") (ne $enforce "privileged") }}
 
 NAMESPACE NOTE: "{{ $ns }}" was not labelled
-pod-security.kubernetes.io/enforce=privileged when this was rendered, and the
+pod-security.kubernetes.io/enforce=privileged when this was rendered (it says
+{{ $enforce | default "nothing" | quote }}), and the
 chart does not create or label the release's namespace (#1403). On a cluster
 that enforces Pod Security admission the agent, proxy, mesh-dns and uds-csi
 pods are refused until you run:
 
-  kubectl label namespace {{ $ns }} pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
+  kubectl label namespace {{ $ns }} --overwrite pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
 
 Refusals show as: kubectl -n {{ $ns }} get events --field-selector reason=FailedCreate
 If pods were already refused, follow the label with:

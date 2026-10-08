@@ -43,6 +43,14 @@
 #        its UID, and now carries helm.sh/resource-policy: keep. Then the
 #        ownership annotations are removed, so the Namespace does leave the
 #        manifest: `keep` on the live object stops Helm deleting it.
+#   vii. the failed first install — run before (iv), on the empty cluster. A
+#        release that was never deployed, whose failed revision lists a
+#        Namespace it does not own: upgrading it would make Helm delete the
+#        namespace. The upgrade is refused with the fix in the message
+#        (`kubectl annotate namespace ... helm.sh/resource-policy=keep`), the
+#        namespace is untouched, and after that command the same upgrade goes
+#        through with the namespace kept. For the aether chart and for the
+#        prober chart, which carries a copy of the guard.
 #
 # Usage: e2e/first-install.sh {up|verify|down}   (bare = up + verify)
 #
@@ -255,7 +263,7 @@ charts_dir() {
 	out="$(mktemp -d)"
 	cp -r "$SOURCE/charts" "$out/"
 	sed -i -e 's/{GIT_COMMIT}/e2e/' -e 's/{STABLE_GIT_VERSION}/0.0.0-e2e/' \
-		"$out/charts/crds/Chart.yaml" "$out/charts/aether/Chart.yaml"
+		"$out/charts/crds/Chart.yaml" "$out/charts/aether/Chart.yaml" "$out/charts/prober/Chart.yaml"
 	CHARTS="$out/charts"
 }
 
@@ -446,12 +454,86 @@ verify_upgrade_safety() {
 	wait_ready "after the upgrade-safety upgrades"
 }
 
+# vii. The one upgrade that could still delete a namespace is refused.
+#
+# The state: a release that has NEVER been deployed, whose failed revision lists
+# a Namespace the release does not own and nothing protects. That is what a
+# first install of a chart older than this one left behind when it was run with
+# --create-namespace ("already exists"). Helm upgrades from the failed revision,
+# and an object that left the manifest is deleted. Rebuilt here with this chart:
+# a first install over a namespace the release owns (so the Namespace is in the
+# manifest) that fails because the API server rejects one workload (an
+# imagePullPolicy it does not know), after which the ownership annotations and
+# `keep` are taken off the namespace.
+#
+# guard_leg <label> <release> <namespace> <install function> <the value that fails the first install>
+guard_leg() {
+	local label="$1" RELEASE="$2" NS="$3" install="$4" bad="$5" uid out
+	kc create namespace "$NS" >/dev/null
+	kc label namespace "$NS" app.kubernetes.io/managed-by=Helm >/dev/null
+	kc annotate namespace "$NS" "meta.helm.sh/release-name=$RELEASE" "meta.helm.sh/release-namespace=$NS" >/dev/null
+	if out="$("$install" --set-string "$bad" 2>&1)"; then
+		die "$label: the first install with $bad succeeded; this leg needs it to fail"
+	fi
+	[ "$(release_field status)" = "failed" ] || die "$label: the release is '$(release_field status)' after the rejected first install, want failed: $out"
+	[ "$(manifest_namespaces)" = "1" ] || die "$label: the failed revision's manifest does not list the Namespace"
+	kc annotate namespace "$NS" meta.helm.sh/release-name- meta.helm.sh/release-namespace- helm.sh/resource-policy- >/dev/null
+	uid="$(ns_uid)"
+	ok "$label: a failed first install whose manifest lists a Namespace the release no longer owns (uid $uid)"
+
+	if out="$("$install" 2>&1)"; then
+		sleep 5
+		die "$label: the upgrade over the failed first install was NOT refused (namespace now: uid '$(ns_uid)', phase '$(ns_phase)')"
+	fi
+	case "$out" in
+	*"has never been deployed successfully"*"helm.sh/resource-policy=keep"*) ;;
+	*) die "$label: the upgrade failed, but not with the guard's message: $out" ;;
+	esac
+	sleep 5
+	[ "$(ns_uid)" = "$uid" ] && [ "$(ns_phase)" = "Active" ] || die "$label: THE NAMESPACE WAS DELETED by a refused upgrade (uid $uid -> '$(ns_uid)', phase '$(ns_phase)')"
+	ok "$label: the upgrade is refused and names the fix; namespace untouched"
+
+	# What the message says to do.
+	kc annotate namespace "$NS" helm.sh/resource-policy=keep >/dev/null
+	out="$("$install" 2>&1)" || die "$label: the upgrade still fails after the namespace was marked keep: $out"
+	sleep 5
+	[ "$(ns_uid)" = "$uid" ] && [ "$(ns_phase)" = "Active" ] || die "$label: THE NAMESPACE WAS DELETED after it was marked keep (uid $uid -> '$(ns_uid)', phase '$(ns_phase)')"
+	[ "$(release_field status)" = "deployed" ] || die "$label: the release is '$(release_field status)' after the upgrade, want deployed"
+	[ "$(manifest_namespaces)" = "0" ] || die "$label: the Namespace is still in the manifest of a release that does not own it"
+	ok "$label: marked keep, the same command upgrades; namespace kept (uid $uid), no longer in the manifest"
+}
+
+# The prober chart carries a copy of the same guard (#1405). Its image
+# reference is a package-time placeholder in the source tree, so its pod never
+# starts; nothing here needs it to.
+PROBER_NS="first-install-prober"
+# The pull policy is always passed: an upgrade given no values at all reuses the
+# previous revision's, and the first revision's is the one the API rejects.
+prober_install() { hc upgrade --install prober "$CHARTS/prober" --namespace "$PROBER_NS" --set image.pullPolicy=IfNotPresent "$@"; }
+
+verify_failed_install_guard() {
+	log "vii. a failed first install that lists an unowned Namespace cannot be upgraded into deleting it"
+	# The aether chart does not render without its CRDs (documented step 1; (iv)
+	# runs the same command again).
+	hc upgrade --install aether-crds "$CHARTS/crds" --wait --timeout 2m >/dev/null || die "the crds chart did not install"
+	guard_leg "aether" "$RELEASE" "$NS" documented_helm_install agent.image.pullPolicy=Bogus
+	hc uninstall prober -n "$PROBER_NS" >/dev/null 2>&1 || true
+	kc delete ns "$PROBER_NS" --wait=true --timeout=120s >/dev/null 2>&1 || true
+	guard_leg "prober" prober "$PROBER_NS" prober_install image.pullPolicy=Bogus
+	hc uninstall prober -n "$PROBER_NS" >/dev/null 2>&1 || true
+	kc delete ns "$PROBER_NS" --wait=false >/dev/null 2>&1 || true
+}
+
 verify() {
 	charts_dir
 	reset_aether
 	verify_docs
 	verify_enforcement
 	verify_broken_combination
+	# Before the documented install, because it needs a release that was never
+	# deployed; it leaves the cluster empty again.
+	verify_failed_install_guard
+	reset_aether
 	verify_first_install
 	verify_upgrade
 	verify_upgrade_safety
