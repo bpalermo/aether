@@ -623,7 +623,8 @@ with `label_replace`), one stat per zero-failure class
 the selector of the README's "Live view",
 with the dashboard's range set to the run, PLUS the series born inside the
 range, which `increase()` reads as 0: for each class the stat is
-`sum(increase(m[$__range]) and m offset $__range) + sum(m unless m offset $__range)`:
+`(sum(increase(m[$__range]) and m offset $__range) or vector(0)) + (sum(m unless m offset $__range) or vector(0))`
+(each sum defaults to zero, or an empty arm would make the whole stat "no data"):
 `increase()` only for a series that already existed at the start of the
 range, the current value only for one born inside it, so a first failure
 cannot look clean and a new series is not counted twice), and p95 per target from the latency
@@ -633,7 +634,7 @@ never the series' value (#1420): named by node, a failure series outlives the
 run that made it, so its bare value is not zero on a later clean run, and a
 series born inside the window reads as 0 under `increase()`, which is why
 the stat above and any alert carry the "present now, absent before" arm
-(`m unless m offset <window>`) next to `increase()`; the same rule is in the
+(`m unless m offset <window>`, each arm with `or vector(0)`) next to `increase()`; the same rule is in the
 runbook for the ext_authz counters and under "Live view" in
 `e2e/soak/README.md`. The dashboards and rules that existed on
 2026-10-08 were checked for this: `aether-k6` puts every `k6_*` counter under
