@@ -29,7 +29,19 @@
 #   2026-09-05T01:35:04Z  main-worker-01  aether-proxy-abcde  1803         241
 #
 # Requires metrics-server (`kubectl top`), which talos-main runs.
+#
+# TERM and INT end it (exit 143 / 130) and leave no process behind (#1419):
+# churn.sh queues it in the background and stops it this way when the driver
+# itself is stopped. Between polls it waits without a child process
+# (lib-wait.sh), and a kubectl call that is in the foreground is waited for.
+# Untrapped, TERM killed the shell where it stood and left its `sleep 15`, or
+# the kubectl it was waiting for.
 set -uo pipefail
+
+trap 'exit 143' TERM
+trap 'exit 130' INT
+# shellcheck source=e2e/soak/lib-wait.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/lib-wait.sh"
 
 NS="${SOAK_PROXY_NS:-aether-system}"
 SELECTOR="${SOAK_PROXY_SELECTOR:-app.kubernetes.io/name=aether-proxy}"
@@ -133,6 +145,12 @@ sample_once() {
 		printf 'timestamp\tnode\tpod\tage_seconds\tworking_set_mi\n' >>"$OUT"
 	fi
 
+	# Listed first, into a variable, and not `done < <(pod_table ...)` (#1419):
+	# bash does not wait for a process substitution, and a trapped TERM ends
+	# the `read` at once, so the script exited and left the kubectl call
+	# running. A command substitution is waited for.
+	local pods
+	pods=$(pod_table | sort -k2,2)
 	while read -r pod node start; do
 		[ -n "$start" ] || continue
 		age=$(date -u -d "$start" +%s 2>/dev/null) || continue
@@ -148,10 +166,11 @@ sample_once() {
 			mi=$(to_mi "$mem")
 		fi
 		printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$node" "$pod" "$age" "$mi" | tee -a "$OUT"
-	done < <(pod_table | sort -k2,2)
+	done <<<"$pods"
 }
 
 if [ -n "$AT_AGE" ]; then
+	nap_open sample-proxy-rss
 	waited=0
 	while :; do
 		age=$(youngest_age)
@@ -164,7 +183,7 @@ if [ -n "$AT_AGE" ]; then
 			echo "sample-proxy-rss: youngest proxy pod still ${age:-?}s < ${AT_AGE}s after ${waited}s; sampling anyway" >&2
 			break
 		fi
-		sleep "$POLL_SECONDS"
+		nap "$POLL_SECONDS"
 		waited=$((waited + POLL_SECONDS))
 	done
 fi

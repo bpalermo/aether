@@ -1087,18 +1087,57 @@ action on the same harness namespace.
 
 ## Stopping the churn driver
 
-**Stop it with `kill -9 <pid>`.** Both of the obvious alternatives are cases
-where the safety action causes the harm, which is exactly why they are written
-down rather than merely fixed.
+**Stop it with `kill -TERM <pid>`, and send it again until the process is gone.**
+The same goes for `restart-watch.sh` and `sample-proxy-rss.sh`.
 
 ```bash
 # Find it by ABSOLUTE path, and read the pid before you kill anything.
 pgrep -af "bash .*/e2e/soak/churn.sh"
-kill -9 <pid>
-# The driver leaves nothing behind except an unrestored SHRINK, and that only
-# if you kill it inside the 90-second shrink window (T0+450m):
+# TERM until it has exited (once is nearly always enough; see below).
+while kill -TERM <pid> 2>/dev/null; do sleep 1; done
+tail -n 3 <run dir>/churn.log
 kubectl -n aether-test get deployment/svc-5   # expect the pre-shrink replicas
 ```
+
+**What a TERM does (#1419).** The driver, in this order: waits for the `kubectl` call
+that is in the foreground, if there is one (a call is never cut in two); restores a
+SHRINK in progress and deletes a new-SA step's three objects; stops what it has running
+in the background (a queued RSS sampler, a uds-csi step's plugin watch) and waits for
+a TRIPLE's rolls that are already under way; exits 143. No process of the driver is
+left, and nothing more is rolled. Between rolls it waits without a child process
+(`lib-wait.sh`: `read -t` on a private fifo, in two-second slices), so the TERM is
+taken within two seconds. What it waits out is a call: one in the foreground (the
+longest are the uds-csi step's `rollout status`, `SOAK_UDSCSI_TIMEOUT`, 600 s, and its
+`wait --for=delete`, 300 s), and those of its children. **It never exits ahead of a
+child**: a sampler's or a TRIPLE roll's `kubectl` call that does not return holds the
+driver, and after 20 s the log says which (`STOP: still waiting after 20s for: <pids>`).
+A driver that is still there can be seen; a roll it had left behind could not.
+
+Until #1419 none of that held. The driver slept in the foreground, and bash runs a trap
+only once the foreground child has ended, so a TERM took effect at the next roll: up
+to 12 minutes later, 90 in the no-roll window. `kill -9` was the documented way to
+stop it, and it left the SHRINK unrestored. A queued sampler survived either way. And
+every uds-csi step left its `kubectl get pods -w` running after the step, stopped or
+not: the kill reached the subshell around it, not the watch.
+`//e2e/soak:harness_test` now sends the driver a TERM before each command it runs and
+during each `kubectl` call, on a fake cluster, and looks for what is left.
+
+**Why "until it has exited" (#1418).** bash 5.2 can drop a trapped signal that arrives
+while it expands a command substitution: it prints `trap: line 2: unexpected EOF while
+looking for matching ')'`, does not run the handler, and carries on. Seen twice in
+1,680 timed TERMs to the watchdog, both in a `$(date …)`. Two paths no longer use
+one: the timestamp of every log line, and the waits (between rolls, between samples,
+inside a step). So the hours a script spends waiting are not exposed. **The steps
+themselves still are**: while a roll, a new-SA step, a uds-csi step or a sample is
+running, the scripts read `kubectl` output and deadlines (`$(date +%s)`) through
+command substitutions, and a single TERM that lands in one can be dropped. A second TERM is
+harmless: once the stop has begun, further ones are ignored.
+
+**`kill -9` is the last resort**, for a driver stuck in a call that does not return.
+It restores nothing and stops nothing: check the SHRINK target (above, inside
+T0+450m..451.5m), delete a live `sa-new-<epoch>` Deployment, ConfigMap and
+ServiceAccount by hand, and look for a sampler it left
+(`pgrep -af "bash .*/e2e/soak/sample-proxy-rss.sh"`).
 
 **Do not `pkill -f "soak/churn.sh"`.** The pattern appears in the command line
 of the shell that is *running the pkill*, so `pkill` matches and kills your own
@@ -1108,7 +1147,7 @@ own shell. Anchoring the pattern to the absolute script path (`bash
 /…/e2e/soak/churn.sh`) fixes both, because the issuing command line does not
 contain that.
 
-**Do not expect `kill -TERM` to stop it.** Before #835 the driver had a single
+**A TERM once made the driver roll early (#835).** The driver had a single
 `trap restore_shrink EXIT INT TERM`, and `restore_shrink` *returns* rather than
 exiting — so a TERM that reached the in-flight `sleep` ran the handler, the
 handler returned, and control fell straight through to **the next roll**. The
@@ -1116,16 +1155,14 @@ signal sent to stop the driver made it fire early: an unscheduled
 `ROLLED aether-test/deployment/svc-1` at 23:10:32Z on 2026-09-19, with the
 driver still running afterwards. In the log that reads as "the tool ignored my
 signal", which sends you debugging the wrong thing — the tool did the opposite,
-and the two need different debugging. The traps are now split
-(`EXIT` / `INT`→130 / `TERM`→143) so TERM terminates, but `kill -9` remains the
-documented way to stop it: a TERM delivered to the driver's pid alone leaves its
-`sleep` child running, and bash defers the handler until that `sleep` returns —
-up to twelve minutes later.
+and the two need different debugging. The traps are split since then
+(`EXIT` / `INT`→130 / `TERM`→143), and since #1419 the stop is one pass that ends in
+`exit`.
 
 **Never edit `churn.sh` while a soak is running.** Bash reads a script
 incrementally, by byte offset, so rewriting the file under a running driver can
-drop it into the middle of a different statement. Patches to this script land
-between runs only.
+drop it into the middle of a different statement. Patches to this script, and to
+`lib-wait.sh` and `sample-proxy-rss.sh` beside it, land between runs only.
 
 ## Proxy RSS sampling (#628)
 
@@ -1163,8 +1200,88 @@ ramp-then-plateau (born-hot) cannot be told from a leak without holding age fixe
 > ~25/s × 28,800 s ≈ 720,000 per target means the SLI was blind for part of the
 > window, and its error zeros mean nothing.
 
-Compute the prober deltas with two instant queries of the same expression, one at T0
-and one at T0+8h. Diff them per series, then compare against the last known-good run:
+**The prober grade is `prober-grade.sh` (#1390).** It applies the rule the same way
+every time and prints what it did. Give it the run directory and the Prometheus that
+holds the run's metrics. The endpoint is a parameter, with no default:
+
+```bash
+# by URL ...
+e2e/soak/prober-grade.sh --dir "$OUT" --prometheus http://<prometheus>:9090
+# ... or through the API server, with the run's own context (run.env):
+e2e/soak/prober-grade.sh --dir "$OUT" --prometheus-service <namespace>/<service>:<port>
+```
+
+T0 is the churn driver's start line in `$OUT/churn.log`, and the window is 8 h (an e2e
+run has no churn log: its window is `T_LOAD` + `DURATION_S` of `run.env`; `--start`,
+`--window` and `--end` override both). It asks four instant queries, and prints each
+with the time it was evaluated at:
+
+```promql
+aether_probe_requests_total            # at T0: the value each series starts from
+aether_probe_requests_total[28800s]    # at T0+8h: every raw sample in the window
+aether_agent_identity_cluster_unpinned_total            # the same two, for the
+aether_agent_identity_cluster_unpinned_total[28800s]    # unpinned-cluster gate
+```
+
+Per series (one label set), the count is the sum of the steps from one sample to the
+next, starting from the value at T0. **A series that is absent at T0 starts from 0**, so
+the count that creates a failure series is in it. With no reset that is exactly "end
+minus start". **A sample below the one before it is a counter reset** (the process
+restarted): the new value is counted whole, and the reset is printed. The second query
+returns the samples of every series that has any in the window, so **a prober pod that
+was replaced mid-run is counted up to its last sample** and its replacement from 0.
+An instant query at T0+8h no longer returns the old pod's series at all.
+
+```
+WINDOW  start=2026-10-08T02:06:04Z end=2026-10-08T10:06:04Z seconds=28800  (T0 from churn.log)
+TOTAL   tier=liveness result=success count=719950 rate=25/s series=5
+TOTAL   tier=mesh_dns result=success count=1439861 rate=50/s series=10
+TOTAL   tier=mesh_dns result=timeout count=40 rate=0/s series=2
+FAILED  tier=mesh_dns result=timeout node=main-worker-04 count=40 pods=prober-hp5h9 targets=echo.aether-test.aether.internal:18081,echo.aether-test.svc.cluster.local:18081
+BORN    tier=mesh_dns result=timeout node=main-worker-04 pod=prober-hp5h9 target=echo.aether-test.aether.internal:18081 first=2@2026-10-08T03:29:25Z count=21  (absent at the start: counted from 0; …)
+BORN    tier=mesh_dns result=timeout node=main-worker-04 pod=prober-hp5h9 target=echo.aether-test.svc.cluster.local:18081 first=1@2026-10-08T02:43:25Z count=19  (absent at the start: counted from 0; …)
+PODS    at_start=5 at_end=5 gone=0 new=0 nodes=5
+PROBER  verdict=FAIL non_success=40 liveness_non_success=0 dns_class_non_success=0 success=2159811 series=17 born_in_window=2 resets=0
+```
+
+That is the 2026-10-08 run, read back from a test cluster's Prometheus: 21 + 19 = 40.
+`increase(aether_probe_requests_total{result!="success"}[8h])` had reported 37 for it.
+Both series were born inside the window, at 2 and at 1, and `increase()` cannot count
+the sample that creates a series. The prober logged 40 `AETHER_PROBE_FAIL` lines.
+
+- `TOTAL` is the control as well as the count: `rate` for `result=success` must be the
+  probe rate, per target the prober's `--rate` times the number of prober pods (above:
+  5/s × 5 pods for liveness, and twice that for the two mesh_dns targets). A success
+  count that is short means the SLI was blind for part of the window.
+- `FAILED` is one line per tier, result and **source** node. **`node` on these series
+  is the node the prober pod ran on, the source of the request, never where the request
+  went** (and `target` is the name it asked for, not an endpoint). The metric has no
+  destination. Group by `node, pod` to place a burst at its source, and take the
+  destination from the access logs (below).
+- `PROBER verdict=FAIL` means there is something to attribute, as a `FAIL` of the
+  loader gate does. The bars are the two below (liveness 0; the `dns_*` classes 0), and
+  the line carries them as `liveness_non_success` and `dns_class_non_success`.
+  `UNPROVEN` means no prober series, or no success counted: the zeros mean nothing.
+- `--logs-file <file>` (prober log lines, e.g. `kubectl logs` of each prober pod) or
+  `--logs-url <VictoriaLogs base URL>` with `--logs-query` adds the cross-check: the
+  `AETHER_PROBE_FAIL` lines inside the window, plus the `suppressed` counts of capped
+  minutes, against the counters, per tier and result (`LOGS … match|MISMATCH|UNPROVEN`).
+  A detail line carries the failure's own time. A `suppressed` summary carries the
+  time its minute was **closed**, up to two minutes after the failures it counts. One
+  that was closed within two minutes after T0 or after T0+8h may therefore count
+  failures on both sides of that end: it is printed as `LOGS    boundary:` and left
+  out of the sum, and the row is `UNPROVEN` when the counters lie between the sum
+  without it and the sum with it. `--logs-url` asks for two minutes past the window's
+  end, so that such a summary is seen; with `--logs-file`, export that far.
+- Exit 0: every verdict `PASS`. Exit 1: a `FAIL`, with everything else proven. Exit 2:
+  anything `UNPROVEN`, a log count that does not match or cannot be told, or a query
+  that failed (a failed query is never read as a zero). 2 comes before 1: a `FAIL`
+  beside a count that cannot be trusted is not yet a list of failures to attribute.
+- The two ends are the last values Prometheus has at or before T0 and T0+8h. The prober
+  exports once a minute, so a failure in the last seconds before T0 can be counted
+  inside the window.
+
+By hand, the same two readings are these. Diff them per series:
 
 ```promql
 # run once at T0 and once at T0+8h (instant queries); diff per row
@@ -1184,9 +1301,10 @@ sum by (tier, target, result) (
 aether_probe_requests_total unless aether_probe_requests_total offset 8h
 ```
 
-Both forms are only valid if the **prober pod set is the same at both ends**. A prober
-pod that was replaced mid-run takes its counts with it, because its series goes stale
-and drops out of the T0+8h instant sum. This query must return nothing:
+Both by-hand forms are only valid if the **prober pod set is the same at both ends**
+and no counter reset in between; the script does not need either. A prober pod that
+was replaced mid-run takes its counts with it, because its series goes stale and drops
+out of the T0+8h instant sum. This query must return nothing:
 
 ```promql
 (count by (node, pod) (aether_probe_requests_total)
@@ -1198,7 +1316,7 @@ or (count by (node, pod) (aether_probe_requests_total offset 8h)
 If it returns rows, grade each replaced pod from its own last raw value
 (`last_over_time(aether_probe_requests_total{pod="<old>"}[8h])`) and add it to the sum.
 `node` is the Kubernetes node since #1041 (before it, the prober POD name), and `pod` is
-the prober pod. Group by `node, pod` instead of `tier, target, result` to place a burst.
+the prober pod.
 
 The same rule applies to every other counter gate in this README.
 
@@ -1287,6 +1405,19 @@ the pod exists, and after that it cannot be placed.
   generator falling behind, never a mesh failure, and a `LOST BACKEND` is one node's
   share of the loader, not the run: the other nodes are graded as usual. See "Load
   driver: sortie".
+- **The unpinned-cluster gate (#1423)** — `prober-grade.sh` prints it with the prober
+  grade: the node agents' `aether_agent_identity_cluster_unpinned_total` must not move
+  over the window (`UNPINNED verdict=PASS increase=0`). It counts TLS clusters published
+  without their server-identity pin, the fail-open direction (#832;
+  `docs/runbook.md`, "The unpinned-cluster signal"). It is graded from raw samples like
+  the prober's counters, for the same reason twice over: the agent is rolled twice in a
+  soak, so its counter resets (or, where the collector keeps a per-pod label, a new
+  series is born), and a count made right after a restart, before the agent knows its
+  trust domain, is exactly the born-at-N case. The counter is seeded at zero, so no
+  series at all is `UNPROVEN`, not a pass. Agents up to chart 2.4.16 counted the
+  plaintext UDP floor too (#1393, fixed in #1421): against those the gate reads `FAIL`
+  with a few hundred per node (2026-10-08: 2,594 over five nodes), and says nothing.
+  A reset is only seen when the new value is below the old one.
 - **The restart gate (#1242)** — 0 new container restarts in `aether-system`,
   `aether-ingress` and `aether-test` over T0 → T0+8h: the watchdog's `SUMMARY` line
   reads `verdict=PASS new_restarts=0`. See "The restart gate".
@@ -2383,14 +2514,26 @@ Each of these invalidated a real run:
   k6").
 - `churn.sh` — the 33-roll churn driver (incl. the two uds-csi steps) plus the two
   new-ServiceAccount steps, the no-roll window and the demand-set shrink; takes a build
-  label for the log header.
+  label for the log header. Stop it with TERM (see "Stopping the churn driver").
+- `lib-wait.sh` — sourced by `churn.sh`, `restart-watch.sh` and `sample-proxy-rss.sh`:
+  the clock and the wait without a child process (`printf '%(…)T'`, `read -t` on a
+  private fifo), so that a TERM is taken at once and leaves nothing behind (#1386,
+  #1418, #1419).
+- `prober-grade.sh` — the prober grade and the unpinned-cluster gate from raw counter
+  samples (#1390, #1423). See "Grading".
 - `udscsi-window.awk` — the uds-csi step's plugin-down detector (#1243), fed the step's
   `kubectl get pods -w` lines; `churn.sh` reads it from this directory.
 - `restart-watch.sh` — the restart watchdog (#1242). See "The restart gate".
 - `harness_test.sh` + `testdata/` — dry tests for `restart-watch.sh` (canned
   `kubectl get pods -o json` through a fake kubectl, including a refused call and a
   non-List answer, and a TERM before every command it runs and during every kubectl
-  call: exit 143 and no process left behind, #1386), `udscsi-window.awk`,
+  call: exit 143 and no process left behind, #1386), `churn.sh` (the whole schedule on
+  a fake cluster and a clock of its own, held against `testdata/churn/schedule.tsv` —
+  every `kubectl` call and the second after T0 it is made at, written by the driver as
+  it was before #1419 — and the same TERM sweep, with `sample-proxy-rss.sh`),
+  `prober-grade.sh` (canned Prometheus responses: series born in the window, a counter
+  reset, a replaced pod, a Prometheus that has neither metric or does not answer),
+  `udscsi-window.awk`,
   `sortie-gate.sh` (canned sortie reports in
   the 9fcbb81 format: clean, stream resets on one target, a missing target,
   `pool_overflow`, a lost backend, every backend lost, a node that froze and thawed,
@@ -2405,7 +2548,7 @@ Each of these invalidated a real run:
   `sortie-plan.sh` (shares and both profiles), the pins and the PriorityClass in
   `sortie-values.yaml` / `run.sh`, and `pods-not-ready.awk` (with the old expression
   as the red reading). No cluster; needs
-  bash, jq and awk. Run `bash e2e/soak/harness_test.sh` after editing any of them;
+  bash, jq, awk, and for the stop sweeps `setsid`, `timeout`, `ps` and `nproc`. Run `bash e2e/soak/harness_test.sh` after editing any of them;
   `bazel test //e2e/soak:harness_test` runs it with the pinned jq.
 - `newsa-client.sh` — the new-SA step's workload (busybox `sh` + `curl` in the pod,
   shipped per step as a ConfigMap); never run on the workstation.
