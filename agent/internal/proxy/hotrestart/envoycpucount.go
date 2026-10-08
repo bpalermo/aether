@@ -3,6 +3,7 @@ package hotrestart
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -78,6 +79,10 @@ type cpuSources interface {
 	// ReadFile reads /proc/self/mountinfo, /proc/self/cgroup and the cgroup
 	// CPU files.
 	ReadFile(path string) ([]byte, error)
+	// EvalSymlinks is realpath(3): the absolute path with every symlink
+	// resolved, and an error when it does not resolve. Envoy decides on it
+	// whether it may read a file (envoyIllegalPath).
+	EvalSymlinks(path string) (string, error)
 }
 
 // systemCPUSources reads this process's own view, which is the view the Envoy
@@ -87,6 +92,9 @@ type systemCPUSources struct{}
 func (systemCPUSources) OnlineCPUs() (int, error)             { return readOnlineCPUs() }
 func (systemCPUSources) AffinityCPUs() (int, error)           { return affinityCPUs() }
 func (systemCPUSources) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+func (systemCPUSources) EvalSymlinks(path string) (string, error) {
+	return filepath.EvalSymlinks(path)
+}
 
 // envoyCPUCount is a predicted default worker count and the three terms it is
 // the minimum of, for the log line of a handoff that depends on it.

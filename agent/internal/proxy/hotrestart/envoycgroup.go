@@ -3,7 +3,6 @@ package hotrestart
 import (
 	"fmt"
 	"math"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -63,19 +62,19 @@ func cgroupCPULimit(src cpuSources) (int, bool) {
 // ownCgroupDir is the directory holding the process's own cgroup files and the
 // cgroup version its path was found under.
 func ownCgroupDir(src cpuSources) (dir, version string, ok bool) {
-	mountInfo, err := src.ReadFile(procMountInfoPath)
+	mountInfo, err := readAsEnvoy(src, procMountInfoPath)
 	if err != nil {
 		return "", "", false
 	}
-	mount, ok := discoverCgroupMount(string(mountInfo))
+	mount, ok := discoverCgroupMount(mountInfo)
 	if !ok {
 		return "", "", false
 	}
-	procCgroup, err := src.ReadFile(procCgroupPath)
+	procCgroup, err := readAsEnvoy(src, procCgroupPath)
 	if err != nil {
 		return "", "", false
 	}
-	path, version, ok := currentCgroupPath(string(procCgroup))
+	path, version, ok := currentCgroupPath(procCgroup)
 	if !ok {
 		return "", "", false
 	}
@@ -89,22 +88,54 @@ func ownCgroupDir(src cpuSources) (dir, version string, ok bool) {
 	return mount.mountPoint + relative, version, true
 }
 
-// readAsEnvoy reads a cgroup file unless Envoy's file reader would refuse the
-// path: it reads nothing under /dev, /sys or /proc except /sys/fs/cgroup/.
-// Envoy applies the rule to the path with symlinks resolved; here it is
-// applied to the cleaned path, which is the same thing for a cgroup mount in
-// its usual place.
+// readAsEnvoy reads path unless Envoy's file reader refuses it: every read of
+// the cgroup detection goes through Filesystem::fileReadToEnd, which answers
+// "Invalid path" for a path envoyIllegalPath rejects, and that is "no limit".
 func readAsEnvoy(src cpuSources, path string) (string, error) {
-	if !strings.HasPrefix(path, "/sys/fs/cgroup/") {
-		clean := filepath.Clean(path)
-		for _, reserved := range []string{"/dev/", "/sys/", "/proc/"} {
-			if strings.HasPrefix(clean, reserved) {
-				return "", fmt.Errorf("%s: a path envoy does not read", path)
-			}
-		}
+	if envoyIllegalPath(src, path) {
+		return "", fmt.Errorf("%s: a path envoy does not read", path)
 	}
 	raw, err := src.ReadFile(path)
 	return string(raw), err
+}
+
+// envoyIllegalPath is InstanceImplPosix::illegalPath of the pinned Envoy
+// (source/common/filesystem/posix/filesystem_impl.cc), in its order:
+//
+//	if path starts with "/dev/fd/"                           -> legal
+//	if path is "/proc/self/mountinfo" or "/proc/self/cgroup",
+//	   or starts with "/sys/fs/cgroup/"                      -> legal
+//	canonical = realpath(path); if that fails                -> illegal
+//	if canonical is /dev, /sys or /proc, or below one:
+//	    if canonical is "/dev/shm" or below it (Linux)       -> legal
+//	    otherwise                                            -> illegal
+//	otherwise                                                -> legal
+//
+// The first two checks are made on the path as written, before any symlink is
+// resolved; the rest on the resolved path. So a cgroup hierarchy mounted under
+// /dev/shm is read, one mounted elsewhere under /dev, /sys or /proc is not,
+// and neither is a path that does not resolve.
+func envoyIllegalPath(src cpuSources, path string) bool {
+	if strings.HasPrefix(path, "/dev/fd/") {
+		return false
+	}
+	if path == procMountInfoPath || path == procCgroupPath || strings.HasPrefix(path, "/sys/fs/cgroup/") {
+		return false
+	}
+	canonical, err := src.EvalSymlinks(path)
+	if err != nil || canonical == "" {
+		return true
+	}
+	if isOrBelow(canonical, "/dev") || isOrBelow(canonical, "/sys") || isOrBelow(canonical, "/proc") {
+		// /dev/shm is the one place under them Envoy reads (Linux).
+		return !isOrBelow(canonical, "/dev/shm")
+	}
+	return false
+}
+
+// isOrBelow reports whether path is dir or a path inside it.
+func isOrBelow(path, dir string) bool {
+	return path == dir || strings.HasPrefix(path, dir+"/")
 }
 
 // discoverCgroupMount is CgroupCpuUtil::discoverCgroupMount: the first cgroup

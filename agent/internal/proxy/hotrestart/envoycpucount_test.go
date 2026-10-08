@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"maps"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,14 +24,38 @@ type fakeCPUs struct {
 	// unreadable paths exist and fail to read.
 	files      map[string]string
 	unreadable map[string]bool
+	// symlinks maps a directory to the directory it is a symlink to.
+	symlinks map[string]string
 }
 
 func (f *fakeCPUs) OnlineCPUs() (int, error)   { return f.online, f.onlineErr }
 func (f *fakeCPUs) AffinityCPUs() (int, error) { return f.affinity, f.affinityErr }
-func (f *fakeCPUs) ReadFile(path string) ([]byte, error) {
-	// As a filesystem does: Envoy asks for "/sys/fs/cgroup//cpu.max" when its
-	// cgroup is the root of the mount, and so does the code under test.
+
+// follow cleans path and follows the symlinked directories, as a filesystem
+// does: Envoy asks for "/sys/fs/cgroup//cpu.max" when its cgroup is the root
+// of the mount, and so does the code under test.
+func (f *fakeCPUs) follow(path string) string {
 	path = filepath.Clean(path)
+	for link, target := range f.symlinks {
+		if rest, ok := strings.CutPrefix(path, link+"/"); ok {
+			return target + "/" + rest
+		}
+	}
+	return path
+}
+
+// EvalSymlinks resolves path as realpath does, and fails when nothing is
+// there.
+func (f *fakeCPUs) EvalSymlinks(path string) (string, error) {
+	path = f.follow(path)
+	if _, ok := f.files[path]; !ok && !f.unreadable[path] {
+		return "", &fs.PathError{Op: "lstat", Path: path, Err: fs.ErrNotExist}
+	}
+	return path, nil
+}
+
+func (f *fakeCPUs) ReadFile(path string) ([]byte, error) {
+	path = f.follow(path)
 	if f.unreadable[path] {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
 	}
@@ -271,17 +296,121 @@ func TestEnvoyDefaultConcurrencyReadsItsOwnCgroup(t *testing.T) {
 		})
 		assert.Equal(t, 2, workersOf(t, src))
 	})
-	t.Run("a cgroup mount Envoy refuses to read from is no limit", func(t *testing.T) {
-		// Envoy's file reader refuses /proc, /sys and /dev except
-		// /sys/fs/cgroup/.
-		src := &fakeCPUs{online: 8, affinity: 8, files: map[string]string{
-			procMountInfoPath:        "35 25 0:30 / /sys/kernel/cg ro - cgroup2 cgroup rw\n",
-			procCgroupPath:           v2Cgroup,
-			"/sys/kernel/cg/cpu.max": "200000 100000\n",
-			"/sys/fs/cgroup/cpu.max": "100000 100000\n",
-		}}
-		assert.Equal(t, 8, workersOf(t, src))
+}
+
+// mountedAt is a cgroup v2 container whose hierarchy is mounted at mountPoint,
+// with a two-CPU quota, on an 8-CPU machine.
+func mountedAt(mountPoint string) *fakeCPUs {
+	return &fakeCPUs{online: 8, affinity: 8, files: map[string]string{
+		procMountInfoPath:       "35 25 0:30 / " + mountPoint + " ro - cgroup2 cgroup rw\n",
+		procCgroupPath:          v2Cgroup,
+		mountPoint + "/cpu.max": "200000 100000\n",
+	}}
+}
+
+// Envoy reads the cgroup files through a file reader that refuses some paths
+// (InstanceImplPosix::illegalPath). A refused file is no limit; a file it
+// reads counts. The quota is 2 CPUs of 8 throughout.
+func TestEnvoyDefaultConcurrencyReadsOnlyWhatEnvoyReads(t *testing.T) {
+	const limited, unlimited = 2, 8
+	for name, tc := range map[string]struct {
+		src  *fakeCPUs
+		want int
+	}{
+		// Legal before anything is resolved.
+		"/sys/fs/cgroup, the usual place": {mountedAt("/sys/fs/cgroup"), limited},
+		"below /sys/fs/cgroup":            {mountedAt("/sys/fs/cgroup/unified"), limited},
+		// Anywhere outside /dev, /sys and /proc.
+		"/mnt/cgroup":           {mountedAt("/mnt/cgroup"), limited},
+		"/sysroot is not /sys":  {mountedAt("/sysroot/cgroup"), limited},
+		"/device is not /dev":   {mountedAt("/device/cgroup"), limited},
+		"/process is not /proc": {mountedAt("/process/cgroup"), limited},
+		// The Linux exception: /dev/shm.
+		"below /dev/shm":             {mountedAt("/dev/shm/cgroup"), limited},
+		"directly /dev/shm":          {mountedAt("/dev/shm"), limited},
+		"/dev/shmem is not /dev/shm": {mountedAt("/dev/shmem/cgroup"), unlimited},
+		// The reserved directories.
+		"elsewhere under /sys":                  {mountedAt("/sys/kernel/cg"), unlimited},
+		"/sys/fs/cgroup2 is not /sys/fs/cgroup": {mountedAt("/sys/fs/cgroup2"), unlimited},
+		"under /proc":                           {mountedAt("/proc/cg"), unlimited},
+		"under /dev":                            {mountedAt("/dev/cg"), unlimited},
+		"directly /dev":                         {mountedAt("/dev"), unlimited},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, workersOf(t, tc.src))
+		})
+	}
+
+	// The reserved directories are judged on the RESOLVED path.
+	t.Run("a symlink from outside into /sys is refused", func(t *testing.T) {
+		src := mountedAt("/sys/kernel/cg")
+		src.files[procMountInfoPath] = "35 25 0:30 / /mnt/cg ro - cgroup2 cgroup rw\n"
+		src.symlinks = map[string]string{"/mnt/cg": "/sys/kernel/cg"}
+		assert.Equal(t, unlimited, workersOf(t, src))
 	})
+	t.Run("a symlink from outside into /dev/shm is read", func(t *testing.T) {
+		src := mountedAt("/dev/shm/cg")
+		src.files[procMountInfoPath] = "35 25 0:30 / /mnt/cg ro - cgroup2 cgroup rw\n"
+		src.symlinks = map[string]string{"/mnt/cg": "/dev/shm/cg"}
+		assert.Equal(t, limited, workersOf(t, src))
+	})
+	t.Run("a symlink from /dev into a legal place is read", func(t *testing.T) {
+		src := mountedAt("/mnt/cg")
+		src.files[procMountInfoPath] = "35 25 0:30 / /dev/cg ro - cgroup2 cgroup rw\n"
+		src.symlinks = map[string]string{"/dev/cg": "/mnt/cg"}
+		assert.Equal(t, limited, workersOf(t, src))
+	})
+	// The first two checks are on the path as written.
+	t.Run("a path written under /sys/fs/cgroup/ is read wherever it leads", func(t *testing.T) {
+		src := mountedAt("/sys/kernel/cg")
+		src.files[procMountInfoPath] = "35 25 0:30 / /sys/fs/cgroup/link ro - cgroup2 cgroup rw\n"
+		src.symlinks = map[string]string{"/sys/fs/cgroup/link": "/sys/kernel/cg"}
+		assert.Equal(t, limited, workersOf(t, src))
+	})
+}
+
+// The rule itself, branch by branch, against the pinned source.
+func TestEnvoyIllegalPath(t *testing.T) {
+	src := &fakeCPUs{
+		files: map[string]string{
+			"/etc/envoy.yaml": "", "/dev/null": "", "/dev/shm/x": "", "/dev/shm": "", "/dev": "", "/sys": "", "/proc": "",
+			"/sys/kernel/x": "", "/proc/stat": "", "/proc/self/status": "", "/sysroot/x": "", "/dev/shmx": "",
+			"/real/x": "",
+		},
+		symlinks: map[string]string{"/link-to-proc": "/proc", "/dev/link-out": "/real"},
+	}
+	for path, illegal := range map[string]bool{
+		// 1. /dev/fd/ as written, resolved or not.
+		"/dev/fd/3":   false,
+		"/dev/fd/999": false,
+		// 2. The cgroup detection's own files, as written, existing or not.
+		"/proc/self/mountinfo":     false,
+		"/proc/self/cgroup":        false,
+		"/sys/fs/cgroup/cpu.max":   false,
+		"/sys/fs/cgroup//cpu.max":  false,
+		"/sys/fs/cgroup/a/b/c.max": false,
+		// 3. A path that does not resolve.
+		"/no/such/file":  true,
+		"/sys/fs/cgroup": true,
+		// 4. The reserved directories and the /dev/shm exception.
+		"/dev":               true,
+		"/sys":               true,
+		"/proc":              true,
+		"/dev/null":          true,
+		"/sys/kernel/x":      true,
+		"/proc/stat":         true,
+		"/proc/self/status":  true,
+		"/dev/shm":           false,
+		"/dev/shm/x":         false,
+		"/dev/shmx":          true,
+		"/link-to-proc/stat": true,
+		// 5. Everything else.
+		"/etc/envoy.yaml": false,
+		"/sysroot/x":      false,
+		"/dev/link-out/x": false,
+	} {
+		assert.Equal(t, illegal, envoyIllegalPath(src, path), path)
+	}
 }
 
 // ENVOY_CGROUP_CPU_DETECTION=false in the child's environment turns the cgroup
