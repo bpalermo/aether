@@ -36,9 +36,19 @@ emit() { # name value
 	echo "  output: $1=$2"
 }
 
+# The tests CI may run: every test target not tagged `manual` (#1413). The
+# lists below reach `bazel test` as explicit labels (--target_pattern_file), and
+# Bazel honours `manual` only when expanding a wildcard, so a `manual` test has
+# to leave the candidate set here or it runs. `attr` matches a regex against the
+# tag list printed as `[a, b, c]`: the brackets pin a whole tag, where a bare
+# `manual` or `\bmanual\b` would also take `no-manual-x`. Same form as
+# scripts/coverage.sh.
+# shellcheck disable=SC2016 # a Bazel query expression, not a shell expansion
+RUNNABLE_TESTS='tests(//...) except attr("tags", "[\[ ]manual[,\]]", //...)'
+
 # bazel query helpers (sorted unique label lists).
-all_tests() { "$BAZEL" query 'tests(//...)' 2>/dev/null | sort -u; }
-integration_tests() { "$BAZEL" query 'attr(tags, "integration", tests(//...))' 2>/dev/null | sort -u; }
+all_tests() { "$BAZEL" query "$RUNNABLE_TESTS" 2>/dev/null | sort -u; }
+integration_tests() { "$BAZEL" query "attr(tags, \"integration\", ${RUNNABLE_TESTS})" 2>/dev/null | sort -u; }
 all_rules() { "$BAZEL" query 'kind(rule, //...)' 2>/dev/null | sort -u; }
 
 # full_run: mark everything impacted (build //..., run every test) and exit 0.
@@ -115,8 +125,10 @@ comm -23 "$OUT_DIR/impacted_tests.txt" "$OUT_DIR/impacted_integration.txt" | gre
 restore
 
 nonempty() { [ -s "$1" ] && echo true || echo false; }
+# The e2e target is `manual`, so it is in no test list above: its leg names it
+# itself, and has_e2e is read from what bazel-diff reported.
 e2e=false
-grep -qxF "$E2E_TARGET" "$OUT_DIR/impacted_tests.txt" && e2e=true
+grep -qxF "$E2E_TARGET" "$OUT_DIR/impacted.sorted" && e2e=true
 
 emit has_any "$(nonempty "$OUT_DIR/impacted_build.txt")"
 emit has_unit "$(nonempty "$OUT_DIR/impacted_unit.txt")"

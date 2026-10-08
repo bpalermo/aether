@@ -411,10 +411,12 @@ spec:
               mountPropagation: HostToContainer
             {{- if .Values.spire.enabled }}
             # The SPIRE workload UDS is mounted from the csi.spiffe.io CSI driver,
-            # which only exists when SPIRE is deployed. With spire.enabled=false the
-            # mesh runs cleartext (no SDS), so mounting it would wedge the proxy pod
-            # in FailedMount ("driver name csi.spiffe.io not found"). Gate it exactly
-            # like the agent DaemonSet does.
+            # which only exists where SPIRE is installed. spire.enabled=false is
+            # "mesh mTLS off" (cleartext, no SDS), with or without SPIRE on the
+            # cluster (#1412): the proxy has no use for the socket, and where
+            # SPIRE is absent mounting it would wedge the proxy pod in FailedMount
+            # ("driver name csi.spiffe.io not found"). Gate it exactly like the
+            # agent DaemonSet does.
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true

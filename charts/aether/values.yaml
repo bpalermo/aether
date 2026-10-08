@@ -80,6 +80,12 @@ otel:
 # is controller.webhook.spire. The Workload API and broker socket paths are
 # per-component plumbing.
 spire:
+  # false means "mesh mTLS is off" (cleartext between proxies; the agent, the
+  # proxy, the registrar and the edge get no SPIRE wiring, and the identity
+  # gate is off). It does NOT mean "SPIRE is not installed": with
+  # controller.webhook.spire=true the controller still serves its admission
+  # webhooks with a SPIRE SVID, as the only SPIRE client of the release. That
+  # pair is supported (#1412).
   enabled: true
   # Workload API socket path, shared by agent, registrar, controller and edge.
   # Every template mounts the csi.spiffe.io volume at the FIXED directory
@@ -939,8 +945,12 @@ edge:
   # Gateway replicas behind the Service; rolled with the standard RollingUpdate
   # + readiness gate (no hot-restart supervisor — nothing node-local to preserve).
   replicaCount: 2
-  # Empty = chart default: a soft hostname spread across the gateway replicas
-  # (maxSkew 1, ScheduleAnyway). Set to replace the default entirely.
+  # How the gateway replicas are spread across nodes: see registrar.nodeSpread
+  # (soft | required | none). Two ingress replicas on one node are a single
+  # point of failure behind the load balancer.
+  nodeSpread: soft
+  # Non-empty REPLACES the constraint nodeSpread renders (it is not merged with
+  # it). Empty = the nodeSpread constraint.
   topologySpreadConstraints: []
   # Empty = chart default, which depends on replicaCount (#812): with >= 2
   # replicas, `maxSurge: 0, maxUnavailable: 1` — no surge pod to be preempted on
@@ -1114,8 +1124,35 @@ registrar:
   # 2 replicas ALWAYS (directive 2026-06-11): exercises the multi-replica
   # write-behind topology permanently.
   replicaCount: 2
-  # Empty = chart default: a soft hostname spread across the replicas
-  # (maxSkew 1, ScheduleAnyway). Set to replace the default entirely.
+  # How the replicas are spread across nodes (#1434). One node lost must not
+  # take every replica with it.
+  #   soft (default): a topology spread constraint over kubernetes.io/hostname,
+  #     maxSkew 1, whenUnsatisfiable ScheduleAnyway. A preference: the scheduler
+  #     weighs it against its other scores, so it can lose, and a single-node
+  #     cluster schedules every replica as before.
+  #   required: the same constraint with DoNotSchedule (and nodeTaintsPolicy
+  #     Honor, so a tainted control plane is not counted as an empty node). A
+  #     replica is refused a node only while another node the pod could use
+  #     holds fewer, so it never leaves a replica Pending for want of nodes:
+  #     two replicas on a one-node cluster still both schedule. It does leave a
+  #     replica Pending when the only emptier node has no room for it. A node
+  #     that is NotReady or cordoned is not counted either, so while one is,
+  #     replicas may share another node.
+  #     Needs Kubernetes >= 1.27; the render fails below that.
+  #   none: no constraint.
+  # From Kubernetes 1.27 the constraint carries matchLabelKeys:
+  # [pod-template-hash], so it counts the pods of one ReplicaSet: during a
+  # rollout the old replicas are not counted beside the new ones. That, and
+  # the controller's former default affinity (see controller.affinity), is how
+  # both replicas could end up on one node under the soft constraint this
+  # chart already rendered before 2.4.20. Nothing moves a running pod: the
+  # constraint acts when a pod is scheduled, so replicas already on one node
+  # stay there until the next rollout (or `kubectl rollout restart`).
+  # Write none, not off: unquoted, off is the YAML boolean false, and the chart
+  # rejects it.
+  nodeSpread: soft
+  # Non-empty REPLACES the constraint nodeSpread renders (it is not merged with
+  # it). Empty = the nodeSpread constraint.
   topologySpreadConstraints: []
   # The CPU limit STAYS here, reviewed with the same data that removed it from
   # uds-csi (#1321): on the 2026-10-06 8 h soak the registrar was CFS-throttled
@@ -1181,8 +1218,22 @@ controller:
   # pod misses its ndots. With one replica, deleting the leader measured a 49 s
   # gap (talos-main, 2026-09-19); a node drain or an image pull makes it longer.
   replicaCount: 2
-  # Empty = chart default: preferred podAntiAffinity away from the registrars'
-  # node (soft). Set to replace the default entirely.
+  # How the replicas are spread across nodes: see registrar.nodeSpread
+  # (soft | required | none). Every replica serves the admission webhooks, so
+  # two on one node share that node's fate. Until 2.4.20 this was a preferred
+  # anti-affinity term in the default affinity below.
+  nodeSpread: soft
+  # Non-empty REPLACES the constraint nodeSpread renders (it is not merged with
+  # it). Empty = the nodeSpread constraint.
+  topologySpreadConstraints: []
+  # Rendered as the pod's affinity when set; empty = none. Until 2.4.20 empty
+  # meant a default: preferred podAntiAffinity away from the registrars' node
+  # (and from the other controller replica). That default is gone (#1434): a
+  # preferred anti-affinity term works in both directions, so it also pushed
+  # each new registrar off the nodes holding a controller, as strongly as the
+  # registrar's own spread pulled it there. Measured on a two-worker kind
+  # cluster, about half the rollouts ended with both registrars (and as many
+  # with both controllers) on one node. Independent of nodeSpread.
   affinity: {}
   # Pod-ndots mutating webhook (proposal 018, mesh-global FQDN): inject dnsConfig
   # ndots (= the mesh-domain label count) into managed pods so a mesh FQDN
@@ -1249,17 +1300,25 @@ controller:
     # docs/runbook.md, "Pod held in Init by aether-identity-ready"). Opt a single
     # pod out with the annotation `aether.io/identity-gate: "false"`.
     #
-    # Rides the pod-mutating webhook: inert unless namespaceInjection or
-    # injectPodNdots renders it. With webhook.spire=true that webhook's caBundle
-    # is patched by the controller whenever it renders (either knob); unpatched,
-    # the apiserver cannot call it and — failurePolicy: Ignore — the gate is
-    # silently skipped. With spire.enabled=false the controller is always passed
+    # Rides the pod-mutating webhook: with namespaceInjection and
+    # injectPodNdots both off that webhook does not render, and the controller
+    # is passed --identity-gate=false and none of the gate's flags (#1432).
+    # With webhook.spire=true that webhook's caBundle is patched by the
+    # controller whenever it renders (either knob); unpatched, the apiserver
+    # cannot call it and — failurePolicy: Ignore — the gate is silently
+    # skipped. With spire.enabled=false the controller is always passed
     # --identity-gate=false (no SVID would ever come). Default ON.
     identityGate:
       enabled: true
       # Empty repository = the agent image (agent.image), which carries
       # /identity-ready as an extra layer and is already on every node. Set to
       # run it from a mirror.
+      # A consequence, accepted (#1428): the image is an argument of the
+      # controller (--identity-gate-image), so a new agent image digest changes
+      # the controller's pod template and rolls the controller Deployment with
+      # the agent DaemonSet. Pods already running keep the init container they
+      # were admitted with. See docs/runbook.md, "Which workloads a chart
+      # upgrade rolls".
       image:
         repository: ""
         digest: ""
