@@ -136,7 +136,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | `proxy.authzSidecar.enabled` | `false` | Add a node-local authz gRPC sidecar (UDS) + a DISABLED ext_authz filter entry; zero effect until an `HTTPFilter` (extAuthz) opts a route/service in. |
 | `proxy.authzSidecar.opa.enabled` | `false` | Built-in OPA preset (opt-in). |
 | `proxy.authzSidecar.opa.image` | `openpolicyagent/opa:1.21.1-envoy-static` | OPA image. |
-| `proxy.authzSidecar.opa.policy` | `""` | Rego policy (ConfigMap-mounted); required when `opa.enabled`. The sidecar **watches** it (`opa run --watch`, chart 2.4.19, #1383): a changed policy is loaded by every node's sidecar within the kubelet's ConfigMap sync period, with **no pod restart and no staging**. The chart does not validate it: **check it before you change it**. See *Changing the OPA policy* below. |
+| `proxy.authzSidecar.opa.policy` | `""` | Rego policy (ConfigMap-mounted); required when `opa.enabled`. The sidecar **watches** it (`opa run --watch`, chart 2.4.19, #1383): a changed policy is loaded by each node's sidecar when that node's kubelet delivers the ConfigMap update (27–64 s observed on one node; not a bound), with **no pod restart and no staging**. The chart does not validate it: **check it before you change it**. See *Changing the OPA policy* below. |
 | `proxy.authzSidecar.image.{repository,tag,args}` | `""` / `[]` | Bring-your-own authz container (serves `envoy.service.auth.v3.Authorization` on `unix:///run/aether/authz/authz.sock`). |
 | `proxy.authzSidecar.timeout` | `200ms` | Per-check gRPC timeout. |
 | `proxy.authzSidecar.failureMode` | `DENY` | `DENY` (fail-closed, 403 when unreachable) or `ALLOW` (fail-open). |
@@ -165,14 +165,19 @@ sidecar disabled nothing changes and no minimum applies.
 **Changing the OPA policy (chart 2.4.19, #1383).** The preset runs
 `opa run --server --watch … /policy/policy.rego`. When `opa.policy` changes, `helm upgrade`
 changes only the ConfigMap `<release>-opa-policy`; the proxy pod template does not follow
-the policy, so no pod is replaced and Envoy is not hot-restarted. The kubelet delivers the
-new file to each node within its sync period (27–64 s after `helm upgrade` returned, over
-eight changes on kind) and OPA swaps the policy without leaving a check unanswered: 8,607 requests
-sent through a reload were all answered, with no `ext_authz` error.
+the policy, so no pod is replaced and Envoy is not hot-restarted. Each node's kubelet
+delivers the new file on its own schedule: its sync period plus the delay of its ConfigMap
+cache. On one kind node that was 27–64 s after `helm upgrade` returned, over eight
+changes; it is an observation on one node, not a bound. OPA then swaps the policy without
+leaving a check unanswered: 8,607 requests sent through a reload were all answered, with
+no `ext_authz` error.
 
-- **It is fleet-wide at once.** A DaemonSet roll applied a policy one node at a time and
-  stopped at the first pod that did not become Ready. A watched ConfigMap reaches every
-  node within the same minute. There is no canary node and nothing to pause.
+- **It is unstaged and asynchronous.** A DaemonSet roll applied a policy one node at a
+  time and stopped at the first pod that did not become Ready. A watched ConfigMap is
+  picked up by every node independently, in no order, with no canary node and nothing to
+  pause, and nothing reports when the last node has it. Do not assume the fleet has
+  converged after a minute: confirm it per proxy pod ([`runbook.md`](./runbook.md)
+  § *Changing the OPA policy*, "Confirming every node has the new policy").
 - **Validate before you update.** The chart adds no admission check and no pre-upgrade
   hook; a policy is the responsibility of whoever changes it. With the image the chart
   runs (`proxy.authzSidecar.opa.image`):
@@ -182,17 +187,58 @@ sent through a reload were all answered, with no `ext_authz` error.
   # parses and compiles (exit 1 and the error otherwise)
   docker run --rm -v "$PWD/policy.rego:/policy/policy.rego:ro" "$OPA_IMAGE" \
     check /policy/policy.rego
-  # defines the decision the sidecar queries (exit 1 when it is undefined)
-  docker run --rm -v "$PWD/policy.rego:/policy/policy.rego:ro" "$OPA_IMAGE" \
-    eval --fail -d /policy/policy.rego 'data.envoy.authz.allow'
+  # the decision the sidecar queries is DEFINED for one request you write down
+  # (request.json: the input the sidecar hands the policy, see below). Prints the
+  # decision; exit 1 when it is undefined for that request
+  docker run --rm -v "$PWD/policy.rego:/policy/policy.rego:ro" \
+    -v "$PWD/request.json:/policy/request.json:ro" "$OPA_IMAGE" \
+    eval --fail -f pretty -d /policy/policy.rego --input /policy/request.json \
+    'data.envoy.authz.allow'
   # your own unit tests, if you keep *_test.rego files next to it
   docker run --rm -v "$PWD:/policy:ro" "$OPA_IMAGE" test /policy
   ```
 
-  `opa check` passes a policy that compiles but defines no `envoy.authz.allow` at all
-  (every check is then denied): the `opa eval --fail` command above catches that. A
-  policy that defines the decision but decides wrongly passes both; only your own
-  tests catch it.
+  `request.json` is one request in the shape the sidecar receives from Envoy
+  (`input.attributes.request.http`, header names in lower case); use one your policy
+  should allow:
+
+  ```bash
+  cat > request.json <<'EOF'
+  {
+    "attributes": {
+      "request": {
+        "http": {
+          "method": "GET",
+          "path": "/",
+          "host": "my-service.my-namespace.aether.internal:18081",
+          "scheme": "http",
+          "protocol": "HTTP/1.1",
+          "headers": {
+            ":authority": "my-service.my-namespace.aether.internal:18081",
+            ":method": "GET",
+            ":path": "/",
+            "x-authz": "letmein"
+          }
+        }
+      }
+    },
+    "parsed_path": [""],
+    "parsed_query": {}
+  }
+  EOF
+  ```
+
+  What each command proves, and no more:
+  - `opa check`: the policy parses and compiles with this OPA version. It passes a policy
+    that defines no `envoy.authz.allow` at all.
+  - `opa eval --fail --input`: `envoy.authz.allow` is defined **for that one request**,
+    and what it is (`true`/`false`). Without `--input` the policy is evaluated against no
+    request at all, which rejects a correct policy that has no `default allow` and says
+    nothing about real requests. Exit 1 means undefined for this request: either the
+    policy does not define the decision, or it has no default and this request matches
+    no rule.
+  - `opa test`: whatever your tests assert. Only they cover the policy's behaviour over
+    the requests you care about; neither command above does.
 - **A policy that does not parse or compile** is not loaded by a running sidecar. It keeps
   deciding with the last good policy, does not exit, and logs the error. That last good
   policy exists only in the running process: a sidecar that *starts* with the bad file

@@ -1450,8 +1450,9 @@ used to do that by accident, so 2.4.15 added the one that is needed:
 | edge | `checksum/edge-config` | the edge's Envoy bootstrap (`aether-edge-config`, data only) | plain `envoy -c`, nothing watches the file |
 
 Two ConfigMaps have no checksum on purpose, because their reader watches the
-mounted file. Both reach every node within the kubelet's sync period, not one
-node at a time like a DaemonSet roll:
+mounted file. Each node picks the change up when its own kubelet delivers it
+(tens of seconds observed, no guaranteed bound), independently of the others, not
+one node at a time like a DaemonSet roll:
 
 - The node proxy's own bootstrap (`aether-proxy-config`): the supervisor watches
   it (`--watch-config=true`) and hot-restarts Envoy in place, without replacing
@@ -3249,36 +3250,86 @@ Since chart **2.4.19** the OPA preset's sidecar watches its policy
 `aether-opa-policy` and nothing else: the proxy pods are not replaced and Envoy
 is not hot-restarted.
 
-**What to expect** (measured on kind, Kubernetes 1.35.8, OPA 1.21.1, one node):
+**What was observed** (kind, Kubernetes 1.35.8, OPA 1.21.1, **one node**; these
+are observations, not bounds):
 
-| | Measured |
+| | Observed |
 | --- | --- |
-| `helm upgrade` returning to the new policy deciding | 55 s, 46 s, 64 s (the kubelet's ConfigMap sync is periodic; the reload itself takes about 1 ms) |
+| `helm upgrade` returning to the new policy deciding | 55 s, 46 s, 64 s; the kubelet's delivery over eight changes was 27–64 s (the reload itself takes about 1 ms) |
 | Proxy pod | same UID, `authz` and `proxy` restart counts unchanged, DaemonSet generation unchanged, Envoy `restart_epoch` unchanged |
 | Requests through a reload | 8,607 of 8,607 answered 200, `ext_authz.error` +0 |
 
-**It is not staged.** Every node's kubelet syncs on its own timer, so all nodes
-have the new policy within about a minute of each other. A DaemonSet roll used to
-apply it one node at a time and stop at the first pod that failed to become
-Ready; that brake is gone. The chart validates nothing, so validate the policy
-**before** you update it, with the image the chart runs:
+**It is unstaged and asynchronous.** A ConfigMap volume is refreshed by each
+node's kubelet on its own schedule: the kubelet's sync period plus the delay of
+its ConfigMap cache (watch, or a TTL, depending on the kubelet's configuration).
+Nodes therefore get the new policy at different moments, in no order, and for a
+while the fleet decides with two policies. Nothing bounds that window and nothing
+reports its end: do not assume every node has converged after a minute; confirm
+it per proxy pod (below). A DaemonSet roll used to apply a policy one node at a
+time and stop at the first pod that failed to become Ready; that brake is gone.
+The chart validates nothing, so validate the policy **before** you update it,
+with the image the chart runs:
 
 ```bash
 OPA_IMAGE="$(helm get values aether -n aether-system -a -o json | jq -r .proxy.authzSidecar.opa.image)"
 # parses and compiles
 docker run --rm -v "$PWD/policy.rego:/policy/policy.rego:ro" "$OPA_IMAGE" \
   check /policy/policy.rego
-# defines the decision the sidecar queries (exit 1 when undefined)
-docker run --rm -v "$PWD/policy.rego:/policy/policy.rego:ro" "$OPA_IMAGE" \
-  eval --fail -d /policy/policy.rego 'data.envoy.authz.allow'
+# the decision the sidecar queries is defined for ONE request you write down
+# (request.json, below); prints it, exit 1 when undefined for that request
+docker run --rm -v "$PWD/policy.rego:/policy/policy.rego:ro" \
+  -v "$PWD/request.json:/policy/request.json:ro" "$OPA_IMAGE" \
+  eval --fail -f pretty -d /policy/policy.rego --input /policy/request.json \
+  'data.envoy.authz.allow'
 # your own tests (*_test.rego next to the policy)
 docker run --rm -v "$PWD:/policy:ro" "$OPA_IMAGE" test /policy
 ```
 
-`opa check` exits 1 for a policy that does not parse or compile. It exits 0 for a
-policy that compiles and decides wrongly, and for one that defines no
-`envoy.authz.allow` (every request is then denied); `opa eval --fail` and your
-tests are what catch those.
+`request.json` is one request in the shape the sidecar receives from Envoy
+(`input.attributes.request.http`, header names in lower case; a sidecar's
+decision log shows real ones under `"input"`). Use a request the policy should
+allow:
+
+```bash
+cat > request.json <<'EOF'
+{
+  "attributes": {
+    "request": {
+      "http": {
+        "method": "GET",
+        "path": "/",
+        "host": "my-service.my-namespace.aether.internal:18081",
+        "scheme": "http",
+        "protocol": "HTTP/1.1",
+        "headers": {
+          ":authority": "my-service.my-namespace.aether.internal:18081",
+          ":method": "GET",
+          ":path": "/",
+          "x-authz": "letmein"
+        }
+      }
+    }
+  },
+  "parsed_path": [""],
+  "parsed_query": {}
+}
+EOF
+```
+
+What each command proves, checked with OPA 1.21.1:
+
+- `opa check` exits 1 for a policy that does not parse or compile, and 0 for
+  anything else, including a policy that defines no `envoy.authz.allow`.
+- `opa eval --fail --input request.json` says whether the decision is defined
+  **for that one request** and prints it. The e2e policy (`default allow :=
+  false`) prints `true` for the request above and `false` with another header
+  value, exit 0 both times. A policy with no default prints `true` for a request
+  that matches a rule and exits 1 (`undefined`) for one that matches none. A
+  policy that does not define the decision exits 1 for every request. Without
+  `--input` the policy is evaluated against no request, which rejects a correct
+  policy that has no default and proves nothing about real requests.
+- Only your own `opa test` cases cover behaviour: which requests are allowed and
+  which are not. Neither command above does.
 
 **A policy that does not parse or compile** (both measured: a `rego_parse_error`
 and a `rego_type_error`):
@@ -3304,24 +3355,36 @@ and a `rego_type_error`):
 So a bad policy does nothing visible when it is applied and takes a node out
 later. Check for it after every policy change (below).
 
-**Seeing a failed reload.** OPA exports no metric for it (its `/metrics` has only
-Go runtime and HTTP request series), and it logs the failure at level `info`.
-There are two ways to see it:
+**Confirming every node has the new policy, and seeing a failed reload.** OPA
+exports no metric for a reload (its `/metrics` has only Go runtime and HTTP
+request series), and it logs a failed one at level `info`. There are two ways to
+see what each sidecar did; both are per proxy pod, because each node converges
+on its own.
 
 ```bash
-# 1. The reload lines of every sidecar. A good reload has "err":null.
+# 1. The latest watch events of every sidecar, successes included.
 for p in $(kubectl -n aether-system get pods -l app.kubernetes.io/component=proxy -o name); do
   echo "== $p"
-  kubectl -n aether-system logs "$p" -c authz --since=10m \
-    | grep 'Processed file watch event' | grep -v '"err":null' | tail -n 2
+  kubectl -n aether-system logs "$p" -c authz --since=15m \
+    | grep 'Processed file watch event' | tail -n 3
 done
 ```
 
-Any line printed is a failed reload, for example
-`"err":"1 error occurred during loading: /policy/policy.rego:7: rego_parse_error: unexpected eof token …","level":"info","msg":"Processed file watch event."`.
-One ConfigMap update produces up to five such lines (one per file-system event of
-the volume's symlink swap). No line at all for a pod means the kubelet has not
-delivered the update yet; wait and repeat.
+Read each pod's lines by their `time` and `err`:
+
+- `{"duration":1779985,"err":null,"level":"info","msg":"Processed file watch event.","time":"2026-10-08T13:32:47Z"}`
+  with a `time` after your update: this sidecar **loaded** the new policy.
+- `{"duration":197736,"err":"1 error occurred during loading: /policy/policy.rego:7: rego_parse_error: unexpected eof token …","level":"info","msg":"Processed file watch event.","time":"2026-10-08T13:33:58Z"}`:
+  this sidecar **rejected** it and is still deciding with the last good policy.
+- No line, or only lines older than your update: the kubelet has **not
+  delivered** the update to that node yet (or the lines are older than
+  `--since`). That is not a success; repeat until every pod shows an event newer
+  than the update. A sidecar that restarted after the update has no event either:
+  it read the file when it started, and a running `authz` container means it
+  loaded.
+
+One ConfigMap update produces about five lines per pod, with the same `err` (one
+per file-system event of the volume's symlink swap).
 
 ```bash
 # 2. The policy a sidecar is deciding with, compared with the ConfigMap. Run it
@@ -3333,12 +3396,14 @@ cd "/var/lib/kubelet/pods/$UID_/volumes/kubernetes.io~empty-dir/authz-socket" &&
 kubectl -n aether-system get configmap aether-opa-policy -o jsonpath='{.data.policy\.rego}'
 ```
 
-If the two differ a minute or more after the update, the sidecar rejected the new
-policy.
+If they are the same, that node has converged. If they differ, either the update
+has not reached that node yet or the sidecar rejected it; the watch events above
+say which.
 
 **Recovering.** Apply a policy that compiles; nothing needs a restart by hand.
 
-- A running sidecar loads it at the next kubelet sync (46 s measured).
+- A running sidecar loads it when its node's kubelet delivers it (46 s in one
+  measurement).
 - A crash-looping `authz` container starts with it at the kubelet's next restart
   attempt. The back-off doubles up to 5 minutes, so recovery can take that long
   after the file is fixed: 8 s after `helm upgrade` in one measurement (the

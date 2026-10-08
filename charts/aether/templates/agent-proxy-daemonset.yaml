@@ -141,12 +141,13 @@ spec:
             - "--server"
             # #1383: reload the policy when the file changes, in place. The
             # kubelet updates the ConfigMap volume by swapping its ..data
-            # symlink, within its sync period (27-64 s measured on kind), and
-            # OPA then swaps the policy with no check left unanswered (8,607
-            # of 8,607 through a reload). A policy change reaches EVERY node at
-            # about the same time and replaces no pod (until chart 2.4.18 a
-            # checksum annotation rolled the DaemonSet instead: an Envoy hot
-            # restart per node).
+            # symlink, some time after the update (27-64 s observed on one kind
+            # node; not a bound: its sync period plus its ConfigMap cache
+            # delay), and OPA then swaps the policy with no check left
+            # unanswered (8,607 of 8,607 through a reload). Every node picks a
+            # policy change up independently, in no order and with no staging,
+            # and no pod is replaced (until chart 2.4.18 a checksum annotation
+            # rolled the DaemonSet instead: an Envoy hot restart per node).
             # A policy that does not parse or compile is NOT loaded: OPA keeps
             # deciding with the last good one and logs the error (msg
             # "Processed file watch event." with a non-null err, at level

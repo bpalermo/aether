@@ -54,7 +54,7 @@
 #      AUTHZ_EVICT_IMAGE (1: re-pull the OPA image on the roll; 0: keep it
 #      cached), AUTHZ_LOOPS (3 parallel request loops), AUTHZ_RELOAD_TIMEOUT
 #      (240: seconds a changed policy may take to decide; the kubelet syncs a
-#      ConfigMap volume periodically, 27-64 s measured on kind)
+#      ConfigMap volume periodically; 27-64 s observed on one kind node, not a bound)
 #
 # Prereqs: kind, docker, kubectl, helm, bazel (for the image build; CI sets
 # AUTHZ_SKIP_BUILD=1 and pre-loads the images from the nightly build artifact).
