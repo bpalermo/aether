@@ -207,16 +207,14 @@ func runLateSibling(t *testing.T, kind siblingKind, sharedEDSName bool, window t
 
 	dest := startH2CDestination(t)
 	f := newSiblingFixture(t, kind, dest, sharedEDSName)
-	httpPort, tcpPort, adminPort := freePort(t), freePort(t), freePort(t)
-	listeners := []types.Resource{clusterHeaderListener(httpPort), tcpProxyListener(tcpPort, f.name())}
+	httpListener, tcpListener := clusterHeaderListener(envoyPicksPort), tcpProxyListener(envoyPicksPort, f.name())
+	listeners := []types.Resource{httpListener, tcpListener}
 
 	cp := startADSControlPlane(t, f.resources(listeners, false))
-	launchEnvoyOverADS(t, bin, cp, adminPort)
-	h := &adsProxyHandle{adminAddr: fmt.Sprintf("127.0.0.1:%d", adminPort), cp: cp}
-	httpAddr := fmt.Sprintf("127.0.0.1:%d", httpPort)
-	tcpAddr := fmt.Sprintf("127.0.0.1:%d", tcpPort)
-	waitListening(t, httpAddr)
-	waitListening(t, tcpAddr)
+	e := launchEnvoyOverADS(t, bin, cp)
+	h := &adsProxyHandle{adminAddr: e.admin, cp: cp}
+	httpAddr := e.listenerAddr(t, httpListener.GetName())
+	tcpAddr := e.listenerAddr(t, tcpListener.GetName())
 
 	// Precondition: the default cluster is active and serving, so its EDS
 	// subscription to the bare name is live before the sibling exists.
