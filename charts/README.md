@@ -122,10 +122,22 @@ several releases coexist without collisions. Customize naming with `nameOverride
 > (`/run/aether`, `/opt/cni/bin`, `/etc/cni/net.d`, …) and the CNI plugin, so only
 > one agent release should target a given set of nodes.
 
-All objects carry the [recommended `app.kubernetes.io/*` labels](https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/)
+Every object the chart renders (not the pods its workloads create: see below) carries the [recommended `app.kubernetes.io/*` labels](https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/)
 (`name`, `instance`, `version`, `component`, `part-of: aether`, `managed-by`) plus
 `helm.sh/chart`. Workload selectors use the immutable subset (`name` + `instance`
 + `component`).
+
+**Pods** carry only the labels that do not change between releases: the selector
+labels, `part-of` and `managed-by`. `helm.sh/chart` and `app.kubernetes.io/version`
+are on the DaemonSet / Deployment object, not on its pod template (`aether` chart
+>= 2.4.15, #1363), so a chart release rolls only the workloads whose pod
+template changed (its spec, or its metadata: the config checksum annotations are
+there to do exactly that). The image digests are part of the pod template, and
+today every in-repo image gets a new digest with every commit, so a deploy of a
+new commit still rolls everything: see the runbook. To see which release a pod
+belongs to, read its owner
+(`kubectl get ds,deploy -A -l app.kubernetes.io/part-of=aether -L helm.sh/chart,app.kubernetes.io/version`)
+or `helm list -A`. See `docs/runbook.md`, "Which workloads a chart upgrade rolls".
 
 ## Publish to Quay (OCI)
 

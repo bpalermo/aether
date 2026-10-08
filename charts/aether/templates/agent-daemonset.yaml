@@ -38,7 +38,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "aether.agent.labels" . | nindent 8 }}
+        {{- include "aether.agent.podLabels" . | nindent 8 }}
     spec:
       hostNetwork: true
       # Resolve in-cluster Service names (e.g. the registrar) while on hostNetwork;

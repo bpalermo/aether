@@ -32,7 +32,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "aether.udsCsi.labels" . | nindent 8 }}
+        {{- include "aether.udsCsi.podLabels" . | nindent 8 }}
     spec:
       # A UDS pod cannot start, and a deleted one cannot finish terminating,
       # while this plugin is down on its node.

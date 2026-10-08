@@ -36,8 +36,19 @@ spec:
       maxUnavailable: 0
   template:
     metadata:
+      {{- if and .Values.proxy.authzSidecar.enabled .Values.proxy.authzSidecar.opa.enabled }}
+      annotations:
+        # `opa run` reads /policy/policy.rego once, at start (no --watch), so a
+        # changed policy reaches the sidecar only when the pod is replaced. This
+        # is what replaces it: until chart 2.4.15 the chart-version label on the
+        # pod template rolled the proxy on every release, and a policy changed
+        # at an unchanged chart version was never applied at all (#1363).
+        # The proxy's own bootstrap needs no checksum: the supervisor watches
+        # the file (--watch-config) and hot-restarts in place.
+        checksum/opa-policy: {{ .Values.proxy.authzSidecar.opa.policy | toString | sha256sum }}
+      {{- end }}
       labels:
-        {{- include "aether.proxy.labels" . | nindent 8 }}
+        {{- include "aether.proxy.podLabels" . | nindent 8 }}
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
