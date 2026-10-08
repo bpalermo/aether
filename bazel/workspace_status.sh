@@ -20,6 +20,7 @@ echo "STABLE_GIT_VERSION $(git describe --tags --always --long --dirty --abbrev=
 # It costs nothing: the value is the same for every build at a commit, so the
 # remote cache still hits across machines, and between commits only the push
 # specs and the chart packages re-run, never a layer, a compile or a link.
+# scripts/check-image-digest-stability.sh fails if this key stops being HEAD.
 echo "STABLE_GIT_COMMIT $(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
 echo "BUILD_TIMESTAMP $(date +%s)"
 echo "GIT_COMMIT $(git rev-parse HEAD 2>/dev/null || echo 'unknown')"

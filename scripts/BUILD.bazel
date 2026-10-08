@@ -50,6 +50,19 @@ sh_test(
     data = ["check-shell-lint.sh"],
 )
 
+# The image-digest check (#1378) against a fake `bazel` that "builds" two images
+# from the workspace-status script it is handed: stable digests pass; a digest
+# that follows the commit, a tag that does not, a status that never reaches the
+# build, an empty query and a status script with no STABLE_GIT_COMMIT each fail.
+# The check itself builds the real images twice and cannot run inside a test
+# (it runs Bazel); CI's `test` job runs it as a step.
+sh_test(
+    name = "check_image_digest_stability_test",
+    size = "small",
+    srcs = ["check_image_digest_stability_test.sh"],
+    data = ["check-image-digest-stability.sh"],
+)
+
 # CI's test selection (scripts/ci-impacted-targets.sh, the `diff` job of ci.yaml
 # and main.yaml) against a throwaway repository, a fake `bazel query` that
 # applies the script's own tag regex to a table of targets, and a fake

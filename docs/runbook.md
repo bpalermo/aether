@@ -1479,7 +1479,11 @@ Neither is true any more for the Go images this workspace builds (agent,
 mesh-dns, proxy-supervisor, uds-csi, cni-install, registrar, controller,
 prober): none of them and none of their binaries carries the commit, so the same
 inputs build the same digest at any commit, the chart pins the same digest, and
-the pod template does not change.
+the pod template does not change. CI holds the build to it: the `test` job
+builds every image index twice, as two made-up commits, and fails on a digest
+that differs (`scripts/check-image-digest-stability.sh`, or
+`make check-image-digests` locally; it takes seconds once the images are
+built).
 
 The `aether-proxy` image is the exception, and stays one. It is built in the
 separate `proxy/` workspace by its own release workflow, and it still carries

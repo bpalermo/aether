@@ -635,6 +635,20 @@ jobs:
         run: scripts/check-cni-deps.sh --config=ci
       - name: Guard mesh-dns linkage
         run: scripts/check-mesh-dns-deps.sh --config=ci
+      # #1378: the charts pin every image by index digest, so a digest that moves
+      # with the commit rolls every workload on every deploy whether or not its
+      # code changed. Builds every image index twice under --stamp, as two
+      # made-up commits, and fails on a digest that differs (a stamped label or
+      # annotation, a version linked into a binary) or on a per-commit tag that
+      # does not. Cheap by construction: nothing in an image reads the workspace
+      # status, so the first build is a cache hit on the images the build step
+      # above or main already built, and the second re-runs the ten tag
+      # expansions only. //scripts:check_image_digest_stability_test covers the
+      # script's failure paths.
+      - name: Guard image digests against the commit
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
+        run: scripts/check-image-digest-stability.sh --config=ci --remote_header=x-buildbuddy-api-key="$BUILDBUDDY_API_KEY"
 
   # Race gate (#772). Runs the same impacted test set as `test` + `integration`,
   # rebuilt with the Go race detector. Scoped by bazel-diff exactly like the
