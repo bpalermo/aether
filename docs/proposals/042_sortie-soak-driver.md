@@ -619,9 +619,17 @@ shown a soak. Its replacement for the soak is a small one over the
 `sortie_mesh_*` series above: 2xx rate per target and per node
 (`…_benchmark_http_2xx_total`, the target and the backend taken out of the name
 with `label_replace`), one stat per zero-failure class
-(`{__name__=~"sortie_mesh_.*_benchmark_(http_[45]xx|stream_resets|pool_.*)_total"}`,
-which has no series on a clean run), and p95 per target from the latency
-histogram, which is the mesh's latency now that the engine is not throttled. It
+(`increase({__name__=~"sortie_mesh_.*_benchmark_(http_[45]xx|stream_resets|pool_.*)_total"}[$__range])`,
+with the dashboard's range set to the run), and p95 per target from the latency
+histogram, which is the mesh's latency now that the engine is not throttled.
+Every panel and any alert on these series is a `rate()` or an `increase()`,
+never the series' value (#1420): named by node, a failure series outlives the
+run that made it, so its bare value is not zero on a later clean run, and a
+series born inside the window reads as 0 under `increase()` (the `unless …
+offset` query under "Live view" in `e2e/soak/README.md` finds those). The dashboards and rules that existed on
+2026-10-08 were checked for this: `aether-k6` puts every `k6_*` counter under
+`rate()` and reads only the `k6_vus` gauges bare, and no dashboard or rule reads
+a `sortie_*` series yet. It
 is a GitOps change (sidecar ConfigMaps in `k8s-talos-main`), made in phase 2,
 once the first talos run has shown what the series look like there. Retiring
 `aether-k6` and `k6-operator` is phase 4, and only if nothing else still uses
