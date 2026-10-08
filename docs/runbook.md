@@ -1444,13 +1444,15 @@ kubectl label namespace aether-system \
   pod-security.kubernetes.io/enforce=privileged \
   pod-security.kubernetes.io/audit=privileged \
   pod-security.kubernetes.io/warn=privileged
+kubectl -n aether-system rollout restart daemonset
 kubectl -n aether-system get ds   # CURRENT reaches DESIRED
 ```
 
-The DaemonSet controller retries on its own; on kind the pods were there within
-5 s of the label when it was applied half a minute after the install. Its retry
-interval grows while the pods are refused, so after a long wait
-`kubectl -n aether-system rollout restart daemonset` makes it try at once.
+The `rollout restart` is there because the DaemonSet controller retries a
+refused pod at a growing interval and a label on the namespace does not wake
+it. On kind the pods appeared within 5 s of the label when it came half a minute
+after the install; when it came four minutes after, they had not appeared 20 s
+later and did at once after the restart.
 
 **`namespace.create=true cannot create "aether-system"`** — a render error;
 nothing was created, not even the namespace `--create-namespace` would have

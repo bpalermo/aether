@@ -20,6 +20,8 @@ pods are refused until you run:
   kubectl label namespace {{ $ns }} pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
 
 Refusals show as: kubectl -n {{ $ns }} get events --field-selector reason=FailedCreate
+If pods were already refused, follow the label with:
+  kubectl -n {{ $ns }} rollout restart daemonset
 {{- end }}
 {{- if .Values.spire.enabled }}
 
