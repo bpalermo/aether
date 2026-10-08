@@ -266,6 +266,7 @@ helm_template_match_runner(
         "  name: release-name-merge\\nnot what follows",
         "  name: release-name-typed-list\\nnot what follows",
         "  name: release-name-nested-anchored\\nnot what follows",
+        "  name: release-name-nested-explicit\\nnot what follows",
     ],
     visibility = RUN_BY,
 )

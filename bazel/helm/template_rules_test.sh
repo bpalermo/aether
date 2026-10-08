@@ -135,7 +135,7 @@ checks() {
 	says failing_missing_document "FAIL: the render has no document Role/no-such-role (a document is found by"
 	says failing_missing_document "  Role/release-name-reader (secretchart/templates/multi.yaml, document 5)"
 	says failing_missing_document "  Secret/release-name-plain (secretchart/templates/multi.yaml, document 1)"
-	at_most failing_missing_document 22
+	at_most failing_missing_document 23
 
 	run failing_flow_document nonzero
 	says failing_flow_document "FAIL: the render has no document Secret/flow-document (a document is found by its 'kind:' line"
@@ -170,12 +170,12 @@ checks() {
 	# Values no `data:` line leads to (an explicit key, a block-scalar key, a
 	# merge key): nothing after the name is printed.
 	run failing_explicit nonzero
-	for doc in explicit-key multiline-key merge typed-list nested-anchored; do
+	for doc in explicit-key multiline-key merge typed-list nested-anchored nested-explicit; do
 		says failing_explicit "  name: release-name-$doc"
 	done
 	excerpt_silent_about failing_explicit "token"
 	excerpt_silent_about failing_explicit "payload"
-	at_most failing_explicit 110
+	at_most failing_explicit 130
 
 	run failing_invalid_pattern nonzero
 	says failing_invalid_pattern "FAIL: the pattern is not a valid extended regular expression:"

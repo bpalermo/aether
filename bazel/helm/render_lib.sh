@@ -47,7 +47,8 @@
 #    top-level `kind: <Word>` line, the word is neither Secret nor a typed list
 #    (anything ending in `List`), and no kind key anywhere inside it -- nested,
 #    in a list item, in a flow mapping -- is Secret, a typed list, or written
-#    with an anchor, a tag or an alias.
+#    with an anchor, a tag or an alias, and it has no explicit (`?`) or merge
+#    (`<<`) key at any depth.
 #    Every other line becomes `<masked>` at its own indentation. Nothing looks
 #    for a `data` key: where the values are does not matter when no value line
 #    is printed.
@@ -107,7 +108,9 @@ function flush(    i, hide, secret, kinds, plain, word, content, unreadable, man
       if (line !~ /^[ \t]+(-[ \t]+)?kind:[ \t]*["\047]?[A-Za-z][A-Za-z0-9]*["\047]?[ \t]*(#.*)?$/) unreadable = 1
       else if (line ~ /List["\047]?[ \t]*(#.*)?$/) unreadable = 1
     }
-    if (line ~ /^(\?|<<)/) unreadable = 1
+    # An explicit (`?`) or merge (`<<`) key at ANY depth: what it names or pulls
+    # in cannot be read from the line.
+    if (line ~ /^[ \t]*(-[ \t]+)?(\?|<<[ \t]*:)/) unreadable = 1
     if (line ~ /^(# Source: |["\047]?(apiVersion|kind)["\047]?[ \t]*:)/) manifest = 1
     if (!content && line !~ /^[ \t]*(#.*)?$/) {
       content = 1

@@ -109,8 +109,8 @@ The mask fails closed. A document is printed as it is only when it is plainly
 something else than a Secret: a single top-level `kind: <Word>` line (optionally
 quoted, optionally with a trailing comment) whose word is not `Secret` and does not end in
 `List` (a typed list such as `SecretList` holds items with no kind line of their
-own), in a document that is not flow style or JSON, has no top-level explicit
-(`?`) or merge (`<<`) key, and has no nested `kind` that is `Secret`, a typed
+own), in a document that is not flow style or JSON, has no explicit (`?`) or merge
+(`<<`) key at any depth, and has no nested `kind` that is `Secret`, a typed
 list, or written with an anchor, a tag or an alias. In a
 document that might be a Secret, only these lines are ever printed, and only as
 simple `key: scalar` lines: the `# Source:` comment, `apiVersion:`, `kind:`,

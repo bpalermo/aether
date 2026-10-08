@@ -49,3 +49,16 @@ spec:
     kind: &nested-kind Secret
     data:
       token: FORBIDDEN-nested-anchored-token
+---
+{{- /* A plainly-kinded outer object carrying a Secret whose nested kind is an indented explicit key. */}}
+apiVersion: example.dev/v1
+kind: Bundle
+metadata:
+  name: {{ .Release.Name }}-nested-explicit
+spec:
+  object:
+    apiVersion: v1
+    ? kind
+    : Secret
+    data:
+      token: FORBIDDEN-nested-explicit-token
