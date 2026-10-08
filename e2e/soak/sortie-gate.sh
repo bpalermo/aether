@@ -84,8 +84,12 @@
 #              target's share x the CONFIGURED duration. A range, and against
 #              the configured duration on purpose: the backend's own elapsed
 #              time can read a hair under it, and a worker that is woken late
-#              ends a run one request short (8,099 of 8,100 on talos-main), so
-#              an equality would fail a clean run, while a rate over the
+#              ends a run one request short (sortie's README: 999 of 1,000 in
+#              about one short run in four on a busy machine; the second
+#              talos-main run read 40,497 to 40,500 of 40,500 per target with
+#              every class at zero, by this or by requests still in flight,
+#              which sortie 94cf103 did not count), so an equality would fail a
+#              clean run, while a rate over the
 #              backend's own elapsed time would pass a run that stopped early.
 #              1 % of the plan is 81 requests of a 9 rps target's 8,100 in 15
 #              minutes, 2,754 of its 275,400 in 8h30m. The plan can only carry

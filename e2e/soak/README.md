@@ -262,7 +262,9 @@ target that stops answering, and the prober catches the rest.
   **counts against the plan** (share × the configured duration), as a range: 99–101 %.
   1 % is 81 of a 9 rps target's 8,100 requests in 15 minutes and 2,754 of 275,400 in
   8h30m; it covers the one request a late-woken worker leaves unsent at the end of a
-  run (8,099 of 8,100 on one node of the third talos run) and nothing like a stall.
+  run (sortie's README has seen 999 of 1,000 on a busy machine; the second talos run
+  read 40,497–40,500 of 40,500 per target with every class at zero, by this or by
+  requests in flight that 94cf103 did not count) and nothing like a stall.
 - **`NOT RUN`, and `FAIL  sortie.log`.** sortie lists a stage it never attempted — one
   after a stage that an engine refused at its execution cap
   (`engine.maxConcurrentExecutions`, 16) — with `"not_run": true`, no counters and no

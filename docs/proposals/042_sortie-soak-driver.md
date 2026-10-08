@@ -184,9 +184,14 @@ Four things the gate adds that k6's `rate<0.01` never had:
   duration (899,999 ms of 900,000 on talos-main), which only flatters a rate —
   and a backend that stopped at 96 % of the run, at exactly its share, had a
   perfect rate. A count against the plan has neither problem, and it is a range
-  because a late-woken `WAIT` worker ends a run one request short (8,099 of
-  8,100 on one node of the third talos run): 1 % is 81 requests of a 9 rps
-  target's 15 minutes, 2,754 of its 8h30m.
+  because a late-woken `WAIT` worker ends a run one request short — sortie's
+  own README reports 999 of 1,000 in about one short run in four on a busy
+  machine and asks for "a range with some slack, not an equality". The second
+  talos run read 40,497–40,500 of 40,500 per 9 rps target with every failure
+  class at zero ("Verified on talos-main"): that, or requests still in flight
+  when the run stopped, which 94cf103 counted nowhere — its reports cannot say
+  which. 1 % is 81 requests of a 9 rps target's 15 minutes, 2,754 of its
+  8h30m.
 - **A stage that was not run fails.** sortie marks an execution it never
   attempted `"not_run": true` (a stage after one that an engine refused at its
   execution cap); it has no counters, so every failure class reads zero. The
