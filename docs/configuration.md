@@ -178,7 +178,7 @@ sent through a reload were all answered, with no `ext_authz` error.
   runs (`proxy.authzSidecar.opa.image`):
 
   ```bash
-  OPA_IMAGE=openpolicyagent/opa:1.21.1-envoy-static
+  OPA_IMAGE="$(helm get values aether -n aether-system -a -o json | jq -r .proxy.authzSidecar.opa.image)"
   # parses and compiles (exit 1 and the error otherwise)
   docker run --rm -v "$PWD/policy.rego:/policy/policy.rego:ro" "$OPA_IMAGE" \
     check /policy/policy.rego
