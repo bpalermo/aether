@@ -378,7 +378,11 @@ jobs:
   # native sidecar the proxy container started after, and that a proxy roll
   # whose sidecar image must be pulled again (evicted from the node first: the
   # #1275 trigger) produces ZERO 403s on the allowed path and ZERO ext_authz
-  # errors, across a real hot-restart handoff. Harness: e2e/authz.sh.
+  # errors, across a real hot-restart handoff. Then (#1383) the policy is changed
+  # by a helm upgrade: the running sidecar reloads it (opa run --watch) with the
+  # same pod UID, restart counts and Envoy epoch, a policy that does not parse
+  # leaves the last good one deciding, and a valid one recovers it.
+  # Harness: e2e/authz.sh.
   authz:
     needs: build
     if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'authz'
@@ -393,7 +397,7 @@ jobs:
         with:
           script: authz.sh
           skip-build-var: AUTHZ_SKIP_BUILD
-          verify-description: Verify ext_authz decisions, sidecar ordering and an error-free proxy roll
+          verify-description: Verify ext_authz decisions, sidecar ordering, an error-free proxy roll and an in-place policy reload
           soft: ${{ github.event.inputs.soft == 'true' }}
           logs-dir: /tmp/authz-logs
           artifact-name: authz-e2e-logs

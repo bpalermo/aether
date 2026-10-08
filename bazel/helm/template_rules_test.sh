@@ -151,6 +151,24 @@ checks() {
 	says failing_value_changes_same "FAIL: the line holding 'tls.key:' is the same with and without the changed values (the line is not shown)"
 	at_most failing_value_changes_same 2
 
+	# The ignored-value test names where a template follows the value (by
+	# position and key, never the text), and refuses values that change nothing.
+	run failing_value_ignored_differs nonzero
+	says failing_value_ignored_differs "FAIL: templates/multi.yaml changes with the changed values, and must not:"
+	says failing_value_ignored_differs "  without the changed values, at 70c70: the value of replicas:"
+	says failing_value_ignored_differs "  with the changed values, at 70c70: the value of replicas:"
+	at_most failing_value_ignored_differs 3
+	run failing_value_ignored_no_effect nonzero
+	says failing_value_ignored_no_effect "FAIL: the whole render is the same with and without the changed values: they change nothing, so this test proves nothing"
+	at_most failing_value_ignored_no_effect 1
+	# A render that differs by itself cannot serve as the control.
+	run failing_value_ignored_unreproducible nonzero
+	says failing_value_ignored_unreproducible "FAIL: two renders of the same values (opts) differ, so a changed render says nothing about the changed values"
+	at_most failing_value_ignored_unreproducible 1
+	run failing_value_ignored_changed_unreproducible nonzero
+	says failing_value_ignored_changed_unreproducible "FAIL: two renders of the same values (opts + changed_opts) differ, so a changed render says nothing about the changed values"
+	at_most failing_value_ignored_changed_unreproducible 1
+
 	# Fail closed: a document that is not plainly something else is masked,
 	# whatever its kind line looks like; a plain ConfigMap is not.
 	run failing_unreadable nonzero

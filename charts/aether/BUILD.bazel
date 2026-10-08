@@ -1,7 +1,7 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url", "image_reference")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test", "helm_template_reproducible_test", "helm_template_value_changes_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test", "helm_template_reproducible_test", "helm_template_value_changes_test", "helm_template_value_ignored_test")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
@@ -242,11 +242,11 @@ helm_template_test(
 # #1363: what the version label did by accident. A pod that reads a
 # chart-rendered ConfigMap only at start was restarted by every release, so a
 # changed ConfigMap always reached it. With the label gone, the two ConfigMaps
-# read that way roll their pods through a checksum of their DATA (never of the
-# whole object: its labels carry the chart version):
-#   - the edge's Envoy bootstrap (plain `envoy -c`, no watcher);
-#   - the OPA sidecar's Rego policy (`opa run` without --watch): an
-#     authorization policy that silently stayed the old one.
+# read that way each got an answer of their own:
+#   - the edge's Envoy bootstrap (plain `envoy -c`, no watcher) rolls its pods
+#     through a checksum of the ConfigMap's DATA (never of the whole object:
+#     its labels carry the chart version);
+#   - the OPA sidecar's Rego policy is watched by OPA instead (#1383, below).
 # The proxy's own bootstrap needs none: its supervisor watches the file
 # (--watch-config) and hot-restarts in place.
 helm_template_test(
@@ -291,10 +291,18 @@ OPA_ON = [
     "proxy.authzSidecar.opa.enabled=true",
 ]
 
-# The checksum is the sha256 of the policy text, so two policies are two pod
-# templates (`printf 'package x' | sha256sum`).
+# #1383: the OPA preset watches its policy (`opa run --watch`), so a changed
+# policy reaches every sidecar through the kubelet's ConfigMap sync and the
+# proxy pod is NOT replaced for it. Until chart 2.4.18 a `checksum/opa-policy`
+# annotation rolled the proxy DaemonSet instead (#1367): an Envoy hot restart
+# on every node for a change the sidecar can load by itself.
+#
+# The flag, unconditional with the preset; the policy is still named as a file
+# of the mounted directory, and the mount is the whole ConfigMap volume (a
+# `subPath` mount is never updated by the kubelet, so OPA would have nothing
+# to see).
 helm_template_test(
-    name = "aether_opa_policy_checksum_test",
+    name = "aether_opa_watch_test",
     chart = ":aether",
     opts = OPA_ON + [
         "--set-string",
@@ -304,34 +312,61 @@ helm_template_test(
     ],
     template_patterns = {
         "aether/templates/agent-proxy-daemonset.yaml": [
-            "\\n  template:\\n    metadata:\\n      annotations:\\n(\\s+#.*\\n)*        checksum/opa-policy: f29a61410674e7e3184fb918a75bd5db888db98e3646d8852cc47162be9146a8\\n",
+            "- name: authz\\n\\s+restartPolicy: Always\\n\\s+image: \"openpolicyagent/opa:[^\"]+\"\\n\\s+args:\\n\\s+- \"run\"\\n\\s+- \"--server\"\\n(\\s+#.*\\n)*\\s+- \"--watch\"\\n",
+            "- \"--watch\"\\n(?s:.*)- \"/policy/policy.rego\"\\n(\\s+#.*\\n)*\\s+startupProbe:",
+            "- name: opa-policy\\n\\s+mountPath: /policy\\n\\s+readOnly: true\\n\\s+[#-]",
+            "- name: opa-policy\\n\\s+configMap:\\n\\s+name: \\S+-opa-policy\\n\\s+- name: proxy-config\\n",
         ],
     },
 )
 
-helm_template_test(
-    name = "aether_opa_policy_checksum_changes_test",
-    chart = ":aether",
-    opts = OPA_ON + [
-        "--set-string",
-        "proxy.authzSidecar.opa.policy=package y",
-        "--set",
-        "controller.webhook.spire=true",
-    ],
-    template_patterns = {
-        "aether/templates/agent-proxy-daemonset.yaml": [
-            "        checksum/opa-policy: accad67074bb4111a47acfb8abae0f531c745376006e750ec99fc2836832ee32\\n",
-        ],
-    },
-)
-
-# Off (the default): no annotation at all on the proxy pod template, so the
-# default render is unchanged.
+# The turned-around #1367 test: with the preset on, the proxy pod template
+# carries no checksum of the policy, and no annotation at all.
 helm_template_absent_test(
-    name = "aether_opa_policy_checksum_off_test",
+    name = "aether_opa_policy_no_checksum_test",
     absent = [
         "checksum/",
         "annotations:",
+    ],
+    chart = ":aether",
+    control = "- name: opa-policy",
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+        "--show-only",
+        "templates/agent-proxy-daemonset.yaml",
+    ],
+)
+
+# ...and nothing else in the DaemonSet follows the policy either (an env var,
+# an argument, a label): two policies are one pod template, byte for byte,
+# while the render as a whole does change (the ConfigMap). The SPIRE-served
+# webhook makes the render reproducible (#1364), which the rule requires of
+# its control: with the default one every render differs by its certificate.
+helm_template_value_ignored_test(
+    name = "aether_opa_policy_change_keeps_proxy_pod_test",
+    changed_opts = [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package y",
+    ],
+    chart = ":aether",
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    templates = ["templates/agent-proxy-daemonset.yaml"],
+)
+
+# Off (the default): no annotation at all on the proxy pod template, and no
+# OPA flag, so the default render is unchanged.
+helm_template_absent_test(
+    name = "aether_proxy_pod_template_no_annotations_test",
+    absent = [
+        "checksum/",
+        "annotations:",
+        "--watch\"",
     ],
     chart = ":aether",
     control = "name: aether-proxy",
