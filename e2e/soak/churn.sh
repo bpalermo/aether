@@ -53,7 +53,8 @@
 #
 # "Again until it has exited": bash 5.2 can drop a trapped signal that arrives
 # while it expands a `$(...)`. The log's timestamp and the waits no longer use
-# one; the kubectl calls of a step still do.
+# one. A step still does while it runs, for its kubectl calls and its deadlines
+# (`$(date +%s)`): a single TERM that lands there can be dropped.
 #
 # ---------------------------------------------------------------- the schedule
 #

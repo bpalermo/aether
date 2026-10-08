@@ -1125,9 +1125,12 @@ during each `kubectl` call, on a fake cluster, and looks for what is left.
 **Why "until it has exited" (#1418).** bash 5.2 can drop a trapped signal that arrives
 while it expands a command substitution: it prints `trap: line 2: unexpected EOF while
 looking for matching ')'`, does not run the handler, and carries on. Seen twice in
-1,680 timed TERMs to the watchdog, both in a `$(date …)`. The scripts no longer use a
-command substitution for the time or for a wait, so the hours between rolls are not
-exposed, but a `kubectl` call's output is still read through one. A second TERM is
+1,680 timed TERMs to the watchdog, both in a `$(date …)`. Two paths no longer use
+one: the timestamp of every log line, and the waits (between rolls, between samples,
+inside a step). So the hours a script spends waiting are not exposed. **The steps
+themselves still are**: while a roll, a new-SA step, a uds-csi step or a sample is
+running, the scripts read `kubectl` output and deadlines (`$(date +%s)`) through
+command substitutions, and a single TERM that lands in one can be dropped. A second TERM is
 harmless: once the stop has begun, further ones are ignored.
 
 **`kill -9` is the last resort**, for a driver stuck in a call that does not return.
