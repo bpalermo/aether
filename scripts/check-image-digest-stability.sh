@@ -71,7 +71,15 @@ fail() {
 
 # --- 3. the real workspace status ---------------------------------------------
 head_commit="$(git rev-parse HEAD)"
-real_commit="$(bash bazel/workspace_status.sh | sed -n 's/^STABLE_GIT_COMMIT //p')"
+# Output and status are taken apart: in `x="$(script | sed)"` under `set -e` a
+# failing script ends this one with its own status and no line saying why.
+status_rc=0
+status_out="$(bash bazel/workspace_status.sh)" || status_rc=$?
+if [ "$status_rc" -ne 0 ]; then
+	echo "FAIL: bazel/workspace_status.sh failed (exit ${status_rc}): what it printed cannot be trusted." >&2
+	exit 1
+fi
+real_commit="$(sed -n 's/^STABLE_GIT_COMMIT //p' <<<"$status_out")"
 if [ "$real_commit" = "$head_commit" ] && [[ "$real_commit" =~ ^[0-9a-f]{40}$ ]]; then
 	echo "ok: bazel/workspace_status.sh reports STABLE_GIT_COMMIT = HEAD"
 else
@@ -79,7 +87,18 @@ else
 fi
 
 # --- the images ----------------------------------------------------------------
-mapfile -t indexes < <("$bazel" query 'kind("image_index rule", //...)' --output=label 2>"$tmp/query.err" | sort)
+# The query's status is read before its output is used. Inside
+# `mapfile < <(query | sort)` it is lost twice (the pipe and the process
+# substitution), and a query that printed some images and then failed would
+# leave this script checking those and passing.
+query_rc=0
+"$bazel" query 'kind("image_index rule", //...)' --output=label >"$tmp/query.out" 2>"$tmp/query.err" || query_rc=$?
+if [ "$query_rc" -ne 0 ]; then
+	cat "$tmp/query.err" >&2
+	echo "FAIL: the image_index query failed (exit ${query_rc}): a partial list of images cannot be trusted." >&2
+	exit 1
+fi
+mapfile -t indexes < <(sort "$tmp/query.out")
 if [ "${#indexes[@]}" -eq 0 ] || ! printf '%s\n' "${indexes[@]}" | grep -qxF "$KNOWN_INDEX"; then
 	cat "$tmp/query.err" >&2
 	echo "FAIL: the image_index query returned ${#indexes[@]} target(s) and not ${KNOWN_INDEX}: it cannot be trusted." >&2

@@ -13,8 +13,11 @@
 #   4. ignore-status  the status never reaches the build           -> exit 1
 #                     (the digests agree, and must not be believed)
 #   5. no-images      the query returns nothing                    -> exit 1
-#   6. no-digest      a build that writes no digest                -> exit 1
-#   7. the real status script reports no STABLE_GIT_COMMIT         -> exit 1
+#   6. query-fails    the query prints one image, then fails       -> exit 1
+#                     (it must not go on to check that one image)
+#   7. no-digest      a build that writes no digest                -> exit 1
+#   8. the real status script reports no STABLE_GIT_COMMIT         -> exit 1
+#   9. the real status script fails                                -> exit 1
 #
 # Run: bazel test //scripts:check_image_digest_stability_test, or
 #      bash scripts/check_image_digest_stability_test.sh
@@ -66,6 +69,12 @@ bin="bazel-out/k8-fastbuild/bin"
 case "$cmd" in
 query)
 	[ "$FAKE_MODE" = no-images ] && exit 0
+	if [ "$FAKE_MODE" = query-fails ]; then
+		# The known image, then a failure: a partial answer.
+		echo "//${pkgs[0]}:image_index"
+		echo "fake bazel: query died half way" >&2
+		exit 3
+	fi
 	for p in "${pkgs[@]}"; do echo "//$p:image_index"; done
 	;;
 build)
@@ -154,12 +163,18 @@ expect "a status that never reaches the build fails although the digests agree" 
 	"the workspace status did not reach the build" -- "OK:"
 expect "a query that returns no image fails" no-images 1 \
 	"it cannot be trusted" -- "OK:"
+expect "a query that prints one image and then fails is not believed" query-fails 1 \
+	"the image_index query failed (exit 3)" "query died half way" -- "OK:" "building"
 expect "a build that writes no digest fails" no-digest 1 \
 	"no digest read" -- "OK:"
 
 write_status "STABLE_GIT_VERSION v1" "GIT_COMMIT $HEAD_SHA"
 expect "a real status script with no STABLE_GIT_COMMIT fails" ok 1 \
 	"bazel/workspace_status.sh reports STABLE_GIT_COMMIT ''" -- "OK:"
+
+printf '#!/usr/bin/env bash\necho "STABLE_GIT_COMMIT %s"\nexit 7\n' "$HEAD_SHA" >"$repo/bazel/workspace_status.sh"
+expect "a real status script that fails is not believed" ok 1 \
+	"bazel/workspace_status.sh failed (exit 7)" -- "OK:"
 
 if [ "$FAILS" -ne 0 ]; then
 	echo "$FAILS case(s) failed"
