@@ -284,9 +284,9 @@ type Supervisor struct {
 	// lineage replaces a drained predecessor, whose epoch numbers it reuses.
 	// Guarded by mu.
 	readyRequiresOwnIdentity bool
-	// onlineCPUs is Envoy's default --concurrency on this node; swapped in
-	// tests.
-	onlineCPUs func() (int, error)
+	// cpus is what Envoy's default worker count is computed from (#1442);
+	// swapped in tests.
+	cpus cpuSources
 }
 
 // watchdogFire is a fatal wedge diagnosis delivered from watchLiveness to Run.
@@ -391,7 +391,7 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 		handoffPeer:        -1,
 		childSilentEpoch:   -1,
 		handoffWaitEpoch:   -1,
-		onlineCPUs:         readOnlineCPUs,
+		cpus:               systemCPUSources{},
 		now:                time.Now,
 		childExited:        make(chan childExit, 8),
 		done:               make(chan struct{}),

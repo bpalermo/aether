@@ -217,7 +217,7 @@ count yet, so code only they exercise reads as uncovered.
   no edit. `cmd/` mains are in: they are code.
 - *One subtree of a component is out too:* `agent/test` (`EXCLUDED_SUBTREES`).
   It holds the Envoy-driven harnesses (`envoy_validate`, its generator,
-  `mtlspool`, `envoybin`), which import `agent/internal/...` and therefore have
+  `mtlspool`, `envoyargs`, `envoybin`), which import `agent/internal/...` and therefore have
   to sit under `agent/` (#1311); before that they were in `test/` and excluded
   with it. Their two non-test files (the config builders and the generator's
   `main`) are fixtures, not product code, so they stay out of the denominator
@@ -3064,8 +3064,9 @@ restart and nothing shared between the old and the new replica.
 
 To read the count a running edge Envoy actually has, before and after the upgrade
 (the first is the pod spec, the second is Envoy's own gauge in the OTLP stats; expect
-one series per edge replica, each equal to `edge.concurrency`, or to the node's core
-count when it is `0`):
+one series per edge replica, each equal to `edge.concurrency`, or, when it is `0`, to
+Envoy's default: the node's core count unless the container has a CPU limit or a
+restricted CPU mask, which lower it):
 
 ```bash
 kubectl get deploy -n aether-ingress aether-edge \
@@ -3879,7 +3880,8 @@ them with the commands in §7 "Pre-flight: node headroom before a roll (#812)".
 - **`proxy.hotRestart.drainTime`** (default `10s`). Do not stretch it to spread the cost.
   At `30s` on talos-main the peak was no lower, there were more starved seconds, Envoy
   spent about 40% more CPU per handoff, and rolls took 70% longer. Keep the default.
-- **`proxy.concurrency`** (default `0`, one worker per core). In an A/B, 2 workers
+- **`proxy.concurrency`** (default `0`: Envoy's own default, one worker per core unless
+  the container has a CPU limit or a restricted CPU mask, see below). In an A/B, 2 workers
   instead of 4 cut handoff starvation per thread by about 27% and steady-state
   starvation by 57–81%. **Do not change it on a live mesh** until both prerequisites
   are deployed. On talos-main a 4→2 change crashed successors (`Mismatched worker
@@ -3916,6 +3918,35 @@ them with the commands in §7 "Pre-flight: node headroom before a roll (#812)".
   node on the rollout that changes the count, 0 otherwise).
   `proxy.hotRestart.hotRestartOnConcurrencyChange: true` forces the old hot restart.
   Reproduce with `e2e/proxy-concurrency-change.sh`.
+
+  **What "its own" count is when `proxy.concurrency` is `0` (#1442).** The supervisor
+  then passes no `--concurrency`, and Envoy does not run one worker per core: it runs
+  `max(1, min(online CPUs, CPUs in its affinity mask, its cgroup CPU limit))`, where the
+  limit is the quota of the container's own cgroup (cgroup v2 `cpu.max`, or cgroup v1
+  `cpu.cfs_quota_us` / `cpu.cfs_period_us`) divided by the period and rounded **down**:
+  a `1500m` limit is one worker, `2500m` two. No ancestor cgroup is read, so a limit set
+  on the pod as a whole and not on the proxy container does not lower the count
+  (measured: a 1.5-CPU quota one level up left 20 workers), and
+  `ENVOY_CGROUP_CPU_DETECTION=false` in the container's environment turns the cgroup
+  term off. Measured on the pinned
+  proxy on a 20-CPU machine: 20 workers unrestricted; 1, 2 and 3 under a mask of 1, 2
+  and 3 CPUs; 1 under a quota of 0.5, 1, 1.5 and 1.99 CPUs, 2 under 2 and 2.5, 3 under
+  3; an explicit `--concurrency 4` stayed 4 under a 2-CPU mask and under a 1.5-CPU
+  quota. The supervisor computes the same number from the same sources (it forks Envoy,
+  so both are in one container and see the same mask and cgroup), and the WARN of a
+  count change says where its number came from (`successorConcurrencyFrom`, for example
+  `envoy default: min(online CPUs 4, CPU affinity 4, cgroup CPU limit 2)`). Before
+  #1442 it assumed one worker per online CPU, so a proxy with a CPU limit or a
+  restricted mask and no explicit count compared, say, 4 with a predecessor's 2 and took
+  the drain + fresh start on every roll: `fresh_after_drain` counting on every restart,
+  not only on the rollout that changes the count, is the signature. Two consequences
+  remain by design. Changing `proxy.resources.limits.cpu` across a whole-CPU boundary
+  with `proxy.concurrency: 0` is a real count change and is handled as one. And when the
+  online CPUs cannot be read the count is unknown and the supervisor hot-restarts, as
+  for every other inconclusive check. `//agent/test/envoyargs` starts the pinned Envoy
+  under an affinity mask (and, where the machine lets an unprivileged test make a
+  cgroup with a quota, under a CPU limit) and fails when the supervisor's number is not
+  Envoy's, so a proxy pin bump that changes the rule is caught there.
 - **The node agent.** It has no CPU limit since #1119 (`agent.resources.requests.cpu`
   `200m`, `GOMAXPROCS=2`), because a CFS quota parked snapshot builds while they held
   the snapshot-cache mutex. Do not add one back to save headroom.
