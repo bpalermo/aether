@@ -3,6 +3,7 @@ package prober
 import (
 	"crypto/tls"
 	"math"
+	"net"
 	"net/http/httptrace"
 	"sync"
 	"time"
@@ -63,6 +64,11 @@ type phaseTimes struct {
 	tlsDone      time.Time
 	gotConn      time.Time
 	reused       bool
+	// Where the probe went (#1391): the address of the last connect attempt, and
+	// the two ends of the connection the request was sent on.
+	dialAddr     string
+	remoteAddr   string
+	localAddr    string
 	wroteRequest time.Time
 	firstByte    time.Time
 }
@@ -87,7 +93,7 @@ func (r *phaseRecorder) trace() *httptrace.ClientTrace {
 		GetConn:  func(string) { r.mark(func(t *phaseTimes) *time.Time { return &t.getConn }) },
 		DNSStart: func(httptrace.DNSStartInfo) { r.mark(func(t *phaseTimes) *time.Time { return &t.dnsStart }) },
 		DNSDone:  func(httptrace.DNSDoneInfo) { r.mark(func(t *phaseTimes) *time.Time { return &t.dnsDone }) },
-		ConnectStart: func(string, string) {
+		ConnectStart: func(_, addr string) {
 			now := time.Now()
 			r.mu.Lock()
 			defer r.mu.Unlock()
@@ -95,6 +101,7 @@ func (r *phaseRecorder) trace() *httptrace.ClientTrace {
 				r.t.connectStart = now
 			}
 			r.t.connecting++
+			r.t.dialAddr = addr
 		},
 		ConnectDone: func(string, string, error) {
 			now := time.Now()
@@ -114,6 +121,10 @@ func (r *phaseRecorder) trace() *httptrace.ClientTrace {
 			if r.t.gotConn.IsZero() {
 				r.t.gotConn = now
 				r.t.reused = info.Reused
+				if info.Conn != nil {
+					r.t.remoteAddr = addrString(info.Conn.RemoteAddr())
+					r.t.localAddr = addrString(info.Conn.LocalAddr())
+				}
 			}
 		},
 		WroteRequest: func(httptrace.WroteRequestInfo) {
@@ -121,6 +132,14 @@ func (r *phaseRecorder) trace() *httptrace.ClientTrace {
 		},
 		GotFirstResponseByte: func() { r.mark(func(t *phaseTimes) *time.Time { return &t.firstByte }) },
 	}
+}
+
+// addrString is a.String(), or "" for a connection that has no such address.
+func addrString(a net.Addr) string {
+	if a == nil {
+		return ""
+	}
+	return a.String()
 }
 
 // phaseSnapshot is a probe's trace as it stood when the probe ended. It is a copy: the
@@ -180,9 +199,27 @@ func (s *phaseSnapshot) span(from, to time.Time) float64 {
 	return math.Round(float64(to.Sub(from).Microseconds())/100) / 10
 }
 
-// phaseTimings are the per-phase fields of the AETHER_PROBE_FAIL line. Every field is
-// always present: -1 means the phase never started, and the phase the probe ended in
-// is measured up to the failure.
+// phaseTimings are the fields of the AETHER_PROBE_FAIL line that come from the probe's
+// trace: the phases, and where the probe went. Every field is always present: a *_ms of
+// -1 means the phase never started, and the phase the probe ended in is measured up to
+// the failure.
+//
+// Where it went (#1391). aether_probe_requests_total has no destination: its `node` is
+// the node the PROBER runs on, the source, and `target` is the name it asked for. The
+// client cannot name the destination either. On the mesh the connection it holds ends
+// at the node proxy of its own node: Remote is the address the probe dialled (the
+// fixed egress, or the Service address the name resolved to), never the pod that would
+// have answered, and the proxy adds no response header that names its upstream. What
+// the client does have is the key to the proxies' own records of the request: the
+// trace id of the `traceparent` header this probe sent. Not the whole header: a proxy
+// with tracing on writes its own span id into it at every hop, also for a request that
+// is marked not-sampled, so the access log's `traceparent` field shares only the trace
+// id with what was sent (two rows of one probe, read from a test cluster on
+// 2026-10-08: `00-7562...4196-5fe29c53fe07c4da-00` at the source proxy,
+// `00-7562...4196-64629e6a312a85b9-00` at the destination's). The source proxy's row
+// with that trace id has the endpoint it chose as `upstream_host`, and its
+// `downstream_remote_address` is this connection's Local; a `reporter:destination`
+// row with it, on another node, means the request arrived there.
 type phaseTimings struct {
 	Phase     string  `json:"phase"`
 	Reused    bool    `json:"reused"`
@@ -192,6 +229,16 @@ type phaseTimings struct {
 	TLSMS     float64 `json:"tls_ms"`     // TLSHandshakeStart to TLSHandshakeDone
 	WriteMS   float64 `json:"write_ms"`   // GotConn to WroteRequest
 	TTFBMS    float64 `json:"ttfb_ms"`    // WroteRequest to GotFirstResponseByte
+	// Dial is the address of the last connect attempt: what the name resolved to.
+	// "" when the probe never dialled (a reused connection, a failed lookup).
+	Dial string `json:"dial"`
+	// Remote and Local are the two ends of the connection the request was sent on;
+	// "" when the probe never had one (then Dial is all there is).
+	Remote string `json:"remote"`
+	Local  string `json:"local"`
+	// TraceID is the trace id of the traceparent header the probe sent: the
+	// access-log join key. "" for a probe that was never sent.
+	TraceID string `json:"trace_id"`
 }
 
 // timings renders s for the failure line.
@@ -209,6 +256,9 @@ func (s *phaseSnapshot) timings() phaseTimings {
 		TLSMS:     s.span(s.tlsStart, s.tlsDone),
 		WriteMS:   s.span(s.gotConn, s.wroteRequest),
 		TTFBMS:    s.span(s.wroteRequest, s.firstByte),
+		Dial:      s.dialAddr,
+		Remote:    s.remoteAddr,
+		Local:     s.localAddr,
 	}
 }
 

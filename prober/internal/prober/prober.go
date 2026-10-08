@@ -186,8 +186,14 @@ func New(ctx context.Context, cfg Config, log *slog.Logger, version string) (*Pr
 func newProber(cfg Config, log *slog.Logger, res *resource.Resource, meter metric.Meter,
 	provider *sdkmetric.MeterProvider, failOut io.Writer,
 ) (*Prober, error) {
+	// The labels: tier, target, result and pod here, and `node` from the resource's
+	// k8s.node.name. That node is the one this prober runs on: the SOURCE of the
+	// probe, never where it went. The metric has no destination, on purpose (a
+	// destination label would be a series per endpoint, per pod, per result). A
+	// failed probe's destination is found through its AETHER_PROBE_FAIL line: see
+	// phaseTimings.
 	counter, err := meter.Int64Counter("aether_probe_requests_total",
-		metric.WithDescription("Synthetic mesh probe results by tier/target/result."))
+		metric.WithDescription("Synthetic mesh probe results by tier/target/result. The node is the prober's own (the source); the destination of a failed probe is on its AETHER_PROBE_FAIL log line."))
 	if err != nil {
 		return nil, fmt.Errorf("probe counter: %w", err)
 	}
@@ -408,7 +414,11 @@ func (p *Prober) probe(ctx context.Context, t target) {
 	// probe rate with proxy tracing enabled every probe becomes a synthetic
 	// liveness-probe trace in Tempo (the access-log health-check exclusion has no
 	// tracing equivalent for the direct_response liveness route).
-	req.Header.Set("traceparent", notSampledTraceparent())
+	// The header's trace id is also the probe's name in the proxies' access logs: a
+	// failed probe prints it, and the rows that carry it say where the probe went
+	// (#1391; see phaseTimings for why the trace id and not the whole header).
+	traceparent := notSampledTraceparent()
+	req.Header.Set("traceparent", traceparent)
 	start := time.Now()
 	// The phase trace (#1252): which step of the request the time went to. The
 	// transport's dial goroutine keeps the request context's values, so the DNS and
@@ -429,6 +439,7 @@ func (p *Prober) probe(ctx context.Context, t target) {
 		}
 		snap := rec.snapshot(end)
 		pt := snap.timings()
+		pt.TraceID = traceID(traceparent)
 		p.record(t, classifyFailure(rctx, err, pt.Phase), elapsed, err, pt)
 		return
 	}
@@ -439,6 +450,7 @@ func (p *Prober) probe(ctx context.Context, t target) {
 	}
 	snap := rec.snapshot(end)
 	pt := snap.timings()
+	pt.TraceID = traceID(traceparent)
 	pt.Phase = phaseResponse // the request completed; the status is the failure
 	p.record(t, resultHTTPError, elapsed, fmt.Errorf("HTTP %d", resp.StatusCode), pt)
 }
@@ -472,6 +484,15 @@ func notSampledTraceparent() string {
 		return "00-0000000000000000000000000000ace0-00000000000000a1-00"
 	}
 	return "00-" + hex.EncodeToString(buf[0:16]) + "-" + hex.EncodeToString(buf[16:24]) + "-00"
+}
+
+// traceID is the trace-id of a W3C traceparent ("00-<32 hex>-<16 hex>-<flags>"), or ""
+// when tp is not one.
+func traceID(tp string) string {
+	if len(tp) != 55 || tp[2] != '-' || tp[35] != '-' || tp[52] != '-' {
+		return ""
+	}
+	return tp[3:35]
 }
 
 // classifyErr maps a request error to a result. connection_error is the class the
