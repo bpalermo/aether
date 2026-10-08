@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"aethermesh.dev/agent/internal/proxy/hotrestart"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -387,4 +389,23 @@ func TestChartEnvoyArgFlagsAreAllowedOnce(t *testing.T) {
 	// Control: -l, three --service-*, --drain-strategy, --concurrency and
 	// --skip-hot-restart-parent-stats.
 	require.GreaterOrEqual(t, flags, 7, "only %d flags found among the chart's --envoy-arg items: %v", flags, args)
+}
+
+// TestStallTopConsumersFlag: the stall line's consumer list is on by default
+// (the chart passes no flag for it) and --stall-top-consumers sizes it or turns
+// it off (#1392).
+func TestStallTopConsumersFlag(t *testing.T) {
+	cmd := New("test")
+	f := cmd.Flags().Lookup("stall-top-consumers")
+	require.NotNil(t, f)
+	assert.Equal(t, "5", f.DefValue)
+
+	cfg := &config{}
+	bound := &cobra.Command{Use: "x"}
+	bindFlags(bound, cfg)
+	require.NoError(t, bound.ParseFlags(nil))
+	assert.Equal(t, hotrestart.DefaultStallTopConsumers, cfg.supervisor.StallTopConsumers)
+	require.NoError(t, bound.ParseFlags([]string{"--stall-top-consumers=0"}))
+	assert.Zero(t, cfg.supervisor.StallTopConsumers)
+	assert.Error(t, bound.ParseFlags([]string{"--stall-top-consumers=many"}))
 }

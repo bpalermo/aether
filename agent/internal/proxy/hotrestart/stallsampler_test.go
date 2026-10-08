@@ -2,6 +2,7 @@ package hotrestart
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -367,6 +368,75 @@ func TestProcReaderReadsLiveThreads(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotZero(t, n.total.sum())
 	assert.NotEmpty(t, n.cpus)
+}
+
+// TestStallSamplerIsTickedWithTheTimeOfTheObservation: the timestamp a
+// time.Ticker delivers is when the tick was DUE. The supervisor shares the
+// proxy container's cgroup, so whatever starves Envoy can keep the supervisor
+// off the CPU for seconds too, and when it runs again the tick it receives is
+// that old. What it then reads from /proc is the state NOW: the sampler has to
+// be told the time of the reading, or a 3 s wait is placed 3 s too early (its
+// start is the reading minus the wait) and the consumers are taken over
+// seconds that had nothing to do with it.
+func TestStallSamplerIsTickedWithTheTimeOfTheObservation(t *testing.T) {
+	proc := newFakeProc(t)
+	logs := &capturedLog{}
+	s := newTestStallSampler(proc, logs, nil, map[int]int{testEpoch: testPID})
+	fs := newFakeStatFS()
+	fs.talosNode()
+	s.consumers = newTestConsumers(fs, 5)
+	proc.thread(testPID, testPID, "envoy", 'S', 0, 0, "do_epoll_wait")
+
+	clock := consumersT0
+	wake := make(chan time.Time)
+	ticked := make(chan time.Time)
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		driveStallSampler(context.Background(), done, wake, func() time.Time { return clock },
+			func(now time.Time) { s.tick(now); ticked <- now })
+	}()
+	t.Cleanup(func() {
+		close(done)
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("the sampler loop did not end")
+		}
+	})
+	// step delivers the tick that was due at `due` while the clock reads
+	// `observed`, and returns the time the sampler was ticked with.
+	step := func(due, observed time.Duration) time.Time {
+		clock = consumersT0.Add(observed)
+		wake <- consumersT0.Add(due)
+		select {
+		case now := <-ticked:
+			return now
+		case <-time.After(5 * time.Second):
+			t.Fatal("no tick")
+			return time.Time{}
+		}
+	}
+
+	for _, at := range []time.Duration{0, time.Second, 2 * time.Second} {
+		require.Equal(t, consumersT0.Add(at), step(at, at))
+	}
+
+	// From 2.1 s to 5.1 s neither Envoy nor the supervisor runs; /init has the
+	// CPUs. The tick due at 2.1 s is received at 5.1 s.
+	fs.cgroup("/init", 2900*time.Millisecond)
+	fs.cgroup("/", 2900*time.Millisecond)
+	proc.thread(testPID, testPID, "envoy", 'R', 0, 3*time.Second, "")
+	assert.Equal(t, consumersT0.Add(5100*time.Millisecond), step(2100*time.Millisecond, 5100*time.Millisecond),
+		"ticked with the time of the reading, not the time the tick was due")
+
+	recs := logs.records(t, "envoy thread stall")
+	require.Len(t, recs, 1, "the window closes on the reading that found the wait")
+	assert.Contains(t, toStrings(t, recs[0]["threads"])[0], "envoy[starved] cpu=0ms runq=3000ms")
+	assert.Equal(t, "/init=2900ms", recs[0][attrTopCgroups])
+	assert.EqualValues(t, 3100, recs[0][attrTopCgroupsOverMs], "from the sample at 2 s, the last one before the wait began")
+	assert.NotContains(t, recs[0], attrTopCgroupsTruncated)
 }
 
 func toStrings(t *testing.T, v any) []string {
