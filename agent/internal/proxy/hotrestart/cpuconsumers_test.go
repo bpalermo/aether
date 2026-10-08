@@ -1055,3 +1055,20 @@ func BenchmarkConsumerSample(b *testing.B) {
 		b.ReportMetric(float64(entries), "processes")
 	})
 }
+
+// A delta under one millisecond would render as `name=0ms`: it must not take
+// a top-N slot from a consumer that has something to say.
+func TestTopConsumersDropsWhatWouldPrintAsZero(t *testing.T) {
+	all := []consumer{
+		{name: "/kubepods", cpu: 3 * time.Millisecond},
+		{name: "/system/a", cpu: 999 * time.Microsecond},
+		{name: "/system/b", cpu: 400 * time.Microsecond},
+		{name: "/init", cpu: time.Millisecond},
+		{name: "/gone", cpu: 0},
+	}
+	top := topConsumers(all, 3)
+	assert.Equal(t, []consumer{
+		{name: "/kubepods", cpu: 3 * time.Millisecond},
+		{name: "/init", cpu: time.Millisecond},
+	}, top)
+}

@@ -226,9 +226,11 @@ type consumer struct {
 }
 
 // topConsumers orders by CPU time, largest first (name breaks a tie, so the
-// line is deterministic), drops what used none and keeps n.
+// line is deterministic), drops what would print as 0ms and keeps n. The line
+// reports whole milliseconds, so anything under one would take a slot to say
+// `name=0ms`.
 func topConsumers(all []consumer, n int) []consumer {
-	all = slices.DeleteFunc(all, func(c consumer) bool { return c.cpu <= 0 })
+	all = slices.DeleteFunc(all, func(c consumer) bool { return c.cpu < time.Millisecond })
 	slices.SortFunc(all, func(a, b consumer) int {
 		return cmp.Or(cmp.Compare(b.cpu, a.cpu), cmp.Compare(a.name, b.name))
 	})
