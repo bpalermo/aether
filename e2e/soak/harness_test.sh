@@ -1851,6 +1851,8 @@ expect "$G" "grade logs: verdict" '^VERDICT prober=FAIL unpinned=PASS logs=MATCH
 grep -v '2026-10-08T05:28:0[56]' "$GF/born/prober.log" >"$TMP/grade-short.log"
 run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-file "$TMP/grade-short.log"
 expect "$G" "grade logs: two lines short is a MISMATCH, with both numbers" '^LOGS    tier=mesh_dns result=timeout lines=37 suppressed=1 counters=40 MISMATCH$' 1
+# RED before: exit 1, the prober's FAIL, as if the 40 were a count to attribute.
+if [ "$grc" -eq 2 ]; then pass "grade logs: a MISMATCH is exit 2 although the prober verdict is FAIL"; else fail "grade logs: exit $grc with logs=MISMATCH, want 2"; fi
 expect "$G" "grade logs: ... in the verdict too" '^VERDICT prober=FAIL unpinned=PASS logs=MISMATCH$' 1
 run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-url http://logs.example:9428 --logs-query '"AETHER_PROBE_FAIL" AND k8s.namespace.name:aether-test'
 expect "$G" "grade logs: from a log store (one JSON record a line, the prober's line in _msg)" '^LOGS    verdict=MATCH lines=39 suppressed=1 boundary=0 counters=40 ' 1
@@ -1869,6 +1871,7 @@ run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-fil
 expect "$G" "grade logs: a summary closed 30 s after the window's end is a boundary summary, named with the span it can cover" '^LOGS    boundary: tier=mesh_dns result=timeout pod=prober-d suppressed=1 closed=2026-10-08T08:10:30Z covers=2026-10-08T08:08:30Z\.\.2026-10-08T08:10:30Z  \(it may count failures on both sides of the end of the window: not in the sum\)$' 1
 expect "$G" "grade logs: ... and the row is UNPROVEN with both bounds, not a MISMATCH" '^LOGS    tier=mesh_dns result=timeout lines=39 suppressed=0 boundary=1 counters=40 UNPROVEN  \(the logs say between 39 and 40\)$' 1
 expect "$G" "grade logs: ... in the verdict too" '^VERDICT prober=FAIL unpinned=PASS logs=UNPROVEN$' 1
+if [ "$grc" -eq 2 ]; then pass "grade logs: logs=UNPROVEN is exit 2 although the prober verdict is FAIL"; else fail "grade logs: exit $grc with logs=UNPROVEN, want 2"; fi
 # ... and closed 30 s after the window's START, a summary of five failures from
 # before T0. RED before: all five were added, `suppressed=6 counters=40 MISMATCH`.
 {

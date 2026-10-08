@@ -42,7 +42,7 @@
 #   FAILED   one per (tier, result, source node) with a non-success count: the
 #            pods and targets. `node` is the node the PROBER ran on, the source
 #            of the request. Where the request went is not in the metric: it is
-#            on the AETHER_PROBE_FAIL line (README, "Grading").
+#            found through the access logs (README, "Grading").
 #   BORN     a non-success series that did not exist at the window's start, with
 #            its first sample: the case increase() gets wrong
 #   RESET    a counter that went down, and the two values
@@ -112,9 +112,11 @@
 # UNPROVEN, not a match and not a MISMATCH. --logs-url asks the store for two
 # minutes past the window's end, so that a summary closed there is seen at all.
 #
-# Exit: 0 every verdict PASS (and the logs match, when asked); 1 a FAIL; 2
-# UNPROVEN, a log count that does not match or cannot be told, a query that
-# failed, or unusable arguments. Needs bash, jq, date and curl (or kubectl). PROBER_GRADE_CURL and
+# Exit: 0 every verdict PASS (and the logs match, when asked); 1 a FAIL with
+# everything else proven; 2 anything UNPROVEN, a log count that does not match
+# or cannot be told, a query that failed, or unusable arguments. 2 comes first:
+# a FAIL beside a count that cannot be trusted is not yet a list of failures
+# to attribute. Needs bash, jq, date and curl (or kubectl). PROBER_GRADE_CURL and
 # PROBER_GRADE_KUBECTL replace them (the test hooks); //e2e/soak:harness_test
 # runs it on canned query responses.
 set -uo pipefail
@@ -401,9 +403,9 @@ if [ -n "$LOGS_FILE" ] || [ -n "$LOGS_URL" ]; then
 fi
 
 echo "VERDICT prober=${P_VERDICT:-UNPROVEN} unpinned=${U_VERDICT:-UNPROVEN} logs=$L_VERDICT"
-case "${P_VERDICT:-UNPROVEN} ${U_VERDICT:-UNPROVEN}" in
+# Unproven before failed: see "Exit" in the header.
+case "${P_VERDICT:-UNPROVEN} ${U_VERDICT:-UNPROVEN} $L_VERDICT" in
+*UNPROVEN* | *MISMATCH*) exit 2 ;;
 *FAIL*) exit 1 ;;
-*UNPROVEN*) exit 2 ;;
 esac
-case "$L_VERDICT" in MISMATCH | UNPROVEN) exit 2 ;; esac
 exit 0

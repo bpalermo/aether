@@ -1270,8 +1270,10 @@ the sample that creates a series. The prober logged 40 `AETHER_PROBE_FAIL` lines
   out of the sum, and the row is `UNPROVEN` when the counters lie between the sum
   without it and the sum with it. `--logs-url` asks for two minutes past the window's
   end, so that such a summary is seen; with `--logs-file`, export that far.
-- Exit 0: every verdict `PASS`. Exit 1: a `FAIL`. Exit 2: `UNPROVEN`, a log count that
-  does not match, or a query that failed (a failed query is never read as a zero).
+- Exit 0: every verdict `PASS`. Exit 1: a `FAIL`, with everything else proven. Exit 2:
+  anything `UNPROVEN`, a log count that does not match or cannot be told, or a query
+  that failed (a failed query is never read as a zero). 2 comes before 1: a `FAIL`
+  beside a count that cannot be trusted is not yet a list of failures to attribute.
 - The two ends are the last values Prometheus has at or before T0 and T0+8h. The prober
   exports once a minute, so a failure in the last seconds before T0 can be counted
   inside the window.
