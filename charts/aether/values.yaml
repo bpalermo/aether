@@ -1185,7 +1185,11 @@ controller:
     #   true: serve with the controller's SPIRE X.509 SVID and inject the trust
     #     bundle into the caBundle at runtime. Requires the ClusterSPIFFEID below
     #     (or an equivalent) granting the controller the webhook Service DNS name
-    #     in its dnsNames, else the apiserver's TLS hostname check fails.
+    #     in its dnsNames, else the apiserver's TLS hostname check fails. The
+    #     controller is then granted update on its webhook configurations: the
+    #     validating one, and the pod-mutating one whenever namespaceInjection
+    #     or injectPodNdots renders it (one condition for the object, the flag
+    #     naming it and the grant: aether.controller.mutatingWebhook, #1411).
     spire: false
     # Rotation of the self-signed pair (spire=false only; #1364). The CA and the
     # serving certificate are generated once, valid for ten years, and every

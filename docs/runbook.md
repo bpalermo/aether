@@ -4675,6 +4675,58 @@ rollout stalls as soon as the first replaced agent goes NotReady — delete the 
 instead. Keep each window under 10 minutes (SVID TTL 4 h) and recover with
 `kubectl -n spire-server scale statefulset spire-server --replicas=1`.
 
+#### The pod-mutating webhook's caBundle is empty (SPIRE-served webhook, #1411)
+
+With `controller.webhook.spire=true` both webhook configurations render with an
+empty `caBundle` and the controller's leader fills them in. For the pod-mutating
+one it needs three things that the chart now derives from one condition
+(`controller.namespaceInjection` **or** `controller.injectPodNdots`): the
+configuration itself, `--mutating-webhook-config-name` on the controller, and the
+`mutatingwebhookconfigurations` rule in the controller's ClusterRole.
+
+Charts up to 2.4.17 rendered the rule only with `injectPodNdots=true`. A release
+with `controller.webhook.spire=true`, `namespaceInjection=true` and
+`injectPodNdots=false` therefore told the controller to patch an object it could
+not read. The default self-signed webhook, and any release with `injectPodNdots`
+on (the default), was never affected. To check a release:
+
+```bash
+NS=aether-system
+SA=$(kubectl -n "$NS" get deploy -l app.kubernetes.io/name=aether-controller \
+  -o jsonpath='{.items[0].spec.template.spec.serviceAccountName}')
+# Expect "yes" for each verb when the webhook is SPIRE-served and the
+# MutatingWebhookConfiguration exists.
+for verb in get list watch update; do
+  printf '%s: ' "$verb"
+  kubectl auth can-i "$verb" mutatingwebhookconfigurations.admissionregistration.k8s.io \
+    --as="system:serviceaccount:$NS:$SA"
+done
+# Every entry of every aether webhook configuration must show a non-zero length.
+kubectl get mutatingwebhookconfiguration,validatingwebhookconfiguration \
+  -l app.kubernetes.io/name=aether-controller \
+  -o jsonpath='{range .items[*]}{range .webhooks[*]}{.name}{" caBundle bytes: "}{.clientConfig.caBundle}{"\n"}{end}{end}' |
+  awk '{ printf "%s %s %s %d\n", $1, $2, $3, length($4) }'
+```
+
+An entry at `0` is a webhook the apiserver cannot call; with
+`failurePolicy: Ignore` it is skipped silently, so pods in an
+`aether.io/managed` namespace come up outside the mesh and without the
+identity gate. What the controller does without the permission was read from
+its code and not reproduced on a cluster: the injector reads the configuration
+through the manager's cache, whose informer can never list it, so the read
+waits instead of failing. Expect client-go's
+`Failed to watch ... mutatingwebhookconfigurations is forbidden` lines on the
+leader, **no** `webhook caBundle injection failed` line, and the leader replica
+NotReady on its `cache-sync` check. Upgrading to a chart with the fix adds the
+rule; the leader's informer then syncs on its next retry and the injector logs
+`injected SPIRE trust bundle into mutating webhook caBundle`. If it does not
+within a few minutes, restart the controller (a decision for the cluster's
+owner; the webhooks fail open while no replica answers):
+
+```bash
+kubectl -n "$NS" rollout restart deploy -l app.kubernetes.io/name=aether-controller
+```
+
 ### Grepping the outbound identity bindings during a soak (issue #638)
 
 `ssl_fail_verify_san` bursts a few tens of seconds into a fresh proxy generation point at
@@ -4790,6 +4842,12 @@ that caught #829. It is the fail-**open** direction.
     bug**, and until now it was invisible.
   - `service endpoints carry no namespace metadata` — not a window at all: it lasts as
     long as the registry serves those endpoints.
+
+  The UDP floor's `udp:<svc>` clusters are never named here. They carry no transport
+  socket at all (UDP rides the mesh in plaintext, proposal 038), so they have no pin to
+  lose. Agents up to chart 2.4.16 did name them, once per snapshot on every node with a
+  UDP service in scope, so on those versions the counter is never at rest and a line
+  whose `clusters` is only `udp:…` is not an authentication event (#1393).
 
 ```promql
 # Seeded at zero, so a live zero is a real series (not an absent one).
