@@ -1,6 +1,6 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url", "image_reference")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_template_absent_test", "helm_template_fail_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_value_changes_test")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
@@ -81,6 +81,171 @@ helm_lint_test(
 helm_template_test(
     name = "aether_template_test",
     chart = ":aether",
+)
+
+# #1363: a chart release must not roll pods whose spec did not change. Each
+# workload's pod template is rendered at two chart versions (and two
+# appVersions) and must be byte-identical: until 2.4.15 every pod template
+# carried `helm.sh/chart: aether-<version>` and `app.kubernetes.io/version`, so
+# a version bump alone rolled the agent, the proxy (a hot restart on every
+# node), mesh-dns, uds-csi, the registrar and the controller. On a `--stamp`
+# build the appVersion is `git describe` and the published commit chart is
+# `X.Y.Z-<sha>`, so both labels changed with every commit.
+# The same test asserts every workload OBJECT still carries
+# `helm.sh/chart: aether-<version>` on its own metadata.
+helm_pod_template_version_test(
+    name = "aether_pod_template_version_test",
+    chart = ":aether",
+    workloads = 6,
+)
+
+# ...with every optional workload and container rendered too (the edge
+# Deployment, the proxy's authz sidecar, telemetry).
+helm_pod_template_version_test(
+    name = "aether_pod_template_version_all_enabled_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set",
+        "otel.enabled=true",
+        "--set",
+        "otel.endpoint=otel-collector.observability.svc:4317",
+    ],
+    workloads = 7,
+)
+
+# ...and for the per-commit packaging (`X.Y.Z-<sha>`, see :aether_commit below).
+helm_pod_template_version_test(
+    name = "aether_commit_pod_template_version_test",
+    chart = ":aether_commit",
+    workloads = 6,
+)
+
+# #1363 guard: a selector is immutable on upgrade, so each stays exactly the
+# three labels it was (name, instance, component) and never gains a
+# version-carrying one. Positional: `matchLabels:` is followed by the three
+# labels and then by a key one level up.
+helm_template_test(
+    name = "aether_selector_labels_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+    template_patterns = {
+        "aether/templates/" + template + ".yaml": [
+            "\\n  selector:\\n    matchLabels:\\n      app.kubernetes.io/name: aether-" + component +
+            "\\n      app.kubernetes.io/instance: \\S+\\n      app.kubernetes.io/component: " + component + "\\n  \\S",
+        ]
+        for template, component in [
+            ("agent-daemonset", "agent"),
+            ("agent-proxy-daemonset", "proxy"),
+            ("mesh-dns-daemonset", "mesh-dns"),
+            ("uds-csi-daemonset", "uds-csi"),
+            ("registrar-deployment", "registrar"),
+            ("controller-deployment", "controller"),
+            ("edge-deployment", "edge"),
+        ]
+    },
+)
+
+# #1363: what the version label did by accident. A pod that reads a
+# chart-rendered ConfigMap only at start was restarted by every release, so a
+# changed ConfigMap always reached it. With the label gone, the two ConfigMaps
+# read that way roll their pods through a checksum of their DATA (never of the
+# whole object: its labels carry the chart version):
+#   - the edge's Envoy bootstrap (plain `envoy -c`, no watcher);
+#   - the OPA sidecar's Rego policy (`opa run` without --watch): an
+#     authorization policy that silently stayed the old one.
+# The proxy's own bootstrap needs none: its supervisor watches the file
+# (--watch-config) and hot-restarts in place.
+helm_template_test(
+    name = "aether_edge_config_checksum_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+    template_patterns = {
+        "aether/templates/edge-deployment.yaml": [
+            "\\n  template:\\n    metadata:\\n      annotations:\\n(.*\\n)*?        checksum/edge-config: [0-9a-f]{64}\\n",
+        ],
+    },
+)
+
+# ...and the checksum follows the bootstrap: a constant would satisfy the shape
+# test above. Turning the admin listener on changes the ConfigMap's data and
+# nothing else the edge pod reads.
+helm_template_value_changes_test(
+    name = "aether_edge_config_checksum_changes_test",
+    changed_opts = [
+        "--set",
+        "edge.admin.enabled=true",
+    ],
+    chart = ":aether",
+    key = "checksum/edge-config:",
+    opts = [
+        "--show-only",
+        "templates/edge-deployment.yaml",
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+OPA_ON = [
+    "--set",
+    "proxy.authzSidecar.enabled=true",
+    "--set",
+    "proxy.authzSidecar.opa.enabled=true",
+]
+
+# The checksum is the sha256 of the policy text, so two policies are two pod
+# templates (`printf 'package x' | sha256sum`).
+helm_template_test(
+    name = "aether_opa_policy_checksum_test",
+    chart = ":aether",
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "\\n  template:\\n    metadata:\\n      annotations:\\n(\\s+#.*\\n)*        checksum/opa-policy: f29a61410674e7e3184fb918a75bd5db888db98e3646d8852cc47162be9146a8\\n",
+        ],
+    },
+)
+
+helm_template_test(
+    name = "aether_opa_policy_checksum_changes_test",
+    chart = ":aether",
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package y",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "        checksum/opa-policy: accad67074bb4111a47acfb8abae0f531c745376006e750ec99fc2836832ee32\\n",
+        ],
+    },
+)
+
+# Off (the default): no annotation at all on the proxy pod template, so the
+# default render is unchanged.
+helm_template_absent_test(
+    name = "aether_opa_policy_checksum_off_test",
+    absent = [
+        "checksum/",
+        "annotations:",
+    ],
+    chart = ":aether",
+    control = "name: aether-proxy",
+    opts = [
+        "--show-only",
+        "templates/agent-proxy-daemonset.yaml",
+    ],
 )
 
 # #1116: the node agent keeps its 200m CPU request but has NO CPU limit -- a

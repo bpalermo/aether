@@ -1369,6 +1369,84 @@ registry, which the pin reader refuses, and the sweep refuses any commit that
 predates the Quay cut-over (proposal 040 phase 4). Each digest ever pinned under
 `image_reference("proxy")` was introduced after the signing cut-over.
 
+### Which workloads a chart upgrade rolls (#1363)
+
+Since chart **2.4.15** the chart itself no longer puts the release into a pod
+template: a `helm upgrade` rolls a workload only when that workload's pod
+template changed (an image digest, a flag, a resource, a volume).
+
+**That is not yet "only the component that changed".** Every image this
+repository builds gets a new digest with every commit, whether or not its
+content changed: the image carries the commit as its
+`org.opencontainers.image.revision` label (#837) and the binaries are stamped
+with the version. On talos-main all seven in-repo image digests (agent,
+cni-install, proxy-supervisor, mesh-dns, uds-csi, registrar, controller) changed
+in each of the four deploys from revision 276 to 279, including one whose
+commits touched only the registrar, tests and scripts. Every workload runs at
+least one of those images (the proxy DaemonSet through its `install-supervisor`
+init container), so a deploy of a new commit still rolls everything. What
+2.4.15 removes is the chart's own share: an upgrade that changes the chart
+version but not the images (the same commit's images under a re-cut chart, a
+values-only change) no longer rolls anything it did not change.
+
+Until 2.4.15 every pod template carried `helm.sh/chart: aether-<version>` and
+`app.kubernetes.io/version: <appVersion>`. The chart version changes with every
+release, and a deploy from the commit tag (`<X.Y.Z>-<full sha>`, above) changes
+both labels with every commit, so **every** upgrade rolled the agent, the proxy
+(a hot restart on every node), mesh-dns, uds-csi, the registrar, the controller
+and the edge. Both labels are still on the DaemonSet / Deployment objects; they
+are no longer on the pods.
+
+**The upgrade that crosses 2.4.15 rolls everything one last time**, because
+removing the two labels is itself a pod-template change. Plan it like any full
+roll (the headroom pre-flight below). The same is true of a rollback to a chart
+older than 2.4.15, which puts the labels back.
+
+To see what an upgrade rolled, compare the pods' template hashes before and
+after it. A pod that was not rolled keeps its name, its age and its hash:
+
+```bash
+for ns in aether-system aether-ingress; do
+  kubectl -n "$ns" get pods -l app.kubernetes.io/part-of=aether \
+    -L controller-revision-hash,pod-template-hash \
+    --sort-by=.metadata.creationTimestamp
+done
+# The release each workload object belongs to (the labels the pods lost):
+kubectl get ds,deploy -A -l app.kubernetes.io/part-of=aether \
+  -L helm.sh/chart,app.kubernetes.io/version
+```
+
+To know before an upgrade, render both charts with the values you deploy with
+and compare; a workload whose `spec.template` is unchanged is not rolled:
+
+```bash
+helm get values aether -n aether-system -o yaml > values.yaml   # never --reuse-values
+helm get manifest aether -n aether-system > before.yaml
+helm template aether oci://quay.io/aethermesh/chart-aether --version "$AETHER_VERSION" \
+  -n aether-system -f values.yaml > after.yaml
+diff before.yaml after.yaml
+```
+
+`//charts/aether:aether_pod_template_version_test` keeps it that way: it renders
+the chart at two versions and fails if any pod template differs. A new pod label,
+annotation, env var or argument that carries the chart version or the appVersion
+fails it.
+
+A config checksum annotation is a different thing: it rolls a pod when the
+configuration it reads at start changes, which is the point. The version labels
+used to do that by accident, so 2.4.15 adds the two that were needed:
+
+| Pod | Annotation | Changes when | Why a roll is needed |
+| --- | --- | --- | --- |
+| edge | `checksum/edge-config` | the edge's Envoy bootstrap (`aether-edge-config`, data only) | plain `envoy -c`, nothing watches the file |
+| proxy, only with the OPA preset on | `checksum/opa-policy` | `proxy.authzSidecar.opa.policy` | `opa run` reads the policy once, without `--watch` |
+
+The node proxy's own bootstrap (`aether-proxy-config`) has no checksum on
+purpose: the supervisor watches the mounted file (`--watch-config=true`) and
+hot-restarts Envoy in place when the kubelet delivers the new ConfigMap, without
+replacing the pod. That reaches every node within the kubelet's sync period, not
+one node at a time like a DaemonSet roll.
+
 ### Pre-flight: node headroom before a roll (#812)
 
 Do this **before** any `helm upgrade` that rolls the DaemonSets. A roll is a

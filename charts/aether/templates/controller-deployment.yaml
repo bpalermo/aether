@@ -14,7 +14,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "aether.controller.labels" . | nindent 8 }}
+        {{- include "aether.controller.podLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "aether.controller.serviceAccountName" . }}
       # Tolerate the aether startup taint. The controller MUST tolerate it or a

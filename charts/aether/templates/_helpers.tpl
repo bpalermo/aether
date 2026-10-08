@@ -96,7 +96,28 @@ Usage:
 {{- toYaml $res -}}
 {{- end -}}
 
-{{/* Chart label value (name-version). */}}
+{{/*
+Labels, three sets per component (#1363):
+
+  aether.<c>.selectorLabels  name + instance + component. Immutable: they are
+                             the workload's selector.
+  aether.<c>.podLabels       the selector labels + part-of + managed-by. What a
+                             POD TEMPLATE carries. Nothing here may change from
+                             one release to the next: a pod template that
+                             changes rolls every pod of the workload, and for
+                             the proxy that is a hot restart on every node.
+  aether.<c>.labels          the pod labels + helm.sh/chart + app.kubernetes.io/
+                             version. What an OBJECT carries on its own
+                             metadata (the DaemonSet, the Service, the RBAC).
+
+Until chart 2.4.15 the pod templates used `labels`, so `helm.sh/chart:
+aether-<version>` (and, on a stamped build, the `git describe` appVersion) put
+the release into every pod template and every chart release rolled every pod.
+//charts/aether:aether_pod_template_version_test renders the chart at two
+versions and fails if a pod template differs.
+*/}}
+
+{{/* Chart label value (name-version). Never on a pod template: see above. */}}
 {{- define "aether.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
@@ -138,11 +159,14 @@ app.kubernetes.io/name: aether-agent
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: agent
 {{- end -}}
-{{- define "aether.agent.labels" -}}
-helm.sh/chart: {{ include "aether.chart" . }}
+{{- define "aether.agent.podLabels" -}}
 {{ include "aether.agent.selectorLabels" . }}
 app.kubernetes.io/part-of: aether
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+{{- define "aether.agent.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.agent.podLabels" . }}
 {{- with .Chart.AppVersion }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
@@ -157,11 +181,14 @@ app.kubernetes.io/name: aether-mesh-dns
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: mesh-dns
 {{- end -}}
-{{- define "aether.meshDns.labels" -}}
-helm.sh/chart: {{ include "aether.chart" . }}
+{{- define "aether.meshDns.podLabels" -}}
 {{ include "aether.meshDns.selectorLabels" . }}
 app.kubernetes.io/part-of: aether
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+{{- define "aether.meshDns.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.meshDns.podLabels" . }}
 {{- with .Chart.AppVersion }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
@@ -207,11 +234,14 @@ app.kubernetes.io/name: aether-uds-csi
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: uds-csi
 {{- end -}}
-{{- define "aether.udsCsi.labels" -}}
-helm.sh/chart: {{ include "aether.chart" . }}
+{{- define "aether.udsCsi.podLabels" -}}
 {{ include "aether.udsCsi.selectorLabels" . }}
 app.kubernetes.io/part-of: aether
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+{{- define "aether.udsCsi.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.udsCsi.podLabels" . }}
 {{- with .Chart.AppVersion }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
@@ -371,11 +401,14 @@ DaemonSet's value.
 {{- trim (toString .Values.agent.eastWestQuicIdleTimeout) -}}
 {{- end -}}
 
-{{- define "aether.proxy.labels" -}}
-helm.sh/chart: {{ include "aether.chart" . }}
+{{- define "aether.proxy.podLabels" -}}
 {{ include "aether.proxy.selectorLabels" . }}
 app.kubernetes.io/part-of: aether
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+{{- define "aether.proxy.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.proxy.podLabels" . }}
 {{- with .Chart.AppVersion }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
@@ -403,11 +436,14 @@ app.kubernetes.io/name: aether-registrar
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: registrar
 {{- end -}}
-{{- define "aether.registrar.labels" -}}
-helm.sh/chart: {{ include "aether.chart" . }}
+{{- define "aether.registrar.podLabels" -}}
 {{ include "aether.registrar.selectorLabels" . }}
 app.kubernetes.io/part-of: aether
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+{{- define "aether.registrar.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.registrar.podLabels" . }}
 {{- with .Chart.AppVersion }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
@@ -431,11 +467,14 @@ app.kubernetes.io/name: aether-edge
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: edge
 {{- end -}}
-{{- define "aether.edge.labels" -}}
-helm.sh/chart: {{ include "aether.chart" . }}
+{{- define "aether.edge.podLabels" -}}
 {{ include "aether.edge.selectorLabels" . }}
 app.kubernetes.io/part-of: aether
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+{{- define "aether.edge.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.edge.podLabels" . }}
 {{- with .Chart.AppVersion }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
@@ -457,11 +496,14 @@ app.kubernetes.io/name: aether-controller
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: controller
 {{- end -}}
-{{- define "aether.controller.labels" -}}
-helm.sh/chart: {{ include "aether.chart" . }}
+{{- define "aether.controller.podLabels" -}}
 {{ include "aether.controller.selectorLabels" . }}
 app.kubernetes.io/part-of: aether
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+{{- define "aether.controller.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.controller.podLabels" . }}
 {{- with .Chart.AppVersion }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}

@@ -26,7 +26,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "aether.meshDns.labels" . | nindent 8 }}
+        {{- include "aether.meshDns.podLabels" . | nindent 8 }}
     spec:
       hostNetwork: true
       # Derived from --lame-duck-max, never set independently (issue #729). On SIGTERM
