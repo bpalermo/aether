@@ -223,12 +223,12 @@ func appHCM(name string, codec hcmv3.HttpConnectionManager_CodecType, accessLog 
 }
 
 // startLoggingDestination runs a destination Envoy: an mTLS h2 listener and an
-// HTTP/3 listener on one port number, both routing to appAddr and both logging
-// with production's inbound access logger to the OTLP receiver at sinkAddr.
-func startLoggingDestination(t *testing.T, p *pki, appAddr, sinkAddr string) (addr string) {
+// HTTP/3 listener (each on its own kernel-assigned port, as in
+// startCostDestination), both routing to appAddr and both logging with
+// production's inbound access logger to the OTLP receiver at sinkAddr.
+func startLoggingDestination(t *testing.T, p *pki, appAddr, sinkAddr string) (h2Addr, h3Addr string) {
 	t.Helper()
 	tcpLog, quicLog := inboundAccessLogs(t)
-	port := freePort(t)
 	hcmFilter := func(h *hcmv3.HttpConnectionManager) []*listenerv3.Filter {
 		return []*listenerv3.Filter{{
 			Name:       "envoy.filters.network.http_connection_manager",
@@ -239,7 +239,7 @@ func startLoggingDestination(t *testing.T, p *pki, appAddr, sinkAddr string) (ad
 	h3HCM.Http3ProtocolOptions = &corev3.Http3ProtocolOptions{}
 	tcp := &listenerv3.Listener{
 		Name:    "dest_h2",
-		Address: socketAddress("127.0.0.1", port),
+		Address: socketAddress("127.0.0.1", envoyPicksPort),
 		FilterChains: []*listenerv3.FilterChain{{
 			Filters: hcmFilter(appHCM("dest_h2", hcmv3.HttpConnectionManager_AUTO, tcpLog)),
 			TransportSocket: &corev3.TransportSocket{
@@ -249,12 +249,11 @@ func startLoggingDestination(t *testing.T, p *pki, appAddr, sinkAddr string) (ad
 		}},
 	}
 	h3 := &listenerv3.Listener{
-		Name: "dest_h3",
-		Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
-			Protocol: corev3.SocketAddress_UDP, Address: "127.0.0.1",
-			PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: uint32(port)},
-		}}},
-		EnableReusePort:   wrapperspb.Bool(true),
+		Name:    "dest_h3",
+		Address: quicListenerAddress(),
+		// Off so the kernel-assigned UDP port is this listener's alone; see
+		// requireExclusiveUDPBinds. This Envoy runs one worker.
+		EnableReusePort:   wrapperspb.Bool(false),
 		UdpListenerConfig: proxy.InboundQUICUDPListenerConfig(),
 		FilterChains: []*listenerv3.FilterChain{{
 			Filters: hcmFilter(h3HCM),
@@ -289,9 +288,8 @@ func startLoggingDestination(t *testing.T, p *pki, appAddr, sinkAddr string) (ad
 			Clusters:  []*clusterv3.Cluster{static(appClusterName, appAddr, false), static(otelCollectorCluster, sinkAddr, true)},
 		},
 	}
-	addr = fmt.Sprintf("127.0.0.1:%d", port)
-	runEnvoy(t, "dest", bs, 1, map[string]string{"dest_h2": addr})
-	return addr
+	dst := runEnvoy(t, "dest", bs, 1, "dest_h2", "dest_h3")
+	return dst.addrs["dest_h2"], dst.addrs["dest_h3"]
 }
 
 // getPath sends one request for path through the source proxy.
@@ -380,8 +378,8 @@ func TestAccessLogConnectionTiming(t *testing.T) {
 				_, _ = io.WriteString(w, "ok")
 			}))
 			t.Cleanup(app.Close)
-			dest := startLoggingDestination(t, p, strings.TrimPrefix(app.URL, "http://"), sink.addr)
-			src := startCostSource(t, p, dest, dest, 1, tc.viaH3, nil)
+			destH2, destH3 := startLoggingDestination(t, p, strings.TrimPrefix(app.URL, "http://"), sink.addr)
+			src := startCostSource(t, p, destH2, destH3, 1, tc.viaH3, nil)
 
 			client := &http.Client{Timeout: 10 * time.Second}
 			base := "http://" + src.addrs["source_a"]

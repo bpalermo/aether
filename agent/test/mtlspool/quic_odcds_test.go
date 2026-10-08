@@ -291,7 +291,6 @@ func startODCDS(t *testing.T, admit bool) *odcdsRun {
 	twinB := proxy.QUICClusterName(odcdsDestSvc, trustDomain, proxy.SourceSAKeyFromSpiffeID(spiffeSourceB))
 	arms := map[string]string{spiffeSourceA: twinA, spiffeSourceB: twinB}
 
-	portA, portB, adminPort := freePort(t), freePort(t), freePort(t)
 	baseCLA := staticEndpoint(odcdsDestSvc, h3.addr)
 	agent := &odcdsAgent{
 		t: t, admit: admit, destAddr: h3.addr, baseCLA: baseCLA, version: 1,
@@ -303,24 +302,22 @@ func startODCDS(t *testing.T, admit bool) *odcdsRun {
 		resourcev3.ClusterType:  {odcdsBase()},
 		resourcev3.EndpointType: {baseCLA},
 		resourcev3.ListenerType: {
-			odcdsSourceListener(t, "source_a", spiffeSourceA, portA, arms),
-			odcdsSourceListener(t, "source_b", spiffeSourceB, portB, arms),
+			odcdsSourceListener(t, "source_a", spiffeSourceA, envoyPicksPort, arms),
+			odcdsSourceListener(t, "source_b", spiffeSourceB, envoyPicksPort, arms),
 		},
 		resourcev3.SecretType: secretResources(t, p, []string{spiffeSourceA, spiffeSourceB, spiffeNode}),
 	}
 	agent.cp = startADSControlPlaneWithHook(t, agent.resources, agent.onDelta)
-	launchEnvoyOverADS(t, bin, agent.cp, adminPort)
+	e := launchEnvoyOverADS(t, bin, agent.cp)
 
-	addrA, addrB := fmt.Sprintf("127.0.0.1:%d", portA), fmt.Sprintf("127.0.0.1:%d", portB)
-	waitListening(t, addrA)
-	waitListening(t, addrB)
+	addrA, addrB := e.listenerAddr(t, "source_a"), e.listenerAddr(t, "source_b")
 	return &odcdsRun{
 		agent:     agent,
 		a:         newSourceClient("source-a", addrA),
 		b:         newSourceClient("source-b", addrB),
 		twinA:     twinA,
 		twinB:     twinB,
-		adminAddr: fmt.Sprintf("127.0.0.1:%d", adminPort),
+		adminAddr: e.admin,
 		initial:   maps.Clone(agent.resources),
 	}
 }
