@@ -451,10 +451,59 @@ literally): `--envoy-path`
 `proxy.hotRestart.drainTime`), `--parent-shutdown-time-s` (from
 `--parent-shutdown-time`, chart `proxy.hotRestart.parentShutdownTime`),
 `--restart-epoch`, `--admin-address-path` and `--mode`. Envoy refuses a flag
-given twice (`Argument already set!`), so each of these, in the `--flag value` or
-the `--flag=value` spelling, is a startup error that names the flag instead of a
-failure of every fork. `--concurrency` is allowed once (the chart passes it for
-`proxy.concurrency`); a second one is refused the same way.
+given twice (`Argument already set!`), so each of these is a startup error that
+names the flag instead of a failure of every fork.
+
+The supervisor checks `--envoy-arg` once, before the first fork, against what the
+pinned Envoy was measured to do. Besides the flags above it refuses:
+
+- **A flag and its value in one item.** The pinned Envoy accepts one spelling
+  only, the flag in one argument and its value in the next. `--concurrency=2`,
+  `--service-node=n1`, `-l=info` and `-linfo` all answer `Couldn't find match for
+  argument`. Write `--envoy-arg=--concurrency --envoy-arg=2`, as the chart does.
+  The error shows the two items for the argument it refused.
+- **Flags that break a handoff or stop Envoy from serving.** The supervisor does
+  not pass these, so they are not repeats, and Envoy would start:
+
+  | Flag | Why it is refused |
+  |---|---|
+  | `--use-dynamic-base-id` | Envoy ignores the fixed `--base-id` and picks a random one, so no successor finds its shared memory and hot-restart socket. Envoy also refuses the flag at any restart epoch above 0, which is every hot restart. |
+  | `--disable-hot-restart` | A successor never contacts its predecessor: the old Envoy is neither drained nor stopped, and no socket is handed over. |
+  | `--socket-path` | The two Envoys of a handoff meet on Envoy's default hot-restart socket, an abstract one in the host network namespace. If they disagree on the path the successor loops on `connection refused`, and a path on a pod's own filesystem is not shared with the next pod. |
+  | `--hot-restart-version`, `--version`, `-h` / `--help` | Envoy prints and exits 0 without serving, on every fork. |
+  | `--` / `--ignore_rest` | Envoy ignores every argument after it, while the supervisor still reads them (a `--concurrency` behind it would be compared with a predecessor's worker count and never applied). |
+
+- **A flag the chart passes, given twice.** `--concurrency`, `-l` / `--log-level`,
+  `--service-cluster`, `--service-node`, `--service-zone`, `--drain-strategy` and
+  `--skip-hot-restart-parent-stats` are allowed once: the chart passes each of
+  them (`--concurrency` for `proxy.concurrency`, `--skip-hot-restart-parent-stats`
+  for `proxy.hotRestart.skipParentStats`), and Envoy refuses any flag given twice
+  except `--stats-tag`.
+- **A `--concurrency` whose value Envoy cannot use.** The value is the next item,
+  whatever it looks like. A missing value, a non-number (`x`, `1.5`, `0x2`), a
+  number above 4294967295 and another flag standing in its place are refused, as
+  Envoy refuses them. Four kinds of value Envoy accepts are refused too: an empty
+  one (Envoy runs its default worker count as if the flag were absent), a
+  negative one (Envoy reads `-1` as 4294967295 workers), one with a sign or a
+  space (`+2`, ` 2`) and one above 2147483647 (no Envoy starts that many
+  workers). `--concurrency 0` is accepted: Envoy runs **one** worker for it,
+  not one per core, and the supervisor counts it as 1 when it compares worker
+  counts at a handoff. (The chart never renders it: `proxy.concurrency: 0` passes
+  no flag.)
+
+Other hot-restart flags are passed through. `--base-id-path` only writes the base
+id Envoy uses to a file (with the fixed `--base-id` the file holds that number at
+every epoch, and a handoff completes). `--skip-hot-restart-on-no-parent` only
+changes what a child does when its parent is already gone. `--socket-mode` is not
+read while the socket is the abstract default. `--cpuset-threads` does nothing in
+the pinned Envoy.
+
+Limits of the check. It does not carry Envoy's flag table, so it does not know
+which flags take a value, and it compares every item. A value that is itself
+spelled like a refused argument (a `--service-node` named `-c`, a `--log-format`
+that is `--x=y` or starts with `-l`) is refused although Envoy would take it. A
+flag in none of the lists above is passed through unchecked: a misspelled one, or
+one given twice, still fails at the fork.
 
 `--termination-grace` is the pod's own `terminationGracePeriodSeconds` (the chart
 passes the same value it sets on the pod spec; `180s` as deployed). The supervisor

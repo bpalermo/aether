@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# Runs the supervisor's --envoy-arg startup check (hotrestart.CheckExtraArgs)
+# and the pinned Envoy's own command-line parser over the same arguments
+# (#1407, #1408, #1409). The rules in the check were measured on this binary;
+# this is what notices when a pin bump changes the parser.
+#
+# About 60 `envoy --mode validate` runs and two short serving ones, ~4 s wall
+# time (measured 4.3 s).
+#
+# Tagged "envoy-validate" (not "integration"): no Docker daemon required.
+go_test(
+    name = "envoyargs_test",
+    size = "small",
+    srcs = ["envoyargs_test.go"],
+    # Gazelle does not manage `data` -- keep this by hand.
+    data = ["//agent/test/envoybin:envoy_bin"],
+    tags = [
+        "envoy-validate",
+        # The Envoy binary reads /proc on startup; run outside strict sandbox.
+        "no-sandbox",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
+    deps = [
+        "//agent/internal/proxy/hotrestart",
+        "//agent/test/envoybin",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

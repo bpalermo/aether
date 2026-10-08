@@ -58,23 +58,36 @@ func TestEveryFlagTheSupervisorPassesIsReserved(t *testing.T) {
 }
 
 // TestReservedFlagsAreAllPassedOrAliases is the other direction: nothing is
-// reserved that the supervisor does not pass, except the long spelling of a
-// flag it passes by its short one. A stale entry would refuse an Envoy flag an
-// operator is entitled to.
+// reserved as "the supervisor passes it" that the supervisor does not pass,
+// except the long spelling of a flag it passes by its short one. A stale entry
+// would refuse an Envoy flag an operator is entitled to.
+//
+// An entry marked conflict (#1409) is the opposite case and is held to the
+// opposite rule: the supervisor passes none of its spellings. So neither kind
+// can be mislabelled as the other, and each error says the right thing ("Envoy
+// refuses a flag given twice" is only true of a flag that is passed).
 func TestReservedFlagsAreAllPassedOrAliases(t *testing.T) {
 	s := New(Config{ConfigPath: "/etc/envoy/envoy.yaml"}, slog.New(slog.DiscardHandler), nil)
 	passed := append(suppliedFlags(s.buildEnvoyCmd(0).Args[1:]), suppliedFlags(s.validateArgs())...)
 
+	conflicts := 0
 	for _, r := range reservedEnvoyFlags {
 		require.NotEmpty(t, r.spellings)
-		assert.NotEmpty(t, r.owner, "%v: the error must say what owns the flag", r.spellings)
+		assert.NotEmpty(t, r.owner, "%v: the error must say what owns the flag, or why it is refused", r.spellings)
 		used := false
 		for _, spelling := range r.spellings {
 			assert.True(t, strings.HasPrefix(spelling, "-"), spelling)
 			used = used || slices.Contains(passed, spelling)
 		}
+		if r.conflict {
+			conflicts++
+			assert.False(t, used, "%v is marked conflict but the supervisor passes it: drop the mark", r.spellings)
+			continue
+		}
 		assert.True(t, used, "%v is reserved but the supervisor passes none of its spellings", r.spellings)
 	}
+	// Control: the conflict branch above ran.
+	assert.Positive(t, conflicts)
 }
 
 // TestCheckExtraArgs covers what is allowed: the chart's own extra arguments,
@@ -87,13 +100,20 @@ func TestCheckExtraArgs(t *testing.T) {
 			"-l", "info", "--service-cluster", "aether-proxy", "--service-node", "n1", "--service-zone", "z",
 			"--drain-strategy", "immediate", "--concurrency", "2", "--skip-hot-restart-parent-stats",
 		},
-		{"--concurrency=2"},
 		{"--base-id-path", "/tmp/b", "--config-yaml", "{}", "--admin-address-pathology"},
-		// A value problem is not this check's: it only refuses a repeat.
+		// Envoy runs one worker for 0 (#1408), so it is a value like another.
 		{"--concurrency", "0"},
-		{"--concurrency"},
 	} {
 		assert.NoError(t, CheckExtraArgs(args), "%v", args)
+	}
+
+	// These two were in the allowed list above until #1407 and #1408: the
+	// pinned Envoy refuses both on every fork.
+	for _, args := range [][]string{
+		{"--concurrency=2"},
+		{"--concurrency"},
+	} {
+		assert.Error(t, CheckExtraArgs(args), "%v", args)
 	}
 
 	for _, args := range [][]string{
@@ -105,5 +125,214 @@ func TestCheckExtraArgs(t *testing.T) {
 		require.Error(t, err, "%v", args)
 		assert.ErrorIs(t, err, errRepeatedConcurrency, "%v", args)
 		assert.Contains(t, err.Error(), "proxy.concurrency")
+	}
+}
+
+// TestCheckExtraArgsRefusesSpellingsEnvoyDoesNotParse is #1407. The pinned
+// Envoy takes a flag and its value as two arguments and nothing else:
+// "--flag=value", "-f=value" and "-fvalue" each answer "Couldn't find match for
+// argument" (//agent/test/envoyargs runs the same items through the binary).
+// The error has to show the two-item form, ready to paste.
+func TestCheckExtraArgsRefusesSpellingsEnvoyDoesNotParse(t *testing.T) {
+	for _, tc := range []struct {
+		args     []string
+		twoItems string
+	}{
+		{[]string{"--concurrency=2"}, "--envoy-arg=--concurrency --envoy-arg=2"},
+		{[]string{"-l", "info", "--concurrency=2"}, "--envoy-arg=--concurrency --envoy-arg=2"},
+		{[]string{"--service-node=n1"}, "--envoy-arg=--service-node --envoy-arg=n1"},
+		{[]string{"--log-level=debug"}, "--envoy-arg=--log-level --envoy-arg=debug"},
+		{[]string{"-l=debug"}, "--envoy-arg=-l --envoy-arg=debug"},
+		{[]string{"-ldebug"}, "--envoy-arg=-l --envoy-arg=debug"},
+		{
+			[]string{"--component-log-level=upstream:debug,config:trace"},
+			"--envoy-arg=--component-log-level --envoy-arg=upstream:debug,config:trace",
+		},
+		// Only the first "=" splits: the value keeps the rest.
+		{[]string{"--stats-tag=a:b=c"}, "--envoy-arg=--stats-tag --envoy-arg=a:b=c"},
+		// A flag this check has never heard of is refused the same way.
+		{[]string{"--some-future-flag=x"}, "--envoy-arg=--some-future-flag --envoy-arg=x"},
+		{[]string{"--log-path="}, "--envoy-arg=--log-path --envoy-arg=<value>"},
+		// A flag that takes no value is not a match for Envoy either.
+		{[]string{"--skip-hot-restart-parent-stats=true"}, "--envoy-arg=--skip-hot-restart-parent-stats"},
+	} {
+		err := CheckExtraArgs(tc.args)
+		require.Error(t, err, "%v", tc.args)
+		assert.Contains(t, err.Error(), tc.twoItems, "%v: the error must show the two-item form", tc.args)
+		assert.Contains(t, err.Error(), "Couldn't find match for argument", "%v", tc.args)
+	}
+
+	// Not a flag spelled with "=": a value that contains one, and a value that
+	// only starts with a dash.
+	for _, args := range [][]string{
+		{"--stats-tag", "a:b=c"},
+		{"--log-format", "[%Y] level=%l %v"},
+		{"--config-yaml", "{admin: {}}"},
+		{"--service-zone", ""},
+		{"--log-format", "- %v"},
+		{"--log-format", "-=-"},
+		{"-l", "info"},
+		{"--log-level", "info"},
+	} {
+		assert.NoError(t, CheckExtraArgs(args), "%v", args)
+	}
+}
+
+// TestCheckExtraArgsConcurrencyValue is #1408: a lone --concurrency whose
+// value Envoy refuses, or reads as something the supervisor cannot know, used
+// to pass the startup check and surface at a handoff as "successor worker
+// count unknown". Each is a startup error now, naming the chart value.
+func TestCheckExtraArgsConcurrencyValue(t *testing.T) {
+	for name, args := range map[string][]string{
+		"no value":               {"-l", "info", "--concurrency"},
+		"not a number":           {"--concurrency", "x"},
+		"number with a suffix":   {"--concurrency", "2x"},
+		"fraction":               {"--concurrency", "1.5"},
+		"hexadecimal":            {"--concurrency", "0x2"},
+		"trailing space":         {"--concurrency", "2 "},
+		"above uint32":           {"--concurrency", "4294967296"},
+		"value is a short flag":  {"--concurrency", "-l", "info"},
+		"value is a long flag":   {"--concurrency", "--skip-hot-restart-parent-stats"},
+		"negative":               {"--concurrency", "-1"},
+		"empty":                  {"--concurrency", ""},
+		"plus sign":              {"--concurrency", "+2"},
+		"leading space":          {"--concurrency", " 2"},
+		"more than can run":      {"--concurrency", "4294967295"},
+		"bad value, flags after": {"--concurrency", "two", "--skip-hot-restart-parent-stats"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := CheckExtraArgs(args)
+			require.Error(t, err, "%v must be refused at startup", args)
+			assert.Contains(t, err.Error(), "--concurrency")
+			assert.Contains(t, err.Error(), "proxy.concurrency", "the error must name the chart value that owns the flag")
+			assert.NotErrorIs(t, err, errRepeatedConcurrency)
+		})
+	}
+
+	for _, args := range [][]string{
+		{"--concurrency", "1"},
+		{"--concurrency", "2", "--skip-hot-restart-parent-stats"},
+		{"--concurrency", "02"},
+		{"--concurrency", "128"},
+		// Envoy runs one worker for 0; concurrencyArg reports 1.
+		{"--concurrency", "0"},
+	} {
+		assert.NoError(t, CheckExtraArgs(args), "%v", args)
+	}
+}
+
+// TestCheckExtraArgsRefusesWhatBreaksAHandoff is #1409: flags the supervisor
+// does not pass, so they are no repeat and Envoy starts, but with them the
+// next handoff fails or Envoy does not serve. The error must say why, and must
+// not claim the flag is given twice.
+func TestCheckExtraArgsRefusesWhatBreaksAHandoff(t *testing.T) {
+	for flag, why := range map[string]string{
+		"--use-dynamic-base-id": "ignore the fixed --base-id",
+		"--disable-hot-restart": "never contacts its predecessor",
+		"--socket-path":         "hot-restart socket",
+		"--hot-restart-version": "exits 0 without serving",
+		"--version":             "exits 0 without serving",
+		"-h":                    "exits 0 without serving",
+		"--help":                "exits 0 without serving",
+		"--":                    "ignores every argument after it",
+		"--ignore_rest":         "ignores every argument after it",
+	} {
+		for _, args := range [][]string{{flag}, {"-l", "info", flag, "x"}, {flag, "--concurrency", "2"}} {
+			err := CheckExtraArgs(args)
+			require.Error(t, err, "%v must be refused at startup", args)
+			assert.Contains(t, err.Error(), "--envoy-arg "+flag+" is reserved", "%v", args)
+			assert.Contains(t, err.Error(), why, "%v: the error must say what the flag breaks", args)
+			assert.NotContains(t, err.Error(), "given twice", "%v: the supervisor does not pass this flag", args)
+		}
+	}
+	// The "=" spelling of one of them is told it is reserved, not how to
+	// respell it.
+	err := CheckExtraArgs([]string{"--socket-path=@x"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is reserved")
+
+	// Hot-restart flags that are left alone, and why:
+	//   --base-id-path only writes the base id Envoy uses to a file (measured:
+	//   the file held the fixed --base-id at epoch 0 and at epoch 1, and the
+	//   handoff completed);
+	//   --skip-hot-restart-parent-stats is the chart's
+	//   proxy.hotRestart.skipParentStats (#1050);
+	//   --skip-hot-restart-on-no-parent only changes what a child does when
+	//   its parent is already gone;
+	//   --socket-mode is not read while the socket path is the abstract
+	//   default, which reserving --socket-path guarantees;
+	//   --cpuset-threads is a no-op in the pinned Envoy (it logs "now the
+	//   default behavior").
+	for _, args := range [][]string{
+		{"--base-id-path", "/tmp/base-id"},
+		{"--skip-hot-restart-parent-stats"},
+		{"--skip-hot-restart-on-no-parent"},
+		{"--socket-mode", "600"},
+		{"--cpuset-threads"},
+		{"--drain-strategy", "immediate"},
+		// Longer flags that only start like a reserved one.
+		{"--socket-pathology", "--versioned", "--helpful", "--use-dynamic-base-ids"},
+	} {
+		assert.NoError(t, CheckExtraArgs(args), "%v", args)
+	}
+}
+
+// TestCheckExtraArgsAllowsTheChartFlagsOnce: the pinned Envoy refuses any flag
+// given twice (measured: --skip-hot-restart-parent-stats, --drain-strategy, -l
+// with --log-level; --stats-tag is the one repeatable flag). The chart passes
+// each flag in onceEnvoyFlags itself, so one more of it fails every fork.
+func TestCheckExtraArgsAllowsTheChartFlagsOnce(t *testing.T) {
+	for _, o := range onceEnvoyFlags {
+		require.NotEmpty(t, o.spellings)
+		assert.NotEmpty(t, o.owner, "%v", o.spellings)
+		first := o.spellings[0]
+		last := o.spellings[len(o.spellings)-1]
+
+		assert.NoError(t, CheckExtraArgs([]string{first, "1"}), "one %s is allowed", first)
+		for _, args := range [][]string{
+			{first, "1", last, "1"},
+			{first, "1", "--stats-tag", "a:b", last + "=1"},
+		} {
+			err := CheckExtraArgs(args)
+			require.Error(t, err, "%v", args)
+			assert.Contains(t, err.Error(), "more than once", "%v", args)
+			assert.Contains(t, err.Error(), first, "%v", args)
+			assert.Contains(t, err.Error(), "Pass it once; "+o.owner, "%v", args)
+		}
+	}
+
+	// --stats-tag is repeatable in Envoy and is not in the list; neither is
+	// any flag the chart does not pass.
+	assert.NoError(t, CheckExtraArgs([]string{"--stats-tag", "a:b", "--stats-tag", "c:d"}))
+	assert.NoError(t, CheckExtraArgs([]string{"--log-path", "/dev/null", "--log-path", "/dev/null"}))
+}
+
+func TestSplitEnvoyArg(t *testing.T) {
+	for _, tc := range []struct {
+		arg, name, value string
+		spelling         argSpelling
+	}{
+		{"--concurrency", "--concurrency", "", spelledPlain},
+		{"--concurrency=2", "--concurrency", "2", spelledEquals},
+		{"--ignore_rest=1", "--ignore_rest", "1", spelledEquals},
+		{"-l=info", "-l", "info", spelledEquals},
+		{"-linfo", "-l", "info", spelledGlued},
+		{"-c/etc/envoy.yaml", "-c", "/etc/envoy.yaml", spelledGlued},
+		{"-l", "-l", "", spelledPlain},
+		{"--", "--", "", spelledPlain},
+		{"-", "-", "", spelledPlain},
+		{"", "", "", spelledPlain},
+		{"-1", "-1", "", spelledPlain},
+		{"-x=y z", "-x", "y z", spelledEquals},
+		{"a=b", "a=b", "", spelledPlain},
+		{"--=x", "--=x", "", spelledPlain},
+		{"- a=b", "- a=b", "", spelledPlain},
+		{"--a b=c", "--a b=c", "", spelledPlain},
+		{"---x=1", "---x=1", "", spelledPlain},
+	} {
+		name, value, spelling := splitEnvoyArg(tc.arg)
+		assert.Equal(t, tc.name, name, "%q", tc.arg)
+		assert.Equal(t, tc.value, value, "%q", tc.arg)
+		assert.Equal(t, tc.spelling, spelling, "%q", tc.arg)
 	}
 }
