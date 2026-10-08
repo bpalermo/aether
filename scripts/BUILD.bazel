@@ -54,7 +54,10 @@ sh_test(
 # and main.yaml) against a throwaway repository, a fake `bazel query` that
 # applies the script's own tag regex to a table of targets, and a fake
 # bazel-diff: a test tagged `manual` reaches no list `bazel test` is handed, on
-# the bazel-diff path and on every full-run fallback (#1413). Needs a real
+# the bazel-diff path and on every full-run fallback (#1413); a `manual` rule
+# reaches no build list (#1438); `integration` is matched as a whole tag
+# (#1439); and a query that fails or returns nothing ends in the full run or a
+# failed step, never in an empty list with has_*=false (#1437). Needs a real
 # `git` on PATH and nothing else.
 sh_test(
     name = "ci_impacted_targets_test",
