@@ -769,7 +769,8 @@ from the binary's own bytes. It is the same value:
 - the continuous profiler files that binary's symbols under;
 - `make check-build-id` prints for a checkout.
 
-It is **not** a commit. No binary has the commit linked in any more: a version
+It is **not** a commit. No Go binary of this workspace has the commit linked in
+any more (the separately built Envoy in the proxy image still does): a version
 taken from the commit made every binary, and so every image, different from one
 commit to the next even when its code had not changed. Two consequences:
 
@@ -1474,9 +1475,20 @@ whose commits touched only the registrar, tests and scripts; and since every
 workload runs at least one of those images, a deploy of any new commit rolled
 everything, the node proxy included.
 
-Neither is true any more. No image and no binary carries the commit, so the same
+Neither is true any more for the Go images this workspace builds (agent,
+mesh-dns, proxy-supervisor, uds-csi, cni-install, registrar, controller,
+prober): none of them and none of their binaries carries the commit, so the same
 inputs build the same digest at any commit, the chart pins the same digest, and
-the pod template does not change. What a deploy of a new commit rolls:
+the pod template does not change.
+
+The `aether-proxy` image is the exception, and stays one. It is built in the
+separate `proxy/` workspace by its own release workflow, and it still carries
+the aether commit twice: as `org.opencontainers.image.revision` (label and
+annotation, `proxy/BUILD.bazel`, the `image_metadata` genrule) and inside the
+Envoy binary, through Envoy's own version linkstamp (`proxy/README.md`, "Where
+the Envoy revision actually is"). That costs no roll: the chart pins the proxy
+image statically (`proxy.image` in `values.yaml`), so it changes only when the
+pin is bumped. What a deploy of a new commit rolls:
 
 | The commits changed | Rolls | Does not roll |
 | --- | --- | --- |
@@ -1501,11 +1513,12 @@ removing the label, the annotations and the linked version changes every
 digest once. Plan it like any full roll. The same holds for a rollback across
 that commit.
 
-The images no longer say which commit built them; three things outside the
+Those Go images no longer say which commit built them; three things outside the
 digest do (the signature's certificate, the provenance attestation and the
 `dev-<sha>` tag). See [verifying-releases.md](verifying-releases.md), "Which
-commit built this digest". A component's own `--version` and `service.version`
-are its binary's build ID, not a commit (section 5).
+commit built this digest". A Go component's own `--version` and
+`service.version` are its binary's build ID, not a commit (section 5). The
+proxy image still names its commit in its labels, and Envoy in its version.
 
 What chart 2.4.15 removed is the chart's own share of this: an upgrade that
 changes the chart version but not the images (a re-cut chart, a values-only

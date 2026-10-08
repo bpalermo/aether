@@ -4,8 +4,9 @@
 # a stale value from a previous build.
 echo "STABLE_GIT_VERSION $(git describe --tags --always --long --dirty --abbrev=40 2>/dev/null || echo 'unknown')"
 # STABLE_ on purpose, and DO NOT REMOVE IT (#1378). No image and no binary
-# carries the commit any more, so an unchanged image keeps its digest from one
-# commit to the next. What still must change with every commit is what NAMES a
+# built in THIS workspace carries the commit any more (the proxy image, built
+# in the nested proxy/ workspace with its own status script, still does, on
+# purpose), so an unchanged image keeps its digest from one commit to the next. What still must change with every commit is what NAMES a
 # build: the per-commit image tag (`dev-<sha>`, bazel/img/go_multi_arch_image.bzl)
 # and the charts' `X.Y.Z-<sha>` version. Those are written by actions that take
 # stable-status.txt as an input, and a change to a STABLE_ key is the only thing
