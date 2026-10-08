@@ -490,9 +490,10 @@ on a Secret.
 The mask fails closed. It does not try to recognise a Secret. A document is
 printed as it is only when it is plainly something else: exactly one top-level
 kind line, of the plain form `kind: <Word>` (optionally quoted, optionally
-followed by a comment), whose word is neither `Secret` nor `List`, in a
-document that is not written in flow style, has no top-level explicit or merge
-key, and holds no `kind: Secret` anywhere else. In a document that might be a
+followed by a comment), whose word is neither `Secret` nor a typed list
+(anything ending in `List`), in a document that is not written in flow style,
+has no top-level explicit or merge key, and has no nested kind that is
+`Secret`, a typed list, or written with an anchor, a tag or an alias. In a document that might be a
 Secret, only these lines are ever printed, and only as simple `key: scalar`
 lines: the `# Source:` comment, `apiVersion:`, `kind:`, `type:`, `metadata:`
 and the `name:` and `namespace:` directly under it. Every other line is

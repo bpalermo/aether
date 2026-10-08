@@ -26,3 +26,26 @@ metadata:
     token: FORBIDDEN-merge-token
 stringData:
   <<: *payload
+---
+{{- /* A typed list: its items are Secrets without a kind line of their own. */}}
+apiVersion: v1
+kind: SecretList
+metadata:
+  name: {{ .Release.Name }}-typed-list
+items:
+  - metadata:
+      name: inner
+    data:
+      token: FORBIDDEN-typed-list-token
+---
+{{- /* A plainly-kinded outer object carrying a Secret whose nested kind has a YAML anchor. */}}
+apiVersion: example.dev/v1
+kind: Bundle
+metadata:
+  name: {{ .Release.Name }}-nested-anchored
+spec:
+  object:
+    apiVersion: v1
+    kind: &nested-kind Secret
+    data:
+      token: FORBIDDEN-nested-anchored-token

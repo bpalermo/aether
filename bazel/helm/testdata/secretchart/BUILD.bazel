@@ -254,7 +254,9 @@ helm_template_match_runner(
 )
 
 # One pattern per document of templates/explicit.yaml, each matching up to the
-# document's name: what follows is where its values are.
+# document's name: what follows is where its values are. The last two are a
+# typed list (`kind: SecretList`) and a plainly-kinded object carrying a Secret
+# whose NESTED kind has a YAML anchor.
 helm_template_match_runner(
     name = "failing_explicit",
     chart = ":secretchart",
@@ -262,6 +264,8 @@ helm_template_match_runner(
         "  name: release-name-explicit-key\\nnot what follows",
         "  name: release-name-multiline-key\\nnot what follows",
         "  name: release-name-merge\\nnot what follows",
+        "  name: release-name-typed-list\\nnot what follows",
+        "  name: release-name-nested-anchored\\nnot what follows",
     ],
     visibility = RUN_BY,
 )

@@ -43,6 +43,11 @@
 #      - the `# Source:` comment helm puts first,
 #      - `apiVersion:`, `kind:` and `type:` at the top level,
 #      - `metadata:` itself, and `name:` and `namespace:` directly under it.
+#    A document is "plainly something else" only when it has exactly one
+#    top-level `kind: <Word>` line, the word is neither Secret nor a typed list
+#    (anything ending in `List`), and no kind key anywhere inside it -- nested,
+#    in a list item, in a flow mapping -- is Secret, a typed list, or written
+#    with an anchor, a tag or an alias.
 #    Every other line becomes `<masked>` at its own indentation. Nothing looks
 #    for a `data` key: where the values are does not matter when no value line
 #    is printed.
@@ -88,8 +93,19 @@ function flush(    i, hide, secret, kinds, plain, word, content, unreadable, man
       kinds++
       if (line ~ /^kind:[ \t]*["\047]?[A-Za-z][A-Za-z0-9]*["\047]?[ \t]*(#.*)?$/) {
         word = unquote(uncomment(substr(line, 6)))
-        if (word != "Secret" && word != "List") plain++
+        # A typed list (SecretList, or any *List) holds items that carry no
+        # kind line of their own: never plainly something else.
+        if (word != "Secret" && word !~ /List$/) plain++
       }
+    }
+    # A kind key anywhere in the document (nested, in a list item, in a flow
+    # mapping) whose value is not a plain word -- an anchor, a tag, an alias --
+    # could be a Secret under any name: the document is not readable. So is a
+    # nested typed list.
+    if (line ~ /(^|[^A-Za-z0-9_])kind["\047]?[ \t]*:[ \t]*[&!*]/) unreadable = 1
+    if (line ~ /^[ \t]+(-[ \t]+)?["\047]?kind["\047]?[ \t]*:/) {
+      if (line !~ /^[ \t]+(-[ \t]+)?kind:[ \t]*["\047]?[A-Za-z][A-Za-z0-9]*["\047]?[ \t]*(#.*)?$/) unreadable = 1
+      else if (line ~ /List["\047]?[ \t]*(#.*)?$/) unreadable = 1
     }
     if (line ~ /^(\?|<<)/) unreadable = 1
     if (line ~ /^(# Source: |["\047]?(apiVersion|kind)["\047]?[ \t]*:)/) manifest = 1
