@@ -308,7 +308,12 @@ func unescapeMountInfoPath(path string) string {
 	var out strings.Builder
 	for i := 0; i < len(path); i++ {
 		if path[i] == '\\' && i+3 < len(path) {
-			if v, err := strconv.ParseUint(path[i+1:i+4], 8, 8); err == nil {
+			// Envoy hands strtol the three digits inside a longer string, and
+			// strtol reads on: a FOURTH octal digit right after them makes it
+			// reject the escape and keep the backslash (`\0407` stays as
+			// written; `\040g` is a space then g).
+			fourth := i+4 < len(path) && path[i+4] >= '0' && path[i+4] <= '7'
+			if v, err := strconv.ParseUint(path[i+1:i+4], 8, 8); err == nil && !fourth {
 				out.WriteByte(byte(v))
 				i += 3
 				continue

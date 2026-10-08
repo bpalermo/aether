@@ -542,3 +542,22 @@ func TestConcurrencyDefaultUnderARestrictionStillSeesAChange(t *testing.T) {
 	initStartEpochWithin(t, s, 10*time.Second)
 	assertFreshAfterDrain(t, s, f)
 }
+
+// Envoy's unescapePath gives strtol the three octal digits inside a longer
+// string, so a fourth octal digit right behind them makes it reject the escape
+// and keep the backslash. The port must decode exactly the same paths.
+func TestUnescapeMountInfoPathFollowsEnvoy(t *testing.T) {
+	for in, want := range map[string]string{
+		`/mnt/c\040g`:      "/mnt/c g",    // an escape, then a non-digit
+		`/mnt/c\040`:       "/mnt/c ",     // an escape at the end
+		`/mnt/c\0407`:      `/mnt/c\0407`, // a fourth octal digit: kept as written
+		`/mnt/c\0408`:      "/mnt/c 8",    // 8 is not octal: decoded
+		`/mnt/c\04`:        `/mnt/c\04`,   // too short
+		`/mnt/c\08a`:       `/mnt/c\08a`,  // not three octal digits
+		`/mnt/c\777`:       `/mnt/c\777`,  // above 255
+		`/mnt/a\040b\011c`: "/mnt/a b\tc", // two escapes
+		"/sys/fs/cgroup":   "/sys/fs/cgroup",
+	} {
+		assert.Equal(t, want, unescapeMountInfoPath(in), in)
+	}
+}
