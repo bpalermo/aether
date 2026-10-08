@@ -1,0 +1,36 @@
+# Input for //bazel/helm:upstream_template_test_opts_selftest. Not a BUILD file:
+# nothing loads it. Every call here passes the option the way the guard wants.
+
+helm_template_test(
+    name = "only_the_option",
+    chart = ":chart",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+)
+
+helm_template_test(
+    name = "after_other_options",
+    chart = ":chart",
+    opts = SHARED + [
+        "--kube-version",
+        "1.29.0",
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    template_patterns = {
+        "chart/templates/a.yaml": [
+            "kind: Deployment",
+        ],
+    },
+)
+
+# Another rule is not this guard's business.
+helm_template_match_test(
+    name = "another_rule",
+    chart = ":chart",
+    patterns = ["kind: Secret"],
+)

@@ -1,0 +1,267 @@
+# A throwaway chart for //bazel/helm:template_rules_test: Secrets in every shape
+# the masking has to recognise, in a template with several documents. Never
+# published. Every Secret value in it starts with FORBIDDEN.
+load("@rules_helm//helm:defs.bzl", "helm_chart")
+load("//bazel/helm:defs.bzl", "helm_pod_template_version_runner", "helm_template_absent_runner", "helm_template_fail_runner", "helm_template_match_runner", "helm_template_match_test", "helm_template_reproducible_runner", "helm_template_value_changes_runner")
+
+helm_chart(
+    name = "secretchart",
+    chart = "Chart.yaml",
+    values = "values.yaml",
+    visibility = ["//bazel/helm:__pkg__"],
+)
+
+# What the rule is for (#1371): patterns scoped to ONE document of a template
+# that renders seven. rules_helm's helm_template_test can only see the last one
+# helm prints (the Deployment).
+# It is also the control for the masking tests below: the patterns for the
+# Secrets match the values as rendered, so those values are in the render, and
+# their absence from a failing test's output is the mask's doing.
+helm_template_match_test(
+    name = "documents_test",
+    chart = ":secretchart",
+    document_patterns = {
+        "Secret/release-name-plain": [
+            "\\ndata:\\n  token: FORBIDDEN-plain-token\\n  tls\\.key: FORBIDDEN-plain-key$",
+        ],
+        "Secret/release-name-block": [
+            "  pem: \\|\\n    FORBIDDEN-block-line-1\\n\\n    FORBIDDEN-block-line-3\\n",
+        ],
+        "Secret/release-name-spaced": [
+            "\\ndata :\\n  token : FORBIDDEN-spaced-token\\n\"stringData\" :\\n  password: FORBIDDEN-spaced-password$",
+        ],
+        "Secret/release-name-flow": [
+            "\\ndata: \\{token: FORBIDDEN-flow-token\\}",
+        ],
+        "List/release-name-list": [
+            "      token: FORBIDDEN-nested-token\\n  - data:\\n      token: FORBIDDEN-dash-token\\n",
+        ],
+        "ConfigMap/release-name-config": [
+            "\\ndata:\\n  greeting: VISIBLE-config-value$",
+        ],
+        "Role/release-name-reader": [
+            "resources: \\[\"configmaps\"\\]\\n\\s+verbs: \\[\"get\"\\]",
+            # `\\S` is one of the three escapes the rule translates.
+            "\\nmetadata:\\n  name: \\S+-reader\\nrules:\\n",
+        ],
+        "RoleBinding/release-name-reader": [
+            "\\nroleRef:\\n\\s+apiGroup: rbac\\.authorization\\.k8s\\.io\\n\\s+kind: Role\\n",
+        ],
+        "Deployment/release-name-app": [
+            "\\n  replicas: 2\\n",
+        ],
+    },
+    patterns = [
+        "kind: Role\\nmetadata:\\n  name: release-name-reader\\nrules:",
+        # The flow-style Secrets have no `kind:` line of their own, so they are
+        # matched in the whole render.
+        "data: \\{token: FORBIDDEN-flow-document-token\\}\\}",
+        "\"token\": \"FORBIDDEN-json-document-token\"\\}\\}",
+        # Nor can the ones whose kind is anchored, tagged, aliased or missing
+        # be named reliably.
+        "\\ndata:\\n  token: FORBIDDEN-anchored-token\\n",
+        "\\nstringData:\\n  token: FORBIDDEN-tagged-token\\n",
+        "\\nkind: \\*what\\nbinaryData:\\n  token: FORBIDDEN-aliased-token\\n",
+        "\\n  name: release-name-kindless\\ndata:\\n  token: FORBIDDEN-kindless-token\\n",
+        # templates/explicit.yaml: values no `data:` line leads to.
+        "\\n\\? data\\n: token: FORBIDDEN-explicit-key-token\\n",
+        "\\n  stringData\\n: token: FORBIDDEN-multiline-key-token\\n",
+        "\\n  annotations: &payload\\n    token: FORBIDDEN-merge-token\\nstringData:\\n  <<: \\*payload",
+    ],
+    visibility = ["//bazel/helm:__pkg__"],
+)
+
+# --- deliberately failing runners ----------------------------------------------
+#
+# Each of these FAILS by design, so none of them is a test: they are the same
+# runners as plain executables (the `_runner` twin of each rule), which no
+# `bazel test` picks up. //bazel/helm:template_rules_test runs them, requires
+# the failure, and reads what they print: the message a reader needs, bounded,
+# and no FORBIDDEN byte.
+
+RUN_BY = ["//bazel/helm:__pkg__"]
+
+# A whole-render pattern whose first line matches INSIDE a Secret: the excerpt
+# the rule prints is the Secret itself.
+helm_template_match_runner(
+    name = "failing_whole_render",
+    chart = ":secretchart",
+    patterns = [
+        "kind: Secret\\nmetadata:\\n  name: release-name-plain\\ntype: Opaque\\ndata:\\n  token: not-the-token\\n",
+        "no line of the render holds this",
+        # ...and one whose excerpt is the flow-style Secrets.
+        "# Source: secretchart/templates/flow\\.yaml\\nnot what follows",
+    ],
+    visibility = RUN_BY,
+)
+
+# The same for every other shape of Secret, each selected as a document.
+helm_template_match_runner(
+    name = "failing_documents",
+    chart = ":secretchart",
+    document_patterns = {
+        "Secret/release-name-block": ["stringData:\\n  password: not-the-password\\n"],
+        "Secret/release-name-spaced": ["kind: Secret\\nmetadata:\\n  name: \\S+\\ndata :\\n  token : not-the-token"],
+        "Secret/release-name-flow": ["kind: Secret # with a trailing comment\\nmetadata:\\n  name: release-name-flow # and one here\\ndata: \\{\\}"],
+        "List/release-name-list": ["kind: List\\nmetadata:\\n  name: no-such-list\\n"],
+        "ConfigMap/release-name-config": ["data:\\n  greeting: not-the-greeting"],
+        "Deployment/release-name-app": ["\\n  replicas: 3\\n"],
+    },
+    visibility = RUN_BY,
+)
+
+# A document the render does not have: the rule lists the ones it has.
+helm_template_match_runner(
+    name = "failing_missing_document",
+    chart = ":secretchart",
+    document_patterns = {
+        "Role/no-such-role": ["rules:"],
+    },
+    visibility = RUN_BY,
+)
+
+# A pattern that is not an extended regular expression.
+helm_template_match_runner(
+    name = "failing_invalid_pattern",
+    chart = ":secretchart",
+    patterns = ["kind: (Secret"],
+    visibility = RUN_BY,
+)
+
+# `helm template` fails, and --debug makes it print what it had rendered.
+helm_template_match_runner(
+    name = "failing_render",
+    chart = ":secretchart",
+    opts = [
+        "--debug",
+        "--set",
+        "broken=true",
+    ],
+    patterns = ["kind: Secret"],
+    visibility = RUN_BY,
+)
+
+# The rejection test, when the chart renders after all...
+helm_template_fail_runner(
+    name = "failing_fail_test_rendered",
+    chart = ":secretchart",
+    expected_message = "this chart rejects nothing",
+    visibility = RUN_BY,
+)
+
+# ...and when it is rejected for another reason, with --debug.
+helm_template_fail_runner(
+    name = "failing_fail_test_other_reason",
+    chart = ":secretchart",
+    expected_message = "not the YAML parse error helm reports",
+    opts = [
+        "--debug",
+        "--set",
+        "broken=true",
+    ],
+    visibility = RUN_BY,
+)
+
+# The absence test, when helm fails with --debug.
+helm_template_absent_runner(
+    name = "failing_absent_test_render",
+    absent = ["kind: StatefulSet"],
+    chart = ":secretchart",
+    control = "kind: Deployment",
+    opts = [
+        "--debug",
+        "--set",
+        "broken=true",
+    ],
+    visibility = RUN_BY,
+)
+
+# The two rules that render to a file and print only helm's stderr: with --debug
+# that is where a failed render goes.
+helm_pod_template_version_runner(
+    name = "failing_version_test_render",
+    chart = ":secretchart",
+    opts = [
+        "--debug",
+        "--set",
+        "broken=true",
+    ],
+    visibility = RUN_BY,
+    workloads = 1,
+)
+
+helm_template_reproducible_runner(
+    name = "failing_reproducible_test_render",
+    chart = ":secretchart",
+    opts = [
+        "--debug",
+        "--set",
+        "broken=true",
+    ],
+    visibility = RUN_BY,
+)
+
+# The derived-value test, pointed at Secret values: a key that many lines hold...
+helm_template_value_changes_runner(
+    name = "failing_value_changes_count",
+    changed_opts = [
+        "--set",
+        "replicas=3",
+    ],
+    chart = ":secretchart",
+    key = "token",
+    visibility = RUN_BY,
+)
+
+# ...and one line that the changed values do not change.
+helm_template_value_changes_runner(
+    name = "failing_value_changes_same",
+    changed_opts = [
+        "--set",
+        "replicas=3",
+    ],
+    chart = ":secretchart",
+    key = "tls.key:",
+    visibility = RUN_BY,
+)
+
+# A flow-style document cannot be named: the rule says so and lists what it has.
+helm_template_match_runner(
+    name = "failing_flow_document",
+    chart = ":secretchart",
+    document_patterns = {
+        "Secret/flow-document": ["kind: Secret"],
+    },
+    visibility = RUN_BY,
+)
+
+# The fail-closed rule: one pattern per document of templates/unreadable.yaml,
+# each matching up to the document's name (or, for the ConfigMaps, its data
+# key). The four that are not plainly something else print `<masked>` from there; the two plain ConfigMaps print their
+# values.
+helm_template_match_runner(
+    name = "failing_unreadable",
+    chart = ":secretchart",
+    patterns = [
+        "  name: release-name-anchored\\nnot what follows",
+        "  name: release-name-tagged\\nnot what follows",
+        "  name: release-name-aliased\\nnot what follows",
+        "  name: release-name-kindless\\nnot what follows",
+        "  name: release-name-plain-config\\ndata:\\n  greeting: nope",
+        "  name: release-name-binary-config\\nbinaryData:\\n  blob: nope",
+    ],
+    visibility = RUN_BY,
+)
+
+# One pattern per document of templates/explicit.yaml, each matching up to the
+# document's name: what follows is where its values are.
+helm_template_match_runner(
+    name = "failing_explicit",
+    chart = ":secretchart",
+    patterns = [
+        "  name: release-name-explicit-key\\nnot what follows",
+        "  name: release-name-multiline-key\\nnot what follows",
+        "  name: release-name-merge\\nnot what follows",
+    ],
+    visibility = RUN_BY,
+)

@@ -1,0 +1,13 @@
+{{- /*
+Off by default. With broken=true this file is not YAML, so `helm template`
+fails; with --debug it then prints everything it rendered, the Secrets
+included. That is the one way a FAILED render carries Secret data.
+*/ -}}
+{{- if .Values.broken }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-broken
+data:
+  a: b: c: [
+{{- end }}

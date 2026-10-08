@@ -1,0 +1,5 @@
+apiVersion: v2
+name: secretchart
+description: A chart that exists only to exercise the template test rules of //bazel/helm:defs.bzl (//bazel/helm:template_rules_test). Never published.
+type: application
+version: "0.0.1"

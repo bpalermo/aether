@@ -1,6 +1,6 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_template_absent_test", "helm_template_match_test")
 
 # udsecho validation chart (published to chart_registry_url("udsecho"); see @aether_registry//:registry.bzl).
 #
@@ -36,4 +36,97 @@ helm_lint_test(
 helm_template_test(
     name = "udsecho_template_test",
     chart = ":udsecho",
+)
+
+# The helm_template_test above prints the whole render into its log (rules_helm's
+# runner does, passing or failing). That is fine for as long as this chart
+# renders no Secret (#1382).
+helm_template_absent_test(
+    name = "udsecho_no_secret_test",
+    absent = ["kind: Secret"],
+    chart = ":udsecho",
+    control = "kind: Deployment",
+)
+
+# Every template of this chart renders more than one document (#1371), and
+# rules_helm's template_patterns search only the one helm prints last for a
+# file (helm sorts by kind): the client's and uds-echo's Deployments and
+# uds-cr-echo's EndpointPolicy. Out of its reach were the three ServiceAccounts
+# and the uds-cr-echo Deployment, the workload the EndpointPolicy path is
+# validated with.
+#
+# The two echo workloads differ in exactly how the socket is announced: uds-echo
+# by pod annotation, uds-cr-echo by the EndpointPolicy, with NO annotation (the
+# line after `endpoint.aether.io/port` is the pod's `spec:`).
+#
+# The socket value is <volume>/<file>: the flag, the volume's mount and its
+# name, down to the end of the document.
+UDS_VOLUME = "\\n            - \"--socket=/%s/%s\"\\n            - \"--text=served-by-[a-z-]+\"\\n          volumeMounts:\\n            - name: %s\\n              mountPath: /%s\\n      volumes:\\n        - name: %s\\n(\\s+#[^\\n]*\\n)*          csi: \\{driver: csi\\.aether\\.io\\}\\s*$"
+
+helm_template_match_test(
+    name = "udsecho_documents_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "ServiceAccount/uds-echo": ["\\nmetadata:\\n  name: uds-echo\\n  namespace: aether-test$"],
+        "ServiceAccount/uds-cr-echo": ["\\nmetadata:\\n  name: uds-cr-echo\\n  namespace: aether-test$"],
+        "ServiceAccount/uds-client": ["\\nmetadata:\\n  name: uds-client\\n  namespace: aether-test$"],
+        "Deployment/uds-echo": [
+            "\\n      annotations:\\n        endpoint\\.aether\\.io/port: \"8080\"\\n        endpoint\\.aether\\.io/uds-socket: \"s/a\\.sock\"\\n    spec:\\n      serviceAccountName: uds-echo\\n",
+            UDS_VOLUME % ("s", "a\\.sock", "s", "s", "s"),
+        ],
+        "Deployment/uds-cr-echo": [
+            "\\n  replicas: 2\\n",
+            "\\n        aether\\.io/managed: \"true\"\\n      annotations:\\n        endpoint\\.aether\\.io/port: \"8080\"\\n    spec:\\n      serviceAccountName: uds-cr-echo\\n",
+            "\\n      securityContext: \\{fsGroup: 65532\\}\\n",
+            UDS_VOLUME % ("s", "a\\.sock", "s", "s", "s"),
+        ],
+        "EndpointPolicy/uds-cr": [
+            "\\nspec:\\n  targetRef: \\{kind: Service, name: uds-cr-echo\\}\\n  udsSocket: \"s/a\\.sock\"$",
+        ],
+        "Deployment/uds-client": [
+            "\\n        config\\.aether\\.io/upstreams: \"uds-echo,uds-cr-echo\"\\n    spec:\\n      serviceAccountName: uds-client\\n",
+        ],
+    },
+)
+
+# An operator override: both halves of `socket` reach the workloads (the
+# volume's name, its mount, the binary's flag) and the policy.
+helm_template_match_test(
+    name = "udsecho_socket_override_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "Deployment/uds-echo": [
+            "\\n        endpoint\\.aether\\.io/uds-socket: \"sockets/echo\\.sock\"\\n",
+            UDS_VOLUME % ("sockets", "echo\\.sock", "sockets", "sockets", "sockets"),
+        ],
+        "Deployment/uds-cr-echo": [
+            "\\n  replicas: 3\\n",
+            UDS_VOLUME % ("sockets", "echo\\.sock", "sockets", "sockets", "sockets"),
+        ],
+        "EndpointPolicy/uds-cr": [
+            "\\n  udsSocket: \"sockets/echo\\.sock\"$",
+        ],
+    },
+    opts = [
+        "--set",
+        "socket=sockets/echo.sock",
+        "--set",
+        "policyPath.replicas=3",
+    ],
+)
+
+# The off switch: without the policy path none of its three documents render,
+# and the client stops probing it.
+helm_template_absent_test(
+    name = "udsecho_policy_path_off_test",
+    absent = [
+        "uds-cr-echo",
+        "kind: EndpointPolicy",
+    ],
+    chart = ":udsecho",
+    control = "config.aether.io/upstreams: \"uds-echo\"",
+    opts = [
+        "--set",
+        "policyPath.enabled=false",
+    ],
 )
