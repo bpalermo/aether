@@ -2612,11 +2612,16 @@ carry:
 
 | label | value | set by |
 |---|---|---|
-| `node` | the **Kubernetes node** (`main-worker-03`) | the collector, from the resource's `k8s.node.name` (chart env `OTEL_RESOURCE_ATTRIBUTES`, downward API `spec.nodeName`) |
+| `node` | the **Kubernetes node** the prober pod runs on (`main-worker-03`): the **source** of the probe, never where it went | the collector, from the resource's `k8s.node.name` (chart env `OTEL_RESOURCE_ATTRIBUTES`, downward API `spec.nodeName`) |
 | `pod` | the prober pod (`prober-h2mzs`) | the prober, as a datapoint attribute |
 | `tier` | `liveness`, `reachability`, `mesh_dns` | the prober |
-| `target` | the probed name (`egress`, `echo.aether-test.aether.internal:18081`, …) | the prober |
+| `target` | the probed name (`egress`, `echo.aether-test.aether.internal:18081`, …): what was asked for, not the endpoint that would have answered | the prober |
 | `result` | `success`, `http_error`, `connection_error`, `timeout`, `saturated`, `dns_error`, `dns_nxdomain`, `dns_timeout` | the prober (`classifyFailure`: the error, plus the request phase the deadline interrupted) |
+
+**There is no destination label (#1391).** A burst grouped `by (node)` is placed at its
+source. Where each failed probe went is not in the metric and cannot be: a label for it
+would be a series per endpoint. It is found from the failure line, through the access
+logs: see "Where a failed probe went" below.
 
 **`timeout` vs `dns_timeout` (#1252).** A probe whose deadline fires while its name
 lookup is still in flight is `dns_timeout`. Before #1252 it was `timeout`: Go's
@@ -2661,7 +2666,7 @@ stdout. It follows the soak's k6 `AETHER_FAIL` convention: a fixed marker, then 
 JSON object:
 
 ```
-AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"pod":"prober-h2mzs","node":"main-worker-01","n":1,"truncated":false}
+AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"dial":"10.96.14.7:18081","remote":"10.96.14.7:18081","local":"10.244.3.114:49292","trace_id":"9fa32b3befe77ea2253e8831d3472fa8","pod":"prober-h2mzs","node":"main-worker-01","n":1,"truncated":false}
 ```
 
 - `t` is the client-side timestamp. Line it up against the proxy's hot-restart
@@ -2686,10 +2691,64 @@ AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"ec
   an IP), and `dns_ms`/`connect_ms` are `-1` on a reused connection.
 - `reused` is `true` when the probe ran on a pooled keep-alive connection (liveness,
   reachability). The mesh_dns tier never reuses, so it is always `false` there.
+- `pod` and `node` are the prober's own: the **source**.
+- `dial`, `remote`, `local` and `trace_id` (#1391) are what the client knows of where
+  the probe went. `dial` is the address of the last connect attempt, which for the
+  mesh_dns tier is what the name resolved to (empty on a reused connection and when the
+  lookup failed). `remote` and `local` are the two ends of the connection the request
+  was sent on (both empty when the probe never had one: a refused or blackholed
+  connect, a lookup that failed). `trace_id` is the trace id of the `traceparent`
+  header the probe sent (empty for `saturated`, which sent nothing). Lines written before #1391 have none of the four.
 - Every key is present on every detail line, so a query can filter on any of them
   (`AND "\"phase\":\"dns\""`).
 - `err` is the Go error string. For `http_error` it is `HTTP <status>`. For `saturated`
   the probe was never sent because `--max-concurrent` probes were already in flight.
+
+**Where a failed probe went (#1391).** The client cannot say. On the mesh its
+connection ends at the node proxy of its own node, so `remote` is the address it
+dialled: `127.0.0.1:18081` for the liveness and reachability tiers, the mesh Service's
+address for mesh_dns (the capture diverts the connection and keeps the original
+destination). It is never the pod that would have answered, and the proxy adds no
+response header that names its upstream. What the line has instead is the key to the
+proxies' own records of that one request: `trace_id`, the trace id of the `traceparent`
+header the probe sent. The HTTP access log has a `traceparent` field, and every row of
+the request carries that trace id in it:
+
+```
+log_name:aether_access_logs AND traceparent:"00-9fa32b3befe77ea2253e8831d3472fa8-"*
+```
+
+**The trace id, not the whole header.** A proxy with tracing on writes its own span id
+into the header at every hop, also for a request that is marked not-sampled, as every
+probe is. The rows of one probe therefore share the 32 hex digits of the trace id and
+differ in the 16 that follow, and a search for the header exactly as the prober sent it
+finds nothing. Two rows of one mesh_dns probe, read from a test cluster on 2026-10-08:
+
+```
+reporter=source       node_name=main-worker-01  traceparent=00-7562d29beca08c9375101ae165a94196-5fe29c53fe07c4da-00  downstream_remote_address=10.244.3.114:47098  upstream_host=10.244.4.106:18008
+reporter=destination  node_name=main-worker-02  traceparent=00-7562d29beca08c9375101ae165a94196-64629e6a312a85b9-00  upstream_host=127.0.0.1:8080
+```
+
+- The `reporter:source` row is the prober's own node proxy. Its `upstream_host` is the
+  endpoint it chose (`<pod ip>:18008`), its `upstream_cluster` the service, and its
+  `response_flags` what the proxy thinks happened (`DC`: the prober gave up first). Its
+  `downstream_remote_address` is the line's `local`, and its `downstream_local_address`
+  the line's `remote`. Translate the pod IP to a node with `kubectl get pods -A -o wide`
+  while the pod exists, or from that pod's own access-log rows (`node_name`).
+- A `reporter:destination` row with the same trace id, written by another node's
+  proxy, means the request arrived there: the destination is that row's `node_name`.
+  No such row means it did not arrive, or the destination proxy has not logged it yet
+  (a row is written when the stream ends).
+- **No row at all** means the request never became an HTTP request at the source
+  proxy: `phase` is `dns` or `connect`, and `dial` is all there is. A liveness probe
+  has no row either way: its route is a local reply, excluded from the access log.
+
+What was measured and what was not: the two rows above, and that a prober row's
+`downstream_remote_address` is the prober pod's `ip:port` and its
+`downstream_local_address` the mesh Service address, were read from a test cluster's
+access logs for probes that succeeded. A failed probe's line has not yet been joined to
+its rows on a cluster: the prober that prints `trace_id` had not been deployed when
+this was written.
 
 It is **bounded**: at most 20 detail lines per `(tier, result)` per minute (`n` counts
 them, and `truncated:true` marks the 20th). Later failures in that minute are only

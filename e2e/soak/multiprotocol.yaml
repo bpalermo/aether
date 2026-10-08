@@ -86,12 +86,38 @@ spec:
         runAsUser: 1000
         seccompProfile:
           type: RuntimeDefault
+      # QUIET (#1395): http-echo logs one line per request to stdout and has no
+      # switch for it, and its image has no shell. Same answer as echo.yaml: a
+      # static busybox copied in as `sh`, the server exec'd through it with stdout
+      # on /dev/null. Its start-up line is on stderr and stays.
+      initContainers:
+        - name: quiet-shell
+          image: busybox:1.37.0-musl@sha256:5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092
+          command: ["cp", "/bin/busybox", "/quiet/sh"]
+          volumeMounts:
+            - name: quiet
+              mountPath: /quiet
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
       containers:
         # The HTTP primary: reached as mixed-svc.<ns>.aether.internal:18081 and
         # portlessly, through the capture HCM, exactly like any other service.
         - name: http
           image: hashicorp/http-echo:1.0
-          args: ["-text=served-by-http-8080", "-listen=:8080"]
+          command: ["/quiet/sh", "-c", "exec /http-echo -text=served-by-http-8080 -listen=:8080 >/dev/null"]
+          volumeMounts:
+            - name: quiet
+              mountPath: /quiet
+              readOnly: true
           ports:
             - containerPort: 8080
           resources:
@@ -126,6 +152,9 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: quiet
+          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: DaemonSet

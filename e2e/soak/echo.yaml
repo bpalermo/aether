@@ -95,9 +95,44 @@ spec:
         runAsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
+      # QUIET (#1395). echo-basic prints one line per request to stdout
+      # (`Echoing back request made to / to client (...)`) and has no switch for
+      # it. Under a soak that is every probe and every loader request, read by the
+      # node's log agent and shipped to the log store, beside the access-log
+      # row the mesh already writes for the same request. The image is distroless:
+      # there is no shell in it to redirect with. So one is copied in (a static
+      # busybox, as `sh`) and the server is started through it with stdout on
+      # /dev/null. `exec`, so the server is still PID 1 and takes the TERM itself;
+      # stderr is left alone. To hear it again, delete `command:` below.
+      initContainers:
+        - name: quiet-shell
+          image: busybox:1.37.0-musl@sha256:5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092
+          command: ["cp", "/bin/busybox", "/quiet/sh"]
+          volumeMounts:
+            - name: quiet
+              mountPath: /quiet
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              memory: 32Mi
+          securityContext:
+            privileged: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
       containers:
         - name: echo
           image: gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb7396722956640221e856b8e8cf44179da131d5bd6fc27a4f0cb91f60c237c3
+          command: ["/quiet/sh", "-c", "exec /echo-basic >/dev/null"]
+          volumeMounts:
+            - name: quiet
+              mountPath: /quiet
+              readOnly: true
           env:
             - name: HTTP_PORT
               value: "8080"
@@ -133,3 +168,6 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: quiet
+          emptyDir: {}
