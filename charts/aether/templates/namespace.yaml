@@ -21,7 +21,8 @@
   price: `helm uninstall` leaves the namespace behind (delete it yourself).
 
   When it is not rendered, aether.namespace.assertUpgradeKeeps refuses the one
-  upgrade that would still delete it (a failed first install of an older chart).
+  upgrade that could still delete it, and asks a release written by an older
+  chart for the `keep` command once.
 */ -}}
 {{- $ns := include "aether.namespace" . -}}
 {{- if .Values.namespace.create -}}

@@ -36,13 +36,22 @@
 #        default `spire.enabled=true`.
 #   v.   upgrade — the same command again: revision 2, `deployed`, the same
 #        namespace (UID), still Ready.
+#   v-b. a release written by an older chart with namespace.create=false (no
+#        marker on the agent ServiceAccount): the first upgrade is refused with
+#        the `keep` command, goes through after it, and the next one needs
+#        nothing.
 #   vi.  upgrade safety (#1403) — a release that OWNS its namespace (every
 #        install made while namespace.create defaulted to true) is upgraded
 #        with the default values and then with an explicit
 #        namespace.create=false: the Namespace stays in the manifest and keeps
 #        its UID, and now carries helm.sh/resource-policy: keep. Then the
 #        ownership annotations are removed, so the Namespace does leave the
-#        manifest: `keep` on the live object stops Helm deleting it.
+#        manifest: `keep` on the live object stops Helm deleting it. In
+#        between, the drift case: ownership annotations AND `keep` removed
+#        (what a namespace rendered by an older chart looks like when its
+#        annotations were lost before the first upgrade); the chart recognises
+#        the namespace by its chart labels and keeps rendering it. The prober
+#        chart gets the same case in (vii).
 #   vii. the failed first install — run before (iv), on the empty cluster. A
 #        release that was never deployed, whose failed revision lists a
 #        Namespace it does not own: upgrading it would make Helm delete the
@@ -425,6 +434,34 @@ safe_upgrade() {
 	ok "$what: namespace kept (uid $uid, Active); Namespace documents in the manifest: $want_in_manifest"
 }
 
+# v-b. A release written by an OLDER chart with namespace.create=false. Its
+# manifest never held the Namespace, so nothing could be deleted, but the chart
+# cannot tell it from an older release whose Namespace lost every sign of
+# ownership: neither carries the marker this chart stamps on the agent
+# ServiceAccount. The first upgrade is therefore refused once, with the `keep`
+# command; after it the upgrade goes through, and the one after that needs
+# nothing (the marker is there), even with `keep` removed again.
+verify_legacy_unmarked() {
+	log "v-b. a release of an older chart with namespace.create=false: asked for keep once, then never again"
+	local uid out
+	uid="$(ns_uid)"
+	# What an older chart's ServiceAccount looks like: no marker.
+	kc -n "$NS" annotate serviceaccount aether-agent aether.io/release-namespace-rendered- >/dev/null
+	if out="$(documented_helm_install 2>&1)"; then
+		die "the upgrade of an unmarked release whose namespace is not protected was not refused"
+	fi
+	case "$out" in
+	*"Helm could DELETE it"*"kubectl annotate namespace $NS helm.sh/resource-policy=keep"*) ;;
+	*) die "the upgrade failed, but not with the command that makes it safe: $out" ;;
+	esac
+	[ "$(ns_uid)" = "$uid" ] && [ "$(ns_phase)" = "Active" ] || die "THE NAMESPACE WAS DELETED by a refused upgrade"
+	ok "refused once, naming kubectl annotate namespace $NS helm.sh/resource-policy=keep"
+	kc annotate namespace "$NS" helm.sh/resource-policy=keep >/dev/null
+	safe_upgrade "after keep" "$uid" 0
+	kc annotate namespace "$NS" helm.sh/resource-policy- >/dev/null
+	safe_upgrade "the next upgrade, keep removed again (the marker is stamped)" "$uid" 0
+}
+
 # vi. A release that owns its namespace must never lose it.
 verify_upgrade_safety() {
 	log "vi. upgrade safety: a release that owns its namespace (the old default)"
@@ -446,6 +483,17 @@ verify_upgrade_safety() {
 	safe_upgrade "explicit namespace.create=false" "$uid" 1 --set namespace.create=false
 	[ "$(ns_annotation helm.sh/resource-policy)" = "keep" ] || die "the owned namespace does not carry helm.sh/resource-policy: keep"
 	ok "the namespace carries helm.sh/resource-policy: keep"
+
+	# Drift before the first upgrade to this chart: the Namespace is in the
+	# stored manifest, as an older chart left it, but the live object has lost
+	# Helm's ownership annotations and never had `keep`. The chart still
+	# recognises it by the labels every chart version put on it, keeps
+	# rendering it, and Helm stamps ownership and `keep` back.
+	kc annotate namespace "$NS" meta.helm.sh/release-name- meta.helm.sh/release-namespace- helm.sh/resource-policy- >/dev/null
+	safe_upgrade "ownership annotations lost before keep was ever stamped" "$uid" 1
+	[ "$(ns_annotation helm.sh/resource-policy)" = "keep" ] && [ "$(ns_annotation meta.helm.sh/release-name)" = "$RELEASE" ] ||
+		die "the upgrade did not put keep and the ownership annotations back on the namespace"
+	ok "keep and the ownership annotations are back on the namespace"
 
 	# The second lock: once the release no longer owns the namespace, the
 	# Namespace leaves the manifest, which is exactly when Helm deletes an
@@ -477,7 +525,10 @@ guard_leg() {
 	fi
 	[ "$(release_field status)" = "failed" ] || die "$label: the release is '$(release_field status)' after the rejected first install, want failed: $out"
 	[ "$(manifest_namespaces)" = "1" ] || die "$label: the failed revision's manifest does not list the Namespace"
+	# What that namespace looked like: made by `helm --create-namespace`, so
+	# with no ownership annotations, no `keep` and none of the chart's labels.
 	kc annotate namespace "$NS" meta.helm.sh/release-name- meta.helm.sh/release-namespace- helm.sh/resource-policy- >/dev/null
+	kc label namespace "$NS" app.kubernetes.io/managed-by- app.kubernetes.io/instance- >/dev/null
 	uid="$(ns_uid)"
 	ok "$label: a failed first install whose manifest lists a Namespace the release no longer owns (uid $uid)"
 
@@ -494,7 +545,7 @@ guard_leg() {
 			die "$label: the upgrade over the failed first install ($how) was NOT refused (namespace now: uid '$(ns_uid)', phase '$(ns_phase)')"
 		fi
 		case "$out" in
-		*"has never been deployed successfully"*"helm.sh/resource-policy=keep"*) ;;
+		*"Helm could DELETE it"*"helm.sh/resource-policy=keep"*) ;;
 		*) die "$label: the upgrade ($how) failed, but not with the guard's message: $out" ;;
 		esac
 		sleep 5
@@ -547,6 +598,30 @@ prober_guard_leg() {
 	prober_reset
 }
 
+# The prober chart's copy of the drift case in (vi): a DEPLOYED release whose
+# manifest lists the Namespace (namespace.create=true, release stored in
+# another namespace), the live object without ownership annotations and
+# without `keep`, upgraded with namespace.create=false.
+PROBER_RELEASE_NS="first-install-prober-release"
+prober_elsewhere_install() {
+	hc upgrade --install prober "$CHARTS/prober" --namespace "$PROBER_RELEASE_NS" --create-namespace \
+		--set "namespace.name=$PROBER_NS" --set image.pullPolicy=IfNotPresent "$@"
+}
+prober_drift_leg() {
+	local NS="$PROBER_NS" uid out
+	out="$(prober_elsewhere_install --set namespace.create=true 2>&1)" || die "prober: installing with namespace.create=true from another namespace failed: $out"
+	uid="$(ns_uid)"
+	kc annotate namespace "$NS" meta.helm.sh/release-name- meta.helm.sh/release-namespace- helm.sh/resource-policy- >/dev/null
+	out="$(prober_elsewhere_install --set namespace.create=false 2>&1)" || die "prober: the upgrade over the drifted namespace failed: $out"
+	sleep 5
+	[ "$(ns_uid)" = "$uid" ] && [ "$(ns_phase)" = "Active" ] ||
+		die "prober: THE NAMESPACE WAS DELETED after its ownership annotations drifted (uid $uid -> '$(ns_uid)', phase '$(ns_phase)')"
+	[ "$(ns_annotation helm.sh/resource-policy)" = "keep" ] || die "prober: the upgrade did not put keep back on the namespace"
+	ok "prober: ownership annotations lost before keep was ever stamped: namespace kept (uid $uid), keep is back"
+	hc uninstall prober -n "$PROBER_RELEASE_NS" >/dev/null 2>&1 || true
+	kc delete ns "$PROBER_NS" "$PROBER_RELEASE_NS" --wait=true --timeout=120s >/dev/null 2>&1 || true
+}
+
 verify_failed_install_guard() {
 	log "vii. a failed first install that lists an unowned Namespace cannot be upgraded into deleting it"
 	# The aether chart does not render without its CRDs (documented step 1; (iv)
@@ -554,6 +629,7 @@ verify_failed_install_guard() {
 	hc upgrade --install aether-crds "$CHARTS/crds" --wait --timeout 2m >/dev/null || die "the crds chart did not install"
 	aether_guard_leg
 	prober_guard_leg
+	prober_drift_leg
 }
 
 verify() {
@@ -568,6 +644,7 @@ verify() {
 	reset_aether
 	verify_first_install
 	verify_upgrade
+	verify_legacy_unmarked
 	verify_upgrade_safety
 	rm -rf "$(dirname "$CHARTS")"
 	log "all assertions passed (#1403/#1404: the documented first install works with default values, upgrades, and no upgrade deletes the namespace)"

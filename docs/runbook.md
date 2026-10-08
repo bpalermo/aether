@@ -1682,16 +1682,39 @@ them again; `registrar.nodeSpread=required` stops it happening.
 #### Chart 2.4.21: the chart no longer creates the release's namespace by default (#1403)
 
 `namespace.create` defaults to `false`. No workload rolls: no pod template
-changed. What the upgrade does to the namespace depends on who owns it, and in
-no case is it deleted:
+changed. What the first upgrade to 2.4.21 does depends on what the chart can
+see on the live namespace, and in no case does it let Helm delete it:
 
-| The release was installed with | The namespace before | After upgrading to 2.4.21 (any `namespace.create`) |
+| The release was installed with | The live namespace | First upgrade to 2.4.21 (any `namespace.create`) |
 |---|---|---|
-| the old default, or `namespace.create=true` | owned by the release (in its manifest) | still in the manifest; gains `helm.sh/resource-policy: keep` |
-| `namespace.create=false` (+ `--create-namespace`, or a namespace you made) | not in the manifest | unchanged |
+| the old default, or `namespace.create=true` | carries Helm's ownership annotations for the release, or at least the chart's labels (`app.kubernetes.io/managed-by: Helm`, `app.kubernetes.io/instance: <release>`) | goes through; the Namespace stays in the manifest and gains `helm.sh/resource-policy: keep` |
+| `namespace.create=false` (+ `--create-namespace`, or a namespace you made) | carries neither | **refused once**, with the command below; goes through after it |
+| the old default, but the namespace lost the annotations **and** the chart's labels | carries neither | the same refusal |
 
-The chart finds out which row applies by reading the live namespace at render
-time. The check, before and after (the UID must not change):
+**The one extra step, for a release installed with `namespace.create=false`**
+(and for the rare namespace that lost every sign of its owner). Run it before
+the upgrade, or when the upgrade's error names it:
+
+```bash
+kubectl annotate namespace aether-system helm.sh/resource-policy=keep
+```
+
+Why: Helm deletes an object that was in the previous manifest and is not in the
+new one, and a chart cannot read the previous manifest. A release written by an
+older chart looks the same from the cluster whether its manifest holds the
+Namespace or not, so the chart leaves the Namespace out only when the live
+object says `keep`, or when the previous revision was written by 2.4.21 or
+newer and recorded that it rendered none (the
+`aether.io/release-namespace-rendered: "false"` annotation on the agent
+ServiceAccount). The annotation is harmless on a namespace the release never
+rendered, the command is needed once, and you may remove the annotation again
+after that upgrade. With a GitOps controller that drives Helm, the refused
+upgrade shows as a failed release with this message; annotate, then let it
+retry. The `prober` chart 1.0.6 asks the same of its namespace on the first
+upgrade from an older chart (`kubectl annotate namespace <prober namespace>
+helm.sh/resource-policy=keep`).
+
+The check, before and after (the UID must not change):
 
 ```bash
 # Owned by the release? Both annotations name it when it is.
@@ -1706,8 +1729,9 @@ helm upgrade aether oci://quay.io/aethermesh/chart-aether --version "$AETHER_VER
   -n aether-system -f values.yaml --dry-run=server | grep -A6 '^kind: Namespace'
 ```
 
-For an owned namespace the last command must print the `Namespace` with
-`helm.sh/resource-policy: keep`. **`helm template` cannot answer this
+For a namespace in the first row the last command must print the `Namespace`
+with `helm.sh/resource-policy: keep`; for the other rows it fails with the
+`kubectl annotate` command until that has been run. **`helm template` cannot answer this
 question**: it renders without a cluster, sees no owner, and prints no
 `Namespace`. For the same reason, a pipeline that renders with `helm template`
 and prunes what is no longer rendered (`kubectl apply --prune`, a GitOps tool in
@@ -1724,8 +1748,8 @@ Consequences to know:
   refused at render time on a **first** install (it could never be installed);
   an existing release that owns its namespace is not refused.
 - A release whose only revision is a **failed** first install of an older chart
-  is refused once, with the command that makes the upgrade safe; see
-  "Recovering from a failed first install".
+  gets the same refusal and the same command; see "Recovering from a failed
+  first install".
 
 #### The prober chart (#1372, #1373, #1374)
 

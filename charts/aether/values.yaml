@@ -49,6 +49,11 @@ fullnameOverride: ""
 # to do. A Namespace the release already owns is rendered whatever this says, and
 # carries helm.sh/resource-policy: keep, so Helm never deletes it (not on an
 # upgrade, and not on `helm uninstall`: delete it yourself then).
+# Upgrading a release of a chart older than 2.4.21 installed with create: false:
+# the first upgrade is refused until the namespace is annotated once
+# (`kubectl annotate namespace <ns> helm.sh/resource-policy=keep`); the chart
+# cannot see that such a release never rendered its namespace. See
+# docs/runbook.md, "Chart 2.4.21".
 namespace:
   create: false
   name: ""

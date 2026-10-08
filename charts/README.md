@@ -197,7 +197,10 @@ create the namespace its own release is stored in.
 A namespace the release already **owns** (it carries Helm's two ownership
 annotations for this release: every install made while `namespace.create`
 defaulted to `true`) is rendered whatever `namespace.create` says, so upgrading
-across 2.4.21 with no values cannot make Helm delete it. Ownership is read from
+across 2.4.21 with no values cannot make Helm delete it. A release of an older chart installed with
+`namespace.create=false` is asked once for `kubectl annotate namespace <ns>
+helm.sh/resource-policy=keep` on its first upgrade ([runbook](../docs/runbook.md),
+"Chart 2.4.21"). Ownership is read from
 the cluster at render time (`lookup`); a render without a cluster (`helm
 template`) does not see it and shows what a first install gets.
 

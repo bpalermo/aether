@@ -249,13 +249,18 @@ render with the two ways out. See
 [`runbook.md`](./runbook.md), "Recovering from a failed first install" if an
 install went wrong.
 
-> **Upgrading a release installed before chart 2.4.21.** Nothing to do, and no
-> value to set. Such a release owns its `Namespace` (the chart created or
-> adopted it), and the chart keeps rendering a namespace its release owns
-> whatever `namespace.create` says, so Helm never sees it leave the manifest and
-> never deletes it. The upgrade also stamps `helm.sh/resource-policy: keep` on
-> it; from then on `helm uninstall` leaves the namespace behind (delete it
-> yourself). This relies on Helm reading the live namespace at render time
+> **Upgrading a release installed before chart 2.4.21.** If it was installed
+> with the old default (or `namespace.create=true`): nothing to do, and no value
+> to set. Such a release owns its `Namespace`, and the chart keeps rendering a
+> namespace its release owns whatever `namespace.create` says, so Helm never
+> sees it leave the manifest and never deletes it. The upgrade also stamps
+> `helm.sh/resource-policy: keep` on it; from then on `helm uninstall` leaves
+> the namespace behind (delete it yourself). If it was installed with
+> `namespace.create=false`: run `kubectl annotate namespace aether-system
+> helm.sh/resource-policy=keep` once before the upgrade. The chart cannot tell
+> such a release from one whose namespace lost every sign of its owner, so it
+> refuses the first upgrade, naming that command, rather than risk Helm deleting
+> the namespace. This relies on Helm reading the live namespace at render time
 > (`lookup`). **If you render without a cluster** (`helm template | kubectl
 > apply --prune`, or a GitOps tool that renders with `helm template` and prunes
 > what left the render) the namespace does leave the render: protect it in

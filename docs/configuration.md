@@ -24,7 +24,7 @@ Configuration has **two layers**:
 | Key | Default | Purpose |
 |---|---|---|
 | `nameOverride` / `fullnameOverride` | `""` | Override the chart name / fully-qualified resource name. |
-| `namespace.create` | `false` | Whether the chart renders the `Namespace`, with the three privileged pod-security labels (`enforce`/`audit`/`warn`) and `helm.sh/resource-policy: keep`. `false` (the default since chart 2.4.21, #1403): Helm (`--create-namespace`) or you create it, and on a cluster that enforces Pod Security admission you label it before installing, or the agent, proxy, mesh-dns and uds-csi pods are refused; see [Getting started](./getting-started.md#install). `true` works only when the release is stored in a **different** namespace (`helm -n <other> --set namespace.name=...`); for the release's own namespace the render fails, naming both ways out, because Helm writes the release record into that namespace before it creates anything the chart renders. A namespace the release already owns (any install made while this defaulted to `true`) is rendered whatever this says, so an upgrade never deletes it ([`runbook.md`](./runbook.md), "Chart 2.4.21"). |
+| `namespace.create` | `false` | Whether the chart renders the `Namespace`, with the three privileged pod-security labels (`enforce`/`audit`/`warn`) and `helm.sh/resource-policy: keep`. `false` (the default since chart 2.4.21, #1403): Helm (`--create-namespace`) or you create it, and on a cluster that enforces Pod Security admission you label it before installing, or the agent, proxy, mesh-dns and uds-csi pods are refused; see [Getting started](./getting-started.md#install). `true` works only when the release is stored in a **different** namespace (`helm -n <other> --set namespace.name=...`); for the release's own namespace the render fails, naming both ways out, because Helm writes the release record into that namespace before it creates anything the chart renders. A namespace the release already owns (any install made while this defaulted to `true`) is rendered whatever this says, so an upgrade never deletes it. The first upgrade of a release that an older chart installed with `false` is refused until `kubectl annotate namespace <ns> helm.sh/resource-policy=keep` has been run once ([`runbook.md`](./runbook.md), "Chart 2.4.21"). |
 | `namespace.name` | `""` | Namespace all resources deploy into (defaults to the release namespace). |
 | `clusterName` | `talos-main` | Cluster name passed to agent + registrar (`--cluster-name`); used in registry keys. |
 | `controlCluster` | `""` | Cross-cluster config authority (026 EM3). Set to a cluster name → only that cluster's registrar exports GAMMA config and everyone imports only from it. Empty = federated (any peer, highest-version wins). |
@@ -891,7 +891,12 @@ defaults to the release namespace; on talos-main that is `aether-test`. Set
 the release's own namespace the render fails (chart 1.0.6, #1405), for the
 reason given under the `aether` chart's `namespace.create`. A namespace the
 chart rendered carries `helm.sh/resource-policy: keep`, so turning the value off
-again, or `helm uninstall`, leaves it in place. The pod
+again, or `helm uninstall`, leaves it in place. The first upgrade from a
+chart older than 1.0.6 is refused until the namespace has been annotated once
+(`kubectl annotate namespace <ns> helm.sh/resource-policy=keep`): the chart
+cannot see whether the older release rendered the namespace, and Helm deletes
+an object that leaves the manifest (the same rule as the `aether` chart;
+[`runbook.md`](./runbook.md), "Chart 2.4.21"). The pod
 carries `aether.io/managed: "true"`, and the chart derives
 `config.aether.io/upstreams` from the union of the reachability and `mesh_dns`
 targets so the agent programs those clusters (proposal 004). It ships **no CPU

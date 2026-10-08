@@ -32,14 +32,32 @@ that was in the previous manifest and is not in the new one — here, the
 namespace with every aether pod in it. So an owned Namespace keeps being
 rendered whatever the values say.
 
+Annotations can be lost (an object replaced from a file, a tool that prunes
+them). A Namespace an older chart rendered would then look unowned on the very
+upgrade that drops it from the manifest, before `keep` was ever stamped. So on
+an upgrade a second sign counts too: the labels every version of this chart has
+put on the Namespace it renders (app.kubernetes.io/managed-by: Helm and
+app.kubernetes.io/instance: <this release>), on a namespace that does not carry
+helm.sh/resource-policy: keep yet. Helm patches a Namespace that is in the
+previous manifest without asking who owns it, and stamps ownership and `keep`
+back. (With `keep` already there the namespace is safe either way, and one that
+has left the manifest must not be rendered again: Helm would refuse to adopt
+it.) A namespace that lost the annotations AND those labels cannot be told from
+one Helm or the operator created; docs/runbook.md, "Chart 2.4.21", says what to
+check before upgrading.
+
 `lookup` returns nothing without a cluster (`helm template`, a client-side
 `--dry-run`), so this is "" there: such a render shows what a first install
 would get.
 Usage: include "aether.namespace.ownedByRelease" (dict "ctx" . "name" $ns)
 */}}
 {{- define "aether.namespace.ownedByRelease" -}}
-{{- $annotations := dig "metadata" "annotations" (dict) (lookup "v1" "Namespace" "" .name | default (dict)) | default (dict) -}}
+{{- $live := lookup "v1" "Namespace" "" .name | default (dict) -}}
+{{- $annotations := dig "metadata" "annotations" (dict) $live | default (dict) -}}
+{{- $labels := dig "metadata" "labels" (dict) $live | default (dict) -}}
 {{- if and (eq (get $annotations "meta.helm.sh/release-name" | toString) .ctx.Release.Name) (eq (get $annotations "meta.helm.sh/release-namespace" | toString) .ctx.Release.Namespace) -}}
+true
+{{- else if and .ctx.Release.IsUpgrade (eq (get $labels "app.kubernetes.io/managed-by" | toString) "Helm") (eq (get $labels "app.kubernetes.io/instance" | toString) .ctx.Release.Name) (ne (get $annotations "helm.sh/resource-policy" | toString) "keep") -}}
 true
 {{- end -}}
 {{- end -}}
@@ -63,26 +81,26 @@ false
 Fails an upgrade that could make Helm delete the namespace although this render
 does not include it (#1403).
 
-The one way that happens: the release has NO deployed revision, and its failed
-revision lists the Namespace without owning it. That is what a first install of
-a chart older than 2.4.21 with `--create-namespace` leaves behind (Helm made the
-namespace, the chart's own Namespace then failed with "already exists", and
-everything else, pods included, was created anyway). With no deployed revision
-Helm upgrades from the failed one, finds the Namespace gone from the new
-manifest, and deletes it: ownership annotations are not consulted for a delete,
-only helm.sh/resource-policy on the live object.
-
-A render cannot read the previous manifest, so this asks what it can see:
-  - an upgrade, of a release none of whose revisions is `deployed` (Helm's
-    release Secrets carry the status as a label; another storage driver shows
-    no Secret and is not judged);
-  - the live namespace is neither owned by the release (then it is rendered)
-    nor already marked helm.sh/resource-policy: keep;
-  - the agent ServiceAccount was not last written by a chart that itself left
-    the Namespace out (aether.io/release-namespace-rendered: "false"). That
-    last test lets a first install of THIS chart that failed for any other
-    reason, a `--wait` timeout say, be retried with the same command.
-Then it stops, with the one command that makes the upgrade safe.
+Helm deletes an object that was in the previous revision's manifest and is not
+in the new one; it consults nothing but helm.sh/resource-policy on the live
+object. A render cannot read the previous manifest, so the Namespace is only
+left out of an UPGRADE when the chart can see that this is safe:
+  - the live namespace already carries helm.sh/resource-policy: keep; or
+  - the agent ServiceAccount says the previous revision was rendered by a chart
+    that itself left the Namespace out (aether.io/release-namespace-rendered:
+    "false", stamped since 2.4.21), so the stored manifest holds none.
+Otherwise it stops, with the one command that makes the upgrade safe. That
+covers, without telling them apart:
+  - a first install of a chart older than 2.4.21 that failed with
+    `--create-namespace` ("already exists": its manifest lists a Namespace the
+    release never owned, and Helm upgrades from that failed revision);
+  - a release of an older chart whose Namespace lost both Helm's ownership
+    annotations and the chart's labels (aether.namespace.ownedByRelease no
+    longer recognises it);
+  - a release of an older chart installed with namespace.create=false, whose
+    manifest never held the Namespace. This one is safe, but looks the same
+    from here, so it is asked for the same command ONCE: the first upgrade to
+    this chart stamps the marker, and later upgrades pass.
 
 It is also asked BEFORE aether.namespace.assertCreatable when namespace.create
 is true: the failed installs it is about were made with namespace.create=true,
@@ -92,22 +110,14 @@ and into a second failure (#1405).
 Usage: include "aether.namespace.assertUpgradeKeeps" .
 */}}
 {{- define "aether.namespace.assertUpgradeKeeps" -}}
+{{- if .Release.IsUpgrade -}}
 {{- $ns := include "aether.namespace" . -}}
 {{- $live := lookup "v1" "Namespace" "" $ns | default (dict) -}}
-{{- if and .Release.IsUpgrade $live (ne (dig "metadata" "annotations" "helm.sh/resource-policy" "" $live | toString) "keep") -}}
-{{- $revisions := 0 -}}
-{{- $deployed := 0 -}}
-{{- range (lookup "v1" "Secret" .Release.Namespace "" | default (dict)).items | default (list) -}}
-{{- if and (eq (toString .type) "helm.sh/release.v1") (eq (dig "metadata" "labels" "name" "" . | toString) $.Release.Name) -}}
-{{- $revisions = add1 $revisions -}}
-{{- if eq (dig "metadata" "labels" "status" "" . | toString) "deployed" -}}
-{{- $deployed = add1 $deployed -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
+{{- if and $live (ne (dig "metadata" "annotations" "helm.sh/resource-policy" "" $live | toString) "keep") -}}
 {{- $marker := dig "metadata" "annotations" "aether.io/release-namespace-rendered" "" (lookup "v1" "ServiceAccount" $ns (include "aether.agent.serviceAccountName" .) | default (dict)) | toString -}}
-{{- if and (gt $revisions 0) (eq $deployed 0) (ne $marker "false") -}}
-{{- fail (printf "release %q has never been deployed successfully (none of its %d revisions is 'deployed'), and the failed first install of an aether chart older than 2.4.21 lists the namespace %q in its manifest: this render does not include that Namespace, so Helm could DELETE it, with every pod in it, on this upgrade. Protect the namespace, then run the same command again (without namespace.create=true, if you pass it: a chart cannot create the namespace its own release is stored in): kubectl annotate namespace %s helm.sh/resource-policy=keep (and label it for Pod Security admission: kubectl label namespace %s --overwrite pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged). See docs/runbook.md, \"Recovering from a failed first install\"." .Release.Name $revisions $ns $ns $ns) -}}
+{{- if ne $marker "false" -}}
+{{- fail (printf "this upgrade of release %q does not render the namespace %q, and the chart cannot see that the previous revision did not either (it was written by an aether chart older than 2.4.21, or it rendered the Namespace). If the previous manifest lists the Namespace, Helm could DELETE it, with every pod in it. Protect the namespace, then run the same command again (without namespace.create=true, if you pass it: a chart cannot create the namespace its own release is stored in): kubectl annotate namespace %s helm.sh/resource-policy=keep (harmless if the release never rendered the namespace, and needed once only; if the namespace is not labelled for Pod Security admission yet: kubectl label namespace %s --overwrite %s). See docs/runbook.md, \"Chart 2.4.21\"." .Release.Name $ns $ns $ns "pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged") -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
