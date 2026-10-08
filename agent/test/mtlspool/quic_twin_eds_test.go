@@ -261,13 +261,108 @@ func (h *adsProxyHandle) statInt(t *testing.T, name string) int {
 	return n
 }
 
+// clusterManagerCounts is one admin read of the cluster manager's totals.
+type clusterManagerCounts struct {
+	// added is the counter cluster_manager.cluster_added: it moves when Envoy
+	// applies a CDS response that carries a cluster it did not have.
+	added int
+	// active and warming are the gauges active_clusters and warming_clusters.
+	active, warming int
+}
+
+// clusterManagerCounts reads the three totals in ONE admin request, so they
+// describe the same moment (the admin handler runs on Envoy's main thread,
+// which is also the only thread that moves a cluster between the warming and
+// the active set). ok is false when the read failed or a total is missing.
+func (h *adsProxyHandle) clusterManagerCounts(t *testing.T) (c clusterManagerCounts, ok bool) {
+	t.Helper()
+
+	stats := h.stats(t, "cluster_manager.")
+	for name, into := range map[string]*int{
+		"cluster_manager.cluster_added":    &c.added,
+		"cluster_manager.active_clusters":  &c.active,
+		"cluster_manager.warming_clusters": &c.warming,
+	} {
+		raw, present := stats[name]
+		if !present {
+			return clusterManagerCounts{}, false
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			t.Fatalf("parse %s=%q: %v", name, raw, err)
+		}
+		*into = n
+	}
+	return c, true
+}
+
+// lateClusterWatch times ONE cluster that a later snapshot adds, from the
+// cluster manager's totals.
+//
+// It judges against the totals read BEFORE the publish, never against fixed
+// numbers. "Nothing is warming and N clusters are active" is already true
+// before Envoy has applied the CDS response when N clusters were active
+// beforehand: SetSnapshot returns before the delta server has written the
+// response, so a sample taken in the first milliseconds still shows the old
+// state. That recorded "left warming after ~5 ms" in about 3 % of the
+// race-detector runs of the shared-name negative control, whose three
+// pre-existing clusters met its fixed threshold of three (aether#1416).
+type lateClusterWatch struct {
+	before clusterManagerCounts
+	// accepted is how long after the publish cluster_added had moved: Envoy has
+	// applied the CDS response and holds the late cluster, warming or active
+	// (0 = never within the window). It is a counter, so a 50 ms sampler cannot
+	// miss it the way it can miss a warming gauge that is back to 0 within a
+	// few milliseconds on the green arm.
+	accepted time.Duration
+	// leftWarming is how long after the publish the late cluster was in the
+	// active set with nothing warming (0 = never within the window).
+	leftWarming time.Duration
+}
+
+// watchLateCluster records the totals before the publish; nothing may be
+// warming at that point, or a later "warming is 0" would not be about the late
+// cluster.
+func (h *adsProxyHandle) watchLateCluster(t *testing.T) *lateClusterWatch {
+	t.Helper()
+
+	before, ok := h.clusterManagerCounts(t)
+	require.True(t, ok, "precondition: the cluster manager's totals are readable")
+	require.Equal(t, 0, before.warming, "precondition: nothing warming before the late cluster")
+	return &lateClusterWatch{before: before}
+}
+
+// sample takes one reading, elapsed after the publish. The late cluster has
+// left warming once one more cluster than before is ACTIVE and none is warming;
+// that cannot hold before Envoy has accepted the late cluster.
+func (w *lateClusterWatch) sample(t *testing.T, h *adsProxyHandle, start time.Time) {
+	t.Helper()
+
+	now, ok := h.clusterManagerCounts(t)
+	if !ok {
+		return
+	}
+	if now.added <= w.before.added {
+		return // Envoy has not applied the CDS response yet: nothing to judge.
+	}
+	if w.accepted == 0 {
+		w.accepted = time.Since(start)
+	}
+	if w.leftWarming == 0 && now.warming == 0 && now.active > w.before.active {
+		w.leftWarming = time.Since(start)
+	}
+}
+
 // lateTwinRun is what one arm observed after the second twin was published.
 type lateTwinRun struct {
 	// firstOK is how long the late twin took to serve its first 200 (0 = never
 	// within the observation window).
 	firstOK time.Duration
-	// leftWarming is how long until cluster_manager.warming_clusters was 0
-	// again (0 = never within the window).
+	// accepted is how long until Envoy held the late twin, warming or active
+	// (lateClusterWatch.accepted; 0 = never within the window).
+	accepted time.Duration
+	// leftWarming is how long until the late twin was active with nothing
+	// warming (lateClusterWatch.leftWarming; 0 = never within the window).
 	leftWarming time.Duration
 	// initFetchTimeouts is cluster.<twin stats key>.init_fetch_timeout at the end.
 	initFetchTimeouts int
@@ -319,7 +414,7 @@ func runLateTwin(t *testing.T, sharedEDSName bool, window time.Duration) lateTwi
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	require.Equal(t, 0, h.statInt(t, "cluster_manager.warming_clusters"), "precondition: nothing warming before the late twin")
+	watch := h.watchLateCluster(t)
 
 	// A new ServiceAccount's first pod: the agent republishes with one more twin.
 	cp.publish(t, "2", f.resources(t, listener, twinSourceA, twinSourceB))
@@ -334,18 +429,21 @@ func runLateTwin(t *testing.T, sharedEDSName bool, window time.Duration) lateTwi
 				run.firstOK = time.Since(start)
 			}
 		}
-		if run.leftWarming == 0 && h.statInt(t, "cluster_manager.warming_clusters") == 0 &&
-			h.statInt(t, "cluster_manager.active_clusters") >= 3 {
-			run.leftWarming = time.Since(start)
+		if watch.leftWarming == 0 {
+			watch.sample(t, h, start)
 		}
-		if run.firstOK != 0 && run.leftWarming != 0 {
+		if run.firstOK != 0 && watch.leftWarming != 0 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	run.accepted, run.leftWarming = watch.accepted, watch.leftWarming
 	run.initFetchTimeouts = h.statInt(t, "cluster."+twinBStats+".init_fetch_timeout")
-	t.Logf("late twin %s: first 200 after %s, left warming after %s, init_fetch_timeout=%d, last status %d %q",
-		twinB, run.firstOK, run.leftWarming, run.initFetchTimeouts, run.lastStatus, run.lastBody)
+	t.Logf("late twin %s: accepted by Envoy after %s, first 200 after %s, left warming after %s, init_fetch_timeout=%d, last status %d %q",
+		twinB, run.accepted, run.firstOK, run.leftWarming, run.initFetchTimeouts, run.lastStatus, run.lastBody)
+	require.NotZerof(t, run.accepted,
+		"Envoy never accepted the late twin within %s (cluster_manager.cluster_added did not move): "+
+			"the CDS update did not arrive, so nothing about its warming was observed", window)
 	return run
 }
 
