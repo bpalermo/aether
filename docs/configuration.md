@@ -189,8 +189,10 @@ sent through a reload were all answered, with no `ext_authz` error.
   docker run --rm -v "$PWD:/policy:ro" "$OPA_IMAGE" test /policy
   ```
 
-  `opa check` passes a policy that compiles but decides wrongly, or that defines no
-  `envoy.authz.allow` at all (every check is then denied); only tests catch that.
+  `opa check` passes a policy that compiles but defines no `envoy.authz.allow` at all
+  (every check is then denied): the `opa eval --fail` command above catches that. A
+  policy that defines the decision but decides wrongly passes both; only your own
+  tests catch it.
 - **A policy that does not parse or compile** is not loaded by a running sidecar. It keeps
   deciding with the last good policy, does not exit, and logs the error. That last good
   policy exists only in the running process: a sidecar that *starts* with the bad file

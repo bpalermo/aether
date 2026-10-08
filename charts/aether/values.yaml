@@ -810,9 +810,10 @@ proxy:
       # period (27-64 s measured), with no pod restart. That means no staging
       # either: it is fleet-wide at once, not one node at a time like a roll.
       # The chart does not validate it. VALIDATE IT BEFORE YOU CHANGE IT, with
-      # the image above:
+      # the image the sidecar runs (`image` above, as you have set it), so the
+      # check uses the OPA version that will load the policy:
       #   docker run --rm -v "$PWD/policy.rego:/policy/policy.rego:ro" \
-      #     openpolicyagent/opa:1.21.1-envoy-static check /policy/policy.rego
+      #     "<the value of proxy.authzSidecar.opa.image>" check /policy/policy.rego
       # A policy that does not parse or compile is not loaded by a running
       # sidecar (it keeps the last good one and logs the error), but a sidecar
       # that STARTS with it exits: after a sidecar restart every check on that
