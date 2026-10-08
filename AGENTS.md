@@ -155,9 +155,11 @@ assume this section has been read.
   fail against the unchanged chart. "Writing a template test" in
   `charts/README.md` says which rule to use. In `charts/aether`, rules_helm's
   `helm_template_test` must pass `--set controller.webhook.spire=true` (a guard
-  test enforces it, so no log holds the generated webhook key); anything else
-  uses the masked `helm_template_match_test`, whose `document_patterns` also
-  reaches every document of a multi-document template.
+  test enforces it, so no log holds the generated webhook key); any other
+  assertion that something IS rendered uses the masked
+  `helm_template_match_test`, whose `document_patterns` also reaches every
+  document of a multi-document template. An off switch is still
+  `helm_template_absent_test` and a rejected value `helm_template_fail_test`.
 - Removing a CPU limit from a Go container means deciding `GOMAXPROCS` in the
   same change (without a limit the runtime sizes to the node's cores); see the
   agent, mesh-dns and uds-csi values for the pattern.
@@ -202,7 +204,8 @@ assume this section has been read.
 - One issue per finding, with the evidence in it; never an umbrella issue. Do
   not comment on `envoyproxy/envoy`.
 - An issue gets its labels when it is filed: a kind (`bug`, `enhancement`,
-  `documentation`), an area (`chart`, `proxy`, `observability`, `soak`, `ci`),
+  `documentation`), an area (`chart`, `proxy`, `controller`, `observability`, `soak`,
+  `ci`),
   and `minor`, `blocked` or `parked` where they apply.
 - Separate what you measured from what you inferred, and say what you could
   not verify.

@@ -621,13 +621,19 @@ shown a soak. Its replacement for the soak is a small one over the
 with `label_replace`), one stat per zero-failure class
 (`increase({__name__=~"sortie_mesh_.*_benchmark_(http_[45]xx|http_inflight_lost|stream_resets.*|pool_.*)_total"}[$__range])`,
 the selector of the README's "Live view",
-with the dashboard's range set to the run), and p95 per target from the latency
+with the dashboard's range set to the run, PLUS the series born inside the
+range, which `increase()` reads as 0: for each class the stat is
+`sum(increase(m[$__range])) + sum(m unless m offset $__range)`, so a first
+failure cannot look clean), and p95 per target from the latency
 histogram, which is the mesh's latency now that the engine is not throttled.
 Every panel and any alert on these series is a `rate()` or an `increase()`,
 never the series' value (#1420): named by node, a failure series outlives the
 run that made it, so its bare value is not zero on a later clean run, and a
-series born inside the window reads as 0 under `increase()` (the `unless …
-offset` query under "Live view" in `e2e/soak/README.md` finds those). The dashboards and rules that existed on
+series born inside the window reads as 0 under `increase()`, which is why
+the stat above and any alert carry the "present now, absent before" arm
+(`m unless m offset <window>`) next to `increase()`; the same rule is in the
+runbook for the ext_authz counters and under "Live view" in
+`e2e/soak/README.md`. The dashboards and rules that existed on
 2026-10-08 were checked for this: `aether-k6` puts every `k6_*` counter under
 `rate()` and reads only the `k6_vus` gauges bare, and no dashboard or rule reads
 a `sortie_*` series yet. It
