@@ -6,34 +6,43 @@
 # report's file name, and job.enabled. Nothing here is per run.
 #
 # Pinned by DIGEST, all three: the two images below and the chart (run.sh,
-# SORTIE_CHART_DIGEST). They are sortie f0750ecf407c1bc50e6740b4b16a3b61964649e0,
-# chart version 0.1.0-f0750ecf407c1bc50e6740b4b16a3b61964649e0. A published chart
+# SORTIE_CHART_DIGEST). They are sortie 96e6bfb97713483c725bfa516d2dc7e4db719f1f,
+# chart version 0.1.0-96e6bfb97713483c725bfa516d2dc7e4db719f1f. A published chart
 # already defaults both image refs to these digests; they are repeated here so
 # the pin is in this repository, where a bump is a reviewed diff.
 #
-# Verified 2026-10-08 with cosign v3.1.2 (the version //bazel/cosign pins), the
-# chart, and the index and both per-arch manifests of each image, bound to that
-# commit (--certificate-github-workflow-sha; the same chart digest bound to the
-# previous pin's commit is refused):
+# Verified 2026-10-08 with cosign v3.1.2 (the version //bazel/cosign pins): the
+# chart, and the index and both per-arch manifests of each image, one signature
+# on each, by sortie's publish workflow on main:
 #   cosign verify \
 #     --certificate-identity-regexp '^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-#     quay.io/sortie/chart-sortie@sha256:b1f0a6d5f838a4d76357b7438f8557cc3b74e37035918aa8ca4a490cd75e45ef
+#     quay.io/sortie/chart-sortie@sha256:b30a426618e79621177affd1d53bc8738925006060949150ce906010808abc89
 # run.sh repeats that for the chart and for every image the release renders, on
-# every run (its pre-flight; see --verify in its header). Bump the three
-# together. cosign 3 or newer: the signatures are OCI referrers, and an older
-# client reports "no signatures found" for a signed artifact.
+# every run (its pre-flight; see --verify in its header). cosign 3 or newer: the
+# signatures are OCI referrers, and an older client reports "no signatures
+# found" for a signed artifact.
 #
-# All three digests change with EVERY sortie commit, the engine's too, whether or
-# not the engine changed: each image's config carries the commit (the
-# org.opencontainers.image.revision label), so the config, the per-arch
-# manifests and the index get new digests while the layers do not.
-# 9fcbb81 -> f0750ec did not touch the engine: both architectures have the same
-# 22 layers, digest for digest, and the label is the only difference (read from
-# the registry, 2026-10-08). "The engine is unchanged" is about the layers; the
-# digest to pin is still the one the new chart names.
+# What a bump changes, since sortie 6d801c0 (measured over the four commits
+# f0750ec..96e6bfb, from the registry): the CHART and the DRIVER get a new
+# digest at every sortie commit (the chart's version is the commit, and the
+# driver binary reports its own version); the ENGINE gets a new digest only
+# when the engine changed. No image carries the commit as a label any more.
+# 6a0a866 and 96e6bfb publish the same engine index, sha256:65392801...; the
+# commit between them and f0750ec, 6d801c0, published the f0750ec layers under a
+# third index, because dropping the label was itself a change of the config.
+# So: take all three digests from the new chart; the engine's may be the one
+# already here (seen for one commit so far, 6a0a866 -> 96e6bfb).
+#
+# Binding a signature to a commit (--certificate-github-workflow-sha) follows
+# from that. sortie signs a digest once, at the commit that first published it:
+# the chart and the driver verify against 96e6bfb, and the engine verifies
+# against 6a0a866, the commit that changed it, and is REFUSED against 96e6bfb
+# ("expected GithubWorkflowSHA to be 96e6bfb..., got 6a0a866..."). That refusal
+# is not a bad pin. run.sh checks the signer, not the commit, so it is
+# unaffected.
 image:
-  ref: quay.io/sortie/sortie@sha256:3d9a9b67900abf00d8f605af68540742d088789a0ef0ed84b5dd5aa0d700e986
+  ref: quay.io/sortie/sortie@sha256:490dfbd60f10d12332fc8c5280e22a0c0499d90c9fafb3f8f126828210ced23f
 
 engine:
   enabled: true
@@ -41,7 +50,7 @@ engine:
   # which the plan's `dns:` pool resolves into one backend per node.
   kind: DaemonSet
   image:
-    ref: quay.io/sortie/engine@sha256:d0fbc8602286c087b449bc2a0849ee9d2a24eb32665ea6b4636113725b10fc98
+    ref: quay.io/sortie/engine@sha256:65392801d00be08c3a5362f380edd0078e61393b9ee57879681e1669bfb83f4c
   # One execution per target runs at once on every engine. sortie-plan.sh
   # refuses a targets file longer than this (its MAX_TARGETS), which is why the
   # chart's own default is repeated here. Since sortie 1374999 an engine at this
