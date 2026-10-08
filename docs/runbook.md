@@ -735,6 +735,66 @@ the full agent, so it gets the slim `/mesh-dns` binary alone (~7Mi vs the agent'
 The `controller` image is not in `load-all`; load it with
 `bazel run //controller/cmd/controller:image_load`.
 
+### Which build is this binary (`--version`, #1378, #1429)
+
+Eight of the thirteen binaries the images ship answer `--version` and exit
+without starting anything: `agent`, `registrar`, `controller`, `prober`,
+`proxy-supervisor`, `mesh-dns`, `uds-csi` and `cni-install`. Five do not, on
+purpose:
+
+- the four probe binaries (`proxy-ready`, `agent-ready`, `mesh-dns-ready`,
+  `identity-ready`) are exec'd every few seconds or gate a pod's start, and each
+  has a test that holds it to the smallest possible link set;
+- the CNI plugin (`cni`) is not run by hand: the container runtime execs it with
+  its command in the environment, and the CNI specification defines its own
+  `VERSION` command for that.
+
+`readelf -n` reads the build ID of any of them, and `make check-build-id` lists
+the CNI plugin's next to the eight above (not the probe binaries'). The e2e
+fixtures (`l4echo`, `udsecho`) are test images and have no flag either.
+
+```console
+$ kubectl -n aether-system exec ds/aether-agent -c agent -- /agent --version
+agent build-id bbf3ba6860da40c812de4d2317532ec7d5f17ec0
+package aethermesh.dev/agent/cmd/agent
+go1.27.1 linux/amd64
+```
+
+The build ID is the binary's GNU build-ID note, which `//bazel/buildid` derives
+from the binary's own bytes. It is the same value:
+
+- `readelf -n <binary>` prints as `Build ID`;
+- the component reports as OTel `service.version` (and `uds-csi` as its CSI
+  `vendor_version`, visible in its `starting` log line);
+- the continuous profiler files that binary's symbols under;
+- `make check-build-id` prints for a checkout.
+
+It is **not** a commit. No Go binary of this workspace has the commit linked in
+any more (the separately built Envoy in the proxy image still does): a version
+taken from the commit made every binary, and so every image, different from one
+commit to the next even when its code had not changed. Two consequences:
+
+- Two pods reporting the same `service.version` run byte-identical binaries,
+  whatever commits their images were published from; a `service.version` that
+  changes across a deploy means that component's code really changed.
+- To go from a build ID to source, find the commit whose build produced it:
+  `make check-build-id` at a candidate commit, or the image's provenance (see
+  [verifying-releases.md](verifying-releases.md)). A build ID belongs to one
+  architecture's binary: the amd64 and arm64 builds of a component have
+  different IDs, and a pod reports its node's. `make check-build-id` prints
+  both lists, `== linux/amd64` then `== linux/arm64`, from any machine (it
+  runs `bazel build --platforms=@rules_go//go/toolchain:linux_<arch>
+  //bazel/buildid:release_build_ids` for each). The chart's `appVersion`
+  still names the commit the chart was packaged from.
+
+There is no module line because a Bazel build records the main package and
+every dependency's version, but no version for the main module itself
+(`go version -m <binary>` shows the same). A binary run outside an image
+(`bazel run //agent/cmd/agent`) reports the build ID the Go linker wrote, which
+under rules_go is one constant shared by every binary; only the binaries inside
+an image have a content-derived one. A binary with no readable note reports
+`dev`.
+
 ---
 
 ## 6. Local multi-cluster end-to-end (proposal 026)
@@ -1492,19 +1552,69 @@ Since chart **2.4.15** the chart itself no longer puts the release into a pod
 template: a `helm upgrade` rolls a workload only when that workload's pod
 template changed (an image digest, a flag, a resource, a volume).
 
-**That is not yet "only the component that changed".** Every image this
-repository builds gets a new digest with every commit, whether or not its
-content changed: the image carries the commit as its
-`org.opencontainers.image.revision` label (#837) and the binaries are stamped
-with the version. On talos-main all seven in-repo image digests (agent,
-cni-install, proxy-supervisor, mesh-dns, uds-csi, registrar, controller) changed
-in each of the four deploys from revision 276 to 279, including one whose
-commits touched only the registrar, tests and scripts. Every workload runs at
-least one of those images (the proxy DaemonSet through its `install-supervisor`
-init container), so a deploy of a new commit still rolls everything. What
-2.4.15 removes is the chart's own share: an upgrade that changes the chart
-version but not the images (the same commit's images under a re-cut chart, a
-values-only change) no longer rolls anything it did not change.
+**And an image changes only when what is in it changes (#1378).** Until #1378
+every image this repository builds got a new digest with every commit, whether
+or not its content changed: the image carried the commit as its
+`org.opencontainers.image.revision` label and annotations (#837), and seven
+binaries had the commit linked in as their version. On a test cluster all seven
+in-repo image digests changed in each of four consecutive deploys, including one
+whose commits touched only the registrar, tests and scripts; and since every
+workload runs at least one of those images, a deploy of any new commit rolled
+everything, the node proxy included.
+
+Neither is true any more for the Go images this workspace builds (agent,
+mesh-dns, proxy-supervisor, uds-csi, cni-install, registrar, controller,
+prober): none of them and none of their binaries carries the commit, so the same
+inputs build the same digest at any commit, the chart pins the same digest, and
+the pod template does not change. CI holds the build to it, for those images:
+the `test` job fails if any action under one of their image indexes takes a
+workspace-status file, then builds every index twice, as two made-up commits,
+and fails on a digest that differs (`scripts/check-image-digest-stability.sh`,
+or `make check-image-digests` locally; it takes seconds once the images are
+built).
+
+The `aether-proxy` image is the exception, and stays one. It is built in the
+separate `proxy/` workspace by its own release workflow, and it still carries
+the aether commit twice: as `org.opencontainers.image.revision` (label and
+annotation, `proxy/BUILD.bazel`, the `image_metadata` genrule) and inside the
+Envoy binary, through Envoy's own version linkstamp (`proxy/README.md`, "Where
+the Envoy revision actually is"). That costs no roll: the chart pins the proxy
+image statically (`proxy.image` in `values.yaml`), so it changes only when the
+pin is bumped. What a deploy of a new commit rolls:
+
+| The commits changed | Rolls | Does not roll |
+| --- | --- | --- |
+| docs, tests, CI, scripts only | nothing | everything |
+| the agent only (`agent/` code outside the other binaries) | the agent DaemonSet, the edge Deployment (it runs the agent image) and the controller (its identity-gate init container image defaults to the agent image, which is a flag in the controller's pod template) | the node proxy: **no Envoy hot restart**; mesh-dns, uds-csi, the registrar |
+| one other component only (the registrar, mesh-dns, uds-csi, the controller, the proxy supervisor, cni-install) | the workloads that run that image: the proxy DaemonSet for the supervisor, the agent DaemonSet for cni-install (its init container) | the rest |
+| the chart only (templates, values) | only the workloads whose pod template changed | the rest |
+| a package under `common/` (or `api/`, or a dependency or toolchain pin) | every workload whose image links it, which for a widely used package is all of them | workloads whose images do not link it |
+
+Two things follow from "a function of what is in it":
+
+- "Did this deploy change component X" has an exact answer before the deploy:
+  compare the digest the new chart pins for X with the one that is running.
+  `bazel query 'rdeps(//..., //common/foo)'` restricted to the image targets
+  says which images a source change reaches.
+- A proxy roll now means the supervisor image (or the proxy image, a static pin
+  in the chart) really changed. The headroom pre-flight below is for those
+  deploys, not for every deploy.
+
+**The first deploy from a commit that has #1378 rolls everything one last time**:
+removing the label, the annotations and the linked version changes every
+digest once. Plan it like any full roll. The same holds for a rollback across
+that commit.
+
+Those Go images no longer say which commit built them; three things outside the
+digest do (the signature's certificate, the provenance attestation and the
+`dev-<sha>` tag). See [verifying-releases.md](verifying-releases.md), "Which
+commit built this digest". A Go component's own `--version` and
+`service.version` are its binary's build ID, not a commit (section 5). The
+proxy image still names its commit in its labels, and Envoy in its version.
+
+What chart 2.4.15 removed is the chart's own share of this: an upgrade that
+changes the chart version but not the images (a re-cut chart, a values-only
+change) rolls nothing it did not change.
 
 Until 2.4.15 every pod template carried `helm.sh/chart: aether-<version>` and
 `app.kubernetes.io/version: <appVersion>`. The chart version changes with every

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"aethermesh.dev/agent/internal/proxy/hotrestart"
+	"aethermesh.dev/common/buildinfo"
 	"aethermesh.dev/common/file"
 	"aethermesh.dev/common/log"
 	"github.com/spf13/cobra"
@@ -54,8 +55,10 @@ type config struct {
 	version              string
 }
 
-// New returns the `proxy-supervisor` command. version is stamped into the OTel
-// service.version on the supervisor's pushed hot-restart metrics.
+// New returns the `proxy-supervisor` command. version becomes the OTel
+// service.version on the supervisor's pushed hot-restart metrics; the caller
+// passes the binary's own build ID (//common/buildinfo), which is also what
+// `--version` prints (#1429).
 //
 // //agent/cmd/proxy-supervisor runs it as its root command. It was also an
 // `agent proxy-supervisor` alias until that was removed after #772.
@@ -67,8 +70,12 @@ func New(version string) *cobra.Command {
 		Short:        "Supervises the Envoy proxy with hot-restart support.",
 		Long:         "Runs as the aether-proxy container entrypoint, forking and hot-restarting Envoy across restart epochs so bootstrap-config and binary upgrades happen without dropping connections.",
 		SilenceUsage: true,
-		RunE:         cfg.run,
+		// Cobra adds `--version` because Version is set, and answers it before
+		// RunE: no Envoy is forked and no file is touched.
+		Version: version,
+		RunE:    cfg.run,
 	}
+	cmd.SetVersionTemplate(buildinfo.Describe("proxy-supervisor") + "\n")
 
 	bindFlags(cmd, cfg)
 	return cmd
