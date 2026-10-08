@@ -1051,6 +1051,40 @@ func TestConsumerScanIsBounded(t *testing.T) {
 		require.NoError(t, c.readKnownCgroups(&s, c.newBudget()))
 		assert.Equal(t, []string{"/a", "/b"}, c.cgroupPaths)
 	})
+	t.Run("a listing that fails keeps the last good set", func(t *testing.T) {
+		// EIO on the root's listing is not "the root has no children": the
+		// walk fails, and the set of the last listing that worked stays.
+		fs := newFakeStatFS()
+		fs.talosNode()
+		c := newTestConsumers(fs, 5)
+		c.roll(consumersT0)
+		require.NoError(t, c.cgroupListErr)
+		before := slices.Clone(c.cgroupPaths)
+		require.NotEmpty(t, before)
+
+		fs.errs[fakeCgroupRoot] = syscall.EIO
+		s := cgroupSample{at: consumersT0, usage: map[string]uint64{}, unknown: map[string]struct{}{}}
+		require.ErrorIs(t, c.listCgroups(&s, c.newBudget()), syscall.EIO)
+		assert.ElementsMatch(t, before, c.cgroupPaths)
+
+		// The same below the root: /kubepods cannot be listed just now.
+		delete(fs.errs, fakeCgroupRoot)
+		fs.errs[path.Join(fakeCgroupRoot, "kubepods")] = syscall.EIO
+		s = cgroupSample{at: consumersT0, usage: map[string]uint64{}, unknown: map[string]struct{}{}}
+		require.ErrorIs(t, c.listCgroups(&s, c.newBudget()), syscall.EIO)
+		assert.ElementsMatch(t, before, c.cgroupPaths)
+
+		// One that went away between its parent's listing and its own, or
+		// that this user may not list, is a single entry and no failure.
+		fs.errs[path.Join(fakeCgroupRoot, "kubepods")] = syscall.ENOENT
+		fs.errs[path.Join(fakeCgroupRoot, "system")] = syscall.EACCES
+		s = cgroupSample{at: consumersT0, usage: map[string]uint64{}, unknown: map[string]struct{}{}}
+		require.NoError(t, c.listCgroups(&s, c.newBudget()))
+		assert.Contains(t, c.cgroupPaths, "/kubepods")
+		assert.Contains(t, c.cgroupPaths, "/system")
+		assert.NotContains(t, c.cgroupPaths, "/kubepods/burstable")
+		assert.NotContains(t, c.cgroupPaths, "/system/apid")
+	})
 	t.Run("too many processes", func(t *testing.T) {
 		fs := newFakeStatFS()
 		fs.hostPIDNamespace()

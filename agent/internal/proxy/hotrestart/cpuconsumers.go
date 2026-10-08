@@ -927,7 +927,14 @@ func (c *cpuConsumers) cgroupChildren(s *cgroupSample, dir string, budget *scanB
 	names, more, err := c.fs.subdirs(path.Join(c.cgroupRoot, dir), cgroupMaxCount)
 	if err != nil {
 		// Removed since its parent listed it, or not ours to list: it stays
-		// a single entry.
+		// a single entry. Not the root, which is neither, and not any other
+		// error (EIO, EMFILE): that is a listing that failed, not a cgroup
+		// without children, and the walk must not replace the last good set
+		// with what it happened to reach.
+		leaf := cgroupGone(err) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM)
+		if dir == "/" || !leaf {
+			return nil, fmt.Errorf("listing cgroup %s: %w", dir, err)
+		}
 		return nil, nil
 	}
 	if more || len(s.usage)+len(s.unknown)+len(names) > cgroupMaxCount {
