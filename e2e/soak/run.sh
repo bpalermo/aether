@@ -112,10 +112,10 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # The chart, by digest (the OCI manifest's). Bump with the two image digests in
 # sortie-values.yaml; the version is here for the reader, the digest is what is
-# pulled. sortie f0750ecf407c1bc50e6740b4b16a3b61964649e0.
+# pulled. sortie 96e6bfb97713483c725bfa516d2dc7e4db719f1f.
 SORTIE_CHART="${SORTIE_CHART:-oci://quay.io/sortie/chart-sortie}"
-SORTIE_CHART_VERSION="0.1.0-f0750ecf407c1bc50e6740b4b16a3b61964649e0"
-SORTIE_CHART_DIGEST="${SORTIE_CHART_DIGEST:-sha256:b1f0a6d5f838a4d76357b7438f8557cc3b74e37035918aa8ca4a490cd75e45ef}"
+SORTIE_CHART_VERSION="0.1.0-96e6bfb97713483c725bfa516d2dc7e4db719f1f"
+SORTIE_CHART_DIGEST="${SORTIE_CHART_DIGEST:-sha256:b30a426618e79621177affd1d53bc8738925006060949150ce906010808abc89}"
 # Who must have signed the chart and the images: sortie's publish workflow, on
 # main, through GitHub Actions' OIDC issuer (keyless).
 SORTIE_SIGNER_IDENTITY='^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$'
