@@ -1447,6 +1447,70 @@ hot-restarts Envoy in place when the kubelet delivers the new ConfigMap, without
 replacing the pod. That reaches every node within the kubelet's sync period, not
 one node at a time like a DaemonSet roll.
 
+#### The prober chart (#1372, #1373, #1374)
+
+The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod
+template no longer carries `helm.sh/chart` or `app.kubernetes.io/version` (both
+stay on the DaemonSet object). The chart is deployed from its commit tag, so
+before 1.0.5 every prober release replaced all prober pods, and each replaced
+pod starts new probe series (the `pod` label). As with the `aether` chart, a
+release built from a new commit still carries a new prober image digest and
+still rolls the DaemonSet; what is gone is the chart's own share.
+
+**The upgrade that crosses 1.0.5 rolls the prober DaemonSet one last time**
+(removing the labels is a pod-template change), and so does a rollback below it.
+With `authzCanary.enabled` it also rolls the one-replica `authz-canary`
+Deployment once: its image is now written by digest
+(`curlimages/curl@sha256:…`, the index of `8.22.0`). The `authz-echo` Deployment
+is not rolled: its pod template is unchanged. No selector changed.
+
+Before and after the upgrade (the prober's namespace; `aether-test` on
+talos-main):
+
+```bash
+NS=aether-test
+# A pod that was not rolled keeps its name, its age and its hash.
+kubectl -n "$NS" get pods -l 'app in (authz-canary,authz-echo)' \
+  -L pod-template-hash --sort-by=.metadata.creationTimestamp
+kubectl -n "$NS" get pods -l app.kubernetes.io/component=prober \
+  -L controller-revision-hash
+# The release each workload object belongs to (the labels the pods lost):
+kubectl -n "$NS" get ds,deploy -l app.kubernetes.io/instance=prober \
+  -L helm.sh/chart,app.kubernetes.io/component
+# The image the canary really runs: the digest the node resolved.
+kubectl -n "$NS" get pods -l app=authz-canary \
+  -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"  "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
+```
+
+To know before the upgrade, render with the values you deploy with (never
+`--reuse-values`) and compare:
+
+```bash
+helm get values prober -n "$NS" -o yaml > values.yaml
+helm get manifest prober -n "$NS" > before.yaml
+helm template prober oci://quay.io/aethermesh/chart-prober --version "$PROBER_VERSION" \
+  -n "$NS" -f values.yaml > after.yaml
+diff before.yaml after.yaml
+```
+
+Since 1.0.5 the canary's five objects (two ServiceAccounts, two Deployments, the
+`HTTPFilter`) carry `app.kubernetes.io/component: authz-canary` on their own
+metadata; until then they carried `component: prober`, so
+`-l app.kubernetes.io/component=prober` listed them with the prober. That
+selector now returns the prober's DaemonSet, ServiceAccount and pods (and the
+Namespace, when the chart creates it with `namespace.create`) only; use
+`-l app.kubernetes.io/component=authz-canary` for the canary's objects, and
+`-l app=authz-canary` / `-l app=authz-echo` for its pods, whose labels did not
+change.
+
+Nothing refreshes the `authzCanary.image` digest automatically (the repository
+has no Renovate, and Dependabot opens no pull requests). To move it, read the
+new tag's index digest and put both in `charts/prober/values.yaml`:
+
+```bash
+docker buildx imagetools inspect curlimages/curl:<tag>   # the top "Digest:" line
+```
+
 ### Rendering the chart reproducibly (#1364)
 
 Two `helm template` renders of the `aether` chart with the same values are
