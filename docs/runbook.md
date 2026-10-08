@@ -737,11 +737,21 @@ The `controller` image is not in `load-all`; load it with
 
 ### Which build is this binary (`--version`, #1378, #1429)
 
-Every component with a command line answers `--version` and exits without
-starting anything: `agent`, `registrar`, `controller`, `prober`,
-`proxy-supervisor`, `mesh-dns` and `uds-csi`. The stdlib-only probe binaries
-(`proxy-ready`, `agent-ready`, `mesh-dns-ready`, `identity-ready`) and the CNI
-plugin have no such flag.
+Eight of the thirteen binaries the images ship answer `--version` and exit
+without starting anything: `agent`, `registrar`, `controller`, `prober`,
+`proxy-supervisor`, `mesh-dns`, `uds-csi` and `cni-install`. Five do not, on
+purpose:
+
+- the four probe binaries (`proxy-ready`, `agent-ready`, `mesh-dns-ready`,
+  `identity-ready`) are exec'd every few seconds or gate a pod's start, and each
+  has a test that holds it to the smallest possible link set;
+- the CNI plugin (`cni`) is not run by hand: the container runtime execs it with
+  its command in the environment, and the CNI specification defines its own
+  `VERSION` command for that.
+
+`readelf -n` reads the build ID of any of them, and `make check-build-id` lists
+the CNI plugin's next to the eight above (not the probe binaries'). The e2e
+fixtures (`l4echo`, `udsecho`) are test images and have no flag either.
 
 ```console
 $ kubectl -n aether-system exec ds/aether-agent -c agent -- /agent --version
@@ -768,7 +778,12 @@ commit to the next even when its code had not changed. Two consequences:
   changes across a deploy means that component's code really changed.
 - To go from a build ID to source, find the commit whose build produced it:
   `make check-build-id` at a candidate commit, or the image's provenance (see
-  [verifying-releases.md](verifying-releases.md)). The chart's `appVersion`
+  [verifying-releases.md](verifying-releases.md)). A build ID belongs to one
+  architecture's binary: the amd64 and arm64 builds of a component have
+  different IDs, and a pod reports its node's. `make check-build-id` prints
+  both lists, `== linux/amd64` then `== linux/arm64`, from any machine (it
+  runs `bazel build --platforms=@rules_go//go/toolchain:linux_<arch>
+  //bazel/buildid:release_build_ids` for each). The chart's `appVersion`
   still names the commit the chart was packaged from.
 
 There is no module line because a Bazel build records the main package and

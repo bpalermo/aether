@@ -194,10 +194,17 @@ push-all: push-agent-image push-mesh-dns-image push-proxy-supervisor-image push-
 # Print (and assert) the GNU build-ID of every binary that ships in a released
 # image. Each must hash that binary's own content and no two may be equal — the
 # collision that made Pyroscope symbol upload unsafe (#653).
+#
+# Both published architectures, whatever machine runs it: a build ID is the hash
+# of one binary, so the amd64 and arm64 builds of a component have different
+# IDs, and a pod on an arm64 node reports the arm64 one (#1378).
 .PHONY: check-build-id
 check-build-id:
-	@bazel build //bazel/buildid:release_build_ids
-	@cat bazel-bin/bazel/buildid/release_build_ids.txt
+	@for arch in amd64 arm64; do \
+		bazel build --platforms=@rules_go//go/toolchain:linux_$$arch //bazel/buildid:release_build_ids || exit 1; \
+		echo "== linux/$$arch"; \
+		cat bazel-bin/bazel/buildid/release_build_ids.txt; \
+	done
 
 # Did a commit on main actually publish? Read-only registry query — no
 # credentials needed for our public packages, and it cannot push anything.
