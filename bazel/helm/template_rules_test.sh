@@ -213,8 +213,34 @@ else
 	bad "translate_pattern: got '$ere', want '$want'"
 fi
 
+# What helm says on stderr is printed as it is, unless it is a manifest: a JSON
+# or flow-style Secret there has no `kind:` line to give it away, and must not
+# print. An ordinary error line, and one opening with a bracketed tag, must.
+stderr_checks() {
+	local shown
+	shown="$(show_helm_failure '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"x"},"data":{"token":"FORBIDDEN-stderr-json"}}' 2>&1)"
+	if [[ "$shown" == *FORBIDDEN* ]]; then
+		bad "show_helm_failure prints a JSON Secret that helm put on stderr"
+	else
+		ok "show_helm_failure masks a JSON Secret on stderr"
+	fi
+	shown="$(show_helm_failure 'Error: template: chart/templates/a.yaml:3:7: nil pointer' 2>&1)"
+	if [[ "$shown" == *"nil pointer"* ]]; then
+		ok "show_helm_failure prints an error message as it is"
+	else
+		bad "show_helm_failure hides an ordinary error message: $shown"
+	fi
+	shown="$(show_helm_failure '[ERROR] templates/: boom' 2>&1)"
+	if [[ "$shown" == *boom* ]]; then
+		ok "show_helm_failure prints a message that opens with a bracketed tag"
+	else
+		bad "show_helm_failure hides a bracketed message: $shown"
+	fi
+}
+
 echo "== awk: the default"
 checks
+stderr_checks
 for candidate in gawk mawk "busybox awk"; do
 	command -v "${candidate%% *}" >/dev/null 2>&1 || continue
 	echo "== awk: $candidate"
@@ -223,6 +249,7 @@ for candidate in gawk mawk "busybox awk"; do
 	RENDER_LIB_AWK="$scratch/awk"
 	export RENDER_LIB_AWK
 	checks
+	stderr_checks
 done
 
 if [[ "$fail" -ne 0 ]]; then

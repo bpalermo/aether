@@ -77,8 +77,9 @@ function unquote(s) {
   gsub(/^["\047]|["\047]$/, "", s)
   return s
 }
-function flush(    i, hide, secret, kinds, plain, word, content, unreadable, manifest, line, out, kind, name, in_meta, shown_meta, base) {
+function flush(    i, hide, flowdoc, secret, kinds, plain, word, content, unreadable, manifest, line, out, kind, name, in_meta, shown_meta, base) {
   secret = 0
+  flowdoc = 0
   kinds = 0
   plain = 0
   unreadable = 0
@@ -115,6 +116,8 @@ function flush(    i, hide, secret, kinds, plain, word, content, unreadable, man
     if (!content && line !~ /^[ \t]*(#.*)?$/) {
       content = 1
       if (line ~ /^[ \t]*[{[]/) unreadable = 1
+      # `{` only: a helm message may open with a bracketed tag such as [ERROR].
+      if (line ~ /^[ \t]*[{]/) flowdoc = 1
     }
     if (kind == "" && line ~ /^kind:/) kind = unquote(uncomment(substr(line, 6)))
     if (line ~ /^metadata:/) in_meta = 1
@@ -124,7 +127,9 @@ function flush(    i, hide, secret, kinds, plain, word, content, unreadable, man
   # Fail closed: readable only when plainly, positively not a Secret.
   hide = !(kinds == 1 && plain == 1 && !unreadable && !secret)
   # What helm says before any document is not a document.
-  if (stream && chunk == 0 && !manifest) hide = 0
+  # ...unless it names a Secret or opens as a flow or JSON document: an error
+  # message does neither, a manifest helm put on stderr could do either.
+  if (stream && chunk == 0 && !manifest && !secret && !flowdoc) hide = 0
   chunk++
   shown_meta = 0
   for (i = 1; i <= n; i++) {
