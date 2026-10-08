@@ -24,7 +24,9 @@
 #     this harness against sortie 9fcbb81 (a clean run, its results stream, a
 #     capped staircase and the sortie pod's log of it). The others are canned:
 #     the shape is sortie's, the numbers are made up;
-#   - sortie-save.sh --times, the saver's offline half;
+#   - sortie-save.sh: its offline --times, and the save itself against a fake
+#     kubectl (both files, a stream with a broken last line and no report, a
+#     download that breaks off, a reader pod that cannot be deleted);
 #   - sortie-values.yaml and run.sh, read: the three digest pins, no CPU limit
 #     on the engine, the PriorityClass on the engines AND the sortie pod, and
 #     the engine's name taken from its node.

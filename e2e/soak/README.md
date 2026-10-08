@@ -2329,7 +2329,7 @@ Each of these invalidated a real run:
   failures and a slow node on one backend only, a cancelled run, a short pool,
   `http_inflight_lost`, a stage refused at the execution cap with two stages not run,
   a results stream whose last line is cut short, two real kind reports, and two
-  old-format reports, which are refused), `sortie-save.sh --times`,
+  old-format reports, which are refused), `sortie-save.sh` (its `--times`, and the save against a fake kubectl),
   `sortie-plan.sh` (shares and both profiles), the pins and the PriorityClass in
   `sortie-values.yaml` / `run.sh`, and `pods-not-ready.awk` (with the old expression
   as the red reading). No cluster; needs
