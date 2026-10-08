@@ -9,6 +9,8 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
+      "started_at": "2026-10-07T11:42:08.412Z",
+      "ended_at": "2026-10-07T11:44:39.176Z",
       "pass": false,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
@@ -53,22 +55,16 @@
           "actual": "0"
         },
         {
+          "expr": "counter:benchmark.http_inflight_lost == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": true,
           "actual": "8.999880001599978"
-        },
-        {
-          "expr": "latency_2xx.p50 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "2.153599ms"
-        },
-        {
-          "expr": "latency_2xx.p99 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "2.771455ms"
         }
       ],
       "totals": {
@@ -78,8 +74,23 @@
         {
           "backend": "10.10.3.22:8443",
           "elapsed_ms": 150002,
+          "started_at": "2026-10-07T11:42:08.924Z",
           "counters": {
             "benchmark.http_2xx": 1350
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 1350,
+              "unit": "ns",
+              "mean": 2239743,
+              "pstdev": 205952,
+              "min": 1529055,
+              "max": 6374346,
+              "p50": 2153599,
+              "p90": 2462527,
+              "p99": 2771455,
+              "p99.9": 4434328
+            }
           }
         }
       ],
@@ -98,6 +109,8 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
+      "started_at": "2026-10-07T11:42:08.415Z",
+      "ended_at": "2026-10-07T11:44:39.179Z",
       "pass": false,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
@@ -142,22 +155,16 @@
           "actual": "0"
         },
         {
+          "expr": "counter:benchmark.http_inflight_lost == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": true,
           "actual": "8.97988026826309"
-        },
-        {
-          "expr": "latency_2xx.p50 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "2.153599ms"
-        },
-        {
-          "expr": "latency_2xx.p99 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "2.771455ms"
         }
       ],
       "failures": [
@@ -176,9 +183,24 @@
         {
           "backend": "10.10.3.22:8443",
           "elapsed_ms": 150002,
+          "started_at": "2026-10-07T11:42:08.927Z",
           "counters": {
             "benchmark.http_2xx": 1347,
             "benchmark.http_5xx": 3
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 1347,
+              "unit": "ns",
+              "mean": 2239743,
+              "pstdev": 205952,
+              "min": 1529055,
+              "max": 6374346,
+              "p50": 2153599,
+              "p90": 2462527,
+              "p99": 2771455,
+              "p99.9": 4434328
+            }
           }
         }
       ],
@@ -197,6 +219,8 @@
       "per_backend": true,
       "duration_ms": 150000,
       "elapsed_ms": 150764,
+      "started_at": "2026-10-07T11:42:08.418Z",
+      "ended_at": "2026-10-07T11:44:39.182Z",
       "pass": false,
       "dns": "soak-sortie-engine-nodes.aether-test.svc.cluster.local:8443",
       "backends": [
@@ -241,22 +265,16 @@
           "actual": "0"
         },
         {
+          "expr": "counter:benchmark.http_inflight_lost == 0",
+          "scope": "pool",
+          "pass": true,
+          "actual": "0"
+        },
+        {
           "expr": "rate:benchmark.http_2xx >= 5.94",
           "scope": "pool",
           "pass": false,
           "actual": "2.999960000533326"
-        },
-        {
-          "expr": "latency_2xx.p50 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "2.153599ms"
-        },
-        {
-          "expr": "latency_2xx.p99 < 60s",
-          "scope": "per-backend",
-          "pass": true,
-          "actual": "2.771455ms"
         }
       ],
       "totals": {
@@ -266,8 +284,23 @@
         {
           "backend": "10.10.3.22:8443",
           "elapsed_ms": 150002,
+          "started_at": "2026-10-07T11:42:08.930Z",
           "counters": {
             "benchmark.http_2xx": 450
+          },
+          "statistics": {
+            "benchmark_http_client.latency_2xx": {
+              "count": 450,
+              "unit": "ns",
+              "mean": 2239743,
+              "pstdev": 205952,
+              "min": 1529055,
+              "max": 6374346,
+              "p50": 2153599,
+              "p90": 2462527,
+              "p99": 2771455,
+              "p99.9": 4434328
+            }
           }
         }
       ],

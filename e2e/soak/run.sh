@@ -39,8 +39,16 @@
 # Everything a run produces lives in ONE directory (--out, default
 # ~/aether-soak-logs/<run tag>): run.env, plan.yaml, shares.tsv, engines.tsv,
 # churn.log, restart-watch.log, proxy-rss.tsv, save.log, and what the saver
-# copies (report.json, sortie.log, job.json, engine-*.log). Pass that directory
-# to sortie-save.sh, sortie-gate.sh and sortie-teardown.sh.
+# copies (report.json, results.jsonl, times.tsv, sortie.log, job.json,
+# engine-*.log). Pass that directory to sortie-save.sh, sortie-gate.sh and
+# sortie-teardown.sh.
+#
+# The report is written when the run ends. Beside it, on the same PVC, sortie
+# appends one line per execution as it finishes (its --results-stream; the
+# chart's report.stream): /var/run/sortie/<run tag>.jsonl. It is what is left of
+# a run whose pod died before the report was written. sortie never truncates
+# that file, so it is this run's own by name -- the run tag carries the second
+# the kickoff started, and a run directory is never reused.
 #
 # Options:
 #   --context NAME        REQUIRED. Never the kubeconfig's current-context: `kind
@@ -86,7 +94,8 @@
 # and the first request; SOAK_STATSD_SERVICE (o11y/otel-scraper); SOAK_COSIGN;
 # SOAK_SORTIE_MAX_PENDING (the client queue: a number, or 0 for none; unset, the
 # plan sizes it for SOAK_SORTIE_STALL_BUDGET seconds, default 2) and
-# SOAK_SORTIE_IDLE_STRATEGY pass through to sortie-plan.sh;
+# SOAK_SORTIE_IDLE_STRATEGY (an experiment; unset, sortie's own default, WAIT)
+# pass through to sortie-plan.sh;
 # SOAK_READER_IMAGE (sortie-save.sh). churn.sh, restart-watch.sh
 # and sample-proxy-rss.sh keep their own SOAK_* knobs, except the three log
 # paths, which this script points into the run directory.
@@ -103,10 +112,10 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # The chart, by digest (the OCI manifest's). Bump with the two image digests in
 # sortie-values.yaml; the version is here for the reader, the digest is what is
-# pulled. sortie 94cf1035d7aa7d1d36d86866e41d653ff2fa5c02.
+# pulled. sortie 9fcbb81afaeab77f6f16bacd3ed43d94a65d9fd8.
 SORTIE_CHART="${SORTIE_CHART:-oci://quay.io/sortie/chart-sortie}"
-SORTIE_CHART_VERSION="0.1.0-94cf1035d7aa7d1d36d86866e41d653ff2fa5c02"
-SORTIE_CHART_DIGEST="${SORTIE_CHART_DIGEST:-sha256:f5007911c7e0e204ff97bdeeec88bd2e5a135fcd08eb9bb0dea96be0dbd4cc7c}"
+SORTIE_CHART_VERSION="0.1.0-9fcbb81afaeab77f6f16bacd3ed43d94a65d9fd8"
+SORTIE_CHART_DIGEST="${SORTIE_CHART_DIGEST:-sha256:10f6c84b9f5dc1a93dd9dd6ad1ab6196130a6f7cbc69dff82258b25700606913}"
 # Who must have signed the chart and the images: sortie's publish workflow, on
 # main, through GitHub Actions' OIDC issuer (keyless).
 SORTIE_SIGNER_IDENTITY='^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$'
@@ -540,6 +549,10 @@ bash "$HERE/sortie-plan.sh" "${PLAN_ARGS[@]}" >"$OUT/plan.yaml" || die "could no
 bash "$HERE/sortie-plan.sh" shares --targets "$TARGETS" --rate "$RATE" >"$OUT/shares.tsv" || die "could not render the share table"
 DURATION_S="$(awk '$1 == "duration:" {sub(/s$/, "", $2); print $2}' "$OUT/plan.yaml")"
 REPORT_FILE="/var/run/sortie/$RUN_TAG.json"
+# The results stream: a file NAME (the chart writes it beside the report), and
+# this run's alone. sortie appends to it and never truncates it, so a name that
+# an earlier run used would hand the gate two runs in one file.
+STREAM_NAME="$RUN_TAG.jsonl"
 
 cat >"$OUT/run.env" <<EOF
 RUN_TAG=$RUN_TAG
@@ -553,6 +566,7 @@ PVC=$PVC
 BACKENDS=$BACKENDS
 DURATION_S=$DURATION_S
 REPORT_FILE=$REPORT_FILE
+STREAM_FILE=$(dirname "$REPORT_FILE")/$STREAM_NAME
 STATSD=$STATSD
 SORTIE_CHART_VERSION=$SORTIE_CHART_VERSION
 SORTIE_CHART_DIGEST=$SORTIE_CHART_DIGEST
@@ -564,7 +578,7 @@ EOF
 # k6-runner.yaml` to have taken the class, and the Job's pod names it.
 ensure_priority_class
 h upgrade "$RELEASE" "$CHART_TGZ" -n "$NS" "${VALUES[@]}" --set job.enabled=true \
-	--set-file "plan=$OUT/plan.yaml" --set "report.path=$REPORT_FILE" >"$OUT/helm-run.log" 2>&1 ||
+	--set-file "plan=$OUT/plan.yaml" --set "report.path=$REPORT_FILE" --set "report.stream=$STREAM_NAME" >"$OUT/helm-run.log" 2>&1 ||
 	die "helm upgrade with the plan failed (see $OUT/helm-run.log)"
 JOB=""
 for _ in $(seq 1 30); do
@@ -584,7 +598,10 @@ T_LOAD="$(date +%s)"
 	echo "JOB=$JOB"
 	echo "T_LOAD=$T_LOAD"
 } >>"$OUT/run.env"
-[ "$PHASE" = Running ] || die "the sortie pod of job/$JOB is '$PHASE', not Running (kubectl -n $NS describe job/$JOB)"
+# A pod that has already ended refused to run the plan: sortie 9fcbb81 stops a
+# stage at once when an engine is at its execution cap, where an older one ran
+# whichever targets got a slot. Its report says why; the saver was not armed.
+[ "$PHASE" = Running ] || die "the sortie pod of job/$JOB is '$PHASE', not Running (kubectl -n $NS describe job/$JOB). If it ran and failed at once, its report says why: sortie-save.sh --dir $OUT, then sortie-gate.sh --dir $OUT"
 # One sortie pod drives every engine: if it is preempted the whole run is
 # cancelled, not one node's share of it. It can move, but a run cannot.
 POD_PRIO="$(k -n "$NS" get pods -l "job-name=$JOB" -o jsonpath='{.items[0].spec.priorityClassName}={.items[0].spec.priority}' 2>/dev/null)"
