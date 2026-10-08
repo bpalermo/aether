@@ -19,7 +19,12 @@ with 9,180,000 of 9,180,000 requests answered `2xx` under 35 rollouts
 The harness then moved to sortie f0750ec (2026-10-08, "What sortie f0750ec
 changed"): a stage refused at the execution cap is marked by a field, and a
 driver that wakes past a backend's deadline takes the answer that is waiting.
-Proven on kind; **f0750ec has not run on talos-main yet**.
+Proven on kind only.
+The harness then moved to sortie 96e6bfb (2026-10-08, "What sortie 96e6bfb
+changed"): nothing the harness reads or passes changed; the engine has a fix
+for a data race between executions that start together, and an image no longer
+gets a new digest from a commit that did not change it.
+Proven on kind; **neither f0750ec nor 96e6bfb has run on talos-main yet**.
 **Author:** Bruno Palermo
 **Date:** 2026-10-06
 **Related:** #1323 (the kickoff lived outside the repository and had two
@@ -117,12 +122,14 @@ the churn schedule, the watchdog or the access-log gates changes.
   signed by sortie's publish workflow (cosign, keyless, the signature an OCI
   referrer), and the chart defaults both image references to digests. They were
   verified by hand with the repository's pinned cosign (v3.1.2): the chart, and
-  the index and both per-arch manifests of each image, bound to commit f0750ec
-  (and before it 9fcbb81 and 94cf103; the f0750ec chart digest bound to the
-  9fcbb81 commit is refused, which is the check doing its work). Every digest
-  changes with every sortie commit, the engine's too when the engine did not
-  change: the commit is a label in each image's config ("What sortie f0750ec
-  changed").
+  the index and both per-arch manifests of each image, for 96e6bfb (and before
+  it f0750ec, 9fcbb81 and 94cf103, each bound to its commit; the f0750ec chart
+  digest bound to the 9fcbb81 commit is refused, which is the check doing its
+  work). Up to f0750ec every digest changed with every sortie commit, because
+  the commit was a label in each image's config. Since sortie 6d801c0 the
+  chart's and the driver's still do and the engine's changes only when the
+  engine does; a digest is signed once, by the commit that first published it,
+  so the 96e6bfb engine is bound to 6a0a866 ("What sortie 96e6bfb changed").
   `run.sh` repeats the check in its pre-flight on every run, against what the
   release actually renders (`--verify` makes a missing cosign an abort).
 
@@ -814,6 +821,103 @@ Job that had already ended **before** it armed the saver (the 9fcbb81 evidence
 below saved that run by hand). The saver is now armed first and the abort
 waits for it (#1387).
 
+## What sortie 96e6bfb changed
+
+The fourth bump, f0750ec → 96e6bfb (three commits on sortie main, all
+2026-10-08: 6d801c0, 6a0a866, 96e6bfb). Read in the sortie source: the diff
+between the two commits touches no file under `internal/`, `api/`, `charts/`,
+`main.go` or `go.mod`. So **no flag, no field of the JSON report or of the
+results stream, no exit code and no key of the chart's values changed**: the
+values the harness sets mean what they meant. The packaged chart, pulled by its
+two digests, differs in three generated lines: its version, and the defaults
+of the two image references (which the harness overrides by digest). The harness's scripts and fixtures are unchanged by this
+bump; only the pins and what the documents say about them moved.
+
+| sortie | what it is | the harness |
+|---|---|---|
+| 6d801c0 | no image carries the commit any more (`org.opencontainers.image.revision` is gone from both images, and so is the stamping). An image whose content did not change keeps its digest. The publish workflow verifies a digest before it signs and signs only what is not signed yet | the README and `sortie-values.yaml` said "all three digests change with every sortie commit". That was true up to f0750ec and is corrected to what the registry shows (below) |
+| 6a0a866 | **the engine**: two executions that start at once each construct Envoy's options, which writes a process-wide delimiter in the argument parser (TCLAP); the construction is now serialized. Found by sortie's ThreadSanitizer run. The rest of the commit is tests and the sanitizer job | nothing to change, and nothing to remove: the harness never worked around it. It is the harness's own case, eight executions started together on every engine, so the path ran on every run so far. Every writer stored the same character (sortie's commit message), which would make the race harmless in practice; that is sortie's reading, not something a run here can show |
+| 96e6bfb | an engine **test** only (a progress snapshot may go out without statistics on a slow sanitizer host) | nothing. It is the commit that shows the first row working: its engine index is 6a0a866's |
+
+**The digests, measured.** From the registry, each commit's
+`dev-<commit>` tag for the two images and the chart's version tag, with every
+per-arch manifest and config read:
+
+| sortie commit | chart | driver index | engine index | engine layers (amd64 / arm64) | `revision` label |
+|---|---|---|---|---|---|
+| f0750ec | `sha256:b1f0a6d5…` | `sha256:3d9a9b67…` | `sha256:d0fbc860…` | 22 / 22 | yes |
+| 6d801c0 | `sha256:446caa71…` | `sha256:d1ff3f59…` | `sha256:94bde035…` | the same 22 / 22, digest for digest | no |
+| 6a0a866 | `sha256:a4dbd82d…` | `sha256:f4ababe0…` | `sha256:65392801…` | 22 / 22, a different set | no |
+| 96e6bfb | `sha256:b30a4266…` | `sha256:490dfbd6…` | `sha256:65392801…` | as 6a0a866, and the same two per-arch manifests | no |
+
+So the chart and the driver have a digest per commit (the chart's version is
+the commit; the driver's binary reports its own version) and the engine has a
+digest per engine. One commit shows it, 6a0a866 → 96e6bfb; 6d801c0 is the
+counter-example that is not one, since removing the label was a change of the
+image's config. At a bump all three are still taken from the new chart.
+
+**The signatures, and what binding to a commit now means.** With the pinned
+cosign (v3.1.2), signer `…/bpalermo/sortie/.github/workflows/publish.yml@refs/heads/main`,
+issuer `https://token.actions.githubusercontent.com`, on the chart and on the
+index and both per-arch manifests of each image, seven references:
+
+| check | chart, driver ×3 | engine ×3 |
+|---|---|---|
+| the signer alone (what `run.sh` checks) | verified, one signature each | verified, one signature each |
+| `--certificate-github-workflow-sha 96e6bfb…` | verified | **refused**: `expected GithubWorkflowSHA to be "96e6bfb…", got "6a0a866…"` |
+| `--certificate-github-workflow-sha 6a0a866…` | refused (`got "96e6bfb…"`) | verified |
+| `--certificate-github-workflow-sha f0750ec…` | refused | refused |
+
+A digest is signed once, by the commit that first published it, so the engine
+of this pin is bound to the commit that last changed it and not to the pin.
+The earlier bumps recorded "bound to the commit" for all three; from here that
+holds for the chart and the driver only. `run.sh` never bound to a commit: its
+pre-flight verified the 96e6bfb chart and both images with no change
+(`verified=cosign-v3.1.2`). The pinned cosign prints no commit for a signature
+it accepts (`"optional": {}`), so the commit that signed a digest is read off
+the refusal.
+
+`//e2e/soak:harness_test` already held `run.sh` and `sortie-values.yaml` to
+one commit. It now holds the README to it too: the sentence that states the
+pin, and the chart digest in the cosign command a reader would copy (each seen
+red with the previous pin's text).
+
+## Evidence on kind (2026-10-08, sortie 96e6bfb)
+
+The same cluster shape, aether install (from the tree this bump was made on),
+stand-in targets and UDP listener as for f0750ec below; every run through
+`run.sh e2e --verify` (`verified=cosign-v3.1.2`, chart `sha256:b30a4266…`).
+Run directories: `~/aether-soak-logs/1008-sortie-96e6bfb-kind/`.
+
+| run | result |
+|---|---|
+| 5 min, the committed values (the f0750ec run, like for like) | 2,700 of 2,700 per 9 rps target on each node, 900 of 900 per 3 rps target: **36,000 of 36,000**; every failure class 0; each backend's elapsed time 300,000–300,004 ms; p50 1.7–2.5 ms, p99 2.3–3.5 ms; `VERDICT PASS targets=8 passed=8 failed=0 not_run=0 backends=2 lost_backends=0`; watchdog `verdict=PASS new_restarts=0`; `SORTIE_SAVED … not_run=0 … stream_executions=8`, the stream's eight lines the report's eight executions, object for object |
+| the e2e profile as it is, 15 min, nothing overridden | 8,100 of 8,100 per 9 rps target on each node, 2,700 of 2,700 per 3 rps target: **108,000 of 108,000**; every failure class 0; each backend's elapsed time 900,001–900,002 ms; p50 1.9–2.6 ms, p99 2.5–3.5 ms; `VERDICT PASS … 8 of 8`; watchdog `verdict=PASS new_restarts=0` over 30 samples; stream and report identical |
+| the engines capped below the plan (`engine.maxConcurrentExecutions: 4`, eight targets) | as with f0750ec: the Job failed at once (window 50 ms), `saver armed` before the abort, the abort 46 s later with `SORTIE_SAVED … job=failed executions=8 … stream_executions=8`. All eight executions carry `"refused": "execution_cap"`, every `backend_errors` entry is marked, and the report has the same set of fields as the committed fixture `kind-capped.json` (every path of the two documents compared). Gate: eight `REFUSED AT THE EXECUTION CAP`, `lost_backends=0` |
+
+**What differs from the f0750ec runs: nothing the harness reads.** The 5-minute
+report has the same keys at every level, the sortie pod's log the same 201
+lines (column padding aside), the Job the same arguments, each engine's log the
+same 698 lines with no warning or error, and the counts are the same to the
+request.
+
+The engine, a new binary at this bump (risk 3), read on each node from its
+pod's cgroup: **0.099 core** per engine over three minutes of the 5-minute run
+and **0.107** over ten minutes of the 15-minute run, `nr_throttled` 0, 300.6 →
+302.1 MiB. The previous engine read 0.09–0.11 core and 301 MiB on the same
+shape.
+
+**Not run against 96e6bfb:** any cluster but kind; anything longer than
+fifteen minutes; `--rolls`; the frozen-driver and staircase runs
+(the driver's code did not change between the two pins); an engine pod deleted
+mid-run. Nothing here can show the race that 6a0a866 fixes, or its absence:
+the eight executions of every run above start together, which is the path, and
+a clean run is what f0750ec gave too.
+
+While comparing: the two earlier 5-minute rows below said 43,200 of 43,200.
+Their saved reports sum to 36,000 (60 rps on two nodes for 300 s), and the
+rows now say so.
+
 ## Evidence on kind (2026-10-08, sortie f0750ec)
 
 The same cluster shape, aether install, stand-in targets and UDP listener as
@@ -823,7 +927,7 @@ for 9fcbb81 below; every run through `run.sh e2e --verify`
 
 | run | result |
 |---|---|
-| 5 min, the committed values | 2,700 of 2,700 per 9 rps target on each node, 900 of 900 per 3 rps target: **43,200 of 43,200**; every failure class 0; each backend's elapsed time 300,000–300,003 ms; p50 1.9–3.0 ms, p99 2.4–3.8 ms; `VERDICT PASS targets=8 passed=8 failed=0 not_run=0 backends=2 lost_backends=0`; watchdog `verdict=PASS new_restarts=0`; `SORTIE_SAVED … stream_executions=8` |
+| 5 min, the committed values | 2,700 of 2,700 per 9 rps target on each node, 900 of 900 per 3 rps target: **36,000 of 36,000**; every failure class 0; each backend's elapsed time 300,000–300,003 ms; p50 1.9–3.0 ms, p99 2.4–3.8 ms; `VERDICT PASS targets=8 passed=8 failed=0 not_run=0 backends=2 lost_backends=0`; watchdog `verdict=PASS new_restarts=0`; `SORTIE_SAVED … stream_executions=8` |
 | the engines capped below the plan (`engine.maxConcurrentExecutions: 4`, eight targets) | the Job failed at once (the report's window is 50 ms). **`run.sh` had armed the saver before it looked**: `saver armed`, then 45 s later `ABORT the sortie pod … is 'Failed', not Running … what it wrote is saved … [saver: SORTIE_SAVED … job=failed executions=8 pass=false not_run=0 … stream_executions=8]` (the 45 s are the saver's one 30 s poll for a Job not yet marked failed, and two reader pods). All eight executions carry `"refused": "execution_cap"`; five of them list one or both engines in `backend_errors`, each entry marked, and three list none. Gate: eight `REFUSED AT THE EXECUTION CAP … [refused by: …]`, `lost_backends=0`. This report and its stream are the fixture `kind-capped.*` |
 | the three-stage staircase of five targets against the same capped engines | stage 1 refused on all five targets (`refused` on each; `backend_errors` on one of them, both engines, both marked); the ten executions of stages 2 and 3 are `"not_run": true` with no `refused`; the stream has the same fifteen objects; the log ends `FAIL  0/5 executions passed, 10 not run`. Four of the executions and the log's lines about them are the fixture `kind-refused.*` |
 | 2 min, and **the driver's node** frozen (`docker pause`) from T+46 s to T+300 s, which is 29 s past the 271 s backend deadline and before anything is evicted | the report was written 2 s after the thaw. All eight executions have results from **both** backends. The healthy node's engine is in no `backend_errors`: its complete results, waiting since T+120 s, were taken. The frozen node's own engine is failed on all eight, as it should be: `reported an execution of 5m1.011s for one planned to last 2m0s: it stalled, and its results are not those of the plan`, counters kept. Gate: `lost_backends=1`; the healthy node reads whole for the two UDS targets (360 of 360) and `http_5xx` for the six whose only target pod was on the frozen node |
@@ -850,7 +954,7 @@ through `run.sh e2e --verify` (`verified=cosign-v3.1.2`).
 
 | run | result |
 |---|---|
-| 5 min, the committed values | pool resolved to 2 backends; 2,700 of 2,700 2xx per 9 rps target on each node, 900 of 900 per 3 rps target: **43,200 of 43,200**; every failure class 0, `http_inflight_lost` among them (the threshold is in the report, `actual 0`); each backend's elapsed time 300,001–300,002 ms and each execution's 300.77–300.80 s, so nothing was in flight long enough to show; latency from `statistics`: p50 1.8–2.5 ms, p99 2.2–3.0 ms, max 6.6–79.7 ms; `VERDICT PASS targets=8 passed=8 failed=0 not_run=0 backends=2 lost_backends=0`; watchdog `verdict=PASS new_restarts=0`; `SORTIE_SAVED … not_run=0 window=…23:26:33.393Z..…23:31:34.192Z stream_executions=8`. The Job ran `--results-stream /var/run/sortie/<run tag>.jsonl`; the stream's eight lines are the report's eight executions, object for object (both compacted with `jq -c` and compared: identical). The engines ran `--backend-name $(SORTIE_BACKEND_NAME)` from `spec.nodeName`, and the datagrams on the wire were named `sortie.mesh.tcp_d.sortie_worker.cluster.0.…` |
+| 5 min, the committed values | pool resolved to 2 backends; 2,700 of 2,700 2xx per 9 rps target on each node, 900 of 900 per 3 rps target: **36,000 of 36,000**; every failure class 0, `http_inflight_lost` among them (the threshold is in the report, `actual 0`); each backend's elapsed time 300,001–300,002 ms and each execution's 300.77–300.80 s, so nothing was in flight long enough to show; latency from `statistics`: p50 1.8–2.5 ms, p99 2.2–3.0 ms, max 6.6–79.7 ms; `VERDICT PASS targets=8 passed=8 failed=0 not_run=0 backends=2 lost_backends=0`; watchdog `verdict=PASS new_restarts=0`; `SORTIE_SAVED … not_run=0 window=…23:26:33.393Z..…23:31:34.192Z stream_executions=8`. The Job ran `--results-stream /var/run/sortie/<run tag>.jsonl`; the stream's eight lines are the report's eight executions, object for object (both compacted with `jq -c` and compared: identical). The engines ran `--backend-name $(SORTIE_BACKEND_NAME)` from `spec.nodeName`, and the datagrams on the wire were named `sortie.mesh.tcp_d.sortie_worker.cluster.0.…` |
 | the engines capped below the plan (`engine.maxConcurrentExecutions: 4`, eight targets) | sortie 1374999: the Job failed five seconds after it started, every execution with `error: backend … refused a start because the engine is at its cap of 4 concurrent executions, and this scenario starts 8 at once on every backend … Raise the engine's --max-concurrent-executions … to at least 8`; nothing ran (the report's window is 49 ms). `run.sh` aborted (`the sortie pod … is 'Failed', not Running`) before arming the saver, which then saved the report and the stream by hand; the gate fails all eight. This run is why the gate now words a refused stage `REFUSED AT THE EXECUTION CAP` (it first listed the refusing engines as lost backends) and why the abort says how to read the report |
 | a three-stage staircase of five targets against the same capped engines (a plan written by hand; `run.sh` cannot render one) | the real `not_run`: stage 1 refused as above on all five targets; the ten executions of stages 2 and 3 are `"not_run": true` with `elapsed_ms: 0`, no `started_at`, no counters, and `error: not run: mesh/stage-1 was refused …`; the pod's log has a `SKIP` line for each, twice (as each "finishes" and in the summary), and ends `FAIL  0/5 executions passed, 10 not run`. The saver: `SORTIE_SAVED … executions=15 pass=false not_run=10 … stream_executions=15`. One target's three stages and the log's lines about them are the test fixture `kind-not-run.*` |
 | 11 min with `--rolls` (agent roll at T+3m, proxy roll at T+8m) | both `ROLLED` (23:41:50Z and 23:47:27Z, inside `WINDOW dispatched=…23:38:41.939Z ended=…23:49:42.701Z`, which is what the line is for); 5,940 of 5,940 per 9 rps target and 1,980 of 1,980 per 3 rps target on both nodes, 79,200 of 79,200; every failure class 0, `http_inflight_lost` 0; p99 ≤ 3.8 ms, max ≤ 80 ms; `VERDICT PASS`; watchdog `verdict=PASS new_restarts=0` |
@@ -919,10 +1023,13 @@ restart; it says nothing about what a roll costs on talos-main.
    a sortie bump that changed the default back, would cost up to eight cores on
    a four-core node and starve the proxy under test. The test suite pins that
    the plan templates nothing; **the engine's CPU has to be read again at every
-   sortie bump**, and has not been read on talos for 9fcbb81 or f0750ec
+   sortie bump**, and has not been read on talos for 9fcbb81, f0750ec or 96e6bfb
    (94cf103 read 127–135m per engine, 2026-10-07; neither saved run directory
    of 2026-10-08 holds a reading). f0750ec's engine has the layers of
-   9fcbb81's, so the two are one reading.
+   9fcbb81's, so the two are one reading. 96e6bfb's engine is a new binary
+   (one lock around a constructor) and has been read on kind only: 0.10–0.11
+   core and 301–302 MiB per engine, as before ("Evidence on kind (2026-10-08,
+   sortie 96e6bfb)").
 4. **One sortie pod is a single point of failure for the run.** If it is
    evicted or its node drains, every execution is cancelled and reported
    `cancelled`, not evaluated: 8 h gone. k6 runners failed independently. It
@@ -1029,7 +1136,7 @@ restart; it says nothing about what a roll costs on talos-main.
 Five runs, k6 not running, five workers at 60 rps per node, `WAIT`, no CPU
 limit: four 15-minute `run.sh e2e` runs and one `run.sh soak`. Runs 1 to 3
 with sortie 94cf103, run 4 and the soak with 9fcbb81; **none yet with
-f0750ec**. Run directories under `~/aether-soak-logs/`: `1007-sortie-e2e-1`,
+f0750ec or 96e6bfb**. Run directories under `~/aether-soak-logs/`: `1007-sortie-e2e-1`,
 `-2`, `-3`, `1008-sortie-e2e-9fcbb81`, `1008-sortie-soak`. Access-log figures
 are the source proxies' rows for `user_agent:"aether-soak-sortie"` (the LogsQL
 is in the README, "The mesh's own numbers"). Runs 1 and 2 first, as they were
@@ -1169,14 +1276,16 @@ churn driver's T0 is **02:06:04Z**.
 
 **Still open:**
 
-- **sortie f0750ec on talos-main at all.** Runs 4 and the soak were made with
-  9fcbb81. f0750ec changes the driver only, and what it changes (the `refused`
-  field, the answer taken after a missed deadline) is not something a clean
-  run exercises; its first run there is a check that nothing else moved.
+- **sortie f0750ec or 96e6bfb on talos-main at all.** Runs 4 and the soak were
+  made with 9fcbb81. f0750ec changes the driver only, and what it changes (the
+  `refused` field, the answer taken after a missed deadline) is not something
+  a clean run exercises. 96e6bfb changes the engine's binary (a lock around
+  one constructor, "What sortie 96e6bfb changed"), so its first run there is
+  also the first reading of that engine's CPU on real nodes (risk 3).
 - **The mesh_dns timeouts of the soak** (37, all labelled
   `node="main-worker-04"`): under investigation.
-- **The engine's CPU and memory on talos-main with 9fcbb81 or f0750ec**, and
-  over eight hours: not in the saved run directories (risk 3).
+- **The engine's CPU and memory on talos-main with 9fcbb81, f0750ec or
+  96e6bfb**, and over eight hours: not in the saved run directories (risk 3).
 - **The access-log cross-check for run 3, run 4 and the soak** is not recorded
   here (rows, codes and flags, `duration_ms` quantiles, whether a `200` / `DC`
   row recurred).

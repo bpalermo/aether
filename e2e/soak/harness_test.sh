@@ -1225,6 +1225,28 @@ if [ -n "$commit" ] && grep -q "sortie $commit" "$VALUES"; then
 else
 	fail "pins: run.sh's chart version commit '$commit' is not the one sortie-values.yaml names"
 fi
+# The README states the pin too, and shows the command that verifies the chart:
+# both have to be the pin, or a reader verifies the previous chart and is told
+# it is this one. A bump that leaves the README behind fails here.
+README="$HERE/README.md"
+# shellcheck disable=SC2016 # the ${...} is run.sh's text, matched literally
+digest=$(sed -n 's/^SORTIE_CHART_DIGEST="\${SORTIE_CHART_DIGEST:-\(sha256:[0-9a-f]\{64\}\)}"$/\1/p' "$RUN")
+# lines <grep options> <text or pattern>: how many README lines match; 0 when
+# the README cannot be read, so a missing file is a failure and not an error.
+lines() { grep -c "$@" -- "$README" 2>/dev/null || true; }
+# shellcheck disable=SC2016 # the backticks are the README's, not a substitution
+if [ -n "$commit" ] && [ "$(lines -F -e 'The pin is sortie `'"$commit"'`, chart')" = 1 ] &&
+	[ "$(lines -F -e '`0.1.0-'"$commit"'`')" = 1 ]; then
+	pass "pins: the README names run.sh's sortie commit and chart version"
+else
+	fail "pins: the README does not say 'The pin is sortie \`$commit\`, chart \`0.1.0-$commit\`' (run.sh's pin)"
+fi
+if [ -n "$digest" ] && [ "$(lines -F -e "  quay.io/sortie/chart-sortie@$digest")" = 1 ] &&
+	[ "$(lines -E -e 'quay\.io/sortie/chart-sortie@sha256:[0-9a-f]{64}')" = 1 ]; then
+	pass "pins: the README's cosign command verifies run.sh's chart digest, and names no other"
+else
+	fail "pins: the README's cosign command does not verify run.sh's chart digest ($digest), or names another"
+fi
 expect "$RUN" "run.sh: the signer is sortie's publish workflow on main" '^SORTIE_SIGNER_IDENTITY=.*bpalermo/sortie/.*workflows/publish.*refs/heads/main' 1
 pc=$(sed -n 's/^PRIORITY_CLASS="\(.*\)"$/\1/p' "$RUN")
 expect "$VALUES" "values: the engines name run.sh's PriorityClass ($pc)" "^  priorityClassName: $pc\$" 1
