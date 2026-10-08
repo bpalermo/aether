@@ -30,6 +30,18 @@
 #                       hot restart carries across epochs), and the node's Envoy
 #                       is at a NEWER hot-restart epoch afterwards (the roll
 #                       really handed over). Then (a) again.
+#   d. policy reload  — (#1383) the policy is changed the way an operator
+#                       changes it, `helm upgrade` with another
+#                       proxy.authzSidecar.opa.policy. The sidecar runs
+#                       `opa run --watch`, so the gates are: the OLD allow
+#                       header turns 403 and the NEW one 200 with the SAME
+#                       proxy pod (UID), no container restart and the same
+#                       Envoy epoch; then a policy that does not parse reaches
+#                       the node and changes NOTHING (the last good policy
+#                       keeps deciding, the sidecar keeps running and logs the
+#                       error); then the first policy again, still the same
+#                       pod. ZERO ext_authz errors throughout. Skipped with
+#                       AUTHZ_EXPECT=red (an older chart reads the policy once)
 #
 # Red/green: AUTHZ_CHARTS=<dir holding an older charts/ tree> installs that chart
 # instead (e.g. main before #1275, extracted with `git archive`), and
@@ -40,7 +52,9 @@
 # Env: AUTHZ_CLUSTER (authz), AUTHZ_SKIP_BUILD=1 (CI: images pre-built),
 #      AUTHZ_CHARTS (default: this repo's charts/), AUTHZ_EXPECT (green|red),
 #      AUTHZ_EVICT_IMAGE (1: re-pull the OPA image on the roll; 0: keep it
-#      cached), AUTHZ_LOOPS (3 parallel request loops)
+#      cached), AUTHZ_LOOPS (3 parallel request loops), AUTHZ_RELOAD_TIMEOUT
+#      (240: seconds a changed policy may take to decide; the kubelet syncs a
+#      ConfigMap volume periodically; 27-64 s observed on one kind node, not a bound)
 #
 # Prereqs: kind, docker, kubectl, helm, bazel (for the image build; CI sets
 # AUTHZ_SKIP_BUILD=1 and pre-loads the images from the nightly build artifact).
@@ -66,6 +80,8 @@ EVICT_IMAGE="${AUTHZ_EVICT_IMAGE:-1}"
 LOOPS="${AUTHZ_LOOPS:-3}"
 NODE="${CLUSTER}-control-plane"
 ALLOW_HEADER="x-authz: letmein"
+ALLOW_HEADER_V2="x-authz: second"
+RELOAD_TIMEOUT="${AUTHZ_RELOAD_TIMEOUT:-240}"
 # The chart's OPA preset image; read from the chart being installed so a red run
 # against an older chart evicts the image THAT chart runs.
 OPA_IMAGE="$(awk '/^ *opa:/ { o = 1 } o && /^ *image:/ { print $2; exit }' "$CHARTS_SRC/aether/values.yaml")"
@@ -178,11 +194,20 @@ default allow := false
 
 allow if input.attributes.request.http.headers["x-authz"] == "letmein"'
 
-install_aether() {
-	local charts values
-	charts="$(chart_dir)"
-	values="$(mktemp)"
-	# A values file, not --set: the policy is multi-line.
+# The same policy with another allow header (d): what was allowed is denied and
+# the reverse, so a reload is visible from the client.
+POLICY_V2="${POLICY/letmein/second}"
+
+# A policy that does not parse (d).
+POLICY_BAD='package envoy.authz
+
+default allow := false
+
+allow if {
+  input.attributes.request.http.headers["x-authz"] =='
+
+# write_values POLICY FILE — a values file, not --set: the policy is multi-line.
+write_values() {
 	{
 		echo "proxy:"
 		echo "  authzSidecar:"
@@ -191,33 +216,47 @@ install_aether() {
 		echo "    opa:"
 		echo "      enabled: true"
 		echo "      policy: |"
-		printf '%s\n' "$POLICY" | sed 's/^/        /'
-	} >"$values"
-	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
-	log "installing the aether CRDs (from $CHARTS_SRC)"
-	helm --kube-context "$CTX" upgrade --install aether-crds "$charts/crds" \
-		-n "$NS" --create-namespace --wait --timeout 2m >/dev/null || die "crds chart install failed"
-	kc wait --for=condition=Established crd/httpfilters.config.aether.io --timeout=60s >/dev/null ||
-		die "the HTTPFilter CRD never became Established"
+		printf '%s\n' "$1" | sed 's/^/        /'
+	} >"$2"
+}
 
+# helm_aether CHARTS VALUES — install or upgrade the release. Every value is
+# passed every time (never --reuse-values), so an upgrade that changes only
+# the policy changes only the policy ConfigMap.
+helm_aether() {
+	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
 	# SPIRE off (cleartext mesh, #421): ext_authz runs on the source proxy's
 	# outbound chain, orthogonal to the inbound transport. otel.enabled with no
 	# endpoint, as in e2e/uds.sh.
-	log "installing aether with the OPA authz sidecar (failureMode DENY)"
 	# shellcheck disable=SC2046
-	helm --kube-context "$CTX" upgrade --install aether "$charts/aether" \
+	helm --kube-context "$CTX" upgrade --install aether "$1/aether" \
 		-n "$NS" --create-namespace \
 		--set namespace.create=false \
 		--set "meshDomain=$MESH_DOMAIN" \
 		--set spire.enabled=false \
 		--set edge.enabled=false \
 		--set otel.enabled=true \
-		-f "$values" \
+		-f "$2" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
 		$(img registrar registrar) $(img controller controller) $(img udsCsi uds-csi) \
 		--set proxy.image.pullPolicy=IfNotPresent \
-		--timeout 5m >/dev/null || die "aether install failed"
+		--timeout 5m >/dev/null
+}
+
+install_aether() {
+	local charts values
+	charts="$(chart_dir)"
+	values="$(mktemp)"
+	write_values "$POLICY" "$values"
+	log "installing the aether CRDs (from $CHARTS_SRC)"
+	helm --kube-context "$CTX" upgrade --install aether-crds "$charts/crds" \
+		-n "$NS" --create-namespace --wait --timeout 2m >/dev/null || die "crds chart install failed"
+	kc wait --for=condition=Established crd/httpfilters.config.aether.io --timeout=60s >/dev/null ||
+		die "the HTTPFilter CRD never became Established"
+
+	log "installing aether with the OPA authz sidecar (failureMode DENY)"
+	helm_aether "$charts" "$values" || die "aether install failed"
 	rm -rf "$(dirname "$charts")" "$values"
 
 	kc -n "$NS" rollout status ds/aether-agent --timeout=240s >/dev/null || die "the agent DaemonSet never became Ready"
@@ -468,6 +507,92 @@ verify_roll() {
 	esac
 }
 
+# apply_policy POLICY — the operator's way: a helm upgrade that differs from the
+# installed release only in proxy.authzSidecar.opa.policy.
+apply_policy() {
+	local charts values
+	charts="$(chart_dir)"
+	values="$(mktemp)"
+	write_values "$1" "$values"
+	helm_aether "$charts" "$values" || die "the helm upgrade that changes the policy failed"
+	rm -rf "$(dirname "$charts")" "$values"
+}
+
+# proxy_identity — what must NOT change when only the policy does: the proxy
+# pod (name, UID), its containers' restart counts, the DaemonSet's generation
+# and the node Envoy's hot-restart epoch.
+proxy_identity() {
+	# shellcheck disable=SC2016 # a jsonpath template, not shell
+	kc -n "$NS" get pods -l app.kubernetes.io/component=proxy -o jsonpath='{range .items[*]}{.metadata.name}{" uid="}{.metadata.uid}{" authz-restarts="}{.status.initContainerStatuses[?(@.name=="authz")].restartCount}{" proxy-restarts="}{.status.containerStatuses[?(@.name=="proxy")].restartCount}{" "}{end}'
+	printf 'ds-generation=%s envoy-epoch=%s' \
+		"$(kc -n "$NS" get ds aether-proxy -o jsonpath='{.metadata.generation}')" "$(envoy_epoch)"
+}
+
+# node_has_policy POLICY — the kubelet's copy of the ConfigMap volume on the
+# node (what the sidecar has mounted at /policy) holds exactly that text. The
+# OPA image has no shell, so this reads the volume from the node.
+node_has_policy() {
+	local uid
+	uid="$(kc -n "$NS" get pods -l app.kubernetes.io/component=proxy -o jsonpath='{.items[0].metadata.uid}')"
+	[ "$(docker exec "$NODE" cat "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~configmap/opa-policy/policy.rego" 2>/dev/null)" = "$1" ]
+}
+
+# d. The policy changes; the pod does not (#1383).
+verify_reload() {
+	if [ "$EXPECT" = "red" ]; then
+		log "d. policy reload: skipped (AUTHZ_EXPECT=red: the old chart's sidecar reads its policy once)"
+		return
+	fi
+	log "d. policy reload: a changed policy reaches the running sidecar; the proxy pod is not replaced"
+	local id0 id code err0 err1 t0 deadline
+	[ "$(kc -n "$NS" get pods -l app.kubernetes.io/component=proxy --no-headers 2>/dev/null | wc -l)" = 1 ] ||
+		die "expected exactly one proxy pod before the policy change"
+	id0="$(proxy_identity)"
+	err0="$(authz_sum error)"
+
+	t0="$SECONDS"
+	apply_policy "$POLICY_V2"
+	code="$(await_code 403 "$RELOAD_TIMEOUT" "$ALLOW_HEADER")" ||
+		die "the old allow header still answers $code ${RELOAD_TIMEOUT}s after the policy changed — the sidecar did not reload it"
+	code="$(await_code 200 30 "$ALLOW_HEADER_V2")" ||
+		die "the new allow header answers $code, expected 200 — the reloaded policy is not the new one"
+	ok "the new policy decides $((SECONDS - t0))s after the upgrade began (old header -> 403, new header -> 200)"
+	id="$(proxy_identity)"
+	[ "$id" = "$id0" ] || die "the policy change replaced or restarted the proxy pod: before [$id0], after [$id]"
+	ok "same pod, no restart, same epoch: $id"
+
+	# A policy that does not parse: wait until the node really has it, give
+	# the watcher time to act on it, then require that nothing changed.
+	apply_policy "$POLICY_BAD"
+	deadline=$((SECONDS + RELOAD_TIMEOUT))
+	until node_has_policy "$POLICY_BAD"; do
+		[ "$SECONDS" -lt "$deadline" ] || die "the bad policy never reached the node's ConfigMap volume in ${RELOAD_TIMEOUT}s"
+		sleep 2
+	done
+	sleep 10
+	code="$(mesh_code "$ALLOW_HEADER_V2")"
+	[ "$code" = 200 ] || die "with a policy that does not parse on the node the allowed request answers $code, expected 200 — the last good policy was dropped"
+	code="$(mesh_code "$ALLOW_HEADER")"
+	[ "$code" = 403 ] || die "with a policy that does not parse on the node the denied request answers $code, expected 403"
+	id="$(proxy_identity)"
+	[ "$id" = "$id0" ] || die "the bad policy restarted or replaced something: before [$id0], after [$id]"
+	# Read to EOF, never `grep -q` on a pipe (#1121).
+	[ "$(kc -n "$NS" logs -l app.kubernetes.io/component=proxy -c authz --tail=2000 2>/dev/null | grep -c 'rego_parse_error')" -gt 0 ] ||
+		die "the sidecar logged no rego_parse_error for the bad policy — the runbook's way to see a failed reload is gone"
+	ok "a policy that does not parse changes nothing: the last good policy decides, the sidecar runs on and logs the error"
+
+	apply_policy "$POLICY"
+	code="$(await_code 200 "$RELOAD_TIMEOUT" "$ALLOW_HEADER")" ||
+		die "the first policy did not come back (allow header answers $code) — the sidecar did not recover from the bad policy"
+	code="$(await_code 403 30 "$ALLOW_HEADER_V2")" ||
+		die "the second policy's header still answers $code after the first policy was restored"
+	id="$(proxy_identity)"
+	[ "$id" = "$id0" ] || die "recovering from the bad policy restarted or replaced something: before [$id0], after [$id]"
+	err1="$(authz_sum error)"
+	[ "$err1" = "$err0" ] || die "ext_authz.error grew by $((err1 - err0)) across the policy changes — a reload left Envoy without an answer"
+	ok "a valid policy recovers it, still the same pod; zero ext_authz errors across all three changes"
+}
+
 verify() {
 	[ -n "$OPA_IMAGE" ] || die "could not read the OPA preset image from $CHARTS_SRC/aether/values.yaml"
 	verify_decisions
@@ -475,7 +600,8 @@ verify() {
 	verify_roll
 	verify_decisions
 	verify_ordering
-	log "all assertions passed (027 ext_authz: allow/deny decided by the sidecar; #1275: the sidecar is up before the proxy and the roll is error-free; expect=$EXPECT)"
+	verify_reload
+	log "all assertions passed (027 ext_authz: allow/deny decided by the sidecar; #1275: the sidecar is up before the proxy and the roll is error-free; #1383: a policy change is reloaded in place; expect=$EXPECT)"
 }
 
 down() {

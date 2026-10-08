@@ -1,0 +1,13 @@
+{{- /*
+Off by default. With random=true this renders a value generated at render
+time, so two renders of the same values differ: what a chart that generates a
+certificate in a template does.
+*/ -}}
+{{- if .Values.random }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-random
+data:
+  nonce: {{ randAlphaNum 16 | quote }}
+{{- end }}
