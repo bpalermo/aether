@@ -619,7 +619,8 @@ shown a soak. Its replacement for the soak is a small one over the
 `sortie_mesh_*` series above: 2xx rate per target and per node
 (`…_benchmark_http_2xx_total`, the target and the backend taken out of the name
 with `label_replace`), one stat per zero-failure class
-(`increase({__name__=~"sortie_mesh_.*_benchmark_(http_[45]xx|stream_resets|pool_.*)_total"}[$__range])`,
+(`increase({__name__=~"sortie_mesh_.*_benchmark_(http_[45]xx|http_inflight_lost|stream_resets.*|pool_.*)_total"}[$__range])`,
+the selector of the README's "Live view",
 with the dashboard's range set to the run), and p95 per target from the latency
 histogram, which is the mesh's latency now that the engine is not throttled.
 Every panel and any alert on these series is a `rate()` or an `increase()`,
