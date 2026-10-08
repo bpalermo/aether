@@ -1,6 +1,7 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url")
 
 # Helm helpers. See defs.bzl; the rules themselves are loaded from //charts/*.
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # chart_push hands oras exactly what `helm push` writes, at the repository and
@@ -19,5 +20,78 @@ sh_test(
         "//bazel/helm/testdata/pushtest",
         "//bazel/helm/testdata/pushtest:pushtest.chart_push",
         "//bazel/helm/testdata/pushtest:wrong_name.chart_push",
+    ],
+)
+
+# Shell that no sh_test in THIS package runs, so it needs a target of its own to
+# be in range of the shellcheck aspect (scripts/check-shell-lint.sh):
+#   - render_lib.sh: what the generated test runners source (defs.bzl,
+#     _RENDER_LIB_ATTR) to print a render with Secret data masked;
+#   - upstream_template_test_opts_test.sh: an sh_test source for a chart package
+#     whose default render holds key material (see charts/aether/BUILD.bazel).
+sh_library(
+    name = "helm_shell",
+    srcs = [
+        "render_lib.sh",
+        "upstream_template_test_opts_test.sh",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+exports_files(
+    [
+        "render_lib.sh",
+        "upstream_template_test_opts_test.sh",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# What the template test rules print when they FAIL (#1382): the pattern, the
+# document searched, a bounded excerpt, and never the data of a Secret. Runs
+# the deliberately failing targets of //bazel/helm/testdata/secretchart.
+sh_test(
+    name = "template_rules_test",
+    size = "small",
+    srcs = ["template_rules_test.sh"],
+    args = [
+        "bazel/helm/testdata/secretchart",
+        "$(rootpath render_lib.sh)",
+    ],
+    data = [
+        "render_lib.sh",
+        "//bazel/helm/testdata/secretchart:documents_test",
+        "//bazel/helm/testdata/secretchart:failing_absent_test_render",
+        "//bazel/helm/testdata/secretchart:failing_documents",
+        "//bazel/helm/testdata/secretchart:failing_explicit",
+        "//bazel/helm/testdata/secretchart:failing_fail_test_other_reason",
+        "//bazel/helm/testdata/secretchart:failing_fail_test_rendered",
+        "//bazel/helm/testdata/secretchart:failing_flow_document",
+        "//bazel/helm/testdata/secretchart:failing_invalid_pattern",
+        "//bazel/helm/testdata/secretchart:failing_missing_document",
+        "//bazel/helm/testdata/secretchart:failing_render",
+        "//bazel/helm/testdata/secretchart:failing_reproducible_test_render",
+        "//bazel/helm/testdata/secretchart:failing_unreadable",
+        "//bazel/helm/testdata/secretchart:failing_value_changes_count",
+        "//bazel/helm/testdata/secretchart:failing_value_changes_same",
+        "//bazel/helm/testdata/secretchart:failing_version_test_render",
+        "//bazel/helm/testdata/secretchart:failing_whole_render",
+    ],
+)
+
+# The option guard itself: calls that must satisfy it and calls that must not
+# (the option in a comment, in another attribute, after another flag).
+sh_test(
+    name = "upstream_template_test_opts_selftest",
+    size = "small",
+    srcs = ["upstream_template_test_opts_selftest.sh"],
+    args = [
+        "$(rootpath upstream_template_test_opts_test.sh)",
+        "$(rootpath testdata/opts_guard/good.BUILD.txt)",
+        "$(rootpath testdata/opts_guard/bad.BUILD.txt)",
+    ],
+    data = [
+        "testdata/opts_guard/bad.BUILD.txt",
+        "testdata/opts_guard/good.BUILD.txt",
+        "upstream_template_test_opts_test.sh",
     ],
 )

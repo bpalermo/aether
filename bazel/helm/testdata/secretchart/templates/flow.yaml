@@ -1,0 +1,6 @@
+{{- /* Secrets written as flow mappings: one YAML line, and JSON over several. */ -}}
+{apiVersion: v1, kind: Secret, metadata: {name: flow-document}, data: {token: FORBIDDEN-flow-document-token}}
+---
+{"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "json-document"},
+ "stringData": {
+   "token": "FORBIDDEN-json-document-token"}}

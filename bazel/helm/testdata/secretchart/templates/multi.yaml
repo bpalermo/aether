@@ -1,0 +1,78 @@
+{{- /*
+Seven documents in one template, in the order helm prints them (it sorts a
+release's objects by kind: Secret, ConfigMap, Role, RoleBinding, Deployment).
+rules_helm's helm_template_test searches only the last one.
+*/ -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-plain
+type: Opaque
+data:
+  token: FORBIDDEN-plain-token
+  tls.key: FORBIDDEN-plain-key
+---
+apiVersion: v1
+stringData:
+  password: FORBIDDEN-string-password
+  # FORBIDDEN-comment-inside-the-block
+  pem: |
+    FORBIDDEN-block-line-1
+
+    FORBIDDEN-block-line-3
+  "quoted.key": "FORBIDDEN-quoted"
+kind: "Secret"
+metadata:
+  name: {{ .Release.Name }}-block
+---
+apiVersion: v1
+kind: Secret # with a trailing comment
+metadata:
+  name: {{ .Release.Name }}-flow # and one here
+data: {token: FORBIDDEN-flow-token}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+data:
+  greeting: VISIBLE-config-value
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-reader
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-reader
+subjects:
+  - kind: ServiceAccount
+    name: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-app
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: secretchart
+  template:
+    metadata:
+      labels:
+        app: secretchart
+    spec:
+      containers:
+        - name: app
+          image: example.invalid/app:1

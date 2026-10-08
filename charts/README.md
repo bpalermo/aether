@@ -71,6 +71,60 @@ bazel build //charts/crds //charts/aether
 bazel test //charts/...
 ```
 
+### Writing a template test
+
+A chart's tests live in its `BUILD.bazel`. Which rule to use:
+
+| The test is about | Rule |
+|---|---|
+| a template that renders **one** document, in a chart whose render holds no Secret | rules_helm's `helm_template_test` (`template_patterns`, Go regular expressions) |
+| one document of a template that renders **several** (RBAC, the webhook configurations, a ServiceAccount next to its Deployment) | `helm_template_match_test` with `document_patterns = {"<Kind>/<name>": [...]}` |
+| a block wherever it renders | `helm_template_match_test` with `patterns` |
+| something that must **not** render (an off switch) | `helm_template_absent_test` |
+| a value the chart must **reject** | `helm_template_fail_test` |
+
+All but the first are in `//bazel/helm:defs.bzl`, which documents each.
+
+Two facts about rules_helm's `helm_template_test` decide the first row:
+
+- It keeps one document per template file, the one helm prints **last**, and
+  helm prints a release's objects sorted by kind, not in template order. A
+  pattern for any other document of that file fails; it cannot pass by accident,
+  but it cannot be written either (#1371).
+- Its runner prints the **whole render** into the test log, whether the test
+  passes or fails. With default values the `aether` chart generates the
+  webhook's private key at render time, so every such test in
+  `charts/aether/BUILD.bazel` passes `--set controller.webhook.spire=true`,
+  which renders no Secret; `:aether_upstream_template_tests_render_no_secret_test`
+  fails a target that leaves it out (#1382). A test that needs the default
+  webhook path uses one of the other rules.
+
+`helm_template_match_test` patterns are POSIX extended regular expressions
+(bash `[[ =~ ]]`) plus `\n`, `\s` and `\S`; no `\d`, `(?s)` or lazy quantifiers.
+When one fails it prints the pattern, the document it searched, and a few lines
+from where the pattern stopped matching, from a masked copy of the render. It
+never prints the render.
+
+The mask fails closed. A document is printed as it is only when it is plainly
+something else than a Secret: a single top-level `kind: <Word>` line (optionally
+quoted, optionally with a trailing comment) whose word is not `Secret` and does not end in
+`List` (a typed list such as `SecretList` holds items with no kind line of their
+own), in a document that is not flow style or JSON, has no explicit (`?`) or merge
+(`<<`) key at any depth, and has no nested `kind` that is `Secret`, a typed
+list, or written with an anchor, a tag or an alias. In a
+document that might be a Secret, only these lines are ever printed, and only as
+simple `key: scalar` lines: the `# Source:` comment, `apiVersion:`, `kind:`,
+`type:`, `metadata:` and the `name:` and `namespace:` directly under it.
+Everything else is `<masked>`. A ConfigMap written the usual way therefore
+stays readable in a failure excerpt, and a failure in a Secret shows which
+Secret and where, never what is in it.
+
+`document_patterns` can name only a document written in block style (a `kind:`
+line at column 0, `metadata:` and its `  name:`), which is how every template in
+these charts is written. A document written as a flow mapping or JSON is not
+indexed: the test fails saying so and lists the documents it found; match such a
+document with `patterns`.
+
 ## Install
 
 CRDs first, then the system:
