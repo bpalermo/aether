@@ -20,7 +20,8 @@ sh_library(
 # #1323): sortie-gate.sh against canned and real (kind) sortie JSON reports and
 # a results stream, sortie-save.sh against a fake kubectl, sortie-plan.sh's
 # share arithmetic and plan template, the pins and the PriorityClass in
-# sortie-values.yaml and run.sh (read, not run), pods-not-ready.awk against canned
+# sortie-values.yaml and run.sh and the pin as README.md states it (read, not
+# run), pods-not-ready.awk against canned
 # `kubectl get pods` listings. No cluster, no network. It used to be run by hand only,
 # for want of jq; jq is now the Bazel-pinned one (jq.bzl), so it runs in
 # `bazel test //...` like any other test. awk and coreutils come from the host,
@@ -43,6 +44,7 @@ sh_test(
     timeout = "moderate",
     srcs = ["harness_test.sh"],
     data = [
+        "README.md",
         "churn.sh",
         "lib-wait.sh",
         "newsa-client.sh",
