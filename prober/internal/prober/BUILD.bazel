@@ -24,6 +24,7 @@ go_test(
     name = "prober_test",
     size = "small",
     srcs = [
+        "destination_test.go",
         "identity_test.go",
         "phase_recorder_test.go",
         "phase_test.go",

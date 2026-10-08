@@ -79,10 +79,9 @@ const (
 	// shared memory) is gone. A launch that still collides is caught by the
 	// bind-collision retry.
 	predecessorExitSettle = 1 * time.Second
-	// onlineCPUsPath lists the online CPUs. Envoy's --concurrency default is
-	// std::thread::hardware_concurrency(), which both libstdc++ (get_nprocs)
-	// and libc++ (sysconf(_SC_NPROCESSORS_ONLN)) derive from this list, not
-	// from the process's affinity mask or cgroup.
+	// onlineCPUsPath lists the online CPUs, what Envoy's
+	// std::thread::hardware_concurrency() counts. It is one of the three terms
+	// of Envoy's default worker count, not the count itself (envoycpucount.go).
 	onlineCPUsPath = "/sys/devices/system/cpu/online"
 )
 
@@ -132,15 +131,20 @@ func readPredecessor(ctx context.Context, conn *adminConn, epoch int) (info pred
 	return predecessorInfo{identity: opts.AdminAddressPath, epoch: epoch, concurrency: opts.Concurrency}, ""
 }
 
-// successorConcurrency is the --concurrency the next Envoy this supervisor
-// forks will run with: the one --concurrency in ExtraArgs, else Envoy's
-// default, the online CPU count.
-func (s *Supervisor) successorConcurrency() (int, error) {
+// successorConcurrency is the worker count the next Envoy this supervisor
+// forks will run with, and where the number comes from: the one --concurrency
+// in ExtraArgs, else Envoy's default for this container (envoycpucount.go),
+// computed for the environment the child is started with.
+func (s *Supervisor) successorConcurrency() (n int, source string, err error) {
 	n, explicit, err := concurrencyArg(s.cfg.ExtraArgs)
 	if err != nil || explicit {
-		return n, err
+		return n, "--concurrency", err
 	}
-	return s.onlineCPUs()
+	c, err := envoyDefaultConcurrency(s.cpus, os.Environ())
+	if err != nil {
+		return 0, "", err
+	}
+	return c.workers, c.String(), nil
 }
 
 // concurrencyArg extracts --concurrency from an Envoy argv: the worker count
@@ -255,7 +259,7 @@ func (s *Supervisor) freshStartInsteadOfHotRestart(ctx context.Context, epoch in
 	if why != "" {
 		return s.hotRestartAnyway(ctx, epoch, why)
 	}
-	ours, err := s.successorConcurrency()
+	ours, oursFrom, err := s.successorConcurrency()
 	if err != nil {
 		return s.hotRestartAnyway(ctx, epoch, "successor worker count unknown: "+err.Error())
 	}
@@ -273,6 +277,7 @@ func (s *Supervisor) freshStartInsteadOfHotRestart(ctx context.Context, epoch in
 			"(--hot-restart-on-concurrency-change): about half of the predecessor's live QUIC connections "+
 			"will be mis-steered and reset (#1136)",
 			"predecessorConcurrency", pred.concurrency, "successorConcurrency", ours,
+			"successorConcurrencyFrom", oursFrom,
 			"predecessorEpoch", epoch, "predecessor", adminIdentityLabel(pred.identity))
 		s.metrics.handoffMode(handoffModeHot)
 		return false
@@ -282,7 +287,7 @@ func (s *Supervisor) freshStartInsteadOfHotRestart(ctx context.Context, epoch in
 		"predecessor, then starting a fresh envoy at epoch 0 (a hot restart would re-steer the predecessor's "+
 		"QUIC connections by the new count and reset about half of them, #1136)",
 		"predecessorConcurrency", pred.concurrency, "successorConcurrency", ours,
-		"predecessorEpoch", epoch, "predecessor", adminIdentityLabel(pred.identity),
+		"successorConcurrencyFrom", oursFrom, "predecessorEpoch", epoch, "predecessor", adminIdentityLabel(pred.identity),
 		"drainTime", s.cfg.DrainTime)
 	start := time.Now()
 	// The drain rides the connection whose answer was just checked.
