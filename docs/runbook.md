@@ -1497,7 +1497,8 @@ Since 1.0.5 the canary's five objects (two ServiceAccounts, two Deployments, the
 `HTTPFilter`) carry `app.kubernetes.io/component: authz-canary` on their own
 metadata; until then they carried `component: prober`, so
 `-l app.kubernetes.io/component=prober` listed them with the prober. That
-selector now returns the prober's DaemonSet, ServiceAccount and pods only; use
+selector now returns the prober's DaemonSet, ServiceAccount and pods (and the
+Namespace, when the chart creates it with `namespace.create`) only; use
 `-l app.kubernetes.io/component=authz-canary` for the canary's objects, and
 `-l app=authz-canary` / `-l app=authz-echo` for its pods, whose labels did not
 change.
