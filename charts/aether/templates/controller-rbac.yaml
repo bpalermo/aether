@@ -41,7 +41,8 @@ rules:
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["validatingwebhookconfigurations"]
     verbs: ["get", "list", "watch", "update", "patch"]
-  {{- if .Values.controller.injectPodNdots }}
+  {{- /* The condition that renders the object and passes its name (#1411). */}}
+  {{- if include "aether.controller.mutatingWebhook" . }}
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["mutatingwebhookconfigurations"]
     verbs: ["get", "list", "watch", "update", "patch"]
