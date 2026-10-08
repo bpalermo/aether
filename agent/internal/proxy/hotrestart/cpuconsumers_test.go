@@ -1025,6 +1025,32 @@ func TestConsumerScanIsBounded(t *testing.T) {
 		assert.Equal(t, []string{fakeCgroupRoot, path.Join(fakeCgroupRoot, "init")}, fs.listed,
 			"the root and /init, read before the deadline; not /kubepods, whose read ran past it")
 	})
+	t.Run("a scan stopped by the deadline leaves the known cgroups as they were", func(t *testing.T) {
+		// The first known cgroup is gone and the budget runs out after the
+		// second: forgetting the first in place would have moved the second
+		// over it and left it in the set twice.
+		fs := newFakeStatFS()
+		fs.cgroup("/a", 0)
+		fs.cgroup("/b", 0)
+		c := newTestConsumers(fs, 5)
+		c.cgroupPaths = []string{"/gone", "/a", "/b"}
+		clock := consumersT0
+		c.clock = func() time.Time { return clock }
+		fs.onRead = func(name string) {
+			if name == path.Join(fakeCgroupRoot, "a", "cpu.stat") {
+				clock = clock.Add(consumerScanBudget + 50*time.Millisecond)
+			}
+		}
+		s := cgroupSample{at: consumersT0, usage: map[string]uint64{}, unknown: map[string]struct{}{}}
+		require.ErrorIs(t, c.readKnownCgroups(&s, c.newBudget()), errScanBudget)
+		assert.Equal(t, []string{"/gone", "/a", "/b"}, c.cgroupPaths)
+
+		// A scan that finishes forgets the removed one, and only that one.
+		fs.onRead = nil
+		s = cgroupSample{at: consumersT0, usage: map[string]uint64{}, unknown: map[string]struct{}{}}
+		require.NoError(t, c.readKnownCgroups(&s, c.newBudget()))
+		assert.Equal(t, []string{"/a", "/b"}, c.cgroupPaths)
+	})
 	t.Run("too many processes", func(t *testing.T) {
 		fs := newFakeStatFS()
 		fs.hostPIDNamespace()

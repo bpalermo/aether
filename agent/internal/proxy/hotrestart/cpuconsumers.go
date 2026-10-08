@@ -885,7 +885,9 @@ func cgroupGone(err error) bool {
 // that is there and could not be read stays known and is marked unread in this
 // sample, so the next one does not find it "new" with its lifetime's usage.
 func (c *cpuConsumers) readKnownCgroups(s *cgroupSample, budget *scanBudget) error {
-	known := c.cgroupPaths[:0]
+	// Not compacted in place: a scan the budget stops must leave the set as it
+	// was, and by then a removed cgroup would have been written over.
+	known := make([]string, 0, len(c.cgroupPaths))
 	for _, p := range c.cgroupPaths {
 		if budget.spent() {
 			return errScanBudget
