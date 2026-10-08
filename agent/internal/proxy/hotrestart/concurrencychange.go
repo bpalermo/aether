@@ -132,8 +132,8 @@ func readPredecessor(ctx context.Context, conn *adminConn, epoch int) (info pred
 }
 
 // successorConcurrency is the --concurrency the next Envoy this supervisor
-// forks will run with: the last --concurrency in ExtraArgs (Envoy's parser
-// keeps the last), else Envoy's default, the online CPU count.
+// forks will run with: the one --concurrency in ExtraArgs, else Envoy's
+// default, the online CPU count.
 func (s *Supervisor) successorConcurrency() (int, error) {
 	n, explicit, err := concurrencyArg(s.cfg.ExtraArgs)
 	if err != nil || explicit {
@@ -143,28 +143,47 @@ func (s *Supervisor) successorConcurrency() (int, error) {
 }
 
 // concurrencyArg extracts --concurrency from an Envoy argv.
+//
+// A --concurrency given more than once is errRepeatedConcurrency, not "the
+// last one wins": Envoy's parser does not keep the last, it refuses the command
+// line ("PARSE ERROR: Argument: (--concurrency) Argument already set!"), so no
+// Envoy ever runs with either value (issue #1375). The repeat is reported
+// before any value is looked at. CheckExtraArgs turns it into a startup
+// failure, so a supervisor started through the command never sees it here.
 func concurrencyArg(args []string) (n int, explicit bool, err error) {
+	var (
+		v       string
+		seen    int
+		noValue bool
+	)
 	for i := 0; i < len(args); i++ {
-		var v string
 		switch a := args[i]; {
-		case a == "--concurrency":
-			if i+1 >= len(args) {
-				return 0, false, fmt.Errorf("--concurrency without a value")
-			}
+		case a == envoyFlagConcurrency:
+			// The next argument is the value, whatever it looks like.
 			i++
-			v = args[i]
-		case strings.HasPrefix(a, "--concurrency="):
-			v = strings.TrimPrefix(a, "--concurrency=")
+			if noValue = i >= len(args); !noValue {
+				v = args[i]
+			}
+		case strings.HasPrefix(a, envoyFlagConcurrency+"="):
+			v = strings.TrimPrefix(a, envoyFlagConcurrency+"=")
 		default:
 			continue
 		}
-		parsed, perr := strconv.Atoi(v)
-		if perr != nil || parsed <= 0 {
-			return 0, false, fmt.Errorf("--concurrency %q is not a positive integer", v)
-		}
-		n, explicit = parsed, true
+		seen++
 	}
-	return n, explicit, nil
+	switch {
+	case seen == 0:
+		return 0, false, nil
+	case seen > 1:
+		return 0, false, fmt.Errorf("%w (%d times)", errRepeatedConcurrency, seen)
+	case noValue:
+		return 0, false, fmt.Errorf("--concurrency without a value")
+	}
+	parsed, perr := strconv.Atoi(v)
+	if perr != nil || parsed <= 0 {
+		return 0, false, fmt.Errorf("--concurrency %q is not a positive integer", v)
+	}
+	return parsed, true, nil
 }
 
 // readOnlineCPUs counts the CPUs in onlineCPUsPath ("0-3", "0,2-5", ...).

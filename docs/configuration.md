@@ -445,6 +445,17 @@ literally): `--envoy-path`
 `--admin-address` (`127.0.0.1:9901`), `--install-path`,
 `--install-readiness-path`, `--otlp-endpoint`.
 
+`--envoy-arg` cannot repeat an Envoy flag the supervisor passes itself: `-c` /
+`--config-path` (set from `--config`), `--base-id` (from `--base-id`, chart
+`proxy.hotRestart.baseId`), `--drain-time-s` (from `--drain-time`, chart
+`proxy.hotRestart.drainTime`), `--parent-shutdown-time-s` (from
+`--parent-shutdown-time`, chart `proxy.hotRestart.parentShutdownTime`),
+`--restart-epoch`, `--admin-address-path` and `--mode`. Envoy refuses a flag
+given twice (`Argument already set!`), so each of these, in the `--flag value` or
+the `--flag=value` spelling, is a startup error that names the flag instead of a
+failure of every fork. `--concurrency` is allowed once (the chart passes it for
+`proxy.concurrency`); a second one is refused the same way.
+
 `--termination-grace` is the pod's own `terminationGracePeriodSeconds` (the chart
 passes the same value it sets on the pod spec; `180s` as deployed). The supervisor
 cannot read it from the API, and it is the only non-arbitrary bound on how long a

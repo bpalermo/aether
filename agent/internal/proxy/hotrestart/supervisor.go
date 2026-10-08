@@ -996,7 +996,7 @@ func (s *Supervisor) validateConfig(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, configValidateTimeout)
 	defer cancel()
 
-	args := append([]string{"--mode", "validate", "-c", s.cfg.ConfigPath}, s.cfg.ExtraArgs...)
+	args := append(s.validateArgs(), s.cfg.ExtraArgs...)
 	out, err := exec.CommandContext(ctx, s.cfg.EnvoyPath, args...).CombinedOutput()
 	if err != nil {
 		tail := out
@@ -1008,21 +1008,36 @@ func (s *Supervisor) validateConfig(ctx context.Context) error {
 	return nil
 }
 
-// buildEnvoyCmd constructs the Envoy invocation for a given restart epoch.
-func (s *Supervisor) buildEnvoyCmd(epoch int) *exec.Cmd {
-	args := []string{
-		"-c", s.cfg.ConfigPath,
-		"--base-id", strconv.FormatUint(uint64(s.cfg.BaseID), 10),
-		"--restart-epoch", strconv.Itoa(epoch),
-		"--drain-time-s", strconv.Itoa(int(s.cfg.DrainTime.Seconds())),
-		"--parent-shutdown-time-s", strconv.Itoa(int(s.cfg.ParentShutdownTime.Seconds())),
+// validateArgs is the part of the `envoy --mode validate` command line the
+// supervisor sets itself; validateConfig appends ExtraArgs to it. Every flag
+// in it must be in reservedEnvoyFlags (envoyargs.go).
+func (s *Supervisor) validateArgs() []string {
+	return []string{envoyFlagMode, "validate", envoyFlagConfigPath, s.cfg.ConfigPath}
+}
+
+// serveArgs is the part of a serving Envoy's command line the supervisor sets
+// itself for the given restart epoch; buildEnvoyCmd appends ExtraArgs to it.
+// Every flag in it must be in reservedEnvoyFlags (envoyargs.go): Envoy refuses
+// a flag given twice, so CheckExtraArgs has to refuse it in ExtraArgs.
+// TestEveryFlagTheSupervisorPassesIsReserved fails when one is missing.
+func (s *Supervisor) serveArgs(epoch int) []string {
+	return []string{
+		envoyFlagConfigPath, s.cfg.ConfigPath,
+		envoyFlagBaseID, strconv.FormatUint(uint64(s.cfg.BaseID), 10),
+		envoyFlagRestartEpoch, strconv.Itoa(epoch),
+		envoyFlagDrainTime, strconv.Itoa(int(s.cfg.DrainTime.Seconds())),
+		envoyFlagParentShutdownTime, strconv.Itoa(int(s.cfg.ParentShutdownTime.Seconds())),
 		// Not for the file Envoy writes: the path is this supervisor's nonce,
 		// echoed by /server_info as command_line_options.admin_address_path,
 		// which is how ownAdminRequest tells our Envoy from another pod's on
 		// the shared admin address (issue #1127).
-		"--admin-address-path", s.adminIdentity,
+		envoyFlagAdminAddressPath, s.adminIdentity,
 	}
-	args = append(args, s.cfg.ExtraArgs...)
+}
+
+// buildEnvoyCmd constructs the Envoy invocation for a given restart epoch.
+func (s *Supervisor) buildEnvoyCmd(epoch int) *exec.Cmd {
+	args := append(s.serveArgs(epoch), s.cfg.ExtraArgs...)
 
 	cmd := exec.Command(s.cfg.EnvoyPath, args...)
 	cmd.Env = childEnv(os.Environ(), epoch)
@@ -1041,8 +1056,9 @@ func (s *Supervisor) buildEnvoyCmd(epoch int) *exec.Cmd {
 //
 // The exported number is always the child's effective epoch. --restart-epoch
 // cannot be given a second time through ExtraArgs to disagree with it: Envoy
-// refuses a repeated flag ("Argument already set!"), so such a child never
-// starts.
+// refuses a repeated flag ("Argument already set!"), so such a child would
+// never start, and CheckExtraArgs refuses that ExtraArgs before the first fork
+// (issue #1376).
 const RestartEpochEnv = "AETHER_RESTART_EPOCH"
 
 // childEnv returns the environment for the Envoy child at the given restart
