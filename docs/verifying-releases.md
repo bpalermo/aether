@@ -32,6 +32,14 @@ Charts are signed and everything in the provenance column is attested starting
 with the first release after this page was added; older releases carry image
 signatures only.
 
+**A digest is signed and attested once**, by the publish run that first pushed
+it. A later commit that publishes the same digest again (an image whose content
+did not change) adds a tag and nothing else: no second signature, no second
+attestation. So the signature and the provenance of a digest name the commit
+that **built it first**, which is not always the commit whose tag you resolved.
+"[Which commit built this digest](#which-commit-built-this-digest)" below has
+the consequences and the commands.
+
 ## Always verify a digest
 
 A tag can be moved; a digest cannot. Resolve the tag once, then verify and
@@ -86,9 +94,17 @@ gh attestation verify oci://quay.io/aethermesh/agent@sha256:<digest> \
 - `--repo` says whose attestation store to ask and whose builds to accept.
 - `--signer-workflow` pins the workflow file. Without it any workflow of the
   repository would do.
-- `--source-digest` pins the commit. Leave it out to accept any commit of the
-  repository, and read the commit from the output instead
-  (`--format json`, `.[].verificationResult.statement.predicate`).
+- `--source-digest` pins the commit **that built the digest**. For a chart
+  that is the commit in its version. For an image it is the commit that first
+  published that digest, which can be older than the commit whose
+  `dev-<full git sha>` tag you resolved: pin it only when you know it, and
+  otherwise leave it out and read the commit from the output (next section).
+- `--limit` is how many attestations of the digest `gh` fetches and checks;
+  the default is 30. A digest published by this repository has one, so the
+  default is enough. Should a digest ever collect more than 30 (nothing in
+  this repository does that today), pass `--limit 1000`, the maximum: the
+  statement you pin with `--source-digest` is otherwise missed whenever it is
+  not among the 30 fetched. The publish workflow's own check always passes it.
 
 A chart is verified the same way, with its own reference:
 
@@ -101,6 +117,63 @@ gh attestation verify oci://quay.io/aethermesh/chart-aether@sha256:<digest> \
 The provenance covers the digest a tag resolves to: an image index, or a chart
 manifest. A per-architecture image manifest has a signature but is not an
 attestation subject, so verify provenance against the index digest.
+
+## Which commit built this digest
+
+Three things bind a digest to a commit, and none of them is inside the image.
+Do not look for the commit in the image itself: the
+`org.opencontainers.image.revision` label is going away (#1378), because a
+label is part of the digest, and a commit in the digest is what made every
+image change with every commit and every deploy roll every workload.
+
+| Where | What it names | How to read it |
+| --- | --- | --- |
+| The provenance attestation | the commit, workflow file and run that **first built** this digest | `gh attestation verify … --format json` (below) |
+| The cosign signature's certificate | the commit of the run that **first signed** this digest: the same run | pin it with `cosign verify … --certificate-github-workflow-sha <full git sha>`; a wrong value fails with `expected GithubWorkflowSHA to be "…", got "<the commit>"` |
+| The tag `dev-<full git sha>` | the digest that commit's publish **resolved to** | `crane digest quay.io/aethermesh/agent:dev-<full git sha>` |
+
+The tag goes from a commit to a digest, and every published commit has one:
+if commits A, B and C did not change the agent, `dev-A`, `dev-B` and `dev-C`
+all resolve to the same agent digest. The attestation and the signature go the
+other way, from a digest to exactly one commit, the first: A.
+
+```bash
+gh attestation verify oci://quay.io/aethermesh/agent@sha256:<digest> \
+  --repo bpalermo/aether \
+  --signer-workflow github.com/bpalermo/aether/.github/workflows/publish.yaml \
+  --format json |
+  jq -r '.[].verificationResult
+         | [.statement.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit,
+            .statement.predicate.runDetails.metadata.invocationId,
+            .verifiedTimestamps[0].timestamp]
+         | @tsv'
+```
+
+That prints the commit, the workflow run and the time the transparency log
+witnessed it. `.signature.certificate.sourceRepositoryDigest` holds the same
+commit, from the certificate rather than from the statement.
+
+What follows from "once, by the first commit":
+
+- `gh attestation verify --source-digest <C>` on an **image** passes only when
+  C is the commit that first built that digest. It fails for a later commit
+  that published the same digest unchanged, and that failure does not mean the
+  image is not genuine. Verify without `--source-digest` (the repository and
+  the signer workflow are still pinned) and read the commit.
+- **Every chart is new for every commit**: its version carries the commit and
+  so does its `appVersion`. A chart's signature and provenance therefore always
+  name the commit in its version, and `--source-digest <C>` is the right check
+  for `chart-<name>:<X.Y.Z>-<C>`.
+- So, to establish that what runs is what commit C published: resolve and
+  verify the chart at C with `--source-digest <C>`; the chart pins every image
+  by digest. Then verify each image digest it pins without a commit. Each was
+  built by C or by an earlier commit of this repository, and the output says
+  which.
+
+The publish workflow checks the same two ways after every run: a digest it
+attested in that run against that commit, and a digest it left alone against
+the workflow only. The run's summary lists every artifact with its digest,
+whether the digest is new, the commit its provenance names and the tag.
 
 ## What this does and does not establish
 
