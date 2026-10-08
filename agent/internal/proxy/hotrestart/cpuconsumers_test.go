@@ -28,6 +28,8 @@ type fakeStatFS struct {
 	// reads and lists count the calls, for the cost assertions; procLists is
 	// the listings of /proc itself (one per process scan).
 	reads, lists, procLists int
+	// listed is every directory a listing was asked for, in order.
+	listed []string
 }
 
 func newFakeStatFS() *fakeStatFS {
@@ -51,6 +53,7 @@ func (f *fakeStatFS) readFile(name string) ([]byte, error) {
 
 func (f *fakeStatFS) subdirs(dir string, limit int) ([]string, bool, error) {
 	f.lists++
+	f.listed = append(f.listed, dir)
 	if dir == fakeProcRoot {
 		f.procLists++
 	}
@@ -377,8 +380,8 @@ func TestCgroupUnreadThenReadIsNotATopConsumer(t *testing.T) {
 			}
 			set(0, 0, 0)
 			fs.cgroup("/kubepods/burstable/"+podB, time.Hour)
+			fs.files[onlineCPUsPath] = "0-3\n"
 			c := newTestConsumers(fs, 5)
-			c.ncpu = 4
 			c.roll(consumersT0)
 
 			// Second 1: the kubelet's and pod A's cpu.stat cannot be read; pod B
@@ -607,8 +610,8 @@ func TestProcessUnreadableThenReadableIsNotATopConsumer(t *testing.T) {
 	fs.files["/proc/703/stat"] = "703 (garbled-then-ok) S 1 2\n"
 	fs.process(704, "exits-mid-scan", time.Hour, 0, 1004)
 	fs.errs["/proc/704/stat"] = syscall.ESRCH
+	fs.files[onlineCPUsPath] = "0-3\n"
 	c := newTestConsumers(fs, 10)
-	c.ncpu = 4
 	c.roll(consumersT0)
 
 	fs.process(700, "kubelet", 100*time.Millisecond, 0, 1000)
@@ -720,11 +723,167 @@ func TestConsumersCoverTheWholeStall(t *testing.T) {
 	got := attrMap(t, report1(c, consumersT0.Add(10*time.Second), 5500*time.Millisecond))
 	assert.Equal(t, "/podruntime/kubelet=4800ms", got[attrTopCgroups])
 	assert.EqualValues(t, 6000, got[attrTopCgroupsOverMs], "the newest sample at least 5.5 s old")
+	assert.NotContains(t, got, "topCgroupsTruncated", "the whole stall is covered")
 
-	// Longer than everything kept: the oldest sample, and the field says how
-	// far back that is.
+	// Longer than everything kept: the oldest sample, the field says how far
+	// back that is, and the line says the start of the stall is not in it.
 	got = attrMap(t, report1(c, consumersT0.Add(11*time.Second), time.Hour))
 	assert.EqualValues(t, 11000, got[attrTopCgroupsOverMs])
+	assert.Equal(t, true, got["topCgroupsTruncated"])
+}
+
+// TestProcessConsumersSayWhenTheStallIsOlderThanTheBaseline: the same for the
+// process list, whose history is four scans.
+func TestProcessConsumersSayWhenTheStallIsOlderThanTheBaseline(t *testing.T) {
+	fs := newFakeStatFS()
+	fs.hostPIDNamespace()
+	fs.process(700, "kubelet", 0, 0, 1000)
+	c := newTestConsumers(fs, 5)
+	c.roll(consumersT0)
+
+	fs.process(700, "kubelet", 400*time.Millisecond, 0, 1000)
+	got := attrMap(t, report1(c, consumersT0.Add(3*time.Second), 2*time.Second))
+	assert.Equal(t, "kubelet(700)=400ms", got[attrTopProcs])
+	assert.EqualValues(t, 3000, got[attrTopProcsOverMs])
+	assert.NotContains(t, got, "topProcsTruncated", "a baseline from before the stall covers it")
+
+	fs.process(700, "kubelet", 500*time.Millisecond, 0, 1000)
+	got = attrMap(t, report1(c, consumersT0.Add(4*time.Second), time.Minute))
+	assert.EqualValues(t, 4000, got[attrTopProcsOverMs], "the oldest scan kept")
+	assert.Equal(t, true, got["topProcsTruncated"])
+}
+
+// TestStarvedEveryWindowStillListsNewCgroups: a node starved in every window
+// only ever reports, never rolls. The cgroup directories are still listed
+// again every cgroupListInterval, so a pod created during a long incident gets
+// its own entry instead of staying inside its parent's for as long as the
+// incident lasts. The listing is paid once per interval, not once per line.
+func TestStarvedEveryWindowStillListsNewCgroups(t *testing.T) {
+	const podNew = "pod12345678-1111-4222-8333-444455556666"
+	fs := newFakeStatFS()
+	fs.talosNode()
+	c := newTestConsumers(fs, 3)
+	c.roll(consumersT0)
+	lists := fs.lists
+	require.Positive(t, lists)
+
+	var listsAfter int
+	for i := 1; i <= 12; i++ {
+		// The new pod exists from the second second on and burns 600 ms in
+		// each.
+		if i >= 2 {
+			used := time.Duration(i-1) * 600 * time.Millisecond
+			fs.cgroup("/kubepods/burstable/"+podNew, used)
+			fs.cgroup("/kubepods/burstable", used)
+			fs.cgroup("/kubepods", used)
+			fs.cgroup("/", used)
+		}
+		got := attrMap(t, report1(c, consumersT0.Add(time.Duration(i)*time.Second), time.Second))
+		switch {
+		case i < 10:
+			assert.NotContains(t, got[attrTopCgroups], podNew, "second %d: not listed yet", i)
+			assert.Equal(t, lists, fs.lists, "second %d: no listing inside the interval", i)
+		case i == 10:
+			assert.Equal(t, "/kubepods/burstable/"+podNew+"=600ms", got[attrTopCgroups],
+				"listed in the starved window the interval ran out in, and held to its parent's second")
+			listsAfter = fs.lists
+			assert.Greater(t, listsAfter, lists)
+		default:
+			assert.Equal(t, "/kubepods/burstable/"+podNew+"=600ms", got[attrTopCgroups], "second %d", i)
+			assert.Equal(t, listsAfter, fs.lists, "second %d: one listing per interval, not one per line", i)
+		}
+	}
+}
+
+// TestListingInAStarvedWindowIsInsideTheScanBudget: the listing a report makes
+// shares the report's one scan budget, a listing that runs out of it costs that
+// one line its cgroups, and the next line does not try again.
+func TestListingInAStarvedWindowIsInsideTheScanBudget(t *testing.T) {
+	fs := newFakeStatFS()
+	fs.talosNode()
+	c := newTestConsumers(fs, 3)
+	c.roll(consumersT0)
+	known := len(c.cgroupPaths)
+	for i := range 600 {
+		fs.cgroup("/kubepods/besteffort/pod"+fmt.Sprintf("%08x", i), 0)
+	}
+
+	// Every look at the clock is 1 ms later: 250 files, then the deadline.
+	tick := consumersT0
+	c.clock = func() time.Time { tick = tick.Add(time.Millisecond); return tick }
+	readsBefore, listsBefore := fs.reads, fs.lists
+	got := attrMap(t, report1(c, consumersT0.Add(10*time.Second), time.Second))
+	assert.Equal(t, "unavailable: scan exceeded its time budget", got[attrTopCgroups])
+	assert.Greater(t, fs.lists, listsBefore, "the listing was due and was tried")
+	assert.Less(t, fs.reads-readsBefore, 300, "and stopped at the deadline")
+	assert.Len(t, c.cgroupPaths, known, "the last good set is kept")
+
+	c.clock = func() time.Time { return consumersT0 }
+	listsBefore = fs.lists
+	fs.cgroup("/init", 300*time.Millisecond)
+	fs.cgroup("/", 300*time.Millisecond)
+	got = attrMap(t, report1(c, consumersT0.Add(11*time.Second), time.Second))
+	assert.Equal(t, "/init=300ms", got[attrTopCgroups], "the next line reads the known set")
+	assert.Equal(t, listsBefore, fs.lists, "and lists nothing")
+}
+
+// TestConsumerBoundIsTheNodesCPUCount: the figures are node-wide, so what is
+// possible in an interval is the interval on every CPU of the NODE. The CPUs
+// this process may run on (its cpuset) say nothing about that: a proxy held to
+// two CPUs of a large node must not cut the node's usage down to two CPUs'
+// worth, and then rank what is left.
+func TestConsumerBoundIsTheNodesCPUCount(t *testing.T) {
+	burn := func(fs *fakeStatFS, kubelet, pod time.Duration) {
+		fs.cgroup("/podruntime/kubelet", kubelet)
+		fs.cgroup("/podruntime", kubelet)
+		fs.cgroup("/kubepods/burstable/"+podA, pod)
+		fs.cgroup("/kubepods/burstable", pod)
+		fs.cgroup("/kubepods", pod)
+		fs.cgroup("/", kubelet+pod)
+	}
+	const wantUnbounded = "/kubepods/burstable/" + podA + "=3000000ms /podruntime/kubelet=1000000ms"
+	t.Run("more CPUs than this process could ever have", func(t *testing.T) {
+		fs := newFakeStatFS()
+		fs.talosNode()
+		fs.files[onlineCPUsPath] = "0-4095\n"
+		c := newTestConsumers(fs, 5)
+		c.roll(consumersT0)
+		// One second on a 4096-CPU node: the pod used 3000 CPU-seconds, the
+		// kubelet 1000. Held to this process's own CPU count, the root's delta
+		// would be cut to a fraction of that and shared out in path order,
+		// and the pod, the real top consumer, would not lead the list.
+		burn(fs, 1000*time.Second, 3000*time.Second)
+		got := attrMap(t, report1(c, consumersT0.Add(time.Second), time.Second))
+		assert.Equal(t, wantUnbounded, got[attrTopCgroups])
+	})
+	t.Run("the node's count still bounds", func(t *testing.T) {
+		fs := newFakeStatFS()
+		fs.talosNode()
+		fs.files[onlineCPUsPath] = "0-1,4-5\n"
+		c := newTestConsumers(fs, 5)
+		c.roll(consumersT0)
+		burn(fs, 9*time.Second, 0)
+		got := attrMap(t, report1(c, consumersT0.Add(time.Second), time.Second))
+		assert.Equal(t, "/podruntime/kubelet=4000ms", got[attrTopCgroups], "1 s on the node's 4 CPUs")
+	})
+	t.Run("unreadable: no bound rather than the wrong one", func(t *testing.T) {
+		for name, breakIt := range map[string]func(*fakeStatFS){
+			"missing":   func(*fakeStatFS) {},
+			"EIO":       func(fs *fakeStatFS) { fs.errs[onlineCPUsPath] = syscall.EIO },
+			"malformed": func(fs *fakeStatFS) { fs.files[onlineCPUsPath] = "all of them\n" },
+		} {
+			t.Run(name, func(t *testing.T) {
+				fs := newFakeStatFS()
+				fs.talosNode()
+				breakIt(fs)
+				c := newTestConsumers(fs, 5)
+				c.roll(consumersT0)
+				burn(fs, 1000*time.Second, 3000*time.Second)
+				got := attrMap(t, report1(c, consumersT0.Add(time.Second), time.Second))
+				assert.Equal(t, wantUnbounded, got[attrTopCgroups])
+			})
+		}
+	})
 }
 
 func TestSampleHistory(t *testing.T) {
@@ -844,6 +1003,25 @@ func TestConsumerScanIsBounded(t *testing.T) {
 		got := attrMap(t, report1(c, consumersT0.Add(time.Second), time.Second))
 		assert.Equal(t, "unavailable: scan exceeded its time budget", got[attrTopCgroups])
 		assert.Equal(t, 1, fs.reads-readsBefore, "only the root was read")
+	})
+	t.Run("no directory is listed after the deadline", func(t *testing.T) {
+		// The read of /kubepods' cpu.stat uses the budget up. The walk must
+		// stop there: listing /kubepods next would put a directory listing on
+		// top of the read the scan is already over by.
+		fs := newFakeStatFS()
+		fs.talosNode()
+		c := newTestConsumers(fs, 5)
+		clock := consumersT0
+		c.clock = func() time.Time { return clock }
+		fs.onRead = func(name string) {
+			if name == path.Join(fakeCgroupRoot, "kubepods", "cpu.stat") {
+				clock = clock.Add(consumerScanBudget + 50*time.Millisecond)
+			}
+		}
+		c.roll(consumersT0)
+		require.ErrorIs(t, c.cgroupListErr, errScanBudget)
+		assert.Equal(t, []string{fakeCgroupRoot, path.Join(fakeCgroupRoot, "init")}, fs.listed,
+			"the root and /init, read before the deadline; not /kubepods, whose read ran past it")
 	})
 	t.Run("too many processes", func(t *testing.T) {
 		fs := newFakeStatFS()
@@ -1180,6 +1358,88 @@ func TestStallLineFirstWindowHasABaseline(t *testing.T) {
 	require.Len(t, recs, 1)
 	assert.Equal(t, "/init=400ms", recs[0][attrTopCgroups])
 	assert.EqualValues(t, 1000, recs[0][attrTopCgroupsOverMs])
+}
+
+// TestStallLineCoversAWaitThatBeganBeforeTheWindow: the kernel charges a
+// runqueue wait when it ends, and the sampler sees it on the next tick. A
+// 500 ms wait seen 100 ms into a window began 400 ms before that window, in a
+// second somebody else had the CPUs. The line's consumers must cover that
+// second too: the ones of the window alone are not the ones that caused it.
+func TestStallLineCoversAWaitThatBeganBeforeTheWindow(t *testing.T) {
+	proc := newFakeProc(t)
+	logs := &capturedLog{}
+	s := newTestStallSampler(proc, logs, nil, map[int]int{testEpoch: testPID})
+	fs := newFakeStatFS()
+	fs.talosNode()
+	s.consumers = newTestConsumers(fs, 5)
+
+	proc.thread(testPID, testPID, "envoy", 'S', 0, 0, "do_epoll_wait")
+	t0 := consumersT0
+	s.tick(t0)
+	s.tick(t0.Add(time.Second)) // a quiet second
+
+	// Second 2: the kubelet holds the CPUs. The thread starts waiting at
+	// 1.6 s; nothing is charged yet, so the window closes quiet.
+	fs.cgroup("/podruntime/kubelet", 900*time.Millisecond)
+	fs.cgroup("/podruntime", 900*time.Millisecond)
+	fs.cgroup("/", 900*time.Millisecond)
+	s.tick(t0.Add(2 * time.Second))
+	require.Empty(t, logs.records(t, "envoy thread stall"))
+
+	// Second 3: the wait ends at 2.1 s and is seen on that tick. For the rest
+	// of the second only /init does a little.
+	proc.thread(testPID, testPID, "envoy", 'R', 0, 500*time.Millisecond, "")
+	s.tick(t0.Add(2100 * time.Millisecond))
+	fs.cgroup("/init", 50*time.Millisecond)
+	fs.cgroup("/", 950*time.Millisecond)
+	s.tick(t0.Add(3 * time.Second))
+
+	recs := logs.records(t, "envoy thread stall")
+	require.Len(t, recs, 1)
+	assert.Contains(t, toStrings(t, recs[0]["threads"])[0], "envoy[starved] cpu=0ms runq=500ms")
+	assert.Equal(t, "/podruntime/kubelet=900ms /init=50ms", recs[0][attrTopCgroups],
+		"from the sample before the wait began (1 s), not from the window's start (2 s)")
+	assert.EqualValues(t, 2000, recs[0][attrTopCgroupsOverMs])
+	assert.NotContains(t, recs[0], "topCgroupsTruncated")
+
+	// A wait wholly inside its window is still measured over the window.
+	fs.cgroup("/init", 350*time.Millisecond)
+	fs.cgroup("/", 1250*time.Millisecond)
+	proc.thread(testPID, testPID, "envoy", 'R', 0, 800*time.Millisecond, "")
+	s.tick(t0.Add(3500 * time.Millisecond))
+	s.tick(t0.Add(4 * time.Second))
+	recs = logs.records(t, "envoy thread stall")
+	require.Len(t, recs, 2)
+	assert.Equal(t, "/init=300ms", recs[1][attrTopCgroups])
+	assert.EqualValues(t, 1000, recs[1][attrTopCgroupsOverMs])
+}
+
+// TestStallLineSaysWhenTheStallIsOlderThanTheHistory: a wait that began before
+// the oldest cgroup sample kept is measured from that sample, and the line
+// says so instead of leaving it to be worked out from two numbers.
+func TestStallLineSaysWhenTheStallIsOlderThanTheHistory(t *testing.T) {
+	proc := newFakeProc(t)
+	logs := &capturedLog{}
+	s := newTestStallSampler(proc, logs, nil, map[int]int{testEpoch: testPID})
+	fs := newFakeStatFS()
+	fs.talosNode()
+	s.consumers = newTestConsumers(fs, 5)
+
+	proc.thread(testPID, testPID, "envoy", 'S', 0, 0, "do_epoll_wait")
+	for i := range cgroupHistoryLen + 8 {
+		s.tick(consumersT0.Add(time.Duration(i) * time.Second))
+	}
+	require.Len(t, s.consumers.cgroups.samples, cgroupHistoryLen)
+	end := consumersT0.Add(time.Duration(cgroupHistoryLen+8) * time.Second)
+	fs.cgroup("/init", 700*time.Millisecond)
+	fs.cgroup("/", 700*time.Millisecond)
+	proc.thread(testPID, testPID, "envoy", 'R', 0, time.Duration(cgroupHistoryLen+4)*time.Second, "")
+	s.tick(end)
+
+	recs := logs.records(t, "envoy thread stall")
+	require.Len(t, recs, 1)
+	assert.EqualValues(t, cgroupHistoryLen*1000, recs[0][attrTopCgroupsOverMs], "from the oldest sample kept")
+	assert.Equal(t, true, recs[0]["topCgroupsTruncated"])
 }
 
 // countingFS counts what one sample reads from the real filesystems.
