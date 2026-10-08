@@ -18,14 +18,18 @@ import (
 //
 //	AETHER_PROBE_FAIL {"t":...,"tier":...,"target":...,"result":...,"err":...,"elapsed_ms":...,
 //	  "phase":...,"reused":...,"conn_ms":...,"dns_ms":...,"connect_ms":...,"tls_ms":...,
-//	  "write_ms":...,"ttfb_ms":...,"pod":...,"node":...,"n":...,"truncated":...}
+//	  "write_ms":...,"ttfb_ms":...,"dial":...,"remote":...,"local":...,"trace_id":...,
+//	  "pod":...,"node":...,"n":...,"truncated":...}
 //
 // the same shape as the soak's k6 AETHER_FAIL sample (e2e/soak/k6-mesh-soak.js): one
 // JSON object per line behind a fixed greppable marker, with the timestamp as the
 // load-bearing field. elapsed_ms separates a probe that burned the whole 2 s budget
 // (timeout) from a fast refusal (connection_error); phase and the *_ms fields (#1252, see
 // phase.go) say which step of the request the time went to. Every key is always present;
-// a *_ms of -1 means that phase never started.
+// a *_ms of -1 means that phase never started. pod and node are the prober's own: the
+// SOURCE. dial, remote, local and trace_id (#1391, see phaseTimings) are what the
+// client knows of where the probe went, and the key that finds the rest in the proxies'
+// access logs.
 //
 // It is bounded so a burst cannot flood the log pipeline: at most failLogCap detail lines
 // per (tier, result) per failLogWindow. Past the cap the failures are only counted, and

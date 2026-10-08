@@ -876,7 +876,7 @@ promotes `host.name` ahead of `k8s.node.name` would export `node="prober-xxxxx"`
 is what happened until #1041.
 
 **Failure log.** Every non-success probe prints one bounded
-`AETHER_PROBE_FAIL {t, tier, target, result, err, elapsed_ms, phase, reused, conn_ms, dns_ms, connect_ms, tls_ms, write_ms, ttfb_ms, pod, node, n, truncated}`
+`AETHER_PROBE_FAIL {t, tier, target, result, err, elapsed_ms, phase, reused, conn_ms, dns_ms, connect_ms, tls_ms, write_ms, ttfb_ms, dial, remote, local, trace_id, pod, node, n, truncated}`
 line to stdout: at most 20 per `(tier, result)` per minute, then one summary line with
 the `suppressed` count (#1040). `phase` and the `*_ms` fields come from a per-probe
 `httptrace` trace and say which step of the request the time went to (#1252; `-1` =

@@ -1225,6 +1225,18 @@ On 2026-10-01 it was 19 lines for 1 liveness + 7 + 11 mesh_dns `timeout`.
 > 70,593 L4 records. The `_stream:{service.name="aether-proxy"} AND "k8s.container.name":proxy`
 > form is correct for the supervisor and Envoy stdout, which do carry the stream.
 
+**`node` on these series and on these lines is the node the PROBER runs on: the source
+of the request, never where it went (#1391).** `target` is the name it asked for. The
+metric has no destination. Each failed probe's line carries `dial`, `remote` and `local`
+(the address it dialled and the two ends of its connection, which on the mesh ends at
+the source node's own proxy) and `trace_id`, the trace id of the `traceparent` header it
+sent. The access-log rows of the same request carry that trace id (and each proxy's own
+span id after it, so search by prefix):
+`log_name:aether_access_logs AND traceparent:"00-<trace_id>-"*`. The `reporter:source`
+row's `upstream_host` is the endpoint the proxy chose, and a `reporter:destination` row
+is the node it arrived on. A probe that failed in `dns` or `connect` has no row.
+`docs/runbook.md`, "Where a failed probe went".
+
 Put each burst's `t` and `node` next to that node's proxy parent-exit and mesh-dns
 handoff times. `elapsed_ms` of about 2000 means the probe used its whole budget
 (`timeout`), and a few ms means a fast refusal (`connection_error`). `phase` says where
@@ -2291,7 +2303,18 @@ Each of these invalidated a real run:
 ## Files
 
 - `echo.yaml` — the mesh_dns SLI target (3 replicas, soft hostname spread). Apply before
-  a run; it is the workload the mesh_dns tier actually measures.
+  a run; it is the workload the mesh_dns tier actually measures. **Quiet (#1395):**
+  `echo-basic` prints one stdout line per request and has no switch for it, and its
+  image has no shell. An init container copies a static busybox in as `sh`, and the
+  server is `exec`'d through it with stdout on `/dev/null` (still PID 1; stderr kept).
+  `multiprotocol.yaml` does the same for `mixed-svc`'s `http-echo`. Measured with the
+  two images under plain docker, started as the manifests start them, 20 requests each:
+  `echo-basic` 22 stdout lines without it (two at start-up) and none with it,
+  `http-echo` 20 and none (its start-up line is on stderr and stays); the server is
+  PID 1 either way. Not yet run on a cluster. **`svc-1` … `svc-5` are `echo-basic`
+  too and are not defined in this repository**: wherever they are, give them the same
+  `initContainers`, `command`, `volumeMounts` and `volumes` (copy them from `echo.yaml`),
+  or they go on logging a line per request.
 - `run.sh` — the one kickoff (proposal 042, #1323): `e2e` and `soak` modes, explicit
   `--context`. See "Load driver: sortie".
 - `sortie-values.yaml` — Helm values for the sortie chart: the engine DaemonSet, its
