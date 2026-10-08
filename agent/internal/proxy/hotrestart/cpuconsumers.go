@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -335,7 +336,10 @@ func parseCgroupUsage(b []byte) (uint64, error) {
 // cgroupDeltas turns two samples into CPU time per cgroup over the interval,
 // EXCLUSIVE of the sampled cgroups below it, so the entries do not overlap and
 // the list can be ranked: "/kubepods" is what ran in /kubepods outside every
-// pod that has its own entry. A pod's entry, and any cgroup at the depth limit,
+// pod that has its own entry, and "/" is what was charged to the root cgroup
+// itself once every sampled cgroup below it is taken out (commonly kernel
+// threads, but also any userspace task attached directly to the root; every
+// task is in some cgroup). A pod's entry, and any cgroup at the depth limit,
 // is its whole subtree.
 //
 // A cgroup that is only in the earlier sample was removed: the kernel keeps its
@@ -437,6 +441,11 @@ type procUse struct {
 type procSample struct {
 	at    time.Time
 	procs map[procKey]procUse
+	// unknown is the PIDs that were listed but whose stat could not be read or
+	// parsed for a reason other than the process having exited. The process
+	// is there and its counters are not known, so a later sample that can
+	// read it has nothing to take a delta from.
+	unknown map[int]struct{}
 }
 
 func (s procSample) when() time.Time { return s.at }
@@ -489,13 +498,27 @@ func ticksToUsec(utime, stime uint64) uint64 {
 // started inside the interval, so all of its CPU time counts. One that exited
 // is not listed: what it used after the earlier sample is not recorded
 // anywhere this can read (its cgroup's entry has it).
-func procDeltas(base, cur procSample) []consumer {
+//
+// A process the earlier scan listed but could not read is not listed either:
+// it is not new, and charging it as new would put its whole lifetime's CPU on
+// the line. (Failing the whole scan instead would let one entry that is never
+// readable turn the field off for good.) And whatever the cause, no process can
+// have used more than the interval on every CPU, so each figure is held to
+// that: a wrong baseline can then mislead by at most what was possible.
+func procDeltas(base, cur procSample, ncpu int) []consumer {
+	limit := uint64(math.MaxUint64)
+	if span := cur.at.Sub(base.at); span > 0 && ncpu > 0 {
+		limit = uint64(span.Microseconds()) * uint64(ncpu)
+	}
 	out := make([]consumer, 0, len(cur.procs))
 	for k, now := range cur.procs {
 		d := now.usec
 		if before, seen := base.procs[k]; seen {
 			d = counterDelta(d, before.usec)
+		} else if _, unread := base.unknown[k.pid]; unread {
+			continue
 		}
+		d = min(d, limit)
 		out = append(out, consumer{
 			name: headName(cleanName(now.comm), procNameMax) + "(" + strconv.Itoa(k.pid) + ")",
 			cpu:  usecDuration(d),
@@ -520,7 +543,9 @@ func (h *sampleHistory[S]) push(s S) {
 }
 
 // baseline returns the newest sample taken at or before since — the latest
-// "before" that still covers the whole stall — or the oldest one kept when the
+// "before" that still covers the whole stall — or the oldest one kept (so only
+// the END of the stall is covered, and the reported interval is shorter than
+// the stall) when the
 // stall began before all of them.
 func (h *sampleHistory[S]) baseline(since time.Time) (S, bool) {
 	if len(h.samples) == 0 {
@@ -545,6 +570,8 @@ type cpuConsumers struct {
 	topN       int
 	// clock is the wall clock the scan budget is measured on.
 	clock func() time.Time
+	// ncpu bounds one process's CPU time over an interval.
+	ncpu int
 
 	cgroups sampleHistory[cgroupSample]
 	procs   sampleHistory[procSample]
@@ -573,6 +600,7 @@ func newCPUConsumers(fs statFS, procRoot, cgroupRoot string, topN int) *cpuConsu
 		cgroupRoot: cgroupRoot,
 		topN:       min(topN, maxStallTopConsumers),
 		clock:      time.Now,
+		ncpu:       runtime.NumCPU(),
 		cgroups:    sampleHistory[cgroupSample]{limit: cgroupHistoryLen},
 		procs:      sampleHistory[procSample]{limit: procHistoryLen},
 	}
@@ -665,7 +693,7 @@ func (c *cpuConsumers) procTop(cur procSample, err error, since time.Time) ([]co
 	if !ok {
 		return nil, 0, errNoBaseline
 	}
-	return topConsumers(procDeltas(base, cur), c.topN), cur.at.Sub(base.at), nil
+	return topConsumers(procDeltas(base, cur, c.ncpu), c.topN), cur.at.Sub(base.at), nil
 }
 
 func appendTop(attrs []any, key, overKey string, top []consumer, over time.Duration, err error) []any {
@@ -693,6 +721,9 @@ func (b *scanBudget) spent() bool {
 // relist, or when none is known yet, it first walks the hierarchy from the root
 // down to pod level to find them.
 func (c *cpuConsumers) sampleCgroups(now time.Time, relist bool) (cgroupSample, error) {
+	// The budget starts before the first file: a slow read of the root's
+	// cpu.stat is charged to it like any other.
+	budget := c.newBudget()
 	root, err := c.cgroupUsage("/")
 	if err != nil {
 		// cgroup v1 has no cpu.stat at the top of /sys/fs/cgroup (it has one
@@ -700,9 +731,11 @@ func (c *cpuConsumers) sampleCgroups(now time.Time, relist bool) (cgroupSample, 
 		// cgroupfs mounted.
 		return cgroupSample{}, fmt.Errorf("%w (%w)", errNoCgroupV2, err)
 	}
+	if budget.spent() {
+		return cgroupSample{}, errScanBudget
+	}
 	s := cgroupSample{at: now, usage: make(map[string]uint64, len(c.cgroupPaths)+1)}
 	s.usage["/"] = root
-	budget := c.newBudget()
 	if c.cgroupPaths == nil {
 		// Nothing to fall back on: list now, unless the last attempt failed
 		// less than an interval ago.
@@ -836,7 +869,7 @@ func (c *cpuConsumers) sampleProcs(now time.Time) (procSample, error) {
 	if more {
 		return procSample{}, fmt.Errorf("%w (more than %d entries in /proc)", errTooMany, procMaxCount)
 	}
-	s := procSample{at: now, procs: make(map[procKey]procUse, len(names))}
+	s := procSample{at: now, procs: make(map[procKey]procUse, len(names)), unknown: map[int]struct{}{}}
 	for _, name := range names {
 		pid, convErr := strconv.Atoi(name)
 		if convErr != nil {
@@ -846,11 +879,16 @@ func (c *cpuConsumers) sampleProcs(now time.Time) (procSample, error) {
 			return procSample{}, errScanBudget
 		}
 		b, readErr := c.fs.readFile(path.Join(c.procRoot, name, "stat"))
+		if errors.Is(readErr, syscall.ENOENT) || errors.Is(readErr, syscall.ESRCH) {
+			continue // exited since the listing
+		}
 		if readErr != nil {
-			continue // exited since the listing, or not readable
+			s.unknown[pid] = struct{}{} // there, and not ours to read
+			continue
 		}
 		comm, usec, start, parseErr := parseProcCPU(b)
 		if parseErr != nil {
+			s.unknown[pid] = struct{}{}
 			continue
 		}
 		s.procs[procKey{pid: pid, start: start}] = procUse{comm: comm, usec: usec}

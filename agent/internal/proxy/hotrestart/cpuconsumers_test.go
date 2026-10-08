@@ -23,6 +23,8 @@ import (
 type fakeStatFS struct {
 	files map[string]string
 	errs  map[string]error
+	// onRead, when set, runs before every readFile (a read that takes time).
+	onRead func(name string)
 	// reads and lists count the calls, for the cost assertions; procLists is
 	// the listings of /proc itself (one per process scan).
 	reads, lists, procLists int
@@ -34,6 +36,9 @@ func newFakeStatFS() *fakeStatFS {
 
 func (f *fakeStatFS) readFile(name string) ([]byte, error) {
 	f.reads++
+	if f.onRead != nil {
+		f.onRead(name)
+	}
 	if err := f.errs[name]; err != nil {
 		return nil, err
 	}
@@ -474,6 +479,56 @@ func TestProcessConsumersSkipUnreadableEntries(t *testing.T) {
 	assert.Equal(t, "kubelet(700)=100ms", got[attrTopProcs])
 }
 
+// TestProcessUnreadableThenReadableIsNotATopConsumer: a long-lived process the
+// baseline scan could not read (or parse) and the next scan can is not a new
+// process. Charged as one, its whole lifetime's CPU would top the list. A
+// process that merely EXITED during the baseline scan and whose PID is then
+// reused is new, and is listed.
+func TestProcessUnreadableThenReadableIsNotATopConsumer(t *testing.T) {
+	fs := newFakeStatFS()
+	fs.hostPIDNamespace()
+	fs.process(700, "kubelet", 0, 0, 1000)
+	fs.process(701, "denied-then-ok", 3*time.Hour, 0, 1001)
+	fs.errs["/proc/701/stat"] = syscall.EACCES
+	fs.files["/proc/703/stat"] = "703 (garbled-then-ok) S 1 2\n"
+	fs.process(704, "exits-mid-scan", time.Hour, 0, 1004)
+	fs.errs["/proc/704/stat"] = syscall.ESRCH
+	c := newTestConsumers(fs, 10)
+	c.ncpu = 4
+	c.roll(consumersT0)
+
+	fs.process(700, "kubelet", 100*time.Millisecond, 0, 1000)
+	delete(fs.errs, "/proc/701/stat")
+	fs.process(701, "denied-then-ok", 3*time.Hour+20*time.Millisecond, 0, 1001)
+	fs.process(703, "garbled-then-ok", 2*time.Hour, 0, 1003)
+	delete(fs.errs, "/proc/704/stat")
+	fs.process(704, "pid-reused", 50*time.Millisecond, 0, 9000)
+
+	got := attrMap(t, report1(c, consumersT0.Add(time.Second), time.Second))
+	assert.Equal(t, "kubelet(700)=100ms pid-reused(704)=50ms", got[attrTopProcs])
+
+	// This scan read them, so the next window has their deltas.
+	fs.process(701, "denied-then-ok", 3*time.Hour+320*time.Millisecond, 0, 1001)
+	got = attrMap(t, report1(c, consumersT0.Add(2*time.Second), time.Second))
+	assert.Equal(t, "denied-then-ok(701)=300ms", got[attrTopProcs])
+}
+
+// TestProcessDeltaIsHeldToWhatWasPossible: whatever went wrong with a
+// baseline, one process cannot be shown using more than the interval on every
+// CPU.
+func TestProcessDeltaIsHeldToWhatWasPossible(t *testing.T) {
+	base := procSample{at: consumersT0, procs: map[procKey]procUse{}}
+	cur := procSample{at: consumersT0.Add(2 * time.Second), procs: map[procKey]procUse{
+		{pid: 9, start: 1}:  {comm: "old-and-never-seen", usec: uint64((5 * time.Hour).Microseconds())},
+		{pid: 10, start: 2}: {comm: "real", usec: 1_500_000},
+	}}
+	assert.Equal(t, "old-and-never-seen(9)=8000ms real(10)=1500ms",
+		formatConsumers(topConsumers(procDeltas(base, cur, 4), 5)), "2 s on 4 CPUs is 8000 ms")
+	// No interval or no CPU count to bound by: the figures are left alone.
+	cur.at = base.at
+	assert.Contains(t, formatConsumers(topConsumers(procDeltas(base, cur, 4), 5)), "old-and-never-seen(9)=18000000ms")
+}
+
 // TestProcessConsumersNeedTheHostPIDNamespace: in the pod's own PID namespace
 // /proc lists this container, which the stall line already describes. The scan
 // is not made at all, and the field says why.
@@ -647,13 +702,34 @@ func TestConsumerScanIsBounded(t *testing.T) {
 		looks := 0
 		c.clock = func() time.Time {
 			looks++
-			if looks == len(c.cgroupPaths)+2 { // the deadline, one per cgroup, then the final check
+			if looks == len(c.cgroupPaths)+3 { // the deadline, the root, one per cgroup, then the final check
 				return consumersT0.Add(time.Hour)
 			}
 			return consumersT0
 		}
 		got = attrMap(t, report1(c, consumersT0.Add(2*time.Second), time.Second))
 		assert.Equal(t, "unavailable: scan exceeded its time budget", got[attrTopCgroups])
+	})
+	t.Run("a slow read of the root is inside the budget", func(t *testing.T) {
+		// The root's cpu.stat is the first file of a cgroup scan. If reading
+		// it alone uses the budget up, the scan stops there: no second budget
+		// for the hierarchy.
+		fs := newFakeStatFS()
+		fs.talosNode()
+		c := newTestConsumers(fs, 5)
+		c.roll(consumersT0)
+		// Time passes only while the root's cpu.stat is being read: 300 ms.
+		clock := consumersT0
+		c.clock = func() time.Time { return clock }
+		fs.onRead = func(name string) {
+			if name == path.Join(fakeCgroupRoot, "cpu.stat") {
+				clock = clock.Add(consumerScanBudget + 50*time.Millisecond)
+			}
+		}
+		readsBefore := fs.reads
+		got := attrMap(t, report1(c, consumersT0.Add(time.Second), time.Second))
+		assert.Equal(t, "unavailable: scan exceeded its time budget", got[attrTopCgroups])
+		assert.Equal(t, 1, fs.reads-readsBefore, "only the root was read")
 	})
 	t.Run("too many processes", func(t *testing.T) {
 		fs := newFakeStatFS()

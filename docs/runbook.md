@@ -3416,7 +3416,7 @@ UID, and a path longer than 64 bytes keeps its tail behind `...`.)
 | field | meaning |
 |---|---|
 | `topCgroups` | The cgroups that used the most CPU time, largest first, as `<cgroup path>=<n>ms`. At most `--stall-top-consumers` entries (default 5, at most 20; 0 turns the consumer sampling off; the chart does not pass the flag, so the default applies). CPU time, not wall time: on a 4-core node one second holds up to 4000 ms. |
-| `topCgroupsOverMs` | The interval the figures cover. It is the stall, not the window: a thread that waited 5 s is reported in the second its wait ended, and the consumers are taken over those 5 s (rounded out to the one-second samples). |
+| `topCgroupsOverMs` | The interval the figures cover. It is the stall, not the window: a thread that waited 5 s is reported in the second its wait ended, and the consumers are taken over those 5 s (rounded out to the one-second samples). The field is the interval actually measured, so compare it with the thread's `runq=`: the supervisor keeps 32 cgroup samples (about 32 s) and 4 process scans, and a wait longer than that history is measured from the oldest sample kept. A `topCgroupsOverMs` shorter than `runq=` therefore means the figures cover only the END of the stall. |
 | `topProcs`, `topProcsOverMs` | The same per process, as `<comm>(<pid>)=<n>ms`. Only when the proxy pod shares the host PID namespace, which the chart does not ask for; otherwise the field says so. |
 | `unavailable: <reason>` | The value of `topCgroups` or `topProcs` when that source could not be read (no cgroup v2, only the container's own cgroup visible, a scan over its 250 ms budget, no earlier sample yet). The stall line is logged regardless. |
 
@@ -3424,7 +3424,10 @@ How to read `topCgroups`:
 
 - The entries do not overlap. Each cgroup's figure excludes the cgroups below it that
   have their own entry, so `/kubepods/burstable` is what ran there outside every pod and
-  `/` is what ran in no cgroup at all (kernel threads). A pod is one entry: its
+  `/` is what was charged to the root cgroup itself once every listed cgroup below it is
+  taken out. That is commonly kernel threads, but a userspace task attached directly to
+  the root is counted there too (every task is in some cgroup), so `/` alone does not
+  name the consumer. A pod is one entry: its
   containers are not listed separately.
 - On Talos the kubelet is `/podruntime/kubelet`, containerd `/podruntime/runtime`, the
   Talos services `/system/<name>`, and a pod `/kubepods/[burstable/|besteffort/]pod<uid>`.
