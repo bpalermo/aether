@@ -148,6 +148,42 @@ sh_test(
     ],
 )
 
+# publish.yaml's sign steps (#1378): an artifact is signed only when it is not
+# signed already, and "signed" means the manifest and every child of an index,
+# under this workflow's identity. A fake `curl` is the registry, a fake `bazel`
+# runs the REAL verify-image-signatures.sh against a fake `cosign`. `moderate`:
+# a signed image costs a full child walk, each one sourcing registry-lib.sh
+# (~0.5 s); about 75 s on an idle machine.
+sh_test(
+    name = "publish_sign_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = ["publish_sign_test.sh"],
+    data = [
+        "image-registry.sh",
+        "publish-sign.sh",
+        "published-chart-refs.sh",
+        "registry-lib.sh",
+        "verify-image-signatures.sh",
+    ],
+)
+
+# publish.yaml's provenance steps (#1378): only a digest with no provenance yet
+# is attested, an unanswered lookup fails the step, every digest is verified
+# afterwards (a new one against this commit, an unchanged one against the
+# workflow alone), and the run summary says which is which. A fake `gh` is the
+# attestation store. The workflow is data so the test can hold its steps to the
+# scripts: the attest step skipped when nothing is new, no inline signing left.
+sh_test(
+    name = "publish_provenance_test",
+    size = "small",
+    srcs = ["publish_provenance_test.sh"],
+    data = [
+        "publish-provenance.sh",
+        "//:ci_definitions",
+    ],
+)
+
 # The same decision applied to the scheduled sweep's push heads (#1282):
 # which heads `verify-published-artifacts.sh --recent` skips as superseded.
 sh_test(
