@@ -97,6 +97,100 @@ Usage:
 {{- end -}}
 
 {{/*
+The `topologySpreadConstraints:` key of a multi-replica Deployment's pod spec
+(the registrar, the controller, the edge; #1434), or nothing.
+
+  <component>.topologySpreadConstraints   non-empty: rendered as given. It
+                                          REPLACES the chart's constraint, it is
+                                          not merged with it, and nodeSpread is
+                                          then not consulted beyond validation.
+  <component>.nodeSpread                  soft      one constraint over
+                                                    kubernetes.io/hostname,
+                                                    maxSkew 1, ScheduleAnyway
+                                          required  the same, DoNotSchedule
+                                          none      no constraint
+
+What the default is built from was measured, not reasoned (kind, Kubernetes
+1.35, one tainted control plane plus two or three workers, the three
+Deployments rolled together twenty times as a chart upgrade rolls them;
+rollouts that ended with both replicas of a Deployment on one node, as
+controller / edge / registrar):
+
+                                               2 workers      3 workers
+  chart 2.4.18                                 8 / 5 / 10     1 / 0 / 5
+  the same without the controller's
+    "off the registrars' node" term            0 / 6 / 2      0 / 0 / 1
+  this constraint, that term kept              9 / 0 / 11     1 / 0 / 3
+  this constraint, that term gone (2.4.20)     0 / 0 / 0      0 / 0 / 0
+
+Two causes, then. The larger one was the controller's default preferred
+anti-affinity against the registrars' node (controller-deployment.yaml says
+why it cancelled the spread). The smaller one is what
+`matchLabelKeys: [pod-template-hash]` removes: without it the constraint
+counts the old ReplicaSet's pods beside the new ones during a rollout. The
+field is on by default for spread constraints from Kubernetes 1.27 (for pod
+anti-affinity only from 1.31, one reason this is a spread constraint).
+
+The other reason: `required` cannot wedge a small cluster. DoNotSchedule with
+maxSkew 1 refuses a node only while another counted node holds fewer
+replicas, so two replicas on a single node, or three on one, still schedule
+(run on kind). Required pod anti-affinity leaves every replica beyond the node
+count Pending, and a surging rollout with it.
+
+`required` adds `nodeTaintsPolicy: Honor`: a tainted node the pod does not
+tolerate (a control plane) is left out of the count. Counted, it is an empty
+node nothing can be put on, and DoNotSchedule then refuses every node that
+already holds one replica: on kind, the third of three replicas stayed
+Pending on two workers without it. The price: a node that is NotReady or
+cordoned is tainted too (node.kubernetes.io/not-ready; a cordon gets
+node.kubernetes.io/unschedulable from the node controller), so while it is,
+replicas may share another node. Run on kind with one of two workers
+cordoned: with Honor both replicas ran on the other worker; without it the
+second stayed Pending.
+
+Below Kubernetes 1.27 the apiserver drops matchLabelKeys. `soft` renders
+without it there (a preference either way). `required` fails the render
+instead: what would be left is a DoNotSchedule rule that does not keep a
+rollout's new replicas apart.
+
+Usage (the selector labels are the component's own; .Release is not reachable
+from the values dict):
+  {{- with include "aether.nodeSpread" (dict "ctx" . "name" "registrar" "values" .Values.registrar "selectorLabels" (include "aether.registrar.selectorLabels" .)) }}
+  {{- . | nindent 6 }}
+  {{- end }}
+*/}}
+{{- define "aether.nodeSpread" -}}
+{{- $mode := .values.nodeSpread -}}
+{{- if not (has $mode (list "soft" "required" "none")) -}}
+{{- fail (printf "%s.nodeSpread must be one of soft, required, none; got %v (an unquoted `off` or `no` in a values file is the YAML boolean false: write none)" .name $mode) -}}
+{{- end -}}
+{{- $kube := .ctx.Capabilities.KubeVersion.Version -}}
+{{- $perReplicaSet := semverCompare ">=1.27.0-0" $kube -}}
+{{- if .values.topologySpreadConstraints -}}
+topologySpreadConstraints:
+  {{- toYaml .values.topologySpreadConstraints | nindent 2 }}
+{{- else if ne $mode "none" -}}
+{{- if and (eq $mode "required") (not $perReplicaSet) -}}
+{{- fail (printf "%s.nodeSpread=required requires Kubernetes >= 1.27 (matchLabelKeys on a topology spread constraint; without it a rollout's old replicas are counted with the new ones), got %s; with `helm template` pass --kube-version, or write the constraint yourself in %s.topologySpreadConstraints" .name $kube .name) -}}
+{{- end -}}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: {{ ternary "DoNotSchedule" "ScheduleAnyway" (eq $mode "required") }}
+    labelSelector:
+      matchLabels:
+        {{- .selectorLabels | nindent 8 }}
+    {{- if eq $mode "required" }}
+    nodeTaintsPolicy: Honor
+    {{- end }}
+    {{- if $perReplicaSet }}
+    matchLabelKeys:
+      - pod-template-hash
+    {{- end }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Labels, three sets per component (#1363):
 
   aether.<c>.selectorLabels  name + instance + component. Immutable: they are
