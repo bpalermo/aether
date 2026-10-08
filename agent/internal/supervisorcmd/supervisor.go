@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"aethermesh.dev/agent/internal/proxy/hotrestart"
@@ -92,10 +91,12 @@ func (c *config) run(cmd *cobra.Command, _ []string) error {
 
 	l := log.Named(log.NewLogger(c.debug), cmd.Name())
 
-	// The supervisor owns Envoy's --admin-address-path: it carries the
-	// per-supervisor identity that keeps a state-changing admin request off
-	// another proxy pod's Envoy on the node-shared admin address (#1127).
-	// Envoy rejects the flag twice, so a duplicate would fail every fork.
+	// The supervisor passes a handful of Envoy flags itself: the bootstrap
+	// path, --base-id, --restart-epoch, the two hot-restart timers, and
+	// --admin-address-path (its admin identity, which keeps a state-changing
+	// admin request off another proxy pod's Envoy, #1127). Envoy rejects a
+	// flag given twice, so an --envoy-arg that repeats one would fail every
+	// fork. Fail once, here, with an error that names it (#1376).
 	if err := checkEnvoyArgs(c.supervisor.ExtraArgs); err != nil {
 		return err
 	}
@@ -131,18 +132,12 @@ func (c *config) run(cmd *cobra.Command, _ []string) error {
 	return hotrestart.New(c.supervisor, l, metrics).Run(cmd.Context())
 }
 
-// reservedEnvoyArg is the Envoy flag the supervisor sets itself on every fork
-// (see hotrestart's adminidentity.go).
-const reservedEnvoyArg = "--admin-address-path"
-
-// checkEnvoyArgs refuses an --envoy-arg the supervisor reserves.
+// checkEnvoyArgs refuses an --envoy-arg that would make Envoy reject its
+// command line on every fork: a flag the supervisor passes itself, or a
+// repeated --concurrency. The list of flags lives with the code that builds the
+// command line (hotrestart.CheckExtraArgs), so the two cannot drift.
 func checkEnvoyArgs(args []string) error {
-	for _, a := range args {
-		if a == reservedEnvoyArg || strings.HasPrefix(a, reservedEnvoyArg+"=") {
-			return fmt.Errorf("--envoy-arg %s is reserved: the supervisor sets it to its own admin identity (#1127)", a)
-		}
-	}
-	return nil
+	return hotrestart.CheckExtraArgs(args)
 }
 
 // runInstall stages the initContainer's binaries onto the shared volume.
@@ -206,7 +201,7 @@ func bindFlags(cmd *cobra.Command, c *config) {
 	f.Uint32Var(&c.supervisor.BaseID, "base-id", 0, "Envoy --base-id, pinned so successive epochs share one shared-memory segment")
 	f.DurationVar(&c.supervisor.DrainTime, "drain-time", 45*time.Second, "Envoy --drain-time-s: graceful connection-close window for the draining epoch")
 	f.DurationVar(&c.supervisor.ParentShutdownTime, "parent-shutdown-time", 60*time.Second, "Envoy --parent-shutdown-time-s: when the previous epoch is terminated (must exceed --drain-time)")
-	f.StringArrayVar(&c.supervisor.ExtraArgs, "envoy-arg", nil, "Extra argument appended to every Envoy invocation (repeatable). A --concurrency that differs from a live predecessor's is a drain + fresh start, not a hot restart (see --hot-restart-on-concurrency-change)")
+	f.StringArrayVar(&c.supervisor.ExtraArgs, "envoy-arg", nil, "Extra argument appended to every Envoy invocation (repeatable). Refused at startup: an Envoy flag the supervisor passes itself (-c/--config-path, --base-id, --restart-epoch, --drain-time-s, --parent-shutdown-time-s, --admin-address-path, --mode) and a second --concurrency, because Envoy rejects a flag given twice. A --concurrency that differs from a live predecessor's is a drain + fresh start, not a hot restart (see --hot-restart-on-concurrency-change)")
 	f.BoolVar(&c.supervisor.WatchConfig, "watch-config", true, "Watch --config and self-trigger a hot restart when the bootstrap config changes")
 	f.StringVar(&c.supervisor.StateDir, "state-dir", "/run/aether/hotrestart", "Shared-hostPath dir for the per-node epoch heartbeat that drives cross-pod hot restart")
 	f.StringVar(&c.supervisor.ReadyMarkerPath, "ready-marker", "/var/run/aether-proxy/ready", "Pod-local path for the readiness marker maintained while Envoy is live at the newest epoch")

@@ -3000,7 +3000,8 @@ counted in `aether_supervisor_admin_mutations_total{aether_supervisor_admin_requ
 aether_supervisor_admin_owner=own|foreign|unreachable|own_envoy_gone}`, seeded at zero. Only
 `own` sends the request. `foreign` during a roll means the old pod's Envoy had already
 handed its admin to another Envoy, so it could not be drained gracefully. The supervisor
-reserves `--admin-address-path` and refuses to start if an `--envoy-arg` sets it.
+reserves `--admin-address-path` and refuses to start if an `--envoy-arg` sets it (as it
+does for every other Envoy flag it passes itself; the list is in `docs/configuration.md`).
 
 `kubectl delete pod aether-proxy-<x>` takes the **`successor_wait`** branch. Expect
 **≈20–25 s** of termination (that is the successor initializing, not a hang) and **zero**

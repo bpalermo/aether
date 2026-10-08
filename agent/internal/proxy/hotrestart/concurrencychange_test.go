@@ -235,19 +235,34 @@ func TestConcurrencyArg(t *testing.T) {
 		n        int
 		explicit bool
 		wantErr  bool
+		repeated bool
 	}{
 		{args: nil},
 		{args: []string{"-l", "info"}},
 		{args: []string{"--concurrency", "2"}, n: 2, explicit: true},
 		{args: []string{"--concurrency=4"}, n: 4, explicit: true},
-		{args: []string{"--concurrency", "2", "--concurrency=3"}, n: 3, explicit: true},
+		{args: []string{"-l", "info", "--concurrency", "2", "--service-node", "n1"}, n: 2, explicit: true},
+		// Envoy refuses a repeated --concurrency; it does not keep the last
+		// (#1375). So there is no worker count to report.
+		{args: []string{"--concurrency", "2", "--concurrency=3"}, wantErr: true, repeated: true},
+		{args: []string{"--concurrency", "2", "--concurrency", "2"}, wantErr: true, repeated: true},
+		{args: []string{"--concurrency=x", "--concurrency", "2"}, wantErr: true, repeated: true},
+		{args: []string{"--concurrency", "2", "--concurrency"}, wantErr: true, repeated: true},
+		// A second --concurrency where the first one's value should be is a
+		// repeat too, not a bad value.
+		{args: []string{"--concurrency", "--concurrency", "2"}, wantErr: true, repeated: true},
+		{args: []string{"--concurrency", "--concurrency=4"}, wantErr: true, repeated: true},
+		{args: []string{"--concurrency", "--concurrency"}, wantErr: true, repeated: true},
 		{args: []string{"--concurrency"}, wantErr: true},
+		{args: []string{"-l", "info", "--concurrency"}, wantErr: true},
 		{args: []string{"--concurrency", "0"}, wantErr: true},
 		{args: []string{"--concurrency=x"}, wantErr: true},
 	} {
 		n, explicit, err := concurrencyArg(tc.args)
 		if tc.wantErr {
-			assert.Error(t, err, "%v", tc.args)
+			require.Error(t, err, "%v", tc.args)
+			assert.Equal(t, tc.repeated, errors.Is(err, errRepeatedConcurrency), "%v: %v", tc.args, err)
+			assert.False(t, explicit, "%v", tc.args)
 			continue
 		}
 		require.NoError(t, err, "%v", tc.args)
