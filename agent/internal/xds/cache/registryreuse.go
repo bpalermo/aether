@@ -277,7 +277,7 @@ func entryDiff(cur, fresh clusterEntry) string {
 	case len(cur.endpoints) != len(fresh.endpoints):
 		return fmt.Sprintf("endpoint map size %d, fresh %d", len(cur.endpoints), len(fresh.endpoints))
 	case !slices.Equal(cur.sanNamespaces, fresh.sanNamespaces) || cur.service != fresh.service || cur.sni != fresh.sni ||
-		cur.l4Floor != fresh.l4Floor || cur.bareEDSAlias != fresh.bareEDSAlias:
+		cur.l4Floor != fresh.l4Floor || cur.plaintext != fresh.plaintext || cur.bareEDSAlias != fresh.bareEDSAlias:
 		return "entry facts differ"
 	}
 	for ip, ep := range fresh.endpoints {

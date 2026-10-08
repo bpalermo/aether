@@ -4843,6 +4843,12 @@ that caught #829. It is the fail-**open** direction.
   - `service endpoints carry no namespace metadata` — not a window at all: it lasts as
     long as the registry serves those endpoints.
 
+  The UDP floor's `udp:<svc>` clusters are never named here. They carry no transport
+  socket at all (UDP rides the mesh in plaintext, proposal 038), so they have no pin to
+  lose. Agents up to chart 2.4.16 did name them, once per snapshot on every node with a
+  UDP service in scope, so on those versions the counter is never at rest and a line
+  whose `clusters` is only `udp:…` is not an authentication event (#1393).
+
 ```promql
 # Seeded at zero, so a live zero is a real series (not an absent one).
 sum by (node) (increase(aether_agent_identity_cluster_unpinned_total[1h]))
