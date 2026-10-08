@@ -8,7 +8,8 @@
 #   sortie-save.sh --dir RUN_DIR [--wait]
 #   sortie-save.sh --times REPORT_OR_STREAM     # offline: print times.tsv, write nothing
 #
-# run.sh arms it detached with --wait at load start: it then polls the Job until
+# run.sh arms it detached with --wait as soon as the Job exists, before it looks
+# at the Job's pod (#1387): it then polls the Job until
 # it has finished (or until the plan's duration + 20 minutes has passed, when it
 # saves what exists and says so). Without --wait it saves now, whatever state
 # the run is in -- run it by hand mid-run for a snapshot of the logs.
@@ -101,9 +102,12 @@ done
 	echo "sortie-save.sh: --dir must name a run directory holding run.env (written by run.sh)" >&2
 	exit 2
 }
-CTX="" NS="" RELEASE="" PVC="" JOB="" T_LOAD="" DURATION_S="" REPORT_FILE="" STREAM_FILE=""
+CTX="" NS="" RELEASE="" PVC="" JOB="" T_JOB="" T_LOAD="" DURATION_S="" REPORT_FILE="" STREAM_FILE=""
 # shellcheck disable=SC1091 # written by run.sh: KEY=value lines
 . "$DIR/run.env"
+# run.sh arms this saver when the Job exists, before the pod is running and so
+# before T_LOAD is written: T_JOB, the moment the Job was found, stands in.
+T_LOAD="${T_LOAD:-${T_JOB:-$(date +%s)}}"
 [ -n "$CTX" ] && [ -n "$NS" ] && [ -n "$JOB" ] && [ -n "$REPORT_FILE" ] || {
 	echo "sortie-save.sh: $DIR/run.env is incomplete (the load never started?)" >&2
 	exit 2

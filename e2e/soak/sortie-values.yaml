@@ -6,25 +6,34 @@
 # report's file name, and job.enabled. Nothing here is per run.
 #
 # Pinned by DIGEST, all three: the two images below and the chart (run.sh,
-# SORTIE_CHART_DIGEST). They are sortie 9fcbb81afaeab77f6f16bacd3ed43d94a65d9fd8,
-# chart version 0.1.0-9fcbb81afaeab77f6f16bacd3ed43d94a65d9fd8. A published chart
+# SORTIE_CHART_DIGEST). They are sortie f0750ecf407c1bc50e6740b4b16a3b61964649e0,
+# chart version 0.1.0-f0750ecf407c1bc50e6740b4b16a3b61964649e0. A published chart
 # already defaults both image refs to these digests; they are repeated here so
 # the pin is in this repository, where a bump is a reviewed diff.
 #
-# Verified 2026-10-07 with cosign v3.1.2 (the version //bazel/cosign pins), the
+# Verified 2026-10-08 with cosign v3.1.2 (the version //bazel/cosign pins), the
 # chart, and the index and both per-arch manifests of each image, bound to that
 # commit (--certificate-github-workflow-sha; the same chart digest bound to the
 # previous pin's commit is refused):
 #   cosign verify \
 #     --certificate-identity-regexp '^https://github\.com/bpalermo/sortie/\.github/workflows/publish\.yml@refs/heads/main$' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-#     quay.io/sortie/chart-sortie@sha256:10f6c84b9f5dc1a93dd9dd6ad1ab6196130a6f7cbc69dff82258b25700606913
+#     quay.io/sortie/chart-sortie@sha256:b1f0a6d5f838a4d76357b7438f8557cc3b74e37035918aa8ca4a490cd75e45ef
 # run.sh repeats that for the chart and for every image the release renders, on
 # every run (its pre-flight; see --verify in its header). Bump the three
 # together. cosign 3 or newer: the signatures are OCI referrers, and an older
 # client reports "no signatures found" for a signed artifact.
+#
+# All three digests change with EVERY sortie commit, the engine's too, whether or
+# not the engine changed: each image's config carries the commit (the
+# org.opencontainers.image.revision label), so the config, the per-arch
+# manifests and the index get new digests while the layers do not.
+# 9fcbb81 -> f0750ec did not touch the engine: both architectures have the same
+# 22 layers, digest for digest, and the label is the only difference (read from
+# the registry, 2026-10-08). "The engine is unchanged" is about the layers; the
+# digest to pin is still the one the new chart names.
 image:
-  ref: quay.io/sortie/sortie@sha256:0a04580af9cc857cf70313c0522fed457ba657e75af5f198aaa467ebdd69c0f9
+  ref: quay.io/sortie/sortie@sha256:3d9a9b67900abf00d8f605af68540742d088789a0ef0ed84b5dd5aa0d700e986
 
 engine:
   enabled: true
@@ -32,7 +41,7 @@ engine:
   # which the plan's `dns:` pool resolves into one backend per node.
   kind: DaemonSet
   image:
-    ref: quay.io/sortie/engine@sha256:99d5058c565764bd952f2c081b5ea6ee7978a6a3f610f431f63a958acf7fb478
+    ref: quay.io/sortie/engine@sha256:d0fbc8602286c087b449bc2a0849ee9d2a24eb32665ea6b4636113725b10fc98
   # One execution per target runs at once on every engine. sortie-plan.sh
   # refuses a targets file longer than this (its MAX_TARGETS), which is why the
   # chart's own default is repeated here. Since sortie 1374999 an engine at this
