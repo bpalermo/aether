@@ -87,17 +87,12 @@ spec:
       # node is a single point of failure behind the LB. Soft (ScheduleAnyway)
       # so single-node kind e2e still schedules. Override via
       # edge.topologySpreadConstraints.
-      {{- with .Values.edge.topologySpreadConstraints }}
-      topologySpreadConstraints:
-        {{- toYaml . | nindent 8 }}
-      {{- else }}
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels:
-              {{- include "aether.edge.selectorLabels" . | nindent 14 }}
+      {{- /* edge.nodeSpread picks soft / required / none. From Kubernetes
+             1.27 the constraint counts one ReplicaSet (matchLabelKeys), so a
+             rollout's old replicas are not counted beside the new ones
+             (#1434). See aether.nodeSpread. */}}
+      {{- with include "aether.nodeSpread" (dict "ctx" . "name" "edge" "values" .Values.edge "selectorLabels" (include "aether.edge.selectorLabels" .)) }}
+      {{- . | nindent 6 }}
       {{- end }}
       securityContext:
         runAsNonRoot: true

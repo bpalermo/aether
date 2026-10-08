@@ -27,37 +27,25 @@ spec:
         - key: aether.io/agent-not-ready
           operator: Exists
           effect: NoSchedule
-      # Keep the controller off the registrars' node when possible.
-      # Preferred, not required: a small or single-node cluster still schedules.
-      # The controller + both-registrars pile-up on one node is the #629 density
-      # suspect. Override via controller.affinity.
+      # No affinity by default (#1434). Until chart 2.4.20 the default was two
+      # preferred anti-affinity terms: away from the registrars' node (#629),
+      # and away from the other controller replica. The first one is why
+      # replicas ended up on one node: the scheduler applies a preferred
+      # anti-affinity term in both directions, so it also pushed each new
+      # REGISTRAR away from the nodes holding a controller, with the same weight
+      # as the registrar's own spread, and the two cancelled out. What #629
+      # wanted (never the controller and both registrars on one node) follows
+      # from each Deployment spreading its own replicas.
       {{- with .Values.controller.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
-      {{- else }}
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                topologyKey: kubernetes.io/hostname
-                labelSelector:
-                  matchExpressions:
-                    - key: app.kubernetes.io/part-of
-                      operator: In
-                      values: [aether]
-                    - key: app.kubernetes.io/component
-                      operator: In
-                      values: [registrar]
-            # And keep the replicas apart from each other: two webhook servers on
-            # one node share that node's fate, which is the gap the second replica
-            # exists to close.
-            - weight: 100
-              podAffinityTerm:
-                topologyKey: kubernetes.io/hostname
-                labelSelector:
-                  matchLabels:
-                    {{- include "aether.controller.selectorLabels" . | nindent 20 }}
+      {{- end }}
+      # Keep the replicas apart from each other: two webhook servers on one node
+      # share that node's fate, which is the gap the second replica exists to
+      # close. controller.nodeSpread picks soft / required / none;
+      # controller.topologySpreadConstraints replaces it. See aether.nodeSpread.
+      {{- with include "aether.nodeSpread" (dict "ctx" . "name" "controller" "values" .Values.controller "selectorLabels" (include "aether.controller.selectorLabels" .)) }}
+      {{- . | nindent 6 }}
       {{- end }}
       containers:
         - name: controller
@@ -87,8 +75,11 @@ spec:
             # Egress identity gate (#1053): the /mutate webhook injects the
             # identity-ready init container. Never with spire.enabled=false —
             # no SVID would ever come, and every mesh pod would sit in Init.
+            # And only when the mutating webhook renders (#1432): with
+            # namespaceInjection and injectPodNdots both off nothing calls
+            # /mutate, and the flags would describe a gate that cannot act.
             {{- $gate := .Values.controller.webhook.identityGate }}
-            {{- if and .Values.spire.enabled $gate.enabled }}
+            {{- if and .Values.spire.enabled $gate.enabled (include "aether.controller.mutatingWebhook" .) }}
             {{- $gateImage := .Values.agent.image }}
             {{- if $gate.image.repository }}
             {{- $gateImage = $gate.image }}
