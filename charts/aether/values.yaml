@@ -804,6 +804,20 @@ proxy:
       image: openpolicyagent/opa:1.21.1-envoy-static
       # Rego policy mounted via ConfigMap; must define the decision the plugin
       # queries (envoy/authz/allow by default). Required when opa.enabled.
+      #
+      # The sidecar WATCHES it (opa run --watch, #1383): a changed policy is
+      # loaded by every node's sidecar within the kubelet's ConfigMap sync
+      # period (27-64 s measured), with no pod restart. That means no staging
+      # either: it is fleet-wide at once, not one node at a time like a roll.
+      # The chart does not validate it. VALIDATE IT BEFORE YOU CHANGE IT, with
+      # the image above:
+      #   docker run --rm -v "$PWD/policy.rego:/policy/policy.rego:ro" \
+      #     openpolicyagent/opa:1.21.1-envoy-static check /policy/policy.rego
+      # A policy that does not parse or compile is not loaded by a running
+      # sidecar (it keeps the last good one and logs the error), but a sidecar
+      # that STARTS with it exits: after a sidecar restart every check on that
+      # node fails per failureMode, and a new proxy pod never starts its proxy.
+      # docs/runbook.md, "Changing the OPA policy".
       policy: ""
     # Bring-your-own authz container (used when opa.enabled is false). Must serve
     # envoy.service.auth.v3.Authorization on unix:///run/aether/authz/authz.sock.

@@ -82,6 +82,8 @@ A chart's tests live in its `BUILD.bazel`. Which rule to use:
 | a block wherever it renders | `helm_template_match_test` with `patterns` |
 | something that must **not** render (an off switch) | `helm_template_absent_test` |
 | a value the chart must **reject** | `helm_template_fail_test` |
+| a derived line that must **follow** a value (a config checksum) | `helm_template_value_changes_test` |
+| templates that must **not** change with a value (a file the pod watches, so no roll) | `helm_template_value_ignored_test` |
 
 All but the first are in `//bazel/helm:defs.bzl`, which documents each.
 

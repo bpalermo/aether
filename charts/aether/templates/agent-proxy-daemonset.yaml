@@ -36,17 +36,13 @@ spec:
       maxUnavailable: 0
   template:
     metadata:
-      {{- if and .Values.proxy.authzSidecar.enabled .Values.proxy.authzSidecar.opa.enabled }}
-      annotations:
-        # `opa run` reads /policy/policy.rego once, at start (no --watch), so a
-        # changed policy reaches the sidecar only when the pod is replaced. This
-        # is what replaces it: until chart 2.4.15 the chart-version label on the
-        # pod template rolled the proxy on every release, and a policy changed
-        # at an unchanged chart version was never applied at all (#1363).
-        # The proxy's own bootstrap needs no checksum: the supervisor watches
-        # the file (--watch-config) and hot-restarts in place.
-        checksum/opa-policy: {{ .Values.proxy.authzSidecar.opa.policy | toString | sha256sum }}
-      {{- end }}
+      {{- /* #1383: no checksum annotation for the OPA policy. The sidecar
+             watches the mounted file (opa run --watch, below), so a policy
+             change must not replace the pod. Chart 2.4.15-2.4.18 carried
+             checksum/opa-policy here, which rolled the DaemonSet (a hot
+             restart on every node) for each policy change. The proxy's own
+             bootstrap never had one either: the supervisor watches it
+             (--watch-config) and hot-restarts in place. */}}
       labels:
         {{- include "aether.proxy.podLabels" . | nindent 8 }}
     spec:
@@ -143,6 +139,23 @@ spec:
           args:
             - "run"
             - "--server"
+            # #1383: reload the policy when the file changes, in place. The
+            # kubelet updates the ConfigMap volume by swapping its ..data
+            # symlink, within its sync period (27-64 s measured on kind), and
+            # OPA then swaps the policy with no check left unanswered (8,607
+            # of 8,607 through a reload). A policy change reaches EVERY node at
+            # about the same time and replaces no pod (until chart 2.4.18 a
+            # checksum annotation rolled the DaemonSet instead: an Envoy hot
+            # restart per node).
+            # A policy that does not parse or compile is NOT loaded: OPA keeps
+            # deciding with the last good one and logs the error (msg
+            # "Processed file watch event." with a non-null err, at level
+            # info); it exports no metric for it. But a sidecar that STARTS
+            # with such a policy exits 1, and the last good policy lives only
+            # in the running process. Nothing in the chart validates the
+            # policy: check it before changing it (docs/runbook.md, "Changing
+            # the OPA policy").
+            - "--watch"
             # No phone-home version check. OPA 1.20 deprecates the old spelling
             # (--disable-telemetry) in favour of this one; a future release that
             # drops it would stop the sidecar from starting.
@@ -156,6 +169,13 @@ spec:
             - "--addr=unix:///run/aether/authz/opa-api.sock"
             - "--set=plugins.envoy_ext_authz_grpc.addr=unix:///run/aether/authz/authz.sock"
             - "--set=decision_logs.console=true"
+            # The FILE, not the /policy directory: a ConfigMap volume holds the
+            # policy three times (policy.rego, ..data/policy.rego and the
+            # timestamped directory both point at), and OPA given the
+            # directory loads all three and refuses to start ("multiple
+            # default rules"). OPA watches the file's directory either way,
+            # which is how it sees the ..data swap. The mount below must stay
+            # the whole volume: the kubelet never updates a subPath mount.
             - "/policy/policy.rego"
           {{- else }}
           image: "{{ $authz.image.repository }}:{{ $authz.image.tag }}"
