@@ -292,6 +292,11 @@ func tailName(s string, limit int) string {
 type cgroupSample struct {
 	at    time.Time
 	usage map[string]uint64
+	// unknown is the cgroups that are there but whose cpu.stat could not be
+	// read or parsed in this sample (anything but "it is gone"). Like a
+	// process's unread stat: a later sample that can read it has no delta to
+	// take from this one, and must not take the cgroup for a new one.
+	unknown map[string]struct{}
 }
 
 func (s cgroupSample) when() time.Time { return s.at }
@@ -350,7 +355,13 @@ func parseCgroupUsage(b []byte) (uint64, error) {
 // what is left of its parent's delta once the siblings that are in both samples
 // have taken theirs. The entries therefore never add up to more than the root's
 // delta, whatever was listed when.
-func cgroupDeltas(base, cur cgroupSample) ([]consumer, error) {
+//
+// A cgroup the earlier sample knew of but could not read is neither: its
+// counter is its lifetime's, so it gets no entry and what it used stays in its
+// parent's (nothing below it gets one either). And whatever went wrong with a
+// baseline, no cgroup can have used more than the interval on every CPU, so
+// each delta is held to that as well as to its parent's.
+func cgroupDeltas(base, cur cgroupSample, ncpu int) ([]consumer, error) {
 	baseRoot, ok := base.usage["/"]
 	if !ok {
 		return nil, errRootNotInOld
@@ -379,13 +390,19 @@ func cgroupDeltas(base, cur cgroupSample) ([]consumer, error) {
 
 	// left[p] starts as p's delta and ends as the part of it no sampled child
 	// accounts for: p's exclusive time.
+	limit := uint64(math.MaxUint64)
+	if span := cur.at.Sub(base.at); span > 0 && ncpu > 0 {
+		limit = uint64(span.Microseconds()) * uint64(ncpu)
+	}
 	left := make(map[string]uint64, len(paths)+1)
-	left["/"] = counterDelta(curRoot, baseRoot)
+	left["/"] = min(counterDelta(curRoot, baseRoot), limit)
 	for _, p := range paths {
 		parent := path.Dir(p)
 		d := cur.usage[p]
 		if before, seen := base.usage[p]; seen {
 			d = counterDelta(d, before)
+		} else if _, unread := base.unknown[p]; unread {
+			continue
 		}
 		// Also the floor for read skew: the files are not read atomically, so
 		// known children can add up to a little more than their parent.
@@ -678,7 +695,7 @@ func (c *cpuConsumers) cgroupTop(cur cgroupSample, err error, since time.Time) (
 	if !ok {
 		return nil, 0, errNoBaseline
 	}
-	all, err := cgroupDeltas(base, cur)
+	all, err := cgroupDeltas(base, cur, c.ncpu)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -734,7 +751,7 @@ func (c *cpuConsumers) sampleCgroups(now time.Time, relist bool) (cgroupSample, 
 	if budget.spent() {
 		return cgroupSample{}, errScanBudget
 	}
-	s := cgroupSample{at: now, usage: make(map[string]uint64, len(c.cgroupPaths)+1)}
+	s := cgroupSample{at: now, usage: make(map[string]uint64, len(c.cgroupPaths)+1), unknown: map[string]struct{}{}}
 	s.usage["/"] = root
 	if c.cgroupPaths == nil {
 		// Nothing to fall back on: list now, unless the last attempt failed
@@ -772,17 +789,30 @@ func (c *cpuConsumers) listCgroups(s *cgroupSample, budget *scanBudget) error {
 		c.cgroupListErr = err
 		return err
 	}
-	c.cgroupPaths = make([]string, 0, len(s.usage))
+	c.cgroupPaths = make([]string, 0, len(s.usage)+len(s.unknown))
 	for p := range s.usage {
 		if p != "/" {
 			c.cgroupPaths = append(c.cgroupPaths, p)
 		}
 	}
+	for p := range s.unknown {
+		c.cgroupPaths = append(c.cgroupPaths, p) // there: read it again next sample
+	}
 	return nil
 }
 
+// cgroupGone reports whether a cpu.stat error means the cgroup was removed:
+// the file is not there (ENOENT), or it was opened just before the cgroup went
+// and the read finds no cgroup behind it (ENODEV). Any other error, and a file
+// that does not parse, is a cgroup that still exists.
+func cgroupGone(err error) bool {
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENODEV)
+}
+
 // readKnownCgroups samples the cgroups of the last listing. One that has been
-// removed since is forgotten; what it used stays in its parent's entry.
+// removed since is forgotten; what it used stays in its parent's entry. One
+// that is there and could not be read stays known and is marked unread in this
+// sample, so the next one does not find it "new" with its lifetime's usage.
 func (c *cpuConsumers) readKnownCgroups(s *cgroupSample, budget *scanBudget) error {
 	known := c.cgroupPaths[:0]
 	for _, p := range c.cgroupPaths {
@@ -790,11 +820,15 @@ func (c *cpuConsumers) readKnownCgroups(s *cgroupSample, budget *scanBudget) err
 			return errScanBudget
 		}
 		usage, err := c.cgroupUsage(p)
+		if cgroupGone(err) {
+			continue
+		}
+		known = append(known, p)
 		if err != nil {
+			s.unknown[p] = struct{}{}
 			continue
 		}
 		s.usage[p] = usage
-		known = append(known, p)
 	}
 	c.cgroupPaths = known
 	return nil
@@ -816,7 +850,7 @@ func (c *cpuConsumers) walkCgroups(s *cgroupSample, dir string, depth int, budge
 		// a single entry.
 		return nil
 	}
-	if more || len(s.usage)+len(names) > cgroupMaxCount {
+	if more || len(s.usage)+len(s.unknown)+len(names) > cgroupMaxCount {
 		return fmt.Errorf("%w (more than %d cgroups)", errTooMany, cgroupMaxCount)
 	}
 	for _, name := range names {
@@ -825,8 +859,14 @@ func (c *cpuConsumers) walkCgroups(s *cgroupSample, dir string, depth int, budge
 		}
 		child := path.Join(dir, name)
 		usage, readErr := c.cgroupUsage(child)
-		if readErr != nil {
+		if cgroupGone(readErr) {
 			// Removed mid-walk. What it used stays in its parent's entry.
+			continue
+		}
+		if readErr != nil {
+			// There, and unread: known from now on, nothing below it listed
+			// until the next walk.
+			s.unknown[child] = struct{}{}
 			continue
 		}
 		s.usage[child] = usage

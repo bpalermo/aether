@@ -200,7 +200,7 @@ func TestCgroupConsumersAreExclusiveOrderedAndBounded(t *testing.T) {
 
 	// With room for all of them, every millisecond of the root's 1150 is in
 	// exactly one entry, and a cgroup that used nothing is not listed.
-	all, err := cgroupDeltas(c.cgroups.samples[0], c.cgroups.samples[1])
+	all, err := cgroupDeltas(c.cgroups.samples[0], c.cgroups.samples[1], 0)
 	require.NoError(t, err)
 	top := topConsumers(all, 100)
 	var sum time.Duration
@@ -354,6 +354,120 @@ func TestFailedCgroupListingIsNotRetriedEveryWindow(t *testing.T) {
 	})
 }
 
+// TestCgroupUnreadThenReadIsNotATopConsumer: a cpu.stat that fails with
+// anything but "gone" (EIO, a read that does not parse) is a cgroup that still
+// exists. It is not forgotten, and when it reads again its lifetime counter is
+// not taken for a new cgroup's. A cgroup that is really gone (ENOENT) is
+// forgotten as before, and one that appears later under that name is new.
+func TestCgroupUnreadThenReadIsNotATopConsumer(t *testing.T) {
+	for name, breakIt := range map[string]func(fs *fakeStatFS, file string){
+		"EIO":       func(fs *fakeStatFS, file string) { fs.errs[file] = syscall.EIO },
+		"malformed": func(fs *fakeStatFS, file string) { fs.files[file] = "nr_periods 0\n" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := newFakeStatFS()
+			fs.talosNode()
+			set := func(kubelet, podAUsed, gone time.Duration) {
+				fs.cgroup("/podruntime/kubelet", time.Hour+kubelet)
+				fs.cgroup("/podruntime", time.Hour+kubelet)
+				fs.cgroup("/kubepods/burstable/"+podA, 2*time.Hour+podAUsed)
+				fs.cgroup("/kubepods/burstable", 3*time.Hour+podAUsed+gone)
+				fs.cgroup("/kubepods", 3*time.Hour+podAUsed+gone)
+				fs.cgroup("/", 4*time.Hour+kubelet+podAUsed+gone)
+			}
+			set(0, 0, 0)
+			fs.cgroup("/kubepods/burstable/"+podB, time.Hour)
+			c := newTestConsumers(fs, 5)
+			c.ncpu = 4
+			c.roll(consumersT0)
+
+			// Second 1: the kubelet's and pod A's cpu.stat cannot be read; pod B
+			// is deleted after using 30 ms more.
+			kubeletStat := path.Join(fakeCgroupRoot, "/podruntime/kubelet/cpu.stat")
+			podAStat := path.Join(fakeCgroupRoot, "/kubepods/burstable/"+podA, "cpu.stat")
+			set(100*time.Millisecond, 50*time.Millisecond, 30*time.Millisecond)
+			breakIt(fs, kubeletStat)
+			breakIt(fs, podAStat)
+			fs.removeCgroup("/kubepods/burstable/" + podB)
+			got := attrMap(t, report1(c, consumersT0.Add(time.Second), time.Second))
+			assert.Equal(t, "/podruntime=100ms /kubepods/burstable=80ms", got[attrTopCgroups],
+				"what the unread and the removed ones used is in their parents' entries")
+			assert.Contains(t, c.cgroupPaths, "/podruntime/kubelet", "an unread cgroup is still known")
+			assert.Contains(t, c.cgroupPaths, "/kubepods/burstable/"+podA)
+			assert.NotContains(t, c.cgroupPaths, "/kubepods/burstable/"+podB, "a removed one is forgotten")
+
+			// Second 2: both read again. Against the sample that could not read
+			// them they have no delta, and they are NOT new: their hours of
+			// lifetime usage must not top the list.
+			delete(fs.errs, kubeletStat)
+			delete(fs.errs, podAStat)
+			set(300*time.Millisecond, 90*time.Millisecond, 30*time.Millisecond)
+			got = attrMap(t, report1(c, consumersT0.Add(2*time.Second), time.Second))
+			assert.Equal(t, "/podruntime=200ms /kubepods/burstable=40ms", got[attrTopCgroups])
+
+			// Over two seconds the baseline is the sample that did read them:
+			// exact deltas again.
+			got = attrMap(t, report1(c, consumersT0.Add(2*time.Second+time.Millisecond), 2*time.Second))
+			assert.Equal(t, "/podruntime/kubelet=300ms /kubepods/burstable/"+podA+"=90ms /kubepods/burstable=30ms", got[attrTopCgroups])
+
+			// Second 3: back to normal, one-second deltas.
+			set(350*time.Millisecond, 100*time.Millisecond, 30*time.Millisecond)
+			got = attrMap(t, report1(c, consumersT0.Add(3*time.Second), time.Second))
+			assert.Equal(t, "/podruntime/kubelet=50ms /kubepods/burstable/"+podA+"=10ms", got[attrTopCgroups])
+
+			// A cgroup of the removed pod's name appears: at the next listing it
+			// is a new cgroup, as any other.
+			for i := 4; i < 10; i++ {
+				c.roll(consumersT0.Add(time.Duration(i) * time.Second))
+			}
+			fs.cgroup("/kubepods/burstable/"+podB, 70*time.Millisecond)
+			fs.cgroup("/kubepods/burstable", 3*time.Hour+100*time.Millisecond+30*time.Millisecond+70*time.Millisecond)
+			fs.cgroup("/kubepods", 3*time.Hour+100*time.Millisecond+30*time.Millisecond+70*time.Millisecond)
+			fs.cgroup("/", 4*time.Hour+350*time.Millisecond+100*time.Millisecond+30*time.Millisecond+70*time.Millisecond)
+			c.roll(consumersT0.Add(10 * time.Second)) // the listing finds it
+			got = attrMap(t, report1(c, consumersT0.Add(10*time.Second+time.Millisecond), time.Second))
+			assert.Equal(t, "/kubepods/burstable/"+podB+"=70ms", got[attrTopCgroups])
+		})
+	}
+}
+
+// TestCgroupUnreadAtTheListingIsKnown: a cgroup whose cpu.stat fails while the
+// hierarchy is being listed is remembered by that listing, so the samples that
+// follow read it and the one after has a delta, never a lifetime.
+func TestCgroupUnreadAtTheListingIsKnown(t *testing.T) {
+	fs := newFakeStatFS()
+	fs.talosNode()
+	fs.cgroup("/init", time.Hour)
+	fs.cgroup("/", time.Hour)
+	stat := path.Join(fakeCgroupRoot, "/init/cpu.stat")
+	fs.errs[stat] = syscall.EIO
+	c := newTestConsumers(fs, 5)
+	c.roll(consumersT0)
+	require.Contains(t, c.cgroupPaths, "/init")
+
+	delete(fs.errs, stat)
+	fs.cgroup("/init", time.Hour+40*time.Millisecond)
+	fs.cgroup("/", time.Hour+40*time.Millisecond)
+	got := attrMap(t, report1(c, consumersT0.Add(time.Second), time.Second))
+	assert.Equal(t, "/=40ms", got[attrTopCgroups], "no entry of its own against the sample that could not read it")
+	fs.cgroup("/init", time.Hour+60*time.Millisecond)
+	fs.cgroup("/", time.Hour+60*time.Millisecond)
+	got = attrMap(t, report1(c, consumersT0.Add(2*time.Second), time.Second))
+	assert.Equal(t, "/init=20ms", got[attrTopCgroups])
+}
+
+// TestCgroupDeltaIsHeldToWhatWasPossible: no cgroup can be shown using more
+// than the interval on every CPU.
+func TestCgroupDeltaIsHeldToWhatWasPossible(t *testing.T) {
+	base := cgroupSample{at: consumersT0, usage: map[string]uint64{"/": 0}}
+	cur := cgroupSample{at: consumersT0.Add(time.Second), usage: map[string]uint64{
+		"/": 9_000_000_000, "/system": 8_000_000_000,
+	}}
+	all, err := cgroupDeltas(base, cur, 4)
+	require.NoError(t, err)
+	assert.Equal(t, "/system=4000ms", formatConsumers(topConsumers(all, 5)), "1 s on 4 CPUs")
+}
+
 // TestCgroupFirstListedInsideTheInterval: when the baseline is from before the
 // listing that found a cgroup, the cgroup's usage is all that is known about
 // it, and it may be older than the interval. Its entry is bounded by what its
@@ -366,7 +480,7 @@ func TestCgroupFirstListedInsideTheInterval(t *testing.T) {
 		"/kubepods":         470_000,       // first listed, as is its child
 		"/kubepods/" + podC: 120_000,
 	}}
-	all, err := cgroupDeltas(base, cur)
+	all, err := cgroupDeltas(base, cur, 4)
 	require.NoError(t, err)
 	assert.Equal(t, "/kubepods=350ms /kubepods/"+podC+"=120ms /system/apid=30ms", formatConsumers(topConsumers(all, 10)))
 
@@ -381,7 +495,7 @@ func TestCgroupFirstListedInsideTheInterval(t *testing.T) {
 		"/kubepods/pod11111111-new":   5_000_000,
 		"/kubepods/pod22222222-new":   5_000_000,
 	}}
-	all, err = cgroupDeltas(base, cur)
+	all, err = cgroupDeltas(base, cur, 4)
 	require.NoError(t, err)
 	top := topConsumers(all, 10)
 	assert.Equal(t, "/kubepods/pod11111111-new=60ms /kubepods/podffffffff-known=40ms", formatConsumers(top))
@@ -391,9 +505,9 @@ func TestCgroupFirstListedInsideTheInterval(t *testing.T) {
 	}
 	assert.Equal(t, 100*time.Millisecond, sum, "the root's delta, no more")
 
-	_, err = cgroupDeltas(cgroupSample{usage: map[string]uint64{}}, cur)
+	_, err = cgroupDeltas(cgroupSample{usage: map[string]uint64{}}, cur, 4)
 	assert.ErrorIs(t, err, errRootNotInOld)
-	_, err = cgroupDeltas(base, cgroupSample{usage: map[string]uint64{}})
+	_, err = cgroupDeltas(base, cgroupSample{usage: map[string]uint64{}}, 4)
 	assert.ErrorIs(t, err, errNoCgroupV2)
 }
 
@@ -795,7 +909,7 @@ func TestKernelCountersSaturate(t *testing.T) {
 
 	all, err := cgroupDeltas(
 		cgroupSample{usage: map[string]uint64{"/": 0}},
-		cgroupSample{usage: map[string]uint64{"/": math.MaxUint64}})
+		cgroupSample{usage: map[string]uint64{"/": math.MaxUint64}}, 4)
 	require.NoError(t, err)
 	require.Len(t, all, 1)
 	assert.Positive(t, all[0].cpu)
