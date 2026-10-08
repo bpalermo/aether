@@ -912,6 +912,7 @@ func (c *SnapshotCache) buildUDPClustersLocked(ctx context.Context, deps map[str
 				service:        serviceName,
 				sni:            strconv.Itoa(int(endpoints[0].GetPort())),
 				l4Floor:        true,
+				plaintext:      true,
 			}
 		}
 		if _, reused := c.reuseOrBuildLocked(reusePassUDP, serviceName, endpoints, owns, in, prev, reuse, build, nil); !reused {

@@ -279,13 +279,22 @@ func (c *SnapshotCache) reportUnpinnedClusters(ctx context.Context, version stri
 // emission path reads — the HTTP/edge mTLS cluster (refreshEntryMTLSLocked) and
 // the TCP floor's "tcp:<svc>" cluster (captureTCPClusters / edgeTCPClusters) —
 // so checking it here covers all of them without re-walking the emitted protos.
+//
+// A plaintext entry (the UDP floor) is left out (#1393). Its cluster is
+// published with no transport socket, so there is no validation context for a
+// pin to be missing from, and no emission path reads its sanURIs. Counting it
+// made every snapshot report one unpinned cluster for as long as a UDP service
+// was in scope, which is the opposite of what this report is for: a counter
+// that never rests cannot show the snapshot where a TLS cluster lost its pin.
+// That the UDP floor is unauthenticated is a property of the protocol
+// (proposal 038), stated where the cluster is built, not a per-snapshot event.
 func (c *SnapshotCache) unpinnedClusterNames() []string {
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
 
 	var names []string
 	for name, entry := range c.clusters {
-		if len(entry.sanURIs) == 0 {
+		if len(entry.sanURIs) == 0 && !entry.plaintext {
 			names = append(names, name)
 		}
 	}

@@ -407,6 +407,50 @@ func TestUnpinnedClusterReportNamesTheOtherCause(t *testing.T) {
 	assert.Equal(t, int64(1), counterValue(t, reader, clusterUnpinnedCtr))
 }
 
+// TestUnpinnedClusterReportSkipsThePlaintextUDPFloor: the report is about
+// clusters whose handshake checks no server identity, and a UDP floor entry has
+// no handshake at all — its "udp:<svc>" cluster is published with no transport
+// socket (proxy.NewUDPServiceCluster), so there is no validation context a SAN
+// pin could be missing from. Its sanURIs are empty by construction, and reading
+// that as "unpinned" made every snapshot on every node WARN and count for as
+// long as one UDP service was in scope (#1393): the counter never rested at
+// zero, so the one signal for a real authentication downgrade was always on.
+func TestUnpinnedClusterReportSkipsThePlaintextUDPFloor(t *testing.T) {
+	c, rec, reader := newBindingTestCache(t)
+	c.SetCaptureEnabled(true)
+	ctx := context.Background()
+
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+	require.NoError(t, c.SetTrustDomain(ctx, raceTrustDomain))
+	declareDeps(c, "aether-test/udponly")
+	reg := udpOnlyRegistry("aether-test/udponly", "10.0.0.40", 9001)
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+	udpName := proxy.UDPClusterName("aether-test/udponly", c.meshDomain)
+	c.clusterMu.RLock()
+	udpEntry, hasUDP := c.clusters[udpName]
+	c.clusterMu.RUnlock()
+	require.True(t, hasUDP, "the fixture must produce the udp: entry this test is about")
+	require.Empty(t, udpEntry.sanURIs, "a UDP entry renders no SAN pin: there is no peer identity on the plaintext floor")
+
+	rec.reset()
+	require.NoError(t, c.generateSnapshot(ctx))
+	assert.Empty(t, rec.with(unpinnedClusterMsg),
+		"a cluster with no TLS has no pin to lose; reporting it hides a real downgrade behind a permanent WARN")
+	assert.Equal(t, int64(0), counterValue(t, reader, clusterUnpinnedCtr))
+
+	// The report still has its teeth next to a UDP entry: a TLS cluster that
+	// loses its pin is named, alone, and counted once.
+	addOutboundCluster(c, bindingClusterName)
+	rec.reset()
+	require.NoError(t, c.generateSnapshot(ctx))
+	warns := rec.with(unpinnedClusterMsg)
+	require.Len(t, warns, 1)
+	assert.Equal(t, bindingClusterName, warns[0].attrs["clusters"], "only the TLS cluster is unpinned")
+	assert.Equal(t, "1", warns[0].attrs["count"])
+	assert.Equal(t, int64(1), counterValue(t, reader, clusterUnpinnedCtr))
+}
+
 // TestNoResourceBytesCarryMalformedPrefix is a belt-and-braces check that the
 // scan above would actually catch the regression it guards, so a future change
 // cannot quietly turn it into a tautology.

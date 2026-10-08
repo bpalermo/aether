@@ -731,6 +731,13 @@ type clusterEntry struct {
 	// were already protocol-agnostic in behaviour, so UDP needed no new branch
 	// at either, only a name that did not claim otherwise.
 	l4Floor bool
+	// plaintext marks an entry whose published cluster carries NO transport
+	// socket: the UDP floor's "udp:<svc>" (proxy.NewUDPServiceCluster). Such an
+	// entry has no handshake, so its empty sanURIs is not a missing
+	// server-identity pin and reportUnpinnedClusters leaves it out (#1393). A
+	// TCP floor entry is NOT plaintext: its "tcp:<svc>" cluster is mTLS and
+	// pins from sanURIs.
+	plaintext bool
 	// bareEDSAlias marks an HTTP port-alias entry ("<fqdn>:<port>",
 	// buildPortAliasesLocked). Its cluster subscribes to its OWN EDS resource
 	// name (the alias name) and it carries no load assignment of its own:
