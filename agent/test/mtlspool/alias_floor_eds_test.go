@@ -183,7 +183,9 @@ func statusViaTCP(addr string) (int, string) {
 
 // lateSiblingRun is what one arm observed after the sibling was published.
 type lateSiblingRun struct {
-	firstOK           time.Duration
+	firstOK time.Duration
+	// accepted and leftWarming are lateClusterWatch's two times.
+	accepted          time.Duration
 	leftWarming       time.Duration
 	initFetchTimeouts int
 	lastStatus        int
@@ -229,7 +231,7 @@ func runLateSibling(t *testing.T, kind siblingKind, sharedEDSName bool, window t
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	require.Equal(t, 0, h.statInt(t, "cluster_manager.warming_clusters"), "precondition: nothing warming before the sibling")
+	watch := h.watchLateCluster(t)
 	// The sibling's stats share the default cluster's tree (alt_stat_name is the
 	// bare service key), so this counter is exactly what the fleet gate reads.
 	initFetchStat := "cluster." + twinDestSvc + ".init_fetch_timeout"
@@ -257,18 +259,21 @@ func runLateSibling(t *testing.T, kind siblingKind, sharedEDSName bool, window t
 				run.firstOK = time.Since(start)
 			}
 		}
-		if run.leftWarming == 0 && h.statInt(t, "cluster_manager.warming_clusters") == 0 &&
-			h.statInt(t, "cluster_manager.active_clusters") >= 3 { // ADS + default + sibling
-			run.leftWarming = time.Since(start)
+		if watch.leftWarming == 0 {
+			watch.sample(t, h, start)
 		}
-		if run.firstOK != 0 && run.leftWarming != 0 {
+		if run.firstOK != 0 && watch.leftWarming != 0 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	run.accepted, run.leftWarming = watch.accepted, watch.leftWarming
 	run.initFetchTimeouts = h.statInt(t, initFetchStat)
-	t.Logf("late %s %s: first 200 after %s, left warming after %s, %s=%d, last status %d %q",
-		kind, f.name(), run.firstOK, run.leftWarming, initFetchStat, run.initFetchTimeouts, run.lastStatus, strings.TrimSpace(run.lastBody))
+	t.Logf("late %s %s: accepted by Envoy after %s, first 200 after %s, left warming after %s, %s=%d, last status %d %q",
+		kind, f.name(), run.accepted, run.firstOK, run.leftWarming, initFetchStat, run.initFetchTimeouts, run.lastStatus, strings.TrimSpace(run.lastBody))
+	require.NotZerof(t, run.accepted,
+		"Envoy never accepted the late %s within %s (cluster_manager.cluster_added did not move): "+
+			"the CDS update did not arrive, so nothing about its warming was observed", kind, window)
 	return run
 }
 
