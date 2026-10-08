@@ -64,7 +64,10 @@
 # TERM and INT end it at once (exit 143 / 130) and leave no process behind
 # (#1386): between samples it waits without a child process, and a call that is
 # in the foreground when the signal arrives (kubectl, at most its 20 s request
-# timeout) is waited for, not orphaned.
+# timeout) is waited for, not orphaned. To stop it, send TERM until it has
+# exited: bash 5.2 can drop a trapped signal that arrives while it expands a
+# `$(...)` (#1418). The timestamps and the waits no longer use one (lib-wait.sh);
+# the kubectl and jq calls of a sample still do.
 #
 # Needs bash 4.2+, kubectl and jq. RESTART_WATCH_KUBECTL replaces kubectl (the
 # test hook).
@@ -76,6 +79,11 @@ set -uo pipefail
 # is a log to write a SUMMARY to.
 trap 'exit 143' TERM
 trap 'exit 130' INT
+
+# The clock and the wait, neither with a child process: soak_now, soak_stamp,
+# nap_until, nap.
+# shellcheck source=e2e/soak/lib-wait.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/lib-wait.sh"
 
 CTX="${SOAK_CONTEXT:-talos-main}"
 NAMESPACES="${SOAK_RESTART_NAMESPACES:-aether-system aether-ingress aether-test}"
@@ -149,12 +157,14 @@ k() { "$KUBECTL" --context "$CTX" "$@"; }
 
 # Lines go to stderr during --preflight, else to $LOG (or stdout for `-`).
 out() {
+	local ts
+	soak_stamp ts
 	if [ "$PREFLIGHT_ONLY" = "1" ]; then
-		echo "$(date -u +%FT%TZ) $*" >&2
+		echo "$ts $*" >&2
 	elif [ "$LOG" = "-" ]; then
-		echo "$(date -u +%FT%TZ) $*"
+		echo "$ts $*"
 	else
-		echo "$(date -u +%FT%TZ) $*" >>"$LOG"
+		echo "$ts $*" >>"$LOG"
 	fi
 }
 
@@ -283,7 +293,7 @@ sorted_keys() {
 seen() { if [ "${LIVE[$1]:-1}" = "1" ]; then echo live; else echo gone; fi; }
 
 finish() {
-	local ended="$1" verdict total=0 key
+	local ended="$1" verdict total=0 key to
 	if [ "$FINISHED" = "1" ]; then return; fi
 	FINISHED=1
 	for key in "${!NEW[@]}"; do total=$((total + ${NEW[$key]})); done
@@ -294,62 +304,25 @@ finish() {
 	else
 		verdict=PASS
 	fi
-	out "SUMMARY restart-watch verdict=$verdict new_restarts=$total containers=${#NEW[@]} samples=$SAMPLES error_samples=$ERROR_SAMPLES baseline=$BASELINE_COUNT ended=$ended from=$STARTED to=$(date -u +%FT%TZ) context=$CTX namespaces=${NAMESPACES// /,}"
+	soak_stamp to
+	out "SUMMARY restart-watch verdict=$verdict new_restarts=$total containers=${#NEW[@]} samples=$SAMPLES error_samples=$ERROR_SAMPLES baseline=$BASELINE_COUNT ended=$ended from=$STARTED to=$to context=$CTX namespaces=${NAMESPACES// /,}"
 	for key in $(sorted_keys); do
 		out "SUMMARY RESTART ${DESC[$key]} seen=$(seen "$key")"
 	done
 }
 
-# The wait between samples has NO child process (#1386). It used to be
-# `sleep N & SLEEP_PID=$!; wait "$SLEEP_PID"`, with a trap that killed
-# $SLEEP_PID, and a TERM at the wrong moment left the sleep behind, holding its
-# caller's stdout open for up to an interval (seen: a `sleep 3599`). Two such
-# moments were found. Between the first two commands SLEEP_PID is still empty
-# and the trap kills nothing. And right after them the trap does send its
-# `kill` and the sleep is sometimes still there afterwards -- presumably the
-# signal reached the child before it had become `sleep`, while it was still a
-# copy of this shell with this shell's handler for TERM. A kill that can miss
-# is not made surer by sending it from somewhere else, so there is nothing to
-# kill: the wait is `read -t` on a fifo nobody writes to. fd 9 is
-# that fifo, opened read-write (the open does not block, the read never sees
-# end-of-file) and unlinked at once.
-NAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/restart-watch.XXXXXX")" || NAP_DIR=""
-if [ -z "$NAP_DIR" ] || ! mkfifo "$NAP_DIR/nap" || ! exec 9<>"$NAP_DIR/nap"; then
-	echo "restart-watch.sh: cannot make the fifo it waits on (mktemp -d and mkfifo under ${TMPDIR:-/tmp})" >&2
-	exit 2
-fi
-rm -rf "$NAP_DIR"
-
-# nap_until EPOCH_SECONDS: wait, interruptibly, until then. bash runs a trap
-# that arrives during `read` at once, and the TERM/INT traps exit.
-#
-# In slices of NAP_SLICE seconds, never one long read. Whatever bash is doing
-# when a signal arrives, the trap is run no later than the end of the builtin
-# in hand; a slice makes that at most NAP_SLICE seconds, where one read of the
-# whole interval would make it the interval.
-NAP_SLICE=2
-nap_until() {
-	local now left rc
-	while
-		printf -v now '%(%s)T' -1
-		left=$(($1 - now))
-		[ "$left" -gt 0 ]
-	do
-		if [ "$left" -gt "$NAP_SLICE" ]; then left=$NAP_SLICE; fi
-		read -r -t "$left" -u 9 _
-		rc=$?
-		# Above 128 is the timeout: the one way this read ends, since nothing
-		# writes to the fifo. Anything else means fd 9 is no longer that fifo:
-		# a foreground sleep then (a trap waits it out, at most a slice),
-		# rather than a loop that spins.
-		if [ "$rc" -le 128 ]; then sleep "$left"; fi
-	done
-}
-nap() {
-	local now
-	printf -v now '%(%s)T' -1
-	nap_until $((now + $1))
-}
+# The wait between samples has NO child process (#1386): nap_until, from
+# lib-wait.sh. It used to be `sleep N & SLEEP_PID=$!; wait "$SLEEP_PID"`, with a
+# trap that killed $SLEEP_PID, and a TERM at the wrong moment left the sleep
+# behind, holding its caller's stdout open for up to an interval (seen: a
+# `sleep 3599`). Two such moments were found. Between the first two commands
+# SLEEP_PID is still empty and the trap kills nothing. And right after them the
+# trap does send its `kill` and the sleep is sometimes still there afterwards --
+# presumably the signal reached the child before it had become `sleep`, while it
+# was still a copy of this shell with this shell's handler for TERM. A kill that
+# can miss is not made surer by sending it from somewhere else, so there is
+# nothing to kill.
+nap_open restart-watch.sh
 
 # Baseline, with a few retries: a watchdog that cannot see the cluster at T0
 # has nothing to compare against, so it refuses to run rather than log "ok".
@@ -376,8 +349,8 @@ if [ "$LOG" != "-" ]; then
 	: >"$LOG"
 fi
 
-STARTED=$(date -u +%FT%TZ)
-START_S=$(date +%s)
+soak_stamp STARTED
+soak_now START_S
 END_S=$((START_S + DURATION_S))
 out "restart-watch start context=$CTX namespaces=${NAMESPACES// /,} interval=${INTERVAL}s duration=${DURATION_S}s"
 # From here on a TERM or an INT ends the run with a SUMMARY line (ended=TERM|INT,
@@ -394,6 +367,7 @@ while :; do
 	if [ "$target" -gt "$END_S" ]; then target=$END_S; fi
 	nap_until "$target"
 	take_sample
-	if [ "$(date +%s)" -ge "$END_S" ]; then break; fi
+	soak_now now
+	if [ "$now" -ge "$END_S" ]; then break; fi
 	if [ "$MAX_SAMPLES" -gt 0 ] && [ "$SAMPLES" -ge "$MAX_SAMPLES" ]; then break; fi
 done
