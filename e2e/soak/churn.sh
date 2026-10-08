@@ -7,7 +7,7 @@
 # and a demand-set SHRINK.
 #
 # Pre-flight in the foreground first (loud, exits non-zero on any problem), then
-# run detached -- it sleeps between rolls for ~7h32m:
+# run detached -- it waits between rolls for ~7h32m:
 #   bash "$PWD/e2e/soak/churn.sh" --context talos-main --preflight &&
 #     nohup setsid bash "$PWD/e2e/soak/churn.sh" --context talos-main "rev192/0.92.0" >/dev/null 2>&1 &
 #
@@ -36,6 +36,24 @@
 # The first FAILED roll (or a SHRINK that cannot scale) logs `CHURN ABORTED` and exits
 # 1, after restoring the shrink target. A schedule with holes is not a soak: stop,
 # fix, relaunch with a fresh T0.
+#
+# ------------------------------------------------- stopping it (#1419, #1418)
+#
+# `kill -TERM <pid>`, and again until it has exited (INT is the same, 130 for
+# 143). It then, in this order: waits for the kubectl call that is in the
+# foreground, if any (a call is never cut in two); restores a SHRINK in progress
+# and deletes a new-SA step's objects; stops what it left in the background -- a
+# queued RSS sampler, a uds-csi step's plugin watch -- and waits for a TRIPLE's
+# rolls that are already under way; exits 143. No process of the driver is left.
+#
+# It waits WITHOUT a child process (lib-wait.sh: `read -t` on a private fifo),
+# so a TERM is taken within two seconds wherever the schedule is. It used to
+# `sleep` in the foreground, and bash runs a trap only once the foreground child
+# has ended: TERM took effect up to 12 minutes later, 90 in the no-roll window.
+#
+# "Again until it has exited": bash 5.2 can drop a trapped signal that arrives
+# while it expands a `$(...)`. The log's timestamp and the waits no longer use
+# one; the kubectl calls of a step still do.
 #
 # ---------------------------------------------------------------- the schedule
 #
@@ -186,7 +204,16 @@
 #                                   the pod to terminate and its replacement
 #   SOAK_UDSCSI_WINDOW_TIMEOUT=300  seconds to wait for the victim node's plugin
 #                                   to go down (the roll reaches nodes one by one)
+#
+# Needs bash 4.2+ and kubectl.
 set -uo pipefail
+
+# From the first line (as in restart-watch.sh): with a trap set, bash takes a
+# signal between commands, after the foreground child has ended. Untrapped, TERM
+# kills the shell where it stands and the kubectl it was waiting for lives on.
+# Replaced below, once there is a SHRINK or a new-SA step to undo.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 CTX="${SOAK_CONTEXT:-talos-main}"
 PREFLIGHT_ONLY=0
@@ -251,6 +278,10 @@ newsa_nodes() {
 }
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# The clock and the wait, neither with a child process: soak_now, soak_stamp,
+# nap_until, nap, nap_brief.
+# shellcheck source=e2e/soak/lib-wait.sh
+. "$HERE/lib-wait.sh"
 SAMPLER="${SOAK_PROXY_RSS_SAMPLER:-$HERE/sample-proxy-rss.sh}"
 
 # Age-matched proxy RSS sampling (#628): sleep 28 minutes after a proxy roll, then
@@ -299,6 +330,14 @@ UDSCSI_WINDOW_AWK="$HERE/udscsi-window.awk"
 # kind while building #1243), so the watch would end exactly when it matters.
 UDSCSI_POD_FMT='pod={.metadata.name} del={.metadata.deletionTimestamp} ready={.status.conditions[?(@.type=="Ready")].status}{"\n"}'
 UDSCSI_STEP=0
+
+# The two waits that were a `sleep`, which also took `90s` or `1.5`: the wait is
+# now arithmetic on the clock, so say so before T0 instead of at T0+450m.
+if ! [[ "$PROXY_RSS_DELAY" =~ ^[0-9]+$ ]] || ! [[ "$SHRINK_SECONDS" =~ ^[0-9]+$ ]]; then
+	echo "churn.sh: SOAK_PROXY_RSS_DELAY and SOAK_SHRINK_SECONDS take whole seconds (got '$PROXY_RSS_DELAY', '$SHRINK_SECONDS')" >&2
+	exit 2
+fi
+nap_open churn.sh
 
 # Pre-flight (#951). Writes to stderr only -- never to $LOG -- and runs before T0.
 # "<namespace> <kind>/<name>" for every workload the schedule or the SHRINK touches.
@@ -436,7 +475,7 @@ preflight() {
 if ! preflight; then exit 2; fi
 if [ "$PREFLIGHT_ONLY" = "1" ]; then exit 0; fi
 
-T0=$(date +%s)
+soak_now T0
 
 # Start a FRESH log, archiving any previous run alongside it. Without this the driver
 # appends to the last soak's file, and `grep -c ROLLED` -- which teardown uses to confirm
@@ -446,7 +485,11 @@ if [ -s "$LOG" ]; then
 fi
 : >"$LOG"
 
-log() { echo "$(date -u +%FT%TZ) $*" >>"$LOG"; }
+log() {
+	local ts
+	soak_stamp ts
+	echo "$ts $*" >>"$LOG"
+}
 
 # Never leave the shrink target scaled to zero, even if the driver is killed mid-shrink.
 restore_shrink() {
@@ -462,13 +505,44 @@ restore_shrink() {
 	fi
 }
 
+# Stop what the driver has running in the background (#1419): a queued RSS
+# sampler (still waiting, or sampling), a uds-csi step's plugin watch, a
+# TRIPLE's rolls.
+#
+# The children are asked for, not remembered: `pid=$!` after a `&` is a second
+# command, and a TERM between the two leaves a child nobody has the PID of.
+# `jobs -pr` is bash's own list of its children that are still running, so it
+# also never names a PID that has since become some other process.
+#
+# TERM, and again every 0.2 s until the child is gone. One TERM can miss: a
+# child that is signalled before it has stopped being a copy of this shell
+# takes the signal with this shell's handler and then drops it. The sampler
+# traps TERM and exits once its kubectl call has returned; the watch is kubectl
+# itself and dies; a TRIPLE's roll ignores TERM and ends when its `rollout
+# restart` has returned, so this waits for it. STOP_CHILDREN_TRIES bounds the
+# wait (20 s): a kubectl that hangs past that is left, and named in the log.
+STOP_CHILDREN_TRIES=100
+stop_children() {
+	local pid tries=0 left
+	while :; do
+		left=""
+		for pid in $(jobs -pr); do
+			if kill -TERM "$pid" 2>/dev/null; then left="$left $pid"; fi
+		done
+		if [ -z "$left" ]; then return 0; fi
+		tries=$((tries + 1))
+		if [ "$tries" -ge "$STOP_CHILDREN_TRIES" ]; then break; fi
+		nap_brief 0.2
+	done
+	log "STOP: still running after $((STOP_CHILDREN_TRIES / 5))s, left behind:$left -- look at them (ps -o pid,args -p <pid>)"
+}
+
 # Fail fast (#951): the first failure ends the run, loudly. Queued RSS samplers are
-# killed so nothing appends to the log after the ABORTED line; the EXIT trap restores
+# stopped so nothing appends to the log after the ABORTED line; the EXIT trap restores
 # a SHRINK in progress.
 abort() {
 	log "CHURN ABORTED: $* -- stop, fix, relaunch with a fresh T0 (context=$CTX)"
-	local j
-	for j in $(jobs -p); do kill "$j" 2>/dev/null; done
+	stop_children
 	exit 1
 }
 # Split on purpose (#835). `trap restore_shrink EXIT INT TERM` made `kill -TERM`
@@ -482,18 +556,25 @@ abort() {
 # EXIT stays as the idempotent safety net: restore_shrink clears SHRINK_PREV
 # before it scales, so the EXIT trap firing again after an INT/TERM handler has
 # already run is a no-op. 130/143 are the conventional 128+SIGINT / 128+SIGTERM.
-trap 'restore_shrink; cleanup_newsa' EXIT
-trap 'restore_shrink; cleanup_newsa; exit 130' INT
-trap 'restore_shrink; cleanup_newsa; exit 143' TERM
-
-# Sleep until T0 + $1 minutes.
-waituntil() {
-	local target now delta
-	target=$((T0 + $1 * 60))
-	now=$(date +%s)
-	delta=$((target - now))
-	if [ "$delta" -gt 0 ]; then sleep "$delta"; fi
+#
+# A stop is one pass (#1419): the cluster first (the SHRINK, the new-SA
+# objects), then the driver's own children, then exit. A further TERM or INT
+# during that pass is ignored rather than starting a second one in the middle
+# of the first. On EXIT alone nothing is stopped: a driver that has run its
+# schedule leaves a queued RSS sampler to take its sample, as it always has.
+on_signal() {
+	trap '' TERM INT
+	restore_shrink
+	cleanup_newsa
+	stop_children
+	exit "$1"
 }
+trap 'restore_shrink; cleanup_newsa' EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+
+# Wait until T0 + $1 minutes. No child process, so a TERM is taken at once.
+waituntil() { nap_until $((T0 + $1 * 60)); }
 
 # Returns non-zero on failure; the caller aborts (a roll inside the TRIPLE runs in
 # a subshell, where exiting would only end the subshell).
@@ -514,9 +595,13 @@ schedule_rss_sample() {
 		log "RSS SAMPLE skipped: no sampler at $SAMPLER"
 		return
 	fi
+	# The wait has no child, and the sampler is exec'd: this job is one process
+	# from start to end, the one stop_children signals. (It was a subshell
+	# around a `sleep` and then around the sampler: TERM to it killed the
+	# subshell and left whichever of the two was running.)
 	(
-		sleep "$PROXY_RSS_DELAY"
-		bash "$SAMPLER" --context "$CTX" --at-age "$PROXY_RSS_AGE"
+		nap "$PROXY_RSS_DELAY"
+		exec bash "$SAMPLER" --context "$CTX" --at-age "$PROXY_RSS_AGE"
 	) >>"$LOG" 2>&1 &
 	log "RSS SAMPLE queued for T+${PROXY_RSS_AGE}s after this aether-proxy roll (#628)"
 }
@@ -539,7 +624,7 @@ shrink() {
 		abort "SHRINK could not scale $SHRINK_NS/$SHRINK_TARGET down"
 	fi
 	SHRINK_PREV="$prev"
-	sleep "$SHRINK_SECONDS"
+	nap "$SHRINK_SECONDS"
 	restore_shrink || abort "SHRINK could not restore $SHRINK_NS/$SHRINK_TARGET"
 }
 
@@ -559,10 +644,15 @@ cleanup_newsa() {
 # when the step produced no tally (a hole); a tally with any non-2xx logs FAILED and
 # returns 0, because that is the gate reading, not a harness failure.
 newsa() {
-	local name node nodes n t_apply ready_after final tally bad
+	local name node nodes=() nodes_list n t_apply ready_after final tally bad
 	NEWSA_STEP=$((NEWSA_STEP + 1))
 	name="sa-new-$(date +%s)"
-	mapfile -t nodes < <(newsa_nodes)
+	# Not `mapfile < <(newsa_nodes)` (#1419): `mapfile` returns as soon as a
+	# trapped signal arrives and bash does not wait for a process substitution,
+	# so a TERM during it ended the driver at once and left the kubectl call
+	# running. A command substitution is waited for.
+	nodes_list=$(newsa_nodes)
+	if [ -n "$nodes_list" ]; then mapfile -t nodes <<<"$nodes_list"; fi
 	n=${#nodes[@]}
 	if [ "$n" -eq 0 ]; then
 		log "FAILED newsa/$name - no Ready worker node"
@@ -594,7 +684,7 @@ newsa() {
 	# The pod prints its final line after NEWSA_SECONDS; allow two minutes of slack.
 	final=""
 	while [ $(($(date +%s) - t_apply)) -lt $((NEWSA_SECONDS + ready_after + 120)) ]; do
-		sleep 10
+		nap 10
 		final=$(k -n "$NEWSA_NS" logs "deployment/$name" 2>/dev/null | grep '^AETHER_NEWSA_FINAL ' | tail -1)
 		if [ -n "$final" ]; then break; fi
 	done
@@ -768,13 +858,16 @@ udscsi() {
 	wfile=$(mktemp)
 	wpid=""
 	if [ -n "$plugin" ]; then
-		k -n "$UDSCSI_NS" get pods -l "$UDSCSI_SELECTOR" --field-selector "spec.nodeName=$vnode" \
-			-w -o jsonpath="$UDSCSI_POD_FMT" >"$wfile" 2>>"$LOG" &
+		# exec, not `k ... &`: a function in the background is a subshell with
+		# kubectl as its child, and killing $! then left the watch running until
+		# the API server closed it. This way $! is kubectl.
+		(exec kubectl --context "$CTX" -n "$UDSCSI_NS" get pods -l "$UDSCSI_SELECTOR" --field-selector "spec.nodeName=$vnode" \
+			-w -o jsonpath="$UDSCSI_POD_FMT") >"$wfile" 2>>"$LOG" &
 		wpid=$!
 		# The watch lists the existing pods first; wait (bounded) until it has.
 		deadline=$(($(date +%s) + 15))
 		while [ "$(udscsi_window "$plugin" "$wfile")" = "unseen" ] && [ "$(date +%s)" -lt "$deadline" ]; do
-			sleep 0.2
+			nap_brief 0.2
 		done
 		if [ "$(udscsi_window "$plugin" "$wfile")" = "unseen" ]; then
 			log "UDSCSI watch on $vnode listed nothing in 15s; polling instead"
@@ -820,7 +913,7 @@ udscsi() {
 			window_why="plugin $plugin not down within ${UDSCSI_WINDOW_TIMEOUT}s (last state: $state)"
 			break
 		fi
-		sleep 0.2
+		nap_brief 0.2
 	done
 	t_del=$(date +%s)
 	if ! k -n "$vns" delete pod "$victim" --wait=false >>"$LOG" 2>&1; then
@@ -868,7 +961,7 @@ udscsi() {
 			ready_s=$(($(date +%s) - t_del))
 			break
 		fi
-		sleep 3
+		nap 3
 	done
 	if [ -z "$replacement" ]; then
 		replacement=-
@@ -883,12 +976,12 @@ udscsi() {
 			bad="$bad,csinode"
 			break
 		fi
-		sleep 5
+		nap 5
 	done
 	t_done=$(date -u +%FT%TZ)
 	fm_during=$(failedmount_count "$vns" "$since" "$t_done")
 	# Settle, then any FailedMount stamped after the step finished outlived the roll.
-	sleep 30
+	nap 30
 	fm_after=$(failedmount_count "$vns" "$t_done")
 	if [ "$fm_after" != 0 ]; then bad="$bad,failedmount"; fi
 	line="$UDSCSI_NS/$UDSCSI_DS victim=$vns/$victim@$vnode window=$window rollout=${rollout_s}s terminated=${term_s}s replacement=$replacement ready=${ready_s}s csinode=$csinode failedmount_during=$fm_during failedmount_after=$fm_after"
@@ -965,11 +1058,25 @@ for entry in "${SCHED[@]}"; do
 		log "CONCURRENT triple begin"
 		# Wait on these three PIDs specifically: a bare `wait` would also block on
 		# any RSS sampler still parked in its --at-age poll, delaying the log.
-		roll aether-system daemonset/aether-agent &
+		#
+		# Each roll ignores TERM (#1419): a driver that is stopped during the
+		# TRIPLE waits for the rolls already under way (stop_children) instead of
+		# killing the subshell and leaving its kubectl, and its `ROLLED` line,
+		# behind. kubectl inherits the ignore, so the call is not cut either.
+		(
+			trap '' TERM
+			roll aether-system daemonset/aether-agent
+		) &
 		t_agent=$!
-		roll aether-system daemonset/aether-proxy &
+		(
+			trap '' TERM
+			roll aether-system daemonset/aether-proxy
+		) &
 		t_proxy=$!
-		roll aether-test deployment/svc-3 &
+		(
+			trap '' TERM
+			roll aether-test deployment/svc-3
+		) &
 		t_svc=$!
 		# Wait on each PID separately: `wait a b c` returns only the LAST status, and
 		# every one of the three must have rolled.
