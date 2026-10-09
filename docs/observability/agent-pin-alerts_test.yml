@@ -222,7 +222,7 @@ tests:
               job: aether-agent
               node: n1
             exp_annotations:
-              summary: "the proxy on n1 holds 2 unpinned mesh cluster(s) that aether-agent no longer publishes"
+              summary: "the proxy on n1 has accepted 2 unpinned mesh cluster(s) that aether-agent no longer publishes"
               description: "The clusters the proxy on n1 has accepted include 2 more mesh clusters without a server-identity pin, counted reason by reason, than the agent's current snapshot publishes. The proxy has not accepted the newer clusters for 15 minutes. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error), and `proxy acknowledged mesh clusters with no server-identity SAN pin` for the per-reason counts. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
       - eval_time: 30m
         alertname: AetherProxyHoldsUnpinnedClusters
@@ -256,7 +256,7 @@ tests:
               job: aether-agent
               node: n1
             exp_annotations:
-              summary: "the proxy on n1 holds 2 unpinned mesh cluster(s) that aether-agent no longer publishes"
+              summary: "the proxy on n1 has accepted 2 unpinned mesh cluster(s) that aether-agent no longer publishes"
               description: "The clusters the proxy on n1 has accepted include 2 more mesh clusters without a server-identity pin, counted reason by reason, than the agent's current snapshot publishes. The proxy has not accepted the newer clusters for 15 minutes. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error), and `proxy acknowledged mesh clusters with no server-identity SAN pin` for the per-reason counts. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
       - eval_time: 30m
         alertname: AetherMeshClusterUnpinned
@@ -293,7 +293,7 @@ tests:
               job: aether-agent
               node: n1
             exp_annotations:
-              summary: "the proxy on n1 holds 1 unpinned mesh cluster(s) that aether-agent no longer publishes"
+              summary: "the proxy on n1 has accepted 1 unpinned mesh cluster(s) that aether-agent no longer publishes"
               description: "The clusters the proxy on n1 has accepted include 1 more mesh clusters without a server-identity pin, counted reason by reason, than the agent's current snapshot publishes. The proxy has not accepted the newer clusters for 15 minutes. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error), and `proxy acknowledged mesh clusters with no server-identity SAN pin` for the per-reason counts. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
 
   # An entry with no cluster in the snapshot (a TCP floor that is not captured)
@@ -345,7 +345,7 @@ tests:
               job: aether-agent
               node: n1
             exp_annotations:
-              summary: "the proxy on n1 holds 1 unpinned mesh cluster(s) that aether-agent no longer publishes"
+              summary: "the proxy on n1 has accepted 1 unpinned mesh cluster(s) that aether-agent no longer publishes"
               description: "The clusters the proxy on n1 has accepted include 1 more mesh clusters without a server-identity pin, counted reason by reason, than the agent's current snapshot publishes. The proxy has not accepted the newer clusters for 15 minutes. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error), and `proxy acknowledged mesh clusters with no server-identity SAN pin` for the per-reason counts. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
 
   # The other direction is not a divergence alert: the agent publishes two

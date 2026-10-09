@@ -212,7 +212,7 @@ groups:
           severity: warning
           component: aether-agent
         annotations:
-          summary: "the proxy on {{ $labels.node }} holds {{ $value }} unpinned mesh cluster(s) that {{ $labels.job }} no longer publishes"
+          summary: "the proxy on {{ $labels.node }} has accepted {{ $value }} unpinned mesh cluster(s) that {{ $labels.job }} no longer publishes"
           description: >-
             The clusters the proxy on {{ $labels.node }} has accepted include
             {{ $value }} more mesh clusters without a server-identity pin,
