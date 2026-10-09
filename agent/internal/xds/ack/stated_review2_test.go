@@ -357,6 +357,88 @@ func TestStreamClose_ForgetsTheVersionOfWhatItLeftUnanswered(t *testing.T) {
 	requirePresent(t, tr, testListener)
 }
 
+// TestStreamClose_AnUnansweredAddMayHaveBeenApplied: a stream closes with the
+// add of a listener unanswered. The proxy may have applied it before the
+// answer was lost, so the listener is not known to be absent any more: a DEL
+// waits for its removal. That holds when this stream had acknowledged its
+// removal before, and when nothing at all was known of it. It does not hold
+// against another generation's acknowledged removal: that one is newer than
+// the add the closing stream never answered.
+func TestStreamClose_AnUnansweredAddMayHaveBeenApplied(t *testing.T) {
+	absentWaits := func(t *testing.T, tr *Tracker, msg string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), unresolvedWait)
+		defer cancel()
+		require.Error(t, tr.WaitListenerAbsent(ctx, testListener), msg)
+	}
+
+	t.Run("after a removal this stream acknowledged", func(t *testing.T) {
+		published := map[string]string{testListener: "h1"}
+		tr := publishing(published)
+		openDelta(tr, 1, resourcev3.ListenerType, nil)
+		sendListeners(tr, 1, "n1", map[string]string{testListener: "h1"}, nil)
+		ackDelta(tr, 1, "n1", "")
+		sendListeners(tr, 1, "n2", nil, []string{testListener})
+		ackDelta(tr, 1, "n2", "")
+		requireAbsentNow(t, tr, testListener)
+
+		sendListeners(tr, 1, "n3", map[string]string{testListener: "h1"}, nil)
+		tr.onDeltaStreamClosed(1, nil)
+		absentWaits(t, tr, "the proxy may hold the listener it was sent again")
+		requireNotPresent(t, tr, testListener, "and may not: it is at no known version")
+
+		// It reconnects and says it applied it.
+		openDelta(tr, 2, resourcev3.ListenerType, map[string]string{testListener: "h1"})
+		sendDelta(tr, 2, "n1", nil, nil)
+		ackDelta(tr, 2, "n1", "")
+		requirePresent(t, tr, testListener)
+	})
+
+	t.Run("of a listener nothing was known of", func(t *testing.T) {
+		tr := publishing(map[string]string{testListener: "h1"})
+		openDelta(tr, 1, resourcev3.ListenerType, nil)
+		sendListeners(tr, 1, "n1", map[string]string{testListener: "h1"}, nil)
+		tr.onDeltaStreamClosed(1, nil)
+		absentWaits(t, tr, "the proxy may hold the listener it was sent")
+
+		// It reconnects and says it does not: the opening response sends it
+		// again, and nothing but the answer to that says it is there.
+		openDelta(tr, 2, resourcev3.ListenerType, nil)
+		sendListeners(tr, 2, "n1", map[string]string{testListener: "h1"}, nil)
+		requireNotPresent(t, tr, testListener)
+		ackDelta(tr, 2, "n1", "")
+		requirePresent(t, tr, testListener)
+	})
+
+	t.Run("an unanswered removal does not make a listener present", func(t *testing.T) {
+		// The proxy rejected the listener, so it does not hold it; the
+		// server, which counts what it sent as delivered, sends its removal
+		// when the pod goes, and the stream closes before the answer.
+		tr := publishing(map[string]string{})
+		openDelta(tr, 1, resourcev3.ListenerType, nil)
+		sendListeners(tr, 1, "n1", map[string]string{testListener: "h1"}, nil)
+		ackDelta(tr, 1, "n1", "Permission denied")
+		sendListeners(tr, 1, "n2", nil, []string{testListener})
+		tr.onDeltaStreamClosed(1, nil)
+		require.False(t, holds(tr, testListener), "nothing the proxy was sent can have made it hold the listener")
+	})
+
+	t.Run("not against another generation's acknowledged removal", func(t *testing.T) {
+		tr := publishing(map[string]string{})
+		const parent, child = int64(1), int64(2)
+		openDelta(tr, parent, resourcev3.ListenerType, nil)
+		sendListeners(tr, parent, "p1", map[string]string{testListener: "h1"}, nil)
+		openDelta(tr, child, resourcev3.ListenerType, nil)
+		sendListeners(tr, child, "c1", map[string]string{testListener: "h1"}, nil)
+		ackDelta(tr, child, "c1", "")
+		sendListeners(tr, child, "c2", nil, []string{testListener})
+		ackDelta(tr, child, "c2", "")
+
+		tr.onDeltaStreamClosed(parent, nil)
+		requireAbsentNow(t, tr, testListener, "the generation that stays acknowledged the removal")
+	})
+}
+
 // TestStreamClose_KeepsWhatAnotherStreamAcknowledged: the unanswered response
 // of a generation that goes away says nothing about the listener the other
 // generation acknowledged.

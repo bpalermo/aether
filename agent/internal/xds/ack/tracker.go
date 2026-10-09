@@ -47,6 +47,11 @@ type resourceState struct {
 	// version was sent (Tracker.clock), and stream the stream it was sent on.
 	sentAt uint64
 	stream int64
+	// unconfirmed is set when present is not a proxy's word: a stream closed
+	// with the add of the resource unanswered, and the proxy may have applied
+	// it (unansweredForgottenLocked). It holds a removal wait and answers no
+	// presence wait, with or without a PublishedVersion.
+	unconfirmed bool
 }
 
 // inflightKey identifies one unacknowledged delta response. Nonces are unique
@@ -225,6 +230,15 @@ type Tracker struct {
 	// from a snapshot at least as new, so the tick it was sent at orders what
 	// two streams answer about one name; and "the last response sent when a
 	// rejection arrived" orders an acknowledgement against that rejection.
+	//
+	// The tick is taken in the response callback, which go-control-plane
+	// runs on the stream's goroutine just before it writes the response, some
+	// time after the cache computed it. So it orders two streams' responses
+	// by when they were written, which is the order they were computed in
+	// unless one stream's goroutine is held up between the two for longer
+	// than the other takes to be answered and sent the next snapshot. The
+	// tracker has no better clock: the snapshot's own order is the cache's
+	// to give (system_version_info is opaque here).
 	clock uint64
 	// published, when set, makes "present" mean "at the published version"
 	// (SetPublishedVersion).
@@ -406,7 +420,7 @@ func (st resourceState) answers(wantPresent, unanswered bool, published Publishe
 	if !wantPresent {
 		return !st.present
 	}
-	return st.present && !unanswered && atPublishedVersion(published, typeURL, name, st.version)
+	return st.present && !st.unconfirmed && !unanswered && atPublishedVersion(published, typeURL, name, st.version)
 }
 
 // isClosed reports whether ch is closed, without waiting.
@@ -771,7 +785,7 @@ func (t *Tracker) acknowledgedLocked(streamID int64, entry inflightResponse) {
 		if st.sentAt > entry.sentAt {
 			return
 		}
-		st.present, st.version, st.sentAt, st.stream = present, version, entry.sentAt, streamID
+		st.present, st.unconfirmed, st.version, st.sentAt, st.stream = present, false, version, entry.sentAt, streamID
 		if entry.sentAt > st.nackAt {
 			st.nackErr, st.nackVersion, st.nackSentAt, st.nackAt = nil, "", 0, 0
 		}
@@ -851,27 +865,42 @@ func (t *Tracker) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 }
 
 // unansweredForgottenLocked is called for a response its stream closed
-// without answering. The proxy may or may not have applied it, so for every
-// resource it carried whose state this stream wrote, the version the proxy
-// holds is no longer known: it is still present (a removal waits for its
-// acknowledgement), at no version (no wait for it to be present is answered).
-// The proxy says which it holds when it reconnects. Callers must hold t.mu.
+// without answering. The proxy may or may not have applied it, so what it
+// holds of each resource the response carried is no longer known, when this
+// stream is the one that said what it held, or nobody had:
+//
+//   - a resource known present is still present (a removal waits for its
+//     acknowledgement), at no version (no wait for it to be present is
+//     answered), unless the response carried the version it had acknowledged;
+//   - a resource not known present that the response ADDED is present from
+//     now on, at no version: the proxy may have applied the add, and a
+//     removal must wait for its acknowledgement.
+//
+// The proxy says which it holds when it reconnects. What another stream said
+// is left alone: it is another proxy generation's, and newer than a response
+// this one never answered. Callers must hold t.mu.
 func (t *Tracker) unansweredForgottenLocked(streamID int64, entry inflightResponse) {
-	forget := func(name, sent string) {
+	forget := func(name, sent string, added bool) {
 		key := entry.typeURL + "/" + name
 		st := t.state[key]
-		// Sent the version it had acknowledged: it holds that one either way.
-		if !st.present || st.stream != streamID || st.version == sent {
+		if st.stream != streamID && (st.stream != 0 || st.present) {
 			return
 		}
-		st.version = ""
+		switch {
+		case st.present && st.version != sent:
+			st.version = ""
+		case !st.present && added:
+			st.present, st.unconfirmed, st.version, st.stream = true, true, "", streamID
+		default:
+			return
+		}
 		t.state[key] = st
 	}
 	for _, r := range entry.added {
-		forget(r.Name, r.Version)
+		forget(r.Name, r.Version, true)
 	}
 	for _, name := range entry.removed {
-		forget(name, "")
+		forget(name, "", false)
 	}
 }
 
