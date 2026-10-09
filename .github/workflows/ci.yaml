@@ -72,6 +72,17 @@ jobs:
   # only what changed and skip entirely when nothing they cover is impacted. Falls
   # back to a full run if the base is unreachable or bazel-diff fails (see the
   # script). Analysis only — no BuildBuddy key needed here.
+  #
+  # One tree (#1459). On `pull_request` the run's commit is the merge of the
+  # head into the base, and that is what every job here checks out and builds.
+  # This job used to check out the HEAD instead and compare it with the tip of
+  # the base: for a pull request behind its base, a target the base had removed
+  # was handed to `test` ("no such target"), and one the base had added was in
+  # no list, so a change that broke it was not tested. The range is now read
+  # from the merge itself (scripts/ci-merge-range.sh): its first parent, the
+  # base, to the merge commit. The artifact carries that commit, and each job
+  # that downloads the lists checks it against its own checkout
+  # (.github/actions/impacted-lists).
   diff:
     needs: changes
     if: needs.changes.outputs.control_plane == 'true'
@@ -86,9 +97,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           # Full history so the base commit is reachable for the diff.
           fetch-depth: 0
+      - name: Resolve the range under test (the merge and its first parent)
+        id: range
+        env:
+          EXPECT_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/ci-merge-range.sh
       - name: Setup Java
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
@@ -109,8 +125,8 @@ jobs:
       - name: Compute impacted targets
         id: impacted
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ steps.range.outputs.base }}
+          HEAD_SHA: ${{ steps.range.outputs.head }}
           BAZEL_DIFF_JAR: ${{ runner.temp }}/bazel-diff.jar
           OUT_DIR: ${{ runner.temp }}/bazel-diff-out
         run: |
@@ -579,11 +595,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
         uses: ./.github/actions/setup-bazel
-      - name: Download impacted target lists
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download impacted target lists (checked against this checkout)
+        uses: ./.github/actions/impacted-lists
         with:
-          name: impacted-targets
-          path: ${{ runner.temp }}/impacted
+          has-any: ${{ needs.diff.outputs.has_any }}
+          has-unit: ${{ needs.diff.outputs.has_unit }}
+          has-integration: ${{ needs.diff.outputs.has_integration }}
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh --config=ci --target_pattern_file=${{ runner.temp }}/impacted/impacted_build.txt
       - name: Build impacted targets
@@ -683,11 +700,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
         uses: ./.github/actions/setup-bazel
-      - name: Download impacted target lists
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download impacted target lists (checked against this checkout)
+        uses: ./.github/actions/impacted-lists
         with:
-          name: impacted-targets
-          path: ${{ runner.temp }}/impacted
+          has-any: ${{ needs.diff.outputs.has_any }}
+          has-unit: ${{ needs.diff.outputs.has_unit }}
+          has-integration: ${{ needs.diff.outputs.has_integration }}
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh --config=ci --target_pattern_file=${{ runner.temp }}/impacted/impacted_build.txt
       # The 19 concurrency-heavy packages from the 2026-09-15 races review get
@@ -739,7 +757,9 @@ jobs:
           fi
           # `|| true`: an empty leg makes grep exit 1, which pipefail would turn
           # into a job failure. An empty combined list is handled by has_* below.
-          { cat "$IMPACTED/impacted_unit.txt" "$IMPACTED/impacted_integration.txt" 2>/dev/null |
+          # Both files are there: the download step above fails on a missing
+          # list (#1460), so `cat` has nothing to hide.
+          { cat "$IMPACTED/impacted_unit.txt" "$IMPACTED/impacted_integration.txt" |
             grep -v '^[[:space:]]*$' | sort -u |
             grep -Fxf "$RUNNER_TEMP/go_tests.txt" >"$RUNNER_TEMP/race_all.txt"; } || true
           while IFS= read -r label; do
@@ -797,11 +817,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
         uses: ./.github/actions/setup-bazel
-      - name: Download impacted target lists
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download impacted target lists (checked against this checkout)
+        uses: ./.github/actions/impacted-lists
         with:
-          name: impacted-targets
-          path: ${{ runner.temp }}/impacted
+          has-any: ${{ needs.diff.outputs.has_any }}
+          has-unit: ${{ needs.diff.outputs.has_unit }}
+          has-integration: ${{ needs.diff.outputs.has_integration }}
       - name: Is the netns gate impacted
         id: impacted
         run: |
@@ -850,11 +871,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Bazel
         uses: ./.github/actions/setup-bazel
-      - name: Download impacted target lists
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download impacted target lists (checked against this checkout)
+        uses: ./.github/actions/impacted-lists
         with:
-          name: impacted-targets
-          path: ${{ runner.temp }}/impacted
+          has-any: ${{ needs.diff.outputs.has_any }}
+          has-unit: ${{ needs.diff.outputs.has_unit }}
+          has-integration: ${{ needs.diff.outputs.has_integration }}
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh --config=ci --target_pattern_file=${{ runner.temp }}/impacted/impacted_integration.txt
       - name: Integration tests
@@ -921,25 +943,31 @@ jobs:
           kind delete cluster --name aether-e2e || true
 
   # Single required status check. Always runs (if: always()) so it reports on
-  # every PR — including proxy-only PRs where the control-plane jobs skip — and
-  # fails only if a job that actually ran failed. This is the context required by
-  # the main branch ruleset.
+  # every PR — including proxy-only PRs where the control-plane jobs skip. This
+  # is the context required by the main branch ruleset.
   #
-  # The `skipped` result is deliberately not in the failure test below: a skipped
-  # required check is a *missing* check to GitHub and would block the PR forever,
-  # which is the whole reason the gate is a separate fan-in job instead of the
-  # legs themselves. `needs.*.result` yields one entry per need, so `contains`
-  # sees 'skipped' for every leg bazel-diff or the path filter scoped out and
-  # ignores it. Not theoretical: this already reports green on PRs where `e2e`
-  # (and often `integration`) skip for an empty impact set.
+  # A leg that bazel-diff or the path filter scoped out is `skipped`, and that
+  # has to pass: this job exists so that the required check is not one of the
+  # legs. But `skipped` passes only where a job said so (#1460). An output that
+  # was never set reads as the empty string in the `if:` of a leg and skips it
+  # exactly as `false` does, so scripts/ci-gate.sh reads the whole `needs`
+  # context and requires `changes` to have written control_plane=true|false,
+  # `diff` to have written true|false to each has_* output, and every job to
+  # have ended the way those values say: "nothing impacted" is four times
+  # `false`, written by `diff`. A failed or cancelled job fails it, as before.
+  #
+  # The rules in that script repeat each job's `if:`; //scripts:ci_gate_test
+  # compares them with this file, and fails when a job is added here and not
+  # to `needs` below and to the script.
   ci:
     if: always()
     needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, actionlint, shell, format, test, race, netns, integration, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail if any control-plane job failed or was cancelled
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-        run: |
-          echo "::error::a required control-plane job failed or was cancelled"
-          exit 1
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Every job ended the way its conditions say it must
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: scripts/ci-gate.sh
