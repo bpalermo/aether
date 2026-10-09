@@ -36,14 +36,20 @@ common --repo_env=ASPECT_TOOLS_TELEMETRY=-all
 # under a second directory name and compares the digests.
 build --experimental_output_paths=strip
 # A tag on a target reaches every action of that target, so a `go_test` tagged
-# `no-sandbox` for the sake of its test run (the Envoy harnesses under
-# agent/test) has compiles that may not be sandboxed and, being path-mapped,
-# cannot run any other way: "requires sandboxing due to path mapping, cannot be
-# executed with any of the available strategies". Take the tag back off the Go
-# build actions; the test run (TestRunner) keeps it. rules_go leaves path
-# mapping off for a target tagged `local` and has no such case for
-# `no-sandbox`; with one, these three entries can go.
+# for the sake of its test run has compiles that carry the tag too, and a
+# path-mapped compile can then run nowhere:
+#   - `no-sandbox` (the Envoy harnesses under agent/test): not in the sandbox,
+#     and unsandboxed is refused;
+#   - `no-remote-exec` (the Docker-bound integration tests and the CNI netns
+#     tests): under --config=remote not on the executor, and what is left is
+#     unsandboxed.
+# Either way: "requires sandboxing due to path mapping, cannot be executed with
+# any of the available strategies". Take both tags back off the Go build
+# actions; the test run (TestRunner) keeps them. rules_go leaves path mapping
+# off for a target tagged `local` and has no such case for these two; with one,
+# these entries can go.
 build --modify_execution_info=Go.*=-no-sandbox,RunNogo=-no-sandbox,ValidateNogo=-no-sandbox
+build --modify_execution_info=Go.*=-no-remote-exec,RunNogo=-no-remote-exec,ValidateNogo=-no-remote-exec
 
 # Configure workspace status script
 build --workspace_status_command=./bazel/workspace_status.sh
