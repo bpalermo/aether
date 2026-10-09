@@ -242,7 +242,15 @@ func (c *Contract) Validate() []string {
 	if c.Version < 1 {
 		problems = append(problems, fmt.Sprintf("version is %d: it is a positive integer", c.Version))
 	}
-	problems = append(problems, validateEntries(c.entries())...)
+	// A chart object has an id too (a chart test lists it), and it is held by
+	// the test of its render: ids are unique across all of them.
+	entries := c.entries()
+	for _, r := range c.Charts {
+		for _, o := range r.Objects {
+			entries = append(entries, entry{"the objects of " + r.ID, o.ID, r.CheckedBy})
+		}
+	}
+	problems = append(problems, validateEntries(entries)...)
 	byID := map[string]Metric{}
 	for _, m := range c.Metrics {
 		byID[m.ID] = m

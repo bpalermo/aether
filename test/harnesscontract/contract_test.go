@@ -135,6 +135,12 @@ func TestParseRejects(t *testing.T) {
 		"an aether render that would generate a key": {
 			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: aether, release: r, namespace: n, objects: [{id: o, kind: K, name: x}], checked_by: review-only}", "generated private key",
 		},
+		"two chart objects with one id": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x}, {id: o, kind: K, name: z}], checked_by: review-only}", `id "o" is used twice`,
+		},
+		"a chart object with the id of another entry": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: m, kind: K, name: x}], checked_by: review-only}", `id "m" is used twice`,
+		},
 		"a render of nothing": {
 			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, checked_by: review-only}", "lists no object",
 		},
