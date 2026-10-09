@@ -275,10 +275,15 @@ names:
       - //test/harnesscontract:harnesscontract_test
       - //test/harnesscontract:aether_chart_test
       - //test/harnesscontract:prober_chart_test
-  # Pod label: "true" opts a pod into the mesh.
+  # Pod label: "true" opts a pod into the mesh. The agent, the CNI plugin and
+  # the controller read it through the Go constant; the aether chart writes it
+  # again in the selectors of the controller's pod webhooks, which are held to
+  # this entry (chart.aether.pod_webhooks).
   - id: pod.label.managed
     value: aether.io/managed
-    checked_by: //test/harnesscontract:harnesscontract_test
+    checked_by:
+      - //test/harnesscontract:harnesscontract_test
+      - //test/harnesscontract:aether_chart_test
   # Pod annotation: the comma-separated upstream services the pod calls.
   - id: pod.annotation.upstreams
     value: config.aether.io/upstreams
@@ -396,6 +401,10 @@ charts:
         # A node has no plugin pod from the old one's end to the new one's
         # readiness: a harness that tests a mount during the roll relies on it.
         rolling_update: {maxSurge: "0", maxUnavailable: "1"}
+        # The kubelet finds the plugin's socket in a directory named after the
+        # driver. The plugin derives it from the Go constant; the chart writes
+        # the directory once more, as the hostPath it mounts there.
+        host_paths: ["/plugins/<csi.driver>"]
       - id: chart.aether.edge
         kind: Deployment
         name: aether-edge
@@ -407,6 +416,16 @@ charts:
       - id: chart.aether.csidriver
         kind: CSIDriver
         name_from: csi.driver
+      # Not an object a harness addresses, so it has no name here: it is the
+      # render's one MutatingWebhookConfiguration. It is listed because the
+      # chart writes the mesh pod label once more in the selectors of these two
+      # webhooks, and both ignore failures: with another key there they would
+      # stop matching and nothing would say so.
+      - id: chart.aether.pod_webhooks
+        kind: MutatingWebhookConfiguration
+        webhooks:
+          namespace-inject.pods.aether.io: pod.label.managed
+          ndots.pods.aether.io: pod.label.managed
     checked_by: //test/harnesscontract:aether_chart_test
 
   - id: chart.aether.agent_surge

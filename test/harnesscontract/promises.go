@@ -201,11 +201,20 @@ func (r Render) promises(p promises) {
 	p.rest(fields, r.ID)
 	for _, o := range r.Objects {
 		fields := fieldsOf(o)
-		take(fields, "pod_labels", "containers", "name", "name_from")
+		take(fields, "pod_labels", "containers", "name", "name_from", "host_paths", "webhooks")
 		// The same object under another render is another promise.
 		p.put(r.ID, o.ID, "render")
 		// The name a harness addresses, wherever the contract takes it from.
-		p.put(o.name(), o.ID, "name")
+		if o.name() != "" {
+			p.put(o.name(), o.ID, "name")
+		}
+		// What each comes to, not the id it is made from.
+		for i, pattern := range o.HostPaths {
+			p.put(o.hostPaths[i], o.ID, "host_paths", pattern)
+		}
+		for _, webhook := range sortedKeys(o.Webhooks) {
+			p.put(o.webhooks[webhook], o.ID, "webhooks", webhook)
+		}
 		for _, k := range sortedKeys(o.PodLabels) {
 			p.put(o.PodLabels[k], o.ID, "pod_labels", k)
 		}
@@ -274,7 +283,9 @@ const lockHeader = `# The promises external-harness.yaml made at the version bel
 # So a line is added to this file whenever the contract gains a promise, and a
 # line leaves it or changes only in the change that bumps the version. Never
 # edit a digest or delete a line by hand to make the test pass: that is the
-# bump the test asked for, skipped. README.md, "The rule".
+# bump the test asked for, skipped, and on a pull request
+# scripts/check-harness-contract-bump.sh compares this file with the one at the
+# base and fails all the same. README.md, "The rule".
 `
 
 // entryOf returns the entry id a promise's name starts with.

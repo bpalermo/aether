@@ -34,9 +34,36 @@ type Object struct {
 	PodLabels     map[string]string `json:"pod_labels"`
 	Containers    []Container       `json:"containers"`
 	RollingUpdate *RollingUpdate    `json:"rolling_update"`
+	// HostPaths are patterns, `<id>` standing for the value of a `names` entry:
+	// the pod has a hostPath volume whose path ends with each.
+	HostPaths []string `json:"host_paths"`
+	// Webhooks maps the name of a webhook of an admission configuration to the
+	// id of the `names` entry that is the label it selects by: a key of its
+	// namespaceSelector's or its objectSelector's matchLabels.
+	Webhooks map[string]string `json:"webhooks"`
 
-	// The value of the entry NameFrom refers to, filled in by Contract.link.
-	nameFrom string
+	// What the fields above refer to, filled in by Contract.link.
+	linked    bool
+	nameFrom  string
+	hostPaths []string
+	webhooks  map[string]string
+}
+
+// refs returns the ids of the `names` entries the object itself refers to
+// (its containers have their own), sorted and without repeats.
+func (o Object) refs() []string {
+	var out []string
+	if o.NameFrom != "" {
+		out = append(out, o.NameFrom)
+	}
+	for _, pattern := range o.HostPaths {
+		out = append(out, argRefs(pattern)...)
+	}
+	for _, webhook := range sortedKeys(o.Webhooks) {
+		out = append(out, o.Webhooks[webhook])
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // name is the name the object is rendered under.
@@ -127,9 +154,7 @@ func (c Container) refs() []string {
 func (r Render) refs() []string {
 	var out []string
 	for _, o := range r.Objects {
-		if o.NameFrom != "" {
-			out = append(out, o.NameFrom)
-		}
+		out = append(out, o.refs()...)
 		for _, c := range o.Containers {
 			out = append(out, c.refs()...)
 		}
@@ -186,6 +211,11 @@ func (c *Contract) validateLinks() []string {
 	c.eachObject(func(o *Object) {
 		if _, ok := names[o.NameFrom]; o.NameFrom != "" && !ok {
 			problems = append(problems, fmt.Sprintf("%s takes its name from %q, and `names` has no entry with that id", o.ID, o.NameFrom))
+		}
+		for _, id := range (Object{HostPaths: o.HostPaths, Webhooks: o.Webhooks}).refs() {
+			if _, ok := names[id]; !ok {
+				problems = append(problems, fmt.Sprintf("%s refers to %q under `host_paths` or `webhooks`, and `names` has no entry with that id (a host path is a pattern, like /plugins/<csi.driver>)", o.ID, id))
+			}
 		}
 	})
 	referrers := map[string][]string{}
@@ -283,7 +313,18 @@ func (c *Contract) validateHolders() []string {
 // accepts.
 func (c *Contract) link() {
 	attributes, names := c.attributesByID(), c.namesByID()
-	c.eachObject(func(o *Object) { o.nameFrom = names[o.NameFrom] })
+	c.eachObject(func(o *Object) {
+		o.linked = true
+		o.nameFrom = names[o.NameFrom]
+		o.hostPaths = nil
+		for _, pattern := range o.HostPaths {
+			o.hostPaths = append(o.hostPaths, argValue(pattern, names))
+		}
+		o.webhooks = map[string]string{}
+		for webhook, id := range o.Webhooks {
+			o.webhooks[webhook] = names[id]
+		}
+	})
 	c.eachContainer(func(_ string, ct *Container) {
 		ct.linked = true
 		ct.attributes, ct.codeAttributes = nil, nil
@@ -324,8 +365,10 @@ func (r Render) validate() []string {
 		problems = append(problems, fmt.Sprintf("%s renders the aether chart without `%s: \"true\"` under set: the render would hold a generated private key", r.ID, noGeneratedKey))
 	}
 	for _, o := range r.Objects {
-		if o.ID == "" || o.Kind == "" || (o.Name == "") == (o.NameFrom == "") {
-			problems = append(problems, fmt.Sprintf("%s: an object needs an id, a kind and either a name or a name_from (got id=%q kind=%q name=%q name_from=%q)", r.ID, o.ID, o.Kind, o.Name, o.NameFrom))
+		// With neither a name nor a name_from it is the one object of its kind
+		// in the render, whatever it is called.
+		if o.ID == "" || o.Kind == "" || (o.Name != "" && o.NameFrom != "") {
+			problems = append(problems, fmt.Sprintf("%s: an object needs an id and a kind, and has a name or a name_from but not both (got id=%q kind=%q name=%q name_from=%q)", r.ID, o.ID, o.Kind, o.Name, o.NameFrom))
 		}
 	}
 	return problems
@@ -430,9 +473,24 @@ type manifest struct {
 			Spec struct {
 				InitContainers []container `json:"initContainers"`
 				Containers     []container `json:"containers"`
+				Volumes        []struct {
+					HostPath *struct {
+						Path string `json:"path"`
+					} `json:"hostPath"`
+				} `json:"volumes"`
 			} `json:"spec"`
 		} `json:"template"`
 	} `json:"spec"`
+	// An admission configuration's.
+	Webhooks []struct {
+		Name              string   `json:"name"`
+		NamespaceSelector selector `json:"namespaceSelector"`
+		ObjectSelector    selector `json:"objectSelector"`
+	} `json:"webhooks"`
+}
+
+type selector struct {
+	MatchLabels map[string]string `json:"matchLabels"`
 }
 
 type strategy struct {
@@ -447,11 +505,15 @@ type container struct {
 	Command []string `json:"command"`
 	Args    []string `json:"args"`
 	Env     []envVar `json:"env"`
+	EnvFrom []any    `json:"envFrom"`
 }
 
+// envVar is one variable. One that has ValueFrom has a value this check cannot
+// read.
 type envVar struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+	ValueFrom any    `json:"valueFrom"`
 }
 
 // documents splits a `helm template` output at its `---` lines.
@@ -517,7 +579,7 @@ func (o Object) find(docs []manifest) (manifest, string) {
 			continue
 		}
 		sameKind = append(sameKind, d.Metadata.Name)
-		if d.Metadata.Name == o.name() {
+		if o.name() == "" || d.Metadata.Name == o.name() {
 			found = append(found, d)
 		}
 	}
@@ -532,13 +594,16 @@ func (o Object) find(docs []manifest) (manifest, string) {
 }
 
 func (o Object) check(docs []manifest) []string {
-	if o.NameFrom != "" && o.nameFrom == "" {
+	if !o.linked && len(o.refs()) > 0 {
 		// A contract that was not loaded through Load: see checkEnv.
-		return []string{fmt.Sprintf("%s takes its name from the entry %s and it was not resolved: load the contract with Load", o.ID, o.NameFrom)}
+		return []string{fmt.Sprintf("%s refers to other entries (%s) and they were not resolved: load the contract with Load", o.ID, strings.Join(o.refs(), ", "))}
 	}
 	what := fmt.Sprintf("%s: %s/%s", o.ID, o.Kind, o.name())
-	if o.NameFrom != "" {
+	switch {
+	case o.NameFrom != "":
 		what += " (named by the entry " + o.NameFrom + ")"
+	case o.Name == "":
+		what = fmt.Sprintf("%s: the render's one %s", o.ID, o.Kind)
 	}
 	d, problem := o.find(docs)
 	if problem != "" {
@@ -561,6 +626,48 @@ func (o Object) check(docs []manifest) []string {
 		if got := rollingUpdateOf(d); got != *o.RollingUpdate {
 			problems = append(problems, fmt.Sprintf("%s rolls with maxSurge=%s maxUnavailable=%s, the contract says maxSurge=%s maxUnavailable=%s",
 				what, orUnset(got.MaxSurge), orUnset(got.MaxUnavailable), o.RollingUpdate.MaxSurge, o.RollingUpdate.MaxUnavailable))
+		}
+	}
+	problems = append(problems, o.checkHostPaths(what, d)...)
+	return append(problems, o.checkWebhooks(what, d)...)
+}
+
+// checkHostPaths holds the pod's hostPath volumes to the patterns: one of them
+// ends with each.
+func (o Object) checkHostPaths(what string, d manifest) []string {
+	var paths, problems []string
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.HostPath != nil {
+			paths = append(paths, v.HostPath.Path)
+		}
+	}
+	for i, want := range o.hostPaths {
+		if !slices.ContainsFunc(paths, func(p string) bool { return strings.HasSuffix(p, want) }) {
+			problems = append(problems, fmt.Sprintf("%s has no hostPath volume whose path ends with %s, which is what the contract's %s comes to (its hostPath volumes: %s)", what, want, o.HostPaths[i], orNone(paths)))
+		}
+	}
+	return problems
+}
+
+// checkWebhooks holds the webhooks of an admission configuration to the label
+// each selects by.
+func (o Object) checkWebhooks(what string, d manifest) []string {
+	var problems []string
+	for _, name := range sortedKeys(o.webhooks) {
+		var names, selectors []string
+		found := false
+		for _, w := range d.Webhooks {
+			names = append(names, w.Name)
+			if w.Name == name {
+				found = true
+				selectors = slices.Concat(sortedKeys(w.NamespaceSelector.MatchLabels), sortedKeys(w.ObjectSelector.MatchLabels))
+			}
+		}
+		switch {
+		case !found:
+			problems = append(problems, fmt.Sprintf("%s has no webhook %q (its webhooks: %s)", what, name, orNone(names)))
+		case !slices.Contains(selectors, o.webhooks[name]):
+			problems = append(problems, fmt.Sprintf("%s: the webhook %q does not select by the label %s, the value of the entry %s (it selects by: %s)", what, name, o.webhooks[name], o.Webhooks[name], orNone(selectors)))
 		}
 	}
 	return problems
@@ -628,6 +735,13 @@ func (c Container) checkCodeResourceAttributes(what string, got container) []str
 		return nil
 	}
 	var problems []string
+	// What cannot be read cannot be shown not to set the attribute.
+	if len(got.EnvFrom) > 0 {
+		problems = append(problems, fmt.Sprintf("%s container %q takes variables from `envFrom`, which this check cannot read: one of them could be %s and replace what the component's own code sets", what, c.Name, ResourceEnv))
+	}
+	if slices.ContainsFunc(got.Env, func(e envVar) bool { return e.Name == ResourceEnv && e.ValueFrom != nil }) {
+		problems = append(problems, fmt.Sprintf("%s container %q takes %s from `valueFrom`, which this check cannot read: it could set what the component's own code sets", what, c.Name, ResourceEnv))
+	}
 	pairs := got.resourcePairs()
 	for _, a := range c.codeAttributes {
 		if _, ok := pairs[a.Attribute]; ok {

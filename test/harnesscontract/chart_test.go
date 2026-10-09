@@ -294,6 +294,17 @@ func TestRenderCheck_Ties(t *testing.T) {
 			render: env("OTEL_SERVICE_NAME\n              valueFrom: {fieldRef: {fieldPath: metadata.name}}"),
 			want:   `is given OTEL_SERVICE_NAME`,
 		},
+		// What the check cannot read could set the attribute: it fails closed.
+		"the chart takes the resource attributes from a source that cannot be read": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, `value: "k8s.node.name=$(NODE_NAME),service.namespace=hunter2"`, "valueFrom: {configMapKeyRef: {name: hunter2, key: attrs}}", 1),
+			want:   "takes OTEL_RESOURCE_ATTRIBUTES from `valueFrom`, which this check cannot read",
+		},
+		"the chart gives the container variables in bulk": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, "          env:\n", "          envFrom:\n            - configMapRef: {name: hunter2}\n          env:\n", 1),
+			want:   "takes variables from `envFrom`, which this check cannot read",
+		},
 		// service.namespace is in the render all along: only the attribute
 		// itself counts, and a variable of another name is not the SDK's.
 		"another variable": {name: "aether-agent", port: "18081", render: env("OTEL_SERVICE_NAMES\n              value: hunter2")},
@@ -336,8 +347,147 @@ func TestRenderCheck_UnresolvedReferences(t *testing.T) {
 	o = agentObject()
 	o.Name, o.NameFrom = "", "ds"
 	got = strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(render)), "\n")
-	if !strings.Contains(got, "o takes its name from the entry ds and it was not resolved") {
+	if !strings.Contains(got, "o refers to other entries (ds) and they were not resolved") {
 		t.Errorf("Check() = %q", got)
+	}
+}
+
+// selected is a contract that holds a pod's hostPath volume and the selectors
+// of two webhooks to `names` entries.
+const selected = `
+version: 1
+names:
+  - {id: driver, value: DRIVER, checked_by: review-only}
+  - {id: label, value: LABEL, checked_by: review-only}
+charts:
+  - id: r
+    chart: x
+    release: x
+    namespace: ns
+    objects:
+      - id: o
+        kind: DaemonSet
+        name: plugin
+        host_paths: ["/plugins/<driver>"]
+      - id: w
+        kind: MutatingWebhookConfiguration
+        webhooks:
+          inject.example: label
+          ndots.example: label
+    checked_by: review-only
+`
+
+const selectedRender = `---
+kind: DaemonSet
+metadata: {name: plugin}
+spec:
+  template:
+    spec:
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: plugin-dir
+          hostPath: {path: /var/lib/kubelet/plugins/csi.example.io}
+        - name: registry
+          hostPath: {path: /var/lib/kubelet/plugins_registry}
+---
+kind: MutatingWebhookConfiguration
+metadata: {name: whatever-the-release-makes-it}
+webhooks:
+  - name: inject.example
+    namespaceSelector: {matchLabels: {example.io/managed: "true"}}
+  - name: ndots.example
+    objectSelector: {matchLabels: {example.io/managed: "true"}}
+  - name: other.example
+---
+kind: ValidatingWebhookConfiguration
+metadata: {name: validate}
+webhooks:
+  - name: inject.example
+`
+
+// TestRenderCheck_HostPathsAndWebhooks: the directory a pod mounts from the
+// host and the label a webhook selects by are read from the entries, so the
+// entry edited alone, or the chart alone, is a difference.
+func TestRenderCheck_HostPathsAndWebhooks(t *testing.T) {
+	for name, tc := range map[string]struct {
+		driver, label string
+		render        string
+		want          string
+	}{
+		"as rendered": {driver: "csi.example.io", label: "example.io/managed"},
+		"the driver's entry is edited alone": {
+			driver: "csi.mesh.io", label: "example.io/managed",
+			want: "o: DaemonSet/plugin has no hostPath volume whose path ends with /plugins/csi.mesh.io, which is what the contract's /plugins/<driver> comes to (its hostPath volumes: /var/lib/kubelet/plugins/csi.example.io, /var/lib/kubelet/plugins_registry)",
+		},
+		"the chart's directory is edited alone": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "plugins/csi.example.io", "plugins/csi.mesh.io", 1),
+			want:   "has no hostPath volume whose path ends with /plugins/csi.example.io",
+		},
+		"a driver that is only the end of the directory's name": {
+			driver: "example.io", label: "example.io/managed",
+			want: "has no hostPath volume whose path ends with /plugins/example.io",
+		},
+		"the label's entry is edited alone": {
+			driver: "csi.example.io", label: "example.io/meshed",
+			want: `w: the render's one MutatingWebhookConfiguration: the webhook "inject.example" does not select by the label example.io/meshed, the value of the entry label (it selects by: example.io/managed)`,
+		},
+		"the chart's namespace selector is edited alone": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "namespaceSelector: {matchLabels: {example.io/managed:", "namespaceSelector: {matchLabels: {example.io/meshed:", 1),
+			want:   `the webhook "inject.example" does not select by the label example.io/managed`,
+		},
+		"the chart's object selector is edited alone": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "objectSelector: {matchLabels: {example.io/managed:", "objectSelector: {matchLabels: {example.io/meshed:", 1),
+			want:   `the webhook "ndots.example" does not select by the label example.io/managed, the value of the entry label (it selects by: example.io/meshed)`,
+		},
+		"a webhook that selects by nothing": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "    objectSelector: {matchLabels: {example.io/managed: \"true\"}}\n", "", 1),
+			want:   `the webhook "ndots.example" does not select by the label example.io/managed, the value of the entry label (it selects by: none)`,
+		},
+		"a webhook the chart no longer renders": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "  - name: ndots.example\n", "  - name: dots.example\n", 1),
+			want:   `has no webhook "ndots.example" (its webhooks: inject.example, dots.example, other.example)`,
+		},
+		"a second configuration of the kind": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: selectedRender + "---\nkind: MutatingWebhookConfiguration\nmetadata: {name: second}\n",
+			want:   "w: the render's one MutatingWebhookConfiguration is rendered 2 times",
+		},
+		"no configuration of the kind": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "kind: MutatingWebhookConfiguration", "kind: Something", 1),
+			want:   "w: the render's one MutatingWebhookConfiguration is not rendered",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := parse([]byte(strings.NewReplacer("DRIVER", tc.driver, "LABEL", tc.label).Replace(selected)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			from := selectedRender
+			if tc.render != "" {
+				from = tc.render
+			}
+			got := strings.Join(c.Charts[0].Check([]byte(from)), "\n")
+			if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+				t.Errorf("Check() = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+	// Built by hand, nothing resolved the entries: never a pass.
+	for _, o := range []Object{
+		{ID: "o", Kind: "DaemonSet", Name: "plugin", HostPaths: []string{"/plugins/<driver>"}},
+		{ID: "o", Kind: "MutatingWebhookConfiguration", Webhooks: map[string]string{"inject.example": "driver"}},
+	} {
+		got := strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(selectedRender)), "\n")
+		if !strings.Contains(got, "o refers to other entries (driver) and they were not resolved") {
+			t.Errorf("Check() = %q", got)
+		}
 	}
 }
 

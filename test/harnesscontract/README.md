@@ -54,13 +54,17 @@ to) with a digest of what is promised there. `TestVersionBump` in
 - A promise the contract makes that the lock does not hold is new. The test
   prints the lines to add to the lock; `version` stays.
 
-So the table above is what the test decides, with one limit. A promise that
-exists only in prose (`notes`, a comment, the entries under "What is
-review-only") has no line, and changing it stays a review rule. And the lock
-is a file in the same pull request: a line deleted from it by hand, or a
-digest computed by hand, passes the test. Its header says not to, and the
-diff shows it; nothing in this repository compares the lock with the one on
-the base branch.
+That test reads both files from one checkout, so on its own it cannot see a
+change made to both: an entry removed together with its lines, or a promise
+changed and its digest computed by hand. (A line deleted alone does not pass:
+the test asks for it back.) `scripts/check-harness-contract-bump.sh` closes
+that. The `chart-version-bump` job of `ci.yaml` runs it on every pull request
+with the base commit: every promise line of the lock at the base is still in
+the lock, unchanged, or `version` is higher than at the base.
+
+So the table above is what the two checks decide, with one limit. A promise
+that exists only in prose (`notes`, a comment, the entries under "What is
+review-only") has no line, and changing it stays a review rule.
 
 ## How an entry is tied to the code
 
@@ -84,10 +88,11 @@ that names a chart test is referred to by one of its renders.
 | `resource_attributes` `k8s.node.name` | The keys `OTEL_RESOURCE_ATTRIBUTES` sets in the rendered agent and prober containers. The chart entries do not repeat the attribute: each container lists the entry's id (`resource_attributes`), and the chart test reads the key from the entry | `//test/harnesscontract:harnesscontract_test` holds the link (every component has a container that refers to the entry, and no other container does); `//test/harnesscontract:{aether,prober}_chart_test` compare with the render |
 | `names` `mesh.default_domain` | Besides the Go constant: the `--mesh-domain` argument the aether chart renders for the agent and the mesh-DNS daemon when `meshDomain` is left at the chart's default, and the one the prober chart renders when `probe.meshDomain` is (a container's `args` maps the flag to the entry's id) | `//test/harnesscontract:{aether,prober}_chart_test`, with `harnesscontract_test` holding the link for the agent |
 | `names` `port.outbound_http` | Besides the Go constant: the `--egress` argument the prober chart renders when `probe.egress` is left at its default (`args` maps the flag to a pattern, `127.0.0.1:<port.outbound_http>`) | `//test/harnesscontract:prober_chart_test` |
-| `names` `csi.driver` | Besides the Go constant: the name of the CSIDriver object the aether chart renders (the object has `name_from: csi.driver` in place of a name) | `//test/harnesscontract:aether_chart_test` |
+| `names` `csi.driver` | Besides the Go constant: the name of the CSIDriver object the aether chart renders (the object has `name_from: csi.driver` in place of a name), and the kubelet plugin directory the uds-csi DaemonSet mounts from the host (`host_paths: ["/plugins/<csi.driver>"]`) | `//test/harnesscontract:aether_chart_test` |
+| `names` `pod.label.managed` | Besides the Go constant: the label the controller's two pod webhooks select by in the aether chart's render (`webhooks` of the render's one MutatingWebhookConfiguration maps each webhook to the entry). Both webhooks ignore failures, so another key there would fail silently | `//test/harnesscontract:aether_chart_test` |
 | `resource_attributes` `service.name` of the prober | Besides the resource the prober builds: the rendered prober container is given neither `service.name` in `OTEL_RESOURCE_ATTRIBUTES` nor `OTEL_SERVICE_NAME`, because the SDK lets the environment win over the code (the container lists the entry in `code_resource_attributes`) | `//test/harnesscontract:prober_chart_test` |
 
-The last four rows exist because a Go constant is not always what is
+The last five rows exist because a Go constant is not always what is
 deployed. A component can be given the name by its chart (a flag, an
 environment variable), the chart can write the name a second time (an object
 it renders), or the chart's own defaults can spell it. Comparing the entry
@@ -128,11 +133,11 @@ class or in two, a chart test named by an entry it compares with nothing).
 - **A promise made only in prose.** `notes` and comments have no line in the
   lock, so the `version` bump for a change of meaning written only there is
   kept by review.
-- **The names the charts write a second time without a value.** The pod label
-  in the selectors of the controller's webhooks, and the annotations, label
-  and CSI driver the prober and udsecho charts put on their own pods, are
-  literals in the templates. The contract compares those names with the Go
-  constants, not with these copies.
+- **The names the prober and udsecho charts put on their own pods.** The mesh
+  label, the annotations and the CSI driver of a volume are literals in those
+  templates, used as any workload uses them. The contract compares the names
+  with the Go constants, not with these copies; a copy that is wrong leaves
+  that chart's own pods outside the mesh, which its end-to-end test sees.
 
 ## When a contract test fails
 

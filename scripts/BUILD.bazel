@@ -143,6 +143,20 @@ sh_test(
     env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
+# check-harness-contract-bump.sh (#1541): the lock of the external-harness
+# contract against the one at the pull request's base, so a promise removed
+# together with its lock line still needs a version bump. Hermetic: a fake
+# `git show`. Also holds ci.yaml to running it against the base sha.
+sh_test(
+    name = "check_harness_contract_bump_test",
+    size = "small",
+    srcs = ["check_harness_contract_bump_test.sh"],
+    data = [
+        "check-harness-contract-bump.sh",
+        "//:ci_definitions",
+    ],
+)
+
 # The verifier and the helper it sources, for //bazel/cosign:verify_image_signatures,
 # which runs it with COSIGN set to the Bazel-pinned cosign binary.
 exports_files(

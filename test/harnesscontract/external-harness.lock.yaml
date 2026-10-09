@@ -10,7 +10,9 @@
 # So a line is added to this file whenever the contract gains a promise, and a
 # line leaves it or changes only in the change that bumps the version. Never
 # edit a digest or delete a line by hand to make the test pass: that is the
-# bump the test asked for, skipped. README.md, "The rule".
+# bump the test asked for, skipped, and on a pull request
+# scripts/check-harness-contract-bump.sh compares this file with the one at the
+# base and fails all the same. README.md, "The rule".
 version: 1
 promises:
   "agent.identity_cluster_unpinned component": "50cd9bfba937d729"
@@ -72,6 +74,10 @@ promises:
   "chart.aether.mesh_dns pod_labels app.kubernetes.io/name": "ff68fd1cd39f8248"
   "chart.aether.mesh_dns render": "1bd6aca7d20880b3"
   "chart.aether.mesh_dns rolling_update": "14c3f43b0d912466"
+  "chart.aether.pod_webhooks kind": "437f0de1558c8e60"
+  "chart.aether.pod_webhooks render": "3b0f12a8c08afd51"
+  "chart.aether.pod_webhooks webhooks namespace-inject.pods.aether.io": "9fb0ff4b8e0a58fb"
+  "chart.aether.pod_webhooks webhooks ndots.pods.aether.io": "eb3f2b87e1e43362"
   "chart.aether.proxy containers proxy": "cd358f8e0dd4401b"
   "chart.aether.proxy kind": "3a27f3541d3a38ae"
   "chart.aether.proxy name": "a81953f000907d56"
@@ -81,6 +87,7 @@ promises:
   "chart.aether.proxy render": "83c05f2518f7b12e"
   "chart.aether.proxy rolling_update": "003556a3c25c4785"
   "chart.aether.uds_csi containers uds-csi": "fe5493fb75a005ac"
+  "chart.aether.uds_csi host_paths /plugins/<csi.driver>": "eba3cd382341b5ac"
   "chart.aether.uds_csi kind": "cac4a9760d0d709b"
   "chart.aether.uds_csi name": "55a972c37259cdfa"
   "chart.aether.uds_csi namespace": "199251693173158e"

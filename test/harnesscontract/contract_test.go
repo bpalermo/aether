@@ -230,10 +230,16 @@ func TestParseRejects(t *testing.T) {
 		"a checked_by that is a map":  {"checked_by: //a:b", "checked_by: {a: b}", "checked_by is a Bazel label, a list of them"},
 		"a checked_by list of a list": {"checked_by: //a:b", "checked_by: [[//a:b]]", "checked_by is a Bazel label, a list of them"},
 		"an object with a name and a name_from": {
-			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: nm, value: v, checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, name_from: nm}], checked_by: review-only}", "either a name or a name_from",
+			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: nm, value: v, checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, name_from: nm}], checked_by: review-only}", "has a name or a name_from but not both",
 		},
-		"an object with neither a name nor a name_from": {
-			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K}], checked_by: review-only}", "either a name or a name_from",
+		"a host path made of a name the contract lacks": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, host_paths: [\"/plugins/<nope>\"]}], checked_by: review-only}", "o refers to \"nope\" under `host_paths` or `webhooks`, and `names` has no entry with that id",
+		},
+		"a host path that is no pattern": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, host_paths: [/plugins/x]}], checked_by: review-only}", "o refers to \"/plugins/x\" under `host_paths` or `webhooks`",
+		},
+		"a webhook held to a name the contract lacks": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, webhooks: {hook: nope}}], checked_by: review-only}", "o refers to \"nope\" under `host_paths` or `webhooks`",
 		},
 		"an object named by an entry the contract lacks": {
 			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name_from: nope}], checked_by: review-only}", "o takes its name from \"nope\", and `names` has no entry with that id",

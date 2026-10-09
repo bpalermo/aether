@@ -155,6 +155,13 @@ jobs:
           fetch-depth: 0
       - name: Require a Chart.yaml version bump for chart changes
         run: scripts/check-chart-version-bump.sh "${{ github.event.pull_request.base.sha }}"
+      # A promise that leaves the external-harness contract together with its
+      # line in the lock passes the hermetic test, which reads both files from
+      # one checkout; only the base can tell (#1541).
+      - name: Require a version bump when a promise leaves the external-harness contract
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/check-harness-contract-bump.sh "$BASE_SHA"
 
   deps-audit:
     needs: changes

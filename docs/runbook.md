@@ -214,6 +214,9 @@ the version it was written against. The bump is a test:
 the current version, and `//test/harnesscontract:harnesscontract_test` fails
 when a promise left or changed and `version` did not (it prints the lock for
 the new version once it is bumped, and the lines to add for a new promise).
+On a pull request `scripts/check-harness-contract-bump.sh` also compares the
+lock with the one at the base, so an entry removed together with its lock
+lines needs the bump too.
 [`test/harnesscontract/README.md`](../test/harnesscontract/README.md) has the
 table of what each test compares, what is kept by review alone, and how to add
 or remove an entry.

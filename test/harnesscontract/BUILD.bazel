@@ -64,12 +64,14 @@ helm_contract_test(
         "chart.aether.csidriver",
         "chart.aether.edge",
         "chart.aether.mesh_dns",
+        "chart.aether.pod_webhooks",
         "chart.aether.proxy",
         "chart.aether.uds_csi",
         # Entries of other sections an object or a container of these renders
         # is held to.
         "csi.driver",
         "mesh.default_domain",
+        "pod.label.managed",
         "resource.node",
     ],
 )

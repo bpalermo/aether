@@ -80,9 +80,13 @@ charts:
           - name: prober
             code_resource_attributes: [sn]
         rolling_update: {maxSurge: "0", maxUnavailable: "1"}
+        host_paths: ["/plugins/<dom>"]
       - id: c.d
         kind: CSIDriver
         name_from: dom
+      - id: c.w
+        kind: MutatingWebhookConfiguration
+        webhooks: {hook.x: dom}
     checked_by: review-only
 `
 
@@ -172,7 +176,8 @@ func TestCheckLock_SameVersion(t *testing.T) {
 				`the entry "dom" no longer promises what it did at version 3: value changed`,
 				// And what the charts are held to through it.
 				`the entry "c.d" no longer promises what it did at version 3: name changed`,
-				`the entry "c.o" no longer promises what it did at version 3: containers agent args --domain changed`,
+				`the entry "c.o" no longer promises what it did at version 3: containers agent args --domain changed; host_paths /plugins/<dom> changed`,
+				`the entry "c.w" no longer promises what it did at version 3: webhooks hook.x changed`,
 				bumpNeeded,
 			},
 		},
@@ -236,6 +241,18 @@ func TestCheckLock_SameVersion(t *testing.T) {
 		"a container no longer given an attribute":      {changes: []change{{"            resource_attributes: [ra]\n", ""}, {"components: [agent], ", ""}}, want: []string{`containers agent resource_attributes ra is gone`, `components agent is gone`, bumpNeeded}},
 		"an argument with another value":                {changes: []change{{`"127.0.0.1:<port>"`, `"localhost:<port>"`}}, want: []string{`containers agent args --egress changed`, bumpNeeded}},
 		"an argument no longer given":                   {changes: []change{{`--domain: dom, `, ``}}, want: []string{`containers agent args --domain is gone`, bumpNeeded}},
+		"a host path no longer held":                    {changes: []change{{"        host_paths: [\"/plugins/<dom>\"]\n", ""}}, want: []string{`host_paths /plugins/<dom> is gone`, bumpNeeded}},
+		"a host path of another shape": {
+			changes: []change{{`host_paths: ["/plugins/<dom>"]`, `host_paths: ["/plugin/<dom>"]`}},
+			want:    []string{`host_paths /plugins/<dom> is gone`, bumpNeeded},
+		},
+		"one more host path": {
+			changes: []change{{`host_paths: ["/plugins/<dom>"]`, `host_paths: ["/plugins/<dom>", "/registry/<dom>"]`}},
+			want:    []string{noBumpNeeded, `"c.o host_paths /registry/<dom>": "`},
+		},
+		"a webhook selecting by another name": {changes: []change{{"webhooks: {hook.x: dom}", "webhooks: {hook.x: port}"}}, want: []string{`"c.w" no longer promises what it did at version 3: webhooks hook.x changed`, bumpNeeded}},
+		"a webhook no longer held":            {changes: []change{{"webhooks: {hook.x: dom}", "webhooks: {hook.y: dom}"}}, want: []string{`webhooks hook.x is gone`, bumpNeeded}},
+		"a name for an object that had none":  {changes: []change{{"kind: MutatingWebhookConfiguration\n", "kind: MutatingWebhookConfiguration\n        name: hooks\n"}}, want: []string{noBumpNeeded, `"c.w name": "`}},
 		// A broken promise and a new one in the same change: the bump comes
 		// first, and nothing offers the lines that would hide it.
 		"a new entry beside a removed one": {
