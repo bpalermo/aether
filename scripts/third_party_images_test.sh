@@ -251,6 +251,14 @@ mutate "YAML flow mapping broken across lines, quoted key" e2e/sub/pod.yml $'  c
 	"e2e/sub/pod.yml:2: new/tool:latest is pinned by tag only"
 mutate "YAML single-pair mapping in a flow sequence" e2e/sub/pod.yaml '  containers: [image: new/tool:latest]' \
 	"e2e/sub/pod.yaml:1: new/tool:latest is pinned by tag only"
+# The value may stand alone on the line after its key, behind a node property
+# or not (third review of #1476).
+mutate "YAML value on the next line" e2e/sub/pod.yaml $'    image:\n      new/tool:latest' \
+	"e2e/sub/pod.yaml:2: new/tool:latest is pinned by tag only"
+mutate "YAML anchored value on the next line" e2e/sub/pod.yaml $'  - image:\n      &probe new/tool:latest # why' \
+	"e2e/sub/pod.yaml:2: new/tool:latest is pinned by tag only"
+mutate "YAML anchor on the key line, quoted value after a comment line" e2e/sub/pod.yaml $'    image: !!str &probe\n      # the probe\n      "new/tool:latest"' \
+	"e2e/sub/pod.yaml:3: new/tool:latest is pinned by tag only"
 # A `#` is a comment only after white space and outside quotes: what follows a
 # quoted one, a `${var#pattern}` or a URL fragment is still read.
 mutate "a known image after a quoted #" e2e/run.sh 'echo "step # 1" && docker run --rm a/b:1.0 true' \
@@ -311,6 +319,13 @@ spec:
   note: {text: "see the image: line", other: 1}
   image: |
     not an image, a paragraph
+  next:
+    image:
+      &next a/b:1.0@$D1
+  nested:
+    image:
+      repository: local
+      tag: dev
 EOF
 cat >>"$T/e2e/run.sh" <<'EOF'
 err "one, two, image: missing"
@@ -318,7 +333,7 @@ log "[image: missing], image: gone"
 echo nodes, image: missing
 EOF
 run_check "$T"
-if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 10 image reference(s) in "* ]]; then
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 11 image reference(s) in "* ]]; then
 	ok "flow mappings, block scalars and trailing comments pass when pinned; prose is not read"
 else
 	bad "pinned flow/block spellings: exit $RC"$'\n'"$OUT"

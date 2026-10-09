@@ -167,7 +167,8 @@ is_skipped() {
 #   1. the value after an `image` key or flag, in any of the spellings in use:
 #      YAML `image: x` (a block key, a list item, with a trailing comment, in
 #      a flow mapping `[{name: p, image: x}]`, also one broken across lines,
-#      as a block scalar `image: >-` with the value on the next line, behind an
+#      as a block scalar `image: >-` with the value on the next line, as a
+#      plain or quoted scalar alone on the line after a bare `image:`, behind an
 #      anchor or a tag `image: &a x`; an alias `image: *a` is refused, since
 #      its value is written where the scan cannot follow), JSON `"image": "x"`
 #      (also inside a shell string, `--overrides='{"image":"x"}'` or
@@ -272,9 +273,20 @@ extract_references() { # <names file>; file list on stdin
 			slash_comments = (FILENAME ~ /\.(go|js)$/)
 		}
 		# The line after `image: >-` / `image: |` is the value (a block scalar).
+		# So is the line after a bare `image:` (block == 2), when it holds one
+		# scalar and nothing else: there a comment line is passed over, and
+		# node properties, quotes and a trailing comment are not the value. A
+		# nested mapping (`image:` / `  repository: x`) is not a literal.
+		block == 2 && /^[ \t]*#/ { next }
 		block && !/^[ \t]*$/ {
-			block = 0
 			ref = $0
+			if (block == 2) {
+				if ((i = comment_start(ref, 0)) > 0) ref = substr(ref, 1, i - 1)
+				sub(/^[ \t]+/, "", ref)
+				while (match(ref, /^[&!][^ \t]*[ \t]+/)) ref = substr(ref, RLENGTH + 1)
+				gsub(/^["\047]|["\047]?[ \t]*$/, "", ref)
+			}
+			block = 0
 			gsub(/^[ \t]+|[ \t]+$/, "", ref)
 			if (literal(ref)) emit(ref)
 		}
@@ -311,6 +323,12 @@ extract_references() { # <names file>; file list on stdin
 				at_start = 0
 				if (key ~ /:[ \t]*$/ && key_opens_line && rest ~ /^[>|][-+0-9]*[ \t]*(#.*)?$/) {
 					block = 1
+					break
+				}
+				# Nothing after the key but node properties: the value, if it is
+				# a scalar, is on the next line.
+				if (key ~ /:[ \t]*$/ && key_opens_line && rest ~ /^([&!][^ \t]*[ \t]*)*$/) {
+					block = 2
 					break
 				}
 				ref = rest
