@@ -1,11 +1,11 @@
-package rendertest
+package render
 
 import (
 	"strings"
 	"testing"
 )
 
-const render = `---
+const rendered = `---
 # Source: x/templates/sa.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -62,7 +62,7 @@ spec:
 `
 
 func TestParse(t *testing.T) {
-	objects, err := Parse(render)
+	objects, err := Parse(rendered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestParse(t *testing.T) {
 	if len(workloads) != 1 || workloads[0].ID() != "DaemonSet/probe" {
 		t.Fatalf("Workloads = %v, want the DaemonSet alone (a `template` that is a scalar, an empty mapping, or a mapping with no containers is not a pod template)", workloads)
 	}
-	ds := Find(t, objects, "DaemonSet/probe")
+	ds := workloads[0]
 	if ds.Metadata.Annotations["a"] != "1" {
 		t.Errorf("object annotations = %v", ds.Metadata.Annotations)
 	}

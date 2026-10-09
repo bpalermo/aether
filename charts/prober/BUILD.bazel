@@ -1,7 +1,6 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url")
-load("@rules_go//go:def.bzl", "go_test")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_mesh_names_test", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test")
 
 # prober Helm chart (published to chart_registry_url("prober"); see @aether_registry//:registry.bzl).
 #
@@ -509,25 +508,16 @@ helm_template_match_test(
 
 # #1589: the mesh label and the mesh annotations on this chart's own pods are
 # literals in the templates. This compares them with the Go constants the CNI,
-# the agent and the webhook read (and, for config.aether.io/upstreams, whose
-# constant is internal to the agent, with the external-harness contract entry
-# that constant is held to), over every workload the chart can render.
-go_test(
-    name = "prober_test",
-    size = "small",
-    srcs = ["mesh_names_test.go"],
-    data = [
-        ":prober",
-        "@rules_helm//helm:current_toolchain",
-    ],
-    env = {
-        "RENDERTEST_CHART": "$(rootpath :prober)",
-        "RENDERTEST_HELM": "$(rootpaths @rules_helm//helm:current_toolchain)",
+# the agent and the webhook read, over every workload the chart can render
+# (the rule's documentation lists the symbols).
+helm_mesh_names_test(
+    name = "prober_mesh_names_test",
+    chart = ":prober",
+    opts = AUTHZ_CANARY_OPTS,
+    workloads = {
+        # The default targets give the DaemonSet its upstreams.
+        "DaemonSet/release-name-prober": ["upstreams"],
+        "Deployment/authz-canary": ["upstreams=authz-echo"],
+        "Deployment/authz-echo": ["endpoint_port=8080"],
     },
-    deps = [
-        "//bazel/helm/rendertest",
-        "//common/constants/annotations",
-        "//common/constants/labels",
-        "//test/harnesscontract",
-    ],
 )

@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# `helm template` over a packaged chart, parsed into objects, for a chart check
+# written in Go (//bazel/helm/meshnames). The pattern rules in
+# //bazel/helm:defs.bzl stay the tool for everything a pattern can say.
+go_library(
+    name = "render",
+    testonly = True,
+    srcs = ["render.go"],
+    importpath = "aethermesh.dev/bazel/helm/render",
+    visibility = ["//bazel/helm:__subpackages__"],
+    deps = ["@io_k8s_sigs_yaml//:yaml"],
+)
+
+go_test(
+    name = "render_test",
+    size = "small",
+    srcs = ["render_test.go"],
+    embed = [":render"],
+)

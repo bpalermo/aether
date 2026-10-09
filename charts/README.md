@@ -84,17 +84,20 @@ A chart's tests live in its `BUILD.bazel`. Which rule to use:
 | a value the chart must **reject** | `helm_template_fail_test` |
 | a derived line that must **follow** a value (a config checksum) | `helm_template_value_changes_test` |
 | templates that must **not** change with a value (a file the pod watches, so no roll) | `helm_template_value_ignored_test` |
-| a name the chart writes that **code reads** (a mesh label, a mesh annotation, a CSI driver) | a `go_test` on `//bazel/helm/rendertest`, comparing the render with the Go constant |
+| a mesh name the chart writes on its **own pods**, which code reads (the mesh-managed label, a mesh annotation, the CSI driver) | `helm_mesh_names_test` |
 
-All but the first and the last are in `//bazel/helm:defs.bzl`, which documents
-each. The last is for what a pattern cannot say: a pattern holds a literal, and
-a literal in a BUILD file agrees with a literal in a template while the
-constant the agent reads has moved on. `charts/prober` and `charts/udsecho`
-write the mesh-managed label, the mesh annotations and the `csi.aether.io`
-driver on their own pods, and `:prober_test` / `:udsecho_test` hold every
-workload they render to `common/constants` and `common/udspath` (#1589). The
-package comment of `bazel/helm/rendertest/rendertest.go` gives the `go_test`
-attributes; like the pattern rules, it never prints a render.
+All but the first are in `//bazel/helm:defs.bzl`, which documents each.
+
+The last row is for what a pattern cannot say: a pattern holds a literal, and a
+literal in a BUILD file agrees with a literal in a template while the constant
+the agent reads has moved on. `charts/prober` and `charts/udsecho` write the
+mesh-managed label, the mesh annotations and the `csi.aether.io` driver on
+their own pods; `:prober_mesh_names_test` and `:udsecho_mesh_names_test` list
+what each workload carries by symbol, and the checker
+(`//bazel/helm/meshnames`) compares the render with `common/constants` and
+`common/udspath` (#1589). It is not a `go_test`: one with a chart in its
+`data` cannot be analysed under `--config=race`. Like the pattern rules, it
+never prints a render.
 
 Two facts about rules_helm's `helm_template_test` decide the first row:
 

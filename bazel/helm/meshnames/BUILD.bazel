@@ -1,0 +1,35 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+# The checker behind helm_mesh_names_test (//bazel/helm:defs.bzl): the mesh
+# label, the mesh annotations and the CSI driver a chart writes on its own
+# pods, compared with the Go constants the code reads (#1589). main.go says
+# why it is a program and not a go_test.
+go_library(
+    name = "meshnames_lib",
+    testonly = True,
+    srcs = ["main.go"],
+    importpath = "aethermesh.dev/bazel/helm/meshnames",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//bazel/helm/render",
+        "//common/constants/annotations",
+        "//common/constants/labels",
+        "//common/udspath",
+        "//test/harnesscontract",
+    ],
+)
+
+go_binary(
+    name = "meshnames",
+    testonly = True,
+    embed = [":meshnames_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "meshnames_test",
+    size = "small",
+    srcs = ["main_test.go"],
+    embed = [":meshnames_lib"],
+    deps = ["//bazel/helm/render"],
+)
