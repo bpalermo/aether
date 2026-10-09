@@ -583,6 +583,108 @@ func TestRenderCheck_HostPathsAndWebhooks(t *testing.T) {
 	}
 }
 
+// rooted is a contract that holds a whole host path: the root a container is
+// run with, then a directory named after an entry.
+const rooted = `
+version: 1
+names:
+  - {id: driver, value: csi.example.io, checked_by: review-only}
+charts:
+  - id: r
+    chart: x
+    release: x
+    namespace: ns
+    objects:
+      - id: o
+        kind: DaemonSet
+        name: plugin
+        host_paths: ["<arg:--kubelet-root>/plugins/<driver>"]
+        containers: [{name: plugin}]
+    checked_by: review-only
+`
+
+const rootedRender = `---
+kind: DaemonSet
+metadata: {name: plugin}
+spec:
+  template:
+    spec:
+      containers:
+        - name: plugin
+          args: ["--kubelet-root=/var/lib/kubelet", "--root=/run/x"]
+          volumeMounts:
+            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}
+        - name: sidecar
+          args: ["--kubelet-root=/wrong"]
+      volumes:
+        - name: plugin-dir
+          hostPath: {path: /var/lib/kubelet/plugins/csi.example.io}
+        - name: registry
+          hostPath: {path: /var/lib/kubelet/plugins_registry}
+`
+
+// TestRenderCheck_RootedHostPath: the directory is held whole. The kubelet
+// looks under its own root, which the plugin is told with a flag: a directory
+// with the right end under another root is one the kubelet never reads.
+func TestRenderCheck_RootedHostPath(t *testing.T) {
+	c, err := parse([]byte(rooted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Charts[0].refs(); !slices.Equal(got, []string{"driver"}) {
+		t.Fatalf("the render refers to %q, want the driver alone: the flag is not an entry", got)
+	}
+	for name, tc := range map[string]struct {
+		from, to string
+		all      bool
+		want     string
+	}{
+		"as rendered": {},
+		"the chart moves the volume and the mount to another root": {
+			from: "/var/lib/kubelet/plugins/csi.example.io", to: "/wrong/plugins/csi.example.io", all: true,
+			want: `o: DaemonSet/plugin has no hostPath volume of the path /var/lib/kubelet/plugins/csi.example.io, which is what the contract's <arg:--kubelet-root>/plugins/<driver> comes to with the --kubelet-root of container "plugin" (its hostPath volumes: /wrong/plugins/csi.example.io, /var/lib/kubelet/plugins_registry)`,
+		},
+		"the chart gives the plugin another root and leaves the directory": {
+			from: `"--kubelet-root=/var/lib/kubelet"`, to: `"--kubelet-root=/var/lib/k0s/kubelet"`,
+			want: `has no hostPath volume of the path /var/lib/k0s/kubelet/plugins/csi.example.io`,
+		},
+		"the chart mounts the directory under another root": {
+			from: "mountPath: /var/lib/kubelet/plugins/csi.example.io", to: "mountPath: /wrong/plugins/csi.example.io",
+			want: `o: DaemonSet/plugin container "plugin" does not mount the hostPath volume "plugin-dir" at /var/lib/kubelet/plugins/csi.example.io, which is what the contract's <arg:--kubelet-root>/plugins/<driver> comes to with its --kubelet-root (it mounts it at: /wrong/plugins/csi.example.io)`,
+		},
+		"the chart names the directory after another driver": {
+			from: "hostPath: {path: /var/lib/kubelet/plugins/csi.example.io}", to: "hostPath: {path: /var/lib/kubelet/plugins/csi.mesh.io}",
+			want: `has no hostPath volume of the path /var/lib/kubelet/plugins/csi.example.io`,
+		},
+		"the plugin is no longer told the root": {
+			from: `"--kubelet-root=/var/lib/kubelet", `, to: ``,
+			want: `o: DaemonSet/plugin container "plugin" is not run with --kubelet-root, which the contract's <arg:--kubelet-root>/plugins/<driver> starts with`,
+		},
+		"the plugin container is gone": {
+			from: "        - name: plugin\n", to: "        - name: csi\n",
+			want: `o: DaemonSet/plugin has no container to take --kubelet-root from`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			from := rootedRender
+			if tc.from != "" {
+				if !strings.Contains(from, tc.from) {
+					t.Fatalf("the render has no %q", tc.from)
+				}
+				n := 1
+				if tc.all {
+					n = -1
+				}
+				from = strings.Replace(from, tc.from, tc.to, n)
+			}
+			got := strings.Join(c.Charts[0].Check([]byte(from)), "\n")
+			if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+				t.Errorf("Check() = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // byTest is a contract with a chart test per chart, and a name the first of
 // them compares with its render.
 const byTest = `

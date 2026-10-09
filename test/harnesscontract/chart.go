@@ -139,6 +139,9 @@ var argRef = regexp.MustCompile(`<([^<>]*)>`)
 
 // argRefs returns the ids of the `names` entries the value of an `args` pair
 // refers to: the whole value, or every `<id>` in it.
+//
+// `<arg:FLAG>` is not an id: it stands for the value a container is run with
+// for that flag, known only from a render (rootFlag).
 func argRefs(value string) []string {
 	matches := argRef.FindAllStringSubmatch(value, -1)
 	if len(matches) == 0 {
@@ -146,17 +149,52 @@ func argRefs(value string) []string {
 	}
 	var out []string
 	for _, m := range matches {
-		out = append(out, m[1])
+		if !strings.HasPrefix(m[1], argPrefix) {
+			out = append(out, m[1])
+		}
 	}
 	return out
 }
 
 // argValue is the value the flag is run with, the ids resolved through names.
+// An `<arg:FLAG>` stays as written.
 func argValue(value string, names map[string]string) string {
 	if !argRef.MatchString(value) {
 		return names[value]
 	}
-	return argRef.ReplaceAllStringFunc(value, func(ref string) string { return names[ref[1:len(ref)-1]] })
+	return argRef.ReplaceAllStringFunc(value, func(ref string) string {
+		if strings.HasPrefix(ref, "<"+argPrefix) {
+			return ref
+		}
+		return names[ref[1:len(ref)-1]]
+	})
+}
+
+// argPrefix marks, inside `<...>`, the flag of a container instead of an id.
+const argPrefix = "arg:"
+
+// rootFlag splits a host path pattern that starts with `<arg:FLAG>` into the
+// flag and what follows it. A pattern that does not start so has no flag.
+func rootFlag(pattern string) (flag, rest string) {
+	if !strings.HasPrefix(pattern, "<"+argPrefix) {
+		return "", pattern
+	}
+	end := strings.Index(pattern, ">")
+	if end < 0 {
+		return "", pattern
+	}
+	return pattern[len("<"+argPrefix):end], pattern[end+1:]
+}
+
+// flagValue returns the value the container is run with for the flag, written
+// as `FLAG=value`.
+func (got container) flagValue(flag string) (string, bool) {
+	for _, a := range slices.Concat(got.Command, got.Args) {
+		if v, ok := strings.CutPrefix(a, flag+"="); ok {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // refs returns the ids of the entries of other sections the container refers
@@ -678,34 +716,85 @@ func (o Object) check(docs []manifest) []string {
 	return append(problems, o.checkWebhooks(what, d)...)
 }
 
+// hostVolume is a hostPath volume of a pod.
+type hostVolume struct{ name, path string }
+
+// hostVolumes returns the pod's hostPath volumes, and their paths for a
+// failure message.
+func hostVolumes(d manifest) ([]hostVolume, []string) {
+	var out []hostVolume
+	var paths []string
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.HostPath != nil {
+			out = append(out, hostVolume{v.Name, v.HostPath.Path})
+			paths = append(paths, v.HostPath.Path)
+		}
+	}
+	return out, paths
+}
+
 // checkHostPaths holds the pod's hostPath volumes to the patterns: the path of
 // one of them ends with each, and a container of the pod mounts that volume at
 // a path that ends the same way. A component that derives a directory from a
 // name writes there in its own filesystem; the host sees it only through the
-// mount.
+// mount. A pattern that starts with the root a container is run with is held
+// whole (checkRootedPath).
 func (o Object) checkHostPaths(what string, d manifest) []string {
-	pod := d.Spec.Template.Spec
-	var paths, problems []string
-	for _, v := range pod.Volumes {
-		if v.HostPath != nil {
-			paths = append(paths, v.HostPath.Path)
-		}
-	}
-	by, whose := o.mounters(pod.Containers)
+	volumes, paths := hostVolumes(d)
+	by, whose := o.mounters(d.Spec.Template.Spec.Containers)
+	var problems []string
 	for i, want := range o.hostPaths {
+		pattern := o.HostPaths[i]
+		if flag, rest := rootFlag(want); flag != "" {
+			problems = append(problems, checkRootedPath(what, volumes, by, flag, rest, pattern)...)
+			continue
+		}
 		found := false
-		for _, v := range pod.Volumes {
-			if v.HostPath == nil || !strings.HasSuffix(v.HostPath.Path, want) {
+		for _, v := range volumes {
+			if !strings.HasSuffix(v.path, want) {
 				continue
 			}
 			found = true
-			if at := mountedAt(by, v.Name); !slices.ContainsFunc(at, func(p string) bool { return strings.HasSuffix(p, want) }) {
+			if at := mountedAt(by, v.name); !slices.ContainsFunc(at, func(p string) bool { return strings.HasSuffix(p, want) }) {
 				problems = append(problems, fmt.Sprintf("%s: no container mounts the hostPath volume %q (%s) at a path ending with %s, which is what the contract's %s comes to (%s mount it at: %s)",
-					what, v.Name, v.HostPath.Path, want, o.HostPaths[i], whose, orNowhere(at)))
+					what, v.name, v.path, want, pattern, whose, orNowhere(at)))
 			}
 		}
 		if !found {
-			problems = append(problems, fmt.Sprintf("%s has no hostPath volume whose path ends with %s, which is what the contract's %s comes to (its hostPath volumes: %s)", what, want, o.HostPaths[i], orNone(paths)))
+			problems = append(problems, fmt.Sprintf("%s has no hostPath volume whose path ends with %s, which is what the contract's %s comes to (its hostPath volumes: %s)", what, want, pattern, orNone(paths)))
+		}
+	}
+	return problems
+}
+
+// checkRootedPath holds a whole path, not its end: the directory a container
+// derives from the root it is run with (`<arg:FLAG>`) and a name. The pod has
+// a hostPath volume of exactly that path, and that container mounts it at
+// exactly that path: the component writes there in its own filesystem, and
+// whoever reads the directory on the host looks under the same root.
+func checkRootedPath(what string, volumes []hostVolume, by []container, flag, rest, pattern string) []string {
+	if len(by) == 0 {
+		return []string{fmt.Sprintf("%s has no container to take %s from, which the contract's %s starts with", what, flag, pattern)}
+	}
+	var problems []string
+	for _, c := range by {
+		root, ok := c.flagValue(flag)
+		if !ok {
+			problems = append(problems, fmt.Sprintf("%s container %q is not run with %s, which the contract's %s starts with", what, c.Name, flag, pattern))
+			continue
+		}
+		want := root + rest
+		i := slices.IndexFunc(volumes, func(v hostVolume) bool { return v.path == want })
+		if i < 0 {
+			var paths []string
+			for _, v := range volumes {
+				paths = append(paths, v.path)
+			}
+			problems = append(problems, fmt.Sprintf("%s has no hostPath volume of the path %s, which is what the contract's %s comes to with the %s of container %q (its hostPath volumes: %s)", what, want, pattern, flag, c.Name, orNone(paths)))
+			continue
+		}
+		if at := mountedAt([]container{c}, volumes[i].name); !slices.Contains(at, want) {
+			problems = append(problems, fmt.Sprintf("%s container %q does not mount the hostPath volume %q at %s, which is what the contract's %s comes to with its %s (it mounts it at: %s)", what, c.Name, volumes[i].name, want, pattern, flag, orNowhere(at)))
 		}
 	}
 	return problems

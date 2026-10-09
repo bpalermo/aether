@@ -87,7 +87,7 @@ promises:
   "chart.aether.proxy render": "83c05f2518f7b12e"
   "chart.aether.proxy rolling_update": "003556a3c25c4785"
   "chart.aether.uds_csi containers uds-csi": "fe5493fb75a005ac"
-  "chart.aether.uds_csi host_paths /plugins/<csi.driver>": "eba3cd382341b5ac"
+  "chart.aether.uds_csi host_paths <arg:--kubelet-root>/plugins/<csi.driver>": "8cdcdb7c8cdc70b3"
   "chart.aether.uds_csi kind": "cac4a9760d0d709b"
   "chart.aether.uds_csi name": "55a972c37259cdfa"
   "chart.aether.uds_csi namespace": "199251693173158e"

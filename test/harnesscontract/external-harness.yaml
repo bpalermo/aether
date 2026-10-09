@@ -360,9 +360,11 @@ names:
 # therefore NOT give it, and its `args` maps a flag to the id of the `names`
 # entry whose value it is run with (or to a pattern: `<id>` inside other text
 # stands for that entry's value); `host_paths` are such patterns too, each the
-# end of the path of a hostPath volume of the pod, which one of these containers mounts at
-# a path that ends the same way; `webhooks` maps a webhook of an admission
-# configuration to the `names` entry it selects by (`namespaces` for its
+# end of the path of a hostPath volume of the pod, which one of these
+# containers mounts at a path that ends the same way (a pattern that starts
+# with `<arg:FLAG>` is the whole path instead, under the value a listed
+# container is run with for that flag); `webhooks` maps a webhook of an
+# admission configuration to the `names` entry it selects by (`namespaces` for its
 # namespaceSelector, `objects` for its objectSelector), as a label with the
 # value "true" and nothing else, its other selector empty; an object with
 # neither `name` nor `name_from`
@@ -432,7 +434,7 @@ charts:
         # The kubelet finds the plugin's socket in a directory named after the
         # driver. The plugin derives it from the Go constant; the chart writes
         # the directory once more, as the hostPath it mounts there.
-        host_paths: ["/plugins/<csi.driver>"]
+        host_paths: ["<arg:--kubelet-root>/plugins/<csi.driver>"]
       - id: chart.aether.edge
         kind: Deployment
         name: aether-edge
