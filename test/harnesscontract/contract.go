@@ -11,6 +11,7 @@ package harnesscontract
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -46,6 +47,61 @@ type Contract struct {
 	NotContract        []NotContract       `json:"not_contract"`
 }
 
+// CheckedBy is an entry's `checked_by`: the Bazel tests that hold the entry to
+// the code, or ReviewOnly alone. The contract writes one test as a string and
+// several as a list. Every test it names declares the entry among the ids it
+// holds (Contract.Owns, or the `ids` of a helm_contract_test), so the list is
+// every test that fails when the entry and the code part.
+type CheckedBy []string
+
+// UnmarshalJSON reads one label or a list of them.
+func (c *CheckedBy) UnmarshalJSON(data []byte) error {
+	var one string
+	if err := json.Unmarshal(data, &one); err == nil {
+		*c = CheckedBy{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(data, &many); err != nil {
+		return fmt.Errorf("checked_by is a Bazel label, a list of them, or %q", ReviewOnly)
+	}
+	*c = many
+	return nil
+}
+
+// Has reports whether target is one of the tests.
+func (c CheckedBy) Has(target string) bool { return slices.Contains(c, target) }
+
+// tests returns the Bazel tests: everything but ReviewOnly.
+func (c CheckedBy) tests() []string {
+	var out []string
+	for _, t := range c {
+		if t != ReviewOnly {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func (c CheckedBy) validate(id string) []string {
+	if len(c) == 0 {
+		return []string{fmt.Sprintf("%s has no checked_by: name the Bazel test that holds it to the code (a list when several do), or %q", id, ReviewOnly)}
+	}
+	var problems []string
+	for i, t := range c {
+		if t != ReviewOnly && !strings.HasPrefix(t, "//") {
+			problems = append(problems, fmt.Sprintf("%s: checked_by %q is neither a Bazel label nor %q", id, t, ReviewOnly))
+		}
+		if slices.Contains(c[:i], t) {
+			problems = append(problems, fmt.Sprintf("%s: checked_by names %s twice", id, t))
+		}
+	}
+	if c.Has(ReviewOnly) && len(c) > 1 {
+		problems = append(problems, fmt.Sprintf("%s: checked_by is %q and a test at once: an entry a test holds is not kept by review alone", id, ReviewOnly))
+	}
+	return problems
+}
+
 // Metric types, as the contract spells them.
 const (
 	TypeCounter = "counter"
@@ -54,14 +110,14 @@ const (
 
 // Metric is one instrument a harness queries.
 type Metric struct {
-	ID         string  `json:"id"`
-	Component  string  `json:"component"`
-	OTelName   string  `json:"otel_name"`
-	StoredName string  `json:"stored_name"`
-	Type       string  `json:"type"`
-	Labels     []Label `json:"labels"`
-	Notes      string  `json:"notes"`
-	CheckedBy  string  `json:"checked_by"`
+	ID         string    `json:"id"`
+	Component  string    `json:"component"`
+	OTelName   string    `json:"otel_name"`
+	StoredName string    `json:"stored_name"`
+	Type       string    `json:"type"`
+	Labels     []Label   `json:"labels"`
+	Notes      string    `json:"notes"`
+	CheckedBy  CheckedBy `json:"checked_by"`
 }
 
 // Label is one attribute of a Metric: a closed set of Values, or Open.
@@ -112,48 +168,48 @@ type ReasonClasses struct {
 	Metric    string              `json:"metric"`
 	Label     string              `json:"label"`
 	Classes   map[string][]string `json:"classes"`
-	CheckedBy string              `json:"checked_by"`
+	CheckedBy CheckedBy           `json:"checked_by"`
 }
 
 // ResourceAttribute is an OpenTelemetry resource attribute a pipeline may turn
 // into a label.
 type ResourceAttribute struct {
-	ID         string   `json:"id"`
-	Attribute  string   `json:"attribute"`
-	Value      string   `json:"value"`
-	Components []string `json:"components"`
-	Notes      string   `json:"notes"`
-	CheckedBy  string   `json:"checked_by"`
+	ID         string    `json:"id"`
+	Attribute  string    `json:"attribute"`
+	Value      string    `json:"value"`
+	Components []string  `json:"components"`
+	Notes      string    `json:"notes"`
+	CheckedBy  CheckedBy `json:"checked_by"`
 }
 
 // LogLine is a marker-prefixed, one-JSON-object log line.
 type LogLine struct {
-	ID            string   `json:"id"`
-	Component     string   `json:"component"`
-	Marker        string   `json:"marker"`
-	Fields        []string `json:"fields"`
-	TimeFields    []string `json:"time_fields"`
-	Notes         string   `json:"notes"`
-	CapPerWindow  int      `json:"cap_per_window"`
-	WindowSeconds int      `json:"window_seconds"`
-	CheckedBy     string   `json:"checked_by"`
+	ID            string    `json:"id"`
+	Component     string    `json:"component"`
+	Marker        string    `json:"marker"`
+	Fields        []string  `json:"fields"`
+	TimeFields    []string  `json:"time_fields"`
+	Notes         string    `json:"notes"`
+	CapPerWindow  int       `json:"cap_per_window"`
+	WindowSeconds int       `json:"window_seconds"`
+	CheckedBy     CheckedBy `json:"checked_by"`
 }
 
 // EnvoyStat is an Envoy stat whose prefix the agent chooses.
 type EnvoyStat struct {
-	ID                string `json:"id"`
-	StatPrefix        string `json:"stat_prefix"`
-	Stat              string `json:"stat"`
-	StoredNamePattern string `json:"stored_name_pattern"`
-	Notes             string `json:"notes"`
-	CheckedBy         string `json:"checked_by"`
+	ID                string    `json:"id"`
+	StatPrefix        string    `json:"stat_prefix"`
+	Stat              string    `json:"stat"`
+	StoredNamePattern string    `json:"stored_name_pattern"`
+	Notes             string    `json:"notes"`
+	CheckedBy         CheckedBy `json:"checked_by"`
 }
 
 // Name is one string a harness writes into a manifest or a URL.
 type Name struct {
-	ID        string `json:"id"`
-	Value     string `json:"value"`
-	CheckedBy string `json:"checked_by"`
+	ID        string    `json:"id"`
+	Value     string    `json:"value"`
+	CheckedBy CheckedBy `json:"checked_by"`
 }
 
 // NotContract names something a harness uses that the product does not emit.
@@ -180,8 +236,14 @@ func parse(data []byte) (*Contract, error) {
 	return c, nil
 }
 
+// chartsSection is the section whose entries are renders of a chart.
+const chartsSection = "charts"
+
 // entry is what every contract entry has in common.
-type entry struct{ section, id, checkedBy string }
+type entry struct {
+	section, id string
+	checkedBy   CheckedBy
+}
 
 func (c *Contract) entries() []entry {
 	var out []entry
@@ -204,16 +266,16 @@ func (c *Contract) entries() []entry {
 		out = append(out, entry{"names", n.ID, n.CheckedBy})
 	}
 	for _, r := range c.Charts {
-		out = append(out, entry{"charts", r.ID, r.CheckedBy})
+		out = append(out, entry{chartsSection, r.ID, r.CheckedBy})
 	}
 	return out
 }
 
-// IDs returns the id of every entry whose checked_by is target, sorted.
+// IDs returns the id of every entry whose checked_by names target, sorted.
 func (c *Contract) IDs(target string) []string {
 	var out []string
 	for _, e := range c.entries() {
-		if e.checkedBy == target {
+		if e.checkedBy.Has(target) {
 			out = append(out, e.id)
 		}
 	}
@@ -221,14 +283,12 @@ func (c *Contract) IDs(target string) []string {
 	return out
 }
 
-// Targets returns every checked_by in the contract except ReviewOnly, sorted
-// and without repeats.
+// Targets returns every test a checked_by in the contract names, sorted and
+// without repeats.
 func (c *Contract) Targets() []string {
 	var out []string
 	for _, e := range c.entries() {
-		if e.checkedBy != ReviewOnly {
-			out = append(out, e.checkedBy)
-		}
+		out = append(out, e.checkedBy.tests()...)
 	}
 	slices.Sort(out)
 	return slices.Compact(out)
@@ -289,12 +349,10 @@ func validateEntries(entries []entry) []string {
 			problems = append(problems, fmt.Sprintf("id %q is used twice (%s and %s)", e.id, seen[e.id], e.section))
 		}
 		seen[e.id] = e.section
-		switch {
-		case e.checkedBy == "":
-			problems = append(problems, fmt.Sprintf("%s has no checked_by: name the Bazel test that holds it to the code, or %q", e.id, ReviewOnly))
-		case e.checkedBy != ReviewOnly && !strings.HasPrefix(e.checkedBy, "//"):
-			problems = append(problems, fmt.Sprintf("%s: checked_by %q is neither a Bazel label nor %q", e.id, e.checkedBy, ReviewOnly))
+		if yamlBoolean([]string{e.id}) != "" {
+			problems = append(problems, fmt.Sprintf("an entry of %s has the id %q: an unquoted y, n, yes, no, on or off is a boolean in YAML, so quote the id or choose another", e.section, e.id))
 		}
+		problems = append(problems, e.checkedBy.validate(e.id)...)
 	}
 	return problems
 }

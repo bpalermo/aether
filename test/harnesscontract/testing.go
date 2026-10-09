@@ -26,7 +26,7 @@ func Errorf(tb testing.TB, format string, args ...any) {
 	tb.Errorf("%s\n%s", fmt.Sprintf(format, args...), Rule)
 }
 
-// Owns asserts that the entries whose checked_by is target are exactly ids:
+// Owns asserts that the entries whose checked_by names target are exactly ids:
 // the test that calls it declares which entries it holds to the code.
 //
 // Both directions matter. An entry assigned to this test that the test does
@@ -107,7 +107,7 @@ func (c *Contract) CheckNames(tb testing.TB, target string, code map[string]stri
 	tb.Helper()
 	c.Owns(tb, target, append(sortedKeys(code), others...)...)
 	for _, n := range c.Names {
-		if n.CheckedBy != target {
+		if !n.CheckedBy.Has(target) {
 			continue
 		}
 		if got, ok := code[n.ID]; ok && got != n.Value {

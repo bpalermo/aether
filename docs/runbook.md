@@ -209,8 +209,11 @@ packaged chart. A rename fails with a message that names the contract file.
 and say so in its description. Removing an entry or changing what it means
 (a rename, a value removed from **or added to** a closed set, another roll
 strategy) bumps the file's `version`; adding an entry does not. A harness pins
-the version it was written against. The bump is a review rule: nothing can
-compare the file with its previous revision in a hermetic test.
+the version it was written against. The bump is a test:
+`external-harness.lock.yaml` beside the contract holds one line per promise of
+the current version, and `//test/harnesscontract:harnesscontract_test` fails
+when a promise left or changed and `version` did not (it prints the lock for
+the new version once it is bumped, and the lines to add for a new promise).
 [`test/harnesscontract/README.md`](../test/harnesscontract/README.md) has the
 table of what each test compares, what is kept by review alone, and how to add
 or remove an entry.

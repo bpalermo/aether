@@ -210,14 +210,184 @@ func TestRenderCheck_LinkedEntries(t *testing.T) {
 	}
 }
 
-// A container built by hand refers to entries nothing resolved: that is a
-// difference, never a pass.
+// tied is a contract whose one object is named by a `names` entry, and whose
+// container takes an argument from a pattern and must not be given a resource
+// attribute its own code sets.
+const tied = `
+version: 1
+resource_attributes:
+  - {id: sn, attribute: service.name, value: svc, components: [agent], checked_by: review-only}
+names:
+  - {id: port, value: "PORT", checked_by: review-only}
+  - {id: ds, value: NAME, checked_by: review-only}
+charts:
+  - id: r
+    chart: x
+    release: x
+    namespace: n
+    objects:
+      - id: o
+        kind: DaemonSet
+        name_from: ds
+        containers:
+          - name: agent
+            code_resource_attributes: [sn]
+            args: {--egress: "127.0.0.1:<port>"}
+    checked_by: review-only
+`
+
+// TestRenderCheck_Ties: an object's name, an argument made of a pattern and a
+// resource attribute the code sets are each read from the entry, so changing
+// the entry alone, or the chart alone, is a difference.
+func TestRenderCheck_Ties(t *testing.T) {
+	// The render, with the argument the pattern describes.
+	rendered := strings.Replace(render, `- "--token=hunter2"`, `- "--token=hunter2"`+"\n            - \"--egress=127.0.0.1:18081\"", 1)
+	env := func(variable string) string {
+		return strings.Replace(rendered, "            - name: TOKEN\n", "            - name: "+variable+"\n            - name: TOKEN\n", 1)
+	}
+	for name, tc := range map[string]struct {
+		name, port string
+		render     string
+		want       string
+	}{
+		"as rendered": {name: "aether-agent", port: "18081"},
+		"the name's entry is edited alone": {
+			name: "aether-node-agent", port: "18081",
+			want: "o: DaemonSet/aether-node-agent (named by the entry ds) is not rendered (the render's DaemonSet objects: aether-agent)",
+		},
+		"the chart renames the object alone": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, "  name: aether-agent\n", "  name: aether-node-agent\n", 1),
+			want:   "o: DaemonSet/aether-agent (named by the entry ds) is not rendered (the render's DaemonSet objects: aether-node-agent)",
+		},
+		"the port's entry is edited alone": {
+			name: "aether-agent", port: "18091",
+			want: `is not run with --egress=127.0.0.1:18091, which is what the contract's 127.0.0.1:<port> comes to (it has --egress with another value)`,
+		},
+		"the chart's default port is edited alone": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, "--egress=127.0.0.1:18081", "--egress=127.0.0.1:19000", 1),
+			want:   `is not run with --egress=127.0.0.1:18081`,
+		},
+		"the chart's default is another host": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, "--egress=127.0.0.1:18081", "--egress=localhost:18081", 1),
+			want:   `is not run with --egress=127.0.0.1:18081`,
+		},
+		"the chart stops passing the argument": {
+			name: "aether-agent", port: "18081",
+			render: render,
+			want:   `(it has no --egress argument)`,
+		},
+		"the chart gives the container the attribute its code sets": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, "service.namespace=hunter2", "service.namespace=hunter2,service.name=hunter2", 1),
+			want:   `OTEL_RESOURCE_ATTRIBUTES sets the resource attribute "service.name", which the entry sn says the component's own code sets`,
+		},
+		"the chart gives the container OTEL_SERVICE_NAME": {
+			name: "aether-agent", port: "18081",
+			render: env("OTEL_SERVICE_NAME\n              value: hunter2"),
+			want:   `container "agent" is given OTEL_SERVICE_NAME, which replaces the service.name the entry sn says the component's own code sets`,
+		},
+		"the chart gives it OTEL_SERVICE_NAME from a field": {
+			name: "aether-agent", port: "18081",
+			render: env("OTEL_SERVICE_NAME\n              valueFrom: {fieldRef: {fieldPath: metadata.name}}"),
+			want:   `is given OTEL_SERVICE_NAME`,
+		},
+		// service.namespace is in the render all along: only the attribute
+		// itself counts, and a variable of another name is not the SDK's.
+		"another variable": {name: "aether-agent", port: "18081", render: env("OTEL_SERVICE_NAMES\n              value: hunter2")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := parse([]byte(strings.NewReplacer("NAME", tc.name, "PORT", tc.port).Replace(tied)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			from := rendered
+			if tc.render != "" {
+				from = tc.render
+			}
+			got := strings.Join(c.Charts[0].Check([]byte(from)), "\n")
+			if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+				t.Errorf("Check() = %q, want it to contain %q", got, tc.want)
+			}
+			if strings.Contains(got, "hunter2") {
+				t.Errorf("Check() printed a value of the render: %q", got)
+			}
+		})
+	}
+}
+
+// A container or an object built by hand refers to entries nothing resolved:
+// that is a difference, never a pass.
 func TestRenderCheck_UnresolvedReferences(t *testing.T) {
 	o := agentObject()
 	o.Containers[0].ResourceAttributes = []string{"resource.node"}
 	got := strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(render)), "\n")
 	if !strings.Contains(got, "refers to other entries (resource.node) and they were not resolved") {
 		t.Errorf("Check() = %q", got)
+	}
+	o = agentObject()
+	o.Containers[0].CodeResourceAttributes = []string{"sn"}
+	got = strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(render)), "\n")
+	if !strings.Contains(got, "refers to other entries (sn) and they were not resolved") {
+		t.Errorf("Check() = %q", got)
+	}
+	o = agentObject()
+	o.Name, o.NameFrom = "", "ds"
+	got = strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(render)), "\n")
+	if !strings.Contains(got, "o takes its name from the entry ds and it was not resolved") {
+		t.Errorf("Check() = %q", got)
+	}
+}
+
+// byTest is a contract with a chart test per chart, and a name the first of
+// them compares with its render.
+const byTest = `
+version: 1
+names:
+  - {id: nm, value: v, checked_by: [//a:b, //t:x]}
+charts:
+  - {id: rx, chart: x, release: r, namespace: ns, objects: [{id: rx.o, kind: K, name_from: nm}], checked_by: //t:x}
+  - {id: ry, chart: y, release: r, namespace: ns, objects: [{id: ry.o, kind: K, name: z}], checked_by: //t:y}
+`
+
+// TestHeldByChartTest: a chart test holds the renders of its chart and what
+// they refer to, and those entries name it; nothing else names it.
+func TestHeldByChartTest(t *testing.T) {
+	c, err := parse([]byte(byTest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.HeldByChartTest("//t:x", "x", []string{"rx", "rx.o", "nm"}); len(got) != 0 {
+		t.Errorf("HeldByChartTest() = %q, want nothing", got)
+	}
+	for name, tc := range map[string]struct {
+		target, chart string
+		ids           []string
+		want          []string
+	}{
+		"an entry the test is named for and does not list": {"//t:x", "x", []string{"rx", "rx.o"}, []string{`holds this chart to the entry "nm"`}},
+		"a render that names another test": {
+			"//t:y", "x",
+			[]string{"rx", "rx.o", "nm"},
+			[]string{
+				`rx is a render of the chart "x" and its checked_by does not name //t:y, the test that renders that chart`,
+				`names //t:y in the checked_by of "ry", and that entry is neither a render of the chart "x" nor referred to by one`,
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := strings.Join(c.HeldByChartTest(tc.target, tc.chart, tc.ids), "\n")
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("HeldByChartTest() = %q, want it to contain %q", got, want)
+				}
+			}
+			if !strings.Contains(got, File) {
+				t.Errorf("a failure does not name the contract file: %q", got)
+			}
+		})
 	}
 }
 
@@ -249,12 +419,12 @@ func TestOwnedIDs(t *testing.T) {
 		t.Errorf("OwnedIDs() = %q, want nothing", got)
 	}
 	untied := strings.Join(OwnedIDs(tied, []string{"r", "r.a"}), "\n")
-	for _, want := range []string{`holds a container of this chart to the entry "n"`, `holds a container of this chart to the entry "ra"`} {
+	for _, want := range []string{`holds this chart to the entry "n"`, `holds this chart to the entry "ra"`} {
 		if !strings.Contains(untied, want) {
 			t.Errorf("OwnedIDs() = %q, want it to contain %q", untied, want)
 		}
 	}
-	if got := strings.Join(OwnedIDs(renders, []string{"r", "r.a", "r.b", "ra"}), "\n"); !strings.Contains(got, `no container of this chart's renders refers to an entry of that id any more`) {
+	if got := strings.Join(OwnedIDs(renders, []string{"r", "r.a", "r.b", "ra"}), "\n"); !strings.Contains(got, `nothing in this chart's renders refers to an entry of that id any more`) {
 		t.Errorf("OwnedIDs() = %q, want the tie that is gone", got)
 	}
 	got := strings.Join(OwnedIDs(renders, []string{"r", "r.a", "r.gone"}), "\n")

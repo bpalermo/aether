@@ -218,7 +218,48 @@ func TestParseRejects(t *testing.T) {
 			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, args: {--mesh-domain: nope}}]}], checked_by: review-only}", "`names` has no entry with that id",
 		},
 		"an argument key that is not a flag": {
-			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: n, value: v, checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, args: {mesh-domain: n}}]}], checked_by: review-only}", "is not a flag",
+			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: nm, value: v, checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, args: {mesh-domain: n}}]}], checked_by: review-only}", "is not a flag",
+		},
+		"an unquoted n as an id": {
+			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: n, value: v, checked_by: review-only}", `an entry of names has the id "false"`,
+		},
+		"an empty checked_by list":    {"checked_by: //a:b", "checked_by: []", "no checked_by"},
+		"a test named twice":          {"checked_by: //a:b", "checked_by: [//a:b, //a:b]", "checked_by names //a:b twice"},
+		"review-only beside a test":   {"checked_by: //a:b", "checked_by: [//a:b, review-only]", "and a test at once"},
+		"prose in a checked_by list":  {"checked_by: //a:b", "checked_by: [//a:b, somebody]", `checked_by "somebody" is neither a Bazel label`},
+		"a checked_by that is a map":  {"checked_by: //a:b", "checked_by: {a: b}", "checked_by is a Bazel label, a list of them"},
+		"a checked_by list of a list": {"checked_by: //a:b", "checked_by: [[//a:b]]", "checked_by is a Bazel label, a list of them"},
+		"an object with a name and a name_from": {
+			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: nm, value: v, checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, name_from: nm}], checked_by: review-only}", "either a name or a name_from",
+		},
+		"an object with neither a name nor a name_from": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K}], checked_by: review-only}", "either a name or a name_from",
+		},
+		"an object named by an entry the contract lacks": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name_from: nope}], checked_by: review-only}", "o takes its name from \"nope\", and `names` has no entry with that id",
+		},
+		"a container held to a code attribute the contract lacks": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, code_resource_attributes: [nope]}]}], checked_by: review-only}", "`resource_attributes` has no entry with that id",
+		},
+		"an attribute the chart both gives and must not give": {
+			"checked_by: //a:b", "checked_by: //a:b\nresource_attributes:\n  - {id: ra, attribute: k, components: [agent], checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, resource_attributes: [ra], code_resource_attributes: [ra]}]}], checked_by: review-only}",
+			"it is one or the other",
+		},
+		"a code attribute of a component whose container is not held to it": {
+			"checked_by: //a:b", "checked_by: //a:b\nresource_attributes:\n  - {id: ra, attribute: k, components: [agent, prober], checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, code_resource_attributes: [ra]}]}], checked_by: review-only}",
+			"ra lists the components [agent, prober], and the chart containers that refer to it are [agent]",
+		},
+		"an argument pattern with a name the contract lacks": {
+			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: nm, value: v, checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, args: {--egress: \"<nm>:<nope>\"}}]}], checked_by: review-only}",
+			"takes --egress from \"nope\", and `names` has no entry with that id",
+		},
+		"an entry a chart test compares with a render and does not name": {
+			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: nm, value: v, checked_by: //a:b}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name_from: nm}], checked_by: //t:chart}",
+			"nm is compared with a render by //t:chart (a render that test holds refers to it), and its checked_by does not name that test",
+		},
+		"an entry that names a chart test with nothing to compare it with": {
+			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: nm, value: v, checked_by: [//a:b, //t:chart]}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x}], checked_by: //t:chart}",
+			"nm: checked_by names the chart test //t:chart, and no render that test holds refers to the entry",
 		},
 		"a render of nothing": {
 			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, checked_by: review-only}", "lists no object",
@@ -234,6 +275,46 @@ func TestParseRejects(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCheckedByList: an entry several tests hold names them all, and is among
+// the entries of each: every one of them has to list it.
+func TestCheckedByList(t *testing.T) {
+	one, err := parse([]byte(minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := one.Metrics[0].CheckedBy; !slices.Equal(got, CheckedBy{"//a:b"}) {
+		t.Errorf("a checked_by written as one label is %q", got)
+	}
+	c, err := parse([]byte(strings.Replace(minimal, "checked_by: //a:b", "checked_by: [//a:b, //c:d]\nnames:\n  - {id: nm, value: v, checked_by: //c:d}\n  - {id: r, value: v, checked_by: review-only}", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for target, want := range map[string][]string{"//a:b": {"m"}, "//c:d": {"m", "nm"}, "//e:f": nil, ReviewOnly: {"r"}} {
+		if got := c.IDs(target); !slices.Equal(got, want) {
+			t.Errorf("IDs(%s) = %q, want %q", target, got, want)
+		}
+	}
+	if got, want := c.Targets(), []string{"//a:b", "//c:d"}; !slices.Equal(got, want) {
+		t.Errorf("Targets() = %q, want %q", got, want)
+	}
+	// Each of the two tests holds m: one that does not list it has an entry
+	// assigned to it and no check.
+	for _, target := range []string{"//a:b", "//c:d"} {
+		r := &recorder{TB: t}
+		c.Owns(r, target, "nm")
+		r.want(t, `assigns the entry "m" to `+target)
+	}
+	r := &recorder{TB: t}
+	c.Owns(r, "//a:b", "m")
+	c.Owns(r, "//c:d", "m", "nm")
+	r.want(t)
+	// And a name two tests hold is compared with the code by each.
+	r = &recorder{TB: t}
+	shared := &Contract{Version: 1, Names: []Name{{ID: "n", Value: "old", CheckedBy: CheckedBy{"//a:b", "//c:d"}}}}
+	shared.CheckNames(r, "//c:d", map[string]string{"n": "new"})
+	r.want(t, `says n is "old", the code says "new"`)
 }
 
 func TestStoredName(t *testing.T) {
@@ -372,7 +453,7 @@ func TestChecksCanFail(t *testing.T) {
 	})
 	t.Run("a name with another value", func(t *testing.T) {
 		r := &recorder{TB: t}
-		named := &Contract{Version: 1, Names: []Name{{ID: "n", Value: "old", CheckedBy: "//a:b"}}}
+		named := &Contract{Version: 1, Names: []Name{{ID: "n", Value: "old", CheckedBy: CheckedBy{"//a:b"}}}}
 		named.CheckNames(r, "//a:b", map[string]string{"n": "new"})
 		r.want(t, `says n is "old", the code says "new"`)
 	})

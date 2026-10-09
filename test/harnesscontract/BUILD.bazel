@@ -15,6 +15,7 @@ go_library(
     srcs = [
         "chart.go",
         "contract.go",
+        "promises.go",
         "testing.go",
     ],
     embedsrcs = ["external-harness.yaml"],
@@ -29,9 +30,11 @@ go_test(
     srcs = [
         "chart_test.go",
         "contract_test.go",
+        "promises_test.go",
     ],
     data = ["BUILD.bazel"],
     embed = [":harnesscontract"],
+    embedsrcs = ["external-harness.lock.yaml"],
     deps = [
         "//common/constants/annotations",
         "//common/constants/labels",
@@ -42,12 +45,13 @@ go_test(
 
 # The chart objects a harness addresses, one test per chart. The render options
 # and the expectations are in the contract, not here. `ids` names the renders
-# and objects each test holds, and the entries of other sections a container
-# of those renders refers to (a resource attribute, the name an argument takes
-# its value from): the test fails when the contract has one this list lacks or
-# lacks one this list has, so an entry, or a container's tie to one, cannot
-# leave the contract while the chart still renders it unless this list changes
-# with it.
+# and objects each test holds, and the entries of other sections an object or
+# a container of those renders refers to (the name an object is given, a
+# resource attribute, the name an argument takes its value from): the test
+# fails when the contract has one this list lacks or lacks one this list has,
+# so an entry, or a tie to one, cannot leave the contract while the chart still
+# renders it unless this list changes with it. Each of those entries names the
+# test in its `checked_by`.
 helm_contract_test(
     name = "aether_chart_test",
     chart = "//charts/aether",
@@ -62,7 +66,9 @@ helm_contract_test(
         "chart.aether.mesh_dns",
         "chart.aether.proxy",
         "chart.aether.uds_csi",
-        # Entries of other sections a container of these renders is held to.
+        # Entries of other sections an object or a container of these renders
+        # is held to.
+        "csi.driver",
         "mesh.default_domain",
         "resource.node",
     ],
@@ -75,7 +81,10 @@ helm_contract_test(
     ids = [
         "chart.prober",
         "chart.prober.daemonset",
+        "mesh.default_domain",
+        "port.outbound_http",
         "resource.node",
+        "resource.service_name.prober",
     ],
 )
 
