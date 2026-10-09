@@ -1,0 +1,100 @@
+# Third-party image pins: the scheduled refresh check (#1478).
+#
+# Every image this repository does not build (curl, the echo servers, OPA, etcd,
+# the kind node, and the distroless base images the Bazel module files pull) is
+# pinned by digest in scripts/third-party-images.txt. A pin never moves by
+# itself: Dependabot opens no pull requests here and there is no Renovate. So a
+# tag that was pushed again (a patched base image) stayed unnoticed until
+# someone ran `scripts/third-party-images.sh outdated` by hand.
+#
+# Once a day this runs it and keeps ONE rolling issue, "CI: third-party image
+# pins are behind their tags" (the stuck-runs.yaml shape: reused, rewritten,
+# closed once every pin is current). A pin that is behind still pulls the digest
+# it names, so nothing is broken and this workflow does not fail for it; it is
+# not a required check and gates no pull request. A registry that does not
+# answer is a warning on the run: such a run neither closes nor rewrites the
+# issue. The rules are scripts/third-party-images-report.sh;
+# //scripts:third_party_images_report_test pins them on a fake `outdated` and a
+# fake `gh`.
+#
+# The registries are read anonymously (public repositories; the script sends no
+# credential and this workflow has no secret).
+#
+# A dispatch is a dry run unless dry_run=false, and always one off `main`: it
+# prints the issue it would write and writes nothing:
+#
+#   gh workflow run third-party-images.yaml
+#
+# A pull request that changes the check, or the pins, runs it as a dry run too,
+# in a job that holds no `issues: write`.
+name: third-party-images
+
+on:
+  schedule:
+    # Daily, off the hour and off the other crons (e2e 04:17, codeql 04:23 on
+    # Mondays, publish-verify :23, stuck-runs :07 and :37).
+    - cron: "43 5 * * *"
+  pull_request:
+    branches: [main, "upgrade/**"]
+    paths:
+      - .github/workflows/third-party-images.yaml
+      - scripts/third-party-images.sh
+      - scripts/third-party-images-report.sh
+      - scripts/third-party-images.txt
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only: write no issue"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# A newer run supersedes an older one on the same ref: the report is re-derived
+# from the registries each time, and a cancelled run leaves at worst a comment
+# the next run repeats.
+concurrency:
+  group: third-party-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # What a pull request and a dry-run dispatch run: the real `outdated` against
+  # the real registries, and the issue it would write, printed. No write
+  # permission: this job runs the pull request's copy of the scripts.
+  preview:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && (inputs.dry_run || github.ref != 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Which pins are behind (dry run, writes nothing)
+        run: scripts/third-party-images-report.sh --dry-run
+
+  # The schedule, and a dispatch on main with dry_run=false.
+  report:
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && !inputs.dry_run && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # The rolling report issue.
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Report the pins that are behind on the rolling issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: scripts/third-party-images-report.sh
