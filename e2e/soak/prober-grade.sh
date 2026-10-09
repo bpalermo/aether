@@ -65,9 +65,13 @@
 #            (#832) and rests at zero since #1421. An agent restarts in every
 #            soak (two rolls), so its counter resets, or a new series is born:
 #            both are counted whole, as above. Since #1424 the counter has a
-#            `reason` label (why the pin was empty), so there are three series
-#            per agent; `UNPINNED reason=` sums each one that moved. The
-#            verdict is the same sum either way. The agent's gauges
+#            `reason` label (why the pin was empty), so there are four series
+#            per agent (three before #1482, which added tls_not_published);
+#            `UNPINNED reason=` sums each one that moved. The verdict is the
+#            same sum either way, whatever the reason: under
+#            trust_domain_unknown and tls_not_published the agent published no
+#            TLS at all, and a soak still has to explain why an agent was in
+#            that state. The agent's gauges
 #            (aether_agent_snapshot_tls_clusters and
 #            aether_agent_xds_acked_tls_clusters, #1425) are not graded here: a
 #            gauge is sampled, and an unpinned window shorter than the export
@@ -427,8 +431,8 @@ cat "$TMPD/p.out"
 P_VERDICT="$(sed -n 's/^PROBER  verdict=\([A-Z]*\) .*/\1/p' "$TMPD/p.out")"
 
 # --- the unpinned-cluster counter (#1423) ----------------------------------------
-# One series per node up to #1424; one per node and `reason` since (three
-# reasons, each seeded at zero). Both shapes are graded alike: every series is
+# One series per node up to #1424; one per node and `reason` since (four
+# reasons, each seeded at zero; three before #1482). Both shapes are graded alike: every series is
 # summed, whatever its labels. A series with no `reason` label is an agent from
 # before #1424 and is printed as reason=-.
 #

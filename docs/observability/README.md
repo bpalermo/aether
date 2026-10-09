@@ -129,36 +129,104 @@ transitional arm).
 etcd backend only: the kubernetes backend reports no revision, so the rule returns
 nothing there. The gauge itself is reported on both backends.
 
-## Node agent SAN-pin state (metrics reference; no rule file yet)
+## Node agent SAN-pin state (`agent-pin-alerts.yml`)
 
 Whether the mesh clusters a node proxy dials check the server identity they are handed
-(#832, #1424, #1425). `docs/runbook.md`, "The unpinned-cluster signal", says what each
-`reason` means and what to do about it. Reported by the node agent (`job` of the agent)
-and by the edge control plane.
+(#832, #1424, #1425, #1481, #1482). `docs/runbook.md`, "The unpinned-cluster signal",
+says what each `reason` means and what to do about it. Reported by the node agent (`job`
+of the agent) and by the edge control plane.
+
+| Alert | Severity | `for:` | Catches |
+|---|---|---|---|
+| `AetherMeshClusterUnpinned` | critical | 3m | per node and reason: clusters published **with TLS and without a server-identity pin** (`no_namespace_metadata`, `pin_not_rendered`). The mTLS validation gap |
+| `AetherMeshClusterPinPending` | warning | 5m | per node and reason: an agent still publishing clusters with **no TLS at all** five minutes on (`trust_domain_unknown`, `tls_not_published`): it never learned its trust domain or never got its SVID |
+| `AetherProxyHoldsUnpinnedClusters` | warning | 15m | per node: the proxy last acknowledged more unpinned clusters than the agent now publishes, so it has not taken the update that pinned them |
 
 | Metric (as Prometheus stores it) | Type | Labels | Meaning |
 |---|---|---|---|
 | `aether_agent_snapshot_tls_clusters` | gauge | `pin`, `reason` | mesh cluster entries in the agent's current snapshot that are meant to be mTLS: `pin="pinned"` (no `reason`), and `pin="unpinned"` once per `reason`. Written on every snapshot, zeros included |
 | `aether_agent_xds_acked_tls_clusters` | gauge | `pin`, `reason` | the same count for the last snapshot whose cluster update the proxy acknowledged. Absent until the first cluster ACK the agent process sees |
 | `aether_agent_identity_cluster_unpinned_total` | counter | `reason` | grows by the number of unpinned clusters on every snapshot that has any. Seeded at zero per reason. Before #1424 it had no `reason` label |
+| `aether_agent_xds_nacks_total` | counter | `aether_xds_type_url` | delta-xDS responses the proxy rejected. Seeded at zero for each of the six resource types the agent serves, and `other` (#1480) |
+| `aether_agent_xds_ack_wait_failures_total` | counter | `aether_xds_wait`, `aether_xds_reason` | ACK waits for a pod's listener that failed (`present`/`absent` by `nack`/`timeout`). Seeded at zero, four series (#1480) |
 
-`reason` is a closed set: `trust_domain_unknown`, `no_namespace_metadata`,
-`pin_not_rendered`. No series carries a cluster name, so each gauge is four series per
-agent and the counter three, whatever the size of the mesh; the names are in the agent's
-WARN line.
+`reason` is a closed set of four: `trust_domain_unknown`, `tls_not_published`,
+`no_namespace_metadata`, `pin_not_rendered`. No series carries a cluster name, so each
+gauge is five series per agent and the counter four, whatever the size of the mesh; the
+names are in the agent's WARN line.
 
-No alert rule ships for these yet. The expression one would be built on:
+### Severity follows what is on the wire
 
-```promql
-# N clusters unpinned for reason R on this node. `for:` it past an agent start:
-# trust_domain_unknown is expected for the first snapshot or two.
-sum by (node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}) > 0
+The four reasons are two kinds of fact, and the rules split on that:
+
+- Under `no_namespace_metadata` (and `pin_not_rendered`, which no code path produces) the
+  cluster is published with TLS and its handshake accepts any workload of the trust
+  domain. That is an authentication gap being served: **critical**.
+- Under `trust_domain_unknown` and `tls_not_published` the agent publishes **no TLS** for
+  those clusters. Nothing is authenticated wrongly; a peer's mesh inbound refuses the
+  connection. It is the normal state of an agent for the moment before it has its
+  identity, and a fault only when it lasts: **warning**, after a longer `for:`.
+  `tls_not_published` is also the reason of a TCP service with no namespace metadata
+  whose floor cluster is not in the snapshot (the service is not captured; on the edge,
+  no route references it). That one lasts with a healthy agent, and the warning is then
+  about the registry data: the entry is the critical rule's the moment its floor is
+  published.
+
+`tls_not_published` exists since #1482. Before it, an entry whose endpoints carry no
+namespace was `no_namespace_metadata` whether or not TLS was published, so a critical
+rule on that reason would have fired for an agent that was merely waiting for its SVID.
+An entry moves from `tls_not_published` to `no_namespace_metadata` in the snapshot that
+first publishes TLS for it, so the critical rule's clock starts when the gap does. The
+agent settles the reason against what each snapshot publishes, not only against its own
+state: a snapshot able to publish TLS never leaves an entry under `tls_not_published`
+unless that entry's floor cluster is absent from it.
+
+### Why `for: 5m` rides out an agent start
+
+- Measured on a five-node test cluster: all five running agents had their SVID within
+  0.5 s of asking (`aether_agent_spire_wait_seconds`, every observation in the lowest
+  bucket). The agent exports every 60 s, so a normal start is shorter than one export and
+  usually in no gauge sample at all. The counter still records it.
+- From the code: an agent still without an SVID after 2 minutes
+  (`--spire-wait-warn-after`) reports NotReady. That is the agent's own bound on a
+  healthy start.
+- 5 minutes is that bound, two more exports so the state is seen twice past it, and one
+  for evaluation jitter.
+
+`AetherMeshClusterUnpinned` has no start-up window to ride out (the same entries are
+`tls_not_published` until TLS exists), so its 3 minutes are only "three exports in a row
+are a state, one is a snapshot".
+
+A mesh run **without SPIRE** never has a node SVID: every entry with no namespace
+metadata stays `tls_not_published`, by design. Drop `AetherMeshClusterPinPending` there.
+
+### The divergence rule and an absent gauge
+
+`aether_agent_xds_acked_tls_clusters` has no series until the first cluster ACK an agent
+process sees, and an agent that restarts against a proxy already in sync is owed none
+(#1483). `AetherProxyHoldsUnpinnedClusters` compares two vectors, and a comparison
+returns nothing for a `(job, node)` that one side lacks, so that state is silent: the
+rule cannot fire on absence, and it does not need `absent()` or `or vector(0)` (either
+would make it fire there). It is one-directional on purpose: acknowledged *below*
+published is an unpinned snapshot not yet acknowledged, which the first rule already
+covers. Its residue is stated in the file: a late ACK from the proxy generation that is
+leaving during a hot restart, on a node where no cluster changes afterwards.
+
+Three more things to know. The gauges are pushed by the agent, so a down agent is no
+series, not a zero (the same trap as the conflist gauge above): these rules are silent
+for a node whose agent does not report, and `AetherCNIConflistUnchained` is the rule for
+that. Anything that sums or compares the *counter* across an upgrade must not select on
+`reason`: an agent from before #1424 exports the one label-less series, and one from
+before #1482 has no `tls_not_published` series. And the rules have a promtool unit test
+beside them, `agent-pin-alerts_test.yml` (an agent start, an agent stuck without its
+SVID, the gap, an absent acknowledged gauge, a proxy that keeps what the agent has
+pinned, a silent agent):
+
+```bash
+promtool test rules docs/observability/agent-pin-alerts_test.yml
 ```
 
-Two things to know before writing it. The gauge is pushed by the agent, so a down agent
-is no series, not a zero (the same trap as the conflist gauge above). And anything that
-sums or compares the counter across an upgrade must not select on `reason`: an agent
-from before #1424 exports the one label-less series.
+This repository has no promtool in its build, so CI does not run it here.
 
 ## Installing
 
@@ -174,6 +242,7 @@ serverFiles:
       # contents of mesh-dns-alerts.yml
       # contents of agent-cni-alerts.yml
       # contents of registrar-alerts.yml
+      # contents of agent-pin-alerts.yml
 ```
 
 `prometheus.yml`'s `rule_files` **already** lists `/etc/config/alerting_rules.yml` — the

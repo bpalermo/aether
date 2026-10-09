@@ -713,7 +713,9 @@ type clusterEntry struct {
 	// it empty (renderSANPin): "" when a pin was rendered, and for a plaintext
 	// entry, which has none to render. The pin report names each unpinned
 	// cluster under this cause (#1424) instead of guessing one for the whole
-	// snapshot from the state at report time.
+	// snapshot from the state at report time. It also says whether the node
+	// could publish TLS for the entry when the pin was rendered:
+	// CauseTLSNotPublished when it could not (#1482).
 	unpinnedCause cachemetrics.UnpinnedCause
 	// mtlsReady records that the node had both a served SVID and a trust
 	// domain when the pin was last rendered, i.e. that a TLS cluster can be

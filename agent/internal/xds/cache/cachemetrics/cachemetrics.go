@@ -43,6 +43,12 @@ const (
 // A CLOSED set (UnpinnedCauses): each value is one branch of the single
 // function that renders the pin (the cache's renderSANPin), so the label can
 // never grow with the mesh.
+//
+// Two of them (CauseTrustDomainUnknown, CauseTLSNotPublished) are states in
+// which the node publishes NO TLS for the entry, so no handshake is made
+// without a pin; they are reported because the pin is what will be missing
+// when TLS is published. CauseNoNamespaceMetadata is the one under which TLS
+// is published and checks no server identity.
 type UnpinnedCause string
 
 const (
@@ -50,9 +56,23 @@ const (
 	// not known, so there was no identity to name (#815/#819). Every mesh
 	// entry on the node has this cause at once.
 	CauseTrustDomainUnknown UnpinnedCause = "trust_domain_unknown"
+	// CauseTLSNotPublished: none of the service's endpoints carries a
+	// Kubernetes namespace, as for CauseNoNamespaceMetadata, AND the node
+	// cannot publish a TLS cluster yet (it has no served SVID), so nothing the
+	// entry publishes has a handshake a pin could be missing from (#1482). The
+	// entry becomes CauseNoNamespaceMetadata in the snapshot that first
+	// publishes TLS for it. Bounded by the arrival of the node SVID.
+	//
+	// Also the cause of a TCP floor entry with no namespace metadata whose
+	// floor cluster is not in the snapshot (the service is not in the capture
+	// TCP set; on the edge, no route references it): no TLS is published for
+	// that entry either. Not bounded: it lasts until the floor is published.
+	CauseTLSNotPublished UnpinnedCause = "tls_not_published"
 	// CauseNoNamespaceMetadata: none of the service's endpoints carries a
 	// Kubernetes namespace, so there is no namespace to build the expected
-	// SPIFFE ID from. Lasts as long as the registry serves those endpoints.
+	// SPIFFE ID from, and the node publishes the cluster with TLS: the
+	// handshake is made and checks no server identity. This is the mTLS
+	// validation gap. Lasts as long as the registry serves those endpoints.
 	CauseNoNamespaceMetadata UnpinnedCause = "no_namespace_metadata"
 	// CausePinNotRendered: the entry reached a snapshot without its pin ever
 	// having been rendered. No code path does that today; the value exists so
@@ -61,11 +81,14 @@ const (
 )
 
 // NumUnpinnedCauses is the size of the closed set.
-const NumUnpinnedCauses = 3
+const NumUnpinnedCauses = 4
 
 // UnpinnedCauses is every UnpinnedCause, in the order the snapshot reports
-// them. A cause's position here is its index in PinCounts.Unpinned.
-var UnpinnedCauses = [NumUnpinnedCauses]UnpinnedCause{CauseTrustDomainUnknown, CauseNoNamespaceMetadata, CausePinNotRendered}
+// them: the two under which the node publishes no TLS at all first, then the
+// two under which it may. A cause's position here is its index in
+// PinCounts.Unpinned, and CausePinNotRendered stays last: it is the fallback
+// slot of AddUnpinned.
+var UnpinnedCauses = [NumUnpinnedCauses]UnpinnedCause{CauseTrustDomainUnknown, CauseTLSNotPublished, CauseNoNamespaceMetadata, CausePinNotRendered}
 
 // PinCounts is the pin state of one snapshot as numbers: how many mesh cluster
 // entries carry a server-identity SAN pin, and how many are meant to and do
@@ -100,6 +123,35 @@ func (p *PinCounts) AddUnpinned(cause UnpinnedCause) {
 		}
 	}
 	p.Unpinned[NumUnpinnedCauses-1]++
+}
+
+// Promote moves every entry counted under from to to. The total is unchanged.
+// A cause outside the closed set moves nothing.
+func (p *PinCounts) Promote(from, to UnpinnedCause) {
+	p.Move(from, to, -1)
+}
+
+// Move moves n of the entries counted under from to to, or all of them when n
+// is negative or more than there are. The total is unchanged. A cause outside
+// the closed set moves nothing.
+func (p *PinCounts) Move(from, to UnpinnedCause, n int) {
+	fromIdx, toIdx := -1, -1
+	for i, c := range UnpinnedCauses {
+		switch c {
+		case from:
+			fromIdx = i
+		case to:
+			toIdx = i
+		}
+	}
+	if fromIdx < 0 || toIdx < 0 || fromIdx == toIdx {
+		return
+	}
+	if n < 0 || n > p.Unpinned[fromIdx] {
+		n = p.Unpinned[fromIdx]
+	}
+	p.Unpinned[toIdx] += n
+	p.Unpinned[fromIdx] -= n
 }
 
 // Metrics holds the snapshot-generation instruments. All methods are

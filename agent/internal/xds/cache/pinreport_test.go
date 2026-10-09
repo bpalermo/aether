@@ -129,12 +129,23 @@ func pinGauge(t *testing.T, reader *sdkmetric.ManualReader) (pinned, unpinned in
 
 // byCause spells a per-cause expectation with the zeros filled in: the gauge
 // records every cause on every snapshot.
+//
+// tls_not_published is zero here: it needs a node with no served SVID, which
+// only the #1482 tests set up (withTLSNotPublished).
 func byCause(tdUnknown, noNamespace, notRendered int64) map[cachemetrics.UnpinnedCause]int64 {
 	return map[cachemetrics.UnpinnedCause]int64{
 		cachemetrics.CauseTrustDomainUnknown:  tdUnknown,
+		cachemetrics.CauseTLSNotPublished:     0,
 		cachemetrics.CauseNoNamespaceMetadata: noNamespace,
 		cachemetrics.CausePinNotRendered:      notRendered,
 	}
+}
+
+// withTLSNotPublished is a byCause expectation with n entries under
+// tls_not_published.
+func withTLSNotPublished(m map[cachemetrics.UnpinnedCause]int64, n int64) map[cachemetrics.UnpinnedCause]int64 {
+	m[cachemetrics.CauseTLSNotPublished] = n
+	return m
 }
 
 // unpinnedByCause reads the #832 counter per `reason` attribute.
@@ -240,11 +251,7 @@ func TestUnpinnedClusterReportGivesEachClusterItsOwnCause(t *testing.T) {
 	}
 
 	// The counter splits the same way, and the gauge holds the same totals.
-	assert.Equal(t, map[cachemetrics.UnpinnedCause]int64{
-		cachemetrics.CauseTrustDomainUnknown:  1,
-		cachemetrics.CauseNoNamespaceMetadata: 2,
-		cachemetrics.CausePinNotRendered:      1,
-	}, unpinnedByCause(t, reader))
+	assert.Equal(t, byCause(1, 2, 1), unpinnedByCause(t, reader))
 	gauge, ok := readPinGauge(t, reader, tlsClustersGauge)
 	require.True(t, ok)
 	assert.Equal(t, int64(1), gauge.pinned)

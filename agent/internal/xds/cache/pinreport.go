@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
 // maxUnpinnedClusterNames bounds how many cluster names one unpinned WARN
@@ -63,10 +65,18 @@ const (
 // It reads the entry as rendered, not the emitted protos, which keeps a
 // snapshot build free of the unmarshalling a structural check would need. Two
 // consequences, both on the loud side: an entry with no pin is named whether
-// or not its cluster carries TLS at this moment (the trust-domain window is
-// reported on purpose, #832, though with no trust domain the node publishes
-// no TLS cluster at all), and a TCP entry is counted whether or not the
-// capture set currently publishes its floor cluster.
+// or not its cluster carries TLS at this moment, and a TCP entry is counted
+// whether or not the capture set currently publishes its floor cluster (so a
+// pinned floor entry whose cluster is not published is in the pinned count).
+//
+// The cause says which it is (#1482). Under CauseTrustDomainUnknown (the
+// window reported on purpose, #832) and CauseTLSNotPublished no TLS cluster is
+// published for the entry; CauseNoNamespaceMetadata is TLS published without
+// a pin. The snapshot build settles the two against what it publishes: an
+// entry the node can publish TLS for is never left under CauseTLSNotPublished
+// (promoteTLSNotPublished), and a floor entry whose cluster is not in the
+// snapshot is not left under CauseNoNamespaceMetadata
+// (demoteUnpublishedFloors).
 func (e *clusterEntry) pinState() (clusterPinKind, cachemetrics.UnpinnedCause) {
 	switch {
 	case e.plaintext:
@@ -95,6 +105,12 @@ func (e *clusterEntry) pinState() (clusterPinKind, cachemetrics.UnpinnedCause) {
 type pinReport struct {
 	counts   cachemetrics.PinCounts
 	unpinned map[cachemetrics.UnpinnedCause][]string
+	// unpinnedFloors is the unpinned TCP floor entries among them, by name.
+	// A floor entry's cluster is built at snapshot time and only for a service
+	// that is captured (or, on the edge, routed to), so whether TLS is
+	// published for it is known only once the build has made the floor
+	// clusters (demoteUnpublishedFloors). Nil when there is none.
+	unpinnedFloors map[string]struct{}
 }
 
 // add classifies one cluster entry (pinState) into the report. A snapshot
@@ -111,7 +127,94 @@ func (r *pinReport) add(name string, entry *clusterEntry) {
 		}
 		r.unpinned[cause] = append(r.unpinned[cause], name)
 		r.counts.AddUnpinned(cause)
+		if entry.l4Floor {
+			if r.unpinnedFloors == nil {
+				r.unpinnedFloors = make(map[string]struct{})
+			}
+			r.unpinnedFloors[name] = struct{}{}
+		}
 	}
+}
+
+// demoteUnpublishedFloors reports a TCP floor entry that is under
+// CauseNoNamespaceMetadata as CauseTLSNotPublished when its floor cluster is
+// not among the clusters this snapshot publishes.
+//
+// A floor entry is keyed by the name of the cluster built from it
+// ("tcp:<svc>[:<port>]"), and that cluster exists only while the service is in
+// the capture TCP set (on the edge: while a TCPRoute or TLSRoute references
+// it). The entry itself stays in the cluster cache either way. Without this an
+// entry with no namespace metadata and no published floor would be reported
+// as TLS served without a pin, which is not on the wire. It is the gap again
+// in the snapshot that first publishes its floor.
+//
+// published is the floor clusters the build made. Called after
+// promoteTLSNotPublished, so the two agree: an entry is CauseTLSNotPublished
+// exactly when this snapshot carries no TLS cluster for it. An entry under any
+// other cause is left where it is. Costs nothing unless a floor entry is
+// unpinned.
+func (r *pinReport) demoteUnpublishedFloors(published ...[]types.Resource) {
+	if len(r.unpinnedFloors) == 0 {
+		return
+	}
+	names := r.unpinned[cachemetrics.CauseNoNamespaceMetadata]
+	if len(names) == 0 {
+		return
+	}
+	isPublished := make(map[string]struct{})
+	for _, set := range published {
+		for _, res := range set {
+			if cl, ok := res.(*clusterv3.Cluster); ok {
+				isPublished[cl.GetName()] = struct{}{}
+			}
+		}
+	}
+	kept := make([]string, 0, len(names))
+	moved := 0
+	for _, name := range names {
+		_, floor := r.unpinnedFloors[name]
+		_, out := isPublished[name]
+		if floor && !out {
+			r.unpinned[cachemetrics.CauseTLSNotPublished] = append(r.unpinned[cachemetrics.CauseTLSNotPublished], name)
+			moved++
+			continue
+		}
+		kept = append(kept, name)
+	}
+	if moved == 0 {
+		return
+	}
+	if len(kept) == 0 {
+		delete(r.unpinned, cachemetrics.CauseNoNamespaceMetadata)
+	} else {
+		r.unpinned[cachemetrics.CauseNoNamespaceMetadata] = kept
+	}
+	r.counts.Move(cachemetrics.CauseNoNamespaceMetadata, cachemetrics.CauseTLSNotPublished, moved)
+	r.sortNames()
+}
+
+// promoteTLSNotPublished reports every entry the render left under
+// CauseTLSNotPublished as CauseNoNamespaceMetadata: the validation gap (#1482).
+//
+// A snapshot build calls it when, AFTER it has built everything that carries a
+// transport socket, the node turns out to be able to publish TLS. The cause on
+// an entry is of the render (mtls.go), and the TCP floor clusters are built at
+// snapshot time from the node identity in force then (captureTCPClusters,
+// edgeTCPClusters): an identity that lands between an entry's render and that
+// build puts a TLS cluster with no pin in a snapshot whose entry still says
+// "no TLS published". The benign reason must never be the label of such a
+// snapshot, so the report errs to the loud side for all of them: an HTTP entry
+// of the same snapshot that is still published bare is named as the gap one
+// snapshot early (the recompute that follows the identity publishes its TLS).
+func (r *pinReport) promoteTLSNotPublished() {
+	names := r.unpinned[cachemetrics.CauseTLSNotPublished]
+	if len(names) == 0 {
+		return
+	}
+	delete(r.unpinned, cachemetrics.CauseTLSNotPublished)
+	r.unpinned[cachemetrics.CauseNoNamespaceMetadata] = append(r.unpinned[cachemetrics.CauseNoNamespaceMetadata], names...)
+	r.counts.Promote(cachemetrics.CauseTLSNotPublished, cachemetrics.CauseNoNamespaceMetadata)
+	r.sortNames()
 }
 
 // sortNames sorts the unpinned names, so the same clusters are shown on every
@@ -144,13 +247,19 @@ func (r *pinReport) sortNames() {
 //     domain. The line's trust_domain attribute is the one in force when the
 //     snapshot was set: if it is non-empty under this cause, the trust domain
 //     has since been learned and the pins have not been re-rendered yet.
+//   - tls_not_published: the service's endpoints carry no Kubernetes
+//     namespace and no TLS is published for the entry (#1482): the node has
+//     no served SVID yet (bounded by its arrival), or the entry is a TCP
+//     floor whose cluster is not in the snapshot. It becomes the next one in
+//     the snapshot that publishes TLS for it.
 //   - no_namespace_metadata: the service's endpoints carry no Kubernetes
-//     namespace. Not a window: it lasts as long as the registry serves them.
+//     namespace and the cluster is published with TLS: the validation gap.
+//     Not a window: it lasts as long as the registry serves them.
 //   - pin_not_rendered: the entry was never rendered. Unreachable today.
 //
 // Bounded: at most one line per cause (a closed set of
 // cachemetrics.NumUnpinnedCauses) and at most maxUnpinnedClusterNames names on
-// each, so a snapshot logs at most 3 lines of 20 names however many clusters
+// each, so a snapshot logs at most 4 lines of 20 names however many clusters
 // are unpinned. The counts on the line are always exact.
 //
 // The gauge is recorded on EVERY snapshot, zeros included, so "no unpinned

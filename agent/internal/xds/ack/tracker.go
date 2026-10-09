@@ -142,7 +142,7 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 		t.mu.Unlock()
 
 		if st.nackErr != nil {
-			t.metrics.waitFailed(ctx, wantPresent, "nack")
+			t.metrics.waitFailed(ctx, wantPresent, reasonNack)
 			return fmt.Errorf("envoy rejected config for %s: %w", name, st.nackErr)
 		}
 		if st.present == wantPresent {
@@ -151,7 +151,7 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 
 		select {
 		case <-ctx.Done():
-			t.metrics.waitFailed(ctx, wantPresent, "timeout")
+			t.metrics.waitFailed(ctx, wantPresent, reasonTimeout)
 			if wantPresent {
 				return fmt.Errorf("timed out waiting for envoy to ack %s", name)
 			}
