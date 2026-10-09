@@ -29,6 +29,7 @@ go_test(
     name = "manager_test",
     size = "small",
     srcs = [
+        "config_test.go",
         "shutdown_log_test.go",
         "telemetry_test.go",
         "verbosity_test.go",

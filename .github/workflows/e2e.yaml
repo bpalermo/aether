@@ -19,7 +19,11 @@
 #
 # ONE Kubernetes everywhere (#1251): every job gets kind + kubectl + the node
 # image from .github/actions/setup-kind, which reads e2e/kind-version.sh — the
-# file the local harnesses source too. The script-driven jobs share their
+# file the local harnesses source too. ONE Helm too (#1580): every job gets it
+# from .github/actions/setup-helm, at a release e2e/helm-version.sh pins; only
+# first-install asks for a major, and runs under both.
+#
+# The script-driven jobs share their
 # body through .github/actions/run-e2e-script (up -> verify -> diagnostics ->
 # down); each stays its own job rather than a matrix leg so `report-failure`
 # names the suite that failed, `only=<suite>` selects it, and its check name and
@@ -52,6 +56,10 @@ permissions:
 # here: it is derived from bazel/registry/registry.bzl, the one registry setting
 # (proposal 040), by scripts/image-registry.sh in each job that uses it. The
 # script-driven jobs (uds, l4-routes, ...) derive it inside the scripts.
+#
+# GATEWAY_API_VERSION is a COPY of e2e/gateway-api-version.sh (a workflow cannot
+# source it), the one pin every harness reads (#1583);
+# //e2e:gateway_api_pin_test fails when they differ.
 env:
   GATEWAY_API_VERSION: v1.6.2
 
@@ -536,11 +544,20 @@ jobs:
   # across an upgrade, and that a failed first install whose manifest lists a
   # Namespace it does not own (aether and prober charts) cannot be upgraded
   # into deleting it. Harness: e2e/first-install.sh.
+  #
+  # Under BOTH Helm majors (#1543), one leg each: what the suite asserts about
+  # rollback and about a release that owns its namespace differs between Helm 3
+  # and Helm 4, and an operator may run either. Every other job runs the default
+  # major of e2e/helm-version.sh; //e2e:helm_pin_test holds this matrix.
   first-install:
     needs: build
     if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'first-install'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        helm: ["3", "4"]
     # Checkout only; the images arrive as an artifact of this same run.
     permissions:
       contents: read
@@ -555,13 +572,18 @@ jobs:
           skip-build-var: FIRST_INSTALL_SKIP_BUILD
           verify-description: Verify the documented first install with default values, one upgrade, and that no upgrade deletes the namespace
           soft: ${{ github.event.inputs.soft == 'true' }}
+          helm-major: ${{ matrix.helm }}
           logs-dir: /tmp/first-install-logs
-          artifact-name: first-install-e2e-logs
+          artifact-name: first-install-e2e-logs-helm${{ matrix.helm }}
           diagnostics: |
             mkdir -p /tmp/first-install-logs
             kubectl --context kind-first-install get pods -A -o wide 2>&1 | tee /tmp/first-install-logs/pods.txt || true
             kind export logs /tmp/first-install-logs/kind --name first-install || true
-            helm --kube-context kind-first-install list -A -a > /tmp/first-install-logs/releases.txt 2>&1 || true
+            # Every release whatever its status, with the flags this leg's Helm
+            # major takes: `list -A -a` is an error under Helm 4, and `|| true`
+            # hid it behind an empty file (#1581).
+            . e2e/helm-version.sh || true
+            helm --kube-context kind-first-install list $(helm_list_all_flags) > /tmp/first-install-logs/releases.txt 2>&1 || true
             kubectl --context kind-first-install get namespaces -o yaml > /tmp/first-install-logs/namespaces.yaml 2>&1 || true
             kubectl --context kind-first-install -n aether-system get ds,deploy -o wide > /tmp/first-install-logs/workloads.txt 2>&1 || true
             kubectl --context kind-first-install -n aether-system get events --sort-by=.lastTimestamp > /tmp/first-install-logs/events.txt 2>&1 || true

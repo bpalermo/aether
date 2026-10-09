@@ -27,7 +27,7 @@ const otlpTraceTimeout = 5 * time.Second
 // trace backend (Tempo/VictoriaTraces) exists. The returned shutdown flushes and
 // stops the provider.
 func SetupTracing(ctx context.Context, cfg Config) (shutdown func(context.Context) error, err error) {
-	res, err := newResource(ctx, cfg)
+	res, err := NewResource(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}

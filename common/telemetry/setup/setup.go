@@ -13,14 +13,13 @@ import (
 	"fmt"
 	"time"
 
-	"aethermesh.dev/common/telemetry/servicename"
+	"aethermesh.dev/common/telemetry/serviceresource"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/prometheus"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.30.0"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -49,21 +48,29 @@ type Config struct {
 	// runtime/metrics at collection time, so it costs no timer; it is opt-in per
 	// component because only the node agent needs it (issue #1131).
 	SchedulerLatency bool
+	// WithoutHostName leaves host.name off the resource. This package is shared
+	// by components that run in the host's network namespace (the node agent,
+	// whose host.name is the node's) and components that do not (the registrar,
+	// the controller, the edge control plane, whose host.name would be their POD
+	// name, #1596), so the package cannot choose: the zero value keeps host.name,
+	// and each component that is not hostNetwork says so. See
+	// serviceresource.WithoutHost.
+	WithoutHostName bool
 }
 
-// newResource builds the OTel Resource shared by the meter and tracer
-// providers so metrics and traces carry identical service identity attributes.
-func newResource(ctx context.Context, cfg Config) (*resource.Resource, error) {
-	return resource.New(
-		ctx,
-		resource.WithAttributes(semconv.ServiceVersion(cfg.ServiceVersion)),
-		resource.WithFromEnv(),
-		// After WithFromEnv, so OTEL_RESOURCE_ATTRIBUTES cannot rename the component (#1562).
-		servicename.Option(cfg.ServiceName),
-		resource.WithTelemetrySDK(),
-		resource.WithProcess(),
-		resource.WithHost(),
-	)
+// NewResource builds the OTel Resource shared by the meter, tracer and logger
+// providers so every signal carries identical service identity attributes. Who
+// decides each attribute is serviceresource's rule, shared with the binaries
+// that do not link this package (mesh-dns, the proxy supervisor, the prober).
+//
+// It is exported so that each component can pin, in its own package, what the
+// resource built from its own configuration carries (#1596).
+func NewResource(ctx context.Context, cfg Config) (*resource.Resource, error) {
+	var opts []serviceresource.Option
+	if cfg.WithoutHostName {
+		opts = append(opts, serviceresource.WithoutHost())
+	}
+	return serviceresource.New(ctx, cfg.ServiceName, cfg.ServiceVersion, opts...)
 }
 
 // readerProducers is one external metric producer per reader: a runtime
@@ -89,7 +96,7 @@ func runtimeProducers(cfg Config) []readerProducers {
 // so any package can create meters via otel.Meter().
 // The returned shutdown function flushes and stops the provider.
 func Setup(ctx context.Context, cfg Config) (shutdown func(context.Context) error, err error) {
-	res, err := newResource(ctx, cfg)
+	res, err := NewResource(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}

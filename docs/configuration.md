@@ -43,18 +43,22 @@ access-log/tracing policy via the MeshConfig CR.
 | Key | Default | Purpose |
 |---|---|---|
 | `otel.enabled` | `false` | Enable the OTel MeterProvider + push telemetry everywhere. |
-| `otel.endpoint` | `""` | OTLP gRPC collector `host:port` (insecure). Empty disables OTLP + the proxy/CNI stat sink. Deploy-time value baked into the CNI plugin and Envoy bootstrap (never read from a runtime ConfigMap). |
+| `otel.endpoint` | `""` | OTLP gRPC collector `host:port` (insecure). Empty disables OTLP export from every component, and the Envoy stats sink of the node proxy and the edge proxy. A deploy-time value: the chart passes it to each Go component as `--otlp-endpoint` and renders it into the two Envoy bootstraps; it is never read from a runtime ConfigMap. The CNI plugin takes no endpoint: it exports no telemetry of its own (#1166/#1185) and forwards its timings to the agent, which exports them (see `cniInstall` below). |
 | `otel.logs` | `false` | Export component logs over OTLP (also tee'd to stderr). |
 | `otel.traceSampleRate` | `0.1` | Head-sampling ratio (0.0–1.0); bounds exported spans only. |
 | `otel.traceExport` | `false` | Export spans over OTLP (needs a collector traces pipeline). |
 
 **Who names a component.** Each Go component (agent, registrar, controller, edge
 control plane, mesh-dns, proxy supervisor, prober) sets its own `service.name`
-(`aether-agent`, `aether-mesh-dns`, …) and takes every other resource attribute
-from `OTEL_RESOURCE_ATTRIBUTES`, which the charts use for the pod's `k8s.*`
-attributes. A `service.name` inside `OTEL_RESOURCE_ATTRIBUTES` is ignored by these
-components (#1562): dashboards and alerts select on the component's name. To
-rename one on purpose, set `OTEL_SERVICE_NAME` on its container. Envoy is not a
+(`aether-agent`, `aether-mesh-dns`, …) and its own `service.version` (the build's),
+and takes every other resource attribute from `OTEL_RESOURCE_ATTRIBUTES`, which the
+charts use for the pod's `k8s.*` attributes. A `service.name` inside
+`OTEL_RESOURCE_ATTRIBUTES` is ignored by these components (#1562): dashboards and
+alerts select on the component's name. To rename one on purpose, set
+`OTEL_SERVICE_NAME` on its container. A `service.version` inside
+`OTEL_RESOURCE_ATTRIBUTES` is ignored too (#1575), and nothing overrides it: the
+version says which binary produced the telemetry, and only the binary knows. All
+of them build that resource with `common/telemetry/serviceresource`. Envoy is not a
 Go component: its stats resource takes `service.name` from
 `OTEL_RESOURCE_ATTRIBUTES`, which is how the edge proxy gets `aether-edge-proxy`.
 
@@ -903,7 +907,10 @@ builder reads it from the environment, so the series de-collapse per node once
 the collector promotes it to `node` (#210). The prober deliberately sets **no**
 `host.name`. On a pod without hostNetwork that is the pod name, and a collector that
 promotes `host.name` ahead of `k8s.node.name` would export `node="prober-xxxxx"`, which
-is what happened until #1041.
+is what happened until #1041. The registrar, the controller and the edge control
+plane are on the pod network too and leave `host.name` out for the same reason
+(#1596); the hostNetwork components (agent, mesh-dns, proxy supervisor) keep it. See
+[`observability/metric-labels.md`](./observability/metric-labels.md).
 
 **Failure log.** Every non-success probe prints one bounded
 `AETHER_PROBE_FAIL {t, tier, target, result, err, elapsed_ms, phase, reused, conn_ms, dns_ms, connect_ms, tls_ms, write_ms, ttfb_ms, dial, remote, local, trace_id, pod, node, n, truncated}`

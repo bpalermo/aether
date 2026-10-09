@@ -65,12 +65,29 @@ Five things follow from the table.
 - **The node proxy's Envoy stats have no `service.name`,** so they arrive without a
   `job`. The edge proxy exports the same metric names with `job="aether-edge-proxy"`,
   which is how a query keeps the two apart (`{job!="aether-edge-proxy"}`).
-- **Every Go component except the prober also sets `host.name`.** The agent, mesh-dns and
-  the node proxy pod are `hostNetwork`, so theirs is the node's hostname. For the
-  registrar, the controller and the edge control plane it is the pod name. Do not derive
-  `node` from `host.name` ahead of `k8s.node.name`: a `node` label then holds a pod name
-  for some components and joins with nothing. The prober leaves `host.name` out for that
-  reason ([`../configuration.md`](../configuration.md), the prober's "Metrics").
+- **Only the `hostNetwork` Go components set `host.name`.** The binary decides this, not
+  the chart: the SDK's host detector reads the hostname, and a component keeps the
+  attribute only where that hostname is a host's.
+
+  | Component | `hostNetwork` | `host.name` |
+  |---|---|---|
+  | node agent | yes | the node's hostname |
+  | mesh-dns | yes | the node's hostname |
+  | proxy supervisor | yes | the node's hostname |
+  | edge control plane (`agent edge`) | no | **not set** (#1596) |
+  | registrar | no | **not set** (#1596) |
+  | controller | no | **not set** (#1596) |
+  | prober | no | **not set** (#1041) |
+
+  On the pod network the hostname is the pod name, which `k8s.pod.name` already holds for
+  all four, so leaving it out loses nothing. Until #1596 the registrar, the controller
+  and the edge control plane did set it, to their pod name. A pipeline that selected or
+  grouped their series by a label made from `host.name` uses `k8s.pod.name` instead.
+
+  Do not derive `node` from `host.name` ahead of `k8s.node.name`. A node's hostname need
+  not be its Kubernetes node name, and series from a release before #1596 (or from a
+  prober before #1041) hold a pod name there, which joins with nothing
+  ([`../configuration.md`](../configuration.md), the prober's "Metrics").
 
 Labels that are **not** your pipeline's job: the prober's `pod`, `tier`, `target` and
 `result`, and every `reason`, `pin`, `result` or `aether_*` label in the rules, are
