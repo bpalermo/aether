@@ -1,10 +1,10 @@
-# promtool unit tests for agent-pin-alerts.yml:
+# promtool unit tests for agent-pin-alerts.yml. The unit tests run them with
+# the promtool the build pins:
 #
-#   promtool test rules docs/observability/agent-pin-alerts_test.yml
+#   bazel test //:observability_rules_test
 #
-# This repository has no promtool in its build, so CI does not run this file
-# here; run it by hand after changing a rule, and copy it next to wherever the
-# rules are deployed from. Passes with promtool 3.5.0.
+# With a promtool of your own: `promtool test rules` on this file. Copy it next
+# to wherever the rules are deployed from.
 #
 # The agent pushes its gauges every 60 s, so every series below has one sample a
 # minute. `_` is a missing sample; a series that is not listed does not exist.
