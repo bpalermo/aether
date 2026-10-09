@@ -18,7 +18,7 @@ configuration attaches, and the same label names are needed.
 |---|---|---|
 | `node` | resource attribute `k8s.node.name` | **your pipeline**. Nothing makes it by default |
 | `job` | resource attribute `service.name` | Prometheus's OTLP ingestion maps `service.name` onto `job` by itself. Another backend may need it done |
-| one label that differs per registrar replica, under any name | resource attribute `k8s.pod.name` | **your pipeline** |
+| one label that differs per replica of the registrar, the controller and the edge control plane, under any name | resource attribute `k8s.pod.name` | **your pipeline** |
 
 The label has to be called `node`. Promoting `k8s.node.name` under its translated name
 (`k8s_node_name`) keeps the series apart but the rules do not select on it: see
@@ -50,7 +50,7 @@ controller), `agent/internal/meshdns/telemetry.go`,
 and the `resource_detectors` entry of the Envoy stats sink in
 `agent-proxy-configmap.yaml` and `edge-configmap.yaml`.
 
-Four things follow from the table.
+Five things follow from the table.
 
 - **The registrar and the controller set no `k8s.node.name`.** They are Deployments, and
   the node is not what tells their replicas apart. Only `k8s.pod.name` does.
@@ -58,6 +58,10 @@ Four things follow from the table.
   Prometheus's `instance` label does not separate two agents, two mesh-dns daemons or two
   registrar replicas. Without a promoted `node` (or pod) label, every instance of a
   component writes the same label set.
+- **The edge control plane needs a pod label as well as `node`.** The chart runs two
+  `agent edge` replicas by default and spreads them across nodes only softly
+  (`edge.replicaCount`, `edge.nodeSpread`), so two can share a node. Both report the pin
+  gauges, and with `job` and `node` alone two co-located replicas write the same series.
 - **The node proxy's Envoy stats have no `service.name`,** so they arrive without a
   `job`. The edge proxy exports the same metric names with `job="aether-edge-proxy"`,
   which is how a query keeps the two apart (`{job!="aether-edge-proxy"}`).
@@ -100,7 +104,7 @@ this directory, with two nodes or two replicas and one of them in the failing st
 | promotes `k8s.node.name` as `k8s_node_name`, not `node` | `AetherCNIConflistUnchained` **does not fire** for the unchained node. Both sides of its `unless` aggregate to one series with no `node`, and one healthy agent anywhere cancels the alert. It fires only when no agent in the fleet reports `1` |
 | the same | `MeshDNSNoRecords` (and the other `by (node)` rules) still fire, as one fleet-wide alert with no `node` label. The summary reads "mesh-DNS is serving zero records on " and names no node |
 | gives the registrar replicas no label that differs (no `k8s.pod.name` promotion) | `AetherRegistrarSnapshotDiverged` **can never fire**. The replicas write one series, the rule counts distinct hashes across replica series, and one series is never more than one hash |
-| promotes nothing per node at all | every agent (and every mesh-dns, supervisor, node proxy and prober) writes the same label set. One series then has one writer per node: a gauge holds whichever node exported last, and `rate()` or `increase()` over a counter reads the interleaved cumulative values as resets. The chart's comments record both from before the attributes existed: fabricated resets and connect failures on the node proxy's `agent_xds` counters, and Prometheus rejecting whole batches with "duplicate sample for timestamp" for two edge proxies |
+| promotes nothing per node at all | every agent (and every mesh-dns, supervisor and node proxy) writes the same label set. The prober does not collapse, because it sets its own `pod` label; its series only lose their `node`. One series then has one writer per node: a gauge holds whichever node exported last, and `rate()` or `increase()` over a counter reads the interleaved cumulative values as resets. The chart's comments record both from before the attributes existed: fabricated resets and connect failures on the node proxy's `agent_xds` counters, and Prometheus rejecting whole batches with "duplicate sample for timestamp" for two edge proxies |
 | leaves `job` out | `AetherRegistrarSnapshotDiverged` still works for one registrar Deployment (it was run with no `job`). The pin rules sum the node agent's series together with the edge control plane's on a node that runs both, and their text has an empty `{{ $labels.job }}` |
 
 The last row but one is the reason `absent()` cannot stand in for a missing promotion: a
@@ -125,11 +129,15 @@ processors:
           # node: from k8s.node.name only. Never from host.name.
           - set(attributes["node"], resource.attributes["k8s.node.name"])
             where resource.attributes["k8s.node.name"] != nil
-          # A per-replica label for what has no node: the registrar and the
-          # controller. The prober already sets its own `pod`.
+          # A per-replica label for the Deployments, whose replicas nothing
+          # else tells apart: the registrar and the controller (no node), and
+          # the edge control plane (two replicas may share a node). The prober
+          # already sets its own `pod`; the edge proxy has service.instance.id.
           - set(attributes["pod"], resource.attributes["k8s.pod.name"])
-            where resource.attributes["k8s.node.name"] == nil
-            and resource.attributes["k8s.pod.name"] != nil
+            where resource.attributes["k8s.pod.name"] != nil
+            and (resource.attributes["service.name"] == "aether-registrar"
+            or resource.attributes["service.name"] == "aether-controller"
+            or resource.attributes["service.name"] == "aether-edge")
 
 service:
   pipelines:
@@ -154,7 +162,13 @@ That keeps the series apart, which is the first half. The rules here say `node`,
 this alone you also replace `node` with `k8s_node_name` in every rule file you install,
 or you rename in a Collector as above.
 
-**Cardinality.** A `node` label on the node proxy's per-cluster Envoy stats multiplies
+**Cardinality.** A `pod` label starts a new set of series every time the pod is
+replaced, which is why the example adds it only for the three Deployments and not for
+the per-node DaemonSets, where `node` is stable across a roll. For the registrar, the
+controller and the edge control plane that is a handful of replicas, and the series of
+a replaced pod go stale.
+
+A `node` label on the node proxy's per-cluster Envoy stats multiplies
 those series by the number of nodes. The chart's comments
 (`agent-proxy-daemonset.yaml`) describe a pipeline that promotes `node` only on the
 proxy's two static clusters, `agent_xds` and `otel_collector`, which exist once per node
