@@ -25,6 +25,7 @@ go_test(
     size = "small",
     srcs = [
         "metrics_test.go",
+        "opening_test.go",
         "seed_test.go",
         "tracker_test.go",
     ],
