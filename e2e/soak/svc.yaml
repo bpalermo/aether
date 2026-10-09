@@ -17,8 +17,8 @@
 #   the new-SA step       dials svc-1 and svc-3 from a ServiceAccount the mesh
 #                         has never seen.
 #   churn.sh --preflight  refuses to start when one of the five is absent, has
-#                         no replica, is not fully available, is not in the
-#                         mesh, or would not roll surge-first.
+#                         no replica, is not fully available or is mid-roll, is
+#                         not in the mesh, or would not roll surge-first.
 #
 # Until this file, the five existed only on the cluster the soaks ran on: a
 # change to them could not be reviewed, and a soak could not be set up from the

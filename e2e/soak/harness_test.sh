@@ -52,7 +52,8 @@
 #     driver rolls and the load addresses. The pre-flight against canned
 #     `kubectl get deployment -o jsonpath` answers in
 #     testdata/preflight/workloads/ (one absent; each difference that would
-#     void a soak; five that only log a line per request), and the manifest,
+#     void a soak; three mid-roll with every replica available; five that only
+#     log a line per request), and the manifest,
 #     read: the names the harness uses are the ones it defines, and the five
 #     differ only where its header says they do;
 #   - prober-grade.sh (#1390, #1423) against canned Prometheus query responses
@@ -1372,7 +1373,7 @@ case "$args" in
 	if [ -f "${FAKE_SVC_DIR:-/nonexistent}/$w.txt" ]; then
 		cat "$FAKE_SVC_DIR/$w.txt"
 	else
-		printf 'replicas=3\navailable=3\nmanaged=true\nsa=%s\nstrategy=RollingUpdate\nmaxUnavailable=0\nminReadySeconds=10\npreStopSleep=3\ncommand=["/quiet/sh","-c","exec /echo-basic >/dev/null"]\n' "$w"
+		printf 'replicas=3\navailable=3\nupdated=3\ntotal=3\ngeneration=7\nobservedGeneration=7\nmanaged=true\nsa=%s\nstrategy=RollingUpdate\nmaxUnavailable=0\nminReadySeconds=10\npreStopSleep=3\ncommand=["/quiet/sh","-c","exec /echo-basic >/dev/null"]\n' "$w"
 	fi
 	;;
 *" get deployment/svc-"*" -o name")
@@ -1632,6 +1633,23 @@ expect "$O" "workloads: svc-5, no preStop sleep" 'PRE-FLIGHT FAILED: aether-test
 expect "$O" "workloads: seven lines, one per difference" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-' 7
 expect "$O" "workloads: the manifest is pointed at once" 'apply -n aether-test -f e2e/soak/svc\.yaml' 1
 expect "$O" "workloads: it never says OK" 'pre-flight OK' 0
+
+# Mid-roll with every replica available. With maxSurge 1 the old pods stay
+# available while the new ReplicaSet comes up, so "4 of 4 available" is also
+# what a Deployment says in the middle of a roll: the count alone let it pass.
+O="$TMP/svc-pf-midroll.out"
+svc_preflight midroll "$O"
+show "churn.sh --preflight, three workloads mid-roll with all replicas available" "$O"
+if [ "$rc" -eq 2 ]; then
+	pass "workloads: a workload that is mid-roll refuses the run even with every replica available (exit 2)"
+else
+	fail "workloads: the 'midroll' fixtures gave exit $rc, want 2"
+fi
+expect "$O" "workloads: svc-1, one new pod beside four old ones" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-1 is mid-roll: 1 of 4 replicas updated, 5 pods ' 1
+expect "$O" "workloads: svc-3, every replica updated and an old pod not yet gone" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-3 is mid-roll: 4 of 4 replicas updated, 5 pods ' 1
+expect "$O" "workloads: svc-4, a change its controller has not looked at yet" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-4 is mid-roll: .*generation 8, observed 7' 1
+expect "$O" "workloads: three lines, and svc-2 and svc-5 are not named" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-' 3
+expect "$O" "workloads: and no manifest is pointed at: applying it is not what a roll waits for" 'apply -n aether-test -f e2e/soak/svc\.yaml' 0
 
 # A server that logs a line per request (#1395) does not void a soak: said, not refused.
 O="$TMP/svc-pf-loud.out"

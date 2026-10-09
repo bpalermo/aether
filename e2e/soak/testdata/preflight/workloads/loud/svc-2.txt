@@ -1,5 +1,9 @@
 replicas=4
 available=4
+updated=4
+total=4
+generation=7
+observedGeneration=7
 managed=true
 sa=svc-2
 strategy=RollingUpdate

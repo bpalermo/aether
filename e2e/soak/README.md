@@ -695,7 +695,7 @@ kubectl apply -f e2e/soak/k6-runner.yaml
 # it checks /readyz, that every DaemonSet/Deployment the schedule rolls (and the
 # SHRINK target) exists, and that the context may patch them, that each of
 # svc-1 ... svc-5 is the workload svc.yaml makes where it matters (#1462: it has
-# replicas, all of them available; its pods are in the mesh and run as the
+# replicas, all of them available, and is not mid-roll; its pods are in the mesh and run as the
 # ServiceAccount of its name; it rolls surge-first with minReadySeconds and a
 # preStop sleep), that the uds-csi
 # step's UDS Deployments have a Running pod to delete, and exits non-zero
@@ -2549,8 +2549,8 @@ Each of these invalidated a real run:
   endpoint metadata annotations, `svc-5`'s second port (h2c on 3001). Written from the
   workloads the soaks so far ran on, with the quiet start added and two ports of
   `svc-5` that nothing listened on removed. `churn.sh --preflight` reads each one and
-  names what would void a soak: absent, no replica, not all available, not in the
-  mesh, another ServiceAccount, a roll that is not surge-first or has no
+  names what would void a soak: absent, no replica, not all available, mid-roll, not
+  in the mesh, another ServiceAccount, a roll that is not surge-first or has no
   `minReadySeconds` or preStop sleep. A server that is not started quiet is a `note`,
   not a refusal. Not yet applied to a cluster from this file.
 - `run.sh` — the one kickoff (proposal 042, #1323): `e2e` and `soak` modes, explicit

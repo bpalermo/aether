@@ -362,8 +362,12 @@ PREFLIGHT_TARGETS=(
 #
 #   no replica            a roll of nothing is logged ROLLED, and the SHRINK
 #                         aborts the run at T0+450m on a svc-5 it cannot shrink;
-#   not all available     the run starts on a workload that is mid-roll or
-#                         broken, and its failures are read as the mesh's;
+#   not all available, or mid-roll
+#                         the run starts on a workload that is rolling or
+#                         broken, and its failures are read as the mesh's. A
+#                         roll is told by the rollout's own numbers (updated
+#                         replicas, pods, observed generation), not by the
+#                         available count: a surge-first roll keeps that full;
 #   not in the mesh       pods without aether.io/managed are not captured and
 #                         not registered: the load has no endpoint to reach;
 #   another ServiceAccount  the mesh service name IS the ServiceAccount name,
@@ -378,7 +382,7 @@ PREFLIGHT_TARGETS=(
 SVC_NS="aether-test"
 SVC_MANIFEST="e2e/soak/svc.yaml"
 # One `key=value` line per field; a field the object does not have is empty.
-SVC_FMT='replicas={.spec.replicas}{"\n"}available={.status.availableReplicas}{"\n"}managed={.spec.template.metadata.labels.aether\.io/managed}{"\n"}sa={.spec.template.spec.serviceAccountName}{"\n"}strategy={.spec.strategy.type}{"\n"}maxUnavailable={.spec.strategy.rollingUpdate.maxUnavailable}{"\n"}minReadySeconds={.spec.minReadySeconds}{"\n"}preStopSleep={.spec.template.spec.containers[0].lifecycle.preStop.sleep.seconds}{"\n"}command={.spec.template.spec.containers[0].command}{"\n"}'
+SVC_FMT='replicas={.spec.replicas}{"\n"}available={.status.availableReplicas}{"\n"}updated={.status.updatedReplicas}{"\n"}total={.status.replicas}{"\n"}generation={.metadata.generation}{"\n"}observedGeneration={.status.observedGeneration}{"\n"}managed={.spec.template.metadata.labels.aether\.io/managed}{"\n"}sa={.spec.template.spec.serviceAccountName}{"\n"}strategy={.spec.strategy.type}{"\n"}maxUnavailable={.spec.strategy.rollingUpdate.maxUnavailable}{"\n"}minReadySeconds={.spec.minReadySeconds}{"\n"}preStopSleep={.spec.template.spec.containers[0].lifecycle.preStop.sleep.seconds}{"\n"}command={.spec.template.spec.containers[0].command}{"\n"}'
 SVC_HINT=0
 is_svc_workload() {
 	[ "$1" = "$SVC_NS" ] && [[ "$2" =~ ^deployment/svc-[1-5]$ ]]
@@ -387,7 +391,7 @@ is_svc_workload() {
 # difference. Returns non-zero when any of them voids the soak.
 preflight_workload() {
 	local ns="$1" obj="$2" name="${2#deployment/}" out key val fail=0
-	local replicas="" available="" managed="" sa="" strategy="" max_unavailable="" min_ready="" pre_stop="" command=""
+	local replicas="" available="" updated="" total="" generation="" observed="" managed="" sa="" strategy="" max_unavailable="" min_ready="" pre_stop="" command=""
 	if ! out=$(k --request-timeout=15s -n "$ns" get "$obj" -o "jsonpath=$SVC_FMT" 2>&1); then
 		echo "churn.sh: PRE-FLIGHT FAILED: could not read $ns/$obj on context '$CTX': $out" >&2
 		return 1
@@ -396,6 +400,10 @@ preflight_workload() {
 		case "$key" in
 		replicas) replicas="$val" ;;
 		available) available="$val" ;;
+		updated) updated="$val" ;;
+		total) total="$val" ;;
+		generation) generation="$val" ;;
+		observedGeneration) observed="$val" ;;
 		managed) managed="$val" ;;
 		sa) sa="$val" ;;
 		strategy) strategy="$val" ;;
@@ -405,14 +413,27 @@ preflight_workload() {
 		command) command="$val" ;;
 		esac
 	done <<<"$out"
+	# wl_fail: a difference from the manifest (the caller points at it once).
+	# wl_wait: a state that passes by itself, or that the manifest does not mend.
 	wl_fail() {
+		echo "churn.sh: PRE-FLIGHT FAILED: $ns/$obj $*" >&2
+		fail=1
+		SVC_HINT=1
+	}
+	wl_wait() {
 		echo "churn.sh: PRE-FLIGHT FAILED: $ns/$obj $*" >&2
 		fail=1
 	}
 	if ! [[ "$replicas" =~ ^[0-9]+$ ]] || [ "$replicas" -eq 0 ]; then
 		wl_fail "has .spec.replicas=${replicas:-unset} (a roll of it rolls nothing, and the SHRINK cannot restore a count it never read)"
 	elif [ "${available:-0}" != "$replicas" ]; then
-		wl_fail "has ${available:-0} of $replicas replicas available (mid-roll or failing: what it drops would be read as the mesh's)"
+		wl_wait "has ${available:-0} of $replicas replicas available (mid-roll or failing: what it drops would be read as the mesh's)"
+	elif [ "${updated:-0}" != "$replicas" ] || [ "${total:-0}" != "$replicas" ] || [ -z "$generation" ] || [ "$observed" != "$generation" ]; then
+		# What `kubectl rollout status` asks. The available count alone is not
+		# it: with maxSurge 1 the old pods stay available while the new
+		# ReplicaSet comes up, so a Deployment in the middle of a roll also
+		# says "all available" -- of pods that are not the template read here.
+		wl_wait "is mid-roll: ${updated:-0} of $replicas replicas updated, ${total:-0} pods (generation ${generation:-unset}, observed ${observed:-unset}): wait for \`kubectl -n $ns rollout status $obj\`"
 	fi
 	if [ "$managed" != "true" ]; then
 		wl_fail "has no aether.io/managed: \"true\" label on its pods (they are not in the mesh: the load has no endpoint to reach)"
@@ -541,10 +562,7 @@ preflight() {
 		fi
 		if is_svc_workload "$ns" "$obj" && [ -z "${seen[$obj]:-}" ]; then
 			seen[$obj]=1
-			if ! preflight_workload "$ns" "$obj"; then
-				fail=1
-				SVC_HINT=1
-			fi
+			preflight_workload "$ns" "$obj" || fail=1
 		fi
 	done
 	if [ "$SVC_HINT" = "1" ]; then
