@@ -22,11 +22,20 @@ if [ ! -f "$LOCK" ]; then
 	exit 1
 fi
 
-# The lock at BASE. A base that has none (the lock is newer than it) has no
-# promise to compare.
-if ! base_lock="$(git show "$BASE:$LOCK" 2>/dev/null)"; then
+# The lock at BASE. Only a base that is here and has no lock (the lock is newer
+# than it) has no promise to compare: a base this checkout cannot read, a
+# shallow clone for one, must not read as one.
+if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+	echo "ERROR: $BASE is not a commit this checkout has (a shallow clone?): the lock cannot be compared with its base."
+	exit 1
+fi
+if ! git cat-file -e "$BASE:$LOCK" 2>/dev/null; then
 	echo "OK: $LOCK does not exist at $BASE, so no promise is compared."
 	exit 0
+fi
+if ! base_lock="$(git show "$BASE:$LOCK")"; then
+	echo "ERROR: $LOCK exists at $BASE and git could not read it."
+	exit 1
 fi
 
 version() { sed -nE 's/^version:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p'; }

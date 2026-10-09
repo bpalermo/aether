@@ -20,9 +20,16 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 cat >"$TMP/bin/git" <<'EOF'
 #!/usr/bin/env bash
-# show <ref>:<path> prints $FAKE_BASE_FILE when the ref and the path are the
-# expected ones and the file exists; everything else fails as git would.
-if [ "$1" = "show" ] && [ "$2" = "$FAKE_BASE_REF:$FAKE_LOCK" ] && [ -f "$FAKE_BASE_FILE" ]; then
+# The one commit this repository has is $FAKE_BASE_REF, and the one path in it
+# is $FAKE_LOCK, when $FAKE_BASE_FILE exists. `cat-file -e` answers for those;
+# `show <ref>:<path>` prints the file, unless $FAKE_SHOW_FAILS is set.
+# Everything else fails as git would.
+if [ "$1" = "cat-file" ] && [ "$2" = "-e" ]; then
+	[ "$3" = "$FAKE_BASE_REF^{commit}" ] && exit 0
+	[ "$3" = "$FAKE_BASE_REF:$FAKE_LOCK" ] && [ -f "$FAKE_BASE_FILE" ] && exit 0
+	exit 1
+fi
+if [ "$1" = "show" ] && [ "$2" = "$FAKE_BASE_REF:$FAKE_LOCK" ] && [ -f "$FAKE_BASE_FILE" ] && [ -z "${FAKE_SHOW_FAILS:-}" ]; then
 	cat "$FAKE_BASE_FILE"
 	exit 0
 fi
@@ -99,9 +106,14 @@ promises: {}
 run "no lock at the base" 0 "does not exist at abc123" "-" "$BASE_LOCK"
 run "no lock in this checkout" 1 "is missing" "$BASE_LOCK" "-"
 run "no version in this checkout's lock" 1 "no 'version: N' line" "$BASE_LOCK" "${BASE_LOCK/version: 3/versions: 3}"
-# The base is the ref the caller names: the fake answers for abc123 only, so
-# another ref reads as a base without a lock.
-run "another base ref is the one asked for" 0 "does not exist at other-ref" "$BASE_LOCK" "$BASE_LOCK" "other-ref"
+# The base is the ref the caller names, and a base that is not here fails: the
+# fake has the commit abc123 only. A lock removed in this checkout would
+# otherwise pass for want of anything to compare.
+run "a base this checkout does not have" 1 "other-ref is not a commit this checkout has" "$BASE_LOCK" "$BASE_LOCK" "other-ref"
+run "a base this checkout does not have, with a promise removed" 1 "is not a commit this checkout has" "$BASE_LOCK" 'version: 3
+promises: {}
+' "other-ref"
+FAKE_SHOW_FAILS=1 run "a lock at the base that git cannot read" 1 "exists at abc123 and git could not read it" "$BASE_LOCK" "$BASE_LOCK"
 
 # The workflow runs it against the pull request's base, in a job with the full
 # history.
