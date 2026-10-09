@@ -1667,8 +1667,9 @@ Two consequences for a build. A path-mapped action runs only in a sandbox or on
 a remote executor; with `--spawn_strategy=local` (or `standalone`) Bazel stops
 with "requires sandboxing due to path mapping" instead of building something
 else. And to see whether a binary still holds a configuration's name:
-`strings <binary> | grep bazel-out/` must print `bazel-out/cfg/` and no other
-directory.
+every line `strings <binary> | grep bazel-out/` prints must start with
+`bazel-out/cfg/`. A binary that links no generated source (mesh-dns, for one)
+prints none, and that is fine too.
 
 The `aether-proxy` image is the exception, and stays one. It is built in the
 separate `proxy/` workspace by its own release workflow, and it still carries
