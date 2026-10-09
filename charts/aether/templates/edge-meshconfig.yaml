@@ -3,20 +3,25 @@
   The edge's own namespace-scoped MeshConfig. An empty spec inherits the
   control-plane (release namespace) MeshConfig field-by-field via the controller's
   fallback, so the edge's projected ConfigMap mirrors the mesh by default. Seeded
-  ONCE (lookup) + resource-policy: keep, like the control-plane CR — operators edit
-  it via kubectl to give the edge its own observability policy. See
-  docs/proposals/015_mesh-config.md.
+  ONCE (lookup), as a hook where it can be and one that deletes nothing
+  (aether.meshConfig.seedMode, #1471), like the control-plane CR — operators edit it via kubectl to give the edge its
+  own observability policy. See docs/proposals/015_mesh-config.md.
 */ -}}
-{{- $existing := lookup "config.aether.io/v1" "MeshConfig" (include "aether.edge.namespace" .) "default" -}}
+{{- $ns := include "aether.edge.namespace" . -}}
+{{- $existing := lookup "config.aether.io/v1" "MeshConfig" $ns "default" -}}
 {{- if not $existing }}
 apiVersion: config.aether.io/v1
 kind: MeshConfig
 metadata:
   name: default
-  namespace: {{ include "aether.edge.namespace" . }}
+  namespace: {{ $ns }}
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
   annotations:
+    {{- if eq (include "aether.meshConfig.seedMode" (dict "namespace" $ns "rendersNamespace" .Values.edge.namespaceCreate)) "hook" }}
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: never
+    {{- end }}
     helm.sh/resource-policy: keep
 spec: {}
 {{- end }}
