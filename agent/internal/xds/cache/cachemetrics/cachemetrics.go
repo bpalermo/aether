@@ -90,10 +90,10 @@ const NumUnpinnedCauses = 4
 // slot of AddUnpinned.
 var UnpinnedCauses = [NumUnpinnedCauses]UnpinnedCause{CauseTrustDomainUnknown, CauseTLSNotPublished, CauseNoNamespaceMetadata, CausePinNotRendered}
 
-// PinCounts is the pin state of one snapshot as numbers: how many mesh cluster
-// entries carry a server-identity SAN pin, and how many are meant to and do
-// not, per cause. A fixed-size value on purpose: one is built per snapshot and
-// a short history of them is kept (the cache's pin history), so it costs no
+// PinCounts is a pin state as numbers: how many mesh cluster entries carry a
+// server-identity SAN pin, and how many are meant to and do not, per cause. Of
+// one snapshot, or of the clusters a proxy has accepted. A fixed-size value on
+// purpose: one is built per snapshot and per acknowledgement, so it costs no
 // allocation and cannot grow with the mesh.
 type PinCounts struct {
 	// Pinned is the number of entries published as a pinned TLS cluster.
@@ -511,9 +511,8 @@ func (m *Metrics) TLSClusterPins(ctx context.Context, counts PinCounts) {
 	m.recordPins(ctx, m.tlsClusters, counts)
 }
 
-// TLSClusterPinsAcked records the pin state of the snapshot whose cluster
-// update the proxy just acknowledged (#1425), series for series like
-// TLSClusterPins.
+// TLSClusterPinsAcked records the pin state of the clusters the proxy has
+// accepted (#1425, #1508), series for series like TLSClusterPins.
 func (m *Metrics) TLSClusterPinsAcked(ctx context.Context, counts PinCounts) {
 	if m == nil {
 		return

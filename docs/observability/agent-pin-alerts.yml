@@ -138,31 +138,37 @@ groups:
 
       # ---------------------------------------------------------------- P2
       # Published is not held. aether_agent_xds_acked_tls_clusters is the same
-      # count for the last snapshot whose cluster update the proxy ACKNOWLEDGED.
-      # This fires when the proxy last acknowledged MORE unpinned clusters than
-      # the agent now publishes: the agent has pinned them (or dropped them)
-      # and the proxy has not taken the update. The usual cause is a proxy
-      # rejecting cluster updates:
+      # count for the clusters the proxy has ACCEPTED, kept cluster by cluster
+      # (#1508): each cluster is counted at the version the proxy last
+      # acknowledged, or stated when it opened its stream. This fires when the
+      # proxy holds MORE unpinned clusters than the agent now publishes: the
+      # agent has pinned them (or dropped them) and the proxy has not taken
+      # the update. The usual cause is a proxy rejecting cluster updates:
       #   increase(aether_agent_xds_nacks_total{aether_xds_type_url=~".*Cluster"}[30m])
+      # A rejected cluster stays at the version the proxy last accepted through
+      # every later ACK of other clusters, so the rule keeps firing until the
+      # proxy accepts that cluster. (Agents before #1508 moved the whole gauge
+      # to the snapshot of the last cluster ACK, and the rule resolved on the
+      # next ACK of any other cluster.)
       #
       # Absence cannot fire it. The acknowledged gauge has no series until a
-      # proxy gives the agent process a cluster ACK that counts: of a response
-      # that added or removed a cluster, or of the empty response that opens
-      # the proxy's stream. (The ACK of a later empty response is not read: it
-      # can name a snapshot the proxy rejected.) A comparison between two
-      # vectors returns nothing for a (job, node) one side lacks, so an absent
-      # gauge is silent here: there is nothing known to compare.
+      # proxy answers a cluster response of this agent process: the ACK of one
+      # that added or removed a cluster, or the answer to the first one of a
+      # stream. A comparison between two vectors returns nothing for a
+      # (job, node) one side lacks, so an absent gauge is silent here: there
+      # is nothing known to compare.
       #
       # When it is absent. Not after an ordinary agent restart: a reconnecting
-      # proxy states the clusters it holds, and its ACK of the agent's answer
-      # is the gauge's first sample within about a second (#1483; agents before
-      # it had no series until a cluster next changed). It is absent while no
-      # proxy is connected, and, the case this rule then MISSES, after an
-      # agent restart for as long as the proxy rejects the cluster update it
-      # is sent: the new agent process has no acknowledged state to show, so a
-      # divergence that was firing resolves when the old samples leave the
-      # lookback. The NACK counter above moves once for each response the
-      # proxy rejects.
+      # proxy states the clusters it holds, and its answer to the agent's first
+      # response is the gauge's first sample within about a second (#1483;
+      # agents before it had no series until a cluster next changed). It is
+      # absent while no proxy is connected, and, the case this rule then
+      # MISSES (#1509), after an agent restart for as long as the proxy
+      # rejects a cluster it holds an older version of: the new agent process
+      # never published that version, cannot count it, and writes no gauge
+      # rather than one that leaves the cluster out. A divergence that was
+      # firing resolves when the old samples leave the lookback. The NACK
+      # counter above moves once for each response the proxy rejects.
       #
       # Reason by reason, never on the totals. A cluster that leaves one reason
       # for another (an unpinned TCP floor that is removed: no_namespace_metadata
@@ -170,12 +176,13 @@ groups:
       # a proxy that rejects that update and goes on serving TLS without a pin
       # would be silent in a comparison of sums. Both gauges carry a series for
       # every reason, zero included, so each reason has both sides. The value
-      # is the number of entries the proxy holds beyond what is published,
+      # is the number of clusters the proxy holds beyond what is published,
       # added up over the reasons.
       #
-      # One direction only. The reverse (acknowledged below published) is the
-      # new unpinned snapshot not yet acknowledged, and the first rule already
-      # speaks for what is published.
+      # One direction only. The reverse (acknowledged below published) is an
+      # unpinned cluster not yet acknowledged, or an entry with no cluster in
+      # the snapshot, which no proxy can hold; the first rule already speaks
+      # for what is published.
       #
       # for: 15m. An update in flight differs for milliseconds, and a restarted
       # agent's previous acknowledged sample is still returned for Prometheus's
@@ -183,11 +190,12 @@ groups:
       # both.
       #
       # Known residue: during a proxy hot restart two generations are connected
-      # and the gauge shows the last ACK from either. A late ACK of an older
-      # snapshot from the generation that is leaving, on a node where no
-      # cluster changes afterwards, leaves the gauge on that older state until
-      # the next cluster update. It needs a pin to change in the same seconds
-      # as a proxy handoff; it is why this is a warning and not a page.
+      # and each cluster shows the last answer from either. A late ACK of an
+      # older version of a cluster from the generation that is leaving, on a
+      # node where that cluster does not change afterwards, leaves that one
+      # cluster on the older state until the next answer about it. It needs a
+      # pin to change in the same seconds as a proxy handoff; it is why this
+      # is a warning and not a page.
       - alert: AetherProxyHoldsUnpinnedClusters
         expr: >-
           sum by (job, node) (clamp_min(
@@ -202,10 +210,11 @@ groups:
         annotations:
           summary: "the proxy on {{ $labels.node }} last acknowledged {{ $value }} unpinned mesh cluster(s) that {{ $labels.job }} no longer publishes"
           description: >-
-            The last cluster update the proxy on {{ $labels.node }} acknowledged
-            had {{ $value }} more mesh cluster entries without a server-identity
-            pin, counted reason by reason, than the agent's current snapshot.
-            The proxy has not accepted the newer clusters for 15 minutes. Check
+            The clusters the proxy on {{ $labels.node }} has accepted include
+            {{ $value }} more mesh clusters without a server-identity pin,
+            counted reason by reason, than the agent's current snapshot
+            publishes. The proxy has not accepted the newer clusters for 15
+            minutes. Check
             aether_agent_xds_nacks_total for the Cluster type URL and the agent
             log for `envoy NACKed delta response` (it carries the proxy's
             error), and `proxy acknowledged mesh clusters with no
