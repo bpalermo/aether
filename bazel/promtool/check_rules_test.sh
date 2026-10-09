@@ -67,9 +67,20 @@ D=""
 with() {
 	N=$((N + 1))
 	D="$TMP/case$N"
-	mkdir "$D"
+	# Fatal, since the harness runs under `set +e`: a fixture that was not
+	# copied makes the checker fail on a missing file, which a negative case
+	# would take for promtool refusing it.
+	mkdir "$D" || {
+		echo "FATAL: could not create $D" >&2
+		exit 1
+	}
 	local f
-	for f in "$@"; do cp "$DATA/$f" "$D/$f"; done
+	for f in "$@"; do
+		cp "$DATA/$f" "$D/$f" || {
+			echo "FATAL: could not copy fixture $f into $D" >&2
+			exit 1
+		}
+	done
 }
 
 with good.yml good_test.yml
