@@ -285,6 +285,51 @@ func TestRunVerifyRejectsSharedBuildIDs(t *testing.T) {
 	}
 }
 
+// A NAME=path argument is reported, and blamed, by NAME, and the report is
+// sorted whatever the order of the arguments: the build_id_check rule hands
+// over a depset, whose order says nothing.
+func TestRunVerifyNamesAndSortsTheReport(t *testing.T) {
+	dir := t.TempDir()
+	in1, in2 := filepath.Join(dir, "in1"), filepath.Join(dir, "in2")
+	one, two := filepath.Join(dir, "one"), filepath.Join(dir, "two")
+	writeELF(t, in1, 1)
+	writeELF(t, in2, 2)
+	for in, out := range map[string]string{in1: one, in2: two} {
+		if err := runSet([]string{"-in", in, "-out", out}); err != nil {
+			t.Fatalf("runSet: %v", err)
+		}
+	}
+	marker := filepath.Join(dir, "marker")
+	args := []string{"-marker", marker, "linux/arm64 //b:b=" + two, "linux/amd64 //a:a=" + one}
+	if err := runVerify(args); err != nil {
+		t.Fatalf("runVerify: %v", err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(got)), "\n")
+	if len(lines) != 2 ||
+		!strings.HasPrefix(lines[0], "linux/amd64 //a:a: ") ||
+		!strings.HasPrefix(lines[1], "linux/arm64 //b:b: ") {
+		t.Fatalf("report is not named and sorted:\n%s", got)
+	}
+	if strings.Contains(string(got), dir) {
+		t.Fatalf("report shows a path next to a name:\n%s", got)
+	}
+
+	// Two names for one ELF share an ID: the problem names both, not the path.
+	err = runVerify([]string{"first=" + one, "second=" + one})
+	if err == nil || !strings.Contains(err.Error(), "shared by 2 binaries: first, second") {
+		t.Fatalf("a shared build-ID must be reported by name, got: %v", err)
+	}
+	// A problem with one file is reported by name too.
+	err = runVerify([]string{"unset=" + in1, "ok=" + two})
+	if err == nil || !strings.Contains(err.Error(), "unset: build-ID is") {
+		t.Fatalf("a note that does not hash its binary must be reported by name, got: %v", err)
+	}
+}
+
 func TestRunSetNonELFCopies(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "not-an-elf")

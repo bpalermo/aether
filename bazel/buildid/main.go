@@ -32,7 +32,7 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
   buildid set    -in FILE -out FILE
-  buildid verify [-marker FILE] FILE...
+  buildid verify [-marker FILE] [NAME=]FILE...
 `)
 	os.Exit(2)
 }
@@ -84,12 +84,17 @@ func runSet(args []string) error {
 //  2. every note equals the SHA-1 recomputed from that binary's own content —
 //     self-verification, i.e. the ID really does identify *this* ELF and the
 //     `content_build_id` rule actually ran on it;
-//  3. the notes are pairwise distinct (#653: seven released ELFs must not share
+//  3. the notes are pairwise distinct (#653: the released ELFs must not share
 //     one ID, or a symbol upload for one silently resolves all of them).
 //
 // Property 3 follows from 2 for distinct binaries, but is asserted directly
 // because it is the property the Pyroscope workflow depends on and the one the
 // previous, commit-stamped guard actively violated.
+//
+// An argument is a path, or NAME=path: the report and every problem then name
+// the binary by NAME (the `build_id_check` rule passes the platform and the
+// labels, which a path under bazel-out does not show). The report is sorted, so
+// it does not depend on the order of the arguments.
 func runVerify(args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	marker := fs.String("marker", "", "file to write on success")
@@ -101,19 +106,28 @@ func runVerify(args []string) error {
 		return errors.New("verify: no files given")
 	}
 
-	var report bytes.Buffer
+	var lines []string
 	var problems []string
 	ids := map[string][]string{}
-	for _, path := range files {
+	for _, arg := range files {
+		name, path := arg, arg
+		if n, p, named := strings.Cut(arg, "="); named {
+			name, path = n, p
+		}
 		id, err := checkOne(path)
 		if err != nil {
-			problems = append(problems, fmt.Sprintf("%s: %v", path, err))
+			problems = append(problems, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
-		fmt.Fprintf(&report, "%s: %s\n", path, id)
-		ids[id] = append(ids[id], path)
+		lines = append(lines, fmt.Sprintf("%s: %s\n", name, id))
+		ids[id] = append(ids[id], name)
 	}
 	problems = append(problems, collisions(ids)...)
+	sort.Strings(lines)
+	var report bytes.Buffer
+	for _, line := range lines {
+		report.WriteString(line)
+	}
 
 	if len(problems) > 0 {
 		return fmt.Errorf("GNU build-ID check failed (see #651, #653):\n  %s", strings.Join(problems, "\n  "))

@@ -44,6 +44,8 @@ filegroup(
 # they set up to MODULE.bazel's go_sdk.download (#1283).
 # //scripts:publish_verify_close_issue_test holds publish-verify.yaml's rolling
 # issue title to the script that closes it (#1316).
+# //bazel/buildid:release_build_ids_test holds the roots of the released
+# build-ID check to the charts publish.yaml pushes (#1427).
 filegroup(
     name = "ci_definitions",
     srcs = glob(
@@ -61,6 +63,7 @@ filegroup(
     ),
     visibility = [
         "//bazel/actionlint:__pkg__",
+        "//bazel/buildid:__pkg__",
         "//e2e:__pkg__",
         "//scripts:__pkg__",
     ],

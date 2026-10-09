@@ -78,8 +78,9 @@ def go_multi_arch_image(name, binary, repository, registry = IMAGE_REGISTRY, bas
     content_build_id(
         name = image_binary,
         binary = binary,
-        # Public so //bazel/buildid:release_build_ids can assert on the exact
-        # ELF that ships, not on a rebuild of it.
+        # //bazel/buildid:release_build_ids finds this target (and the extras
+        # below) under the image index, by the provider the rule returns, and
+        # asserts on the exact ELF that ships: nothing lists it by name (#1427).
         visibility = ["//visibility:public"],
     )
 
