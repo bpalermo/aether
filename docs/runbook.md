@@ -710,11 +710,11 @@ by the workflow when it ends.
 | **main-post-merge: a commit on main failed its post-merge run** | `main-watch.yaml` | `bug`, `ci` | itself, when no commit on it is failing |
 | **CI: workflow runs stuck before they started** | `stuck-runs.yaml` | `bug`, `ci` | itself, when nothing is stuck |
 | **publish-verify: the expected-red control …** (four titles) | `publish-verify.yaml` | `bug`, `ci` | itself, by the next run whose control goes red |
-| **publish: artifacts missing for a commit on main** | `publish-verify.yaml` | none | itself, by a green run for `main`'s head or a green sweep |
+| **publish: artifacts missing for a commit on main** | `publish-verify.yaml` | `bug`, `ci` | itself, by a green run for `main`'s head or a green sweep |
 | **Nightly e2e failing** | the `report-failure` job of `e2e.yaml` | `bug`, `ci` | a person |
 | **CI: third-party image pins are behind their tags** | `third-party-images.yaml` | `enhancement`, `ci` | itself, when every pin is current |
 
-Three rules hold for all of them except where noted
+Three rules hold for all of them
 (`scripts/rolling-issue-lib.sh`; the post-merge watcher carries its own copy
 of them, and the pin report checks who opened the issue but still finds it by
 search):
@@ -735,15 +735,6 @@ search):
   with `was opened without the label(s) …`: create the label again (`gh label
   create ci`), or change the script that names it. The post-merge watcher
   files without labels and warns instead of failing.
-
-**The exception.** The step that OPENS "publish: artifacts missing for a
-commit on main" is still inline in `publish-verify.yaml` and still finds its
-issue with a title search that takes the first hit, with no label. Changing
-that file can re-raise a code-scanning false positive that blocks the pull
-request (`AGENTS.md`, "Secrets and releases"), so it was left for a change of
-its own.
-The step that CLOSES that issue does follow the rules: it closes only the
-workflow's own.
 
 ### Stuck workflow runs
 

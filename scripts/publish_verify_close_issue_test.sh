@@ -23,6 +23,7 @@ set -uo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$HERE/publish-verify-close-issue.sh"
 CONTROL_ISSUE="$HERE/publish-verify-control-issue.sh"
+MISSING_ISSUE="$HERE/publish-verify-missing-issue.sh"
 # The workflow, to hold its title and its step to the script: a runfile under
 # Bazel (//:ci_definitions), the checkout otherwise.
 WORKFLOW="${TEST_SRCDIR:-}/${TEST_WORKSPACE:-_main}/.github/workflows/publish-verify.yaml"
@@ -36,7 +37,7 @@ JQ="${JQ:-$(command -v jq)}"
 	exit 1
 }
 export JQ
-for f in "$SCRIPT" "$CONTROL_ISSUE" "$WORKFLOW" "$HERE/fake-gh-issues.sh" "$HERE/rolling-issue-lib.sh"; do
+for f in "$SCRIPT" "$CONTROL_ISSUE" "$MISSING_ISSUE" "$WORKFLOW" "$HERE/fake-gh-issues.sh" "$HERE/rolling-issue-lib.sh"; do
 	[ -f "$f" ] || {
 		echo "FAIL: $f not found"
 		exit 1
@@ -148,10 +149,35 @@ else
 fi
 
 # --- the title is the workflow's -------------------------------------------------
-if [ "$(bash "$SCRIPT" title)" = "$title" ] && grep -qF "title=\"${title}\"" "$WORKFLOW"; then
-	pass "the title is the one the workflow files the issue under"
+# The issue is opened by scripts/publish-verify-missing-issue.sh, which takes
+# its title from the script that closes it: one title, in one place. The
+# workflow step runs that script and keeps no title, body or `gh` call of its
+# own (#1532: the inline step took the first hit of a title search).
+if [ "$(bash "$SCRIPT" title)" = "$title" ] && grep -qF '"${here}/publish-verify-close-issue.sh" title' "$MISSING_ISSUE"; then
+	pass "the title is the closing script's, and the opening script reads it from there"
 else
-	fail "the script's title ('$(bash "$SCRIPT" title)') is not the workflow's"
+	fail "the script's title ('$(bash "$SCRIPT" title)') is not the one the opening script files under"
+fi
+open_step="$(awk '/^      - name: / { on = ($0 ~ /Open or update the missing-artifacts issue/) } on' "$WORKFLOW")"
+if grep -qE '^[[:space:]]+run: \./scripts/publish-verify-missing-issue\.sh$' <<<"$open_step"; then
+	pass "the workflow's missing-artifacts step runs the script"
+else
+	fail "the missing-artifacts step does not run ./scripts/publish-verify-missing-issue.sh"
+fi
+if grep -qE 'gh issue|title=' <<<"$open_step"; then
+	fail "the missing-artifacts step still has issue logic of its own"
+else
+	pass "the missing-artifacts step has no title and no gh call of its own"
+fi
+# What the step is gated on, and what it hands the script, must not have moved.
+if grep -qF "if: github.event_name != 'workflow_dispatch' && (cancelled() || (failure() && (steps.verify.conclusion == 'failure' || steps.cosign.conclusion == 'failure')))" <<<"$open_step" &&
+	grep -qF 'VERIFY_CONCLUSION: ${{ steps.verify.conclusion }}' <<<"$open_step" &&
+	grep -qF 'COSIGN_CONCLUSION: ${{ steps.cosign.conclusion }}' <<<"$open_step" &&
+	grep -qF 'TRIGGERING_RUN: ${{ github.event.workflow_run.html_url }}' <<<"$open_step" &&
+	grep -qF 'GH_REPO: ${{ github.repository }}' <<<"$open_step"; then
+	pass "the missing-artifacts step keeps its condition and its environment"
+else
+	fail "the missing-artifacts step's condition or environment changed"
 fi
 if grep -qE '^[[:space:]]+run: \./scripts/publish-verify-close-issue\.sh$' "$WORKFLOW"; then
 	pass "the workflow runs the script"
@@ -475,6 +501,70 @@ printf '%s\t%s\n' 2000 "an unrelated issue" >"$tmp/issues"
 SEED_RACE="1999:${t_inconclusive}" file 0 "another run opens the same issue in the same moment" &&
 	check "same moment: the report is a comment on the older #1999" grep -qx 'WRITE issue comment 1999' "$tmp/gh.log"
 check "same moment: the newer #2001 is closed as a duplicate" grep -qx 'WRITE issue close 2001 not_planned' "$tmp/gh.log"
+
+# --- filing the missing-artifacts issue (#1532, #1568) -----------------------------
+# miss <want exit> <name> [VAR=value...]: run the missing-artifacts step on the
+# logs in $tmp/logs.
+miss() {
+	local want="$1" name="$2" rc
+	shift 2
+	: >"$tmp/gh.log"
+	seed_issues
+	env -u RUNNER_TEMP -u FAKE_FAIL -u FAKE_LABELS PATH="$tmp/bin:$PATH" GH_TOKEN=x GH_REPO=o/r \
+		FAKE_LOG="$tmp/gh.log" FAKE_STATE="$tmp/state" LOG_DIR="$tmp/logs" \
+		RUN_URL=https://example.invalid/runs/42 TRIGGERING_RUN=https://example.invalid/runs/41 \
+		VERIFY_CONCLUSION=failure COSIGN_CONCLUSION=skipped "$@" \
+		bash "$MISSING_ISSUE" >"$tmp/log" 2>&1
+	rc=$?
+	read_back
+	if [ "$rc" -ne "$want" ]; then
+		fail "$name: exit $rc, wanted $want: $(cat "$tmp/log")"
+		return 1
+	fi
+}
+mkdir -p "$tmp/logs"
+printf '%s\n' 'checking 01391e0b6e56' '  MISSING  quay.io/acme/agent:1.0.0-01391e0' '  ok       quay.io/acme/cni:1.0.0-01391e0' \
+	'  MISSING  a ``` fence and an escape '"$(printf '\033')"'[31m' >"$tmp/logs/verify.log"
+printf '%s\n' '  FAILED   quay.io/acme/registrar@sha256:abc' >"$tmp/logs/cosign.log"
+
+# The decoys the old search would have handed over first: a stranger's issue
+# under the title, another bot's, a longer title.
+printf '%s\t%s\t%s\n' 1500 "$title" mallory 1501 "$title" dependabot 1502 "Re: ${title} (discussion)" "" >"$tmp/issues"
+miss 0 "a gap, only issues that are not the workflow's open" &&
+	check "missing: a NEW issue under the title, nothing written on the others" test "$(cat "$tmp/filed") $(grep -c '^WRITE' "$tmp/gh.log")" = "create	${title} 1"
+check "missing: the new issue is labelled bug and ci" grep -qxF "WRITE issue create 1503 [bug+ci]: ${title}" "$tmp/gh.log"
+check "missing: the body lists what is missing" body_has "MISSING quay.io/acme/agent:1.0.0-01391e0"
+check "missing: ... and what does not verify" body_has "UNVERIFIED quay.io/acme/registrar@sha256:abc"
+check "missing: ... and not what is there" body_lacks "quay.io/acme/cni"
+check "missing: the body names both runs" bash -c 'grep -qxF "Verification run: https://example.invalid/runs/42" "$1" && grep -qxF "Publish run: https://example.invalid/runs/41" "$1"' _ "$tmp/body"
+check "missing: a backtick in a log line cannot close the fence" test "$(grep -c '```' "$tmp/body")" = 2
+check "missing: no escape byte reaches the issue" bash -c '! grep -q "$(printf "\033")" "$1"' _ "$tmp/body"
+
+# Reuse: the workflow's own open issue gets the comment.
+printf '%s\t%s\t%s\n' 1500 "$title" mallory 1316 "$title" "" >"$tmp/issues"
+miss 0 "a gap, the workflow's issue open" &&
+	check "missing, reuse: a comment on #1316 and nothing else" test "$(cat "$tmp/filed") $(grep -c '^WRITE' "$tmp/gh.log")" = "comment	1316 1"
+
+# The check did not finish: nothing recorded as missing.
+: >"$tmp/logs/verify.log"
+: >"$tmp/logs/cosign.log"
+: >"$tmp/issues"
+miss 0 "a run that was cancelled before it could say" VERIFY_CONCLUSION=cancelled COSIGN_CONCLUSION= &&
+	check "unfinished: the body says the commits are UNVERIFIED" body_has "so the commits it was to check are UNVERIFIED"
+check "unfinished: ... and how far it got" body_has "(none recorded — the check did not finish: gate cancelled, signatures not run; see the run log)"
+check "unfinished: ... and does not claim artifacts are missing" body_lacks "is missing artifacts in the image registry"
+rm -f "$tmp/logs/verify.log" "$tmp/logs/cosign.log"
+miss 0 "no log at all" &&
+	check "no logs: filed as unfinished" body_has "the check did not finish"
+
+# A label that is gone, and an issue API that does not answer: the step fails.
+for mode in reject drop; do
+	SEED_LABELS=bug miss 1 "missing: a label is gone (GitHub would ${mode} it)" FAKE_LABELS="$mode" &&
+		check "missing, label gone (${mode}): the issue is filed all the same" test "$(cat "$tmp/filed")" = "create	${title}"
+done
+miss 1 "missing: the issue API is down while filing" FAKE_FAIL="create comment"
+miss 1 "missing: the listing is down while filing" FAKE_FAIL=list &&
+	check "missing, listing down: nothing is filed blind" test ! -s "$tmp/filed"
 
 # A control that went red as expected files nothing, whatever ran this step.
 record ok

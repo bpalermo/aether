@@ -61,8 +61,8 @@
 set -euo pipefail
 
 # The title the "Open or update the missing-artifacts issue" step of
-# .github/workflows/publish-verify.yaml files under. The test reads that file
-# and fails if the two ever differ.
+# .github/workflows/publish-verify.yaml files under: its script,
+# scripts/publish-verify-missing-issue.sh, asks this one for it (`title`).
 ISSUE_TITLE="publish: artifacts missing for a commit on main"
 
 # shellcheck source=scripts/rolling-issue-lib.sh

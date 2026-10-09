@@ -200,6 +200,55 @@ if [ "$RC" -eq 0 ] && grep -qx 'WRITE issue comment 7' "$TMP/log" && grep -qx 'W
 else
 	fail "an extra open issue was left open, or the wrong one was closed (rc=$RC)"
 fi
+# The newer of the two may hold the ONLY copy of a report (the move to the
+# older failed when both were opened): it is copied to the older before the
+# newer is closed.
+set_body() { # set_body <number> <body>
+	"$JQ" --argjson n "$1" --arg b "$2" 'map(if .number == $n then .body = $b else . end)' \
+		"$TMP/state/issues.json" >"$TMP/state/issues.next" && mv "$TMP/state/issues.next" "$TMP/state/issues.json"
+}
+nine_on_seven() { grep -c 'REPORT-NINE' <<<"$(field 7 '.comments[].body')"; }
+reset_state
+seed 7 "$BOT" "$TITLE"
+seed 9 "$BOT" "$TITLE"
+set_body 9 "$(printf 'REPORT-NINE\nsecond line')"
+report
+if [ "$RC" -eq 0 ] && [ "$(nine_on_seven)" -eq 1 ] && [ "$(field 9 .state)" = closed ]; then
+	pass "an extra issue's report is copied to the older before the extra is closed"
+else
+	fail "an extra issue was closed without its report being copied (rc=$RC, copies=$(nine_on_seven))"
+fi
+# ... once: a report that is already on the older (the move worked, only the
+# close failed) is not copied again.
+reset_state
+seed 7 "$BOT" "$TITLE"
+seed 9 "$BOT" "$TITLE"
+set_body 9 "$(printf 'REPORT-NINE\nsecond line')"
+"$JQ" --argjson u "$BOT" 'map(if .number == 7 then .comments += [{user: $u, body: "REPORT-NINE\nsecond line"}] else . end)' \
+	"$TMP/state/issues.json" >"$TMP/state/issues.next" && mv "$TMP/state/issues.next" "$TMP/state/issues.json"
+report
+if [ "$RC" -eq 0 ] && [ "$(nine_on_seven)" -eq 1 ] && [ "$(field 9 .state)" = closed ]; then
+	pass "a report that is already on the older issue is not copied twice"
+else
+	fail "already moved: copies=$(nine_on_seven), #9 $(field 9 .state) (rc=$RC)"
+fi
+# ... and if the copy fails, the extra stays open: it is still the only copy.
+reset_state
+seed 7 "$BOT" "$TITLE"
+seed 9 "$BOT" "$TITLE"
+set_body 9 "$(printf 'REPORT-NINE\nsecond line')"
+report FAKE_FAIL_COMMENT_MATCH=REPORT-NINE
+if [ "$RC" -eq 0 ] && [ "$(field 9 .state)" = open ] && ! grep -q '^WRITE issue close 9' "$TMP/log" &&
+	grep -q 'could not copy the report of #9' "$TMP/out"; then
+	pass "the copy fails: the extra issue stays open, with a warning"
+else
+	fail "the copy failed and the extra was closed anyway (rc=$RC, #9 $(field 9 .state))"
+fi
+# The older issue cannot be read (is the report there already?): nothing is closed.
+report FAKE_FAIL=comments
+if [ "$(field 9 .state)" = open ]; then pass "the older issue cannot be read: the extra stays open"; else
+	fail "the older issue was unreadable and the extra was closed"
+fi
 report GH_REPO=
 if [ "$RC" -eq 1 ] && [ ! -s "$TMP/log" ]; then
 	pass "no GH_REPO: refused before any call"

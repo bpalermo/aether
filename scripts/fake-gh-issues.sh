@@ -29,6 +29,8 @@
 #   FAKE_LABELS  how a create answers a label the repository does not have:
 #                `reject` (HTTP 422, the default) or `drop` (the issue is
 #                opened without it, and nothing says so).
+#   FAKE_FAIL_COMMENT_MATCH  a comment whose body holds this text answers
+#                HTTP 502; every other comment works.
 #   FAKE_CLOSED_MEANWHILE  a comment lands on an issue that somebody closes in
 #                that same moment: after the comment is stored, the issue is
 #                closed (GitHub accepts a comment on a closed issue).
@@ -151,6 +153,13 @@ case "$method $path" in
 	;;
 "POST repos/"*"/issues/"*"/comments")
 	fails comment
+	if [ -n "${FAKE_FAIL_COMMENT_MATCH:-}" ]; then
+		case "$body" in *"$FAKE_FAIL_COMMENT_MATCH"*)
+			echo "gh: Bad Gateway (HTTP 502)" >&2
+			exit 1
+			;;
+		esac
+	fi
 	n="${path#*/issues/}"
 	n="${n%%/*}"
 	update --argjson n "$n" --arg b "$body" --argjson u "$BOT" \

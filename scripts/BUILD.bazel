@@ -277,6 +277,7 @@ sh_test(
         "fake-gh-issues.sh",
         "publish-verify-close-issue.sh",
         "publish-verify-control-issue.sh",
+        "publish-verify-missing-issue.sh",
         "rolling-issue-lib.sh",
         "//:ci_definitions",
         "@jq_toolchains//:resolved_toolchain",

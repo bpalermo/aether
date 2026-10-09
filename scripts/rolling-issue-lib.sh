@@ -5,7 +5,7 @@
 #   . "$(dirname "${BASH_SOURCE[0]}")/rolling-issue-lib.sh"
 #
 # Used by scripts/stuck-runs.sh, scripts/publish-verify-control-issue.sh,
-# scripts/publish-verify-close-issue.sh
+# scripts/publish-verify-missing-issue.sh, scripts/publish-verify-close-issue.sh
 # and scripts/e2e-report-failure.sh. Each used to find its issue with a title
 # search (`gh issue list --search 'in:title ...'`). Three things were wrong
 # with that, and this file is the one place they are put right:
@@ -134,15 +134,33 @@ rolling_issue_close() {
 
 # rolling_issue_close_extras <numbers, oldest first>
 # With more than one of the workflow's own issues open under a title (two runs
-# opened one in the same moment and the close of the newer failed), every one
-# after the first is closed as a duplicate. Called on each report, so a close
-# that failed is tried again by the next run instead of leaving two issues
-# open for good. A close that fails is a warning: the report comes first.
+# opened one in the same moment, and the move of the newer's report or the
+# close of the newer failed), every one after the first is closed as a
+# duplicate. Called on each report, so what failed is tried again by the next
+# run instead of leaving two issues open for good.
+# The extra may hold the ONLY copy of its report (the move failed), so its body
+# is on the oldest issue before it is closed: copied there as a comment, unless
+# the workflow already wrote that very text on the oldest. If the oldest cannot
+# be read, or the copy fails, the extra stays open. Nothing here fails the
+# caller: the report it just wrote comes first, and the next run tries again.
 rolling_issue_close_extras() {
-	local oldest n
+	local oldest n repo body have=""
 	oldest="$(sed -n 1p <<<"$1")"
+	[ -n "$(sed -n 2p <<<"$1")" ] || return 0
+	repo="$(_rolling_issue_repo)" || return 0
 	while read -r n; do
 		[ -n "$n" ] || continue
+		if ! body="$(gh api "repos/${repo}/issues/${n}" --jq '.body // ""')" || ! have="$(rolling_issue_text "$oldest")"; then
+			echo "::warning title=rolling-issue::could not read #${n} or #${oldest}; #${n}, a duplicate, stays open and the next run tries again" >&2
+			continue
+		fi
+		if [ -n "$body" ] && [[ "$have" != *"$body"* ]]; then
+			if ! rolling_issue_comment "$oldest" "$body"; then
+				echo "::warning title=rolling-issue::could not copy the report of #${n} to #${oldest}; #${n} stays open and the next run tries again" >&2
+				continue
+			fi
+			echo "copied the report of #${n} to #${oldest}"
+		fi
 		rolling_issue_comment "$n" "A duplicate of #${oldest}, which is older: the report is there." || true
 		if rolling_issue_close "$n" not_planned; then
 			echo "closed #${n}, a duplicate of #${oldest}"
