@@ -64,13 +64,19 @@ type entryClass struct {
 	class pinClass
 }
 
-// offeredVersions is how many versions of one cluster the agent remembers the
-// pin class of: the one the newest snapshot publishes and the two before it.
-// An acknowledgement names the version the proxy was sent, and that is nearly
-// always the newest. An older one is acknowledged when a build changed the
-// cluster again while the response was in flight; three covers two such
-// changes of the SAME cluster inside one round trip. A version that has
-// fallen out is not guessed at (heldKnown).
+// offeredVersions is how many PUBLISHED versions of one cluster the agent
+// remembers the pin class of: the one the newest snapshot publishes and the
+// two before it.
+//
+// It is not what an ACK is read with, and so not a bound on how long a proxy
+// may take to answer: a version is copied into the record's `sent` list when
+// a response carrying it is written, and stays there until that response is
+// answered (clusterAck.sent). This list is what that copy is made from, and
+// what a proxy's opening statement is read with. Three covers a cluster that
+// is rebuilt twice between go-control-plane building a response and the
+// stream's goroutine handing it to the tracker, a step inside this process
+// with no proxy and no network in it; a version missed there has no class and
+// is not guessed at (heldKnown).
 const offeredVersions = 3
 
 // offeredCluster is one version of a cluster a snapshot published and the pin
@@ -80,11 +86,28 @@ type offeredCluster struct {
 	class   pinClass
 }
 
+// sentCluster is one version of a cluster in flight.
+type sentCluster struct {
+	offeredCluster
+	// known is false when the version had no class on record when it was
+	// sent (see offeredVersions).
+	known bool
+	// responses is how many unanswered responses carry it.
+	responses int
+}
+
 // clusterAck is what the agent knows about one cluster entry on the proxy.
 type clusterAck struct {
 	// offered is the versions the agent published the cluster at, newest
 	// first; a zero slot is unused.
 	offered [offeredVersions]offeredCluster
+	// sent is the versions of the cluster in flight: written to a proxy in a
+	// response that has not been answered yet, with the class each had when it
+	// was sent. A version stays here until every response that carried it has
+	// been answered or its stream has ended, whatever the builds in between
+	// do to offered, so the ACK of a version this agent sent always finds its
+	// class. Nil when nothing is in flight, which is nearly always.
+	sent []sentCluster
 	// build is the last snapshot build whose cluster map had the entry.
 	build uint64
 	// holds says the proxy has accepted the cluster, and held is the version
@@ -127,15 +150,63 @@ func (s *clusterAck) offer(version string, class pinClass) (heldChanged bool) {
 	return heldChanged
 }
 
+// classOfVersion is the class on record for version: the one it was sent with
+// when it is in flight, else the one it was published with.
+func (s *clusterAck) classOfVersion(version string) (pinClass, bool) {
+	if version == "" {
+		return pinClassNone, false
+	}
+	for _, o := range s.sent {
+		if o.version == version && o.known {
+			return o.class, true
+		}
+	}
+	for _, o := range s.offered {
+		if o.version == version {
+			return o.class, true
+		}
+	}
+	if s.holds && s.heldKnown && s.held == version {
+		return s.heldClass, true
+	}
+	return pinClassNone, false
+}
+
+// send records that a response carrying the cluster at version was written.
+func (s *clusterAck) send(version string) {
+	for i := range s.sent {
+		if s.sent[i].version == version {
+			s.sent[i].responses++
+			return
+		}
+	}
+	class, known := s.classOfVersion(version)
+	s.sent = append(s.sent, sentCluster{offeredCluster: offeredCluster{version: version, class: class}, known: known, responses: 1})
+}
+
+// answered records that a response carrying the cluster at version was
+// answered, or will never be.
+func (s *clusterAck) answered(version string) {
+	for i := range s.sent {
+		if s.sent[i].version != version {
+			continue
+		}
+		if s.sent[i].responses--; s.sent[i].responses > 0 {
+			return
+		}
+		s.sent = append(s.sent[:i], s.sent[i+1:]...)
+		if len(s.sent) == 0 {
+			s.sent = nil
+		}
+		return
+	}
+}
+
 // hold records that the proxy accepted the cluster at version.
 func (s *clusterAck) hold(version string) {
-	if version != "" {
-		for _, o := range s.offered {
-			if o.version == version {
-				s.holds, s.held, s.heldClass, s.heldKnown = true, version, o.class, true
-				return
-			}
-		}
+	if class, known := s.classOfVersion(version); known {
+		s.holds, s.held, s.heldClass, s.heldKnown = true, version, class, true
+		return
 	}
 	if s.holds && s.held == version {
 		// What it already held, restated: the class is the one on record.
@@ -161,9 +232,15 @@ func (s *clusterAck) release() {
 //
 // One record per cluster entry of the newest snapshot, plus one per entry
 // that left the snapshot while the proxy still holds its cluster (until the
-// proxy accepts the removal or opens a stream without it). Each record is a
-// fixed size: memory is bounded by the number of clusters, not by the number
-// of snapshots or of ACKs.
+// proxy accepts the removal or opens a stream without it) or while a response
+// carrying it is unanswered. A record is a fixed size plus one small item per
+// version of the cluster that is in flight, which is at most one per
+// unanswered response carrying the cluster; go-control-plane leaves at most
+// one response of a type unanswered per request it has not answered on a
+// stream, and the tracker drops them all when the stream ends. So memory is
+// bounded by the number of clusters times the number of connected proxy
+// streams (one, two during a hot restart), not by the number of snapshots or
+// of ACKs.
 //
 // It has its own mutex and is a leaf: the ACK arrives on the xDS stream's
 // goroutine, which must never wait on a snapshot build (snapshotMu) or on the
@@ -240,9 +317,7 @@ func (h *ackedPins) publish(entries []entryClass, versions map[string]string, pr
 		}
 	}
 	for name, s := range h.clusters {
-		if !s.holds {
-			h.forgetIfGoneLocked(name, s)
-		}
+		h.forgetIfGoneLocked(name, s)
 	}
 	if !heldChanged {
 		// Nothing the proxy holds is counted differently: a build alone
@@ -266,11 +341,31 @@ func (h *ackedPins) recordLocked(name string) *clusterAck {
 }
 
 // forgetIfGoneLocked drops the record of a cluster the proxy does not hold
-// when the newest snapshot has no entry for it either: nothing is kept for a
-// cluster neither published nor held. Callers hold h.mu.
+// when the newest snapshot has no entry for it either and no response carrying
+// it is in flight: nothing is kept for a cluster neither published, nor sent
+// and unanswered, nor held. Callers hold h.mu.
 func (h *ackedPins) forgetIfGoneLocked(name string, s *clusterAck) {
-	if s.build != h.build {
+	if s.build != h.build && !s.holds && len(s.sent) == 0 {
 		delete(h.clusters, name)
+	}
+}
+
+// deliver records the clusters of a response entering or leaving flight
+// (ack.Delivery), so that a version is known for as long as its ACK can come.
+func (h *ackedPins) deliver(d ack.Delivery) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range d.Resources {
+		s := h.clusters[r.Name]
+		if s == nil {
+			continue
+		}
+		if !d.Ended {
+			s.send(r.Version)
+			continue
+		}
+		s.answered(r.Version)
+		h.forgetIfGoneLocked(r.Name, s)
 	}
 }
 
@@ -352,6 +447,14 @@ const (
 	ackedClusterPinsUnknownMsg = "proxy holds mesh clusters at a version this agent did not publish; their pin state is not known and the acknowledged pin gauge is not written"
 	ackedClusterPinsKnownMsg   = "the pin state of every mesh cluster the proxy holds is known again"
 )
+
+// ResponseDelivery is the cache's ack.DeliveryObserver: the clusters of a
+// response entering or leaving flight. The other types carry no pin.
+func (c *SnapshotCache) ResponseDelivery(_ context.Context, delivery ack.Delivery) {
+	if delivery.TypeURL == resourcev3.ClusterType {
+		c.acked.deliver(delivery)
+	}
+}
 
 // ResponseAccepted is the cache's ack.AckObserver: it is told what every
 // answered delta response says the proxy holds and acts on the cluster ones

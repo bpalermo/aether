@@ -304,6 +304,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	// clusters the proxy accepted", cluster by cluster
 	// (aether.agent.xds.acked_tls_clusters, #1425, #1508).
 	ackTracker.SetAckObserver(snapshotCache.ResponseAccepted)
+	ackTracker.SetDeliveryObserver(snapshotCache.ResponseDelivery)
 
 	spireBridge, err := wireSpireBridge(ctx, m, snapshotCache, spireSource)
 	if err != nil {

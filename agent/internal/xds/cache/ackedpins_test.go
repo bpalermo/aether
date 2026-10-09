@@ -11,6 +11,7 @@ import (
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -22,6 +23,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // snapshotVersion is the version of the snapshot the cache currently serves:
@@ -198,6 +200,7 @@ func ackedPinFixture(t *testing.T) (*SnapshotCache, *recorder, *sdkmetric.Manual
 	require.NoError(t, c.SetTrustDomain(ctx, raceTrustDomain))
 	tracker := ack.NewTracker(c.log)
 	tracker.SetAckObserver(c.ResponseAccepted)
+	tracker.SetDeliveryObserver(c.ResponseDelivery)
 	return c, rec, reader, tracker
 }
 
@@ -640,6 +643,115 @@ func TestAckedPinsAreBoundedByTheClusters(t *testing.T) {
 	u = s.accept(ack.Accepted{Added: []ack.Resource{{Name: "a", Version: "v1"}}})
 	require.True(t, u.report, "the oldest version still remembered")
 	assert.Equal(t, 1, u.counts.UnpinnedTotal())
+}
+
+// addClusterVariant stores an outbound cluster entry whose bytes differ with
+// variant, pinned or not: a rebuild of the same cluster.
+func addClusterVariant(c *SnapshotCache, name string, variant int, pinned bool) {
+	entry := clusterEntry{
+		cluster: &clusterv3.Cluster{Name: name, ConnectTimeout: durationpb.New(time.Duration(variant+1) * time.Second)},
+		service: "aether-test/echo",
+	}
+	if pinned {
+		entry.sanNamespaces = []string{"aether-test"}
+	}
+	c.clusterMu.Lock()
+	c.clusters[name] = entry
+	c.clusterMu.Unlock()
+	c.recomputeMTLSClusters()
+}
+
+// TestAckedPinGaugeKnowsAVersionHoweverLongItsAckTakes: a response waits for
+// its ACK for as long as the proxy takes, and the agent goes on building.
+// However many times a cluster is rebuilt in that time, the version in flight
+// is one this agent sent, and when the proxy acknowledges it the agent must
+// know what it sent: the gauge moves to it. It must not be left on what it
+// showed before because the version was forgotten.
+func TestAckedPinGaugeKnowsAVersionHoweverLongItsAckTakes(t *testing.T) {
+	c, rec, reader, tracker := ackedPinFixture(t)
+	ackedGauge := func() (pinSeries, bool) { return readPinGauge(t, reader, ackedTLSClustersGauge) }
+	ctx := context.Background()
+	addClusterVariant(c, bindingClusterName, 0, false)
+	require.NoError(t, c.generateSnapshot(ctx))
+	proxy := connectCDSProxy(t, c, tracker, 1, nil)
+	proxy.ack(proxy.next())
+	acked, _ := ackedGauge()
+	require.Equal(t, byCause(0, 1, 0), acked.unpinned)
+
+	// The pinned version is sent, and the proxy is slow to answer.
+	addClusterVariant(c, bindingClusterName, 1, true)
+	require.NoError(t, c.generateSnapshot(ctx))
+	pending := proxy.next()
+	require.Equal(t, []string{bindingClusterName}, deltaNames(pending))
+
+	// Meanwhile the cluster is rebuilt many times over, unpinned again.
+	const rebuilds = 3 * offeredVersions
+	for i := range rebuilds {
+		addClusterVariant(c, bindingClusterName, 10+i, false)
+		require.NoError(t, c.generateSnapshot(ctx))
+	}
+
+	proxy.ack(pending)
+	acked, _ = ackedGauge()
+	assert.Equal(t, int64(1), acked.pinned, "the proxy acknowledged the pinned version it was sent")
+	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
+	assert.Empty(t, rec.with(ackedClusterPinsUnknownMsg), "a version this agent sent is never unknown to it")
+
+	// And what is kept for it is released with the answer: after the proxy
+	// takes the newest version, the record holds nothing in flight.
+	proxy.ack(proxy.next())
+	acked, _ = ackedGauge()
+	assert.Equal(t, byCause(0, 1, 0), acked.unpinned)
+	assert.Empty(t, c.acked.clusters[bindingClusterName].sent)
+}
+
+// TestAckedPinsForgetAVersionThatIsNoLongerInFlight: memory. A version is kept
+// while a response that carried it waits for its answer, and no longer: an
+// ACK, a NACK and the end of the stream each release it.
+func TestAckedPinsForgetAVersionThatIsNoLongerInFlight(t *testing.T) {
+	c, _, _, tracker := ackedPinFixture(t)
+	ctx := context.Background()
+	addClusterVariant(c, bindingClusterName, 0, true)
+	require.NoError(t, c.generateSnapshot(ctx))
+	inFlight := func() int {
+		c.acked.mu.Lock()
+		defer c.acked.mu.Unlock()
+		return len(c.acked.clusters[bindingClusterName].sent)
+	}
+
+	proxy := connectCDSProxy(t, c, tracker, 1, nil)
+	first := proxy.next()
+	assert.Equal(t, 1, inFlight(), "sent and not answered")
+	proxy.ack(first)
+	assert.Zero(t, inFlight(), "acknowledged")
+
+	addClusterVariant(c, bindingClusterName, 1, true)
+	require.NoError(t, c.generateSnapshot(ctx))
+	rejected := proxy.next()
+	assert.Equal(t, 1, inFlight())
+	proxy.nack(rejected)
+	assert.Zero(t, inFlight(), "rejected")
+
+	addClusterVariant(c, bindingClusterName, 2, true)
+	require.NoError(t, c.generateSnapshot(ctx))
+	require.NotNil(t, proxy.next())
+	// A second generation is sent the same version while the first has not
+	// answered: one version, in flight twice.
+	other := connectCDSProxy(t, c, tracker, 2, nil)
+	second := other.next()
+	assert.Equal(t, 1, inFlight(), "one version, however many streams carry it")
+	proxy.callbacks.OnDeltaStreamClosed(1, nil)
+	assert.Equal(t, 1, inFlight(), "still in flight on the other stream")
+	other.ack(second)
+	assert.Zero(t, inFlight())
+
+	// A stream that ends with a response unanswered.
+	addClusterVariant(c, bindingClusterName, 3, true)
+	require.NoError(t, c.generateSnapshot(ctx))
+	require.NotNil(t, other.next())
+	assert.Equal(t, 1, inFlight())
+	other.callbacks.OnDeltaStreamClosed(2, nil)
+	assert.Zero(t, inFlight(), "the stream ended: its answer will never come")
 }
 
 // TestAckedPinsUnderConcurrentBuildsAndAnswers: answers arrive on the xDS

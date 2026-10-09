@@ -225,12 +225,14 @@ type Metrics struct {
 	// including the positive answer: a `pinned` value with every `unpinned`
 	// series at zero. No per-cluster attribute.
 	tlsClusters metric.Int64Gauge
-	// ackedTLSClusters is the same reading for the last snapshot whose cluster
-	// update the proxy ACKNOWLEDGED: what the proxy holds, as far as the agent
-	// can know it, where tlsClusters is what the agent published. The two
-	// differ while an update is in flight and for as long as the proxy rejects
-	// one (aether.agent.xds.nacks). Not recorded until the first cluster ACK
-	// this agent process sees, so an absent series is "not known", not zero.
+	// ackedTLSClusters is the same reading for the clusters the proxy has
+	// ACCEPTED, kept cluster by cluster (#1508): each is counted at the version
+	// the proxy last acknowledged, or stated when it opened its stream. It is
+	// what the proxy holds, as far as the agent can know it, where tlsClusters
+	// is what the agent published. The two differ while an update is in flight
+	// and for as long as the proxy rejects a cluster (aether.agent.xds.nacks).
+	// Not recorded until a proxy answers a cluster response of this agent
+	// process, so an absent series is "not known", not zero.
 	ackedTLSClusters metric.Int64Gauge
 	// pinnedAttrs and unpinnedAttrs are the two gauges' attribute sets, built
 	// once at registration: the gauges are recorded on every snapshot.
@@ -340,7 +342,7 @@ func (m *Metrics) registerActivityInstruments(meter metric.Meter) error {
 		return fmt.Errorf("tls clusters: %w", err)
 	}
 	if m.ackedTLSClusters, err = meter.Int64Gauge("aether.agent.xds.acked_tls_clusters",
-		metric.WithDescription("The count aether.agent.snapshot.tls_clusters gives, for the last snapshot whose cluster update the proxy acknowledged; absent until the first cluster ACK")); err != nil {
+		metric.WithDescription("The count aether.agent.snapshot.tls_clusters gives, for the clusters the proxy has accepted, each at the version it last acknowledged or stated; absent until a proxy answers a cluster response")); err != nil {
 		return fmt.Errorf("acked tls clusters: %w", err)
 	}
 	m.pinnedAttrs = metric.WithAttributeSet(attribute.NewSet(attrPin.String(PinPinned)))

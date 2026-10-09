@@ -116,6 +116,28 @@ type Accepted struct {
 	Removed       []string
 }
 
+// Delivery is the resources of one delta response entering or leaving flight.
+// A response is in flight from the moment it is written to its stream until
+// the proxy answers it (ACK or NACK) or the stream ends. Ended is false when
+// it is written and true when it leaves; every Delivery that is not Ended is
+// followed by exactly one that is, with the same Resources.
+//
+// It exists so that whoever interprets an ACK can keep what it needs to know
+// about a version for exactly as long as an ACK of that version can still
+// arrive, however long the proxy takes (#1508). An acknowledged response is
+// told to the AckObserver first and leaves flight after.
+//
+// Resources is the tracker's: read it, do not keep or change it.
+type Delivery struct {
+	TypeURL   string
+	Resources []Resource
+	Ended     bool
+}
+
+// DeliveryObserver is told of every Delivery. It runs on the xDS stream's
+// goroutine, after the tracker's own lock is released: it must not block.
+type DeliveryObserver func(ctx context.Context, delivery Delivery)
+
 // AckObserver is told what an answered delta response says a proxy holds: once
 // per acknowledged response that carried something, and once for the answer,
 // ACK or NACK, to the first response of a type on a stream. A later response
@@ -142,6 +164,9 @@ type Tracker struct {
 	changed chan struct{}
 	// observer, when set, is told what the proxy accepted (SetAckObserver).
 	observer AckObserver
+	// deliveries, when set, is told of responses entering and leaving flight
+	// (SetDeliveryObserver).
+	deliveries DeliveryObserver
 }
 
 // SetAckObserver registers fn to be told what each answered delta response
@@ -153,6 +178,16 @@ func (t *Tracker) SetAckObserver(fn AckObserver) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.observer = fn
+}
+
+// SetDeliveryObserver registers fn to be told of every response that carries a
+// resource entering and leaving flight (Delivery). One observer; nil removes
+// it. Call it while wiring, before the xDS server serves: a response already
+// in flight when it is set is reported only as leaving.
+func (t *Tracker) SetDeliveryObserver(fn DeliveryObserver) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.deliveries = fn
 }
 
 // NewTracker creates an empty Tracker.
@@ -273,7 +308,23 @@ func (t *Tracker) onDeltaResponse(streamID int64, _ *discoveryv3.DeltaDiscoveryR
 	empty := len(entry.added) == 0 && len(entry.removed) == 0
 
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	kept, replaced := t.keepLocked(streamID, resp.GetNonce(), &entry, empty)
+	deliveries := t.deliveries
+	t.mu.Unlock()
+	if replaced != nil {
+		endDelivery(deliveries, *replaced)
+	}
+	if kept && deliveries != nil && len(entry.added) > 0 {
+		deliveries(context.Background(), Delivery{TypeURL: entry.typeURL, Resources: entry.added})
+	}
+}
+
+// keepLocked files a written response under its nonce, with the statement it
+// answers when it is the first of its type on its stream, and reports whether
+// it was kept (a later empty one is not). replaced is the response it took the
+// place of, which will now never be answered: go-control-plane's nonces are
+// unique per stream, so there is none. Callers hold t.mu.
+func (t *Tracker) keepLocked(streamID int64, nonce string, entry *inflightResponse, empty bool) (kept bool, replaced *inflightResponse) {
 	pair := streamType{streamID: streamID, typeURL: entry.typeURL}
 	st := t.streams[pair]
 	if st == nil {
@@ -287,9 +338,14 @@ func (t *Tracker) onDeltaResponse(streamID int64, _ *discoveryv3.DeltaDiscoveryR
 		st.answered, st.stated = true, nil
 	}
 	if empty && !entry.opening {
-		return
+		return false, nil
 	}
-	t.inflight[inflightKey{streamID: streamID, nonce: resp.GetNonce()}] = entry
+	key := inflightKey{streamID: streamID, nonce: nonce}
+	if old, ok := t.inflight[key]; ok {
+		replaced = &old
+	}
+	t.inflight[key] = *entry
+	return true, replaced
 }
 
 // noteOpeningRequestLocked keeps the statement of the first request of a type
@@ -343,14 +399,24 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 	}
 	t.resolveLocked(entry, nackErr)
 	t.broadcastLocked()
-	observer := t.observer
+	observer, deliveries := t.observer, t.deliveries
 	t.mu.Unlock()
 
 	accepted, told := t.answered(entry, nackErr)
 	if told && observer != nil {
 		observer(context.Background(), accepted)
 	}
+	// After the AckObserver: what was kept for the versions in flight is
+	// there for it to read the ACK with.
+	endDelivery(deliveries, entry)
 	return nil
+}
+
+// endDelivery tells the DeliveryObserver that a response left flight.
+func endDelivery(deliveries DeliveryObserver, entry inflightResponse) {
+	if deliveries != nil && len(entry.added) > 0 {
+		deliveries(context.Background(), Delivery{TypeURL: entry.typeURL, Resources: entry.added, Ended: true})
+	}
 }
 
 // resolveLocked records an answered response against each resource it carried:
@@ -416,8 +482,10 @@ func (t *Tracker) nackLocked(typeURL, name string, nackErr error) {
 // statement not yet answered included): stream IDs are never reused.
 func (t *Tracker) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 	t.mu.Lock()
-	for key := range t.inflight {
+	var ended []inflightResponse
+	for key, entry := range t.inflight {
 		if key.streamID == streamID {
+			ended = append(ended, entry)
 			delete(t.inflight, key)
 		}
 	}
@@ -426,7 +494,11 @@ func (t *Tracker) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 			delete(t.streams, key)
 		}
 	}
+	deliveries := t.deliveries
 	t.mu.Unlock()
+	for _, entry := range ended {
+		endDelivery(deliveries, entry)
+	}
 }
 
 // broadcastLocked wakes all waiters. Callers must hold t.mu.

@@ -5822,8 +5822,11 @@ What follows from that:
 
 - The two gauges agree at rest, for every cluster the snapshot publishes. An entry with
   **no cluster in the snapshot** (a `tcp:` floor that is not captured) is in the
-  published gauge and never in this one: a proxy cannot hold it. So acknowledged can be
-  *below* published at rest, by exactly those entries, and is never above it.
+  published gauge and never in this one: a proxy cannot hold it. So with a proxy that
+  has accepted everything it was sent, acknowledged sits *below* published by exactly
+  those entries. Acknowledged *above* published, in any series, is the other case: the
+  proxy holds a cluster the agent no longer publishes in that state (a rejected update
+  or a rejected removal, below).
 - They differ for the moment an update is in flight.
 - They **stay** different while the proxy rejects a cluster: the rejected cluster stays
   at the version the proxy last accepted, through every later ACK of other clusters,
@@ -5855,6 +5858,9 @@ What follows from that:
 - **Absent is "not known", not zero.** Nothing is written until a proxy answers this
   agent process: the node's proxy is down, or this agent is a surge-rolled standby that
   does not serve xDS yet.
+- **A slow proxy loses nothing.** The agent keeps what it sent, version by version, until
+  the proxy answers it or the stream ends, however many times the cluster is rebuilt in
+  between. An ACK that arrives late is read against the version that was sent.
 - **Not written while a held cluster's state is unknown.** The agent can count a version
   only if this agent process published it. An agent that restarts **while its proxy is
   rejecting a cluster update** is told the version the proxy held *before* that update
@@ -5909,10 +5915,21 @@ What follows from that:
 sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
   != sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"})
 
-# Clusters the agent publishes that the proxy has not accepted in any version,
-# or holds in another state, by series. Lasting, it is a rejected cluster.
-sum by (job, node, pin, reason) (aether_agent_snapshot_tls_clusters)
-  - sum by (job, node, pin, reason) (aether_agent_xds_acked_tls_clusters)
+# Per series, how many more cluster entries the agent publishes than the proxy
+# has accepted in that state: not accepted in any version, accepted in another
+# state, or entries with no cluster in the snapshot. Clamped, because the same
+# rejected update shows as a surplus on the acknowledged side of another series
+# (the next query). Lasting above the unpublished entries, it is a rejected
+# cluster.
+clamp_min(
+  sum by (job, node, pin, reason) (aether_agent_snapshot_tls_clusters)
+  - sum by (job, node, pin, reason) (aether_agent_xds_acked_tls_clusters), 0) > 0
+
+# The other side: clusters the proxy holds in a state the agent no longer
+# publishes (an old version it kept, or a cluster whose removal it rejected).
+clamp_min(
+  sum by (job, node, pin, reason) (aether_agent_xds_acked_tls_clusters)
+  - sum by (job, node, pin, reason) (aether_agent_snapshot_tls_clusters), 0) > 0
 
 # Did the proxy reject a cluster update. Zero is a real answer since #1480.
 sum by (job, node) (increase(aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.cluster.v3.Cluster"}[1h]))
