@@ -441,7 +441,10 @@ file 0 "a verdict file that does not hold a verdict" &&
 printf '%s\t%s\n' 1351 "$t_green" 1352 "$t_wrong" 1353 "Re: ${t_inconclusive} (again?)" 1350 "$t_inconclusive" 1360 "$t_inconclusive" >"$tmp/issues"
 record inconclusive "INCONCLUSIVE — again"
 file 0 "an inconclusive control, the inconclusive issue already open" &&
-	check "reuse: a comment on #1350, no new issue" test "$(cat "$tmp/filed")" = "comment	1350"
+	check "reuse: the report is a comment on #1350, no new issue" test "$(grep -c "^WRITE issue create" "$tmp/gh.log") $(sed -n 1p "$tmp/filed")" = "0 comment	1350"
+# #1360 is a second open issue of the workflow's own under the title: closed as
+# a duplicate of the older, so one rolling issue is left.
+check "reuse: the newer duplicate #1360 is closed" grep -qx "WRITE issue close 1360 not_planned" "$tmp/gh.log"
 check "reuse: says so" grep -qx 'commented on #1350' "$tmp/log"
 record green "the verifier PASSED"
 file 0 "then the control goes green while the inconclusive issue is open" &&

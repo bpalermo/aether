@@ -472,6 +472,20 @@ else
 	fail "after a fold, everything closed: the memory was lost"
 	dump
 fi
+# Two open issues of the watchdog's own (a fold whose close failed): the next
+# tick closes the newer.
+reset_state
+seed 7 open "$BOT" "$TITLE" "$(printf 'a report\n\n<!-- stuck-runs: 37000000004 -->\n')"
+seed 9 open "$BOT" "$TITLE" "its duplicate"
+run_fake "$FIX/head-run.json"
+if [ "$RC" -eq 0 ] && grep -qx 'WRITE issue close 9 not_planned' "$TMP/log" && [ "$(state_of 7)" = open ] &&
+	[ "$(state_of 9)" = closed ]; then
+	pass "two open issues of the watchdog's own: the newer is closed as a duplicate"
+else
+	fail "an extra open issue was left open (rc=$RC)"
+	dump
+fi
+
 # Which issue holds the record, with several of the watchdog's own: the open
 # one before any closed one, and among closed ones the newest.
 reset_state

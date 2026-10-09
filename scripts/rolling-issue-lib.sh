@@ -132,6 +132,26 @@ rolling_issue_close() {
 		--jq '.id // empty' >/dev/null
 }
 
+# rolling_issue_close_extras <numbers, oldest first>
+# With more than one of the workflow's own issues open under a title (two runs
+# opened one in the same moment and the close of the newer failed), every one
+# after the first is closed as a duplicate. Called on each report, so a close
+# that failed is tried again by the next run instead of leaving two issues
+# open for good. A close that fails is a warning: the report comes first.
+rolling_issue_close_extras() {
+	local oldest n
+	oldest="$(sed -n 1p <<<"$1")"
+	while read -r n; do
+		[ -n "$n" ] || continue
+		rolling_issue_comment "$n" "A duplicate of #${oldest}, which is older: the report is there." || true
+		if rolling_issue_close "$n" not_planned; then
+			echo "closed #${n}, a duplicate of #${oldest}"
+		else
+			echo "::warning title=rolling-issue::could not close #${n}, a duplicate of #${oldest}; the next run tries again" >&2
+		fi
+	done < <(sed -n '2,$p' <<<"$1")
+}
+
 # rolling_issue_create <title> <body> [label...]
 # Opens the issue and prints the number of the issue the report is on: the new
 # one, or an older one that another run opened in the same moment (the report
@@ -195,7 +215,9 @@ rolling_issue_create() {
 
 # rolling_issue_report <title> <body> [label...]
 # The whole of a report that needs no memory: a comment on the workflow's open
-# issue with this title (the oldest, if there are several), or a new issue.
+# issue with this title (the oldest, if there are several; the others are then
+# closed as duplicates, and the issue is reopened if it was closed while the
+# comment was being written), or a new issue.
 # Says which on stdout. Returns as rolling_issue_create does.
 rolling_issue_report() {
 	local title="$1" body="$2" numbers num rc=0
@@ -211,6 +233,23 @@ rolling_issue_report() {
 			return 1
 		}
 		echo "commented on #${num}"
+		# GitHub accepts a comment on a closed issue. If somebody closed this
+		# one between the listing and the comment, the report would sit where
+		# nobody looks: read the state back, and reopen.
+		local repo state
+		repo="$(_rolling_issue_repo)" || return 1
+		state="$(gh api "repos/${repo}/issues/${num}" --jq '.state // ""')" || {
+			echo "rolling-issue: the report is on #${num}, but the issue could not be read back; check that it is open" >&2
+			return 1
+		}
+		if [ "$state" != open ]; then
+			gh api -X PATCH "repos/${repo}/issues/${num}" -f state=open --jq '.id // empty' >/dev/null || {
+				echo "rolling-issue: #${num} was closed while the report was being written on it, and could not be reopened" >&2
+				return 1
+			}
+			echo "reopened #${num}: it was closed while the report was being written on it"
+		fi
+		rolling_issue_close_extras "$numbers"
 		return 0
 	fi
 	num="$(rolling_issue_create "$title" "$body" "$@")" || rc=$?

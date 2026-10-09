@@ -29,6 +29,9 @@
 #   FAKE_LABELS  how a create answers a label the repository does not have:
 #                `reject` (HTTP 422, the default) or `drop` (the issue is
 #                opened without it, and nothing says so).
+#   FAKE_CLOSED_MEANWHILE  a comment lands on an issue that somebody closes in
+#                that same moment: after the comment is stored, the issue is
+#                closed (GitHub accepts a comment on a closed issue).
 #   FAKE_GH_ELSE a program that gets every call this file does not know (the
 #                actions API of a test that needs one); without it, such a call
 #                fails.
@@ -153,6 +156,9 @@ case "$method $path" in
 	update --argjson n "$n" --arg b "$body" --argjson u "$BOT" \
 		'map(if .number == $n then .comments += [{user: $u, body: $b}] else . end)'
 	echo "WRITE issue comment $n" >>"$FAKE_LOG"
+	if [ -n "${FAKE_CLOSED_MEANWHILE:-}" ]; then
+		update --argjson n "$n" 'map(if .number == $n then .state = "closed" | .state_reason = "completed" else . end)'
+	fi
 	echo '{"id": 1}' | "$JQ" -r "$filter"
 	;;
 "PATCH repos/"*"/issues/"*)

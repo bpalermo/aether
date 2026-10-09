@@ -169,6 +169,37 @@ if [ "$RC" -eq 1 ]; then pass "the create fails: the step fails"; else fail "the
 seed 7 "$BOT" "$TITLE"
 report FAKE_FAIL=comment
 if [ "$RC" -eq 1 ]; then pass "the comment fails: the step fails"; else fail "the comment fails: rc=$RC"; fi
+# Somebody closes the issue while the failure is being written on it (this one
+# is closed by hand): a comment on a closed issue is a failure nobody sees, so
+# the issue is open again afterwards.
+reset_state
+seed 7 "$BOT" "$TITLE"
+report FAKE_CLOSED_MEANWHILE=1
+if [ "$RC" -eq 0 ] && grep -qx 'WRITE issue comment 7' "$TMP/log" && grep -qx 'WRITE issue reopen 7' "$TMP/log" &&
+	[ "$(field 7 .state)" = open ]; then
+	pass "the issue is closed while the failure is written on it: reopened"
+else
+	fail "closed meanwhile: the failure was left on a closed issue (rc=$RC)"
+fi
+report FAKE_CLOSED_MEANWHILE=1 FAKE_FAIL=patch
+if [ "$RC" -eq 1 ]; then pass "... and if it cannot be reopened, the step fails"; else fail "closed meanwhile, reopen fails: rc=$RC"; fi
+reset_state
+seed 7 "$BOT" "$TITLE"
+report FAKE_FAIL=view
+if [ "$RC" -eq 1 ]; then pass "the issue cannot be read back after the comment: the step fails"; else fail "state unreadable: rc=$RC"; fi
+# Two open issues of the workflow's own (a fold whose close failed): the report
+# goes on the older, and the newer is closed now.
+reset_state
+seed 7 "$BOT" "$TITLE"
+seed 9 "$BOT" "$TITLE"
+seed 8 '{"login":"mallory","type":"User"}' "$TITLE"
+report
+if [ "$RC" -eq 0 ] && grep -qx 'WRITE issue comment 7' "$TMP/log" && grep -qx 'WRITE issue close 9 not_planned' "$TMP/log" &&
+	[ "$(field 9 .state)" = closed ] && [ "$(field 8 .state)" = open ] && [ "$(field 7 .state)" = open ]; then
+	pass "two open issues of the workflow's own: the report is on the older, the newer is closed (a stranger's is not)"
+else
+	fail "an extra open issue was left open, or the wrong one was closed (rc=$RC)"
+fi
 report GH_REPO=
 if [ "$RC" -eq 1 ] && [ ! -s "$TMP/log" ]; then
 	pass "no GH_REPO: refused before any call"

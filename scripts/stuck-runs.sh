@@ -466,6 +466,8 @@ cmd_run() {
 	local numbers
 	numbers="$(rolling_issue_list open "$ISSUE_TITLE")" || die "could not list the open issues"
 	num="$(sed -n 1p <<<"$numbers")"
+	# A duplicate whose close failed when two ticks opened one at once.
+	rolling_issue_close_extras "$numbers"
 	if [ "$n" -eq 0 ]; then
 		if [ -n "$num" ]; then
 			local closing="Nothing is stuck any more (threshold ${THRESHOLD}m). Closing; the next stuck run opens a new issue. ${RUN_URL:-}"
