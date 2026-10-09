@@ -180,6 +180,13 @@ case "$method $path" in
 	down "jobs@${at}"
 	if [ -e "$FAKE_STATE/jobs.${at}.json" ]; then out <"$FAKE_STATE/jobs.${at}.json"; else out <"$FAKE_STATE/jobs.json"; fi
 	;;
+"GET repos/o/r/actions/runs/${FAKE_RUN_ID}/attempts/"*)
+	# One earlier attempt of the run: run.<attempt>.json when the test wrote
+	# one, else an attempt that succeeded. `run@<attempt>`: it cannot be read.
+	at="${path#*/attempts/}"
+	down "run@${at}"
+	if [ -e "$FAKE_STATE/run.${at}.json" ]; then out <"$FAKE_STATE/run.${at}.json"; else echo '{"status": "completed", "conclusion": "success"}' | out; fi
+	;;
 "GET repos/o/r/actions/runs/${FAKE_RUN_ID}")
 	down run
 	out <"$FAKE_STATE/run.json"
@@ -246,9 +253,10 @@ S="$TMP/state"
 mkdir -p "$S"
 RUN_ID=4242
 HEAD="$A"
+no_issues() { echo '[]' >"$S/issues.json"; } # the run and its attempts stay
 reset() {
-	echo '[]' >"$S/issues.json"
-	rm -f "$S"/jobs.*.json
+	no_issues
+	rm -f "$S"/jobs.*.json "$S"/run.*.json
 }
 # run <sha> <conclusion> [attempt] [status] [event] [branch] [head repo] [path]
 run() {
@@ -273,6 +281,10 @@ jobs_at() {
 	shift
 	jobs "$@"
 	mv "$S/jobs.json" "$S/jobs.${at}.json"
+}
+# run_at <attempt> <conclusion>: how that earlier attempt of the run ended.
+run_at() {
+	"$JQ" -n --arg c "$2" '{status: "completed", conclusion: (if $c == "" then null else $c end)}' >"$S/run.$1.json"
 }
 # issue <number> <title> <author> [body] [pull request: yes]
 issue() {
@@ -315,6 +327,12 @@ check() {
 	fi
 }
 body_of() { q --argjson n "$1" '.[] | select(.number == $n) | .body'; }
+all_of() { q --argjson n "$1" '.[] | select(.number == $n) | ([.body] + [.comments[].body]) | join("\n")'; } # body and comments
+# The attempts recorded as failed, `<run>/<attempt>` each, in order, one per
+# record: on the open issues, and on every issue.
+MARKS='([.body] + [.comments[].body]) | .[] | scan("main-post-merge-watch:failed:[0-9a-f]{40}:([0-9]+/[0-9]+)") | .[0]'
+failed_open() { q "[.[] | select(.state == \"open\") | ${MARKS}] | sort | join(\" \")"; }
+failed_twice() { q "[.[] | ${MARKS}] | group_by(.) | map(select(length > 1) | .[0]) | join(\" \")"; }
 has() { grep -qF -- "$2" <<<"$1"; }
 lacks() { ! grep -qF -- "$2" <<<"$1"; }
 
@@ -522,52 +540,60 @@ check "cancelled over an ancillary failure: a job was cancelled, so the whole ru
 # again. Its last conclusion in an earlier attempt stands.
 reset
 run "$A" failure 2
+run_at 1 failure
 jobs_at 1 diff=success test=success main=success refresh-pin-prs=failure
 jobs_at 2 refresh-pin-prs=failure
 step 0 "attempt 2 re-ran only refresh-pin-prs, and it failed again" &&
 	check "partial re-run: filed" test "$(open_numbers)" = 101
-body="$(body_of 101)"
+body="$(all_of 101)"
 check "partial re-run: the gate's conclusion is carried from attempt 1" has "$body" 'The `main` job, the gate of this run, **succeeded** in attempt 1 and was not re-run in this attempt: the commit was validated'
 check "partial re-run: never that the gate did not run" lacks "$body" "did not run"
 check "partial re-run: never that the commit is not validated" lacks "$body" "not validated"
 # Two partial re-runs: the gate is found two attempts back.
 reset
 run "$A" failure 3
+run_at 1 failure
+run_at 2 failure
 jobs_at 1 diff=success test=success main=success refresh-pin-prs=failure
 jobs_at 2 refresh-pin-prs=failure
 jobs_at 3 refresh-pin-prs=failure
 step 0 "attempt 3 re-ran only refresh-pin-prs again" &&
-	check "two partial re-runs: carried from attempt 1" has "$(body_of 101)" '**succeeded** in attempt 1 and was not re-run in this attempt'
+	check "two partial re-runs: carried from attempt 1" has "$(all_of 101)" '**succeeded** in attempt 1 and was not re-run in this attempt'
 # The latest attempt that has the gate decides, not the first.
 reset
+run_at 1 failure
+run_at 2 failure
 jobs_at 1 diff=success test=failure main=failure refresh-pin-prs=failure
 jobs_at 2 test=success main=success refresh-pin-prs=failure
 jobs_at 3 refresh-pin-prs=failure
 step 0 "attempt 2 fixed the gate, attempt 3 re-ran only refresh-pin-prs" &&
-	check "the latest attempt with the gate decides" has "$(body_of 101)" '**succeeded** in attempt 2 and was not re-run in this attempt'
+	check "the latest attempt with the gate decides" has "$(all_of 101)" '**succeeded** in attempt 2 and was not re-run in this attempt'
 # A gate that did not succeed, carried the same way.
 reset
 run "$A" failure 2
+run_at 1 failure
 jobs_at 1 diff=success test=failure main=failure
 jobs_at 2 refresh-pin-prs=failure
 step 0 "the gate failed in attempt 1 and is not in attempt 2" &&
-	check "partial re-run, gate failed earlier: says so, and where" has "$(body_of 101)" 'The `main` job, the gate of this run, ended **failure** in attempt 1 and was not re-run in this attempt: the commit is not validated'
+	check "partial re-run, gate failed earlier: says so, and where" has "$(all_of 101)" 'The `main` job, the gate of this run, ended **failure** in attempt 1 and was not re-run in this attempt: the commit is not validated'
 # The earlier attempt cannot be read: not known, and said so. Never "did not run".
 reset
+run_at 1 failure
 jobs_at 1 diff=success test=success main=success refresh-pin-prs=failure
 jobs_at 2 refresh-pin-prs=failure
 step 0 "a partial re-run, and attempt 1 cannot be read" FAKE_DOWN=jobs@1 &&
 	check "partial re-run, earlier attempt unreadable: still filed" test "$(open_numbers)" = 101
-body="$(body_of 101)"
+body="$(all_of 101)"
 check "partial re-run, earlier attempt unreadable: validation is reported as not known" has "$body" "whether the commit was validated is not known"
 check "partial re-run, earlier attempt unreadable: never that the gate did not run" lacks "$body" "did not run"
 check "partial re-run, earlier attempt unreadable: nor that it is not validated" lacks "$body" "is not validated"
 # No attempt has the gate: it never ran.
 reset
+run_at 1 failure
 jobs_at 1 refresh-pin-prs=failure
 jobs_at 2 refresh-pin-prs=failure
 step 0 "no attempt has the gate" &&
-	check "no attempt has the gate: it did not run" has "$(body_of 101)" 'The `main` job, the gate of this run, did not run: the commit is not validated'
+	check "no attempt has the gate: it did not run" has "$(all_of 101)" 'The `main` job, the gate of this run, did not run: the commit is not validated'
 # A first attempt has no earlier one to ask.
 reset
 run "$A" failure 1
@@ -575,16 +601,207 @@ jobs refresh-pin-prs=failure
 step 0 "attempt 1 without the gate" &&
 	check "attempt 1 without the gate: one listing of jobs, no earlier attempt is asked" test "$(grep -c '/jobs?per_page' "$TMP/gh.log")" = 1
 # The same premise decides a cancelled re-run: the gate succeeded in attempt 1,
-# the re-run of refresh-pin-prs never got a runner. Validated: not filed.
+# the re-run of refresh-pin-prs never got a runner. Attempt 2 is validated and
+# not filed. Attempt 1 FAILED, though, and its own watcher may have found the
+# re-run already running and recorded nothing: attempt 2's watcher records it.
 reset
 run "$A" cancelled 2
+run_at 1 failure
 jobs_at 1 diff=success test=success main=success refresh-pin-prs=failure
 jobs_at 2 refresh-pin-prs=cancelled
-step 0 "a cancelled partial re-run whose gate passed in attempt 1" &&
-	check "cancelled partial re-run, validated: nothing is filed" test "$(open_numbers) $(writes)" = " 0"
-step 0 "a cancelled partial re-run, and attempt 1 cannot be read" FAKE_DOWN=jobs@1 &&
-	check "cancelled partial re-run, gate not known: filed (fail closed)" test "$(open_numbers)" = 101
-check "cancelled partial re-run, gate not known: says validation is not known" has "$(body_of 101)" "whether the commit was validated is not known"
+step 0 "a failed attempt, then a cancelled partial re-run; only the second watcher sees a finished run" &&
+	check "failure, then a cancelled partial re-run: the failure of attempt 1 is recorded, the cancelled attempt is not" test "$(failed_open)" = "4242/1"
+check "failure, then a cancelled partial re-run: the entry is attempt 1's" has "$(body_of 101)" "ended **failure**: https://github.com/o/r/actions/runs/4242/attempts/1"
+check "failure, then a cancelled partial re-run: ... and says why it comes now" has "$(body_of 101)" "Recorded late: this attempt ended before a newer attempt of the run began (attempt 2 is the latest)"
+check "failure, then a cancelled partial re-run: the log still says attempt 2 is ignored" grep -q 'attempt 2, completed/cancelled): ignore: ' "$TMP/log"
+step 0 "the same again" &&
+	check "failure, then a cancelled partial re-run, delivered twice: recorded once" test "$(failed_open) $(writes)" = "4242/1 0"
+step 0 "a cancelled partial re-run, and the jobs of attempt 1 cannot be read" FAKE_DOWN=jobs@1 &&
+	check "cancelled partial re-run, gate not known: filed too (fail closed)" test "$(failed_open)" = "4242/1 4242/2"
+check "cancelled partial re-run, gate not known: says validation is not known" has "$(all_of 101)" "whether the commit was validated is not known"
+
+# --- every order of two attempts ---
+# An attempt's watcher judges the run as it is WHEN IT RUNS, not as it was when
+# the attempt ended. So a failed attempt 1 has two histories: its watcher ran
+# before the re-run began (and judged attempt 1), or after (and found attempt 2,
+# running or finished). What is on the issue in the end must not depend on
+# which. The rule: an attempt that did not pass is recorded once, unless a
+# later attempt of the same run succeeded.
+#   attempt 1   G: failure, the gate failed      N: failure, the gate passed, refresh-pin-prs failed
+#               C: cancelled, not validated      V: cancelled, validated (not filed by itself)
+#   attempt 2   none | run: still running | P*: only the jobs that did not pass | F*: every job
+#               *s success  *f failure  Fn failure of refresh-pin-prs alone
+#               Pc, Fc cancelled  Fv cancelled, validated
+#   expect      the attempts on the open issue as failed; `-`: no open issue
+a1_conclusion() { case "$1" in G | N) echo failure ;; *) echo cancelled ;; esac }
+a1_jobs() {
+	case "$1" in
+	G) echo "diff=success test=failure main=failure refresh-pin-prs=success" ;;
+	N) echo "diff=success test=success main=success refresh-pin-prs=failure" ;;
+	C) echo "diff=success test=cancelled main=failure refresh-pin-prs=success" ;;
+	V) echo "diff=success test=success main=success refresh-pin-prs=cancelled" ;;
+	esac
+}
+a2_conclusion() {
+	case "$1" in
+	Ps | Fs) echo success ;;
+	Pf | Ff | Fn) echo failure ;;
+	Pc | Fc | Fv) echo cancelled ;;
+	esac
+}
+a2_jobs() { # attempt 1, attempt 2
+	case "$2:$1" in
+	Ps:G | Ps:C) echo "test=success main=success" ;;
+	Ps:N | Ps:V) echo "refresh-pin-prs=success" ;;
+	Pf:G | Pf:C) echo "test=failure main=failure" ;;
+	Pf:N | Pf:V) echo "refresh-pin-prs=failure" ;;
+	Pc:G) echo "test=cancelled main=failure" ;;
+	Pc:C) echo "test=cancelled main=cancelled" ;;
+	Pc:N | Pc:V) echo "refresh-pin-prs=cancelled" ;;
+	Fs:*) echo "diff=success test=success main=success refresh-pin-prs=success" ;;
+	Ff:*) echo "diff=success test=failure main=failure refresh-pin-prs=success" ;;
+	Fn:*) echo "diff=success test=success main=success refresh-pin-prs=failure" ;;
+	Fc:*) echo "diff=success test=cancelled main=failure refresh-pin-prs=success" ;;
+	Fv:*) echo "diff=success test=success main=success refresh-pin-prs=cancelled" ;;
+	esac
+}
+# The run as the API shows it once attempt 2 exists.
+second_attempt() { # attempt 1, attempt 2
+	if [ "$2" = run ]; then
+		run "$A" "" 2 in_progress
+	else
+		run "$A" "$(a2_conclusion "$2")" 2
+		# shellcheck disable=SC2046 # the words are the jobs
+		jobs_at 2 $(a2_jobs "$1" "$2")
+	fi
+}
+RUN_ID=4242
+HEAD="$A"
+rows=0
+while read -r a1 a2 expect; do
+	[ -n "$a1" ] || continue
+	rows=$((rows + 1))
+	want_open="${expect//,/ }"
+	[ "$want_open" != - ] || want_open=""
+	want_open="$(for k in $want_open; do printf '4242/%s ' "$k"; done)"
+	want_open="${want_open% }"
+	for order in "its watcher ran before the re-run" "its watcher ran after the re-run began"; do
+		[ "$a2" != none ] || [ "$order" = "its watcher ran before the re-run" ] || continue
+		reset
+		run_at 1 "$(a1_conclusion "$a1")"
+		# shellcheck disable=SC2046 # the words are the jobs
+		jobs_at 1 $(a1_jobs "$a1")
+		ok=true
+		if [ "$order" = "its watcher ran before the re-run" ]; then
+			run "$A" "$(a1_conclusion "$a1")" 1
+			step 0 "$a1/$a2: the watcher of attempt 1, on time" || ok=false
+			if [ "$a2" != none ]; then
+				second_attempt "$a1" "$a2"
+				step 0 "$a1/$a2: the watcher of attempt 2" || ok=false
+			fi
+		else
+			second_attempt "$a1" "$a2"
+			step 0 "$a1/$a2: the watcher of attempt 1, late" || ok=false
+			step 0 "$a1/$a2: the watcher of attempt 2" || ok=false
+		fi
+		[ "$ok" = true ] || continue
+		expect "attempt 1 $a1, attempt 2 $a2, $order: failed on the open issue; recorded twice" \
+			"[$(failed_open)] [$(failed_twice)] $(open_numbers | wc -w)" "[$want_open] [] $([ -n "$want_open" ] && echo 1 || echo 0)"
+	done
+done <<'ROWS'
+G none 1
+G run  1
+G Ps   -
+G Fs   -
+G Pf   1,2
+G Ff   1,2
+G Fn   1,2
+G Pc   1,2
+G Fc   1,2
+G Fv   1
+N none 1
+N run  1
+N Ps   -
+N Fs   -
+N Pf   1,2
+N Ff   1,2
+N Fn   1,2
+N Pc   1
+N Fc   1,2
+N Fv   1
+C none 1
+C run  1
+C Ps   -
+C Fs   -
+C Pf   1,2
+C Ff   1,2
+C Fn   1,2
+C Pc   1,2
+C Fc   1,2
+C Fv   1
+V none -
+V run  -
+V Ps   -
+V Fs   -
+V Pf   2
+V Ff   2
+V Fn   2
+V Pc   -
+V Fc   2
+V Fv   -
+ROWS
+expect "every row of the table ran" "$rows" 40
+
+# Three attempts, and only the last one's watcher finds a finished run.
+# A failure, a green re-run, a failure: the green attempt answered the first.
+reset
+run "$A" failure 3
+run_at 1 failure
+run_at 2 success
+jobs_at 1 diff=success test=failure main=failure
+jobs_at 3 diff=success test=failure main=failure
+step 0 "failure, success, failure; one watcher" &&
+	check "an attempt answered by a later green one is not dug up" test "$(failed_open)" = "4242/3"
+# Two cancelled re-runs of refresh-pin-prs after its failure: both validated,
+# both ignored, and the failure two attempts back is still found, once.
+reset
+run "$A" cancelled 3
+run_at 1 failure
+run_at 2 cancelled
+jobs_at 1 diff=success test=success main=success refresh-pin-prs=failure
+jobs_at 2 refresh-pin-prs=cancelled
+jobs_at 3 refresh-pin-prs=cancelled
+step 0 "failure, cancelled, cancelled; one watcher" &&
+	check "a failure two attempts back, behind two ignored ones, is recorded" test "$(failed_open)" = "4242/1"
+step 0 "the same again" &&
+	check "... once" test "$(failed_open) $(writes)" = "4242/1 0"
+# Two unrecorded failures before a cancelled, validated attempt: both, oldest first.
+no_issues
+run_at 2 failure
+jobs_at 2 refresh-pin-prs=failure
+step 0 "failure, failure, cancelled; one watcher" &&
+	check "two unrecorded failures: both recorded" test "$(failed_open)" = "4242/1 4242/2"
+check "two unrecorded failures: the oldest opens the issue" has "$(body_of 101)" "<!-- main-post-merge-watch:failed:${A}:4242/1 -->"
+check "two unrecorded failures: the next is a comment on it" has "$(last_comment 101)" "<!-- main-post-merge-watch:failed:${A}:4242/2 -->"
+# An earlier attempt cannot be read: what is known is recorded, the step is
+# red, and a re-run of it adds the rest without repeating anything.
+reset
+run "$A" failure 2
+run_at 1 failure
+jobs_at 1 diff=success test=failure main=failure
+jobs_at 2 diff=success test=failure main=failure
+step 1 "failure, failure; attempt 1 cannot be read" FAKE_DOWN=run@1 &&
+	check "earlier attempt unreadable: this attempt is recorded all the same" test "$(failed_open)" = "4242/2"
+check "earlier attempt unreadable: the step fails, and says what may be missing" \
+	grep -q '^::error title=main-post-merge-watch::an earlier attempt of run 4242 could not be read' "$TMP/log"
+step 0 "the watcher is re-run" &&
+	check "earlier attempt unreadable, then read: attempt 1 is added, nothing twice" test "[$(failed_open)] [$(failed_twice)]" = "[4242/1 4242/2] []"
+# A dry run looks at the earlier attempts too, and writes nothing.
+no_issues
+step 0 "dry run of a run with an unrecorded earlier failure" DRY_RUN=true &&
+	check "dry run with an earlier failure: nothing is written" test "$(writes) $(open_numbers)" = "0 "
+check "dry run with an earlier failure: prints both" test "$(grep -c '^<!-- main-post-merge-watch:failed:' "$TMP/log")" = 2
+jobs diff=success test=cancelled main=failure
 
 reset
 run "$A" cancelled
@@ -605,13 +822,22 @@ reset
 issue 101 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${A}:4242/1 -->"
 for spec in "failure:completed:pull_request:main:mallory/r:$PATH_MAIN" "success:completed:pull_request:main:mallory/r:$PATH_MAIN" \
 	"success:completed:push:feature:o/r:$PATH_MAIN" "success:completed:push:main:o/r:.github/workflows/evil.yaml" \
-	"success:completed:workflow_dispatch:main:o/r:$PATH_MAIN" ":in_progress:push:main:o/r:$PATH_MAIN"; do
+	"success:completed:workflow_dispatch:main:o/r:$PATH_MAIN"; do
 	IFS=: read -r c st e b hr p <<<"$spec"
 	run "$A" "$c" 2 "$st" "$e" "$b" "$hr" "$p"
 	step 0 "not ours: $spec" &&
 		check "not ours ($e $b $hr $p $st ${c:-none}): one read of the run, nothing else" test "$(wc -l <"$TMP/gh.log")" = 1
 done
 expect "not ours: the open issue is as it was" "$(open_numbers) $(ncomments 101)" "101 0"
+# A first attempt that is still running: nothing to judge, nothing before it.
+run "$A" "" 1 in_progress
+step 0 "a first attempt that is not finished" &&
+	check "not finished, attempt 1: one read of the run, nothing else" test "$(wc -l <"$TMP/gh.log")" = 1
+# A re-run that is still running: its own completion is judged later; the
+# attempt before it succeeded here, so there is nothing to record.
+run "$A" "" 2 in_progress
+step 0 "a re-run that is not finished, after a green attempt" &&
+	check "not finished, attempt 2 after a green one: nothing is written" test "$(writes) $(open_numbers) $(ncomments 101)" = "0 101 0"
 
 # --- decoys: only what this workflow wrote counts ---
 # The same title, opened by someone else; a pull request with the title; an

@@ -55,6 +55,32 @@
 # says. When an earlier attempt cannot be read, the gate is `unknown`: a
 # cancelled run is then filed, and the entry says validation is not known.
 #
+# EVERY ATTEMPT, WHICHEVER WATCHER GETS TO IT. A run is re-run under the same
+# id, as a new attempt, and the watcher of an attempt reads the run as it is
+# when it runs, not as it was when the attempt ended. If the re-run had begun
+# by then, the watcher of a failed attempt finds the run in progress and has
+# nothing to judge; and of two watchers waiting on one run, GitHub keeps one.
+# Left at that, whether a failure reached the issue depended on how fast its
+# watcher started, and a failure followed by a re-run that was cancelled with
+# the gate green (ignored, by the exception above) was never recorded at all.
+# So a watcher judges the latest attempt AND, unless that attempt passed, each
+# attempt before it, back to the first or to one that succeeded: whatever did
+# not pass and is not on the issue yet is recorded then, oldest first, with a
+# line saying it is recorded late. The rule, whatever the order of delivery:
+#   an attempt that did not pass is recorded once, unless a later attempt of
+#   the same run succeeded.
+# "Once" rests on the marker of the attempt, and on the watchers of one run
+# being serialised (the concurrency group of main-watch.yaml is the judged
+# run). The attempts of a run, and what the issue says in the end:
+#   attempt 1 \ attempt 2   none or   success   did not   cancelled,
+#                           running             pass      validated
+#   did not pass            1         closed    1 and 2   1
+#   cancelled, validated    nothing   nothing   2         nothing
+# (the same whether the watcher of attempt 1 ran before or after attempt 2
+# began; //scripts:main_post_merge_watch_test runs every row both ways). An
+# earlier attempt that cannot be read stops the walk there: what is known is
+# recorded, and the step fails so that it is run again.
+#
 # WHICH COMMAND RE-RUNS IT. Each entry names one, from the run's jobs:
 # `gh run rerun <id> --failed` when every job that did not pass concluded
 # `failure`, and the whole run (`gh run rerun <id>`) otherwise: `--failed`
@@ -126,7 +152,7 @@
 #     prints what it would write. WATCH_RUN_URL: this run, for the record.
 #
 # Exit 0 when the run was judged and the issue is as it should be; 1 when the
-# API failed (the watcher's run goes red and can be re-run: it is idempotent);
+# API failed, or an earlier attempt of the run could not be read (the watcher's run goes red and can be re-run: it is idempotent);
 # 2 on a RUN_ID that is not a number.
 #
 # Test: scripts/main_post_merge_watch_test.sh (//scripts:main_post_merge_watch_test).
@@ -149,12 +175,17 @@ is_sha() {
 	[ "${#1}" -eq 40 ]
 }
 
+# A post-merge run of main: a push to `main` of this repository, of main.yaml.
+ours() { # event, branch, head repository, repository, workflow path
+	[ "$1" = push ] && [ "$2" = main ] && [ "$3" = "$4" ] && [ "$5" = "$WORKFLOW_PATH" ]
+}
+
 decide() {
 	local event="$1" branch="$2" head_repo="$3" repo="$4" path="$5" status="$6" conclusion="$7" gate="$8" others="$9"
-	if [ "$event" != push ] || [ "$branch" != main ] || [ "$head_repo" != "$repo" ] || [ "$path" != "$WORKFLOW_PATH" ]; then
+	if ! ours "$event" "$branch" "$head_repo" "$repo" "$path"; then
 		echo "ignore: not a post-merge run of main (event ${event:-none}, branch ${branch:-none}, repository ${head_repo:-none}, workflow ${path:-none})"
 	elif [ "$status" != completed ]; then
-		echo "ignore: the run is ${status:-in an unknown state}, not completed (a newer attempt is running; its own completion is judged)"
+		echo "ignore: the run is ${status:-in an unknown state}, not completed (a newer attempt is running; its own completion is judged, and the attempts before it are looked at now)"
 	elif [ "$conclusion" = success ]; then
 		echo clear
 	elif [ "$conclusion" = cancelled ] && [ "$gate" = success ] && [ "$others" = ok ]; then
@@ -206,34 +237,41 @@ mapfile -t f <<<"$fields"
 [ "${#f[@]}" -eq 8 ] || die "run ${id} was read as ${#f[@]} fields, not 8"
 event="${f[0]}" branch="${f[1]}" head_repo="${f[2]}" path="${f[3]}" status="${f[4]}" conclusion="${f[5]}" sha="${f[6]}" attempt="${f[7]}"
 
-verdict="$(decide "$event" "$branch" "$head_repo" "$repo" "$path" "$status" "$conclusion" unknown unknown)"
-if [ "${verdict%%:*}" != ignore ]; then
-	# Read from the API, and still checked before either is put in a request
-	# path or on the issue.
-	is_sha "$sha" || die "run ${id} names a commit that is not a sha"
-	[[ "$attempt" =~ ^[1-9][0-9]*$ ]] || die "run ${id} has an attempt that is not a number"
+if ! ours "$event" "$branch" "$head_repo" "$repo" "$path"; then
+	echo "run ${id}: $(decide "$event" "$branch" "$head_repo" "$repo" "$path" "$status" "$conclusion" unknown unknown)"
+	exit 0
 fi
-jobs="" jobs_read=false gate="" gate_attempt=""
+# Read from the API, and still checked before either is put in a request path
+# or on the issue.
+is_sha "$sha" || die "run ${id} names a commit that is not a sha"
+[[ "$attempt" =~ ^[1-9][0-9]*$ ]] || die "run ${id} has an attempt that is not a number"
+
 # The gate's conclusion among jobs given as name<TAB>conclusion lines.
 gate_of() { awk -F'\t' -v g="$GATE_JOB" '$1 == g { c = $2 } END { print c }'; }
-if [ "${verdict%%:*}" = file ]; then
-	# The jobs of this attempt: the gate's conclusion decides a cancelled run,
+# Judge one attempt of the run: judged (what decide says), and for an attempt
+# that did not pass its jobs, jobs_read, gate, gate_attempt.
+judge() { # attempt, status, conclusion
+	local k="$1" a earlier others
+	jobs="" jobs_read=false gate="" gate_attempt=""
+	judged="$(decide "$event" "$branch" "$head_repo" "$repo" "$path" "$2" "$3" unknown unknown)"
+	[ "${judged%%:*}" = file ] || return 0
+	# The jobs of the attempt: the gate's conclusion decides a cancelled run,
 	# and the ones that did not pass are named on the issue. Not being able to
 	# read them never stops a report.
-	if jobs="$(gh api --paginate "repos/${repo}/actions/runs/${id}/attempts/${attempt}/jobs?per_page=100" \
+	if jobs="$(gh api --paginate "repos/${repo}/actions/runs/${id}/attempts/${k}/jobs?per_page=100" \
 		--jq '.jobs[] | [.name, (.conclusion // "none"), (.html_url // "")] | @tsv')"; then
 		jobs_read=true
 		gate="$(gate_of <<<"$jobs")"
-		gate_attempt="$attempt"
+		gate_attempt="$k"
 		# A re-run of some of the jobs: the gate is not among this attempt's.
 		# Its conclusion in the latest earlier attempt that has it stands.
-		for ((a = attempt - 1; a >= 1 && ${#gate} == 0; a--)); do
+		for ((a = k - 1; a >= 1 && ${#gate} == 0; a--)); do
 			if earlier="$(gh api --paginate "repos/${repo}/actions/runs/${id}/attempts/${a}/jobs?per_page=100" \
 				--jq '.jobs[] | [.name, (.conclusion // "none")] | @tsv')"; then
 				gate="$(gate_of <<<"$earlier")"
 				gate_attempt="$a"
 			else
-				echo "::warning title=main-post-merge-watch::the ${GATE_JOB} job is not among the jobs of attempt ${attempt} of run ${id}, and the jobs of attempt ${a} could not be listed; whether the commit was validated is not known"
+				echo "::warning title=main-post-merge-watch::the ${GATE_JOB} job is not among the jobs of attempt ${k} of run ${id}, and the jobs of attempt ${a} could not be listed; whether the commit was validated is not known"
 				gate=unknown
 			fi
 		done
@@ -241,17 +279,150 @@ if [ "${verdict%%:*}" = file ]; then
 		# skipped nor was cancelled is a failure the run already holds. (The
 		# gate needs no exception here: it only matters when it succeeded.)
 		others="$(awk -F'\t' '$2 != "success" && $2 != "skipped" && $2 != "cancelled" { bad = 1 } END { print (bad ? "failed" : "ok") }' <<<"$jobs")"
-		verdict="$(decide "$event" "$branch" "$head_repo" "$repo" "$path" "$status" "$conclusion" "$gate" "$others")"
+		judged="$(decide "$event" "$branch" "$head_repo" "$repo" "$path" "$2" "$3" "$gate" "$others")"
 	else
-		echo "::warning title=main-post-merge-watch::could not list the jobs of run ${id}; reporting without them"
+		echo "::warning title=main-post-merge-watch::could not list the jobs of attempt ${k} of run ${id}; reporting without them"
 	fi
-fi
-echo "run ${id} (${event:-no event} on ${branch:-no branch}, ${sha:-no commit}, attempt ${attempt:-?}, ${status:-no status}/${conclusion:-no conclusion}): ${verdict}"
-[ "${verdict%%:*}" != ignore ] || exit 0
+}
 
-conclusion="$(printf '%s' "$conclusion" | tr -cd 'a-z_')"
+# Runs finish in any order: an entry says so when main is no longer at this
+# commit. Read once.
+moved="" moved_read=false
+main_moved() {
+	local head_sha
+	[ "$moved_read" = false ] || return 0
+	moved_read=true
+	if head_sha="$(gh api "repos/${repo}/git/ref/heads/main" --jq '.object.sha // empty')" && is_sha "$head_sha"; then
+		if [ "$head_sha" != "$sha" ]; then
+			moved="\`main\` has moved on since: its head is now \`${head_sha:0:12}\`. A green run of a later commit does not clear this one: each post-merge run tests only what its own merge reaches."
+		fi
+	else
+		echo "::notice title=main-post-merge-watch::could not read main's head; the report does not say whether main has moved on"
+	fi
+}
+
+failed_marker() { printf '%s' "<!-- ${MARK}:failed:${sha}:${id}/$1 -->"; } # attempt
+
+# The entry for the attempt judge was last called for: entry.
+build_entry() { # attempt, conclusion, [why it is recorded now and not when it ended]
+	local k="$1" c late="${3:-}" rows="" failed_jobs=0 other_jobs=0 name result url table g validated="" carried="" rerun
+	c="$(printf '%s' "$2" | tr -cd 'a-z_')"
+	# The jobs that did not pass, as table rows. A name is free text: keep plain
+	# characters only, in a code span. A link is kept only when it is one of
+	# this run's jobs.
+	if [ "$jobs_read" = true ]; then
+		while IFS=$'\t' read -r name result url; do
+			result="$(printf '%s' "$result" | tr -cd 'a-z_')"
+			case "$result" in
+			success | skipped | "") continue ;;
+			failure) failed_jobs=$((failed_jobs + 1)) ;;
+			*) other_jobs=$((other_jobs + 1)) ;;
+			esac
+			name="$(printf '%s' "$name" | tr -cd 'A-Za-z0-9 ._/()-' | tr -s ' ' | sed 's/^ //; s/ $//')"
+			[ -n "$name" ] || name="(unnamed)"
+			if [[ "$url" =~ ^${server}/${repo}/actions/runs/${id}/job/[0-9]+$ ]]; then
+				rows+="| [\`${name}\`](${url}) | ${result} |"$'\n'
+			else
+				rows+="| \`${name}\` | ${result} |"$'\n'
+			fi
+		done <<<"$jobs"
+	fi
+	if [ -n "$rows" ]; then
+		table="$(printf '| Job | Result |\n|---|---|\n%s' "$rows")"
+	elif [ "$jobs_read" = true ]; then
+		table="(no job of the run reported a failure: it did not start, or was skipped as a whole; read the run page)"
+	else
+		table="(the jobs of the run could not be listed; read the run page)"
+	fi
+
+	# Was the commit validated? The run's gate says, when the jobs were read. A
+	# run is filed whenever it did not pass, and that includes a run whose gate
+	# succeeded while another job (`refresh-pin-prs`) failed: then no target on
+	# main is broken, and the reader must not go looking for one.
+	g="$(printf '%s' "$gate" | tr -cd 'a-z_')"
+	if [ "$jobs_read" = true ]; then
+		[ "$gate_attempt" = "$k" ] || carried=" in attempt ${gate_attempt} and was not re-run in this attempt"
+		case "$g" in
+		unknown) validated="The \`${GATE_JOB}\` job, the gate of this run, is not among the jobs of this attempt (a re-run of some of the jobs), and an earlier attempt could not be read: whether the commit was validated is not known. Read the \`${GATE_JOB}\` job on the run page." ;;
+		success) validated="The \`${GATE_JOB}\` job, the gate of this run, **succeeded**${carried}: the commit was validated (\`diff\` and \`test\` did their work), and this is not a broken target on \`main\`. What did not pass is another job of the run, named above; the run stays red, and this entry open, until that job passes." ;;
+		"") validated="The \`${GATE_JOB}\` job, the gate of this run, did not run: the commit is not validated." ;;
+		*) validated="The \`${GATE_JOB}\` job, the gate of this run, ended **${g}**${carried}: the commit is not validated." ;;
+		esac
+	fi
+
+	# The command that can clear this commit. `gh run rerun --failed` asks
+	# GitHub to re-run "the failed jobs and their dependent jobs": with no job
+	# that concluded `failure` (nothing started, or jobs were cancelled before
+	# they got a runner) it has nothing to select, no new attempt is made, and
+	# the entry would never clear. It is offered only when every job that did
+	# not pass concluded `failure`; in every other case, the whole run (jobs
+	# that could not be listed count none as failed). Whether `--failed` takes
+	# a cancelled job is not documented, so it is not relied on.
+	if [ "$failed_jobs" -gt 0 ] && [ "$other_jobs" -eq 0 ]; then
+		rerun="If the failure is not the commit's own (a registry or GitHub answered 5xx, a step never ran), re-run the failed jobs and the jobs that depend on them: \`gh run rerun ${id} --failed\`"
+	else
+		rerun="If the cause is not the commit's own (no job started, a job never got a runner or hit its time limit, the run was cancelled), re-run the whole run: \`gh run rerun ${id}\`. Not \`--failed\`: that re-runs only the jobs that concluded \`failure\`, which may be none of this run's."
+	fi
+	if [ "$c" = startup_failure ]; then
+		rerun+=" If the workflow file of this commit is not valid, a re-run repeats it (a re-run executes the commit's own workflow): fix it in a new commit."
+	fi
+
+	main_moved
+	entry="$(
+		printf '%s\n' "$(failed_marker "$k")" \
+			"The post-merge run of \`${sha:0:12}\` on \`main\` ended **${c:-unknown}**: ${server}/${repo}/actions/runs/${id}/attempts/${k}" "" \
+			"$table" "" \
+			"Commit: ${server}/${repo}/commit/${sha}"
+		[ -z "$validated" ] || printf '\n%s\n' "$validated"
+		[ -z "$late" ] || printf '\n%s\n' "$late"
+		printf '\n%s\n' "$rerun"
+		[ -z "$moved" ] || printf '\n%s\n' "$moved"
+		printf '\n%s\n' "Recorded by ${WATCH_RUN_URL:-a run of main-post-merge-watch}."
+	)"
+}
+
+judge "$attempt" "$status" "$conclusion"
+verdict="$judged"
+echo "run ${id} (${event:-no event} on ${branch:-no branch}, ${sha:-no commit}, attempt ${attempt:-?}, ${status:-no status}/${conclusion:-no conclusion}): ${verdict}"
+
+# What this step has to record: the attempts that did not pass, oldest first.
+to_attempt=() to_entry=() earlier_unread=false
+if [ "${verdict%%:*}" = file ]; then
+	build_entry "$attempt" "$conclusion"
+	to_attempt=("$attempt") to_entry=("$entry")
+fi
+# THE ATTEMPTS BEFORE THIS ONE. An attempt's own watcher reads the run as it is
+# when it runs: if a re-run had started by then, it found the run in progress
+# and recorded nothing (and a pending watcher is replaced by the next one of
+# the same run). So unless this attempt passed, every earlier attempt is judged
+# here as well, back to the first, or to one that succeeded: what did not pass
+# and is not yet on the issue is recorded now. A failed attempt is so recorded
+# once, whichever watcher gets to it, and whether the attempt after it failed,
+# was cancelled (its own verdict may be "validated, ignore") or is still
+# running. One request per earlier attempt, and its jobs when it did not pass.
+if [ "$verdict" != clear ]; then
+	for ((k = attempt - 1; k >= 1; k--)); do
+		if ! was="$(gh api "repos/${repo}/actions/runs/${id}/attempts/${k}" --jq '.conclusion // ""')"; then
+			echo "::warning title=main-post-merge-watch::could not read attempt ${k} of run ${id}; the attempts up to it are not looked at"
+			earlier_unread=true
+			break
+		fi
+		[ "$was" != success ] || break
+		judge "$k" completed "$was"
+		[ "${judged%%:*}" = file ] || continue
+		build_entry "$k" "$was" "Recorded late: this attempt ended before a newer attempt of the run began (attempt ${attempt} is the latest), and it was not on the issue."
+		to_attempt=("$k" "${to_attempt[@]}") to_entry=("$entry" "${to_entry[@]}")
+	done
+fi
+unread_earlier() {
+	[ "$earlier_unread" = false ] || die "an earlier attempt of run ${id} could not be read, so a failure of it may be unrecorded; re-run this job"
+}
+if [ "$verdict" != clear ] && [ "${#to_attempt[@]}" -eq 0 ]; then
+	unread_earlier
+	exit 0
+fi
+
 run_url="${server}/${repo}/actions/runs/${id}/attempts/${attempt}"
-marker_failed="<!-- ${MARK}:failed:${sha}:${id}/${attempt} -->"
 marker_passed="<!-- ${MARK}:passed:${sha}:${id}/${attempt} -->"
 
 # --- the issue -----------------------------------------------------------------------------
@@ -380,128 +551,54 @@ if [ "$verdict" = clear ]; then
 	exit 0
 fi
 
-# --- a run that did not pass -----------------------------------------------------------------
-if grep -qF -- "$marker_failed" <<<"$text"; then
-	echo "attempt ${attempt} of run ${id} is already recorded on #${oldest}; nothing to write"
-	exit 0
-fi
-
-# The jobs that did not pass, as table rows. A name is free text: keep plain
-# characters only, in a code span. A link is kept only when it is one of this
-# run's jobs.
-rows="" failed_jobs=0 other_jobs=0
-if [ "$jobs_read" = true ]; then
-	while IFS=$'\t' read -r name result url; do
-		result="$(printf '%s' "$result" | tr -cd 'a-z_')"
-		case "$result" in
-		success | skipped | "") continue ;;
-		failure) failed_jobs=$((failed_jobs + 1)) ;;
-		*) other_jobs=$((other_jobs + 1)) ;;
-		esac
-		name="$(printf '%s' "$name" | tr -cd 'A-Za-z0-9 ._/()-' | tr -s ' ' | sed 's/^ //; s/ $//')"
-		[ -n "$name" ] || name="(unnamed)"
-		if [[ "$url" =~ ^${server}/${repo}/actions/runs/${id}/job/[0-9]+$ ]]; then
-			rows+="| [\`${name}\`](${url}) | ${result} |"$'\n'
-		else
-			rows+="| \`${name}\` | ${result} |"$'\n'
-		fi
-	done <<<"$jobs"
-fi
-if [ -n "$rows" ]; then
-	table="$(printf '| Job | Result |\n|---|---|\n%s' "$rows")"
-elif [ "$jobs_read" = true ]; then
-	table="(no job of the run reported a failure: it did not start, or was skipped as a whole; read the run page)"
-else
-	table="(the jobs of the run could not be listed; read the run page)"
-fi
-
-# Was the commit validated? The run's gate says, when the jobs were read. A run
-# is filed whenever it did not pass, and that includes a run whose gate
-# succeeded while another job (`refresh-pin-prs`) failed: then no target on
-# main is broken, and the reader must not go looking for one.
-gate="$(printf '%s' "$gate" | tr -cd 'a-z_')"
-validated="" carried=""
-if [ "$jobs_read" = true ]; then
-	[ "$gate_attempt" = "$attempt" ] || carried=" in attempt ${gate_attempt} and was not re-run in this attempt"
-	case "$gate" in
-	unknown) validated="The \`${GATE_JOB}\` job, the gate of this run, is not among the jobs of this attempt (a re-run of some of the jobs), and an earlier attempt could not be read: whether the commit was validated is not known. Read the \`${GATE_JOB}\` job on the run page." ;;
-	success) validated="The \`${GATE_JOB}\` job, the gate of this run, **succeeded**${carried}: the commit was validated (\`diff\` and \`test\` did their work), and this is not a broken target on \`main\`. What did not pass is another job of the run, named above; the run stays red, and this entry open, until that job passes." ;;
-	"") validated="The \`${GATE_JOB}\` job, the gate of this run, did not run: the commit is not validated." ;;
-	*) validated="The \`${GATE_JOB}\` job, the gate of this run, ended **${gate}**${carried}: the commit is not validated." ;;
-	esac
-fi
-
-# The command that can clear this commit. `gh run rerun --failed` asks GitHub
-# to re-run "the failed jobs and their dependent jobs": with no job that
-# concluded `failure` (nothing started, or jobs were cancelled before they got
-# a runner) it has nothing to select, no new attempt is made, and the entry
-# would never clear. It is offered only when every job that did not pass
-# concluded `failure`; in every other case, the whole run (jobs that could not
-# be listed count none as failed). Whether `--failed` takes a cancelled job is
-# not documented, so it is not relied on.
-if [ "$failed_jobs" -gt 0 ] && [ "$other_jobs" -eq 0 ]; then
-	rerun="If the failure is not the commit's own (a registry or GitHub answered 5xx, a step never ran), re-run the failed jobs and the jobs that depend on them: \`gh run rerun ${id} --failed\`"
-else
-	rerun="If the cause is not the commit's own (no job started, a job never got a runner or hit its time limit, the run was cancelled), re-run the whole run: \`gh run rerun ${id}\`. Not \`--failed\`: that re-runs only the jobs that concluded \`failure\`, which may be none of this run's."
-fi
-if [ "$conclusion" = startup_failure ]; then
-	rerun+=" If the workflow file of this commit is not valid, a re-run repeats it (a re-run executes the commit's own workflow): fix it in a new commit."
-fi
-
-# Runs finish in any order: say so when main is no longer at this commit.
-moved=""
-if head_sha="$(gh api "repos/${repo}/git/ref/heads/main" --jq '.object.sha // empty')" && is_sha "$head_sha"; then
-	if [ "$head_sha" != "$sha" ]; then
-		moved="\`main\` has moved on since: its head is now \`${head_sha:0:12}\`. A green run of a later commit does not clear this one: each post-merge run tests only what its own merge reaches."
+# --- attempts that did not pass --------------------------------------------------------------
+# Record one entry: on the open issue, or on a new one, which is then the open
+# issue for the next entry.
+file_entry() { # entry
+	local body created first l label_args=()
+	if [ -n "$oldest" ]; then
+		record "$oldest" "$1"
+		return 0
 	fi
-else
-	echo "::notice title=main-post-merge-watch::could not read main's head; the report does not say whether main has moved on"
-fi
+	body="$(printf '%s\n\n%s\n\n%s\n' \
+		"A commit on \`main\` did not pass its post-merge run (\`main-post-merge\`, .github/workflows/main.yaml). Nothing blocks on that run, so this issue is where it is seen." \
+		"$1" \
+		"_Filed automatically by \`main-post-merge-watch\`; this issue is reused while any commit named on it is failing. A commit is cleared when a re-run of its own run passes (each entry gives the command for its run), and the issue closes itself when none is left. A green run of another commit never closes it. When a later commit fixed the failure, close this issue from that pull request (\`Closes #<this issue>\`) or by hand. See docs/runbook.md, \"The post-merge run\"._")"
+	if [ "$dry" = true ]; then
+		printf 'DRY RUN: would open "%s" (labels: %s) with:\n%s\n' "$ISSUE_TITLE" "${ISSUE_LABELS[*]}" "$body"
+		return 0
+	fi
+	for l in "${ISSUE_LABELS[@]}"; do
+		label_args+=(-f "labels[]=${l}")
+	done
+	if ! created="$(gh api -X POST "repos/${repo}/issues" -f "title=${ISSUE_TITLE}" -f "body=${body}" "${label_args[@]}" --jq '.number')"; then
+		echo "::warning title=main-post-merge-watch::could not open the issue with the labels ${ISSUE_LABELS[*]} (is a label gone?); opening it without labels"
+		created="$(gh api -X POST "repos/${repo}/issues" -f "title=${ISSUE_TITLE}" -f "body=${body}" --jq '.number')" ||
+			die "could not open the issue; re-run this job"
+	fi
+	[[ "$created" =~ ^[0-9]+$ ]] || die "the issue was opened, but its number was not returned"
+	echo "opened #${created}"
+	oldest="$created"
 
-entry="$(
-	printf '%s\n' "$marker_failed" \
-		"The post-merge run of \`${sha:0:12}\` on \`main\` ended **${conclusion:-unknown}**: ${run_url}" "" \
-		"$table" "" \
-		"Commit: ${server}/${repo}/commit/${sha}"
-	[ -z "$validated" ] || printf '\n%s\n' "$validated"
-	printf '\n%s\n' "$rerun"
-	[ -z "$moved" ] || printf '\n%s\n' "$moved"
-	printf '\n%s\n' "Recorded by ${WATCH_RUN_URL:-a run of main-post-merge-watch}."
-)"
+	# Another run may have opened one in the same moment. The older issue wins.
+	if ! numbers="$(open_issues)"; then
+		echo "::warning title=main-post-merge-watch::could not list the issues again; if two were opened at once, the next run reads them as one"
+		return 0
+	fi
+	first="$(head -n 1 <<<"$numbers")"
+	if [ -n "$first" ] && [ "$first" -lt "$created" ]; then
+		record "$first" "$1"
+		comment "$created" "Duplicate of #${first}: two post-merge runs failed at the same moment. The failure is recorded there."
+		close_issue "$created" not_planned
+		oldest="$first"
+	fi
+}
 
-if [ -n "$oldest" ]; then
-	record "$oldest" "$entry"
-	exit 0
-fi
-
-body="$(printf '%s\n\n%s\n\n%s\n' \
-	"A commit on \`main\` did not pass its post-merge run (\`main-post-merge\`, .github/workflows/main.yaml). Nothing blocks on that run, so this issue is where it is seen." \
-	"$entry" \
-	"_Filed automatically by \`main-post-merge-watch\`; this issue is reused while any commit named on it is failing. A commit is cleared when a re-run of its own run passes (each entry gives the command for its run), and the issue closes itself when none is left. A green run of another commit never closes it. When a later commit fixed the failure, close this issue from that pull request (\`Closes #<this issue>\`) or by hand. See docs/runbook.md, \"The post-merge run\"._")"
-if [ "$dry" = true ]; then
-	printf 'DRY RUN: would open "%s" (labels: %s) with:\n%s\n' "$ISSUE_TITLE" "${ISSUE_LABELS[*]}" "$body"
-	exit 0
-fi
-label_args=()
-for l in "${ISSUE_LABELS[@]}"; do
-	label_args+=(-f "labels[]=${l}")
+for i in "${!to_attempt[@]}"; do
+	if grep -qF -- "$(failed_marker "${to_attempt[$i]}")" <<<"$text"; then
+		echo "attempt ${to_attempt[$i]} of run ${id} is already recorded on #${oldest}; nothing to write"
+	else
+		file_entry "${to_entry[$i]}"
+	fi
 done
-if ! created="$(gh api -X POST "repos/${repo}/issues" -f "title=${ISSUE_TITLE}" -f "body=${body}" "${label_args[@]}" --jq '.number')"; then
-	echo "::warning title=main-post-merge-watch::could not open the issue with the labels ${ISSUE_LABELS[*]} (is a label gone?); opening it without labels"
-	created="$(gh api -X POST "repos/${repo}/issues" -f "title=${ISSUE_TITLE}" -f "body=${body}" --jq '.number')" ||
-		die "could not open the issue; re-run this job"
-fi
-[[ "$created" =~ ^[0-9]+$ ]] || die "the issue was opened, but its number was not returned"
-echo "opened #${created}"
-
-# Another run may have opened one in the same moment. The older issue wins.
-if ! numbers="$(open_issues)"; then
-	echo "::warning title=main-post-merge-watch::could not list the issues again; if two were opened at once, the next run reads them as one"
-	exit 0
-fi
-oldest="$(head -n 1 <<<"$numbers")"
-if [ -n "$oldest" ] && [ "$oldest" -lt "$created" ]; then
-	record "$oldest" "$entry"
-	comment "$created" "Duplicate of #${oldest}: two post-merge runs failed at the same moment. The failure is recorded there."
-	close_issue "$created" not_planned
-fi
+unread_earlier

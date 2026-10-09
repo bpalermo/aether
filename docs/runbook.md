@@ -577,6 +577,29 @@ says so ("succeeded in attempt 1 and was not re-run in this attempt"). If that
 attempt cannot be read, the entry says that whether the commit was validated
 is not known: read the `main` job on the run page.
 
+**Re-runs and the order of things.** A re-run is a new attempt of the same
+run, and the watcher of an attempt reads the run as it is when the watcher
+runs. If a re-run was started quickly, the watcher of the failed attempt finds
+the run in progress and judges nothing. So each watcher also looks at the
+attempts before the latest one (unless the latest passed), back to the first
+or to one that succeeded, and records what did not pass and is not on the
+issue yet; such an entry says "Recorded late". The rule is: an attempt that
+did not pass is recorded once, unless a later attempt of the same run
+succeeded. For two attempts of one run the issue ends up with:
+
+| Attempt 1 | Attempt 2 | On the issue |
+|---|---|---|
+| did not pass | none, or still running | attempt 1 |
+| did not pass | `success` | nothing failing: attempt 1 is cleared if it was recorded, and never recorded otherwise |
+| did not pass | did not pass | both attempts |
+| did not pass | `cancelled`, validated (not filed by itself) | attempt 1: only a green attempt clears it |
+| `cancelled`, validated | did not pass | attempt 2 |
+| `cancelled`, validated | anything else | nothing |
+
+That holds whether the watcher of attempt 1 ran before or after attempt 2
+began. If an earlier attempt cannot be read, the watcher records what it can
+and its run fails: re-run it, and it adds the rest without repeating anything.
+
 What to do, for each commit the issue names:
 
 1. Open the run it links and read the first failed step.

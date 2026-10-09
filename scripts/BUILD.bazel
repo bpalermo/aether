@@ -152,10 +152,15 @@ sh_test(
 # applies the script's own `--jq` filters with the Bazel-pinned jq. The second
 # half holds the workflow file to its trigger, its permissions, its pins and
 # the one field it reads from the triggering run, and main.yaml to what the
-# decision assumes (no concurrency group, a gate job called `main`).
+# decision assumes (no concurrency group, a gate job called `main`). It also
+# runs every pair of attempts of one run in both orders of delivery (40 rows,
+# about 150 runs of the step through the fake), which takes it past the 60 s of
+# a small test: the size says what it needs (no network, one core), the timeout
+# what it takes.
 sh_test(
     name = "main_post_merge_watch_test",
     size = "small",
+    timeout = "moderate",
     srcs = ["main_post_merge_watch_test.sh"],
     data = [
         "main-post-merge-watch.sh",
