@@ -18,9 +18,89 @@ import (
 // MeterName identifies this instrumentation scope in metric backends.
 const MeterName = "aether/agent-xds-cache"
 
-// attrReason labels aether.agent.uds.resolve_failures with the udspath.Reason.
-// Bounded: udspath.Reasons is a closed set.
+// attrReason labels aether.agent.uds.resolve_failures with the udspath.Reason
+// and aether.agent.identity.cluster_unpinned with the UnpinnedCause. Bounded:
+// udspath.Reasons and UnpinnedCauses are closed sets.
 const attrReason = attribute.Key("reason")
+
+// attrPin labels the two TLS-cluster gauges (aether.agent.snapshot.tls_clusters
+// and aether.agent.xds.acked_tls_clusters). Bounded: PinPinned or PinUnpinned.
+// A PinUnpinned series also carries attrReason, one per UnpinnedCause; the
+// PinPinned series carries no reason.
+const attrPin = attribute.Key("pin")
+
+// The two values of the pin attribute on the TLS-cluster gauges.
+const (
+	PinPinned   = "pinned"
+	PinUnpinned = "unpinned"
+)
+
+// UnpinnedCause is why a mesh cluster entry has no server-identity SAN pin. It
+// is the `reason` attribute of aether.agent.identity.cluster_unpinned, of the
+// unpinned series of the two TLS-cluster gauges and of the WARN the snapshot
+// logs, so one vocabulary joins them all.
+//
+// A CLOSED set (UnpinnedCauses): each value is one branch of the single
+// function that renders the pin (the cache's renderSANPin), so the label can
+// never grow with the mesh.
+type UnpinnedCause string
+
+const (
+	// CauseTrustDomainUnknown: the pin was rendered while the trust domain was
+	// not known, so there was no identity to name (#815/#819). Every mesh
+	// entry on the node has this cause at once.
+	CauseTrustDomainUnknown UnpinnedCause = "trust_domain_unknown"
+	// CauseNoNamespaceMetadata: none of the service's endpoints carries a
+	// Kubernetes namespace, so there is no namespace to build the expected
+	// SPIFFE ID from. Lasts as long as the registry serves those endpoints.
+	CauseNoNamespaceMetadata UnpinnedCause = "no_namespace_metadata"
+	// CausePinNotRendered: the entry reached a snapshot without its pin ever
+	// having been rendered. No code path does that today; the value exists so
+	// such an entry is named with a cause of its own instead of borrowing one.
+	CausePinNotRendered UnpinnedCause = "pin_not_rendered"
+)
+
+// NumUnpinnedCauses is the size of the closed set.
+const NumUnpinnedCauses = 3
+
+// UnpinnedCauses is every UnpinnedCause, in the order the snapshot reports
+// them. A cause's position here is its index in PinCounts.Unpinned.
+var UnpinnedCauses = [NumUnpinnedCauses]UnpinnedCause{CauseTrustDomainUnknown, CauseNoNamespaceMetadata, CausePinNotRendered}
+
+// PinCounts is the pin state of one snapshot as numbers: how many mesh cluster
+// entries carry a server-identity SAN pin, and how many are meant to and do
+// not, per cause. A fixed-size value on purpose: one is built per snapshot and
+// a short history of them is kept (the cache's pin history), so it costs no
+// allocation and cannot grow with the mesh.
+type PinCounts struct {
+	// Pinned is the number of entries published as a pinned TLS cluster.
+	Pinned int
+	// Unpinned is the number of entries with no pin, indexed like
+	// UnpinnedCauses.
+	Unpinned [NumUnpinnedCauses]int
+}
+
+// UnpinnedTotal is the number of unpinned entries across every cause.
+func (p PinCounts) UnpinnedTotal() int {
+	n := 0
+	for _, v := range p.Unpinned {
+		n += v
+	}
+	return n
+}
+
+// AddUnpinned counts one entry under cause. A cause outside the closed set is
+// counted as CausePinNotRendered, the "no known branch emptied this pin" value,
+// so the total stays exact and the label set stays closed.
+func (p *PinCounts) AddUnpinned(cause UnpinnedCause) {
+	for i, c := range UnpinnedCauses {
+		if c == cause {
+			p.Unpinned[i]++
+			return
+		}
+	}
+	p.Unpinned[NumUnpinnedCauses-1]++
+}
 
 // Metrics holds the snapshot-generation instruments. All methods are
 // nil-receiver-safe so the cache runs unchanged when telemetry is disabled.
@@ -81,7 +161,29 @@ type Metrics struct {
 	// alternative, "spiffe:///ns/…", is the rev222 outage, #815/#819) — but it
 	// is an authentication downgrade, so the window it covers must be visible
 	// and bounded rather than silent.
+	//
+	// One series per UnpinnedCause (attribute `reason`), each seeded at zero.
 	clusterUnpinned metric.Int64Counter
+	// tlsClusters is how many mesh cluster entries the CURRENT snapshot holds
+	// that are meant to be mTLS: one series for those carrying a
+	// server-identity SAN pin (pin=pinned) and one per UnpinnedCause for those
+	// without (pin=unpinned, reason=<cause>) (#1425). The counter above says a
+	// snapshot went out unpinned and adds up per snapshot; this says how many
+	// clusters are in that state at a given time and for which reason,
+	// including the positive answer: a `pinned` value with every `unpinned`
+	// series at zero. No per-cluster attribute.
+	tlsClusters metric.Int64Gauge
+	// ackedTLSClusters is the same reading for the last snapshot whose cluster
+	// update the proxy ACKNOWLEDGED: what the proxy holds, as far as the agent
+	// can know it, where tlsClusters is what the agent published. The two
+	// differ while an update is in flight and for as long as the proxy rejects
+	// one (aether.agent.xds.nacks). Not recorded until the first cluster ACK
+	// this agent process sees, so an absent series is "not known", not zero.
+	ackedTLSClusters metric.Int64Gauge
+	// pinnedAttrs and unpinnedAttrs are the two gauges' attribute sets, built
+	// once at registration: the gauges are recorded on every snapshot.
+	pinnedAttrs   metric.MeasurementOption
+	unpinnedAttrs [NumUnpinnedCauses]metric.MeasurementOption
 	// inboundBindingMismatch counts local pods whose INBOUND filter chains are
 	// bound to an SDS server-certificate secret that is NOT that pod's own
 	// SPIFFE ID (issue #638). Non-zero means the node would TERMINATE mesh mTLS
@@ -181,6 +283,18 @@ func (m *Metrics) registerActivityInstruments(meter metric.Meter) error {
 		metric.WithDescription("Clusters in the node's current xDS snapshot (demand-scoped set + per-pod clusters)")); err != nil {
 		return fmt.Errorf("clusters: %w", err)
 	}
+	if m.tlsClusters, err = meter.Int64Gauge("aether.agent.snapshot.tls_clusters",
+		metric.WithDescription("Mesh cluster entries in the node's current xDS snapshot that are meant to be mTLS: with a server-identity SAN pin (pin=pinned), or without one, by reason (pin=unpinned, reason=<cause>)")); err != nil {
+		return fmt.Errorf("tls clusters: %w", err)
+	}
+	if m.ackedTLSClusters, err = meter.Int64Gauge("aether.agent.xds.acked_tls_clusters",
+		metric.WithDescription("The count aether.agent.snapshot.tls_clusters gives, for the last snapshot whose cluster update the proxy acknowledged; absent until the first cluster ACK")); err != nil {
+		return fmt.Errorf("acked tls clusters: %w", err)
+	}
+	m.pinnedAttrs = metric.WithAttributeSet(attribute.NewSet(attrPin.String(PinPinned)))
+	for i, cause := range UnpinnedCauses {
+		m.unpinnedAttrs[i] = metric.WithAttributeSet(attribute.NewSet(attrPin.String(PinUnpinned), attrReason.String(string(cause))))
+	}
 	if m.upstreamsDeclared, err = meter.Int64Gauge("aether.agent.upstreams.declared",
 		metric.WithDescription("Distinct upstream services declared by local pods (config.aether.io/upstreams union)")); err != nil {
 		return fmt.Errorf("upstreams declared: %w", err)
@@ -273,7 +387,10 @@ func (m *Metrics) seedAnomalyCounters() {
 	m.bindingMismatch.Add(ctx, 0)
 	m.inboundBindingMismatch.Add(ctx, 0)
 	m.staleNetnsSkipped.Add(ctx, 0)
-	m.clusterUnpinned.Add(ctx, 0)
+	// One series per cause, for the same reason as the UDS reasons below.
+	for _, cause := range UnpinnedCauses {
+		m.clusterUnpinned.Add(ctx, 0, metric.WithAttributes(attrReason.String(string(cause))))
+	}
 	m.udpRouteUnsupported.Add(ctx, 0)
 	m.udpNoHealthyBackend.Add(ctx, 0)
 	m.versionMemoMismatch.Add(ctx, 0)
@@ -318,15 +435,45 @@ func (m *Metrics) InboundBindingMismatch(ctx context.Context, n int64) {
 }
 
 // ClusterUnpinned counts n mesh clusters published by ONE snapshot generation
-// without a server-identity SAN pin (issue #832). Cluster names are deliberately
-// NOT attributes (unbounded cardinality); the snapshot logs them at WARN. A
-// no-op for n <= 0, so the healthy case rides on the zero seeded at
-// registration — an unseeded zero reads as a false zero.
-func (m *Metrics) ClusterUnpinned(ctx context.Context, n int64) {
+// without a server-identity SAN pin (issue #832), under the cause that emptied
+// the pin (#1424). Cluster names are deliberately NOT attributes (unbounded
+// cardinality); the snapshot logs them at WARN. The cause is one: it is a
+// closed set (UnpinnedCauses). A no-op for n <= 0, so the healthy case rides
+// on the zeros seeded at registration — an unseeded zero reads as a false zero.
+func (m *Metrics) ClusterUnpinned(ctx context.Context, cause UnpinnedCause, n int64) {
 	if m == nil || n <= 0 {
 		return
 	}
-	m.clusterUnpinned.Add(ctx, n)
+	m.clusterUnpinned.Add(ctx, n, metric.WithAttributes(attrReason.String(string(cause))))
+}
+
+// TLSClusterPins records the pin state of the snapshot just set: how many mesh
+// cluster entries carry a server-identity SAN pin, and how many do not, per
+// cause (#1425). Every series is recorded on every snapshot, zeros included,
+// so "no cluster unpinned for reason R" is a sample and not an absent series,
+// and a cause that stops applying reads zero instead of keeping its last value.
+func (m *Metrics) TLSClusterPins(ctx context.Context, counts PinCounts) {
+	if m == nil {
+		return
+	}
+	m.recordPins(ctx, m.tlsClusters, counts)
+}
+
+// TLSClusterPinsAcked records the pin state of the snapshot whose cluster
+// update the proxy just acknowledged (#1425), series for series like
+// TLSClusterPins.
+func (m *Metrics) TLSClusterPinsAcked(ctx context.Context, counts PinCounts) {
+	if m == nil {
+		return
+	}
+	m.recordPins(ctx, m.ackedTLSClusters, counts)
+}
+
+func (m *Metrics) recordPins(ctx context.Context, gauge metric.Int64Gauge, counts PinCounts) {
+	gauge.Record(ctx, int64(counts.Pinned), m.pinnedAttrs)
+	for i, n := range counts.Unpinned {
+		gauge.Record(ctx, int64(n), m.unpinnedAttrs[i])
+	}
 }
 
 // UDPRouteUnsupported counts n UDPRoute inputs discarded by ONE snapshot

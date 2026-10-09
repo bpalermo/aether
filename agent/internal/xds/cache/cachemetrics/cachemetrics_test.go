@@ -71,7 +71,9 @@ func TestCacheMetrics_NilReceiverSafe(t *testing.T) {
 	m.Generated(context.Background(), 0.01, 1, errors.New("boom"))
 	m.UpstreamTTLRefreshed(context.Background(), 3)
 	m.UpstreamsRestored(context.Background(), 3)
-	m.ClusterUnpinned(context.Background(), 3)
+	m.ClusterUnpinned(context.Background(), CauseNoNamespaceMetadata, 3)
+	m.TLSClusterPins(context.Background(), PinCounts{Pinned: 4})
+	m.TLSClusterPinsAcked(context.Background(), PinCounts{Pinned: 4})
 	m.UDSResolveFailure(context.Background(), "not_csi")
 }
 
@@ -249,6 +251,143 @@ func TestCacheMetrics_UDSResolveFailuresSeededPerReason(t *testing.T) {
 	got = reasonValues(t, reader, "aether.agent.uds.resolve_failures")
 	if got[string(udspath.ReasonNotCSI)] != 1 || got[string(udspath.ReasonVolumeNotDeclared)] != 0 {
 		t.Errorf("after one not_csi failure: %v", got)
+	}
+}
+
+// TestCacheMetrics_ClusterUnpinnedSeededPerCause: every cause exists at zero
+// before anything is counted, so reason="trust_domain_unknown" == 0 is a live
+// answer, and an unpinned cluster increments only its own cause (#1424).
+func TestCacheMetrics_ClusterUnpinnedSeededPerCause(t *testing.T) {
+	const name = "aether.agent.identity.cluster_unpinned"
+	m, reader := newTestMetrics(t)
+	got := reasonValues(t, reader, name)
+	if len(got) != len(UnpinnedCauses) {
+		t.Fatalf("seeded %d causes (%v), want %d", len(got), got, len(UnpinnedCauses))
+	}
+	for _, c := range UnpinnedCauses {
+		if v, ok := got[string(c)]; !ok || v != 0 {
+			t.Errorf("reason %q = %d (present %v), want a seeded 0", c, v, ok)
+		}
+	}
+
+	m.ClusterUnpinned(context.Background(), CauseNoNamespaceMetadata, 2)
+	m.ClusterUnpinned(context.Background(), CauseTrustDomainUnknown, 0)
+	got = reasonValues(t, reader, name)
+	if got[string(CauseNoNamespaceMetadata)] != 2 || got[string(CauseTrustDomainUnknown)] != 0 || got[string(CausePinNotRendered)] != 0 {
+		t.Errorf("after two no_namespace_metadata clusters: %v", got)
+	}
+	if len(got) != len(UnpinnedCauses) {
+		t.Errorf("the label set grew beyond the closed set: %v", got)
+	}
+}
+
+// pinValues returns one TLS-cluster gauge's series, keyed "pinned" or
+// "unpinned/<reason>", and fails on any attribute other than pin and reason.
+func pinValues(t *testing.T, reader *sdkmetric.ManualReader, name string) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	out := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			gauge, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok {
+				t.Fatalf("%s is %T, want Gauge[int64]", name, m.Data)
+			}
+			for _, dp := range gauge.DataPoints {
+				pin, _ := dp.Attributes.Value(attrPin)
+				key, want := pin.AsString(), 1
+				if reason, ok := dp.Attributes.Value(attrReason); ok {
+					key, want = key+"/"+reason.AsString(), 2
+				}
+				if dp.Attributes.Len() != want {
+					t.Errorf("%s data point carries attributes beyond pin and reason: %v", name, dp.Attributes)
+				}
+				if _, dup := out[key]; dup {
+					t.Errorf("%s has two series for %s", name, key)
+				}
+				out[key] = dp.Value
+			}
+		}
+	}
+	return out
+}
+
+// TestCacheMetrics_TLSClusterPins: each of the two gauges has exactly four
+// series (pinned, and unpinned per cause), all written on every record (a zero
+// is a sample, not an absence), and holds the last values rather than a sum
+// (#1425). Recording one does not touch the other.
+func TestCacheMetrics_TLSClusterPins(t *testing.T) {
+	const published, acked = "aether.agent.snapshot.tls_clusters", "aether.agent.xds.acked_tls_clusters"
+	m, reader := newTestMetrics(t)
+	for _, name := range []string{published, acked} {
+		if got := pinValues(t, reader, name); len(got) != 0 {
+			t.Fatalf("nothing recorded yet, but %s has %v", name, got)
+		}
+	}
+	want := func(name string, pinned, tdUnknown, noNamespace, notRendered int64) {
+		t.Helper()
+		got := pinValues(t, reader, name)
+		exp := map[string]int64{
+			PinPinned: pinned,
+			PinUnpinned + "/" + string(CauseTrustDomainUnknown):  tdUnknown,
+			PinUnpinned + "/" + string(CauseNoNamespaceMetadata): noNamespace,
+			PinUnpinned + "/" + string(CausePinNotRendered):      notRendered,
+		}
+		if len(got) != len(exp) {
+			t.Fatalf("%s: %d series %v, want exactly %d (zeros are data points)", name, len(got), got, len(exp))
+		}
+		for k, v := range exp {
+			if got[k] != v {
+				t.Errorf("%s{%s} = %d, want %d (all: %v)", name, k, got[k], v, got)
+			}
+		}
+	}
+
+	var healthy PinCounts
+	healthy.Pinned = 7
+	m.TLSClusterPins(context.Background(), healthy)
+	want(published, 7, 0, 0, 0)
+	if got := pinValues(t, reader, acked); len(got) != 0 {
+		t.Fatalf("published is not acknowledged, but %s has %v", acked, got)
+	}
+
+	var mixed PinCounts
+	mixed.Pinned = 5
+	mixed.AddUnpinned(CauseNoNamespaceMetadata)
+	mixed.AddUnpinned(CauseNoNamespaceMetadata)
+	mixed.AddUnpinned(CauseTrustDomainUnknown)
+	if mixed.UnpinnedTotal() != 3 {
+		t.Fatalf("UnpinnedTotal() = %d, want 3", mixed.UnpinnedTotal())
+	}
+	m.TLSClusterPins(context.Background(), mixed)
+	want(published, 5, 1, 2, 0)
+
+	m.TLSClusterPinsAcked(context.Background(), mixed)
+	want(acked, 5, 1, 2, 0)
+
+	// Back to healthy: every reason reads zero, none keeps its last value.
+	m.TLSClusterPins(context.Background(), healthy)
+	want(published, 7, 0, 0, 0)
+	want(acked, 5, 1, 2, 0)
+}
+
+// TestPinCounts_AClosedSet: a cause outside the closed set cannot open a new
+// series. It is counted, so the total stays exact, under pin_not_rendered.
+func TestPinCounts_AClosedSet(t *testing.T) {
+	var p PinCounts
+	p.AddUnpinned(UnpinnedCause("some.cluster.name"))
+	p.AddUnpinned("")
+	if p.UnpinnedTotal() != 2 || p.Unpinned[NumUnpinnedCauses-1] != 2 {
+		t.Fatalf("counts = %+v, want both under %s", p, CausePinNotRendered)
+	}
+	if UnpinnedCauses[NumUnpinnedCauses-1] != CausePinNotRendered {
+		t.Fatalf("the fallback slot must be %s", CausePinNotRendered)
 	}
 }
 

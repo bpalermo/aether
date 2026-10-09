@@ -1950,6 +1950,10 @@ run_grade clean "$G" --start 2026-10-08T00:10:00Z --window 8h --prometheus http:
 show "prober-grade: a clean window" "$G"
 if [ "$grc" -eq 0 ]; then pass "grade clean: exit 0"; else fail "grade clean: exit $grc, want 0"; fi
 expect "$G" "grade clean: verdict" '^VERDICT prober=PASS unpinned=PASS logs=not-checked$' 1
+# This scenario's agents all have the `reason` label (#1424): three series each.
+expect "$G" "grade clean: the unpinned counter at rest, one series per node and reason" '^UNPINNED verdict=PASS increase=0 series=15 nodes=5 resets=0$' 1
+expect "$G" "grade clean: per node, three reasons" '^UNPINNED node=worker-0[1-5] count=0 series=3 born_in_window=0 resets=0$' 5
+expect "$G" "grade clean: no reason line when nothing moved" '^UNPINNED (reason=|moved:)' 0
 expect "$G" "grade clean: no FAILED, BORN or RESET line" '^(FAILED|BORN|RESET|GONE) ' 0
 expect "$G" "grade clean: the prober line" '^PROBER  verdict=PASS non_success=0 liveness_non_success=0 dns_class_non_success=0 success=7200000 series=10 born_in_window=0 resets=0$' 1
 
@@ -1957,7 +1961,9 @@ expect "$G" "grade clean: the prober line" '^PROBER  verdict=PASS non_success=0 
 # container restarted (same series: 5,288,000 then 120,000); prober-e was
 # replaced by prober-f at T0+4h, four connection errors before it went. And an
 # agent rolled inside the window published two snapshots without a pin: a NEW
-# series, born at 2.
+# series, born at 2. The new agent is one with the `reason` label (#1424), so it
+# brings three series, one per reason, two of them resting at their seeded
+# zero; the agents that did not roll still have the one label-less series each.
 G="$TMP/grade-reset.log"
 run_grade reset "$G" --dir "$GD" --prometheus http://prom.example:9090
 show "prober-grade: a counter reset, a replaced prober pod, and an unpinned cluster after an agent roll" "$G"
@@ -1971,9 +1977,12 @@ expect "$G" "grade reset: the failures of the pod that is gone are still counted
 expect "$G" "grade reset: the replaced pod is named" '^GONE    pod=prober-e node=worker-05 last_sample=2026-10-08T04:04:00Z ' 1
 expect "$G" "grade reset: the pod set" '^PODS    at_start=5 at_end=5 gone=1 new=1 nodes=5$' 1
 expect "$G" "grade reset: the prober verdict counts liveness apart" '^PROBER  verdict=FAIL non_success=7 liveness_non_success=3 dns_class_non_success=0 ' 1
-expect "$G" "grade reset: the unpinned counter moved on one node, on a series born in the window (RED for increase(): 2 - 2 = 0)" '^UNPINNED moved: node=worker-03 .*pod=aether-agent-new count=2 first=2@2026-10-08T05:10:00Z last=2@2026-10-08T08:10:00Z \(absent at the start: counted from 0\)$' 1
-expect "$G" "grade reset: per node" '^UNPINNED node=worker-03 count=2 series=2 born_in_window=1 resets=0$' 1
-expect "$G" "grade reset: UNPINNED verdict FAIL, its own line (#1423)" '^UNPINNED verdict=FAIL increase=2 series=6 nodes=5 resets=0  \(a TLS cluster was published without its server-identity pin' 1
+expect "$G" "grade reset: the unpinned counter moved on one node, on a series born in the window (RED for increase(): 2 - 2 = 0)" '^UNPINNED moved: node=worker-03 .*pod=aether-agent-new reason=trust_domain_unknown count=2 first=2@2026-10-08T05:10:00Z last=2@2026-10-08T08:10:00Z \(absent at the start: counted from 0\)$' 1
+expect "$G" "grade reset: only the series that moved is a moved line (the two reasons at their seeded zero are not)" '^UNPINNED moved: ' 1
+expect "$G" "grade reset: per reason, for the reason that moved (#1424)" '^UNPINNED reason=trust_domain_unknown count=2 nodes=worker-03$' 1
+expect "$G" "grade reset: no line for a reason that did not move" '^UNPINNED reason=' 1
+expect "$G" "grade reset: per node, the old agent's one series and the new agent's three" '^UNPINNED node=worker-03 count=2 series=4 born_in_window=3 resets=0$' 1
+expect "$G" "grade reset: UNPINNED verdict FAIL, its own line (#1423); the sum is over every series, with or without a reason label" '^UNPINNED verdict=FAIL increase=2 series=8 nodes=5 resets=0  \(a TLS cluster was published without its server-identity pin' 1
 expect "$G" "grade reset: verdict" '^VERDICT prober=FAIL unpinned=FAIL logs=not-checked$' 1
 red=$(jq '[.data.result[] | (.values[-1][1] | tonumber) - (.values[0][1] | tonumber)] | add' "$GF/reset/unpinned.window.json")
 if [ "$red" = 0 ]; then pass "grade reset: last-minus-first-sample reads 0 for the unpinned counter on these samples (seen red)"; else fail "grade reset: the increase()-style unpinned count is $red, want 0"; fi

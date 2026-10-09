@@ -300,6 +300,9 @@ func runAgent(ctx context.Context) (retErr error) {
 	reconcileSpireIdentity(ctx, spireSource, identityTrustDomain, snapshotCache, localStorage)
 
 	ackTracker := ack.NewTracker(l)
+	// A cluster update the proxy acknowledges becomes "the SAN-pin state the
+	// proxy accepted" (aether.agent.xds.acked_tls_clusters, #1425).
+	ackTracker.SetAckObserver(snapshotCache.ResponseAcked)
 
 	spireBridge, err := wireSpireBridge(ctx, m, snapshotCache, spireSource)
 	if err != nil {

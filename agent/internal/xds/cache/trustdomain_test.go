@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	"aethermesh.dev/agent/storage"
 	"aethermesh.dev/agent/types"
@@ -359,7 +360,7 @@ func TestEmptyTrustDomainReportsUnpinnedClusters(t *testing.T) {
 	assert.Contains(t, warns[0].attrs["clusters"], bindingClusterName,
 		"the WARN has to NAME the affected clusters to be actionable")
 	assert.Equal(t, "1", warns[0].attrs["count"])
-	assert.Equal(t, "trust domain not yet known", warns[0].attrs["reason"])
+	assert.Equal(t, string(cachemetrics.CauseTrustDomainUnknown), warns[0].attrs["reason"])
 	assert.Equal(t, int64(1), counterValue(t, reader, clusterUnpinnedCtr))
 
 	// The lesser evil is still what is emitted: loud, but never `spiffe:///`.
@@ -402,7 +403,7 @@ func TestUnpinnedClusterReportNamesTheOtherCause(t *testing.T) {
 
 	warns := rec.with(unpinnedClusterMsg)
 	require.Len(t, warns, 1)
-	assert.Equal(t, "service endpoints carry no namespace metadata", warns[0].attrs["reason"])
+	assert.Equal(t, string(cachemetrics.CauseNoNamespaceMetadata), warns[0].attrs["reason"])
 	assert.Equal(t, raceTrustDomain, warns[0].attrs["trust_domain"])
 	assert.Equal(t, int64(1), counterValue(t, reader, clusterUnpinnedCtr))
 }

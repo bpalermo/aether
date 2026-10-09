@@ -228,6 +228,13 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to version snapshot resources: %w", err)
 	}
 
+	// The pin state of this snapshot, taken and remembered under its version
+	// BEFORE SetSnapshot: SetSnapshot is what lets the proxy see the snapshot,
+	// and its acknowledgement is looked up by this version (ClusterPinsAcked,
+	// #1425). Remembered after, an ACK could arrive first and find nothing.
+	pins := c.clusterPinReport()
+	c.pins.remember(v, pins.counts)
+
 	// Everything SetSnapshot does runs under the cache mutex the ADS stream
 	// needs; time it so a regression of the above is visible.
 	setStart := time.Now()
@@ -252,7 +259,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// cluster published with NO server-identity SAN pin. The two checks above
 	// ask "is the identity we present the right one"; this one asks "are we
 	// checking the identity we are handed at all".
-	c.reportUnpinnedClusters(ctx, v)
+	c.reportClusterPins(ctx, v, pins)
 
 	return nil
 }
