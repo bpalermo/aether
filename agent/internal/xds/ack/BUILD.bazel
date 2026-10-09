@@ -28,6 +28,7 @@ go_test(
         "metrics_test.go",
         "opening_test.go",
         "seed_test.go",
+        "stated_review2_test.go",
         "stated_review_test.go",
         "stated_server_test.go",
         "stated_test.go",

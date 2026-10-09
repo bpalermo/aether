@@ -84,6 +84,7 @@ go_test(
     name = "cache_test",
     size = "medium",
     srcs = [
+        "ackpublished_race_test.go",
         "ackpublished_test.go",
         "alias_floor_eds_test.go",
         "cache_test.go",

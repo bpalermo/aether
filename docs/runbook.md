@@ -6192,9 +6192,17 @@ or stated for the name is the version the agent publishes at that moment. Before
 earlier acknowledgement of the name answered it at once, with the proxy still on the old
 pod's listener. So a `present`/`timeout` for a replacement pod now means what it says: the
 proxy did not acknowledge the replacement's listener within the wait. The state is kept
-per name for the node, not per proxy generation: during a hot restart the last word of
-either generation stands, and what one generation stated never overrides what either
-acknowledged or rejected afterwards, nor a rejection of that same version.
+per name for the node, not per proxy generation, so during a hot restart it is the word
+of whichever generation answered. Two rules keep an old answer from replacing a new one.
+An acknowledgement (or what a proxy stated) is recorded only when nothing was said about
+the listener after the response it answers was sent: the draining generation's late ACK
+of an older version, or of an add, does not replace what the generation taking over has
+acknowledged since. A rejection is always recorded, and fails the wait for the version
+it rejected until a proxy acknowledges a response sent after it. So a `present`/`nack`
+during a hot restart can be the draining generation's refusal while the new one accepted
+the listener; the proxy's NACK line in the agent log (`envoy NACKed delta response`) is
+where to tell them apart, by time. And a listener the acknowledging stream has been sent
+again and has not answered is not counted as present, even at the published version.
 
 The label names are the OTLP attribute keys (`aether.xds.type_url`, `aether.xds.wait`,
 `aether.xds.reason`) with their dots turned into underscores by the OTLP ingest, like

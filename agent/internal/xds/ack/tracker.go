@@ -43,6 +43,8 @@ type resourceState struct {
 	version string
 	// seq is the tracker's sequence number when this was written (Tracker.seq).
 	seq uint64
+	// stream is the stream whose acknowledgement wrote present and version.
+	stream int64
 }
 
 // inflightKey identifies one unacknowledged delta response. Nonces are unique
@@ -218,19 +220,32 @@ func (t *Tracker) Callbacks() serverv3.Callbacks {
 // for the name is the version the agent publishes now. So:
 //
 //   - a listener already ACKed at that version returns immediately;
+//
 //   - so does one Envoy already holds at that version and that is therefore
 //     never sent on the current stream (an agent restart, a stream reset): the
 //     proxy states it in its opening request and the ACK of the opening
 //     response resolves it (statedHeld, #1511);
+//
 //   - a listener whose published content changed since (a same-named
 //     replacement pod) waits for the ACK of the response that carries the new
 //     content, whatever the proxy acknowledged, stated or rejected for the
 //     name before: a NACK fails the wait only when it is of the version
 //     published now (nackFails).
 //
+//   - a listener the stream that acknowledged it has since been sent again, or
+//     sent the removal of, and has not answered, waits for that answer even
+//     when the acknowledged version is the published one again: what was
+//     acknowledged is not what was last sent (unansweredLocked).
+//
 // Like any ACK, that says the proxy accepted the listener, not that it has
 // finished warming it. Publish before waiting: the comparison is with what is
 // published when the wait looks.
+//
+// What it does not say, because the state is one per name and not one per
+// proxy: during a hot restart the answer may be one generation's. An
+// acknowledgement of either generation resolves the wait, and a rejection by
+// either fails it, until an acknowledgement of a response sent after that
+// rejection (acknowledgedLocked, rejectedLocked).
 //
 // A wait can still run to the caller's deadline with the listener in place:
 // when no proxy is connected, or when the proxy rejected the opening response
@@ -264,6 +279,7 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 		st := t.state[key]
 		ch := t.changed
 		published := t.published
+		unanswered := t.unansweredLocked(st.stream, typeURL, name)
 		t.mu.Unlock()
 
 		if st.nackFails(wantPresent, published, typeURL, name) {
@@ -273,7 +289,7 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 		if !wantPresent && !st.present {
 			return nil
 		}
-		if wantPresent && st.present && atPublishedVersion(published, typeURL, name, st.version) {
+		if wantPresent && st.present && !unanswered && atPublishedVersion(published, typeURL, name, st.version) {
 			return nil
 		}
 
@@ -287,6 +303,28 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 		case <-ch:
 		}
 	}
+}
+
+// unansweredLocked reports whether the stream has been sent a response that
+// adds or removes the resource and has not answered it. Callers must hold t.mu.
+//
+// The state is what a proxy last ACKNOWLEDGED, and the server may have sent it
+// something else since. While it has, the acknowledged version is not known to
+// be what the proxy holds, even when it is the published one again (the agent
+// went back to it): the proxy may have applied the newer one, and the server
+// has yet to send the published one again. Only the stream that wrote the
+// state is looked at: another proxy generation's unanswered response says
+// nothing about what this one holds.
+func (t *Tracker) unansweredLocked(streamID int64, typeURL, name string) bool {
+	for key, entry := range t.inflight {
+		if key.streamID != streamID || entry.typeURL != typeURL {
+			continue
+		}
+		if slices.Contains(entry.added, name) || slices.Contains(entry.removed, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // nackFails reports whether the recorded rejection fails a wait. A rejection
@@ -399,7 +437,7 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 	if detail := req.GetErrorDetail(); detail != nil {
 		t.rejectedLocked(entry, fmt.Errorf("%s", detail.GetMessage()))
 	} else {
-		t.acknowledgedLocked(entry)
+		t.acknowledgedLocked(streamID, entry)
 	}
 	t.broadcastLocked()
 	observer := t.observer
@@ -435,24 +473,41 @@ func (t *Tracker) rejectedLocked(entry inflightResponse, nackErr error) {
 // acknowledgedLocked records an ACK: what the response added and removed, and
 // what the proxy had stated it holds (statedHeld). Callers must hold t.mu and
 // have advanced t.seq.
-func (t *Tracker) acknowledgedLocked(entry inflightResponse) {
+//
+// The state is one per name, and two proxy generations write it during a hot
+// restart. An ACK is the answer to a response computed when it was SENT, so
+// it is older than anything written to the name since: it is recorded only
+// when nothing was. Otherwise a draining generation's late ACK of an older
+// version, or of an add, would replace what the generation taking over has
+// acknowledged since (a newer version, or the removal), and nothing would
+// ever correct it: that generation is sent nothing more for the name.
+//
+// On one stream the rule never bites: go-control-plane has at most one
+// response of a type outstanding per stream, so nothing is written to a name
+// between a response and its answer except by another stream.
+func (t *Tracker) acknowledgedLocked(streamID int64, entry inflightResponse) {
+	record := func(name string, st resourceState) {
+		key := entry.typeURL + "/" + name
+		if t.state[key].seq > entry.sentSeq {
+			return
+		}
+		st.seq, st.stream = t.seq, streamID
+		t.state[key] = st
+	}
 	for i, name := range entry.added {
-		t.state[entry.typeURL+"/"+name] = resourceState{present: true, version: entry.addedVersions[i], seq: t.seq}
+		record(name, resourceState{present: true, version: entry.addedVersions[i]})
 	}
 	for _, name := range entry.removed {
-		t.state[entry.typeURL+"/"+name] = resourceState{seq: t.seq}
+		record(name, resourceState{})
 	}
-	// What the proxy stated is older than anything it, or another proxy
-	// generation, acknowledged or rejected after this response was sent: a
-	// removal acknowledged meanwhile must not be undone by it. And a statement
-	// never clears a rejection of the very version it states, whenever that
-	// was: one generation holding it does not make the other accept it.
+	// A statement, besides, never clears a rejection of the very version it
+	// states, whenever that was: one generation holding it does not make the
+	// other accept it.
 	for name, version := range entry.held {
-		st := t.state[entry.typeURL+"/"+name]
-		if st.seq > entry.sentSeq || (st.nackErr != nil && st.nackVersion == version) {
+		if st := t.state[entry.typeURL+"/"+name]; st.nackErr != nil && st.nackVersion == version {
 			continue
 		}
-		t.state[entry.typeURL+"/"+name] = resourceState{present: true, version: version, seq: t.seq}
+		record(name, resourceState{present: true, version: version})
 	}
 }
 
@@ -560,8 +615,9 @@ func statedHeld(stated map[string]string, added, removed []string) map[string]st
 // never reused.
 func (t *Tracker) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 	t.mu.Lock()
-	for key := range t.inflight {
+	for key, entry := range t.inflight {
 		if key.streamID == streamID {
+			t.unansweredForgottenLocked(streamID, entry)
 			delete(t.inflight, key)
 		}
 	}
@@ -575,7 +631,30 @@ func (t *Tracker) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 			delete(t.stated, key)
 		}
 	}
+	t.broadcastLocked()
 	t.mu.Unlock()
+}
+
+// unansweredForgottenLocked is called for a response its stream closed
+// without answering. The proxy may or may not have applied it, so for every
+// resource it carried whose state this stream wrote, the version the proxy
+// holds is no longer known: it is still present (a removal waits for its
+// acknowledgement), at no version (no wait for it to be present is answered).
+// The proxy says which it holds when it reconnects. Callers must hold t.mu.
+func (t *Tracker) unansweredForgottenLocked(streamID int64, entry inflightResponse) {
+	for i, name := range append(slices.Clone(entry.added), entry.removed...) {
+		key := entry.typeURL + "/" + name
+		st := t.state[key]
+		if !st.present || st.stream != streamID {
+			continue
+		}
+		// Sent the version it had acknowledged: it holds that one either way.
+		if i < len(entry.addedVersions) && entry.addedVersions[i] == st.version {
+			continue
+		}
+		st.version = ""
+		t.state[key] = st
+	}
 }
 
 // broadcastLocked wakes all waiters. Callers must hold t.mu.
