@@ -13,32 +13,39 @@ const (
 	// plaintext.
 	udpClusterPrefix = "udp:"
 	// waypointIngressClusterPrefix: the STATIC cluster of a service's local
-	// pods behind the east/west tunnel (WaypointIngressClusterName), which
-	// forwards the source's own mTLS bytes raw.
+	// pods behind the east/west tunnel (WaypointIngressClusterName). It has
+	// no transport socket of its own.
 	waypointIngressClusterPrefix = "ew_ingress_"
 	// edgeK8sClusterPrefix: the edge's cleartext cluster for a non-mesh
 	// HTTPRoute backend (EdgeK8sClusterName).
 	edgeK8sClusterPrefix = "edge_k8s_"
 )
 
-// ClusterNameCarriesNoPin reports whether a cluster of this name is, by its
-// name alone, of a family that never carries a server-identity SAN pin of its
-// own, so that it is never one of the cluster entries the agent's pin gauges
-// count:
+// ClusterNameOutsidePinGauge reports whether a cluster of this name is, by its
+// name alone, of a family the agent's pin gauges do not count
+// (aether.agent.snapshot.tls_clusters, aether.agent.xds.acked_tls_clusters).
+// Those gauges count mesh cluster entries, the clusters IsMeshEntryClusterName
+// recognises; this is every other family the generators of this package
+// build.
 //
-//   - per-pod clusters (application delivery, health probe, inbound
-//     readiness): loopback or node-local, IsPerPodClusterName;
-//   - a QUIC twin: pinned exactly when its h2 base entry is, and counted
-//     through that entry;
-//   - the UDP floor, the east/west waypoint ingress cluster, the edge's
-//     cleartext k8s-Service cluster, the ORIGINAL_DST passthrough and the
-//     blackhole: no upstream transport socket at all.
+// It says where a cluster is counted. It does NOT say the cluster has no TLS
+// or no SAN pin:
+//
+//   - the per-pod inbound-readiness cluster (NewInboundReadyProbeCluster) IS
+//     an mTLS cluster pinned to its pod's SPIFFE ID, and a QUIC twin is pinned
+//     exactly when its h2 base entry is. Neither is a cluster entry: the first
+//     is a node-local probe of the pod's own listener, the second is counted
+//     through its base;
+//   - the per-pod application and health-probe clusters, the UDP floor, the
+//     east/west waypoint ingress cluster, the edge's cleartext k8s-Service
+//     cluster, the ORIGINAL_DST passthrough and the blackhole have no
+//     upstream transport socket.
 //
 // It is the single list. A cluster family added to this package is either one
 // IsMeshEntryClusterName recognises or is added here;
 // TestEveryClusterConstructorIsOfAClassifiedFamily fails until it is one or
 // the other.
-func ClusterNameCarriesNoPin(name string) bool {
+func ClusterNameOutsidePinGauge(name string) bool {
 	return IsPerPodClusterName(name) ||
 		IsQUICClusterName(name) ||
 		strings.HasPrefix(name, udpClusterPrefix) ||
@@ -54,10 +61,14 @@ func ClusterNameCarriesNoPin(name string) bool {
 // behind "tcp:"). Those are the clusters meant to be mTLS with a
 // server-identity pin, on the node agent and on the edge alike.
 //
-// A name of a no-pin family is never one, whatever it ends in: the waypoint
-// ingress cluster is named by a service FQDN behind its prefix.
+// A name of a family outside the pin gauges is not one, whatever it ends in:
+// the waypoint ingress cluster is named by a service FQDN behind its prefix.
+//
+// It reads the form of the name only. It does not say that a cluster of that
+// name exists, nor that the one published under it carries a pin at this
+// moment (cache.clusterEntry.pinState decides that).
 func IsMeshEntryClusterName(name, meshDomain string) bool {
-	if ClusterNameCarriesNoPin(name) {
+	if ClusterNameOutsidePinGauge(name) {
 		return false
 	}
 	_, ok := ServiceFromClusterName(strings.TrimPrefix(name, tcpClusterPrefix), meshDomain)

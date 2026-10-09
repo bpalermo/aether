@@ -148,12 +148,12 @@ of the agent) and by the edge control plane.
 |---|---|---|---|
 | `AetherMeshClusterUnpinned` | critical | 3m | per node and reason: clusters published **with TLS and without a server-identity pin** (`no_namespace_metadata`, `pin_not_rendered`). The mTLS validation gap |
 | `AetherMeshClusterPinPending` | warning | 5m | per node and reason: an agent still publishing clusters with **no TLS at all** five minutes on (`trust_domain_unknown`, `tls_not_published`): it never learned its trust domain or never got its SVID |
-| `AetherProxyHoldsUnpinnedClusters` | warning | 15m | per node: the proxy holds more unpinned clusters than the agent now publishes, so it has not taken the update that pinned them. A rejected cluster stays held through later ACKs of other clusters (#1508) |
+| `AetherProxyHoldsUnpinnedClusters` | warning | 15m | per node: the proxy has accepted more unpinned clusters than the agent now publishes, so it has not accepted the update that pinned or removed them. A rejected cluster stays counted at the version the proxy last accepted through later ACKs of other clusters (#1508) |
 
 | Metric (as Prometheus stores it) | Type | Labels | Meaning |
 |---|---|---|---|
 | `aether_agent_snapshot_tls_clusters` | gauge | `pin`, `reason` | mesh cluster entries in the agent's current snapshot that are meant to be mTLS: `pin="pinned"` (no `reason`), and `pin="unpinned"` once per `reason`. Written on every snapshot, zeros included |
-| `aether_agent_xds_acked_tls_clusters` | gauge | `pin`, `reason` | the same count for the clusters the proxy has accepted, kept cluster by cluster: each is counted at the version the proxy last acknowledged or stated when it opened its stream (#1508). An entry with no cluster in the snapshot is in it only while the proxy still holds that cluster from an earlier snapshot (it rejected the removal); one whose cluster was never published, or whose removal the proxy accepted, is not. Absent until a proxy answers a cluster response of this agent process, which a reconnecting proxy does within a second or so of an agent restart (#1483); not written while the proxy holds a mesh cluster this agent process has no pin class for: a version it never published, or a cluster it no longer publishes and has no record of |
+| `aether_agent_xds_acked_tls_clusters` | gauge | `pin`, `reason` | the same count for the clusters the proxy has accepted, kept cluster by cluster: each is counted at the version the proxy last acknowledged or stated when it opened its stream (#1508). An entry with no cluster in the snapshot is in it only while the proxy still holds that cluster from an earlier snapshot (it rejected the removal); one whose cluster was never published, or whose removal the proxy accepted, is not. Absent until a proxy answers a cluster response of this agent process, which a reconnecting proxy normally does within a second or so of an agent restart (#1483); not written while the proxy holds a mesh cluster this agent process has no pin class for: a version it never published, or a cluster it no longer publishes and has no record of |
 | `aether_agent_identity_cluster_unpinned_total` | counter | `reason` | grows by the number of unpinned clusters on every snapshot that has any. Seeded at zero per reason. Before #1424 it had no `reason` label |
 | `aether_agent_xds_nacks_total` | counter | `aether_xds_type_url` | delta-xDS responses the proxy rejected. Seeded at zero for each of the six resource types the agent serves, and `other` (#1480) |
 | `aether_agent_xds_ack_wait_failures_total` | counter | `aether_xds_wait`, `aether_xds_reason` | ACK waits for a pod's listener that failed (`present`/`absent` by `nack`/`timeout`). Seeded at zero, four series (#1480) |
@@ -221,7 +221,8 @@ until a proxy has answered that agent process at all (a standby agent, a proxy t
 not connected since the agent started), and after a restart
 for as long as the proxy rejects a cluster it holds an older version of (the new agent
 process cannot count a version it never published, and writes nothing rather than a
-count without it): the runbook's "Published is not held" has both. Once the gauge has
+count without it), or rejects the removal of a mesh cluster the agent no longer
+publishes and has no record of: the runbook's "Published is not held" has them. Once the gauge has
 samples, a proxy stream that drops does not withdraw them: the last accepted state
 stays exported until the proxy answers again, so a sample is not proof of a live xDS
 connection.

@@ -1559,7 +1559,7 @@ func TestAckedPinsStatedClustersWithNoRecord(t *testing.T) {
 	stated := map[string]string{
 		"a":                      "ha",
 		"published_not_an_entry": "hp", // of no family the agent knows, and published: not an entry
-		// Stale: of a family that carries no pin, and no longer published.
+		// Stale: of a family the pin gauges do not count, and no longer published.
 		"app_pod-0_8080":     "x1",
 		"health_pod-0":       "x2",
 		"inboundready_pod-0": "x3",
@@ -1615,18 +1615,18 @@ func TestAckedPinsStatedClustersWithNoRecord(t *testing.T) {
 	for _, name := range []string{
 		gone, goneFloor, proxy.PortClusterName("demo/gone", domain, 8080), proxy.TCPPortClusterName(goneFloor, 9000),
 	} {
-		assert.False(t, proxy.ClusterNameCarriesNoPin(name), name)
+		assert.False(t, proxy.ClusterNameOutsidePinGauge(name), name)
 	}
 }
 
-// TestAckedPinGaugeIsNotWithdrawnForAStaleClusterThatCarriesNoPin: the stale
+// TestAckedPinGaugeIsNotWithdrawnForAStaleClusterItDoesNotCount: the stale
 // statement and the rejected opening removal, for a cluster that is not a mesh
 // cluster entry. The agent stops publishing the ORIGINAL_DST passthrough (the
 // capture mode changed while the proxy was away); the proxy states it, and
 // rejects the response that removes it. It holds a cluster the agent no
 // longer publishes and has no record of, and nothing about a pin is unknown:
 // that cluster never carries one.
-func TestAckedPinGaugeIsNotWithdrawnForAStaleClusterThatCarriesNoPin(t *testing.T) {
+func TestAckedPinGaugeIsNotWithdrawnForAStaleClusterItDoesNotCount(t *testing.T) {
 	c, rec, reader, tracker := ackedPinFixture(t)
 	c.SetCaptureEnabled(true)
 	c.SetCaptureRedirectAll(true)
@@ -1664,12 +1664,12 @@ func publishedClusterNames(t *testing.T, c *SnapshotCache) []string {
 	return slices.Sorted(maps.Keys(snap.GetResources(resourcev3.ClusterType)))
 }
 
-// TestEveryPublishedClusterIsACountedEntryOrCarriesNoPin holds the two
+// TestEveryPublishedClusterIsACountedEntryOrOutsideThePinGauges holds the two
 // definitions the acknowledged pin state reads a proxy's statement with to
 // what the node agent and the edge really publish. A published cluster is
 // either a cluster entry the pin report tracks (it has a record, and its name
-// is a mesh entry's) or of a family whose name says it carries no pin
-// (proxy.ClusterNameCarriesNoPin). Never both, never neither: a cluster that
+// is a mesh entry's) or of a family the pin gauges do not count
+// (proxy.ClusterNameOutsidePinGauge). Never both, never neither: a cluster that
 // is neither would be taken for a mesh cluster of unknown pin state when a
 // proxy states it after the agent dropped it, and one that is both would be
 // left out of the count when the proxy holds it.
@@ -1678,7 +1678,7 @@ func publishedClusterNames(t *testing.T, c *SnapshotCache) []string {
 // fails when one of them stops appearing, so the test cannot go vacuous. A
 // family added to the generators is caught where it is built, by
 // TestEveryClusterConstructorIsOfAClassifiedFamily in the proxy package.
-func TestEveryPublishedClusterIsACountedEntryOrCarriesNoPin(t *testing.T) {
+func TestEveryPublishedClusterIsACountedEntryOrOutsideThePinGauges(t *testing.T) {
 	ctx := context.Background()
 	seen := map[string]bool{}
 	check := func(t *testing.T, c *SnapshotCache) {
@@ -1687,8 +1687,8 @@ func TestEveryPublishedClusterIsACountedEntryOrCarriesNoPin(t *testing.T) {
 		require.NotEmpty(t, names)
 		for _, name := range names {
 			_, tracked := c.acked.clusters[name]
-			noPin := proxy.ClusterNameCarriesNoPin(name)
-			assert.NotEqual(t, tracked, noPin, "%s: tracked as a cluster entry = %v, of a family that carries no pin = %v", name, tracked, noPin)
+			outside := proxy.ClusterNameOutsidePinGauge(name)
+			assert.NotEqual(t, tracked, outside, "%s: tracked as a cluster entry = %v, of a family outside the pin gauges = %v", name, tracked, outside)
 			assert.Equal(t, tracked, proxy.IsMeshEntryClusterName(name, c.meshDomain), "%s: a tracked entry is published under a mesh entry's name, and nothing else is", name)
 			seen[clusterFamilyForTest(name)] = true
 		}
@@ -1739,7 +1739,7 @@ func TestEveryPublishedClusterIsACountedEntryOrCarriesNoPin(t *testing.T) {
 }
 
 // clusterFamilyForTest names the family of a published cluster for the
-// coverage list of TestEveryPublishedClusterIsACountedEntryOrCarriesNoPin,
+// coverage list of TestEveryPublishedClusterIsACountedEntryOrOutsideThePinGauges,
 // from the spelling of the name alone (deliberately not through the
 // predicates under test).
 func clusterFamilyForTest(name string) string {

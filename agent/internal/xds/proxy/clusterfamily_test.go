@@ -15,33 +15,33 @@ import (
 
 // clusterConstructors is every function of this package that builds a
 // cluster, with the names the clusters it builds are published under, split
-// by what a name says about a server-identity pin: a mesh cluster entry's
-// (meant to carry one) or of a family that never carries one of its own.
+// by where the agent's pin gauges put them: a mesh cluster entry's name (the
+// gauges count it) or a name of a family they do not count.
 //
 // It is the enumeration of the cluster families the node agent and the edge
 // can publish. A constructor is added here together with its names, and its
 // names are then held to exactly one of IsMeshEntryClusterName and
-// ClusterNameCarriesNoPin.
-func clusterConstructors() map[string]struct{ entry, noPin []string } {
+// ClusterNameOutsidePinGauge.
+func clusterConstructors() map[string]struct{ entry, outside []string } {
 	const domain = "aether.internal"
 	pod := &cniv1.CNIPod{Name: "web-0", Namespace: "demo"}
 	fqdn := ServiceClusterName("demo/web", domain)
 	floor := TCPClusterName("demo/web", domain)
-	return map[string]struct{ entry, noPin []string }{
+	return map[string]struct{ entry, outside []string }{
 		// The HTTP cluster of a service, its per-port clusters and port
 		// aliases; a QUIC twin is cloned from one.
 		"NewServiceCluster": {
-			entry: []string{fqdn, PortClusterName("demo/web", domain, 8080)},
-			noPin: []string{QUICClusterName("demo/web", domain, "demo/client")},
+			entry:   []string{fqdn, PortClusterName("demo/web", domain, 8080)},
+			outside: []string{QUICClusterName("demo/web", domain, "demo/client")},
 		},
 		"NewTCPServiceCluster":             {entry: []string{floor, TCPPortClusterName(floor, 5432)}},
-		"NewUDPServiceCluster":             {noPin: []string{UDPClusterName("demo/web", domain)}},
-		"NewAppCluster":                    {noPin: []string{AppClusterName(pod, 8080), HealthProbeClusterName(pod)}},
-		"NewInboundReadyProbeCluster":      {noPin: []string{InboundReadyClusterName(pod)}},
-		"NewPassthroughOriginalDstCluster": {noPin: []string{PassthroughClusterName}},
-		"NewBlackholeCluster":              {noPin: []string{BlackholeClusterName}},
-		"BuildWaypointIngressCluster":      {noPin: []string{WaypointIngressClusterName(fqdn)}},
-		"BuildEdgeK8sCluster":              {noPin: []string{EdgeK8sClusterName("demo", "web", 8080)}},
+		"NewUDPServiceCluster":             {outside: []string{UDPClusterName("demo/web", domain)}},
+		"NewAppCluster":                    {outside: []string{AppClusterName(pod, 8080), HealthProbeClusterName(pod)}},
+		"NewInboundReadyProbeCluster":      {outside: []string{InboundReadyClusterName(pod)}},
+		"NewPassthroughOriginalDstCluster": {outside: []string{PassthroughClusterName}},
+		"NewBlackholeCluster":              {outside: []string{BlackholeClusterName}},
+		"BuildWaypointIngressCluster":      {outside: []string{WaypointIngressClusterName(fqdn)}},
+		"BuildEdgeK8sCluster":              {outside: []string{EdgeK8sClusterName("demo", "web", 8080)}},
 	}
 }
 
@@ -49,9 +49,9 @@ func clusterConstructors() map[string]struct{ entry, noPin []string } {
 // name predicates the agent reads a proxy's statement with
 // (cache.ackedPins.restateLocked): a cluster the proxy holds and the agent no
 // longer publishes is taken for a mesh cluster of unknown pin state unless its
-// name says it carries no pin. A cluster family that neither predicate knows
-// would withdraw the acknowledged pin gauge for a cluster that has no pin to
-// be unknown; one that both knew would be left out of the count.
+// name says the pin gauges do not count it. A cluster family that neither
+// predicate knows would withdraw the acknowledged pin gauge for a cluster the
+// gauge never counts; one that both knew would be left out of the count.
 //
 // Two halves. Every function of this package that builds a clusterv3.Cluster
 // is in clusterConstructors (found by scanning the package's source, so a new
@@ -110,21 +110,21 @@ func TestEveryClusterConstructorIsOfAClassifiedFamily(t *testing.T) {
 			"list the new one with the names its clusters are published under, and classify a new family in clusterfamily.go")
 
 	for constructor, names := range listed {
-		require.NotEmpty(t, append(slices.Clone(names.entry), names.noPin...), constructor)
+		require.NotEmpty(t, append(slices.Clone(names.entry), names.outside...), constructor)
 		for _, name := range names.entry {
 			require.NotEmpty(t, name, constructor)
 			assert.True(t, IsMeshEntryClusterName(name, domain), "%s: %q is a mesh cluster entry's name", constructor, name)
-			assert.False(t, ClusterNameCarriesNoPin(name), "%s: %q is meant to carry a pin", constructor, name)
+			assert.False(t, ClusterNameOutsidePinGauge(name), "%s: %q is a name the pin gauges count", constructor, name)
 		}
-		for _, name := range names.noPin {
+		for _, name := range names.outside {
 			require.NotEmpty(t, name, constructor)
-			assert.True(t, ClusterNameCarriesNoPin(name), "%s: %q carries no pin of its own", constructor, name)
+			assert.True(t, ClusterNameOutsidePinGauge(name), "%s: %q is of a family the pin gauges do not count", constructor, name)
 			assert.False(t, IsMeshEntryClusterName(name, domain), "%s: %q is not a mesh cluster entry's name", constructor, name)
 		}
 	}
 
 	// A name of no family is neither: the agent then errs to "unknown".
-	assert.False(t, ClusterNameCarriesNoPin("some_future_cluster"))
+	assert.False(t, ClusterNameOutsidePinGauge("some_future_cluster"))
 	assert.False(t, IsMeshEntryClusterName("some_future_cluster", domain))
 	// And a mesh entry of another mesh domain is not this mesh's.
 	assert.False(t, IsMeshEntryClusterName(ServiceClusterName("demo/web", "other.internal"), domain))

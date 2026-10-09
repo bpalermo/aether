@@ -250,9 +250,9 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// of a cluster is looked up by that version (ClustersAccepted, #1425,
 	// #1508). Recorded after, an ACK could arrive first and find nothing.
 	//
-	// A later snapshot can count the very bytes the proxy holds differently;
-	// that is the one case in which a build, not an ACK, moves the
-	// acknowledged gauge.
+	// A build moves the acknowledged gauge itself, without an ACK, in two
+	// cases: it counts the very bytes the proxy holds differently, or it
+	// publishes a version the proxy holds that had no class on record.
 	c.publishAckedPins(ctx, pins, snapshot.GetVersionMap(resourcev3.ClusterType), v)
 
 	// Everything SetSnapshot does runs under the cache mutex the ADS stream

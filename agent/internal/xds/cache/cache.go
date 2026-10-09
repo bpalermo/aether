@@ -231,10 +231,11 @@ type SnapshotCache struct {
 
 	// acked is the pin state of the clusters the proxy has accepted, cluster by
 	// cluster: what each published version of a cluster entry is counted as,
-	// and which version the proxy accepted (#1425, #1508). It has its own mutex
-	// and is a leaf: the ACK arrives on the xDS stream's goroutine, which must
-	// never wait on a snapshot build (snapshotMu) or on the cluster map
-	// (clusterMu). See ackedpins.go.
+	// and which version the proxy accepted (#1425, #1508). It has its own
+	// mutex, under which only the gauge's mutex and the log handler are taken:
+	// the ACK arrives on the xDS stream's goroutine, which must never wait on
+	// a snapshot build (snapshotMu) or on the cluster map (clusterMu). See
+	// ackedpins.go.
 	acked ackedPins
 	// entryClasses is the buffer a snapshot build collects its cluster
 	// entries' pin classes in (pinReport.classes), kept so that a build

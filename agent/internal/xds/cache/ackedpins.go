@@ -72,7 +72,7 @@ type entryClass struct {
 // It is not what an ACK is read with, and so not a bound on how long a proxy
 // may take to answer: a version is copied into the record's `sent` list when
 // a response carrying it is written, and stays there until that response is
-// answered (clusterAck.sent). This list is what that copy is made from, and
+// answered or its stream ends (clusterAck.sent). This list is what that copy is made from, and
 // what a proxy's opening statement is read with. Three covers a cluster that
 // is rebuilt twice between go-control-plane building a response and the
 // stream's goroutine handing it to the tracker, a step inside this process
@@ -133,17 +133,31 @@ type clusterAck struct {
 	sent []sentCluster
 	// build is the last snapshot build whose cluster map had the entry.
 	build uint64
-	// holds says the proxy has accepted the cluster, and held is the version
-	// it accepted it at: the one a response it acknowledged carried, or the
-	// one it stated when it opened its stream. Not holds: the proxy has not
-	// accepted it in any version (it was never sent, is in flight, was
-	// rejected, or its removal was accepted).
+	// holds says the agent has read the proxy's acceptance of the cluster,
+	// and held is the version it accepted it at: the one a response it
+	// acknowledged carried, or the one it stated when it opened its stream.
+	// Not holds: the agent has read no acceptance that still stands (the
+	// cluster was never sent, is in flight, was rejected, its removal was
+	// accepted, or an opening statement did not name it). That is not always
+	// "the proxy does not have it": an acceptance on a stream that ended
+	// before the agent read it is unknown here until the proxy states the
+	// cluster on its next stream.
 	holds bool
 	held  string
 	// heldClass is the pin class of held. heldKnown is false when held is a
-	// version this agent process has no class for: one it never published
-	// (the proxy took it from the agent process before this one), or one that
-	// fell out of offered while its response was in flight.
+	// version there was no class on record for when the proxy's acceptance of
+	// it was read (classOfVersion):
+	//   - a STATED version that is neither among offered nor in flight: one
+	//     this agent process never published (the proxy took it from the
+	//     agent process before this one), or one it published and has since
+	//     rebuilt offeredVersions times;
+	//   - an ACKNOWLEDGED version that had fallen out of offered BEFORE its
+	//     response was recorded as in flight (offeredVersions). Falling out
+	//     while in flight does not do it: the class is kept in sent from the
+	//     moment the response is recorded;
+	//   - any version a proxy stated for a cluster with no record: one that
+	//     was dropped, or never existed (restateLocked).
+	// It becomes known if a later snapshot publishes that version (offer).
 	heldClass pinClass
 	heldKnown bool
 }
@@ -187,7 +201,8 @@ func (s *clusterAck) offer(version string, class pinClass) (heldChanged bool) {
 }
 
 // classOfVersion is the class on record for version: the one a recent snapshot
-// published it with, else the one it was sent with when it is in flight.
+// published it with, else the one kept with it while it is in flight, else the
+// one it is already held with. None of the three: not on record.
 //
 // Published first, because a later snapshot can count the same bytes under
 // another reason (offer), and a cluster must be counted alike on both gauges.
@@ -306,11 +321,12 @@ type ackedPins struct {
 	clusters map[string]*clusterAck
 	// published is the cluster versions of the newest snapshot, by name: the
 	// snapshot's own map, which nothing changes once the snapshot is built. A
-	// name in it with no record is a cluster that is not a cluster entry
+	// name in it with no record is a cluster the pin gauges do not count
 	// (restateLocked).
 	published map[string]string
 	// build counts publish calls; a record whose build is older is of an
-	// entry the newest snapshot no longer has.
+	// entry the newest snapshot no longer has, or of a stated cluster that
+	// was never an entry of a snapshot this record saw (restateLocked).
 	build uint64
 	// counts is the acknowledged pin state last reported; reported is false
 	// until the first.
@@ -324,7 +340,8 @@ type ackedPins struct {
 }
 
 // ackedPinsUpdate is what a change to ackedPins leaves for its caller to
-// report, outside the lock.
+// report. The caller reports it while it still holds ackedPins.mu, the lock
+// it made the change under (see ackedPins).
 type ackedPinsUpdate struct {
 	counts cachemetrics.PinCounts
 	// report: the counts are complete and are to be written to the gauge.
@@ -418,7 +435,9 @@ func (h *ackedPins) forgetIfGoneLocked(name string, s *clusterAck) {
 }
 
 // deliver records the clusters of a response entering or leaving flight
-// (ack.Delivery), so that a version is known for as long as its ACK can come.
+// (ack.Delivery), so that the class a version has on record when its response
+// is written is kept for as long as its ACK can come. A cluster with no record
+// at that moment is not recorded (acceptLocked says what that leaves out).
 func (h *ackedPins) deliver(d ack.Delivery) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -469,30 +488,32 @@ func (h *ackedPins) acceptLocked(a ack.Accepted) ackedPinsUpdate {
 // cluster by cluster. A cluster the proxy does not state it does not hold.
 // Callers hold h.mu.
 //
-// A stated name with no record is not thereby a cluster that carries no pin.
+// A stated name with no record is not thereby a cluster the pin gauges do not
+// count.
 // The proxy can hold a cluster entry this agent has dropped the record of: one
 // it accepted on a stream that ended before the agent read the answer, removed
 // from the snapshot since, and stated again more than goneBuilds builds later
 // (or within them, when the builds went by while the opening response waited
 // for its answer). Its class is not on record, so it is held at a version of
-// unknown class, which withdraws the gauge until the proxy accepts its removal
-// or states it no more: a count without it would say the proxy holds fewer
-// unpinned clusters than it may.
+// unknown class, which withdraws the gauge until the proxy accepts its
+// removal, states it no more, or the agent publishes that version again: a
+// count without it would say the proxy holds fewer unpinned clusters than it
+// may.
 //
 // What tells the two apart is what the agent publishes now. A stated name the
 // newest snapshot publishes and that has no record is not a cluster the pin
 // gauges count: every entry of that snapshot that can carry a pin has its
 // record (the plaintext UDP floor has none, and no pin). One it does not
-// publish is taken for an entry unless its name says it is of a family that
-// never carries a pin of its own (proxy.ClusterNameCarriesNoPin, the one list
-// of them, held to every cluster the generators build by a test in that
-// package). The agent errs to "unknown" for a name the list does not know.
+// publish is taken for an entry unless its name says it is of a family the
+// pin gauges do not count (proxy.ClusterNameOutsidePinGauge, the one list of
+// them, held to every cluster constructor of that package by a test there).
+// The agent errs to "unknown" for a name the list does not know.
 func (h *ackedPins) restateLocked(stated map[string]string) {
 	for name, version := range stated {
 		if h.clusters[name] != nil {
 			continue
 		}
-		if _, published := h.published[name]; published || proxy.ClusterNameCarriesNoPin(name) {
+		if _, published := h.published[name]; published || proxy.ClusterNameOutsidePinGauge(name) {
 			continue
 		}
 		// build stays zero: an entry of no snapshot this record knows.
@@ -540,12 +561,14 @@ const ackedClusterPinsMsg = "proxy acknowledged mesh clusters with no server-ide
 const ackedClusterPinsClearMsg = "proxy acknowledged mesh clusters, all with a server-identity SAN pin"
 
 // ackedClusterPinsUnknownMsg is logged when the proxy turns out to hold a
-// cluster at a version this agent process has no pin class for, and the
-// acknowledged gauge stops being written; ackedClusterPinsKnownMsg when that
-// ends.
+// cluster at a version this agent process has no pin class on record for, and
+// the acknowledged gauge stops being written; ackedClusterPinsKnownMsg when
+// that ends. It does not say "a version this agent did not publish": this
+// process may have published and sent it, and dropped the record since
+// (clusterAck.heldKnown lists the ways).
 const (
-	ackedClusterPinsUnknownMsg = "proxy holds mesh clusters at a version this agent did not publish; their pin state is not known and the acknowledged pin gauge is not written"
-	ackedClusterPinsKnownMsg   = "the pin state of every mesh cluster the proxy holds is known again"
+	ackedClusterPinsUnknownMsg = "proxy holds mesh clusters whose pin state this agent cannot determine; the acknowledged pin gauge is not written"
+	ackedClusterPinsKnownMsg   = "the pin state of every mesh cluster this agent has on record as held by the proxy can be determined again; the acknowledged pin gauge is written"
 )
 
 // ResponseDelivery is the cache's ack.DeliveryObserver: the clusters of a
@@ -589,9 +612,10 @@ func (c *SnapshotCache) ResponseAccepted(ctx context.Context, accepted ack.Accep
 //     sample from a proxy that is already in sync (#1483), and what corrects
 //     the record after a stream is lost with an answer in flight.
 //
-// A version is a hash of the cluster's bytes, so "the proxy holds version V"
-// is "the proxy holds exactly the cluster this agent published as V", and its
-// pin class is the one the snapshot that published V counted it under.
+// A version is a hash of the cluster's bytes, so "the proxy accepted version
+// V" is "the proxy accepted exactly the cluster this agent published as V",
+// and its pin class is the one the last snapshot that published V counted it
+// under.
 //
 // What it cannot know, by construction:
 //
@@ -608,7 +632,7 @@ func (c *SnapshotCache) ResponseAccepted(ctx context.Context, accepted ack.Accep
 //     is an observable gauge and has no sample while this lasts.
 //   - The class of a cluster the proxy states and the agent neither publishes
 //     nor has a record of (restateLocked): the same, "not written", unless its
-//     name is of a family that carries no pin. A cluster the agent does
+//     name is of a family the pin gauges do not count. A cluster the agent does
 //     publish that is not a cluster entry is in no count.
 //   - What the proxy states is what it ACCEPTED, not what it runs. Envoy
 //     applies the valid clusters of a response it then rejects as a whole,
@@ -627,13 +651,15 @@ func (c *SnapshotCache) ResponseAccepted(ctx context.Context, accepted ack.Accep
 // (TestAckedPinGaugeKeepsAFloorWhoseRemovalWasRejected). One whose cluster was
 // never published, or whose removal the proxy accepted, is not in this gauge.
 //
-// It logs only when the acknowledged counts CHANGE, so a steady state is
-// silent however many updates are acknowledged in it.
+// It logs when the acknowledged counts CHANGE, and when the state becomes
+// unknown or known again; a steady state is silent however many updates are
+// acknowledged in it.
 //
 // Safe to call from the xDS stream's goroutine: it takes the acknowledged
 // state's own mutex and, under it, only the gauge's leaf mutex and the log
 // handler; never snapshotMu or clusterMu. It walks every cluster record once
-// (BenchmarkAckedPinsAccept: about 25 microseconds at 2,000 cluster entries).
+// (BenchmarkAckedPinsAccept measures it: tens of microseconds at 2,000
+// cluster entries on a workstation, growing with the number of entries).
 //
 // The state change and its report are one critical section, so that the gauge
 // is written in the order the state changed (ackedPins).

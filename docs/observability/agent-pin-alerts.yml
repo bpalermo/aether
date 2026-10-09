@@ -141,13 +141,14 @@ groups:
       # count for the clusters the proxy has ACCEPTED, kept cluster by cluster
       # (#1508): each cluster is counted at the version the proxy last
       # acknowledged, or stated when it opened its stream. This fires when the
-      # proxy holds MORE unpinned clusters than the agent now publishes: the
-      # agent has pinned them (or dropped them) and the proxy has not taken
-      # the update. The usual cause is a proxy rejecting cluster updates:
+      # proxy has accepted MORE unpinned clusters than the agent now publishes:
+      # the agent has pinned them (or dropped them) and the proxy has not
+      # accepted the update. The usual cause is a proxy rejecting cluster updates:
       #   increase(aether_agent_xds_nacks_total{aether_xds_type_url=~".*Cluster"}[30m])
       # A rejected cluster stays at the version the proxy last accepted through
       # every later ACK of other clusters, so the rule keeps firing until the
-      # proxy accepts that cluster. (Agents before #1508 moved the whole gauge
+      # proxy accepts that cluster (or the gauge stops being written, the
+      # absent cases below). (Agents before #1508 moved the whole gauge
       # to the snapshot of the last cluster ACK, and the rule resolved on the
       # next ACK of any other cluster.)
       #
@@ -160,7 +161,7 @@ groups:
       #
       # When it is absent. Not after an ordinary agent restart: a reconnecting
       # proxy states the clusters it holds, and its answer to the agent's first
-      # response is the gauge's first sample within about a second (#1483;
+      # response is the gauge's first sample, normally within a second (#1483;
       # agents before it had no series until a cluster next changed). It is
       # absent until a proxy has answered this agent process at all (a
       # standby, a proxy that never connected); once it has samples a stream
@@ -170,7 +171,9 @@ groups:
       # MISSES (#1509), after an agent restart for as long as the proxy
       # rejects a cluster it holds an older version of: the new agent process
       # never published that version, cannot count it, and writes no gauge
-      # rather than one that leaves the cluster out. A divergence that was
+      # rather than one that leaves the cluster out. The same when the proxy
+      # rejects the removal of a mesh cluster the agent no longer publishes
+      # and has no record of. A divergence that was
       # firing resolves when the old samples leave the lookback. The NACK
       # counter above moves once for each response the proxy rejects.
       #
@@ -180,7 +183,7 @@ groups:
       # a proxy that rejects that update and goes on serving TLS without a pin
       # would be silent in a comparison of sums. Both gauges carry a series for
       # every reason, zero included, so each reason has both sides. The value
-      # is the number of clusters the proxy holds beyond what is published,
+      # is the number of clusters the proxy has accepted beyond what is published,
       # added up over the reasons.
       #
       # One direction only. The reverse (acknowledged below published) is an
