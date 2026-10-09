@@ -454,9 +454,20 @@ failing() {
 short_list() { # shas on stdin -> `aaaaaaaaaaaa`, `bbbbbbbbbbbb`
 	awk '{ printf "%s`%s`", (NR > 1 ? ", " : ""), substr($0, 1, 12) }'
 }
+# What a dry run prints is the writes the real step would make, one line
+# `DRY RUN: would <open|comment on|close> ...` for each, in order. An issue it
+# would have opened has no number: NEW_ISSUE stands for it afterwards, so that
+# a second entry is a comment on that issue, as it is for real, and not a
+# second issue.
+NEW_ISSUE="new"
 comment() { # issue, body
 	if [ "$dry" = true ]; then
-		printf 'DRY RUN: would comment on #%s:\n%s\n' "$1" "$2"
+		# NEW_ISSUE: the issue this dry run said it would open.
+		if [ "$1" = "$NEW_ISSUE" ]; then
+			printf 'DRY RUN: would comment on the issue it would open:\n%s\n' "$2"
+		else
+			printf 'DRY RUN: would comment on #%s:\n%s\n' "$1" "$2"
+		fi
 	else
 		gh api -X POST "repos/${repo}/issues/$1/comments" -f "body=$2" --jq '.id // empty' >/dev/null ||
 			die "could not comment on #$1; re-run this job"
@@ -521,10 +532,9 @@ if [ "$verdict" = clear ]; then
 			"The post-merge run of \`${sha:0:12}\` passes now: ${run_url}" "" "$rest")"
 		# Decide from what is on the issue AFTER this write, not from the
 		# reading before it: another watcher may have written since.
-		if [ "$dry" != true ]; then
-			read_issues
-			[ -z "$still" ] || echo "#${oldest} stays open. Still failing: $(short_list <<<"$still")"
-		fi
+		# (A dry run wrote nothing: what it worked out above is all it has.)
+		[ "$dry" = true ] || read_issues
+		[ -z "$still" ] || echo "#${oldest} stays open. Still failing: $(short_list <<<"$still")"
 	elif [ -n "$still" ]; then
 		echo "${sha:0:12} is not recorded as failing: its green run leaves #${oldest} open (a run tests only what its own merge reaches). Still failing: $(short_list <<<"$still")"
 	fi
@@ -566,6 +576,7 @@ file_entry() { # entry
 		"_Filed automatically by \`main-post-merge-watch\`; this issue is reused while any commit named on it is failing. A commit is cleared when a re-run of its own run passes (each entry gives the command for its run), and the issue closes itself when none is left. A green run of another commit never closes it. When a later commit fixed the failure, close this issue from that pull request (\`Closes #<this issue>\`) or by hand. See docs/runbook.md, \"The post-merge run\"._")"
 	if [ "$dry" = true ]; then
 		printf 'DRY RUN: would open "%s" (labels: %s) with:\n%s\n' "$ISSUE_TITLE" "${ISSUE_LABELS[*]}" "$body"
+		oldest="$NEW_ISSUE"
 		return 0
 	fi
 	for l in "${ISSUE_LABELS[@]}"; do

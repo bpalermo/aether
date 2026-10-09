@@ -801,6 +801,16 @@ no_issues
 step 0 "dry run of a run with an unrecorded earlier failure" DRY_RUN=true &&
 	check "dry run with an earlier failure: nothing is written" test "$(writes) $(open_numbers)" = "0 "
 check "dry run with an earlier failure: prints both" test "$(grep -c '^<!-- main-post-merge-watch:failed:' "$TMP/log")" = 2
+# ... as the writes the real step makes: ONE issue for the older attempt, and
+# the newer one as a comment on it. Not two issues.
+check "dry run with an earlier failure: one issue would be opened" test "$(grep -c '^DRY RUN: would open ' "$TMP/log")" = 1
+check "dry run with an earlier failure: the other attempt would be a comment on that issue" \
+	test "$(grep -c '^DRY RUN: would comment on the issue it would open:$' "$TMP/log")" = 1
+check "dry run with an earlier failure: the issue is opened first" \
+	test "$(grep -n '^DRY RUN: would ' "$TMP/log" | head -n 1 | cut -d: -f2-)" = "$(grep '^DRY RUN: would open ' "$TMP/log")"
+no_issues
+step 0 "the same, for real" &&
+	check "the real step makes those writes: one issue, one comment" test "$(open_numbers) $(ncomments 101) $(grep -c -- '-X POST repos/o/r/issues ' "$TMP/gh.log")" = "101 1 1"
 jobs diff=success test=cancelled main=failure
 
 reset
@@ -1026,6 +1036,39 @@ run "$A" success 2
 step 0 "dry run of the green run that would close it" DRY_RUN=true &&
 	check "dry run: nothing is closed" test "$(writes) $(open_numbers)" = "0 101"
 check "dry run: says what it would do" grep -q '^DRY RUN: would close #101' "$TMP/log"
+check "dry run of a green run: the pass would be a comment on the issue, before the close" \
+	test "$(grep '^DRY RUN: would ' "$TMP/log" | tr '\n' '|')" = "DRY RUN: would comment on #101:|DRY RUN: would close #101 (completed)|"
+check "dry run of a green run: prints the record it would write" grep -qFx "<!-- main-post-merge-watch:passed:${A}:4242/2 -->" "$TMP/log"
+# Every other write the step has, dry, next to what the real step does.
+# A failure with the issue open: a comment on it, no second issue.
+RUN_ID=4343
+run "$B" failure
+jobs test=failure main=failure
+step 0 "dry run of a failure with the issue open" DRY_RUN=true &&
+	check "dry run, issue open: one comment on it, nothing opened, nothing written" \
+		test "$(grep '^DRY RUN: would ' "$TMP/log" | tr '\n' '|') $(writes)" = "DRY RUN: would comment on #101:| 0"
+step 0 "the same, for real" &&
+	check "the real step: one comment on the open issue" test "$(open_numbers) $(ncomments 101)" = "101 1"
+# A green run that clears one commit of two: a comment, and no close; the log
+# says the issue stays open, as the real step's does.
+RUN_ID=4242
+run "$A" success 2
+step 0 "dry run of a green run that leaves another commit failing" DRY_RUN=true &&
+	check "dry run, one of two cleared: one comment, no close" \
+		test "$(grep '^DRY RUN: would ' "$TMP/log" | tr '\n' '|') $(writes)" = "DRY RUN: would comment on #101:| 0"
+check "dry run, one of two cleared: says the issue stays open, and for what" grep -q "^#101 stays open. Still failing: \`${B:0:12}\`$" "$TMP/log"
+step 0 "the same, for real" &&
+	check "the real step: the pass is a comment, the issue stays open" test "$(open_numbers) $(ncomments 101)" = "101 2"
+check "the real step says the same about the issue" grep -q "^#101 stays open. Still failing: \`${B:0:12}\`$" "$TMP/log"
+# The same green run again: the commit is not failing any more, nothing to say.
+step 0 "dry run of a green run already recorded" DRY_RUN=true &&
+	check "dry run, already cleared: no write is announced" test "$(grep -c '^DRY RUN: would ' "$TMP/log") $(writes)" = "0 0"
+# A failure already recorded: nothing.
+RUN_ID=4343
+run "$B" failure
+step 0 "dry run of a failure already recorded" DRY_RUN=true &&
+	check "dry run, already recorded: no write is announced" test "$(grep -c '^DRY RUN: would ' "$TMP/log") $(writes)" = "0 0"
+RUN_ID=4242
 
 # --- 3. what reaches the issue ------------------------------------------------------------------
 # The run id is the one value taken from the event. Anything but digits is refused
