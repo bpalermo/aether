@@ -31,7 +31,8 @@
 #                                     at the window's end, which returns the
 #                                     samples themselves, of every series that
 #                                     has any -- a pod that was replaced mid-run
-#                                     included
+#                                     included. (The agents' gauge is read the
+#                                     same way, this one query only.)
 #   the count                         the sum of the steps from one sample to
 #                                     the next. With no reset that is exactly
 #                                     end minus start. A sample BELOW the one
@@ -60,22 +61,33 @@
 #   PROBER   verdict=PASS|FAIL|UNPROVEN and the sums
 #   UNPINNED per node, per reason when it moved, then
 #            verdict=PASS|FAIL|UNPROVEN: the increase of
-#            aether_agent_identity_cluster_unpinned_total, which must be 0. It
-#            counts TLS clusters published without their server-identity pin
-#            (#832) and rests at zero since #1421. An agent restarts in every
-#            soak (two rolls), so its counter resets, or a new series is born:
-#            both are counted whole, as above. Since #1424 the counter has a
-#            `reason` label (why the pin was empty), so there are four series
-#            per agent (three before #1482, which added tls_not_published);
-#            `UNPINNED reason=` sums each one that moved. The verdict is the
-#            same sum either way, whatever the reason: under
-#            trust_domain_unknown and tls_not_published the agent published no
-#            TLS at all, and a soak still has to explain why an agent was in
-#            that state. The agent's gauges
-#            (aether_agent_snapshot_tls_clusters and
-#            aether_agent_xds_acked_tls_clusters, #1425) are not graded here: a
-#            gauge is sampled, and an unpinned window shorter than the export
-#            interval is in the counter and may be in no gauge sample.
+#            aether_agent_identity_cluster_unpinned_total, graded per reason
+#            (see "UNPINNED verdict"). The counter counts mesh cluster entries
+#            with no server-identity pin (#832), on every snapshot, and rests
+#            at zero since #1421. An agent restarts in every soak (two rolls),
+#            so its counter resets, or a new series is born: both are counted
+#            whole, as above. Since #1424 the counter has a `reason` label (why
+#            the pin was empty), so there are four series per agent (three
+#            before #1482, which added tls_not_published). Its lines:
+#              UNPINNED node=       per node: the sum, series, born, resets
+#              UNPINNED reason=     per reason that moved: count, nodes, and
+#                                   class=gap|no_tls|unknown|unlabelled
+#              UNPINNED moved:      each series that moved, first and last sample
+#              UNPINNED steps:      WHEN it moved: the first six samples that
+#                                   showed an increase, to hold against the
+#                                   agent rolls in churn.log. A step happened
+#                                   in the export interval before its sample.
+#              UNPINNED published:  what the agent's gauge
+#                                   aether_agent_snapshot_tls_clusters
+#                                   {pin="unpinned"} (#1425) held: per node,
+#                                   job and reason with a non-zero sample, how
+#                                   many samples, the longest run of them, the
+#                                   most entries, and the value at the
+#                                   window's end. `absent:` and `not graded:`
+#                                   are its coverage (see the verdict).
+#              UNPINNED silent: / missing: / ended:   the counter's coverage
+#            The acknowledged gauge (aether_agent_xds_acked_tls_clusters) is
+#            not read.
 #   LOGS     with --logs-file / --logs-url: AETHER_PROBE_FAIL lines in the
 #            window (one per failed probe, plus the `suppressed` counts of the
 #            capped minutes) against the counters, per tier and result:
@@ -89,10 +101,44 @@
 #             bars are in README.md, "Grading" (liveness 0; the dns_* classes 0).
 #   UNPROVEN  no prober series in the window, or no success counted: the SLI
 #             saw nothing, and its zeros mean nothing.
-# UNPINNED verdict: PASS = 0; FAIL = any; UNPROVEN = no series at all (the
-# counter is seeded at zero, so absent means it does not reach this Prometheus),
-# or a node whose agent has no sample in the window (`UNPINNED silent:`,
-# `UNPINNED missing:`): a sum over the nodes that did report is not the fleet's.
+# UNPINNED verdict (#1491). The reasons are a closed set and two kinds of fact,
+# so each is graded for what it is:
+#   no_namespace_metadata, pin_not_rendered   (class gap)
+#       TLS was published and checks no server identity: the mTLS validation
+#       gap. FAIL on any movement of the counter, and on any non-zero sample
+#       of the gauge (a gap that stands through a window with no new snapshot
+#       does not move the counter). The text names reason, count and nodes.
+#   trust_domain_unknown, tls_not_published   (class no_tls)
+#       the agent published NO TLS for those entries. Every agent start does
+#       that for a moment, and a soak rolls the agents twice. Reported, with
+#       count and nodes; not a failure by itself. FAIL only when the state
+#       STOOD: a run of non-zero gauge samples that spans PENDING_S (300 s) or
+#       more, anywhere in the window -- an agent that did not get its trust
+#       domain or its SVID, or endpoints with no namespace metadata whose TLS
+#       is not published (which is the gap, waiting). The counter cannot say
+#       this: it adds the entry count on every snapshot, so its size is entries
+#       times snapshots, not time.
+#   any other value                           (class unknown)
+#       an agent newer than this script. FAIL on any movement: a reason this
+#       script does not know is not taken for a harmless one.
+#   no `reason` label                         (class unlabelled)
+#       an agent from before #1424. Its one series holds every reason, and
+#       whether TLS was published under what it counted is not in it: FAIL on
+#       any movement, as before #1491 and with the same text. Such an agent
+#       has no gauge either (`UNPINNED published: not graded:`).
+# PASS = none of those. UNPROVEN = no series at all (the counter is seeded at
+# zero, so absent means it does not reach this Prometheus); a node whose agent
+# has no sample in the window (`UNPINNED silent:`, `UNPINNED missing:`): a sum
+# over the nodes that did report is not the fleet's; or a node and job whose
+# counter has the `reason` label and whose gauge has no sample in the window
+# (`UNPINNED published: absent:`): the gauge is written on every snapshot,
+# zeros included, so an absent one is not a zero, and how long a state stood
+# there was not seen.
+# What the gauge cannot show: a state shorter than one export interval (a
+# minute) may be in no sample, so a run is a LOWER bound of how long it stood;
+# a run is not carried across more than STALE_S (300 s) without a sample; and
+# a state still non-zero at the window's end for less than PENDING_S is an
+# agent start that the window cut (said on its `published:` line, not graded).
 #
 # A series with no sample in the window (#1469). The window query returns only
 # series that have a sample in it, so a series the query at T0 returned and the
@@ -188,6 +234,24 @@ set -uo pipefail
 
 PROBE_METRIC="aether_probe_requests_total"
 UNPINNED_METRIC="aether_agent_identity_cluster_unpinned_total"
+# The agent's gauge of what its last snapshot published (#1425): how many
+# cluster entries have no pin, per `reason`, now. The counter says THAT a state
+# was reported, summed over snapshots; only this says for how long it stood.
+PUBLISHED_METRIC="aether_agent_snapshot_tls_clusters"
+# The counter's `reason` label is a closed set
+# (agent/internal/xds/cache/cachemetrics/cachemetrics.go, UnpinnedCause), and
+# its two halves are different facts. GAP: TLS was published and checks no
+# server identity -- the mTLS validation gap. NO_TLS: the agent published no
+# TLS for the entry at all -- expected for a moment at an agent start. A value
+# in neither list is a reason this script does not know: it fails the gate.
+GAP_REASONS="no_namespace_metadata,pin_not_rendered"
+NO_TLS_REASONS="trust_domain_unknown,tls_not_published"
+# How long a NO_TLS state may stand, in the gauge's samples, before it is no
+# longer an agent start. The same number, for the same reasons, as `for: 5m` of
+# AetherMeshClusterPinPending (docs/observability/agent-pin-alerts.yml): an
+# agent without its SVID after 2 minutes reports NotReady, plus two export
+# intervals to see the state twice past that, plus one for jitter.
+PENDING_S=300
 # A series whose last sample is older than this at the window's end has ended
 # (Prometheus's own lookback for an instant query).
 STALE_S=300
@@ -345,6 +409,9 @@ pq() {
 # nothing: `fresh` when its sample at the start is at most $fresh seconds old
 # (alive at T0), not fresh when it is older or its time is not known (it had
 # ended before the window). See "A series with no sample in the window".
+# $keep: also keep WHEN the counter stepped (`steps`: the sample that showed
+# each increase, and by how much). Asked for the unpinned counter only: a
+# prober's success counter steps at every sample.
 # shellcheck disable=SC2016 # jq variables, not the shell's
 JQ_SERIES='
 def key: del(.__name__) | [to_entries[] | "\(.key)=\(.value)"] | sort | join(",");
@@ -354,16 +421,17 @@ def key: del(.__name__) | [to_entries[] | "\(.key)=\(.value)"] | sort | join(","
 | [ $win[0].data.result[]
     | . as $s
     | $base[$s.metric | key] as $b
-    | (reduce $s.values[] as $p ({prev: ($b // 0), inc: 0, resets: []};
+    | (reduce $s.values[] as $p ({prev: ($b // 0), inc: 0, resets: [], steps: []};
         ($p[1] | tonumber) as $v
-        | if $v < .prev
-          then .inc += $v | .resets += [{at: $p[0], before: .prev, after: $v}]
-          else .inc += ($v - .prev) end
+        | (if $v < .prev then $v else $v - .prev end) as $d
+        | if $v < .prev then .resets += [{at: $p[0], before: .prev, after: $v}] else . end
+        | .inc += $d
+        | if $keep and $d > 0 then .steps += [{t: $p[0], d: $d}] else . end
         | .prev = $v)) as $w
     | { labels: ($s.metric | del(.__name__)), born: ($b == null), silent: false, fresh: true,
         first: {t: $s.values[0][0], v: ($s.values[0][1] | tonumber)},
         last: {t: $s.values[-1][0], v: ($s.values[-1][1] | tonumber)},
-        inc: $w.inc, resets: $w.resets } ]
+        inc: $w.inc, resets: $w.resets, steps: $w.steps } ]
 + [ $start[0].data.result[]
     | (.metric | key) as $k
     | select($inwin[$k] | not)
@@ -371,7 +439,7 @@ def key: del(.__name__) | [to_entries[] | "\(.key)=\(.value)"] | sort | join(","
     | { labels: (.metric | del(.__name__)), born: false, silent: true,
         fresh: ($t != null and $t0 - $t <= $fresh),
         first: {t: $t, v: (.value[1] | tonumber)}, last: {t: $t, v: (.value[1] | tonumber)},
-        inc: 0, resets: [] } ]'
+        inc: 0, resets: [], steps: [] } ]'
 
 SEL=""
 [ -z "$MATCH" ] || SEL="{$MATCH}"
@@ -387,10 +455,11 @@ pq probe/window "$PROBE_METRIC${SEL}[${W}s]" "$END_S" "$TMPD/pw.json" matrix
 pq unpinned/start "$UNPINNED_METRIC$SEL" "$START_S" "$TMPD/u0.json" vector
 pq unpinned/start-time "timestamp($UNPINNED_METRIC$SEL)" "$START_S" "$TMPD/ut.json" vector
 pq unpinned/window "$UNPINNED_METRIC${SEL}[${W}s]" "$END_S" "$TMPD/uw.json" matrix
+pq unpinned/published "$PUBLISHED_METRIC{pin=\"unpinned\"${MATCH:+,$MATCH}}[${W}s]" "$END_S" "$TMPD/gw.json" matrix
 jq -n --slurpfile start "$TMPD/p0.json" --slurpfile at "$TMPD/pt.json" --slurpfile win "$TMPD/pw.json" \
-	--argjson t0 "$START_S" --argjson fresh "$FRESH_S" "$JQ_SERIES" >"$TMPD/p.json" || die "could not read the prober samples"
+	--argjson t0 "$START_S" --argjson fresh "$FRESH_S" --argjson keep false "$JQ_SERIES" >"$TMPD/p.json" || die "could not read the prober samples"
 jq -n --slurpfile start "$TMPD/u0.json" --slurpfile at "$TMPD/ut.json" --slurpfile win "$TMPD/uw.json" \
-	--argjson t0 "$START_S" --argjson fresh "$FRESH_S" "$JQ_SERIES" >"$TMPD/u.json" || die "could not read the unpinned-cluster samples"
+	--argjson t0 "$START_S" --argjson fresh "$FRESH_S" --argjson keep true "$JQ_SERIES" >"$TMPD/u.json" || die "could not read the unpinned-cluster samples"
 
 # --- the prober ------------------------------------------------------------------
 # shellcheck disable=SC2016
@@ -432,23 +501,58 @@ P_VERDICT="$(sed -n 's/^PROBER  verdict=\([A-Z]*\) .*/\1/p' "$TMPD/p.out")"
 
 # --- the unpinned-cluster counter (#1423) ----------------------------------------
 # One series per node up to #1424; one per node and `reason` since (four
-# reasons, each seeded at zero; three before #1482). Both shapes are graded alike: every series is
-# summed, whatever its labels. A series with no `reason` label is an agent from
-# before #1424 and is printed as reason=-.
+# reasons, each seeded at zero; three before #1482). Every series is counted,
+# whatever its labels; what its count MEANS depends on its reason (#1491), and
+# that is its class:
+#   gap         a reason of GAP_REASONS: TLS published without its pin
+#   no_tls      a reason of NO_TLS_REASONS: no TLS published at all
+#   unknown     a `reason` this script does not know
+#   unlabelled  no `reason` label: an agent from before #1424, printed reason=-
+# See "UNPINNED verdict" in the header for what each does to the verdict.
+#
+# How long a state stood is not in the counter: it adds the number of unpinned
+# entries on EVERY snapshot, so 200 is two entries on a hundred snapshots or a
+# hundred entries on two. The gauge's samples say it: a run of consecutive
+# non-zero samples (no two more than STALE_S apart, the continuity Prometheus
+# itself gives an alert's `for:`), from its first sample to its last. That is
+# a LOWER bound, at the export interval's resolution: a state shorter than one
+# interval may be in no sample at all, which is why the counter stays the
+# measure of whether it happened.
 #
 # Coverage (#1469): the sum is the fleet's only when every node's agent was
 # seen. `silent`: an exporter (node and job) that was alive at the window's
 # start and has no sample in the window, under any pod or reason. `missing`: a
 # node whose prober reported in the window and whose counter did not. Either
 # makes the gate UNPROVEN. `ended`: one that had stopped before the window; said,
-# not graded.
+# not graded. And the gauge's coverage (#1491): a node and job whose counter has
+# the `reason` label and whose gauge has no sample in the window is UNPROVEN
+# too -- both arrived in the same agent (#1424, #1425), the gauge is written on
+# every snapshot, zeros included, so an absent one is not a zero.
 # shellcheck disable=SC2016
-jq -r --arg node "$NODE_LABEL" --arg job "$JOB_LABEL" --argjson start "$START_S" --argjson fresh "$FRESH_S" --slurpfile probe "$TMPD/p.json" '
+jq -r --arg node "$NODE_LABEL" --arg job "$JOB_LABEL" --argjson start "$START_S" --argjson end "$END_S" \
+	--argjson fresh "$FRESH_S" --argjson stale "$STALE_S" --argjson pending "$PENDING_S" \
+	--arg gap "$GAP_REASONS" --arg notls "$NO_TLS_REASONS" --arg gauge "$PUBLISHED_METRIC" \
+	--slurpfile probe "$TMPD/p.json" --slurpfile pub "$TMPD/gw.json" '
 def l($k): .labels[$k] // "-";
 def iso: if . == null then "unknown" else floor | todate end;
 def n: if . == floor then floor else . end;
 def age: if . == null then "of unknown age" else "\($start - . | floor) s old" end;
 def unit: [l($node), l($job)];
+def nodes: map(l($node)) | unique | join(",");
+def cls: .labels.reason as $r
+  | if $r == null then "unlabelled"
+    elif ($gap | split(",") | index($r)) != null then "gap"
+    elif ($notls | split(",") | index($r)) != null then "no_tls"
+    else "unknown" end;
+# The runs of consecutive non-zero samples of one gauge series.
+def runs: reduce .values[] as $p ({done: [], cur: null};
+    ($p[1] | tonumber) as $v
+    | if $v > 0 and .cur != null and $p[0] - .cur.to <= $stale
+      then .cur.to = $p[0] | .cur.n += 1 | .cur.max = ([.cur.max, $v] | max)
+      else (if .cur != null then .done += [.cur] | .cur = null else . end)
+        | (if $v > 0 then .cur = {from: $p[0], to: $p[0], n: 1, max: $v} else . end)
+      end)
+  | .done + (if .cur != null then [.cur] else [] end);
 map(select(.silent | not)) as $all
 | ($all | map(unit) | unique) as $covered
 | (map(select(.silent)) | group_by(unit) | map({node: (.[0] | l($node)), job: (.[0] | l($job)), unit: (.[0] | unit),
@@ -458,25 +562,71 @@ map(select(.silent | not)) as $all
 | ($lost | map(select(.fresh | not))) as $ended
 | ([$probe[0][] | select(.silent | not) | l($node)] | unique
     | map(select(. as $n | ($all | any(.[]; l($node) == $n) | not) and ($silent | any(.[]; .node == $n) | not)))) as $missing
+| [ $pub[0].data.result[] | select((.values | length) > 0)
+    | {labels: (.metric | del(.__name__)), runs: runs, last: {t: .values[-1][0], v: (.values[-1][1] | tonumber)}} ] as $g
+| ($g | map(unit) | unique) as $gunits
+| ($g | group_by([l($node), l($job), l("reason")])
+    | map({node: (.[0] | l($node)), job: (.[0] | l($job)), reason: (.[0] | l("reason")), class: (.[0] | cls),
+        nonzero: (map(.runs[].n) | add // 0), longest: (map(.runs[] | .to - .from) | max // 0),
+        max: (map(.runs[].max) | max // 0), at_end: (map(select(.last.t >= $end - $stale) | .last.v) | add // 0)})
+    | map(select(.nonzero > 0))) as $held
+| ($held | map(select(.class != "no_tls"))) as $gheld
+| ($held | map(select(.class == "no_tls" and .longest >= $pending))) as $standing
+| ($all | map(select(.labels | has("reason")) | unit) | unique | map(select(. as $u | $gunits | index([$u]) | not))) as $nogauge
+| ($all | map(unit) | unique | map(select(. as $u | ($gunits | index([$u]) | not) and ($nogauge | index([$u]) | not)))) as $ungraded
 | $all
 | (map(.inc) | add // 0) as $inc
+| (map(select(.inc > 0))) as $moved
+| def inc($c): $moved | map(select(cls == $c) | .inc) | add // 0;
+  def by_reason($c): $moved | map(select(cls == $c)) | group_by(l("reason"))
+    | map("reason=\(.[0] | l("reason")) count=\(map(.inc) | add | n) nodes=\(nodes)") | join(", ");
+  def gauge_of($c): $gheld | map(select(.class == $c) | "reason=\(.reason) node=\(.node) published=\(.max | n)") | join(", ");
+  (inc("gap") > 0 or inc("unknown") > 0 or inc("unlabelled") > 0 or ($gheld | length) > 0 or ($standing | length) > 0) as $failed
 | ( group_by(l($node))[]
     | "UNPINNED node=\(.[0] | l($node)) count=\(map(.inc) | add | n) series=\(length) born_in_window=\(map(select(.born)) | length) resets=\(map(.resets | length) | add)" ),
-  ( map(select(.inc > 0)) | group_by(l("reason"))[]
-    | "UNPINNED reason=\(.[0] | l("reason")) count=\(map(.inc) | add | n) nodes=\(map(l($node)) | unique | join(","))" ),
-  ( $all[] | select(.inc > 0) | . as $s
+  ( $moved | group_by(l("reason"))[]
+    | "UNPINNED reason=\(.[0] | l("reason")) count=\(map(.inc) | add | n) nodes=\(nodes) class=\(.[0] | cls)" ),
+  ( $moved[] | . as $s
     | "UNPINNED moved: node=\(l($node)) \(.labels | del(.[$node]) | to_entries | map("\(.key)=\(.value)") | join(" ")) count=\(.inc | n) first=\(.first.v | n)@\(.first.t | iso) last=\(.last.v | n)@\(.last.t | iso)\(if .born then " (absent at the start: counted from 0)" else "" end)\(if (.resets | length) > 0 then " (reset at \(.resets | map(.at | iso) | join(",")))" else "" end)" ),
+  ( $moved[]
+    | "UNPINNED steps: node=\(l($node)) job=\(l($job)) reason=\(l("reason")) at=\(.steps[:6] | map("\(.t | iso)(+\(.d | n))") | join(","))\(if (.steps | length) > 6 then " and \((.steps | length) - 6) more" else "" end)  (the sample that showed each increase: it happened in the export interval before it)" ),
+  ( $held[]
+    | "UNPINNED published: node=\(.node) job=\(.job) reason=\(.reason) class=\(.class) nonzero_samples=\(.nonzero) longest=\(.longest | floor)s max=\(.max | n) at_end=\(.at_end | n)  "
+      + (if .class != "no_tls" then "(the gauge held it: fails the gate)"
+         elif .longest >= $pending then "(no TLS published for \($pending) s or more: not an agent start; fails the gate)"
+         else "(less than \($pending) s: reported, not a failure)"
+           + (if .at_end > 0 then " -- and still non-zero at the end of the window: whether it recovered is after it" else "" end) end) ),
   ( $silent[]
     | "UNPINNED silent: node=\(.node) job=\(.job) series=\(.series) last_sample=\(.last | iso)  (alive at the start, its sample there \(.last | age), and no sample in the window from this node and job: its counter was not seen)" ),
   ( $missing[]
     | "UNPINNED missing: node=\(.)  (a prober on this node has samples in the window and the counter has none from it: its agent was not seen)" ),
   ( $ended[]
     | "UNPINNED ended: node=\(.node) job=\(.job) series=\(.series) last_sample=\(.last | iso)  (the query at the start still returned it, with a sample \(.last | age): more than \($fresh) s, so it had stopped before the window and is not in it)" ),
-  "UNPINNED verdict=\(if length == 0 or ($silent | length) > 0 or ($missing | length) > 0 then "UNPROVEN" elif $inc > 0 then "FAIL" else "PASS" end) increase=\($inc | n) series=\(length) nodes=\(map(l($node)) | unique | length) resets=\(map(.resets | length) | add // 0)"
+  ( $nogauge[]
+    | "UNPINNED published: absent: node=\(.[0]) job=\(.[1])  (its counter has the `reason` label and \($gauge){pin=\"unpinned\"} has no sample in the window from it: how long a state stood there was not seen, and an absent gauge is not a zero)" ),
+  ( if ($ungraded | length) > 0
+    then "UNPINNED published: not graded: nodes=\($ungraded | map(.[0]) | unique | join(","))  (no `reason` label and no gauge: agents from before #1424. How long a state stood is not graded there; any movement of their counter fails)"
+    else empty end ),
+  "UNPINNED verdict=\(if length == 0 or ($silent | length) > 0 or ($missing | length) > 0 or ($nogauge | length) > 0 then "UNPROVEN" elif $failed then "FAIL" else "PASS" end) increase=\($inc | n) series=\(length) nodes=\(map(l($node)) | unique | length) resets=\(map(.resets | length) | add // 0)"
   + (if length == 0 then "  (no series: the counter is seeded at zero, so an absent one is not a zero -- it does not reach this Prometheus, or --match is wrong)"
      elif ($silent | length) > 0 or ($missing | length) > 0 then "  (no sample in the window from \([$silent[].node, $missing[]] | unique | join(",")): the sum is over the nodes that reported, not the fleet"
        + (if $inc > 0 then "; and the counter moved on those" else "" end) + ")"
-     elif $inc > 0 then "  (a TLS cluster was published without its server-identity pin: the agent logged which and why, `mesh clusters published with no server-identity SAN pin`; what each reason means is in docs/runbook.md, \"The unpinned-cluster signal\")" else "" end)
+     elif ($nogauge | length) > 0 then "  (the gauge \($gauge) has no sample in the window from \($nogauge | map(.[0]) | unique | join(",")): how long a state stood there was not seen"
+       + (if $inc > 0 then "; and the counter moved" else "" end) + ")"
+     elif $failed then "  (" + ([
+         (if inc("unlabelled") > 0 then "a TLS cluster was published without its server-identity pin: the agent logged which and why, `mesh clusters published with no server-identity SAN pin`; what each reason means is in docs/runbook.md, \"The unpinned-cluster signal\" -- \(by_reason("unlabelled")), from agents with no `reason` label (before #1424): whether TLS was published under them is not in the counter, so any movement fails" else empty end),
+         (if inc("gap") > 0 or (gauge_of("gap") | length) > 0 then "TLS was published without its server-identity pin, the mTLS validation gap: "
+           + ([by_reason("gap"), gauge_of("gap")] | map(select(length > 0)) | join("; in the gauge: "))
+           + " -- the agent logged which clusters, `mesh clusters published with no server-identity SAN pin`; docs/runbook.md, \"The unpinned-cluster signal\"" else empty end),
+         (if inc("unknown") > 0 or (gauge_of("unknown") | length) > 0 or (gauge_of("unlabelled") | length) > 0 then "this script does not know "
+           + ([by_reason("unknown"), gauge_of("unknown"), gauge_of("unlabelled")] | map(select(length > 0)) | join("; in the gauge: "))
+           + ": an agent newer than this script reports a reason that is in neither GAP_REASONS (\($gap)) nor NO_TLS_REASONS (\($notls)), and it is not taken for a harmless one" else empty end),
+         (if ($standing | length) > 0 then "no TLS was published for \($pending) s or more: "
+           + ($standing | map("reason=\(.reason) node=\(.node) seconds=\(.longest | floor) published=\(.max | n)") | join(", "))
+           + " -- longer than an agent start: an agent without its trust domain or its SVID, or endpoints with no namespace metadata whose TLS is not published" else empty end)
+       ] | join(" | ")) + ")"
+     elif $inc > 0 then "  (no TLS cluster was published without its pin: \(by_reason("no_tls")) -- under these the agent published no TLS at all, which is expected at an agent start, and no such state stood for \($pending) s in the samples of the gauge. Compare `UNPINNED steps:` with the agent rolls in churn.log)"
+     else "" end)
 ' "$TMPD/u.json" >"$TMPD/u.out" || die "could not grade the unpinned-cluster samples"
 cat "$TMPD/u.out"
 U_VERDICT="$(sed -n 's/^UNPINNED verdict=\([A-Z]*\) .*/\1/p' "$TMPD/u.out")"

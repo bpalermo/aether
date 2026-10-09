@@ -53,7 +53,10 @@
 #     2026-10-08 shape: 40 raw, 37 as increase() counts), a counter reset, a
 #     replaced prober pod, the unpinned-cluster counter moving on a series born
 #     in the window, a Prometheus with neither metric, one that does not
-#     answer, and the cross-check against AETHER_PROBE_FAIL lines. And a series
+#     answer, and the cross-check against AETHER_PROBE_FAIL lines. The
+#     unpinned-cluster gate's verdict per reason (#1491): the validation gap,
+#     an agent start, a no-TLS state that stood, a reason the script does not
+#     know, a series with no reason label, an absent gauge. And a series
 #     the query at T0 returns that has no sample in the window (#1469): an
 #     agent silent for the whole window, a node whose agent never reports, pods
 #     replaced shortly before T0, a prober pod deleted right after it.
@@ -1826,6 +1829,7 @@ case "$url" in
 	case "$q" in
 	aether_probe_requests_total* | "timestamp(aether_probe_requests_total"*) m=probe ;;
 	aether_agent_identity_cluster_unpinned_total* | "timestamp(aether_agent_identity_cluster_unpinned_total"*) m=unpinned ;;
+	'aether_agent_snapshot_tls_clusters{pin="unpinned"'*) m=published ;;
 	*) m=unknown ;;
 	esac
 	case "$q" in "timestamp("*) k=start-time ;; *"["*) k=window ;; *) k=start ;; esac
@@ -1850,7 +1854,7 @@ case "$*" in
 	exit 1
 	;;
 esac
-case "$*" in *query=aether_probe_requests_total* | *query=timestamp%28aether_probe_requests_total*) m=probe ;; *) m=unpinned ;; esac
+case "$*" in *query=aether_probe_requests_total* | *query=timestamp%28aether_probe_requests_total*) m=probe ;; *query=aether_agent_snapshot_tls_clusters%7Bpin%3D%22unpinned%22*) m=published ;; *) m=unpinned ;; esac
 case "$*" in *query=timestamp%28*) k=start-time ;; *%5B*) k=window ;; *) k=start ;; esac
 cat "$FAKE_PROM_DIR/$m.$k.json"
 EOF
@@ -1886,12 +1890,17 @@ expect "$G" "grade born: the pod set did not change" '^PODS    at_start=5 at_end
 expect "$G" "grade born: the unpinned-cluster counter rests at its seeded zero on every node (#1423)" '^UNPINNED verdict=PASS increase=0 series=5 nodes=5 resets=0$' 1
 expect "$G" "grade born: one VERDICT line" '^VERDICT prober=FAIL unpinned=PASS logs=not-checked$' 1
 expect "$G" "grade born: the time of each sample at the start is asked for too (#1469)" '^QUERY   (probe|unpinned)/start-time  time=2026-10-08T00:10:00Z  timestamp\(aether_(probe_requests|agent_identity_cluster_unpinned)_total\)$' 2
-if [ "$(cut -f1 "$TMP/grade-queries.tsv" | sort -u)" = "http://prom.example:9090/api/v1/query" ] && [ "$(grep -c '' "$TMP/grade-queries.tsv")" -eq 6 ] &&
+if [ "$(cut -f1 "$TMP/grade-queries.tsv" | sort -u)" = "http://prom.example:9090/api/v1/query" ] && [ "$(grep -c '' "$TMP/grade-queries.tsv")" -eq 7 ] &&
 	[ "$(cut -f2 "$TMP/grade-queries.tsv" | sort -u | tr '\n' ' ')" = "$GT0 $((GT0 + 28800)) " ]; then
-	pass "grade born: six instant queries, to the URL it was given, at the window's two ends"
+	pass "grade born: seven instant queries, to the URL it was given, at the window's two ends"
 else
 	fail "grade born: the queries were: $(tr '\n' '|' <"$TMP/grade-queries.tsv")"
 fi
+expect "$G" "grade born: the seventh is the gauge of what the agents published, its unpinned series over the window (#1491)" '^QUERY   unpinned/published  time=2026-10-08T08:10:00Z  aether_agent_snapshot_tls_clusters\{pin="unpinned"\}\[28800s\]$' 1
+# These agents have no `reason` label (before #1424) and so no gauge: that is
+# said, and it is not UNPROVEN -- an agent that old never had one.
+# shellcheck disable=SC2016 # the backticks are the output's, not a substitution
+expect "$G" "grade born: agents with no reason label have no gauge, and that is said, not graded" '^UNPINNED published: not graded: nodes=worker-01,worker-02,worker-03,worker-04,worker-05  \(no `reason` label and no gauge: agents from before #1424\. ' 1
 # The RED reading: what increase() can see of the same samples. It needs two
 # samples of a series, so it counts from a series' FIRST sample in the window --
 # the count that created the series is not in it. (Prometheus's increase() also
@@ -1985,10 +1994,15 @@ expect "$G" "grade clean: the prober line" '^PROBER  verdict=PASS non_success=0 
 # A counter reset and a replaced pod, each handled and each said. prober-c's
 # container restarted (same series: 5,288,000 then 120,000); prober-e was
 # replaced by prober-f at T0+4h, four connection errors before it went. And an
-# agent rolled inside the window published two snapshots without a pin: a NEW
-# series, born at 2. The new agent is one with the `reason` label (#1424), so it
-# brings four series, one per reason, three of them resting at their seeded
-# zero; the agents that did not roll still have the one label-less series each.
+# agent rolled inside the window reported two entries without a pin before it
+# knew its trust domain: a NEW series, born at 2. The new agent is one with the
+# `reason` label (#1424), so it brings four series, one per reason, three of
+# them resting at their seeded zero; the agents that did not roll still have
+# the one label-less series each. Under trust_domain_unknown the agent
+# published no TLS, and its gauge is at zero in every sample: the state was
+# over within an export interval. That is an agent start, reported and not a
+# failure (#1491). RED before: `UNPINNED verdict=FAIL ... (a TLS cluster was
+# published without its server-identity pin`, VERDICT unpinned=FAIL.
 G="$TMP/grade-reset.log"
 run_grade reset "$G" --dir "$GD" --prometheus http://prom.example:9090
 show "prober-grade: a counter reset, a replaced prober pod, and an unpinned cluster after an agent roll" "$G"
@@ -2004,11 +2018,15 @@ expect "$G" "grade reset: the pod set" '^PODS    at_start=5 at_end=5 gone=1 new=
 expect "$G" "grade reset: the prober verdict counts liveness apart" '^PROBER  verdict=FAIL non_success=7 liveness_non_success=3 dns_class_non_success=0 ' 1
 expect "$G" "grade reset: the unpinned counter moved on one node, on a series born in the window (RED for increase(): 2 - 2 = 0)" '^UNPINNED moved: node=worker-03 .*pod=aether-agent-new reason=trust_domain_unknown count=2 first=2@2026-10-08T05:10:00Z last=2@2026-10-08T08:10:00Z \(absent at the start: counted from 0\)$' 1
 expect "$G" "grade reset: only the series that moved is a moved line (the two reasons at their seeded zero are not)" '^UNPINNED moved: ' 1
-expect "$G" "grade reset: per reason, for the reason that moved (#1424)" '^UNPINNED reason=trust_domain_unknown count=2 nodes=worker-03$' 1
+expect "$G" "grade reset: per reason, for the reason that moved (#1424)" '^UNPINNED reason=trust_domain_unknown count=2 nodes=worker-03 class=no_tls$' 1
 expect "$G" "grade reset: no line for a reason that did not move" '^UNPINNED reason=' 1
 expect "$G" "grade reset: per node, the old agent's one series and the new agent's four" '^UNPINNED node=worker-03 count=2 series=5 born_in_window=4 resets=0$' 1
-expect "$G" "grade reset: UNPINNED verdict FAIL, its own line (#1423); the sum is over every series, with or without a reason label" '^UNPINNED verdict=FAIL increase=2 series=9 nodes=5 resets=0  \(a TLS cluster was published without its server-identity pin' 1
-expect "$G" "grade reset: verdict" '^VERDICT prober=FAIL unpinned=FAIL logs=not-checked$' 1
+# shellcheck disable=SC2016 # the backticks are the output's, not a substitution
+expect "$G" "grade reset: UNPINNED verdict PASS, its own line (#1423, #1491): the sum is over every series, and what moved is a reason under which no TLS is published" '^UNPINNED verdict=PASS increase=2 series=9 nodes=5 resets=0  \(no TLS cluster was published without its pin: reason=trust_domain_unknown count=2 nodes=worker-03 -- under these the agent published no TLS at all, which is expected at an agent start, and no such state stood for 300 s in the samples of the gauge\. Compare `UNPINNED steps:` with the agent rolls in churn\.log\)$' 1
+expect "$G" "grade reset: when it stepped, to hold against the churn log's agent rolls" '^UNPINNED steps: node=worker-03 job=aether-agent reason=trust_domain_unknown at=2026-10-08T05:10:00Z\(\+2\)  ' 1
+expect "$G" "grade reset: the gauge at zero is no published line" '^UNPINNED published: node=' 0
+expect "$G" "grade reset: the four agents that did not roll have no reason label and no gauge: said, not graded" '^UNPINNED published: not graded: nodes=worker-01,worker-02,worker-04,worker-05  ' 1
+expect "$G" "grade reset: verdict" '^VERDICT prober=FAIL unpinned=PASS logs=not-checked$' 1
 red=$(jq '[.data.result[] | (.values[-1][1] | tonumber) - (.values[0][1] | tonumber)] | add' "$GF/reset/unpinned.window.json")
 if [ "$red" = 0 ]; then pass "grade reset: last-minus-first-sample reads 0 for the unpinned counter on these samples (seen red)"; else fail "grade reset: the increase()-style unpinned count is $red, want 0"; fi
 
@@ -2038,7 +2056,7 @@ cp "$GF/reset/"*.json "$TMP/grade-silent-moved/"
 jq -c '.data.result |= map(select(.metric.node != "worker-04"))' "$GF/reset/unpinned.window.json" >"$TMP/grade-silent-moved/unpinned.window.json"
 GF="$TMP" run_grade grade-silent-moved "$G" --dir "$GD" --prometheus http://prom.example:9090
 expect "$G" "grade silent + moved: UNPROVEN, and it says the counter moved" '^UNPINNED verdict=UNPROVEN increase=2 series=8 nodes=4 resets=0  \(no sample in the window from worker-04: the sum is over the nodes that reported, not the fleet; and the counter moved on those\)$' 1
-expect "$G" "grade silent + moved: what moved is still listed" '^UNPINNED reason=trust_domain_unknown count=2 nodes=worker-03$' 1
+expect "$G" "grade silent + moved: what moved is still listed" '^UNPINNED reason=trust_domain_unknown count=2 nodes=worker-03 class=no_tls$' 1
 if [ "$grc" -eq 2 ]; then pass "grade silent + moved: exit 2"; else fail "grade silent + moved: exit $grc, want 2"; fi
 
 # missing: worker-04's agent has no series at all, at T0 or after -- silent
@@ -2095,6 +2113,190 @@ expect "$G" "grade gone: no ENDED line (it was alive at T0)" '^ENDED ' 0
 expect "$G" "grade gone: the counts are of the series that have samples: ten, the gone pod's two not among them" '^PROBER  verdict=PASS non_success=0 liveness_non_success=0 dns_class_non_success=0 success=7200000 series=10 born_in_window=0 resets=0$' 1
 expect "$G" "grade gone: verdict" '^VERDICT prober=PASS unpinned=PASS logs=not-checked$' 1
 
+# The verdict per reason (#1491). The counter's `reason` is a closed set of two
+# kinds of fact: under no_namespace_metadata and pin_not_rendered TLS went out
+# without its server-identity pin, the validation gap; under
+# trust_domain_unknown and tls_not_published the agent published no TLS at
+# all, which every agent start does for a moment -- and a soak rolls the agents
+# twice. Any movement used to fail, with a text that was untrue for the second
+# kind. Each scenario is `clean` with one thing changed, built here; RED
+# before, for each: noted (the same assertions against the script as it was).
+#
+# grade_case <name> [base]: a copy of a scenario to change, served from $TMP.
+grade_case() { mkdir -p "$TMP/$1" && cp "$GF/${2:-clean}/"*.json "$TMP/$1/"; }
+# grade_edit <name> <file> <jq filter> [jq args...]: rewrites one response.
+grade_edit() {
+	local d="$TMP/$1" f="$2" prog="$3"
+	shift 3
+	jq -c "$@" "$prog" "$d/$f.json" >"$d/$f.tmp" && mv "$d/$f.tmp" "$d/$f.json"
+}
+# grade_last <name> <file> <node> <reason> <value>: the LAST sample of that
+# node's series for that reason (`-`: the series with no reason label).
+grade_last() {
+	# shellcheck disable=SC2016 # jq's variables, not the shell's
+	grade_edit "$1" "$2" '(.data.result[] | select(.metric.node == $n and (.metric.reason // "-") == $r) | .values[-1][1]) = $v' --arg n "$3" --arg r "$4" --arg v "$5"
+}
+# grade_gauge <name> <node> <reason> <values>: every sample of that gauge series.
+grade_gauge() {
+	# shellcheck disable=SC2016 # jq's variables, not the shell's
+	grade_edit "$1" published.window '(.data.result[] | select(.metric.node == $n and .metric.reason == $r) | .values) = $v' --arg n "$2" --arg r "$3" --argjson v "$4"
+}
+# gauge_run <from> <samples> <value>: zero a minute before, <samples> non-zero
+# samples a minute apart (they span (samples - 1) x 60 s), zero after, zero at
+# the window's end.
+gauge_run() {
+	jq -nc --argjson f "$1" --argjson k "$2" --arg v "$3" --argjson e "$((GT0 + 28800))" \
+		'[[$f - 60, "0"]] + [range(0; $k) | [$f + . * 60, $v]] + [[$f + $k * 60, "0"], [$e, "0"]]'
+}
+GRUN=$((GT0 + 18000)) # 05:10:00Z, the TRIPLE's agent roll (T0+300m)
+
+# gap: worker-02 published TLS without a pin (6 on the counter, in no gauge
+# sample: it came and went within an export interval), worker-04 reported
+# pin_not_rendered once, and worker-01's agent start counted 180 under
+# trust_domain_unknown. The first two fail, by name; the third is listed and
+# is not in the verdict's text.
+# RED before: `UNPINNED verdict=FAIL increase=187 ... (a TLS cluster was
+# published without its server-identity pin: the agent logged which and why`
+# -- no reason, no count per reason, no node, and 180 of the 187 were not that.
+grade_case grade-gap
+grade_last grade-gap unpinned.window worker-02 no_namespace_metadata 6
+grade_last grade-gap unpinned.window worker-04 pin_not_rendered 1
+grade_last grade-gap unpinned.window worker-01 trust_domain_unknown 180
+G="$TMP/grade-gap.log"
+GF="$TMP" run_grade grade-gap "$G" --dir "$GD" --prometheus http://prom.example:9090
+show "prober-grade: TLS published without its pin, beside an agent start" "$G"
+if [ "$grc" -eq 1 ]; then pass "grade gap: exit 1"; else fail "grade gap: exit $grc, want 1"; fi
+expect "$G" "grade gap: each reason that moved, with its class" '^UNPINNED reason=(no_namespace_metadata count=6 nodes=worker-02 class=gap|pin_not_rendered count=1 nodes=worker-04 class=gap|trust_domain_unknown count=180 nodes=worker-01 class=no_tls)$' 3
+# shellcheck disable=SC2016 # the backticks are the output's, not a substitution
+expect "$G" "grade gap: FAIL, and the text names the gap reasons, their counts and their nodes -- and only those" '^UNPINNED verdict=FAIL increase=187 series=20 nodes=5 resets=0  \(TLS was published without its server-identity pin, the mTLS validation gap: reason=no_namespace_metadata count=6 nodes=worker-02, reason=pin_not_rendered count=1 nodes=worker-04 -- the agent logged which clusters, `mesh clusters published with no server-identity SAN pin`; docs/runbook\.md, "The unpinned-cluster signal"\)$' 1
+expect "$G" "grade gap: verdict" '^VERDICT prober=PASS unpinned=FAIL logs=not-checked$' 1
+# ... the same with three entries in the gauge's last sample: said too.
+grade_last grade-gap published.window worker-02 no_namespace_metadata 3
+GF="$TMP" run_grade grade-gap "$G" --dir "$GD" --prometheus http://prom.example:9090
+expect "$G" "grade gap: the gauge's non-zero sample is a published line" '^UNPINNED published: node=worker-02 job=aether-agent reason=no_namespace_metadata class=gap nonzero_samples=1 longest=0s max=3 at_end=3  \(the gauge held it: fails the gate\)$' 1
+expect "$G" "grade gap: ... and in the verdict's text, after the counter's" '^UNPINNED verdict=FAIL increase=187 .* reason=pin_not_rendered count=1 nodes=worker-04; in the gauge: reason=no_namespace_metadata node=worker-02 published=3 -- the agent logged ' 1
+# ... and a gap that stood through the window with no new snapshot: the counter
+# adds on a snapshot, so it does not move; the gauge is exported every minute.
+# RED before: `UNPINNED verdict=PASS increase=0`, exit 0 (the gauge was not read).
+grade_case grade-gap-held
+grade_edit grade-gap-held published.window '(.data.result[] | select(.metric.node == "worker-02" and .metric.reason == "no_namespace_metadata") | .values[][1]) = "4"'
+GF="$TMP" run_grade grade-gap-held "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 1 ]; then pass "grade gap held: exit 1 although the counter did not move"; else fail "grade gap held: exit $grc, want 1"; fi
+expect "$G" "grade gap held: FAIL from the gauge alone" '^UNPINNED verdict=FAIL increase=0 series=20 nodes=5 resets=0  \(TLS was published without its server-identity pin, the mTLS validation gap: reason=no_namespace_metadata node=worker-02 published=4 -- ' 1
+
+# no-tls: two agent starts and nothing else. worker-01 counted 180 under
+# trust_domain_unknown and worker-05 12 under tls_not_published; neither state
+# is in a gauge sample. RED before: `UNPINNED verdict=FAIL increase=192`,
+# VERDICT unpinned=FAIL, exit 1.
+grade_case grade-notls
+grade_last grade-notls unpinned.window worker-01 trust_domain_unknown 180
+grade_last grade-notls unpinned.window worker-05 tls_not_published 12
+G="$TMP/grade-notls.log"
+GF="$TMP" run_grade grade-notls "$G" --dir "$GD" --prometheus http://prom.example:9090
+show "prober-grade: agent starts, and no TLS published without a pin" "$G"
+if [ "$grc" -eq 0 ]; then pass "grade no-tls: exit 0 (an agent start does not fail a soak that rolls the agents)"; else fail "grade no-tls: exit $grc, want 0"; fi
+expect "$G" "grade no-tls: reported, per reason, with count and nodes" '^UNPINNED reason=(trust_domain_unknown count=180 nodes=worker-01|tls_not_published count=12 nodes=worker-05) class=no_tls$' 2
+expect "$G" "grade no-tls: PASS, and the text says what the count is" '^UNPINNED verdict=PASS increase=192 series=20 nodes=5 resets=0  \(no TLS cluster was published without its pin: reason=tls_not_published count=12 nodes=worker-05, reason=trust_domain_unknown count=180 nodes=worker-01 -- under these the agent published no TLS at all, ' 1
+expect "$G" "grade no-tls: verdict" '^VERDICT prober=PASS unpinned=PASS logs=not-checked$' 1
+# ... the same with the state in the window's LAST gauge sample: an agent start
+# the window cut. Not a failure, and said.
+grade_last grade-notls published.window worker-05 tls_not_published 12
+GF="$TMP" run_grade grade-notls "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 0 ]; then pass "grade no-tls at the end: exit 0"; else fail "grade no-tls at the end: exit $grc, want 0"; fi
+expect "$G" "grade no-tls at the end: one sample is not a state, and it is said that the window ends on it" '^UNPINNED published: node=worker-05 job=aether-agent reason=tls_not_published class=no_tls nonzero_samples=1 longest=0s max=12 at_end=12  \(less than 300 s: reported, not a failure\) -- and still non-zero at the end of the window: whether it recovered is after it$' 1
+
+# standing: worker-03's agent did not get its trust domain for five minutes
+# after the TRIPLE: 90 entries in six gauge samples, 300 s from the first to
+# the last. Longer than an agent start (PENDING_S), so it fails, with its own
+# text. RED before: FAIL too, but as `a TLS cluster was published without its
+# server-identity pin`, which did not happen.
+grade_case grade-standing
+grade_last grade-standing unpinned.window worker-03 trust_domain_unknown 630
+grade_gauge grade-standing worker-03 trust_domain_unknown "$(gauge_run "$GRUN" 6 90)"
+G="$TMP/grade-standing.log"
+GF="$TMP" run_grade grade-standing "$G" --dir "$GD" --prometheus http://prom.example:9090
+show "prober-grade: an agent that published no TLS for five minutes" "$G"
+if [ "$grc" -eq 1 ]; then pass "grade standing: exit 1"; else fail "grade standing: exit $grc, want 1"; fi
+expect "$G" "grade standing: the run, from the gauge's samples" '^UNPINNED published: node=worker-03 job=aether-agent reason=trust_domain_unknown class=no_tls nonzero_samples=6 longest=300s max=90 at_end=0  \(no TLS published for 300 s or more: not an agent start; fails the gate\)$' 1
+expect "$G" "grade standing: FAIL, and the text is about no TLS, not about a missing pin" '^UNPINNED verdict=FAIL increase=630 series=20 nodes=5 resets=0  \(no TLS was published for 300 s or more: reason=trust_domain_unknown node=worker-03 seconds=300 published=90 -- longer than an agent start: ' 1
+expect "$G" "grade standing: ... it does not claim the validation gap" 'UNPINNED verdict=.*(without its server-identity pin|validation gap)' 0
+# ... one sample fewer is 240 s: under the bound, reported.
+grade_gauge grade-standing worker-03 trust_domain_unknown "$(gauge_run "$GRUN" 5 90)"
+GF="$TMP" run_grade grade-standing "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 0 ]; then pass "grade standing: 240 s is under the bound: exit 0"; else fail "grade standing: a 240 s run gave exit $grc, want 0"; fi
+expect "$G" "grade standing: ... and printed with its length" '^UNPINNED published: node=worker-03 .* nonzero_samples=5 longest=240s max=90 at_end=0  \(less than 300 s: reported, not a failure\)$' 1
+# ... and two 240 s runs with ten minutes of no sample between them are two
+# runs, not one of 19 minutes: nothing says the state held while the exporter
+# was silent (the bound for that is Prometheus's own lookback, STALE_S).
+grade_gauge grade-standing worker-03 trust_domain_unknown "$(jq -nc --argjson f "$GRUN" --argjson e "$((GT0 + 28800))" '[range(0; 5) | [$f + . * 60, "90"]] + [range(0; 5) | [$f + 900 + . * 60, "90"]] + [[$e, "0"]]')"
+GF="$TMP" run_grade grade-standing "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 0 ]; then pass "grade standing: a run does not span a gap in the samples: exit 0"; else fail "grade standing: two runs around a gap gave exit $grc, want 0"; fi
+expect "$G" "grade standing: ... ten samples, the longest run 240 s" '^UNPINNED published: node=worker-03 .* nonzero_samples=10 longest=240s ' 1
+# ... never recovered, and no snapshot in the window: worker-05 publishes two
+# entries with no TLS in every sample from T0 to the end, and its counter does
+# not move. RED before: `UNPINNED verdict=PASS increase=0`, exit 0.
+grade_case grade-never
+grade_gauge grade-never worker-05 tls_not_published "$(jq -nc --argjson t "$GT0" '[range(0; 481) | [$t + . * 60, "2"]]')"
+GF="$TMP" run_grade grade-never "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 1 ]; then pass "grade never recovered: exit 1 although the counter did not move"; else fail "grade never recovered: exit $grc, want 1"; fi
+expect "$G" "grade never recovered: the whole window, and still there at its end" '^UNPINNED published: node=worker-05 job=aether-agent reason=tls_not_published class=no_tls nonzero_samples=481 longest=28800s max=2 at_end=2  \(no TLS published for 300 s or more: ' 1
+expect "$G" "grade never recovered: FAIL" '^UNPINNED verdict=FAIL increase=0 series=20 nodes=5 resets=0  \(no TLS was published for 300 s or more: reason=tls_not_published node=worker-05 seconds=28800 published=2 -- ' 1
+
+# unknown: an agent newer than this script reports a fifth reason. The script
+# cannot say which kind of fact it is, so it fails closed and says so. RED
+# before: FAIL, as `a TLS cluster was published without its server-identity pin`.
+grade_case grade-unknown
+for f in unpinned.window published.window; do
+	grade_edit grade-unknown "$f" '.data.result += [.data.result[] | select(.metric.node == "worker-02" and .metric.reason == "pin_not_rendered") | .metric.reason = "some_new_reason"]'
+done
+G="$TMP/grade-unknown.log"
+GF="$TMP" run_grade grade-unknown "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 0 ]; then pass "grade unknown reason at rest: exit 0 (nothing was counted under it)"; else fail "grade unknown reason at rest: exit $grc, want 0"; fi
+grade_last grade-unknown unpinned.window worker-02 some_new_reason 1
+GF="$TMP" run_grade grade-unknown "$G" --dir "$GD" --prometheus http://prom.example:9090
+show "prober-grade: a reason the script does not know" "$G"
+if [ "$grc" -eq 1 ]; then pass "grade unknown reason: exit 1"; else fail "grade unknown reason: exit $grc, want 1"; fi
+expect "$G" "grade unknown reason: its class" '^UNPINNED reason=some_new_reason count=1 nodes=worker-02 class=unknown$' 1
+expect "$G" "grade unknown reason: FAIL, and the text says the script does not know it" '^UNPINNED verdict=FAIL increase=1 series=21 nodes=5 resets=0  \(this script does not know reason=some_new_reason count=1 nodes=worker-02: an agent newer than this script reports a reason that is in neither GAP_REASONS \(no_namespace_metadata,pin_not_rendered\) nor NO_TLS_REASONS \(trust_domain_unknown,tls_not_published\), and it is not taken for a harmless one\)$' 1
+
+# unlabelled: agents from before #1424 (the `born` scenario's: one series per
+# node, no reason). Whether TLS was published under what they counted is not
+# in the counter, so any movement fails, as it always did, with the text it
+# always had -- and now the count and the node. This rule is the old one: the
+# old script fails this too; what is new is the class and what follows `--`.
+grade_case grade-unlabelled
+cp "$GF/born/unpinned."*.json "$GF/born/published.window.json" "$TMP/grade-unlabelled/"
+grade_last grade-unlabelled unpinned.window worker-02 - 3
+G="$TMP/grade-unlabelled.log"
+GF="$TMP" run_grade grade-unlabelled "$G" --dir "$GD" --prometheus http://prom.example:9090
+show "prober-grade: the counter of an agent with no reason label moved" "$G"
+if [ "$grc" -eq 1 ]; then pass "grade unlabelled: exit 1"; else fail "grade unlabelled: exit $grc, want 1"; fi
+expect "$G" "grade unlabelled: its class" '^UNPINNED reason=- count=3 nodes=worker-02 class=unlabelled$' 1
+# shellcheck disable=SC2016 # the backticks are the output's, not a substitution
+expect "$G" "grade unlabelled: FAIL with the text it always had, then the count and the node" '^UNPINNED verdict=FAIL increase=3 series=5 nodes=5 resets=0  \(a TLS cluster was published without its server-identity pin: the agent logged which and why, `mesh clusters published with no server-identity SAN pin`; what each reason means is in docs/runbook\.md, "The unpinned-cluster signal" -- reason=- count=3 nodes=worker-02, from agents with no `reason` label \(before #1424\): whether TLS was published under them is not in the counter, so any movement fails\)$' 1
+
+# no gauge: worker-04's counter has the reason label and its gauge has no
+# sample in the window. Both arrived in one agent and the gauge is written on
+# every snapshot, zeros included: an absent one is not a zero, so how long a
+# state stood there was not seen. RED before: PASS, exit 0 (the gauge was not
+# read at all).
+grade_case grade-nogauge
+grade_edit grade-nogauge published.window '.data.result |= map(select(.metric.node != "worker-04"))'
+G="$TMP/grade-nogauge.log"
+GF="$TMP" run_grade grade-nogauge "$G" --dir "$GD" --prometheus http://prom.example:9090
+show "prober-grade: an agent whose gauge does not reach Prometheus" "$G"
+if [ "$grc" -eq 2 ]; then pass "grade no gauge: exit 2, not a pass on a gauge read as zero"; else fail "grade no gauge: exit $grc, want 2"; fi
+# shellcheck disable=SC2016 # the backticks are the output's, not a substitution
+expect "$G" "grade no gauge: the node and job are named" '^UNPINNED published: absent: node=worker-04 job=aether-agent  \(its counter has the `reason` label and aether_agent_snapshot_tls_clusters\{pin="unpinned"\} has no sample in the window from it: ' 1
+expect "$G" "grade no gauge: UNPROVEN" '^UNPINNED verdict=UNPROVEN increase=0 series=20 nodes=5 resets=0  \(the gauge aether_agent_snapshot_tls_clusters has no sample in the window from worker-04: how long a state stood there was not seen\)$' 1
+expect "$G" "grade no gauge: verdict" '^VERDICT prober=PASS unpinned=UNPROVEN logs=not-checked$' 1
+# ... and unproven comes before failed here too: the gap moved on worker-02.
+grade_last grade-nogauge unpinned.window worker-02 no_namespace_metadata 6
+GF="$TMP" run_grade grade-nogauge "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 2 ]; then pass "grade no gauge + gap: exit 2"; else fail "grade no gauge + gap: exit $grc, want 2"; fi
+expect "$G" "grade no gauge + gap: UNPROVEN, and it says the counter moved" '^UNPINNED verdict=UNPROVEN increase=6 series=20 nodes=5 resets=0  \(the gauge aether_agent_snapshot_tls_clusters has no sample in the window from worker-04: how long a state stood there was not seen; and the counter moved\)$' 1
+expect "$G" "grade no gauge + gap: what moved is still listed, with its class" '^UNPINNED reason=no_namespace_metadata count=6 nodes=worker-02 class=gap$' 1
+
 # A zero that is not a zero: a Prometheus that answers and has neither metric.
 G="$TMP/grade-empty.log"
 run_grade empty "$G" --dir "$GD" --prometheus http://prom.example:9090
@@ -2119,6 +2321,7 @@ fi
 run_grade born "$G" --dir "$GD" --prometheus-service monitoring/prometheus:9090 --match 'cluster="east"'
 if [ "$grc" -eq 1 ] && grep -q '^VERDICT prober=FAIL unpinned=PASS ' "$G"; then pass "grade service: the same grade through the API-server proxy"; else fail "grade service: exit $grc: $(tail -n 2 "$G")"; fi
 expect "$G" "grade service: --match goes into the selector" '^QUERY   probe/window  time=2026-10-08T08:10:00Z  aether_probe_requests_total\{cluster="east"\}\[28800s\]$' 1
+expect "$G" "grade service: ... and into the gauge's, beside its own matcher" '^QUERY   unpinned/published  time=2026-10-08T08:10:00Z  aether_agent_snapshot_tls_clusters\{pin="unpinned",cluster="east"\}\[28800s\]$' 1
 if grep -qF -- '--context some-cluster get --raw /api/v1/namespaces/monitoring/services/prometheus:9090/proxy/api/v1/query?query=aether_probe_requests_total%7Bcluster%3D%22east%22%7D%5B28800s%5D&time='"$((GT0 + 28800))" "$TMP/grade-queries.tsv"; then
 	pass "grade service: kubectl is given the run's own context (run.env) and the query, URL-encoded"
 else
