@@ -1820,6 +1820,10 @@ fi
 # The README says how to create them, with the command the pre-flight prints.
 expect "$HERE/README.md" "README: the Run steps apply svc.yaml" '^kubectl apply -n aether-test -f e2e/soak/svc\.yaml$' 1
 expect "$HERE/README.md" "README: it no longer says the svc-N workloads are not in the repository" 'are not defined in this repository' 0
+# One Deployment to a `rollout status`: a kubectl that takes only one resource
+# there fails the documented set-up instead of waiting.
+expect "$HERE/README.md" "README: no rollout status names more than one Deployment" 'rollout status +deployment/[^ ]+ +deployment/' 0
+expect "$HERE/README.md" "README: the Run steps wait for each of the five in turn" "^for d in svc-1 svc-2 svc-3 svc-4 svc-5; do kubectl -n aether-test rollout status \"deployment/\\\$d\"; done\$" 1
 expect "$HERE/README.md" "README: it says the 10 s preStop sleep is a change from what earlier soaks ran" 'earlier soaks ran .*3 s' 1
 
 # TERM during a real wait: the real clock, no hook. The driver is waiting for

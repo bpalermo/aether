@@ -611,7 +611,7 @@ kubectl -n aether-test get pods -l app=echo -o wide   # expect 3, on 3 different
 #     and per-roll counts of svc-2 ... svc-5 do not compare across it. A cluster that still has the old objects is refused by the
 #     pre-flight until this file is applied.
 kubectl apply -n aether-test -f e2e/soak/svc.yaml
-kubectl -n aether-test rollout status deployment/svc-1 deployment/svc-2 deployment/svc-3 deployment/svc-4 deployment/svc-5
+for d in svc-1 svc-2 svc-3 svc-4 svc-5; do kubectl -n aether-test rollout status "deployment/$d"; done
 kubectl -n aether-test get svc svc-1 svc-2 svc-3 svc-4 svc-5   # the generated mesh Services
 
 # 0b. The proposal-037 leg: a multi-protocol workload (HTTP :8080 primary + raw
