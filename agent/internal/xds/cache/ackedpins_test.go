@@ -498,6 +498,45 @@ func TestAckedPinGaugeWhenTheAgentRestartsWhileTheProxyRejects(t *testing.T) {
 	assert.Len(t, rec.with(ackedClusterPinsKnownMsg), 1)
 }
 
+// TestAckedPinGaugeIsWithdrawnWhenAHeldClusterBecomesUnknown: "not written
+// while unknown" has to hold for a gauge that was ALREADY written too. A gauge
+// that is merely not recorded again goes on exporting its last values, which
+// then read as a current, valid acknowledged state. When the proxy turns out
+// to hold a cluster at a version this agent has no class for, the gauge has no
+// sample at all until the state is known again.
+func TestAckedPinGaugeIsWithdrawnWhenAHeldClusterBecomesUnknown(t *testing.T) {
+	c, rec, reader, tracker := ackedPinFixture(t)
+	ackedGauge := func() (pinSeries, bool) { return readPinGauge(t, reader, ackedTLSClustersGauge) }
+	ctx := context.Background()
+	addOutboundCluster(c, bindingClusterName) // unpinned
+	addPinnedCluster(c, otherClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+	proxy := connectCDSProxy(t, c, tracker, 1, nil)
+	proxy.ack(proxy.next())
+	acked, ok := ackedGauge()
+	require.True(t, ok)
+	require.Equal(t, byCause(0, 1, 0), acked.unpinned)
+
+	// A stream opens on which the proxy states a version of the cluster this
+	// agent has no class for, and rejects what it is sent instead.
+	stated := clusterVersions(t, c)
+	stated[bindingClusterName] = "a-version-this-agent-has-no-class-for"
+	again := connectCDSProxy(t, c, tracker, 2, stated)
+	again.nack(again.next())
+
+	_, ok = ackedGauge()
+	assert.False(t, ok, "the last known values must not go on being exported as the acknowledged state")
+	require.Len(t, rec.with(ackedClusterPinsUnknownMsg), 1)
+
+	// It comes back with the proxy's acceptance of the cluster.
+	third := connectCDSProxy(t, c, tracker, 3, again.accepted)
+	third.ack(third.next())
+	acked, ok = ackedGauge()
+	require.True(t, ok)
+	assert.Equal(t, byCause(0, 1, 0), acked.unpinned)
+	assert.Equal(t, int64(1), acked.pinned)
+}
+
 // TestAckedPinGaugeWithTwoProxyGenerations: the hot-restart residue, written
 // down. There is one record per cluster, not one per generation. A new
 // generation's opening exchange replaces the set with its own; after that each

@@ -5867,7 +5867,9 @@ What follows from that:
   (a proxy never states a version it rejected), which the new process never built; it
   sends the update again and the proxy rejects it again. A count that left that cluster
   out would say the proxy holds fewer unpinned clusters than it may, so the gauge is
-  not written: after a restart it stays absent, and the agent logs, once, WARN `proxy
+  not written: after a restart it stays absent (and a gauge that had samples stops
+  having them: it is withdrawn, not left on its last values), and the agent logs, once,
+  WARN `proxy
   holds mesh clusters at a version this agent did not publish; their pin state is not
   known and the acknowledged pin gauge is not written` with the number of clusters
   (INFO `the pin state of every mesh cluster the proxy holds is known again` when it

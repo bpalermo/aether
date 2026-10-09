@@ -74,6 +74,7 @@ func TestCacheMetrics_NilReceiverSafe(t *testing.T) {
 	m.ClusterUnpinned(context.Background(), CauseNoNamespaceMetadata, 3)
 	m.TLSClusterPins(context.Background(), PinCounts{Pinned: 4})
 	m.TLSClusterPinsAcked(context.Background(), PinCounts{Pinned: 4})
+	m.TLSClusterPinsAckedUnknown()
 	m.UDSResolveFailure(context.Background(), "not_csi")
 }
 
@@ -517,5 +518,48 @@ func TestEveryRegisteredCounterDeclaresItsSeedPolicy(t *testing.T) {
 	if want := len(seededCounters) + len(countersDeliberatelyNotSeeded); len(registered) != want {
 		t.Fatalf("parsed %d Int64Counter registrations (%v), want %d; update seededCounters or countersDeliberatelyNotSeeded",
 			len(registered), registered, want)
+	}
+}
+
+// TestAckedTLSClusters_WithdrawnWhileUnknown: the acknowledged gauge has to be
+// able to stop. A recorded gauge exports its last values for the life of the
+// process; this one is observed, so that while the acknowledged state is not
+// known it has no sample at all, and it has one again when it is set.
+func TestAckedTLSClusters_WithdrawnWhileUnknown(t *testing.T) {
+	const name = "aether.agent.xds.acked_tls_clusters"
+	m, reader := newTestMetrics(t)
+	points := func() int {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("Collect() error = %v", err)
+		}
+		for _, sm := range rm.ScopeMetrics {
+			for _, metric := range sm.Metrics {
+				if metric.Name == name {
+					return len(metric.Data.(metricdata.Gauge[int64]).DataPoints)
+				}
+			}
+		}
+		return 0
+	}
+
+	if n := points(); n != 0 {
+		t.Fatalf("before any acknowledgement: %d data points, want none", n)
+	}
+	m.TLSClusterPinsAcked(context.Background(), PinCounts{Pinned: 4})
+	if n := points(); n != 1+NumUnpinnedCauses {
+		t.Fatalf("set: %d data points, want %d", n, 1+NumUnpinnedCauses)
+	}
+	if n := points(); n != 1+NumUnpinnedCauses {
+		t.Fatalf("unchanged at the next collection: %d data points, want %d", n, 1+NumUnpinnedCauses)
+	}
+	m.TLSClusterPinsAckedUnknown()
+	if n := points(); n != 0 {
+		t.Fatalf("withdrawn: %d data points, want none", n)
+	}
+	m.TLSClusterPinsAcked(context.Background(), PinCounts{})
+	if n := points(); n != 1+NumUnpinnedCauses {
+		t.Fatalf("set again, zeros included: %d data points, want %d", n, 1+NumUnpinnedCauses)
 	}
 }

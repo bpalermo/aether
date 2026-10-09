@@ -504,6 +504,8 @@ func (c *SnapshotCache) ResponseAccepted(ctx context.Context, accepted ack.Accep
 //     that cluster would say the proxy holds fewer unpinned clusters than it
 //     may), the agent says so once (ackedClusterPinsUnknownMsg), and the NACK
 //     counter moves. It is written again when every held version is known.
+//     "Not written" is absent, also for a gauge that was written before: it
+//     is an observable gauge and has no sample while this lasts.
 //   - A cluster the proxy holds that is not a cluster entry of any snapshot
 //     this process built is in no count.
 //   - What the proxy states is what it ACCEPTED, not what it runs. Envoy
@@ -532,6 +534,11 @@ func (c *SnapshotCache) ClustersAccepted(ctx context.Context, accepted ack.Accep
 // gauge and the log. version is the snapshot whose build or whose response
 // produced it.
 func (c *SnapshotCache) reportAckedPins(ctx context.Context, u ackedPinsUpdate, version string) {
+	if u.unclassified > 0 {
+		// Withdrawn, not left: a gauge that was written before would go on
+		// exporting its last values as if they were the acknowledged state.
+		c.metrics.TLSClusterPinsAckedUnknown()
+	}
 	if u.unclassifiedChanged {
 		if u.unclassified > 0 {
 			c.log.WarnContext(ctx, ackedClusterPinsUnknownMsg, "clusters", u.unclassified, "snapshot_version", version)

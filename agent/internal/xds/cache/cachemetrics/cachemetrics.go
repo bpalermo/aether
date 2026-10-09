@@ -9,6 +9,7 @@ package cachemetrics
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"aethermesh.dev/common/udspath"
 	"go.opentelemetry.io/otel/attribute"
@@ -233,7 +234,20 @@ type Metrics struct {
 	// and for as long as the proxy rejects a cluster (aether.agent.xds.nacks).
 	// Not recorded until a proxy answers a cluster response of this agent
 	// process, so an absent series is "not known", not zero.
-	ackedTLSClusters metric.Int64Gauge
+	//
+	// An OBSERVABLE gauge, read at each collection from acked below, where
+	// tlsClusters is recorded. A recorded gauge goes on exporting its last
+	// values for the life of the process, and this one has to be able to
+	// stop: while the pin state of a cluster the proxy holds is not known it
+	// has no sample at all (TLSClusterPinsAckedUnknown), instead of the last
+	// known one read as current.
+	ackedTLSClusters metric.Int64ObservableGauge
+	// acked is what ackedTLSClusters observes; ackedKnown is false while there
+	// is nothing to observe. Guarded by ackedMu: written on the xDS stream's
+	// goroutine and by snapshot builds, read by the metric reader.
+	ackedMu    sync.Mutex
+	acked      PinCounts
+	ackedKnown bool
 	// pinnedAttrs and unpinnedAttrs are the two gauges' attribute sets, built
 	// once at registration: the gauges are recorded on every snapshot.
 	pinnedAttrs   metric.MeasurementOption
@@ -341,13 +355,27 @@ func (m *Metrics) registerActivityInstruments(meter metric.Meter) error {
 		metric.WithDescription("Mesh cluster entries in the node's current xDS snapshot that are meant to be mTLS: with a server-identity SAN pin (pin=pinned), or without one, by reason (pin=unpinned, reason=<cause>)")); err != nil {
 		return fmt.Errorf("tls clusters: %w", err)
 	}
-	if m.ackedTLSClusters, err = meter.Int64Gauge("aether.agent.xds.acked_tls_clusters",
-		metric.WithDescription("The count aether.agent.snapshot.tls_clusters gives, for the clusters the proxy has accepted, each at the version it last acknowledged or stated; absent until a proxy answers a cluster response")); err != nil {
-		return fmt.Errorf("acked tls clusters: %w", err)
-	}
-	m.pinnedAttrs = metric.WithAttributeSet(attribute.NewSet(attrPin.String(PinPinned)))
+	pinned := attribute.NewSet(attrPin.String(PinPinned))
+	m.pinnedAttrs = metric.WithAttributeSet(pinned)
+	var unpinned [NumUnpinnedCauses]attribute.Set
 	for i, cause := range UnpinnedCauses {
-		m.unpinnedAttrs[i] = metric.WithAttributeSet(attribute.NewSet(attrPin.String(PinUnpinned), attrReason.String(string(cause))))
+		unpinned[i] = attribute.NewSet(attrPin.String(PinUnpinned), attrReason.String(string(cause)))
+		m.unpinnedAttrs[i] = metric.WithAttributeSet(unpinned[i])
+	}
+	if m.ackedTLSClusters, err = meter.Int64ObservableGauge("aether.agent.xds.acked_tls_clusters",
+		metric.WithDescription("The count aether.agent.snapshot.tls_clusters gives, for the clusters the proxy has accepted, each at the version it last acknowledged or stated; absent until a proxy answers a cluster response, and while the pin state of a cluster it holds is not known"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			counts, known := m.ackedPins()
+			if !known {
+				return nil
+			}
+			o.Observe(int64(counts.Pinned), metric.WithAttributeSet(pinned))
+			for i, n := range counts.Unpinned {
+				o.Observe(int64(n), metric.WithAttributeSet(unpinned[i]))
+			}
+			return nil
+		})); err != nil {
+		return fmt.Errorf("acked tls clusters: %w", err)
 	}
 	if m.upstreamsDeclared, err = meter.Int64Gauge("aether.agent.upstreams.declared",
 		metric.WithDescription("Distinct upstream services declared by local pods (config.aether.io/upstreams union)")); err != nil {
@@ -513,13 +541,36 @@ func (m *Metrics) TLSClusterPins(ctx context.Context, counts PinCounts) {
 	m.recordPins(ctx, m.tlsClusters, counts)
 }
 
-// TLSClusterPinsAcked records the pin state of the clusters the proxy has
-// accepted (#1425, #1508), series for series like TLSClusterPins.
-func (m *Metrics) TLSClusterPinsAcked(ctx context.Context, counts PinCounts) {
+// TLSClusterPinsAcked sets the pin state of the clusters the proxy has
+// accepted (#1425, #1508), exported series for series like TLSClusterPins from
+// the next collection on.
+func (m *Metrics) TLSClusterPinsAcked(_ context.Context, counts PinCounts) {
 	if m == nil {
 		return
 	}
-	m.recordPins(ctx, m.ackedTLSClusters, counts)
+	m.ackedMu.Lock()
+	defer m.ackedMu.Unlock()
+	m.acked, m.ackedKnown = counts, true
+}
+
+// TLSClusterPinsAckedUnknown withdraws the acknowledged pin state: the gauge
+// has no sample from the next collection on, until TLSClusterPinsAcked sets
+// one again. For when the pin state of a cluster the proxy holds is not known
+// (#1508): the last known counts would read as a current, valid state.
+func (m *Metrics) TLSClusterPinsAckedUnknown() {
+	if m == nil {
+		return
+	}
+	m.ackedMu.Lock()
+	defer m.ackedMu.Unlock()
+	m.acked, m.ackedKnown = PinCounts{}, false
+}
+
+// ackedPins is what the acknowledged gauge observes.
+func (m *Metrics) ackedPins() (PinCounts, bool) {
+	m.ackedMu.Lock()
+	defer m.ackedMu.Unlock()
+	return m.acked, m.ackedKnown
 }
 
 func (m *Metrics) recordPins(ctx context.Context, gauge metric.Int64Gauge, counts PinCounts) {
