@@ -166,10 +166,22 @@ spire:
 # into a ConfigMap the agent mounts. The CR ONLY overrides the proxy data plane's
 # observability; everything else is inherited from the system config above.
 meshConfig:
-  # Seed the singleton MeshConfig CR (name "default") on first install only — it
-  # is created once and NEVER overwritten on upgrade (lookup-skip + Helm
-  # resource-policy: keep), so operators own it via kubectl thereafter. Set false
-  # to manage the CR entirely yourself.
+  # Seed the singleton MeshConfig CR (name "default") when none is live (the
+  # first install; an upgrade that finds it absent) — it is created once and
+  # NEVER overwritten on upgrade or rollback (lookup-skip), so operators own it
+  # via kubectl thereafter. The seed is a Helm hook (pre-install,pre-upgrade),
+  # not an object of the release (#1471): it is in no revision's manifest, so
+  # `helm rollback` to the revision that seeded it (normally the first) works,
+  # and `--no-hooks` seeds nothing. The hook deletes nothing either: it names
+  # a hook-delete-policy Helm does not act on (`never`), because Helm's
+  # default deletes the live object of that name before creating the hook's.
+  # A MeshConfig created while an upgrade is running is therefore never
+  # deleted; that upgrade can fail on "already exists", and succeeds when run
+  # again. With Helm 4's server-side apply the seed is applied to that object
+  # instead (labels, annotations, and any `proxy` field below that it does
+  # not set). docs/runbook.md, "Chart 2.4.24".
+  # Set false to manage the CR entirely yourself (do that with a tool that
+  # renders with `helm template`: it would render the seed on every sync).
   createDefault: true
   # The MeshConfig spec.proxy seeded into the default CR (protojson field names of
   # aether.config.v1.MeshConfig.proxy). An empty block means the proxy inherits

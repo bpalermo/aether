@@ -36,6 +36,19 @@
 #        default `spire.enabled=true`.
 #   v.   upgrade — the same command again: revision 2, `deployed`, the same
 #        namespace (UID), still Ready.
+#   v-a. rollback (#1471) — `helm rollback aether 1`, then `helm rollback
+#        aether 2`: each leaves the release `deployed`, the seeded MeshConfig is
+#        the same object with the operator's edit in it, and no revision's
+#        manifest holds a MeshConfig (it is a hook). A deleted MeshConfig is
+#        seeded again by the next upgrade, and that revision can be rolled back
+#        to as well.
+#   v-a2. the seed never deletes a MeshConfig (#1471) — the `lookup` that
+#        decides to render the seed and the hook that creates it are not
+#        atomic. A copy of the chart with a slow `pre-upgrade` hook ahead of
+#        the seed holds an upgrade in that window; a MeshConfig created there
+#        must be the same object afterwards, with its spec. The upgrade may
+#        fail on "already exists" (and then succeeds when run again) or go
+#        through (server-side apply); it must not delete or replace.
 #   v-b. a release written by an older chart with namespace.create=false (no
 #        marker on the agent ServiceAccount): the first upgrade is refused with
 #        the `keep` command, goes through after it, and the next one needs
@@ -295,11 +308,12 @@ image_args() {
 }
 
 # The documented step 3, against the chart in $SOURCE. Extra arguments are
-# appended (the upgrade-safety legs pass a namespace value).
+# appended (the upgrade-safety legs pass a namespace value). AETHER_CHART
+# replaces the chart directory for one call (leg v-a2's copy with a slow hook).
 documented_helm_install() {
 	local args
 	mapfile -t args < <(image_args)
-	hc upgrade --install "$RELEASE" "$CHARTS/aether" \
+	hc upgrade --install "$RELEASE" "${AETHER_CHART:-$CHARTS/aether}" \
 		--namespace "$NS" --create-namespace \
 		--set "clusterName=$CLUSTER_NAME" \
 		--set "meshDomain=$MESH_DOMAIN" \
@@ -419,6 +433,159 @@ verify_upgrade() {
 	[ "$(ns_uid)" = "$uid" ] && [ "$(ns_phase)" = "Active" ] || die "the namespace changed across the upgrade (uid $uid -> $(ns_uid), phase $(ns_phase))"
 	ok "release deployed at revision 2; namespace unchanged (uid $uid)"
 	wait_ready "after the upgrade"
+}
+
+# One field of the seeded MeshConfig (a jq path), or nothing.
+meshconfig_field() { kc -n "$NS" get meshconfig default -o json 2>/dev/null | jq -r "$1 // empty"; }
+# How many MeshConfig documents revision $1's stored manifest holds.
+manifest_meshconfigs() { hc get manifest "$RELEASE" -n "$NS" --revision "$1" | grep -c '^kind: MeshConfig' || true; }
+
+# v-a. Back to the first revision, and forward again (#1471). The chart seeds
+# the `default` MeshConfig once and the operator owns it afterwards. While the
+# seed was a release object it was in revision 1's manifest and in no later
+# one, and still live: `helm rollback <release> 1` failed with `no MeshConfig
+# with the name "default" found` and left the release `failed`.
+verify_rollback_to_first() {
+	log "v-a. helm rollback to the release's first revision, and forward again (#1471)"
+	local uid out rev
+	uid="$(meshconfig_field .metadata.uid)"
+	[ -n "$uid" ] || die "the install seeded no MeshConfig 'default' in $NS"
+	# The operator's edit: it must be there after every step below.
+	kc -n "$NS" patch meshconfig default --type merge -p '{"spec":{"proxy":{"accessLogsEnabled":true}}}' >/dev/null ||
+		die "could not edit the seeded MeshConfig"
+	out="$(hc rollback "$RELEASE" 1 -n "$NS" 2>&1)" || die "helm rollback $RELEASE 1 failed: $out"
+	[ "$(release_field status)" = "deployed" ] || die "after the rollback to revision 1 the release is '$(release_field status)', want deployed"
+	[ "$(release_field revision)" = "3" ] || die "after the rollback to revision 1 the release is at revision $(release_field revision), want 3"
+	out="$(hc rollback "$RELEASE" 2 -n "$NS" 2>&1)" || die "helm rollback $RELEASE 2 failed: $out"
+	[ "$(release_field status)" = "deployed" ] || die "after the rollback to revision 2 the release is '$(release_field status)', want deployed"
+	[ "$(release_field revision)" = "4" ] || die "after the rollback to revision 2 the release is at revision $(release_field revision), want 4"
+	ok "rolled back to revision 1 (revision 3, deployed) and to revision 2 (revision 4, deployed)"
+	[ "$(meshconfig_field .metadata.uid)" = "$uid" ] ||
+		die "the MeshConfig was deleted or replaced by a rollback (uid $uid -> '$(meshconfig_field .metadata.uid)')"
+	[ "$(meshconfig_field .spec.proxy.accessLogsEnabled)" = "true" ] ||
+		die "a rollback reverted the operator's edit of the MeshConfig (spec: $(meshconfig_field '.spec | tojson'))"
+	ok "the MeshConfig is the same object (uid $uid) and kept the operator's edit"
+	# Why it works: the seed is in no revision's manifest.
+	for rev in 1 2 3 4; do
+		[ "$(manifest_meshconfigs "$rev")" = "0" ] ||
+			die "revision $rev's manifest holds a MeshConfig: a rollback to it fails once a later revision exists"
+	done
+	ok "no revision's manifest holds a MeshConfig"
+	wait_ready "after the rollbacks"
+
+	# An absent MeshConfig is seeded again by the next upgrade, outside the
+	# manifest as on the install.
+	kc -n "$NS" delete meshconfig default --wait=true >/dev/null || die "could not delete the MeshConfig"
+	out="$(documented_helm_install 2>&1)" || die "the upgrade over a deleted MeshConfig failed: $out"
+	[ "$(release_field revision)" = "5" ] || die "after that upgrade the release is at revision $(release_field revision), want 5"
+	uid="$(meshconfig_field .metadata.uid)"
+	[ -n "$uid" ] || die "the upgrade did not seed the MeshConfig again"
+	[ "$(manifest_meshconfigs 5)" = "0" ] || die "the upgrade seeded the MeshConfig as a release object (revision 5's manifest holds it)"
+	out="$(hc rollback "$RELEASE" 4 -n "$NS" 2>&1)" || die "helm rollback $RELEASE 4 failed: $out"
+	out="$(hc rollback "$RELEASE" 5 -n "$NS" 2>&1)" || die "helm rollback $RELEASE 5 (the revision that seeded the MeshConfig again) failed: $out"
+	[ "$(release_field status)" = "deployed" ] || die "after those rollbacks the release is '$(release_field status)', want deployed"
+	# Revision 5 stores the seed as a hook; a rollback to it must not run it
+	# (Helm would delete the live MeshConfig first).
+	[ "$(meshconfig_field .metadata.uid)" = "$uid" ] ||
+		die "a rollback to the revision that seeded the MeshConfig replaced it (uid $uid -> '$(meshconfig_field .metadata.uid)')"
+	ok "a deleted MeshConfig is seeded again by the next upgrade (uid $uid); that revision can be rolled back to, and the rollback leaves the object alone"
+	wait_ready "after the MeshConfig was seeded again"
+}
+
+# v-a2. The seed hook never deletes a MeshConfig (#1471). The chart renders the
+# seed when a `lookup` finds no MeshConfig, and Helm creates it later, as a
+# pre-upgrade hook: an object created in between is not the chart's to touch.
+# Left to Helm's default hook-delete-policy (before-hook-creation) the hook
+# deleted that object and put the seed in its place, and the upgrade reported
+# success. The window is held open here by a second pre-upgrade hook of a lower
+# weight, a Pod that sleeps, in a copy of the chart.
+verify_seed_race() {
+	log "v-a2. a MeshConfig created between the render and the seed hook is not deleted (#1471)"
+	local image slow out logf pid rc phase uid after
+	# A sleeper that is on every node without a pull: kube-proxy's image has
+	# `sleep` (kind's local-path-helper image does not).
+	image="$(kc -n kube-system get ds kube-proxy -o jsonpath='{.spec.template.spec.containers[0].image}')"
+	[ -n "$image" ] || die "could not read kube-proxy's image (the sleeper of the slow hook)"
+	slow="$(mktemp -d)"
+	logf="$slow/upgrade.log"
+	cp -r "$CHARTS/aether" "$slow/aether"
+	cat >"$slow/aether/templates/zz-e2e-slow-hook.yaml" <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-slow-pre-upgrade
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: sleep
+      image: $image
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "15"]
+YAML
+	kc -n "$NS" delete meshconfig default --wait=true >/dev/null || die "could not delete the MeshConfig"
+	AETHER_CHART="$slow/aether" documented_helm_install >"$logf" 2>&1 &
+	pid=$!
+	# Once the slow hook is running, the chart is rendered (no MeshConfig
+	# was live, so the seed is in it) and the seed hook has not run yet.
+	phase=""
+	for _ in $(seq 1 120); do
+		phase="$(kc -n "$NS" get pod e2e-slow-pre-upgrade -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+		[ "$phase" = "Running" ] && break
+		sleep 0.5
+	done
+	if [ "$phase" != "Running" ]; then
+		wait "$pid" || true
+		die "the slow pre-upgrade hook never ran (pod phase '$phase'): $(cat "$logf")"
+	fi
+	[ -z "$(meshconfig_field .metadata.uid)" ] || die "a MeshConfig exists before the test created one: the window was not held open"
+	# The operator's object, with a spec the seed does not have.
+	kc create -f - >/dev/null <<YAML || die "could not create the MeshConfig"
+apiVersion: config.aether.io/v1
+kind: MeshConfig
+metadata:
+  name: default
+  namespace: $NS
+spec:
+  proxy:
+    accessLogsEnabled: true
+YAML
+	uid="$(meshconfig_field .metadata.uid)"
+	rc=0
+	wait "$pid" || rc=$?
+	out="$(cat "$logf")"
+	after="$(meshconfig_field .metadata.uid)"
+	[ -n "$after" ] || die "the upgrade deleted the MeshConfig created during it (uid $uid) and left none (helm exit $rc): $out"
+	[ "$after" = "$uid" ] ||
+		die "the upgrade deleted the MeshConfig created during it and put the seed in its place (uid $uid -> $after, helm exit $rc)"
+	[ "$(meshconfig_field .spec.proxy.accessLogsEnabled)" = "true" ] ||
+		die "the upgrade overwrote the spec of the MeshConfig created during it (spec: $(meshconfig_field '.spec | tojson'))"
+	if [ "$rc" -ne 0 ]; then
+		# Client-side creation: the seed hook fails on the object that is
+		# there, and the same command again succeeds (the object is live, so
+		# the seed is not rendered).
+		case "$out" in
+		*"already exists"*) ;;
+		*) die "the upgrade failed, and not on the MeshConfig that already exists: $out" ;;
+		esac
+		[ "$(release_field status)" = "failed" ] || die "after the failed upgrade the release is '$(release_field status)', want failed"
+		out="$(documented_helm_install 2>&1)" || die "the upgrade run again after 'already exists' failed: $out"
+		ok "the upgrade failed on 'already exists' and left the MeshConfig alone; run again, it succeeded"
+	else
+		ok "the upgrade went through and left the MeshConfig in place"
+	fi
+	[ "$(release_field status)" = "deployed" ] || die "after leg v-a2 the release is '$(release_field status)', want deployed"
+	[ "$(meshconfig_field .metadata.uid)" = "$uid" ] || die "the upgrade run again replaced the MeshConfig (uid $uid -> '$(meshconfig_field .metadata.uid)')"
+	[ "$(meshconfig_field .spec.proxy.accessLogsEnabled)" = "true" ] || die "the upgrade run again overwrote the MeshConfig's spec"
+	ok "the MeshConfig created between the render and the seed hook is the same object (uid $uid), with its spec"
+	kc -n "$NS" delete pod e2e-slow-pre-upgrade --ignore-not-found >/dev/null 2>&1 || true
+	rm -rf "$slow"
+	wait_ready "after the seed race"
 }
 
 # One upgrade of the upgrade-safety leg: the namespace must be the same, Active
@@ -674,6 +841,8 @@ verify() {
 	reset_aether
 	verify_first_install
 	verify_upgrade
+	verify_rollback_to_first
+	verify_seed_race
 	verify_legacy_unmarked
 	verify_upgrade_safety
 	rm -rf "$(dirname "$CHARTS")"
