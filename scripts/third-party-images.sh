@@ -175,9 +175,10 @@ is_skipped() {
 #      `--overrides="{\"image\":\"x\"}"`), `--image=x` / `--image x`, a shell
 #      `FOO_IMAGE="x"` or `FOO_IMAGE="${FOO_IMAGE:-x}"`, Go `Image: "x"` and
 #      `Image = "x"`;
-#   2. any `<name>:<tag>` of a name the inventory already knows, wherever it
-#      stands, so a known image cannot come back by tag (or under a computed
-#      tag, `name:$TAG`) behind a key net 1 does not read.
+#   2. any `<name>:<tag>` or `<name>@<digest>` of a name the inventory already
+#      knows, wherever it stands, so a known image cannot come back by tag,
+#      under a digest the inventory does not list, or under a computed tag or
+#      digest (`name:$TAG`, `name@$DIGEST`) behind a key net 1 does not read.
 # Comments are not read, neither a comment line nor the comment that ends a
 # line of code (` # ...`; ` // ...` in Go and JavaScript): a comment may name
 # the tag, and a pin that only a comment still names is used by nothing. A `#`
@@ -357,11 +358,12 @@ extract_references() { # <names file>; file list on stdin
 				if (key ~ /:[ \t]*$/ && !key_opens_line && !in_flow && !quoted) continue
 				if (literal(ref)) {
 					emit(ref)
-				} else if (match(rest, /^["\047]?[a-z0-9][a-z0-9._\/-]*(:[0-9]+\/[a-z0-9._\/-]+)?:(\$|\{\{)[^ \t"\047]*/)) {
+				} else if (match(rest, /^["\047]?[a-z0-9][a-z0-9._\/-]*(:[0-9]+\/[a-z0-9._\/-]+)?(:(\$|\{\{)|(:[A-Za-z0-9_][A-Za-z0-9._-]*)?@(\$|\{\{))[^ \t"\047]*/)) {
 					# A repository written out under a computed tag (`x/y:$TAG`,
-					# `x/y:{{ .Values.tag }}`) is an image this file names, and it
-					# is not pinned: emitted as it stands, whether or not the
-					# inventory knows the name.
+					# `x/y:{{ .Values.tag }}`) or a computed digest (`x/y:1@$D`,
+					# `x/y@$D`) is an image this file names, and it is not
+					# pinned: emitted as it stands, whether or not the inventory
+					# knows the name.
 					ref = substr(rest, 1, RLENGTH)
 					sub(/^["\047]/, "", ref)
 					emit(ref)
@@ -369,11 +371,21 @@ extract_references() { # <names file>; file list on stdin
 			}
 			for (n in names) {
 				rest = code
-				while ((i = index(rest, n ":")) > 0) {
+				while ((i = index(rest, n)) > 0) {
 					before = (i > 1) ? substr(rest, i - 1, 1) : ""
 					if (i > 2 && substr(rest, i - 2, 2) == ":-") before = ""  # ${VAR:-name:tag}
-					rest = substr(rest, i + length(n) + 1)
+					sep = substr(rest, i + length(n), 1)
+					rest = substr(rest, i + length(n))
+					if (sep != ":" && sep != "@") continue                    # not a reference
 					if (before ~ /[A-Za-z0-9._\/-]/) continue                 # a longer name
+					if (sep == "@") {
+						# By digest alone (`name@sha256:...`, `name@$DIGEST`): the
+						# whole @ token, as below.
+						match(rest, /^@[^ \t"\047}),;]*/)
+						emit(n substr(rest, 1, RLENGTH))
+						continue
+					}
+					rest = substr(rest, 2)
 					if (match(rest, /^(\$|\{\{)[^ \t"\047]*/)) {
 						# A known image under a computed tag is not pinned either.
 						emit(n ":" substr(rest, 1, RLENGTH))

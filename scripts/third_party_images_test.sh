@@ -209,6 +209,32 @@ mutate "an unknown image under a computed tag, quoted flag" e2e/run.sh 'kubectl 
 	'e2e/run.sh:12: new/tool:$TOOL_TAG is pinned by tag only'
 mutate "an unknown image under a templated tag" charts/x/values.yaml '  image: new/tool:{{ .Values.tag }}' \
 	'charts/x/values.yaml:6: new/tool:{{ is pinned by tag only'
+# A computed DIGEST is no pin either, with or without a written-out tag.
+mutate "an unknown image under a computed digest, YAML" e2e/sub/pod.yaml '      image: new/tool:2@${TOOL_DIGEST}' \
+	'e2e/sub/pod.yaml:1: new/tool:2@${TOOL_DIGEST}' "is not sha256:<64 hex>"
+mutate "an unknown image under a computed digest, no tag, quoted flag" e2e/run.sh 'kubectl run q --image="new/tool@$TOOL_DIGEST"' \
+	'e2e/run.sh:12: new/tool@$TOOL_DIGEST' "is not sha256:<64 hex>"
+mutate "an unknown image under a templated digest" charts/x/values.yaml '  image: new/tool:2@{{ .Values.digest }}' \
+	'charts/x/values.yaml:6: new/tool:2@{{' "is not sha256:<64 hex>"
+# A known name by digest alone, behind a key the scan does not read.
+mutate "a known image by an unlisted digest, no tag, behind no image key" e2e/run.sh "docker run --rm a/b@$D9 true" \
+	"e2e/run.sh:12: a/b@$D9 is not in scripts/third-party-images.txt"
+mutate "a known image by a computed digest, no tag, behind no image key" e2e/run.sh 'docker run --rm "a/b@${B_DIGEST}" true' \
+	'e2e/run.sh:12: a/b@${B_DIGEST' "is not sha256:<64 hex>"
+# ...which counts as a use when the digest is the listed one; a longer name that
+# ends in a known one, and a comment, are not that image.
+new_tree "$T"
+echo "pin x/positional 2 $D9" >>"$T/scripts/third-party-images.txt"
+cat >>"$T/e2e/run.sh" <<EOF
+docker run --rm x/positional@$D9 true
+docker run --rm zx/positional@$D1 true # x/positional@$D1
+EOF
+run_check "$T"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 5 image reference(s) in "*": 4 pinned image(s)"* ]]; then
+	ok "a known image by its listed digest alone, behind no image key, is a use"
+else
+	bad "digest-only positional use: exit $RC"$'\n'"$OUT"
+fi
 
 # Spellings that once read as prose or were not read at all (review of #1476).
 mutate "YAML flow mapping, unquoted, by tag only" e2e/sub/pod.yaml '  containers: [{name: probe, image: x/y:latest}]' \
