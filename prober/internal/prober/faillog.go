@@ -21,7 +21,7 @@ import (
 //	  "write_ms":...,"ttfb_ms":...,"dial":...,"remote":...,"local":...,"trace_id":...,
 //	  "pod":...,"node":...,"n":...,"truncated":...}
 //
-// the same shape as the soak's k6 AETHER_FAIL sample (e2e/soak/k6-mesh-soak.js): one
+// the same shape as the AETHER_FAIL sample of the soak's former k6 load script: one
 // JSON object per line behind a fixed greppable marker, with the timestamp as the
 // load-bearing field. elapsed_ms separates a probe that burned the whole 2 s budget
 // (timeout) from a fast refusal (connection_error); phase and the *_ms fields (#1252, see

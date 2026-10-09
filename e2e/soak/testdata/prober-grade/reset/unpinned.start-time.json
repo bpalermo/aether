@@ -1,7 +1,0 @@
-{"status":"success","data":{"resultType":"vector","result":[
-{"metric":{"job":"aether-agent","node":"worker-01","pod":"aether-agent-01"},"value":[1791418200,"1791418170"]},
-{"metric":{"job":"aether-agent","node":"worker-02","pod":"aether-agent-02"},"value":[1791418200,"1791418170"]},
-{"metric":{"job":"aether-agent","node":"worker-03","pod":"aether-agent-03"},"value":[1791418200,"1791418170"]},
-{"metric":{"job":"aether-agent","node":"worker-04","pod":"aether-agent-04"},"value":[1791418200,"1791418170"]},
-{"metric":{"job":"aether-agent","node":"worker-05","pod":"aether-agent-05"},"value":[1791418200,"1791418170"]}
-]}}
