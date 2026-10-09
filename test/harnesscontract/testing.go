@@ -180,17 +180,24 @@ func (m Metric) emitted(tb testing.TB, series []Series) map[string][]string {
 				out[k] = append(out[k], s[k])
 			}
 		}
-		for _, l := range m.Labels {
-			_, has := s[l.Name]
-			switch want := l.On(s); {
-			case want && !has:
-				Errorf(tb, "%s has a series without the label %q (%v), and %s says %s.", m.OTelName, l.Name, s, File, l.presence())
-			case !want && has:
-				Errorf(tb, "%s has a series with the label %q (%v), and %s says %s.", m.OTelName, l.Name, s, File, l.presence())
-			}
-		}
+		m.checkPresence(tb, s)
 	}
 	return out
+}
+
+// checkPresence reports a label one series should carry and does not, or
+// carries and should not.
+func (m Metric) checkPresence(tb testing.TB, s Series) {
+	tb.Helper()
+	for _, l := range m.Labels {
+		_, has := s[l.Name]
+		switch want := l.On(s); {
+		case want && !has:
+			Errorf(tb, "%s has a series without the label %q (%v), and %s says %s.", m.OTelName, l.Name, s, File, l.presence())
+		case !want && has:
+			Errorf(tb, "%s has a series with the label %q (%v), and %s says %s.", m.OTelName, l.Name, s, File, l.presence())
+		}
+	}
 }
 
 // presence says which series carry the label, for a failure message.

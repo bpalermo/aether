@@ -307,10 +307,18 @@ func (m Metric) validate() []string {
 		if v := yamlBoolean(l.Values); v != "" {
 			problems = append(problems, fmt.Sprintf("%s: label %q has the value %q: an unquoted y, n, yes, no, on or off is a boolean in YAML, so quote the value", m.ID, l.Name, v))
 		}
-		for _, k := range sortedKeys(l.When) {
-			if on, ok := m.Label(k); !ok || k == l.Name || !slices.Contains(on.Values, l.When[k]) {
-				problems = append(problems, fmt.Sprintf("%s: label %q is `when` %s=%s, and that is not a value of another closed label of the metric", m.ID, l.Name, k, l.When[k]))
-			}
+		problems = append(problems, m.validateWhen(l)...)
+	}
+	return problems
+}
+
+// validateWhen checks that a conditional label's condition names values of the
+// metric's other closed labels.
+func (m Metric) validateWhen(l Label) []string {
+	var problems []string
+	for _, k := range sortedKeys(l.When) {
+		if on, ok := m.Label(k); !ok || k == l.Name || !slices.Contains(on.Values, l.When[k]) {
+			problems = append(problems, fmt.Sprintf("%s: label %q is `when` %s=%s, and that is not a value of another closed label of the metric", m.ID, l.Name, k, l.When[k]))
 		}
 	}
 	return problems
