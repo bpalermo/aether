@@ -62,7 +62,7 @@ spec:
                     operator: DoesNotExist
       containers:
         - name: k6
-          image: grafana/k6:latest
+          image: grafana/k6:latest@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603
           args:
             - run
             - --no-usage-report

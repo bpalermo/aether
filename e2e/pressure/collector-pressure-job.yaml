@@ -91,7 +91,7 @@ spec:
           # Pinned to the deployed collector's own version (o11y/otel-collector runs
           # otel/opentelemetry-collector-contrib:0.159.0). Never :latest — the flag
           # set below is version-sensitive.
-          image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.159.0
+          image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.159.0@sha256:bad7fde3119476a9177cc4b9f04307c9876fca5b5584e009aebd7123d7557658
           args:
             - logs
             - --otlp-endpoint=otel-collector.o11y.svc.cluster.local:4317
