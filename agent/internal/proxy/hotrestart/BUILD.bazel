@@ -44,6 +44,7 @@ go_test(
         "adminreverify_test.go",
         "childenv_test.go",
         "concurrencychange_test.go",
+        "configwatch_test.go",
         "coordination_test.go",
         "cpuconsumers_test.go",
         "crash_test.go",
@@ -65,6 +66,7 @@ go_test(
     embed = [":hotrestart"],
     deps = [
         "//common/readymarker",
+        "@com_github_fsnotify_fsnotify//:fsnotify",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_sigs_yaml//:yaml",

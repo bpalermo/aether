@@ -1679,7 +1679,10 @@ one node at a time like a DaemonSet roll:
 
 - The node proxy's own bootstrap (`aether-proxy-config`): the supervisor watches
   it (`--watch-config=true`) and hot-restarts Envoy in place, without replacing
-  the pod.
+  the pod. The watch is in place before the supervisor starts its first Envoy,
+  so a change delivered while the pod is starting is either read by that Envoy
+  or followed by a hot restart; until #1470 one that landed just after the
+  first start could go unnoticed until the next change.
 - The OPA preset's policy (`aether-opa-policy`), since chart **2.4.19** (#1383):
   the sidecar runs `opa run --watch` and reloads it with no restart of anything.
   Chart 2.4.15–2.4.18 carried `checksum/opa-policy` and rolled the proxy
