@@ -105,6 +105,14 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		// backend is a plain k8s Service, not a mesh-registered endpoint.
 		clusters = append(clusters, c.edgeK8sBackendClusters()...)
 	}
+	// Everything that carries an upstream transport socket is built. If the
+	// node can publish TLS now, no entry of this snapshot is reported as "no TLS
+	// published" (#1482): the read is taken after the last builder that gates
+	// on the node identity, so an identity that arrived during this build is
+	// seen here. See promoteTLSNotPublished.
+	if c.tcpFloorIdentityReady() {
+		pins.promoteTLSNotPublished()
+	}
 	// UDP floor clusters (proposal 018, Phase 3b): one per service with UDPRoute
 	// backends. These are plain EDS clusters with no transport socket — UDP datagrams
 	// are not protected by mesh mTLS (known limitation). Only emitted when capture is

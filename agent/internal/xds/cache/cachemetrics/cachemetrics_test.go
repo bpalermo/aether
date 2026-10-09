@@ -318,7 +318,7 @@ func pinValues(t *testing.T, reader *sdkmetric.ManualReader, name string) map[st
 	return out
 }
 
-// TestCacheMetrics_TLSClusterPins: each of the two gauges has exactly four
+// TestCacheMetrics_TLSClusterPins: each of the two gauges has exactly five
 // series (pinned, and unpinned per cause), all written on every record (a zero
 // is a sample, not an absence), and holds the last values rather than a sum
 // (#1425). Recording one does not touch the other.
@@ -336,6 +336,7 @@ func TestCacheMetrics_TLSClusterPins(t *testing.T) {
 		exp := map[string]int64{
 			PinPinned: pinned,
 			PinUnpinned + "/" + string(CauseTrustDomainUnknown):  tdUnknown,
+			PinUnpinned + "/" + string(CauseTLSNotPublished):     0,
 			PinUnpinned + "/" + string(CauseNoNamespaceMetadata): noNamespace,
 			PinUnpinned + "/" + string(CausePinNotRendered):      notRendered,
 		}
@@ -388,6 +389,40 @@ func TestPinCounts_AClosedSet(t *testing.T) {
 	}
 	if UnpinnedCauses[NumUnpinnedCauses-1] != CausePinNotRendered {
 		t.Fatalf("the fallback slot must be %s", CausePinNotRendered)
+	}
+}
+
+// TestPinCounts_Promote: the entries counted under one cause move to another
+// and the total does not change (#1482: a snapshot that turns out to carry TLS
+// reports its tls_not_published entries as the validation gap they are).
+func TestPinCounts_Promote(t *testing.T) {
+	var p PinCounts
+	p.Pinned = 3
+	p.AddUnpinned(CauseTLSNotPublished)
+	p.AddUnpinned(CauseTLSNotPublished)
+	p.AddUnpinned(CauseNoNamespaceMetadata)
+	p.AddUnpinned(CauseTrustDomainUnknown)
+
+	p.Promote(CauseTLSNotPublished, CauseNoNamespaceMetadata)
+
+	var want PinCounts
+	want.Pinned = 3
+	for range 3 {
+		want.AddUnpinned(CauseNoNamespaceMetadata)
+	}
+	want.AddUnpinned(CauseTrustDomainUnknown)
+	if p != want {
+		t.Fatalf("after Promote: %+v, want %+v", p, want)
+	}
+	if p.UnpinnedTotal() != 4 {
+		t.Fatalf("Promote changed the total: %d, want 4", p.UnpinnedTotal())
+	}
+
+	// A cause outside the closed set moves nothing.
+	p.Promote("some.cluster.name", CauseNoNamespaceMetadata)
+	p.Promote(CauseTrustDomainUnknown, "some.cluster.name")
+	if p != want {
+		t.Fatalf("a Promote naming an unknown cause changed the counts: %+v", p)
 	}
 }
 

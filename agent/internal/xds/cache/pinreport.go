@@ -63,10 +63,14 @@ const (
 // It reads the entry as rendered, not the emitted protos, which keeps a
 // snapshot build free of the unmarshalling a structural check would need. Two
 // consequences, both on the loud side: an entry with no pin is named whether
-// or not its cluster carries TLS at this moment (the trust-domain window is
-// reported on purpose, #832, though with no trust domain the node publishes
-// no TLS cluster at all), and a TCP entry is counted whether or not the
-// capture set currently publishes its floor cluster.
+// or not its cluster carries TLS at this moment, and a TCP entry is counted
+// whether or not the capture set currently publishes its floor cluster.
+//
+// The cause says which it is (#1482). Under CauseTrustDomainUnknown (the
+// window reported on purpose, #832) and CauseTLSNotPublished the node
+// publishes no TLS cluster at all; CauseNoNamespaceMetadata is TLS published
+// without a pin. A snapshot that can publish TLS never reports
+// CauseTLSNotPublished (promoteTLSNotPublished).
 func (e *clusterEntry) pinState() (clusterPinKind, cachemetrics.UnpinnedCause) {
 	switch {
 	case e.plaintext:
@@ -114,6 +118,30 @@ func (r *pinReport) add(name string, entry *clusterEntry) {
 	}
 }
 
+// promoteTLSNotPublished reports every entry the render left under
+// CauseTLSNotPublished as CauseNoNamespaceMetadata: the validation gap (#1482).
+//
+// A snapshot build calls it when, AFTER it has built everything that carries a
+// transport socket, the node turns out to be able to publish TLS. The cause on
+// an entry is of the render (mtls.go), and the TCP floor clusters are built at
+// snapshot time from the node identity in force then (captureTCPClusters,
+// edgeTCPClusters): an identity that lands between an entry's render and that
+// build puts a TLS cluster with no pin in a snapshot whose entry still says
+// "no TLS published". The benign reason must never be the label of such a
+// snapshot, so the report errs to the loud side for all of them: an HTTP entry
+// of the same snapshot that is still published bare is named as the gap one
+// snapshot early (the recompute that follows the identity publishes its TLS).
+func (r *pinReport) promoteTLSNotPublished() {
+	names := r.unpinned[cachemetrics.CauseTLSNotPublished]
+	if len(names) == 0 {
+		return
+	}
+	delete(r.unpinned, cachemetrics.CauseTLSNotPublished)
+	r.unpinned[cachemetrics.CauseNoNamespaceMetadata] = append(r.unpinned[cachemetrics.CauseNoNamespaceMetadata], names...)
+	r.counts.Promote(cachemetrics.CauseTLSNotPublished, cachemetrics.CauseNoNamespaceMetadata)
+	r.sortNames()
+}
+
 // sortNames sorts the unpinned names, so the same clusters are shown on every
 // snapshot when the list is cut.
 func (r *pinReport) sortNames() {
@@ -144,13 +172,18 @@ func (r *pinReport) sortNames() {
 //     domain. The line's trust_domain attribute is the one in force when the
 //     snapshot was set: if it is non-empty under this cause, the trust domain
 //     has since been learned and the pins have not been re-rendered yet.
+//   - tls_not_published: the service's endpoints carry no Kubernetes
+//     namespace and the node has no served SVID yet, so it publishes no TLS
+//     for the entry (#1482). Bounded by the arrival of the node SVID, at
+//     which the entry becomes the next one.
 //   - no_namespace_metadata: the service's endpoints carry no Kubernetes
-//     namespace. Not a window: it lasts as long as the registry serves them.
+//     namespace and the cluster is published with TLS: the validation gap.
+//     Not a window: it lasts as long as the registry serves them.
 //   - pin_not_rendered: the entry was never rendered. Unreachable today.
 //
 // Bounded: at most one line per cause (a closed set of
 // cachemetrics.NumUnpinnedCauses) and at most maxUnpinnedClusterNames names on
-// each, so a snapshot logs at most 3 lines of 20 names however many clusters
+// each, so a snapshot logs at most 4 lines of 20 names however many clusters
 // are unpinned. The counts on the line are always exact.
 //
 // The gauge is recorded on EVERY snapshot, zeros included, so "no unpinned

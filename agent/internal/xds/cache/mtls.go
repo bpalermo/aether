@@ -163,17 +163,18 @@ func (c *SnapshotCache) renderEntryMTLSLocked(entry *clusterEntry, st localMTLSS
 	if ref, ok := serviceref.ParseKey(entry.service); ok {
 		saName = ref.Name
 	}
-	entry.sanURIs, entry.unpinnedCause = renderSANPin(st.trustDomain, entry.sanNamespaces, saName)
+	// Whether the node can publish a TLS cluster for this entry at all. The
+	// two conditions are the ones every emission path gates on: the early
+	// return below for the HTTP cluster, tcpFloorIdentityReady for the TCP
+	// floor. Without them a rendered pin is carried by nothing, and a pin that
+	// cannot be rendered is missing from nothing yet (#1482).
+	entry.mtlsReady = st.nodeSpiffeID != "" && st.trustDomain != ""
+	entry.sanURIs, entry.unpinnedCause = renderSANPin(st.trustDomain, entry.sanNamespaces, saName, entry.mtlsReady)
 	if entry.plaintext {
 		// The UDP floor has no handshake: an empty pin there is not a missing
 		// one, and it has no cause (#1393).
 		entry.unpinnedCause = ""
 	}
-	// Whether the node can publish a TLS cluster for this entry at all. The
-	// two conditions are the ones every emission path gates on: the early
-	// return below for the HTTP cluster, tcpFloorIdentityReady for the TCP
-	// floor. Without them a rendered pin is carried by nothing.
-	entry.mtlsReady = st.nodeSpiffeID != "" && st.trustDomain != ""
 	sanURIs := entry.sanURIs
 
 	// TCP entries carry no HTTP (h2) cluster (only the TCP floor consumes their
@@ -227,11 +228,32 @@ func (c *SnapshotCache) renderEntryMTLSLocked(entry *clusterEntry, st localMTLSS
 //
 // The trust domain is checked first: without one, whether the endpoints carry
 // a namespace does not matter, and every entry on the node has the same cause.
-func renderSANPin(trustDomain string, sanNamespaces []string, saName string) ([]string, cachemetrics.UnpinnedCause) {
+//
+// tlsPublishable says whether the node can publish a TLS cluster at all (a
+// served node SVID and a trust domain; renderEntryMTLSLocked). It splits the
+// "no namespace" branch in two (#1482), because the two are different facts:
+//
+//   - CauseNoNamespaceMetadata: the cluster is published WITH TLS and checks no
+//     server identity. This is the validation gap.
+//   - CauseTLSNotPublished: the pin could not be rendered either, but the node
+//     publishes no TLS yet, so no handshake is made without it. It is still
+//     reported (the pin is what will be missing when TLS is published), under
+//     a reason that does not claim a gap is being served.
+//
+// The node SVID is an input of the render (mtlsRenderKey.st), so its arrival
+// re-renders the entry and moves it to CauseNoNamespaceMetadata before the
+// snapshot that first publishes TLS for it; and a snapshot that finds TLS
+// publishable while an entry still says CauseTLSNotPublished reports it as the
+// gap (pinReport.promoteTLSNotPublished). The benign reason is never the label
+// of a snapshot that carries TLS.
+func renderSANPin(trustDomain string, sanNamespaces []string, saName string, tlsPublishable bool) ([]string, cachemetrics.UnpinnedCause) {
 	if trustDomain == "" {
 		return nil, cachemetrics.CauseTrustDomainUnknown
 	}
 	if len(sanNamespaces) == 0 {
+		if !tlsPublishable {
+			return nil, cachemetrics.CauseTLSNotPublished
+		}
 		return nil, cachemetrics.CauseNoNamespaceMetadata
 	}
 	sanURIs := make([]string, 0, len(sanNamespaces))
