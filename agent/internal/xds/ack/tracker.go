@@ -457,9 +457,17 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 
 // rejectedLocked records a NACK against every resource of the response.
 // Callers must hold t.mu and have advanced t.seq.
+//
+// Unlike an acknowledgement (acknowledgedLocked) a rejection is recorded
+// whatever was acknowledged since its response was sent. One rejection is kept
+// per name, though, and an older one does not replace a newer one: the newer
+// is of the later version, the one a wait is more likely for.
 func (t *Tracker) rejectedLocked(entry inflightResponse, nackErr error) {
 	for i, name := range append(entry.added, entry.removed...) {
 		st := t.state[entry.typeURL+"/"+name]
+		if st.nackErr != nil && st.seq > entry.sentSeq {
+			continue
+		}
 		st.nackErr = nackErr
 		st.nackVersion = ""
 		if i < len(entry.addedVersions) {

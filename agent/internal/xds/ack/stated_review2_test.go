@@ -228,6 +228,41 @@ func TestTwoGenerations_ARejectionIsAlwaysRecorded(t *testing.T) {
 	requirePresent(t, tr, testListener)
 }
 
+// TestTwoGenerations_AnOlderRejectionDoesNotReplaceANewerOne: one rejection is
+// kept per name. The generation taking over rejects the published version;
+// the draining one then rejects the older version it had been sent before.
+// The rejection that fails the wait for what is published must stay.
+func TestTwoGenerations_AnOlderRejectionDoesNotReplaceANewerOne(t *testing.T) {
+	published := map[string]string{testListener: "h1"}
+	tr := publishing(published)
+	const parent, child = int64(1), int64(2)
+
+	openDelta(tr, parent, resourcev3.ListenerType, nil)
+	sendListeners(tr, parent, "p1", map[string]string{testListener: "h1"}, nil)
+
+	published[testListener] = "h2"
+	openDelta(tr, child, resourcev3.ListenerType, nil)
+	sendListeners(tr, child, "c1", map[string]string{testListener: "h2"}, nil)
+	ackDelta(tr, child, "c1", "h2 refused")
+	ackDelta(tr, parent, "p1", "h1 refused")
+
+	ctx, cancel := context.WithTimeout(context.Background(), resolvedWait)
+	defer cancel()
+	err := tr.WaitListenerPresent(ctx, testListener)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "h2 refused", "the rejection of the published version is the one on record")
+
+	// A rejection of a response sent after it does replace it.
+	published[testListener] = "h3"
+	sendListeners(tr, child, "c2", map[string]string{testListener: "h3"}, nil)
+	ackDelta(tr, child, "c2", "h3 refused")
+	ctx2, cancel2 := context.WithTimeout(context.Background(), resolvedWait)
+	defer cancel2()
+	err = tr.WaitListenerPresent(ctx2, testListener)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "h3 refused")
+}
+
 // TestTwoGenerations_AnOlderRemovalDoesNotUndoANewerAdd: the mirror of the
 // older add. Both generations are sent the removal; the one taking over
 // acknowledges it and then the listener published again; the other's ACK of
