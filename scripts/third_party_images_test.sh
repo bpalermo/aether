@@ -288,6 +288,7 @@ stale_in_comment "a pin named only in a YAML trailing comment" e2e/sub/pod.yaml 
 stale_in_comment "a pin named only in a shell trailing comment" e2e/run.sh "true # was x/stale:2@$D9"
 stale_in_comment "a pin named only after a quoted string and a comment" e2e/run.sh "echo \"it's\" # was x/stale:2@$D9"
 stale_in_comment "a pin named only in a Go trailing comment" test/e2e/x_test.go "var h = 1 // was x/stale:2@$D9"
+stale_in_comment "a pin named only in a Go comment with no space before it" test/e2e/x_test.go "var h = 1// was x/stale:2@$D9"
 # ...and a comment may still name the tag alone, as a comment line may.
 new_tree "$T"
 echo "  - image: a/b:1.0@$D1 # a/b:1.0, was a/b:0.9" >"$T/e2e/sub/pod.yaml"

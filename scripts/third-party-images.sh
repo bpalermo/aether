@@ -196,6 +196,11 @@ is_skipped() {
 # or flag introduces it (a positional `docker run <image>`, a list of bare
 # names). Give such a reference a `*_IMAGE` variable, as e2e/etcd-image.sh does.
 # Also not read, on purpose:
+#   - an image split over sibling keys (`image:` / `  repository: x` /
+#     `  tag: y`, the Helm values spelling, put together by a template): the
+#     parts are not a reference on any one line. No third-party image in this
+#     tree is written that way (the chart's split values are the images this
+#     repository builds); write a third-party one as a single reference.
 #   - YAML embedded in another language (a here-document in a shell script, a
 #     Go raw string) when it holds a flow mapping broken across lines, with an
 #     unquoted `image:` value that is not first on its line and whose `{` is on
@@ -239,9 +244,9 @@ extract_references() { # <names file>; file list on stdin
 		}
 		# Where the comment that ends line s begins (0: it has none), and, in
 		# OPEN_QUOTE, the quote s ends inside of ("" for none). A comment opens
-		# with `#` (`//` when slash_comments) after white space and outside
-		# quotes; a backslash takes the next character with it, so `\"` closes
-		# nothing. Quotes are not followed across lines: one left open hides a
+		# with `#` after white space, or with `//` anywhere when slash_comments
+		# (Go and JavaScript need no space before it), outside quotes; a
+		# backslash takes the next character with it, so `\"` closes nothing. Quotes are not followed across lines: one left open hides a
 		# comment on its own line only, and that line then stays read in full.
 		function comment_start(s, slash_comments,    i, n, c, q, prev) {
 			n = length(s)
@@ -259,7 +264,7 @@ extract_references() { # <names file>; file list on stdin
 					if (c == q) q = ""
 				} else if (c == "\"" || c == "\047" || (slash_comments && c == "`")) {
 					q = c
-				} else if (prev ~ /[ \t]/ && (slash_comments ? substr(s, i, 2) == "//" : c == "#")) {
+				} else if (slash_comments ? substr(s, i, 2) == "//" : (prev ~ /[ \t]/ && c == "#")) {
 					return i
 				}
 				prev = c
