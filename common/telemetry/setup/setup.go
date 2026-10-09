@@ -13,14 +13,13 @@ import (
 	"fmt"
 	"time"
 
-	"aethermesh.dev/common/telemetry/servicename"
+	"aethermesh.dev/common/telemetry/serviceresource"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/prometheus"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.30.0"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -51,19 +50,12 @@ type Config struct {
 	SchedulerLatency bool
 }
 
-// newResource builds the OTel Resource shared by the meter and tracer
-// providers so metrics and traces carry identical service identity attributes.
+// newResource builds the OTel Resource shared by the meter, tracer and logger
+// providers so every signal carries identical service identity attributes. Who
+// decides each attribute is serviceresource's rule, shared with the binaries
+// that do not link this package (mesh-dns, the proxy supervisor, the prober).
 func newResource(ctx context.Context, cfg Config) (*resource.Resource, error) {
-	return resource.New(
-		ctx,
-		resource.WithAttributes(semconv.ServiceVersion(cfg.ServiceVersion)),
-		resource.WithFromEnv(),
-		// After WithFromEnv, so OTEL_RESOURCE_ATTRIBUTES cannot rename the component (#1562).
-		servicename.Option(cfg.ServiceName),
-		resource.WithTelemetrySDK(),
-		resource.WithProcess(),
-		resource.WithHost(),
-	)
+	return serviceresource.New(ctx, cfg.ServiceName, cfg.ServiceVersion)
 }
 
 // readerProducers is one external metric producer per reader: a runtime

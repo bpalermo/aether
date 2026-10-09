@@ -50,11 +50,15 @@ access-log/tracing policy via the MeshConfig CR.
 
 **Who names a component.** Each Go component (agent, registrar, controller, edge
 control plane, mesh-dns, proxy supervisor, prober) sets its own `service.name`
-(`aether-agent`, `aether-mesh-dns`, …) and takes every other resource attribute
-from `OTEL_RESOURCE_ATTRIBUTES`, which the charts use for the pod's `k8s.*`
-attributes. A `service.name` inside `OTEL_RESOURCE_ATTRIBUTES` is ignored by these
-components (#1562): dashboards and alerts select on the component's name. To
-rename one on purpose, set `OTEL_SERVICE_NAME` on its container. Envoy is not a
+(`aether-agent`, `aether-mesh-dns`, …) and its own `service.version` (the build's),
+and takes every other resource attribute from `OTEL_RESOURCE_ATTRIBUTES`, which the
+charts use for the pod's `k8s.*` attributes. A `service.name` inside
+`OTEL_RESOURCE_ATTRIBUTES` is ignored by these components (#1562): dashboards and
+alerts select on the component's name. To rename one on purpose, set
+`OTEL_SERVICE_NAME` on its container. A `service.version` inside
+`OTEL_RESOURCE_ATTRIBUTES` is ignored too (#1575), and nothing overrides it: the
+version says which binary produced the telemetry, and only the binary knows. All
+of them build that resource with `common/telemetry/serviceresource`. Envoy is not a
 Go component: its stats resource takes `service.name` from
 `OTEL_RESOURCE_ATTRIBUTES`, which is how the edge proxy gets `aether-edge-proxy`.
 
