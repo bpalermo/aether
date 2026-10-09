@@ -92,14 +92,30 @@ func (c *SnapshotCache) ResponseAcked(ctx context.Context, typeURL, systemVersio
 // flight, and they stay different for as long as the proxy rejects cluster
 // updates: a NACK leaves the proxy on what it had, and this gauge with it.
 //
+// An agent that restarts against a proxy already holding exactly the current
+// clusters is told too (#1483). The proxy states the version of every cluster
+// it holds in the first Cluster request of its new stream, go-control-plane
+// answers that request with an empty response naming the snapshot it compared
+// the statement with, and the ACK of that response arrives here like any
+// other (ack.Tracker.onDeltaResponse has the rule and why only the FIRST
+// response of a stream may be read this way). The versions are hashes of each
+// cluster's bytes, so "equal" is "the same clusters", whichever agent process
+// sent them.
+//
 // What it cannot know, by construction:
 //
-//   - Nothing is recorded until the first cluster ACK. An agent that restarts
-//     against a proxy already holding exactly the current clusters sends that
-//     proxy no cluster response (delta xDS sends differences), so there is no
-//     ACK and no sample until a cluster changes. Absent means "not known since
-//     this agent started"; and since no response was owed, the proxy then
-//     holds what tls_clusters reports.
+//   - Nothing is recorded until a proxy acknowledges a cluster response to
+//     this agent process. Absent means "not known since this agent started":
+//     no proxy has connected yet, or the proxy rejected the only cluster
+//     response it was sent. The second is the case to remember: a proxy that
+//     is rejecting a cluster update when the agent restarts states the
+//     clusters it held BEFORE the rejected update, which this process never
+//     built and cannot count, so it is sent the update again, rejects it
+//     again, and the gauge stays absent while the NACK counter moves.
+//   - What the proxy states is what it ACCEPTED, not what it runs. Envoy
+//     applies the valid clusters of a response it then rejects as a whole,
+//     and keeps stating their old versions. The same is true of every ACK:
+//     this gauge follows acknowledgements.
 //   - The ACK names a snapshot version, not the clusters applied. A version no
 //     longer in the history (pinHistorySize builds behind) changes nothing.
 //   - With two proxy generations connected during a hot restart, the last ACK

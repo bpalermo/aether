@@ -145,12 +145,21 @@ groups:
       # rejecting cluster updates:
       #   increase(aether_agent_xds_nacks_total{aether_xds_type_url=~".*Cluster"}[30m])
       #
-      # Absence cannot fire it. The acknowledged gauge has no series until the
-      # first cluster ACK an agent process sees, and an agent that restarts
-      # against a proxy already in sync is owed none (#1483). A comparison
+      # Absence cannot fire it. The acknowledged gauge has no series until a
+      # proxy acknowledges a cluster response to the agent process. A comparison
       # between two vectors returns nothing for a (job, node) one side lacks,
-      # so that state is silent here, as it should be: no response was owed, so
-      # the proxy holds what the published gauge shows.
+      # so an absent gauge is silent here: there is nothing known to compare.
+      #
+      # When it is absent. Not after an ordinary agent restart: a reconnecting
+      # proxy states the clusters it holds, and its ACK of the agent's answer
+      # is the gauge's first sample within about a second (#1483; agents before
+      # it had no series until a cluster next changed). It is absent while no
+      # proxy is connected, and, the case this rule then MISSES, after an
+      # agent restart for as long as the proxy rejects the cluster update it
+      # is sent: the new agent process has no acknowledged state to show, so a
+      # divergence that was firing resolves when the old samples leave the
+      # lookback. The NACK counter above moves once for each response the
+      # proxy rejects.
       #
       # Reason by reason, never on the totals. A cluster that leaves one reason
       # for another (an unpinned TCP floor that is removed: no_namespace_metadata
