@@ -5850,7 +5850,8 @@ workload in the trust domain, so a foreign endpoint in its load assignment produ
 clean handshake and a delivered request instead of the `ssl_fail_verify_san` rejection
 that caught #829. It is the fail-**open** direction.
 
-There are four signals, and one vocabulary (`reason`) joins them:
+There are four signals, and one vocabulary (`reason`) joins them. The alert rules built
+on them are in `docs/observability/agent-pin-alerts.yml`:
 
 | Signal | Says | Shape |
 |---|---|---|
@@ -5862,7 +5863,7 @@ There are four signals, and one vocabulary (`reason`) joins them:
 None of the metrics carries a cluster name: the names are in the log line only.
 
 **The line (#1424).** Each cluster is named under the reason that emptied *its* pin, so a
-snapshot logs at most one line per reason (three), each with at most 20 names followed by
+snapshot logs at most one line per reason (four), each with at most 20 names followed by
 `...`. `count` is that reason's exact number, `unpinned` and `pinned` are the snapshot's
 totals, `trust_domain` is the trust domain in force when the snapshot was set. Agents
 before #1424 logged one line with one `reason` for every cluster it named, chosen from the
@@ -5872,7 +5873,8 @@ carry no namespace metadata`); a cluster listed there may have had the other cau
 | `reason` | What happened | Transient? | What to do |
 |---|---|---|---|
 | `trust_domain_unknown` | The pin was rendered while the agent did not know its trust domain, so there was no identity to name. The deliberate lesser evil over `spiffe:///ns/…`, which no certificate can satisfy and cost rev222 four endpoints (#815/#819). Every mesh cluster on the node has this reason at once. | Yes: it ends with the first snapshot after the agent learns its trust domain. | Nothing if it lasts a snapshot or two after an agent start. **If it persists it is the bug**: check that the agent has its own SVID (the agent's identity readiness, #740) and whether `trust_domain` on the line is still empty. A non-empty `trust_domain` under this reason means the trust domain was learned and the pins have not been re-rendered yet; the next snapshot does it. While it lasts the node publishes these clusters with **no TLS at all** (a peer's mesh inbound refuses them), not with an unpinned TLS context. |
-| `no_namespace_metadata` | None of the service's endpoints carries a Kubernetes namespace in the registry, so the expected SPIFFE ID (`spiffe://<td>/ns/<ns>/sa/<svc>`) cannot be built. Once the node has its own SVID the cluster is published **with TLS and without a pin**. Before that (the first moments of an agent, or a node whose SVID never arrives) no mesh cluster carries TLS at all: an HTTP cluster goes out bare and the TCP floor cluster is withheld, and such an entry is still named and counted under this reason, because the pin is what is missing once TLS is there. The line alone does not tell the two apart: the gauge's `pin="pinned"` series does (zero on a node that publishes no TLS yet). | No. It lasts as long as the registry serves those endpoints. | This is the mTLS validation gap. Find who registered the endpoints (`clusters` on the line names the service) and why their `kubernetes_metadata.namespace` is empty; a destination that is not a Kubernetes workload with a SPIFFE identity of that shape cannot be pinned. |
+| `tls_not_published` | None of the service's endpoints carries a Kubernetes namespace in the registry, **and** the node agent has no SVID of its own yet, so it publishes no TLS for the cluster at all: an HTTP cluster goes out bare and the TCP floor cluster is withheld (#1482). No handshake is made without a pin, because none is made. The entry is named because the pin is what will be missing: the snapshot that first publishes TLS for it reports it as `no_namespace_metadata`. The same reason is given to a TCP floor entry (`tcp:<svc>` on the line) with no namespace metadata whose floor cluster is not in the snapshot, because the service is not in the capture TCP set or, on the edge, no TCPRoute or TLSRoute references it: no TLS is published for it either. | Yes for the first case: it ends when the node SVID is served. On a five-node test cluster every running agent had its SVID within 0.5 s of asking; an agent still without one after 2 minutes reports NotReady. | Nothing if it lasts a snapshot or two after an agent start. If it persists, the agent has no identity: check its identity readiness and its SPIRE Workload API socket (#740). A mesh run without SPIRE never leaves this state, by design. A `tcp:` name under this reason on an agent that has its identity is the unpublished-floor case: it lasts until the floor is published, and nothing is wrong with the agent. Either way, the endpoints behind `clusters` need the fix in the next row before TLS is published for them. |
+| `no_namespace_metadata` | None of the service's endpoints carries a Kubernetes namespace in the registry, so the expected SPIFFE ID (`spiffe://<td>/ns/<ns>/sa/<svc>`) cannot be built, and the cluster is published **with TLS and without a pin**. Since #1482 this reason means exactly that: a snapshot that publishes no TLS reports the same entries as `tls_not_published` instead, and a snapshot that is able to publish TLS never does. (Agents before #1482 used this reason for both states; there the gauge's `pin="pinned"` series, zero on a node that publishes no TLS yet, was the only way to tell.) | No. It lasts as long as the registry serves those endpoints. | This is the mTLS validation gap. Find who registered the endpoints (`clusters` on the line names the service) and why their `kubernetes_metadata.namespace` is empty; a destination that is not a Kubernetes workload with a SPIFFE identity of that shape cannot be pinned. |
 | `pin_not_rendered` | The entry reached a snapshot without its pin ever having been rendered. | No code path does this. | An agent defect: file it with the line. |
 
 The UDP floor's `udp:<svc>` clusters are never named and never counted, in any of the
@@ -5884,7 +5886,7 @@ only `udp:…` is not an authentication event (#1393).
 
 **The gauges (#1425).** The counter cannot answer "how many clusters are unpinned now":
 it grows by the unpinned count on *every* snapshot, so its rate is clusters times
-snapshots. `aether_agent_snapshot_tls_clusters` is the count itself. It has four series
+snapshots. `aether_agent_snapshot_tls_clusters` is the count itself. It has five series
 per agent whatever the size of the mesh: `pin="pinned"`, and `pin="unpinned"` once per
 `reason`. A reason that no longer applies reads `0`; a cluster that gains its pin moves
 from its `unpinned` series to `pinned`; a cluster that is removed leaves both. It counts
@@ -5894,8 +5896,13 @@ pin is rendered is in neither series while the node cannot publish TLS for it (n
 SVID yet): it is not a pinned TLS cluster until one is published.
 
 ```promql
-# N clusters unpinned for reason R on this node, now. This is the alert.
-sum by (node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}) > 0
+# N clusters unpinned for reason R on this node, now.
+sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}) > 0
+
+# The validation gap alone: TLS published without a pin. This is the alert
+# (docs/observability/agent-pin-alerts.yml, AetherMeshClusterUnpinned; the two
+# reasons under which no TLS is published are a separate, slower warning).
+sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned", reason=~"no_namespace_metadata|pin_not_rendered"}) > 0
 
 # The positive answer: TLS clusters were published, and all of them pinned.
 sum by (node) (aether_agent_snapshot_tls_clusters{pin="pinned"}) > 0
@@ -5914,11 +5921,11 @@ the proxy's admin interface.
 
 - The two agree at rest. They differ for the moment an update is in flight.
 - They **stay** different while the proxy rejects cluster updates: a NACK acknowledges
-  nothing, so the acknowledged gauge stays on what the proxy last accepted
-  (`aether_agent_xds_nacks_total{aether_xds_type_url=~".*Cluster"}` moves, and the agent
-  logs `envoy NACKed delta response`). Published `unpinned == 0` with acknowledged
-  `unpinned > 0` reads: *the agent has pinned it, the proxy still holds the unpinned
-  cluster*.
+  nothing, so the acknowledged gauge stays on what the proxy last accepted (the NACK
+  counter moves, see below, and the agent logs `envoy NACKed delta response`). Published
+  `unpinned == 0` with acknowledged `unpinned > 0` reads: *the agent has pinned it, the
+  proxy still holds the unpinned cluster*. `AetherProxyHoldsUnpinnedClusters` in
+  `docs/observability/agent-pin-alerts.yml` is that reading as a rule.
 - **Absent is "not known", not zero.** Nothing is written before the first cluster ACK
   the agent process sees. An agent that restarts against a proxy already holding exactly
   the current clusters owes it no cluster update (delta xDS sends differences), so there
@@ -5934,9 +5941,35 @@ the proxy's admin interface.
 
 ```promql
 # What the proxy last acknowledged, where it differs from what is published.
-sum by (node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
-  != sum by (node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"})
+# A node with no acknowledged series (the "not known" state above) is not in
+# the result: a comparison returns nothing for a side that is absent.
+sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
+  != sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"})
+
+# Did the proxy reject a cluster update. Zero is a real answer since #1480.
+sum by (job, node) (increase(aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.cluster.v3.Cluster"}[1h]))
 ```
+
+**The NACK counters (#1480).** `aether_agent_xds_nacks_total` counts the delta responses
+a proxy rejected, by `aether_xds_type_url`; `aether_agent_xds_ack_wait_failures_total`
+counts the ACK waits of a pod's listener that failed, by `aether_xds_wait` (`present`,
+`absent`) and `aether_xds_reason` (`nack`, `timeout`). Both are seeded at zero when the
+agent starts, so "no NACK" is a series at `0` and not an absent one. The first has seven
+series: one per resource type the agent serves (`…listener.v3.Listener`,
+`…cluster.v3.Cluster`, `…endpoint.v3.ClusterLoadAssignment`,
+`…route.v3.RouteConfiguration`, `…tls.v3.Secret`, `…core.v3.TypedExtensionConfig`, each as
+its full `type.googleapis.com/…` URL) and `other`, which nothing uses today. The second
+has four. Agents before #1480 created each series on its first increment, so on those an
+absent series is the healthy state and cannot be told from an agent that reports nothing.
+
+The label names are the OTLP attribute keys (`aether.xds.type_url`, `aether.xds.wait`,
+`aether.xds.reason`) with their dots turned into underscores by the OTLP ingest, like
+every other metric here. Read back from a test cluster's Prometheus on 2026-10-08:
+`aether_agent_xds_ack_wait_failures_total` is stored with exactly `aether_xds_wait`,
+`aether_xds_reason`, `job` and `node`. `aether_agent_xds_nacks_total` had no series there
+(no NACK in 30 days, which is the gap this seeding closes), so its name and its
+`aether_xds_type_url` label are the same translation applied to its sibling, not a
+reading.
 
 ```
 # VictoriaLogs (field syntax; never `| stats`, it false-zeroes).
