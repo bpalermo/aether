@@ -157,8 +157,10 @@
 # counter has the `reason` label and whose gauge has no sample in the window
 # (`UNPINNED published: absent:`): the gauge is written on every snapshot,
 # zeros included, so an absent one is not a zero, and how long a state stood
-# there was not seen. An exporter is the labels the counter and the gauge
-# share, less `reason` and `pin`: with a per-pod label that is the pod, so a
+# there was not seen. An exporter is every label of its counter series but
+# `reason`, and a gauge series is its own when the two agree on every label
+# both carry (each exporter by its own labels: a job without a per-pod label
+# does not change the key of one that has it). With a per-pod label, then, a
 # replaced agent that exports its seeded counter and never sets a snapshot is
 # not covered by the gauge of the pod before it. Where restarts fall into one
 # series (no per-pod label), the counter says when the process started again
@@ -657,23 +659,23 @@ map(select(.silent | not)) as $all
 | ($expected | split(",")) as $exp
 | ($stood | map(select(.reason as $r | $exp | index($r) | not))) as $standing
 | ($stood | map(select(.reason as $r | $exp | index($r)))) as $declared
-# The coverage of the gauge, per EXPORTER: the labels the counter and the gauge
-# have in common, less `reason` and `pin`. With a per-pod label that is the
-# pod, so a replaced agent is not covered by the gauge of the one before it.
-# Where restarts fall into one series, the counter says when the process
-# started again (born in the window, or a reset), and the gauge must have a
-# sample from then on.
+# The coverage of the gauge, per EXPORTER: every label of a counter series but
+# `reason`. A gauge series is that exporter when it agrees with it on every
+# label the two series both carry (`pin` and `reason` aside): each exporter is
+# matched on its OWN labels, so one job without a per-pod label does not take
+# the pod out of the key of another. With a per-pod label a replaced agent is
+# therefore not covered by the gauge of the one before it. Where restarts fall
+# into one series, the counter says when the process started again (born in
+# the window, or a reset), and the gauge must have a sample from then on.
 | ($all | map(select(.labels | has("reason")))) as $lab
-| ([$lab[], $g[]] | map(.labels | del(.reason, .pin) | keys)) as $ks
-| (if ($ks | length) == 0 then [] else reduce $ks[1:][] as $k ($ks[0]; . - (. - $k)) end) as $idn
-| def ident: .labels | to_entries | map(select(.key as $k | $idn | index($k))) | sort_by(.key);
+| def ident: .labels | del(.reason, .pin);
   ($lab | group_by(ident)
     | map(. as $ss | ($ss[0] | ident) as $id
         | ([$ss[] | (if .born then .first.t else empty end), .resets[].at] | max) as $since
-        | ($g | map(select(ident == $id))) as $mine
+        | ($g | map(select(ident as $c | all($id | to_entries[]; ($c[.key] // .value) == .value)))) as $mine
         | select($mine | any(.[]; .values | any(.[]; .[0] >= ($since // $start))) | not)
         | {node: ($ss[0] | l($node)), job: ($ss[0] | l($job)), unit: ($ss[0] | unit),
-           more: ($id | map(select(.key != $node and .key != $job) | " \(.key)=\(.value)") | join("")),
+           more: ($id | to_entries | map(select(.key != $node and .key != $job) | " \(.key)=\(.value)") | join("")),
            since: (if ($mine | length) > 0 then $since else null end)})) as $nogauge
 | ($all | map(unit) | unique | map(select(. as $u | ($gunits | index([$u]) | not) and ($nogauge | any(.[]; .unit == $u) | not)))) as $ungraded
 | $all

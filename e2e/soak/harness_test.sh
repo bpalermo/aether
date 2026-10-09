@@ -2492,6 +2492,26 @@ if [ "$grc" -eq 2 ]; then pass "grade replaced, no gauge: exit 2, not a pass on 
 expect "$G" "grade replaced, no gauge: the new pod is named" '^UNPINNED published: absent: node=worker-04 job=aether-agent pod=aether-agent-04b  \(its counter has the `reason` label and aether_agent_snapshot_tls_clusters\{pin="unpinned"\} has no sample in the window from it: ' 1
 expect "$G" "grade replaced, no gauge: ... and only it" '^UNPINNED published: absent: ' 1
 expect "$G" "grade replaced, no gauge: UNPROVEN" '^UNPINNED verdict=UNPROVEN increase=0 series=24 nodes=5 resets=0  \(the gauge aether_agent_snapshot_tls_clusters has no sample in the window from worker-04: ' 1
+# ... and the pod stays in an exporter's key when ANOTHER exporter in the same
+# answer has no per-pod label (review of #1494, second round). worker-04's old
+# pod runs on for two minutes beside its replacement (a surge roll) and its
+# gauge has samples after the new pod's counter was born; worker-01's series
+# carry no `pod` at all. RED before: the key was the labels common to EVERY
+# series, so worker-01 took `pod` out of it, the old pod's later samples
+# covered the new pod, and the grade was PASS, exit 0.
+mkdir -p "$TMP/grade-mixed-labels" && cp "$TMP/grade-replaced-nogauge/"*.json "$TMP/grade-mixed-labels/"
+for f in unpinned.window published.window; do
+	# shellcheck disable=SC2016 # jq's variables, not the shell's
+	grade_edit grade-mixed-labels "$f" '(.data.result[] | select(.metric.pod == "aether-agent-04") | .values) += [[$run, "0"], [$run + 60, "0"], [$run + 120, "0"]]' --argjson run "$GRUN"
+done
+for f in unpinned.start unpinned.start-time unpinned.window published.window; do
+	grade_edit grade-mixed-labels "$f" '.data.result |= map(if .metric.node == "worker-01" then del(.metric.pod) else . end)'
+done
+GF="$TMP" run_grade grade-mixed-labels "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 2 ]; then pass "grade mixed labels: exit 2: an exporter with no pod label does not take the pod out of another's key"; else fail "grade mixed labels: exit $grc, want 2"; fi
+# shellcheck disable=SC2016 # the backticks are the output's, not a substitution
+expect "$G" "grade mixed labels: the new pod is named, and only it" '^UNPINNED published: absent: node=worker-04 job=aether-agent pod=aether-agent-04b  \(its counter has the `reason` label and aether_agent_snapshot_tls_clusters\{pin="unpinned"\} has no sample in the window from it: ' 1
+expect "$G" "grade mixed labels: ... the exporter with no pod label is covered by its own gauge" '^UNPINNED published: absent: ' 1
 # ... the same where the collector has no per-pod label: restarts fall into one
 # series per node, job and reason, and no label says whose samples they are.
 # The counter does: worker-04's stood at 4 and reads 0 from 05:10, a reset, so

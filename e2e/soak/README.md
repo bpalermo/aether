@@ -1567,8 +1567,10 @@ the pod exists, and after that it cannot be placed.
   absent: node=… job=… [pod=…]` and the gate is `UNPROVEN`. (The counter is seeded when
   the process starts and the gauge is first written with its first snapshot, so a
   process that set no snapshot at all has the one without the other: also `absent`,
-  and also not a state anyone has seen.) An exporter is the labels the counter and the
-  gauge have in common, less `reason` and `pin`. With a per-pod label that is the pod:
+  and also not a state anyone has seen.) An exporter is every label of its counter series but
+  `reason`, and a gauge series is its own when the two agree on every label both carry.
+  Each exporter is matched on its own labels, so a job that has no per-pod label does
+  not change the key of one that has it. With a per-pod label that is the pod:
   a replaced agent is not covered by the gauge samples of the pod before it. Where
   restarts fall into one series, the counter says when the process started again (a
   series born in the window, or a reset) and the gauge must have a sample from then
