@@ -705,6 +705,39 @@ func TestAckedPinGaugeKnowsAVersionHoweverLongItsAckTakes(t *testing.T) {
 	assert.Empty(t, c.acked.clusters[bindingClusterName].sent)
 }
 
+// TestAckedPinGaugeCountsAClusterRemovedWhileItsResponseWasInFlight: the agent
+// drops a cluster it has sent and the proxy has not answered for. The ACK that
+// then arrives is of a cluster no snapshot has any more, and the proxy does
+// hold it, unpinned, until it takes the removal.
+func TestAckedPinGaugeCountsAClusterRemovedWhileItsResponseWasInFlight(t *testing.T) {
+	c, _, reader, tracker := ackedPinFixture(t)
+	ackedGauge := func() (pinSeries, bool) { return readPinGauge(t, reader, ackedTLSClustersGauge) }
+	ctx := context.Background()
+	addPinnedCluster(c, otherClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+	proxy := connectCDSProxy(t, c, tracker, 1, nil)
+	proxy.ack(proxy.next())
+
+	addOutboundCluster(c, bindingClusterName) // unpinned
+	require.NoError(t, c.generateSnapshot(ctx))
+	pending := proxy.next()
+	require.Equal(t, []string{bindingClusterName}, deltaNames(pending))
+	require.NoError(t, c.RemoveCluster(ctx, bindingClusterName))
+	addPinnedCluster(c, addedClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	proxy.ack(pending)
+	acked, _ := ackedGauge()
+	assert.Equal(t, byCause(0, 1, 0), acked.unpinned, "the proxy accepted the cluster it was sent, published or not")
+
+	removal := proxy.next()
+	require.Equal(t, []string{bindingClusterName}, removal.GetRemovedResources())
+	proxy.ack(removal)
+	acked, _ = ackedGauge()
+	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
+	assert.NotContains(t, c.acked.clusters, bindingClusterName)
+}
+
 // TestAckedPinsForgetAVersionThatIsNoLongerInFlight: memory. A version is kept
 // while a response that carried it waits for its answer, and no longer: an
 // ACK, a NACK and the end of the stream each release it.
