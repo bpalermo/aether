@@ -94,6 +94,19 @@ func (e *clusterEntry) pinState() (clusterPinKind, cachemetrics.UnpinnedCause) {
 	return pinPresent, ""
 }
 
+// publishedClusterName is the name of the cluster a snapshot publishes for the
+// entry stored under key: the name a proxy acknowledges it by. A floor entry
+// is keyed by the name of the cluster built from it at snapshot time
+// ("tcp:<svc>[:<port>]"). Every other entry holds its cluster, and the name is
+// the cluster's: a service's default entry is keyed by the bare service name
+// while its cluster is named by the FQDN.
+func (e *clusterEntry) publishedClusterName(key string) string {
+	if e.l4Floor || e.cluster == nil {
+		return key
+	}
+	return e.cluster.GetName()
+}
+
 // pinReport is one snapshot's pin state: the counts (how many cluster entries
 // carry a server-identity pin, and how many are meant to and do not, per
 // cause), and the names of the unpinned ones, sorted, under the cause that
@@ -111,6 +124,16 @@ type pinReport struct {
 	// published for it is known only once the build has made the floor
 	// clusters (demoteUnpublishedFloors). Nil when there is none.
 	unpinnedFloors map[string]struct{}
+	// classes is every entry the report read that can carry a pin (every one
+	// but the plaintext UDP floor) and the class it counted it under, when
+	// track is set: what the acknowledged pin state is built from
+	// (ackedPins.publish). A snapshot build tracks, into a buffer it reuses.
+	track   bool
+	classes []entryClass
+	// promoted records promoteTLSNotPublished: the counts moved every
+	// tls_not_published entry to no_namespace_metadata after the classes were
+	// collected.
+	promoted bool
 }
 
 // add classifies one cluster entry (pinState) into the report. A snapshot
@@ -118,7 +141,17 @@ type pinReport struct {
 // (clustersEndpointsVhostsAndPins), so the report describes exactly the
 // entries that build read and costs no pass of its own.
 func (r *pinReport) add(name string, entry *clusterEntry) {
-	switch kind, cause := entry.pinState(); kind {
+	kind, cause := entry.pinState()
+	// A plaintext entry (the UDP floor) is not tracked: it has no transport
+	// socket in any version, so nothing a proxy holds of it can be in a pin
+	// series. Tracked, a version of it this agent process never published
+	// (stated by a proxy that then rejects the update) would be a held cluster
+	// of unknown class and withdraw the whole acknowledged gauge over bytes
+	// that cannot carry a pin.
+	if r.track && !entry.plaintext {
+		r.classes = append(r.classes, entryClass{name: entry.publishedClusterName(name), class: classOf(kind, cause)})
+	}
+	switch kind {
 	case pinPresent:
 		r.counts.Pinned++
 	case pinMissing:
@@ -207,6 +240,7 @@ func (r *pinReport) demoteUnpublishedFloors(published ...[]types.Resource) {
 // of the same snapshot that is still published bare is named as the gap one
 // snapshot early (the recompute that follows the identity publishes its TLS).
 func (r *pinReport) promoteTLSNotPublished() {
+	r.promoted = true
 	names := r.unpinned[cachemetrics.CauseTLSNotPublished]
 	if len(names) == 0 {
 		return
@@ -270,8 +304,8 @@ func (r *pinReport) sortNames() {
 //
 // Called from generateSnapshot with snapshotMu held, next to the #638 binding
 // discriminators, with the report generateSnapshot took before SetSnapshot
-// (it has to be in the pin history before the proxy can acknowledge the
-// snapshot). Reporting here rather than inside the recompute is deliberate:
+// (its entries have to be in the acknowledged pin state before the proxy can
+// acknowledge the snapshot). Reporting here rather than inside the recompute is deliberate:
 // what matters is what a snapshot PUBLISHES, and a recompute that is
 // superseded before the next generation never reached Envoy.
 func (c *SnapshotCache) reportClusterPins(ctx context.Context, version string, report pinReport) {

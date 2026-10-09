@@ -24,6 +24,7 @@ go_test(
     name = "ack_test",
     size = "small",
     srcs = [
+        "delivery_test.go",
         "metrics_test.go",
         "opening_test.go",
         "seed_test.go",

@@ -21,7 +21,7 @@ and say so in its description.**
 | Change | `version` |
 |---|---|
 | An entry is removed | bump |
-| An entry changes meaning: a renamed metric, label, field or object; a label value removed from a closed set, **or added to one**; a field that changes type or unit; another rolling-update strategy | bump |
+| An entry changes meaning: a renamed metric, label, field or object; a label value removed from a closed set, **or added to one**; a field that changes type or unit; another rolling-update strategy; a metric that keeps its name and labels and counts something else, or is absent under other conditions | bump |
 | A label added to a metric, or removed from it | bump |
 | A render made with other `set` pairs, release or namespace | bump |
 | A new entry, a new object of a render | no bump |
@@ -69,10 +69,26 @@ What an entry means beyond its keys is written in `notes` and comments (what
 a gauge counts, when a series is absent and when it is zero, the entries
 under "What is review-only"), and prose has no line. A change of meaning that
 leaves every key alone, made in the code's behaviour and described in `notes`,
-passes both checks with `version` unchanged. It is still a bump: whoever
-changes what an entry means bumps `version` by hand, and whoever reviews a
-diff of `notes` asks whether the meaning moved. A bump made for that reason
-goes through the same steps as any other (the test prints the new lock).
+passes both checks with `version` unchanged. Version 2 was such a change: a
+gauge kept its name, type and labels and counts something else. It is still a
+bump: whoever changes what an entry means bumps `version` by hand, and whoever
+reviews a diff of `notes` asks whether the meaning moved. A bump made for that
+reason goes through the same steps as any other (the test prints the new
+lock).
+
+Every bump, whichever way it was found, gets a row in "Versions" below: that
+table is the one place that says what a version changed and what a harness
+pinned to an earlier one has to do.
+
+## Versions
+
+What each bump changed, for whoever maintains a harness pinned to an earlier
+one.
+
+| `version` | Change | What a harness has to change |
+|---|---|---|
+| 2 | `agent.xds_acked_tls_clusters` keeps its name, type and labels and means something else (#1508). It was the counts of the last snapshot whose cluster update the proxy acknowledged. It is the count of the clusters the proxy has accepted, each at the version it last acknowledged or stated. | Do not read it as "the proxy holds the newest snapshot" after any cluster ACK: a rejected cluster stays at its accepted version through later ACKs, so the gauge can stay above `agent.snapshot_tls_clusters` for as long as the proxy rejects. Treat an absent series as "not known", and expect it to become absent AFTER having had samples, while the proxy holds a cluster whose pin state the agent cannot determine: a grader that takes a missing series for zero, or that carries the last sample forward, is wrong there. The entry's `notes` have the full statement. |
+| 1 | The first version (#1535). | |
 
 ## How an entry is tied to the code
 

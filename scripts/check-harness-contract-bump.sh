@@ -76,7 +76,8 @@ if [ "$head_version" -gt "$base_version" ]; then
 fi
 
 echo "ERROR: $count promise(s) of the external-harness contract left or changed and its version is still $head_version:"
-printf '%s\n' "$broken" | sed -E 's/^  ("[^"]+"): .*$/         \1/'
+# The names only, never a digest: nothing here can be pasted into the lock.
+printf '%s\n' "$broken" | sed -E 's/^  ("([^"\\]|\\.)+"): .*$/         \1/'
 echo
 echo "A harness outside this repository written against version $head_version relies on each of them."
 echo "Bump \`version\` in test/harnesscontract/external-harness.yaml and replace $LOCK with the one"

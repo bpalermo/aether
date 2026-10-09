@@ -36,7 +36,7 @@
 # what a metrics pipeline or Envoy does to a name after it leaves the product,
 # and meanings that exist only in prose. Those entries are promises kept by
 # review alone.
-version: 1
+version: 2
 
 # --- Metrics ------------------------------------------------------------------
 #
@@ -81,8 +81,26 @@ metrics:
         values: [trust_domain_unknown, tls_not_published, no_namespace_metadata, pin_not_rendered]
         when: {pin: unpinned}
     notes: >-
-      The same counts for the last snapshot whose cluster update the proxy
-      acknowledged. Absent until the first cluster ACK.
+      The same count for the clusters the node's proxy has ACCEPTED, kept
+      cluster by cluster: each mesh cluster entry is counted at the version the
+      proxy last acknowledged, or stated when it opened its xDS stream, with
+      the pin state and reason that version was last published with. A cluster
+      the proxy rejected stays at the version it last accepted through later
+      acknowledgements of other clusters (so this gauge can stay above the
+      snapshot gauge for as long as the proxy rejects); a cluster it has not
+      accepted in any version is in no series; a cluster the agent no longer
+      publishes stays counted until the proxy accepts its removal. All series
+      are written together, zeros included, and are ABSENT together in two
+      cases, neither of which is a zero: (1) until a proxy has answered a
+      cluster response of this agent process, which is the ACK of a response
+      that added or removed a cluster, or the ACK or NACK of the first cluster
+      response of a stream; (2) for as long as the proxy holds a mesh cluster
+      whose pin state the agent cannot determine, when the series STOP after
+      having had samples (they are not left on their last values) and return
+      when it can. A dropped xDS stream does not remove the series.
+      Since contract version 2. Version 1 defined this metric as the counts of
+      the last snapshot whose cluster update the proxy acknowledged, absent
+      only until the first cluster ACK.
     checked_by: //agent/internal/xds/cache/cachemetrics:cachemetrics_test
 
   - id: agent.identity_cluster_unpinned

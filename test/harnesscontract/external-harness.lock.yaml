@@ -13,7 +13,7 @@
 # bump the test asked for, skipped, and on a pull request
 # scripts/check-harness-contract-bump.sh compares this file with the one at the
 # base and fails all the same. README.md, "The rule".
-version: 1
+version: 2
 promises:
   "agent.identity_cluster_unpinned component": "50cd9bfba937d729"
   "agent.identity_cluster_unpinned labels": "24ef360621b205d9"

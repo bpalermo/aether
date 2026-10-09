@@ -172,7 +172,7 @@ func TestTLSNotPublishedIsNeverTheReasonOfASnapshotThatCarriesTLS(t *testing.T) 
 	assert.Equal(t, byCause(0, int64(n), 0), gauge.unpinned)
 
 	// And the acknowledged gauge is of the same, corrected, counts.
-	c.ClusterPinsAcked(ctx, snapshotVersion(t, c))
+	c.ResponseAccepted(ctx, wholeSnapshotAccepted(t, c))
 	acked, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
 	require.True(t, ok)
 	assert.Equal(t, gauge.unpinned, acked.unpinned)

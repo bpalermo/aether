@@ -67,6 +67,12 @@ run() {
 		echo "FAIL: $name: exit $code, want $want_exit and output containing '$want'. Output:"
 		printf '%s\n' "$out" | sed 's/^/    /'
 		fail=1
+	elif [[ "$out" =~ [0-9]{16} ]]; then
+		# Every digest of these fixtures is sixteen digits. A failure names
+		# the promises and never shows a digest: nothing to paste into the lock.
+		echo "FAIL: $name: the output holds a digest. Output:"
+		printf '%s\n' "$out" | sed 's/^/    /'
+		fail=1
 	else
 		echo "ok: $name"
 	fi
