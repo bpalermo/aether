@@ -2,10 +2,12 @@ package cache
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
+	"aethermesh.dev/agent/internal/xds/proxy"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 )
 
@@ -264,12 +266,27 @@ func (s *clusterAck) release() {
 // streams (one, two during a hot restart), not by the number of snapshots or
 // of ACKs.
 //
-// It has its own mutex and is a leaf: the ACK arrives on the xDS stream's
-// goroutine, which must never wait on a snapshot build (snapshotMu) or on the
-// cluster map (clusterMu).
+// It has its own mutex: the ACK arrives on the xDS stream's goroutine, which
+// must never wait on a snapshot build (snapshotMu) or on the cluster map
+// (clusterMu).
+//
+// mu covers a change of the state AND the report of it (the gauge write and
+// the log lines, SnapshotCache.reportAckedPins): the two are one critical
+// section. Changes come from several goroutines (one per connected proxy
+// generation, and the snapshot build), and a report made after the lock is
+// released can be overtaken by the report of a later change, which leaves the
+// gauge on the older state, or written when the later change withdrew it. So
+// publishLocked and acceptLocked are called with mu held, and the caller
+// reports before it releases it. Nothing taken under mu waits on anything but
+// the metric's own leaf mutex and the log handler.
 type ackedPins struct {
 	mu       sync.Mutex
 	clusters map[string]*clusterAck
+	// published is the cluster versions of the newest snapshot, by name: the
+	// snapshot's own map, which nothing changes once the snapshot is built. A
+	// name in it with no record is a cluster that is not a cluster entry
+	// (restateLocked).
+	published map[string]string
 	// build counts publish calls; a record whose build is older is of an
 	// entry the newest snapshot no longer has.
 	build uint64
@@ -298,11 +315,12 @@ type ackedPinsUpdate struct {
 	unclassifiedChanged bool
 }
 
-// publish records the cluster entries of the snapshot about to be set: the
-// version each one's cluster is published at and the class the snapshot's pin
-// report counts it under. Called before SetSnapshot, which is what lets a
+// publishLocked records the cluster entries of the snapshot about to be set:
+// the version each one's cluster is published at and the class the snapshot's
+// pin report counts it under. Called before SetSnapshot, which is what lets a
 // proxy see the snapshot: published after, an ACK could arrive first and find
-// the version unknown.
+// the version unknown. Callers hold h.mu and report the update before they
+// release it (ackedPins).
 //
 // entries is the build's own read of the cluster map (pinReport.classes).
 // versions is the snapshot's per-cluster version map; an entry with no cluster
@@ -315,13 +333,12 @@ type ackedPinsUpdate struct {
 //
 // A walk of the entries and one of the records, no allocation unless an entry
 // is new: it runs on every snapshot build.
-func (h *ackedPins) publish(entries []entryClass, versions map[string]string, promoted bool) ackedPinsUpdate {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+func (h *ackedPins) publishLocked(entries []entryClass, versions map[string]string, promoted bool) ackedPinsUpdate {
 	if h.clusters == nil {
 		h.clusters = make(map[string]*clusterAck, len(entries))
 	}
 	h.build++
+	h.published = versions
 	notPublished, gap := unpinnedClass(cachemetrics.CauseTLSNotPublished), unpinnedClass(cachemetrics.CauseNoNamespaceMetadata)
 	heldChanged := false
 	for _, e := range entries {
@@ -395,17 +412,20 @@ func (h *ackedPins) deliver(d ack.Delivery) {
 	}
 }
 
-// accept applies what one answered cluster response says the proxy holds.
-func (h *ackedPins) accept(a ack.Accepted) ackedPinsUpdate {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+// acceptLocked applies what one answered cluster response says the proxy
+// holds. Callers hold h.mu and report the update before they release it
+// (ackedPins).
+func (h *ackedPins) acceptLocked(a ack.Accepted) ackedPinsUpdate {
 	if a.Opening {
 		h.restateLocked(a.Stated)
 	}
-	// A name with no record is not a cluster entry of a snapshot this process
-	// built recently or since the proxy last held it (a per-pod application
-	// cluster, a QUIC twin, the passthrough cluster, a plaintext UDP floor):
-	// it is in no pin count.
+	// A name with no record here is a cluster the response carried that is
+	// not a cluster entry (a per-pod application cluster, a QUIC twin, the
+	// passthrough cluster, a plaintext UDP floor), and is in no pin count. Or
+	// it is an entry that left the snapshot more than goneBuilds builds
+	// before the response that carried it was written, which is the bound
+	// goneBuilds states; the proxy's next opening statement names it, and
+	// restateLocked does not take a name on trust.
 	for _, r := range a.Added {
 		if s := h.clusters[r.Name]; s != nil {
 			s.hold(r.Version)
@@ -424,7 +444,36 @@ func (h *ackedPins) accept(a ack.Accepted) ackedPinsUpdate {
 // made in the first cluster request of a stream: it replaces what was known,
 // cluster by cluster. A cluster the proxy does not state it does not hold.
 // Callers hold h.mu.
+//
+// A stated name with no record is not thereby a cluster that carries no pin.
+// The proxy can hold a cluster entry this agent has dropped the record of: one
+// it accepted on a stream that ended before the agent read the answer, removed
+// from the snapshot since, and stated again more than goneBuilds builds later
+// (or within them, when the builds went by while the opening response waited
+// for its answer). Its class is not on record, so it is held at a version of
+// unknown class, which withdraws the gauge until the proxy accepts its removal
+// or states it no more: a count without it would say the proxy holds fewer
+// unpinned clusters than it may.
+//
+// What tells the two apart is what the agent publishes now. A stated name the
+// newest snapshot publishes and that has no record is a cluster that is not a
+// cluster entry: every entry of that snapshot has its record. One it does not
+// publish is taken for an entry unless its name says it is of a family that
+// never carries a pin of its own (carriesNoPinOfItsOwn). The agent errs to
+// "unknown" there: a cluster of some other family that the agent stopped
+// publishing while the proxy keeps it withdraws the gauge for as long as the
+// proxy rejects the removal.
 func (h *ackedPins) restateLocked(stated map[string]string) {
+	for name, version := range stated {
+		if h.clusters[name] != nil {
+			continue
+		}
+		if _, published := h.published[name]; published || carriesNoPinOfItsOwn(name) {
+			continue
+		}
+		// build stays zero: an entry of no snapshot this record knows.
+		h.clusters[name] = &clusterAck{holds: true, held: version}
+	}
 	for name, s := range h.clusters {
 		if version, holds := stated[name]; holds {
 			s.hold(version)
@@ -433,6 +482,21 @@ func (h *ackedPins) restateLocked(stated map[string]string) {
 		s.release()
 		h.forgetIfGoneLocked(name, s)
 	}
+}
+
+// udpFloorClusterPrefix is the prefix of a plaintext UDP floor cluster's name
+// (proxy.UDPClusterName).
+const udpFloorClusterPrefix = "udp:"
+
+// carriesNoPinOfItsOwn reports whether a cluster of this name is, by its name
+// alone, never a cluster entry the pin gauges count: a per-pod cluster
+// (application, health probe, inbound readiness), a QUIC twin (counted through
+// its base entry, pinState), or a plaintext UDP floor. Every name a counted
+// entry is published under must answer false; a family missing from this list
+// only costs the gauge when the proxy keeps such a cluster the agent no longer
+// publishes (restateLocked).
+func carriesNoPinOfItsOwn(name string) bool {
+	return proxy.IsPerPodClusterName(name) || proxy.IsQUICClusterName(name) || strings.HasPrefix(name, udpFloorClusterPrefix)
 }
 
 // settleLocked recounts what the proxy holds. Callers hold h.mu.
@@ -533,8 +597,10 @@ func (c *SnapshotCache) ResponseAccepted(ctx context.Context, accepted ack.Accep
 //     counter moves. It is written again when every held version is known.
 //     "Not written" is absent, also for a gauge that was written before: it
 //     is an observable gauge and has no sample while this lasts.
-//   - A cluster the proxy holds that is not a cluster entry of any snapshot
-//     this process built is in no count.
+//   - The class of a cluster the proxy states and the agent neither publishes
+//     nor has a record of (restateLocked): the same, "not written", unless its
+//     name is of a family that carries no pin. A cluster the agent does
+//     publish that is not a cluster entry is in no count.
 //   - What the proxy states is what it ACCEPTED, not what it runs. Envoy
 //     applies the valid clusters of a response it then rejects as a whole,
 //     and keeps stating their old versions. They are counted at the old
@@ -552,14 +618,29 @@ func (c *SnapshotCache) ResponseAccepted(ctx context.Context, accepted ack.Accep
 // silent however many updates are acknowledged in it.
 //
 // Safe to call from the xDS stream's goroutine: it takes the acknowledged
-// state's own mutex and nothing else. It walks every cluster record once.
+// state's own mutex and nothing else. It walks every cluster record once
+// (BenchmarkAckedPinsAccept: about 25 microseconds at 2,000 cluster entries).
+//
+// The state change and its report are one critical section, so that the gauge
+// is written in the order the state changed (ackedPins).
 func (c *SnapshotCache) ClustersAccepted(ctx context.Context, accepted ack.Accepted) {
-	c.reportAckedPins(ctx, c.acked.accept(accepted), accepted.SystemVersion)
+	c.acked.mu.Lock()
+	defer c.acked.mu.Unlock()
+	c.reportAckedPins(ctx, c.acked.acceptLocked(accepted), accepted.SystemVersion)
+}
+
+// publishAckedPins records the cluster entries of the snapshot about to be set
+// (ackedPins.publishLocked) and reports what that changed, in one critical
+// section like ClustersAccepted.
+func (c *SnapshotCache) publishAckedPins(ctx context.Context, pins pinReport, versions map[string]string, version string) {
+	c.acked.mu.Lock()
+	defer c.acked.mu.Unlock()
+	c.reportAckedPins(ctx, c.acked.publishLocked(pins.classes, versions, pins.promoted), version)
 }
 
 // reportAckedPins writes one change of the acknowledged pin state to the
 // gauge and the log. version is the snapshot whose build or whose response
-// produced it.
+// produced it. Callers hold c.acked.mu, from before the change was made.
 func (c *SnapshotCache) reportAckedPins(ctx context.Context, u ackedPinsUpdate, version string) {
 	if u.unclassified > 0 {
 		// Withdrawn, not left: a gauge that was written before would go on

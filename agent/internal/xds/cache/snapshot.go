@@ -253,7 +253,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// A later snapshot can count the very bytes the proxy holds differently;
 	// that is the one case in which a build, not an ACK, moves the
 	// acknowledged gauge.
-	c.reportAckedPins(ctx, c.acked.publish(pins.classes, snapshot.GetVersionMap(resourcev3.ClusterType), pins.promoted), v)
+	c.publishAckedPins(ctx, pins, snapshot.GetVersionMap(resourcev3.ClusterType), v)
 
 	// Everything SetSnapshot does runs under the cache mutex the ADS stream
 	// needs; time it so a regression of the above is visible.

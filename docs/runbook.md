@@ -6187,7 +6187,13 @@ What follows from that:
   response, and the agent's `envoy NACKed delta response` line. An absent acknowledged
   gauge on an agent whose proxy is connected is therefore a reason to look at the NACK
   counter. The ACK of some other cluster does not end it; the proxy accepting that
-  cluster does.
+  cluster does. The same holds for a cluster the proxy **states it holds when it opens
+  a stream** that the agent no longer publishes and has no record of (the agent
+  restarted, or the stream ended before the agent read the proxy's answer and the
+  cluster was removed since), when the proxy then rejects the response that removes
+  it: it is counted as unknown until the proxy accepts the removal. Per-pod clusters,
+  QUIC twins and UDP floor clusters are never counted that way; they carry no pin of
+  their own.
 - **Accepted is not applied.** Envoy applies the valid clusters of a response and then
   rejects the response as a whole when one cluster in it is invalid; it goes on stating
   the versions it had before. So after a rejected update the proxy can run a newer

@@ -3,8 +3,10 @@ package cache
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,6 +205,20 @@ func deltaNames(resp *discoveryv3.DeltaDiscoveryResponse) []string {
 		names = append(names, r.GetName())
 	}
 	return names
+}
+
+// publish and accept are publishLocked and acceptLocked for a test that reads
+// the update itself instead of having the cache report it.
+func (h *ackedPins) publish(entries []entryClass, versions map[string]string, promoted bool) ackedPinsUpdate {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.publishLocked(entries, versions, promoted)
+}
+
+func (h *ackedPins) accept(a ack.Accepted) ackedPinsUpdate {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.acceptLocked(a)
 }
 
 // buildPastTheGoneWindow builds the snapshots after which the record of an
@@ -1413,4 +1429,348 @@ func TestAckedPinGaugeMakesNoClaimForAProxyThatIsNotInSync(t *testing.T) {
 	assert.Equal(t, byCause(0, 1, 0), acked.unpinned,
 		"the proxy rejected the pinned cluster: an empty response later on the stream must not be read as it holding that snapshot")
 	assert.Zero(t, acked.pinned)
+}
+
+// lostAckFixture is a proxy that accepted an unpinned cluster this agent sent
+// it while the agent never read the answer: the stream ended first. The agent
+// then dropped the cluster. It returns the cache, what the proxy would state
+// on its next stream (the cluster included), and the tracker.
+func lostAckFixture(t *testing.T) (*SnapshotCache, *recorder, *sdkmetric.ManualReader, *ack.Tracker, map[string]string) {
+	t.Helper()
+	c, rec, reader, tracker := ackedPinFixture(t)
+	ctx := context.Background()
+	addPinnedCluster(c, otherClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+	first := connectCDSProxy(t, c, tracker, 1, nil)
+	first.ack(first.next())
+
+	addOutboundCluster(c, bindingClusterName) // unpinned
+	require.NoError(t, c.generateSnapshot(ctx))
+	sent := first.next()
+	require.Equal(t, []string{bindingClusterName}, deltaNames(sent))
+	holds := maps.Clone(first.accepted)
+	holds[bindingClusterName] = sent.GetResources()[0].GetVersion()
+	first.callbacks.OnDeltaStreamClosed(1, nil)
+	require.NoError(t, c.RemoveCluster(ctx, bindingClusterName))
+	return c, rec, reader, tracker, holds
+}
+
+// TestAckedPinGaugeIsNotCompleteWithAStatedClusterItHasNoRecordOf: a proxy can
+// hold a mesh cluster this agent has no record of. Here the agent sent it, the
+// stream ended before the answer was read, the cluster was removed, and the
+// builds a record outlives its entry by went past before the proxy came back.
+// Its opening statement names the cluster; it rejects the response that
+// removes it, so it goes on holding it. The agent does not know that
+// cluster's pin class any more. It must not report a count that leaves it
+// out as if it were the whole of what the proxy holds.
+func TestAckedPinGaugeIsNotCompleteWithAStatedClusterItHasNoRecordOf(t *testing.T) {
+	c, rec, reader, tracker, holds := lostAckFixture(t)
+	ackedGauge := func() (pinSeries, bool) { return readPinGauge(t, reader, ackedTLSClustersGauge) }
+	buildPastTheGoneWindow(t, c)
+	require.NotContains(t, c.acked.clusters, bindingClusterName, "fixture: nothing kept the record")
+
+	again := connectCDSProxy(t, c, tracker, 2, holds)
+	removal := again.next()
+	require.Equal(t, []string{bindingClusterName}, removal.GetRemovedResources(), "fixture: the proxy is told to drop it")
+	again.nack(removal)
+
+	_, ok := ackedGauge()
+	assert.False(t, ok, "the proxy holds a cluster whose pin state is not known: no count is the whole of it")
+	require.Len(t, rec.with(ackedClusterPinsUnknownMsg), 1)
+	assert.Equal(t, "1", rec.with(ackedClusterPinsUnknownMsg)[0].attrs["clusters"])
+
+	// It lasts until the proxy accepts the removal.
+	third := connectCDSProxy(t, c, tracker, 3, again.accepted)
+	third.ack(third.next())
+	acked, ok := ackedGauge()
+	require.True(t, ok)
+	assert.Equal(t, int64(1), acked.pinned)
+	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
+	assert.Len(t, rec.with(ackedClusterPinsKnownMsg), 1)
+	buildPastTheGoneWindow(t, c)
+	assert.NotContains(t, c.acked.clusters, bindingClusterName, "and nothing is kept for it afterwards")
+}
+
+// TestAckedPinGaugeWhenARecordIsDroppedWhileTheOpeningAnswerIsAwaited: the same
+// proxy comes back while the record of the removed cluster is still kept, and
+// is slow to answer the response that removes it. A removal carries no version
+// and is not in flight as far as the record goes, so the builds meanwhile drop
+// it. The proxy then rejects the removal. What it holds is what it stated,
+// that cluster included, and the gauge must not say otherwise.
+func TestAckedPinGaugeWhenARecordIsDroppedWhileTheOpeningAnswerIsAwaited(t *testing.T) {
+	c, rec, reader, tracker, holds := lostAckFixture(t)
+	require.Contains(t, c.acked.clusters, bindingClusterName, "fixture: the record is still kept when the proxy states the cluster")
+
+	again := connectCDSProxy(t, c, tracker, 2, holds)
+	removal := again.next()
+	require.Equal(t, []string{bindingClusterName}, removal.GetRemovedResources())
+	buildPastTheGoneWindow(t, c)
+	again.nack(removal)
+
+	_, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+	assert.False(t, ok, "the proxy still holds the cluster it stated; a count without it is not what it holds")
+	assert.Len(t, rec.with(ackedClusterPinsUnknownMsg), 1)
+}
+
+// TestAckedPinGaugeCountsAStatedClusterWhoseRecordIsStillKept: the same again
+// with the answer inside the window. The record is there, with the class the
+// cluster was published with, and the cluster is counted, not unknown.
+func TestAckedPinGaugeCountsAStatedClusterWhoseRecordIsStillKept(t *testing.T) {
+	c, rec, reader, tracker, holds := lostAckFixture(t)
+	again := connectCDSProxy(t, c, tracker, 2, holds)
+	again.nack(again.next())
+
+	acked, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), acked.pinned)
+	assert.Equal(t, byCause(0, 1, 0), acked.unpinned)
+	assert.Empty(t, rec.with(ackedClusterPinsUnknownMsg))
+}
+
+// TestAckedPinsStatedClustersWithNoRecord: which stated names with no record
+// make the state unknown. Not a cluster the newest snapshot publishes (it is
+// not a cluster entry, or it would have a record). Not a name of a family
+// that never carries a pin of its own. Any other is a cluster this agent does
+// not publish and has no class for: unknown, until the proxy accepts its
+// removal or stops stating it.
+func TestAckedPinsStatedClustersWithNoRecord(t *testing.T) {
+	const domain = "aether.internal"
+	gone := proxy.ServiceClusterName("demo/gone", domain)
+	goneFloor := proxy.TCPClusterName("demo/gone", domain)
+	stated := map[string]string{
+		"a":                        "ha",
+		"passthrough_original_dst": "hp", // published, not an entry
+		"app_pod-0_8080":           "x1", // per-pod, gone
+		"health_pod-0":             "x2",
+		"inboundready_pod-0":       "x3",
+		proxy.QUICClusterName("demo/gone", domain, "demo/client"): "x4",
+		proxy.UDPClusterName("demo/gone", domain):                 "x5",
+	}
+	publish := func(h *ackedPins) {
+		h.publish([]entryClass{{name: "a", class: pinClassPinned}}, map[string]string{"a": "ha", "passthrough_original_dst": "hp"}, false)
+	}
+
+	var h ackedPins
+	publish(&h)
+	u := h.accept(ack.Accepted{Opening: true, Rejected: true, Stated: stated})
+	require.True(t, u.report, "none of these is a cluster whose pin state could be unknown")
+	assert.Equal(t, cachemetrics.PinCounts{Pinned: 1}, u.counts)
+	assert.Len(t, h.clusters, 1)
+
+	stated[gone], stated[goneFloor] = "hg", "hf"
+	u = h.accept(ack.Accepted{Opening: true, Rejected: true, Stated: stated})
+	assert.False(t, u.report)
+	assert.Equal(t, 2, u.unclassified, "an HTTP cluster and a TCP floor cluster this agent does not publish")
+
+	// An acknowledged opening response removes what the snapshot does not
+	// have: stated, removed, held no more.
+	u = h.accept(ack.Accepted{Opening: true, Stated: stated, Removed: []string{gone, goneFloor}})
+	require.True(t, u.report)
+	assert.Equal(t, cachemetrics.PinCounts{Pinned: 1}, u.counts)
+
+	// A statement that no longer names it releases it too.
+	h.accept(ack.Accepted{Opening: true, Rejected: true, Stated: stated})
+	delete(stated, gone)
+	delete(stated, goneFloor)
+	u = h.accept(ack.Accepted{Opening: true, Rejected: true, Stated: stated})
+	require.True(t, u.report)
+	for range goneBuilds {
+		publish(&h)
+	}
+	assert.Len(t, h.clusters, 1, "and its record goes")
+
+	// The agent publishes the version the proxy stated: known from then on.
+	stated[gone] = "hg"
+	h.accept(ack.Accepted{Opening: true, Rejected: true, Stated: stated})
+	u = h.publish([]entryClass{{name: "a", class: pinClassPinned}, {name: gone, class: unpinnedClass(cachemetrics.CauseNoNamespaceMetadata)}},
+		map[string]string{"a": "ha", gone: "hg"}, false)
+	require.True(t, u.report)
+	assert.Equal(t, 1, u.counts.UnpinnedTotal())
+
+	// Every name a cluster entry is published under is one the rule can see.
+	for _, name := range []string{
+		gone, goneFloor, proxy.PortClusterName("demo/gone", domain, 8080), proxy.TCPPortClusterName(goneFloor, 9000),
+	} {
+		assert.False(t, carriesNoPinOfItsOwn(name), name)
+	}
+}
+
+// blockOnce is a log handler that stops the first record with msg until
+// release is closed, and closes entered when it has it.
+type blockOnce struct {
+	slog.Handler
+	msg     string
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *blockOnce) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == h.msg {
+		h.once.Do(func() {
+			close(h.entered)
+			<-h.release
+		})
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+// reportInOrder runs first, which must log msg while it reports a change of
+// the acknowledged pin state, stops it there, and runs second, a later change,
+// while it is stopped. A report is the gauge write and the log lines; msg is
+// one that is logged before the gauge is written. If reports can overtake one
+// another, second writes the gauge and first then overwrites it with the
+// older state.
+func reportInOrder(t *testing.T, c *SnapshotCache, msg string, first, second func()) {
+	t.Helper()
+	block := &blockOnce{Handler: c.log.Handler(), msg: msg, entered: make(chan struct{}), release: make(chan struct{})}
+	c.log = slog.New(block)
+	firstDone, secondDone := make(chan struct{}), make(chan struct{})
+	go func() { defer close(firstDone); first() }()
+	select {
+	case <-block.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fixture: the first change did not log " + msg)
+	}
+	go func() { defer close(secondDone); second() }()
+	// The second change either completes while the first is stopped (reports
+	// are not ordered: it has now written the gauge) or waits for the first.
+	select {
+	case <-secondDone:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(block.release)
+	for _, done := range []chan struct{}{firstDone, secondDone} {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a change of the acknowledged pin state did not return")
+		}
+	}
+}
+
+// TestAckedPinGaugeIsWrittenInTheOrderTheStateChanged: two proxy generations
+// answer on two stream goroutines during a hot restart. The state changes one
+// answer after the other, and the gauge has to end on the later one: an
+// earlier change whose report is slow must not be written over a later one.
+func TestAckedPinGaugeIsWrittenInTheOrderTheStateChanged(t *testing.T) {
+	// The first change in each case: the proxy accepts, at a version this
+	// agent knows, the cluster it held at one it does not. The state is known
+	// again, which is logged before the gauge is written: pinned 1, unpinned 1.
+	for _, tc := range []struct {
+		name   string
+		second ack.Accepted
+		check  func(t *testing.T, acked pinSeries, ok bool)
+	}{
+		{
+			name:   "a later count",
+			second: ack.Accepted{TypeURL: resourcev3.ClusterType, Removed: []string{bindingClusterName}},
+			check: func(t *testing.T, acked pinSeries, ok bool) {
+				require.True(t, ok)
+				assert.Equal(t, int64(1), acked.pinned)
+				assert.Equal(t, byCause(0, 0, 0), acked.unpinned, "the proxy dropped the unpinned cluster after it accepted it")
+			},
+		},
+		{
+			name:   "a later withdrawal",
+			second: ack.Accepted{TypeURL: resourcev3.ClusterType, Added: []ack.Resource{{Name: otherClusterName, Version: "a-version-this-agent-has-no-class-for"}}},
+			check: func(t *testing.T, _ pinSeries, ok bool) {
+				assert.False(t, ok, "the state became unknown after it was known: the gauge must stay withdrawn")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, reader, _ := ackedPinFixture(t)
+			ctx := context.Background()
+			addOutboundCluster(c, bindingClusterName) // unpinned
+			addPinnedCluster(c, otherClusterName)
+			require.NoError(t, c.generateSnapshot(ctx))
+			versions := clusterVersions(t, c)
+			stated := maps.Clone(versions)
+			stated[bindingClusterName] = "a-version-this-agent-has-no-class-for"
+			c.ResponseAccepted(ctx, ack.Accepted{TypeURL: resourcev3.ClusterType, Opening: true, Rejected: true, Stated: stated})
+			_, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+			require.False(t, ok, "fixture: unknown")
+
+			known := ack.Accepted{TypeURL: resourcev3.ClusterType, Added: []ack.Resource{{Name: bindingClusterName, Version: versions[bindingClusterName]}}}
+			reportInOrder(t, c, ackedClusterPinsKnownMsg,
+				func() { c.ResponseAccepted(ctx, known) },
+				func() { c.ResponseAccepted(ctx, tc.second) })
+
+			acked, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+			tc.check(t, acked, ok)
+		})
+	}
+}
+
+// TestAckedPinGaugeIsWrittenInOrderAcrossABuildAndAnAnswer: the other pair of
+// goroutines. A snapshot build can move the acknowledged gauge (it publishes
+// the version a proxy stated, which makes that cluster's class known), and an
+// answer arrives on the stream's goroutine meanwhile. The later change wins
+// here too.
+func TestAckedPinGaugeIsWrittenInOrderAcrossABuildAndAnAnswer(t *testing.T) {
+	c, _, reader, _ := ackedPinFixture(t)
+	ctx := context.Background()
+	addPinnedCluster(c, otherClusterName)
+	// The proxy holds the cluster at a version this agent published too long
+	// ago to have a class for.
+	addClusterVariant(c, bindingClusterName, 0, true)
+	require.NoError(t, c.generateSnapshot(ctx))
+	stated := clusterVersions(t, c)
+	for i := range offeredVersions {
+		addClusterVariant(c, bindingClusterName, 1+i, false)
+		require.NoError(t, c.generateSnapshot(ctx))
+	}
+	c.ResponseAccepted(ctx, ack.Accepted{TypeURL: resourcev3.ClusterType, Opening: true, Rejected: true, Stated: stated})
+	_, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+	require.False(t, ok, "fixture: unknown")
+
+	reportInOrder(t, c, ackedClusterPinsKnownMsg,
+		func() {
+			// The agent publishes that version again: pinned 2.
+			addClusterVariant(c, bindingClusterName, 0, true)
+			assert.NoError(t, c.generateSnapshot(ctx))
+		},
+		func() {
+			// The proxy accepts the removal of the cluster: pinned 1.
+			c.ResponseAccepted(ctx, ack.Accepted{TypeURL: resourcev3.ClusterType, Removed: []string{bindingClusterName}})
+		})
+
+	acked, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), acked.pinned, "the answer came after the build's change")
+	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
+}
+
+// BenchmarkAckedPinsAccept is what one cluster ACK costs on the xDS stream's
+// goroutine. accept recounts every record (settleLocked), so the cost grows
+// with the number of cluster entries on the node and not with the response.
+// Measure with this before making the count incremental.
+func BenchmarkAckedPinsAccept(b *testing.B) {
+	for _, n := range []int{200, 2000, 20000} {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			var h ackedPins
+			entries := make([]entryClass, 0, n)
+			versions := make(map[string]string, n)
+			opening := ack.Accepted{Opening: true, Stated: map[string]string{}}
+			for i := range n {
+				name := fmt.Sprintf("svc-%05d.aether-test.aether.internal", i)
+				class := pinClassPinned
+				if i%10 == 0 {
+					class = unpinnedClass(cachemetrics.CauseNoNamespaceMetadata)
+				}
+				entries = append(entries, entryClass{name: name, class: class})
+				versions[name] = "v-" + name
+				opening.Added = append(opening.Added, ack.Resource{Name: name, Version: versions[name]})
+			}
+			h.publish(entries, versions, false)
+			h.accept(opening)
+			one := ack.Accepted{Added: opening.Added[:1]}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				h.accept(one)
+			}
+		})
+	}
 }
