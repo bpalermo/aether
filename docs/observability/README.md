@@ -166,12 +166,20 @@ The four reasons are two kinds of fact, and the rules split on that:
   those clusters. Nothing is authenticated wrongly; a peer's mesh inbound refuses the
   connection. It is the normal state of an agent for the moment before it has its
   identity, and a fault only when it lasts: **warning**, after a longer `for:`.
+  `tls_not_published` is also the reason of a TCP service with no namespace metadata
+  whose floor cluster is not in the snapshot (the service is not captured; on the edge,
+  no route references it). That one lasts with a healthy agent, and the warning is then
+  about the registry data: the entry is the critical rule's the moment its floor is
+  published.
 
 `tls_not_published` exists since #1482. Before it, an entry whose endpoints carry no
 namespace was `no_namespace_metadata` whether or not TLS was published, so a critical
 rule on that reason would have fired for an agent that was merely waiting for its SVID.
 An entry moves from `tls_not_published` to `no_namespace_metadata` in the snapshot that
-first publishes TLS for it, so the critical rule's clock starts when the gap does.
+first publishes TLS for it, so the critical rule's clock starts when the gap does. The
+agent settles the reason against what each snapshot publishes, not only against its own
+state: a snapshot able to publish TLS never leaves an entry under `tls_not_published`
+unless that entry's floor cluster is absent from it.
 
 ### Why `for: 5m` rides out an agent start
 

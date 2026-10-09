@@ -418,6 +418,16 @@ func TestPinCounts_Promote(t *testing.T) {
 		t.Fatalf("Promote changed the total: %d, want 4", p.UnpinnedTotal())
 	}
 
+	// Move takes some of them back, and never more than there are.
+	p.Move(CauseNoNamespaceMetadata, CauseTLSNotPublished, 2)
+	if p.Unpinned != [NumUnpinnedCauses]int{1, 2, 1, 0} {
+		t.Fatalf("after Move(2): %+v", p)
+	}
+	p.Move(CauseTLSNotPublished, CauseNoNamespaceMetadata, 5)
+	if p != want {
+		t.Fatalf("after Move(5) of 2: %+v, want %+v", p, want)
+	}
+
 	// A cause outside the closed set moves nothing.
 	p.Promote("some.cluster.name", CauseNoNamespaceMetadata)
 	p.Promote(CauseTrustDomainUnknown, "some.cluster.name")

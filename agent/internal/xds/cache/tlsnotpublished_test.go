@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"aethermesh.dev/agent/internal/capture"
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
 	"aethermesh.dev/agent/internal/xds/proxy"
@@ -194,6 +195,67 @@ func TestTLSNotPublishedIsNotTheTrustDomainWindow(t *testing.T) {
 	assert.Zero(t, gauge.unpinned[cachemetrics.CauseTLSNotPublished])
 	assert.Zero(t, gauge.unpinned[cachemetrics.CauseNoNamespaceMetadata])
 	assert.Positive(t, gauge.unpinned[cachemetrics.CauseTrustDomainUnknown])
+}
+
+// TestUnpublishedTCPFloorIsNotTheValidationGap: a TCP floor entry is kept in
+// the cluster cache whether or not its floor cluster is published (only a
+// service in the capture TCP set, or on the edge one a route references, gets
+// a "tcp:" cluster). An entry with no namespace metadata whose floor cluster
+// is NOT in the snapshot has no TLS on the wire either, so it is
+// tls_not_published, not the validation gap; and it is the gap in the snapshot
+// that first publishes its floor cluster.
+func TestUnpublishedTCPFloorIsNotTheValidationGap(t *testing.T) {
+	c, rec, reader := pinFixture(t, true) // node SVID served: HTTP clusters carry TLS
+	ctx := context.Background()
+	rawnons := proxy.TCPClusterName("demo/rawnons", c.meshDomain)
+	rawnonsPort := proxy.TCPPortClusterName(rawnons, 9100)
+	nons := proxy.ServiceClusterName("demo/nons", c.meshDomain)
+
+	// demo/rawnons leaves the capture TCP set: its floor is no longer published.
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{
+		{ServiceName: "demo/db", ClusterIP: "10.96.0.30", PrimaryIsTCP: true},
+	})
+	rec.reset()
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	gate := gateOnSnapshot(t, c)
+	require.NotContains(t, gate.all, rawnons, "fixture: the floor cluster is not in the snapshot")
+	require.NotContains(t, gate.all, rawnonsPort, "fixture: nor its per-port cluster")
+	require.Contains(t, gate.unpinned, nons, "fixture: the HTTP cluster with no namespace is still TLS without a pin")
+
+	warns := warnsByCause(t, rec)
+	require.Len(t, warns, 2, "%v", warns)
+	gap := warns[cachemetrics.CauseNoNamespaceMetadata].attrs["clusters"]
+	pending := warns[cachemetrics.CauseTLSNotPublished].attrs["clusters"]
+	assert.NotContains(t, gap, "tcp:", "no floor cluster is published: it must not be reported as TLS without a pin")
+	assert.Contains(t, gap, "demo/nons", "the published HTTP gap is still reported as the gap")
+	assert.Equal(t, rawnons+" "+rawnonsPort, pending)
+	gauge, _ := readPinGauge(t, reader, tlsClustersGauge)
+	assert.Equal(t, int64(2), gauge.unpinned[cachemetrics.CauseTLSNotPublished])
+	assert.Equal(t, int64(entriesWithoutNamespace(c)-2), gauge.unpinned[cachemetrics.CauseNoNamespaceMetadata])
+
+	// Every published cluster with an unpinned TLS context is reported as the gap.
+	for name := range gate.unpinned {
+		if proxy.IsQUICClusterName(name) {
+			continue
+		}
+		assert.Contains(t, gap, name, "%s is published with an unpinned TLS context", name)
+	}
+
+	// It is captured again: the snapshot that publishes the floor says so.
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{
+		{ServiceName: "demo/db", ClusterIP: "10.96.0.30", PrimaryIsTCP: true},
+		{ServiceName: "demo/rawnons", ClusterIP: "10.96.0.31", PrimaryIsTCP: true},
+	})
+	rec.reset()
+	require.NoError(t, c.generateSnapshot(ctx))
+	gate = gateOnSnapshot(t, c)
+	require.Contains(t, gate.unpinned, rawnons)
+	warns = warnsByCause(t, rec)
+	require.Len(t, warns, 1, "%v", warns)
+	assert.Contains(t, warns[cachemetrics.CauseNoNamespaceMetadata].attrs["clusters"], rawnons)
+	gauge, _ = readPinGauge(t, reader, tlsClustersGauge)
+	assert.Equal(t, byCause(0, int64(entriesWithoutNamespace(c)), 0), gauge.unpinned)
 }
 
 // TestEveryPublishedResourceTypeHasASeededNackSeries holds the closed set of

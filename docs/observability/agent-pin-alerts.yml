@@ -24,10 +24,13 @@
 #                          does it; an agent defect if it ever shows.
 #   trust_domain_unknown   The agent did not know its trust domain when it
 #                          rendered the pin. It publishes NO TLS in that state.
-#   tls_not_published      The endpoints carry no namespace and the agent has no
-#                          SVID yet. It publishes NO TLS in that state; the
-#                          entry becomes no_namespace_metadata in the snapshot
-#                          that first publishes TLS (#1482).
+#   tls_not_published      The endpoints carry no namespace and NO TLS is
+#                          published for the entry: the agent has no SVID yet,
+#                          or the entry is a TCP floor whose `tcp:` cluster is
+#                          not in the snapshot (the service is not captured;
+#                          on the edge, no route references it). The entry
+#                          becomes no_namespace_metadata in the snapshot that
+#                          first publishes TLS for it (#1482).
 #
 # docs/runbook.md, "The unpinned-cluster signal", says what to do about each.
 #
@@ -99,6 +102,13 @@ groups:
       #     twice past it, plus one more for evaluation jitter. An alert at 5 m
       #     is therefore never an agent start; it is an agent that is stuck.
       #
+      # tls_not_published also lasts, with a healthy agent, for a TCP service
+      # whose endpoints carry no namespace and whose floor cluster is not
+      # published (not in the capture set; on the edge, referenced by no
+      # route). The warning is then about the registry data: the same entry is
+      # the critical rule's the moment the floor is published. The agent's WARN
+      # line names it (`tcp:<svc>`).
+      #
       # A mesh run WITHOUT SPIRE never has a node SVID: every entry with no
       # namespace metadata is tls_not_published for good, by design. Drop this
       # rule (or its tls_not_published half) there.
@@ -119,11 +129,12 @@ groups:
             which the agent publishes them with no TLS at all. It is expected
             for a moment when an agent starts and has now lasted 5 minutes.
             trust_domain_unknown: the agent has not learned its trust domain.
-            tls_not_published: the agent has no SVID of its own. In both cases
-            check the agent's identity readiness and its SPIRE Workload API
-            socket. tls_not_published entries have endpoints with no namespace
-            metadata and become AetherMeshClusterUnpinned the moment the SVID
-            arrives. See docs/runbook.md, "The unpinned-cluster signal".
+            tls_not_published: the agent has no SVID of its own, or the
+            clusters are TCP floors that are not published (`tcp:` names in
+            the agent's WARN line). Check the agent's identity readiness and
+            its SPIRE Workload API socket first. tls_not_published entries have
+            endpoints with no namespace metadata and become
+            AetherMeshClusterUnpinned the moment TLS is published for them. See docs/runbook.md, "The unpinned-cluster signal".
 
       # ---------------------------------------------------------------- P2
       # Published is not held. aether_agent_xds_acked_tls_clusters is the same

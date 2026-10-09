@@ -62,6 +62,11 @@ const (
 	// entry publishes has a handshake a pin could be missing from (#1482). The
 	// entry becomes CauseNoNamespaceMetadata in the snapshot that first
 	// publishes TLS for it. Bounded by the arrival of the node SVID.
+	//
+	// Also the cause of a TCP floor entry with no namespace metadata whose
+	// floor cluster is not in the snapshot (the service is not in the capture
+	// TCP set; on the edge, no route references it): no TLS is published for
+	// that entry either. Not bounded: it lasts until the floor is published.
 	CauseTLSNotPublished UnpinnedCause = "tls_not_published"
 	// CauseNoNamespaceMetadata: none of the service's endpoints carries a
 	// Kubernetes namespace, so there is no namespace to build the expected
@@ -123,6 +128,13 @@ func (p *PinCounts) AddUnpinned(cause UnpinnedCause) {
 // Promote moves every entry counted under from to to. The total is unchanged.
 // A cause outside the closed set moves nothing.
 func (p *PinCounts) Promote(from, to UnpinnedCause) {
+	p.Move(from, to, -1)
+}
+
+// Move moves n of the entries counted under from to to, or all of them when n
+// is negative or more than there are. The total is unchanged. A cause outside
+// the closed set moves nothing.
+func (p *PinCounts) Move(from, to UnpinnedCause, n int) {
 	fromIdx, toIdx := -1, -1
 	for i, c := range UnpinnedCauses {
 		switch c {
@@ -135,8 +147,11 @@ func (p *PinCounts) Promote(from, to UnpinnedCause) {
 	if fromIdx < 0 || toIdx < 0 || fromIdx == toIdx {
 		return
 	}
-	p.Unpinned[toIdx] += p.Unpinned[fromIdx]
-	p.Unpinned[fromIdx] = 0
+	if n < 0 || n > p.Unpinned[fromIdx] {
+		n = p.Unpinned[fromIdx]
+	}
+	p.Unpinned[toIdx] += n
+	p.Unpinned[fromIdx] -= n
 }
 
 // Metrics holds the snapshot-generation instruments. All methods are
