@@ -82,6 +82,7 @@ die() {
 # --- the inventory -------------------------------------------------------------
 
 declare -A PIN_TAG=()  # "<name>@<digest>" -> tag
+declare -A PIN_DIGEST=() # "<name>:<tag>" -> digest
 declare -A PIN_USES=() # "<name>@<digest>" -> newline-separated "path:line"
 declare -a PIN_ORDER=()
 declare -A ALLOW=()      # "<path> <ref>" -> 1
@@ -110,6 +111,10 @@ load_inventory() {
 			[[ "$c" =~ $DIGEST_RE ]] || die "$INVENTORY:$n: '$c' is not sha256:<64 hex>"
 			key="$a@$c"
 			[ -z "${PIN_TAG[$key]:-}" ] || die "$INVENTORY:$n: $key is listed twice"
+			# One tag has one digest: a second line for it is a refresh left half
+			# done, with both digests still in use and nothing saying so.
+			[ -z "${PIN_DIGEST["$a:$b"]:-}" ] || die "$INVENTORY:$n: $a:$b is already pinned (to ${PIN_DIGEST["$a:$b"]}); a tag has one digest, replace that line"
+			PIN_DIGEST["$a:$b"]="$c"
 			PIN_TAG[$key]="$b"
 			PIN_ORDER+=("$key")
 			;;
@@ -211,7 +216,7 @@ extract_references() { # <names file>; file list on stdin
 		# an optional :tag and @digest. That leaves out $VAR, {{ .Values.x }}, a
 		# {@//label} stamp, a Go identifier, a regex, and a switch named *_IMAGE.
 		function literal(ref) {
-			if (ref !~ /^[a-z0-9][a-z0-9._\/-]*(:[0-9]+\/[a-z0-9._\/-]+)?(:[A-Za-z0-9_][A-Za-z0-9._-]*)?(@[A-Za-z0-9:]+)?$/) return 0
+			if (ref !~ /^[a-z0-9][a-z0-9._\/-]*(:[0-9]+\/[a-z0-9._\/-]+)?(:[A-Za-z0-9_][A-Za-z0-9._-]*)?(@[^${]*)?$/) return 0
 			return ref !~ /^(0|1|true|false|yes|no)$/
 		}
 		FNR == 1 { block = 0 }
@@ -268,8 +273,9 @@ extract_references() { # <names file>; file list on stdin
 					if (!match(rest, /^[A-Za-z0-9_][A-Za-z0-9._-]*/)) continue
 					tag = substr(rest, 1, RLENGTH)
 					after = substr(rest, RLENGTH + 1)
-					if (after ~ /^@sha256:[0-9a-f]/) {
-						match(after, /^@sha256:[0-9a-f]+/)
+					# The WHOLE @ token, so `@sha256:<64 hex>-x` is judged as
+					# written (and refused) and not as its valid prefix.
+					if (match(after, /^@[^ \t"\047}),;]*/)) {
 						emit(n ":" tag substr(after, 1, RLENGTH))
 					} else {
 						emit(n ":" tag)
@@ -321,10 +327,12 @@ scan() {
 	} | LC_ALL=C sort -u >"$names"
 	scanned_files >"$tmp/files" || die "could not list the files under ${SCAN_PATHS[*]}"
 	nfiles="$(wc -l <"$tmp/files" | tr -d ' ')"
-	# A `skip` whose path holds no file any more excuses nothing.
+	# A `skip` whose path holds no file the scan would read excuses nothing
+	# (a README or a BUILD file under it is never read anyway).
 	SKIP_UNUSED=()
 	for key in "${SKIP[@]}"; do
 		while IFS= read -r path; do
+			is_scanned_file "$path" || continue
 			case "$path" in "$key"*) continue 2 ;; esac
 		done <"$tmp/files"
 		SKIP_UNUSED+=("$key")

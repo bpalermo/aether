@@ -275,6 +275,14 @@ if [ "$RC" -eq 0 ] && [[ "$OUT" == *"1 skipped path(s)"* ]]; then ok "a skipped 
 new_tree "$T"
 echo "skip e2e/gone/" >>"$T/scripts/third-party-images.txt"
 expect_fail "a skip that matches no file any more" "$T" "'skip e2e/gone/' matches no file any more"
+# ...and a prefix that holds only files the scan never reads excuses nothing.
+new_tree "$T"
+mkdir -p "$T/e2e/docs"
+echo 'Use `image: nginx`.' >"$T/e2e/docs/README.md"
+echo 'patterns = ["image: x"]' >"$T/e2e/docs/BUILD.bazel"
+echo 'want="image: x/y:1"' >"$T/e2e/docs/pin_test.sh"
+echo "skip e2e/docs/" >>"$T/scripts/third-party-images.txt"
+expect_fail "a skip over files the scan never reads" "$T" "'skip e2e/docs/' matches no file any more"
 
 # A scan that reads nothing must not pass.
 rm -rf "$TMP/empty"
@@ -297,6 +305,25 @@ new_tree "$T"
 echo "pin a/b 1.0 $D1" >>"$T/scripts/third-party-images.txt"
 run_check "$T"
 if [ "$RC" -eq 2 ] && [[ "$OUT" == *"listed twice"* ]]; then ok "a pin listed twice is refused"; else bad "duplicate pin: exit $RC"$'\n'"$OUT"; fi
+# One tag, two digests (a refresh that moved the inventory and only some of the
+# references): refused even though both digests are in use.
+new_tree "$T"
+echo "pin a/b 1.0 $D9" >>"$T/scripts/third-party-images.txt"
+echo "      image: a/b:1.0@$D9" >"$T/e2e/sub/pod.yaml"
+run_check "$T"
+if [ "$RC" -eq 2 ] && [[ "$OUT" == *"scripts/third-party-images.txt:5: a/b:1.0 is already pinned"* ]]; then
+	ok "one name:tag under two digests is refused"
+else
+	bad "one tag, two digests: exit $RC"$'\n'"$OUT"
+fi
+
+# A digest with anything after its 64 hex digits is not that digest.
+mutate "a known image whose digest has a suffix" e2e/sub/pod.yaml "      image: a/b:1.0@$D1-x" \
+	"e2e/sub/pod.yaml:1: a/b:1.0@$D1-x" "is not sha256:<64 hex>"
+mutate "a known image whose digest has a suffix, behind no image key" e2e/run.sh "docker run --rm a/b:1.0@$D1.bak true" \
+	"e2e/run.sh:12: a/b:1.0@$D1.bak" "is not sha256:<64 hex>"
+mutate "an unknown image whose digest has a suffix" e2e/sub/pod.yaml "      image: x/y:1.2@$D9-x" \
+	"e2e/sub/pod.yaml:1: x/y:1.2@$D9-x" "is not sha256:<64 hex>"
 
 # In a git work tree the scan follows git: an untracked file counts before it is
 # committed, an ignored one does not.
