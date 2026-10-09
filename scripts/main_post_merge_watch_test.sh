@@ -145,8 +145,23 @@ while [ "$#" -gt 0 ]; do
 done
 out() { if [ -n "$jqx" ]; then "$JQ" -r "$jqx"; else cat; fi; }
 down() { case " ${FAKE_DOWN:-} " in *" $1 "*) echo "gh: HTTP 502" >&2; exit 1 ;; esac; }
+# `read-after-comment`, `read-after-close`: an issue cannot be read once this
+# step has written that.
+read_issue() {
+	down read
+	[ ! -e "$FAKE_STATE/commented" ] || down read-after-comment
+	[ ! -e "$FAKE_STATE/closed" ] || down read-after-close
+}
 I="$FAKE_STATE/issues.json"
 edit() { "$JQ" "$@" "$I" >"$I.next" && mv "$I.next" "$I"; }
+# Another watcher, running at the same time: $FAKE_HOOK names the moment
+# (before-comment, after-comment, before-close), $FAKE_HOOK_JQ what it does to
+# the issues. Once per step.
+hook() {
+	[ "${FAKE_HOOK:-}" = "$1" ] && [ ! -e "$FAKE_STATE/hook.done" ] || return 0
+	: >"$FAKE_STATE/hook.done"
+	edit "$FAKE_HOOK_JQ"
+}
 number="${path#repos/o/r/issues/}"
 number="${number%%/*}"
 case "$method $path" in
@@ -169,11 +184,11 @@ case "$method $path" in
 	"$JQ" '[.[] | select(.state == "open") | del(.comments)]' "$I" | out
 	;;
 "GET repos/o/r/issues/${number}/comments?per_page=100")
-	down read
+	read_issue
 	"$JQ" --argjson n "$number" '.[] | select(.number == $n) | .comments' "$I" | out
 	;;
 "GET repos/o/r/issues/${number}")
-	down read
+	read_issue
 	"$JQ" --argjson n "$number" '.[] | select(.number == $n) | del(.comments)' "$I" | out
 	;;
 "POST repos/o/r/issues")
@@ -193,14 +208,19 @@ case "$method $path" in
 	;;
 "POST repos/o/r/issues/${number}/comments")
 	down comment
+	hook before-comment
 	edit --argjson n "$number" --arg b "$body" --arg bot 'github-actions[bot]' \
 		'map(if .number == $n then .comments += [{user: {login: $bot}, body: $b}] else . end)'
+	: >"$FAKE_STATE/commented"
+	hook after-comment
 	echo '{}' | out
 	;;
 "PATCH repos/o/r/issues/${number}")
-	down close
+	if [ "$state" = closed ]; then down close; else down reopen; fi
+	[ "$state" != closed ] || hook before-close
 	edit --argjson n "$number" --arg s "$state" --arg r "$reason" \
-		'map(if .number == $n then .state = $s | .state_reason = $r else . end)'
+		'map(if .number == $n then .state = $s | .state_reason = (if $r == "" then null else $r end) else . end)'
+	[ "$state" != closed ] || : >"$FAKE_STATE/closed"
 	echo '{}' | out
 	;;
 *)
@@ -253,6 +273,7 @@ step() {
 	local want="$1" name="$2" rc
 	shift 2
 	: >"$TMP/gh.log"
+	rm -f "$S/hook.done" "$S/commented" "$S/closed"
 	env PATH="$TMP/bin:$PATH" GH_TOKEN=x GH_REPO=o/r GITHUB_SERVER_URL=https://github.com \
 		FAKE_LOG="$TMP/gh.log" FAKE_STATE="$S" FAKE_RUN_ID="$RUN_ID" FAKE_HEAD="$HEAD" \
 		RUN_ID="$RUN_ID" DRY_RUN=false WATCH_RUN_URL=https://github.com/o/r/actions/runs/7 "$@" \
@@ -357,7 +378,7 @@ step 0 "B's run passes on a re-run" &&
 	check "B passes: the issue is closed" test "$(open_numbers)" = ""
 expect "B passes: closed as completed" "$(q '.[0].state_reason')" completed
 check "B passes: the closing comment names the run" has "$(last_comment 101)" "https://github.com/o/r/actions/runs/4343/attempts/2"
-check "B passes: ... and says nothing is failing" has "$(last_comment 101)" "Nothing recorded here is failing any more"
+check "B passes: ... and says nothing is failing" has "$(last_comment 101)" "No other commit recorded here is failing: the issue closes"
 
 # The next failure opens a NEW issue: a closed one is never reopened or written to.
 before="$(ncomments 101)"
@@ -506,6 +527,78 @@ RUN_ID=4242
 run "$A" success 2
 step 0 "two open issues, then A passes" &&
 	check "two open, reversed: B's older failure does not outlive its pass; both close" test "$(open_numbers)" = ""
+
+# --- two watchers at once ---
+# Watchers of different runs are not serialised (one group for the workflow
+# would drop a pending one). Each case is one step of this watcher with the
+# other's write placed at the worst moment by the fake.
+others_comment() { # issue, body -> a jq program: the bot comments on it
+	printf 'map(if .number == %s then .comments += [{user: {login: "github-actions[bot]"}, body: "%s"}] else . end)' "$1" "$2"
+}
+# A and B are failing and both pass at once. Each read the issue before the
+# other wrote, so each saw the other still failing. The one that writes last
+# reads again and closes: the issue is not left open with nothing failing.
+reset
+issue 101 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${A}:4242/1 --> <!-- main-post-merge-watch:failed:${B}:4343/1 -->"
+RUN_ID=4242
+run "$A" success 2
+step 0 "A and B pass at once; B's pass lands just before A's comment" \
+	FAKE_HOOK=before-comment FAKE_HOOK_JQ="$(others_comment 101 "<!-- main-post-merge-watch:passed:${B}:4343/2 -->")" &&
+	check "two passes at once: the later writer closes the issue" test "$(open_numbers)" = ""
+# A is the only failure and passes; B's failure lands after A's watcher read
+# the issue, before its comment. Read again after writing: not closed.
+reset
+issue 101 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${A}:4242/1 -->"
+step 0 "A passes; B's failure lands just before A's comment" \
+	FAKE_HOOK=before-comment FAKE_HOOK_JQ="$(others_comment 101 "<!-- main-post-merge-watch:failed:${B}:4343/1 -->")" &&
+	check "a failure before the pass is written: the issue is never closed" test "$(open_numbers) $(grep -c -- '-X PATCH' "$TMP/gh.log")" = "101 0"
+# ... and when it lands in the last gap, between that second reading and the
+# close: the closer looks once more at what it closed, and reopens it.
+reset
+issue 101 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${A}:4242/1 -->"
+step 0 "A passes; B's failure lands just before the close" \
+	FAKE_HOOK=before-close FAKE_HOOK_JQ="$(others_comment 101 "<!-- main-post-merge-watch:failed:${B}:4343/1 -->")" &&
+	check "a failure just before the close: the issue is open again" test "$(open_numbers) $(q '.[0].state_reason')" = "101 null"
+check "a failure just before the close: the log says why it was reopened" grep -q "reopened #101: .*${B:0:12}" "$TMP/log"
+# The same race seen from the watcher that files: its comment went onto an
+# issue that another watcher closes in that moment. It finds it closed, and
+# reopens it: a failure is never left on a closed issue.
+reset
+issue 101 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${A}:4242/1 --> <!-- main-post-merge-watch:passed:${A}:4242/2 -->"
+RUN_ID=4343
+run "$B" failure
+jobs test=failure main=failure
+step 0 "B fails; the issue is closed just after B's comment" \
+	FAKE_HOOK=after-comment FAKE_HOOK_JQ='map(if .number == 101 then .state = "closed" | .state_reason = "completed" else . end)' &&
+	check "closed under a failure: the issue is open again, with the failure on it" test "$(open_numbers) $(ncomments 101)" = "101 1"
+check "closed under a failure: the log says so" grep -q 'reopened #101' "$TMP/log"
+# Nothing raced: a plain close stays closed, and costs no reopen.
+reset
+issue 101 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${A}:4242/1 -->"
+RUN_ID=4242
+run "$A" success 2
+step 0 "A passes, alone" &&
+	check "no race: closed, and not reopened" test "$(open_numbers) $(grep -c -- '-X PATCH' "$TMP/gh.log")" = " 1"
+# The reopen fails: the watcher's run is red, not silent.
+reset
+issue 101 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${A}:4242/1 -->"
+step 1 "B's failure lands before the close, and the reopen fails" FAKE_DOWN=reopen \
+	FAKE_HOOK=before-close FAKE_HOOK_JQ="$(others_comment 101 "<!-- main-post-merge-watch:failed:${B}:4343/1 -->")"
+# The check itself cannot be made: red, and it says what was left unchecked.
+reset
+issue 101 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${A}:4242/1 -->"
+RUN_ID=4343
+run "$B" failure
+step 1 "B fails; the issue cannot be read back after the comment" FAKE_DOWN=read-after-comment &&
+	check "no read back after a failure: an error that says to check the issue is open" \
+		grep -q '^::error title=main-post-merge-watch::the failure is recorded on #101, but the issue could not be read back' "$TMP/log"
+reset
+issue 101 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${A}:4242/1 -->"
+RUN_ID=4242
+run "$A" success 2
+step 1 "A passes; the issue cannot be read back after the close" FAKE_DOWN=read-after-close &&
+	check "no read back after a close: an error that says what to check" \
+		grep -q '^::error title=main-post-merge-watch::closed #101, but could not read it back' "$TMP/log"
 
 # --- a label that does not exist ---
 reset

@@ -51,8 +51,31 @@
 #
 # OUT OF ORDER. Runs finish in any order. An older commit's failure that
 # arrives after a newer commit's green run is filed, for the reason above; the
-# text says main has moved on and names its head. A closed issue is never
-# reopened or written to: the next failure opens a new one.
+# text says main has moved on and names its head. A closed issue is not
+# written to: the next failure opens a new one.
+#
+# AT THE SAME TIME. Watchers of different runs are not serialised (one
+# concurrency group for the workflow would drop a pending run), so another
+# watcher can write between this one's reading of the issue and its own write.
+# Nothing is decided from a reading older than this run's last write:
+#   - a green run writes its pass, then reads the issue AGAIN and closes only
+#     if nothing is failing in that second reading. Two commits that pass at
+#     once each saw the other failing; the one that writes last sees both
+#     passes and closes;
+#   - after closing, it reads what it closed once more, and reopens it if a
+#     failure is on it: one that was written between the second reading and
+#     the close;
+#   - a watcher that records a failure reads the issue's state after its
+#     comment, and reopens the issue if it was closed in that moment.
+# A failure comment is written either before the close, and then the closer's
+# last reading has it, or after, and then its writer finds the issue closed.
+# Either way the issue ends open. What remains rests on GitHub answering a
+# read with every write that completed before it: a reading that lags can
+# only be the closer's last one missing a comment, and then that comment's
+# writer, who reads after the close, reopens. Both lagging at once would leave
+# a failure on a closed issue; the other outcomes of a race are an issue left
+# open with nothing failing (closed by hand, or by the next green re-run that
+# finds it so) and a reopen done twice.
 #
 # THE RECORD. Each failure and each pass is a hidden marker on the issue,
 #   <!-- main-post-merge-watch:failed|passed:<sha>:<run id>/<attempt> -->
@@ -237,14 +260,36 @@ close_issue() { # issue, reason
 	fi
 }
 
-numbers="$(open_issues)" || die "could not list the open issues; nothing was written. Re-run this job"
-oldest="$(head -n 1 <<<"$numbers")"
-text=""
-for n in $numbers; do
-	part="$(issue_text "$n")" || die "could not read #${n}; nothing was written. Re-run this job"
-	text+="${part}"$'\n'
-done
-still="$(failing <<<"$text")"
+reopen_issue() { # issue, why
+	gh api -X PATCH "repos/${repo}/issues/$1" -f state=open --jq '.id // empty' >/dev/null ||
+		die "could not reopen #$1 ($2); reopen it by hand, or re-run this job"
+	echo "reopened #$1: $2"
+}
+# Record a failure on an open issue, and make sure it is still open afterwards:
+# a green run's watcher may have closed it in that moment.
+record() { # issue, body
+	local state
+	comment "$1" "$2"
+	[ "$dry" != true ] || return 0
+	state="$(gh api "repos/${repo}/issues/$1" --jq '.state // ""')" ||
+		die "the failure is recorded on #$1, but the issue could not be read back; check that it is open"
+	[ "$state" = open ] || reopen_issue "$1" "it was closed while this failure was being recorded on it"
+}
+# The open issues and what is recorded on them, as of now: numbers, oldest,
+# text, still.
+read_issues() {
+	local n part
+	numbers="$(open_issues)" || die "could not list the open issues; re-run this job"
+	oldest="$(head -n 1 <<<"$numbers")"
+	text=""
+	for n in $numbers; do
+		part="$(issue_text "$n")" || die "could not read #${n}; re-run this job"
+		text+="${part}"$'\n'
+	done
+	still="$(failing <<<"$text")"
+}
+
+read_issues
 
 # --- a green run -----------------------------------------------------------------------------
 if [ "$verdict" = clear ]; then
@@ -255,12 +300,18 @@ if [ "$verdict" = clear ]; then
 	if grep -qx -- "$sha" <<<"$still"; then
 		still="$(grep -vx -- "$sha" <<<"$still" || true)"
 		if [ -z "$still" ]; then
-			rest="Nothing recorded here is failing any more; closing. The next failure opens a new issue."
+			rest="No other commit recorded here is failing: the issue closes, unless a failure is being recorded at this moment. The next failure after that opens a new issue."
 		else
 			rest="Still failing: $(short_list <<<"$still"). The issue stays open until each has passed, or is closed by hand."
 		fi
 		comment "$oldest" "$(printf '%s\n' "$marker_passed" \
 			"The post-merge run of \`${sha:0:12}\` passes now: ${run_url}" "" "$rest")"
+		# Decide from what is on the issue AFTER this write, not from the
+		# reading before it: another watcher may have written since.
+		if [ "$dry" != true ]; then
+			read_issues
+			[ -z "$still" ] || echo "#${oldest} stays open. Still failing: $(short_list <<<"$still")"
+		fi
 	elif [ -n "$still" ]; then
 		echo "${sha:0:12} is not recorded as failing: its green run leaves #${oldest} open (a run tests only what its own merge reaches). Still failing: $(short_list <<<"$still")"
 	fi
@@ -270,6 +321,20 @@ if [ "$verdict" = clear ]; then
 	for n in $numbers; do
 		close_issue "$n" completed
 	done
+	[ "$dry" != true ] || exit 0
+	# A failure written between that reading and the close is now on a closed
+	# issue. Look once more at what was closed, and undo the close if so.
+	text=""
+	for n in $numbers; do
+		part="$(issue_text "$n")" || die "closed #${n}, but could not read it back; check that no failure was recorded on it meanwhile"
+		text+="${part}"$'\n'
+	done
+	still="$(failing <<<"$text")"
+	if [ -n "$still" ]; then
+		for n in $numbers; do
+			reopen_issue "$n" "$(short_list <<<"$still") was recorded as failing while it was being closed"
+		done
+	fi
 	exit 0
 fi
 
@@ -324,7 +389,7 @@ entry="$(
 )"
 
 if [ -n "$oldest" ]; then
-	comment "$oldest" "$entry"
+	record "$oldest" "$entry"
 	exit 0
 fi
 
@@ -355,7 +420,7 @@ if ! numbers="$(open_issues)"; then
 fi
 oldest="$(head -n 1 <<<"$numbers")"
 if [ -n "$oldest" ] && [ "$oldest" -lt "$created" ]; then
-	comment "$oldest" "$entry"
+	record "$oldest" "$entry"
 	comment "$created" "Duplicate of #${oldest}: two post-merge runs failed at the same moment. The failure is recorded there."
 	close_issue "$created" not_planned
 fi

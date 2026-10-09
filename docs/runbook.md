@@ -550,7 +550,13 @@ and names its head.
 | `cancelled`, and the `main` job succeeded | no | `diff` and `test` did their work; what was cancelled is another job (`refresh-pin-prs` waiting for a runner) |
 | `success` | no | clears that commit if the issue names it |
 
-A closed issue is never reopened: the next failure opens a new one. Only the
+A closed issue is not written to: the next failure opens a new one. The one
+exception is a close that raced with a failure. Watchers of different runs are
+not serialised, so a green run's watcher can close the issue in the moment
+another records a failure on it; whichever of the two notices reopens it, and
+the log of that `main-post-merge-watch` run says `reopened #<n>` and why. An
+issue left open with every commit on it passing is the harmless side of the
+same race: close it by hand. Only the
 issue that `github-actions[bot]` opened, and that account's comments, are read,
 so an issue or a comment someone else writes with the same title or marker
 changes nothing.
