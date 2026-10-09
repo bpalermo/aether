@@ -1237,7 +1237,7 @@ aether_probe_requests_total[28800s]       # at T0+8h: every raw sample in the wi
 aether_agent_identity_cluster_unpinned_total               # the same three, for the
 timestamp(aether_agent_identity_cluster_unpinned_total)    # unpinned-cluster gate
 aether_agent_identity_cluster_unpinned_total[28800s]
-aether_agent_snapshot_tls_clusters{pin="unpinned"}[28920s]  # at T0+8h: the agents' gauge,
+aether_agent_snapshot_tls_clusters{pin="unpinned"}[28921s]  # at T0+8h: the agents' gauge,
                                                            # how long a state stood (#1491);
                                                            # from 120 s before T0 (below)
 ```
@@ -1529,7 +1529,9 @@ the pod exists, and after that it cannot be placed.
   at T0 is left out (before 3.0 it was `[T0, end]`), and a sample from before T0 is in
   neither. A state already standing at T0 would be measured one sample short, and a
   state of exactly 300 s would pass. So the query reaches 120 s (two export intervals)
-  before the window, the last sample at or before T0 is counted as the sample at T0,
+  and one second before the window (the second so that a sample exactly 120 s old is
+  returned by a left-open range too), the last sample at or before T0 and at most
+  120 s old is counted as the sample at T0,
   and anything older is dropped: a run starts at T0 at the earliest, and how long a
   state stood before the window is not graded. Held against the Prometheus this
   repository pins (3.15.0, `//bazel/promtool`'s archive), with samples at T0-60, T0,

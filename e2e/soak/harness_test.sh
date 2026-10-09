@@ -1924,7 +1924,7 @@ if [ "$(cut -f1 "$TMP/grade-queries.tsv" | sort -u)" = "http://prom.example:9090
 else
 	fail "grade born: the queries were: $(tr '\n' '|' <"$TMP/grade-queries.tsv")"
 fi
-expect "$G" "grade born: the seventh is the gauge of what the agents published, its unpinned series over the window and the two minutes before it (#1491)" '^QUERY   unpinned/published  time=2026-10-08T08:10:00Z  aether_agent_snapshot_tls_clusters\{pin="unpinned"\}\[28920s\]$' 1
+expect "$G" "grade born: the seventh is the gauge of what the agents published, its unpinned series over the window and the two minutes before it (#1491)" '^QUERY   unpinned/published  time=2026-10-08T08:10:00Z  aether_agent_snapshot_tls_clusters\{pin="unpinned"\}\[28921s\]$' 1
 # These agents have no `reason` label (before #1424) and so no gauge: that is
 # said, and it is not UNPROVEN -- an agent that old never had one.
 # shellcheck disable=SC2016 # the backticks are the output's, not a substitution
@@ -2292,8 +2292,8 @@ show "prober-grade: a no-TLS state that is already standing at the window's star
 if [ "$grc" -eq 1 ]; then pass "grade at the start: exit 1 (300 s from T0, the sample at T0 included)"; else fail "grade at the start: exit $grc, want 1"; fi
 expect "$G" "grade at the start: the run starts at T0, six samples" '^UNPINNED published: node=worker-03 job=aether-agent reason=trust_domain_unknown class=no_tls nonzero_samples=6 longest=300s max=90 at_end=0 series=1  \(no TLS published for 300 s or more: not an agent start; fails the gate\)$' 1
 expect "$G" "grade at the start: FAIL" '^UNPINNED verdict=FAIL increase=0 series=20 nodes=5 resets=0  \(no TLS was published for 300 s or more: reason=trust_domain_unknown node=worker-03 seconds=300 published=90 -- ' 1
-if grep -qF 'aether_agent_snapshot_tls_clusters{pin="unpinned"}[28920s]' "$TMP/grade-queries.tsv"; then
-	pass "grade at the start: the gauge is asked for over the window and FRESH_S (120 s) before it"
+if grep -qF 'aether_agent_snapshot_tls_clusters{pin="unpinned"}[28921s]' "$TMP/grade-queries.tsv"; then
+	pass "grade at the start: the gauge is asked for over the window and FRESH_S (120 s) and a second before it"
 else
 	fail "grade at the start: the gauge query was: $(grep snapshot_tls "$TMP/grade-queries.tsv")"
 fi
@@ -2309,6 +2309,20 @@ grade_gauge grade-at-start worker-03 trust_domain_unknown "$(jq -nc --argjson t 
 GF="$TMP" run_grade grade-at-start "$G" --dir "$GD" --prometheus http://prom.example:9090
 if [ "$grc" -eq 0 ]; then pass "grade at the start: 270 s from T0 is under the bound: exit 0"; else fail "grade at the start: a 270 s run from T0 gave exit $grc, want 0"; fi
 expect "$G" "grade at the start: ... the run is counted from T0, not from the sample before it" '^UNPINNED published: node=worker-03 .* nonzero_samples=6 longest=270s max=90 at_end=0 series=1  \(less than 300 s: reported, not a failure\)$' 1
+# ... a sample EXACTLY FRESH_S (120 s) before T0 is still the state at T0: "at
+# most FRESH_S old" includes it, and a left-open range of the window plus
+# FRESH_S would not return it (review of #1494, third round). Samples at
+# T0-120 and T0+60 ... T0+300: 300 s from T0. RED before: the range was
+# `[28920s]`, the sample was not returned, `longest=240s`, PASS, exit 0.
+grade_gauge grade-at-start worker-03 trust_domain_unknown "$(jq -nc --argjson t "$GT0" '[[$t - 120, "90"]] + [range(1; 6) | [$t + . * 60, "90"]] + [[$t + 360, "0"], [$t + 28800, "0"]]')"
+GF="$TMP" run_grade grade-at-start "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 1 ]; then pass "grade at the start: a sample exactly 120 s before T0 is the state at T0: exit 1"; else fail "grade at the start: a sample exactly FRESH_S old gave exit $grc, want 1"; fi
+expect "$G" "grade at the start: ... 300 s from T0" '^UNPINNED published: node=worker-03 .* nonzero_samples=6 longest=300s max=90 at_end=0 series=1  ' 1
+# ... and one a second older is not: the exporter had stopped (FRESH_S).
+grade_gauge grade-at-start worker-03 trust_domain_unknown "$(jq -nc --argjson t "$GT0" '[[$t - 121, "90"]] + [range(1; 6) | [$t + . * 60, "90"]] + [[$t + 360, "0"], [$t + 28800, "0"]]')"
+FAKE_PROM_CLOSED_LEFT=1 GF="$TMP" run_grade grade-at-start "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 0 ]; then pass "grade at the start: a sample 121 s before T0 is not the state at T0, even from a server that returns it: exit 0"; else fail "grade at the start: a sample 121 s old gave exit $grc, want 0"; fi
+expect "$G" "grade at the start: ... 240 s" '^UNPINNED published: node=worker-03 .* nonzero_samples=5 longest=240s ' 1
 # ... and a state that was over before T0 is not a state in the window.
 grade_gauge grade-at-start worker-03 trust_domain_unknown "$(jq -nc --argjson t "$GT0" '[[$t - 90, "90"], [$t - 30, "0"], [$t + 30, "0"], [$t + 28800, "0"]]')"
 GF="$TMP" run_grade grade-at-start "$G" --dir "$GD" --prometheus http://prom.example:9090
@@ -2563,7 +2577,7 @@ fi
 run_grade born "$G" --dir "$GD" --prometheus-service monitoring/prometheus:9090 --match 'cluster="east"'
 if [ "$grc" -eq 1 ] && grep -q '^VERDICT prober=FAIL unpinned=PASS ' "$G"; then pass "grade service: the same grade through the API-server proxy"; else fail "grade service: exit $grc: $(tail -n 2 "$G")"; fi
 expect "$G" "grade service: --match goes into the selector" '^QUERY   probe/window  time=2026-10-08T08:10:00Z  aether_probe_requests_total\{cluster="east"\}\[28800s\]$' 1
-expect "$G" "grade service: ... and into the gauge's, beside its own matcher" '^QUERY   unpinned/published  time=2026-10-08T08:10:00Z  aether_agent_snapshot_tls_clusters\{pin="unpinned",cluster="east"\}\[28920s\]$' 1
+expect "$G" "grade service: ... and into the gauge's, beside its own matcher" '^QUERY   unpinned/published  time=2026-10-08T08:10:00Z  aether_agent_snapshot_tls_clusters\{pin="unpinned",cluster="east"\}\[28921s\]$' 1
 if grep -qF -- '--context some-cluster get --raw /api/v1/namespaces/monitoring/services/prometheus:9090/proxy/api/v1/query?query=aether_probe_requests_total%7Bcluster%3D%22east%22%7D%5B28800s%5D&time='"$((GT0 + 28800))" "$TMP/grade-queries.tsv"; then
 	pass "grade service: kubectl is given the run's own context (run.env) and the query, URL-encoded"
 else

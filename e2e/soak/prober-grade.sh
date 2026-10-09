@@ -174,8 +174,10 @@
 # so even a sample exactly at T0 is left out (before 3.0 it was [T0, end]), and
 # a sample from before T0 is in neither. A state already standing at T0 would
 # be read a sample short. So the range reaches FRESH_S (120 s, two export
-# intervals) before the window; the last sample at or before T0 is the state
-# AT T0 and is counted as a sample at T0, and anything older is dropped. A run
+# intervals) and one second before the window -- the second so that a sample
+# exactly FRESH_S old is returned by a left-open range too. The last sample at
+# or before T0, at most FRESH_S old, is the state AT T0 and is counted as a
+# sample at T0, and anything older is dropped. A run
 # therefore starts at T0 at the earliest: how long a state stood before the
 # window is not graded. The same on either side of 3.0.
 # What the gauge cannot show: a state shorter than one export interval (a
@@ -514,10 +516,11 @@ pq probe/window "$PROBE_METRIC${SEL}[${W}s]" "$END_S" "$TMPD/pw.json" matrix
 pq unpinned/start "$UNPINNED_METRIC$SEL" "$START_S" "$TMPD/u0.json" vector
 pq unpinned/start-time "timestamp($UNPINNED_METRIC$SEL)" "$START_S" "$TMPD/ut.json" vector
 pq unpinned/window "$UNPINNED_METRIC${SEL}[${W}s]" "$END_S" "$TMPD/uw.json" matrix
-# FRESH_S more than the window: the state AT the window's start is a sample
-# from before it, and a range selector leaves out a sample exactly at its start
-# since Prometheus 3.0. See "The gauge at the window's start" in the header.
-pq unpinned/published "$PUBLISHED_METRIC{pin=\"unpinned\"${MATCH:+,$MATCH}}[$((W + FRESH_S))s]" "$END_S" "$TMPD/gw.json" matrix
+# FRESH_S more than the window, and a second: the state AT the window's start
+# is a sample from before it, and a range selector leaves out a sample exactly
+# at its start since Prometheus 3.0 -- here, one exactly FRESH_S old. See "The
+# gauge at the window's start" in the header.
+pq unpinned/published "$PUBLISHED_METRIC{pin=\"unpinned\"${MATCH:+,$MATCH}}[$((W + FRESH_S + 1))s]" "$END_S" "$TMPD/gw.json" matrix
 jq -n --slurpfile start "$TMPD/p0.json" --slurpfile at "$TMPD/pt.json" --slurpfile win "$TMPD/pw.json" \
 	--argjson t0 "$START_S" --argjson fresh "$FRESH_S" --argjson keep false "$JQ_SERIES" >"$TMPD/p.json" || die "could not read the prober samples"
 jq -n --slurpfile start "$TMPD/u0.json" --slurpfile at "$TMPD/ut.json" --slurpfile win "$TMPD/uw.json" \
@@ -626,11 +629,11 @@ map(select(.silent | not)) as $all
 | ([$probe[0][] | select(.silent | not) | l($node)] | unique
     | map(select(. as $n | ($all | any(.[]; l($node) == $n) | not) and ($silent | any(.[]; .node == $n) | not)))) as $missing
 # One record per gauge series: its samples in the window, the first of them the
-# state AT the start -- the last sample at or before T0 (the query reaches
-# FRESH_S before it), placed at T0. Header, "The gauge at the start".
+# state AT the start -- the last sample at or before T0 and at most FRESH_S
+# old (the query reaches a second further), placed at T0. Header, "The gauge at the start".
 | [ $pub[0].data.result[]
     | (.values | map([.[0], (.[1] | tonumber)])) as $v
-    | ($v | map(select(.[0] <= $start)) | last) as $at0
+    | ($v | map(select(.[0] <= $start and .[0] >= $start - $fresh)) | last) as $at0
     | ((if $at0 != null then [[$start, $at0[1]]] else [] end) + ($v | map(select(.[0] > $start)))) as $vals
     | select(($vals | length) > 0)
     | {labels: (.metric | del(.__name__)), values: $vals, own: ($vals | runs), last: {t: $vals[-1][0], v: $vals[-1][1]}} ] as $g
