@@ -444,7 +444,7 @@ while [ "$#" -gt 0 ]; do
 	case "$1" in
 	-o) out="$2"; shift ;;
 	-D) hdr="$2"; shift ;;
-	-w | --max-time | --retry) shift ;;
+	-w | --max-time | --retry | --proto | --proto-redir) shift ;;
 	-H) case "$2" in Authorization:*) auth="${2#Authorization: }" ;; esac; shift ;;
 	-*) ;;
 	*) url="$1" ;;
@@ -702,6 +702,13 @@ if grep -Ev '^-q ' "$FAKE/calls" | grep -q .; then
 	bad "a curl call does not start with -q (it would read ~/.curlrc):"$'\n'"$(grep -Ev '^-q ' "$FAKE/calls" | head -3)"
 else
 	ok "every curl call starts with -q"
+fi
+# -L follows redirects: neither the request nor a redirect may leave HTTPS, or
+# an on-path answer could supply both a manifest and the digest it is checked by.
+if grep -Ev -- ' --proto =https --proto-redir =https ' "$FAKE/calls" | grep -q .; then
+	bad "a curl call may leave HTTPS (no --proto =https --proto-redir =https):"$'\n'"$(grep -Ev -- ' --proto =https --proto-redir =https ' "$FAKE/calls" | head -3)"
+else
+	ok "every curl call is held to HTTPS, redirects included"
 fi
 if grep -Eq -- '(^| )(-u|--user|--netrc|--netrc-file|--netrc-optional|-n|--config|-K|--oauth2-bearer|--cert|-E)( |$)' "$FAKE/calls"; then
 	bad "a curl call passes a credential option"

@@ -520,9 +520,11 @@ registry_of() {
 
 # One GET. No credential is ever sent: -q ignores ~/.curlrc, and nothing here
 # passes --netrc, -u or a Docker config. A bearer token, when there is one, is
-# the anonymous pull token the registry itself handed out.
+# the anonymous pull token the registry itself handed out. HTTPS only, for the
+# request and for every redirect -L follows: over plain HTTP an on-path answer
+# could supply both the manifest and the digest header it is checked against.
 http_get() { # <url> <body out> <headers out> [<bearer token>]
-	local args=(-q -sS -L --max-time 60 --retry 2 -D "$3" -o "$2" -w '%{http_code}' -H "Accept: $ACCEPT")
+	local args=(-q -sS -L --proto '=https' --proto-redir '=https' --max-time 60 --retry 2 -D "$3" -o "$2" -w '%{http_code}' -H "Accept: $ACCEPT")
 	[ -n "${4:-}" ] && args+=(-H "Authorization: Bearer $4")
 	"$CURL" "${args[@]}" "$1"
 }
