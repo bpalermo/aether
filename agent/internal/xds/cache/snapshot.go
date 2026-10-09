@@ -22,6 +22,10 @@ const snapshotVersionLabel = "snapshot"
 // tracerName identifies this instrumentation scope in trace backends.
 const tracerName = "aether/agent-xds-cache"
 
+// snapshotWatchUnansweredMsg is logged when SetSnapshot installed the snapshot
+// and then returned an error (generateSnapshot says when it can).
+const snapshotWatchUnansweredMsg = "snapshot installed, but an open watch was not answered from it"
+
 // generateSnapshot assembles a single, consistent xDS snapshot from every cached
 // resource type — listeners, clusters, endpoints, the outbound route config and
 // secrets — and sets it for the node.
@@ -258,16 +262,31 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// Everything SetSnapshot does runs under the cache mutex the ADS stream
 	// needs; time it so a regression of the above is visible.
 	setStart := time.Now()
-	err = c.SetSnapshot(ctx, c.nodeName, snapshot)
+	setErr := c.SetSnapshot(ctx, c.nodeName, snapshot)
 	c.metrics.SnapshotSet(ctx, time.Since(setStart).Seconds())
-	if err != nil {
-		return fmt.Errorf("failed to set snapshot: %w", err)
+	// An error here is not "the snapshot was not set" (#1549). The pinned
+	// go-control-plane (v0.14.0, pkg/cache/v3/simple.go) stores the snapshot
+	// as the first thing SetSnapshot does and can return an error only after
+	// that, from answering the watches that were open: handing a response to
+	// a watch whose channel is not being read, when ctx ends first. (Its other
+	// error, building the version map, cannot happen for a snapshot whose map
+	// fillVersionMap already built.) So this snapshot is the one every later
+	// request is answered from, and the watches answered before the error
+	// were answered from it. What follows describes the snapshot the cache
+	// serves and runs whatever SetSnapshot returned. Skipped, it was made up
+	// for by the next build, under the next build's version.
+	//
+	// The error is logged here, under its own message, and still returned: a
+	// watch that was open and not answered stays open, and is answered by a
+	// later SetSnapshot unless its stream replaces or cancels it first.
+	if setErr != nil {
+		c.log.WarnContext(ctx, snapshotWatchUnansweredMsg, "snapshot_version", v, "error", setErr)
 	}
 
 	// Issue #638 discriminator: name the (source pod → outbound cluster → SDS
-	// client-cert secret) bindings this snapshot just handed Envoy, but only
+	// client-cert secret) bindings of the snapshot just installed, but only
 	// the ones that changed — steady state is silent, a re-bind is loud. Runs
-	// after SetSnapshot so a logged binding is one Envoy actually received.
+	// after SetSnapshot so a logged binding is one the cache serves.
 	c.logIdentityBindings(ctx, v)
 	// The inbound counterpart (#638, hypothesis inverted): ssl_fail_verify_san
 	// is the CLIENT rejecting the SERVER's certificate, so the mis-bound
@@ -281,6 +300,9 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// checking the identity we are handed at all".
 	c.reportClusterPins(ctx, v, pins)
 
+	if setErr != nil {
+		return fmt.Errorf("snapshot %s is installed, but an open watch was not answered from it: %w", v, setErr)
+	}
 	return nil
 }
 

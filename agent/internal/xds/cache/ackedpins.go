@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"sync"
+	"time"
 
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
@@ -81,9 +82,9 @@ type entryClass struct {
 const offeredVersions = 3
 
 // goneBuilds is how many snapshot builds the record of an entry that LEFT the
-// snapshot is kept for when the proxy does not hold its cluster and no
-// response carrying it is in flight: it is dropped by the goneBuilds-th build
-// without the entry.
+// snapshot is always kept for when the proxy does not hold its cluster and no
+// response carrying it is in flight: no build before the goneBuilds-th one
+// without the entry drops it. goneAge keeps it longer (below).
 //
 // It covers the same step as offeredVersions, for an entry that is removed
 // instead of rebuilt. go-control-plane builds a response from the snapshot of
@@ -92,9 +93,33 @@ const offeredVersions = 3
 // that is neither published, nor in flight, nor held; dropped there and then,
 // the response would be written and acknowledged with nothing to count it by,
 // and the proxy would hold a cluster the gauge leaves out. So the record, and
-// with it the class of each version, outlives the entry by the builds that
-// step can span: the same two.
+// with it the class of each version, outlives the entry.
 const goneBuilds = offeredVersions
+
+// goneAge is how long that record is kept for after the first build without
+// the entry, however many builds run in that time (#1551).
+//
+// The step it covers is not measured in builds. A response waits in the
+// stream's channel until the stream's goroutine takes it, and that goroutine
+// does one thing at a time (it may still be writing an earlier response),
+// while the agent builds once per change of the node. So a count of builds
+// says little about how long a response may wait, and a time says more. It is
+// still a bound and not a guarantee: go-control-plane has no "a response was
+// built" hook, so a response whose entry left, and that is written after the
+// record was dropped, is acknowledged with nothing to count it by
+// (acceptLocked). The record is dropped no earlier than goneAge after the
+// first build without the entry, and no earlier than the goneBuilds-th such
+// build, unless the cap below applies.
+//
+// maxAgedRecords caps what that costs. Kept by age alone, there would be one
+// record per entry that left in the last goneAge, which is as many as the
+// node's cluster entries can churn in that time. A build that finds more than
+// maxAgedRecords records that are not of an entry of its snapshot keeps none
+// of them by age: each falls back to goneBuilds alone, for that build.
+const (
+	goneAge        = time.Minute
+	maxAgedRecords = 1024
+)
 
 // offeredCluster is one version of a cluster a snapshot published and the pin
 // class the snapshot's report gave the entry.
@@ -133,6 +158,11 @@ type clusterAck struct {
 	sent []sentCluster
 	// build is the last snapshot build whose cluster map had the entry.
 	build uint64
+	// gone is when the first build without the entry ran, by the clock of
+	// ackedPins: what goneAge is measured from. Zero while the newest snapshot
+	// has the entry, and for a record no build has walked since it was made
+	// (restateLocked).
+	gone time.Time
 	// holds says the agent has read the proxy's acceptance of the cluster,
 	// and held is the version it accepted it at: the one a response it
 	// acknowledged carried, or the one it stated when it opened its stream.
@@ -292,16 +322,18 @@ func (s *clusterAck) release() {
 // that left the snapshot while the proxy still holds its cluster (until the
 // proxy accepts the removal or opens a stream without it) or while a response
 // carrying it is unanswered, plus one per entry that left in the last few
-// builds (goneBuilds), plus one per cluster a proxy states it holds that the
-// agent neither publishes nor has a record of (restateLocked; for as long as
-// the proxy holds it). A record is a fixed size plus one small item per
+// builds (goneBuilds), plus, after a build, at most maxAgedRecords that left
+// longer ago than that and less than goneAge ago, plus one per cluster a proxy
+// states it holds that the agent neither publishes nor has a record of
+// (restateLocked; for as long as the proxy holds it, and after that under the
+// same two bounds). A record is a fixed size plus one small item per
 // version of the cluster that is in flight, which is at most one per
 // unanswered response carrying the cluster; go-control-plane leaves at most
 // one response of a type unanswered per request it has not answered on a
 // stream, and the tracker drops them all when the stream ends. So memory is
 // bounded by the number of clusters times the number of connected proxy
-// streams (one, two during a hot restart) plus what those proxies state, not
-// by the number of snapshots or of ACKs.
+// streams (one, two during a hot restart) plus what those proxies state plus
+// maxAgedRecords, not by the number of snapshots or of ACKs.
 //
 // It has its own mutex: the ACK arrives on the xDS stream's goroutine, which
 // must never wait on a snapshot build (snapshotMu) or on the cluster map
@@ -332,11 +364,22 @@ type ackedPins struct {
 	// until the first.
 	counts   cachemetrics.PinCounts
 	reported bool
+	// now is the clock goneAge is measured with; nil is time.Now. A test sets
+	// it before anything else uses the state.
+	now func() time.Time
 	// unclassified is how many clusters the proxy held at a version with no
 	// known class when the state was last settled. While it is not zero
 	// nothing is reported: a count that leaves them out would say the proxy
 	// holds fewer unpinned clusters than it may.
 	unclassified int
+}
+
+// clock is the time of now. Callers hold h.mu.
+func (h *ackedPins) clock() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
 }
 
 // ackedPinsUpdate is what a change to ackedPins leaves for its caller to
@@ -382,8 +425,14 @@ func (h *ackedPins) publishLocked(entries []entryClass, versions map[string]stri
 	h.published = versions
 	notPublished, gap := unpinnedClass(cachemetrics.CauseTLSNotPublished), unpinnedClass(cachemetrics.CauseNoNamespaceMetadata)
 	heldChanged := false
+	// live is the records of this build's entries: one per name, however many
+	// entries publish under it.
+	live := 0
 	for _, e := range entries {
-		s := h.recordLocked(e.name)
+		s, first := h.recordLocked(e.name)
+		if first {
+			live++
+		}
 		version := versions[e.name]
 		if version == "" {
 			continue
@@ -396,9 +445,7 @@ func (h *ackedPins) publishLocked(entries []entryClass, versions map[string]stri
 			heldChanged = true
 		}
 	}
-	for name, s := range h.clusters {
-		h.forgetIfGoneLocked(name, s)
-	}
+	h.sweepLocked(live)
 	if !heldChanged {
 		// Nothing the proxy holds is counted differently: a build alone
 		// reports nothing.
@@ -407,31 +454,58 @@ func (h *ackedPins) publishLocked(entries []entryClass, versions map[string]stri
 	return h.settleLocked()
 }
 
+// sweepLocked is the walk a build makes over every record once its entries
+// are marked: it notes when an entry is first missing (clusterAck.gone) and
+// drops the records nothing keeps (forgetIfGoneLocked). live is the number of
+// records of this build's entries; the rest are what maxAgedRecords caps.
+// Callers hold h.mu.
+func (h *ackedPins) sweepLocked(live int) {
+	now := h.clock()
+	byAge := len(h.clusters)-live <= maxAgedRecords
+	for name, s := range h.clusters {
+		if s.build != h.build && s.gone.IsZero() {
+			s.gone = now
+		}
+		h.forgetIfGoneLocked(name, s, now, byAge)
+	}
+}
+
 // recordLocked is the record of the entry published as the cluster name,
 // marked as part of the build in progress; a new one for an entry seen for the
-// first time. Callers hold h.mu.
-func (h *ackedPins) recordLocked(name string) *clusterAck {
-	s := h.clusters[name]
+// first time. first says this call is the one that marked it for this build.
+// Callers hold h.mu.
+func (h *ackedPins) recordLocked(name string) (s *clusterAck, first bool) {
+	s = h.clusters[name]
 	if s == nil {
 		s = &clusterAck{}
 		h.clusters[name] = s
 	}
-	s.build = h.build
-	return s
+	first = s.build != h.build
+	s.build, s.gone = h.build, time.Time{}
+	return s, first
 }
 
 // forgetIfGoneLocked drops the record of a cluster the proxy does not hold
-// when no response carrying it is in flight and the last goneBuilds snapshots
-// had no entry for it: nothing is kept for good for a cluster neither
-// published, nor sent and unanswered, nor held. Not at the first build without
-// it: a response built before that one may not have been written yet
-// (goneBuilds). A record that an answer leaves with nothing to keep it inside
-// that window is dropped by the build that ends it (publish walks them all).
-// Callers hold h.mu.
-func (h *ackedPins) forgetIfGoneLocked(name string, s *clusterAck) {
-	if h.build-s.build >= goneBuilds && !s.holds && len(s.sent) == 0 {
-		delete(h.clusters, name)
+// when no response carrying it is in flight, the last goneBuilds snapshots had
+// no entry for it, and, with byAge, the first of those was built goneAge ago
+// or more: nothing is kept for good for a cluster neither published, nor sent
+// and unanswered, nor held. Not at the first build without it: a response
+// built before that one may not have been written yet (goneBuilds, goneAge).
+// A record that an answer leaves with nothing to keep it inside that window is
+// dropped by the first build after the window (publish walks them all), or by
+// a later answer about its cluster.
+//
+// now is h.clock(). byAge is false only from a build that found more than
+// maxAgedRecords records that are not of its entries; every other caller keeps
+// a record by age and leaves the cap to the next build. Callers hold h.mu.
+func (h *ackedPins) forgetIfGoneLocked(name string, s *clusterAck, now time.Time, byAge bool) {
+	if s.holds || len(s.sent) > 0 || h.build-s.build < goneBuilds {
+		return
 	}
+	if byAge && !s.gone.IsZero() && now.Sub(s.gone) < goneAge {
+		return
+	}
+	delete(h.clusters, name)
 }
 
 // deliver records the clusters of a response entering or leaving flight
@@ -441,6 +515,7 @@ func (h *ackedPins) forgetIfGoneLocked(name string, s *clusterAck) {
 func (h *ackedPins) deliver(d ack.Delivery) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	now := h.clock()
 	for _, r := range d.Resources {
 		s := h.clusters[r.Name]
 		if s == nil {
@@ -451,7 +526,7 @@ func (h *ackedPins) deliver(d ack.Delivery) {
 			continue
 		}
 		s.answered(r.Version)
-		h.forgetIfGoneLocked(r.Name, s)
+		h.forgetIfGoneLocked(r.Name, s, now, true)
 	}
 }
 
@@ -459,16 +534,17 @@ func (h *ackedPins) deliver(d ack.Delivery) {
 // holds. Callers hold h.mu and report the update before they release it
 // (ackedPins).
 func (h *ackedPins) acceptLocked(a ack.Accepted) ackedPinsUpdate {
+	now := h.clock()
 	if a.Opening {
-		h.restateLocked(a.Stated)
+		h.restateLocked(a.Stated, now)
 	}
 	// A name with no record here is a cluster the response carried that is
 	// not a cluster entry (a per-pod application cluster, a QUIC twin, the
 	// passthrough cluster, a plaintext UDP floor), and is in no pin count. Or
-	// it is an entry that left the snapshot more than goneBuilds builds
-	// before the response that carried it was written, which is the bound
-	// goneBuilds states; the proxy's next opening statement names it, and
-	// restateLocked does not take a name on trust.
+	// it is an entry whose record was dropped before the response that
+	// carried it was written, which is the bound goneBuilds and goneAge
+	// state; the proxy's next opening statement names it, and restateLocked
+	// does not take a name on trust.
 	for _, r := range a.Added {
 		if s := h.clusters[r.Name]; s != nil {
 			s.hold(r.Version)
@@ -477,7 +553,7 @@ func (h *ackedPins) acceptLocked(a ack.Accepted) ackedPinsUpdate {
 	for _, name := range a.Removed {
 		if s := h.clusters[name]; s != nil {
 			s.release()
-			h.forgetIfGoneLocked(name, s)
+			h.forgetIfGoneLocked(name, s, now, true)
 		}
 	}
 	return h.settleLocked()
@@ -492,9 +568,9 @@ func (h *ackedPins) acceptLocked(a ack.Accepted) ackedPinsUpdate {
 // count.
 // The proxy can hold a cluster entry this agent has dropped the record of: one
 // it accepted on a stream that ended before the agent read the answer, removed
-// from the snapshot since, and stated again more than goneBuilds builds later
-// (or within them, when the builds went by while the opening response waited
-// for its answer). Its class is not on record, so it is held at a version of
+// from the snapshot since, and stated again after the record was dropped
+// (forgetIfGoneLocked), or before that, when it was dropped while the opening
+// response waited for its answer. Its class is not on record, so it is held at a version of
 // unknown class, which withdraws the gauge until the proxy accepts its
 // removal, states it no more, or the agent publishes that version again: a
 // count without it would say the proxy holds fewer unpinned clusters than it
@@ -508,7 +584,7 @@ func (h *ackedPins) acceptLocked(a ack.Accepted) ackedPinsUpdate {
 // pin gauges do not count (proxy.ClusterNameOutsidePinGauge, the one list of
 // them, held to every cluster constructor of that package by a test there).
 // The agent errs to "unknown" for a name the list does not know.
-func (h *ackedPins) restateLocked(stated map[string]string) {
+func (h *ackedPins) restateLocked(stated map[string]string, now time.Time) {
 	for name, version := range stated {
 		if h.clusters[name] != nil {
 			continue
@@ -525,7 +601,7 @@ func (h *ackedPins) restateLocked(stated map[string]string) {
 			continue
 		}
 		s.release()
-		h.forgetIfGoneLocked(name, s)
+		h.forgetIfGoneLocked(name, s, now, true)
 	}
 }
 
