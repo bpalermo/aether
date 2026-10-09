@@ -407,7 +407,7 @@ preflight() {
 		ns="${ns%%.*}"
 		k -n "$ns" get svc "$svc" >/dev/null 2>&1 || missing="$missing $ns/$svc"
 	done <<<"$shares"
-	if [ -n "$missing" ]; then pf_fail "no mesh Service for target(s):$missing"; else pf_ok "every target's mesh Service exists"; fi
+	if [ -n "$missing" ]; then pf_fail "no mesh Service for target(s):$missing (the registrar generates it once the workload's pods are registered; the workloads are the manifests of e2e/soak/ (svc.yaml for svc-N) and charts/udsecho: README.md, \"Run\", step 0 onwards)"; else pf_ok "every target's mesh Service exists"; fi
 
 	# One run per release: `helm upgrade` with a new plan REPLACES the Job, and a
 	# finished Job's pod log is the only copy of its summary until it is saved.

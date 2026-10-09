@@ -48,6 +48,13 @@
 #     sampler) and during each kubectl call must end it with exit 143, leave no
 #     process in its session and leave the schedule where it was; and
 #     sample-proxy-rss.sh, which it queues, the same during its three calls;
+#   - churn.sh --preflight and svc.yaml (#1462): the five svc-N workloads the
+#     driver rolls and the load addresses. The pre-flight against canned
+#     `kubectl get deployment -o jsonpath` answers in
+#     testdata/preflight/workloads/ (one absent; each difference that would
+#     void a soak; five that only log a line per request), and the manifest,
+#     read: the names the harness uses are the ones it defines, and the five
+#     differ only where its header says they do;
 #   - prober-grade.sh (#1390, #1423) against canned Prometheus query responses
 #     in testdata/prober-grade/: failure series born inside the window (the
 #     2026-10-08 shape: 40 raw, 37 as increase() counts), a counter reset, a
@@ -1272,6 +1279,8 @@ expect "$VALUES" "values: --progress is passed (a snapshot no longer copies hist
 #                  the driver as it was BEFORE its waits were changed (#1419),
 #                  run under this same fake. What the driver does to a cluster,
 #                  and when, is in that file; a change to it has to be meant.
+#                  (One has been since: #1462 added the pre-flight's five reads
+#                  of the svc-N workloads, at second 0.)
 #   the stop       a TERM before each command the driver runs, and during each
 #                  kubectl call, must end it with exit 143, leave no process in
 #                  its session, and leave the clock where it was (a clock that
@@ -1350,6 +1359,31 @@ case "$args" in
 	echo done
 	;;
 *" rollout status "* | *" scale "* | *" delete "* | *" wait --for=delete "*) echo done ;;
+*" get deployment/svc-"*" -o jsonpath=replicas="*)
+	# The pre-flight's reading of a svc-N workload (#1462): the canned answer
+	# of $FAKE_SVC_DIR when it has one for this Deployment (<name>.err: not
+	# found), else a workload as svc.yaml makes it.
+	w="${args#* get deployment/}"
+	w="${w%% *}"
+	if [ -f "${FAKE_SVC_DIR:-/nonexistent}/$w.err" ]; then
+		cat "$FAKE_SVC_DIR/$w.err" >&2
+		exit 1
+	fi
+	if [ -f "${FAKE_SVC_DIR:-/nonexistent}/$w.txt" ]; then
+		cat "$FAKE_SVC_DIR/$w.txt"
+	else
+		printf 'replicas=3\navailable=3\nmanaged=true\nsa=%s\nstrategy=RollingUpdate\nmaxUnavailable=0\nminReadySeconds=10\npreStopSleep=3\ncommand=["/quiet/sh","-c","exec /echo-basic >/dev/null"]\n' "$w"
+	fi
+	;;
+*" get deployment/svc-"*" -o name")
+	w="${args#* get deployment/}"
+	w="${w%% *}"
+	if [ -f "${FAKE_SVC_DIR:-/nonexistent}/$w.err" ]; then
+		cat "$FAKE_SVC_DIR/$w.err" >&2
+		exit 1
+	fi
+	echo "deployment/$w"
+	;;
 *"-o jsonpath={.spec.replicas}"*) printf 3 ;;
 *" create configmap "*) printf 'apiVersion: v1\nkind: ConfigMap\n' ;;
 *" apply -f -"*) cat >/dev/null ;;
@@ -1541,6 +1575,174 @@ if [ "$rc" -eq 2 ] && grep -q 'SOAK_SHRINK_SECONDS take whole seconds' "$TMP/chu
 else
 	fail "churn: SOAK_SHRINK_SECONDS=90s gave exit $rc: $(cat "$TMP/churn-refused.out")"
 fi
+
+# --- the svc-N workloads: the pre-flight and the manifest (#1462) ---------------
+# churn.sh rolls deployment/svc-1 ... svc-5 and the load addresses four of them.
+# Until #1462 no manifest for them was in the repository, and the pre-flight
+# asked one thing of each: that it exists. A workload left at 0 replicas, or
+# outside the mesh, passed, and was found out hours into the run (the SHRINK
+# aborts at T0+450m on a svc-5 with no replica) or not at all (a roll of nothing
+# is logged ROLLED).
+WF="$HERE/testdata/preflight/workloads"
+# svc_preflight <scenario> <out>: churn.sh --preflight against that scenario's
+# canned Deployments (none: every workload as svc.yaml makes it). Sets $rc.
+svc_preflight() {
+	local scen="$1" outf="$2" state="$TMP/svc-pf-$1"
+	rm -rf "$state" && mkdir -p "$state"
+	echo "$CHURN_EPOCH" >"$state/clock"
+	env PATH="$CB:$PATH" FAKE_STATE="$state" FAKE_CLOCK="$state/clock" FAKE_EPOCH="$CHURN_EPOCH" \
+		FAKE_SVC_DIR="$WF/$scen" SOAK_CHURN_LOG="$state/churn.log" \
+		bash "$CHURN" --context fake --preflight >"$outf" 2>&1
+	rc=$?
+	if [ -e "$state/churn.log" ]; then fail "workloads, $scen: the pre-flight wrote the churn log"; fi
+}
+O="$TMP/svc-pf-as-made.out"
+svc_preflight as-made "$O"
+if [ "$rc" -eq 0 ] && grep -q 'pre-flight OK' "$O"; then
+	pass "workloads: (control) five workloads as svc.yaml makes them pass the pre-flight"
+else
+	fail "workloads: the control run gave exit $rc: $(cat "$O")"
+fi
+expect "$O" "workloads: (control) and nothing is said about them" 'svc-[1-5]' 0
+
+O="$TMP/svc-pf-absent.out"
+svc_preflight absent "$O"
+show "churn.sh --preflight, deployment/svc-2 absent" "$O"
+if [ "$rc" -eq 2 ]; then pass "workloads: an absent workload refuses the run (exit 2)"; else fail "workloads: absent svc-2 gave exit $rc, want 2"; fi
+expect "$O" "workloads: the absent one is named" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-2 not found on context ' 1
+expect "$O" "workloads: only that one is" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-' 1
+expect "$O" "workloads: and the message says where the workloads come from (RED before #1462: 'not found', and no manifest to point at)" "kubectl --context 'fake' apply -n aether-test -f e2e/soak/svc\\.yaml" 1
+
+# One difference per workload, and three on svc-5: each is one that voids a soak.
+O="$TMP/svc-pf-differs.out"
+svc_preflight differs "$O"
+show "churn.sh --preflight, five workloads that differ from svc.yaml" "$O"
+if [ "$rc" -eq 2 ]; then
+	pass "workloads: a workload that would void the soak refuses the run (exit 2; RED before #1462: exit 0, 'pre-flight OK')"
+else
+	fail "workloads: the 'differs' fixtures gave exit $rc, want 2"
+fi
+expect "$O" "workloads: svc-1, no replica" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-1 has \.spec\.replicas=0 ' 1
+expect "$O" "workloads: svc-2, 3 of 4 replicas available" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-2 has 3 of 4 replicas available ' 1
+expect "$O" "workloads: svc-3, pods not in the mesh" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-3 .*aether\.io/managed' 1
+expect "$O" "workloads: svc-4, another ServiceAccount (another mesh service)" "PRE-FLIGHT FAILED: aether-test/deployment/svc-4 runs as ServiceAccount 'default'" 1
+expect "$O" "workloads: svc-5, a roll that is not surge-first" "PRE-FLIGHT FAILED: aether-test/deployment/svc-5 .*maxUnavailable='25%'" 1
+expect "$O" "workloads: svc-5, no minReadySeconds" "PRE-FLIGHT FAILED: aether-test/deployment/svc-5 has minReadySeconds=''" 1
+expect "$O" "workloads: svc-5, no preStop sleep" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-5 has no preStop sleep' 1
+expect "$O" "workloads: seven lines, one per difference" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-' 7
+expect "$O" "workloads: the manifest is pointed at once" 'apply -n aether-test -f e2e/soak/svc\.yaml' 1
+expect "$O" "workloads: it never says OK" 'pre-flight OK' 0
+
+# A server that logs a line per request (#1395) does not void a soak: said, not refused.
+O="$TMP/svc-pf-loud.out"
+svc_preflight loud "$O"
+show "churn.sh --preflight, five workloads started without the quiet shell" "$O"
+if [ "$rc" -eq 0 ] && grep -q 'pre-flight OK' "$O"; then
+	pass "workloads: a workload that only logs a line per request does not refuse the run"
+else
+	fail "workloads: the 'loud' fixtures gave exit $rc: $(cat "$O")"
+fi
+expect "$O" "workloads: but each of the five is noted, with the manifest that quiets it" 'pre-flight note: aether-test/deployment/svc-[1-5] .*stdout.*e2e/soak/svc\.yaml' 5
+
+# The manifest, read. Comments out, one file per Deployment document, the name
+# written svc-N in each so that they compare.
+SVC_YAML="$HERE/svc.yaml"
+M="$TMP/svc-manifest"
+mkdir -p "$M"
+: >"$M/objects"
+if [ -r "$SVC_YAML" ]; then
+	grep -v '^ *#' "$SVC_YAML" | awk -v dir="$M" '
+		/^---$/ { n++; next }
+		{ doc[n] = doc[n] $0 "\n" }
+		$1 == "kind:" { kind[n] = $2 }
+		$1 == "name:" && !(n in name) { name[n] = $2 }
+		END {
+			for (i = 1; i <= n; i++) {
+				print kind[i] "/" name[i] >> (dir "/objects")
+				if (kind[i] == "Deployment") {
+					d = doc[i]
+					gsub(name[i], "svc-N", d)
+					printf "%s", d > (dir "/" name[i])
+				}
+			}
+		}'
+else
+	fail "workloads: e2e/soak/svc.yaml is not in the repository (RED before #1462)"
+fi
+want="Deployment/svc-1 Deployment/svc-2 Deployment/svc-3 Deployment/svc-4 Deployment/svc-5 ServiceAccount/svc-1 ServiceAccount/svc-2 ServiceAccount/svc-3 ServiceAccount/svc-4 ServiceAccount/svc-5"
+got=$(LC_ALL=C sort "$M/objects" | tr '\n' ' ' | sed 's/ $//')
+if [ "$got" = "$want" ]; then
+	pass "svc.yaml: a Deployment and a ServiceAccount for each of svc-1 ... svc-5, and nothing else"
+else
+	fail "svc.yaml: defines [$got], want [$want]"
+fi
+# What the harness names, the manifest defines: the Deployments churn.sh rolls
+# and scales, the hosts the load and the new-SA step dial, the upstreams the
+# engines declare.
+used=$({
+	grep -oE 'deployment/svc-[0-9]+' "$CHURN"
+	grep -oE '"[0-9]+ svc svc-[0-9]+"' "$CHURN"
+	grep -ohE '//svc-[0-9]+\.' "$CHURN" "$HERE/sortie-targets.txt"
+	grep -E '^ *config\.aether\.io/upstreams:' "$HERE/sortie-values.yaml" | grep -oE 'svc-[0-9]+'
+} | grep -oE 'svc-[0-9]+' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')
+if [ "$used" = "svc-1 svc-2 svc-3 svc-4 svc-5" ]; then
+	pass "svc.yaml: every svc-N that churn.sh, sortie-targets.txt and sortie-values.yaml name is one it defines ($used)"
+else
+	fail "svc.yaml: the harness names [$used]; the manifest defines svc-1 ... svc-5"
+fi
+for w in svc-1 svc-2 svc-3 svc-4 svc-5; do
+	f="$M/$w"
+	[ -s "$f" ] || {
+		fail "svc.yaml: no Deployment document for $w"
+		continue
+	}
+	bad=""
+	grep -qx '  replicas: 4' "$f" || bad="$bad replicas"
+	grep -qx '  minReadySeconds: 10' "$f" || bad="$bad minReadySeconds"
+	grep -qx '      maxUnavailable: 0' "$f" || bad="$bad maxUnavailable"
+	grep -qx '        aether.io/managed: "true"' "$f" || bad="$bad managed-label"
+	grep -qx '      serviceAccountName: svc-N' "$f" || bad="$bad serviceAccountName"
+	grep -qE '^ +seconds: [0-9]+$' "$f" || bad="$bad preStop-sleep"
+	grep -qF 'command: ["/quiet/sh", "-c", "exec /echo-basic >/dev/null"]' "$f" || bad="$bad quiet-command"
+	if [ -z "$bad" ]; then
+		pass "svc.yaml: $w has what the pre-flight asks for, and the quiet start of #1395"
+	else
+		fail "svc.yaml: $w is missing:$bad"
+	fi
+done
+# The same two images as echo.yaml, by the same digests.
+imgs() { awk '$1 == "image:" {print $2}' "$@" 2>/dev/null | LC_ALL=C sort -u; }
+if [ -n "$(imgs "$SVC_YAML")" ] && [ "$(imgs "$SVC_YAML")" = "$(imgs "$HERE/echo.yaml")" ] &&
+	[ "$(imgs "$SVC_YAML" | grep -c '@sha256:[0-9a-f]\{64\}$')" -eq 2 ]; then
+	pass "svc.yaml: its two images are echo.yaml's, each by digest"
+else
+	fail "svc.yaml: images [$(imgs "$SVC_YAML" | tr '\n' ' ')], echo.yaml has [$(imgs "$HERE/echo.yaml" | tr '\n' ' ')]"
+fi
+# Five near-identical documents drift: hold them to the differences the header names.
+delta() { diff "$M/svc-2" "$M/$1" 2>&1 | grep -v '^[0-9-]' | sed 's/  */ /g' | tr '\n' '|'; }
+if [ -s "$M/svc-2" ] && cmp -s "$M/svc-2" "$M/svc-3"; then
+	pass "svc.yaml: svc-2 and svc-3 are the same but for the name"
+else
+	fail "svc.yaml: svc-3 differs from svc-2: $(delta svc-3)"
+fi
+if [ "$(delta svc-1)" = '< seconds: 3|> seconds: 10|' ]; then
+	pass "svc.yaml: svc-1 differs in its preStop sleep only (10 s)"
+else
+	fail "svc.yaml: svc-1 differs from svc-2 by: $(delta svc-1)"
+fi
+if [ "$(delta svc-4)" = '> annotations:|> metadata.endpoint.aether.io/tier: gold|> metadata.endpoint.aether.io/version: v2|' ]; then
+	pass "svc.yaml: svc-4 differs in its two endpoint metadata annotations only"
+else
+	fail "svc.yaml: svc-4 differs from svc-2 by: $(delta svc-4)"
+fi
+if [ "$(delta svc-5)" = '> annotations:|> endpoint.aether.io/ports: "8080,3001=h2"|> - containerPort: 3001|' ]; then
+	pass "svc.yaml: svc-5 differs in its second port only (h2c on 3001, declared)"
+else
+	fail "svc.yaml: svc-5 differs from svc-2 by: $(delta svc-5)"
+fi
+# The README says how to create them, with the command the pre-flight prints.
+expect "$HERE/README.md" "README: the Run steps apply svc.yaml" '^kubectl apply -n aether-test -f e2e/soak/svc\.yaml$' 1
+expect "$HERE/README.md" "README: it no longer says the svc-N workloads are not in the repository" 'are not defined in this repository' 0
 
 # TERM during a real wait: the real clock, no hook. The driver is waiting for
 # its first roll, twelve minutes away. RED before #1419: its `sleep 720` was in

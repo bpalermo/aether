@@ -1,0 +1,9 @@
+replicas=4
+available=4
+managed=true
+sa=svc-4
+strategy=RollingUpdate
+maxUnavailable=0
+minReadySeconds=10
+preStopSleep=3
+command=

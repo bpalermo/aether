@@ -342,6 +342,7 @@ nap_open churn.sh
 
 # Pre-flight (#951). Writes to stderr only -- never to $LOG -- and runs before T0.
 # "<namespace> <kind>/<name>" for every workload the schedule or the SHRINK touches.
+# The five svc-N are also read, not only looked for: see preflight_workload.
 PREFLIGHT_TARGETS=(
 	"aether-system daemonset/aether-agent"
 	"aether-system daemonset/aether-proxy"
@@ -355,6 +356,86 @@ PREFLIGHT_TARGETS=(
 	"aether-test deployment/svc-5"
 	"$SHRINK_NS $SHRINK_TARGET"
 )
+# The five workloads the schedule rolls and the load addresses (#1462). They are
+# e2e/soak/svc.yaml; "exists" is not enough to ask of them. Each line below is a
+# difference that voids a soak, and none of them shows before T0 otherwise:
+#
+#   no replica            a roll of nothing is logged ROLLED, and the SHRINK
+#                         aborts the run at T0+450m on a svc-5 it cannot shrink;
+#   not all available     the run starts on a workload that is mid-roll or
+#                         broken, and its failures are read as the mesh's;
+#   not in the mesh       pods without aether.io/managed are not captured and
+#                         not registered: the load has no endpoint to reach;
+#   another ServiceAccount  the mesh service name IS the ServiceAccount name,
+#                         so the pods serve some other service;
+#   not surge-first, no minReadySeconds, no preStop sleep
+#                         a roll outruns the mesh and drops requests
+#                         (docs/workload-requirements.md, "Hitless rolling
+#                         restarts"): the soak measures the workload.
+#
+# A server that is not started through the quiet shell (#1395) logs a line per
+# request and voids nothing: that one is a note.
+SVC_NS="aether-test"
+SVC_MANIFEST="e2e/soak/svc.yaml"
+# One `key=value` line per field; a field the object does not have is empty.
+SVC_FMT='replicas={.spec.replicas}{"\n"}available={.status.availableReplicas}{"\n"}managed={.spec.template.metadata.labels.aether\.io/managed}{"\n"}sa={.spec.template.spec.serviceAccountName}{"\n"}strategy={.spec.strategy.type}{"\n"}maxUnavailable={.spec.strategy.rollingUpdate.maxUnavailable}{"\n"}minReadySeconds={.spec.minReadySeconds}{"\n"}preStopSleep={.spec.template.spec.containers[0].lifecycle.preStop.sleep.seconds}{"\n"}command={.spec.template.spec.containers[0].command}{"\n"}'
+SVC_HINT=0
+is_svc_workload() {
+	[ "$1" = "$SVC_NS" ] && [[ "$2" =~ ^deployment/svc-[1-5]$ ]]
+}
+# preflight_workload <namespace> deployment/<name>: one read, one line per
+# difference. Returns non-zero when any of them voids the soak.
+preflight_workload() {
+	local ns="$1" obj="$2" name="${2#deployment/}" out key val fail=0
+	local replicas="" available="" managed="" sa="" strategy="" max_unavailable="" min_ready="" pre_stop="" command=""
+	if ! out=$(k --request-timeout=15s -n "$ns" get "$obj" -o "jsonpath=$SVC_FMT" 2>&1); then
+		echo "churn.sh: PRE-FLIGHT FAILED: could not read $ns/$obj on context '$CTX': $out" >&2
+		return 1
+	fi
+	while IFS='=' read -r key val; do
+		case "$key" in
+		replicas) replicas="$val" ;;
+		available) available="$val" ;;
+		managed) managed="$val" ;;
+		sa) sa="$val" ;;
+		strategy) strategy="$val" ;;
+		maxUnavailable) max_unavailable="$val" ;;
+		minReadySeconds) min_ready="$val" ;;
+		preStopSleep) pre_stop="$val" ;;
+		command) command="$val" ;;
+		esac
+	done <<<"$out"
+	wl_fail() {
+		echo "churn.sh: PRE-FLIGHT FAILED: $ns/$obj $*" >&2
+		fail=1
+	}
+	if ! [[ "$replicas" =~ ^[0-9]+$ ]] || [ "$replicas" -eq 0 ]; then
+		wl_fail "has .spec.replicas=${replicas:-unset} (a roll of it rolls nothing, and the SHRINK cannot restore a count it never read)"
+	elif [ "${available:-0}" != "$replicas" ]; then
+		wl_fail "has ${available:-0} of $replicas replicas available (mid-roll or failing: what it drops would be read as the mesh's)"
+	fi
+	if [ "$managed" != "true" ]; then
+		wl_fail "has no aether.io/managed: \"true\" label on its pods (they are not in the mesh: the load has no endpoint to reach)"
+	fi
+	if [ "$sa" != "$name" ]; then
+		wl_fail "runs as ServiceAccount '${sa:-default}' (the mesh service name is the ServiceAccount name: its pods are not $name)"
+	fi
+	if [ "$strategy" != "RollingUpdate" ] || [ "$max_unavailable" != "0" ]; then
+		wl_fail "rolls with strategy=${strategy:-unset} maxUnavailable='$max_unavailable' (want RollingUpdate with maxUnavailable 0: a roll must add a ready pod before it takes one away)"
+	fi
+	if ! [[ "$min_ready" =~ ^[0-9]+$ ]] || [ "$min_ready" -lt 10 ]; then
+		wl_fail "has minReadySeconds='$min_ready' (want 10 or more: a roll retires the old pod before the mesh routes to the new one)"
+	fi
+	if ! [[ "$pre_stop" =~ ^[0-9]+$ ]] || [ "$pre_stop" -lt 3 ]; then
+		wl_fail "has no preStop sleep of 3 s or more on its first container (got '${pre_stop}': the server exits before the mesh has drained it)"
+	fi
+	case "$command" in
+	*'>/dev/null'*) ;;
+	*) echo "churn.sh: pre-flight note: $ns/$obj does not start its server with stdout on /dev/null (#1395): it logs one line per request for the whole run. $SVC_MANIFEST starts it quiet; applying it rolls the workload" >&2 ;;
+	esac
+	return "$fail"
+}
+
 # The new-SA step creates and deletes objects instead of patching them, and needs a
 # worker node to pin to and the pod's log to read its tally.
 preflight_newsa() {
@@ -429,6 +510,8 @@ preflight_udscsi() {
 
 preflight() {
 	local out fail=0 ns obj t
+	# The SHRINK target is a second entry for svc-5: read each workload once.
+	local -A seen=()
 	if ! out=$(k --request-timeout=15s get --raw /readyz 2>&1); then
 		echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' cannot reach a ready API server:" >&2
 		printf '  %s\n' "$out" >&2
@@ -449,13 +532,24 @@ preflight() {
 		if ! out=$(k --request-timeout=15s -n "$ns" get "$obj" -o name 2>&1); then
 			echo "churn.sh: PRE-FLIGHT FAILED: $ns/$obj not found on context '$CTX': $out" >&2
 			fail=1
+			if is_svc_workload "$ns" "$obj"; then SVC_HINT=1; fi
 			continue
 		fi
 		if ! out=$(k --request-timeout=15s -n "$ns" auth can-i patch "$obj" 2>&1); then
 			echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' may not patch $ns/$obj ($out)" >&2
 			fail=1
 		fi
+		if is_svc_workload "$ns" "$obj" && [ -z "${seen[$obj]:-}" ]; then
+			seen[$obj]=1
+			if ! preflight_workload "$ns" "$obj"; then
+				fail=1
+				SVC_HINT=1
+			fi
+		fi
 	done
+	if [ "$SVC_HINT" = "1" ]; then
+		echo "churn.sh: the svc-N workloads are $SVC_MANIFEST: kubectl --context '$CTX' apply -n $SVC_NS -f $SVC_MANIFEST (README.md, \"Run\", step 0a)" >&2
+	fi
 	if { [ "$NEWSA_ON" != "0" ] && [ "$UDSCSI_ONCE" != "1" ]; } || [ "$NEWSA_ONCE" = "1" ]; then
 		preflight_newsa || fail=1
 	fi

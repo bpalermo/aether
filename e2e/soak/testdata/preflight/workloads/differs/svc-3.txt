@@ -1,0 +1,9 @@
+replicas=4
+available=4
+managed=
+sa=svc-3
+strategy=RollingUpdate
+maxUnavailable=0
+minReadySeconds=10
+preStopSleep=3
+command=["/quiet/sh","-c","exec /echo-basic >/dev/null"]
