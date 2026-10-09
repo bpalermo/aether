@@ -16,12 +16,56 @@ var lockSource []byte
 // promise that left or changed is a version bump (README.md, "The rule"); the
 // failure says which entry and which key.
 func TestVersionBump(t *testing.T) {
-	lock, err := ParseLock(lockSource)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, problem := range MustLoad(t).CheckLock(lock) {
+	for _, problem := range MustLoad(t).CheckLockFile(lockSource) {
 		Errorf(t, "%s", problem)
+	}
+}
+
+// TestCheckLockFile: the lock is held to the form the test prints, one promise
+// to a line. scripts/check-harness-contract-bump.sh reads the lock at a pull
+// request's base line by line; a lock that says the same in another YAML
+// shape would read there as holding no promise, and promises could then leave
+// with their entries and no version bump.
+func TestCheckLockFile(t *testing.T) {
+	c := mustParse(t, full)
+	if got := c.CheckLockFile(c.Lock()); len(got) != 0 {
+		t.Fatalf("CheckLockFile() of the lock the contract writes = %q", got)
+	}
+	lock := lockOf(t, c)
+	var inline, indented []string
+	for _, name := range sortedKeys(lock.Promises) {
+		inline = append(inline, strings.TrimSpace(lockLine(name, lock.Promises[name])))
+		indented = append(indented, "  "+lockLine(name, lock.Promises[name]))
+	}
+	for name, text := range map[string]string{
+		"an inline map":              "version: 3\npromises: {" + strings.Join(inline, ", ") + "}\n",
+		"another indentation":        "version: 3\npromises:\n" + strings.Join(indented, "\n") + "\n",
+		"the lines in another order": strings.Replace(string(c.Lock()), lockLine("c chart", lock.Promises["c chart"])+"\n", "", 1) + lockLine("c chart", lock.Promises["c chart"]) + "\n",
+		"no header":                  string(lock.render()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The same promises, so the comparison with the contract passes...
+			parsed, err := ParseLock([]byte(text))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := c.CheckLock(parsed); len(got) != 0 {
+				t.Fatalf("CheckLock() = %q: the case is meant to hold the same promises", got)
+			}
+			// ...and the file is refused for its form.
+			got := strings.Join(c.CheckLockFile([]byte(text)), "\n")
+			if !strings.Contains(got, "is not written the way this test prints it") || !strings.Contains(got, LockFile) {
+				t.Errorf("CheckLockFile() = %q", got)
+			}
+		})
+	}
+	// A lock that is wrong is reported for what is wrong, not for its form.
+	stale := strings.Join(mustParse(t, edit(t, full, "{id: dom, value: v,", "{id: dom, value: v9,")).CheckLockFile(c.Lock()), "\n")
+	if !strings.Contains(stale, bumpNeeded) || strings.Contains(stale, "is not written the way") {
+		t.Errorf("CheckLockFile() = %q", stale)
+	}
+	if got := c.CheckLockFile([]byte("version: [")); len(got) != 1 || !strings.Contains(got[0], LockFile) {
+		t.Errorf("CheckLockFile() of a file that is not YAML = %q", got)
 	}
 }
 

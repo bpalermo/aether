@@ -312,6 +312,28 @@ const lockHeader = `# The promises external-harness.yaml made at the version bel
 # base and fails all the same. README.md, "The rule".
 `
 
+// CheckLockFile compares the contract with the lock file as it is written: it
+// parses, holds what CheckLock holds, and is byte for byte the file Lock
+// writes.
+//
+// The form matters because scripts/check-harness-contract-bump.sh reads the
+// lock at a pull request's base one line at a time. The same promises as an
+// inline map, or indented otherwise, are the same lock to a YAML parser and
+// no promise at all to that script.
+func (c *Contract) CheckLockFile(data []byte) []string {
+	lock, err := ParseLock(data)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	if problems := c.CheckLock(lock); len(problems) > 0 {
+		return problems
+	}
+	if want := c.Lock(); string(data) != string(want) {
+		return []string{fmt.Sprintf("%s holds the right promises and is not written the way this test prints it (the header, then one promise to a line, sorted). The check of a pull request against its base reads it line by line, so write it exactly so:\n\n%s", LockFile, want)}
+	}
+	return nil
+}
+
 // entryOf returns the entry id a promise's name starts with.
 func entryOf(name string) string {
 	id, _, _ := strings.Cut(name, " ")

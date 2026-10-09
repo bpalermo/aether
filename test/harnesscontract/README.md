@@ -54,6 +54,10 @@ to) with a digest of what is promised there. `TestVersionBump` in
   version. Replace the file with it in the same change.
 - A promise the contract makes that the lock does not hold is new. The test
   prints the lines to add to the lock; `version` stays.
+- The lock is written exactly as the test prints it: the header, then one
+  promise to a line, sorted. A lock that holds the right promises in another
+  shape fails, and the test prints the whole file. The comparison with the
+  base (below) reads the lock line by line, so its form is part of the check.
 
 That test reads both files from one checkout, so on its own it cannot see a
 change made to both: an entry removed together with its lines, or a promise
