@@ -1,5 +1,13 @@
 # Observability: alerting rules
 
+Every `.yml` in this directory is a Prometheus rule file, except `<name>_test.yml`,
+which is a `promtool` unit test for `<name>.yml`. The build holds both to a pinned
+`promtool`: `bazel test //:observability_rules_test` runs `promtool check rules` on
+every rule file and `promtool test rules` on every rule test, and it is part of the
+unit tests CI runs. A file added here is picked up with no other edit. To run
+`promtool` by hand with the same version: `bazel run //bazel/promtool -- test rules
+docs/observability/<name>_test.yml`.
+
 ## mesh-DNS (`mesh-dns-alerts.yml`)
 
 Covers the `aether-mesh-dns` DaemonSet, which is on the critical path for **every**

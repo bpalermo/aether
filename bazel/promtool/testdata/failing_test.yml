@@ -1,0 +1,24 @@
+# Fixture for //bazel/promtool:check_rules_test: a rule test that does NOT
+# hold, on purpose. The target is up for the whole test, and the test expects
+# the alert: `promtool test rules` must fail on it.
+rule_files:
+  - good.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: expects an alert for a target that is up
+    interval: 1m
+    input_series:
+      - series: 'up{job="fixture", instance="a"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: FixtureDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: fixture
+              instance: a
+            exp_annotations:
+              summary: "a is down"

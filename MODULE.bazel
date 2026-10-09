@@ -370,6 +370,46 @@ http_archive(
     urls = ["https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_darwin_arm64.tar.gz"],
 )
 
+# promtool: checks the Prometheus rule files under docs/observability and runs
+# their unit tests (//:observability_rules_test, #1492). Prometheus publishes it
+# only inside the server's release archive, so that is what is pinned: the
+# official archives, sha256 from the release's sha256sums.txt. Only the host's
+# archive is ever fetched (about 110 MB). //bazel/promtool selects one per
+# platform, and //bazel/promtool:version_test fails until EXPECTED moves with a
+# bump.
+# PROMETHEUS_VERSION = "3.15.0"
+http_archive(
+    name = "prometheus_linux_amd64",
+    build_file_content = 'exports_files(["promtool"])',
+    sha256 = "2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0",
+    strip_prefix = "prometheus-3.15.0.linux-amd64",
+    urls = ["https://github.com/prometheus/prometheus/releases/download/v3.15.0/prometheus-3.15.0.linux-amd64.tar.gz"],
+)
+
+http_archive(
+    name = "prometheus_linux_arm64",
+    build_file_content = 'exports_files(["promtool"])',
+    sha256 = "f1f90ec08e849d494ca66c611470afc50192f0355f1a61c33f2cbde02d067823",
+    strip_prefix = "prometheus-3.15.0.linux-arm64",
+    urls = ["https://github.com/prometheus/prometheus/releases/download/v3.15.0/prometheus-3.15.0.linux-arm64.tar.gz"],
+)
+
+http_archive(
+    name = "prometheus_darwin_amd64",
+    build_file_content = 'exports_files(["promtool"])',
+    sha256 = "2d79e744c2d7e505db936fbc898e05abc74fcb6e437c25befd26e9c9f00aa58b",
+    strip_prefix = "prometheus-3.15.0.darwin-amd64",
+    urls = ["https://github.com/prometheus/prometheus/releases/download/v3.15.0/prometheus-3.15.0.darwin-amd64.tar.gz"],
+)
+
+http_archive(
+    name = "prometheus_darwin_arm64",
+    build_file_content = 'exports_files(["promtool"])',
+    sha256 = "920df4d17e78b3b0175af144eb318b0c74d1cf7b1d1251b326966f0e81977260",
+    strip_prefix = "prometheus-3.15.0.darwin-arm64",
+    urls = ["https://github.com/prometheus/prometheus/releases/download/v3.15.0/prometheus-3.15.0.darwin-arm64.tar.gz"],
+)
+
 pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
 
 pull(
