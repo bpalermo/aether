@@ -116,8 +116,10 @@ const goneBuilds = offeredVersions
 // node's cluster entries can churn in that time. A build that finds more than
 // maxAgedRecords records that are not of an entry of its snapshot keeps none
 // of them by age: each falls back to goneBuilds alone, for that build. An
-// answer that releases a record while there are that many does the same for
-// that record (byAgeLocked).
+// answer that releases a record while there are more than maxAgedRecords such
+// records, the released one counted, does the same for that record
+// (byAgeLocked). The bound is inclusive: with exactly maxAgedRecords of them
+// the age bound applies, to the build and to the answer.
 const (
 	goneAge        = time.Minute
 	maxAgedRecords = 1024

@@ -6560,7 +6560,8 @@ What follows from that:
   snapshot build without the cluster, and for one minute from the first of those builds
   however many run (#1551); a build that finds more than 1,024 records of clusters its
   snapshot does not have keeps none of them for the minute, and an answer that releases
-  one while there are that many drops it at once.)
+  one while there are more than 1,024 of them, that one counted, does not keep it for
+  the minute either. With exactly 1,024 the minute applies.)
 - **Not written while a held cluster's state is unknown.** The agent can count a version
   only if it has that version's pin class on record: this agent process published it,
   and recently enough (the last three versions of a cluster, plus any in flight). An agent that restarts **while its proxy is
