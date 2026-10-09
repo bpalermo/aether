@@ -1,2 +1,0 @@
-E1005 04:00:01.123456   12345 memcache.go:265] couldn't get current server API group list: Get "https://192.168.100.10:6443/api?timeout=20s": dial tcp 192.168.100.10:6443: connect: connection refused
-The connection to the server 192.168.100.10:6443 was refused - did you specify the right host or port?

@@ -10,7 +10,7 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 # SC2155/SC2034 findings that #853 had to clear before the gate could be turned
 # on were here.
 #
-# Per-directory targets (this one, //e2e/pressure, //e2e/soak) rather than one
+# Per-directory targets (this one, //e2e/pressure) rather than one
 # recursive target, for two reasons. A glob cannot cross a package boundary, so
 # `glob(["**/*.sh"])` here would stop dead at //e2e/udsecho's BUILD.bazel and
 # quietly cover less than it appears to; and a per-directory target keeps the

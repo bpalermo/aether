@@ -730,7 +730,8 @@ reboot.
   `FailedMount`. This answers Q4 for a plugin roll.
 - **Soak harness (#1112).** k6 now sends 5% of its traffic to the UDS-served
   services, and `churn.sh` rolls `aether-uds-csi` twice per soak, so every
-  later soak repeats the plugin roll under load.
+  later soak repeats the plugin roll under load. (The harness has since become
+  an external soak harness, maintained outside this repository.)
 - **Still open: the node reboot (#1106)** — the kubelet republishing onto an
   empty `/run/aether/uds` after boot (`NodePublishVolume` step 4), and the Q3
   re-evaluation that depends on it.
