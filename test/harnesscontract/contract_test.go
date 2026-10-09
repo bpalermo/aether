@@ -82,6 +82,73 @@ func TestResourceAttributeIsTiedToTheCharts(t *testing.T) {
 	}
 }
 
+// ties is every place where the checked-in contract holds a chart to another
+// entry instead of to a string of its own (Contract.Ties).
+//
+// The lock does not hold these: a name is the same promise to a harness
+// whether the contract writes it out or takes it from the entry. So nothing
+// else fails when `name_from: csi.driver` becomes `name: csi.aether.io`, and
+// the next rename of the driver then reaches the plugin's directory and
+// leaves the CSIDriver object behind. A tie leaves this list only on purpose,
+// in the change that says why the chart no longer has to follow the entry.
+var ties = []string{
+	"chart.aether.agent containers agent args --mesh-domain mesh.default_domain",
+	"chart.aether.agent containers agent resource_attributes resource.node",
+	"chart.aether.csidriver name_from csi.driver",
+	"chart.aether.mesh_dns containers mesh-dns args --mesh-domain mesh.default_domain",
+	"chart.aether.pod_webhooks webhooks namespace-inject.pods.aether.io namespaces pod.label.managed",
+	"chart.aether.pod_webhooks webhooks ndots.pods.aether.io objects pod.label.managed",
+	"chart.aether.uds_csi host_paths <arg:--kubelet-root>/plugins/<csi.driver>",
+	"chart.prober.daemonset containers prober args --egress 127.0.0.1:<port.outbound_http>",
+	"chart.prober.daemonset containers prober args --mesh-domain mesh.default_domain",
+	"chart.prober.daemonset containers prober code_resource_attributes resource.service_name.prober",
+	"chart.prober.daemonset containers prober resource_attributes resource.node",
+}
+
+// TestTies: the contract has exactly the ties listed above. One that is gone
+// was replaced by a literal or removed; one that is new is added to the list,
+// so that it cannot leave silently either.
+func TestTies(t *testing.T) {
+	got := MustLoad(t).Ties()
+	gone, added := diff(ties, got)
+	for _, tie := range gone {
+		Errorf(t, "%s no longer holds the chart to another entry here: %q. Written out as a literal, the name is the same today and stops following the entry at its next rename. Put the reference back; or, if the chart no longer has to follow the entry, remove the line from `ties` in contract_test.go and say why in the change.", File, tie)
+	}
+	for _, tie := range added {
+		Errorf(t, "%s holds the chart to another entry in a new place: %q. Add the line to `ties` in contract_test.go, so that the tie cannot be replaced by a literal unnoticed.", File, tie)
+	}
+}
+
+// TestContractTies: what Ties lists, on a contract with every kind of tie.
+func TestContractTies(t *testing.T) {
+	c, err := parse([]byte(full))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"c.d name_from dom",
+		"c.o containers agent args --domain dom",
+		"c.o containers agent args --egress 127.0.0.1:<port>",
+		"c.o containers agent resource_attributes ra",
+		"c.o containers prober code_resource_attributes sn",
+		"c.o host_paths /plugins/<dom>",
+		"c.w webhooks hook.x objects dom",
+	}
+	if got := c.Ties(); !slices.Equal(got, want) {
+		t.Errorf("Ties() = %q, want %q", got, want)
+	}
+	// A webhook held by its namespaces is another tie than one held by its
+	// objects, and a name written out is none.
+	other, err := parse([]byte(strings.NewReplacer("webhooks: {hook.x: {objects: dom}}", "webhooks: {hook.x: {namespaces: dom}}", "name_from: dom", "name: v").Replace(full)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone, added := diff(want, other.Ties())
+	if !slices.Equal(gone, []string{"c.d name_from dom", "c.w webhooks hook.x objects dom"}) || !slices.Equal(added, []string{"c.w webhooks hook.x namespaces dom"}) {
+		t.Errorf("gone %q, added %q", gone, added)
+	}
+}
+
 // TestMeshDomainIsTiedToTheChart: the default mesh domain is compared with the
 // Go default by TestNames, and with what a default install really passes only
 // because a container of the aether chart's default render takes --mesh-domain

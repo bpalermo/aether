@@ -134,12 +134,14 @@ func TestCheckLock_SameVersion(t *testing.T) {
 	}{
 		"nothing": {},
 		// Not promises.
-		"a description":                                                  {changes: []change{{"notes: prose", "notes: other prose"}}},
-		"one more test holds the entry":                                  {changes: []change{{"checked_by: //a:b", "checked_by: [//a:b, //c:d]"}}},
-		"the order of a closed set":                                      {changes: []change{{"values: [x, w]", "values: [w, x]"}}},
-		"the order of a line's fields":                                   {changes: []change{{"fields: [t, tier, err]", "fields: [err, t, tier]"}}},
-		"the order within a class":                                       {changes: []change{{"one: [x, w]", "one: [w, x]"}}},
-		"the order of a metric's labels":                                 {changes: []change{{"      - {name: pod, open: true}\n", ""}, {"    labels:\n", "    labels:\n      - {name: pod, open: true}\n"}}},
+		"a description":                  {changes: []change{{"notes: prose", "notes: other prose"}}},
+		"one more test holds the entry":  {changes: []change{{"checked_by: //a:b", "checked_by: [//a:b, //c:d]"}}},
+		"the order of a closed set":      {changes: []change{{"values: [x, w]", "values: [w, x]"}}},
+		"the order of a line's fields":   {changes: []change{{"fields: [t, tier, err]", "fields: [err, t, tier]"}}},
+		"the order within a class":       {changes: []change{{"one: [x, w]", "one: [w, x]"}}},
+		"the order of a metric's labels": {changes: []change{{"      - {name: pod, open: true}\n", ""}, {"    labels:\n", "    labels:\n      - {name: pod, open: true}\n"}}},
+		// The same promise to a harness, so no bump; that the tie is gone is
+		// TestTies's to say, on the checked-in contract.
 		"a name written out instead of taken from the entry that has it": {changes: []change{{"name_from: dom", "name: v"}}},
 
 		// New promises: a line in the lock, no bump.

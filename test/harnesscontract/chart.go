@@ -240,6 +240,67 @@ func (r Render) refs() []string {
 	return slices.Compact(out)
 }
 
+// Ties returns every place where the contract holds a chart to another entry
+// instead of to a string of its own: `<object id> <key> ... <the entry's id,
+// or the pattern that names it>`, sorted.
+//
+// A tie is not a promise to a harness, so it is not in the lock: the name an
+// object is rendered under is the same whether the contract writes it out or
+// takes it from an entry. But it is what makes a rename of the entry reach
+// the chart. TestTies holds the checked-in contract to the list of its ties,
+// so one that is replaced by a literal fails there and not at the next rename.
+func (c *Contract) Ties() []string {
+	var out []string
+	c.eachObject(func(o *Object) {
+		for _, tie := range o.ties() {
+			out = append(out, o.ID+" "+tie)
+		}
+		for _, ct := range o.Containers {
+			for _, tie := range ct.ties() {
+				out = append(out, o.ID+" containers "+ct.Name+" "+tie)
+			}
+		}
+	})
+	slices.Sort(out)
+	return out
+}
+
+// ties returns the object's own ties, without its id.
+func (o Object) ties() []string {
+	var out []string
+	if o.NameFrom != "" {
+		out = append(out, "name_from "+o.NameFrom)
+	}
+	for _, pattern := range o.HostPaths {
+		out = append(out, "host_paths "+pattern)
+	}
+	for _, webhook := range sortedKeys(o.Webhooks) {
+		s := o.Webhooks[webhook]
+		if s.Namespaces != "" {
+			out = append(out, "webhooks "+webhook+" namespaces "+s.Namespaces)
+		}
+		if s.Objects != "" {
+			out = append(out, "webhooks "+webhook+" objects "+s.Objects)
+		}
+	}
+	return out
+}
+
+// ties returns the container's ties, without the object's id and its name.
+func (c Container) ties() []string {
+	var out []string
+	for _, id := range c.ResourceAttributes {
+		out = append(out, "resource_attributes "+id)
+	}
+	for _, id := range c.CodeResourceAttributes {
+		out = append(out, "code_resource_attributes "+id)
+	}
+	for _, flag := range sortedKeys(c.Args) {
+		out = append(out, "args "+flag+" "+c.Args[flag])
+	}
+	return out
+}
+
 // eachObject calls fn with every object under `charts`. fn may change the
 // object.
 func (c *Contract) eachObject(fn func(o *Object)) {

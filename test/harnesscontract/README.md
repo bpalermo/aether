@@ -124,6 +124,17 @@ with the constant alone then passes while a default install does something
 else. When you add an entry, ask which of these holds; when one does, tie the
 entry to the render as well.
 
+A tie is a reference under `charts` to another entry: `name_from`, `args`,
+`resource_attributes`, `code_resource_attributes`, `host_paths`, `webhooks`.
+It is not a promise to a harness (an object's name is the same whether the
+contract writes it out or takes it from an entry), so the lock does not hold
+it, and writing the literal in its place changes nothing today. It would
+change the next rename: the entry moves, the chart stays, and no test
+compares the two any more. `TestTies` in `harnesscontract_test` therefore
+holds the contract to the list of its ties (`ties` in `contract_test.go`), in
+both directions: a tie that is gone fails, and a new one is added to the list.
+Neither needs a version bump.
+
 `stored_name` is checked against the usual OTLP-to-Prometheus translation of
 `otel_name`, computed by the test. Whether a given pipeline applies that
 translation is not something this repository can test.
