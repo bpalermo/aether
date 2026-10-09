@@ -185,8 +185,9 @@ assume this section has been read.
 - Every action pinned by full commit SHA with the version in a trailing
   comment; `timeout-minutes` on every job; `permissions` per job, least
   privilege; no `${{ }}` inside a `run:` script except through `env:`.
-- Kind, Bazel, conformance and format steps go through the composite actions in
-  `.github/actions/`; the pin tests (`//e2e:kind_pin_test`, `//e2e:go_pin_test`)
+- Kind, Helm, Bazel, conformance and format steps go through the composite
+  actions in `.github/actions/`; the pin tests (`//e2e:kind_pin_test`,
+  `//e2e:go_pin_test`, `//e2e:helm_pin_test`, `//e2e:gateway_api_pin_test`)
   fail a workflow that bypasses them.
 - The API cannot update a branch that touches `.github/workflows` without the
   `workflow` token scope: rebase over git and `push --force-with-lease`.

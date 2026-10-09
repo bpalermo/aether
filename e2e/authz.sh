@@ -72,7 +72,9 @@ NS="aether-system"
 TEST_NS="aether-test"
 MESH_DOMAIN="aether.internal"
 OUTBOUND_PORT="18081"
-GWAPI_VERSION="v1.6.2"
+# The pinned Gateway API release (#1583): one for every e2e surface.
+# shellcheck source=e2e/gateway-api-version.sh
+. "$REPO_ROOT/e2e/gateway-api-version.sh"
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi)
 CHARTS_SRC="${AUTHZ_CHARTS:-$REPO_ROOT/charts}"
 EXPECT="${AUTHZ_EXPECT:-green}"
