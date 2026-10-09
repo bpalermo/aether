@@ -1974,9 +1974,10 @@ run_grade clean "$G" --start 2026-10-08T00:10:00Z --window 8h --prometheus http:
 show "prober-grade: a clean window" "$G"
 if [ "$grc" -eq 0 ]; then pass "grade clean: exit 0"; else fail "grade clean: exit $grc, want 0"; fi
 expect "$G" "grade clean: verdict" '^VERDICT prober=PASS unpinned=PASS logs=not-checked$' 1
-# This scenario's agents all have the `reason` label (#1424): three series each.
-expect "$G" "grade clean: the unpinned counter at rest, one series per node and reason" '^UNPINNED verdict=PASS increase=0 series=15 nodes=5 resets=0$' 1
-expect "$G" "grade clean: per node, three reasons" '^UNPINNED node=worker-0[1-5] count=0 series=3 born_in_window=0 resets=0$' 5
+# This scenario's agents all have the `reason` label (#1424): four series each
+# (the fourth reason, tls_not_published, since #1482).
+expect "$G" "grade clean: the unpinned counter at rest, one series per node and reason" '^UNPINNED verdict=PASS increase=0 series=20 nodes=5 resets=0$' 1
+expect "$G" "grade clean: per node, four reasons" '^UNPINNED node=worker-0[1-5] count=0 series=4 born_in_window=0 resets=0$' 5
 expect "$G" "grade clean: no reason line when nothing moved" '^UNPINNED (reason=|moved:)' 0
 expect "$G" "grade clean: no FAILED, BORN or RESET line" '^(FAILED|BORN|RESET|GONE) ' 0
 expect "$G" "grade clean: the prober line" '^PROBER  verdict=PASS non_success=0 liveness_non_success=0 dns_class_non_success=0 success=7200000 series=10 born_in_window=0 resets=0$' 1
@@ -1986,7 +1987,7 @@ expect "$G" "grade clean: the prober line" '^PROBER  verdict=PASS non_success=0 
 # replaced by prober-f at T0+4h, four connection errors before it went. And an
 # agent rolled inside the window published two snapshots without a pin: a NEW
 # series, born at 2. The new agent is one with the `reason` label (#1424), so it
-# brings three series, one per reason, two of them resting at their seeded
+# brings four series, one per reason, three of them resting at their seeded
 # zero; the agents that did not roll still have the one label-less series each.
 G="$TMP/grade-reset.log"
 run_grade reset "$G" --dir "$GD" --prometheus http://prom.example:9090
@@ -2005,8 +2006,8 @@ expect "$G" "grade reset: the unpinned counter moved on one node, on a series bo
 expect "$G" "grade reset: only the series that moved is a moved line (the two reasons at their seeded zero are not)" '^UNPINNED moved: ' 1
 expect "$G" "grade reset: per reason, for the reason that moved (#1424)" '^UNPINNED reason=trust_domain_unknown count=2 nodes=worker-03$' 1
 expect "$G" "grade reset: no line for a reason that did not move" '^UNPINNED reason=' 1
-expect "$G" "grade reset: per node, the old agent's one series and the new agent's three" '^UNPINNED node=worker-03 count=2 series=4 born_in_window=3 resets=0$' 1
-expect "$G" "grade reset: UNPINNED verdict FAIL, its own line (#1423); the sum is over every series, with or without a reason label" '^UNPINNED verdict=FAIL increase=2 series=8 nodes=5 resets=0  \(a TLS cluster was published without its server-identity pin' 1
+expect "$G" "grade reset: per node, the old agent's one series and the new agent's four" '^UNPINNED node=worker-03 count=2 series=5 born_in_window=4 resets=0$' 1
+expect "$G" "grade reset: UNPINNED verdict FAIL, its own line (#1423); the sum is over every series, with or without a reason label" '^UNPINNED verdict=FAIL increase=2 series=9 nodes=5 resets=0  \(a TLS cluster was published without its server-identity pin' 1
 expect "$G" "grade reset: verdict" '^VERDICT prober=FAIL unpinned=FAIL logs=not-checked$' 1
 red=$(jq '[.data.result[] | (.values[-1][1] | tonumber) - (.values[0][1] | tonumber)] | add' "$GF/reset/unpinned.window.json")
 if [ "$red" = 0 ]; then pass "grade reset: last-minus-first-sample reads 0 for the unpinned counter on these samples (seen red)"; else fail "grade reset: the increase()-style unpinned count is $red, want 0"; fi
@@ -2018,13 +2019,14 @@ if [ "$red" = 0 ]; then pass "grade reset: last-minus-first-sample reads 0 for t
 #
 # silent: worker-04's agent is there at T0 (its sample 30 s old) and exports
 # nothing for the whole window. RED before: `UNPINNED verdict=PASS increase=0
-# series=12 nodes=4`, VERDICT unpinned=PASS, exit 0 -- a pass on four nodes of five.
+# series=12 nodes=4` (three reasons per agent then), VERDICT unpinned=PASS, exit 0
+# -- a pass on four nodes of five.
 G="$TMP/grade-silent.log"
 run_grade silent "$G" --dir "$GD" --prometheus http://prom.example:9090
 show "prober-grade: an agent that exports nothing for the whole window" "$G"
 if [ "$grc" -eq 2 ]; then pass "grade silent: exit 2, not a pass on the nodes that did report"; else fail "grade silent: exit $grc, want 2"; fi
-expect "$G" "grade silent: the node and job are named, with the age of its sample at the start" '^UNPINNED silent: node=worker-04 job=aether-agent series=3 last_sample=2026-10-08T00:09:30Z  \(alive at the start, its sample there 30 s old, and no sample in the window from this node and job: its counter was not seen\)$' 1
-expect "$G" "grade silent: UNPROVEN, and the sum it does have is still printed" '^UNPINNED verdict=UNPROVEN increase=0 series=12 nodes=4 resets=0  \(no sample in the window from worker-04: the sum is over the nodes that reported, not the fleet\)$' 1
+expect "$G" "grade silent: the node and job are named, with the age of its sample at the start" '^UNPINNED silent: node=worker-04 job=aether-agent series=4 last_sample=2026-10-08T00:09:30Z  \(alive at the start, its sample there 30 s old, and no sample in the window from this node and job: its counter was not seen\)$' 1
+expect "$G" "grade silent: UNPROVEN, and the sum it does have is still printed" '^UNPINNED verdict=UNPROVEN increase=0 series=16 nodes=4 resets=0  \(no sample in the window from worker-04: the sum is over the nodes that reported, not the fleet\)$' 1
 expect "$G" "grade silent: it is one finding, not two (its prober reports, but the node is already named)" '^UNPINNED missing: ' 0
 expect "$G" "grade silent: the prober grade is not touched" '^PROBER  verdict=PASS non_success=0 liveness_non_success=0 dns_class_non_success=0 success=7200000 series=10 born_in_window=0 resets=0$' 1
 expect "$G" "grade silent: verdict" '^VERDICT prober=PASS unpinned=UNPROVEN logs=not-checked$' 1
@@ -2035,7 +2037,7 @@ mkdir -p "$TMP/grade-silent-moved"
 cp "$GF/reset/"*.json "$TMP/grade-silent-moved/"
 jq -c '.data.result |= map(select(.metric.node != "worker-04"))' "$GF/reset/unpinned.window.json" >"$TMP/grade-silent-moved/unpinned.window.json"
 GF="$TMP" run_grade grade-silent-moved "$G" --dir "$GD" --prometheus http://prom.example:9090
-expect "$G" "grade silent + moved: UNPROVEN, and it says the counter moved" '^UNPINNED verdict=UNPROVEN increase=2 series=7 nodes=4 resets=0  \(no sample in the window from worker-04: the sum is over the nodes that reported, not the fleet; and the counter moved on those\)$' 1
+expect "$G" "grade silent + moved: UNPROVEN, and it says the counter moved" '^UNPINNED verdict=UNPROVEN increase=2 series=8 nodes=4 resets=0  \(no sample in the window from worker-04: the sum is over the nodes that reported, not the fleet; and the counter moved on those\)$' 1
 expect "$G" "grade silent + moved: what moved is still listed" '^UNPINNED reason=trust_domain_unknown count=2 nodes=worker-03$' 1
 if [ "$grc" -eq 2 ]; then pass "grade silent + moved: exit 2"; else fail "grade silent + moved: exit $grc, want 2"; fi
 
@@ -2048,7 +2050,7 @@ run_grade missing "$G" --dir "$GD" --prometheus http://prom.example:9090
 show "prober-grade: a node whose prober reports and whose agent never does" "$G"
 if [ "$grc" -eq 2 ]; then pass "grade missing: exit 2"; else fail "grade missing: exit $grc, want 2"; fi
 expect "$G" "grade missing: the node is named, from the prober's series" '^UNPINNED missing: node=worker-04  \(a prober on this node has samples in the window and the counter has none from it: its agent was not seen\)$' 1
-expect "$G" "grade missing: UNPROVEN" '^UNPINNED verdict=UNPROVEN increase=0 series=12 nodes=4 resets=0  \(no sample in the window from worker-04: ' 1
+expect "$G" "grade missing: UNPROVEN" '^UNPINNED verdict=UNPROVEN increase=0 series=16 nodes=4 resets=0  \(no sample in the window from worker-04: ' 1
 expect "$G" "grade missing: verdict" '^VERDICT prober=PASS unpinned=UNPROVEN logs=not-checked$' 1
 
 # replaced: pods replaced shortly BEFORE T0. The query at T0 still returns the
@@ -2074,10 +2076,10 @@ expect "$G" "grade replaced: it is not GONE" '^GONE ' 0
 expect "$G" "grade replaced: ... and not in the pod set: four at the start, its replacement new" '^PODS    at_start=4 at_end=5 gone=0 new=1 nodes=5$' 1
 expect "$G" "grade replaced: the replacement is counted from 0, whole" '^TOTAL   tier=(liveness|mesh_dns) result=success count=3600000 rate=125/s series=5$' 2
 expect "$G" "grade replaced: an agent replaced before T0, old (worker-05) or fresh (worker-04), is no silent node: its node and job report" '^UNPINNED (silent|missing): ' 0
-expect "$G" "grade replaced: per node, the replacement's three series, born in the window" '^UNPINNED node=worker-0[45] count=0 series=3 born_in_window=3 resets=0$' 2
-expect "$G" "grade replaced: a node that left before the window is said, and is not a verdict" '^UNPINNED ended: node=worker-06 job=aether-agent series=3 last_sample=2026-10-08T00:06:40Z  \(the query at the start still returned it, with a sample 200 s old: more than 120 s, so it had stopped before the window and is not in it\)$' 1
+expect "$G" "grade replaced: per node, the replacement's four series, born in the window" '^UNPINNED node=worker-0[45] count=0 series=4 born_in_window=4 resets=0$' 2
+expect "$G" "grade replaced: a node that left before the window is said, and is not a verdict" '^UNPINNED ended: node=worker-06 job=aether-agent series=4 last_sample=2026-10-08T00:06:40Z  \(the query at the start still returned it, with a sample 200 s old: more than 120 s, so it had stopped before the window and is not in it\)$' 1
 expect "$G" "grade replaced: only that one" '^UNPINNED ended: ' 1
-expect "$G" "grade replaced: the unpinned verdict" '^UNPINNED verdict=PASS increase=0 series=15 nodes=5 resets=0$' 1
+expect "$G" "grade replaced: the unpinned verdict" '^UNPINNED verdict=PASS increase=0 series=20 nodes=5 resets=0$' 1
 
 # gone: prober-e (worker-05) is alive at T0 (its sample 20 s old) and deleted
 # right after it, before it exports again; prober-f replaces it. RED before:

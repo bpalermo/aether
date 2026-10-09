@@ -1,0 +1,276 @@
+# promtool unit tests for agent-pin-alerts.yml:
+#
+#   promtool test rules docs/observability/agent-pin-alerts_test.yml
+#
+# This repository has no promtool in its build, so CI does not run this file
+# here; run it by hand after changing a rule, and copy it next to wherever the
+# rules are deployed from. Passes with promtool 3.5.0.
+#
+# The agent pushes its gauges every 60 s, so every series below has one sample a
+# minute. `_` is a missing sample; a series that is not listed does not exist.
+
+rule_files:
+  - agent-pin-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # A healthy node: TLS clusters published, all pinned, every unpinned series a
+  # written zero; the proxy acknowledged the same.
+  - name: healthy node is quiet
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="pinned"}'
+        values: '12x40'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="trust_domain_unknown"}'
+        values: '0x40'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="tls_not_published"}'
+        values: '0x40'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0x40'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="pin_not_rendered"}'
+        values: '0x40'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="pinned"}'
+        values: '12x40'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+
+  # The validation gap: two clusters published with TLS and no pin. Quiet for
+  # two samples, critical at the third minute, per node and reason. The other
+  # node, healthy, is not named.
+  - name: no_namespace_metadata is critical after three minutes
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '2x20'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n2", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-agent
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "2 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "aether-agent on n1 publishes 2 mesh cluster entries whose upstream TLS context carries no match_typed_subject_alt_names, reason no_namespace_metadata. Their handshake proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 20m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+
+  # An agent start, drawn longer than any measured one: for two exports the
+  # trust domain is unknown (nine entries), then for two more the agent has no
+  # SVID and three entries with no namespace are tls_not_published, then the
+  # SVID arrives and those three are the validation gap. The transient reasons
+  # never alert; the gap does, three minutes after TLS was first published.
+  - name: an agent start does not alert, and the gap behind it does
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="trust_domain_unknown"}'
+        values: '9 9 0x30'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="tls_not_published"}'
+        values: '0 0 3 3 0x28'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0 0 0 0 3x28'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="pinned"}'
+        values: '0 0 0 0 6x28'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-agent
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "3 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "aether-agent on n1 publishes 3 mesh cluster entries whose upstream TLS context carries no match_typed_subject_alt_names, reason no_namespace_metadata. Their handshake proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+
+  # An agent that never gets its SVID: the state lasts, and at five minutes it
+  # is a warning. Never critical: no TLS is published, so no gap is served.
+  - name: an agent stuck without its SVID warns at five minutes
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="tls_not_published"}'
+        values: '3x30'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-agent
+              node: n1
+              reason: tls_not_published
+            exp_annotations:
+              summary: "aether-agent on n1 has 3 mesh cluster entr(ies) for which no TLS cluster is published, for 5m (tls_not_published)"
+              description: "3 mesh cluster entries on n1 have no server-identity pin for reason tls_not_published, a state in which the agent publishes them with no TLS at all. It is expected for a moment when an agent starts and has now lasted 5 minutes. trust_domain_unknown: the agent has not learned its trust domain. tls_not_published: the agent has no SVID of its own, or the clusters are TCP floors that are not published (`tcp:` names in the agent's WARN line). Check the agent's identity readiness and its SPIRE Workload API socket first. tls_not_published entries have endpoints with no namespace metadata and become AetherMeshClusterUnpinned the moment TLS is published for them. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 30m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+
+  # #1483: an agent restarted against a proxy that is already in sync. It is
+  # owed no cluster response, so the acknowledged gauge has NO series. The
+  # divergence rule must not read absence as anything, whatever is published.
+  - name: an absent acknowledged gauge never fires the divergence rule
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="pinned"}'
+        values: '12x40'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0x40'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n2", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '2x40'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+
+  # The proxy rejects the update that pins two clusters: the agent publishes
+  # zero unpinned from minute 5, the acknowledged gauge stays on two. Quiet for
+  # fifteen minutes, then a warning. The published gauge is clean, so the
+  # critical rule is not the one that speaks.
+  - name: a proxy that keeps unpinned clusters the agent has pinned
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '2 2 0x40'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="trust_domain_unknown"}'
+        values: '0x42'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '2x42'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="trust_domain_unknown"}'
+        values: '0x42'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-agent
+              node: n1
+            exp_annotations:
+              summary: "the proxy on n1 last acknowledged 2 unpinned mesh cluster(s) that aether-agent no longer publishes"
+              description: "The last cluster update the proxy on n1 acknowledged had 2 more mesh cluster entries without a server-identity pin, counted reason by reason, than the agent's current snapshot. The proxy has not accepted the newer clusters for 15 minutes. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error), and `proxy acknowledged mesh clusters with no server-identity SAN pin` for the per-reason counts. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
+      - eval_time: 30m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+
+  # A cluster changes reason and the proxy rejects the update: an unpinned TCP
+  # floor is removed, so the agent publishes one tls_not_published entry where
+  # it published one no_namespace_metadata entry, and the proxy still holds the
+  # old one. One unpinned entry on each side: only a per-reason comparison
+  # sees it.
+  - name: a rejected update that moves a cluster to another reason
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '1 1 0x40'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="tls_not_published"}'
+        values: '0 0 1x40'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '1x42'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="tls_not_published"}'
+        values: '0x42'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-agent
+              node: n1
+            exp_annotations:
+              summary: "the proxy on n1 last acknowledged 1 unpinned mesh cluster(s) that aether-agent no longer publishes"
+              description: "The last cluster update the proxy on n1 acknowledged had 1 more mesh cluster entries without a server-identity pin, counted reason by reason, than the agent's current snapshot. The proxy has not accepted the newer clusters for 15 minutes. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error), and `proxy acknowledged mesh clusters with no server-identity SAN pin` for the per-reason counts. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
+
+  # The other direction is not a divergence alert: the agent publishes two
+  # unpinned clusters and the proxy acknowledges them a minute later, or never.
+  # The published gauge already alerts for those.
+  - name: published above acknowledged is not the divergence rule's
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0 0 2x40'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0x42'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+
+  # An agent that stops reporting while it had unpinned clusters: its last
+  # samples go stale and the alert resolves. These rules do not cover a silent
+  # agent; the per-node absence rule in agent-cni-alerts.yml does.
+  - name: a silent agent is not this file's alert
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '2 2 2 2 2 2 _x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-agent
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "2 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "aether-agent on n1 publishes 2 mesh cluster entries whose upstream TLS context carries no match_typed_subject_alt_names, reason no_namespace_metadata. Their handshake proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 20m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
