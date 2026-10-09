@@ -1124,11 +1124,22 @@ reference is written `<name>:<tag>@sha256:…`: the digest is what a node or
 `docker run` pulls, the tag is there for the reader. A few older references are
 `<name>@sha256:…`, with the tag recorded only in the list.
 
+The **base images** of what this repository builds are on the same list
+(#1477): `gcr.io/distroless/static-debian13` under every Go image, pulled by
+`MODULE.bazel`, and `gcr.io/distroless/cc-debian12` under the proxy image,
+pulled by `proxy/MODULE.bazel`. Starlark does not write them as one reference,
+so `check` reads exactly two constructs in those two files, the rules_img
+`pull(registry =, repository =, tag =, digest =)` and the rules_oci
+`oci.pull(image =, digest =)`, and puts each together as a reference. It is a
+line reader for the shape buildifier writes and it fails closed: a pull written
+on one line, an attribute that is not a plain string, or a pull rule bound
+under a spelling it does not know is a finding.
+
 `scripts/third-party-images.sh` has four commands:
 
 | Command | Network | What it does |
 | --- | --- | --- |
-| `check` | no | The gate (CI's `shell` job). Fails on an image named by tag only or with no tag, on a digest the list does not have for that name, on a tag that disagrees with the list, and on a pin or an exception nothing uses any more |
+| `check` | no | The gate (CI's `shell` job). Fails on an image named by tag only or with no tag, on a digest the list does not have for that name, on a tag that disagrees with the list, on a pin or an exception nothing uses any more, and on a base-image pull in a Bazel module file that it cannot read |
 | `list` | no | Every pin, with the files and lines that use it |
 | `outdated [--newer-tags] [<name>...]` | yes | Asks each pin's registry what its tag points at now: `current`, `MOVED` (the tag was re-pushed; the new digest is printed), `NOT-MULTI-ARCH` (the pinned index itself lacks `linux/amd64` or `linux/arm64`; counted as behind) or `ERROR` (no answer; never reported as current). `--newer-tags` adds the registry's tags that have the pinned tag's shape and sort after it. Exit 0 all current, 1 a pin is behind, 2 a pin could not be checked |
 | `resolve <name>:<tag>...` | yes | Prints the `pin` line for a tag, and says so when its index lacks `linux/amd64` or `linux/arm64` |
@@ -1140,9 +1151,35 @@ answers `ERROR`, not `current`.
 
 **Nothing moves a pin by itself.** There is no bot: Dependabot opens no pull
 requests here, because they run without the repository's secrets and could
-never pass CI. Run `scripts/third-party-images.sh outdated --newer-tags` in the
-same pass that bumps the Bazel, Go and Actions pins, and whenever an image's
-advisory says a tag was rebuilt.
+never pass CI. What there is, is a daily look (#1478):
+`.github/workflows/third-party-images.yaml` runs `outdated` at 05:43 UTC
+through `scripts/third-party-images-report.sh` and keeps one rolling issue,
+**CI: third-party image pins are behind their tags**.
+
+| `outdated` said | What the run does |
+| --- | --- |
+| a pin is `MOVED` or `NOT-MULTI-ARCH` | Opens the issue, or rewrites the open one so it says where the tags point now. It adds a comment only when the set of pins behind changed |
+| every pin `current` | Comments on the open issue and closes it |
+| a pin is `ERROR` (the registry did not answer) | A warning on the run. That run does not know the whole set, so it neither closes nor rewrites an open issue; with none open, the pins it did find behind open one |
+
+The run is green in all three cases: a pin that is behind still pulls the
+digest it names, and the workflow is not a required check. It fails only when
+the check itself is broken (`outdated` died, or `gh` did). The issue reports
+tags that were pushed again. It does not report a newer version (`8.23.0`
+next to a pinned `8.22.0`): for those, run
+`scripts/third-party-images.sh outdated --newer-tags` in the same pass that
+bumps the Bazel, Go and Actions pins.
+
+The issue is opened with the `enhancement` and `ci` labels; if one of them is
+deleted the run fails instead of filing an unlabelled issue. Only an issue the
+workflow itself opened counts as the rolling one: an issue someone else files
+under the same title is never rewritten or closed, and the report opens its
+own next to it.
+
+To see what it would write without writing it, dispatch a dry run:
+`gh workflow run third-party-images.yaml`. A dispatch is a dry run unless you
+pass `-f dry_run=false` on `main`. A pull request that touches the scripts or
+the list runs the same dry run, in a job without `issues: write`.
 
 To move a pin (or add an image):
 
@@ -1163,6 +1200,13 @@ What a moved pin obliges:
   rolls the proxy DaemonSet on every node where the OPA preset is on;
   `charts/udsecho`'s `client.image` and `charts/prober`'s `authzCanary.image`
   each roll one single-replica Deployment.
+- The two distroless base pins move in the module file and the list together:
+  `digest` in the `pull` of `MODULE.bazel`, or in the `oci.pull` of
+  `proxy/MODULE.bazel`, and the `pin` line. distroless rebuilds `nonroot` in
+  place, so the issue lists them whenever the base was patched. A new base
+  digest changes the digest of every image built on it: the `MODULE.bazel` one
+  is a release of every Go image, and the `proxy/MODULE.bazel` one is a proxy
+  build (`proxy.yml`) and a proxy release.
 - The two etcd pins (`quay.io/coreos/etcd` for the kind harnesses,
   `gcr.io/etcd-development/etcd` for the testcontainers tests) move together,
   and stay on the minor line of the Go client in `go.mod` (#1223).
@@ -6294,25 +6338,37 @@ sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
 sum by (job, node) (increase(aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.cluster.v3.Cluster"}[1h]))
 ```
 
-**The soak gate (#1423, #1491).** The soak's grader (`prober-grade.sh`, part of
-an external soak harness, maintained outside this repository) grades the counter over a
-soak's window, per `reason`, with the same split as the alert rules. The two reasons of
-the validation gap (`no_namespace_metadata`, `pin_not_rendered`) fail it on any
-movement, and on any non-zero sample of the published gauge. The two under which no TLS
-is published (`trust_domain_unknown`, `tls_not_published`) are expected at an agent
-start, and a soak rolls the agents on purpose: they are reported with their count and
-nodes, and fail only when the published gauge shows the state for 300 s or more of
-consecutive samples (the `for: 5m` of `AetherMeshClusterPinPending`), per node, job and
-reason over every series of them, as that rule's `sum by` is. A standing
-`tls_not_published` that is the cluster's design (no SPIRE, or an unpublished TCP floor)
-fails by default too; `--expect-tls-not-published` declares it expected, and it is then
-reported with its duration and not failed. The counter cannot
-make that call: it grows by entries times snapshots, not by time. A `reason` the script
-does not know fails the same way a gap reason does, and so does any movement of a series with no `reason` label (an
-agent before #1424, where the two kinds cannot be told apart). An agent that has the
-label and whose own gauge does not reach Prometheus (a replaced pod is not covered by
-the one before it) makes the gate `UNPROVEN`, not a pass.
-The lines and the table are in that harness's README, "Grading".
+**Grading a soak on these series (#1423, #1491).** A soak is run and graded by an
+external soak harness, maintained outside this repository. What such a harness reads is
+written down in [the external-harness contract](#the-external-harness-contract): the
+counter (`agent.identity_cluster_unpinned`), the published and the acknowledged gauge
+(`agent.snapshot_tls_clusters`, `agent.xds_acked_tls_clusters`), the closed `reason` set,
+and the split of the reasons the alert rules use (`agent.unpinned_reason_classes`: `gap`
+and `no_tls`). The grading procedure is the harness's own: its thresholds, its flags,
+its verdicts and the lines it prints are documented with it, and nothing in this
+repository defines or tests them. What holds for any grader, because it is how the
+product behaves:
+
+- **The two `gap` reasons** (`no_namespace_metadata`, `pin_not_rendered`) are the
+  validation gap: a TLS cluster that checks no server identity. Any movement of the
+  counter, and any non-zero sample of the published gauge, is that state.
+- **The two `no_tls` reasons** (`trust_domain_unknown`, `tls_not_published`) are expected
+  at an agent start, and a soak rolls the agents on purpose. What tells a start from a
+  standing state is how long the published gauge shows it, per node, job and reason
+  over every series of them (the `sum by` and the `for: 5m` of
+  `AetherMeshClusterPinPending`). The counter cannot make that call: it grows by entries
+  times snapshots, not by time.
+- **A standing `tls_not_published` can be a cluster's design** (no SPIRE, or an
+  unpublished TCP floor). Whether that is expected is a statement about the cluster, so
+  a grader has to be told. The series cannot say.
+- **A series of the counter with no `reason` label** is from an agent before #1424,
+  where the two kinds cannot be told apart. That holds for the counter only
+  (`agent.identity_cluster_unpinned`), whose every series carries `reason`. On the two
+  gauges `reason` is on the `pin="unpinned"` series alone (the contract's `when`), so a
+  `pin="pinned"` series without it is the healthy shape, from any agent.
+- **A gauge that does not reach the store is not a zero.** A replaced pod is not covered
+  by the one before it, so an agent that has the label and whose own gauge is absent has
+  proven nothing (see **Absent is "not known", not zero** above).
 
 **The NACK counters (#1480).** `aether_agent_xds_nacks_total` counts the delta responses
 a proxy rejected, by `aether_xds_type_url`; `aether_agent_xds_ack_wait_failures_total`

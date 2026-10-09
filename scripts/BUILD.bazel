@@ -46,7 +46,10 @@ sh_test(
 # registries, and that no call ever carries a credential. Hermetic: the
 # Bazel-pinned jq, no network. The real tree is checked by the `shell` job of
 # .github/workflows/ci.yaml (`scripts/third-party-images.sh check`), which
-# needs the git checkout this test does not have.
+# needs the git checkout this test does not have. The base-image pulls of the
+# Bazel module files (#1477) are read from fixture MODULE.bazel files here, for
+# the same reason. The report script is data for the seam: its dry run over the
+# real `outdated` and the fake registry.
 sh_test(
     name = "third_party_images_test",
     size = "small",
@@ -54,6 +57,25 @@ sh_test(
     data = [
         "third-party-images.sh",
         "third-party-images.txt",
+        "third-party-images-report.sh",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
+# The scheduled refresh check (.github/workflows/third-party-images.yaml,
+# #1478): scripts/third-party-images-report.sh over a fake `outdated` and a
+# fake `gh` that keeps the rolling issue. What each answer writes and does not
+# write, that a registry error never closes or rewrites the issue and never
+# fails the run, that a check which is itself broken exits 2, and that only an
+# issue the workflow itself opened counts as the rolling one (the fake `gh`
+# runs the script's own `--jq` filter, hence the Bazel-pinned jq).
+sh_test(
+    name = "third_party_images_report_test",
+    size = "small",
+    srcs = ["third_party_images_report_test.sh"],
+    data = [
+        "third-party-images-report.sh",
         "@jq_toolchains//:resolved_toolchain",
     ],
     env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
