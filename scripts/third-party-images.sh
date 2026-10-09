@@ -166,30 +166,43 @@ is_skipped() {
 # Two nets, because no single pattern knows every way an image is named:
 #   1. the value after an `image` key or flag, in any of the spellings in use:
 #      YAML `image: x` (a block key, a list item, with a trailing comment, in
-#      a flow mapping `[{name: p, image: x}]`, as a block scalar `image: >-`
-#      with the value on the next line, behind an anchor or a tag
-#      `image: &a x`; an alias `image: *a` is refused, since its value is
-#      written where the scan cannot follow), JSON `"image": "x"` (also inside a
-#      `--overrides='{...}'` string), `--image=x` / `--image x`, a shell
+#      a flow mapping `[{name: p, image: x}]`, also one broken across lines,
+#      as a block scalar `image: >-` with the value on the next line, behind an
+#      anchor or a tag `image: &a x`; an alias `image: *a` is refused, since
+#      its value is written where the scan cannot follow), JSON `"image": "x"`
+#      (also inside a shell string, `--overrides='{"image":"x"}'` or
+#      `--overrides="{\"image\":\"x\"}"`), `--image=x` / `--image x`, a shell
 #      `FOO_IMAGE="x"` or `FOO_IMAGE="${FOO_IMAGE:-x}"`, Go `Image: "x"` and
 #      `Image = "x"`;
 #   2. any `<name>:<tag>` of a name the inventory already knows, wherever it
 #      stands, so a known image cannot come back by tag (or under a computed
 #      tag, `name:$TAG`) behind a key net 1 does not read.
-# Comment lines are not read: a comment may name the tag. A value that is not a
-# literal (`$VAR`, `{{ .Values.x }}`, a Bazel `{@//label}` stamp) is somebody
-# else's value and is judged where it is written down.
+# Comments are not read, neither a comment line nor the comment that ends a
+# line of code (` # ...`; ` // ...` in Go and JavaScript): a comment may name
+# the tag, and a pin that only a comment still names is used by nothing. A `#`
+# or `//` inside quotes, or with no white space before it (`${var#prefix}`, a
+# URL), is not a comment. A value that is not a literal (`$VAR`,
+# `{{ .Values.x }}`, a Bazel `{@//label}` stamp) is somebody else's value and is
+# judged where it is written down.
+#
+# The scan is line by line and not a YAML parser, so in a YAML file (`*.yaml`,
+# `*.yml`) it fails closed: an `image:` that follows a `{`, `[` or `,` outside
+# quotes is read as a flow-mapping key whether or not the `{` is on that line.
+# The price: a YAML line that is no flow mapping and still reads
+# `..., image: word` outside quotes is a finding; quote the text.
 #
 # What this cannot see: an image no pin names yet, written where no `image` key
 # or flag introduces it (a positional `docker run <image>`, a list of bare
 # names). Give such a reference a `*_IMAGE` variable, as e2e/etcd-image.sh does.
-# Also not read, on purpose, because the scan is line by line and not a YAML
-# parser:
-#   - a flow mapping broken across lines with `image:` not first on its line
-#     and its `{` on an earlier one (`{name: p,` / `  other: 1, image: x}`):
-#     an unquoted `image:` in mid-line with no `{` before it on the same line
-#     is how prose reads ("3 node(s) but 2 image: line(s)"), and reading it
-#     brings those back as findings;
+# Also not read, on purpose:
+#   - YAML embedded in another language (a here-document in a shell script, a
+#     Go raw string) when it holds a flow mapping broken across lines, with an
+#     unquoted `image:` value that is not first on its line and whose `{` is on
+#     an earlier one. There an unquoted `image:` in mid-line with no `{` before
+#     it on the same line is how prose reads ("3 node(s) but 2 image: line(s)"),
+#     and reading it brings those back as findings. A quoted value is read;
+#   - a comment that follows a quote left open on its line (an apostrophe in a
+#     here-document's text): the line is read whole, comment included;
 #   - a block scalar whose value is folded over several lines, or whose first
 #     line is a comment-looking `#` line: only the first non-blank line after
 #     `image: >-` / `image: |` is taken;
@@ -223,7 +236,41 @@ extract_references() { # <names file>; file list on stdin
 			if (ref !~ /^[a-z0-9][a-z0-9._\/-]*(:[0-9]+\/[a-z0-9._\/-]+)?(:[A-Za-z0-9_][A-Za-z0-9._-]*)?(@[^${]*)?$/) return 0
 			return ref !~ /^(0|1|true|false|yes|no)$/
 		}
-		FNR == 1 { block = 0 }
+		# Where the comment that ends line s begins (0: it has none), and, in
+		# OPEN_QUOTE, the quote s ends inside of ("" for none). A comment opens
+		# with `#` (`//` when slash_comments) after white space and outside
+		# quotes; a backslash takes the next character with it, so `\"` closes
+		# nothing. Quotes are not followed across lines: one left open hides a
+		# comment on its own line only, and that line then stays read in full.
+		function comment_start(s, slash_comments,    i, n, c, q, prev) {
+			n = length(s)
+			q = ""
+			prev = ""
+			OPEN_QUOTE = ""
+			for (i = 1; i <= n; i++) {
+				c = substr(s, i, 1)
+				if (c == "\\" && q != "\047" && q != "`") {
+					i++
+					prev = c
+					continue
+				}
+				if (q != "") {
+					if (c == q) q = ""
+				} else if (c == "\"" || c == "\047" || (slash_comments && c == "`")) {
+					q = c
+				} else if (prev ~ /[ \t]/ && (slash_comments ? substr(s, i, 2) == "//" : c == "#")) {
+					return i
+				}
+				prev = c
+			}
+			OPEN_QUOTE = q
+			return 0
+		}
+		FNR == 1 {
+			block = 0
+			yaml = (FILENAME ~ /\.ya?ml$/)
+			slash_comments = (FILENAME ~ /\.(go|js)$/)
+		}
 		# The line after `image: >-` / `image: |` is the value (a block scalar).
 		block && !/^[ \t]*$/ {
 			block = 0
@@ -233,7 +280,12 @@ extract_references() { # <names file>; file list on stdin
 		}
 		/^[ \t]*(#|\/\/)/ { next }
 		{
-			rest = $0
+			code = $0
+			if ((i = comment_start(code, slash_comments)) > 0) code = substr(code, 1, i - 1)
+			# JSON inside a double-quoted shell argument writes every quote as
+			# `\"` (`--overrides="{\"image\":\"x\"}"`): read as the JSON it is.
+			if (!yaml) gsub(/\\"/, "\"", code)
+			rest = code
 			before_key = ""
 			at_start = 1
 			while (match(rest, /([Ii][Mm][Aa][Gg][Ee]["\047]?[ \t]*[:=][ \t]*|--image[ \t]+)/)) {
@@ -246,6 +298,15 @@ extract_references() { # <names file>; file list on stdin
 				# ...or stands in a flow mapping: after its `{` or a `,`, inside
 				# braces opened on this line (`containers: [{name: p, image: x}]`).
 				in_flow = (before_key ~ /\{/ && before_key ~ /[{,][ \t]*["\047]?$/)
+				# In a YAML file the `{` may be on an earlier line, and a flow
+				# sequence takes a single pair (`[image: x]`): fail closed, any
+				# key that follows `{`, `[` or `,` outside quotes is a flow key.
+				if (!in_flow && yaml && before_key ~ /[{[,][ \t]*["\047]?$/) {
+					outside = before_key
+					sub(/["\047]$/, "", outside)
+					comment_start(outside, 0)
+					in_flow = (OPEN_QUOTE == "")
+				}
 				before_key = before_key key
 				at_start = 0
 				if (key ~ /:[ \t]*$/ && key_opens_line && rest ~ /^[>|][-+0-9]*[ \t]*(#.*)?$/) {
@@ -266,7 +327,7 @@ extract_references() { # <names file>; file list on stdin
 				}
 				quoted = sub(/^["\047]/, "", ref)
 				sub(/^\$\{[A-Za-z_][A-Za-z0-9_]*:-/, "", ref)
-				if (!match(ref, /^[^ \t"\047}),;]+/)) continue
+				if (!match(ref, /^[^] \t"\047}),;]+/)) continue
 				ref = substr(ref, 1, RLENGTH)
 				# `image:` anywhere else in a line is prose ("no image: line") unless
 				# a quoted value follows (Go: `{Name: "a", Image: "b"}`).
@@ -284,7 +345,7 @@ extract_references() { # <names file>; file list on stdin
 				}
 			}
 			for (n in names) {
-				rest = $0
+				rest = code
 				while ((i = index(rest, n ":")) > 0) {
 					before = (i > 1) ? substr(rest, i - 1, 1) : ""
 					if (i > 2 && substr(rest, i - 2, 2) == ":-") before = ""  # ${VAR:-name:tag}

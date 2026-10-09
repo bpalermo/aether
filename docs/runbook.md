@@ -997,12 +997,24 @@ What a moved pin obliges:
 
 An exception is an `allow <path> <reference>` or `skip <path prefix>` line in
 the list, with its reason beside it. An `allow` or `skip` that matches nothing any more
-fails `check`.
+fails `check`. There is none of the first kind today: the retired k6 runner
+(`e2e/soak/k6-runner.yaml`) is pinned as `grafana/k6:latest@sha256:…`, so
+`outdated` reports it `MOVED` at every k6 release, and it is moved only on
+purpose.
+
+`check` does not read comments, whether a comment line or the comment that
+ends a line of code: a pin that only a comment still names is reported as
+unused. In a YAML file it fails closed on flow mappings: an `image:` that
+follows `{`, `[` or `,` outside quotes is read as a key, so a line of prose
+written that way must be quoted.
 
 What `check` cannot see: an image no pin names yet, written where no `image`
 key, `--image` flag or `*_IMAGE` variable introduces it (a positional
 `docker run <image>`). Give such a reference a `*_IMAGE` variable, as
-`e2e/etcd-image.sh` does. It also reads only `charts/`, `e2e/`, `test/` and
+`e2e/etcd-image.sh` does. Nor does it see an unquoted `image:` value in the
+middle of a line of a multi-line flow mapping when that YAML is embedded in a
+shell here-document or a Go string (the header of the script has the list). It
+also reads only `charts/`, `e2e/`, `test/` and
 `registry/etcdtest/`; the images the Bazel image rules pull (`MODULE.bazel`)
 are pinned there by digest and are not in the list.
 

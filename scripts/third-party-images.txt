@@ -65,6 +65,15 @@ pin gcr.io/etcd-development/etcd v3.7.2 sha256:7c6c239825d00e3f6328a69caafd54be9
 # Kubernetes version"): a node image is built for one kind release.
 pin kindest/node v1.35.8 sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
 
+# The k6 runner (e2e/soak/k6-runner.yaml), the soak's retired load driver
+# (proposal 042, phase 4). No script applies it any more; e2e/soak/README.md
+# still documents applying it by hand for a side-by-side run. The manifest never
+# named a k6 version, so the pin keeps its `latest` tag and fixes the index the
+# tag pointed at on 2026-10-09: a side-by-side run now compares against one
+# known k6. `outdated` reports MOVED at every k6 release; that is expected, and
+# the pin is moved only on purpose. The line goes away with the file.
+pin grafana/k6 latest sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603
+
 # --- exceptions ----------------------------------------------------------------
 #
 #   allow <path> <reference>    this reference, in this file, may stay as it is
@@ -72,13 +81,8 @@ pin kindest/node v1.35.8 sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22
 #
 # Each needs its reason next to it. An `allow` or `skip` that matches nothing any more
 # fails the check, so an exception cannot outlive what it excused. `outdated`
-# prints what an allowed tag points at.
-
-# The k6 runner is the soak's retired load driver (proposal 042, phase 4), kept
-# only for a side-by-side run until the file is deleted. It never named a k6
-# version, and choosing one here would change what a side-by-side run compares
-# against; the line goes away with the file.
-allow e2e/soak/k6-runner.yaml grafana/k6:latest
+# prints what an allowed tag points at. There is no `allow` today: every image
+# the tree names is pinned.
 
 # Canned `kubectl get -o json` answers for //e2e/soak:harness_test (pods whose
 # image is "x"). Fixtures a hermetic test reads; nothing in them is started.

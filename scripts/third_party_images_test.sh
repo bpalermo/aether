@@ -239,9 +239,60 @@ mutate "YAML anchor in a flow mapping" e2e/sub/pod.yaml '  containers: [{name: p
 mutate "YAML alias as the image" e2e/sub/pod.yaml '    image: *probe' \
 	"e2e/sub/pod.yaml:1: *probe names no tag and no digest"
 
+# Second review of #1476. JSON inside a DOUBLE-quoted shell argument: every
+# quote of it is written `\"`.
+mutate "JSON in a double-quoted kubectl --overrides string" e2e/run.sh 'kubectl run r --overrides="{\"spec\":{\"containers\":[{\"name\":\"r\",\"image\":\"x/y:latest\"}]}}"' \
+	"e2e/run.sh:12: x/y:latest is pinned by tag only"
+# A flow mapping broken across lines: in a YAML file a key that follows `{`,
+# `[` or `,` is a flow key wherever the brace was opened.
+mutate "YAML flow mapping broken across lines" e2e/sub/pod.yaml $'  containers: [{name: probe,\n    command: [sleep], image: new/tool:latest}]' \
+	"e2e/sub/pod.yaml:2: new/tool:latest is pinned by tag only"
+mutate "YAML flow mapping broken across lines, quoted key" e2e/sub/pod.yml $'  containers: [{name: probe,\n    command: [sleep], "image": new/tool:latest}]' \
+	"e2e/sub/pod.yml:2: new/tool:latest is pinned by tag only"
+mutate "YAML single-pair mapping in a flow sequence" e2e/sub/pod.yaml '  containers: [image: new/tool:latest]' \
+	"e2e/sub/pod.yaml:1: new/tool:latest is pinned by tag only"
+# A `#` is a comment only after white space and outside quotes: what follows a
+# quoted one, a `${var#pattern}` or a URL fragment is still read.
+mutate "a known image after a quoted #" e2e/run.sh 'echo "step # 1" && docker run --rm a/b:1.0 true' \
+	"e2e/run.sh:12: a/b:1.0 is pinned by tag only"
+mutate "a known image after a single-quoted #" e2e/run.sh "echo 'step # 1' && docker run --rm a/b:1.0 true" \
+	"e2e/run.sh:12: a/b:1.0 is pinned by tag only"
+mutate "a known image after an escaped quote and a #" e2e/run.sh 'echo "a \" # b" && docker run --rm a/b:1.0 true' \
+	"e2e/run.sh:12: a/b:1.0 is pinned by tag only"
+mutate "an image after a \${var#pattern}" e2e/run.sh 'short=${full#docker.io/} C_IMAGE="x/y:1.2"' \
+	"e2e/run.sh:12: x/y:1.2 is pinned by tag only"
+mutate "an image after a URL fragment" e2e/run.sh 'curl -s https://example.test/doc#pins; kubectl run q --image=x/y:1.2' \
+	"e2e/run.sh:12: x/y:1.2 is pinned by tag only"
+mutate "a Go field after a // inside a string" test/e2e/x_test.go 'var f = Container{Name: "see // below", Image: "x/y:1.2"}' \
+	"test/e2e/x_test.go:10: x/y:1.2 is pinned by tag only"
+mutate "a Go field after a URL" test/e2e/x_test.go 'var g = Container{Name: "https://example.test", Image: "x/y:1.2"} // why' \
+	"test/e2e/x_test.go:10: x/y:1.2 is pinned by tag only"
+
+# A pin whose only occurrence is in a trailing comment is used by nothing.
+stale_in_comment() { # <name> <relative file> <line>
+	new_tree "$T"
+	echo "pin x/stale 2 $D9" >>"$T/scripts/third-party-images.txt"
+	mkdir -p "$(dirname "$T/$2")"
+	printf '%s\n' "$3" >>"$T/$2"
+	expect_fail "$1" "$T" "pin x/stale 2 $D9 is used by no file"
+}
+stale_in_comment "a pin named only in a YAML trailing comment" e2e/sub/pod.yaml "note: history # x/stale:2@$D9"
+stale_in_comment "a pin named only in a shell trailing comment" e2e/run.sh "true # was x/stale:2@$D9"
+stale_in_comment "a pin named only after a quoted string and a comment" e2e/run.sh "echo \"it's\" # was x/stale:2@$D9"
+stale_in_comment "a pin named only in a Go trailing comment" test/e2e/x_test.go "var h = 1 // was x/stale:2@$D9"
+# ...and a comment may still name the tag alone, as a comment line may.
+new_tree "$T"
+echo "  - image: a/b:1.0@$D1 # a/b:1.0, was a/b:0.9" >"$T/e2e/sub/pod.yaml"
+run_check "$T"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 5 image reference(s) in "* ]]; then
+	ok "a trailing comment may name a tag"
+else
+	bad "tag in a trailing comment: exit $RC"$'\n'"$OUT"
+fi
+
 # The same spellings pass when pinned and listed, and prose stays prose: an
-# unquoted `image:` in mid-line with no `{` before it, and a block scalar's
-# value that is not an image.
+# `image:` in mid-line inside a quoted string, in a shell script with no `{`
+# before it, and a block scalar's value that is not an image.
 new_tree "$T"
 cat >"$T/e2e/sub/pod.yaml" <<EOF
 spec:
@@ -252,14 +303,22 @@ spec:
         a/b:1.0@$D1
     - image: a/b:1.0@$D1 # the probe
     - image: &anchored a/b:1.0@$D1
-  description: no tag, image: latest is what a reader would write
+  split: [{name: probe,
+    command: [sleep], image: a/b:1.0@$D1}]
+  description: "no tag, image: latest is what a reader would write"
+  other: 'one, image: latest'
+  escaped: "a \" b, image: latest"
   note: {text: "see the image: line", other: 1}
   image: |
     not an image, a paragraph
 EOF
-echo 'err "one, two, image: missing"' >>"$T/e2e/run.sh"
+cat >>"$T/e2e/run.sh" <<'EOF'
+err "one, two, image: missing"
+log "[image: missing], image: gone"
+echo nodes, image: missing
+EOF
 run_check "$T"
-if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 9 image reference(s) in "* ]]; then
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 10 image reference(s) in "* ]]; then
 	ok "flow mappings, block scalars and trailing comments pass when pinned; prose is not read"
 else
 	bad "pinned flow/block spellings: exit $RC"$'\n'"$OUT"
