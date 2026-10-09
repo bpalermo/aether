@@ -15,11 +15,15 @@ go_library(
 go_test(
     name = "cachemetrics_test",
     size = "small",
-    srcs = ["cachemetrics_test.go"],
+    srcs = [
+        "cachemetrics_test.go",
+        "harnesscontract_test.go",
+    ],
     embed = [":cachemetrics"],
     embedsrcs = ["cachemetrics.go"],
     deps = [
         "//common/udspath",
+        "//test/harnesscontract",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],
