@@ -854,7 +854,20 @@ expect "the only script is the one under scripts/" "$(grep -E '^[[:space:]]+run:
 # the triggering run is read, its id; nothing of the run is checked out.
 expect "the expressions, each handed over through env (or the concurrency group)" \
 	"$(grep -F '${{' <<<"$wf" | sed 's/^ *//' | LC_ALL=C sort | tr '\n' '|')" \
-	'DRY_RUN: ${{ github.event_name == '"'workflow_dispatch'"' && inputs.dry_run }}|GH_REPO: ${{ github.repository }}|GH_TOKEN: ${{ github.token }}|RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}|WATCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|group: main-post-merge-watch-${{ github.event.workflow_run.id || inputs.run_id }}|'
+	'DRY_RUN: ${{ github.event_name == '"'workflow_dispatch'"' && inputs.dry_run }}|GH_REPO: ${{ github.repository }}|GH_TOKEN: ${{ github.token }}|RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}|WATCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|group: main-post-merge-watch-${{ github.event.workflow_run.id || inputs.run_id }}${{ github.event_name == '"'workflow_dispatch'"' && inputs.dry_run && format('"'-dry-run-{0}'"', github.run_id) || '"''"' }}|'
+# GitHub keeps ONE pending run per group and cancels the one that was waiting.
+# A manual dry run in the judged run's group could so replace a pending
+# automatic watcher of that run, and a dry run writes nothing: the verdict
+# would be lost. A dry run gets a group of its own (this watcher run's id).
+# Whatever can write stays in the judged run's group, where the run that
+# survives judges the run as it is then, and a second judgment writes nothing.
+group="$(sed -n 's/^  group: //p' <<<"$wf")"
+dry_cond="$(sed -n 's/^          DRY_RUN: \${{ \(.*\) }}$/\1/p' <<<"$wf")"
+expect "the group starts with the judged run, for every event" "${group%%\}\}*}}}" \
+	'main-post-merge-watch-${{ github.event.workflow_run.id || inputs.run_id }}'
+expect "a dry run adds this watcher run's own id to the group; nothing else adds anything" "\${{${group#*\}\}\$\{\{}" \
+	'${{ '"$dry_cond"' && format('"'-dry-run-{0}'"', github.run_id) || '"''"' }}'
+expect "the group's dry-run condition is the one DRY_RUN is set from" "$dry_cond" "github.event_name == 'workflow_dispatch' && inputs.dry_run"
 expect "runs are not cancelled or replaced within the group" "$(grep -c '^  cancel-in-progress: false$' <<<"$wf")" 1
 expect "every action is pinned by a full commit sha, with its version" \
 	"$(grep -E '^[[:space:]]+(- )?uses:' <<<"$wf" | grep -cvE 'uses: [A-Za-z0-9_./-]+@[0-9a-f]{40} # v?[0-9][0-9.]*$')" 0

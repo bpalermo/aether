@@ -640,7 +640,9 @@ To see what it would do with a given run without writing anything:
 gh workflow run main-watch.yaml -f run_id=<id of a main-post-merge run>   # dry_run defaults to true
 ```
 
-The log of that run prints the verdict and the text it would file. With
+The log of that run prints the verdict and the text it would file. A dry run
+has a concurrency group of its own, so it never takes the place of a pending
+watcher of the same run. With
 `-f dry_run=false` it files for real; use that only on a run whose commit you
 then mean to clear or whose issue you will close by hand.
 

@@ -39,6 +39,15 @@ name: main-post-merge-watch
 # still running (GitHub keeps one pending run per group), and that run's
 # verdict would be lost. Two runs that fail in the same moment can therefore
 # both open the issue; the script folds the newer into the older.
+#
+# Within one judged run's group the same rule is harmless for a run that can
+# write: whichever run survives reads the run as it is then (nothing but the id
+# comes from the event), and a second judgment of an attempt already recorded
+# writes nothing. It is NOT harmless for a manual dry run, which writes
+# nothing: in that group it could replace a pending automatic run, and the
+# verdict would never reach the issue. So a dry run adds its own run id to the
+# group and shares it with nothing; the condition is the one DRY_RUN is set
+# from, and the test holds the two together.
 on:
   workflow_run:
     workflows: [main-post-merge]
@@ -57,7 +66,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: main-post-merge-watch-${{ github.event.workflow_run.id || inputs.run_id }}
+  group: main-post-merge-watch-${{ github.event.workflow_run.id || inputs.run_id }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && format('-dry-run-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 jobs:
