@@ -25,7 +25,9 @@ name: main-post-merge
 # what actually prevents the bad merge.
 #
 # Nothing here is a required status check — `ci` (from `ci.yaml`) remains the only
-# one, and this workflow deliberately does not touch the pull_request path.
+# one, and this workflow deliberately does not touch the pull_request path. The
+# `main` job below is what turns the run red when a leg did not do what `diff`
+# decided (#1501).
 # Integration and e2e are not repeated here: `e2e.yaml` runs the heavy suite
 # nightly (`schedule: 17 4 * * *`, plus `workflow_dispatch`) — it has no `push`
 # trigger, so a `main` push is covered by the next nightly rather than
@@ -203,6 +205,39 @@ jobs:
         run: scripts/check-cni-deps.sh --config=ci
       - name: Guard mesh-dns linkage
         run: scripts/check-mesh-dns-deps.sh --config=ci
+
+  # What makes the run red when `test` did not do what `diff` decided (#1501).
+  #
+  # `test` skips on `needs.diff.outputs.has_any == 'true'`. An output that was
+  # never set reads as the empty string there and skips it exactly as `false`
+  # does: a `diff` that succeeded without writing its outputs left a green run
+  # that had tested nothing. scripts/ci-gate.sh reads the whole `needs` context
+  # and requires `diff` to have succeeded and written true|false to each has_*
+  # output, and `test` to have ended the way has_any says: "nothing impacted"
+  # is three times `false`, written by `diff`. The same script, with another
+  # table, decides the `ci` and `proxy` checks.
+  #
+  # No ruleset requires this job (nothing does on a push): when it fails, the
+  # run of this commit on `main` is red, and that is all it does.
+  #
+  # The rules in that script repeat each job's `if:`; //scripts:ci_gate_test
+  # compares them with this file, and fails when a job is added here and not
+  # to `needs` below and to the script. `refresh-pin-prs` is deliberately not
+  # in `needs`: it reads no output of another job, and that test holds it so.
+  main:
+    if: always()
+    needs: [diff, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - name: Every job ended the way its conditions say it must
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: scripts/ci-gate.sh main
 
   # Keep the open chart-pin PRs (#727) current with `main`.
   #

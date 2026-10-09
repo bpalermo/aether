@@ -153,7 +153,7 @@ of the agent) and by the edge control plane.
 | Metric (as Prometheus stores it) | Type | Labels | Meaning |
 |---|---|---|---|
 | `aether_agent_snapshot_tls_clusters` | gauge | `pin`, `reason` | mesh cluster entries in the agent's current snapshot that are meant to be mTLS: `pin="pinned"` (no `reason`), and `pin="unpinned"` once per `reason`. Written on every snapshot, zeros included |
-| `aether_agent_xds_acked_tls_clusters` | gauge | `pin`, `reason` | the same count for the last snapshot whose cluster update the proxy acknowledged. Absent until the first cluster ACK the agent process sees |
+| `aether_agent_xds_acked_tls_clusters` | gauge | `pin`, `reason` | the same count for the last snapshot whose cluster update the proxy acknowledged. Absent until the agent process sees the first cluster ACK that counts: of a response that added or removed a cluster, or of the empty response that opens a proxy's stream, which a reconnecting proxy that is in sync gives within a second or so of an agent restart (#1483). The ACK of a later empty response is not read |
 | `aether_agent_identity_cluster_unpinned_total` | counter | `reason` | grows by the number of unpinned clusters on every snapshot that has any. Seeded at zero per reason. Before #1424 it had no `reason` label |
 | `aether_agent_xds_nacks_total` | counter | `aether_xds_type_url` | delta-xDS responses the proxy rejected. Seeded at zero for each of the six resource types the agent serves, and `other` (#1480) |
 | `aether_agent_xds_ack_wait_failures_total` | counter | `aether_xds_wait`, `aether_xds_reason` | ACK waits for a pod's listener that failed (`present`/`absent` by `nack`/`timeout`). Seeded at zero, four series (#1480) |
@@ -210,9 +210,16 @@ metadata stays `tls_not_published`, by design. Drop `AetherMeshClusterPinPending
 
 ### The divergence rule and an absent gauge
 
-`aether_agent_xds_acked_tls_clusters` has no series until the first cluster ACK an agent
-process sees, and an agent that restarts against a proxy already in sync is owed none
-(#1483). `AetherProxyHoldsUnpinnedClusters` compares two vectors, and a comparison
+`aether_agent_xds_acked_tls_clusters` has no series until a proxy gives that agent
+process a cluster ACK that counts: of a response that added or removed a cluster, or of
+the empty response that opens the proxy's stream. The ACK of an empty response later on
+a stream is not read, because it can name a snapshot the proxy rejected. Since #1483 an agent that restarts against a proxy
+already in sync has its sample as soon as the proxy reconnects (the proxy states the
+clusters it holds and acknowledges the agent's empty answer). The gauge is still absent
+while no proxy is connected (a standby agent, a proxy that is down), and after a restart
+for as long as the proxy rejects the cluster update it is sent: the runbook's "Published
+is not held" has both.
+`AetherProxyHoldsUnpinnedClusters` compares two vectors, and a comparison
 returns nothing for a `(job, node)` that one side lacks, so that state is silent: the
 rule cannot fire on absence, and it does not need `absent()` or `or vector(0)` (either
 would make it fire there). It is one-directional on purpose: acknowledged *below*
@@ -227,8 +234,8 @@ that. Anything that sums or compares the *counter* across an upgrade must not se
 `reason`: an agent from before #1424 exports the one label-less series, and one from
 before #1482 has no `tls_not_published` series. And the rules have a promtool unit test
 beside them, `agent-pin-alerts_test.yml` (an agent start, an agent stuck without its
-SVID, the gap, an absent acknowledged gauge, a proxy that keeps what the agent has
-pinned, a silent agent):
+SVID, the gap, an absent acknowledged gauge, an agent restart with the proxy in sync and
+with the proxy rejecting, a proxy that keeps what the agent has pinned, a silent agent):
 
 ```bash
 promtool test rules docs/observability/agent-pin-alerts_test.yml
