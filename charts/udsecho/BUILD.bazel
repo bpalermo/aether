@@ -1,6 +1,6 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_template_absent_test", "helm_template_match_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_match_test")
 
 # udsecho validation chart (published to chart_registry_url("udsecho"); see @aether_registry//:registry.bzl).
 #
@@ -67,9 +67,9 @@ helm_template_match_test(
     name = "udsecho_documents_test",
     chart = ":udsecho",
     document_patterns = {
-        "ServiceAccount/uds-echo": ["\\nmetadata:\\n  name: uds-echo\\n  namespace: aether-test$"],
-        "ServiceAccount/uds-cr-echo": ["\\nmetadata:\\n  name: uds-cr-echo\\n  namespace: aether-test$"],
-        "ServiceAccount/uds-client": ["\\nmetadata:\\n  name: uds-client\\n  namespace: aether-test$"],
+        "ServiceAccount/uds-echo": ["\\nmetadata:\\n  name: uds-echo\\n  namespace: aether-test\\n"],
+        "ServiceAccount/uds-cr-echo": ["\\nmetadata:\\n  name: uds-cr-echo\\n  namespace: aether-test\\n"],
+        "ServiceAccount/uds-client": ["\\nmetadata:\\n  name: uds-client\\n  namespace: aether-test\\n"],
         "Deployment/uds-echo": [
             "\\n      annotations:\\n        endpoint\\.aether\\.io/port: \"8080\"\\n        endpoint\\.aether\\.io/uds-socket: \"s/a\\.sock\"\\n    spec:\\n      serviceAccountName: uds-echo\\n",
             UDS_VOLUME % ("s", "a\\.sock", "s", "s", "s"),
@@ -128,5 +128,125 @@ helm_template_absent_test(
     opts = [
         "--set",
         "policyPath.enabled=false",
+    ],
+)
+
+# #1402: every object says which chart, release and version rendered it, on its
+# OWN metadata: the standard labels, in this order, between `namespace:` and the
+# next top-level key (or the end of a ServiceAccount). `component` is the
+# workload the object belongs to; the EndpointPolicy belongs to uds-cr-echo.
+OBJECT_LABELS = "\\nmetadata:\\n  name: %s\\n  namespace: aether-test\\n  labels:" + \
+                "\\n    helm\\.sh/chart: udsecho-\\S+" + \
+                "\\n    app\\.kubernetes\\.io/name: udsecho" + \
+                "\\n    app\\.kubernetes\\.io/instance: \\S+" + \
+                "\\n    app\\.kubernetes\\.io/component: %s" + \
+                "\\n    app\\.kubernetes\\.io/part-of: aether" + \
+                "\\n    app\\.kubernetes\\.io/managed-by: Helm" + \
+                "\\n    app\\.kubernetes\\.io/version: \"\\S+\"" + \
+                "%s"
+
+helm_template_match_test(
+    name = "udsecho_object_labels_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "ServiceAccount/uds-echo": [OBJECT_LABELS % ("uds-echo", "uds-echo", "$")],
+        "ServiceAccount/uds-cr-echo": [OBJECT_LABELS % ("uds-cr-echo", "uds-cr-echo", "$")],
+        "ServiceAccount/uds-client": [OBJECT_LABELS % ("uds-client", "uds-client", "$")],
+        "Deployment/uds-echo": [OBJECT_LABELS % ("uds-echo", "uds-echo", "\\nspec:\\n")],
+        "Deployment/uds-cr-echo": [OBJECT_LABELS % ("uds-cr-echo", "uds-cr-echo", "\\nspec:\\n")],
+        "Deployment/uds-client": [OBJECT_LABELS % ("uds-client", "uds-client", "\\nspec:\\n")],
+        "EndpointPolicy/uds-cr": [OBJECT_LABELS % ("uds-cr", "uds-cr-echo", "\\nspec:\\n")],
+    },
+)
+
+# The guard for #1402 (it passed before the labels were added and must keep
+# passing): a Deployment's selector is immutable, and a pod template that
+# changes rolls the pods. So each selector is exactly `{app: <name>}`, written
+# as it always was, and each pod template carries exactly the two labels it
+# always carried: the selector's, and the one that puts the pod in the mesh.
+# Positional: from `selector:` to the key that follows the pod's labels.
+SELECTOR_AND_POD_LABELS = "\\n  selector:\\n    matchLabels: \\{app: %s\\}\\n  template:\\n    metadata:\\n      labels:" + \
+                          "\\n        app: %s\\n        aether\\.io/managed: \"true\"\\n      annotations:\\n"
+
+# The echo workloads spread on the same selector.
+SPREAD_SELECTOR = "\\n          whenUnsatisfiable: ScheduleAnyway\\n          labelSelector:\\n            matchLabels: \\{app: %s\\}\\n"
+
+helm_template_match_test(
+    name = "udsecho_selectors_unchanged_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "Deployment/uds-echo": [
+            SELECTOR_AND_POD_LABELS % ("uds-echo", "uds-echo"),
+            SPREAD_SELECTOR % "uds-echo",
+        ],
+        "Deployment/uds-cr-echo": [
+            SELECTOR_AND_POD_LABELS % ("uds-cr-echo", "uds-cr-echo"),
+            SPREAD_SELECTOR % "uds-cr-echo",
+        ],
+        "Deployment/uds-client": [SELECTOR_AND_POD_LABELS % ("uds-client", "uds-client")],
+    },
+)
+
+# #1402: no pod template depends on the chart version or the appVersion, so a
+# release that changes neither image nor values rolls nothing; and each
+# Deployment object carries `helm.sh/chart: udsecho-<version>` itself.
+helm_pod_template_version_test(
+    name = "udsecho_pod_template_version_test",
+    chart = ":udsecho",
+    workloads = 3,
+)
+
+# ...and with the EndpointPolicy path off (two Deployments).
+helm_pod_template_version_test(
+    name = "udsecho_pod_template_version_policy_path_off_test",
+    chart = ":udsecho",
+    opts = [
+        "--set",
+        "policyPath.enabled=false",
+    ],
+    workloads = 2,
+)
+
+# #1400: the client's default image is a third-party one, so it is pinned by the
+# digest of its multi-arch index, with the tag kept for the reader
+# (scripts/third-party-images.txt is the inventory; `scripts/third-party-images.sh
+# check` holds this value to it).
+helm_template_match_test(
+    name = "udsecho_client_image_pinned_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "Deployment/uds-client": [
+            "\\n        - name: curl\\n          image: curlimages/curl:[0-9.]+@sha256:[0-9a-f]{64}\\n          command:",
+        ],
+    },
+)
+
+# An operator override (a mirror) reaches the container as written.
+helm_template_match_test(
+    name = "udsecho_client_image_override_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "Deployment/uds-client": [
+            "\\n        - name: curl\\n          image: registry\\.example/curl:1\\n          command:",
+        ],
+    },
+    opts = [
+        "--set",
+        "client.image=registry.example/curl:1",
+    ],
+)
+
+# The off switch: no client, and so no third-party image in the render at all.
+helm_template_absent_test(
+    name = "udsecho_client_off_test",
+    absent = [
+        "uds-client",
+        "curlimages",
+    ],
+    chart = ":udsecho",
+    control = "name: uds-cr-echo",
+    opts = [
+        "--set",
+        "client.enabled=false",
     ],
 )

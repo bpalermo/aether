@@ -10,21 +10,24 @@ kind: ServiceAccount
 metadata:
   name: uds-echo
   namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "udsecho.labels" (dict "root" $ "workload" "uds-echo") | nindent 4 }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: uds-echo
   namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "udsecho.labels" (dict "root" $ "workload" "uds-echo") | nindent 4 }}
 spec:
   replicas: {{ .Values.annotationPath.replicas }}
   selector:
-    matchLabels: {app: uds-echo}
+    matchLabels: { {{- include "udsecho.selectorLabels" "uds-echo" -}} }
   template:
     metadata:
       labels:
-        app: uds-echo
-        aether.io/managed: "true"
+        {{- include "udsecho.podLabels" "uds-echo" | nindent 8 }}
       annotations:
         endpoint.aether.io/port: "8080"
         endpoint.aether.io/uds-socket: {{ .Values.socket | quote }}
@@ -37,7 +40,7 @@ spec:
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
-            matchLabels: {app: uds-echo}
+            matchLabels: { {{- include "udsecho.selectorLabels" "uds-echo" -}} }
       # fsGroup is REQUIRED by csi.aether.io: the per-pod tmpfs is
       # root:<fsGroup> mode 2770, which is how the distroless nonroot user can
       # create the socket in it (the plugin refuses a pod without one).

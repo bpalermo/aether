@@ -141,7 +141,9 @@ Without one the run goes ahead and says `provenance NOT VERIFIED` (the digests s
 pin what is pulled); `--verify` turns that into an abort, `--no-verify` skips the check.
 **cosign 3 or newer**: an older client does not look up referrers and reports `no
 signatures found` for a signed artifact, so the pre-flight refuses it instead of
-believing it. When bumping sortie, change the three digests together and verify the
+believing it. When bumping sortie, change the three digests together (and the two
+image `pin` lines in `scripts/third-party-images.txt`, which `check` holds
+`sortie-values.yaml` to) and verify the
 index **and both per-arch manifests** of each image by hand once; the pre-flight
 verifies what the cluster is told to pull, which is the index.
 

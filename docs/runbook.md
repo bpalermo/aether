@@ -1017,6 +1017,86 @@ that disagrees with the SDK pin, a setup-go step with a literal `go-version` or
 `check-latest`, and any workflow job or composite action that runs `go` without
 setting it up first, which would leave it on the runner image's Go.
 
+### Refreshing third-party image pins
+
+An image this repository does not build (curl, the echo servers, OPA, etcd, the
+OpenTelemetry collector, the kind node) is named in chart values, in the e2e and
+soak harnesses and their manifests, and in test fixtures. Every such reference
+carries the digest of the image's **multi-arch index**, and
+[`scripts/third-party-images.txt`](../scripts/third-party-images.txt) is the one
+list of them, one `pin <name> <tag> <digest>` line per image (#1400, #1401). A
+reference is written `<name>:<tag>@sha256:…`: the digest is what a node or
+`docker run` pulls, the tag is there for the reader. A few older references are
+`<name>@sha256:…`, with the tag recorded only in the list.
+
+`scripts/third-party-images.sh` has four commands:
+
+| Command | Network | What it does |
+| --- | --- | --- |
+| `check` | no | The gate (CI's `shell` job). Fails on an image named by tag only or with no tag, on a digest the list does not have for that name, on a tag that disagrees with the list, and on a pin or an exception nothing uses any more |
+| `list` | no | Every pin, with the files and lines that use it |
+| `outdated [--newer-tags] [<name>...]` | yes | Asks each pin's registry what its tag points at now: `current`, `MOVED` (the tag was re-pushed; the new digest is printed), `NOT-MULTI-ARCH` (the pinned index itself lacks `linux/amd64` or `linux/arm64`; counted as behind) or `ERROR` (no answer; never reported as current). `--newer-tags` adds the registry's tags that have the pinned tag's shape and sort after it. Exit 0 all current, 1 a pin is behind, 2 a pin could not be checked |
+| `resolve <name>:<tag>...` | yes | Prints the `pin` line for a tag, and says so when its index lacks `linux/amd64` or `linux/arm64` |
+
+`outdated` and `resolve` read public registries anonymously: no credential is
+read from the machine or sent (the anonymous pull token a registry hands out is
+the only `Authorization` header there is). A private or rate-limited registry
+answers `ERROR`, not `current`.
+
+**Nothing moves a pin by itself.** There is no bot: Dependabot opens no pull
+requests here, because they run without the repository's secrets and could
+never pass CI. Run `scripts/third-party-images.sh outdated --newer-tags` in the
+same pass that bumps the Bazel, Go and Actions pins, and whenever an image's
+advisory says a tag was rebuilt.
+
+To move a pin (or add an image):
+
+```bash
+scripts/third-party-images.sh resolve curlimages/curl:8.23.0   # prints: pin curlimages/curl 8.23.0 sha256:…
+scripts/third-party-images.sh list                             # where the old pin is used
+# Replace the pin line in scripts/third-party-images.txt, then the old
+# <tag>@<digest> in every file `list` printed.
+scripts/third-party-images.sh check
+bazel test //scripts:third_party_images_test //charts/...
+```
+
+What a moved pin obliges:
+
+- A pin used under `charts/<chart>/` is a change to that chart: bump its
+  `Chart.yaml` and say what rolls. `charts/aether`'s
+  `proxy.authzSidecar.opa.image` is a container of the proxy pod, so moving it
+  rolls the proxy DaemonSet on every node where the OPA preset is on;
+  `charts/udsecho`'s `client.image` and `charts/prober`'s `authzCanary.image`
+  each roll one single-replica Deployment.
+- The two etcd pins (`quay.io/coreos/etcd` for the kind harnesses,
+  `gcr.io/etcd-development/etcd` for the testcontainers tests) move together,
+  and stay on the minor line of the Go client in `go.mod` (#1223).
+- `kindest/node` moves only with `KIND_VERSION` (*Bumping the e2e Kubernetes
+  version* above); `//e2e:kind_pin_test` holds its copies together.
+
+An exception is an `allow <path> <reference>` or `skip <path prefix>` line in
+the list, with its reason beside it. An `allow` or `skip` that matches nothing any more
+fails `check`. There is none of the first kind today: the retired k6 runner
+(`e2e/soak/k6-runner.yaml`) is pinned as `grafana/k6:latest@sha256:…`, so
+`outdated` reports it `MOVED` at every k6 release, and it is moved only on
+purpose.
+
+`check` does not read comments, whether a comment line or the comment that
+ends a line of code: a pin that only a comment still names is reported as
+unused. In a YAML file it fails closed on flow mappings: an `image:` that
+follows `{`, `[` or `,` outside quotes is read as a key, so a line of prose
+written that way must be quoted.
+
+What `check` cannot see: an image no pin names yet, written where no `image`
+key, `--image` flag or `*_IMAGE` variable introduces it (a positional
+`docker run <image>`). Give such a reference a `*_IMAGE` variable, as
+`e2e/etcd-image.sh` does. Nor does it see an unquoted `image:` value in the
+middle of a line of a multi-line flow mapping when that YAML is embedded in a
+shell here-document or a Go string (the header of the script has the list). It
+also reads only `charts/`, `e2e/`, `test/` and
+`registry/etcdtest/`; the images the Bazel image rules pull (`MODULE.bazel`)
+are pinned there by digest and are not in the list.
+
 ---
 
 ## 7. Installing on a real cluster
@@ -2022,6 +2102,34 @@ Consequences to know:
   and delete the old namespace yourself if it should go. The prober chart
   checks this when `namespace.name` or `namespace.create` is set.
 
+#### Chart 2.4.22: with the OPA preset on, the proxy DaemonSet rolls once (#1401)
+
+`proxy.authzSidecar.opa.image` was `openpolicyagent/opa:1.21.1-envoy-static`,
+a tag, and is now the same tag with the digest of its multi-arch index
+(`…-envoy-static@sha256:b4a8bbe8…344b`): a tag can be re-pushed, and this
+container sits next to the proxy on every node. The OPA version does not
+change.
+
+The sidecar is a container of the proxy pod, so **the upgrade that crosses
+2.4.22 rolls the proxy DaemonSet once on a cluster where
+`proxy.authzSidecar.opa.enabled` is true and `opa.image` is the chart's
+default**. With the preset off (the default), or with `opa.image` set to your
+own reference (a mirror), nothing renders differently and nothing rolls. A
+mirror reference is used as written: pin it by digest yourself.
+
+Before and after the upgrade:
+
+```bash
+# Is the preset on, and which image does the release set? (never --reuse-values)
+helm get values aether -n aether-system -a -o yaml | grep -A12 'authzSidecar:'
+# The image each proxy pod's sidecar really runs: the digest the node resolved.
+kubectl -n aether-system get pods -l app.kubernetes.io/component=proxy \
+  -o jsonpath='{range .items[*]}{.spec.nodeName}{"  "}{.spec.initContainers[?(@.name=="authz")].image}{"  "}{.status.initContainerStatuses[?(@.name=="authz")].imageID}{"\n"}{end}'
+# Whether the DaemonSet rolled: its pods' revision hash and age.
+kubectl -n aether-system get pods -l app.kubernetes.io/component=proxy \
+  -L controller-revision-hash --sort-by=.metadata.creationTimestamp
+```
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod
@@ -2078,12 +2186,47 @@ Namespace, when the chart creates it with `namespace.create`) only; use
 `-l app=authz-canary` / `-l app=authz-echo` for its pods, whose labels did not
 change.
 
-Nothing refreshes the `authzCanary.image` digest automatically (the repository
-has no Renovate, and Dependabot opens no pull requests). To move it, read the
-new tag's index digest and put both in `charts/prober/values.yaml`:
+Nothing moves the `authzCanary.image` and `authzCanary.echo.image` digests by
+itself. Both are listed in `scripts/third-party-images.txt` since chart 1.0.7
+(#1401; the values themselves did not change, so that upgrade rolls nothing):
+`scripts/third-party-images.sh outdated` says when the registry has moved past
+one. See *Refreshing third-party image pins*.
+
+#### The udsecho chart (#1400, #1402)
+
+Two changes in chart **2.0.3**, neither of which touches a selector:
+
+- **Labels.** Until 2.0.3 no object of the chart carried any label. Its seven
+  objects (three ServiceAccounts, three Deployments, the `EndpointPolicy`) now
+  carry the standard set on their own metadata: `helm.sh/chart`,
+  `app.kubernetes.io/name: udsecho`, `instance`, `component` (the workload:
+  `uds-echo`, `uds-cr-echo` or `uds-client`; the `EndpointPolicy` belongs to
+  `uds-cr-echo`), `part-of: aether`, `managed-by` and `version`. The pod
+  templates are unchanged (`app: <name>` and `aether.io/managed: "true"`, as
+  before), so the labels roll nothing, and the pods themselves are still found
+  with `-l app=<name>`, not with the new labels.
+- **The client image is pinned by digest.** `client.image` was
+  `curlimages/curl:8.22.0` and is now that tag with the digest of its
+  multi-arch index (`curlimages/curl:8.22.0@sha256:58adaa4e…6777`). **The
+  upgrade that crosses 2.0.3 rolls the one-replica `uds-client` Deployment
+  once** for it, unless you set `client.image` yourself. The two echo
+  Deployments are not rolled by the chart (a release built from a new commit
+  still carries a new udsecho image and rolls them for that).
+
+Before and after the upgrade (the chart's namespace, `aether-test` by default):
 
 ```bash
-docker buildx imagetools inspect curlimages/curl:<tag>   # the top "Digest:" line
+NS=aether-test
+# Everything the release owns (empty before 2.0.3):
+kubectl -n "$NS" get deploy,sa,endpointpolicy -l app.kubernetes.io/name=udsecho \
+  -L helm.sh/chart,app.kubernetes.io/component
+# A pod that was not rolled keeps its name, its age and its hash; only
+# uds-client's changes.
+kubectl -n "$NS" get pods -l 'app in (uds-echo,uds-cr-echo,uds-client)' \
+  -L pod-template-hash --sort-by=.metadata.creationTimestamp
+# The image the client really runs: the digest the node resolved.
+kubectl -n "$NS" get pods -l app=uds-client \
+  -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"  "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
 ```
 
 ### Rendering the chart reproducibly (#1364)

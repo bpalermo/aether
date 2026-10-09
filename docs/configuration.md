@@ -135,7 +135,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 |---|---|---|
 | `proxy.authzSidecar.enabled` | `false` | Add a node-local authz gRPC sidecar (UDS) + a DISABLED ext_authz filter entry; zero effect until an `HTTPFilter` (extAuthz) opts a route/service in. |
 | `proxy.authzSidecar.opa.enabled` | `false` | Built-in OPA preset (opt-in). |
-| `proxy.authzSidecar.opa.image` | `openpolicyagent/opa:1.21.1-envoy-static` | OPA image. |
+| `proxy.authzSidecar.opa.image` | `openpolicyagent/opa:1.21.1-envoy-static@sha256:b4a8bbe8…344b` (the multi-arch index of that tag) | OPA image. Pinned by digest since chart 2.4.22 (#1401); it was the tag alone. The upgrade that crosses 2.4.22 rolls the proxy DaemonSet once where the preset is on and this value is the default ([`runbook.md`](./runbook.md), "Chart 2.4.22"). A reference you set (a mirror) is used as written. Moving the pin: `runbook.md`, "Refreshing third-party image pins". |
 | `proxy.authzSidecar.opa.policy` | `""` | Rego policy (ConfigMap-mounted); required when `opa.enabled`. The sidecar **watches** it (`opa run --watch`, chart 2.4.19, #1383): a changed policy is loaded by each node's sidecar when that node's kubelet delivers the ConfigMap update (27–64 s observed on one node; not a bound), with **no pod restart and no staging**. The chart does not validate it: **check it before you change it**. See *Changing the OPA policy* below. |
 | `proxy.authzSidecar.image.{repository,tag,args}` | `""` / `[]` | Bring-your-own authz container (serves `envoy.service.auth.v3.Authorization` on `unix:///run/aether/authz/authz.sock`). |
 | `proxy.authzSidecar.timeout` | `200ms` | Per-check gRPC timeout. |
@@ -952,7 +952,7 @@ No output means no container carries an empty quantity.
 
 | Key | Default | Notes |
 |---|---|---|
-| `authzCanary.image` | `curlimages/curl@sha256:58adaa4e…6777` (the multi-arch index of `curlimages/curl:8.22.0`) | The client: needs `/bin/sh`, `curl` and `date`. Pinned by digest since chart 1.0.5 (#1374); it was the tag. Nothing refreshes the pin automatically: see [`runbook.md`](./runbook.md), "The prober chart". The container has no liveness probe on purpose: a canary that stops shows up as the `ext_authz` counters no longer increasing. |
+| `authzCanary.image` | `curlimages/curl@sha256:58adaa4e…6777` (the multi-arch index of `curlimages/curl:8.22.0`) | The client: needs `/bin/sh`, `curl` and `date`. Pinned by digest since chart 1.0.5 (#1374); it was the tag. Nothing moves the pin by itself; `scripts/third-party-images.sh outdated` says when the registry has moved past it: see [`runbook.md`](./runbook.md), "Refreshing third-party image pins". The container has no liveness probe on purpose: a canary that stops shows up as the `ext_authz` counters no longer increasing. |
 | `authzCanary.echo.image` | `gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb739672…37c3` | The target. |
 
 **Labels** (chart 1.0.5). The prober pods carry the DaemonSet's selector labels
