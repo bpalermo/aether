@@ -30,6 +30,12 @@
 #
 # The rolling issue is the shape scripts/stuck-runs.sh uses: found by exact
 # title among the open issues, reused, closed when there is nothing to report.
+# Two things on top of it. Only an issue the workflow's own token opened
+# (author `app/github-actions`) is the rolling issue: the repository is public,
+# anyone can open an issue under this title, and this job would otherwise
+# rewrite, comment on and close a stranger's issue. And the issue is opened with
+# its kind and area labels (ISSUE_LABELS); a label that no longer exists fails
+# the run instead of filing an issue nobody triages.
 #
 # --dry-run runs `outdated` for real and writes nothing: it prints the issue it
 # would write and calls `gh` not at all (a pull request's run has no
@@ -54,6 +60,9 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES="${THIRD_PARTY_IMAGES:-$HERE/third-party-images.sh}"
 ISSUE_TITLE="CI: third-party image pins are behind their tags"
+# How `gh` spells the author of an issue the workflow token opened.
+ISSUE_AUTHOR="app/github-actions"
+ISSUE_LABELS=(enhancement ci)
 MARKER_PREFIX="<!-- third-party-images:"
 
 die() {
@@ -155,16 +164,24 @@ fi
 
 : "${GH_REPO:?GH_REPO must name the repository (owner/repo)}"
 
-# Exact-title match (the search is fuzzy, the select is not).
+open_issue() {
+	local args=() label
+	for label in "${ISSUE_LABELS[@]}"; do args+=(--label "$label"); done
+	gh issue create --title "$ISSUE_TITLE" --body-file "$tmp/body.md" "${args[@]}" || die "could not open the issue"
+}
+
+# Exact-title match (the search is fuzzy, the select is not), and only an issue
+# this workflow opened: one a user filed under the same title is theirs.
 num="$(gh issue list --state open --limit 100 --search "in:title \"${ISSUE_TITLE}\"" \
-	--json number,title --jq "[.[] | select(.title == \"${ISSUE_TITLE}\")] | .[0].number // empty")" ||
+	--json number,title,author \
+	--jq "[.[] | select(.title == \"${ISSUE_TITLE}\" and .author.is_bot == true and .author.login == \"${ISSUE_AUTHOR}\")] | .[0].number // empty")" ||
 	die "could not list the open issues"
 
 if [ "$nerrors" -gt 0 ]; then
 	# An incomplete run: what it found behind is real, what it did not reach is
 	# unknown. It may open the issue; it may not close or rewrite one.
 	if [ "$nbehind" -gt 0 ] && [ -z "$num" ]; then
-		gh issue create --title "$ISSUE_TITLE" --body-file "$tmp/body.md" || die "could not open the issue"
+		open_issue
 	elif [ -n "$num" ]; then
 		echo "#${num} left as it is: ${nerrors} pin(s) could not be checked, so this run does not know the whole set"
 	fi
@@ -182,7 +199,7 @@ if [ "$nbehind" -eq 0 ]; then
 fi
 
 if [ -z "$num" ]; then
-	gh issue create --title "$ISSUE_TITLE" --body-file "$tmp/body.md" || die "could not open the issue"
+	open_issue
 	exit 0
 fi
 

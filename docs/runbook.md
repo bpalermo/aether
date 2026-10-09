@@ -1043,6 +1043,12 @@ next to a pinned `8.22.0`): for those, run
 `scripts/third-party-images.sh outdated --newer-tags` in the same pass that
 bumps the Bazel, Go and Actions pins.
 
+The issue is opened with the `enhancement` and `ci` labels; if one of them is
+deleted the run fails instead of filing an unlabelled issue. Only an issue the
+workflow itself opened counts as the rolling one: an issue someone else files
+under the same title is never rewritten or closed, and the report opens its
+own next to it.
+
 To see what it would write without writing it, dispatch a dry run:
 `gh workflow run third-party-images.yaml`. A dispatch is a dry run unless you
 pass `-f dry_run=false` on `main`. A pull request that touches the scripts or

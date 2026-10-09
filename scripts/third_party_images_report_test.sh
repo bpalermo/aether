@@ -8,12 +8,27 @@
 # it and never fails the run, every pin current closes it, a dry run calls `gh`
 # not at all, and a check that is itself broken exits 2 and reports nothing.
 #
+# The fake `gh` answers `issue list` with JSON and runs the script's own `--jq`
+# filter over it (with jq: the Bazel-pinned one, or the one on PATH), so which
+# issue counts as the rolling one is decided by the real filter: an issue a
+# user opened under the same title, another bot's, and a longer title are not.
+#
 # Run: bazel test //scripts:third_party_images_report_test, or
-# bash scripts/third_party_images_report_test.sh.
+# bash scripts/third_party_images_report_test.sh with jq on PATH.
 set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$HERE/third-party-images-report.sh"
+
+if [ -n "${JQ_RLOCATIONPATH:-}" ]; then
+	JQ="${TEST_SRCDIR:-${RUNFILES_DIR:-$PWD/..}}/${JQ_RLOCATIONPATH}"
+fi
+JQ="${JQ:-$(command -v jq)}"
+[ -x "$JQ" ] || {
+	echo "FAIL: no jq (JQ=${JQ})"
+	exit 1
+}
+export JQ
 
 TMP="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
@@ -42,7 +57,9 @@ exit "$FAKE_OUTDATED_RC"
 EOF
 
 # The fake `gh`: the rolling issue lives in $FAKE_STATE (num, body, comments),
-# every call is logged, every write is logged as WRITE.
+# every call is logged, every write is logged as WRITE. `issue list` answers
+# with the rolling issue (the workflow's own) plus whatever $FAKE_STATE/others
+# holds (one JSON issue per line), through the caller's --jq filter.
 cat >"$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 echo "gh $*" >>"$FAKE_LOG"
@@ -52,16 +69,31 @@ case " ${FAKE_GH_FAIL:-} " in *" $1-$2 "*)
 	;;
 esac
 case "$1 $2" in
-"issue list") cat "$FAKE_STATE/num" 2>/dev/null || true ;;
+"issue list")
+	filter=""
+	while [ $# -gt 0 ]; do
+		[ "$1" = "--jq" ] && filter="$2"
+		shift
+	done
+	{
+		cat "$FAKE_STATE/others" 2>/dev/null
+		if [ -f "$FAKE_STATE/num" ]; then
+			printf '{"number":%s,"title":"%s","author":{"is_bot":true,"login":"app/github-actions"}}\n' \
+				"$(cat "$FAKE_STATE/num")" "$FAKE_TITLE"
+		fi
+	} | "$JQ" -s -r "$filter"
+	;;
 "issue create")
 	echo 7 >"$FAKE_STATE/num"
 	title=""
+	labels=""
 	while [ $# -gt 0 ]; do
 		[ "$1" = "--title" ] && title="$2"
+		[ "$1" = "--label" ] && labels="${labels:+$labels+}$2"
 		[ "$1" = "--body-file" ] && cp "$2" "$FAKE_STATE/body"
 		shift
 	done
-	echo "WRITE issue create: $title" >>"$FAKE_LOG"
+	echo "WRITE issue create [$labels]: $title" >>"$FAKE_LOG"
 	;;
 "issue view") cat "$FAKE_STATE/body" ;;
 "issue comment")
@@ -105,7 +137,7 @@ report() {
 	: >"$TMP/log"
 	: >"$TMP/summary"
 	PATH="$TMP/bin:$PATH" THIRD_PARTY_IMAGES="$TMP/bin/images" FAKE_OUTDATED="$TMP/answer" FAKE_OUTDATED_RC="$rc" \
-		FAKE_LOG="$TMP/log" FAKE_STATE="$TMP/state" FAKE_GH_FAIL="${FAKE_GH_FAIL:-}" \
+		FAKE_LOG="$TMP/log" FAKE_STATE="$TMP/state" FAKE_GH_FAIL="${FAKE_GH_FAIL:-}" FAKE_TITLE="$TITLE" \
 		GH_REPO=bpalermo/aether RUN_URL=https://example.invalid/run GITHUB_STEP_SUMMARY="$TMP/summary" \
 		bash "$SCRIPT" "$@" >"$TMP/out" 2>&1
 	RC=$?
@@ -138,6 +170,8 @@ lacks() { # <name> <file> <needle>
 }
 
 TITLE="CI: third-party image pins are behind their tags"
+# What opening the issue looks like in the log: its labels, then its title.
+CREATED="issue create [enhancement+ci]: $TITLE"
 MOVED_AB="MOVED    a/b:1.0  pinned $D1, the tag now points at $D2"
 NOT_MULTI="NOT-MULTI-ARCH quay.io/c/d:v2  $D2: the index does not list linux/arm64"
 
@@ -174,7 +208,7 @@ has "dry run, every pin current: says it would close" "$TMP/out" "DRY RUN: every
 # --- a pin behind opens the issue ----------------------------------------------
 one_behind
 report 1
-expect "a pin behind and no open issue: the issue is opened, the run stays green" 0 "issue create: $TITLE"
+expect "a pin behind and no open issue: the issue is opened with its labels, the run stays green" 0 "$CREATED"
 has "the issue lists the pin, the runbook section and the run" "$TMP/state/body" \
 	"$MOVED_AB" "Refreshing third-party image pins" "https://example.invalid/run" "<!-- third-party-images: "
 lacks "the issue does not list a pin that is current" "$TMP/state/body" "quay.io/c/d"
@@ -262,7 +296,7 @@ ERROR    quay.io/c/d:v2  no answer from quay.io
 2 checked: 1 behind, 1 could not be checked.
 EOF
 report 2
-expect "a pin behind next to a registry error, no open issue: the issue is opened" 0 "issue create: $TITLE"
+expect "a pin behind next to a registry error, no open issue: the issue is opened with its labels" 0 "$CREATED"
 has "that issue says which pin could not be checked" "$TMP/state/body" \
 	"$MOVED_AB" "1 pin(s) could not be checked in this run" "ERROR    quay.io/c/d:v2  no answer from quay.io"
 
@@ -298,15 +332,40 @@ broken "every pin current under an exit status outdated never uses" 127 "exited 
 all_current
 : >"$TMP/log"
 PATH="$TMP/bin:$PATH" THIRD_PARTY_IMAGES="$TMP/bin/images" FAKE_OUTDATED="$TMP/answer" FAKE_OUTDATED_RC=0 \
-	FAKE_LOG="$TMP/log" FAKE_STATE="$TMP/state" GH_REPO=bpalermo/aether bash "$SCRIPT" --bogus >"$TMP/out" 2>&1
+	FAKE_LOG="$TMP/log" FAKE_STATE="$TMP/state" FAKE_TITLE="$TITLE" GH_REPO=bpalermo/aether bash "$SCRIPT" --bogus >"$TMP/out" 2>&1
 RC=$?
 expect "an unknown argument is refused before anything runs" 2 ""
+
+# --- only the workflow's own issue is the rolling issue -------------------------
+# The repository is public: anyone can open an issue under the title. Such an
+# issue is never rewritten, commented on or closed; the report opens its own.
+rm -rf "$TMP/state"
+mkdir -p "$TMP/state"
+cat >"$TMP/state/others" <<EOF
+{"number":91,"title":"$TITLE","author":{"is_bot":false,"login":"mallory"}}
+{"number":92,"title":"$TITLE","author":{"is_bot":true,"login":"app/some-other-app"}}
+{"number":93,"title":"$TITLE","author":{"is_bot":false,"login":"app/github-actions"}}
+{"number":94,"title":"$TITLE (again)","author":{"is_bot":true,"login":"app/github-actions"}}
+EOF
+all_current
+report 0
+expect "every pin current: an issue someone else opened under the title is not closed" 0 ""
+one_behind
+report 1
+expect "a pin behind: someone else's issue under the title is not reused, the report opens its own" 0 "$CREATED"
+report 1
+expect "the next run rewrites the workflow's own issue and no other" 0 "issue edit 7"
+all_current
+report 0
+expect "every pin current: the workflow's own issue is closed and no other" 0 "issue comment 7,issue close 7"
+rm -f "$TMP/state/others"
 
 # --- gh failing is never "nothing to report" -----------------------------------
 all_current
 FAKE_GH_FAIL="issue-list" report 0
 expect "the issue list cannot be read: exit 2" 2 ""
 one_behind
+report 1 # opens the issue the next cases fail to read, rewrite and close
 FAKE_GH_FAIL="issue-view" report 1
 expect "the open issue cannot be read: exit 2, nothing written" 2 ""
 FAKE_GH_FAIL="issue-edit" report 1

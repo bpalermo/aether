@@ -67,12 +67,18 @@ sh_test(
 # #1478): scripts/third-party-images-report.sh over a fake `outdated` and a
 # fake `gh` that keeps the rolling issue. What each answer writes and does not
 # write, that a registry error never closes or rewrites the issue and never
-# fails the run, and that a check which is itself broken exits 2.
+# fails the run, that a check which is itself broken exits 2, and that only an
+# issue the workflow itself opened counts as the rolling one (the fake `gh`
+# runs the script's own `--jq` filter, hence the Bazel-pinned jq).
 sh_test(
     name = "third_party_images_report_test",
     size = "small",
     srcs = ["third_party_images_report_test.sh"],
-    data = ["third-party-images-report.sh"],
+    data = [
+        "third-party-images-report.sh",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
 # The shell-lint coverage check (#853) against a fake `bazel query` and fake
