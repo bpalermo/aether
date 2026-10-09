@@ -208,8 +208,11 @@ packaged chart. A rename fails with a message that names the contract file.
 **The rule.** Change the code and the contract together, in one pull request,
 and say so in its description. Removing an entry or changing what it means
 (a rename, a value removed from **or added to** a closed set, another roll
-strategy) bumps the file's `version`; adding an entry does not. A harness pins
-the version it was written against. The bump is a review rule: nothing can
+strategy, a metric that keeps its name and counts something else) bumps the
+file's `version`; adding an entry does not. A harness pins
+the version it was written against; the README's "Versions" table says what
+each bump changed (version 2: what `aether_agent_xds_acked_tls_clusters` counts
+and when it is absent, #1508). The bump is a review rule: nothing can
 compare the file with its previous revision in a hermetic test.
 [`test/harnesscontract/README.md`](../test/harnesscontract/README.md) has the
 table of what each test compares, what is kept by review alone, and how to add
