@@ -463,7 +463,9 @@ itself) and `scripts/ci-impacted-targets.sh` refuses any other `HEAD_SHA` than
 the checkout. The artifact carries the commit in `impacted_commit.txt`; a job
 that reads the lists gets them through `.github/actions/impacted-lists`, which
 fails when a list is missing, when the lists are for another commit than the
-job's checkout, or when a `has_*` output disagrees with its list.
+job's checkout, or when a `has_*` output disagrees with its list. The `test`
+job of `main.yaml` (the post-merge run) gets its lists through the same action,
+under the name its own `diff` uploads them (`artifact-name`, #1488).
 
 **The required check.** `ci` passes when `scripts/ci-gate.sh` accepts the
 results and outputs of every other job. A skipped job passes only where a job
@@ -480,6 +482,18 @@ times, and the log of the `ci` job says which case it was:
 | `job diff succeeded and its output has_… is not set` | `diff` wrote no decision, so the legs skipped on an empty value | read the `Compute impacted targets` step; this is a defect in the workflow or the script, not in the change |
 | `job <x> was skipped, and diff says it had to run` | a leg did not run although its output is `true` (usually a job it needs failed, reported on its own line) | read the failed job first |
 | `job <x> is not in the needs of the ci job` / `has no rule for it` | a job was added to `ci.yaml` and not to the `needs` of `ci` or to `scripts/ci-gate.sh` | add both; `//scripts:ci_gate_test` holds them to the workflow |
+
+**The `proxy` check** is decided by the same script with the table for
+`proxy.yml` (`scripts/ci-gate.sh proxy`, #1489). Its `shell` and `test` jobs
+skip on a pull request that does not touch the proxy workspace, and that passes
+only because `changes` wrote `proxy=false`:
+
+| The `proxy` job's log shows | What it means | Do |
+|---|---|---|
+| `decision: the proxy workspace changed (changes wrote proxy=true); had to run: shell test` | both ran and succeeded | nothing |
+| `decision: the proxy workspace is untouched (changes wrote proxy=false)` | nothing under the path filter changed; `ci` is the gate of this change | nothing |
+| `job changes succeeded and its output proxy is not set` | the path filter wrote no decision, so `shell` and `test` skipped on an empty value | read the `changes` job; this is a defect in the workflow, not in the change |
+| `job <x> was skipped, and changes says proxy=true` | a job did not run although the workspace changed | read that job; re-run it if no step ran |
 
 A cancelled run of `coverage` or `codeql` (both cancel the previous run of the
 same pull request when a new commit arrives) shows its summary job as failed on

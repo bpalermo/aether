@@ -101,13 +101,16 @@ sh_test(
     ],
 )
 
-# The decision of ci.yaml's `ci` job, the required check (#1460):
-# scripts/ci-gate.sh over `needs` contexts written in the test. An output that
-# was never set, a job skipped that had to run, a failed or cancelled job and a
-# context the rules do not cover all fail; "nothing impacted" passes only as
-# four `false` written by `diff`. The second half compares the rules with
-# ci.yaml itself (the job list, the `needs` of `ci`, every `if:`), and holds
-# what #1459 needs from the file. Hermetic: the Bazel-pinned jq.
+# The decision of ci.yaml's `ci` job and of proxy.yml's `proxy` job, two
+# required checks (#1460, #1489): scripts/ci-gate.sh over `needs` contexts
+# written in the test. An output that was never set, a job skipped that had to
+# run, a failed or cancelled job and a context the rules do not cover all fail;
+# "nothing impacted" passes only as four `false` written by `diff`, and "the
+# proxy workspace is untouched" only as proxy=false written by `changes`. The
+# second half compares the rules with each workflow file (the job list, the
+# `needs` of the aggregate job, every `if:`), holds what #1459 needs from
+# ci.yaml, and holds main.yaml's `test` job to the same checked download of the
+# impacted lists as ci.yaml's legs (#1488). Hermetic: the Bazel-pinned jq.
 sh_test(
     name = "ci_gate_test",
     size = "small",

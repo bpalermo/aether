@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Hermetic test of scripts/ci-gate.sh, the decision of the `ci` job of
-# .github/workflows/ci.yaml (#1460). No network, no GitHub: each case is a
+# .github/workflows/ci.yaml (#1460) and of the `proxy` job of
+# .github/workflows/proxy.yml (#1489). No network, no GitHub: each case is a
 # `needs` context written here, as GitHub renders it with toJSON(needs).
 #
-# Two halves:
+# Two halves, first for ci.yaml (sections 1 to 6), then the same two for
+# proxy.yml (7 and 8), then how main.yaml's `test` job gets the impacted lists
+# (9, #1488):
 #
 #   1. the decision. A run passes when every job ended the way the workflow's
 #      conditions say it must, and "nothing to do" is something a job wrote:
@@ -31,7 +34,10 @@ SCRIPT="$HERE/ci-gate.sh"
 WORKFLOW="${TEST_SRCDIR:-}/${TEST_WORKSPACE:-_main}/.github/workflows/ci.yaml"
 [ -f "$WORKFLOW" ] || WORKFLOW="$HERE/../.github/workflows/ci.yaml"
 ACTION="$(dirname -- "$(dirname -- "$WORKFLOW")")/actions/impacted-lists/action.yml"
-for f in "$SCRIPT" "$WORKFLOW"; do
+CI_WORKFLOW="$WORKFLOW"
+PROXY_WORKFLOW="$(dirname -- "$WORKFLOW")/proxy.yml"
+MAIN_WORKFLOW="$(dirname -- "$WORKFLOW")/main.yaml"
+for f in "$SCRIPT" "$WORKFLOW" "$PROXY_WORKFLOW" "$MAIN_WORKFLOW"; do
 	[ -f "$f" ] || {
 		echo "FAIL: $f not found"
 		exit 1
@@ -87,15 +93,19 @@ LEGS='test race netns integration e2e'
 CP_JOBS='diff chart-version-bump deps-audit shell format'
 
 RC=0
-# decide <jq edit of FULL>: runs the gate on the edited context; status in RC,
+# The context the edits start from, and the rules the gate is asked for (none:
+# ci.yaml's). Section 7 sets both for proxy.yml.
+CTX="$FULL"
+GATE=()
+# decide <jq edit of CTX>: runs the gate on the edited context; status in RC,
 # output in $TMP/log.
 decide() {
 	local ctx
-	ctx="$("$JQ" -c "$DEFS $1" <<<"$FULL")" || {
+	ctx="$("$JQ" -c "$DEFS $1" <<<"$CTX")" || {
 		echo "FAIL: the test's own jq edit does not compile: $1"
 		exit 1
 	}
-	NEEDS_JSON="$ctx" bash "$SCRIPT" >"$TMP/log" 2>&1
+	NEEDS_JSON="$ctx" bash "$SCRIPT" "${GATE[@]}" >"$TMP/log" 2>&1
 	RC=$?
 }
 # green <what> <edit> <a line the log must have>
@@ -207,9 +217,9 @@ red "the context is an array" '[.]' 'the needs context is not a JSON object'
 
 raw() { # what, NEEDS_JSON value (or unset), piece of the error
 	if [ "$2" = unset ]; then
-		env -u NEEDS_JSON bash "$SCRIPT" >"$TMP/log" 2>&1
+		env -u NEEDS_JSON bash "$SCRIPT" "${GATE[@]}" >"$TMP/log" 2>&1
 	else
-		NEEDS_JSON="$2" bash "$SCRIPT" >"$TMP/log" 2>&1
+		NEEDS_JSON="$2" bash "$SCRIPT" "${GATE[@]}" >"$TMP/log" 2>&1
 	fi
 	RC=$?
 	if [ "$RC" -ne 0 ] && grep -F -- '::error::' "$TMP/log" | grep -qF -- "$3"; then
@@ -225,7 +235,7 @@ raw "NEEDS_JSON is not JSON" '{"changes": ' 'could not be read as the needs cont
 raw "NEEDS_JSON is the empty object" '{}' 'job changes is not in the needs of the ci job'
 
 # --- 6. the rules against the workflow file --------------------------------------------
-# job <name>: the lines of that job in ci.yaml (from its key to the next one).
+# job <name>: the lines of that job in $WORKFLOW (from its key to the next one).
 # Always read into a variable first: under pipefail, `job x | grep -q` fails
 # when grep matches early and awk dies of SIGPIPE.
 job() {
@@ -305,13 +315,23 @@ if [ -f "$ACTION" ] && awk '
 	downloaded && /^[[:space:]]+run: scripts\/ci-impacted-lists\.sh "\$RUNNER_TEMP\/impacted"$/ { ok = 1 }
 	END { exit ok ? 0 : 1 }' "$ACTION" &&
 	grep -qF 'path: ${{ runner.temp }}/impacted' "$ACTION" &&
+	grep -qE '^[[:space:]]+name: \$\{\{ inputs\.artifact-name \}\}$' "$ACTION" &&
 	grep -qF 'HAS_ANY: ${{ inputs.has-any }}' "$ACTION" &&
 	grep -qF 'HAS_UNIT: ${{ inputs.has-unit }}' "$ACTION" &&
 	grep -qF 'HAS_INTEGRATION: ${{ inputs.has-integration }}' "$ACTION"; then
-	pass "the impacted-lists action downloads the artifact, then runs scripts/ci-impacted-lists.sh on it with the three outputs"
+	pass "the impacted-lists action downloads the artifact it is told to, then runs scripts/ci-impacted-lists.sh on it with the three outputs"
 else
-	fail "$ACTION does not download the artifact and then run scripts/ci-impacted-lists.sh \"\$RUNNER_TEMP/impacted\" with HAS_ANY, HAS_UNIT and HAS_INTEGRATION"
+	fail "$ACTION does not download the artifact named by its artifact-name input and then run scripts/ci-impacted-lists.sh \"\$RUNNER_TEMP/impacted\" with HAS_ANY, HAS_UNIT and HAS_INTEGRATION"
 fi
+# The name ci.yaml's jobs get without saying one is the name its `diff` uploads.
+expect "the action's artifact-name defaults to the artifact ci.yaml's diff uploads" \
+	"$(awk '
+		/^  artifact-name:[[:space:]]*$/ { mine = 1; next }
+		/^  [A-Za-z0-9_-]+:[[:space:]]*$/ { mine = 0 }
+		mine && /^    default: / { print $2 }' "$ACTION")" \
+	"$(job diff | awk '/uses: actions\/upload-artifact@/ { up = 1 } up && /^          name: / { print $2; exit }')"
+expect "ci.yaml: no job names an artifact for the action (the default is its own)" \
+	"$(grep -c 'artifact-name:' "$WORKFLOW")" 0
 expect "ci.yaml: no job downloads the impacted-targets artifact itself" \
 	"$(grep -cE '^[[:space:]]+name: impacted-targets$' "$WORKFLOW") $(grep -c 'uses: actions/download-artifact@' "$WORKFLOW")" "1 0"
 readers=""
@@ -333,6 +353,148 @@ for j in $workflow_jobs; do
 	fi
 done
 expect "ci.yaml: the jobs that read the impacted lists" "$(sorted <<<"$readers")" "integration netns race test"
+
+# --- 7. proxy.yml: the decision (#1489) ---------------------------------------------------
+# The `proxy` job is the other required check with `if: always()`. Its legs
+# skip on `needs.changes.outputs.proxy == 'true'`, so an output that was never
+# set skips both exactly as `false` does: same rules, another table.
+CTX='{
+  "changes": {"result": "success", "outputs": {"proxy": "true"}},
+  "shell":   {"result": "success", "outputs": {}},
+  "test":    {"result": "success", "outputs": {}}
+}'
+GATE=(proxy)
+green "proxy: the workspace changed, shell and test green" '.' \
+	'decision: the proxy workspace changed (changes wrote proxy=true); had to run: shell test'
+# proxy.yml has no `diff`: its log says nothing about one.
+if grep -q 'diff' "$TMP/log"; then
+	fail "proxy: the log of a run of proxy.yml speaks of a diff job"
+	sed 's/^/    /' "$TMP/log"
+else
+	pass "proxy: the log of a run of proxy.yml does not speak of a diff job"
+fi
+green "proxy: control-plane-only change, proxy=false, shell and test skipped" \
+	'.changes.outputs.proxy = "false" | skip("shell test")' \
+	'decision: the proxy workspace is untouched (changes wrote proxy=false)'
+red "proxy: changes succeeded and set no output; shell and test skipped" \
+	'.changes.outputs = {} | skip("shell test")' 'its output proxy is not set'
+red "proxy: the output is the empty string; shell and test skipped" \
+	'.changes.outputs.proxy = "" | skip("shell test")' 'its output proxy is ""'
+for value in TRUE True 1 yes ' true' null; do
+	red "proxy: the output is '$value', which is not true or false" \
+		".changes.outputs.proxy = \"$value\" | skip(\"shell test\")" 'its output proxy is'
+done
+red "proxy: changes set another output than proxy" \
+	'.changes.outputs = {control_plane: "false"} | skip("shell test")' 'its output proxy is not set'
+for j in shell test; do
+	red "proxy: $j skipped though proxy=true" "skip(\"$j\")" "job $j was skipped, and changes says proxy=true"
+	red "proxy: $j ran though proxy=false" \
+		".changes.outputs.proxy = \"false\" | skip(\"shell test\") | .[\"$j\"].result = \"success\"" \
+		"job $j ran, and changes says proxy=false"
+done
+red "proxy: changes skipped though it has no condition" \
+	'skip("changes shell test")' 'job changes was skipped, and it has no condition'
+for j in changes shell test; do
+	for result in failure cancelled; do
+		red "proxy: $j ended as $result" ".[\"$j\"].result = \"$result\"" "job $j ended as $result"
+	done
+done
+red "proxy: changes failed before it set the output; shell and test skipped" \
+	'.changes = {result: "failure", outputs: {}} | skip("shell test")' 'job changes ended as failure'
+red "proxy: a job is missing from needs" 'del(.shell)' 'job shell is not in the needs of the proxy job'
+red "proxy: needs has a job with no rule" '.["new-leg"] = {result: "success", outputs: {}}' \
+	'job new-leg is in the needs of the proxy job and scripts/ci-gate.sh has no rule for it'
+red "proxy: the context of ci.yaml is not one of proxy.yml" "$FULL" 'has no rule for it'
+raw "proxy: NEEDS_JSON is empty" '' 'NEEDS_JSON is empty'
+raw "proxy: NEEDS_JSON is the empty object" '{}' 'job changes is not in the needs of the proxy job'
+# The rules are asked for by name, and a name the script does not know is not
+# ci.yaml's rules by default.
+GATE=(release)
+raw "a gate the script has no rules for" "$CTX" 'no rules for a workflow named'
+GATE=()
+red "the context of proxy.yml is not one of ci.yaml" "$CTX" 'is not in the needs of the ci job'
+CTX="$FULL"
+
+# --- 8. proxy.yml: the rules against the workflow file ---------------------------------------
+WORKFLOW="$PROXY_WORKFLOW"
+workflow_jobs="$(awk '
+	/^jobs:/ { in_jobs = 1; next }
+	in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { sub(/:$/, "", $1); print $1 }
+' "$WORKFLOW" | grep -vx proxy | sorted)"
+gate_jobs="$(bash "$SCRIPT" proxy --jobs | sorted)"
+proxy_needs="$(job proxy | sed -n 's/^    needs: \[\(.*\)\]$/\1/p' | sorted)"
+[ -n "$workflow_jobs" ] || fail "no job found in $WORKFLOW (did its layout change?)"
+expect "every job of proxy.yml but proxy has a rule in the gate, and the gate has no other" "$gate_jobs" "$workflow_jobs"
+expect "the proxy job needs every other job of proxy.yml" "$proxy_needs" "$workflow_jobs"
+expect "the proxy job runs whatever the others did" "$(job proxy | grep -c '^    if: always()$')" 1
+proxy_job="$(job proxy)"
+if grep -qF 'NEEDS_JSON: ${{ toJSON(needs) }}' <<<"$proxy_job" && grep -qE '^[[:space:]]+run: scripts/ci-gate\.sh proxy$' <<<"$proxy_job"; then
+	pass "the proxy job hands toJSON(needs) to scripts/ci-gate.sh proxy"
+else
+	fail "the proxy job does not run scripts/ci-gate.sh proxy with NEEDS_JSON: \${{ toJSON(needs) }}"
+fi
+# Nothing else decides: a step with a condition of its own could pass or be
+# skipped whatever the gate said.
+expect "the proxy job has no step with a condition of its own" "$(grep -c '^        if: ' <<<"$proxy_job")" 0
+condition() { # job, the `if:` it must have (empty: none)
+	expect "proxy.yml: the condition of job $1 is the one the gate assumes" \
+		"$(job "$1" | sed -n 's/^    if: //p')" "$2"
+}
+condition changes ""
+for j in shell test; do condition "$j" "needs.changes.outputs.proxy == 'true'"; done
+expect "proxy.yml: the output of job changes is the one the gate reads" \
+	"$(job changes | sed -n 's/^      \([a-z0-9_]*\): \${{ steps\.filter\.outputs\.\([a-z0-9_]*\) }}$/\1=\2/p' | sorted)" \
+	"proxy=proxy"
+# The gate is a script of the checkout: the job must check out the run's own
+# commit, no other ref.
+if grep -q 'uses: actions/checkout@' <<<"$proxy_job"; then
+	pass "the proxy job checks the repository out before it runs the gate"
+else
+	fail "the proxy job runs scripts/ci-gate.sh without a checkout"
+fi
+expect "proxy.yml: no checkout names a ref of its own" "$(grep -cE '^[[:space:]]+ref:' "$WORKFLOW")" 0
+
+# --- 9. main.yaml: the impacted lists (#1488) --------------------------------------------------
+# main.yaml's `diff` uploads its lists under another name than ci.yaml's, and
+# its `test` job reads them: through the same checked action, told that name.
+WORKFLOW="$MAIN_WORKFLOW"
+expect "main.yaml: no job downloads an artifact itself" "$(grep -c 'uses: actions/download-artifact@' "$WORKFLOW")" 0
+uploaded="$(job diff | awk '/uses: actions\/upload-artifact@/ { up = 1 } up && /^          name: / { print $2; exit }')"
+[ -n "$uploaded" ] || fail "main.yaml: job diff uploads no named artifact (did its layout change?)"
+expect "main.yaml: the outputs of job diff are the three the action checks" \
+	"$(job diff | sed -n 's/^      \(has_[a-z0-9_]*\): \${{ steps\.impacted\.outputs\.\(has_[a-z0-9_]*\) }}$/\1=\2/p' | sorted)" \
+	"has_any=has_any has_integration=has_integration has_unit=has_unit"
+# One tree here too: the lists are computed for github.sha, and both checkouts
+# of the workflow are of github.sha.
+expect "main.yaml: the lists are computed for the commit the test job checks out" \
+	"$(job diff | grep -cF 'HEAD_SHA: ${{ github.sha }}') $(grep -cE '^[[:space:]]+ref: \$\{\{ github\.sha \}\}$' "$WORKFLOW") $(grep -cE '^[[:space:]]+ref:' "$WORKFLOW")" \
+	"1 2 2"
+readers=""
+workflow_jobs="$(awk '
+	/^jobs:/ { in_jobs = 1; next }
+	in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { sub(/:$/, "", $1); print $1 }
+' "$WORKFLOW" | sorted)"
+[ -n "$workflow_jobs" ] || fail "no job found in $WORKFLOW (did its layout change?)"
+for j in $workflow_jobs; do
+	body="$(job "$j")"
+	grep -qE '(runner\.temp \}\}|RUNNER_TEMP)/impacted(/|"|$)' <<<"$body" || continue
+	readers="$readers $j"
+	if awk -v name="$uploaded" '
+		/^      - / { step++ }
+		/uses: \.\/\.github\/actions\/impacted-lists$/ && !action { action = step }
+		/(runner\.temp \}\}|RUNNER_TEMP)\/impacted(\/|"|$)/ && !reader { reader = step }
+		$1 == "artifact-name:" && $2 == name { named = 1 }
+		/has-any: \$\{\{ needs\.diff\.outputs\.has_any \}\}$/ { any = 1 }
+		/has-unit: \$\{\{ needs\.diff\.outputs\.has_unit \}\}$/ { unit = 1 }
+		/has-integration: \$\{\{ needs\.diff\.outputs\.has_integration \}\}$/ { integration = 1 }
+		END { exit (action && reader && action < reader && named && any && unit && integration) ? 0 : 1 }' <<<"$body"; then
+		pass "main.yaml: job $j gets the impacted lists through the checked action, by the name diff uploads, before it reads one"
+	else
+		fail "main.yaml: job $j reads an impacted list and does not use ./.github/actions/impacted-lists (artifact-name: $uploaded, has-any, has-unit, has-integration) in an earlier step"
+	fi
+done
+expect "main.yaml: the jobs that read the impacted lists" "$(sorted <<<"$readers")" "test"
+WORKFLOW="$CI_WORKFLOW"
 
 echo
 if [ "$FAILS" -ne 0 ]; then

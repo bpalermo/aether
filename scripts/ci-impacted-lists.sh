@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# What a job of .github/workflows/ci.yaml runs right after it downloads the
-# `impacted-targets` artifact of the `diff` job, before it reads any list
-# (#1459, #1460). It fails unless:
+# What a job of .github/workflows/ci.yaml or main.yaml runs right after it
+# downloads the impacted-targets artifact of its `diff` job, before it reads
+# any list (#1459, #1460, #1488). It fails unless:
 #
 #   - impacted_build.txt, impacted_unit.txt, impacted_integration.txt and
 #     impacted_commit.txt are all there. A list that is missing is not an empty
