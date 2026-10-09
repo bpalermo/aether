@@ -56,7 +56,7 @@
 #
 # THE RECORD. Each failure and each pass is a hidden marker on the issue,
 #   <!-- main-post-merge-watch:failed|passed:<sha>:<run id>/<attempt> -->
-# and the last one for a commit is its state. Only the issue body and the
+# and the one with the highest run id and attempt for a commit is its state. Only the issue body and the
 # comments written by `github-actions[bot]` are read, and only an issue that
 # account opened counts as the rolling issue: anyone can open an issue with
 # this title or comment a marker on a public repository. A run that is already
@@ -201,10 +201,18 @@ issue_text() {
 	gh api "repos/${repo}/issues/$1" --jq '.body // ""' &&
 		gh api --paginate "repos/${repo}/issues/$1/comments?per_page=100" --jq ".[] | select(.user.login == \"${BOT}\") | .body"
 }
-# The commits whose last record is `failed`, in the order they first failed.
+# The commits whose latest record is `failed`, in the order they are first
+# named. Latest is by run id and attempt, not by position in the text: with
+# two open copies of the issue, a pass written on the older one comes before
+# the failure it answers, in the body of the newer one.
 failing() {
 	{ grep -oE -- "<!-- ${MARK}:(failed|passed):[0-9a-f]{40}:[0-9]+/[0-9]+ -->" || true; } |
-		awk -F: '{ state[$3] = $2; if (!($3 in seen)) { seen[$3] = 1; order[++n] = $3 } }
+		awk -F: '{
+				split($4, at, "[/ ]"); run = at[1] + 0; attempt = at[2] + 0
+				if (!($3 in seen)) { seen[$3] = 1; order[++n] = $3 }
+				else if (run < r[$3] || (run == r[$3] && attempt < a[$3])) next
+				state[$3] = $2; r[$3] = run; a[$3] = attempt
+			}
 			END { for (i = 1; i <= n; i++) if (state[order[i]] == "failed") print order[i] }'
 }
 short_list() { # shas on stdin -> `aaaaaaaaaaaa`, `bbbbbbbbbbbb`

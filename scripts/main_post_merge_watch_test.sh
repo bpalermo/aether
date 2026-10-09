@@ -492,6 +492,21 @@ run "$B" success 4
 step 0 "two open issues, B passes" &&
 	check "two open: both close" test "$(open_numbers)" = ""
 
+# The same, the other way round: B's failure is in the body of the NEWER copy
+# and its pass is written on the older one, so the pass comes first in the
+# text. The attempt decides, not the position: B stays cleared when A passes.
+reset
+issue 101 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${A}:4242/1 -->"
+issue 105 "$TITLE" "$BOT" "<!-- main-post-merge-watch:failed:${B}:4343/1 -->"
+RUN_ID=4343
+run "$B" success 2
+step 0 "two open issues, B (recorded on the newer) passes first" &&
+	check "two open, reversed: A keeps both open" test "$(open_numbers) $(ncomments 101)" = "101 105 1"
+RUN_ID=4242
+run "$A" success 2
+step 0 "two open issues, then A passes" &&
+	check "two open, reversed: B's older failure does not outlive its pass; both close" test "$(open_numbers)" = ""
+
 # --- a label that does not exist ---
 reset
 RUN_ID=4242
