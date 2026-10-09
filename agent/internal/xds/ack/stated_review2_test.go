@@ -2,6 +2,7 @@ package ack
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -402,6 +403,112 @@ func TestStreamClose_WakesAWaiterItUnblocks(t *testing.T) {
 	case <-time.After(resolvedWait / 2):
 		t.Fatal("the waiter was not woken by the stream closing")
 	}
+}
+
+// TestTwoGenerations_ANewerResponseAnsweredLastStands: the order that decides
+// between two answers is the order their RESPONSES were sent in, not the order
+// the answers arrived in. The draining generation is sent h1; h2 is published
+// and the generation taking over is sent h2 before either has answered. The
+// one that answers second was sent the newer version: its answer stands,
+// whether it accepts or rejects.
+func TestTwoGenerations_ANewerResponseAnsweredLastStands(t *testing.T) {
+	const parent, child = int64(1), int64(2)
+	sent := func(t *testing.T) (*Tracker, map[string]string) {
+		t.Helper()
+		published := map[string]string{testListener: "h1"}
+		tr := publishing(published)
+		openDelta(tr, parent, resourcev3.ListenerType, nil)
+		sendListeners(tr, parent, "p1", map[string]string{testListener: "h1"}, nil)
+		published[testListener] = "h2"
+		openDelta(tr, child, resourcev3.ListenerType, nil)
+		sendListeners(tr, child, "c1", map[string]string{testListener: "h2"}, nil)
+		return tr, published
+	}
+	failsWith := func(t *testing.T, tr *Tracker, msg string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), resolvedWait)
+		defer cancel()
+		err := tr.WaitListenerPresent(ctx, testListener)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), msg)
+	}
+
+	t.Run("both accept", func(t *testing.T) {
+		tr, _ := sent(t)
+		ackDelta(tr, parent, "p1", "")
+		ackDelta(tr, child, "c1", "")
+		requirePresent(t, tr, testListener, "the generation taking over acknowledged the published version, last")
+	})
+	t.Run("both accept, the newer first", func(t *testing.T) {
+		tr, _ := sent(t)
+		ackDelta(tr, child, "c1", "")
+		ackDelta(tr, parent, "p1", "")
+		requirePresent(t, tr, testListener)
+	})
+	t.Run("both reject", func(t *testing.T) {
+		tr, _ := sent(t)
+		ackDelta(tr, parent, "p1", "h1 refused")
+		ackDelta(tr, child, "c1", "h2 refused")
+		failsWith(t, tr, "h2 refused")
+	})
+	t.Run("both reject, with another response sent before either answers", func(t *testing.T) {
+		// What orders two rejections is when their responses were sent, not
+		// how much else was sent before the first of them arrived.
+		tr, _ := sent(t)
+		sendVersioned(tr, child, resourcev3.ClusterType, "c9", "v", []string{"a-cluster"})
+		ackDelta(tr, parent, "p1", "h1 refused")
+		ackDelta(tr, child, "c1", "h2 refused")
+		failsWith(t, tr, "h2 refused")
+	})
+	t.Run("both reject, the newer first", func(t *testing.T) {
+		tr, _ := sent(t)
+		ackDelta(tr, child, "c1", "h2 refused")
+		ackDelta(tr, parent, "p1", "h1 refused")
+		failsWith(t, tr, "h2 refused")
+	})
+	t.Run("the older accepts, then the newer rejects", func(t *testing.T) {
+		tr, _ := sent(t)
+		ackDelta(tr, parent, "p1", "")
+		ackDelta(tr, child, "c1", "h2 refused")
+		failsWith(t, tr, "h2 refused")
+	})
+	t.Run("the older rejects, then the newer accepts", func(t *testing.T) {
+		// The acceptance is of a response sent before the rejection arrived,
+		// but the rejection is of another version: it does not fail a wait
+		// for the published one.
+		tr, _ := sent(t)
+		ackDelta(tr, parent, "p1", "h1 refused")
+		ackDelta(tr, child, "c1", "")
+		requirePresent(t, tr, testListener)
+	})
+}
+
+// TestWait_StateAndPublishedVersionAreReadTogether: the wait reads the state
+// under the tracker's lock and the published version outside it. If the state
+// changes in between, the two were never true together and the wait looks
+// again instead of answering from the pair.
+func TestWait_StateAndPublishedVersionAreReadTogether(t *testing.T) {
+	tr := NewTracker(slog.New(slog.DiscardHandler))
+	asked := 0
+	tr.SetPublishedVersion(func(string, string) (string, bool) {
+		asked++
+		if asked == 1 {
+			// Between the wait's read of the state (h1) and this answer, the
+			// proxy is sent and acknowledges h2, and the agent goes back to
+			// publishing h1.
+			sendListeners(tr, 1, "n2", map[string]string{testListener: "h2"}, nil)
+			ackDelta(tr, 1, "n2", "")
+		}
+		return "h1", true
+	})
+	openDelta(tr, 1, resourcev3.ListenerType, nil)
+	sendListeners(tr, 1, "n1", map[string]string{testListener: "h1"}, nil)
+	ackDelta(tr, 1, "n1", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), unresolvedWait)
+	defer cancel()
+	require.Error(t, tr.WaitListenerPresent(ctx, testListener), "the proxy holds h2 by the time h1 is read as published")
+	require.GreaterOrEqual(t, asked, 2, "the wait looked again")
 }
 
 // TestStreamClose_TellsTheDeliveryObserverOutsideTheLock: a closing stream

@@ -36,13 +36,16 @@ type resourceState struct {
 	// nackVersion is the version of the resource in the rejected response
 	// (empty for a rejected removal).
 	nackVersion string
+	// nackSentAt is when the rejected response was sent, and nackAt the last
+	// response sent when its rejection arrived (Tracker.clock).
+	nackSentAt, nackAt uint64
 	// version is the version of the resource the proxy holds: the one the
 	// acknowledged response carried, or the one the proxy stated. Empty when
 	// the resource is not present.
 	version string
-	// seq is the tracker's sequence number when this was written (Tracker.seq).
-	seq uint64
-	// stream is the stream whose acknowledgement wrote present and version.
+	// sentAt is when the response whose acknowledgement wrote present and
+	// version was sent (Tracker.clock), and stream the stream it was sent on.
+	sentAt uint64
 	stream int64
 }
 
@@ -102,10 +105,10 @@ type inflightResponse struct {
 	// first of its type on its stream, neither added nor removed, with the
 	// version it stated (#1511). Only an ACK reads it: see statedHeld.
 	held map[string]string
-	// sentSeq is the tracker's sequence number when the response was sent.
-	// Anything written to a resource's state after it is newer than what this
-	// response compared (acknowledgedLocked).
-	sentSeq uint64
+	// sentAt is when the response was sent (Tracker.clock). It orders the
+	// answers to two responses by the snapshots they were computed from,
+	// whatever order the answers arrive in (acknowledgedLocked).
+	sentAt uint64
 }
 
 // Accepted is what one answered delta response says about the resources of
@@ -218,9 +221,11 @@ type Tracker struct {
 	// deliveries, when set, is told of responses entering and leaving flight
 	// (SetDeliveryObserver).
 	deliveries DeliveryObserver
-	// seq counts the acknowledgements and rejections that wrote state. It
-	// orders a write against the moment a response was sent.
-	seq uint64
+	// clock ticks when a response is sent. A response sent later was computed
+	// from a snapshot at least as new, so the tick it was sent at orders what
+	// two streams answer about one name; and "the last response sent when a
+	// rejection arrived" orders an acknowledgement against that rejection.
+	clock uint64
 	// published, when set, makes "present" mean "at the published version"
 	// (SetPublishedVersion).
 	published PublishedVersion
@@ -366,14 +371,18 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 		unanswered := t.unansweredLocked(st.stream, typeURL, name)
 		t.mu.Unlock()
 
-		if st.nackFails(wantPresent, published, typeURL, name) {
+		// The published version is read with no lock held. If the state
+		// changed meanwhile, the two were never true together: look again.
+		failed := st.nackFails(wantPresent, published, typeURL, name)
+		answered := st.answers(wantPresent, unanswered, published, typeURL, name)
+		if (failed || answered) && isClosed(ch) {
+			continue
+		}
+		if failed {
 			t.metrics.waitFailed(ctx, wantPresent, reasonNack)
 			return fmt.Errorf("envoy rejected config for %s: %w", name, st.nackErr)
 		}
-		if !wantPresent && !st.present {
-			return nil
-		}
-		if wantPresent && st.present && !unanswered && atPublishedVersion(published, typeURL, name, st.version) {
+		if answered {
 			return nil
 		}
 
@@ -386,6 +395,27 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 			return fmt.Errorf("timed out waiting for envoy to ack removal of %s", name)
 		case <-ch:
 		}
+	}
+}
+
+// answers reports whether the state answers a wait: for the removal, that
+// nothing is known to be present; for the presence, that the resource is
+// present at the published version with nothing unanswered on the stream that
+// said so (unansweredLocked).
+func (st resourceState) answers(wantPresent, unanswered bool, published PublishedVersion, typeURL, name string) bool {
+	if !wantPresent {
+		return !st.present
+	}
+	return st.present && !unanswered && atPublishedVersion(published, typeURL, name, st.version)
+}
+
+// isClosed reports whether ch is closed, without waiting.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -513,7 +543,8 @@ func (t *Tracker) keepLocked(streamID int64, nonce string, entry *inflightRespon
 		}
 		st.answered, st.stated = true, nil
 	}
-	entry.sentSeq = t.seq
+	t.clock++
+	entry.sentAt = t.clock
 	if empty && !entry.opening {
 		return false, nil
 	}
@@ -682,7 +713,6 @@ func endDelivery(deliveries DeliveryObserver, entry inflightResponse) {
 // present or absent on an ACK, Envoy's error on a NACK (nackErr is non-nil).
 // Callers hold t.mu.
 func (t *Tracker) resolveLocked(streamID int64, entry inflightResponse, nackErr error) {
-	t.seq++
 	if nackErr != nil {
 		t.rejectedLocked(entry, nackErr)
 		return
@@ -691,20 +721,20 @@ func (t *Tracker) resolveLocked(streamID int64, entry inflightResponse, nackErr 
 }
 
 // rejectedLocked records a NACK against every resource of the response.
-// Callers must hold t.mu and have advanced t.seq.
+// Callers must hold t.mu.
 //
 // Unlike an acknowledgement (acknowledgedLocked) a rejection is recorded
-// whatever was acknowledged since its response was sent. One rejection is kept
-// per name, though, and an older one does not replace a newer one: the newer
-// is of the later version, the one a wait is more likely for.
+// whatever was acknowledged meanwhile: it does not touch what the proxy holds.
+// One rejection is kept per name, though, and it is the one of the response
+// sent last: that one is of the newest version, the one a wait is for.
 func (t *Tracker) rejectedLocked(entry inflightResponse, nackErr error) {
 	reject := func(name, version string) {
 		key := entry.typeURL + "/" + name
 		st := t.state[key]
-		if st.nackErr != nil && st.seq > entry.sentSeq {
+		if st.nackErr != nil && st.nackSentAt > entry.sentAt {
 			return
 		}
-		st.nackErr, st.nackVersion, st.seq = nackErr, version, t.seq
+		st.nackErr, st.nackVersion, st.nackSentAt, st.nackAt = nackErr, version, entry.sentAt, t.clock
 		t.state[key] = st
 	}
 	for _, r := range entry.added {
@@ -716,43 +746,50 @@ func (t *Tracker) rejectedLocked(entry inflightResponse, nackErr error) {
 }
 
 // acknowledgedLocked records an ACK: what the response added and removed, and
-// what the proxy had stated it holds (statedHeld). Callers must hold t.mu and
-// have advanced t.seq.
+// what the proxy had stated it holds (statedHeld). Callers must hold t.mu.
 //
 // The state is one per name, and two proxy generations write it during a hot
-// restart. An ACK is the answer to a response computed when it was SENT, so
-// it is older than anything written to the name since: it is recorded only
-// when nothing was. Otherwise a draining generation's late ACK of an older
-// version, or of an add, would replace what the generation taking over has
-// acknowledged since (a newer version, or the removal), and nothing would
+// restart. Their answers are ordered by when the responses they answer were
+// SENT, not by when the answers arrive: a response is computed from the
+// snapshot of the moment it is sent, so the one sent later says the newer
+// thing. An ACK is recorded only when its response was sent after the one
+// whose ACK wrote the state. Otherwise a draining generation's late ACK of an
+// older version, or of an add, would replace what the generation taking over
+// has acknowledged since (a newer version, or the removal), and nothing would
 // ever correct it: that generation is sent nothing more for the name.
 //
-// On one stream the rule never bites: go-control-plane has at most one
-// response of a type outstanding per stream, so nothing is written to a name
-// between a response and its answer except by another stream.
+// A recorded ACK clears a rejection only when its response was sent after the
+// rejection ARRIVED. One sent before may be the other generation's answer to
+// the same content, and one generation accepting it does not make the other.
+//
+// On one stream neither rule bites: go-control-plane has at most one response
+// of a type outstanding per stream.
 func (t *Tracker) acknowledgedLocked(streamID int64, entry inflightResponse) {
-	record := func(name string, st resourceState) {
+	record := func(name string, present bool, version string) {
 		key := entry.typeURL + "/" + name
-		if t.state[key].seq > entry.sentSeq {
+		st := t.state[key]
+		if st.sentAt > entry.sentAt {
 			return
 		}
-		st.seq, st.stream = t.seq, streamID
+		st.present, st.version, st.sentAt, st.stream = present, version, entry.sentAt, streamID
+		if entry.sentAt > st.nackAt {
+			st.nackErr, st.nackVersion, st.nackSentAt, st.nackAt = nil, "", 0, 0
+		}
 		t.state[key] = st
 	}
 	for _, r := range entry.added {
-		record(r.Name, resourceState{present: true, version: r.Version})
+		record(r.Name, true, r.Version)
 	}
 	for _, name := range entry.removed {
-		record(name, resourceState{})
+		record(name, false, "")
 	}
 	// A statement, besides, never clears a rejection of the very version it
-	// states, whenever that was: one generation holding it does not make the
-	// other accept it.
+	// states, whenever that was.
 	for name, version := range entry.held {
 		if st := t.state[entry.typeURL+"/"+name]; st.nackErr != nil && st.nackVersion == version {
 			continue
 		}
-		record(name, resourceState{present: true, version: version})
+		record(name, true, version)
 	}
 }
 

@@ -6640,11 +6640,13 @@ pod's listener. So a `present`/`timeout` for a replacement pod now means what it
 proxy did not acknowledge the replacement's listener within the wait. The state is kept
 per name for the node, not per proxy generation, so during a hot restart it is the word
 of whichever generation answered. Two rules keep an old answer from replacing a new one.
-An acknowledgement (or what a proxy stated) is recorded only when nothing was said about
-the listener after the response it answers was sent: the draining generation's late ACK
-of an older version, or of an add, does not replace what the generation taking over has
-acknowledged since. A rejection is always recorded, and fails the wait for the version
-it rejected until a proxy acknowledges a response sent after it. So a `present`/`nack`
+Answers are ordered by when the responses they answer were sent, not by when they arrive:
+a response sent later was built from a newer snapshot. An acknowledgement (or what a proxy
+stated) is recorded only when its response was sent after the one whose acknowledgement
+is on record, so the draining generation's late ACK of an older version, or of an add,
+does not replace what the generation taking over has acknowledged. A rejection is always
+recorded (the one of the response sent last, when there are two), and fails the wait for
+the version it rejected until a proxy acknowledges a response sent after it arrived. So a `present`/`nack`
 during a hot restart can be the draining generation's refusal while the new one accepted
 the listener; the proxy's NACK line in the agent log (`envoy NACKed delta response`) is
 where to tell them apart, by time. And a listener the acknowledging stream has been sent
