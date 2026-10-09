@@ -9,8 +9,9 @@ A release that rebuilds a binary changes that binary's build ID, so Pyroscope no
 knows how to symbolise it until a matching blob arrives.
 
 > **Since #651/#653 the ID is a hash of the binary's own content, not of the release.**
-> Every Go ELF that enters an image — the six binaries `//bazel/buildid:release_build_ids`
-> guards, plus the readiness probers that ride along as extra layers — gets
+> Every Go ELF that enters an image — each image's main binary and whatever rides
+> along as an extra layer (the readiness probers, the CNI plugin), all of which
+> `//bazel/buildid:release_build_ids` guards — gets
 > `sha1(its own bytes)` written into `.note.gnu.build-id` by
 > `//bazel/buildid`, and the custom Envoy gets lld's
 > `--build-id=sha1` over the linked output. So a binary that a release leaves
@@ -195,9 +196,11 @@ Three build-time gates keep the *inputs* to symbolisation honest. They cannot kn
 - **`//bazel/buildid:release_build_ids`** — fails the build if any released binary lacks
   a build-ID note, carries one that is not the hash of its own bytes, or shares an ID
   with another released binary. That collision is why the rule exists: before #653 one
-  commit produced seven ELFs sharing a single stamped ID, and Pyroscope resolved all of
-  them against whichever debuginfo happened to be uploaded — silently, with
+  commit produced every released ELF with the same stamped ID, and Pyroscope resolved all
+  of them against whichever debuginfo happened to be uploaded — silently, with
   plausible-looking frames. It needs no `--stamp`, so the property holds in PR CI too.
+  The binaries are not listed anywhere: the rule finds every one under the images the
+  release pushes (the charts' `push_images` targets), for both published platforms.
 - **`//integration:build_id_test`** (in the `proxy/` workspace) — asserts the linked
   Envoy carries a `.note.gnu.build-id` whose descriptor is exactly 20 bytes and not all
   zeroes. It deliberately does not recompute the hash: lld's sha1 is a tree hash over the
