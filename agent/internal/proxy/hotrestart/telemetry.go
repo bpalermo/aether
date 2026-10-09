@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"aethermesh.dev/common/telemetry/servicename"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -48,19 +49,9 @@ func NewTelemetry(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error) 
 		return nil, fmt.Errorf("supervisor telemetry requires an OTLP endpoint")
 	}
 
-	res, err := resource.New(
-		ctx,
-		resource.WithAttributes(
-			semconv.ServiceName(telemetryServiceName),
-			semconv.ServiceVersion(cfg.ServiceVersion),
-		),
-		resource.WithFromEnv(),
-		resource.WithTelemetrySDK(),
-		resource.WithProcess(),
-		resource.WithHost(),
-	)
+	res, err := newTelemetryResource(ctx, cfg.ServiceVersion)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create resource: %w", err)
+		return nil, err
 	}
 
 	exporter, err := otlpmetricgrpc.New(
@@ -79,6 +70,25 @@ func NewTelemetry(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error) 
 			sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)),
 		),
 	}, nil
+}
+
+// newTelemetryResource builds the supervisor's Resource: its own service
+// identity plus the pod's OTEL_RESOURCE_ATTRIBUTES (k8s.node.name and the like).
+func newTelemetryResource(ctx context.Context, serviceVersion string) (*resource.Resource, error) {
+	res, err := resource.New(
+		ctx,
+		resource.WithAttributes(semconv.ServiceVersion(serviceVersion)),
+		resource.WithFromEnv(),
+		// After WithFromEnv, so OTEL_RESOURCE_ATTRIBUTES cannot rename the component (#1562).
+		servicename.Option(telemetryServiceName),
+		resource.WithTelemetrySDK(),
+		resource.WithProcess(),
+		resource.WithHost(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create resource: %w", err)
+	}
+	return res, nil
 }
 
 // Meter returns the meter to register supervisor instruments on.
