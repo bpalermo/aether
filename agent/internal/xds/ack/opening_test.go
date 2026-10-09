@@ -122,6 +122,9 @@ func TestAckObserver_EmptyOpeningResponseThatIsNotAcknowledged(t *testing.T) {
 // for the streams that ended.
 func TestTrackerForgetsAClosedStream(t *testing.T) {
 	tr, _ := observe(t)
+	// What a stream states is kept only by a tracker that can hold it to what
+	// is published.
+	tr.SetPublishedVersion(func(string, string) (string, bool) { return "h1", true })
 	for stream := int64(1); stream <= 50; stream++ {
 		openDelta(tr, stream, resourcev3.ClusterType, map[string]string{"c1": "h1"})
 		openDelta(tr, stream, resourcev3.ListenerType, map[string]string{testListener: "h1"})

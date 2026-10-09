@@ -72,6 +72,8 @@ func newDeltaServer(t *testing.T) *deltaServer {
 		tracker: NewTracker(slog.New(slog.DiscardHandler)),
 		cache:   cachev3.NewSnapshotCache(true, cachev3.IDHash{}, nil),
 	}
+	// As the node agent wires it: present is "at the version this cache serves".
+	s.tracker.SetPublishedVersion(SnapshotVersions(s.cache, serverNodeID))
 
 	lis := bufconn.Listen(1 << 20)
 	gs := grpc.NewServer()
@@ -347,4 +349,38 @@ func TestServer_SnapshotChangedBetweenStatementAndResponse(t *testing.T) {
 	p.ack(resp)
 	requirePresent(t, s.tracker, testListener)
 	requirePresent(t, s.tracker, otherListener)
+}
+
+// TestSnapshotVersions: the published version of a listener is the one in the
+// version map of the snapshot the cache serves the node. A node with no
+// snapshot, a name the snapshot does not have, and a snapshot whose versions
+// have not been computed all publish nothing: a wait is then never answered
+// by a version nobody compared.
+func TestSnapshotVersions(t *testing.T) {
+	cache := cachev3.NewSnapshotCache(true, cachev3.IDHash{}, nil)
+	published := SnapshotVersions(cache, serverNodeID)
+
+	_, ok := published(resourcev3.ListenerType, testListener)
+	require.False(t, ok, "no snapshot for the node")
+
+	snapshot, err := cachev3.NewSnapshot("v1", map[resourcev3.Type][]types.Resource{
+		resourcev3.ListenerType: {testServerListener(testListener, 1)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, cache.SetSnapshot(context.Background(), serverNodeID, snapshot))
+	_, ok = published(resourcev3.ListenerType, testListener)
+	require.False(t, ok, "the snapshot's versions are not computed yet")
+
+	require.NoError(t, snapshot.ConstructVersionMap())
+	version, ok := published(resourcev3.ListenerType, testListener)
+	require.True(t, ok)
+	require.Equal(t, snapshot.GetVersionMap(resourcev3.ListenerType)[testListener], version)
+	require.NotEmpty(t, version)
+
+	_, ok = published(resourcev3.ListenerType, otherListener)
+	require.False(t, ok, "not in the snapshot")
+	_, ok = published(resourcev3.ClusterType, testListener)
+	require.False(t, ok, "a listener is not a cluster")
+	_, ok = SnapshotVersions(cache, "another-node")(resourcev3.ListenerType, testListener)
+	require.False(t, ok, "another node's snapshot")
 }

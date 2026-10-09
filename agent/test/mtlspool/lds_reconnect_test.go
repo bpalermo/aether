@@ -78,6 +78,8 @@ func startLDSControlPlane(t *testing.T, socketPath string, listeners ...types.Re
 		tracker:  ack.NewTracker(slog.New(slog.DiscardHandler)),
 		versions: maps.Clone(snapshot.GetVersionMap(resourcev3.ListenerType)),
 	}
+	// As the node agent wires it: present is "at the version this cache serves".
+	cp.tracker.SetPublishedVersion(ack.SnapshotVersions(cache, envoyNodeID))
 	tracked := cp.tracker.Callbacks()
 	// The tracker runs first, so by the time a message is in the record the
 	// tracker has acted on it.
@@ -261,6 +263,29 @@ func TestReconnectingProxyStatesTheListenersItHolds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), ldsUnresolvedWait)
 	defer cancel()
 	require.Error(t, after.tracker.WaitListenerPresent(ctx, "never-published"), "a listener nobody stated is not resolved")
+
+	// Other content is published under a name the proxy holds (a same-named
+	// replacement pod). What the proxy stated is the old version, so the wait
+	// is answered only by its ACK of the response that carries the new one:
+	// the version on the wire is the version the tracker reads as published.
+	replaced, err := cachev3.NewSnapshot("v2", map[resourcev3.Type][]types.Resource{
+		resourcev3.ListenerType: {heldListener("held-a", 204), heldListener("held-b", 200)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, replaced.ConstructVersionMap())
+	require.NotEqual(t, after.versions["held-a"], replaced.GetVersionMap(resourcev3.ListenerType)["held-a"])
+	require.NoError(t, after.cache.SetSnapshot(context.Background(), envoyNodeID, replaced))
+	after.requirePresent(t, "held-a", "the proxy acknowledges the replacement's listener")
+	var update *discoverygrpc.DeltaDiscoveryResponse
+	after.mu.Lock()
+	for _, resp := range after.responses {
+		if resp.GetSystemVersionInfo() == "v2" {
+			update = resp
+		}
+	}
+	after.mu.Unlock()
+	require.NotNil(t, update, "the wait was answered before the replacement was sent")
+	assert.Equal(t, []string{"held-a"}, resourceNames(update))
 }
 
 // TestReconnectingProxyStatesNoListenerVersionItWasNotSent is the same restart

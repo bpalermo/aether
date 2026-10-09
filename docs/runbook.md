@@ -6184,6 +6184,18 @@ waited for, because the agent reads a listener it knows nothing of as absent. Li
 statement says the proxy accepted the listener, not that the listener has finished
 warming; the in-netns readiness probe stays the data-plane proof.
 
+The wait of a pod ADD is for a version, not for a name (#1511). A pod's listeners are
+named after the pod (`outbound_http_<pod>`, `inbound_<pod>`), so a pod recreated under
+the same name (a StatefulSet replica) publishes other content under a name the proxy
+already holds. The ADD's wait is answered only when the last thing a proxy acknowledged
+or stated for the name is the version the agent publishes at that moment. Before, any
+earlier acknowledgement of the name answered it at once, with the proxy still on the old
+pod's listener. So a `present`/`timeout` for a replacement pod now means what it says: the
+proxy did not acknowledge the replacement's listener within the wait. The state is kept
+per name for the node, not per proxy generation: during a hot restart the last word of
+either generation stands, and what one generation stated never overrides what either
+acknowledged or rejected afterwards, nor a rejection of that same version.
+
 The label names are the OTLP attribute keys (`aether.xds.type_url`, `aether.xds.wait`,
 `aether.xds.reason`) with their dots turned into underscores by the OTLP ingest, like
 every other metric here. Read back from a test cluster's Prometheus on 2026-10-08:

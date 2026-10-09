@@ -13,12 +13,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 
 	commonlog "aethermesh.dev/common/log"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"go.opentelemetry.io/otel"
@@ -32,6 +34,15 @@ type resourceState struct {
 	// nackErr holds Envoy's error detail when the most recent response covering
 	// this resource was rejected. Cleared by a subsequent ACK.
 	nackErr error
+	// nackVersion is the version of the resource in the rejected response
+	// (empty for a rejected removal).
+	nackVersion string
+	// version is the version of the resource the proxy holds: the one the
+	// acknowledged response carried, or the one the proxy stated. Empty when
+	// the resource is not present.
+	version string
+	// seq is the tracker's sequence number when this was written (Tracker.seq).
+	seq uint64
 }
 
 // inflightKey identifies one unacknowledged delta response. Nonces are unique
@@ -56,11 +67,17 @@ type inflightResponse struct {
 	// it is kept here to tell an AckObserver which snapshot was accepted.
 	systemVersion string
 	added         []string
+	// addedVersions is the version of each added resource, in the order of added.
+	addedVersions []string
 	removed       []string
 	// held is the resources the proxy stated it holds and this response, the
-	// first of its type on its stream, neither added nor removed (#1511). Only
-	// an ACK reads it: see statedHeld.
-	held []string
+	// first of its type on its stream, neither added nor removed, with the
+	// version it stated (#1511). Only an ACK reads it: see statedHeld.
+	held map[string]string
+	// sentSeq is the tracker's sequence number when the response was sent.
+	// Anything written to a resource's state after it is newer than what this
+	// response compared (onDeltaRequest).
+	sentSeq uint64
 }
 
 // AckObserver is told, once per acknowledged delta response, the resource type
@@ -74,6 +91,31 @@ type inflightResponse struct {
 // It runs on the xDS stream's goroutine, after the tracker's own lock is
 // released: it must not block.
 type AckObserver func(ctx context.Context, typeURL, systemVersion string)
+
+// PublishedVersion returns the version of the named resource in the snapshot
+// the agent currently publishes, and false when the snapshot does not have it.
+// It is the per-resource version go-control-plane sends with the resource and
+// compares a proxy's stated version with.
+//
+// It is called from a waiter's goroutine with no tracker lock held.
+type PublishedVersion func(typeURL, name string) (version string, ok bool)
+
+// SnapshotVersions is a PublishedVersion that reads the snapshot a
+// go-control-plane snapshot cache serves to nodeID: the same per-resource
+// version map the cache's delta responses are computed from.
+func SnapshotVersions(snapshots interface {
+	GetSnapshot(nodeID string) (cachev3.ResourceSnapshot, error)
+}, nodeID string,
+) PublishedVersion {
+	return func(typeURL, name string) (string, bool) {
+		snapshot, err := snapshots.GetSnapshot(nodeID)
+		if err != nil {
+			return "", false
+		}
+		version := snapshot.GetVersionMap(typeURL)[name]
+		return version, version != ""
+	}
+}
 
 // Tracker observes the delta-xDS streams via server callbacks and lets callers
 // wait until Envoy has acknowledged the presence or removal of a named resource.
@@ -93,8 +135,15 @@ type Tracker struct {
 	// initial_resource_versions carried (noteRequestLocked). The entry is
 	// there from the first request on, with no names when nothing may be
 	// concluded from them, so that a later request is never taken for the
-	// first.
-	stated map[streamType][]string
+	// first. Kept only with a PublishedVersion: without one a statement cannot
+	// be held to what is published when it is acted on.
+	stated map[streamType]map[string]string
+	// seq counts the acknowledgements and rejections that wrote state. It
+	// orders a write against the moment a response was sent.
+	seq uint64
+	// published, when set, makes "present" mean "at the published version"
+	// (SetPublishedVersion).
+	published PublishedVersion
 	// changed is closed and replaced on every state transition (broadcast).
 	changed chan struct{}
 	// observer, when set, is told of every ACK (SetAckObserver).
@@ -109,6 +158,25 @@ func (t *Tracker) SetAckObserver(fn AckObserver) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.observer = fn
+}
+
+// SetPublishedVersion makes WaitListenerPresent version-aware: the listener is
+// present when the proxy holds it at the version fn returns, not when it holds
+// some version of that name. A pod's listeners are named after the pod, so a
+// same-named replacement publishes other content under a name the proxy
+// already holds, and the name alone would resolve its wait before the proxy
+// has been sent anything.
+//
+// It is also what allows the tracker to act on what a proxy states it holds
+// (statedHeld): a statement is about one version, and is worth nothing once
+// another is published. Without fn the tracker keys presence by name and
+// reads no statement.
+//
+// Call it while wiring, before the xDS server serves.
+func (t *Tracker) SetPublishedVersion(fn PublishedVersion) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.published = fn
 }
 
 // NewTracker creates an empty Tracker.
@@ -126,7 +194,7 @@ func NewTracker(log *slog.Logger) *Tracker {
 		state:    make(map[string]resourceState),
 		inflight: make(map[inflightKey]inflightResponse),
 		answered: make(map[streamType]struct{}),
-		stated:   make(map[streamType][]string),
+		stated:   make(map[streamType]map[string]string),
 		changed:  make(chan struct{}),
 	}
 }
@@ -145,17 +213,30 @@ func (t *Tracker) Callbacks() serverv3.Callbacks {
 // WaitListenerPresent blocks until Envoy has ACKed an update containing the
 // named listener, the context ends, or Envoy NACKs it (returned as the error).
 //
-// A listener already ACKed earlier returns immediately. So does one Envoy
-// already holds at the published version and that is therefore never sent on
-// the current stream (an agent restart, a stream reset): the proxy states it
-// in its opening request and the ACK of the opening response resolves it
-// (statedHeld, #1511). Like an ACK, that says the proxy accepted the listener,
-// not that it has finished warming it.
+// With a PublishedVersion (SetPublishedVersion), which the node agent wires,
+// the listener is present when the last thing the proxy acknowledged or stated
+// for the name is the version the agent publishes now. So:
+//
+//   - a listener already ACKed at that version returns immediately;
+//   - so does one Envoy already holds at that version and that is therefore
+//     never sent on the current stream (an agent restart, a stream reset): the
+//     proxy states it in its opening request and the ACK of the opening
+//     response resolves it (statedHeld, #1511);
+//   - a listener whose published content changed since (a same-named
+//     replacement pod) waits for the ACK of the response that carries the new
+//     content, whatever the proxy acknowledged or stated for the name before.
+//
+// Like any ACK, that says the proxy accepted the listener, not that it has
+// finished warming it. Publish before waiting: the comparison is with what is
+// published when the wait looks.
 //
 // A wait can still run to the caller's deadline with the listener in place:
 // when no proxy is connected, or when the proxy rejected the opening response
 // because of another resource. Callers treat the wait as best-effort, exactly
 // like the admin config_dump poll this replaces.
+//
+// Without a PublishedVersion presence is keyed by the name alone: any earlier
+// ACK of the name returns immediately, and no statement is read.
 func (t *Tracker) WaitListenerPresent(ctx context.Context, name string) error {
 	return t.wait(ctx, resourcev3.ListenerType, name, true)
 }
@@ -180,13 +261,17 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 		t.mu.Lock()
 		st := t.state[key]
 		ch := t.changed
+		published := t.published
 		t.mu.Unlock()
 
 		if st.nackErr != nil {
 			t.metrics.waitFailed(ctx, wantPresent, reasonNack)
 			return fmt.Errorf("envoy rejected config for %s: %w", name, st.nackErr)
 		}
-		if st.present == wantPresent {
+		if !wantPresent && !st.present {
+			return nil
+		}
+		if wantPresent && st.present && atPublishedVersion(published, typeURL, name, st.version) {
 			return nil
 		}
 
@@ -200,6 +285,16 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 		case <-ch:
 		}
 	}
+}
+
+// atPublishedVersion reports whether held is the version published for the
+// resource. With no PublishedVersion every version is.
+func atPublishedVersion(published PublishedVersion, typeURL, name, held string) bool {
+	if published == nil {
+		return true
+	}
+	version, ok := published(typeURL, name)
+	return ok && version == held
 }
 
 // onDeltaResponse records the resources carried by an outgoing delta response
@@ -238,6 +333,7 @@ func (t *Tracker) onDeltaResponse(streamID int64, _ *discoveryv3.DeltaDiscoveryR
 	}
 	for _, r := range resp.GetResources() {
 		entry.added = append(entry.added, r.GetName())
+		entry.addedVersions = append(entry.addedVersions, r.GetVersion())
 	}
 	empty := len(entry.added) == 0 && len(entry.removed) == 0
 
@@ -246,6 +342,7 @@ func (t *Tracker) onDeltaResponse(streamID int64, _ *discoveryv3.DeltaDiscoveryR
 	opening := streamType{streamID: streamID, typeURL: entry.typeURL}
 	_, later := t.answered[opening]
 	t.answered[opening] = struct{}{}
+	entry.sentSeq = t.seq
 	if !later {
 		entry.held = statedHeld(t.stated[opening], entry.added, entry.removed)
 		delete(t.stated, opening)
@@ -279,23 +376,11 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 	}
 	delete(t.inflight, key)
 
+	t.seq++
 	if detail := req.GetErrorDetail(); detail != nil {
-		nackErr := fmt.Errorf("%s", detail.GetMessage())
-		for _, name := range append(entry.added, entry.removed...) {
-			st := t.state[entry.typeURL+"/"+name]
-			st.nackErr = nackErr
-			t.state[entry.typeURL+"/"+name] = st
-		}
+		t.rejectedLocked(entry, fmt.Errorf("%s", detail.GetMessage()))
 	} else {
-		for _, name := range entry.added {
-			t.state[entry.typeURL+"/"+name] = resourceState{present: true}
-		}
-		for _, name := range entry.removed {
-			t.state[entry.typeURL+"/"+name] = resourceState{present: false}
-		}
-		for _, name := range entry.held {
-			t.state[entry.typeURL+"/"+name] = resourceState{present: true}
-		}
+		t.acknowledgedLocked(entry)
 	}
 	t.broadcastLocked()
 	observer := t.observer
@@ -313,6 +398,45 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 	return nil
 }
 
+// rejectedLocked records a NACK against every resource of the response.
+// Callers must hold t.mu and have advanced t.seq.
+func (t *Tracker) rejectedLocked(entry inflightResponse, nackErr error) {
+	for i, name := range append(entry.added, entry.removed...) {
+		st := t.state[entry.typeURL+"/"+name]
+		st.nackErr = nackErr
+		st.nackVersion = ""
+		if i < len(entry.addedVersions) {
+			st.nackVersion = entry.addedVersions[i]
+		}
+		st.seq = t.seq
+		t.state[entry.typeURL+"/"+name] = st
+	}
+}
+
+// acknowledgedLocked records an ACK: what the response added and removed, and
+// what the proxy had stated it holds (statedHeld). Callers must hold t.mu and
+// have advanced t.seq.
+func (t *Tracker) acknowledgedLocked(entry inflightResponse) {
+	for i, name := range entry.added {
+		t.state[entry.typeURL+"/"+name] = resourceState{present: true, version: entry.addedVersions[i], seq: t.seq}
+	}
+	for _, name := range entry.removed {
+		t.state[entry.typeURL+"/"+name] = resourceState{seq: t.seq}
+	}
+	// What the proxy stated is older than anything it, or another proxy
+	// generation, acknowledged or rejected after this response was sent: a
+	// removal acknowledged meanwhile must not be undone by it. And a statement
+	// never clears a rejection of the very version it states, whenever that
+	// was: one generation holding it does not make the other accept it.
+	for name, version := range entry.held {
+		st := t.state[entry.typeURL+"/"+name]
+		if st.seq > entry.sentSeq || (st.nackErr != nil && st.nackVersion == version) {
+			continue
+		}
+		t.state[entry.typeURL+"/"+name] = resourceState{present: true, version: version, seq: t.seq}
+	}
+}
+
 // noteRequestLocked keeps the names a stream's FIRST request of a type states
 // in initial_resource_versions, until the first response of that type.
 // Callers must hold t.mu.
@@ -325,6 +449,9 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 //   - the request opens a wildcard subscription. For a subscription by name
 //     go-control-plane compares only the subscribed names, so a stated
 //     resource that is missing from the response may not have been looked at;
+//   - the request unsubscribes from nothing. go-control-plane forgets the
+//     stated version of a name the same request unsubscribes from, and then
+//     neither adds nor removes it whatever the snapshot has;
 //   - no other request of the type arrives before the first response. A second
 //     one can change the subscription the response is computed for, so it
 //     drops what the first stated.
@@ -336,31 +463,30 @@ func (t *Tracker) noteRequestLocked(key streamType, req *discoveryv3.DeltaDiscov
 		t.stated[key] = nil
 		return
 	}
-	var names []string
-	if opensWildcard(req) {
-		for name := range req.GetInitialResourceVersions() {
-			names = append(names, name)
-		}
+	var stated map[string]string
+	if t.published != nil && opensWildcard(req) {
+		// A copy: the request's map becomes the server's subscription state.
+		stated = maps.Clone(req.GetInitialResourceVersions())
 	}
-	t.stated[key] = names
+	t.stated[key] = stated
 }
 
 // wildcard is the resource name that subscribes to every resource of a type.
 const wildcard = "*"
 
 // opensWildcard reports whether a first request subscribes to every resource
-// of its type: it names no resource (the legacy form) or names "*", and does
-// not unsubscribe from "*".
+// of its type and to nothing else: it names no resource (the legacy form) or
+// names "*", and unsubscribes from nothing.
 func opensWildcard(req *discoveryv3.DeltaDiscoveryRequest) bool {
-	if slices.Contains(req.GetResourceNamesUnsubscribe(), wildcard) {
+	if len(req.GetResourceNamesUnsubscribe()) > 0 {
 		return false
 	}
 	subscribed := req.GetResourceNamesSubscribe()
 	return len(subscribed) == 0 || slices.Contains(subscribed, wildcard)
 }
 
-// statedHeld returns the stated names that the first response of their type
-// on their stream neither added nor removed (#1511).
+// statedHeld returns, with the version stated, the stated names that the first
+// response of their type on their stream neither added nor removed (#1511).
 //
 // go-control-plane computes that response by comparing every resource of the
 // snapshot with the version the proxy stated for it: a resource whose version
@@ -381,7 +507,14 @@ func opensWildcard(req *discoveryv3.DeltaDiscoveryRequest) bool {
 // (onDeltaRequest). A rejected opening response resolves nothing, though the
 // proxy still holds what it stated: the agent then waits for the next
 // acknowledgement instead of reasoning about a proxy that is rejecting config.
-func statedHeld(stated, added, removed []string) []string {
+//
+// The comparison is with the snapshot of the moment the response was
+// computed, and the snapshot moves on: by the ACK, or any time after it, the
+// name may publish other content. So the stated VERSION is what is recorded,
+// and a wait compares it with what is published when it looks
+// (atPublishedVersion). The name alone would resolve the wait of a same-named
+// replacement before the proxy had been sent it.
+func statedHeld(stated map[string]string, added, removed []string) map[string]string {
 	if len(stated) == 0 {
 		return nil
 	}
@@ -392,10 +525,10 @@ func statedHeld(stated, added, removed []string) []string {
 	for _, name := range removed {
 		changed[name] = struct{}{}
 	}
-	var held []string
-	for _, name := range stated {
+	held := make(map[string]string, len(stated))
+	for name, version := range stated {
 		if _, ok := changed[name]; !ok {
-			held = append(held, name)
+			held[name] = version
 		}
 	}
 	return held

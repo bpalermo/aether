@@ -303,6 +303,9 @@ func runAgent(ctx context.Context) (retErr error) {
 	// A cluster update the proxy acknowledges becomes "the SAN-pin state the
 	// proxy accepted" (aether.agent.xds.acked_tls_clusters, #1425).
 	ackTracker.SetAckObserver(snapshotCache.ResponseAcked)
+	// A pod's listener is acknowledged when the proxy holds the version this
+	// agent publishes, not any listener of that name (#1511).
+	ackTracker.SetPublishedVersion(ack.SnapshotVersions(snapshotCache, cfg.NodeName))
 
 	spireBridge, err := wireSpireBridge(ctx, m, snapshotCache, spireSource)
 	if err != nil {
