@@ -9,7 +9,7 @@ A release that rebuilds a binary changes that binary's build ID, so Pyroscope no
 knows how to symbolise it until a matching blob arrives.
 
 > **Since #651/#653 the ID is a hash of the binary's own content, not of the release.**
-> Every Go ELF that enters an image — each image's main binary and whatever rides
+> Every Go ELF that enters a released image — each image's main binary and whatever rides
 > along as an extra layer (the readiness probers, the CNI plugin), all of which
 > `//bazel/buildid:release_build_ids` guards — gets
 > `sha1(its own bytes)` written into `.note.gnu.build-id` by
