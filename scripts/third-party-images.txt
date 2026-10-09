@@ -4,6 +4,7 @@
 #   scripts/third-party-images.sh check      every reference in the tree agrees with this file (CI)
 #   scripts/third-party-images.sh list       where each pin is used
 #   scripts/third-party-images.sh outdated   which pins the registry has moved past
+#   scripts/third-party-images.sh newer      which pins have newer tags next to the pinned one
 #   scripts/third-party-images.sh resolve <name>:<tag>   the `pin` line for a new image or tag
 #
 # docs/runbook.md, "Refreshing third-party image pins", is the procedure.

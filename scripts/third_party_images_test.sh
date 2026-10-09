@@ -8,7 +8,11 @@
 #      inventory does not list, a tag that disagrees with it, in every spelling
 #      the scan reads (YAML, --image, a shell *_IMAGE default, Go), a known
 #      image by tag behind a key the scan does not read, a pin or an exception
-#      nothing uses, and a scan that read nothing.
+#      nothing uses, and a scan that read nothing. A YAML file goes through
+#      the YAML parser (#1525): what a line reader could not follow, a file no
+#      parser can read, and a reader that fails. The Bazel module files: the
+#      two pulls, the files they include() and a rule of an image ruleset the
+#      reader does not know (#1571).
 #   2. `outdated` and `resolve` against a fake `curl` that plays the registries:
 #      a tag that still points at the pin, one that moved, a registry that is
 #      down or answers with something that is not a manifest (never "current"),
@@ -16,8 +20,9 @@
 #      across two pages of a tag list.
 #   3. no credential: every fake-registry call is logged, and none carries one.
 #
-# Run: bazel test //scripts:third_party_images_test (jq is the Bazel-pinned
-# one), or bash scripts/third_party_images_test.sh with jq on PATH.
+# Run: bazel test //scripts:third_party_images_test (jq and the YAML reader's
+# PyYAML are the Bazel-pinned ones), or bash scripts/third_party_images_test.sh
+# with jq and a python3 that has PyYAML on PATH.
 #
 # File-wide: the fixture lines below are literal shell, YAML and Markdown written
 # into throwaway files ('C_IMAGE="${C_IMAGE:-x/y:1.2}"'); none is meant to expand
@@ -38,6 +43,18 @@ JQ="${JQ:-$(command -v jq)}"
 	exit 1
 }
 export JQ
+
+# The YAML reader `check` hands every YAML file to: under Bazel the py_binary
+# with the hash-checked PyYAML wheel, otherwise the script's own default
+# (python3 on PATH and its yaml module).
+if [ -n "${YAML_READER_RLOCATIONPATH:-}" ]; then
+	THIRD_PARTY_YAML_READER="${TEST_SRCDIR:-${RUNFILES_DIR:-$PWD/..}}/${YAML_READER_RLOCATIONPATH}"
+	[ -x "$THIRD_PARTY_YAML_READER" ] || {
+		echo "FAIL: no YAML reader (THIRD_PARTY_YAML_READER=${THIRD_PARTY_YAML_READER})"
+		exit 1
+	}
+	export THIRD_PARTY_YAML_READER
+fi
 
 TMP="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
@@ -263,9 +280,11 @@ mutate "YAML tag and anchor before the value" e2e/sub/pod.yaml '  - image: !!str
 	"e2e/sub/pod.yaml:1: x/y:latest is pinned by tag only"
 mutate "YAML anchor in a flow mapping" e2e/sub/pod.yaml '  containers: [{name: p, image: &probe x/y:latest}]' \
 	"e2e/sub/pod.yaml:1: x/y:latest is pinned by tag only"
-# An alias is a value written somewhere this scan cannot follow: refused.
-mutate "YAML alias as the image" e2e/sub/pod.yaml '    image: *probe' \
-	"e2e/sub/pod.yaml:1: *probe names no tag and no digest"
+# An alias with no anchor is no YAML: the file is refused, never passed over.
+# (Before #1525 the line reader refused the alias itself, as `*probe names no
+# tag`; an alias that HAS its anchor is followed, below.)
+mutate "YAML alias with no anchor as the image" e2e/sub/pod.yaml '    image: *probe' \
+	"e2e/sub/pod.yaml:1: is not YAML a parser can read (found undefined alias"
 
 # Second review of #1476. JSON inside a DOUBLE-quoted shell argument: every
 # quote of it is written `\"`.
@@ -367,6 +386,101 @@ if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 11 image reference(s) in "* ]]; then
 else
 	bad "pinned flow/block spellings: exit $RC"$'\n'"$OUT"
 fi
+
+# --- a YAML file is read with a YAML parser (#1525, #1557) ----------------------
+#
+# What a line reader could not follow in a YAML file: each is a reference by
+# tag only and must fail, at the line the value is written on.
+mutate "YAML alias, followed to its anchor" e2e/sub/pod.yaml $'probe: &probe new/tool:latest\nspec:\n  image: *probe' \
+	"e2e/sub/pod.yaml:1: new/tool:latest is pinned by tag only"
+mutate "YAML block scalar behind node properties" e2e/sub/pod.yaml $'    image: &probe >-\n      new/tool:latest' \
+	"e2e/sub/pod.yaml:2: new/tool:latest is pinned by tag only"
+mutate "YAML flow mapping broken between the key and its value" e2e/sub/pod.yaml $'  containers: [{name: probe, image:\n      new/tool:latest}]' \
+	"e2e/sub/pod.yaml:2: new/tool:latest is pinned by tag only"
+# A whole reference under a child key of `image:` (the Helm values spelling
+# `image:` / `  ref: x`), of a name no pin knows yet (#1557).
+mutate "YAML reference under a child key of image:, a name no pin knows" charts/x/values.yaml $'engine:\n  image:\n    ref: new/tool:latest' \
+	"charts/x/values.yaml:8: new/tool:latest is pinned by tag only"
+mutate "YAML reference under a child key of image:, flow mapping" charts/x/values.yaml 'engine: {image: {ref: new/tool:latest, pullPolicy: Always}}' \
+	"charts/x/values.yaml:6: new/tool:latest is pinned by tag only"
+# A mapping reached once as it stands and once, through an alias, as the value
+# of an image key is judged the second time too.
+mutate "YAML alias of a mapping, under an image key" e2e/sub/pod.yaml $'shared: &shared {ref: new/tool:latest}\nengine:\n  image: *shared' \
+	"e2e/sub/pod.yaml:1: new/tool:latest is pinned by tag only"
+# Every document of a multi-document file is read, however alike they are.
+new_tree "$T"
+for _ in 1 2 3 4 5 6; do
+	printf -- '---\nkind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - name: echo\n          image: a/b:1.0@%s\n' "$D1"
+done >"$T/e2e/sub/many.yaml"
+run_check "$T"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 10 image reference(s) in "* ]]; then
+	ok "every document of a multi-document YAML file is read"
+else
+	bad "multi-document YAML: exit $RC"$'\n'"$OUT"
+fi
+printf -- '---\nkind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - name: echo\n          image: new/tool:latest\n' >>"$T/e2e/sub/many.yaml"
+expect_fail "an image by tag in the last document of a multi-document YAML file" "$T" \
+	"e2e/sub/many.yaml:56: new/tool:latest is pinned by tag only"
+# A file under a YAML name that no parser can read is a finding: it is not
+# passed over, and it is not handed to the line reader as if it were a script.
+mutate "a YAML file no parser can read" e2e/sub/broken.yaml $'spec:\n  ports: [1, 2\n  image: 3' \
+	"e2e/sub/broken.yaml:3: is not YAML a parser can read"
+# What a string of a YAML file holds is text in another language, and is read
+# like a here-document: a manifest, a script (its comments are comments), JSON.
+mutate "a manifest embedded in a YAML block scalar" e2e/sub/cm.yaml $'data:\n  pod.yaml: |\n    spec:\n      containers:\n        - image: new/tool:latest' \
+	"e2e/sub/cm.yaml:5: new/tool:latest is pinned by tag only"
+mutate "a script embedded in a YAML block scalar" e2e/sub/cm.yaml $'data:\n  run.sh: |\n    # kubectl run old --image=x/y:0\n    kubectl run q --image=new/tool:latest # why' \
+	"e2e/sub/cm.yaml:4: new/tool:latest is pinned by tag only"
+mutate "JSON embedded in a YAML string" e2e/sub/cm.yaml $'overrides: \'{"spec":{"containers":[{"name":"r","image":"new/tool:latest"}]}}\'' \
+	"e2e/sub/cm.yaml:1: new/tool:latest is pinned by tag only"
+mutate "a known image by tag in a YAML string" e2e/sub/cm.yaml 'command: ["docker", "run", "a/b:1.0"]' \
+	"e2e/sub/cm.yaml:1: a/b:1.0 is pinned by tag only"
+# A `#` inside a YAML string is text: the parser has already taken the comments.
+mutate "a known image after a # inside a YAML string" e2e/sub/cm.yaml 'note: "step # 1, then a/b:1.0"' \
+	"e2e/sub/cm.yaml:1: a/b:1.0 is pinned by tag only"
+# A Helm template is no YAML until it is rendered: it stays with the line
+# reader, like YAML embedded in any other language.
+mutate "a Helm template is still read line by line" charts/x/templates/d.yaml $'{{- if .Values.x }}\n          image: new/tool:latest\n{{- end }}' \
+	"charts/x/templates/d.yaml:2: new/tool:latest is pinned by tag only"
+# ...and what the fail-closed line reader charged for it is gone: prose inside a
+# YAML string that reads `, image: word` is prose, and a comment line inside an
+# embedded script is a comment.
+new_tree "$T"
+cat >"$T/e2e/sub/pod.yaml" <<EOF
+notes: |
+  nodes, image: missing
+  [image: missing], image: gone
+script: |
+  # docker run a/b:0.9
+  true # a/b:0.8
+cut:
+  - |
+    image: >-
+  - |
+    new/tool:latest
+parts: &parts
+  image:
+    repository: local
+    tag: dev
+again: *parts
+EOF
+run_check "$T"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 4 image reference(s) in "* ]]; then
+	ok "prose and comments inside a YAML string are not read; an image split over repository/tag is not a reference"
+else
+	bad "prose in a YAML string: exit $RC"$'\n'"$OUT"
+fi
+# The reader failing is never "no YAML file names an image": exit 2.
+for reader in false true; do
+	new_tree "$T"
+	OUT="$(THIRD_PARTY_ROOT="$T" THIRD_PARTY_YAML_READER="$reader" "$SCRIPT" check 2>&1)"
+	RC=$?
+	if [ "$RC" -eq 2 ] && [[ "$OUT" == *"YAML reader"* ]] && [[ "$OUT" != *"OK:"* ]]; then
+		ok "a YAML reader that fails or answers for no file ($reader) is exit 2, never a pass"
+	else
+		bad "YAML reader '$reader': exit $RC"$'\n'"$OUT"
+	fi
+done
 
 # A pin nothing uses.
 new_tree "$T"
@@ -597,6 +711,124 @@ sed -i -e "s/^    digest = \"$D9\".*/    # digest = \"$D9\",/" "$M/MODULE.bazel"
 expect_fail "MODULE.bazel: a commented-out attribute is not read" "$M" \
 	"MODULE.bazel:8: gcr.io/base/static:nonroot is pinned by tag only" \
 	"pin gcr.io/base/static nonroot $D9 is used by no file"
+
+# --- 1c. include()d module files and other pulling rules (#1571) -----------------
+#
+# A module file may `include()` another, and a pull moved there is still a pull:
+# the reader follows the include, from the workspace the module file is the root
+# of. What it cannot follow, and a rule of an image ruleset it does not know, is
+# a finding.
+
+# include_tree <dir>: the module tree with the root pull moved into a file the
+# root module file includes, through a second include.
+include_tree() {
+	local t="$1"
+	module_tree "$t"
+	mkdir -p "$t/bazel/images" "$t/proxy/bazel"
+	{
+		echo '# The base images.'
+		sed -n '/^pull = use_repo_rule/,/^)$/p' "$t/MODULE.bazel"
+	} >"$t/bazel/images/base.MODULE.bazel"
+	echo 'include("//bazel/images:base.MODULE.bazel")  # the pulls' >"$t/images.MODULE.bazel"
+	sed -i -e '/^pull = use_repo_rule/,/^)$/d' "$t/MODULE.bazel"
+	echo 'include("//:images.MODULE.bazel")' >>"$t/MODULE.bazel"
+}
+include_tree "$M"
+run_check "$M"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 6 image reference(s) in "*": 5 pinned image(s), "* ]]; then
+	ok "include(): a pull in an included module file, two includes deep, is read"
+else
+	bad "include tree: exit $RC"$'\n'"$OUT"
+fi
+OUT="$(THIRD_PARTY_ROOT="$M" "$SCRIPT" list 2>&1)"
+if [[ "$OUT" == *"gcr.io/base/static:nonroot@$D9"$'\n'"    bazel/images/base.MODULE.bazel:6"* ]]; then
+	ok "include(): list names the included file and the digest's line"
+else
+	bad "include list:"$'\n'"$OUT"
+fi
+include_tree "$M"
+sed -i -e "s/$D9/$D2/" "$M/bazel/images/base.MODULE.bazel"
+expect_fail "include(): a digest the inventory does not list, in an included file" "$M" \
+	"bazel/images/base.MODULE.bazel:6: gcr.io/base/static:nonroot@$D2 is not in scripts/third-party-images.txt" \
+	"pin gcr.io/base/static nonroot $D9 is used by no file"
+# An include of the //proxy workspace is a path under proxy/.
+include_tree "$M"
+{
+	echo 'oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")'
+	sed -n '/^oci.pull(/,/^)$/p' "$M/proxy/MODULE.bazel" | sed -e "s/$D1/$D2/"
+} >"$M/proxy/bazel/base.MODULE.bazel"
+echo 'include("//bazel:base.MODULE.bazel")' >"$M/proxy/MODULE.bazel"
+expect_fail "include(): an included file of the proxy workspace is read from under proxy/" "$M" \
+	"proxy/bazel/base.MODULE.bazel:4: gcr.io/base/cc@$D2 is not in scripts/third-party-images.txt"
+# Two files that include each other are each read once.
+include_tree "$M"
+echo 'include("//:images.MODULE.bazel")' >>"$M/bazel/images/base.MODULE.bazel"
+run_check "$M"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 6 image reference(s) in "* ]]; then
+	ok "include(): a cycle of includes ends"
+else
+	bad "include cycle: exit $RC"$'\n'"$OUT"
+fi
+# An include() the reader cannot follow is a finding at its line.
+include_edit() { # <name> <include line> <needle>...
+	local name="$1" line="$2"
+	shift 2
+	include_tree "$M"
+	sed -i -e '$d' "$M/MODULE.bazel"
+	printf '%s\n' "$line" >>"$M/MODULE.bazel"
+	expect_fail "$name" "$M" "$@"
+}
+include_edit "include(): a file that is not there" 'include("//bazel:gone.MODULE.bazel")' \
+	"MODULE.bazel:11: include() names bazel/gone.MODULE.bazel, which is not a file"
+include_edit "include(): a label that is not a string literal" 'include(IMAGES)' \
+	"MODULE.bazel:11: an include() the reader cannot follow"
+include_edit "include(): broken across lines" $'include(\n    "//:images.MODULE.bazel",\n)' \
+	"MODULE.bazel:11: an include() the reader cannot follow"
+include_edit "include(): behind another statement" 'x = 1; include("//:images.MODULE.bazel")' \
+	"MODULE.bazel:11: an include() the reader cannot follow"
+include_edit "include(): a label out of the workspace" 'include("//../other:images.MODULE.bazel")' \
+	"MODULE.bazel:11: an include() the reader cannot follow"
+# ...and a comment or an attribute that says include( is not an include.
+include_tree "$M"
+cat >>"$M/MODULE.bazel" <<'EOF'
+# include("//bazel:gone.MODULE.bazel") was here once
+archive_override(
+    module_name = "x",
+    patch_cmds = ["sed -i 's/#include(a)//' x.h"],
+)
+EOF
+run_check "$M"
+if [ "$RC" -eq 0 ]; then
+	ok "include(): a comment and a string that say include( are not read"
+else
+	bad "include in a comment: exit $RC"$'\n'"$OUT"
+fi
+
+# A rule of an image ruleset the reader does not know pulls an image the check
+# never sees: a finding, whether or not the file also holds a pull it can read.
+module_edit "MODULE.bazel: a repository rule of an image ruleset the reader does not know" MODULE.bazel \
+	'$a oci_pull = use_repo_rule("@rules_oci//oci:pull.bzl", "oci_pull")' \
+	"MODULE.bazel:21: names @rules_oci//oci:pull.bzl, a rule of an image ruleset the reader does not know"
+module_edit "proxy/MODULE.bazel: an extension of an image ruleset the reader does not know" proxy/MODULE.bazel \
+	'$a images = use_extension("@rules_img//img:extensions.bzl", "images")' \
+	"proxy/MODULE.bazel:12: names @rules_img//img:extensions.bzl, a rule of an image ruleset the reader does not know"
+module_edit "MODULE.bazel: rules_docker's container_pull" MODULE.bazel \
+	'$a container_pull = use_repo_rule("@io_bazel_rules_docker//container:pull.bzl", "container_pull")' \
+	"MODULE.bazel:21: names @io_bazel_rules_docker//container:pull.bzl, a rule of an image ruleset the reader does not know"
+# The known .bzl under another symbol, next to a pull that IS read: the file is
+# not excused by its one readable pull.
+module_edit "MODULE.bazel: a second binding of the pull rule that the reader cannot read" MODULE.bazel \
+	'$a other = use_repo_rule("@rules_img//img:pull.bzl", "pull_tarball")' \
+	"MODULE.bazel:21: names @rules_img//img:pull.bzl in a way the reader does not know"
+# A dependency on an image ruleset is not a pull.
+module_tree "$M"
+echo 'bazel_dep(name = "rules_oci", version = "2.0")' >>"$M/MODULE.bazel"
+run_check "$M"
+if [ "$RC" -eq 0 ]; then
+	ok "module files: a bazel_dep on an image ruleset is not a pull"
+else
+	bad "bazel_dep on rules_oci: exit $RC"$'\n'"$OUT"
+fi
 
 # --- 2. the registry -----------------------------------------------------------
 
@@ -856,13 +1088,58 @@ says "outdated --newer-tags: same shape, version order, both pages" 0 \
 for unwanted in latest rc1 v8.30.0 "8.9.0" "8.22.0.1"; do
 	[[ "${OUT#*newer tags:}" == *"$unwanted"* ]] && bad "newer tags include $unwanted: $OUT"
 done
+# `newer` (#1569): the same list as a command of its own, which the scheduled
+# report runs next to `outdated`. It asks for tag lists and for no manifest.
+: >"$FAKE/calls"
+registry newer
+says "newer: same shape, version order, both pages, and a summary" 0 \
+	"NEWER    gcr.io/proj/echo:8.22.0  3 newer: 8.23.0 8.100.1 9.0.0" "1 checked: 1 with newer tags, 0 could not be listed."
+if grep -q '/manifests/' "$FAKE/calls"; then bad "newer asked for a manifest:"$'\n'"$(cat "$FAKE/calls")"; else ok "newer reads tag lists only"; fi
+reported
+says "report: the newer tags are a section of the dry run, which still says every pin is current" 0 \
+	"  | NEWER    gcr.io/proj/echo:8.22.0  3 newer: 8.23.0 8.100.1 9.0.0" "DRY RUN: every pin is current"
+registry newer gcr.io/proj/echo
+says "newer <name>: only that pin" 0 "1 checked: 1 with newer tags"
+registry newer no/such
+says "newer <name>: an unknown name is an error" 2 "no pin matches no/such"
+tags gcr.io proj/echo 2 9.0.0 9.0.1 9.0.2 9.0.3 9.0.4 9.0.5 9.0.6 9.0.7
+registry newer
+says "newer: of many newer tags, the count and the newest" 0 \
+	"NEWER    gcr.io/proj/echo:8.22.0  10 newer, the newest 8: 9.0.0 9.0.1 9.0.2 9.0.3 9.0.4 9.0.5 9.0.6 9.0.7"
 tags gcr.io proj/echo 1 8.22.0 8.1.0
 rm -f "$FAKE/gcr.io/proj/echo/tags/2"
 registry outdated --newer-tags
 if [ "$RC" -eq 0 ] && [[ "$OUT" != *"newer tags"* ]]; then ok "outdated --newer-tags: silent when nothing is newer"; else bad "no newer tag: exit $RC"$'\n'"$OUT"; fi
+registry newer
+if [ "$RC" -eq 0 ] && [[ "$OUT" != *"NEWER"* ]] && [[ "$OUT" == *"1 checked: 0 with newer tags, 0 could not be listed."* ]]; then
+	ok "newer: no line for a pin with nothing newer, exit 0"
+else
+	bad "newer, nothing newer: exit $RC"$'\n'"$OUT"
+fi
 rm -rf "$FAKE/gcr.io/proj/echo/tags"
 registry outdated --newer-tags
 says "outdated --newer-tags: a tag list that cannot be read is an error" 2 "ERROR    gcr.io/proj/echo:8.22.0  tags:"
+says "outdated --newer-tags: the error says what the registry answered" 2 \
+	"ERROR    gcr.io/proj/echo:8.22.0  tags: https://gcr.io/v2/proj/echo/tags/list?n=1000 answered HTTP 404"
+registry newer
+says "newer: a tag list that cannot be read is an error with its reason, exit 2" 2 \
+	"ERROR    gcr.io/proj/echo:8.22.0  tags: https://gcr.io/v2/proj/echo/tags/list?n=1000 answered HTTP 404" \
+	"1 checked: 0 with newer tags, 1 could not be listed."
+reported
+says "report: a tag list that cannot be read is said in the section and changes nothing else" 0 \
+	"The tag list of 1 pin(s) was not read in this run" "DRY RUN: every pin is current"
+
+# A tag is a string: 3.1 is not the pinned 3.10, and 3.2 to 3.9 are older.
+d_pause="$(serve gcr.io proj/pause 3.10 "${BOTH[@]}")"
+echo "pin gcr.io/proj/pause 3.10 $d_pause" >"$INV"
+tags gcr.io proj/pause 1 3.0 3.1 3.2 3.9 3.10 3.11 latest
+registry newer
+says "newer: tags that are equal as numbers are not the pinned tag" 0 \
+	"NEWER    gcr.io/proj/pause:3.10  1 newer: 3.11" "1 checked: 1 with newer tags"
+registry outdated --newer-tags
+says "outdated --newer-tags: the same" 0 "gcr.io/proj/pause:3.10  newer tags: 3.11 "
+[[ "$OUT" == *"newer tags: 3.2"* ]] && bad "outdated --newer-tags lists 3.2 as newer than 3.10: $OUT"
+echo "pin gcr.io/proj/echo 8.22.0 $d_echo" >"$INV"
 
 # What is allowed to stay a tag is reported with where its tag points.
 cat >"$INV" <<EOF

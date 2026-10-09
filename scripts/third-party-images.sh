@@ -17,8 +17,9 @@
 #
 # A base image is third-party too (#1477): the image every aether image is
 # built on is pulled by the Bazel module files, where it is the attributes of a
-# pull and never one reference. MODULE_FILES are read for exactly that
-# construct (extract_module_pulls) and what they name is held to the same list.
+# pull and never one reference. MODULE_FILES, and the module files they
+# `include()`, are read for exactly that construct (extract_module_pulls) and
+# what they name is held to the same list.
 #
 # Usage:
 #   scripts/third-party-images.sh check
@@ -29,7 +30,11 @@
 #         - a digest the inventory does not list for that name
 #         - a tag that disagrees with the inventory's tag for that digest
 #         - a pin, or an `allow` or `skip` line, that nothing uses any more
-#       so a new image cannot arrive unpinned or unlisted.
+#         - a YAML file no YAML parser can read, a module file's include() it
+#           cannot follow, and a rule of an image ruleset it does not know
+#       so a new image cannot arrive unpinned or unlisted. YAML files are read
+#       with a YAML parser (#1525): this needs python3 with PyYAML, and stops
+#       with exit 2, having checked nothing, when it is not there.
 #   scripts/third-party-images.sh list
 #       Offline. Every pin and the files that use it.
 #   scripts/third-party-images.sh outdated [--newer-tags] [<name>...]
@@ -45,6 +50,13 @@
 #       pinned one and have its shape (8.22.0 -> 8.23.0, not `latest`).
 #       Exit 0: every pin is current. 1: a pin is behind. 2: a pin could not be
 #       checked.
+#   scripts/third-party-images.sh newer [<name>...]
+#       Asks each pin's registry for its tag list and nothing else, and prints
+#       `NEWER <name>:<tag>  <n> newer: <tags>` for a pin that has tags of the
+#       pinned tag's shape that sort after it (the newest NEWER_SHOWN of them),
+#       `ERROR <name>:<tag>  tags: <why>` for a list it could not read, and a
+#       summary line. The scheduled report shows it as a section of its issue
+#       (#1569). Exit 0: every list was read, newer tags or not. 2: one was not.
 #   scripts/third-party-images.sh resolve <name>:<tag>...
 #       Prints the `pin` line for each, after checking the index lists both
 #       architectures. How a pin is added or moved; see docs/runbook.md,
@@ -54,7 +66,11 @@
 #   THIRD_PARTY_ROOT       the tree to scan (default: this script's repository)
 #   THIRD_PARTY_INVENTORY  the inventory (default: scripts/third-party-images.txt
 #                          under the root)
-#   JQ, CURL               the jq and curl to run (`outdated`, `resolve` only)
+#   JQ, CURL               the jq and curl to run (`outdated`, `newer`, `resolve`
+#                          only)
+#   THIRD_PARTY_YAML_READER  the YAML reader `check` and `list` run (default:
+#                          python3 scripts/third_party_images_yaml.py; the test
+#                          passes the Bazel-built one, with a pinned PyYAML)
 set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,6 +78,11 @@ ROOT="${THIRD_PARTY_ROOT:-$(cd -- "$HERE/.." && pwd)}"
 INVENTORY="${THIRD_PARTY_INVENTORY:-$ROOT/scripts/third-party-images.txt}"
 JQ="${JQ:-jq}"
 CURL="${CURL:-curl}"
+if [ -n "${THIRD_PARTY_YAML_READER:-}" ]; then
+	YAML_READER=("$THIRD_PARTY_YAML_READER")
+else
+	YAML_READER=(python3 "$HERE/third_party_images_yaml.py")
+fi
 
 # Where an image reference can reach a cluster or a container runtime from:
 # the charts, the e2e harnesses and their manifests, the Go e2e and conformance
@@ -173,20 +194,72 @@ is_skipped() {
 	return 1
 }
 
+declare -A YAML_PARSED=() # "<path>" -> 1: read from its records, not line by line
+
+# read_yaml_files <work dir> <problems out> <path>...: hands the YAML files to
+# the YAML reader (YAML_READER; scripts/third_party_images_yaml.py). Sets
+# YAML_PARSED for each file it parsed, whose records are then in
+# <work dir>/records/<path>; appends "<path>\t<line>\t<what is wrong>" to
+# <problems out> for a file that is neither YAML nor a template. Returns 1,
+# with the reason on stderr, when the reader failed or did not answer for every
+# file: the caller then stops, because a YAML file nothing read is not a file
+# with no image in it.
+read_yaml_files() {
+	local work="$1" problems="$2" status path line what n=0
+	shift 2
+	mkdir -p "$work/records" || return 1
+	printf '%s\n' "$@" | (cd "$ROOT" && "${YAML_READER[@]}" "$work/records") >"$work/yaml-status" || {
+		echo "third-party-images: the YAML reader failed (${YAML_READER[*]}): it needs python3 with PyYAML (THIRD_PARTY_YAML_READER names another)" >&2
+		return 1
+	}
+	while IFS=$'\t' read -r status path line what; do
+		case "$status" in
+		parsed)
+			[ -f "$work/records/$path" ] || continue
+			YAML_PARSED["$path"]=1
+			;;
+		template) ;;
+		problem) printf '%s\t%s\t%s\n' "$path" "$line" "$what" >>"$problems" ;;
+		*) continue ;;
+		esac
+		n=$((n + 1))
+	done <"$work/yaml-status"
+	[ "$n" -eq "$#" ] || {
+		echo "third-party-images: the YAML reader (${YAML_READER[*]}) answered for $n of $# YAML file(s)" >&2
+		return 1
+	}
+}
+
 # Prints "<path>\t<line>\t<reference>" for every literal image reference.
 #
+# A YAML file (`*.yaml`, `*.yml`) is read by a YAML parser and never line by
+# line (#1525): read_yaml_files hands the scan one record per scalar, so what
+# is judged is what the file says, in whatever syntax it says it: a flow
+# mapping broken across lines, a block scalar behind node properties, a value
+# on the line after its key, an alias (followed to its anchor and reported
+# there). A file under a YAML name that no parser can read is a finding, unless
+# it holds `{{`: a Helm template is no YAML until it is rendered, and is read
+# line by line with every other file.
+#
 # Two nets, because no single pattern knows every way an image is named:
-#   1. the value after an `image` key or flag, in any of the spellings in use:
-#      YAML `image: x` (a block key, a list item, with a trailing comment, in
-#      a flow mapping `[{name: p, image: x}]`, also one broken across lines,
-#      as a block scalar `image: >-` with the value on the next line, as a
-#      plain or quoted scalar alone on the line after a bare `image:`, behind an
-#      anchor or a tag `image: &a x`; an alias `image: *a` is refused, since
-#      its value is written where the scan cannot follow), JSON `"image": "x"`
-#      (also inside a shell string, `--overrides='{"image":"x"}'` or
-#      `--overrides="{\"image\":\"x\"}"`), `--image=x` / `--image x`, a shell
-#      `FOO_IMAGE="x"` or `FOO_IMAGE="${FOO_IMAGE:-x}"`, Go `Image: "x"` and
-#      `Image = "x"`;
+#   1. the value of an `image` key or flag:
+#      - in a YAML file, the scalar under any key that ends in `image` (any
+#        case), and a scalar directly under such a key's mapping or sequence
+#        (`image:` / `  ref: x`, as some Helm values files write a whole
+#        reference), except under the keys an image is split over (see below);
+#      - line by line everywhere else, in any of the spellings in use: YAML
+#        embedded in a here-document or a template (`image: x` as a block key,
+#        a list item, with a trailing comment, in a flow mapping
+#        `[{name: p, image: x}]`, as a block scalar `image: >-` with the value
+#        on the next line, as a plain or quoted scalar alone on the line after
+#        a bare `image:`, behind an anchor or a tag `image: &a x`; an alias
+#        `image: *a` is refused, since no parser followed it), JSON
+#        `"image": "x"` (also inside a shell string,
+#        `--overrides='{"image":"x"}'` or `--overrides="{\"image\":\"x\"}"`),
+#        `--image=x` / `--image x`, a shell `FOO_IMAGE="x"` or
+#        `FOO_IMAGE="${FOO_IMAGE:-x}"`, Go `Image: "x"` and `Image = "x"`. What
+#        a string of a YAML file holds (a script, a manifest, JSON) is read
+#        this way too: it is text in another language;
 #   2. any `<name>:<tag>` or `<name>@<digest>` of a name the inventory already
 #      knows, wherever it stands, so a known image cannot come back by tag,
 #      under a digest the inventory does not list, or under a computed tag or
@@ -199,57 +272,60 @@ is_skipped() {
 # `{{ .Values.x }}`, a Bazel `{@//label}` stamp) is somebody else's value and is
 # judged where it is written down.
 #
-# The scan is line by line and not a YAML parser, so in a YAML file (`*.yaml`,
-# `*.yml`) it fails closed: an `image:` that follows a `{`, `[` or `,` outside
-# quotes is read as a flow-mapping key whether or not the `{` is on that line.
-# The price: a YAML line that is no flow mapping and still reads
-# `..., image: word` outside quotes is a finding; quote the text.
-#
 # What this cannot see: an image no pin names yet, written where no `image` key
 # or flag introduces it (a positional `docker run <image>`, a list of bare
 # names). Give such a reference a `*_IMAGE` variable, as e2e/etcd-image.sh does.
 # Also not read, on purpose:
 #   - an image split over sibling keys (`image:` / `  repository: x` /
 #     `  tag: y`, the Helm values spelling, put together by a template): the
-#     parts are not a reference on any one line. No third-party image in this
-#     tree is written that way (the chart's split values are the images this
-#     repository builds); write a third-party one as a single reference.
-#   - a whole reference under a child key of `image:` (`image:` / `  ref: x`,
-#     as some Helm values files write it) when no pin names the image yet:
-#     `ref` is no image key. Once the name is in the inventory net 2 reads it
-#     there like anywhere else;
+#     parts are not a reference, and the values that are written this way are
+#     the images this repository builds. Write a third-party one as a single
+#     reference;
 #   - YAML embedded in another language (a here-document in a shell script, a
-#     Go raw string) when it holds a flow mapping broken across lines, with an
-#     unquoted `image:` value that is not first on its line and whose `{` is on
-#     an earlier one. There an unquoted `image:` in mid-line with no `{` before
-#     it on the same line is how prose reads ("3 node(s) but 2 image: line(s)"),
-#     and reading it brings those back as findings. A quoted value is read;
+#     Go raw string, a Helm template) when it holds a flow mapping broken across
+#     lines, with an unquoted `image:` value that is not first on its line and
+#     whose `{` is on an earlier one. There an unquoted `image:` in mid-line
+#     with no `{` before it on the same line is how prose reads ("3 node(s) but
+#     2 image: line(s)"), and reading it brings those back as findings. A
+#     quoted value is read. The same text has the line reader's other limits:
+#     an alias is refused, a block scalar behind node properties
+#     (`image: &a >-`) is not read, and of a block scalar only the first
+#     non-blank line is taken;
 #   - a comment that follows a quote left open on its line (an apostrophe in a
 #     here-document's text): the line is read whole, comment included;
-#   - a block scalar whose value is folded over several lines, or whose first
-#     line is a comment-looking `#` line: only the first non-blank line after
-#     `image: >-` / `image: |` is taken;
 #   - an image assembled from parts (`"$REPO:$TAG"`, a Go `fmt.Sprintf`): not a
 #     literal. A repository written out under a computed tag (`x/y:$TAG`) IS
 #     read, by net 1 behind an image key or flag for any name and by net 2
 #     anywhere for a known one.
-extract_references() { # <names file>; file list on stdin
-	local files=() f
+extract_references() { # <names file> <work dir> <problems out>; file list on stdin
+	local files=() yaml=() f records_root="$2/records/"
+	: >"$3"
 	while IFS= read -r f; do
 		is_scanned_file "$f" || continue
 		is_skipped "$f" && continue
+		case "$f" in *.yaml | *.yml) yaml+=("$f") ;; esac
 		files+=("$f")
 	done
 	[ "${#files[@]}" -gt 0 ] || return 0
-	(cd "$ROOT" && awk -v names_file="$1" '
+	if [ "${#yaml[@]}" -gt 0 ]; then
+		read_yaml_files "$2" "$3" "${yaml[@]}" || return 1
+		# A parsed file is read from its records, in the place it had in the
+		# list; a template stays where it is and is read line by line.
+		local i
+		for i in "${!files[@]}"; do
+			[ -n "${YAML_PARSED["${files[$i]}"]:-}" ] && files[i]="$records_root${files[$i]}"
+		done
+	fi
+	(cd "$ROOT" && RECORDS_ROOT="$records_root" awk -v names_file="$1" '
 		BEGIN {
+			records_root = ENVIRON["RECORDS_ROOT"]
 			while ((getline n < names_file) > 0) if (n != "") names[n] = 1
 			close(names_file)
 		}
 		function emit(ref) {
-			if (!((FILENAME, FNR, ref) in seen)) {
-				seen[FILENAME, FNR, ref] = 1
-				printf "%s\t%d\t%s\n", FILENAME, FNR, ref
+			if (!((path, line, ref) in seen)) {
+				seen[path, line, ref] = 1
+				printf "%s\t%d\t%s\n", path, line, ref
 			}
 		}
 		# Only a literal image reference is judged: a lower-case repository, then
@@ -259,17 +335,16 @@ extract_references() { # <names file>; file list on stdin
 			if (ref !~ /^[a-z0-9][a-z0-9._\/-]*(:[0-9]+\/[a-z0-9._\/-]+)?(:[A-Za-z0-9_][A-Za-z0-9._-]*)?(@[^${]*)?$/) return 0
 			return ref !~ /^(0|1|true|false|yes|no)$/
 		}
-		# Where the comment that ends line s begins (0: it has none), and, in
-		# OPEN_QUOTE, the quote s ends inside of ("" for none). A comment opens
-		# with `#` after white space, or with `//` anywhere when slash_comments
-		# (Go and JavaScript need no space before it), outside quotes; a
-		# backslash takes the next character with it, so `\"` closes nothing. Quotes are not followed across lines: one left open hides a
+		# Where the comment that ends line s begins (0: it has none). A comment
+		# opens with `#` after white space, or with `//` anywhere when
+		# slash_comments (Go and JavaScript need no space before it), outside
+		# quotes; a backslash takes the next character with it, so `\"` closes
+		# nothing. Quotes are not followed across lines: one left open hides a
 		# comment on its own line only, and that line then stays read in full.
 		function comment_start(s, slash_comments,    i, n, c, q, prev) {
 			n = length(s)
 			q = ""
 			prev = ""
-			OPEN_QUOTE = ""
 			for (i = 1; i <= n; i++) {
 				c = substr(s, i, 1)
 				if (c == "\\" && q != "\047" && q != "`") {
@@ -286,24 +361,42 @@ extract_references() { # <names file>; file list on stdin
 				}
 				prev = c
 			}
-			OPEN_QUOTE = q
 			return 0
 		}
 		FNR == 1 {
 			block = 0
-			yaml = (FILENAME ~ /\.ya?ml$/)
-			slash_comments = (FILENAME ~ /\.(go|js)$/)
+			# A YAML file the parser read arrives as its records, in a file of
+			# the same path under records_root (see read_yaml_files).
+			records = (records_root != "" && index(FILENAME, records_root) == 1)
+			path = records ? substr(FILENAME, length(records_root) + 1) : FILENAME
+			slash_comments = (path ~ /\.(go|js)$/)
+		}
+		# A record is `<line> TAB <kind> TAB <text>`; an empty one ends a group
+		# of records. Kind `v` is what a scalar says: there is no comment left
+		# in it, so a `#` in it is text.
+		records {
+			if ($0 == "") {
+				block = 0
+				next
+			}
+			line = $0 + 0
+			plain = (substr($0, index($0, "\t") + 1, 1) == "v")
+			$0 = substr($0, index($0, "\t") + 3)
+		}
+		!records {
+			line = FNR
+			plain = 0
 		}
 		# The line after `image: >-` / `image: |` is the value (a block scalar).
 		# So is the line after a bare `image:` (block == 2), when it holds one
 		# scalar and nothing else: there a comment line is passed over, and
 		# node properties, quotes and a trailing comment are not the value. A
 		# nested mapping (`image:` / `  repository: x`) is not a literal.
-		block == 2 && /^[ \t]*#/ { next }
+		block == 2 && !plain && /^[ \t]*#/ { next }
 		block && !/^[ \t]*$/ {
 			ref = $0
 			if (block == 2) {
-				if ((i = comment_start(ref, 0)) > 0) ref = substr(ref, 1, i - 1)
+				if (!plain && (i = comment_start(ref, 0)) > 0) ref = substr(ref, 1, i - 1)
 				sub(/^[ \t]+/, "", ref)
 				while (match(ref, /^[&!][^ \t]*[ \t]+/)) ref = substr(ref, RLENGTH + 1)
 				gsub(/^["\047]|["\047]?[ \t]*$/, "", ref)
@@ -312,13 +405,13 @@ extract_references() { # <names file>; file list on stdin
 			gsub(/^[ \t]+|[ \t]+$/, "", ref)
 			if (literal(ref)) emit(ref)
 		}
-		/^[ \t]*(#|\/\/)/ { next }
+		!plain && /^[ \t]*(#|\/\/)/ { next }
 		{
 			code = $0
-			if ((i = comment_start(code, slash_comments)) > 0) code = substr(code, 1, i - 1)
+			if (!plain && (i = comment_start(code, slash_comments)) > 0) code = substr(code, 1, i - 1)
 			# JSON inside a double-quoted shell argument writes every quote as
 			# `\"` (`--overrides="{\"image\":\"x\"}"`): read as the JSON it is.
-			if (!yaml) gsub(/\\"/, "\"", code)
+			gsub(/\\"/, "\"", code)
 			rest = code
 			before_key = ""
 			at_start = 1
@@ -332,15 +425,6 @@ extract_references() { # <names file>; file list on stdin
 				# ...or stands in a flow mapping: after its `{` or a `,`, inside
 				# braces opened on this line (`containers: [{name: p, image: x}]`).
 				in_flow = (before_key ~ /\{/ && before_key ~ /[{,][ \t]*["\047]?$/)
-				# In a YAML file the `{` may be on an earlier line, and a flow
-				# sequence takes a single pair (`[image: x]`): fail closed, any
-				# key that follows `{`, `[` or `,` outside quotes is a flow key.
-				if (!in_flow && yaml && before_key ~ /[{[,][ \t]*["\047]?$/) {
-					outside = before_key
-					sub(/["\047]$/, "", outside)
-					comment_start(outside, 0)
-					in_flow = (OPEN_QUOTE == "")
-				}
 				before_key = before_key key
 				at_start = 0
 				if (key ~ /:[ \t]*$/ && key_opens_line && rest ~ /^[>|][-+0-9]*[ \t]*(#.*)?$/) {
@@ -453,16 +537,104 @@ extract_references() { # <names file>; file list on stdin
 # closed: a pull in any other shape, an attribute it needs that is not a plain
 # string literal, a pull with no repository, and a file that names either rule
 # without one pull having been read are each a finding, never a pass. A comment
-# line is not read. What it does not follow: a module file reached by
-# `include()`, and a pull rule other than these two.
+# line is not read.
+#
+# What else can pull an image (#1571):
+#   - a module file reached by `include("//<package>:<file>.MODULE.bazel")`: it
+#     is followed, from the workspace its root module file stands in (so an
+#     include of proxy/MODULE.bazel is a path under proxy/), to any depth, each
+#     file read once. An include() in any other shape (no string literal, not
+#     alone on its line, a `..` in the label) and one that names no file are
+#     findings: a module file nobody read is not a module file with no pull;
+#   - another rule of a ruleset that pulls images (IMAGE_RULESETS: rules_img,
+#     rules_oci, rules_docker, rules_apko): any label of one of them, other
+#     than in the two bindings above, is a finding at its line, whether or not
+#     the file also holds a pull the reader follows. Teach the reader the rule
+#     and it passes.
+# Still not seen: a pull by a ruleset that is not in IMAGE_RULESETS (a
+# hand-written repository rule, an http_file of an image tarball), and a rule
+# reached through a second name (`p = pull`).
+IMAGE_RULESETS='rules_img|rules_oci|rules_docker|io_bazel_rules_docker|rules_apko'
+
+# awk: the code of a Starlark line, without the comment that ends it.
+AWK_CODE_OF='
+	function code_of(s,    i, n, c, q) {
+		n = length(s)
+		q = ""
+		for (i = 1; i <= n; i++) {
+			c = substr(s, i, 1)
+			if (c == "\\") {
+				i++
+				continue
+			}
+			if (q != "") {
+				if (c == q) q = ""
+			} else if (c == "\"" || c == "\047") {
+				q = c
+			} else if (c == "#") {
+				return substr(s, 1, i - 1)
+			}
+		}
+		return s
+	}
+'
+
+# module_includes <module file>: prints "<line>\t<path within the workspace>"
+# for every include() of the file, with an empty path for one it cannot follow.
+module_includes() {
+	awk "$AWK_CODE_OF"'
+		/^[ \t]*#/ { next }
+		{
+			bare = code_of($0)
+			gsub(/"([^"\\]|\\.)*"|\047([^\047\\]|\\.)*\047/, "\"\"", bare)
+			if (bare !~ /(^|[^A-Za-z0-9_.])include[ \t]*\(/) next
+			target = ""
+			line = code_of($0)
+			if (line ~ /^include\("\/\/[A-Za-z0-9_.\/-]*:[A-Za-z0-9_.\/-]+\.MODULE\.bazel"\)[ \t]*$/) {
+				target = line
+				sub(/^include\("\/\//, "", target)
+				sub(/"\).*/, "", target)
+				pkg = target
+				sub(/:.*/, "", pkg)
+				sub(/[^:]*:/, "", target)
+				if (pkg != "") target = pkg "/" target
+				if (("/" target "/") ~ /\/\.\.?\// || target ~ /\/\// || target ~ /^\//) target = ""
+			}
+			printf "%d\t%s\n", FNR, target
+		}
+	' "$1"
+}
+
 extract_module_pulls() { # <problems out>
-	local present=() f
-	: >"$1"
+	local problems="$1" files=() queue=() workspaces=() f ws line target i=0
+	local -A read_once=()
+	: >"$problems"
 	for f in "${MODULE_FILES[@]}"; do
-		[ -f "$ROOT/$f" ] && present+=("$f")
+		[ -f "$ROOT/$f" ] || continue
+		queue+=("$f")
+		ws="${f%MODULE.bazel}"
+		workspaces+=("$ws")
 	done
-	[ "${#present[@]}" -gt 0 ] || return 0
-	(cd "$ROOT" && awk -v problems="$1" '
+	while [ "$i" -lt "${#queue[@]}" ]; do
+		f="${queue[$i]}"
+		ws="${workspaces[$i]}"
+		i=$((i + 1))
+		[ -z "${read_once[$f]:-}" ] || continue
+		read_once[$f]=1
+		files+=("$f")
+		while IFS=$'\t' read -r line target; do
+			if [ -z "$target" ]; then
+				printf '%s\t%s\t%s\n' "$f" "$line" 'an include() the reader cannot follow: write it alone on its line, as include("//<package>:<file>.MODULE.bazel")' >>"$problems"
+			elif [ -f "$ROOT/$ws$target" ]; then
+				queue+=("$ws$target")
+				workspaces+=("$ws")
+			else
+				printf '%s\t%s\t%s\n' "$f" "$line" "include() names $ws$target, which is not a file" >>"$problems"
+			fi
+		done < <(module_includes "$ROOT/$f")
+	done
+	[ "${#files[@]}" -gt 0 ] || return 0
+	(cd "$ROOT" && awk -v problems="$problems" -v rulesets="$IMAGE_RULESETS" "$AWK_CODE_OF"'
 		function problem(line, what) {
 			printf "%s\t%s\t%s\n", file, line, what >> problems
 		}
@@ -479,8 +651,22 @@ extract_module_pulls() { # <problems out>
 			split("", ext)
 		}
 		/^[ \t]*#/ { next }
-		/@rules_img\/\/img:pull\.bzl/ { names_rule = "@rules_img//img:pull.bzl" }
-		/@rules_oci\/\/oci:extensions\.bzl/ { names_rule = "@rules_oci//oci:extensions.bzl" }
+		# Every label of an image ruleset: one of the two bindings below, or a
+		# finding.
+		{
+			binding = (inside == "" && ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*use_repo_rule\("@rules_img\/\/img:pull\.bzl",[ \t]*"pull"\)/ || $0 ~ /^[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*use_extension\("@rules_oci\/\/oci:extensions\.bzl",[ \t]*"oci"[,)]/))
+			rest = code_of($0)
+			while (match(rest, "[\"\047]@(" rulesets ")//[^\"\047]*[\"\047]")) {
+				label = substr(rest, RSTART + 1, RLENGTH - 2)
+				rest = substr(rest, RSTART + RLENGTH)
+				if (label == "@rules_img//img:pull.bzl" || label == "@rules_oci//oci:extensions.bzl") {
+					names_rule = label
+					if (!binding) problem(FNR, "names " label " in a way the reader does not know; write the binding the way scripts/third-party-images.sh (extract_module_pulls) documents")
+				} else {
+					problem(FNR, "names " label ", a rule of an image ruleset the reader does not know: an image it pulls is checked by nothing; teach scripts/third-party-images.sh (extract_module_pulls) the rule")
+				}
+			}
+		}
 		inside == "" && /^[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*use_repo_rule\("@rules_img\/\/img:pull\.bzl",[ \t]*"pull"\)/ {
 			n = $0
 			sub(/[ \t]*=.*/, "", n)
@@ -558,7 +744,7 @@ extract_module_pulls() { # <problems out>
 			attr[key] = value
 		}
 		END { end_of_file() }
-	' "${present[@]}")
+	' "${files[@]}")
 }
 
 # split_reference <ref>: sets REF_NAME, REF_TAG, REF_DIGEST (empty when absent).
@@ -612,7 +798,7 @@ scan() {
 		done <"$tmp/files"
 		SKIP_UNUSED+=("$key")
 	done
-	extract_references "$names" <"$tmp/files" >"$tmp/refs" || die "the scan itself failed"
+	extract_references "$names" "$tmp" "$tmp/yaml-problems" <"$tmp/files" >"$tmp/refs" || die "the scan itself failed; nothing was checked"
 	# The base-image pulls of the Bazel module files: judged below like every
 	# other reference; a pull that could not be read is a finding of its own.
 	extract_module_pulls "$tmp/problems" >>"$tmp/refs" || die "the read of ${MODULE_FILES[*]} itself failed"
@@ -620,7 +806,7 @@ scan() {
 		# Line 0: about the file as a whole.
 		[ "$line" = 0 ] && line=""
 		finding "$path${line:+:$line}: $ref"
-	done <"$tmp/problems"
+	done < <(cat "$tmp/yaml-problems" "$tmp/problems")
 	for path in "${MODULE_FILES[@]}"; do
 		[ -f "$ROOT/$path" ] && nfiles=$((nfiles + 1))
 	done
@@ -812,8 +998,11 @@ platform_gap() { # <platform list>
 	[ -z "$missing" ] || echo "the index does not list${missing}"
 }
 
-# newer_tags <name> <tag> <work dir>: the registry's tags with the pinned tag's
-# shape (digits may differ, everything else must not) that sort after it.
+# newer_tags <name> <tag> <work dir>: writes to <work dir>/newer, one per line,
+# the registry's tags with the pinned tag's shape (digits may differ, everything
+# else must not) that sort after it. Returns 1 with the reason in REG_ERROR, so
+# it is called as it stands and never in a command substitution, where
+# REG_ERROR would be lost.
 newer_tags() {
 	local name="$1" tag="$2" work="$3" url shape next pages=0
 	registry_of "$name"
@@ -842,7 +1031,9 @@ newer_tags() {
 	{
 		grep -E -x -- "$shape" "$work/tags" || true
 		printf '%s\n' "$tag"
-	} | LC_ALL=C sort -u -V | awk -v pinned="$tag" 'found { print } $0 == pinned { found = 1 }'
+	} | LC_ALL=C sort -u -V | awk -v pinned="$tag" 'found { print } ($0 "") == (pinned "") { found = 1 }' >"$work/newer"
+	# (Compared as strings: as numbers, a tag 3.1 IS the pinned 3.10, and
+	# everything from 3.2 on was listed as newer than it.)
 }
 
 need_network_tools() {
@@ -897,8 +1088,9 @@ cmd_outdated() {
 			echo "current  $name:$tag  $digest"
 		fi
 		if [ "$with_newer" = 1 ]; then
-			if newer="$(newer_tags "$name" "$tag" "$work")"; then
-				[ -z "$newer" ] || echo "         $name:$tag  newer tags: $(printf '%s' "$newer" | tr '\n' ' ')"
+			if newer_tags "$name" "$tag" "$work"; then
+				newer="$(tr '\n' ' ' <"$work/newer")"
+				[ -z "$newer" ] || echo "         $name:$tag  newer tags: $newer"
 			else
 				echo "ERROR    $name:$tag  tags: $REG_ERROR"
 				errors=$((errors + 1))
@@ -922,6 +1114,50 @@ cmd_outdated() {
 	echo "$seen checked: $behind behind, $errors could not be checked."
 	[ "$errors" -eq 0 ] || return 2
 	[ "$behind" -eq 0 ] || return 1
+}
+
+# How many of a pin's newer tags `newer` prints: the newest ones.
+NEWER_SHOWN=8
+
+cmd_newer() {
+	local only=() key name tag work n o with=0 errors=0 seen=0
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		-*) die "newer: unknown option $1" ;;
+		*) only+=("$1") ;;
+		esac
+		shift
+	done
+	need_network_tools
+	load_inventory
+	work="$(mktemp -d)" || die "mktemp failed"
+	# shellcheck disable=SC2064 # expand now: $work is local
+	trap "rm -rf '$work'" EXIT
+	for key in "${PIN_ORDER[@]}"; do
+		name="${key%@*}"
+		tag="${PIN_TAG[$key]}"
+		if [ "${#only[@]}" -gt 0 ]; then
+			for o in "${only[@]}"; do [ "$o" = "$name" ] && break; done
+			[ "$o" = "$name" ] || continue
+		fi
+		seen=$((seen + 1))
+		if ! newer_tags "$name" "$tag" "$work"; then
+			echo "ERROR    $name:$tag  tags: $REG_ERROR"
+			errors=$((errors + 1))
+			continue
+		fi
+		n="$(wc -l <"$work/newer" | tr -d ' ')"
+		[ "$n" -gt 0 ] || continue
+		with=$((with + 1))
+		if [ "$n" -gt "$NEWER_SHOWN" ]; then
+			echo "NEWER    $name:$tag  $n newer, the newest $NEWER_SHOWN: $(tail -n "$NEWER_SHOWN" "$work/newer" | paste -sd' ' -)"
+		else
+			echo "NEWER    $name:$tag  $n newer: $(paste -sd' ' - <"$work/newer")"
+		fi
+	done
+	[ "$seen" -gt 0 ] || die "newer: no pin matches ${only[*]:-the inventory}"
+	echo "$seen checked: $with with newer tags, $errors could not be listed."
+	[ "$errors" -eq 0 ] || return 2
 }
 
 cmd_resolve() {
@@ -961,6 +1197,10 @@ list)
 outdated)
 	shift
 	cmd_outdated "$@"
+	;;
+newer)
+	shift
+	cmd_newer "$@"
 	;;
 resolve)
 	shift
