@@ -21,7 +21,8 @@
 # See README.md in this directory. Deployed from
 # bpalermo/k8s-talos-main -> clusters/talos-main/prometheus/values.yaml, where
 # promtool unit tests (clusters/talos-main/prometheus/rules_test.yaml) run this
-# expression in CI. This repo has no promtool in its build.
+# expression in CI. In this repository `bazel test //:observability_rules_test`
+# runs `promtool check rules` on this file; there is no unit test for it here.
 #
 # UPGRADING from a registrar without the value gauge (before #1329): this rule
 # reads a metric an older replica does not export, so it is blind to that
