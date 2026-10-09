@@ -123,6 +123,10 @@ func TestAckObserver_EmptyOpeningResponseThatIsNotAcknowledged(t *testing.T) {
 func TestTrackerForgetsAClosedStream(t *testing.T) {
 	tr, _ := observe(t)
 	for stream := int64(1); stream <= 50; stream++ {
+		openDelta(tr, stream, resourcev3.ClusterType, map[string]string{"c1": "h1"})
+		openDelta(tr, stream, resourcev3.ListenerType, map[string]string{testListener: "h1"})
+		// A type the stream opens and is never answered for.
+		openDelta(tr, stream, resourcev3.RouteType, map[string]string{"r1": "h1"})
 		sendVersioned(tr, stream, resourcev3.ClusterType, "n1", "v1", nil)
 		sendVersioned(tr, stream, resourcev3.ListenerType, "n2", "v1", []string{testListener})
 		ackDelta(tr, stream, "n1", "")
@@ -130,4 +134,5 @@ func TestTrackerForgetsAClosedStream(t *testing.T) {
 	}
 	assert.Empty(t, tr.inflight)
 	assert.Empty(t, tr.answered)
+	assert.Empty(t, tr.stated)
 }

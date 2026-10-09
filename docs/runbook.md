@@ -6168,6 +6168,19 @@ its full `type.googleapis.com/…` URL) and `other`, which nothing uses today. T
 has four. Agents before #1480 created each series on its first increment, so on those an
 absent series is the healthy state and cannot be told from an agent that reports nothing.
 
+A restarted agent learns what the proxy already holds from the proxy's opening request
+on the new stream (#1511). A listener the proxy states at the version the agent
+publishes is never sent again, so nothing acknowledges it by name; the agent takes the
+acknowledged first Listener response of the stream as the acknowledgement of every such
+listener. Two things follow for `aether_agent_xds_ack_wait_failures_total`. A pod ADD
+retried, or a pod re-added, after an agent restart no longer counts a `present`/`timeout`
+for a listener that was there all along. And a pod DEL after an agent restart now waits
+for the proxy to acknowledge the removal, where it used to return at once because the
+new agent knew of no listener: an `absent`/`timeout` there is a removal the proxy did not
+acknowledge within the wait, which before #1511 went uncounted. Like any ACK, the
+statement says the proxy accepted the listener, not that the listener has finished
+warming; the in-netns readiness probe stays the data-plane proof.
+
 The label names are the OTLP attribute keys (`aether.xds.type_url`, `aether.xds.wait`,
 `aether.xds.reason`) with their dots turned into underscores by the OTLP ingest, like
 every other metric here. Read back from a test cluster's Prometheus on 2026-10-08:

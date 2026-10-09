@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 
 	commonlog "aethermesh.dev/common/log"
@@ -56,6 +57,10 @@ type inflightResponse struct {
 	systemVersion string
 	added         []string
 	removed       []string
+	// held is the resources the proxy stated it holds and this response, the
+	// first of its type on its stream, neither added nor removed (#1511). Only
+	// an ACK reads it: see statedHeld.
+	held []string
 }
 
 // AckObserver is told, once per acknowledged delta response, the resource type
@@ -83,6 +88,13 @@ type Tracker struct {
 	// first response of a pair is the one computed against what the proxy
 	// stated it holds (onDeltaResponse).
 	answered map[streamType]struct{}
+	// stated is, per (stream, type) whose first request has arrived and whose
+	// first response has not, the names that request's
+	// initial_resource_versions carried (noteRequestLocked). The entry is
+	// there from the first request on, with no names when nothing may be
+	// concluded from them, so that a later request is never taken for the
+	// first.
+	stated map[streamType][]string
 	// changed is closed and replaced on every state transition (broadcast).
 	changed chan struct{}
 	// observer, when set, is told of every ACK (SetAckObserver).
@@ -114,6 +126,7 @@ func NewTracker(log *slog.Logger) *Tracker {
 		state:    make(map[string]resourceState),
 		inflight: make(map[inflightKey]inflightResponse),
 		answered: make(map[streamType]struct{}),
+		stated:   make(map[streamType][]string),
 		changed:  make(chan struct{}),
 	}
 }
@@ -132,11 +145,17 @@ func (t *Tracker) Callbacks() serverv3.Callbacks {
 // WaitListenerPresent blocks until Envoy has ACKed an update containing the
 // named listener, the context ends, or Envoy NACKs it (returned as the error).
 //
-// A listener already ACKed earlier returns immediately. A listener Envoy
-// already holds but that was never sent on the current stream (agent restart
-// with initial_resource_versions match) is never ACKed by name and waits out
-// the caller's deadline — callers treat the wait as best-effort, exactly like
-// the admin config_dump poll this replaces.
+// A listener already ACKed earlier returns immediately. So does one Envoy
+// already holds at the published version and that is therefore never sent on
+// the current stream (an agent restart, a stream reset): the proxy states it
+// in its opening request and the ACK of the opening response resolves it
+// (statedHeld, #1511). Like an ACK, that says the proxy accepted the listener,
+// not that it has finished warming it.
+//
+// A wait can still run to the caller's deadline with the listener in place:
+// when no proxy is connected, or when the proxy rejected the opening response
+// because of another resource. Callers treat the wait as best-effort, exactly
+// like the admin config_dump poll this replaces.
 func (t *Tracker) WaitListenerPresent(ctx context.Context, name string) error {
 	return t.wait(ctx, resourcev3.ListenerType, name, true)
 }
@@ -220,6 +239,10 @@ func (t *Tracker) onDeltaResponse(streamID int64, _ *discoveryv3.DeltaDiscoveryR
 	opening := streamType{streamID: streamID, typeURL: entry.typeURL}
 	_, later := t.answered[opening]
 	t.answered[opening] = struct{}{}
+	if !later {
+		entry.held = statedHeld(t.stated[opening], entry.added, entry.removed)
+		delete(t.stated, opening)
+	}
 	if empty && later {
 		return
 	}
@@ -229,13 +252,18 @@ func (t *Tracker) onDeltaResponse(streamID int64, _ *discoveryv3.DeltaDiscoveryR
 // onDeltaRequest resolves an inflight response when the request echoes its
 // nonce: without an error detail it is an ACK (resources applied), with one it
 // is a NACK (whole response rejected, error recorded against each resource).
+//
+// It also keeps what the first request of a type on a stream states the proxy
+// holds, for the first response to be read against (noteRequestLocked).
 func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscoveryRequest) error {
 	nonce := req.GetResponseNonce()
-	if nonce == "" {
-		return nil
-	}
 
 	t.mu.Lock()
+	t.noteRequestLocked(streamType{streamID: streamID, typeURL: req.GetTypeUrl()}, req)
+	if nonce == "" {
+		t.mu.Unlock()
+		return nil
+	}
 	key := inflightKey{streamID: streamID, nonce: nonce}
 	entry, ok := t.inflight[key]
 	if !ok {
@@ -258,6 +286,9 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 		for _, name := range entry.removed {
 			t.state[entry.typeURL+"/"+name] = resourceState{present: false}
 		}
+		for _, name := range entry.held {
+			t.state[entry.typeURL+"/"+name] = resourceState{present: true}
+		}
 	}
 	t.broadcastLocked()
 	observer := t.observer
@@ -275,10 +306,99 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 	return nil
 }
 
+// noteRequestLocked keeps the names a stream's FIRST request of a type states
+// in initial_resource_versions, until the first response of that type.
+// Callers must hold t.mu.
+//
+// It mirrors go-control-plane, which seeds a type's subscription from the
+// first request of the type on the stream and reads the field from no other.
+// The names are kept only when the first response is certain to be the
+// comparison of exactly those statements with the snapshot:
+//
+//   - the request opens a wildcard subscription. For a subscription by name
+//     go-control-plane compares only the subscribed names, so a stated
+//     resource that is missing from the response may not have been looked at;
+//   - no other request of the type arrives before the first response. A second
+//     one can change the subscription the response is computed for, so it
+//     drops what the first stated.
+func (t *Tracker) noteRequestLocked(key streamType, req *discoveryv3.DeltaDiscoveryRequest) {
+	if _, answered := t.answered[key]; answered {
+		return
+	}
+	if _, second := t.stated[key]; second {
+		t.stated[key] = nil
+		return
+	}
+	var names []string
+	if opensWildcard(req) {
+		for name := range req.GetInitialResourceVersions() {
+			names = append(names, name)
+		}
+	}
+	t.stated[key] = names
+}
+
+// wildcard is the resource name that subscribes to every resource of a type.
+const wildcard = "*"
+
+// opensWildcard reports whether a first request subscribes to every resource
+// of its type: it names no resource (the legacy form) or names "*", and does
+// not unsubscribe from "*".
+func opensWildcard(req *discoveryv3.DeltaDiscoveryRequest) bool {
+	if slices.Contains(req.GetResourceNamesUnsubscribe(), wildcard) {
+		return false
+	}
+	subscribed := req.GetResourceNamesSubscribe()
+	return len(subscribed) == 0 || slices.Contains(subscribed, wildcard)
+}
+
+// statedHeld returns the stated names that the first response of their type
+// on their stream neither added nor removed (#1511).
+//
+// go-control-plane computes that response by comparing every resource of the
+// snapshot with the version the proxy stated for it: a resource whose version
+// differs, or that the proxy did not state, is added, and a stated resource
+// the snapshot does not have is removed. So a stated name that is in neither
+// list was stated at exactly the version the snapshot publishes, and nothing
+// is sent for it on this stream until it changes.
+//
+// What that proves: the proxy holds the resource at the published version and
+// accepted it. Envoy records a resource's version only once the update that
+// carried it has been applied without error, so it never states a version it
+// rejected (//agent/test/mtlspool,
+// TestReconnectingProxyStatesNoClusterItRejected). That is what the ACK of a
+// response carrying the resource proves, and no more: not that a listener has
+// finished warming.
+//
+// The names are acted on only when the proxy ACKs the response
+// (onDeltaRequest). A rejected opening response resolves nothing, though the
+// proxy still holds what it stated: the agent then waits for the next
+// acknowledgement instead of reasoning about a proxy that is rejecting config.
+func statedHeld(stated, added, removed []string) []string {
+	if len(stated) == 0 {
+		return nil
+	}
+	changed := make(map[string]struct{}, len(added)+len(removed))
+	for _, name := range added {
+		changed[name] = struct{}{}
+	}
+	for _, name := range removed {
+		changed[name] = struct{}{}
+	}
+	var held []string
+	for _, name := range stated {
+		if _, ok := changed[name]; !ok {
+			held = append(held, name)
+		}
+	}
+	return held
+}
+
 // onDeltaStreamClosed drops inflight responses for the closed stream; their
 // ACKs will never arrive. Acknowledged state is kept: Envoy retains its config
 // across stream reconnects. The record of which types the stream had been
-// answered for goes too: stream IDs are never reused.
+// answered for goes too, with what its opening requests stated: stream IDs are
+// never reused.
 func (t *Tracker) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 	t.mu.Lock()
 	for key := range t.inflight {
@@ -289,6 +409,11 @@ func (t *Tracker) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 	for key := range t.answered {
 		if key.streamID == streamID {
 			delete(t.answered, key)
+		}
+	}
+	for key := range t.stated {
+		if key.streamID == streamID {
+			delete(t.stated, key)
 		}
 	}
 	t.mu.Unlock()
