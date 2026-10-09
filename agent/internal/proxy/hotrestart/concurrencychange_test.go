@@ -248,11 +248,14 @@ func TestConcurrencyArg(t *testing.T) {
 		{args: []string{"--concurrency", "2", "--concurrency", "2"}, wantErr: true, repeated: true},
 		{args: []string{"--concurrency=x", "--concurrency", "2"}, wantErr: true, repeated: true},
 		{args: []string{"--concurrency", "2", "--concurrency"}, wantErr: true, repeated: true},
-		// A second --concurrency where the first one's value should be is a
-		// repeat too, not a bad value.
-		{args: []string{"--concurrency", "--concurrency", "2"}, wantErr: true, repeated: true},
-		{args: []string{"--concurrency", "--concurrency=4"}, wantErr: true, repeated: true},
-		{args: []string{"--concurrency", "--concurrency"}, wantErr: true, repeated: true},
+		// A second --concurrency where the first one's value should be IS
+		// that value, and a bad one: Envoy answers "Couldn't read argument
+		// value from string '--concurrency'", not "Argument already set!"
+		// (measured). Until #1443 these three were counted as a repeat. They
+		// are an error either way.
+		{args: []string{"--concurrency", "--concurrency", "2"}, wantErr: true},
+		{args: []string{"--concurrency", "--concurrency=4"}, wantErr: true},
+		{args: []string{"--concurrency", "--concurrency"}, wantErr: true},
 		{args: []string{"--concurrency"}, wantErr: true},
 		{args: []string{"-l", "info", "--concurrency"}, wantErr: true},
 		// Envoy runs ONE worker for 0 (max(1, value); measured, #1408). Until

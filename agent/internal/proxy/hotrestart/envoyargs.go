@@ -180,8 +180,8 @@ var reservedEnvoyFlags = []reservedEnvoyFlag{
 		// Measured: "-- --concurrency 1" ran the default worker count.
 		spellings: []string{envoyFlagIgnoreRest, envoyFlagIgnoreRestLong},
 		conflict:  true,
-		owner: "Envoy ignores every argument after it, while the supervisor still reads them: a " +
-			"--concurrency behind it would be compared with a predecessor's worker count and never applied",
+		owner: "Envoy ignores every argument after it, so nothing written behind it is applied, and " +
+			"it is not refused when it is wrong either: a --concurrency there would never take effect",
 	},
 }
 
@@ -198,11 +198,12 @@ type onceEnvoyFlag struct {
 // Envoy refuses every flag given twice except --stats-tag (measured for these:
 // "Argument already set!", and -l with --log-level counts as twice), so an
 // ExtraArgs that adds one of them to the chart's own fails every fork.
-// TestChartEnvoyArgFlagsAreAllowedOnce (supervisorcmd) reads the flags off the
-// chart template and fails when one is missing here.
 //
-// A flag in neither list is passed through unchecked: the supervisor does not
-// carry Envoy's whole flag table.
+// checkRepeatedArgs refuses a repeat of any flag, in this list or not. What an
+// entry adds is the owner: the error says the first occurrence is the chart's,
+// which an operator who wrote only one cannot see otherwise.
+// TestChartEnvoyArgFlagsAreAllowedOnce (supervisorcmd) reads the flags off the
+// chart template and fails when one has no entry here.
 var onceEnvoyFlags = []onceEnvoyFlag{
 	{
 		spellings: []string{envoyFlagConcurrency},
@@ -243,187 +244,180 @@ var errRepeatedConcurrency = errors.New("--concurrency is given more than once")
 // spelling, which the pinned Envoy does not accept (issue #1407).
 var errConcurrencyEquals = errors.New("--concurrency=N is not a spelling Envoy accepts")
 
-// argSpelling is how one ExtraArgs item spells a flag.
-type argSpelling int
-
-const (
-	// spelledPlain is a flag alone in its item ("--concurrency"), or an item
-	// that is not a flag at all.
-	spelledPlain argSpelling = iota
-	// spelledEquals is "--flag=value" or "-f=value".
-	spelledEquals
-	// spelledGlued is a value glued to a short flag: "-linfo".
-	spelledGlued
-)
-
-// splitEnvoyArg returns the flag name an ExtraArgs item carries, the value
-// written into the same item (if any) and how it is spelled. An item that is
-// not shaped like a flag comes back unchanged as spelledPlain.
-//
-// The pinned Envoy accepts one spelling only: the flag in one argument and its
-// value in the next. Measured on 17 flags, long and short ("--concurrency=2",
-// "--service-node=n1", "--log-level=info", "-l=info", "-linfo", ...): each is
-// "PARSE ERROR: Argument: <item> Couldn't find match for argument", while
-// "-l info" and "--log-level info" are accepted (issue #1407).
-func splitEnvoyArg(a string) (name, value string, spelling argSpelling) {
-	if n, v, ok := strings.Cut(a, "="); ok && isEnvoyFlagToken(n) {
-		return n, v, spelledEquals
-	}
-	// Envoy's short flags that take a value are -l and -c.
-	if len(a) > 2 && a[0] == '-' && a[1] != '-' {
-		switch short := a[:2]; short {
-		case envoyFlagLogLevelShort, envoyFlagConfigPath:
-			return short, a[2:], spelledGlued
-		}
-	}
-	return a, "", spelledPlain
-}
-
-// isEnvoyFlagToken reports whether s is shaped like a flag name: one or two
-// dashes, then letters, digits, dashes and underscores, starting with a letter
-// or a digit.
-func isEnvoyFlagToken(s string) bool {
-	rest := strings.TrimPrefix(strings.TrimPrefix(s, "-"), "-")
-	if rest == s || rest == "" {
-		return false
-	}
-	for i, c := range rest {
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case i > 0 && (c == '-' || c == '_'):
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 // CheckExtraArgs refuses a Config.ExtraArgs (the supervisor's --envoy-arg) that
 // cannot give a working Envoy. Either the pinned Envoy rejects the command line
-// on every fork, or it starts and the next handoff breaks:
+// on every fork, or it starts and the next handoff breaks.
+//
+// The list is read the way the pinned Envoy reads it (parseEnvoyArgs, issue
+// #1443): a flag, then its value when the flag takes one. So a value is never
+// mistaken for a flag (a --service-node named "-c" is a node name), and a flag
+// is found wherever it stands and however it is spelled ("--socket-path @x" in
+// one item included). Refused, in this order:
 //
 //   - a flag in reservedEnvoyFlags: one the supervisor passes itself, or one
 //     that defeats what the supervisor controls (issues #1376, #1409);
-//   - a flag in onceEnvoyFlags given more than once (#1375). One is allowed:
-//     it is how the chart's values reach Envoy;
-//   - a spelling the pinned Envoy does not accept: "--flag=value", "-f=value"
-//     or "-fvalue" (#1407). The error shows the two-item form;
-//   - a --concurrency whose value is missing or is not a plain number (#1408).
+//   - any flag given more than once, except --stats-tag (#1375). The flags the
+//     chart passes (onceEnvoyFlags) are therefore allowed once and no more;
+//   - then the first argument, in order, that Envoy does not take: a spelling
+//     it does not parse ("--flag=value", "-f=value", "-fvalue"; #1407), a flag
+//     it does not have, an argument that is no flag and no flag's value, a
+//     flag whose value is missing, and a --concurrency value it refuses or
+//     reads as a count the supervisor cannot know (#1408).
 //
 // It is meant to run once, before the first fork, so the mistake is a startup
-// error naming the flag instead of a supervisor that fails every fork.
+// error naming the argument instead of a supervisor that fails every fork.
 //
-// Every argument is compared, because the check does not carry Envoy's whole
-// flag table and so does not know which flags take a value. Envoy does: it
-// reads the argument after a value flag as that value, whatever it looks like.
-// So a flag's value that is itself spelled like a refused argument (a
-// --service-node named "-c", a --log-format that is "--x=y") is refused too,
-// although Envoy would take it.
+// What it does not check is what a value means: a log level Envoy does not
+// know, a number that is not one for a flag other than --concurrency. Those
+// still fail at the fork.
 func CheckExtraArgs(args []string) error {
-	if err := checkReservedArgs(args); err != nil {
+	parsed := parseEnvoyArgs(args)
+	if err := checkReservedArgs(parsed); err != nil {
 		return err
 	}
-	if err := checkRepeatedArgs(args); err != nil {
+	if err := checkRepeatedArgs(parsed); err != nil {
 		return err
 	}
-	if err := checkArgSpellings(args); err != nil {
-		return err
+	for i := range parsed {
+		if err := checkEnvoyArg(&parsed[i]); err != nil {
+			return err
+		}
 	}
-	if _, _, err := concurrencyArg(args); err != nil {
-		return fmt.Errorf("--envoy-arg %w. Pass the flag and a whole number of workers as two items "+
-			"(--envoy-arg=--concurrency --envoy-arg=2); the chart does when proxy.concurrency is set", err)
+	return nil
+}
+
+// reservedEntry returns the reservedEnvoyFlags entry for f, or nil.
+func reservedEntry(f *EnvoyFlag) *reservedEnvoyFlag {
+	for i := range reservedEnvoyFlags {
+		if r := &reservedEnvoyFlags[i]; slices.Contains(r.spellings, f.Long) {
+			return r
+		}
+	}
+	return nil
+}
+
+// onceEntry returns the onceEnvoyFlags entry for f, or nil.
+func onceEntry(f *EnvoyFlag) *onceEnvoyFlag {
+	for i := range onceEnvoyFlags {
+		if o := &onceEnvoyFlags[i]; slices.Contains(o.spellings, f.Long) {
+			return o
+		}
 	}
 	return nil
 }
 
 // checkReservedArgs refuses a flag in reservedEnvoyFlags, in any spelling.
-func checkReservedArgs(args []string) error {
-	for _, a := range args {
-		name, _, _ := splitEnvoyArg(a)
-		for _, r := range reservedEnvoyFlags {
-			if !slices.Contains(r.spellings, name) {
-				continue
-			}
-			if r.conflict {
-				return fmt.Errorf("--envoy-arg %s is reserved: %s", a, r.owner)
-			}
-			return fmt.Errorf("--envoy-arg %s is reserved: %s. Envoy refuses a flag given twice, "+
-				"so every fork would fail", a, r.owner)
-		}
-	}
-	return nil
-}
-
-// checkRepeatedArgs refuses a flag in onceEnvoyFlags given more than once, in
-// any mix of its spellings.
-func checkRepeatedArgs(args []string) error {
-	for _, o := range onceEnvoyFlags {
-		seen := 0
-		for _, a := range args {
-			if name, _, _ := splitEnvoyArg(a); slices.Contains(o.spellings, name) {
-				seen++
-			}
-		}
-		if seen < 2 {
+func checkReservedArgs(parsed []envoyArg) error {
+	for _, a := range parsed {
+		if a.flag == nil {
 			continue
 		}
-		err := o.repeated
-		if err == nil {
-			err = fmt.Errorf("%s is given more than once", strings.Join(o.spellings, " / "))
-		}
-		return fmt.Errorf("--envoy-arg %w (%d times): Envoy refuses a flag given twice, so every fork would fail. "+
-			"Pass it once; %s", err, seen, o.owner)
-	}
-	return nil
-}
-
-// checkArgSpellings refuses an item that carries a flag and its value
-// together, which the pinned Envoy does not parse.
-func checkArgSpellings(args []string) error {
-	for _, a := range args {
-		name, value, spelling := splitEnvoyArg(a)
-		if spelling == spelledPlain {
+		r := reservedEntry(a.flag)
+		if r == nil {
 			continue
 		}
-		what := `the "flag=value" spelling, for any flag`
-		if spelling == spelledGlued {
-			what = "a value glued to a short flag"
+		owner := r.owner
+		if a.readAsHelp && a.problem == argOK {
+			owner = `Envoy reads an "h" in a single-dash argument as its -h switch. ` + owner
 		}
-		refused := fmt.Sprintf("--envoy-arg %s: the pinned Envoy does not accept %s (it answers \"Couldn't find "+
-			"match for argument\"), so every fork would fail", a, what)
-		if slices.Contains(envoySwitchFlags, name) {
-			return fmt.Errorf("%s. %s takes no value: pass it alone, as the one item --envoy-arg=%s", refused, name, name)
+		if r.conflict {
+			return fmt.Errorf("--envoy-arg %s is reserved: %s", a.item, owner)
 		}
-		if value == "" {
-			value = "<value>"
-		}
-		return fmt.Errorf("%s. Pass the flag and its value as two items: --envoy-arg=%s --envoy-arg=%s",
-			refused, name, value)
+		return fmt.Errorf("--envoy-arg %s is reserved: %s. Envoy refuses a flag given twice, "+
+			"so every fork would fail", a.item, owner)
 	}
 	return nil
 }
 
-// envoySwitchFlags are the pinned Envoy's flags that take no value (its
-// TCLAP::SwitchArg options in source/server/options_impl.cc), less the ones
-// reservedEnvoyFlags refuses first. checkArgSpellings uses the list only to
-// word its advice: for these the fix for "--flag=true" is the flag alone, and
-// a second item "true" would be refused by Envoy as well. A flag missing from
-// the list gets the two-item advice. //agent/test/envoyargs checks each one
-// against the binary.
-var envoySwitchFlags = []string{
-	envoyFlagSkipHotRestartStats,
-	"--skip-hot-restart-on-no-parent",
-	"--allow-unknown-fields",
-	"--allow-unknown-static-fields",
-	"--reject-unknown-dynamic-fields",
-	"--ignore-unknown-dynamic-fields",
-	"--skip-deprecated-logs",
-	"--log-stacktrace-single-entry",
-	"--log-format-escaped",
-	"--enable-fine-grain-logging",
-	"--enable-mutex-tracing",
-	"--cpuset-threads",
-	"--enable-core-dump",
+// checkRepeatedArgs refuses a flag given more than once, in any mix of its
+// spellings. The pinned Envoy refuses every repeat except --stats-tag's.
+func checkRepeatedArgs(parsed []envoyArg) error {
+	seen := make(map[*EnvoyFlag]int)
+	for _, a := range parsed {
+		if a.flag != nil && a.flag.Kind != EnvoyMultiValue {
+			seen[a.flag]++
+		}
+	}
+	// In the order the flags first appear, so the error does not depend on
+	// map iteration.
+	for _, a := range parsed {
+		if seen[a.flag] < 2 {
+			continue
+		}
+		err := fmt.Errorf("%s is given more than once", strings.Join(a.flag.spellings(), " / "))
+		advice := "Pass it once"
+		if o := onceEntry(a.flag); o != nil {
+			if o.repeated != nil {
+				err = o.repeated
+			}
+			advice += "; " + o.owner
+		}
+		return fmt.Errorf("--envoy-arg %w (%d times): Envoy refuses a flag given twice, so every fork would fail. %s",
+			err, seen[a.flag], advice)
+	}
+	return nil
+}
+
+// noMatch is how the pinned Envoy answers an argument it has no flag for.
+const noMatch = `it answers "Couldn't find match for argument"`
+
+// checkEnvoyArg refuses one argument the pinned Envoy does not take as it is
+// written.
+func checkEnvoyArg(a *envoyArg) error {
+	switch a.problem {
+	case argEqualsSpelling, argGluedSpelling:
+		return spellingError(a)
+	case argUnknownFlag:
+		return fmt.Errorf("--envoy-arg %q: the pinned Envoy has no flag %s (%s), so every fork would fail. "+
+			"Its flags are the ones `envoy --help` lists; a flag and its value are two items",
+			a.item, a.name, noMatch)
+	case argStray:
+		return fmt.Errorf("--envoy-arg %q is not a flag, and the argument before it takes no value (%s), "+
+			"so every fork would fail. A flag that takes no value goes alone; a flag and its value are "+
+			"two items in that order: --envoy-arg=<flag> --envoy-arg=<value>", a.item, noMatch)
+	}
+	if a.flag == nil {
+		return nil
+	}
+	if a.flag.Long == envoyFlagConcurrency {
+		if _, err := concurrencyValue(a); err != nil {
+			return fmt.Errorf("--envoy-arg %w. Pass the flag and a whole number of workers as two items "+
+				"(--envoy-arg=--concurrency --envoy-arg=2); the chart does when proxy.concurrency is set", err)
+		}
+		return nil
+	}
+	if a.problem == argMissingValue {
+		return fmt.Errorf("--envoy-arg %s is the last argument and has no value (Envoy: \"Missing a value for "+
+			"this argument!\"), so every fork would fail. Pass its value as the next item: "+
+			"--envoy-arg=%s --envoy-arg=<value>", a.item, a.name)
+	}
+	return nil
+}
+
+// spellingError is the error for an item that carries a flag and its value in
+// a way the pinned Envoy does not parse. It shows what to write instead.
+func spellingError(a *envoyArg) error {
+	what := `the "flag=value" spelling, for any flag`
+	if a.problem == argGluedSpelling {
+		what = "a value glued to a short flag"
+	}
+	answer := noMatch
+	if a.readAsHelp {
+		// Measured: "-lwhatever" printed the usage and exited 0.
+		answer = `it reads an "h" in a single-dash argument as its -h switch, so it prints its usage ` +
+			`instead of serving or refuses the argument; without the "h" ` + noMatch
+	}
+	refused := fmt.Sprintf("--envoy-arg %s: the pinned Envoy does not accept %s (%s), so every fork would fail",
+		a.item, what, answer)
+	if !a.flag.takesValue() {
+		return fmt.Errorf("%s. %s takes no value: pass it alone, as the one item --envoy-arg=%s", refused, a.name, a.name)
+	}
+	value := a.value
+	if value == "" {
+		value = "<value>"
+	}
+	return fmt.Errorf("%s. Pass the flag and its value as two items: --envoy-arg=%s --envoy-arg=%s",
+		refused, a.name, value)
 }
 
 // maxConcurrency bounds a --concurrency value. Envoy reads a uint32; nothing

@@ -137,9 +137,19 @@ func findRepoFile(t *testing.T, rel string) string {
 // drain off another pod's Envoy (#1127) — and Envoy refuses the flag twice, so
 // an operator-supplied one must fail fast rather than fail every fork.
 func TestEnvoyArgRejectsTheReservedAdminAddressPath(t *testing.T) {
-	require.NoError(t, checkEnvoyArgs([]string{"-l", "info", "--service-node", "n1", "--admin-address-pathology"}))
+	require.NoError(t, checkEnvoyArgs([]string{"-l", "info", "--service-node", "n1"}))
 	assert.Error(t, checkEnvoyArgs([]string{"--admin-address-path", "/tmp/x"}))
 	assert.Error(t, checkEnvoyArgs([]string{"--admin-address-path=/tmp/x"}))
+	// One item, split by a space: Envoy accepts that spelling (#1443).
+	assert.Error(t, checkEnvoyArgs([]string{"--admin-address-path /tmp/x"}))
+
+	// "--admin-address-pathology" was in the accepted list above until #1443.
+	// It is not the reserved flag, and it is no flag of the pinned Envoy
+	// either, so it is refused as that.
+	err := checkEnvoyArgs([]string{"-l", "info", "--service-node", "n1", "--admin-address-pathology"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "is reserved")
+	assert.Contains(t, err.Error(), "has no flag --admin-address-pathology")
 }
 
 // TestEnvoyArgRejectsEveryFlagTheSupervisorSets: Envoy refuses a flag given
@@ -178,9 +188,9 @@ func TestEnvoyArgRejectsEveryFlagTheSupervisorSets(t *testing.T) {
 	}
 }
 
-// TestEnvoyArgAllowsWhatIsNotReserved: only an exact flag name is refused. A
-// longer flag that merely starts like a reserved one, and a value that contains
-// one, are somebody else's.
+// TestEnvoyArgAllowsWhatIsNotReserved: only a reserved flag is refused as
+// reserved. A value that contains one, or that is spelled exactly like one, is
+// a value (#1443).
 func TestEnvoyArgAllowsWhatIsNotReserved(t *testing.T) {
 	for _, args := range [][]string{
 		nil,
@@ -188,12 +198,22 @@ func TestEnvoyArgAllowsWhatIsNotReserved(t *testing.T) {
 		{"--drain-strategy", "immediate", "--skip-hot-restart-parent-stats"},
 		{"--base-id-path", "/tmp/base-id"},
 		{"--config-yaml", "{}"},
-		{"--drain-time-seconds", "1", "--restart-epochs", "1", "--modest", "--config-path-x", "y"},
 		{"--component-log-level", "upstream:debug,config:trace"},
 		{"--log-format", "[%Y] --base-id %v"},
+		{"--service-node", "--base-id"},
+		{"--service-node", "-c", "--service-zone", "--mode"},
 	} {
 		assert.NoError(t, checkEnvoyArgs(args), "%v", args)
 	}
+
+	// A longer flag that merely starts like a reserved one is not reserved.
+	// This list was accepted until #1443; the pinned Envoy has none of these
+	// flags and refuses each on every fork, so the first one is refused, as a
+	// flag Envoy does not have.
+	err := checkEnvoyArgs([]string{"--drain-time-seconds", "1", "--restart-epochs", "1", "--modest", "--config-path-x", "y"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "is reserved")
+	assert.Contains(t, err.Error(), "has no flag --drain-time-seconds")
 }
 
 // TestEnvoyArgConcurrencyOnceOnly: --concurrency is the one Envoy flag the chart
@@ -370,9 +390,11 @@ func TestChartEnvoyArgsPassTheCheck(t *testing.T) {
 
 // TestChartEnvoyArgFlagsAreAllowedOnce: the pinned Envoy refuses any flag given
 // twice, so each flag the chart passes through --envoy-arg can be passed once
-// and no more. This reads the flags off the template, so a flag the chart
-// starts passing has to be added to hotrestart.onceEnvoyFlags (or be reserved)
-// before a second one of it can reach a fork.
+// and no more. Since #1443 a repeat of any flag is refused; what a flag of the
+// chart's needs besides is an entry in hotrestart.onceEnvoyFlags, so the error
+// tells the operator that the first occurrence is the chart's own. This reads
+// the flags off the template, so a flag the chart starts passing fails here
+// until it has that entry.
 func TestChartEnvoyArgFlagsAreAllowedOnce(t *testing.T) {
 	args := chartEnvoyArgs(t)
 	flags := 0
@@ -385,6 +407,8 @@ func TestChartEnvoyArgFlagsAreAllowedOnce(t *testing.T) {
 		require.Error(t, err, "the chart passes %s; a second one must be refused at startup", a)
 		assert.Contains(t, err.Error(), a)
 		assert.Contains(t, err.Error(), "more than once")
+		assert.Contains(t, err.Error(), "the chart already passes",
+			"%s has no entry in hotrestart.onceEnvoyFlags: the error does not say the chart passes it", a)
 	}
 	// Control: -l, three --service-*, --drain-strategy, --concurrency and
 	// --skip-hot-restart-parent-stats.
