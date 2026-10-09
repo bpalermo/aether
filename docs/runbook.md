@@ -3108,8 +3108,13 @@ them, and `truncated:true` marks the 20th). Later failures in that minute are on
 counted, and when the minute closes they produce ONE summary line under the same marker:
 
 ```
-AETHER_PROBE_FAIL {"t":"…","tier":"mesh_dns","result":"timeout","suppressed":122,"window_s":60,"pod":"prober-h2mzs","node":"main-worker-01"}
+AETHER_PROBE_FAIL {"t":"…","tier":"mesh_dns","result":"timeout","suppressed":122,"window_s":60,"window_start":"…","pod":"prober-h2mzs","node":"main-worker-01"}
 ```
+
+A summary's `t` is when it was written, and the failures it counts lie between
+`window_start` (the minute's first failure) and `t`. A prober built before the fix for
+#1463 has no `window_start`, and dates the summary it writes as it stops 60 s in the
+future: a last line dated after the pod was gone is that.
 
 A 30 s burst of about 142 timeouts therefore prints 20 lines plus one summary, not 142
 lines. The budget renews every minute, so the next burst is still attributable.

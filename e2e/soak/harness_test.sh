@@ -53,7 +53,10 @@
 #     2026-10-08 shape: 40 raw, 37 as increase() counts), a counter reset, a
 #     replaced prober pod, the unpinned-cluster counter moving on a series born
 #     in the window, a Prometheus with neither metric, one that does not
-#     answer, and the cross-check against AETHER_PROBE_FAIL lines.
+#     answer, and the cross-check against AETHER_PROBE_FAIL lines. And a series
+#     the query at T0 returns that has no sample in the window (#1469): an
+#     agent silent for the whole window, a node whose agent never reports, pods
+#     replaced shortly before T0, a prober pod deleted right after it.
 #
 #   bazel test //e2e/soak:harness_test  # jq is the Bazel-pinned one
 #   bash e2e/soak/harness_test.sh       # by hand: needs bash, jq, awk on PATH
@@ -1795,8 +1798,9 @@ fi
 # Against canned Prometheus query responses in testdata/prober-grade/<scenario>/
 # (the HTTP API's shape; the numbers are made up, except that `born` has the
 # 2026-10-08 run's two timeout series: 21 + 19 raw, 37 by increase()). A fake
-# curl serves <metric>.<start|window>.json by what the query asks for and logs
-# each query; a fake kubectl serves the same through the API-server proxy path.
+# curl serves <metric>.<start|start-time|window>.json by what the query asks for
+# (the metric, `timestamp(metric)`, `metric[Ns]`) and logs each query; a fake
+# kubectl serves the same through the API-server proxy path.
 GRADE="$HERE/prober-grade.sh"
 GF="$HERE/testdata/prober-grade"
 GT0=1791418200 # 2026-10-08T00:10:00Z
@@ -1819,8 +1823,12 @@ printf '%s\t%s\t%s\n' "$url" "$t" "$q" >>"$FAKE_PROM_LOG"
 case "$url" in
 */select/logsql/query) f="$FAKE_PROM_DIR/logs.jsonl" ;;
 */api/v1/query)
-	case "$q" in aether_probe_requests_total*) m=probe ;; aether_agent_identity_cluster_unpinned_total*) m=unpinned ;; *) m=unknown ;; esac
-	case "$q" in *"["*) k=window ;; *) k=start ;; esac
+	case "$q" in
+	aether_probe_requests_total* | "timestamp(aether_probe_requests_total"*) m=probe ;;
+	aether_agent_identity_cluster_unpinned_total* | "timestamp(aether_agent_identity_cluster_unpinned_total"*) m=unpinned ;;
+	*) m=unknown ;;
+	esac
+	case "$q" in "timestamp("*) k=start-time ;; *"["*) k=window ;; *) k=start ;; esac
 	f="$FAKE_PROM_DIR/$m.$k.json"
 	;;
 *) f=/nonexistent ;;
@@ -1842,8 +1850,8 @@ case "$*" in
 	exit 1
 	;;
 esac
-case "$*" in *query=aether_probe_requests_total*) m=probe ;; *) m=unpinned ;; esac
-case "$*" in *%5B*) k=window ;; *) k=start ;; esac
+case "$*" in *query=aether_probe_requests_total* | *query=timestamp%28aether_probe_requests_total*) m=probe ;; *) m=unpinned ;; esac
+case "$*" in *query=timestamp%28*) k=start-time ;; *%5B*) k=window ;; *) k=start ;; esac
 cat "$FAKE_PROM_DIR/$m.$k.json"
 EOF
 chmod +x "$TMP/grade-bin/curl" "$TMP/grade-bin/kubectl"
@@ -1877,9 +1885,10 @@ expect "$G" "grade born: the prober verdict" '^PROBER  verdict=FAIL non_success=
 expect "$G" "grade born: the pod set did not change" '^PODS    at_start=5 at_end=5 gone=0 new=0 nodes=5$' 1
 expect "$G" "grade born: the unpinned-cluster counter rests at its seeded zero on every node (#1423)" '^UNPINNED verdict=PASS increase=0 series=5 nodes=5 resets=0$' 1
 expect "$G" "grade born: one VERDICT line" '^VERDICT prober=FAIL unpinned=PASS logs=not-checked$' 1
-if [ "$(cut -f1 "$TMP/grade-queries.tsv" | sort -u)" = "http://prom.example:9090/api/v1/query" ] && [ "$(grep -c '' "$TMP/grade-queries.tsv")" -eq 4 ] &&
+expect "$G" "grade born: the time of each sample at the start is asked for too (#1469)" '^QUERY   (probe|unpinned)/start-time  time=2026-10-08T00:10:00Z  timestamp\(aether_(probe_requests|agent_identity_cluster_unpinned)_total\)$' 2
+if [ "$(cut -f1 "$TMP/grade-queries.tsv" | sort -u)" = "http://prom.example:9090/api/v1/query" ] && [ "$(grep -c '' "$TMP/grade-queries.tsv")" -eq 6 ] &&
 	[ "$(cut -f2 "$TMP/grade-queries.tsv" | sort -u | tr '\n' ' ')" = "$GT0 $((GT0 + 28800)) " ]; then
-	pass "grade born: four instant queries, to the URL it was given, at the window's two ends"
+	pass "grade born: six instant queries, to the URL it was given, at the window's two ends"
 else
 	fail "grade born: the queries were: $(tr '\n' '|' <"$TMP/grade-queries.tsv")"
 fi
@@ -1944,6 +1953,21 @@ grep -v '2026-10-08T05:28:0[56]' "$TMP/grade-edge-end.log" >"$TMP/grade-edge-sho
 run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-file "$TMP/grade-edge-short.log"
 expect "$G" "grade logs: a count the boundary summary cannot explain is still a MISMATCH (37 + at most 1 against 40)" '^LOGS    tier=mesh_dns result=timeout lines=37 suppressed=0 boundary=1 counters=40 MISMATCH$' 1
 expect "$G" "grade logs: ... in the verdict too" '^VERDICT prober=FAIL unpinned=PASS logs=MISMATCH$' 1
+# A prober since #1463 says when the summary's window OPENED (`window_start`):
+# the failures it counts lie between that and `t`, and no two-window guess is
+# needed. Closed 90 s after the window's start, with a window that opened 10 s
+# after it: every failure it counts is inside. RED before: the guess put the
+# span at 00:09:30..00:11:30, across T0 -- `boundary=1 ... UNPROVEN`, exit 2.
+sed 's/"t":"2026-10-08T02:16:10.000Z"\(.*"suppressed":1,"window_s":60\)/"t":"2026-10-08T00:11:30.000Z"\1,"window_start":"2026-10-08T00:10:10.250Z"/' "$GF/born/prober.log" >"$TMP/grade-window-start.log"
+run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-file "$TMP/grade-window-start.log"
+expect "$G" "grade logs: a summary that carries its window_start is counted when that window is inside the run's" '^LOGS    tier=mesh_dns result=timeout lines=39 suppressed=1 counters=40 match$' 1
+expect "$G" "grade logs: ... no boundary line" '^LOGS    boundary: ' 0
+if [ "$grc" -eq 1 ]; then pass "grade logs: ... exit 1 (the prober's FAIL, and a count that matches)"; else fail "grade logs: exit $grc with a window_start inside the window, want 1"; fi
+# ... and one whose window opened before T0 is still a boundary summary, with
+# its own span, not the guess (which would be 00:08:30..00:10:30).
+sed 's/"t":"2026-10-08T02:16:10.000Z"\(.*"suppressed":1,"window_s":60\)/"t":"2026-10-08T00:10:30.000Z"\1,"window_start":"2026-10-08T00:09:50.000Z"/' "$GF/born/prober.log" >"$TMP/grade-window-start-edge.log"
+run_grade born "$G" --dir "$GD" --prometheus http://prom.example:9090 --logs-file "$TMP/grade-window-start-edge.log"
+expect "$G" "grade logs: a window that opened before T0 and closed after it is a boundary summary, with the span the line gives" '^LOGS    boundary: tier=mesh_dns result=timeout pod=prober-d suppressed=1 closed=2026-10-08T00:10:30Z covers=2026-10-08T00:09:50Z\.\.2026-10-08T00:10:30Z  \(it may count failures on both sides of the start of the window: not in the sum\)$' 1
 
 G="$TMP/grade-clean.log"
 run_grade clean "$G" --start 2026-10-08T00:10:00Z --window 8h --prometheus http://prom.example:9090
@@ -1986,6 +2010,88 @@ expect "$G" "grade reset: UNPINNED verdict FAIL, its own line (#1423); the sum i
 expect "$G" "grade reset: verdict" '^VERDICT prober=FAIL unpinned=FAIL logs=not-checked$' 1
 red=$(jq '[.data.result[] | (.values[-1][1] | tonumber) - (.values[0][1] | tonumber)] | add' "$GF/reset/unpinned.window.json")
 if [ "$red" = 0 ]; then pass "grade reset: last-minus-first-sample reads 0 for the unpinned counter on these samples (seen red)"; else fail "grade reset: the increase()-style unpinned count is $red, want 0"; fi
+
+# A series the query at T0 returned and the window query did not (#1469). The
+# window query returns only series that have a sample in the window, and the
+# audit was built from it alone: such a series was in no line and no verdict.
+# Each scenario is `clean` with one thing changed. RED before, for each: noted.
+#
+# silent: worker-04's agent is there at T0 (its sample 30 s old) and exports
+# nothing for the whole window. RED before: `UNPINNED verdict=PASS increase=0
+# series=12 nodes=4`, VERDICT unpinned=PASS, exit 0 -- a pass on four nodes of five.
+G="$TMP/grade-silent.log"
+run_grade silent "$G" --dir "$GD" --prometheus http://prom.example:9090
+show "prober-grade: an agent that exports nothing for the whole window" "$G"
+if [ "$grc" -eq 2 ]; then pass "grade silent: exit 2, not a pass on the nodes that did report"; else fail "grade silent: exit $grc, want 2"; fi
+expect "$G" "grade silent: the node and job are named, with the age of its sample at the start" '^UNPINNED silent: node=worker-04 job=aether-agent series=3 last_sample=2026-10-08T00:09:30Z  \(alive at the start, its sample there 30 s old, and no sample in the window from this node and job: its counter was not seen\)$' 1
+expect "$G" "grade silent: UNPROVEN, and the sum it does have is still printed" '^UNPINNED verdict=UNPROVEN increase=0 series=12 nodes=4 resets=0  \(no sample in the window from worker-04: the sum is over the nodes that reported, not the fleet\)$' 1
+expect "$G" "grade silent: it is one finding, not two (its prober reports, but the node is already named)" '^UNPINNED missing: ' 0
+expect "$G" "grade silent: the prober grade is not touched" '^PROBER  verdict=PASS non_success=0 liveness_non_success=0 dns_class_non_success=0 success=7200000 series=10 born_in_window=0 resets=0$' 1
+expect "$G" "grade silent: verdict" '^VERDICT prober=PASS unpinned=UNPROVEN logs=not-checked$' 1
+# ... and a counter that moved elsewhere does not make it a FAIL to attribute:
+# unproven comes first, in the verdict as in the exit status. The reset
+# scenario's samples (worker-03 moved by 2), without worker-04's.
+mkdir -p "$TMP/grade-silent-moved"
+cp "$GF/reset/"*.json "$TMP/grade-silent-moved/"
+jq -c '.data.result |= map(select(.metric.node != "worker-04"))' "$GF/reset/unpinned.window.json" >"$TMP/grade-silent-moved/unpinned.window.json"
+GF="$TMP" run_grade grade-silent-moved "$G" --dir "$GD" --prometheus http://prom.example:9090
+expect "$G" "grade silent + moved: UNPROVEN, and it says the counter moved" '^UNPINNED verdict=UNPROVEN increase=2 series=7 nodes=4 resets=0  \(no sample in the window from worker-04: the sum is over the nodes that reported, not the fleet; and the counter moved on those\)$' 1
+expect "$G" "grade silent + moved: what moved is still listed" '^UNPINNED reason=trust_domain_unknown count=2 nodes=worker-03$' 1
+if [ "$grc" -eq 2 ]; then pass "grade silent + moved: exit 2"; else fail "grade silent + moved: exit $grc, want 2"; fi
+
+# missing: worker-04's agent has no series at all, at T0 or after -- silent
+# since more than the lookback before the run -- while the prober on that node
+# reports. Nothing at T0 names it; the prober's node does. RED before: the same
+# `UNPINNED verdict=PASS ... nodes=4`, exit 0.
+G="$TMP/grade-missing.log"
+run_grade missing "$G" --dir "$GD" --prometheus http://prom.example:9090
+show "prober-grade: a node whose prober reports and whose agent never does" "$G"
+if [ "$grc" -eq 2 ]; then pass "grade missing: exit 2"; else fail "grade missing: exit $grc, want 2"; fi
+expect "$G" "grade missing: the node is named, from the prober's series" '^UNPINNED missing: node=worker-04  \(a prober on this node has samples in the window and the counter has none from it: its agent was not seen\)$' 1
+expect "$G" "grade missing: UNPROVEN" '^UNPINNED verdict=UNPROVEN increase=0 series=12 nodes=4 resets=0  \(no sample in the window from worker-04: ' 1
+expect "$G" "grade missing: verdict" '^VERDICT prober=PASS unpinned=UNPROVEN logs=not-checked$' 1
+
+# replaced: pods replaced shortly BEFORE T0. The query at T0 still returns the
+# old pod's series (an instant query answers with a sample up to five minutes
+# old), and it has no sample in the window: exactly what a silent node looks
+# like, except for the AGE of that sample. None of this is unproven:
+#   prober-old (worker-05), last sample 200 s before T0; prober-e replaced it
+#   aether-agent-05-old, 200 s before T0; aether-agent-05 replaced it
+#   aether-agent-04-old, 30 s before T0 -- as fresh as a live one -- and
+#     aether-agent-04 replaced it: the node and job have samples in the window
+#   worker-06, an agent 200 s before T0 and nothing since: a node that left
+# RED before: exit 0 as well, and not a word about any of them (no ENDED line,
+# no `UNPINNED ended:` line). With the age test taken out of the fixed script
+# (FRESH_S=300, every sample the query returns counts as alive) this scenario
+# is exit 2: `GONE pod=prober-old` and `UNPINNED silent: node=worker-06`.
+G="$TMP/grade-replaced.log"
+run_grade replaced "$G" --dir "$GD" --prometheus http://prom.example:9090
+show "prober-grade: pods replaced shortly before the window" "$G"
+if [ "$grc" -eq 0 ]; then pass "grade replaced: exit 0 (a pod replaced before T0 is not an unproven window)"; else fail "grade replaced: exit $grc, want 0"; fi
+expect "$G" "grade replaced: verdict" '^VERDICT prober=PASS unpinned=PASS logs=not-checked$' 1
+expect "$G" "grade replaced: the old prober pod is said to have ended before the window, with the age that says so" '^ENDED   pod=prober-old node=worker-05 last_sample=2026-10-08T00:06:40Z  \(the query at the start still returned it, with a sample 200 s old: more than 120 s, so it had stopped before the window and is not in it\)$' 1
+expect "$G" "grade replaced: it is not GONE" '^GONE ' 0
+expect "$G" "grade replaced: ... and not in the pod set: four at the start, its replacement new" '^PODS    at_start=4 at_end=5 gone=0 new=1 nodes=5$' 1
+expect "$G" "grade replaced: the replacement is counted from 0, whole" '^TOTAL   tier=(liveness|mesh_dns) result=success count=3600000 rate=125/s series=5$' 2
+expect "$G" "grade replaced: an agent replaced before T0, old (worker-05) or fresh (worker-04), is no silent node: its node and job report" '^UNPINNED (silent|missing): ' 0
+expect "$G" "grade replaced: per node, the replacement's three series, born in the window" '^UNPINNED node=worker-0[45] count=0 series=3 born_in_window=3 resets=0$' 2
+expect "$G" "grade replaced: a node that left before the window is said, and is not a verdict" '^UNPINNED ended: node=worker-06 job=aether-agent series=3 last_sample=2026-10-08T00:06:40Z  \(the query at the start still returned it, with a sample 200 s old: more than 120 s, so it had stopped before the window and is not in it\)$' 1
+expect "$G" "grade replaced: only that one" '^UNPINNED ended: ' 1
+expect "$G" "grade replaced: the unpinned verdict" '^UNPINNED verdict=PASS increase=0 series=15 nodes=5 resets=0$' 1
+
+# gone: prober-e (worker-05) is alive at T0 (its sample 20 s old) and deleted
+# right after it, before it exports again; prober-f replaces it. RED before:
+# no GONE line and `PODS at_start=4 at_end=5 gone=0 new=1` -- a pod that was
+# there at the start, missing from the audit.
+G="$TMP/grade-gone.log"
+run_grade gone "$G" --dir "$GD" --prometheus http://prom.example:9090
+show "prober-grade: a prober pod deleted right after the window's start" "$G"
+if [ "$grc" -eq 0 ]; then pass "grade gone: exit 0 (a GONE pod is a line, not a verdict)"; else fail "grade gone: exit $grc, want 0"; fi
+expect "$G" "grade gone: the pod is GONE, with its last sample, which is before the window" '^GONE    pod=prober-e node=worker-05 last_sample=2026-10-08T00:09:40Z  \(alive at the start, its sample there 20 s old, and no sample in the window: nothing of it is in the totals\)$' 1
+expect "$G" "grade gone: the pod set has it at the start" '^PODS    at_start=5 at_end=5 gone=1 new=1 nodes=5$' 1
+expect "$G" "grade gone: no ENDED line (it was alive at T0)" '^ENDED ' 0
+expect "$G" "grade gone: the counts are of the series that have samples: ten, the gone pod's two not among them" '^PROBER  verdict=PASS non_success=0 liveness_non_success=0 dns_class_non_success=0 success=7200000 series=10 born_in_window=0 resets=0$' 1
+expect "$G" "grade gone: verdict" '^VERDICT prober=PASS unpinned=PASS logs=not-checked$' 1
 
 # A zero that is not a zero: a Prometheus that answers and has neither metric.
 G="$TMP/grade-empty.log"
