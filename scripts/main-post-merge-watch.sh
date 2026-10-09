@@ -54,16 +54,6 @@
 # attempt that has it stands, for the decision above and for what the entry
 # says. When an earlier attempt cannot be read, the gate is `unknown`: a
 # cancelled run is then filed, and the entry says validation is not known.
-# What the listing does in fact (#1552, read on 2026-10-09 from the 21
-# attempts that re-ran some of the jobs, in 19 of this repository's runs since
-# 2026-09-28, e.g. run 37366070027 attempts 1 and 2):
-# `/actions/runs/{id}/attempts/{n}/jobs` lists EVERY job of the run. A job the
-# re-run did not run again is there as a copy: a new job id, `run_attempt` n,
-# and the conclusion and the start time of the attempt it really ran in (all
-# 152 such jobs). So the gate is present in an attempt that did not re-run it,
-# with its earlier conclusion. That is an observation, not something the API
-# reference says, and the walk back costs nothing when the gate is there: it
-# stays.
 #
 # EVERY ATTEMPT, WHICHEVER WATCHER GETS TO IT. A run is re-run under the same
 # id, as a new attempt, and the watcher of an attempt reads the run as it is
@@ -92,26 +82,10 @@
 # recorded, and the step fails so that it is run again.
 #
 # WHICH COMMAND RE-RUNS IT. Each entry names one, from the run's jobs:
-# `gh run rerun <id> --failed` when at least one job did not pass and every
-# one of those concluded `failure` or `cancelled`, and the whole run
-# (`gh run rerun <id>`) otherwise. `--failed` re-runs "the failed jobs and
-# their dependent jobs", and neither the REST reference nor the how-to page
-# says whether a cancelled job is one of them. It is (#1552), as observed on
-# runs this repository already had, read on 2026-10-09:
-#   run 37366070027 (`ci`), attempt 1: seven jobs `cancelled` (they never got a
-#   runner), seven `success`, none `failure`. Attempt 2 ran the seven
-#   cancelled jobs again, six of them independent of one another, and none of
-#   the jobs they need (`changes`, `diff`, `test` kept their attempt-1 times).
-#   Re-running one job re-runs it and its dependents, so no single job
-#   explains that attempt: it is what `--failed` selects. Run 37367281258
-#   (`proxy`) shows the same for two cancelled jobs.
-# Which request made an attempt is not recorded by the API, so that is an
-# inference from its shape; the shape is unambiguous. What was NOT observed:
-# a job that ended any other way (`timed_out`, `action_required`, ...), and a
-# run with no job at all (`startup_failure`, a run skipped as a whole). Those
-# keep the whole run, which is always enough. So does a run in which the gate
-# FAILED and is the only job that did not pass: the gate reads what `diff` and
-# `test` wrote, and `--failed` would re-run it alone on the same results.
+# `gh run rerun <id> --failed` when every job that did not pass concluded
+# `failure`, and the whole run (`gh run rerun <id>`) otherwise: `--failed`
+# re-runs "the failed jobs and their dependent jobs", and a run where no job
+# started, or jobs were cancelled before they got a runner, has none.
 #
 # WHICH GREEN RUN CLEARS WHAT. A post-merge run tests only what its own merge
 # reaches (bazel-diff against the first parent), and a merge that reaches
@@ -331,7 +305,7 @@ failed_marker() { printf '%s' "<!-- ${MARK}:failed:${sha}:${id}/$1 -->"; } # att
 
 # The entry for the attempt judge was last called for: entry.
 build_entry() { # attempt, conclusion, [why it is recorded now and not when it ended]
-	local k="$1" c late="${3:-}" rows="" failed_jobs=0 other_jobs=0 beside_gate=0 name result url table g validated="" carried="" rerun
+	local k="$1" c late="${3:-}" rows="" failed_jobs=0 other_jobs=0 name result url table g validated="" carried="" rerun
 	c="$(printf '%s' "$2" | tr -cd 'a-z_')"
 	# The jobs that did not pass, as table rows. A name is free text: keep plain
 	# characters only, in a code span. A link is kept only when it is one of
@@ -341,12 +315,9 @@ build_entry() { # attempt, conclusion, [why it is recorded now and not when it e
 			result="$(printf '%s' "$result" | tr -cd 'a-z_')"
 			case "$result" in
 			success | skipped | "") continue ;;
-			failure | cancelled) failed_jobs=$((failed_jobs + 1)) ;;
+			failure) failed_jobs=$((failed_jobs + 1)) ;;
 			*) other_jobs=$((other_jobs + 1)) ;;
 			esac
-			# The gate having FAILED is its verdict on the other jobs; the gate
-			# cancelled is a job that did not run, like any other.
-			{ [ "$name" = "$GATE_JOB" ] && [ "$result" = failure ]; } || beside_gate=$((beside_gate + 1))
 			name="$(printf '%s' "$name" | tr -cd 'A-Za-z0-9 ._/()-' | tr -s ' ' | sed 's/^ //; s/ $//')"
 			[ -n "$name" ] || name="(unnamed)"
 			if [[ "$url" =~ ^${server}/${repo}/actions/runs/${id}/job/[0-9]+$ ]]; then
@@ -380,25 +351,17 @@ build_entry() { # attempt, conclusion, [why it is recorded now and not when it e
 	fi
 
 	# The command that can clear this commit. `gh run rerun --failed` asks
-	# GitHub to re-run "the failed jobs and their dependent jobs", and that
-	# takes the jobs that concluded `failure` and the ones that concluded
-	# `cancelled` (WHICH COMMAND RE-RUNS IT, above). With no such job (nothing
-	# started) it has nothing to select, no new attempt is made, and the entry
-	# would never clear. So it is offered when at least one job did not pass
-	# and each of those failed or was cancelled; in every other case, the whole
-	# run (jobs that could not be listed count none as failed).
-	# One more case for the whole run: the gate FAILED and is the only job that
-	# did not pass. The gate does no work of its own; it failed on what `diff`
-	# and `test` gave it (an output that was not set, a job skipped that had to
-	# run), those jobs passed or were skipped, and `--failed` would re-run the
-	# gate alone on the same results. (A gate that was only cancelled never
-	# gave a verdict: `--failed` re-runs it, and that is enough.)
-	if [ "$failed_jobs" -gt 0 ] && [ "$other_jobs" -eq 0 ] && [ "$beside_gate" -gt 0 ]; then
-		rerun="If the cause is not the commit's own (a registry or GitHub answered 5xx, a step never ran, a job never got a runner or was cancelled), re-run the jobs that failed or were cancelled, and the jobs that depend on them: \`gh run rerun ${id} --failed\`"
-	elif [ "$failed_jobs" -gt 0 ] && [ "$other_jobs" -eq 0 ]; then
-		rerun="The \`${GATE_JOB}\` job is the only job that did not pass, and it decides from what the jobs before it wrote: read its log for which one. If the cause is not the commit's own, re-run the whole run: \`gh run rerun ${id}\`. Not \`--failed\`: that would re-run \`${GATE_JOB}\` alone, on the same results."
+	# GitHub to re-run "the failed jobs and their dependent jobs": with no job
+	# that concluded `failure` (nothing started, or jobs were cancelled before
+	# they got a runner) it has nothing to select, no new attempt is made, and
+	# the entry would never clear. It is offered only when every job that did
+	# not pass concluded `failure`; in every other case, the whole run (jobs
+	# that could not be listed count none as failed). Whether `--failed` takes
+	# a cancelled job is not documented, so it is not relied on.
+	if [ "$failed_jobs" -gt 0 ] && [ "$other_jobs" -eq 0 ]; then
+		rerun="If the failure is not the commit's own (a registry or GitHub answered 5xx, a step never ran), re-run the failed jobs and the jobs that depend on them: \`gh run rerun ${id} --failed\`"
 	else
-		rerun="If the cause is not the commit's own (no job started, a job hit its time limit, the jobs could not be listed), re-run the whole run: \`gh run rerun ${id}\`. Not \`--failed\`: that re-runs the jobs that concluded \`failure\` or \`cancelled\`, which may be none of this run's."
+		rerun="If the cause is not the commit's own (no job started, a job never got a runner or hit its time limit, the run was cancelled), re-run the whole run: \`gh run rerun ${id}\`. Not \`--failed\`: that re-runs only the jobs that concluded \`failure\`, which may be none of this run's."
 	fi
 	if [ "$c" = startup_failure ]; then
 		rerun+=" If the workflow file of this commit is not valid, a re-run repeats it (a re-run executes the commit's own workflow): fix it in a new commit."

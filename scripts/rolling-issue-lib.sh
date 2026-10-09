@@ -4,8 +4,8 @@
 #
 #   . "$(dirname "${BASH_SOURCE[0]}")/rolling-issue-lib.sh"
 #
-# Used by scripts/stuck-runs.sh, scripts/watcher-runs.sh,
-# scripts/publish-verify-control-issue.sh, scripts/publish-verify-close-issue.sh
+# Used by scripts/stuck-runs.sh, scripts/publish-verify-control-issue.sh,
+# scripts/publish-verify-close-issue.sh
 # and scripts/e2e-report-failure.sh. Each used to find its issue with a title
 # search (`gh issue list --search 'in:title ...'`). Three things were wrong
 # with that, and this file is the one place they are put right:
