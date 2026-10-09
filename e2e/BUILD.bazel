@@ -52,3 +52,36 @@ sh_test(
         "//:go.mod",
     ],
 )
+
+# One Helm for CI (#1580): e2e/helm-version.sh pins a Helm 3 and a Helm 4
+# release and which of the two is the default; .github/actions/setup-helm is the
+# only installer, so no job runs the runner image's Helm or azure/setup-helm's
+# `latest`. Also holds the Helm 4 pin to the rules_helm toolchain's helm (the
+# one the chart template tests render with), `helm list` to flags both majors
+# accept (#1581), and the nightly first-install job to a matrix over both
+# majors (#1543). Reads files, and runs the toolchain's helm for `version` and
+# `list --help`.
+sh_test(
+    name = "helm_pin_test",
+    size = "small",
+    srcs = ["helm_pin_test.sh"],
+    args = ["$(rootpath @helm//:helm)"],
+    data = glob(["*.sh"]) + [
+        "//:ci_definitions",
+        "@helm",
+    ],
+)
+
+# One Gateway API release for every e2e surface (#1583):
+# e2e/gateway-api-version.sh, which every harness sources. Fails on a harness
+# that assigns its own, on a literal release in a download URL, and when go.mod
+# or e2e.yaml's one copy disagrees. Hermetic: it only reads files.
+sh_test(
+    name = "gateway_api_pin_test",
+    size = "small",
+    srcs = ["gateway_api_pin_test.sh"],
+    data = glob(["*.sh"]) + [
+        "//:ci_definitions",
+        "//:go.mod",
+    ],
+)

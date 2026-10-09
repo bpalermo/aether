@@ -93,7 +93,8 @@
 #        rollback to the revision that created the namespace still works.
 #
 # Helm: the suite runs under Helm 3 and under Helm 4 (#1543). Whatever `helm`
-# is first on PATH is the one under test; `verify` prints its version.
+# is first on PATH is the one under test; `verify` prints its version. The
+# nightly job runs one leg per major, at the releases e2e/helm-version.sh pins.
 #
 # Usage: e2e/first-install.sh {up|verify|down}   (bare = up + verify)
 #
@@ -111,6 +112,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # e2e surface, local and CI alike.
 # shellcheck source=e2e/kind-version.sh
 . "$REPO_ROOT/e2e/kind-version.sh"
+# The Helm releases CI installs, and the `helm list` flags per major (#1580).
+# shellcheck source=e2e/helm-version.sh
+. "$REPO_ROOT/e2e/helm-version.sh"
 # <registry>/<namespace> every aether image is tagged under, from the single
 # setting in bazel/registry/registry.bzl (proposal 040) -- never a literal.
 IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
@@ -136,7 +140,9 @@ SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.6.1}"
 SPIRE_NS="spire-mgmt"
 # The edge renders a GatewayClass and a Gateway (leg viii); the same bundle as
 # e2e/authz.sh.
-GWAPI_VERSION="${GWAPI_VERSION:-v1.6.2}"
+# The pinned Gateway API release (#1583): one for every e2e surface.
+# shellcheck source=e2e/gateway-api-version.sh
+. "$REPO_ROOT/e2e/gateway-api-version.sh"
 EDGE_NS="aether-ingress"
 EDGE_MARKER="aether.io/edge-meshconfig-in-manifest"
 # The last chart that knows nothing of that marker, as published (leg viii-b
@@ -168,11 +174,10 @@ dump_state() {
 	printf '\033[1;33m  -- helm releases --\033[0m\n' >&2
 	helm version --short 2>&1 | sed 's/^/    /' >&2 || true
 	# Every status: Helm 3 needs -a for that; Helm 4 lists them all and no
-	# longer has the flag (#1543).
-	case "$(helm version --short 2>/dev/null || true)" in
-	v3.*) hc list -A -a 2>&1 | sed 's/^/    /' >&2 || true ;;
-	*) hc list -A 2>&1 | sed 's/^/    /' >&2 || true ;;
-	esac
+	# longer has the flag (#1543). helm_list_all_flags picks, for both this
+	# and the workflow's diagnostics (#1581).
+	# shellcheck disable=SC2046 # two flags, split on purpose
+	hc list $(helm_list_all_flags) 2>&1 | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- namespaces --\033[0m\n' >&2
 	kc get ns --show-labels 2>&1 | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- pods --\033[0m\n' >&2
