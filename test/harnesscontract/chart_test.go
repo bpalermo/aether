@@ -369,6 +369,7 @@ charts:
         kind: DaemonSet
         name: plugin
         host_paths: ["/plugins/<driver>"]
+        containers: [{name: plugin}]
       - id: w
         kind: MutatingWebhookConfiguration
         webhooks:
@@ -393,6 +394,9 @@ spec:
             - {name: tmp, mountPath: /tmp}
             - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}
             - {name: registry, mountPath: /var/lib/kubelet/plugins_registry}
+        - name: sidecar
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -477,12 +481,12 @@ func TestRenderCheck_HostPathsAndWebhooks(t *testing.T) {
 		"the chart no longer mounts the directory": {
 			driver: "csi.example.io", label: "example.io/managed",
 			render: strings.Replace(selectedRender, "            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}\n", "", 1),
-			want:   `o: DaemonSet/plugin: no container mounts the hostPath volume "plugin-dir" (/var/lib/kubelet/plugins/csi.example.io) at a path ending with /plugins/csi.example.io, which is what the contract's /plugins/<driver> comes to (it is mounted at: nowhere)`,
+			want:   `o: DaemonSet/plugin: no container mounts the hostPath volume "plugin-dir" (/var/lib/kubelet/plugins/csi.example.io) at a path ending with /plugins/csi.example.io, which is what the contract's /plugins/<driver> comes to (the containers the contract lists for the object, plugin, mount it at: nowhere)`,
 		},
 		"the chart mounts the directory elsewhere": {
 			driver: "csi.example.io", label: "example.io/managed",
 			render: strings.Replace(selectedRender, "{name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}", "{name: plugin-dir, mountPath: /csi}", 1),
-			want:   `no container mounts the hostPath volume "plugin-dir" (/var/lib/kubelet/plugins/csi.example.io) at a path ending with /plugins/csi.example.io, which is what the contract's /plugins/<driver> comes to (it is mounted at: /csi)`,
+			want:   `no container mounts the hostPath volume "plugin-dir" (/var/lib/kubelet/plugins/csi.example.io) at a path ending with /plugins/csi.example.io, which is what the contract's /plugins/<driver> comes to (the containers the contract lists for the object, plugin, mount it at: /csi)`,
 		},
 		"another volume is mounted at the directory": {
 			driver: "csi.example.io", label: "example.io/managed",
@@ -494,6 +498,25 @@ func TestRenderCheck_HostPathsAndWebhooks(t *testing.T) {
 			render: strings.Replace(strings.Replace(selectedRender, "            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}\n", "", 1),
 				"{name: registry, mountPath: /registry}", "{name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}", 1),
 			want: `no container mounts the hostPath volume "plugin-dir"`,
+		},
+		// The process that writes the socket is the one the contract lists.
+		"only a sidecar mounts the directory": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(strings.Replace(selectedRender, "            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}\n", "", 1),
+				"        - name: sidecar\n          volumeMounts:\n", "        - name: sidecar\n          volumeMounts:\n            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}\n", 1),
+			want: `no container mounts the hostPath volume "plugin-dir" (/var/lib/kubelet/plugins/csi.example.io) at a path ending with /plugins/csi.example.io, which is what the contract's /plugins/<driver> comes to (the containers the contract lists for the object, plugin, mount it at: nowhere)`,
+		},
+		// A webhook's two selectors are ANDed as well: the one the contract
+		// does not name must select nothing in particular.
+		"the chart adds an object selector to the webhook held by its namespaces": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `    namespaceSelector: {matchLabels: {example.io/managed: "true"}}`, `    namespaceSelector: {matchLabels: {example.io/managed: "true"}}`+"\n"+`    objectSelector: {matchLabels: {tier: mesh}}`, 1),
+			want:   `w: the render's one MutatingWebhookConfiguration: the webhook "inject.example" also selects with its objectSelector (tier=mesh), and the contract holds it to its other selector alone`,
+		},
+		"the chart adds a namespace selector to the webhook held by its objects": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `    objectSelector: {matchLabels: {example.io/managed: "true"}}`, `    objectSelector: {matchLabels: {example.io/managed: "true"}}`+"\n"+`    namespaceSelector: {matchExpressions: [{key: tier, operator: Exists}]}`, 1),
+			want:   `the webhook "ndots.example" also selects with its namespaceSelector (none, and 1 matchExpressions), and the contract holds it to its other selector alone`,
 		},
 		// Kubernetes ANDs the requirements of a selector: anything beside the
 		// one pair narrows what the webhook sees, and it ignores failures.

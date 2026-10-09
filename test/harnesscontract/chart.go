@@ -689,6 +689,7 @@ func (o Object) checkHostPaths(what string, d manifest) []string {
 			paths = append(paths, v.HostPath.Path)
 		}
 	}
+	by, whose := o.mounters(pod.Containers)
 	for i, want := range o.hostPaths {
 		found := false
 		for _, v := range pod.Volumes {
@@ -696,9 +697,9 @@ func (o Object) checkHostPaths(what string, d manifest) []string {
 				continue
 			}
 			found = true
-			if at := mountedAt(pod.Containers, v.Name); !slices.ContainsFunc(at, func(p string) bool { return strings.HasSuffix(p, want) }) {
-				problems = append(problems, fmt.Sprintf("%s: no container mounts the hostPath volume %q (%s) at a path ending with %s, which is what the contract's %s comes to (it is mounted at: %s)",
-					what, v.Name, v.HostPath.Path, want, o.HostPaths[i], orNowhere(at)))
+			if at := mountedAt(by, v.Name); !slices.ContainsFunc(at, func(p string) bool { return strings.HasSuffix(p, want) }) {
+				problems = append(problems, fmt.Sprintf("%s: no container mounts the hostPath volume %q (%s) at a path ending with %s, which is what the contract's %s comes to (%s mount it at: %s)",
+					what, v.Name, v.HostPath.Path, want, o.HostPaths[i], whose, orNowhere(at)))
 			}
 		}
 		if !found {
@@ -706,6 +707,27 @@ func (o Object) checkHostPaths(what string, d manifest) []string {
 		}
 	}
 	return problems
+}
+
+// mounters returns the containers whose mounts count, and what to call them
+// in a failure: the ones the contract lists for the object, because those are
+// the processes it speaks of (a sidecar that mounts the directory does not put
+// the component's socket in it), or every container when it lists none.
+func (o Object) mounters(containers []container) ([]container, string) {
+	if len(o.Containers) == 0 {
+		return containers, "its containers"
+	}
+	var out []container
+	var names []string
+	for _, listed := range o.Containers {
+		names = append(names, listed.Name)
+		for _, c := range containers {
+			if c.Name == listed.Name {
+				out = append(out, c)
+			}
+		}
+	}
+	return out, "the containers the contract lists for the object, " + strings.Join(names, ", ") + ","
 }
 
 // mountedAt returns the paths the containers mount the volume at.
@@ -761,9 +783,16 @@ func (o Object) checkWebhooks(what string, d manifest) []string {
 // matches nothing the mesh manages; and Kubernetes requires everything a
 // selector lists, so one more label or any expression narrows what the webhook
 // sees, down to nothing if the two contradict.
+//
+// A webhook's two selectors are required together too, so the one the contract
+// does not name (no id) selects by nothing.
 func selects(what, webhook, kind string, got selector, label, id string) []string {
 	if id == "" {
-		return nil
+		if len(got.MatchLabels)+len(got.MatchExpressions) == 0 {
+			return nil
+		}
+		return []string{fmt.Sprintf("%s: the webhook %q also selects with its %s (%s), and the contract holds it to its other selector alone: every further requirement narrows what the webhook sees",
+			what, webhook, kind, got.describe())}
 	}
 	problem := ""
 	switch {
