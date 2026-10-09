@@ -219,7 +219,13 @@ read_yaml_files() {
 			YAML_PARSED["$path"]=1
 			;;
 		template) ;;
-		problem) printf '%s\t%s\t%s\n' "$path" "$line" "$what" >>"$problems" ;;
+		problem)
+			# The finding is the whole answer for this file: an empty set of
+			# records, so the line reader is not let loose on it as well.
+			printf '%s\t%s\t%s\n' "$path" "$line" "$what" >>"$problems"
+			mkdir -p "$(dirname "$work/records/$path")" && : >"$work/records/$path" || return 1
+			YAML_PARSED["$path"]=1
+			;;
 		*) continue ;;
 		esac
 		n=$((n + 1))

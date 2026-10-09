@@ -425,6 +425,11 @@ expect_fail "an image by tag in the last document of a multi-document YAML file"
 # passed over, and it is not handed to the line reader as if it were a script.
 mutate "a YAML file no parser can read" e2e/sub/broken.yaml $'spec:\n  ports: [1, 2\n  image: 3' \
 	"e2e/sub/broken.yaml:3: is not YAML a parser can read"
+if [[ "$OUT" == *"names no tag"* ]]; then
+	bad "a YAML file no parser can read was read line by line as well:"$'\n'"$OUT"
+else
+	ok "a YAML file no parser can read gets that one finding"
+fi
 # What a string of a YAML file holds is text in another language, and is read
 # like a here-document: a manifest, a script (its comments are comments), JSON.
 mutate "a manifest embedded in a YAML block scalar" e2e/sub/cm.yaml $'data:\n  pod.yaml: |\n    spec:\n      containers:\n        - image: new/tool:latest' \

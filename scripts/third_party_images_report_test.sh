@@ -581,6 +581,22 @@ expect "a count line with junk in it: the run goes on" 0 "$CREATED"
 state_is "only a pin and a count of at most six digits are read from it" "open a/b:1.0=1 quay.io/c/d:v2=3"
 if [ ! -e "$TMP/pwned" ]; then ok "nothing from the body is run"; else bad "text from the issue body was executed"; fi
 
+# A body someone saved in the web editor has CR LF line ends: the hidden part is
+# still found and replaced, and what follows it is kept.
+fresh
+one_behind
+report 1
+sed -i -e 's/$/\r/' "$TMP/state/body"
+cd_fails
+report 2
+report 2
+if [ "$(grep -c -F -- "$STATE_LINE" "$TMP/state/body")" = 1 ] && grep -qF -- "errors@open quay.io/c/d:v2=2 -->" "$TMP/state/body"; then
+	ok "a body with CR LF line ends: the count is replaced, not added a second time"
+else
+	bad "CR LF body: the hidden state is not one line with the count 2"
+fi
+has "a body with CR LF line ends: what follows the hidden part is kept" "$TMP/state/body" "Check run: https://example.invalid/run" "<!-- third-party-images: "
+
 # gh failing while the count is read or written is exit 2.
 fresh
 cd_fails
@@ -594,6 +610,23 @@ if [ "$RC" -eq 2 ]; then ok "the count cannot be written: exit 2"; else bad "cou
 fresh
 FAKE_GH_FAIL="issue-close" report 2
 if [ "$RC" -eq 2 ]; then ok "the issue that holds the count cannot be closed: exit 2"; else bad "holder close fails: exit $RC"; fi
+# ...which leaves it OPEN (so does a run cancelled between the two writes). The
+# next run closes it and goes on counting: an open issue that only ever had its
+# count edited would never report the streak.
+report 2
+expect "the issue that holds the count was left open: the next run counts and closes it" 0 "issue edit 7,issue close 7"
+state_is "the count went on" "closed quay.io/c/d:v2=2"
+report 2
+expect "and the third run reports the pin in a new issue" 0 "$CREATED"
+# Left open and reportable by the time it is found: it becomes the report.
+fresh
+FAKE_GH_FAIL="issue-close" report 2
+FAKE_GH_FAIL="issue-close" report 2
+report 2
+expect "left open until the third run: it is rewritten as the report and stays open" 0 "issue edit 7"
+has "the rewritten issue is the report, not the note that it is closed" "$TMP/state/body" "quay.io/c/d:v2  3 runs in a row" "among the pins it could check"
+lacks "the rewritten issue no longer says it is closed" "$TMP/state/body" "this issue is closed"
+state_is "its count is an open issue's now" "open quay.io/c/d:v2=3"
 
 # --- newer tags are a section, and decide nothing (#1569) -----------------------
 NEWER_CD="NEWER    quay.io/c/d:v2  2 newer: v3 v4"

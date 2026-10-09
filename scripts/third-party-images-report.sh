@@ -276,7 +276,10 @@ with_region() {
 			done = 1
 		}
 		skip {
-			if ($0 == end) skip = 0
+			# A body saved from the web editor ends its lines with CR LF.
+			line = $0
+			sub(/\r$/, "", line)
+			if (line == end) skip = 0
 			next
 		}
 		!done && index($0, begin) == 1 {
@@ -407,7 +410,26 @@ if [ "$nerrors" -gt 0 ]; then
 	reported "$tmp/state" >"$tmp/reported"
 	nreported="$(wc -l <"$tmp/reported" | tr -d ' ')"
 
-	if [ -n "$num" ]; then
+	# An OPEN issue whose count says `@closed` is the issue that holds the
+	# count, left open: the run that opened it was cancelled, or failed, before
+	# it closed it. Left alone it would hide the streak for good (an open issue
+	# only has its count edited), so this run finishes the job: it closes it,
+	# or, when there is something to report by now, makes it the report.
+	stranded=0
+	if [ -n "$num" ] && grep -qF -- "${STATE_PREFIX}closed" "$tmp/old.md"; then stranded=1; fi
+
+	if [ "$stranded" -eq 1 ] && [ "$nbehind" -eq 0 ] && [ "$nreported" -eq 0 ]; then
+		region "$tmp/state" closed >"$tmp/region"
+		with_region "$tmp/old.md" "$tmp/region" >"$tmp/body.md"
+		gh issue edit "$num" --body-file "$tmp/body.md" || die "could not rewrite #${num}"
+		gh issue close "$num" || die "could not close #${num}"
+		echo "closed #${num}: it holds the count of failed lookups and was left open by an earlier run"
+	elif [ "$stranded" -eq 1 ]; then
+		region "$tmp/state" open >"$tmp/region"
+		if [ "$nbehind" -gt 0 ]; then body behind >"$tmp/body.md"; else body unreachable >"$tmp/body.md"; fi
+		gh issue edit "$num" --body-file "$tmp/body.md" || die "could not rewrite #${num}"
+		echo "rewrote #${num}: it held the count of failed lookups, and there is something to report now"
+	elif [ -n "$num" ]; then
 		region "$tmp/state" open >"$tmp/region"
 		with_region "$tmp/old.md" "$tmp/region" >"$tmp/body.md"
 		# The comment goes first: if the rewrite then fails, the next run
