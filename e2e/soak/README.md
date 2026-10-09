@@ -1483,13 +1483,17 @@ the pod exists, and after that it cannot be placed.
   with a few hundred per node (2026-10-08: 2,594 over five nodes), and says nothing.
   A reset is only seen when the new value is below the old one.
   Since #1424 the counter has a `reason` label (why the pin was empty:
-  `trust_domain_unknown`, `no_namespace_metadata`, `pin_not_rendered`), so an agent has
-  three series, each seeded at zero. The gate sums every series whatever its labels, so
-  it grades both shapes, and a soak that rolls from one to the other, alike; when the
-  counter moved it also prints `UNPINNED reason=<reason> count=N nodes=…`, and a series
-  from an older agent is `reason=-`. A `trust_domain_unknown` count in the snapshots
-  right after an agent roll and a `no_namespace_metadata` count are different findings:
-  the runbook says what each means. The agent's two gauges
+  `trust_domain_unknown`, `tls_not_published`, `no_namespace_metadata`,
+  `pin_not_rendered`), so an agent has four series, each seeded at zero (three before
+  #1482, which added `tls_not_published`). The gate sums every series whatever its
+  labels, so it grades every shape, and a soak that rolls from one to another, alike;
+  when the counter moved it also prints `UNPINNED reason=<reason> count=N nodes=…`, and
+  a series from an older agent is `reason=-`. The reasons are different findings: under
+  `trust_domain_unknown` and `tls_not_published` (the snapshots right after an agent
+  roll, before it has its identity) the agent published no TLS at all, and
+  `no_namespace_metadata` is TLS published without a pin. Any of them fails the gate: a
+  soak has to say why an agent was in that state. The runbook says what each means. The
+  agent's two gauges
   (`aether_agent_snapshot_tls_clusters`, `aether_agent_xds_acked_tls_clusters`, #1425)
   are not graded: a gauge is sampled, and an unpinned window shorter than the export
   interval is in the counter and may be in no gauge sample. Read them to see how many

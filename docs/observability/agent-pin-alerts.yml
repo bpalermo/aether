@@ -1,0 +1,202 @@
+# Prometheus alerting rules for the server-identity SAN pin of the mesh clusters
+# a node proxy dials (#832, #1424, #1425, #1481, #1482).
+#
+# A mesh cluster's upstream TLS context pins the server identity it expects
+# (match_typed_subject_alt_names, one SPIFFE ID per endpoint namespace). A
+# cluster published WITH TLS and WITHOUT that pin authenticates any workload in
+# the trust domain: a foreign endpoint in its load assignment is a clean
+# handshake and a delivered request. It is the fail-open direction, and nothing
+# on the data path reports it.
+#
+# The agent (and the edge control plane) reports the state of every snapshot it
+# publishes:
+#
+#   aether_agent_snapshot_tls_clusters{pin="pinned"}
+#   aether_agent_snapshot_tls_clusters{pin="unpinned", reason="<reason>"}
+#
+# written on every snapshot, zeros included, with no per-cluster label: five
+# series per agent whatever the size of the mesh. `reason` is a closed set, and
+# the two halves of it are different kinds of fact:
+#
+#   no_namespace_metadata  TLS is published and checks no server identity. The
+#                          validation gap. Not transient.
+#   pin_not_rendered       An entry reached a snapshot unrendered. No code path
+#                          does it; an agent defect if it ever shows.
+#   trust_domain_unknown   The agent did not know its trust domain when it
+#                          rendered the pin. It publishes NO TLS in that state.
+#   tls_not_published      The endpoints carry no namespace and NO TLS is
+#                          published for the entry: the agent has no SVID yet,
+#                          or the entry is a TCP floor whose `tcp:` cluster is
+#                          not in the snapshot (the service is not captured;
+#                          on the edge, no route references it). The entry
+#                          becomes no_namespace_metadata in the snapshot that
+#                          first publishes TLS for it (#1482).
+#
+# docs/runbook.md, "The unpinned-cluster signal", says what to do about each.
+#
+# The names are as Prometheus stores them from OTLP: dots become underscores and
+# a counter gains _total. The gauges carry `job` (aether-agent, or the edge's)
+# and `node`.
+#
+# Install: merge into the Prometheus rule files (with the Prometheus helm chart,
+# under serverFiles: alerting_rules.yml: groups: [...]). See README.md in this
+# directory. agent-pin-alerts_test.yml beside this file is its promtool unit
+# test: `promtool test rules docs/observability/agent-pin-alerts_test.yml`.
+# This repository has no promtool in its build, so CI does not run it here.
+
+groups:
+  - name: aether-agent-san-pin
+    rules:
+      # ---------------------------------------------------------------- P1
+      # TLS published without a server-identity pin.
+      #
+      # for: 3m is three export intervals (the agent pushes every 60 s): one
+      # sample is a snapshot, three in a row are a state. Nothing at an agent
+      # start produces this reason transiently: before the agent has its SVID
+      # the same entries are tls_not_published (the rule below), so there is no
+      # start-up window to ride out here.
+      #
+      # The gauge is pushed, so an agent that is down is no series, not a zero:
+      # this rule says nothing about a node whose agent does not report. That
+      # is what the per-node absence rule in agent-cni-alerts.yml is for.
+      - alert: AetherMeshClusterUnpinned
+        expr: >-
+          sum by (job, node, reason) (
+            aether_agent_snapshot_tls_clusters{pin="unpinned", reason=~"no_namespace_metadata|pin_not_rendered"}
+          ) > 0
+        for: 3m
+        labels:
+          severity: critical
+          component: aether-agent
+        annotations:
+          summary: "{{ $value }} mesh cluster(s) on {{ $labels.node }} are published with TLS and no server-identity pin ({{ $labels.reason }})"
+          description: >-
+            {{ $labels.job }} on {{ $labels.node }} publishes {{ $value }} mesh
+            cluster entries whose upstream TLS context carries no
+            match_typed_subject_alt_names, reason {{ $labels.reason }}. Their
+            handshake proves trust-domain membership only, so any mesh workload
+            is accepted as the server. The agent names the clusters in its WARN
+            line `mesh clusters published with no server-identity SAN pin`
+            (same `reason`). For no_namespace_metadata, find who registered the
+            service's endpoints without a Kubernetes namespace. pin_not_rendered
+            is an agent defect. See docs/runbook.md, "The unpinned-cluster
+            signal".
+
+      # ---------------------------------------------------------------- P3
+      # The two reasons under which the agent publishes no TLS at all. Both are
+      # expected for a moment at an agent start and are a fault only when they
+      # last: the agent never learned its trust domain, or never got its SVID.
+      # While they last the node's mesh clusters go out without a transport
+      # socket and a peer's mesh inbound refuses them: an availability problem
+      # on this node, not an authentication gap.
+      #
+      # for: 5m. Why that number:
+      #   - Measured on a five-node test cluster: all five running agents had
+      #     their SVID within 0.5 s of asking (aether_agent_spire_wait_seconds,
+      #     every observation in the lowest bucket), so the window is normally
+      #     shorter than one 60 s export and is in no gauge sample at all.
+      #   - From the code: an agent still without an SVID after 2 m
+      #     (--spire-wait-warn-after) reports NotReady, and the node is tainted.
+      #     That is the agent's own bound on a healthy start.
+      #   - 5 m is that 2 m, plus two export intervals so the state is seen
+      #     twice past it, plus one more for evaluation jitter. An alert at 5 m
+      #     is therefore never an agent start; it is an agent that is stuck.
+      #
+      # tls_not_published also lasts, with a healthy agent, for a TCP service
+      # whose endpoints carry no namespace and whose floor cluster is not
+      # published (not in the capture set; on the edge, referenced by no
+      # route). The warning is then about the registry data: the same entry is
+      # the critical rule's the moment the floor is published. The agent's WARN
+      # line names it (`tcp:<svc>`).
+      #
+      # A mesh run WITHOUT SPIRE never has a node SVID: every entry with no
+      # namespace metadata is tls_not_published for good, by design. Drop this
+      # rule (or its tls_not_published half) there.
+      - alert: AetherMeshClusterPinPending
+        expr: >-
+          sum by (job, node, reason) (
+            aether_agent_snapshot_tls_clusters{pin="unpinned", reason=~"trust_domain_unknown|tls_not_published"}
+          ) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: aether-agent
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.node }} has {{ $value }} mesh cluster entr(ies) for which no TLS cluster is published, for 5m ({{ $labels.reason }})"
+          description: >-
+            {{ $value }} mesh cluster entries on {{ $labels.node }} have no
+            server-identity pin for reason {{ $labels.reason }}, a state in
+            which the agent publishes them with no TLS at all. It is expected
+            for a moment when an agent starts and has now lasted 5 minutes.
+            trust_domain_unknown: the agent has not learned its trust domain.
+            tls_not_published: the agent has no SVID of its own, or the
+            clusters are TCP floors that are not published (`tcp:` names in
+            the agent's WARN line). Check the agent's identity readiness and
+            its SPIRE Workload API socket first. tls_not_published entries have
+            endpoints with no namespace metadata and become
+            AetherMeshClusterUnpinned the moment TLS is published for them. See docs/runbook.md, "The unpinned-cluster signal".
+
+      # ---------------------------------------------------------------- P2
+      # Published is not held. aether_agent_xds_acked_tls_clusters is the same
+      # count for the last snapshot whose cluster update the proxy ACKNOWLEDGED.
+      # This fires when the proxy last acknowledged MORE unpinned clusters than
+      # the agent now publishes: the agent has pinned them (or dropped them)
+      # and the proxy has not taken the update. The usual cause is a proxy
+      # rejecting cluster updates:
+      #   increase(aether_agent_xds_nacks_total{aether_xds_type_url=~".*Cluster"}[30m])
+      #
+      # Absence cannot fire it. The acknowledged gauge has no series until the
+      # first cluster ACK an agent process sees, and an agent that restarts
+      # against a proxy already in sync is owed none (#1483). A comparison
+      # between two vectors returns nothing for a (job, node) one side lacks,
+      # so that state is silent here, as it should be: no response was owed, so
+      # the proxy holds what the published gauge shows.
+      #
+      # Reason by reason, never on the totals. A cluster that leaves one reason
+      # for another (an unpinned TCP floor that is removed: no_namespace_metadata
+      # falls by one, tls_not_published rises by one) keeps the totals equal, so
+      # a proxy that rejects that update and goes on serving TLS without a pin
+      # would be silent in a comparison of sums. Both gauges carry a series for
+      # every reason, zero included, so each reason has both sides. The value
+      # is the number of entries the proxy holds beyond what is published,
+      # added up over the reasons.
+      #
+      # One direction only. The reverse (acknowledged below published) is the
+      # new unpinned snapshot not yet acknowledged, and the first rule already
+      # speaks for what is published.
+      #
+      # for: 15m. An update in flight differs for milliseconds, and a restarted
+      # agent's previous acknowledged sample is still returned for Prometheus's
+      # 5 m lookback (OTLP has no staleness marker). 15 m is well clear of
+      # both.
+      #
+      # Known residue: during a proxy hot restart two generations are connected
+      # and the gauge shows the last ACK from either. A late ACK of an older
+      # snapshot from the generation that is leaving, on a node where no
+      # cluster changes afterwards, leaves the gauge on that older state until
+      # the next cluster update. It needs a pin to change in the same seconds
+      # as a proxy handoff; it is why this is a warning and not a page.
+      - alert: AetherProxyHoldsUnpinnedClusters
+        expr: >-
+          sum by (job, node) (clamp_min(
+          sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
+          -
+          sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}),
+          0)) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: aether-agent
+        annotations:
+          summary: "the proxy on {{ $labels.node }} last acknowledged {{ $value }} unpinned mesh cluster(s) that {{ $labels.job }} no longer publishes"
+          description: >-
+            The last cluster update the proxy on {{ $labels.node }} acknowledged
+            had {{ $value }} more mesh cluster entries without a server-identity
+            pin, counted reason by reason, than the agent's current snapshot.
+            The proxy has not accepted the newer clusters for 15 minutes. Check
+            aether_agent_xds_nacks_total for the Cluster type URL and the agent
+            log for `envoy NACKed delta response` (it carries the proxy's
+            error), and `proxy acknowledged mesh clusters with no
+            server-identity SAN pin` for the per-reason counts. See
+            docs/runbook.md, "The unpinned-cluster signal", "Published is not
+            held".
