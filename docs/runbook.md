@@ -2122,16 +2122,16 @@ before. What changes:
 
   The same command recovers a release that a rollback to such a revision left
   `failed`; so does `helm rollback aether <the last deployed revision>`.
-- **Two cases still seed the MeshConfig as a release object**, because a
+- **One case still seeds the MeshConfig as a release object**, because a
   `pre-install` hook runs before any object of the release exists and so cannot
-  create a MeshConfig in a namespace the same revision creates: the edge's
+  create a MeshConfig in a namespace the same revision creates: the control
+  plane's with `namespace.create=true` (the release stored in another
+  namespace). Under Helm 3 that one revision cannot be rolled back to once a
+  later one exists; the check and the way round above apply to it. The edge's
   MeshConfig on the revision that creates the edge namespace
-  (`edge.enabled=true` with `edge.namespaceCreate=true`, its default), and the
-  control plane's with `namespace.create=true` (the release stored in another
-  namespace). That one revision cannot be rolled back to once a later one
-  exists; the check and the way round above apply to it. To avoid it, create
-  the edge namespace yourself (labelled `pod-security.kubernetes.io/enforce=baseline`)
-  and set `edge.namespaceCreate=false`.
+  (`edge.enabled=true` with `edge.namespaceCreate=true`, its default) was the
+  second such case in 2.4.24 and is not one since 2.4.25: see "Chart 2.4.25"
+  below, also for an edge namespace that 2.4.24 or an older chart created.
 - For a MeshConfig seeded by the hook, `helm get manifest` does not list it
   and `helm get hooks` does, on the revision that seeded it; the object carries
   no `meta.helm.sh/release-*` annotations. One that an older chart seeded keeps
@@ -2194,6 +2194,111 @@ kubectl -n aether-system get meshconfig default \
   -o jsonpath='{.metadata.uid} generation={.metadata.generation}{"\n"}'
 kubectl -n aether-system get ds,deploy \
   -o custom-columns=KIND:.kind,NAME:.metadata.name,GENERATION:.metadata.generation
+```
+
+#### Chart 2.4.25: the edge's MeshConfig is in every revision; a kept Namespace and `helm rollback` (#1514, #1515)
+
+Both items are about **Helm 3**. For an object that is live and in the manifest
+it rolls back to, Helm 3 starts from the copy in the current manifest and fails
+when there is none (`no <Kind> with the name "<name>" found`; measured with
+3.18.4). Helm 4 starts from the live object instead (`resource exists on
+cluster but not in original release, using cluster state as baseline`) and
+rolls back; measured with 4.2.0 on both cases below.
+
+**The edge's MeshConfig (#1514).** With `edge.enabled=true` and
+`edge.namespaceCreate=true` (its default) the chart creates the edge namespace
+and the `default` MeshConfig in it on the same revision. A hook cannot do that
+(it runs before the namespace exists), so that MeshConfig is an object of the
+release. Up to 2.4.24 it was seeded once: in that revision's manifest, in no
+later one, and still live, so under Helm 3 `helm rollback` to that revision
+failed like #1471:
+
+```
+$ helm rollback aether 1 -n aether-system
+Error: no MeshConfig with the name "default" found
+```
+
+Since 2.4.25 the chart renders it on **every** revision, for a release whose
+edge namespace it created: the namespace carries
+`aether.io/edge-meshconfig-in-manifest: "true"`. The chart sets no field of
+that MeshConfig's spec (`spec: {}` whatever the values), so rendering it again
+changes nothing in it: your edits survive every upgrade and every rollback
+(measured with Helm 3.18.4 and Helm 4.2.0: the same UID and the edited field
+after an upgrade and a rollback in each direction). `helm get manifest` lists
+it on every revision.
+
+- **Upgrading to 2.4.25 rolls nothing and changes nothing in the cluster.** An
+  edge namespace that 2.4.24 or an older chart created is not marked, and the
+  chart treats it as before: the MeshConfig is live, so it is not rendered. The
+  revision that created that namespace keeps the MeshConfig in its stored
+  manifest and still cannot be a Helm 3 rollback target; the check and the way
+  round of "Chart 2.4.24" apply (an upgrade to that revision's chart with that
+  revision's values).
+- Do not add the annotation to such a namespace by hand. The next upgrade
+  would bring the live MeshConfig back into the manifest, and that revision
+  could then not be rolled back to from an older one: the same failure, one
+  revision later.
+- Which form a release has:
+
+  ```bash
+  kubectl get namespace aether-ingress \
+    -o jsonpath='{.metadata.annotations.aether\.io/edge-meshconfig-in-manifest}{"\n"}'
+  # "true": the edge's MeshConfig is in the manifest of every revision since
+  # the one that created the namespace. Empty: seeded once (the namespace is
+  # older than 2.4.25, or was created with meshConfig.createDefault=false).
+  ```
+- With `meshConfig.createDefault=false` the chart renders no MeshConfig and
+  the namespace is created unmarked. If a marked release turns the seed off,
+  the MeshConfig leaves the manifest and stays in the cluster
+  (`helm.sh/resource-policy: keep`); under Helm 3 the revisions before that
+  one can then not be rolled back to, as in the next item.
+- `helm uninstall`, and an upgrade with `edge.enabled=false`, delete the edge
+  namespace as before, and the MeshConfig with it.
+- The control plane's MeshConfig with `namespace.create=true` is **not**
+  changed: its seed carries `meshConfig.proxy`, and a spec that is rendered
+  again is patched over yours. It stays the one exception of "Chart 2.4.24".
+
+After an upgrade to 2.4.25 with the edge on, check that the edge's MeshConfig
+was left alone and that the edge did not roll:
+
+```bash
+kubectl -n aether-ingress get meshconfig default \
+  -o jsonpath='{.metadata.uid} generation={.metadata.generation}{"\n"}'
+kubectl -n aether-ingress get deploy aether-edge \
+  -o custom-columns=NAME:.metadata.name,GENERATION:.metadata.generation
+```
+
+**A Namespace that left the manifest (#1515).** The chart keeps rendering a
+Namespace the release owns, so that Helm never deletes it (#1403). It stops
+when the release no longer owns it: the ownership annotations
+(`meta.helm.sh/release-name`, `meta.helm.sh/release-namespace`) were removed
+from the live Namespace, or a first install failed and was upgraded after the
+`keep` command of "Chart 2.4.21". The Namespace stays
+(`helm.sh/resource-policy: keep`), and from then on a revision whose stored
+manifest holds it cannot be a Helm 3 rollback target. Measured on kind, Helm
+3.18.4, revision 2 holding the Namespace and revision 3 not:
+
+```
+$ helm rollback aether 2 -n aether-system
+Error: no Namespace with the name "aether-system" found
+```
+
+The namespace is untouched (same UID, `Active`), and the release is `failed` at
+a new revision. A rollback to a revision without the Namespace works and puts
+the release back to `deployed`, and so does Helm 4.2.0 on the same steps. Nothing in a chart can change this: the manifests are already stored,
+and Helm refuses a Namespace the release does not own if the chart renders it
+again. The check and the way round are those of "Chart 2.4.24", with
+`Namespace` in place of `MeshConfig`:
+
+```bash
+for rev in $(helm history aether -n aether-system -o json | jq -r '.[].revision'); do
+  echo "revision $rev: $(helm get manifest aether -n aether-system --revision "$rev" | grep -c '^kind: Namespace')"
+done
+# To get what an affected revision ran (also after a failed rollback):
+REV=2
+helm get values aether -n aether-system --revision "$REV" -o yaml > "revision-$REV-values.yaml"
+helm upgrade aether oci://quay.io/aethermesh/chart-aether --version <that revision's chart version> \
+  --namespace aether-system -f "revision-$REV-values.yaml"
 ```
 
 #### The prober chart (#1372, #1373, #1374)

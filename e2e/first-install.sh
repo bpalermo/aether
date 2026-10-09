@@ -76,6 +76,19 @@
 #        namespace is untouched, and after that command the same upgrade goes
 #        through with the namespace kept. For the aether chart and for the
 #        prober chart, which carries a copy of the guard.
+#   viii. the edge's MeshConfig (#1514) — run last, on the release (vi) left.
+#        An upgrade turns the edge on with its defaults, so that revision
+#        creates the edge namespace and the MeshConfig in it. A pre-install
+#        hook cannot do that, and seeded once as a release object the
+#        MeshConfig was in that revision's manifest only: under Helm 3,
+#        `helm rollback` to it failed with `no MeshConfig with the name
+#        "default" found`. It is in every revision's manifest now (the
+#        namespace is marked), an edit of it survives an upgrade and a
+#        rollback in each direction, and the edge pods start (the controller
+#        projected it). Needs the Gateway API CRDs (`up` installs them).
+#
+# Helm: the suite runs under Helm 3 and under Helm 4 (#1543). Whatever `helm`
+# is first on PATH is the one under test; `verify` prints its version.
 #
 # Usage: e2e/first-install.sh {up|verify|down}   (bare = up + verify)
 #
@@ -83,7 +96,7 @@
 #                                    of this one's (e.g. a `git worktree` of
 #                                    main: the suite must be RED there).
 #
-# Prereqs: kind, docker, kubectl, helm, jq, bazel (for the image build; CI sets
+# Prereqs: kind, docker, kubectl, helm (3 or 4), jq, bazel (for the image build; CI sets
 # FIRST_INSTALL_SKIP_BUILD=1 and pre-loads the images from the nightly build
 # artifact).
 set -euo pipefail
@@ -116,6 +129,11 @@ PSA_LABELS=(
 SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.30.2}"
 SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.6.1}"
 SPIRE_NS="spire-mgmt"
+# The edge renders a GatewayClass and a Gateway (leg viii); the same bundle as
+# e2e/authz.sh.
+GWAPI_VERSION="${GWAPI_VERSION:-v1.6.2}"
+EDGE_NS="aether-ingress"
+EDGE_MARKER="aether.io/edge-meshconfig-in-manifest"
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi)
 WORKLOADS=(ds/aether-agent ds/aether-proxy ds/aether-mesh-dns ds/aether-uds-csi deploy/aether-registrar deploy/aether-controller)
 # Where the API server's admission configuration lives on the host; mounted into
@@ -136,7 +154,13 @@ hc() { helm --kube-context "$CTX" "$@"; }
 dump_state() {
 	kubectl config get-contexts "$CTX" >/dev/null 2>&1 || return 0
 	printf '\033[1;33m  -- helm releases --\033[0m\n' >&2
-	hc list -A -a 2>&1 | sed 's/^/    /' >&2 || true
+	helm version --short 2>&1 | sed 's/^/    /' >&2 || true
+	# Every status: Helm 3 needs -a for that; Helm 4 lists them all and no
+	# longer has the flag (#1543).
+	case "$(helm version --short 2>/dev/null || true)" in
+	v3.*) hc list -A -a 2>&1 | sed 's/^/    /' >&2 || true ;;
+	*) hc list -A 2>&1 | sed 's/^/    /' >&2 || true ;;
+	esac
 	printf '\033[1;33m  -- namespaces --\033[0m\n' >&2
 	kc get ns --show-labels 2>&1 | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- pods --\033[0m\n' >&2
@@ -271,12 +295,23 @@ install_spire() {
 	ok "SPIRE up"
 }
 
+# The edge's GatewayClass and Gateway need their CRDs before the chart renders
+# them (leg viii turns the edge on).
+install_gateway_api() {
+	log "installing the Gateway API CRDs ($GWAPI_VERSION, standard channel)"
+	kc apply --server-side -f \
+		"https://github.com/kubernetes-sigs/gateway-api/releases/download/${GWAPI_VERSION}/standard-install.yaml" >/dev/null ||
+		die "could not install the Gateway API CRDs"
+	ok "Gateway API CRDs installed"
+}
+
 up() {
 	raise_inotify
 	build_images
 	create_cluster
 	load_images
 	install_spire
+	install_gateway_api
 	log "environment ready: an empty cluster (no aether namespace, no aether release)"
 }
 
@@ -320,7 +355,18 @@ documented_helm_install() {
 		"${args[@]}" "$@"
 }
 
-release_field() { hc list -n "$NS" -a --filter "^${RELEASE}\$" -o json | jq -r ".[0].$1 // empty"; }
+# `status` or `revision` of the release's LATEST revision, whatever its status;
+# nothing when there is no such release. Read from `helm status`, which Helm 3
+# and Helm 4 both have: `helm list -a` is Helm 3 only (#1543).
+release_field() {
+	local path
+	case "$1" in
+	status) path=".info.status" ;;
+	revision) path=".version" ;;
+	*) die "release_field: unknown field '$1'" ;;
+	esac
+	{ hc status "$RELEASE" -n "$NS" -o json 2>/dev/null || true; } | jq -r "$path // empty"
+}
 ns_uid() { kc get ns "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null || true; }
 ns_phase() { kc get ns "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true; }
 ns_annotation() { kc get ns "$NS" -o json | jq -r --arg k "$1" '.metadata.annotations[$k] // empty'; }
@@ -339,6 +385,8 @@ wait_ready() {
 # Back to an empty cluster, so `verify` can be run again.
 reset_aether() {
 	hc uninstall "$RELEASE" -n "$NS" >/dev/null 2>&1 || true
+	# Leg viii's namespace, when a run stopped inside it.
+	kc delete ns "$EDGE_NS" --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1 || true
 	# The proxy pod's termination grace period is 180 s, and the namespace is
 	# only gone some time after its last pod.
 	kc delete ns "$NS" --wait=true --timeout=480s >/dev/null 2>&1 || true
@@ -829,7 +877,90 @@ verify_failed_install_guard() {
 	prober_migration_leg
 }
 
+# One field of the edge's MeshConfig (a jq path), or nothing.
+edge_meshconfig_field() { kc -n "$EDGE_NS" get meshconfig default -o json 2>/dev/null | jq -r "$1 // empty"; }
+
+# viii. The edge's MeshConfig, in a namespace the same revision creates (#1514).
+# A pre-install hook runs before the release's objects exist, so it cannot seed
+# that MeshConfig; as an object of the release that was seeded ONCE, it was in
+# the manifest of the revision that created the namespace and of no later one,
+# and `helm rollback` to that revision failed under Helm 3 as in #1471. The
+# chart now renders it on every revision of a release whose edge namespace it
+# created (the namespace carries $EDGE_MARKER).
+verify_edge_meshconfig_rollback() {
+	log "viii. the edge's MeshConfig, in a namespace the same revision creates (#1514)"
+	local base on again uid out
+	# Not skipped when the CRDs are missing: a leg that skips itself green
+	# cannot fail (#853).
+	kc get crd gateways.gateway.networking.k8s.io gatewayclasses.gateway.networking.k8s.io >/dev/null 2>&1 ||
+		die "the Gateway API CRDs are not installed, and the edge renders a GatewayClass and a Gateway: run '$0 up' first (it installs the $GWAPI_VERSION standard bundle)"
+	[ -z "$(kc get ns "$EDGE_NS" -o name 2>/dev/null || true)" ] ||
+		die "the namespace $EDGE_NS exists before the edge was turned on: this leg needs the chart to create it"
+	base="$(release_field revision)"
+	on=$((base + 1))
+	again=$((base + 2))
+
+	# The edge at its defaults: this revision creates the namespace and the
+	# MeshConfig in it.
+	out="$(documented_helm_install --set edge.enabled=true 2>&1)" || die "the upgrade that turns the edge on failed: $out"
+	[ "$(release_field status)" = "deployed" ] && [ "$(release_field revision)" = "$on" ] ||
+		die "after turning the edge on the release is '$(release_field status)' at revision $(release_field revision), want deployed at $on"
+	uid="$(edge_meshconfig_field .metadata.uid)"
+	[ -n "$uid" ] || die "turning the edge on seeded no MeshConfig 'default' in $EDGE_NS"
+	# The controller projects it into the ConfigMap the edge pods mount: they
+	# start only if the MeshConfig was there in time.
+	kc -n "$EDGE_NS" rollout status deploy/aether-edge --timeout=420s >/dev/null || die "deploy/aether-edge never became Ready"
+	ok "the edge is on at revision $on: the chart created $EDGE_NS and the MeshConfig in it (uid $uid), and the edge pods are Ready"
+
+	# The operator's edit, then a later revision.
+	kc -n "$EDGE_NS" patch meshconfig default --type merge -p '{"spec":{"proxy":{"accessLogsEnabled":true}}}' >/dev/null ||
+		die "could not edit the edge's MeshConfig"
+	out="$(documented_helm_install --set edge.enabled=true 2>&1)" || die "the upgrade after the edge was turned on failed: $out"
+	[ "$(release_field revision)" = "$again" ] || die "after that upgrade the release is at revision $(release_field revision), want $again"
+	[ "$(edge_meshconfig_field .spec.proxy.accessLogsEnabled)" = "true" ] ||
+		die "an upgrade reverted the operator's edit of the edge's MeshConfig (spec: $(edge_meshconfig_field '.spec | tojson'))"
+
+	# Back to the revision that created the namespace and the MeshConfig, and
+	# forward again.
+	out="$(hc rollback "$RELEASE" "$on" -n "$NS" 2>&1)" ||
+		die "helm rollback $RELEASE $on (the revision that created $EDGE_NS and its MeshConfig) failed: $out"
+	[ "$(release_field status)" = "deployed" ] || die "after the rollback to revision $on the release is '$(release_field status)', want deployed"
+	out="$(hc rollback "$RELEASE" "$again" -n "$NS" 2>&1)" || die "helm rollback $RELEASE $again failed: $out"
+	[ "$(release_field status)" = "deployed" ] && [ "$(release_field revision)" = "$((again + 2))" ] ||
+		die "after the rollback to revision $again the release is '$(release_field status)' at revision $(release_field revision), want deployed at $((again + 2))"
+	ok "rolled back to revision $on and forward to revision $again; the release is deployed"
+	[ "$(edge_meshconfig_field .metadata.uid)" = "$uid" ] ||
+		die "the edge's MeshConfig was deleted or replaced by a rollback (uid $uid -> '$(edge_meshconfig_field .metadata.uid)')"
+	[ "$(edge_meshconfig_field .spec.proxy.accessLogsEnabled)" = "true" ] ||
+		die "a rollback reverted the operator's edit of the edge's MeshConfig (spec: $(edge_meshconfig_field '.spec | tojson'))"
+	ok "the edge's MeshConfig is the same object (uid $uid) and kept the operator's edit"
+
+	# Why it works: the MeshConfig is in BOTH manifests (the control plane's is
+	# a hook, in neither), and the namespace says so for the revisions to come.
+	[ "$(manifest_meshconfigs "$on")" = "1" ] && [ "$(manifest_meshconfigs "$again")" = "1" ] ||
+		die "the edge's MeshConfig is not in every manifest (revision $on: $(manifest_meshconfigs "$on"), revision $again: $(manifest_meshconfigs "$again"); want 1 and 1)"
+	[ "$(kc get ns "$EDGE_NS" -o json | jq -r --arg k "$EDGE_MARKER" '.metadata.annotations[$k] // empty')" = "true" ] ||
+		die "the namespace $EDGE_NS does not carry $EDGE_MARKER=true"
+	ok "revisions $on and $again both hold the edge's MeshConfig; $EDGE_NS carries $EDGE_MARKER"
+
+	# The edge off again: the namespace is the release's and goes with it.
+	out="$(documented_helm_install 2>&1)" || die "the upgrade that turns the edge off failed: $out"
+	[ "$(release_field status)" = "deployed" ] || die "after turning the edge off the release is '$(release_field status)', want deployed"
+	local gone=""
+	for _ in $(seq 1 120); do
+		[ -n "$(kc get ns "$EDGE_NS" -o name 2>/dev/null || true)" ] || {
+			gone=1
+			break
+		}
+		sleep 2
+	done
+	[ -n "$gone" ] || die "the namespace $EDGE_NS was not removed with the edge"
+	ok "the edge is off again and $EDGE_NS is gone"
+	wait_ready "after the edge leg"
+}
+
 verify() {
+	log "helm $(helm version --short 2>/dev/null || echo '(version unknown)')"
 	charts_dir
 	reset_aether
 	verify_docs
@@ -845,6 +976,7 @@ verify() {
 	verify_seed_race
 	verify_legacy_unmarked
 	verify_upgrade_safety
+	verify_edge_meshconfig_rollback
 	rm -rf "$(dirname "$CHARTS")"
 	log "all assertions passed (#1403/#1404: the documented first install works with default values, upgrades, and no upgrade deletes the namespace)"
 }
