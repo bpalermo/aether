@@ -1,0 +1,12 @@
+# Fixture for //bazel/promtool:check_rules_test: a valid rule file. Not a rule
+# anyone deploys.
+groups:
+  - name: fixture
+    rules:
+      - alert: FixtureDown
+        expr: up{job="fixture"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is down"

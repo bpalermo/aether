@@ -1,0 +1,9 @@
+# Fixture for //bazel/promtool:check_rules_test: a rule file that is broken on
+# purpose. The expression has an unclosed parenthesis: `promtool check rules`
+# must reject it.
+groups:
+  - name: fixture
+    rules:
+      - alert: FixtureBroken
+        expr: sum(rate(fixture_requests_total[5m]) > 0
+        for: 2m

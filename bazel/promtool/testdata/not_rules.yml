@@ -1,0 +1,6 @@
+# Fixture for //bazel/promtool:check_rules_test: valid YAML that is not a rule
+# file (a scrape configuration). `promtool check rules` must reject it.
+scrape_configs:
+  - job_name: fixture
+    static_configs:
+      - targets: ["localhost:9090"]
