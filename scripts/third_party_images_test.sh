@@ -467,6 +467,137 @@ OUT="$(THIRD_PARTY_ROOT="$T" THIRD_PARTY_INVENTORY="$REAL_INVENTORY" "$SCRIPT" c
 RC=$?
 if [ "$RC" -eq 1 ] && [[ "$OUT" == *"is used by no file"* ]]; then ok "the checked-in inventory parses"; else bad "real inventory: exit $RC"$'\n'"$OUT"; fi
 
+# --- 1b. the base-image pulls in the Bazel module files (#1477) ------------------
+#
+# The base image of every image this repository builds is named in Starlark, as
+# the attributes of a pull and never as one reference: a rules_img
+# `pull(registry =, repository =, tag =, digest =)` in MODULE.bazel and a
+# rules_oci `oci.pull(image =, digest =)` in proxy/MODULE.bazel. `check` reads
+# those two constructs and judges what they name like any other reference.
+
+# module_tree <dir>: the clean tree plus both module files, pinned and listed.
+module_tree() {
+	local t="$1"
+	new_tree "$t"
+	mkdir -p "$t/proxy"
+	cat >>"$t/scripts/third-party-images.txt" <<EOF
+pin gcr.io/base/static nonroot $D9
+pin gcr.io/base/cc nonroot $D1
+EOF
+	cat >"$t/MODULE.bazel" <<EOF
+bazel_dep(name = "rules_img", version = "1.0")
+
+# pull(
+#     digest = "sha256:in-a-comment",
+# )
+pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
+
+pull(
+    name = "base_static",
+    digest = "$D9",  # the index
+    layer_handling = "lazy",
+    registry = "gcr.io",
+    repository = "base/static",
+    tag = "nonroot",
+)
+
+http_file(
+    name = "not_an_image",
+    digest = "sha256:zzz",
+)
+EOF
+	cat >"$t/proxy/MODULE.bazel" <<EOF
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+oci.pull(
+    name = "base_cc",
+    digest = "$D1",
+    image = "gcr.io/base/cc",
+    platforms = [
+        "linux/amd64",
+        "linux/arm64/v8",
+    ],
+)
+use_repo(oci, "base_cc")
+EOF
+}
+
+M="$TMP/module-tree"
+module_tree "$M"
+run_check "$M"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 6 image reference(s) in "*": 5 pinned image(s), "* ]]; then
+	ok "module files: a rules_img pull and a rules_oci pull that agree with the inventory pass"
+else
+	bad "module tree: exit $RC"$'\n'"$OUT"
+fi
+OUT="$(THIRD_PARTY_ROOT="$M" "$SCRIPT" list 2>&1)"
+if [[ "$OUT" == *"gcr.io/base/static:nonroot@$D9"$'\n'"    MODULE.bazel:10"* ]] &&
+	[[ "$OUT" == *"gcr.io/base/cc:nonroot@$D1"$'\n'"    proxy/MODULE.bazel:4"* ]]; then
+	ok "module files: list names the module file and the digest's line for each pull"
+else
+	bad "module list:"$'\n'"$OUT"
+fi
+
+# module_edit <name> <file> <sed program> <needle>...: one edit to one module
+# file of a fresh module tree makes check fail.
+module_edit() {
+	local name="$1" file="$2" prog="$3"
+	shift 3
+	module_tree "$M"
+	sed -i -e "$prog" "$M/$file"
+	expect_fail "$name" "$M" "$@"
+}
+
+module_edit "MODULE.bazel: a digest the inventory does not list" MODULE.bazel "s/$D9/$D2/" \
+	"MODULE.bazel:10: gcr.io/base/static:nonroot@$D2 is not in scripts/third-party-images.txt" \
+	"pin gcr.io/base/static nonroot $D9 is used by no file"
+module_edit "MODULE.bazel: a tag that disagrees with the inventory" MODULE.bazel 's/tag = "nonroot"/tag = "latest"/' \
+	"MODULE.bazel:10: gcr.io/base/static:latest@$D9 says tag latest, but scripts/third-party-images.txt lists this digest as gcr.io/base/static:nonroot"
+module_edit "MODULE.bazel: a pull by tag only" MODULE.bazel '/^    digest = /d' \
+	"MODULE.bazel:8: gcr.io/base/static:nonroot is pinned by tag only"
+module_edit "MODULE.bazel: another repository" MODULE.bazel 's|repository = "base/static"|repository = "base/other"|' \
+	"MODULE.bazel:10: gcr.io/base/other:nonroot@$D9 is not in scripts/third-party-images.txt"
+module_edit "MODULE.bazel: a pull with no repository" MODULE.bazel '/^    repository = /d' \
+	"MODULE.bazel:8: this pull names no repository"
+module_edit "MODULE.bazel: a digest that is not a string literal" MODULE.bazel "s/digest = \"$D9\"/digest = BASE_DIGEST/" \
+	"MODULE.bazel:10: digest is not a plain string literal"
+module_edit "MODULE.bazel: a pull written on one line" MODULE.bazel 's/^pull($/pull(name = "x", digest = "y")/' \
+	"MODULE.bazel:8: a pull the reader cannot follow"
+module_edit "MODULE.bazel: the pull rule under another name is still read" MODULE.bazel \
+	"s/^pull = use_repo_rule/img_pull = use_repo_rule/; s/^pull(\$/img_pull(/; s/$D9/$D2/" \
+	"MODULE.bazel:10: gcr.io/base/static:nonroot@$D2 is not in"
+module_edit "MODULE.bazel: a pull rule bound in a way the reader does not know" MODULE.bazel \
+	's|^pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")|pull = use_repo_rule(\n    "@rules_img//img:pull.bzl",\n    "pull",\n)|' \
+	"MODULE.bazel: names an image pull rule" "no pull was read"
+module_edit "proxy/MODULE.bazel: an extension bound in a way the reader does not know" proxy/MODULE.bazel \
+	's|^oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")|oci = use_extension(\n    "@rules_oci//oci:extensions.bzl",\n    "oci",\n)|' \
+	"proxy/MODULE.bazel: names an image pull rule (@rules_oci//oci:extensions.bzl) but no pull was read"
+module_edit "proxy/MODULE.bazel: a digest the inventory does not list" proxy/MODULE.bazel "s/$D1/$D2/" \
+	"proxy/MODULE.bazel:4: gcr.io/base/cc@$D2 is not in scripts/third-party-images.txt"
+module_edit "proxy/MODULE.bazel: an oci.pull with no digest" proxy/MODULE.bazel '/^    digest = /d' \
+	"proxy/MODULE.bazel:2: gcr.io/base/cc names no tag and no digest"
+module_edit "proxy/MODULE.bazel: an oci.pull by tag" proxy/MODULE.bazel 's/^    digest = .*/    tag = "latest",/' \
+	"proxy/MODULE.bazel:2: gcr.io/base/cc:latest is pinned by tag only"
+module_edit "proxy/MODULE.bazel: an oci.pull with no image" proxy/MODULE.bazel '/^    image = /d' \
+	"proxy/MODULE.bazel:2: this pull names no image"
+
+# A comment that names the rule is not a pull that went unread.
+module_tree "$M"
+echo '# The base was once pulled with use_extension("@rules_oci//oci:extensions.bzl", "oci").' >"$M/proxy/MODULE.bazel"
+sed -i -e '/^pin gcr.io\/base\/cc /d' "$M/scripts/third-party-images.txt"
+run_check "$M"
+if [ "$RC" -eq 0 ]; then
+	ok "module files: a comment that names a pull rule is not read"
+else
+	bad "module comment: exit $RC"$'\n'"$OUT"
+fi
+
+# A pin only a module file's comment still names is used by nothing.
+module_tree "$M"
+sed -i -e "s/^    digest = \"$D9\".*/    # digest = \"$D9\",/" "$M/MODULE.bazel"
+expect_fail "MODULE.bazel: a commented-out attribute is not read" "$M" \
+	"MODULE.bazel:8: gcr.io/base/static:nonroot is pinned by tag only" \
+	"pin gcr.io/base/static nonroot $D9 is used by no file"
+
 # --- 2. the registry -----------------------------------------------------------
 
 FAKE="$TMP/fake"
@@ -605,6 +736,15 @@ says() { # <name> <want rc> <needle>...
 	done
 	ok "$name"
 }
+# The scheduled report (scripts/third-party-images-report.sh, #1478) reads what
+# `outdated` prints: `reported` runs it as a dry run over the REAL `outdated`
+# and this fake registry, so the two cannot drift apart on a line's wording or
+# an exit status (its own test plays `outdated` from canned text).
+reported() { # sets RC and OUT
+	OUT="$(HOME="$TMP/home" DOCKER_CONFIG="$TMP/home/.docker" PATH="$BIN:$PATH" FAKE="$FAKE" \
+		THIRD_PARTY_ROOT="$TMP/tree" THIRD_PARTY_INVENTORY="$INV" "$HERE/third-party-images-report.sh" --dry-run 2>&1)"
+	RC=$?
+}
 reset_fake() {
 	rm -rf "$FAKE"
 	mkdir -p "$FAKE"
@@ -629,6 +769,8 @@ registry outdated
 says "outdated: every pin current, through the anonymous token dance" 0 \
 	"current  curlimages/curl:8.22.0  $d_curl" "current  busybox:1.36  $d_busy" \
 	"current  gcr.io/proj/echo:v1  $d_echo" "3 checked: 0 behind, 0 could not be checked."
+reported
+says "report: reads the real answer when every pin is current" 0 "DRY RUN: every pin is current"
 if grep -q 'https://registry-1.docker.io/v2/library/busybox/manifests/1.36' "$FAKE/calls" &&
 	grep -q 'https://auth.registry-1.docker.io/token?service=registry-1.docker.io&scope=repository:curlimages/curl:pull' "$FAKE/calls" &&
 	grep -q 'https://gcr.io/v2/proj/echo/manifests/v1' "$FAKE/calls"; then
@@ -642,6 +784,9 @@ d_new="$(serve registry-1.docker.io curlimages/curl 8.22.0 "${BOTH[@]}" linux/ri
 registry outdated
 says "outdated: a re-pushed tag is MOVED, with the new digest, exit 1" 1 \
 	"MOVED    curlimages/curl:8.22.0  pinned $d_curl, the tag now points at $d_new" "3 checked: 1 behind, 0 could not be checked."
+reported
+says "report: reads a real MOVED line, its summary and its exit status" 0 \
+	"DRY RUN: would open or update the issue" "  | MOVED    curlimages/curl:8.22.0  pinned $d_curl, the tag now points at $d_new"
 registry outdated gcr.io/proj/echo
 says "outdated <name>: only that pin" 0 "1 checked: 0 behind"
 registry outdated no/such
@@ -666,6 +811,9 @@ else
 	says "outdated: a pin whose own index lacks an architecture is behind, exit 1" 1 \
 		"NOT-MULTI-ARCH gcr.io/proj/echo:v1  $d_short: the index does not list linux/arm64" "1 checked: 1 behind, 0 could not be checked."
 fi
+reported
+says "report: reads a real NOT-MULTI-ARCH line as a pin behind" 0 \
+	"DRY RUN: would open or update the issue" "  | NOT-MULTI-ARCH gcr.io/proj/echo:v1  $d_short"
 
 # A registry that does not answer with a manifest is never "current".
 not_current() { # <name> <needle>
@@ -680,6 +828,9 @@ d_echo="$(serve gcr.io proj/echo v1 "${BOTH[@]}")"
 echo "pin gcr.io/proj/echo v1 $d_echo" >"$INV"
 echo down >"$FAKE/gcr.io/mode"
 not_current "outdated: a 503 is an error, exit 2" "answered HTTP 503"
+reported
+says "report: a real registry error is a warning and exit 0, never 'current'" 0 \
+	"::warning title=third-party image pin not checked::ERROR    gcr.io/proj/echo:v1" "DRY RUN: 1 pin(s) could not be checked"
 echo unreachable >"$FAKE/gcr.io/mode"
 not_current "outdated: no connection is an error" "no answer from gcr.io"
 echo closed >"$FAKE/gcr.io/mode"
