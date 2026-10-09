@@ -6007,6 +6007,25 @@ sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
 sum by (job, node) (increase(aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.cluster.v3.Cluster"}[1h]))
 ```
 
+**The soak gate (#1423, #1491).** `e2e/soak/prober-grade.sh` grades the counter over a
+soak's window, per `reason`, with the same split as the alert rules. The two reasons of
+the validation gap (`no_namespace_metadata`, `pin_not_rendered`) fail it on any
+movement, and on any non-zero sample of the published gauge. The two under which no TLS
+is published (`trust_domain_unknown`, `tls_not_published`) are expected at an agent
+start, and a soak rolls the agents on purpose: they are reported with their count and
+nodes, and fail only when the published gauge shows the state for 300 s or more of
+consecutive samples (the `for: 5m` of `AetherMeshClusterPinPending`), per node, job and
+reason over every series of them, as that rule's `sum by` is. A standing
+`tls_not_published` that is the cluster's design (no SPIRE, or an unpublished TCP floor)
+fails by default too; `--expect-tls-not-published` declares it expected, and it is then
+reported with its duration and not failed. The counter cannot
+make that call: it grows by entries times snapshots, not by time. A `reason` the script
+does not know fails the same way a gap reason does, and so does any movement of a series with no `reason` label (an
+agent before #1424, where the two kinds cannot be told apart). An agent that has the
+label and whose own gauge does not reach Prometheus (a replaced pod is not covered by
+the one before it) makes the gate `UNPROVEN`, not a pass.
+The lines and the table are in `e2e/soak/README.md`, "Grading".
+
 **The NACK counters (#1480).** `aether_agent_xds_nacks_total` counts the delta responses
 a proxy rejected, by `aether_xds_type_url`; `aether_agent_xds_ack_wait_failures_total`
 counts the ACK waits of a pod's listener that failed, by `aether_xds_wait` (`present`,
