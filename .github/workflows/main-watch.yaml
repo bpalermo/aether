@@ -22,9 +22,10 @@ name: main-post-merge-watch
 #     script through `env:` and refused there unless it is digits. The script
 #     reads everything else from the API for that id and acts only on a `push`
 #     to `main` of this repository, of the file .github/workflows/main.yaml;
-#   - nothing of the triggering run is checked out: the checkout names no ref
-#     (so it is the default branch), fetches the one script, and leaves no
-#     token behind;
+#   - nothing of the triggering run is checked out: the checkout is `ref: main`
+#     whatever started the run (a `workflow_dispatch` can be started on another
+#     branch or tag, and the default ref would then be that one), fetches the
+#     one script, and leaves no token behind;
 #   - the workflow has no permission, and its one job has the three it needs:
 #     `issues: write` for the issue, `actions: read` for the run and its jobs,
 #     `contents: read` for the checkout and main's head.
@@ -71,6 +72,9 @@ jobs:
       - name: Checkout (the default branch's script, never the triggering run's commit)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # ALWAYS main, as in publish-verify: never the triggering run's
+          # commit, and not the ref a manual run was started on.
+          ref: main
           persist-credentials: false
           sparse-checkout: |
             scripts/main-post-merge-watch.sh

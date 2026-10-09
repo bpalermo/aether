@@ -703,7 +703,8 @@ expect "every action is pinned by a full commit sha, with its version" \
 	"$(grep -E '^[[:space:]]+(- )?uses:' <<<"$wf" | grep -cvE 'uses: [A-Za-z0-9_./-]+@[0-9a-f]{40} # v?[0-9][0-9.]*$')" 0
 expect "the one action is the checkout, at the sha main.yaml uses" \
 	"$(grep -oE 'uses: [^ ]+' <<<"$wf" | sort -u)" "$(grep -oE 'uses: actions/checkout@[0-9a-f]{40}' "$MAIN_WORKFLOW" | sort -u)"
-expect "the checkout names no ref: the default branch's script, never the run's commit" "$(grep -cE '^[[:space:]]+(ref|repository):' <<<"$wf")" 0
+expect "the checkout is main's script whatever started the run: never the run's commit, nor the ref of a manual run" \
+	"$(grep -E '^[[:space:]]+(ref|repository):' <<<"$wf" | sed 's/^ *//' | tr '\n' '|')" "ref: main|"
 expect "the checkout leaves no token in the workspace" "$(grep -c '^          persist-credentials: false$' <<<"$wf")" 1
 expect "the checkout fetches the script and nothing else" \
 	"$(sed -n '/sparse-checkout: |/,/sparse-checkout-cone-mode/p' <<<"$wf" | sed 's/^ *//' | tr '\n' '|')" \
