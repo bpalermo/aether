@@ -106,6 +106,8 @@ func (c *config) run(cmd *cobra.Command, _ []string) error {
 	// fork. Fail once, here, with an error that names it (#1376). The same
 	// check refuses the other arguments the pinned Envoy rejects at every
 	// fork, or accepts and then cannot hand off with (#1407, #1408, #1409).
+	// It reads the list as Envoy does, a flag and then its value, so a value
+	// is never mistaken for a flag (#1443).
 	if err := checkEnvoyArgs(c.supervisor.ExtraArgs); err != nil {
 		return err
 	}
@@ -143,9 +145,10 @@ func (c *config) run(cmd *cobra.Command, _ []string) error {
 
 // checkEnvoyArgs refuses an --envoy-arg that would make Envoy reject its
 // command line on every fork (a flag the supervisor passes itself, a repeated
-// chart flag, a --flag=value spelling, a --concurrency without a usable value)
-// or start and then fail a handoff (--use-dynamic-base-id and its like). The
-// lists live with the code that builds the command line
+// flag, a --flag=value spelling, a flag Envoy does not have, an argument that
+// is no flag and no flag's value, a --concurrency without a usable value) or
+// start and then fail a handoff (--use-dynamic-base-id and its like). The
+// lists and the parser live with the code that builds the command line
 // (hotrestart.CheckExtraArgs), so the two cannot drift.
 func checkEnvoyArgs(args []string) error {
 	return hotrestart.CheckExtraArgs(args)
@@ -212,7 +215,7 @@ func bindFlags(cmd *cobra.Command, c *config) {
 	f.Uint32Var(&c.supervisor.BaseID, "base-id", 0, "Envoy --base-id, pinned so successive epochs share one shared-memory segment")
 	f.DurationVar(&c.supervisor.DrainTime, "drain-time", 45*time.Second, "Envoy --drain-time-s: graceful connection-close window for the draining epoch")
 	f.DurationVar(&c.supervisor.ParentShutdownTime, "parent-shutdown-time", 60*time.Second, "Envoy --parent-shutdown-time-s: when the previous epoch is terminated (must exceed --drain-time)")
-	f.StringArrayVar(&c.supervisor.ExtraArgs, "envoy-arg", nil, "Extra argument appended to every Envoy invocation (repeatable). A flag and its value are two items (--envoy-arg=--concurrency --envoy-arg=2): the pinned Envoy does not parse --flag=value, -f=value or -fvalue. Refused at startup: that spelling; an Envoy flag the supervisor passes itself (-c/--config-path, --base-id, --restart-epoch, --drain-time-s, --parent-shutdown-time-s, --admin-address-path, --mode), because Envoy rejects a flag given twice; a flag that breaks a handoff or stops Envoy from serving (--use-dynamic-base-id, --disable-hot-restart, --socket-path, --hot-restart-version, --version, -h/--help, --, --ignore_rest); a second --concurrency, -l/--log-level, --service-cluster, --service-node, --service-zone, --drain-strategy or --skip-hot-restart-parent-stats; and a --concurrency whose value is missing or is not a whole number in digits (0 means one worker). A --concurrency that differs from a live predecessor's is a drain + fresh start, not a hot restart (see --hot-restart-on-concurrency-change)")
+	f.StringArrayVar(&c.supervisor.ExtraArgs, "envoy-arg", nil, "Extra argument appended to every Envoy invocation (repeatable). A flag and its value are two items (--envoy-arg=--concurrency --envoy-arg=2): the pinned Envoy does not parse --flag=value, -f=value or -fvalue. The list is read as the pinned Envoy reads it, a flag and then its value when the flag takes one, so a value may look like anything. Refused at startup: that spelling; an Envoy flag the supervisor passes itself (-c/--config-path, --base-id, --restart-epoch, --drain-time-s, --parent-shutdown-time-s, --admin-address-path, --mode), because Envoy rejects a flag given twice; a flag that breaks a handoff or stops Envoy from serving (--use-dynamic-base-id, --disable-hot-restart, --socket-path, --hot-restart-version, --version, -h/--help or any single-dash item with an h in it, --, --ignore_rest); any flag given twice except --stats-tag (the chart already passes --concurrency, -l/--log-level, --service-cluster, --service-node, --service-zone, --drain-strategy and --skip-hot-restart-parent-stats); a flag the pinned Envoy does not have; an argument that is not a flag where no flag takes it as its value; a flag whose value is missing; and a --concurrency whose value is not a whole number in digits (0 means one worker). A --concurrency that differs from a live predecessor's is a drain + fresh start, not a hot restart (see --hot-restart-on-concurrency-change)")
 	f.BoolVar(&c.supervisor.WatchConfig, "watch-config", true, "Watch --config and self-trigger a hot restart when the bootstrap config changes")
 	f.StringVar(&c.supervisor.StateDir, "state-dir", "/run/aether/hotrestart", "Shared-hostPath dir for the per-node epoch heartbeat that drives cross-pod hot restart")
 	f.StringVar(&c.supervisor.ReadyMarkerPath, "ready-marker", "/var/run/aether-proxy/ready", "Pod-local path for the readiness marker maintained while Envoy is live at the newest epoch")

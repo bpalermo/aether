@@ -3,7 +3,10 @@ load("@rules_go//go:def.bzl", "go_test")
 # Runs the supervisor's --envoy-arg startup check (hotrestart.CheckExtraArgs)
 # and the pinned Envoy's own command-line parser over the same arguments
 # (#1407, #1408, #1409). The rules in the check were measured on this binary;
-# this is what notices when a pin bump changes the parser.
+# this is what notices when a pin bump changes the parser. It also holds the
+# flag table the check parses with against `envoy --help` of this binary
+# (#1443): the check refuses a flag that is not in the table, so a pin bump
+# that adds a flag fails here until the table has it.
 #
 # It also holds the supervisor's prediction of Envoy's default worker count
 # (hotrestart.EnvoyDefaultConcurrency, #1442) against the count the pinned
@@ -11,7 +14,7 @@ load("@rules_go//go:def.bzl", "go_test")
 # test can get a cgroup with a CPU quota (a systemd user session), under a CPU
 # limit. That last test skips where it cannot, CI included.
 #
-# About 60 `envoy --mode validate` runs and a dozen short serving ones, ~7 s
+# About 120 `envoy --mode validate` runs and a dozen short serving ones, ~11 s
 # wall time.
 #
 # Tagged "envoy-validate" (not "integration"): no Docker daemon required.

@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,7 @@ func TestEnvoyRefusesWhatTheCheckRefuses(t *testing.T) {
 		alreadySet = "Argument already set!"
 		badValue   = "Couldn't read argument value from string"
 		noValue    = "Missing a value for this argument!"
+		twoValues  = "More than one valid value parsed from string"
 	)
 	for _, tc := range []struct {
 		args  []string
@@ -135,6 +137,41 @@ func TestEnvoyRefusesWhatTheCheckRefuses(t *testing.T) {
 		{[]string{"--mode", "validate"}, alreadySet},
 		{[]string{"-c", "/dev/null"}, alreadySet},
 		{[]string{"--config-path", "/dev/null"}, alreadySet},
+
+		// #1443: the check reads the list as this parser does. A repeat of
+		// any flag, not only of the ones the chart passes.
+		{[]string{"--log-path", "/dev/null", "--log-path", "/dev/null"}, alreadySet},
+		{[]string{"--cpuset-threads", "--cpuset-threads"}, alreadySet},
+		{[]string{"--file-flush-interval-msec", "1", "--file-flush-interval-msec", "1"}, alreadySet},
+		// A flag and its value sharing one item, split by a space, is a
+		// spelling Envoy does take, so a repeat written that way is a repeat.
+		{[]string{"--concurrency 2", "--concurrency", "2"}, alreadySet},
+		{[]string{"-l info", "--log-level", "info"}, alreadySet},
+		{[]string{"-c /dev/null"}, alreadySet},
+		{[]string{"--mode validate"}, alreadySet},
+		// And its value is read like any other.
+		{[]string{"--concurrency x"}, badValue},
+		{[]string{"--concurrency 2 3"}, twoValues},
+		// A flag Envoy does not have.
+		{[]string{"--some-future-flag"}, noMatch},
+		{[]string{"--some-future-flag", "x"}, noMatch},
+		{[]string{"--some-future-flag=x"}, noMatch},
+		{[]string{"-x"}, noMatch},
+		{[]string{"-v"}, noMatch},
+		// An argument that is not a flag, where no flag takes it as a value.
+		{[]string{"stray"}, noMatch},
+		{[]string{" "}, noMatch},
+		{[]string{"--cpuset-threads", "true"}, noMatch},
+		{[]string{"-l", "info", "stray"}, noMatch},
+		// A switch shares its item with nothing.
+		{[]string{"--cpuset-threads x"}, noMatch},
+		// A flag that takes a value, standing last.
+		{[]string{"--service-node"}, noValue},
+		{[]string{"--service-node "}, noValue},
+		{[]string{"--stats-tag"}, noValue},
+		// Two of the "h" Envoy reads as -h (one is in
+		// TestCheckIsStricterThanEnvoyOnPurpose: Envoy exits 0 for it).
+		{[]string{"-hh"}, alreadySet},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			accepted, out := validate(t, envoy, bootstrap, tc.args...)
@@ -170,6 +207,29 @@ func TestEnvoyAcceptsWhatTheCheckAccepts(t *testing.T) {
 		// Envoy reads the argument after a value flag as the value even when
 		// it starts with a dash.
 		{"--log-format", "- %v"},
+
+		// #1443: and even when it is spelled exactly like a flag. Until then
+		// the check compared every item and refused each of these.
+		{"--service-node", "-c"},
+		{"--service-node", "--base-id"},
+		{"--service-node", "--socket-path"},
+		{"--service-node", "-h"},
+		{"--service-node", "--version"},
+		{"--service-node", "--", "--service-zone", "z"},
+		{"--log-format", "--x=y"},
+		{"--log-format", "-linfo"},
+		{"--service-cluster", "--service-cluster"},
+		{"--log-path", "--log-path"},
+		{"--service-node", "--concurrency", "--concurrency", "2"},
+		// A flag and its value sharing one item, split by a space.
+		{"--concurrency 2"},
+		{"-l info", "--service-node n1"},
+		{"--stats-tag a:b", "--stats-tag", "c:d"},
+		{"--service-node ", "n1"},
+		// Envoy accepts an empty item and a lone dash and ignores them.
+		{""},
+		{"-"},
+		{"-l", "info", "", "--concurrency", "2"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			require.NoError(t, hotrestart.CheckExtraArgs(args))
@@ -183,7 +243,7 @@ func TestEnvoyAcceptsWhatTheCheckAccepts(t *testing.T) {
 // advice for "--flag=true" is the flag alone, not two items. That is only right
 // while the pinned Envoy takes each of these alone and refuses a value item
 // after it. The list is Envoy's SwitchArg options that the check does not
-// reserve (hotrestart.envoySwitchFlags).
+// reserve: the switches of hotrestart.EnvoyFlags it lets through.
 func TestEnvoySwitchFlagsTakeNoValue(t *testing.T) {
 	envoy, bootstrap := pinnedEnvoy(t), writeBootstrap(t)
 
@@ -206,7 +266,7 @@ func TestEnvoySwitchFlagsTakeNoValue(t *testing.T) {
 			err := hotrestart.CheckExtraArgs([]string{flag + "=true"})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "takes no value: pass it alone",
-				"%s is missing from hotrestart.envoySwitchFlags, so the error advises a second item Envoy refuses", flag)
+				"%s is not a switch in hotrestart.EnvoyFlags, so the error advises a second item Envoy refuses", flag)
 
 			accepted, out := validate(t, envoy, bootstrap, flag)
 			assert.True(t, accepted, "the pinned Envoy does not take %s alone:\n%s", flag, out)
@@ -245,6 +305,17 @@ func TestCheckIsStricterThanEnvoyOnPurpose(t *testing.T) {
 		{"--concurrency", ""},
 		{"--concurrency", "+2"},
 		{"--concurrency", " 2"},
+		// #1443. A reserved flag sharing an item with its value. Envoy takes
+		// the spelling, so these reached every fork until the check read it.
+		// (--base-id and --restart-epoch are accepted HERE because a validate
+		// run does not pass them; a serving Envoy gets them twice.)
+		{"--socket-path @aether_test_socket"},
+		{"--base-id 5"},
+		{"--restart-epoch 0"},
+		// An "h" behind a single dash is read as -h: Envoy prints its usage
+		// and exits 0 (TestEnvoyReadsAnHBehindOneDashAsHelp).
+		{"-xh"},
+		{"-lwhatever"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			require.Error(t, hotrestart.CheckExtraArgs(args))
@@ -327,4 +398,92 @@ func TestEnvoyRunsOneWorkerForConcurrencyZero(t *testing.T) {
 	assert.Equal(t, 1, servedConcurrency(t, envoy, "--concurrency", "0"))
 	// Control: the reported number follows the flag.
 	assert.Equal(t, 2, servedConcurrency(t, envoy, "--concurrency", "2"))
+}
+
+// TestEnvoyReadsAnHBehindOneDashAsHelp pins why the check refuses a
+// single-dash item with an "h" in it (#1443): the pinned Envoy does not answer
+// "Couldn't find match for argument" for it, it prints its usage and exits 0
+// without serving. Without the "h" the same item is refused.
+func TestEnvoyReadsAnHBehindOneDashAsHelp(t *testing.T) {
+	envoy, bootstrap := pinnedEnvoy(t), writeBootstrap(t)
+
+	for _, item := range []string{"-xh", "-lwhatever", "-hx"} {
+		accepted, out := validate(t, envoy, bootstrap, item)
+		assert.True(t, accepted, "%s: the pinned Envoy no longer exits 0:\n%s", item, out)
+		assert.Contains(t, out, "USAGE:", "%s: the pinned Envoy no longer prints its usage", item)
+		assert.Error(t, hotrestart.CheckExtraArgs([]string{item}), item)
+	}
+	for _, item := range []string{"-x", "-linfo"} {
+		accepted, out := validate(t, envoy, bootstrap, item)
+		assert.False(t, accepted, "%s:\n%s", item, out)
+		assert.Contains(t, out, "Couldn't find match for argument", item)
+	}
+	// As a value it is a value.
+	accepted, out := validate(t, envoy, bootstrap, "--service-node", "-xh")
+	assert.True(t, accepted, out)
+	assert.NotContains(t, out, "USAGE:")
+}
+
+// helpFlagLine matches one flag of the long part of `envoy --help`:
+//
+//	--stats-tag <string>  (accepted multiple times)
+//	-l <string>,  --log-level <string>
+//	--,  --ignore_rest
+//	--cpuset-threads
+var helpFlagLine = regexp.MustCompile(
+	`^   (-[^ ,]+)( <[^>]+>)?(?:,  (--[^ ]+)(?: <[^>]+>)?)?(  \(accepted multiple times\))?$`)
+
+// TestEnvoyFlagTableMatchesThePinnedEnvoy holds the flag table the check
+// parses with (hotrestart.EnvoyFlags, #1443) against the flags the pinned
+// binary lists itself: the same names, the same short spellings, and the same
+// answer to "does it take a value" and "may it repeat". The check refuses a
+// flag that is not in the table, so a pin bump that adds one has to add it
+// here first, and one that removes or changes one fails here instead of at a
+// fork.
+func TestEnvoyFlagTableMatchesThePinnedEnvoy(t *testing.T) {
+	envoy := pinnedEnvoy(t)
+
+	ctx, cancel := context.WithTimeout(t.Context(), envoyRunTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, envoy, "--help").Output()
+	require.NoError(t, err, "envoy --help")
+
+	var listed []hotrestart.EnvoyFlag
+	for _, line := range strings.Split(string(out), "\n") {
+		m := helpFlagLine.FindStringSubmatch(line)
+		if m == nil {
+			require.False(t, strings.HasPrefix(line, "   -"),
+				"a flag line of `envoy --help` this test does not understand: %q", line)
+			continue
+		}
+		f := hotrestart.EnvoyFlag{Long: m[1]}
+		if m[3] != "" {
+			f.Short, f.Long = m[1], m[3]
+		}
+		switch {
+		case m[4] != "":
+			require.NotEmpty(t, m[2], "%q repeats and takes no value", line)
+			f.Kind = hotrestart.EnvoyMultiValue
+		case m[2] != "":
+			f.Kind = hotrestart.EnvoyValue
+		}
+		listed = append(listed, f)
+	}
+	// Control: the scan read the list. The pinned Envoy has 44 flags.
+	require.GreaterOrEqual(t, len(listed), 40, "only %d flags read from `envoy --help`", len(listed))
+
+	assert.ElementsMatch(t, listed, hotrestart.EnvoyFlags(),
+		"the pinned Envoy's flags differ from hotrestart.envoyFlags: update the table (and reservedEnvoyFlags, "+
+			"if a new flag touches the base id, the hot-restart socket or what Envoy serves)")
+}
+
+// TestEnvoyRunsTheConcurrencyThatSharesItsItem: the supervisor reads
+// "--concurrency 2" in one item as two workers (#1443) and compares that with
+// a live predecessor's count. It is only right while the pinned Envoy reads the
+// item the same way.
+func TestEnvoyRunsTheConcurrencyThatSharesItsItem(t *testing.T) {
+	envoy := pinnedEnvoy(t)
+
+	require.NoError(t, hotrestart.CheckExtraArgs([]string{"--concurrency 2"}))
+	assert.Equal(t, 2, servedConcurrency(t, envoy, "--concurrency 2"))
 }
