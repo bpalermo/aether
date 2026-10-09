@@ -27,7 +27,8 @@ and say so in its description.**
 | A new entry, a new object of a render | no bump |
 | A new field on a log line that keeps every field it had (add it to `fields`) | no bump |
 | Something more said of an entry that was said of nothing before: a key it did not have, one more pod label or container of an object, one more thing a container is held to | no bump |
-| `notes`, a comment, `checked_by`, the order of a list | no bump |
+| `checked_by`, the order of a list, `notes` or a comment reworded without saying anything else | no bump |
+| What an entry MEANS, changed in `notes`, a comment or the code's behaviour while every key stays as it was (what a gauge counts, when a series is absent) | bump, and no check asks for it: see below |
 
 A new value in a closed set is a change of meaning because a harness branches
 on the set: a grader that knows four `reason` values has to decide what a
@@ -62,9 +63,16 @@ that. The `chart-version-bump` job of `ci.yaml` runs it on every pull request
 with the base commit: every promise line of the lock at the base is still in
 the lock, unchanged, or `version` is higher than at the base.
 
-So the table above is what the two checks decide, with one limit. A promise
-that exists only in prose (`notes`, a comment, the entries under "What is
-review-only") has no line, and changing it stays a review rule.
+So the table above is what the two checks decide, with one limit, and it is a
+real one. The lock holds the keys of an entry: names, types, sets, fields.
+What an entry means beyond its keys is written in `notes` and comments (what
+a gauge counts, when a series is absent and when it is zero, the entries
+under "What is review-only"), and prose has no line. A change of meaning that
+leaves every key alone, made in the code's behaviour and described in `notes`,
+passes both checks with `version` unchanged. It is still a bump: whoever
+changes what an entry means bumps `version` by hand, and whoever reviews a
+diff of `notes` asks whether the meaning moved. A bump made for that reason
+goes through the same steps as any other (the test prints the new lock).
 
 ## How an entry is tied to the code
 

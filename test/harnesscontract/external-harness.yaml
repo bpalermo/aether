@@ -21,8 +21,9 @@
 # line per promise made at the current `version`; a promise that leaves this
 # file or changes while `version` stays fails
 # //test/harnesscontract:harnesscontract_test, and a new promise adds a line
-# there without a bump. Prose is not covered: `notes` and comments promise
-# only what review holds them to.
+# there without a bump. Prose is not covered: what an entry means beyond its
+# keys is said in `notes` and comments, and a change of meaning made only
+# there (and in the code's behaviour) is a bump no test asks for.
 #
 # Every entry below is also compared with the code that produces the thing.
 # `checked_by` names the Bazel test that does, or lists them when several do,
