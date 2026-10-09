@@ -248,10 +248,8 @@ with the proxy rejecting, a proxy that keeps what the agent has pinned, also thr
 later ACKs of other clusters, a silent agent):
 
 ```bash
-promtool test rules docs/observability/agent-pin-alerts_test.yml
+bazel test //:observability_rules_test
 ```
-
-This repository has no promtool in its build, so CI does not run it here.
 
 ## Labels the rules need from your pipeline
 
