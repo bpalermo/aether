@@ -662,7 +662,14 @@ jobs:
       # or a per-commit tag that does not is a failure. Cheap by construction:
       # nothing in an image reads the workspace status, so the first build is a
       # cache hit on the images the build step above or main already built, and
-      # the second re-runs the ten tag expansions only. The proxy image (the
+      # the second re-runs the ten tag expansions only.
+      # #1500: a third build under --platform_suffix, which renames
+      # bazel-out/<configuration>/ and nothing else, must give the same digests
+      # too: generated Go source is compiled from under that directory, and
+      # .bazelrc's --experimental_output_paths=strip is what keeps its name out
+      # of the binaries. With paths stripped every compile of that build is a
+      # cache hit; it relinks the binaries and re-makes the layers.
+      # The proxy image (the
       # nested proxy/ workspace, its own workflow) is out of scope: it carries
       # the commit on purpose. //scripts:check_image_digest_stability_test
       # covers the script's failure paths.

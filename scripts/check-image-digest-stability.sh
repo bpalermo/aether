@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Fails if the digest of a Go image of the root workspace depends on the commit
-# (#1378).
+# (#1378) or on the name of the Bazel output directory it was built in (#1500).
 #
 # Scope: the `image_index` targets of this workspace, which are the Go images
 # (agent, mesh-dns, proxy-supervisor, uds-csi, cni-install, registrar,
@@ -63,11 +63,38 @@
 # What neither sees: a commit that reaches an image without going through the
 # workspace status, such as a rule that reads the repository itself.
 #
+# Third, the output directory (#1500). Bazel builds each configuration under
+# `bazel-out/<name>/`, and the name is made from the flags: a flag added to
+# .bazelrc, a transition a rule gains or a Bazel upgrade renames it with no
+# change to any source. Generated Go source (every `.pb.go`) is compiled from
+# under that directory, and the Go compiler records the path of each file it
+# compiles in the binary. Six released binaries carried
+# `bazel-out/<name>/bin/...pb.go` that way until #1500, so a renamed directory
+# gave each of them a new GNU build ID and each image holding one a new digest.
+# `--experimental_output_paths=strip` in .bazelrc is what keeps the name out:
+# the compile sees `bazel-out/cfg/bin/` whatever the configuration is called.
+#
+#   4. Every index is built a third time, as the second commit again and with
+#      `--platform_suffix`, which appends to the name of every target
+#      configuration's directory and changes nothing else. Every digest is the
+#      same as in the second build.
+#   5. The control for 4: the binaries that go into the images (every
+#      `content_build_id` output under an index) are not in the same
+#      directories in the two builds; no directory holds one in both. Without
+#      it, a flag that stopped renaming the directory would leave check 4
+#      comparing a build with itself.
+#
+# What it does not see: a path outside `bazel-out/<name>/` that reaches a
+# binary, such as the absolute path of the workspace or of the output base.
+#
 # Cost: the aquery is analysis only. The first build is the ten images (a cache
 # hit after any build of them, stamped or not: nothing in an image reads the
 # status); the second re-runs the ten tag expansions and nothing else. If it
 # re-runs a compile or a link, that is the regression, and check 1 names the
-# image.
+# image. The third build cannot reuse the outputs on disk (they are under
+# another directory), but with paths stripped the cache key of a compile does
+# not hold the directory either, so every compile is a cache hit. What runs
+# again is what is not path-mapped: the links and the image layers.
 #
 # Usage: scripts/check-image-digest-stability.sh [extra bazel build flags...]
 #        (or: make check-image-digests)
@@ -82,6 +109,10 @@ bazel="${BAZEL:-bazel}"
 # else in the tree can contain either by accident.
 COMMIT_A="a1378a1378a1378a1378a1378a1378a1378a1378"
 COMMIT_B="b1378b1378b1378b1378b1378b1378b1378b1378"
+
+# The made-up suffix of the third build's output directories. No flag of this
+# repository and no configuration Bazel names can contain it by accident.
+DIR_SUFFIX="x1500renamed"
 
 # An image known to exist: a query that does not return it cannot be trusted.
 KNOWN_INDEX="//agent/cmd/agent:image_index"
@@ -199,36 +230,50 @@ status_script() {
 	printf '%s\n' "$out"
 }
 
-# build_under <commit> <timestamp> <extra bazel flags...>: build every index
-# digest and every push's deploy manifest under that commit, and copy them to
-# $tmp/<commit>/<package>.{digest,push}.
+# build_under <name> <commit> <timestamp> <extra bazel flags...>: build every
+# index digest and every push's deploy manifest under that commit, and copy
+# them to $tmp/<name>/<package>.{digest,push}. The configuration directories
+# that hold the binaries of the images go to $tmp/<name>/binary-dirs, one a
+# line.
 build_under() {
-	local commit="$1" status files file pkg
-	status="$(status_script "$1" "$2")"
-	shift 2
-	local flags=(--stamp "--workspace_status_command=$status" "--output_groups=digest,deploy_manifest" "$@")
+	local name="$1" commit="$2" status files file pkg
+	status="$(status_script "$2" "$3")"
+	shift 3
+	local config=(--stamp "--workspace_status_command=$status" "$@")
+	local flags=("${config[@]}" "--output_groups=digest,deploy_manifest")
 
-	echo "building ${#indexes[@]} image indexes as commit ${commit}"
+	echo "building ${#indexes[@]} image indexes as commit ${commit} (build '${name}')"
 	"$bazel" build "${flags[@]}" "${indexes[@]}" "${pushes[@]}"
 	files="$("$bazel" cquery "${flags[@]}" --output=files "set(${indexes[*]} ${pushes[*]})" 2>"$tmp/cquery.err")" || {
 		cat "$tmp/cquery.err" >&2
 		exit 1
 	}
 
-	mkdir -p "$tmp/$commit"
+	mkdir -p "$tmp/$name"
 	while IFS= read -r file; do
 		[ -n "$file" ] || continue
 		# bazel-out/<config>/bin/<package>/<name>: the package is what is left.
 		pkg="$(dirname "${file#bazel-out/*/bin/}")"
 		case "$file" in
-		*/image_index_digest) cp "$file" "$tmp/$commit/${pkg//\//_}.digest" ;;
-		*/image_push*) cat "$file" >>"$tmp/$commit/${pkg//\//_}.push" ;;
+		*/image_index_digest) cp "$file" "$tmp/$name/${pkg//\//_}.digest" ;;
+		*/image_push*) cat "$file" >>"$tmp/$name/${pkg//\//_}.push" ;;
 		esac
 	done <<<"$files"
+
+	# Where the binaries of the images are. Analysis only: nothing is built.
+	# Without the output groups above: a binary has neither, and `--output=files`
+	# would print nothing for it.
+	files="$("$bazel" cquery "${config[@]}" --output=files "kind(\"content_build_id rule\", deps(set(${indexes[*]})))" 2>"$tmp/cquery.err")" || {
+		cat "$tmp/cquery.err" >&2
+		exit 1
+	}
+	# bazel-out/<config>/bin/...: the configuration is the second segment.
+	awk -F/ '$1 == "bazel-out" && $2 != "" { print $2 }' <<<"$files" | sort -u >"$tmp/$name/binary-dirs"
 }
 
-build_under "$COMMIT_A" 1000000000 "$@"
-build_under "$COMMIT_B" 2000000000 "$@"
+build_under "$COMMIT_A" "$COMMIT_A" 1000000000 "$@"
+build_under "$COMMIT_B" "$COMMIT_B" 2000000000 "$@"
+build_under renamed "$COMMIT_B" 2000000000 "$@" "--platform_suffix=$DIR_SUFFIX"
 
 # --- 1 and 2 ---------------------------------------------------------------------
 stable=0
@@ -239,10 +284,15 @@ for index in "${indexes[@]}"; do
 
 	a="$(cat "$tmp/$COMMIT_A/$key.digest" 2>/dev/null || true)"
 	b="$(cat "$tmp/$COMMIT_B/$key.digest" 2>/dev/null || true)"
+	r="$(cat "$tmp/renamed/$key.digest" 2>/dev/null || true)"
 	if ! [[ "$a" =~ ^sha256:[0-9a-f]{64}$ && "$b" =~ ^sha256:[0-9a-f]{64}$ ]]; then
 		fail "${index}: no digest read (first build '${a}', second '${b}')"
 	elif [ "$a" != "$b" ]; then
 		fail "${index}: the digest depends on the commit (${a} as one commit, ${b} as the next). Something in the image reads the workspace status: a stamped label or annotation, or a value linked into a binary (x_defs)."
+	elif ! [[ "$r" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+		fail "${index}: no digest read from the build under renamed output directories ('${r}')"
+	elif [ "$b" != "$r" ]; then
+		fail "${index}: the digest depends on the name of the Bazel output directory (${b}, and ${r} with --platform_suffix=${DIR_SUFFIX}). Something in the image holds a path under bazel-out/<configuration>/. Most likely a binary compiled from generated Go source without --experimental_output_paths=strip (.bazelrc), or by an action that does not support path mapping; strings(1) on that binary from both builds shows the path."
 	else
 		echo "ok: ${index} ${a}"
 		stable=$((stable + 1))
@@ -257,8 +307,21 @@ for index in "${indexes[@]}"; do
 	fi
 done
 
+# --- 5. the control for 4 ----------------------------------------------------------
+# one_line <file>: its lines on one line, separated by a space.
+one_line() { paste -sd' ' "$1" 2>/dev/null || true; }
+plain_dirs="$tmp/$COMMIT_B/binary-dirs"
+renamed_dirs="$tmp/renamed/binary-dirs"
+if ! [ -s "$plain_dirs" ] || ! [ -s "$renamed_dirs" ]; then
+	fail "no content_build_id output found under the image indexes (configuration directories: '$(one_line "$plain_dirs")' in the second build, '$(one_line "$renamed_dirs")' in the third). Where the binaries of the images are built is not known, so whether the third build renamed it is not known either."
+elif [ -n "$(comm -12 "$plain_dirs" "$renamed_dirs")" ]; then
+	fail "the build under --platform_suffix=${DIR_SUFFIX} has binaries of the images in a directory the build without it also used (bazel-out/: $(comm -12 "$plain_dirs" "$renamed_dirs" | paste -sd' ' -)). That output directory was not renamed, so for those binaries the digests above were compared with themselves."
+else
+	echo "ok: the third build has the binaries of the images under other output directories ($(one_line "$renamed_dirs"), not $(one_line "$plain_dirs"))"
+fi
+
 if [ "$failures" -ne 0 ]; then
 	echo "${failures} check(s) failed" >&2
 	exit 1
 fi
-echo "OK: no action under an image reads the workspace status, ${stable} of ${#indexes[@]} image digests are the same under two commits, and every per-commit tag follows the commit."
+echo "OK: no action under an image reads the workspace status, ${stable} of ${#indexes[@]} image digests are the same under two commits and under renamed output directories, and every per-commit tag follows the commit."

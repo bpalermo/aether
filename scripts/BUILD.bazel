@@ -50,14 +50,17 @@ sh_test(
     data = ["check-shell-lint.sh"],
 )
 
-# The image-digest check (#1378) against a fake `bazel` that "builds" two images
-# from the workspace-status script it is handed: stable digests pass; a digest
-# that follows the commit, a tag that does not, a status that never reaches the
-# build, an action under an image that takes a status file, a query or action
-# query that fails or comes back empty, and a status script that fails or has no
-# STABLE_GIT_COMMIT each fail.
-# The check itself builds the real images twice and cannot run inside a test
-# (it runs Bazel); CI's `test` job runs it as a step.
+# The image-digest check (#1378, #1500) against a fake `bazel` that "builds" two
+# images from the workspace-status script it is handed: stable digests pass; a
+# digest that follows the commit, a tag that does not, a status that never
+# reaches the build, an action under an image that takes a status file, a query
+# or action query that fails or comes back empty, and a status script that fails
+# or has no STABLE_GIT_COMMIT each fail. So do a digest that follows the name of
+# the output directory, a `--platform_suffix` that renames none or only some of
+# the directories the images' binaries are built in, and a query for those
+# binaries that fails or finds none.
+# The check itself builds the real images three times and cannot run inside a
+# test (it runs Bazel); CI's `test` job runs it as a step.
 sh_test(
     name = "check_image_digest_stability_test",
     size = "small",
