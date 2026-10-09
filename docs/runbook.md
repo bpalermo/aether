@@ -916,17 +916,20 @@ helm upgrade --install aether-crds oci://quay.io/aethermesh/chart-crds \
 # 2) then the system. Prefer this commit-pinned chart tag over the bare
 #    `--version <X.Y.Z>`: the bare tag is mutable and re-pushed by every publish,
 #    the commit tag never is (#692).
-#    No --create-namespace: the chart creates the namespace (namespace.create=true)
-#    and the two collide on a first install (#1384). On a FIRST install the
-#    namespace must already exist, marked for the release, so run this once before:
+#    The chart does not create the namespace (namespace.create=false, the
+#    default since 2.4.21, #1403): --create-namespace does. On a FIRST install
+#    into a cluster that enforces Pod Security admission, label the namespace
+#    before this command, or the agent, proxy, mesh-dns and uds-csi pods are
+#    refused:
 #      kubectl create namespace aether-system
-#      kubectl label namespace aether-system app.kubernetes.io/managed-by=Helm
-#      kubectl annotate namespace aether-system \
-#        meta.helm.sh/release-name=aether meta.helm.sh/release-namespace=aether-system
-#    (see getting-started.md, "Install"; with namespace.create=false you create
-#    and label the namespace yourself instead).
+#      kubectl label namespace aether-system \
+#        pod-security.kubernetes.io/enforce=privileged \
+#        pod-security.kubernetes.io/audit=privileged \
+#        pod-security.kubernetes.io/warn=privileged
+#    (see getting-started.md, "Install", and "Recovering from a failed first
+#    install" below).
 helm upgrade --install aether oci://quay.io/aethermesh/chart-aether \
-  --version "$AETHER_VERSION" -n aether-system \
+  --version "$AETHER_VERSION" -n aether-system --create-namespace \
   --set clusterName=my-cluster --set meshDomain=aether.internal
 
 # 3) ALWAYS assert what actually landed. The chart's appVersion is the commit
@@ -1459,6 +1462,95 @@ registry, which the pin reader refuses, and the sweep refuses any commit that
 predates the Quay cut-over (proposal 040 phase 4). Each digest ever pinned under
 `image_reference("proxy")` was introduced after the signing cut-over.
 
+### Recovering from a failed first install (#1406)
+
+Every command below was run on kind (Kubernetes 1.35, Helm 3.18.4) with the API
+server enforcing Pod Security `baseline` by default. Start by looking at what
+is there:
+
+```bash
+helm list -n aether-system -a                      # the release and its status
+kubectl get namespace aether-system --show-labels  # exists? labelled privileged?
+kubectl -n aether-system get ds,deploy
+kubectl -n aether-system get events --field-selector reason=FailedCreate
+```
+
+**`namespaces "aether-system" already exists`** — a chart older than 2.4.21
+installed with `--create-namespace` (the chart rendered the namespace Helm had
+just created). What it leaves: a release in status `failed`, a namespace without
+the pod-security labels, and everything else the chart renders. The Deployments
+run; where Pod Security is enforced the four DaemonSets have no pods (`FailedCreate`:
+`violates PodSecurity`). Start again from nothing, with chart 2.4.21 or newer:
+
+```bash
+helm uninstall aether -n aether-system     # prints: kept ... [MeshConfig] default
+kubectl delete namespace aether-system     # takes the kept MeshConfig with it
+# then the install from getting-started.md, "Install": create and label the
+# namespace, and `helm upgrade --install ... --create-namespace`
+```
+
+`helm install` over the failed release answers `cannot re-use a name that is
+still in use`, which is why the uninstall comes first. Nothing cluster-scoped
+is left behind by the uninstall.
+
+To keep the namespace instead (say, something else already lives in it), do not
+simply run the new chart over the failed release: that release's manifest lists
+the namespace, the new chart's does not, and Helm deletes an object that leaves
+the manifest. Chart 2.4.21 refuses that upgrade and names the fix, which is to
+mark the namespace first:
+
+```bash
+kubectl annotate namespace aether-system helm.sh/resource-policy=keep
+kubectl label namespace aether-system --overwrite \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=privileged \
+  pod-security.kubernetes.io/warn=privileged
+# then the same `helm upgrade --install ... --create-namespace` again
+```
+
+**`namespaces "aether-system" not found`** or **`invalid ownership
+metadata`** — a chart older than 2.4.21 installed without `--create-namespace`,
+or into a namespace made with a plain `kubectl create namespace`. Nothing was
+created and no release was stored. Run the documented install with chart 2.4.21
+or newer; an existing namespace can stay.
+
+**The release is `deployed` but the DaemonSets have no pods** — chart 2.4.21 or
+newer on a cluster that enforces Pod Security admission, namespace not
+labelled. The install notes print a `NAMESPACE NOTE`, and the events say
+`violates PodSecurity "baseline:latest"`. Label the namespace; nothing has to be
+reinstalled (`--overwrite` because the namespace may already carry another
+level):
+
+```bash
+kubectl label namespace aether-system --overwrite \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=privileged \
+  pod-security.kubernetes.io/warn=privileged
+kubectl -n aether-system rollout restart daemonset
+kubectl -n aether-system get ds   # CURRENT reaches DESIRED
+```
+
+The `rollout restart` is there because the DaemonSet controller retries a
+refused pod at a growing interval and a label on the namespace does not wake
+it. On kind the pods appeared within 5 s of the label when it came half a minute
+after the install; when it came four minutes after, they had not appeared 20 s
+later and did at once after the restart.
+
+**`namespace.create=true cannot create "aether-system"`** — a render error;
+nothing was created, not even the namespace `--create-namespace` would have
+made. Drop `namespace.create=true` (and label the namespace yourself), or store
+the release in another namespace (`helm -n <other> ... --set
+namespace.name=aether-system`).
+
+**A first install that failed for another reason** (a `--wait` that timed out)
+is retried with the same command: `helm upgrade --install` upgrades the failed
+release in place. If it failed very early, before the agent ServiceAccount was
+written (one of that name already existed, say), the retry may ask once for
+`kubectl annotate namespace aether-system helm.sh/resource-policy=keep`: without
+the mark that ServiceAccount carries, the chart cannot see that the failed
+revision rendered no namespace, and it refuses rather than risk a delete. The
+command is safe to run; nothing is deleted either way.
+
 ### Which workloads a chart upgrade rolls (#1363)
 
 Since chart **2.4.15** the chart itself no longer puts the release into a pod
@@ -1701,6 +1793,101 @@ Two replicas of one component on the same node after the roll means the
 preference lost to the scheduler's other scores (or only one node had room).
 `kubectl -n aether-system rollout restart deploy/aether-registrar` schedules
 them again; `registrar.nodeSpread=required` stops it happening.
+
+#### Chart 2.4.21: the chart no longer creates the release's namespace by default (#1403)
+
+> **Before upgrading a release that an older chart installed with
+> `namespace.create=false`, run this once** (it is what every install that
+> passed `--set namespace.create=false`, or whose values file says so, is):
+>
+> ```bash
+> kubectl annotate namespace aether-system helm.sh/resource-policy=keep
+> # the prober chart, before its first upgrade to 1.0.6 (its default was
+> # already namespace.create=false, so this is every prober release):
+> kubectl annotate namespace <prober namespace> helm.sh/resource-policy=keep
+> ```
+>
+> Without it the first upgrade is **refused** with a message naming that
+> command; nothing is changed and nothing is deleted. Under a GitOps controller
+> that drives Helm the symptom is a release that fails to upgrade, with that
+> message, until the namespace is annotated. A release installed with the old
+> default (`namespace.create=true`) needs nothing.
+
+`namespace.create` defaults to `false`. No workload rolls: no pod template
+changed. What the first upgrade to 2.4.21 does depends on what the chart can
+see on the live namespace, and in no case does it let Helm delete it:
+
+| The release was installed with | The live namespace | First upgrade to 2.4.21 (any `namespace.create`) |
+|---|---|---|
+| the old default, or `namespace.create=true` | carries Helm's ownership annotations for the release, or at least the chart's labels (`app.kubernetes.io/managed-by: Helm`, `app.kubernetes.io/instance: <release>`) | goes through; the Namespace stays in the manifest and gains `helm.sh/resource-policy: keep` |
+| `namespace.create=false` (+ `--create-namespace`, or a namespace you made) | carries neither | **refused once**, with the command below; goes through after it |
+| the old default, but the namespace lost the annotations **and** the chart's labels | carries neither | the same refusal |
+
+**The one extra step, for a release installed with `namespace.create=false`**
+(and for the rare namespace that lost every sign of its owner). Run it before
+the upgrade, or when the upgrade's error names it:
+
+```bash
+kubectl annotate namespace aether-system helm.sh/resource-policy=keep
+```
+
+Why: Helm deletes an object that was in the previous manifest and is not in the
+new one, and a chart cannot read the previous manifest. A release written by an
+older chart looks the same from the cluster whether its manifest holds the
+Namespace or not, so the chart leaves the Namespace out only when the live
+object says `keep`, or when the previous revision was written by 2.4.21 or
+newer and recorded that it rendered none (the
+`aether.io/release-namespace-rendered: "false"` annotation on the agent
+ServiceAccount). The annotation is harmless on a namespace the release never
+rendered, the command is needed once, and you may remove the annotation again
+after that upgrade. With a GitOps controller that drives Helm, the refused
+upgrade shows as a failed release with this message; annotate, then let it
+retry. The `prober` chart 1.0.6 asks the same of its namespace on the first
+upgrade from an older chart (`kubectl annotate namespace <prober namespace>
+helm.sh/resource-policy=keep`).
+
+The check, before and after (the UID must not change):
+
+```bash
+# Owned by the release? Both annotations name it when it is.
+kubectl get namespace aether-system \
+  -o jsonpath='{.metadata.uid}{"\n"}{.metadata.annotations}{"\n"}'
+# Is the Namespace part of the release? 1 = yes, 0 = no.
+helm get manifest aether -n aether-system | grep -c '^kind: Namespace'
+# What the upgrade would send, rendered against the cluster (never
+# --reuse-values: read the values back and pass them with -f):
+helm get values aether -n aether-system -o yaml > values.yaml
+helm upgrade aether oci://quay.io/aethermesh/chart-aether --version "$AETHER_VERSION" \
+  -n aether-system -f values.yaml --dry-run=server | grep -A6 '^kind: Namespace'
+```
+
+For a namespace in the first row the last command must print the `Namespace`
+with `helm.sh/resource-policy: keep`; for the other rows it fails with the
+`kubectl annotate` command until that has been run. **`helm template` cannot answer this
+question**: it renders without a cluster, sees no owner, and prints no
+`Namespace`. For the same reason, a pipeline that renders with `helm template`
+and prunes what is no longer rendered (`kubectl apply --prune`, a GitOps tool in
+that mode) would remove a namespace the old chart rendered: exclude the
+namespace from pruning in that tool, or keep it in your own manifests, before
+upgrading. Helm itself (the CLI, or a controller that drives the Helm SDK
+against the cluster) is not affected.
+
+Consequences to know:
+
+- `helm uninstall` no longer deletes a namespace the chart rendered; delete it
+  yourself.
+- `namespace.create=true` with the release stored in the namespace it names is
+  refused at render time on a **first** install (it could never be installed);
+  an existing release that owns its namespace is not refused.
+- A release whose only revision is a **failed** first install of an older chart
+  gets the same refusal and the same command; see "Recovering from a failed
+  first install".
+- Moving a release to another namespace (`namespace.name`, or `edge.namespace`,
+  changed on an upgrade) is refused while a namespace the release owns would be
+  left behind unprotected: Helm would delete it with everything in it. The
+  message names it; annotate it with `helm.sh/resource-policy=keep`, upgrade,
+  and delete the old namespace yourself if it should go. The prober chart
+  checks this when `namespace.name` or `namespace.create` is set.
 
 #### The prober chart (#1372, #1373, #1374)
 

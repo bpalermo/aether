@@ -149,20 +149,22 @@ workflow prints for that run):
 ```bash
 helm install aether-crds oci://quay.io/aethermesh/chart-crds \
   --version <crds-version>-<git-commit>
-# The namespace, marked as belonging to the release so the chart adopts it.
+# The namespace, labelled for Pod Security admission (the agent, proxy, mesh-dns
+# and uds-csi pods need hostNetwork, hostPath volumes and NET_ADMIN).
 kubectl create namespace aether-system
-kubectl label namespace aether-system app.kubernetes.io/managed-by=Helm
-kubectl annotate namespace aether-system \
-  meta.helm.sh/release-name=aether meta.helm.sh/release-namespace=aether-system
+kubectl label namespace aether-system \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=privileged \
+  pod-security.kubernetes.io/warn=privileged
 # Prefer the commit-pinned tag; the bare `--version <aether-version>` also
 # resolves, but that tag is mutable and re-pushed by every release.
 helm install aether oci://quay.io/aethermesh/chart-aether \
-  --version <aether-version>-<git-commit> -n aether-system
+  --version <aether-version>-<git-commit> -n aether-system --create-namespace
 ```
 
-There is no `--create-namespace`: the `aether` chart owns its namespace
-(`namespace.create=true`, the default) so that it carries the privileged
-pod-security labels the agent needs. See "Who creates the namespace" below.
+The `aether` chart does not create its namespace (`namespace.create=false`, the
+default since 2.4.21): Helm or you do, and you label it. See "Who creates the
+namespace" below.
 
 > **Moving from ghcr.io (chart 1.0.0, proposal 040).** Until the 1.x charts,
 > everything was published to GitHub Container Registry under a different path
@@ -182,18 +184,29 @@ resources (ClusterRole/ClusterRoleBinding) additionally include the namespace, s
 several releases coexist without collisions. Customize naming with `nameOverride`
 / `fullnameOverride`, and target a namespace with `helm install <release> -n <ns>`.
 
-**Who creates the namespace.** Exactly one of the chart, Helm, or you (#1384):
+**Who creates the namespace** (#1403). Helm stores the release record in the
+release namespace before it creates anything a chart renders, so a chart cannot
+create the namespace its own release is stored in.
 
-| `namespace.create` | Who creates it | First install |
-|---|---|---|
-| `true` (default) | the chart, with privileged pod-security labels | Create the namespace empty with Helm's ownership metadata first (the three `kubectl` commands above, with your release name and namespace), then install **without** `--create-namespace`. |
-| `false` | Helm or you | Pass `--create-namespace`, or create the namespace beforehand. Nothing labels it: on a cluster that enforces Pod Security admission, set `pod-security.kubernetes.io/enforce: privileged` on it yourself, or the agent's pods are refused. |
+| `namespace.create` | Release stored in | Who creates the namespace | What you do |
+|---|---|---|---|
+| `false` (default) | the same namespace (`-n aether-system`) | Helm (`--create-namespace`) or you | Label it for Pod Security admission before installing (the three `kubectl label` values above); on a cluster that enforces nothing, the helm command alone is enough. |
+| `true` | a **different** namespace (`-n <other> --set namespace.name=aether-system`) | the chart, with the three privileged labels and `helm.sh/resource-policy: keep` | Nothing. |
+| `true` | the same namespace | nobody: the render fails, naming the two rows above | Pick one of them. |
 
-With the default, `--create-namespace` fails a first install (`namespaces "<ns>"
-already exists`: Helm made it, then the chart tries to), and so does a namespace
-you created without the ownership metadata (`invalid ownership metadata`). With
-neither, Helm has nowhere to store the release (`namespaces "<ns>" not found`).
-`helm uninstall` deletes a namespace the chart created.
+A namespace the release already **owns** (it carries Helm's two ownership
+annotations for this release: every install made while `namespace.create`
+defaulted to `true`) is rendered whatever `namespace.create` says, so upgrading
+across 2.4.21 with no values cannot make Helm delete it. A release of an older chart installed with
+`namespace.create=false` is asked once for `kubectl annotate namespace <ns>
+helm.sh/resource-policy=keep` on its first upgrade ([runbook](../docs/runbook.md),
+"Chart 2.4.21"). Ownership is read from
+the cluster at render time (`lookup`); a render without a cluster (`helm
+template`) does not see it and shows what a first install gets.
+
+`helm uninstall` no longer deletes a namespace the chart rendered (`keep`):
+delete it yourself. The `prober` chart follows the same rules since 1.0.6
+(#1405); its `namespace.create` was already `false` by default.
 
 > The **agent** is effectively singleton-per-node by design: it owns host paths
 > (`/run/aether`, `/opt/cni/bin`, `/etc/cni/net.d`, …) and the CNI plugin, so only

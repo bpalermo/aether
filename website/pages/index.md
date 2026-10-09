@@ -103,19 +103,19 @@ helm upgrade --install aether-crds \
   oci://quay.io/aethermesh/chart-crds \
   --version "$VERSION"
 
-# 2) First install only: the namespace, marked so the chart adopts it. The chart
-#    owns the namespace (it sets the pod-security labels the agent needs), so
-#    there is no --create-namespace below.
+# 2) First install only: the namespace, labelled for Pod Security admission (the
+#    agent's pods need hostNetwork, hostPath volumes and NET_ADMIN).
 kubectl create namespace aether-system
-kubectl label namespace aether-system app.kubernetes.io/managed-by=Helm
-kubectl annotate namespace aether-system \
-  meta.helm.sh/release-name=aether meta.helm.sh/release-namespace=aether-system
+kubectl label namespace aether-system \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=privileged \
+  pod-security.kubernetes.io/warn=privileged
 
 # 3) The system: agent + proxy + mesh-dns + registrar + controller.
 helm upgrade --install aether \
   oci://quay.io/aethermesh/chart-aether \
   --version "$VERSION" \
-  --namespace aether-system \
+  --namespace aether-system --create-namespace \
   --set clusterName=my-cluster \
   --set meshDomain=aether.internal
 ```

@@ -1,11 +1,51 @@
-{{- if .Values.namespace.create }}
+{{- /*
+  The namespace all aether resources deploy into (#1403).
+
+  NOT rendered by default: the release is normally stored in this very
+  namespace, and a chart cannot create the namespace its release record lives in
+  (see aether.namespace.assertCreatable). Helm (--create-namespace) or the
+  operator creates it, and the operator labels it for Pod Security admission;
+  docs/getting-started.md has the commands.
+
+  Rendered in two cases:
+    - namespace.create=true with the release stored in ANOTHER namespace;
+    - the live Namespace already belongs to this release (an install made while
+      namespace.create defaulted to true). It is then rendered WHATEVER
+      namespace.create says: dropping it from the manifest would make Helm
+      delete the namespace, and every aether pod with it.
+
+  helm.sh/resource-policy: keep is the second lock on the same door. Helm reads
+  it from the LIVE object when an object leaves the manifest (and on uninstall),
+  so once an upgrade to this chart has stamped it, no later change of values,
+  of ownership annotations or of this template can delete the namespace. The
+  price: `helm uninstall` leaves the namespace behind (delete it yourself).
+
+  When it is not rendered, aether.namespace.assertUpgradeKeeps refuses the one
+  upgrade that could still delete it, and asks a release written by an older
+  chart for the `keep` command once.
+*/ -}}
+{{- $ns := include "aether.namespace" . -}}
+{{- include "aether.namespace.assertNoneLeftBehind" . -}}
+{{- if .Values.namespace.create -}}
+{{- /* A retry over a failed first install of an older chart gets the message
+       with `keep` in it first (see aether.namespace.assertUpgradeKeeps). */ -}}
+{{- if and (eq $ns .Release.Namespace) (not (include "aether.namespace.ownedByRelease" (dict "ctx" . "name" $ns))) -}}
+{{- include "aether.namespace.assertUpgradeKeeps" . -}}
+{{- end -}}
+{{- include "aether.namespace.assertCreatable" (dict "ctx" . "name" $ns "value" "namespace.create" "waysOut" (printf "leave namespace.create at its default (false), install with --create-namespace and label the namespace for Pod Security admission yourself (kubectl label namespace %s pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged), or store the release in another namespace (helm -n <other> ... --set namespace.name=%s)" $ns $ns)) -}}
+{{- end -}}
+{{- if eq (include "aether.namespace.rendered" .) "true" }}
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ include "aether.namespace" . }}
+  name: {{ $ns }}
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     pod-security.kubernetes.io/audit: privileged
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/warn: privileged
     {{- include "aether.agent.labels" . | nindent 4 }}
+{{- else -}}
+{{- include "aether.namespace.assertUpgradeKeeps" . -}}
 {{- end }}
