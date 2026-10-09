@@ -40,6 +40,12 @@ type inflightKey struct {
 	nonce    string
 }
 
+// streamType is one resource type on one delta stream.
+type streamType struct {
+	streamID int64
+	typeURL  string
+}
+
 // inflightResponse records which resources a delta response added/removed, so
 // the matching ACK/NACK (a request echoing the nonce) can be attributed.
 type inflightResponse struct {
@@ -56,6 +62,10 @@ type inflightResponse struct {
 // and the version of the snapshot the response was built from. It is never
 // told about a NACK: a rejected response leaves the proxy on what it had.
 //
+// A response that changed something is always told. One that carried nothing
+// is told only when it was the first of its type on its stream: the answer to
+// the resources the proxy stated it holds (onDeltaResponse, #1483).
+//
 // It runs on the xDS stream's goroutine, after the tracker's own lock is
 // released: it must not block.
 type AckObserver func(ctx context.Context, typeURL, systemVersion string)
@@ -69,6 +79,10 @@ type Tracker struct {
 	mu       sync.Mutex
 	state    map[string]resourceState // keyed by typeURL + "/" + name
 	inflight map[inflightKey]inflightResponse
+	// answered is the (stream, type) pairs a response has been sent for. The
+	// first response of a pair is the one computed against what the proxy
+	// stated it holds (onDeltaResponse).
+	answered map[streamType]struct{}
 	// changed is closed and replaced on every state transition (broadcast).
 	changed chan struct{}
 	// observer, when set, is told of every ACK (SetAckObserver).
@@ -99,6 +113,7 @@ func NewTracker(log *slog.Logger) *Tracker {
 		metrics:  metrics,
 		state:    make(map[string]resourceState),
 		inflight: make(map[inflightKey]inflightResponse),
+		answered: make(map[streamType]struct{}),
 		changed:  make(chan struct{}),
 	}
 }
@@ -163,6 +178,29 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 
 // onDeltaResponse records the resources carried by an outgoing delta response
 // under its nonce, so the eventual ACK/NACK can be attributed to them.
+//
+// A response that carries nothing is kept only when it is the FIRST response
+// of its type on its stream (#1483). That one is the server's answer to the
+// proxy's opening request, whose initial_resource_versions state every
+// resource of the type the proxy holds: go-control-plane seeds the
+// subscription with them, compares them with the snapshot, and for a wildcard
+// subscription answers even when there is nothing to add and nothing to
+// remove. So an empty first response reads "the snapshot with this
+// system_version_info is exactly what you stated", and its ACK is told to the
+// AckObserver like any other. After an agent restart against a proxy that is
+// already in sync it is the only acknowledgement there is until a resource
+// changes.
+//
+// A LATER empty response is dropped, and must be. From its first response on,
+// go-control-plane compares the snapshot with what it has SENT on the stream,
+// whether the proxy accepted it or not, and it answers every wildcard request
+// that carries no nonce, which an on-demand subscription in the middle of a
+// stream is. After a rejected update such a response is empty, names the
+// rejected snapshot, and is ACKed: it says nothing about what the proxy holds.
+//
+// Both halves are measured on the pinned proxy by //agent/test/mtlspool
+// (TestReconnectingProxyStatesTheClustersItHolds,
+// TestReconnectingProxyStatesNoClusterItRejected).
 func (t *Tracker) onDeltaResponse(streamID int64, _ *discoveryv3.DeltaDiscoveryRequest, resp *discoveryv3.DeltaDiscoveryResponse) {
 	if resp.GetNonce() == "" {
 		return
@@ -175,13 +213,17 @@ func (t *Tracker) onDeltaResponse(streamID int64, _ *discoveryv3.DeltaDiscoveryR
 	for _, r := range resp.GetResources() {
 		entry.added = append(entry.added, r.GetName())
 	}
-	if len(entry.added) == 0 && len(entry.removed) == 0 {
-		return
-	}
+	empty := len(entry.added) == 0 && len(entry.removed) == 0
 
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	opening := streamType{streamID: streamID, typeURL: entry.typeURL}
+	_, later := t.answered[opening]
+	t.answered[opening] = struct{}{}
+	if empty && later {
+		return
+	}
 	t.inflight[inflightKey{streamID: streamID, nonce: resp.GetNonce()}] = entry
-	t.mu.Unlock()
 }
 
 // onDeltaRequest resolves an inflight response when the request echoes its
@@ -235,12 +277,18 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 
 // onDeltaStreamClosed drops inflight responses for the closed stream; their
 // ACKs will never arrive. Acknowledged state is kept: Envoy retains its config
-// across stream reconnects.
+// across stream reconnects. The record of which types the stream had been
+// answered for goes too: stream IDs are never reused.
 func (t *Tracker) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 	t.mu.Lock()
 	for key := range t.inflight {
 		if key.streamID == streamID {
 			delete(t.inflight, key)
+		}
+	}
+	for key := range t.answered {
+		if key.streamID == streamID {
+			delete(t.answered, key)
 		}
 	}
 	t.mu.Unlock()
