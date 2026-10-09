@@ -34,9 +34,49 @@ sh_test(
     size = "small",
     srcs = ["stuck_runs_test.sh"],
     data = [
+        "fake-gh-issues.sh",
+        "rolling-issue-lib.sh",
         "stuck-runs.sh",
         "@jq_toolchains//:resolved_toolchain",
     ] + glob(["testdata/stuck-runs/*"]),
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
+# A watcher workflow whose own run failed (#1533): scripts/watcher-runs.sh, the
+# second step of .github/workflows/stuck-runs.yaml. Which failed runs are a
+# watcher failing (and which are a watcher doing its job, red), the rolling
+# issue through the fake `gh`, and the table of watchers held to the workflow
+# files: every workflow that may write an issue is in it, or named in the test
+# with the reason it is not.
+sh_test(
+    name = "watcher_runs_test",
+    size = "small",
+    srcs = ["watcher_runs_test.sh"],
+    data = [
+        "fake-gh-issues.sh",
+        "rolling-issue-lib.sh",
+        "watcher-runs.sh",
+        "//:ci_definitions",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
+# The nightly e2e's report-failure step (#1532, #1568):
+# scripts/e2e-report-failure.sh through the fake `gh`, and the job of
+# .github/workflows/e2e.yaml that runs it (its sparse checkout must hold the
+# script and the library it sources).
+sh_test(
+    name = "e2e_report_failure_test",
+    size = "small",
+    srcs = ["e2e_report_failure_test.sh"],
+    data = [
+        "e2e-report-failure.sh",
+        "fake-gh-issues.sh",
+        "rolling-issue-lib.sh",
+        "//:ci_definitions",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
     env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
@@ -234,10 +274,14 @@ sh_test(
     size = "small",
     srcs = ["publish_verify_close_issue_test.sh"],
     data = [
+        "fake-gh-issues.sh",
         "publish-verify-close-issue.sh",
         "publish-verify-control-issue.sh",
+        "rolling-issue-lib.sh",
         "//:ci_definitions",
+        "@jq_toolchains//:resolved_toolchain",
     ],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
 # The signature verifier against answers that are not answers (#1316): a 5xx,

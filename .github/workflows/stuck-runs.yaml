@@ -12,7 +12,7 @@
 #
 # Every 30 minutes this lists the runs that have been stuck before starting for
 # longer than the threshold (default 60 minutes; publish and proxy-release take
-# ~10), reports them on ONE rolling issue (the e2e.yaml `report-failure` shape),
+# ~10), reports them on ONE rolling issue (its own: scripts/rolling-issue-lib.sh),
 # and cancels a stuck run ONLY when it is a superseded run: a push or
 # pull_request run, first attempt, not from a fork, whose branch is gone, or
 # whose commit is no longer its branch's head AND a newer run of the same
@@ -22,6 +22,15 @@
 # a hidden marker on the issue, and not counted again (#1301). The rules, and
 # why each one is there, are in
 # scripts/stuck-runs.sh; //scripts:stuck_runs_test pins them on canned API JSON.
+#
+# A second step reports a WATCHER workflow whose own run failed (#1533):
+# main-post-merge-watch, publish-verify's issue steps, this workflow, the
+# third-party image report and the nightly e2e's report-failure job each exist
+# to tell someone about a failure, and a failed run of one told nobody. It is
+# a step here and not a workflow of its own, so nothing new needs watching;
+# what it still cannot see (this workflow failing every time, a schedule that
+# does not fire) is said in scripts/watcher-runs.sh, which
+# //scripts:watcher_runs_test holds to the workflow files.
 #
 # A dispatch is a dry run unless dry_run=false: it lists what it would cancel
 # and the issue it would write, and writes nothing:
@@ -42,6 +51,8 @@ on:
     paths:
       - .github/workflows/stuck-runs.yaml
       - scripts/stuck-runs.sh
+      - scripts/watcher-runs.sh
+      - scripts/rolling-issue-lib.sh
   workflow_dispatch:
     inputs:
       dry_run:
@@ -71,7 +82,7 @@ jobs:
       contents: read
       # List runs and their jobs; cancel a superseded run.
       actions: write
-      # The rolling report issue.
+      # The two rolling report issues.
       issues: write
     steps:
       - name: Checkout
@@ -91,4 +102,21 @@ jobs:
             scripts/stuck-runs.sh run --dry-run
           else
             scripts/stuck-runs.sh run
+          fi
+
+      # Whether the step above passed or failed (not when the tick was cancelled
+      # for a newer one): a tick whose first step failed still has
+      # to say which watchers are failing, this workflow's last tick included.
+      - name: Report a watcher workflow whose own run failed
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DRY_RUN: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            scripts/watcher-runs.sh run --dry-run
+          else
+            scripts/watcher-runs.sh run
           fi

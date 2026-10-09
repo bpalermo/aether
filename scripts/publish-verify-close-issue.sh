@@ -47,6 +47,9 @@
 #     `issues: write` and GH_REPO, the same as the step that opens the issue.
 #     Closes every OPEN issue whose title is exactly ISSUE_TITLE with a one-line
 #     comment naming the run. No open issue is the normal case and says so.
+#     Only an issue this workflow's token opened: one that somebody else filed
+#     under the title is theirs, and stays open (#1532;
+#     scripts/rolling-issue-lib.sh, which also lists instead of searching).
 #     Then the control's issues, by the recorded verdict
 #     (`publish-verify-control-issue.sh verdict` / `titles`).
 #
@@ -61,6 +64,9 @@ set -euo pipefail
 # .github/workflows/publish-verify.yaml files under. The test reads that file
 # and fails if the two ever differ.
 ISSUE_TITLE="publish: artifacts missing for a commit on main"
+
+# shellcheck source=scripts/rolling-issue-lib.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/rolling-issue-lib.sh"
 
 is_sha() {
 	case "$1" in
@@ -102,14 +108,14 @@ decide_control() {
 	fi
 }
 
-# close_titled <title> <comment>: close every OPEN issue whose title is exactly
-# <title>. Never fails: an issue-API error is a ::warning::.
+# close_titled <title> <comment>: close every OPEN issue of the workflow's own
+# whose title is exactly <title>. Never fails: an issue-API error is a
+# ::warning::.
 close_titled() {
 	local title="$1" comment="$2" numbers num
-	# `in:title` is a word search, so match the title exactly before touching
-	# anything: an issue that merely quotes it is not this one.
-	if ! numbers="$(gh issue list --state open --search "in:title \"${title}\"" -L 20 \
-		--json number,title -q ".[] | select(.title == \"${title}\") | .number")"; then
+	# Exactly the title, and opened by the workflow token: an issue that merely
+	# quotes the title is not this one, and neither is one a person filed.
+	if ! numbers="$(rolling_issue_list open "$title")"; then
 		echo "::warning title=publish-verify::could not list open issues, so \"${title}\" was not closed; the next green run will try again"
 		return 0
 	fi
@@ -119,7 +125,7 @@ close_titled() {
 	fi
 	while read -r num; do
 		[[ "$num" =~ ^[0-9]+$ ]] || continue
-		if gh issue close "$num" --reason completed --comment "$comment"; then
+		if rolling_issue_comment "$num" "$comment" && rolling_issue_close "$num" completed; then
 			echo "closed #${num}"
 		else
 			echo "::warning title=publish-verify::could not close #${num}; the next green run will try again"
