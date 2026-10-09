@@ -503,6 +503,7 @@ type manifest struct {
 				InitContainers []container `json:"initContainers"`
 				Containers     []container `json:"containers"`
 				Volumes        []struct {
+					Name     string `json:"name"`
 					HostPath *struct {
 						Path string `json:"path"`
 					} `json:"hostPath"`
@@ -519,7 +520,17 @@ type manifest struct {
 }
 
 type selector struct {
-	MatchLabels map[string]string `json:"matchLabels"`
+	MatchLabels      map[string]string `json:"matchLabels"`
+	MatchExpressions []any             `json:"matchExpressions"`
+}
+
+// describe lists what the selector requires, for a failure message.
+func (s selector) describe() string {
+	out := orNone(labelPairs(s.MatchLabels))
+	if n := len(s.MatchExpressions); n > 0 {
+		out += fmt.Sprintf(", and %d matchExpressions", n)
+	}
+	return out
 }
 
 type strategy struct {
@@ -535,6 +546,10 @@ type container struct {
 	Args    []string `json:"args"`
 	Env     []envVar `json:"env"`
 	EnvFrom []any    `json:"envFrom"`
+	Mounts  []struct {
+		Name      string `json:"name"`
+		MountPath string `json:"mountPath"`
+	} `json:"volumeMounts"`
 }
 
 // envVar is one variable. One that has ValueFrom has a value this check cannot
@@ -661,21 +676,56 @@ func (o Object) check(docs []manifest) []string {
 	return append(problems, o.checkWebhooks(what, d)...)
 }
 
-// checkHostPaths holds the pod's hostPath volumes to the patterns: one of them
-// ends with each.
+// checkHostPaths holds the pod's hostPath volumes to the patterns: the path of
+// one of them ends with each, and a container of the pod mounts that volume at
+// a path that ends the same way. A component that derives a directory from a
+// name writes there in its own filesystem; the host sees it only through the
+// mount.
 func (o Object) checkHostPaths(what string, d manifest) []string {
+	pod := d.Spec.Template.Spec
 	var paths, problems []string
-	for _, v := range d.Spec.Template.Spec.Volumes {
+	for _, v := range pod.Volumes {
 		if v.HostPath != nil {
 			paths = append(paths, v.HostPath.Path)
 		}
 	}
 	for i, want := range o.hostPaths {
-		if !slices.ContainsFunc(paths, func(p string) bool { return strings.HasSuffix(p, want) }) {
+		found := false
+		for _, v := range pod.Volumes {
+			if v.HostPath == nil || !strings.HasSuffix(v.HostPath.Path, want) {
+				continue
+			}
+			found = true
+			if at := mountedAt(pod.Containers, v.Name); !slices.ContainsFunc(at, func(p string) bool { return strings.HasSuffix(p, want) }) {
+				problems = append(problems, fmt.Sprintf("%s: no container mounts the hostPath volume %q (%s) at a path ending with %s, which is what the contract's %s comes to (it is mounted at: %s)",
+					what, v.Name, v.HostPath.Path, want, o.HostPaths[i], orNowhere(at)))
+			}
+		}
+		if !found {
 			problems = append(problems, fmt.Sprintf("%s has no hostPath volume whose path ends with %s, which is what the contract's %s comes to (its hostPath volumes: %s)", what, want, o.HostPaths[i], orNone(paths)))
 		}
 	}
 	return problems
+}
+
+// mountedAt returns the paths the containers mount the volume at.
+func mountedAt(containers []container, volume string) []string {
+	var out []string
+	for _, c := range containers {
+		for _, m := range c.Mounts {
+			if m.Name == volume {
+				out = append(out, m.MountPath)
+			}
+		}
+	}
+	return out
+}
+
+func orNowhere(paths []string) string {
+	if len(paths) == 0 {
+		return "nowhere"
+	}
+	return strings.Join(paths, ", ")
 }
 
 // selectedValue is the value a webhook selects a label with.
@@ -687,13 +737,13 @@ func (o Object) checkWebhooks(what string, d manifest) []string {
 	var problems []string
 	for _, name := range sortedKeys(o.webhooks) {
 		var names []string
-		var namespaces, objects map[string]string
+		var namespaces, objects selector
 		found := false
 		for _, w := range d.Webhooks {
 			names = append(names, w.Name)
 			if w.Name == name {
 				found = true
-				namespaces, objects = w.NamespaceSelector.MatchLabels, w.ObjectSelector.MatchLabels
+				namespaces, objects = w.NamespaceSelector, w.ObjectSelector
 			}
 		}
 		if !found {
@@ -706,15 +756,26 @@ func (o Object) checkWebhooks(what string, d manifest) []string {
 	return problems
 }
 
-// selects reports a selector that does not select by the label with the value
-// "true". The label opts in with that value: a selector on the key with
-// another value matches nothing the mesh manages.
-func selects(what, webhook, selector string, labels map[string]string, label, id string) []string {
-	if id == "" || labels[label] == selectedValue {
+// selects reports a selector that is not exactly the label with the value
+// "true". The label opts in with that value, so the key with another value
+// matches nothing the mesh manages; and Kubernetes requires everything a
+// selector lists, so one more label or any expression narrows what the webhook
+// sees, down to nothing if the two contradict.
+func selects(what, webhook, kind string, got selector, label, id string) []string {
+	if id == "" {
 		return nil
 	}
-	return []string{fmt.Sprintf("%s: the %s of the webhook %q does not select by the label %s=%s, the value of the entry %s with %q (it selects by: %s)",
-		what, selector, webhook, label, selectedValue, id, selectedValue, orNone(labelPairs(labels)))}
+	problem := ""
+	switch {
+	case got.MatchLabels[label] != selectedValue:
+		problem = "does not select by"
+	case len(got.MatchLabels) > 1 || len(got.MatchExpressions) > 0:
+		problem = "selects by more than"
+	default:
+		return nil
+	}
+	return []string{fmt.Sprintf("%s: the %s of the webhook %q %s the label %s=%s, the value of the entry %s with %q (it selects by: %s)",
+		what, kind, webhook, problem, label, selectedValue, id, selectedValue, got.describe())}
 }
 
 func (c Container) check(what string, containers []container) []string {

@@ -383,6 +383,16 @@ metadata: {name: plugin}
 spec:
   template:
     spec:
+      initContainers:
+        - name: prepare
+          volumeMounts:
+            - {name: registry, mountPath: /registry}
+      containers:
+        - name: plugin
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}
+            - {name: registry, mountPath: /var/lib/kubelet/plugins_registry}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -422,7 +432,7 @@ func TestRenderCheck_HostPathsAndWebhooks(t *testing.T) {
 		},
 		"the chart's directory is edited alone": {
 			driver: "csi.example.io", label: "example.io/managed",
-			render: strings.Replace(selectedRender, "plugins/csi.example.io", "plugins/csi.mesh.io", 1),
+			render: strings.Replace(selectedRender, "hostPath: {path: /var/lib/kubelet/plugins/csi.example.io}", "hostPath: {path: /var/lib/kubelet/plugins/csi.mesh.io}", 1),
 			want:   "has no hostPath volume whose path ends with /plugins/csi.example.io",
 		},
 		"a driver that is only the end of the directory's name": {
@@ -460,6 +470,47 @@ func TestRenderCheck_HostPathsAndWebhooks(t *testing.T) {
 			driver: "csi.example.io", label: "example.io/managed",
 			render: strings.Replace(selectedRender, `objectSelector: {matchLabels: {example.io/managed: "true"}}`, `objectSelector: {matchLabels: {example.io/managed: "false"}}`, 1),
 			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/managed=false)`,
+		},
+		// The plugin writes its socket under the directory named after the
+		// driver, in its own filesystem: the kubelet sees it only if the host's
+		// directory is mounted there.
+		"the chart no longer mounts the directory": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}\n", "", 1),
+			want:   `o: DaemonSet/plugin: no container mounts the hostPath volume "plugin-dir" (/var/lib/kubelet/plugins/csi.example.io) at a path ending with /plugins/csi.example.io, which is what the contract's /plugins/<driver> comes to (it is mounted at: nowhere)`,
+		},
+		"the chart mounts the directory elsewhere": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "{name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}", "{name: plugin-dir, mountPath: /csi}", 1),
+			want:   `no container mounts the hostPath volume "plugin-dir" (/var/lib/kubelet/plugins/csi.example.io) at a path ending with /plugins/csi.example.io, which is what the contract's /plugins/<driver> comes to (it is mounted at: /csi)`,
+		},
+		"another volume is mounted at the directory": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "{name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}", "{name: tmp, mountPath: /var/lib/kubelet/plugins/csi.example.io}", 1),
+			want:   `no container mounts the hostPath volume "plugin-dir"`,
+		},
+		"only an init container mounts the directory": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(strings.Replace(selectedRender, "            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}\n", "", 1),
+				"{name: registry, mountPath: /registry}", "{name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}", 1),
+			want: `no container mounts the hostPath volume "plugin-dir"`,
+		},
+		// Kubernetes ANDs the requirements of a selector: anything beside the
+		// one pair narrows what the webhook sees, and it ignores failures.
+		"the chart requires one more label of a namespace": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `namespaceSelector: {matchLabels: {example.io/managed: "true"}}`, `namespaceSelector: {matchLabels: {example.io/managed: "true", tier: mesh}}`, 1),
+			want:   `w: the render's one MutatingWebhookConfiguration: the namespaceSelector of the webhook "inject.example" selects by more than the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/managed=true, tier=mesh)`,
+		},
+		"the chart adds an expression to a selector": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `objectSelector: {matchLabels: {example.io/managed: "true"}}`, `objectSelector: {matchLabels: {example.io/managed: "true"}, matchExpressions: [{key: example.io/managed, operator: NotIn, values: ["true"]}]}`, 1),
+			want:   `the objectSelector of the webhook "ndots.example" selects by more than the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/managed=true, and 1 matchExpressions)`,
+		},
+		"the chart selects by an expression alone": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `objectSelector: {matchLabels: {example.io/managed: "true"}}`, `objectSelector: {matchExpressions: [{key: example.io/managed, operator: In, values: ["true"]}]}`, 1),
+			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: none, and 1 matchExpressions)`,
 		},
 		"a webhook that selects by nothing": {
 			driver: "csi.example.io", label: "example.io/managed",
