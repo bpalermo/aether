@@ -565,8 +565,17 @@ the run's gate, the `main` job:
   and re-run it. What it missed is its own work (the open pin-bump pull
   requests were not brought up to date for this push).
 
-A run that was `cancelled` with the gate green is not filed at all (the table
-below); one that `failure`d with the gate green is, as the second case.
+A run that was `cancelled` with the gate green and no failed job is not filed
+at all (the table below); one that ended `failure` with the gate green is, as
+the second case, and so is a `cancelled` one in which another job had already
+failed.
+
+After `gh run rerun --failed` on the second case, the new attempt re-runs that
+job alone and its jobs may not include `main`. The watcher then takes the
+gate's conclusion from the latest earlier attempt that has it, and the entry
+says so ("succeeded in attempt 1 and was not re-run in this attempt"). If that
+attempt cannot be read, the entry says that whether the commit was validated
+is not known: read the `main` job on the run page.
 
 What to do, for each commit the issue names:
 
@@ -606,8 +615,9 @@ and names its head.
 | `failure`, `timed_out` | yes | the run is red: the commit failed it, or (`failure` with the `main` job green) another job did, and the entry says which |
 | `startup_failure` | yes | the workflow file on `main` is not valid: no job ran, and every later push fails the same way |
 | `skipped`, `action_required`, anything unknown | yes | nothing validated the commit |
+| `cancelled`, the `main` job succeeded, and another job failed | yes | the red run with a green gate, cut short: `refresh-pin-prs` had failed when the run was cancelled. The entry says the commit was validated |
 | `cancelled`, and the `main` job did not succeed | yes | `main.yaml` has no concurrency group, so no newer push cancels a run: a job hit its time limit or never got a runner, or someone cancelled it, and the commit is not validated |
-| `cancelled`, and the `main` job succeeded | no | `diff` and `test` did their work; what was cancelled is another job (`refresh-pin-prs` waiting for a runner) |
+| `cancelled`, the `main` job succeeded, and every other job succeeded, was skipped or was cancelled | no | `diff` and `test` did their work; what was cancelled is another job (`refresh-pin-prs` waiting for a runner) |
 | `success` | no | clears that commit if the issue names it |
 
 A closed issue is not written to: the next failure opens a new one. The one

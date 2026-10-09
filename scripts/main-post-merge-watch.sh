@@ -36,12 +36,24 @@
 #                           push never cancels an older run: cancelled means a
 #                           job hit its time limit or never got a runner, or a
 #                           person cancelled it. It is filed UNLESS the run's
-#                           own gate, the `main` job, succeeded: then `diff`
-#                           and `test` did their work and the commit is
-#                           validated, and what was cancelled is something
-#                           else (run 37337609845: `refresh-pin-prs` waited
-#                           3.5 hours for a runner). If the jobs cannot be
-#                           read, it is filed.
+#                           own gate, the `main` job, succeeded and every
+#                           other job succeeded, was skipped or was cancelled:
+#                           then `diff` and `test` did their work and the
+#                           commit is validated, and what was cancelled is
+#                           something else (run 37337609845: `refresh-pin-prs`
+#                           waited 3.5 hours for a runner). A cancelled run
+#                           in which another job had already FAILED is filed:
+#                           it is the `failure` with a green gate of the first
+#                           line, cut short. If the jobs cannot be read, it is
+#                           filed.
+#
+# THE GATE, IN A RE-RUN OF SOME JOBS. `gh run rerun --failed` after an
+# ancillary failure re-runs that job alone, and the jobs of the new attempt
+# may then not include `main`. An absent gate is not a gate that did not run:
+# nothing it rests on ran again, so its conclusion in the latest earlier
+# attempt that has it stands, for the decision above and for what the entry
+# says. When an earlier attempt cannot be read, the gate is `unknown`: a
+# cancelled run is then filed, and the entry says validation is not known.
 #
 # WHICH COMMAND RE-RUNS IT. Each entry names one, from the run's jobs:
 # `gh run rerun <id> --failed` when every job that did not pass concluded
@@ -104,7 +116,8 @@
 # and closed together.
 #
 #   scripts/main-post-merge-watch.sh decide <event> <branch> <head repository> \
-#       <repository> <workflow path> <status> <conclusion> <main job conclusion>
+#       <repository> <workflow path> <status> <conclusion> <main job conclusion> \
+#       <other jobs: ok (each succeeded, was skipped or was cancelled) | failed | unknown>
 #     prints `file: <why>`, `clear` or `ignore: <why>` (pure; the test drives it)
 #   scripts/main-post-merge-watch.sh title | labels
 #   scripts/main-post-merge-watch.sh
@@ -137,15 +150,15 @@ is_sha() {
 }
 
 decide() {
-	local event="$1" branch="$2" head_repo="$3" repo="$4" path="$5" status="$6" conclusion="$7" gate="$8"
+	local event="$1" branch="$2" head_repo="$3" repo="$4" path="$5" status="$6" conclusion="$7" gate="$8" others="$9"
 	if [ "$event" != push ] || [ "$branch" != main ] || [ "$head_repo" != "$repo" ] || [ "$path" != "$WORKFLOW_PATH" ]; then
 		echo "ignore: not a post-merge run of main (event ${event:-none}, branch ${branch:-none}, repository ${head_repo:-none}, workflow ${path:-none})"
 	elif [ "$status" != completed ]; then
 		echo "ignore: the run is ${status:-in an unknown state}, not completed (a newer attempt is running; its own completion is judged)"
 	elif [ "$conclusion" = success ]; then
 		echo clear
-	elif [ "$conclusion" = cancelled ] && [ "$gate" = success ]; then
-		echo "ignore: the run was cancelled, but its ${GATE_JOB} job succeeded: the commit was validated"
+	elif [ "$conclusion" = cancelled ] && [ "$gate" = success ] && [ "$others" = ok ]; then
+		echo "ignore: the run was cancelled, but its ${GATE_JOB} job succeeded and no other job failed: the commit was validated"
 	else
 		echo "file: the run ended ${conclusion:-with no conclusion}"
 	fi
@@ -153,8 +166,8 @@ decide() {
 
 case "${1:-}" in
 decide)
-	[ "$#" -eq 9 ] || {
-		echo "usage: $0 decide <event> <branch> <head repository> <repository> <workflow path> <status> <conclusion> <main job conclusion>" >&2
+	[ "$#" -eq 10 ] || {
+		echo "usage: $0 decide <event> <branch> <head repository> <repository> <workflow path> <status> <conclusion> <main job conclusion> <other jobs: ok|failed|unknown>" >&2
 		exit 2
 	}
 	shift
@@ -193,14 +206,16 @@ mapfile -t f <<<"$fields"
 [ "${#f[@]}" -eq 8 ] || die "run ${id} was read as ${#f[@]} fields, not 8"
 event="${f[0]}" branch="${f[1]}" head_repo="${f[2]}" path="${f[3]}" status="${f[4]}" conclusion="${f[5]}" sha="${f[6]}" attempt="${f[7]}"
 
-verdict="$(decide "$event" "$branch" "$head_repo" "$repo" "$path" "$status" "$conclusion" unknown)"
+verdict="$(decide "$event" "$branch" "$head_repo" "$repo" "$path" "$status" "$conclusion" unknown unknown)"
 if [ "${verdict%%:*}" != ignore ]; then
 	# Read from the API, and still checked before either is put in a request
 	# path or on the issue.
 	is_sha "$sha" || die "run ${id} names a commit that is not a sha"
 	[[ "$attempt" =~ ^[1-9][0-9]*$ ]] || die "run ${id} has an attempt that is not a number"
 fi
-jobs="" jobs_read=false gate=""
+jobs="" jobs_read=false gate="" gate_attempt=""
+# The gate's conclusion among jobs given as name<TAB>conclusion lines.
+gate_of() { awk -F'\t' -v g="$GATE_JOB" '$1 == g { c = $2 } END { print c }'; }
 if [ "${verdict%%:*}" = file ]; then
 	# The jobs of this attempt: the gate's conclusion decides a cancelled run,
 	# and the ones that did not pass are named on the issue. Not being able to
@@ -208,8 +223,25 @@ if [ "${verdict%%:*}" = file ]; then
 	if jobs="$(gh api --paginate "repos/${repo}/actions/runs/${id}/attempts/${attempt}/jobs?per_page=100" \
 		--jq '.jobs[] | [.name, (.conclusion // "none"), (.html_url // "")] | @tsv')"; then
 		jobs_read=true
-		gate="$(awk -F'\t' -v g="$GATE_JOB" '$1 == g { c = $2 } END { print c }' <<<"$jobs")"
-		verdict="$(decide "$event" "$branch" "$head_repo" "$repo" "$path" "$status" "$conclusion" "$gate")"
+		gate="$(gate_of <<<"$jobs")"
+		gate_attempt="$attempt"
+		# A re-run of some of the jobs: the gate is not among this attempt's.
+		# Its conclusion in the latest earlier attempt that has it stands.
+		for ((a = attempt - 1; a >= 1 && ${#gate} == 0; a--)); do
+			if earlier="$(gh api --paginate "repos/${repo}/actions/runs/${id}/attempts/${a}/jobs?per_page=100" \
+				--jq '.jobs[] | [.name, (.conclusion // "none")] | @tsv')"; then
+				gate="$(gate_of <<<"$earlier")"
+				gate_attempt="$a"
+			else
+				echo "::warning title=main-post-merge-watch::the ${GATE_JOB} job is not among the jobs of attempt ${attempt} of run ${id}, and the jobs of attempt ${a} could not be listed; whether the commit was validated is not known"
+				gate=unknown
+			fi
+		done
+		# The other jobs of this attempt: one that neither succeeded, was
+		# skipped nor was cancelled is a failure the run already holds. (The
+		# gate needs no exception here: it only matters when it succeeded.)
+		others="$(awk -F'\t' '$2 != "success" && $2 != "skipped" && $2 != "cancelled" { bad = 1 } END { print (bad ? "failed" : "ok") }' <<<"$jobs")"
+		verdict="$(decide "$event" "$branch" "$head_repo" "$repo" "$path" "$status" "$conclusion" "$gate" "$others")"
 	else
 		echo "::warning title=main-post-merge-watch::could not list the jobs of run ${id}; reporting without them"
 	fi
@@ -388,12 +420,14 @@ fi
 # succeeded while another job (`refresh-pin-prs`) failed: then no target on
 # main is broken, and the reader must not go looking for one.
 gate="$(printf '%s' "$gate" | tr -cd 'a-z_')"
-validated=""
+validated="" carried=""
 if [ "$jobs_read" = true ]; then
+	[ "$gate_attempt" = "$attempt" ] || carried=" in attempt ${gate_attempt} and was not re-run in this attempt"
 	case "$gate" in
-	success) validated="The \`${GATE_JOB}\` job, the gate of this run, **succeeded**: the commit was validated (\`diff\` and \`test\` did their work), and this is not a broken target on \`main\`. What did not pass is another job of the run, named above; the run stays red, and this entry open, until that job passes." ;;
+	unknown) validated="The \`${GATE_JOB}\` job, the gate of this run, is not among the jobs of this attempt (a re-run of some of the jobs), and an earlier attempt could not be read: whether the commit was validated is not known. Read the \`${GATE_JOB}\` job on the run page." ;;
+	success) validated="The \`${GATE_JOB}\` job, the gate of this run, **succeeded**${carried}: the commit was validated (\`diff\` and \`test\` did their work), and this is not a broken target on \`main\`. What did not pass is another job of the run, named above; the run stays red, and this entry open, until that job passes." ;;
 	"") validated="The \`${GATE_JOB}\` job, the gate of this run, did not run: the commit is not validated." ;;
-	*) validated="The \`${GATE_JOB}\` job, the gate of this run, ended **${gate}**: the commit is not validated." ;;
+	*) validated="The \`${GATE_JOB}\` job, the gate of this run, ended **${gate}**${carried}: the commit is not validated." ;;
 	esac
 fi
 

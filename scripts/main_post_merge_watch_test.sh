@@ -64,8 +64,8 @@ B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 C="cccccccccccccccccccccccccccccccccccccccc"
 
 # --- 1. the decision --------------------------------------------------------------------------
-# decide <event> <branch> <head repository> <repository> <workflow path> <status> <conclusion> <main job>
-want() { # file|clear|ignore, name, the eight arguments
+# decide <event> <branch> <head repository> <repository> <workflow path> <status> <conclusion> <main job> <other jobs>
+want() { # file|clear|ignore, name, the nine arguments
 	local want="$1" name="$2" got
 	shift 2
 	got="$(bash "$SCRIPT" decide "$@")"
@@ -75,32 +75,38 @@ want() { # file|clear|ignore, name, the eight arguments
 	esac
 }
 ours=(push main o/r o/r "$PATH_MAIN" completed)
-want clear "a green run" "${ours[@]}" success ""
-want file "a failed run" "${ours[@]}" failure failure
-want file "a failed run whose gate passed (another job failed)" "${ours[@]}" failure success
-want file "a run that timed out" "${ours[@]}" timed_out ""
-want file "a run that never started (an invalid workflow file)" "${ours[@]}" startup_failure ""
-want file "a run that was skipped: nothing validated the commit" "${ours[@]}" skipped ""
-want file "a run waiting for an approval" "${ours[@]}" action_required ""
-want file "a conclusion this script has never heard of: fail closed" "${ours[@]}" stale ""
-want file "a completed run with no conclusion: fail closed" "${ours[@]}" "" ""
+want clear "a green run" "${ours[@]}" success "" ""
+want file "a failed run" "${ours[@]}" failure failure ""
+want file "a failed run whose gate passed (another job failed)" "${ours[@]}" failure success ""
+want file "a run that timed out" "${ours[@]}" timed_out "" ""
+want file "a run that never started (an invalid workflow file)" "${ours[@]}" startup_failure "" ""
+want file "a run that was skipped: nothing validated the commit" "${ours[@]}" skipped "" ""
+want file "a run waiting for an approval" "${ours[@]}" action_required "" ""
+want file "a conclusion this script has never heard of: fail closed" "${ours[@]}" stale "" ""
+want file "a completed run with no conclusion: fail closed" "${ours[@]}" "" "" ""
 # main.yaml has no concurrency group: nothing supersedes a run. A cancelled
 # run is a job that hit its time limit, or a person.
-want file "cancelled, and its gate failed" "${ours[@]}" cancelled failure
-want file "cancelled, and its gate was cancelled too" "${ours[@]}" cancelled cancelled
-want file "cancelled, and its gate never ran" "${ours[@]}" cancelled ""
-want file "cancelled, and the jobs could not be read: fail closed" "${ours[@]}" cancelled unknown
-want ignore "cancelled, but its gate passed: the commit was validated" "${ours[@]}" cancelled success
-want ignore "a run that is not finished (a newer attempt is running)" push main o/r o/r "$PATH_MAIN" in_progress "" ""
-want ignore "a queued run" push main o/r o/r "$PATH_MAIN" queued "" ""
+want file "cancelled, and its gate failed" "${ours[@]}" cancelled failure ok
+want file "cancelled, and its gate was cancelled too" "${ours[@]}" cancelled cancelled ok
+want file "cancelled, and its gate never ran" "${ours[@]}" cancelled "" ok
+want file "cancelled, and the jobs could not be read: fail closed" "${ours[@]}" cancelled unknown unknown
+want ignore "cancelled, but its gate passed: the commit was validated" "${ours[@]}" cancelled success ok
+# The exception is for a run whose other work was cancelled, not for one that
+# already holds a failure: that is the failure-with-a-green-gate case above,
+# cut short. Anything not known about the other jobs files.
+want file "cancelled, its gate passed, but another job failed" "${ours[@]}" cancelled success failed
+want file "cancelled, its gate passed, and the other jobs are not known" "${ours[@]}" cancelled success unknown
+want file "cancelled, its gate passed, and nothing is said of the other jobs" "${ours[@]}" cancelled success ""
+want ignore "a run that is not finished (a newer attempt is running)" push main o/r o/r "$PATH_MAIN" in_progress "" "" ""
+want ignore "a queued run" push main o/r o/r "$PATH_MAIN" queued "" "" ""
 # Not a post-merge run of main: whatever it concluded.
 for c in success failure; do
-	want ignore "a pull request's run from a fork whose branch is called main ($c)" pull_request main mallory/r o/r "$PATH_MAIN" completed "$c" ""
-	want ignore "a pull request's run in this repository ($c)" pull_request main o/r o/r "$PATH_MAIN" completed "$c" ""
-	want ignore "a push to another branch ($c)" push feature o/r o/r "$PATH_MAIN" completed "$c" ""
-	want ignore "a push in another repository ($c)" push main mallory/r o/r "$PATH_MAIN" completed "$c" ""
-	want ignore "another workflow that took the name ($c)" push main o/r o/r .github/workflows/other.yaml completed "$c" ""
-	want ignore "a manual run ($c)" workflow_dispatch main o/r o/r "$PATH_MAIN" completed "$c" ""
+	want ignore "a pull request's run from a fork whose branch is called main ($c)" pull_request main mallory/r o/r "$PATH_MAIN" completed "$c" "" ""
+	want ignore "a pull request's run in this repository ($c)" pull_request main o/r o/r "$PATH_MAIN" completed "$c" "" ""
+	want ignore "a push to another branch ($c)" push feature o/r o/r "$PATH_MAIN" completed "$c" "" ""
+	want ignore "a push in another repository ($c)" push main mallory/r o/r "$PATH_MAIN" completed "$c" "" ""
+	want ignore "another workflow that took the name ($c)" push main o/r o/r .github/workflows/other.yaml completed "$c" "" ""
+	want ignore "a manual run ($c)" workflow_dispatch main o/r o/r "$PATH_MAIN" completed "$c" "" ""
 done
 if bash "$SCRIPT" decide push main >/dev/null 2>&1; then
 	fail "decide with too few arguments must be refused"
@@ -166,8 +172,13 @@ number="${path#repos/o/r/issues/}"
 number="${number%%/*}"
 case "$method $path" in
 "GET repos/o/r/actions/runs/${FAKE_RUN_ID}/attempts/"*"/jobs?per_page=100")
+	# jobs.<attempt>.json when the test wrote one for that attempt, else
+	# jobs.json. `jobs@<attempt>`: that attempt's jobs cannot be listed.
+	at="${path#*/attempts/}"
+	at="${at%%/*}"
 	down jobs
-	out <"$FAKE_STATE/jobs.json"
+	down "jobs@${at}"
+	if [ -e "$FAKE_STATE/jobs.${at}.json" ]; then out <"$FAKE_STATE/jobs.${at}.json"; else out <"$FAKE_STATE/jobs.json"; fi
 	;;
 "GET repos/o/r/actions/runs/${FAKE_RUN_ID}")
 	down run
@@ -235,7 +246,10 @@ S="$TMP/state"
 mkdir -p "$S"
 RUN_ID=4242
 HEAD="$A"
-reset() { echo '[]' >"$S/issues.json"; }
+reset() {
+	echo '[]' >"$S/issues.json"
+	rm -f "$S"/jobs.*.json
+}
 # run <sha> <conclusion> [attempt] [status] [event] [branch] [head repo] [path]
 run() {
 	"$JQ" -n --arg sha "$1" --arg c "$2" --argjson a "${3:-1}" --arg st "${4:-completed}" \
@@ -252,6 +266,13 @@ jobs() {
 			'. + [{name: $name, conclusion: $c, html_url: $u}]' <<<"$list")"
 	done
 	"$JQ" -n --argjson j "$list" '{jobs: $j}' >"$S/jobs.json"
+}
+# jobs_at <attempt> <name>=<conclusion>...: the jobs of that attempt only.
+jobs_at() {
+	local at="$1"
+	shift
+	jobs "$@"
+	mv "$S/jobs.json" "$S/jobs.${at}.json"
 }
 # issue <number> <title> <author> [body] [pull request: yes]
 issue() {
@@ -473,11 +494,101 @@ jobs diff=success test=success main=success refresh-pin-prs=cancelled
 step 0 "cancelled, the gate passed (refresh-pin-prs never got a runner)" &&
 	check "cancelled, validated: nothing is filed" test "$(open_numbers) $(writes)" = " 0"
 check "cancelled, validated: the log says why" grep -q 'ignore: .*cancelled.*main.*succeeded' "$TMP/log"
+# A merge that reaches nothing: `test` is skipped and the gate passes on what
+# `diff` wrote. A skipped job is not a failed one.
+jobs diff=success test=skipped main=success refresh-pin-prs=cancelled
+step 0 "cancelled, the gate passed, test was skipped" &&
+	check "cancelled, validated with a skipped job: nothing is filed" test "$(open_numbers) $(writes)" = " 0"
 jobs diff=success test=cancelled main=failure
 step 0 "cancelled, the gate failed (test hit its time limit)" &&
 	check "cancelled, not validated: filed" has "$(body_of 101)" "ended **cancelled**"
 check "cancelled, not validated: the cancelled job is named" has "$(body_of 101)" '`test`](https://github.com/o/r/actions/runs/4242/job/902) | cancelled |'
+# Cancelled with the gate green, but a job had already FAILED when the run was
+# cancelled (another always() job was still finishing). That is the red run
+# with a green gate, cut short: filed, like the same run left to end `failure`.
 reset
+jobs diff=success test=success main=success refresh-pin-prs=failure other=cancelled
+step 0 "cancelled, the gate passed, but refresh-pin-prs had failed" &&
+	check "cancelled over an ancillary failure: filed" test "$(open_numbers)" = 101
+body="$(body_of 101)"
+check "cancelled over an ancillary failure: the failed job is named" has "$body" '`refresh-pin-prs`](https://github.com/o/r/actions/runs/4242/job/904) | failure |'
+check "cancelled over an ancillary failure: the body says the commit was validated" has "$body" 'The `main` job, the gate of this run, **succeeded**: the commit was validated'
+check "cancelled over an ancillary failure: a job was cancelled, so the whole run is re-run" lacks "$body" 'gh run rerun 4242 --failed'
+
+# --- a re-run of some of the jobs ---
+# `gh run rerun --failed` after an ancillary failure re-runs `refresh-pin-prs`
+# alone. If the jobs of the new attempt are then only that one, `main` is not
+# among them, although it succeeded in attempt 1 and nothing it rests on ran
+# again. Its last conclusion in an earlier attempt stands.
+reset
+run "$A" failure 2
+jobs_at 1 diff=success test=success main=success refresh-pin-prs=failure
+jobs_at 2 refresh-pin-prs=failure
+step 0 "attempt 2 re-ran only refresh-pin-prs, and it failed again" &&
+	check "partial re-run: filed" test "$(open_numbers)" = 101
+body="$(body_of 101)"
+check "partial re-run: the gate's conclusion is carried from attempt 1" has "$body" 'The `main` job, the gate of this run, **succeeded** in attempt 1 and was not re-run in this attempt: the commit was validated'
+check "partial re-run: never that the gate did not run" lacks "$body" "did not run"
+check "partial re-run: never that the commit is not validated" lacks "$body" "not validated"
+# Two partial re-runs: the gate is found two attempts back.
+reset
+run "$A" failure 3
+jobs_at 1 diff=success test=success main=success refresh-pin-prs=failure
+jobs_at 2 refresh-pin-prs=failure
+jobs_at 3 refresh-pin-prs=failure
+step 0 "attempt 3 re-ran only refresh-pin-prs again" &&
+	check "two partial re-runs: carried from attempt 1" has "$(body_of 101)" '**succeeded** in attempt 1 and was not re-run in this attempt'
+# The latest attempt that has the gate decides, not the first.
+reset
+jobs_at 1 diff=success test=failure main=failure refresh-pin-prs=failure
+jobs_at 2 test=success main=success refresh-pin-prs=failure
+jobs_at 3 refresh-pin-prs=failure
+step 0 "attempt 2 fixed the gate, attempt 3 re-ran only refresh-pin-prs" &&
+	check "the latest attempt with the gate decides" has "$(body_of 101)" '**succeeded** in attempt 2 and was not re-run in this attempt'
+# A gate that did not succeed, carried the same way.
+reset
+run "$A" failure 2
+jobs_at 1 diff=success test=failure main=failure
+jobs_at 2 refresh-pin-prs=failure
+step 0 "the gate failed in attempt 1 and is not in attempt 2" &&
+	check "partial re-run, gate failed earlier: says so, and where" has "$(body_of 101)" 'The `main` job, the gate of this run, ended **failure** in attempt 1 and was not re-run in this attempt: the commit is not validated'
+# The earlier attempt cannot be read: not known, and said so. Never "did not run".
+reset
+jobs_at 1 diff=success test=success main=success refresh-pin-prs=failure
+jobs_at 2 refresh-pin-prs=failure
+step 0 "a partial re-run, and attempt 1 cannot be read" FAKE_DOWN=jobs@1 &&
+	check "partial re-run, earlier attempt unreadable: still filed" test "$(open_numbers)" = 101
+body="$(body_of 101)"
+check "partial re-run, earlier attempt unreadable: validation is reported as not known" has "$body" "whether the commit was validated is not known"
+check "partial re-run, earlier attempt unreadable: never that the gate did not run" lacks "$body" "did not run"
+check "partial re-run, earlier attempt unreadable: nor that it is not validated" lacks "$body" "is not validated"
+# No attempt has the gate: it never ran.
+reset
+jobs_at 1 refresh-pin-prs=failure
+jobs_at 2 refresh-pin-prs=failure
+step 0 "no attempt has the gate" &&
+	check "no attempt has the gate: it did not run" has "$(body_of 101)" 'The `main` job, the gate of this run, did not run: the commit is not validated'
+# A first attempt has no earlier one to ask.
+reset
+run "$A" failure 1
+jobs refresh-pin-prs=failure
+step 0 "attempt 1 without the gate" &&
+	check "attempt 1 without the gate: one listing of jobs, no earlier attempt is asked" test "$(grep -c '/jobs?per_page' "$TMP/gh.log")" = 1
+# The same premise decides a cancelled re-run: the gate succeeded in attempt 1,
+# the re-run of refresh-pin-prs never got a runner. Validated: not filed.
+reset
+run "$A" cancelled 2
+jobs_at 1 diff=success test=success main=success refresh-pin-prs=failure
+jobs_at 2 refresh-pin-prs=cancelled
+step 0 "a cancelled partial re-run whose gate passed in attempt 1" &&
+	check "cancelled partial re-run, validated: nothing is filed" test "$(open_numbers) $(writes)" = " 0"
+step 0 "a cancelled partial re-run, and attempt 1 cannot be read" FAKE_DOWN=jobs@1 &&
+	check "cancelled partial re-run, gate not known: filed (fail closed)" test "$(open_numbers)" = 101
+check "cancelled partial re-run, gate not known: says validation is not known" has "$(body_of 101)" "whether the commit was validated is not known"
+
+reset
+run "$A" cancelled
+jobs diff=success test=cancelled main=failure
 step 0 "cancelled, and the jobs cannot be read" FAKE_DOWN=jobs &&
 	check "cancelled, jobs unreadable: filed (fail closed)" test "$(open_numbers)" = 101
 check "cancelled, jobs unreadable: the body says the jobs could not be listed" has "$(body_of 101)" "the jobs of the run could not be listed"
