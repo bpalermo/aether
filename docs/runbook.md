@@ -2159,14 +2159,21 @@ before. What changes:
   changed. **Run the same `helm upgrade` again**: the MeshConfig is live now,
   the seed is not rendered, and the upgrade goes through. With Helm 4 and a
   release it applies server side, the first upgrade goes through instead: the
-  MeshConfig keeps its UID and its spec and gains the chart's labels and the
-  hook annotations; if the seed (`meshConfig.proxy`) and the object set the
-  same field to different values, the upgrade fails on `Apply failed with 1
-  conflict` and the object is again untouched (run it again). To check that
-  an upgrade left the MeshConfig alone, compare its UID before and after:
+  MeshConfig is not deleted (same UID) and keeps every field it set, but
+  **the seed is applied to it**: it gains the chart's labels, the hook
+  annotations and any `meshConfig.proxy` field of your values that the object
+  does not set itself (measured with Helm 4.2.0: a seed with
+  `tracingEnabled: true` over an object that set only `accessLogsEnabled:
+  true` left both set). With the default, empty `meshConfig.proxy` the spec
+  does not change. If the seed and the object set the same field to different
+  values, the upgrade fails on `Apply failed with 1 conflict` and the object
+  is untouched (run it again). So with Helm 4, a non-empty `meshConfig.proxy`
+  and a MeshConfig that something else may create during an upgrade, compare
+  the spec as well as the UID before and after, or set
+  `meshConfig.createDefault=false` and own the object yourself:
 
   ```bash
-  kubectl -n aether-system get meshconfig default -o jsonpath='{.metadata.uid}{"\n"}'
+  kubectl -n aether-system get meshconfig default -o jsonpath='{.metadata.uid} {.spec}{"\n"}'
   ```
 - `helm install --no-hooks` seeds no MeshConfig, and the agent pods then stay
   in `ContainerCreating` (they mount the ConfigMap the controller projects

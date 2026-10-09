@@ -125,10 +125,10 @@ object absent at render and created before the seed hook runs:
   hook-failed       upgrade fails, "already      object kept, upgrade succeeds;
                     exists"; object kept         DELETED when the wait after
                                                  the apply fails
-  never             upgrade fails, "already      object kept (it gains this
-                    exists"; object kept         chart's labels and
-                                                 annotations), upgrade succeeds;
-                                                 kept when the wait fails too
+  never             upgrade fails, "already      not deleted, but the seed is
+                    exists"; object untouched    APPLIED to it (see below),
+                                                 upgrade succeeds; not deleted
+                                                 when the wait fails either
 
 hook-failed is the documented value that looks right and is not: Helm applies
 it after the hook's object was created and the WAIT for it failed. With
@@ -140,7 +140,19 @@ anything: the upgrade either fails on "already exists" with the release left
 `failed` at a new revision and the previous one still `deployed` (running the
 same command again succeeds: the object is live now, so the seed is not
 rendered), or it goes through with the operator's object in place. A failed
-upgrade that is fixed by running it again is the better failure. If a future
+upgrade that is fixed by running it again is the better failure.
+
+What `never` does NOT give is a create-only seed under Helm 4's server-side
+apply. There the hook is an apply, and an apply over the object created in the
+window merges the seed into it: the object keeps its UID and every field it
+set, and gains the chart's labels, the hook annotations and any
+meshConfig.proxy field it did not set itself (measured: a seed with
+tracingEnabled=true over an object with only accessLogsEnabled=true left both
+set, upgrade exit 0). A field both set to different values is a conflict and
+fails the upgrade with the object untouched. With the default, empty
+meshConfig.proxy the spec is not changed. Closing that needs a seed that is
+created and never applied (a hook Job running `kubectl create`, say), which is
+not what this chart does today. If a future
 Helm rejects or reinterprets a value it does not know, e2e/first-install.sh
 (leg v-a2) and the template tests fail first.
 

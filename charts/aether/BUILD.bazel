@@ -3686,8 +3686,11 @@ helm_template_fail_test(
 #     deletes the object when the wait after the creation fails, which with
 #     Helm 4's server-side apply can be the operator's object (measured). With
 #     a value Helm does not act on, nothing is ever deleted: the upgrade fails
-#     on "already exists" (or leaves the operator's object in place, under
-#     server-side apply) and running it again succeeds. `aether.meshConfig.seedMode`
+#     on "already exists" and running it again succeeds. Under Helm 4's
+#     server-side apply the object is not deleted either, but the seed is
+#     applied to it (labels, hook annotations, and any `meshConfig.proxy`
+#     field the object does not set): not deleting is all this value
+#     guarantees. `aether.meshConfig.seedMode`
 #     has the table; `e2e/first-install.sh` (leg v-a2) fails if a Helm ever
 #     deletes on this value;
 #   - no weight.
