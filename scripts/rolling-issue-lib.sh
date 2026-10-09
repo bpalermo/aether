@@ -54,11 +54,10 @@ _rolling_issue_repo() {
 	printf '%s\n' "$GH_REPO"
 }
 
-# rolling_issue_list <open|closed|all> <title>
-# The numbers of the workflow's own issues with exactly this title, oldest
-# first. Prints nothing when there is none. Non-zero when the list could not be
-# read: a caller must not take that for "none".
-rolling_issue_list() {
+# _rolling_issue_rows <open|closed|all> <title>
+# The workflow's own issues with exactly this title, one per line:
+# number <TAB> state <TAB> state_reason, oldest first.
+_rolling_issue_rows() {
 	local state="$1" title="$2" repo out
 	repo="$(_rolling_issue_repo)" || return 1
 	case "$title" in
@@ -70,10 +69,40 @@ rolling_issue_list() {
 	# `creator=` narrows the listing; the select is what decides. A pull request
 	# is an issue to this endpoint, hence the first select.
 	out="$(gh api --paginate "repos/${repo}/issues?state=${state}&creator=${ROLLING_ISSUE_BOT_QUERY}&per_page=100" \
-		--jq ".[] | select(.pull_request == null) | select(.user.login == \"${ROLLING_ISSUE_BOT}\" and .user.type == \"Bot\") | select(.title == \"${title}\") | .number")" ||
+		--jq ".[] | select(.pull_request == null) | select(.user.login == \"${ROLLING_ISSUE_BOT}\" and .user.type == \"Bot\") | select(.title == \"${title}\") | [.number, .state, (.state_reason // \"\")] | @tsv")" ||
 		return 1
 	[ -n "$out" ] || return 0
 	sort -n <<<"$out"
+}
+
+# rolling_issue_list <open|closed|all> <title>
+# The numbers of the workflow's own issues with exactly this title, oldest
+# first. Prints nothing when there is none. Non-zero when the list could not be
+# read: a caller must not take that for "none".
+rolling_issue_list() {
+	local rows
+	rows="$(_rolling_issue_rows "$1" "$2")" || return 1
+	[ -n "$rows" ] || return 0
+	cut -f1 <<<"$rows"
+}
+
+# rolling_issue_record <title>
+# The number of the issue that holds the workflow's record under this title,
+# for a caller that reads its memory back from the issue even once it is
+# closed: the oldest OPEN one, and with none open the newest closed one that
+# was not closed as `not_planned`. That reason is how rolling_issue_create
+# closes the newer of two issues opened in the same moment: such a duplicate
+# has the highest number and is never written to again, so reading "the newest"
+# would read it for ever and miss everything recorded on the issue that won.
+# Prints nothing when there is none; non-zero when the list could not be read.
+rolling_issue_record() {
+	local rows
+	rows="$(_rolling_issue_rows all "$1")" || return 1
+	[ -n "$rows" ] || return 0
+	awk -F'\t' '
+		$2 == "open" { if (open == "") open = $1; next }
+		$3 != "not_planned" { closed = $1 }
+		END { if (open != "") print open; else if (closed != "") print closed }' <<<"$rows"
 }
 
 # rolling_issue_text <number>

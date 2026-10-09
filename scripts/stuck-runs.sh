@@ -89,7 +89,7 @@
 # "uncancellable — needs GitHub support" and remembered in a hidden marker,
 #   <!-- stuck-runs-uncancellable: <id>,<id> -->
 # carried in every report the watchdog writes (body, comment, closing comment).
-# Each tick reads it back from its own newest issue with the title, open or closed,
+# Each tick reads it back from its own issue with the title (the open one, else the newest closed),
 # and leaves those runs out of the stuck set, so the issue closes once nothing
 # else is stuck and a NEW stuck run is reported as usual. A remembered id is
 # carried only while GitHub still lists the run as stuck. Any other cancel
@@ -322,14 +322,14 @@ render_report() {
 }
 
 # The runs remembered as uncancellable: every id in an UNCANCELLABLE_PREFIX
-# marker on the watchdog's own newest issue with the report's title, open or
-# closed (a closed one still carries its closing comment's marker), in what the
-# watchdog itself wrote there. One id per line. Returns non-zero when the issue
-# cannot be read.
+# marker on the issue that holds the watchdog's record under the report's
+# title: its open one, and with none open its newest closed one (which still
+# carries its closing comment's marker), never a duplicate that was folded into
+# another (rolling_issue_record). Only what the watchdog itself wrote there is
+# read. One id per line. Returns non-zero when the issue cannot be read.
 read_uncancellable() {
-	local numbers num
-	numbers="$(rolling_issue_list all "$ISSUE_TITLE")" || return 1
-	num="$(sed -n '$p' <<<"$numbers")"
+	local num
+	num="$(rolling_issue_record "$ISSUE_TITLE")" || return 1
 	[ -n "$num" ] || return 0
 	rolling_issue_text "$num" >"$SCRATCH/issue.txt" || return 1
 	# grep -o reads all of its input (never the early-exit `| grep -q` shape), and

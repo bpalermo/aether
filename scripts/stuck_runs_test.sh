@@ -447,6 +447,53 @@ else
 	fail "duplicate fold (rc=$RC)"
 	dump
 fi
+# The ticks after it. The closed duplicate, #7, has the highest number and is
+# never written to again: the memory must be read from #3, the issue that won.
+# A run turns out uncancellable (recorded on #3); the next tick must remember.
+FAKE_CANCEL_409="$Z" run_fake "$FIX/deleted-branch.json"
+if grep -qx 'WRITE issue comment 3' "$TMP/log" && in_comments 3 -qF -- "$ZMARK" && ! in_body 7 -qF -- "$ZMARK"; then
+	FAKE_CANCEL_409="$Z" run_fake "$FIX/deleted-branch.json"
+	if [ "$(grep -c '^WRITE cancel' "$TMP/log")" -eq 0 ] && grep -q "^ignored ${Z} " "$TMP/out"; then
+		pass "after a fold: the memory is read from the issue that won, not from the closed duplicate"
+	else
+		fail "after a fold: the uncancellable run recorded on #3 was forgotten (the closed duplicate #7 was read)"
+		dump
+	fi
+else
+	fail "after a fold: the uncancellable run was not recorded on #3"
+	dump
+fi
+# ... and once that issue is closed too, it is still the one read (the newest
+# closed that is not a folded duplicate).
+FAKE_CANCEL_409="$Z" run_fake "$FIX/deleted-branch.json"
+if [ "$(state_of 3)" = closed ] && [ "$(grep -c '^WRITE cancel' "$TMP/log")" -eq 0 ] && grep -q "^ignored ${Z} " "$TMP/out"; then
+	pass "after a fold, everything closed: still read from the issue that won"
+else
+	fail "after a fold, everything closed: the memory was lost"
+	dump
+fi
+# Which issue holds the record, with several of the watchdog's own: the open
+# one before any closed one, and among closed ones the newest.
+reset_state
+seed 5 closed "$BOT" "$TITLE" "an older report, since closed"
+seed 7 open "$BOT" "$TITLE" "$(printf 'the open report\n\n<!-- stuck-runs: %s -->\n%s\n' "$Z" "$ZMARK")"
+FAKE_CANCEL_409="$Z" run_fake "$FIX/deleted-branch.json"
+if [ "$(grep -c '^WRITE cancel' "$TMP/log")" -eq 0 ] && grep -q "^ignored ${Z} " "$TMP/out"; then
+	pass "an open issue and an older closed one: the record is the open one's"
+else
+	fail "the record was not read from the open issue"
+	dump
+fi
+reset_state
+seed 5 closed "$BOT" "$TITLE" "$(printf 'an older report\n\n%s\n' "$ZMARK")"
+seed 8 closed "$BOT" "$TITLE" "a newer report, which no longer remembers the run"
+run_fake "$FIX/deleted-branch.json"
+if grep -qx "WRITE cancel repos/bpalermo/aether/actions/runs/${Z}/cancel" "$TMP/log" && ! grep -q "^ignored ${Z} " "$TMP/out"; then
+	pass "two closed issues: the record is the newest one's (a run it dropped is counted again)"
+else
+	fail "the record was read from the older of two closed issues"
+	dump
+fi
 
 # The issue API failing is a broken check (exit 2), never "nothing to report".
 reset_state

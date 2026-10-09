@@ -687,9 +687,14 @@ cancelled this way.
 
 | What the run looks like | Command | Why |
 |---|---|---|
-| a job concluded `failure` or `cancelled` (a step failed, a registry or GitHub answered 5xx, the job never got a runner, the run was cancelled) | `gh run rerun <run id> --failed` | re-runs those jobs and every job that depends on them, and keeps the jobs that passed |
-| no job concluded `failure` or `cancelled`: no job started (`startup_failure`), a job was **skipped** that should have run, or the job at fault concluded `success` and only the gate after it failed | `gh run rerun <run id>` | `--failed` has nothing to select, or selects only the gate, which reads the same inputs again |
+| ALL of: at least one job did not pass; EVERY job that did not pass concluded `failure` or `cancelled` (a step failed, a registry or GitHub answered 5xx, the job never got a runner, the run was cancelled); and the gate job (`ci`, `proxy`, `main`) is not the only one that failed | `gh run rerun <run id> --failed` | re-runs those jobs and every job that depends on them, and keeps the jobs that passed |
+| anything else: no job started (`startup_failure`); a job that did not pass concluded some other way (`timed_out`, …), alone or next to a failed one; a job was **skipped** that should have run; or the gate failed and nothing else did (the job at fault concluded `success`) | `gh run rerun <run id>` | `--failed` has nothing to select, was not seen to select that job, or selects only the gate, which reads the same inputs again |
 | you do not know | `gh run rerun <run id>` | the whole run is always enough; it costs the jobs that had passed |
+
+The rows do not overlap: the first needs all three of its conditions, and one
+job outside them (a `timed_out` job beside a failed one) sends the run to the
+second. This is the rule the post-merge watcher applies when it writes the
+command into its issue (`scripts/main-post-merge-watch.sh`).
 
 `<run id>` is the number in the run's URL (`…/actions/runs/<run id>`); a job's
 URL holds it too, before `/job/`. One job alone is
@@ -720,7 +725,8 @@ it had. A script that reads an attempt's jobs sees the whole run.
 
 ### The issues the workflows open (#1532, #1568)
 
-Seven titles are opened by workflows, never by a person. Each is ONE rolling
+Ten titles are opened by workflows, never by a person: the six below that
+stand alone, and the four of the expected-red control. Each is ONE rolling
 issue: reused while the condition lasts, and (where the table says so) closed
 by the workflow when it ends.
 
@@ -863,8 +869,9 @@ When a cancel and the force-cancel after it both return 409, the watchdog
 reports the run once as **uncancellable — needs GitHub support**. It records the
 run ID in a hidden `<!-- stuck-runs-uncancellable: … -->` marker on the issue
 and stops counting the run as stuck. Each check reads the marker back from its
-own newest issue with that title, even a closed one, so the issue can close and
-new stuck runs are still reported. Only a marker the watchdog itself wrote is
+own issue with that title (the open one; with none open, the newest closed one
+that is not a folded duplicate), so the issue can close and new stuck runs are
+still reported. Only a marker the watchdog itself wrote is
 read (#1532): pasting one into a comment does not hide a run. The ID drops out of the marker once GitHub stops
 listing the run. To have such a run removed, open a GitHub support ticket.
 
