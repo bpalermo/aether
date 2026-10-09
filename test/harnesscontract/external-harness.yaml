@@ -1,0 +1,444 @@
+# What a harness outside this repository may read from a deployed mesh.
+#
+# A harness that rolls the mesh's workloads, reads its metrics and logs and
+# grades a run is a consumer of names this repository chooses: a metric and its
+# labels, the fields of a log line, the name of a DaemonSet. While such a
+# harness lived in this repository, a rename and the grader that read the name
+# changed in one pull request. A harness outside it has no such guarantee, so
+# the names are written down here and tests hold the code to them.
+#
+# THE RULE. Change the code and this file together, in one pull request, and
+# say so in its description. A harness outside this repository pins the
+# `version` it was written against.
+#
+#   - Removing an entry, or changing what an entry means (a renamed metric, a
+#     label value that is gone or NEW in a closed set, a field that changes
+#     type or meaning, a renamed object), bumps `version` by one.
+#   - Adding an entry, or an optional field to a log line that keeps every
+#     field it had, does not.
+#
+# No test can compare this file with its previous revision, so the bump is a
+# review rule. What the tests do enforce: every entry below is compared with
+# the code that produces the thing (`checked_by` names the Bazel test), and
+# each of those tests lists the entries it expects (a chart test lists its
+# renders and their objects, by id), so removing an entry here fails that test
+# until the check is removed too. README.md beside this file
+# says how each kind of entry is tied and what to do when a test fails.
+#
+# `checked_by: review-only` marks what no test in this repository can hold:
+# what a metrics pipeline or Envoy does to a name after it leaves the product,
+# and meanings that exist only in prose. Those entries are promises kept by
+# review alone.
+version: 1
+
+# --- Metrics ------------------------------------------------------------------
+#
+# `otel_name` is the name the instrument is registered with; `stored_name` is
+# the name a Prometheus-compatible store holds after the usual OTLP translation
+# (every character outside [a-zA-Z0-9_:] becomes `_`, and a monotonic counter
+# gets the suffix `_total` unless it has it already). The tests compute that
+# translation; whether a given pipeline applies it is the pipeline's business.
+#
+# A label with `values` is a CLOSED set: the instrument emits exactly these and
+# a harness may branch on them. A label with `open: true` has no fixed set.
+# Every series carries every label, except a label with `when`: exactly the
+# series whose other labels have those values carry it.
+metrics:
+  - id: agent.snapshot_tls_clusters
+    component: agent
+    otel_name: aether.agent.snapshot.tls_clusters
+    stored_name: aether_agent_snapshot_tls_clusters
+    type: gauge
+    labels:
+      - name: pin
+        values: [pinned, unpinned]
+      # The pin="pinned" series has no reason.
+      - name: reason
+        values: [trust_domain_unknown, tls_not_published, no_namespace_metadata, pin_not_rendered]
+        when: {pin: unpinned}
+    notes: >-
+      Mesh cluster entries in the node's current xDS snapshot that are meant to
+      be mTLS, with a server-identity pin or without one, per reason. Every
+      series is written on every snapshot, zeros included.
+    checked_by: //agent/internal/xds/cache/cachemetrics:cachemetrics_test
+
+  - id: agent.xds_acked_tls_clusters
+    component: agent
+    otel_name: aether.agent.xds.acked_tls_clusters
+    stored_name: aether_agent_xds_acked_tls_clusters
+    type: gauge
+    labels:
+      - name: pin
+        values: [pinned, unpinned]
+      - name: reason
+        values: [trust_domain_unknown, tls_not_published, no_namespace_metadata, pin_not_rendered]
+        when: {pin: unpinned}
+    notes: >-
+      The same counts for the last snapshot whose cluster update the proxy
+      acknowledged. Absent until the first cluster ACK.
+    checked_by: //agent/internal/xds/cache/cachemetrics:cachemetrics_test
+
+  - id: agent.identity_cluster_unpinned
+    component: agent
+    otel_name: aether.agent.identity.cluster_unpinned
+    stored_name: aether_agent_identity_cluster_unpinned_total
+    type: counter
+    labels:
+      - name: reason
+        values: [trust_domain_unknown, tls_not_published, no_namespace_metadata, pin_not_rendered]
+    notes: >-
+      Mesh cluster entries a snapshot holds with no server-identity pin, summed
+      over snapshots, per reason. That is two different states, and the reason
+      says which (reason_classes below): under trust_domain_unknown and
+      tls_not_published the node published NO TLS cluster for the entry, so no
+      handshake was made without a pin; under no_namespace_metadata it
+      published a TLS cluster that checks no server identity, and
+      pin_not_rendered (which no code path produces today) is graded with it.
+      Every reason is seeded at zero when the agent starts, so an absent
+      series is not a zero.
+    checked_by: //agent/internal/xds/cache/cachemetrics:cachemetrics_test
+
+  - id: prober.probe_requests
+    component: prober
+    otel_name: aether_probe_requests_total
+    stored_name: aether_probe_requests_total
+    type: counter
+    labels:
+      - name: tier
+        values: [liveness, reachability, mesh_dns]
+      - name: result
+        values: [success, http_error, connection_error, timeout, saturated, dns_error, dns_nxdomain, dns_timeout]
+      - name: target
+        open: true
+      # The prober's own pod: the source of the probe.
+      - name: pod
+        open: true
+    notes: >-
+      One increment per probe. Anything but result="success" is a failed probe
+      and has an AETHER_PROBE_FAIL line (log_lines below), up to that line's cap.
+    checked_by: //prober/internal/prober:prober_test
+
+# What the two halves of the `reason` set mean. A harness grades them
+# differently: under `no_tls` the node published no TLS for the entry at all
+# (expected for a moment at an agent start), under `gap` it published TLS that
+# checks no server identity. The partition exists in the code only as comments
+# (UnpinnedCause in agent/internal/xds/cache/cachemetrics), so it is kept by
+# review; a test only checks that it covers the closed set exactly once.
+reason_classes:
+  - id: agent.unpinned_reason_classes
+    metric: agent.identity_cluster_unpinned
+    label: reason
+    classes:
+      no_tls: [trust_domain_unknown, tls_not_published]
+      gap: [no_namespace_metadata, pin_not_rendered]
+    checked_by: review-only
+
+# Labels a store adds from the OpenTelemetry RESOURCE, not from the instrument.
+# The product sets the resource attribute; which label a pipeline turns it
+# into, if any (`node`, `job`), is the pipeline's configuration and is kept by
+# review. A harness takes the label names as parameters.
+#
+# An attribute the charts pass in OTEL_RESOURCE_ATTRIBUTES is tied to them from
+# the other side: under `charts`, the container of each of `components` lists
+# the entry's id in its `resource_attributes`, and the chart test that renders
+# the container looks for THIS entry's `attribute` among the keys the variable
+# sets. The contract does not load unless the containers that refer to an entry
+# are exactly its `components`.
+resource_attributes:
+  - id: resource.node
+    attribute: k8s.node.name
+    components: [agent, prober]
+    notes: The node the component runs on. For the prober that is the SOURCE of a probe.
+    # This test holds the link (above); the comparison with the rendered
+    # charts is made by :aether_chart_test (agent) and :prober_chart_test
+    # (prober), which list this id in their `ids`.
+    checked_by: //test/harnesscontract:harnesscontract_test
+  - id: resource.service_name.prober
+    attribute: service.name
+    value: aether-prober
+    components: [prober]
+    checked_by: //prober/internal/prober:prober_test
+
+# --- Log lines ----------------------------------------------------------------
+#
+# A line is `marker` followed by ONE JSON object, written to the container's
+# stdout as a single line. `fields` is the exact key set, in the order the
+# product writes them. A consumer must ignore keys it does not know: adding a
+# key is not a version bump.
+log_lines:
+  - id: prober.probe_fail.detail
+    component: prober
+    marker: "AETHER_PROBE_FAIL "
+    fields: [t, tier, target, result, err, elapsed_ms, phase, reused, conn_ms, dns_ms, connect_ms, tls_ms, write_ms, ttfb_ms, dial, remote, local, trace_id, pod, node, "n", truncated]
+    # RFC 3339, UTC, with fractional seconds when there are any.
+    time_fields: [t]
+    notes: >-
+      One line per failed probe, at most `cap_per_window` per (tier, result)
+      per `window_seconds`; `tier` and `result` take the values of the metric's
+      labels. The line that reaches the cap has truncated=true. A detail line
+      never has the key `suppressed`.
+    cap_per_window: 20
+    window_seconds: 60
+    checked_by: //prober/internal/prober:prober_test
+
+  - id: prober.probe_fail.summary
+    component: prober
+    marker: "AETHER_PROBE_FAIL "
+    fields: [t, tier, result, suppressed, window_s, window_start, pod, node]
+    time_fields: [t, window_start]
+    notes: >-
+      Written when a window closes in which failures past the cap were only
+      counted: `suppressed` is how many. The failures it counts lie between
+      `window_start` (the window's first failure) and `t` (when the summary was
+      written). `window_s` is the cap's period, not the length of this window.
+      A window is closed by the first once-a-window flush that finds it a full
+      window old, so `t` is less than two `window_s` after `window_start`. A
+      prober that is stopping closes every open window at once and stamps the
+      summaries with the time it stopped. The key `suppressed` is what tells a
+      summary from a detail line.
+    window_seconds: 60
+    checked_by: //prober/internal/prober:prober_test
+
+# --- Envoy stats --------------------------------------------------------------
+#
+# The agent chooses the stat prefix; Envoy and the metrics pipeline make the
+# stored name out of it. `<cluster>` is the Envoy cluster name with every
+# character outside [a-zA-Z0-9_] flattened to `_` by the pipeline, so a harness
+# matches by pattern and never assembles the name.
+envoy_stats:
+  - id: envoy.capture.anyport_downstream_cx
+    stat_prefix: cap_tcp_anyport_
+    stat: tcp.cap_tcp_anyport_<cluster>.downstream_cx_total
+    stored_name_pattern: envoy_tcp_cap_tcp_anyport_.*_downstream_cx_total
+    notes: >-
+      Connections accepted by the portless any-port chain of a TCP-primary
+      service's capture listener, counted apart from the supported spellings.
+      Only the prefix is tied to code.
+    checked_by: //agent/internal/xds/proxy:proxy_test
+
+# --- Names --------------------------------------------------------------------
+#
+# Strings a harness writes into its own workloads' manifests or into a URL.
+# A mesh service is addressed from a meshed pod as
+#
+#   <service>.<namespace>.<mesh-domain>:<port.outbound_http>   plain HTTP/1.1
+#   <service>.<namespace>.<mesh-domain>:<port.outbound_l4>     raw TCP, and UDP
+#
+# where <mesh-domain> is the chart value `meshDomain`.
+#
+# A name a chart passes to a component on its command line is tied to the
+# chart as well: under `charts`, a container's `args` maps the flag to the
+# entry's id, and the chart test looks for `<flag>=<this entry's value>` among
+# the rendered arguments.
+names:
+  - id: port.outbound_http
+    value: "18081"
+    checked_by: //test/harnesscontract:harnesscontract_test
+  - id: port.outbound_l4
+    value: "18082"
+    checked_by: //test/harnesscontract:harnesscontract_test
+  # The Go default, and the default of the chart value `meshDomain`, which is
+  # what a deployed component is really given (--mesh-domain of the agent and
+  # of the mesh-DNS daemon in chart.aether, rendered with no `meshDomain` set).
+  - id: mesh.default_domain
+    value: aether.internal
+    checked_by: //test/harnesscontract:harnesscontract_test
+  # Pod label: "true" opts a pod into the mesh.
+  - id: pod.label.managed
+    value: aether.io/managed
+    checked_by: //test/harnesscontract:harnesscontract_test
+  # Pod annotation: the comma-separated upstream services the pod calls.
+  - id: pod.annotation.upstreams
+    value: config.aether.io/upstreams
+    checked_by: //agent/internal/xds/xdsconst:xdsconst_test
+  - id: pod.annotation.endpoint_port
+    value: endpoint.aether.io/port
+    checked_by: //test/harnesscontract:harnesscontract_test
+  - id: pod.annotation.endpoint_ports
+    value: endpoint.aether.io/ports
+    checked_by: //test/harnesscontract:harnesscontract_test
+  - id: pod.annotation.endpoint_protocol
+    value: endpoint.aether.io/protocol
+    checked_by: //test/harnesscontract:harnesscontract_test
+  - id: pod.annotation.endpoint_uds_socket
+    value: endpoint.aether.io/uds-socket
+    checked_by: //test/harnesscontract:harnesscontract_test
+  - id: pod.annotation.capture_exclude_outbound_ports
+    value: capture.aether.io/exclude-outbound-ports
+    checked_by: //test/harnesscontract:harnesscontract_test
+  # The registrar generates one Service per mesh service, named after the
+  # service, in the service's namespace, carrying this label with the value
+  # "true". The label is tied to code; the Service's name and namespace are
+  # kept by review.
+  - id: service.label.mesh_service
+    value: aether.io/mesh-service
+    checked_by: //test/harnesscontract:harnesscontract_test
+  # The CSI driver a pod's UDS volume names, and the name in a node's CSINode
+  # once the node plugin has registered. Also rendered as a CSIDriver object
+  # (charts below).
+  - id: csi.driver
+    value: csi.aether.io
+    checked_by: //test/harnesscontract:harnesscontract_test
+
+# --- Chart objects ------------------------------------------------------------
+#
+# Each entry is one `helm template <release> <chart> --namespace <namespace>
+# --set ...` of a chart in this repository, and the objects in that render a
+# harness addresses: the workloads it rolls and waits for, the pod labels it
+# selects by, the container names it reads logs or usage of. Object names
+# derive from the release name, so they hold for the release name given here
+# (the documented one); the namespace is whatever the install chose, except
+# where an object says otherwise.
+#
+# For an object: `pod_labels` must all be on the pod template; `containers`
+# must all be containers of the pod (others may exist); a container's
+# `resource_attributes` are ids of entries above whose attribute its
+# OTEL_RESOURCE_ATTRIBUTES sets, and its `args` maps a flag to the id of the
+# `names` entry whose value it is run with; `rolling_update` is the
+# workload's rolling-update strategy, which decides whether a roll runs the old
+# and the new pod of a node side by side (maxSurge 1) or leaves a gap
+# (maxSurge 0).
+charts:
+  - id: chart.aether
+    chart: aether
+    release: aether
+    namespace: aether-system
+    set:
+      # Without it the chart generates a webhook key at render time; a test
+      # render has no use for one.
+      controller.webhook.spire: "true"
+      edge.enabled: "true"
+    objects:
+      - id: chart.aether.agent
+        kind: DaemonSet
+        name: aether-agent
+        namespace: aether-system
+        pod_labels:
+          app.kubernetes.io/name: aether-agent
+          app.kubernetes.io/component: agent
+        containers:
+          - name: agent
+            resource_attributes: [resource.node]
+            args:
+              --mesh-domain: mesh.default_domain
+        # The default. `agent.updateStrategy.surge` (chart.aether.agent_surge)
+        # is the other one.
+        rolling_update: {maxSurge: "0", maxUnavailable: "1"}
+      - id: chart.aether.proxy
+        kind: DaemonSet
+        name: aether-proxy
+        namespace: aether-system
+        pod_labels:
+          app.kubernetes.io/name: aether-proxy
+          app.kubernetes.io/component: proxy
+        containers:
+          - name: proxy
+        rolling_update: {maxSurge: "1", maxUnavailable: "0"}
+      - id: chart.aether.mesh_dns
+        kind: DaemonSet
+        name: aether-mesh-dns
+        namespace: aether-system
+        pod_labels:
+          app.kubernetes.io/name: aether-mesh-dns
+          app.kubernetes.io/component: mesh-dns
+        containers:
+          - name: mesh-dns
+            args:
+              --mesh-domain: mesh.default_domain
+        rolling_update: {maxSurge: "1", maxUnavailable: "0"}
+      - id: chart.aether.uds_csi
+        kind: DaemonSet
+        name: aether-uds-csi
+        namespace: aether-system
+        pod_labels:
+          app.kubernetes.io/name: aether-uds-csi
+          app.kubernetes.io/component: uds-csi
+        containers:
+          - name: uds-csi
+        # A node has no plugin pod from the old one's end to the new one's
+        # readiness: a harness that tests a mount during the roll relies on it.
+        rolling_update: {maxSurge: "0", maxUnavailable: "1"}
+      - id: chart.aether.edge
+        kind: Deployment
+        name: aether-edge
+        # The chart's own default for `edge.namespace`, not the release's.
+        namespace: aether-ingress
+        pod_labels:
+          app.kubernetes.io/name: aether-edge
+          app.kubernetes.io/component: edge
+      - id: chart.aether.csidriver
+        kind: CSIDriver
+        name: csi.aether.io
+    checked_by: //test/harnesscontract:aether_chart_test
+
+  - id: chart.aether.agent_surge
+    chart: aether
+    release: aether
+    namespace: aether-system
+    set:
+      controller.webhook.spire: "true"
+      agent.updateStrategy.surge: "true"
+    objects:
+      - id: chart.aether.agent_surge.agent
+        kind: DaemonSet
+        name: aether-agent
+        namespace: aether-system
+        rolling_update: {maxSurge: "1", maxUnavailable: "0"}
+    checked_by: //test/harnesscontract:aether_chart_test
+
+  - id: chart.prober
+    chart: prober
+    release: prober
+    namespace: mesh-workloads
+    objects:
+      # The container whose stdout carries the AETHER_PROBE_FAIL lines.
+      - id: chart.prober.daemonset
+        kind: DaemonSet
+        name: prober
+        namespace: mesh-workloads
+        containers:
+          - name: prober
+            resource_attributes: [resource.node]
+            env_contains:
+              OTEL_RESOURCE_ATTRIBUTES: ["k8s.pod.name="]
+    checked_by: //test/harnesscontract:prober_chart_test
+
+  # This chart puts its objects in the namespace its VALUE `namespace` names,
+  # not in the release's: `helm --namespace` alone does not move them.
+  - id: chart.udsecho
+    chart: udsecho
+    release: udsecho
+    namespace: mesh-workloads
+    set:
+      namespace: mesh-workloads
+    objects:
+      - id: chart.udsecho.annotation_path
+        kind: Deployment
+        name: uds-echo
+        namespace: mesh-workloads
+        pod_labels: {app: uds-echo}
+      - id: chart.udsecho.policy_path
+        kind: Deployment
+        name: uds-cr-echo
+        namespace: mesh-workloads
+        pod_labels: {app: uds-cr-echo}
+    checked_by: //test/harnesscontract:udsecho_chart_test
+
+# --- Not part of the contract ---------------------------------------------------
+#
+# Names a harness may well use, listed so nobody looks for them in the product.
+# They belong to the harness's own workloads and tools: the product does not
+# emit them and no test here knows them.
+not_contract:
+  - name: AETHER_FAIL
+    what: the per-failure log line of a load generator's script
+  - name: AETHER_METRIC
+    what: the periodic counter line of a harness's client loops
+  - name: AETHER_NEWSA / AETHER_NEWSA_FINAL
+    what: the log lines of a harness's first-use (new ServiceAccount) client
+  - name: aether_fail and aether_fail_<class>
+    what: a load generator's own failure counters
+  - name: aether.io/soak-newsa
+    what: a label a harness puts on its own pods
+  - name: the namespace of the harness's workloads, their Deployment names, and any `app=` label on them
+    what: the harness's own manifests (the udsecho chart's two echo Deployments above are the exception)
