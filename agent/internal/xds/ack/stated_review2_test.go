@@ -593,6 +593,66 @@ func TestWait_StateAndPublishedVersionAreReadTogether(t *testing.T) {
 	require.GreaterOrEqual(t, asked, 2, "the wait looked again")
 }
 
+// TestWait_AResponseSentWhileItLooksIsSeen: the same for a response that
+// enters flight between the wait's two reads. The proxy is sent another
+// version while the published one is being read; the agent goes back to the
+// first. The acknowledged version is the published one again, and it is not
+// what the proxy was last sent.
+func TestWait_AResponseSentWhileItLooksIsSeen(t *testing.T) {
+	tr := NewTracker(slog.New(slog.DiscardHandler))
+	asked := 0
+	tr.SetPublishedVersion(func(string, string) (string, bool) {
+		asked++
+		if asked == 1 {
+			sendListeners(tr, 1, "n2", map[string]string{testListener: "h2"}, nil)
+		}
+		return "h1", true
+	})
+	openDelta(tr, 1, resourcev3.ListenerType, nil)
+	sendListeners(tr, 1, "n1", map[string]string{testListener: "h1"}, nil)
+	ackDelta(tr, 1, "n1", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), unresolvedWait)
+	defer cancel()
+	require.Error(t, tr.WaitListenerPresent(ctx, testListener), "the proxy has been sent h2 and not answered")
+}
+
+// TestStreamClose_AnUnansweredAddIsOrderedLikeAnAnswer: what a closing stream
+// leaves uncertain is ordered like any answer, by when its response was sent.
+// One generation acknowledges the removal; the other is sent the listener
+// again LATER and closes without answering: it may hold it, whatever the
+// first said before. And an older add acknowledged late does not make the
+// uncertain listener certain.
+func TestStreamClose_AnUnansweredAddIsOrderedLikeAnAnswer(t *testing.T) {
+	published := map[string]string{testListener: "h1"}
+	tr := publishing(published)
+	const one, other = int64(1), int64(2)
+
+	openDelta(tr, one, resourcev3.ListenerType, nil)
+	sendListeners(tr, one, "a1", map[string]string{testListener: "h1"}, nil)
+	ackDelta(tr, one, "a1", "")
+	sendListeners(tr, one, "a2", nil, []string{testListener})
+	ackDelta(tr, one, "a2", "")
+	requireAbsentNow(t, tr, testListener)
+
+	// A response to a third stream, sent after the removal was acknowledged
+	// and before the add below, and answered last.
+	openDelta(tr, 3, resourcev3.ListenerType, nil)
+	sendListeners(tr, 3, "old", map[string]string{testListener: "h1"}, nil)
+
+	openDelta(tr, other, resourcev3.ListenerType, nil)
+	sendListeners(tr, other, "b1", map[string]string{testListener: "h1"}, nil)
+	tr.onDeltaStreamClosed(other, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), unresolvedWait)
+	defer cancel()
+	require.Error(t, tr.WaitListenerAbsent(ctx, testListener), "the proxy that was sent the listener last may hold it")
+	requireNotPresent(t, tr, testListener)
+
+	ackDelta(tr, 3, "old", "")
+	requireNotPresent(t, tr, testListener, "an answer to a response sent before the unanswered one settles nothing")
+}
+
 // TestStreamClose_TellsTheDeliveryObserverOutsideTheLock: a closing stream
 // wakes the waiters and tells the DeliveryObserver what left flight. The
 // observer is called with the tracker's lock released, so it can ask the

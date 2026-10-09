@@ -524,6 +524,11 @@ func (t *Tracker) onDeltaResponse(streamID int64, _ *discoveryv3.DeltaDiscoveryR
 
 	t.mu.Lock()
 	kept, replaced := t.keepLocked(streamID, resp.GetNonce(), &entry, empty)
+	if kept {
+		// A response in flight changes what a wait may answer
+		// (unansweredLocked): one that is looking now must look again.
+		t.broadcastLocked()
+	}
 	deliveries := t.deliveries
 	t.mu.Unlock()
 	if replaced != nil {
@@ -866,8 +871,7 @@ func (t *Tracker) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 
 // unansweredForgottenLocked is called for a response its stream closed
 // without answering. The proxy may or may not have applied it, so what it
-// holds of each resource the response carried is no longer known, when this
-// stream is the one that said what it held, or nobody had:
+// holds of each resource the response carried is no longer known:
 //
 //   - a resource known present is still present (a removal waits for its
 //     acknowledgement), at no version (no wait for it to be present is
@@ -876,24 +880,27 @@ func (t *Tracker) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
 //     now on, at no version: the proxy may have applied the add, and a
 //     removal must wait for its acknowledgement.
 //
-// The proxy says which it holds when it reconnects. What another stream said
-// is left alone: it is another proxy generation's, and newer than a response
-// this one never answered. Callers must hold t.mu.
+// The proxy says which it holds when it reconnects. Like an answer, this is
+// ordered by when the response was sent: what the answer to a response sent
+// later already says (another proxy generation's) is left alone, and the
+// uncertainty takes the response's place in that order, so that an older
+// answer arriving late does not settle it. Callers must hold t.mu.
 func (t *Tracker) unansweredForgottenLocked(streamID int64, entry inflightResponse) {
 	forget := func(name, sent string, added bool) {
 		key := entry.typeURL + "/" + name
 		st := t.state[key]
-		if st.stream != streamID && (st.stream != 0 || st.present) {
+		if st.sentAt > entry.sentAt {
 			return
 		}
 		switch {
 		case st.present && st.version != sent:
 			st.version = ""
 		case !st.present && added:
-			st.present, st.unconfirmed, st.version, st.stream = true, true, "", streamID
+			st.present, st.unconfirmed = true, true
 		default:
 			return
 		}
+		st.sentAt, st.stream = entry.sentAt, streamID
 		t.state[key] = st
 	}
 	for _, r := range entry.added {
