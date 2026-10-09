@@ -471,7 +471,8 @@ preflight_cluster() {
 
 preflight_no_soak() {
 	# A soak grades on cumulative prober counters exported through this very
-	# collector. Shedding it mid-run destroys the SLI (soak README gotcha 3/4).
+	# collector. Shedding it mid-run destroys the SLI (gotchas 3 and 4 of the
+	# README of the soak harness, which is maintained outside this repository).
 	if kubectl -n aether-test get ds k6-soak-loader >/dev/null 2>&1; then
 		die "k6-soak-loader is deployed — a soak looks active. NEVER run this during a soak."
 	fi

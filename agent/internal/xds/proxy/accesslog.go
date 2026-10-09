@@ -124,7 +124,7 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 			// FIN was decoded) is a DC line with a full bytes_sent and
 			// upstream_rx_ms "-": resetAllStreams destroyed and logged the stream
 			// before the end_stream arrived. A clean line carries both numbers.
-			// See e2e/soak/README.md "Benign DC" for the grading rule.
+			// docs/runbook.md (#1009) has the grading rule.
 			kv("upstream_rx_ms", "%COMMON_DURATION(US_RX_BEG:US_RX_END:ms)%"),
 			kv("downstream_tx_end_ms", "%COMMON_DURATION(US_RX_BEG:DS_TX_END:ms)%"),
 			// Which proxy generation wrote the line (#1333); what the connection

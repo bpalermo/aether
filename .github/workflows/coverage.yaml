@@ -38,7 +38,7 @@ name: coverage
 # tagged integration, requires-root or manual, over every first-party Go
 # component, with a zero-hit record for each file no test links, so untested
 # code lowers the number instead of vanishing from it. Not integration, e2e,
-# kind, netns or soak.
+# kind or netns.
 #
 # The `coverage` job at the bottom is the one name a ruleset requires. A
 # required check must report on every pull request that can merge, hence the
