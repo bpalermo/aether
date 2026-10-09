@@ -18,12 +18,15 @@
 #                         has never seen.
 #   churn.sh --preflight  refuses to start when one of the five is absent, has
 #                         no replica, is not fully available or is mid-roll, is
-#                         not in the mesh, or would not roll surge-first.
+#                         not in the mesh, has no readiness probe, or would
+#                         not roll surge-first behind a 10 s preStop sleep
+#                         that its termination grace outlasts.
 #
 # Until this file, the five existed only on the cluster the soaks ran on: a
 # change to them could not be reviewed, and a soak could not be set up from the
-# repository. It is written from those objects, with two changes: the quiet
-# start below, and svc-5 no longer sets two ports nothing listened on.
+# repository. It is written from those objects, with three changes: the quiet
+# start below, svc-5 no longer sets two ports nothing listened on, and the
+# preStop sleep is 10 s on all five (see "the roll").
 #
 # What each one is. A Deployment and its ServiceAccount, nothing else:
 #
@@ -36,10 +39,21 @@
 #                     exception: see it.
 #   4 replicas        soft-spread over the nodes, as echo.yaml spreads its three.
 #   the roll          surge-first (maxUnavailable 0), paced by minReadySeconds 10
-#                     and held by a native preStop sleep: the two workload-side
-#                     settings docs/workload-requirements.md ("Hitless rolling
-#                     restarts") asks of every mesh workload. A soak whose
-#                     workloads lack them measures the workloads.
+#                     and held by a native preStop sleep of 10 s: the two
+#                     workload-side settings docs/workload-requirements.md
+#                     ("Hitless rolling restarts") asks of every mesh
+#                     workload. A soak whose workloads lack them measures the
+#                     workloads.
+#   the sleep, 10 s   A DELIBERATE CHANGE (#1517) from what the soaks before
+#                     this file ran: svc-1 slept 10 s and the other four 3 s.
+#                     3 s is the supported minimum and is recorded at about
+#                     one failed request per pod, 10 s at none; the load gate
+#                     wants none, so at 3 s a healthy mesh could fail it. A
+#                     roll now holds each old pod 7 s longer: roll times and
+#                     per-roll counts of svc-2 ... svc-5 do not compare with
+#                     the runs before it. terminationGracePeriodSeconds (30)
+#                     must outlast the sleep: the grace counts from the
+#                     deletion, the sleep included.
 #   QUIET (#1395)     echo-basic prints one stdout line per request and has no
 #                     switch for it, and its image has no shell. As in
 #                     echo.yaml: an init container copies a static busybox in
@@ -49,11 +63,9 @@
 #   requests          10m CPU and no memory request: what the soaks so far ran
 #                     with, kept so that their baselines still compare.
 #
-# The five are the same but for three things, and //e2e/soak:harness_test holds
-# them to that (svc-2 and svc-3 are the plain ones):
+# The five are the same but for two things, and //e2e/soak:harness_test holds
+# them to that (svc-1, svc-2 and svc-3 are the plain ones):
 #
-#   svc-1   preStop sleep 10 s, the documented value. The other four hold 3 s,
-#           the supported minimum, so both ends are rolled every run.
 #   svc-4   two free-form endpoint metadata annotations (subset keys).
 #   svc-5   a second port: h2c on 3001, declared with endpoint.aether.io/ports.
 #
@@ -262,7 +274,7 @@ spec:
           lifecycle:
             preStop:
               sleep:
-                seconds: 3
+                seconds: 10
           resources:
             requests:
               cpu: 10m
@@ -371,7 +383,7 @@ spec:
           lifecycle:
             preStop:
               sleep:
-                seconds: 3
+                seconds: 10
           resources:
             requests:
               cpu: 10m
@@ -484,7 +496,7 @@ spec:
           lifecycle:
             preStop:
               sleep:
-                seconds: 3
+                seconds: 10
           resources:
             requests:
               cpu: 10m
@@ -598,7 +610,7 @@ spec:
           lifecycle:
             preStop:
               sleep:
-                seconds: 3
+                seconds: 10
           resources:
             requests:
               cpu: 10m

@@ -52,8 +52,10 @@
 #     driver rolls and the load addresses. The pre-flight against canned
 #     `kubectl get deployment -o jsonpath` answers in
 #     testdata/preflight/workloads/ (one absent; each difference that would
-#     void a soak; three mid-roll with every replica available; five that only
-#     log a line per request), and the manifest,
+#     void a soak; three mid-roll with every replica available; one with no
+#     readiness probe; two with a preStop sleep under 10 s; three whose
+#     termination grace does not outlast the sleep; five that only log a line
+#     per request), and the manifest,
 #     read: the names the harness uses are the ones it defines, and the five
 #     differ only where its header says they do;
 #   - prober-grade.sh (#1390, #1423) against canned Prometheus query responses
@@ -1379,7 +1381,7 @@ case "$args" in
 	if [ -f "${FAKE_SVC_DIR:-/nonexistent}/$w.txt" ]; then
 		cat "$FAKE_SVC_DIR/$w.txt"
 	else
-		printf 'replicas=3\navailable=3\nupdated=3\ntotal=3\ngeneration=7\nobservedGeneration=7\nmanaged=true\nsa=%s\nstrategy=RollingUpdate\nmaxUnavailable=0\nminReadySeconds=10\npreStopSleep=3\ncommand=["/quiet/sh","-c","exec /echo-basic >/dev/null"]\n' "$w"
+		printf 'replicas=3\navailable=3\nupdated=3\ntotal=3\ngeneration=7\nobservedGeneration=7\nmanaged=true\nsa=%s\nstrategy=RollingUpdate\nmaxUnavailable=0\nminReadySeconds=10\npreStopSleep=10\nterminationGrace=30\nreadinessHttpGet=8080\nreadinessTcpSocket=\nreadinessExec=\nreadinessGrpc=\ncommand=["/quiet/sh","-c","exec /echo-basic >/dev/null"]\n' "$w"
 	fi
 	;;
 *" get deployment/svc-"*" -o name")
@@ -1657,6 +1659,57 @@ expect "$O" "workloads: svc-4, a change its controller has not looked at yet" 'P
 expect "$O" "workloads: three lines, and svc-2 and svc-5 are not named" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-' 3
 expect "$O" "workloads: and no manifest is pointed at: applying it is not what a roll waits for" 'apply -n aether-test -f e2e/soak/svc\.yaml' 0
 
+# No readiness probe. Without one the kubelet calls a container Ready as soon as
+# it runs, so "all available" and minReadySeconds say nothing about the server
+# answering, and the agent has nothing to gate the endpoint's promotion on.
+# Which kind of probe, and its numbers, are the workload's business: svc-3
+# (tcpSocket) and svc-4 (exec) pass.
+O="$TMP/svc-pf-noprobe.out"
+svc_preflight noprobe "$O"
+show "churn.sh --preflight, one workload with no readiness probe" "$O"
+if [ "$rc" -eq 2 ]; then
+	pass "workloads: a workload with no readiness probe refuses the run (exit 2; RED before the probe was read: exit 0, 'pre-flight OK')"
+else
+	fail "workloads: the 'noprobe' fixtures gave exit $rc, want 2"
+fi
+expect "$O" "workloads: svc-2, no readiness probe" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-2 has no readiness probe on its first container ' 1
+expect "$O" "workloads: one line: a tcpSocket probe (svc-3) and an exec probe (svc-4) are probes" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-' 1
+expect "$O" "workloads: the manifest is pointed at" 'apply -n aether-test -f e2e/soak/svc\.yaml' 1
+
+# A preStop sleep under 10 s. 3 s is the supported minimum and costs about one
+# failed request per pod (docs/workload-requirements.md): in a soak whose load
+# gate wants none, that is the workload failing the mesh's gate.
+O="$TMP/svc-pf-shortsleep.out"
+svc_preflight shortsleep "$O"
+show "churn.sh --preflight, two workloads with a preStop sleep under 10 s" "$O"
+if [ "$rc" -eq 2 ]; then
+	pass "workloads: a preStop sleep under 10 s refuses the run (exit 2; RED while the minimum was 3 s: exit 0, 'pre-flight OK')"
+else
+	fail "workloads: the 'shortsleep' fixtures gave exit $rc, want 2"
+fi
+expect "$O" "workloads: svc-2, a 3 s sleep" "PRE-FLIGHT FAILED: aether-test/deployment/svc-2 has no preStop sleep of 10 s or more on its first container \\(got '3'" 1
+expect "$O" "workloads: svc-3, a 9 s sleep" "PRE-FLIGHT FAILED: aether-test/deployment/svc-3 has no preStop sleep of 10 s or more on its first container \\(got '9'" 1
+expect "$O" "workloads: two lines" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-' 2
+
+# A termination grace that does not outlast the sleep. The kubelet's grace
+# counts from the deletion, the sleep included: at 0 the hook never runs, at the
+# sleep's own length the hard kill lands with the SIGTERM, and common/drain
+# keeps the pool close 2 s clear of the hard kill. So: the sleep plus 2 s, at
+# least. svc-4 has none set (the API's default, 30 s) and svc-5 exactly sleep +
+# 2: both pass.
+O="$TMP/svc-pf-shortgrace.out"
+svc_preflight shortgrace "$O"
+show "churn.sh --preflight, three workloads whose termination grace does not outlast the preStop sleep" "$O"
+if [ "$rc" -eq 2 ]; then
+	pass "workloads: a termination grace that does not outlast the preStop sleep refuses the run (exit 2; RED before the grace was read: exit 0, 'pre-flight OK')"
+else
+	fail "workloads: the 'shortgrace' fixtures gave exit $rc, want 2"
+fi
+expect "$O" "workloads: svc-1, a grace of 0 (the hook never runs)" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-1 has terminationGracePeriodSeconds=0 with a preStop sleep of 10 s \(want 12 or more' 1
+expect "$O" "workloads: svc-2, a grace as long as the sleep" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-2 has terminationGracePeriodSeconds=10 with a preStop sleep of 10 s \(want 12 or more' 1
+expect "$O" "workloads: svc-3, a grace one second short of the margin" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-3 has terminationGracePeriodSeconds=11 with a preStop sleep of 10 s \(want 12 or more' 1
+expect "$O" "workloads: three lines: no grace set (svc-4: the 30 s default) and sleep + 2 (svc-5) pass" 'PRE-FLIGHT FAILED: aether-test/deployment/svc-' 3
+
 # A server that logs a line per request (#1395) does not void a soak: said, not refused.
 O="$TMP/svc-pf-loud.out"
 svc_preflight loud "$O"
@@ -1726,7 +1779,10 @@ for w in svc-1 svc-2 svc-3 svc-4 svc-5; do
 	grep -qx '      maxUnavailable: 0' "$f" || bad="$bad maxUnavailable"
 	grep -qx '        aether.io/managed: "true"' "$f" || bad="$bad managed-label"
 	grep -qx '      serviceAccountName: svc-N' "$f" || bad="$bad serviceAccountName"
-	grep -qE '^ +seconds: [0-9]+$' "$f" || bad="$bad preStop-sleep"
+	# The sleep is 10 s on all five (#1517), and the grace outlasts it.
+	[ "$(grep -E '^ +seconds: [0-9]+$' "$f")" = '                seconds: 10' ] || bad="$bad preStop-sleep-10"
+	grep -qx '      terminationGracePeriodSeconds: 30' "$f" || bad="$bad terminationGracePeriodSeconds"
+	[ "$(grep -A1 -x '          readinessProbe:' "$f" | tail -n 1)" = '            httpGet:' ] || bad="$bad readinessProbe"
 	grep -qF 'command: ["/quiet/sh", "-c", "exec /echo-basic >/dev/null"]' "$f" || bad="$bad quiet-command"
 	if [ -z "$bad" ]; then
 		pass "svc.yaml: $w has what the pre-flight asks for, and the quiet start of #1395"
@@ -1744,15 +1800,12 @@ else
 fi
 # Five near-identical documents drift: hold them to the differences the header names.
 delta() { diff "$M/svc-2" "$M/$1" 2>&1 | grep -v '^[0-9-]' | sed 's/  */ /g' | tr '\n' '|'; }
-if [ -s "$M/svc-2" ] && cmp -s "$M/svc-2" "$M/svc-3"; then
-	pass "svc.yaml: svc-2 and svc-3 are the same but for the name"
+# svc-1 held 10 s of preStop sleep and the other four 3 s until #1517: a 3 s
+# sleep costs about a request per pod, and the load gate wants none.
+if [ -s "$M/svc-2" ] && cmp -s "$M/svc-2" "$M/svc-1" && cmp -s "$M/svc-2" "$M/svc-3"; then
+	pass "svc.yaml: svc-1, svc-2 and svc-3 are the same but for the name (RED while four of the five slept 3 s)"
 else
-	fail "svc.yaml: svc-3 differs from svc-2: $(delta svc-3)"
-fi
-if [ "$(delta svc-1)" = '< seconds: 3|> seconds: 10|' ]; then
-	pass "svc.yaml: svc-1 differs in its preStop sleep only (10 s)"
-else
-	fail "svc.yaml: svc-1 differs from svc-2 by: $(delta svc-1)"
+	fail "svc.yaml: svc-1 differs from svc-2 by: $(delta svc-1) and svc-3 by: $(delta svc-3)"
 fi
 if [ "$(delta svc-4)" = '> annotations:|> metadata.endpoint.aether.io/tier: gold|> metadata.endpoint.aether.io/version: v2|' ]; then
 	pass "svc.yaml: svc-4 differs in its two endpoint metadata annotations only"
@@ -1767,6 +1820,7 @@ fi
 # The README says how to create them, with the command the pre-flight prints.
 expect "$HERE/README.md" "README: the Run steps apply svc.yaml" '^kubectl apply -n aether-test -f e2e/soak/svc\.yaml$' 1
 expect "$HERE/README.md" "README: it no longer says the svc-N workloads are not in the repository" 'are not defined in this repository' 0
+expect "$HERE/README.md" "README: it says the 10 s preStop sleep is a change from what earlier soaks ran" 'earlier soaks ran .*3 s' 1
 
 # TERM during a real wait: the real clock, no hook. The driver is waiting for
 # its first roll, twelve minutes away. RED before #1419: its `sleep 720` was in

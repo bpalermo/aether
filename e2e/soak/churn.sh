@@ -30,7 +30,8 @@
 #
 # Pre-flight runs BEFORE the log is touched and before T0: the API server must answer
 # /readyz, every workload the schedule rolls (and the SHRINK target) must exist, and
-# the context must be allowed to patch them. Any failure prints to stderr and exits 2
+# the context must be allowed to patch them; svc-1 ... svc-5 are also read (see
+# preflight_workload). Any failure prints to stderr and exits 2
 # with $LOG untouched -- a bad launch leaves no half-run log behind.
 #
 # The first FAILED roll (or a SHRINK that cannot scale) logs `CHURN ABORTED` and exits
@@ -372,18 +373,42 @@ PREFLIGHT_TARGETS=(
 #                         not registered: the load has no endpoint to reach;
 #   another ServiceAccount  the mesh service name IS the ServiceAccount name,
 #                         so the pods serve some other service;
-#   not surge-first, no minReadySeconds, no preStop sleep
+#   not surge-first, no minReadySeconds, a preStop sleep under 10 s
 #                         a roll outruns the mesh and drops requests
 #                         (docs/workload-requirements.md, "Hitless rolling
-#                         restarts"): the soak measures the workload.
+#                         restarts"): the soak measures the workload. The sleep
+#                         is held to the 10 s that document measured at zero
+#                         failed requests, not to its supported minimum of 3 s
+#                         (about one failed request per pod): the load gate
+#                         wants none (#1517);
+#   no readiness probe    the kubelet calls a container Ready as soon as it
+#                         runs, so "available" and minReadySeconds no longer
+#                         say the server answers, and the agent has nothing to
+#                         gate the endpoint's promotion on. Any handler will
+#                         do (httpGet, tcpSocket, exec, grpc); its numbers are
+#                         the workload's business;
+#   a termination grace that does not outlast the sleep
+#                         the grace counts from the deletion, the sleep
+#                         included. At 0 the hook never runs; at the sleep's
+#                         own length the kubelet's hard kill lands with the
+#                         SIGTERM. common/drain/drain.go closes the pools 1 s
+#                         before the SIGTERM and never inside the last 2 s of
+#                         the grace (the hard-kill window), so the SIGTERM
+#                         itself must come before that window opens: the
+#                         grace is the sleep plus SVC_GRACE_MARGIN, at least.
+#                         An unset grace is the API's default, 30 s.
 #
 # A server that is not started through the quiet shell (#1395) logs a line per
 # request and voids nothing: that one is a note.
 SVC_NS="aether-test"
 SVC_MANIFEST="e2e/soak/svc.yaml"
 # One `key=value` line per field; a field the object does not have is empty.
-SVC_FMT='replicas={.spec.replicas}{"\n"}available={.status.availableReplicas}{"\n"}updated={.status.updatedReplicas}{"\n"}total={.status.replicas}{"\n"}generation={.metadata.generation}{"\n"}observedGeneration={.status.observedGeneration}{"\n"}managed={.spec.template.metadata.labels.aether\.io/managed}{"\n"}sa={.spec.template.spec.serviceAccountName}{"\n"}strategy={.spec.strategy.type}{"\n"}maxUnavailable={.spec.strategy.rollingUpdate.maxUnavailable}{"\n"}minReadySeconds={.spec.minReadySeconds}{"\n"}preStopSleep={.spec.template.spec.containers[0].lifecycle.preStop.sleep.seconds}{"\n"}command={.spec.template.spec.containers[0].command}{"\n"}'
+SVC_FMT='replicas={.spec.replicas}{"\n"}available={.status.availableReplicas}{"\n"}updated={.status.updatedReplicas}{"\n"}total={.status.replicas}{"\n"}generation={.metadata.generation}{"\n"}observedGeneration={.status.observedGeneration}{"\n"}managed={.spec.template.metadata.labels.aether\.io/managed}{"\n"}sa={.spec.template.spec.serviceAccountName}{"\n"}strategy={.spec.strategy.type}{"\n"}maxUnavailable={.spec.strategy.rollingUpdate.maxUnavailable}{"\n"}minReadySeconds={.spec.minReadySeconds}{"\n"}preStopSleep={.spec.template.spec.containers[0].lifecycle.preStop.sleep.seconds}{"\n"}terminationGrace={.spec.template.spec.terminationGracePeriodSeconds}{"\n"}readinessHttpGet={.spec.template.spec.containers[0].readinessProbe.httpGet.port}{"\n"}readinessTcpSocket={.spec.template.spec.containers[0].readinessProbe.tcpSocket.port}{"\n"}readinessExec={.spec.template.spec.containers[0].readinessProbe.exec.command}{"\n"}readinessGrpc={.spec.template.spec.containers[0].readinessProbe.grpc.port}{"\n"}command={.spec.template.spec.containers[0].command}{"\n"}'
 SVC_HINT=0
+# Seconds. The sleep docs/workload-requirements.md measured at zero failed
+# requests per roll, and what the grace must exceed it by (see above).
+SVC_PRESTOP_MIN=10
+SVC_GRACE_MARGIN=2
 is_svc_workload() {
 	[ "$1" = "$SVC_NS" ] && [[ "$2" =~ ^deployment/svc-[1-5]$ ]]
 }
@@ -391,7 +416,8 @@ is_svc_workload() {
 # difference. Returns non-zero when any of them voids the soak.
 preflight_workload() {
 	local ns="$1" obj="$2" name="${2#deployment/}" out key val fail=0
-	local replicas="" available="" updated="" total="" generation="" observed="" managed="" sa="" strategy="" max_unavailable="" min_ready="" pre_stop="" command=""
+	local replicas="" available="" updated="" total="" generation="" observed="" managed="" sa="" strategy="" max_unavailable="" min_ready="" pre_stop="" grace="" probe="" command=""
+	local slept grace_min
 	if ! out=$(k --request-timeout=15s -n "$ns" get "$obj" -o "jsonpath=$SVC_FMT" 2>&1); then
 		echo "churn.sh: PRE-FLIGHT FAILED: could not read $ns/$obj on context '$CTX': $out" >&2
 		return 1
@@ -410,6 +436,9 @@ preflight_workload() {
 		maxUnavailable) max_unavailable="$val" ;;
 		minReadySeconds) min_ready="$val" ;;
 		preStopSleep) pre_stop="$val" ;;
+		terminationGrace) grace="$val" ;;
+		# One handler to a probe: whichever of the four is set.
+		readinessHttpGet | readinessTcpSocket | readinessExec | readinessGrpc) probe="$probe$val" ;;
 		command) command="$val" ;;
 		esac
 	done <<<"$out"
@@ -447,8 +476,21 @@ preflight_workload() {
 	if ! [[ "$min_ready" =~ ^[0-9]+$ ]] || [ "$min_ready" -lt 10 ]; then
 		wl_fail "has minReadySeconds='$min_ready' (want 10 or more: a roll retires the old pod before the mesh routes to the new one)"
 	fi
-	if ! [[ "$pre_stop" =~ ^[0-9]+$ ]] || [ "$pre_stop" -lt 3 ]; then
-		wl_fail "has no preStop sleep of 3 s or more on its first container (got '${pre_stop}': the server exits before the mesh has drained it)"
+	slept="$SVC_PRESTOP_MIN"
+	if ! [[ "$pre_stop" =~ ^[0-9]+$ ]] || [ "$pre_stop" -lt "$SVC_PRESTOP_MIN" ]; then
+		wl_fail "has no preStop sleep of $SVC_PRESTOP_MIN s or more on its first container (got '${pre_stop}': requests still in flight when the server exits fail, about one per pod at 3 s, and the load gate wants none)"
+	else
+		slept="$pre_stop"
+	fi
+	# Against the sleep it has, or the one it should have: one line for a
+	# missing sleep, not two.
+	grace_min=$((slept + SVC_GRACE_MARGIN))
+	grace="${grace:-30}"
+	if ! [[ "$grace" =~ ^[0-9]+$ ]] || [ "$grace" -lt "$grace_min" ]; then
+		wl_fail "has terminationGracePeriodSeconds=$grace with a preStop sleep of $slept s (want $grace_min or more: the grace counts from the deletion, and the kubelet's hard kill would cut the sleep short or land with the SIGTERM)"
+	fi
+	if [ -z "$probe" ]; then
+		wl_fail "has no readiness probe on its first container (the kubelet calls it Ready as soon as it runs: neither 'available' nor minReadySeconds then says the server answers)"
 	fi
 	case "$command" in
 	*'>/dev/null'*) ;;
