@@ -50,6 +50,59 @@ func TestResourceServiceName(t *testing.T) {
 	}
 }
 
+// TestResourceServiceVersion pins who states the component's version on its OTel
+// resource (#1575).
+//
+// service.version is the build's: it says which binary produced a series, a log line
+// or a span, and no deployment can know that better than the binary. A service.version
+// inside OTEL_RESOURCE_ATTRIBUTES (an attribute string copied from another container,
+// or a chart's app version) must not replace it. Every other attribute in the variable
+// is kept. There is no OTEL_SERVICE_VERSION convention and no override.
+func TestResourceServiceVersion(t *testing.T) {
+	tests := []struct {
+		name         string
+		resourceAttr string
+		serviceName  string
+	}{
+		{name: "no service.version in the environment", resourceAttr: "k8s.node.name=n1"},
+		{name: "service.version in OTEL_RESOURCE_ATTRIBUTES does not replace the build's", resourceAttr: "service.version=other,k8s.node.name=n1"},
+		{name: "nor does it beside an OTEL_SERVICE_NAME override", resourceAttr: "service.version=other,k8s.node.name=n1", serviceName: "explicit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", tt.resourceAttr)
+			t.Setenv("OTEL_SERVICE_NAME", tt.serviceName)
+
+			res, err := newTelemetryResource(context.Background(), "v1.2.3")
+			if err != nil {
+				t.Fatalf("building the resource: %v", err)
+			}
+			if got := resourceAttr(res, "service.version"); got != "v1.2.3" {
+				t.Errorf("service.version = %q, want %q: the build's version", got, "v1.2.3")
+			}
+			if got := resourceAttr(res, "k8s.node.name"); got != "n1" {
+				t.Errorf("k8s.node.name = %q, want %q: the rest of OTEL_RESOURCE_ATTRIBUTES must be kept", got, "n1")
+			}
+		})
+	}
+}
+
+// TestResourceHostName pins that this resource carries host.name (#1576): the shared
+// builder can leave it off (serviceresource.WithoutHost, which the prober needs), and
+// mesh-dns, whose hostname is the node's (hostNetwork), must not start doing so by accident.
+func TestResourceHostName(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "k8s.node.name=n1")
+	t.Setenv("OTEL_SERVICE_NAME", "")
+
+	res, err := newTelemetryResource(context.Background(), "v1.2.3")
+	if err != nil {
+		t.Fatalf("building the resource: %v", err)
+	}
+	if !res.Set().HasValue("host.name") {
+		t.Error("the resource carries no host.name")
+	}
+}
+
 // resourceAttr returns the string value of key on res, or "" when it is absent.
 func resourceAttr(res *resource.Resource, key attribute.Key) string {
 	v, _ := res.Set().Value(key)
