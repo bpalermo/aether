@@ -585,3 +585,55 @@ func TestOpeningExchange_DoesNotOverwriteWhatWasSaidAfterItWasSent(t *testing.T)
 		requireAbsentNow(t, tr, testListener)
 	})
 }
+
+// TestWaitListenerPresent_ARejectionIsOfAVersion: a NACK is the proxy's word
+// on the version it was sent. It fails the wait for that version, at once and
+// with the proxy's error, and says nothing of a version published since: a
+// same-named replacement waits for the answer to its own listener, and a
+// rejected removal fails no wait for the listener to be present.
+func TestWaitListenerPresent_ARejectionIsOfAVersion(t *testing.T) {
+	published := map[string]string{testListener: "h1"}
+	tr := publishing(published)
+	openDelta(tr, 1, resourcev3.ListenerType, nil)
+	sendListeners(tr, 1, "n1", map[string]string{testListener: "h1"}, nil)
+	ackDelta(tr, 1, "n1", "Permission denied")
+
+	ctx, cancel := context.WithTimeout(context.Background(), resolvedWait)
+	defer cancel()
+	err := tr.WaitListenerPresent(ctx, testListener)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Permission denied", "the published version is the one the proxy rejected")
+
+	// The replacement is published: the rejection was of the other pod's.
+	published[testListener] = "h2"
+	requireNotPresent(t, tr, testListener, "nothing has answered the replacement's listener yet")
+	sendListeners(tr, 1, "n2", map[string]string{testListener: "h2"}, nil)
+	requireNotPresent(t, tr, testListener)
+	ackDelta(tr, 1, "n2", "")
+	requirePresent(t, tr, testListener)
+
+	// A rejected removal leaves the proxy holding what it held.
+	sendDelta(tr, 1, "n3", nil, []string{testListener})
+	ackDelta(tr, 1, "n3", "cannot remove")
+	requirePresent(t, tr, testListener, "the proxy still holds the published version")
+	ctx2, cancel2 := context.WithTimeout(context.Background(), resolvedWait)
+	defer cancel2()
+	err = tr.WaitListenerAbsent(ctx2, testListener)
+	require.Error(t, err, "the removal wait is the one a rejected removal fails")
+	assert.Contains(t, err.Error(), "cannot remove")
+}
+
+// TestWaitListenerPresent_WithoutAPublishedVersionAnyRejectionFails: the
+// tracker nobody gave a published version to behaves as it always did.
+func TestWaitListenerPresent_WithoutAPublishedVersionAnyRejectionFails(t *testing.T) {
+	tr := NewTracker(slog.New(slog.DiscardHandler))
+	sendListeners(tr, 1, "n1", map[string]string{testListener: "h1"}, nil)
+	ackDelta(tr, 1, "n1", "")
+	sendDelta(tr, 1, "n2", nil, []string{testListener})
+	ackDelta(tr, 1, "n2", "cannot remove")
+	ctx, cancel := context.WithTimeout(context.Background(), resolvedWait)
+	defer cancel()
+	err := tr.WaitListenerPresent(ctx, testListener)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot remove")
+}

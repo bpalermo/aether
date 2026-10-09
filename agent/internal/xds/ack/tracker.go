@@ -224,7 +224,9 @@ func (t *Tracker) Callbacks() serverv3.Callbacks {
 //     response resolves it (statedHeld, #1511);
 //   - a listener whose published content changed since (a same-named
 //     replacement pod) waits for the ACK of the response that carries the new
-//     content, whatever the proxy acknowledged or stated for the name before.
+//     content, whatever the proxy acknowledged, stated or rejected for the
+//     name before: a NACK fails the wait only when it is of the version
+//     published now (nackFails).
 //
 // Like any ACK, that says the proxy accepted the listener, not that it has
 // finished warming it. Publish before waiting: the comparison is with what is
@@ -264,7 +266,7 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 		published := t.published
 		t.mu.Unlock()
 
-		if st.nackErr != nil {
+		if st.nackFails(wantPresent, published, typeURL, name) {
 			t.metrics.waitFailed(ctx, wantPresent, reasonNack)
 			return fmt.Errorf("envoy rejected config for %s: %w", name, st.nackErr)
 		}
@@ -285,6 +287,23 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 		case <-ch:
 		}
 	}
+}
+
+// nackFails reports whether the recorded rejection fails a wait. A rejection
+// is of the version the proxy was sent: with a PublishedVersion it fails a
+// wait for the resource to be present only when that is the version published
+// now, so neither the rejection of a same-named predecessor nor a rejected
+// removal fails the wait of a replacement. The removal wait, and a tracker
+// with no PublishedVersion, are failed by any rejection, as they always were.
+func (st resourceState) nackFails(wantPresent bool, published PublishedVersion, typeURL, name string) bool {
+	if st.nackErr == nil {
+		return false
+	}
+	if !wantPresent {
+		return true
+	}
+	// With no PublishedVersion every version is the published one.
+	return atPublishedVersion(published, typeURL, name, st.nackVersion)
 }
 
 // atPublishedVersion reports whether held is the version published for the
