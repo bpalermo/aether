@@ -25,6 +25,7 @@ go_test(
     size = "small",
     srcs = [
         "destination_test.go",
+        "harnesscontract_test.go",
         "identity_test.go",
         "phase_recorder_test.go",
         "phase_test.go",
@@ -32,7 +33,9 @@ go_test(
         "shutdown_test.go",
     ],
     embed = [":prober"],
+    embedsrcs = ["prober.go"],
     deps = [
+        "//test/harnesscontract",
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel//semconv/v1.30.0:v1_30_0",
         "@io_opentelemetry_go_otel_metric//:metric",

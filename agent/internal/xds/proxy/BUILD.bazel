@@ -116,6 +116,7 @@ go_test(
         "filterchain_test.go",
         "gammaroute_test.go",
         "geoip_test.go",
+        "harnesscontract_test.go",
         "healthgateway_test.go",
         "http3_test.go",
         "httpfilter_test.go",
@@ -224,6 +225,7 @@ go_test(
         "quic_outbound_test.go",
         "l4observability_test.go",
         "idletimeout_test.go",
+        "harnesscontract_test.go",
     ],
     deps = [
         "//agent/internal/xds/config",
@@ -234,6 +236,7 @@ go_test(
         "//common/constants/annotations",
         "//common/constants/mesh",
         "//common/gammaproject",
+        "//test/harnesscontract",
         "@com_github_cncf_xds_go//xds/type/v3:type",
         "@com_github_envoyproxy_go_control_plane_envoy//config/accesslog/v3:accesslog",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",

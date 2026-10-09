@@ -1,8 +1,16 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "xdsconst",
     srcs = ["xdsconst.go"],
     importpath = "aethermesh.dev/agent/internal/xds/xdsconst",
     visibility = ["//agent:__subpackages__"],
+)
+
+go_test(
+    name = "xdsconst_test",
+    size = "small",
+    srcs = ["harnesscontract_test.go"],
+    embed = [":xdsconst"],
+    deps = ["//test/harnesscontract"],
 )
