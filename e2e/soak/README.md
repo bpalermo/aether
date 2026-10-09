@@ -1227,14 +1227,16 @@ e2e/soak/prober-grade.sh --dir "$OUT" --prometheus-service <namespace>/<service>
 
 T0 is the churn driver's start line in `$OUT/churn.log`, and the window is 8 h (an e2e
 run has no churn log: its window is `T_LOAD` + `DURATION_S` of `run.env`; `--start`,
-`--window` and `--end` override both). It asks four instant queries, and prints each
+`--window` and `--end` override both). It asks six instant queries, and prints each
 with the time it was evaluated at:
 
 ```promql
-aether_probe_requests_total            # at T0: the value each series starts from
-aether_probe_requests_total[28800s]    # at T0+8h: every raw sample in the window
-aether_agent_identity_cluster_unpinned_total            # the same two, for the
-aether_agent_identity_cluster_unpinned_total[28800s]    # unpinned-cluster gate
+aether_probe_requests_total               # at T0: the value each series starts from
+timestamp(aether_probe_requests_total)    # at T0: how old that value is
+aether_probe_requests_total[28800s]       # at T0+8h: every raw sample in the window
+aether_agent_identity_cluster_unpinned_total               # the same three, for the
+timestamp(aether_agent_identity_cluster_unpinned_total)    # unpinned-cluster gate
+aether_agent_identity_cluster_unpinned_total[28800s]
 ```
 
 Per series (one label set), the count is the sum of the steps from one sample to the
@@ -1245,6 +1247,40 @@ restarted): the new value is counted whole, and the reset is printed. The second
 returns the samples of every series that has any in the window, so **a prober pod that
 was replaced mid-run is counted up to its last sample** and its replacement from 0.
 An instant query at T0+8h no longer returns the old pod's series at all.
+
+**A series with no sample in the window (#1469).** The window query returns only the
+series that have a sample in it. A series the query at T0 returned and the window query
+did not went silent, and the question is when: the query at T0 answers with a series'
+*last* sample, which can be up to five minutes old (Prometheus's lookback). So the grade
+asks for the time of that sample and goes by its age:
+
+| The sample at T0 is | It means | A prober pod | An agent (the unpinned gate) |
+| --- | --- | --- | --- |
+| at most 120 s old (two export intervals) | the exporter was alive at T0 and exported nothing in the window | in `PODS at_start`, and a `GONE` line: `alive at the start … and no sample in the window` | `UNPINNED silent: node=… job=…` and the gate is **`UNPROVEN`** (exit 2), unless another series of the same node and job (a replacement pod) has samples in the window |
+| older, or of unknown age | it had stopped before T0: a pod replaced a few minutes before the run | an `ENDED` line; not in `PODS`, not a verdict | `UNPINNED ended: …`; not a verdict |
+
+One more check needs no sample at T0: a node whose **prober** has samples in the window
+while the unpinned counter has none from that node, under any job, is
+`UNPINNED missing: node=…`, `UNPROVEN`. That is the agent that was already silent five
+minutes before the run. Either way the verdict line says which nodes
+(`no sample in the window from <nodes>: the sum is over the nodes that reported, not
+the fleet`), and the sum it does have is still printed.
+
+What this rule cannot see, and why it is this rule: it is decided from Prometheus
+alone, with no list of nodes from the cluster (the grade can run long after the run,
+against a cluster that has changed). So:
+
+- an agent silent since more than two minutes before T0 is seen only through the
+  prober on its node: not on a node with no prober, and not on a node where another
+  job exports the same counter (the edge does, and its series covers the node);
+- an exporter that was alive at T0 but whose last export was more than 120 s old (a
+  stalled exporter) reads as ended before the window;
+- a pod that died in the 120 s before T0 reads as alive at T0: a `GONE` line for a
+  prober, which is no verdict; for an agent it is `silent` only when nothing replaced
+  it, and then the window does lack that node;
+- a node that reports for part of the window is covered for that part only. Nothing
+  here measures for how long: read `TOTAL … rate=` for the prober, and the agent's
+  restarts in the restart gate.
 
 ```
 WINDOW  start=2026-10-08T02:06:04Z end=2026-10-08T10:06:04Z seconds=28800  (T0 from churn.log)
@@ -1282,11 +1318,22 @@ the sample that creates a series. The prober logged 40 `AETHER_PROBE_FAIL` lines
   minutes, against the counters, per tier and result (`LOGS … match|MISMATCH|UNPROVEN`).
   A detail line carries the failure's own time. A `suppressed` summary carries the
   time its minute was **closed**, up to two minutes after the failures it counts. One
-  that was closed within two minutes after T0 or after T0+8h may therefore count
+  whose minute opened before T0 or T0+8h and was closed after it may therefore count
   failures on both sides of that end: it is printed as `LOGS    boundary:` and left
   out of the sum, and the row is `UNPROVEN` when the counters lie between the sum
   without it and the sum with it. `--logs-url` asks for two minutes past the window's
   end, so that such a summary is seen; with `--logs-file`, export that far.
+  **Which prober needs which part.** A prober built since the fix for #1463 puts
+  `window_start` on the summary (when its minute opened), and the grade uses that span
+  as it is. A prober built before it has no `window_start`: the grade takes the two
+  minutes before `t`, the most the span can be, so more of its summaries near an end
+  are boundary summaries. That older prober also dates the summary it writes when it
+  *stops* 60 s in the future (#1463); the two-minute allowance holds it. Tell the two
+  apart in the log itself, by the field. Both are handled for as long as a log can
+  hold an older prober's lines, which includes every run that rolls from one to the
+  other. The two minutes asked for past the window's end are needed with every
+  prober: a minute opened by a failure in the run's last second is closed, and its
+  summary dated, up to two minutes later.
 - Exit 0: every verdict `PASS`. Exit 1: a `FAIL`, with everything else proven. Exit 2:
   anything `UNPROVEN`, a log count that does not match or cannot be told, or a query
   that failed (a failed query is never read as a zero). 2 comes before 1: a `FAIL`
@@ -1428,7 +1475,10 @@ the pod exists, and after that it cannot be placed.
   soak, so its counter resets (or, where the collector keeps a per-pod label, a new
   series is born), and a count made right after a restart, before the agent knows its
   trust domain, is exactly the born-at-N case. The counter is seeded at zero, so no
-  series at all is `UNPROVEN`, not a pass. Agents up to chart 2.4.16 counted the
+  series at all is `UNPROVEN`, not a pass; and so is a node whose agent has no sample
+  in the window (`UNPINNED silent:` / `UNPINNED missing:`, #1469; "A series with no
+  sample in the window" above): four nodes at zero are not a fleet of five at zero.
+  Agents up to chart 2.4.16 counted the
   plaintext UDP floor too (#1393, fixed in #1421): against those the gate reads `FAIL`
   with a few hundred per node (2026-10-08: 2,594 over five nodes), and says nothing.
   A reset is only seen when the new value is below the old one.
