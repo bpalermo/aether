@@ -107,7 +107,7 @@ func (c *config) run(cmd *cobra.Command, _ []string) error {
 	// check refuses the other arguments the pinned Envoy rejects at every
 	// fork, or accepts and then cannot hand off with (#1407, #1408, #1409).
 	// It reads the list as Envoy does, a flag and then its value, so a value
-	// is never taken for a flag (#1443).
+	// is never mistaken for a flag (#1443).
 	if err := checkEnvoyArgs(c.supervisor.ExtraArgs); err != nil {
 		return err
 	}

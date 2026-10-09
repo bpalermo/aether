@@ -554,15 +554,17 @@ pinned Envoy was measured to do. It reads the list the way that Envoy's parser
 does (#1443): a flag, then its value in the next item when the flag takes one. It
 knows which flags take a value because it carries the pinned Envoy's flag list,
 which a test holds against `envoy --help` of the binary the chart deploys. Two
-things follow. A value is never taken for a flag: `--service-node -c` names a
-node `-c`, and a `--log-format` of `--x=y` is a format. And a flag is found
+things follow. The item after a flag that takes a value is always read as that
+value and never mistaken for another flag: `--service-node -c` names a node
+`-c`, and a `--log-format` of `--x=y` is a format. And a flag is found
 wherever it stands, in any spelling Envoy accepts, including the one-item form
 with a space (`--envoy-arg="--socket-path @x"`), which Envoy does accept.
 
 Besides the flags above it refuses:
 
 - **A flag and its value joined by `=` or glued together.** The pinned Envoy
-  takes the flag in one argument and its value in the next. `--concurrency=2`,
+  reads a value from the next argument (or after a space in the same one), and
+  not after `=` or glued to a short flag. `--concurrency=2`,
   `--service-node=n1`, `-l=info` and `-linfo` all answer `Couldn't find match for
   argument`. Write `--envoy-arg=--concurrency --envoy-arg=2`, as the chart does.
   The error shows the two items for the argument it refused. A flag that takes no
