@@ -185,8 +185,11 @@ groups:
       #
       # One direction only. The reverse (acknowledged below published) is an
       # unpinned cluster not yet acknowledged, or an entry with no cluster in
-      # the snapshot, which no proxy can hold; the first rule already speaks
-      # for what is published.
+      # the snapshot that the proxy does not hold (its cluster was never
+      # published, or the proxy accepted its removal); the first rule already
+      # speaks for what is published. An entry whose cluster left the snapshot
+      # while the proxy rejects the removal is still counted as acknowledged,
+      # at the version the proxy accepted.
       #
       # for: 15m. An update in flight differs for milliseconds, and a restarted
       # agent's previous acknowledged sample is still returned for Prometheus's

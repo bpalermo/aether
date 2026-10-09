@@ -296,11 +296,13 @@ tests:
               summary: "the proxy on n1 has accepted 1 unpinned mesh cluster(s) that aether-agent no longer publishes"
               description: "The clusters the proxy on n1 has accepted include 1 more mesh cluster(s) without a server-identity pin, counted reason by reason, than the agent's current snapshot publishes. The proxy has not accepted the newer clusters for 15 minutes. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error), and `proxy acknowledged mesh clusters with no server-identity SAN pin` for the per-reason counts. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
 
-  # An entry with no cluster in the snapshot (a TCP floor that is not captured)
-  # is published and can never be acknowledged: acknowledged sits below
-  # published for good, on the pinned series and on tls_not_published. Not a
-  # divergence.
-  - name: an entry no proxy can hold keeps acknowledged below published and is quiet
+  # An entry whose cluster was never published (a TCP floor that was never
+  # captured) is published as an entry and no proxy holds a cluster for it:
+  # acknowledged sits below published for as long as that lasts, on the pinned
+  # series and on tls_not_published. Not a divergence. (A floor that was
+  # published and whose removal the proxy rejects is the opposite case: it
+  # stays in the acknowledged count.)
+  - name: an entry whose cluster was never published keeps acknowledged below published and is quiet
     interval: 1m
     input_series:
       - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="pinned"}'

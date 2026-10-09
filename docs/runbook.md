@@ -6125,9 +6125,12 @@ What follows from that:
 
 - The two gauges agree at rest, for every cluster the snapshot publishes. An entry with
   **no cluster in the snapshot** (a `tcp:` floor that is not captured) is in the
-  published gauge and never in this one: a proxy cannot hold it. So with a proxy that
-  has accepted everything it was sent, acknowledged sits *below* published by exactly
-  those entries. Acknowledged *above* published, in any series, is the other case: the
+  published gauge, and in this one only while the proxy still holds that cluster from an
+  earlier snapshot: a floor that was captured, is no longer, and whose removal the proxy
+  rejected stays counted at the version the proxy accepted. One whose cluster was never
+  published, or whose removal the proxy accepted, is not in this gauge. So with a proxy
+  that has accepted everything it was sent, removals included, acknowledged sits *below*
+  published by exactly those entries. Acknowledged *above* published, in any series, is the other case: the
   proxy holds a cluster the agent no longer publishes in that state (a rejected update
   or a rejected removal, below).
 - They differ for the moment an update is in flight.
@@ -6168,7 +6171,12 @@ What follows from that:
   is an unknown held version, below.
 - **A slow proxy loses nothing.** The agent keeps what it sent, version by version, until
   the proxy answers it or the stream ends, however many times the cluster is rebuilt in
-  between. An ACK that arrives late is read against the version that was sent.
+  between. An ACK that arrives late is read against the version that was sent, with the
+  pin class that version was last published with. (What is kept is taken when the
+  response is written. A response written after its cluster was rebuilt three times, or
+  more than two snapshot builds after its cluster was removed, inside the agent
+  process, is the exception: its version is unknown, or its ACK is not counted until the
+  proxy next opens a stream.)
 - **Not written while a held cluster's state is unknown.** The agent can count a version
   only if this agent process published it. An agent that restarts **while its proxy is
   rejecting a cluster update** is told the version the proxy held *before* that update
@@ -6191,9 +6199,10 @@ What follows from that:
   a stream** that the agent no longer publishes and has no record of (the agent
   restarted, or the stream ended before the agent read the proxy's answer and the
   cluster was removed since), when the proxy then rejects the response that removes
-  it: it is counted as unknown until the proxy accepts the removal. Per-pod clusters,
-  QUIC twins and UDP floor clusters are never counted that way; they carry no pin of
-  their own.
+  it: it is counted as unknown until the proxy accepts the removal. A cluster whose
+  name says it carries no pin of its own is not counted that way: per-pod clusters, QUIC
+  twins, UDP floors, east/west waypoint ingress clusters, the edge's cleartext backend
+  clusters, the passthrough and the blackhole.
 - **Accepted is not applied.** Envoy applies the valid clusters of a response and then
   rejects the response as a whole when one cluster in it is invalid; it goes on stating
   the versions it had before. So after a rejected update the proxy can run a newer
@@ -6226,14 +6235,16 @@ What follows from that:
 # What the proxy has accepted, where it differs from what is published. A node
 # with no acknowledged series (the "not known" states above) is not in the
 # result: a comparison returns nothing for a side that is absent. An entry with
-# no cluster in the snapshot shows here as published without acknowledged
+# no cluster in the snapshot that the proxy does not hold (never published, or
+# its removal accepted) shows here as published without acknowledged
 # (tls_not_published, a `tcp:` floor that is not captured).
 sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
   != sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"})
 
 # Per series, how many more cluster entries the agent publishes than the proxy
 # has accepted in that state: not accepted in any version, accepted in another
-# state, or entries with no cluster in the snapshot. Clamped, because the same
+# state, or entries with no cluster in the snapshot that the proxy does not
+# hold. Clamped, because the same
 # rejected update shows as a surplus on the acknowledged side of another series
 # (the next query). Lasting above the unpublished entries, it is a rejected
 # cluster.

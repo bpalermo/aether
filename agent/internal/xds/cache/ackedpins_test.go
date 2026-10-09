@@ -5,14 +5,18 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"aethermesh.dev/agent/internal/capture"
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -219,6 +223,17 @@ func (h *ackedPins) accept(a ack.Accepted) ackedPinsUpdate {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.acceptLocked(a)
+}
+
+// classOfOffered is the class the version was published with, when it is one
+// of the published versions on record.
+func (s *clusterAck) classOfOffered(version string) (pinClass, bool) {
+	for _, o := range s.offered {
+		if o.version == version && version != "" {
+			return o.class, true
+		}
+	}
+	return pinClassNone, false
 }
 
 // buildPastTheGoneWindow builds the snapshots after which the record of an
@@ -679,13 +694,17 @@ func TestAckedPinsReadALateAckWithTheClassOfNow(t *testing.T) {
 	assert.Equal(t, cachemetrics.PinCounts{Unpinned: [cachemetrics.NumUnpinnedCauses]int{0, 0, 1, 0}}, u.counts)
 }
 
-// TestAckedPinsCountOnlyWhatAProxyCanHold: an entry with no cluster in the
-// snapshot (a TCP floor that is not captured) is published as an entry and can
-// never be acknowledged. It is in the published gauge and not in this one.
-func TestAckedPinsCountOnlyWhatAProxyCanHold(t *testing.T) {
+// TestAckedPinsDoNotCountAnEntryWhoseClusterWasNeverPublished: an entry whose
+// cluster no snapshot has published (a TCP floor that was never captured) is
+// published as an entry and no proxy has been sent a cluster for it. It is in
+// the published gauge and not in this one. (An entry whose cluster WAS
+// published and has left the snapshot is another matter: it stays counted
+// while the proxy holds the cluster,
+// TestAckedPinGaugeKeepsAFloorWhoseRemovalWasRejected.)
+func TestAckedPinsDoNotCountAnEntryWhoseClusterWasNeverPublished(t *testing.T) {
 	var h ackedPins
 	entries := []entryClass{
-		{name: "tcp:floor", class: pinClassPinned}, // no cluster in the snapshot
+		{name: "tcp:floor", class: pinClassPinned}, // no cluster in this snapshot or any before it
 		{name: "http", class: pinClassPinned},
 		{name: "udp:floor", class: pinClassNone},
 	}
@@ -809,7 +828,7 @@ func TestAckedPinGaugeKnowsAVersionHoweverLongItsAckTakes(t *testing.T) {
 	acked, _ = ackedGauge()
 	assert.Equal(t, int64(1), acked.pinned, "the proxy acknowledged the pinned version it was sent")
 	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
-	assert.Empty(t, rec.with(ackedClusterPinsUnknownMsg), "a version this agent sent is never unknown to it")
+	assert.Empty(t, rec.with(ackedClusterPinsUnknownMsg), "a version that was on record when its response was written stays known until the answer")
 
 	// And what is kept for it is released with the answer: after the proxy
 	// takes the newest version, the record holds nothing in flight.
@@ -1538,16 +1557,21 @@ func TestAckedPinsStatedClustersWithNoRecord(t *testing.T) {
 	gone := proxy.ServiceClusterName("demo/gone", domain)
 	goneFloor := proxy.TCPClusterName("demo/gone", domain)
 	stated := map[string]string{
-		"a":                        "ha",
-		"passthrough_original_dst": "hp", // published, not an entry
-		"app_pod-0_8080":           "x1", // per-pod, gone
-		"health_pod-0":             "x2",
-		"inboundready_pod-0":       "x3",
+		"a":                      "ha",
+		"published_not_an_entry": "hp", // of no family the agent knows, and published: not an entry
+		// Stale: of a family that carries no pin, and no longer published.
+		"app_pod-0_8080":     "x1",
+		"health_pod-0":       "x2",
+		"inboundready_pod-0": "x3",
 		proxy.QUICClusterName("demo/gone", domain, "demo/client"): "x4",
 		proxy.UDPClusterName("demo/gone", domain):                 "x5",
+		proxy.PassthroughClusterName:                              "x6",
+		proxy.BlackholeClusterName:                                "x7",
+		proxy.WaypointIngressClusterName(gone):                    "x8",
+		proxy.EdgeK8sClusterName("demo", "gone", 8080):            "x9",
 	}
 	publish := func(h *ackedPins) {
-		h.publish([]entryClass{{name: "a", class: pinClassPinned}}, map[string]string{"a": "ha", "passthrough_original_dst": "hp"}, false)
+		h.publish([]entryClass{{name: "a", class: pinClassPinned}}, map[string]string{"a": "ha", "published_not_an_entry": "hp"}, false)
 	}
 
 	var h ackedPins
@@ -1591,7 +1615,255 @@ func TestAckedPinsStatedClustersWithNoRecord(t *testing.T) {
 	for _, name := range []string{
 		gone, goneFloor, proxy.PortClusterName("demo/gone", domain, 8080), proxy.TCPPortClusterName(goneFloor, 9000),
 	} {
-		assert.False(t, carriesNoPinOfItsOwn(name), name)
+		assert.False(t, proxy.ClusterNameCarriesNoPin(name), name)
+	}
+}
+
+// TestAckedPinGaugeIsNotWithdrawnForAStaleClusterThatCarriesNoPin: the stale
+// statement and the rejected opening removal, for a cluster that is not a mesh
+// cluster entry. The agent stops publishing the ORIGINAL_DST passthrough (the
+// capture mode changed while the proxy was away); the proxy states it, and
+// rejects the response that removes it. It holds a cluster the agent no
+// longer publishes and has no record of, and nothing about a pin is unknown:
+// that cluster never carries one.
+func TestAckedPinGaugeIsNotWithdrawnForAStaleClusterThatCarriesNoPin(t *testing.T) {
+	c, rec, reader, tracker := ackedPinFixture(t)
+	c.SetCaptureEnabled(true)
+	c.SetCaptureRedirectAll(true)
+	ctx := context.Background()
+	addPinnedCluster(c, otherClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+	first := connectCDSProxy(t, c, tracker, 1, nil)
+	first.ack(first.next())
+	require.Contains(t, first.accepted, proxy.PassthroughClusterName, "fixture: the proxy holds the passthrough cluster")
+	first.callbacks.OnDeltaStreamClosed(1, nil)
+
+	c.SetCaptureRedirectAll(false)
+	require.NoError(t, c.generateSnapshot(ctx))
+	require.NotContains(t, clusterVersions(t, c), proxy.PassthroughClusterName, "fixture: the agent no longer publishes it")
+
+	again := connectCDSProxy(t, c, tracker, 2, first.accepted)
+	opening := again.next()
+	require.Contains(t, opening.GetRemovedResources(), proxy.PassthroughClusterName)
+	again.nack(opening)
+
+	acked, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+	require.True(t, ok, "the proxy holds no cluster whose pin state is unknown")
+	assert.Equal(t, int64(1), acked.pinned)
+	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
+	assert.Empty(t, rec.with(ackedClusterPinsUnknownMsg))
+	assert.NotContains(t, c.acked.clusters, proxy.PassthroughClusterName)
+}
+
+// publishedClusterNames is the names of the clusters the cache's snapshot
+// publishes.
+func publishedClusterNames(t *testing.T, c *SnapshotCache) []string {
+	t.Helper()
+	snap, err := c.GetSnapshot(c.nodeName)
+	require.NoError(t, err)
+	return slices.Sorted(maps.Keys(snap.GetResources(resourcev3.ClusterType)))
+}
+
+// TestEveryPublishedClusterIsACountedEntryOrCarriesNoPin holds the two
+// definitions the acknowledged pin state reads a proxy's statement with to
+// what the node agent and the edge really publish. A published cluster is
+// either a cluster entry the pin report tracks (it has a record, and its name
+// is a mesh entry's) or of a family whose name says it carries no pin
+// (proxy.ClusterNameCarriesNoPin). Never both, never neither: a cluster that
+// is neither would be taken for a mesh cluster of unknown pin state when a
+// proxy states it after the agent dropped it, and one that is both would be
+// left out of the count when the proxy holds it.
+//
+// The fixtures publish every family a snapshot can carry; the list at the end
+// fails when one of them stops appearing, so the test cannot go vacuous. A
+// family added to the generators is caught where it is built, by
+// TestEveryClusterConstructorIsOfAClassifiedFamily in the proxy package.
+func TestEveryPublishedClusterIsACountedEntryOrCarriesNoPin(t *testing.T) {
+	ctx := context.Background()
+	seen := map[string]bool{}
+	check := func(t *testing.T, c *SnapshotCache) {
+		t.Helper()
+		names := publishedClusterNames(t, c)
+		require.NotEmpty(t, names)
+		for _, name := range names {
+			_, tracked := c.acked.clusters[name]
+			noPin := proxy.ClusterNameCarriesNoPin(name)
+			assert.NotEqual(t, tracked, noPin, "%s: tracked as a cluster entry = %v, of a family that carries no pin = %v", name, tracked, noPin)
+			assert.Equal(t, tracked, proxy.IsMeshEntryClusterName(name, c.meshDomain), "%s: a tracked entry is published under a mesh entry's name, and nothing else is", name)
+			seen[clusterFamilyForTest(name)] = true
+		}
+	}
+
+	t.Run("node agent, scoped capture", func(t *testing.T) {
+		c, _, _ := pinFixture(t, true)
+		c.SetWaypointConfig(true, proxy.DefaultEastWestTunnelPort)
+		udpFloor := proxy.UDPClusterName("demo/dns", c.meshDomain)
+		c.SetUDPServiceRoutes(map[string][]proxy.L4Backend{"demo/dns": {{Service: "demo/dns", Cluster: udpFloor, Weight: 1}}})
+		require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
+			Name: "web-0", Namespace: "demo", ServiceAccount: "web",
+			NetworkNamespace: "/var/run/netns/cni-web-0", Ips: []string{"10.244.0.9"},
+		}, raceTrustDomain))
+		require.NoError(t, c.generateSnapshot(ctx))
+		check(t, c)
+	})
+	t.Run("node agent, redirect-all capture", func(t *testing.T) {
+		c, _, _ := pinFixture(t, true)
+		c.SetCaptureRedirectAll(true)
+		require.NoError(t, c.generateSnapshot(ctx))
+		check(t, c)
+	})
+	t.Run("edge", func(t *testing.T) {
+		c, _, _ := newBindingTestCache(t)
+		c.SetEdgeMode(8080)
+		require.NoError(t, c.SetTrustDomain(ctx, raceTrustDomain))
+		addPinnedCluster(c, bindingClusterName)
+		c.SetVirtualHosts([]VirtualHost{{
+			Hosts: []string{"plain.example.com"},
+			Routes: []Route{{
+				Prefix: "/", Service: "plain", BackendNamespace: "legacy", Port: 8080,
+				Backends: []RouteBackend{{Service: "plain", BackendNamespace: "legacy", Port: 8080, Weight: 1}},
+			}},
+		}})
+		require.NoError(t, c.generateSnapshot(ctx))
+		check(t, c)
+	})
+
+	for _, family := range []string{
+		"service", "tcp floor", "udp floor", "quic twin", "per-pod app", "per-pod health", "per-pod inbound readiness",
+		"waypoint ingress", "edge k8s", "passthrough", "blackhole",
+	} {
+		assert.True(t, seen[family], "no fixture publishes a cluster of the %q family any more: the test above no longer covers it", family)
+	}
+	delete(seen, "")
+	assert.Len(t, seen, 11, "a fixture publishes a cluster of a family this test does not name: %v", seen)
+}
+
+// clusterFamilyForTest names the family of a published cluster for the
+// coverage list of TestEveryPublishedClusterIsACountedEntryOrCarriesNoPin,
+// from the spelling of the name alone (deliberately not through the
+// predicates under test).
+func clusterFamilyForTest(name string) string {
+	for prefix, family := range map[string]string{
+		"tcp:": "tcp floor", "udp:": "udp floor", "quic:": "quic twin", "app_": "per-pod app", "health_": "per-pod health",
+		"inboundready_": "per-pod inbound readiness", "ew_ingress_": "waypoint ingress", "edge_k8s_": "edge k8s",
+	} {
+		if strings.HasPrefix(name, prefix) {
+			return family
+		}
+	}
+	switch {
+	case name == "passthrough_original_dst":
+		return "passthrough"
+	case name == "blackhole":
+		return "blackhole"
+	case strings.Contains(name, ".aether-test.") || strings.Contains(name, ".demo."):
+		return "service"
+	}
+	return "unnamed: " + name
+}
+
+// TestAckedPinGaugeKeepsAFloorWhoseRemovalWasRejected: "an entry with no
+// cluster in the snapshot is not in the acknowledged gauge" holds for an entry
+// whose cluster was never published, and for one whose removal the proxy
+// accepted. It does not hold for a TCP floor that WAS published, left the
+// capture set, and whose removal the proxy rejected: the entry has no cluster
+// in the newest snapshot, the proxy still holds the floor cluster at the
+// version it accepted, and the gauge goes on counting it there.
+func TestAckedPinGaugeKeepsAFloorWhoseRemovalWasRejected(t *testing.T) {
+	c, _, reader := pinFixture(t, true)
+	ackedGauge := func() (pinSeries, bool) { return readPinGauge(t, reader, ackedTLSClustersGauge) }
+	tracker := ack.NewTracker(c.log)
+	tracker.SetAckObserver(c.ResponseAccepted)
+	tracker.SetDeliveryObserver(c.ResponseDelivery)
+	ctx := context.Background()
+	p := connectCDSProxy(t, c, tracker, 1, nil)
+	p.ack(p.next())
+	before, ok := ackedGauge()
+	require.True(t, ok)
+
+	// demo/db leaves the capture TCP set: its floor entries stay in the
+	// cluster map, pinned, and their clusters leave the snapshot.
+	floor := proxy.TCPClusterName("demo/db", c.meshDomain)
+	require.Contains(t, p.accepted, floor, "fixture: the proxy holds the floor cluster")
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "demo/rawnons", ClusterIP: "10.96.0.31", PrimaryIsTCP: true}})
+	require.NoError(t, c.generateSnapshot(ctx))
+	require.NotContains(t, clusterVersions(t, c), floor, "fixture: the entry has no cluster in the newest snapshot")
+	c.clusterMu.RLock()
+	_, stillAnEntry := c.clusters[floor]
+	c.clusterMu.RUnlock()
+	require.True(t, stillAnEntry, "fixture: and it is still a cluster entry")
+
+	removal := p.next()
+	require.Contains(t, removal.GetRemovedResources(), floor)
+	gone := int64(0)
+	for _, name := range removal.GetRemovedResources() {
+		if strings.HasPrefix(name, floor) {
+			gone++
+		}
+	}
+	p.nack(removal)
+	acked, ok := ackedGauge()
+	require.True(t, ok)
+	assert.Equal(t, before, acked, "the proxy rejected the removal: it holds the floor clusters at the versions it accepted, and they are counted")
+
+	// Until it accepts the removal.
+	again := connectCDSProxy(t, c, tracker, 2, p.accepted)
+	again.ack(again.next())
+	acked, ok = ackedGauge()
+	require.True(t, ok)
+	assert.Equal(t, before.pinned-gone, acked.pinned, "accepted: the entry is in the published gauge and no longer in this one")
+	assert.Equal(t, before.unpinned, acked.unpinned)
+}
+
+// TestAckedPinsReadALateAckWithTheLastClassItsVersionWasPublishedWith: the
+// class kept with a version in flight is not the class it had when it was
+// FIRST sent. A build can count the same bytes under another reason while they
+// are in flight (the tls_not_published promotion), and the version can then
+// fall out of the published ones before the proxy answers. The answer is read
+// with the class the version was last published with, whichever response
+// carried it: with two proxy generations, one sent it before the
+// reclassification and one after, and they hold the same bytes.
+func TestAckedPinsReadALateAckWithTheLastClassItsVersionWasPublishedWith(t *testing.T) {
+	notPublished := unpinnedClass(cachemetrics.CauseTLSNotPublished)
+	entries := []entryClass{{name: "a", class: notPublished}}
+	versions := map[string]string{"a": "ha"}
+	sent := []ack.Resource{{Name: "a", Version: "ha"}}
+	gap := cachemetrics.PinCounts{Unpinned: [cachemetrics.NumUnpinnedCauses]int{0, 0, 1, 0}}
+
+	for _, tc := range []struct {
+		name         string
+		secondStream bool
+	}{
+		{name: "one response, sent before the reclassification"},
+		{name: "two responses, one on each side of it", secondStream: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var h ackedPins
+			h.publish(entries, versions, false)
+			h.deliver(ack.Delivery{Resources: sent})
+			h.publish(entries, versions, true) // the same bytes, the gap from now on
+			if tc.secondStream {
+				h.deliver(ack.Delivery{Resources: sent})
+			}
+			// The cluster is rebuilt until the version is no longer among the
+			// published ones.
+			for v := range offeredVersions {
+				h.publish([]entryClass{{name: "a", class: pinClassPinned}}, map[string]string{"a": fmt.Sprintf("h%d", v)}, false)
+			}
+			_, offered := h.clusters["a"].classOfOffered("ha")
+			require.False(t, offered, "fixture: the version fell out of the published ones")
+
+			u := h.accept(ack.Accepted{Added: sent})
+			h.deliver(ack.Delivery{Resources: sent, Ended: true})
+			require.True(t, u.report)
+			assert.Equal(t, gap, u.counts, "the first proxy's answer")
+			if tc.secondStream {
+				u = h.accept(ack.Accepted{Added: sent})
+				h.deliver(ack.Delivery{Resources: sent, Ended: true})
+				require.True(t, u.report)
+				assert.Equal(t, gap, u.counts, "and the second's")
+			}
+		})
 	}
 }
 

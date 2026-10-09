@@ -153,7 +153,7 @@ of the agent) and by the edge control plane.
 | Metric (as Prometheus stores it) | Type | Labels | Meaning |
 |---|---|---|---|
 | `aether_agent_snapshot_tls_clusters` | gauge | `pin`, `reason` | mesh cluster entries in the agent's current snapshot that are meant to be mTLS: `pin="pinned"` (no `reason`), and `pin="unpinned"` once per `reason`. Written on every snapshot, zeros included |
-| `aether_agent_xds_acked_tls_clusters` | gauge | `pin`, `reason` | the same count for the clusters the proxy has accepted, kept cluster by cluster: each is counted at the version the proxy last acknowledged or stated when it opened its stream (#1508). An entry with no cluster in the snapshot is not in it. Absent until a proxy answers a cluster response of this agent process, which a reconnecting proxy does within a second or so of an agent restart (#1483); not written while the proxy holds a cluster at a version this agent process never published |
+| `aether_agent_xds_acked_tls_clusters` | gauge | `pin`, `reason` | the same count for the clusters the proxy has accepted, kept cluster by cluster: each is counted at the version the proxy last acknowledged or stated when it opened its stream (#1508). An entry with no cluster in the snapshot is in it only while the proxy still holds that cluster from an earlier snapshot (it rejected the removal); one whose cluster was never published, or whose removal the proxy accepted, is not. Absent until a proxy answers a cluster response of this agent process, which a reconnecting proxy does within a second or so of an agent restart (#1483); not written while the proxy holds a mesh cluster this agent process has no pin class for: a version it never published, or a cluster it no longer publishes and has no record of |
 | `aether_agent_identity_cluster_unpinned_total` | counter | `reason` | grows by the number of unpinned clusters on every snapshot that has any. Seeded at zero per reason. Before #1424 it had no `reason` label |
 | `aether_agent_xds_nacks_total` | counter | `aether_xds_type_url` | delta-xDS responses the proxy rejected. Seeded at zero for each of the six resource types the agent serves, and `other` (#1480) |
 | `aether_agent_xds_ack_wait_failures_total` | counter | `aether_xds_wait`, `aether_xds_reason` | ACK waits for a pod's listener that failed (`present`/`absent` by `nack`/`timeout`). Seeded at zero, four series (#1480) |
@@ -229,7 +229,8 @@ connection.
 returns nothing for a `(job, node)` that one side lacks, so that state is silent: the
 rule cannot fire on absence, and it does not need `absent()` or `or vector(0)` (either
 would make it fire there). It is one-directional on purpose: acknowledged *below*
-published is an unpinned cluster not yet acknowledged, or an entry no proxy can hold,
+published is an unpinned cluster not yet acknowledged, or an entry with no cluster in
+the snapshot that the proxy does not hold (never published, or its removal accepted),
 which the first rule already covers. Its residue is stated in the file: a late ACK from
 the proxy generation that is leaving during a hot restart, for a cluster that does not
 change afterwards.
