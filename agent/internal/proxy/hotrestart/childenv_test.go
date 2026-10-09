@@ -171,6 +171,12 @@ func TestEnvoyChildSeesItsRestartEpoch(t *testing.T) {
 
 		require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) >= 1 },
 			5*time.Second, 50*time.Millisecond, "epoch 0 never started")
+		// No pause is needed before this write. The supervisor arms its
+		// bootstrap watch before it forks epoch 0 (#1470), so a write made
+		// once epoch 0 has recorded itself is always reported. When the watch
+		// was armed on a goroutine of its own, this write could land first and
+		// be lost, and the wait below then failed after its full 5 s.
+		// TestConfigChangeRightAfterTheFirstForkIsNotLost forces that order.
 		require.NoError(t, os.WriteFile(configPath, []byte("v1\n"), 0o644))
 		require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) >= 2 },
 			5*time.Second, 50*time.Millisecond, "config change did not trigger epoch 1")

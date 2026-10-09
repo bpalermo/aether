@@ -287,6 +287,11 @@ type Supervisor struct {
 	// cpus is what Envoy's default worker count is computed from (#1442);
 	// swapped in tests.
 	cpus cpuSources
+	// newConfigWatcher creates the watcher armConfigWatch arms the
+	// bootstrap-config watch on. fsnotify.NewWatcher outside tests; a test
+	// swaps it to fail the creation or to observe when the watch is armed
+	// (#1470).
+	newConfigWatcher func() (*fsnotify.Watcher, error)
 }
 
 // watchdogFire is a fatal wedge diagnosis delivered from watchLiveness to Run.
@@ -392,6 +397,7 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 		childSilentEpoch:   -1,
 		handoffWaitEpoch:   -1,
 		cpus:               systemCPUSources{},
+		newConfigWatcher:   fsnotify.NewWatcher,
 		now:                time.Now,
 		childExited:        make(chan childExit, 8),
 		done:               make(chan struct{}),
@@ -416,9 +422,20 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGUSR1)
 	defer signal.Stop(sigCh)
 
+	// The watch is armed HERE, on this goroutine, before the first fork, and
+	// only its event loop runs on a goroutine of its own. Arming it there too
+	// (as this did until #1470) raced the fork: a bootstrap rewritten after
+	// epoch 0 had started and before the watch existed produced no event, and
+	// Envoy kept the old bootstrap until the next change. With the watch in
+	// place first, every Envoy this supervisor forks reads the bootstrap after
+	// the kernel has started recording changes to it, so there is no content
+	// to compare afterwards: a change is either read by the fork or reported.
+	// Arming is two system calls; the fork waits for nothing else.
 	trigger := make(chan struct{}, 1)
 	if s.cfg.WatchConfig {
-		go s.watchConfig(ctx, trigger)
+		if w := s.armConfigWatch(ctx); w != nil {
+			go s.watchConfig(ctx, w, trigger)
+		}
 	}
 
 	// Pick the start epoch from a confirmed-live predecessor (if any), then
@@ -939,24 +956,39 @@ func (s *Supervisor) hotRestart() error {
 	return nil
 }
 
-// watchConfig watches the directory holding ConfigPath and emits a trigger on any
-// change. Watching the directory (not the file) survives the atomic symlink swap
-// the kubelet uses to update ConfigMap mounts. Coalescing is handled downstream by
-// the debounce timer.
-func (s *Supervisor) watchConfig(ctx context.Context, trigger chan<- struct{}) {
-	w, err := fsnotify.NewWatcher()
+// armConfigWatch puts a watch on the directory holding ConfigPath and returns
+// its watcher, or nil when the watch cannot be set up. Watching the directory
+// (not the file) survives the atomic symlink swap the kubelet uses to update
+// ConfigMap mounts.
+//
+// It returns only once the kernel is recording changes (inotify_add_watch has
+// returned), which is what lets Run fork after it without losing one (#1470).
+// Changes from then on queue in the watcher until watchConfig reads them.
+//
+// A watch that cannot be set up is not fatal: the supervisor logs it and runs
+// without the self-triggered hot restart (SIGHUP still triggers one), as it
+// always has.
+func (s *Supervisor) armConfigWatch(ctx context.Context) *fsnotify.Watcher {
+	w, err := s.newConfigWatcher()
 	if err != nil {
 		s.log.ErrorContext(ctx, "config watcher disabled", "error", err)
-		return
+		return nil
 	}
-	defer func() { _ = w.Close() }()
-
 	dir := filepath.Dir(s.cfg.ConfigPath)
 	if err := w.Add(dir); err != nil {
 		s.log.ErrorContext(ctx, "failed to watch config dir; watcher disabled", "error", err, "dir", dir)
-		return
+		_ = w.Close()
+		return nil
 	}
 	s.log.InfoContext(ctx, "watching bootstrap config for changes", "dir", dir, "config", s.cfg.ConfigPath)
+	return w
+}
+
+// watchConfig emits a trigger on any change the armed watch w reports, and
+// closes w when the supervisor stops. Coalescing is handled downstream by the
+// debounce timer.
+func (s *Supervisor) watchConfig(ctx context.Context, w *fsnotify.Watcher, trigger chan<- struct{}) {
+	defer func() { _ = w.Close() }()
 
 	for {
 		select {
