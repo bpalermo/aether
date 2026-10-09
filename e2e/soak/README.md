@@ -1237,8 +1237,9 @@ aether_probe_requests_total[28800s]       # at T0+8h: every raw sample in the wi
 aether_agent_identity_cluster_unpinned_total               # the same three, for the
 timestamp(aether_agent_identity_cluster_unpinned_total)    # unpinned-cluster gate
 aether_agent_identity_cluster_unpinned_total[28800s]
-aether_agent_snapshot_tls_clusters{pin="unpinned"}[28800s]  # at T0+8h: the agents' gauge,
-                                                           # how long a state stood (#1491)
+aether_agent_snapshot_tls_clusters{pin="unpinned"}[28920s]  # at T0+8h: the agents' gauge,
+                                                           # how long a state stood (#1491);
+                                                           # from 120 s before T0 (below)
 ```
 
 Per series (one label set), the count is the sum of the steps from one sample to the
@@ -1487,7 +1488,7 @@ the pod exists, and after that it cannot be placed.
   | `reason` (the line's `class=`) | What the agent did | The gate |
   |---|---|---|
   | `no_namespace_metadata`, `pin_not_rendered` (`gap`) | published TLS that checks no server identity: the mTLS validation gap, the fail-open direction | **`FAIL`** on any movement of the counter, and on any non-zero sample of the gauge. The text names the reason, the count and the nodes. |
-  | `trust_domain_unknown`, `tls_not_published` (`no_tls`) | published **no TLS** for those entries. Every agent start does, for a moment, and the schedule rolls the agents at T0+72 and T0+300 | reported (`UNPINNED reason=… count=N nodes=… class=no_tls`), **not a failure by itself**. `FAIL` only when the state *stood*: 300 s or more of consecutive non-zero gauge samples, anywhere in the window. |
+  | `trust_domain_unknown`, `tls_not_published` (`no_tls`) | published **no TLS** for those entries. Every agent start does, for a moment, and the schedule rolls the agents at T0+72 and T0+300 | reported (`UNPINNED reason=… count=N nodes=… class=no_tls`), **not a failure by itself**. `FAIL` only when the state *stood*: 300 s or more of consecutive non-zero gauge samples, anywhere in the window. A standing `tls_not_published` that is declared expected with `--expect-tls-not-published` is reported and does not fail (below). |
   | any other value (`unknown`) | an agent newer than the script reports a reason it does not know | **`FAIL`** on any movement of the counter and on any non-zero sample of the gauge, like a gap reason, and the text says the script does not know it: an unknown reason is not taken for a harmless one. One that rests at zero in both is not a verdict. Add it to `GAP_REASONS` or `NO_TLS_REASONS` in the script. |
   | no `reason` label, printed `reason=-` (`unlabelled`) | an agent from before #1424: one series for every reason | **`FAIL`** on any movement, with the text the gate always had. Whether TLS was published under what it counted is not in the counter, so the old rule is the only safe one. |
 
@@ -1503,7 +1504,7 @@ the pod exists, and after that it cannot be placed.
   Nothing in it is a duration. The agent's gauge `aether_agent_snapshot_tls_clusters{pin="unpinned",reason}`
   (#1425) is the state itself, exported every minute, zeros included, so consecutive
   non-zero samples are a state that stood, from the first to the last. That is what
-  `UNPINNED published: node=… job=… reason=… class=… nonzero_samples=N longest=Ns max=N at_end=N`
+  `UNPINNED published: node=… job=… reason=… class=… nonzero_samples=N longest=Ns max=N at_end=N series=N`
   prints, one line per node, job and reason with a non-zero sample. The bound is 300 s,
   the `for: 5m` of `AetherMeshClusterPinPending`
   (`docs/observability/agent-pin-alerts.yml`) for the same reasons: an agent without
@@ -1513,20 +1514,69 @@ the pod exists, and after that it cannot be placed.
   measure of *whether* it happened), it is not carried across more than five minutes
   without a sample, and a state still non-zero at the window's end for less than
   300 s is an agent start that the window cut: said on its line, not graded.
-  A standing `tls_not_published` fails here although it can be the design of the
-  cluster (a mesh run without SPIRE, or a TCP service that is not captured): either
-  way its endpoints carry no namespace metadata, which is the validation gap the
-  moment TLS is published for them, and a soak has to say so.
+
+  **A run is the node's, not the pod's.** The runs are computed per node, job and
+  reason over *every* series of them, as the alert rule's `sum by (job, node, reason)`
+  is. Where the collector keeps a per-pod label, an agent that is replaced is a new
+  series, and a state that outlives the pod that first showed it is one run (`series=2`
+  on the line), not two short ones. A zero from one pod between two non-zero samples
+  of another that runs beside it (a surge roll) does not end the run; a zero with no
+  such sample around it does. `max` is the most entries in one sample of one series.
+
+  **The gauge at the window's start.** The state at T0 is the last sample at or before
+  T0, as for the counters. A range of exactly the window does not return it: since
+  Prometheus 3.0 a range selector is left-open, `(T0, end]`, so even a sample exactly
+  at T0 is left out (before 3.0 it was `[T0, end]`), and a sample from before T0 is in
+  neither. A state already standing at T0 would be measured one sample short, and a
+  state of exactly 300 s would pass. So the query reaches 120 s (two export intervals)
+  before the window, the last sample at or before T0 is counted as the sample at T0,
+  and anything older is dropped: a run starts at T0 at the earliest, and how long a
+  state stood before the window is not graded. Held against the Prometheus this
+  repository pins (3.15.0, `//bazel/promtool`'s archive), with samples at T0-60, T0,
+  T0+60 … T0+300 loaded by `promtool tsdb create-blocks-from openmetrics`: `[28800s]`
+  at the window's end returned the five from T0+60, `[28920s]` all seven. A server
+  before 3.0 was not run; the grade does not depend on which it is.
+
+  **`tls_not_published` can be the design of the cluster: `--expect-tls-not-published`.**
+  A mesh run without SPIRE never leaves that state, and a healthy agent keeps a TCP
+  floor entry in it for as long as the floor is not published (a service with no
+  namespace metadata that is not in the capture set; `tcp:<svc>` on the agent's WARN
+  line). The default is strict: a standing `tls_not_published` fails like a standing
+  `trust_domain_unknown`, because its endpoints carry no namespace metadata, which is
+  the validation gap the moment TLS is published for them. On a cluster where it is
+  expected, say so:
+
+  ```bash
+  e2e/soak/prober-grade.sh --dir "$OUT" --prometheus http://<prometheus>:9090 --expect-tls-not-published
+  ```
+
+  The output then starts with an `EXPECT` line, and a `tls_not_published` state that
+  stood for 300 s or more is `UNPINNED expected: node=… job=… reason=tls_not_published
+  seconds=N published=N count=N` (how long, the most entries, and the counter's count
+  for it), named in the verdict's text as expected by declaration, and **not a
+  failure**. Nothing else changes: `trust_domain_unknown` is timed as before, and the
+  gap reasons fail as before. What the switch gives up: the metric does not tell an
+  unpublished floor from an agent that cannot get its SVID (both are
+  `tls_not_published`), so with the switch an agent stuck without its identity is not
+  failed by *this* gate. It reports NotReady after two minutes, which the node taint
+  and the restart gate see.
 
   **An absent gauge is not a zero.** The gauge arrived in the same agent as the
-  `reason` label and is written on every snapshot. A node and job whose counter has
+  `reason` label and is written on every snapshot. An exporter whose counter has
   the label and whose gauge has no sample in the window is `UNPINNED published:
-  absent: node=… job=…` and the gate is `UNPROVEN`. (The counter is seeded when the
-  process starts and the gauge is first written with its first snapshot, so a process
-  that set no snapshot at all has the one without the other: also `absent`, and also
-  not a state anyone has seen.) Agents with no `reason` label have
-  no gauge to miss: `UNPINNED published: not graded: nodes=…`, which is a statement
-  and not a verdict (their counter fails on any movement anyway).
+  absent: node=… job=… [pod=…]` and the gate is `UNPROVEN`. (The counter is seeded when
+  the process starts and the gauge is first written with its first snapshot, so a
+  process that set no snapshot at all has the one without the other: also `absent`,
+  and also not a state anyone has seen.) An exporter is the labels the counter and the
+  gauge have in common, less `reason` and `pin`. With a per-pod label that is the pod:
+  a replaced agent is not covered by the gauge samples of the pod before it. Where
+  restarts fall into one series, the counter says when the process started again (a
+  series born in the window, or a reset) and the gauge must have a sample from then
+  on: `… has no sample from it since its counter started again at <time>`. A reset is
+  only seen when the new value is below the old one, so a counter that rests at zero
+  across a restart shows none, and that case is not caught. Agents with no `reason`
+  label have no gauge to miss: `UNPINNED published: not graded: nodes=…`, which is a
+  statement and not a verdict (their counter fails on any movement anyway).
 
   **Do the counts line up with the agent rolls?** `UNPINNED steps: node=… job=…
   reason=… at=<time>(+N),…` gives the first six samples that showed an increase, per
