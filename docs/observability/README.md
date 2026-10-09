@@ -145,7 +145,7 @@ of the agent) and by the edge control plane.
 | Metric (as Prometheus stores it) | Type | Labels | Meaning |
 |---|---|---|---|
 | `aether_agent_snapshot_tls_clusters` | gauge | `pin`, `reason` | mesh cluster entries in the agent's current snapshot that are meant to be mTLS: `pin="pinned"` (no `reason`), and `pin="unpinned"` once per `reason`. Written on every snapshot, zeros included |
-| `aether_agent_xds_acked_tls_clusters` | gauge | `pin`, `reason` | the same count for the last snapshot whose cluster update the proxy acknowledged. Absent until the first cluster ACK the agent process sees, which a reconnecting proxy gives within a second or so of an agent restart (#1483) |
+| `aether_agent_xds_acked_tls_clusters` | gauge | `pin`, `reason` | the same count for the last snapshot whose cluster update the proxy acknowledged. Absent until the agent process sees the first cluster ACK that counts: of a response that added or removed a cluster, or of the empty response that opens a proxy's stream, which a reconnecting proxy that is in sync gives within a second or so of an agent restart (#1483). The ACK of a later empty response is not read |
 | `aether_agent_identity_cluster_unpinned_total` | counter | `reason` | grows by the number of unpinned clusters on every snapshot that has any. Seeded at zero per reason. Before #1424 it had no `reason` label |
 | `aether_agent_xds_nacks_total` | counter | `aether_xds_type_url` | delta-xDS responses the proxy rejected. Seeded at zero for each of the six resource types the agent serves, and `other` (#1480) |
 | `aether_agent_xds_ack_wait_failures_total` | counter | `aether_xds_wait`, `aether_xds_reason` | ACK waits for a pod's listener that failed (`present`/`absent` by `nack`/`timeout`). Seeded at zero, four series (#1480) |
@@ -202,8 +202,10 @@ metadata stays `tls_not_published`, by design. Drop `AetherMeshClusterPinPending
 
 ### The divergence rule and an absent gauge
 
-`aether_agent_xds_acked_tls_clusters` has no series until a proxy acknowledges a cluster
-response to that agent process. Since #1483 an agent that restarts against a proxy
+`aether_agent_xds_acked_tls_clusters` has no series until a proxy gives that agent
+process a cluster ACK that counts: of a response that added or removed a cluster, or of
+the empty response that opens the proxy's stream. The ACK of an empty response later on
+a stream is not read, because it can name a snapshot the proxy rejected. Since #1483 an agent that restarts against a proxy
 already in sync has its sample as soon as the proxy reconnects (the proxy states the
 clusters it holds and acknowledges the agent's empty answer). The gauge is still absent
 while no proxy is connected (a standby agent, a proxy that is down), and after a restart

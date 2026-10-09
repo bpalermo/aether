@@ -175,7 +175,7 @@ tests:
   # (the proxy reconnected, stated the clusters it holds, and acknowledged the
   # agent's empty answer), with the same values as what is published. Quiet
   # throughout, including for the two unpinned clusters that are published
-  # and held alike: those are the critical rule's.
+  # and held alike: those belong to the critical rule.
   - name: an agent restart against a proxy in sync is quiet
     interval: 1m
     input_series:

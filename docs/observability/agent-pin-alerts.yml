@@ -146,9 +146,12 @@ groups:
       #   increase(aether_agent_xds_nacks_total{aether_xds_type_url=~".*Cluster"}[30m])
       #
       # Absence cannot fire it. The acknowledged gauge has no series until a
-      # proxy acknowledges a cluster response to the agent process. A comparison
-      # between two vectors returns nothing for a (job, node) one side lacks,
-      # so an absent gauge is silent here: there is nothing known to compare.
+      # proxy gives the agent process a cluster ACK that counts: of a response
+      # that added or removed a cluster, or of the empty response that opens
+      # the proxy's stream. (The ACK of a later empty response is not read: it
+      # can name a snapshot the proxy rejected.) A comparison between two
+      # vectors returns nothing for a (job, node) one side lacks, so an absent
+      # gauge is silent here: there is nothing known to compare.
       #
       # When it is absent. Not after an ordinary agent restart: a reconnecting
       # proxy states the clusters it holds, and its ACK of the agent's answer

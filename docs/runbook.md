@@ -5729,7 +5729,7 @@ on them are in `docs/observability/agent-pin-alerts.yml`:
 | WARN `mesh clusters published with no server-identity SAN pin` | **which** clusters, and why each | one line per `reason` per snapshot, first 20 names per line |
 | counter `aether_agent_identity_cluster_unpinned_total{reason}` | **that** a snapshot went out with unpinned clusters | adds the unpinned count on every snapshot; seeded at zero per reason |
 | gauge `aether_agent_snapshot_tls_clusters{pin,reason}` | **how many** clusters are pinned and unpinned **now**, per reason | written on every snapshot, zeros included |
-| gauge `aether_agent_xds_acked_tls_clusters{pin,reason}` | the same, for the last snapshot whose cluster update the **proxy acknowledged** | written on every cluster ACK, the one that opens a proxy's stream included; absent before the first |
+| gauge `aether_agent_xds_acked_tls_clusters{pin,reason}` | the same, for the last snapshot whose cluster update the **proxy acknowledged** | written on the ACK of every cluster response that added or removed a cluster, and of the empty response that opens a proxy's stream; not on the ACK of a later empty response; absent before the first |
 
 None of the metrics carries a cluster name: the names are in the log line only.
 
@@ -5809,10 +5809,12 @@ the proxy's admin interface.
   cluster response of a stream is read this way. A later empty one is compared with
   what the agent has *sent* on the stream, accepted or not, and says nothing about what
   the proxy holds.
-- **Absent is "not known", not zero.** Nothing is written until a proxy acknowledges a
-  cluster response to this agent process. That leaves two absent states. *No proxy has
-  connected*: the node's proxy is down, or this agent is a surge-rolled standby that
-  does not serve xDS yet. *The proxy rejected the only cluster response it was sent*:
+- **Absent is "not known", not zero.** Nothing is written until a proxy gives this agent
+  process an ACK that counts: of a cluster response that added or removed a cluster, or
+  of the empty response that opened its stream. That leaves two absent states. *No proxy
+  has connected*: the node's proxy is down, or this agent is a surge-rolled standby that
+  does not serve xDS yet. *The proxy rejected the only cluster response that carried
+  anything* (it may since have acknowledged an empty one, which is not read):
   an agent that restarts while its proxy is rejecting a cluster update is told the
   clusters the proxy held **before** that update (a proxy never states a version it
   rejected), which the new agent process never built and cannot count; it sends the

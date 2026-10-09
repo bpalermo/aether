@@ -104,10 +104,12 @@ func (c *SnapshotCache) ResponseAcked(ctx context.Context, typeURL, systemVersio
 //
 // What it cannot know, by construction:
 //
-//   - Nothing is recorded until a proxy acknowledges a cluster response to
-//     this agent process. Absent means "not known since this agent started":
-//     no proxy has connected yet, or the proxy rejected the only cluster
-//     response it was sent. The second is the case to remember: a proxy that
+//   - Nothing is recorded until a proxy gives this agent process an ACK that
+//     counts: of a cluster response that added or removed a cluster, or of
+//     the empty response that opened its stream. The ACK of a later empty
+//     response is not one (it never reaches this function). Absent means "not
+//     known since this agent started": no proxy has connected yet, or the
+//     proxy rejected the only cluster response that carried anything. The second is the case to remember: a proxy that
 //     is rejecting a cluster update when the agent restarts states the
 //     clusters it held BEFORE the rejected update, which this process never
 //     built and cannot count, so it is sent the update again, rejects it
