@@ -331,7 +331,7 @@ spec:
       securityContext: {fsGroup: $FS_GROUP}
       containers:
         - name: app
-          image: hashicorp/http-echo:1.0
+          image: hashicorp/http-echo:1.0@sha256:fcb75f691c8b0414d670ae570240cbf95502cc18a9ba57e982ecac589760a186
           args: ["-text=served-by-tcp-echo", "-listen=:8080"]
           ports: [{containerPort: 8080}]
           volumeMounts: [{name: s, mountPath: /s}]
@@ -392,7 +392,7 @@ spec:
       serviceAccountName: client
       containers:
         - name: curl
-          image: curlimages/curl:8.22.0
+          image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
           command: ["sleep", "infinity"]
 YAML
 	# (b) The service-scoped declaration for uds-cr-echo. targetRef names the mesh
@@ -642,7 +642,7 @@ verify_cni_telemetry() {
 	before="$(cni_divert_count success)"
 	# A fresh managed ADD (and its DEL) now, so the count under test moved after
 	# the read above and cannot be an artefact of an earlier install.
-	kc -n "$TEST_NS" run cni-telemetry-probe --image=registry.k8s.io/pause:3.10 \
+	kc -n "$TEST_NS" run cni-telemetry-probe --image=registry.k8s.io/pause:3.10@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a \
 		--restart=Never --labels='app=cni-telemetry-probe,aether.io/managed=true' >/dev/null
 	kc -n "$TEST_NS" wait --for=condition=Ready pod/cni-telemetry-probe --timeout=120s >/dev/null ||
 		die "the probe pod never became Ready"

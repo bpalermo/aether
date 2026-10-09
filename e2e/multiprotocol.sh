@@ -88,14 +88,14 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: http
-          image: hashicorp/http-echo:1.0
+          image: hashicorp/http-echo:1.0@sha256:fcb75f691c8b0414d670ae570240cbf95502cc18a9ba57e982ecac589760a186
           args: ["-text=served-by-http-8080", "-listen=:8080"]
           ports: [{containerPort: 8080}]
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: ["ALL"]}
         - name: tcp
-          image: istio/tcp-echo-server:1.3
+          image: istio/tcp-echo-server:1.3@sha256:782259608d5ce934e1a07ce4a3f2664934b6806d50430fd20b7bf429ea500272
           args: ["9000", "served-by-tcp-9000"]
           ports: [{containerPort: 9000}]
           securityContext:
@@ -172,7 +172,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: probe
-          image: curlimages/curl:8.22.0
+          image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: ["ALL"]}

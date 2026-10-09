@@ -40,6 +40,25 @@ sh_test(
     env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
+# scripts/third-party-images.sh (#1400, #1401): `check` over throwaway trees
+# (every way an image can be unpinned or unlisted must fail, with its file and
+# line), `outdated` and `resolve` against a fake `curl` that plays the
+# registries, and that no call ever carries a credential. Hermetic: the
+# Bazel-pinned jq, no network. The real tree is checked by the `shell` job of
+# .github/workflows/ci.yaml (`scripts/third-party-images.sh check`), which
+# needs the git checkout this test does not have.
+sh_test(
+    name = "third_party_images_test",
+    size = "small",
+    srcs = ["third_party_images_test.sh"],
+    data = [
+        "third-party-images.sh",
+        "third-party-images.txt",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
 # The shell-lint coverage check (#853) against a fake `bazel query` and fake
 # `git ls-files`, including the #1297 SIGPIPE trap: a covered set larger than
 # the pipe buffer, on which the old `printf | grep -q` lookup must fail.

@@ -4,6 +4,8 @@ kind: ServiceAccount
 metadata:
   name: uds-client
   namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "udsecho.labels" (dict "root" $ "workload" "uds-client") | nindent 4 }}
 ---
 # Continuous light load on the UDS services through the mesh (qualified names,
 # explicit outbound listener). Logs FAILURES ONLY, plus an OK heartbeat every
@@ -14,15 +16,16 @@ kind: Deployment
 metadata:
   name: uds-client
   namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "udsecho.labels" (dict "root" $ "workload" "uds-client") | nindent 4 }}
 spec:
   replicas: 1
   selector:
-    matchLabels: {app: uds-client}
+    matchLabels: { {{- include "udsecho.selectorLabels" "uds-client" -}} }
   template:
     metadata:
       labels:
-        app: uds-client
-        aether.io/managed: "true"
+        {{- include "udsecho.podLabels" "uds-client" | nindent 8 }}
       annotations:
         # Pin the upstream clusters into the node dependency set (demand-scoped
         # distribution) instead of riding TTL'd ODCDS-observed membership.
