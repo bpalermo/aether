@@ -1,0 +1,85 @@
+name: main-post-merge-watch
+
+# Someone to watch a red `main-post-merge` run (#1506).
+#
+# `main.yaml` re-tests every push to `main`. It runs after the merge, so no
+# ruleset can require it: a failure blocked nothing, and was seen only by
+# whoever opened the Actions page. This workflow runs when one of its runs
+# completes and keeps ONE rolling issue, "main-post-merge: a commit on main
+# failed its post-merge run": a run that did not pass is recorded on it, a
+# commit is cleared when a re-run of its own run passes, and the issue closes
+# when no commit recorded on it is failing. Which conclusions file, why a green
+# run of a LATER commit never closes it, and what happens when runs finish out
+# of order: scripts/main-post-merge-watch.sh, the whole of the logic, tested by
+# //scripts:main_post_merge_watch_test (which also holds this file to what is
+# said here). What the issue asks of its reader: docs/runbook.md, "The
+# post-merge run".
+#
+# A `workflow_run` workflow is the default branch's file with a token that can
+# write, started by an event that a workflow NAMED `main-post-merge` anywhere
+# can cause, a pull request from a fork included. So:
+#   - exactly one field of the triggering run is read, its id, handed to the
+#     script through `env:` and refused there unless it is digits. The script
+#     reads everything else from the API for that id and acts only on a `push`
+#     to `main` of this repository, of the file .github/workflows/main.yaml;
+#   - nothing of the triggering run is checked out: the checkout names no ref
+#     (so it is the default branch), fetches the one script, and leaves no
+#     token behind;
+#   - the workflow has no permission, and its one job has the three it needs:
+#     `issues: write` for the issue, `actions: read` for the run and its jobs,
+#     `contents: read` for the checkout and main's head.
+#
+# `workflow_dispatch` judges a run by its id, by hand: a dry run by default
+# (reads everything, prints what it would write, writes nothing). It is how
+# the failure path is exercised without a red `main`; see the runbook.
+#
+# Concurrency is per judged run, as in publish-verify: one group for the
+# workflow would let a third completion replace the second while the first is
+# still running (GitHub keeps one pending run per group), and that run's
+# verdict would be lost. Two runs that fail in the same moment can therefore
+# both open the issue; the script folds the newer into the older.
+on:
+  workflow_run:
+    workflows: [main-post-merge]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Id of the main-post-merge run to judge"
+        type: string
+        required: true
+      dry_run:
+        description: "Report only: print what would be written, write nothing"
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: main-post-merge-watch-${{ github.event.workflow_run.id || inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Checkout (the default branch's script, never the triggering run's commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/main-post-merge-watch.sh
+          sparse-checkout-cone-mode: false
+      - name: Record a run that did not pass, clear a commit whose run now passes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          WATCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: ./scripts/main-post-merge-watch.sh

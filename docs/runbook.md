@@ -498,8 +498,8 @@ only because `changes` wrote `proxy=false`:
 **The post-merge run** (`main-post-merge`, `main.yaml`) is decided by the same
 script with a third table (`scripts/ci-gate.sh main`, #1501), in its `main`
 job. No ruleset requires it, since it runs on a push: a failure blocks nothing
-and shows as a red run of that commit on `main`. Nothing in the repository
-watches for one, so look at the run after a merge. Its `test` job skips when
+and shows as a red run of that commit on `main`, which the rolling issue below
+reports. Its `test` job skips when
 bazel-diff finds nothing the merge reaches, and that passes only because `diff`
 wrote `false`:
 
@@ -509,6 +509,64 @@ wrote `false`:
 | `decision: nothing impacted (diff wrote false to has_any, has_unit and has_integration)` | bazel-diff found no target the merge reaches; `test` is skipped by design | nothing |
 | `job diff succeeded and its output has_… is not set` | `diff` wrote no decision, so `test` skipped on an empty value and the merge was not tested | read the `Compute impacted targets` step. If it failed on something transient, re-run the run. If the workflow or the script is at fault, a re-run repeats it (a re-run executes that commit's own workflow): fix it in a new commit, and test the missed commit yourself (`make test` on a checkout of it), or the merge stays untested |
 | `job test was skipped, and diff says it had to run` | `test` did not run although `has_any` is `true` | read the `test` job; re-run it if no step ran |
+
+**A post-merge run that did not pass files an issue** (#1506):
+"main-post-merge: a commit on main failed its post-merge run", labelled `bug`
+and `ci`. One issue, reused: `main-post-merge-watch` (`main-watch.yaml`) runs
+when a post-merge run completes and records the commit, the run and the jobs
+that did not pass, in the issue body for the first failure and as a comment for
+each later one. The logic is `scripts/main-post-merge-watch.sh`.
+
+What the issue means: the commit it names is on `main` and its post-merge run
+did not validate it. Nothing was blocked. Until it is dealt with, a pull
+request whose impacted targets include the broken one fails `ci` for a reason
+that is not its own.
+
+What to do, for each commit the issue names:
+
+1. Open the run it links and read the first failed step.
+2. No step ran, a registry or GitHub answered 5xx, a job never got a runner or
+   hit its time limit: re-run it, `gh run rerun <run id> --failed`. When the
+   re-run passes, the watcher comments that the commit passes now, and closes
+   the issue once no commit named on it is still failing.
+3. A real failure: fix it in a new pull request and write `Closes #<the issue>`
+   in it. Re-running the old run cannot pass, since it tests the old commit.
+
+**A green run of a later commit never closes the issue.** Each post-merge run
+tests only what its own merge reaches, and a merge that reaches nothing passes
+without running a test: the next documentation-only merge would close the
+issue with `main` still broken. So a commit is cleared only by its own run, and
+a failure fixed by a later commit is closed from that pull request or by hand.
+For the same reason an older commit's failure is filed even when it arrives
+after a newer commit's green run; the entry then says that `main` has moved on
+and names its head.
+
+| The run ended | Filed? | Why |
+|---|---|---|
+| `failure`, `timed_out` | yes | the commit failed its run |
+| `startup_failure` | yes | the workflow file on `main` is not valid: no job ran, and every later push fails the same way |
+| `skipped`, `action_required`, anything unknown | yes | nothing validated the commit |
+| `cancelled`, and the `main` job did not succeed | yes | `main.yaml` has no concurrency group, so no newer push cancels a run: a job hit its time limit or never got a runner, or someone cancelled it, and the commit is not validated |
+| `cancelled`, and the `main` job succeeded | no | `diff` and `test` did their work; what was cancelled is another job (`refresh-pin-prs` waiting for a runner) |
+| `success` | no | clears that commit if the issue names it |
+
+A closed issue is never reopened: the next failure opens a new one. Only the
+issue that `github-actions[bot]` opened, and that account's comments, are read,
+so an issue or a comment someone else writes with the same title or marker
+changes nothing.
+
+The watcher is a `workflow_run` workflow, so it runs from `main` only and its
+own failures are red runs of `main-post-merge-watch` (an API error while
+reading or writing the issue). Re-run a failed one: it writes nothing twice.
+To see what it would do with a given run without writing anything:
+
+```bash
+gh workflow run main-watch.yaml -f run_id=<id of a main-post-merge run>   # dry_run defaults to true
+```
+
+The log of that run prints the verdict and the text it would file. With
+`-f dry_run=false` it files for real; use that only on a run whose commit you
+then mean to clear or whose issue you will close by hand.
 
 A cancelled run of `coverage` or `codeql` (both cancel the previous run of the
 same pull request when a new commit arrives) shows its summary job as failed on
