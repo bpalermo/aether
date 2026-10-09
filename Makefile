@@ -197,14 +197,14 @@ push-all: push-agent-image push-mesh-dns-image push-proxy-supervisor-image push-
 #
 # Both published architectures, whatever machine runs it: a build ID is the hash
 # of one binary, so the amd64 and arm64 builds of a component have different
-# IDs, and a pod on an arm64 node reports the arm64 one (#1378).
+# IDs, and a pod on an arm64 node reports the arm64 one (#1378). One build: the
+# check finds the binaries under the image indexes the release pushes, and an
+# index builds each one for both platforms (#1427). Each line is
+# `<os>/<arch> <target in the image> (<binary>): <build ID>`.
 .PHONY: check-build-id
 check-build-id:
-	@for arch in amd64 arm64; do \
-		bazel build --platforms=@rules_go//go/toolchain:linux_$$arch //bazel/buildid:release_build_ids || exit 1; \
-		echo "== linux/$$arch"; \
-		cat bazel-bin/bazel/buildid/release_build_ids.txt; \
-	done
+	@bazel build //bazel/buildid:release_build_ids
+	@cat bazel-bin/bazel/buildid/release_build_ids.txt
 
 # Fail if the digest of a Go image of this workspace depends on the commit
 # (#1378): no action under an image index may take a workspace-status file

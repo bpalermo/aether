@@ -1,4 +1,6 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//bazel/buildid:defs.bzl", "build_id_check")
 
 go_library(
@@ -24,36 +26,73 @@ go_test(
     embed = [":buildid_lib"],
 )
 
+# What the release pushes: the `<chart>.push_images` targets publish.yaml runs,
+# each of which pushes every image its chart names. An image a chart gains, a
+# chart added here, or a binary an image gains in its `tars_layer` is checked
+# with no edit to a list of binaries (#1427): there is none.
+#
+# :release_build_ids_test holds this list to publish.yaml.
+_RELEASED = [
+    "//charts/aether:aether.push_images",
+    "//charts/prober:prober.push_images",
+    "//charts/udsecho:udsecho.push_images",
+]
+
 # Acceptance guard for #651 and #653 over every binary that ships in a released
-# image. It fails the build if any of them lacks a GNU build-ID note, carries a
-# note that is not the hash of its own content, or shares an ID with another —
-# the collision that made Pyroscope symbol upload unsafe.
+# image, for every platform the image is published for. It fails the build if
+# any of them lacks a GNU build-ID note, carries a note that is not the hash of
+# its own content, or shares an ID with another — the collision that made
+# Pyroscope symbol upload unsafe.
+#
+# The binaries are found, not listed: every `content_build_id` output under
+# the images of _RELEASED, in the configuration the image index builds it in,
+# so the ELF checked is the ELF that ships. That is the main binary of each
+# image and everything `go_multi_arch_image` puts in an extra layer.
 #
 # It needs no `--stamp`: the IDs are content-derived, so the property holds (and
 # is checked) in every build configuration, including PR CI. `bazel build //...`
 # covers it, and publish.yaml re-states it to print the per-binary report.
 build_id_check(
     name = "release_build_ids",
-    binaries = [
-        "//agent/cmd/agent:agent_image_buildid_binary",
-        "//agent/cmd/mesh-dns:mesh-dns_image_buildid_binary",
-        # The Envoy hot-restart supervisor (#772 phase B2). It is PID 1 of the
-        # aether-proxy container, so the continuous profiler sees it as its own
-        # process and its symbols are uploaded under its build-ID — exactly the
-        # property #673's profiling pass depended on when the same code was part
-        # of the agent binary.
-        "//agent/cmd/proxy-supervisor:proxy-supervisor_image_buildid_binary",
-        # The csi.aether.io node plugin (proposal 039): its own published image.
-        "//agent/cmd/uds-csi:uds-csi_image_buildid_binary",
-        "//cni/cmd/cni-install:cni-install_image_buildid_binary",
-        # The CNI plugin the installer drops on the host — a second released ELF
-        # inside the cni-install image.
-        "//cni/cmd/cni-install:cni-install_image_buildid_extra_0",
-        "//controller/cmd/controller:controller_image_buildid_binary",
-        # The external SLI prober: its own chart (//charts/prober) and its own
-        # published image, so it is a released ELF like any other and its symbols
-        # are uploaded to Pyroscope under its build-ID.
-        "//prober/cmd/prober:prober_image_buildid_binary",
-        "//registrar/cmd/registrar:registrar_image_buildid_binary",
+    ships = _RELEASED,
+)
+
+# The same question asked of the target graph instead of the analysis: which
+# `content_build_id` targets are under _RELEASED. :release_build_ids walks named
+# attributes of other people's rules to answer it; this follows every edge.
+genquery(
+    name = "released_binaries_query",
+    expression = "kind(content_build_id, deps({}))".format(" + ".join(_RELEASED)),
+    scope = _RELEASED,
+)
+
+write_file(
+    name = "released",
+    out = "released.txt",
+    content = _RELEASED + [""],
+)
+
+# Two things the guard above cannot say about itself:
+#
+#   - that it saw everything. Its report must name, for each platform an image
+#     is published for, exactly the targets the query finds: a binary that
+#     ships and is not in the report fails here;
+#   - that _RELEASED is what the release pushes: the `push_images` targets
+#     publish.yaml runs, no more and no fewer.
+sh_test(
+    name = "release_build_ids_test",
+    size = "small",
+    srcs = ["release_build_ids_test.sh"],
+    args = [
+        "$(rootpath :release_build_ids)",
+        "$(rootpath :released_binaries_query)",
+        "$(rootpath :released)",
+        ".github/workflows/publish.yaml",
+    ],
+    data = [
+        ":release_build_ids",
+        ":released",
+        ":released_binaries_query",
+        "//:ci_definitions",
     ],
 )
