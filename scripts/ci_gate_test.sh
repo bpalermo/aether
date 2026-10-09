@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Hermetic test of scripts/ci-gate.sh, the decision of the `ci` job of
-# .github/workflows/ci.yaml (#1460) and of the `proxy` job of
-# .github/workflows/proxy.yml (#1489). No network, no GitHub: each case is a
+# .github/workflows/ci.yaml (#1460), of the `proxy` job of
+# .github/workflows/proxy.yml (#1489) and of the `main` job of
+# .github/workflows/main.yaml (#1501). No network, no GitHub: each case is a
 # `needs` context written here, as GitHub renders it with toJSON(needs).
 #
 # Two halves, first for ci.yaml (sections 1 to 6), then the same two for
 # proxy.yml (7 and 8), then how main.yaml's `test` job gets the impacted lists
-# (9, #1488):
+# (9, #1488), then the same two for main.yaml (10 and 11):
 #
 #   1. the decision. A run passes when every job ended the way the workflow's
 #      conditions say it must, and "nothing to do" is something a job wrote:
@@ -464,11 +465,11 @@ uploaded="$(job diff | awk '/uses: actions\/upload-artifact@/ { up = 1 } up && /
 expect "main.yaml: the outputs of job diff are the three the action checks" \
 	"$(job diff | sed -n 's/^      \(has_[a-z0-9_]*\): \${{ steps\.impacted\.outputs\.\(has_[a-z0-9_]*\) }}$/\1=\2/p' | sorted)" \
 	"has_any=has_any has_integration=has_integration has_unit=has_unit"
-# One tree here too: the lists are computed for github.sha, and both checkouts
-# of the workflow are of github.sha.
+# One tree here too: the lists are computed for github.sha, and every checkout
+# of the workflow (diff, test and the main job) is of github.sha.
 expect "main.yaml: the lists are computed for the commit the test job checks out" \
 	"$(job diff | grep -cF 'HEAD_SHA: ${{ github.sha }}') $(grep -cE '^[[:space:]]+ref: \$\{\{ github\.sha \}\}$' "$WORKFLOW") $(grep -cE '^[[:space:]]+ref:' "$WORKFLOW")" \
-	"1 2 2"
+	"1 3 3"
 readers=""
 workflow_jobs="$(awk '
 	/^jobs:/ { in_jobs = 1; next }
@@ -494,6 +495,127 @@ for j in $workflow_jobs; do
 	fi
 done
 expect "main.yaml: the jobs that read the impacted lists" "$(sorted <<<"$readers")" "test"
+
+# --- 10. main.yaml: the decision (#1501) -----------------------------------------------------
+# main.yaml runs on a push to main and has no `changes` job: `diff` always
+# runs, and `test` skips on `needs.diff.outputs.has_any == 'true'`. A `diff`
+# that wrote nothing skips it exactly as `false` does, and without the `main`
+# job the run is green having tested nothing. Same rules, a third table.
+MAIN_FULL='{
+  "diff": {"result": "success", "outputs": {"has_any": "true", "has_unit": "true", "has_integration": "true"}},
+  "test": {"result": "success", "outputs": {}}
+}'
+CTX="$MAIN_FULL"
+GATE=(main)
+DEFS="$DEFS"'
+def has3($a; $u; $i): .diff.outputs = {has_any: $a, has_unit: $u, has_integration: $i};
+'
+green "main: everything impacted, diff and test green" '.' 'decision: impacted; had to run: test'
+# main.yaml has no `changes` job and no has_e2e output: its log names neither.
+if grep -qE 'changes|has_e2e|pull request' "$TMP/log"; then
+	fail "main: the log of a run of main.yaml speaks of a changes job, of has_e2e or of a pull request"
+	sed 's/^/    /' "$TMP/log"
+else
+	pass "main: the log of a run of main.yaml speaks of no changes job, no has_e2e and no pull request"
+fi
+green "main: nothing impacted: diff wrote false three times, test is skipped" \
+	'has3("false"; "false"; "false") | skip("test")' \
+	'decision: nothing impacted (diff wrote false to has_any, has_unit and has_integration)'
+green "main: a library with no test impacted: test ran its build" \
+	'has3("true"; "false"; "false")' 'decision: impacted; had to run: test'
+green "main: only an integration test impacted: test ran its build" \
+	'has3("true"; "false"; "true")' 'decision: impacted; had to run: test'
+# The run of #1501: `diff` green, no output, `test` skipped on '' == 'true'.
+red "main: diff succeeded and set no output; test skipped" \
+	'.diff.outputs = {} | skip("test")' 'its output has_any is not set'
+# An output that is not set is not read as `false` further down: the log of
+# that run must not also say that nothing was impacted.
+if grep -qxF 'decision: none, see the errors' "$TMP/log" && ! grep -q 'nothing impacted' "$TMP/log"; then
+	pass "main: a diff that set no output is not also reported as nothing impacted"
+else
+	fail "main: a diff that set no output must log 'decision: none, see the errors' and no 'nothing impacted'"
+	sed 's/^/    /' "$TMP/log"
+fi
+red "main: diff succeeded and has_any is the empty string; test skipped" \
+	'.diff.outputs.has_any = "" | skip("test")' 'its output has_any is ""'
+for out in has_any has_unit has_integration; do
+	red "main: $out is missing, the others say false; test skipped" \
+		"has3(\"false\"; \"false\"; \"false\") | del(.diff.outputs.$out) | skip(\"test\")" \
+		"its output $out is not set"
+done
+# `test` skips its unit-test step on has_unit: unset is not "no unit test".
+red "main: has_unit is missing and test ran" 'del(.diff.outputs.has_unit)' 'its output has_unit is not set'
+for value in TRUE True 1 yes ' true' null; do
+	red "main: has_any is '$value', which is not true or false" \
+		".diff.outputs.has_any = \"$value\"" 'its output has_any is'
+done
+red "main: test skipped though diff says it had to run" 'skip("test")' 'job test was skipped, and diff says it had to run'
+red "main: test ran though diff says it had nothing to run" \
+	'has3("false"; "false"; "false")' 'job test ran, and diff says it had nothing to run'
+red "main: has_any=false and has_unit=true: the outputs contradict each other" \
+	'has3("false"; "true"; "false") | skip("test")' \
+	'job diff says has_any=false has_unit=true has_integration=false: a test cannot be impacted when no target is'
+red "main: diff skipped though it has no condition" \
+	'skip("diff test")' 'job diff was skipped, and it has no condition: it runs on every push to main'
+for j in diff test; do
+	for result in failure cancelled; do
+		red "main: $j ended as $result" ".[\"$j\"].result = \"$result\"" "job $j ended as $result"
+	done
+done
+red "main: diff failed before it set an output; test skipped" \
+	'.diff = {result: "failure", outputs: {}} | skip("test")' 'job diff ended as failure'
+red "main: a job is missing from needs" 'del(.test)' 'job test is not in the needs of the main job'
+red "main: needs has a job with no rule" '.["refresh-pin-prs"] = {result: "success", outputs: {}}' \
+	'job refresh-pin-prs is in the needs of the main job and scripts/ci-gate.sh has no rule for it'
+red "main: the context of ci.yaml is not one of main.yaml" "$FULL" 'has no rule for it'
+raw "main: NEEDS_JSON is empty" '' 'NEEDS_JSON is empty'
+raw "main: NEEDS_JSON is the empty object" '{}' 'job diff is not in the needs of the main job'
+GATE=()
+red "the context of main.yaml is not one of ci.yaml" "$CTX" 'is not in the needs of the ci job'
+CTX="$FULL"
+
+# --- 11. main.yaml: the rules against the workflow file ----------------------------------------
+# `refresh-pin-prs` is the one job the `main` job does not need: it has no
+# `needs`, runs on `always()` and reads no output of another job, so nothing
+# another job did or did not write can skip it. Held here, so that the day it
+# takes a condition it is noticed.
+INDEPENDENT=refresh-pin-prs
+gated_jobs="$(tr ' ' '\n' <<<"$workflow_jobs" | grep -vx -e main -e "$INDEPENDENT" | sorted)"
+gate_jobs="$(bash "$SCRIPT" main --jobs | sorted)"
+main_needs="$(job main | sed -n 's/^    needs: \[\(.*\)\]$/\1/p' | sorted)"
+expect "every job of main.yaml but main and $INDEPENDENT has a rule in the gate, and the gate has no other" "$gate_jobs" "$gated_jobs"
+expect "the main job needs every job of main.yaml but $INDEPENDENT" "$main_needs" "$gated_jobs"
+expect "the main job runs whatever the others did" "$(job main | grep -c '^    if: always()$')" 1
+main_job="$(job main)"
+if grep -qF 'NEEDS_JSON: ${{ toJSON(needs) }}' <<<"$main_job" && grep -qE '^[[:space:]]+run: scripts/ci-gate\.sh main$' <<<"$main_job"; then
+	pass "the main job hands toJSON(needs) to scripts/ci-gate.sh main"
+else
+	fail "the main job does not run scripts/ci-gate.sh main with NEEDS_JSON: \${{ toJSON(needs) }}"
+fi
+expect "the main job has no step with a condition of its own" "$(grep -c '^        if: ' <<<"$main_job")" 0
+if grep -q 'uses: actions/checkout@' <<<"$main_job"; then
+	pass "the main job checks the repository out before it runs the gate"
+else
+	fail "the main job runs scripts/ci-gate.sh without a checkout"
+fi
+# It reads results and outputs: no key, so no environment to wait on.
+expect "the main job has no environment" "$(grep -c '^    environment:' <<<"$main_job")" 0
+condition() { # job, the `if:` it must have (empty: none)
+	expect "main.yaml: the condition of job $1 is the one the gate assumes" \
+		"$(job "$1" | sed -n 's/^    if: //p')" "$2"
+}
+condition diff ""
+condition test "needs.diff.outputs.has_any == 'true'"
+condition "$INDEPENDENT" "always()"
+independent_job="$(job "$INDEPENDENT")"
+expect "main.yaml: job $INDEPENDENT needs no job and reads no output of one" \
+	"$(grep -cE '^    needs:|needs\.[A-Za-z0-9_-]+\.' <<<"$independent_job")" 0
+# Every condition in the file that reads another job, job or step: the `if:`
+# of `test`, and the unit-test step inside it. A third one is a decision the
+# gate does not know about.
+expect "main.yaml: the conditions that read another job are the two the gate covers" \
+	"$(grep -E '^[[:space:]]+if: .*needs\.' "$WORKFLOW" | sed 's/^[[:space:]]*//' | sort | tr '\n' '|')" \
+	"if: needs.diff.outputs.has_any == 'true'|if: needs.diff.outputs.has_unit == 'true'|"
 WORKFLOW="$CI_WORKFLOW"
 
 echo

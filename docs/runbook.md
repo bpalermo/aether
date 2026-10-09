@@ -495,6 +495,21 @@ only because `changes` wrote `proxy=false`:
 | `job changes succeeded and its output proxy is not set` | the path filter wrote no decision, so `shell` and `test` skipped on an empty value | read the `changes` job; this is a defect in the workflow, not in the change |
 | `job <x> was skipped, and changes says proxy=true` | a job did not run although the workspace changed | read that job; re-run it if no step ran |
 
+**The post-merge run** (`main-post-merge`, `main.yaml`) is decided by the same
+script with a third table (`scripts/ci-gate.sh main`, #1501), in its `main`
+job. No ruleset requires it, since it runs on a push: a failure blocks nothing
+and shows as a red run of that commit on `main`. Nothing in the repository
+watches for one, so look at the run after a merge. Its `test` job skips when
+bazel-diff finds nothing the merge reaches, and that passes only because `diff`
+wrote `false`:
+
+| The `main` job's log shows | What it means | Do |
+|---|---|---|
+| `decision: impacted; had to run: test` | `test` ran and succeeded | nothing |
+| `decision: nothing impacted (diff wrote false to has_any, has_unit and has_integration)` | bazel-diff found no target the merge reaches; `test` is skipped by design | nothing |
+| `job diff succeeded and its output has_… is not set` | `diff` wrote no decision, so `test` skipped on an empty value and the merge was not tested | read the `Compute impacted targets` step. If it failed on something transient, re-run the run. If the workflow or the script is at fault, a re-run repeats it (a re-run executes that commit's own workflow): fix it in a new commit, and test the missed commit yourself (`make test` on a checkout of it), or the merge stays untested |
+| `job test was skipped, and diff says it had to run` | `test` did not run although `has_any` is `true` | read the `test` job; re-run it if no step ran |
+
 A cancelled run of `coverage` or `codeql` (both cancel the previous run of the
 same pull request when a new commit arrives) shows its summary job as failed on
 the commit that was superseded. That is deliberate: a summary job that was
