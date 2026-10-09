@@ -85,14 +85,7 @@ func setupTelemetry(ctx context.Context, cfg Config, serviceName, serviceVersion
 		l = slog.Default()
 	}
 
-	telemetryCfg := setup.Config{
-		ServiceName:      serviceName,
-		ServiceVersion:   serviceVersion,
-		OTLPEndpoint:     cfg.OTLPEndpoint,
-		TraceSampleRate:  cfg.TraceSampleRate,
-		TraceExport:      cfg.TracingExport,
-		SchedulerLatency: cfg.SchedulerLatency,
-	}
+	telemetryCfg := cfg.Telemetry(serviceName, serviceVersion)
 
 	setupCtx, cancel := setup.DetachedTimeout(ctx, setup.SetupTimeout)
 	defer cancel()

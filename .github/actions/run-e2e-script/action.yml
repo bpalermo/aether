@@ -1,6 +1,6 @@
 # The body every script-driven nightly e2e job shares (.github/workflows/e2e.yaml:
 # waypoint, replicator, uds, uds-csi, l4-routes, eastwest-quic): load the
-# images the `build` job saved, install the pinned kind + kubectl, then
+# images the `build` job saved, install the pinned kind + kubectl + Helm, then
 # `<script> up` -> `<script> verify` -> diagnostics + artifact on failure ->
 # `<script> down`. What differs per suite is an input; the job (its name, `if:`,
 # `timeout-minutes`) stays in the workflow, so `report-failure` still reads one
@@ -37,6 +37,12 @@ inputs:
     description: '"true" = a verify failure does not fail the job (debugging only).'
     required: false
     default: "false"
+  helm-major:
+    description: >-
+      The Helm major the harness runs under, "3" or "4"; empty for the default.
+      The release of each is pinned in e2e/helm-version.sh.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -56,6 +62,13 @@ runs:
     # clusters itself, with --image "$KIND_NODE_IMAGE" from e2e/kind-version.sh.
     - name: Setup kind (pinned)
       uses: ./.github/actions/setup-kind
+
+    # Every harness drives helm. Before #1580 these jobs ran the runner's
+    # preinstalled Helm, whose major moves with the runner image.
+    - name: Setup Helm (pinned)
+      uses: ./.github/actions/setup-helm
+      with:
+        major: ${{ inputs.helm-major }}
 
     - name: Bring up the environment (e2e/${{ inputs.script }} up)
       shell: bash

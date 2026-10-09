@@ -118,6 +118,10 @@ runs:
       with:
         cluster_name: ${{ inputs.cluster-name }}
 
+    # Helm from e2e/helm-version.sh (#1580), not the runner image's.
+    - name: Setup Helm (pinned)
+      uses: ./.github/actions/setup-helm
+
     - name: Load images into kind
       shell: bash
       env:
