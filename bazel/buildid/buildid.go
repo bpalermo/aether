@@ -13,8 +13,8 @@
 // against another binary's offsets.
 //
 // The first fix (#652) rewrote the note to the release commit SHA. That traded
-// one collision for another: a commit produces *seven* released ELFs, so all
-// seven ended up sharing a single ID (issue #653). A GNU build-ID identifies a
+// one collision for another: a commit produces *many* released ELFs, so all
+// of them ended up sharing a single ID (issue #653). A GNU build-ID identifies a
 // *linked object*, not a source revision.
 //
 // # What this tool writes
