@@ -2783,11 +2783,13 @@ did exactly this on 2026-09-19, spreading the o11y stack and taking w01 from
 watch them specifically. A pod stuck `Terminating` → resolve it first via
 §8 "A pod is stuck `Terminating`"; do not start a roll on top of it.
 
-**Load generators must not be the victim.** The priority-0 k6 runner was picked
-as the preemption victim twice on a dense node and cost a soak its data; it runs
-under the `aether-soak-loader` PriorityClass since #811. Any new load or probe
-workload needs a PriorityClass for the same reason — an evicted generator looks
-exactly like a passing test.
+**Load generators must not be the victim.** A soak's priority-0 load generator
+was picked as the preemption victim twice on a dense node and cost the soak its
+data; since #811 the load generators run under a PriorityClass of their own (the
+soak is run by an external soak harness, maintained outside this repository, and
+the class is that harness's object). Any new load or probe workload needs a
+PriorityClass for the same reason — an evicted generator looks exactly like a
+passing test.
 
 ### Agent surge roll (proposal 041)
 
@@ -3055,7 +3057,7 @@ and #979 merged on 2026-09-29; the re-soak of the merged build:
   - A successor that logs `initial fetch timed out for …Listener` next to `starting workers` is this case.
 - **k6 had 147 failures in 9.18 M requests.**
   - 141 were `503 NC` first-use timeouts at loader start, before T0 (#1086).
-  - 6 were `504 UT` to a terminating svc-3 pod in the TRIPLE (#1087).
+  - 6 were `504 UT` to a terminating pod of one of the soak's services in the TRIPLE (#1087).
 The one exception is a service with any endpoint behind the east/west
 waypoint (019): it stays h2, because the waypoint tunnel has no QUIC leg.
 
@@ -3124,8 +3126,8 @@ talos-main is 8–14 SAs × ~19 services ≈ 150–270 per node, the pairs actua
 stay the same).
 
 **What a healthy node reads.** `observed_pairs` ≈ the (source ServiceAccount,
-destination) pairs that carry traffic on that node: on talos the k6 loaders, the
-prober and the dialers, so **single digits per node**, and `quic_clusters` equal to
+destination) pairs that carry traffic on that node: under a soak, its load
+generators and dialers plus the prober, so **single digits per node**, and `quic_clusters` equal to
 it. `observed_pairs` that is a whole multiple of `local_identities` on every node
 (every local SA × the same destinations) is the #1033 red reading (rev245, 2026-09-28: 24/24/12, 18/18/9, 28/28/14, 20/20/10,
 20/20/10), not a busy fleet.
@@ -3339,7 +3341,7 @@ snapshot), with no debounce and no wait on a registry reload. What used to lose 
 the 2 s timeout was Envoy warming the twin. A twin names its source ServiceAccount's
 SVID statically in its transport socket, so a twin published before that secret is
 in the snapshot warms on SDS until SPIRE delivers it. On rev248 (2026-09-28
-15:44Z, the k6 loaders' first pods on every node right after an agent roll) that
+15:44Z, the soak load generators' first pods on every node right after an agent roll) that
 took 6.9-7.4 s from the CNI ADD, and 428 requests failed 503 `NC`. Two rules close
 it:
 
@@ -3410,7 +3412,7 @@ Expected upstream QUIC connections to one destination are **one per (source node
 source ServiceAccount that dialled it, Envoy worker that SA's app connections landed
 on, destination endpoint)**. They are NOT one per app connection. A twin does not
 pool per downstream connection (`QUICClusterFrom` pins
-`connection_pool_per_downstream_connection` off), so a k6 runner's 60 keep-alive
+`connection_pool_per_downstream_connection` off), so a load generator's 60 keep-alive
 connections share its node's per-worker pools. Pods of one ServiceAccount share a
 twin's connections, because the SA is the identity. The upper bound per destination
 is `Σ_nodes (dialling SAs × workers × endpoints)`:
@@ -3495,7 +3497,7 @@ mesh-wide — it is not an escape hatch.
 `503` with response flag `NC` (no cluster) for ~15 s on every request to every
 QUIC destination, then recovers on its own. Other callers on the node
 are unaffected; h2 destinations are unaffected. On talos (rev242) it was 1,060
-client-visible 503/NC in 11 s when the k6 loaders started.
+client-visible 503/NC in 11 s when the soak's load generators started.
 
 Since #1020 every twin is a late twin, because it is built on the pair's first
 request. A regression of this fix would therefore hit **every** new (source,
@@ -3652,8 +3654,7 @@ the pod. Now that `node` is the node, a new pod on the same node satisfies that 
 for a dead pod's frozen burst. Guard `on (node, pod)` instead.
 
 **The failure line.** Every probe that does not succeed prints one line to the prober's
-stdout. It follows the soak's k6 `AETHER_FAIL` convention: a fixed marker, then one
-JSON object:
+stdout: a fixed marker, then one JSON object:
 
 ```
 AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"dial":"10.96.14.7:18081","remote":"10.96.14.7:18081","local":"10.244.3.114:49292","trace_id":"9fa32b3befe77ea2253e8831d3472fa8","pod":"prober-h2mzs","node":"main-worker-01","n":1,"truncated":false}
@@ -6826,7 +6827,10 @@ log_name:aether_l4_access_logs AND filter_chain_name:~"^cap_tls_" AND upstream_c
 **Symptom.** A node proxy's outbound L4 connection to `tcp-echo` or `mixed-svc` is
 rejected with `ssl_fail_verify_san`: it reached the inbound `:18008` listener of an
 **unrelated pod on the same node** (always the node's newest mesh pod), which presented
-its own SVID. The soak's `mp-dialer` shows it as one failure on every L4 leg at once.
+its own SVID. A client that dials several L4 ports in one pass sees it as one failure on
+every L4 leg at once (the multi-protocol dialer of the soak did; the soak is run by an
+external soak harness, maintained outside this repository, and the workloads named in this
+section are that harness's).
 
 **Two defects, one proof order.**
 
@@ -6898,7 +6902,7 @@ example).
 
 | build | expected |
 |---|---|
-| rev242 and earlier (no thread-self patch) — the negative control | non-zero on svc-1..5, prober, k6-soak-loader, udp-dialer (and echo, uds-cr-echo, udp-echo); ~1 burst per node per hour; `verify_san` ticks on `tcp-echo`/`mixed-svc` (23 over the rev242 soak) |
+| rev242 and earlier (no thread-self patch) — the negative control | non-zero on the prober and on every workload of the soak (its HTTP services, load generators, dialers and echo servers); ~1 burst per node per hour; `verify_san` ticks on `tcp-echo`/`mixed-svc` (23 over the rev242 soak) |
 | rev243 (unpatched, 1h47m generation, 2026-09-27 22:53Z–09-28 00:39Z) | 6 stray floor connections, all on `prober` pods (w05 2, w03 3, w04 1), and 1 `verify_san` on w03 `tcp-echo` |
 | first proxy with the #1022 patch, #1007 still unfixed | **no new series and no increments** after every node's proxy has rolled onto it (series from older generations age out with them) |
 

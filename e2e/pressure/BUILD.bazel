@@ -13,12 +13,15 @@ sh_library(
 # The soak guard of run.sh (#1555): a real run needs the operator's
 # acknowledgement, the best-effort refusals fail closed, and the guard neither
 # asks for an object by a name this repository does not define nor looks at
-# local processes. Hermetic: a fake kubectl, the Bazel-pinned jq, no cluster.
+# local processes. And every other kubectl and curl call of run.sh (#1578): a
+# call that failed is neither an absent object nor a verdict. Hermetic: a fake
+# kubectl and a fake curl, the Bazel-pinned jq, no cluster.
 sh_test(
     name = "preflight_test",
     size = "small",
     srcs = ["preflight_test.sh"],
     data = [
+        "collector-pressure-job.yaml",
         "run.sh",
         "@jq_toolchains//:resolved_toolchain",
     ],
