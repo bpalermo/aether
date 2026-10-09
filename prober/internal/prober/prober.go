@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"aethermesh.dev/common/telemetry/servicename"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
@@ -278,11 +279,10 @@ func withDefaultPort(authority, port string) string {
 func newResource(ctx context.Context, version string) (*resource.Resource, error) {
 	res, err := resource.New(
 		ctx,
-		resource.WithAttributes(
-			semconv.ServiceName(telemetryServiceName),
-			semconv.ServiceVersion(version),
-		),
+		resource.WithAttributes(semconv.ServiceVersion(version)),
 		resource.WithFromEnv(), // OTEL_RESOURCE_ATTRIBUTES: k8s.node.name, k8s.pod.name, k8s.namespace.name
+		// After WithFromEnv, so OTEL_RESOURCE_ATTRIBUTES cannot rename the component (#1562).
+		servicename.Option(telemetryServiceName),
 		resource.WithTelemetrySDK(),
 		resource.WithProcess(),
 	)

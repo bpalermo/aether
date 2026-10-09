@@ -48,6 +48,16 @@ access-log/tracing policy via the MeshConfig CR.
 | `otel.traceSampleRate` | `0.1` | Head-sampling ratio (0.0–1.0); bounds exported spans only. |
 | `otel.traceExport` | `false` | Export spans over OTLP (needs a collector traces pipeline). |
 
+**Who names a component.** Each Go component (agent, registrar, controller, edge
+control plane, mesh-dns, proxy supervisor, prober) sets its own `service.name`
+(`aether-agent`, `aether-mesh-dns`, …) and takes every other resource attribute
+from `OTEL_RESOURCE_ATTRIBUTES`, which the charts use for the pod's `k8s.*`
+attributes. A `service.name` inside `OTEL_RESOURCE_ATTRIBUTES` is ignored by these
+components (#1562): dashboards and alerts select on the component's name. To
+rename one on purpose, set `OTEL_SERVICE_NAME` on its container. Envoy is not a
+Go component: its stats resource takes `service.name` from
+`OTEL_RESOURCE_ATTRIBUTES`, which is how the edge proxy gets `aether-edge-proxy`.
+
 ### `spire` — system-wide mTLS
 
 `enabled` is the mesh-wide mTLS switch; the rest is per-component plumbing.
