@@ -257,7 +257,7 @@ func (t *Tracker) SetDeliveryObserver(fn DeliveryObserver) {
 // It is also what allows the tracker to act on what a proxy states it holds
 // (statedHeld): a statement is about one version, and is worth nothing once
 // another is published. Without fn the tracker keys presence by name and
-// reads no statement.
+// resolves no wait from a statement (the AckObserver is told it all the same).
 //
 // Call it while wiring, before the xDS server serves.
 func (t *Tracker) SetPublishedVersion(fn PublishedVersion) {
@@ -337,7 +337,7 @@ func (t *Tracker) Callbacks() serverv3.Callbacks {
 // like the admin config_dump poll this replaces.
 //
 // Without a PublishedVersion presence is keyed by the name alone: any earlier
-// ACK of the name returns immediately, and no statement is read.
+// ACK of the name returns immediately, and no statement resolves a wait.
 func (t *Tracker) WaitListenerPresent(ctx context.Context, name string) error {
 	return t.wait(ctx, resourcev3.ListenerType, name, true)
 }
@@ -443,7 +443,7 @@ func atPublishedVersion(published PublishedVersion, typeURL, name, held string) 
 //
 // The FIRST response of a type on a stream is the server's answer to the
 // proxy's opening request, whose initial_resource_versions state every
-// resource of the type the proxy holds (noteOpeningRequestLocked). It is kept
+// resource of the type the proxy holds (noteRequestLocked). It is kept
 // even when it carries nothing (#1483): go-control-plane answers the first
 // wildcard request of a stream whether or not anything is owed, and after an
 // agent restart against a proxy that is already in sync the answer to that

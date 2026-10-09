@@ -404,6 +404,38 @@ func TestStreamClose_WakesAWaiterItUnblocks(t *testing.T) {
 	}
 }
 
+// TestStreamClose_TellsTheDeliveryObserverOutsideTheLock: a closing stream
+// wakes the waiters and tells the DeliveryObserver what left flight. The
+// observer is called with the tracker's lock released, so it can ask the
+// tracker something itself.
+func TestStreamClose_TellsTheDeliveryObserverOutsideTheLock(t *testing.T) {
+	tr := publishing(map[string]string{testListener: "h1"})
+	ended := 0
+	tr.SetDeliveryObserver(func(_ context.Context, delivery Delivery) {
+		if !delivery.Ended {
+			return
+		}
+		ended++
+		ctx, cancel := context.WithTimeout(context.Background(), unresolvedWait)
+		defer cancel()
+		_ = tr.WaitListenerAbsent(ctx, "never-present")
+	})
+	openDelta(tr, 1, resourcev3.ListenerType, nil)
+	sendListeners(tr, 1, "n1", map[string]string{testListener: "h1"}, nil)
+
+	done := make(chan struct{})
+	go func() {
+		tr.onDeltaStreamClosed(1, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(resolvedWait):
+		t.Fatal("the stream close never returned: the observer was called under the tracker's lock")
+	}
+	require.Equal(t, 1, ended)
+}
+
 func isTimeout(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "timed out")
 }
