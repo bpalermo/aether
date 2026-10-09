@@ -7,21 +7,24 @@ kind: ServiceAccount
 metadata:
   name: uds-cr-echo
   namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "udsecho.labels" (dict "root" $ "workload" "uds-cr-echo") | nindent 4 }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: uds-cr-echo
   namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "udsecho.labels" (dict "root" $ "workload" "uds-cr-echo") | nindent 4 }}
 spec:
   replicas: {{ .Values.policyPath.replicas }}
   selector:
-    matchLabels: {app: uds-cr-echo}
+    matchLabels: { {{- include "udsecho.selectorLabels" "uds-cr-echo" -}} }
   template:
     metadata:
       labels:
-        app: uds-cr-echo
-        aether.io/managed: "true"
+        {{- include "udsecho.podLabels" "uds-cr-echo" | nindent 8 }}
       annotations:
         endpoint.aether.io/port: "8080"
     spec:
@@ -32,7 +35,7 @@ spec:
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
-            matchLabels: {app: uds-cr-echo}
+            matchLabels: { {{- include "udsecho.selectorLabels" "uds-cr-echo" -}} }
       securityContext: {fsGroup: 65532}
       containers:
         - name: app
@@ -53,6 +56,8 @@ kind: EndpointPolicy
 metadata:
   name: uds-cr
   namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "udsecho.labels" (dict "root" $ "workload" "uds-cr-echo") | nindent 4 }}
 spec:
   targetRef: {kind: Service, name: uds-cr-echo}
   udsSocket: {{ .Values.socket | quote }}

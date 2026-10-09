@@ -28,7 +28,7 @@ spec:
       serviceAccountName: echo-v1
       containers:
       - name: echo
-        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd
+        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd@sha256:5efb54877c2280c51b971857ea9a6256b355822ab84a4edbef9ec1c876587068
         imagePullPolicy: IfNotPresent
         args:
         - --tcp=9090
@@ -86,7 +86,7 @@ spec:
       serviceAccountName: echo-v2
       containers:
       - name: echo
-        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd
+        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd@sha256:5efb54877c2280c51b971857ea9a6256b355822ab84a4edbef9ec1c876587068
         imagePullPolicy: IfNotPresent
         args:
         - --tcp=9090
@@ -177,7 +177,7 @@ spec:
       serviceAccountName: echo-v1
       containers:
       - name: echo
-        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd
+        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd@sha256:5efb54877c2280c51b971857ea9a6256b355822ab84a4edbef9ec1c876587068
         imagePullPolicy: IfNotPresent
 
 ---
@@ -227,7 +227,7 @@ spec:
     spec:
       containers:
       - name: echo
-        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd
+        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd@sha256:5efb54877c2280c51b971857ea9a6256b355822ab84a4edbef9ec1c876587068
         ports:
         - containerPort: 8080
 ---
@@ -254,6 +254,6 @@ spec:
     spec:
       containers:
       - name: echo
-        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd
+        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd@sha256:5efb54877c2280c51b971857ea9a6256b355822ab84a4edbef9ec1c876587068
         ports:
         - containerPort: 8080
