@@ -3625,10 +3625,27 @@ helm_template_fail_test(
 #     install that failed, `meshConfig.createDefault` or `edge.enabled` turned
 #     on later, a deleted object) is seeded then, as before;
 #   - NO rollback event: Helm runs the TARGET revision's stored hooks on a
-#     rollback, and deletes a hook's object before it creates it. A seed stored
-#     with a rollback event would replace the operator's MeshConfig;
-#   - no `helm.sh/hook-delete-policy`, and no weight.
-MESHCONFIG_SEED_HOOK = "\\n  annotations:\\n    helm\\.sh/hook: pre-install,pre-upgrade\\n    helm\\.sh/resource-policy: keep\\nspec:"
+#     rollback. A seed stored with a rollback event would be created, or
+#     applied, over the operator's MeshConfig;
+#   - `helm.sh/hook-delete-policy: never`. `never` is NOT a policy Helm knows,
+#     and that is the point: a hook with no policy gets `before-hook-creation`,
+#     so Helm deletes whatever MeshConfig is live just before it creates the
+#     seed. The `lookup` and the hook are not atomic: an object created in
+#     between (measured on kind, Helm 3.18.4 and 4.2.0) was deleted and
+#     replaced by the seed, and the upgrade reported success. Naming any policy
+#     turns that default off. The two Helm does know are wrong here:
+#     `hook-succeeded` deletes the seed it has just created, and `hook-failed`
+#     deletes the object when the wait after the creation fails, which with
+#     Helm 4's server-side apply can be the operator's object (measured). With
+#     a value Helm does not act on, nothing is ever deleted: the upgrade fails
+#     on "already exists" (or leaves the operator's object in place, under
+#     server-side apply) and running it again succeeds. `aether.meshConfig.seedMode`
+#     has the table; `e2e/first-install.sh` (leg v-a2) fails if a Helm ever
+#     deletes on this value;
+#   - no weight.
+MESHCONFIG_SEED_HOOK_ANNOTATIONS = "    helm\\.sh/hook: pre-install,pre-upgrade\\n    helm\\.sh/hook-delete-policy: never\\n    helm\\.sh/resource-policy: keep\\n"
+
+MESHCONFIG_SEED_HOOK = "\\n  annotations:\\n" + MESHCONFIG_SEED_HOOK_ANNOTATIONS + "spec:"
 
 # The same object where a hook cannot be used (see the two "created namespace"
 # tests below): what every chart before 2.4.24 rendered.
@@ -3774,8 +3791,8 @@ helm_template_match_test(
         "edge.namespaceCreate=false",
     ],
     patterns = [
-        EDGE_MESHCONFIG + "    helm\\.sh/hook: pre-install,pre-upgrade\\n    helm\\.sh/resource-policy: keep\\nspec: \\{\\}",
-        CONTROL_PLANE_MESHCONFIG + "    helm\\.sh/hook: pre-install,pre-upgrade\\n    helm\\.sh/resource-policy: keep\\nspec:\\n",
+        EDGE_MESHCONFIG + MESHCONFIG_SEED_HOOK_ANNOTATIONS + "spec: \\{\\}",
+        CONTROL_PLANE_MESHCONFIG + MESHCONFIG_SEED_HOOK_ANNOTATIONS + "spec:\\n",
     ],
 )
 
@@ -3794,7 +3811,7 @@ helm_template_match_test(
     ],
     patterns = [
         EDGE_MESHCONFIG + "    helm\\.sh/resource-policy: keep\\nspec: \\{\\}",
-        CONTROL_PLANE_MESHCONFIG + "    helm\\.sh/hook: pre-install,pre-upgrade\\n    helm\\.sh/resource-policy: keep\\nspec:\\n",
+        CONTROL_PLANE_MESHCONFIG + MESHCONFIG_SEED_HOOK_ANNOTATIONS + "spec:\\n",
     ],
 )
 

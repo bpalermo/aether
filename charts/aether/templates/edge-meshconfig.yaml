@@ -20,6 +20,7 @@ metadata:
   annotations:
     {{- if eq (include "aether.meshConfig.seedMode" (dict "namespace" $ns "rendersNamespace" .Values.edge.namespaceCreate)) "hook" }}
     helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: never
     {{- end }}
     helm.sh/resource-policy: keep
 spec: {}
