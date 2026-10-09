@@ -53,6 +53,16 @@ pin ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen v0.159.0
 pin quay.io/coreos/etcd v3.7.2 sha256:e9afa62b1e914f02db62e5c46a7a140d8cdf026f2ed888cab4e5a142ec4d06fd
 pin gcr.io/etcd-development/etcd v3.7.2 sha256:7c6c239825d00e3f6328a69caafd54be92063acf0c2ce78b8394699f52b75dc3
 
+# The base images of what this repository builds (#1477), read from the Bazel
+# module files and not from a reference: static is the base of every Go image
+# (MODULE.bazel, the rules_img `pull`), cc of the aether-proxy image
+# (proxy/MODULE.bazel, `oci.pull`, by digest alone: `nonroot` is the tag that
+# serves that digest). distroless rebuilds `nonroot` in place, so `outdated`
+# reports MOVED whenever the base was patched: moving the pin then changes the
+# digest of every image built on it, and is a release.
+pin gcr.io/distroless/static-debian13 nonroot sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
+pin gcr.io/distroless/cc-debian12 nonroot sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
+
 # The kind node image. e2e/kind-version.sh owns this pin and //e2e:kind_pin_test
 # holds every copy to it; it is listed here so `outdated` reports on it too.
 # Move it only together with KIND_VERSION (docs/runbook.md, "Bumping the e2e
