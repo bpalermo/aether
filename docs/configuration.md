@@ -70,7 +70,7 @@ not rename Envoy's.
 **Who tells replicas apart.** The registrar, the controller and the edge
 control plane also set `service.instance.id` to the pod name (chart 2.4.26,
 #1560). Prometheus's OTLP ingestion stores that attribute as `instance` by
-itself, so there two replicas write a series each with no pipeline
+itself, so with Prometheus the replicas write a series each with no pipeline
 configuration; another backend may need the mapping made, and one that drops
 the attribute still collapses them. The per-node DaemonSets do not set it: the node tells them
 apart, and your pipeline makes the `node` label. See
