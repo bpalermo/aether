@@ -150,6 +150,10 @@ func (s *Supervisor) successorConcurrency() (n int, source string, err error) {
 // concurrencyArg extracts --concurrency from an Envoy argv: the worker count
 // an Envoy started with it will run, and whether the flag is there at all.
 //
+// The argv is read as Envoy reads it (parseEnvoyArgs): a "--concurrency" that
+// is the value of another flag is not the flag, and one behind "--" is ignored
+// as Envoy ignores it.
+//
 // A --concurrency given more than once is errRepeatedConcurrency, not "the
 // last one wins": Envoy's parser does not keep the last, it refuses the command
 // line ("PARSE ERROR: Argument: (--concurrency) Argument already set!"), so no
@@ -167,44 +171,37 @@ func (s *Supervisor) successorConcurrency() (n int, source string, err error) {
 // CheckExtraArgs turns every error here into a startup failure, so a
 // supervisor started through the command never sees one at a handoff.
 func concurrencyArg(args []string) (n int, explicit bool, err error) {
-	var (
-		v       string
-		seen    int
-		noValue bool
-		equals  bool
-	)
-	for i := 0; i < len(args); i++ {
-		switch a := args[i]; {
-		case a == envoyFlagConcurrency:
-			// The next argument is the value. It is read but not skipped, so
-			// a --concurrency standing where a value should be is still
-			// counted as a repeat.
-			if noValue = i+1 >= len(args); !noValue {
-				v = args[i+1]
-			}
-		case strings.HasPrefix(a, envoyFlagConcurrency+"="):
-			equals = true
-		default:
-			continue
+	var found []envoyArg
+	for _, a := range parseEnvoyArgs(args) {
+		if a.flag != nil && a.flag.Long == envoyFlagConcurrency {
+			found = append(found, a)
 		}
-		seen++
 	}
-	switch {
-	case seen == 0:
+	switch len(found) {
+	case 0:
 		return 0, false, nil
-	case seen > 1:
-		return 0, false, fmt.Errorf("%w (%d times)", errRepeatedConcurrency, seen)
-	case equals:
-		return 0, false, errConcurrencyEquals
-	case noValue:
-		return 0, false, errors.New("--concurrency is the last argument and has no value " +
-			`(Envoy: "Missing a value for this argument!")`)
+	case 1:
+	default:
+		return 0, false, fmt.Errorf("%w (%d times)", errRepeatedConcurrency, len(found))
 	}
-	parsed, err := parseConcurrencyValue(v)
+	n, err = concurrencyValue(&found[0])
 	if err != nil {
 		return 0, false, err
 	}
-	return parsed, true, nil
+	return n, true, nil
+}
+
+// concurrencyValue is the worker count one parsed --concurrency argument gives
+// Envoy, or why no Envoy runs with a count the supervisor can know.
+func concurrencyValue(a *envoyArg) (int, error) {
+	switch a.problem {
+	case argEqualsSpelling:
+		return 0, errConcurrencyEquals
+	case argMissingValue:
+		return 0, errors.New("--concurrency is the last argument and has no value " +
+			`(Envoy: "Missing a value for this argument!")`)
+	}
+	return parseConcurrencyValue(a.value)
 }
 
 // readOnlineCPUs counts the CPUs in onlineCPUsPath ("0-3", "0,2-5", ...).
