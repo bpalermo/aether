@@ -86,6 +86,11 @@
 #        namespace is marked), an edit of it survives an upgrade and a
 #        rollback in each direction, and the edge pods start (the controller
 #        projected it). Needs the Gateway API CRDs (`up` installs them).
+#   viii-b. the same release through chart 2.4.24 and back (the published
+#        chart, pulled by its commit tag). 2.4.24 takes the marker off the namespace
+#        and the MeshConfig out of the manifest; back on this chart the
+#        MeshConfig is rendered again (it carries the marker too) and the
+#        rollback to the revision that created the namespace still works.
 #
 # Helm: the suite runs under Helm 3 and under Helm 4 (#1543). Whatever `helm`
 # is first on PATH is the one under test; `verify` prints its version.
@@ -134,6 +139,13 @@ SPIRE_NS="spire-mgmt"
 GWAPI_VERSION="${GWAPI_VERSION:-v1.6.2}"
 EDGE_NS="aether-ingress"
 EDGE_MARKER="aether.io/edge-meshconfig-in-manifest"
+# The last chart that knows nothing of that marker, as published (leg viii-b
+# upgrades through it and back). By its commit tag (<version>-<commit>, #692),
+# which is written once: the bare `2.4.24` tag is written again by every
+# commit that still carries that version, and a tag@digest reference then
+# fails on "digest mismatch" (it did, the same afternoon).
+SKEW_CHART_VERSION="2.4.24"
+SKEW_CHART_TAG="${SKEW_CHART_VERSION}-da5198b28736a365eb0a6546f322bbcfb64bb418"
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi)
 WORKLOADS=(ds/aether-agent ds/aether-proxy ds/aether-mesh-dns ds/aether-uds-csi deploy/aether-registrar deploy/aether-controller)
 # Where the API server's admission configuration lives on the host; mounted into
@@ -942,6 +954,42 @@ verify_edge_meshconfig_rollback() {
 	[ "$(kc get ns "$EDGE_NS" -o json | jq -r --arg k "$EDGE_MARKER" '.metadata.annotations[$k] // empty')" = "true" ] ||
 		die "the namespace $EDGE_NS does not carry $EDGE_MARKER=true"
 	ok "revisions $on and $again both hold the edge's MeshConfig; $EDGE_NS carries $EDGE_MARKER"
+
+	# viii-b. Through the previous chart and back (the one-release skew). Chart
+	# 2.4.24 renders the edge Namespace WITHOUT the marker, so Helm takes it off,
+	# and does not render the live MeshConfig, which leaves the manifest. If
+	# the Namespace's marker were all the chart went by, every later revision
+	# would leave the MeshConfig out too, and a rollback to $on or $again would
+	# fail for good. The MeshConfig carries the marker as well, and the older
+	# chart does not touch it.
+	local old through back
+	old="$(mktemp -d)"
+	out="$(helm pull "oci://${IMAGE_REGISTRY}/chart-aether" --version "$SKEW_CHART_TAG" --untar --untardir "$old" 2>&1)" ||
+		die "could not pull the published chart ${IMAGE_REGISTRY}/chart-aether:${SKEW_CHART_TAG} (the previous release, for the skew leg): $out"
+	out="$(AETHER_CHART="$old/aether" documented_helm_install --set edge.enabled=true 2>&1)" ||
+		die "the upgrade to chart $SKEW_CHART_VERSION failed: $out"
+	through="$(release_field revision)"
+	# What this leg is about; if a 2.4.24 ever behaved otherwise the leg would
+	# prove nothing.
+	[ "$(manifest_meshconfigs "$through")" = "0" ] &&
+		[ -z "$(kc get ns "$EDGE_NS" -o json | jq -r --arg k "$EDGE_MARKER" '.metadata.annotations[$k] // empty')" ] ||
+		die "chart $SKEW_CHART_VERSION was expected to drop the edge's MeshConfig from the manifest and the marker from $EDGE_NS, and did not: this leg no longer tests the skew"
+	[ "$(edge_meshconfig_field .metadata.uid)" = "$uid" ] ||
+		die "the upgrade to chart $SKEW_CHART_VERSION deleted or replaced the edge's MeshConfig (uid $uid -> '$(edge_meshconfig_field .metadata.uid)')"
+	out="$(documented_helm_install --set edge.enabled=true 2>&1)" || die "the upgrade back from chart $SKEW_CHART_VERSION failed: $out"
+	back="$(release_field revision)"
+	[ "$(manifest_meshconfigs "$back")" = "1" ] ||
+		die "after an upgrade through chart $SKEW_CHART_VERSION the chart no longer renders the edge's MeshConfig (revision $back holds $(manifest_meshconfigs "$back")): no later revision can be rolled back from to revision $on"
+	[ "$(kc get ns "$EDGE_NS" -o json | jq -r --arg k "$EDGE_MARKER" '.metadata.annotations[$k] // empty')" = "true" ] ||
+		die "after an upgrade through chart $SKEW_CHART_VERSION the namespace $EDGE_NS is not marked again"
+	out="$(hc rollback "$RELEASE" "$on" -n "$NS" 2>&1)" ||
+		die "helm rollback $RELEASE $on failed after an upgrade through chart $SKEW_CHART_VERSION: $out"
+	out="$(hc rollback "$RELEASE" "$back" -n "$NS" 2>&1)" || die "helm rollback $RELEASE $back failed: $out"
+	[ "$(release_field status)" = "deployed" ] || die "after those rollbacks the release is '$(release_field status)', want deployed"
+	[ "$(edge_meshconfig_field .metadata.uid)" = "$uid" ] && [ "$(edge_meshconfig_field .spec.proxy.accessLogsEnabled)" = "true" ] ||
+		die "the edge's MeshConfig did not survive the way through chart $SKEW_CHART_VERSION (uid $uid -> '$(edge_meshconfig_field .metadata.uid)', spec: $(edge_meshconfig_field '.spec | tojson'))"
+	ok "through chart $SKEW_CHART_VERSION (revision $through, no MeshConfig, no marker) and back (revision $back): the MeshConfig is rendered and the namespace marked again; rollback to revision $on and to $back works; same object, edit kept"
+	rm -rf "$old"
 
 	# The edge off again: the namespace is the release's and goes with it.
 	out="$(documented_helm_install 2>&1)" || die "the upgrade that turns the edge off failed: $out"

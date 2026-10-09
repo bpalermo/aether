@@ -2248,8 +2248,9 @@ Error: no MeshConfig with the name "default" found
 ```
 
 Since 2.4.25 the chart renders it on **every** revision, for a release whose
-edge namespace it created: the namespace carries
-`aether.io/edge-meshconfig-in-manifest: "true"`. The chart sets no field of
+edge namespace it created: the namespace and the MeshConfig both carry
+`aether.io/edge-meshconfig-in-manifest: "true"`, and either one is enough
+afterwards. The chart sets no field of
 that MeshConfig's spec (`spec: {}` whatever the values), so rendering it again
 changes nothing in it: your edits survive every upgrade and every rollback
 (measured with Helm 3.18.4 and Helm 4.2.0: the same UID and the edited field
@@ -2263,18 +2264,33 @@ it on every revision.
   manifest and still cannot be a Helm 3 rollback target; the check and the way
   round of "Chart 2.4.24" apply (an upgrade to that revision's chart with that
   revision's values).
-- Do not add the annotation to such a namespace by hand. The next upgrade
-  would bring the live MeshConfig back into the manifest, and that revision
-  could then not be rolled back to from an older one: the same failure, one
-  revision later.
+- Do not add the annotation to such a namespace or MeshConfig by hand. The
+  next upgrade would bring the live MeshConfig back into the manifest, and that
+  revision could then not be rolled back to from an older one: the same
+  failure, one revision later.
+- **Back through 2.4.24** (an upgrade to the 2.4.24 chart, or a rollback to one
+  of its revisions, on a release whose edge namespace 2.4.25 created). Chart
+  2.4.24 renders the edge Namespace without the annotation, so Helm takes it
+  off the namespace, and it does not render the live MeshConfig, which leaves
+  the manifest and stays in the cluster with its annotations. The next
+  **upgrade** to 2.4.25 or later reads the marker from the MeshConfig, renders
+  it again and marks the namespace again, and rollbacks to the 2.4.25
+  revisions work from then on (measured with Helm 3.18.4 and Helm 4.2.0;
+  e2e leg viii-b). What does not work under Helm 3 is a `helm rollback`
+  straight **from a 2.4.24 revision to a 2.4.25 one**: the 2.4.24 manifest
+  holds no MeshConfig, and nothing in a chart can change a stored manifest.
+  Use `helm upgrade` to go forward from 2.4.24. The same holds from a
+  rollback copy of a 2.4.24 revision.
 - Which form a release has:
 
   ```bash
   kubectl get namespace aether-ingress \
     -o jsonpath='{.metadata.annotations.aether\.io/edge-meshconfig-in-manifest}{"\n"}'
-  # "true": the edge's MeshConfig is in the manifest of every revision since
-  # the one that created the namespace. Empty: seeded once (the namespace is
-  # older than 2.4.25, or was created with meshConfig.createDefault=false).
+  kubectl -n aether-ingress get meshconfig default \
+    -o jsonpath='{.metadata.annotations.aether\.io/edge-meshconfig-in-manifest}{"\n"}'
+  # "true" on either: the edge's MeshConfig is rendered on every revision of
+  # this chart. Both empty: seeded once (the namespace is older than 2.4.25,
+  # or was created with meshConfig.createDefault=false).
   ```
 - With `meshConfig.createDefault=false` the chart renders no MeshConfig and
   the namespace is created unmarked. If a marked release turns the seed off,

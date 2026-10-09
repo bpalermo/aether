@@ -3899,6 +3899,13 @@ helm_template_absent_test(
     ],
 )
 
+# The MeshConfig carries the same marker as the Namespace, and either one is
+# enough afterwards. Chart 2.4.24 renders the edge Namespace without the
+# annotation, so an upgrade or a rollback through it takes the Namespace's
+# marker off (measured, Helm 3.18.4); it does not render the live MeshConfig,
+# so the MeshConfig's stays, and the next upgrade to this chart renders the
+# MeshConfig again and marks the Namespace again (e2e/first-install.sh, leg
+# viii-b).
 helm_template_match_test(
     name = "aether_edge_meshconfig_seed_created_namespace_test",
     chart = ":aether",
@@ -3909,7 +3916,7 @@ helm_template_match_test(
         "edge.enabled=true",
     ],
     patterns = [
-        EDGE_MESHCONFIG + "    helm\\.sh/resource-policy: keep\\nspec: \\{\\}",
+        EDGE_MESHCONFIG + "    aether\\.io/edge-meshconfig-in-manifest: \"true\"\\n    helm\\.sh/resource-policy: keep\\nspec: \\{\\}",
         CONTROL_PLANE_MESHCONFIG + MESHCONFIG_SEED_HOOK_ANNOTATIONS + "spec:\\n",
     ],
 )

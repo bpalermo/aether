@@ -27,6 +27,9 @@ metadata:
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
   annotations:
+    {{- /* The same marker as on the Namespace; the one chart 2.4.24 cannot
+           take off (aether.edge.meshConfigInManifest). */}}
+    aether.io/edge-meshconfig-in-manifest: "true"
     helm.sh/resource-policy: keep
 spec: {}
 {{- else if not (lookup "config.aether.io/v1" "MeshConfig" $ns "default") }}

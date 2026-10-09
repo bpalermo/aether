@@ -202,27 +202,48 @@ because the chart sets no field of its spec (`spec: {}` whatever the values):
 Both measured (e2e/first-install.sh, leg viii: an edit of the MeshConfig
 survives an upgrade and a rollback in each direction).
 
-Which releases: the ones whose edge namespace THIS chart created. The Namespace
-carries aether.io/edge-meshconfig-in-manifest: "true" from its creation, and
-the answer is read back from the live Namespace afterwards. A namespace an
-older chart created is never marked, and its MeshConfig stays as it is (in one
-old manifest, or in none): bringing a live object back into the manifest would
-make the revision that does it one that cannot be rolled back to from an older
-one, which is the bug again, one revision later. The marker is only stamped
-with meshConfig.createDefault=true: in a namespace created without a seed, a
-seed turned on later is a hook (the namespace exists by then).
+Which releases: the ones whose edge namespace THIS chart created. The decision
+is taken once, on the revision that creates the namespace (the namespace is
+absent and meshConfig.createDefault is on), and recorded as
+aether.io/edge-meshconfig-in-manifest: "true" on BOTH objects, the Namespace
+and the MeshConfig. Afterwards it is read back from the live objects, and
+either marker is enough:
+  - the MeshConfig's survives a pass through chart 2.4.24 (an upgrade to it, or
+    a rollback to one of its revisions). 2.4.24 renders the edge Namespace
+    without the annotation, so Helm takes the Namespace's marker off, and it
+    does not render the live MeshConfig, so that object and its annotations
+    are left alone (measured, Helm 3.18.4). With the Namespace's marker alone,
+    every later revision of this chart would have left the MeshConfig out for
+    good, and no rollback to the earlier revisions would work again. Read from
+    the MeshConfig, the next upgrade to this chart renders it again and marks
+    the Namespace again;
+  - the Namespace's covers a MeshConfig that carries none: one the operator
+    deleted (rendered and created again, where the hook would leave it out of
+    the manifest) or replaced by hand. The second matters: an object that was
+    in the previous manifest and is not rendered is DELETED by Helm, and a
+    hand-made MeshConfig has no helm.sh/resource-policy: keep.
+A namespace an older chart created carries no marker, and neither does its
+MeshConfig; both stay as they are (the MeshConfig in one old manifest, or in
+none). Bringing such an object back into the manifest would make the revision
+that does it one that cannot be rolled back to from an older one, which is the
+bug again, one revision later. That is also what remains of a pass through
+2.4.24: under Helm 3, a rollback FROM a 2.4.24 revision to a revision of this
+chart fails (the 2.4.24 manifest holds no MeshConfig); an upgrade works.
 
 `lookup` returns nothing without a cluster, so `helm template` renders the
 first revision: marked.
 */}}
 {{- define "aether.edge.meshConfigInManifest" -}}
-{{- if and .Values.edge.enabled .Values.edge.namespaceCreate -}}
-{{- $live := lookup "v1" "Namespace" "" (include "aether.edge.namespace" .) | default (dict) -}}
-{{- if not $live -}}
-{{- if .Values.meshConfig.createDefault -}}
+{{- if .Values.edge.enabled -}}
+{{- $marker := "aether.io/edge-meshconfig-in-manifest" -}}
+{{- $ns := include "aether.edge.namespace" . -}}
+{{- $liveNs := lookup "v1" "Namespace" "" $ns | default (dict) -}}
+{{- $liveMc := lookup "config.aether.io/v1" "MeshConfig" $ns "default" | default (dict) -}}
+{{- if eq (dig "metadata" "annotations" $marker "" $liveMc | toString) "true" -}}
 true
-{{- end -}}
-{{- else if eq (dig "metadata" "annotations" "aether.io/edge-meshconfig-in-manifest" "" $live | toString) "true" -}}
+{{- else if and .Values.edge.namespaceCreate (eq (dig "metadata" "annotations" $marker "" $liveNs | toString) "true") -}}
+true
+{{- else if and .Values.edge.namespaceCreate .Values.meshConfig.createDefault (not $liveNs) -}}
 true
 {{- end -}}
 {{- end -}}

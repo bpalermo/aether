@@ -992,8 +992,9 @@ edge:
   # create it (with baseline PSA); set false if you manage the namespace yourself.
   # A namespace the chart creates is annotated
   # aether.io/edge-meshconfig-in-manifest: "true" (when meshConfig.createDefault
-  # is on): the edge's MeshConfig is then an object of the release on every
-  # revision, so that `helm rollback` works to each of them (#1514).
+  # is on), and so is the MeshConfig in it: the edge's MeshConfig is then an
+  # object of the release on every revision, so that `helm rollback` works to
+  # each of them (#1514).
   namespace: aether-ingress
   namespaceCreate: true
   # Gateway replicas behind the Service; rolled with the standard RollingUpdate
