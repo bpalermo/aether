@@ -243,15 +243,27 @@ jobs:
 
   # Single required status check — symmetric with the control-plane `ci` gate.
   # Always runs so it reports on every PR (including control-plane-only PRs where
-  # the matrix skips); fails only if a leg that actually ran failed.
+  # the matrix skips).
+  #
+  # `shell` and `test` skipped has to pass on such a PR, but only because
+  # `changes` said so (#1489). An output that was never set reads as the empty
+  # string in their `if:` and skips both exactly as `false` does, so
+  # scripts/ci-gate.sh reads the whole `needs` context and requires `changes`
+  # to have written proxy=true|false and both jobs to have ended the way that
+  # value says. A failed or cancelled job fails it, as before.
+  #
+  # The rules in that script repeat each job's `if:`; //scripts:ci_gate_test
+  # compares them with this file, and fails when a job is added here and not
+  # to `needs` below and to the script.
   proxy:
     if: always()
     needs: [changes, shell, test]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail if any proxy job failed or was cancelled
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-        run: |
-          echo "::error::a required proxy job failed or was cancelled"
-          exit 1
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Every job ended the way its conditions say it must
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: scripts/ci-gate.sh proxy
