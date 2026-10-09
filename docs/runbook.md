@@ -5828,7 +5828,7 @@ start, and a soak rolls the agents on purpose: they are reported with their coun
 nodes, and fail only when the published gauge shows the state for 300 s or more of
 consecutive samples (the `for: 5m` of `AetherMeshClusterPinPending`). The counter cannot
 make that call: it grows by entries times snapshots, not by time. A `reason` the script
-does not know fails, and so does any movement of a series with no `reason` label (an
+does not know fails the same way a gap reason does, and so does any movement of a series with no `reason` label (an
 agent before #1424, where the two kinds cannot be told apart). An agent that has the
 label and whose gauge does not reach Prometheus makes the gate `UNPROVEN`, not a pass.
 The lines and the table are in `e2e/soak/README.md`, "Grading".

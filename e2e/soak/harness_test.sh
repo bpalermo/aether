@@ -2258,6 +2258,17 @@ show "prober-grade: a reason the script does not know" "$G"
 if [ "$grc" -eq 1 ]; then pass "grade unknown reason: exit 1"; else fail "grade unknown reason: exit $grc, want 1"; fi
 expect "$G" "grade unknown reason: its class" '^UNPINNED reason=some_new_reason count=1 nodes=worker-02 class=unknown$' 1
 expect "$G" "grade unknown reason: FAIL, and the text says the script does not know it" '^UNPINNED verdict=FAIL increase=1 series=21 nodes=5 resets=0  \(this script does not know reason=some_new_reason count=1 nodes=worker-02: an agent newer than this script reports a reason that is in neither GAP_REASONS \(no_namespace_metadata,pin_not_rendered\) nor NO_TLS_REASONS \(trust_domain_unknown,tls_not_published\), and it is not taken for a harmless one\)$' 1
+# ... and the unknown reason in the gauge alone, its counter at rest: the same
+# closed door. A non-zero gauge sample is a state the agent published under a
+# reason this script cannot class, whether or not a snapshot was set in the
+# window. RED before: PASS, exit 0 (the gauge was not read).
+grade_case grade-unknown-held
+grade_edit grade-unknown-held published.window '.data.result += [.data.result[] | select(.metric.node == "worker-02" and .metric.reason == "pin_not_rendered") | .metric.reason = "some_new_reason"]'
+grade_last grade-unknown-held published.window worker-02 some_new_reason 5
+GF="$TMP" run_grade grade-unknown-held "$G" --dir "$GD" --prometheus http://prom.example:9090
+if [ "$grc" -eq 1 ]; then pass "grade unknown reason in the gauge: exit 1 although no counter moved"; else fail "grade unknown reason in the gauge: exit $grc, want 1"; fi
+expect "$G" "grade unknown reason in the gauge: FAIL, and the text says the script does not know it" '^UNPINNED verdict=FAIL increase=0 series=20 nodes=5 resets=0  \(this script does not know reason=some_new_reason node=worker-02 published=5: an agent newer than this script ' 1
+expect "$G" "grade unknown reason in the gauge: its published line" '^UNPINNED published: node=worker-02 job=aether-agent reason=some_new_reason class=unknown nonzero_samples=1 longest=0s max=5 at_end=5  \(the gauge held it: fails the gate\)$' 1
 
 # unlabelled: agents from before #1424 (the `born` scenario's: one series per
 # node, no reason). Whether TLS was published under what they counted is not

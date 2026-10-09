@@ -119,8 +119,10 @@
 #       this: it adds the entry count on every snapshot, so its size is entries
 #       times snapshots, not time.
 #   any other value                           (class unknown)
-#       an agent newer than this script. FAIL on any movement: a reason this
-#       script does not know is not taken for a harmless one.
+#       an agent newer than this script. FAIL on any movement of the counter
+#       and on any non-zero sample of the gauge, like a gap reason: a reason
+#       this script does not know is not taken for a harmless one. A series of
+#       it that rests at zero in both is not a verdict.
 #   no `reason` label                         (class unlabelled)
 #       an agent from before #1424. Its one series holds every reason, and
 #       whether TLS was published under what it counted is not in it: FAIL on
