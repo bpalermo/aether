@@ -12,10 +12,15 @@
 # closed once every pin is current). A pin that is behind still pulls the digest
 # it names, so nothing is broken and this workflow does not fail for it; it is
 # not a required check and gates no pull request. A registry that does not
-# answer is a warning on the run: such a run neither closes nor rewrites the
-# issue. The rules are scripts/third-party-images-report.sh;
-# //scripts:third_party_images_report_test pins them on a fake `outdated` and a
-# fake `gh`.
+# answer is a warning on the run: such a run neither closes the issue nor
+# rewrites what it says is behind. It does count the failed lookup, in a hidden
+# line of the rolling issue (the open one, else the newest closed one, edited
+# and not reopened): a pin whose lookup fails in three runs in a row is
+# reported like a pin behind (#1570). The same run lists the tags that are
+# newer than a pinned one, as a section of the issue and of the run summary
+# that never opens or closes it (#1569). The rules are
+# scripts/third-party-images-report.sh; //scripts:third_party_images_report_test
+# pins them on a fake `outdated` and a fake `gh`.
 #
 # The registries are read anonymously (public repositories; the script sends no
 # credential and this workflow has no secret).
