@@ -940,7 +940,7 @@ reference is written `<name>:<tag>@sha256:…`: the digest is what a node or
 | --- | --- | --- |
 | `check` | no | The gate (CI's `shell` job). Fails on an image named by tag only or with no tag, on a digest the list does not have for that name, on a tag that disagrees with the list, and on a pin or an exception nothing uses any more |
 | `list` | no | Every pin, with the files and lines that use it |
-| `outdated [--newer-tags] [<name>...]` | yes | Asks each pin's registry what its tag points at now: `current`, `MOVED` (the tag was re-pushed; the new digest is printed) or `ERROR` (no answer; never reported as current). `--newer-tags` adds the registry's tags that have the pinned tag's shape and sort after it. Exit 0 all current, 1 a pin is behind, 2 a pin could not be checked |
+| `outdated [--newer-tags] [<name>...]` | yes | Asks each pin's registry what its tag points at now: `current`, `MOVED` (the tag was re-pushed; the new digest is printed), `NOT-MULTI-ARCH` (the pinned index itself lacks `linux/amd64` or `linux/arm64`; counted as behind) or `ERROR` (no answer; never reported as current). `--newer-tags` adds the registry's tags that have the pinned tag's shape and sort after it. Exit 0 all current, 1 a pin is behind, 2 a pin could not be checked |
 | `resolve <name>:<tag>...` | yes | Prints the `pin` line for a tag, and says so when its index lacks `linux/amd64` or `linux/arm64` |
 
 `outdated` and `resolve` read public registries anonymously: no credential is

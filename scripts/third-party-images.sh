@@ -29,7 +29,8 @@
 #   scripts/third-party-images.sh outdated [--newer-tags] [<name>...]
 #       Asks each pin's registry what its tag points at now. Anonymous: public
 #       repositories only, no credential is read from anywhere. Reports, per pin,
-#       `current`, `MOVED` (the tag was re-pushed: the new digest is printed) or
+#       `current`, `MOVED` (the tag was re-pushed: the new digest is printed),
+#       `NOT-MULTI-ARCH` (the pinned index lacks linux/amd64 or linux/arm64) or
 #       `ERROR` (the registry did not answer; never reported as current), and
 #       says when the index no longer lists linux/amd64 and linux/arm64. With
 #       --newer-tags it also lists the registry's tags that sort after the
@@ -586,14 +587,19 @@ cmd_outdated() {
 			errors=$((errors + 1))
 			continue
 		fi
-		if [ "$TAG_DIGEST" = "$digest" ]; then
-			echo "current  $name:$tag  $digest"
-		else
+		gap="$(platform_gap "$TAG_PLATFORMS")"
+		if [ "$TAG_DIGEST" != "$digest" ]; then
 			echo "MOVED    $name:$tag  pinned $digest, the tag now points at $TAG_DIGEST"
 			behind=$((behind + 1))
+			[ -z "$gap" ] || echo "         $name:$tag  note: $gap"
+		elif [ -n "$gap" ]; then
+			# The pin itself is not an index of both architectures: not current,
+			# whatever the tag does.
+			echo "NOT-MULTI-ARCH $name:$tag  $digest: $gap"
+			behind=$((behind + 1))
+		else
+			echo "current  $name:$tag  $digest"
 		fi
-		gap="$(platform_gap "$TAG_PLATFORMS")"
-		[ -z "$gap" ] || echo "         $name:$tag  note: $gap"
 		if [ "$with_newer" = 1 ]; then
 			if newer="$(newer_tags "$name" "$tag" "$work")"; then
 				[ -z "$newer" ] || echo "         $name:$tag  newer tags: $(printf '%s' "$newer" | tr '\n' ' ')"

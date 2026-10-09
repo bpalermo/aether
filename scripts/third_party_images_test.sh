@@ -509,6 +509,18 @@ echo '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json
 registry outdated gcr.io/proj/echo
 says "outdated: says when the tag is a single-platform manifest" 1 "note: a single-platform manifest, not a multi-arch index"
 
+# The same, when the PIN ITSELF is the short index (the digest has not moved):
+# it is not "current", and the exit is 1 for the gap alone.
+d_short="$(serve gcr.io proj/echo v1 linux/amd64)"
+echo "pin gcr.io/proj/echo v1 $d_short" >"$INV"
+registry outdated gcr.io/proj/echo
+if [[ "$OUT" == *"current  gcr.io"* ]]; then
+	bad "outdated: a pinned index short of an architecture was reported current"$'\n'"$OUT"
+else
+	says "outdated: a pin whose own index lacks an architecture is behind, exit 1" 1 \
+		"NOT-MULTI-ARCH gcr.io/proj/echo:v1  $d_short: the index does not list linux/arm64" "1 checked: 1 behind, 0 could not be checked."
+fi
+
 # A registry that does not answer with a manifest is never "current".
 not_current() { # <name> <needle>
 	registry outdated gcr.io/proj/echo
