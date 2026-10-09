@@ -38,15 +38,34 @@ type Object struct {
 	// the pod has a hostPath volume whose path ends with each.
 	HostPaths []string `json:"host_paths"`
 	// Webhooks maps the name of a webhook of an admission configuration to the
-	// id of the `names` entry that is the label it selects by: a key of its
-	// namespaceSelector's or its objectSelector's matchLabels.
-	Webhooks map[string]string `json:"webhooks"`
+	// labels it selects by.
+	Webhooks map[string]WebhookSelector `json:"webhooks"`
 
 	// What the fields above refer to, filled in by Contract.link.
 	linked    bool
 	nameFrom  string
 	hostPaths []string
-	webhooks  map[string]string
+	webhooks  map[string]WebhookSelector
+}
+
+// WebhookSelector says which label a webhook selects by, and with which of its
+// two selectors: each is the id of a `names` entry (and, once linked, that
+// entry's value), a key of the selector's matchLabels with the value "true".
+// The two are not interchangeable: one selects the namespaces whose pods the
+// webhook sees, the other the pods themselves.
+type WebhookSelector struct {
+	Namespaces string `json:"namespaces"`
+	Objects    string `json:"objects"`
+}
+
+func (s WebhookSelector) refs() []string {
+	var out []string
+	for _, id := range []string{s.Namespaces, s.Objects} {
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // refs returns the ids of the `names` entries the object itself refers to
@@ -60,7 +79,7 @@ func (o Object) refs() []string {
 		out = append(out, argRefs(pattern)...)
 	}
 	for _, webhook := range sortedKeys(o.Webhooks) {
-		out = append(out, o.Webhooks[webhook])
+		out = append(out, o.Webhooks[webhook].refs()...)
 	}
 	slices.Sort(out)
 	return slices.Compact(out)
@@ -208,16 +227,7 @@ func (c *Contract) namesByID() map[string]string {
 func (c *Contract) validateLinks() []string {
 	var problems []string
 	attributes, names := c.attributesByID(), c.namesByID()
-	c.eachObject(func(o *Object) {
-		if _, ok := names[o.NameFrom]; o.NameFrom != "" && !ok {
-			problems = append(problems, fmt.Sprintf("%s takes its name from %q, and `names` has no entry with that id", o.ID, o.NameFrom))
-		}
-		for _, id := range (Object{HostPaths: o.HostPaths, Webhooks: o.Webhooks}).refs() {
-			if _, ok := names[id]; !ok {
-				problems = append(problems, fmt.Sprintf("%s refers to %q under `host_paths` or `webhooks`, and `names` has no entry with that id (a host path is a pattern, like /plugins/<csi.driver>)", o.ID, id))
-			}
-		}
-	})
+	c.eachObject(func(o *Object) { problems = append(problems, o.validateRefs(names)...) })
 	referrers := map[string][]string{}
 	c.eachContainer(func(object string, ct *Container) {
 		problems = append(problems, ct.validateAttributes(object, attributes, referrers)...)
@@ -232,6 +242,25 @@ func (c *Contract) validateLinks() []string {
 		}
 	}
 	return append(problems, c.validateHolders()...)
+}
+
+// validateRefs checks the `names` entries the object itself refers to.
+func (o Object) validateRefs(names map[string]string) []string {
+	var problems []string
+	if _, ok := names[o.NameFrom]; o.NameFrom != "" && !ok {
+		problems = append(problems, fmt.Sprintf("%s takes its name from %q, and `names` has no entry with that id", o.ID, o.NameFrom))
+	}
+	for _, webhook := range sortedKeys(o.Webhooks) {
+		if len(o.Webhooks[webhook].refs()) == 0 {
+			problems = append(problems, fmt.Sprintf("%s: the webhook %q is held to nothing: give it `namespaces` or `objects`, the id of the `names` entry that selector selects by", o.ID, webhook))
+		}
+	}
+	for _, id := range (Object{HostPaths: o.HostPaths, Webhooks: o.Webhooks}).refs() {
+		if _, ok := names[id]; !ok {
+			problems = append(problems, fmt.Sprintf("%s refers to %q under `host_paths` or `webhooks`, and `names` has no entry with that id (a host path is a pattern, like /plugins/<csi.driver>)", o.ID, id))
+		}
+	}
+	return problems
 }
 
 // validateAttributes checks the resource attributes the container refers to,
@@ -320,9 +349,9 @@ func (c *Contract) link() {
 		for _, pattern := range o.HostPaths {
 			o.hostPaths = append(o.hostPaths, argValue(pattern, names))
 		}
-		o.webhooks = map[string]string{}
-		for webhook, id := range o.Webhooks {
-			o.webhooks[webhook] = names[id]
+		o.webhooks = map[string]WebhookSelector{}
+		for webhook, s := range o.Webhooks {
+			o.webhooks[webhook] = WebhookSelector{Namespaces: names[s.Namespaces], Objects: names[s.Objects]}
 		}
 	})
 	c.eachContainer(func(_ string, ct *Container) {
@@ -653,30 +682,39 @@ func (o Object) checkHostPaths(what string, d manifest) []string {
 const selectedValue = "true"
 
 // checkWebhooks holds the webhooks of an admission configuration to the label
-// each selects by.
+// each selects by, in the selector the contract names.
 func (o Object) checkWebhooks(what string, d manifest) []string {
 	var problems []string
 	for _, name := range sortedKeys(o.webhooks) {
-		var names, selectors []string
+		var names []string
+		var namespaces, objects map[string]string
 		found := false
 		for _, w := range d.Webhooks {
 			names = append(names, w.Name)
 			if w.Name == name {
 				found = true
-				selectors = slices.Concat(labelPairs(w.NamespaceSelector.MatchLabels), labelPairs(w.ObjectSelector.MatchLabels))
+				namespaces, objects = w.NamespaceSelector.MatchLabels, w.ObjectSelector.MatchLabels
 			}
 		}
-		// The label opts in with the value "true": a selector on the key with
-		// another value matches nothing the mesh manages.
-		want := o.webhooks[name] + "=" + selectedValue
-		switch {
-		case !found:
+		if !found {
 			problems = append(problems, fmt.Sprintf("%s has no webhook %q (its webhooks: %s)", what, name, orNone(names)))
-		case !slices.Contains(selectors, want):
-			problems = append(problems, fmt.Sprintf("%s: the webhook %q does not select by the label %s, the value of the entry %s with %q (it selects by: %s)", what, name, want, o.Webhooks[name], selectedValue, orNone(selectors)))
+			continue
 		}
+		problems = append(problems, selects(what, name, "namespaceSelector", namespaces, o.webhooks[name].Namespaces, o.Webhooks[name].Namespaces)...)
+		problems = append(problems, selects(what, name, "objectSelector", objects, o.webhooks[name].Objects, o.Webhooks[name].Objects)...)
 	}
 	return problems
+}
+
+// selects reports a selector that does not select by the label with the value
+// "true". The label opts in with that value: a selector on the key with
+// another value matches nothing the mesh manages.
+func selects(what, webhook, selector string, labels map[string]string, label, id string) []string {
+	if id == "" || labels[label] == selectedValue {
+		return nil
+	}
+	return []string{fmt.Sprintf("%s: the %s of the webhook %q does not select by the label %s=%s, the value of the entry %s with %q (it selects by: %s)",
+		what, selector, webhook, label, selectedValue, id, selectedValue, orNone(labelPairs(labels)))}
 }
 
 func (c Container) check(what string, containers []container) []string {

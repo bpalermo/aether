@@ -238,8 +238,11 @@ func TestParseRejects(t *testing.T) {
 		"a host path that is no pattern": {
 			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, host_paths: [/plugins/x]}], checked_by: review-only}", "o refers to \"/plugins/x\" under `host_paths` or `webhooks`",
 		},
+		"a webhook held to nothing": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, webhooks: {hook: {}}}], checked_by: review-only}", "o: the webhook \"hook\" is held to nothing",
+		},
 		"a webhook held to a name the contract lacks": {
-			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, webhooks: {hook: nope}}], checked_by: review-only}", "o refers to \"nope\" under `host_paths` or `webhooks`",
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, webhooks: {hook: {objects: nope}}}], checked_by: review-only}", "o refers to \"nope\" under `host_paths` or `webhooks`",
 		},
 		"an object named by an entry the contract lacks": {
 			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name_from: nope}], checked_by: review-only}", "o takes its name from \"nope\", and `names` has no entry with that id",

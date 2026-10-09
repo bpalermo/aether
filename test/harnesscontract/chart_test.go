@@ -372,8 +372,8 @@ charts:
       - id: w
         kind: MutatingWebhookConfiguration
         webhooks:
-          inject.example: label
-          ndots.example: label
+          inject.example: {namespaces: label}
+          ndots.example: {objects: label}
     checked_by: review-only
 `
 
@@ -431,28 +431,40 @@ func TestRenderCheck_HostPathsAndWebhooks(t *testing.T) {
 		},
 		"the label's entry is edited alone": {
 			driver: "csi.example.io", label: "example.io/meshed",
-			want: `w: the render's one MutatingWebhookConfiguration: the webhook "inject.example" does not select by the label example.io/meshed=true, the value of the entry label with "true" (it selects by: example.io/managed=true)`,
+			want: `w: the render's one MutatingWebhookConfiguration: the namespaceSelector of the webhook "inject.example" does not select by the label example.io/meshed=true, the value of the entry label with "true" (it selects by: example.io/managed=true)`,
 		},
 		"the chart's namespace selector is edited alone": {
 			driver: "csi.example.io", label: "example.io/managed",
 			render: strings.Replace(selectedRender, "namespaceSelector: {matchLabels: {example.io/managed:", "namespaceSelector: {matchLabels: {example.io/meshed:", 1),
-			want:   `the webhook "inject.example" does not select by the label example.io/managed=true`,
+			want:   `the namespaceSelector of the webhook "inject.example" does not select by the label example.io/managed=true`,
 		},
 		"the chart's object selector is edited alone": {
 			driver: "csi.example.io", label: "example.io/managed",
 			render: strings.Replace(selectedRender, "objectSelector: {matchLabels: {example.io/managed:", "objectSelector: {matchLabels: {example.io/meshed:", 1),
-			want:   `the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/meshed=true)`,
+			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/meshed=true)`,
+		},
+		// The two selectors are not interchangeable: the label moved from one
+		// to the other selects other things.
+		"the chart moves the label to the object selector": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "namespaceSelector: {matchLabels: {example.io/managed:", "objectSelector: {matchLabels: {example.io/managed:", 1),
+			want:   `the namespaceSelector of the webhook "inject.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: none)`,
+		},
+		"the chart moves the label to the namespace selector": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "    objectSelector: {matchLabels: {example.io/managed:", "    namespaceSelector: {matchLabels: {example.io/managed:", 1),
+			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true`,
 		},
 		// The key with another value matches no pod the mesh manages.
 		"the chart selects the label with another value": {
 			driver: "csi.example.io", label: "example.io/managed",
 			render: strings.Replace(selectedRender, `objectSelector: {matchLabels: {example.io/managed: "true"}}`, `objectSelector: {matchLabels: {example.io/managed: "false"}}`, 1),
-			want:   `the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/managed=false)`,
+			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/managed=false)`,
 		},
 		"a webhook that selects by nothing": {
 			driver: "csi.example.io", label: "example.io/managed",
 			render: strings.Replace(selectedRender, "    objectSelector: {matchLabels: {example.io/managed: \"true\"}}\n", "", 1),
-			want:   `the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: none)`,
+			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: none)`,
 		},
 		"a webhook the chart no longer renders": {
 			driver: "csi.example.io", label: "example.io/managed",
@@ -488,7 +500,7 @@ func TestRenderCheck_HostPathsAndWebhooks(t *testing.T) {
 	// Built by hand, nothing resolved the entries: never a pass.
 	for _, o := range []Object{
 		{ID: "o", Kind: "DaemonSet", Name: "plugin", HostPaths: []string{"/plugins/<driver>"}},
-		{ID: "o", Kind: "MutatingWebhookConfiguration", Webhooks: map[string]string{"inject.example": "driver"}},
+		{ID: "o", Kind: "MutatingWebhookConfiguration", Webhooks: map[string]WebhookSelector{"inject.example": {Objects: "driver"}}},
 	} {
 		got := strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(selectedRender)), "\n")
 		if !strings.Contains(got, "o refers to other entries (driver) and they were not resolved") {

@@ -340,7 +340,8 @@ names:
 # entry whose value it is run with (or to a pattern: `<id>` inside other text
 # stands for that entry's value); `host_paths` are such patterns too, each the
 # end of the path of a hostPath volume of the pod; `webhooks` maps a webhook of
-# an admission configuration to the id of the `names` entry it selects by, as
+# an admission configuration to the `names` entry it selects by (`namespaces`
+# for its namespaceSelector, `objects` for its objectSelector), as
 # a label with the value "true"; an object with neither `name` nor `name_from`
 # is the render's one object of its kind; `rolling_update` is the workload's
 # rolling-update strategy, which decides whether a roll runs the old and the
@@ -428,8 +429,10 @@ charts:
       - id: chart.aether.pod_webhooks
         kind: MutatingWebhookConfiguration
         webhooks:
-          namespace-inject.pods.aether.io: pod.label.managed
-          ndots.pods.aether.io: pod.label.managed
+          # Namespaces labelled for the mesh: their pods are given the pod label.
+          namespace-inject.pods.aether.io: {namespaces: pod.label.managed}
+          # Pods that carry the label already.
+          ndots.pods.aether.io: {objects: pod.label.managed}
     checked_by: //test/harnesscontract:aether_chart_test
 
   - id: chart.aether.agent_surge

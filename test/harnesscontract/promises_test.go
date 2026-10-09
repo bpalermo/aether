@@ -86,7 +86,7 @@ charts:
         name_from: dom
       - id: c.w
         kind: MutatingWebhookConfiguration
-        webhooks: {hook.x: dom}
+        webhooks: {hook.x: {objects: dom}}
     checked_by: review-only
 `
 
@@ -250,9 +250,10 @@ func TestCheckLock_SameVersion(t *testing.T) {
 			changes: []change{{`host_paths: ["/plugins/<dom>"]`, `host_paths: ["/plugins/<dom>", "/registry/<dom>"]`}},
 			want:    []string{noBumpNeeded, `"c.o host_paths /registry/<dom>": "`},
 		},
-		"a webhook selecting by another name": {changes: []change{{"webhooks: {hook.x: dom}", "webhooks: {hook.x: port}"}}, want: []string{`"c.w" no longer promises what it did at version 3: webhooks hook.x changed`, bumpNeeded}},
-		"a webhook no longer held":            {changes: []change{{"webhooks: {hook.x: dom}", "webhooks: {hook.y: dom}"}}, want: []string{`webhooks hook.x is gone`, bumpNeeded}},
-		"a name for an object that had none":  {changes: []change{{"kind: MutatingWebhookConfiguration\n", "kind: MutatingWebhookConfiguration\n        name: hooks\n"}}, want: []string{noBumpNeeded, `"c.w name": "`}},
+		"a webhook selecting by another name":  {changes: []change{{"webhooks: {hook.x: {objects: dom}}", "webhooks: {hook.x: {objects: port}}"}}, want: []string{`"c.w" no longer promises what it did at version 3: webhooks hook.x changed`, bumpNeeded}},
+		"a webhook held by its other selector": {changes: []change{{"webhooks: {hook.x: {objects: dom}}", "webhooks: {hook.x: {namespaces: dom}}"}}, want: []string{`"c.w" no longer promises what it did at version 3: webhooks hook.x changed`, bumpNeeded}},
+		"a webhook no longer held":             {changes: []change{{"webhooks: {hook.x: {objects: dom}}", "webhooks: {hook.y: {objects: dom}}"}}, want: []string{`webhooks hook.x is gone`, bumpNeeded}},
+		"a name for an object that had none":   {changes: []change{{"kind: MutatingWebhookConfiguration\n", "kind: MutatingWebhookConfiguration\n        name: hooks\n"}}, want: []string{noBumpNeeded, `"c.w name": "`}},
 		// A broken promise and a new one in the same change: the bump comes
 		// first, and nothing offers the lines that would hide it.
 		"a new entry beside a removed one": {
