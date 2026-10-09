@@ -598,6 +598,22 @@ then stop the churn driver and the watchdog as below.
 kubectl apply -n aether-test -f e2e/soak/echo.yaml
 kubectl -n aether-test get pods -l app=echo -o wide   # expect 3, on 3 different nodes
 
+# 0a. The five load-and-roll workloads, svc-1 ... svc-5 (#1462): a Deployment and
+#     a ServiceAccount each, nothing else (the registrar generates the mesh
+#     Service `svc-N` from the registered endpoints). churn.sh rolls all five and
+#     shrinks svc-5; the load drives svc-1 ... svc-4. Only needed once, and after
+#     any change to the file. On a cluster that already has them, a change to
+#     the pod template ROLLS all five at once: never apply it during a run.
+#     `churn.sh --preflight` (step 3) reads each of them and refuses to start
+#     when one is absent or differs in a way that would void the soak.
+#     All five hold a 10 s preStop sleep, a deliberate change (#1517): the
+#     workloads earlier soaks ran held 3 s on four of the five, so roll times
+#     and per-roll counts of svc-2 ... svc-5 do not compare across it. A cluster that still has the old objects is refused by the
+#     pre-flight until this file is applied.
+kubectl apply -n aether-test -f e2e/soak/svc.yaml
+for d in svc-1 svc-2 svc-3 svc-4 svc-5; do kubectl -n aether-test rollout status "deployment/$d"; done
+kubectl -n aether-test get svc svc-1 svc-2 svc-3 svc-4 svc-5   # the generated mesh Services
+
 # 0b. The proposal-037 leg: a multi-protocol workload (HTTP :8080 primary + raw
 #     TCP :9000) plus the per-node dialer that keeps its new chains busy. Same
 #     "only needed once" status as echo.yaml, and the same reason to CHECK it:
@@ -681,7 +697,12 @@ kubectl apply -f e2e/soak/k6-runner.yaml
 # cluster: on 2026-09-26 that made every roll hit localhost:8080 for 58 minutes
 # while the soak looked healthy. The foreground --preflight run is the loud one:
 # it checks /readyz, that every DaemonSet/Deployment the schedule rolls (and the
-# SHRINK target) exists, and that the context may patch them, that the uds-csi
+# SHRINK target) exists, and that the context may patch them, that each of
+# svc-1 ... svc-5 is the workload svc.yaml makes where it matters (#1462: it has
+# replicas, all of them available, and is not mid-roll; its pods are in the mesh and run as the
+# ServiceAccount of its name; it has a readiness probe; it rolls surge-first with
+# minReadySeconds, a preStop sleep of 10 s or more and a termination grace that
+# outlasts the sleep by 2 s or more), that the uds-csi
 # step's UDS Deployments have a Running pod to delete, and exits non-zero
 # with the reason on stderr. The detached launch pre-flights again, but its stderr
 # goes to /dev/null -- so never skip the foreground run. A failed pre-flight
@@ -2622,10 +2643,34 @@ Each of these invalidated a real run:
   two images under plain docker, started as the manifests start them, 20 requests each:
   `echo-basic` 22 stdout lines without it (two at start-up) and none with it,
   `http-echo` 20 and none (its start-up line is on stderr and stays); the server is
-  PID 1 either way. Not yet run on a cluster. **`svc-1` … `svc-5` are `echo-basic`
-  too and are not defined in this repository**: wherever they are, give them the same
-  `initContainers`, `command`, `volumeMounts` and `volumes` (copy them from `echo.yaml`),
-  or they go on logging a line per request.
+  PID 1 either way. Not yet run on a cluster. `svc.yaml` starts `svc-1` … `svc-5`
+  the same way.
+- `svc.yaml` — the five load-and-roll workloads, `svc-1` … `svc-5` (#1462): 4 replicas
+  of `echo-basic` each, a Deployment and a ServiceAccount, no Service (the registrar
+  generates the mesh Service). `churn.sh` rolls all five and shrinks `svc-5`;
+  `sortie-targets.txt` drives `svc-1` … `svc-4`; `svc-5` is a declared upstream that is
+  never driven. They differ in two places, which the file's header names and
+  `harness_test.sh` holds: `svc-4`'s two endpoint metadata annotations and `svc-5`'s
+  second port (h2c on 3001). Written from the workloads the soaks so far ran on, with
+  the quiet start added, two ports of `svc-5` that nothing listened on removed, and
+  the preStop sleep set to 10 s on all five. That last one is a deliberate change
+  (#1517): `svc-1` slept 10 s and the other four 3 s, which
+  `docs/workload-requirements.md` records as about one failed request per pod, in a
+  soak whose load gate wants none. Each old pod of `svc-2` … `svc-5` now lives 7 s
+  longer in a roll, so their roll times and per-roll counts are not comparable with
+  runs before the change. The schedule has room: a roll of four replicas is about a
+  minute to `rollout status` (four steps of pod start plus `minReadySeconds`; the
+  Deployment controller does not wait for a terminating pod, so the sleep adds only
+  to the tail), the driver does not wait on it, and the nearest scheduled action
+  after any `svc-N` roll is six minutes later. `churn.sh --preflight` reads each one
+  and names what would void a soak: absent, no replica, not all available, mid-roll,
+  not in the mesh, another ServiceAccount, no readiness probe (any handler; its
+  numbers are not read), a roll that is not surge-first or has no `minReadySeconds`,
+  a preStop sleep under 10 s, a `terminationGracePeriodSeconds` under the sleep plus
+  2 s (unset is the 30 s default; `common/drain/drain.go` keeps the pool close out of
+  the last 2 s of the grace, so the SIGTERM must come before them). A server that is
+  not started quiet is a `note`, not a refusal. Not yet applied to a cluster from
+  this file.
 - `run.sh` — the one kickoff (proposal 042, #1323): `e2e` and `soak` modes, explicit
   `--context`. See "Load driver: sortie".
 - `sortie-values.yaml` — Helm values for the sortie chart: the engine DaemonSet, its
