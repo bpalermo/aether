@@ -78,6 +78,55 @@ false
 {{- end -}}
 
 {{/*
+"hook" or "release": how this render seeds a `default` MeshConfig that is not
+live yet (#1471).
+
+The seed is rendered once (a `lookup` skips it when the object exists) and the
+operator owns it afterwards. As a release object it is in the manifest of the
+one revision that seeded it and of no other, and stays live. `helm rollback` to
+that revision (the first one of every release) then fails with `no MeshConfig
+with the name "default" found`: for an object that is live and in the target
+manifest, Helm builds its patch from the CURRENT manifest's copy, and there is
+none. An object that is in no manifest cannot be in that position, so the seed
+is a hook:
+
+  helm.sh/hook: pre-install,pre-upgrade
+
+  - pre, not post: the agent pod (and the edge's) stays in ContainerCreating
+    until the controller has projected the MeshConfig into a ConfigMap, so
+    under `--wait` a post-install hook would never run.
+  - pre-upgrade as well: whenever the object is absent on an upgrade (a first
+    install that failed early, meshConfig.createDefault or edge.enabled turned
+    on later, an object someone deleted) it is seeded then, as before.
+  - NEVER a rollback event. On a rollback Helm runs the hooks STORED with the
+    target revision, and it deletes a hook's object before creating it (the
+    default helm.sh/hook-delete-policy, before-hook-creation). A seed with a
+    rollback event would replace the operator's MeshConfig with the seed. For
+    the same reason the `lookup` around the template is what keeps an install
+    or an upgrade from doing that: the hook is only rendered when there is
+    nothing to delete.
+
+"release" is the exception. A pre-install hook runs before any object of the
+release exists, so it cannot create a MeshConfig in a namespace that this very
+revision creates (namespace.create=true with the release stored elsewhere;
+edge.namespaceCreate=true, the default once the edge is on): the hook, and the
+install with it, would fail on "namespaces ... not found". That one revision
+seeds the MeshConfig as a release object, as every chart before 2.4.24 did, and
+cannot be rolled back to once a later revision exists (docs/runbook.md,
+"Chart 2.4.24", has the way round). `lookup` returns nothing without a cluster,
+so `helm template` shows this case whenever the chart renders the namespace.
+
+Usage: include "aether.meshConfig.seedMode" (dict "namespace" $ns "rendersNamespace" <bool>)
+*/}}
+{{- define "aether.meshConfig.seedMode" -}}
+{{- if and .rendersNamespace (not (lookup "v1" "Namespace" "" .namespace)) -}}
+release
+{{- else -}}
+hook
+{{- end -}}
+{{- end -}}
+
+{{/*
 Fails an upgrade that could make Helm delete the namespace although this render
 does not include it (#1403).
 

@@ -36,6 +36,12 @@
 #        default `spire.enabled=true`.
 #   v.   upgrade — the same command again: revision 2, `deployed`, the same
 #        namespace (UID), still Ready.
+#   v-a. rollback (#1471) — `helm rollback aether 1`, then `helm rollback
+#        aether 2`: each leaves the release `deployed`, the seeded MeshConfig is
+#        the same object with the operator's edit in it, and no revision's
+#        manifest holds a MeshConfig (it is a hook). A deleted MeshConfig is
+#        seeded again by the next upgrade, and that revision can be rolled back
+#        to as well.
 #   v-b. a release written by an older chart with namespace.create=false (no
 #        marker on the agent ServiceAccount): the first upgrade is refused with
 #        the `keep` command, goes through after it, and the next one needs
@@ -421,6 +427,63 @@ verify_upgrade() {
 	wait_ready "after the upgrade"
 }
 
+# One field of the seeded MeshConfig (a jq path), or nothing.
+meshconfig_field() { kc -n "$NS" get meshconfig default -o json 2>/dev/null | jq -r "$1 // empty"; }
+# How many MeshConfig documents revision $1's stored manifest holds.
+manifest_meshconfigs() { hc get manifest "$RELEASE" -n "$NS" --revision "$1" | grep -c '^kind: MeshConfig' || true; }
+
+# v-a. Back to the first revision, and forward again (#1471). The chart seeds
+# the `default` MeshConfig once and the operator owns it afterwards. While the
+# seed was a release object it was in revision 1's manifest and in no later
+# one, and still live: `helm rollback <release> 1` failed with `no MeshConfig
+# with the name "default" found` and left the release `failed`.
+verify_rollback_to_first() {
+	log "v-a. helm rollback to the release's first revision, and forward again (#1471)"
+	local uid out rev
+	uid="$(meshconfig_field .metadata.uid)"
+	[ -n "$uid" ] || die "the install seeded no MeshConfig 'default' in $NS"
+	# The operator's edit: it must be there after every step below.
+	kc -n "$NS" patch meshconfig default --type merge -p '{"spec":{"proxy":{"accessLogsEnabled":true}}}' >/dev/null ||
+		die "could not edit the seeded MeshConfig"
+	out="$(hc rollback "$RELEASE" 1 -n "$NS" 2>&1)" || die "helm rollback $RELEASE 1 failed: $out"
+	[ "$(release_field status)" = "deployed" ] || die "after the rollback to revision 1 the release is '$(release_field status)', want deployed"
+	[ "$(release_field revision)" = "3" ] || die "after the rollback to revision 1 the release is at revision $(release_field revision), want 3"
+	out="$(hc rollback "$RELEASE" 2 -n "$NS" 2>&1)" || die "helm rollback $RELEASE 2 failed: $out"
+	[ "$(release_field status)" = "deployed" ] || die "after the rollback to revision 2 the release is '$(release_field status)', want deployed"
+	[ "$(release_field revision)" = "4" ] || die "after the rollback to revision 2 the release is at revision $(release_field revision), want 4"
+	ok "rolled back to revision 1 (revision 3, deployed) and to revision 2 (revision 4, deployed)"
+	[ "$(meshconfig_field .metadata.uid)" = "$uid" ] ||
+		die "the MeshConfig was deleted or replaced by a rollback (uid $uid -> '$(meshconfig_field .metadata.uid)')"
+	[ "$(meshconfig_field .spec.proxy.accessLogsEnabled)" = "true" ] ||
+		die "a rollback reverted the operator's edit of the MeshConfig (spec: $(meshconfig_field '.spec | tojson'))"
+	ok "the MeshConfig is the same object (uid $uid) and kept the operator's edit"
+	# Why it works: the seed is in no revision's manifest.
+	for rev in 1 2 3 4; do
+		[ "$(manifest_meshconfigs "$rev")" = "0" ] ||
+			die "revision $rev's manifest holds a MeshConfig: a rollback to it fails once a later revision exists"
+	done
+	ok "no revision's manifest holds a MeshConfig"
+	wait_ready "after the rollbacks"
+
+	# An absent MeshConfig is seeded again by the next upgrade, outside the
+	# manifest as on the install.
+	kc -n "$NS" delete meshconfig default --wait=true >/dev/null || die "could not delete the MeshConfig"
+	out="$(documented_helm_install 2>&1)" || die "the upgrade over a deleted MeshConfig failed: $out"
+	[ "$(release_field revision)" = "5" ] || die "after that upgrade the release is at revision $(release_field revision), want 5"
+	uid="$(meshconfig_field .metadata.uid)"
+	[ -n "$uid" ] || die "the upgrade did not seed the MeshConfig again"
+	[ "$(manifest_meshconfigs 5)" = "0" ] || die "the upgrade seeded the MeshConfig as a release object (revision 5's manifest holds it)"
+	out="$(hc rollback "$RELEASE" 4 -n "$NS" 2>&1)" || die "helm rollback $RELEASE 4 failed: $out"
+	out="$(hc rollback "$RELEASE" 5 -n "$NS" 2>&1)" || die "helm rollback $RELEASE 5 (the revision that seeded the MeshConfig again) failed: $out"
+	[ "$(release_field status)" = "deployed" ] || die "after those rollbacks the release is '$(release_field status)', want deployed"
+	# Revision 5 stores the seed as a hook; a rollback to it must not run it
+	# (Helm would delete the live MeshConfig first).
+	[ "$(meshconfig_field .metadata.uid)" = "$uid" ] ||
+		die "a rollback to the revision that seeded the MeshConfig replaced it (uid $uid -> '$(meshconfig_field .metadata.uid)')"
+	ok "a deleted MeshConfig is seeded again by the next upgrade (uid $uid); that revision can be rolled back to, and the rollback leaves the object alone"
+	wait_ready "after the MeshConfig was seeded again"
+}
+
 # One upgrade of the upgrade-safety leg: the namespace must be the same, Active
 # object afterwards, and in or out of the manifest as stated.
 safe_upgrade() {
@@ -674,6 +737,7 @@ verify() {
 	reset_aether
 	verify_first_install
 	verify_upgrade
+	verify_rollback_to_first
 	verify_legacy_unmarked
 	verify_upgrade_safety
 	rm -rf "$(dirname "$CHARTS")"

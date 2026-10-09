@@ -407,6 +407,11 @@ telemetry; it never mounts the CM it produces, so there is no deadlock.
   operator owns the CR via `kubectl`, and new chart versions (with new config
   defaults) never clobber it. `meshConfig.createDefault: false` opts out of
   seeding entirely.
+- Since chart 2.4.24 the seed is a Helm hook (`pre-install,pre-upgrade`) and no
+  longer an object of the release (#1471): as a release object it was in the
+  first revision's manifest only, and `helm rollback` to that revision failed.
+  `charts/aether/templates/_helpers.tpl` (`aether.meshConfig.seedMode`) has the
+  reasoning and the one case in which it is still a release object.
 
 ### Bootstrap (deadlock-free)
 

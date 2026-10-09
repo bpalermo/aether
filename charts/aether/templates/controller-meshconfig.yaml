@@ -1,22 +1,31 @@
 {{- if .Values.meshConfig.createDefault }}
 {{- /*
   Seed the singleton MeshConfig ONCE and never overwrite it. lookup skips
-  rendering when a MeshConfig/default already exists, and resource-policy: keep
-  stops Helm deleting it once it drops out of the rendered manifest on later
-  upgrades. Net effect: a `helm upgrade` is a no-op for mesh config — operators
-  own the CR via kubectl, and new chart versions (with new config defaults) never
-  clobber it. See docs/proposals/015_mesh-config.md.
+  rendering when a MeshConfig/default already exists. Net effect: a `helm
+  upgrade` is a no-op for mesh config — operators own the CR via kubectl, and
+  new chart versions (with new config defaults) never clobber it. See
+  docs/proposals/015_mesh-config.md.
+
+  The seed is a HOOK, so that it is in no revision's manifest (#1471; see
+  aether.meshConfig.seedMode for why, and for the one case in which it is still
+  a release object). helm.sh/resource-policy: keep is for that case and for the
+  objects older charts created: it stops Helm deleting a MeshConfig that drops
+  out of the rendered manifest.
 */ -}}
-{{- $existing := lookup "config.aether.io/v1" "MeshConfig" (include "aether.namespace" .) "default" -}}
+{{- $ns := include "aether.namespace" . -}}
+{{- $existing := lookup "config.aether.io/v1" "MeshConfig" $ns "default" -}}
 {{- if not $existing }}
 apiVersion: config.aether.io/v1
 kind: MeshConfig
 metadata:
   name: default
-  namespace: {{ include "aether.namespace" . }}
+  namespace: {{ $ns }}
   labels:
     {{- include "aether.controller.labels" . | nindent 4 }}
   annotations:
+    {{- if eq (include "aether.meshConfig.seedMode" (dict "namespace" $ns "rendersNamespace" (eq (include "aether.namespace.rendered" .) "true"))) "hook" }}
+    helm.sh/hook: pre-install,pre-upgrade
+    {{- end }}
     helm.sh/resource-policy: keep
 spec:
   proxy:
