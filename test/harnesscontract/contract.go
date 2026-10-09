@@ -65,10 +65,24 @@ type Metric struct {
 }
 
 // Label is one attribute of a Metric: a closed set of Values, or Open.
+//
+// Every series carries the label, unless When is set: then exactly the series
+// whose other labels have the values When gives carry it, and no other does.
 type Label struct {
-	Name   string   `json:"name"`
-	Values []string `json:"values"`
-	Open   bool     `json:"open"`
+	Name   string            `json:"name"`
+	Values []string          `json:"values"`
+	Open   bool              `json:"open"`
+	When   map[string]string `json:"when"`
+}
+
+// On reports whether a series with these attributes carries the label.
+func (l Label) On(s map[string]string) bool {
+	for k, v := range l.When {
+		if s[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // Label returns the metric's label called name.
@@ -292,6 +306,11 @@ func (m Metric) validate() []string {
 		}
 		if v := yamlBoolean(l.Values); v != "" {
 			problems = append(problems, fmt.Sprintf("%s: label %q has the value %q: an unquoted y, n, yes, no, on or off is a boolean in YAML, so quote the value", m.ID, l.Name, v))
+		}
+		for _, k := range sortedKeys(l.When) {
+			if on, ok := m.Label(k); !ok || k == l.Name || !slices.Contains(on.Values, l.When[k]) {
+				problems = append(problems, fmt.Sprintf("%s: label %q is `when` %s=%s, and that is not a value of another closed label of the metric", m.ID, l.Name, k, l.When[k]))
+			}
 		}
 	}
 	return problems

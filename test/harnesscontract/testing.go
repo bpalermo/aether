@@ -162,8 +162,11 @@ func (m Metric) CheckMetric(tb testing.TB, registeredType string, series []Serie
 	}
 }
 
-// emitted returns the values each label takes across series, and reports a
-// label the contract does not list.
+// emitted returns the values each label takes across series. It reports, for
+// each series on its own, a label the contract does not list, a label the
+// contract says the series carries and it does not, and a conditional label
+// (`when`) on a series that should not have it: a harness selects ONE series
+// by its labels, so a label that most series still carry is no help to it.
 func (m Metric) emitted(tb testing.TB, series []Series) map[string][]string {
 	tb.Helper()
 	out := map[string][]string{}
@@ -177,8 +180,29 @@ func (m Metric) emitted(tb testing.TB, series []Series) map[string][]string {
 				out[k] = append(out[k], s[k])
 			}
 		}
+		for _, l := range m.Labels {
+			_, has := s[l.Name]
+			switch want := l.On(s); {
+			case want && !has:
+				Errorf(tb, "%s has a series without the label %q (%v), and %s says %s.", m.OTelName, l.Name, s, File, l.presence())
+			case !want && has:
+				Errorf(tb, "%s has a series with the label %q (%v), and %s says %s.", m.OTelName, l.Name, s, File, l.presence())
+			}
+		}
 	}
 	return out
+}
+
+// presence says which series carry the label, for a failure message.
+func (l Label) presence() string {
+	if len(l.When) == 0 {
+		return "every series carries it"
+	}
+	var conds []string
+	for _, k := range sortedKeys(l.When) {
+		conds = append(conds, k+"="+l.When[k])
+	}
+	return "only the series with " + strings.Join(conds, ", ") + " carry it"
 }
 
 // diff returns what is only in want and what is only in got, each sorted.

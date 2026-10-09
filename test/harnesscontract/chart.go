@@ -91,6 +91,32 @@ func (c *Contract) RendersOf(name string) []Render {
 	return out
 }
 
+// OwnedIDs compares the ids of renders and of their objects with the ids a
+// chart test declares it holds (the `ids` of its helm_contract_test), in both
+// directions, and returns what differs.
+func OwnedIDs(renders []Render, ids []string) []string {
+	var have []string
+	for _, r := range renders {
+		have = append(have, r.ID)
+		for _, o := range r.Objects {
+			have = append(have, o.ID)
+		}
+	}
+	var problems []string
+	for _, id := range ids {
+		if id != "" && !slices.Contains(have, id) {
+			problems = append(problems, fmt.Sprintf("%s no longer has the chart entry %q, and the test still lists it in `ids`. "+
+				"If a harness may no longer rely on it, bump `version` and remove the id from the test's `ids` in the same change; otherwise put the entry back.", File, id))
+		}
+	}
+	for _, id := range have {
+		if !slices.Contains(ids, id) {
+			problems = append(problems, fmt.Sprintf("%s has the chart entry %q, and the test that renders its chart does not list it in `ids` (test/harnesscontract/BUILD.bazel): add it there.", File, id))
+		}
+	}
+	return problems
+}
+
 // manifest is the part of a rendered object the contract can speak about.
 type manifest struct {
 	Kind     string `json:"kind"`

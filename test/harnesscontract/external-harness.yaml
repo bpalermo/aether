@@ -20,8 +20,9 @@
 # No test can compare this file with its previous revision, so the bump is a
 # review rule. What the tests do enforce: every entry below is compared with
 # the code that produces the thing (`checked_by` names the Bazel test), and
-# each of those tests lists the entries it expects, so removing an entry here
-# fails that test until the check is removed too. README.md beside this file
+# each of those tests lists the entries it expects (a chart test lists its
+# renders and their objects, by id), so removing an entry here fails that test
+# until the check is removed too. README.md beside this file
 # says how each kind of entry is tied and what to do when a test fails.
 #
 # `checked_by: review-only` marks what no test in this repository can hold:
@@ -40,6 +41,8 @@ version: 1
 #
 # A label with `values` is a CLOSED set: the instrument emits exactly these and
 # a harness may branch on them. A label with `open: true` has no fixed set.
+# Every series carries every label, except a label with `when`: exactly the
+# series whose other labels have those values carry it.
 metrics:
   - id: agent.snapshot_tls_clusters
     component: agent
@@ -49,9 +52,10 @@ metrics:
     labels:
       - name: pin
         values: [pinned, unpinned]
-      # Only on the pin="unpinned" series; the pin="pinned" series has no reason.
+      # The pin="pinned" series has no reason.
       - name: reason
         values: [trust_domain_unknown, tls_not_published, no_namespace_metadata, pin_not_rendered]
+        when: {pin: unpinned}
     notes: >-
       Mesh cluster entries in the node's current xDS snapshot that are meant to
       be mTLS, with a server-identity pin or without one, per reason. Every
@@ -68,6 +72,7 @@ metrics:
         values: [pinned, unpinned]
       - name: reason
         values: [trust_domain_unknown, tls_not_published, no_namespace_metadata, pin_not_rendered]
+        when: {pin: unpinned}
     notes: >-
       The same counts for the last snapshot whose cluster update the proxy
       acknowledged. Absent until the first cluster ACK.
@@ -368,18 +373,24 @@ charts:
               OTEL_RESOURCE_ATTRIBUTES: ["k8s.node.name=", "k8s.pod.name="]
     checked_by: //test/harnesscontract:prober_chart_test
 
+  # This chart puts its objects in the namespace its VALUE `namespace` names,
+  # not in the release's: `helm --namespace` alone does not move them.
   - id: chart.udsecho
     chart: udsecho
     release: udsecho
     namespace: mesh-workloads
+    set:
+      namespace: mesh-workloads
     objects:
       - id: chart.udsecho.annotation_path
         kind: Deployment
         name: uds-echo
+        namespace: mesh-workloads
         pod_labels: {app: uds-echo}
       - id: chart.udsecho.policy_path
         kind: Deployment
         name: uds-cr-echo
+        namespace: mesh-workloads
         pod_labels: {app: uds-cr-echo}
     checked_by: //test/harnesscontract:udsecho_chart_test
 

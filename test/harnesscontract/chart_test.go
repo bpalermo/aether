@@ -129,6 +129,19 @@ func TestRenderCheck_UnreadableDocument(t *testing.T) {
 	}
 }
 
+func TestOwnedIDs(t *testing.T) {
+	renders := []Render{{ID: "r", Objects: []Object{{ID: "r.a"}, {ID: "r.b"}}}}
+	if got := OwnedIDs(renders, []string{"r", "r.a", "r.b"}); len(got) != 0 {
+		t.Errorf("OwnedIDs() = %q, want nothing", got)
+	}
+	got := strings.Join(OwnedIDs(renders, []string{"r", "r.a", "r.gone"}), "\n")
+	for _, want := range []string{`no longer has the chart entry "r.gone"`, `has the chart entry "r.b", and the test that renders its chart does not list it`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("OwnedIDs() = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
 func TestHelmArgs(t *testing.T) {
 	r := Render{Release: "aether", Namespace: "aether-system", Set: map[string]string{"b.c": "true", "a": "1"}}
 	want := []string{"template", "aether", "chart.tgz", "--namespace", "aether-system", "--set", "a=1", "--set", "b.c=true"}

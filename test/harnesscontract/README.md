@@ -76,8 +76,6 @@ a `reason` that is in no class or in two).
   TLS that checks no server identity. The code states it in comments only.
 - **The name of a generated mesh Service** (the service's name, in the
   service's namespace). Only its label is tied to a constant.
-- **A single object removed from a `charts` entry.** The chart tests check the
-  objects that are listed; nothing knows an object used to be listed.
 - **The `version` bump.**
 
 ## When a contract test fails
@@ -98,8 +96,15 @@ contract assigns it an entry it has no check for. Prefer comparing with what
 the code really emits (an instrument's collected series, a line the real
 formatter wrote, a render) over comparing two constants.
 
-For a chart object there is nothing to write but the YAML: the render options
-and the expectations are both read from the entry. The chart tests live here
+A metric label is on every series unless it has `when`: the test looks at each
+series on its own, because a harness selects one series by its labels.
+
+For a chart object, write the YAML and add its id to the `ids` of that chart's
+`helm_contract_test` in `BUILD.bazel`: the render options and the expectations
+are both read from the entry, and `ids` is the test's list of what it holds
+(it fails when the two differ, in either direction). Mind which namespace a
+chart puts its objects in: `udsecho` takes it from its `namespace` value, not
+from the release. The chart tests live here
 and not in `charts/<chart>/BUILD.bazel` on purpose: a change under `charts/`
 needs a chart version bump, and adding a contract entry is not a chart change.
 
@@ -108,7 +113,8 @@ needs a chart version bump, and adding a contract entry is not a chart change.
 Removing an entry while the code still emits the thing fails the owning test
 (`... no longer has the entry "<id>" ..., and the code it describes is still
 here`). Remove the check in the same change and bump `version`: the diff then
-shows the entry, its check and the version moving together.
+shows the entry, its check and the version moving together. For a `charts`
+entry or one of its objects the check is its id in the test's `ids`.
 
 ## What is not in the contract
 

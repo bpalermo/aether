@@ -21,7 +21,7 @@ export HELM_REPOSITORY_CONFIG="$scratch/repositories.yaml"
 export HELM_REGISTRY_CONFIG="$scratch/registry.json"
 export HELM_PLUGINS=@@HELM_PLUGINS@@
 
-exec @@CHECKER@@ --helm @@HELM@@ --chart @@CHART@@ --name @@NAME@@
+exec @@CHECKER@@ --helm @@HELM@@ --chart @@CHART@@ --name @@NAME@@ --ids @@IDS@@
 """
 
 def _shell_quote(s):
@@ -39,6 +39,7 @@ def _helm_contract_test_impl(ctx):
         ("@@CHART@@", _shell_quote(chart.short_path)),
         ("@@CHECKER@@", _shell_quote(checker.short_path)),
         ("@@NAME@@", _shell_quote(ctx.attr.chart_name)),
+        ("@@IDS@@", _shell_quote(",".join(ctx.attr.ids))),
     ]:
         script = script.replace(placeholder, value)
 
@@ -67,6 +68,12 @@ Nothing about the render is written in the BUILD file: the options and the
 expectations both come from the contract, so there is one list, and a chart
 that renames an object fails here with a message naming that file.
 
+`ids` is the one thing the BUILD file does hold: the ids of the contract's
+renders of this chart and of their objects. The test fails when that list and
+the contract differ, in either direction, so a render or an object cannot be
+removed from the contract while the chart still renders it without this list
+changing in the same diff.
+
 The checker never prints a render. It lives outside `charts/` on purpose: a
 change to a chart's own BUILD file counts as a chart change and needs a
 version bump, and adding a contract entry is not one.
@@ -78,6 +85,11 @@ version bump, and adding a contract entry is not one.
             doc = "The `helm_chart` target to render.",
             mandatory = True,
             providers = [HelmPackageInfo],
+        ),
+        "ids": attr.string_list(
+            doc = "The id of every `charts` entry for this chart and of every object under them.",
+            mandatory = True,
+            allow_empty = False,
         ),
         "chart_name": attr.string(
             doc = "The chart's name in the contract (`chart:` of a `charts` entry).",

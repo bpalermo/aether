@@ -24,8 +24,9 @@ func main() {
 	helm := flag.String("helm", "", "path to the helm binary")
 	chart := flag.String("chart", "", "path to the packaged chart")
 	name := flag.String("name", "", "the chart's name in the contract")
+	ids := flag.String("ids", "", "the ids of the renders and objects this test holds, comma-separated")
 	flag.Parse()
-	os.Exit(run(os.Stdout, os.Stderr, *helm, *chart, *name, helmTemplate))
+	os.Exit(run(os.Stdout, os.Stderr, *helm, *chart, *name, strings.Split(*ids, ","), helmTemplate))
 }
 
 // renderFunc runs helm with args and returns its standard output and its
@@ -40,9 +41,9 @@ func helmTemplate(helm string, args []string) ([]byte, []byte, error) {
 	return out.Bytes(), errOut.Bytes(), err
 }
 
-func run(stdout, stderr io.Writer, helm, chart, name string, render renderFunc) int {
+func run(stdout, stderr io.Writer, helm, chart, name string, ids []string, render renderFunc) int {
 	if helm == "" || chart == "" || name == "" {
-		fmt.Fprintln(stderr, "usage: chartcheck --helm HELM --chart CHART.tgz --name NAME")
+		fmt.Fprintln(stderr, "usage: chartcheck --helm HELM --chart CHART.tgz --name NAME --ids ID,ID,...")
 		return 2
 	}
 	contract, err := harnesscontract.Load()
@@ -57,6 +58,13 @@ func run(stdout, stderr io.Writer, helm, chart, name string, render renderFunc) 
 		return 1
 	}
 	failed := false
+	// The test's own list of what it holds, against the contract's: a render or
+	// an object removed from the contract while the chart still renders it must
+	// not pass for want of anything to compare.
+	for _, p := range harnesscontract.OwnedIDs(renders, ids) {
+		fmt.Fprintln(stderr, "FAIL:", p)
+		failed = true
+	}
 	for _, r := range renders {
 		args := r.HelmArgs(chart)
 		out, errOut, err := render(helm, args)

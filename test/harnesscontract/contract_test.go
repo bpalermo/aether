@@ -108,6 +108,9 @@ func TestParseRejects(t *testing.T) {
 		"an unquoted n among the fields": {
 			"checked_by: //a:b", "checked_by: //a:b\nlog_lines:\n  - {id: l, marker: M, fields: [t, n], checked_by: review-only}", "is a boolean in YAML",
 		},
+		"a label conditional on nothing the metric has": {
+			"{name: reason, values: [x, w]}", "{name: reason, values: [x, w], when: {pin: unpinned}}", "is not a value of another closed label",
+		},
 		"an id used twice": {
 			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: m, value: v, checked_by: review-only}", "used twice",
 		},
@@ -238,6 +241,29 @@ func TestChecksCanFail(t *testing.T) {
 		r := &recorder{TB: t}
 		m.CheckMetric(r, TypeCounter, []Series{{"reason": "x", "node": "n"}, {"reason": "w"}})
 		r.want(t, `the label "node"`)
+	})
+	t.Run("one series without a label the others carry", func(t *testing.T) {
+		r := &recorder{TB: t}
+		m.CheckMetric(r, TypeCounter, []Series{{"reason": "x"}, {"reason": "w"}, {}})
+		r.want(t, `a series without the label "reason"`, "every series carries it")
+	})
+	t.Run("a conditional label", func(t *testing.T) {
+		gauge := Metric{ID: "g", OTelName: "g", StoredName: "g", Type: TypeGauge, Labels: []Label{
+			{Name: "pin", Values: []string{"pinned", "unpinned"}},
+			{Name: "reason", Values: []string{"x"}, When: map[string]string{"pin": "unpinned"}},
+		}}
+		r := &recorder{TB: t}
+		gauge.CheckMetric(r, TypeGauge, []Series{{"pin": "pinned"}, {"pin": "unpinned", "reason": "x"}})
+		r.want(t)
+		gauge.CheckMetric(r, TypeGauge, []Series{{"pin": "pinned", "reason": "x"}, {"pin": "unpinned", "reason": "x"}})
+		r.want(t, `a series with the label "reason"`, "only the series with pin=unpinned carry it")
+		r = &recorder{TB: t}
+		gauge.CheckMetric(r, TypeGauge, []Series{{"pin": "pinned"}, {"pin": "unpinned"}, {"pin": "unpinned", "reason": "x"}})
+		r.want(t, `a series without the label "reason"`)
+		// The pinned series losing `pin` while the unpinned ones keep it.
+		r = &recorder{TB: t}
+		gauge.CheckMetric(r, TypeGauge, []Series{{}, {"pin": "unpinned", "reason": "x"}})
+		r.want(t, `a series without the label "pin"`)
 	})
 	t.Run("a label no series carries", func(t *testing.T) {
 		r := &recorder{TB: t}

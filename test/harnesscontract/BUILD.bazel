@@ -41,23 +41,46 @@ go_test(
 )
 
 # The chart objects a harness addresses, one test per chart. The render options
-# and the expectations are in the contract, not here.
+# and the expectations are in the contract, not here. `ids` names the renders
+# and objects each test holds: the test fails when the contract has one this
+# list lacks or lacks one this list has, so an entry cannot leave the contract
+# while the chart still renders the object unless this list changes with it.
 helm_contract_test(
     name = "aether_chart_test",
     chart = "//charts/aether",
     chart_name = "aether",
+    ids = [
+        "chart.aether",
+        "chart.aether.agent",
+        "chart.aether.agent_surge",
+        "chart.aether.agent_surge.agent",
+        "chart.aether.csidriver",
+        "chart.aether.edge",
+        "chart.aether.mesh_dns",
+        "chart.aether.proxy",
+        "chart.aether.uds_csi",
+    ],
 )
 
 helm_contract_test(
     name = "prober_chart_test",
     chart = "//charts/prober",
     chart_name = "prober",
+    ids = [
+        "chart.prober",
+        "chart.prober.daemonset",
+    ],
 )
 
 helm_contract_test(
     name = "udsecho_chart_test",
     chart = "//charts/udsecho",
     chart_name = "udsecho",
+    ids = [
+        "chart.udsecho",
+        "chart.udsecho.annotation_path",
+        "chart.udsecho.policy_path",
+    ],
 )
 
 # Every test a contract entry names in `checked_by`. harnesscontract_test fails
