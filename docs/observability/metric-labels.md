@@ -78,8 +78,8 @@ and label names are stored with dots turned into underscores, and a counter gain
 
 | Rule file | Labels it needs | Where |
 |---|---|---|
-| [`mesh-dns-alerts.yml`](./mesh-dns-alerts.yml) | `node` | every per-node rule aggregates `by (node)`. `MeshDNSResolutionFailing` aggregates the prober's counter `by (node, target)` |
-| [`agent-cni-alerts.yml`](./agent-cni-alerts.yml) | `node`, **equal across two components** | `AetherCNIConflistUnchained` joins mesh-dns's `aether_mesh_dns_ready` against the agent's `aether_agent_cni_conflist_chained` on `node` |
+| [`mesh-dns-alerts.yml`](./mesh-dns-alerts.yml) | `node` | every per-node rule aggregates `by (node)`. `MeshDNSResolutionFailing` aggregates the prober's counter `by (node, target)`. `MeshDNSMetricsAbsent` is `absent()` over the bare metric and needs no label |
+| [`agent-cni-alerts.yml`](./agent-cni-alerts.yml) | `node`, **equal across two components** | `AetherCNIConflistUnchained` joins mesh-dns's `aether_mesh_dns_ready` against the agent's `aether_agent_cni_conflist_chained` on `node`. `AetherCNIConflistReasserting` sums `by (node)`. `AetherCNIConflistMetricsAbsent` is `absent()` and needs no label |
 | [`agent-pin-alerts.yml`](./agent-pin-alerts.yml) | `job`, `node` | all three rules aggregate `by (job, node, …)` |
 | [`registrar-alerts.yml`](./registrar-alerts.yml) | `job`, and one series per replica | `count by (job, revision)` over each replica's hash. The expression keeps every label (`without ()`), so the replica label may have any name |
 
@@ -164,15 +164,22 @@ the label on those series too.
 
 ## Checking a pipeline
 
-Each of these should return one series per node, or per replica. One series for the
-whole fleet means the promotion is missing.
+Each of these should return one result per node. A single result with no `node` label
+means the promotion is missing.
 
 ```promql
 count by (node) (aether_mesh_dns_ready)                # one per node, node = the Kubernetes node name
 count by (node) (aether_agent_cni_conflist_chained)    # the same set of node values
 count by (job, node) (aether_agent_snapshot_tls_clusters)
-count(aether_registrar_snapshot_content_hash)          # = the number of registrar replicas
 count by (node) (aether_probe_requests_total)          # node is a node name, not a prober pod name
+```
+
+The registrar check reads differently. This always returns one result, and its **value**
+has to equal the number of registrar replicas. A value of `1` with more than one replica
+running means the replicas write one series.
+
+```promql
+count(aether_registrar_snapshot_content_hash)
 ```
 
 Then prove a rule fires, as [`README.md`](./README.md) says to: break one node and

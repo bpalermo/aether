@@ -245,8 +245,9 @@ This repository has no promtool in its build, so CI does not run it here.
 
 ## Labels the rules need from your pipeline
 
-Every rule here selects on `node`, `job`, or both. The components do not set those
-labels: they set the resource attributes `k8s.node.name` and `service.name`, and the
+Every rule here selects on `node`, `job`, or both, except the two fleet-wide `absent()`
+meta-rules (`MeshDNSMetricsAbsent`, `AetherCNIConflistMetricsAbsent`), which select on
+neither. The components do not set those labels: they set the resource attributes `k8s.node.name` and `service.name`, and the
 metrics pipeline has to turn `k8s.node.name` into a label called `node`. Where it does
 not, `AetherCNIConflistUnchained` cannot fire for a single node and the per-node rules
 fire without naming one. [`metric-labels.md`](./metric-labels.md) has the attributes
