@@ -31,6 +31,10 @@
 #                opened without it, and nothing says so).
 #   FAKE_FAIL_COMMENT_MATCH  a comment whose body holds this text answers
 #                HTTP 502; every other comment works.
+#   FAKE_COMMENT_BEFORE_CLOSE  another run writes this comment on the issue in
+#                the moment before a close of it lands (after whatever the
+#                closer read, before its PATCH). As the workflow's own
+#                account, or as a person with FAKE_COMMENT_BEFORE_CLOSE_BY=user.
 #   FAKE_CLOSED_MEANWHILE  a comment lands on an issue that somebody closes in
 #                that same moment: after the comment is stored, the issue is
 #                closed (GitHub accepts a comment on a closed issue).
@@ -173,6 +177,12 @@ case "$method $path" in
 "PATCH repos/"*"/issues/"*)
 	fails patch
 	n="${path#*/issues/}"
+	if [ "$state" = closed ] && [ -n "${FAKE_COMMENT_BEFORE_CLOSE:-}" ]; then
+		who="$BOT"
+		[ "${FAKE_COMMENT_BEFORE_CLOSE_BY:-}" != user ] || who='{"login":"mallory","type":"User"}'
+		update --argjson n "$n" --arg b "$FAKE_COMMENT_BEFORE_CLOSE" --argjson u "$who" \
+			'map(if .number == $n then .comments += [{user: $u, body: $b}] else . end)'
+	fi
 	update --argjson n "$n" --arg s "$state" --arg r "$reason" \
 		'map(if .number == $n then .state = $s | .state_reason = $r else . end)'
 	if [ "$state" = closed ]; then

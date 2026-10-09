@@ -117,6 +117,34 @@ rolling_issue_text() {
 		--jq ".[] | select(.user.login == \"${ROLLING_ISSUE_BOT}\" and .user.type == \"Bot\") | .body"
 }
 
+# rolling_issue_reports <number> <prefix>
+# How many comments the workflow wrote on the issue that do NOT start with
+# <prefix>: its reports, as against its own closing comments. A closer counts
+# them before and after it closes, to see a report that landed in between.
+# Non-zero when the comments could not be read.
+rolling_issue_reports() {
+	local repo out
+	repo="$(_rolling_issue_repo)" || return 1
+	case "$2" in
+	*'"'* | *\\* | "")
+		echo "rolling-issue: a prefix must be non-empty and hold no quote or backslash: '$2'" >&2
+		return 1
+		;;
+	esac
+	# One line per such comment (--jq runs once per page, so no `length` here).
+	out="$(gh api --paginate "repos/${repo}/issues/$1/comments?per_page=100" \
+		--jq ".[] | select(.user.login == \"${ROLLING_ISSUE_BOT}\" and .user.type == \"Bot\") | select(.body | startswith(\"$2\") | not) | .id")" ||
+		return 1
+	grep -c . <<<"$out" || true
+}
+
+# rolling_issue_reopen <number>
+rolling_issue_reopen() {
+	local repo
+	repo="$(_rolling_issue_repo)" || return 1
+	gh api -X PATCH "repos/${repo}/issues/$1" -f state=open --jq '.id // empty' >/dev/null
+}
+
 # rolling_issue_comment <number> <body>
 rolling_issue_comment() {
 	local repo

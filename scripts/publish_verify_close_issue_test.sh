@@ -334,6 +334,38 @@ step 0 "no open issue" GITHUB_EVENT_NAME=schedule &&
 	check "none open: nothing is closed" test ! -s "$tmp/closed"
 check "none open: says so" grep -q 'nothing to close' "$tmp/log"
 
+# A failure is written on the issue between this run's reading of it and its
+# close (publish-verify runs overlap: one group per commit). GitHub takes a
+# comment on a closed issue, so the failure would sit where nobody looks: the
+# closer reads the issue again after closing, and reopens it.
+issue_state() { "$JQ" -r --argjson n "$1" '.[] | select(.number == $n) | .state' "$tmp/state/issues.json"; }
+printf '%s\t%s\n' 1316 "$title" >"$tmp/issues"
+step 0 "a failure lands between the read and the close" GITHUB_EVENT_NAME=schedule \
+	FAKE_COMMENT_BEFORE_CLOSE="A commit on main is missing artifacts in the image registry" &&
+	check "failure in between: the issue is open again" test "$(issue_state 1316)" = open
+check "failure in between: closed, then reopened, in that order" test \
+	"$(grep -E '^WRITE issue (close|reopen) 1316' "$tmp/gh.log" | tr '\n' '|')" = "WRITE issue close 1316 completed|WRITE issue reopen 1316|"
+check "failure in between: the log says why" grep -q '^reopened #1316: a failure was written on it while it was being closed' "$tmp/log"
+# Another green run closing it in the same moment is not a failure: it stays closed.
+step 0 "another green run comments in between" GITHUB_EVENT_NAME=schedule \
+	FAKE_COMMENT_BEFORE_CLOSE="Closed by a green publish-verify run: the scheduled sweep verified every push head it covers. https://example.invalid/runs/43" &&
+	check "another closer in between: the issue stays closed" test "$(issue_state 1316)" = closed
+# Nor is a comment by anyone else: a person writing on the issue in that moment
+# does not get to reopen it.
+step 0 "a person comments in between" GITHUB_EVENT_NAME=schedule \
+	FAKE_COMMENT_BEFORE_CLOSE="is this still happening?" FAKE_COMMENT_BEFORE_CLOSE_BY=user &&
+	check "a person's comment in between: the issue stays closed" test "$(issue_state 1316)" = closed
+# What is on the issue cannot be read before the close: it is not closed blind.
+step 0 "the comments cannot be read" GITHUB_EVENT_NAME=schedule FAKE_FAIL=comments &&
+	check "comments unreadable: nothing is closed" test "$(issue_state 1316) $(grep -c '^WRITE' "$tmp/gh.log")" = "open 0"
+check "comments unreadable: a warning, not a failure" grep -q '^::warning title=publish-verify::could not read #1316' "$tmp/log"
+# The same for the control's issues, which close through the same function.
+printf '%s\t%s\n' 1350 "$t_inconclusive" >"$tmp/issues"
+printf '%s\n' ok >"$tmp/control.result"
+step 0 "a control failure lands between the read and the close" GITHUB_EVENT_NAME=workflow_run TARGET="$old" \
+	CONTROL_RESULT_FILE="$tmp/control.result" FAKE_COMMENT_BEFORE_CLOSE="**The control was INCONCLUSIVE: no verdict on the gate, either way.**" &&
+	check "control failure in between: the issue is open again" test "$(issue_state 1350)" = open
+
 # The issue API failing must not turn a green verification red.
 printf '%s\t%s\n' 1316 "$title" >"$tmp/issues"
 step 0 "the listing fails" GITHUB_EVENT_NAME=schedule FAKE_FAIL=list &&
@@ -556,6 +588,28 @@ check "unfinished: ... and does not claim artifacts are missing" body_lacks "is 
 rm -f "$tmp/logs/verify.log" "$tmp/logs/cosign.log"
 miss 0 "no log at all" &&
 	check "no logs: filed as unfinished" body_has "the check did not finish"
+
+# A sweep that finds everything missing: GitHub refuses a body over 65,536
+# characters, and a report that is refused is no report. The quoted lines are
+# cut to fit, and the body says how many were cut.
+for i in $(seq 1 300); do printf '  MISSING  quay.io/acme/img-%03d:%s\n' "$i" "$(printf 'x%.0s' $(seq 1 380))"; done >"$tmp/logs/verify.log"
+for i in $(seq 1 300); do printf '  FAILED   quay.io/acme/sig-%03d@%s\n' "$i" "$(printf 'y%.0s' $(seq 1 380))"; done >"$tmp/logs/cosign.log"
+printf '  FAILED   short-last-line\n' >>"$tmp/logs/cosign.log"
+miss 0 "six hundred long lines and a short one" &&
+	check "long report: the body fits GitHub's limit with room to spare" test "$(wc -m <"$tmp/body")" -lt 60000
+kept="$(grep -cE '^(MISSING|UNVERIFIED) ' "$tmp/body")"
+cut_n="$(sed -nE 's/^\(([0-9]+) more line\(s\) not shown: .*/\1/p' "$tmp/body")"
+check "long report: it says how many lines were cut, and none is unaccounted for" test "$kept ${cut_n:-0} $((kept + ${cut_n:-0}))" = "$kept $((601 - kept)) 601"
+check "long report: ... and some were kept, the first ones" bash -c '[ "$1" -gt 50 ] && grep -q "^MISSING quay.io/acme/img-001:" "$2"' _ "$kept" "$tmp/body"
+# What is shown is the start of the list, not whichever later lines happen to fit.
+check "long report: a short line after the cut is not slipped in" body_lacks "short-last-line"
+check "long report: the fence still closes and the runs are still named" bash -c '[ "$(grep -c "\`\`\`" "$1")" = 2 ] && grep -qxF "Verification run: https://example.invalid/runs/42" "$1"' _ "$tmp/body"
+# A report that fits is not cut and says nothing about cutting.
+printf '%s\n' '  MISSING  quay.io/acme/agent:1.0.0-01391e0' >"$tmp/logs/verify.log"
+: >"$tmp/logs/cosign.log"
+miss 0 "one line" &&
+	check "short report: nothing is cut" body_lacks "not shown"
+rm -f "$tmp/logs/verify.log" "$tmp/logs/cosign.log"
 
 # A label that is gone, and an issue API that does not answer: the step fails.
 for mode in reject drop; do

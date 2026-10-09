@@ -23,7 +23,10 @@
 #   - with neither, the check did not finish (a step timed out, the run was
 #     cancelled, #1281): the body says so, and that the commits are UNVERIFIED.
 # A line of those logs is quoted in a code fence: no backtick and nothing
-# unprintable gets through, and at most 200 lines of 400 bytes.
+# unprintable gets through, and a line is cut at 400 bytes. GitHub refuses an
+# issue body or comment over 65,536 characters, and a report that is refused is
+# no report: the quoted lines stop at QUOTE_LIMIT characters in all (both logs
+# together), and a last line says how many were not shown.
 #
 # Usage:
 #   scripts/publish-verify-missing-issue.sh        the workflow step
@@ -50,11 +53,24 @@ ISSUE_LABELS=(bug ci)
 # shellcheck source=scripts/rolling-issue-lib.sh
 . "${here}/rolling-issue-lib.sh"
 
+# Characters of quoted log lines in one body. The rest of the body is under
+# 2,000, so this leaves GitHub's 65,536 well clear.
+QUOTE_LIMIT=40000
+
 # lines <file> <sed expression>: the matching lines, made safe to quote.
 lines() {
 	local file="${LOG_DIR:-.}/$1"
 	[ -r "$file" ] || return 0
-	sed -nE "$2" "$file" | tr -c '[:print:]\n' '?' | tr '`' "'" | cut -c1-400 | sed -n '1,200p'
+	sed -nE "$2" "$file" | tr -c '[:print:]\n' '?' | tr '`' "'" | cut -c1-400
+}
+
+# fit: whole lines from stdin while they fit in QUOTE_LIMIT characters, then
+# one line saying how many were left out.
+fit() {
+	awk -v limit="$QUOTE_LIMIT" '
+		!full && used + length($0) + 1 <= limit { print; used += length($0) + 1; next }
+		{ full = 1; cut++ }
+		END { if (cut) printf "(%d more line(s) not shown: an issue body has a size limit; the run log has every line)\n", cut }'
 }
 
 body() {
@@ -62,7 +78,7 @@ body() {
 	missing="$({
 		lines verify.log 's/^[[:space:]]*MISSING[[:space:]]+/MISSING /p'
 		lines cosign.log 's/^[[:space:]]*FAILED[[:space:]]+/UNVERIFIED /p'
-	} | grep . || true)"
+	} | { grep . || true; } | fit)"
 	lead="A commit on \`main\` is missing artifacts in the image registry (bazel/registry/registry.bzl) — never published, or published only in part. A deploy pinned to it will 404, and \`helm upgrade\` against its commit-suffixed chart tag cannot work."
 	if [ -z "$missing" ]; then
 		# Nothing recorded as missing: the check did not finish (#1281).
