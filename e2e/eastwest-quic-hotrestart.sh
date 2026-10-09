@@ -108,7 +108,7 @@ export EWQ_CLUSTER="${EWQ_CLUSTER:-eastwest-quic-hr}"
 COLLECTOR_NS="o11y"
 COLLECTOR_SVC="otel-collector"
 COLLECTOR_ENDPOINT="${COLLECTOR_SVC}.${COLLECTOR_NS}.svc.cluster.local:4317"
-COLLECTOR_IMAGE="ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.159.0"
+COLLECTOR_IMAGE="ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.159.0@sha256:7725a7a10c87d8853208bdd4bb3439ad3c0d7b32b4292b9300ac07c8daba14a2"
 
 # Access logs ON: the MeshConfig CR the controller seeds on first install
 # (meshConfig.proxy), and the collector the proxy bootstrap's otel_collector

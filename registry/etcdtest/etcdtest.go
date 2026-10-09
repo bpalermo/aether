@@ -6,4 +6,4 @@ package etcdtest
 // minor line of the Go client in go.mod (go.etcd.io/etcd/client/v3), and in
 // step with ETCD_IMAGE in e2e/etcd-image.sh, which the kind e2e harnesses
 // start (#1223).
-const Image = "gcr.io/etcd-development/etcd:v3.7.2"
+const Image = "gcr.io/etcd-development/etcd:v3.7.2@sha256:7c6c239825d00e3f6328a69caafd54be92063acf0c2ce78b8394699f52b75dc3"

@@ -376,6 +376,54 @@ helm_template_absent_test(
     ],
 )
 
+# #1401: the OPA preset's default image is the one third-party image this chart
+# runs, in the proxy pod of every node: it is pinned by the digest of its
+# multi-arch index, with the tag kept for the reader
+# (scripts/third-party-images.txt is the inventory; `scripts/third-party-images.sh
+# check` holds this value to it). Until chart 2.4.22 it was the tag alone.
+helm_template_match_test(
+    name = "aether_opa_image_pinned_test",
+    chart = ":aether",
+    document_patterns = {
+        "DaemonSet/aether-proxy": [
+            "\\n        - name: authz\\n          restartPolicy: Always\\n          image: \"openpolicyagent/opa:[0-9.]+-envoy-static@sha256:[0-9a-f]{64}\"\\n          args:\\n",
+        ],
+    },
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+    ],
+)
+
+# An operator override (a mirror) reaches the sidecar as written.
+helm_template_match_test(
+    name = "aether_opa_image_override_test",
+    chart = ":aether",
+    document_patterns = {
+        "DaemonSet/aether-proxy": [
+            "\\n        - name: authz\\n          restartPolicy: Always\\n          image: \"registry\\.example/opa:1\"\\n          args:\\n",
+        ],
+    },
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+        "--set",
+        "proxy.authzSidecar.opa.image=registry.example/opa:1",
+    ],
+)
+
+# Off (the default): the render names no third-party image at all, so pinning
+# the preset's image changes nothing for an install that does not use it.
+helm_template_absent_test(
+    name = "aether_default_render_no_third_party_image_test",
+    absent = [
+        "openpolicyagent",
+        "name: authz",
+    ],
+    chart = ":aether",
+    control = "name: aether-proxy",
+)
+
 # #1364: `helm template` is reproducible, with one documented exception. With
 # default values the chart generates the controller's self-signed webhook CA
 # and serving certificate at render time. An upgrade reuses the Secret it

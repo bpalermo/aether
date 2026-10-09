@@ -37,7 +37,8 @@ sh_library(
 # the host. The stop sweeps are most of this test's time (about three
 # CPU-minutes: 45 s on CI's runner, 70 s on four cores, 90 s on two), hence the
 # timeout: `moderate`, 300 s. prober-grade.sh (#1390) runs against canned
-# Prometheus query responses.
+# Prometheus query responses. The svc-N workloads (#1462): churn.sh's pre-flight
+# against canned Deployments, and svc.yaml (and echo.yaml, for its images), read.
 sh_test(
     name = "harness_test",
     size = "small",
@@ -46,6 +47,7 @@ sh_test(
     data = [
         "README.md",
         "churn.sh",
+        "echo.yaml",
         "lib-wait.sh",
         "newsa-client.sh",
         "pods-not-ready.awk",
@@ -58,6 +60,7 @@ sh_test(
         "sortie-save.sh",
         "sortie-targets.txt",
         "sortie-values.yaml",
+        "svc.yaml",
         "udscsi-window.awk",
         "@jq_toolchains//:resolved_toolchain",
     ] + glob(["testdata/**"]),

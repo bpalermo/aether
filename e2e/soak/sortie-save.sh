@@ -76,7 +76,7 @@ times_tsv() {
 
 DIR=""
 WAIT=0
-READER_IMAGE="${SOAK_READER_IMAGE:-curlimages/curl:8.22.0}"
+READER_IMAGE="${SOAK_READER_IMAGE:-curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777}"
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--dir)

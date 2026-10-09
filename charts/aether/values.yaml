@@ -841,7 +841,16 @@ proxy:
       # are strings, not booleans. The preset passes OPA no YAML (flags and a
       # .rego file only); a policy that calls yaml.unmarshal, or a bundle/--data
       # YAML you add, must spell booleans true/false (#1222).
-      image: openpolicyagent/opa:1.21.1-envoy-static
+      #
+      # A third-party image, so it is pinned by the digest of its multi-arch
+      # index (linux/amd64 and linux/arm64): the tag is kept for the reader and
+      # the digest is what the node pulls (#1401; it was the tag alone until
+      # chart 2.4.22). The pin is listed in scripts/third-party-images.txt, and
+      # `scripts/third-party-images.sh outdated` says when the registry has
+      # moved past it (docs/runbook.md, "Refreshing third-party image pins").
+      # The sidecar is a container of the proxy pod: a changed value here rolls
+      # the proxy DaemonSet on every node where the preset is on.
+      image: openpolicyagent/opa:1.21.1-envoy-static@sha256:b4a8bbe87c9405419d03d1a8b6b9f4b540e7ea8ff8832248d6339b30594b344b
       # Rego policy mounted via ConfigMap; must define the decision the plugin
       # queries (envoy/authz/allow by default). Required when opa.enabled.
       #
