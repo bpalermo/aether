@@ -1,5 +1,11 @@
 # Proposal 042: sortie as the soak's load driver — k6 retired
 
+> **Note (2026-10-09):** the soak harness this proposal describes has left this
+> repository. It is now an external soak harness, maintained outside this
+> repository. Every `e2e/soak/...` path and every `//e2e/soak:...` target below
+> names a file as it was here when this was written; none of them exists in
+> this tree any more. The text is kept as the record of the design.
+
 **Status:** Draft, harness built and proven on kind 2026-10-06 (#1339) against
 sortie b71b37e, and moved to sortie 94cf103 on 2026-10-07, which fixed every
 defect the first version had to work around ("What sortie 94cf103 retired").
