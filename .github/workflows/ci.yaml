@@ -331,8 +331,10 @@ jobs:
       # scripts/third-party-images.txt lists them (#1400, #1401). This fails on
       # an image named by tag only, a digest the list does not have, a tag that
       # disagrees with it, and a pin or an exception nothing uses any more.
-      # It reads tracked files; no network (`outdated` is the online half, run
-      # by hand: docs/runbook.md, "Refreshing third-party image pins").
+      # The base images the Bazel module files pull are held to the same list
+      # (#1477). It reads tracked files; no network (`outdated` is the online
+      # half, run daily by third-party-images.yaml: docs/runbook.md,
+      # "Refreshing third-party image pins").
       - name: Every third-party image is pinned by digest and listed
         run: scripts/third-party-images.sh check
 
