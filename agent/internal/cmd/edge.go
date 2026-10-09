@@ -28,8 +28,11 @@ import (
 // edgeName is the controller/logging name for the edge proxy control plane.
 const edgeName = "aether-edge"
 
+// edgeUse is the edge subcommand's name: `agent edge`.
+const edgeUse = "edge"
+
 var edgeCmd = &cobra.Command{
-	Use:   "edge",
+	Use:   edgeUse,
 	Short: "Runs the aether edge (north-south ingress) proxy control plane.",
 	Long: "Runs the Aether agent in edge mode: a single-identity ingress gateway sidecar that serves xDS to a " +
 		"public-facing Envoy, routing external traffic directly to mesh pods over mTLS. It runs no CNI server, " +
@@ -38,6 +41,21 @@ var edgeCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return runEdge(cmd.Context())
 	},
+}
+
+// applyEdgeTelemetry makes the edge's telemetry resource the resource of a pod
+// that is not hostNetwork (#1596). The edge shares the node agent's cfg and its
+// PersistentPreRunE, and the two are deployed differently: the agent is a
+// hostNetwork DaemonSet, so its host.name is the node's and stays; the edge is a
+// Deployment on the pod network, so its host.name would be its pod name, which
+// k8s.pod.name already carries. For any command but the edge it changes nothing.
+//
+// It runs in the shared PersistentPreRunE, before the logger is built: the
+// logger's provider is the first of the three built from this configuration.
+func applyEdgeTelemetry(cmd *cobra.Command, c *manager.Config) {
+	if cmd.Name() == edgeUse {
+		c.WithoutHostName = true
+	}
 }
 
 func init() {
