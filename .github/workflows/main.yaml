@@ -2,7 +2,8 @@ name: main-post-merge
 
 # Post-merge validation of `main` (issue #679).
 #
-# `ci.yaml` validates a PR *head* against that PR's merge-base. That is the right
+# `ci.yaml` validates a PR's merge into its base as the base was when the run
+# started (#1459: the merge commit against its first parent). That is the right
 # scope for the PR's own change, but it is structurally blind to the combination
 # of two concurrently-open PRs: the combined state does not exist anywhere until
 # the second merge creates it, and until this workflow existed nothing looked at
@@ -46,9 +47,9 @@ permissions:
   contents: read
 
 jobs:
-  # Same bazel-diff analysis as ci.yaml's `diff` job, but based on the merge
-  # commit's first parent instead of a PR merge-base. Analysis only — no
-  # BuildBuddy key needed here.
+  # Same bazel-diff analysis as ci.yaml's `diff` job, on the commit pushed to
+  # main and its first parent instead of a PR's merge commit and its first
+  # parent. Analysis only — no BuildBuddy key needed here.
   #
   # No coarse `paths-filter` scoping (unlike ci.yaml): there is no required check
   # to keep reporting here, and a proxy-only merge naturally yields an empty

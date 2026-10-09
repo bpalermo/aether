@@ -8,10 +8,21 @@
 # and an empty list never stands in for "nothing to test" (#1437).
 #
 # The range is whatever the caller passes; nothing here assumes a PR. Two callers:
-#   .github/workflows/ci.yaml   BASE_SHA = the PR's merge-base, HEAD_SHA = PR head
+#   .github/workflows/ci.yaml   the range scripts/ci-merge-range.sh reads from the
+#                               checkout: BASE_SHA = the first parent of the pull
+#                               request's merge commit (its base), HEAD_SHA = that
+#                               merge commit, which every job of ci.yaml builds
+#                               (#1459)
 #   .github/workflows/main.yaml BASE_SHA = HEAD^ (a merge commit's first parent),
 #                               HEAD_SHA = the merge commit — i.e. post-merge
 #                               validation of what a merge added to main (#679)
+#
+# HEAD_SHA must be the commit that is checked out, and the step fails when it is
+# not (#1459): the lists are read by jobs that build their own checkout, the
+# bazel-diff path lists the targets at HEAD_SHA and the full run lists them where
+# the checkout is. impacted_commit.txt carries that commit with the lists, and
+# scripts/ci-impacted-lists.sh compares it with the checkout of the job that
+# downloads them.
 #
 # Runs bazel-diff at both the base and head revisions (it git-checkouts them), so
 # the workflow MUST run this from a copy outside the repo tree (e.g. $RUNNER_TEMP)
@@ -19,16 +30,17 @@
 #
 # Env:
 #   BASE_SHA        base commit to diff against (empty -> full fallback)
-#   HEAD_SHA        head commit to diff (default: current HEAD)
+#   HEAD_SHA        head commit to diff (default: current HEAD; any other
+#                   commit than the one checked out is refused)
 #   BAZEL_DIFF_JAR  path to bazel-diff_deploy.jar (missing -> full fallback)
 #   OUT_DIR         output dir for the target lists (default: $PWD/.bazel-diff-out)
 #   GITHUB_OUTPUT   if set, has_any/has_unit/has_integration/has_e2e are appended
 #
 # Outputs in OUT_DIR: impacted_build.txt, impacted_unit.txt, impacted_integration.txt
+# and impacted_commit.txt (the commit the three lists are for)
 set -uo pipefail
 
 BAZEL="$(command -v bazelisk || command -v bazel)"
-HEAD_SHA="${HEAD_SHA:-$(git rev-parse HEAD)}"
 OUT_DIR="${OUT_DIR:-$PWD/.bazel-diff-out}"
 mkdir -p "$OUT_DIR"
 
@@ -42,6 +54,21 @@ emit() { # name value
 die() { # message: what to test could not be determined, and nothing wider is left
 	echo "::error::ci-impacted-targets: $1" >&2
 	exit 1
+}
+
+# The commit under test is the one checked out (#1459). Before anything else,
+# the full-run fallbacks included: they list the tests of the checkout.
+start_commit="$(git rev-parse HEAD 2>/dev/null)" || die "git rev-parse HEAD failed"
+HEAD_SHA="${HEAD_SHA:-$start_commit}"
+head_commit="$(git rev-parse --verify -q "${HEAD_SHA}^{commit}")" || die "HEAD_SHA ${HEAD_SHA} is not a commit of this repository"
+[ "$head_commit" = "$start_commit" ] ||
+	die "HEAD_SHA is ${head_commit} and the checkout is at ${start_commit}: the lists would be for another tree than the one the caller builds"
+# No commit file from an earlier run into the same OUT_DIR: a run that fails
+# leaves none, so its lists cannot pass ci-impacted-lists.sh.
+rm -f "$OUT_DIR/impacted_commit.txt" || die "could not remove a stale impacted_commit.txt"
+# stamp: the lists in OUT_DIR are for start_commit. Called once they are written.
+stamp() {
+	echo "$start_commit" >"$OUT_DIR/impacted_commit.txt" || die "could not write impacted_commit.txt"
 }
 
 # What CI may build and test: nothing tagged `manual` (#1413 tests, #1438 build).
@@ -125,6 +152,7 @@ full_run() {
 	echo '//...' >"$OUT_DIR/impacted_build.txt"
 	cp "$OUT_DIR/integration_tests.txt" "$OUT_DIR/impacted_integration.txt" || die "could not write impacted_integration.txt"
 	cp "$OUT_DIR/all_unit.txt" "$OUT_DIR/impacted_unit.txt" || die "could not write impacted_unit.txt"
+	stamp
 	emit has_any true
 	emit has_unit true
 	emit has_integration true
@@ -164,10 +192,9 @@ generate() { # ref outfile
 	java -jar "$BAZEL_DIFF_JAR" generate-hashes -w "$PWD" -b "$BAZEL" -s "$rev_seed" "$2"
 }
 
-# Where the checkout is now. The callers check out HEAD_SHA before they run this,
-# so the full run (which queries here) and the bazel-diff path (which queries at
-# HEAD_SHA) list the same commit's targets.
-start_commit="$(git rev-parse HEAD)" || die "git rev-parse HEAD failed"
+# Where the checkout is now: at HEAD_SHA (checked above), so the full run (which
+# queries here) and the bazel-diff path (which queries at HEAD_SHA) list the same
+# commit's targets.
 orig_ref="$(git rev-parse --abbrev-ref HEAD)"
 [ "$orig_ref" = "HEAD" ] && orig_ref="$start_commit"
 # restore: back to where the run started, or fail. From a checkout left on the
@@ -225,6 +252,7 @@ unit "$OUT_DIR/impacted_tests.txt" "$OUT_DIR/impacted_integration.txt" >"$OUT_DI
 
 nonempty() { [ -s "$1" ] && echo true || echo false; }
 
+stamp
 emit has_any "$(nonempty "$OUT_DIR/impacted_build.txt")"
 emit has_unit "$(nonempty "$OUT_DIR/impacted_unit.txt")"
 emit has_integration "$(nonempty "$OUT_DIR/impacted_integration.txt")"
