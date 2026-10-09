@@ -181,6 +181,13 @@ func TestRenderCheck_LinkedEntries(t *testing.T) {
 			attribute: "k8s.node.name", flag: "--mesh-domain", domain: "aether",
 			want: `it has --mesh-domain with another value`,
 		},
+		// The right value first and another after it: the container runs with
+		// the last.
+		"the chart gives the domain twice": {
+			attribute: "k8s.node.name", flag: "--mesh-domain", domain: "aether.internal",
+			render: strings.Replace(render, `- "--mesh-domain=aether.internal"`, `- "--mesh-domain=aether.internal"`+"\n            - \"--mesh-domain=mesh.internal\"", 1),
+			want:   `container "agent" is run with --mesh-domain 2 times: the last one wins, so no one value can be held`,
+		},
 		"a flag the container is not run with": {
 			attribute: "k8s.node.name", flag: "--domain", domain: "aether.internal",
 			want: `is not run with --domain=aether.internal, the value of the entry mesh.default_domain (it has no --domain argument)`,
@@ -655,6 +662,16 @@ func TestRenderCheck_RootedHostPath(t *testing.T) {
 		"the chart names the directory after another driver": {
 			from: "hostPath: {path: /var/lib/kubelet/plugins/csi.example.io}", to: "hostPath: {path: /var/lib/kubelet/plugins/csi.mesh.io}",
 			want: `has no hostPath volume of the path /var/lib/kubelet/plugins/csi.example.io`,
+		},
+		// The last of a repeated flag is the one a Go program runs with: a
+		// render that says the root twice is not held by its first.
+		"the chart gives the root twice": {
+			from: `"--kubelet-root=/var/lib/kubelet", `, to: `"--kubelet-root=/var/lib/kubelet", "--kubelet-root=/wrong", `,
+			want: `o: DaemonSet/plugin container "plugin" is run with --kubelet-root 2 times: the last one wins, so no one value can be held`,
+		},
+		"the chart gives the same root twice": {
+			from: `"--kubelet-root=/var/lib/kubelet", `, to: `"--kubelet-root=/var/lib/kubelet", "--kubelet-root=/var/lib/kubelet", `,
+			want: `is run with --kubelet-root 2 times`,
 		},
 		"the plugin is no longer told the root": {
 			from: `"--kubelet-root=/var/lib/kubelet", `, to: ``,

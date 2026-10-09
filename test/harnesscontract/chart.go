@@ -197,6 +197,24 @@ func (got container) flagValue(flag string) (string, bool) {
 	return "", false
 }
 
+// givenTwice reports a flag the container is run with more than once, as
+// `FLAG` or `FLAG=value`. A Go program runs with the last of them, so the
+// right value followed by another is not the right value: no flag the
+// contract holds may be repeated, whatever the values.
+func (got container) givenTwice(what, flag string) []string {
+	n := 0
+	for _, a := range slices.Concat(got.Command, got.Args) {
+		if a == flag || strings.HasPrefix(a, flag+"=") {
+			n++
+		}
+	}
+	if n < 2 {
+		return nil
+	}
+	// Not the values: an argument can hold a secret.
+	return []string{fmt.Sprintf("%s container %q is run with %s %d times: the last one wins, so no one value can be held", what, got.Name, flag, n)}
+}
+
 // refs returns the ids of the entries of other sections the container refers
 // to, sorted and without repeats.
 func (c Container) refs() []string {
@@ -778,6 +796,10 @@ func checkRootedPath(what string, volumes []hostVolume, by []container, flag, re
 	}
 	var problems []string
 	for _, c := range by {
+		if twice := c.givenTwice(what, flag); twice != nil {
+			problems = append(problems, twice...)
+			continue
+		}
 		root, ok := c.flagValue(flag)
 		if !ok {
 			problems = append(problems, fmt.Sprintf("%s container %q is not run with %s, which the contract's %s starts with", what, c.Name, flag, pattern))
@@ -1011,6 +1033,10 @@ func (c Container) checkArgs(what string, got container) []string {
 	var problems []string
 	line := slices.Concat(got.Command, got.Args)
 	for _, flag := range sortedKeys(c.args) {
+		if twice := got.givenTwice(what, flag); twice != nil {
+			problems = append(problems, twice...)
+			continue
+		}
 		want := flag + "=" + c.args[flag]
 		if slices.Contains(line, want) {
 			continue
