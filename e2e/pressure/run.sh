@@ -154,6 +154,10 @@ JOB_APPLIED=0
 # 1 from the moment this run asks for the agent pod's deletion: the request may
 # have been acted on even if its answer was lost.
 AGENT_RESTARTED=0
+# 1 from the moment this run asks for the Job to be applied, for good: JOB_APPLIED
+# goes back to 0 when the Job is deleted, and "none applied now" is not "none
+# was ever applied".
+JOB_EVER_APPLIED=0
 OLD_POD=""
 KUBE_CONTEXT=""
 PF_PID=""
@@ -628,6 +632,14 @@ agent_status() { pod_field "$1" '{.status.containerStatuses[?(@.name=="'"$AGENT_
 # default would be a guess (#1579). main calls this before any command is run.
 preflight_inputs() {
 	local missing=""
+	# A percentage, checked here: a wait loop does arithmetic with it, and a
+	# value that is not a number would end the run there with the shell's own
+	# status, while one above 100 would make a FAIL impossible.
+	case "$MIN_POLL_OK_PCT" in
+	"" | *[!0-9]*) die "MIN_POLL_OK_PCT must be a whole number from 0 to 100 (got '${MIN_POLL_OK_PCT}')" ;;
+	esac
+	[ "$MIN_POLL_OK_PCT" -le 100 ] ||
+		die "MIN_POLL_OK_PCT must be a whole number from 0 to 100 (got '${MIN_POLL_OK_PCT}')"
 	[ -n "$EXPECT_CONTEXT" ] || missing="${missing} EXPECT_CONTEXT (the kube context this run is meant for)"
 	[ -n "$COLLECTOR_NS" ] || missing="${missing} COLLECTOR_NS (the namespace of the ${COLLECTOR_DEPLOY} Deployment)"
 	[ -n "$PROM_NS" ] || missing="${missing} PROM_NS (the namespace of the ${PROM_SVC} Service)"
@@ -793,12 +805,18 @@ track_memory() {
 		reason="RSS $(mib "$M_RSS")MiB crossed the $(mib "$ABORT_RSS_BYTES")MiB backstop (${ABORT_RSS_PCT}% of the $(mib "$POD_MEM_LIMIT_BYTES")MiB pod limit)"
 	fi
 	[ -n "$reason" ] || return 0
-	# The baseline is read before the Job is applied, and a dry run never
-	# applies it: there is nothing to delete then, and a dry run changes nothing.
-	[ "$JOB_APPLIED" = 1 ] || die "collector ${reason} — no job had been applied, nothing was changed"
 	# This is read after the restart step too (#1598): say what is true of the agent.
 	local agent="no agent was touched"
 	[ "$AGENT_RESTARTED" != 1 ] || agent="agent pod ${OLD_POD} on ${NODE} had already been deleted by this run"
+	# No Job to delete now. Either none was ever applied (the baseline is read
+	# before the apply, and a dry run never applies: nothing was changed), or
+	# this run has already deleted it (the ceiling is read while the collector
+	# drains, too), and then things were changed.
+	if [ "$JOB_APPLIED" != 1 ]; then
+		[ "$JOB_EVER_APPLIED" = 1 ] ||
+			die "collector ${reason} — no job had been applied, nothing was changed"
+		die "collector ${reason} — the pressure job had already been deleted by this run, and ${agent}"
+	fi
 	if delete_job; then
 		JOB_APPLIED=0
 		die "collector ${reason} — job deleted, ${agent}"
@@ -823,14 +841,19 @@ apply_job() {
 	local rendered
 	rendered=$(render_job) || die "could not read the job manifest ${JOB_MANIFEST}"
 	# The Job that is applied must be the Job that is watched and deleted
-	# (#1600). A manifest whose metadata names another one is refused before
-	# anything is applied.
-	if ! grep -qxF "  name: ${JOB_NAME}" <<<"$rendered" || ! grep -qxF "  namespace: ${JOB_NS}" <<<"$rendered"; then
-		die "${JOB_MANIFEST} does not define job ${JOB_NS}/${JOB_NAME}: its metadata must read '  name: ${JOB_NAME}' and '  namespace: ${JOB_NS}' (or carry the __JOB_NAME__ and __JOB_NS__ tokens). Nothing was applied."
+	# (#1600). The manifest must be one object, a Job, whose metadata carries
+	# that name and namespace and no other: in a single Job document the only
+	# keys named `name` and `namespace` at this depth are its metadata's, so the
+	# expected name on some other object next to a Job by another name does not
+	# pass. Refused before anything is applied.
+	if [ "$(grep -c '^kind:' <<<"$rendered")" != 1 ] || ! grep -qxE 'kind: Job[[:space:]]*' <<<"$rendered" ||
+		! grep -qxF "  name: ${JOB_NAME}" <<<"$rendered" || ! grep -qxF "  namespace: ${JOB_NS}" <<<"$rendered"; then
+		die "${JOB_MANIFEST} does not define job ${JOB_NS}/${JOB_NAME}: its metadata must read '  name: ${JOB_NAME}' and '  namespace: ${JOB_NS}' (or carry the __JOB_NAME__ and __JOB_NS__ tokens), and it must hold that one Job and no other object. Nothing was applied."
 	fi
 	# Set before the apply: one that failed may still have created the Job, and
 	# the cleanup trap deletes it only when this says so.
 	JOB_APPLIED=1
+	JOB_EVER_APPLIED=1
 	printf '%s\n' "$rendered" | kc apply -f - >/dev/null ||
 		die "could not confirm that ${JOB_MANIFEST} was applied (the error is above) — job ${JOB_NS}/${JOB_NAME} may have been created, and the cleanup trap tries to delete it. No agent was touched."
 	log "applied ${JOB_MANIFEST} (hard stop: activeDeadlineSeconds, plus the cleanup trap)"

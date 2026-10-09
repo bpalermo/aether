@@ -37,8 +37,8 @@ lacks one aborts before it asks the cluster anything, naming each missing variab
 | `COLLECTOR_OTLP_ENDPOINT` | The OTLP gRPC endpoint the Job floods. | `<COLLECTOR_DEPLOY>.<COLLECTOR_NS>.svc.cluster.local:4317` |
 | `PROM_SVC` | Name of the Prometheus Service (port 80). | `prometheus-server` |
 | `AGENT_NS`, `AGENT_SELECTOR`, `AGENT_CONTAINER` | The node agent, as the `aether` chart installs it. | `aether-system`, `app.kubernetes.io/name=aether-agent`, `agent` |
-| `JOB_NS`, `JOB_NAME`, `--job-manifest` | The pressure Job. The shipped manifest takes its namespace and name from the two variables. A manifest of your own must define that same Job (`  name: <JOB_NAME>`, `  namespace: <JOB_NS>`): one that defines another is refused before anything is applied. | `aether-test`, `aether-collector-pressure`, `collector-pressure-job.yaml` |
-| `MIN_POLL_OK_PCT` | The share of a wait loop's polls that must have got an answer before its deadline may be read as a FAIL. | `50` |
+| `JOB_NS`, `JOB_NAME`, `--job-manifest` | The pressure Job. The shipped manifest takes its namespace and name from the two variables. A manifest of your own must hold one object, that same Job (`kind: Job`, `  name: <JOB_NAME>`, `  namespace: <JOB_NS>`): anything else is refused before anything is applied. | `aether-test`, `aether-collector-pressure`, `collector-pressure-job.yaml` |
+| `MIN_POLL_OK_PCT` | The share of a wait loop's polls that must have got an answer before its deadline may be read as a FAIL. A whole number from 0 to 100. | `50` |
 | `SOAK_POD_SELECTOR` | See [The soak guard](#the-soak-guard-what-it-can-and-cannot-know). | unset |
 
 The measured numbers further down (a 2Gi collector, two replicas, five nodes) are those of the
@@ -375,8 +375,10 @@ holding the process at its ceiling, not a problem. Peak RSS ≤ 1,766 MiB in all
 
 Exit codes: **0** PASS · **1** FAIL (the agent misbehaved — #662 is back, keep the logs) ·
 **2** INCONCLUSIVE (pressure never reached, lapsed mid-test, the safety ceiling aborted the
-run, or a `kubectl` or `curl` call failed; nothing was proven and, on a ceiling abort, no agent
-was touched).
+run, or a `kubectl` or `curl` call failed; nothing was proven). An INCONCLUSIVE run is not
+always a run that changed nothing: the abort message says whether the Job was applied or
+deleted and whether the agent pod had already been deleted. The ceiling is read until the
+end, so it can be crossed after the restart.
 
 A FAIL is a real regression report: capture `kubectl -n aether-system describe pod` and the
 full pod log before re-running, because the next run replaces the pod.
@@ -419,7 +421,9 @@ harness:
 3. The manual switch, safe at any instant:
 
    ```bash
-   kubectl --context <kube-context> -n aether-test delete job aether-collector-pressure
+   # the EXPECT_CONTEXT, JOB_NS and JOB_NAME the run was given
+   # (defaults: aether-test, aether-collector-pressure)
+   kubectl --context <kube-context> -n <JOB_NS> delete job <JOB_NAME>
    ```
 
 Nothing else is mutated: no helm release, no chart value, no DaemonSet, no collector config.

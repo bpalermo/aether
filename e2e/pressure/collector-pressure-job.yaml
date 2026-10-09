@@ -16,8 +16,9 @@
 #   __COLLECTOR_NS__              the namespace of the collector's pods
 #   __JOB_NS__, __JOB_NAME__      default aether-test, aether-collector-pressure
 #
-# Kill switch (either works, both are safe at any moment):
-#   kubectl -n aether-test delete job aether-collector-pressure
+# Kill switch (either works, both are safe at any moment), with the context,
+# JOB_NS and JOB_NAME the run was given:
+#   kubectl --context <kube-context> -n <JOB_NS> delete job <JOB_NAME>
 #   ...or wait: activeDeadlineSeconds terminates the whole Job at 600s no matter what.
 #
 # Why LOGS and not metrics: memory_limiter is one shared process-wide component,

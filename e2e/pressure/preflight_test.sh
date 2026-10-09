@@ -382,6 +382,16 @@ run_main inputs-one-missing NO_SOAK_RUNNING=1 EXPECT_CONTEXT=ctx-test COLLECTOR_
 want inputs-one-missing 2 'PROM_NS'
 lacks inputs-one-missing 'COLLECTOR_NS'
 
+# MIN_POLL_OK_PCT is a percentage: anything else would end a wait loop in an
+# arithmetic error, or make a FAIL impossible.
+for bad in abc 150 -1 5.5; do
+	run_main "inputs-pct-$bad" "${INPUTS[@]}" NO_SOAK_RUNNING=1 MIN_POLL_OK_PCT="$bad" -- --node n1
+	want "inputs-pct-$bad" 2 "MIN_POLL_OK_PCT must be a whole number from 0 to 100 (got '$bad')"
+	if [ -s "$FAKE/calls" ]; then
+		fail "inputs-pct-$bad: the script ran a command with a bad input: $(cat "$FAKE/calls")"
+	fi
+done
+
 # --- SOAK_POD_SELECTOR --------------------------------------------------------
 prepare selector-hit
 printf 'pod/loader-abc\npod/loader-def\n' >"$CASES/selector-hit/pods"
@@ -740,6 +750,23 @@ else
 	pass "apply-mismatch: nothing was applied"
 fi
 
+# The check is of the Job's own metadata: a manifest that carries the expected
+# name on another object, next to a Job by another name, is refused too.
+DECOY="$TMP/decoy-job.yaml"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: aether-collector-pressure\n  namespace: aether-test\n---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: some-other-flood\n  namespace: elsewhere\nspec: {}\n' >"$DECOY"
+call apply-decoy "$APPLY" JOB_MANIFEST="$DECOY"
+want apply-decoy 2 'JOB_APPLIED=0'
+want apply-decoy 2 'Nothing was applied'
+if grep -q ' apply ' "$FAKE/calls"; then
+	fail "apply-decoy: applied a manifest whose Job is another one: $(cat "$FAKE/calls")"
+else
+	pass "apply-decoy: nothing was applied"
+fi
+NOTJOB="$TMP/not-a-job.yaml"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: aether-collector-pressure\n  namespace: aether-test\n' >"$NOTJOB"
+call apply-not-a-job "$APPLY" JOB_MANIFEST="$NOTJOB"
+want apply-not-a-job 2 'Nothing was applied'
+
 # restart_agent.
 put restart-ok agent-pods.out aether-agent-aaa
 call restart-ok 'NODE=n1; echo "before=$AGENT_RESTARTED"; restart_agent; echo "after=$AGENT_RESTARTED"'
@@ -919,6 +946,12 @@ call ceiling-after-restart "JOB_APPLIED=1; AGENT_RESTARTED=1; NODE=n1; OLD_POD=a
 want ceiling-after-restart 2 'job deleted'
 want ceiling-after-restart 2 'agent pod aether-agent-aaa on n1 had already been deleted by this run'
 lacks ceiling-after-restart 'no agent was touched'
+# And after the pressure was released (the Job deleted by this run): "no job
+# had been applied, nothing was changed" is not true either.
+call ceiling-after-release "JOB_APPLIED=0; JOB_EVER_APPLIED=1; AGENT_RESTARTED=1; NODE=n1; OLD_POD=aether-agent-aaa; $CEILING"
+want ceiling-after-release 2 'the pressure job had already been deleted by this run'
+want ceiling-after-release 2 'agent pod aether-agent-aaa on n1 had already been deleted by this run'
+lacks ceiling-after-release 'nothing was changed'
 put ceiling-after-restart-delete-error delete-job.err
 call ceiling-after-restart-delete-error "JOB_APPLIED=1; AGENT_RESTARTED=1; NODE=n1; OLD_POD=aether-agent-aaa; $CEILING"
 want ceiling-after-restart-delete-error 2 'agent pod aether-agent-aaa on n1 had already been deleted by this run'
