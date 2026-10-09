@@ -69,7 +69,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	c.reconcileUDPCaptureListeners()
 
 	listeners := c.Listeners()
-	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
+	clusters, endpoints, vhosts, pins := c.clustersEndpointsVhostsAndPins()
 
 	// Per-pod application clusters live alongside listeners (not in the
 	// registry-driven cluster map) so registry reloads never drop them. STATIC
@@ -228,11 +228,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to version snapshot resources: %w", err)
 	}
 
-	// The pin state of this snapshot, taken and remembered under its version
-	// BEFORE SetSnapshot: SetSnapshot is what lets the proxy see the snapshot,
-	// and its acknowledgement is looked up by this version (ClusterPinsAcked,
-	// #1425). Remembered after, an ACK could arrive first and find nothing.
-	pins := c.clusterPinReport()
+	// The pin state of this snapshot (taken in the read of the cluster map
+	// that collected its clusters, above), remembered under its version BEFORE
+	// SetSnapshot: SetSnapshot is what lets the proxy see the snapshot, and its
+	// acknowledgement is looked up by this version (ClusterPinsAcked, #1425).
+	// Remembered after, an ACK could arrive first and find nothing.
 	c.pins.remember(v, pins.counts)
 
 	// Everything SetSnapshot does runs under the cache mutex the ADS stream

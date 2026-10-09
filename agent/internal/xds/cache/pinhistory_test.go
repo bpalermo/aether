@@ -157,6 +157,29 @@ func TestPinReportCostsNoAllocationPerCluster(t *testing.T) {
 	assert.Zero(t, allocs, "allocations per report over %d pinned clusters", n)
 }
 
+// TestPinReportIsOfTheClustersTheBuildRead: a snapshot's pin report is filed
+// under that snapshot's version, so it has to describe the cluster entries the
+// build collected its clusters from, not the cluster map as it is some time
+// later. The build therefore takes both in one read. Here the map changes
+// right after that read, as a registry reload landing mid-build would change
+// it: the report still counts what the resources were built from.
+func TestPinReportIsOfTheClustersTheBuildRead(t *testing.T) {
+	c, _, _ := newBindingTestCache(t)
+	ctx := context.Background()
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+	require.NoError(t, c.SetTrustDomain(ctx, raceTrustDomain))
+	addPinnedCluster(c, bindingClusterName)
+
+	clusters, _, _, pins := c.clustersEndpointsVhostsAndPins()
+	addOutboundCluster(c, "late.aether-test.aether.internal") // unpinned, after the read
+
+	require.Len(t, clusters, 1, "the build read one cluster")
+	assert.Equal(t, cachemetrics.PinCounts{Pinned: 1}, pins.counts, "and its report is of that one")
+	assert.Empty(t, pins.unpinned)
+	later := c.clusterPinReport()
+	assert.Equal(t, 1, later.counts.UnpinnedTotal(), "fixture: a later read of the map does see the new entry")
+}
+
 // TestSnapshotIsInThePinHistoryBeforeItCanBeAcked: the pin state is
 // remembered before SetSnapshot, which is what makes the snapshot visible to a
 // proxy. A watch that is already open is answered from inside SetSnapshot; by

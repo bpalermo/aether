@@ -14,6 +14,8 @@ import (
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,6 +30,28 @@ const (
 	tlsClustersGauge      = "aether.agent.snapshot.tls_clusters"
 	ackedTLSClustersGauge = "aether.agent.xds.acked_tls_clusters"
 )
+
+// clusterPinReport is the pin report of the cache as it is now, under one read
+// of the cluster map. A snapshot build takes its report in the pass that
+// collects the cluster resources (clustersEndpointsVhostsAndPins).
+func (c *SnapshotCache) clusterPinReport() pinReport {
+	c.clusterMu.RLock()
+	defer c.clusterMu.RUnlock()
+
+	var r pinReport
+	for name, entry := range c.clusters {
+		r.add(name, &entry)
+	}
+	r.sortNames()
+	return r
+}
+
+// clustersEndpointsAndVhosts is the build's read of the cluster map without
+// the pin report, for the tests that only look at the resources.
+func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.Resource, []*routev3.VirtualHost) {
+	clusters, clas, vhosts, _ := c.clustersEndpointsVhostsAndPins()
+	return clusters, clas, vhosts
+}
 
 // pinSeries is one reading of a TLS-cluster gauge: the pinned series and one
 // unpinned series per cause.

@@ -97,29 +97,29 @@ type pinReport struct {
 	unpinned map[cachemetrics.UnpinnedCause][]string
 }
 
-// clusterPinReport classifies every cluster entry (pinState) under one read of
-// the cluster map.
-func (c *SnapshotCache) clusterPinReport() pinReport {
-	c.clusterMu.RLock()
-	defer c.clusterMu.RUnlock()
-
-	var r pinReport
-	for name, entry := range c.clusters {
-		switch kind, cause := entry.pinState(); kind {
-		case pinPresent:
-			r.counts.Pinned++
-		case pinMissing:
-			if r.unpinned == nil {
-				r.unpinned = make(map[cachemetrics.UnpinnedCause][]string, cachemetrics.NumUnpinnedCauses)
-			}
-			r.unpinned[cause] = append(r.unpinned[cause], name)
-			r.counts.AddUnpinned(cause)
+// add classifies one cluster entry (pinState) into the report. A snapshot
+// build calls it from the pass it already makes over the cluster map
+// (clustersEndpointsVhostsAndPins), so the report describes exactly the
+// entries that build read and costs no pass of its own.
+func (r *pinReport) add(name string, entry *clusterEntry) {
+	switch kind, cause := entry.pinState(); kind {
+	case pinPresent:
+		r.counts.Pinned++
+	case pinMissing:
+		if r.unpinned == nil {
+			r.unpinned = make(map[cachemetrics.UnpinnedCause][]string, cachemetrics.NumUnpinnedCauses)
 		}
+		r.unpinned[cause] = append(r.unpinned[cause], name)
+		r.counts.AddUnpinned(cause)
 	}
+}
+
+// sortNames sorts the unpinned names, so the same clusters are shown on every
+// snapshot when the list is cut.
+func (r *pinReport) sortNames() {
 	for _, names := range r.unpinned {
 		sort.Strings(names)
 	}
-	return r
 }
 
 // reportClusterPins records, for the snapshot just set, how many mesh cluster
