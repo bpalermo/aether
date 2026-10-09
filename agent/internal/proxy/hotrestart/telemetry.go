@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"aethermesh.dev/common/telemetry/servicename"
+	"aethermesh.dev/common/telemetry/serviceresource"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.30.0"
 )
 
 const (
@@ -75,16 +74,7 @@ func NewTelemetry(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error) 
 // newTelemetryResource builds the supervisor's Resource: its own service
 // identity plus the pod's OTEL_RESOURCE_ATTRIBUTES (k8s.node.name and the like).
 func newTelemetryResource(ctx context.Context, serviceVersion string) (*resource.Resource, error) {
-	res, err := resource.New(
-		ctx,
-		resource.WithAttributes(semconv.ServiceVersion(serviceVersion)),
-		resource.WithFromEnv(),
-		// After WithFromEnv, so OTEL_RESOURCE_ATTRIBUTES cannot rename the component (#1562).
-		servicename.Option(telemetryServiceName),
-		resource.WithTelemetrySDK(),
-		resource.WithProcess(),
-		resource.WithHost(),
-	)
+	res, err := serviceresource.New(ctx, telemetryServiceName, serviceVersion)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
