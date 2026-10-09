@@ -194,7 +194,9 @@ is_skipped() {
 #     line is a comment-looking `#` line: only the first non-blank line after
 #     `image: >-` / `image: |` is taken;
 #   - an image assembled from parts (`"$REPO:$TAG"`, a Go `fmt.Sprintf`): not a
-#     literal. Net 2 still catches a known name under a computed tag.
+#     literal. A repository written out under a computed tag (`x/y:$TAG`) IS
+#     read, by net 1 behind an image key or flag for any name and by net 2
+#     anywhere for a known one.
 extract_references() { # <names file>; file list on stdin
 	local files=() f
 	while IFS= read -r f; do
@@ -269,7 +271,17 @@ extract_references() { # <names file>; file list on stdin
 				# `image:` anywhere else in a line is prose ("no image: line") unless
 				# a quoted value follows (Go: `{Name: "a", Image: "b"}`).
 				if (key ~ /:[ \t]*$/ && !key_opens_line && !in_flow && !quoted) continue
-				if (literal(ref)) emit(ref)
+				if (literal(ref)) {
+					emit(ref)
+				} else if (match(rest, /^["\047]?[a-z0-9][a-z0-9._\/-]*(:[0-9]+\/[a-z0-9._\/-]+)?:(\$|\{\{)[^ \t"\047]*/)) {
+					# A repository written out under a computed tag (`x/y:$TAG`,
+					# `x/y:{{ .Values.tag }}`) is an image this file names, and it
+					# is not pinned: emitted as it stands, whether or not the
+					# inventory knows the name.
+					ref = substr(rest, 1, RLENGTH)
+					sub(/^["\047]/, "", ref)
+					emit(ref)
+				}
 			}
 			for (n in names) {
 				rest = $0

@@ -203,6 +203,12 @@ mutate "a known image by tag behind a key the scan does not read" e2e/run.sh 'do
 	"e2e/run.sh:12: a/b:1.0 is pinned by tag only"
 mutate "a known image under a computed tag" e2e/run.sh 'docker run --rm "a/b:${B_TAG}" true' \
 	'e2e/run.sh:12: a/b:${B_TAG} is pinned by tag only'
+mutate "an unknown image under a computed tag, YAML" e2e/sub/pod.yaml '      image: new/tool:${TOOL_TAG}' \
+	'e2e/sub/pod.yaml:1: new/tool:${TOOL_TAG} is pinned by tag only'
+mutate "an unknown image under a computed tag, quoted flag" e2e/run.sh 'kubectl run q --image="new/tool:$TOOL_TAG"' \
+	'e2e/run.sh:12: new/tool:$TOOL_TAG is pinned by tag only'
+mutate "an unknown image under a templated tag" charts/x/values.yaml '  image: new/tool:{{ .Values.tag }}' \
+	'charts/x/values.yaml:6: new/tool:{{ is pinned by tag only'
 
 # Spellings that once read as prose or were not read at all (review of #1476).
 mutate "YAML flow mapping, unquoted, by tag only" e2e/sub/pod.yaml '  containers: [{name: probe, image: x/y:latest}]' \
