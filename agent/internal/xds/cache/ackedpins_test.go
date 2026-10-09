@@ -1152,12 +1152,12 @@ func TestPinReportIsOfTheClustersTheBuildRead(t *testing.T) {
 	assert.Equal(t, 1, later.counts.UnpinnedTotal(), "fixture: a later read of the map does see the new entry")
 }
 
-// TestSnapshotIsInThePinHistoryBeforeItCanBeAcked: the pin classes of a
+// TestSnapshotPinClassesAreRecordedBeforeItCanBeAcked: the pin classes of a
 // snapshot's clusters are recorded before SetSnapshot, which is what makes the
 // snapshot visible to a proxy. A watch that is already open is answered from
 // inside SetSnapshot; by then the versions must be known, or a fast ACK finds
 // nothing.
-func TestSnapshotIsInThePinHistoryBeforeItCanBeAcked(t *testing.T) {
+func TestSnapshotPinClassesAreRecordedBeforeItCanBeAcked(t *testing.T) {
 	c, _, reader := newBindingTestCache(t)
 	ctx := context.Background()
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
