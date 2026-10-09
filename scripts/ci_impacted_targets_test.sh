@@ -26,6 +26,9 @@
 #     no has_* output at all. Same for an integration query that takes every
 #     test, for a bazel-diff that exits 0 without writing its list, and for a
 #     checkout that cannot be put back;
+#   - #1459: the lists are for the commit that is checked out. A HEAD_SHA that
+#     is another commit fails the step, and impacted_commit.txt names the
+#     commit on every path that writes the lists;
 #   - anti-vacuity: with a filter taken back out of a copy of the script, the
 #     same fixture puts the `manual` targets and the look-alike tags in the lists.
 #
@@ -417,6 +420,40 @@ run "$SCRIPT" "$OUT" BASE_SHA="$BASE" BAZEL_DIFF_JAR="$JAR" FAKE_JAVA_DIRTY=1
 expect "stuck checkout: the fixture left the repository on the base revision" "$(git -C "$REPO" rev-parse HEAD)" "$BASE"
 loud "checkout stuck on the base revision"
 git -C "$REPO" checkout -q -f main
+
+# --- 9. the lists are for the commit that is checked out (#1459) -------------------
+# The jobs that read the lists build the commit they check out. A HEAD_SHA that
+# is another commit would list targets on one tree for a build of another: the
+# bazel-diff path lists at HEAD_SHA, the full run where the checkout is.
+HEAD_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
+cut -f1 "$TARGETS" >"$FAKE_IMPACTED"
+OUT="$TMP/out9"
+run "$SCRIPT" "$OUT" BASE_SHA="$BASE" BAZEL_DIFF_JAR="$JAR" HEAD_SHA="$BASE"
+loud "HEAD_SHA is not the checkout (bazel-diff path)"
+run "$SCRIPT" "$OUT" BASE_SHA="$BASE" HEAD_SHA="$BASE"
+loud "HEAD_SHA is not the checkout (full run, no jar)"
+run "$SCRIPT" "$OUT" BASE_SHA="$BASE" BAZEL_DIFF_JAR="$JAR" HEAD_SHA=0000000000000000000000000000000000000000
+loud "HEAD_SHA is not a commit"
+# The same commit under another name is the checkout.
+run "$SCRIPT" "$OUT" BASE_SHA="$BASE" BAZEL_DIFF_JAR="$JAR" HEAD_SHA=main
+expect "HEAD_SHA names the checkout by branch: accepted" "$RC $(output has_any=true)" "0 1"
+# Every path that writes the lists says which commit they are for: the jobs
+# that download them compare it with their own checkout (ci-impacted-lists.sh).
+expect "bazel-diff path: impacted_commit.txt is the checkout" "$(lists "$OUT" impacted_commit.txt)" "$HEAD_COMMIT"
+run "$SCRIPT" "$OUT" BASE_SHA="$BASE"
+expect "full run: impacted_commit.txt is the checkout" "$(lists "$OUT" impacted_commit.txt)" "$HEAD_COMMIT"
+: >"$FAKE_IMPACTED"
+run "$SCRIPT" "$OUT" BASE_SHA="$BASE" BAZEL_DIFF_JAR="$JAR"
+expect "nothing impacted: impacted_commit.txt is the checkout, and every has_* is written as false" \
+	"$(lists "$OUT" impacted_commit.txt) $(output has_any=false)$(output has_unit=false)$(output has_integration=false)$(output has_e2e=false)" \
+	"$HEAD_COMMIT 1111"
+# A commit file an earlier run left in OUT_DIR is not this run's: a failed run
+# leaves none behind.
+mkdir -p "$OUT"
+echo stale >"$OUT/impacted_commit.txt"
+KEEP_OUT=1 run "$SCRIPT" "$OUT" BASE_SHA="$BASE" BAZEL_DIFF_JAR="$JAR" FAKE_QUERY_FAIL="$Q_TESTS"
+loud "a failed run"
+expect "a failed run leaves no impacted_commit.txt" "$([ -e "$OUT/impacted_commit.txt" ] && echo present || echo absent)" absent
 
 echo
 if [ "$FAILS" -ne 0 ]; then

@@ -72,13 +72,52 @@ sh_test(
 # the bazel-diff path and on every full-run fallback (#1413); a `manual` rule
 # reaches no build list (#1438); `integration` is matched as a whole tag
 # (#1439); and a query that fails or returns nothing ends in the full run or a
-# failed step, never in an empty list with has_*=false (#1437). Needs a real
-# `git` on PATH and nothing else.
+# failed step, never in an empty list with has_*=false (#1437). The lists are
+# for the commit that is checked out: any other HEAD_SHA fails the step, and
+# impacted_commit.txt names that commit (#1459). Needs a real `git` on PATH and
+# nothing else.
 sh_test(
     name = "ci_impacted_targets_test",
     size = "small",
     srcs = ["ci_impacted_targets_test.sh"],
     data = ["ci-impacted-targets.sh"],
+)
+
+# One tree for ci.yaml's `diff` job and its test legs (#1459), against
+# throwaway git repositories: scripts/ci-merge-range.sh reads the range from
+# the pull request's merge commit (its first parent to the merge itself, never
+# the head) and refuses a checkout that is not the run's commit;
+# scripts/ci-impacted-lists.sh, run by .github/actions/impacted-lists in every
+# job that reads the lists, refuses a missing list, lists computed for another
+# commit than the one checked out, and a has_* output that is not true/false or
+# disagrees with its list (#1460). Needs a real `git` on PATH and nothing else.
+sh_test(
+    name = "ci_same_tree_test",
+    size = "small",
+    srcs = ["ci_same_tree_test.sh"],
+    data = [
+        "ci-impacted-lists.sh",
+        "ci-merge-range.sh",
+    ],
+)
+
+# The decision of ci.yaml's `ci` job, the required check (#1460):
+# scripts/ci-gate.sh over `needs` contexts written in the test. An output that
+# was never set, a job skipped that had to run, a failed or cancelled job and a
+# context the rules do not cover all fail; "nothing impacted" passes only as
+# four `false` written by `diff`. The second half compares the rules with
+# ci.yaml itself (the job list, the `needs` of `ci`, every `if:`), and holds
+# what #1459 needs from the file. Hermetic: the Bazel-pinned jq.
+sh_test(
+    name = "ci_gate_test",
+    size = "small",
+    srcs = ["ci_gate_test.sh"],
+    data = [
+        "ci-gate.sh",
+        "//:ci_definitions",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
 # The verifier and the helper it sources, for //bazel/cosign:verify_image_signatures,

@@ -1,0 +1,342 @@
+#!/usr/bin/env bash
+# Hermetic test of scripts/ci-gate.sh, the decision of the `ci` job of
+# .github/workflows/ci.yaml (#1460). No network, no GitHub: each case is a
+# `needs` context written here, as GitHub renders it with toJSON(needs).
+#
+# Two halves:
+#
+#   1. the decision. A run passes when every job ended the way the workflow's
+#      conditions say it must, and "nothing to do" is something a job wrote:
+#      control_plane=false from `changes`, or four times `false` from `diff`.
+#      It fails when an output was never set (the empty string skips a leg
+#      exactly as `false` does), when a job that had to run was skipped, failed
+#      or was cancelled, and when the context is missing a job or is not JSON.
+#   2. the rules against the workflow file. The script repeats the `if:` of
+#      every job, so the job list, the `needs` of the `ci` job and each `if:`
+#      are compared with ci.yaml here: a job added to the workflow and not to
+#      the gate, or a condition changed in one place only, fails this test.
+#      It also holds what #1459 needs from the file: no job checks out another
+#      ref than the run's own, `diff` takes its range from that checkout, and a
+#      job reads the impacted lists only after .github/actions/impacted-lists
+#      has checked them against its checkout.
+#
+# Run: bazel test //scripts:ci_gate_test (jq is the Bazel-pinned one), or
+#      bash scripts/ci_gate_test.sh with jq on PATH.
+# shellcheck disable=SC2016 # single-quoted $names here are jq variables or
+# workflow expressions, never shell expansions.
+set -uo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$HERE/ci-gate.sh"
+WORKFLOW="${TEST_SRCDIR:-}/${TEST_WORKSPACE:-_main}/.github/workflows/ci.yaml"
+[ -f "$WORKFLOW" ] || WORKFLOW="$HERE/../.github/workflows/ci.yaml"
+ACTION="$(dirname -- "$(dirname -- "$WORKFLOW")")/actions/impacted-lists/action.yml"
+for f in "$SCRIPT" "$WORKFLOW"; do
+	[ -f "$f" ] || {
+		echo "FAIL: $f not found"
+		exit 1
+	}
+done
+
+# Under Bazel, JQ_RLOCATIONPATH names the pinned jq in the runfiles.
+if [ -n "${JQ_RLOCATIONPATH:-}" ]; then
+	JQ="${TEST_SRCDIR:-${RUNFILES_DIR:-$PWD/..}}/${JQ_RLOCATIONPATH}"
+fi
+JQ="${JQ:-$(command -v jq)}"
+[ -x "$JQ" ] || {
+	echo "FAIL: no jq (JQ=${JQ})"
+	exit 1
+}
+export JQ
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+FAILS=0
+pass() { echo "PASS  $*"; }
+fail() {
+	echo "FAIL  $*"
+	FAILS=$((FAILS + 1))
+}
+
+# --- the contexts ---------------------------------------------------------------
+# FULL: a pull request that impacts everything, every job green. The other
+# cases are this one with a jq edit, so each names only what differs.
+FULL='{
+  "changes":            {"result": "success", "outputs": {"control_plane": "true"}},
+  "diff":               {"result": "success", "outputs": {"has_any": "true", "has_unit": "true", "has_integration": "true", "has_e2e": "true"}},
+  "chart-version-bump": {"result": "success", "outputs": {}},
+  "deps-audit":         {"result": "success", "outputs": {}},
+  "envoy-api-parity":   {"result": "success", "outputs": {}},
+  "proxy-pin":          {"result": "success", "outputs": {}},
+  "actionlint":         {"result": "success", "outputs": {}},
+  "shell":              {"result": "success", "outputs": {}},
+  "format":             {"result": "success", "outputs": {}},
+  "test":               {"result": "success", "outputs": {}},
+  "race":               {"result": "success", "outputs": {}},
+  "netns":              {"result": "success", "outputs": {}},
+  "integration":        {"result": "success", "outputs": {}},
+  "e2e":                {"result": "success", "outputs": {}}
+}'
+# jq helpers the edits below use: skip(jobs) and has(any; unit; integration; e2e).
+DEFS='
+def skip($jobs): reduce ($jobs | split(" "))[] as $j (.; .[$j] = {result: "skipped", outputs: {}});
+def has($a; $u; $i; $e): .diff.outputs = {has_any: $a, has_unit: $u, has_integration: $i, has_e2e: $e};
+'
+LEGS='test race netns integration e2e'
+CP_JOBS='diff chart-version-bump deps-audit shell format'
+
+RC=0
+# decide <jq edit of FULL>: runs the gate on the edited context; status in RC,
+# output in $TMP/log.
+decide() {
+	local ctx
+	ctx="$("$JQ" -c "$DEFS $1" <<<"$FULL")" || {
+		echo "FAIL: the test's own jq edit does not compile: $1"
+		exit 1
+	}
+	NEEDS_JSON="$ctx" bash "$SCRIPT" >"$TMP/log" 2>&1
+	RC=$?
+}
+# green <what> <edit> <a line the log must have>
+green() {
+	decide "$2"
+	if [ "$RC" -eq 0 ] && grep -qF -- "$3" "$TMP/log"; then
+		pass "$1"
+	else
+		fail "$1: expected a pass saying '$3', got exit $RC"
+		sed 's/^/    /' "$TMP/log"
+	fi
+}
+# red <what> <edit> <a piece of the ::error:: line the log must have>
+red() {
+	decide "$2"
+	if [ "$RC" -ne 0 ] && grep -F -- '::error::' "$TMP/log" | grep -qF -- "$3"; then
+		pass "$1"
+	else
+		fail "$1: expected a failure saying '$3', got exit $RC"
+		sed 's/^/    /' "$TMP/log"
+	fi
+}
+
+# --- 1. runs that pass ------------------------------------------------------------
+green "everything impacted, everything green" '.' \
+	'decision: impacted; had to run: test race netns integration e2e'
+green "proxy-only change: control_plane=false, everything else skipped" \
+	".changes.outputs.control_plane = \"false\" | skip(\"$CP_JOBS $LEGS\")" \
+	'decision: the control plane is untouched (changes wrote control_plane=false)'
+green "nothing impacted: diff wrote false four times, the legs are skipped" \
+	"has(\"false\"; \"false\"; \"false\"; \"false\") | skip(\"$LEGS\")" \
+	'decision: nothing impacted (diff wrote false to has_any, has_unit, has_integration and has_e2e)'
+green "only unit tests impacted" \
+	'has("true"; "true"; "false"; "false") | skip("integration e2e")' \
+	'decision: impacted; had to run: test race netns'
+green "only an integration test impacted" \
+	'has("true"; "false"; "true"; "false") | skip("netns e2e")' \
+	'decision: impacted; had to run: test race integration'
+green "only the e2e target impacted" \
+	'has("true"; "false"; "false"; "true") | skip("race netns integration")' \
+	'decision: impacted; had to run: test e2e'
+green "a library with no test impacted: only the build leg" \
+	'has("true"; "false"; "false"; "false") | skip("race netns integration e2e")' \
+	'decision: impacted; had to run: test'
+
+# --- 2. an output that was never set (#1460) ---------------------------------------
+# What a `diff` that wrote nothing looks like from the `ci` job: it succeeded,
+# its outputs are empty, and every leg skipped on `'' == 'true'`.
+red "diff succeeded and set no output; the legs skipped" \
+	".diff.outputs = {} | skip(\"$LEGS\")" 'its output has_any is not set'
+red "diff succeeded and has_any is the empty string" \
+	".diff.outputs.has_any = \"\" | skip(\"$LEGS\")" 'its output has_any is ""'
+for out in has_any has_unit has_integration has_e2e; do
+	red "diff succeeded and $out is missing, the others say false" \
+		"has(\"false\"; \"false\"; \"false\"; \"false\") | del(.diff.outputs.$out) | skip(\"$LEGS\")" \
+		"its output $out is not set"
+done
+for value in TRUE True 1 yes ' true' null; do
+	red "has_any is '$value', which is not true or false" \
+		".diff.outputs.has_any = \"$value\"" 'its output has_any is'
+done
+red "changes succeeded and set no control_plane; everything else skipped" \
+	".changes.outputs = {} | skip(\"$CP_JOBS $LEGS\")" 'its output control_plane is not set'
+red "control_plane is the empty string" \
+	".changes.outputs.control_plane = \"\" | skip(\"$CP_JOBS $LEGS\")" 'its output control_plane is ""'
+
+# --- 3. a job that had to run did not ------------------------------------------------
+red "diff skipped though control_plane=true" \
+	".diff = {result: \"skipped\", outputs: {}} | skip(\"$LEGS\")" 'job diff was skipped, and changes says control_plane=true'
+for job in chart-version-bump deps-audit shell format; do
+	red "$job skipped though control_plane=true" "skip(\"$job\")" "job $job was skipped, and changes says control_plane=true"
+done
+for job in changes envoy-api-parity proxy-pin actionlint; do
+	red "$job skipped though it has no condition" "skip(\"$job\")" "job $job was skipped, and it has no condition"
+done
+for leg in $LEGS; do
+	red "$leg skipped though diff says it had to run" "skip(\"$leg\")" "job $leg was skipped, and diff says it had to run"
+done
+red "race skipped with only an integration test impacted" \
+	'has("true"; "false"; "true"; "false") | skip("race netns e2e")' 'job race was skipped, and diff says it had to run'
+red "has_any=false and has_unit=true: the outputs contradict each other" \
+	"has(\"false\"; \"true\"; \"false\"; \"false\") | skip(\"$LEGS\")" 'a test cannot be impacted when no target is'
+
+# --- 4. failed and cancelled ---------------------------------------------------------
+for job in changes diff shell actionlint test race netns integration e2e; do
+	for result in failure cancelled; do
+		red "$job ended as $result" ".[\"$job\"].result = \"$result\"" "job $job ended as $result"
+	done
+done
+# The shape of a real red run: `test` failed, so the legs that need it skipped.
+red "test failed and the legs that need it skipped" \
+	'.test.result = "failure" | skip("race integration e2e")' 'job test ended as failure'
+red "diff was cancelled before it set an output; the legs skipped" \
+	".diff = {result: \"cancelled\", outputs: {}} | skip(\"$LEGS\")" 'job diff ended as cancelled'
+red "diff failed before it set an output; the legs skipped" \
+	".diff = {result: \"failure\", outputs: {}} | skip(\"$LEGS\")" 'job diff ended as failure'
+
+# --- 5. a context the rules do not cover ----------------------------------------------
+red "a job is missing from needs" 'del(.format)' 'job format is not in the needs of the ci job'
+red "needs has a job with no rule" '.["new-leg"] = {result: "success", outputs: {}}' 'job new-leg is in the needs of the ci job and scripts/ci-gate.sh has no rule for it'
+red "a result that is not one of the four" '.shell.result = "neutral"' 'job shell has the result "neutral"'
+red "a job with no result" 'del(.shell.result)' 'job shell has the result not set'
+red "a job ran though control_plane=false" \
+	".changes.outputs.control_plane = \"false\" | skip(\"$CP_JOBS $LEGS\") | .shell.result = \"success\"" \
+	'job shell ran, and changes says control_plane=false'
+red "a leg ran though diff says it had nothing to run" \
+	'has("true"; "true"; "false"; "false") | skip("e2e")' 'job integration ran, and diff says it had nothing to run'
+red "the context is an array" '[.]' 'the needs context is not a JSON object'
+
+raw() { # what, NEEDS_JSON value (or unset), piece of the error
+	if [ "$2" = unset ]; then
+		env -u NEEDS_JSON bash "$SCRIPT" >"$TMP/log" 2>&1
+	else
+		NEEDS_JSON="$2" bash "$SCRIPT" >"$TMP/log" 2>&1
+	fi
+	RC=$?
+	if [ "$RC" -ne 0 ] && grep -F -- '::error::' "$TMP/log" | grep -qF -- "$3"; then
+		pass "$1"
+	else
+		fail "$1: expected a failure saying '$3', got exit $RC"
+		sed 's/^/    /' "$TMP/log"
+	fi
+}
+raw "NEEDS_JSON is not set" unset 'NEEDS_JSON is empty'
+raw "NEEDS_JSON is empty" '' 'NEEDS_JSON is empty'
+raw "NEEDS_JSON is not JSON" '{"changes": ' 'could not be read as the needs context'
+raw "NEEDS_JSON is the empty object" '{}' 'job changes is not in the needs of the ci job'
+
+# --- 6. the rules against the workflow file --------------------------------------------
+# job <name>: the lines of that job in ci.yaml (from its key to the next one).
+# Always read into a variable first: under pipefail, `job x | grep -q` fails
+# when grep matches early and awk dies of SIGPIPE.
+job() {
+	awk -v want="$1" '
+		/^jobs:/ { in_jobs = 1; next }
+		!in_jobs { next }
+		/^  [A-Za-z0-9_-]+:[[:space:]]*$/ { name = $1; sub(/:$/, "", name) }
+		name == want { print }
+	' "$WORKFLOW"
+}
+expect() { # what, got, want
+	if [ "$2" = "$3" ]; then
+		pass "$1"
+	else
+		fail "$1"
+		echo "    got:  $2"
+		echo "    want: $3"
+	fi
+}
+sorted() { tr -s ' ,' '\n' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/ $//'; }
+
+workflow_jobs="$(awk '
+	/^jobs:/ { in_jobs = 1; next }
+	in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { sub(/:$/, "", $1); print $1 }
+' "$WORKFLOW" | grep -vx ci | sorted)"
+gate_jobs="$(bash "$SCRIPT" --jobs | sorted)"
+ci_needs="$(job ci | sed -n 's/^    needs: \[\(.*\)\]$/\1/p' | sorted)"
+[ -n "$workflow_jobs" ] || fail "no job found in $WORKFLOW (did its layout change?)"
+expect "every job of ci.yaml but ci has a rule in the gate, and the gate has no other" "$gate_jobs" "$workflow_jobs"
+expect "the ci job needs every other job of ci.yaml" "$ci_needs" "$workflow_jobs"
+expect "the ci job runs whatever the others did" "$(job ci | grep -c '^    if: always()$')" 1
+ci_job="$(job ci)"
+if grep -qF 'NEEDS_JSON: ${{ toJSON(needs) }}' <<<"$ci_job" && grep -qE '^[[:space:]]+run: scripts/ci-gate\.sh$' <<<"$ci_job"; then
+	pass "the ci job hands toJSON(needs) to scripts/ci-gate.sh"
+else
+	fail "the ci job does not run scripts/ci-gate.sh with NEEDS_JSON: \${{ toJSON(needs) }}"
+fi
+
+# The `if:` of each job, as the rules in ci-gate.sh assume it.
+CP="needs.changes.outputs.control_plane == 'true'"
+condition() { # job, the `if:` it must have (empty: none)
+	expect "ci.yaml: the condition of job $1 is the one the gate assumes" \
+		"$(job "$1" | sed -n 's/^    if: //p')" "$2"
+}
+for j in changes envoy-api-parity proxy-pin actionlint; do condition "$j" ""; done
+for j in diff chart-version-bump deps-audit shell format; do condition "$j" "$CP"; done
+condition test "$CP && needs.diff.outputs.has_any == 'true'"
+condition race "$CP && (needs.diff.outputs.has_unit == 'true' || needs.diff.outputs.has_integration == 'true')"
+condition netns "$CP && needs.diff.outputs.has_unit == 'true'"
+condition integration "$CP && needs.diff.outputs.has_integration == 'true'"
+condition e2e "$CP && needs.diff.outputs.has_e2e == 'true'"
+# `diff` hands on exactly the four outputs the gate reads.
+expect "ci.yaml: the outputs of job diff are the four the gate reads" \
+	"$(job diff | sed -n 's/^      \(has_[a-z0-9_]*\): \${{ steps\.impacted\.outputs\.\(has_[a-z0-9_]*\) }}$/\1=\2/p' | sorted)" \
+	"has_any=has_any has_e2e=has_e2e has_integration=has_integration has_unit=has_unit"
+
+# #1459: one tree. No job asks actions/checkout for another ref than the run's
+# own (on pull_request: the merge of the head into the base), `diff` computes
+# its range from that checkout, and a job that downloads the impacted lists
+# checks them against its own checkout before it uses them.
+expect "ci.yaml: no checkout names a ref of its own" "$(grep -cE '^[[:space:]]+ref:' "$WORKFLOW")" 0
+diff_job="$(job diff)"
+if grep -qE '^[[:space:]]+run: scripts/ci-merge-range\.sh$' <<<"$diff_job" &&
+	grep -qF 'BASE_SHA: ${{ steps.range.outputs.base }}' <<<"$diff_job" &&
+	grep -qF 'HEAD_SHA: ${{ steps.range.outputs.head }}' <<<"$diff_job"; then
+	pass "ci.yaml: diff takes its range from scripts/ci-merge-range.sh"
+else
+	fail "ci.yaml: diff does not take BASE_SHA and HEAD_SHA from scripts/ci-merge-range.sh"
+fi
+# The lists reach a job through .github/actions/impacted-lists only, which
+# downloads the artifact and then runs the check. A job that reads a list
+# (a path under .../impacted/, or the race job's $IMPACTED) uses the action,
+# with the three outputs, before the first step that reads one; no job
+# downloads the artifact itself.
+if [ -f "$ACTION" ] && awk '
+	/uses: actions\/download-artifact@/ { downloaded = 1 }
+	downloaded && /^[[:space:]]+run: scripts\/ci-impacted-lists\.sh "\$RUNNER_TEMP\/impacted"$/ { ok = 1 }
+	END { exit ok ? 0 : 1 }' "$ACTION" &&
+	grep -qF 'path: ${{ runner.temp }}/impacted' "$ACTION" &&
+	grep -qF 'HAS_ANY: ${{ inputs.has-any }}' "$ACTION" &&
+	grep -qF 'HAS_UNIT: ${{ inputs.has-unit }}' "$ACTION" &&
+	grep -qF 'HAS_INTEGRATION: ${{ inputs.has-integration }}' "$ACTION"; then
+	pass "the impacted-lists action downloads the artifact, then runs scripts/ci-impacted-lists.sh on it with the three outputs"
+else
+	fail "$ACTION does not download the artifact and then run scripts/ci-impacted-lists.sh \"\$RUNNER_TEMP/impacted\" with HAS_ANY, HAS_UNIT and HAS_INTEGRATION"
+fi
+expect "ci.yaml: no job downloads the impacted-targets artifact itself" \
+	"$(grep -cE '^[[:space:]]+name: impacted-targets$' "$WORKFLOW") $(grep -c 'uses: actions/download-artifact@' "$WORKFLOW")" "1 0"
+readers=""
+for j in $workflow_jobs; do
+	body="$(job "$j")"
+	grep -qE '(runner\.temp \}\}|RUNNER_TEMP)/impacted(/|"|$)' <<<"$body" || continue
+	readers="$readers $j"
+	if awk '
+		/^      - / { step++ }
+		/uses: \.\/\.github\/actions\/impacted-lists$/ && !action { action = step }
+		/(runner\.temp \}\}|RUNNER_TEMP)\/impacted(\/|"|$)/ && !reader { reader = step }
+		/has-any: \$\{\{ needs\.diff\.outputs\.has_any \}\}$/ { any = 1 }
+		/has-unit: \$\{\{ needs\.diff\.outputs\.has_unit \}\}$/ { unit = 1 }
+		/has-integration: \$\{\{ needs\.diff\.outputs\.has_integration \}\}$/ { integration = 1 }
+		END { exit (action && reader && action < reader && any && unit && integration) ? 0 : 1 }' <<<"$body"; then
+		pass "ci.yaml: job $j gets the impacted lists through the checked action before it reads one"
+	else
+		fail "ci.yaml: job $j reads an impacted list and does not use ./.github/actions/impacted-lists (with has-any, has-unit, has-integration) in an earlier step"
+	fi
+done
+expect "ci.yaml: the jobs that read the impacted lists" "$(sorted <<<"$readers")" "integration netns race test"
+
+echo
+if [ "$FAILS" -ne 0 ]; then
+	echo "$FAILS check(s) failed"
+	exit 1
+fi
+echo "all checks passed"
