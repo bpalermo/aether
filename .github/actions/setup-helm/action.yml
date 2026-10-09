@@ -1,0 +1,64 @@
+# The ONE way a workflow gets Helm (#1580): a release e2e/helm-version.sh pins,
+# never the runner image's preinstalled Helm (which moves, majors included,
+# whenever GitHub updates the image) and never azure/setup-helm's default
+# (`latest`). The two majors differ in what the suites assert (rollback,
+# #1514/#1515; `helm list`, #1581), so which one a job runs is a decision made
+# in that file. Wraps azure/setup-helm (SHA-pinned), which installs the release
+# into the tool cache and puts it on PATH ahead of the runner's own.
+# //e2e:helm_pin_test fails if azure/setup-helm is used anywhere else, and if a
+# job or a composite action runs helm without this action before it.
+#
+# Requires the repository to be checked out (this action and the pin file live
+# in it).
+name: Setup Helm (pinned)
+description: Install Helm at a release e2e/helm-version.sh pins - the default major, or the major asked for.
+
+inputs:
+  major:
+    description: >-
+      The Helm major to install, "3" or "4". Leave empty for the default
+      (HELM_DEFAULT_MAJOR in e2e/helm-version.sh). A job names a major, never a
+      version: the release of each comes from the pin file.
+    required: false
+    default: ""
+
+outputs:
+  version:
+    description: The Helm release installed.
+    value: ${{ steps.pin.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read the Helm pin (e2e/helm-version.sh)
+      id: pin
+      shell: bash
+      env:
+        MAJOR: ${{ inputs.major }}
+      run: |
+        set -euo pipefail
+        # shellcheck source=/dev/null
+        . "$GITHUB_ACTION_PATH/../../../e2e/helm-version.sh"
+        version="$(helm_pin_version "$MAJOR")"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "helm $version (major asked for: ${MAJOR:-default, $HELM_DEFAULT_MAJOR})"
+
+    - name: Install Helm ${{ steps.pin.outputs.version }}
+      uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      with:
+        version: ${{ steps.pin.outputs.version }}
+
+    # The evidence a reviewer reads to know which Helm a run tested, and the
+    # guard against a PATH on which the runner's own helm still comes first.
+    - name: Require the pinned Helm on PATH
+      shell: bash
+      env:
+        WANT: ${{ steps.pin.outputs.version }}
+      run: |
+        set -euo pipefail
+        have="$(helm version --short)"
+        echo "helm on PATH: $have ($(command -v helm))"
+        if [ "${have%%+*}" != "$WANT" ]; then
+          echo "::error::helm on PATH is $have, not the pinned $WANT (e2e/helm-version.sh)"
+          exit 1
+        fi
