@@ -1,0 +1,6 @@
+{"status":"success","data":{"resultType":"matrix","result":[
+{"metric":{"__name__":"aether_agent_snapshot_tls_clusters","job":"aether-agent","node":"worker-03","pod":"aether-agent-new","reason":"trust_domain_unknown","pin":"unpinned"},"values":[[1791436200,"0"],[1791441240,"0"],[1791447000,"0"]]},
+{"metric":{"__name__":"aether_agent_snapshot_tls_clusters","job":"aether-agent","node":"worker-03","pod":"aether-agent-new","reason":"no_namespace_metadata","pin":"unpinned"},"values":[[1791436200,"0"],[1791441240,"0"],[1791447000,"0"]]},
+{"metric":{"__name__":"aether_agent_snapshot_tls_clusters","job":"aether-agent","node":"worker-03","pod":"aether-agent-new","reason":"tls_not_published","pin":"unpinned"},"values":[[1791436200,"0"],[1791441240,"0"],[1791447000,"0"]]},
+{"metric":{"__name__":"aether_agent_snapshot_tls_clusters","job":"aether-agent","node":"worker-03","pod":"aether-agent-new","reason":"pin_not_rendered","pin":"unpinned"},"values":[[1791436200,"0"],[1791441240,"0"],[1791447000,"0"]]}
+]}}
