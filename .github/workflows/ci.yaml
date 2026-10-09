@@ -473,8 +473,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
-      - name: Setup helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Setup Helm (pinned)
+        uses: ./.github/actions/setup-helm
       - name: Assert the aether-proxy pin agrees with the registry and the chart
         run: |
           values=charts/aether/values.yaml

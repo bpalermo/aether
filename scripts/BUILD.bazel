@@ -1,3 +1,4 @@
+load("@rules_python//python:defs.bzl", "py_binary")
 load("@rules_shell//shell:sh_library.bzl", "sh_library")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
@@ -53,14 +54,33 @@ sh_test(
 sh_test(
     name = "third_party_images_test",
     size = "small",
+    # Some 170 runs of `check`, each starting the YAML reader's interpreter:
+    # 40 s on a workstation, too close to a small test's 60 s on a runner.
+    timeout = "moderate",
     srcs = ["third_party_images_test.sh"],
     data = [
         "third-party-images.sh",
         "third-party-images.txt",
         "third-party-images-report.sh",
+        ":third_party_images_yaml",
         "@jq_toolchains//:resolved_toolchain",
     ],
-    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+    env = {
+        "JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)",
+        "YAML_READER_RLOCATIONPATH": "$(rlocationpath :third_party_images_yaml)",
+    },
+)
+
+# The YAML reader of scripts/third-party-images.sh (#1525): `check` reads YAML
+# files with a YAML parser, not line by line. PyYAML is the hash-checked wheel
+# the documentation site's lock already holds (//website:requirements_lock.txt,
+# a dependency of mkdocs), so this adds no pin. Outside Bazel (the `shell` job
+# of ci.yaml) the script runs the same file with the python3 on PATH.
+py_binary(
+    name = "third_party_images_yaml",
+    srcs = ["third_party_images_yaml.py"],
+    legacy_create_init = 0,
+    deps = ["@aether_docs_pip//pyyaml"],
 )
 
 # The scheduled refresh check (.github/workflows/third-party-images.yaml,
