@@ -178,7 +178,8 @@ Three flags in the Job are load-bearing and must not be dropped:
    `EXPECT_CONTEXT` to override deliberately).
 2. **No soak is running**: no `k6-soak-loader` DaemonSet in `aether-test`, no `churn.sh` on
    this workstation. Shedding the collector mid-soak makes the prober's cumulative counters
-   non-monotonic and the run ungradeable (soak README gotchas 3 and 4).
+   non-monotonic and the run ungradeable (gotchas 3 and 4 of the soak harness's README; it is
+   an external soak harness, maintained outside this repository).
 3. `otel-collector` is at full readiness (2/2). Do not pressure an already-degraded o11y plane.
 4. The target node's agent pod is Ready with `restartCount: 0`.
 5. The external prober is reporting successes — the availability signal must be alive going in.

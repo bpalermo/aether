@@ -203,9 +203,9 @@ is_skipped() {
 #     tree is written that way (the chart's split values are the images this
 #     repository builds); write a third-party one as a single reference.
 #   - a whole reference under a child key of `image:` (`image:` / `  ref: x`,
-#     as e2e/soak/sortie-values.yaml writes it) when no pin names the image
-#     yet: `ref` is no image key. Once the name is in the inventory net 2 reads
-#     it there like anywhere else, which is how the sortie images are held;
+#     as some Helm values files write it) when no pin names the image yet:
+#     `ref` is no image key. Once the name is in the inventory net 2 reads it
+#     there like anywhere else;
 #   - YAML embedded in another language (a here-document in a shell script, a
 #     Go raw string) when it holds a flow mapping broken across lines, with an
 #     unquoted `image:` value that is not first on its line and whose `{` is on

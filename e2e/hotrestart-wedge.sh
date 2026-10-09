@@ -31,7 +31,7 @@
 #     running (existing connections serve), admin (main thread) is dead, and
 #     SIGTERM (a main-dispatcher signal event) is ignored by both processes.
 #
-# What it proves (the red-then-green check; e2e/soak/README.md, #1050):
+# What it proves (the red-then-green check; docs/runbook.md, #1050):
 #   red    WEDGE_SKIP_PARENT_STATS=false WEDGE_FREEZE_S=6 on a proxy image
 #          WITHOUT the carried #1060 patch -> WEDGES > 0 (4/4 on 2026-09-28):
 #          the forced fault reproduces the production wedge

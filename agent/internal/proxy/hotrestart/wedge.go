@@ -35,7 +35,9 @@ import (
 
 // childSilentAfter is how long a hot-restart child's admin may stay dark,
 // once the child is expected to serve, before it is reported silent. It is
-// the 10 s of soak gate (c) in e2e/soak/README.md: a healthy successor's next
+// the 10 s of the soak's hot-restart wedge gate (c) (#1050; the soak is run by
+// an external soak harness, maintained outside this repository): a healthy
+// successor's next
 // line follows `starting workers` within a few seconds.
 const childSilentAfter = 10 * time.Second
 

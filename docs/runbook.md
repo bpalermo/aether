@@ -1080,8 +1080,8 @@ setting it up first, which would leave it on the runner image's Go.
 ### Refreshing third-party image pins
 
 An image this repository does not build (curl, the echo servers, OPA, etcd, the
-OpenTelemetry collector, the kind node) is named in chart values, in the e2e and
-soak harnesses and their manifests, and in test fixtures. Every such reference
+OpenTelemetry collector, the kind node) is named in chart values, in the e2e
+harnesses and their manifests, and in test fixtures. Every such reference
 carries the digest of the image's **multi-arch index**, and
 [`scripts/third-party-images.txt`](../scripts/third-party-images.txt) is the one
 list of them, one `pin <name> <tag> <digest>` line per image (#1400, #1401). A
@@ -1136,10 +1136,7 @@ What a moved pin obliges:
 
 An exception is an `allow <path> <reference>` or `skip <path prefix>` line in
 the list, with its reason beside it. An `allow` or `skip` that matches nothing any more
-fails `check`. There is none of the first kind today: the retired k6 runner
-(`e2e/soak/k6-runner.yaml`) is pinned as `grafana/k6:latest@sha256:…`, so
-`outdated` reports it `MOVED` at every k6 release, and it is moved only on
-purpose.
+fails `check`. There is none of either kind today.
 
 `check` does not read comments, whether a comment line or the comment that
 ends a line of code: a pin that only a comment still names is reported as
@@ -3043,7 +3040,7 @@ then routed to a name Envoy would never ask for again. `//agent/test/mtlspool`
 `TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control` reproduces
 it: `status=503 … in 2.000099268s`, and no CDS request reaches the control plane.
 
-**`DC` 200s on a QUIC destination at a source-proxy roll (#1009)** are benign when the line is `DC` + `downstream_remote_disconnect` + 200 + the clean-line `bytes_sent`: the HTTP/1.1 client closed after a complete body before the h3 FIN was decoded. `upstream_rx_ms` and `downstream_tx_end_ms` read `-` on such a line. The rule and its LogsQL are in `e2e/soak/README.md`, "Benign `DC` at a source-proxy hot restart"; any other `DC` is a real failure.
+**`DC` 200s on a QUIC destination at a source-proxy roll (#1009)** are benign when the line is `DC` + `downstream_remote_disconnect` + 200 + the clean-line `bytes_sent`: the HTTP/1.1 client closed after a complete body before the h3 FIN was decoded. `upstream_rx_ms` and `downstream_tx_end_ms` read `-` on such a line. The soak (run by an external soak harness, maintained outside this repository) grades its `DC` lines by this rule; any other `DC` is a real failure.
 
 **Why the agent never forgets a subscribed pair.** The agent tracks which twins the
 proxy holds an ODCDS subscription for: those it asked for by name, and those it
@@ -3194,7 +3191,8 @@ cores) measured an HTTP/3 mesh request at **1.18×** the proxy CPU of an h2 one
 (#979, merged as 33ff5e9) was held to ([#1021, "Same-revision measurement, 2026-09-28"](https://github.com/bpalermo/aether/issues/1021)).
 The earlier ~3.3× (~11 ms vs ~3.3 ms, rev242 QUIC vs rev239 h2) compared two
 builds and is superseded. Grade it only with the
-matched-window method in `e2e/soak/README.md` ("The QUIC per-request cost gate"):
+matched-window method of the soak's QUIC per-request cost gate (the soak is run by
+an external soak harness, maintained outside this repository):
 envoy-only Pyroscope cores over the T0+6h05m→T0+7h25m no-roll window of a QUIC run
 and of an h2 reference run with matched per-destination rps, loaded minus idle, per
 request. Fleet CPU alone says nothing, because the QUIC share of the load changes
@@ -4477,8 +4475,8 @@ kubectl -n aether-system get pod <proxy-pod> -o jsonpath='{range .status.contain
 
 Reproduce it on kind with `e2e/hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
 WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 against the unpatched image, and
-0 against the patched one (see the header of the script). The per-roll soak gates are in
-`e2e/soak/README.md`, "The hot-restart wedge gates (#1050)".
+0 against the patched one (see the header of the script). The per-roll soak gates (the
+hot-restart wedge gates, #1050) are documented with an external soak harness, maintained outside this repository.
 
 ### A node stalls for seconds during a handoff (#1093)
 
@@ -4976,8 +4974,8 @@ outlasts the 15 s parent-shutdown window.
   to the minimum on both ends) also closes a twin connection with no open stream after
   8 s, so raising this flag above 8 s no longer lengthens reuse.
 
-A request in flight at the parent's exit still dies, as it does on h2. The soak gate is
-in `e2e/soak/README.md`, "The h3 stateless-reset gate (#1054)"; the kind leg is
+A request in flight at the parent's exit still dies, as it does on h2. The soak gate (the
+h3 stateless-reset gate, #1054) is documented with an external soak harness, maintained outside this repository; the kind leg is
 `e2e/eastwest-quic-hotrestart.sh` with `HR_MODE=sparse` (two nodes, `EWQ_WORKER=1`).
 
 ### `504 UT` after exactly 15 s over a `quic:` twin to a terminating pod (#1087)
@@ -6261,7 +6259,8 @@ sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
 sum by (job, node) (increase(aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.cluster.v3.Cluster"}[1h]))
 ```
 
-**The soak gate (#1423, #1491).** `e2e/soak/prober-grade.sh` grades the counter over a
+**The soak gate (#1423, #1491).** The soak's grader (`prober-grade.sh`, part of
+an external soak harness, maintained outside this repository) grades the counter over a
 soak's window, per `reason`, with the same split as the alert rules. The two reasons of
 the validation gap (`no_namespace_metadata`, `pin_not_rendered`) fail it on any
 movement, and on any non-zero sample of the published gauge. The two under which no TLS
@@ -6278,7 +6277,7 @@ does not know fails the same way a gap reason does, and so does any movement of 
 agent before #1424, where the two kinds cannot be told apart). An agent that has the
 label and whose own gauge does not reach Prometheus (a replaced pod is not covered by
 the one before it) makes the gate `UNPROVEN`, not a pass.
-The lines and the table are in `e2e/soak/README.md`, "Grading".
+The lines and the table are in that harness's README, "Grading".
 
 **The NACK counters (#1480).** `aether_agent_xds_nacks_total` counts the delta responses
 a proxy rejected, by `aether_xds_type_url`; `aether_agent_xds_ack_wait_failures_total`
