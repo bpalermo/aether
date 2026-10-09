@@ -81,9 +81,9 @@ die() {
 
 # --- the inventory -------------------------------------------------------------
 
-declare -A PIN_TAG=()  # "<name>@<digest>" -> tag
+declare -A PIN_TAG=()    # "<name>@<digest>" -> tag
 declare -A PIN_DIGEST=() # "<name>:<tag>" -> digest
-declare -A PIN_USES=() # "<name>@<digest>" -> newline-separated "path:line"
+declare -A PIN_USES=()   # "<name>@<digest>" -> newline-separated "path:line"
 declare -a PIN_ORDER=()
 declare -A ALLOW=()      # "<path> <ref>" -> 1
 declare -A ALLOW_USED=() # "<path> <ref>" -> 1
