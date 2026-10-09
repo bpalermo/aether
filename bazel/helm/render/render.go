@@ -5,8 +5,11 @@
 //
 // Nothing here prints a render: with default values the aether chart
 // generates the webhook's private key at render time (#1382). When helm fails,
-// only what it wrote to stderr is returned, and a document that does not parse
-// is reported without its text.
+// only its exit status is returned: nothing it wrote, on either stream. Helm
+// can put manifest text on stderr (a YAML parse error quotes the document), and
+// the pattern rules pass it through a fail-closed mask for that reason
+// (render_lib.sh, show_helm_failure). This package has no mask, so it shows
+// none of it. A document that does not parse is reported without its text.
 package render
 
 import (
@@ -92,10 +95,15 @@ func (h Helm) Template(chart, scratch string, opts ...string) ([]Object, error) 
 		"HELM_REGISTRY_CONFIG="+filepath.Join(scratch, "registry.json"),
 		"HELM_PLUGINS="+h.Plugins,
 	)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	// Stderr is not captured at all (a nil Stderr is the null device), so it
+	// cannot be printed by a later change to the message either.
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("helm template %s failed: %w\n----- what helm said (its stderr) -----\n%s", strings.Join(opts, " "), err, stderr.String())
+		// %v of the exit error is "exit status N" (or why helm could not be
+		// started): it holds nothing helm wrote.
+		return nil, fmt.Errorf("helm template %s failed: %v. What helm wrote is not shown: a failed render can hold key material. "+
+			"To read it, run it yourself: `bazel build` the chart and `helm template release-name <the .tgz> %s`", strings.Join(opts, " "), err, strings.Join(opts, " "))
 	}
 	objects, err := Parse(stdout.String())
 	if err != nil {

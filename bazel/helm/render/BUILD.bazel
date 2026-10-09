@@ -15,6 +15,9 @@ go_library(
 go_test(
     name = "render_test",
     size = "small",
-    srcs = ["render_test.go"],
+    srcs = [
+        "render_test.go",
+        "template_test.go",
+    ],
     embed = [":render"],
 )
