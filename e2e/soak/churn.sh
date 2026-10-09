@@ -30,7 +30,8 @@
 #
 # Pre-flight runs BEFORE the log is touched and before T0: the API server must answer
 # /readyz, every workload the schedule rolls (and the SHRINK target) must exist, and
-# the context must be allowed to patch them. Any failure prints to stderr and exits 2
+# the context must be allowed to patch them; svc-1 ... svc-5 are also read (see
+# preflight_workload). Any failure prints to stderr and exits 2
 # with $LOG untouched -- a bad launch leaves no half-run log behind.
 #
 # The first FAILED roll (or a SHRINK that cannot scale) logs `CHURN ABORTED` and exits
@@ -342,6 +343,7 @@ nap_open churn.sh
 
 # Pre-flight (#951). Writes to stderr only -- never to $LOG -- and runs before T0.
 # "<namespace> <kind>/<name>" for every workload the schedule or the SHRINK touches.
+# The five svc-N are also read, not only looked for: see preflight_workload.
 PREFLIGHT_TARGETS=(
 	"aether-system daemonset/aether-agent"
 	"aether-system daemonset/aether-proxy"
@@ -355,6 +357,148 @@ PREFLIGHT_TARGETS=(
 	"aether-test deployment/svc-5"
 	"$SHRINK_NS $SHRINK_TARGET"
 )
+# The five workloads the schedule rolls and the load addresses (#1462). They are
+# e2e/soak/svc.yaml; "exists" is not enough to ask of them. Each line below is a
+# difference that voids a soak, and none of them shows before T0 otherwise:
+#
+#   no replica            a roll of nothing is logged ROLLED, and the SHRINK
+#                         aborts the run at T0+450m on a svc-5 it cannot shrink;
+#   not all available, or mid-roll
+#                         the run starts on a workload that is rolling or
+#                         broken, and its failures are read as the mesh's. A
+#                         roll is told by the rollout's own numbers (updated
+#                         replicas, pods, observed generation), not by the
+#                         available count: a surge-first roll keeps that full;
+#   not in the mesh       pods without aether.io/managed are not captured and
+#                         not registered: the load has no endpoint to reach;
+#   another ServiceAccount  the mesh service name IS the ServiceAccount name,
+#                         so the pods serve some other service;
+#   not surge-first, no minReadySeconds, a preStop sleep under 10 s
+#                         a roll outruns the mesh and drops requests
+#                         (docs/workload-requirements.md, "Hitless rolling
+#                         restarts"): the soak measures the workload. The sleep
+#                         is held to the 10 s that document measured at zero
+#                         failed requests, not to its supported minimum of 3 s
+#                         (about one failed request per pod): the load gate
+#                         wants none (#1517);
+#   no readiness probe    the kubelet calls a container Ready as soon as it
+#                         runs, so "available" and minReadySeconds no longer
+#                         say the server answers, and the agent has nothing to
+#                         gate the endpoint's promotion on. Any handler will
+#                         do (httpGet, tcpSocket, exec, grpc); its numbers are
+#                         the workload's business;
+#   a termination grace that does not outlast the sleep
+#                         the grace counts from the deletion, the sleep
+#                         included. At 0 the hook never runs; at the sleep's
+#                         own length the kubelet's hard kill lands with the
+#                         SIGTERM. common/drain/drain.go closes the pools 1 s
+#                         before the SIGTERM and never inside the last 2 s of
+#                         the grace (the hard-kill window), so the SIGTERM
+#                         itself must come before that window opens: the
+#                         grace is the sleep plus SVC_GRACE_MARGIN, at least.
+#                         An unset grace is the API's default, 30 s.
+#
+# A server that is not started through the quiet shell (#1395) logs a line per
+# request and voids nothing: that one is a note.
+SVC_NS="aether-test"
+SVC_MANIFEST="e2e/soak/svc.yaml"
+# One `key=value` line per field; a field the object does not have is empty.
+SVC_FMT='replicas={.spec.replicas}{"\n"}available={.status.availableReplicas}{"\n"}updated={.status.updatedReplicas}{"\n"}total={.status.replicas}{"\n"}generation={.metadata.generation}{"\n"}observedGeneration={.status.observedGeneration}{"\n"}managed={.spec.template.metadata.labels.aether\.io/managed}{"\n"}sa={.spec.template.spec.serviceAccountName}{"\n"}strategy={.spec.strategy.type}{"\n"}maxUnavailable={.spec.strategy.rollingUpdate.maxUnavailable}{"\n"}minReadySeconds={.spec.minReadySeconds}{"\n"}preStopSleep={.spec.template.spec.containers[0].lifecycle.preStop.sleep.seconds}{"\n"}terminationGrace={.spec.template.spec.terminationGracePeriodSeconds}{"\n"}readinessHttpGet={.spec.template.spec.containers[0].readinessProbe.httpGet.port}{"\n"}readinessTcpSocket={.spec.template.spec.containers[0].readinessProbe.tcpSocket.port}{"\n"}readinessExec={.spec.template.spec.containers[0].readinessProbe.exec.command}{"\n"}readinessGrpc={.spec.template.spec.containers[0].readinessProbe.grpc.port}{"\n"}command={.spec.template.spec.containers[0].command}{"\n"}'
+SVC_HINT=0
+# Seconds. The sleep docs/workload-requirements.md measured at zero failed
+# requests per roll, and what the grace must exceed it by (see above).
+SVC_PRESTOP_MIN=10
+SVC_GRACE_MARGIN=2
+is_svc_workload() {
+	[ "$1" = "$SVC_NS" ] && [[ "$2" =~ ^deployment/svc-[1-5]$ ]]
+}
+# preflight_workload <namespace> deployment/<name>: one read, one line per
+# difference. Returns non-zero when any of them voids the soak.
+preflight_workload() {
+	local ns="$1" obj="$2" name="${2#deployment/}" out key val fail=0
+	local replicas="" available="" updated="" total="" generation="" observed="" managed="" sa="" strategy="" max_unavailable="" min_ready="" pre_stop="" grace="" probe="" command=""
+	local slept grace_min
+	if ! out=$(k --request-timeout=15s -n "$ns" get "$obj" -o "jsonpath=$SVC_FMT" 2>&1); then
+		echo "churn.sh: PRE-FLIGHT FAILED: could not read $ns/$obj on context '$CTX': $out" >&2
+		return 1
+	fi
+	while IFS='=' read -r key val; do
+		case "$key" in
+		replicas) replicas="$val" ;;
+		available) available="$val" ;;
+		updated) updated="$val" ;;
+		total) total="$val" ;;
+		generation) generation="$val" ;;
+		observedGeneration) observed="$val" ;;
+		managed) managed="$val" ;;
+		sa) sa="$val" ;;
+		strategy) strategy="$val" ;;
+		maxUnavailable) max_unavailable="$val" ;;
+		minReadySeconds) min_ready="$val" ;;
+		preStopSleep) pre_stop="$val" ;;
+		terminationGrace) grace="$val" ;;
+		# One handler to a probe: whichever of the four is set.
+		readinessHttpGet | readinessTcpSocket | readinessExec | readinessGrpc) probe="$probe$val" ;;
+		command) command="$val" ;;
+		esac
+	done <<<"$out"
+	# wl_fail: a difference from the manifest (the caller points at it once).
+	# wl_wait: a state that passes by itself, or that the manifest does not mend.
+	wl_fail() {
+		echo "churn.sh: PRE-FLIGHT FAILED: $ns/$obj $*" >&2
+		fail=1
+		SVC_HINT=1
+	}
+	wl_wait() {
+		echo "churn.sh: PRE-FLIGHT FAILED: $ns/$obj $*" >&2
+		fail=1
+	}
+	if ! [[ "$replicas" =~ ^[0-9]+$ ]] || [ "$replicas" -eq 0 ]; then
+		wl_fail "has .spec.replicas=${replicas:-unset} (a roll of it rolls nothing, and the SHRINK cannot restore a count it never read)"
+	elif [ "${available:-0}" != "$replicas" ]; then
+		wl_wait "has ${available:-0} of $replicas replicas available (mid-roll or failing: what it drops would be read as the mesh's)"
+	elif [ "${updated:-0}" != "$replicas" ] || [ "${total:-0}" != "$replicas" ] || [ -z "$generation" ] || [ "$observed" != "$generation" ]; then
+		# What `kubectl rollout status` asks. The available count alone is not
+		# it: with maxSurge 1 the old pods stay available while the new
+		# ReplicaSet comes up, so a Deployment in the middle of a roll also
+		# says "all available" -- of pods that are not the template read here.
+		wl_wait "is mid-roll: ${updated:-0} of $replicas replicas updated, ${total:-0} pods (generation ${generation:-unset}, observed ${observed:-unset}): wait for \`kubectl -n $ns rollout status $obj\`"
+	fi
+	if [ "$managed" != "true" ]; then
+		wl_fail "has no aether.io/managed: \"true\" label on its pods (they are not in the mesh: the load has no endpoint to reach)"
+	fi
+	if [ "$sa" != "$name" ]; then
+		wl_fail "runs as ServiceAccount '${sa:-default}' (the mesh service name is the ServiceAccount name: its pods are not $name)"
+	fi
+	if [ "$strategy" != "RollingUpdate" ] || [ "$max_unavailable" != "0" ]; then
+		wl_fail "rolls with strategy=${strategy:-unset} maxUnavailable='$max_unavailable' (want RollingUpdate with maxUnavailable 0: a roll must add a ready pod before it takes one away)"
+	fi
+	if ! [[ "$min_ready" =~ ^[0-9]+$ ]] || [ "$min_ready" -lt 10 ]; then
+		wl_fail "has minReadySeconds='$min_ready' (want 10 or more: a roll retires the old pod before the mesh routes to the new one)"
+	fi
+	slept="$SVC_PRESTOP_MIN"
+	if ! [[ "$pre_stop" =~ ^[0-9]+$ ]] || [ "$pre_stop" -lt "$SVC_PRESTOP_MIN" ]; then
+		wl_fail "has no preStop sleep of $SVC_PRESTOP_MIN s or more on its first container (got '${pre_stop}': requests still in flight when the server exits fail, about one per pod at 3 s, and the load gate wants none)"
+	else
+		slept="$pre_stop"
+	fi
+	# Against the sleep it has, or the one it should have: one line for a
+	# missing sleep, not two.
+	grace_min=$((slept + SVC_GRACE_MARGIN))
+	grace="${grace:-30}"
+	if ! [[ "$grace" =~ ^[0-9]+$ ]] || [ "$grace" -lt "$grace_min" ]; then
+		wl_fail "has terminationGracePeriodSeconds=$grace with a preStop sleep of $slept s (want $grace_min or more: the grace counts from the deletion, and the kubelet's hard kill would cut the sleep short or land with the SIGTERM)"
+	fi
+	if [ -z "$probe" ]; then
+		wl_fail "has no readiness probe on its first container (the kubelet calls it Ready as soon as it runs: neither 'available' nor minReadySeconds then says the server answers)"
+	fi
+	case "$command" in
+	*'>/dev/null'*) ;;
+	*) echo "churn.sh: pre-flight note: $ns/$obj does not start its server with stdout on /dev/null (#1395): it logs one line per request for the whole run. $SVC_MANIFEST starts it quiet; applying it rolls the workload" >&2 ;;
+	esac
+	return "$fail"
+}
+
 # The new-SA step creates and deletes objects instead of patching them, and needs a
 # worker node to pin to and the pod's log to read its tally.
 preflight_newsa() {
@@ -429,6 +573,8 @@ preflight_udscsi() {
 
 preflight() {
 	local out fail=0 ns obj t
+	# The SHRINK target is a second entry for svc-5: read each workload once.
+	local -A seen=()
 	if ! out=$(k --request-timeout=15s get --raw /readyz 2>&1); then
 		echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' cannot reach a ready API server:" >&2
 		printf '  %s\n' "$out" >&2
@@ -449,13 +595,21 @@ preflight() {
 		if ! out=$(k --request-timeout=15s -n "$ns" get "$obj" -o name 2>&1); then
 			echo "churn.sh: PRE-FLIGHT FAILED: $ns/$obj not found on context '$CTX': $out" >&2
 			fail=1
+			if is_svc_workload "$ns" "$obj"; then SVC_HINT=1; fi
 			continue
 		fi
 		if ! out=$(k --request-timeout=15s -n "$ns" auth can-i patch "$obj" 2>&1); then
 			echo "churn.sh: PRE-FLIGHT FAILED: context '$CTX' may not patch $ns/$obj ($out)" >&2
 			fail=1
 		fi
+		if is_svc_workload "$ns" "$obj" && [ -z "${seen[$obj]:-}" ]; then
+			seen[$obj]=1
+			preflight_workload "$ns" "$obj" || fail=1
+		fi
 	done
+	if [ "$SVC_HINT" = "1" ]; then
+		echo "churn.sh: the svc-N workloads are $SVC_MANIFEST: kubectl --context '$CTX' apply -n $SVC_NS -f $SVC_MANIFEST (README.md, \"Run\", step 0a)" >&2
+	fi
 	if { [ "$NEWSA_ON" != "0" ] && [ "$UDSCSI_ONCE" != "1" ]; } || [ "$NEWSA_ONCE" = "1" ]; then
 		preflight_newsa || fail=1
 	fi
