@@ -1947,9 +1947,11 @@ Consequences to know:
 
 The chart seeds the `default` MeshConfig once and never renders it again, so
 that it is yours to edit. Until 2.4.24 the seed was an object of the release:
-in the manifest of the one revision that created it (the first, on every
-release), in no later manifest, and still live. Helm cannot roll back to such
-a revision once a later one exists:
+in the manifest of the one revision that created it, in no later manifest, and
+still live. That revision is normally the first; it is a later one when an
+upgrade found the MeshConfig absent and seeded it then
+(`meshConfig.createDefault` or `edge.enabled` turned on later, a deleted
+object). Helm cannot roll back to such a revision once a later one exists:
 
 ```
 $ helm rollback aether 1 -n aether-system
@@ -1969,11 +1971,12 @@ before. What changes:
 - A release **first installed with 2.4.24 or later** can be rolled back to any
   revision, the first included. The MeshConfig is not touched by a rollback: it
   keeps its UID and your edits.
-- A release **first installed with an older chart** keeps its first revision
-  as it was stored, so that one revision still cannot be a rollback target.
-  Every other revision can, across the upgrade to 2.4.24 in both directions.
-  To see which revisions are affected (the count is 1 for a revision that
-  cannot be rolled back to):
+- A release **that an older chart seeded** keeps that revision as it was
+  stored, so it still cannot be a rollback target: any revision whose stored
+  manifest holds a MeshConfig, usually revision 1 and no other. Every other
+  revision can be rolled back to, across the upgrade to 2.4.24 in both
+  directions. To see which revisions are affected (the count is not 0 for a
+  revision that cannot be rolled back to):
 
   ```bash
   for rev in $(helm history aether -n aether-system -o json | jq -r '.[].revision'); do
@@ -1981,18 +1984,20 @@ before. What changes:
   done
   ```
 
-  To get what revision 1 ran without a rollback, upgrade to that revision's
-  chart with that revision's values (never `--reuse-values`). The MeshConfig is
-  not rendered by an upgrade, so nothing stands in the way:
+  To get what such a revision ran without a rollback, upgrade to that
+  revision's chart with that revision's values (never `--reuse-values`). The
+  MeshConfig is live, so an upgrade does not render it and nothing stands in
+  the way. With `REV` the affected revision:
 
   ```bash
-  helm history aether -n aether-system            # the CHART column of revision 1
-  helm get values aether -n aether-system --revision 1 -o yaml > revision-1-values.yaml
-  helm upgrade aether oci://quay.io/aethermesh/chart-aether --version <revision 1's chart version> \
-    --namespace aether-system -f revision-1-values.yaml
+  REV=1
+  helm history aether -n aether-system            # the CHART column of revision $REV
+  helm get values aether -n aether-system --revision "$REV" -o yaml > "revision-$REV-values.yaml"
+  helm upgrade aether oci://quay.io/aethermesh/chart-aether --version <that revision's chart version> \
+    --namespace aether-system -f "revision-$REV-values.yaml"
   ```
 
-  The same command recovers a release that a rollback to revision 1 left
+  The same command recovers a release that a rollback to such a revision left
   `failed`; so does `helm rollback aether <the last deployed revision>`.
 - **Two cases still seed the MeshConfig as a release object**, because a
   `pre-install` hook runs before any object of the release exists and so cannot
@@ -2004,10 +2009,10 @@ before. What changes:
   exists; the check and the way round above apply to it. To avoid it, create
   the edge namespace yourself (labelled `pod-security.kubernetes.io/enforce=baseline`)
   and set `edge.namespaceCreate=false`.
-- `helm get manifest` no longer lists the MeshConfig; `helm get hooks` does,
-  on the revision that seeded it. The object carries no `meta.helm.sh/release-*`
-  annotations. `helm uninstall` leaves it behind, as it left the kept object
-  behind before.
+- For a MeshConfig seeded by the hook, `helm get manifest` does not list it
+  and `helm get hooks` does, on the revision that seeded it; the object carries
+  no `meta.helm.sh/release-*` annotations. One that an older chart seeded keeps
+  the annotations it has. `helm uninstall` leaves either behind.
 - `helm install --no-hooks` seeds no MeshConfig, and the agent pods then stay
   in `ContainerCreating` (they mount the ConfigMap the controller projects
   from it). Run a `helm upgrade` without `--no-hooks`, or apply a MeshConfig

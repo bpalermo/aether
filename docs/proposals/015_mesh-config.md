@@ -409,7 +409,8 @@ telemetry; it never mounts the CM it produces, so there is no deadlock.
   seeding entirely.
 - Since chart 2.4.24 the seed is a Helm hook (`pre-install,pre-upgrade`) and no
   longer an object of the release (#1471): as a release object it was in the
-  first revision's manifest only, and `helm rollback` to that revision failed.
+  manifest of the one revision that seeded it (normally the first) and of no
+  other, and `helm rollback` to that revision failed.
   `charts/aether/templates/_helpers.tpl` (`aether.meshConfig.seedMode`) has the
   reasoning and the one case in which it is still a release object.
 

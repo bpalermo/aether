@@ -3610,7 +3610,8 @@ helm_template_fail_test(
 # live) and never renders it again, so operators own it. As a release object it
 # was in the manifest of the ONE revision that seeded it and of no other, while
 # staying live (`helm.sh/resource-policy: keep`). `helm rollback` to that
-# revision, the first one of every release, then failed with `no MeshConfig
+# revision (normally the first one of a release; a later one when the object
+# was absent on an upgrade) then failed with `no MeshConfig
 # with the name "default" found`: Helm updates an object that is live and in
 # the target manifest from the current manifest's copy, and there is none. A
 # hook is in no revision's manifest, so no rollback ever meets it.

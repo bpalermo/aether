@@ -84,7 +84,8 @@ live yet (#1471).
 The seed is rendered once (a `lookup` skips it when the object exists) and the
 operator owns it afterwards. As a release object it is in the manifest of the
 one revision that seeded it and of no other, and stays live. `helm rollback` to
-that revision (the first one of every release) then fails with `no MeshConfig
+that revision (normally a release's first; a later one when the object was
+absent on an upgrade and seeded then) fails with `no MeshConfig
 with the name "default" found`: for an object that is live and in the target
 manifest, Helm builds its patch from the CURRENT manifest's copy, and there is
 none. An object that is in no manifest cannot be in that position, so the seed

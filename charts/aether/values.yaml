@@ -171,7 +171,8 @@ meshConfig:
   # NEVER overwritten on upgrade or rollback (lookup-skip), so operators own it
   # via kubectl thereafter. The seed is a Helm hook (pre-install,pre-upgrade),
   # not an object of the release (#1471): it is in no revision's manifest, so
-  # `helm rollback` to the first revision works, and `--no-hooks` seeds nothing.
+  # `helm rollback` to the revision that seeded it (normally the first) works,
+  # and `--no-hooks` seeds nothing.
   # Set false to manage the CR entirely yourself (do that with a tool that
   # renders with `helm template`: it would render the seed on every sync).
   createDefault: true
