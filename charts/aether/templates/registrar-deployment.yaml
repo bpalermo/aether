@@ -113,14 +113,8 @@ spec:
             # Stamped onto every OTel signal (metrics/traces/logs) via
             # resource.WithFromEnv(), so logs are filterable per pod in
             # VictoriaLogs. Refs the env vars defined above ($(VAR) expansion).
-            # service.instance.id (#1560) is the one attribute here a metrics
-            # backend turns into a label by itself (Prometheus's OTLP ingestion:
-            # `instance`), so the replicas write a series each even when the
-            # pipeline promotes nothing. Without it they wrote one, and
-            # AetherRegistrarSnapshotDiverged, which counts the distinct hashes
-            # across replica series, could never fire.
             - name: OTEL_RESOURCE_ATTRIBUTES
-              value: "service.instance.id=$(POD_NAME),k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
+              value: "k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
             {{- /* 90% of limits.memory, never 100% (aether.goMemLimit). */}}
             {{- with include "aether.goMemLimit" .Values.registrar.resources }}
             - name: GOMEMLIMIT

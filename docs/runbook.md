@@ -2642,10 +2642,11 @@ helm upgrade aether oci://quay.io/aethermesh/chart-aether --version <that revisi
   --namespace aether-system -f "revision-$REV-values.yaml"
 ```
 
-#### Chart 2.4.26: replicas and the node proxy name themselves in their metrics (#1560, #1561)
+#### Chart 2.4.26: the node proxy's Envoy stats name their service (#1561)
 
-Two attributes of the telemetry resource change, so that a metrics backend
-tells things apart without pipeline configuration.
+The node proxy's Envoy stats (`envoy_*`, `aether_requests_total`) are exported
+with `service.name=aether-proxy`, which a metrics backend stores as `job`. They
+had none, and a query could only tell them from the edge proxy's by negation.
 [`observability/metric-labels.md`](./observability/metric-labels.md) is the
 page for what each component sets.
 
@@ -2653,11 +2654,8 @@ page for what each component sets.
 
 | Object | What changes | Effect |
 | --- | --- | --- |
-| registrar Deployment | `OTEL_RESOURCE_ATTRIBUTES` gains `service.instance.id=$(POD_NAME)` | **rolls once**, with telemetry on or off (the variable is always rendered) |
-| controller Deployment | the same | **rolls once**, likewise |
-| edge Deployment (when `edge.enabled`) | the same, on its `agent` container | **rolls once** |
 | `aether-proxy-config` ConfigMap, only when `otel.endpoint` is set | the Envoy stats sink gains a second resource detector that sets `service.name: aether-proxy` | no pod is replaced. **Every node's Envoy hot-restarts in place**: the supervisor watches the file. See below |
-| agent, proxy, mesh-dns and uds-csi DaemonSets | nothing in a pod template | not rolled by the chart |
+| every Deployment and DaemonSet | nothing in a pod template | not rolled by the chart |
 
 With `otel.endpoint` empty the ConfigMap is byte for byte what 2.4.25 rendered,
 and no Envoy restarts.
@@ -2672,61 +2670,60 @@ restart": check the headroom that section asks for before the upgrade, and
 grade the upgrade as you would a proxy roll. A rollback to 2.4.25 restores the
 old bootstrap and is the same event again.
 
-**What changes in the stored metrics:**
+**What changes in the stored metrics**, once, at each node's restart:
 
-- **`instance` on the registrar's, the controller's and the edge control
-  plane's series** (`aether_registrar_*`, the controller's, the edge's
-  `aether_agent_*`), holding the pod name: Prometheus's OTLP ingestion stores
-  `service.instance.id` as `instance`. Each replica now writes its own series
-  whatever the pipeline promotes. Where the pipeline already promoted
-  `k8s.pod.name` the series were apart before and only gain a label.
-  `AetherRegistrarSnapshotDiverged` (`registrar-alerts.yml`) needs one series
-  per replica and gets it; no shipped rule selects on `instance`. A query of
-  your own that matches these series one to one against something without the
-  label needs `ignoring (instance)`.
-- **`job="aether-proxy"` on the node proxy's Envoy series** (`envoy_*`,
-  `aether_requests_total`), which had no `job`. A label that appears makes
-  every one of those series a **new series**, per node, from that node's hot
-  restart on. The old ones stop receiving samples. A `rate()` or `increase()`
-  whose window spans the restart sees a series that ends and one that starts
-  (no counter reset is invented, but the new series contributes nothing until
-  its second sample), so expect a dip of about one window in a `sum(rate())`.
-  `{job!="aether-edge-proxy"}` selects the node proxy's series on both sides
-  of the upgrade. **A selector that relied on the label being absent
-  (`{job=""}`) matches nothing afterwards**: change it to
+- **`job="aether-proxy"` on the node proxy's Envoy series.** A label that
+  appears makes every one of those series a **new series**. The old ones stop
+  receiving samples.
+- **For five minutes the old and the new series are both read.** A pushed
+  series has no staleness marker, so the last sample of each old (`job`-less)
+  series stays in the lookback beside the new one. An aggregation that does
+  not keep `job` counts both: `sum by (node, aether_cluster)
+  (envoy_cluster_membership_healthy)` reads **twice** the real value for up to
+  five minutes after that node's restart (run through promtool: 4 hosts read
+  as 8, and as 4 again once the five minutes had passed), and so does any other gauge
+  (`envoy_cluster_upstream_rq_active`, `envoy_server_live`). An alert of your
+  own with a threshold on such a sum can fire in that window. Selecting one
+  side (`{job="aether-proxy"}`) does not double.
+- **Counters.** A `rate()` or `increase()` whose window spans the restart sees
+  a series that ends and one that starts. No counter reset is invented, but
+  the new series contributes nothing until its second sample, so expect a dip
+  of about one window in a `sum(rate())`.
+- **Selectors.** `{job!="aether-edge-proxy"}` selects the node proxy's series
+  on both sides of the upgrade. **A selector that relied on the label being
+  absent (`{job=""}`) matches nothing afterwards**: change it to
   `{job="aether-proxy"}`, or to `{job=~"|aether-proxy"}` while both chart
   versions are stored. No rule in `docs/observability/` selects on these
   series.
 - **Not changed:** the supervisor's `aether_supervisor_*` series stay
   `job="aether-proxy-supervisor"` (the proxy container's environment is as it
-  was), the agent's and mesh-dns's series gain nothing, and the edge proxy's
-  are as before.
+  was), and every other component's series are as before.
+
+This is a one-time effect of the upgrade (and of a rollback across it), not
+something each later proxy roll repeats: the label does not change again.
 
 Before and after (never `--reuse-values`; read the values back and pass them
 with `-f`):
 
 ```bash
-# Which pods were replaced: the two (three with the edge) Deployments, no DaemonSet.
+# No pod is replaced by this upgrade: names and ages stay.
 kubectl -n aether-system get pods -L controller-revision-hash,pod-template-hash \
   --sort-by=.metadata.creationTimestamp
-# The bootstrap each node's Envoy runs on: the epoch moves up by one on every
-# node once its kubelet has delivered the ConfigMap, and the pod keeps its name.
+# The bootstrap the chart rendered. Each node's Envoy moves to it (its epoch
+# goes up by one) once that node's kubelet has delivered the ConfigMap.
 kubectl -n aether-system get configmap aether-proxy-config \
   -o jsonpath='{.data.envoy\.yaml}' | grep -A4 'resource_detectors.static_config'
 ```
 
 ```promql
-# One result per proxy kind after the upgrade (aether-proxy, and
-# aether-edge-proxy with the edge on). A result with no job is a node whose
-# Envoy has not restarted on the new bootstrap yet.
+# One result per proxy kind (aether-proxy, and aether-edge-proxy with the edge
+# on). A result with no job is a node whose Envoy has not restarted on the new
+# bootstrap yet, or, for five minutes after it did, its old series' last sample.
 count by (job) (envoy_server_live)
 # Every node restarted exactly once: +1 per node across the upgrade.
-max by (node) (envoy_server_hot_restart_epoch)
+max by (node) (envoy_server_hot_restart_epoch{job="aether-proxy"})
 # The supervisor kept its name: the same set of series before and after.
 count by (job) ({__name__=~"aether_supervisor_.+"})
-# Equals the number of registrar replicas (it was 1 where nothing told them apart).
-count(aether_registrar_snapshot_content_hash)
-count by (instance) (aether_registrar_snapshot_content_hash)
 ```
 
 #### The prober chart (#1372, #1373, #1374)
