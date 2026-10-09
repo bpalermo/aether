@@ -6190,8 +6190,11 @@ product behaves:
 - **A standing `tls_not_published` can be a cluster's design** (no SPIRE, or an
   unpublished TCP floor). Whether that is expected is a statement about the cluster, so
   a grader has to be told. The series cannot say.
-- **A series with no `reason` label** is from an agent before #1424, where the two
-  kinds cannot be told apart.
+- **A series of the counter with no `reason` label** is from an agent before #1424,
+  where the two kinds cannot be told apart. That holds for the counter only
+  (`agent.identity_cluster_unpinned`), whose every series carries `reason`. On the two
+  gauges `reason` is on the `pin="unpinned"` series alone (the contract's `when`), so a
+  `pin="pinned"` series without it is the healthy shape, from any agent.
 - **A gauge that does not reach the store is not a zero.** A replaced pod is not covered
   by the one before it, so an agent that has the label and whose own gauge is absent has
   proven nothing (see **Absent is "not known", not zero** above).
