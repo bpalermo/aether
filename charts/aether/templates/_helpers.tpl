@@ -78,6 +78,105 @@ false
 {{- end -}}
 
 {{/*
+"hook" or "release": how this render seeds a `default` MeshConfig that is not
+live yet (#1471).
+
+The seed is rendered once (a `lookup` skips it when the object exists) and the
+operator owns it afterwards. As a release object it is in the manifest of the
+one revision that seeded it and of no other, and stays live. `helm rollback` to
+that revision (normally a release's first; a later one when the object was
+absent on an upgrade and seeded then) fails with `no MeshConfig
+with the name "default" found`: for an object that is live and in the target
+manifest, Helm builds its patch from the CURRENT manifest's copy, and there is
+none. An object that is in no manifest cannot be in that position, so the seed
+is a hook:
+
+  helm.sh/hook: pre-install,pre-upgrade
+
+  - pre, not post: the agent pod (and the edge's) stays in ContainerCreating
+    until the controller has projected the MeshConfig into a ConfigMap, so
+    under `--wait` a post-install hook would never run.
+  - pre-upgrade as well: whenever the object is absent on an upgrade (a first
+    install that failed early, meshConfig.createDefault or edge.enabled turned
+    on later, an object someone deleted) it is seeded then, as before.
+  - NEVER a rollback event. On a rollback Helm runs the hooks STORED with the
+    target revision, whatever is live: a seed with a rollback event would be
+    created, or applied, over the operator's MeshConfig.
+
+  helm.sh/hook-delete-policy: never
+
+`never` is not a policy Helm knows, and it is there so that Helm deletes
+nothing. A hook with NO policy gets Helm's default, before-hook-creation: Helm
+deletes the live object of that name just before it creates the hook's. The
+`lookup` around the template only says the object was absent when the chart
+was RENDERED; the hook runs later (after every pre-upgrade hook of a lower
+weight, and after whatever a parent chart or a slow API server puts in
+between). An object created in that window (by the operator, a GitOps tool, a
+second `helm upgrade`) is then deleted and replaced by the seed, and the
+upgrade reports success. Any value in the annotation replaces the default;
+Helm 3 and Helm 4 both store the values as given and act only on the three
+they know (pkg/action/hooks.go). Measured on kind (Kubernetes v1.35.8), the
+object absent at render and created before the seed hook runs:
+
+  policy            Helm 3.18.4                  Helm 4.2.0 (server-side apply)
+  (none)            deleted and replaced,        deleted and replaced,
+                    upgrade "succeeds"           upgrade "succeeds"
+  hook-succeeded    (the seed is deleted as soon as it is created: unusable)
+  hook-failed       upgrade fails, "already      object kept, upgrade succeeds;
+                    exists"; object kept         DELETED when the wait after
+                                                 the apply fails
+  never             upgrade fails, "already      not deleted, but the seed is
+                    exists"; object untouched    APPLIED to it (see below),
+                                                 upgrade succeeds; not deleted
+                                                 when the wait fails either
+
+hook-failed is the documented value that looks right and is not: Helm applies
+it after the hook's object was created and the WAIT for it failed. With
+client-side creation the object it then deletes can only be the seed. Helm 4
+applies hooks server-side, an apply over an existing object succeeds, and so
+the object deleted after a failed wait (an identity that may not list
+MeshConfigs, a timeout) is the operator's. With `never` no step deletes
+anything: the upgrade either fails on "already exists" with the release left
+`failed` at a new revision and the previous one still `deployed` (running the
+same command again succeeds: the object is live now, so the seed is not
+rendered), or it goes through with the operator's object in place. A failed
+upgrade that is fixed by running it again is the better failure.
+
+What `never` does NOT give is a create-only seed under Helm 4's server-side
+apply. There the hook is an apply, and an apply over the object created in the
+window merges the seed into it: the object keeps its UID and every field it
+set, and gains the chart's labels, the hook annotations and any
+meshConfig.proxy field it did not set itself (measured: a seed with
+tracingEnabled=true over an object with only accessLogsEnabled=true left both
+set, upgrade exit 0). A field both set to different values is a conflict and
+fails the upgrade with the object untouched. With the default, empty
+meshConfig.proxy the spec is not changed. Closing that needs a seed that is
+created and never applied (a hook Job running `kubectl create`, say), which is
+not what this chart does today. If a future
+Helm rejects or reinterprets a value it does not know, e2e/first-install.sh
+(leg v-a2) and the template tests fail first.
+
+"release" is the exception. A pre-install hook runs before any object of the
+release exists, so it cannot create a MeshConfig in a namespace that this very
+revision creates (namespace.create=true with the release stored elsewhere;
+edge.namespaceCreate=true, the default once the edge is on): the hook, and the
+install with it, would fail on "namespaces ... not found". That one revision
+seeds the MeshConfig as a release object, as every chart before 2.4.24 did, and
+cannot be rolled back to once a later revision exists (docs/runbook.md,
+"Chart 2.4.24", has the way round). `lookup` returns nothing without a cluster,
+so `helm template` shows this case whenever the chart renders the namespace.
+
+Usage: include "aether.meshConfig.seedMode" (dict "namespace" $ns "rendersNamespace" <bool>)
+*/}}
+{{- define "aether.meshConfig.seedMode" -}}
+{{- if and .rendersNamespace (not (lookup "v1" "Namespace" "" .namespace)) -}}
+release
+{{- else -}}
+hook
+{{- end -}}
+{{- end -}}
+
+{{/*
 Fails an upgrade that could make Helm delete the namespace although this render
 does not include it (#1403).
 

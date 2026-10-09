@@ -2130,6 +2130,136 @@ kubectl -n aether-system get pods -l app.kubernetes.io/component=proxy \
   -L controller-revision-hash --sort-by=.metadata.creationTimestamp
 ```
 
+#### Chart 2.4.24: the seeded MeshConfig is a hook; rolling back to a release's first revision (#1471)
+
+The chart seeds the `default` MeshConfig once and never renders it again, so
+that it is yours to edit. Until 2.4.24 the seed was an object of the release:
+in the manifest of the one revision that created it, in no later manifest, and
+still live. That revision is normally the first; it is a later one when an
+upgrade found the MeshConfig absent and seeded it then
+(`meshConfig.createDefault` or `edge.enabled` turned on later, a deleted
+object). Helm cannot roll back to such a revision once a later one exists:
+
+```
+$ helm rollback aether 1 -n aether-system
+Error: no MeshConfig with the name "default" found
+```
+
+For an object that is live and in the target manifest, Helm takes the copy in
+the **current** manifest as its starting point, and there is none. The release
+is left `failed` at a new revision, with the objects Helm reached before the
+MeshConfig already rolled back. A rollback to any other revision works.
+
+Since 2.4.24 the seed is a Helm hook (`helm.sh/hook: pre-install,pre-upgrade`),
+which is in no manifest. **Upgrading to 2.4.24 rolls nothing and changes
+nothing in the cluster**: the MeshConfig is live, so it is not rendered, as
+before. What changes:
+
+- A release **first installed with 2.4.24 or later** can be rolled back to any
+  revision, the first included. The MeshConfig is not touched by a rollback: it
+  keeps its UID and your edits.
+- A release **that an older chart seeded** keeps that revision as it was
+  stored, so it still cannot be a rollback target: any revision whose stored
+  manifest holds a MeshConfig, usually revision 1 and no other. Every other
+  revision can be rolled back to, across the upgrade to 2.4.24 in both
+  directions. To see which revisions are affected (the count is not 0 for a
+  revision that cannot be rolled back to):
+
+  ```bash
+  for rev in $(helm history aether -n aether-system -o json | jq -r '.[].revision'); do
+    echo "revision $rev: $(helm get manifest aether -n aether-system --revision "$rev" | grep -c '^kind: MeshConfig')"
+  done
+  ```
+
+  To get what such a revision ran without a rollback, upgrade to that
+  revision's chart with that revision's values (never `--reuse-values`). The
+  MeshConfig is live, so an upgrade does not render it and nothing stands in
+  the way. With `REV` the affected revision:
+
+  ```bash
+  REV=1
+  helm history aether -n aether-system            # the CHART column of revision $REV
+  helm get values aether -n aether-system --revision "$REV" -o yaml > "revision-$REV-values.yaml"
+  helm upgrade aether oci://quay.io/aethermesh/chart-aether --version <that revision's chart version> \
+    --namespace aether-system -f "revision-$REV-values.yaml"
+  ```
+
+  The same command recovers a release that a rollback to such a revision left
+  `failed`; so does `helm rollback aether <the last deployed revision>`.
+- **Two cases still seed the MeshConfig as a release object**, because a
+  `pre-install` hook runs before any object of the release exists and so cannot
+  create a MeshConfig in a namespace the same revision creates: the edge's
+  MeshConfig on the revision that creates the edge namespace
+  (`edge.enabled=true` with `edge.namespaceCreate=true`, its default), and the
+  control plane's with `namespace.create=true` (the release stored in another
+  namespace). That one revision cannot be rolled back to once a later one
+  exists; the check and the way round above apply to it. To avoid it, create
+  the edge namespace yourself (labelled `pod-security.kubernetes.io/enforce=baseline`)
+  and set `edge.namespaceCreate=false`.
+- For a MeshConfig seeded by the hook, `helm get manifest` does not list it
+  and `helm get hooks` does, on the revision that seeded it; the object carries
+  no `meta.helm.sh/release-*` annotations. One that an older chart seeded keeps
+  the annotations it has. `helm uninstall` leaves either behind.
+- **The seed hook never deletes a MeshConfig.** The chart decides to render
+  the seed when it finds no MeshConfig, and Helm creates it later in the same
+  upgrade, as a `pre-upgrade` hook. Helm's default for a hook is to delete the
+  live object of that name first; a MeshConfig created in between (by you, by
+  a GitOps tool, by a second `helm upgrade`) would be deleted and replaced by
+  the seed, with the upgrade reporting success. The hook therefore carries
+  `helm.sh/hook-delete-policy: never`. `never` is not one of Helm's policies:
+  naming any value turns the default off, and Helm acts only on the three it
+  knows, so nothing is deleted (`hook-failed`, the documented value, can still
+  delete your object under Helm 4's server-side apply). What you see instead,
+  when a MeshConfig appears during an upgrade that is seeding one:
+
+  ```
+  Error: UPGRADE FAILED: pre-upgrade hooks failed: warning: Hook pre-upgrade aether/templates/controller-meshconfig.yaml failed: 1 error occurred:
+  	* meshconfigs.config.aether.io "default" already exists
+  ```
+
+  The MeshConfig is the one that was created, untouched. The release is
+  `failed` at a new revision and the previous revision is still `deployed`;
+  `pre-upgrade` hooks run before Helm updates anything, so no workload
+  changed. **Run the same `helm upgrade` again**: the MeshConfig is live now,
+  the seed is not rendered, and the upgrade goes through. With Helm 4 and a
+  release it applies server side, the first upgrade goes through instead: the
+  MeshConfig is not deleted (same UID) and keeps every field it set, but
+  **the seed is applied to it**: it gains the chart's labels, the hook
+  annotations and any `meshConfig.proxy` field of your values that the object
+  does not set itself (measured with Helm 4.2.0: a seed with
+  `tracingEnabled: true` over an object that set only `accessLogsEnabled:
+  true` left both set). With the default, empty `meshConfig.proxy` the spec
+  does not change. If the seed and the object set the same field to different
+  values, the upgrade fails on `Apply failed with 1 conflict` and the object
+  is untouched (run it again). So with Helm 4, a non-empty `meshConfig.proxy`
+  and a MeshConfig that something else may create during an upgrade, compare
+  the spec as well as the UID before and after, or set
+  `meshConfig.createDefault=false` and own the object yourself:
+
+  ```bash
+  kubectl -n aether-system get meshconfig default -o jsonpath='{.metadata.uid} {.spec}{"\n"}'
+  ```
+- `helm install --no-hooks` seeds no MeshConfig, and the agent pods then stay
+  in `ContainerCreating` (they mount the ConfigMap the controller projects
+  from it). Run a `helm upgrade` without `--no-hooks`, or apply a MeshConfig
+  yourself.
+- A tool that renders with `helm template` and applies the result has no
+  cluster to look the MeshConfig up in: it renders the seed on every sync (as
+  it did before), now with the hook annotation on it. Set
+  `meshConfig.createDefault=false` there and keep the MeshConfig with your
+  other manifests. A controller that drives Helm itself (Flux's
+  helm-controller) is not affected.
+
+After an upgrade to 2.4.24, check that the MeshConfig was left alone (the same
+UID and generation as before the upgrade) and that nothing rolled:
+
+```bash
+kubectl -n aether-system get meshconfig default \
+  -o jsonpath='{.metadata.uid} generation={.metadata.generation}{"\n"}'
+kubectl -n aether-system get ds,deploy \
+  -o custom-columns=KIND:.kind,NAME:.metadata.name,GENERATION:.metadata.generation
+```
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod

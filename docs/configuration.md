@@ -75,7 +75,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 
 | Key | Default | Purpose |
 |---|---|---|
-| `meshConfig.createDefault` | `true` | Seed the singleton `MeshConfig` (`default`) on first install only — never overwritten on upgrade (operators own it via kubectl). |
+| `meshConfig.createDefault` | `true` | Seed the singleton `MeshConfig` (`default`) once, when none is live: on the first install, and on an upgrade that finds it absent. Never overwritten on upgrade or rollback (operators own it via kubectl). Since chart 2.4.24 the seed is a Helm hook (`helm.sh/hook: pre-install,pre-upgrade`), so it is in no revision's manifest and `helm rollback` to the revision that seeded it (normally a release's first) works (#1471); `helm install --no-hooks` therefore seeds nothing. The hook never deletes a MeshConfig (`helm.sh/hook-delete-policy: never`, a value Helm does not act on, in place of its default `before-hook-creation`): one created while an upgrade is running is not deleted, and that upgrade can fail on `"default" already exists`; run it again (with Helm 4's server-side apply the upgrade goes through and the seed is applied to that object: the runbook has what that changes). It is still a release object on the one revision that also creates the namespace it goes into (`edge.namespaceCreate=true`, `namespace.create=true`). See [`runbook.md`](./runbook.md), "Chart 2.4.24", for releases installed by an older chart. With a tool that renders with `helm template`, set `false` and keep the MeshConfig with your own manifests. |
 | `meshConfig.proxy` | `{}` | The `spec.proxy` seeded into that CR (protojson field names). Empty = proxy inherits everything from system config. |
 
 ### `agent`
