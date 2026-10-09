@@ -344,3 +344,145 @@ func TestAckTrackerFeedsTheAckedPinGauge(t *testing.T) {
 	assert.Equal(t, int64(1), got.pinned)
 	assert.Equal(t, byCause(0, 0, 0), got.unpinned)
 }
+
+// cdsExchange asks the cache for the cluster set as the xDS server does for
+// one request of a stream, and returns the response it writes, stamped with
+// nonce, or nil when the cache leaves the watch open instead of answering.
+// Like the server, it records what the response carried as returned on the
+// subscription the moment it is written, accepted or not.
+func cdsExchange(t *testing.T, c *SnapshotCache, sub *streamv3.Subscription, requestNonce, nonce string) *discoveryv3.DeltaDiscoveryResponse {
+	t.Helper()
+	responses := make(chan cachev3.DeltaResponse, 1)
+	cancel, err := c.CreateDeltaWatch(&discoveryv3.DeltaDiscoveryRequest{
+		Node:          &corev3.Node{Id: c.nodeName},
+		TypeUrl:       resourcev3.ClusterType,
+		ResponseNonce: requestNonce,
+	}, *sub, responses)
+	require.NoError(t, err)
+	if cancel != nil {
+		cancel()
+		return nil
+	}
+	raw := <-responses
+	resp, err := raw.GetDeltaDiscoveryResponse()
+	require.NoError(t, err)
+	resp.Nonce = nonce
+	sub.SetReturnedResources(raw.GetNextVersionMap())
+	return resp
+}
+
+// clusterVersions is the per-cluster versions of the snapshot the cache
+// serves: what a proxy that holds exactly those clusters states in the
+// initial_resource_versions of its first request on a new stream.
+func clusterVersions(t *testing.T, c *SnapshotCache) map[string]string {
+	t.Helper()
+	snap, err := c.GetSnapshot(c.nodeName)
+	require.NoError(t, err)
+	versions := snap.GetVersionMap(resourcev3.ClusterType)
+	require.NotEmpty(t, versions)
+	return versions
+}
+
+// TestAckedPinGaugeAfterAnAgentRestartAgainstAnInSyncProxy is #1483: an agent
+// that restarts finds a proxy holding exactly the clusters it publishes. The
+// proxy says so in its first request, the cache answers with an empty response
+// naming the snapshot, the proxy ACKs it, and that is the acknowledged gauge's
+// first sample. Before, the gauge had none until a cluster next changed.
+func TestAckedPinGaugeAfterAnAgentRestartAgainstAnInSyncProxy(t *testing.T) {
+	c, _, reader := newBindingTestCache(t)
+	ctx := context.Background()
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+	require.NoError(t, c.SetTrustDomain(ctx, raceTrustDomain))
+	addOutboundCluster(c, bindingClusterName) // no namespace: unpinned
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	tracker := ack.NewTracker(c.log)
+	tracker.SetAckObserver(c.ResponseAcked)
+	callbacks := tracker.Callbacks()
+	const stream = int64(1)
+
+	// The proxy's first request on the new stream: it holds every cluster the
+	// restarted agent publishes, at the version it publishes it.
+	sub := streamv3.NewDeltaSubscription(nil, nil, clusterVersions(t, c), true)
+	opening := cdsExchange(t, c, &sub, "", "n1")
+	require.NotNil(t, opening, "the first wildcard request of a stream is answered even when nothing is owed")
+	require.Empty(t, opening.GetResources())
+	require.Empty(t, opening.GetRemovedResources())
+	require.Equal(t, snapshotVersion(t, c), opening.GetSystemVersionInfo())
+
+	callbacks.OnStreamDeltaResponse(stream, nil, opening)
+	_, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+	require.False(t, ok, "sent is not acknowledged")
+	require.NoError(t, callbacks.OnStreamDeltaRequest(stream, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl: resourcev3.ClusterType, ResponseNonce: "n1",
+	}))
+
+	acked, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+	require.True(t, ok, "the proxy acknowledged the snapshot it stated it holds: the gauge has its sample")
+	published, _ := readPinGauge(t, reader, tlsClustersGauge)
+	assert.Equal(t, published, acked, "an in-sync proxy holds what is published")
+	assert.Equal(t, byCause(0, 1, 0), acked.unpinned)
+}
+
+// TestAckedPinGaugeMakesNoClaimForAProxyThatIsNotInSync is the other side: a
+// reconnecting proxy whose stated clusters are not the snapshot's is sent the
+// difference, and only its ACK of that moves the gauge. And an empty response
+// later on the stream moves nothing, whatever it names.
+//
+// The second half runs the pinned go-control-plane cache through the case that
+// makes the first-response rule necessary: after the proxy REJECTS a cluster
+// update, a request without a nonce (an on-demand subscription) is answered
+// with an empty response that names the rejected snapshot, and the proxy ACKs
+// it.
+func TestAckedPinGaugeMakesNoClaimForAProxyThatIsNotInSync(t *testing.T) {
+	c, _, reader := newBindingTestCache(t)
+	ctx := context.Background()
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+	require.NoError(t, c.SetTrustDomain(ctx, raceTrustDomain))
+	addOutboundCluster(c, bindingClusterName) // no namespace: unpinned
+	require.NoError(t, c.generateSnapshot(ctx))
+	unpinned := clusterVersions(t, c)
+
+	// The agent pins the cluster. The proxy still holds the unpinned one.
+	addPinnedCluster(c, bindingClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+	pinnedVersion := snapshotVersion(t, c)
+
+	tracker := ack.NewTracker(c.log)
+	tracker.SetAckObserver(c.ResponseAcked)
+	callbacks := tracker.Callbacks()
+	const stream = int64(1)
+
+	sub := streamv3.NewDeltaSubscription(nil, nil, unpinned, true)
+	opening := cdsExchange(t, c, &sub, "", "n1")
+	require.NotNil(t, opening)
+	require.NotEmpty(t, opening.GetResources(), "fixture: the proxy is owed the pinned cluster")
+	callbacks.OnStreamDeltaResponse(stream, nil, opening)
+
+	// The proxy rejects it.
+	require.NoError(t, callbacks.OnStreamDeltaRequest(stream, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl: resourcev3.ClusterType, ResponseNonce: "n1",
+		ErrorDetail: status.New(codes.InvalidArgument, "rejected").Proto(),
+	}))
+	_, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+	require.False(t, ok, "a NACK acknowledges nothing")
+
+	// The NACK is also the next request: nothing changed since, so the watch
+	// stays open and nothing is re-sent. The cache takes the rejected clusters
+	// as delivered.
+	require.Nil(t, cdsExchange(t, c, &sub, "n1", ""), "go-control-plane does not re-send what a proxy rejected")
+
+	// An on-demand subscription: a request with no nonce. It is answered,
+	// empty, in the name of the snapshot the proxy rejected, and ACKed.
+	later := cdsExchange(t, c, &sub, "", "n2")
+	require.NotNil(t, later, "fixture: a wildcard request without a nonce is answered")
+	require.Empty(t, later.GetResources())
+	require.Empty(t, later.GetRemovedResources())
+	require.Equal(t, pinnedVersion, later.GetSystemVersionInfo(), "fixture: the empty response names the rejected snapshot")
+	callbacks.OnStreamDeltaResponse(stream, nil, later)
+	require.NoError(t, callbacks.OnStreamDeltaRequest(stream, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl: resourcev3.ClusterType, ResponseNonce: "n2",
+	}))
+	_, ok = readPinGauge(t, reader, ackedTLSClustersGauge)
+	assert.False(t, ok, "the proxy rejected the pinned cluster: an empty response later on the stream must not be read as it holding that snapshot")
+}
