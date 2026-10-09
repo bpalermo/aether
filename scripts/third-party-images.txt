@@ -74,6 +74,16 @@ pin kindest/node v1.35.8 sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22
 # the pin is moved only on purpose. The line goes away with the file.
 pin grafana/k6 latest sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603
 
+# The soak's load driver and its engines (e2e/soak/sortie-values.yaml,
+# `image.ref` and `engine.image.ref`, by digest alone). The tag is the sortie
+# commit the soak is pinned to; an engine keeps its digest across commits that
+# did not change it, so its tag may name a later commit than the one that built
+# it. e2e/soak/README.md, "Provenance", is how these move: together with the
+# chart digest in e2e/soak/run.sh, which is an OCI chart and not an image and
+# is not listed here.
+pin quay.io/sortie/sortie dev-96e6bfb97713483c725bfa516d2dc7e4db719f1f sha256:490dfbd60f10d12332fc8c5280e22a0c0499d90c9fafb3f8f126828210ced23f
+pin quay.io/sortie/engine dev-96e6bfb97713483c725bfa516d2dc7e4db719f1f sha256:65392801d00be08c3a5362f380edd0078e61393b9ee57879681e1669bfb83f4c
+
 # --- exceptions ----------------------------------------------------------------
 #
 #   allow <path> <reference>    this reference, in this file, may stay as it is

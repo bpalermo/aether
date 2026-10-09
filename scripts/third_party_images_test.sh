@@ -221,6 +221,8 @@ mutate "a known image by an unlisted digest, no tag, behind no image key" e2e/ru
 	"e2e/run.sh:12: a/b@$D9 is not in scripts/third-party-images.txt"
 mutate "a known image by a computed digest, no tag, behind no image key" e2e/run.sh 'docker run --rm "a/b@${B_DIGEST}" true' \
 	'e2e/run.sh:12: a/b@${B_DIGEST' "is not sha256:<64 hex>"
+mutate "a known image by an unlisted digest under a child key of image:" charts/x/values.yaml $'engine:\n  image:\n    ref: a/b@'"$D9" \
+	"charts/x/values.yaml:8: a/b@$D9 is not in scripts/third-party-images.txt"
 # ...which counts as a use when the digest is the listed one; a longer name that
 # ends in a known one, and a comment, are not that image.
 new_tree "$T"
