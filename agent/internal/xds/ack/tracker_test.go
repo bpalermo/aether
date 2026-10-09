@@ -158,7 +158,8 @@ func TestStreamCloseDropsInflight(t *testing.T) {
 	require.Error(t, tr.WaitListenerPresent(ctx, testListener))
 }
 
-// observed is one call of an AckObserver.
+// observed is one call of an AckObserver, as the type and the snapshot version
+// of the response that was answered.
 type observed struct{ typeURL, version string }
 
 // sendVersioned is sendDelta for any resource type, with the version of the
@@ -172,19 +173,19 @@ func sendVersioned(t *Tracker, streamID int64, typeURL, nonce, version string, a
 }
 
 // TestAckObserver_ToldTheSnapshotVersionOfEveryAck: an ACK echoes only the
-// nonce, so the tracker has to carry the response's system_version_info to the
-// observer itself (#1425). A NACK is never an acknowledgement, and neither is
-// a response that was only sent.
+// nonce, so the tracker has to carry what the response was to the observer
+// itself (#1425). A later NACK is never an acknowledgement, and neither is a
+// response that was only sent.
 func TestAckObserver_ToldTheSnapshotVersionOfEveryAck(t *testing.T) {
 	tr := NewTracker(slog.New(slog.DiscardHandler))
 	var got []observed
-	tr.SetAckObserver(func(_ context.Context, typeURL, version string) {
+	tr.SetAckObserver(func(_ context.Context, accepted Accepted) {
 		// The tracker's lock is released by now: calling back into the tracker
 		// from the observer must not deadlock.
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_ = tr.WaitListenerAbsent(ctx, "never-present")
-		got = append(got, observed{typeURL, version})
+		got = append(got, observed{accepted.TypeURL, accepted.SystemVersion})
 	})
 
 	sendVersioned(tr, 1, resourcev3.ClusterType, "n1", "v1", []string{"c1"})

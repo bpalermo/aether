@@ -180,6 +180,11 @@ meshConfig:
   # again. With Helm 4's server-side apply the seed is applied to that object
   # instead (labels, annotations, and any `proxy` field below that it does
   # not set). docs/runbook.md, "Chart 2.4.24".
+  # The edge's own MeshConfig (edge.enabled) hangs off this switch too. In an
+  # edge namespace the chart creates (edge.namespaceCreate, since 2.4.25) it is
+  # not a hook but an object of the release, rendered on every revision with
+  # an empty spec, which leaves your edits alone (#1514; runbook, "Chart
+  # 2.4.25").
   # Set false to manage the CR entirely yourself (do that with a tool that
   # renders with `helm template`: it would render the seed on every sync).
   createDefault: true
@@ -985,6 +990,11 @@ edge:
   # The edge is an ingress gateway, not a mesh workload, so it runs in its own
   # namespace, isolated from the control plane. namespaceCreate lets the chart
   # create it (with baseline PSA); set false if you manage the namespace yourself.
+  # A namespace the chart creates is annotated
+  # aether.io/edge-meshconfig-in-manifest: "true" (when meshConfig.createDefault
+  # is on), and so is the MeshConfig in it: the edge's MeshConfig is then an
+  # object of the release on every revision, so that `helm rollback` works to
+  # each of them (#1514).
   namespace: aether-ingress
   namespaceCreate: true
   # Gateway replicas behind the Service; rolled with the standard RollingUpdate

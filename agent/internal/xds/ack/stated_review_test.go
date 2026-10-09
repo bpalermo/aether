@@ -206,8 +206,8 @@ func TestServer_SecondRequestBeforeTheFirstResponse(t *testing.T) {
 	require.Eventually(t, func() bool {
 		s.tracker.mu.Lock()
 		defer s.tracker.mu.Unlock()
-		names, ok := s.tracker.stated[streamType{streamID: 1, typeURL: resourcev3.ListenerType}]
-		return ok && names == nil
+		st := s.tracker.streams[streamType{streamID: 1, typeURL: resourcev3.ListenerType}]
+		return st != nil && !st.compared
 	}, resolvedWait, time.Millisecond)
 	s.publish(t, "v1", testServerListener(testListener, 1))
 	requireNotPresent(t, s.tracker, testListener)
@@ -216,7 +216,8 @@ func TestServer_SecondRequestBeforeTheFirstResponse(t *testing.T) {
 // TestTracker_ConcurrentStreamsAndWaiters is for the race detector.
 func TestTracker_ConcurrentStreamsAndWaiters(t *testing.T) {
 	tr := publishing(map[string]string{testListener: "h1", otherListener: "h2"})
-	tr.SetAckObserver(func(context.Context, string, string) {})
+	tr.SetAckObserver(func(context.Context, Accepted) {})
+	tr.SetDeliveryObserver(func(context.Context, Delivery) {})
 	var wg sync.WaitGroup
 	for stream := int64(1); stream <= 8; stream++ {
 		wg.Add(2)

@@ -417,6 +417,12 @@ telemetry; it never mounts the CM it produces, so there is no deadlock.
   `charts/aether/templates/_helpers.tpl` (`aether.meshConfig.seedMode`) has the
   reasoning, the measurements and the one case in which it is still a release
   object.
+- The edge's MeshConfig in an edge namespace the chart creates
+  (`edge.namespaceCreate`) cannot be a hook (the namespace does not exist when
+  a `pre-install` hook runs). Since chart 2.4.25 it is an object of the release
+  on every revision instead of a seed (#1514): the chart sets no field of its
+  spec, so rendering it again never touches the operator's
+  (`aether.edge.meshConfigInManifest` in the same file).
 
 ### Bootstrap (deadlock-free)
 

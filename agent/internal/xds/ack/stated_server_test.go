@@ -314,7 +314,7 @@ func TestServer_StreamResetBeforeTheAcknowledgement(t *testing.T) {
 	require.Eventually(t, func() bool {
 		s.tracker.mu.Lock()
 		defer s.tracker.mu.Unlock()
-		return len(s.tracker.answered) == 0
+		return len(s.tracker.streams) == 0
 	}, resolvedWait, time.Millisecond, "the server never closed the stream")
 
 	p2 := s.open(t, nil)
@@ -340,7 +340,7 @@ func TestServer_SnapshotChangedBetweenStatementAndResponse(t *testing.T) {
 	require.Eventually(t, func() bool {
 		s.tracker.mu.Lock()
 		defer s.tracker.mu.Unlock()
-		return len(s.tracker.stated) == 1
+		return len(s.tracker.streams) == 1
 	}, resolvedWait, time.Millisecond)
 
 	s.publish(t, "v1", testServerListener(testListener, 1), testServerListener(otherListener, 7))

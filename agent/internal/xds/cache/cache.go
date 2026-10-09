@@ -229,13 +229,19 @@ type SnapshotCache struct {
 	// Guarded by snapshotMu.
 	versions *versionMemo
 
-	// pins remembers the pin state of the last few snapshots by version, so a
-	// cluster ACK, which names only the snapshot version it answers, can be
-	// turned into "the pin state the proxy acknowledged" (#1425). It has its
-	// own mutex and is a leaf: the ACK arrives on the xDS stream's goroutine,
-	// which must never wait on a snapshot build (snapshotMu) or on the cluster
-	// map (clusterMu). See pinhistory.go.
-	pins pinHistory
+	// acked is the pin state of the clusters the proxy has accepted, cluster by
+	// cluster: what each published version of a cluster entry is counted as,
+	// and which version the proxy accepted (#1425, #1508). It has its own
+	// mutex, under which only the gauge's mutex and the log handler are taken:
+	// the ACK arrives on the xDS stream's goroutine, which must never wait on
+	// a snapshot build (snapshotMu) or on the cluster map (clusterMu). See
+	// ackedpins.go.
+	acked ackedPins
+	// entryClasses is the buffer a snapshot build collects its cluster
+	// entries' pin classes in (pinReport.classes), kept so that a build
+	// allocates none once it has grown to the size of the cluster map.
+	// Guarded by snapshotMu.
+	entryClasses []entryClass
 
 	// depMu guards podDeps and observedDeps. The node dependency set derived
 	// from them scopes which registry services the snapshot carries

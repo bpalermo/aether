@@ -131,7 +131,7 @@ func TestServer_RejectionThenIdenticalRepublish(t *testing.T) {
 	require.Eventually(t, func() bool {
 		s.tracker.mu.Lock()
 		defer s.tracker.mu.Unlock()
-		return len(s.tracker.answered) == 0
+		return len(s.tracker.streams) == 0
 	}, resolvedWait, time.Millisecond)
 	p2 := s.open(t, nil)
 	again, added := p2.recv()

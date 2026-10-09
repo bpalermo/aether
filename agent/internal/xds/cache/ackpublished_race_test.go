@@ -20,7 +20,8 @@ func TestWaitersReadThePublishedVersionWhileTheCachePublishes(t *testing.T) {
 	c := newTestCache("node-1")
 	tracker := ack.NewTracker(c.log)
 	tracker.SetPublishedVersion(ack.SnapshotVersions(c, c.nodeName))
-	tracker.SetAckObserver(c.ResponseAcked)
+	tracker.SetAckObserver(c.ResponseAccepted)
+	tracker.SetDeliveryObserver(c.ResponseDelivery)
 
 	var wg sync.WaitGroup
 	for w := 0; w < 4; w++ {

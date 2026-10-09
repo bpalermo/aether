@@ -135,13 +135,18 @@ func TestWaitListenerPresent_ResolvedByTheOpeningExchangeWhileWaiting(t *testing
 
 // TestOpeningExchange_NothingIsReadWithoutThePublishedVersion: a statement is
 // about one version, and without the published one to hold it to (a tracker
-// nobody called SetPublishedVersion on) it is not read at all.
+// nobody called SetPublishedVersion on) no wait is resolved by it. It is still
+// told to the AckObserver, which holds it to what it knows itself (#1508).
 func TestOpeningExchange_NothingIsReadWithoutThePublishedVersion(t *testing.T) {
-	tr := NewTracker(slog.New(slog.DiscardHandler))
+	tr, told := observe(t)
 	openDelta(tr, 1, resourcev3.ListenerType, map[string]string{testListener: "h1"})
-	assert.Nil(t, tr.stated[streamType{streamID: 1, typeURL: resourcev3.ListenerType}], "the statement is not even kept")
 	sendDelta(tr, 1, "n1", nil, nil)
+	for _, entry := range tr.inflight {
+		assert.Nil(t, entry.held, "nothing is kept to resolve a wait with")
+	}
 	ackDelta(tr, 1, "n1", "")
+	require.Len(t, *told, 1)
+	assert.Equal(t, map[string]string{testListener: "h1"}, (*told)[0].Stated)
 	requireNotPresent(t, tr, testListener)
 }
 
@@ -300,7 +305,7 @@ func TestOpeningExchange_OnlyTheFirstRequestStates(t *testing.T) {
 		ackDelta(tr, 1, "n1", "")
 
 		openDelta(tr, 1, resourcev3.ListenerType, map[string]string{testListener: "h1"})
-		assert.Empty(t, tr.stated, "and is not kept")
+		assert.Nil(t, tr.streams[streamType{streamID: 1, typeURL: resourcev3.ListenerType}].stated, "and is not kept")
 		sendListeners(tr, 1, "n2", map[string]string{"another": "a1"}, nil)
 		ackDelta(tr, 1, "n2", "")
 		requireNotPresent(t, tr, testListener, "not the opening request")

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"aethermesh.dev/common/telemetry/servicename"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -55,11 +56,10 @@ type Config struct {
 func newResource(ctx context.Context, cfg Config) (*resource.Resource, error) {
 	return resource.New(
 		ctx,
-		resource.WithAttributes(
-			semconv.ServiceName(cfg.ServiceName),
-			semconv.ServiceVersion(cfg.ServiceVersion),
-		),
+		resource.WithAttributes(semconv.ServiceVersion(cfg.ServiceVersion)),
 		resource.WithFromEnv(),
+		// After WithFromEnv, so OTEL_RESOURCE_ATTRIBUTES cannot rename the component (#1562).
+		servicename.Option(cfg.ServiceName),
 		resource.WithTelemetrySDK(),
 		resource.WithProcess(),
 		resource.WithHost(),
