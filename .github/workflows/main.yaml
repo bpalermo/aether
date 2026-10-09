@@ -60,6 +60,7 @@ jobs:
     outputs:
       has_any: ${{ steps.impacted.outputs.has_any }}
       has_unit: ${{ steps.impacted.outputs.has_unit }}
+      has_integration: ${{ steps.impacted.outputs.has_integration }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,11 +143,16 @@ jobs:
           ref: ${{ github.sha }}
       - name: Setup Bazel
         uses: ./.github/actions/setup-bazel
-      - name: Download impacted target lists
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      # The same checked download as ci.yaml's legs (#1488): it fails when a
+      # list is missing, when the lists are for another commit than this
+      # checkout, or when an output of `diff` disagrees with its list.
+      - name: Impacted target lists, checked against this checkout
+        uses: ./.github/actions/impacted-lists
         with:
-          name: impacted-targets-main
-          path: ${{ runner.temp }}/impacted
+          artifact-name: impacted-targets-main
+          has-any: ${{ needs.diff.outputs.has_any }}
+          has-unit: ${{ needs.diff.outputs.has_unit }}
+          has-integration: ${{ needs.diff.outputs.has_integration }}
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         run: scripts/ci-bazel-warmup.sh --config=ci --target_pattern_file=${{ runner.temp }}/impacted/impacted_build.txt
       - name: Build impacted targets
