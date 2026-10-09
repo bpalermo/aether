@@ -1115,6 +1115,41 @@ that disagrees with the SDK pin, a setup-go step with a literal `go-version` or
 `check-latest`, and any workflow job or composite action that runs `go` without
 setting it up first, which would leave it on the runner image's Go.
 
+### Bumping Helm
+
+No workflow job runs the runner image's Helm (it moves, majors included, when
+GitHub updates the image) or `azure/setup-helm`'s default, which is the newest
+release (#1580). [`e2e/helm-version.sh`](../e2e/helm-version.sh) pins one Helm 3
+release, one Helm 4 release and `HELM_DEFAULT_MAJOR`, the major a job gets when
+it does not ask; `.github/actions/setup-helm` installs from that file and is
+the only installer. The default is Helm 3. Helm 4 renders every chart in the
+Bazel template tests (the rules_helm toolchain), and the nightly `first-install`
+job runs `e2e/first-install.sh` under both majors, one matrix leg each (#1543).
+
+To bump a release, change its line. `HELM_V4_VERSION` is held equal to the
+rules_helm toolchain's Helm, so a rules_helm bump that moves its Helm moves
+that line in the same pull request. To move the default major, change
+`HELM_DEFAULT_MAJOR` and prove it with a `workflow_dispatch` of `e2e.yaml` on
+the branch: no pull request check runs the kind harnesses. `bazel test
+//e2e:helm_pin_test` fails on a job or composite action that runs `helm` or an
+`e2e/*.sh` harness without `setup-helm` before it, on `azure/setup-helm` used
+anywhere else, on a caller that names a version instead of a major, and on a
+`helm list -a`: Helm 4 dropped that flag, so anything that lists releases takes
+its flags from `helm_list_all_flags` in the same file (#1581).
+
+### Bumping Gateway API
+
+[`e2e/gateway-api-version.sh`](../e2e/gateway-api-version.sh) is the one
+Gateway API release every e2e surface installs: each harness sources it for the
+CRD bundle it applies, and the nightly conformance jobs install the same
+release's bundle and run its suite (#1583). Bump it together with go.mod's
+`sigs.k8s.io/gateway-api` (the release the code is built against) and
+`GATEWAY_API_VERSION` in `.github/workflows/e2e.yaml` (a workflow cannot source
+a shell file, so it carries the one copy). `bazel test
+//e2e:gateway_api_pin_test` fails until the three agree, and on a harness that
+assigns `GWAPI_VERSION` itself or a download URL that names a release.
+`GWAPI_VERSION=<release>` overrides it for one local run.
+
 ### Refreshing third-party image pins
 
 An image this repository does not build (curl, the echo servers, OPA, etcd, the
@@ -1136,18 +1171,34 @@ so `check` reads exactly two constructs in those two files, the rules_img
 `oci.pull(image =, digest =)`, and puts each together as a reference. It is a
 line reader for the shape buildifier writes and it fails closed: a pull written
 on one line, an attribute that is not a plain string, or a pull rule bound
-under a spelling it does not know is a finding.
+under a spelling it does not know is a finding. A module file reached by
+`include("//<package>:<file>.MODULE.bazel")` is read like the file that includes
+it (#1571); an `include()` in any other shape, and any other rule of a ruleset
+that pulls images (rules_img, rules_oci, rules_docker, rules_apko), are findings
+until the reader is taught them. A pull by a hand-written repository rule is
+still not seen.
 
-`scripts/third-party-images.sh` has four commands:
+A YAML file is read with a YAML parser, not line by line (#1525): an alias is
+followed to its anchor, and a flow mapping broken across lines, a value on the
+line after its key and a reference under a child key (`image:` / `ref: x`) are
+all read. A file named `*.yaml` that no parser can read is a finding, unless it
+is a Helm template (it holds `{{`), which is read line by line like a shell
+script. This is the one part of `check` that needs more than `bash`, `awk` and
+`git`: `python3` with PyYAML (`python3 -c 'import yaml'`). Without it `check`
+stops with exit 2 and has checked nothing. The test runs the reader that Bazel
+builds with a pinned PyYAML (`//scripts:third_party_images_yaml`).
+
+`scripts/third-party-images.sh` has five commands:
 
 | Command | Network | What it does |
 | --- | --- | --- |
-| `check` | no | The gate (CI's `shell` job). Fails on an image named by tag only or with no tag, on a digest the list does not have for that name, on a tag that disagrees with the list, on a pin or an exception nothing uses any more, and on a base-image pull in a Bazel module file that it cannot read |
+| `check` | no | The gate (CI's `shell` job). Fails on an image named by tag only or with no tag, on a digest the list does not have for that name, on a tag that disagrees with the list, on a pin or an exception nothing uses any more, on a YAML file no parser can read, and on a base-image pull, an `include()` or an image rule in a Bazel module file that it cannot read |
 | `list` | no | Every pin, with the files and lines that use it |
 | `outdated [--newer-tags] [<name>...]` | yes | Asks each pin's registry what its tag points at now: `current`, `MOVED` (the tag was re-pushed; the new digest is printed), `NOT-MULTI-ARCH` (the pinned index itself lacks `linux/amd64` or `linux/arm64`; counted as behind) or `ERROR` (no answer; never reported as current). `--newer-tags` adds the registry's tags that have the pinned tag's shape and sort after it. Exit 0 all current, 1 a pin is behind, 2 a pin could not be checked |
+| `newer [<name>...]` | yes | Reads each pin's tag list and prints `NEWER <name>:<tag>  <n> newer: …` for a pin that has tags of the pinned tag's shape sorting after it (the newest eight), and `ERROR` for a list it could not read. Exit 0 every list was read, 2 one was not |
 | `resolve <name>:<tag>...` | yes | Prints the `pin` line for a tag, and says so when its index lacks `linux/amd64` or `linux/arm64` |
 
-`outdated` and `resolve` read public registries anonymously: no credential is
+`outdated`, `newer` and `resolve` read public registries anonymously: no credential is
 read from the machine or sent (the anonymous pull token a registry hands out is
 the only `Authorization` header there is). A private or rate-limited registry
 answers `ERROR`, not `current`.
@@ -1163,15 +1214,34 @@ through `scripts/third-party-images-report.sh` and keeps one rolling issue,
 | --- | --- |
 | a pin is `MOVED` or `NOT-MULTI-ARCH` | Opens the issue, or rewrites the open one so it says where the tags point now. It adds a comment only when the set of pins behind changed |
 | every pin `current` | Comments on the open issue and closes it |
-| a pin is `ERROR` (the registry did not answer) | A warning on the run. That run does not know the whole set, so it neither closes nor rewrites an open issue; with none open, the pins it did find behind open one |
+| a pin is `ERROR` (the registry did not answer) | A warning on the run. That run does not know the whole set, so it neither closes an open issue nor rewrites what it says is behind; with none open, the pins it did find behind open one |
+| the same pin is `ERROR` in three runs in a row | The pin is reported (#1570): the issue is opened for it, or the open one gains a section and a comment. It stays open until a run checks every pin |
 
-The run is green in all three cases: a pin that is behind still pulls the
+The run is green in all four cases: a pin that is behind still pulls the
 digest it names, and the workflow is not a required check. It fails only when
-the check itself is broken (`outdated` died, or `gh` did). The issue reports
-tags that were pushed again. It does not report a newer version (`8.23.0`
-next to a pinned `8.22.0`): for those, run
-`scripts/third-party-images.sh outdated --newer-tags` in the same pass that
-bumps the Bazel, Go and Actions pins.
+the check itself is broken (`outdated` died, or `gh` did).
+
+**A lookup that keeps failing.** One `ERROR` is a registry having a bad
+minute. A pin whose lookup fails on every run (the repository went private,
+the tag was deleted, a rate limit that never lifts) would otherwise stay a
+warning on a green run for good. So the rolling issue also holds, in a hidden
+line of its body (`<!-- third-party-images-state: errors@… <name>:<tag>=<runs> -->`),
+in how many runs in a row each pin's lookup has failed; a pin that answers
+again is forgotten at once. The count lives in the open issue when there is
+one, and otherwise in the newest closed one, which is edited without being
+reopened, so a streak shorter than three notifies nobody. When there has never
+been a rolling issue, the first failed lookup opens one and closes it in the
+same run to hold the count: expect that once. Do not delete that hidden line
+by hand; a line that is not a pin and a count is ignored, never run.
+
+**Newer versions.** The report above is about the tag each pin names; it says
+nothing when `8.23.0` exists next to a pinned `8.22.0`. The same run asks
+`scripts/third-party-images.sh newer`, and its answer is a section of the
+issue (#1569) and of the run's summary. That section is for the reader only:
+it never opens the issue, never keeps it open, never closes it and never
+causes a comment, and when a tag list cannot be read it says so and the run
+goes on. With no issue open, read it in the run's summary, or run `newer` in
+the same pass that bumps the Bazel, Go and Actions pins.
 
 The issue is opened with the `enhancement` and `ci` labels; if one of them is
 deleted the run fails instead of filing an unlabelled issue. Only an issue the

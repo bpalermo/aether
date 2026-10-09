@@ -68,7 +68,9 @@ TEST_NS="aether-test"
 MESH_DOMAIN="aether.internal"
 # The pod-local outbound listener port every mesh client dials (post-030).
 OUTBOUND_PORT="18081"
-GWAPI_VERSION="v1.6.2"
+# The pinned Gateway API release (#1583): one for every e2e surface.
+# shellcheck source=e2e/gateway-api-version.sh
+. "$REPO_ROOT/e2e/gateway-api-version.sh"
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi udsecho)
 # The declared socket, as "<volume>/<file>". The resolved host path is
 # /run/aether/uds/<36-byte pod UID>/<file>, so <file> has a 54-byte budget (the
