@@ -6462,6 +6462,14 @@ QUIC twin is not counted apart from the cluster it is derived from, and an entry
 pin is rendered is in neither series while the node cannot publish TLS for it (no node
 SVID yet): it is not a pinned TLS cluster until one is published.
 
+"Every snapshot" includes one whose set returned an error (#1549). The control plane
+library installs a snapshot before it answers the watches that are open, and only that
+second step can fail, so the snapshot is the one the agent serves from then on. The
+agent reports it like any other (this gauge, the counter and the line above, the
+identity-binding lines) and logs `snapshot installed, but an open watch was not answered from it` at
+WARN with the error. Agents before #1549 skipped the report for such a snapshot, and
+the gauge kept the previous snapshot's values until the next build.
+
 ```promql
 # N clusters unpinned for reason R on this node, now.
 sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}) > 0
@@ -6554,9 +6562,14 @@ What follows from that:
   between. An ACK that arrives late is read against the version that was sent, with the
   pin class that version was last published with. (What is kept is taken when the
   response is written. A response written after its cluster was rebuilt three times, or
-  more than two snapshot builds after its cluster was removed, inside the agent
+  after the record of a cluster that was removed has been dropped, inside the agent
   process, is the exception: its version is unknown, or its ACK is not counted until the
-  proxy next opens a stream.)
+  proxy next opens a stream. The record of a removed cluster is kept until the third
+  snapshot build without the cluster, and for one minute from the first of those builds
+  however many run (#1551); a build that finds more than 1,024 records of clusters its
+  snapshot does not have keeps none of them for the minute, and an answer that releases
+  one while there are more than 1,024 of them, that one counted, does not keep it for
+  the minute either. With exactly 1,024 the minute applies.)
 - **Not written while a held cluster's state is unknown.** The agent can count a version
   only if it has that version's pin class on record: this agent process published it,
   and recently enough (the last three versions of a cluster, plus any in flight). An agent that restarts **while its proxy is

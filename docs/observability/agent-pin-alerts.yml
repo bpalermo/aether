@@ -41,8 +41,9 @@
 # Install: merge into the Prometheus rule files (with the Prometheus helm chart,
 # under serverFiles: alerting_rules.yml: groups: [...]). See README.md in this
 # directory. agent-pin-alerts_test.yml beside this file is its promtool unit
-# test: `promtool test rules docs/observability/agent-pin-alerts_test.yml`.
-# This repository has no promtool in its build, so CI does not run it here.
+# test. `bazel test //:observability_rules_test` runs it, and `promtool check
+# rules` on this file, with the promtool the build pins; it is one of the
+# repository's unit tests (README.md).
 
 groups:
   - name: aether-agent-san-pin
@@ -71,11 +72,12 @@ groups:
         annotations:
           summary: "{{ $value }} mesh cluster(s) on {{ $labels.node }} are published with TLS and no server-identity pin ({{ $labels.reason }})"
           description: >-
-            {{ $labels.job }} on {{ $labels.node }} publishes {{ $value }} mesh
-            cluster entries whose upstream TLS context carries no
-            match_typed_subject_alt_names, reason {{ $labels.reason }}. Their
-            handshake proves trust-domain membership only, so any mesh workload
-            is accepted as the server. The agent names the clusters in its WARN
+            Mesh cluster entries {{ $labels.job }} on {{ $labels.node }}
+            publishes with an upstream TLS context that carries no
+            match_typed_subject_alt_names, reason {{ $labels.reason }}:
+            {{ $value }}. The handshake of such a cluster proves trust-domain
+            membership only, so any mesh workload is accepted as the server.
+            The agent names the clusters in its WARN
             line `mesh clusters published with no server-identity SAN pin`
             (same `reason`). For no_namespace_metadata, find who registered the
             service's endpoints without a Kubernetes namespace. pin_not_rendered
@@ -124,9 +126,10 @@ groups:
         annotations:
           summary: "{{ $labels.job }} on {{ $labels.node }} has {{ $value }} mesh cluster entr(ies) for which no TLS cluster is published, for 5m ({{ $labels.reason }})"
           description: >-
-            {{ $value }} mesh cluster entries on {{ $labels.node }} have no
-            server-identity pin for reason {{ $labels.reason }}, a state in
-            which the agent publishes them with no TLS at all. It is expected
+            Mesh cluster entries on {{ $labels.node }} with no
+            server-identity pin for reason {{ $labels.reason }}: {{ $value }}.
+            In that state the agent publishes no TLS at all for an entry. It is
+            expected
             for a moment when an agent starts and has now lasted 5 minutes.
             trust_domain_unknown: the agent has not learned its trust domain.
             tls_not_published: the agent has no SVID of its own, or the

@@ -236,11 +236,27 @@ func (s *clusterAck) classOfOffered(version string) (pinClass, bool) {
 	return pinClassNone, false
 }
 
-// buildPastTheGoneWindow builds the snapshots after which the record of an
-// entry that has left the snapshot, is not held and is not in flight is
-// dropped (goneBuilds).
+// stepClock is a clock a test moves by hand (ackedPins.now).
+type stepClock struct{ t time.Time }
+
+func newStepClock() *stepClock { return &stepClock{t: time.Unix(1_700_000_000, 0)} }
+
+func (c *stepClock) now() time.Time          { return c.t }
+func (c *stepClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+// buildPastTheGoneWindow moves the acknowledged pin state's clock on by
+// goneAge and builds goneBuilds snapshots, after which the record of an entry
+// that had left the snapshot before the call, is not held and is not in flight
+// is dropped (forgetIfGoneLocked: both bounds have passed).
 func buildPastTheGoneWindow(t *testing.T, c *SnapshotCache) {
 	t.Helper()
+	c.acked.mu.Lock()
+	earlier := c.acked.now
+	if earlier == nil {
+		earlier = time.Now
+	}
+	c.acked.now = func() time.Time { return earlier().Add(goneAge) }
+	c.acked.mu.Unlock()
 	for range goneBuilds {
 		require.NoError(t, c.generateSnapshot(context.Background()))
 	}
@@ -477,7 +493,8 @@ func TestAckedPinGaugeKeepsAClusterWhoseRemovalWasRejected(t *testing.T) {
 	acked, _ = ackedGauge()
 	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
 	assert.Equal(t, int64(3), acked.pinned)
-	assert.NotContains(t, c.acked.clusters, bindingClusterName, "nothing is kept for a cluster neither published nor held")
+	buildPastTheGoneWindow(t, c)
+	assert.NotContains(t, c.acked.clusters, bindingClusterName, "nothing is kept for good for a cluster neither published nor held")
 }
 
 // TestAckedPinGaugeDoesNotCountAClusterNeverAcknowledged: a cluster whose
@@ -724,10 +741,15 @@ func TestAckedPinsDoNotCountAnEntryWhoseClusterWasNeverPublished(t *testing.T) {
 // snapshot, per ACK or per stream. And the versions remembered per
 // cluster are a fixed few: an acknowledgement of one that has fallen out is
 // not attributed to another.
+//
+// The builds here are goneAge apart, so no record is kept by its age: what
+// that adds, and its cap, is TestAckedPinsKeptByAgeAreCapped.
 func TestAckedPinsAreBoundedByTheClusters(t *testing.T) {
-	var h ackedPins
+	clock := newStepClock()
+	h := ackedPins{now: clock.now}
 	const live = 10
 	for build := range 500 {
+		clock.advance(goneAge)
 		entries := make([]entryClass, 0, live)
 		versions := map[string]string{}
 		var added []ack.Resource
@@ -759,9 +781,11 @@ func TestAckedPinsAreBoundedByTheClusters(t *testing.T) {
 	assert.Equal(t, cachemetrics.PinCounts{}, u.counts)
 	assert.Len(t, h.clusters, live+(goneBuilds-1), "a proxy that holds nothing leaves the newest snapshot's entries and the ones that left in the builds just before")
 	for range goneBuilds - 1 {
+		clock.advance(goneAge)
 		h.publish(nil, nil, false)
 	}
 	require.Len(t, h.clusters, live, "fixture: the newest entries are kept as long as the ones before them were")
+	clock.advance(goneAge)
 	h.publish(nil, nil, false)
 	assert.Empty(t, h.clusters, "and nothing is kept for good")
 
@@ -917,8 +941,12 @@ func TestAckedPinGaugeCountsAClusterRemovedBeforeItsResponseWasWritten(t *testin
 // the classes of its versions, through the builds a response built before it
 // left can still be waiting to be written in (goneBuilds), and dropped by the
 // build after: memory stays bounded by the clusters of the last few snapshots.
+//
+// The builds here are goneAge apart, so this is the build bound alone;
+// TestAckedPinsKeepAGoneClusterForAWhile has the two together.
 func TestAckedPinsKeepAGoneClusterForAFewBuilds(t *testing.T) {
-	var h ackedPins
+	clock := newStepClock()
+	h := ackedPins{now: clock.now}
 	gap := unpinnedClass(cachemetrics.CauseNoNamespaceMetadata)
 	both := []entryClass{{name: "a", class: pinClassPinned}, {name: "gone", class: gap}}
 	rest := both[:1]
@@ -927,6 +955,7 @@ func TestAckedPinsKeepAGoneClusterForAFewBuilds(t *testing.T) {
 
 	h.publish(both, versions, false)
 	for build := 1; build < goneBuilds; build++ {
+		clock.advance(goneAge)
 		h.publish(rest, versions, false)
 		require.Contains(t, h.clusters, "gone", "%d build(s) after it left", build)
 	}
@@ -939,6 +968,7 @@ func TestAckedPinsKeepAGoneClusterForAFewBuilds(t *testing.T) {
 
 	// Held: kept for as long as the proxy holds it, however many builds.
 	for range 2 * goneBuilds {
+		clock.advance(goneAge)
 		h.publish(rest, versions, false)
 	}
 	require.Contains(t, h.clusters, "gone")
@@ -950,11 +980,289 @@ func TestAckedPinsKeepAGoneClusterForAFewBuilds(t *testing.T) {
 	// Never sent: dropped by the build that ends the window.
 	h.publish(both, versions, false)
 	for range goneBuilds - 1 {
+		clock.advance(goneAge)
 		h.publish(rest, versions, false)
 	}
 	require.Contains(t, h.clusters, "gone")
+	clock.advance(goneAge)
 	h.publish(rest, versions, false)
 	assert.NotContains(t, h.clusters, "gone", "nothing is kept for good for a cluster neither published, nor in flight, nor held")
+}
+
+// TestAckedPinGaugeCountsAClusterWhoseResponseWaitedManyBuildsToBeWritten is
+// #1551. The step between go-control-plane building a response and the stream
+// writing it is measured in time, not in builds: the response waits in the
+// stream's channel while the stream's goroutine is busy, and the agent builds
+// as often as the node changes. A response that carries a cluster the agent
+// dropped right after, and is written many builds but only seconds later, is
+// acknowledged like any other: the proxy holds the cluster and the gauge
+// counts it.
+func TestAckedPinGaugeCountsAClusterWhoseResponseWaitedManyBuildsToBeWritten(t *testing.T) {
+	c, rec, reader, tracker := ackedPinFixture(t)
+	clock := newStepClock()
+	c.acked.now = clock.now
+	ackedGauge := func() (pinSeries, bool) { return readPinGauge(t, reader, ackedTLSClustersGauge) }
+	ctx := context.Background()
+	addPinnedCluster(c, otherClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+	proxy := connectCDSProxy(t, c, tracker, 1, nil)
+	proxy.ack(proxy.next())
+
+	addOutboundCluster(c, bindingClusterName) // unpinned
+	require.NoError(t, c.generateSnapshot(ctx))
+	pending := proxy.build()
+	require.Equal(t, []string{bindingClusterName}, deltaNames(pending))
+	// Built, not written yet: the agent drops the cluster, and builds many
+	// times over in less than goneAge.
+	require.NoError(t, c.RemoveCluster(ctx, bindingClusterName))
+	const builds = 4 * goneBuilds
+	for range builds {
+		clock.advance(goneAge / (2 * builds))
+		require.NoError(t, c.generateSnapshot(ctx))
+	}
+
+	proxy.written(pending)
+	proxy.ack(pending)
+	acked, ok := ackedGauge()
+	require.True(t, ok)
+	assert.Equal(t, int64(1), acked.pinned)
+	assert.Equal(t, byCause(0, 1, 0), acked.unpinned, "the proxy accepted the cluster it was sent, however many builds went by before it was written")
+	assert.Empty(t, rec.with(ackedClusterPinsUnknownMsg), "and its class is the one it was published with")
+
+	removal := proxy.next()
+	require.Equal(t, []string{bindingClusterName}, removal.GetRemovedResources())
+	proxy.ack(removal)
+	acked, _ = ackedGauge()
+	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
+
+	// The bound. Released, the record outlives the entry by goneAge from the
+	// first build without it, and is dropped by the first build after that.
+	require.Contains(t, c.acked.clusters, bindingClusterName)
+	clock.advance(goneAge / 2)
+	require.NoError(t, c.generateSnapshot(ctx))
+	assert.NotContains(t, c.acked.clusters, bindingClusterName, "nothing is kept for good")
+}
+
+// TestAckedPinsKeepAGoneClusterForAWhile: the two bounds on the record of an
+// entry that left the snapshot, is not held and is not in flight. It is kept
+// while EITHER fewer than goneBuilds builds without the entry have run OR less
+// than goneAge has passed since the first of them, and dropped by the first
+// build after both.
+func TestAckedPinsKeepAGoneClusterForAWhile(t *testing.T) {
+	gap := unpinnedClass(cachemetrics.CauseNoNamespaceMetadata)
+	both := []entryClass{{name: "a", class: pinClassPinned}, {name: "gone", class: gap}}
+	rest := both[:1]
+	versions := map[string]string{"a": "ha", "gone": "hg"}
+	sent := []ack.Resource{{Name: "gone", Version: "hg"}}
+
+	t.Run("many builds in less than goneAge", func(t *testing.T) {
+		clock := newStepClock()
+		h := ackedPins{now: clock.now}
+		h.publish(both, versions, false)
+		h.publish(rest, versions, false) // the first build without it
+		for range 10 * goneBuilds {
+			h.publish(rest, versions, false)
+		}
+		clock.advance(goneAge - time.Nanosecond)
+		h.publish(rest, versions, false)
+		require.Contains(t, h.clusters, "gone", "younger than goneAge")
+		// A response built while it was published is written and acknowledged.
+		h.deliver(ack.Delivery{Resources: sent})
+		u := h.accept(ack.Accepted{Added: sent})
+		h.deliver(ack.Delivery{Resources: sent, Ended: true})
+		require.True(t, u.report)
+		assert.Equal(t, cachemetrics.PinCounts{Unpinned: [cachemetrics.NumUnpinnedCauses]int{0, 0, 1, 0}}, u.counts)
+		h.accept(ack.Accepted{Removed: []string{"gone"}})
+		require.Contains(t, h.clusters, "gone", "an answer does not drop it early either")
+
+		clock.advance(time.Nanosecond)
+		h.publish(rest, versions, false)
+		assert.NotContains(t, h.clusters, "gone", "goneAge after the first build without it, and more than goneBuilds builds")
+	})
+
+	t.Run("goneAge passes in fewer than goneBuilds builds", func(t *testing.T) {
+		clock := newStepClock()
+		h := ackedPins{now: clock.now}
+		h.publish(both, versions, false)
+		h.publish(rest, versions, false)
+		clock.advance(10 * goneAge)
+		for build := 2; build < goneBuilds; build++ {
+			h.publish(rest, versions, false)
+			require.Contains(t, h.clusters, "gone", "%d build(s) without it", build)
+		}
+		h.publish(rest, versions, false)
+		assert.NotContains(t, h.clusters, "gone")
+	})
+
+	t.Run("the age is of the last time it left", func(t *testing.T) {
+		clock := newStepClock()
+		h := ackedPins{now: clock.now}
+		h.publish(both, versions, false)
+		h.publish(rest, versions, false) // left
+		h.publish(both, versions, false) // back
+		clock.advance(10 * goneAge)
+		h.publish(rest, versions, false) // left again, now
+		for range 10 * goneBuilds {
+			h.publish(rest, versions, false)
+		}
+		assert.Contains(t, h.clusters, "gone", "it left a moment ago, whenever it had left before")
+	})
+
+	t.Run("an answer after both bounds drops it without a build", func(t *testing.T) {
+		clock := newStepClock()
+		h := ackedPins{now: clock.now}
+		h.publish(both, versions, false)
+		h.deliver(ack.Delivery{Resources: sent})
+		h.accept(ack.Accepted{Added: sent})
+		h.deliver(ack.Delivery{Resources: sent, Ended: true})
+		for range goneBuilds {
+			h.publish(rest, versions, false)
+		}
+		h.accept(ack.Accepted{Removed: []string{"gone"}})
+		require.Contains(t, h.clusters, "gone", "released inside goneAge: kept")
+		h.accept(ack.Accepted{Added: sent})
+		clock.advance(goneAge)
+		h.accept(ack.Accepted{Removed: []string{"gone"}})
+		assert.NotContains(t, h.clusters, "gone", "released after it: gone with the answer")
+	})
+
+	// The other two things that can leave a record with nothing to keep it:
+	// neither drops it inside goneAge, and each drops it after.
+	for _, tc := range []struct {
+		name string
+		// keep makes something hold the record; end takes that away.
+		keep, end func(h *ackedPins)
+	}{
+		{
+			name: "a response that is never acknowledged",
+			keep: func(h *ackedPins) { h.deliver(ack.Delivery{Resources: sent}) },
+			end:  func(h *ackedPins) { h.deliver(ack.Delivery{Resources: sent, Ended: true}) },
+		},
+		{
+			name: "a stream opened without the cluster",
+			keep: func(h *ackedPins) { h.accept(ack.Accepted{Added: sent}) },
+			end: func(h *ackedPins) {
+				h.accept(ack.Accepted{Opening: true, Rejected: true, Stated: map[string]string{"a": "ha"}})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newStepClock()
+			h := ackedPins{now: clock.now}
+			h.publish(both, versions, false)
+			tc.keep(&h)
+			for range goneBuilds {
+				h.publish(rest, versions, false)
+			}
+			tc.end(&h)
+			require.Contains(t, h.clusters, "gone", "inside goneAge: kept")
+			tc.keep(&h)
+			clock.advance(goneAge)
+			tc.end(&h)
+			assert.NotContains(t, h.clusters, "gone", "after it: gone at once")
+		})
+	}
+}
+
+// TestAckedPinsKeptByAgeAreCapped: memory. The age bound alone would keep one
+// record per entry that left in the last goneAge, which is as many as the node
+// can churn in that time. So it applies only while the records that are not of
+// an entry of the newest snapshot number at most maxAgedRecords; a build that
+// finds more keeps none of them by age, and they fall back to the build bound.
+func TestAckedPinsKeptByAgeAreCapped(t *testing.T) {
+	entries := func(n int) ([]entryClass, map[string]string) {
+		out := make([]entryClass, 0, n+1)
+		versions := make(map[string]string, n+1)
+		for i := range n + 1 {
+			name := "c" + strconv.Itoa(i)
+			out = append(out, entryClass{name: name, class: pinClassPinned})
+			versions[name] = "v"
+		}
+		return out, versions
+	}
+	for _, tc := range []struct {
+		name string
+		gone int
+		kept int
+	}{
+		{name: "at the cap", gone: maxAgedRecords, kept: maxAgedRecords},
+		{name: "over it", gone: maxAgedRecords + 1, kept: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newStepClock()
+			h := ackedPins{now: clock.now}
+			all, versions := entries(tc.gone)
+			// What stays is one record that two entries publish under: the
+			// cap counts records, not entries.
+			stays := []entryClass{all[0], all[0]}
+			h.publish(all, versions, false)
+			for build := 1; build < goneBuilds; build++ {
+				h.publish(stays, versions, false)
+				require.Len(t, h.clusters, 1+tc.gone, "%d build(s) without them: the build bound keeps them all", build)
+			}
+			h.publish(stays, versions, false)
+			assert.Len(t, h.clusters, 1+tc.kept)
+		})
+	}
+}
+
+// TestAckedPinsKeptByAgeAreCappedWithoutABuild: the cap holds between builds
+// too. Records that outlived their entries because a proxy held their clusters,
+// or had not answered for them, are released by answers, inside goneAge and
+// with no build after. Each release keeps the record by age only while the
+// records that are not of an entry number at most maxAgedRecords, so that many
+// are left and no more, whichever path released them.
+func TestAckedPinsKeptByAgeAreCappedWithoutABuild(t *testing.T) {
+	const over = 2
+	all := make([]entryClass, 0, maxAgedRecords+over+1)
+	versions := make(map[string]string, cap(all))
+	var gone []ack.Resource
+	var goneNames []string
+	for i := range cap(all) {
+		name := "c" + strconv.Itoa(i)
+		all = append(all, entryClass{name: name, class: pinClassPinned})
+		versions[name] = "v"
+		if i > 0 {
+			gone = append(gone, ack.Resource{Name: name, Version: "v"})
+			goneNames = append(goneNames, name)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// keep makes something hold every record; end takes that away.
+		keep, end func(h *ackedPins)
+	}{
+		{
+			name: "removals the proxy accepts",
+			keep: func(h *ackedPins) { h.accept(ack.Accepted{Added: gone}) },
+			end:  func(h *ackedPins) { h.accept(ack.Accepted{Removed: goneNames}) },
+		},
+		{
+			name: "a stream opened without the clusters",
+			keep: func(h *ackedPins) { h.accept(ack.Accepted{Added: gone}) },
+			end: func(h *ackedPins) {
+				h.accept(ack.Accepted{Opening: true, Rejected: true, Stated: map[string]string{"c0": "v"}})
+			},
+		},
+		{
+			name: "responses that are never acknowledged",
+			keep: func(h *ackedPins) { h.deliver(ack.Delivery{Resources: gone}) },
+			end:  func(h *ackedPins) { h.deliver(ack.Delivery{Resources: gone, Ended: true}) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newStepClock()
+			h := ackedPins{now: clock.now}
+			h.publish(all, versions, false)
+			tc.keep(&h)
+			for range goneBuilds {
+				h.publish(all[:1], versions, false)
+			}
+			require.Len(t, h.clusters, len(all), "fixture: held or in flight, every record is kept")
+			tc.end(&h)
+			assert.Len(t, h.clusters, 1+maxAgedRecords)
+		})
+	}
 }
 
 // TestAckedPinGaugeIsNotWithdrawnForAPlaintextUDPFloor: a UDP floor cluster
@@ -1026,6 +1334,82 @@ func TestAckedPinsKnowASnapshotWhoseSetReturnedAnError(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, int64(1), acked.pinned)
 	assert.Equal(t, byCause(0, 1, 0), acked.unpinned, "the proxy holds the cluster of that snapshot, and the agent knows its class")
+}
+
+// TestASnapshotWhoseSetReturnedAnErrorIsReportedAsTheOneServed is #1549, the
+// build's own side of the test above. The snapshot is installed although
+// SetSnapshot returned an error, so what the agent says about "the snapshot it
+// serves" has to be about that one: the published pin gauge and its WARN, and
+// the outbound and inbound identity-binding lines. They used to be skipped,
+// and were made up for only by the next build, under the next version.
+//
+// The error is still returned, and it is told apart from a snapshot that was
+// never installed: its own line, and its own text.
+func TestASnapshotWhoseSetReturnedAnErrorIsReportedAsTheOneServed(t *testing.T) {
+	c, rec, reader, _ := ackedPinFixture(t)
+	ctx := context.Background()
+	serveSecrets(c, inboundEchoIdentity, inboundTrustBundleSDS)
+	addPinnedCluster(c, otherClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+	published, ok := readPinGauge(t, reader, tlsClustersGauge)
+	require.True(t, ok)
+	require.Equal(t, byCause(0, 0, 0), published.unpinned, "fixture: nothing is unpinned yet")
+
+	// An open watch nobody reads: SetSnapshot blocks answering it until the
+	// context it was called with ends, and returns that as its error.
+	cancel, err := c.CreateDeltaWatch(&discoveryv3.DeltaDiscoveryRequest{
+		Node: &corev3.Node{Id: c.nodeName}, TypeUrl: resourcev3.ClusterType, ResponseNonce: "n1",
+	}, streamv3.NewDeltaSubscription(nil, nil, clusterVersions(t, c), true), make(chan cachev3.DeltaResponse))
+	require.NoError(t, err)
+	require.NotNil(t, cancel, "fixture: the watch must be open")
+	defer cancel()
+
+	// One build that changes all three: an unpinned cluster, and a pod, which
+	// binds a client certificate to that cluster and a server certificate to
+	// its own inbound chains.
+	addOutboundCluster(c, bindingClusterName)
+	rec.reset()
+	ended, end := context.WithCancel(ctx)
+	end()
+	err = c.AddPod(ended, bindingPod("echo-1", "echo"), bindingTrustDomain)
+	require.ErrorIs(t, err, context.Canceled, "fixture: SetSnapshot must fail")
+	served := snapshotVersion(t, c)
+	require.Contains(t, clusterVersions(t, c), bindingClusterName, "the snapshot is served although setting it returned an error")
+
+	published, ok = readPinGauge(t, reader, tlsClustersGauge)
+	require.True(t, ok)
+	assert.Equal(t, byCause(0, 1, 0), published.unpinned, "the published gauge is of the snapshot the cache serves")
+	unpinned := rec.with(unpinnedClusterMsg)
+	require.Len(t, unpinned, 1, "and so is the line that names the unpinned cluster")
+	assert.Equal(t, served, unpinned[0].attrs["snapshot_version"])
+
+	outbound := rec.with(bindingLineMsg)
+	require.NotEmpty(t, outbound, "the outbound bindings of the served snapshot are named")
+	for _, l := range outbound {
+		assert.Equal(t, served, l.attrs["snapshot_version"])
+	}
+	inbound := rec.with(inboundLineMsg)
+	require.NotEmpty(t, inbound, "and the inbound ones")
+	for _, l := range inbound {
+		assert.Equal(t, served, l.attrs["snapshot_version"])
+	}
+
+	// Installed, with a watch left unanswered: not "failed to set".
+	assert.NotContains(t, err.Error(), "failed to set snapshot")
+	assert.ErrorContains(t, err, "is installed")
+	lines := rec.with(snapshotWatchUnansweredMsg)
+	require.Len(t, lines, 1)
+	assert.Equal(t, slog.LevelWarn, lines[0].level)
+	assert.Equal(t, served, lines[0].attrs["snapshot_version"])
+
+	// The next build has nothing to make up for. (The watch is closed first:
+	// it is still open, and a build would wait on it again.)
+	cancel()
+	rec.reset()
+	require.NoError(t, c.generateSnapshot(ctx))
+	assert.Empty(t, rec.with(bindingLineMsg))
+	assert.Empty(t, rec.with(inboundLineMsg))
+	assert.Empty(t, rec.with(snapshotWatchUnansweredMsg))
 }
 
 // TestAckedPinsForgetAVersionThatIsNoLongerInFlight: memory. A version is kept
@@ -1574,7 +1958,8 @@ func TestAckedPinsStatedClustersWithNoRecord(t *testing.T) {
 		h.publish([]entryClass{{name: "a", class: pinClassPinned}}, map[string]string{"a": "ha", "published_not_an_entry": "hp"}, false)
 	}
 
-	var h ackedPins
+	clock := newStepClock()
+	h := ackedPins{now: clock.now}
 	publish(&h)
 	u := h.accept(ack.Accepted{Opening: true, Rejected: true, Stated: stated})
 	require.True(t, u.report, "none of these is a cluster whose pin state could be unknown")
@@ -1599,6 +1984,7 @@ func TestAckedPinsStatedClustersWithNoRecord(t *testing.T) {
 	u = h.accept(ack.Accepted{Opening: true, Rejected: true, Stated: stated})
 	require.True(t, u.report)
 	for range goneBuilds {
+		clock.advance(goneAge)
 		publish(&h)
 	}
 	assert.Len(t, h.clusters, 1, "and its record goes")
