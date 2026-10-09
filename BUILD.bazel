@@ -1,5 +1,6 @@
 load("@gazelle//:def.bzl", "gazelle")
 load("@rules_go//go:def.bzl", "TOOLS_NOGO", "nogo")
+load("//bazel/promtool:defs.bzl", "promtool_rules_test")
 
 # README.md is an input to //website:site — the architecture page is generated
 # from it at build time so the site can never carry a stale copy.
@@ -107,6 +108,26 @@ nogo(
     config = ":nogo.json",
     visibility = ["//visibility:public"],
     deps = TOOLS_NOGO,
+)
+
+# The Prometheus rule files shipped beside the docs, held to the pinned
+# promtool (#1492): `promtool check rules` on every one, and `promtool test
+# rules` on every `<name>_test.yml` next to them. A rule file added there is
+# checked, and a rule test added there is run, with no edit here.
+#
+# Here and not in a package of its own: a BUILD file in docs/observability
+# would take that directory's .md files out of :website_docs above.
+promtool_rules_test(
+    name = "observability_rules_test",
+    rules = glob(
+        ["docs/observability/*.yml"],
+        allow_empty = False,
+        exclude = ["docs/observability/*_test.yml"],
+    ),
+    tests = glob(
+        ["docs/observability/*_test.yml"],
+        allow_empty = True,
+    ),
 )
 
 alias(

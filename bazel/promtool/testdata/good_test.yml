@@ -1,0 +1,27 @@
+# Fixture for //bazel/promtool:check_rules_test: a rule test that holds.
+rule_files:
+  - good.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: down for longer than the hold fires, up does not
+    interval: 1m
+    input_series:
+      - series: 'up{job="fixture", instance="a"}'
+        values: '0x10'
+      - series: 'up{job="fixture", instance="b"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: FixtureDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: FixtureDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: fixture
+              instance: a
+            exp_annotations:
+              summary: "a is down"

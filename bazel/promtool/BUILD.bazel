@@ -1,0 +1,115 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(":defs.bzl", "promtool_rules_test")
+
+# promtool from the official Prometheus release archives pinned in MODULE.bazel
+# (sha256 from the release's sha256sums.txt). It checks the Prometheus rule
+# files this repository ships beside its docs and runs their unit tests
+# (//:observability_rules_test, #1492), and is what
+# `bazel run //bazel/promtool -- <args>` gives a workstation. Bumping it is
+# editing those four http_archive entries; :version_test fails until EXPECTED
+# moves with them.
+#
+# Hand-written: Gazelle manages Go only.
+
+config_setting(
+    name = "linux_amd64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+config_setting(
+    name = "darwin_amd64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "darwin_arm64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+# The release binary for the platform being built for (a test and `bazel run`
+# build for the host, which is also where they run).
+alias(
+    name = "promtool_bin",
+    actual = select(
+        {
+            ":darwin_amd64": "@prometheus_darwin_amd64//:promtool",
+            ":darwin_arm64": "@prometheus_darwin_arm64//:promtool",
+            ":linux_amd64": "@prometheus_linux_amd64//:promtool",
+            ":linux_arm64": "@prometheus_linux_arm64//:promtool",
+        },
+        no_match_error = "//bazel/promtool: no pinned Prometheus release for this platform (linux/darwin x amd64/arm64 only; see MODULE.bazel)",
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# bazel run //bazel/promtool -- <args>
+sh_binary(
+    name = "promtool",
+    srcs = ["promtool.sh"],
+    data = [":promtool_bin"],
+    env = {"PROMTOOL_RLOCATIONPATH": "$(rlocationpath :promtool_bin)"},
+    visibility = ["//visibility:public"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# Network-free: `promtool --version` must print the version MODULE.bazel pins.
+sh_test(
+    name = "version_test",
+    size = "small",
+    srcs = ["version_test.sh"],
+    data = [":promtool_bin"],
+    env = {"PROMTOOL_RLOCATIONPATH": "$(rlocationpath :promtool_bin)"},
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# What a promtool_rules_test (defs.bzl) runs. Its own target so the ShellCheck
+# aspect visits it here as well as through each test that uses it.
+exports_files(["check_rules.sh"])
+
+sh_library(
+    name = "check_rules",
+    srcs = ["check_rules.sh"],
+)
+
+# The checker against rule files written to fail: a rule file promtool rejects,
+# a rule test whose expectation does not hold, a file that is not a rule file,
+# and no rule file at all each fail it, and the two good fixtures pass. Without
+# this, a checker that ran nothing would be as green as one that ran promtool.
+sh_test(
+    name = "check_rules_test",
+    size = "small",
+    srcs = ["check_rules_test.sh"],
+    data = [
+        "check_rules.sh",
+        ":promtool_bin",
+    ] + glob(["testdata/*.yml"]),
+    env = {"PROMTOOL_RLOCATIONPATH": "$(rlocationpath :promtool_bin)"},
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# The good fixtures through the macro itself, as //:observability_rules_test
+# uses it.
+promtool_rules_test(
+    name = "fixtures_rules_test",
+    rules = ["testdata/good.yml"],
+    tests = ["testdata/good_test.yml"],
+)
