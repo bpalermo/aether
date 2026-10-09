@@ -109,6 +109,7 @@ var rootCmd = &cobra.Command{
 			return err
 		}
 		applyMeshConfig(mc)
+		applyEdgeTelemetry(cmd, &cfg.Config)
 
 		l, logShutdown = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
 		return nil
