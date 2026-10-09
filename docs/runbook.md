@@ -3076,8 +3076,13 @@ them, and `truncated:true` marks the 20th). Later failures in that minute are on
 counted, and when the minute closes they produce ONE summary line under the same marker:
 
 ```
-AETHER_PROBE_FAIL {"t":"…","tier":"mesh_dns","result":"timeout","suppressed":122,"window_s":60,"pod":"prober-h2mzs","node":"main-worker-01"}
+AETHER_PROBE_FAIL {"t":"…","tier":"mesh_dns","result":"timeout","suppressed":122,"window_s":60,"window_start":"…","pod":"prober-h2mzs","node":"main-worker-01"}
 ```
+
+A summary's `t` is when it was written, and the failures it counts lie between
+`window_start` (the minute's first failure) and `t`. A prober built before the fix for
+#1463 has no `window_start`, and dates the summary it writes as it stops 60 s in the
+future: a last line dated after the pod was gone is that.
 
 A 30 s burst of about 142 timeouts therefore prints 20 lines plus one summary, not 142
 lines. The budget renews every minute, so the next burst is still attributable.
@@ -5665,25 +5670,97 @@ workload in the trust domain, so a foreign endpoint in its load assignment produ
 clean handshake and a delivered request instead of the `ssl_fail_verify_san` rejection
 that caught #829. It is the fail-**open** direction.
 
-- **WARN `mesh clusters published with no server-identity SAN pin`** + counter
-  `aether_agent_identity_cluster_unpinned_total` — emitted **once per snapshot**, naming
-  the clusters (first 20) with `count`, `trust_domain` and a `reason`:
-  - `trust domain not yet known` — the deliberate lesser evil over `spiffe:///ns/…`,
-    which is unservable and cost rev222 four endpoints (#815/#819). Bounded to the window
-    before SPIRE resolves the trust domain; **more than a snapshot or two of this is the
-    bug**, and until now it was invisible.
-  - `service endpoints carry no namespace metadata` — not a window at all: it lasts as
-    long as the registry serves those endpoints.
+There are four signals, and one vocabulary (`reason`) joins them:
 
-  The UDP floor's `udp:<svc>` clusters are never named here. They carry no transport
-  socket at all (UDP rides the mesh in plaintext, proposal 038), so they have no pin to
-  lose. Agents up to chart 2.4.16 did name them, once per snapshot on every node with a
-  UDP service in scope, so on those versions the counter is never at rest and a line
-  whose `clusters` is only `udp:…` is not an authentication event (#1393).
+| Signal | Says | Shape |
+|---|---|---|
+| WARN `mesh clusters published with no server-identity SAN pin` | **which** clusters, and why each | one line per `reason` per snapshot, first 20 names per line |
+| counter `aether_agent_identity_cluster_unpinned_total{reason}` | **that** a snapshot went out with unpinned clusters | adds the unpinned count on every snapshot; seeded at zero per reason |
+| gauge `aether_agent_snapshot_tls_clusters{pin,reason}` | **how many** clusters are pinned and unpinned **now**, per reason | written on every snapshot, zeros included |
+| gauge `aether_agent_xds_acked_tls_clusters{pin,reason}` | the same, for the last snapshot whose cluster update the **proxy acknowledged** | written on every cluster ACK; absent before the first |
+
+None of the metrics carries a cluster name: the names are in the log line only.
+
+**The line (#1424).** Each cluster is named under the reason that emptied *its* pin, so a
+snapshot logs at most one line per reason (three), each with at most 20 names followed by
+`...`. `count` is that reason's exact number, `unpinned` and `pinned` are the snapshot's
+totals, `trust_domain` is the trust domain in force when the snapshot was set. Agents
+before #1424 logged one line with one `reason` for every cluster it named, chosen from the
+trust domain at the time of the report (`trust domain not yet known` or `service endpoints
+carry no namespace metadata`); a cluster listed there may have had the other cause.
+
+| `reason` | What happened | Transient? | What to do |
+|---|---|---|---|
+| `trust_domain_unknown` | The pin was rendered while the agent did not know its trust domain, so there was no identity to name. The deliberate lesser evil over `spiffe:///ns/…`, which no certificate can satisfy and cost rev222 four endpoints (#815/#819). Every mesh cluster on the node has this reason at once. | Yes: it ends with the first snapshot after the agent learns its trust domain. | Nothing if it lasts a snapshot or two after an agent start. **If it persists it is the bug**: check that the agent has its own SVID (the agent's identity readiness, #740) and whether `trust_domain` on the line is still empty. A non-empty `trust_domain` under this reason means the trust domain was learned and the pins have not been re-rendered yet; the next snapshot does it. While it lasts the node publishes these clusters with **no TLS at all** (a peer's mesh inbound refuses them), not with an unpinned TLS context. |
+| `no_namespace_metadata` | None of the service's endpoints carries a Kubernetes namespace in the registry, so the expected SPIFFE ID (`spiffe://<td>/ns/<ns>/sa/<svc>`) cannot be built. Once the node has its own SVID the cluster is published **with TLS and without a pin**. Before that (the first moments of an agent, or a node whose SVID never arrives) no mesh cluster carries TLS at all: an HTTP cluster goes out bare and the TCP floor cluster is withheld, and such an entry is still named and counted under this reason, because the pin is what is missing once TLS is there. The line alone does not tell the two apart: the gauge's `pin="pinned"` series does (zero on a node that publishes no TLS yet). | No. It lasts as long as the registry serves those endpoints. | This is the mTLS validation gap. Find who registered the endpoints (`clusters` on the line names the service) and why their `kubernetes_metadata.namespace` is empty; a destination that is not a Kubernetes workload with a SPIFFE identity of that shape cannot be pinned. |
+| `pin_not_rendered` | The entry reached a snapshot without its pin ever having been rendered. | No code path does this. | An agent defect: file it with the line. |
+
+The UDP floor's `udp:<svc>` clusters are never named and never counted, in any of the
+four signals. They carry no transport socket at all (UDP rides the mesh in plaintext,
+proposal 038), so they have no pin to lose: plaintext by design, not unpinned. Agents up
+to chart 2.4.16 did name them, once per snapshot on every node with a UDP service in
+scope, so on those versions the counter is never at rest and a line whose `clusters` is
+only `udp:…` is not an authentication event (#1393).
+
+**The gauges (#1425).** The counter cannot answer "how many clusters are unpinned now":
+it grows by the unpinned count on *every* snapshot, so its rate is clusters times
+snapshots. `aether_agent_snapshot_tls_clusters` is the count itself. It has four series
+per agent whatever the size of the mesh: `pin="pinned"`, and `pin="unpinned"` once per
+`reason`. A reason that no longer applies reads `0`; a cluster that gains its pin moves
+from its `unpinned` series to `pinned`; a cluster that is removed leaves both. It counts
+cluster *entries*: an HTTP service is three (its default cluster and two port aliases), a
+QUIC twin is not counted apart from the cluster it is derived from, and an entry whose
+pin is rendered is in neither series while the node cannot publish TLS for it (no node
+SVID yet): it is not a pinned TLS cluster until one is published.
 
 ```promql
-# Seeded at zero, so a live zero is a real series (not an absent one).
-sum by (node) (increase(aether_agent_identity_cluster_unpinned_total[1h]))
+# N clusters unpinned for reason R on this node, now. This is the alert.
+sum by (node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}) > 0
+
+# The positive answer: TLS clusters were published, and all of them pinned.
+sum by (node) (aether_agent_snapshot_tls_clusters{pin="pinned"}) > 0
+  and sum by (node) (aether_agent_snapshot_tls_clusters{pin="unpinned"}) == 0
+
+# Did it happen at all in a window, however briefly (a gauge is sampled; the counter
+# is not). Seeded at zero, so a live zero is a real series (not an absent one).
+sum by (node, reason) (increase(aether_agent_identity_cluster_unpinned_total[1h]))
+```
+
+**Published is not held.** The gauge above is what the agent *published*.
+`aether_agent_xds_acked_tls_clusters` has the same series and is written when the proxy
+**acknowledges** a cluster update: it then takes the values of the snapshot that update
+was built from. It is the closest the agent gets to what the proxy holds without asking
+the proxy's admin interface.
+
+- The two agree at rest. They differ for the moment an update is in flight.
+- They **stay** different while the proxy rejects cluster updates: a NACK acknowledges
+  nothing, so the acknowledged gauge stays on what the proxy last accepted
+  (`aether_agent_xds_nacks_total{aether_xds_type_url=~".*Cluster"}` moves, and the agent
+  logs `envoy NACKed delta response`). Published `unpinned == 0` with acknowledged
+  `unpinned > 0` reads: *the agent has pinned it, the proxy still holds the unpinned
+  cluster*.
+- **Absent is "not known", not zero.** Nothing is written before the first cluster ACK
+  the agent process sees. An agent that restarts against a proxy already holding exactly
+  the current clusters owes it no cluster update (delta xDS sends differences), so there
+  is no ACK and no series until a cluster next changes. In that state the proxy holds
+  what the published gauge shows.
+- During a proxy hot restart two generations are connected; the gauge shows the last
+  ACK from either.
+- The agent logs the acknowledged state only when it **changes**: WARN `proxy
+  acknowledged mesh clusters with no server-identity SAN pin` (with `unpinned`, `pinned`,
+  one count per reason and `snapshot_version`, which joins it to the snapshot's own line
+  and its cluster names), and INFO `proxy acknowledged mesh clusters, all with a
+  server-identity SAN pin` when it returns to none.
+
+```promql
+# What the proxy last acknowledged, where it differs from what is published.
+sum by (node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
+  != sum by (node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"})
+```
+
+```
+# VictoriaLogs (field syntax; never `| stats`, it false-zeroes).
+_stream:{service.name="aether-agent"} AND "published with no server-identity SAN pin" AND reason:no_namespace_metadata
 ```
 
 The config-shape half is a build-time gate: `//agent/test/envoy_validate` asserts every upstream

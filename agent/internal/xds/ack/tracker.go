@@ -44,9 +44,21 @@ type inflightKey struct {
 // the matching ACK/NACK (a request echoing the nonce) can be attributed.
 type inflightResponse struct {
 	typeURL string
-	added   []string
-	removed []string
+	// systemVersion is the response's system_version_info: the version of the
+	// snapshot the response was built from. The ACK echoes only the nonce, so
+	// it is kept here to tell an AckObserver which snapshot was accepted.
+	systemVersion string
+	added         []string
+	removed       []string
 }
+
+// AckObserver is told, once per acknowledged delta response, the resource type
+// and the version of the snapshot the response was built from. It is never
+// told about a NACK: a rejected response leaves the proxy on what it had.
+//
+// It runs on the xDS stream's goroutine, after the tracker's own lock is
+// released: it must not block.
+type AckObserver func(ctx context.Context, typeURL, systemVersion string)
 
 // Tracker observes the delta-xDS streams via server callbacks and lets callers
 // wait until Envoy has acknowledged the presence or removal of a named resource.
@@ -59,6 +71,18 @@ type Tracker struct {
 	inflight map[inflightKey]inflightResponse
 	// changed is closed and replaced on every state transition (broadcast).
 	changed chan struct{}
+	// observer, when set, is told of every ACK (SetAckObserver).
+	observer AckObserver
+}
+
+// SetAckObserver registers fn to be told of every acknowledged delta response.
+// One observer; a second call replaces the first, nil removes it. Call it
+// while wiring, before the xDS server serves: it may also be called later, but
+// an ACK being processed at that moment may go to either observer.
+func (t *Tracker) SetAckObserver(fn AckObserver) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.observer = fn
 }
 
 // NewTracker creates an empty Tracker.
@@ -144,8 +168,9 @@ func (t *Tracker) onDeltaResponse(streamID int64, _ *discoveryv3.DeltaDiscoveryR
 		return
 	}
 	entry := inflightResponse{
-		typeURL: resp.GetTypeUrl(),
-		removed: resp.GetRemovedResources(),
+		typeURL:       resp.GetTypeUrl(),
+		systemVersion: resp.GetSystemVersionInfo(),
+		removed:       resp.GetRemovedResources(),
 	}
 	for _, r := range resp.GetResources() {
 		entry.added = append(entry.added, r.GetName())
@@ -193,12 +218,17 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 		}
 	}
 	t.broadcastLocked()
+	observer := t.observer
 	t.mu.Unlock()
 
 	if detail := req.GetErrorDetail(); detail != nil {
 		t.metrics.nacked(context.Background(), entry.typeURL)
 		t.log.Info("envoy NACKed delta response",
 			"typeURL", entry.typeURL, "added", entry.added, "removed", entry.removed, "error", detail.GetMessage())
+		return nil
+	}
+	if observer != nil {
+		observer(context.Background(), entry.typeURL, entry.systemVersion)
 	}
 	return nil
 }

@@ -77,8 +77,8 @@ func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) e
 	return c.generateClusterSnapshot(ctx)
 }
 
-// clustersEndpointsAndVhosts returns all cached cluster, endpoint, and virtual
-// host resources as separate slices. It returns the concrete vhost type to avoid
+// clustersEndpointsVhostsAndPins returns all cached cluster, endpoint, and virtual
+// host resources as separate slices, and the pin report. It returns the concrete vhost type to avoid
 // boxing/unboxing at the caller. Each service cluster speaks per-source mTLS to
 // the destination node; the upstream transport-socket matcher (selecting the
 // source pod's certificate by its network namespace) is precomputed into
@@ -86,7 +86,14 @@ func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) e
 // so snapshot generation only reads the cached proto (issue #537). Before the
 // node SVID is served mtlsCluster is nil and the base cluster is emitted
 // without the matcher.
-func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.Resource, []*routev3.VirtualHost) {
+//
+// The pin report comes from the SAME read of the cluster map (#1425). It is
+// filed under the version of the snapshot these resources go into, and an ACK
+// of that version is read as "the proxy accepted this pin state". Taken in a
+// later read, a registry reload or an identity change that landed in between
+// would put the pin state of clusters the proxy was never sent under that
+// version.
+func (c *SnapshotCache) clustersEndpointsVhostsAndPins() ([]types.Resource, []types.Resource, []*routev3.VirtualHost, pinReport) {
 	// The east-west QUIC fan-out inputs, snapshotted BEFORE clusterMu; their
 	// own locks (depMu, localMu) never nest inside it (see mtls.go's lock order).
 	quic := c.quicFanoutSnapshot()
@@ -102,7 +109,9 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 	clas := make([]types.Resource, 0, len(c.clusters))
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.clusters))
 	quicClusters := 0
+	var pins pinReport
 	for key, entry := range c.clusters {
+		pins.add(key, &entry)
 		if entry.l4Floor {
 			// TCP/UDP floor entries publish their load assignment only; their
 			// clusters are rendered by captureTCPClusters / captureUDPClusters.
@@ -129,7 +138,8 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)
 	sortVirtualHostsByName(vhosts)
-	return clusters, clas, vhosts
+	pins.sortNames()
+	return clusters, clas, vhosts, pins
 }
 
 // appendEntryCLAsLocked appends the load assignment(s) one cluster-cache entry

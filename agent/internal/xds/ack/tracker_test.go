@@ -158,6 +158,65 @@ func TestStreamCloseDropsInflight(t *testing.T) {
 	require.Error(t, tr.WaitListenerPresent(ctx, testListener))
 }
 
+// observed is one call of an AckObserver.
+type observed struct{ typeURL, version string }
+
+// sendVersioned is sendDelta for any resource type, with the version of the
+// snapshot the response was built from.
+func sendVersioned(t *Tracker, streamID int64, typeURL, nonce, version string, added []string) {
+	resp := &discoveryv3.DeltaDiscoveryResponse{TypeUrl: typeURL, Nonce: nonce, SystemVersionInfo: version}
+	for _, name := range added {
+		resp.Resources = append(resp.Resources, &discoveryv3.Resource{Name: name})
+	}
+	t.onDeltaResponse(streamID, nil, resp)
+}
+
+// TestAckObserver_ToldTheSnapshotVersionOfEveryAck: an ACK echoes only the
+// nonce, so the tracker has to carry the response's system_version_info to the
+// observer itself (#1425). A NACK is never an acknowledgement, and neither is
+// a response that was only sent.
+func TestAckObserver_ToldTheSnapshotVersionOfEveryAck(t *testing.T) {
+	tr := NewTracker(slog.New(slog.DiscardHandler))
+	var got []observed
+	tr.SetAckObserver(func(_ context.Context, typeURL, version string) {
+		// The tracker's lock is released by now: calling back into the tracker
+		// from the observer must not deadlock.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = tr.WaitListenerAbsent(ctx, "never-present")
+		got = append(got, observed{typeURL, version})
+	})
+
+	sendVersioned(tr, 1, resourcev3.ClusterType, "n1", "v1", []string{"c1"})
+	assert.Empty(t, got, "sent is not acknowledged")
+	ackDelta(tr, 1, "n1", "")
+	assert.Equal(t, []observed{{resourcev3.ClusterType, "v1"}}, got)
+
+	sendVersioned(tr, 1, resourcev3.ClusterType, "n2", "v2", []string{"c1"})
+	ackDelta(tr, 1, "n2", "rejected")
+	assert.Len(t, got, 1, "a NACK is not told as an ACK")
+
+	sendVersioned(tr, 1, resourcev3.ListenerType, "n3", "v2", []string{testListener})
+	ackDelta(tr, 1, "n3", "")
+	require.Len(t, got, 2)
+	assert.Equal(t, observed{resourcev3.ListenerType, "v2"}, got[1], "every type is told; the observer picks")
+
+	// The same nonce on another stream is another response.
+	sendVersioned(tr, 1, resourcev3.ClusterType, "n4", "v3", []string{"c1"})
+	ackDelta(tr, 2, "n4", "")
+	assert.Len(t, got, 2, "an ACK is matched on its own stream")
+	ackDelta(tr, 1, "n4", "")
+	require.Len(t, got, 3)
+	assert.Equal(t, observed{resourcev3.ClusterType, "v3"}, got[2])
+	ackDelta(tr, 1, "n4", "")
+	assert.Len(t, got, 3, "and told once")
+
+	tr.SetAckObserver(nil)
+	sendVersioned(tr, 1, resourcev3.ClusterType, "n5", "v4", []string{"c1"})
+	ackDelta(tr, 1, "n5", "")
+	assert.Len(t, got, 3, "no observer: nothing is told, and the tracker works as before")
+}
+
 func TestAckOnOneStreamDoesNotResolveAnother(t *testing.T) {
 	tr := NewTracker(slog.New(slog.DiscardHandler))
 	sendDelta(tr, 1, "n1", []string{testListener}, nil)

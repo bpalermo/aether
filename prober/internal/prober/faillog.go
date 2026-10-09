@@ -35,7 +35,14 @@ import (
 // per (tier, result) per failLogWindow. Past the cap the failures are only counted, and
 // when the window closes ONE summary line carries the count, under the same marker:
 //
-//	AETHER_PROBE_FAIL {"t":...,"tier":...,"result":...,"suppressed":122,"window_s":60,"pod":...,"node":...}
+//	AETHER_PROBE_FAIL {"t":...,"tier":...,"result":...,"suppressed":122,"window_s":60,"window_start":...,"pod":...,"node":...}
+//
+// A summary's t is the time it was written, which is when its window was closed; the
+// failures it counts lie between window_start (the window's first failure) and t. A
+// window is closed by the first once-a-window flush that finds it a full window old, so
+// t is less than two window_s after window_start; a prober that is stopping closes every
+// open window at once, at the time it stops (#1463: it used to stamp that summary one
+// window in the future).
 //
 // The budget renews every window (it is not a lifetime cap), so the next burst, weeks
 // later, is still attributable.
@@ -72,15 +79,19 @@ type failLine struct {
 	Truncated bool   `json:"truncated"`
 }
 
-// failSummary is the once-per-window count of the failures the cap suppressed.
+// failSummary is the once-per-window count of the failures the cap suppressed. T is
+// when the summary was written; WindowStart is when its window opened (the window's
+// first failure), so the failures it counts lie in [WindowStart, T]. WindowS is the
+// cap's period, not the length of this window: a window closed at shutdown is shorter.
 type failSummary struct {
-	T          string  `json:"t"`
-	Tier       string  `json:"tier"`
-	Result     string  `json:"result"`
-	Suppressed int     `json:"suppressed"`
-	WindowS    float64 `json:"window_s"`
-	Pod        string  `json:"pod"`
-	Node       string  `json:"node"`
+	T           string  `json:"t"`
+	Tier        string  `json:"tier"`
+	Result      string  `json:"result"`
+	Suppressed  int     `json:"suppressed"`
+	WindowS     float64 `json:"window_s"`
+	WindowStart string  `json:"window_start"`
+	Pod         string  `json:"pod"`
+	Node        string  `json:"node"`
 }
 
 // failLog writes the bounded AETHER_PROBE_FAIL lines. It is safe for concurrent use:
@@ -147,7 +158,16 @@ func (f *failLog) log(now time.Time, t target, result string, elapsedSeconds flo
 // flush closes every window that has run its full length by now, printing the summary
 // for any that suppressed failures. Run calls it once per window so the tail of a burst
 // is reported even when no further failure arrives to close its window.
-func (f *failLog) flush(now time.Time) {
+func (f *failLog) flush(now time.Time) { f.closeWindows(now, false) }
+
+// flushAll closes every open window, however young, at now: the prober is stopping and
+// nothing will close them later. now is the real time, and it is what the summaries
+// carry. Which windows to close and what time it is are separate arguments (#1463: the
+// shutdown path used to call flush with a now one window in the future, to get the
+// first, and so printed that future time).
+func (f *failLog) flushAll(now time.Time) { f.closeWindows(now, true) }
+
+func (f *failLog) closeWindows(now time.Time, all bool) {
 	if f == nil || f.out == nil {
 		return
 	}
@@ -161,7 +181,7 @@ func (f *failLog) flush(now time.Time) {
 		return cmp.Or(cmp.Compare(a.tier, b.tier), cmp.Compare(a.result, b.result))
 	})
 	for _, k := range keys {
-		if w := f.keys[k]; now.Sub(w.start) >= f.window {
+		if w := f.keys[k]; all || now.Sub(w.start) >= f.window {
 			f.closeWindow(k, w, now)
 		}
 	}
@@ -172,13 +192,14 @@ func (f *failLog) flush(now time.Time) {
 func (f *failLog) closeWindow(k failKey, w *failWindow, now time.Time) {
 	if w.suppressed > 0 {
 		f.write(failSummary{
-			T:          now.UTC().Format(time.RFC3339Nano),
-			Tier:       k.tier,
-			Result:     k.result,
-			Suppressed: w.suppressed,
-			WindowS:    f.window.Seconds(),
-			Pod:        f.pod,
-			Node:       f.node,
+			T:           now.UTC().Format(time.RFC3339Nano),
+			Tier:        k.tier,
+			Result:      k.result,
+			Suppressed:  w.suppressed,
+			WindowS:     f.window.Seconds(),
+			WindowStart: w.start.UTC().Format(time.RFC3339Nano),
+			Pod:         f.pod,
+			Node:        f.node,
 		})
 	}
 	delete(f.keys, k)

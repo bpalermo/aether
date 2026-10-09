@@ -8,9 +8,6 @@
 {"metric":{"__name__":"aether_agent_identity_cluster_unpinned_total","job":"aether-agent","node":"worker-03","pod":"aether-agent-03","reason":"trust_domain_unknown"},"value":[1791418200,"0"]},
 {"metric":{"__name__":"aether_agent_identity_cluster_unpinned_total","job":"aether-agent","node":"worker-03","pod":"aether-agent-03","reason":"no_namespace_metadata"},"value":[1791418200,"0"]},
 {"metric":{"__name__":"aether_agent_identity_cluster_unpinned_total","job":"aether-agent","node":"worker-03","pod":"aether-agent-03","reason":"pin_not_rendered"},"value":[1791418200,"0"]},
-{"metric":{"__name__":"aether_agent_identity_cluster_unpinned_total","job":"aether-agent","node":"worker-04","pod":"aether-agent-04","reason":"trust_domain_unknown"},"value":[1791418200,"0"]},
-{"metric":{"__name__":"aether_agent_identity_cluster_unpinned_total","job":"aether-agent","node":"worker-04","pod":"aether-agent-04","reason":"no_namespace_metadata"},"value":[1791418200,"0"]},
-{"metric":{"__name__":"aether_agent_identity_cluster_unpinned_total","job":"aether-agent","node":"worker-04","pod":"aether-agent-04","reason":"pin_not_rendered"},"value":[1791418200,"0"]},
 {"metric":{"__name__":"aether_agent_identity_cluster_unpinned_total","job":"aether-agent","node":"worker-05","pod":"aether-agent-05","reason":"trust_domain_unknown"},"value":[1791418200,"0"]},
 {"metric":{"__name__":"aether_agent_identity_cluster_unpinned_total","job":"aether-agent","node":"worker-05","pod":"aether-agent-05","reason":"no_namespace_metadata"},"value":[1791418200,"0"]},
 {"metric":{"__name__":"aether_agent_identity_cluster_unpinned_total","job":"aether-agent","node":"worker-05","pod":"aether-agent-05","reason":"pin_not_rendered"},"value":[1791418200,"0"]}

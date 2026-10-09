@@ -229,6 +229,14 @@ type SnapshotCache struct {
 	// Guarded by snapshotMu.
 	versions *versionMemo
 
+	// pins remembers the pin state of the last few snapshots by version, so a
+	// cluster ACK, which names only the snapshot version it answers, can be
+	// turned into "the pin state the proxy acknowledged" (#1425). It has its
+	// own mutex and is a leaf: the ACK arrives on the xDS stream's goroutine,
+	// which must never wait on a snapshot build (snapshotMu) or on the cluster
+	// map (clusterMu). See pinhistory.go.
+	pins pinHistory
+
 	// depMu guards podDeps and observedDeps. The node dependency set derived
 	// from them scopes which registry services the snapshot carries
 	// (proposal 004).
@@ -701,6 +709,19 @@ type clusterEntry struct {
 	// or the node's local mTLS state changes. Consumed by the TCP floor
 	// cluster builds (captureTCPClusters / edgeTCPClusters).
 	sanURIs []string
+	// unpinnedCause is why sanURIs is empty, recorded by the render that left
+	// it empty (renderSANPin): "" when a pin was rendered, and for a plaintext
+	// entry, which has none to render. The pin report names each unpinned
+	// cluster under this cause (#1424) instead of guessing one for the whole
+	// snapshot from the state at report time.
+	unpinnedCause cachemetrics.UnpinnedCause
+	// mtlsReady records that the node had both a served SVID and a trust
+	// domain when the pin was last rendered, i.e. that a TLS cluster can be
+	// published for this entry at all. While false the HTTP cluster goes out
+	// bare (mtlsCluster is nil) and the TCP floor cluster is withheld, so a
+	// rendered pin is carried by nothing and the entry is not counted as a
+	// pinned TLS cluster (#1425).
+	mtlsReady bool
 	// mtlsCluster is the cached mTLS-injected copy of cluster (per-source
 	// transport-socket matcher, SAN pinning, SNI), precomputed at entry
 	// build/invalidation time (refreshEntryMTLSLocked) so snapshot generation
@@ -734,7 +755,7 @@ type clusterEntry struct {
 	// plaintext marks an entry whose published cluster carries NO transport
 	// socket: the UDP floor's "udp:<svc>" (proxy.NewUDPServiceCluster). Such an
 	// entry has no handshake, so its empty sanURIs is not a missing
-	// server-identity pin and reportUnpinnedClusters leaves it out (#1393). A
+	// server-identity pin and the pin report (pinState) leaves it out (#1393). A
 	// TCP floor entry is NOT plaintext: its "tcp:<svc>" cluster is mTLS and
 	// pins from sanURIs.
 	plaintext bool

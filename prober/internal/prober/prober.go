@@ -350,8 +350,9 @@ func (p *Prober) Run(ctx context.Context) error {
 		}
 	})
 	wg.Wait()
-	// Final summary for anything still suppressed when the prober stops.
-	p.fails.flush(time.Now().Add(failLogWindow))
+	// Final summary for anything still suppressed when the prober stops: every open
+	// window is closed, whatever its age, and stamped with the time it is (#1463).
+	p.fails.flushAll(time.Now())
 	if p.provider != nil {
 		sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
