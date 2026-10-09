@@ -179,6 +179,33 @@ sh_test(
     ],
 )
 
+# The watcher of the post-merge run (#1506): scripts/main-post-merge-watch.sh,
+# the step of .github/workflows/main-watch.yaml. Which completed runs of
+# main.yaml are recorded on the rolling issue, which green run clears a commit
+# and when the issue closes, an older failure that arrives after a newer green
+# run, duplicates, issues and markers written by someone else, a failing API
+# and the dry run, through a fake `gh` that keeps the issues as JSON and
+# applies the script's own `--jq` filters with the Bazel-pinned jq. The second
+# half holds the workflow file to its trigger, its permissions, its pins and
+# the one field it reads from the triggering run, and main.yaml to what the
+# decision assumes (no concurrency group, a gate job called `main`). It also
+# runs every pair of attempts of one run in both orders of delivery (40 rows,
+# about 150 runs of the step through the fake), which takes it past the 60 s of
+# a small test: the size says what it needs (no network, one core), the timeout
+# what it takes.
+sh_test(
+    name = "main_post_merge_watch_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = ["main_post_merge_watch_test.sh"],
+    data = [
+        "main-post-merge-watch.sh",
+        "//:ci_definitions",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
 # The verifier and the helper it sources, for //bazel/cosign:verify_image_signatures,
 # which runs it with COSIGN set to the Bazel-pinned cosign binary.
 exports_files(
