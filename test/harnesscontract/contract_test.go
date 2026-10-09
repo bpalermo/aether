@@ -42,7 +42,69 @@ func TestNames(t *testing.T) {
 		"pod.annotation.capture_exclude_outbound_ports": annotations.AnnotationCaptureExcludeOutboundPorts,
 		"service.label.mesh_service":                    labels.LabelMeshService,
 		"csi.driver":                                    udspath.CSIDriver,
-	})
+	}, linkedResourceAttribute)
+}
+
+// linkedResourceAttribute is the one entry outside `names` this test holds:
+// the resource attribute the charts pass to the agent and to the prober.
+const linkedResourceAttribute = "resource.node"
+
+// TestResourceAttributeIsTiedToTheCharts: what this test holds of resource.node
+// is the link. The entry's attribute is compared with a render by the chart
+// test of each component's chart, and only because that component's container
+// refers to the entry; so every component has such a container (Validate also
+// refuses a container of any other name), and it was resolved to this entry.
+func TestResourceAttributeIsTiedToTheCharts(t *testing.T) {
+	c := MustLoad(t)
+	entry := c.ResourceAttribute(t, linkedResourceAttribute)
+	if entry.Attribute == "" || len(entry.Components) == 0 {
+		t.Fatalf("%s: %s has no attribute or no components", File, entry.ID)
+	}
+	tied := map[string]bool{}
+	for _, r := range c.Charts {
+		for _, o := range r.Objects {
+			for _, ct := range o.Containers {
+				if !slices.Contains(ct.ResourceAttributes, entry.ID) {
+					continue
+				}
+				if !ct.linked || !slices.ContainsFunc(ct.attributes, func(a ResourceAttribute) bool { return a.ID == entry.ID && a.Attribute == entry.Attribute }) {
+					t.Errorf("%s: container %q of %s refers to %s and was not resolved to it", File, ct.Name, o.ID, entry.ID)
+				}
+				tied[ct.Name] = true
+			}
+		}
+	}
+	for _, component := range entry.Components {
+		if !tied[component] {
+			Errorf(t, "%s says the %s carries %s (%s), and no container %q under `charts` lists %s in its `resource_attributes`: no chart test compares it with a render.",
+				File, component, entry.Attribute, entry.ID, component, entry.ID)
+		}
+	}
+}
+
+// TestMeshDomainIsTiedToTheChart: the default mesh domain is compared with the
+// Go default by TestNames, and with what a default install really passes only
+// because a container of the aether chart's default render takes --mesh-domain
+// from the entry.
+func TestMeshDomainIsTiedToTheChart(t *testing.T) {
+	const id, flag = "mesh.default_domain", "--mesh-domain"
+	var tied []string
+	for _, r := range MustLoad(t).RendersOf("aether") {
+		if _, set := r.Set["meshDomain"]; set {
+			continue
+		}
+		for _, o := range r.Objects {
+			for _, ct := range o.Containers {
+				if ct.Args[flag] == id && ct.args[flag] == mesh.DefaultMeshDomain {
+					tied = append(tied, ct.Name)
+				}
+			}
+		}
+	}
+	if !slices.Contains(tied, "agent") {
+		Errorf(t, "%s: no render of the aether chart that leaves `meshDomain` at its default holds the agent container's %s to %s (containers that do: %v), so the chart's default could change and no test would fail.",
+			File, flag, id, tied)
+	}
 }
 
 // TestEveryCheckedByIsInTheSuite: a checked_by that names a test nobody runs
@@ -140,6 +202,23 @@ func TestParseRejects(t *testing.T) {
 		},
 		"a chart object with the id of another entry": {
 			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: m, kind: K, name: x}], checked_by: review-only}", `id "m" is used twice`,
+		},
+		"a container tied to a resource attribute the contract lacks": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, resource_attributes: [nope]}]}], checked_by: review-only}", "`resource_attributes` has no entry with that id",
+		},
+		"a resource attribute of a component whose container is not tied to it": {
+			"checked_by: //a:b", "checked_by: //a:b\nresource_attributes:\n  - {id: ra, attribute: k, components: [agent, prober], checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, resource_attributes: [ra]}]}], checked_by: review-only}",
+			"ra lists the components [agent, prober], and the chart containers that refer to it are [agent]",
+		},
+		"a resource attribute tied to a container that is not a component": {
+			"checked_by: //a:b", "checked_by: //a:b\nresource_attributes:\n  - {id: ra, attribute: k, components: [agent], checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, resource_attributes: [ra]}, {name: proxy, resource_attributes: [ra]}]}], checked_by: review-only}",
+			"the chart containers that refer to it are [agent, proxy]",
+		},
+		"an argument taken from a name the contract lacks": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, args: {--mesh-domain: nope}}]}], checked_by: review-only}", "`names` has no entry with that id",
+		},
+		"an argument key that is not a flag": {
+			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: n, value: v, checked_by: review-only}\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent, args: {mesh-domain: n}}]}], checked_by: review-only}", "is not a flag",
 		},
 		"a render of nothing": {
 			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, checked_by: review-only}", "lists no object",

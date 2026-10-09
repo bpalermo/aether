@@ -87,7 +87,7 @@ version bump, and adding a contract entry is not one.
             providers = [HelmPackageInfo],
         ),
         "ids": attr.string_list(
-            doc = "The id of every `charts` entry for this chart and of every object under them.",
+            doc = "The id of every `charts` entry for this chart, of every object under them, and of every entry of another section a container of theirs refers to (`resource_attributes`, `args`).",
             mandatory = True,
             allow_empty = False,
         ),

@@ -100,10 +100,12 @@ func (c *Contract) ResourceAttribute(tb testing.TB, id string) ResourceAttribute
 }
 
 // CheckNames compares the `names` entries assigned to target with the values
-// the code has (id -> the Go constant), in both directions.
-func (c *Contract) CheckNames(tb testing.TB, target string, code map[string]string) {
+// the code has (id -> the Go constant), in both directions. others are the ids
+// of the entries of other sections the same test holds with checks of its own:
+// target's entries are exactly the names in code and those.
+func (c *Contract) CheckNames(tb testing.TB, target string, code map[string]string, others ...string) {
 	tb.Helper()
-	c.Owns(tb, target, sortedKeys(code)...)
+	c.Owns(tb, target, append(sortedKeys(code), others...)...)
 	for _, n := range c.Names {
 		if n.CheckedBy != target {
 			continue

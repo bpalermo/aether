@@ -87,9 +87,15 @@ metrics:
       - name: reason
         values: [trust_domain_unknown, tls_not_published, no_namespace_metadata, pin_not_rendered]
     notes: >-
-      Mesh clusters published with no server-identity pin, summed over
-      snapshots. Every reason is seeded at zero when the agent starts, so an
-      absent series is not a zero.
+      Mesh cluster entries a snapshot holds with no server-identity pin, summed
+      over snapshots, per reason. That is two different states, and the reason
+      says which (reason_classes below): under trust_domain_unknown and
+      tls_not_published the node published NO TLS cluster for the entry, so no
+      handshake was made without a pin; under no_namespace_metadata it
+      published a TLS cluster that checks no server identity, and
+      pin_not_rendered (which no code path produces today) is graded with it.
+      Every reason is seeded at zero when the agent starts, so an absent
+      series is not a zero.
     checked_by: //agent/internal/xds/cache/cachemetrics:cachemetrics_test
 
   - id: prober.probe_requests
@@ -128,16 +134,25 @@ reason_classes:
     checked_by: review-only
 
 # Labels a store adds from the OpenTelemetry RESOURCE, not from the instrument.
-# The product sets the resource attribute (the charts pass it in
-# OTEL_RESOURCE_ATTRIBUTES; see `charts` below); which label a pipeline turns
-# it into, if any, is the pipeline's configuration. A harness takes the label
-# names as parameters.
+# The product sets the resource attribute; which label a pipeline turns it
+# into, if any (`node`, `job`), is the pipeline's configuration and is kept by
+# review. A harness takes the label names as parameters.
+#
+# An attribute the charts pass in OTEL_RESOURCE_ATTRIBUTES is tied to them from
+# the other side: under `charts`, the container of each of `components` lists
+# the entry's id in its `resource_attributes`, and the chart test that renders
+# the container looks for THIS entry's `attribute` among the keys the variable
+# sets. The contract does not load unless the containers that refer to an entry
+# are exactly its `components`.
 resource_attributes:
   - id: resource.node
     attribute: k8s.node.name
     components: [agent, prober]
     notes: The node the component runs on. For the prober that is the SOURCE of a probe.
-    checked_by: review-only
+    # This test holds the link (above); the comparison with the rendered
+    # charts is made by :aether_chart_test (agent) and :prober_chart_test
+    # (prober), which list this id in their `ids`.
+    checked_by: //test/harnesscontract:harnesscontract_test
   - id: resource.service_name.prober
     attribute: service.name
     value: aether-prober
@@ -210,6 +225,11 @@ envoy_stats:
 #   <service>.<namespace>.<mesh-domain>:<port.outbound_l4>     raw TCP, and UDP
 #
 # where <mesh-domain> is the chart value `meshDomain`.
+#
+# A name a chart passes to a component on its command line is tied to the
+# chart as well: under `charts`, a container's `args` maps the flag to the
+# entry's id, and the chart test looks for `<flag>=<this entry's value>` among
+# the rendered arguments.
 names:
   - id: port.outbound_http
     value: "18081"
@@ -217,6 +237,9 @@ names:
   - id: port.outbound_l4
     value: "18082"
     checked_by: //test/harnesscontract:harnesscontract_test
+  # The Go default, and the default of the chart value `meshDomain`, which is
+  # what a deployed component is really given (--mesh-domain of the agent and
+  # of the mesh-DNS daemon in chart.aether, rendered with no `meshDomain` set).
   - id: mesh.default_domain
     value: aether.internal
     checked_by: //test/harnesscontract:harnesscontract_test
@@ -268,7 +291,10 @@ names:
 # where an object says otherwise.
 #
 # For an object: `pod_labels` must all be on the pod template; `containers`
-# must all be containers of the pod (others may exist); `rolling_update` is the
+# must all be containers of the pod (others may exist); a container's
+# `resource_attributes` are ids of entries above whose attribute its
+# OTEL_RESOURCE_ATTRIBUTES sets, and its `args` maps a flag to the id of the
+# `names` entry whose value it is run with; `rolling_update` is the
 # workload's rolling-update strategy, which decides whether a roll runs the old
 # and the new pod of a node side by side (maxSurge 1) or leaves a gap
 # (maxSurge 0).
@@ -292,8 +318,9 @@ charts:
           app.kubernetes.io/component: agent
         containers:
           - name: agent
-            env_contains:
-              OTEL_RESOURCE_ATTRIBUTES: ["k8s.node.name="]
+            resource_attributes: [resource.node]
+            args:
+              --mesh-domain: mesh.default_domain
         # The default. `agent.updateStrategy.surge` (chart.aether.agent_surge)
         # is the other one.
         rolling_update: {maxSurge: "0", maxUnavailable: "1"}
@@ -316,6 +343,8 @@ charts:
           app.kubernetes.io/component: mesh-dns
         containers:
           - name: mesh-dns
+            args:
+              --mesh-domain: mesh.default_domain
         rolling_update: {maxSurge: "1", maxUnavailable: "0"}
       - id: chart.aether.uds_csi
         kind: DaemonSet
@@ -369,8 +398,9 @@ charts:
         namespace: mesh-workloads
         containers:
           - name: prober
+            resource_attributes: [resource.node]
             env_contains:
-              OTEL_RESOURCE_ATTRIBUTES: ["k8s.node.name=", "k8s.pod.name="]
+              OTEL_RESOURCE_ATTRIBUTES: ["k8s.pod.name="]
     checked_by: //test/harnesscontract:prober_chart_test
 
   # This chart puts its objects in the namespace its VALUE `namespace` names,

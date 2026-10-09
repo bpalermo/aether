@@ -47,6 +47,8 @@ that produces the thing, or `review-only`.
 | `envoy_stats` | The stat prefix of the portless chain in a capture listener the real generator built | `//agent/internal/xds/proxy:proxy_test` |
 | `names` | The Go constant the product itself uses | `//test/harnesscontract:harnesscontract_test`, and `//agent/internal/xds/xdsconst:xdsconst_test` for the one constant that is internal to the agent |
 | `charts` | `helm template` of the packaged chart, run with the release name, namespace and `--set` pairs the entry gives | `//test/harnesscontract:{aether,prober,udsecho}_chart_test` |
+| `resource_attributes` `k8s.node.name` | The keys `OTEL_RESOURCE_ATTRIBUTES` sets in the rendered agent and prober containers. The chart entries do not repeat the attribute: each container lists the entry's id (`resource_attributes`), and the chart test reads the key from the entry | `//test/harnesscontract:harnesscontract_test` holds the link (every component has a container that refers to the entry, and no other container does); `//test/harnesscontract:{aether,prober}_chart_test` compare with the render |
+| `names` `mesh.default_domain` | Besides the Go constant: the `--mesh-domain` argument the aether chart renders for the agent and the mesh-DNS daemon when `meshDomain` is left at the chart's default (a container's `args` maps the flag to the entry's id) | `//test/harnesscontract:aether_chart_test`, with `harnesscontract_test` holding the link |
 
 `stored_name` is checked against the usual OTLP-to-Prometheus translation of
 `otel_name`, computed by the test. Whether a given pipeline applies that
@@ -67,8 +69,9 @@ a `reason` that is in no class or in two).
 
 - **What a pipeline does to a name.** The `node` and `job` labels of a stored
   series come from OpenTelemetry resource attributes (`k8s.node.name`,
-  `service.name`) through the metrics pipeline's own configuration. The charts
-  are checked to pass `k8s.node.name`; the label it becomes is the pipeline's.
+  `service.name`) through the metrics pipeline's own configuration. That the
+  product sets the attribute is checked (the table above); the label it
+  becomes is the pipeline's.
   The same holds for the stored name of an Envoy stat: only the prefix the
   agent chooses is tied to code.
 - **The meaning of the two halves of `reason`** (`reason_classes`): under
@@ -102,7 +105,11 @@ series on its own, because a harness selects one series by its labels.
 For a chart object, write the YAML and add its id to the `ids` of that chart's
 `helm_contract_test` in `BUILD.bazel`: the render options and the expectations
 are both read from the entry, and `ids` is the test's list of what it holds
-(it fails when the two differ, in either direction). Mind which namespace a
+(it fails when the two differ, in either direction). When a container must be
+given something another entry already names (a resource attribute, a name
+passed as a flag), refer to that entry by id (`resource_attributes`, `args`)
+instead of writing the string again under `env_contains`, and add the id to
+`ids` as well. Mind which namespace a
 chart puts its objects in: `udsecho` takes it from its `namespace` value, not
 from the release. The chart tests live here
 and not in `charts/<chart>/BUILD.bazel` on purpose: a change under `charts/`

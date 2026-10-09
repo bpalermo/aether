@@ -36,6 +36,136 @@ type Container struct {
 	Name string `json:"name"`
 	// EnvContains maps an environment variable to substrings its value holds.
 	EnvContains map[string][]string `json:"env_contains"`
+	// ResourceAttributes are ids of `resource_attributes` entries the container
+	// is given in OTEL_RESOURCE_ATTRIBUTES. The key (and the value, when the
+	// entry has one) is read from that entry, so the two cannot disagree.
+	ResourceAttributes []string `json:"resource_attributes"`
+	// Args maps a command-line flag to the id of a `names` entry: the container
+	// is run with `<flag>=<that entry's value>`.
+	Args map[string]string `json:"args"`
+
+	// What the two lists above refer to, filled in by Contract.link when the
+	// contract is loaded.
+	linked     bool
+	attributes []ResourceAttribute
+	args       map[string]string
+}
+
+// ResourceEnv is the environment variable the OpenTelemetry SDK reads resource
+// attributes from, as comma-separated key=value pairs.
+const ResourceEnv = "OTEL_RESOURCE_ATTRIBUTES"
+
+// refs returns the ids of the entries of other sections the container refers
+// to, sorted and without repeats.
+func (c Container) refs() []string {
+	out := slices.Clone(c.ResourceAttributes)
+	for _, flag := range sortedKeys(c.Args) {
+		out = append(out, c.Args[flag])
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// refs returns the ids of the entries of other sections the render's
+// containers refer to, sorted and without repeats.
+func (r Render) refs() []string {
+	var out []string
+	for _, o := range r.Objects {
+		for _, c := range o.Containers {
+			out = append(out, c.refs()...)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// eachContainer calls fn with every container under `charts`, and the id of
+// the object it belongs to. fn may change the container.
+func (c *Contract) eachContainer(fn func(object string, ct *Container)) {
+	for _, r := range c.Charts {
+		for _, o := range r.Objects {
+			for i := range o.Containers {
+				fn(o.ID, &o.Containers[i])
+			}
+		}
+	}
+}
+
+// attributesByID and namesByID index the two sections a container refers to.
+func (c *Contract) attributesByID() map[string]ResourceAttribute {
+	out := map[string]ResourceAttribute{}
+	for _, a := range c.ResourceAttributes {
+		out[a.ID] = a
+	}
+	return out
+}
+
+func (c *Contract) namesByID() map[string]string {
+	out := map[string]string{}
+	for _, n := range c.Names {
+		out[n.ID] = n.Value
+	}
+	return out
+}
+
+// validateLinks checks what the chart containers refer to: every id is an
+// entry of the right section, and a resource attribute is referred to by the
+// containers of exactly the components its entry lists. A referred-to entry
+// is one the charts are held to, so `components` cannot say more, or less,
+// than what is rendered and compared.
+func (c *Contract) validateLinks() []string {
+	var problems []string
+	attributes, names := c.attributesByID(), c.namesByID()
+	referrers := map[string][]string{}
+	c.eachContainer(func(object string, ct *Container) {
+		for _, id := range ct.ResourceAttributes {
+			if _, ok := attributes[id]; !ok {
+				problems = append(problems, fmt.Sprintf("%s: container %q refers to the resource attribute %q, and `resource_attributes` has no entry with that id", object, ct.Name, id))
+				continue
+			}
+			referrers[id] = append(referrers[id], ct.Name)
+		}
+		problems = append(problems, ct.validateArgs(object, names)...)
+	})
+	for _, id := range sortedKeys(referrers) {
+		got := slices.Compact(sorted(referrers[id]))
+		want := sorted(attributes[id].Components)
+		if !slices.Equal(got, want) {
+			problems = append(problems, fmt.Sprintf("%s lists the components [%s], and the chart containers that refer to it are [%s]: the container of each component (named after it) lists the id in its `resource_attributes` under `charts`, and no other container does",
+				id, strings.Join(want, ", "), strings.Join(got, ", ")))
+		}
+	}
+	return problems
+}
+
+func (c Container) validateArgs(object string, names map[string]string) []string {
+	var problems []string
+	for _, flag := range sortedKeys(c.Args) {
+		if !strings.HasPrefix(flag, "-") || strings.Contains(flag, "=") {
+			problems = append(problems, fmt.Sprintf("%s: container %q: the key %q under args is not a flag (write it as the container is run with it, like --mesh-domain, without a value)", object, c.Name, flag))
+		}
+		if _, ok := names[c.Args[flag]]; !ok {
+			problems = append(problems, fmt.Sprintf("%s: container %q takes %s from %q, and `names` has no entry with that id", object, c.Name, flag, c.Args[flag]))
+		}
+	}
+	return problems
+}
+
+// link resolves what each chart container refers to, so a render is compared
+// with the entry itself. Called on a contract that validateLinks accepts.
+func (c *Contract) link() {
+	attributes, names := c.attributesByID(), c.namesByID()
+	c.eachContainer(func(_ string, ct *Container) {
+		ct.linked = true
+		ct.attributes = nil
+		for _, id := range ct.ResourceAttributes {
+			ct.attributes = append(ct.attributes, attributes[id])
+		}
+		ct.args = map[string]string{}
+		for flag, id := range ct.Args {
+			ct.args[flag] = names[id]
+		}
+	})
 }
 
 // RollingUpdate is a workload's rolling-update strategy, values as written.
@@ -91,27 +221,37 @@ func (c *Contract) RendersOf(name string) []Render {
 	return out
 }
 
-// OwnedIDs compares the ids of renders and of their objects with the ids a
-// chart test declares it holds (the `ids` of its helm_contract_test), in both
-// directions, and returns what differs.
+// OwnedIDs compares the ids of renders, of their objects and of the entries of
+// other sections their containers refer to (a resource attribute, the name an
+// argument takes its value from) with the ids a chart test declares it holds
+// (the `ids` of its helm_contract_test), in both directions, and returns what
+// differs.
 func OwnedIDs(renders []Render, ids []string) []string {
-	var have []string
+	var have, referred []string
 	for _, r := range renders {
 		have = append(have, r.ID)
 		for _, o := range r.Objects {
 			have = append(have, o.ID)
 		}
+		referred = append(referred, r.refs()...)
 	}
+	slices.Sort(referred)
+	referred = slices.Compact(referred)
 	var problems []string
 	for _, id := range ids {
-		if id != "" && !slices.Contains(have, id) {
-			problems = append(problems, fmt.Sprintf("%s no longer has the chart entry %q, and the test still lists it in `ids`. "+
+		if id != "" && !slices.Contains(have, id) && !slices.Contains(referred, id) {
+			problems = append(problems, fmt.Sprintf("%s no longer has the chart entry %q (or no container of this chart's renders refers to an entry of that id any more), and the test still lists it in `ids`. "+
 				"If a harness may no longer rely on it, bump `version` and remove the id from the test's `ids` in the same change; otherwise put the entry back.", File, id))
 		}
 	}
 	for _, id := range have {
 		if !slices.Contains(ids, id) {
 			problems = append(problems, fmt.Sprintf("%s has the chart entry %q, and the test that renders its chart does not list it in `ids` (test/harnesscontract/BUILD.bazel): add it there.", File, id))
+		}
+	}
+	for _, id := range referred {
+		if !slices.Contains(ids, id) {
+			problems = append(problems, fmt.Sprintf("%s holds a container of this chart to the entry %q, and the test that renders the chart does not list it in `ids` (test/harnesscontract/BUILD.bazel): add it there.", File, id))
 		}
 	}
 	return problems
@@ -148,8 +288,10 @@ type strategy struct {
 }
 
 type container struct {
-	Name string `json:"name"`
-	Env  []struct {
+	Name    string   `json:"name"`
+	Command []string `json:"command"`
+	Args    []string `json:"args"`
+	Env     []struct {
 		Name  string `json:"name"`
 		Value string `json:"value"`
 	} `json:"env"`
@@ -193,8 +335,9 @@ func parseRender(render []byte) ([]manifest, error) {
 // Check compares the render (the output of `helm` run with r.HelmArgs) with
 // the objects the contract lists, and returns what differs. It never returns
 // any part of the render other than the names of objects and containers, pod
-// labels, and the names of environment variables: a chart can generate key
-// material at render time.
+// labels, the names of environment variables, the keys of the resource
+// attributes one sets, and the names of command-line flags: a chart can
+// generate key material at render time.
 func (r Render) Check(render []byte) []string {
 	docs, err := parseRender(render)
 	if err != nil {
@@ -270,21 +413,80 @@ func (c Container) check(what string, containers []container) []string {
 	return []string{fmt.Sprintf("%s has no container %q (its containers: %s)", what, c.Name, orNone(names))}
 }
 
+func (got container) env(name string) string {
+	value := ""
+	for _, e := range got.Env {
+		if e.Name == name {
+			value = e.Value
+		}
+	}
+	return value
+}
+
 func (c Container) checkEnv(what string, got container) []string {
 	var problems []string
 	for _, env := range sortedKeys(c.EnvContains) {
-		value := ""
-		for _, e := range got.Env {
-			if e.Name == env {
-				value = e.Value
-			}
-		}
+		value := got.env(env)
 		for _, want := range c.EnvContains[env] {
 			if !strings.Contains(value, want) {
 				// Not the value: an environment variable can hold a secret.
 				problems = append(problems, fmt.Sprintf("%s container %q: %s does not contain %q", what, c.Name, env, want))
 			}
 		}
+	}
+	if !c.linked && len(c.refs()) > 0 {
+		// A contract that was not loaded through Load: comparing nothing must
+		// not read as agreement.
+		return append(problems, fmt.Sprintf("%s container %q refers to other entries (%s) and they were not resolved: load the contract with Load", what, c.Name, strings.Join(c.refs(), ", ")))
+	}
+	problems = append(problems, c.checkResourceAttributes(what, got)...)
+	return append(problems, c.checkArgs(what, got)...)
+}
+
+// checkResourceAttributes holds the container's OTEL_RESOURCE_ATTRIBUTES to
+// the `resource_attributes` entries it refers to: the entry's attribute is the
+// key of one of the pairs, with the entry's value when it has one.
+func (c Container) checkResourceAttributes(what string, got container) []string {
+	if len(c.attributes) == 0 {
+		return nil
+	}
+	pairs := map[string]string{}
+	for pair := range strings.SplitSeq(got.env(ResourceEnv), ",") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(pair), "="); ok {
+			pairs[k] = v
+		}
+	}
+	var problems []string
+	for _, a := range c.attributes {
+		v, ok := pairs[a.Attribute]
+		switch {
+		case !ok:
+			problems = append(problems, fmt.Sprintf("%s container %q: %s sets no resource attribute %q, which the entry %s says the component carries (it sets: %s)",
+				what, c.Name, ResourceEnv, a.Attribute, a.ID, orNone(sortedKeys(pairs))))
+		case a.Value != "" && v != a.Value:
+			// Not the value it has: an environment variable can hold a secret.
+			problems = append(problems, fmt.Sprintf("%s container %q: %s sets %s to something other than %q, the value of the entry %s", what, c.Name, ResourceEnv, a.Attribute, a.Value, a.ID))
+		}
+	}
+	return problems
+}
+
+// checkArgs holds the container's command line to the `names` entries its
+// `args` refer to: `<flag>=<value>` is one of the arguments.
+func (c Container) checkArgs(what string, got container) []string {
+	var problems []string
+	line := slices.Concat(got.Command, got.Args)
+	for _, flag := range sortedKeys(c.args) {
+		want := flag + "=" + c.args[flag]
+		if slices.Contains(line, want) {
+			continue
+		}
+		// Not the value it has: an argument can hold a secret.
+		has := "it has no " + flag + " argument"
+		if slices.ContainsFunc(line, func(a string) bool { return a == flag || strings.HasPrefix(a, flag+"=") }) {
+			has = "it has " + flag + " with another value"
+		}
+		problems = append(problems, fmt.Sprintf("%s container %q is not run with %s, the value of the entry %s (%s)", what, c.Name, want, c.Args[flag], has))
 	}
 	return problems
 }

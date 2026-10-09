@@ -176,6 +176,7 @@ func parse(data []byte) (*Contract, error) {
 	if problems := c.Validate(); len(problems) > 0 {
 		return nil, fmt.Errorf("%s is not well formed:\n  %s", File, strings.Join(problems, "\n  "))
 	}
+	c.link()
 	return c, nil
 }
 
@@ -236,7 +237,8 @@ func (c *Contract) Targets() []string {
 // Validate returns what is wrong with the contract as a document, whatever
 // the code says: a missing version, an entry without an id or a checked_by, an
 // id used twice, a label that is neither closed nor open, a reason partition
-// that does not cover its label's closed set exactly once.
+// that does not cover its label's closed set exactly once, a chart container
+// that refers to an entry the contract lacks.
 func (c *Contract) Validate() []string {
 	var problems []string
 	if c.Version < 1 {
@@ -270,7 +272,7 @@ func (c *Contract) Validate() []string {
 	for _, r := range c.Charts {
 		problems = append(problems, r.validate()...)
 	}
-	return problems
+	return append(problems, c.validateLinks()...)
 }
 
 // validateEntries checks what every entry has: an id of its own and a
