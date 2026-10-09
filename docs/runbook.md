@@ -2028,6 +2028,38 @@ before. What changes:
   and `helm get hooks` does, on the revision that seeded it; the object carries
   no `meta.helm.sh/release-*` annotations. One that an older chart seeded keeps
   the annotations it has. `helm uninstall` leaves either behind.
+- **The seed hook never deletes a MeshConfig.** The chart decides to render
+  the seed when it finds no MeshConfig, and Helm creates it later in the same
+  upgrade, as a `pre-upgrade` hook. Helm's default for a hook is to delete the
+  live object of that name first; a MeshConfig created in between (by you, by
+  a GitOps tool, by a second `helm upgrade`) would be deleted and replaced by
+  the seed, with the upgrade reporting success. The hook therefore carries
+  `helm.sh/hook-delete-policy: never`. `never` is not one of Helm's policies:
+  naming any value turns the default off, and Helm acts only on the three it
+  knows, so nothing is deleted (`hook-failed`, the documented value, can still
+  delete your object under Helm 4's server-side apply). What you see instead,
+  when a MeshConfig appears during an upgrade that is seeding one:
+
+  ```
+  Error: UPGRADE FAILED: pre-upgrade hooks failed: warning: Hook pre-upgrade aether/templates/controller-meshconfig.yaml failed: 1 error occurred:
+  	* meshconfigs.config.aether.io "default" already exists
+  ```
+
+  The MeshConfig is the one that was created, untouched. The release is
+  `failed` at a new revision and the previous revision is still `deployed`;
+  `pre-upgrade` hooks run before Helm updates anything, so no workload
+  changed. **Run the same `helm upgrade` again**: the MeshConfig is live now,
+  the seed is not rendered, and the upgrade goes through. With Helm 4 and a
+  release it applies server side, the first upgrade goes through instead: the
+  MeshConfig keeps its UID and its spec and gains the chart's labels and the
+  hook annotations; if the seed (`meshConfig.proxy`) and the object set the
+  same field to different values, the upgrade fails on `Apply failed with 1
+  conflict` and the object is again untouched (run it again). To check that
+  an upgrade left the MeshConfig alone, compare its UID before and after:
+
+  ```bash
+  kubectl -n aether-system get meshconfig default -o jsonpath='{.metadata.uid}{"\n"}'
+  ```
 - `helm install --no-hooks` seeds no MeshConfig, and the agent pods then stay
   in `ContainerCreating` (they mount the ConfigMap the controller projects
   from it). Run a `helm upgrade` without `--no-hooks`, or apply a MeshConfig

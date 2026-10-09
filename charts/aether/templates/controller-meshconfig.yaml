@@ -8,7 +8,10 @@
 
   The seed is a HOOK, so that it is in no revision's manifest (#1471; see
   aether.meshConfig.seedMode for why, and for the one case in which it is still
-  a release object). helm.sh/resource-policy: keep is for that case and for the
+  a release object). helm.sh/hook-delete-policy: never is a value Helm does not
+  act on, in place of its default (delete the live object, then create the
+  hook's): the lookup below and the hook are not atomic, and an object created
+  in between must not be deleted. helm.sh/resource-policy: keep is for that case and for the
   objects older charts created: it stops Helm deleting a MeshConfig that drops
   out of the rendered manifest.
 */ -}}

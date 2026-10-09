@@ -501,11 +501,11 @@ verify_rollback_to_first() {
 # weight, a Pod that sleeps, in a copy of the chart.
 verify_seed_race() {
 	log "v-a2. a MeshConfig created between the render and the seed hook is not deleted (#1471)"
-	local image slow out logf pid rc phase i uid after
-	# A sleeper that is on every kind node without a pull: the image kind's
-	# storage provisioner runs its helper pods with.
-	image="$(kc -n local-path-storage get cm local-path-config -o jsonpath='{.data.helperPod\.yaml}' | awk '$1 == "image:" { print $2; exit }')"
-	[ -n "$image" ] || die "could not read the helper image from local-path-storage/local-path-config"
+	local image slow out logf pid rc phase uid after
+	# A sleeper that is on every node without a pull: kube-proxy's image has
+	# `sleep` (kind's local-path-helper image does not).
+	image="$(kc -n kube-system get ds kube-proxy -o jsonpath='{.spec.template.spec.containers[0].image}')"
+	[ -n "$image" ] || die "could not read kube-proxy's image (the sleeper of the slow hook)"
 	slow="$(mktemp -d)"
 	logf="$slow/upgrade.log"
 	cp -r "$CHARTS/aether" "$slow/aether"
@@ -534,7 +534,7 @@ YAML
 	# Once the slow hook is running, the chart is rendered (no MeshConfig
 	# was live, so the seed is in it) and the seed hook has not run yet.
 	phase=""
-	for i in $(seq 1 120); do
+	for _ in $(seq 1 120); do
 		phase="$(kc -n "$NS" get pod e2e-slow-pre-upgrade -o jsonpath='{.status.phase}' 2>/dev/null || true)"
 		[ "$phase" = "Running" ] && break
 		sleep 0.5

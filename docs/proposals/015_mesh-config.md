@@ -410,9 +410,13 @@ telemetry; it never mounts the CM it produces, so there is no deadlock.
 - Since chart 2.4.24 the seed is a Helm hook (`pre-install,pre-upgrade`) and no
   longer an object of the release (#1471): as a release object it was in the
   manifest of the one revision that seeded it (normally the first) and of no
-  other, and `helm rollback` to that revision failed.
+  other, and `helm rollback` to that revision failed. The hook carries
+  `helm.sh/hook-delete-policy: never`, a value Helm does not act on, so that
+  Helm's default (delete the live object, then create the hook's) cannot
+  replace a MeshConfig created between the render and the hook.
   `charts/aether/templates/_helpers.tpl` (`aether.meshConfig.seedMode`) has the
-  reasoning and the one case in which it is still a release object.
+  reasoning, the measurements and the one case in which it is still a release
+  object.
 
 ### Bootstrap (deadlock-free)
 

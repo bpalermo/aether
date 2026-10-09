@@ -172,7 +172,12 @@ meshConfig:
   # via kubectl thereafter. The seed is a Helm hook (pre-install,pre-upgrade),
   # not an object of the release (#1471): it is in no revision's manifest, so
   # `helm rollback` to the revision that seeded it (normally the first) works,
-  # and `--no-hooks` seeds nothing.
+  # and `--no-hooks` seeds nothing. The hook deletes nothing either: it names
+  # a hook-delete-policy Helm does not act on (`never`), because Helm's
+  # default deletes the live object of that name before creating the hook's.
+  # A MeshConfig created while an upgrade is running is therefore left
+  # alone; that upgrade can fail on "already exists", and succeeds when run
+  # again (docs/runbook.md, "Chart 2.4.24").
   # Set false to manage the CR entirely yourself (do that with a tool that
   # renders with `helm template`: it would render the seed on every sync).
   createDefault: true

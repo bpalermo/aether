@@ -3,8 +3,8 @@
   The edge's own namespace-scoped MeshConfig. An empty spec inherits the
   control-plane (release namespace) MeshConfig field-by-field via the controller's
   fallback, so the edge's projected ConfigMap mirrors the mesh by default. Seeded
-  ONCE (lookup), as a hook where it can be (aether.meshConfig.seedMode, #1471),
-  like the control-plane CR — operators edit it via kubectl to give the edge its
+  ONCE (lookup), as a hook where it can be and one that deletes nothing
+  (aether.meshConfig.seedMode, #1471), like the control-plane CR — operators edit it via kubectl to give the edge its
   own observability policy. See docs/proposals/015_mesh-config.md.
 */ -}}
 {{- $ns := include "aether.edge.namespace" . -}}
