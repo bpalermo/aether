@@ -152,6 +152,15 @@ groups:
       # so that state is silent here, as it should be: no response was owed, so
       # the proxy holds what the published gauge shows.
       #
+      # Reason by reason, never on the totals. A cluster that leaves one reason
+      # for another (an unpinned TCP floor that is removed: no_namespace_metadata
+      # falls by one, tls_not_published rises by one) keeps the totals equal, so
+      # a proxy that rejects that update and goes on serving TLS without a pin
+      # would be silent in a comparison of sums. Both gauges carry a series for
+      # every reason, zero included, so each reason has both sides. The value
+      # is the number of entries the proxy holds beyond what is published,
+      # added up over the reasons.
+      #
       # One direction only. The reverse (acknowledged below published) is the
       # new unpinned snapshot not yet acknowledged, and the first rule already
       # speaks for what is published.
@@ -169,20 +178,22 @@ groups:
       # as a proxy handoff; it is why this is a warning and not a page.
       - alert: AetherProxyHoldsUnpinnedClusters
         expr: >-
-          sum by (job, node) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
-          >
-          sum by (job, node) (aether_agent_snapshot_tls_clusters{pin="unpinned"})
+          sum by (job, node) (clamp_min(
+          sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
+          -
+          sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}),
+          0)) > 0
         for: 15m
         labels:
           severity: warning
           component: aether-agent
         annotations:
-          summary: "the proxy on {{ $labels.node }} last acknowledged {{ $value }} unpinned mesh cluster(s), more than {{ $labels.job }} now publishes"
+          summary: "the proxy on {{ $labels.node }} last acknowledged {{ $value }} unpinned mesh cluster(s) that {{ $labels.job }} no longer publishes"
           description: >-
             The last cluster update the proxy on {{ $labels.node }} acknowledged
-            had {{ $value }} mesh cluster entries without a server-identity pin;
-            the agent's current snapshot has fewer. The proxy has not accepted
-            the newer clusters for 15 minutes. Check
+            had {{ $value }} more mesh cluster entries without a server-identity
+            pin, counted reason by reason, than the agent's current snapshot.
+            The proxy has not accepted the newer clusters for 15 minutes. Check
             aether_agent_xds_nacks_total for the Cluster type URL and the agent
             log for `envoy NACKed delta response` (it carries the proxy's
             error), and `proxy acknowledged mesh clusters with no
