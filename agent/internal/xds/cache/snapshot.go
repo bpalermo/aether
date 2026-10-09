@@ -272,9 +272,15 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// error, building the version map, cannot happen for a snapshot whose map
 	// fillVersionMap already built.) So this snapshot is the one every later
 	// request is answered from, and the watches answered before the error
-	// were answered from it. What follows describes the snapshot the cache
-	// serves and runs whatever SetSnapshot returned. Skipped, it was made up
-	// for by the next build, under the next build's version.
+	// were answered from it. What follows is the report every build makes
+	// after SetSnapshot, and it runs whatever SetSnapshot returned. Skipped,
+	// it was made up for by the next build, under the next build's version.
+	//
+	// The pin report is of this build's own read of the cluster map. The two
+	// binding logs read the cache's maps when they run, here as after a
+	// SetSnapshot that returned nil: a change a mutator made since this build
+	// read them, which the next build publishes, is named under this version.
+	// A SetSnapshot that waits on a watch makes that window longer.
 	//
 	// The error is logged here, under its own message, and still returned: a
 	// watch that was open and not answered stays open, and is answered by a
@@ -286,7 +292,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// Issue #638 discriminator: name the (source pod → outbound cluster → SDS
 	// client-cert secret) bindings of the snapshot just installed, but only
 	// the ones that changed — steady state is silent, a re-bind is loud. Runs
-	// after SetSnapshot so a logged binding is one the cache serves.
+	// after SetSnapshot, and reads the maps as they are then (see above).
 	c.logIdentityBindings(ctx, v)
 	// The inbound counterpart (#638, hypothesis inverted): ssl_fail_verify_san
 	// is the CLIENT rejecting the SERVER's certificate, so the mis-bound

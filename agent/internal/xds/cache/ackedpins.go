@@ -115,7 +115,9 @@ const goneBuilds = offeredVersions
 // record per entry that left in the last goneAge, which is as many as the
 // node's cluster entries can churn in that time. A build that finds more than
 // maxAgedRecords records that are not of an entry of its snapshot keeps none
-// of them by age: each falls back to goneBuilds alone, for that build.
+// of them by age: each falls back to goneBuilds alone, for that build. An
+// answer that releases a record while there are that many does the same for
+// that record (byAgeLocked).
 const (
 	goneAge        = time.Minute
 	maxAgedRecords = 1024
@@ -322,8 +324,9 @@ func (s *clusterAck) release() {
 // that left the snapshot while the proxy still holds its cluster (until the
 // proxy accepts the removal or opens a stream without it) or while a response
 // carrying it is unanswered, plus one per entry that left in the last few
-// builds (goneBuilds), plus, after a build, at most maxAgedRecords that left
-// longer ago than that and less than goneAge ago, plus one per cluster a proxy
+// builds (goneBuilds), plus at most maxAgedRecords that left longer ago than
+// that and are kept by goneAge (until the first build, or answer about them,
+// after it has passed), plus one per cluster a proxy
 // states it holds that the agent neither publishes nor has a record of
 // (restateLocked; for as long as the proxy holds it, and after that under the
 // same two bounds). A record is a fixed size plus one small item per
@@ -364,6 +367,10 @@ type ackedPins struct {
 	// until the first.
 	counts   cachemetrics.PinCounts
 	reported bool
+	// live is the number of records of the newest snapshot's entries, as its
+	// build counted them. The other records are the ones maxAgedRecords caps
+	// (byAgeLocked).
+	live int
 	// now is the clock goneAge is measured with; nil is time.Now. A test sets
 	// it before anything else uses the state.
 	now func() time.Time
@@ -460,14 +467,26 @@ func (h *ackedPins) publishLocked(entries []entryClass, versions map[string]stri
 // records of this build's entries; the rest are what maxAgedRecords caps.
 // Callers hold h.mu.
 func (h *ackedPins) sweepLocked(live int) {
+	h.live = live
 	now := h.clock()
-	byAge := len(h.clusters)-live <= maxAgedRecords
+	byAge := h.byAgeLocked()
 	for name, s := range h.clusters {
 		if s.build != h.build && s.gone.IsZero() {
 			s.gone = now
 		}
 		h.forgetIfGoneLocked(name, s, now, byAge)
 	}
+}
+
+// byAgeLocked reports whether a record may be kept by its age: whether the
+// records that are not of an entry of the newest snapshot number at most
+// maxAgedRecords. They are the records of entries that left (held, in flight,
+// or kept by a bound) and of clusters a proxy stated. Every path that can
+// leave a record with nothing but its age to keep it asks, the build and the
+// answers alike, so at no time are more than maxAgedRecords kept by age alone.
+// Callers hold h.mu.
+func (h *ackedPins) byAgeLocked() bool {
+	return len(h.clusters)-h.live <= maxAgedRecords
 }
 
 // recordLocked is the record of the entry published as the cluster name,
@@ -495,9 +514,8 @@ func (h *ackedPins) recordLocked(name string) (s *clusterAck, first bool) {
 // dropped by the first build after the window (publish walks them all), or by
 // a later answer about its cluster.
 //
-// now is h.clock(). byAge is false only from a build that found more than
-// maxAgedRecords records that are not of its entries; every other caller keeps
-// a record by age and leaves the cap to the next build. Callers hold h.mu.
+// now is h.clock() and byAge is h.byAgeLocked(), each read once by a caller
+// that walks many records. Callers hold h.mu.
 func (h *ackedPins) forgetIfGoneLocked(name string, s *clusterAck, now time.Time, byAge bool) {
 	if s.holds || len(s.sent) > 0 || h.build-s.build < goneBuilds {
 		return
@@ -526,7 +544,7 @@ func (h *ackedPins) deliver(d ack.Delivery) {
 			continue
 		}
 		s.answered(r.Version)
-		h.forgetIfGoneLocked(r.Name, s, now, true)
+		h.forgetIfGoneLocked(r.Name, s, now, h.byAgeLocked())
 	}
 }
 
@@ -553,7 +571,7 @@ func (h *ackedPins) acceptLocked(a ack.Accepted) ackedPinsUpdate {
 	for _, name := range a.Removed {
 		if s := h.clusters[name]; s != nil {
 			s.release()
-			h.forgetIfGoneLocked(name, s, now, true)
+			h.forgetIfGoneLocked(name, s, now, h.byAgeLocked())
 		}
 	}
 	return h.settleLocked()
@@ -601,7 +619,7 @@ func (h *ackedPins) restateLocked(stated map[string]string, now time.Time) {
 			continue
 		}
 		s.release()
-		h.forgetIfGoneLocked(name, s, now, true)
+		h.forgetIfGoneLocked(name, s, now, h.byAgeLocked())
 	}
 }
 

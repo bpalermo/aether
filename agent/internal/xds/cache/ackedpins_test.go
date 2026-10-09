@@ -1206,6 +1206,65 @@ func TestAckedPinsKeptByAgeAreCapped(t *testing.T) {
 	}
 }
 
+// TestAckedPinsKeptByAgeAreCappedWithoutABuild: the cap holds between builds
+// too. Records that outlived their entries because a proxy held their clusters,
+// or had not answered for them, are released by answers, inside goneAge and
+// with no build after. Each release keeps the record by age only while the
+// records that are not of an entry number at most maxAgedRecords, so that many
+// are left and no more, whichever path released them.
+func TestAckedPinsKeptByAgeAreCappedWithoutABuild(t *testing.T) {
+	const over = 2
+	all := make([]entryClass, 0, maxAgedRecords+over+1)
+	versions := make(map[string]string, cap(all))
+	var gone []ack.Resource
+	var goneNames []string
+	for i := range cap(all) {
+		name := "c" + strconv.Itoa(i)
+		all = append(all, entryClass{name: name, class: pinClassPinned})
+		versions[name] = "v"
+		if i > 0 {
+			gone = append(gone, ack.Resource{Name: name, Version: "v"})
+			goneNames = append(goneNames, name)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// keep makes something hold every record; end takes that away.
+		keep, end func(h *ackedPins)
+	}{
+		{
+			name: "removals the proxy accepts",
+			keep: func(h *ackedPins) { h.accept(ack.Accepted{Added: gone}) },
+			end:  func(h *ackedPins) { h.accept(ack.Accepted{Removed: goneNames}) },
+		},
+		{
+			name: "a stream opened without the clusters",
+			keep: func(h *ackedPins) { h.accept(ack.Accepted{Added: gone}) },
+			end: func(h *ackedPins) {
+				h.accept(ack.Accepted{Opening: true, Rejected: true, Stated: map[string]string{"c0": "v"}})
+			},
+		},
+		{
+			name: "responses that are never acknowledged",
+			keep: func(h *ackedPins) { h.deliver(ack.Delivery{Resources: gone}) },
+			end:  func(h *ackedPins) { h.deliver(ack.Delivery{Resources: gone, Ended: true}) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newStepClock()
+			h := ackedPins{now: clock.now}
+			h.publish(all, versions, false)
+			tc.keep(&h)
+			for range goneBuilds {
+				h.publish(all[:1], versions, false)
+			}
+			require.Len(t, h.clusters, len(all), "fixture: held or in flight, every record is kept")
+			tc.end(&h)
+			assert.Len(t, h.clusters, 1+maxAgedRecords)
+		})
+	}
+}
+
 // TestAckedPinGaugeIsNotWithdrawnForAPlaintextUDPFloor: a UDP floor cluster
 // has no transport socket, so no version of it, known to this agent process or
 // not, can be in a pin series. A proxy that states one at a version from the
