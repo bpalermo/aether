@@ -124,8 +124,9 @@ type pinReport struct {
 	// published for it is known only once the build has made the floor
 	// clusters (demoteUnpublishedFloors). Nil when there is none.
 	unpinnedFloors map[string]struct{}
-	// classes is every entry the report read and the class it counted it
-	// under, when track is set: what the acknowledged pin state is built from
+	// classes is every entry the report read that can carry a pin (every one
+	// but the plaintext UDP floor) and the class it counted it under, when
+	// track is set: what the acknowledged pin state is built from
 	// (ackedPins.publish). A snapshot build tracks, into a buffer it reuses.
 	track   bool
 	classes []entryClass
@@ -141,7 +142,13 @@ type pinReport struct {
 // entries that build read and costs no pass of its own.
 func (r *pinReport) add(name string, entry *clusterEntry) {
 	kind, cause := entry.pinState()
-	if r.track {
+	// A plaintext entry (the UDP floor) is not tracked: it has no transport
+	// socket in any version, so nothing a proxy holds of it can be in a pin
+	// series. Tracked, a version of it this agent process never published
+	// (stated by a proxy that then rejects the update) would be a held cluster
+	// of unknown class and withdraw the whole acknowledged gauge over bytes
+	// that cannot carry a pin.
+	if r.track && !entry.plaintext {
 		r.classes = append(r.classes, entryClass{name: entry.publishedClusterName(name), class: classOf(kind, cause)})
 	}
 	switch kind {

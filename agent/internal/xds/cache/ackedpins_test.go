@@ -10,6 +10,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
+	"aethermesh.dev/agent/internal/xds/proxy"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -106,14 +107,29 @@ func connectCDSProxy(t *testing.T, c *SnapshotCache, tracker *ack.Tracker, strea
 // tracker before it is returned.
 func (p *cdsProxy) next() *discoveryv3.DeltaDiscoveryResponse {
 	p.t.Helper()
-	p.nonces++
-	nonce := "n" + strconv.Itoa(p.nonces)
-	resp := cdsExchange(p.t, p.c, &p.sub, p.last, nonce)
+	resp := p.build()
 	if resp == nil {
 		return nil
 	}
-	p.callbacks.OnStreamDeltaResponse(p.stream, nil, resp)
+	p.written(resp)
 	return resp
+}
+
+// build is the first half of next: the cache builds the response to this
+// proxy's pending request and hands it over, and the stream has not written it
+// yet, so the tracker has not been told. In the agent that is the time a
+// response spends in the watch's channel, and snapshots can be built in it.
+func (p *cdsProxy) build() *discoveryv3.DeltaDiscoveryResponse {
+	p.t.Helper()
+	p.nonces++
+	return cdsExchange(p.t, p.c, &p.sub, p.last, "n"+strconv.Itoa(p.nonces))
+}
+
+// written is the second half: the stream writes resp, which is when the
+// tracker learns of it.
+func (p *cdsProxy) written(resp *discoveryv3.DeltaDiscoveryResponse) {
+	p.t.Helper()
+	p.callbacks.OnStreamDeltaResponse(p.stream, nil, resp)
 }
 
 // onDemand is the response to a request with no nonce in the middle of the
@@ -187,6 +203,16 @@ func deltaNames(resp *discoveryv3.DeltaDiscoveryResponse) []string {
 		names = append(names, r.GetName())
 	}
 	return names
+}
+
+// buildPastTheGoneWindow builds the snapshots after which the record of an
+// entry that has left the snapshot, is not held and is not in flight is
+// dropped (goneBuilds).
+func buildPastTheGoneWindow(t *testing.T, c *SnapshotCache) {
+	t.Helper()
+	for range goneBuilds {
+		require.NoError(t, c.generateSnapshot(context.Background()))
+	}
 }
 
 // ackedPinFixture is a cache with a node identity and a trust domain, so every
@@ -361,7 +387,8 @@ func TestAckedPinGaugeAfterARejectedClusterUpdate(t *testing.T) {
 	assert.Equal(t, int64(3), acked.pinned)
 
 	// A removal the proxy acknowledges takes the cluster out, and its record
-	// with it.
+	// with it once the builds a response from before the removal could still
+	// be written in have passed (goneBuilds).
 	require.NoError(t, c.RemoveCluster(ctx, addedClusterName))
 	removal := again.next()
 	require.Equal(t, []string{addedClusterName}, removal.GetRemovedResources())
@@ -370,6 +397,7 @@ func TestAckedPinGaugeAfterARejectedClusterUpdate(t *testing.T) {
 	again.ack(removal)
 	acked, _ = ackedGauge()
 	assert.Equal(t, int64(2), acked.pinned)
+	buildPastTheGoneWindow(t, c)
 	assert.NotContains(t, c.acked.clusters, addedClusterName)
 }
 
@@ -656,8 +684,9 @@ func TestAckedPinsCountOnlyWhatAProxyCanHold(t *testing.T) {
 }
 
 // TestAckedPinsAreBoundedByTheClusters: memory. One fixed-size record per
-// cluster entry of the newest snapshot, plus the entries a proxy still holds;
-// nothing per snapshot, per ACK or per stream. And the versions remembered per
+// cluster entry of the newest snapshot, plus the entries a proxy still holds,
+// plus the entries that left in the last goneBuilds-1 builds; nothing per
+// snapshot, per ACK or per stream. And the versions remembered per
 // cluster are a fixed few: an acknowledgement of one that has fallen out is
 // not attributed to another.
 func TestAckedPinsAreBoundedByTheClusters(t *testing.T) {
@@ -684,15 +713,22 @@ func TestAckedPinsAreBoundedByTheClusters(t *testing.T) {
 			}
 			h.accept(accepted)
 		}
-		// The entries of this build, and at most the ones a proxy was told to
-		// drop and has not: removals are never acknowledged here, so only an
-		// opening exchange clears them.
-		require.LessOrEqual(t, len(h.clusters), live+30, "build %d", build)
+		// The entries of this build, the one each of the last goneBuilds-1
+		// builds dropped, and at most the ones a proxy was told to drop and
+		// has not: removals are never acknowledged here, so only an opening
+		// exchange clears them.
+		require.LessOrEqual(t, len(h.clusters), live+(goneBuilds-1)+30, "build %d", build)
 	}
 	u := h.accept(ack.Accepted{Opening: true, Stated: map[string]string{}})
 	require.True(t, u.report)
 	assert.Equal(t, cachemetrics.PinCounts{}, u.counts)
-	assert.Len(t, h.clusters, live, "a proxy that holds nothing leaves the newest snapshot's entries and no other")
+	assert.Len(t, h.clusters, live+(goneBuilds-1), "a proxy that holds nothing leaves the newest snapshot's entries and the ones that left in the builds just before")
+	for range goneBuilds - 1 {
+		h.publish(nil, nil, false)
+	}
+	require.Len(t, h.clusters, live, "fixture: the newest entries are kept as long as the ones before them were")
+	h.publish(nil, nil, false)
+	assert.Empty(t, h.clusters, "and nothing is kept for good")
 
 	// A version older than the remembered ones.
 	var s ackedPins
@@ -797,7 +833,164 @@ func TestAckedPinGaugeCountsAClusterRemovedWhileItsResponseWasInFlight(t *testin
 	proxy.ack(removal)
 	acked, _ = ackedGauge()
 	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
+	buildPastTheGoneWindow(t, c)
 	assert.NotContains(t, c.acked.clusters, bindingClusterName)
+}
+
+// TestAckedPinGaugeCountsAClusterRemovedBeforeItsResponseWasWritten: the
+// window before the one above. go-control-plane builds a response from the
+// snapshot of the moment and hands it to the stream, and the tracker (and so
+// the acknowledged pin state) learns of it only when the stream writes it. A
+// build that drops the cluster in between finds its record neither published,
+// nor in flight, nor held. The response is written and acknowledged all the
+// same: the proxy holds the cluster, unpinned, until it takes the removal, and
+// the gauge must count it.
+func TestAckedPinGaugeCountsAClusterRemovedBeforeItsResponseWasWritten(t *testing.T) {
+	c, rec, reader, tracker := ackedPinFixture(t)
+	ackedGauge := func() (pinSeries, bool) { return readPinGauge(t, reader, ackedTLSClustersGauge) }
+	ctx := context.Background()
+	addPinnedCluster(c, otherClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+	proxy := connectCDSProxy(t, c, tracker, 1, nil)
+	proxy.ack(proxy.next())
+
+	addOutboundCluster(c, bindingClusterName) // unpinned
+	require.NoError(t, c.generateSnapshot(ctx))
+	pending := proxy.build()
+	require.Equal(t, []string{bindingClusterName}, deltaNames(pending))
+	// Built, not written yet: the agent drops the cluster.
+	require.NoError(t, c.RemoveCluster(ctx, bindingClusterName))
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	proxy.written(pending)
+	proxy.ack(pending)
+	acked, ok := ackedGauge()
+	require.True(t, ok)
+	assert.Equal(t, int64(1), acked.pinned)
+	assert.Equal(t, byCause(0, 1, 0), acked.unpinned, "the proxy accepted the cluster it was sent: it holds it, whatever was built since")
+	assert.Empty(t, rec.with(ackedClusterPinsUnknownMsg), "and its class is the one it was published with")
+
+	removal := proxy.next()
+	require.Equal(t, []string{bindingClusterName}, removal.GetRemovedResources())
+	proxy.ack(removal)
+	acked, _ = ackedGauge()
+	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
+}
+
+// TestAckedPinsKeepAGoneClusterForAFewBuilds: what the test above relies on,
+// and its bound. The record of an entry that left the snapshot is kept, with
+// the classes of its versions, through the builds a response built before it
+// left can still be waiting to be written in (goneBuilds), and dropped by the
+// build after: memory stays bounded by the clusters of the last few snapshots.
+func TestAckedPinsKeepAGoneClusterForAFewBuilds(t *testing.T) {
+	var h ackedPins
+	gap := unpinnedClass(cachemetrics.CauseNoNamespaceMetadata)
+	both := []entryClass{{name: "a", class: pinClassPinned}, {name: "gone", class: gap}}
+	rest := both[:1]
+	versions := map[string]string{"a": "ha", "gone": "hg"}
+	sent := []ack.Resource{{Name: "gone", Version: "hg"}}
+
+	h.publish(both, versions, false)
+	for build := 1; build < goneBuilds; build++ {
+		h.publish(rest, versions, false)
+		require.Contains(t, h.clusters, "gone", "%d build(s) after it left", build)
+	}
+	// The response built while it was published is written and acknowledged.
+	h.deliver(ack.Delivery{Resources: sent})
+	u := h.accept(ack.Accepted{Added: sent})
+	h.deliver(ack.Delivery{Resources: sent, Ended: true})
+	require.True(t, u.report)
+	assert.Equal(t, cachemetrics.PinCounts{Unpinned: [cachemetrics.NumUnpinnedCauses]int{0, 0, 1, 0}}, u.counts)
+
+	// Held: kept for as long as the proxy holds it, however many builds.
+	for range 2 * goneBuilds {
+		h.publish(rest, versions, false)
+	}
+	require.Contains(t, h.clusters, "gone")
+	// Released by the proxy, and already gone for longer than the window: the
+	// record goes with the answer.
+	h.accept(ack.Accepted{Removed: []string{"gone"}})
+	assert.NotContains(t, h.clusters, "gone")
+
+	// Never sent: dropped by the build that ends the window.
+	h.publish(both, versions, false)
+	for range goneBuilds - 1 {
+		h.publish(rest, versions, false)
+	}
+	require.Contains(t, h.clusters, "gone")
+	h.publish(rest, versions, false)
+	assert.NotContains(t, h.clusters, "gone", "nothing is kept for good for a cluster neither published, nor in flight, nor held")
+}
+
+// TestAckedPinGaugeIsNotWithdrawnForAPlaintextUDPFloor: a UDP floor cluster
+// has no transport socket, so no version of it, known to this agent process or
+// not, can be in a pin series. A proxy that states one at a version from the
+// agent process before this one, and rejects the update, must not cost the
+// node its acknowledged pin gauge: there is nothing about a pin that the agent
+// does not know.
+func TestAckedPinGaugeIsNotWithdrawnForAPlaintextUDPFloor(t *testing.T) {
+	c, rec, reader, tracker := ackedPinFixture(t)
+	c.SetCaptureEnabled(true)
+	ctx := context.Background()
+	const udpService = "aether-test/udponly"
+	udpName := proxy.UDPClusterName(udpService, c.meshDomain)
+	c.SetUDPServiceRoutes(map[string][]proxy.L4Backend{udpService: {{Service: udpService, Cluster: udpName, Weight: 1}}})
+	declareDeps(c, udpService)
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", udpOnlyRegistry(udpService, "10.0.0.40", 9001)))
+	addPinnedCluster(c, otherClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	stated := clusterVersions(t, c)
+	require.Contains(t, stated, udpName, "fixture: the snapshot publishes the UDP floor cluster")
+	stated[udpName] = "a-version-the-previous-agent-process-published"
+	p := connectCDSProxy(t, c, tracker, 1, stated)
+	update := p.next()
+	require.Equal(t, []string{udpName}, deltaNames(update), "fixture: the proxy is owed this process's version of it and nothing else")
+	p.nack(update)
+
+	acked, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+	require.True(t, ok, "the pin state of every TLS cluster the proxy holds is known")
+	assert.Equal(t, int64(1), acked.pinned)
+	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
+	assert.Empty(t, rec.with(ackedClusterPinsUnknownMsg))
+	assert.NotContains(t, c.acked.clusters, udpName, "a plaintext entry has no record")
+}
+
+// TestAckedPinsKnowASnapshotWhoseSetReturnedAnError: why the classes are
+// recorded before SetSnapshot without waiting to see whether it succeeds. The
+// pinned go-control-plane installs the snapshot first and can fail only
+// afterwards, while it answers the watches that were open (here: the stream's
+// context ended with a response half handed over). The snapshot is then the
+// one every later request is answered from, so a proxy can hold its clusters
+// and acknowledge them: their classes have to be on record. There is no
+// "rejected and never published" outcome to keep out of the record.
+func TestAckedPinsKnowASnapshotWhoseSetReturnedAnError(t *testing.T) {
+	c, _, reader, tracker := ackedPinFixture(t)
+	ctx := context.Background()
+	addPinnedCluster(c, otherClusterName)
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	// An open watch nobody reads: SetSnapshot blocks answering it until its
+	// context ends, and returns that as its error.
+	cancel, err := c.CreateDeltaWatch(&discoveryv3.DeltaDiscoveryRequest{
+		Node: &corev3.Node{Id: c.nodeName}, TypeUrl: resourcev3.ClusterType, ResponseNonce: "n1",
+	}, streamv3.NewDeltaSubscription(nil, nil, clusterVersions(t, c), true), make(chan cachev3.DeltaResponse))
+	require.NoError(t, err)
+	require.NotNil(t, cancel, "fixture: the watch must be open")
+	defer cancel()
+
+	addOutboundCluster(c, bindingClusterName) // unpinned
+	ended, end := context.WithCancel(ctx)
+	end()
+	require.Error(t, c.generateSnapshot(ended), "fixture: SetSnapshot must fail")
+	require.Contains(t, clusterVersions(t, c), bindingClusterName, "the snapshot is served although setting it returned an error")
+
+	p := connectCDSProxy(t, c, tracker, 1, nil)
+	p.ack(p.next())
+	acked, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), acked.pinned)
+	assert.Equal(t, byCause(0, 1, 0), acked.unpinned, "the proxy holds the cluster of that snapshot, and the agent knows its class")
 }
 
 // TestAckedPinsForgetAVersionThatIsNoLongerInFlight: memory. A version is kept

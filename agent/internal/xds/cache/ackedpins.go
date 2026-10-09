@@ -79,6 +79,22 @@ type entryClass struct {
 // is not guessed at (heldKnown).
 const offeredVersions = 3
 
+// goneBuilds is how many snapshot builds the record of an entry that LEFT the
+// snapshot is kept for when the proxy does not hold its cluster and no
+// response carrying it is in flight: it is dropped by the goneBuilds-th build
+// without the entry.
+//
+// It covers the same step as offeredVersions, for an entry that is removed
+// instead of rebuilt. go-control-plane builds a response from the snapshot of
+// the moment, and the acknowledged pin state learns of it only when the stream
+// writes it (deliver). A build that drops the entry in between sees a record
+// that is neither published, nor in flight, nor held; dropped there and then,
+// the response would be written and acknowledged with nothing to count it by,
+// and the proxy would hold a cluster the gauge leaves out. So the record, and
+// with it the class of each version, outlives the entry by the builds that
+// step can span: the same two.
+const goneBuilds = offeredVersions
+
 // offeredCluster is one version of a cluster a snapshot published and the pin
 // class the snapshot's report gave the entry.
 type offeredCluster struct {
@@ -238,7 +254,8 @@ func (s *clusterAck) release() {
 // One record per cluster entry of the newest snapshot, plus one per entry
 // that left the snapshot while the proxy still holds its cluster (until the
 // proxy accepts the removal or opens a stream without it) or while a response
-// carrying it is unanswered. A record is a fixed size plus one small item per
+// carrying it is unanswered, plus one per entry that left in the last few
+// builds (goneBuilds). A record is a fixed size plus one small item per
 // version of the cluster that is in flight, which is at most one per
 // unanswered response carrying the cluster; go-control-plane leaves at most
 // one response of a type unanswered per request it has not answered on a
@@ -346,11 +363,15 @@ func (h *ackedPins) recordLocked(name string) *clusterAck {
 }
 
 // forgetIfGoneLocked drops the record of a cluster the proxy does not hold
-// when the newest snapshot has no entry for it either and no response carrying
-// it is in flight: nothing is kept for a cluster neither published, nor sent
-// and unanswered, nor held. Callers hold h.mu.
+// when no response carrying it is in flight and the last goneBuilds snapshots
+// had no entry for it: nothing is kept for good for a cluster neither
+// published, nor sent and unanswered, nor held. Not at the first build without
+// it: a response built before that one may not have been written yet
+// (goneBuilds). A record that an answer leaves with nothing to keep it inside
+// that window is dropped by the build that ends it (publish walks them all).
+// Callers hold h.mu.
 func (h *ackedPins) forgetIfGoneLocked(name string, s *clusterAck) {
-	if s.build != h.build && !s.holds && len(s.sent) == 0 {
+	if h.build-s.build >= goneBuilds && !s.holds && len(s.sent) == 0 {
 		delete(h.clusters, name)
 	}
 }
@@ -382,8 +403,9 @@ func (h *ackedPins) accept(a ack.Accepted) ackedPinsUpdate {
 		h.restateLocked(a.Stated)
 	}
 	// A name with no record is not a cluster entry of a snapshot this process
-	// built since the proxy last held it (a per-pod application cluster, a
-	// QUIC twin, the passthrough cluster): it is in no pin count.
+	// built recently or since the proxy last held it (a per-pod application
+	// cluster, a QUIC twin, the passthrough cluster, a plaintext UDP floor):
+	// it is in no pin count.
 	for _, r := range a.Added {
 		if s := h.clusters[r.Name]; s != nil {
 			s.hold(r.Version)
