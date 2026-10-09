@@ -227,6 +227,9 @@ echo "      image: x/y:1.2" >"$T/e2e/sub/pod.yaml"
 echo "skip e2e/sub/" >>"$T/scripts/third-party-images.txt"
 run_check "$T"
 if [ "$RC" -eq 0 ] && [[ "$OUT" == *"1 skipped path(s)"* ]]; then ok "a skipped path is not read"; else bad "skip: exit $RC"$'\n'"$OUT"; fi
+new_tree "$T"
+echo "skip e2e/gone/" >>"$T/scripts/third-party-images.txt"
+expect_fail "a skip that matches no file any more" "$T" "'skip e2e/gone/' matches no file any more"
 
 # A scan that reads nothing must not pass.
 rm -rf "$TMP/empty"

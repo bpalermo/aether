@@ -22,7 +22,7 @@
 #         - an image referenced by tag only, or by no tag at all
 #         - a digest the inventory does not list for that name
 #         - a tag that disagrees with the inventory's tag for that digest
-#         - a pin, or an `allow` line, that nothing uses any more
+#         - a pin, or an `allow` or `skip` line, that nothing uses any more
 #       so a new image cannot arrive unpinned or unlisted.
 #   scripts/third-party-images.sh list
 #       Offline. Every pin and the files that use it.
@@ -87,6 +87,7 @@ declare -A ALLOW=()      # "<path> <ref>" -> 1
 declare -A ALLOW_USED=() # "<path> <ref>" -> 1
 declare -a ALLOW_ORDER=()
 declare -a SKIP=()
+declare -a SKIP_UNUSED=() # the `skip` prefixes no scanned file is under
 
 NAME_RE='^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-]+[a-z0-9]+)*)+$|^[a-z0-9]+([._-][a-z0-9]+)*$'
 TAG_RE='^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'
@@ -283,6 +284,14 @@ scan() {
 	} | LC_ALL=C sort -u >"$names"
 	scanned_files >"$tmp/files" || die "could not list the files under ${SCAN_PATHS[*]}"
 	nfiles="$(wc -l <"$tmp/files" | tr -d ' ')"
+	# A `skip` whose path holds no file any more excuses nothing.
+	SKIP_UNUSED=()
+	for key in "${SKIP[@]}"; do
+		while IFS= read -r path; do
+			case "$path" in "$key"*) continue 2 ;; esac
+		done <"$tmp/files"
+		SKIP_UNUSED+=("$key")
+	done
 	extract_references "$names" <"$tmp/files" >"$tmp/refs" || die "the scan itself failed"
 	while IFS=$'\t' read -r path line ref; do
 		nrefs=$((nrefs + 1))
@@ -330,6 +339,9 @@ cmd_check() {
 	for key in "${ALLOW_ORDER[@]}"; do
 		[ -n "${ALLOW_USED[$key]:-}" ] ||
 			finding "${INVENTORY#"$ROOT"/}: 'allow $key' matches nothing any more; remove the line"
+	done
+	for key in "${SKIP_UNUSED[@]}"; do
+		finding "${INVENTORY#"$ROOT"/}: 'skip $key' matches no file any more; remove the line"
 	done
 	# A scan that read nothing would pass by default: say so instead.
 	[ "$SCANNED_FILES" -gt 0 ] || finding "no file found under ${SCAN_PATHS[*]} in $ROOT; nothing was checked"

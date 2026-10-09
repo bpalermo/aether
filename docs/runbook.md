@@ -980,7 +980,7 @@ What a moved pin obliges:
   version* above); `//e2e:kind_pin_test` holds its copies together.
 
 An exception is an `allow <path> <reference>` or `skip <path prefix>` line in
-the list, with its reason beside it. An `allow` that matches nothing any more
+the list, with its reason beside it. An `allow` or `skip` that matches nothing any more
 fails `check`.
 
 What `check` cannot see: an image no pin names yet, written where no `image`
