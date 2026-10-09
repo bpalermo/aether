@@ -35,4 +35,12 @@ client:
   enabled: true
   # Seconds between probe rounds (one request per service per round).
   interval: 1
-  image: curlimages/curl:8.22.0
+  # Client image: needs /bin/sh, curl and date. A third-party image, so it is
+  # pinned by the digest of its multi-arch index (linux/amd64 and linux/arm64);
+  # the tag is kept for the reader and the digest is what the node pulls
+  # (#1400; it was the tag alone until chart 2.0.3). The pin is listed in
+  # scripts/third-party-images.txt, and `scripts/third-party-images.sh outdated`
+  # says when the registry has moved past it (docs/runbook.md, "Refreshing
+  # third-party image pins"). A changed value rolls the one-replica uds-client
+  # Deployment.
+  image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777

@@ -1,0 +1,623 @@
+#!/usr/bin/env bash
+# Third-party container images: pinned by digest, from one inventory, with a
+# way to see which pins are behind (#1400, #1401).
+#
+# An image this repository does not build (curl, an echo server, etcd, the kind
+# node) is named in chart values, e2e harnesses, manifests and test fixtures. A
+# tag can be re-pushed; a digest cannot. So every such reference carries the
+# digest of the image's multi-arch INDEX, and scripts/third-party-images.txt is
+# the one list of them:
+#
+#   pin <name> <tag> <digest>
+#
+# A reference is written `<name>:<tag>@<digest>` (what the kubelet, containerd,
+# `docker run`, `kubectl run --image` and kind's `--image` all accept: the
+# digest selects the image, the tag is for the reader), or `<name>@<digest>`
+# where a consumer wants no tag.
+#
+# Usage:
+#   scripts/third-party-images.sh check
+#       Offline; the test (.github/workflows/ci.yaml, `shell` job). Scans the
+#       tracked and untracked-but-not-ignored files under SCAN_PATHS and fails on
+#         - an image referenced by tag only, or by no tag at all
+#         - a digest the inventory does not list for that name
+#         - a tag that disagrees with the inventory's tag for that digest
+#         - a pin, or an `allow` line, that nothing uses any more
+#       so a new image cannot arrive unpinned or unlisted.
+#   scripts/third-party-images.sh list
+#       Offline. Every pin and the files that use it.
+#   scripts/third-party-images.sh outdated [--newer-tags] [<name>...]
+#       Asks each pin's registry what its tag points at now. Anonymous: public
+#       repositories only, no credential is read from anywhere. Reports, per pin,
+#       `current`, `MOVED` (the tag was re-pushed: the new digest is printed) or
+#       `ERROR` (the registry did not answer; never reported as current), and
+#       says when the index no longer lists linux/amd64 and linux/arm64. With
+#       --newer-tags it also lists the registry's tags that sort after the
+#       pinned one and have its shape (8.22.0 -> 8.23.0, not `latest`).
+#       Exit 0: every pin is current. 1: a pin is behind. 2: a pin could not be
+#       checked.
+#   scripts/third-party-images.sh resolve <name>:<tag>...
+#       Prints the `pin` line for each, after checking the index lists both
+#       architectures. How a pin is added or moved; see docs/runbook.md,
+#       "Refreshing third-party image pins".
+#
+# Environment (tests set these; a normal run needs none):
+#   THIRD_PARTY_ROOT       the tree to scan (default: this script's repository)
+#   THIRD_PARTY_INVENTORY  the inventory (default: scripts/third-party-images.txt
+#                          under the root)
+#   JQ, CURL               the jq and curl to run (`outdated`, `resolve` only)
+set -uo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${THIRD_PARTY_ROOT:-$(cd -- "$HERE/.." && pwd)}"
+INVENTORY="${THIRD_PARTY_INVENTORY:-$ROOT/scripts/third-party-images.txt}"
+JQ="${JQ:-jq}"
+CURL="${CURL:-curl}"
+
+# Where an image reference can reach a cluster or a container runtime from:
+# the charts, the e2e harnesses and their manifests, the Go e2e and conformance
+# suites, and the one Go constant the testcontainers integration tests pull.
+# Go unit tests elsewhere name images that are never pulled (`app:v1` in a pod
+# fixture) and are deliberately not scanned.
+SCAN_PATHS=(charts e2e test registry/etcdtest)
+
+# Not scanned inside SCAN_PATHS: Bazel files and hermetic shell tests (their
+# image strings are patterns and fixtures: `kindest/node:$V@sha256:[0-9a-f]{64}`
+# in e2e/kind_pin_test.sh is a regular expression, and nothing a `*_test.sh`
+# names is ever pulled), and Markdown (prose). A Go `_test.go` IS scanned: the
+# e2e and conformance suites are Go tests, and they start what they name.
+is_scanned_file() {
+	case "$1" in
+	*/BUILD.bazel | *.bzl | *.md | *_test.sh) return 1 ;;
+	esac
+	return 0
+}
+
+die() {
+	echo "third-party-images: $*" >&2
+	exit 2
+}
+
+# --- the inventory -------------------------------------------------------------
+
+declare -A PIN_TAG=()  # "<name>@<digest>" -> tag
+declare -A PIN_USES=() # "<name>@<digest>" -> newline-separated "path:line"
+declare -a PIN_ORDER=()
+declare -A ALLOW=()      # "<path> <ref>" -> 1
+declare -A ALLOW_USED=() # "<path> <ref>" -> 1
+declare -a ALLOW_ORDER=()
+declare -a SKIP=()
+
+NAME_RE='^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-]+[a-z0-9]+)*)+$|^[a-z0-9]+([._-][a-z0-9]+)*$'
+TAG_RE='^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'
+DIGEST_RE='^sha256:[0-9a-f]{64}$'
+
+load_inventory() {
+	[ -f "$INVENTORY" ] || die "no inventory at $INVENTORY"
+	local n=0 kind a b c extra key
+	while IFS= read -r line || [ -n "$line" ]; do
+		n=$((n + 1))
+		line="${line%%#*}"
+		read -r kind a b c extra <<<"$line" || true
+		[ -n "${kind:-}" ] || continue
+		case "$kind" in
+		pin)
+			[ -n "${c:-}" ] && [ -z "${extra:-}" ] || die "$INVENTORY:$n: want 'pin <name> <tag> <digest>'"
+			[[ "$a" =~ $NAME_RE ]] || die "$INVENTORY:$n: '$a' is not an image name"
+			[[ "$b" =~ $TAG_RE ]] || die "$INVENTORY:$n: '$b' is not a tag"
+			[[ "$c" =~ $DIGEST_RE ]] || die "$INVENTORY:$n: '$c' is not sha256:<64 hex>"
+			key="$a@$c"
+			[ -z "${PIN_TAG[$key]:-}" ] || die "$INVENTORY:$n: $key is listed twice"
+			PIN_TAG[$key]="$b"
+			PIN_ORDER+=("$key")
+			;;
+		allow)
+			[ -n "${b:-}" ] && [ -z "${c:-}" ] || die "$INVENTORY:$n: want 'allow <path> <reference>'"
+			key="$a $b"
+			ALLOW[$key]=1
+			ALLOW_ORDER+=("$key")
+			;;
+		skip)
+			[ -n "${a:-}" ] && [ -z "${b:-}" ] || die "$INVENTORY:$n: want 'skip <path prefix>'"
+			SKIP+=("$a")
+			;;
+		*) die "$INVENTORY:$n: unknown line kind '$kind' (pin, allow, skip)" ;;
+		esac
+	done <"$INVENTORY"
+}
+
+# --- the scan ------------------------------------------------------------------
+
+# Every file under SCAN_PATHS, relative to the root. In a git work tree: tracked
+# files plus untracked ones git does not ignore, so a new manifest is judged
+# before it is committed. Elsewhere (a test's fixture tree): every file.
+scanned_files() {
+	local present=() p
+	for p in "${SCAN_PATHS[@]}"; do
+		[ -e "$ROOT/$p" ] && present+=("$p")
+	done
+	[ "${#present[@]}" -gt 0 ] || return 0
+	if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+		[ "$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null)" = "$ROOT" ]; then
+		git -C "$ROOT" ls-files --cached --others --exclude-standard -- "${present[@]}" |
+			while IFS= read -r p; do [ -f "$ROOT/$p" ] && printf '%s\n' "$p"; done
+	else
+		(cd "$ROOT" && find "${present[@]}" -type f)
+	fi | LC_ALL=C sort -u
+}
+
+is_skipped() {
+	local prefix
+	for prefix in "${SKIP[@]}"; do
+		case "$1" in "$prefix"*) return 0 ;; esac
+	done
+	return 1
+}
+
+# Prints "<path>\t<line>\t<reference>" for every literal image reference.
+#
+# Two nets, because no single pattern knows every way an image is named:
+#   1. the value after an `image` key or flag, in any of the spellings in use:
+#      YAML `image: x`, `--image=x` / `--image x`, a shell `FOO_IMAGE="x"` or
+#      `FOO_IMAGE="${FOO_IMAGE:-x}"`, Go `Image: "x"` and `Image = "x"`;
+#   2. any `<name>:<tag>` of a name the inventory already knows, wherever it
+#      stands, so a known image cannot come back by tag (or under a computed
+#      tag, `name:$TAG`) behind a key net 1 does not read.
+# Comment lines are not read: a comment may name the tag. A value that is not a
+# literal (`$VAR`, `{{ .Values.x }}`, a Bazel `{@//label}` stamp) is somebody
+# else's value and is judged where it is written down.
+#
+# What this cannot see: an image no pin names yet, written where no `image` key
+# or flag introduces it (a positional `docker run <image>`, a list of bare
+# names). Give such a reference a `*_IMAGE` variable, as e2e/etcd-image.sh does.
+extract_references() { # <names file>; file list on stdin
+	local files=() f
+	while IFS= read -r f; do
+		is_scanned_file "$f" || continue
+		is_skipped "$f" && continue
+		files+=("$f")
+	done
+	[ "${#files[@]}" -gt 0 ] || return 0
+	(cd "$ROOT" && awk -v names_file="$1" '
+		BEGIN {
+			while ((getline n < names_file) > 0) if (n != "") names[n] = 1
+			close(names_file)
+		}
+		function emit(ref) {
+			if (!((FILENAME, FNR, ref) in seen)) {
+				seen[FILENAME, FNR, ref] = 1
+				printf "%s\t%d\t%s\n", FILENAME, FNR, ref
+			}
+		}
+		/^[ \t]*(#|\/\/)/ { next }
+		{
+			rest = $0
+			at_start = 1
+			while (match(rest, /([Ii][Mm][Aa][Gg][Ee]["\047]?[ \t]*[:=][ \t]*|--image[ \t]+)/)) {
+				key = substr(rest, RSTART, RLENGTH)
+				lead = substr(rest, 1, RSTART - 1)
+				rest = substr(rest, RSTART + RLENGTH)
+				# A YAML key opens its line (`image: x`, `- image: x`, `"image": x`).
+				key_opens_line = (at_start && lead ~ /^[ \t]*(-[ \t]+)?["\047]?$/)
+				at_start = 0
+				ref = rest
+				quoted = sub(/^["\047]/, "", ref)
+				sub(/^\$\{[A-Za-z_][A-Za-z0-9_]*:-/, "", ref)
+				if (!match(ref, /^[^ \t"\047}),;]+/)) continue
+				ref = substr(ref, 1, RLENGTH)
+				# `image:` in the middle of a line is prose ("no image: line") unless
+				# a quoted value follows (Go: `{Name: "a", Image: "b"}`).
+				if (key ~ /:[ \t]*$/ && !key_opens_line && !quoted) continue
+				# Only a literal image reference is judged: a lower-case repository,
+				# then an optional :tag and @digest. That leaves out $VAR,
+				# {{ .Values.x }}, a {@//label} stamp, a Go identifier, a regex.
+				if (ref !~ /^[a-z0-9][a-z0-9._\/-]*(:[0-9]+\/[a-z0-9._\/-]+)?(:[A-Za-z0-9_][A-Za-z0-9._-]*)?(@[A-Za-z0-9:]+)?$/) continue
+				if (ref ~ /^(0|1|true|false|yes|no)$/) continue  # a switch named *_IMAGE
+				emit(ref)
+			}
+			for (n in names) {
+				rest = $0
+				while ((i = index(rest, n ":")) > 0) {
+					before = (i > 1) ? substr(rest, i - 1, 1) : ""
+					if (i > 2 && substr(rest, i - 2, 2) == ":-") before = ""  # ${VAR:-name:tag}
+					rest = substr(rest, i + length(n) + 1)
+					if (before ~ /[A-Za-z0-9._\/-]/) continue                 # a longer name
+					if (match(rest, /^(\$|\{\{)[^ \t"\047]*/)) {
+						# A known image under a computed tag is not pinned either.
+						emit(n ":" substr(rest, 1, RLENGTH))
+						continue
+					}
+					if (!match(rest, /^[A-Za-z0-9_][A-Za-z0-9._-]*/)) continue
+					tag = substr(rest, 1, RLENGTH)
+					after = substr(rest, RLENGTH + 1)
+					if (after ~ /^@sha256:[0-9a-f]/) {
+						match(after, /^@sha256:[0-9a-f]+/)
+						emit(n ":" tag substr(after, 1, RLENGTH))
+					} else {
+						emit(n ":" tag)
+					}
+				}
+			}
+		}
+	' "${files[@]}")
+}
+
+# split_reference <ref>: sets REF_NAME, REF_TAG, REF_DIGEST (empty when absent).
+split_reference() {
+	local ref="$1" rest
+	REF_DIGEST=""
+	REF_TAG=""
+	rest="$ref"
+	case "$rest" in *@*)
+		REF_DIGEST="${rest#*@}"
+		rest="${rest%%@*}"
+		;;
+	esac
+	case "${rest##*/}" in *:*)
+		REF_TAG="${rest##*:}"
+		rest="${rest%:*}"
+		;;
+	esac
+	REF_NAME="$rest"
+}
+
+FINDINGS=0
+finding() {
+	echo "FAIL: $*" >&2
+	FINDINGS=$((FINDINGS + 1))
+}
+
+# Reads the tree into PIN_USES / ALLOW_USED and reports every bad reference.
+scan() {
+	local names tmp path line ref key want nfiles=0 nrefs=0
+	tmp="$(mktemp -d)" || die "mktemp failed"
+	# shellcheck disable=SC2064 # expand now: $tmp is local
+	trap "rm -rf '$tmp'" EXIT
+	names="$tmp/names"
+	{
+		for key in "${PIN_ORDER[@]}"; do printf '%s\n' "${key%@*}"; done
+		for key in "${ALLOW_ORDER[@]}"; do
+			split_reference "${key#* }"
+			printf '%s\n' "$REF_NAME"
+		done
+	} | LC_ALL=C sort -u >"$names"
+	scanned_files >"$tmp/files" || die "could not list the files under ${SCAN_PATHS[*]}"
+	nfiles="$(wc -l <"$tmp/files" | tr -d ' ')"
+	extract_references "$names" <"$tmp/files" >"$tmp/refs" || die "the scan itself failed"
+	while IFS=$'\t' read -r path line ref; do
+		nrefs=$((nrefs + 1))
+		if [ -n "${ALLOW["$path $ref"]:-}" ]; then
+			ALLOW_USED["$path $ref"]=1
+			continue
+		fi
+		split_reference "$ref"
+		if [ -z "$REF_DIGEST" ]; then
+			if [ -n "$REF_TAG" ]; then
+				finding "$path:$line: $ref is pinned by tag only; write $REF_NAME:$REF_TAG@sha256:<index digest> and list it in ${INVENTORY#"$ROOT"/} ($0 resolve $ref)"
+			else
+				finding "$path:$line: $ref names no tag and no digest; write $REF_NAME:<tag>@sha256:<index digest> and list it in ${INVENTORY#"$ROOT"/}"
+			fi
+			continue
+		fi
+		if ! [[ "$REF_DIGEST" =~ $DIGEST_RE ]]; then
+			finding "$path:$line: $ref: '$REF_DIGEST' is not sha256:<64 hex>"
+			continue
+		fi
+		key="$REF_NAME@$REF_DIGEST"
+		want="${PIN_TAG[$key]:-}"
+		if [ -z "$want" ]; then
+			finding "$path:$line: $ref is not in ${INVENTORY#"$ROOT"/}; add 'pin $REF_NAME <tag> $REF_DIGEST', or use the digest it lists for $REF_NAME"
+			continue
+		fi
+		if [ -n "$REF_TAG" ] && [ "$REF_TAG" != "$want" ]; then
+			finding "$path:$line: $ref says tag $REF_TAG, but ${INVENTORY#"$ROOT"/} lists this digest as $REF_NAME:$want"
+			continue
+		fi
+		PIN_USES[$key]+="$path:$line"$'\n'
+	done <"$tmp/refs"
+	SCANNED_FILES="$nfiles"
+	SCANNED_REFS="$nrefs"
+}
+
+cmd_check() {
+	load_inventory
+	scan
+	local key
+	for key in "${PIN_ORDER[@]}"; do
+		[ -n "${PIN_USES[$key]:-}" ] ||
+			finding "${INVENTORY#"$ROOT"/}: pin ${key%@*} ${PIN_TAG[$key]} ${key#*@} is used by no file under ${SCAN_PATHS[*]}; remove the line"
+	done
+	for key in "${ALLOW_ORDER[@]}"; do
+		[ -n "${ALLOW_USED[$key]:-}" ] ||
+			finding "${INVENTORY#"$ROOT"/}: 'allow $key' matches nothing any more; remove the line"
+	done
+	# A scan that read nothing would pass by default: say so instead.
+	[ "$SCANNED_FILES" -gt 0 ] || finding "no file found under ${SCAN_PATHS[*]} in $ROOT; nothing was checked"
+	[ "$SCANNED_REFS" -gt 0 ] || finding "no image reference found under ${SCAN_PATHS[*]} in $ROOT; the scan reads nothing"
+	if [ "$FINDINGS" -gt 0 ]; then
+		echo "third-party-images: $FINDINGS finding(s)." >&2
+		return 1
+	fi
+	echo "OK: $SCANNED_REFS image reference(s) in $SCANNED_FILES file(s): ${#PIN_ORDER[@]} pinned image(s), ${#ALLOW_ORDER[@]} allowed exception(s), ${#SKIP[@]} skipped path(s)."
+}
+
+cmd_list() {
+	load_inventory
+	scan 2>/dev/null
+	local key
+	for key in "${PIN_ORDER[@]}"; do
+		printf '%s:%s@%s\n' "${key%@*}" "${PIN_TAG[$key]}" "${key#*@}"
+		printf '%s' "${PIN_USES[$key]:-}" | sed 's/^/    /'
+	done
+	for key in "${ALLOW_ORDER[@]}"; do
+		printf 'NOT PINNED %s (%s)\n' "${key#* }" "${key% *}"
+	done
+}
+
+# --- the registry (anonymous, read-only) ---------------------------------------
+
+ACCEPT='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+
+# registry_of <name>: sets REG_HOST and REG_REPO the way a container runtime
+# reads the name (no registry host means Docker Hub; one path segment there
+# means library/<name>).
+registry_of() {
+	local name="$1" first="${1%%/*}"
+	if [ "$first" != "$name" ] && [[ "$first" == *.* || "$first" == *:* || "$first" == localhost ]]; then
+		REG_HOST="$first"
+		REG_REPO="${name#*/}"
+	else
+		REG_HOST="registry-1.docker.io"
+		REG_REPO="$name"
+		[[ "$name" == */* ]] || REG_REPO="library/$name"
+	fi
+	[ "$REG_HOST" = docker.io ] && REG_HOST="registry-1.docker.io"
+	return 0
+}
+
+# One GET. No credential is ever sent: -q ignores ~/.curlrc, and nothing here
+# passes --netrc, -u or a Docker config. A bearer token, when there is one, is
+# the anonymous pull token the registry itself handed out.
+http_get() { # <url> <body out> <headers out> [<bearer token>]
+	local args=(-q -sS -L --max-time 60 --retry 2 -D "$3" -o "$2" -w '%{http_code}' -H "Accept: $ACCEPT")
+	[ -n "${4:-}" ] && args+=(-H "Authorization: Bearer $4")
+	"$CURL" "${args[@]}" "$1"
+}
+
+header_value() { # <headers file> <lower-case name>: the value in the LAST response
+	tr -d '\r' <"$1" | awk -v want="$2" '
+		/^HTTP\// { v = "" }
+		{ k = tolower($0); if (index(k, want ":") == 1) { v = substr($0, length(want) + 2); sub(/^[ \t]+/, "", v) } }
+		END { print v }'
+}
+
+# registry_get <host> <repo> <url> <body out> <headers out>: GET with the
+# anonymous token dance. Prints nothing; returns 0 on HTTP 200, 1 otherwise
+# with the reason in REG_ERROR.
+registry_get() {
+	local host="$1" repo="$2" url="$3" body="$4" hdr="$5" code challenge realm service scope token
+	REG_ERROR=""
+	code="$(http_get "$url" "$body" "$hdr")" || {
+		REG_ERROR="no answer from $host"
+		return 1
+	}
+	if [ "$code" = 401 ]; then
+		challenge="$(header_value "$hdr" www-authenticate)"
+		realm="$(printf '%s' "$challenge" | sed -n 's/.*realm="\([^"]*\)".*/\1/p')"
+		service="$(printf '%s' "$challenge" | sed -n 's/.*service="\([^"]*\)".*/\1/p')"
+		scope="$(printf '%s' "$challenge" | sed -n 's/.*scope="\([^"]*\)".*/\1/p')"
+		[ -n "$scope" ] || scope="repository:$repo:pull"
+		case "$realm" in
+		https://*) ;;
+		*)
+			REG_ERROR="$host answered 401 without a token endpoint (private repository?)"
+			return 1
+			;;
+		esac
+		code="$(http_get "$realm?service=$service&scope=$scope" "$body.token" "$hdr.token")" || code=000
+		token=""
+		[ "$code" = 200 ] && token="$("$JQ" -r '.token // .access_token // empty' "$body.token" 2>/dev/null)"
+		[ -n "$token" ] || {
+			REG_ERROR="$realm gave no anonymous pull token for $repo (HTTP $code; private repository?)"
+			return 1
+		}
+		code="$(http_get "$url" "$body" "$hdr" "$token")" || {
+			REG_ERROR="no answer from $host"
+			return 1
+		}
+	fi
+	[ "$code" = 200 ] || {
+		REG_ERROR="$url answered HTTP $code"
+		return 1
+	}
+}
+
+# tag_digest <name> <tag> <work dir>: sets TAG_DIGEST and TAG_PLATFORMS (a
+# space-separated os/arch list; empty for a single-platform manifest).
+tag_digest() {
+	local name="$1" tag="$2" work="$3" got header
+	TAG_DIGEST=""
+	TAG_PLATFORMS=""
+	registry_of "$name"
+	registry_get "$REG_HOST" "$REG_REPO" "https://$REG_HOST/v2/$REG_REPO/manifests/$tag" "$work/manifest" "$work/headers" || return 1
+	"$JQ" -e 'type == "object"' "$work/manifest" >/dev/null 2>&1 || {
+		REG_ERROR="$REG_HOST answered 200 for $name:$tag with something that is not a manifest"
+		return 1
+	}
+	got="sha256:$(sha256sum <"$work/manifest" | awk '{print $1}')"
+	header="$(header_value "$work/headers" docker-content-digest)"
+	if [ -n "$header" ] && [ "$header" != "$got" ]; then
+		REG_ERROR="$name:$tag: the registry says $header but the manifest it sent hashes to $got"
+		return 1
+	fi
+	TAG_DIGEST="$got"
+	TAG_PLATFORMS="$("$JQ" -r '[.manifests[]?.platform | select(. != null and .os != "unknown") | "\(.os)/\(.architecture)"] | unique | join(" ")' "$work/manifest")"
+}
+
+# Says what is wrong with a platform list, or nothing.
+platform_gap() { # <platform list>
+	local missing="" want
+	[ -n "$1" ] || {
+		echo "a single-platform manifest, not a multi-arch index"
+		return
+	}
+	for want in linux/amd64 linux/arm64; do
+		case " $1 " in *" $want "*) ;; *) missing+=" $want" ;; esac
+	done
+	[ -z "$missing" ] || echo "the index does not list${missing}"
+}
+
+# newer_tags <name> <tag> <work dir>: the registry's tags with the pinned tag's
+# shape (digits may differ, everything else must not) that sort after it.
+newer_tags() {
+	local name="$1" tag="$2" work="$3" url shape next pages=0
+	registry_of "$name"
+	: >"$work/tags"
+	url="https://$REG_HOST/v2/$REG_REPO/tags/list?n=1000"
+	while [ -n "$url" ]; do
+		pages=$((pages + 1))
+		[ "$pages" -le 50 ] || {
+			REG_ERROR="$name: more than 50 pages of tags"
+			return 1
+		}
+		registry_get "$REG_HOST" "$REG_REPO" "$url" "$work/taglist" "$work/tagheaders" || return 1
+		"$JQ" -r '.tags[]?' "$work/taglist" >>"$work/tags" || {
+			REG_ERROR="$name: the tag list is not JSON"
+			return 1
+		}
+		next="$(header_value "$work/tagheaders" link | sed -n 's/^<\([^>]*\)>;[ ]*rel="next".*/\1/p')"
+		case "$next" in
+		"") url="" ;;
+		https://*) url="$next" ;;
+		/*) url="https://$REG_HOST$next" ;;
+		*) url="" ;;
+		esac
+	done
+	shape="$(printf '%s' "$tag" | sed -e 's/[.]/\\./g' -e 's/[0-9][0-9]*/[0-9]+/g')"
+	{
+		grep -E -x -- "$shape" "$work/tags" || true
+		printf '%s\n' "$tag"
+	} | LC_ALL=C sort -u -V | awk -v pinned="$tag" 'found { print } $0 == pinned { found = 1 }'
+}
+
+need_network_tools() {
+	command -v "$JQ" >/dev/null 2>&1 || die "jq not found (JQ=$JQ)"
+	command -v "$CURL" >/dev/null 2>&1 || die "curl not found (CURL=$CURL)"
+	command -v sha256sum >/dev/null 2>&1 || die "sha256sum not found"
+}
+
+cmd_outdated() {
+	local with_newer=0 only=() key name tag digest gap newer work behind=0 errors=0 seen=0
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--newer-tags) with_newer=1 ;;
+		-*) die "outdated: unknown option $1" ;;
+		*) only+=("$1") ;;
+		esac
+		shift
+	done
+	need_network_tools
+	load_inventory
+	work="$(mktemp -d)" || die "mktemp failed"
+	# shellcheck disable=SC2064 # expand now: $work is local
+	trap "rm -rf '$work'" EXIT
+	wanted() {
+		[ "${#only[@]}" -eq 0 ] && return 0
+		local o
+		for o in "${only[@]}"; do [ "$o" = "$1" ] && return 0; done
+		return 1
+	}
+	for key in "${PIN_ORDER[@]}"; do
+		name="${key%@*}"
+		digest="${key#*@}"
+		tag="${PIN_TAG[$key]}"
+		wanted "$name" || continue
+		seen=$((seen + 1))
+		if ! tag_digest "$name" "$tag" "$work"; then
+			echo "ERROR    $name:$tag  $REG_ERROR"
+			errors=$((errors + 1))
+			continue
+		fi
+		if [ "$TAG_DIGEST" = "$digest" ]; then
+			echo "current  $name:$tag  $digest"
+		else
+			echo "MOVED    $name:$tag  pinned $digest, the tag now points at $TAG_DIGEST"
+			behind=$((behind + 1))
+		fi
+		gap="$(platform_gap "$TAG_PLATFORMS")"
+		[ -z "$gap" ] || echo "         $name:$tag  note: $gap"
+		if [ "$with_newer" = 1 ]; then
+			if newer="$(newer_tags "$name" "$tag" "$work")"; then
+				[ -z "$newer" ] || echo "         $name:$tag  newer tags: $(printf '%s' "$newer" | tr '\n' ' ')"
+			else
+				echo "ERROR    $name:$tag  tags: $REG_ERROR"
+				errors=$((errors + 1))
+			fi
+		fi
+	done
+	# What is not pinned at all is behind by definition; say where its tag is.
+	for key in "${ALLOW_ORDER[@]}"; do
+		split_reference "${key#* }"
+		wanted "$REF_NAME" || continue
+		[ -n "$REF_TAG" ] && [ -z "$REF_DIGEST" ] || continue
+		seen=$((seen + 1))
+		if tag_digest "$REF_NAME" "$REF_TAG" "$work"; then
+			echo "UNPINNED $REF_NAME:$REF_TAG  (${key% *}) the tag points at $TAG_DIGEST"
+		else
+			echo "ERROR    $REF_NAME:$REF_TAG  $REG_ERROR"
+			errors=$((errors + 1))
+		fi
+	done
+	[ "$seen" -gt 0 ] || die "outdated: no pin matches ${only[*]:-the inventory}"
+	echo "$seen checked: $behind behind, $errors could not be checked."
+	[ "$errors" -eq 0 ] || return 2
+	[ "$behind" -eq 0 ] || return 1
+}
+
+cmd_resolve() {
+	[ "$#" -gt 0 ] || die "resolve: want <name>:<tag>..."
+	need_network_tools
+	local work ref gap rc=0
+	work="$(mktemp -d)" || die "mktemp failed"
+	# shellcheck disable=SC2064 # expand now: $work is local
+	trap "rm -rf '$work'" EXIT
+	for ref in "$@"; do
+		split_reference "$ref"
+		[ -n "$REF_TAG" ] && [ -z "$REF_DIGEST" ] || die "resolve: '$ref' is not <name>:<tag>"
+		if ! tag_digest "$REF_NAME" "$REF_TAG" "$work"; then
+			echo "ERROR $ref: $REG_ERROR" >&2
+			rc=2
+			continue
+		fi
+		gap="$(platform_gap "$TAG_PLATFORMS")"
+		if [ -n "$gap" ]; then
+			echo "# $ref: $gap" >&2
+			[ "$rc" -ne 0 ] || rc=1
+		fi
+		echo "pin $REF_NAME $REF_TAG $TAG_DIGEST"
+	done
+	return "$rc"
+}
+
+case "${1:-}" in
+check)
+	shift
+	cmd_check "$@"
+	;;
+list)
+	shift
+	cmd_list "$@"
+	;;
+outdated)
+	shift
+	cmd_outdated "$@"
+	;;
+resolve)
+	shift
+	cmd_resolve "$@"
+	;;
+*)
+	sed -n '2,/^set -uo/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//' >&2
+	exit 2
+	;;
+esac

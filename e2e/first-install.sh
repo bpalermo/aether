@@ -359,7 +359,7 @@ verify_docs() {
 verify_enforcement() {
 	log "ii. Pod Security admission is enforced where a namespace says nothing"
 	local out
-	out="$(kc -n default run first-install-psa-probe --image=registry.k8s.io/pause:3.10 \
+	out="$(kc -n default run first-install-psa-probe --image=registry.k8s.io/pause:3.10@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a \
 		--overrides='{"spec":{"hostNetwork":true}}' --dry-run=server 2>&1 || true)"
 	case "$out" in
 	*'violates PodSecurity "baseline'*) ok "a hostNetwork pod is refused in an unlabelled namespace" ;;

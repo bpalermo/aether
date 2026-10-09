@@ -1,0 +1,557 @@
+#!/usr/bin/env bash
+# Hermetic test of scripts/third-party-images.sh (#1400, #1401): no network, no
+# registry, no credentials. Three halves:
+#
+#   1. `check` over throwaway trees: a tree whose every reference agrees with
+#      its inventory passes, and each way of being unpinned or unlisted fails
+#      with the file and line: a tag alone, no tag at all, a digest the
+#      inventory does not list, a tag that disagrees with it, in every spelling
+#      the scan reads (YAML, --image, a shell *_IMAGE default, Go), a known
+#      image by tag behind a key the scan does not read, a pin or an exception
+#      nothing uses, and a scan that read nothing.
+#   2. `outdated` and `resolve` against a fake `curl` that plays the registries:
+#      a tag that still points at the pin, one that moved, a registry that is
+#      down or answers with something that is not a manifest (never "current"),
+#      the anonymous token dance, an index short of an architecture, newer tags
+#      across two pages of a tag list.
+#   3. no credential: every fake-registry call is logged, and none carries one.
+#
+# Run: bazel test //scripts:third_party_images_test (jq is the Bazel-pinned
+# one), or bash scripts/third_party_images_test.sh with jq on PATH.
+#
+# File-wide: the fixture lines below are literal shell, YAML and Markdown written
+# into throwaway files ('C_IMAGE="${C_IMAGE:-x/y:1.2}"'); none is meant to expand
+# here.
+# shellcheck disable=SC2016
+set -uo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$HERE/third-party-images.sh"
+REAL_INVENTORY="$HERE/third-party-images.txt"
+
+if [ -n "${JQ_RLOCATIONPATH:-}" ]; then
+	JQ="${TEST_SRCDIR:-${RUNFILES_DIR:-$PWD/..}}/${JQ_RLOCATIONPATH}"
+fi
+JQ="${JQ:-$(command -v jq)}"
+[ -x "$JQ" ] || {
+	echo "FAIL: no jq (JQ=${JQ})"
+	exit 1
+}
+export JQ
+
+TMP="$(cd "$(mktemp -d)" && pwd -P)"
+trap 'rm -rf "$TMP"' EXIT
+
+FAILS=0
+CASES=0
+ok() {
+	CASES=$((CASES + 1))
+	echo "ok   $*"
+}
+bad() {
+	CASES=$((CASES + 1))
+	FAILS=$((FAILS + 1))
+	echo "FAIL $*"
+}
+
+D1="sha256:$(printf '1%.0s' {1..64})"
+D2="sha256:$(printf '2%.0s' {1..64})"
+D3="sha256:$(printf '3%.0s' {1..64})"
+D9="sha256:$(printf '9%.0s' {1..64})"
+
+# --- 1. check ------------------------------------------------------------------
+
+# new_tree <dir>: a tree in which every reference is pinned and listed.
+new_tree() {
+	local t="$1"
+	rm -rf "$t"
+	mkdir -p "$t/scripts" "$t/charts/x/templates" "$t/e2e/sub" "$t/test/e2e" "$t/registry/etcdtest" "$t/other"
+	cat >"$t/scripts/third-party-images.txt" <<EOF
+# a comment
+pin a/b 1.0 $D1   # trailing comment
+pin quay.io/c/d v2 $D2
+pin registry.k8s.io/pause 3.10 $D3
+EOF
+	cat >"$t/charts/x/values.yaml" <<EOF
+image:
+  ref: "{@//x:image_push}"
+client:
+  # a/b:1.0 is the tag; a comment may say so
+  image: a/b:1.0@$D1
+EOF
+	cat >"$t/charts/x/templates/x.yaml" <<'EOF'
+          image: {{ .Values.client.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+EOF
+	cat >"$t/e2e/run.sh" <<EOF
+#!/usr/bin/env bash
+D_IMAGE="\${D_IMAGE:-quay.io/c/d:v2@$D2}"
+EVICT_IMAGE="\${X_EVICT_IMAGE:-1}"
+echo "(X_EVICT_IMAGE=\$EVICT_IMAGE: the image stays cached)"
+err "\$CFG: \$nodes node(s) but \$images image: line(s)"
+kubectl run p --image=registry.k8s.io/pause:3.10@$D3 --restart=Never
+kind create cluster --image "\$KIND_NODE_IMAGE"
+cat <<YAML
+      image: \$D_IMAGE
+      image: \${IMAGE_REGISTRY}/local:latest
+YAML
+EOF
+	cat >"$t/test/e2e/x_test.go" <<EOF
+package e2e
+
+var agentImage = envOrDefault("AGENT_IMAGE", defaultAgentImage)
+
+// Image: "nginx" in a comment is not read.
+var c = Container{
+	Image: "a/b@$D1",
+}
+var d = Container{Name: "x", Image: agentImage}
+EOF
+	# Not scanned: Bazel files, a shell test's patterns, prose, and anything
+	# outside the scan paths.
+	echo 'patterns = ["image: \"a/b:9\""]' >"$t/e2e/BUILD.bazel"
+	echo 'want_re="^a/b:${V}@sha256:[0-9a-f]{64}$"' >"$t/e2e/pin_test.sh"
+	echo 'Use `image: nginx` for a quick try.' >"$t/e2e/README.md"
+	echo 'image: nginx' >"$t/other/pod.yaml"
+}
+
+run_check() { # <tree>: sets RC and OUT
+	OUT="$(THIRD_PARTY_ROOT="$1" "$SCRIPT" check 2>&1)"
+	RC=$?
+}
+
+# expect_fail <name> <tree> <needle>...: check fails (1) and says every needle.
+expect_fail() {
+	local name="$1" tree="$2" needle
+	shift 2
+	run_check "$tree"
+	if [ "$RC" -ne 1 ]; then
+		bad "$name: exit $RC, want 1"$'\n'"$OUT"
+		return
+	fi
+	for needle in "$@"; do
+		case "$OUT" in *"$needle"*) ;; *)
+			bad "$name: output lacks '$needle'"$'\n'"$OUT"
+			return
+			;;
+		esac
+	done
+	ok "$name"
+}
+
+T="$TMP/tree"
+new_tree "$T"
+run_check "$T"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 4 image reference(s) in "*": 3 pinned image(s), 0 allowed exception(s), 0 skipped path(s)." ]]; then
+	ok "a tree whose references all agree with the inventory passes"
+else
+	bad "clean tree: exit $RC"$'\n'"$OUT"
+fi
+
+# list: every pin with its uses.
+OUT="$(THIRD_PARTY_ROOT="$T" "$SCRIPT" list 2>&1)"
+want="a/b:1.0@$D1
+    charts/x/values.yaml:5
+    test/e2e/x_test.go:7
+quay.io/c/d:v2@$D2
+    e2e/run.sh:2
+registry.k8s.io/pause:3.10@$D3
+    e2e/run.sh:6"
+if [ "$OUT" = "$want" ]; then ok "list prints every pin with the files and lines that use it"; else bad "list:"$'\n'"$OUT"; fi
+
+# Each mutation: one more line in one file of a fresh clean tree.
+mutate() { # <name> <relative file> <line> <needle>...
+	local name="$1" file="$2" line="$3"
+	shift 3
+	new_tree "$T"
+	mkdir -p "$(dirname "$T/$file")"
+	printf '%s\n' "$line" >>"$T/$file"
+	expect_fail "$name" "$T" "$@"
+}
+
+mutate "YAML image by tag only" charts/x/values.yaml "  image: x/y:1.2" \
+	"charts/x/values.yaml:6: x/y:1.2 is pinned by tag only"
+mutate "YAML list item, quoted, by tag only" e2e/sub/pod.yaml '  - image: "x/y:1.2"' \
+	"e2e/sub/pod.yaml:1: x/y:1.2 is pinned by tag only"
+mutate "YAML image with no tag at all" e2e/sub/pod.yaml "      image: nginx" \
+	"e2e/sub/pod.yaml:1: nginx names no tag and no digest"
+mutate "a digest the inventory does not list" e2e/sub/pod.yaml "      image: x/y:1.2@$D9" \
+	"e2e/sub/pod.yaml:1: x/y:1.2@$D9 is not in scripts/third-party-images.txt"
+mutate "a listed name under another digest" e2e/sub/pod.yaml "      image: a/b:1.0@$D9" \
+	"e2e/sub/pod.yaml:1: a/b:1.0@$D9 is not in scripts/third-party-images.txt"
+mutate "a tag that disagrees with the inventory" e2e/sub/pod.yaml "      image: a/b:1.1@$D1" \
+	"says tag 1.1, but scripts/third-party-images.txt lists this digest as a/b:1.0"
+mutate "a malformed digest" e2e/sub/pod.yaml "      image: a/b:1.0@sha256:abc" \
+	"is not sha256:<64 hex>"
+mutate "shell *_IMAGE assignment by tag" e2e/run.sh 'C_IMAGE="x/y:1.2"' \
+	"e2e/run.sh:12: x/y:1.2 is pinned by tag only"
+mutate "shell *_IMAGE default by tag" e2e/run.sh 'C_IMAGE="${C_IMAGE:-x/y:1.2}"' \
+	"e2e/run.sh:12: x/y:1.2 is pinned by tag only"
+mutate "--image=<tag>" e2e/run.sh 'kubectl run q --image=x/y:1.2' \
+	"e2e/run.sh:12: x/y:1.2 is pinned by tag only"
+mutate "--image <tag>" e2e/run.sh 'kubectl run q --image x/y:1.2 --restart=Never' \
+	"e2e/run.sh:12: x/y:1.2 is pinned by tag only"
+mutate "Go field by tag" test/e2e/x_test.go '	Image: "x/y:1.2",' \
+	"test/e2e/x_test.go:10: x/y:1.2 is pinned by tag only"
+mutate "Go field in the middle of a line" test/e2e/x_test.go 'var e = Container{Name: "x", Image: "x/y:1.2"}' \
+	"test/e2e/x_test.go:10: x/y:1.2 is pinned by tag only"
+mutate "Go constant by tag" registry/etcdtest/etcdtest.go 'const Image = "gcr.io/x/etcd:v3"' \
+	"registry/etcdtest/etcdtest.go:1: gcr.io/x/etcd:v3 is pinned by tag only"
+mutate "a registry with a port" e2e/sub/pod.yaml "      image: localhost:5000/x/y:1" \
+	"localhost:5000/x/y:1 is pinned by tag only"
+mutate "a known image by tag behind a key the scan does not read" e2e/run.sh 'docker run --rm a/b:1.0 true' \
+	"e2e/run.sh:12: a/b:1.0 is pinned by tag only"
+mutate "a known image under a computed tag" e2e/run.sh 'docker run --rm "a/b:${B_TAG}" true' \
+	'e2e/run.sh:12: a/b:${B_TAG} is pinned by tag only'
+
+# A pin nothing uses.
+new_tree "$T"
+echo "pin x/unused 1 $D9" >>"$T/scripts/third-party-images.txt"
+expect_fail "a pin that no file uses" "$T" "pin x/unused 1 $D9 is used by no file"
+
+# allow: this reference, in this file, and nowhere else.
+new_tree "$T"
+echo "  image: x/y:1.2" >>"$T/charts/x/values.yaml"
+echo "allow charts/x/values.yaml x/y:1.2 # cannot be pinned: reason" >>"$T/scripts/third-party-images.txt"
+run_check "$T"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == *"1 allowed exception(s)"* ]]; then ok "an allowed exception passes"; else bad "allow: exit $RC"$'\n'"$OUT"; fi
+echo "      image: x/y:1.2" >"$T/e2e/sub/pod.yaml"
+expect_fail "an exception covers its own file only" "$T" "e2e/sub/pod.yaml:1: x/y:1.2 is pinned by tag only"
+new_tree "$T"
+echo "allow charts/x/values.yaml x/y:1.2" >>"$T/scripts/third-party-images.txt"
+expect_fail "an exception that matches nothing any more" "$T" "'allow charts/x/values.yaml x/y:1.2' matches nothing any more"
+
+# skip: nothing under the prefix is read.
+new_tree "$T"
+echo "      image: x/y:1.2" >"$T/e2e/sub/pod.yaml"
+echo "skip e2e/sub/" >>"$T/scripts/third-party-images.txt"
+run_check "$T"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == *"1 skipped path(s)"* ]]; then ok "a skipped path is not read"; else bad "skip: exit $RC"$'\n'"$OUT"; fi
+
+# A scan that reads nothing must not pass.
+rm -rf "$TMP/empty"
+mkdir -p "$TMP/empty/scripts"
+: >"$TMP/empty/scripts/third-party-images.txt"
+expect_fail "a tree with nothing to scan" "$TMP/empty" "nothing was checked"
+
+# A malformed inventory is an error (2), not a finding.
+for line in "pin a/b 1.0" "pin a/b 1.0 sha256:abc" "pin A/B 1.0 $D1" "pin a/b 1.0 $D1 extra" "allow only-a-path" "frobnicate x"; do
+	new_tree "$T"
+	echo "$line" >>"$T/scripts/third-party-images.txt"
+	run_check "$T"
+	if [ "$RC" -eq 2 ] && [[ "$OUT" == *"scripts/third-party-images.txt:5:"* ]]; then
+		ok "inventory line '$line' is refused with its line number"
+	else
+		bad "inventory line '$line': exit $RC"$'\n'"$OUT"
+	fi
+done
+new_tree "$T"
+echo "pin a/b 1.0 $D1" >>"$T/scripts/third-party-images.txt"
+run_check "$T"
+if [ "$RC" -eq 2 ] && [[ "$OUT" == *"listed twice"* ]]; then ok "a pin listed twice is refused"; else bad "duplicate pin: exit $RC"$'\n'"$OUT"; fi
+
+# In a git work tree the scan follows git: an untracked file counts before it is
+# committed, an ignored one does not.
+if command -v git >/dev/null 2>&1; then
+	new_tree "$T"
+	git -C "$T" init -q 2>/dev/null
+	echo "ignored/" >"$T/e2e/.gitignore"
+	mkdir -p "$T/e2e/ignored"
+	echo "      image: x/y:1.2" >"$T/e2e/ignored/pod.yaml"
+	run_check "$T"
+	if [ "$RC" -eq 0 ]; then ok "git: an ignored file is not read"; else bad "git ignored: exit $RC"$'\n'"$OUT"; fi
+	echo "      image: x/y:1.2" >"$T/e2e/sub/new.yaml"
+	expect_fail "git: an untracked file is read before it is committed" "$T" "e2e/sub/new.yaml:1: x/y:1.2 is pinned by tag only"
+	rm -rf "$T/.git"
+else
+	echo "skip git cases: no git on PATH"
+fi
+
+# The checked-in inventory parses (exit 1 for unused pins here, never 2).
+new_tree "$T"
+OUT="$(THIRD_PARTY_ROOT="$T" THIRD_PARTY_INVENTORY="$REAL_INVENTORY" "$SCRIPT" check 2>&1)"
+RC=$?
+if [ "$RC" -eq 1 ] && [[ "$OUT" == *"is used by no file"* ]]; then ok "the checked-in inventory parses"; else bad "real inventory: exit $RC"$'\n'"$OUT"; fi
+
+# --- 2. the registry -----------------------------------------------------------
+
+FAKE="$TMP/fake"
+BIN="$TMP/bin"
+mkdir -p "$BIN"
+# The fake registry. Serves $FAKE/<host>/<repo>/manifests/<tag> and
+# .../tags/<page>, per-host behaviour from $FAKE/<host>/mode:
+#   open    no authentication
+#   token   401 + a Bearer challenge until the anonymous token is presented
+#   closed  401 + a challenge whose token endpoint refuses
+#   down    HTTP 503
+# Logs every call (arguments and all) to $FAKE/calls.
+cat >"$BIN/curl" <<'FAKECURL'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >>"$FAKE/calls"
+out="" hdr="" auth="" url=""
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	-o) out="$2"; shift ;;
+	-D) hdr="$2"; shift ;;
+	-w | --max-time | --retry) shift ;;
+	-H) case "$2" in Authorization:*) auth="${2#Authorization: }" ;; esac; shift ;;
+	-*) ;;
+	*) url="$1" ;;
+	esac
+	shift
+done
+rest="${url#https://}"
+host="${rest%%/*}"
+path="/${rest#*/}"
+reply() { # <code> [<header>...]; body on stdin
+	local code="$1"
+	shift
+	{
+		printf 'HTTP/2 %s\r\n' "$code"
+		for h in "$@"; do printf '%s\r\n' "$h"; done
+		printf '\r\n'
+	} >"$hdr"
+	cat >"$out"
+	printf '%s' "$code"
+	exit 0
+}
+case "$host" in
+auth.*)
+	registry="${host#auth.}"
+	[ "$(cat "$FAKE/$registry/mode" 2>/dev/null)" = closed ] && reply 401 <<<'{"errors":[]}'
+	scope="${path#*scope=}"
+	reply 200 <<<"{\"token\":\"anon:${scope}\"}"
+	;;
+esac
+mode="$(cat "$FAKE/$host/mode" 2>/dev/null || echo open)"
+[ "$mode" = unreachable ] && exit 6
+[ "$mode" = down ] && reply 503 <<<'Service Unavailable'
+repo="${path#/v2/}"
+case "$repo" in
+*/manifests/*) kind=manifests; item="${repo##*/manifests/}"; repo="${repo%/manifests/*}" ;;
+*/tags/list*) kind=tags; item="${repo##*/tags/list}"; repo="${repo%/tags/list*}" ;;
+*) reply 404 <<<'not found' ;;
+esac
+if [ "$mode" = token ] || [ "$mode" = closed ]; then
+	if [ "$auth" != "Bearer anon:repository:${repo}:pull" ]; then
+		reply 401 <<<'{"errors":[{"code":"UNAUTHORIZED"}]}' \
+			"Www-Authenticate: Bearer realm=\"https://auth.${host}/token\",service=\"${host}\",scope=\"repository:${repo}:pull\""
+	fi
+fi
+if [ "$kind" = manifests ]; then
+	f="$FAKE/$host/$repo/manifests/$item"
+	[ -f "$f" ] || reply 404 <<<'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}'
+	digest="sha256:$(sha256sum <"$f" | awk '{print $1}')"
+	[ -f "$f.digest" ] && digest="$(cat "$f.digest")"
+	reply 200 "Docker-Content-Digest: $digest" <"$f"
+fi
+page=1
+case "$item" in *"last="*) page=2 ;; esac
+f="$FAKE/$host/$repo/tags/$page"
+[ -f "$f" ] || reply 404 <<<'{"errors":[]}'
+if [ "$page" = 1 ] && [ -f "$FAKE/$host/$repo/tags/2" ]; then
+	reply 200 "Link: </v2/${repo}/tags/list?n=1000&last=x>; rel=\"next\"" <"$f"
+fi
+reply 200 <"$f"
+FAKECURL
+chmod +x "$BIN/curl"
+
+index() { # <os/arch>...: an image index naming those platforms
+	local p first=1
+	printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":['
+	for p in "$@"; do
+		[ "$first" = 1 ] || printf ','
+		first=0
+		printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%064d","size":1,"platform":{"os":"%s","architecture":"%s"}}' "$RANDOM" "${p%/*}" "${p#*/}"
+	done
+	# An attestation manifest, as buildx pushes them: not a platform.
+	printf ',{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%064d","size":1,"platform":{"os":"unknown","architecture":"unknown"}}]}\n' 7
+}
+serve() { # <host> <repo> <tag> <os/arch>...: prints the digest it serves
+	local dir="$FAKE/$1/$2/manifests" tag="$3"
+	shift 3
+	mkdir -p "$dir"
+	index "$@" >"$dir/$tag"
+	echo "sha256:$(sha256sum <"$dir/$tag" | awk '{print $1}')"
+}
+tags() { # <host> <repo> <page> <tag>...
+	local dir="$FAKE/$1/$2/tags" page="$3"
+	shift 3
+	mkdir -p "$dir"
+	printf '%s\n' "$@" | "$JQ" -R . | "$JQ" -s '{name: "x", tags: .}' >"$dir/$page"
+}
+
+# A home directory holding credentials the tool must never read or send.
+SENTINEL="s3cr3t-must-not-leak"
+mkdir -p "$TMP/home/.docker"
+echo "{\"auths\":{\"registry-1.docker.io\":{\"auth\":\"$SENTINEL\"}}}" >"$TMP/home/.docker/config.json"
+echo "machine registry-1.docker.io login u password $SENTINEL" >"$TMP/home/.netrc"
+echo "user = u:$SENTINEL" >"$TMP/home/.curlrc"
+
+INV="$TMP/inventory.txt"
+registry() { # outdated|resolve ...: sets RC and OUT
+	OUT="$(HOME="$TMP/home" DOCKER_CONFIG="$TMP/home/.docker" PATH="$BIN:$PATH" FAKE="$FAKE" \
+		THIRD_PARTY_ROOT="$TMP/tree" THIRD_PARTY_INVENTORY="$INV" "$SCRIPT" "$@" 2>&1)"
+	RC=$?
+}
+says() { # <name> <want rc> <needle>...
+	local name="$1" want="$2" needle
+	shift 2
+	if [ "$RC" -ne "$want" ]; then
+		bad "$name: exit $RC, want $want"$'\n'"$OUT"
+		return
+	fi
+	for needle in "$@"; do
+		case "$OUT" in *"$needle"*) ;; *)
+			bad "$name: output lacks '$needle'"$'\n'"$OUT"
+			return
+			;;
+		esac
+	done
+	ok "$name"
+}
+reset_fake() {
+	rm -rf "$FAKE"
+	mkdir -p "$FAKE"
+	: >"$FAKE/calls"
+}
+
+BOTH=(linux/amd64 linux/arm64)
+
+# Every pin current: Docker Hub (token), a library/ image, gcr.io (open).
+reset_fake
+mkdir -p "$FAKE/registry-1.docker.io" "$FAKE/gcr.io"
+echo token >"$FAKE/registry-1.docker.io/mode"
+d_curl="$(serve registry-1.docker.io curlimages/curl 8.22.0 "${BOTH[@]}")"
+d_busy="$(serve registry-1.docker.io library/busybox 1.36 "${BOTH[@]}" linux/s390x)"
+d_echo="$(serve gcr.io proj/echo v1 "${BOTH[@]}")"
+cat >"$INV" <<EOF
+pin curlimages/curl 8.22.0 $d_curl
+pin busybox 1.36 $d_busy
+pin gcr.io/proj/echo v1 $d_echo
+EOF
+registry outdated
+says "outdated: every pin current, through the anonymous token dance" 0 \
+	"current  curlimages/curl:8.22.0  $d_curl" "current  busybox:1.36  $d_busy" \
+	"current  gcr.io/proj/echo:v1  $d_echo" "3 checked: 0 behind, 0 could not be checked."
+if grep -q 'https://registry-1.docker.io/v2/library/busybox/manifests/1.36' "$FAKE/calls" &&
+	grep -q 'https://auth.registry-1.docker.io/token?service=registry-1.docker.io&scope=repository:curlimages/curl:pull' "$FAKE/calls" &&
+	grep -q 'https://gcr.io/v2/proj/echo/manifests/v1' "$FAKE/calls"; then
+	ok "names resolve the way a runtime reads them (Docker Hub, library/, another registry)"
+else
+	bad "registry URLs:"$'\n'"$(cat "$FAKE/calls")"
+fi
+
+# The tag was re-pushed.
+d_new="$(serve registry-1.docker.io curlimages/curl 8.22.0 "${BOTH[@]}" linux/riscv64)"
+registry outdated
+says "outdated: a re-pushed tag is MOVED, with the new digest, exit 1" 1 \
+	"MOVED    curlimages/curl:8.22.0  pinned $d_curl, the tag now points at $d_new" "3 checked: 1 behind, 0 could not be checked."
+registry outdated gcr.io/proj/echo
+says "outdated <name>: only that pin" 0 "1 checked: 0 behind"
+registry outdated no/such
+says "outdated <name>: an unknown name is an error" 2 "no pin matches no/such"
+
+# An index short of an architecture, and a single-platform manifest.
+serve gcr.io proj/echo v1 linux/amd64 >/dev/null
+registry outdated gcr.io/proj/echo
+says "outdated: says when the index no longer lists an architecture" 1 "note: the index does not list linux/arm64"
+echo '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{},"layers":[]}' >"$FAKE/gcr.io/proj/echo/manifests/v1"
+registry outdated gcr.io/proj/echo
+says "outdated: says when the tag is a single-platform manifest" 1 "note: a single-platform manifest, not a multi-arch index"
+
+# A registry that does not answer with a manifest is never "current".
+not_current() { # <name> <needle>
+	registry outdated gcr.io/proj/echo
+	if [[ "$OUT" == *"current  gcr.io"* ]]; then
+		bad "$1: reported current"$'\n'"$OUT"
+	else
+		says "$1" 2 "ERROR    gcr.io/proj/echo:v1" "$2" "1 checked: 0 behind, 1 could not be checked."
+	fi
+}
+d_echo="$(serve gcr.io proj/echo v1 "${BOTH[@]}")"
+echo "pin gcr.io/proj/echo v1 $d_echo" >"$INV"
+echo down >"$FAKE/gcr.io/mode"
+not_current "outdated: a 503 is an error, exit 2" "answered HTTP 503"
+echo unreachable >"$FAKE/gcr.io/mode"
+not_current "outdated: no connection is an error" "no answer from gcr.io"
+echo closed >"$FAKE/gcr.io/mode"
+not_current "outdated: a repository that hands out no anonymous token is an error" "gave no anonymous pull token"
+echo open >"$FAKE/gcr.io/mode"
+echo '<html>502 Bad Gateway</html>' >"$FAKE/gcr.io/proj/echo/manifests/v1"
+not_current "outdated: a 200 that is not a manifest is an error" "something that is not a manifest"
+serve gcr.io proj/echo v1 "${BOTH[@]}" >/dev/null
+echo "$d_echo" >"$FAKE/gcr.io/proj/echo/manifests/v1.digest"
+not_current "outdated: a digest header that disagrees with the body is an error" "hashes to"
+rm -f "$FAKE/gcr.io/proj/echo/manifests/v1.digest"
+rm -f "$FAKE/gcr.io/proj/echo/manifests/v1"
+not_current "outdated: a tag that is gone is an error" "answered HTTP 404"
+
+# Newer tags: the pinned tag's shape only, version order, across two pages.
+d_echo="$(serve gcr.io proj/echo 8.22.0 "${BOTH[@]}")"
+echo "pin gcr.io/proj/echo 8.22.0 $d_echo" >"$INV"
+tags gcr.io proj/echo 1 latest 8.9.0 8.22.0 8.23.0 8.23.0-rc1 8.100.1 v8.30.0 8.22
+tags gcr.io proj/echo 2 9.0.0 8.22.0.1
+registry outdated --newer-tags
+says "outdated --newer-tags: same shape, version order, both pages" 0 \
+	"current  gcr.io/proj/echo:8.22.0" "gcr.io/proj/echo:8.22.0  newer tags: 8.23.0 8.100.1 9.0.0"
+for unwanted in latest rc1 v8.30.0 "8.9.0" "8.22.0.1"; do
+	[[ "${OUT#*newer tags:}" == *"$unwanted"* ]] && bad "newer tags include $unwanted: $OUT"
+done
+tags gcr.io proj/echo 1 8.22.0 8.1.0
+rm -f "$FAKE/gcr.io/proj/echo/tags/2"
+registry outdated --newer-tags
+if [ "$RC" -eq 0 ] && [[ "$OUT" != *"newer tags"* ]]; then ok "outdated --newer-tags: silent when nothing is newer"; else bad "no newer tag: exit $RC"$'\n'"$OUT"; fi
+rm -rf "$FAKE/gcr.io/proj/echo/tags"
+registry outdated --newer-tags
+says "outdated --newer-tags: a tag list that cannot be read is an error" 2 "ERROR    gcr.io/proj/echo:8.22.0  tags:"
+
+# What is allowed to stay a tag is reported with where its tag points.
+cat >"$INV" <<EOF
+pin gcr.io/proj/echo 8.22.0 $d_echo
+allow charts/x/values.yaml gcr.io/proj/echo:8.22.0
+EOF
+registry outdated
+says "outdated: an unpinned exception is reported with its tag's digest" 0 \
+	"UNPINNED gcr.io/proj/echo:8.22.0  (charts/x/values.yaml) the tag points at $d_echo"
+
+# resolve: the inventory line for a tag.
+registry resolve gcr.io/proj/echo:8.22.0
+says "resolve prints the pin line" 0 "pin gcr.io/proj/echo 8.22.0 $d_echo"
+d_one="$(serve gcr.io proj/echo 1-amd linux/amd64)"
+registry resolve gcr.io/proj/echo:1-amd
+says "resolve: an index short of an architecture is said, exit 1" 1 \
+	"# gcr.io/proj/echo:1-amd: the index does not list linux/arm64" "pin gcr.io/proj/echo 1-amd $d_one"
+registry resolve gcr.io/proj/echo:nope
+says "resolve: a tag that does not exist is an error, and prints no pin" 2 "ERROR gcr.io/proj/echo:nope"
+[[ "$OUT" == *"pin gcr.io/proj/echo nope"* ]] && bad "resolve printed a pin for a missing tag"
+registry resolve gcr.io/proj/echo
+says "resolve: a name without a tag is refused" 2 "is not <name>:<tag>"
+
+# --- 3. no credential, ever ----------------------------------------------------
+
+if grep -q -- "$SENTINEL" "$FAKE/calls"; then
+	bad "a credential from the home directory reached a registry call"
+else
+	ok "no credential from ~/.docker, ~/.netrc or ~/.curlrc reached a call"
+fi
+if grep -Ev '^-q ' "$FAKE/calls" | grep -q .; then
+	bad "a curl call does not start with -q (it would read ~/.curlrc):"$'\n'"$(grep -Ev '^-q ' "$FAKE/calls" | head -3)"
+else
+	ok "every curl call starts with -q"
+fi
+if grep -Eq -- '(^| )(-u|--user|--netrc|--netrc-file|--netrc-optional|-n|--config|-K|--oauth2-bearer|--cert|-E)( |$)' "$FAKE/calls"; then
+	bad "a curl call passes a credential option"
+else
+	ok "no curl call passes a credential option"
+fi
+if grep -F 'Authorization:' "$FAKE/calls" | grep -Fv 'Authorization: Bearer anon:' | grep -q .; then
+	bad "an Authorization header other than the registry's own anonymous token was sent"
+else
+	ok "the only Authorization ever sent is the anonymous token the registry handed out"
+fi
+
+echo
+echo "$CASES cases, $FAILS failed"
+[ "$FAILS" -eq 0 ]

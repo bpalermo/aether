@@ -111,12 +111,13 @@ authzCanary:
   enabled: false
   # Client image: needs /bin/sh, curl and date.
   # curlimages/curl:8.22.0, pinned by the digest of its multi-arch index (#1374):
-  # a tag can be re-pushed, a digest cannot. Nothing in this repository refreshes
-  # this pin (there is no Renovate, and Dependabot is off): to move it, read the
-  # new tag's index digest from the registry
-  # (`docker buildx imagetools inspect curlimages/curl:<tag>`, the top `Digest:`)
-  # and update the tag in this comment with it. A changed digest rolls the
-  # one-replica authz-canary Deployment.
+  # a tag can be re-pushed, a digest cannot. This pin and the echo image's below
+  # are listed, with their tags, in scripts/third-party-images.txt (#1401):
+  # `scripts/third-party-images.sh outdated` says when the registry has moved
+  # past one, and `... resolve curlimages/curl:<tag>` prints the index digest of
+  # a new tag (docs/runbook.md, "Refreshing third-party image pins"). Nothing
+  # moves a pin by itself. A changed digest rolls the one-replica authz-canary
+  # Deployment.
   image: curlimages/curl@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
   # Mesh authority suffix (aether's meshDomain).
   meshDomain: aether.internal
