@@ -3606,13 +3606,15 @@ helm_template_match_test(
 
 # Guard: the edge namespace is a second Namespace the chart creates, in which
 # the release is NOT stored, so it renders as before (baseline, no keep) with
-# the release in aether-system and namespace.create at its default...
+# the release in aether-system and namespace.create at its default. Its one
+# annotation is the marker of #1514
+# (:aether_edge_namespace_marks_meshconfig_in_manifest_test), not `keep`...
 helm_template_match_test(
     name = "aether_edge_namespace_still_rendered_test",
     chart = ":aether",
     document_patterns = {
         "Namespace/aether-ingress": [
-            "\\nkind: Namespace\\nmetadata:\\n  name: aether-ingress\\n  labels:\\n",
+            "\\nkind: Namespace\\nmetadata:\\n  name: aether-ingress\\n  annotations:\\n    aether\\.io/edge-meshconfig-in-manifest: \"true\"\\n  labels:\\n",
             "\\n    pod-security\\.kubernetes\\.io/enforce: baseline\\n    pod-security\\.kubernetes\\.io/audit: baseline\\n    pod-security\\.kubernetes\\.io/warn: baseline\\n",
         ],
     },
@@ -3848,9 +3850,62 @@ helm_template_match_test(
 )
 
 # With the edge namespace created by the chart (the default once the edge is
-# on), the edge's seed is a release object on the revision that creates the
-# namespace (the guard above, one namespace over); the control plane's is still
-# a hook.
+# on), a `pre-install` hook cannot seed the edge's MeshConfig (the guard above,
+# one namespace over), so it is a release object. Seeded once, it was in that
+# one revision's manifest only, and `helm rollback` to it failed under Helm 3
+# as in #1471 (#1514). It is now an ORDINARY release object, rendered on every
+# revision of a release whose edge namespace says so:
+# `aether.io/edge-meshconfig-in-manifest` on the Namespace, stamped when the
+# chart creates the namespace and read back with `lookup` afterwards
+# (aether.edge.meshConfigInManifest). `helm template` has no cluster, so it
+# renders the first revision: the marker on the Namespace, the MeshConfig as a
+# release object with no hook annotation. The control plane's is still a hook.
+# What the later revisions render needs a cluster: e2e/first-install.sh, leg
+# viii.
+helm_template_match_test(
+    name = "aether_edge_namespace_marks_meshconfig_in_manifest_test",
+    chart = ":aether",
+    document_patterns = {
+        "Namespace/aether-ingress": [
+            "\\nmetadata:\\n  name: aether-ingress\\n  annotations:\\n    aether\\.io/edge-meshconfig-in-manifest: \"true\"\\n  labels:\\n",
+        ],
+    },
+    opts = [
+        "--namespace",
+        "aether-system",
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+# Guard: no marker without a seed. With meshConfig.createDefault=false the
+# namespace is created unmarked, so a seed turned on later is a hook (the
+# namespace exists by then) and is in no manifest either.
+helm_template_absent_test(
+    name = "aether_edge_namespace_unmarked_without_seed_test",
+    absent = [
+        "aether.io/edge-meshconfig-in-manifest",
+        "kind: MeshConfig",
+    ],
+    chart = ":aether",
+    control = "pod-security.kubernetes.io/enforce: baseline",
+    opts = [
+        "--namespace",
+        "aether-system",
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "meshConfig.createDefault=false",
+    ],
+)
+
+# The MeshConfig carries the same marker as the Namespace, and either one is
+# enough afterwards. Chart 2.4.24 renders the edge Namespace without the
+# annotation, so an upgrade or a rollback through it takes the Namespace's
+# marker off (measured, Helm 3.18.4); it does not render the live MeshConfig,
+# so the MeshConfig's stays, and the next upgrade to this chart renders the
+# MeshConfig again and marks the Namespace again (e2e/first-install.sh, leg
+# viii-b).
 helm_template_match_test(
     name = "aether_edge_meshconfig_seed_created_namespace_test",
     chart = ":aether",
@@ -3861,7 +3916,7 @@ helm_template_match_test(
         "edge.enabled=true",
     ],
     patterns = [
-        EDGE_MESHCONFIG + "    helm\\.sh/resource-policy: keep\\nspec: \\{\\}",
+        EDGE_MESHCONFIG + "    aether\\.io/edge-meshconfig-in-manifest: \"true\"\\n    helm\\.sh/resource-policy: keep\\nspec: \\{\\}",
         CONTROL_PLANE_MESHCONFIG + MESHCONFIG_SEED_HOOK_ANNOTATIONS + "spec:\\n",
     ],
 )

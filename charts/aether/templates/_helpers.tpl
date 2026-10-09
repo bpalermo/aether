@@ -158,13 +158,17 @@ Helm rejects or reinterprets a value it does not know, e2e/first-install.sh
 
 "release" is the exception. A pre-install hook runs before any object of the
 release exists, so it cannot create a MeshConfig in a namespace that this very
-revision creates (namespace.create=true with the release stored elsewhere;
-edge.namespaceCreate=true, the default once the edge is on): the hook, and the
-install with it, would fail on "namespaces ... not found". That one revision
-seeds the MeshConfig as a release object, as every chart before 2.4.24 did, and
-cannot be rolled back to once a later revision exists (docs/runbook.md,
-"Chart 2.4.24", has the way round). `lookup` returns nothing without a cluster,
-so `helm template` shows this case whenever the chart renders the namespace.
+revision creates: the hook, and the install with it, would fail on "namespaces
+... not found". For the control plane's MeshConfig that is namespace.create=true
+with the release stored elsewhere. That one revision seeds the MeshConfig as a
+release object, as every chart before 2.4.24 did, and under Helm 3 cannot be
+rolled back to once a later revision exists (docs/runbook.md, "Chart 2.4.24",
+has the way round; Helm 4 rolls back to it). `lookup` returns nothing without a
+cluster, so `helm template` shows this case whenever the chart renders the
+namespace. The edge's MeshConfig had the same exception until 2.4.25 and is in
+every manifest instead (aether.edge.meshConfigInManifest); that cannot be done
+here, because this seed carries meshConfig.proxy, and a spec rendered again
+would be patched over the operator's.
 
 Usage: include "aether.meshConfig.seedMode" (dict "namespace" $ns "rendersNamespace" <bool>)
 */}}
@@ -173,6 +177,75 @@ Usage: include "aether.meshConfig.seedMode" (dict "namespace" $ns "rendersNamesp
 release
 {{- else -}}
 hook
+{{- end -}}
+{{- end -}}
+
+{{/*
+"true" when the edge's MeshConfig is an ordinary object of the release, in the
+manifest of every revision (#1514); "" when it is seeded once, by the hook
+described at aether.meshConfig.seedMode.
+
+A pre-install hook cannot create the edge's MeshConfig in a namespace the same
+revision creates (edge.namespaceCreate=true, the default once the edge is on),
+so there it has to be an object of the release. Seeded ONCE, as it was up to
+2.4.24, it was in the manifest of the revision that created the namespace and
+of no later one, and still live: under Helm 3 `helm rollback` to that revision
+failed with `no MeshConfig with the name "default" found`, as in #1471
+(measured on kind, Helm 3.18.4; Helm 4.2.0 takes the live object as its base
+and rolls back). The way out is the opposite of a hook: render it on every
+revision. That is safe for this MeshConfig and not for the control plane's,
+because the chart sets no field of its spec (`spec: {}` whatever the values):
+  - Helm 3 patches a custom resource with the difference between the previous
+    manifest and the new one, which is empty for the spec on every upgrade and
+    every rollback, so the operator's fields are never touched;
+  - Helm 4's server-side apply applies an empty spec, which owns no field.
+Both measured (e2e/first-install.sh, leg viii: an edit of the MeshConfig
+survives an upgrade and a rollback in each direction).
+
+Which releases: the ones whose edge namespace THIS chart created. The decision
+is taken once, on the revision that creates the namespace (the namespace is
+absent and meshConfig.createDefault is on), and recorded as
+aether.io/edge-meshconfig-in-manifest: "true" on BOTH objects, the Namespace
+and the MeshConfig. Afterwards it is read back from the live objects, and
+either marker is enough:
+  - the MeshConfig's survives a pass through chart 2.4.24 (an upgrade to it, or
+    a rollback to one of its revisions). 2.4.24 renders the edge Namespace
+    without the annotation, so Helm takes the Namespace's marker off, and it
+    does not render the live MeshConfig, so that object and its annotations
+    are left alone (measured, Helm 3.18.4). With the Namespace's marker alone,
+    every later revision of this chart would have left the MeshConfig out for
+    good, and no rollback to the earlier revisions would work again. Read from
+    the MeshConfig, the next upgrade to this chart renders it again and marks
+    the Namespace again;
+  - the Namespace's covers a MeshConfig that carries none: one the operator
+    deleted (rendered and created again, where the hook would leave it out of
+    the manifest) or replaced by hand. The second matters: an object that was
+    in the previous manifest and is not rendered is DELETED by Helm, and a
+    hand-made MeshConfig has no helm.sh/resource-policy: keep.
+A namespace an older chart created carries no marker, and neither does its
+MeshConfig; both stay as they are (the MeshConfig in one old manifest, or in
+none). Bringing such an object back into the manifest would make the revision
+that does it one that cannot be rolled back to from an older one, which is the
+bug again, one revision later. That is also what remains of a pass through
+2.4.24: under Helm 3, a rollback FROM a 2.4.24 revision to a revision of this
+chart fails (the 2.4.24 manifest holds no MeshConfig); an upgrade works.
+
+`lookup` returns nothing without a cluster, so `helm template` renders the
+first revision: marked.
+*/}}
+{{- define "aether.edge.meshConfigInManifest" -}}
+{{- if .Values.edge.enabled -}}
+{{- $marker := "aether.io/edge-meshconfig-in-manifest" -}}
+{{- $ns := include "aether.edge.namespace" . -}}
+{{- $liveNs := lookup "v1" "Namespace" "" $ns | default (dict) -}}
+{{- $liveMc := lookup "config.aether.io/v1" "MeshConfig" $ns "default" | default (dict) -}}
+{{- if eq (dig "metadata" "annotations" $marker "" $liveMc | toString) "true" -}}
+true
+{{- else if and .Values.edge.namespaceCreate (eq (dig "metadata" "annotations" $marker "" $liveNs | toString) "true") -}}
+true
+{{- else if and .Values.edge.namespaceCreate .Values.meshConfig.createDefault (not $liveNs) -}}
+true
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

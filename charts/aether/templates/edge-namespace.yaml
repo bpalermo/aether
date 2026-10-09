@@ -6,6 +6,16 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ $ns }}
+  {{- /* Says that the edge's MeshConfig is in every revision's manifest
+         (#1514). Stamped when the chart creates the namespace, and afterwards
+         as long as the live Namespace or the live MeshConfig carries it (the
+         MeshConfig's is the one chart 2.4.24 cannot take off); never added to
+         a namespace an older chart created. See
+         aether.edge.meshConfigInManifest. */}}
+  {{- if eq (include "aether.edge.meshConfigInManifest" .) "true" }}
+  annotations:
+    aether.io/edge-meshconfig-in-manifest: "true"
+  {{- end }}
   labels:
     # The edge is an unprivileged ingress gateway (runs non-root, drops ALL caps,
     # adds only NET_BIND_SERVICE) — baseline PSA, unlike the privileged
