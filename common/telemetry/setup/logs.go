@@ -28,7 +28,7 @@ func SetupLogs(ctx context.Context, cfg Config) (provider *sdklog.LoggerProvider
 		return nil, nil, fmt.Errorf("logs require an OTLP endpoint")
 	}
 
-	res, err := newResource(ctx, cfg)
+	res, err := NewResource(ctx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create resource: %w", err)
 	}

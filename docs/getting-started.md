@@ -782,9 +782,10 @@ otel:
   traceSampleRate: 0.1
 ```
 
-- The collector endpoint is **deploy-time** config baked into the CNI plugin and
-  Envoy bootstrap (so the fleet rolls atomically and a config change can't break
-  CNI) — it is not read from a runtime ConfigMap.
+- The collector endpoint is **deploy-time** config: the chart passes it to each Go
+  component as a flag and renders it into the Envoy bootstrap. It is not read from a
+  runtime ConfigMap. The CNI plugin takes no endpoint: it exports no telemetry of its
+  own and forwards its timings to the agent, which exports them (#1166/#1185).
 - Proxy access logs / tracing / per-pod stats are retunable at runtime via the
   `MeshConfig` CR (§4b) without a redeploy.
 - Control-plane metrics, proxy stats, and a per-request source→destination request

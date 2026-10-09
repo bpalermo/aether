@@ -33,7 +33,7 @@ func TestResourceServiceName(t *testing.T) {
 			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", tt.resourceAttr)
 			t.Setenv("OTEL_SERVICE_NAME", tt.serviceName)
 
-			res, err := newResource(context.Background(), Config{ServiceName: "aether-test", ServiceVersion: "v1.2.3"})
+			res, err := NewResource(context.Background(), Config{ServiceName: "aether-test", ServiceVersion: "v1.2.3"})
 			if err != nil {
 				t.Fatalf("building the resource: %v", err)
 			}
@@ -73,7 +73,7 @@ func TestResourceServiceVersion(t *testing.T) {
 			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", tt.resourceAttr)
 			t.Setenv("OTEL_SERVICE_NAME", tt.serviceName)
 
-			res, err := newResource(context.Background(), Config{ServiceName: "aether-test", ServiceVersion: "v1.2.3"})
+			res, err := NewResource(context.Background(), Config{ServiceName: "aether-test", ServiceVersion: "v1.2.3"})
 			if err != nil {
 				t.Fatalf("building the resource: %v", err)
 			}
@@ -87,19 +87,45 @@ func TestResourceServiceVersion(t *testing.T) {
 	}
 }
 
-// TestResourceHostName pins that this resource carries host.name (#1576): the shared
-// builder can leave it off (serviceresource.WithoutHost, which the prober needs), and
-// the components built on this package must not start doing so by accident.
+// TestResourceHostName pins who decides whether this resource carries host.name
+// (#1576, #1596). The package is shared by the hostNetwork node agent, whose
+// host.name is the node's, and by components on the pod network, whose host.name
+// would be their pod name. So the default keeps it, as before, and only a caller
+// that says WithoutHostName loses it: a component must not start or stop carrying
+// host.name by accident.
 func TestResourceHostName(t *testing.T) {
-	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "k8s.node.name=n1")
-	t.Setenv("OTEL_SERVICE_NAME", "")
-
-	res, err := newResource(context.Background(), Config{ServiceName: "aether-test", ServiceVersion: "v1.2.3"})
-	if err != nil {
-		t.Fatalf("building the resource: %v", err)
+	tests := []struct {
+		name            string
+		withoutHostName bool
+		wantHost        bool
+	}{
+		{name: "the default keeps host.name", wantHost: true},
+		{name: "WithoutHostName leaves it off", withoutHostName: true, wantHost: false},
 	}
-	if !res.Set().HasValue("host.name") {
-		t.Error("the resource carries no host.name")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "k8s.node.name=n1")
+			t.Setenv("OTEL_SERVICE_NAME", "")
+
+			res, err := NewResource(context.Background(), Config{
+				ServiceName:     "aether-test",
+				ServiceVersion:  "v1.2.3",
+				WithoutHostName: tt.withoutHostName,
+			})
+			if err != nil {
+				t.Fatalf("building the resource: %v", err)
+			}
+			if got := res.Set().HasValue("host.name"); got != tt.wantHost {
+				t.Errorf("host.name present = %v, want %v", got, tt.wantHost)
+			}
+			// The option is about host.name alone.
+			if got := resourceAttr(res, "k8s.node.name"); got != "n1" {
+				t.Errorf("k8s.node.name = %q, want %q", got, "n1")
+			}
+			if got := resourceAttr(res, "service.name"); got != "aether-test" {
+				t.Errorf("service.name = %q, want %q", got, "aether-test")
+			}
+		})
 	}
 }
 
