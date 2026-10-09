@@ -1,4 +1,5 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url")
+load("@rules_go//go:def.bzl", "go_test")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
 load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_match_test")
 
@@ -248,5 +249,31 @@ helm_template_absent_test(
     opts = [
         "--set",
         "client.enabled=false",
+    ],
+)
+
+# #1589: the mesh label, the mesh annotations and the CSI driver of the socket
+# volume are literals in the templates. This compares them with the Go
+# constants the CNI, the agent and the node plugin read (and, for
+# config.aether.io/upstreams, whose constant is internal to the agent, with the
+# external-harness contract entry that constant is held to).
+go_test(
+    name = "udsecho_test",
+    size = "small",
+    srcs = ["mesh_names_test.go"],
+    data = [
+        ":udsecho",
+        "@rules_helm//helm:current_toolchain",
+    ],
+    env = {
+        "RENDERTEST_CHART": "$(rootpath :udsecho)",
+        "RENDERTEST_HELM": "$(rootpaths @rules_helm//helm:current_toolchain)",
+    },
+    deps = [
+        "//bazel/helm/rendertest",
+        "//common/constants/annotations",
+        "//common/constants/labels",
+        "//common/udspath",
+        "//test/harnesscontract",
     ],
 )

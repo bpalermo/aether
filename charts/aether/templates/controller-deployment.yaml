@@ -143,8 +143,10 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             # Stamped onto every OTel signal so logs are filterable per pod.
+            # service.instance.id (#1560) keeps the replicas' metric series
+            # apart with no pipeline configuration: see registrar-deployment.yaml.
             - name: OTEL_RESOURCE_ATTRIBUTES
-              value: "k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
+              value: "service.instance.id=$(POD_NAME),k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
             {{- /* 90% of limits.memory, never 100% (aether.goMemLimit). */}}
             {{- with include "aether.goMemLimit" .Values.controller.resources }}
             - name: GOMEMLIMIT

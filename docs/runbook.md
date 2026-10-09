@@ -1262,9 +1262,12 @@ AETHER_VERSION=<X.Y.Z>-$COMMIT
 helm upgrade --install aether-crds oci://quay.io/aethermesh/chart-crds \
   --version "$CRDS_VERSION"
 
-# 2) then the system. Prefer this commit-pinned chart tag over the bare
+# 2) then the system. Use this commit-pinned chart tag, not the bare
 #    `--version <X.Y.Z>`: the bare tag is mutable and re-pushed by every publish,
-#    the commit tag never is (#692).
+#    the commit tag never is (#692). Anything that PINS a chart (a lock file, a
+#    GitOps source, a `tag@sha256:` reference) names the commit tag or the
+#    digest alone, never the bare tag with a digest: see "Pinning a released
+#    chart" below (#1588).
 #    The chart does not create the namespace (namespace.create=false, the
 #    default since 2.4.21, #1403): --create-namespace does. On a FIRST install
 #    into a cluster that enforces Pod Security admission, label the namespace
@@ -1298,6 +1301,35 @@ esac
 `v1.2.3-N-g` prefix or a `-dirty` suffix; hence the substring match rather than
 string equality. If it fails, the chart tag you pulled was built from a different
 commit: re-run that commit's `publish` workflow and upgrade again.
+
+**Pinning a released chart (#1588).** The `aether` chart is published under two
+tags, and only one of them can be pinned:
+
+| Tag | Example | Written | Its digest |
+| --- | --- | --- | --- |
+| commit-suffixed | `chart-aether:2.4.26-<full sha>` | once, by that commit's publish | never changes |
+| bare version | `chart-aether:2.4.26` | again by **every** commit on `main` that still carries that `Chart.yaml` version | changes with each of those commits, while the version does not |
+
+Most commits do not touch the chart, so most commits republish the bare tag: it
+is "the newest build of this chart version", not a release. A reference that
+pins a digest **under the bare tag** (`chart-aether:2.4.26@sha256:…`, or a tool's
+lock entry of tag plus digest) is valid until the next commit publishes, and
+then fails; Helm reports `chart reference digest mismatch` (seen within an hour
+of writing such a reference). The crds, prober and udsecho charts have no bare
+tag: their `Chart.yaml` version carries the commit.
+
+So a pin is one of these two, and nothing else:
+
+```bash
+# the commit-suffixed tag (what this runbook uses everywhere)
+helm pull oci://quay.io/aethermesh/chart-aether --version "<X.Y.Z>-$COMMIT"
+# or the digest alone, with no tag for it to disagree with
+helm pull oci://quay.io/aethermesh/chart-aether@sha256:<digest of that commit's chart>
+```
+
+`helm pull` of the commit tag prints that chart's digest (its `Digest:` line).
+A digest read from the bare tag is the digest of whichever commit published
+last.
 
 **After a proxy release, normally there is nothing to do.** `proxy-release`
 publishes the image, pins `charts/aether/values.yaml` (`tag:` *and* `digest:`),
@@ -2285,9 +2317,21 @@ Error: no MeshConfig with the name "default" found
 ```
 
 For an object that is live and in the target manifest, Helm takes the copy in
-the **current** manifest as its starting point, and there is none. The release
-is left `failed` at a new revision, with the objects Helm reached before the
-MeshConfig already rolled back. A rollback to any other revision works.
+the **current** manifest as its starting point, and there is none. The rollback
+is recorded as a new revision, and that revision is `failed`; the objects Helm
+reached before the MeshConfig are already rolled back. **No revision is
+`deployed` afterwards** (#1582): the revision that was current before the
+rollback is marked `superseded`. `helm history aether -n aether-system` shows
+the new revision as `failed` and every revision below it as `superseded`, and
+`helm status aether -n aether-system` prints `STATUS: failed` at the new
+revision number.
+
+A failed **upgrade** reads differently (the seed-hook case further down):
+there the previous revision stays `deployed` beside the `failed` one. So after
+a failed rollback, do not look for the `deployed` revision to go back to:
+there is none. The revision to return to is the one just below the failed one.
+A rollback to any revision whose stored manifest holds no MeshConfig works,
+that one included.
 
 Since 2.4.24 the seed is a Helm hook (`helm.sh/hook: pre-install,pre-upgrade`),
 which is in no manifest. **Upgrading to 2.4.24 rolls no workload and does not
@@ -2325,7 +2369,9 @@ chart upgrade). What changes:
   ```
 
   The same command recovers a release that a rollback to such a revision left
-  `failed`; so does `helm rollback aether <the last deployed revision>`.
+  `failed`; so does `helm rollback aether <the revision that was current before
+  the failed rollback>`. `helm history` shows that revision as `superseded`,
+  not `deployed`: it is the one just below the `failed` one.
 - **One case still seeds the MeshConfig as a release object**, because a
   `pre-install` hook runs before any object of the release exists and so cannot
   create a MeshConfig in a namespace the same revision creates: the control
@@ -2508,7 +2554,8 @@ Error: no Namespace with the name "aether-system" found
 ```
 
 The namespace is untouched (same UID, `Active`), and the release is `failed` at
-a new revision. A rollback to a revision without the Namespace works and puts
+a new revision, with the revision that was current now `superseded` and none
+`deployed` (see "Chart 2.4.24"). A rollback to a revision without the Namespace works and puts
 the release back to `deployed`, and so does Helm 4.2.0 on the same steps. Nothing in a chart can change this: the manifests are already stored,
 and Helm refuses a Namespace the release does not own if the chart renders it
 again. The check and the way round are those of "Chart 2.4.24", with
@@ -2523,6 +2570,93 @@ REV=2
 helm get values aether -n aether-system --revision "$REV" -o yaml > "revision-$REV-values.yaml"
 helm upgrade aether oci://quay.io/aethermesh/chart-aether --version <that revision's chart version> \
   --namespace aether-system -f "revision-$REV-values.yaml"
+```
+
+#### Chart 2.4.26: replicas and the node proxy name themselves in their metrics (#1560, #1561)
+
+Two attributes of the telemetry resource change, so that a metrics backend
+tells things apart without pipeline configuration.
+[`observability/metric-labels.md`](./observability/metric-labels.md) is the
+page for what each component sets.
+
+**What the upgrade that crosses 2.4.26 does:**
+
+| Object | What changes | Effect |
+| --- | --- | --- |
+| registrar Deployment | `OTEL_RESOURCE_ATTRIBUTES` gains `service.instance.id=$(POD_NAME)` | **rolls once**, with telemetry on or off (the variable is always rendered) |
+| controller Deployment | the same | **rolls once**, likewise |
+| edge Deployment (when `edge.enabled`) | the same, on its `agent` container | **rolls once** |
+| `aether-proxy-config` ConfigMap, only when `otel.endpoint` is set | the Envoy stats sink gains a second resource detector that sets `service.name: aether-proxy` | no pod is replaced. **Every node's Envoy hot-restarts in place**: the supervisor watches the file. See below |
+| agent, proxy, mesh-dns and uds-csi DaemonSets | nothing in a pod template | not rolled by the chart |
+
+With `otel.endpoint` empty the ConfigMap is byte for byte what 2.4.25 rendered,
+and no Envoy restarts.
+
+**The hot restart.** This is the in-place restart of "Which workloads a chart
+upgrade rolls" above, as for any earlier change to the bootstrap: each node's
+supervisor starts a new Envoy epoch when that node's kubelet delivers the new
+ConfigMap, which is tens of seconds after the upgrade, on every node
+independently, **not one node at a time**. The nodes therefore overlap, unlike
+a DaemonSet roll. Each one is the handoff of "Sizing nodes for a proxy hot
+restart": check the headroom that section asks for before the upgrade, and
+grade the upgrade as you would a proxy roll. A rollback to 2.4.25 restores the
+old bootstrap and is the same event again.
+
+**What changes in the stored metrics:**
+
+- **`instance` on the registrar's, the controller's and the edge control
+  plane's series** (`aether_registrar_*`, the controller's, the edge's
+  `aether_agent_*`), holding the pod name: Prometheus's OTLP ingestion stores
+  `service.instance.id` as `instance`. Each replica now writes its own series
+  whatever the pipeline promotes. Where the pipeline already promoted
+  `k8s.pod.name` the series were apart before and only gain a label.
+  `AetherRegistrarSnapshotDiverged` (`registrar-alerts.yml`) needs one series
+  per replica and gets it; no shipped rule selects on `instance`. A query of
+  your own that matches these series one to one against something without the
+  label needs `ignoring (instance)`.
+- **`job="aether-proxy"` on the node proxy's Envoy series** (`envoy_*`,
+  `aether_requests_total`), which had no `job`. A label that appears makes
+  every one of those series a **new series**, per node, from that node's hot
+  restart on. The old ones stop receiving samples. A `rate()` or `increase()`
+  whose window spans the restart sees a series that ends and one that starts
+  (no counter reset is invented, but the new series contributes nothing until
+  its second sample), so expect a dip of about one window in a `sum(rate())`.
+  `{job!="aether-edge-proxy"}` selects the node proxy's series on both sides
+  of the upgrade. **A selector that relied on the label being absent
+  (`{job=""}`) matches nothing afterwards**: change it to
+  `{job="aether-proxy"}`, or to `{job=~"|aether-proxy"}` while both chart
+  versions are stored. No rule in `docs/observability/` selects on these
+  series.
+- **Not changed:** the supervisor's `aether_supervisor_*` series stay
+  `job="aether-proxy-supervisor"` (the proxy container's environment is as it
+  was), the agent's and mesh-dns's series gain nothing, and the edge proxy's
+  are as before.
+
+Before and after (never `--reuse-values`; read the values back and pass them
+with `-f`):
+
+```bash
+# Which pods were replaced: the two (three with the edge) Deployments, no DaemonSet.
+kubectl -n aether-system get pods -L controller-revision-hash,pod-template-hash \
+  --sort-by=.metadata.creationTimestamp
+# The bootstrap each node's Envoy runs on: the epoch moves up by one on every
+# node once its kubelet has delivered the ConfigMap, and the pod keeps its name.
+kubectl -n aether-system get configmap aether-proxy-config \
+  -o jsonpath='{.data.envoy\.yaml}' | grep -A4 'resource_detectors.static_config'
+```
+
+```promql
+# One result per proxy kind after the upgrade (aether-proxy, and
+# aether-edge-proxy with the edge on). A result with no job is a node whose
+# Envoy has not restarted on the new bootstrap yet.
+count by (job) (envoy_server_live)
+# Every node restarted exactly once: +1 per node across the upgrade.
+max by (node) (envoy_server_hot_restart_epoch)
+# The supervisor kept its name: the same set of series before and after.
+count by (job) ({__name__=~"aether_supervisor_.+"})
+# Equals the number of registrar replicas (it was 1 where nothing told them apart).
+count(aether_registrar_snapshot_content_hash)
+count by (instance) (aether_registrar_snapshot_content_hash)
 ```
 
 #### The prober chart (#1372, #1373, #1374)

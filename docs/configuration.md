@@ -55,8 +55,21 @@ from `OTEL_RESOURCE_ATTRIBUTES`, which the charts use for the pod's `k8s.*`
 attributes. A `service.name` inside `OTEL_RESOURCE_ATTRIBUTES` is ignored by these
 components (#1562): dashboards and alerts select on the component's name. To
 rename one on purpose, set `OTEL_SERVICE_NAME` on its container. Envoy is not a
-Go component: its stats resource takes `service.name` from
-`OTEL_RESOURCE_ATTRIBUTES`, which is how the edge proxy gets `aether-edge-proxy`.
+Go component. The edge proxy's stats resource takes `service.name` from
+`OTEL_RESOURCE_ATTRIBUTES`, which is how it gets `aether-edge-proxy`. The node
+proxy's is named `aether-proxy` in its bootstrap (chart 2.4.26, #1561; it had no
+name before, so its series had no `job`), not in the container's environment:
+the supervisor runs in that container too and reads the same variables, so an
+`OTEL_SERVICE_NAME` there would rename the supervisor's metrics, and it does
+not rename Envoy's.
+
+**Who tells replicas apart.** The registrar, the controller and the edge
+control plane also set `service.instance.id` to the pod name (chart 2.4.26,
+#1560), which a metrics backend stores as `instance` by itself, so two replicas
+never write one series. The per-node DaemonSets do not: the node tells them
+apart, and your pipeline makes the `node` label. See
+[`observability/metric-labels.md`](./observability/metric-labels.md) for the
+whole table, and the runbook's "Chart 2.4.26" for what the upgrade rolls.
 
 ### `spire` — system-wide mTLS
 
