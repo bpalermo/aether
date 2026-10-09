@@ -183,6 +183,38 @@ And a clean run is not evidence of absence: the detector only reports
 interleavings a test actually produced, so a race between two goroutines no test
 runs concurrently stays invisible no matter how often you run it.
 
+### The external-harness contract
+
+A harness outside this repository (one that rolls the mesh's workloads, reads
+its metrics and logs and grades a run) depends on names this repository
+chooses. They are written down in
+[`test/harnesscontract/external-harness.yaml`](../test/harnesscontract/external-harness.yaml):
+the agent's pin metrics with their labels and the closed `reason` set, the
+prober's `aether_probe_requests_total` with its `tier` and `result` sets, the
+fields of the `AETHER_PROBE_FAIL` lines, the any-port stat prefix, the
+annotations, labels and ports a workload manifest names, and the chart objects
+a harness addresses (workload names and namespaces, pod labels, container
+names, rolling-update strategies).
+
+```bash
+bazel test //test/harnesscontract:checks
+```
+
+Each entry is compared with the code that produces the thing, by a test in the
+package that owns it: the real instruments' collected series, lines the real
+fail log wrote, a listener the real generator built, a `helm template` of the
+packaged chart. A rename fails with a message that names the contract file.
+
+**The rule.** Change the code and the contract together, in one pull request,
+and say so in its description. Removing an entry or changing what it means
+(a rename, a value removed from **or added to** a closed set, another roll
+strategy) bumps the file's `version`; adding an entry does not. A harness pins
+the version it was written against. The bump is a review rule: nothing can
+compare the file with its previous revision in a hermetic test.
+[`test/harnesscontract/README.md`](../test/harnesscontract/README.md) has the
+table of what each test compares, what is kept by review alone, and how to add
+or remove an entry.
+
 ### Code coverage
 
 ```bash
