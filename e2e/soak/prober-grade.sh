@@ -48,12 +48,20 @@
 #   RESET    a counter that went down, and the two values
 #   PODS     prober pods at the start, at the end, gone and new in between
 #   PROBER   verdict=PASS|FAIL|UNPROVEN and the sums
-#   UNPINNED per node, then verdict=PASS|FAIL|UNPROVEN: the increase of
+#   UNPINNED per node, per reason when it moved, then
+#            verdict=PASS|FAIL|UNPROVEN: the increase of
 #            aether_agent_identity_cluster_unpinned_total, which must be 0. It
 #            counts TLS clusters published without their server-identity pin
 #            (#832) and rests at zero since #1421. An agent restarts in every
 #            soak (two rolls), so its counter resets, or a new series is born:
-#            both are counted whole, as above.
+#            both are counted whole, as above. Since #1424 the counter has a
+#            `reason` label (why the pin was empty), so there are three series
+#            per agent; `UNPINNED reason=` sums each one that moved. The
+#            verdict is the same sum either way. The agent's gauges
+#            (aether_agent_snapshot_tls_clusters and
+#            aether_agent_xds_acked_tls_clusters, #1425) are not graded here: a
+#            gauge is sampled, and an unpinned window shorter than the export
+#            interval is in the counter and may be in no gauge sample.
 #   LOGS     with --logs-file / --logs-url: AETHER_PROBE_FAIL lines in the
 #            window (one per failed probe, plus the `suppressed` counts of the
 #            capped minutes) against the counters, per tier and result:
@@ -329,6 +337,10 @@ cat "$TMPD/p.out"
 P_VERDICT="$(sed -n 's/^PROBER  verdict=\([A-Z]*\) .*/\1/p' "$TMPD/p.out")"
 
 # --- the unpinned-cluster counter (#1423) ----------------------------------------
+# One series per node up to #1424; one per node and `reason` since (three
+# reasons, each seeded at zero). Both shapes are graded alike: every series is
+# summed, whatever its labels. A series with no `reason` label is an agent from
+# before #1424 and is printed as reason=-.
 # shellcheck disable=SC2016
 jq -r --arg node "$NODE_LABEL" '
 def l($k): .labels[$k] // "-";
@@ -338,11 +350,13 @@ def n: if . == floor then floor else . end;
 | (map(.inc) | add // 0) as $inc
 | ( group_by(l($node))[]
     | "UNPINNED node=\(.[0] | l($node)) count=\(map(.inc) | add | n) series=\(length) born_in_window=\(map(select(.born)) | length) resets=\(map(.resets | length) | add)" ),
+  ( map(select(.inc > 0)) | group_by(l("reason"))[]
+    | "UNPINNED reason=\(.[0] | l("reason")) count=\(map(.inc) | add | n) nodes=\(map(l($node)) | unique | join(","))" ),
   ( $all[] | select(.inc > 0) | . as $s
     | "UNPINNED moved: node=\(l($node)) \(.labels | del(.[$node]) | to_entries | map("\(.key)=\(.value)") | join(" ")) count=\(.inc | n) first=\(.first.v | n)@\(.first.t | iso) last=\(.last.v | n)@\(.last.t | iso)\(if .born then " (absent at the start: counted from 0)" else "" end)\(if (.resets | length) > 0 then " (reset at \(.resets | map(.at | iso) | join(",")))" else "" end)" ),
   "UNPINNED verdict=\(if length == 0 then "UNPROVEN" elif $inc > 0 then "FAIL" else "PASS" end) increase=\($inc | n) series=\(length) nodes=\(map(l($node)) | unique | length) resets=\(map(.resets | length) | add // 0)"
   + (if length == 0 then "  (no series: the counter is seeded at zero, so an absent one is not a zero -- it does not reach this Prometheus, or --match is wrong)"
-     elif $inc > 0 then "  (a TLS cluster was published without its server-identity pin: the agent logged which, `mesh clusters published with no server-identity SAN pin`)" else "" end)
+     elif $inc > 0 then "  (a TLS cluster was published without its server-identity pin: the agent logged which and why, `mesh clusters published with no server-identity SAN pin`; what each reason means is in docs/runbook.md, \"The unpinned-cluster signal\")" else "" end)
 ' "$TMPD/u.json" >"$TMPD/u.out" || die "could not grade the unpinned-cluster samples"
 cat "$TMPD/u.out"
 U_VERDICT="$(sed -n 's/^UNPINNED verdict=\([A-Z]*\) .*/\1/p' "$TMPD/u.out")"

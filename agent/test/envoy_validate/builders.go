@@ -1207,31 +1207,87 @@ func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
 // shape, where the pin lives on every match INCLUDING the node-identity
 // on_no_match one).
 func UnpinnedMeshClusters(bootstrapJSON []byte) ([]string, error) {
+	var unpinned []string
+	err := walkUpstreamTLS(bootstrapJSON, func(_, socket string, pinned bool) {
+		if !pinned {
+			unpinned = append(unpinned, socket)
+		}
+	})
+	return unpinned, err
+}
+
+// MeshClusterPins sorts the clusters of a generated bootstrap that carry an
+// upstream TLS context into those whose every context is SAN-pinned and those
+// with at least one that is not, by cluster name. A cluster with no upstream
+// TLS context is in neither list.
+//
+// It is UnpinnedMeshClusters' definition, read per cluster and with the pinned
+// side kept: both run on one walk (walkUpstreamTLS), so they cannot disagree.
+// The agent's runtime report (the xDS cache's pin report, #1424/#1425) is held
+// to this answer by a test in that package, which is what keeps the build-time
+// gate and the runtime signal from drifting apart again (#1393).
+func MeshClusterPins(bootstrapJSON []byte) (pinned, unpinned []string, err error) {
+	state := map[string]bool{} // cluster -> every TLS context seen so far is pinned
+	var order []string
+	err = walkUpstreamTLS(bootstrapJSON, func(cluster, _ string, socketPinned bool) {
+		prev, seen := state[cluster]
+		if !seen {
+			order = append(order, cluster)
+			prev = true
+		}
+		state[cluster] = prev && socketPinned
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, name := range order {
+		if state[name] {
+			pinned = append(pinned, name)
+		} else {
+			unpinned = append(unpinned, name)
+		}
+	}
+	return pinned, unpinned, nil
+}
+
+// ClustersBootstrapJSON wraps clusters as the static resources of a bootstrap,
+// in the same form the builders above produce, so clusters taken from
+// somewhere else (a snapshot the xDS cache generated) can be put through
+// UnpinnedMeshClusters and MeshClusterPins unchanged.
+func ClustersBootstrapJSON(clusters []*clusterv3.Cluster) ([]byte, error) {
+	return marshalBootstrap(newBootstrap(clusters, nil))
+}
+
+// walkUpstreamTLS calls fn once for every upstream TLS context in a generated
+// bootstrap: the cluster's own transport_socket (socket == "<cluster>") and
+// each transport_socket_matches entry (socket == "<cluster>/<match>"). A
+// socket that is absent or carries no UpstreamTlsContext is not visited.
+func walkUpstreamTLS(bootstrapJSON []byte, fn func(cluster, socket string, pinned bool)) error {
 	var bs bootstrapv3.Bootstrap
 	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
-		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+		return fmt.Errorf("unmarshal bootstrap: %w", err)
 	}
-
-	var unpinned []string
-	for _, c := range bs.GetStaticResources().GetClusters() {
-		pinned, err := upstreamTLSPinned(c.GetTransportSocket())
+	visit := func(cluster, socket string, ts *corev3.TransportSocket) error {
+		ctx, err := upstreamTLSContextOf(ts)
 		if err != nil {
-			return nil, fmt.Errorf("cluster %s: %w", c.GetName(), err)
+			return fmt.Errorf("cluster %s: %w", socket, err)
 		}
-		if !pinned {
-			unpinned = append(unpinned, c.GetName())
+		if ctx != nil {
+			fn(cluster, socket, tlsContextPinned(ctx))
+		}
+		return nil
+	}
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		if err := visit(c.GetName(), c.GetName(), c.GetTransportSocket()); err != nil {
+			return err
 		}
 		for _, m := range c.GetTransportSocketMatches() {
-			pinned, err := upstreamTLSPinned(m.GetTransportSocket())
-			if err != nil {
-				return nil, fmt.Errorf("cluster %s match %s: %w", c.GetName(), m.GetName(), err)
-			}
-			if !pinned {
-				unpinned = append(unpinned, c.GetName()+"/"+m.GetName())
+			if err := visit(c.GetName(), c.GetName()+"/"+m.GetName(), m.GetTransportSocket()); err != nil {
+				return err
 			}
 		}
 	}
-	return unpinned, nil
+	return nil
 }
 
 // UnpinnedInboundChains returns "<listener>/<chain>" for every filter chain in
@@ -1389,25 +1445,17 @@ func quicChainLacksR4(ts *corev3.TransportSocket) (bool, error) {
 	return !resumptionOff || !earlyDataOff, nil
 }
 
-// upstreamTLSPinned reports whether a transport socket is SAN-pinned. A socket
-// that is absent or is not an UpstreamTlsContext is "pinned" vacuously: it has
-// no upstream peer identity to check in the first place.
+// tlsContextPinned reports whether an upstream TLS context names the server
+// identities it accepts. The pin lives in the COMBINED validation context; the
+// plain ValidationContextSdsSecretConfig form carries the trust bundle alone.
 //
-// A QuicUpstreamTransport is UNWRAPPED and its inner UpstreamTlsContext held
-// to the same rule (proposal 038 Phase 4b); before that a `quic:` cluster
-// passed vacuously because the typed config was not an UpstreamTlsContext.
-func upstreamTLSPinned(ts *corev3.TransportSocket) (bool, error) {
-	ctx, err := upstreamTLSContextOf(ts)
-	if err != nil {
-		return false, err
-	}
-	if ctx == nil {
-		return true, nil
-	}
-	// The pin lives in the COMBINED validation context; the plain
-	// ValidationContextSdsSecretConfig form carries the trust bundle alone.
+// walkUpstreamTLS hands it the context of a TLS socket directly and the INNER
+// context of a QuicUpstreamTransport (upstreamTLSContextOf unwraps it,
+// proposal 038 Phase 4b); before that unwrap a `quic:` cluster passed
+// vacuously because its typed config was not an UpstreamTlsContext.
+func tlsContextPinned(ctx *tlsv3.UpstreamTlsContext) bool {
 	return len(ctx.GetCommonTlsContext().GetCombinedValidationContext().
-		GetDefaultValidationContext().GetMatchTypedSubjectAltNames()) > 0, nil
+		GetDefaultValidationContext().GetMatchTypedSubjectAltNames()) > 0
 }
 
 // upstreamTLSContextOf returns the UpstreamTlsContext a transport socket

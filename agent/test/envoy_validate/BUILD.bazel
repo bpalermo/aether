@@ -28,7 +28,13 @@ go_library(
         "builders.go",
     ],
     importpath = "aethermesh.dev/agent/test/envoy_validate",
-    visibility = ["//agent/test/envoy_validate:__subpackages__"],
+    # The xDS cache's tests put a snapshot the cache generated through
+    # UnpinnedMeshClusters, so the runtime pin report and this gate cannot
+    # drift apart (#1393, #1424).
+    visibility = [
+        "//agent/internal/xds/cache:__pkg__",
+        "//agent/test/envoy_validate:__subpackages__",
+    ],
     deps = [
         "//agent/internal/xds/config",
         "//agent/internal/xds/proxy",

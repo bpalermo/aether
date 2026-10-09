@@ -1713,7 +1713,7 @@ func TestQUICOutboundFixtureCarriesTheSelection(t *testing.T) {
 }
 
 // TestUnpinnedMeshClustersSeesThroughQUIC proves the QUIC unwrap in
-// upstreamTLSPinned is load-bearing: a `quic:` cluster whose inner context
+// upstreamTLSContextOf is load-bearing: a `quic:` cluster whose inner context
 // pins nothing must be reported (before the unwrap it passed vacuously).
 func TestUnpinnedMeshClustersSeesThroughQUIC(t *testing.T) {
 	c := &clusterv3.Cluster{

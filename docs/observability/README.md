@@ -129,6 +129,37 @@ transitional arm).
 etcd backend only: the kubernetes backend reports no revision, so the rule returns
 nothing there. The gauge itself is reported on both backends.
 
+## Node agent SAN-pin state (metrics reference; no rule file yet)
+
+Whether the mesh clusters a node proxy dials check the server identity they are handed
+(#832, #1424, #1425). `docs/runbook.md`, "The unpinned-cluster signal", says what each
+`reason` means and what to do about it. Reported by the node agent (`job` of the agent)
+and by the edge control plane.
+
+| Metric (as Prometheus stores it) | Type | Labels | Meaning |
+|---|---|---|---|
+| `aether_agent_snapshot_tls_clusters` | gauge | `pin`, `reason` | mesh cluster entries in the agent's current snapshot that are meant to be mTLS: `pin="pinned"` (no `reason`), and `pin="unpinned"` once per `reason`. Written on every snapshot, zeros included |
+| `aether_agent_xds_acked_tls_clusters` | gauge | `pin`, `reason` | the same count for the last snapshot whose cluster update the proxy acknowledged. Absent until the first cluster ACK the agent process sees |
+| `aether_agent_identity_cluster_unpinned_total` | counter | `reason` | grows by the number of unpinned clusters on every snapshot that has any. Seeded at zero per reason. Before #1424 it had no `reason` label |
+
+`reason` is a closed set: `trust_domain_unknown`, `no_namespace_metadata`,
+`pin_not_rendered`. No series carries a cluster name, so each gauge is four series per
+agent and the counter three, whatever the size of the mesh; the names are in the agent's
+WARN line.
+
+No alert rule ships for these yet. The expression one would be built on:
+
+```promql
+# N clusters unpinned for reason R on this node. `for:` it past an agent start:
+# trust_domain_unknown is expected for the first snapshot or two.
+sum by (node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}) > 0
+```
+
+Two things to know before writing it. The gauge is pushed by the agent, so a down agent
+is no series, not a zero (the same trap as the conflist gauge above). And anything that
+sums or compares the counter across an upgrade must not select on `reason`: an agent
+from before #1424 exports the one label-less series.
+
 ## Installing
 
 There is **no Prometheus operator** on `talos-main` (no `PrometheusRule` CRD) and the

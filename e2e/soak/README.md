@@ -1432,6 +1432,18 @@ the pod exists, and after that it cannot be placed.
   plaintext UDP floor too (#1393, fixed in #1421): against those the gate reads `FAIL`
   with a few hundred per node (2026-10-08: 2,594 over five nodes), and says nothing.
   A reset is only seen when the new value is below the old one.
+  Since #1424 the counter has a `reason` label (why the pin was empty:
+  `trust_domain_unknown`, `no_namespace_metadata`, `pin_not_rendered`), so an agent has
+  three series, each seeded at zero. The gate sums every series whatever its labels, so
+  it grades both shapes, and a soak that rolls from one to the other, alike; when the
+  counter moved it also prints `UNPINNED reason=<reason> count=N nodes=…`, and a series
+  from an older agent is `reason=-`. A `trust_domain_unknown` count in the snapshots
+  right after an agent roll and a `no_namespace_metadata` count are different findings:
+  the runbook says what each means. The agent's two gauges
+  (`aether_agent_snapshot_tls_clusters`, `aether_agent_xds_acked_tls_clusters`, #1425)
+  are not graded: a gauge is sampled, and an unpinned window shorter than the export
+  interval is in the counter and may be in no gauge sample. Read them to see how many
+  clusters were unpinned at a given time and whether the proxy had acknowledged them.
 - **The restart gate (#1242)** — 0 new container restarts in `aether-system`,
   `aether-ingress` and `aether-test` over T0 → T0+8h: the watchdog's `SUMMARY` line
   reads `verdict=PASS new_restarts=0`. See "The restart gate".
