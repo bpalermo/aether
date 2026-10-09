@@ -87,6 +87,11 @@ promises:
   "a value": "1111111111111111"
 '
 run "the version bumped and nothing else" 0 "every promise" "$BASE_LOCK" "${BASE_LOCK/version: 3/version: 4}"
+run "the version bumped by two and nothing else" 1 "went from 3 at abc123 to 5 here: a bump is by one" "$BASE_LOCK" "${BASE_LOCK/version: 3/version: 5}"
+run "a promise removed and the version bumped by two" 1 "a bump is by one" "$BASE_LOCK" 'version: 5
+promises:
+  "a value": "1111111111111111"
+'
 run "the version lowered" 1 "went back: 3 at abc123, 2 here" "$BASE_LOCK" "${BASE_LOCK/version: 3/version: 2}"
 run "the version lowered to hide a removal" 1 "went back" "$BASE_LOCK" 'version: 2
 promises: {}

@@ -649,6 +649,9 @@ func (o Object) checkHostPaths(what string, d manifest) []string {
 	return problems
 }
 
+// selectedValue is the value a webhook selects a label with.
+const selectedValue = "true"
+
 // checkWebhooks holds the webhooks of an admission configuration to the label
 // each selects by.
 func (o Object) checkWebhooks(what string, d manifest) []string {
@@ -660,14 +663,17 @@ func (o Object) checkWebhooks(what string, d manifest) []string {
 			names = append(names, w.Name)
 			if w.Name == name {
 				found = true
-				selectors = slices.Concat(sortedKeys(w.NamespaceSelector.MatchLabels), sortedKeys(w.ObjectSelector.MatchLabels))
+				selectors = slices.Concat(labelPairs(w.NamespaceSelector.MatchLabels), labelPairs(w.ObjectSelector.MatchLabels))
 			}
 		}
+		// The label opts in with the value "true": a selector on the key with
+		// another value matches nothing the mesh manages.
+		want := o.webhooks[name] + "=" + selectedValue
 		switch {
 		case !found:
 			problems = append(problems, fmt.Sprintf("%s has no webhook %q (its webhooks: %s)", what, name, orNone(names)))
-		case !slices.Contains(selectors, o.webhooks[name]):
-			problems = append(problems, fmt.Sprintf("%s: the webhook %q does not select by the label %s, the value of the entry %s (it selects by: %s)", what, name, o.webhooks[name], o.Webhooks[name], orNone(selectors)))
+		case !slices.Contains(selectors, want):
+			problems = append(problems, fmt.Sprintf("%s: the webhook %q does not select by the label %s, the value of the entry %s with %q (it selects by: %s)", what, name, want, o.Webhooks[name], selectedValue, orNone(selectors)))
 		}
 	}
 	return problems

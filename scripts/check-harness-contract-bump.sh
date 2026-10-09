@@ -44,6 +44,12 @@ if [ "$head_version" -lt "$base_version" ]; then
 	echo "ERROR: the contract's version went back: $base_version at $BASE, $head_version here."
 	exit 1
 fi
+# The hermetic test holds a bump to one step only while the lock is a version
+# behind the contract; with both files moved together only the base can tell.
+if [ "$head_version" -gt "$((base_version + 1))" ]; then
+	echo "ERROR: the contract's version went from $base_version at $BASE to $head_version here: a bump is by one."
+	exit 1
+fi
 
 # The lines of BASE that are not here as they were.
 broken="$(comm -23 <(printf '%s\n' "$base_lock" | promises) <(promises <"$LOCK") || true)"
