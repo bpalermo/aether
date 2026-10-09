@@ -143,9 +143,18 @@ SERIES_FRESH_MAX_AGE="${SERIES_FRESH_MAX_AGE:-120}"
 # is pushed to anyway).
 POLL_INTERVAL="${POLL_INTERVAL:-}"
 
+# The share of a wait loop's polls that must have got an answer before its
+# deadline may be read as a FAIL (#1599). A FAIL is a verdict on the agent, and
+# one answered poll in a window of failed ones is one look, not a watch.
+MIN_POLL_OK_PCT="${MIN_POLL_OK_PCT:-50}"
+
 MIB=$((1024 * 1024))
 
 JOB_APPLIED=0
+# 1 from the moment this run asks for the agent pod's deletion: the request may
+# have been acted on even if its answer was lost.
+AGENT_RESTARTED=0
+OLD_POD=""
 KUBE_CONTEXT=""
 PF_PID=""
 PF_LOG=""
@@ -586,6 +595,30 @@ agent_pods_on_node() {
 		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
 }
 
+# sole_agent_pod <names>: the one agent pod of the node, or an abort (#1601).
+# Two pods are a surge-rolled standby next to the owner (proposal 041), or a
+# replacement next to a pod that is still terminating. Which of them this run
+# would restart, and which one's status it would read, is not the script's to
+# guess.
+sole_agent_pod() {
+	local n
+	n=$(printf '%s\n' "$1" | wc -l | tr -d ' ')
+	[ "$n" = 1 ] ||
+		die "${n} aether-agent pods on node ${NODE} ($(printf '%s' "$1" | tr '\n' ' ')) — a roll's standby, or a pod still terminating, is next to the owner. Wait until the node has one agent pod, then run again."
+	printf '%s\n' "$1"
+}
+
+# polls_support_fail <last-answered> <answered> <polls> <what could not be asked>:
+# returns when a wait loop that ran out of time may FAIL; aborts (exit 2) when
+# its polls do not support a verdict: the last one failed, or fewer than
+# MIN_POLL_OK_PCT percent of them got an answer.
+polls_support_fail() {
+	[ "$1" = 1 ] ||
+		die "$4 when the time ran out — this is not a verdict on the agent"
+	[ $(($2 * 100)) -ge $(($3 * MIN_POLL_OK_PCT)) ] ||
+		die "$4 on most polls: only $2 of $3 polls got an answer, and a FAIL needs ${MIN_POLL_OK_PCT}% (MIN_POLL_OK_PCT) — this is not a verdict on the agent"
+}
+
 # No output with status 0: the field is not set. Non-zero: it could not be read.
 pod_field() { kc -n "$AGENT_NS" get pod "$1" -o jsonpath="$2"; }
 
@@ -689,7 +722,7 @@ preflight_agent() {
 	pods=$(agent_pods_on_node) ||
 		die "could not list the aether-agent pods on node ${NODE} (kubectl's error is above) — not reading that as none"
 	[ -n "$pods" ] || die "no aether-agent pod on node ${NODE}"
-	pod=${pods%%$'\n'*}
+	pod=$(sole_agent_pod "$pods") || exit $?
 	ready=$(agent_status "$pod" '.ready') ||
 		die "could not read the status of agent pod ${pod} (kubectl's error is above) — not reading that as not Ready"
 	restarts=$(agent_status "$pod" '.restartCount') ||
@@ -763,29 +796,43 @@ track_memory() {
 	# The baseline is read before the Job is applied, and a dry run never
 	# applies it: there is nothing to delete then, and a dry run changes nothing.
 	[ "$JOB_APPLIED" = 1 ] || die "collector ${reason} — no job had been applied, nothing was changed"
+	# This is read after the restart step too (#1598): say what is true of the agent.
+	local agent="no agent was touched"
+	[ "$AGENT_RESTARTED" != 1 ] || agent="agent pod ${OLD_POD} on ${NODE} had already been deleted by this run"
 	if delete_job; then
 		JOB_APPLIED=0
-		die "collector ${reason} — job deleted, no agent was touched"
+		die "collector ${reason} — job deleted, ${agent}"
 	fi
 	# Not known to be deleted, not known to be still there. JOB_APPLIED stays
 	# 1: the cleanup trap tries the delete again.
-	die "collector ${reason} — and the deletion of the job could NOT be confirmed (kubectl's error is above): the flood may still be running. The cleanup trap tries again; activeDeadlineSeconds ends it regardless."
+	die "collector ${reason} — and the deletion of the job could NOT be confirmed (kubectl's error is above): the flood may still be running. The cleanup trap tries again; activeDeadlineSeconds ends it regardless. Also: ${agent}."
 }
 
-# The manifest on stdout, aimed at the collector the caller named: the two
-# tokens of the shipped manifest are filled in. A manifest of the caller's own
-# (--job-manifest) that has neither passes through as it is.
+# The manifest on stdout, with the tokens of the shipped manifest filled in:
+# the collector the caller named, and the Job's own namespace and name (#1600).
+# A manifest of the caller's own (--job-manifest) that has no token passes
+# through as it is.
 render_job() {
 	sed -e "s|__COLLECTOR_OTLP_ENDPOINT__|${COLLECTOR_OTLP_ENDPOINT:-${COLLECTOR_DEPLOY}.${COLLECTOR_NS}.svc.cluster.local:4317}|g" \
-		-e "s|__COLLECTOR_NS__|${COLLECTOR_NS}|g" "$JOB_MANIFEST"
+		-e "s|__COLLECTOR_NS__|${COLLECTOR_NS}|g" \
+		-e "s|__JOB_NS__|${JOB_NS}|g" \
+		-e "s|__JOB_NAME__|${JOB_NAME}|g" "$JOB_MANIFEST"
 }
 
 apply_job() {
+	local rendered
+	rendered=$(render_job) || die "could not read the job manifest ${JOB_MANIFEST}"
+	# The Job that is applied must be the Job that is watched and deleted
+	# (#1600). A manifest whose metadata names another one is refused before
+	# anything is applied.
+	if ! grep -qxF "  name: ${JOB_NAME}" <<<"$rendered" || ! grep -qxF "  namespace: ${JOB_NS}" <<<"$rendered"; then
+		die "${JOB_MANIFEST} does not define job ${JOB_NS}/${JOB_NAME}: its metadata must read '  name: ${JOB_NAME}' and '  namespace: ${JOB_NS}' (or carry the __JOB_NAME__ and __JOB_NS__ tokens). Nothing was applied."
+	fi
 	# Set before the apply: one that failed may still have created the Job, and
 	# the cleanup trap deletes it only when this says so.
 	JOB_APPLIED=1
-	render_job | kc apply -f - >/dev/null ||
-		die "could not apply ${JOB_MANIFEST} (the error is above) — no pressure was applied by this run, and no agent was touched"
+	printf '%s\n' "$rendered" | kc apply -f - >/dev/null ||
+		die "could not confirm that ${JOB_MANIFEST} was applied (the error is above) — job ${JOB_NS}/${JOB_NAME} may have been created, and the cleanup trap tries to delete it. No agent was touched."
 	log "applied ${JOB_MANIFEST} (hard stop: activeDeadlineSeconds, plus the cleanup trap)"
 }
 
@@ -817,9 +864,10 @@ restart_agent() {
 	pods=$(agent_pods_on_node) ||
 		die "could not list the aether-agent pods on node ${NODE} (kubectl's error is above) — no agent was restarted"
 	[ -n "$pods" ] || die "no aether-agent pod on ${NODE} to restart"
-	OLD_POD=${pods%%$'\n'*}
+	OLD_POD=$(sole_agent_pod "$pods") || exit $?
 	# Pod-scoped on purpose: `kubectl rollout restart ds/aether-agent` is DaemonSet-wide
 	# and would restart every node's agent under a shedding collector at once.
+	AGENT_RESTARTED=1
 	kc -n "$AGENT_NS" delete pod "$OLD_POD" --wait=false >/dev/null ||
 		die "could not confirm the deletion of agent pod ${OLD_POD} (kubectl's error is above) — whether the agent was restarted is not known, so nothing was proven"
 	log "deleted agent pod ${OLD_POD} on ${NODE} while the collector is shedding"
@@ -829,15 +877,17 @@ restart_agent() {
 # so pod-appearance and pod-readiness get separate budgets: the readiness clock starts
 # when the new pod exists, not when the old one was told to die.
 wait_agent_replaced() {
-	local deadline=$((SECONDS + POD_APPEAR_TIMEOUT)) pods pod asked=1
+	local deadline=$((SECONDS + POD_APPEAR_TIMEOUT)) pods pod asked=1 answered=0 polls=0
 	NEW_POD=""
 	while [ "$SECONDS" -lt "$deadline" ]; do
 		sleep 5
 		# A list that could not be read is asked for again: one failed call is
 		# not the agent's fault. An empty list is the gap before the DaemonSet
 		# creates the replacement.
+		polls=$((polls + 1))
 		if pods=$(agent_pods_on_node); then
 			asked=1
+			answered=$((answered + 1))
 			while IFS= read -r pod; do
 				if [ -n "$pod" ] && [ "$pod" != "$OLD_POD" ]; then
 					NEW_POD="$pod"
@@ -851,20 +901,21 @@ wait_agent_replaced() {
 		fi
 	done
 	# FAIL is a verdict on the agent. A list that could not be read at the
-	# deadline is not one.
-	[ "$asked" = 1 ] ||
-		die "could not list the aether-agent pods on node ${NODE} when the ${POD_APPEAR_TIMEOUT}s ran out — the replacement was not looked for, so this is not a verdict on the agent"
+	# deadline is not one, and neither is one answered poll among failed ones.
+	polls_support_fail "$asked" "$answered" "$polls" "could not list the aether-agent pods on node ${NODE}"
 	fail "no replacement agent pod appeared on ${NODE} within ${POD_APPEAR_TIMEOUT}s of deleting ${OLD_POD}"
 }
 
 wait_agent_ready() {
-	local deadline=$((SECONDS + AGENT_READY_TIMEOUT)) ready reason="" asked=1
+	local deadline=$((SECONDS + AGENT_READY_TIMEOUT)) ready reason="" asked=1 answered=0 polls=0
 	while [ "$SECONDS" -lt "$deadline" ]; do
 		# A status that could not be read is asked for again, and is neither
 		# "not Ready" nor "not crash-looping".
+		polls=$((polls + 1))
 		if reason=$(agent_status "$NEW_POD" '.state.waiting.reason') &&
 			ready=$(agent_status "$NEW_POD" '.ready'); then
 			asked=1
+			answered=$((answered + 1))
 			if [ "$reason" = "CrashLoopBackOff" ]; then
 				fail "replacement agent pod ${NEW_POD} is in CrashLoopBackOff — #662 reproduced, the fix did not hold"
 			fi
@@ -878,8 +929,7 @@ wait_agent_ready() {
 		fi
 		sleep 5
 	done
-	[ "$asked" = 1 ] ||
-		die "could not read the status of agent pod ${NEW_POD} when the ${AGENT_READY_TIMEOUT}s ran out — its readiness was not seen, so this is not a verdict on the agent"
+	polls_support_fail "$asked" "$answered" "$polls" "could not read the status of agent pod ${NEW_POD}"
 	fail "replacement agent pod ${NEW_POD} did not become Ready within ${AGENT_READY_TIMEOUT}s (waiting reason: ${reason:-none})"
 }
 
@@ -974,11 +1024,13 @@ wait_shedding_stops() {
 }
 
 wait_series_fresh() {
-	local deadline=$((SECONDS + SERIES_FRESH_TIMEOUT)) age="" asked=1
+	local deadline=$((SECONDS + SERIES_FRESH_TIMEOUT)) age="" asked=1 answered=0 polls=0
 	while [ "$SECONDS" -lt "$deadline" ]; do
 		# A query that could not be asked is asked again, and is not "stale".
+		polls=$((polls + 1))
 		if age=$(series_age); then
 			asked=1
+			answered=$((answered + 1))
 			if [ -n "$age" ] && [ "$age" -lt "$SERIES_FRESH_MAX_AGE" ]; then
 				log "aether_agent_storage_pods{node=\"${NODE}\"} is fresh again (${age}s old)"
 				return 0
@@ -990,8 +1042,7 @@ wait_series_fresh() {
 		fi
 		sleep "$POLL_INTERVAL"
 	done
-	[ "$asked" = 1 ] ||
-		die "could not query Prometheus for the age of aether_agent_storage_pods{node=\"${NODE}\"} when the ${SERIES_FRESH_TIMEOUT}s ran out — the series was not read, so this is not a verdict on the agent's telemetry"
+	polls_support_fail "$asked" "$answered" "$polls" "could not query Prometheus for the age of aether_agent_storage_pods{node=\"${NODE}\"}"
 	fail "aether_agent_storage_pods{node=\"${NODE}\"} did not go fresh within ${SERIES_FRESH_TIMEOUT}s (age: ${age:-no samples}) — the agent recovered but its telemetry did not resume"
 }
 

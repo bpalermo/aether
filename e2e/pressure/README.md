@@ -37,7 +37,8 @@ lacks one aborts before it asks the cluster anything, naming each missing variab
 | `COLLECTOR_OTLP_ENDPOINT` | The OTLP gRPC endpoint the Job floods. | `<COLLECTOR_DEPLOY>.<COLLECTOR_NS>.svc.cluster.local:4317` |
 | `PROM_SVC` | Name of the Prometheus Service (port 80). | `prometheus-server` |
 | `AGENT_NS`, `AGENT_SELECTOR`, `AGENT_CONTAINER` | The node agent, as the `aether` chart installs it. | `aether-system`, `app.kubernetes.io/name=aether-agent`, `agent` |
-| `JOB_NS`, `JOB_NAME`, `--job-manifest` | The pressure Job. The namespace and name are also in the manifest, so change them together. | `aether-test`, `aether-collector-pressure`, `collector-pressure-job.yaml` |
+| `JOB_NS`, `JOB_NAME`, `--job-manifest` | The pressure Job. The shipped manifest takes its namespace and name from the two variables. A manifest of your own must define that same Job (`  name: <JOB_NAME>`, `  namespace: <JOB_NS>`): one that defines another is refused before anything is applied. | `aether-test`, `aether-collector-pressure`, `collector-pressure-job.yaml` |
+| `MIN_POLL_OK_PCT` | The share of a wait loop's polls that must have got an answer before its deadline may be read as a FAIL. | `50` |
 | `SOAK_POD_SELECTOR` | See [The soak guard](#the-soak-guard-what-it-can-and-cannot-know). | unset |
 
 The measured numbers further down (a 2Gi collector, two replicas, five nodes) are those of the
@@ -272,7 +273,7 @@ said that. Where absence is a legitimate answer it is read from a call that **su
 | `get pods -l <SOAK_POD_SELECTOR>` (when set) | pass: no pod carries it | abort (#1565) |
 | `get ds` of `AGENT_NS` | pass: none mid-roll | abort (#1565) |
 | `get job` (a Job left by an earlier run) | pass: no Job | abort: could not ask |
-| `get pods` of the agent on the node, pre-flight and before the restart | abort: no agent pod | abort: could not list |
+| `get pods` of the agent on the node, pre-flight and before the restart | abort: no agent pod. Two pods (a roll's standby, or one still terminating) abort too: the script does not guess which to restart | abort: could not list |
 | the agent pod's `ready` and `restartCount`, pre-flight | n/a | abort |
 | `get pods` of the collector | abort: none Running | abort: could not list |
 | the collector pod's `GOMEMLIMIT` | fall back to the memory limit, said | abort |
@@ -282,14 +283,14 @@ said that. Where absence is a legitimate answer it is read from a call that **su
 | `curl` of a replica's `/metrics`, every poll | abort: an answer with no `otelcol_*` sample is not a zero heap | abort |
 | a Prometheus query for a required number (prober rate, collector heap, RSS, refused counters) | abort: `no data for …` | abort: `could not query Prometheus for …` (transport error, an error status, or not Prometheus's JSON) |
 | the age of the agent's series, pre-flight | abort: the series has no samples | abort: could not query |
-| `apply` of the Job | n/a | abort; the cleanup trap deletes the Job in case it was created |
-| `delete job` at a safety ceiling | fine (`--ignore-not-found`) | abort, saying the deletion could **not be confirmed** (the API server may have acted before the answer was lost); the cleanup trap tries again |
+| `apply` of the Job | n/a | abort, saying the apply could not be confirmed: the Job may have been created, and the cleanup trap tries to delete it |
+| `delete job` at a safety ceiling (the message also says whether the agent pod had already been deleted) | fine (`--ignore-not-found`) | abort, saying the deletion could **not be confirmed** (the API server may have acted before the answer was lost); the cleanup trap tries again |
 | `delete pod` of the agent | abort (the pod is gone: nothing was proven) | abort: whether the agent was restarted is not known |
-| `get pods` of the agent, waiting for the replacement | keep waiting; **FAIL** at the deadline | ask again; abort if the last call before the deadline failed |
-| the replacement's status, waiting for Ready | keep waiting; **FAIL** at the deadline | ask again; abort if the last call before the deadline failed |
+| `get pods` of the agent, waiting for the replacement | keep waiting; **FAIL** at the deadline | ask again; abort at the deadline if the last call failed, or if fewer than `MIN_POLL_OK_PCT` percent of the polls got an answer |
+| the replacement's status, waiting for Ready | keep waiting; **FAIL** at the deadline | ask again; abort at the deadline on the same two conditions |
 | the replacement's `restartCount` and terminated state, and its log | part of the verdict | abort: unread evidence is not a verdict |
 | `delete job`, releasing the pressure | fine | abort (the recovery was not measured); the cleanup trap tries again |
-| the age of the agent's series, waiting for it to go fresh | keep waiting; **FAIL** at the deadline | ask again; abort if the last query before the deadline failed |
+| the age of the agent's series, waiting for it to go fresh | keep waiting; **FAIL** at the deadline | ask again; abort at the deadline on the same two conditions |
 | `delete job` in the cleanup trap | fine | a `WARN` that the Job may still be running; the run's exit status stands |
 
 `//e2e/pressure:preflight_test` has a case for the failed call of each row, and one for the
@@ -445,8 +446,8 @@ between agent export intervals (60s); more parallelism, not more size, is the fi
 
 ## Files
 
-- `collector-pressure-job.yaml` — the `telemetrygen` Job, with two tokens `run.sh` fills in
-  for the collector's endpoint and namespace (namespace `aether-test`, explicit
+- `collector-pressure-job.yaml` — the `telemetrygen` Job, with four tokens `run.sh` fills in
+  for the collector's endpoint and namespace and the Job's own (by default `aether-test`, explicit
   `aether.io/managed: "false"` mesh opt-out, no tolerations, priority 0, capped resources,
   `activeDeadlineSeconds: 600`).
 - `run.sh` — pre-flight, pressure, one-node agent restart, assertions, teardown, verdict.

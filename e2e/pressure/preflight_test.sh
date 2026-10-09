@@ -692,8 +692,11 @@ want signals-ok 0 'prober ~25/s success, agent series age 14s'
 APPLY='trap '\''echo "JOB_APPLIED=$JOB_APPLIED"'\'' EXIT; apply_job'
 put apply-error apply.err
 call apply-error "$APPLY"
-asked apply-error 'could not apply'
+asked apply-error 'could not confirm that'
+want apply-error 2 'the cleanup trap tries to delete it'
 want apply-error 2 'JOB_APPLIED=1'
+# A failed apply is an unknown outcome: the Job may have been created.
+lacks apply-error 'no pressure was applied'
 
 call apply-ok "$APPLY"
 want apply-ok 0 'JOB_APPLIED=1'
@@ -711,7 +714,56 @@ else
 	fail "apply-endpoint: $(grep -n 'otlp-endpoint' "$FAKE/applied")"
 fi
 
+# The Job's namespace and name are the caller's too (#1600): the shipped
+# manifest takes them from JOB_NS and JOB_NAME, so the Job that is applied is
+# the Job that is watched and deleted. A manifest of the caller's own that
+# defines another Job is refused before anything is applied.
+call apply-job-names "$APPLY" JOB_NS=other-ns JOB_NAME=other-job
+want apply-job-names 0 'JOB_APPLIED=1'
+if grep -qxF '  name: other-job' "$FAKE/applied" && grep -qxF '  namespace: other-ns' "$FAKE/applied"; then
+	pass "apply-job-names: JOB_NS and JOB_NAME reach the manifest"
+else
+	fail "apply-job-names: $(grep -n '^  name:\|^  namespace:' "$FAKE/applied")"
+fi
+
+OWN="$TMP/own-job.yaml"
+printf 'apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: aether-collector-pressure\n  namespace: aether-test\nspec: {}\n' >"$OWN"
+call apply-own-manifest "$APPLY" JOB_MANIFEST="$OWN"
+want apply-own-manifest 0 'JOB_APPLIED=1'
+
+call apply-mismatch "$APPLY" JOB_MANIFEST="$OWN" JOB_NS=other-ns
+want apply-mismatch 2 'does not define job other-ns/aether-collector-pressure'
+want apply-mismatch 2 'JOB_APPLIED=0'
+if grep -q ' apply ' "$FAKE/calls"; then
+	fail "apply-mismatch: applied a manifest for another Job: $(cat "$FAKE/calls")"
+else
+	pass "apply-mismatch: nothing was applied"
+fi
+
 # restart_agent.
+put restart-ok agent-pods.out aether-agent-aaa
+call restart-ok 'NODE=n1; echo "before=$AGENT_RESTARTED"; restart_agent; echo "after=$AGENT_RESTARTED"'
+want restart-ok 0 'before=0'
+want restart-ok 0 'after=1'
+
+# Two agent pods on the node (#1601): a surge-rolled standby next to the owner,
+# or a replacement next to a pod that is still terminating. Which one the run
+# would restart is not this script's to guess: it refuses.
+put agent-two agent-pods.out 'aether-agent-aaa
+aether-agent-zzz
+'
+call agent-two 'NODE=n1; preflight_agent'
+want agent-two 2 '2 aether-agent pods on node n1'
+put restart-two agent-pods.out 'aether-agent-aaa
+aether-agent-zzz
+'
+call restart-two 'NODE=n1; restart_agent'
+want restart-two 2 '2 aether-agent pods on node n1'
+if grep -q 'delete' "$FAKE/calls"; then
+	fail "restart-two: deleted a pod it could not choose: $(cat "$FAKE/calls")"
+else
+	pass "restart-two: nothing was deleted"
+fi
 put restart-list-error agent-pods.err
 call restart-list-error 'NODE=n1; restart_agent'
 asked restart-list-error 'could not list the aether-agent pods on node n1'
@@ -747,6 +799,31 @@ put replaced-never agent-pods.out aether-agent-aaa
 call replaced-never "$REPLACED"
 want replaced-never 1 'no replacement agent pod appeared on n1'
 
+# A FAIL needs more than the last poll (#1599): three failed lists and then one
+# that shows no replacement is one look in twenty seconds, not a verdict.
+put replaced-mostly-errors agent-pods.err.1
+put replaced-mostly-errors agent-pods.err.2
+put replaced-mostly-errors agent-pods.err.3
+put replaced-mostly-errors agent-pods.out aether-agent-aaa
+call replaced-mostly-errors "$REPLACED"
+want replaced-mostly-errors 2 'only 1 of 4 polls got an answer'
+lacks replaced-mostly-errors 'no replacement agent pod appeared'
+
+# Most polls answered, but not the last one: what the node held when the time
+# ran out is not known.
+put replaced-last-error agent-pods.err.4
+put replaced-last-error agent-pods.out aether-agent-aaa
+call replaced-last-error "$REPLACED"
+want replaced-last-error 2 'could not list the aether-agent pods on node n1 when the time ran out'
+lacks replaced-last-error 'no replacement agent pod appeared'
+
+# Half the polls answered, the last one among them: that is a verdict.
+put replaced-half-errors agent-pods.err.1
+put replaced-half-errors agent-pods.err.2
+put replaced-half-errors agent-pods.out aether-agent-aaa
+call replaced-half-errors "$REPLACED"
+want replaced-half-errors 1 'no replacement agent pod appeared on n1'
+
 # wait_agent_ready.
 READY='NEW_POD=aether-agent-bbb; AGENT_READY_TIMEOUT=20; wait_agent_ready'
 put ready-errors status-waiting.err
@@ -763,6 +840,20 @@ want ready-blip 0 'replacement agent pod aether-agent-bbb Ready'
 put ready-never status-ready.out false
 call ready-never "$READY"
 want ready-never 1 'did not become Ready within 20s'
+
+put ready-mostly-errors status-waiting.err.1
+put ready-mostly-errors status-waiting.err.2
+put ready-mostly-errors status-waiting.err.3
+put ready-mostly-errors status-ready.out false
+call ready-mostly-errors "$READY"
+want ready-mostly-errors 2 'only 1 of 4 polls got an answer'
+lacks ready-mostly-errors 'did not become Ready'
+
+put ready-last-error status-waiting.err.4
+put ready-last-error status-ready.out false
+call ready-last-error "$READY"
+want ready-last-error 2 'could not read the status of agent pod aether-agent-bbb when the time ran out'
+lacks ready-last-error 'did not become Ready'
 
 put ready-crashloop status-waiting.out CrashLoopBackOff
 call ready-crashloop "$READY"
@@ -820,6 +911,17 @@ lacks ceiling-delete-error 'job deleted'
 call ceiling-delete-ok "JOB_APPLIED=1; $CEILING"
 want ceiling-delete-ok 2 'job deleted'
 want ceiling-delete-ok 2 'JOB_APPLIED=0'
+want ceiling-delete-ok 2 'no agent was touched'
+
+# The ceiling is also read after the agent was restarted (#1598): "no agent was
+# touched" is not true then.
+call ceiling-after-restart "JOB_APPLIED=1; AGENT_RESTARTED=1; NODE=n1; OLD_POD=aether-agent-aaa; $CEILING"
+want ceiling-after-restart 2 'job deleted'
+want ceiling-after-restart 2 'agent pod aether-agent-aaa on n1 had already been deleted by this run'
+lacks ceiling-after-restart 'no agent was touched'
+put ceiling-after-restart-delete-error delete-job.err
+call ceiling-after-restart-delete-error "JOB_APPLIED=1; AGENT_RESTARTED=1; NODE=n1; OLD_POD=aether-agent-aaa; $CEILING"
+want ceiling-after-restart-delete-error 2 'agent pod aether-agent-aaa on n1 had already been deleted by this run'
 
 # Before the Job is applied (the baseline, and every dry run) there is nothing
 # to delete, and a dry run changes nothing.
@@ -855,6 +957,20 @@ want fresh-blip 0 'is fresh again (3s old)'
 put fresh-stale prom.out "$(prom_value 500)"
 call fresh-stale "$FRESH"
 want fresh-stale 1 'did not go fresh within 20s (age: 500)'
+
+put fresh-mostly-errors prom.err.1
+put fresh-mostly-errors prom.err.2
+put fresh-mostly-errors prom.err.3
+put fresh-mostly-errors prom.out "$(prom_value 500)"
+call fresh-mostly-errors "$FRESH"
+want fresh-mostly-errors 2 'only 1 of 4 polls got an answer'
+lacks fresh-mostly-errors 'did not go fresh'
+
+put fresh-last-error prom.err.4
+put fresh-last-error prom.out "$(prom_value 500)"
+call fresh-last-error "$FRESH"
+want fresh-last-error 2 'when the time ran out'
+lacks fresh-last-error 'did not go fresh'
 
 # --- one cluster for the whole run ----------------------------------------------
 # The current context is checked once, and it can change under a run that

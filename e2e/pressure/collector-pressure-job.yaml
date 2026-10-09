@@ -8,11 +8,13 @@
 #
 # NEVER apply this by hand during a soak. See README.md.
 #
-# Not applicable as it is: run.sh fills in the two tokens that name the
-# collector, which is the caller's (COLLECTOR_NS, COLLECTOR_DEPLOY,
-# COLLECTOR_OTLP_ENDPOINT), before it applies the Job:
+# Not applicable as it is: run.sh fills in four tokens before it applies the
+# Job. Two name the collector, which is the caller's (COLLECTOR_NS,
+# COLLECTOR_DEPLOY, COLLECTOR_OTLP_ENDPOINT), and two the Job itself, so that
+# the Job run.sh applies is the one it watches and deletes (JOB_NS, JOB_NAME):
 #   __COLLECTOR_OTLP_ENDPOINT__   the OTLP gRPC endpoint that is flooded
 #   __COLLECTOR_NS__              the namespace of the collector's pods
+#   __JOB_NS__, __JOB_NAME__      default aether-test, aether-collector-pressure
 #
 # Kill switch (either works, both are safe at any moment):
 #   kubectl -n aether-test delete job aether-collector-pressure
@@ -28,8 +30,8 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: aether-collector-pressure
-  namespace: aether-test
+  name: __JOB_NAME__
+  namespace: __JOB_NS__
   labels:
     app.kubernetes.io/name: aether-collector-pressure
     app.kubernetes.io/component: pressure-generator
