@@ -163,6 +163,13 @@ func (t *Tracker) WaitListenerPresent(ctx context.Context, name string) error {
 // WaitListenerAbsent blocks until Envoy has ACKed the removal of the named
 // listener (or it was never known to be present), the context ends, or Envoy
 // NACKs the removal.
+//
+// "Never known to be present" is read as absent, and after an agent restart
+// that is every listener until a proxy's opening Listener exchange has been
+// acknowledged (statedHeld, #1511). A removal waited for before that moment,
+// while no proxy is connected or between its opening request and its ACK of
+// the opening response, returns at once although the proxy may hold the
+// listener. Like the rest of this wait it is best-effort.
 func (t *Tracker) WaitListenerAbsent(ctx context.Context, name string) error {
 	return t.wait(ctx, resourcev3.ListenerType, name, false)
 }

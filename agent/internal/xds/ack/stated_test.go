@@ -339,11 +339,21 @@ func TestOpeningExchange_IsPerType(t *testing.T) {
 // TestWaitListenerAbsent_WaitsForAListenerTheProxyStated: before #1511 a
 // restarted agent knew nothing of a listener the proxy still held, read that
 // as absent, and returned from the removal wait at once. Now the wait is for
-// the acknowledged removal, as it is for an agent that did not restart.
+// the acknowledged removal, as it is for an agent that did not restart, from
+// the moment the opening response is acknowledged.
 func TestWaitListenerAbsent_WaitsForAListenerTheProxyStated(t *testing.T) {
 	tr := NewTracker(slog.New(slog.DiscardHandler))
 	openDelta(tr, 1, resourcev3.ListenerType, map[string]string{testListener: "h1"})
 	sendDelta(tr, 1, "n1", nil, nil)
+
+	// The limit: until the opening response is acknowledged the tracker
+	// knows nothing of the listener, and unknown reads as absent. A removal
+	// waited for in that window (or before any proxy has connected) is not
+	// waited for, as before #1511.
+	early, cancelEarly := context.WithTimeout(context.Background(), resolvedWait)
+	defer cancelEarly()
+	require.NoError(t, tr.WaitListenerAbsent(early, testListener), "stated and compared, not yet acknowledged: still unknown")
+
 	ackDelta(tr, 1, "n1", "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), unresolvedWait)

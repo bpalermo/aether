@@ -6177,7 +6177,10 @@ retried, or a pod re-added, after an agent restart no longer counts a `present`/
 for a listener that was there all along. And a pod DEL after an agent restart now waits
 for the proxy to acknowledge the removal, where it used to return at once because the
 new agent knew of no listener: an `absent`/`timeout` there is a removal the proxy did not
-acknowledge within the wait, which before #1511 went uncounted. Like any ACK, the
+acknowledge within the wait, which before #1511 went uncounted. That holds from the
+moment the proxy has acknowledged its opening Listener response: a DEL that arrives
+earlier (no proxy connected yet, or the opening exchange still in flight) is still not
+waited for, because the agent reads a listener it knows nothing of as absent. Like any ACK, the
 statement says the proxy accepted the listener, not that the listener has finished
 warming; the in-netns readiness probe stays the data-plane proof.
 
