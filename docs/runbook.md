@@ -2160,9 +2160,10 @@ is left `failed` at a new revision, with the objects Helm reached before the
 MeshConfig already rolled back. A rollback to any other revision works.
 
 Since 2.4.24 the seed is a Helm hook (`helm.sh/hook: pre-install,pre-upgrade`),
-which is in no manifest. **Upgrading to 2.4.24 rolls nothing and changes
-nothing in the cluster**: the MeshConfig is live, so it is not rendered, as
-before. What changes:
+which is in no manifest. **Upgrading to 2.4.24 rolls no workload and does not
+touch the MeshConfig**: it is live, so it is not rendered, as before (Helm
+still patches the `helm.sh/chart` label on the objects it renders, as on every
+chart upgrade). What changes:
 
 - A release **first installed with 2.4.24 or later** can be rolled back to any
   revision, the first included. The MeshConfig is not touched by a rollback: it
@@ -2301,8 +2302,12 @@ changes nothing in it: your edits survive every upgrade and every rollback
 after an upgrade and a rollback in each direction). `helm get manifest` lists
 it on every revision.
 
-- **Upgrading to 2.4.25 rolls nothing and changes nothing in the cluster.** An
-  edge namespace that 2.4.24 or an older chart created is not marked, and the
+- **Upgrading from 2.4.24 to 2.4.25 rolls no workload and changes no
+  MeshConfig** (measured: every DaemonSet and Deployment keeps its generation,
+  both MeshConfigs keep their UID, generation and spec, and the edge namespace
+  gets no new annotation). What Helm does patch, as on every chart upgrade, is
+  the `helm.sh/chart` label on the objects it renders; pod templates do not
+  carry it. An edge namespace that 2.4.24 or an older chart created is not marked, and the
   chart treats it as before: the MeshConfig is live, so it is not rendered. The
   revision that created that namespace keeps the MeshConfig in its stored
   manifest and still cannot be a Helm 3 rollback target; the check and the way
