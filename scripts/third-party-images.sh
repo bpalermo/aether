@@ -15,10 +15,16 @@
 # digest selects the image, the tag is for the reader), or `<name>@<digest>`
 # where a consumer wants no tag.
 #
+# A base image is third-party too (#1477): the image every aether image is
+# built on is pulled by the Bazel module files, where it is the attributes of a
+# pull and never one reference. MODULE_FILES are read for exactly that
+# construct (extract_module_pulls) and what they name is held to the same list.
+#
 # Usage:
 #   scripts/third-party-images.sh check
 #       Offline; the test (.github/workflows/ci.yaml, `shell` job). Scans the
-#       tracked and untracked-but-not-ignored files under SCAN_PATHS and fails on
+#       tracked and untracked-but-not-ignored files under SCAN_PATHS, and the
+#       base-image pulls in MODULE_FILES, and fails on
 #         - an image referenced by tag only, or by no tag at all
 #         - a digest the inventory does not list for that name
 #         - a tag that disagrees with the inventory's tag for that digest
@@ -27,7 +33,9 @@
 #   scripts/third-party-images.sh list
 #       Offline. Every pin and the files that use it.
 #   scripts/third-party-images.sh outdated [--newer-tags] [<name>...]
-#       Asks each pin's registry what its tag points at now. Anonymous: public
+#       Asks each pin's registry what its tag points at now (daily, by
+#       .github/workflows/third-party-images.yaml through
+#       scripts/third-party-images-report.sh). Anonymous: public
 #       repositories only, no credential is read from anywhere. Reports, per pin,
 #       `current`, `MOVED` (the tag was re-pushed: the new digest is printed),
 #       `NOT-MULTI-ARCH` (the pinned index lacks linux/amd64 or linux/arm64) or
@@ -67,6 +75,10 @@ SCAN_PATHS=(charts e2e test registry/etcdtest)
 # in e2e/kind_pin_test.sh is a regular expression, and nothing a `*_test.sh`
 # names is ever pulled), and Markdown (prose). A Go `_test.go` IS scanned: the
 # e2e and conformance suites are Go tests, and they start what they name.
+# The Bazel module files, read for the base-image pulls and nothing else (see
+# extract_module_pulls): the root workspace's and the //proxy workspace's.
+MODULE_FILES=(MODULE.bazel proxy/MODULE.bazel)
+
 is_scanned_file() {
 	case "$1" in
 	*/BUILD.bazel | *.bzl | *.md | *_test.sh) return 1 ;;
@@ -203,9 +215,9 @@ is_skipped() {
 #     tree is written that way (the chart's split values are the images this
 #     repository builds); write a third-party one as a single reference.
 #   - a whole reference under a child key of `image:` (`image:` / `  ref: x`,
-#     as e2e/soak/sortie-values.yaml writes it) when no pin names the image
-#     yet: `ref` is no image key. Once the name is in the inventory net 2 reads
-#     it there like anywhere else, which is how the sortie images are held;
+#     as some Helm values files write it) when no pin names the image yet:
+#     `ref` is no image key. Once the name is in the inventory net 2 reads it
+#     there like anywhere else;
 #   - YAML embedded in another language (a here-document in a shell script, a
 #     Go raw string) when it holds a flow mapping broken across lines, with an
 #     unquoted `image:` value that is not first on its line and whose `{` is on
@@ -411,6 +423,144 @@ extract_references() { # <names file>; file list on stdin
 	' "${files[@]}")
 }
 
+# Prints "<path>\t<line>\t<reference>" for every base image a Bazel module file
+# pulls, and writes "<path>\t<line>\t<what is wrong>" to <problems out> for a
+# pull it cannot follow (#1477).
+#
+# A base image is not written as one reference: it is the attributes of a pull.
+# This reads the two spellings in use and no other Starlark:
+#
+#   <name> = use_repo_rule("@rules_img//img:pull.bzl", "pull")    MODULE.bazel
+#   <name>(
+#       digest = "sha256:...",
+#       registry = "gcr.io",
+#       repository = "distroless/static-debian13",
+#       tag = "nonroot",
+#   )
+#
+#   <name> = use_extension("@rules_oci//oci:extensions.bzl", "oci")    proxy/MODULE.bazel
+#   <name>.pull(
+#       digest = "sha256:...",
+#       image = "gcr.io/distroless/cc-debian12",
+#   )
+#
+# and puts them together as `<registry>/<repository>[:<tag>][@<digest>]` or
+# `<image>[:<tag>][@<digest>]`, reported at the digest's line (the pull's own
+# line when it has none), for scan() to judge like any other reference.
+#
+# It is a line reader for the shape buildifier writes (the call opens a line,
+# one attribute per line, `)` closes it), not a Starlark evaluator, so it fails
+# closed: a pull in any other shape, an attribute it needs that is not a plain
+# string literal, a pull with no repository, and a file that names either rule
+# without one pull having been read are each a finding, never a pass. A comment
+# line is not read. What it does not follow: a module file reached by
+# `include()`, and a pull rule other than these two.
+extract_module_pulls() { # <problems out>
+	local present=() f
+	: >"$1"
+	for f in "${MODULE_FILES[@]}"; do
+		[ -f "$ROOT/$f" ] && present+=("$f")
+	done
+	[ "${#present[@]}" -gt 0 ] || return 0
+	(cd "$ROOT" && awk -v problems="$1" '
+		function problem(line, what) {
+			printf "%s\t%s\t%s\n", file, line, what >> problems
+		}
+		function end_of_file() {
+			if (file != "" && names_rule != "" && !pulls) problem(0, "names an image pull rule (" names_rule ") but no pull was read; write the binding and the call the way scripts/third-party-images.sh (extract_module_pulls) documents")
+		}
+		FNR == 1 {
+			end_of_file()
+			file = FILENAME
+			names_rule = ""
+			pulls = 0
+			inside = ""
+			split("", rule)
+			split("", ext)
+		}
+		/^[ \t]*#/ { next }
+		/@rules_img\/\/img:pull\.bzl/ { names_rule = "@rules_img//img:pull.bzl" }
+		/@rules_oci\/\/oci:extensions\.bzl/ { names_rule = "@rules_oci//oci:extensions.bzl" }
+		inside == "" && /^[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*use_repo_rule\("@rules_img\/\/img:pull\.bzl",[ \t]*"pull"\)/ {
+			n = $0
+			sub(/[ \t]*=.*/, "", n)
+			rule[n] = 1
+			next
+		}
+		inside == "" && /^[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*use_extension\("@rules_oci\/\/oci:extensions\.bzl",[ \t]*"oci"[,)]/ {
+			n = $0
+			sub(/[ \t]*=.*/, "", n)
+			ext[n] = 1
+			next
+		}
+		inside == "" && /^[A-Za-z_][A-Za-z0-9_.]*\(/ {
+			n = $0
+			sub(/\(.*/, "", n)
+			kind = ""
+			if (n in rule) kind = "img"
+			else if (n ~ /\.pull$/ && (substr(n, 1, length(n) - 5) in ext)) kind = "oci"
+			if (kind == "") next
+			pulls++
+			if ($0 !~ /^[A-Za-z_][A-Za-z0-9_.]*\([ \t]*$/) {
+				problem(FNR, "a pull the reader cannot follow: open the call on its own line and write one attribute per line")
+				next
+			}
+			inside = kind
+			opened = FNR
+			digest_line = 0
+			unreadable = 0
+			split("", attr)
+			next
+		}
+		inside != "" && /^\)/ {
+			if (inside == "img") {
+				if (!("repository" in attr)) {
+					problem(opened, "this pull names no repository")
+					unreadable = 1
+				} else if (!("registry" in attr)) {
+					problem(opened, "this pull names no registry")
+					unreadable = 1
+				} else {
+					name = attr["registry"] "/" attr["repository"]
+				}
+			} else {
+				if (!("image" in attr)) {
+					problem(opened, "this pull names no image")
+					unreadable = 1
+				} else {
+					name = attr["image"]
+				}
+			}
+			if (!unreadable) {
+				ref = name
+				if ("tag" in attr) ref = ref ":" attr["tag"]
+				if ("digest" in attr) ref = ref "@" attr["digest"]
+				printf "%s\t%d\t%s\n", FILENAME, (digest_line ? digest_line : opened), ref
+			}
+			inside = ""
+			next
+		}
+		inside != "" && /^[ \t]+[a-z_]+[ \t]*=/ {
+			key = $0
+			sub(/^[ \t]+/, "", key)
+			sub(/[ \t]*=.*/, "", key)
+			if (key != "registry" && key != "repository" && key != "image" && key != "tag" && key != "digest") next
+			value = $0
+			sub(/^[^=]*=[ \t]*/, "", value)
+			if (value !~ /^"[^"\\]*",?[ \t]*(#.*)?$/) {
+				problem(FNR, key " is not a plain string literal")
+				unreadable = 1
+				next
+			}
+			if (key == "digest") digest_line = FNR
+			sub(/^"/, "", value)
+			sub(/".*/, "", value)
+			attr[key] = value
+		}
+		END { end_of_file() }
+	' "${present[@]}")
+}
+
 # split_reference <ref>: sets REF_NAME, REF_TAG, REF_DIGEST (empty when absent).
 split_reference() {
 	local ref="$1" rest
@@ -463,6 +613,17 @@ scan() {
 		SKIP_UNUSED+=("$key")
 	done
 	extract_references "$names" <"$tmp/files" >"$tmp/refs" || die "the scan itself failed"
+	# The base-image pulls of the Bazel module files: judged below like every
+	# other reference; a pull that could not be read is a finding of its own.
+	extract_module_pulls "$tmp/problems" >>"$tmp/refs" || die "the read of ${MODULE_FILES[*]} itself failed"
+	while IFS=$'\t' read -r path line ref; do
+		# Line 0: about the file as a whole.
+		[ "$line" = 0 ] && line=""
+		finding "$path${line:+:$line}: $ref"
+	done <"$tmp/problems"
+	for path in "${MODULE_FILES[@]}"; do
+		[ -f "$ROOT/$path" ] && nfiles=$((nfiles + 1))
+	done
 	while IFS=$'\t' read -r path line ref; do
 		nrefs=$((nrefs + 1))
 		if [ -n "${ALLOW["$path $ref"]:-}" ]; then
@@ -504,7 +665,7 @@ cmd_check() {
 	local key
 	for key in "${PIN_ORDER[@]}"; do
 		[ -n "${PIN_USES[$key]:-}" ] ||
-			finding "${INVENTORY#"$ROOT"/}: pin ${key%@*} ${PIN_TAG[$key]} ${key#*@} is used by no file under ${SCAN_PATHS[*]}; remove the line"
+			finding "${INVENTORY#"$ROOT"/}: pin ${key%@*} ${PIN_TAG[$key]} ${key#*@} is used by no file under ${SCAN_PATHS[*]} and by no pull in ${MODULE_FILES[*]}; remove the line"
 	done
 	for key in "${ALLOW_ORDER[@]}"; do
 		[ -n "${ALLOW_USED[$key]:-}" ] ||

@@ -481,7 +481,8 @@ identity-bearing class (R2):
 
   The gate for dropping the allow-list (#979) is **QUIC per-request proxy CPU
   ≤ 1.5× h2**, measured on a soak with the #1006 method
-  (`e2e/soak/README.md`, "The QUIC per-request cost gate"). The baseline is the
+  ("The QUIC per-request cost gate" of the soak harness, which is now an external
+  soak harness, maintained outside this repository). The baseline is the
   same-revision A/B of 2026-09-28 (rev247, 300 rps, matched 80-min no-roll
   windows, Pyroscope fleet envoy cores): h3/h2 = **1.18×** per request (10.5 ms
   vs 8.9 ms), under the gate — [#1021, "Same-revision measurement,

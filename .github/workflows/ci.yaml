@@ -333,13 +333,15 @@ jobs:
         run: scripts/check-registry-config.sh
 
       # A third-party image (curl, an echo server, OPA, etcd, the kind node) is
-      # named in chart values, e2e and soak manifests and test fixtures. Each
+      # named in chart values, e2e manifests and test fixtures. Each
       # reference carries the digest of the image's multi-arch index, and
       # scripts/third-party-images.txt lists them (#1400, #1401). This fails on
       # an image named by tag only, a digest the list does not have, a tag that
       # disagrees with it, and a pin or an exception nothing uses any more.
-      # It reads tracked files; no network (`outdated` is the online half, run
-      # by hand: docs/runbook.md, "Refreshing third-party image pins").
+      # The base images the Bazel module files pull are held to the same list
+      # (#1477). It reads tracked files; no network (`outdated` is the online
+      # half, run daily by third-party-images.yaml: docs/runbook.md,
+      # "Refreshing third-party image pins").
       - name: Every third-party image is pinned by digest and listed
         run: scripts/third-party-images.sh check
 

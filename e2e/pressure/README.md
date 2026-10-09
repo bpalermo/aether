@@ -4,14 +4,17 @@ Deliberately drives the shared `otel-collector` into `memory_limiter` shedding, 
 **one** node's `aether-agent` under that pressure, and asserts the agent still starts,
 attests to SPIRE and serves. It is the on-demand test for the branch #668 fixed.
 
-**Never run this during a soak.** See [Risk](#risk-and-blast-radius).
+**Never run this during a soak.** See [Risk](#risk-and-blast-radius). The script cannot
+detect a soak, so a real run needs the operator to say there is none
+(`--no-soak-running`); see [The soak guard](#the-soak-guard-what-it-can-and-cannot-know).
 
 ```bash
-bash e2e/pressure/run.sh --node main-worker-03
-
 # Resolve GOMEMLIMIT, the pod limits, the abort thresholds and the metrics source,
 # print them, and exit. Applies no Job and touches no agent — safe any time.
-bash e2e/pressure/run.sh --node main-worker-03 --dry-run
+bash e2e/pressure/run.sh --node <node> --dry-run
+
+# The real run. --no-soak-running is your statement, not something the script checked.
+bash e2e/pressure/run.sh --node <node> --no-soak-running
 ```
 
 ## Why a soak cannot test this
@@ -50,7 +53,7 @@ exports to that collector, so the shed hits the real agent's real export path �
 
 The cost is honest: the SLI goes blind while the collector is shedding (prober counters
 are exported through it). That is acceptable *outside* a soak and is the reason the
-pre-flight refuses to run when a soak is up.
+pre-flight refuses to run until the operator has said that no soak is up.
 
 ### B — a dedicated throwaway collector + one node pointed at it (rejected)
 
@@ -176,9 +179,12 @@ Three flags in the Job are load-bearing and must not be dropped:
 
 1. `kubectl` context is `talos-main` (it gets silently stolen by `kind-kind`; set
    `EXPECT_CONTEXT` to override deliberately).
-2. **No soak is running**: no `k6-soak-loader` DaemonSet in `aether-test`, no `churn.sh` on
-   this workstation. Shedding the collector mid-soak makes the prober's cumulative counters
-   non-monotonic and the run ungradeable (soak README gotchas 3 and 4).
+2. **The soak guard**: the operator's acknowledgement (`--no-soak-running` or
+   `NO_SOAK_RUNNING=1`; a `--dry-run` only warns without it), no pod carrying
+   `SOAK_POD_SELECTOR` when that is set, and no DaemonSet of `aether-system` mid-roll.
+   Shedding the collector mid-soak leaves a hole in the prober's cumulative counters and
+   makes the run ungradeable. This guard does not detect a soak: see
+   [the next section](#the-soak-guard-what-it-can-and-cannot-know).
 3. `otel-collector` is at full readiness (2/2). Do not pressure an already-degraded o11y plane.
 4. The target node's agent pod is Ready with `restartCount: 0`.
 5. The external prober is reporting successes — the availability signal must be alive going in.
@@ -194,6 +200,29 @@ the resolved plan; it is the cheapest way to catch a resized o11y plane or a sto
 
 Also confirm by eye that nothing else important is mid-flight (a release, a conformance run,
 a profiling pass) — for the shedding window, cluster telemetry is unreliable by design.
+
+### The soak guard: what it can and cannot know
+
+A soak is run by an external soak harness, maintained outside this repository. What such a
+harness may read from a mesh is written down in
+[`test/harnesscontract/external-harness.yaml`](../../test/harnesscontract/external-harness.yaml),
+and that contract names **no identity for a load driver**: the namespace, the names and the
+labels of a harness's workloads are its own (the file's `not_contract` section says so). So
+nothing in this repository can tell that a soak is running, and `run.sh` does not claim to.
+Before #1555 it looked for a DaemonSet and a local process by names a soak no longer uses,
+and passed while one ran.
+
+| Part | What it is | What it proves |
+|---|---|---|
+| `--no-soak-running` / `NO_SOAK_RUNNING=1` | The operator's acknowledgement. A real run aborts without it, before it asks the cluster anything. | Nothing the script verified. It is your statement that no soak, release validation or other graded run is using the cluster. |
+| `SOAK_POD_SELECTOR=<label selector>` | Optional. When set, the run is refused while any pod in any namespace carries the selector. | Only as much as the selector: set it to the label your harness puts on its pods. Unset (the default), no pod is looked for, and the script prints that. There is no default because any default would be a guess. |
+| The roll check | The run is refused while a DaemonSet of `aether-system` is mid-roll (spec not yet observed, a pod not updated, or a pod unavailable). | That no roll is in progress **at that instant**. A soak rolls these DaemonSets, and so does an upgrade. A soak between two rolls passes it. |
+
+The two checks can only add a refusal, and each fails closed: a list that could not be read
+aborts the run. Neither looks at the processes of the machine the script runs on, because a
+harness need not run there (and a `pgrep -f <pattern>` matches the command line of whatever
+waits on it). `//e2e/pressure:preflight_test` holds the guard to all of this with a fake
+`kubectl`.
 
 ## Procedure
 
@@ -343,6 +372,10 @@ between agent export intervals (60s); more parallelism, not more size, is the fi
   `aether.io/managed: "false"` mesh opt-out, no tolerations, priority 0, capped resources,
   `activeDeadlineSeconds: 600`).
 - `run.sh` — pre-flight, pressure, one-node agent restart, assertions, teardown, verdict.
-  Useful flags: `--dry-run` (resolve and print the plan, change nothing), `--metrics-source
+  Useful flags: `--dry-run` (resolve and print the plan, change nothing),
+  `--no-soak-running` (required for a real run), `--metrics-source
   auto|collector|prometheus`, `--pressure-timeout`, `--ready-timeout`. Env overrides for
-  everything else, including `ABORT_HEAP_PCT` / `ABORT_RSS_PCT` and `EXPECT_CONTEXT`.
+  everything else, including `ABORT_HEAP_PCT` / `ABORT_RSS_PCT`, `EXPECT_CONTEXT` and
+  `SOAK_POD_SELECTOR`.
+- `preflight_test.sh` — the hermetic test of the soak guard (`bazel test
+  //e2e/pressure:preflight_test`).

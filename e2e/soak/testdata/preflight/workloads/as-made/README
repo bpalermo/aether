@@ -1,3 +1,0 @@
-No canned answer here, on purpose: for a svc-N with no file in its scenario,
-the fake kubectl of harness_test.sh answers with a Deployment as
-e2e/soak/svc.yaml makes it.
