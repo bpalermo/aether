@@ -103,11 +103,13 @@ type Container struct {
 	// entry has one) is read from that entry, so the two cannot disagree.
 	ResourceAttributes []string `json:"resource_attributes"`
 	// CodeResourceAttributes are ids of `resource_attributes` entries the
-	// component's own code sets. The OpenTelemetry SDK lets the environment
-	// win over the code, so a chart that gave the container the attribute would
-	// change what is deployed while the code still says what the entry says:
-	// the container is given it neither in OTEL_RESOURCE_ATTRIBUTES nor, for
-	// service.name, as OTEL_SERVICE_NAME.
+	// component's own code sets. The environment can replace what the code
+	// sets (OTEL_SERVICE_NAME always does; OTEL_RESOURCE_ATTRIBUTES does for a
+	// component that reads the environment after its own attributes), so a
+	// chart that gave the container the attribute could change what is deployed
+	// while the code still says what the entry says: the container is given it
+	// neither in OTEL_RESOURCE_ATTRIBUTES nor, for service.name, as
+	// OTEL_SERVICE_NAME.
 	CodeResourceAttributes []string `json:"code_resource_attributes"`
 	// Args maps a command-line flag to the id of a `names` entry: the container
 	// is run with `<flag>=<that entry's value>`. A value with `<id>` in it is a
@@ -871,7 +873,7 @@ func (c Container) checkCodeResourceAttributes(what string, got container) []str
 	var problems []string
 	// What cannot be read cannot be shown not to set the attribute.
 	if len(got.EnvFrom) > 0 {
-		problems = append(problems, fmt.Sprintf("%s container %q takes variables from `envFrom`, which this check cannot read: one of them could be %s and replace what the component's own code sets", what, c.Name, ResourceEnv))
+		problems = append(problems, fmt.Sprintf("%s container %q takes variables from `envFrom`, which this check cannot read: one of them could be %s or %s and replace what the component's own code sets", what, c.Name, ServiceNameEnv, ResourceEnv))
 	}
 	if slices.ContainsFunc(got.Env, func(e envVar) bool { return e.Name == ResourceEnv && e.ValueFrom != nil }) {
 		problems = append(problems, fmt.Sprintf("%s container %q takes %s from `valueFrom`, which this check cannot read: it could set what the component's own code sets", what, c.Name, ResourceEnv))
@@ -880,7 +882,7 @@ func (c Container) checkCodeResourceAttributes(what string, got container) []str
 	for _, a := range c.codeAttributes {
 		if _, ok := pairs[a.Attribute]; ok {
 			// Not the value it has: an environment variable can hold a secret.
-			problems = append(problems, fmt.Sprintf("%s container %q: %s sets the resource attribute %q, which the entry %s says the component's own code sets. The environment wins over the code, so what is deployed is no longer what the code says",
+			problems = append(problems, fmt.Sprintf("%s container %q: %s sets the resource attribute %q, which the entry %s says the component's own code sets: a chart does not name it a second time (a component that reads the environment after its own attributes is renamed by it)",
 				what, c.Name, ResourceEnv, a.Attribute, a.ID))
 		}
 		if a.Attribute == serviceNameAttribute && slices.ContainsFunc(got.Env, func(e envVar) bool { return e.Name == ServiceNameEnv }) {
