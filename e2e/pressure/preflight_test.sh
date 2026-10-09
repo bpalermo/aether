@@ -387,7 +387,7 @@ prepare selector-hit
 printf 'pod/loader-abc\npod/loader-def\n' >"$CASES/selector-hit/pods"
 guard selector-hit NO_SOAK_RUNNING=1 SOAK_POD_SELECTOR='role=load,tier!=x'
 want selector-hit 2 "2 pod(s) carry SOAK_POD_SELECTOR='role=load,tier!=x'"
-if grep -qxF -- 'get pods --all-namespaces -l role=load,tier!=x -o name' "$FAKE/calls"; then
+if grep -qxF -- '--context ctx-test get pods --all-namespaces -l role=load,tier!=x -o name' "$FAKE/calls"; then
 	pass "selector-hit: the selector reaches kubectl as given, across namespaces"
 else
 	fail "selector-hit: unexpected pod query: $(cat "$FAKE/calls")"
@@ -415,7 +415,7 @@ roll_case roll-two "$(ds aether-proxy 7 7 5 3 0),$(ds aether-mesh-dns 2 2 5 4 1)
 
 guard roll-other-namespace NO_SOAK_RUNNING=1 AGENT_NS=mesh-ns
 want roll-other-namespace 0 'no DaemonSet of mesh-ns is mid-roll'
-if grep -qxF -- '-n mesh-ns get ds -o json' "$FAKE/calls"; then
+if grep -qxF -- '--context ctx-test -n mesh-ns get ds -o json' "$FAKE/calls"; then
 	pass "roll-other-namespace: AGENT_NS is the namespace asked"
 else
 	fail "roll-other-namespace: unexpected DaemonSet query: $(cat "$FAKE/calls")"
@@ -719,7 +719,7 @@ asked restart-list-error 'could not list the aether-agent pods on node n1'
 put restart-delete-error agent-pods.out aether-agent-aaa
 put restart-delete-error delete-pod.err
 call restart-delete-error 'NODE=n1; restart_agent'
-asked restart-delete-error 'could not delete agent pod aether-agent-aaa'
+asked restart-delete-error 'could not confirm the deletion of agent pod aether-agent-aaa'
 
 # wait_agent_replaced: FAIL (exit 1) says the replacement never appeared. A
 # list that could not be read says nothing about the agent, and the moment
@@ -801,17 +801,19 @@ call verify-ok "$VERIFY"
 want verify-ok 0 'restarts=0, no terminated container, SPIRE Workload API source established'
 
 # The Job's deletion: after the agent's checks, at a safety ceiling, and in the
-# cleanup trap. A delete that failed did not delete, and the trap tries again.
+# cleanup trap. A delete that failed is a delete whose outcome is not known
+# (the API server may have acted before the answer was lost): the script says
+# neither "deleted" nor "not deleted", and the trap tries again.
 put stop-error delete-job.err
 call stop-error 'JOB_APPLIED=1; trap '\''echo "JOB_APPLIED=$JOB_APPLIED"'\'' EXIT; stop_pressure'
-asked stop-error 'could not delete job aether-test/aether-collector-pressure'
+asked stop-error 'could not confirm the deletion of job aether-test/aether-collector-pressure'
 want stop-error 2 'JOB_APPLIED=1'
 lacks stop-error 'pressure job deleted'
 
 CEILING='M_RSS=900; M_HEAP=900; ABORT_HEAP_BYTES=50; ABORT_RSS_BYTES=50; GOMEMLIMIT_BYTES=100; POD_MEM_LIMIT_BYTES=100; trap '\''echo "JOB_APPLIED=$JOB_APPLIED"'\'' EXIT; track_memory'
 put ceiling-delete-error delete-job.err
 call ceiling-delete-error "JOB_APPLIED=1; $CEILING"
-asked ceiling-delete-error 'the job could NOT be deleted'
+asked ceiling-delete-error 'the deletion of the job could NOT be confirmed'
 want ceiling-delete-error 2 'JOB_APPLIED=1'
 lacks ceiling-delete-error 'job deleted'
 
@@ -831,7 +833,7 @@ fi
 
 put cleanup-delete-error delete-job.err
 call cleanup-delete-error 'JOB_APPLIED=1; trap cleanup EXIT; exit 1'
-want cleanup-delete-error 1 'WARN: could not delete job aether-test/aether-collector-pressure'
+want cleanup-delete-error 1 'WARN: could not confirm the deletion of job aether-test/aether-collector-pressure'
 want cleanup-delete-error 1 "$KUBE_ERR"
 
 call cleanup-delete-ok 'JOB_APPLIED=1; trap cleanup EXIT; exit 0'
@@ -853,6 +855,30 @@ want fresh-blip 0 'is fresh again (3s old)'
 put fresh-stale prom.out "$(prom_value 500)"
 call fresh-stale "$FRESH"
 want fresh-stale 1 'did not go fresh within 20s (age: 500)'
+
+# --- one cluster for the whole run ----------------------------------------------
+# The current context is checked once, and it can change under a run that
+# lasts minutes (making a `kind` cluster takes it). Every call after the check
+# names the context the run is meant for, the cleanup trap's delete included,
+# so no apply or delete can land on another cluster.
+for c in "$CASES"/*/; do
+	name="$(basename "$c")"
+	stray=$(grep -v '^curl ' "$c/calls" | grep -v '^config current-context$' | grep -v '^--context ctx-test ' || true)
+	if [ -n "$stray" ]; then
+		fail "$name: kubectl was called without the expected context: $stray"
+	fi
+done
+pass "every kubectl call but the context check names the expected context"
+
+# The collector's series are selected by a regex made of the Deployment's
+# name, and a Deployment's name may have dots: `otel.collector` must not match
+# the pods of `otelxcollector`.
+call series-selector 'echo "sel=$COLLECTOR_SEL"' COLLECTOR_DEPLOY=otel.collector
+want series-selector 0 'sel=instance=~"otel\\.collector-.*"'
+call series-selector-default 'echo "sel=$COLLECTOR_SEL"'
+want series-selector-default 0 'sel=instance=~"otel-collector-.*"'
+call series-selector-given 'echo "sel=$COLLECTOR_SEL"' COLLECTOR_SEL='job="x"'
+want series-selector-given 0 'sel=job="x"'
 
 # --- what the guard must not do -----------------------------------------------
 # No object is asked for by a name this repository does not define, and local

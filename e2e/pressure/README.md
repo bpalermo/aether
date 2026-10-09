@@ -283,8 +283,8 @@ said that. Where absence is a legitimate answer it is read from a call that **su
 | a Prometheus query for a required number (prober rate, collector heap, RSS, refused counters) | abort: `no data for …` | abort: `could not query Prometheus for …` (transport error, an error status, or not Prometheus's JSON) |
 | the age of the agent's series, pre-flight | abort: the series has no samples | abort: could not query |
 | `apply` of the Job | n/a | abort; the cleanup trap deletes the Job in case it was created |
-| `delete job` at a safety ceiling | fine (`--ignore-not-found`) | abort, saying the Job was **not** deleted; the cleanup trap tries again |
-| `delete pod` of the agent | abort (the pod is gone: nothing was proven) | abort |
+| `delete job` at a safety ceiling | fine (`--ignore-not-found`) | abort, saying the deletion could **not be confirmed** (the API server may have acted before the answer was lost); the cleanup trap tries again |
+| `delete pod` of the agent | abort (the pod is gone: nothing was proven) | abort: whether the agent was restarted is not known |
 | `get pods` of the agent, waiting for the replacement | keep waiting; **FAIL** at the deadline | ask again; abort if the last call before the deadline failed |
 | the replacement's status, waiting for Ready | keep waiting; **FAIL** at the deadline | ask again; abort if the last call before the deadline failed |
 | the replacement's `restartCount` and terminated state, and its log | part of the verdict | abort: unread evidence is not a verdict |
@@ -294,6 +294,11 @@ said that. Where absence is a legitimate answer it is read from a call that **su
 
 `//e2e/pressure:preflight_test` has a case for the failed call of each row, and one for the
 absence where there is one.
+
+**One cluster for the whole run.** The current context is checked against `EXPECT_CONTEXT`
+once, and it can change under a run that lasts minutes. Every later call names
+`--context "$EXPECT_CONTEXT"`, the cleanup trap's delete included, so no apply or delete can
+land on another cluster.
 
 ## Procedure
 
@@ -413,7 +418,7 @@ harness:
 3. The manual switch, safe at any instant:
 
    ```bash
-   kubectl -n aether-test delete job aether-collector-pressure
+   kubectl --context <kube-context> -n aether-test delete job aether-collector-pressure
    ```
 
 Nothing else is mutated: no helm release, no chart value, no DaemonSet, no collector config.

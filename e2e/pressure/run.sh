@@ -104,8 +104,10 @@ METRICS_SOURCE="${METRICS_SOURCE:-auto}"
 # Series selector for the SHARED collector's self-telemetry in Prometheus: its
 # pods, by the Deployment's name. Deliberately not a bare job= match: any other
 # collector-based process in the cluster (a scraper, a profiler) also emits
-# otelcol_* series.
-COLLECTOR_SEL="${COLLECTOR_SEL:-instance=~\"${COLLECTOR_DEPLOY}-.*\"}"
+# otelcol_* series. The name goes into a regex, and the one regex character a
+# Deployment's name may hold is the dot, so it is escaped (twice: once for the
+# PromQL string, once for the regex).
+COLLECTOR_SEL="${COLLECTOR_SEL:-instance=~\"${COLLECTOR_DEPLOY//./\\\\.}-.*\"}"
 
 # memory_limiter settings, as in the collector's deployed config. The absolute
 # thresholds are derived from the pod's real memory limit at run time rather
@@ -262,7 +264,7 @@ cleanup() {
 		# The exit status of the run stands. A delete that failed is said: the
 		# flood may still be running.
 		delete_job ||
-			log "WARN: could not delete job ${JOB_NS}/${JOB_NAME} (kubectl's error is above). It may still be running: delete it by hand (kubectl -n ${JOB_NS} delete job ${JOB_NAME}). Its activeDeadlineSeconds ends it regardless."
+			log "WARN: could not confirm the deletion of job ${JOB_NS}/${JOB_NAME} (kubectl's error is above). It may still be running: check, and delete it by hand (kubectl --context ${EXPECT_CONTEXT} -n ${JOB_NS} delete job ${JOB_NAME}). Its activeDeadlineSeconds ends it regardless."
 	fi
 	if [ -n "$PF_PID" ]; then kill "$PF_PID" >/dev/null 2>&1 || true; fi
 	if [ -n "$PF_LOG" ]; then rm -f "$PF_LOG"; fi
@@ -273,12 +275,20 @@ cleanup() {
 
 # ------------------------------------------------------------------- helpers
 
+# kc: kubectl against the context the run is meant for. The current context is
+# checked once (preflight_cluster), and it can change under a run that lasts
+# minutes: making a kind cluster takes it. So no call after the check relies
+# on it, and no apply or delete, the cleanup trap's included, can land on
+# another cluster.
+kc() { kubectl --context "$EXPECT_CONTEXT" "$@"; }
+
 # delete_job: deletes the pressure Job. A Job that is not there is fine
 # (--ignore-not-found). An API error is not: kubectl's status is returned and
-# its error stays on stderr, so no caller can say "deleted" of a delete that
-# failed.
+# its error stays on stderr. A failed delete is one whose outcome is not known
+# (the API server may have acted before the answer was lost), so a caller may
+# say neither "deleted" nor "not deleted" of it.
 delete_job() {
-	kubectl -n "$JOB_NS" delete job "$JOB_NAME" --ignore-not-found --wait=false >/dev/null
+	kc -n "$JOB_NS" delete job "$JOB_NAME" --ignore-not-found --wait=false >/dev/null
 }
 
 # parse_bytes <quantity> -> bytes. Accepts Go's GOMEMLIMIT spelling (B/KiB/MiB/GiB/TiB)
@@ -309,7 +319,7 @@ start_pf() {
 	# Create the log before forking: the first sed below can otherwise race the
 	# background redirection and print a spurious "can't read" to stderr.
 	: >"$logf"
-	kubectl -n "$ns" port-forward "$target" ":${port}" --address 127.0.0.1 >"$logf" 2>&1 &
+	kc -n "$ns" port-forward "$target" ":${port}" --address 127.0.0.1 >"$logf" 2>&1 &
 	pid=$!
 	while [ "$waited" -lt 30 ]; do
 		# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail,
@@ -389,7 +399,7 @@ discover_collector_pods() {
 	if [ -n "$COLLECTOR_SELECTOR" ]; then
 		sel="$COLLECTOR_SELECTOR"
 	else
-		dep=$(kubectl -n "$COLLECTOR_NS" get deploy "$COLLECTOR_DEPLOY" -o json) ||
+		dep=$(kc -n "$COLLECTOR_NS" get deploy "$COLLECTOR_DEPLOY" -o json) ||
 			die "could not read Deployment ${COLLECTOR_NS}/${COLLECTOR_DEPLOY} (kubectl's error is above)"
 		sel=$(jq -r '.spec.selector.matchLabels // {} | to_entries | map("\(.key)=\(.value)") | join(",")' <<<"$dep") ||
 			die "could not read .spec.selector.matchLabels from ${COLLECTOR_NS}/${COLLECTOR_DEPLOY}: kubectl's answer is not the Deployment's JSON"
@@ -397,7 +407,7 @@ discover_collector_pods() {
 			die "could not read .spec.selector.matchLabels from ${COLLECTOR_NS}/${COLLECTOR_DEPLOY}: the Deployment has none"
 	fi
 	# An empty list is "none Running"; a list that could not be read is not.
-	names=$(kubectl -n "$COLLECTOR_NS" get pods -l "$sel" \
+	names=$(kc -n "$COLLECTOR_NS" get pods -l "$sel" \
 		--field-selector status.phase=Running \
 		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}') ||
 		die "could not list the collector pods (-l ${sel}) of ${COLLECTOR_NS} (kubectl's error is above) — not reading that as none Running"
@@ -415,9 +425,9 @@ resolve_collector_limits() {
 	csel='{.spec.containers[?(@.name=="'"$COLLECTOR_CONTAINER"'")]'
 	# A jsonpath that matches nothing prints nothing and succeeds: that is the
 	# "not set" answer. A kubectl that failed has not said "not set".
-	raw=$(kubectl -n "$COLLECTOR_NS" get pod "$pod" -o jsonpath="${csel}.env[?(@.name=='GOMEMLIMIT')].value}") ||
+	raw=$(kc -n "$COLLECTOR_NS" get pod "$pod" -o jsonpath="${csel}.env[?(@.name=='GOMEMLIMIT')].value}") ||
 		die "could not read GOMEMLIMIT of ${COLLECTOR_NS}/${pod} (kubectl's error is above) — not reading that as not set"
-	lim=$(kubectl -n "$COLLECTOR_NS" get pod "$pod" -o jsonpath="${csel}.resources.limits.memory}") ||
+	lim=$(kc -n "$COLLECTOR_NS" get pod "$pod" -o jsonpath="${csel}.resources.limits.memory}") ||
 		die "could not read the memory limit of ${COLLECTOR_NS}/${pod} (kubectl's error is above) — not reading that as no limit"
 	[ -n "$lim" ] || die "container ${COLLECTOR_CONTAINER} in ${COLLECTOR_NS}/${pod} has no memory limit — cannot size the safety ceilings"
 	POD_MEM_LIMIT_BYTES=$(parse_bytes "$lim") || die "cannot parse the container memory limit '${lim}'"
@@ -571,13 +581,13 @@ select_metrics_source() {
 # error on stderr: the list could not be read. (`{.items[0]...}` cannot tell
 # the two apart: kubectl fails on an empty list with it.)
 agent_pods_on_node() {
-	kubectl -n "$AGENT_NS" get pods -l "$AGENT_SELECTOR" \
+	kc -n "$AGENT_NS" get pods -l "$AGENT_SELECTOR" \
 		--field-selector "spec.nodeName=${NODE}" \
 		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
 }
 
 # No output with status 0: the field is not set. Non-zero: it could not be read.
-pod_field() { kubectl -n "$AGENT_NS" get pod "$1" -o jsonpath="$2"; }
+pod_field() { kc -n "$AGENT_NS" get pod "$1" -o jsonpath="$2"; }
 
 agent_status() { pod_field "$1" '{.status.containerStatuses[?(@.name=="'"$AGENT_CONTAINER"'")]'"$2"'}'; }
 
@@ -598,15 +608,16 @@ preflight_cluster() {
 	ctx=$(kubectl config current-context) ||
 		die "could not read the current kube context (kubectl's error is above)"
 	[ "$ctx" = "$EXPECT_CONTEXT" ] || die "kubectl context is '${ctx}', expected '${EXPECT_CONTEXT}' (EXPECT_CONTEXT names the context this run is meant for)"
+	# From here on every call names this context (kc).
 	KUBE_CONTEXT=$ctx
 	# --ignore-not-found: an absent node is an empty answer with status 0, so a
 	# non-zero status is "could not ask" and nothing else.
-	out=$(kubectl get node "$NODE" --ignore-not-found -o name) ||
+	out=$(kc get node "$NODE" --ignore-not-found -o name) ||
 		die "could not ask for node ${NODE} (kubectl's error is above) — not reading that as an absent node"
 	[ -n "$out" ] || die "node ${NODE} not found"
 	# No --ignore-not-found: the collector is required, and kubectl's own
 	# NotFound is the message for a Deployment that is not there.
-	out=$(kubectl -n "$COLLECTOR_NS" get deploy "$COLLECTOR_DEPLOY" -o jsonpath='{.spec.replicas} {.status.readyReplicas}') ||
+	out=$(kc -n "$COLLECTOR_NS" get deploy "$COLLECTOR_DEPLOY" -o jsonpath='{.spec.replicas} {.status.readyReplicas}') ||
 		die "could not read Deployment ${COLLECTOR_NS}/${COLLECTOR_DEPLOY} (kubectl's error is above)"
 	spec=${out%% *}
 	ready=${out#* }
@@ -648,7 +659,7 @@ preflight_no_soak() {
 	# fails closed: a list that could not be read is not an empty list.
 	local pods ds rolling job
 	if [ -n "$SOAK_POD_SELECTOR" ]; then
-		pods=$(kubectl get pods --all-namespaces -l "$SOAK_POD_SELECTOR" -o name) ||
+		pods=$(kc get pods --all-namespaces -l "$SOAK_POD_SELECTOR" -o name) ||
 			die "could not list pods by SOAK_POD_SELECTOR='${SOAK_POD_SELECTOR}' — not assuming there are none"
 		if [ -n "$pods" ]; then
 			die "$(printf '%s\n' "$pods" | wc -l | tr -d ' ') pod(s) carry SOAK_POD_SELECTOR='${SOAK_POD_SELECTOR}' — a soak looks active. NEVER run this during a soak."
@@ -657,7 +668,7 @@ preflight_no_soak() {
 	else
 		log "SOAK_POD_SELECTOR is not set: no pod was looked for. The soak guard is the operator's acknowledgement and the roll check only."
 	fi
-	ds=$(kubectl -n "$AGENT_NS" get ds -o json) ||
+	ds=$(kc -n "$AGENT_NS" get ds -o json) ||
 		die "could not list the DaemonSets of ${AGENT_NS} — not assuming none is mid-roll"
 	rolling=$(printf '%s' "$ds" | daemonsets_mid_roll) ||
 		die "could not read the DaemonSets of ${AGENT_NS} — not assuming none is mid-roll"
@@ -668,7 +679,7 @@ preflight_no_soak() {
 	# A Job left by an earlier run is still flooding. "Could not ask" is not
 	# "there is none" (#1578): with --ignore-not-found an absent Job is an empty
 	# answer with status 0.
-	job=$(kubectl -n "$JOB_NS" get job "$JOB_NAME" --ignore-not-found -o name) ||
+	job=$(kc -n "$JOB_NS" get job "$JOB_NAME" --ignore-not-found -o name) ||
 		die "could not ask for job ${JOB_NS}/${JOB_NAME} (kubectl's error is above) — not reading that as an absent job"
 	[ -z "$job" ] || die "job ${JOB_NS}/${JOB_NAME} already exists — delete it first"
 }
@@ -756,8 +767,9 @@ track_memory() {
 		JOB_APPLIED=0
 		die "collector ${reason} — job deleted, no agent was touched"
 	fi
-	# JOB_APPLIED stays 1: the cleanup trap tries the delete again.
-	die "collector ${reason} — and the job could NOT be deleted (kubectl's error is above): the flood may still be running. The cleanup trap tries again; activeDeadlineSeconds ends it regardless."
+	# Not known to be deleted, not known to be still there. JOB_APPLIED stays
+	# 1: the cleanup trap tries the delete again.
+	die "collector ${reason} — and the deletion of the job could NOT be confirmed (kubectl's error is above): the flood may still be running. The cleanup trap tries again; activeDeadlineSeconds ends it regardless."
 }
 
 # The manifest on stdout, aimed at the collector the caller named: the two
@@ -772,7 +784,7 @@ apply_job() {
 	# Set before the apply: one that failed may still have created the Job, and
 	# the cleanup trap deletes it only when this says so.
 	JOB_APPLIED=1
-	render_job | kubectl apply -f - >/dev/null ||
+	render_job | kc apply -f - >/dev/null ||
 		die "could not apply ${JOB_MANIFEST} (the error is above) — no pressure was applied by this run, and no agent was touched"
 	log "applied ${JOB_MANIFEST} (hard stop: activeDeadlineSeconds, plus the cleanup trap)"
 }
@@ -808,8 +820,8 @@ restart_agent() {
 	OLD_POD=${pods%%$'\n'*}
 	# Pod-scoped on purpose: `kubectl rollout restart ds/aether-agent` is DaemonSet-wide
 	# and would restart every node's agent under a shedding collector at once.
-	kubectl -n "$AGENT_NS" delete pod "$OLD_POD" --wait=false >/dev/null ||
-		die "could not delete agent pod ${OLD_POD} (kubectl's error is above) — the agent was not restarted by this run, so nothing was proven"
+	kc -n "$AGENT_NS" delete pod "$OLD_POD" --wait=false >/dev/null ||
+		die "could not confirm the deletion of agent pod ${OLD_POD} (kubectl's error is above) — whether the agent was restarted is not known, so nothing was proven"
 	log "deleted agent pod ${OLD_POD} on ${NODE} while the collector is shedding"
 }
 
@@ -898,7 +910,7 @@ verify_agent() {
 
 	# From the beginning of the log, not the tail: the evidence is the startup sequence.
 	# A log that could not be read has not "never logged" anything.
-	logs=$(kubectl -n "$AGENT_NS" logs "$NEW_POD" -c "$AGENT_CONTAINER" --limit-bytes=8000000) ||
+	logs=$(kc -n "$AGENT_NS" logs "$NEW_POD" -c "$AGENT_CONTAINER" --limit-bytes=8000000) ||
 		die "could not read the log of agent pod ${NEW_POD} (kubectl's error is above) — an unread log is not evidence, so this is not a verdict on the agent"
 	if grep -q 'failed to create SPIRE Workload API source' <<<"$logs"; then
 		fail "agent ${NEW_POD} logged 'failed to create SPIRE Workload API source' — #662's signature"
@@ -938,7 +950,7 @@ stop_pressure() {
 	# The agent's checks have passed by now, but the recovery was not measured:
 	# INCONCLUSIVE, not FAIL.
 	delete_job ||
-		die "could not delete job ${JOB_NS}/${JOB_NAME} (kubectl's error is above) — the flood may still be running and the recovery was not measured. The cleanup trap tries again."
+		die "could not confirm the deletion of job ${JOB_NS}/${JOB_NAME} (kubectl's error is above) — the flood may still be running and the recovery was not measured. The cleanup trap tries again."
 	JOB_APPLIED=0
 	log "pressure job deleted"
 }
