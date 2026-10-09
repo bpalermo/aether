@@ -91,6 +91,9 @@ func NewRegistrarConfig() *RegistrarConfig {
 		Config: manager.Config{
 			HealthProbeBindAddress: ":8082",
 			MetricsBindAddress:     ":8081",
+			// The registrar is a Deployment on the pod network: its hostname is
+			// its pod name, which k8s.pod.name already carries (#1596).
+			WithoutHostName: true,
 			// Leader election: the registrar runs multiple replicas (HA endpoint
 			// stream), but the leader-only runnables — the mesh-Service VIP
 			// generator and the MCS ServiceImport generator (both
