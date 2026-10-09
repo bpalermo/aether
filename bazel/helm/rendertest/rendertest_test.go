@@ -26,6 +26,8 @@ spec:
       labels:
         aether.io/managed: "true"
     spec:
+      containers:
+        - name: probe
       volumes:
         - name: sock
           csi: {driver: csi.aether.io}
@@ -38,6 +40,25 @@ metadata:
   name: other
 spec:
   template: not-a-pod-template
+---
+apiVersion: example.io/v1
+kind: Other
+metadata:
+  name: mapping
+spec:
+  template:
+    metadata:
+      labels:
+        aether.io/managed: "true"
+    spec:
+      size: 3
+---
+apiVersion: example.io/v1
+kind: Other
+metadata:
+  name: empty
+spec:
+  template: {}
 `
 
 func TestParse(t *testing.T) {
@@ -49,13 +70,13 @@ func TestParse(t *testing.T) {
 	for _, o := range objects {
 		ids = append(ids, o.ID())
 	}
-	if got, want := strings.Join(ids, " "), "ServiceAccount/probe DaemonSet/probe Other/other"; got != want {
+	if got, want := strings.Join(ids, " "), "ServiceAccount/probe DaemonSet/probe Other/other Other/mapping Other/empty"; got != want {
 		t.Fatalf("objects = %s, want %s", got, want)
 	}
 
 	workloads := Workloads(objects)
 	if len(workloads) != 1 || workloads[0].ID() != "DaemonSet/probe" {
-		t.Fatalf("Workloads = %v, want the DaemonSet alone (a `template` that is not a mapping is not a pod template)", workloads)
+		t.Fatalf("Workloads = %v, want the DaemonSet alone (a `template` that is a scalar, an empty mapping, or a mapping with no containers is not a pod template)", workloads)
 	}
 	ds := Find(t, objects, "DaemonSet/probe")
 	if ds.Metadata.Annotations["a"] != "1" {

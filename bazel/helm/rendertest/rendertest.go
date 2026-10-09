@@ -62,6 +62,11 @@ type Volume struct {
 type PodTemplate struct {
 	Metadata Meta `json:"metadata"`
 	Spec     struct {
+		// Containers is what makes a `template` a pod template: see
+		// podTemplate.
+		Containers []struct {
+			Name string `json:"name"`
+		} `json:"containers"`
 		Volumes []Volume `json:"volumes"`
 	} `json:"spec"`
 }
@@ -150,7 +155,10 @@ func errWithoutContent(err error) error {
 }
 
 // podTemplate decodes spec.template when it is a pod template, and returns nil
-// when it is something else (another kind's field of the same name).
+// when it is something else: another kind's field of the same name, which may
+// be a scalar or a mapping of its own (a custom resource's `template: {}`).
+// Any mapping decodes into PodTemplate, so the shape is checked: a pod
+// template has at least one container.
 func podTemplate(template any) *PodTemplate {
 	raw, err := yaml.Marshal(template)
 	if err != nil {
@@ -158,6 +166,9 @@ func podTemplate(template any) *PodTemplate {
 	}
 	var pt PodTemplate
 	if err := yaml.Unmarshal(raw, &pt); err != nil {
+		return nil
+	}
+	if len(pt.Spec.Containers) == 0 {
 		return nil
 	}
 	return &pt
