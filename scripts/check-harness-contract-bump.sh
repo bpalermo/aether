@@ -39,8 +39,10 @@ if ! base_lock="$(git show "$BASE:$LOCK")"; then
 fi
 
 version() { sed -nE 's/^version:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p'; }
-# A promise line: two spaces, a quoted name, a quoted digest.
-promises() { grep -E '^  "[^"]+": "[^"]+"[[:space:]]*$' | sed -E 's/[[:space:]]+$//' | LC_ALL=C sort; }
+# A promise line: two spaces, a quoted name, a quoted digest. The name is
+# written as Go's %q writes it, so a quote inside it is \" (a member of an open
+# set, a substring of an environment variable for one, can hold one).
+promises() { grep -E '^  "([^"\\]|\\.)+": "[^"]+"[[:space:]]*$' | sed -E 's/[[:space:]]+$//' | LC_ALL=C sort; }
 
 base_version="$(printf '%s\n' "$base_lock" | version)"
 head_version="$(version <"$LOCK")"

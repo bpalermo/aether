@@ -223,6 +223,18 @@ func TestParseRejects(t *testing.T) {
 		"an unquoted n as an id": {
 			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: n, value: v, checked_by: review-only}", `an entry of names has the id "false"`,
 		},
+		"an id of two words": {
+			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: a fields, value: v, checked_by: review-only}", `an entry of names has the id "a fields": an id is one word`,
+		},
+		"an id with a quote": {
+			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: 'a\"b', value: v, checked_by: review-only}", `an id is one word`,
+		},
+		"a field listed twice": {
+			"checked_by: //a:b", "checked_by: //a:b\nlog_lines:\n  - {id: l, marker: M, fields: [t, tier, t], checked_by: review-only}", "it says these more than once (a field, a component, a container or a host path listed twice): l fields t",
+		},
+		"a container listed twice": {
+			"checked_by: //a:b", "checked_by: //a:b\ncharts:\n  - {id: c, chart: x, release: r, namespace: n, objects: [{id: o, kind: K, name: x, containers: [{name: agent}, {name: agent}]}], checked_by: review-only}", "more than once (a field, a component, a container or a host path listed twice): o containers agent",
+		},
 		"an empty checked_by list":    {"checked_by: //a:b", "checked_by: []", "no checked_by"},
 		"a test named twice":          {"checked_by: //a:b", "checked_by: [//a:b, //a:b]", "checked_by names //a:b twice"},
 		"review-only beside a test":   {"checked_by: //a:b", "checked_by: [//a:b, review-only]", "and a test at once"},

@@ -49,7 +49,11 @@ func (p promises) put(value any, path ...string) {
 		// Only values decoded from JSON, and strings, get here.
 		panic(fmt.Sprintf("%s: %v", strings.Join(path, " "), err))
 	}
-	p[strings.Join(path, " ")] = string(b)
+	name := strings.Join(path, " ")
+	if _, made := p[name]; made {
+		p[madeTwice] += name + "\n"
+	}
+	p[name] = string(b)
 }
 
 // rest promises every key left in fields that is set, each as one value: a
@@ -124,6 +128,26 @@ func take(fields map[string]any, keys ...string) {
 //     containers, and what each container is held to;
 //   - the order of a list is not a promise.
 func (c *Contract) Promises() map[string]string {
+	p := c.promised()
+	delete(p, madeTwice)
+	return p
+}
+
+// madeTwice is the key under which promised keeps the names it was given more
+// than once: two promises under one name are one line in the lock, and either
+// could then leave without the lock changing.
+const madeTwice = "\x00twice"
+
+// duplicatePromises returns the names more than one promise has.
+func (c *Contract) duplicatePromises() []string {
+	twice := strings.TrimSuffix(c.promised()[madeTwice], "\n")
+	if twice == "" {
+		return nil
+	}
+	return strings.Split(twice, "\n")
+}
+
+func (c *Contract) promised() promises {
 	p := promises{}
 	for _, m := range c.Metrics {
 		m.promises(p)

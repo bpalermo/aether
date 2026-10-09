@@ -233,6 +233,11 @@ func parse(data []byte) (*Contract, error) {
 		return nil, fmt.Errorf("%s is not well formed:\n  %s", File, strings.Join(problems, "\n  "))
 	}
 	c.link()
+	// Two promises under one name are one line of the lock: either could leave
+	// and the lock would not change.
+	if twice := c.duplicatePromises(); len(twice) > 0 {
+		return nil, fmt.Errorf("%s is not well formed:\n  it says these more than once (a field, a component, a container or a host path listed twice): %s", File, strings.Join(twice, "; "))
+	}
 	return c, nil
 }
 
@@ -349,6 +354,11 @@ func validateEntries(entries []entry) []string {
 			problems = append(problems, fmt.Sprintf("id %q is used twice (%s and %s)", e.id, seen[e.id], e.section))
 		}
 		seen[e.id] = e.section
+		// An id is the first word of the name of each of its promises in the
+		// lock, which separates words with spaces and quotes names.
+		if strings.ContainsAny(e.id, " \t\n\"\\") {
+			problems = append(problems, fmt.Sprintf("an entry of %s has the id %q: an id is one word, without spaces, quotes or backslashes", e.section, e.id))
+		}
 		if yamlBoolean([]string{e.id}) != "" {
 			problems = append(problems, fmt.Sprintf("an entry of %s has the id %q: an unquoted y, n, yes, no, on or off is a boolean in YAML, so quote the id or choose another", e.section, e.id))
 		}

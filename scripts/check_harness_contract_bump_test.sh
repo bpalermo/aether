@@ -86,6 +86,11 @@ run "a promise removed with its line" 1 '"b fields t"' "$BASE_LOCK" "${BASE_LOCK
 run "a removed promise is counted" 1 "1 promise(s) of the external-harness contract left or changed and its version is still 3" "$BASE_LOCK" "${BASE_LOCK/  \"b fields t\": \"2222222222222222\"$'\n'/}"
 run "a promise changed and its digest recomputed" 1 '"a value"' "$BASE_LOCK" "${BASE_LOCK/1111111111111111/9999999999999999}"
 run "a promise renamed" 1 '"c containers agent args --mesh-domain"' "$BASE_LOCK" "${BASE_LOCK/--mesh-domain/--domain}"
+# A name with a quote in it, as the lock writes it.
+QUOTED_LOCK="$BASE_LOCK"'  "c containers agent env_contains VAR say \"k\"": "5555555555555555"
+'
+run "a name with an escaped quote, unchanged" 0 "every promise" "$QUOTED_LOCK" "$QUOTED_LOCK"
+run "a promise with an escaped quote in its name removed" 1 '"c containers agent env_contains VAR say \"k\""' "$QUOTED_LOCK" "$BASE_LOCK"
 run "every promise removed" 1 "3 promise(s)" "$BASE_LOCK" 'version: 3
 promises: {}
 '
