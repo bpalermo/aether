@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "serviceresource",
+    srcs = ["serviceresource.go"],
+    importpath = "aethermesh.dev/common/telemetry/serviceresource",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//common/telemetry/servicename",
+        "@io_opentelemetry_go_otel//semconv/v1.30.0:v1_30_0",
+        "@io_opentelemetry_go_otel_sdk//resource",
+    ],
+)
+
+go_test(
+    name = "serviceresource_test",
+    size = "small",
+    srcs = ["serviceresource_test.go"],
+    embed = [":serviceresource"],
+    deps = [
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_sdk//resource",
+    ],
+)
