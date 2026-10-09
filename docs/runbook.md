@@ -507,7 +507,7 @@ wrote `false`:
 |---|---|---|
 | `decision: impacted; had to run: test` | `test` ran and succeeded | nothing |
 | `decision: nothing impacted (diff wrote false to has_any, has_unit and has_integration)` | bazel-diff found no target the merge reaches; `test` is skipped by design | nothing |
-| `job diff succeeded and its output has_… is not set` | `diff` wrote no decision, so `test` skipped on an empty value and the merge was not tested | read the `Compute impacted targets` step; a defect in the workflow or the script. Re-run the run once it is fixed, or the merge stays untested |
+| `job diff succeeded and its output has_… is not set` | `diff` wrote no decision, so `test` skipped on an empty value and the merge was not tested | read the `Compute impacted targets` step. If it failed on something transient, re-run the run. If the workflow or the script is at fault, a re-run repeats it (a re-run executes that commit's own workflow): fix it in a new commit, and test the missed commit yourself (`make test` on a checkout of it), or the merge stays untested |
 | `job test was skipped, and diff says it had to run` | `test` did not run although `has_any` is `true` | read the `test` job; re-run it if no step ran |
 
 A cancelled run of `coverage` or `codeql` (both cancel the previous run of the
