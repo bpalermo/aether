@@ -204,6 +204,51 @@ mutate "a known image by tag behind a key the scan does not read" e2e/run.sh 'do
 mutate "a known image under a computed tag" e2e/run.sh 'docker run --rm "a/b:${B_TAG}" true' \
 	'e2e/run.sh:12: a/b:${B_TAG} is pinned by tag only'
 
+# Spellings that once read as prose or were not read at all (review of #1476).
+mutate "YAML flow mapping, unquoted, by tag only" e2e/sub/pod.yaml '  containers: [{name: probe, image: x/y:latest}]' \
+	"e2e/sub/pod.yaml:1: x/y:latest is pinned by tag only"
+mutate "YAML flow mapping, image first, by tag only" e2e/sub/pod.yaml '  containers: [{image: x/y:latest, name: probe}]' \
+	"e2e/sub/pod.yaml:1: x/y:latest is pinned by tag only"
+mutate "YAML flow mapping, quoted, by tag only" e2e/sub/pod.yaml '  containers: [{name: probe, "image": "x/y:latest"}]' \
+	"e2e/sub/pod.yaml:1: x/y:latest is pinned by tag only"
+mutate "YAML folded block scalar by tag only" e2e/sub/pod.yaml $'  - image: >-\n      x/y:latest' \
+	"e2e/sub/pod.yaml:2: x/y:latest is pinned by tag only"
+mutate "YAML literal block scalar by tag only" e2e/sub/pod.yaml $'    image: |\n\n      x/y:latest' \
+	"e2e/sub/pod.yaml:3: x/y:latest is pinned by tag only"
+mutate "YAML list item with a trailing comment" e2e/sub/pod.yaml '  - image: x/y:latest # the probe' \
+	"e2e/sub/pod.yaml:1: x/y:latest is pinned by tag only"
+mutate "JSON manifest by tag only" e2e/sub/pod.json '{"spec":{"containers":[{"name":"p","image":"x/y:latest"}]}}' \
+	"e2e/sub/pod.json:1: x/y:latest is pinned by tag only"
+mutate "JSON in a kubectl --overrides string" e2e/run.sh "kubectl run r --overrides='{\"spec\":{\"containers\":[{\"name\":\"r\",\"image\":\"x/y:latest\"}]}}'" \
+	"e2e/run.sh:12: x/y:latest is pinned by tag only"
+mutate "--image=\"<tag>\", quoted" e2e/run.sh 'kubectl run s --image="x/y:latest"' \
+	"e2e/run.sh:12: x/y:latest is pinned by tag only"
+
+# The same spellings pass when pinned and listed, and prose stays prose: an
+# unquoted `image:` in mid-line with no `{` before it, and a block scalar's
+# value that is not an image.
+new_tree "$T"
+cat >"$T/e2e/sub/pod.yaml" <<EOF
+spec:
+  containers: [{name: probe, image: a/b:1.0@$D1}]
+  initContainers: [{name: i, "image": "a/b:1.0@$D1"}]
+  more:
+    - image: >-
+        a/b:1.0@$D1
+    - image: a/b:1.0@$D1 # the probe
+  description: no tag, image: latest is what a reader would write
+  note: {text: "see the image: line", other: 1}
+  image: |
+    not an image, a paragraph
+EOF
+echo 'err "one, two, image: missing"' >>"$T/e2e/run.sh"
+run_check "$T"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 8 image reference(s) in "* ]]; then
+	ok "flow mappings, block scalars and trailing comments pass when pinned; prose is not read"
+else
+	bad "pinned flow/block spellings: exit $RC"$'\n'"$OUT"
+fi
+
 # A pin nothing uses.
 new_tree "$T"
 echo "pin x/unused 1 $D9" >>"$T/scripts/third-party-images.txt"

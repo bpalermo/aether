@@ -159,8 +159,12 @@ is_skipped() {
 #
 # Two nets, because no single pattern knows every way an image is named:
 #   1. the value after an `image` key or flag, in any of the spellings in use:
-#      YAML `image: x`, `--image=x` / `--image x`, a shell `FOO_IMAGE="x"` or
-#      `FOO_IMAGE="${FOO_IMAGE:-x}"`, Go `Image: "x"` and `Image = "x"`;
+#      YAML `image: x` (a block key, a list item, with a trailing comment, in
+#      a flow mapping `[{name: p, image: x}]`, as a block scalar `image: >-`
+#      with the value on the next line), JSON `"image": "x"` (also inside a
+#      `--overrides='{...}'` string), `--image=x` / `--image x`, a shell
+#      `FOO_IMAGE="x"` or `FOO_IMAGE="${FOO_IMAGE:-x}"`, Go `Image: "x"` and
+#      `Image = "x"`;
 #   2. any `<name>:<tag>` of a name the inventory already knows, wherever it
 #      stands, so a known image cannot come back by tag (or under a computed
 #      tag, `name:$TAG`) behind a key net 1 does not read.
@@ -171,6 +175,18 @@ is_skipped() {
 # What this cannot see: an image no pin names yet, written where no `image` key
 # or flag introduces it (a positional `docker run <image>`, a list of bare
 # names). Give such a reference a `*_IMAGE` variable, as e2e/etcd-image.sh does.
+# Also not read, on purpose, because the scan is line by line and not a YAML
+# parser:
+#   - a flow mapping broken across lines with `image:` not first on its line
+#     and its `{` on an earlier one (`{name: p,` / `  other: 1, image: x}`):
+#     an unquoted `image:` in mid-line with no `{` before it on the same line
+#     is how prose reads ("3 node(s) but 2 image: line(s)"), and reading it
+#     brings those back as findings;
+#   - a block scalar whose value is folded over several lines, or whose first
+#     line is a comment-looking `#` line: only the first non-blank line after
+#     `image: >-` / `image: |` is taken;
+#   - an image assembled from parts (`"$REPO:$TAG"`, a Go `fmt.Sprintf`): not a
+#     literal. Net 2 still catches a known name under a computed tag.
 extract_references() { # <names file>; file list on stdin
 	local files=() f
 	while IFS= read -r f; do
@@ -190,31 +206,51 @@ extract_references() { # <names file>; file list on stdin
 				printf "%s\t%d\t%s\n", FILENAME, FNR, ref
 			}
 		}
+		# Only a literal image reference is judged: a lower-case repository, then
+		# an optional :tag and @digest. That leaves out $VAR, {{ .Values.x }}, a
+		# {@//label} stamp, a Go identifier, a regex, and a switch named *_IMAGE.
+		function literal(ref) {
+			if (ref !~ /^[a-z0-9][a-z0-9._\/-]*(:[0-9]+\/[a-z0-9._\/-]+)?(:[A-Za-z0-9_][A-Za-z0-9._-]*)?(@[A-Za-z0-9:]+)?$/) return 0
+			return ref !~ /^(0|1|true|false|yes|no)$/
+		}
+		FNR == 1 { block = 0 }
+		# The line after `image: >-` / `image: |` is the value (a block scalar).
+		block && !/^[ \t]*$/ {
+			block = 0
+			ref = $0
+			gsub(/^[ \t]+|[ \t]+$/, "", ref)
+			if (literal(ref)) emit(ref)
+		}
 		/^[ \t]*(#|\/\/)/ { next }
 		{
 			rest = $0
+			before_key = ""
 			at_start = 1
 			while (match(rest, /([Ii][Mm][Aa][Gg][Ee]["\047]?[ \t]*[:=][ \t]*|--image[ \t]+)/)) {
 				key = substr(rest, RSTART, RLENGTH)
 				lead = substr(rest, 1, RSTART - 1)
+				before_key = before_key lead
 				rest = substr(rest, RSTART + RLENGTH)
 				# A YAML key opens its line (`image: x`, `- image: x`, `"image": x`).
 				key_opens_line = (at_start && lead ~ /^[ \t]*(-[ \t]+)?["\047]?$/)
+				# ...or stands in a flow mapping: after its `{` or a `,`, inside
+				# braces opened on this line (`containers: [{name: p, image: x}]`).
+				in_flow = (before_key ~ /\{/ && before_key ~ /[{,][ \t]*["\047]?$/)
+				before_key = before_key key
 				at_start = 0
+				if (key ~ /:[ \t]*$/ && key_opens_line && rest ~ /^[>|][-+0-9]*[ \t]*(#.*)?$/) {
+					block = 1
+					break
+				}
 				ref = rest
 				quoted = sub(/^["\047]/, "", ref)
 				sub(/^\$\{[A-Za-z_][A-Za-z0-9_]*:-/, "", ref)
 				if (!match(ref, /^[^ \t"\047}),;]+/)) continue
 				ref = substr(ref, 1, RLENGTH)
-				# `image:` in the middle of a line is prose ("no image: line") unless
+				# `image:` anywhere else in a line is prose ("no image: line") unless
 				# a quoted value follows (Go: `{Name: "a", Image: "b"}`).
-				if (key ~ /:[ \t]*$/ && !key_opens_line && !quoted) continue
-				# Only a literal image reference is judged: a lower-case repository,
-				# then an optional :tag and @digest. That leaves out $VAR,
-				# {{ .Values.x }}, a {@//label} stamp, a Go identifier, a regex.
-				if (ref !~ /^[a-z0-9][a-z0-9._\/-]*(:[0-9]+\/[a-z0-9._\/-]+)?(:[A-Za-z0-9_][A-Za-z0-9._-]*)?(@[A-Za-z0-9:]+)?$/) continue
-				if (ref ~ /^(0|1|true|false|yes|no)$/) continue  # a switch named *_IMAGE
-				emit(ref)
+				if (key ~ /:[ \t]*$/ && !key_opens_line && !in_flow && !quoted) continue
+				if (literal(ref)) emit(ref)
 			}
 			for (n in names) {
 				rest = $0
