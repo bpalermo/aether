@@ -21,8 +21,10 @@
 # The guard is:
 #
 #   1. an acknowledgement the operator must give: --no-soak-running (or
-#      NO_SOAK_RUNNING=1). Without it a real run aborts. It is the operator's
-#      statement, not something the script verified.
+#      NO_SOAK_RUNNING=1). Without it a real run aborts, as the first thing
+#      after its arguments are read and before any command is run against the
+#      cluster. It is the operator's statement, not something the script
+#      verified.
 #   2. two best-effort refusals, which can only ever ADD a refusal:
 #        - SOAK_POD_SELECTOR, when set to the label selector the operator's
 #          harness puts on its pods, refuses while any pod in any namespace
@@ -519,20 +521,25 @@ daemonsets_mid_roll() {
 		| .metadata.name'
 }
 
+# The operator's half of the soak guard. A soak grades on cumulative prober
+# counters exported through the collector this script sheds, and the script
+# cannot detect a soak (header, "WHAT THE SOAK GUARD CAN AND CANNOT KNOW"), so
+# the operator says there is none. main calls this first, before it runs any
+# command: a run that was not acknowledged asks the cluster nothing.
+preflight_ack() {
+	[ "$NO_SOAK_RUNNING" = 1 ] && return 0
+	if [ "$DRY_RUN" = 1 ]; then
+		log "WARN: --no-soak-running not given. A real run needs it: this script cannot detect a soak."
+		return 0
+	fi
+	die "refusing to run without --no-soak-running (or NO_SOAK_RUNNING=1). This script cannot detect a soak: confirm that no soak, release validation or other graded run is using this cluster, then say so. NEVER run this during a soak."
+}
+
 preflight_no_soak() {
-	# A soak grades on cumulative prober counters exported through this very
-	# collector. Shedding it mid-run destroys the SLI. The script cannot detect
-	# a soak (header, "WHAT THE SOAK GUARD CAN AND CANNOT KNOW"): the operator
-	# says there is none, and the two checks below can only add a refusal. Each
+	# The script's half of the soak guard: two best-effort checks that can only
+	# add a refusal to the operator's acknowledgement (preflight_ack). Each
 	# fails closed: a list that could not be read is not an empty list.
 	local pods ds rolling
-	if [ "$NO_SOAK_RUNNING" != 1 ]; then
-		if [ "$DRY_RUN" = 1 ]; then
-			log "WARN: --no-soak-running not given. A real run needs it: this script cannot detect a soak."
-		else
-			die "refusing to run without --no-soak-running (or NO_SOAK_RUNNING=1). This script cannot detect a soak: confirm that no soak, release validation or other graded run is using this cluster, then say so. NEVER run this during a soak."
-		fi
-	fi
 	if [ -n "$SOAK_POD_SELECTOR" ]; then
 		pods=$(kubectl get pods --all-namespaces -l "$SOAK_POD_SELECTOR" -o name) ||
 			die "could not list pods by SOAK_POD_SELECTOR='${SOAK_POD_SELECTOR}' — not assuming there are none"
@@ -819,6 +826,7 @@ EOF
 
 main() {
 	parse_args "$@"
+	preflight_ack
 	for c in kubectl jq curl awk; do command -v "$c" >/dev/null || die "missing required command: $c"; done
 	SCRATCH=$(mktemp -d)
 	trap cleanup EXIT INT TERM

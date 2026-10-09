@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Hermetic test of the soak guard of e2e/pressure/run.sh (`preflight_no_soak`,
-# #1555): no cluster, a fake `kubectl` that answers from files and logs every
+# Hermetic test of the soak guard of e2e/pressure/run.sh (`preflight_ack` and
+# `preflight_no_soak`, #1555): no cluster, a fake `kubectl` that answers from files and logs every
 # call, and a fake `pgrep` that always matches.
 #
 # What it holds the guard to:
 #   - a real run without the operator's acknowledgement (--no-soak-running or
-#     NO_SOAK_RUNNING=1) aborts, before any kubectl call; a dry run warns and
-#     goes on;
+#     NO_SOAK_RUNNING=1) aborts, and the script run as an operator runs it
+#     (`main`, not one function) has called neither kubectl nor curl by then; a
+#     dry run warns and goes on;
 #   - the acknowledgement alone passes on a quiet cluster, and the script says
 #     that no pod was looked for;
 #   - SOAK_POD_SELECTOR refuses while a pod carries it, in any namespace, and
@@ -85,7 +86,15 @@ cat >"$BIN/pgrep" <<'FAKE'
 printf '%s\n' "$*" >>"$FAKE/pgrep-calls"
 exit 0
 FAKE
-chmod +x "$BIN/kubectl" "$BIN/pgrep"
+
+# curl: the script reads Prometheus with it. No case gets that far, so a call
+# is only recorded, with kubectl's.
+cat >"$BIN/curl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >>"$FAKE/calls"
+exit 1
+FAKE
+chmod +x "$BIN/kubectl" "$BIN/pgrep" "$BIN/curl"
 
 # ds <name> <generation> <observed> <desired> <updated> <unavailable>
 ds() {
@@ -100,7 +109,8 @@ QUIET="$(ds_list "$(ds aether-agent 4 4 5 5 0)" "$(ds aether-proxy 7 7 5 5 0)")"
 prepare() { mkdir -p "$CASES/$1"; }
 
 # guard <case> [VAR=value ...]: a fake cluster (quiet, unless the case prepared
-# its directory first), then `preflight_no_soak` of the sourced script, after
+# its directory first), then the two halves of the guard in the order `main`
+# calls them (`preflight_ack`, `preflight_no_soak`) of the sourced script, after
 # $BEFORE when a case sets it (the script assigns its own globals when it is
 # sourced, so a global that has no environment variable is set after that).
 # Sets RC, and OUT to the file of its output.
@@ -115,7 +125,7 @@ guard() {
 	OUT="$FAKE/out"
 	env -u NO_SOAK_RUNNING -u SOAK_POD_SELECTOR \
 		PATH="$BIN:$PATH" FAKE="$FAKE" "$@" \
-		bash -c 'source "$1" || exit 97; eval "$2"; preflight_no_soak' preflight_test "$SCRIPT" "${BEFORE:-}" >"$OUT" 2>&1
+		bash -c 'source "$1" || exit 97; eval "$2"; preflight_ack; preflight_no_soak' preflight_test "$SCRIPT" "${BEFORE:-}" >"$OUT" 2>&1
 	RC=$?
 	BEFORE=""
 }
@@ -154,6 +164,53 @@ if grep -q 'get pods' "$FAKE/calls"; then
 else
 	pass "ack: no pod list without a selector"
 fi
+
+# The script as an operator runs it: `main` reaches the acknowledgement before
+# it runs any command, so a run that was not acknowledged asks the cluster
+# nothing. An acknowledged one goes on to the cluster (and ends there: the fake
+# has no context to give).
+# run_main <case> [VAR=value ...] -- <arguments of run.sh>
+run_main() {
+	local name="$1" envs=()
+	shift
+	while [ "$1" != -- ]; do
+		envs+=("$1")
+		shift
+	done
+	shift
+	FAKE="$CASES/$name"
+	mkdir -p "$FAKE"
+	: >"$FAKE/calls"
+	: >"$FAKE/pgrep-calls"
+	OUT="$FAKE/out"
+	env -u NO_SOAK_RUNNING -u SOAK_POD_SELECTOR \
+		PATH="$BIN:$PATH" FAKE="$FAKE" "${envs[@]}" \
+		bash "$SCRIPT" "$@" >"$OUT" 2>&1
+	RC=$?
+}
+
+run_main main-no-ack -- --node n1
+want main-no-ack 2 'refusing to run without --no-soak-running'
+if [ -s "$FAKE/calls" ]; then
+	fail "main-no-ack: the script ran a command before it checked the acknowledgement: $(cat "$FAKE/calls")"
+else
+	pass "main-no-ack: nothing was run before the refusal"
+fi
+
+for how in flag variable; do
+	if [ "$how" = flag ]; then
+		run_main "main-ack-$how" -- --node n1 --no-soak-running
+	else
+		run_main "main-ack-$how" NO_SOAK_RUNNING=1 -- --node n1
+	fi
+	if grep -qF 'refusing to run without' "$OUT"; then
+		fail "main-ack-$how: refused although acknowledged: $(cat "$OUT")"
+	elif [ "$(head -n 1 "$FAKE/calls")" != 'config current-context' ]; then
+		fail "main-ack-$how: did not go on to the cluster (exit $RC): calls=[$(cat "$FAKE/calls")] $(cat "$OUT")"
+	else
+		pass "main-ack-$how: goes on to the cluster"
+	fi
+done
 
 # The flag is the same acknowledgement as the variable.
 if out=$(env -u NO_SOAK_RUNNING PATH="$BIN:$PATH" FAKE="$CASES/ack" \
