@@ -15,11 +15,12 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
-# Test-only image: the UDS-serving workload the proposal 034 e2e harness
+# Validation image: the UDS-serving workload the proposal 034 e2e harness
 # (e2e/uds.sh) deploys. It rides the same multi-arch/distroless macro as the
 # shipped binaries so the nightly `build` job can produce it alongside them and
-# ship it in the one aether-images artifact; it is never pushed to a registry
-# (no release wiring references :image_push).
+# ship it in the one aether-images artifact. It is also a released image:
+# //charts/udsecho lists :image_push, and publish.yaml pushes it with that
+# chart (`//charts/udsecho:udsecho.push_images`).
 go_multi_arch_image(
     name = "udsecho_image",
     binary = ":udsecho",
