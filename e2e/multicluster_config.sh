@@ -39,7 +39,9 @@ ETCD_NAME="${ETCD_NAME:-aether-shared-etcd}"
 KIND_NET="kind"
 REGION="local"
 NS="aether-system"
-GWAPI_VERSION="v1.6.2"
+# The pinned Gateway API release (#1583): one for every e2e surface.
+# shellcheck source=e2e/gateway-api-version.sh
+. "$REPO_ROOT/e2e/gateway-api-version.sh"
 MCS_VERSION="v0.5.0"
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi)
 

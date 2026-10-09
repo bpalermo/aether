@@ -1115,6 +1115,41 @@ that disagrees with the SDK pin, a setup-go step with a literal `go-version` or
 `check-latest`, and any workflow job or composite action that runs `go` without
 setting it up first, which would leave it on the runner image's Go.
 
+### Bumping Helm
+
+No workflow job runs the runner image's Helm (it moves, majors included, when
+GitHub updates the image) or `azure/setup-helm`'s default, which is the newest
+release (#1580). [`e2e/helm-version.sh`](../e2e/helm-version.sh) pins one Helm 3
+release, one Helm 4 release and `HELM_DEFAULT_MAJOR`, the major a job gets when
+it does not ask; `.github/actions/setup-helm` installs from that file and is
+the only installer. The default is Helm 3. Helm 4 renders every chart in the
+Bazel template tests (the rules_helm toolchain), and the nightly `first-install`
+job runs `e2e/first-install.sh` under both majors, one matrix leg each (#1543).
+
+To bump a release, change its line. `HELM_V4_VERSION` is held equal to the
+rules_helm toolchain's Helm, so a rules_helm bump that moves its Helm moves
+that line in the same pull request. To move the default major, change
+`HELM_DEFAULT_MAJOR` and prove it with a `workflow_dispatch` of `e2e.yaml` on
+the branch: no pull request check runs the kind harnesses. `bazel test
+//e2e:helm_pin_test` fails on a job or composite action that runs `helm` or an
+`e2e/*.sh` harness without `setup-helm` before it, on `azure/setup-helm` used
+anywhere else, on a caller that names a version instead of a major, and on a
+`helm list -a`: Helm 4 dropped that flag, so anything that lists releases takes
+its flags from `helm_list_all_flags` in the same file (#1581).
+
+### Bumping Gateway API
+
+[`e2e/gateway-api-version.sh`](../e2e/gateway-api-version.sh) is the one
+Gateway API release every e2e surface installs: each harness sources it for the
+CRD bundle it applies, and the nightly conformance jobs install the same
+release's bundle and run its suite (#1583). Bump it together with go.mod's
+`sigs.k8s.io/gateway-api` (the release the code is built against) and
+`GATEWAY_API_VERSION` in `.github/workflows/e2e.yaml` (a workflow cannot source
+a shell file, so it carries the one copy). `bazel test
+//e2e:gateway_api_pin_test` fails until the three agree, and on a harness that
+assigns `GWAPI_VERSION` itself or a download URL that names a release.
+`GWAPI_VERSION=<release>` overrides it for one local run.
+
 ### Refreshing third-party image pins
 
 An image this repository does not build (curl, the echo servers, OPA, etcd, the

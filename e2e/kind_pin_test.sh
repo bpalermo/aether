@@ -236,7 +236,9 @@ for f in "${ci_files[@]}"; do
 	esac
 	actions_checked=$((actions_checked + 1))
 	code=$(grep -vE '^[[:space:]]*#' "$f" || true)
-	if grep -qE '(^|[^A-Za-z0-9_-])kind (create|load|export|get|delete)[[:space:]]|\./e2e/[A-Za-z0-9_.$-]+' <<<"$code" &&
+	# A harness is run as ./e2e/<script>; an action that only sources a pin file
+	# by its own path (<action path>/../../../e2e/helm-version.sh) drives nothing.
+	if grep -qE '(^|[^A-Za-z0-9_-])kind (create|load|export|get|delete)[[:space:]]|(^|[^.A-Za-z0-9_])\./e2e/[A-Za-z0-9_.$-]+' <<<"$code" &&
 		! grep -qE 'uses:[[:space:]]*\./\.github/actions/(setup-kind|run-e2e-script)' <<<"$code"; then
 		err "$f: drives kind without .github/actions/setup-kind (it would run the runner's preinstalled kind and its default node image)"
 	fi

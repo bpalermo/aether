@@ -10,6 +10,14 @@ a local run and CI run the same Kubernetes; bumping it is one file
 ([runbook](../docs/runbook.md#bumping-the-e2e-kubernetes-version)).
 `//e2e:kind_pin_test` enforces both.
 
+Two more pins live beside it, each with its test and its runbook section:
+[`gateway-api-version.sh`](gateway-api-version.sh), the Gateway API release whose
+CRDs a harness installs (source it; never assign `GWAPI_VERSION` in a script,
+`//e2e:gateway_api_pin_test`), and [`helm-version.sh`](helm-version.sh), the Helm
+releases CI installs (`//e2e:helm_pin_test`). A harness runs whatever `helm` is
+first on `PATH`, so write it for Helm 3 and Helm 4 alike: `helm list -a` exists
+only in Helm 3, and `helm_list_all_flags` gives the flags for the one in use.
+
 ## Rules for script authors
 
 ### No early-exit reader in a pipeline (SIGPIPE under `pipefail`)
