@@ -21,7 +21,7 @@ and say so in its description.**
 | Change | `version` |
 |---|---|
 | An entry is removed | bump |
-| An entry changes meaning: a renamed metric, label, field or object; a label value removed from a closed set, **or added to one**; a field that changes type or unit; another rolling-update strategy | bump |
+| An entry changes meaning: a renamed metric, label, field or object; a label value removed from a closed set, **or added to one**; a field that changes type or unit; another rolling-update strategy; a metric that keeps its name and labels and counts something else, or is absent under other conditions | bump |
 | A new entry | no bump |
 | A new field on a log line that keeps every field it had (add it to `fields`) | no bump |
 
@@ -33,6 +33,16 @@ The bump itself is a review rule: no test in this repository can compare the
 file with its previous revision. What the tests do guarantee is that the
 contract cannot drift from the code without a test failing, and that an entry
 cannot be removed silently (see "Removing an entry").
+
+## Versions
+
+What each bump changed, for whoever maintains a harness pinned to an earlier
+one.
+
+| `version` | Change | What a harness has to change |
+|---|---|---|
+| 2 | `agent.xds_acked_tls_clusters` keeps its name, type and labels and means something else (#1508). It was the counts of the last snapshot whose cluster update the proxy acknowledged. It is the count of the clusters the proxy has accepted, each at the version it last acknowledged or stated. | Do not read it as "the proxy holds the newest snapshot" after any cluster ACK: a rejected cluster stays at its accepted version through later ACKs, so the gauge can stay above `agent.snapshot_tls_clusters` for as long as the proxy rejects. Treat an absent series as "not known", and expect it to become absent AFTER having had samples, while the proxy holds a cluster whose pin state the agent cannot determine: a grader that takes a missing series for zero, or that carries the last sample forward, is wrong there. The entry's `notes` have the full statement. |
+| 1 | The first version (#1535). | |
 
 ## How an entry is tied to the code
 

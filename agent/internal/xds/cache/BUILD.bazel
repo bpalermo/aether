@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "cache",
     srcs = [
+        "ackedpins.go",
         "cache.go",
         "capture.go",
         "cluster.go",
@@ -19,7 +20,6 @@ go_library(
         "observedstore.go",
         "odcds_resend.go",
         "ordering.go",
-        "pinhistory.go",
         "pinreport.go",
         "quicpairs.go",
         "quicpublish.go",
@@ -36,6 +36,7 @@ go_library(
         "//agent/constants",
         "//agent/internal/capture",
         "//agent/internal/meshdns",
+        "//agent/internal/xds/ack",
         "//agent/internal/xds/cache/cachemetrics",
         "//agent/internal/xds/cache/snapversion",
         "//agent/internal/xds/proxy",
@@ -84,6 +85,7 @@ go_test(
     name = "cache_test",
     size = "medium",
     srcs = [
+        "ackedpins_test.go",
         "alias_floor_eds_test.go",
         "cache_test.go",
         "capture_reproject_test.go",
@@ -113,7 +115,6 @@ go_test(
         "odcds_test.go",
         "outbound_mtls_test.go",
         "outboundroute_test.go",
-        "pinhistory_test.go",
         "pinreport_test.go",
         "podchurn_cds_test.go",
         "quic_burst_test.go",
@@ -171,6 +172,7 @@ go_test(
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
         "@com_github_envoyproxy_go_control_plane//pkg/server/stream/v3:stream",
+        "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
         "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",

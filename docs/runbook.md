@@ -208,8 +208,11 @@ packaged chart. A rename fails with a message that names the contract file.
 **The rule.** Change the code and the contract together, in one pull request,
 and say so in its description. Removing an entry or changing what it means
 (a rename, a value removed from **or added to** a closed set, another roll
-strategy) bumps the file's `version`; adding an entry does not. A harness pins
-the version it was written against. The bump is a review rule: nothing can
+strategy, a metric that keeps its name and counts something else) bumps the
+file's `version`; adding an entry does not. A harness pins
+the version it was written against; the README's "Versions" table says what
+each bump changed (version 2: what `aether_agent_xds_acked_tls_clusters` counts
+and when it is absent, #1508). The bump is a review rule: nothing can
 compare the file with its previous revision in a hermetic test.
 [`test/harnesscontract/README.md`](../test/harnesscontract/README.md) has the
 table of what each test compares, what is kept by review alone, and how to add
@@ -6344,7 +6347,7 @@ on them are in `docs/observability/agent-pin-alerts.yml`:
 | WARN `mesh clusters published with no server-identity SAN pin` | **which** clusters, and why each | one line per `reason` per snapshot, first 20 names per line |
 | counter `aether_agent_identity_cluster_unpinned_total{reason}` | **that** a snapshot went out with unpinned clusters | adds the unpinned count on every snapshot; seeded at zero per reason |
 | gauge `aether_agent_snapshot_tls_clusters{pin,reason}` | **how many** clusters are pinned and unpinned **now**, per reason | written on every snapshot, zeros included |
-| gauge `aether_agent_xds_acked_tls_clusters{pin,reason}` | the same, for the last snapshot whose cluster update the **proxy acknowledged** | written on the ACK of every cluster response that added or removed a cluster, and of the empty response that opens a proxy's stream; not on the ACK of a later empty response; absent before the first |
+| gauge `aether_agent_xds_acked_tls_clusters{pin,reason}` | the same, for the clusters the **proxy has accepted**, cluster by cluster | written when the proxy answers a cluster response: the ACK of one that added or removed a cluster, and the answer (ACK or NACK) to the first one of a stream, and by a snapshot build that changes how a cluster the proxy has accepted is counted; absent before the first answer; not written while the pin state of a cluster the proxy holds is unknown |
 
 None of the metrics carries a cluster name: the names are in the log line only.
 
@@ -6400,65 +6403,168 @@ sum by (node, reason) (increase(aether_agent_identity_cluster_unpinned_total[1h]
 ```
 
 **Published is not held.** The gauge above is what the agent *published*.
-`aether_agent_xds_acked_tls_clusters` has the same series and is written when the proxy
-**acknowledges** a cluster update: it then takes the values of the snapshot that update
-was built from. It is the closest the agent gets to what the proxy holds without asking
-the proxy's admin interface.
+`aether_agent_xds_acked_tls_clusters` has the same series and counts the clusters the
+proxy has **accepted**. The agent keeps, for every mesh cluster entry, the version the
+proxy last accepted, and counts that version the way it last counted it when it
+published it. It is the
+closest the agent gets to what the proxy holds without asking the proxy's admin
+interface. It learns it from two things the proxy says:
 
-- The two agree at rest. They differ for the moment an update is in flight.
-- They **stay** different while the proxy rejects cluster updates: a NACK acknowledges
-  nothing, so the acknowledged gauge stays on what the proxy last accepted (the NACK
-  counter moves, see below, and the agent logs `envoy NACKed delta response`). Published
-  `unpinned == 0` with acknowledged `unpinned > 0` reads: *the agent has pinned it, the
-  proxy still holds the unpinned cluster*. `AetherProxyHoldsUnpinnedClusters` in
-  `docs/observability/agent-pin-alerts.yml` is that reading as a rule.
-- **An agent restart does not lose it (#1483).** A proxy that reconnects states, in the
-  first cluster request of its new stream, the version of every cluster it holds; the
-  versions are hashes of each cluster's content. When they are exactly the clusters of
-  the agent's snapshot the agent has nothing to send, answers with an empty response
-  that names that snapshot, and the proxy acknowledges it: the gauge takes that
-  snapshot's values, within the second or so the proxy takes to reconnect. When they
-  are not, the proxy is sent the difference and the gauge moves on its ACK of that, as
-  ever. (Agents before #1483 dropped the empty exchange, so after a restart on a quiet
-  node the gauge had no series until a cluster next changed.) Only the **first**
-  cluster response of a stream is read this way. A later empty one is compared with
-  what the agent has *sent* on the stream, accepted or not, and says nothing about what
-  the proxy holds.
-- **Absent is "not known", not zero.** Nothing is written until a proxy gives this agent
-  process an ACK that counts: of a cluster response that added or removed a cluster, or
-  of the empty response that opened its stream. That leaves two absent states. *No proxy
-  has connected*: the node's proxy is down, or this agent is a surge-rolled standby that
-  does not serve xDS yet. *The proxy rejected the only cluster response that carried
-  anything* (it may since have acknowledged an empty one, which is not read):
-  an agent that restarts while its proxy is rejecting a cluster update is told the
-  clusters the proxy held **before** that update (a proxy never states a version it
-  rejected), which the new agent process never built and cannot count; it sends the
-  update again, the proxy rejects it again, and there is no acknowledgement to record.
-  In that second state `AetherProxyHoldsUnpinnedClusters` is silent although the proxy
-  may hold unpinned clusters: what remains is an increment of
+- **An ACK is about the clusters its response carried, and no other (#1508).** Each of
+  them is then held at the version it was sent at; each one the response removed is
+  gone. The control plane sends a response only for what changed, and it treats a
+  cluster as delivered once it has sent it, accepted or not, so after a rejected update
+  the next response, and its ACK, are about other clusters.
+- **The first cluster request of a stream states every cluster the proxy holds**, by
+  version (a version is a hash of the cluster's content, so it means the same to any
+  agent process). The agent reads that statement when the proxy answers the first
+  cluster response of the stream: the proxy holds what it stated, with the response
+  over it if it acknowledged it, and nothing of the response if it rejected it. That
+  replaces what the agent knew, cluster by cluster.
+
+What follows from that:
+
+- The two gauges agree at rest, for every cluster the snapshot publishes. An entry with
+  **no cluster in the snapshot** (a `tcp:` floor that is not captured) is in the
+  published gauge, and in this one only while the proxy still holds that cluster from an
+  earlier snapshot: a floor that was captured, is no longer, and whose removal the proxy
+  rejected stays counted at the version the proxy accepted. One whose cluster was never
+  published, or whose removal the proxy accepted, is not in this gauge. So with a proxy
+  that has accepted everything it was sent, removals included, acknowledged sits *below*
+  published by exactly those entries. Acknowledged *above* published, in any series, is the other case: the
+  proxy holds a cluster the agent no longer publishes in that state (a rejected update
+  or a rejected removal, below).
+- They differ for the moment an update is in flight.
+- They **stay** different while the proxy rejects a cluster: the rejected cluster stays
+  at the version the proxy last accepted, through every later ACK of other clusters,
+  until a response that carries it is acknowledged (the NACK counter moves, see below,
+  and the agent logs `envoy NACKed delta response`). A cluster the proxy never accepted
+  in any version is in no series. Published `unpinned == 0` with acknowledged
+  `unpinned > 0` reads: *the agent has pinned it, the proxy still holds the unpinned
+  cluster*. `AetherProxyHoldsUnpinnedClusters` in
+  `docs/observability/agent-pin-alerts.yml` is that reading as a rule. (Agents before
+  #1508 took the whole gauge from the snapshot of the last cluster ACK. There the ACK of
+  any *other* cluster after the rejected one made the gauge read as if the rejected
+  cluster had been accepted, and the rule resolved with the proxy unchanged.)
+- **A rejected cluster is not sent again on that stream** unless it changes (#1510).
+  The state above therefore lasts until the cluster changes and is accepted, or until
+  the proxy's stream is re-established, when the proxy states its old version and is
+  sent the current one again (which it can reject again).
+- **Removals.** A cluster the agent no longer publishes stays counted, at the state it
+  was accepted in, until the proxy acknowledges the response that removes it or opens a
+  stream without it. A proxy that rejected the removal still holds the cluster.
+- **An agent restart does not lose it (#1483).** A proxy that reconnects states the
+  clusters it holds; when they are exactly the clusters of the agent's snapshot the
+  agent has nothing to send, answers with an empty response, and the proxy acknowledges
+  it: the gauge has its sample as soon as the proxy has reconnected and answered,
+  normally within a second or so.
+  When they are not, the proxy is sent the difference, and each cluster moves when the
+  proxy acknowledges it. (Agents before #1483 dropped the empty exchange, so after a
+  restart on a quiet node the gauge had no series until a cluster next changed.) Only
+  the **first** cluster response of a stream is read with the statement. A later empty
+  one carries no cluster and says nothing about any.
+- **Absent is "not known", not zero.** Nothing is written until a proxy answers this
+  agent process for the first time: the node's proxy has not connected since the agent
+  started, or this agent is a surge-rolled standby that does not serve xDS yet.
+- **A sample is not a live connection.** Once the gauge has samples, a proxy stream that
+  drops, or a proxy that goes down, does not withdraw them: the agent keeps what the
+  proxy last accepted (Envoy keeps its clusters across a reconnect) and goes on
+  exporting it until the proxy answers again. The only thing that withdraws the gauge
+  is an unknown held version, below.
+- **A slow proxy's answer is still read.** The agent keeps what it sent, version by version, until
+  the proxy answers it or the stream ends, however many times the cluster is rebuilt in
+  between. An ACK that arrives late is read against the version that was sent, with the
+  pin class that version was last published with. (What is kept is taken when the
+  response is written. A response written after its cluster was rebuilt three times, or
+  more than two snapshot builds after its cluster was removed, inside the agent
+  process, is the exception: its version is unknown, or its ACK is not counted until the
+  proxy next opens a stream.)
+- **Not written while a held cluster's state is unknown.** The agent can count a version
+  only if it has that version's pin class on record: this agent process published it,
+  and recently enough (the last three versions of a cluster, plus any in flight). An agent that restarts **while its proxy is
+  rejecting a cluster update** is told the version the proxy held *before* that update
+  (a proxy never states a version it rejected), which the new process never built; it
+  sends the update again and the proxy rejects it again. A count that left that cluster
+  out would say the proxy holds fewer unpinned clusters than it may, so the gauge is
+  not written: after a restart it stays absent (and a gauge that had samples stops
+  having them: it is withdrawn, not left on its last values), and the agent logs, once,
+  WARN `proxy
+  holds mesh clusters whose pin state this agent cannot determine; the acknowledged pin
+  gauge is not written` with the number of clusters
+  (INFO `the pin state of every mesh cluster this agent has on record as held by the
+  proxy can be determined again; the acknowledged pin gauge is written` when it ends). In that state `AetherProxyHoldsUnpinnedClusters` is silent although the proxy
+  may hold unpinned clusters (#1509): what remains is that line, an increment of
   `aether_agent_xds_nacks_total` for the Cluster type each time the proxy rejects a
   response, and the agent's `envoy NACKed delta response` line. An absent acknowledged
   gauge on an agent whose proxy is connected is therefore a reason to look at the NACK
-  counter.
-- **Acknowledged is accepted, not applied.** Envoy applies the valid clusters of a
-  response and then rejects the response as a whole when one cluster in it is invalid;
-  it goes on stating the versions it had before. So after a rejected update the proxy
-  can run a newer cluster than the gauge (and the proxy's own statement at a reconnect)
-  says. The gauge follows acknowledgements, on purpose: a NACK is the event to chase.
-- During a proxy hot restart two generations are connected; the gauge shows the last
-  ACK from either.
+  counter. The ACK of some other cluster does not end it; the proxy accepting that
+  cluster does. The same holds for a cluster the proxy **states it holds when it opens
+  a stream** that the agent no longer publishes and has no record of (the agent
+  restarted, or the stream ended before the agent read the proxy's answer and the
+  cluster was removed since), when the proxy then rejects the response that removes
+  it: it is counted as unknown until the proxy accepts the removal, stops stating it, or
+  the agent publishes that version again. A cluster of a family the pin gauges do not
+  count is never treated that way, whatever its TLS: per-pod clusters (application,
+  health probe, inbound readiness), QUIC twins, UDP floors, east/west waypoint ingress
+  clusters, the edge's cleartext backend clusters, the passthrough and the blackhole.
+- **Accepted is not applied.** Envoy applies the valid clusters of a response and then
+  rejects the response as a whole when one cluster in it is invalid; it goes on stating
+  the versions it had before. So after a rejected update the proxy can run a newer
+  cluster than the gauge (and the proxy's own statement at a reconnect) says. The
+  sharpest case: a proxy that starts with nothing and rejects its **first** cluster
+  response has accepted nothing, the gauge counts nothing for it, and it runs every
+  valid cluster of that response; each comes back into the gauge when it next changes
+  and is acknowledged. The gauge follows acknowledgements, on purpose: a NACK is the
+  event to chase.
+- A cluster of one of those families is in no series of either gauge, whether or not
+  the agent still publishes it. Any other cluster the proxy states it holds that this
+  agent process neither publishes nor has a record of (left over from before an agent
+  restart, with its removal rejected) is the unknown state above, not a cluster left
+  out of the count.
+- During a proxy hot restart two generations are connected and there is one record per
+  cluster, not one per generation: the new generation's first answer replaces the set
+  with its own, and after that each cluster shows the last answer from either. A late
+  ACK of an older version from the generation that is leaving moves that one cluster
+  back until the next answer about it.
+- The gauge is written on each of those answers. A snapshot build moves it too, in two
+  cases: it publishes again a version the proxy holds that the agent had no class for
+  (the unknown state ends), or it
+  counts the very cluster the proxy holds under another reason (an HTTP cluster
+  published without TLS is `tls_not_published`, and `no_namespace_metadata` from the
+  snapshot that sees the node's identity on, #1482). Nothing is sent for that, so the
+  build itself rewrites the gauge and the two keep agreeing.
 - The agent logs the acknowledged state only when it **changes**: WARN `proxy
   acknowledged mesh clusters with no server-identity SAN pin` (with `unpinned`, `pinned`,
-  one count per reason and `snapshot_version`, which joins it to the snapshot's own line
-  and its cluster names), and INFO `proxy acknowledged mesh clusters, all with a
+  one count per reason and `snapshot_version`, the snapshot of the response or of the
+  build that changed it), and INFO `proxy acknowledged mesh clusters, all with a
   server-identity SAN pin` when it returns to none.
 
 ```promql
-# What the proxy last acknowledged, where it differs from what is published.
-# A node with no acknowledged series (the "not known" state above) is not in
-# the result: a comparison returns nothing for a side that is absent.
+# What the proxy has accepted, where it differs from what is published. A node
+# with no acknowledged series (the "not known" states above) is not in the
+# result: a comparison returns nothing for a side that is absent. An entry with
+# no cluster in the snapshot that the proxy does not hold (never published, or
+# its removal accepted) shows here as published without acknowledged
+# (tls_not_published, a `tcp:` floor that is not captured).
 sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
   != sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"})
+
+# Per series, how many more cluster entries the agent publishes than the proxy
+# has accepted in that state: not accepted in any version, accepted in another
+# state, or entries with no cluster in the snapshot that the proxy does not
+# hold. Clamped, because the same
+# rejected update shows as a surplus on the acknowledged side of another series
+# (the next query). Lasting above the unpublished entries, it is a rejected
+# cluster.
+clamp_min(
+  sum by (job, node, pin, reason) (aether_agent_snapshot_tls_clusters)
+  - sum by (job, node, pin, reason) (aether_agent_xds_acked_tls_clusters), 0) > 0
+
+# The other side: clusters the proxy holds in a state the agent no longer
+# publishes (an old version it kept, or a cluster whose removal it rejected).
+clamp_min(
+  sum by (job, node, pin, reason) (aether_agent_xds_acked_tls_clusters)
+  - sum by (job, node, pin, reason) (aether_agent_snapshot_tls_clusters), 0) > 0
 
 # Did the proxy reject a cluster update. Zero is a real answer since #1480.
 sum by (job, node) (increase(aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.cluster.v3.Cluster"}[1h]))

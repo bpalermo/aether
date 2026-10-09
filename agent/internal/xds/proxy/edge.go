@@ -772,7 +772,7 @@ func BuildEdgeRouteConfiguration(vhosts []*routev3.VirtualHost) *routev3.RouteCo
 // unique per (namespace, service, port) and DNS-safe.
 // Scheme: edge_k8s_<namespace>_<service>_<port>
 func EdgeK8sClusterName(namespace, service string, port uint32) string {
-	return fmt.Sprintf("edge_k8s_%s_%s_%d", namespace, service, port)
+	return fmt.Sprintf("%s%s_%s_%d", edgeK8sClusterPrefix, namespace, service, port)
 }
 
 // BuildEdgeK8sCluster builds a STRICT_DNS cleartext cluster that reaches a

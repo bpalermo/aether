@@ -157,7 +157,8 @@ func runEdge(ctx context.Context) (retErr error) {
 
 	ackTracker := ack.NewTracker(l)
 	// As on the node agent: the SAN-pin state the edge proxy accepted (#1425).
-	ackTracker.SetAckObserver(snapshotCache.ResponseAcked)
+	ackTracker.SetAckObserver(snapshotCache.ResponseAccepted)
+	ackTracker.SetDeliveryObserver(snapshotCache.ResponseDelivery)
 
 	// The edge runs no local workloads, so it loads listeners from an empty
 	// storage: PreListen's LoadListenersFromStorage finds zero pods and the

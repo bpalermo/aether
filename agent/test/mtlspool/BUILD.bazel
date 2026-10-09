@@ -18,6 +18,7 @@ go_test(
         "accesslog_timing_test.go",
         "ads_sds_test.go",
         "alias_floor_eds_test.go",
+        "cds_partial_reject_test.go",
         "cds_reconnect_test.go",
         "harness_test.go",
         "pool_identity_test.go",
