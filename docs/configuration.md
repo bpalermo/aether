@@ -137,6 +137,9 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | `proxy.authzSidecar.opa.enabled` | `false` | Built-in OPA preset (opt-in). |
 | `proxy.authzSidecar.opa.image` | `openpolicyagent/opa:1.21.1-envoy-static` | OPA image. |
 | `proxy.authzSidecar.opa.policy` | `""` | Rego policy (ConfigMap-mounted); required when `opa.enabled`. The sidecar **watches** it (`opa run --watch`, chart 2.4.19, #1383): a changed policy is loaded by each node's sidecar when that node's kubelet delivers the ConfigMap update (27–64 s observed on one node; not a bound), with **no pod restart and no staging**. The chart does not validate it: **check it before you change it**. See *Changing the OPA policy* below. |
+| `proxy.authzSidecar.opa.policyCheck.enabled` | `true` | Chart 2.4.23, #1447. With the OPA preset on, render a one-pod Deployment, `<release>-opa-policy-check`, that says whether `opa.policy` **compiles**: it runs the sidecar's image with the same ConfigMap mounted, and its readiness probe is `/opa check /policy/policy.rego`. Its pod template carries a checksum of the policy and its strategy is `Recreate`, so a policy change replaces that pod (never a proxy pod) and the new one judges the new policy within seconds (7 s in one measurement). With a policy that does not compile, `kubectl rollout status deploy/<release>-opa-policy-check` does not complete, the Deployment has an unavailable replica, the pod's `Unhealthy` event carries the compile error, and `helm upgrade --wait` fails at its timeout (the ConfigMap is updated all the same). It takes no part in any request, validates nothing before the update, and is one answer for the ConfigMap, not one per node. It is a pod of its own because a readiness probe on the sidecar is unsafe: see the `readinessProbe` row below. See [`runbook.md`](./runbook.md) § *A policy that does not compile*. |
+| `proxy.authzSidecar.opa.policyCheck.{periodSeconds,timeoutSeconds,failureThreshold}` | `10` / `5` / `1` | Timings of that probe. One run of `opa check` took 30 ms and 33 MB of peak RSS with a five-line policy (OPA 1.21.1). |
+| `proxy.authzSidecar.opa.policyCheck.resources` | `5m` / `32Mi` requests, `96Mi` memory limit | The check pod's resources. Its OPA is idle (it loads no policy and nothing calls it). No CPU limit; `GOMAXPROCS` is pinned to `1` in the template, which also covers the probe's process. |
 | `proxy.authzSidecar.image.{repository,tag,args}` | `""` / `[]` | Bring-your-own authz container (serves `envoy.service.auth.v3.Authorization` on `unix:///run/aether/authz/authz.sock`). |
 | `proxy.authzSidecar.timeout` | `200ms` | Per-check gRPC timeout. |
 | `proxy.authzSidecar.failureMode` | `DENY` | `DENY` (fail-closed, 403 when unreachable) or `ALLOW` (fail-open). |
@@ -144,7 +147,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | `proxy.authzSidecar.startupProbe.enabled` | `true` | Render the sidecar's startupProbe. The kubelet starts the `proxy` container only after it passes (#1275). Off: the sidecar counts as started as soon as its process runs. |
 | `proxy.authzSidecar.startupProbe.{periodSeconds,timeoutSeconds,failureThreshold}` | `1` / `1` / `120` | Timings of the default probe, which execs the staged `proxy-ready --unix-socket=/run/aether/authz/authz.sock` inside the sidecar container: it passes once a `connect(2)` to the authz socket succeeds. Works for the OPA preset and for a bring-your-own image, since both must serve on that socket. |
 | `proxy.authzSidecar.startupProbe.override` | `{}` | A full Kubernetes probe, used verbatim instead of the default socket check. The pod is `hostNetwork`, so a port probe answers for whichever pod on the node holds the port. |
-| `proxy.authzSidecar.{livenessProbe,readinessProbe}` | `{}` | Optional probes, rendered verbatim. A native sidecar's readinessProbe counts toward pod Ready (and so gates a proxy roll); a failed livenessProbe restarts only the sidecar, and checks fail per `failureMode` while it is down. |
+| `proxy.authzSidecar.{livenessProbe,readinessProbe}` | `{}` | Optional probes, rendered verbatim; think twice before setting either. A native sidecar's readinessProbe counts toward pod Ready, and a NotReady proxy pod is **not** protected by `maxUnavailable: 0`: during a roll the DaemonSet controller deletes a NotReady old pod as soon as its replacement exists, whether or not the replacement ever becomes Ready (measured, #1447: with `opa check` as the sidecar's readiness probe, a policy that does not compile followed by a proxy roll deleted the serving pod while its successor crash-looped). A failed livenessProbe restarts only the sidecar; checks fail per `failureMode` while it is down, and an OPA sidecar cannot start again while the policy on its node does not compile. |
 
 **The sidecar is a native sidecar (chart 2.4.9, #1275).** `authz` is an init container
 with `restartPolicy: Always`, placed after `install-supervisor` (which stages the probe
@@ -244,8 +247,11 @@ no `ext_authz` error.
   policy exists only in the running process: a sidecar that *starts* with the bad file
   exits 1. So the failure is delayed until a sidecar restarts (an OOM kill, a node
   reboot) or a proxy pod is replaced, and then that node fails every check per
-  `failureMode`, or loses its proxy. [`runbook.md`](./runbook.md) § *Changing the OPA
-  policy* has the measurements, how to see a failed reload, and the recovery.
+  `failureMode`, or loses its proxy. Since chart 2.4.23 it shows when it is applied
+  (`opa.policyCheck`, #1447): the Deployment `<release>-opa-policy-check` is unavailable
+  and its pod's `Unhealthy` event carries the compile error.
+  [`runbook.md`](./runbook.md) § *A policy that does not compile* has the measurements,
+  the signal and its queries, and the recovery of a node whose proxy is down.
 - **The first upgrade to 2.4.19 rolls the proxy DaemonSet once** when the OPA preset is on
   (the `checksum/opa-policy` annotation leaves the pod template and the sidecar gains
   `--watch`). With the preset off the proxy pod template is unchanged. Chart 2.4.15–2.4.18

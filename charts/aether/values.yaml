@@ -853,6 +853,57 @@ proxy:
       # node fails per failureMode, and a new proxy pod never starts its proxy.
       # docs/runbook.md, "Changing the OPA policy".
       policy: ""
+      # #1447: a small Deployment (one pod, `<release>-opa-policy-check`) that
+      # says whether the policy above COMPILES, because nothing else does. A
+      # running sidecar that is handed a policy it cannot compile keeps the
+      # last good one and reports it only in a log line at level info (no
+      # metric, no health endpoint, no status; measured with OPA 1.21.1, its
+      # status plugin on as well), yet no sidecar can START with that file:
+      # the node's next sidecar restart fails every check per failureMode and
+      # its next pod replacement leaves the node without a proxy.
+      #
+      # The pod runs the sidecar's image (`image` above) with the same
+      # ConfigMap mounted, and its readiness probe is `opa check` on that
+      # file: the loader and compiler `opa run` starts with. Its pod template
+      # carries a checksum of the policy, so a policy change replaces THIS pod
+      # (never a proxy pod) and the new one judges the new policy at once:
+      #   kubectl -n <ns> rollout status deploy/<release>-opa-policy-check --timeout=2m
+      # fails for a policy that does not compile, the Deployment shows 0/1
+      # available, the pod's Unhealthy event carries the compile error, and
+      # `helm upgrade --wait` (or a GitOps controller that waits) does not
+      # report success. It is one answer for the ConfigMap, not one per node.
+      #
+      # It validates nothing BEFORE the update (that stays with whoever
+      # changes the policy), blocks nothing, and takes no part in any
+      # request. It does not say whether a policy that compiles is right, nor
+      # whether every node has received it.
+      #
+      # Why a pod of its own and not a readiness probe on the sidecar: a
+      # DaemonSet roll deletes an old pod that is NotReady as soon as its
+      # replacement exists, without waiting for the replacement. Measured on
+      # kind with that probe: bad policy, then a proxy roll, and the serving
+      # pod was deleted in the second it turned NotReady while its successor
+      # was crash-looping. For the same reason never set
+      # `proxy.authzSidecar.readinessProbe` to something that can fail while
+      # the sidecar is serving. docs/runbook.md, "A policy that does not
+      # compile".
+      policyCheck:
+        enabled: true
+        # The readiness probe (`/opa check /policy/policy.rego`). One run took
+        # 30 ms and 33 MB of peak RSS with a five-line policy.
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 1
+        # The pod's OPA is idle (it serves nothing and loads no policy). No
+        # CPU limit and GOMAXPROCS pinned to 1 in the template: the probe is
+        # a short-lived Go process that would otherwise size itself to the
+        # node's cores.
+        resources:
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            memory: 96Mi
     # Bring-your-own authz container (used when opa.enabled is false). Must serve
     # envoy.service.auth.v3.Authorization on unix:///run/aether/authz/authz.sock.
     image:
@@ -892,10 +943,19 @@ proxy:
       # no startupProbe at all and the kubelet counts the sidecar started as soon
       # as its process is; the ordering then guarantees "running", not "serving".
       override: {}
-    # Optional probes for the sidecar, rendered verbatim; none by default. A
-    # native sidecar's readinessProbe counts toward the pod's Ready (and so
-    # gates a proxy roll); a livenessProbe failure restarts only the sidecar
-    # — while it is down, checks fail per failureMode (403s under DENY).
+    # Optional probes for the sidecar, rendered verbatim; none by default.
+    # Think twice before setting either.
+    # A native sidecar's readinessProbe counts toward the pod's Ready, and a
+    # proxy pod that is NotReady is NOT protected by maxUnavailable: 0. During
+    # a roll the DaemonSet controller deletes a NotReady old pod as soon as
+    # its replacement exists, whether or not the replacement ever becomes
+    # Ready (measured, #1447). A readinessProbe that can fail while the
+    # sidecar is still serving therefore turns a stalled roll into a node
+    # without a proxy.
+    # A livenessProbe failure restarts only the sidecar; while it is down,
+    # checks fail per failureMode (403s under DENY), and with the OPA preset
+    # a sidecar cannot start again while the policy on the node does not
+    # compile.
     livenessProbe: {}
     readinessProbe: {}
     # The sidecar used to run with `resources: {}`: unbounded, and invisible to

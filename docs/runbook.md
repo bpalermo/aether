@@ -3879,14 +3879,18 @@ and a `rego_type_error`):
     `successor_wait` (155 s at the defaults), then drains and exits, and the node
     has **no proxy**: mesh requests from that node fail to connect.
 
-So a bad policy does nothing visible when it is applied and takes a node out
-later. Check for it after every policy change (below).
+So a bad policy changes no decision when it is applied and takes a node out
+later. Since chart 2.4.23 it is visible when it is applied: the Deployment
+`aether-opa-policy-check` does not become available. See *A policy that does not
+compile* below for that signal and for the recovery of a node whose proxy is
+already down.
 
 **Confirming every node has the new policy, and seeing a failed reload.** OPA
 exports no metric for a reload (its `/metrics` has only Go runtime and HTTP
-request series), and it logs a failed one at level `info`. There are two ways to
-see what each sidecar did; both are per proxy pod, because each node converges
-on its own.
+request series), and it logs a failed one at level `info`. The policy check
+(next section) says whether the policy in the ConfigMap compiles; it does not
+say which nodes have received it. There are two ways to see what each sidecar
+did; both are per proxy pod, because each node converges on its own.
 
 ```bash
 # 1. The latest watch events of every sidecar, successes included.
@@ -3947,8 +3951,197 @@ mount would never be updated, so the mount is the whole volume.
 
 Kind e2e: `e2e/authz.sh`, step d (nightly job `authz`): a policy change, a policy
 that does not parse, and the first policy again, with the pod UID, the restart
-counts and the Envoy epoch required to stay the same. The sidecar-restart and
-new-pod cases above were measured by hand and are not in CI.
+counts and the Envoy epoch required to stay the same. The sidecar-restart, roll
+and new-pod cases are `e2e/authz-bad-policy.sh` (nightly job `authz-bad-policy`,
+next section).
+
+### A policy that does not compile (#1447)
+
+Nothing in the chart refuses a policy: validating it is the job of whoever
+changes it, **before** the change. This section is what to run first, what a bad
+policy does once it is on a node, how it shows, and how to get a node back.
+
+**Before you update the ConfigMap.** Check the file with the OPA the sidecar
+runs, so the version that will load it is the one that judges it. The image is a
+chart value; read it back from the release (never assume the default):
+
+```bash
+OPA_IMAGE="$(helm get values aether -n aether-system -a -o json | jq -r .proxy.authzSidecar.opa.image)"
+# 1. It parses and compiles. Exit 1 and the error otherwise. This is exactly
+#    what the chart's policy check (below) runs after the update.
+docker run --rm -v "$PWD/policy.rego:/policy/policy.rego:ro" "$OPA_IMAGE" \
+  check /policy/policy.rego
+# 2. Your own tests (*_test.rego next to the policy): the only check of what
+#    the policy DECIDES.
+docker run --rm -v "$PWD:/policy:ro" "$OPA_IMAGE" test /policy
+```
+
+`opa check` and a starting `opa run` agreed on every policy tried (OPA 1.21.1):
+
+| Policy | `opa check` | `opa run` starting with it | A running `--watch` sidecar given it |
+| --- | --- | --- | --- |
+| valid | exit 0 | starts | loads it |
+| does not parse (`rego_parse_error`) | exit 1 | exits 1, `load error` | keeps the last good policy |
+| parses, does not compile (`rego_type_error: undefined function`) | exit 1 | exits 1, `initialization error` | keeps the last good policy |
+| empty file, or comments only (`rego_parse_error: empty module`) | exit 1 | exits 1 | keeps the last good policy |
+| compiles, denies everything (`default allow := false` alone) | exit 0 | starts | loads it: every request is a 403 **by decision** (`ext_authz.denied`, not `error`) |
+| compiles, another package (no `envoy.authz.allow`) | exit 0 | starts | loads it: every check is an `ext_authz` **error** (the sidecar logs `"error":"undefined decision"`), so 403 with `failureMode: DENY` and allowed unchecked with `ALLOW` |
+
+The last two rows are why step 2 matters: a policy that compiles and is wrong is
+loaded everywhere within about a minute, and no check here or on the node will
+say so. *Changing the OPA policy* above has an `opa eval --fail` command that
+tells whether the decision is defined for one request.
+
+**What OPA itself reports about a failed reload: a log line.** Measured on OPA
+1.21.1 with `--watch`, before and after a file that does not compile, also with
+its status plugin and its Prometheus status metrics switched on:
+
+| Signal | Changes? |
+| --- | --- |
+| process, restart count | no: it does not exit |
+| `/health`, `/health?plugins`, `/health?bundles` | no: 200 `{}` throughout |
+| `/metrics` | no new series and no changed value besides Go runtime and HTTP request series; `plugin_status_gauge{…,status="OK"}` stays 1 for every plugin |
+| `/v1/status` (status plugin on) | no: it reports plugin states and metrics, nothing about the file watch |
+| `/v1/policies` | still returns the last good policy (that is the comparison in *Changing the OPA policy*) |
+| log | `"msg":"Processed file watch event."` with a non-null `"err"`, at level `info` |
+
+**The signal: the policy check (chart 2.4.23,
+`proxy.authzSidecar.opa.policyCheck`).** With the OPA preset on, the chart runs
+one more pod, the Deployment `aether-opa-policy-check`: the sidecar's image, the
+same ConfigMap mounted, and a readiness probe that runs `/opa check
+/policy/policy.rego`. Its pod template carries a checksum of the policy and its
+strategy is `Recreate`, so every policy change replaces that pod, the new pod
+mounts the ConfigMap as it is (a running pod waits for the kubelet's sync), and
+the answer is there within seconds of the update: 7 s after `helm upgrade`
+began, in one measurement. No proxy pod is touched and the check takes no part
+in any request.
+
+After **every** policy change:
+
+```bash
+kubectl -n aether-system rollout status deploy/aether-opa-policy-check --timeout=2m
+```
+
+- It returns 0: the policy in the ConfigMap compiles with the OPA the sidecars
+  run.
+- It times out (`error: timed out waiting for the condition`): the policy does
+  not compile, and `kubectl -n aether-system get deploy aether-opa-policy-check`
+  shows `0/1`. The error, with file and line:
+
+  ```bash
+  kubectl -n aether-system get events --field-selector reason=Unhealthy \
+    -o custom-columns=POD:.involvedObject.name,LAST:.lastTimestamp,MESSAGE:.message \
+    | grep -E 'POD|opa-policy-check'
+  # aether-opa-policy-check-…   Readiness probe failed: 1 error occurred during loading:
+  #   /policy/policy.rego:7: rego_parse_error: unexpected eof token
+  ```
+
+`helm upgrade --wait` waits for the same rollout, so with `--wait` the upgrade
+that applies a policy that does not compile fails at its `--timeout` (measured:
+`Error: UPGRADE FAILED: context deadline exceeded`, the release left in status
+`failed`), and a GitOps controller that waits for readiness reports the release
+as not ready. **The ConfigMap is updated all the same**: a failed upgrade is not
+a rollback, and every node still receives the bad file (helm's `--atomic`
+rolls a failed upgrade back at the end of the timeout; that was not measured
+here). Without `--wait` helm returns as before; run the command above.
+
+With kube-state-metrics, as a query and an alert that needs no log pipeline:
+
+```promql
+kube_deployment_status_replicas_unavailable{namespace="aether-system", deployment="aether-opa-policy-check"} > 0
+```
+
+Hold it for a minute or two before alerting: the Deployment also has no
+available replica for the few seconds a valid policy change takes to replace the
+pod.
+
+What the check does **not** say:
+
+- that a policy is *wrong* (it compiles and decides badly): see the table above;
+- which nodes have *received* the policy: it is one answer for the ConfigMap.
+  *Changing the OPA policy*, "Confirming every node has the new policy", is
+  still the per-node check;
+- anything about a bring-your-own sidecar (no check is rendered for one).
+
+It does not stop anything either. By the time it reports, every node's kubelet
+is delivering the bad file; the sidecars keep deciding with the last good
+policy, and the fix is a policy that compiles, before the next restart.
+
+**Why the check is a pod of its own and not a readiness probe on the sidecar.**
+That was tried first and measured on kind: `opa check` as the `authz` sidecar's
+readiness probe, a policy that does not parse, then `kubectl rollout restart
+ds/aether-proxy`. The proxy pod turned NotReady as designed, the roll surged a
+new pod whose sidecar could not start, and the DaemonSet controller **deleted
+the serving pod in the same second it turned NotReady** (`SuccessfulDelete`),
+leaving the node to lose its proxy after the successor wait. `maxUnavailable: 0`
+protects only Ready pods: a NotReady old pod is deleted as soon as its
+replacement exists, whether or not the replacement becomes Ready. Without that
+probe the same roll stalls with the old pod still serving (the table below). So
+do not put a readiness probe on the sidecar (`proxy.authzSidecar.readinessProbe`)
+that can fail while the sidecar is serving, and never a liveness probe that
+fails on a bad policy: it would restart the sidecar into the file it cannot
+start with.
+
+**What a bad file on a node does at each later event** (kind, one node,
+Kubernetes 1.35.8, OPA 1.21.1, `failureMode: DENY`):
+
+| Event | Result |
+| --- | --- |
+| nothing (the sidecar keeps running) | the last good policy decides; the proxy pod stays Ready; only the policy check reports it |
+| the `authz` container restarts (an OOM kill, a crash) | the new OPA exits 1 and crash-loops (`Init:CrashLoopBackOff`). `proxy` keeps running, same Envoy epoch, with nothing behind the authz socket: every check on the node is an `ext_authz` error. With `failureMode: DENY` that is a **403** for every request on an `extAuthz` route; with `ALLOW` every such request is **allowed unchecked** (both measured; under `ALLOW` a request the policy denied a minute before answered 200, counted in `ext_authz.failure_mode_allowed`) |
+| a proxy roll (`rollout restart`, a chart upgrade) | the surged pod's sidecar cannot start, so its `proxy` container is never started and the roll **stalls** on that node. The old pod keeps deciding with its last good policy; no request fails |
+| the proxy pod is replaced without a surge (pod deleted, node drained, node rebooted, node added) | the old pod's Envoy serves on for its successor wait (155 s at the defaults; the pod was gone 166–169 s after the delete) and exits. The new pod never starts its proxy. **The node has no proxy**: mesh requests from its pods fail to connect, on every route, whether or not the route uses `extAuthz` and whatever `failureMode` says |
+
+**Recovering.** In every row above the fix is the same, and nothing needs a
+restart by hand: **apply a policy that compiles** (`helm upgrade` with the fixed
+`proxy.authzSidecar.opa.policy`, values read back with `helm get values -o yaml`
+and passed with `-f`).
+
+- The policy check becomes available within seconds (`kubectl rollout status
+  deploy/aether-opa-policy-check`). If the last `helm upgrade --wait` failed on
+  the bad policy, the release is in status `failed`; the next `helm upgrade`
+  with the fixed policy brings it back to `deployed`.
+- A running sidecar loads it when its node's kubelet delivers it.
+- A crash-looping `authz` container starts with it at the kubelet's next restart
+  attempt, and then the kubelet starts `proxy` if it was never started. The
+  restart back-off doubles up to 5 minutes, so a node can stay down that long
+  **after** the file is fixed.
+- To skip the back-off on a node that has no proxy, delete the stuck pod once
+  the ConfigMap is fixed; the DaemonSet creates a new one, whose sidecar starts
+  at once (measured: requests answered again 4 s after the delete, against 110
+  and 115 s when the stuck pod was left to its back-off). Do this only for a pod
+  whose `proxy` container is not running: deleting a pod that is serving starts
+  its 155 s successor wait.
+
+  ```bash
+  # Pods whose proxy container never started (the node has no proxy):
+  kubectl -n aether-system get pods -l app.kubernetes.io/component=proxy \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" node="}{.spec.nodeName}{" proxy-started="}{.status.containerStatuses[?(@.name=="proxy")].started}{" authz-restarts="}{.status.initContainerStatuses[?(@.name=="authz")].restartCount}{"\n"}{end}'
+  kubectl -n aether-system logs <pod> -c authz --previous --tail=5   # error: load error: … rego_parse_error
+  # after the ConfigMap holds a policy that passes `opa check`:
+  kubectl -n aether-system delete pod <pod>
+  ```
+
+- If no valid policy is at hand, the previous release's is:
+  `helm history aether -n aether-system`, then `helm get values aether -n
+  aether-system --revision <n> -o yaml` for a revision from before the change.
+
+**Open decision: should the proxy start when its sidecar cannot?** Today it does
+not (#1275: the kubelet starts `proxy` only after the sidecar's startup probe
+has passed), which is what turns a bad policy plus a pod replacement into a node
+with no data plane, for routes that never asked for authorization too and
+regardless of `failureMode: ALLOW`. The alternative is to let the proxy start
+after a bounded wait and have each `extAuthz` route follow `failureMode`. That
+is a security trade-off and it is not decided; #1447 has both sides. Until it
+is, the check above is how to see the hazard before a restart turns it into an
+outage.
+
+Kind e2e: `e2e/authz-bad-policy.sh` (nightly job `authz-bad-policy`): a deny-all
+policy, a policy that does not parse on a running sidecar (the policy check must
+report it with the error in an event, and the proxy pod must stay Ready), the
+sidecar stopped, a roll (it must stall with the old pod serving), the old pod
+deleted, and the recovery. `AUTHZ_CHARTS=<older charts/ tree> ABP_EXPECT=red`
+runs it against a chart without the check.
 
 ### A roll wedges both epochs after `starting workers` (#1050)
 

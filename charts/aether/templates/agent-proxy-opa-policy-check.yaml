@@ -1,0 +1,113 @@
+{{- $authz := .Values.proxy.authzSidecar }}
+{{- if and $authz.enabled $authz.opa.enabled $authz.opa.policyCheck.enabled }}
+{{- $check := $authz.opa.policyCheck }}
+# Says whether the OPA policy in the ConfigMap COMPILES (#1447). One pod, the
+# sidecar's own image, the same ConfigMap, and a readiness probe that runs
+# `opa check` on the mounted file. It takes no part in any request.
+#
+# Why it exists: `opa run --watch` reports a policy it could not load only in
+# a log line at level info. A running sidecar keeps deciding with the last good
+# policy, so nothing looks wrong, but no sidecar can START with that file: the
+# node's next sidecar restart fails every check per failureMode, and its next
+# pod replacement leaves the node without a proxy. This Deployment is where
+# that shows before it happens:
+#   kubectl -n {{ include "aether.namespace" . }} rollout status deploy/{{ include "aether.opaPolicyCheck.fullname" . }} --timeout=2m
+#
+# Why a pod of its own, not a readiness probe on the sidecar: during a roll
+# the DaemonSet controller deletes a NotReady old pod as soon as its
+# replacement exists, without waiting for the replacement to become Ready.
+# With the check on the sidecar, a bad policy followed by a proxy roll deleted
+# the serving pod while its successor was crash-looping (measured). Nothing
+# depends on THIS pod being Ready.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aether.opaPolicyCheck.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.opaPolicyCheck.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # Recreate, so that every policy change is judged by a NEW pod. A new pod
+  # mounts the ConfigMap as it is; a pod that is kept (which a rolling update
+  # does with the old one until the new one is Ready, i.e. for as long as a
+  # policy is bad) sees a change only when the kubelet syncs its volume,
+  # about a minute later. Measured with RollingUpdate: bad policy reported in
+  # 7 s, but the fix took over 60 s to show, on the kept pod. Nothing depends
+  # on this pod, so the moment with no pod costs nothing.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "aether.opaPolicyCheck.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # A policy change replaces THIS pod (and only this one: the proxy
+        # DaemonSet carries no such annotation, #1383). The new pod mounts the
+        # new ConfigMap at once, where a running pod waits for the kubelet's
+        # sync, so the answer follows the change by seconds and
+        # `rollout status` / `helm upgrade --wait` see it.
+        checksum/opa-policy: {{ required "proxy.authzSidecar.opa.policy is required when the OPA preset is enabled" $authz.opa.policy | sha256sum }}
+      labels:
+        {{- include "aether.opaPolicyCheck.podLabels" . | nindent 8 }}
+    spec:
+      # No API access: it reads one mounted file.
+      automountServiceAccountToken: false
+      # Not a mesh workload: schedulable while a node's agent is not ready.
+      tolerations:
+        - key: aether.io/agent-not-ready
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: check
+          image: {{ $authz.opa.image | quote }}
+          # An idle OPA: no policy argument, so it starts whatever the policy
+          # is, and it serves nothing anyone calls (loopback, in the pod's own
+          # network namespace). It is here because the image holds one binary
+          # and a pod needs a process; the check is the probe below.
+          args:
+            - "run"
+            - "--server"
+            - "--skip-version-check"
+            - "--addr=127.0.0.1:8181"
+          env:
+            # No CPU limit, so Go would size itself (and the probe below, a
+            # new process every period) to the node's cores.
+            - name: GOMAXPROCS
+              value: "1"
+          # Ready = the mounted policy parses and compiles with this OPA: the
+          # loader and compiler `opa run` starts with. A failure is recorded
+          # in an Unhealthy event whose message is the compile error. Never a
+          # liveness probe: there is nothing a restart would fix.
+          readinessProbe:
+            exec:
+              command:
+                - "/opa"
+                - "check"
+                - "/policy/policy.rego"
+            periodSeconds: {{ $check.periodSeconds }}
+            timeoutSeconds: {{ $check.timeoutSeconds }}
+            failureThreshold: {{ $check.failureThreshold }}
+          volumeMounts:
+            # The whole volume, as in the sidecar: the kubelet never updates a
+            # subPath mount.
+            - name: opa-policy
+              mountPath: /policy
+              readOnly: true
+          resources:
+            {{- include "aether.resources" $check.resources | nindent 12 }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: opa-policy
+          configMap:
+            name: {{ include "aether.fullname" . }}-opa-policy
+{{- end }}

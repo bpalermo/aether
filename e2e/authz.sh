@@ -620,6 +620,12 @@ up() {
 	deploy_workloads
 }
 
+# Sourced (e2e/authz-bad-policy.sh reuses the bring-up, the policies and the
+# readings): define everything, run nothing.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+	return 0
+fi
+
 case "${1:-}" in
 up) up ;;
 test) verify ;;

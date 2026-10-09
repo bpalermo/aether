@@ -1,5 +1,5 @@
 # Nightly e2e — conformance (GATEWAY-HTTP + MESH-HTTP), waypoint, replicator, uds,
-# uds-csi, authz, l4-routes, eastwest-quic, first-install.
+# uds-csi, authz, authz-bad-policy, l4-routes, eastwest-quic, first-install.
 #
 # Consolidates the former conformance.yaml, waypoint-e2e.yaml, and
 # replicator-e2e.yaml into ONE workflow: a single bazel `build` job builds the
@@ -40,7 +40,7 @@ on:
         description: "Run a single job (debugging)"
         type: choice
         default: all
-        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, l4-routes, eastwest-quic, first-install]
+        options: [all, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, authz-bad-policy, l4-routes, eastwest-quic, first-install]
   schedule:
     # Nightly at 04:17 UTC (off the hour to avoid contention).
     - cron: "17 4 * * *"
@@ -411,6 +411,55 @@ jobs:
             kubectl --context kind-authz -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=300 > /tmp/authz-logs/agent.log 2>&1 || true
             kubectl --context kind-authz get httpfilters -A -o yaml > /tmp/authz-logs/httpfilters.yaml 2>&1 || true
 
+  # --- An OPA policy that does not compile, when it is applied and at the
+  # restarts that follow (#1447, #1448). ONE kind cluster of its own (the steps
+  # are destructive), brought up exactly like `authz` (e2e/authz.sh is sourced).
+  # Asserts that a deny-all policy is a decision and not a failure; that a
+  # policy that does not parse leaves the last good one deciding on a running
+  # sidecar, with the proxy pod still Ready, AND is reported by the chart's
+  # policy check (the Deployment aether-opa-policy-check is unavailable and its
+  # pod's Unhealthy event carries the compile error); that a stopped
+  # `authz` container then crash-loops while `proxy` runs on and every check
+  # fails closed (403 under DENY); that a proxy roll stalls with the old pod
+  # still deciding; that deleting the old pod leaves the node with no proxy
+  # after the successor wait (the behaviour today, pinned until the #1447
+  # decision); and that a valid policy recovers the node with no manual step.
+  # Harness: e2e/authz-bad-policy.sh.
+  authz-bad-policy:
+    needs: build
+    if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'authz-bad-policy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Checkout only; the images arrive as an artifact of this same run.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run e2e/authz-bad-policy.sh
+        uses: ./.github/actions/run-e2e-script
+        with:
+          script: authz-bad-policy.sh
+          skip-build-var: AUTHZ_SKIP_BUILD
+          verify-description: Verify what an OPA policy that does not compile does when applied, at a sidecar restart, at a roll and at a pod replacement, and the recovery
+          soft: ${{ github.event.inputs.soft == 'true' }}
+          logs-dir: /tmp/authz-bad-policy-logs
+          artifact-name: authz-bad-policy-e2e-logs
+          diagnostics: |
+            mkdir -p /tmp/authz-bad-policy-logs
+            kubectl --context kind-authz-bad get pods -A -o wide 2>&1 | tee /tmp/authz-bad-policy-logs/pods.txt || true
+            kind export logs /tmp/authz-bad-policy-logs/kind --name authz-bad || true
+            kubectl --context kind-authz-bad -n aether-system get pods -l app.kubernetes.io/component=proxy -o yaml > /tmp/authz-bad-policy-logs/proxy-pods.yaml 2>&1 || true
+            kubectl --context kind-authz-bad -n aether-system get ds aether-proxy -o yaml > /tmp/authz-bad-policy-logs/proxy-ds.yaml 2>&1 || true
+            kubectl --context kind-authz-bad -n aether-system get deploy,rs,pods -l app.kubernetes.io/component=opa-policy-check -o yaml > /tmp/authz-bad-policy-logs/policy-check.yaml 2>&1 || true
+            kubectl --context kind-authz-bad -n aether-system get events --sort-by=.lastTimestamp > /tmp/authz-bad-policy-logs/events.txt 2>&1 || true
+            kubectl --context kind-authz-bad -n aether-system get configmap aether-opa-policy -o yaml > /tmp/authz-bad-policy-logs/opa-policy.yaml 2>&1 || true
+            kubectl --context kind-authz-bad -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=300 --prefix > /tmp/authz-bad-policy-logs/proxy.log 2>&1 || true
+            kubectl --context kind-authz-bad -n aether-system logs -l app.kubernetes.io/component=proxy -c authz --tail=300 --prefix > /tmp/authz-bad-policy-logs/authz.log 2>&1 || true
+            kubectl --context kind-authz-bad -n aether-system logs -l app.kubernetes.io/component=proxy -c authz --previous --tail=100 --prefix > /tmp/authz-bad-policy-logs/authz-previous.log 2>&1 || true
+            kubectl --context kind-authz-bad -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=300 > /tmp/authz-bad-policy-logs/agent.log 2>&1 || true
+
   # --- Gateway API L4 routes on the mesh capture path (proposal 018 Phase 3b).
   #
   # All three route types (issue #868). TCPRoute: a weighted 75/25 split and
@@ -580,7 +629,7 @@ jobs:
   # rather than filing per night — three duplicate issues is how people learn to
   # ignore them, which is the very failure mode this exists to prevent.
   report-failure:
-    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, l4-routes, eastwest-quic, first-install]
+    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds, uds-csi, authz, authz-bad-policy, l4-routes, eastwest-quic, first-install]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -611,6 +660,7 @@ jobs:
             uds=${{ needs.uds.result }}
             uds-csi=${{ needs.uds-csi.result }}
             authz=${{ needs.authz.result }}
+            authz-bad-policy=${{ needs.authz-bad-policy.result }}
             l4-routes=${{ needs.l4-routes.result }}
             eastwest-quic=${{ needs.eastwest-quic.result }}
             first-install=${{ needs.first-install.result }}

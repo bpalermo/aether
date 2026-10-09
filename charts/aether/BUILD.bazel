@@ -359,6 +359,205 @@ helm_template_value_ignored_test(
     templates = ["templates/agent-proxy-daemonset.yaml"],
 )
 
+# #1447: a policy that does not compile is not loaded by a running sidecar
+# (it keeps the last good one) and OPA reports that nowhere but in a log line
+# at level info: no metric, no health endpoint, no status. But the same file
+# stops a sidecar from STARTING, so from then on the node's next sidecar or
+# pod restart is an outage. With the preset on, the chart therefore renders a
+# one-pod Deployment that runs the sidecar's image with the same ConfigMap and
+# `opa check` on the mounted file as its readiness probe: a policy that does
+# not compile shows as that Deployment being unavailable, with the compile
+# error in the pod's Unhealthy event.
+OPA_POLICY_CHECK_TEMPLATE = "aether/templates/agent-proxy-opa-policy-check.yaml"
+
+OPA_POLICY_CHECK_PROBE = "\\n          readinessProbe:\\n            exec:\\n              command:\\n                - \"/opa\"\\n                - \"check\"\\n                - \"/policy/policy.rego\"\\n            periodSeconds: %s\\n            timeoutSeconds: %s\\n            failureThreshold: %s\\n          volumeMounts:\\n"
+
+helm_template_test(
+    name = "aether_opa_policy_check_test",
+    chart = ":aether",
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    template_patterns = {
+        OPA_POLICY_CHECK_TEMPLATE: [
+            "\\nkind: Deployment\\nmetadata:\\n  name: \\S+-opa-policy-check\\n",
+            # Recreate: every policy change is judged by a new pod, which mounts
+            # the ConfigMap as it is (a kept pod waits for the kubelet's sync).
+            "\\nspec:\\n  replicas: 1\\n(\\s+#.*\\n)*  strategy:\\n    type: Recreate\\n  selector:\\n",
+            # Its own component: nothing that selects proxy pods selects it.
+            "\\n      app.kubernetes.io/component: opa-policy-check\\n",
+            # The sidecar's image, idle: no policy argument, so the pod starts
+            # whatever the policy is.
+            "\\n        - name: check\\n          image: \"openpolicyagent/opa:[^\"]+\"\\n(\\s+#.*\\n)*          args:\\n            - \"run\"\\n            - \"--server\"\\n            - \"--skip-version-check\"\\n            - \"--addr=127\\.0\\.0\\.1:8181\"\\n          env:\\n",
+            "\\n            - name: GOMAXPROCS\\n              value: \"1\"\\n",
+            OPA_POLICY_CHECK_PROBE % ("10", "5", "1"),
+            # The whole ConfigMap volume, read-only, no subPath (the kubelet
+            # never updates a subPath mount).
+            "\\n            - name: opa-policy\\n              mountPath: /policy\\n              readOnly: true\\n          resources:\\n            limits:\\n              memory: 96Mi\\n            requests:\\n              cpu: 5m\\n              memory: 32Mi\\n",
+            "\\n        - name: opa-policy\\n          configMap:\\n            name: \\S+-opa-policy\\s*$",
+            "\\n      automountServiceAccountToken: false\\n",
+            "\\n      securityContext:\\n        runAsNonRoot: true\\n        seccompProfile:\\n          type: RuntimeDefault\\n",
+            "\\n            readOnlyRootFilesystem: true\\n            allowPrivilegeEscalation: false\\n            capabilities:\\n              drop: \\[\"ALL\"\\]\\n",
+        ],
+    },
+)
+
+# Readiness and nothing else: a restart fixes nothing, and no CPU limit.
+helm_template_absent_test(
+    name = "aether_opa_policy_check_no_liveness_no_cpu_limit_test",
+    absent = [
+        "livenessProbe:",
+        "startupProbe:",
+        "cpu: \"",
+        "subPath:",
+    ],
+    chart = ":aether",
+    control = "- name: check",
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+        "--show-only",
+        "templates/agent-proxy-opa-policy-check.yaml",
+    ],
+)
+
+# Its timings and resources are values; an emptied limit renders no limit
+# (aether.resources), and the image follows proxy.authzSidecar.opa.image, so
+# the check always runs the OPA the sidecars run.
+helm_template_test(
+    name = "aether_opa_policy_check_overrides_test",
+    chart = ":aether",
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+        "--set",
+        "proxy.authzSidecar.opa.image=registry.example/opa:1",
+        "--set",
+        "proxy.authzSidecar.opa.policyCheck.periodSeconds=30",
+        "--set",
+        "proxy.authzSidecar.opa.policyCheck.timeoutSeconds=3",
+        "--set",
+        "proxy.authzSidecar.opa.policyCheck.failureThreshold=2",
+        "--set",
+        "proxy.authzSidecar.opa.policyCheck.resources.limits.memory=",
+        "--set",
+        "proxy.authzSidecar.opa.policyCheck.resources.requests.cpu=20m",
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    template_patterns = {
+        OPA_POLICY_CHECK_TEMPLATE: [
+            "\\n        - name: check\\n          image: \"registry\\.example/opa:1\"\\n",
+            OPA_POLICY_CHECK_PROBE % ("30", "3", "2"),
+            "\\n          resources:\\n            requests:\\n              cpu: 20m\\n              memory: 32Mi\\n          securityContext:\\n",
+        ],
+    },
+)
+
+# The pod template follows the policy: a policy change replaces the check's
+# pod, which mounts the new ConfigMap at once, so `rollout status` and
+# `helm upgrade --wait` see the answer for the NEW policy. (The proxy pod
+# template still does not follow it:
+# aether_opa_policy_change_keeps_proxy_pod_test above.)
+helm_template_value_changes_test(
+    name = "aether_opa_policy_check_checksum_changes_test",
+    changed_opts = [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package y",
+    ],
+    chart = ":aether",
+    key = "checksum/opa-policy:",
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+        "--show-only",
+        "templates/agent-proxy-opa-policy-check.yaml",
+    ],
+)
+
+# The off switch: no such Deployment, and the rest of the preset still renders.
+helm_template_absent_test(
+    name = "aether_opa_policy_check_disabled_test",
+    absent = [
+        "opa-policy-check",
+        "\"check\"",
+    ],
+    chart = ":aether",
+    control = "- name: opa-policy",
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+        "--set",
+        "proxy.authzSidecar.opa.policyCheck.enabled=false",
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+)
+
+# Guard: a bring-your-own sidecar gets no check (the chart knows nothing about
+# its binary or its policy), and neither does the default install.
+helm_template_absent_test(
+    name = "aether_opa_policy_check_not_for_byo_sidecar_test",
+    absent = [
+        "opa-policy-check",
+        "\"check\"",
+        "openpolicyagent",
+    ],
+    chart = ":aether",
+    control = "image: \"example.com/authz:1.0\"",
+    opts = [
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set",
+        "proxy.authzSidecar.image.repository=example.com/authz",
+        "--set",
+        "proxy.authzSidecar.image.tag=1.0",
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+)
+
+helm_template_absent_test(
+    name = "aether_opa_policy_check_not_by_default_test",
+    absent = [
+        "opa-policy-check",
+        "openpolicyagent",
+    ],
+    chart = ":aether",
+    control = "name: aether-proxy",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+)
+
+# Guard: the check is NOT a probe of the sidecar, and the preset renders no
+# readiness or liveness probe there. During a roll the DaemonSet controller
+# deletes a NotReady old pod as soon as its replacement exists; with `opa
+# check` as the sidecar's readiness probe, a bad policy followed by a proxy
+# roll deleted the serving pod while its successor crash-looped (measured on
+# kind, #1447). And a liveness probe would restart the sidecar into the file
+# it cannot start with. The pattern requires the startup probe to be followed
+# directly by the mounts.
+helm_template_test(
+    name = "aether_opa_sidecar_no_readiness_or_liveness_probe_test",
+    chart = ":aether",
+    opts = OPA_ON + [
+        "--set-string",
+        "proxy.authzSidecar.opa.policy=package x",
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "- \"--unix-socket=/run/aether/authz/authz\\.sock\"\\n\\s+periodSeconds: 1\\n\\s+timeoutSeconds: 1\\n\\s+failureThreshold: 120\\n\\s+volumeMounts:\\n\\s+- name: authz-socket\\n",
+        ],
+    },
+)
+
 # Off (the default): no annotation at all on the proxy pod template, and no
 # OPA flag, so the default render is unchanged.
 helm_template_absent_test(

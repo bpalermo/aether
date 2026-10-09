@@ -662,6 +662,33 @@ app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
 {{- end -}}
 
+{{/* ------------------------------------------- OPA policy check (#1447) */}}
+{{/*
+Its own name and component, so that no selector of the proxy DaemonSet (or of
+anything that lists proxy pods by app.kubernetes.io/component=proxy) matches
+the check's pod.
+*/}}
+{{- define "aether.opaPolicyCheck.fullname" -}}
+{{- printf "%s-opa-policy-check" (include "aether.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- define "aether.opaPolicyCheck.selectorLabels" -}}
+app.kubernetes.io/name: aether-opa-policy-check
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: opa-policy-check
+{{- end -}}
+{{- define "aether.opaPolicyCheck.podLabels" -}}
+{{ include "aether.opaPolicyCheck.selectorLabels" . }}
+app.kubernetes.io/part-of: aether
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+{{- define "aether.opaPolicyCheck.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.opaPolicyCheck.podLabels" . }}
+{{- with .Chart.AppVersion }}
+app.kubernetes.io/version: {{ . | quote }}
+{{- end }}
+{{- end -}}
+
 {{/* -------------------------------------------------------------- registrar */}}
 {{- define "aether.registrar.fullname" -}}
 {{- printf "%s-registrar" (include "aether.fullname" .) | trunc 63 | trimSuffix "-" -}}
