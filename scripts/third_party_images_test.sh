@@ -223,6 +223,15 @@ mutate "JSON in a kubectl --overrides string" e2e/run.sh "kubectl run r --overri
 	"e2e/run.sh:12: x/y:latest is pinned by tag only"
 mutate "--image=\"<tag>\", quoted" e2e/run.sh 'kubectl run s --image="x/y:latest"' \
 	"e2e/run.sh:12: x/y:latest is pinned by tag only"
+mutate "YAML anchor before the value" e2e/sub/pod.yaml '    image: &probe x/y:latest' \
+	"e2e/sub/pod.yaml:1: x/y:latest is pinned by tag only"
+mutate "YAML tag and anchor before the value" e2e/sub/pod.yaml '  - image: !!str &probe "x/y:latest"' \
+	"e2e/sub/pod.yaml:1: x/y:latest is pinned by tag only"
+mutate "YAML anchor in a flow mapping" e2e/sub/pod.yaml '  containers: [{name: p, image: &probe x/y:latest}]' \
+	"e2e/sub/pod.yaml:1: x/y:latest is pinned by tag only"
+# An alias is a value written somewhere this scan cannot follow: refused.
+mutate "YAML alias as the image" e2e/sub/pod.yaml '    image: *probe' \
+	"e2e/sub/pod.yaml:1: *probe names no tag and no digest"
 
 # The same spellings pass when pinned and listed, and prose stays prose: an
 # unquoted `image:` in mid-line with no `{` before it, and a block scalar's
@@ -236,6 +245,7 @@ spec:
     - image: >-
         a/b:1.0@$D1
     - image: a/b:1.0@$D1 # the probe
+    - image: &anchored a/b:1.0@$D1
   description: no tag, image: latest is what a reader would write
   note: {text: "see the image: line", other: 1}
   image: |
@@ -243,7 +253,7 @@ spec:
 EOF
 echo 'err "one, two, image: missing"' >>"$T/e2e/run.sh"
 run_check "$T"
-if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 8 image reference(s) in "* ]]; then
+if [ "$RC" -eq 0 ] && [[ "$OUT" == "OK: 9 image reference(s) in "* ]]; then
 	ok "flow mappings, block scalars and trailing comments pass when pinned; prose is not read"
 else
 	bad "pinned flow/block spellings: exit $RC"$'\n'"$OUT"

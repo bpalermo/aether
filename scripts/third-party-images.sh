@@ -167,7 +167,9 @@ is_skipped() {
 #   1. the value after an `image` key or flag, in any of the spellings in use:
 #      YAML `image: x` (a block key, a list item, with a trailing comment, in
 #      a flow mapping `[{name: p, image: x}]`, as a block scalar `image: >-`
-#      with the value on the next line), JSON `"image": "x"` (also inside a
+#      with the value on the next line, behind an anchor or a tag
+#      `image: &a x`; an alias `image: *a` is refused, since its value is
+#      written where the scan cannot follow), JSON `"image": "x"` (also inside a
 #      `--overrides='{...}'` string), `--image=x` / `--image x`, a shell
 #      `FOO_IMAGE="x"` or `FOO_IMAGE="${FOO_IMAGE:-x}"`, Go `Image: "x"` and
 #      `Image = "x"`;
@@ -249,6 +251,17 @@ extract_references() { # <names file>; file list on stdin
 					break
 				}
 				ref = rest
+				if (key ~ /:[ \t]*$/ && (key_opens_line || in_flow)) {
+					# YAML node properties stand before the value and are not it:
+					# `image: &probe x`, `image: !!str x`.
+					while (match(ref, /^[&!][^ \t]*[ \t]+/)) ref = substr(ref, RLENGTH + 1)
+					# An alias (`image: *probe`) is a value written where this scan
+					# cannot follow it: emitted as it stands, which no pin matches.
+					if (match(ref, /^\*[A-Za-z0-9_.-]+/)) {
+						emit(substr(ref, 1, RLENGTH))
+						continue
+					}
+				}
 				quoted = sub(/^["\047]/, "", ref)
 				sub(/^\$\{[A-Za-z_][A-Za-z0-9_]*:-/, "", ref)
 				if (!match(ref, /^[^ \t"\047}),;]+/)) continue
