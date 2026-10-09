@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"aethermesh.dev/common/telemetry/servicename"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
@@ -98,11 +99,10 @@ func SetupTelemetry(ctx context.Context, otlpEndpoint, serviceVersion string) (*
 func newTelemetryResource(ctx context.Context, serviceVersion string) (*resource.Resource, error) {
 	res, err := resource.New(
 		ctx,
-		resource.WithAttributes(
-			semconv.ServiceName(telemetryServiceName),
-			semconv.ServiceVersion(serviceVersion),
-		),
+		resource.WithAttributes(semconv.ServiceVersion(serviceVersion)),
 		resource.WithFromEnv(),
+		// After WithFromEnv, so OTEL_RESOURCE_ATTRIBUTES cannot rename the component (#1562).
+		servicename.Option(telemetryServiceName),
 		resource.WithTelemetrySDK(),
 		resource.WithProcess(),
 		resource.WithHost(),
