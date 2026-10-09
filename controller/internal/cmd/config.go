@@ -89,6 +89,9 @@ func NewControllerConfig() *ControllerConfig {
 			MetricsBindAddress:     ":8080",
 			LeaderElection:         true,
 			LeaderElectionID:       "aether-controller.config.aether.io",
+			// The controller is a Deployment on the pod network: its hostname is
+			// its pod name, which k8s.pod.name already carries (#1596).
+			WithoutHostName: true,
 		},
 		MeshConfigMapName:       meshconfig.DefaultMeshConfigMapName,
 		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
