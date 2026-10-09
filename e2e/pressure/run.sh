@@ -9,8 +9,31 @@
 #
 # Read README.md first. NEVER run this during a soak.
 #
-#   bash e2e/pressure/run.sh --node main-worker-03
-#   bash e2e/pressure/run.sh --node main-worker-03 --dry-run   # resolve + print, touch nothing
+#   bash e2e/pressure/run.sh --node <node> --dry-run           # resolve + print, touch nothing
+#   bash e2e/pressure/run.sh --node <node> --no-soak-running
+#
+# WHAT THE SOAK GUARD CAN AND CANNOT KNOW (#1555). A soak is run by an external
+# soak harness, maintained outside this repository. What such a harness may read
+# from a mesh is written down in test/harnesscontract/external-harness.yaml, and
+# that contract names no identity for a load driver: the namespace, names and
+# labels of a harness's workloads are its own (the file's `not_contract`
+# section). So this script cannot detect a running soak, and does not claim to.
+# The guard is:
+#
+#   1. an acknowledgement the operator must give: --no-soak-running (or
+#      NO_SOAK_RUNNING=1). Without it a real run aborts. It is the operator's
+#      statement, not something the script verified.
+#   2. two best-effort refusals, which can only ever ADD a refusal:
+#        - SOAK_POD_SELECTOR, when set to the label selector the operator's
+#          harness puts on its pods, refuses while any pod in any namespace
+#          carries it. Unset, the check is skipped, and the script says so.
+#        - a DaemonSet of aether-system (AGENT_NS) that is mid-roll refuses the
+#          run: a soak rolls them, and so does an upgrade, and a pressure run
+#          on top of either cannot be attributed. A soak between two rolls
+#          passes this.
+#
+# Neither looks at the processes of the machine the script runs on: a harness
+# need not run there.
 #
 # Exit codes: 0 PASS, 1 FAIL, 2 INCONCLUSIVE (pressure not reached, or lapsed
 # mid-test, or aborted on a safety ceiling). Every exit path deletes the Job.
@@ -39,6 +62,13 @@ COLLECTOR_SELECTOR="${COLLECTOR_SELECTOR:-}"
 COLLECTOR_CONTAINER="${COLLECTOR_CONTAINER:-opentelemetry-collector}"
 COLLECTOR_METRICS_PORT="${COLLECTOR_METRICS_PORT:-8888}"
 EXPECT_CONTEXT="${EXPECT_CONTEXT:-talos-main}"
+
+# The soak guard (see the header). NO_SOAK_RUNNING=1 is the operator's
+# acknowledgement, the same as --no-soak-running. SOAK_POD_SELECTOR is empty on
+# purpose: the external-harness contract names no label of a load driver, so
+# any default here would be a guess that reads as a check.
+NO_SOAK_RUNNING="${NO_SOAK_RUNNING:-0}"
+SOAK_POD_SELECTOR="${SOAK_POD_SELECTOR:-}"
 
 # Where the collector's own numbers are read from:
 #   collector  — port-forward each replica's :8888/metrics (no scrape lag)
@@ -108,6 +138,10 @@ usage: $0 --node <node-name> [options]
   --dry-run              resolve GOMEMLIMIT, limits, thresholds and the metrics source,
                          print the plan and the current readings, then exit 0.
                          Applies no Job and touches no agent.
+  --no-soak-running      the operator's acknowledgement that no soak, release
+                         validation or other graded run is using this cluster
+                         (or NO_SOAK_RUNNING=1). Required for a real run: the
+                         script cannot detect a soak (see the header).
   --metrics-source S     auto|collector|prometheus (default ${METRICS_SOURCE})
   --pressure-timeout N   seconds to wait for shedding to engage (default ${PRESSURE_TIMEOUT})
   --ready-timeout N      seconds for the replacement agent pod to become Ready (default ${AGENT_READY_TIMEOUT})
@@ -138,6 +172,10 @@ parse_args() {
 			;;
 		--dry-run)
 			DRY_RUN=1
+			shift
+			;;
+		--no-soak-running)
+			NO_SOAK_RUNNING=1
 			shift
 			;;
 		--metrics-source)
@@ -469,16 +507,50 @@ preflight_cluster() {
 	log "context=${ctx} node=${NODE} collector=${ready}/${spec} ready"
 }
 
+# Names the DaemonSets of ${AGENT_NS} that are mid-roll, one per line, from
+# `kubectl get ds -o json` on stdin. Mid-roll: the controller has not observed
+# the current spec, or not every scheduled pod is updated, or a pod is
+# unavailable.
+daemonsets_mid_roll() {
+	jq -r '.items[]
+		| select((.metadata.generation // 0) != (.status.observedGeneration // 0)
+			or (.status.updatedNumberScheduled // 0) < (.status.desiredNumberScheduled // 0)
+			or (.status.numberUnavailable // 0) > 0)
+		| .metadata.name'
+}
+
 preflight_no_soak() {
 	# A soak grades on cumulative prober counters exported through this very
-	# collector. Shedding it mid-run destroys the SLI (gotchas 3 and 4 of the
-	# README of the soak harness, which is maintained outside this repository).
-	if kubectl -n aether-test get ds k6-soak-loader >/dev/null 2>&1; then
-		die "k6-soak-loader is deployed — a soak looks active. NEVER run this during a soak."
+	# collector. Shedding it mid-run destroys the SLI. The script cannot detect
+	# a soak (header, "WHAT THE SOAK GUARD CAN AND CANNOT KNOW"): the operator
+	# says there is none, and the two checks below can only add a refusal. Each
+	# fails closed: a list that could not be read is not an empty list.
+	local pods ds rolling
+	if [ "$NO_SOAK_RUNNING" != 1 ]; then
+		if [ "$DRY_RUN" = 1 ]; then
+			log "WARN: --no-soak-running not given. A real run needs it: this script cannot detect a soak."
+		else
+			die "refusing to run without --no-soak-running (or NO_SOAK_RUNNING=1). This script cannot detect a soak: confirm that no soak, release validation or other graded run is using this cluster, then say so. NEVER run this during a soak."
+		fi
 	fi
-	if pgrep -f 'soak/churn\.sh' >/dev/null 2>&1; then
-		die "a churn.sh driver is running on this workstation — a soak looks active."
+	if [ -n "$SOAK_POD_SELECTOR" ]; then
+		pods=$(kubectl get pods --all-namespaces -l "$SOAK_POD_SELECTOR" -o name) ||
+			die "could not list pods by SOAK_POD_SELECTOR='${SOAK_POD_SELECTOR}' — not assuming there are none"
+		if [ -n "$pods" ]; then
+			die "$(printf '%s\n' "$pods" | wc -l | tr -d ' ') pod(s) carry SOAK_POD_SELECTOR='${SOAK_POD_SELECTOR}' — a soak looks active. NEVER run this during a soak."
+		fi
+		log "no pod carries SOAK_POD_SELECTOR='${SOAK_POD_SELECTOR}'"
+	else
+		log "SOAK_POD_SELECTOR is not set: no pod was looked for. The soak guard is the operator's acknowledgement and the roll check only."
 	fi
+	ds=$(kubectl -n "$AGENT_NS" get ds -o json) ||
+		die "could not list the DaemonSets of ${AGENT_NS} — not assuming none is mid-roll"
+	rolling=$(printf '%s' "$ds" | daemonsets_mid_roll) ||
+		die "could not read the DaemonSets of ${AGENT_NS} — not assuming none is mid-roll"
+	if [ -n "$rolling" ]; then
+		die "DaemonSet(s) mid-roll in ${AGENT_NS}: $(printf '%s' "$rolling" | tr '\n' ' ') — a soak's churn or an upgrade looks active. A pressure run on top of a roll cannot be attributed."
+	fi
+	log "no DaemonSet of ${AGENT_NS} is mid-roll"
 	if kubectl -n "$JOB_NS" get job "$JOB_NAME" >/dev/null 2>&1; then
 		die "job ${JOB_NS}/${JOB_NAME} already exists — delete it first"
 	fi
@@ -788,5 +860,11 @@ main() {
 
 	report_pass
 }
+
+# Sourced (preflight_test.sh calls the pre-flight functions one at a time):
+# define everything, run nothing.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+	return 0
+fi
 
 main "$@"
