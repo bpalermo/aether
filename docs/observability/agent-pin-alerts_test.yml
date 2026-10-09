@@ -146,7 +146,7 @@ tests:
               node: n1
               reason: tls_not_published
             exp_annotations:
-              summary: "aether-agent on n1 has published 3 mesh cluster(s) with no TLS for 5m (tls_not_published)"
+              summary: "aether-agent on n1 has 3 mesh cluster entr(ies) for which no TLS cluster is published, for 5m (tls_not_published)"
               description: "3 mesh cluster entries on n1 have no server-identity pin for reason tls_not_published, a state in which the agent publishes them with no TLS at all. It is expected for a moment when an agent starts and has now lasted 5 minutes. trust_domain_unknown: the agent has not learned its trust domain. tls_not_published: the agent has no SVID of its own, or the clusters are TCP floors that are not published (`tcp:` names in the agent's WARN line). Check the agent's identity readiness and its SPIRE Workload API socket first. tls_not_published entries have endpoints with no namespace metadata and become AetherMeshClusterUnpinned the moment TLS is published for them. See docs/runbook.md, \"The unpinned-cluster signal\"."
       - eval_time: 30m
         alertname: AetherMeshClusterUnpinned

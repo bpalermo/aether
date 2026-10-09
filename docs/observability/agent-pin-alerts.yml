@@ -122,7 +122,7 @@ groups:
           severity: warning
           component: aether-agent
         annotations:
-          summary: "{{ $labels.job }} on {{ $labels.node }} has published {{ $value }} mesh cluster(s) with no TLS for 5m ({{ $labels.reason }})"
+          summary: "{{ $labels.job }} on {{ $labels.node }} has {{ $value }} mesh cluster entr(ies) for which no TLS cluster is published, for 5m ({{ $labels.reason }})"
           description: >-
             {{ $value }} mesh cluster entries on {{ $labels.node }} have no
             server-identity pin for reason {{ $labels.reason }}, a state in
