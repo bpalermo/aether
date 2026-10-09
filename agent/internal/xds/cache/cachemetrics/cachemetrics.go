@@ -355,27 +355,8 @@ func (m *Metrics) registerActivityInstruments(meter metric.Meter) error {
 		metric.WithDescription("Mesh cluster entries in the node's current xDS snapshot that are meant to be mTLS: with a server-identity SAN pin (pin=pinned), or without one, by reason (pin=unpinned, reason=<cause>)")); err != nil {
 		return fmt.Errorf("tls clusters: %w", err)
 	}
-	pinned := attribute.NewSet(attrPin.String(PinPinned))
-	m.pinnedAttrs = metric.WithAttributeSet(pinned)
-	var unpinned [NumUnpinnedCauses]attribute.Set
-	for i, cause := range UnpinnedCauses {
-		unpinned[i] = attribute.NewSet(attrPin.String(PinUnpinned), attrReason.String(string(cause)))
-		m.unpinnedAttrs[i] = metric.WithAttributeSet(unpinned[i])
-	}
-	if m.ackedTLSClusters, err = meter.Int64ObservableGauge("aether.agent.xds.acked_tls_clusters",
-		metric.WithDescription("The count aether.agent.snapshot.tls_clusters gives, for the clusters the proxy has accepted, each at the version it last acknowledged or stated; absent until a proxy answers a cluster response, and while the pin state of a cluster it holds is not known"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			counts, known := m.ackedPins()
-			if !known {
-				return nil
-			}
-			o.Observe(int64(counts.Pinned), metric.WithAttributeSet(pinned))
-			for i, n := range counts.Unpinned {
-				o.Observe(int64(n), metric.WithAttributeSet(unpinned[i]))
-			}
-			return nil
-		})); err != nil {
-		return fmt.Errorf("acked tls clusters: %w", err)
+	if err := m.registerAckedTLSClusters(meter); err != nil {
+		return err
 	}
 	if m.upstreamsDeclared, err = meter.Int64Gauge("aether.agent.upstreams.declared",
 		metric.WithDescription("Distinct upstream services declared by local pods (config.aether.io/upstreams union)")); err != nil {
@@ -406,6 +387,35 @@ func (m *Metrics) registerActivityInstruments(meter metric.Meter) error {
 	if m.resourceVersions, err = meter.Int64Counter("aether.agent.snapshot.resource_versions",
 		metric.WithDescription("Per-resource delta xDS versions resolved by snapshot builds, by source (memo: reused for an unchanged proto; hashed: marshalled and hashed)")); err != nil {
 		return fmt.Errorf("resource versions: %w", err)
+	}
+	return nil
+}
+
+// registerAckedTLSClusters builds the attribute sets of the two pin gauges and
+// registers the acknowledged one, with the callback that observes it.
+func (m *Metrics) registerAckedTLSClusters(meter metric.Meter) error {
+	var err error
+	pinned := attribute.NewSet(attrPin.String(PinPinned))
+	m.pinnedAttrs = metric.WithAttributeSet(pinned)
+	var unpinned [NumUnpinnedCauses]attribute.Set
+	for i, cause := range UnpinnedCauses {
+		unpinned[i] = attribute.NewSet(attrPin.String(PinUnpinned), attrReason.String(string(cause)))
+		m.unpinnedAttrs[i] = metric.WithAttributeSet(unpinned[i])
+	}
+	if m.ackedTLSClusters, err = meter.Int64ObservableGauge("aether.agent.xds.acked_tls_clusters",
+		metric.WithDescription("The count aether.agent.snapshot.tls_clusters gives, for the clusters the proxy has accepted, each at the version it last acknowledged or stated; absent until a proxy answers a cluster response, and while the pin state of a cluster it holds is not known"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			counts, known := m.ackedPins()
+			if !known {
+				return nil
+			}
+			o.Observe(int64(counts.Pinned), metric.WithAttributeSet(pinned))
+			for i, n := range counts.Unpinned {
+				o.Observe(int64(n), metric.WithAttributeSet(unpinned[i]))
+			}
+			return nil
+		})); err != nil {
+		return fmt.Errorf("acked tls clusters: %w", err)
 	}
 	return nil
 }
