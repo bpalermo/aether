@@ -2,8 +2,9 @@
 # The decision of a workflow's aggregate job: the `ci` job of
 # .github/workflows/ci.yaml (#1460) and the `proxy` job of
 # .github/workflows/proxy.yml (#1489), two of the status checks the `main`
-# ruleset requires. Both run with `if: always()` so that they report on every
-# pull request, and both have legs that a path filter skips.
+# ruleset requires, and the `main` job of .github/workflows/main.yaml (#1501),
+# the run that follows every push to main. All three run with `if: always()`,
+# and all three have legs that a path filter or bazel-diff skips.
 #
 # It reads the `needs` context of that job as JSON and passes only when every
 # job ended the way the workflow's own conditions say it must. "Skipped" is an
@@ -29,6 +30,13 @@
 # `shell` and `test` must have succeeded; with `false` (a change outside the
 # proxy workspace) both must be skipped. It has no `diff` and no leg.
 #
+# For main.yaml there is no `changes`: `diff` runs on every push and must have
+# succeeded and set has_any, has_unit and has_integration to `true` or `false`
+# (it has no e2e leg, so no has_e2e); `test` must then have succeeded when
+# has_any says `true` and be skipped when it says `false`. Nothing requires
+# that run, so a failure is a red run on main, not a blocked merge: without it
+# a `diff` that wrote nothing left a green run that had tested nothing.
+#
 # The rules below repeat the `if:` of each job in the workflow.
 # //scripts:ci_gate_test holds the two together: the job list, the `needs` of
 # the aggregate job and every `if:` are compared with each workflow file.
@@ -37,8 +45,8 @@
 #   NEEDS_JSON  `${{ toJSON(needs) }}` of the aggregate job
 #   JQ          jq binary (default: jq)
 #
-# Usage: ci-gate.sh [ci|proxy]          decide; exit 0 to pass, 1 to fail
-#        ci-gate.sh [ci|proxy] --jobs   print the jobs the rules cover, one per line
+# Usage: ci-gate.sh [ci|proxy|main]          decide; exit 0 to pass, 1 to fail
+#        ci-gate.sh [ci|proxy|main] --jobs   print the jobs the rules cover, one per line
 # The workflow defaults to ci. A name with no table below is an error, never
 # another workflow's rules.
 # shellcheck disable=SC2016 # single-quoted $names here are jq variables
@@ -56,29 +64,46 @@ case "${1:-}" in
 esac
 
 # One table per workflow. GATE is also the name of its aggregate job.
-#   ALWAYS       jobs with no condition: they run on every pull request
-#   SWITCH       the output of `changes` the other jobs are conditional on
+#   EVERY        what the workflow runs on, for the log
+#   ALWAYS       jobs with no condition: they run every time
+#   SWITCH       the output of `changes` the other jobs are conditional on;
+#                empty when the workflow has no `changes` and nothing to switch
 #   SCOPE        what that output says was touched, for the log
 #   CONDITIONAL  jobs with `if: needs.changes.outputs.<SWITCH> == 'true'`
-#   LEGS         jobs with that condition and an output of `diff`; which
+#   LEGS         jobs with (that condition and) an output of `diff`; which
 #                output is in the jq program below
+#   OUTPUTS      the outputs `diff` must have set to `true` or `false`; the
+#                first one is has_any
 case "$GATE" in
 ci)
+	EVERY="pull request"
 	ALWAYS="changes envoy-api-parity proxy-pin actionlint"
 	SWITCH=control_plane
 	SCOPE="the control plane"
 	CONDITIONAL="diff chart-version-bump deps-audit shell format"
 	LEGS="test race netns integration e2e"
+	OUTPUTS="has_any has_unit has_integration has_e2e"
 	;;
 proxy)
+	EVERY="pull request"
 	ALWAYS="changes"
 	SWITCH=proxy
 	SCOPE="the proxy workspace"
 	CONDITIONAL="shell test"
 	LEGS=""
+	OUTPUTS=""
+	;;
+main)
+	EVERY="push to main"
+	ALWAYS="diff"
+	SWITCH=""
+	SCOPE=""
+	CONDITIONAL=""
+	LEGS="test"
+	OUTPUTS="has_any has_unit has_integration"
 	;;
 *)
-	echo "::error::ci-gate: no rules for a workflow named '${GATE}' (known: ci, proxy)"
+	echo "::error::ci-gate: no rules for a workflow named '${GATE}' (known: ci, proxy, main)"
 	exit 1
 	;;
 esac
@@ -98,6 +123,7 @@ def flag: if . == "true" then true elif . == "false" then false else null end;
 ($always | words) as $always
 | ($conditional | words) as $cp_jobs
 | ($legs | words) as $legs
+| ($outputs | words) as $outs
 | ($always + $cp_jobs + $legs) as $known
 | if type != "object" then
     {errors: ["the needs context is not a JSON object"], notes: []}
@@ -106,18 +132,17 @@ def flag: if . == "true" then true elif . == "false" then false else null end;
     | ($known - ($n | keys)) as $missing
     | (($n | keys) - $known) as $extra
     | [$known[] | select($n[.] != null) | {job: ., result: $n[.].result}] as $seen
+    | ($switch != "") as $switched
     | ($n.changes.outputs[$switch]?) as $said
-    | ($said | flag) as $cp
-    | ({
-        has_any: ($n.diff.outputs.has_any? | flag),
-        has_unit: ($n.diff.outputs.has_unit? | flag),
-        has_integration: ($n.diff.outputs.has_integration? | flag),
-        has_e2e: ($n.diff.outputs.has_e2e? | flag)
-      }) as $has
+    # With no `changes` job nothing is switched off: the jobs always had to run.
+    | (if $switched then $said | flag else true end) as $cp
+    | ([$outs[] | {key: ., value: ($n.diff.outputs[.]? | flag)}] | from_entries) as $has
     | ($has | to_entries | map(select(.value == null) | .key)) as $unset
+    | ([$outs[1:][] | select($has[.])] | length > 0) as $has_test
     | (($legs | length) > 0) as $has_legs
     | ($cp == true and $n.diff.result? == "success" and ($unset | length) == 0) as $decided
-    # Which legs must have run. Each line is the `if:` of that job in ci.yaml.
+    # Which legs must have run. Each line is the `if:` of that job in ci.yaml;
+    # main.yaml has the first one only.
     | ({
         test: $has.has_any,
         race: ($has.has_unit or $has.has_integration),
@@ -134,7 +159,7 @@ def flag: if . == "true" then true elif . == "false" then false else null end;
           + [$seen[] | select(.result == "failure" or .result == "cancelled")
               | "job \(.job) ended as \(.result)"]
           + [$seen[] | select(.result == "skipped") | select(.job as $j | $always | index($j))
-              | "job \(.job) was skipped, and it has no condition: it runs on every pull request"]
+              | "job \(.job) was skipped, and it has no condition: it runs on every \($every)"]
           + (if $n.changes.result? == "success" and $cp == null then
                ["job changes succeeded and its output \($switch) is \($said | shown), not \"true\" or \"false\": nothing says whether the other jobs had to run"]
              else [] end)
@@ -149,8 +174,8 @@ def flag: if . == "true" then true elif . == "false" then false else null end;
           + (if $cp == true and $n.diff.result? == "success" then
                [$unset[] | "job diff succeeded and its output \(.) is \($n.diff.outputs[.]? | shown), not \"true\" or \"false\": a leg skipped on it tested nothing, and nothing says there was nothing to test"]
              else [] end)
-          + (if $decided and $has.has_any == false and ($has.has_unit or $has.has_integration or $has.has_e2e) then
-               ["job diff says has_any=false and has_unit=\($has.has_unit) has_integration=\($has.has_integration) has_e2e=\($has.has_e2e): a test cannot be impacted when no target is"]
+          + (if $decided and $has.has_any == false and $has_test then
+               ["job diff says \([$outs[] | "\(.)=\($has[.])"] | join(" ")): a test cannot be impacted when no target is"]
              else [] end)
           + (if $decided then
                [$seen[] | select(.job as $j | $legs | index($j)) | . as $s
@@ -163,16 +188,16 @@ def flag: if . == "true" then true elif . == "false" then false else null end;
         ),
         notes: (
           [$seen[] | "\(.job): \(.result // "not set")"]
-          + ["changes: \($switch)=\($said | shown)"]
+          + (if $switched then ["changes: \($switch)=\($said | shown)"] else [] end)
           + (if $has_legs then
-               [$has | keys_unsorted[] as $k | "diff: \($k)=\($n.diff.outputs[$k]? | shown)"]
+               [$outs[] as $k | "diff: \($k)=\($n.diff.outputs[$k]? | shown)"]
              else [] end)
           + (if $cp == false then
                ["decision: \($scope) is untouched (changes wrote \($switch)=false); every other job is skipped by design"]
              elif $cp == true and ($has_legs | not) then
                ["decision: \($scope) changed (changes wrote \($switch)=true); had to run: \($cp_jobs | join(" "))"]
              elif $decided and ($has | [.[]] | any | not) then
-               ["decision: nothing impacted (diff wrote false to has_any, has_unit, has_integration and has_e2e); the test legs are skipped by design"]
+               ["decision: nothing impacted (diff wrote false to \($outs[:-1] | join(", ")) and \($outs[-1])); the test legs are skipped by design"]
              elif $decided then
                ["decision: impacted; had to run: \([$legs[] | select($want[.])] | join(" "))"]
              else
@@ -195,8 +220,8 @@ printf '%s\n' "$NEEDS_JSON"
 echo "::endgroup::"
 
 if ! verdict="$(printf '%s' "$NEEDS_JSON" | "$JQ" -c \
-	--arg gate "$GATE" --arg switch "$SWITCH" --arg scope "$SCOPE" \
-	--arg always "$ALWAYS" --arg conditional "$CONDITIONAL" --arg legs "$LEGS" \
+	--arg gate "$GATE" --arg switch "$SWITCH" --arg scope "$SCOPE" --arg every "$EVERY" \
+	--arg always "$ALWAYS" --arg conditional "$CONDITIONAL" --arg legs "$LEGS" --arg outputs "$OUTPUTS" \
 	"$DECIDE")" || [ -z "$verdict" ]; then
 	echo "::error::ci-gate: NEEDS_JSON could not be read as the needs context (jq failed)"
 	exit 1

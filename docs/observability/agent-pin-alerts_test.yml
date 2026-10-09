@@ -1,10 +1,10 @@
-# promtool unit tests for agent-pin-alerts.yml:
+# promtool unit tests for agent-pin-alerts.yml. The unit tests run them with
+# the promtool the build pins:
 #
-#   promtool test rules docs/observability/agent-pin-alerts_test.yml
+#   bazel test //:observability_rules_test
 #
-# This repository has no promtool in its build, so CI does not run this file
-# here; run it by hand after changing a rule, and copy it next to wherever the
-# rules are deployed from. Passes with promtool 3.5.0.
+# With a promtool of your own: `promtool test rules` on this file. Copy it next
+# to wherever the rules are deployed from.
 #
 # The agent pushes its gauges every 60 s, so every series below has one sample a
 # minute. `_` is a missing sample; a series that is not listed does not exist.
@@ -152,9 +152,10 @@ tests:
         alertname: AetherMeshClusterUnpinned
         exp_alerts: []
 
-  # #1483: an agent restarted against a proxy that is already in sync. It is
-  # owed no cluster response, so the acknowledged gauge has NO series. The
-  # divergence rule must not read absence as anything, whatever is published.
+  # The acknowledged gauge has NO series: no proxy has acknowledged a cluster
+  # response to this agent process (no proxy connected, or an agent from before
+  # #1483 restarted against a proxy that was already in sync). The divergence
+  # rule must not read absence as anything, whatever is published.
   - name: an absent acknowledged gauge never fires the divergence rule
     interval: 1m
     input_series:
@@ -166,6 +167,62 @@ tests:
         values: '2x40'
     alert_rule_test:
       - eval_time: 40m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+
+  # #1483: an agent restarted at minute 10 against a proxy that is in sync. The
+  # old process's acknowledged samples end, the new one's begin a minute later
+  # (the proxy reconnected, stated the clusters it holds, and acknowledged the
+  # agent's empty answer), with the same values as what is published. Quiet
+  # throughout, including for the two unpinned clusters that are published
+  # and held alike: those belong to the critical rule.
+  - name: an agent restart against a proxy in sync is quiet
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '2x9 _ 2x30'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="trust_domain_unknown"}'
+        values: '0x9 _ 0x30'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '2x9 _ 2x30'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="trust_domain_unknown"}'
+        values: '0x9 _ 0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+
+  # The known gap, stated as a test so nobody reads the rule as covering it:
+  # the proxy rejects the update that pins two clusters (the rule fires at
+  # minute 17), and the AGENT restarts at minute 20. The proxy tells the new
+  # agent process the clusters it held before the rejected update, is sent the
+  # update again and rejects it again, so the new process has no acknowledged
+  # state: the series ends, and the alert resolves once its last sample is out
+  # of the 5 m lookback, with the proxy unchanged. What is left is the NACK
+  # counter (one increment for each rejected response) and the agent's log line.
+  - name: an agent restart while the proxy rejects cluster updates silences the divergence rule
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '2 2 0x40'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '2x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-agent
+              node: n1
+            exp_annotations:
+              summary: "the proxy on n1 last acknowledged 2 unpinned mesh cluster(s) that aether-agent no longer publishes"
+              description: "The last cluster update the proxy on n1 acknowledged had 2 more mesh cluster entries without a server-identity pin, counted reason by reason, than the agent's current snapshot. The proxy has not accepted the newer clusters for 15 minutes. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error), and `proxy acknowledged mesh clusters with no server-identity SAN pin` for the per-reason counts. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
+      - eval_time: 30m
         alertname: AetherProxyHoldsUnpinnedClusters
         exp_alerts: []
 
