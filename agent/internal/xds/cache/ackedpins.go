@@ -150,19 +150,24 @@ func (s *clusterAck) offer(version string, class pinClass) (heldChanged bool) {
 	return heldChanged
 }
 
-// classOfVersion is the class on record for version: the one it was sent with
-// when it is in flight, else the one it was published with.
+// classOfVersion is the class on record for version: the one a recent snapshot
+// published it with, else the one it was sent with when it is in flight.
+//
+// Published first, because a later snapshot can count the same bytes under
+// another reason (offer), and a cluster must be counted alike on both gauges:
+// the class kept with a sent version is for a version no snapshot remembers
+// any more, not a second opinion about one it does.
 func (s *clusterAck) classOfVersion(version string) (pinClass, bool) {
 	if version == "" {
 		return pinClassNone, false
 	}
-	for _, o := range s.sent {
-		if o.version == version && o.known {
+	for _, o := range s.offered {
+		if o.version == version {
 			return o.class, true
 		}
 	}
-	for _, o := range s.offered {
-		if o.version == version {
+	for _, o := range s.sent {
+		if o.version == version && o.known {
 			return o.class, true
 		}
 	}

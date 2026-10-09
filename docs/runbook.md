@@ -5856,8 +5856,13 @@ What follows from that:
   the **first** cluster response of a stream is read with the statement. A later empty
   one carries no cluster and says nothing about any.
 - **Absent is "not known", not zero.** Nothing is written until a proxy answers this
-  agent process: the node's proxy is down, or this agent is a surge-rolled standby that
-  does not serve xDS yet.
+  agent process for the first time: the node's proxy has not connected since the agent
+  started, or this agent is a surge-rolled standby that does not serve xDS yet.
+- **A sample is not a live connection.** Once the gauge has samples, a proxy stream that
+  drops, or a proxy that goes down, does not withdraw them: the agent keeps what the
+  proxy last accepted (Envoy keeps its clusters across a reconnect) and goes on
+  exporting it until the proxy answers again. The only thing that withdraws the gauge
+  is an unknown held version, below.
 - **A slow proxy loses nothing.** The agent keeps what it sent, version by version, until
   the proxy answers it or the stream ends, however many times the cluster is rebuilt in
   between. An ACK that arrives late is read against the version that was sent.

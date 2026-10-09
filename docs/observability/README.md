@@ -217,10 +217,14 @@ clusters its response carried and no other, so a cluster the proxy rejected stay
 it was through later ACKs. Since #1483 an agent that restarts against a proxy
 already in sync has its sample as soon as the proxy reconnects (the proxy states the
 clusters it holds and acknowledges the agent's empty answer). The gauge is still absent
-while no proxy is connected (a standby agent, a proxy that is down), and after a restart
+until a proxy has answered that agent process at all (a standby agent, a proxy that has
+not connected since the agent started), and after a restart
 for as long as the proxy rejects a cluster it holds an older version of (the new agent
 process cannot count a version it never published, and writes nothing rather than a
-count without it): the runbook's "Published is not held" has both.
+count without it): the runbook's "Published is not held" has both. Once the gauge has
+samples, a proxy stream that drops does not withdraw them: the last accepted state
+stays exported until the proxy answers again, so a sample is not proof of a live xDS
+connection.
 `AetherProxyHoldsUnpinnedClusters` compares two vectors, and a comparison
 returns nothing for a `(job, node)` that one side lacks, so that state is silent: the
 rule cannot fire on absence, and it does not need `absent()` or `or vector(0)` (either

@@ -162,7 +162,11 @@ groups:
       # proxy states the clusters it holds, and its answer to the agent's first
       # response is the gauge's first sample within about a second (#1483;
       # agents before it had no series until a cluster next changed). It is
-      # absent while no proxy is connected, and, the case this rule then
+      # absent until a proxy has answered this agent process at all (a
+      # standby, a proxy that never connected); once it has samples a stream
+      # that drops does not withdraw them, the last accepted state stays
+      # exported, so a sample is not proof of a live xDS connection. And it
+      # is absent, the case this rule then
       # MISSES (#1509), after an agent restart for as long as the proxy
       # rejects a cluster it holds an older version of: the new agent process
       # never published that version, cannot count it, and writes no gauge
@@ -208,7 +212,7 @@ groups:
           severity: warning
           component: aether-agent
         annotations:
-          summary: "the proxy on {{ $labels.node }} last acknowledged {{ $value }} unpinned mesh cluster(s) that {{ $labels.job }} no longer publishes"
+          summary: "the proxy on {{ $labels.node }} holds {{ $value }} unpinned mesh cluster(s) that {{ $labels.job }} no longer publishes"
           description: >-
             The clusters the proxy on {{ $labels.node }} has accepted include
             {{ $value }} more mesh clusters without a server-identity pin,

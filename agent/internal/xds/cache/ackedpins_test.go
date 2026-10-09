@@ -612,6 +612,29 @@ func TestAckedPinGaugeFollowsAReclassificationOfWhatTheProxyHolds(t *testing.T) 
 	assert.Equal(t, cachemetrics.PinCounts{Pinned: 1, Unpinned: [cachemetrics.NumUnpinnedCauses]int{0, 0, 1, 0}}, u.counts)
 }
 
+// TestAckedPinsReadALateAckWithTheClassOfNow: a build can count the very bytes
+// that are in flight under another reason before the proxy answers for them
+// (the tls_not_published promotion). The ACK that then arrives is of bytes the
+// newest snapshot still publishes, so it is counted as that snapshot counts
+// them, not as they were counted when they were sent: the two gauges must
+// agree about one cluster. The class kept with a sent version is for a version
+// no snapshot remembers any more.
+func TestAckedPinsReadALateAckWithTheClassOfNow(t *testing.T) {
+	var h ackedPins
+	notPublished := unpinnedClass(cachemetrics.CauseTLSNotPublished)
+	entries := []entryClass{{name: "a", class: notPublished}}
+	versions := map[string]string{"a": "ha"}
+	sent := []ack.Resource{{Name: "a", Version: "ha"}}
+
+	h.publish(entries, versions, false)
+	h.deliver(ack.Delivery{Resources: sent})
+	h.publish(entries, versions, true) // the same bytes, the gap from now on
+	u := h.accept(ack.Accepted{Added: sent})
+	h.deliver(ack.Delivery{Resources: sent, Ended: true})
+	require.True(t, u.report)
+	assert.Equal(t, cachemetrics.PinCounts{Unpinned: [cachemetrics.NumUnpinnedCauses]int{0, 0, 1, 0}}, u.counts)
+}
+
 // TestAckedPinsCountOnlyWhatAProxyCanHold: an entry with no cluster in the
 // snapshot (a TCP floor that is not captured) is published as an entry and can
 // never be acknowledged. It is in the published gauge and not in this one.
