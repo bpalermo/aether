@@ -513,24 +513,52 @@ wrote `false`:
 **A post-merge run that did not pass files an issue** (#1506):
 "main-post-merge: a commit on main failed its post-merge run", labelled `bug`
 and `ci`. One issue, reused: `main-post-merge-watch` (`main-watch.yaml`) runs
-when a post-merge run completes and records the commit, the run and the jobs
-that did not pass, in the issue body for the first failure and as a comment for
-each later one. The logic is `scripts/main-post-merge-watch.sh`.
+when a post-merge run completes and records the commit, the run, the jobs
+that did not pass, whether the run's gate passed and the command that re-runs
+it, in the issue body for the first failure and as a comment for each later
+one. The logic is `scripts/main-post-merge-watch.sh`.
 
 What the issue means: the commit it names is on `main` and its post-merge run
-did not validate it. Nothing was blocked. Until it is dealt with, a pull
-request whose impacted targets include the broken one fails `ci` for a reason
-that is not its own.
+is red. Nothing was blocked. Each entry says which of two things that is, from
+the run's gate, the `main` job:
+
+- **The `main` job did not succeed** (it failed, was cancelled or never ran):
+  the commit is not validated. If a target is broken, then until it is dealt
+  with a pull request whose impacted targets include it fails `ci` for a
+  reason that is not its own.
+- **The `main` job succeeded, and another job did not** (`refresh-pin-prs`,
+  which runs whatever the gate concluded): the commit was validated, and no
+  target on `main` is broken by it. Do not look for a regression. The run is
+  red all the same and the entry stays until that job passes: read that job,
+  and re-run it. What it missed is its own work (the open pin-bump pull
+  requests were not brought up to date for this push).
+
+A run that was `cancelled` with the gate green is not filed at all (the table
+below); one that `failure`d with the gate green is, as the second case.
 
 What to do, for each commit the issue names:
 
 1. Open the run it links and read the first failed step.
 2. No step ran, a registry or GitHub answered 5xx, a job never got a runner or
-   hit its time limit: re-run it, `gh run rerun <run id> --failed`. When the
-   re-run passes, the watcher comments that the commit passes now, and closes
-   the issue once no commit named on it is still failing.
+   hit its time limit: re-run it, with the command its entry gives. Which one
+   depends on the run's jobs:
+
+   | The jobs of the run | Command |
+   |---|---|
+   | every job that did not pass concluded `failure` | `gh run rerun <run id> --failed`: the failed jobs and the jobs that depend on them (the `main` job among them) |
+   | no job started (`startup_failure`, a run skipped as a whole), a job was `cancelled` or timed out, or the jobs could not be listed | `gh run rerun <run id>`: the whole run |
+
+   `--failed` asks GitHub to re-run "the failed jobs and their dependent
+   jobs". A run with no job that concluded `failure` gives it nothing to
+   select, so no new attempt is made and the issue never clears; whether it
+   takes a `cancelled` job is not documented, so the watcher does not rely on
+   it. The whole run is always enough. When the re-run passes, the watcher
+   comments that the commit passes now, and closes the issue once no commit
+   named on it is still failing.
 3. A real failure: fix it in a new pull request and write `Closes #<the issue>`
    in it. Re-running the old run cannot pass, since it tests the old commit.
+   The same holds for a `startup_failure` whose cause is the workflow file of
+   that commit: a re-run executes the commit's own workflow.
 
 **A green run of a later commit never closes the issue.** Each post-merge run
 tests only what its own merge reaches, and a merge that reaches nothing passes
@@ -543,7 +571,7 @@ and names its head.
 
 | The run ended | Filed? | Why |
 |---|---|---|
-| `failure`, `timed_out` | yes | the commit failed its run |
+| `failure`, `timed_out` | yes | the run is red: the commit failed it, or (`failure` with the `main` job green) another job did, and the entry says which |
 | `startup_failure` | yes | the workflow file on `main` is not valid: no job ran, and every later push fails the same way |
 | `skipped`, `action_required`, anything unknown | yes | nothing validated the commit |
 | `cancelled`, and the `main` job did not succeed | yes | `main.yaml` has no concurrency group, so no newer push cancels a run: a job hit its time limit or never got a runner, or someone cancelled it, and the commit is not validated |

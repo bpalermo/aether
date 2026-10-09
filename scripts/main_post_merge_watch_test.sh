@@ -320,6 +320,11 @@ check "A fails: the body records it for the next run to read" has "$body" "<!-- 
 check "A fails: A is main's head, so the body does not say main moved on" lacks "$body" "has moved on"
 check "A fails: the body says what closes the issue" has "$body" "docs/runbook.md"
 check "A fails: the body names the run that filed it" has "$body" "https://github.com/o/r/actions/runs/7"
+# What a reader does next. A job concluded `failure` and nothing else did not
+# pass: re-running the failed jobs is enough, and the command names this run.
+check "A fails: every job that did not pass failed, so the command re-runs the failed jobs" has "$body" '`gh run rerun 4242 --failed`'
+check "A fails: no command with a placeholder for the run id" lacks "$body" 'gh run rerun <'
+check "A fails: the gate failed, and the body says the commit is not validated" has "$body" 'The `main` job, the gate of this run, ended **failure**: the commit is not validated'
 
 # The same event again (a re-delivered event, a re-run of the watcher): nothing.
 step 0 "the same failure again" &&
@@ -336,6 +341,10 @@ step 0 "B fails while the issue is open" &&
 expect "B fails: one comment on it" "$(ncomments 101)" 1
 check "B fails: the comment names B and its conclusion" has "$(last_comment 101)" "ended **timed_out**"
 check "B fails: ... and records it" has "$(last_comment 101)" "<!-- main-post-merge-watch:failed:${B}:4343/1 -->"
+# `test` was cancelled: `--failed` selects the jobs that concluded `failure`,
+# and is not known to take a cancelled one. The whole run is re-run.
+check "B fails: a job was cancelled, so the command re-runs the whole run" has "$(last_comment 101)" '`gh run rerun 4343`'
+check "B fails: ... and --failed is not offered as the command" lacks "$(last_comment 101)" 'gh run rerun 4343 --failed'
 
 # C, a newer commit, is green. Each run tests only what its own merge reaches:
 # that says nothing about A or B.
@@ -416,7 +425,41 @@ for c in timed_out startup_failure skipped action_required stale; do
 	step 0 "a run that ended $c" &&
 		check "$c: filed, and the body says so" has "$(body_of 101)" "ended **${c}**"
 	check "$c: with no job to name, the body says no job reported" has "$(body_of 101)" "no job of the run reported a failure"
+	# No job failed, so `--failed` has nothing to re-run and the issue would
+	# never clear: the whole run.
+	check "$c: no failed job, so the command re-runs the whole run" has "$(body_of 101)" '`gh run rerun 4242`'
+	check "$c: ... and --failed is not offered as the command" lacks "$(body_of 101)" 'gh run rerun 4242 --failed'
+	check "$c: the gate did not run, and the body says the commit is not validated" has "$(body_of 101)" 'The `main` job, the gate of this run, did not run: the commit is not validated'
 done
+reset
+run "$A" startup_failure
+jobs
+step 0 "a run that never started" &&
+	check "startup_failure: the body says when a re-run cannot pass" has "$(body_of 101)" "a re-run repeats it"
+reset
+run "$A" skipped
+step 0 "a run that was skipped" &&
+	check "skipped: nothing about an invalid workflow file" lacks "$(body_of 101)" "a re-run repeats it"
+# The run is red, but its gate passed: an ancillary job failed. It is filed
+# all the same (the run did not pass), and the entry says the commit WAS
+# validated, so nobody looks for a broken target.
+reset
+run "$A" failure
+jobs diff=success test=success main=success refresh-pin-prs=failure
+step 0 "failed, but the gate passed (refresh-pin-prs failed)" &&
+	check "ancillary failure: filed" test "$(open_numbers)" = 101
+body="$(body_of 101)"
+check "ancillary failure: the body says the gate succeeded and the commit was validated" has "$body" 'The `main` job, the gate of this run, **succeeded**: the commit was validated'
+check "ancillary failure: ... and never that it is not validated" lacks "$body" "not validated"
+check "ancillary failure: the job that failed is named" has "$body" '`refresh-pin-prs`](https://github.com/o/r/actions/runs/4242/job/904) | failure |'
+check "ancillary failure: the command re-runs the failed job" has "$body" '`gh run rerun 4242 --failed`'
+# A failed job and a cancelled one: `--failed` alone may leave the cancelled
+# one as it is, and the run red.
+reset
+jobs diff=success test=failure main=failure refresh-pin-prs=cancelled
+step 0 "one job failed and another was cancelled" &&
+	check "failed and cancelled: the command re-runs the whole run" has "$(body_of 101)" '`gh run rerun 4242`'
+check "failed and cancelled: ... not only the failed jobs" lacks "$(body_of 101)" 'gh run rerun 4242 --failed'
 reset
 run "$A" ""
 jobs test=failure
@@ -438,6 +481,9 @@ reset
 step 0 "cancelled, and the jobs cannot be read" FAKE_DOWN=jobs &&
 	check "cancelled, jobs unreadable: filed (fail closed)" test "$(open_numbers)" = 101
 check "cancelled, jobs unreadable: the body says the jobs could not be listed" has "$(body_of 101)" "the jobs of the run could not be listed"
+check "cancelled, jobs unreadable: the command re-runs the whole run" has "$(body_of 101)" '`gh run rerun 4242`'
+check "cancelled, jobs unreadable: ... not only the failed jobs" lacks "$(body_of 101)" 'gh run rerun 4242 --failed'
+check "cancelled, jobs unreadable: the body claims nothing about the gate" lacks "$(body_of 101)" "the gate of this run"
 reset
 run "$A" failure
 step 0 "failed, and the jobs cannot be read" FAKE_DOWN=jobs &&
