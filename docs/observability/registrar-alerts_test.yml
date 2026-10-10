@@ -1,0 +1,464 @@
+# promtool unit tests for registrar-alerts.yml. The unit tests run them with
+# the promtool the build pins:
+#
+#   bazel test //:observability_rules_test
+#
+# With a promtool of your own: `promtool test rules` on this file. Copy it next
+# to wherever the rules are deployed from.
+#
+# The registrar pushes its gauges every 60 s, so every series below has one
+# sample a minute. `_` is a missing sample; a series that is not listed does
+# not exist. The replicas are kept apart by `instance`, the pod name the chart
+# sets as service.instance.id since 2.5.3 (#1560); any other per-replica label
+# does the same. The hashes are small numbers for reading; a real one is 52
+# bits.
+
+rule_files:
+  - registrar-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Two replicas at one revision with one hash, and then both move to the next
+  # revision in the same export: quiet at every step.
+  - name: replicas that agree are quiet, also when both change together
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-a"}'
+        values: '5x5 6x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-a"}'
+        values: '111x5 333x20'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-b"}'
+        values: '5x5 6x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-b"}'
+        values: '111x5 333x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+
+  # Two LIVE replicas at one revision with different hashes: the alert, three
+  # minutes on. This is what one series for both replicas could never show.
+  - name: two live replicas with different hashes at one revision fire after three minutes
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-a"}'
+        values: '5x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-a"}'
+        values: '111x20'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-b"}'
+        values: '5x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-b"}'
+        values: '222x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+      - eval_time: 20m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+
+  # A replica one revision behind is at another revision and is not compared.
+  - name: a replica that lags a revision is quiet
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-a"}'
+        values: '5x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-a"}'
+        values: '111x20'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-b"}'
+        values: '4x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-b"}'
+        values: '222x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+
+  # A pending write-behind intent is overlaid on the listing, so that replica is
+  # legitimately ahead of its revision: quiet while a depth above zero is
+  # reported. A depth of zero does not quieten a divergence.
+  - name: a pending write-behind intent is quiet, a drained queue is not
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-a"}'
+        values: '5x30'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-a"}'
+        values: '111x30'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-b"}'
+        values: '5x30'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-b"}'
+        values: '222x30'
+      - series: 'aether_registrar_writebehind_queue_depth{job="aether-registrar", instance="registrar-a"}'
+        values: '0x30'
+      - series: 'aether_registrar_writebehind_queue_depth{job="aether-registrar", instance="registrar-b"}'
+        values: '2x9 0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+
+  # The kubernetes backend reports the hash and no revision: nothing to compare.
+  - name: replicas that report no revision are quiet
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-a"}'
+        values: '111x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-b"}'
+        values: '222x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+
+
+  # ----------------------------------------------------------------------
+  # A replaced pod (#1560). A pod name in the replica label makes every roll
+  # end one set of series and start another, and nothing marks the ended ones
+  # stale: every selector in the rule reads only a sample of the last 150 s
+  # (last_over_time). Below, old pods' series end at minute 9 and their
+  # replacements' start at minute 10. With bare selectors an old pod's last
+  # sample is read through minute 13.
+
+  # A whole roll. The last export of one old replica fell between an agent RPC
+  # and its sync: a hash that is not its revision's (what for: 3m rides out on a
+  # live replica). The other old replica reported the right one, and both
+  # replacements agree. The one odd sample is read at minutes 9, 10 and 11 and
+  # no longer: three minutes are never reached.
+  - name: a replaced replica's last hash does not fire against the others
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-old-a"}'
+        values: '5x9'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-old-a"}'
+        values: '111x9'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-old-b"}'
+        values: '5x9'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-old-b"}'
+        values: '111x8 999'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-new-a"}'
+        values: '_x10 5x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-new-a"}'
+        values: '_x10 111x20'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-new-b"}'
+        values: '_x10 5x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-new-b"}'
+        values: '_x10 111x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+
+  # One replica replaced beside one that stays, the same odd last sample: the
+  # dead replica's hash is not held against the live replica's.
+  - name: a dead replica's last hash is not compared with a live replica's past the window
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-a"}'
+        values: '5x30'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-a"}'
+        values: '111x30'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-old-b"}'
+        values: '5x9'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-old-b"}'
+        values: '111x8 999'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-new-b"}'
+        values: '_x10 5x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-new-b"}'
+        values: '_x10 111x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+
+  # A real divergence between the two LIVE replicas, from their first export at
+  # minute 10. One of the replaced pods last reported a write-behind depth of 3.
+  # That sample quietens the rule at minutes 10 and 11 and is gone at minute 12,
+  # so the alert fires at minute 15. (With a bare selector it quietened the rule
+  # through minute 13 and the alert came at minute 17.)
+  - name: a dead replica's last queue depth delays a real divergence by the window only
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-old-a"}'
+        values: '5x9'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-old-a"}'
+        values: '111x9'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-old-b"}'
+        values: '5x9'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-old-b"}'
+        values: '111x9'
+      - series: 'aether_registrar_writebehind_queue_depth{job="aether-registrar", instance="registrar-old-a"}'
+        values: '0x8 3'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-new-a"}'
+        values: '_x10 6x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-new-a"}'
+        values: '_x10 111x20'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-new-b"}'
+        values: '_x10 6x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-new-b"}'
+        values: '_x10 222x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "6"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 6"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (6) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+      - eval_time: 25m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "6"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 6"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (6) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+
+  # A divergence that was firing, and the odd replica is replaced (the runbook's
+  # recovery) by one that lists what the store holds: the alert ends when the
+  # old pod's last sample is more than 150 s old, at minute 12.
+  - name: an alert that was firing ends with the replaced replica
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-a"}'
+        values: '5x30'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-a"}'
+        values: '111x30'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-old-b"}'
+        values: '5x9'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-old-b"}'
+        values: '222x9'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-new-b"}'
+        values: '_x10 5x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-new-b"}'
+        values: '_x10 111x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+      - eval_time: 11m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+      - eval_time: 12m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts: []
+
+  # The divergence is real and the replacement has it too: the alert stays
+  # firing through the roll (were it interrupted, it would be pending again at
+  # minute 12).
+  - name: an alert that was firing stays firing through a roll while the divergence lasts
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-a"}'
+        values: '5x30'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-a"}'
+        values: '111x30'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-old-b"}'
+        values: '5x9'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-old-b"}'
+        values: '222x9'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-new-b"}'
+        values: '_x10 5x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-new-b"}'
+        values: '_x10 222x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+      - eval_time: 10m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+      - eval_time: 12m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+      - eval_time: 25m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+
+  # A live replica that misses exports. Its sample of minute 3 is the newest one
+  # at minutes 4 and 5 (120 s old at minute 5): still read, so the alert does
+  # not flap, and it is firing, not pending again, at minute 6. The lower bound
+  # of the 150 s window; the cases above are its upper bound.
+  - name: a live replica that misses an export is still read
+    interval: 1m
+    input_series:
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-a"}'
+        values: '5x20'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-a"}'
+        values: '111x20'
+      - series: 'aether_registrar_snapshot_revision{job="aether-registrar", instance="registrar-b"}'
+        values: '5 5 5 5 _ _ 5x14'
+      - series: 'aether_registrar_snapshot_content_hash{job="aether-registrar", instance="registrar-b"}'
+        values: '222 222 222 222 _ _ 222x14'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+      - eval_time: 4m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+      - eval_time: 5m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."
+      - eval_time: 6m
+        alertname: AetherRegistrarSnapshotDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-registrar
+              job: aether-registrar
+              revision: "5"
+            exp_annotations:
+              summary: "registrar replicas serve 2 different endpoint sets at store revision 5"
+              description: "Registrar replicas report the same aether_registrar_snapshot_revision (5) with different values of aether_registrar_snapshot_content_hash, and no write-behind intent is pending. The listing is a pure function of the revision, so at least one replica is not serving what the store holds, and the agents watching it program different endpoints from the rest of the fleet. Compare `aether_registrar_snapshot_content_hash` per replica, then the registrar logs for sync errors and `aether_registrar_sync_errors_total`. Restarting the odd replica makes it list again, but keep its logs first: this is a bug, see docs/runbook.md, \"Stored vs in place vs applied\"."

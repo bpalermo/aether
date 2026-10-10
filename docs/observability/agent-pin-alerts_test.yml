@@ -451,3 +451,343 @@ tests:
       - eval_time: 20m
         alertname: AetherMeshClusterUnpinned
         exp_alerts: []
+
+  # ----------------------------------------------------------------------
+  # A replaced pod (#1560). Since chart 2.5.3 the edge control plane sets
+  # service.instance.id to its pod name, which Prometheus stores as `instance`:
+  # every roll of the edge Deployment ends one set of series and starts
+  # another. Nothing marks the ended ones stale, so each selector in the rule
+  # file reads only a sample of the last 150 s (last_over_time). The cases
+  # below are an old pod whose series end at minute 9 and a replacement whose
+  # series start at minute 10. With a bare selector the old pod's last sample
+  # is read through minute 13.
+
+  # The old pod's LAST export reported one unpinned cluster (a snapshot, not a
+  # state); its replacement reports none. One sample is read at minutes 9, 10
+  # and 11 and no longer: three minutes are never reached.
+  - name: a replaced pod's last sample does not become a critical alert
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-old", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0x8 1'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-new", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '_x10 0x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+
+  # The gap is real and the replacement publishes it too: the alert that was
+  # firing stays firing through the roll (were it interrupted at minute 10 or
+  # 11, it would be pending again at minute 12), and from minute 12 its figure
+  # is the live pod's alone. At minutes 10 and 11 both pods are read and the
+  # figure is 2, as for two replicas on one node (#1616).
+  - name: an alert that was firing stays firing through a roll while the replacement reports it
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-old", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '1x9'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-new", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '_x10 1x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 10m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "2 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 2. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 12m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 13m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 25m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+
+  # The gap was the old pod's and its replacement reports none: the alert ends
+  # when the old pod's last sample is more than 150 s old, at minute 12.
+  - name: an alert that was firing ends with the replaced pod
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-old", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '1x9'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-new", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '_x10 0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 11m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 12m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+
+  # A live pod that misses exports. Its sample of minute 3 is the newest one
+  # at minutes 4 and 5 (120 s old at minute 5): still read, so the alert does
+  # not flap, and it is firing, not pending again, at minute 6. This is the
+  # lower bound of the 150 s window: one lost export, evaluated just before
+  # the next one lands. The case above is the upper bound (a sample 180 s old
+  # is not read).
+  - name: a live pod that misses an export is still read
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-a", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '1 1 1 1 _ _ 1x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 4m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 5m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 6m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+
+  # What the window does not remove. A pod whose last TWO exports reported the
+  # cluster is read from minute 8 to minute 11, which is the rule's three
+  # minutes: it fires for one evaluation and ends. (With a bare selector it
+  # fired from minute 11 through minute 13.) The state lasted two exports on a pod
+  # that then went away, where the rule otherwise asks for four.
+  - name: limit - a replaced pod's last two samples fire for one evaluation
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-old", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0x7 1 1'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-new", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '_x10 0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "1 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 1. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 12m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts: []
+
+  # The warning rule (for: 5m) across the same roll. On n1 it was firing and
+  # ends at minute 12 with the old pod. On n2 the old pod's last sample alone
+  # never fires it.
+  - name: the pending warning does not outlive a replaced pod
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-old", pin="unpinned", reason="tls_not_published"}'
+        values: '3x9'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-new", pin="unpinned", reason="tls_not_published"}'
+        values: '_x10 0x20'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n2", instance="edge-old-2", pin="unpinned", reason="tls_not_published"}'
+        values: '0x8 3'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n2", instance="edge-new-2", pin="unpinned", reason="tls_not_published"}'
+        values: '_x10 0x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: tls_not_published
+            exp_annotations:
+              summary: "aether-edge on n1 has 3 mesh cluster entr(ies) for which no TLS cluster is published, for 5m (tls_not_published)"
+              description: "Mesh cluster entries on n1 with no server-identity pin for reason tls_not_published: 3. In that state the agent publishes no TLS at all for an entry. It is expected for a moment when an agent starts and has now lasted 5 minutes. trust_domain_unknown: the agent has not learned its trust domain. tls_not_published: the agent has no SVID of its own, or the clusters are TCP floors that are not published (`tcp:` names in the agent's WARN line). Check the agent's identity readiness and its SPIRE Workload API socket first. tls_not_published entries have endpoints with no namespace metadata and become AetherMeshClusterUnpinned the moment TLS is published for them. See docs/runbook.md, \"The unpinned-cluster signal\"."
+      - eval_time: 12m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AetherMeshClusterPinPending
+        exp_alerts: []
+
+  # The two 15-minute rules. The old pod's proxy held a cluster the pod had
+  # pinned, and the old pod could not place two others, both since the start:
+  # firing from minute 15. The pod is replaced at minute 26 and the new one is
+  # in sync. Both alerts end at minute 28, with the old pod's last sample.
+  - name: the divergence and unknown-state alerts end with a replaced pod
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-edge", node="n1", instance="edge-old", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '1x25'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-old", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '0x25'
+      - series: 'aether_agent_xds_acked_tls_clusters_unknown{job="aether-edge", node="n1", instance="edge-old"}'
+        values: '2x25'
+      - series: 'aether_agent_xds_acked_tls_clusters{job="aether-edge", node="n1", instance="edge-new", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '_x26 0x20'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", instance="edge-new", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '_x26 0x20'
+      - series: 'aether_agent_xds_acked_tls_clusters_unknown{job="aether-edge", node="n1", instance="edge-new"}'
+        values: '_x26 0x20'
+    alert_rule_test:
+      - eval_time: 27m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-edge
+              node: n1
+            exp_annotations:
+              summary: "the proxy on n1 has accepted 1 unpinned mesh cluster(s) that aether-edge no longer publishes"
+              description: "The clusters the proxy on n1 has accepted include 1 more mesh cluster(s) without a server-identity pin, counted reason by reason, than the agent's current snapshot publishes. The proxy has not accepted the newer clusters for 15 minutes. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error), and `proxy acknowledged mesh clusters with no server-identity SAN pin` for the per-reason counts. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
+      - eval_time: 28m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: AetherProxyPinStateUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-edge
+              node: n1
+            exp_annotations:
+              summary: "aether-edge on n1 cannot determine the pin state of 2 mesh cluster(s) the proxy holds"
+              description: "The proxy on n1 holds 2 mesh cluster(s) at a version aether-edge has no server-identity pin state on record for, and has for 15 minutes. While that lasts aether_agent_xds_acked_tls_clusters is not written, so AetherProxyHoldsUnpinnedClusters cannot fire for this node. This does not say the proxy holds a cluster without a pin, only that the agent cannot tell. Either the proxy is rejecting cluster updates (it was when the agent restarted, and still is): aether_agent_xds_nacks_total for the Cluster type URL moves and the agent logs `envoy NACKed delta response` with the proxy's error. Or the proxy accepted a version whose pin state the agent no longer had on record: no NACK. The agent logs `proxy holds mesh clusters whose pin state this agent cannot determine` when the state begins. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
+      - eval_time: 28m
+        alertname: AetherProxyPinStateUnknown
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AetherProxyPinStateUnknown
+        exp_alerts: []

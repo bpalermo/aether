@@ -390,3 +390,146 @@ tests:
             exp_annotations:
               summary: "the proxy on n1 rejected a Listener update from aether-edge"
               description: "The proxy that aether-edge serves on n1 rejected (NACKed) at least one Listener response in the last hour. The agent published a listener the proxy cannot build, which is an agent defect: report it. The proxy applied the rest of that response, its removals and the listeners it could build, and a listener it kept that way is unknown to the agent after an agent restart, so nothing removes it when its pod goes. The agent's log line `envoy NACKed delta response` on that node names the listeners of the response (`added`, `removed`) and carries the proxy's reason (`error`). Once the cause is fixed, replace that proxy's pod (for the node agent, the aether-proxy pod on that node). The alert ends an hour after the last rejection, whatever was done. See docs/runbook.md, \"The proxy rejected a Listener update\"."
+
+  # ----------------------------------------------------------------------
+  # One series per pod (#1560). Since chart 2.5.3 the edge control plane sets
+  # service.instance.id to its pod name, stored as `instance`: a replaced edge
+  # pod's counter is a series that ends, and its replacement's a new one. The
+  # node agent sets no such attribute and the cases above stand for it. The
+  # rule is the same expression for both; it has no freshness window, and
+  # these cases say what that does.
+
+  # An edge roll long after a rejection. The old pod's last count (1) is read
+  # for five more minutes, but its series is not new, and the new pod's
+  # seeded zero is neither an increase nor above zero: quiet.
+  - name: an edge roll after an old rejection is quiet
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_xds_nacks_total{job="aether-edge", node="n1", instance="edge-old", aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"}'
+        values: '0 1x149'
+      - series: 'aether_agent_xds_nacks_total{job="aether-edge", node="n1", instance="edge-new", aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"}'
+        values: '_x151 0x60'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts: []
+      - eval_time: 151m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts: []
+      - eval_time: 152m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts: []
+      - eval_time: 156m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts: []
+      - eval_time: 200m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts: []
+
+  # The first limit above does not hold for a series per pod: a replacement
+  # that is rejected before its first export is a NEW series that appears at
+  # 1, whatever count the old pod ended on, and the second arm fires for its
+  # first hour.
+  - name: a replaced edge pod rejected before its first export fires
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_xds_nacks_total{job="aether-edge", node="n1", instance="edge-old", aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"}'
+        values: '0x9 1x80'
+      - series: 'aether_agent_xds_nacks_total{job="aether-edge", node="n1", instance="edge-new", aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"}'
+        values: '_x91 1x90'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts: []
+      - eval_time: 91m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-edge
+              node: n1
+            exp_annotations:
+              summary: "the proxy on n1 rejected a Listener update from aether-edge"
+              description: "The proxy that aether-edge serves on n1 rejected (NACKed) at least one Listener response in the last hour. The agent published a listener the proxy cannot build, which is an agent defect: report it. The proxy applied the rest of that response, its removals and the listeners it could build, and a listener it kept that way is unknown to the agent after an agent restart, so nothing removes it when its pod goes. The agent's log line `envoy NACKed delta response` on that node names the listeners of the response (`added`, `removed`) and carries the proxy's reason (`error`). Once the cause is fixed, replace that proxy's pod (for the node agent, the aether-proxy pod on that node). The alert ends an hour after the last rejection, whatever was done. See docs/runbook.md, \"The proxy rejected a Listener update\"."
+      - eval_time: 120m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-edge
+              node: n1
+            exp_annotations:
+              summary: "the proxy on n1 rejected a Listener update from aether-edge"
+              description: "The proxy that aether-edge serves on n1 rejected (NACKed) at least one Listener response in the last hour. The agent published a listener the proxy cannot build, which is an agent defect: report it. The proxy applied the rest of that response, its removals and the listeners it could build, and a listener it kept that way is unknown to the agent after an agent restart, so nothing removes it when its pod goes. The agent's log line `envoy NACKed delta response` on that node names the listeners of the response (`added`, `removed`) and carries the proxy's reason (`error`). Once the cause is fixed, replace that proxy's pod (for the node agent, the aether-proxy pod on that node). The alert ends an hour after the last rejection, whatever was done. See docs/runbook.md, \"The proxy rejected a Listener update\"."
+      - eval_time: 150m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-edge
+              node: n1
+            exp_annotations:
+              summary: "the proxy on n1 rejected a Listener update from aether-edge"
+              description: "The proxy that aether-edge serves on n1 rejected (NACKed) at least one Listener response in the last hour. The agent published a listener the proxy cannot build, which is an agent defect: report it. The proxy applied the rest of that response, its removals and the listeners it could build, and a listener it kept that way is unknown to the agent after an agent restart, so nothing removes it when its pod goes. The agent's log line `envoy NACKed delta response` on that node names the listeners of the response (`added`, `removed`) and carries the proxy's reason (`error`). Once the cause is fixed, replace that proxy's pod (for the node agent, the aether-proxy pod on that node). The alert ends an hour after the last rejection, whatever was done. See docs/runbook.md, \"The proxy rejected a Listener update\"."
+      - eval_time: 152m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts: []
+
+  # A LIMIT of a series per pod. A pod rejected before its first export and
+  # replaced nine minutes later: the second arm reads the old pod's last
+  # sample for the five minutes a bare selector returns it, and the alert
+  # ends there, not an hour after the rejection. The rejection fired when it
+  # happened; the proxy it was sent to went with the pod.
+  - name: limit - a rejection before a pod's first export ends five minutes after the pod
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_xds_nacks_total{job="aether-edge", node="n1", instance="edge-old", aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"}'
+        values: '1x9'
+      - series: 'aether_agent_xds_nacks_total{job="aether-edge", node="n1", instance="edge-new", aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"}'
+        values: '_x10 0x60'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-edge
+              node: n1
+            exp_annotations:
+              summary: "the proxy on n1 rejected a Listener update from aether-edge"
+              description: "The proxy that aether-edge serves on n1 rejected (NACKed) at least one Listener response in the last hour. The agent published a listener the proxy cannot build, which is an agent defect: report it. The proxy applied the rest of that response, its removals and the listeners it could build, and a listener it kept that way is unknown to the agent after an agent restart, so nothing removes it when its pod goes. The agent's log line `envoy NACKed delta response` on that node names the listeners of the response (`added`, `removed`) and carries the proxy's reason (`error`). Once the cause is fixed, replace that proxy's pod (for the node agent, the aether-proxy pod on that node). The alert ends an hour after the last rejection, whatever was done. See docs/runbook.md, \"The proxy rejected a Listener update\"."
+      - eval_time: 9m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-edge
+              node: n1
+            exp_annotations:
+              summary: "the proxy on n1 rejected a Listener update from aether-edge"
+              description: "The proxy that aether-edge serves on n1 rejected (NACKed) at least one Listener response in the last hour. The agent published a listener the proxy cannot build, which is an agent defect: report it. The proxy applied the rest of that response, its removals and the listeners it could build, and a listener it kept that way is unknown to the agent after an agent restart, so nothing removes it when its pod goes. The agent's log line `envoy NACKed delta response` on that node names the listeners of the response (`added`, `removed`) and carries the proxy's reason (`error`). Once the cause is fixed, replace that proxy's pod (for the node agent, the aether-proxy pod on that node). The alert ends an hour after the last rejection, whatever was done. See docs/runbook.md, \"The proxy rejected a Listener update\"."
+      - eval_time: 13m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-edge
+              node: n1
+            exp_annotations:
+              summary: "the proxy on n1 rejected a Listener update from aether-edge"
+              description: "The proxy that aether-edge serves on n1 rejected (NACKed) at least one Listener response in the last hour. The agent published a listener the proxy cannot build, which is an agent defect: report it. The proxy applied the rest of that response, its removals and the listeners it could build, and a listener it kept that way is unknown to the agent after an agent restart, so nothing removes it when its pod goes. The agent's log line `envoy NACKed delta response` on that node names the listeners of the response (`added`, `removed`) and carries the proxy's reason (`error`). Once the cause is fixed, replace that proxy's pod (for the node agent, the aether-proxy pod on that node). The alert ends an hour after the last rejection, whatever was done. See docs/runbook.md, \"The proxy rejected a Listener update\"."
+      - eval_time: 14m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: AetherProxyRejectedListenerUpdate
+        exp_alerts: []
