@@ -400,7 +400,16 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 	// membership_healthy/membership_total gauges (see the 2026-06-11 stats
 	// outage). A shared alt_stat_name would merge every pod's membership into
 	// one gauge and one unhealthy pod would fail every pod's readiness.
-	c.AltStatName = ""
+	//
+	// Per-pod, and still a name the chart's stats exclusions read correctly:
+	// empty (the stats are keyed by the cluster's name) unless the pod's name
+	// contains a dot, and then the name with '~' for each dot (#1636,
+	// podStatDot). With the dots left in, the exclusion of this cluster's dead
+	// subtrees matched the very gauges the filter reads, for a pod called
+	// "web.external-0". The filter finds the cluster by NAME and reads its
+	// gauges through the cluster, so the stat name is free to differ
+	// (//agent/test/envoy_validate, TestHealthGatewayAnswersForADottedPod).
+	c.AltStatName = podClusterAltStatName(name)
 	hc := &corev3.HealthCheck{
 		Timeout:            durationpb.New(1 * time.Second),
 		Interval:           durationpb.New(5 * time.Second),
@@ -498,8 +507,9 @@ func NewInboundReadyProbeCluster(name, netns, nodeSpiffeID, validationContextNam
 		// membership_healthy/membership_total gauges. A shared alt_stat_name
 		// would merge every pod's membership into one gauge and one unready pod
 		// would gate every pod (the 2026-06-11 stats outage, from the other
-		// direction). Same reason NewAppHealthProbeCluster clears it.
-		AltStatName:                   "",
+		// direction). Same reason NewAppHealthProbeCluster clears it, and the
+		// same per-pod stat name for a pod whose name contains a dot (#1636).
+		AltStatName:                   podClusterAltStatName(name),
 		ConnectTimeout:                durationpb.New(2 * time.Second),
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		ClusterDiscoveryType:          &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},

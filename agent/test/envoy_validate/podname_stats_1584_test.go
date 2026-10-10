@@ -165,14 +165,32 @@ func TestChartStatsConfigOnNamespacedPodNames(t *testing.T) {
 // listener per given stat prefix and one STATIC cluster per given name.
 func podStatsBootstrap(t *testing.T, listenerStatPrefixes, clusters []string) string {
 	t.Helper()
+	named := make([]statsCluster, 0, len(clusters))
+	for _, name := range clusters {
+		named = append(named, statsCluster{name: name})
+	}
+	return podStatsBootstrapWithClusters(t, listenerStatPrefixes, named)
+}
+
+// statsCluster is a cluster of podStatsBootstrapWithClusters: its name and,
+// when not empty, the alt_stat_name its stats are keyed by instead.
+type statsCluster struct {
+	name, altStatName string
+}
+
+// podStatsBootstrapWithClusters is podStatsBootstrap for clusters that may set
+// an alt_stat_name, as the agent's probe clusters do for a pod whose name
+// contains a dot (#1636).
+func podStatsBootstrapWithClusters(t *testing.T, listenerStatPrefixes []string, clusters []statsCluster) string {
+	t.Helper()
 	var b strings.Builder
 	b.WriteString("node:\n  id: pod-stats-test\n  cluster: pod-stats-test\n")
 	b.WriteString("admin:\n  address:\n    socket_address:\n      address: 127.0.0.1\n      port_value: 0\n")
 	b.WriteString(chartStatsConfig(t))
 	b.WriteString("\nstatic_resources:\n  listeners:\n")
 	for _, prefix := range listenerStatPrefixes {
-		fmt.Fprintf(&b, `    - name: %[1]s
-      stat_prefix: %[1]s
+		fmt.Fprintf(&b, `    - name: %[1]q
+      stat_prefix: %[1]q
       address:
         socket_address:
           address: 127.0.0.1
@@ -183,16 +201,19 @@ func podStatsBootstrap(t *testing.T, listenerStatPrefixes, clusters []string) st
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
                 stat_prefix: pod_stats_test
-                cluster: %[2]s
-`, prefix, clusters[0])
+                cluster: %[2]q
+`, prefix, clusters[0].name)
 	}
 	b.WriteString("  clusters:\n")
-	for _, name := range clusters {
-		fmt.Fprintf(&b, `    - name: %[1]s
-      type: STATIC
+	for _, c := range clusters {
+		fmt.Fprintf(&b, "    - name: %q\n", c.name)
+		if c.altStatName != "" {
+			fmt.Fprintf(&b, "      alt_stat_name: %q\n", c.altStatName)
+		}
+		fmt.Fprintf(&b, `      type: STATIC
       connect_timeout: 1s
       load_assignment:
-        cluster_name: %[1]s
+        cluster_name: %[1]q
         endpoints:
           - lb_endpoints:
               - endpoint:
@@ -200,7 +221,7 @@ func podStatsBootstrap(t *testing.T, listenerStatPrefixes, clusters []string) st
                     socket_address:
                       address: 127.0.0.1
                       port_value: 9
-`, name)
+`, c.name)
 	}
 	return b.String()
 }

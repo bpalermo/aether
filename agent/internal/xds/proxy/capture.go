@@ -249,7 +249,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		// same VIP:port getsockname would (the TPROXY spike, e2e/spike/tproxy-phase0b.py T1, removed after it was superseded by the in-tree netns test; see git history before 95788da5).
 		UseOriginalDst:                wrapperspb.Bool(false),
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		StatPrefix:                    CaptureListenerName(cniPod),
+		StatPrefix:                    podStatName(CaptureListenerName(cniPod)),
 		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
 		FilterChains:                  chains,
 	}
