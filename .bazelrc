@@ -9,6 +9,48 @@ build --@protobuf//bazel/toolchains:prefer_prebuilt_protoc
 # opt-out; DO_NOT_TRACK=1 is equivalent.
 common --repo_env=ASPECT_TOOLS_TELEMETRY=-all
 
+# Keep the name of the output directory out of what is built (#1500). Bazel
+# builds each configuration under bazel-out/<name>/, and the name is made from
+# the flags: a flag added here, a transition a rule gains or a Bazel upgrade
+# renames it with no change to any source. rules_go trims the sandbox off every
+# path it hands the Go compiler, which leaves a path relative to the execution
+# root: `agent/...` for a source file, `external/...` for a dependency, and
+# `bazel-out/<name>/bin/...pb.go` for generated source, name and all. The
+# compiler records that path in the binary (the table a stack trace is printed
+# from), so every binary that links generated protobuf code changed, GNU build
+# ID and image digest with it, whenever the directory was renamed.
+#
+# With `strip`, an action that declares it supports path mapping (rules_go's
+# compile actions do, cgo ones excepted, and no released binary uses cgo) is
+# run with every bazel-out/<name>/ rewritten to bazel-out/cfg/. A stack trace
+# names `bazel-out/cfg/bin/...pb.go`, whichever configuration built it. The same
+# rewrite takes the name out of the action's cache key, so the two
+# configurations an image index builds share their compiles with a plain
+# `bazel build`.
+#
+# Such an action cannot run unsandboxed: the rewritten paths exist only inside
+# a sandbox or on a remote executor, and Bazel refuses the `local` strategy for
+# it instead of building something else. `--config=remote` below sends its
+# fallback to the sandbox for that reason.
+# scripts/check-image-digest-stability.sh is the guard: it builds every image
+# under a second directory name and compares the digests.
+build --experimental_output_paths=strip
+# A tag on a target reaches every action of that target, so a `go_test` tagged
+# for the sake of its test run has compiles that carry the tag too, and a
+# path-mapped compile can then run nowhere:
+#   - `no-sandbox` (the Envoy harnesses under agent/test): not in the sandbox,
+#     and unsandboxed is refused;
+#   - `no-remote-exec` (the Docker-bound integration tests and the CNI netns
+#     tests): under --config=remote not on the executor, and what is left is
+#     unsandboxed.
+# Either way: "requires sandboxing due to path mapping, cannot be executed with
+# any of the available strategies". Take both tags back off the Go build
+# actions; the test run (TestRunner) keeps them. rules_go leaves path mapping
+# off for a target tagged `local` and has no such case for these two; with one,
+# these entries can go.
+build --modify_execution_info=Go.*=-no-sandbox,RunNogo=-no-sandbox,ValidateNogo=-no-sandbox
+build --modify_execution_info=Go.*=-no-remote-exec,RunNogo=-no-remote-exec,ValidateNogo=-no-remote-exec
+
 # Configure workspace status script
 build --workspace_status_command=./bazel/workspace_status.sh
 
@@ -72,6 +114,14 @@ build:remote --remote_download_toplevel
 # unreachable or the key is absent (e.g. fork PRs) so CI degrades gracefully.
 build:remote --spawn_strategy=remote,local
 build:remote --remote_local_fallback
+# The fallback of an action the executor was handed runs in the sandbox, not
+# unsandboxed (the default): a path-mapped action (--experimental_output_paths
+# above) writes its outputs to paths that exist only there. Measured with an
+# unreachable executor: without this line the first Go action fails with "not
+# all outputs were created or valid". The flag is marked deprecated upstream
+# (bazelbuild/bazel#7480) and still decides this in Bazel 9; if a later Bazel
+# drops it, it says so at startup.
+build:remote --remote_local_fallback_strategy=sandboxed
 # Test EXECUTION stays on the runner: the BuildBuddy executor sandbox runs as
 # root with no privileged capabilities, so permission- and netns-sensitive tests
 # (CNI netns bind-mounts need CAP_SYS_ADMIN; read-only-dir checks are bypassed by

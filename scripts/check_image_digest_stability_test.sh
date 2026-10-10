@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Hermetic test of scripts/check-image-digest-stability.sh (#1378): no Bazel and
-# no git repository. It runs a copy of the script inside a throwaway tree, with
-# a fake `bazel` and a fake `git` on PATH. The fake bazel "builds" two images:
-# it runs the workspace-status script it is handed, like the real one, and
-# writes each image's digest and each push's tags from what that script
-# reported, in the way $FAKE_MODE says.
+# Hermetic test of scripts/check-image-digest-stability.sh (#1378, #1500): no
+# Bazel and no git repository. It runs a copy of the script inside a throwaway
+# tree, with a fake `bazel` and a fake `git` on PATH. The fake bazel "builds"
+# two images: it runs the workspace-status script it is handed, like the real
+# one, and writes each image's digest and each push's tags from what that
+# script reported, in the way $FAKE_MODE says. Like the real one, it puts its
+# outputs, and the binaries of the images, under a directory that
+# `--platform_suffix` renames.
 #
 #   1. ok             digests ignore the commit, tags follow it   -> exit 0
 #   2. stamped        one image's digest follows the commit        -> exit 1,
@@ -24,6 +26,15 @@
 #  11. aquery-fails   the action query prints, then fails           -> exit 1
 #  12. aquery-blind   the action query reports no push              -> exit 1
 #                     (it saw no status input at all; not believed)
+#  13. dir-in-binary  one image's digest follows the name of the    -> exit 1,
+#                     output directory                               naming that
+#                     image and not the other
+#  14. not-renamed    --platform_suffix renames no directory        -> exit 1
+#                     (the digests agree, and must not be believed)
+#  15. half-renamed   one of two binary directories keeps its name  -> exit 1,
+#                     naming that directory
+#  16. no-binaries    no binary is found under the images           -> exit 1
+#  17. binaries-fail  the query for the binaries fails              -> exit 1
 #
 # Run: bazel test //scripts:check_image_digest_stability_test, or
 #      bash scripts/check_image_digest_stability_test.sh
@@ -70,7 +81,19 @@ set -euo pipefail
 cmd="$1"
 shift
 pkgs=(agent/cmd/agent other/image)
-bin="bazel-out/k8-fastbuild/bin"
+
+# --platform_suffix renames the output directory, as in Bazel: of the command
+# line's configuration and of the two an image index builds its binaries in.
+suffix=""
+binaries=0
+for a in "$@"; do
+	case "$a" in
+	--platform_suffix=*) suffix="-${a#*=}" ;;
+	*content_build_id*) binaries=1 ;;
+	esac
+done
+[ "$FAKE_MODE" = not-renamed ] && suffix=""
+bin="bazel-out/k8-fastbuild${suffix}/bin"
 
 case "$cmd" in
 query)
@@ -98,6 +121,7 @@ build)
 		tag="dev-$commit"
 		case "$FAKE_MODE" in
 		stamped) [ "$p" = other/image ] && digest="sha256:$(printf '%s' "$p$commit" | sha256sum | cut -d' ' -f1)" ;;
+		dir-in-binary) [ "$p" = other/image ] && digest="sha256:$(printf '%s' "$p$bin" | sha256sum | cut -d' ' -f1)" ;;
 		stale-tag) tag="dev-$first" ;;
 		ignore-status) tag="dev" ;;
 		esac
@@ -126,6 +150,28 @@ aquery)
 	fi
 	;;
 cquery)
+	if [ "$binaries" -eq 1 ]; then
+		# The binaries of the images, one per platform an index is built for.
+		for a in "$@"; do
+			case "$a" in --output_groups=*)
+				echo "fake bazel: the binaries were asked for with $a, and have no such output group" >&2
+				exit 1
+				;;
+			esac
+		done
+		[ "$FAKE_MODE" = no-binaries ] && exit 0
+		if [ "$FAKE_MODE" = binaries-fail ]; then
+			echo "fake bazel: cquery died half way" >&2
+			exit 3
+		fi
+		arm="$suffix"
+		[ "$FAKE_MODE" = half-renamed ] && arm=""
+		for p in "${pkgs[@]}"; do
+			echo "bazel-out/k8-fastbuild${suffix}-ST-amd64/bin/$p/binary"
+			echo "bazel-out/k8-fastbuild${arm}-ST-arm64/bin/$p/binary"
+		done
+		exit 0
+	fi
 	for p in "${pkgs[@]}"; do
 		echo "$bin/$p/image_index_digest"
 		echo "$bin/$p/image_push.json"
@@ -176,6 +222,7 @@ write_status "STABLE_GIT_COMMIT $HEAD_SHA" "GIT_COMMIT $HEAD_SHA"
 
 expect "stable digests and tags that follow the commit pass" ok 0 \
 	"2 of 2 image digests" "ok: //agent/cmd/agent:image_index sha256:" \
+	"ok: the third build has the binaries of the images under other output directories (k8-fastbuild-x1500renamed-ST-amd64 k8-fastbuild-x1500renamed-ST-arm64, not k8-fastbuild-ST-amd64 k8-fastbuild-ST-arm64)" \
 	"ok: no action under the 2 image indexes takes a workspace-status file (the 2 pushes do" -- "FAIL"
 expect "a digest that follows the commit fails, and only that image is named" stamped 1 \
 	"FAIL: //other/image:image_index: the digest depends on the commit" "ok: //agent/cmd/agent:image_index" "1 check(s) failed" \
@@ -198,6 +245,23 @@ expect "an action query that prints and then fails is not believed" aquery-fails
 	"the action query failed (exit 3)" "aquery died half way" -- "OK:" "building"
 expect "an action query that reports no push is not believed" aquery-blind 1 \
 	"does not report //agent/cmd/agent:image_push reading the workspace status" -- "OK:"
+
+expect "a digest that follows the output directory's name fails, and only that image is named" dir-in-binary 1 \
+	"FAIL: //other/image:image_index: the digest depends on the name of the Bazel output directory" \
+	"with --platform_suffix=x1500renamed" "ok: //agent/cmd/agent:image_index" \
+	"ok: the third build has the binaries of the images under other output directories" "1 check(s) failed" \
+	-- "FAIL: //agent/cmd/agent" "depends on the commit"
+expect "a suffix that renames no directory fails although the digests agree" not-renamed 1 \
+	"ok: //other/image:image_index sha256:" \
+	"in a directory the build without it also used (bazel-out/: k8-fastbuild-ST-amd64 k8-fastbuild-ST-arm64)" "1 check(s) failed" \
+	-- "OK:"
+expect "a binary directory that keeps its name fails, and is named" half-renamed 1 \
+	"in a directory the build without it also used (bazel-out/: k8-fastbuild-ST-arm64)" "1 check(s) failed" \
+	-- "OK:" "k8-fastbuild-ST-amd64 k8-fastbuild-ST-arm64)"
+expect "no binary found under the images fails" no-binaries 1 \
+	"no content_build_id output found under the image indexes" "1 check(s) failed" -- "OK:"
+expect "a query for the binaries that fails is not believed" binaries-fail 1 \
+	"cquery died half way" -- "OK:"
 
 write_status "STABLE_GIT_VERSION v1" "GIT_COMMIT $HEAD_SHA"
 expect "a real status script with no STABLE_GIT_COMMIT fails" ok 1 \

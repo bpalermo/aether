@@ -130,6 +130,17 @@ type pinReport struct {
 	// (ackedPins.publish). A snapshot build tracks, into a buffer it reuses.
 	track   bool
 	classes []entryClass
+	// mtls is the name of every mTLS-injected cluster the read published
+	// (entry.mtlsCluster, appended to the snapshot's clusters in that pass):
+	// the clusters the outbound identity-binding log names (logIdentityBindings,
+	// #1621). A resource name, which is not always the entry's map key: a
+	// service's default entry publishes a cluster named by the FQDN
+	// (publishedClusterName). A floor entry publishes no cluster in that pass
+	// and adds no name; the TCP floor clusters a snapshot carries are built
+	// later in the build and are not among these names, as they were not
+	// before. Collected by clustersEndpointsVhostsAndPinsInto, not by add, and
+	// in map order.
+	mtls []string
 	// promoted records promoteTLSNotPublished: the counts moved every
 	// tls_not_published entry to no_namespace_metadata after the classes were
 	// collected.

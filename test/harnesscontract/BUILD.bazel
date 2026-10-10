@@ -15,6 +15,7 @@ go_library(
     srcs = [
         "chart.go",
         "contract.go",
+        "promises.go",
         "testing.go",
     ],
     embedsrcs = ["external-harness.yaml"],
@@ -23,15 +24,27 @@ go_library(
     deps = ["@io_k8s_sigs_yaml//:yaml"],
 )
 
+# The aether chart says which `version` of the contract it was packaged with
+# (the annotation of the entry object.annotation.harness_contract_version). It
+# reads the number from this file in a build step of its own, so that no second
+# copy of it exists anywhere; the library above is testonly and cannot feed a
+# published package. Nothing else reads the file by label.
+exports_files(
+    ["external-harness.yaml"],
+    visibility = ["//charts/aether:__pkg__"],
+)
+
 go_test(
     name = "harnesscontract_test",
     size = "small",
     srcs = [
         "chart_test.go",
         "contract_test.go",
+        "promises_test.go",
     ],
     data = ["BUILD.bazel"],
     embed = [":harnesscontract"],
+    embedsrcs = ["external-harness.lock.yaml"],
     deps = [
         "//common/constants/annotations",
         "//common/constants/labels",
@@ -42,12 +55,13 @@ go_test(
 
 # The chart objects a harness addresses, one test per chart. The render options
 # and the expectations are in the contract, not here. `ids` names the renders
-# and objects each test holds, and the entries of other sections a container
-# of those renders refers to (a resource attribute, the name an argument takes
-# its value from): the test fails when the contract has one this list lacks or
-# lacks one this list has, so an entry, or a container's tie to one, cannot
-# leave the contract while the chart still renders it unless this list changes
-# with it.
+# and objects each test holds, and the entries of other sections an object or
+# a container of those renders refers to (the name an object is given, a
+# resource attribute, the name an argument takes its value from): the test
+# fails when the contract has one this list lacks or lacks one this list has,
+# so an entry, or a tie to one, cannot leave the contract while the chart still
+# renders it unless this list changes with it. Each of those entries names the
+# test in its `checked_by`.
 helm_contract_test(
     name = "aether_chart_test",
     chart = "//charts/aether",
@@ -60,12 +74,21 @@ helm_contract_test(
         "chart.aether.csidriver",
         "chart.aether.edge",
         "chart.aether.mesh_dns",
+        "chart.aether.pod_webhooks",
         "chart.aether.proxy",
         "chart.aether.uds_csi",
-        # Entries of other sections a container of these renders is held to.
+        # Entries of other sections an object or a container of these renders
+        # is held to.
+        "csi.driver",
         "mesh.default_domain",
+        "object.annotation.harness_contract_version",
+        "pod.label.managed",
         "resource.node",
     ],
+    # The per-commit packaging (`X.Y.Z-<sha>`) is a second package of the same
+    # templates and files, and it is one an install can name: it is held to the
+    # contract as well, the version annotation included.
+    other_packagings = ["//charts/aether:aether_commit"],
 )
 
 helm_contract_test(
@@ -75,7 +98,10 @@ helm_contract_test(
     ids = [
         "chart.prober",
         "chart.prober.daemonset",
+        "mesh.default_domain",
+        "port.outbound_http",
         "resource.node",
+        "resource.service_name.prober",
     ],
 )
 

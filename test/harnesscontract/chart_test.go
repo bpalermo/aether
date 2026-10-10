@@ -181,6 +181,13 @@ func TestRenderCheck_LinkedEntries(t *testing.T) {
 			attribute: "k8s.node.name", flag: "--mesh-domain", domain: "aether",
 			want: `it has --mesh-domain with another value`,
 		},
+		// The right value first and another after it: the container runs with
+		// the last.
+		"the chart gives the domain twice": {
+			attribute: "k8s.node.name", flag: "--mesh-domain", domain: "aether.internal",
+			render: strings.Replace(render, `- "--mesh-domain=aether.internal"`, `- "--mesh-domain=aether.internal"`+"\n            - \"--mesh-domain=mesh.internal\"", 1),
+			want:   `container "agent" is run with --mesh-domain 2 times: the last one wins, so no one value can be held`,
+		},
 		"a flag the container is not run with": {
 			attribute: "k8s.node.name", flag: "--domain", domain: "aether.internal",
 			want: `is not run with --domain=aether.internal, the value of the entry mesh.default_domain (it has no --domain argument)`,
@@ -210,14 +217,711 @@ func TestRenderCheck_LinkedEntries(t *testing.T) {
 	}
 }
 
-// A container built by hand refers to entries nothing resolved: that is a
-// difference, never a pass.
+// tied is a contract whose one object is named by a `names` entry, and whose
+// container takes an argument from a pattern and must not be given a resource
+// attribute its own code sets.
+const tied = `
+version: 1
+resource_attributes:
+  - {id: sn, attribute: service.name, value: svc, components: [agent], checked_by: review-only}
+names:
+  - {id: port, value: "PORT", checked_by: review-only}
+  - {id: ds, value: NAME, checked_by: review-only}
+charts:
+  - id: r
+    chart: x
+    release: x
+    namespace: n
+    objects:
+      - id: o
+        kind: DaemonSet
+        name_from: ds
+        containers:
+          - name: agent
+            code_resource_attributes: [sn]
+            args: {--egress: "127.0.0.1:<port>"}
+    checked_by: review-only
+`
+
+// TestRenderCheck_Ties: an object's name, an argument made of a pattern and a
+// resource attribute the code sets are each read from the entry, so changing
+// the entry alone, or the chart alone, is a difference.
+func TestRenderCheck_Ties(t *testing.T) {
+	// The render, with the argument the pattern describes.
+	rendered := strings.Replace(render, `- "--token=hunter2"`, `- "--token=hunter2"`+"\n            - \"--egress=127.0.0.1:18081\"", 1)
+	env := func(variable string) string {
+		return strings.Replace(rendered, "            - name: TOKEN\n", "            - name: "+variable+"\n            - name: TOKEN\n", 1)
+	}
+	for name, tc := range map[string]struct {
+		name, port string
+		render     string
+		want       string
+	}{
+		"as rendered": {name: "aether-agent", port: "18081"},
+		"the name's entry is edited alone": {
+			name: "aether-node-agent", port: "18081",
+			want: "o: DaemonSet/aether-node-agent (named by the entry ds) is not rendered (the render's DaemonSet objects: aether-agent)",
+		},
+		"the chart renames the object alone": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, "  name: aether-agent\n", "  name: aether-node-agent\n", 1),
+			want:   "o: DaemonSet/aether-agent (named by the entry ds) is not rendered (the render's DaemonSet objects: aether-node-agent)",
+		},
+		"the port's entry is edited alone": {
+			name: "aether-agent", port: "18091",
+			want: `is not run with --egress=127.0.0.1:18091, which is what the contract's 127.0.0.1:<port> comes to (it has --egress with another value)`,
+		},
+		"the chart's default port is edited alone": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, "--egress=127.0.0.1:18081", "--egress=127.0.0.1:19000", 1),
+			want:   `is not run with --egress=127.0.0.1:18081`,
+		},
+		"the chart's default is another host": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, "--egress=127.0.0.1:18081", "--egress=localhost:18081", 1),
+			want:   `is not run with --egress=127.0.0.1:18081`,
+		},
+		"the chart stops passing the argument": {
+			name: "aether-agent", port: "18081",
+			render: render,
+			want:   `(it has no --egress argument)`,
+		},
+		"the chart gives the container the attribute its code sets": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, "service.namespace=hunter2", "service.namespace=hunter2,service.name=hunter2", 1),
+			want:   `OTEL_RESOURCE_ATTRIBUTES sets the resource attribute "service.name", which the entry sn says the component's own code sets`,
+		},
+		"the chart gives the container OTEL_SERVICE_NAME": {
+			name: "aether-agent", port: "18081",
+			render: env("OTEL_SERVICE_NAME\n              value: hunter2"),
+			want:   `container "agent" is given OTEL_SERVICE_NAME, which replaces the service.name the entry sn says the component's own code sets`,
+		},
+		"the chart gives it OTEL_SERVICE_NAME from a field": {
+			name: "aether-agent", port: "18081",
+			render: env("OTEL_SERVICE_NAME\n              valueFrom: {fieldRef: {fieldPath: metadata.name}}"),
+			want:   `is given OTEL_SERVICE_NAME`,
+		},
+		// What the check cannot read could set the attribute: it fails closed.
+		"the chart takes the resource attributes from a source that cannot be read": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, `value: "k8s.node.name=$(NODE_NAME),service.namespace=hunter2"`, "valueFrom: {configMapKeyRef: {name: hunter2, key: attrs}}", 1),
+			want:   "takes OTEL_RESOURCE_ATTRIBUTES from `valueFrom`, which this check cannot read",
+		},
+		"the chart gives the container variables in bulk": {
+			name: "aether-agent", port: "18081",
+			render: strings.Replace(rendered, "          env:\n", "          envFrom:\n            - configMapRef: {name: hunter2}\n          env:\n", 1),
+			want:   "takes variables from `envFrom`, which this check cannot read",
+		},
+		// service.namespace is in the render all along: only the attribute
+		// itself counts, and a variable of another name is not the SDK's.
+		"another variable": {name: "aether-agent", port: "18081", render: env("OTEL_SERVICE_NAMES\n              value: hunter2")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := parse([]byte(strings.NewReplacer("NAME", tc.name, "PORT", tc.port).Replace(tied)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			from := rendered
+			if tc.render != "" {
+				from = tc.render
+			}
+			got := strings.Join(c.Charts[0].Check([]byte(from)), "\n")
+			if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+				t.Errorf("Check() = %q, want it to contain %q", got, tc.want)
+			}
+			if strings.Contains(got, "hunter2") {
+				t.Errorf("Check() printed a value of the render: %q", got)
+			}
+		})
+	}
+}
+
+// A container or an object built by hand refers to entries nothing resolved:
+// that is a difference, never a pass.
 func TestRenderCheck_UnresolvedReferences(t *testing.T) {
 	o := agentObject()
 	o.Containers[0].ResourceAttributes = []string{"resource.node"}
 	got := strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(render)), "\n")
 	if !strings.Contains(got, "refers to other entries (resource.node) and they were not resolved") {
 		t.Errorf("Check() = %q", got)
+	}
+	o = agentObject()
+	o.Containers[0].CodeResourceAttributes = []string{"sn"}
+	got = strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(render)), "\n")
+	if !strings.Contains(got, "refers to other entries (sn) and they were not resolved") {
+		t.Errorf("Check() = %q", got)
+	}
+	o = agentObject()
+	o.Name, o.NameFrom = "", "ds"
+	got = strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(render)), "\n")
+	if !strings.Contains(got, "o refers to other entries (ds) and they were not resolved") {
+		t.Errorf("Check() = %q", got)
+	}
+}
+
+// selected is a contract that holds a pod's hostPath volume and the selectors
+// of two webhooks to `names` entries.
+const selected = `
+version: 1
+names:
+  - {id: driver, value: DRIVER, checked_by: review-only}
+  - {id: label, value: LABEL, checked_by: review-only}
+charts:
+  - id: r
+    chart: x
+    release: x
+    namespace: ns
+    objects:
+      - id: o
+        kind: DaemonSet
+        name: plugin
+        host_paths: ["/plugins/<driver>"]
+        containers: [{name: plugin}]
+      - id: w
+        kind: MutatingWebhookConfiguration
+        webhooks:
+          inject.example: {namespaces: label}
+          ndots.example: {objects: label}
+    checked_by: review-only
+`
+
+const selectedRender = `---
+kind: DaemonSet
+metadata: {name: plugin}
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: prepare
+          volumeMounts:
+            - {name: registry, mountPath: /registry}
+      containers:
+        - name: plugin
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}
+            - {name: registry, mountPath: /var/lib/kubelet/plugins_registry}
+        - name: sidecar
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: plugin-dir
+          hostPath: {path: /var/lib/kubelet/plugins/csi.example.io}
+        - name: registry
+          hostPath: {path: /var/lib/kubelet/plugins_registry}
+---
+kind: MutatingWebhookConfiguration
+metadata: {name: whatever-the-release-makes-it}
+webhooks:
+  - name: inject.example
+    namespaceSelector: {matchLabels: {example.io/managed: "true"}}
+  - name: ndots.example
+    objectSelector: {matchLabels: {example.io/managed: "true"}}
+  - name: other.example
+---
+kind: ValidatingWebhookConfiguration
+metadata: {name: validate}
+webhooks:
+  - name: inject.example
+`
+
+// TestRenderCheck_HostPathsAndWebhooks: the directory a pod mounts from the
+// host and the label a webhook selects by are read from the entries, so the
+// entry edited alone, or the chart alone, is a difference.
+func TestRenderCheck_HostPathsAndWebhooks(t *testing.T) {
+	for name, tc := range map[string]struct {
+		driver, label string
+		render        string
+		want          string
+	}{
+		"as rendered": {driver: "csi.example.io", label: "example.io/managed"},
+		"the driver's entry is edited alone": {
+			driver: "csi.mesh.io", label: "example.io/managed",
+			want: "o: DaemonSet/plugin has no hostPath volume whose path ends with /plugins/csi.mesh.io, which is what the contract's /plugins/<driver> comes to (its hostPath volumes: /var/lib/kubelet/plugins/csi.example.io, /var/lib/kubelet/plugins_registry)",
+		},
+		"the chart's directory is edited alone": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "hostPath: {path: /var/lib/kubelet/plugins/csi.example.io}", "hostPath: {path: /var/lib/kubelet/plugins/csi.mesh.io}", 1),
+			want:   "has no hostPath volume whose path ends with /plugins/csi.example.io",
+		},
+		"a driver that is only the end of the directory's name": {
+			driver: "example.io", label: "example.io/managed",
+			want: "has no hostPath volume whose path ends with /plugins/example.io",
+		},
+		"the label's entry is edited alone": {
+			driver: "csi.example.io", label: "example.io/meshed",
+			want: `w: the render's one MutatingWebhookConfiguration: the namespaceSelector of the webhook "inject.example" does not select by the label example.io/meshed=true, the value of the entry label with "true" (it selects by: example.io/managed=true)`,
+		},
+		"the chart's namespace selector is edited alone": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "namespaceSelector: {matchLabels: {example.io/managed:", "namespaceSelector: {matchLabels: {example.io/meshed:", 1),
+			want:   `the namespaceSelector of the webhook "inject.example" does not select by the label example.io/managed=true`,
+		},
+		"the chart's object selector is edited alone": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "objectSelector: {matchLabels: {example.io/managed:", "objectSelector: {matchLabels: {example.io/meshed:", 1),
+			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/meshed=true)`,
+		},
+		// The two selectors are not interchangeable: the label moved from one
+		// to the other selects other things.
+		"the chart moves the label to the object selector": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "namespaceSelector: {matchLabels: {example.io/managed:", "objectSelector: {matchLabels: {example.io/managed:", 1),
+			want:   `the namespaceSelector of the webhook "inject.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: none)`,
+		},
+		"the chart moves the label to the namespace selector": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "    objectSelector: {matchLabels: {example.io/managed:", "    namespaceSelector: {matchLabels: {example.io/managed:", 1),
+			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true`,
+		},
+		// The key with another value matches no pod the mesh manages.
+		"the chart selects the label with another value": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `objectSelector: {matchLabels: {example.io/managed: "true"}}`, `objectSelector: {matchLabels: {example.io/managed: "false"}}`, 1),
+			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/managed=false)`,
+		},
+		// The plugin writes its socket under the directory named after the
+		// driver, in its own filesystem: the kubelet sees it only if the host's
+		// directory is mounted there.
+		"the chart no longer mounts the directory": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}\n", "", 1),
+			want:   `o: DaemonSet/plugin: no container mounts the hostPath volume "plugin-dir" (/var/lib/kubelet/plugins/csi.example.io) at a path ending with /plugins/csi.example.io, which is what the contract's /plugins/<driver> comes to (the containers the contract lists for the object, plugin, mount it at: nowhere)`,
+		},
+		"the chart mounts the directory elsewhere": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "{name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}", "{name: plugin-dir, mountPath: /csi}", 1),
+			want:   `no container mounts the hostPath volume "plugin-dir" (/var/lib/kubelet/plugins/csi.example.io) at a path ending with /plugins/csi.example.io, which is what the contract's /plugins/<driver> comes to (the containers the contract lists for the object, plugin, mount it at: /csi)`,
+		},
+		"another volume is mounted at the directory": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "{name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}", "{name: tmp, mountPath: /var/lib/kubelet/plugins/csi.example.io}", 1),
+			want:   `no container mounts the hostPath volume "plugin-dir"`,
+		},
+		"only an init container mounts the directory": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(strings.Replace(selectedRender, "            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}\n", "", 1),
+				"{name: registry, mountPath: /registry}", "{name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}", 1),
+			want: `no container mounts the hostPath volume "plugin-dir"`,
+		},
+		// The process that writes the socket is the one the contract lists.
+		"only a sidecar mounts the directory": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(strings.Replace(selectedRender, "            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}\n", "", 1),
+				"        - name: sidecar\n          volumeMounts:\n", "        - name: sidecar\n          volumeMounts:\n            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}\n", 1),
+			want: `no container mounts the hostPath volume "plugin-dir" (/var/lib/kubelet/plugins/csi.example.io) at a path ending with /plugins/csi.example.io, which is what the contract's /plugins/<driver> comes to (the containers the contract lists for the object, plugin, mount it at: nowhere)`,
+		},
+		// A webhook's two selectors are ANDed as well: the one the contract
+		// does not name must select nothing in particular.
+		"the chart adds an object selector to the webhook held by its namespaces": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `    namespaceSelector: {matchLabels: {example.io/managed: "true"}}`, `    namespaceSelector: {matchLabels: {example.io/managed: "true"}}`+"\n"+`    objectSelector: {matchLabels: {tier: mesh}}`, 1),
+			want:   `w: the render's one MutatingWebhookConfiguration: the webhook "inject.example" also selects with its objectSelector (tier=mesh), and the contract holds it to its other selector alone`,
+		},
+		"the chart adds a namespace selector to the webhook held by its objects": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `    objectSelector: {matchLabels: {example.io/managed: "true"}}`, `    objectSelector: {matchLabels: {example.io/managed: "true"}}`+"\n"+`    namespaceSelector: {matchExpressions: [{key: tier, operator: Exists}]}`, 1),
+			want:   `the webhook "ndots.example" also selects with its namespaceSelector (none, and 1 matchExpressions), and the contract holds it to its other selector alone`,
+		},
+		// Kubernetes ANDs the requirements of a selector: anything beside the
+		// one pair narrows what the webhook sees, and it ignores failures.
+		"the chart requires one more label of a namespace": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `namespaceSelector: {matchLabels: {example.io/managed: "true"}}`, `namespaceSelector: {matchLabels: {example.io/managed: "true", tier: mesh}}`, 1),
+			want:   `w: the render's one MutatingWebhookConfiguration: the namespaceSelector of the webhook "inject.example" selects by more than the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/managed=true, tier=mesh)`,
+		},
+		"the chart adds an expression to a selector": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `objectSelector: {matchLabels: {example.io/managed: "true"}}`, `objectSelector: {matchLabels: {example.io/managed: "true"}, matchExpressions: [{key: example.io/managed, operator: NotIn, values: ["true"]}]}`, 1),
+			want:   `the objectSelector of the webhook "ndots.example" selects by more than the label example.io/managed=true, the value of the entry label with "true" (it selects by: example.io/managed=true, and 1 matchExpressions)`,
+		},
+		"the chart selects by an expression alone": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, `objectSelector: {matchLabels: {example.io/managed: "true"}}`, `objectSelector: {matchExpressions: [{key: example.io/managed, operator: In, values: ["true"]}]}`, 1),
+			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: none, and 1 matchExpressions)`,
+		},
+		"a webhook that selects by nothing": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "    objectSelector: {matchLabels: {example.io/managed: \"true\"}}\n", "", 1),
+			want:   `the objectSelector of the webhook "ndots.example" does not select by the label example.io/managed=true, the value of the entry label with "true" (it selects by: none)`,
+		},
+		"a webhook the chart no longer renders": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "  - name: ndots.example\n", "  - name: dots.example\n", 1),
+			want:   `has no webhook "ndots.example" (its webhooks: inject.example, dots.example, other.example)`,
+		},
+		"a second configuration of the kind": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: selectedRender + "---\nkind: MutatingWebhookConfiguration\nmetadata: {name: second}\n",
+			want:   "w: the render's one MutatingWebhookConfiguration is rendered 2 times",
+		},
+		"no configuration of the kind": {
+			driver: "csi.example.io", label: "example.io/managed",
+			render: strings.Replace(selectedRender, "kind: MutatingWebhookConfiguration", "kind: Something", 1),
+			want:   "w: the render's one MutatingWebhookConfiguration is not rendered",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := parse([]byte(strings.NewReplacer("DRIVER", tc.driver, "LABEL", tc.label).Replace(selected)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			from := selectedRender
+			if tc.render != "" {
+				from = tc.render
+			}
+			got := strings.Join(c.Charts[0].Check([]byte(from)), "\n")
+			if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+				t.Errorf("Check() = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+	// Built by hand, nothing resolved the entries: never a pass.
+	for _, o := range []Object{
+		{ID: "o", Kind: "DaemonSet", Name: "plugin", HostPaths: []string{"/plugins/<driver>"}},
+		{ID: "o", Kind: "MutatingWebhookConfiguration", Webhooks: map[string]WebhookSelector{"inject.example": {Objects: "driver"}}},
+	} {
+		got := strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(selectedRender)), "\n")
+		if !strings.Contains(got, "o refers to other entries (driver) and they were not resolved") {
+			t.Errorf("Check() = %q", got)
+		}
+	}
+}
+
+// rooted is a contract that holds a whole host path: the root a container is
+// run with, then a directory named after an entry.
+const rooted = `
+version: 1
+names:
+  - {id: driver, value: csi.example.io, checked_by: review-only}
+charts:
+  - id: r
+    chart: x
+    release: x
+    namespace: ns
+    objects:
+      - id: o
+        kind: DaemonSet
+        name: plugin
+        host_paths: ["<arg:--kubelet-root>/plugins/<driver>"]
+        containers: [{name: plugin}]
+    checked_by: review-only
+`
+
+const rootedRender = `---
+kind: DaemonSet
+metadata: {name: plugin}
+spec:
+  template:
+    spec:
+      containers:
+        - name: plugin
+          args: ["--kubelet-root=/var/lib/kubelet", "--root=/run/x"]
+          volumeMounts:
+            - {name: plugin-dir, mountPath: /var/lib/kubelet/plugins/csi.example.io}
+        - name: sidecar
+          args: ["--kubelet-root=/wrong"]
+      volumes:
+        - name: plugin-dir
+          hostPath: {path: /var/lib/kubelet/plugins/csi.example.io}
+        - name: registry
+          hostPath: {path: /var/lib/kubelet/plugins_registry}
+`
+
+// TestRenderCheck_RootedHostPath: the directory is held whole. The kubelet
+// looks under its own root, which the plugin is told with a flag: a directory
+// with the right end under another root is one the kubelet never reads.
+func TestRenderCheck_RootedHostPath(t *testing.T) {
+	c, err := parse([]byte(rooted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Charts[0].refs(); !slices.Equal(got, []string{"driver"}) {
+		t.Fatalf("the render refers to %q, want the driver alone: the flag is not an entry", got)
+	}
+	for name, tc := range map[string]struct {
+		from, to string
+		all      bool
+		want     string
+	}{
+		"as rendered": {},
+		"the chart moves the volume and the mount to another root": {
+			from: "/var/lib/kubelet/plugins/csi.example.io", to: "/wrong/plugins/csi.example.io", all: true,
+			want: `o: DaemonSet/plugin has no hostPath volume of the path /var/lib/kubelet/plugins/csi.example.io, which is what the contract's <arg:--kubelet-root>/plugins/<driver> comes to with the --kubelet-root of container "plugin" (its hostPath volumes: /wrong/plugins/csi.example.io, /var/lib/kubelet/plugins_registry)`,
+		},
+		"the chart gives the plugin another root and leaves the directory": {
+			from: `"--kubelet-root=/var/lib/kubelet"`, to: `"--kubelet-root=/var/lib/k0s/kubelet"`,
+			want: `has no hostPath volume of the path /var/lib/k0s/kubelet/plugins/csi.example.io`,
+		},
+		"the chart mounts the directory under another root": {
+			from: "mountPath: /var/lib/kubelet/plugins/csi.example.io", to: "mountPath: /wrong/plugins/csi.example.io",
+			want: `o: DaemonSet/plugin container "plugin" does not mount the hostPath volume "plugin-dir" at /var/lib/kubelet/plugins/csi.example.io, which is what the contract's <arg:--kubelet-root>/plugins/<driver> comes to with its --kubelet-root (it mounts it at: /wrong/plugins/csi.example.io)`,
+		},
+		"the chart names the directory after another driver": {
+			from: "hostPath: {path: /var/lib/kubelet/plugins/csi.example.io}", to: "hostPath: {path: /var/lib/kubelet/plugins/csi.mesh.io}",
+			want: `has no hostPath volume of the path /var/lib/kubelet/plugins/csi.example.io`,
+		},
+		// The last of a repeated flag is the one a Go program runs with: a
+		// render that says the root twice is not held by its first.
+		"the chart gives the root twice": {
+			from: `"--kubelet-root=/var/lib/kubelet", `, to: `"--kubelet-root=/var/lib/kubelet", "--kubelet-root=/wrong", `,
+			want: `o: DaemonSet/plugin container "plugin" is run with --kubelet-root 2 times: the last one wins, so no one value can be held`,
+		},
+		"the chart gives the same root twice": {
+			from: `"--kubelet-root=/var/lib/kubelet", `, to: `"--kubelet-root=/var/lib/kubelet", "--kubelet-root=/var/lib/kubelet", `,
+			want: `is run with --kubelet-root 2 times`,
+		},
+		"the plugin is no longer told the root": {
+			from: `"--kubelet-root=/var/lib/kubelet", `, to: ``,
+			want: `o: DaemonSet/plugin container "plugin" is not run with --kubelet-root, which the contract's <arg:--kubelet-root>/plugins/<driver> starts with`,
+		},
+		"the plugin container is gone": {
+			from: "        - name: plugin\n", to: "        - name: csi\n",
+			want: `o: DaemonSet/plugin has no container to take --kubelet-root from`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			from := rootedRender
+			if tc.from != "" {
+				if !strings.Contains(from, tc.from) {
+					t.Fatalf("the render has no %q", tc.from)
+				}
+				n := 1
+				if tc.all {
+					n = -1
+				}
+				from = strings.Replace(from, tc.from, tc.to, n)
+			}
+			got := strings.Join(c.Charts[0].Check([]byte(from)), "\n")
+			if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+				t.Errorf("Check() = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// byTest is a contract with a chart test per chart, and a name the first of
+// them compares with its render.
+const byTest = `
+version: 1
+names:
+  - {id: nm, value: v, checked_by: [//a:b, //t:x]}
+charts:
+  - {id: rx, chart: x, release: r, namespace: ns, objects: [{id: rx.o, kind: K, name_from: nm}], checked_by: //t:x}
+  - {id: ry, chart: y, release: r, namespace: ns, objects: [{id: ry.o, kind: K, name: z}], checked_by: //t:y}
+`
+
+// versioned is a contract whose one object carries the contract's version in
+// an annotation of its own metadata.
+const versioned = `
+version: 7
+names:
+  - {id: ann, value: example.io/contract-version, checked_by: review-only}
+charts:
+  - id: r
+    chart: x
+    release: x
+    namespace: n
+    objects:
+      - id: o
+        kind: DaemonSet
+        name: aether-agent
+        contract_version_annotation: ann
+    checked_by: review-only
+`
+
+// versionedRender is the render of that object, and of a second workload that
+// carries nothing.
+const versionedRender = `---
+kind: DaemonSet
+metadata:
+  name: aether-agent
+  labels: {app: agent}
+  annotations:
+    example.io/contract-version: "7"
+    other: hunter2
+spec:
+  template:
+    metadata:
+      labels: {app: agent}
+      annotations: {checksum/config: abc}
+---
+kind: Deployment
+metadata:
+  name: registrar
+  annotations: {other: hunter2}
+spec:
+  template:
+    metadata:
+      labels: {app: registrar}
+`
+
+// TestRenderCheck_ContractVersionAnnotation: the annotation's key is read from
+// the entry and its value from the contract's own `version`, so the entry
+// edited alone, the version bumped alone and the chart edited alone are each a
+// difference; and the key is on the object's own metadata and nowhere else,
+// because on a pod template a bump of the contract replaces every pod.
+func TestRenderCheck_ContractVersionAnnotation(t *testing.T) {
+	const own = `    example.io/contract-version: "7"` + "\n"
+	for name, tc := range map[string]struct {
+		contract [2]string // a replacement in the contract, if any
+		render   string
+		want     []string
+	}{
+		"as rendered": {},
+		"the contract's version is bumped alone": {
+			contract: [2]string{"version: 7", "version: 8"},
+			want:     []string{`o: DaemonSet/aether-agent carries the annotation example.io/contract-version (the value of the entry ann) with the value "7", and test/harnesscontract/external-harness.yaml is at version 8: the annotation is the string "8"`},
+		},
+		"the key's entry is edited alone": {
+			contract: [2]string{"value: example.io/contract-version", "value: example.io/contract"},
+			want:     []string{`o: DaemonSet/aether-agent has no annotation example.io/contract (the value of the entry ann) on its own metadata`, `(the annotations it has: example.io/contract-version, other)`},
+		},
+		"the chart renders another version": {
+			render: strings.Replace(versionedRender, own, `    example.io/contract-version: "6"`+"\n", 1),
+			want:   []string{`with the value "6", and test/harnesscontract/external-harness.yaml is at version 7`},
+		},
+		// A render from the source tree, where the generated file is not: the
+		// chart omits the annotation there, and the packaged chart may not.
+		"the chart renders no annotation": {
+			render: strings.Replace(versionedRender, own, "", 1),
+			want:   []string{`has no annotation example.io/contract-version (the value of the entry ann) on its own metadata`, `(the annotations it has: other)`},
+		},
+		"the chart renders no annotations at all": {
+			render: strings.Replace(versionedRender, "  annotations:\n"+own+"    other: hunter2\n", "", 1),
+			want:   []string{`has no annotation example.io/contract-version`, `(the annotations it has: none)`},
+		},
+		// Kubernetes takes strings only; the API server refuses a number.
+		"the chart renders the version unquoted": {
+			render: strings.Replace(versionedRender, own, "    example.io/contract-version: 7\n", 1),
+			want:   []string{`with the value 7, and test/harnesscontract/external-harness.yaml is at version 7: the annotation is the string "7"`},
+		},
+		"the chart renders it empty": {
+			render: strings.Replace(versionedRender, own, `    example.io/contract-version: ""`+"\n", 1),
+			want:   []string{`with the value "", and`},
+		},
+		"the chart moves it to the pod template": {
+			render: strings.Replace(strings.Replace(versionedRender, own, "", 1), "annotations: {checksum/config: abc}", `annotations: {checksum/config: abc, example.io/contract-version: "7"}`, 1),
+			want: []string{
+				`has no annotation example.io/contract-version (the value of the entry ann) on its own metadata`,
+				`o: DaemonSet/aether-agent also carries example.io/contract-version (the value of the entry ann) as an annotation of its pod template (a contract bump would then replace every pod of the workload)`,
+			},
+		},
+		"the chart writes it on the pod template as well": {
+			render: strings.Replace(versionedRender, "annotations: {checksum/config: abc}", `annotations: {checksum/config: abc, example.io/contract-version: "7"}`, 1),
+			want:   []string{`also carries example.io/contract-version (the value of the entry ann) as an annotation of its pod template`},
+		},
+		"the chart writes it as a pod label as well": {
+			render: strings.Replace(versionedRender, "      labels: {app: agent}\n      annotations", `      labels: {app: agent, example.io/contract-version: "7"}`+"\n      annotations", 1),
+			want:   []string{`also carries example.io/contract-version (the value of the entry ann) as a label of its pod template`},
+		},
+		"the chart writes it as a label of the object as well": {
+			render: strings.Replace(versionedRender, "  labels: {app: agent}\n  annotations", `  labels: {app: agent, example.io/contract-version: "7"}`+"\n  annotations", 1),
+			want:   []string{`also carries example.io/contract-version (the value of the entry ann) as a label of the object`},
+		},
+		"another object carries it too": {
+			render: strings.Replace(versionedRender, "annotations: {other: hunter2}", `annotations: {other: hunter2, example.io/contract-version: "7"}`, 1),
+			want:   []string{`r: Deployment/registrar carries example.io/contract-version as an annotation of the object, and the contract holds no such object to it`},
+		},
+		"another workload's pods carry it": {
+			render: strings.Replace(versionedRender, "labels: {app: registrar}", `annotations: {example.io/contract-version: "7"}`, 1),
+			want:   []string{`r: Deployment/registrar carries example.io/contract-version as an annotation of its pod template (a contract bump would then replace every pod of the workload)`},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			text := versioned
+			if tc.contract[0] != "" {
+				if !strings.Contains(text, tc.contract[0]) {
+					t.Fatalf("the contract has no %q to replace", tc.contract[0])
+				}
+				text = strings.Replace(text, tc.contract[0], tc.contract[1], 1)
+			}
+			c, err := parse([]byte(text))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rendered := tc.render
+			if rendered == "" {
+				rendered = versionedRender
+			}
+			if rendered == versionedRender && name != "as rendered" && tc.contract[0] == "" {
+				t.Fatal("the case changes neither the contract nor the render")
+			}
+			problems := c.Charts[0].Check([]byte(rendered))
+			got := strings.Join(problems, "\n")
+			if len(tc.want) == 0 && got != "" {
+				t.Errorf("Check() = %q, want no problem", got)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("Check() = %q, want it to contain %q", got, want)
+				}
+			}
+			// Another annotation's value is none of this check's business.
+			if strings.Contains(got, "hunter2") {
+				t.Errorf("Check() printed the value of another annotation: %q", got)
+			}
+		})
+	}
+}
+
+// TestRenderCheck_ContractVersionAnnotationUnresolved: an object that names
+// the entry and was not loaded through Load compares nothing, and says so.
+func TestRenderCheck_ContractVersionAnnotationUnresolved(t *testing.T) {
+	o := Object{ID: "o", Kind: "DaemonSet", Name: "aether-agent", ContractVersionAnnotation: "ann"}
+	got := strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(versionedRender)), "\n")
+	if !strings.Contains(got, "o refers to other entries (ann) and they were not resolved") {
+		t.Errorf("Check() = %q", got)
+	}
+}
+
+// TestContractVersionAnnotationNeedsAnEntry: the key is an entry of `names`,
+// never a string of the object's own.
+func TestContractVersionAnnotationNeedsAnEntry(t *testing.T) {
+	_, err := parse([]byte(strings.Replace(versioned, "contract_version_annotation: ann", "contract_version_annotation: example.io/contract-version", 1)))
+	if want := "o takes the key of its `contract_version_annotation` from \"example.io/contract-version\", and `names` has no entry with that id"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("parse() error = %v, want it to contain %q", err, want)
+	}
+}
+
+// TestHeldByChartTest: a chart test holds the renders of its chart and what
+// they refer to, and those entries name it; nothing else names it.
+func TestHeldByChartTest(t *testing.T) {
+	c, err := parse([]byte(byTest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.HeldByChartTest("//t:x", "x", []string{"rx", "rx.o", "nm"}); len(got) != 0 {
+		t.Errorf("HeldByChartTest() = %q, want nothing", got)
+	}
+	for name, tc := range map[string]struct {
+		target, chart string
+		ids           []string
+		want          []string
+	}{
+		"an entry the test is named for and does not list": {"//t:x", "x", []string{"rx", "rx.o"}, []string{`holds this chart to the entry "nm"`}},
+		"a render that names another test": {
+			"//t:y", "x",
+			[]string{"rx", "rx.o", "nm"},
+			[]string{
+				`rx is a render of the chart "x" and its checked_by does not name //t:y, the test that renders that chart`,
+				`names //t:y in the checked_by of "ry", and that entry is neither a render of the chart "x" nor referred to by one`,
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := strings.Join(c.HeldByChartTest(tc.target, tc.chart, tc.ids), "\n")
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("HeldByChartTest() = %q, want it to contain %q", got, want)
+				}
+			}
+			if !strings.Contains(got, File) {
+				t.Errorf("a failure does not name the contract file: %q", got)
+			}
+		})
 	}
 }
 
@@ -249,12 +953,12 @@ func TestOwnedIDs(t *testing.T) {
 		t.Errorf("OwnedIDs() = %q, want nothing", got)
 	}
 	untied := strings.Join(OwnedIDs(tied, []string{"r", "r.a"}), "\n")
-	for _, want := range []string{`holds a container of this chart to the entry "n"`, `holds a container of this chart to the entry "ra"`} {
+	for _, want := range []string{`holds this chart to the entry "n"`, `holds this chart to the entry "ra"`} {
 		if !strings.Contains(untied, want) {
 			t.Errorf("OwnedIDs() = %q, want it to contain %q", untied, want)
 		}
 	}
-	if got := strings.Join(OwnedIDs(renders, []string{"r", "r.a", "r.b", "ra"}), "\n"); !strings.Contains(got, `no container of this chart's renders refers to an entry of that id any more`) {
+	if got := strings.Join(OwnedIDs(renders, []string{"r", "r.a", "r.b", "ra"}), "\n"); !strings.Contains(got, `nothing in this chart's renders refers to an entry of that id any more`) {
 		t.Errorf("OwnedIDs() = %q, want the tie that is gone", got)
 	}
 	got := strings.Join(OwnedIDs(renders, []string{"r", "r.a", "r.gone"}), "\n")

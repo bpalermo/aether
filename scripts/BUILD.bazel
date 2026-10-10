@@ -16,7 +16,7 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 # must not be a list anyone has to remember to append to. scripts/ has no
 # subdirectories and no non-shell files; if it grows either, the glob still only
 # claims `*.sh` here and the sibling directory needs its own target (see
-# //e2e and //e2e/pressure for why the targets are per-directory).
+# //e2e for why the targets are per-directory).
 #
 # `scripts/check-shell-lint.sh` asserts that the union of these targets' srcs
 # covers every shell script in the repository, so adding one in a directory with
@@ -131,14 +131,17 @@ sh_test(
     data = ["check-shell-lint.sh"],
 )
 
-# The image-digest check (#1378) against a fake `bazel` that "builds" two images
-# from the workspace-status script it is handed: stable digests pass; a digest
-# that follows the commit, a tag that does not, a status that never reaches the
-# build, an action under an image that takes a status file, a query or action
-# query that fails or comes back empty, and a status script that fails or has no
-# STABLE_GIT_COMMIT each fail.
-# The check itself builds the real images twice and cannot run inside a test
-# (it runs Bazel); CI's `test` job runs it as a step.
+# The image-digest check (#1378, #1500) against a fake `bazel` that "builds" two
+# images from the workspace-status script it is handed: stable digests pass; a
+# digest that follows the commit, a tag that does not, a status that never
+# reaches the build, an action under an image that takes a status file, a query
+# or action query that fails or comes back empty, and a status script that fails
+# or has no STABLE_GIT_COMMIT each fail. So do a digest that follows the name of
+# the output directory, a `--platform_suffix` that renames none or only some of
+# the directories the images' binaries are built in, and a query for those
+# binaries that fails or finds none.
+# The check itself builds the real images three times and cannot run inside a
+# test (it runs Bazel); CI's `test` job runs it as a step.
 sh_test(
     name = "check_image_digest_stability_test",
     size = "small",
@@ -203,6 +206,20 @@ sh_test(
         "@jq_toolchains//:resolved_toolchain",
     ],
     env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
+# check-harness-contract-bump.sh (#1541): the lock of the external-harness
+# contract against the one at the pull request's base, so a promise removed
+# together with its lock line still needs a version bump. Hermetic: a fake
+# `git show`. Also holds ci.yaml to running it against the base sha.
+sh_test(
+    name = "check_harness_contract_bump_test",
+    size = "small",
+    srcs = ["check_harness_contract_bump_test.sh"],
+    data = [
+        "check-harness-contract-bump.sh",
+        "//:ci_definitions",
+    ],
 )
 
 # The watcher of the post-merge run (#1506): scripts/main-post-merge-watch.sh,

@@ -127,9 +127,13 @@ assume this section has been read.
 - `make format-check` before pushing (it also runs buildifier's linter on every
   BUILD and `.bzl` file). `make actionlint` when a workflow or a composite
   action changed. `scripts/check-shell-lint.sh` when a script was added.
-  `make check-image-digests` when an image rule, a binary's `x_defs` or the
-  workspace status changed: nothing in a Go image of this workspace may depend
-  on the commit (#1378; the separately built proxy image is the exception).
+  `make check-image-digests` when an image rule, a binary's `x_defs`, the
+  workspace status or a build flag in `.bazelrc` changed: nothing in a Go image
+  of this workspace may depend on the commit (#1378; the separately built proxy
+  image is the exception) or on the name of Bazel's output directory (#1500).
+- `.bazelrc` sets `--experimental_output_paths=strip`, so Go compiles are
+  path-mapped and run only sandboxed or remotely: do not pass
+  `--spawn_strategy=local` or `standalone`.
 - The race detector goes on the `go_test` targets you touched
   (`bazel test --config=race //pkg:pkg_test`), never on a wildcard that includes
   image targets: that fails in analysis (cgo is off for images).
@@ -178,8 +182,9 @@ assume this section has been read.
   and `bazel test //test/harnesscontract:checks` fails when the code and that
   file disagree. Renaming, removing or adding to a closed set of any of them:
   change the file in the same pull request, bump its `version` when
-  `test/harnesscontract/README.md` says so, and say in the description that
-  the contract changed.
+  `test/harnesscontract/README.md` says so (a test says so too: it compares
+  the file with `external-harness.lock.yaml` and prints what that file needs),
+  and say in the description that the contract changed.
 
 **Workflows**
 - Every action pinned by full commit SHA with the version in a trailing
