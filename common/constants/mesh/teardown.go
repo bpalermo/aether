@@ -16,7 +16,7 @@ import "time"
 // DOWN loopback: the SYN is dropped, not refused. With Envoy's default 5 s
 // connect timeout the 503 UF was written after the veth was gone
 // (ENETUNREACH), and the source waited on its own liveness timer. Measured on
-// talos-main 2026-10-01 (TRIPLE roll): app gone -> fast "connection refused"
+// the reference cluster 2026-10-01 (TRIPLE roll): app gone -> fast "connection refused"
 // 503s, then lo DOWN -> 5 s connection_timeout 503s, then CNI DEL, then the
 // veth ~2.2 s later.
 //

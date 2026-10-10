@@ -23,7 +23,7 @@ import (
 
 const (
 	testPod  = "prober-h2mzs"
-	testNode = "main-worker-03"
+	testNode = "node-c"
 )
 
 // setProberEnv sets OTEL_RESOURCE_ATTRIBUTES exactly as charts/prober's DaemonSet does.

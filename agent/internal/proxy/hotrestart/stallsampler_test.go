@@ -324,7 +324,7 @@ func TestParsePressureTotal(t *testing.T) {
 }
 
 func TestParseProcStat(t *testing.T) {
-	// Verbatim head of main-worker-04's /proc/stat (2026-10-01).
+	// Verbatim head of node D's /proc/stat (2026-10-01).
 	n, err := parseProcStat([]byte("cpu  81259081 0 52506391 207860896 12266 10811280 15188217 0 0 0\n" +
 		"cpu0 17021116 0 13834353 49829478 2674 3099526 8314454 0 0 0\n" +
 		"cpu1 21458363 0 12867111 52647812 3210 2565697 2311839 0 0 0\n" +

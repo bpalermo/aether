@@ -149,7 +149,7 @@ defeat `catch_unwind`). Instead of forking the proxy image, publish a minimal
 proxy pod as a **Kubernetes image volume** (`volume.image`, beta/on-by-default in
 1.34), with `ENVOY_DYNAMIC_MODULES_SEARCH_PATH=/modules` and
 `LD_LIBRARY_PATH=/modules`. Stock proxy image, module released on its own cadence.
-Requires a runtime with image-volume support (containerd ≥ 2.0) — verify on talos.
+Requires a runtime with image-volume support (containerd ≥ 2.0) — verify on Talos.
 
 ### Cardinality discipline
 - Default dimensions: `source_service` × `destination_service` ×

@@ -441,7 +441,7 @@ func (r *odcdsRun) waitRestated(t *testing.T) (resubscribed, heldOnly []string) 
 }
 
 // TestOnDemandQUICHeldTwinsNotReadmittedAfterAgentRestart is the live #1033
-// gate, in the talos shape.
+// gate, in the reference-cluster shape.
 //
 // The proxy holds twins A and B that the previous agent generation built UP
 // FRONT (the pre-#1020 SAs x destinations rule) and delivered through the

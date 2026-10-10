@@ -11,7 +11,7 @@ import (
 // bind collision exits non-zero (errno 98) WITHOUT a signal; a genuine Envoy
 // crash is signaled. Distinguishing them lets the supervisor give up on a
 // crashing Envoy fast instead of burning the (much larger) bind-collision retry
-// budget and looping silently for minutes (talos worker-01, 2026-06-19: a CDS
+// budget and looping silently for minutes (node A of the reference cluster, 2026-06-19: a CDS
 // referencing a gone netns crashed every epoch and masqueraded as a collision).
 func isCrashSignal(err error) bool {
 	var ee *exec.ExitError

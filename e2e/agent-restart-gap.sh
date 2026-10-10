@@ -8,7 +8,7 @@
 # long gap (#1129). The gate is the gap itself.
 #
 # THE HARNESS. The EWQ_WORKER=1 shape of e2e/eastwest-quic.sh (control plane +
-# one worker, both meshed, SPIRE on), on the etcd registry backend as talos-main
+# one worker, both meshed, SPIRE on), on the etcd registry backend as the reference cluster
 # runs it (ARG_BACKEND=kubernetes for the chart default). A poller inside each
 # kind node reads the node proxy's `control_plane.connected_state` from its
 # admin (127.0.0.1:9901) every ARG_POLL s and timestamps it; `kubectl rollout

@@ -224,7 +224,7 @@ func (s *AgentXdsServer) FirstServeReady() <-chan struct{} { return s.firstServe
 
 // clientCertificateTimeout bounds the first serve's wait for the SPIRE bridge
 // to deliver every local workload's certificate. The broker delivers them a few
-// seconds after the agent's own SVID (~2 s on talos-main, ~3.5 s on kind); the
+// seconds after the agent's own SVID (~2 s on the reference cluster, ~3.5 s on kind); the
 // bound exists for a pod whose SVID never comes, which would otherwise hold the
 // node's xDS forever.
 const clientCertificateTimeout = 5 * time.Second
@@ -234,7 +234,7 @@ const clientCertificatePoll = 50 * time.Millisecond
 
 // captureProjectionTimeout bounds the first serve's wait for the mesh-Service
 // projection. The reconciler projects within a second or two of its informer
-// syncing (~2 s after start on talos); the bound exists only for a kube API
+// syncing (~2 s after start on the reference cluster); the bound exists only for a kube API
 // that cannot be listed, where holding Envoy's previous configuration a little
 // longer is the safe failure and holding it forever is not.
 const captureProjectionTimeout = 10 * time.Second
@@ -387,7 +387,7 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	// the local pods' listeners needs nothing from SPIRE (the trust domain is
 	// the seeded one; reconcileSpireIdentity rebuilds them if SPIRE issues into
 	// another) and publishes nothing, because the socket is not open yet. Run
-	// after the hold it added 0.25-0.98 s to every talos restart, serially
+	// after the hold it added 0.25-0.98 s to every reference-cluster restart, serially
 	// behind an SVID wait it can overlap instead.
 	if err := s.cache.LoadListenersFromStorage(ctx, s.storage, s.trustDomain); err != nil {
 		s.log.ErrorContext(ctx, "failed to load listeners from storage", "error", err)
@@ -516,7 +516,7 @@ func (s *AgentXdsServer) waitForClientCertificatesFor(ctx context.Context, timeo
 // some point", not "the registry will serve this read now". The read that
 // follows takes a different path (the RPC fallback when the cache is not
 // serving), and on the rev211 deploy roll (2026-09-07 20:47:28Z on
-// main-worker-02) it failed while the registrar client's ClientConn was still
+// node B) it failed while the registrar client's ClientConn was still
 // recovering from the handshakes it had failed before this agent acquired its
 // SVID a fraction of a second earlier. The registrar was healthy and both
 // replicas had been Ready for 43 seconds. The snapshot published from that
@@ -528,7 +528,7 @@ func (s *AgentXdsServer) waitForClientCertificatesFor(ctx context.Context, timeo
 // unreachable still costs exactly what it cost before — the budget, then the
 // local-only fallback and the background retry — because a crash-looping or
 // stalled agent takes down the node's CNI ADD/DEL and xDS entirely, turning a
-// registrar blip into a node-wide outage (talos-main, 2026-06-10).
+// registrar blip into a node-wide outage (the reference cluster, 2026-06-10).
 //
 // Registries with no watch (the synchronous backends) have nothing to wait for
 // and keep the single-attempt behaviour exactly.
@@ -629,7 +629,7 @@ const identityHoldLogInterval = 15 * time.Second
 // server is unreachable, which is exactly why the crash loop this replaced was
 // survivable: a dying agent published nothing. A LIVING agent that opens the
 // xDS socket and pushes what it can does the one thing the crash loop never
-// did — it REPLACES a complete snapshot with a local-only one. On main-worker-03
+// did — it REPLACES a complete snapshot with a local-only one. On node C
 // on 2026-09-07 that evicted every cross-node endpoint and failed ~95% of the
 // node's mesh probes for the whole 6m41s outage (+5,083 errors), on a node whose
 // Envoy had been serving fine a second earlier.

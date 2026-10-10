@@ -1,7 +1,7 @@
 # Gateway API conformance — rev21: GATEWAY-HTTP FULLY CONFORMANT 43/43 (2026-06-27)
 
 A twenty-first run of the upstream Kubernetes **Gateway API conformance suite**
-(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **talos-main**, now at
+(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **the reference cluster**, now at
 aether **0.53.0 (helm rev 110)**, image/commit **`f7b7b35`** (#385). This run is the
 **first fully-conformant GATEWAY-HTTP run**: Core **33/33** and Extended **10/10**,
 zero failures, zero Core skips. rev20 was Core `33/0` but Extended `9/1` — the lone
@@ -12,7 +12,7 @@ Same programmatic runner as rev2–rev20 (`conformance/aether_rev20_test.go` dri
 `suite.NewConformanceTestSuite`, `GatewayClassName "aether"`, controller
 `gateway.aether.io/edge`), **not committed** to the repo. Aether was modified and
 redeployed this rev (rev20 was a re-run of an unchanged image; rev21 deploys the
-`f7b7b35` edge fixes). `api.palermo.dev` verified **200 / 301** before and after — no
+`f7b7b35` edge fixes). `api.example.com` verified **200 / 301** before and after — no
 production-shape regression.
 
 ## TL;DR — GATEWAY-HTTP fully conformant; MESH-HTTP unchanged (3 known fails)
@@ -127,7 +127,7 @@ work. **MESH-HTTP confirmed unchanged.**
   → follower-replica reconciler → internal-port leak in the redirect Location.
 - **MESH-HTTP unchanged at 4/3** — the three GAMMA capture-path fails remain, blocked on
   **proposal 022**. The edge work this rev did not touch the mesh data path.
-- **No `api.palermo.dev`-shape regression:** 200 / 301 before and after the deploy.
+- **No `api.example.com`-shape regression:** 200 / 301 before and after the deploy.
 
 ### Correction to the rev20 record
 

@@ -6,7 +6,7 @@
 # one no existing suite covers — then drives it from a mesh client and asserts
 # both protocols reach the right port.
 #
-# Why a Job rather than `kubectl exec`: exec into talos-main is not available to
+# Why a Job rather than `kubectl exec`: exec into the reference cluster is not available to
 # this harness, so the checks have to run INSIDE the mesh as a managed workload
 # and report through their own logs. That is also closer to what a real caller
 # experiences: the client pod is captured, so its dials traverse the capture

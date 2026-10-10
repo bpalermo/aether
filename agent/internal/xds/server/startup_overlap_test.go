@@ -20,7 +20,7 @@ import (
 // startup-overlap term. Building the local pods' listeners from storage needs
 // nothing from SPIRE (the trust domain is the seeded one, and a different one
 // is folded in later by reconcileSpireIdentity), yet it ran strictly AFTER the
-// identity hold: 0.25-0.98 s per restart on the 2026-10-02 talos agent rolls,
+// identity hold: 0.25-0.98 s per restart on the 2026-10-02 reference-cluster agent rolls,
 // serially behind an SVID wait of 0.15-2.0 s. Both sit inside the window in
 // which the node's proxy has no ADS stream.
 //

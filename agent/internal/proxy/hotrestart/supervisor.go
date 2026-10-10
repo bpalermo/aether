@@ -83,7 +83,7 @@ const (
 	// maxCrashRetries bounds in-process retries of an epoch that died on a fatal
 	// SIGNAL (SIGSEGV/SIGABRT) rather than a clean bind-collision exit. A crash is
 	// not a transient socket race, so it gets a small budget: a deterministically
-	// crashing Envoy (e.g. a CDS referencing a gone netns — talos worker-01,
+	// crashing Envoy (e.g. a CDS referencing a gone netns — node A of the reference cluster,
 	// 2026-06-19) surfaces as CrashLoopBackOff in ~15s instead of looping silently
 	// for the full 4.5-min bind-collision budget while masquerading as a collision.
 	maxCrashRetries = 5
@@ -321,7 +321,7 @@ const readyGateBuffer = 3 * time.Second
 // successor's ready gate on its first observed LIVE (issue #991).
 //
 // Envoy arms its parent-shutdown timer in startWorkers(), the same init-complete
-// step that flips admin to LIVE — not at the fork. Measured on talos
+// step that flips admin to LIVE — not at the fork. Measured on the reference cluster
 // (2026-09-26/27, 60 handoffs): "shutting down parent after drain" minus
 // "starting workers" was 14.93-15.00s against a 15s ParentShutdownTime, and the
 // old Envoy was gone 0.4-0.9s after that. The observed LIVE is never earlier
@@ -1194,7 +1194,7 @@ func (s *Supervisor) childTracked(epoch int) bool {
 // marker for the whole retry, and recorded a ready_transitions{ready=false},
 // while its epoch-0 Envoy was still tracked and still serving every request on
 // the node. That is a candidate mechanism for the unexplained proxy
-// readiness-marker flap on w01/w05 in the 2026-09-03 soak.
+// readiness-marker flap on nodes A and E in the 2026-09-03 soak.
 func (s *Supervisor) anyChildTracked() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

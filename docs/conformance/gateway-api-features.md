@@ -4,11 +4,11 @@ Aether implements Gateway API natively on its own SPIRE-mTLS + registry-EDS data
 (proposal 018), both north-south (edge `Gateway`/`HTTPRoute`) and east-west (GAMMA,
 `HTTPRoute`/`GRPCRoute` with `parentRef: Service`). This is the honest
 supported-features list — "ship support first, report it honestly, chase the badge
-later". `Supported` = implemented and e2e-validated on talos; `Partial` = implemented
+later". `Supported` = implemented and e2e-validated on the reference cluster; `Partial` = implemented
 with the noted limitation; `Planned` = on the 018 roadmap, not yet shipped.
 
 The L4 routes (TCPRoute/TLSRoute/UDPRoute) and the TCP-over-mTLS floor below were
-first e2e-validated on talos at aether chart 0.41.0 and have been carried by every
+first e2e-validated on the reference cluster at aether chart 0.41.0 and have been carried by every
 release since (chart 0.92.x at the time of writing); the conformance jobs in
 `.github/workflows/e2e.yaml` are the standing gate.
 

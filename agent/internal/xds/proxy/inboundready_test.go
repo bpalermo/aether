@@ -211,7 +211,7 @@ func TestInboundReadyChainAlwaysExists(t *testing.T) {
 // TestHealthGatewayProbesHaveSeparatePaths: each probe cluster gets its OWN
 // gateway path reflecting that cluster alone. #819 ANDed both behind
 // /healthz/health_<namespace>_<pod>, which made "the app is fine but the mesh inbound never
-// came up" indistinguishable from "the app died" — and cost main-worker-03 four
+// came up" indistinguishable from "the app died" — and cost node C four
 // endpoints on 2026-09-19.
 func TestHealthGatewayProbesHaveSeparatePaths(t *testing.T) {
 	probe := NewHealthGatewayProbe("health_echo-1", "inboundready_echo-1")

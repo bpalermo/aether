@@ -24,7 +24,7 @@ import (
 //
 //   - 4 -> 2: a parent connection whose CID % 4 differs from CID % 2 (about
 //     half) lands on a parent worker that does not own it and is reset
-//     ("Mismatched worker index", then a stateless reset). Measured on talos
+//     ("Mismatched worker index", then a stateless reset). Measured on the reference cluster
 //     2026-10-02: 34 mismatched batches and 12 stateless resets fleet-wide.
 //   - 2 -> 4: the child's sockets for workers 2-3 are new, not inherited, so
 //     they are not paused, and about half of the parent's connections are

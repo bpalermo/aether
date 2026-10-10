@@ -125,7 +125,7 @@ func TestWatchLoop_ConnectsImmediatelyWhenIdentityArrives(t *testing.T) {
 // the redial: the ClientConn still answers it
 // with the failure it cached before identity, the loop classifies it as the
 // post-identity reconnect, and then slept a whole initialBackoff (1s + jitter)
-// although the connection came up a few milliseconds later. On talos-main that
+// although the connection came up a few milliseconds later. On the reference cluster that
 // was the steady ~1.05s between `identity acquired` and `watch stream
 // connected` on every node of the 2026-10-02 agent rolls (03:05Z, 06:53Z), all
 // of it inside the window in which the node's proxy has no ADS stream.

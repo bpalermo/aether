@@ -169,8 +169,8 @@ spire:
   # recovers. That is the point (nothing new should be scheduled onto a node that
   # cannot give it an identity), but it also means a SPIRE that does not tolerate
   # the taint cannot be rescheduled onto the very nodes it has to attest: the
-  # outage would fence out its own cure. On talos-main these tolerations were
-  # applied in k8s-talos-main #45 (2026-09-07).
+  # outage would fence out its own cure. On the reference cluster these tolerations were
+  # applied in the platform's GitOps repository (2026-09-07).
   waitWarnAfter: 2m
 
 # Proxy MeshConfig — the controller seeds and projects the singleton MeshConfig CR
@@ -232,7 +232,7 @@ agent:
   updateStrategy:
     # false (default): delete-then-create (maxSurge 0, maxUnavailable 1). The
     # node's proxy has no ADS stream from the old agent's exit until the new
-    # one serves: the whole pod replacement plus startup (7.6-15.8 s on talos
+    # one serves: the whole pod replacement plus startup (7.6-15.8 s on the reference cluster
     # before #1123's first half, ~4-9 s after it).
     #
     # true: surge (maxSurge 1, maxUnavailable 0). The new agent starts beside
@@ -303,7 +303,7 @@ agent:
   # set to "true" (the passthrough chain itself is always present, proposal
   # 031). Carve out destinations
   # with capture.aether.io/exclude-outbound-ports / -ip-ranges (link-local +
-  # multicast are always excluded). Default ON — validated HITLESS on talos
+  # multicast are always excluded). Default ON — validated HITLESS on the reference cluster
   # (2026-06-29 churn soak: external prober 100%, k6 0.012%, egress intact, stable
   # RSS through 6 proxy + 14 service rolls). This is the riskiest blast radius
   # (every meshed pod's egress); set false to revert to per-pod opt-in.
@@ -407,12 +407,12 @@ agent:
     # the agent (#1116) and the authz sidecar. This daemon is every managed pod's
     # resolver, so its tail latency is every pod's lookup latency. At the old
     # 25m request / 100m limit it averaged ~24.5m and was STILL CFS-throttled in
-    # 8.7 % of 100 ms periods (live cgroup on talos w05: nr_throttled 16851 of
+    # 8.7 % of 100 ms periods (live cgroup on node E of the reference cluster: nr_throttled 16851 of
     # nr_periods 193397, ~1,632 s throttled over ~4.5 h): its CPU arrives in
     # bursts (a reload, a query storm at a rollout, a GC cycle), and a burst
     # past 10 ms in a period parks every query in flight until the next period.
     # The request still reserves CPU for scheduling and is the CFS weight under
-    # contention (25m against talos' 800m proxy request was a ~1:32 weight on a
+    # contention (25m against the reference cluster's 800m proxy request was a ~1:32 weight on a
     # saturated node). A surge roll (maxSurge 1) needs a second 50m per node.
     # The pod was already QoS Burstable (requests != limits), so no QoS class
     # changes. To restore a cap, set limits.cpu (and see goMaxProcs below);
@@ -443,7 +443,7 @@ agent:
     # round trip (token + manifest HEAD) to every agent pod start. That start
     # is spent with the node's proxy on no ADS stream: the kubelet measured
     # 1.44 s of image "pulling" (agent + cni-install, both already present) on
-    # one 2026-10-02 talos agent restart. Set Always only for a mutable tag.
+    # one 2026-10-02 reference-cluster agent restart. Set Always only for a mutable tag.
     pullPolicy: IfNotPresent
   # CPU: a 200m REQUEST and deliberately NO CPU LIMIT (#1116). The agent's xDS
   # snapshot builds are 5-25 ms CPU bursts on latency-critical paths (ODCDS
@@ -524,7 +524,7 @@ cniInstall:
   # the plugin already on the host against the one in the image (#1123's
   # "unchanged; not rewriting it" path), then a few small conflist reads. A
   # 100m quota is 10 ms of CPU per 100 ms CFS period, so the burst was parked
-  # once per period: on talos-main all 40 agent starts of 2026-10-05..07 (8
+  # once per period: on the reference cluster all 40 agent starts of 2026-10-05..07 (8
   # rolls x 5 nodes, every one on the unchanged path) took 496-802 ms from the
   # installer's first log line to its last (median 598 ms), always a multiple
   # of ~100 ms, for at most 50-80 ms of CPU -- about half a second of pure
@@ -623,7 +623,7 @@ udsCsi:
   # the termination) path of every UDS pod. At the old 5m request / 100m limit
   # it used 11-23 CPU-seconds per pod over an 8 h soak (under 1m on average) and
   # was STILL CFS-throttled in 57.6 % of the 100 ms periods it ran in (cAdvisor,
-  # talos 2026-10-06: 20,248 throttled of 35,169 periods, 15 pods). All of its
+  # the reference cluster 2026-10-06: 20,248 throttled of 35,169 periods, 15 pods). All of its
   # CPU is bursts: a publish (mkdir, mount, bind), and every 30 s the liveness
   # probe, which is a whole second Go process (`/uds-csi --probe`) started
   # inside THIS container's cgroup. A burst past 10 ms in a period parks the
@@ -760,7 +760,7 @@ proxy:
     # is server-wide: h2 connections, LDS listener drains and the
     # pod-termination drain all switch too.
     #
-    # Default is gradual. On talos-main immediate made the #1054 resets WORSE
+    # Default is gradual. On the reference cluster immediate made the #1054 resets WORSE
     # (4/8/0 per roll vs 1–3 per run under gradual): every parent connection
     # closes at drain start, and those closes are what the source then sees
     # reset. The carried patches (#1064: the child unpauses its UDP listeners
@@ -1077,17 +1077,17 @@ edge:
     # address pins the Gateway's spec.addresses. Under proposal 021 Phase 2
     # (per-Gateway addressing) the edge controller requests this IP from MetalLB for
     # the Gateway's own LoadBalancer Service, so the edge keeps a stable address
-    # (e.g. the IP api.palermo.dev resolves to). Empty = MetalLB auto-assigns from
+    # (e.g. the IP api.example.com resolves to). Empty = MetalLB auto-assigns from
     # the pool.
     address: ""
     # hostname constrains the chart-managed Gateway's listeners (e.g.
-    # "*.palermo.dev"). Empty = listeners accept any host.
+    # "*.example.com"). Empty = listeners accept any host.
     hostname: ""
     # httpRoutes declares HTTPRoutes managed by this chart, each parented to the
     # chart-managed edge Gateway above. This is the supported, declarative
     # replacement for hand-applying HTTPRoute manifests (DEPRECATED). Each entry:
     #   - name: api
-    #     hostnames: ["api.palermo.dev"]
+    #     hostnames: ["api.example.com"]
     #     rules:
     #       - backendRefs:
     #           - name: my-backend
@@ -1130,7 +1130,7 @@ edge:
   # (#1116). `resources` above carries no CPU limit, and since Go 1.25 the
   # runtime derives GOMAXPROCS from the cgroup CPU limit, so without this it
   # follows the node's core count (and the GC's background workers with it).
-  # Measured on talos-main (cAdvisor, 2 replicas, the 45 h to 2026-10-07, light
+  # Measured on the reference cluster (cAdvisor, 2 replicas, the 45 h to 2026-10-07, light
   # edge traffic): the container averaged 1.8m and its busiest 5 minutes were
   # 4.4m -- well under
   # one percent of ONE core -- so 2 is not a ceiling it can feel; it is the
@@ -1149,7 +1149,7 @@ edge:
   # (#1455). One worker per node core only when the container has no CPU limit
   # and no restricted mask; a limit on the pod as a whole is not read.
   #
-  # Default 2, the count the node proxies run with on talos-main since #1093.
+  # Default 2, the count the node proxies run with on the reference cluster since #1093.
   # The edge Envoy averages about 12m of CPU there, so two workers are far from
   # a ceiling, and each worker it does not start is a thread's idle wake-ups and
   # per-worker memory (connection pools, thread-local stats and config) saved.
@@ -1304,7 +1304,7 @@ controller:
   # while no replica answers, pods are admitted unmutated, so a pod created in an
   # aether.io/managed namespace silently comes up OUTSIDE the mesh and a managed
   # pod misses its ndots. With one replica, deleting the leader measured a 49 s
-  # gap (talos-main, 2026-09-19); a node drain or an image pull makes it longer.
+  # gap (the reference cluster, 2026-09-19); a node drain or an image pull makes it longer.
   replicaCount: 2
   # How the replicas are spread across nodes: see registrar.nodeSpread
   # (soft | required | none). Every replica serves the admission webhooks, so
@@ -1390,7 +1390,7 @@ controller:
     # for the pod's X.509 SVID and exits 0 once SPIRE has issued it, so the app
     # cannot send before the node proxy has a client certificate for it. Without
     # it, a pod that sends in its first seconds (SPIRE's entry sync; ~7.5 s on
-    # talos-main) gets 503 UF connection_timeout until its SVID lands. The egress
+    # the reference cluster) gets 503 UF connection_timeout until its SVID lands. The egress
     # twin of the inbound-readiness promotion gate.
     #
     # Fail closed: a pod whose SVID never comes stays in Init, and the init

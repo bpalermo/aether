@@ -1,7 +1,7 @@
 # Gateway API conformance — rev20: GATEWAY-HTTP-Core 33/33 COMPLETE (2026-06-26)
 
 A twentieth run of the upstream Kubernetes **Gateway API conformance suite**
-(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **talos-main**, now at
+(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **the reference cluster**, now at
 aether **0.51.0 (rev 103)**, image/commit **`9d6f53c`** (#376). This run targeted the
 **GATEWAY-HTTP-Core-complete (33/33)** confirmation. rev18/rev19 were both `39/4`
 (Core `32/1`, Extended `7/3`). Since rev19, two fix PRs deployed:
@@ -25,7 +25,7 @@ Aether was **not** modified or redeployed (HEAD `9d6f53c` == deployed image comm
 the `/\1`, `IgnorePortInHostMatching: true`, and gatewayServiceName changes were
 verified present in the deployed source before the run). All `gateway-conformance-*`
 namespaces and per-Gateway LoadBalancer Services were cleaned up afterward (admin on,
-Phase 2 on). `api.palermo.dev` verified **200** (HTTP→HTTPS **301**) both before and
+Phase 2 on). `api.example.com` verified **200** (HTTP→HTTPS **301**) both before and
 after the run — no production-shape regression from the host-port HCM/route change.
 
 ## TL;DR — Core 33/33 COMPLETE, the two expected flips both landed
@@ -133,7 +133,7 @@ unrelated to the core mesh-route score.)
   (Core via `ignore_port_in_host_matching`, Extended via `/\1` + method-sort) landed;
   `HTTPRouteRedirectPortAndScheme` flipped from a redirect-404 (rev18) to a clean
   address-convergence timeout, which is a convergence gap, not a regression.
-- **No `api.palermo.dev`-shape regression:** 200 / 301 before and after — the host-port
+- **No `api.example.com`-shape regression:** 200 / 301 before and after — the host-port
   HCM/route change (`strip_any_host_port` → `ignore_port_in_host_matching`) did not
   disturb the production edge.
 

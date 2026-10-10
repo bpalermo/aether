@@ -16,7 +16,7 @@
 // tag keeps it out of `go test ./...` / `bazel test //...` in this repo. See
 // .github/workflows/conformance.yaml and docs/proposals/024_conformance-ci.md.
 //
-//   - TestAetherGatewayHTTP: the north-south edge profile. Fully conformant on talos
+//   - TestAetherGatewayHTTP: the north-south edge profile. Fully conformant on the reference cluster
 //     (43/43, rev21). Runs and GATES in CI (kind, no SPIRE, cleartext backends).
 //   - TestAetherMeshHTTP: the east-west GAMMA profile. Runs in CI (kind, no SPIRE)
 //     via the `mesh-http` job, SOFT (continue-on-error) while the score is driven up.
@@ -170,7 +170,7 @@ func logGatewayFeatures(t *testing.T, c client.Client) {
 	t.Logf("Supported features for GatewayClass %s: %v", aetherGatewayClassName, fns)
 }
 
-// aetherTimeouts mirrors the talos baseline runner: a long GatewayMustHaveAddress
+// aetherTimeouts mirrors the reference-cluster baseline runner: a long GatewayMustHaveAddress
 // budget (LoadBalancer/MetalLB or cloud-provider-kind convergence is slow) and a
 // generous consistency window for demand-scoped xDS propagation.
 func aetherTimeouts() conformanceconfig.TimeoutConfig {
@@ -244,7 +244,7 @@ func aetherImpl() confv1.Implementation {
 		Project:      "aether",
 		URL:          "https://github.com/bpalermo/aether",
 		Version:      aetherImplVersion,
-		Contact:      []string{"bpalermo@pm.me"},
+		Contact:      []string{"@bpalermo"},
 	}
 }
 
@@ -309,7 +309,7 @@ func skipUnlessEnabled(t *testing.T) {
 // TestAetherGatewayHTTP runs the GATEWAY-HTTP (north-south edge) conformance
 // profile. Features are inferred from GatewayClass.status.supportedFeatures
 // (SupportedFeatures left nil + EnableAllSupportedFeatures=false). This is the
-// profile aether is fully conformant on (43/43 on talos, rev21) and the one CI gates.
+// profile aether is fully conformant on (43/43 on the reference cluster, rev21) and the one CI gates.
 func TestAetherGatewayHTTP(t *testing.T) {
 	skipUnlessEnabled(t)
 	c, cs, copts, cfg := aetherClients(t)

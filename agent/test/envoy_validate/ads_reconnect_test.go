@@ -20,7 +20,7 @@ import (
 // While the stream is down the proxy routes on its last config, so a
 // destination the registry marked DRAINING in the meantime is still selected.
 // Envoy's xDS default is a fully jittered exponential backoff with a 30 s cap,
-// which on talos-main left a proxy reconnecting 8.4 s AFTER its restarted agent
+// which on the reference cluster left a proxy reconnecting 8.4 s AFTER its restarted agent
 // was serving again, and sending requests to a pod drained 3.4 s earlier. The
 // cap is what bounds that blind tail once the agent is back; 1 s keeps it under
 // the two-phase drain's 2 s pool-close floor.

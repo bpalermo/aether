@@ -126,7 +126,7 @@ type AetherConf struct {
 const defaultNetnsPinDir = "/run/aether/netns"
 
 // defaultNetnsUnpinDelay covers the post-removal dial window observed on
-// talos-main: health checkers / connection pools dialed up to ~13s after the
+// the reference cluster: health checkers / connection pools dialed up to ~13s after the
 // listener and clusters were removed from the snapshot under roll churn. Such a
 // dial through an already-released pin used to segfault Envoy 1.38; on the
 // pinned snapshot it is a clean failure (envoyproxy/envoy#45975, #46503), so

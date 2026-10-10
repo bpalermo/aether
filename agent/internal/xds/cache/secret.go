@@ -41,7 +41,7 @@ func (c *SnapshotCache) SetNodeIdentity(ctx context.Context, nodeSpiffeID string
 	// presents (issue #815). That recompute is NOT triggered from here: the
 	// SPIRE bridge calls this method exactly once ever (`if firstServe`), so a
 	// trigger hanging off it can be missed permanently — which is how
-	// main-worker-05 ran a whole agent lifetime with no probe clusters at all on
+	// node E ran a whole agent lifetime with no probe clusters at all on
 	// 2026-09-19. generateSnapshot reconciles them on every push instead.
 
 	return c.generateSnapshot(ctx)

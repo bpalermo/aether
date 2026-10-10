@@ -59,7 +59,7 @@ const (
 	// resolution of the state/wchan sampling (schedstat is cumulative, so CPU
 	// and runqueue time are exact regardless). Per tick it is two or three
 	// small file reads per sampled thread — five threads per epoch at Envoy's
-	// default --concurrency on the 4-core talos-main workers.
+	// default --concurrency on the 4-core reference-cluster workers.
 	DefaultStallSampleInterval = 100 * time.Millisecond
 	// DefaultStallThreshold is the --stall-threshold default, matching Envoy's
 	// default worker watchdog miss_timeout.

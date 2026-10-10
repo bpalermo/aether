@@ -2,7 +2,7 @@
 
 What a Kubernetes workload needs to participate in the Aether mesh, and what it
 needs to be rolled with **zero dropped requests**. Validated end-to-end on
-talos-main (2026-06-10): three consecutive rolling restarts of three services
+the reference cluster (2026-06-10): three consecutive rolling restarts of three services
 under ~250 rps with 0 failed requests across every stream.
 
 ## Joining the mesh
@@ -57,7 +57,7 @@ spec:
 Every connection a mesh pod makes is mTLS with **the pod's own SVID** as the
 client certificate — and SPIRE issues that SVID a few seconds after the pod is
 created (its registration entry has to be created and synced to the node's
-SPIRE agent: ~7.5 s measured on talos-main). An app that sends in that window
+SPIRE agent: ~7.5 s measured on the reference cluster). An app that sends in that window
 used to get `503 UF` (`connection_timeout`): the source proxy had no certificate
 to present yet (#1053).
 

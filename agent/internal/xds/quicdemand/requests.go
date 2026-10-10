@@ -10,7 +10,7 @@
 //     the pre-#1020 agent delivered its SAs x destinations fan-out, built up
 //     front with no request behind any of them. A held twin is not demand. The
 //     #1032 agent re-admitted every one as a pair (RestoreQUICTwin), so on its
-//     first talos deploy (rev245, 2026-09-28) every node logged
+//     first reference-cluster deploy (rev245, 2026-09-28) every node logged
 //     `quic_clusters=N observed_pairs=N local_identities=N/2` and persisted the
 //     fan-out for good. A held-only twin the agent does not serve is answered
 //     absent: go-control-plane seeds the stream's returned-resource map from

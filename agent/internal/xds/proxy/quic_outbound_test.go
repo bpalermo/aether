@@ -21,7 +21,7 @@ import (
 
 func TestSourceSAKeyFromSpiffeID(t *testing.T) {
 	assert.Equal(t, "demo/source-a", SourceSAKeyFromSpiffeID("spiffe://aether.internal/ns/demo/sa/source-a"))
-	assert.Equal(t, "", SourceSAKeyFromSpiffeID("spiffe://aether.internal/node/main-worker-01"), "a node identity is not a workload")
+	assert.Equal(t, "", SourceSAKeyFromSpiffeID("spiffe://aether.internal/node/node-a"), "a node identity is not a workload")
 	assert.Equal(t, "", SourceSAKeyFromSpiffeID("spiffe://aether.internal/ns/demo/sa/"), "empty sa")
 	assert.Equal(t, "", SourceSAKeyFromSpiffeID("spiffe://aether.internal/ns/demo/sa/a/b"), "nested path is not a workload id")
 	assert.Equal(t, "", SourceSAKeyFromSpiffeID(""))

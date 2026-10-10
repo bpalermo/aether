@@ -292,7 +292,7 @@ func inboundReadyClusterName(entry listenerEntry) string {
 // first node SVID it ever serves (`if firstServe`). Any ordering in which both
 // of those fire while one precondition is still missing left the gate absent
 // for the entire life of the agent, with nothing to re-run it and no signal:
-// main-worker-05 on 2026-09-19 emitted no inboundready_* cluster at all despite
+// node E on 2026-09-19 emitted no inboundready_* cluster at all despite
 // a served node SVID. Convergence must not depend on catching a specific event.
 //
 // The per-entry work is skipped when the entry was already rendered from this
@@ -670,7 +670,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	//
 	// This is the structural half of the #815/#819 fix. The old code recorded it
 	// AFTER publishing the whole listener map, which left a window (710 ms on
-	// main-worker-03, 2026-09-19) in which the cache held 15 per-pod listeners
+	// node C, 2026-09-19) in which the cache held 15 per-pod listeners
 	// and an empty trust domain. Any regeneration that started in that window —
 	// the gamma reconciler's first SetServiceChainFilters did, at 17:31:22.024Z —
 	// read "" and rewrote every inbound chain as `spiffe:///ns/…`.
@@ -695,7 +695,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		// Skip a pod whose network namespace no longer exists: a missed CNI DEL
 		// (or one the agent was absent for, #796) left the storage entry behind,
 		// and its per-pod cluster would point Envoy at a dead netns via
-		// NetworkNamespaceFilepath. That used to fault the proxy outright (talos
+		// NetworkNamespaceFilepath. That used to fault the proxy outright (the reference cluster
 		// worker-01, 2026-06-19); on the pinned snapshot it is only stale config
 		// whose dials fail cleanly (envoyproxy/envoy#45975 for the pool dial,
 		// #46503 for the active health checkers). Skipping is still right — the

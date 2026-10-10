@@ -65,7 +65,7 @@ func TestOnDemandObserver_OverlappingProxyGenerationsAfterAgentRestart(t *testin
 		name  string
 		order []int64 // which fresh stream re-states first
 	}{
-		{name: "new generation first (rev248 w03)", order: []int64{child, parent}},
+		{name: "new generation first (rev248 node C)", order: []int64{child, parent}},
 		{name: "old generation first", order: []int64{parent, child}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

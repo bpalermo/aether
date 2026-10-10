@@ -17,7 +17,7 @@ import (
 // mutual TLS and sleeps the stream backoff (1 s, doubling). When the SVID
 // lands, nothing woke those sleeps: the pods' certificates arrived on the
 // backoff's schedule, ~1.05 s after the agent's identity on the 2026-10-02
-// talos rolls and up to 2.7 s (main-worker-05, 06:54Z), and the first xDS
+// reference-cluster rolls and up to 2.7 s (node E, 06:54Z), and the first xDS
 // serve waits for them (#1103's client-certificate gate) while the node's
 // proxy has no ADS stream.
 //

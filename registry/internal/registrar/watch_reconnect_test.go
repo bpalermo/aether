@@ -38,7 +38,7 @@ func newClassifyingRegistry(t *testing.T, identityReady func() bool) (*Registrar
 }
 
 // TestFailStream_ClassificationOrder is PR 5 of #740. The rev211 deploy roll
-// (2026-09-07 20:47Z, main-worker-02) logged `registrar has no identity yet` for
+// (2026-09-07 20:47Z, node B) logged `registrar has no identity yet` for
 // two conditions that were not that: at 20:47:27.338 the AGENT had no SVID, and
 // at 20:47:27.912 the agent had one (85ms old) while its ClientConn was still
 // recovering from the handshakes it had failed before. Both registrar replicas

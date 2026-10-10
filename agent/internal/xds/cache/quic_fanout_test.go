@@ -181,7 +181,7 @@ func observeQUIC(t *testing.T, c *SnapshotCache, service string, sources ...stri
 // per service, not a node-wide off switch.
 func TestQUICFanoutSkipsWaypointedServices(t *testing.T) {
 	remote := makeEndpoint("10.9.0.1", "cluster-2", "node-9", 8080)
-	remote.KubernetesMetadata.NodeIp = "192.168.9.1"
+	remote.KubernetesMetadata.NodeIp = "198.51.100.1"
 	c := quicFanoutCache(t, true, map[string][]*registryv1.ServiceEndpoint{
 		"demo/local":  {makeEndpoint("10.0.3.1", "cluster-1", "node-2", 8080)},
 		"demo/spread": {makeEndpoint("10.0.3.2", "cluster-1", "node-2", 8080), remote},

@@ -248,7 +248,7 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint_MetadataCannotForgeBuilti
 		KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
 			Namespace: "tenant-a",
 			PodName:   "svc-a-1",
-			NodeIp:    "192.168.1.10",
+			NodeIp:    "198.51.100.10",
 		},
 		Metadata: map[string]string{
 			subsetIPKey:           "10.9.9.9",
@@ -399,7 +399,7 @@ func TestServiceLocalityLbEndpoint_Waypoint(t *testing.T) {
 			ClusterName: "cluster-b",
 			Locality:    &registryv1.ServiceEndpoint_Locality{Region: "r1", Zone: "z1"},
 			KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
-				Namespace: "default", PodName: "svc-b-1", NodeName: "node-b", NodeIp: "192.168.0.42",
+				Namespace: "default", PodName: "svc-b-1", NodeName: "node-b", NodeIp: "192.0.2.42",
 			},
 		}
 	}
@@ -409,7 +409,7 @@ func TestServiceLocalityLbEndpoint_Waypoint(t *testing.T) {
 	// remote priority band (locality 0 + band 3).
 	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(remote(), "r1", "z1", wp)
 	sa := lle.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
-	assert.Equal(t, "192.168.0.42", sa.GetAddress(), "dial the node, not the pod")
+	assert.Equal(t, "192.0.2.42", sa.GetAddress(), "dial the node, not the pod")
 	assert.Equal(t, uint32(18009), sa.GetPortValue(), "dial the tunnel port")
 	lb := lle.GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields()
 	assert.Equal(t, "true", lb[subsetWaypointKey].GetStringValue(), "tagged for the waypoint transport socket")

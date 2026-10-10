@@ -19,7 +19,7 @@ lifecycle), 001 (the proxy's own hot-restart handoff, the model this follows).
 
 A node agent roll is delete-then-create (`maxSurge: 0, maxUnavailable: 1`). From
 the moment the old agent exits until the new one serves xDS, the node's proxy
-has no ADS stream and routes on stale config. On talos-main on 2026-10-02 (agent
+has no ADS stream and routes on stale config. On the reference cluster on 2026-10-02 (agent
 logs, VictoriaLogs; 10 node restarts across the 03:05Z and 06:53Z rolls) that
 window was 7.6-15.8 s:
 
@@ -36,11 +36,11 @@ proxy-side `control_plane.connected_state`) it took the gap from median 12.0 s /
 p99 17.9 s (n=16) to median 5.5 s / p99 8.8 s (n=20), and everything after the
 agent's own SVID now takes ~0.1 s. What is left is not the agent's:
 
-- **replacement**, 2.8-3.4 s on kind (images are `Never`-pulled there; talos
+- **replacement**, 2.8-3.4 s on kind (images are `Never`-pulled there; the reference cluster
   adds its registry checks, now gone, and a slower sandbox). Of that, the
   cni-install init container costs its run (0.1-0.3 s) plus the kubelet
   noticing it exited (0.4-1.4 s, the PLEG relist).
-- **the first SVID**, 1.0-5.2 s on kind (0.15-2.0 s on talos): the SPIRE
+- **the first SVID**, 1.0-5.2 s on kind (0.15-2.0 s on the reference cluster): the SPIRE
   agent's Kubernetes attestor cannot match the new container until the kubelet
   reports it, so the agent's Workload API fetch waits on SPIRE and the kubelet,
   not on aether.
@@ -65,7 +65,7 @@ instant the old process dies, however it dies. On acquiring it the standby:
 
 1. reconciles its listeners with storage: pods the old agent ADDed or DELed
    during the overlap (a diff against the pods it loaded, not a full reload: the
-   full load is 0.25-0.98 s on talos);
+   full load is 0.25-0.98 s on the reference cluster);
 2. binds `cni.sock` and `xds.sock` (unlink + bind, as today's restart);
 3. starts the writers it held back (observed upstreams, QUIC pairs, the mesh-DNS
    snapshot and its heartbeat).
@@ -93,7 +93,7 @@ pod-start cost.
 
 Behind `agent.updateStrategy.surge` (default `false`). The kind harness from
 #1123 (`e2e/agent-restart-gap.sh`) is the gate: green at `ARG_BOUND=1` across 20
-rolls with load running, then a talos soak with the agent rolled under the
+rolls with load running, then a reference-cluster soak with the agent rolled under the
 standard churn.
 
 ## Open questions
@@ -185,4 +185,4 @@ Found during implementation:
   lock, and it opens the CNI ADD hazard above for the whole overlap.
 - **Shorter pod start only.** Measured: even with no image checks and an
   idempotent init container, sandbox + init + container start is several
-  seconds on talos.
+  seconds on the reference cluster.

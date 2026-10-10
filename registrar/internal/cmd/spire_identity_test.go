@@ -145,7 +145,7 @@ func TestBuildSpireGRPCCredsSpireDisabled(t *testing.T) {
 // It has NO dwell (#740 PR 4), and that is the whole point of this test. On the
 // rev210 upgrade roll (2026-09-07 20:03:45Z) this replica carried the agent's 2m
 // dwell, so it was Ready — and therefore in the Service's endpoints — with no
-// SVID; the agent on main-worker-01 dialled it and got
+// SVID; the agent on node A dialled it and got
 // `transport: authentication handshake failed: x509svid: could not get X509
 // bundle`. The dwell belongs to the DaemonSet, whose NotReady arms a node taint;
 // a Deployment behind a Service has no such coupling, and NotReady there is

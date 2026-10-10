@@ -81,7 +81,7 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 	// `spiffe:///ns/…`: a chain carrying that name never resolves a secret, so
 	// the listener never listen()s, so the pod is unreachable on the mesh —
 	// permanently, because the malformed config is already published
-	// (main-worker-03, 2026-09-19; issue #815). The caller keeps the pod's
+	// (node C, 2026-09-19; issue #815). The caller keeps the pod's
 	// previous listener and retries on the next rebuild.
 	//
 	// Cleartext (SPIRE off) needs no identity at all and is unaffected — that

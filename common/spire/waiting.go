@@ -400,7 +400,7 @@ const NotReadyDwell = DefaultWaitWarnAfter
 // Observed on the rev210 upgrade roll (2026-09-07 20:03:45Z), which is what this
 // constant fixes: a registrar pod carried the agent's 2m dwell, so it was Ready
 // and IN the registrar Service's endpoints while it still had no SVID. An agent
-// on main-worker-01 dialled it and got
+// on node A dialled it and got
 //
 //	transport: authentication handshake failed: x509svid: could not get X509 bundle
 //

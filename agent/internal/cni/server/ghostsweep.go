@@ -101,7 +101,7 @@ const (
 	// The fraction deliberately excludes API-confirmed orphans, in both numerator
 	// and denominator (#670). Measuring it over the combined set made the breaker
 	// self-reinforcing: once a node's orphan backlog crossed 30% of storage every
-	// pass was refused, so the backlog could only grow. Observed on talos-main
+	// pass was refused, so the backlog could only grow. Observed on the reference cluster
 	// 2026-09-03 — 92 storage records for 39 live pods fleet-wide (57.6% stale;
 	// worker-01 at 66%) with one refusal per sweep pass on every node, standing
 	// for weeks and surviving agent rolls because the staleness lives on disk.
@@ -463,14 +463,14 @@ func (s *CNIServer) pruneStaleStoragePods(ctx context.Context, pods []*cniv1.CNI
 	// behind. Keeping it both re-registers a dead endpoint (the missing-direction
 	// loop would treat it as a live local pod) and programs a per-pod app cluster
 	// whose netns is gone — historically an Envoy crash creating the connection
-	// (talos worker-01, 2026-06-19), and on the pinned proxy snapshot a clean
+	// (node A of the reference cluster, 2026-06-19), and on the pinned proxy snapshot a clean
 	// per-request failure plus an eternally unhealthy host (envoyproxy/envoy
 	// #45975, #46503). Either way this sweep is what makes it go away. Two
 	// independent signals catch
 	// it: the netns path is gone, OR the Kubernetes pod is gone. The latter is
 	// essential because a missed DEL can leave the netns bind-mount pin behind, so
 	// netnsExists reports present and the netns check alone never prunes it
-	// (talos worker-01, 2026-06-22: prober-vhbp8 ghost). RemovePod drops the whole
+	// (node A of the reference cluster, 2026-06-22: prober-vhbp8 ghost). RemovePod drops the whole
 	// listenerEntry — inbound/outbound listeners AND the per-pod app/health
 	// clusters (which carry the netns) — so the dead-netns cluster leaves the
 	// snapshot. The pruned pod's registry endpoints then fall through to ghost
@@ -829,7 +829,7 @@ func (s *CNIServer) pruneOnePod(ctx context.Context, p *cniv1.CNIPod, netns stri
 // applyEvictions issues the Eviction API requests afterwards.
 func (s *CNIServer) planMissingStorageEvictions(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool, evictionsBlocked bool) (int, []plannedEviction) {
 	// Surface live mesh-managed pods on this node that local storage has no entry
-	// for: a lost CNI ADD (talos worker-01, 2026-06-22: prober-k7vsm running with
+	// for: a lost CNI ADD (node A of the reference cluster, 2026-06-22: prober-k7vsm running with
 	// no listener). The agent has no CNI data (netns, IPs) to synthesize a
 	// listener, so it cannot rebuild one in place — but CNI ADD reliably re-fires
 	// on sandbox recreation, so after a few confirming passes it evicts the pod

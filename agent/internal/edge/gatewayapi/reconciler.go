@@ -44,7 +44,7 @@ import (
 //
 // Default absent / "false" → the HTTP listener serves its attached HTTPRoutes
 // (no redirect). Operators MUST set this annotation on any Gateway whose HTTP
-// listener should redirect to HTTPS (e.g. the production api.palermo.dev edge
+// listener should redirect to HTTPS (e.g. the production api.example.com edge
 // Gateway). The aether chart sets it automatically when edge.tls.enabled is true.
 const AnnotationGatewayHTTPRedirect = "gateway.aether.io/http-redirect"
 

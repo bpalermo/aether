@@ -42,7 +42,7 @@ func runShutdown(t *testing.T, s *Supervisor, within time.Duration) {
 // them apart: on main the old supervisor read "LIVE at our epoch", waited out
 // its successor budget, and POSTed /drain_listeners?graceful to the NEW pod's
 // Envoy — which then added no listeners for pods created on the node until the
-// next handoff (2026-10-01, w01/w03, ~12 minutes).
+// next handoff (2026-10-01, nodes A and C, ~12 minutes).
 func TestShutdownFallbackDoesNotDrainAForeignEnvoyAtTheSameEpoch(t *testing.T) {
 	requireShell(t)
 

@@ -135,7 +135,7 @@ works (unlike the privileged node DaemonSet).
 - Gateway API translation; JWT / external authn at the edge; peer authz when the
   mesh grows one; cross-cluster edge routing (until the multi-cluster registry).
 
-## End-to-end validation (talos-main)
+## End-to-end validation (the reference cluster)
 
 See `test/e2e/edge/README.md` for the runbook. Summary:
 

@@ -24,7 +24,7 @@ import (
 )
 
 // The #1033 gates, at the server: an agent restart is a fresh delta stream on
-// which the running Envoy re-states the twins it has. The first talos deploy of
+// which the running Envoy re-states the twins it has. The first reference-cluster deploy of
 // #1032 (rev245, 2026-09-28) admitted each one as a pair --
 // `quic_clusters=24 observed_pairs=24 local_identities=12` on a node whose
 // previous agent had built the SAs x destinations twins up front -- and
@@ -73,7 +73,7 @@ func versions(names []string) map[string]string {
 	return held
 }
 
-// TestOnDemandObserver_FreshStreamHeldTwinsAdmitNothing is the talos shape:
+// TestOnDemandObserver_FreshStreamHeldTwinsAdmitNothing is the reference-cluster shape:
 // the proxy HOLDS 24 twins an older agent built up front and delivered through
 // the wildcard (initial_resource_versions; no on-demand subscription behind
 // any of them). Want 0 pairs admitted and all 24 answered absent in the first

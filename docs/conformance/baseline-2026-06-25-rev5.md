@@ -1,7 +1,7 @@
 # Gateway API conformance — first scored GATEWAY-HTTP, rev5 (2026-06-25)
 
 A fifth run of the upstream Kubernetes **Gateway API conformance suite**
-(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **talos-main**, now
+(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **the reference cluster**, now
 at aether **0.49.0 (rev 82)**. This is the **first GATEWAY-HTTP run to actually
 score** since [rev3](./baseline-2026-06-25-rev3.md): the cert-namespace
 regression that **setup-blocked** [rev4](./baseline-2026-06-25-rev4.md) is fixed
@@ -80,14 +80,14 @@ status.
 
 ```
 ## conformance gateways (.status)
-all-namespaces                          Programmed=True   192.168.100.51
-backend-namespaces                      Programmed=True   192.168.100.52
-same-namespace                          Programmed=True   192.168.100.50
+all-namespaces                          Programmed=True   203.0.113.51
+backend-namespaces                      Programmed=True   203.0.113.52
+same-namespace                          Programmed=True   203.0.113.50
 same-namespace-with-https-listener      Programmed=True   <port-demuxed behind .50-class>
-gateway-certificate-malformed-secret    Programmed=True   192.168.100.54   (negative test gw)
+gateway-certificate-malformed-secret    Programmed=True   203.0.113.54   (negative test gw)
 gateway-certificate-nonexistent-secret  Programmed=False  <none>           (correct)
-gateway-certificate-unsupported-group   Programmed=False  192.168.100.53   (correct)
-gateway-certificate-unsupported-kind    Programmed=False  192.168.100.53   (correct)
+gateway-certificate-unsupported-group   Programmed=False  203.0.113.53   (correct)
+gateway-certificate-unsupported-kind    Programmed=False  203.0.113.53   (correct)
 
 ## same-namespace-with-https-listener listeners
 https                                 ResolvedRefs=True
@@ -234,7 +234,7 @@ disappears via namespace deletion — they held pool IPs `.50–.54`). These wer
 $ kubectl get ns | grep conformance                      → none
 $ kubectl get svc -n aether-ingress -l aether.io/edge-gateway
 NAME                                        IP
-aether-edge-gw-aether-ingress-aether-edge   192.168.100.101   ← production edge only
+aether-edge-gw-aether-ingress-aether-edge   203.0.113.101   ← production edge only
 ```
 
 No MetalLB pool IPs leaked. **Follow-up note:** the orphan-Service-on-namespace-delete

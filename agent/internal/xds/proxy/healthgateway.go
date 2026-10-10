@@ -34,7 +34,7 @@ func HealthGatewayPath(probeClusterName string) string {
 //
 // EACH CLUSTER GETS ITS OWN PATH — /healthz/<cluster-name> — reflecting THAT
 // cluster alone. #819 instead ANDed both clusters behind the single
-// /healthz/health_<namespace>_<pod> path, which cost main-worker-03 four endpoints on
+// /healthz/health_<namespace>_<pod> path, which cost node C four endpoints on
 // 2026-09-19: the agent could see only the conjunction, so "the app is fine but
 // the mesh inbound never came up" was indistinguishable from "the app died",
 // and the liveness loop demoted the endpoints permanently with no signal. Two

@@ -195,7 +195,7 @@ func TestSweepRegistersMissingEndpoint(t *testing.T) {
 // TestSweepPrunesOrphanedPods: a stored pod whose Kubernetes pod no longer
 // exists is pruned from storage and its registry endpoint deregistered — even
 // though its netns pin lingers (netnsExists reports present), the case the netns
-// check alone cannot catch (talos worker-01, 2026-06-22: prober-vhbp8). A pod
+// check alone cannot catch (node A of the reference cluster, 2026-06-22: prober-vhbp8). A pod
 // that still exists in Kubernetes is kept.
 func TestSweepPrunesOrphanedPods(t *testing.T) {
 	ctx := context.Background()
@@ -703,13 +703,13 @@ func storeCNIPod(t *testing.T, store *storage.MockStorage[*cniv1.CNIPod], name, 
 // stored entries are orphans per the Kubernetes API, they ARE pruned and the
 // breaker does not engage. Before the fix the fraction counted orphans, so any
 // node whose stale backlog crossed pruneBreakerFraction refused every pass
-// forever and the backlog could only grow — measured on talos-main 2026-09-03 at
+// forever and the backlog could only grow — measured on the reference cluster 2026-09-03 at
 // 92 storage records for 39 live pods (57.6% stale) with one refusal per sweep
 // pass on every node.
 func TestSweepPrunesMajorityOrphansDespiteBreaker(t *testing.T) {
 	ctx := context.Background()
 	// netnsExists stays true (package init): the orphans' netns pins linger, so
-	// only the API cross-check can identify them — the talos-main signature.
+	// only the API cross-check can identify them — the reference-cluster signature.
 
 	const (
 		orphans   = 7

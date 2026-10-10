@@ -102,7 +102,7 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20261009.189f198.envoy")
 #   alarm factory, QUIC config) was owned by the thread-local ClusterEntry while
 #   HTTP/3 pools held it by reference and their connections by raw pointer; a CDS
 #   removal destroys the entry after only DRAINING its pools, so a pool with live
-#   streams outlived the info and the next write/alarm read the freed clock (the w01
+#   streams outlived the info and the next write/alarm read the freed clock (the
 #   SIGBUS in QuicConnection::CanWrite). PersistentQuicInfoPtr is now shared and each
 #   HTTP/3 pool and connectivity grid holds a reference. Its test
 #   (test/common/http/http3:conn_pool_test) needs quiche's test tooling, so it runs in

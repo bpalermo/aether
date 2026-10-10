@@ -794,7 +794,7 @@ func podExcludedOutboundPorts(conf config.AetherConf) []uint16 {
 // podExcludedOutboundIPRanges parses the capture.aether.io/exclude-outbound-ip-ranges
 // annotation (proposal 022, M2-default; Istio parity) into a deduplicated list of
 // IPv4 destination prefixes to carve OUT of capture. The value is comma-separated
-// CIDRs (e.g. "10.0.0.0/8, 192.168.1.5/32"); a bare address is treated as a /32.
+// CIDRs (e.g. "10.0.0.0/8, 198.51.100.5/32"); a bare address is treated as a /32.
 // Blanks, unparseable entries, and non-IPv4 prefixes (the capture table is IPv4) are
 // skipped so a malformed annotation degrades to "exclude what parses" rather than
 // failing the pod's networking. Each prefix is normalised to its network address so

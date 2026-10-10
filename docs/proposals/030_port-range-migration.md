@@ -43,7 +43,7 @@ cheapest-first.
 
 ### 15009 → 18009: free, do it immediately
 
-`--east-west-waypoint` is default-OFF and enabled nowhere (talos runs with
+`--east-west-waypoint` is default-OFF and enabled nowhere (the reference cluster runs with
 the flag off; only the e2e harnesses set the port, explicitly). The port
 must match across a clusterset, so changing it AFTER adoption would need a
 coordinated multi-cluster dance — changing it NOW costs one constant, one
@@ -89,7 +89,7 @@ cluster's constant) and rides the same three phases.
 
 Each phase is one PR + one chart release, validated by the standard ladder:
 unit + `envoy --mode validate`, conformance (GATEWAY-HTTP + MESH-HTTP),
-waypoint/replicator e2e harnesses, then a talos roll under the external
+waypoint/replicator e2e harnesses, then a reference-cluster roll under the external
 prober (100% bar), with the consolidated soak as the Phase C exit check.
 
 ## Sequencing
@@ -108,7 +108,7 @@ prober (100% bar), with the consolidated soak as the Phase C exit check.
 
 Between PR 2 and PR 3, and PR 3 and PR 4, every participating cluster must
 complete its roll — in a multi-cluster mesh the *fleet* is the clusterset.
-Today that is one cluster (talos-main), so the whole sequence can land in a
+Today that is one cluster (the reference cluster), so the whole sequence can land in a
 week of normal release cadence.
 
 ## Alternatives considered

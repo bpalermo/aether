@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// main-worker-05, 2026-09-19: the node served its node SVID at 17:31:00.051Z
+// Node E, 2026-09-19: the node served its node SVID at 17:31:00.051Z
 // and still emitted NO inboundready_* cluster for its whole agent lifetime,
 // while its health_* clusters exported normally. Nothing said so.
 //
@@ -23,7 +23,7 @@ import (
 // there is no third trigger. These tests pin the two orderings and the
 // convergence that now makes the ordering irrelevant.
 
-// TestInboundGateConvergesAfterMissedTriggers is the main-worker-05 regression.
+// TestInboundGateConvergesAfterMissedTriggers is the node E regression.
 // Both of the old triggers fire while a precondition is missing — the node SVID
 // lands before any listener exists, and the listener load happens with the node
 // identity already set but through a path that does not recompute — and the

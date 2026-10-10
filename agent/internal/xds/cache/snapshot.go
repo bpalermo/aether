@@ -200,7 +200,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		// listener then warms for the whole initial_fetch_timeout, activates with
 		// an unresolved route table, and answers 404 NR route_not_found on
 		// everything until a later snapshot finally carries out_http. Measured on
-		// main-worker-02, 2026-09-19: LDS at 16:08:50.558Z, first 404 at
+		// node B, 2026-09-19: LDS at 16:08:50.558Z, first 404 at
 		// 16:09:05.214Z (14.7s ≈ the 15s timeout), first RDS 91ms after the last
 		// 404 (issue #817).
 		//

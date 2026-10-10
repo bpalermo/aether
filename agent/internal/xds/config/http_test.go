@@ -113,7 +113,7 @@ func TestUseDownstreamProtocolOptions(t *testing.T) {
 // 30s idle timeout. Service clusters pool per downstream connection for
 // per-source mTLS; an orphaned pool's upstream connection is reclaimed ONLY by
 // this timeout (Envoy default 1h leaked ~41k mTLS conns / 3.2 GiB per proxy
-// under non-keepalive downstream traffic on talos-main, 2026-06-11).
+// under non-keepalive downstream traffic on the reference cluster, 2026-06-11).
 func TestUpstreamIdleTimeoutSet(t *testing.T) {
 	for name, opts := range map[string]*httpv3.HttpProtocolOptions{
 		"http1":          Http1ProtocolOptions(),
@@ -248,7 +248,7 @@ func TestMeshHttp2ProtocolOptionsDetectADeadPeer(t *testing.T) {
 	if bound := maxInterval + MeshH2KeepaliveTimeout; bound > 10*time.Second {
 		t.Errorf("dead-peer bound %v exceeds 10 s", bound)
 	}
-	// aether#1093: never inside the 5-7 s worker stalls seen on talos-main --
+	// aether#1093: never inside the 5-7 s worker stalls seen on the reference cluster --
 	// a stalled DESTINATION worker cannot ACK, and a live request would fail.
 	if MeshH2KeepaliveTimeout < 8*time.Second {
 		t.Errorf("keepalive timeout %v is inside the #1093 stall range", MeshH2KeepaliveTimeout)

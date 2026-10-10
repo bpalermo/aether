@@ -17,7 +17,7 @@ var errBundle = status.Error(codes.Unavailable,
 	`connection error: desc = "transport: authentication handshake failed: x509svid: could not get X509 bundle"`)
 
 // TestClassifyHandshake is issue #740, PR 5: the rev211 deploy roll
-// (2026-09-07 20:47Z) produced this exact error twice on main-worker-02 within
+// (2026-09-07 20:47Z) produced this exact error twice on node B within
 // 600ms, and both times it was attributed to the registrar — once while the
 // AGENT had no SVID, once while the agent's own connection was still
 // re-establishing itself after acquiring one. The registrar had had its identity

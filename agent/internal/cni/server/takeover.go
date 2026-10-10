@@ -33,7 +33,7 @@ import (
 //     watch marking it Terminating) is rebuilt from the new record.
 //
 // It is a diff, not a reload: rebuilding every listener costs 0.25-0.98 s on
-// talos, inside the window the proxy has no ADS stream (open question 1).
+// the reference cluster, inside the window the proxy has no ADS stream (open question 1).
 func (s *CNIServer) ReconcileStorage(ctx context.Context) error {
 	reloader, ok := s.storage.(storage.Reloader[*cniv1.CNIPod])
 	if !ok {

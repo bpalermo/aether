@@ -296,7 +296,7 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	// and the connections riding the removed chains were drained, until the
 	// next registry load put them back. An agent restart interleaves one
 	// reconcile per mesh Service with its first registry loads, which is how
-	// talos hit it 12 s after a restart.
+	// the reference cluster hit it 12 s after a restart.
 	entries := make([]captureTCPEntry, 0, len(services))
 	for _, s := range services {
 		if s.ServiceName != "" && s.ClusterIP != "" {
@@ -1457,7 +1457,7 @@ func (c *SnapshotCache) warnTCPFloorWithoutIdentity(services int) {
 // outage. This is the same reason recomputeInboundReadyClusters runs from
 // generateSnapshot rather than from its mutators: SetNodeIdentity is called
 // exactly once ever by the SPIRE bridge (`if firstServe`), so a trigger hanging
-// off it can be missed permanently — which is how main-worker-05 ran a whole
+// off it can be missed permanently — which is how node E ran a whole
 // agent lifetime with no probe clusters at all on 2026-09-19.
 //
 // A comparison and an early return in the steady state; nothing is rebuilt

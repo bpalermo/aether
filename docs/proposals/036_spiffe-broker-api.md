@@ -2,10 +2,10 @@
 
 **Status:** Implemented — accepted 2026-09-18. Phase 1, the only phase in this
 repository (#802), shipped: the Broker API is the node agent's only path to a
-pod's SVID. Phases 0 (k8s-talos-main#79) and 2 (k8s-talos-main#96) are platform
-configuration, deployed and validated on talos-main, including an 8-hour soak.
+pod's SVID. Phases 0 and 2 are platform configuration (in the platform's GitOps
+repository), deployed and validated on the reference cluster, including an 8-hour soak.
 Phase 3 (`enforced` access policy with the impersonation grant) is platform
-configuration too and was merged there on 2026-09-19 (k8s-talos-main#102); its
+configuration too and was merged in the platform's GitOps repository on 2026-09-19; its
 measurements (SubjectAccessReview load, CNI ADD latency) are not recorded here.
 The measured results are in the two Outcome sections below.
 **Author:** Bruno Palermo
@@ -47,7 +47,7 @@ Everything needed exists in the versions already deployed (checked 2026-09-18):
 
 | Piece | State |
 |---|---|
-| SPIRE agent | implements the Broker API since 1.15.2 under `experimental { broker { … } }`; talos-main runs 1.15.3 |
+| SPIRE agent | implements the Broker API since 1.15.2 under `experimental { broker { … } }`; the reference cluster runs 1.15.3 |
 | k8s workload attestor | resolves `KubernetesObjectReference` and `WorkloadPIDReference`; `experimental.broker.access_policy` = `enforced` (SubjectAccessReview, verb `impersonate-via-spire`, username = broker SPIFFE ID) or `permissive`; `pod_reference_scope` = `agent_node` (default) or `cluster` |
 | Helm chart | `spire-0.30.2` (the GitOps pin) exposes `sockets.broker`, `brokerAPI.brokers.<key>` and `workloadAttestors.k8s.brokerAPI` |
 | Go stubs | `github.com/spiffe/go-spiffe/v2/exp/proto/spiffe/broker`, present in the pinned v2.8.1 |
@@ -111,7 +111,7 @@ practice that only matters for entries written with such selectors:
 `spire-controller-manager` emits entries keyed on exactly one selector,
 `k8s:pod-uid:<uid>`, which the delegated path's hand-built set already carried —
 so for ClusterSPIFFEID-managed entries nothing matches now that did not match
-before (measured on talos-main, see Outcome). The concrete gains are the other
+before (measured on the reference cluster, see Outcome). The concrete gains are the other
 three: the admin socket and `authorizedDelegates` disappear, impersonation can be
 RBAC-scoped per pod once `enforced` is on, and the agent speaks a SPIFFE standard
 rather than a SPIRE API, with `spire-api-sdk` out of the module.
@@ -160,7 +160,7 @@ in validation. The breaking change is called out in the release notes and
    `enforced` is inert). Then measure the SubjectAccessReview load and the CNI ADD
    latency, and consider granting it only in mesh-managed namespaces.
 
-## Validation (phase 1, on talos-main)
+## Validation (phase 1, on the reference cluster)
 
 A hitless roll graded by the external prober (zero errors per node); the SDS
 secret count equals the managed pod count; the #638 mismatch counters stay zero
@@ -172,7 +172,7 @@ delegated path could not provide; then the 8-hour soak before phase 2.
 
 ## Outcome (phase 1, 2026-09-18)
 
-Deployed to talos-main as rev217 (`0.92.24-9fc27c8`, #802) on top of phase 0.
+Deployed to the reference cluster as rev217 (`0.92.24-9fc27c8`, #802) on top of phase 0.
 Every per-pod SVID on the cluster is now minted over the Broker API.
 
 | Measure | Result |
@@ -213,7 +213,7 @@ proxy + service roll) on rev218 (`0.92.24-15332e2`), then phase 2.
 | Signing-CA rotation | SPIRE's 24 h CA activated ~02:41Z, inside the window; rotation cycles 3 and 4 and every re-mint after it were issued by the new CA at zero cost. The X.509 bundle is the upstream root and does not move on that cycle |
 | `permission_denied` / `reference_not_found` / #638 / `sds_push_*` / xDS rejects | 0 for 8 h |
 | SLI | liveness 0 / 719,998; mesh-DNS 42 timeouts / 1,439,996, none identity-related; k6 0.00505 % |
-| **Phase 2** (admin socket and `authorizedDelegates` removed, k8s-talos-main#96) | `spire-agent` rolled node by node; every pod resubscribed in 17.2 – 17.8 s per node, 0 prober errors, 0 `permission_denied`; a cold agent start with no admin socket on the node is clean. The rev216 rollback path is gone with it |
+| **Phase 2** (admin socket and `authorizedDelegates` removed, in the platform's GitOps repository) | `spire-agent` rolled node by node; every pod resubscribed in 17.2 – 17.8 s per node, 0 prober errors, 0 `permission_denied`; a cold agent start with no admin socket on the node is clean. The rev216 rollback path is gone with it |
 
 What the soak changed in the design's favour, and what it exposed:
 
@@ -240,8 +240,8 @@ Still open: **phase 3** — `access_policy: enforced` together with the
 `impersonate-via-spire` grant, in one change — and the selector gain, which remains
 theoretical while controller-manager entries carry only `k8s:pod-uid`.
 
-**Later note (2026-10-10):** the phase 3 change was merged in the platform
-repository the same day as this section (k8s-talos-main#102). What phase 3 asked
+**Later note (2026-10-10):** the phase 3 change was merged in the platform's
+GitOps repository the same day as this section. What phase 3 asked
 to be measured afterwards, the SubjectAccessReview load and the CNI ADD latency
 under `enforced`, is not recorded in this proposal.
 
@@ -250,7 +250,7 @@ under `enforced`, is not recorded in this proposal.
 The Broker subscription opens at CNI ADD, but SPIRE delivers the pod's initial
 SVID only once the pod's entry exists and has synced to the node's spire-agent:
 two `svids=0` updates, then `update=initial` 7.46 s after the subscribe on
-talos-main. A pod that sent in that window got `503 UF` — the source proxy had no
+the reference cluster. A pod that sent in that window got `503 UF` — the source proxy had no
 client certificate for it. The inbound side already had a gate (an endpoint turns
 HEALTHY only after an mTLS handshake with the pod's own inbound listener, #815);
 egress now has the symmetric one.

@@ -29,7 +29,7 @@ type threadStat struct {
 	// nanoseconds spent RUNNABLE BUT WAITING for one. The second is what tells a
 	// thread starved of CPU apart from one that is busy or blocked, and it needs
 	// no tracing: the kernel accounts it whenever CONFIG_SCHED_INFO is on (it is
-	// on the Talos kernel; verified on main-worker-04, 2026-10-01).
+	// on the Talos kernel; verified on node D, 2026-10-01).
 	cpuNs  uint64
 	runqNs uint64
 }

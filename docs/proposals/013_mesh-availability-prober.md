@@ -231,7 +231,7 @@ supervisor metrics = **when/where** churn happened.
 
 1. Agent egress liveness `direct_response` route (small xDS change) + a route test.
 2. `prober` binary + Bazel + image (no cluster impact).
-3. `charts/prober` (off by default); enable on talos-main; validate the liveness
+3. `charts/prober` (off by default); enable on the reference cluster; validate the liveness
    SLI tracks k6 during a manual proxy roll.
 4. Dashboard row + alerts; demote the self-reported panel. Reachability tier later.
 

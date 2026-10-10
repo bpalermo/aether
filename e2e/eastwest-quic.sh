@@ -128,10 +128,10 @@
 # controller.webhook.identityGate.enabled=false) is a report, not a red: no init
 # container is injected and the app's t=0 request races SPIRE's entry sync. On
 # kind (2026-09-28) SPIRE issued the SVID 3.9-5.9 s after the agent's subscribe
-# (two svids=0 updates first, the talos-main shape) and the first request
+# (two svids=0 updates first, the reference-cluster shape) and the first request
 # STALLED 3.4-5.4 s waiting for the pod's client certificate before answering
 # 200; with the gate on it answered in 12-14 ms after the gate held the pod
-# 3.6-4.1 s. On talos-main the same window is ~7.5 s, which crosses the mesh
+# 3.6-4.1 s. On the reference cluster the same window is ~7.5 s, which crosses the mesh
 # cluster connect_timeout and becomes 503 UF (#1053). E6 prints the first
 # request's status and latency either way and asserts only the gate-on
 # contract (init container injected first, exited 0, first request 200 as the
@@ -163,7 +163,7 @@
 # and E2 goes red with the twins present: the negative control above.
 #
 # E7 alone, against an `up` cluster: e2e/eastwest-quic.sh burst. Its red is
-# main before #1086 on a CPU-starved agent (talos: 66-141 x 503 NC per loader
+# main before #1086 on a CPU-starved agent (the reference cluster: 66-141 x 503 NC per loader
 # start); on kind the agent is rarely slow enough to cross 2 s, so the leg also
 # prints the build count and first-use latency the fix moves.
 #

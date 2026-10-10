@@ -1239,7 +1239,7 @@ func outboundPortVhostWithChainFilter(portName string, chainFilters map[string]p
 // identities is deliberately NOT every local identity (issue #1049). A twin
 // names its source's SVID statically in its transport socket, so a twin
 // published before that secret is in the snapshot warms on SDS until SPIRE
-// delivers it -- 6.9-7.4 s after the CNI ADD of a new pod on talos (rev248) --
+// delivers it -- 6.9-7.4 s after the CNI ADD of a new pod on the reference cluster (rev248) --
 // and every request its arm routes there meanwhile 503s NC at the 2 s
 // on_demand timeout. An identity still waiting for its certificate
 // (awaitingCert) gets neither an arm nor a twin, so its requests ride the h2

@@ -21,8 +21,8 @@ import (
 // TestSweepPruneUnsubscribesSVID: a pod the sweep prunes never gets the CNI DEL
 // that would have ended its SVID subscription, so the prune has to end it. Left
 // running, the subscription asks SPIRE for a pod that no longer exists and
-// retries NotFound for the agent's lifetime (talos-main, 2026-09-18: a svc-3 pod
-// deleted while the agent was down kept main-worker-02 retrying at ~2/min). A
+// retries NotFound for the agent's lifetime (the reference cluster, 2026-09-18: a svc-3 pod
+// deleted while the agent was down kept node B retrying at ~2/min). A
 // live pod's subscription is untouched.
 func TestSweepPruneUnsubscribesSVID(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

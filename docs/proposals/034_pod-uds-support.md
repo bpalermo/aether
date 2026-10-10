@@ -2,7 +2,7 @@
 
 **Status:** Implemented (Phases 1 + 1b) and production-validated — annotation path (#616/#617)
 and `EndpointPolicy` CRD path (#618) shipped, kind e2e in CI (#619), and both paths validated
-under an 8-hour churn soak on talos-main (2026-08-03; follow-ups tracked in #628/#629).
+under an 8-hour churn soak on the reference cluster (2026-08-03; follow-ups tracked in #628/#629).
 Phase 2 (outbound egress socket) remains deferred post-redirect-all.
 **Superseded carrier (2026-09-30):** the `emptyDir` socket carrier this proposal
 specifies — the `kubernetes.io~empty-dir` resolver, `--kubelet-pods-dir`, the
@@ -14,7 +14,7 @@ the annotation-wins precedence, the failure semantics and the pipe cluster shape
 below are unchanged. Read the carrier-specific text below (the volume kind, the
 kubelet path, the ~16-character budget) as history; the current contract is in
 `docs/workload-requirements.md`. Proposal 039 is implemented (Phases 1–2, #1090 /
-#1092) and validated on talos-main (chart 2.0.0, soaked 2026-10-01; the node-reboot
+#1092) and validated on the reference cluster (chart 2.0.0, soaked 2026-10-01; the node-reboot
 check is still open in #1106). This proposal's Phase 2 (outbound: the proxy listens,
 the app dials) waited on that carrier and is now **unblocked**, but it remains
 deferred.
@@ -135,7 +135,7 @@ whether rendering pipe addresses is allowed).
    from the annotation, plus pod UID; output
    `<kubelet-pods-dir>/<uid>/volumes/kubernetes.io~empty-dir/<volume>/<file>`.
    - `--kubelet-pods-dir` agent flag, default `/var/lib/kubelet/pods`
-     (distro-dependent; talos uses the default).
+     (distro-dependent; Talos uses the default).
    - **Validation is security-critical**: both components must be single,
      clean path segments — reject empty, `/`, `.`, `..`, and anything that
      does not stay inside the pod's own volume dir after `filepath.Clean`.
@@ -360,14 +360,14 @@ Apps then call `unix:///<in-pod-volume-mount>/<socket-file>` with the same
 | 2 | Phase 1 | merged (#617) | pipe variants of `app_<pod>_<port>`/`health_<pod>` clusters; per-pod selection in `GenerateListenersFromRegistryPod`; proxy DS chart mount + `proxy.udsWorkloads.enabled` + agent flag + Chart.yaml bump; `workload-requirements.md` section |
 | 2b | Phase 1b | merged (#618) | `EndpointPolicy` proto + CRD + admission webhook; CRD-gated agent reconciler; annotation-over-CR precedence in the cache; chart RBAC/webhook rules + Chart.yaml bumps |
 | 3a | Phase 1 e2e — CI (kind) | this change | UDS-serving test workload (`e2e/udsecho`, a Go HTTP server that binds only a socket and no TCP port, shipped in the nightly `aether-images` artifact) + the `uds` job in `.github/workflows/e2e.yaml` running `e2e/uds.sh`: one kind cluster, SPIRE off, asserting the annotation path, the `EndpointPolicy` path, annotation-over-CR precedence, admission rejection (over-budget socket, non-Service target), and drift — a policy naming a volume the pods don't mount unpromotes only its own service (no CDS NACK) and recovers on delete |
-| 3b | Phase 1 e2e — talos | pending | talos-main validation of what a single-node kind cluster cannot show: cross-node traffic, rolling restart, agent restart (storage replay with the persisted UID, API server unreachable), and the before/after latency capture |
-| 4 | Phase 2 spike | pending | checklist above on talos-main |
-| 5 | Phase 2 | pending | `outbound_uds_<pod>` listener + `GenerateOutboundHTTPListener` address parameterization; docs; talos e2e with a `unix://` gRPC client |
+| 3b | Phase 1 e2e — the reference cluster | pending | Reference-cluster validation of what a single-node kind cluster cannot show: cross-node traffic, rolling restart, agent restart (storage replay with the persisted UID, API server unreachable), and the before/after latency capture |
+| 4 | Phase 2 spike | pending | checklist above on the reference cluster |
+| 5 | Phase 2 | pending | `outbound_uds_<pod>` listener + `GenerateOutboundHTTPListener` address parameterization; docs; reference-cluster e2e with a `unix://` gRPC client |
 
 ## Risks / Open Questions
 
 - **kubelet pods dir location** is distro-dependent → flag (default fits
-  talos and stock kubeadm).
+  Talos and stock kubeadm).
 - **Multi-port UDS pods**: all declared ports dial the same socket. If a
   real workload needs per-port sockets, the annotation grows a map form
   (`<port>:<vol>/<file>,...`) — deferred until demanded.

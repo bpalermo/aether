@@ -23,7 +23,7 @@ import (
 // the snapshot did not carry yet, so the node proxy asked for each over ODCDS.
 // Each admission started its own full snapshot rebuild; they serialized behind
 // one another (the first already carried every pair recorded so far), each
-// costing 200-870 ms of wall clock on the CPU-capped talos agent, and the
+// costing 200-870 ms of wall clock on the CPU-capped reference-cluster agent, and the
 // twins delivered mid-burst could not warm (EDS) before the 2 s on_demand
 // timeout: 66 x 503 NC cluster_not_found on the 2026-10-01 soak (141 and 116
 // on the two before).

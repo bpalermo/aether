@@ -1,10 +1,10 @@
-# Edge proxy e2e (talos-main)
+# Edge proxy e2e (a live cluster)
 
 Validates the north-south edge gateway (proposal 003): external traffic →
 edge Service → edge Envoy → destination pod's mesh inbound (`pod_ip:18008`,
 mTLS), with **no node proxy / DaemonSet in the path**.
 
-This is a manual runbook against a live cluster (talos-main); it is not a CI
+This is a manual runbook against a live cluster; it is not a CI
 target. It assumes aether is already deployed (agent + registrar + controller)
 and SPIRE is installed with a `spire-controller-manager` class.
 
@@ -19,7 +19,7 @@ edge:
     type: LoadBalancer            # or NodePort for a quick test
   spire:
     clusterSpiffeID:
-      className: spire-mgmt-spire  # the talos-main SPIRE class
+      className: spire-mgmt-spire  # your SPIRE controller-manager class
   # Downstream TLS is optional; omit for a plain-HTTP first pass.
   # tls:
   #   enabled: true

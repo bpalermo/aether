@@ -215,7 +215,7 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 // A separate stream because the field shapes differ: an L4 record has no
 // method, path, authority, response code or request id, and every one of those
 // would render "-" in the HTTP stream. And it deliberately carries NO `reporter`
-// attribute: the collector's identity connectors (k8s-talos-main
+// attribute: the collector's identity connectors (the platform's GitOps repository
 // otel-collector values, aether#863/#842) key on `reporter` -- log_name is a
 // RESOURCE attribute the transform cannot see -- so an L4 record carrying it
 // would enter the HTTP request counters and their denominator. The L4 record

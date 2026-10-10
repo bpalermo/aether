@@ -166,7 +166,7 @@ var seededCounters = []string{
 	// #796/#717: listener entries dropped for a vanished network namespace.
 	"aether.agent.snapshot.stale_netns_skipped",
 	// #873/#882: UDPRoute inputs the capture listener cannot represent. This
-	// one shipped unseeded and had NO Prometheus series on talos-main rev231,
+	// one shipped unseeded and had NO Prometheus series on the reference cluster rev231,
 	// so a dashboard or alert built on it could never fire.
 	"aether.agent.l4route.udp_unsupported",
 	// #931: a published udp: cluster in which NO endpoint is routable, so

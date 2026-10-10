@@ -39,7 +39,7 @@ const (
 	// AnnotationCaptureExcludeOutboundIPRanges carves outbound traffic to specific
 	// destination IP ranges OUT of transparent capture (proposal 022, M2-default,
 	// Istio parity with traffic.sidecar.istio.io/excludeOutboundIPRanges). The value
-	// is a comma-separated list of IPv4 CIDRs (e.g. "10.0.0.0/8,192.168.1.5/32"; a
+	// is a comma-separated list of IPv4 CIDRs (e.g. "10.0.0.0/8,198.51.100.5/32"; a
 	// bare address is treated as /32); the CNI emits an nft RETURN matching the
 	// destination range, ahead of the redirect rule, so connections to those ranges
 	// bypass the mesh entirely (an external dependency, a metadata endpoint, a peer

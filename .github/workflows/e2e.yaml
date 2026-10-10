@@ -312,7 +312,7 @@ jobs:
   # policy, that a policy naming an unbound socket degrades only its own service
   # (no CDS NACK) and recovers on delete, that an emptyDir-carrier pod is denied
   # at admission, and that the agent counts not_csi / volume_not_declared
-  # resolve failures. Harness: e2e/uds.sh. The talos half of proposal 034's
+  # resolve failures. Harness: e2e/uds.sh. The reference-cluster half of proposal 034's
   # PR 3 (agent restart / storage replay, cross-node) is validated separately.
   uds:
     needs: build

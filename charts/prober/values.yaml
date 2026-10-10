@@ -69,7 +69,7 @@ telemetry:
 # latency comes out quantised in ~100 ms steps no matter how fast the mesh answered.
 #
 # At the previous 50m limit that was not a theoretical risk, it was the dominant term in
-# the SLI (issue #735). Measured on talos-main: the container was throttled in 81–90% of
+# the SLI (issue #735). Measured on the reference cluster: the container was throttled in 81–90% of
 # ALL CFS periods on every one of the five nodes, and the mesh_dns tier's p50 read 179 ms
 # against a source-proxy `duration` of 29 ms for the very same requests — roughly 150 ms
 # of the published SLI was the prober's own quota. Even the liveness tier, a local

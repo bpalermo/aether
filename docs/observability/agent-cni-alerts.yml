@@ -19,8 +19,8 @@
 #     alerting_rules.yml:
 #       groups: [...]
 # See README.md in this directory. Deployed from
-# bpalermo/k8s-talos-main -> clusters/talos-main/prometheus/values.yaml, where
-# promtool unit tests (clusters/talos-main/prometheus/rules_test.yaml) run these
+# the platform's GitOps repository -> clusters/<cluster>/prometheus/values.yaml, where
+# promtool unit tests (clusters/<cluster>/prometheus/rules_test.yaml) run these
 # expressions in CI.
 
 groups:

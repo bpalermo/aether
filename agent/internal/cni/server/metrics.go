@@ -107,7 +107,7 @@ func (m *cniMetrics) snapshotWatchUnanswered(ctx context.Context, caller string)
 // Without this there is no series at all until the first transition, so "zero
 // demotions" and "the metric does not exist" look identical — which is exactly
 // what happened on 2026-09-19: four endpoints were demoted HEALTHY→UNHEALTHY on
-// main-worker-03 and the release could not be graded against the metric,
+// node C and the release could not be graded against the metric,
 // because no HEALTHY→UNHEALTHY series had ever existed on any node.
 func (m *cniMetrics) seedHealthTransitions() {
 	ctx := context.Background()
@@ -294,7 +294,7 @@ func (m *cniMetrics) pruneBreakerTripped(ctx context.Context) {
 // (1) or clear (0). Recorded every sweep pass, zero included, so "the breaker is
 // standing open" is a state an alert can match rather than a counter slope
 // somebody has to notice — the counter climbed once a minute on every node of
-// talos-main for weeks and went unremarked (#670).
+// the reference cluster for weeks and went unremarked (#670).
 func (m *cniMetrics) pruneBreakerState(ctx context.Context, engaged bool) {
 	if m == nil {
 		return

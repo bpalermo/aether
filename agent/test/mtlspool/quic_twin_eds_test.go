@@ -11,7 +11,7 @@
 // pod on the node -- its watch adds nothing to resource_names_subscribe, no
 // request goes out, the control plane correctly sends nothing (the resource
 // did not change), and the twin sits in warming until initial_fetch_timeout
-// (15 s) expires. On talos that was 1,060 client-visible 503/NC in 11 s.
+// (15 s) expires. On the reference cluster that was 1,060 client-visible 503/NC in 11 s.
 //
 // It is #842's mechanism (SDS then) on EDS, and it only bites the LATE twin:
 // at startup base and twin arrive in one CDS response and one subscribe

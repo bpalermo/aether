@@ -341,7 +341,7 @@ func TestRegistryRefreshRebuildsExactlyWhatChanged(t *testing.T) {
 				f.c.SetWaypointConfig(true, 15009)
 				f.edit(http, "demo/echo", func(eps []*registryv1.ServiceEndpoint) []*registryv1.ServiceEndpoint {
 					eps[0].ClusterName = "cluster-2"
-					eps[0].KubernetesMetadata.NodeIp = "192.168.9.9"
+					eps[0].KubernetesMetadata.NodeIp = "198.51.100.9"
 					return eps
 				})
 			},

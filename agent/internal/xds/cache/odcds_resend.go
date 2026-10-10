@@ -20,7 +20,7 @@ import (
 // delivered earlier gets no response at all. The per-name subscription then
 // waits out its initial-fetch timeout (15 s) and Envoy reports the twin
 // missing: `cm odcds: cluster quic:... not found during on-demand discovery`
-// on main-worker-03 at 15:45:04.7, 15.0 s after the k6 loader's first request
+// on node C at 15:45:04.7, 15.0 s after the k6 loader's first request
 // at 15:44:49.7, while the agent served that twin continuously from 15:44:46.1.
 // A request still waiting on the name at that moment is failed as missing.
 //

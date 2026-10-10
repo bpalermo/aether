@@ -15,7 +15,7 @@ import (
 //
 // An agent restart that lands in the middle of a proxy hot restart reconnects
 // two generations at once: the child (which holds no ODCDS subscriptions) and
-// the draining parent (which re-subscribes its twins). On rev248 main-worker-03
+// the draining parent (which re-subscribes its twins). On rev248 node C
 // the child's stream came first (15:39:16Z, re-subscribed nothing: the dormant
 // pairs were pruned) and the parent's second (15:39:27Z, re-subscribed them:
 // parked dormant again). Before #1052 the parked pairs outlived the parent, so

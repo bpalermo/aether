@@ -43,7 +43,7 @@ import (
 // child's stream (naming nothing) pruned the dormant pairs, the parent's stream
 // eleven seconds later (naming them) parked them again, and once the parent
 // exited the ledger held dormant pairs no live proxy was subscribed to -- the
-// republish-on-return premise broken (rev248 main-worker-03).
+// republish-on-return premise broken (rev248 node C).
 //
 // When the LAST live stream ends nothing is concluded: the agent cannot tell a
 // proxy that exited from one that is reconnecting. Its subscriptions are kept,

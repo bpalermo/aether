@@ -1,12 +1,12 @@
 # Proposal 040: Publish to Quay (`quay.io/aethermesh`)
 
 **Status:** Implemented. Phases 1 (the abstraction, #998), 2 (the
-cut-over, #1017) and 3 (talos-main runs from quay since rev243, 2026-09-27) are done, and
+cut-over, #1017) and 3 (the reference cluster runs from quay since rev243, 2026-09-27) are done, and
 phase 4 (decommission ghcr, #1167) is implemented: the `ghcr-lib.sh` shim
 (#1179), the 11 `ghcr_*` aliases (#1181), `PROXY_PIN_LEGACY_REFERENCES` and
 every pin reader's ghcr allowance (#1184), and the publish-verify sweep's ghcr
 branch plus `GHCR_TOKEN` and the docs that named ghcr.io as a source (#1186).
-Pre-check on 2026-10-04: no deployed chart or pod on talos-main references a
+Pre-check on 2026-10-04: no deployed chart or pod on the reference cluster references a
 `ghcr.io/bpalermo/aether/*` image. The ghcr.io packages themselves were **not**
 deleted; their retention is a separate maintainer decision. The remaining
 mentions are history and migration notes for pre-1.0.0 releases.
@@ -165,11 +165,11 @@ and falls back to the tags; any other non-200 is inconclusive.
      triggers one — whose bump-chart PR rewrites `repository:` with `tag:` and
      `digest:`. Every pin reader accepts `proxy_pin_references()`, and the sweep
      looks a pin up on the registry the pin names.
-3. **talos rollout.** `helm upgrade` on talos-main from the quay coordinates
+3. **Reference-cluster rollout.** `helm upgrade` on the reference cluster from the quay coordinates
    (values from `helm get values -o yaml`, never `--reuse-values`), then an 8h
    soak graded as usual.
 4. **Decommission ghcr — DONE (#1167).** Pre-checked 2026-10-04: no chart
-   values or pod image on talos-main names a `ghcr.io/bpalermo/aether/*`
+   values or pod image on the reference cluster names a `ghcr.io/bpalermo/aether/*`
    coordinate, and the GitOps repository's only aether hit is a stale doc line.
    Then, one PR each:
    - **#1179** removed the `scripts/ghcr-lib.sh` shim and the regression case

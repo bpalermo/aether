@@ -1,6 +1,6 @@
 # Proposal: Arbitrary-Service interception (the genuine GAMMA / Mesh data plane)
 
-**Status:** Implemented — arbitrary-service interception (redirect-all) shipped and is the default for managed pods (`agent.captureRedirectAllDefault=true`), soak-validated hitless on talos. (2026-06-25 design.)
+**Status:** Implemented — arbitrary-service interception (redirect-all) shipped and is the default for managed pods (`agent.captureRedirectAllDefault=true`), soak-validated hitless on the reference cluster. (2026-06-25 design.)
 **Relates:** proposal 018 (Gateway API/GAMMA — the Phase 3 "interception model" this
 details), proposal 020 (namespace-aware services + the mesh-Service model this builds on),
 proposal 004 (demand-scoped distribution — the scope-limiter), proposal 005 (multi-port);
@@ -183,22 +183,22 @@ The mark is unique to the proxy's passthrough — no UID collision, app-UID-agno
    redirect). The gate for the default flip. ✅ **GATE CLEARED** — the loop failure mode is
    prevented regardless of outcome (see step 3, SO_MARK, already wired both sides), and the
    offline envoy-validate (`capture_bootstrap.json`, `withPassthrough=true`) accepts the
-   SO_MARK'd passthrough bootstrap. talos M2a (rev122) showed egress intact under redirect-all
+   SO_MARK'd passthrough bootstrap. The reference cluster's M2a run (rev122) showed egress intact under redirect-all
    (github:443=200, apiserver:443 TLS ok, mesh echo=200) — no observable loop. Final on-cluster
-   confirmation rides on the step-4 talos validation (where the flag is actually enabled).
+   confirmation rides on the step-4 reference-cluster validation (where the flag is actually enabled).
 3. **SO_MARK self-exclusion** (agent xDS `socket_options` + CNI `meta mark RETURN`). ✅ **DONE** —
    `NewPassthroughOriginalDstCluster` stamps `CapturePassthroughFwMark` (SO_MARK, STATE_PREBIND)
    on the passthrough cluster's upstream sockets; `programCaptureRedirectAll` RETURNs that mark
    ahead of the redirect. Defensive (harmless if the passthrough egresses proxy-side); unit-tested
    both sides + covered by envoy-validate.
 4. **Flip redirect-all to default-on for managed pods** behind a chart value (default off
-   until validated on talos), annotation as opt-out. ✅ **IMPLEMENTED (default off)** —
+   until validated on the reference cluster), annotation as opt-out. ✅ **IMPLEMENTED (default off)** —
    `agent.captureRedirectAllDefault` (chart, default false) → cni-install
    `--capture-redirect-all-default` → netconf `capture_redirect_all_default` → the CNI
    redirect-alls every non-system pod UNLESS `capture.aether.io/redirect-all="false"`; the
    chart value also enables the agent `--capture-redirect-all` (Envoy passthrough chain).
    Precedence resolved in `podRedirectAll` (annotation true/false overrides node default).
-   **REMAINING: enable on talos and validate** egress volume on the node-shared proxy + the
+   **REMAINING: enable on the reference cluster and validate** egress volume on the node-shared proxy + the
    non-mesh cleartext catch-all passthrough (the #288 failure mode) before flipping the chart
    default on.
 

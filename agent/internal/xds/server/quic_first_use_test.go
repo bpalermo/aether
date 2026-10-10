@@ -95,7 +95,7 @@ func resourceNames(resp *discoveryv3.DeltaDiscoveryResponse) []string {
 }
 
 // TestOnDemandSubscribeForATwinTheWildcardAlreadySentIsAnswered is the
-// main-worker-03 "not found during on-demand discovery" at 15:45:04.7. The
+// node C "not found during on-demand discovery" at 15:45:04.7. The
 // twin reached the proxy through the wildcard CDS subscription first; a
 // request then routed to it while it was not yet an active cluster, and
 // Envoy's ODCDS manager subscribed to the name on the same stream.

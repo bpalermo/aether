@@ -51,7 +51,7 @@ type Storage[T proto.Message] interface {
 // loads storage at its start, but until it takes the node over the OLD agent is
 // the one serving CNI ADD/DEL and writing these files. On takeover the standby
 // reloads and applies only the difference — a full listener rebuild costs
-// 0.25-0.98 s on talos, inside the window the node's proxy has no ADS stream.
+// 0.25-0.98 s on the reference cluster, inside the window the node's proxy has no ADS stream.
 type Reloader[T proto.Message] interface {
 	// Reload re-reads every resource from disk, replaces the in-memory view with
 	// it, and returns how it differs from the view it replaced. Every value in

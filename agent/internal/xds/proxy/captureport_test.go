@@ -143,7 +143,7 @@ func TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain(t *testing.T) {
 // Phase 4 proposes deleting the portless floor chain — the only step in
 // proposal 037 that changes what an existing client observes — and it is gated
 // on evidence that no client observes it: the shim's own counter reading zero
-// across a full release on talos.
+// across a full release on the reference cluster.
 //
 // That evidence is only obtainable if the shim has a stat prefix of its own. If
 // it shared one with the supported spellings (:18082 and the primary port), the

@@ -1,7 +1,7 @@
 # Gateway API conformance — the hostname-less routing fix did NOT flip traffic, rev7 (2026-06-26)
 
 A seventh run of the upstream Kubernetes **Gateway API conformance suite**
-(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **talos-main**, now at
+(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **the reference cluster**, now at
 aether **0.50.0 (rev 86)**, image/commit **`ddd3ee4`**. This run measures the
 **3-PR hostname-less routing fix** (#341 / #342 / #343) that was expected to flip
 rev6's uniform-404 traffic wall (rev6 was never written up; the last committed
@@ -92,7 +92,7 @@ MESH finished in 164 s.
 observed, and the gap between them is the rev7 finding.**
 
 **1. The suite: still a uniform 404, identical to rev6.** Every traffic test issues
-`GET http://192.168.100.5x/…` with an **empty Host header** to the correct,
+`GET http://203.0.113.5x/…` with an **empty Host header** to the correct,
 distinct per-Gateway address, and the edge Envoy answers **404**:
 
 ```
@@ -253,7 +253,7 @@ $ kubectl get ns | grep -E 'conformance|rev7-repro'   → none
 $ kubectl get gateway -A | grep -E 'conformance|rev7' → none
 $ kubectl get svc -n aether-ingress -l aether.io/edge-gateway
 NAME                                        EXTERNAL-IP
-aether-edge-gw-aether-ingress-aether-edge   192.168.100.101   ← production edge only
+aether-edge-gw-aether-ingress-aether-edge   203.0.113.101   ← production edge only
 ```
 
 **No MetalLB pool IPs leaked** (.50–.254 pool clean; only the prod edge `.101`

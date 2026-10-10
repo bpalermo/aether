@@ -308,7 +308,7 @@ func TestQUICDemandRefusesWhatItCannotBuild(t *testing.T) {
 // the window after the agent starts is pruned with its twin, one log line per
 // node; a persisted pair that IS fetched in the window is kept. This is what
 // drains the SAs x destinations fan-out the first #1032 deploy persisted on
-// every talos node (observed_pairs == local_identities x 2).
+// every reference-cluster node (observed_pairs == local_identities x 2).
 //
 // Red before #1033: no such prune existed, and both pairs survived for as
 // long as their source had a pod on the node.

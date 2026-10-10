@@ -58,7 +58,7 @@ func newHoldServer(t *testing.T, gate IdentityGate) (*AgentXdsServer, *atomic.In
 // restarted agent cannot handshake to the registrar, so the local-only fallback
 // fires and the snapshot it publishes has no cross-node endpoints — which
 // REPLACES the complete config Envoy was still happily serving. On
-// main-worker-03 on 2026-09-07 that failed ~95% of the node's mesh probes for a
+// node C on 2026-09-07 that failed ~95% of the node's mesh probes for a
 // whole 6m41s outage. The crash loop this replaced never did that, because a
 // dying agent published nothing.
 //

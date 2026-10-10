@@ -480,7 +480,7 @@ func stringSetsEqual(a, b []string) bool {
 //     waits for the registry snapshot after identity, with the node's proxy on
 //     no ADS stream (#1123), so whatever backoff the ClientConn has reached when
 //     the SVID lands is added to that gap. The own-SVID wait was 0.15–2 s on
-//     talos-main and 1–5 s on kind. This ladder (0.1, 0.16, 0.26, 0.41, then
+//     the reference cluster and 1–5 s on kind. This ladder (0.1, 0.16, 0.26, 0.41, then
 //     0.5 s) reaches its cap after ~0.9 s of failures, so the redial follows
 //     identity by at most ~0.6 s (cap plus jitter), ~0.25 s on average. A 1 s
 //     cap would double both.
@@ -895,7 +895,7 @@ func (r *RegistrarRegistry) deferStream(ctx context.Context, err error, backoff 
 //
 // Observed on the rev210 upgrade roll (2026-09-07 20:03:45Z): a registrar pod was
 // in its Service's endpoints before it had an SVID (the readiness dwell #744
-// removed), and the agent on main-worker-01 logged this as
+// removed), and the agent on node A logged this as
 // `failed to start watch stream, retrying` at ERROR for a replica that was
 // serving seconds later.
 func (r *RegistrarRegistry) deferPeerStream(ctx context.Context, err error, backoff *time.Duration) bool {
@@ -908,7 +908,7 @@ func (r *RegistrarRegistry) deferPeerStream(ctx context.Context, err error, back
 // the SVID landed failed the handshake, so the ClientConn holds a cached
 // transport failure — with the pre-identity error text — until it redials.
 //
-// On the rev211 deploy roll (2026-09-07, main-worker-02) the wake fired (then a
+// On the rev211 deploy roll (2026-09-07, node B) the wake fired (then a
 // ResetConnectBackoff, removed by #1137) at 20:47:27.911Z, this loop logged
 // `registrar has no identity yet; retrying` 1ms later, and the stream connected
 // at 20:47:29.017Z. The registrar had had its identity for a minute. Blaming the
@@ -923,7 +923,7 @@ func (r *RegistrarRegistry) deferPeerStream(ctx context.Context, err error, back
 // the redial and loses (the ClientConn answers it from the cached pre-identity
 // failure a few milliseconds before the new transport is up), and sleeping a
 // full initialBackoff after that was a steady ~1.05s on every node of the
-// 2026-10-02 talos agent rolls, spent with the node's proxy on no ADS stream.
+// 2026-10-02 reference-cluster agent rolls, spent with the node's proxy on no ADS stream.
 func (r *RegistrarRegistry) deferReconnect(ctx context.Context, err error, backoff *time.Duration) bool {
 	jitter := time.Duration(float64(*backoff) * jitterFraction * rand.Float64())
 	wait := *backoff + jitter

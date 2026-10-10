@@ -9,7 +9,7 @@
 # The production symptom: a hot-restart successor whose main thread goes silent
 # right after `starting workers` while the draining parent goes silent right
 # after `closing and draining listeners`, until the supervisor's 30 s liveness
-# watchdog kills both epochs (~1 in 60 proxy rolls on talos, h3 inbound on).
+# watchdog kills both epochs (~1 in 60 proxy rolls on the reference cluster, h3 inbound on).
 #
 # The mechanism (pinned Envoy 726d7ac + carried patches; confirmed with the
 # per-thread kernel stacks and gdb backtraces this leg captures): a
