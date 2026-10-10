@@ -84,8 +84,20 @@ A chart's tests live in its `BUILD.bazel`. Which rule to use:
 | a value the chart must **reject** | `helm_template_fail_test` |
 | a derived line that must **follow** a value (a config checksum) | `helm_template_value_changes_test` |
 | templates that must **not** change with a value (a file the pod watches, so no roll) | `helm_template_value_ignored_test` |
+| a mesh name the chart writes on its **own pods**, which code reads (the mesh-managed label, a mesh annotation, the CSI driver) | `helm_mesh_names_test` |
 
 All but the first are in `//bazel/helm:defs.bzl`, which documents each.
+
+The last row is for what a pattern cannot say: a pattern holds a literal, and a
+literal in a BUILD file agrees with a literal in a template while the constant
+the agent reads has moved on. `charts/prober` and `charts/udsecho` write the
+mesh-managed label, the mesh annotations and the `csi.aether.io` driver on
+their own pods; `:prober_mesh_names_test` and `:udsecho_mesh_names_test` list
+what each workload carries by symbol, and the checker
+(`//bazel/helm/meshnames`) compares the render with `common/constants` and
+`common/udspath` (#1589). It is not a `go_test`: one with a chart in its
+`data` cannot be analysed under `--config=race`. Like the pattern rules, it
+never prints a render.
 
 Two facts about rules_helm's `helm_template_test` decide the first row:
 
@@ -156,11 +168,24 @@ kubectl label namespace aether-system \
   pod-security.kubernetes.io/enforce=privileged \
   pod-security.kubernetes.io/audit=privileged \
   pod-security.kubernetes.io/warn=privileged
-# Prefer the commit-pinned tag; the bare `--version <aether-version>` also
-# resolves, but that tag is mutable and re-pushed by every release.
+# Use the commit-pinned tag; the bare `--version <aether-version>` also
+# resolves, but that tag is mutable: see below.
 helm install aether oci://quay.io/aethermesh/chart-aether \
   --version <aether-version>-<git-commit> -n aether-system --create-namespace
 ```
+
+**Pin the commit tag or the digest, never the bare tag with a digest (#1588).**
+`chart-aether:<aether-version>` is pushed again by every commit on `main` that
+still carries that `Chart.yaml` version, which is most commits: its digest
+changes while the version does not. Only `<aether-version>-<git-commit>` is
+written once. A reference that pins a digest under the bare tag
+(`chart-aether:<aether-version>@sha256:…`, or a lock entry of tag plus digest)
+breaks when the next commit publishes; Helm reports
+`chart reference digest mismatch`. Whatever pins a released chart (a values
+lock, a GitOps source, a mirror) names `<aether-version>-<git-commit>`, or the
+digest alone (`oci://quay.io/aethermesh/chart-aether@sha256:…`). The other three
+charts have no bare tag: their version carries the commit. `docs/runbook.md`,
+"Pinning a released chart", has the table.
 
 The `aether` chart does not create its namespace (`namespace.create=false`, the
 default since 2.4.21): Helm or you do, and you label it. See "Who creates the

@@ -59,8 +59,14 @@ alerts select on the component's name. To rename one on purpose, set
 `OTEL_RESOURCE_ATTRIBUTES` is ignored too (#1575), and nothing overrides it: the
 version says which binary produced the telemetry, and only the binary knows. All
 of them build that resource with `common/telemetry/serviceresource`. Envoy is not a
-Go component: its stats resource takes `service.name` from
-`OTEL_RESOURCE_ATTRIBUTES`, which is how the edge proxy gets `aether-edge-proxy`.
+Go component. The edge proxy's stats resource takes `service.name` from
+`OTEL_RESOURCE_ATTRIBUTES`, which is how it gets `aether-edge-proxy`. The node
+proxy's is named `aether-proxy` in its bootstrap (chart 2.4.26, #1561; it had no
+name before, so its series had no `job` in a backend that makes `job` from
+`service.name`), not in the container's environment:
+the supervisor runs in that container too and reads the same variables, so an
+`OTEL_SERVICE_NAME` there would rename the supervisor's metrics, and it does
+not rename Envoy's.
 
 ### `spire` — system-wide mTLS
 

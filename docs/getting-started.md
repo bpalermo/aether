@@ -197,7 +197,11 @@ can be upgraded independently), then the system chart.
 ```bash
 # Pick the published version. Every chart is published under a commit-pinned tag
 # `<X.Y.Z>-<full git sha>` — use it, not the `aether` chart's bare `<X.Y.Z>` tag,
-# which is mutable and re-pushed by every release (#692).
+# which is mutable and re-pushed by every release (#692): every commit that
+# keeps the version rewrites it, so its digest changes and the version does
+# not. Anything that pins the chart (a lock file, a GitOps source) names the
+# commit-pinned tag, or the digest alone, never the bare tag with a digest
+# (#1588; docs/runbook.md, "Pinning a released chart").
 COMMIT=<full 40-char git sha>
 VERSION=<X.Y.Z>-$COMMIT   # each chart's Chart.yaml version at that commit
 

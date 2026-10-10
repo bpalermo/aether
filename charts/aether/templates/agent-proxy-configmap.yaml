@@ -62,6 +62,22 @@ data:
             - name: envoy.tracers.opentelemetry.resource_detectors.environment
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.EnvironmentResourceDetectorConfig
+            # service.name for these stats (#1561), which Prometheus's OTLP
+            # ingestion stores as `job` (another backend may need the mapping
+            # made): until chart 2.4.26 they had none, and a query
+            # could only tell them from the edge proxy's by negation
+            # ({job!="aether-edge-proxy"}). It is set HERE and not in the
+            # container's environment because the supervisor in the same
+            # container exports its own metrics from that environment, as
+            # aether-proxy-supervisor: OTEL_SERVICE_NAME there would rename
+            # them. Envoy merges the detectors in order and the later one wins
+            # (resource_provider.cc), so this name also holds against a
+            # service.name in OTEL_RESOURCE_ATTRIBUTES.
+            - name: envoy.tracers.opentelemetry.resource_detectors.static_config
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.StaticConfigResourceDetectorConfig
+                attributes:
+                  service.name: aether-proxy
           prefix: envoy
           # Export the tag-extracted name with tags as OTLP attributes: one
           # metric family per stat, labeled by aether.cluster (see stats_tags)
