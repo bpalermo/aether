@@ -273,9 +273,9 @@ const attrContentHashLabel = attribute.Key("content_hash")
 //     two replicas may legitimately differ for a moment (health derives from
 //     each replica's clock), so the value is for reading by hand there, not
 //     for alerting.
-//   - aether.registrar.snapshot.content: DEPRECATED by the gauge above, kept
-//     for one release so a rule written on it keeps working while replicas of
-//     both images run (#1329; remove with the first release after it). An
+//   - aether.registrar.snapshot.content: DEPRECATED by the gauge above in chart 2.4.12
+//     (#1329), kept so a rule written on it keeps working while replicas of both images
+//     run. Removed in chart 2.6.0 at the earliest (one chart minor, AGENTS.md). An
 //     info gauge, always 1, labelled content_hash. Exactly one series per
 //     replica is exported at a time, but Prometheus still returns a
 //     superseded series for its 5-minute lookback (OTLP has no staleness

@@ -295,7 +295,8 @@ func TestMetrics_ContentHashGauge(t *testing.T) {
 	if len(seen) != 3 {
 		t.Errorf("distinct values = %d, want 3 (one per distinct endpoint set)", len(seen))
 	}
-	// The deprecated labelled gauge is still exported next to it for one release.
+	// The deprecated labelled gauge is still exported next to it (deprecated in
+	// chart 2.4.12; removed in chart 2.6.0 at the earliest).
 	if got := collectGaugePoints(t, reader, "aether.registrar.snapshot.content"); len(got) != 1 {
 		t.Errorf("deprecated snapshot.content series = %d, want 1", len(got))
 	}

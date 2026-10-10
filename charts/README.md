@@ -140,6 +140,43 @@ these charts is written. A document written as a flow mapping or JSON is not
 indexed: the test fails saying so and lists the documents it found; match such a
 document with `patterns`.
 
+## Compatibility window
+
+The unit of compatibility is **one minor version of the `aether` chart**. That
+is what "one release" means wherever these docs say it.
+
+**Skew that is supported.** The chart pins every image by digest, so a release
+is one chart with its own images; skew exists while a roll is under way (the
+agent, the node proxy, mesh-dns, uds-csi, the registrar and the controller roll
+separately, node by node) and after a rollback.
+
+| Combination | Supported |
+| --- | --- |
+| Components of one chart minor, any patch versions, side by side | yes |
+| Components of two **adjacent** minors side by side (an upgrade or a rollback in progress, e.g. a 2.5.x agent with a 2.6.x proxy, or a 2.6.x registrar with 2.5.x agents) | yes, for the length of the roll |
+| An upgrade that skips a minor (2.4.x straight to 2.6.x) | no: go through the minor in between and let it finish rolling |
+| A chart with image digests overridden to those of another minor, as a steady state | no |
+| A major version step | only as its own runbook section says ("Upgrading to chart 2.0.0") |
+
+**Deprecation.** Something deprecated in a chart of minor *N* (a flag, a value,
+a metric or one of its labels, a file or wire format, a tolerance for an older
+peer) is still there in every chart of minor *N* and may be removed in *N+1*.0:
+deprecated in 2.5.x, removable in 2.6.0, never within 2.5.x. It is announced in
+two places:
+
+- the runbook (`docs/runbook.md`, "Which workloads a chart upgrade rolls"), in
+  the **"Chart X.Y.Z"** section of the chart that deprecates it: what is
+  deprecated, what to use instead, and the chart minor that removes it. The
+  section of the chart that removes it says what an operator who skipped the
+  window sees;
+- where the thing is defined: the flag's `--help` text, the metric's
+  description, the comment on the value in `values.yaml`, or the comment beside
+  the template or the code.
+
+Read the sections between the chart you run and the chart you are moving to
+before every upgrade. "Chart 2.5.7" lists what was deprecated when this rule
+was written down, with the chart that may remove each.
+
 ## Install
 
 CRDs first, then the system:
