@@ -58,6 +58,16 @@ run --workspace_status_command=./bazel/workspace_status.sh
 
 # Pass HOME for testcontainers config resolution
 test --test_env=HOME
+# CI runs the testcontainers tests without the reaper (#1602). The reaper is a
+# container of its own, `testcontainers/ryuk`, which the library pulls from
+# Docker Hub by tag and with no credential: that pull, not a test, is what
+# failed the `race` and `integration` jobs when Docker Hub's token endpoint
+# timed out. It removes what a crashed test leaves behind, and a CI runner is
+# thrown away with everything on it; the tests terminate their own containers
+# (the TestMain of each package). A local run keeps the reaper, since a
+# workstation is not thrown away. //scripts:docker_hub_mirror_test holds this
+# line and the workflow steps that depend on it.
+test:ci --test_env=TESTCONTAINERS_RYUK_DISABLED=true
 
 # Colima Docker socket config for macOS integration tests.
 # Run ./bazel/configure_colima.sh to generate colima.bazelrc with your socket path.

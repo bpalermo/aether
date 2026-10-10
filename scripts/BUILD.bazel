@@ -43,6 +43,26 @@ sh_test(
     env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
+# scripts/docker-hub-mirror.sh (#1602): the runner's Docker daemon is given a
+# Docker Hub mirror (merged into daemon.json, reloaded, never restarted) and a
+# digest-pinned image is pulled through it, with a warning whenever the pull
+# would still reach Docker Hub. Also holds .bazelrc to turning the
+# testcontainers reaper off under --config=ci, and the workflows to running
+# their test lists with that config. Hermetic: a fake docker, curl, sudo and
+# systemctl, and the Bazel-pinned jq.
+sh_test(
+    name = "docker_hub_mirror_test",
+    size = "small",
+    srcs = ["docker_hub_mirror_test.sh"],
+    data = [
+        "docker-hub-mirror.sh",
+        "//:.bazelrc",
+        "//:ci_definitions",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
 # The nightly e2e's report-failure step (#1532, #1568):
 # scripts/e2e-report-failure.sh through the fake `gh`, and the job of
 # .github/workflows/e2e.yaml that runs it (its sparse checkout must hold the

@@ -6,6 +6,8 @@
 # on PATH ahead of the runner's preinstalled kind, and — when `cluster_name` is
 # set — a cluster created from the pinned node image and deleted in the post
 # step. //e2e:kind_pin_test fails if helm/kind-action is used anywhere else.
+# The node image is pulled first, through a Docker Hub mirror
+# (scripts/docker-hub-mirror.sh, #1602).
 #
 # Requires the repository to be checked out (this action and the pin file live
 # in it).
@@ -50,6 +52,20 @@ runs:
           echo "node_image=$KIND_NODE_IMAGE"
         } >> "$GITHUB_OUTPUT"
         echo "kind $KIND_VERSION, kubectl $KUBECTL_VERSION, node image $KIND_NODE_IMAGE"
+
+    # The node image is the one Docker Hub pull of a kind job's runner, and it
+    # was anonymous: a timeout of Docker Hub's token endpoint failed `e2e` with
+    # no test run (#1602). The runner's daemon gets a mirror and the image is
+    # pulled here, by the pinned reference with its digest, so that kind (below,
+    # or the harness or //test/e2e later) finds it present. The script warns on
+    # the run when the pull would still reach Docker Hub. //e2e:kind_pin_test
+    # holds this step to its place before anything creates a cluster.
+    - name: Pull the node image through the Docker Hub mirror
+      shell: bash
+      env:
+        NODE_IMAGE: ${{ steps.pin.outputs.node_image }}
+      run: |
+        "$GITHUB_ACTION_PATH/../../../scripts/docker-hub-mirror.sh" "$NODE_IMAGE"
 
     - name: Install kind + kubectl${{ inputs.cluster_name != '' && ' and create the cluster' || '' }}
       uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0

@@ -31,6 +31,11 @@
 #      for every composite action that drives kind (run-e2e-script,
 #      run-conformance), since a job that calls one has no kind command of its
 #      own
+#   8. setup-kind pulls the pinned node image through the Docker Hub mirror
+#      (scripts/docker-hub-mirror.sh, #1602) BEFORE helm/kind-action, and hands
+#      that script the pin's own output: every kind job gets the image the same
+#      way, and none is left to pull it from Docker Hub anonymously when its
+#      cluster is created
 set -euo pipefail
 
 fail=0
@@ -244,6 +249,23 @@ for f in "${ci_files[@]}"; do
 	fi
 done
 echo "checked $actions_checked composite action(s)"
+
+# --- 8. the node image comes through the Docker Hub mirror.
+if [ -f "$SETUP_KIND" ]; then
+	code=$(grep -nvE '^[[:space:]]*#' "$SETUP_KIND" || true)
+	# shellcheck disable=SC2016 # the action's literal text
+	mirror_line=$(grep -E '^[0-9]+:[[:space:]]+"\$GITHUB_ACTION_PATH/\.\./\.\./\.\./scripts/docker-hub-mirror\.sh" "\$NODE_IMAGE"[[:space:]]*$' <<<"$code" | head -n1 | cut -d: -f1)
+	kind_line=$(grep -E 'uses:[[:space:]]*helm/kind-action@' <<<"$code" | head -n1 | cut -d: -f1)
+	if [ -z "$mirror_line" ]; then
+		err "$SETUP_KIND: no step runs scripts/docker-hub-mirror.sh \"\$NODE_IMAGE\": the node image would be pulled from Docker Hub anonymously (#1602)"
+	elif [ -n "$kind_line" ] && [ "$mirror_line" -gt "$kind_line" ]; then
+		err "$SETUP_KIND:$mirror_line: scripts/docker-hub-mirror.sh runs after helm/kind-action (line $kind_line), which has already pulled the node image from Docker Hub"
+	fi
+	# shellcheck disable=SC2016 # the action's literal text
+	grep -qE '^[0-9]+:[[:space:]]+NODE_IMAGE:[[:space:]]*\$\{\{ steps\.pin\.outputs\.node_image \}\}[[:space:]]*$' <<<"$code" ||
+		err "$SETUP_KIND: NODE_IMAGE is not \${{ steps.pin.outputs.node_image }}: the image pulled through the mirror must be the pin's"
+	echo "checked the Docker Hub mirror step of $SETUP_KIND"
+fi
 
 if [ "$fail" -ne 0 ]; then
 	echo "kind pin drift: bump e2e/kind-version.sh and every copy together (docs/runbook.md, \"Bumping the e2e Kubernetes version\")" >&2
