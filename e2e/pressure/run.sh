@@ -649,17 +649,19 @@ pod_field() { kc -n "$AGENT_NS" get pod "$1" -o jsonpath="$2"; }
 
 agent_status() { pod_field "$1" '{.status.containerStatuses[?(@.name=="'"$AGENT_CONTAINER"'")]'"$2"'}'; }
 
-# whole_number <variable name> [max]: aborts unless the variable holds a whole
-# number (digits only), at most <max> when given, and rewrites it in decimal
-# without leading zeros. The shell's arithmetic reads a leading zero as octal:
+# whole_number <variable name> <min> [max]: aborts unless the variable holds a
+# whole number (digits only) of at least <min>, and at most <max> when given,
+# and rewrites it in decimal without leading zeros. The shell's arithmetic reads a leading zero as octal:
 # 08 is an error there ("value too great for base"), which under errexit ends
 # the run with the shell's status 1, this script's FAIL, and 010 is eight.
 whole_number() {
-	local name=$1 max=${2:-} v=${!1} range=""
-	[ -z "$max" ] || range=" from 0 to ${max}"
+	local name=$1 min=$2 max=${3:-} v=${!1} range
+	if [ -n "$max" ]; then range=" from ${min} to ${max}"; else range=" of at least ${min}"; fi
 	case "$v" in
 	"" | *[!0-9]*) die "${name} must be a whole number${range} (got '${v}')" ;;
 	esac
+	[ "$((10#$v))" -ge "$min" ] ||
+		die "${name} must be a whole number${range} (got '${v}')"
 	[ -z "$max" ] || [ "$((10#$v))" -le "$max" ] ||
 		die "${name} must be a whole number${range} (got '${v}')"
 	printf -v "$name" '%d' "$((10#$v))"
@@ -674,14 +676,22 @@ preflight_inputs() {
 	# computes with it (whole_number). MIN_POLL_OK_PCT above 100 would make a
 	# FAIL impossible; the other percentages are of a limit.
 	for v in MIN_POLL_OK_PCT LIMIT_PCT SPIKE_PCT ABORT_HEAP_PCT ABORT_RSS_PCT; do
-		whole_number "$v" 100
+		whole_number "$v" 0 100
 	done
+	# The soft limit is (LIMIT_PCT - SPIKE_PCT) percent of the pod's memory, and
+	# the baseline is divided by it: it must be more than nothing.
+	[ "$LIMIT_PCT" -gt "$SPIKE_PCT" ] ||
+		die "LIMIT_PCT (${LIMIT_PCT}) must be greater than SPIKE_PCT (${SPIKE_PCT}): the soft limit is their difference"
+	# At least 1: a wait of zero seconds makes no call, and its deadline would
+	# still read as a FAIL.
 	for v in PRESSURE_TIMEOUT POD_APPEAR_TIMEOUT AGENT_READY_TIMEOUT RECOVERY_TIMEOUT \
-		SERIES_FRESH_TIMEOUT SERIES_FRESH_MAX_AGE COLLECTOR_METRICS_PORT; do
-		whole_number "$v"
+		SERIES_FRESH_TIMEOUT SERIES_FRESH_MAX_AGE; do
+		whole_number "$v" 1
 	done
-	# Empty means "decide by the metrics source" (select_metrics_source).
-	[ -z "$POLL_INTERVAL" ] || whole_number POLL_INTERVAL
+	whole_number COLLECTOR_METRICS_PORT 1 65535
+	# Empty means "decide by the metrics source" (select_metrics_source). Zero
+	# would poll without a pause.
+	[ -z "$POLL_INTERVAL" ] || whole_number POLL_INTERVAL 1
 	[ -n "$EXPECT_CONTEXT" ] || missing="${missing} EXPECT_CONTEXT (the kube context this run is meant for)"
 	[ -n "$COLLECTOR_NS" ] || missing="${missing} COLLECTOR_NS (the namespace of the ${COLLECTOR_DEPLOY} Deployment)"
 	[ -n "$PROM_NS" ] || missing="${missing} PROM_NS (the namespace of the ${PROM_SVC} Service)"

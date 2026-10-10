@@ -1306,6 +1306,31 @@ for v in PRESSURE_TIMEOUT POD_APPEAR_TIMEOUT AGENT_READY_TIMEOUT RECOVERY_TIMEOU
 done
 call number-pct-over 'preflight_inputs; echo reached' ABORT_HEAP_PCT=101
 want number-pct-over 2 "ABORT_HEAP_PCT must be a whole number from 0 to 100 (got '101')"
+# A duration of zero is not a short wait, it is no wait: the loop makes no call
+# and its deadline still reads as a FAIL. A zero poll interval spins.
+for v in PRESSURE_TIMEOUT POD_APPEAR_TIMEOUT AGENT_READY_TIMEOUT RECOVERY_TIMEOUT SERIES_FRESH_TIMEOUT \
+	SERIES_FRESH_MAX_AGE POLL_INTERVAL; do
+	call "number-zero-$v" 'preflight_inputs; echo reached' "$v=0"
+	want "number-zero-$v" 2 "$v must be a whole number of at least 1 (got '0')"
+	lacks "number-zero-$v" 'reached'
+done
+for bad in 0 000 65536; do
+	call "number-port-$bad" 'preflight_inputs; echo reached' COLLECTOR_METRICS_PORT="$bad"
+	want "number-port-$bad" 2 "COLLECTOR_METRICS_PORT must be a whole number from 1 to 65535 (got '$bad')"
+done
+call number-port-max 'preflight_inputs; echo "port=$COLLECTOR_METRICS_PORT"' COLLECTOR_METRICS_PORT=65535
+want number-port-max 0 'port=65535'
+# The soft limit is (LIMIT_PCT - SPIKE_PCT) percent of the pod's memory, and
+# the baseline is divided by it: equal percentages are a division by zero
+# (the shell's status 1, this script's FAIL), and a larger spike a negative
+# threshold.
+call number-limit-equals-spike 'preflight_inputs; echo reached' LIMIT_PCT=25 SPIKE_PCT=25
+want number-limit-equals-spike 2 'LIMIT_PCT (25) must be greater than SPIKE_PCT (25)'
+lacks number-limit-equals-spike 'reached'
+call number-limit-below-spike 'preflight_inputs; echo reached' LIMIT_PCT=020 SPIKE_PCT=25
+want number-limit-below-spike 2 'LIMIT_PCT (20) must be greater than SPIKE_PCT (25)'
+call number-limit-above-spike 'preflight_inputs; echo "limit=$LIMIT_PCT spike=$SPIKE_PCT"' LIMIT_PCT=26 SPIKE_PCT=25
+want number-limit-above-spike 0 'limit=26 spike=25'
 # A byte count read off the cluster is a number the script computes with too.
 call number-bytes 'echo "b=$(parse_bytes 08) m=$(parse_bytes 010Mi) sum=$(($(parse_bytes 0900) + 1))"'
 want number-bytes 0 'b=8 m=10485760 sum=901'

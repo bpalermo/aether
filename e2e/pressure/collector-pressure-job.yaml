@@ -62,10 +62,12 @@ spec:
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
-      # No priorityClassName on purpose: priority 0 is below whatever priority
-      # the platform gives its critical and observability workloads, so under
-      # node pressure the generator is the first thing evicted — never the
-      # collector, Prometheus or an agent.
+      # No priorityClassName on purpose: the generator runs at priority 0. Under
+      # node pressure it is evicted before the collector, Prometheus and the
+      # agent only on a cluster that gives those a higher priority than 0. That
+      # is the cluster's to arrange, and this manifest cannot guarantee it: on
+      # a cluster where they have no PriorityClass either, the kubelet may
+      # evict any of them first. Check before a run.
       #
       # No tolerations on purpose either: the generator must stay off tainted and
       # control-plane nodes.
