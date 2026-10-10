@@ -99,6 +99,17 @@ gRPC traffic through a Gateway the edge cannot serve (the tests run and fail/tim
 so it is omitted here while GAMMA continues to implement `GRPCRoute` for the mesh
 profile (see "Route types" above).
 
+`GatewayInfrastructure` is **not** advertised. The feature covers
+`spec.infrastructure` as a whole, and aether implements half of it: a Gateway whose
+`spec.infrastructure.parametersRef` is invalid or does not resolve is rejected with
+`Accepted=False`/`InvalidParameters`, but `spec.infrastructure.labels` and
+`annotations` are not propagated to the per-Gateway LoadBalancer Service. Since
+gateway-api v1.6.3 the suite gates both `GatewayInfrastructureMetadata` (the
+propagation test) and `GatewayInvalidParametersRef` on that one feature, so both are
+skipped. `GatewayInvalidParametersRef` was a Core test through v1.6.2 and passed
+there; the rejection itself is unchanged and stays covered by the edge reconciler's
+unit tests.
+
 ### Data-plane / addressing
 
 Per-Gateway addressing (proposal 021 Phase 2) is implemented and unconditional: each

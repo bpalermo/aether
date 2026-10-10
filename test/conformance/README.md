@@ -1,7 +1,7 @@
 # Gateway API conformance runner
 
 Committed, reproducible driver for the upstream Kubernetes **Gateway API conformance
-suite** (`sigs.k8s.io/gateway-api/conformance` @ **v1.6.1**) against a live aether
+suite** (`sigs.k8s.io/gateway-api/conformance` @ **v1.6.3**) against a live aether
 cluster. This replaces the previously uncommitted one-off that lived in a gateway-api
 checkout (see `docs/conformance/baseline-*.md`). Design + feasibility analysis:
 `docs/proposals/024_conformance-ci.md`.
@@ -23,18 +23,18 @@ aether module** (Gazelle skips it; `go test ./...` / `bazel test //...` ignore i
 gateway-api **conformance suite is a separate Go module** whose `go.mod` has
 `replace sigs.k8s.io/gateway-api => ../` — it is buildable **only from inside a
 gateway-api source checkout** and cannot be consumed as an ordinary dependency
-(`go get sigs.k8s.io/gateway-api/conformance@v1.6.1` fails to resolve the `apis/*`
+(`go get sigs.k8s.io/gateway-api/conformance@v1.6.3` fails to resolve the `apis/*`
 imports). That is why the prior runner lived in a `/tmp` gateway-api checkout, and why
 this committed copy is **copied into a checked-out gateway-api tree at run time**.
 
 ## Run it
 
 Against any aether cluster with the **edge** enabled, the **Gateway API CRDs**
-(standard channel, v1.6.1) installed, and GatewayClass `aether` present:
+(standard channel, v1.6.3) installed, and GatewayClass `aether` present:
 
 ```bash
 # 1. Check out the suite at the pinned version and drop the runner + overlay in.
-git clone --depth 1 --branch v1.6.1 \
+git clone --depth 1 --branch v1.6.3 \
   https://github.com/kubernetes-sigs/gateway-api /tmp/gateway-api
 cp test/conformance/conformance_test.go /tmp/gateway-api/conformance/aether_conformance_test.go
 cp test/conformance/mesh/manifests.yaml /tmp/gateway-api/conformance/mesh/manifests.yaml

@@ -208,9 +208,10 @@ MESH_UDP_PORT="18082"
 # The pinned Gateway API release (#1583): one for every e2e surface.
 # shellcheck source=e2e/gateway-api-version.sh
 . "$REPO_ROOT/e2e/gateway-api-version.sh"
-# TCPRoute/TLSRoute/UDPRoute are EXPERIMENTAL-channel in gateway-api v1.6.2 (the
-# standard channel stops at GRPCRoute), so the standard bundle uds.sh installs is
-# not enough here.
+# This harness installs the experimental bundle, unlike uds.sh. It had to while
+# TCPRoute/TLSRoute/UDPRoute were experimental-only; since gateway-api v1.6 the
+# standard bundle serves all three at v1 as well (the only version the agent
+# watches), so the channel is a choice here, kept as it was.
 GWAPI_CHANNEL="experimental-install.yaml"
 # SPIRE >= 1.15.2 is required since proposal 036 (the SPIFFE Broker API); these
 # are the same chart pins e2e/multicluster_waypoint.sh uses.
