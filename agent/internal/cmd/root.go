@@ -306,6 +306,9 @@ func runAgent(ctx context.Context) (retErr error) {
 	// (aether.agent.xds.acked_tls_clusters, #1425, #1508).
 	ackTracker.SetAckObserver(snapshotCache.ResponseAccepted)
 	ackTracker.SetDeliveryObserver(snapshotCache.ResponseDelivery)
+	// A pod's listener is acknowledged when a proxy holds the version this
+	// agent publishes, not any listener of that name (#1624).
+	ackTracker.SetPublishedVersion(ack.SnapshotVersions(snapshotCache, cfg.NodeName))
 
 	spireBridge, err := wireSpireBridge(ctx, m, snapshotCache, spireSource)
 	if err != nil {
