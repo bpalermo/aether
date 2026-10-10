@@ -1708,6 +1708,39 @@ helm_template_test(
     },
 )
 
+# #1636: a guard for what the agent now relies on. The exclusions of the probe
+# clusters' dead subtrees read a stat name up to its FIRST dot as the cluster
+# ("health_[^.]*", "inboundready_[^.]*"), and the agent keeps the dots of a pod
+# name out of those clusters' stat names (alt_stat_name with '~' for each dot),
+# so that part is the whole cluster and the alternation is matched against the
+# stat alone. The health gateway reads the clusters' membership gauges: an
+# exclusion that matches them answers 503 for the pod (the 2026-06-11 outage).
+# //agent/test/envoy_validate (TestChartStatsConfigOnDottedPodNames,
+# TestHealthGatewayAnswersForADottedPod) runs the pinned proxy with the block;
+# this pins both patterns in the packaged chart, alternatives included, so a
+# change of either is made on purpose and with that test in view.
+#
+# Do not make the bootstrap accept the dots instead: where a dotted pod name
+# ends and the stat begins can only be told with a list of every stat and
+# subtree name Envoy has ("ssl", "http2", "external" and "default" are all
+# legal labels of a pod name). The template itself is left as it was by #1636,
+# comments included: the supervisor watches the bootstrap, so any change of
+# that ConfigMap hot-restarts the proxy on every node.
+helm_template_test(
+    name = "aether_proxy_bootstrap_probe_cluster_exclusions_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-configmap.yaml": [
+            "- safe_regex:\\n\\s+regex: \"\\^cluster.{1,4}health_\\[\\^\\.\\]\\*.{1,4}\\(upstream_\\|lb_\\|retry\\|external\\|circuit_breakers\\|http1\\|http2\\|max_host_weight\\|assignment\\|bind_\\|original_dst\\|default.{1,4}total_match\\)\\.\\*\"\\n",
+            "- safe_regex:\\n\\s+regex: \"\\^cluster.{1,4}inboundready_\\[\\^\\.\\]\\*.{1,4}\\(upstream_\\|lb_\\|retry\\|external\\|circuit_breakers\\|http1\\|http2\\|max_host_weight\\|assignment\\|bind_\\|original_dst\\|default.{1,4}total_match\\)\\.\\*\"\\n",
+        ],
+    },
+)
+
 # #1054: the proxy drains with --drain-strategy gradual by default (immediate
 # made the stateless resets worse on talos-main); immediate stays an opt-in.
 helm_template_test(

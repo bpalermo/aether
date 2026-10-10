@@ -3234,6 +3234,144 @@ None of this was run on a cluster for this change. What was measured is named
 above; the labels, the swap and the two-pod case were each run against the
 pinned proxy binary, and the agent side against its own snapshot cache.
 
+#### Chart 2.5.2: a pod whose name contains a dot (#1636)
+
+**Who this is about.** A pod name may contain dots (it is an RFC 1123
+subdomain). No workload controller generates one; a pod created directly, or
+by an operator that names its pods, can have one. List them:
+
+```bash
+kubectl get pods -A -o json \
+  | jq -r '.items[] | select(.metadata.name | contains(".")) | "\(.metadata.namespace)/\(.metadata.name)"'
+```
+
+If that prints nothing, this release changes nothing on the cluster's proxies:
+the listeners and clusters of a pod without a dot in its name are what they
+were (`//agent/internal/xds/proxy`, `TestPodWithoutADotKeepsItsStatNames`).
+
+**What was wrong.** A dot is the separator of an Envoy stat name, and the
+agent put the pod name into its per-pod stat names as it is. For a pod
+`web.external-7d9f` in `team-a`:
+
+- `cluster.health_team-a_web.external-7d9f.membership_healthy` reads, to the
+  bootstrap's stats exclusions, as cluster `health_team-a_web` and stat
+  `external-7d9f.membership_healthy`, which the exclusion of the probe
+  clusters' dead `external.*` subtree matches. The gauge was never allocated,
+  the health gateway reads it, and the gateway answered `503` for the pod for
+  as long as it lived: its endpoint was never promoted. The same for a pod
+  whose second name label starts with `http1`, `http2`, `retry` or
+  `assignment` (the exclusion's other alternatives contain an underscore,
+  which no pod name does). Measured on the pinned proxy, the gateway included
+  (`//agent/test/envoy_validate`, `TestHealthGatewayAcrossTheStatNameChange`
+  keeps the old agent's cluster for `web.external-0` and reads `503` from it).
+- for every dotted pod, the part of the name after the first dot stayed in the
+  metric NAME (`envoy_listener_inbound_external_7d9f_downstream_cx_total`,
+  `envoy_cluster_external_7d9f_membership_healthy`): one set of metric
+  families per pod, with `aether_pod="web"` and
+  `aether_cluster="health_team-a_web"`.
+
+**What changed.** In a STAT name the agent now writes `~` for each dot of the
+pod name. `~` is legal in neither a namespace nor a pod name, so two pods never
+share a stat name and the pod name can be read back.
+
+| | Before | Since 2.5.2 |
+|---|---|---|
+| listener stat prefixes | `inbound_team-a_web.external-7d9f` (and `…_h3`, `out_http_…`, `capture_…`, `capture_udp_…`) | `inbound_team-a_web~external-7d9f` (and the same four) |
+| TCP floor stat prefix | `in_tcp_team-a_web.external-7d9f[_<port>]` | `in_tcp_team-a_web~external-7d9f[_<port>]` |
+| probe clusters' stats | keyed by the cluster name | keyed by `alt_stat_name`: `health_team-a_web~external-7d9f`, `inboundready_team-a_web~external-7d9f` |
+
+No resource is renamed. Listener, cluster and filter chain names, and the
+health gateway paths (`/healthz/health_team-a_web.external-7d9f`), carry the
+pod's own name, dots included, as they have since 2.5.0. The bootstrap is
+byte-identical to 2.5.1's: its tag extractors and exclusions were already
+right for a stat name without a dot in the pod part, and
+`//charts/aether:aether_proxy_bootstrap_probe_cluster_exclusions_test` now
+pins the two exclusion patterns.
+
+**Metric labels, for a dotted pod only.**
+
+- `aether_pod` is the pod name with `~` for each dot: `web~external-7d9f`
+  (`web~external-7d9f_h3` for the HTTP/3 inbound listener). It was `web`. A
+  regex tag extractor takes a piece of the stat name and cannot rewrite it, so
+  the label cannot be the pod's own name; to join it with a label that is
+  (`pod` from kube-state-metrics, `destination_pod` of
+  `aether_requests_total`):
+
+  ```promql
+  label_replace(envoy_listener_inbound_downstream_cx_active, "pod", "$1.$2", "aether_pod", "([^~]*)~([^~_]*)(?:_h3)?")
+  ```
+
+  (one `label_replace` per dot; a name with two dots needs a second).
+- `aether_cluster` of its probe clusters is `health_team-a_web~external-7d9f`
+  and `inboundready_team-a_web~external-7d9f`. It was `health_team-a_web`.
+- The metric families that carried the rest of its name stop receiving
+  samples. The metrics store keeps their names until its retention drops them.
+- The TCP floor's stat prefix is part of the metric name, where both `.` and
+  `~` become `_`: `envoy_tcp_in_tcp_team_a_web_external_7d9f_…` before and
+  after.
+
+**What an upgrade does on a node.** The proxy DaemonSet does not roll and the
+bootstrap ConfigMap does not change, so no proxy hot-restarts. The agent
+DaemonSet rolls (its image changed). When a node's agent is replaced:
+
+- for a pod without a dot in its name, the first snapshot of the new agent
+  holds the same listeners and clusters, and the proxy changes nothing;
+- for a dotted pod, its five listeners differ in `stat_prefix` and its two
+  probe clusters in `alt_stat_name`, so the proxy replaces them under the same
+  names.
+  - The probe clusters, measured on the pinned proxy
+    (`TestHealthGatewayAcrossTheStatNameChange`: the old agent's clusters
+    replaced by this agent's, the gateway requested every millisecond or so
+    throughout): the path of a healthy pod answered `200` at every request.
+    The proxy warms the replacing cluster, its first health check included,
+    before it takes the old one's place.
+  - The listeners, not measured for this change. From the 2.5.0 measurement
+    above, which replaced listeners at the same address: new connections are
+    not refused, and connections established before are closed at the end of
+    the proxy's drain time (`proxy.hotRestart.drainTime`, 10 s). Unlike
+    2.5.0, the app clusters keep their names, so a draining inbound listener
+    keeps routing until then.
+- a dotted pod that was never promoted because of the excluded gauges is
+  promoted once its node's agent is replaced (the same test: `503` from the
+  old agent's cluster, `200` from this agent's, the application up
+  throughout).
+
+While a node's agent is older than this release, its dotted pods are as
+before: the bootstrap cannot tell where a dotted pod name ends in a stat name.
+A rollback of the agent puts the dots back.
+
+**After the upgrade.**
+
+```promql
+# A pod name in a metric NAME. Each must return nothing once every agent is
+# replaced and the old series have gone stale (5 minutes).
+count by (__name__) ({__name__=~"envoy_cluster_.+_membership_(healthy|total)"})
+count by (__name__) ({__name__=~"envoy_listener_(inbound|out_http)_.+_downstream_cx_total", __name__!~"envoy_listener_(inbound|out_http)_worker_[0-9]+_downstream_cx_total"})
+
+# The dotted pods, as the proxies export them: one row per pod, and 1 from
+# the membership gauge of a pod whose application is up.
+count by (aether_namespace, aether_pod) (envoy_listener_inbound_downstream_cx_total{aether_pod=~".*~.*"})
+envoy_cluster_membership_healthy{aether_cluster=~"health_.*~.*"}
+```
+
+```bash
+# On one node: the gauges the health gateway reads exist for every pod
+# (the count is the number of mesh pods on the node, dotted or not).
+kubectl -n aether-system exec <proxy-pod> -c aether-proxy -- \
+  curl -s 'http://127.0.0.1:9901/stats?filter=membership_healthy' \
+  | grep -c '^cluster\.health_[^.]*\.membership_healthy: '
+```
+
+None of this was run on a cluster. What was measured, on the pinned proxy
+binary with the chart's `stats_config`: that `~` is kept as it is in a stat
+name, a tag value and a label value (`:` is rewritten to `_` by Envoy, and
+`@` already marks the HTTP/3 twin clusters in `aether_cluster`); the labels
+and the absence of any per-pod metric family for eighteen pod names chosen
+against the bootstrap's patterns; the health gateway answering `200` for a
+dotted pod whose application is up, `503` for one whose application is down,
+and following a pod whose application comes up; and the gateway across the
+replacement of the probe clusters.
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod
