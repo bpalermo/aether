@@ -922,7 +922,9 @@ m json '{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"aether-collect
 '
 m json-after "${HEAD}${GOODMETA}${SPEC}{\"kind\":\"Job\"}
 "
-m tab "${HEAD}${GOODMETA}${SPEC}  template:	{}
+# Deep in the pod template, where no other rule looks.
+m tab "${HEAD}${GOODMETA}${SPEC}  template:
+    spec:	{}
 "
 m crlf "$(printf '%s' "${HEAD}${GOODMETA}${SPEC}" | sed 's/$/\r/')
 "
@@ -947,7 +949,35 @@ m no-kind "apiVersion: batch/v1
 ${GOODMETA}${SPEC}"
 m no-apiversion "kind: Job
 ${GOODMETA}${SPEC}"
-for f in marker-then-indented spec-twice cr-in-spec no-kind no-apiversion \
+# The two-space level of spec is held to the rule of metadata's: plain
+# unquoted `key:` lines. YAML reads a quoted key, an explicit key and a merge
+# as the same key, and the later value wins: each of these applies a Job with
+# no deadline behind the line the check counted.
+m spec-quoted-dup "${HEAD}${GOODMETA}${SPEC}  \"activeDeadlineSeconds\": null
+"
+m spec-single-quoted-dup "${HEAD}${GOODMETA}${SPEC}  'activeDeadlineSeconds': null
+"
+m spec-explicit-key "${HEAD}${GOODMETA}${SPEC}  ? activeDeadlineSeconds
+  : null
+"
+m spec-merge-key "${HEAD}${GOODMETA}${SPEC}  <<: {activeDeadlineSeconds: null}
+"
+m spec-flow "${HEAD}${GOODMETA}${SPEC}  {activeDeadlineSeconds: null}
+"
+m spec-anchored-key "${HEAD}${GOODMETA}${SPEC}  &k activeDeadlineSeconds: null
+"
+m spec-deadline-twice "${HEAD}${GOODMETA}${SPEC}  activeDeadlineSeconds: 900
+"
+m spec-one-space "${HEAD}${GOODMETA}${SPEC} activeDeadlineSeconds: null
+"
+m spec-key-space "${HEAD}${GOODMETA}${SPEC}  activeDeadlineSeconds : null
+"
+m spec-deadline-octal "${HEAD}${GOODMETA}spec:
+  activeDeadlineSeconds: 0600
+"
+for f in spec-quoted-dup spec-single-quoted-dup spec-explicit-key spec-merge-key spec-flow \
+	spec-anchored-key spec-deadline-twice spec-one-space spec-key-space spec-deadline-octal \
+	marker-then-indented spec-twice cr-in-spec no-kind no-apiversion \
 	dots dots-then-doc flow-metadata no-namespace no-name generate-name name-twice \
 	quoted-name-key merge-key metadata-twice metadata-anchor marker-content marker-comment-doc \
 	directive tag list-kind extra-top-key no-spec json json-after tab crlf bom \
@@ -1237,6 +1267,48 @@ put fresh-last-error prom.out "$(prom_value 500)"
 call fresh-last-error "$FRESH"
 want fresh-last-error 2 'when the time ran out'
 lacks fresh-last-error 'did not go fresh'
+
+# --- numeric inputs ----------------------------------------------------------
+# A number with leading zeros is octal to the shell's arithmetic: 08 is an
+# error there ("value too great for base") and 010 is eight. Every numeric
+# input is checked and made decimal before anything computes with it.
+call number-pct-08 'preflight_inputs; echo "pct=$MIN_POLL_OK_PCT"' MIN_POLL_OK_PCT=08
+want number-pct-08 0 'pct=8'
+call number-pct-007 'preflight_inputs; echo "pct=$MIN_POLL_OK_PCT"' MIN_POLL_OK_PCT=007
+want number-pct-007 0 'pct=7'
+call number-pct-100 'preflight_inputs; echo "pct=$MIN_POLL_OK_PCT"' MIN_POLL_OK_PCT=100
+want number-pct-100 0 'pct=100'
+call number-pct-0100 'preflight_inputs; echo "pct=$MIN_POLL_OK_PCT"' MIN_POLL_OK_PCT=0100
+want number-pct-0100 0 'pct=100'
+# In the loop that computes with it: a FAIL stays a FAIL, not a shell error.
+put number-pct-08-loop agent-pods.out aether-agent-aaa
+call number-pct-08-loop 'preflight_inputs; NODE=n1; OLD_POD=aether-agent-aaa; POD_APPEAR_TIMEOUT=20; wait_agent_replaced' MIN_POLL_OK_PCT=08
+want number-pct-08-loop 1 'no replacement agent pod appeared on n1'
+lacks number-pct-08-loop 'value too great'
+
+NUMBERS='preflight_inputs; echo "limit=$LIMIT_PCT spike=$SPIKE_PCT heap=$ABORT_HEAP_PCT rss=$ABORT_RSS_PCT pressure=$PRESSURE_TIMEOUT appear=$POD_APPEAR_TIMEOUT ready=$AGENT_READY_TIMEOUT recovery=$RECOVERY_TIMEOUT fresh=$SERIES_FRESH_TIMEOUT age=$SERIES_FRESH_MAX_AGE poll=$POLL_INTERVAL port=$COLLECTOR_METRICS_PORT"; echo "deadline=$((SECONDS + PRESSURE_TIMEOUT + POD_APPEAR_TIMEOUT + AGENT_READY_TIMEOUT + RECOVERY_TIMEOUT + SERIES_FRESH_TIMEOUT)) soft=$((1000 * (LIMIT_PCT - SPIKE_PCT) / 100)) ceil=$((1000 * ABORT_HEAP_PCT / 100 + 1000 * ABORT_RSS_PCT / 100))"'
+call number-all "$NUMBERS" LIMIT_PCT=080 SPIKE_PCT=09 ABORT_HEAP_PCT=095 ABORT_RSS_PCT=090 \
+	PRESSURE_TIMEOUT=0300 POD_APPEAR_TIMEOUT=090 AGENT_READY_TIMEOUT=08 RECOVERY_TIMEOUT=0080 \
+	SERIES_FRESH_TIMEOUT=018 SERIES_FRESH_MAX_AGE=019 POLL_INTERVAL=09 COLLECTOR_METRICS_PORT=08888
+want number-all 0 'limit=80 spike=9 heap=95 rss=90 pressure=300 appear=90 ready=8 recovery=80 fresh=18 age=19 poll=9 port=8888'
+want number-all 0 'soft=710 ceil=1850'
+lacks number-all 'value too great'
+call number-defaults "$NUMBERS"
+want number-defaults 0 'limit=80 spike=25 heap=95 rss=90 pressure=300 appear=90 ready=120 recovery=300 fresh=180 age=120 poll= port=8888'
+# The flags set the same variables, after the environment.
+call number-flags 'parse_args --node n1 --pressure-timeout 09 --ready-timeout 010; preflight_inputs; echo "pressure=$PRESSURE_TIMEOUT ready=$AGENT_READY_TIMEOUT"'
+want number-flags 0 'pressure=9 ready=10'
+for v in PRESSURE_TIMEOUT POD_APPEAR_TIMEOUT AGENT_READY_TIMEOUT RECOVERY_TIMEOUT SERIES_FRESH_TIMEOUT \
+	SERIES_FRESH_MAX_AGE POLL_INTERVAL COLLECTOR_METRICS_PORT LIMIT_PCT SPIKE_PCT ABORT_HEAP_PCT ABORT_RSS_PCT; do
+	call "number-bad-$v" 'preflight_inputs; echo reached' "$v=5m"
+	want "number-bad-$v" 2 "$v must be a whole number"
+	lacks "number-bad-$v" 'reached'
+done
+call number-pct-over 'preflight_inputs; echo reached' ABORT_HEAP_PCT=101
+want number-pct-over 2 "ABORT_HEAP_PCT must be a whole number from 0 to 100 (got '101')"
+# A byte count read off the cluster is a number the script computes with too.
+call number-bytes 'echo "b=$(parse_bytes 08) m=$(parse_bytes 010Mi) sum=$(($(parse_bytes 0900) + 1))"'
+want number-bytes 0 'b=8 m=10485760 sum=901'
 
 # --- one cluster for the whole run ----------------------------------------------
 # The current context is checked once, and it can change under a run that

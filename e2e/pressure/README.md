@@ -39,6 +39,8 @@ lacks one aborts before it asks the cluster anything, naming each missing variab
 | `AGENT_NS`, `AGENT_SELECTOR`, `AGENT_CONTAINER` | The node agent, as the `aether` chart installs it. | `aether-system`, `app.kubernetes.io/name=aether-agent`, `agent` |
 | `JOB_NS`, `JOB_NAME`, `--job-manifest` | The pressure Job. The shipped manifest takes its namespace and name from the two variables. A manifest of your own must have the one shape `run.sh` accepts (an allow-list, see below); anything else is refused before anything is applied. | `aether-test`, `aether-collector-pressure`, `collector-pressure-job.yaml` |
 | `MIN_POLL_OK_PCT` | The share of a wait loop's polls that must have got an answer before its deadline may be read as a FAIL. A whole number from 0 to 100. | `50` |
+| `LIMIT_PCT`, `SPIKE_PCT`, `ABORT_HEAP_PCT`, `ABORT_RSS_PCT` | The collector's `memory_limiter` percentages and the two abort ceilings. Whole numbers from 0 to 100. | `80`, `25`, `95`, `90` |
+| `PRESSURE_TIMEOUT`, `POD_APPEAR_TIMEOUT`, `AGENT_READY_TIMEOUT`, `RECOVERY_TIMEOUT`, `SERIES_FRESH_TIMEOUT`, `SERIES_FRESH_MAX_AGE`, `POLL_INTERVAL` | Seconds, whole numbers. Every numeric input is checked before any command is run and read as decimal: `08` is eight, not an octal error. | `300`, `90`, `120`, `300`, `180`, `120`, by metrics source |
 | `SOAK_POD_SELECTOR` | See [The soak guard](#the-soak-guard-what-it-can-and-cannot-know). | unset |
 
 **The shape of a `--job-manifest`.** The Job that is applied must be the Job that is watched
@@ -52,8 +54,10 @@ one shape and refuses everything else (`manifest_defines_job`):
   once, in any order;
 - under `metadata:`, at two spaces, the lines `  name: <JOB_NAME>` and `  namespace: <JOB_NS>`
   (unquoted), once each, no `generateName`; labels and annotations are free;
-- under `spec:`, one `  activeDeadlineSeconds: <positive integer>`: it is the stop that works
-  when a delete cannot be confirmed.
+- under `spec:`, at two spaces, plain unquoted `key:` lines as well, with exactly one
+  `  activeDeadlineSeconds: <positive integer>` (no leading zero): it is the stop that works
+  when a delete cannot be confirmed, and a quoted, explicit (`? key`) or merged (`<<`) key at
+  that depth could override it. The pod template below is free.
 
 It reads lines and does not parse YAML: `kubectl --dry-run=client` asks the API server
 (measured with kubectl 1.35), and the script requires no YAML tool. A valid Job written

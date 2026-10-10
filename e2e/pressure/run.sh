@@ -313,7 +313,9 @@ parse_bytes() {
 	unit="${q#"$num"}"
 	[ -n "$num" ] || return 1
 	case "$unit" in
-	"" | B | b) echo "${num%.*}" ;;
+	# Through awk like the others, so that a count with leading zeros comes out
+	# decimal: the callers compute with it.
+	"" | B | b) awk -v n="$num" 'BEGIN{printf "%.0f", n}' ;;
 	KiB | Ki | K | k) awk -v n="$num" 'BEGIN{printf "%.0f", n*1024}' ;;
 	MiB | Mi | M) awk -v n="$num" 'BEGIN{printf "%.0f", n*1024*1024}' ;;
 	GiB | Gi | G) awk -v n="$num" 'BEGIN{printf "%.0f", n*1024*1024*1024}' ;;
@@ -647,18 +649,39 @@ pod_field() { kc -n "$AGENT_NS" get pod "$1" -o jsonpath="$2"; }
 
 agent_status() { pod_field "$1" '{.status.containerStatuses[?(@.name=="'"$AGENT_CONTAINER"'")]'"$2"'}'; }
 
+# whole_number <variable name> [max]: aborts unless the variable holds a whole
+# number (digits only), at most <max> when given, and rewrites it in decimal
+# without leading zeros. The shell's arithmetic reads a leading zero as octal:
+# 08 is an error there ("value too great for base"), which under errexit ends
+# the run with the shell's status 1, this script's FAIL, and 010 is eight.
+whole_number() {
+	local name=$1 max=${2:-} v=${!1} range=""
+	[ -z "$max" ] || range=" from 0 to ${max}"
+	case "$v" in
+	"" | *[!0-9]*) die "${name} must be a whole number${range} (got '${v}')" ;;
+	esac
+	[ -z "$max" ] || [ "$((10#$v))" -le "$max" ] ||
+		die "${name} must be a whole number${range} (got '${v}')"
+	printf -v "$name" '%d' "$((10#$v))"
+}
+
 # The inputs that have no default: each is the layout of one cluster, so a
 # default would be a guess (#1579). main calls this before any command is run.
 preflight_inputs() {
 	local missing=""
-	# A percentage, checked here: a wait loop does arithmetic with it, and a
-	# value that is not a number would end the run there with the shell's own
-	# status, while one above 100 would make a FAIL impossible.
-	case "$MIN_POLL_OK_PCT" in
-	"" | *[!0-9]*) die "MIN_POLL_OK_PCT must be a whole number from 0 to 100 (got '${MIN_POLL_OK_PCT}')" ;;
-	esac
-	[ "$MIN_POLL_OK_PCT" -le 100 ] ||
-		die "MIN_POLL_OK_PCT must be a whole number from 0 to 100 (got '${MIN_POLL_OK_PCT}')"
+	local v
+	# Every numeric input, checked and made decimal here, before anything
+	# computes with it (whole_number). MIN_POLL_OK_PCT above 100 would make a
+	# FAIL impossible; the other percentages are of a limit.
+	for v in MIN_POLL_OK_PCT LIMIT_PCT SPIKE_PCT ABORT_HEAP_PCT ABORT_RSS_PCT; do
+		whole_number "$v" 100
+	done
+	for v in PRESSURE_TIMEOUT POD_APPEAR_TIMEOUT AGENT_READY_TIMEOUT RECOVERY_TIMEOUT \
+		SERIES_FRESH_TIMEOUT SERIES_FRESH_MAX_AGE COLLECTOR_METRICS_PORT; do
+		whole_number "$v"
+	done
+	# Empty means "decide by the metrics source" (select_metrics_source).
+	[ -z "$POLL_INTERVAL" ] || whole_number POLL_INTERVAL
 	[ -n "$EXPECT_CONTEXT" ] || missing="${missing} EXPECT_CONTEXT (the kube context this run is meant for)"
 	[ -n "$COLLECTOR_NS" ] || missing="${missing} COLLECTOR_NS (the namespace of the ${COLLECTOR_DEPLOY} Deployment)"
 	[ -n "$PROM_NS" ] || missing="${missing} PROM_NS (the namespace of the ${PROM_SVC} Service)"
@@ -866,9 +889,12 @@ track_memory() {
 #     one `  name: ${JOB_NAME}` and one `  namespace: ${JOB_NS}`, no other
 #     `name` or `namespace`, and no `generateName`. Deeper lines (labels,
 #     annotations) are not looked at;
-#   - under `spec:`, anything indented, with exactly one
-#     `  activeDeadlineSeconds: <positive integer>` at two spaces. That
-#     deadline is the stop that needs neither this script nor the API server
+#   - under `spec:`, at two spaces, plain `key:` lines too, among them
+#     exactly one `  activeDeadlineSeconds: <positive integer, no leading
+#     zero>`. A quoted key, an explicit `? key`, a merge `<<` or a flow
+#     mapping at that depth is another spelling of a key YAML would let
+#     override it, so none is accepted. Deeper lines (the pod template) are
+#     not looked at. That deadline is the stop that needs neither this script nor the API server
 #     to be reachable from it, and the messages of a delete that could not be
 #     confirmed rely on it.
 #
@@ -910,9 +936,13 @@ manifest_defines_job() {
 			next
 		}
 		section == "spec" {
-			if ($0 ~ /^  activeDeadlineSeconds:/) {
-				if ($0 !~ /^  activeDeadlineSeconds: [1-9][0-9]*[[:space:]]*$/) refuse()
-				deadline++
+			if ($0 ~ /^ [^ ]/) refuse()
+			if ($0 ~ /^  [^ ]/) {
+				if ($0 !~ /^  [A-Za-z][A-Za-z0-9]*:( |$)/) refuse()
+				if ($0 ~ /^  activeDeadlineSeconds:/) {
+					if ($0 !~ /^  activeDeadlineSeconds: [1-9][0-9]*[[:space:]]*$/) refuse()
+					deadline++
+				}
 			}
 			next
 		}
