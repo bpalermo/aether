@@ -261,6 +261,37 @@ on one node, a silent agent):
 bazel test //:observability_rules_test
 ```
 
+## Rejected xDS updates (`agent-xds-alerts.yml`)
+
+The agent, and the edge control plane, count every delta-xDS response their proxy
+rejects in `aether_agent_xds_nacks_total`, by resource type, seeded at zero (#1480). A
+rejection is always a defect of the agent that built the response.
+
+| Alert | Severity | `for:` | Catches |
+|---|---|---|---|
+| `AetherProxyRejectedListenerUpdate` | warning | 0m | per `job` and node: the proxy rejected **a Listener response** in the last hour. One rejection fires it |
+
+Listener rejections have a rule of their own because of what the proxy does with one
+(#1633): it applies the rest of the response, its removals and the listeners it could
+build, and a listener kept that way is not in what the proxy states when it reconnects.
+After an agent restart the agent does not know of it, and nothing removes it when its
+pod goes. The agent does not hunt for such listeners; the rule makes the precondition
+loud, and `docs/runbook.md`, "The proxy rejected a Listener update", has how to find the
+listener and the recovery (fix the cause, then replace the proxy pod on that node).
+Rejected Cluster responses are read by the pin rules above.
+
+Three things to know, each a case in `agent-xds-alerts_test.yml`. The expression has two
+arms: `increase(...[1h]) > 0`, and one for a series whose **first sample is already above
+zero** (the proxy rejected the first response of an agent before the agent's first
+export, on a node nothing reported from in the two hours before), where `increase()` is
+0. The alert **ends an hour after the last rejection whatever was done**, because a
+counter cannot tell that the proxy was replaced: it is an event, not a state. And it
+misses one case and repeats in another: a restarted agent whose first export carries
+exactly the count its predecessor ended on is one unbroken series and is not seen; and
+the two agents of a surge roll, in a pipeline that keeps agents apart by `node` alone,
+share one series for the overlap, so an old count next to the successor's zero reads as
+an increase and the alert fires again with no new rejection.
+
 ## Labels the rules need from your pipeline
 
 Every rule here selects on `node`, `job`, or both, except the two fleet-wide `absent()`
@@ -287,6 +318,7 @@ serverFiles:
       # contents of agent-cni-alerts.yml
       # contents of registrar-alerts.yml
       # contents of agent-pin-alerts.yml
+      # contents of agent-xds-alerts.yml
 ```
 
 `prometheus.yml`'s `rule_files` **already** lists `/etc/config/alerting_rules.yml` — the
