@@ -242,6 +242,14 @@ type SnapshotCache struct {
 	// allocates none once it has grown to the size of the cluster map.
 	// Guarded by snapshotMu.
 	entryClasses []entryClass
+	// mtlsEntries is the same kind of buffer for the names of the
+	// mTLS-injected clusters a build published (pinReport.mtls). Guarded by
+	// snapshotMu.
+	mtlsEntries []string
+	// watchAnswerTimeout is how long one SetSnapshot may wait to hand its
+	// responses to the watches that were open; zero is
+	// defaultWatchAnswerTimeout. A test sets it before the cache is used.
+	watchAnswerTimeout time.Duration
 
 	// depMu guards podDeps and observedDeps. The node dependency set derived
 	// from them scopes which registry services the snapshot carries
