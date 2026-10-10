@@ -25,7 +25,8 @@ import (
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
-// edgeName is the controller/logging name for the edge proxy control plane.
+// edgeName is the name the edge proxy control plane reports itself under: its
+// logger name and the service.name of its logs, metrics and traces.
 const edgeName = "aether-edge"
 
 // edgeUse is the edge subcommand's name: `agent edge`.
@@ -56,6 +57,22 @@ func applyEdgeTelemetry(cmd *cobra.Command, c *manager.Config) {
 	if cmd.Name() == edgeUse {
 		c.WithoutHostName = true
 	}
+}
+
+// componentName is the name the running command reports itself under: the edge
+// control plane's for `agent edge`, the node agent's for anything else (#1622).
+//
+// The logger is built in the PersistentPreRunE the two commands share, and the
+// name it is given is the "logger" field of every stderr record and, with OTLP
+// log export on, the service.name and the instrumentation scope of every log
+// record. The edge's meter and tracer providers are built in runEdge under
+// edgeName, so naming the logger by the command is what makes the edge's three
+// signals carry one service.name.
+func componentName(cmd *cobra.Command) string {
+	if cmd.Name() == edgeUse {
+		return edgeName
+	}
+	return name
 }
 
 func init() {
