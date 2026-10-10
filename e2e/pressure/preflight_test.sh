@@ -777,7 +777,7 @@ else
 fi
 
 OWN="$TMP/own-job.yaml"
-printf 'apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: aether-collector-pressure\n  namespace: aether-test\nspec: {}\n' >"$OWN"
+printf 'apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: aether-collector-pressure\n  namespace: aether-test\nspec:\n  activeDeadlineSeconds: 600\n' >"$OWN"
 call apply-own-manifest "$APPLY" JOB_MANIFEST="$OWN"
 want apply-own-manifest 0 'JOB_APPLIED=1'
 
@@ -793,7 +793,7 @@ fi
 # The check is of the Job's own metadata: a manifest that carries the expected
 # name on another object, next to a Job by another name, is refused too.
 DECOY="$TMP/decoy-job.yaml"
-printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: aether-collector-pressure\n  namespace: aether-test\n---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: some-other-flood\n  namespace: elsewhere\nspec: {}\n' >"$DECOY"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: aether-collector-pressure\n  namespace: aether-test\n---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: some-other-flood\n  namespace: elsewhere\nspec:\n  activeDeadlineSeconds: 600\n' >"$DECOY"
 call apply-decoy "$APPLY" JOB_MANIFEST="$DECOY"
 want apply-decoy 2 'JOB_APPLIED=0'
 want apply-decoy 2 'Nothing was applied'
@@ -821,34 +821,44 @@ GOODMETA='metadata:
 # expected metadata: `kubectl apply` could create the first before it fails on
 # the second, and the cleanup would delete only the expected name.
 TWODOCS="$TMP/two-docs.yaml"
-printf 'apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: some-other-flood\n  namespace: elsewhere\nspec: {}\n---\n%s' "$GOODMETA" >"$TWODOCS"
+printf 'apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: some-other-flood\n  namespace: elsewhere\nspec:\n  activeDeadlineSeconds: 600\n---\n%s' "$GOODMETA" >"$TWODOCS"
 refused apply-two-docs "$TWODOCS"
 # The same with the separator carrying a comment, and with the good one first.
 TWODOCS2="$TMP/two-docs-2.yaml"
-printf 'apiVersion: batch/v1\nkind: Job\n%sspec: {}\n--- # next\nmetadata:\n  name: some-other-flood\n' "$GOODMETA" >"$TWODOCS2"
+printf 'apiVersion: batch/v1\nkind: Job\n%sspec:\n  activeDeadlineSeconds: 600\n--- # next\nmetadata:\n  name: some-other-flood\n' "$GOODMETA" >"$TWODOCS2"
 refused apply-two-docs-good-first "$TWODOCS2"
 # One document, a Job by another name, with the expected name under another key.
 STRAY="$TMP/stray-name.yaml"
-printf 'apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: some-other-flood\n  namespace: aether-test\nextra:\n  name: aether-collector-pressure\n' >"$STRAY"
+printf 'apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: some-other-flood\n  namespace: aether-test\nspec:\n  activeDeadlineSeconds: 600\nextra:\n  name: aether-collector-pressure\n' >"$STRAY"
 refused apply-stray-name "$STRAY"
 # Another API group's Job.
 OTHERAPI="$TMP/other-api.yaml"
-printf 'apiVersion: example.org/v1\nkind: Job\n%s' "$GOODMETA" >"$OTHERAPI"
+printf 'apiVersion: example.org/v1\nkind: Job\n%sspec:\n  activeDeadlineSeconds: 600\n' "$GOODMETA" >"$OTHERAPI"
 refused apply-other-api "$OTHERAPI"
 # batch/v1, the expected metadata, and another kind.
 OTHERKIND="$TMP/other-kind.yaml"
-printf 'apiVersion: batch/v1\nkind: CronJob\n%s' "$GOODMETA" >"$OTHERKIND"
+printf 'apiVersion: batch/v1\nkind: CronJob\n%sspec:\n  activeDeadlineSeconds: 600\n' "$GOODMETA" >"$OTHERKIND"
 refused apply-other-kind "$OTHERKIND"
 # The expected Job, then a document that is nothing kubectl knows: the apply
 # would fail after creating the Job. One document only.
 TRAILING="$TMP/trailing-doc.yaml"
-printf 'apiVersion: batch/v1\nkind: Job\n%sspec: {}\n---\nfoo: bar\n' "$GOODMETA" >"$TRAILING"
+printf 'apiVersion: batch/v1\nkind: Job\n%sspec:\n  activeDeadlineSeconds: 600\n---\nfoo: bar\n' "$GOODMETA" >"$TRAILING"
 refused apply-trailing-doc "$TRAILING"
 # Separators around the one document, and comments, are not a second document.
 WRAPPED="$TMP/wrapped.yaml"
-printf '# a comment\n---\n# another\napiVersion: batch/v1\nkind: Job\n%sspec: {}\n---\n\n# trailing\n' "$GOODMETA" >"$WRAPPED"
+printf '# a comment\n---\n# another\napiVersion: batch/v1\nkind: Job\n%sspec:\n  activeDeadlineSeconds: 600\n---\n\n# trailing\n' "$GOODMETA" >"$WRAPPED"
 call apply-wrapped "$APPLY" JOB_MANIFEST="$WRAPPED"
 want apply-wrapped 0 'JOB_APPLIED=1'
+
+# The messages of a delete that could not be confirmed say that the Job's
+# activeDeadlineSeconds ends the flood regardless. That is only true of a Job
+# that has one: a manifest without a positive deadline is refused.
+NODEADLINE="$TMP/no-deadline.yaml"
+printf 'apiVersion: batch/v1\nkind: Job\n%sspec:\n  parallelism: 3\n' "$GOODMETA" >"$NODEADLINE"
+refused apply-no-deadline "$NODEADLINE"
+ZERODEADLINE="$TMP/zero-deadline.yaml"
+printf 'apiVersion: batch/v1\nkind: Job\n%sspec:\n  activeDeadlineSeconds: 0\n' "$GOODMETA" >"$ZERODEADLINE"
+refused apply-zero-deadline "$ZERODEADLINE"
 
 NOTJOB="$TMP/not-a-job.yaml"
 printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: aether-collector-pressure\n  namespace: aether-test\n' >"$NOTJOB"
@@ -974,6 +984,12 @@ put ready-crashloop status-waiting.out CrashLoopBackOff
 call ready-crashloop "$READY"
 want ready-crashloop 1 'is in CrashLoopBackOff'
 
+# A crash loop that was read is #662's signature, whatever the next read does.
+put ready-crashloop-then-error status-waiting.out CrashLoopBackOff
+put ready-crashloop-then-error status-ready.err
+call ready-crashloop-then-error "$READY"
+want ready-crashloop-then-error 1 'is in CrashLoopBackOff'
+
 # verify_agent: the verdict is read off the pod's status and its log. One that
 # could not be read is neither a PASS nor #662's signature.
 VERIFY='NEW_POD=aether-agent-bbb; verify_agent'
@@ -986,6 +1002,14 @@ put verify-term-error status-restarts.out 0
 put verify-term-error status-term-reason.err
 call verify-term-error "$VERIFY"
 asked verify-term-error 'could not read the status of agent pod aether-agent-bbb'
+
+# A terminated previous container that was read is the signature too: its exit
+# code is a detail of the message, and failing to read it does not undo it.
+put verify-term-exit-error status-restarts.out 0
+put verify-term-exit-error status-term-reason.out Error
+put verify-term-exit-error status-term-exit.err
+call verify-term-exit-error "$VERIFY"
+want verify-term-exit-error 1 'has a terminated previous container (Error, exit ?)'
 
 put verify-logs-error status-restarts.out 0
 put verify-logs-error logs.err

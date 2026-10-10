@@ -860,7 +860,11 @@ track_memory() {
 #     only the expected name;
 #   - in that document, exactly one top-level `kind:` and one `apiVersion:`,
 #     and exactly one `name:` and one `namespace:` at the depth of metadata's
-#     keys. A Job has no other mapping at the top that holds them.
+#     keys. A Job has no other mapping at the top that holds them;
+#   - a positive `activeDeadlineSeconds` at the depth of spec's keys. It is
+#     the stop that needs neither this script nor the API server to be
+#     reachable from it, and the messages of a delete that could not be
+#     confirmed rely on it.
 manifest_defines_job() {
 	local m=$1 docs
 	docs=$(awk '
@@ -877,6 +881,7 @@ manifest_defines_job() {
 	grep -qxE 'apiVersion: batch/v1[[:space:]]*' <<<"$m" || return 1
 	grep -qxF "  name: ${JOB_NAME}" <<<"$m" || return 1
 	grep -qxF "  namespace: ${JOB_NS}" <<<"$m" || return 1
+	grep -qxE '  activeDeadlineSeconds: [1-9][0-9]*[[:space:]]*' <<<"$m" || return 1
 }
 
 # The manifest on stdout, with the tokens of the shipped manifest filled in:
@@ -896,7 +901,7 @@ apply_job() {
 	# The Job that is applied must be the Job that is watched and deleted
 	# (#1600): anything else is refused before anything is applied.
 	manifest_defines_job "$rendered" ||
-		die "${JOB_MANIFEST} does not define job ${JOB_NS}/${JOB_NAME} and nothing else: it must be one document, 'apiVersion: batch/v1' and 'kind: Job', whose metadata reads '  name: ${JOB_NAME}' and '  namespace: ${JOB_NS}' (or carries the __JOB_NAME__ and __JOB_NS__ tokens). Nothing was applied."
+		die "${JOB_MANIFEST} does not define job ${JOB_NS}/${JOB_NAME} and nothing else: it must be one document, 'apiVersion: batch/v1' and 'kind: Job', whose metadata reads '  name: ${JOB_NAME}' and '  namespace: ${JOB_NS}' (or carries the __JOB_NAME__ and __JOB_NS__ tokens), and whose spec has a positive '  activeDeadlineSeconds:'. Nothing was applied."
 	# Set before the apply: one that failed may still have created the Job, and
 	# the cleanup trap deletes it only when this says so.
 	JOB_APPLIED=1
@@ -982,13 +987,19 @@ wait_agent_ready() {
 		# A status that could not be read is asked for again, and is neither
 		# "not Ready" nor "not crash-looping".
 		polls=$((polls + 1))
-		if reason=$(agent_status "$NEW_POD" '.state.waiting.reason') &&
-			ready=$(agent_status "$NEW_POD" '.ready'); then
-			asked=1
-			answered=$((answered + 1))
+		# The waiting reason is acted on as soon as it is read: a crash loop
+		# that was seen is the signature, whatever the next read does.
+		if reason=$(agent_status "$NEW_POD" '.state.waiting.reason'); then
 			if [ "$reason" = "CrashLoopBackOff" ]; then
 				fail "replacement agent pod ${NEW_POD} is in CrashLoopBackOff — #662 reproduced, the fix did not hold"
 			fi
+			ready=$(agent_status "$NEW_POD" '.ready') || reason=unread
+		else
+			reason=unread
+		fi
+		if [ "$reason" != unread ]; then
+			asked=1
+			answered=$((answered + 1))
 			if [ "$ready" = "true" ]; then
 				log "replacement agent pod ${NEW_POD} Ready"
 				return 0
@@ -1024,8 +1035,10 @@ verify_agent() {
 	[ "$restarts" = "0" ] || fail "agent pod ${NEW_POD} started with restartCount=${restarts} — it died at least once under pressure (#662's signature)"
 	term_reason=$(agent_status "$NEW_POD" '.lastState.terminated.reason') ||
 		die "could not read the status of agent pod ${NEW_POD} ${unread}"
-	term_exit=$(agent_status "$NEW_POD" '.lastState.terminated.exitCode') ||
-		die "could not read the status of agent pod ${NEW_POD} ${unread}"
+	# The exit code is a detail of the message. A terminated container that
+	# was read is the signature whether or not its exit code can be read too.
+	term_exit=""
+	[ -z "$term_reason" ] || term_exit=$(agent_status "$NEW_POD" '.lastState.terminated.exitCode') || term_exit=""
 	[ -z "$term_reason" ] || fail "agent pod ${NEW_POD} has a terminated previous container (${term_reason}, exit ${term_exit:-?}) — it exited under pressure (#662's signature)"
 
 	# From the beginning of the log, not the tail: the evidence is the startup sequence.
