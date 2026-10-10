@@ -180,11 +180,12 @@ class or in two, a chart test named by an entry it compares with nothing).
 - **A promise made only in prose.** `notes` and comments have no line in the
   lock, so the `version` bump for a change of meaning written only there is
   kept by review.
-- **The names the prober and udsecho charts put on their own pods.** The mesh
-  label, the annotations and the CSI driver of a volume are literals in those
-  templates, used as any workload uses them. The contract compares the names
-  with the Go constants, not with these copies; a copy that is wrong leaves
-  that chart's own pods outside the mesh, which its end-to-end test sees.
+- **The names the prober and udsecho charts put on their own pods** are not
+  the contract's to hold, and are not kept by review either: the mesh label,
+  the annotations and the CSI driver of a volume are literals in those
+  templates, and the charts' own `helm_mesh_names_test` targets compare them
+  with the Go constants (`charts/README.md`). The contract compares the same
+  names with the same constants from its side.
 
 ## When a contract test fails
 
