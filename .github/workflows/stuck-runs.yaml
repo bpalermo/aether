@@ -12,7 +12,7 @@
 #
 # Every 30 minutes this lists the runs that have been stuck before starting for
 # longer than the threshold (default 60 minutes; publish and proxy-release take
-# ~10), reports them on ONE rolling issue (the e2e.yaml `report-failure` shape),
+# ~10), reports them on ONE rolling issue (its own: scripts/rolling-issue-lib.sh),
 # and cancels a stuck run ONLY when it is a superseded run: a push or
 # pull_request run, first attempt, not from a fork, whose branch is gone, or
 # whose commit is no longer its branch's head AND a newer run of the same
@@ -42,6 +42,7 @@ on:
     paths:
       - .github/workflows/stuck-runs.yaml
       - scripts/stuck-runs.sh
+      - scripts/rolling-issue-lib.sh
   workflow_dispatch:
     inputs:
       dry_run:

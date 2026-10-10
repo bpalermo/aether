@@ -47,6 +47,9 @@
 #     `issues: write` and GH_REPO, the same as the step that opens the issue.
 #     Closes every OPEN issue whose title is exactly ISSUE_TITLE with a one-line
 #     comment naming the run. No open issue is the normal case and says so.
+#     Only an issue this workflow's token opened: one that somebody else filed
+#     under the title is theirs, and stays open (#1532;
+#     scripts/rolling-issue-lib.sh, which also lists instead of searching).
 #     Then the control's issues, by the recorded verdict
 #     (`publish-verify-control-issue.sh verdict` / `titles`).
 #
@@ -58,9 +61,16 @@
 set -euo pipefail
 
 # The title the "Open or update the missing-artifacts issue" step of
-# .github/workflows/publish-verify.yaml files under. The test reads that file
-# and fails if the two ever differ.
+# .github/workflows/publish-verify.yaml files under: its script,
+# scripts/publish-verify-missing-issue.sh, asks this one for it (`title`).
 ISSUE_TITLE="publish: artifacts missing for a commit on main"
+
+# How every closing comment of this script starts: what tells a closing
+# comment from a report when the comments are counted (close_titled).
+CLOSING_PREFIX="Closed by a "
+
+# shellcheck source=scripts/rolling-issue-lib.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/rolling-issue-lib.sh"
 
 is_sha() {
 	case "$1" in
@@ -102,14 +112,27 @@ decide_control() {
 	fi
 }
 
-# close_titled <title> <comment>: close every OPEN issue whose title is exactly
-# <title>. Never fails: an issue-API error is a ::warning::.
+# close_titled <title> <comment>: close every OPEN issue of the workflow's own
+# whose title is exactly <title>. Never fails: an issue-API error is a
+# ::warning::.
+#
+# AT THE SAME TIME. publish-verify runs overlap (one concurrency group per
+# commit), so a run that failed can write on the issue while this one is
+# closing it, and GitHub takes a comment on a closed issue: the failure would
+# sit where nobody looks. The reporter reads the issue's state after its
+# comment and reopens it (rolling_issue_report), which covers a close that
+# landed BEFORE that reading. For one that lands after it, this side counts
+# the reports on the issue before it writes anything and again after its
+# close, and reopens if one was added in between. A report written between
+# the two counts is seen by this side; one written before the first count was
+# there when this run decided to close, as before. Another green run's closing
+# comment is not a report (every closing comment starts with CLOSING_PREFIX).
+# If the reports cannot be counted first, the issue is not closed.
 close_titled() {
 	local title="$1" comment="$2" numbers num
-	# `in:title` is a word search, so match the title exactly before touching
-	# anything: an issue that merely quotes it is not this one.
-	if ! numbers="$(gh issue list --state open --search "in:title \"${title}\"" -L 20 \
-		--json number,title -q ".[] | select(.title == \"${title}\") | .number")"; then
+	# Exactly the title, and opened by the workflow token: an issue that merely
+	# quotes the title is not this one, and neither is one a person filed.
+	if ! numbers="$(rolling_issue_list open "$title")"; then
 		echo "::warning title=publish-verify::could not list open issues, so \"${title}\" was not closed; the next green run will try again"
 		return 0
 	fi
@@ -117,12 +140,27 @@ close_titled() {
 		echo "no open \"${title}\" issue; nothing to close"
 		return 0
 	fi
+	local before after
 	while read -r num; do
 		[[ "$num" =~ ^[0-9]+$ ]] || continue
-		if gh issue close "$num" --reason completed --comment "$comment"; then
+		if ! before="$(rolling_issue_reports "$num" "$CLOSING_PREFIX")"; then
+			echo "::warning title=publish-verify::could not read #${num}, so it was not closed; the next green run will try again"
+			continue
+		fi
+		if rolling_issue_comment "$num" "$comment" && rolling_issue_close "$num" completed; then
 			echo "closed #${num}"
 		else
 			echo "::warning title=publish-verify::could not close #${num}; the next green run will try again"
+			continue
+		fi
+		if ! after="$(rolling_issue_reports "$num" "$CLOSING_PREFIX")"; then
+			echo "::warning title=publish-verify::closed #${num}, but could not read it back: check that no failure was written on it meanwhile"
+		elif [ "$after" -gt "$before" ]; then
+			if rolling_issue_reopen "$num"; then
+				echo "reopened #${num}: a failure was written on it while it was being closed"
+			else
+				echo "::warning title=publish-verify::a failure was written on #${num} while it was being closed, and it could not be reopened: reopen it by hand"
+			fi
 		fi
 	done <<<"$numbers"
 }

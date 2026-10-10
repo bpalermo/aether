@@ -312,36 +312,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TRIGGERING_RUN: ${{ github.event.workflow_run.html_url }}
-        run: |
-          set -euo pipefail
-          title="publish: artifacts missing for a commit on main"
-          missing="$(sed -nE 's/^[[:space:]]*MISSING[[:space:]]+/MISSING /p' verify.log 2>/dev/null || true)"
-          # Signatures that exist but do not verify (wrong identity, unsigned
-          # child) come from the cosign step (#925).
-          unverified="$(sed -nE 's/^[[:space:]]*FAILED[[:space:]]+/UNVERIFIED /p' cosign.log 2>/dev/null || true)"
-          missing="$(printf '%s\n%s\n' "$missing" "$unverified" | grep . || true)"
-          lead="A commit on \`main\` is missing artifacts in the image registry (bazel/registry/registry.bzl) — never published, or published only in part. A deploy pinned to it will 404, and \`helm upgrade\` against its commit-suffixed chart tag cannot work."
-          if [ -z "$missing" ]; then
-            # Nothing recorded as missing: the check did not finish (#1281).
-            missing="(none recorded — the check did not finish: gate ${VERIFY_CONCLUSION:-not run}, signatures ${COSIGN_CONCLUSION:-not run}; see the run log)"
-            lead="publish-verify did not finish (a step timed out, the run was cancelled, or a lookup was inconclusive), so the commits it was to check are UNVERIFIED — a gap here would have gone unreported."
-          fi
-
-          # shellcheck disable=SC2016 # literal Markdown code fences, nothing to expand
-          body=$(printf '%s\n\n```\n%s\n```\n\n%s\n%s\n\n%s\n' \
-            "$lead" \
-            "$missing" \
-            "Verification run: ${RUN_URL}" \
-            "Publish run: ${TRIGGERING_RUN:-n/a}" \
-            "_Filed automatically by \`publish-verify\`; this issue is reused for consecutive gaps. To republish: re-run the cancelled publish run (\`gh run rerun <id>\`), which re-runs at that same commit. Never push images or charts by hand — the release workflow is the only publisher. See docs/runbook.md, \"Pre-flight: did that commit actually publish?\"._")
-
-          num=$(gh issue list --state open --search "in:title \"${title}\"" -L 1 --json number -q '.[0].number // empty')
-          if [ -n "$num" ]; then
-            gh issue comment "$num" --body "$body"
-            echo "commented on #$num"
-          else
-            gh issue create --title "$title" --body "$body"
-          fi
+        run: ./scripts/publish-verify-missing-issue.sh
 
       # A failed control is a different defect from a missing artifact: the gate
       # itself can no longer be trusted to go red. It gets its own rolling issue
