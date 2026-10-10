@@ -21,7 +21,6 @@ import (
 // per-protocol API) is counted so a test can assert the syncer did not use it.
 type revisionedRegistry struct {
 	mockRegistry
-	derived bool
 
 	mu       sync.Mutex
 	rev      int64
