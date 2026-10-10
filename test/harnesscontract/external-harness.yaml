@@ -103,6 +103,23 @@ metrics:
       only until the first cluster ACK.
     checked_by: //agent/internal/xds/cache/cachemetrics:cachemetrics_test
 
+  - id: agent.xds_acked_tls_clusters_unknown
+    component: agent
+    otel_name: aether.agent.xds.acked_tls_clusters_unknown
+    stored_name: aether_agent_xds_acked_tls_clusters_unknown
+    type: gauge
+    labels: []
+    notes: >-
+      How many mesh clusters the node's proxy holds whose pin state the agent
+      cannot determine: case (2) of agent.xds_acked_tls_clusters. One series,
+      no label of its own. It is 0 whenever that gauge is written and above 0
+      whenever that gauge is absent for case (2), in the same collection; it is
+      ABSENT, like that gauge, until a proxy has answered a cluster response of
+      this agent process. A value above 0 says the agent cannot classify what
+      the proxy holds. It does not say the proxy holds an unpinned cluster, and
+      it does not say the proxy is rejecting updates.
+    checked_by: //agent/internal/xds/cache/cachemetrics:cachemetrics_test
+
   - id: agent.identity_cluster_unpinned
     component: agent
     otel_name: aether.agent.identity.cluster_unpinned

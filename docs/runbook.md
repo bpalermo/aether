@@ -1340,9 +1340,12 @@ AETHER_VERSION=<X.Y.Z>-$COMMIT
 helm upgrade --install aether-crds oci://quay.io/aethermesh/chart-crds \
   --version "$CRDS_VERSION"
 
-# 2) then the system. Prefer this commit-pinned chart tag over the bare
+# 2) then the system. Use this commit-pinned chart tag, not the bare
 #    `--version <X.Y.Z>`: the bare tag is mutable and re-pushed by every publish,
-#    the commit tag never is (#692).
+#    the commit tag never is (#692). Anything that PINS a chart (a lock file, a
+#    GitOps source, a `tag@sha256:` reference) names the commit tag or the
+#    digest alone, never the bare tag with a digest: see "Pinning a released
+#    chart" below (#1588).
 #    The chart does not create the namespace (namespace.create=false, the
 #    default since 2.4.21, #1403): --create-namespace does. On a FIRST install
 #    into a cluster that enforces Pod Security admission, label the namespace
@@ -1376,6 +1379,35 @@ esac
 `v1.2.3-N-g` prefix or a `-dirty` suffix; hence the substring match rather than
 string equality. If it fails, the chart tag you pulled was built from a different
 commit: re-run that commit's `publish` workflow and upgrade again.
+
+**Pinning a released chart (#1588).** The `aether` chart is published under two
+tags, and only one of them can be pinned:
+
+| Tag | Example | Written | Its digest |
+| --- | --- | --- | --- |
+| commit-suffixed | `chart-aether:2.4.26-<full sha>` | once, by that commit's publish | never changes |
+| bare version | `chart-aether:2.4.26` | again by **every** commit on `main` that still carries that `Chart.yaml` version | changes with each of those commits, while the version does not |
+
+Most commits do not touch the chart, so most commits republish the bare tag: it
+is "the newest build of this chart version", not a release. A reference that
+pins a digest **under the bare tag** (`chart-aether:2.4.26@sha256:…`, or a tool's
+lock entry of tag plus digest) is valid until the next commit publishes, and
+then fails; Helm reports `chart reference digest mismatch` (seen within an hour
+of writing such a reference). The crds, prober and udsecho charts have no bare
+tag: their `Chart.yaml` version carries the commit.
+
+So a pin is one of these two, and nothing else:
+
+```bash
+# the commit-suffixed tag (what this runbook uses everywhere)
+helm pull oci://quay.io/aethermesh/chart-aether --version "<X.Y.Z>-$COMMIT"
+# or the digest alone, with no tag for it to disagree with
+helm pull oci://quay.io/aethermesh/chart-aether@sha256:<digest of that commit's chart>
+```
+
+`helm pull` of the commit tag prints that chart's digest (its `Digest:` line).
+A digest read from the bare tag is the digest of whichever commit published
+last.
 
 **After a proxy release, normally there is nothing to do.** `proxy-release`
 publishes the image, pins `charts/aether/values.yaml` (`tag:` *and* `digest:`),
@@ -2363,9 +2395,21 @@ Error: no MeshConfig with the name "default" found
 ```
 
 For an object that is live and in the target manifest, Helm takes the copy in
-the **current** manifest as its starting point, and there is none. The release
-is left `failed` at a new revision, with the objects Helm reached before the
-MeshConfig already rolled back. A rollback to any other revision works.
+the **current** manifest as its starting point, and there is none. The rollback
+is recorded as a new revision, and that revision is `failed`; the objects Helm
+reached before the MeshConfig are already rolled back. **No revision is
+`deployed` afterwards** (#1582): the revision that was current before the
+rollback is marked `superseded`. `helm history aether -n aether-system` shows
+the new revision as `failed` and every revision below it as `superseded`, and
+`helm status aether -n aether-system` prints `STATUS: failed` at the new
+revision number.
+
+A failed **upgrade** reads differently (the seed-hook case further down):
+there the previous revision stays `deployed` beside the `failed` one. So after
+a failed rollback, do not look for the `deployed` revision to go back to:
+there is none. The revision to return to is the one just below the failed one.
+A rollback to any revision whose stored manifest holds no MeshConfig works,
+that one included.
 
 Since 2.4.24 the seed is a Helm hook (`helm.sh/hook: pre-install,pre-upgrade`),
 which is in no manifest. **Upgrading to 2.4.24 rolls no workload and does not
@@ -2403,7 +2447,9 @@ chart upgrade). What changes:
   ```
 
   The same command recovers a release that a rollback to such a revision left
-  `failed`; so does `helm rollback aether <the last deployed revision>`.
+  `failed`; so does `helm rollback aether <the revision that was current before
+  the failed rollback>`. `helm history` shows that revision as `superseded`,
+  not `deployed`: it is the one just below the `failed` one.
 - **One case still seeds the MeshConfig as a release object**, because a
   `pre-install` hook runs before any object of the release exists and so cannot
   create a MeshConfig in a namespace the same revision creates: the control
@@ -2586,7 +2632,8 @@ Error: no Namespace with the name "aether-system" found
 ```
 
 The namespace is untouched (same UID, `Active`), and the release is `failed` at
-a new revision. A rollback to a revision without the Namespace works and puts
+a new revision, with the revision that was current now `superseded` and none
+`deployed` (see "Chart 2.4.24"). A rollback to a revision without the Namespace works and puts
 the release back to `deployed`, and so does Helm 4.2.0 on the same steps. Nothing in a chart can change this: the manifests are already stored,
 and Helm refuses a Namespace the release does not own if the chart renders it
 again. The check and the way round are those of "Chart 2.4.24", with
@@ -2601,6 +2648,108 @@ REV=2
 helm get values aether -n aether-system --revision "$REV" -o yaml > "revision-$REV-values.yaml"
 helm upgrade aether oci://quay.io/aethermesh/chart-aether --version <that revision's chart version> \
   --namespace aether-system -f "revision-$REV-values.yaml"
+```
+
+#### Chart 2.4.26: the node proxy's Envoy stats name their service (#1561)
+
+The node proxy's Envoy stats (`envoy_*`, `aether_requests_total`) are exported
+with the resource attribute `service.name=aether-proxy`. They had no
+`service.name`. **Where the backend maps `service.name` to `job`**, their
+series gain `job="aether-proxy"`: Prometheus's OTLP ingestion does that by
+itself, another backend may need the mapping made
+([`observability/metric-labels.md`](./observability/metric-labels.md), "What
+you must do"). Everything below about `job` holds for such a backend; where
+nothing maps the attribute, the series keep the labels they had.
+
+What was measured and what was not. Measured: the renders of 2.4.25 and
+2.4.26; the pinned Envoy exporting that `service.name` with the chart's
+bootstrap block (a test); the queries below against synthetic series, with
+promtool. **Not measured: the upgrade itself on a cluster.** What the
+supervisor does with a changed bootstrap is taken from "Which workloads a chart
+upgrade rolls" above.
+
+**What the upgrade that crosses 2.4.26 changes in the render:**
+
+| Object | What changes | Effect |
+| --- | --- | --- |
+| `aether-proxy-config` ConfigMap, only when `otel.endpoint` is set | its `envoy.yaml`: the Envoy stats sink gains a second resource detector that sets `service.name: aether-proxy` | no pod is replaced; the supervisor watches the mounted file and hot-restarts Envoy in place, on every node. See below |
+| every Deployment and DaemonSet | nothing in a pod template | not rolled by the chart |
+
+With `otel.endpoint` empty the ConfigMap's `envoy.yaml` is what 2.4.25
+rendered (the object's `helm.sh/chart` label moves with the version, as on
+every object, and is not mounted), so no Envoy restarts for it.
+
+"Not rolled by the chart" is about the chart: a release built from a newer
+commit can carry a new image digest for a workload, and that rolls it, as on
+any upgrade.
+
+**The hot restart.** A changed `envoy.yaml` is picked up as "Which workloads a
+chart upgrade rolls" describes for this ConfigMap: each node's supervisor
+starts a new Envoy epoch when that node's kubelet delivers the file, on every
+node independently, **not one node at a time**, so the nodes can overlap,
+unlike a DaemonSet roll. For the length of each restart two Envoy processes
+run on the node: check the headroom of "Sizing nodes for a proxy hot restart"
+before the upgrade, and watch the upgrade as you would a proxy roll. A
+rollback to 2.4.25 changes `envoy.yaml` back, so expect the same again.
+
+**What changes in the stored metrics**, where `service.name` becomes `job`:
+
+- **`job="aether-proxy"` appears on the node proxy's Envoy series**, from each
+  node's restart on. A label that appears makes each of them a new series; the
+  old one receives no more samples.
+- **For five minutes the old and the new series are both read.** A pushed
+  series has no staleness marker, so the last sample of an old (`job`-less)
+  series stays in the 5-minute lookback beside the new one. An aggregation
+  that does not keep `job` counts both. With promtool: `sum by (node,
+  aether_cluster) (envoy_cluster_membership_healthy)` over 4 hosts read 8 two
+  minutes after the restart, and 4 again once the five minutes had passed.
+  The same arithmetic applies to a sum over any gauge these proxies export. An
+  alert of your own with a threshold on such a sum can fire in that window.
+- **Selectors**, with promtool:
+  - `{job="aether-proxy"}` reads the new series only and does not double.
+  - `{job!="aether-edge-proxy"}` selects the node proxy's series before and
+    after; inside the five minutes it reads the old and the new one.
+  - `{job=""}`, a selector that relied on the label being absent, matches
+    nothing once the old series have left the lookback. Change it to
+    `{job="aether-proxy"}`, or to `{job=~"|aether-proxy"}` while both chart
+    versions are stored.
+- **Counters.** Not measured. A `rate()` or `increase()` whose window spans
+  the restart is computed per series, over one that ends and one that starts,
+  so a `sum(rate())` can read low around the restart.
+- **The supervisor's name.** The proxy container's environment is as it was
+  (its pod template renders unchanged), and that environment is all the
+  supervisor's resource is built from, so `aether_supervisor_*` should stay
+  `job="aether-proxy-supervisor"`. The last query below checks it.
+- No rule in `docs/observability/` selects on the node proxy's Envoy series.
+
+The label changes once, so this happens at the upgrade (and at a rollback
+across it), not at each later proxy roll.
+
+Before and after (never `--reuse-values`; read the values back and pass them
+with `-f`):
+
+```bash
+# Which pods were replaced. The chart replaces none; a pod with a new name and
+# age was rolled for another reason (a new image digest).
+kubectl -n aether-system get pods -L controller-revision-hash,pod-template-hash \
+  --sort-by=.metadata.creationTimestamp
+# The bootstrap the chart rendered: the static detector is there with
+# otel.endpoint set, and absent without it.
+kubectl -n aether-system get configmap aether-proxy-config \
+  -o jsonpath='{.data.envoy\.yaml}' | grep -A4 'resource_detectors.static_config'
+```
+
+```promql
+# With service.name mapped to job: one result per proxy kind (aether-proxy,
+# and aether-edge-proxy with the edge on). A result with no job is a node
+# whose Envoy has not restarted on the new bootstrap yet, or, for five minutes
+# after it did, the last sample of its old series.
+count by (job) (envoy_server_live)
+# Each node's Envoy epoch. Compare with the value before the upgrade: a node
+# whose epoch did not move has not picked the bootstrap up.
+max by (node) (envoy_server_hot_restart_epoch{job="aether-proxy"})
+# The supervisor's series: the same job as before the upgrade.
+count by (job) ({__name__=~"aether_supervisor_.+"})
 ```
 
 #### The prober chart (#1372, #1373, #1374)
@@ -6328,6 +6477,21 @@ any more (a missed CNI DEL) logs WARN `outbound identity mapping has no owning p
 Above 200 changed pairs in one snapshot a single `outbound identity bindings changed`
 summary replaces the per-pair lines, keeping the distinct source→identity transitions.
 
+**What `snapshot_version` on a binding line means (#1621).** The outbound and the
+inbound lines are made from what the snapshot of that version was built from: its own
+listeners, its own secrets, and the clusters its build read. A pod is named only when
+the listener its entry held is one of that snapshot's listeners. So a line never names
+a pod, a cluster or a served secret that the snapshot of its version does not carry.
+(Agents before this read the agent's maps after the snapshot was set, so a change that
+landed during a build was named under the version before it, and the build that
+published it said nothing.) Two things are not exact. A pod whose listeners were
+written in the few statements between the build's two reads of the listener map is in
+the snapshot and is first named by the next build; one that was rebuilt in that gap is
+named again by the next build although nothing about it changed. And the
+netns → identity index is no part of a snapshot: it is read during the build. A pod
+whose network namespace is gone is not named while the agent leaves its listeners out
+of the snapshot.
+
 ```bash
 # Every re-bind on one node, around the roll.
 kubectl -n aether-system logs ds/aether-agent --since=10m \
@@ -6426,6 +6590,7 @@ on them are in `docs/observability/agent-pin-alerts.yml`:
 | counter `aether_agent_identity_cluster_unpinned_total{reason}` | **that** a snapshot went out with unpinned clusters | adds the unpinned count on every snapshot; seeded at zero per reason |
 | gauge `aether_agent_snapshot_tls_clusters{pin,reason}` | **how many** clusters are pinned and unpinned **now**, per reason | written on every snapshot, zeros included |
 | gauge `aether_agent_xds_acked_tls_clusters{pin,reason}` | the same, for the clusters the **proxy has accepted**, cluster by cluster | written when the proxy answers a cluster response: the ACK of one that added or removed a cluster, and the answer (ACK or NACK) to the first one of a stream, and by a snapshot build that changes how a cluster the proxy has accepted is counted; absent before the first answer; not written while the pin state of a cluster the proxy holds is unknown |
+| gauge `aether_agent_xds_acked_tls_clusters_unknown` | **how many** clusters the proxy holds whose pin state the agent cannot determine (#1509) | one series, no label of its own; zero while the gauge above is written, the number of such clusters while it is not written for that reason; absent before the first answer |
 
 None of the metrics carries a cluster name: the names are in the log line only.
 
@@ -6469,6 +6634,22 @@ agent reports it like any other (this gauge, the counter and the line above, the
 identity-binding lines) and logs `snapshot installed, but an open watch was not answered from it` at
 WARN with the error. Agents before #1549 skipped the report for such a snapshot, and
 the gauge kept the previous snapshot's values until the next build.
+
+That line is not expected from a connected proxy (#1619, #1620). The agent hands each
+open watch its response through a channel the proxy's stream owns, and waits at most
+5 s for room in it. With the control plane library the agent pins there is always
+room, also for a proxy that has stopped reading its stream: the channel of a delta
+stream holds twenty responses and at most seven can be waiting in it (one per resource
+type the agent serves, and one more), and a secret stream makes a channel for every
+request. The unit tests hold that against the library's own stream handlers. The wait
+no longer ends with the caller's context either: before #1620 a snapshot built for a
+caller whose context had already ended (a CNI ADD whose RPC was abandoned) could stop
+at any open watch, by a random choice made once per watch, and leave that one and
+the ones after it unanswered: the proxy was not sent the change until the next build,
+and the caller was told the build had failed. If the line does appear,
+the build that logged it held up every other build on the node for those 5 s, and the
+proxy is sent the change by a later build; the first thing to check is whether the
+control plane library was upgraded, since how a stream buffers is the library's.
 
 ```promql
 # N clusters unpinned for reason R on this node, now.
@@ -6584,11 +6765,19 @@ What follows from that:
   gauge is not written` with the number of clusters
   (INFO `the pin state of every mesh cluster this agent has on record as held by the
   proxy can be determined again; the acknowledged pin gauge is written` when it ends). In that state `AetherProxyHoldsUnpinnedClusters` is silent although the proxy
-  may hold unpinned clusters (#1509): what remains is that line, an increment of
-  `aether_agent_xds_nacks_total` for the Cluster type each time the proxy rejects a
-  response, and the agent's `envoy NACKed delta response` line. An absent acknowledged
-  gauge on an agent whose proxy is connected is therefore a reason to look at the NACK
-  counter. The ACK of some other cluster does not end it; the proxy accepting that
+  may hold unpinned clusters. The state has a sample of its own (#1509):
+  `aether_agent_xds_acked_tls_clusters_unknown` is the number of clusters on that WARN
+  line, and zero whenever the acknowledged gauge is written. `AetherProxyPinStateUnknown`
+  fires when it has been above zero for 15 minutes. It says the agent cannot classify
+  what the proxy holds, and that `AetherProxyHoldsUnpinnedClusters` is blind for the
+  node. It does not say the proxy holds an unpinned cluster, and it does not say the
+  proxy is rejecting updates: the state also arises with a proxy that accepts, when
+  the version it accepted (or states on a new stream) is one whose pin class the agent
+  had already dropped from its record (the bounds in the previous point). What tells
+  the two apart is `aether_agent_xds_nacks_total` for the Cluster type, which moves each
+  time the proxy rejects a response, and the agent's `envoy NACKed delta response`
+  line, which carries the proxy's reason. With no NACK, the state ends when the proxy
+  next accepts a version of that cluster the agent has on record. The ACK of some other cluster does not end it; the proxy accepting that
   cluster does. The same holds for a cluster the proxy **states it holds when it opens
   a stream** that the agent no longer publishes and has no record of (the agent
   restarted, or the stream ended before the agent read the proxy's answer and the

@@ -421,7 +421,7 @@ func (c *SnapshotCache) regenerateAllHTTPListeners() {
 	// Push the rebuilt listeners immediately (the dependency signal ALSO triggers a
 	// registry reload, but that path only runs when the refresher is up — and prompt
 	// convergence beats waiting a debounce for a pure listener change).
-	if err := c.generateListenerSnapshot(context.Background()); err != nil {
+	if err := c.generateListenerSnapshot(context.Background()); !snapshotInstalled(err) {
 		c.log.Error("failed to regenerate snapshot after extension-union change", "error", err)
 	}
 }
@@ -442,7 +442,7 @@ func (c *SnapshotCache) rebuildIdentityDerived(ctx context.Context) {
 	// trust domain too.
 	c.recomputeMTLSClusters()
 
-	if err := c.generateSnapshot(ctx); err != nil {
+	if err := c.generateSnapshot(ctx); !snapshotInstalled(err) {
 		c.log.ErrorContext(ctx, "failed to regenerate snapshot after a trust-domain change", "error", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"aethermesh.dev/common/udspath"
+	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -74,7 +75,7 @@ func TestCacheMetrics_NilReceiverSafe(t *testing.T) {
 	m.ClusterUnpinned(context.Background(), CauseNoNamespaceMetadata, 3)
 	m.TLSClusterPins(context.Background(), PinCounts{Pinned: 4})
 	m.TLSClusterPinsAcked(context.Background(), PinCounts{Pinned: 4})
-	m.TLSClusterPinsAckedUnknown()
+	m.TLSClusterPinsAckedUnknown(1)
 	m.UDSResolveFailure(context.Background(), "not_csi")
 }
 
@@ -554,12 +555,130 @@ func TestAckedTLSClusters_WithdrawnWhileUnknown(t *testing.T) {
 	if n := points(); n != 1+NumUnpinnedCauses {
 		t.Fatalf("unchanged at the next collection: %d data points, want %d", n, 1+NumUnpinnedCauses)
 	}
-	m.TLSClusterPinsAckedUnknown()
+	m.TLSClusterPinsAckedUnknown(2)
 	if n := points(); n != 0 {
 		t.Fatalf("withdrawn: %d data points, want none", n)
 	}
 	m.TLSClusterPinsAcked(context.Background(), PinCounts{})
 	if n := points(); n != 1+NumUnpinnedCauses {
 		t.Fatalf("set again, zeros included: %d data points, want %d", n, 1+NumUnpinnedCauses)
+	}
+}
+
+// TestAckedTLSClustersUnknown_IsTheOtherHalfOfTheAckedGauge: a withdrawn
+// acknowledged gauge is an absence, and no rule matches an absence (#1509).
+// The unknown gauge is the sample for it: absent until the acknowledged state
+// was first settled either way, the number of clusters the agent cannot place
+// while the acknowledged gauge is withdrawn, and zero, not absent, while it is
+// written.
+func TestAckedTLSClustersUnknown_IsTheOtherHalfOfTheAckedGauge(t *testing.T) {
+	const name = "aether.agent.xds.acked_tls_clusters_unknown"
+	m, reader := newTestMetrics(t)
+	unknown := func() (int64, bool) {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("Collect() error = %v", err)
+		}
+		for _, sm := range rm.ScopeMetrics {
+			for _, metric := range sm.Metrics {
+				if metric.Name != name {
+					continue
+				}
+				points := metric.Data.(metricdata.Gauge[int64]).DataPoints
+				switch len(points) {
+				case 0:
+					return 0, false
+				case 1:
+					if n := points[0].Attributes.Len(); n != 0 {
+						t.Fatalf("%s carries %d attributes, want none: %v", name, n, points[0].Attributes)
+					}
+					return points[0].Value, true
+				default:
+					t.Fatalf("%s has %d data points, want one", name, len(points))
+				}
+			}
+		}
+		return 0, false
+	}
+	expect := func(step string, want int64, wantOK bool) {
+		t.Helper()
+		if got, ok := unknown(); got != want || ok != wantOK {
+			t.Fatalf("%s: got (%d, %t), want (%d, %t)", step, got, ok, want, wantOK)
+		}
+	}
+
+	expect("before any answer", 0, false)
+	m.TLSClusterPinsAckedUnknown(3)
+	expect("withdrawn first", 3, true)
+	m.TLSClusterPinsAcked(context.Background(), PinCounts{Pinned: 4})
+	expect("known", 0, true)
+	m.TLSClusterPinsAckedUnknown(1)
+	expect("withdrawn after having been known", 1, true)
+	m.TLSClusterPinsAcked(context.Background(), PinCounts{})
+	expect("known again", 0, true)
+}
+
+// callbackRecorder is a meter that notes how each observable gauge is
+// collected: by a callback of its own, or by a callback registered for several
+// instruments.
+type callbackRecorder struct {
+	metric.Meter
+	own    map[string]int
+	shared [][]metric.Observable
+}
+
+func (r *callbackRecorder) Int64ObservableGauge(name string, opts ...metric.Int64ObservableGaugeOption) (metric.Int64ObservableGauge, error) {
+	r.own[name] = len(metric.NewInt64ObservableGaugeConfig(opts...).Callbacks())
+	return r.Meter.Int64ObservableGauge(name, opts...)
+}
+
+func (r *callbackRecorder) RegisterCallback(f metric.Callback, instruments ...metric.Observable) (metric.Registration, error) {
+	r.shared = append(r.shared, instruments)
+	return r.Meter.RegisterCallback(f, instruments...)
+}
+
+// TestAckedGaugesAreCollectedTogether: the acknowledged gauge and the unknown
+// gauge are two readings of one state, and exactly one of them says "known".
+// Collected by a callback each, a change of that state between the two
+// callbacks of one collection exports both the acknowledged series and a
+// positive unknown count, or neither. So they are observed by ONE callback,
+// from one read of the state.
+func TestAckedGaugesAreCollectedTogether(t *testing.T) {
+	const acked, unknown = "aether.agent.xds.acked_tls_clusters", "aether.agent.xds.acked_tls_clusters_unknown"
+	reader := sdkmetric.NewManualReader()
+	rec := &callbackRecorder{
+		Meter: sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"),
+		own:   map[string]int{},
+	}
+	m, err := New(rec)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, name := range []string{acked, unknown} {
+		n, registered := rec.own[name]
+		if !registered {
+			t.Fatalf("%s is not registered as an observable gauge", name)
+		}
+		if n != 0 {
+			t.Errorf("%s has %d callback(s) of its own; it must be observed with the other gauge, in one callback", name, n)
+		}
+	}
+	together := 0
+	for _, instruments := range rec.shared {
+		var hasAcked, hasUnknown bool
+		for _, inst := range instruments {
+			hasAcked = hasAcked || inst == metric.Observable(m.ackedTLSClusters)
+			hasUnknown = hasUnknown || inst == metric.Observable(m.ackedUnknownClusters)
+		}
+		if hasAcked != hasUnknown {
+			t.Errorf("a callback is registered for one of the two gauges without the other")
+		}
+		if hasAcked && hasUnknown {
+			together++
+		}
+	}
+	if together != 1 {
+		t.Fatalf("%d callbacks observe the two gauges together, want exactly one", together)
 	}
 }

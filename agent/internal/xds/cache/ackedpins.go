@@ -781,7 +781,7 @@ func (c *SnapshotCache) reportAckedPins(ctx context.Context, u ackedPinsUpdate, 
 	if u.unclassified > 0 {
 		// Withdrawn, not left: a gauge that was written before would go on
 		// exporting its last values as if they were the acknowledged state.
-		c.metrics.TLSClusterPinsAckedUnknown()
+		c.metrics.TLSClusterPinsAckedUnknown(u.unclassified)
 	}
 	if u.unclassifiedChanged {
 		if u.unclassified > 0 {

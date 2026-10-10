@@ -105,7 +105,7 @@ func (c *SnapshotCache) runQUICPublisher(ctx context.Context) {
 		p.mu.Unlock()
 
 		start := time.Now()
-		if err := c.generateSnapshot(ctx); err != nil {
+		if err := c.generateSnapshot(ctx); !snapshotInstalled(err) {
 			c.log.Error("failed to publish the snapshot for observed QUIC pairs", "admitted", admitted, "error", err)
 			continue
 		}

@@ -6,9 +6,11 @@ import (
 	"strings"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
 // The INBOUND identity-binding discriminator (issue #638).
@@ -33,9 +35,11 @@ import (
 // and chains after (proxy.SpiffeIDFromPod, ingress.go), so within one build the
 // invariant holds BY CONSTRUCTION — a Go-level mismatch cannot be constructed.
 // What this check adds is that it does not read that Go string: it reads the
-// DownstreamTlsContext out of the listener proto the snapshot just handed
-// Envoy, and compares it with the identity of the pod recorded as owning that
-// listener entry. That catches what construction cannot rule out:
+// DownstreamTlsContext out of the listener proto the snapshot carries (the
+// snapshot's own listener set, joined to the entry that held that very proto
+// when the build read the listener map: bindingView, #1621), and compares it
+// with the identity of the pod recorded as owning that listener entry. That
+// catches what construction cannot rule out:
 //
 //   - a listener entry rebuilt from, or left behind by, a DIFFERENT pod than the
 //     one now owning the netns (netns reuse after a missed CNI DEL — the same
@@ -55,8 +59,8 @@ import (
 // was right and the defect is in Envoy's SDS/secret lifecycle across the hot
 // restart — which closes the agent-side line of enquiry.
 //
-// Fail-open throughout: this observes the snapshot after SetSnapshot and never
-// blocks, alters or delays it.
+// Fail-open throughout: this reports on the snapshot after SetSnapshot and
+// never blocks, alters or delays it.
 
 // inboundChainsPerPod is a sizing hint only: the TCP floor chain, the no-SNI h2
 // chain and one chain per served port.
@@ -75,8 +79,9 @@ type inboundBinding struct {
 	// serve on this chain. Should equal podIdentity.
 	presented string
 	// served reports whether the snapshot that carries this chain also carries
-	// a secret of that name. False means the chain reached Envoy ahead of its
-	// own SVID.
+	// a secret of that name (its own secret set, not the cache's secret map at
+	// some later time). False means the chain reached Envoy ahead of its own
+	// SVID.
 	served bool
 }
 
@@ -98,10 +103,9 @@ type inboundBindingState struct {
 // the previous snapshot (or are seen for the first time), and WARNs about any
 // chain whose server certificate is not the identity of the pod it serves.
 // Called from generateSnapshot with snapshotMu held, which also serializes the
-// stored state.
-func (c *SnapshotCache) logInboundIdentityBindings(ctx context.Context, version string) {
-	chains := c.collectInboundBindings()
-
+// stored state. chains is bindingView.inboundBindings for the snapshot's
+// listeners and secrets.
+func (c *SnapshotCache) logInboundIdentityBindings(ctx context.Context, version string, chains map[string]inboundBinding) {
 	c.bindingMu.Lock()
 	prev := c.lastInboundBindings
 	c.lastInboundBindings = inboundBindingState{chains: chains}
@@ -116,42 +120,16 @@ func (c *SnapshotCache) logInboundIdentityBindings(ctx context.Context, version 
 	c.emitInboundBindingChanges(ctx, version, prev.chains, chains, changed)
 }
 
-// collectInboundBindings reads each local pod's inbound listener out of the
-// cache and names, per filter chain, the server certificate it binds. Returns
-// nil before any listener load has recorded a trust domain (nothing can be
-// compared then). Cleartext chains (SPIRE off) carry no transport socket and
-// are skipped: they present no certificate at all.
-func (c *SnapshotCache) collectInboundBindings() map[string]inboundBinding {
-	trustDomain := c.currentTrustDomain()
-	if trustDomain == "" {
-		return nil
-	}
-
-	served := c.servedSecretNames()
-
-	c.listenerMu.RLock()
-	defer c.listenerMu.RUnlock()
-
-	out := make(map[string]inboundBinding, len(c.listeners)*inboundChainsPerPod)
-	for _, entry := range c.listeners {
-		collectPodInboundBindings(entry, trustDomain, served, out)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 // collectPodInboundBindings adds one entry per certificate-bearing inbound
-// filter chain of a single pod.
-func collectPodInboundBindings(entry listenerEntry, trustDomain string, served map[string]struct{}, out map[string]inboundBinding) {
-	l, ok := entry.inbound.(*listenerv3.Listener)
-	if !ok || l == nil || entry.cniPod == nil {
+// filter chain of a single pod's inbound listener.
+func collectPodInboundBindings(pod *cniv1.CNIPod, inbound types.Resource, trustDomain string, served map[string]struct{}, out map[string]inboundBinding) {
+	l, ok := inbound.(*listenerv3.Listener)
+	if !ok || l == nil || pod == nil {
 		return
 	}
 	b := inboundBinding{
-		pod:         entry.cniPod.GetNamespace() + "/" + entry.cniPod.GetName(),
-		podIdentity: proxy.SpiffeIDFromPod(entry.cniPod, trustDomain),
+		pod:         pod.GetNamespace() + "/" + pod.GetName(),
+		podIdentity: proxy.SpiffeIDFromPod(pod, trustDomain),
 	}
 	for _, fc := range l.GetFilterChains() {
 		secret := downstreamCertSecretName(fc.GetTransportSocket())
@@ -181,18 +159,6 @@ func downstreamCertSecretName(ts *corev3.TransportSocket) string {
 		return ""
 	}
 	return cfgs[0].GetName()
-}
-
-// servedSecretNames snapshots the secret names this node's snapshot carries.
-func (c *SnapshotCache) servedSecretNames() map[string]struct{} {
-	c.secretMu.RLock()
-	defer c.secretMu.RUnlock()
-
-	names := make(map[string]struct{}, len(c.secrets))
-	for name := range c.secrets {
-		names[name] = struct{}{}
-	}
-	return names
 }
 
 // diffInboundBindings returns the chains whose binding is new or changed,

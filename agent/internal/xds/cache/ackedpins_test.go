@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -209,6 +210,34 @@ func deltaNames(resp *discoveryv3.DeltaDiscoveryResponse) []string {
 		names = append(names, r.GetName())
 	}
 	return names
+}
+
+// ackedUnknownGauge is the gauge that says how many mesh clusters the proxy
+// holds whose pin state the agent cannot determine (#1509).
+const ackedUnknownGauge = "aether.agent.xds.acked_tls_clusters_unknown"
+
+// readUnknownGauge reads that gauge: its one series, which carries no
+// attribute. ok is false while it has no sample.
+func readUnknownGauge(t *testing.T, reader *sdkmetric.ManualReader) (int64, bool) {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != ackedUnknownGauge {
+				continue
+			}
+			gauge, isGauge := m.Data.(metricdata.Gauge[int64])
+			require.True(t, isGauge, "%s is %T, want Gauge[int64]", ackedUnknownGauge, m.Data)
+			if len(gauge.DataPoints) == 0 {
+				return 0, false
+			}
+			require.Len(t, gauge.DataPoints, 1, "one series per agent")
+			assert.Zero(t, gauge.DataPoints[0].Attributes.Len(), "no attribute: %v", gauge.DataPoints[0].Attributes)
+			return gauge.DataPoints[0].Value, true
+		}
+	}
+	return 0, false
 }
 
 // publish and accept are publishLocked and acceptLocked for a test that reads
@@ -532,6 +561,11 @@ func TestAckedPinGaugeDoesNotCountAClusterNeverAcknowledged(t *testing.T) {
 // The agent cannot know the pin state of that version. It must not report a
 // count that leaves the cluster out, and before #1508 it reported worse: the
 // next unrelated ACK moved the gauge to the whole newest snapshot.
+//
+// Not reporting is silence, and a rule cannot match silence (#1509: the alert
+// on the acknowledged gauge resolved here, with the proxy unchanged). So the
+// state has a sample of its own: the number of held clusters the agent cannot
+// place, which is zero whenever the acknowledged gauge is written.
 func TestAckedPinGaugeWhenTheAgentRestartsWhileTheProxyRejects(t *testing.T) {
 	c, rec, reader, tracker := ackedPinFixture(t)
 	ackedGauge := func() (pinSeries, bool) { return readPinGauge(t, reader, ackedTLSClustersGauge) }
@@ -539,6 +573,8 @@ func TestAckedPinGaugeWhenTheAgentRestartsWhileTheProxyRejects(t *testing.T) {
 	addPinnedCluster(c, bindingClusterName)
 	addPinnedCluster(c, otherClusterName)
 	require.NoError(t, c.generateSnapshot(ctx))
+	_, ok := readUnknownGauge(t, reader)
+	require.False(t, ok, "no proxy has answered: nothing is known, and nothing is claimed unknown either")
 
 	// The proxy holds `other` as this process publishes it, and the binding
 	// cluster at a version from the process before this one.
@@ -549,10 +585,13 @@ func TestAckedPinGaugeWhenTheAgentRestartsWhileTheProxyRejects(t *testing.T) {
 	require.Equal(t, []string{bindingClusterName}, deltaNames(update), "fixture: the proxy is owed this process's version")
 	proxy.nack(update)
 
-	_, ok := ackedGauge()
+	_, ok = ackedGauge()
 	assert.False(t, ok, "the pin state of one held cluster is not known: nothing is reported")
 	require.Len(t, rec.with(ackedClusterPinsUnknownMsg), 1, "and the agent says why, once")
 	assert.Equal(t, "1", rec.with(ackedClusterPinsUnknownMsg)[0].attrs["clusters"])
+	unknown, ok := readUnknownGauge(t, reader)
+	require.True(t, ok, "the withdrawal is a sample")
+	assert.Equal(t, int64(1), unknown, "of the one cluster the agent cannot place")
 
 	// An unrelated cluster is added and acknowledged.
 	addPinnedCluster(c, addedClusterName)
@@ -563,6 +602,9 @@ func TestAckedPinGaugeWhenTheAgentRestartsWhileTheProxyRejects(t *testing.T) {
 	_, ok = ackedGauge()
 	assert.False(t, ok, "the ACK of another cluster does not make the rejected one known (#1508)")
 	assert.Len(t, rec.with(ackedClusterPinsUnknownMsg), 1, "not said again while it lasts")
+	unknown, ok = readUnknownGauge(t, reader)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), unknown, "and it is still one")
 
 	// The proxy reconnects and accepts the cluster.
 	again := connectCDSProxy(t, c, tracker, 2, proxy.accepted)
@@ -572,6 +614,9 @@ func TestAckedPinGaugeWhenTheAgentRestartsWhileTheProxyRejects(t *testing.T) {
 	assert.Equal(t, int64(3), acked.pinned)
 	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
 	assert.Len(t, rec.with(ackedClusterPinsKnownMsg), 1)
+	unknown, ok = readUnknownGauge(t, reader)
+	require.True(t, ok, "known again is a sample too, so the series falls to zero instead of ending")
+	assert.Zero(t, unknown)
 }
 
 // TestAckedPinGaugeIsWithdrawnWhenAHeldClusterBecomesUnknown: "not written
@@ -1302,19 +1347,20 @@ func TestAckedPinGaugeIsNotWithdrawnForAPlaintextUDPFloor(t *testing.T) {
 // TestAckedPinsKnowASnapshotWhoseSetReturnedAnError: why the classes are
 // recorded before SetSnapshot without waiting to see whether it succeeds. The
 // pinned go-control-plane installs the snapshot first and can fail only
-// afterwards, while it answers the watches that were open (here: the stream's
-// context ended with a response half handed over). The snapshot is then the
-// one every later request is answered from, so a proxy can hold its clusters
+// afterwards, while it answers the watches that were open (here: a watch on a
+// channel nobody reads, which the build gives up on after its bound). The
+// snapshot is then the one every later request is answered from, so a proxy can hold its clusters
 // and acknowledge them: their classes have to be on record. There is no
 // "rejected and never published" outcome to keep out of the record.
 func TestAckedPinsKnowASnapshotWhoseSetReturnedAnError(t *testing.T) {
 	c, _, reader, tracker := ackedPinFixture(t)
 	ctx := context.Background()
+	c.watchAnswerTimeout = 50 * time.Millisecond
 	addPinnedCluster(c, otherClusterName)
 	require.NoError(t, c.generateSnapshot(ctx))
 
-	// An open watch nobody reads: SetSnapshot blocks answering it until its
-	// context ends, and returns that as its error.
+	// An open watch nobody reads: SetSnapshot blocks answering it until the
+	// build's bound for that passes, and returns an error.
 	cancel, err := c.CreateDeltaWatch(&discoveryv3.DeltaDiscoveryRequest{
 		Node: &corev3.Node{Id: c.nodeName}, TypeUrl: resourcev3.ClusterType, ResponseNonce: "n1",
 	}, streamv3.NewDeltaSubscription(nil, nil, clusterVersions(t, c), true), make(chan cachev3.DeltaResponse))
@@ -1323,9 +1369,7 @@ func TestAckedPinsKnowASnapshotWhoseSetReturnedAnError(t *testing.T) {
 	defer cancel()
 
 	addOutboundCluster(c, bindingClusterName) // unpinned
-	ended, end := context.WithCancel(ctx)
-	end()
-	require.Error(t, c.generateSnapshot(ended), "fixture: SetSnapshot must fail")
+	require.ErrorIs(t, c.generateSnapshot(ctx), ErrWatchNotAnswered, "fixture: SetSnapshot must fail")
 	require.Contains(t, clusterVersions(t, c), bindingClusterName, "the snapshot is served although setting it returned an error")
 
 	p := connectCDSProxy(t, c, tracker, 1, nil)
@@ -1344,10 +1388,11 @@ func TestAckedPinsKnowASnapshotWhoseSetReturnedAnError(t *testing.T) {
 // and were made up for only by the next build, under the next version.
 //
 // The error is still returned, and it is told apart from a snapshot that was
-// never installed: its own line, and its own text.
+// never installed: its own line, its own text, and ErrWatchNotAnswered.
 func TestASnapshotWhoseSetReturnedAnErrorIsReportedAsTheOneServed(t *testing.T) {
 	c, rec, reader, _ := ackedPinFixture(t)
 	ctx := context.Background()
+	c.watchAnswerTimeout = 50 * time.Millisecond
 	serveSecrets(c, inboundEchoIdentity, inboundTrustBundleSDS)
 	addPinnedCluster(c, otherClusterName)
 	require.NoError(t, c.generateSnapshot(ctx))
@@ -1356,7 +1401,7 @@ func TestASnapshotWhoseSetReturnedAnErrorIsReportedAsTheOneServed(t *testing.T) 
 	require.Equal(t, byCause(0, 0, 0), published.unpinned, "fixture: nothing is unpinned yet")
 
 	// An open watch nobody reads: SetSnapshot blocks answering it until the
-	// context it was called with ends, and returns that as its error.
+	// build's bound for that passes, and returns an error.
 	cancel, err := c.CreateDeltaWatch(&discoveryv3.DeltaDiscoveryRequest{
 		Node: &corev3.Node{Id: c.nodeName}, TypeUrl: resourcev3.ClusterType, ResponseNonce: "n1",
 	}, streamv3.NewDeltaSubscription(nil, nil, clusterVersions(t, c), true), make(chan cachev3.DeltaResponse))
@@ -1369,10 +1414,8 @@ func TestASnapshotWhoseSetReturnedAnErrorIsReportedAsTheOneServed(t *testing.T) 
 	// its own inbound chains.
 	addOutboundCluster(c, bindingClusterName)
 	rec.reset()
-	ended, end := context.WithCancel(ctx)
-	end()
-	err = c.AddPod(ended, bindingPod("echo-1", "echo"), bindingTrustDomain)
-	require.ErrorIs(t, err, context.Canceled, "fixture: SetSnapshot must fail")
+	err = c.AddPod(ctx, bindingPod("echo-1", "echo"), bindingTrustDomain)
+	require.ErrorIs(t, err, ErrWatchNotAnswered, "fixture: SetSnapshot must fail")
 	served := snapshotVersion(t, c)
 	require.Contains(t, clusterVersions(t, c), bindingClusterName, "the snapshot is served although setting it returned an error")
 
