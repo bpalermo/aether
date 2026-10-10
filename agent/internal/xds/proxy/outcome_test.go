@@ -23,11 +23,15 @@ const (
 	wireOutcomeHeader = "x-aether-outcome"
 	wireOutcomeFormat = "%RESPONSE_CODE%;%RESPONSE_FLAGS%;%REQ(:METHOD)%;%RESPONSE_CODE_DETAILS%"
 	wireRetryOn       = "connect-failure,refused-stream,reset-before-request,retriable-headers"
+	// For a local reply that has no route: the reply's own status as the code.
+	wireRouteLessFormat = "%RESP(:STATUS)%;%RESPONSE_FLAGS%;%REQ(:METHOD)%;%RESPONSE_CODE_DETAILS%"
 )
 
 func TestOutcomeWireContract(t *testing.T) {
 	assert.Equal(t, wireOutcomeHeader, OutcomeHeader)
 	assert.Equal(t, wireOutcomeFormat, outcomeFormat)
+	assert.Equal(t, wireRouteLessFormat, outcomeRouteLessFormat)
+	assert.Equal(t, "overload", outcomeOverloadDetail, "Envoy's response code details for stop_accepting_requests")
 }
 
 // inboundHCMs returns every HTTP connection manager of an inbound listener,
@@ -49,9 +53,11 @@ func inboundHCMs(t *testing.T, l *listenerv3.Listener) map[string]*http_connecti
 
 // TestInboundStampsTheOutcomeOnEveryResponse: every inbound connection manager
 // (mTLS TCP on each HTTP port, cleartext, HTTP/3) stamps the outcome header on
-// its virtual host, overwriting what the application set, and does nothing
-// else to a response: no local-reply rewriting, and no opinion about
-// x-envoy-ratelimited (aether#1641).
+// its virtual host, overwriting what the application set; stamps the local
+// replies that have no route through its local-reply mapper, only where the
+// header is absent and without touching status or body; removes a request
+// header of that name; and has no opinion about x-envoy-ratelimited
+// (aether#1641).
 func TestInboundStampsTheOutcomeOnEveryResponse(t *testing.T) {
 	pod := quicTestPod() // HTTP ports 8080 and 8081, raw TCP 9000
 	mtls, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
@@ -73,7 +79,20 @@ func TestInboundStampsTheOutcomeOnEveryResponse(t *testing.T) {
 			hcms := inboundHCMs(t, tc.l)
 			require.Lenf(t, hcms, tc.wantHCMs, "connection managers of %s", tc.l.GetName())
 			for chain, h := range hcms {
-				assert.Nilf(t, h.GetLocalReplyConfig(), "%s: the status and body of a local reply are Envoy's", chain)
+				mappers := h.GetLocalReplyConfig().GetMappers()
+				require.Lenf(t, mappers, 1, "%s: one local-reply mapper", chain)
+				m := mappers[0]
+				assert.Nilf(t, m.GetStatusCode(), "%s: the status of a local reply is Envoy's", chain)
+				assert.Nilf(t, m.GetBody(), "%s: so is its body", chain)
+				assert.Nilf(t, m.GetBodyFormatOverride(), chain)
+				assert.Nilf(t, h.GetLocalReplyConfig().GetBodyFormat(), chain)
+				assert.NotNilf(t, m.GetFilter().GetNotHealthCheckFilter(), "%s: every local reply, whatever its status or flags", chain)
+				require.Lenf(t, m.GetHeadersToAdd(), 1, chain)
+				stamp := m.GetHeadersToAdd()[0]
+				assert.Equalf(t, wireOutcomeHeader, stamp.GetHeader().GetKey(), chain)
+				assert.Equalf(t, wireRouteLessFormat, stamp.GetHeader().GetValue(), chain)
+				assert.Equalf(t, corev3.HeaderValueOption_ADD_IF_ABSENT, stamp.GetAppendAction(),
+					"%s: a reply the route stamped keeps the route's value", chain)
 				vhosts := h.GetRouteConfig().GetVirtualHosts()
 				require.NotEmptyf(t, vhosts, chain)
 				for _, vh := range vhosts {
@@ -84,6 +103,8 @@ func TestInboundStampsTheOutcomeOnEveryResponse(t *testing.T) {
 					assert.Equalf(t, corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD, add.GetAppendAction(),
 						"%s: the application must not be able to write its own outcome", chain)
 					assert.Emptyf(t, vh.GetResponseHeadersToRemove(), "%s: nothing is removed from the application's response", chain)
+					assert.Equalf(t, []string{wireOutcomeHeader}, vh.GetRequestHeadersToRemove(),
+						"%s: an application is never handed a request header of that name", chain)
 				}
 			}
 		})
@@ -215,6 +236,10 @@ func TestOutcomeRetriableRegex(t *testing.T) {
 		{"200;UR;POST;" + refusedS, false, "never a 200"},
 		{"0;LR;POST;" + localRef, false, "only the application's refusal: local_refused_stream_reset is another reason"},
 		{"0;UC;POST;x{connection_termination|Connection_refused}", false, "a 'refused' that is not a refused stream"},
+		// Rule 5's method class is [!-:<-~]+, any printable ASCII without ";".
+		// Widening it to include ";" changes nothing a caller can see only
+		// because Envoy rejects a request whose method is not a token, so no
+		// value has a ";" in that field.
 		{"0;UC;e_refused;" + termed, false, "a method spelled like the detail is still a method"},
 
 		// Begun, and never replayed whatever the method.
@@ -228,6 +253,23 @@ func TestOutcomeRetriableRegex(t *testing.T) {
 		{"0;UF UH;GET;x", false, "malformed set"},
 		{"0;,UF;GET;x", false, "malformed set"},
 		{"0;UF,,UH;GET;x", false, "malformed set"},
+
+		// The proxy is overloaded: the request reached no application.
+		{"0;-;POST;overload", true, "stop_accepting_requests, stamped by the route"},
+		{"0;-;GET;overload", true, "any method"},
+		{"503;-;POST;overload", true, "the same reply without a route, stamped by the mapper (rule 1)"},
+		{"200;-;POST;overload", false, "never a 200 (a gRPC caller's overload reply without a route)"},
+		{"0;-;POST;overloaded", false, "the details end in overload"},
+		{"0;-;POST;overload;x", false, "the details end in overload"},
+		{"0;-;overload;rbac_access_denied", false, "a method spelled like the detail is still a method"},
+		{"0;UAEX;POST;overload", false, "only with no flag"},
+		{"0;UC;POST;overload", false, "only with no flag"},
+		{"400;-;;http1.codec_error", false, "a malformed request (measured value)"},
+		{"408;-;GET;request_header_timeout", false, "the client was slow"},
+		{"431;-;GET;request_headers_too_large", false, "the request is bad"},
+		{"404;NR;GET;route_not_found", false, "no route"},
+		{"0;-;GET;health_check_ok", false, "a 200 from the health-check filter"},
+		{"0;-;GET;rbac_access_denied_matched_policy[none]", false, "a verdict without a flag"},
 
 		// Local replies that are not the router's.
 		{"0;-;GET;direct_response", false, "no flag, no rule"},
@@ -252,10 +294,11 @@ func TestOutcomeRetriableRegex(t *testing.T) {
 		assert.Equalf(t, tc.want, re.MatchString(tc.value), "%q: %s", tc.value, tc.why)
 	}
 
-	// What the compact set spelling additionally accepts. No Envoy writes
-	// these (the formatter joins flags with ","); they are here so that the
-	// looseness is a known quantity and stays inside the flag field.
-	for _, value := range []string{"0;UFUH;POST;x", "0;UF,;POST;x"} {
+	// What the compact spelling additionally accepts. No Envoy writes the
+	// first two (the formatter joins flags with ","), and drop_overload comes
+	// with its own flag (DO/UDO), never with "-". They are here so that the
+	// looseness is a known quantity.
+	for _, value := range []string{"0;UFUH;POST;x", "0;UF,;POST;x", "0;-;POST;drop_overload"} {
 		assert.Truef(t, re.MatchString(value), "%q", value)
 	}
 
@@ -299,6 +342,8 @@ func TestOutcomeRetriableRegex(t *testing.T) {
 		assert.Containsf(t, envoyResponseFlags, f, "%s is not a response flag Envoy has", f)
 	}
 	assert.Contains(t, refusedS, outcomeRefusedStreamDetail)
+	assert.Contains(t, outcomeRetriableRegex, outcomeRefusedStreamDetail)
+	assert.Contains(t, outcomeRetriableRegex, outcomeOverloadDetail)
 	for _, other := range []string{refused, termed, reset, localRef} {
 		assert.NotContainsf(t, other, outcomeRefusedStreamDetail, "the refused-stream detail must not be in %q", other)
 	}
@@ -361,9 +406,15 @@ func retryRoutes(vhosts []*routev3.VirtualHost) map[string]*routev3.Route {
 func TestCallerRoutesMatchAndRemoveTheOutcome(t *testing.T) {
 	gamma := BuildOutboundServiceVirtualHost("web.shop.mesh.local", []string{"web.shop.mesh.local"}, []GammaRoute{
 		{
-			Matches:        []GammaMatch{{Prefix: "/a"}, {Prefix: "/b"}},
-			Backends:       []GammaBackend{{Cluster: "v1.shop.mesh.local", Weight: 1}, {Cluster: "v2.shop.mesh.local", Weight: 1}},
-			HeaderMutation: &GammaHeaderMutation{RemoveResponse: []string{"x-internal"}},
+			Matches:  []GammaMatch{{Prefix: "/a"}, {Prefix: "/b"}},
+			Backends: []GammaBackend{{Cluster: "v1.shop.mesh.local", Weight: 1}, {Cluster: "v2.shop.mesh.local", Weight: 1}},
+			// Several removals each. (Whether two matches sharing a slice
+			// would show here depends on the capacity the allocator gave it;
+			// the generators clone regardless.)
+			HeaderMutation: &GammaHeaderMutation{
+				RemoveResponse: []string{"x-internal", "x-internal-2", "x-internal-3"},
+				RemoveRequest:  []string{"x-debug", "x-debug-2", "x-debug-3"},
+			},
 		},
 		{Matches: []GammaMatch{{Prefix: "/plain"}}},
 		{Matches: []GammaMatch{{Prefix: "/moved"}}, Redirect: &GammaRedirect{Hostname: "elsewhere.example"}},
@@ -381,6 +432,8 @@ func TestCallerRoutesMatchAndRemoveTheOutcome(t *testing.T) {
 		for rn, r := range routes {
 			requireMeshRetryPolicy(t, name+" "+rn, r.GetRoute().GetRetryPolicy())
 			assert.Equalf(t, 1, countOf(r.GetResponseHeadersToRemove(), wireOutcomeHeader), "%s %s removes the outcome header once", name, rn)
+			assert.Equalf(t, 1, countOf(r.GetRequestHeadersToRemove(), wireOutcomeHeader),
+				"%s %s forwards a client's request header of that name", name, rn)
 		}
 		// Nothing above the route removes it: the capture table's passthrough
 		// route reaches destinations outside the mesh, whose headers are theirs.
@@ -413,10 +466,14 @@ func TestCallerRoutesMatchAndRemoveTheOutcome(t *testing.T) {
 	}
 	require.NotNil(t, a)
 	require.NotNil(t, b)
-	assert.Equal(t, []string{"x-internal", wireOutcomeHeader}, a.GetResponseHeadersToRemove())
-	assert.Equal(t, []string{"x-internal", wireOutcomeHeader}, b.GetResponseHeadersToRemove())
+	assert.Equal(t, []string{"x-internal", "x-internal-2", "x-internal-3", wireOutcomeHeader}, a.GetResponseHeadersToRemove())
+	assert.Equal(t, []string{"x-internal", "x-internal-2", "x-internal-3", wireOutcomeHeader}, b.GetResponseHeadersToRemove())
 	a.ResponseHeadersToRemove[0] = "changed"
 	assert.Equal(t, "x-internal", b.GetResponseHeadersToRemove()[0], "the two matches of one rule must not share a slice")
+	assert.Equal(t, []string{"x-debug", "x-debug-2", "x-debug-3", wireOutcomeHeader}, a.GetRequestHeadersToRemove())
+	assert.Equal(t, []string{"x-debug", "x-debug-2", "x-debug-3", wireOutcomeHeader}, b.GetRequestHeadersToRemove())
+	a.RequestHeadersToRemove[0] = "changed"
+	assert.Equal(t, "x-debug", b.GetRequestHeadersToRemove()[0], "nor the request removals")
 }
 
 func countOf(s []string, v string) int {
@@ -447,21 +504,26 @@ func TestEdgeRoutesByBackendKind(t *testing.T) {
 		require.Lenf(t, rp.GetRetryHostPredicate(), 1, where)
 	}
 
-	r := BuildEdgeRoute("/", "", nil, "", nil, mesh, &GammaHeaderMutation{RemoveResponse: []string{"x-internal"}}, nil, nil, nil)
+	r := BuildEdgeRoute("/", "", nil, "", nil, mesh, &GammaHeaderMutation{RemoveResponse: []string{"x-internal"}, RemoveRequest: []string{"x-debug"}}, nil, nil, nil)
 	requireMeshRetryPolicy(t, "edge, mesh backend", r.GetRoute().GetRetryPolicy())
 	assert.Equal(t, []string{"x-internal", wireOutcomeHeader}, r.GetResponseHeadersToRemove())
+	assert.Equal(t, []string{"x-debug", wireOutcomeHeader}, r.GetRequestHeadersToRemove(), "an external client's header stops at the edge")
 
 	r = BuildEdgeRoute("/", "", nil, "", nil, k8s, nil, nil, nil, nil)
 	requireNonMesh("edge, cleartext backend", r.GetRoute().GetRetryPolicy())
 	assert.NotContains(t, r.GetResponseHeadersToRemove(), wireOutcomeHeader, "a cleartext Kubernetes Service is not behind a destination proxy")
+	assert.Equal(t, []string{wireOutcomeHeader}, r.GetRequestHeadersToRemove(), "an external client's header stops at the edge, whatever the backend")
 
 	r = BuildEdgeRoute("/", "", nil, "", nil, "", nil, &GammaRedirect{Hostname: "elsewhere.example"}, nil, nil)
 	assert.Nil(t, r.GetRoute())
 	assert.NotContains(t, r.GetResponseHeadersToRemove(), wireOutcomeHeader, "a redirect has no upstream response")
+	assert.NotContains(t, r.GetRequestHeadersToRemove(), wireOutcomeHeader, "and no upstream request")
 
 	r = BuildEdgeRouteWeighted("/", "", nil, "", nil, []WeightedRouteBackend{{Cluster: mesh, Weight: 1}, {Cluster: k8s, Weight: 1}}, nil, nil, nil, nil)
 	requireMeshRetryPolicy(t, "edge, split rule", r.GetRoute().GetRetryPolicy())
 	assert.NotContains(t, r.GetResponseHeadersToRemove(), wireOutcomeHeader, "a split rule removes per backend")
+	assert.Equal(t, []string{wireOutcomeHeader}, r.GetRequestHeadersToRemove(),
+		"the request header is removed for the whole rule: the cleartext share is the one a client could use")
 	byName := map[string][]string{}
 	for _, cw := range r.GetRoute().GetWeightedClusters().GetClusters() {
 		byName[cw.GetName()] = cw.GetResponseHeadersToRemove()
@@ -471,6 +533,7 @@ func TestEdgeRoutesByBackendKind(t *testing.T) {
 
 	r = BuildEdgeRouteWeighted("/", "", nil, "", nil, []WeightedRouteBackend{{Cluster: k8s, Weight: 1}, {Cluster: EdgeK8sClusterName("shop", "other", 80), Weight: 1}}, nil, nil, nil, nil)
 	requireNonMesh("edge, split between two cleartext backends", r.GetRoute().GetRetryPolicy())
+	assert.Equal(t, []string{wireOutcomeHeader}, r.GetRequestHeadersToRemove())
 
 	// One backend through the weighted builder is the plain route.
 	r = BuildEdgeRouteWeighted("/", "", nil, "", nil, []WeightedRouteBackend{{Cluster: mesh, Weight: 1}}, nil, nil, nil, nil)

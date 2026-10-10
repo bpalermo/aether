@@ -556,9 +556,10 @@ func buildScoredRoutes(name string, rules []GammaRoute) []scoredRoute {
 				r.Action = gammaRedirectAction(rule.Redirect)
 			} else {
 				r.Action = gammaRouteAction(name, rule, m.Prefix)
-				// A slice of its own: respRemove is shared by every match
-				// of the rule.
+				// Slices of their own: respRemove and reqRemove are shared
+				// by every match of the rule.
 				r.ResponseHeadersToRemove = slices.Clone(respRemove)
+				r.RequestHeadersToRemove = slices.Clone(reqRemove)
 				stripOutcomeHeader(r)
 			}
 			scored = append(scored, scoredRoute{route: r, key: gammaMatchSpecificity(m)})

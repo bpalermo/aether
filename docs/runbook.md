@@ -6778,6 +6778,7 @@ on that header. There is no status-code condition any more.
 | `200;-;POST;via_upstream` (any application status but 503) | that status | does not retry |
 | `503;-;POST;via_upstream` (the application answered 503) | `503` | retries, any method |
 | `0;UF;POST;…` connect refused or timed out, `0;UH;…` no healthy host, `0;UO;…` overflow, `0;NC;…` app cluster gone | `503` | retries, any method |
+| `0;-;POST;overload` or `503;-;POST;overload` (the destination's proxy is overloaded: `stop_accepting_requests`) | `503` | retries, any method |
 | `0;UC;GET;…{connection_termination}`, `0;UR;GET;…{remote_reset}`, `0;LR;…` with `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE` | `503` | retries |
 | the same with any other method (`POST`, `PATCH`, …) | `503` | **does not retry** |
 | `0;UR;POST;…{remote_refused_stream_reset}` (an HTTP/2 application refused the stream: not processed, by the protocol) | `503` | retries, any method |
@@ -6827,11 +6828,48 @@ Other things to know:
   Service takes the mesh policy: the cleartext share of it loses the retry of an
   application's `503`.
 - An application cannot write its own outcome: the destination overwrites the header.
-  A request header of that name does nothing.
+  A **request** header of that name is removed where a request enters the mesh's
+  hands: on every edge route (so an external client's goes no further), on the
+  caller's routes to mesh services, and at the destination before the application.
+  The one place a response header of that name is not overwritten is the cleartext
+  share of an edge rule that also has a mesh backend (Envoy has one retry policy per
+  route, not per weighted backend, so that share carries the mesh policy): a cleartext
+  backend that sets `x-aether-outcome` on its own response decides its own retry
+  there, as it always could by answering `503`.
+- In a mesh run **without SPIRE** (cleartext, a testing posture) the pod's single
+  inbound chain also receives connections from a source's TCP floor (`tcp_proxy`,
+  no HTTP awareness on the caller's side). HTTP carried that way gets
+  `x-aether-outcome` on every response and nothing removes it, so the client
+  application sees it. With mTLS the TCP floor lands on the inbound `tcp_proxy`
+  chain and no header exists.
 - `x-envoy-ratelimited` is Envoy's own: a response that carries it is never retried
   by Envoy, whatever the policy. The mesh neither sets nor removes it, so an
   application that answers `503` with that header is not retried and its client sees
   both.
+
+#### Replies the destination's connection manager writes before any route (#1641)
+
+A virtual host's headers apply only when a route was chosen. For the replies below the
+connection manager's local-reply mapper stamps `x-aether-outcome` itself when it is
+absent, with the reply's HTTP status as the code. Only the first is ever retried.
+
+| Reply | Status | `x-aether-outcome` | Retried before #1641 | Retried now | Right? |
+|---|---|---|---|---|---|
+| Overload, `stop_accepting_requests` ("envoy overloaded") | `503` | `0;-;<method>;overload` over the mesh hop, `503;-;<method>;overload` for a plain client (both measured) | yes (a 503) | **yes**, any method (measured, `GET` and `POST`) | yes: no application saw it, and the chart's overload ladder relies on it |
+| The same for a gRPC request | `200` + `grpc-status: 14` | `0;-;POST;overload` when the route stamped it; `200;-;POST;overload` otherwise | no | yes in the first shape, no in the second (not measured) | the first is; the second is the pre-#1646 behaviour |
+| Malformed request (codec error) | `400` | `400;-;;http1.codec_error` (measured) | no | no | yes: the request is bad everywhere |
+| Request headers too large | `431` | `431;…` | no | no | yes |
+| Request-header / request / max-stream-duration timeouts | `408` / `504` | not configured on the inbound (Envoy defaults: none) | no | no | n/a |
+| Stream idle timeout (5 min default) | `408` / `504`, flag `SI` | no rule matches `SI` | no | no | yes: the request may be in the application |
+| Path normalisation rejects | `400` | not configured on the inbound | no | no | n/a |
+| Listener drain (hot restart, listener update) | none: `GOAWAY` / `connection: close` | responses in flight keep their normal value | n/a | n/a | n/a |
+
+The overload manager's other rungs write no reply: `shrink_heap` frees memory;
+`disable_http_keepalive` closes connections after their response; `reduce_timeouts`
+shortens idle timers; `stop_accepting_connections` refuses the caller's connect, which
+the caller retries as `connect-failure`, before and now. (`reset_high_memory_stream`,
+not in the chart's ladder, resets a stream in flight: the caller sees a reset after it
+sent the request, which it did not retry before and does not now.)
 
 #### Upgrading across #1641: the agent roll is a window with fewer retries
 

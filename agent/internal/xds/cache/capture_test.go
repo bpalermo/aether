@@ -395,7 +395,7 @@ func TestCaptureVhosts_RouteTargetGAMMAFeatures(t *testing.T) {
 	require.Len(t, setRoute.GetRequestHeadersToAdd(), 2, "set + add request headers emitted on the capture path")
 	assert.Equal(t, "X-Header-Set", setRoute.GetRequestHeadersToAdd()[0].GetHeader().GetKey())
 	assert.Equal(t, "X-Header-Add", setRoute.GetRequestHeadersToAdd()[1].GetHeader().GetKey())
-	assert.Equal(t, []string{"X-Header-Remove"}, setRoute.GetRequestHeadersToRemove())
+	assert.Equal(t, []string{"X-Header-Remove", "x-aether-outcome"}, setRoute.GetRequestHeadersToRemove())
 	require.Len(t, setRoute.GetResponseHeadersToAdd(), 1, "response set header emitted on the capture path")
 	assert.Equal(t, "X-Resp-Set", setRoute.GetResponseHeadersToAdd()[0].GetHeader().GetKey())
 	// The rule's own removal, then the outcome header (aether#1641).

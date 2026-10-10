@@ -465,7 +465,7 @@ idempotent by definition (RFC 9110). What that means for you:
 The destination's proxy tells the caller's which row applies in the response
 header `x-aether-outcome`. It is removed before a response reaches a client
 application, anything your application puts under that name is overwritten,
-and sending it on a request does nothing. One header of Envoy's own still
+and a request header of that name is removed before it reaches you. One header of Envoy's own still
 applies: a response that carries `x-envoy-ratelimited` is never retried.
 
 While the mesh itself is being upgraded across the release that introduced

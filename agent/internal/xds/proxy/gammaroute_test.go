@@ -117,7 +117,7 @@ func TestBuildOutboundServiceVirtualHost_HeaderMutation(t *testing.T) {
 	assert.Equal(t, corev3.HeaderValueOption_APPEND_IF_EXISTS_OR_ADD, reqAdd[1].GetAppendAction())
 
 	// Request headers to remove.
-	assert.Equal(t, []string{"x-debug"}, r0.GetRequestHeadersToRemove())
+	assert.Equal(t, []string{"x-debug", "x-aether-outcome"}, r0.GetRequestHeadersToRemove())
 
 	// Response headers to add.
 	respAdd := r0.GetResponseHeadersToAdd()
