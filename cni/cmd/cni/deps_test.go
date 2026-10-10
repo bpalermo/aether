@@ -22,7 +22,8 @@ import (
 // module is a deliberate act: justify it in the PR.
 //
 // 37 when this guard was added; 19 since #1166 dropped the OTel SDK, the OTLP
-// exporters and otelgrpc (18 modules, 3.2 MB). The plugin exports no telemetry:
+// exporters and otelgrpc (18 modules, 3.2 MB); 18 now that nothing the plugin
+// links imports github.com/golang/protobuf. The plugin exports no telemetry:
 // it forwards its timings and its capture-divert outcome to the agent on the
 // CNI gRPC requests, and the agent exports them. Do not bring an OTel module
 // back for the plugin; add a field to api/aether/cni/v1 instead.
@@ -41,7 +42,6 @@ var allowedModules = map[string]bool{
 	// gRPC + protobuf.
 	"google.golang.org/grpc":                    true,
 	"google.golang.org/protobuf":                true,
-	"github.com/golang/protobuf":                true,
 	"google.golang.org/genproto/googleapis/rpc": true,
 	"golang.org/x/net":                          true,
 	"golang.org/x/sync":                         true,
@@ -57,7 +57,7 @@ var allowedModules = map[string]bool{
 // maxModules is the module budget: the size of the allow-list above. It is
 // asserted separately so a change to the list has to change this number too,
 // which makes a growing budget visible in review.
-const maxModules = 19
+const maxModules = 18
 
 // forbiddenPackages must never be reachable from the plugin, under any module.
 // It runs no Kubernetes client (the agent does that and answers over the CNI
