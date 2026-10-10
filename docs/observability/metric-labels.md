@@ -115,6 +115,7 @@ and label names are stored with dots turned into underscores, and a counter gain
 | [`mesh-dns-alerts.yml`](./mesh-dns-alerts.yml) | `node` | every per-node rule aggregates `by (node)`. `MeshDNSResolutionFailing` aggregates the prober's counter `by (node, target)`. `MeshDNSMetricsAbsent` is `absent()` over the bare metric and needs no label |
 | [`agent-cni-alerts.yml`](./agent-cni-alerts.yml) | `node`, **equal across two components** | `AetherCNIConflistUnchained` joins mesh-dns's `aether_mesh_dns_ready` against the agent's `aether_agent_cni_conflist_chained` on `node`. `AetherCNIConflistReasserting` sums `by (node)`. `AetherCNIConflistMetricsAbsent` is `absent()` and needs no label |
 | [`agent-pin-alerts.yml`](./agent-pin-alerts.yml) | `job`, `node` | all three rules aggregate `by (job, node, …)` |
+| [`agent-xds-alerts.yml`](./agent-xds-alerts.yml) | `job`, `node` | `AetherProxyRejectedListenerUpdate` aggregates `by (job, node)` |
 | [`registrar-alerts.yml`](./registrar-alerts.yml) | `job`, and one series per replica | `count by (job, revision)` over each replica's hash. The expression keeps every label (`without ()`), so the replica label may have any name |
 
 The join in `agent-cni-alerts.yml` is why the agent and mesh-dns DaemonSets both stamp
