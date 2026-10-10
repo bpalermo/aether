@@ -18,7 +18,8 @@ import (
 func TestExternalHarnessContract(t *testing.T) {
 	c := harnesscontract.MustLoad(t)
 	c.Owns(t, "//agent/internal/xds/cache/cachemetrics:cachemetrics_test",
-		"agent.snapshot_tls_clusters", "agent.xds_acked_tls_clusters", "agent.identity_cluster_unpinned")
+		"agent.snapshot_tls_clusters", "agent.xds_acked_tls_clusters", "agent.xds_acked_tls_clusters_unknown",
+		"agent.identity_cluster_unpinned")
 
 	m, reader := newTestMetrics(t)
 	// Every series of the two gauges: recordPins writes them all, zeros
@@ -30,7 +31,10 @@ func TestExternalHarnessContract(t *testing.T) {
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
-	for _, id := range []string{"agent.snapshot_tls_clusters", "agent.xds_acked_tls_clusters", "agent.identity_cluster_unpinned"} {
+	for _, id := range []string{
+		"agent.snapshot_tls_clusters", "agent.xds_acked_tls_clusters", "agent.xds_acked_tls_clusters_unknown",
+		"agent.identity_cluster_unpinned",
+	} {
 		entry := c.Metric(t, id)
 		kind, series := collected(rm, entry.OTelName)
 		entry.CheckMetric(t, kind, series)
