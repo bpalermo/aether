@@ -94,6 +94,7 @@ func TestResourceAttributeIsTiedToTheCharts(t *testing.T) {
 var ties = []string{
 	"chart.aether.agent containers agent args --mesh-domain mesh.default_domain",
 	"chart.aether.agent containers agent resource_attributes resource.node",
+	"chart.aether.agent contract_version_annotation object.annotation.harness_contract_version",
 	"chart.aether.csidriver name_from csi.driver",
 	"chart.aether.mesh_dns containers mesh-dns args --mesh-domain mesh.default_domain",
 	"chart.aether.pod_webhooks webhooks namespace-inject.pods.aether.io namespaces pod.label.managed",
@@ -131,6 +132,7 @@ func TestContractTies(t *testing.T) {
 		"c.o containers agent args --egress 127.0.0.1:<port>",
 		"c.o containers agent resource_attributes ra",
 		"c.o containers prober code_resource_attributes sn",
+		"c.o contract_version_annotation ann",
 		"c.o host_paths /plugins/<dom>",
 		"c.w webhooks hook.x objects dom",
 	}

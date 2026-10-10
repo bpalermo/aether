@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -40,12 +41,21 @@ type Object struct {
 	// Webhooks maps the name of a webhook of an admission configuration to the
 	// labels it selects by.
 	Webhooks map[string]WebhookSelector `json:"webhooks"`
+	// ContractVersionAnnotation is the id of the `names` entry whose value is
+	// the key of an annotation on the object's OWN metadata, and the value of
+	// that annotation is this contract's `version`: where a harness reads which
+	// contract a deployed mesh satisfies. Never on the object's pod template,
+	// where a version bump would replace every pod.
+	ContractVersionAnnotation string `json:"contract_version_annotation"`
 
 	// What the fields above refer to, filled in by Contract.link.
 	linked    bool
 	nameFrom  string
 	hostPaths []string
 	webhooks  map[string]WebhookSelector
+	// The annotation's key, and the version the contract was loaded at.
+	versionAnnotation string
+	contractVersion   int
 }
 
 // WebhookSelector says which label a webhook selects by, and with which of its
@@ -80,6 +90,9 @@ func (o Object) refs() []string {
 	}
 	for _, webhook := range sortedKeys(o.Webhooks) {
 		out = append(out, o.Webhooks[webhook].refs()...)
+	}
+	if o.ContractVersionAnnotation != "" {
+		out = append(out, o.ContractVersionAnnotation)
 	}
 	slices.Sort(out)
 	return slices.Compact(out)
@@ -283,6 +296,9 @@ func (o Object) ties() []string {
 			out = append(out, "webhooks "+webhook+" objects "+s.Objects)
 		}
 	}
+	if o.ContractVersionAnnotation != "" {
+		out = append(out, "contract_version_annotation "+o.ContractVersionAnnotation)
+	}
 	return out
 }
 
@@ -379,6 +395,9 @@ func (o Object) validateRefs(names map[string]string) []string {
 			problems = append(problems, fmt.Sprintf("%s refers to %q under `host_paths` or `webhooks`, and `names` has no entry with that id (a host path is a pattern, like /plugins/<csi.driver>)", o.ID, id))
 		}
 	}
+	if _, ok := names[o.ContractVersionAnnotation]; o.ContractVersionAnnotation != "" && !ok {
+		problems = append(problems, fmt.Sprintf("%s takes the key of its `contract_version_annotation` from %q, and `names` has no entry with that id", o.ID, o.ContractVersionAnnotation))
+	}
 	return problems
 }
 
@@ -449,7 +468,7 @@ func (c *Contract) validateHolders() []string {
 		}
 		for _, test := range e.checkedBy.tests() {
 			if slices.Contains(chartTests, test) && !slices.Contains(tied[e.id], test) {
-				problems = append(problems, fmt.Sprintf("%s: checked_by names the chart test %s, and no render that test holds refers to the entry (an object's `name_from`; a container's `resource_attributes`, `code_resource_attributes` or `args`): the test would compare it with nothing", e.id, test))
+				problems = append(problems, fmt.Sprintf("%s: checked_by names the chart test %s, and no render that test holds refers to the entry (an object's `name_from`, `host_paths`, `webhooks` or `contract_version_annotation`; a container's `resource_attributes`, `code_resource_attributes` or `args`): the test would compare it with nothing", e.id, test))
 			}
 		}
 	}
@@ -472,6 +491,8 @@ func (c *Contract) link() {
 		for webhook, s := range o.Webhooks {
 			o.webhooks[webhook] = WebhookSelector{Namespaces: names[s.Namespaces], Objects: names[s.Objects]}
 		}
+		o.versionAnnotation = names[o.ContractVersionAnnotation]
+		o.contractVersion = c.Version
 	})
 	c.eachContainer(func(_ string, ct *Container) {
 		ct.linked = true
@@ -609,6 +630,10 @@ type manifest struct {
 	Metadata struct {
 		Name      string `json:"name"`
 		Namespace string `json:"namespace"`
+		// Values are `any`: an annotation the chart wrote unquoted is a number
+		// here, which the check reports instead of failing to read the render.
+		Labels      map[string]any `json:"labels"`
+		Annotations map[string]any `json:"annotations"`
 	} `json:"metadata"`
 	Spec struct {
 		// A DaemonSet's is updateStrategy, a Deployment's is strategy.
@@ -616,7 +641,8 @@ type manifest struct {
 		Strategy       *strategy `json:"strategy"`
 		Template       struct {
 			Metadata struct {
-				Labels map[string]string `json:"labels"`
+				Labels      map[string]string `json:"labels"`
+				Annotations map[string]any    `json:"annotations"`
 			} `json:"metadata"`
 			Spec struct {
 				InitContainers []container `json:"initContainers"`
@@ -729,7 +755,7 @@ func (r Render) Check(render []byte) []string {
 	for _, o := range r.Objects {
 		problems = append(problems, o.check(docs)...)
 	}
-	return problems
+	return append(problems, r.checkVersionAnnotationElsewhere(docs)...)
 }
 
 // find returns the one rendered object of o's kind and name, or why there is
@@ -792,7 +818,98 @@ func (o Object) check(docs []manifest) []string {
 		}
 	}
 	problems = append(problems, o.checkHostPaths(what, d)...)
+	problems = append(problems, o.checkVersionAnnotation(what, d)...)
 	return append(problems, o.checkWebhooks(what, d)...)
+}
+
+// carriedBy returns where in the rendered object the key is written besides
+// the annotations of the object's own metadata: every such place is one a
+// contract version must not be in.
+func carriedBy(d manifest, key string) []string {
+	var where []string
+	if _, ok := d.Metadata.Labels[key]; ok {
+		where = append(where, "a label of the object (a label can end up in a selector, and nothing selects by a contract version)")
+	}
+	if _, ok := d.Spec.Template.Metadata.Annotations[key]; ok {
+		where = append(where, "an annotation of its pod template (a contract bump would then replace every pod of the workload)")
+	}
+	if _, ok := d.Spec.Template.Metadata.Labels[key]; ok {
+		where = append(where, "a label of its pod template (a contract bump would then replace every pod of the workload)")
+	}
+	return where
+}
+
+// checkVersionAnnotation holds the object's own metadata to the annotation
+// that carries the contract's version: the key is the value of the `names`
+// entry the object refers to, the value is the `version` this contract was
+// loaded at, as a string, and the key is nowhere else in the object.
+//
+// The version compared with is read from the contract embedded in this test.
+// The chart reads the same file when it is packaged, by another path (a build
+// step of //charts/aether), so a packaged chart that says another version was
+// built from another contract, or by a step that no longer reads the field.
+func (o Object) checkVersionAnnotation(what string, d manifest) []string {
+	if o.ContractVersionAnnotation == "" {
+		return nil
+	}
+	key, want := o.versionAnnotation, strconv.Itoa(o.contractVersion)
+	from := "the value of the entry " + o.ContractVersionAnnotation
+	var problems []string
+	switch got, ok := d.Metadata.Annotations[key]; {
+	case !ok:
+		problems = append(problems, fmt.Sprintf("%s has no annotation %s (%s) on its own metadata: a harness reads there which version of %s the deployed mesh satisfies (the annotations it has: %s)",
+			what, key, from, File, orNone(sortedKeys(d.Metadata.Annotations))))
+	case got != any(want):
+		// The value is a contract version or a mistake for one, never a secret.
+		problems = append(problems, fmt.Sprintf("%s carries the annotation %s (%s) with the value %#v, and %s is at version %d: the annotation is the string %q. The chart takes it from that file when it is packaged, so this package was built from another contract, or the step that reads `version` no longer does",
+			what, key, from, got, File, o.contractVersion, want))
+	}
+	for _, where := range carriedBy(d, key) {
+		problems = append(problems, fmt.Sprintf("%s also carries %s (%s) as %s: it belongs in the annotations of the object's own metadata and nowhere else", what, key, from, where))
+	}
+	return problems
+}
+
+// checkVersionAnnotationElsewhere reports every other object of the render
+// that carries a key some object of the contract is held to as its
+// `contract_version_annotation`. A harness reads the version from the objects
+// the contract names; a copy on another object is one no test compares, and on
+// a pod template it replaces pods at every bump.
+func (r Render) checkVersionAnnotationElsewhere(docs []manifest) []string {
+	holders := map[string][]Object{}
+	for _, o := range r.Objects {
+		if o.linked && o.ContractVersionAnnotation != "" {
+			holders[o.versionAnnotation] = append(holders[o.versionAnnotation], o)
+		}
+	}
+	var problems []string
+	for _, key := range sortedKeys(holders) {
+		for _, d := range docs {
+			if slices.ContainsFunc(holders[key], func(o Object) bool { return o.is(d) }) {
+				continue
+			}
+			for _, where := range carriedAnywhereBy(d, key) {
+				problems = append(problems, fmt.Sprintf("%s: %s/%s carries %s as %s, and the contract holds no such object to it: list the object with `contract_version_annotation`, or take the key off it",
+					r.ID, d.Kind, d.Metadata.Name, key, where))
+			}
+		}
+	}
+	return problems
+}
+
+// is reports whether the rendered object is the one the contract describes:
+// its kind, and its name when the contract gives one.
+func (o Object) is(d manifest) bool {
+	return o.Kind == d.Kind && (o.name() == "" || o.name() == d.Metadata.Name)
+}
+
+// carriedAnywhereBy is carriedBy and the one place that function leaves out.
+func carriedAnywhereBy(d manifest, key string) []string {
+	where := carriedBy(d, key)
+	if _, ok := d.Metadata.Annotations[key]; ok {
+		where = append(where, "an annotation of the object")
+	}
+	return where
 }
 
 // hostVolume is a hostPath volume of a pod.

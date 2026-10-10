@@ -59,6 +59,13 @@ part of the external-harness contract (`test/harnesscontract`). Address the
 proxy as `daemonset/aether-proxy` in the release's namespace, whatever the
 release is called.
 
+Since chart 2.4.28 the agent DaemonSet's own metadata carries the annotation
+`aether.io/harness-contract-version`: the `version` of that contract the chart
+was packaged with. No value sets it. It identifies the contract, not the build,
+it is absent from a render of the source tree, and it is never on a pod
+template, so it changes without replacing a pod. `docs/runbook.md`, "The
+external-harness contract", has the command that reads it.
+
 Since chart 2.4.27 a second release is refused at render time, where the chart
 can see it: when the `aether-proxy` DaemonSet in the release's namespace, or the
 `csi.aether.io` CSIDriver, already exists and names another Helm release

@@ -84,6 +84,7 @@ A chart's tests live in its `BUILD.bazel`. Which rule to use:
 | a value the chart must **reject** | `helm_template_fail_test` |
 | a derived line that must **follow** a value (a config checksum) | `helm_template_value_changes_test` |
 | templates that must **not** change with a value (a file the pod watches, so no roll) | `helm_template_value_ignored_test` |
+| pod templates that must **not** change with a file the chart is **packaged** with (`.Files.Get` of something a build step derived), which the chart must also render without | `helm_pod_template_file_test` |
 | a mesh name the chart writes on its **own pods**, which code reads (the mesh-managed label, a mesh annotation, the CSI driver) | `helm_mesh_names_test` |
 
 All but the first are in `//bazel/helm:defs.bzl`, which documents each.
