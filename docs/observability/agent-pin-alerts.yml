@@ -41,12 +41,37 @@
 # Every rule aggregates by (job, node), so `{{ $value }}` is a figure for the
 # node, added up over every series the pipeline stores for that job on it. For
 # a node agent that is one process. Two edge control-plane replicas can share a
-# node, and a pipeline that keeps them apart (the `pod` label
-# docs/observability/metric-labels.md recommends for the edge) then stores two
-# sets of series there: the figure counts a cluster once for each of those
-# replicas that reports it (#1616). The rules fire on > 0 either way; read the
-# figure per `pod` for an edge. (The edge control plane sets no
-# service.instance.id, so there is no `instance` label to do this by.)
+# node, and they are stored as two sets of series there (since chart 2.5.3 the
+# edge control plane sets service.instance.id to its pod name, which Prometheus
+# stores as `instance`; a `pod` label a pipeline makes does the same): the
+# figure counts a cluster once for each of those replicas that reports it
+# (#1616). The rules fire on > 0 either way; read the figure per `instance`
+# for an edge.
+#
+# Fresh samples only (#1560). Every selector is wrapped in
+# last_over_time(...[150s]): the newest sample of a series, if it is at most
+# 150 s old. A bare selector returns a sample up to 5 minutes old, and the
+# gauges are pushed over OTLP, which has no staleness marker: a pod that is
+# gone would be read for five minutes after its last export. A label that
+# holds the pod name (`instance` on the edge) makes every roll leave such a
+# series behind, beside its replacement's, and a sum over both reads a pod
+# that no longer exists; one last non-zero sample then lasts longer than
+# `for: 3m`.
+#
+# Why 150 s. The components export every 60 s (the OTel SDK's periodic reader
+# at its default interval; common/telemetry/setup sets none and the chart sets
+# no OTEL_METRIC_EXPORT_INTERVAL). The window has to be:
+#   - above 120 s, so a live pod that loses ONE export is still read until its
+#     next one lands (two intervals, plus 30 s for the export's 10 s timeout
+#     and the pipeline's delay). Shorter, and one lost export makes a firing
+#     alert resolve and start its `for:` again;
+#   - below 180 s, the shortest `for:` in this file, so one last sample of a
+#     pod that is gone can never be an alert by itself.
+# What is left: a pod whose last TWO exports reported the state is read for
+# 60 s + 150 s, and `for: 3m` can be met for one evaluation
+# (agent-pin-alerts_test.yml, "limit - a replaced pod's last two samples").
+# If your components export less often than every 60 s, or you scrape them at
+# a longer interval, raise the window to 2.5 intervals and the `for:` with it.
 #
 # Install: merge into the Prometheus rule files (with the Prometheus helm chart,
 # under serverFiles: alerting_rules.yml: groups: [...]). See README.md in this
@@ -73,7 +98,7 @@ groups:
       - alert: AetherMeshClusterUnpinned
         expr: >-
           sum by (job, node, reason) (
-            aether_agent_snapshot_tls_clusters{pin="unpinned", reason=~"no_namespace_metadata|pin_not_rendered"}
+            last_over_time(aether_agent_snapshot_tls_clusters{pin="unpinned", reason=~"no_namespace_metadata|pin_not_rendered"}[150s])
           ) > 0
         for: 3m
         labels:
@@ -127,7 +152,7 @@ groups:
       - alert: AetherMeshClusterPinPending
         expr: >-
           sum by (job, node, reason) (
-            aether_agent_snapshot_tls_clusters{pin="unpinned", reason=~"trust_domain_unknown|tls_not_published"}
+            last_over_time(aether_agent_snapshot_tls_clusters{pin="unpinned", reason=~"trust_domain_unknown|tls_not_published"}[150s])
           ) > 0
         for: 5m
         labels:
@@ -186,7 +211,8 @@ groups:
       # and writes no gauge rather than one that leaves the cluster out. The
       # same when the proxy rejects the removal of a mesh cluster the agent no
       # longer publishes and has no record of. A divergence that was firing
-      # resolves when the old samples leave the lookback. That state is
+      # resolves when the old samples are older than the 150 s the rule reads
+      # (five minutes, before #1560). That state is
       # AetherProxyPinStateUnknown's, below (#1509). The NACK counter above
       # moves once for each response the proxy rejects.
       #
@@ -208,9 +234,9 @@ groups:
       # at the version the proxy accepted.
       #
       # for: 15m. An update in flight differs for milliseconds, and a restarted
-      # agent's previous acknowledged sample is still returned for Prometheus's
-      # 5 m lookback (OTLP has no staleness marker). 15 m is well clear of
-      # both.
+      # agent's previous acknowledged sample is still read for 150 s (OTLP has
+      # no staleness marker; "Fresh samples only" at the top). 15 m is well
+      # clear of both.
       #
       # Known residue: during a proxy hot restart two generations are connected
       # and each cluster shows the last answer from either. A late ACK of an
@@ -222,9 +248,9 @@ groups:
       - alert: AetherProxyHoldsUnpinnedClusters
         expr: >-
           sum by (job, node) (clamp_min(
-          sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
+          sum by (job, node, reason) (last_over_time(aether_agent_xds_acked_tls_clusters{pin="unpinned"}[150s]))
           -
-          sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}),
+          sum by (job, node, reason) (last_over_time(aether_agent_snapshot_tls_clusters{pin="unpinned"}[150s])),
           0)) > 0
         for: 15m
         labels:
@@ -284,7 +310,7 @@ groups:
       # for: 15m, the same as the rule it stands in for.
       - alert: AetherProxyPinStateUnknown
         expr: >-
-          sum by (job, node) (aether_agent_xds_acked_tls_clusters_unknown) > 0
+          sum by (job, node) (last_over_time(aether_agent_xds_acked_tls_clusters_unknown[150s])) > 0
         for: 15m
         labels:
           severity: warning

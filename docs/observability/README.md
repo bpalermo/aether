@@ -110,12 +110,28 @@ revision, and the listing is a pure function of that revision. Two replicas at t
 
 `aether_registrar_snapshot_content_hash` is the first 13 hex digits (52 bits) of the
 content hash in the snapshot version, as an integer; a float64 holds it exactly. One
-series per replica and no label that changes, so a content change moves the value and
-leaves nothing behind in Prometheus's lookback. The rule is then a plain count of
-distinct values per `(job, revision)`: no `timestamp()` filter, and no dependence on the
-two metrics' timestamps (the file's comments say how they arrive). 52 bits is a
-divergence check between a few replicas (two different endpoint sets collide with
-probability 2^-52), not an identifier.
+series per replica and no label that changes with the content, so a content change moves
+the value and leaves nothing behind in Prometheus's lookback. The rule is then a plain
+count of distinct values per `(job, revision)`: no `timestamp()` filter, and no
+dependence on the two metrics' timestamps (the file's comments say how they arrive).
+52 bits is a divergence check between a few replicas (two different endpoint sets
+collide with probability 2^-52), not an identifier.
+
+### One series per replica, and a replica that is gone
+
+The rule compares replicas, so it needs a label that tells them apart. Since chart 2.5.3
+the registrar sets `service.instance.id` to its pod name, which Prometheus stores as
+`instance` (#1560); before it, a pipeline that promoted nothing per replica stored one
+series for all of them and the rule could not fire.
+
+A pod name changes at every roll, and a pushed series has no staleness marker: a
+replaced registrar's last sample is returned by a bare selector for five minutes. The
+rule therefore wraps each of its three selectors in `last_over_time(...[150s])` and
+reads a replica only while its newest sample is at most 150 seconds old: two and a half
+of the registrar's 60-second exports, so one lost export does not drop a live replica,
+and less than the rule's `for: 3m`, so one last sample of a replica that is gone is
+never an alert. [`metric-labels.md`](./metric-labels.md), "A label that holds the pod
+name", has the reasoning and what a roll did without the window.
 
 ### Deprecated: `aether_registrar_snapshot_content{content_hash}`
 
@@ -128,11 +144,15 @@ keep the #1328 expression as a second `or` arm (`docs/runbook.md`, "Stored vs in
 vs applied", has the text and the order of work): a rule on the new metric alone cannot
 see a replica on the older image.
 
-Its promtool tests are in the GitOps repo: same revision and same hash (quiet), same
-revision and different hash (fires after 3m), both replicas changing hash together
-(quiet at every step), a replica one revision behind (quiet), a pending write-behind
-intent (quiet), and replicas that export only the labelled metric (still caught by the
-transitional arm).
+It has a promtool unit test beside it, `registrar-alerts_test.yml`: same revision and
+same hash (quiet), two live replicas with different hashes (fires after 3m), both
+replicas changing hash together (quiet at every step), a replica one revision behind
+(quiet), a pending write-behind intent (quiet), no revision (quiet), and the roll cases:
+a replaced replica's odd last hash (quiet), a replaced replica's last queue depth (a
+real divergence is reported two minutes later, not four), an alert that ends with the
+replica that was replaced and one that stays firing while the divergence lasts, and a
+live replica that misses an export (still read). The GitOps repo's tests add replicas
+that export only the labelled metric (still caught by the transitional arm).
 
 etcd backend only: the kubernetes backend reports no revision, so the rule returns
 nothing there. The gauge itself is reported on both backends.
@@ -243,9 +263,14 @@ change afterwards.
 
 Four more things to know. The figure in an annotation (`{{ $value }}`) is per `job` and
 `node`, added up over every series stored for them: for two edge control-plane replicas
-that share a node, in a pipeline that keeps them apart by `pod` (see "Labels the rules
-need from your pipeline"), it counts a cluster once for each replica that reports it
-(#1616). The gauges are pushed by the agent, so a down agent is no
+that share a node, which are kept apart by `instance` (their pod name, chart 2.5.3 and
+later; see "Labels the rules need from your pipeline"), it counts a cluster once for
+each replica that reports it (#1616). Every selector of the four rules is wrapped in
+`last_over_time(...[150s])`, so a series is read only while its newest sample is at most
+150 seconds old: an edge pod that was replaced, or an agent that stopped, leaves the
+sums two and a half minutes after its last export and not five
+([`metric-labels.md`](./metric-labels.md), "A label that holds the pod name", has why
+150). The gauges are pushed by the agent, so a down agent is no
 series, not a zero (the same trap as the conflist gauge above): these rules are silent
 for a node whose agent does not report, and `AetherCNIConflistUnchained` is the rule for
 that. Anything that sums or compares the *counter* across an upgrade must not select on
@@ -255,7 +280,9 @@ beside them, `agent-pin-alerts_test.yml` (an agent start, an agent stuck without
 SVID, the gap, an absent acknowledged gauge, an agent restart with the proxy in sync and
 with the proxy rejecting, a proxy that keeps what the agent has pinned, also through
 later ACKs of other clusters, a pin state the agent cannot determine, two edge replicas
-on one node, a silent agent):
+on one node, a silent agent, and an edge pod that is replaced: its last sample alone,
+an alert that ends with it, one that stays firing on its replacement, a live pod that
+misses an export, and the limit of the window):
 
 ```bash
 bazel test //:observability_rules_test
@@ -292,6 +319,14 @@ the two agents of a surge roll, in a pipeline that keeps agents apart by `node` 
 share one series for the overlap, so an old count next to the successor's zero reads as
 an increase and the alert fires again with no new rejection.
 
+The edge control plane's counter is one series per pod since chart 2.5.3 (`instance`).
+The first of those two cases does not apply to it (a replacement rejected before its
+first export is a new series and fires), an edge roll long after a rejection is quiet,
+and a rejection before a pod's first export ends five minutes after that pod is
+replaced instead of an hour after the rejection. This rule has no 150-second window:
+it reports an event from a counter, and `increase()` over a series that ended still
+counts what it counted.
+
 ## Labels the rules need from your pipeline
 
 Every rule here selects on `node`, `job`, or both, except the two fleet-wide `absent()`
@@ -302,6 +337,10 @@ not, `AetherCNIConflistUnchained` cannot fire for a single node and the per-node
 fire without naming one. [`metric-labels.md`](./metric-labels.md) has the attributes
 each component sets, what each rule file needs, what a missing promotion looks like, and
 an example pipeline. Read it before installing the rules.
+
+The registrar's, the controller's and the edge's replicas are told apart by `instance`,
+which Prometheus makes from the `service.instance.id` the chart sets (2.5.3 and later).
+That one needs nothing from the pipeline except that it is **not dropped**.
 
 ## Installing
 
@@ -320,6 +359,16 @@ serverFiles:
       # contents of agent-pin-alerts.yml
       # contents of agent-xds-alerts.yml
 ```
+
+**Take the rule files of the chart you run, and update them before or with the chart.**
+Chart 2.5.3 puts the pod name in the `instance` label of the registrar's, the
+controller's and the edge's series, and the rule files of that release read only
+samples of the last 150 seconds so that a replaced pod is not counted. Rule files from
+an earlier release, left in place under chart 2.5.3, fire `AetherMeshClusterUnpinned`
+and `AetherRegistrarSnapshotDiverged` falsely after a roll of the edge or the registrar
+(one last sample of the old pod is read for five minutes). The new rule files are
+correct against an older chart too, so install them first. `docs/runbook.md`, "Chart
+2.5.3", has the order and what to check.
 
 `prometheus.yml`'s `rule_files` **already** lists `/etc/config/alerting_rules.yml` — the
 wiring exists, the file was just empty — so populating that key is the only change needed

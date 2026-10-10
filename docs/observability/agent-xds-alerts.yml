@@ -9,7 +9,8 @@
 # so "no rejection" is a series at 0. The name is as Prometheus stores it from
 # OTLP: dots become underscores and a counter gains _total. The series carry
 # `job` (aether-agent, or the edge's) and `node`
-# (docs/observability/metric-labels.md).
+# (docs/observability/metric-labels.md); the edge's also `instance`, its pod
+# name, since chart 2.5.3.
 #
 # A rejected response is always a defect of the agent that built it: the proxy
 # is the pinned one, and the agent is the only writer of its configuration.
@@ -92,6 +93,22 @@ groups:
       # the overlap, and a count above zero interleaved with a zero reads as
       # resets and increases. It needs a rejection in the outgoing agent's
       # life, so it repeats an alert that was true once on that node.
+      #
+      # No freshness window (#1560). agent-pin-alerts.yml and
+      # registrar-alerts.yml read only samples of the last 150 s, so that a
+      # replaced pod's last sample is not taken for a state. This rule reports
+      # an event of the last hour: increase() over a series that has ended
+      # still counts what it counted, which is right, and the second arm is
+      # already limited to a series' first hour. A window there would only end
+      # a true alert sooner after its pod is gone. Nor would it help the surge
+      # roll above: there the two agents are ONE series, and no selector can
+      # tell their samples apart. That needs a per-pod label on the node
+      # agent, which the chart does not set (the node agent's series are per
+      # node on purpose: a label that changes on every roll would multiply
+      # them). The edge control plane does set one since chart 2.5.3
+      # (service.instance.id, stored as `instance`): its replicas, and a
+      # replaced pod and its successor, are separate series here, and the test
+      # file says what that changes.
       - alert: AetherProxyRejectedListenerUpdate
         expr: >-
           sum by (job, node) (

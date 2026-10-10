@@ -4252,26 +4252,37 @@ OTEL_ON = [
 # rendered as written.
 RESOURCE_ATTRIBUTES = "\\n +- name: OTEL_RESOURCE_ATTRIBUTES\\n +value: \"%s\"\\n"
 
-# Guard: #1561 changes no container's environment, so nothing below may move.
+# Every workload's OTEL_RESOURCE_ATTRIBUTES, whole. A change here changes what
+# a metrics backend stores, so it is made on purpose and with the rules.
 #
 # The proxy container's environment is the supervisor's too (one container, two
 # exporters), so the node proxy's service.name is not set there (see
 # :aether_proxy_stats_service_name_test).
 #
-# No workload but the edge proxy sets service.instance.id, and that is a
-# decision, not an omission (#1560). Prometheus stores the attribute as
-# `instance`; with the pod name in it every roll starts a new set of series,
-# and a pushed series has no staleness marker: the terminated pod's last sample
-# stays in the 5-minute lookback beside the new pod's. The shipped rules
-# aggregate over replicas (agent-pin-alerts.yml sums by job and node,
-# registrar-alerts.yml compares hashes across replica series), so for those
-# five minutes they read a pod that is gone: one last non-zero sample becomes a
-# 3-minute state and fires. The attribute can come back when the rules select
-# fresh series only. mesh-dns also has a datapoint attribute of its own called
-# `instance`, on its exit counter, which a resource-made label would collide
-# with.
+# service.instance.id is the pod name on the Deployments whose replicas
+# nothing else tells apart (#1560): the registrar and the controller (no node
+# in their resource), and both containers of the edge (two replicas may share
+# a node). Prometheus stores the attribute as `instance` by itself, so those
+# replicas are separate series with no pipeline configuration; without it they
+# wrote ONE series, and AetherRegistrarSnapshotDiverged, which compares hashes
+# across replica series, could never fire.
+#
+# It comes with a cost the shipped rules pay: with the pod name in a label
+# every roll starts a new set of series, and a pushed series has no staleness
+# marker, so the terminated pod's last sample stays in the 5-minute lookback
+# beside the new pod's. The rules that aggregate over these series
+# (docs/observability/agent-pin-alerts.yml, registrar-alerts.yml) therefore
+# read only a sample of the last 150 s, and their promtool tests hold the roll
+# cases. Do not add the attribute to another workload without doing the same
+# for the rules that read it.
+#
+# NOT on the per-node DaemonSets (agent, mesh-dns, node proxy): their series
+# are told apart by the node, which is stable across a roll, and a pod-name
+# label would start a new set of series per node on every roll. mesh-dns also
+# has a datapoint attribute of its own called `instance`, on its exit counter,
+# which a resource-made label would collide with.
 helm_template_match_test(
-    name = "aether_resource_attributes_unchanged_test",
+    name = "aether_resource_attributes_test",
     chart = ":aether",
     document_patterns = {
         "DaemonSet/release-name-aether-agent": [
@@ -4284,14 +4295,14 @@ helm_template_match_test(
             RESOURCE_ATTRIBUTES % "k8s\\.node\\.name=\\$\\(NODE_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.pod\\.uid=\\$\\(POD_UID\\)",
         ],
         "Deployment/release-name-aether-registrar": [
-            RESOURCE_ATTRIBUTES % "k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\)",
+            RESOURCE_ATTRIBUTES % "service\\.instance\\.id=\\$\\(POD_NAME\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\)",
         ],
         "Deployment/release-name-aether-controller": [
-            RESOURCE_ATTRIBUTES % "k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\)",
+            RESOURCE_ATTRIBUTES % "service\\.instance\\.id=\\$\\(POD_NAME\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\)",
         ],
         # Its two containers: the edge control plane, then the edge proxy.
         "Deployment/release-name-aether-edge": [
-            RESOURCE_ATTRIBUTES % "k8s\\.node\\.name=\\$\\(NODE_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.pod\\.uid=\\$\\(POD_UID\\),k8s\\.deployment\\.name=release-name-aether-edge",
+            RESOURCE_ATTRIBUTES % "service\\.instance\\.id=\\$\\(POD_NAME\\),k8s\\.node\\.name=\\$\\(NODE_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.pod\\.uid=\\$\\(POD_UID\\),k8s\\.deployment\\.name=release-name-aether-edge",
             RESOURCE_ATTRIBUTES % "service\\.name=aether-edge-proxy,service\\.instance\\.id=\\$\\(POD_NAME\\),k8s\\.node\\.name=\\$\\(NODE_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.pod\\.uid=\\$\\(POD_UID\\),k8s\\.deployment\\.name=release-name-aether-edge",
         ],
     },
@@ -4299,6 +4310,23 @@ helm_template_match_test(
         "--set",
         "edge.enabled=true",
     ],
+)
+
+# ...and with default values too: the attribute does not depend on otel.* (the
+# variable is rendered whether or not anything is exported), so there is no
+# off switch, and the registrar and the controller roll once on the upgrade
+# that crosses 2.5.3 on every install. The edge is off by default.
+helm_template_match_test(
+    name = "aether_replica_instance_id_default_values_test",
+    chart = ":aether",
+    document_patterns = {
+        "Deployment/release-name-aether-registrar": [
+            RESOURCE_ATTRIBUTES % "service\\.instance\\.id=\\$\\(POD_NAME\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\)",
+        ],
+        "Deployment/release-name-aether-controller": [
+            RESOURCE_ATTRIBUTES % "service\\.instance\\.id=\\$\\(POD_NAME\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\)",
+        ],
+    },
 )
 
 # #1561: the node proxy's Envoy stats name their service in the BOOTSTRAP: a

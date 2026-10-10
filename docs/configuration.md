@@ -104,7 +104,12 @@ access-log/tracing policy via the MeshConfig CR.
 control plane, mesh-dns, proxy supervisor, prober) sets its own `service.name`
 (`aether-agent`, `aether-mesh-dns`, …) and its own `service.version` (the build's),
 and takes every other resource attribute from `OTEL_RESOURCE_ATTRIBUTES`, which the
-charts use for the pod's `k8s.*` attributes. A `service.name` inside
+charts use for the pod's `k8s.*` attributes and, on the registrar, the controller
+and both containers of the edge, for `service.instance.id` (the pod name; chart
+2.5.3, #1560). Prometheus stores that one as `instance`, and it is what keeps
+their replicas' series apart: do not drop it in your pipeline
+([`observability/metric-labels.md`](./observability/metric-labels.md); the
+runbook's "Chart 2.5.3" for the upgrade). A `service.name` inside
 `OTEL_RESOURCE_ATTRIBUTES` is ignored by these components (#1562): dashboards and
 alerts select on the component's name. To rename one on purpose, set
 `OTEL_SERVICE_NAME` on its container. A `service.version` inside

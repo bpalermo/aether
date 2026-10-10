@@ -113,8 +113,19 @@ spec:
             # Stamped onto every OTel signal (metrics/traces/logs) via
             # resource.WithFromEnv(), so logs are filterable per pod in
             # VictoriaLogs. Refs the env vars defined above ($(VAR) expansion).
+            #
+            # service.instance.id (#1560): the registrar has no node in its
+            # resource, so nothing told its replicas apart unless a pipeline
+            # promoted k8s.pod.name. Prometheus's OTLP ingestion maps this
+            # attribute onto `instance` by itself, so each replica is its own
+            # series, which AetherRegistrarSnapshotDiverged needs (it compares
+            # hashes ACROSS replica series; one series is never two hashes).
+            # The pod name changes on every roll and a pushed series has no
+            # staleness marker, so the rules in docs/observability read only
+            # samples of the last 150 s: see metric-labels.md there before
+            # writing a rule or a panel over these series.
             - name: OTEL_RESOURCE_ATTRIBUTES
-              value: "k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
+              value: "service.instance.id=$(POD_NAME),k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
             {{- /* 90% of limits.memory, never 100% (aether.goMemLimit). */}}
             {{- with include "aether.goMemLimit" .Values.registrar.resources }}
             - name: GOMEMLIMIT
