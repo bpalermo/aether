@@ -181,16 +181,29 @@ func (c *SnapshotCache) appendEntryCLAsLocked(clas []types.Resource, entry clust
 // it under their own names (proxy.LoadAssignmentAlias, aether#1013). Caller
 // must hold clusterMu.
 func (c *SnapshotCache) bareServiceCLALocked(serviceName string) *endpointv3.ClusterLoadAssignment {
+	holder, _ := c.bareServiceHolderLocked(serviceName)
+	return holder.loadAssignment
+}
+
+// bareServiceHolderLocked returns the one entry that holds a service's
+// bare-name load assignment (see bareServiceCLALocked), and false when none
+// does. A reader that needs more than the endpoints -- the udp: cluster dials
+// the application port the entry carries in sni -- takes BOTH from this entry:
+// two listings of one service need not register the same port, so endpoints
+// from the holder with the port of another entry (a retained one, say) is a
+// live pod dialed at a port it does not serve (#1635). Caller must hold
+// clusterMu.
+func (c *SnapshotCache) bareServiceHolderLocked(serviceName string) (clusterEntry, bool) {
 	if e, ok := c.clusters[serviceName]; ok && e.loadAssignment != nil {
-		return e.loadAssignment
+		return e, true
 	}
 	if e, ok := c.tcpEntryLocked(serviceName); ok && e.loadAssignment != nil {
-		return e.loadAssignment
+		return e, true
 	}
 	if e, ok := c.udpEntryLocked(serviceName); ok && e.loadAssignment != nil {
-		return e.loadAssignment
+		return e, true
 	}
-	return nil
+	return clusterEntry{}, false
 }
 
 // withBareCLALocked returns a default HTTP entry (keyed by the bare service

@@ -1,7 +1,13 @@
 package cache
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
+	"maps"
+	"math/rand"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +19,7 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
@@ -76,10 +83,17 @@ func newBareFixture(t *testing.T) *bareFixture {
 	return f
 }
 
+// listingPort is the application port the pods of one listing register. One
+// per protocol, on purpose: a pod is listed under the protocol it declares, so
+// two listings of one service need not agree on the port, and a reader that
+// takes the endpoints from one entry and the port from another is only seen
+// when they differ.
+var listingPort = map[registryv1.Service_Protocol]uint32{http: 8080, tcp: 9000, udp: 5353}
+
 // list sets one service's rows under one protocol: n pods whose addresses
 // start at 10.2.<block>.1, so two listings of one service never share a pod
-// (a pod is listed under the one protocol it declares). n == 0 removes the
-// listing.
+// (a pod is listed under the one protocol it declares), each on the
+// protocol's listingPort. n == 0 removes the listing.
 func (f *bareFixture) list(p registryv1.Service_Protocol, svc string, block, n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -89,9 +103,29 @@ func (f *bareFixture) list(p registryv1.Service_Protocol, svc string, block, n i
 	}
 	rows := make([]*registryv1.ServiceEndpoint, 0, n)
 	for i := 1; i <= n; i++ {
-		rows = append(rows, reuseEndpoint("10.2."+string(rune('0'+block))+"."+string(rune('0'+i))))
+		ep := reuseEndpoint(fmt.Sprintf("10.2.%d.%d", block, i))
+		ep.Port = listingPort[p]
+		rows = append(rows, ep)
 	}
 	f.listing[p][svc] = rows
+}
+
+// udpAddrs is the sorted address:port list the udp: cluster of svc dials, or
+// nil when it is not published.
+func (f *bareFixture) udpAddrs(s *cachev3.Snapshot, svc string) []string {
+	cl, ok := s.GetResources(resourcev3.ClusterType)[proxy.UDPClusterName(svc, f.c.meshDomain)].(*clusterv3.Cluster)
+	if !ok {
+		return nil
+	}
+	var addrs []string
+	for _, l := range cl.GetLoadAssignment().GetEndpoints() {
+		for _, lb := range l.GetLbEndpoints() {
+			sa := lb.GetEndpoint().GetAddress().GetSocketAddress()
+			addrs = append(addrs, fmt.Sprintf("%s:%d", sa.GetAddress(), sa.GetPortValue()))
+		}
+	}
+	slices.Sort(addrs)
+	return addrs
 }
 
 // lbEndpoints is how many endpoints a load assignment carries.
@@ -214,6 +248,7 @@ func (f *bareFixture) requireHTTPClusterAndVhost(t *testing.T, s *cachev3.Snapsh
 // one), the h2 port alias's and the QUIC twin's.
 func TestHTTPListingLostWhileTCPStaysPublishesTheLiveLoadAssignment(t *testing.T) {
 	f := newBareFixture(t)
+	f.list(tcp, bareSvc, 2, 2)
 	f.list(http, bareSvc, 4, 3)
 	s := f.refresh(t)
 	twin := proxy.QUICClusterName(bareSvc, f.c.meshDomain, "demo/"+reuseSA)
@@ -234,7 +269,8 @@ func TestHTTPListingLostWhileTCPStaysPublishesTheLiveLoadAssignment(t *testing.T
 	})
 	f.requireHTTPClusterAndVhost(t, s, bareSvc, true)
 	assert.Contains(t, s.GetResources(resourcev3.ClusterType), twin, "the retained cluster's twin stays too")
-	assert.Equal(t, 2, f.udpEndpoints(s, bareSvc), "the udp: cluster is rendered from the live load assignment")
+	assert.Equal(t, []string{"10.2.2.1:9000", "10.2.2.2:9000"}, f.udpAddrs(s, bareSvc),
+		"the udp: cluster is rendered from the live entry: its endpoints AND its port, not the retained HTTP entry's 8080")
 	f.requireCheckSilent(t)
 
 	// Past the grace the retained entry is pruned and nothing else changes.
@@ -318,7 +354,8 @@ func TestTCPAndUDPListingsPublishOneLoadAssignment(t *testing.T) {
 	t.Run("UDP listing lost, TCP stays", func(t *testing.T) {
 		f.list(udp, bareUDPSvc, 0, 0)
 		s := f.requireStable(t, want{bareUDPSvc: 2, f.tcpFloor(bareUDPSvc): 2})
-		assert.Equal(t, 2, f.udpEndpoints(s, bareUDPSvc), "the retained udp: cluster follows the live load assignment")
+		assert.Equal(t, []string{"10.2.5.1:9000", "10.2.5.2:9000"}, f.udpAddrs(s, bareUDPSvc),
+			"the retained udp: cluster follows the live entry, endpoints and port")
 		f.requireCheckSilent(t)
 	})
 	t.Run("TCP listing lost, UDP stays", func(t *testing.T) {
@@ -326,7 +363,8 @@ func TestTCPAndUDPListingsPublishOneLoadAssignment(t *testing.T) {
 		f.refresh(t)
 		f.list(tcp, bareUDPSvc, 0, 0)
 		s := f.requireStable(t, want{bareUDPSvc: 1, f.tcpFloor(bareUDPSvc): 1})
-		assert.Equal(t, 1, f.udpEndpoints(s, bareUDPSvc))
+		assert.Equal(t, []string{"10.2.3.1:5353"}, f.udpAddrs(s, bareUDPSvc),
+			"the live UDP pod at the port it registered, not the retained TCP entry's 9000")
 		f.requireCheckSilent(t)
 	})
 }
@@ -336,13 +374,352 @@ func TestTCPAndUDPListingsPublishOneLoadAssignment(t *testing.T) {
 // retained HTTP entry.
 func TestHTTPListingLostWhileUDPStaysPublishesTheLiveLoadAssignment(t *testing.T) {
 	f := newBareFixture(t)
+	f.list(udp, bareUDPSvc, 3, 1)
 	f.list(http, bareUDPSvc, 4, 3)
 	s := f.refresh(t)
 	require.Equal(t, 3, published(s, bareUDPSvc))
 
 	f.list(http, bareUDPSvc, 0, 0)
 	s = f.requireStable(t, want{bareUDPSvc: 1, f.meshAlias(bareUDPSvc): 1})
-	assert.Equal(t, 1, f.udpEndpoints(s, bareUDPSvc), "datagrams reach the live UDP endpoint through the grace")
+	assert.Equal(t, []string{"10.2.3.1:5353"}, f.udpAddrs(s, bareUDPSvc),
+		"datagrams reach the live UDP pod at the port it registered through the grace, not at the retained HTTP entry's 8080")
 	f.requireHTTPClusterAndVhost(t, s, bareUDPSvc, true)
 	f.requireCheckSilent(t)
+}
+
+// The check itself, on a duplicate that has nothing to do with pods (two
+// different load assignments of one name): one ERROR naming the type and the
+// name and NO issue, since more than one input can produce it, and one count
+// per name per build. No input of the cache is known to produce this one any
+// more (#1635), so the check is driven directly.
+func TestDuplicateLoadAssignmentNameIsReportedWithoutAnIssue(t *testing.T) {
+	f := newBareFixture(t)
+	ctx := context.Background()
+	populated := proxy.NewClusterLoadAssignment(bareSvc)
+	populated.Endpoints = []*endpointv3.LocalityLbEndpoints{{LbEndpoints: []*endpointv3.LbEndpoint{{}}}}
+	resources := map[resourcev3.Type][]types.Resource{
+		resourcev3.EndpointType: {proxy.NewClusterLoadAssignment(bareSvc), populated},
+	}
+
+	f.c.snapshotMu.Lock()
+	f.c.reportDuplicateResourceNames(ctx, resources)
+	f.c.reportDuplicateResourceNames(ctx, resources)
+	f.c.snapshotMu.Unlock()
+
+	lines := f.rec.with(duplicateNamesMsg)
+	require.Len(t, lines, 1, "written when the set of names changes, not once per build")
+	assert.Equal(t, slog.LevelError, lines[0].level)
+	assert.Equal(t, resourcev3.EndpointType, lines[0].attrs["type"])
+	assert.Equal(t, "["+bareSvc+"]", lines[0].attrs["names"])
+	assert.NotContains(t, lines[0].attrs, "issue", "the line claims no cause")
+	assert.Equal(t, int64(2), counterValue(t, f.reader, duplicateNamesCtr), "one per name per build")
+}
+
+// walkModel is what the random walk believes about bareSvc.
+type walkModel struct {
+	h, t, u   int  // 0 absent, 1 and 2 two variants of the rows
+	clock     int  // seconds the retained entries were aged by
+	hLost     int  // clock when the HTTP listing was first seen absent; -1 otherwise
+	hRetained bool // the h2 cluster is published (live or within its grace)
+	inDeps    bool
+}
+
+// walkRows are n rows of one listing. Variant 2 adds a second advertised port
+// (a per-port cluster), so the walk also changes which entries a pass writes.
+func walkRows(p registryv1.Service_Protocol, block, n, variant int) []*registryv1.ServiceEndpoint {
+	rows := make([]*registryv1.ServiceEndpoint, 0, n)
+	for i := 1; i <= n; i++ {
+		ep := reuseEndpoint(fmt.Sprintf("10.2.%d.%d", block, i))
+		ep.Port = listingPort[p]
+		if variant == 2 {
+			second := listingPort[p] + 1
+			ep.Ports = []uint32{ep.GetPort(), second}
+			if p == tcp {
+				ep.PortProtocols = map[uint32]registryv1.PortProtocol{second: registryv1.PortProtocol_PORT_PROTOCOL_TCP}
+			}
+		}
+		rows = append(rows, ep)
+	}
+	return rows
+}
+
+func (f *bareFixture) setRows(p registryv1.Service_Protocol, svc string, rows []*registryv1.ServiceEndpoint) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if rows == nil {
+		delete(f.listing[p], svc)
+		return
+	}
+	f.listing[p][svc] = rows
+}
+
+// age moves every retained entry's absentSince back by d.
+func (f *bareFixture) age(d time.Duration) {
+	f.c.clusterMu.Lock()
+	defer f.c.clusterMu.Unlock()
+	for k, e := range f.c.clusters {
+		if !e.absentSince.IsZero() {
+			e.absentSince = e.absentSince.Add(-d)
+			f.c.clusters[k] = e
+		}
+	}
+}
+
+// describe lists bareSvc's entries, for a failing walk's trace.
+func (f *bareFixture) describe() string {
+	f.c.clusterMu.RLock()
+	defer f.c.clusterMu.RUnlock()
+	var b strings.Builder
+	for _, k := range slices.Sorted(maps.Keys(f.c.clusters)) {
+		e := f.c.clusters[k]
+		if e.service != bareSvc {
+			continue
+		}
+		la := "nil"
+		if e.loadAssignment != nil {
+			la = fmt.Sprintf("%s(%d)", e.loadAssignment.GetClusterName(), lbEndpoints(e.loadAssignment))
+		}
+		fmt.Fprintf(&b, "  entry %q la=%s retained=%v\n", k, la, !e.absentSince.IsZero())
+	}
+	return b.String()
+}
+
+// holderViolation: no two entries hold a load assignment of one name.
+func (f *bareFixture) holderViolation() string {
+	f.c.clusterMu.RLock()
+	defer f.c.clusterMu.RUnlock()
+	owner := map[string]string{}
+	for key, e := range f.c.clusters {
+		if e.loadAssignment == nil {
+			continue
+		}
+		name := e.loadAssignment.GetClusterName()
+		if prev, dup := owner[name]; dup {
+			return fmt.Sprintf("two holders of %q: %q and %q", name, prev, key)
+		}
+		owner[name] = key
+	}
+	return ""
+}
+
+// derivedViolation: every EDS cluster of the service has its load assignment
+// published, and every own-name copy has the bare one's membership.
+func (f *bareFixture) derivedViolation(s *cachev3.Snapshot) string {
+	eds := s.GetResources(resourcev3.EndpointType)
+	for name, r := range s.GetResources(resourcev3.ClusterType) {
+		cl, ok := r.(*clusterv3.Cluster)
+		if !ok || cl.GetType() != clusterv3.Cluster_EDS || !strings.Contains(name, "db.demo") {
+			continue
+		}
+		if _, ok := eds[edsServiceName(cl)]; !ok {
+			return fmt.Sprintf("cluster %q subscribes to EDS %q, which is not published", name, edsServiceName(cl))
+		}
+	}
+	bare, ok := eds[bareSvc].(*endpointv3.ClusterLoadAssignment)
+	if !ok {
+		return ""
+	}
+	for name, r := range eds {
+		isCopy := name == f.tcpFloor(bareSvc) || name == f.meshAlias(bareSvc) ||
+			strings.HasPrefix(name, "quic:") && strings.Contains(name, "db.demo")
+		cla, ok := r.(*endpointv3.ClusterLoadAssignment)
+		if isCopy && ok && lbEndpoints(cla) != lbEndpoints(bare) {
+			return fmt.Sprintf("copy %q has %d endpoints, the bare one %d", name, lbEndpoints(cla), lbEndpoints(bare))
+		}
+	}
+	return ""
+}
+
+// membershipViolation: the bare name carries the first live listing's rows, a
+// live TCP listing's floor is not empty, and the udp: cluster dials the
+// endpoints AND the port of the one entry that holds them.
+func (f *bareFixture) membershipViolation(s *cachev3.Snapshot, m walkModel) string {
+	got := published(s, bareSvc)
+	if !m.inDeps {
+		if got != -1 {
+			return fmt.Sprintf("out of the dependency set, the bare name publishes %d", got)
+		}
+		return ""
+	}
+	var want int
+	var port uint32
+	switch {
+	case m.h != 0:
+		want, port = 3, listingPort[http]
+	case m.t != 0:
+		want, port = 2, listingPort[tcp]
+	case m.u != 0:
+		want, port = 1, listingPort[udp]
+	default:
+		return "" // nothing live: an empty one or none, by the retention's clock
+	}
+	if got != want {
+		return fmt.Sprintf("the bare name publishes %d endpoints, want %d", got, want)
+	}
+	if c := published(s, f.tcpFloor(bareSvc)); m.t != 0 && c <= 0 {
+		return fmt.Sprintf("live TCP listing: floor publishes %d", c)
+	}
+	addrs := f.udpAddrs(s, bareSvc)
+	if len(addrs) != want {
+		return fmt.Sprintf("udp: cluster dials %v, want %d endpoints", addrs, want)
+	}
+	for _, a := range addrs {
+		if !strings.HasSuffix(a, fmt.Sprintf(":%d", port)) {
+			return fmt.Sprintf("udp: cluster dials %v, want port %d (the port of the listing its endpoints are from)", addrs, port)
+		}
+	}
+	return ""
+}
+
+// walkViolation returns the first invariant the snapshot breaks, or "".
+func (f *bareFixture) walkViolation(t *testing.T, s *cachev3.Snapshot, m walkModel) string {
+	t.Helper()
+	for _, v := range []string{f.holderViolation(), f.derivedViolation(s), f.membershipViolation(s, m)} {
+		if v != "" {
+			return v
+		}
+	}
+	// The retention protection, and the check.
+	if _, hasH2 := s.GetResources(resourcev3.ClusterType)[f.fqdn(bareSvc)]; hasH2 != m.hRetained {
+		return fmt.Sprintf("h2 cluster published=%v, the model says %v", hasH2, m.hRetained)
+	}
+	if n := counterValue(t, f.reader, duplicateNamesCtr); n != 0 {
+		return fmt.Sprintf("duplicate-name counter = %d", n)
+	}
+	return ""
+}
+
+// walkVersions is every resource version of a snapshot, one per line.
+func walkVersions(s *cachev3.Snapshot) string {
+	var b strings.Builder
+	for _, typ := range []string{resourcev3.EndpointType, resourcev3.ClusterType, resourcev3.RouteType, resourcev3.ListenerType} {
+		vm := s.GetVersionMap(typ)
+		for _, k := range slices.Sorted(maps.Keys(vm)) {
+			fmt.Fprintf(&b, "%s|%s=%s\n", typ, k, vm[k])
+		}
+	}
+	return b.String()
+}
+
+// walkStep applies one random change to the listings and the model and
+// returns its name.
+func (f *bareFixture) walkStep(r *rand.Rand, m *walkModel) string {
+	set := func(p registryv1.Service_Protocol, block, n, variant int) {
+		if variant == 0 {
+			f.setRows(p, bareSvc, nil)
+			return
+		}
+		f.setRows(p, bareSvc, walkRows(p, block, n, variant))
+	}
+	switch k := r.Intn(10); {
+	case k < 3:
+		m.h = r.Intn(3)
+		set(http, 4, 3, m.h)
+		return fmt.Sprintf("H=%d", m.h)
+	case k < 6:
+		m.t = r.Intn(3)
+		set(tcp, 2, 2, m.t)
+		return fmt.Sprintf("T=%d", m.t)
+	case k < 8:
+		m.u = r.Intn(2)
+		set(udp, 3, 1, m.u)
+		return fmt.Sprintf("U=%d", m.u)
+	case k < 9:
+		f.age(50 * time.Second)
+		m.clock += 50
+		return "age50"
+	default: // two listings change in one refresh
+		m.h, m.t = r.Intn(2), r.Intn(2)
+		set(http, 4, 3, m.h)
+		set(tcp, 2, 2, m.t)
+		return fmt.Sprintf("H=%d,T=%d", m.h, m.t)
+	}
+}
+
+// retainH2 moves the model's view of the h2 cluster one refresh on.
+func (m *walkModel) retainH2() {
+	switch {
+	case !m.inDeps:
+		m.hRetained, m.hLost = false, -1
+	case m.h != 0:
+		m.hRetained, m.hLost = true, -1
+	case m.hRetained && m.hLost < 0:
+		m.hLost = m.clock
+	case m.hRetained && m.clock-m.hLost > 90:
+		m.hRetained, m.hLost = false, -1
+	}
+}
+
+// walk runs one seeded walk and returns the first violation and the trace.
+func walk(t *testing.T, seed int64, steps int, withDeps bool) (string, []string) {
+	t.Helper()
+	f := newBareFixture(t)
+	r := rand.New(rand.NewSource(seed)) //nolint:gosec // a reproducible test sequence
+	twin := proxy.QUICClusterName(bareSvc, f.c.meshDomain, "demo/"+reuseSA)
+	m := walkModel{t: 1, hLost: -1, inDeps: true}
+	f.setRows(tcp, bareSvc, walkRows(tcp, 2, 2, 1))
+	f.refresh(t)
+	var trace []string
+	for step := range steps {
+		op := f.walkStep(r, &m)
+		if withDeps && r.Intn(6) == 0 {
+			m.inDeps = !m.inDeps
+			// A captured TCP service is a dependency too, so it leaves and
+			// returns with the declaration.
+			captured := []capture.CaptureTCPService{{ServiceName: bareUDPSvc, ClusterIP: "10.96.0.61", PrimaryIsTCP: true}}
+			if m.inDeps {
+				declareDeps(f.c, "demo/echo", "demo/other", bareSvc, bareUDPSvc)
+				captured = append(captured, capture.CaptureTCPService{ServiceName: bareSvc, ClusterIP: "10.96.0.60", PrimaryIsTCP: true})
+			} else {
+				declareDeps(f.c, "demo/echo", "demo/other", bareUDPSvc)
+			}
+			f.c.SetCaptureTCPServices(captured)
+			op += fmt.Sprintf("+deps=%v", m.inDeps)
+		}
+		if r.Intn(4) == 0 {
+			f.c.recordQUICPair(testQUICStream, twin) // the proxy asks for the twin
+			op += "+twin"
+		}
+		s := f.refresh(t)
+		m.retainH2()
+		trace = append(trace, fmt.Sprintf("%02d %-10s clock=%d h=%d t=%d u=%d\n%s", step, op, m.clock, m.h, m.t, m.u, f.describe()))
+		if v := f.walkViolation(t, s, m); v != "" {
+			return v, trace
+		}
+		base := walkVersions(s)
+		for i := range 4 {
+			s = f.refresh(t)
+			if v := f.walkViolation(t, s, m); v != "" {
+				return fmt.Sprintf("on unchanged rebuild %d: %s", i, v), trace
+			}
+			if walkVersions(s) != base {
+				return fmt.Sprintf("a version changed on unchanged rebuild %d", i), trace
+			}
+		}
+	}
+	return "", trace
+}
+
+// A seeded random walk over one service's three listings (rows appear, change
+// shape and go, one or two listings per refresh), time jumps across the
+// retention grace, the dependency set and the QUIC twin. After every refresh
+// and on four unchanged rebuilds of it: one holder per name, every EDS
+// cluster's load assignment published, the bare name carrying the first live
+// listing's rows, no live floor empty, the udp: cluster on the holder's
+// endpoints and port, every copy equal to the bare one, the h2 cluster
+// retained for exactly its grace, no version moving, the check silent.
+// (From the adversarial review of the fix: before it, nearly every seed
+// failed.)
+func TestOneHolderPerNameHoldsOverARandomWalk(t *testing.T) {
+	const seeds, steps = 12, 40
+	for seed := int64(1); seed <= seeds; seed++ {
+		v, trace := walk(t, seed, steps, seed%2 == 0)
+		if v == "" {
+			continue
+		}
+		if len(trace) > 5 {
+			trace = trace[len(trace)-5:]
+		}
+		t.Errorf("seed %d: %s\n%s", seed, v, strings.Join(trace, ""))
+	}
 }
