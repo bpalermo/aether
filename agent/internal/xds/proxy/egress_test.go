@@ -607,7 +607,7 @@ func assertCertSelectorSDSSource(t *testing.T, src *corev3.ConfigSource) {
 		"the certificate selector must NOT fetch over the shared ADS stream: Envoy's delta "+
 			"WatchMap deduplicates subscription interest per (type_url, resource name) across "+
 			"watches, and every secret the selector asks for is ALREADY subscribed there by a "+
-			"static reference (each pod's inbound listener; the node SVID via inboundready_<pod>). "+
+			"static reference (each pod's inbound listener; the node SVID via inboundready_<namespace>_<pod>). "+
 			"The selector's watch then never sends a request, never receives the secret, and the "+
 			"upstream handshake pauses with no error and no stat (issue #842, rev228)")
 

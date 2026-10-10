@@ -49,7 +49,7 @@ can be large, capture it first and test the variable — a here-string has no
 writer process to kill:
 
 ```bash
-grep -q "inbound_${pod}" <<<"$(admin /listeners 2>/dev/null)"
+grep -q "inbound_${ns}_${pod}" <<<"$(admin /listeners 2>/dev/null)"
 ```
 
 `grep -q`, `head` and `awk … exit` are fine on a file argument or a

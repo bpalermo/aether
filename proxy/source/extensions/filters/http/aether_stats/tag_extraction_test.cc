@@ -78,8 +78,8 @@ private:
   const bool previous_;
 };
 
-// The stats_tags the chart keeps after aether#695: aether.cluster and
-// aether.pod only, both extracted from Envoy's OWN stat names. Deliberately no
+// The stats_tags the chart keeps after aether#695: aether.cluster,
+// aether.namespace and aether.pod only, all extracted from Envoy's OWN stat names. Deliberately no
 // regex for any aether_stats programmatic key — that is the invariant under
 // test. Envoy tag semantics: the first capture group is removed from the stat
 // name, the tag value is the second group.
@@ -92,7 +92,11 @@ Stats::TagProducerPtr productionTagProducer() {
     tag->set_regex(std::string(regex));
   };
   add("aether.cluster", "^cluster\\.(([^.]+)\\.)");
-  add("aether.pod", "^listener\\.(?:inbound|out_http)(_([^.]+))\\.");
+  // The listener stat prefixes are inbound_<namespace>_<pod> and
+  // out_http_<namespace>_<pod> since aether#1584; the namespace part is
+  // optional in the pod extractor for an agent older than that.
+  add("aether.namespace", "^listener\\.(?:inbound|out_http)(_([^_.]+))_[^.]+\\.");
+  add("aether.pod", "^listener\\.(?:inbound|out_http)(?:_[^_.]+)?(_([^.]+))\\.");
   return Stats::TagProducerImpl::createTagProducer(config, {}).value();
 }
 
@@ -354,6 +358,22 @@ TEST_F(HotRestartTagPropagationTest, RetainedChartRegexesStillExtract) {
   ASSERT_EQ(listener_tags.size(), 1);
   EXPECT_EQ(listener_tags[0].name_, "aether.pod");
   EXPECT_EQ(listener_tags[0].value_, "svc-1-abc123");
+
+  // Since aether#1584 the agent writes inbound_<namespace>_<pod>: two tags, and
+  // the same collapsed name.
+  Stats::TagVector namespaced_tags;
+  const std::string namespaced_extracted = producer->produceTags(
+      "listener.inbound_shop_svc-1-abc123.downstream_cx_total", namespaced_tags);
+  EXPECT_EQ(namespaced_extracted, "listener.inbound.downstream_cx_total");
+  ASSERT_EQ(namespaced_tags.size(), 2);
+  for (const Stats::Tag& tag : namespaced_tags) {
+    if (tag.name_ == "aether.namespace") {
+      EXPECT_EQ(tag.value_, "shop");
+    } else {
+      EXPECT_EQ(tag.name_, "aether.pod");
+      EXPECT_EQ(tag.value_, "svc-1-abc123");
+    }
+  }
 
   // No regex re-derives the programmatic keys any more: extraction alone leaves
   // the mangled name untouched. Propagation, not regex, is what recovers them.

@@ -66,7 +66,7 @@ func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, m
 	networkFilters = append(networkFilters, buildHTTPConnectionManagerFilter(hcm))
 
 	return &listenerv3.FilterChain{
-		Name:    fmt.Sprintf("out_http_%s", cniPod.GetName()),
+		Name:    fmt.Sprintf("out_http_%s", PodResourceKey(cniPod)),
 		Filters: networkFilters,
 	}
 }

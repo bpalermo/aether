@@ -241,6 +241,10 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	declared, observed := c.dependencyCounts()
 	c.metrics.SnapshotShape(ctx, len(clusters), declared, observed)
 
+	// NewSnapshot indexes every type by name and keeps one resource per name
+	// without a word. Say it here if two resources share one (#1584).
+	c.reportDuplicateResourceNames(ctx, resources)
+
 	snapshot, err := cachev3.NewSnapshot(v, resources)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot: %w", err)

@@ -90,9 +90,9 @@ func TestBindingLinesAreOfTheSnapshotTheyName(t *testing.T) {
 	require.NoError(t, err)
 	sent := deltaNames(resp)
 	require.Contains(t, sent, bindingClusterName, "fixture: the first snapshot has the cluster added before its build")
-	require.Contains(t, sent, "app_echo-001_8080", "fixture: and the first pod")
+	require.Contains(t, sent, "app_aether-test_echo-001_8080", "fixture: and the first pod")
 	require.NotContains(t, sent, lateCluster, "fixture: it does not have the cluster added during its SetSnapshot")
-	require.NotContains(t, sent, "app_echo-002_8080", "fixture: nor the second pod")
+	require.NotContains(t, sent, "app_aether-test_echo-002_8080", "fixture: nor the second pod")
 	firstVersion := resp.GetSystemVersionInfo()
 	for _, built := range []chan error{first, second} {
 		select {

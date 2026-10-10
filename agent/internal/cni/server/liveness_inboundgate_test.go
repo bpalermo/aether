@@ -46,8 +46,8 @@ func twoPathGateway(t *testing.T, podName string, appStatus, inboundStatus int) 
 	ln, err := net.Listen("unix", sock)
 	require.NoError(t, err)
 
-	appPath := proxy.HealthGatewayPath("health_" + podName)
-	inboundPath := proxy.HealthGatewayPath("inboundready_" + podName)
+	appPath := proxy.HealthGatewayPath("health_default_" + podName)
+	inboundPath := proxy.HealthGatewayPath("inboundready_default_" + podName)
 
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

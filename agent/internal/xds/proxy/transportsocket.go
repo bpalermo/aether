@@ -58,7 +58,7 @@ const (
 // On a node proxy those two watches are not hypothetical. EVERY local pod's
 // SVID is already named statically by that pod's own inbound listener
 // (DownstreamTransportSocket), and the node SVID — the selector's default_value
-// AND its prefetch — is already named statically by every inboundready_<pod>
+// AND its prefetch — is already named statically by every inboundready_<namespace>_<pod>
 // probe cluster. The selector is therefore always the SECOND subscriber.
 //
 // Put both watches on one DELTA_GRPC mux and the second one starves. Envoy's

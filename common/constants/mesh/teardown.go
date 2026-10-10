@@ -3,7 +3,7 @@ package mesh
 import "time"
 
 // AppConnectTimeout bounds the node proxy's connect to a pod's application (the
-// per-pod app_<pod>_<port> cluster: 127.0.0.1:<port> inside the pod netns, or a
+// per-pod app_<namespace>_<pod>_<port> cluster: 127.0.0.1:<port> inside the pod netns, or a
 // UDS). It is the one place the destination side of a pod teardown can hang.
 //
 // Teardown order under containerd (aether#1103). StopPodSandbox stops the

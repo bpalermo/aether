@@ -303,6 +303,14 @@ type Metrics struct {
 	// had been serving a stale version and Envoy had missed the change until
 	// the audit corrected it (#1105). Healthy value: zero forever.
 	versionMemoMismatch metric.Int64Counter
+	// duplicateResourceNames counts resource names that more than one resource
+	// of one xDS type carried in a snapshot build (#1584). go-control-plane
+	// keeps ONE resource per name, silently, so the proxy is sent only one of
+	// them and which one can change from build to build. Counted once per name
+	// per build for as long as the condition lasts. Zero on a node where
+	// nothing shares a name; the cache's duplicatenames.go lists the inputs
+	// known to produce it.
+	duplicateResourceNames metric.Int64Counter
 }
 
 // attrVersionSource labels aether.agent.snapshot.resource_versions.
@@ -485,6 +493,10 @@ func (m *Metrics) registerAnomalyCounters(meter metric.Meter) error {
 		metric.WithDescription("Published xDS resources found mutated in place by a version-memo audit; Envoy missed the change until the audit (#1105)")); err != nil {
 		return fmt.Errorf("version memo mismatch: %w", err)
 	}
+	if m.duplicateResourceNames, err = meter.Int64Counter("aether.agent.snapshot.duplicate_resource_names",
+		metric.WithDescription("Resource names carried by more than one resource of one xDS type in a snapshot build, per build; the proxy is sent only one of them (#1584)")); err != nil {
+		return fmt.Errorf("duplicate resource names: %w", err)
+	}
 
 	return nil
 }
@@ -515,6 +527,7 @@ func (m *Metrics) seedAnomalyCounters() {
 	m.udpRouteUnsupported.Add(ctx, 0)
 	m.udpNoHealthyBackend.Add(ctx, 0)
 	m.versionMemoMismatch.Add(ctx, 0)
+	m.duplicateResourceNames.Add(ctx, 0)
 	// One series per reason, so a grader can ask for reason="not_csi" and get
 	// a zero rather than nothing.
 	for _, r := range udspath.Reasons {
@@ -742,6 +755,17 @@ func (m *Metrics) SnapshotVersions(ctx context.Context, memoized, hashed, mismat
 	if mismatched > 0 {
 		m.versionMemoMismatch.Add(ctx, mismatched)
 	}
+}
+
+// DuplicateResourceNames counts n resource names that one snapshot build found
+// on more than one resource of a type (#1584). The names are deliberately NOT
+// attributes (unbounded cardinality); the snapshot logs them at ERROR. A no-op
+// for n <= 0, so the healthy case rides on the zero seeded at registration.
+func (m *Metrics) DuplicateResourceNames(ctx context.Context, n int64) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.duplicateResourceNames.Add(ctx, n)
 }
 
 // Generated records the outcome of one snapshot generation.

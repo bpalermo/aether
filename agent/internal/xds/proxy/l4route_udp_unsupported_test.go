@@ -3,6 +3,8 @@ package proxy
 import (
 	"strings"
 	"testing"
+
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 )
 
 // TestUnsupportedUDPRouteShapes pins the UDPRoute inputs the per-pod UDP
@@ -180,7 +182,7 @@ func TestUnsupportedUDPRouteShapesTracksTheGenerator(t *testing.T) {
 		t.Fatalf("reason should say ns/z has no ClusterIP, got: %s", got[0])
 	}
 
-	l, err := GenerateUDPCaptureListener("pod-1", "/var/run/netns/x", 18082, routes, vips)
+	l, err := GenerateUDPCaptureListener(&cniv1.CNIPod{Name: "pod-1", Namespace: "ns", NetworkNamespace: "/var/run/netns/x"}, 18082, routes, vips)
 	if err != nil {
 		t.Fatalf("GenerateUDPCaptureListener: %v", err)
 	}

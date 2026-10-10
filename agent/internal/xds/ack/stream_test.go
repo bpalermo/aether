@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"aethermesh.dev/agent/internal/xds/proxy"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
@@ -29,9 +31,16 @@ const (
 	resolvedWait = 10 * time.Second
 	// unresolvedWait is how long a wait that must NOT return is given.
 	unresolvedWait = 50 * time.Millisecond
-
-	otherListener = "outbound_http_other-pod"
 )
+
+// otherListener is another pod's outbound listener.
+var otherListener = listenerOf("other-pod")
+
+// listenerOf is the name of the outbound listener of the named pod, as the
+// agent builds it.
+func listenerOf(pod string) string {
+	return proxy.OutboundListenerName(&cniv1.CNIPod{Namespace: "default", Name: pod})
+}
 
 // publishing returns a tracker wired, as the node agent's is, to the versions
 // of the listeners the agent publishes. The test changes the map to publish.
@@ -555,7 +564,7 @@ func TestTrackerForgetsARemovedListener(t *testing.T) {
 
 	const pods = 200
 	for i := range pods {
-		name := fmt.Sprintf("outbound_http_pod-%d", i)
+		name := listenerOf(fmt.Sprintf("pod-%d", i))
 		cluster := fmt.Sprintf("cluster-%d", i)
 		sendVersioned(tr, 1, resourcev3.ClusterType, fmt.Sprintf("c%d", i), "v", []string{cluster})
 		ackDelta(tr, 1, fmt.Sprintf("c%d", i), "")
@@ -570,7 +579,7 @@ func TestTrackerForgetsARemovedListener(t *testing.T) {
 	require.Equal(t, pods, remembered(tr), "fixture: the proxy holds every listener, and no cluster is kept")
 
 	for i := range pods {
-		sendDelta(tr, 1, fmt.Sprintf("r%d", i), nil, []string{fmt.Sprintf("outbound_http_pod-%d", i)})
+		sendDelta(tr, 1, fmt.Sprintf("r%d", i), nil, []string{listenerOf(fmt.Sprintf("pod-%d", i))})
 		ackDelta(tr, 1, fmt.Sprintf("r%d", i), "")
 	}
 	assert.Zero(t, remembered(tr), "a removed listener's name is still kept")

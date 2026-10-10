@@ -23,10 +23,11 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 			name: "standard pod",
 			cniPod: &cniv1.CNIPod{
 				Name:             "test-pod",
+				Namespace:        "team-a",
 				NetworkNamespace: "/var/run/netns/test",
 			},
-			expectedInboundName:  "inbound_test-pod",
-			expectedOutboundName: "outbound_http_test-pod",
+			expectedInboundName:  "inbound_team-a_test-pod",
+			expectedOutboundName: "outbound_http_team-a_test-pod",
 			expectedError:        false,
 		},
 		{
@@ -108,9 +109,10 @@ func TestGenerateOutboundHTTPListener(t *testing.T) {
 			name: "standard pod",
 			cniPod: &cniv1.CNIPod{
 				Name:             "test-pod",
+				Namespace:        "team-a",
 				NetworkNamespace: "/var/run/netns/test",
 			},
-			expectedStatPrefix:       "out_http_test-pod",
+			expectedStatPrefix:       "out_http_team-a_test-pod",
 			expectedNetworkNamespace: "/var/run/netns/test",
 			expectedError:            false,
 		},
@@ -140,7 +142,7 @@ func TestGenerateOutboundHTTPListener(t *testing.T) {
 
 			require.NoError(t, err)
 			require.NotNil(t, listener)
-			assert.Equal(t, "outbound_http_"+tt.cniPod.GetName(), listener.GetName())
+			assert.Equal(t, "outbound_http_"+tt.cniPod.GetNamespace()+"_"+tt.cniPod.GetName(), listener.GetName())
 			assert.Equal(t, tt.expectedStatPrefix, listener.GetStatPrefix())
 			assert.Equal(t, corev3.TrafficDirection_OUTBOUND, listener.GetTrafficDirection())
 

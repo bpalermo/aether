@@ -21,20 +21,20 @@ const (
 )
 
 // HealthGatewayPath returns the gateway path that reflects the active health
-// of the given per-pod health-probe cluster (health_<pod>).
+// of the given per-pod health-probe cluster (health_<namespace>_<pod>).
 func HealthGatewayPath(probeClusterName string) string {
 	return healthGatewayPathPrefix + probeClusterName
 }
 
 // HealthGatewayProbe is one pod's entry on the health gateway.
 //
-// AppCluster is the pod's application health-probe cluster (health_<pod>) and
-// InboundReadyCluster its inbound-readiness probe (inboundready_<pod>, issue
+// AppCluster is the pod's application health-probe cluster (health_<namespace>_<pod>) and
+// InboundReadyCluster its inbound-readiness probe (inboundready_<namespace>_<pod>, issue
 // #815), or "" when that probe is not programmed for this pod.
 //
 // EACH CLUSTER GETS ITS OWN PATH — /healthz/<cluster-name> — reflecting THAT
 // cluster alone. #819 instead ANDed both clusters behind the single
-// /healthz/health_<pod> path, which cost main-worker-03 four endpoints on
+// /healthz/health_<namespace>_<pod> path, which cost main-worker-03 four endpoints on
 // 2026-09-19: the agent could see only the conjunction, so "the app is fine but
 // the mesh inbound never came up" was indistinguishable from "the app died",
 // and the liveness loop demoted the endpoints permanently with no signal. Two
@@ -74,8 +74,8 @@ func (p HealthGatewayProbe) clusters() []string {
 //
 // Paths, per pod:
 //
-//	/healthz/health_<pod>        the APPLICATION probe, exactly as before #815
-//	/healthz/inboundready_<pod>  the pod's own mesh inbound listener completing
+//	/healthz/health_<namespace>_<pod>        the APPLICATION probe, exactly as before #815
+//	/healthz/inboundready_<namespace>_<pod>  the pod's own mesh inbound listener completing
 //	                             an mTLS handshake with its own certificate;
 //	                             absent (404) when the pod is not gated
 //

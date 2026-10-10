@@ -166,7 +166,7 @@ func TestReconcileLivenessSkipsTerminatingPod(t *testing.T) {
 	pod := validCNIPod("pod-a", "default", "container-a")
 	pod.Terminating = true
 
-	sock := fakeHealthGateway(t, "health_pod-a", http.StatusServiceUnavailable)
+	sock := fakeHealthGateway(t, "health_default_pod-a", http.StatusServiceUnavailable)
 
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))

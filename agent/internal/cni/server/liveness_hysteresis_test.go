@@ -43,7 +43,7 @@ func hysteresisPod(t *testing.T) (*cniv1.CNIPod, storage.Storage[*cniv1.CNIPod])
 // must.
 func TestLivenessDemotionRequiresConsecutiveFailures(t *testing.T) {
 	pod, store := hysteresisPod(t)
-	sock := fakeHealthGateway(t, "health_pod-a", 503)
+	sock := fakeHealthGateway(t, "health_default_pod-a", 503)
 	reg := &recordingRegistry{}
 	srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
@@ -67,8 +67,8 @@ func TestLivenessFailStreakResetsOnHealthy(t *testing.T) {
 	pod, store := hysteresisPod(t)
 	reg := &recordingRegistry{}
 
-	failing := fakeHealthGateway(t, "health_pod-a", 503)
-	passing := fakeHealthGateway(t, "health_pod-a", 200)
+	failing := fakeHealthGateway(t, "health_default_pod-a", 503)
+	passing := fakeHealthGateway(t, "health_default_pod-a", 200)
 
 	state := servedState(pod.GetContainerId())
 	failingSrv := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), failing)
@@ -104,7 +104,7 @@ func TestLivenessRearmsWarmupAfterGatewayOutage(t *testing.T) {
 
 	// Ticks 2..n: the new epoch answers 503 for every pod while it re-fetches
 	// secrets and warms listeners. The re-arm must absorb all of them.
-	up := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), fakeHealthGateway(t, "health_pod-a", 503))
+	up := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), fakeHealthGateway(t, "health_default_pod-a", 503))
 	for range livenessDemoteStreak + 2 {
 		up.reconcileLiveness(context.Background(), state)
 	}
@@ -137,7 +137,7 @@ func TestLivenessRearmDoesNotForgetReportedHealth(t *testing.T) {
 // from before #815.
 func TestLivenessNeverServedPodStillGatedAfterGrace(t *testing.T) {
 	pod, store := hysteresisPod(t)
-	sock := fakeHealthGateway(t, "health_pod-a", 503)
+	sock := fakeHealthGateway(t, "health_default_pod-a", 503)
 	reg := &recordingRegistry{}
 	srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 

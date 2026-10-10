@@ -94,7 +94,7 @@ thaw_agent() {
 dst_admin() { docker exec "$DST_NODE" curl -s --max-time 5 "http://127.0.0.1:9901$1"; }
 
 # app_connect_timeouts — the destination proxy's collapsed app-cluster counter
-# (every app_<pod>_<port> cluster shares alt_stat_name "app").
+# (every app_<namespace>_<pod>_<port> cluster shares alt_stat_name "app").
 app_connect_timeouts() {
 	dst_admin '/stats?filter=^cluster\.app\.upstream_cx_connect_timeout$' |
 		awk -F': ' '{ s += $2 } END { print s + 0 }'

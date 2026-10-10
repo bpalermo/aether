@@ -42,7 +42,7 @@ func inboundReadyTLS(t *testing.T, c *clusterv3.Cluster) *tlsv3.UpstreamTlsConte
 func TestInboundReadyProbeClusterAddressing(t *testing.T) {
 	c := testInboundReadyCluster(t)
 
-	assert.Equal(t, "inboundready_"+testSourcePod, c.GetName())
+	assert.Equal(t, "inboundready_aether-test_"+testSourcePod, c.GetName())
 	assert.Equal(t, clusterv3.Cluster_STATIC, c.GetClusterDiscoveryType().(*clusterv3.Cluster_Type).Type)
 
 	endpoints := c.GetLoadAssignment().GetEndpoints()
@@ -210,7 +210,7 @@ func TestInboundReadyChainAlwaysExists(t *testing.T) {
 
 // TestHealthGatewayProbesHaveSeparatePaths: each probe cluster gets its OWN
 // gateway path reflecting that cluster alone. #819 ANDed both behind
-// /healthz/health_<pod>, which made "the app is fine but the mesh inbound never
+// /healthz/health_<namespace>_<pod>, which made "the app is fine but the mesh inbound never
 // came up" indistinguishable from "the app died" — and cost main-worker-03 four
 // endpoints on 2026-09-19.
 func TestHealthGatewayProbesHaveSeparatePaths(t *testing.T) {
@@ -235,7 +235,7 @@ func TestHealthGatewayProbesHaveSeparatePaths(t *testing.T) {
 
 // TestHealthGatewayUngatedPodKeepsAppPathOnly: a pod with no inbound-readiness
 // probe gets exactly the pre-#815 gateway shape — one filter, the app path —
-// and NO /healthz/inboundready_<pod>, so the agent reads 404 there and treats
+// and NO /healthz/inboundready_<namespace>_<pod>, so the agent reads 404 there and treats
 // the pod as ungated rather than unhealthy.
 func TestHealthGatewayUngatedPodKeepsAppPathOnly(t *testing.T) {
 	hcm := gatewayHCM(t, []HealthGatewayProbe{NewHealthGatewayProbe("health_a", "")})

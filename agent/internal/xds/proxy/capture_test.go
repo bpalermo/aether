@@ -19,11 +19,11 @@ import (
 )
 
 func TestGenerateCaptureListener(t *testing.T) {
-	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
+	pod := &cniv1.CNIPod{Name: "p1", Namespace: "default", NetworkNamespace: "/var/run/netns/p1"}
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, false, nil)
 	require.NoError(t, err)
 
-	assert.Equal(t, "capture_p1", l.GetName())
+	assert.Equal(t, "capture_default_p1", l.GetName())
 	sa := l.GetAddress().GetSocketAddress()
 	assert.Equal(t, "0.0.0.0", sa.GetAddress())
 	assert.Equal(t, uint32(15001), sa.GetPortValue())
@@ -86,7 +86,7 @@ func TestGenerateCaptureListener_RequiresNetns(t *testing.T) {
 // TestGenerateCaptureListener_WithTCPServices verifies that non-HTTP services produce
 // per-ClusterIP TCP floor chains in addition to the global HCM catch-all.
 func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
-	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
+	pod := &cniv1.CNIPod{Name: "p1", Namespace: "default", NetworkNamespace: "/var/run/netns/p1"}
 	tcpSvcs := []CaptureTCPService{
 		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", PrimaryIsTCP: true},
 		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20", PrimaryIsTCP: true},
@@ -105,7 +105,7 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 	assert.True(t, names["cap_tcp_tcp:svc-a.aether.internal_18082"], "the :18082 spelling")
 	assert.True(t, names["cap_tcp_anyport_tcp:svc-a.aether.internal"], "the any-port shim, counted separately")
 	assert.True(t, names["cap_tcp_blackhole"])
-	assert.True(t, names["capture_p1"])
+	assert.True(t, names["capture_default_p1"])
 	require.Len(t, l.GetFilterChains(), 6, "2 per TCP service + HCM catch-all + blackhole")
 
 	// Collect chains by match type.

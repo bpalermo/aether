@@ -213,7 +213,7 @@ func TestServer_StatedAtThePublishedVersionAnswersTheWait(t *testing.T) {
 	require.Empty(t, resp.GetRemovedResources())
 	requirePresent(t, s.tracker, testListener)
 	requirePresent(t, s.tracker, otherListener)
-	requireAbsent(t, s.tracker, "outbound_http_no-such-pod", "the proxy said what it holds, and this is not in it")
+	requireAbsent(t, s.tracker, listenerOf("no-such-pod"), "the proxy said what it holds, and this is not in it")
 }
 
 // TestServer_StatedAtAnotherVersionWaitsForItsOwnAnswer: a listener the proxy
@@ -333,14 +333,14 @@ func TestServer_NoSnapshotYet(t *testing.T) {
 		otherListener: versionsOf[otherListener],
 	})
 	s.connected(t, 1)
-	requireNotAbsent(t, s.tracker, "outbound_http_no-such-pod", "the statement is not answered")
+	requireNotAbsent(t, s.tracker, listenerOf("no-such-pod"), "the statement is not answered")
 
 	s.publish(t, "v1", testServerListener(testListener, 1), testServerListener(otherListener, 7))
 	resp, added := p.recv()
 	require.Equal(t, []string{otherListener}, added)
 	requirePresent(t, s.tracker, testListener)
 	requireNotPresent(t, s.tracker, otherListener)
-	requireAbsent(t, s.tracker, "outbound_http_no-such-pod")
+	requireAbsent(t, s.tracker, listenerOf("no-such-pod"))
 	p.ack(resp)
 	requirePresent(t, s.tracker, otherListener)
 }

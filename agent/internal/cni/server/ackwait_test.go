@@ -118,7 +118,7 @@ func TestRemovePod_WaitsUntilAProxySaysWhatItHolds(t *testing.T) {
 
 	t.Run("a proxy that holds neither: at once", func(t *testing.T) {
 		tracker := ack.NewTracker(slog.New(slog.DiscardHandler))
-		proxyStatesItsListeners(tracker, 1, map[string]string{"outbound_http_another-pod": "h"})
+		proxyStatesItsListeners(tracker, 1, map[string]string{proxy.OutboundListenerName(validCNIPod("another-pod", "default", "container-other")): "h"})
 		s, logged := server(t, tracker)
 		remove(t, s)
 		assert.NotContains(t, logged.String(), removalNotAcked)

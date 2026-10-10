@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	udp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/udp/udp_proxy/v3"
 	network_inputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
 	"github.com/stretchr/testify/assert"
@@ -34,7 +35,7 @@ func udpArmsOf(t *testing.T, podName string, routes map[string][]L4Backend) map[
 	for svc := range routes {
 		vips[svc] = syntheticVIP(svc)
 	}
-	l, err := GenerateUDPCaptureListener(podName, "/var/run/netns/x", 18082, routes, vips)
+	l, err := GenerateUDPCaptureListener(&cniv1.CNIPod{Name: podName, Namespace: "ns", NetworkNamespace: "/var/run/netns/x"}, 18082, routes, vips)
 	require.NoError(t, err)
 	require.NotNil(t, l, "expected a UDP capture listener")
 	require.Len(t, l.GetListenerFilters(), 1)
@@ -111,7 +112,7 @@ func TestUDPCaptureListenerFullyDrainedServiceIsNotChosen(t *testing.T) {
 // honouring the drains there is no cluster to bind, and a listener that names
 // no cluster is worse than no listener (udp_proxy validates cluster non-empty).
 func TestUDPCaptureListenerAllDrainedProducesNoListener(t *testing.T) {
-	l, err := GenerateUDPCaptureListener("pod-all-drained", "/var/run/netns/x", 18082,
+	l, err := GenerateUDPCaptureListener(&cniv1.CNIPod{Name: "pod-all-drained", Namespace: "ns", NetworkNamespace: "/var/run/netns/x"}, 18082,
 		map[string][]L4Backend{
 			"ns/a": {{Service: "ns/a1", Cluster: "udp:a1.mesh", Weight: 0}},
 		},

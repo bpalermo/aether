@@ -3,6 +3,7 @@ package proxy
 import (
 	"testing"
 
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
@@ -233,7 +234,7 @@ func TestBuildCaptureTLSRouteFilterChains_EmptyRuleSkipped(t *testing.T) {
 
 // TestGenerateUDPCaptureListener_NoRoutes returns nil when udpRoutes is empty.
 func TestGenerateUDPCaptureListener_NoRoutes(t *testing.T) {
-	l, err := GenerateUDPCaptureListener("pod-1", "/proc/1/ns/net", 18082, nil, nil)
+	l, err := GenerateUDPCaptureListener(&cniv1.CNIPod{Name: "pod-1", Namespace: "ns", NetworkNamespace: "/proc/1/ns/net"}, 18082, nil, nil)
 	require.NoError(t, err)
 	assert.Nil(t, l, "should return nil when no routes are provided")
 }
@@ -244,10 +245,10 @@ func TestGenerateUDPCaptureListener_WithRoutes(t *testing.T) {
 	routes := map[string][]L4Backend{
 		"svc-f": {{Service: "svc-f", Cluster: "tcp:svc-f.aether.internal", Weight: 1}},
 	}
-	l, err := GenerateUDPCaptureListener("pod-2", "/proc/2/ns/net", 18082, routes, map[string]string{"svc-f": "10.96.0.6"})
+	l, err := GenerateUDPCaptureListener(&cniv1.CNIPod{Name: "pod-2", Namespace: "ns", NetworkNamespace: "/proc/2/ns/net"}, 18082, routes, map[string]string{"svc-f": "10.96.0.6"})
 	require.NoError(t, err)
 	require.NotNil(t, l)
-	assert.Equal(t, "capture_udp_pod-2", l.Name)
+	assert.Equal(t, "capture_udp_ns_pod-2", l.Name)
 	// Protocol must be UDP
 	sa := l.GetAddress().GetSocketAddress()
 	require.NotNil(t, sa)
