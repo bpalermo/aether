@@ -124,7 +124,7 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 		// The "inbound_<namespace>_<pod>" shape is what the aether.pod stats_tag extracts, so
 		// exports collapse to listener.inbound.* labeled by pod while the stats
 		// stay per-pod. HCM stats (5x larger) aggregate node-wide instead.
-		StatPrefix:       InboundListenerName(cniPod),
+		StatPrefix:       podStatName(InboundListenerName(cniPod)),
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  listenerFilters,
 		FilterChains:     chains,
@@ -232,7 +232,7 @@ func buildInboundTCPPortFilterChain(cniPod *cniv1.CNIPod, port uint16, tlsCertif
 		},
 		TransportSocket: DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain),
 		Filters: []*listenerv3.Filter{
-			buildTCPProxyNetworkFilter(fmt.Sprintf("%s_%s_%d", inboundTCPFloorStatPrefix, PodResourceKey(cniPod), port), appCluster),
+			buildTCPProxyNetworkFilter(fmt.Sprintf("%s_%s_%d", inboundTCPFloorStatPrefix, PodStatKey(cniPod), port), appCluster),
 		},
 	}
 }
@@ -244,7 +244,7 @@ func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, t
 		FilterChainMatch: nil, // default chain: no ALPN / no SNI → the TCP floor
 		TransportSocket:  DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain),
 		Filters: []*listenerv3.Filter{
-			buildTCPProxyNetworkFilter(inboundTCPFloorStatPrefix+"_"+PodResourceKey(cniPod), appCluster),
+			buildTCPProxyNetworkFilter(inboundTCPFloorStatPrefix+"_"+PodStatKey(cniPod), appCluster),
 		},
 	}
 }
@@ -412,7 +412,7 @@ func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain, meshDomain string
 		// Same per-pod stats shape as the TCP inbound, with the _h3 suffix the
 		// aether.pod stats_tag ignores, so listener.inbound.* is labelled by pod
 		// for both transports.
-		StatPrefix:       InboundQUICListenerName(cniPod),
+		StatPrefix:       podStatName(InboundQUICListenerName(cniPod)),
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		FilterChains:     chains,
 	}, nil

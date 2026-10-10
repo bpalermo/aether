@@ -257,7 +257,7 @@ func GenerateUDPCaptureListener(cniPod *cniv1.CNIPod, captureUDPPort uint32, udp
 	// with "N filter chain(s) specified for connection-less UDP listener" -- so the
 	// proxy config goes in listener_filters instead.
 	udpProxyConfig := config.TypedConfig(&udp_proxyv3.UdpProxyConfig{
-		StatPrefix: CaptureUDPListenerName(cniPod),
+		StatPrefix: podStatName(CaptureUDPListenerName(cniPod)),
 		RouteSpecifier: &udp_proxyv3.UdpProxyConfig_Matcher{
 			Matcher: &matcherv3.Matcher{
 				MatcherType: &matcherv3.Matcher_MatcherTree_{
@@ -298,7 +298,7 @@ func GenerateUDPCaptureListener(cniPod *cniv1.CNIPod, captureUDPPort uint32, udp
 		// PREBIND inside the pod netns; needs CAP_NET_ADMIN, which the proxy
 		// pod grants (charts/aether, aether_proxy_net_admin_test).
 		Transparent:      wrapperspb.Bool(true),
-		StatPrefix:       CaptureUDPListenerName(cniPod),
+		StatPrefix:       podStatName(CaptureUDPListenerName(cniPod)),
 		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
 		ListenerFilters: []*listenerv3.ListenerFilter{
 			{
