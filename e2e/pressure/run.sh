@@ -1,16 +1,33 @@
 #!/usr/bin/env bash
 # Collector-shedding harness for issue #662 (fix: #668).
 #
-# Deliberately drives the shared otel-collector into memory_limiter shedding, then
-# restarts ONE node's aether-agent under that pressure and asserts the agent still
-# starts, resolves its SPIRE identity and serves. Four soaks never reproduced this
-# condition — over the last two the collector peaked at ~22% of its shedding threshold
-# with zero refusals — so the branch #668 fixed has never been exercised since it landed.
+# Deliberately drives the cluster's shared OpenTelemetry collector into
+# memory_limiter shedding, then restarts ONE node's aether-agent under that
+# pressure and asserts the agent still starts, resolves its SPIRE identity and
+# serves. Four soaks never reproduced this condition — over the last two the
+# collector peaked at ~22% of its shedding threshold with zero refusals — so the
+# branch #668 fixed has never been exercised since it landed.
 #
 # Read README.md first. NEVER run this during a soak.
 #
-#   bash e2e/pressure/run.sh --node <node> --dry-run           # resolve + print, touch nothing
+# Three inputs have no default, because any default would be one cluster's
+# layout (#1579): the kube context you mean to pressure, and the namespaces of
+# the collector and of Prometheus.
+#
+#   export EXPECT_CONTEXT=<kube-context> COLLECTOR_NS=<collector-namespace> PROM_NS=<prometheus-namespace>
+#   bash e2e/pressure/run.sh --node <node> --dry-run           # resolve + print, change nothing
 #   bash e2e/pressure/run.sh --node <node> --no-soak-running
+#
+# WHAT A FAILED QUESTION MEANS (#1578). Every kubectl and curl call of this
+# script either gets an answer or aborts the run with exit 2 and the tool's own
+# error on the terminal: "could not ask" is never read as "absent", and never
+# as a verdict. Where absence is an answer (no such node, no agent pod yet, no
+# GOMEMLIMIT, no sample in Prometheus) it is read from a call that succeeded.
+# The wait loops ask again after a failed call, and at their deadline abort
+# (exit 2), not FAIL (exit 1), when the last call failed, or when fewer than
+# MIN_POLL_OK_PCT percent of their polls got an answer even though the last
+# one did (#1599): one look in a window of failed calls is not a watch.
+# README.md has the table.
 #
 # WHAT THE SOAK GUARD CAN AND CANNOT KNOW (#1555). A soak is run by an external
 # soak harness, maintained outside this repository. What such a harness may read
@@ -51,19 +68,26 @@ JOB_NS="${JOB_NS:-aether-test}"
 AGENT_NS="${AGENT_NS:-aether-system}"
 AGENT_SELECTOR="${AGENT_SELECTOR:-app.kubernetes.io/name=aether-agent}"
 AGENT_CONTAINER="${AGENT_CONTAINER:-agent}"
-PROM_NS="${PROM_NS:-prometheus}"
+# No default (#1579): the namespace Prometheus runs in, the namespace the
+# collector runs in, and the kube context the run is meant for. `preflight_inputs`
+# aborts a run that lacks one, before it asks the cluster anything.
+PROM_NS="${PROM_NS:-}"
 PROM_SVC="${PROM_SVC:-prometheus-server}"
-COLLECTOR_NS="${COLLECTOR_NS:-o11y}"
+COLLECTOR_NS="${COLLECTOR_NS:-}"
 COLLECTOR_DEPLOY="${COLLECTOR_DEPLOY:-otel-collector}"
 # Derived from the Deployment's own .spec.selector at run time when left empty.
-# Do NOT default this to app.kubernetes.io/name=opentelemetry-collector: the
-# single-replica otel-scraper Deployment carries the same name label, and pulling
-# its pods into the set would both add a bogus port-forward and fold a second
-# process's refused counters into the sums.
+# Do NOT default this to app.kubernetes.io/name=opentelemetry-collector: every
+# Deployment of the upstream collector chart carries that name label (a second,
+# scraping collector for one), and pulling another Deployment's pods into the
+# set would both add a bogus port-forward and fold a second process's refused
+# counters into the sums.
 COLLECTOR_SELECTOR="${COLLECTOR_SELECTOR:-}"
 COLLECTOR_CONTAINER="${COLLECTOR_CONTAINER:-opentelemetry-collector}"
 COLLECTOR_METRICS_PORT="${COLLECTOR_METRICS_PORT:-8888}"
-EXPECT_CONTEXT="${EXPECT_CONTEXT:-talos-main}"
+# The OTLP gRPC endpoint the pressure Job floods. Left empty, it is the
+# collector Deployment's same-named Service: <deploy>.<namespace>.svc.cluster.local:4317.
+COLLECTOR_OTLP_ENDPOINT="${COLLECTOR_OTLP_ENDPOINT:-}"
+EXPECT_CONTEXT="${EXPECT_CONTEXT:-}"
 
 # The soak guard (see the header). NO_SOAK_RUNNING=1 is the operator's
 # acknowledgement, the same as --no-soak-running. SOAK_POD_SELECTOR is empty on
@@ -80,13 +104,17 @@ SOAK_POD_SELECTOR="${SOAK_POD_SELECTOR:-}"
 METRICS_SOURCE="${METRICS_SOURCE:-auto}"
 
 # Series selector for the SHARED collector's self-telemetry in Prometheus.
-# Deliberately not a bare job= match: otel-scraper and the eBPF profiler also emit
-# otelcol_* series.
-COLLECTOR_SEL='instance=~"otel-collector-.*"'
+# Left empty, discover_collector_pods makes it of the exact names of the
+# replicas it found: `instance=~"<pod>|<pod>"`. Not a prefix of the
+# Deployment's name, which the pods of another Deployment share
+# (`<name>-scraper-...`), and not a bare job= match: any other collector-based
+# process in the cluster (a scraper, a profiler) also emits otelcol_* series,
+# and its heap or its refusals must not drive this run's ceilings or verdict.
+COLLECTOR_SEL="${COLLECTOR_SEL:-}"
 
-# memory_limiter settings from the deployed o11y/otel-collector ConfigMap. The
-# absolute thresholds are derived from the pod's real memory limit at run time
-# rather than hard-coded, so a resize of the o11y plane cannot silently invalidate
+# memory_limiter settings, as in the collector's deployed config. The absolute
+# thresholds are derived from the pod's real memory limit at run time rather
+# than hard-coded, so a resize of the collector cannot silently invalidate
 # them.
 LIMIT_PCT="${LIMIT_PCT:-80}" # memory_limiter limit_percentage
 SPIKE_PCT="${SPIKE_PCT:-25}" # memory_limiter spike_limit_percentage
@@ -118,9 +146,23 @@ SERIES_FRESH_MAX_AGE="${SERIES_FRESH_MAX_AGE:-120}"
 # is pushed to anyway).
 POLL_INTERVAL="${POLL_INTERVAL:-}"
 
+# The share of a wait loop's polls that must have got an answer before its
+# deadline may be read as a FAIL (#1599). A FAIL is a verdict on the agent, and
+# one answered poll in a window of failed ones is one look, not a watch.
+MIN_POLL_OK_PCT="${MIN_POLL_OK_PCT:-50}"
+
 MIB=$((1024 * 1024))
 
 JOB_APPLIED=0
+# 1 from the moment this run asks for the agent pod's deletion: the request may
+# have been acted on even if its answer was lost.
+AGENT_RESTARTED=0
+# 1 from the moment this run asks for the Job to be applied, for good: JOB_APPLIED
+# goes back to 0 when the Job is deleted, and "none applied now" is not "none
+# was ever applied".
+JOB_EVER_APPLIED=0
+OLD_POD=""
+KUBE_CONTEXT=""
 PF_PID=""
 PF_LOG=""
 PROM_PORT=""
@@ -149,17 +191,28 @@ usage: $0 --node <node-name> [options]
   --ready-timeout N      seconds for the replacement agent pod to become Ready (default ${AGENT_READY_TIMEOUT})
   --job-manifest PATH    pressure Job manifest (default ${JOB_MANIFEST})
   -h, --help             this text
+
+required environment (no default: each is your cluster's own):
+  EXPECT_CONTEXT         the kube context this run is meant for; the run aborts
+                         when the current context is another one
+  COLLECTOR_NS           namespace of the collector Deployment (COLLECTOR_DEPLOY,
+                         default ${COLLECTOR_DEPLOY})
+  PROM_NS                namespace of the Prometheus Service (PROM_SVC, default
+                         ${PROM_SVC})
 EOF
 }
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 step() { printf '\n%s ==== %s\n' "$(date -u +%FT%TZ)" "$*"; }
+# die and fail end the run. Called inside a $(...), their message would go to
+# the caller's variable and the run would end without a word (#1578), so there
+# it goes to stderr; the exit status reaches the caller either way.
 die() {
-	log "ABORT: $*"
+	if [ "${BASH_SUBSHELL:-0}" -gt 0 ]; then log "ABORT: $*" >&2; else log "ABORT: $*"; fi
 	exit 2
 }
 fail() {
-	log "FAIL: $*"
+	if [ "${BASH_SUBSHELL:-0}" -gt 0 ]; then log "FAIL: $*" >&2; else log "FAIL: $*"; fi
 	exit 1
 }
 mib() { echo $(($1 / MIB)); }
@@ -224,7 +277,10 @@ cleanup() {
 	trap - EXIT INT TERM
 	if [ "$JOB_APPLIED" = 1 ]; then
 		log "cleanup: deleting job ${JOB_NS}/${JOB_NAME}"
-		kubectl -n "$JOB_NS" delete job "$JOB_NAME" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+		# The exit status of the run stands. A delete that failed is said: the
+		# flood may still be running.
+		delete_job ||
+			log "WARN: could not confirm the deletion of job ${JOB_NS}/${JOB_NAME} (kubectl's error is above). It may still be running: check, and delete it by hand (kubectl --context ${EXPECT_CONTEXT} -n ${JOB_NS} delete job ${JOB_NAME}). Its activeDeadlineSeconds ends it regardless."
 	fi
 	if [ -n "$PF_PID" ]; then kill "$PF_PID" >/dev/null 2>&1 || true; fi
 	if [ -n "$PF_LOG" ]; then rm -f "$PF_LOG"; fi
@@ -235,6 +291,22 @@ cleanup() {
 
 # ------------------------------------------------------------------- helpers
 
+# kc: kubectl against the context the run is meant for. The current context is
+# checked once (preflight_cluster), and it can change under a run that lasts
+# minutes: making a kind cluster takes it. So no call after the check relies
+# on it, and no apply or delete, the cleanup trap's included, can land on
+# another cluster.
+kc() { kubectl --context "$EXPECT_CONTEXT" "$@"; }
+
+# delete_job: deletes the pressure Job. A Job that is not there is fine
+# (--ignore-not-found). An API error is not: kubectl's status is returned and
+# its error stays on stderr. A failed delete is one whose outcome is not known
+# (the API server may have acted before the answer was lost), so a caller may
+# say neither "deleted" nor "not deleted" of it.
+delete_job() {
+	kc -n "$JOB_NS" delete job "$JOB_NAME" --ignore-not-found --wait=false >/dev/null
+}
+
 # parse_bytes <quantity> -> bytes. Accepts Go's GOMEMLIMIT spelling (B/KiB/MiB/GiB/TiB)
 # and Kubernetes resource quantities (Ki/Mi/Gi/Ti and k/M/G/T), plus a bare byte count.
 parse_bytes() {
@@ -244,7 +316,9 @@ parse_bytes() {
 	unit="${q#"$num"}"
 	[ -n "$num" ] || return 1
 	case "$unit" in
-	"" | B | b) echo "${num%.*}" ;;
+	# Through awk like the others, so that a count with leading zeros comes out
+	# decimal: the callers compute with it.
+	"" | B | b) awk -v n="$num" 'BEGIN{printf "%.0f", n}' ;;
 	KiB | Ki | K | k) awk -v n="$num" 'BEGIN{printf "%.0f", n*1024}' ;;
 	MiB | Mi | M) awk -v n="$num" 'BEGIN{printf "%.0f", n*1024*1024}' ;;
 	GiB | Gi | G) awk -v n="$num" 'BEGIN{printf "%.0f", n*1024*1024*1024}' ;;
@@ -263,7 +337,7 @@ start_pf() {
 	# Create the log before forking: the first sed below can otherwise race the
 	# background redirection and print a spurious "can't read" to stderr.
 	: >"$logf"
-	kubectl -n "$ns" port-forward "$target" ":${port}" --address 127.0.0.1 >"$logf" 2>&1 &
+	kc -n "$ns" port-forward "$target" ":${port}" --address 127.0.0.1 >"$logf" 2>&1 &
 	pid=$!
 	while [ "$waited" -lt 30 ]; do
 		# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail,
@@ -290,9 +364,8 @@ start_pf() {
 # ---------------------------------------------------------------- Prometheus
 
 start_port_forward() {
-	# The Prometheus LB address is not reachable from a workstation and `kubectl exec`
-	# into Prometheus is not permitted here, so everything is read over a port-forward
-	# on an ephemeral local port.
+	# Read over a port-forward on an ephemeral local port: it needs neither a
+	# route from the operator's machine to Prometheus nor an exec into its pod.
 	local out
 	PF_LOG="${SCRATCH}/prom-pf.log"
 	out=$(start_pf "$PROM_NS" "svc/${PROM_SVC}" 80 "$PF_LOG") || {
@@ -304,43 +377,71 @@ start_port_forward() {
 	log "prometheus reachable on 127.0.0.1:${PROM_PORT} (port-forward pid ${PF_PID})"
 }
 
-# promq <promql> -> first sample's value, floored to an integer. Empty on no data.
+# promq <promql> -> first sample's value, floored to an integer.
+# Status 0 with empty output: Prometheus answered, and the answer has no sample.
+# Non-zero, with the reason on stderr: the query could not be sent, or
+# Prometheus did not answer it (an error status, or something that is not its
+# JSON). The two are different answers and no caller may fold them (#1578).
 promq() {
-	local out
+	local out v
 	out=$(curl -sS --max-time 10 --get --data-urlencode "query=$1" \
-		"http://127.0.0.1:${PROM_PORT}/api/v1/query" 2>/dev/null) || return 0
-	jq -r 'if .status == "success" and (.data.result | length) > 0
-	       then (.data.result[0].value[1] | tonumber | floor)
-	       else "" end' <<<"$out" 2>/dev/null || echo ""
-}
-
-# promq_req <promql> <what> -> like promq, but a missing sample is fatal.
-promq_req() {
-	local v
-	v=$(promq "$1")
-	[ -n "$v" ] || die "no data for $2 — is Prometheus healthy? (query: $1)"
+		"http://127.0.0.1:${PROM_PORT}/api/v1/query") || return 1
+	v=$(jq -r 'if .status == "success"
+	           then (if (.data.result | length) > 0
+	                 then (.data.result[0].value[1] | tonumber | floor)
+	                 else "" end)
+	           else error("prometheus answered status=\(.status): \(.error // "no error text")") end' <<<"$out") || {
+		printf 'prometheus did not answer the query: %s\n' "${out:0:300}" >&2
+		return 1
+	}
 	echo "$v"
 }
 
+# promq_req <promql> <what> -> like promq, but a missing sample is fatal, and
+# so is a query that could not be asked. The message says which.
+promq_req() {
+	local v
+	v=$(promq "$1") ||
+		die "could not query Prometheus for $2 (the error is above) — not reading that as no data (query: $1)"
+	[ -n "$v" ] || die "no data for $2 — Prometheus answered with no sample (query: $1)"
+	echo "$v"
+}
+
+# The age in seconds of the agent's exported series; promq's contract.
 series_age() { promq "time() - timestamp(aether_agent_storage_pods{node=\"${NODE}\"})"; }
 
 # ------------------------------------------------- collector self-telemetry
 
 discover_collector_pods() {
-	local names sel
+	local names sel dep
 	if [ -n "$COLLECTOR_SELECTOR" ]; then
 		sel="$COLLECTOR_SELECTOR"
 	else
-		sel=$(kubectl -n "$COLLECTOR_NS" get deploy "$COLLECTOR_DEPLOY" -o json 2>/dev/null |
-			jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')
-		[ -n "$sel" ] && [ "$sel" != "null" ] ||
-			die "could not read .spec.selector.matchLabels from ${COLLECTOR_NS}/${COLLECTOR_DEPLOY}"
+		dep=$(kc -n "$COLLECTOR_NS" get deploy "$COLLECTOR_DEPLOY" -o json) ||
+			die "could not read Deployment ${COLLECTOR_NS}/${COLLECTOR_DEPLOY} (kubectl's error is above)"
+		sel=$(jq -r '.spec.selector.matchLabels // {} | to_entries | map("\(.key)=\(.value)") | join(",")' <<<"$dep") ||
+			die "could not read .spec.selector.matchLabels from ${COLLECTOR_NS}/${COLLECTOR_DEPLOY}: kubectl's answer is not the Deployment's JSON"
+		[ -n "$sel" ] ||
+			die "could not read .spec.selector.matchLabels from ${COLLECTOR_NS}/${COLLECTOR_DEPLOY}: the Deployment has none"
 	fi
-	names=$(kubectl -n "$COLLECTOR_NS" get pods -l "$sel" \
+	# An empty list is "none Running"; a list that could not be read is not.
+	names=$(kc -n "$COLLECTOR_NS" get pods -l "$sel" \
 		--field-selector status.phase=Running \
-		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}') ||
+		die "could not list the collector pods (-l ${sel}) of ${COLLECTOR_NS} (kubectl's error is above) — not reading that as none Running"
 	[ -n "$names" ] || die "no Running collector pods matched -l ${sel} in ${COLLECTOR_NS}"
 	mapfile -t COLLECTOR_PODS <<<"$names"
+	if [ -z "$COLLECTOR_SEL" ]; then
+		# The names go into a regex inside a PromQL string. The one regex
+		# character a pod's name may hold is the dot, escaped twice: once for
+		# the string, once for the regex.
+		local alt
+		alt=$(
+			IFS='|'
+			printf '%s' "${COLLECTOR_PODS[*]}"
+		)
+		COLLECTOR_SEL="instance=~\"${alt//./\\\\.}\""
+	fi
 	log "collector replicas (-l ${sel}): ${COLLECTOR_PODS[*]}"
 }
 
@@ -351,8 +452,12 @@ discover_collector_pods() {
 resolve_collector_limits() {
 	local pod=${COLLECTOR_PODS[0]} raw lim csel
 	csel='{.spec.containers[?(@.name=="'"$COLLECTOR_CONTAINER"'")]'
-	raw=$(kubectl -n "$COLLECTOR_NS" get pod "$pod" -o jsonpath="${csel}.env[?(@.name=='GOMEMLIMIT')].value}" 2>/dev/null)
-	lim=$(kubectl -n "$COLLECTOR_NS" get pod "$pod" -o jsonpath="${csel}.resources.limits.memory}" 2>/dev/null)
+	# A jsonpath that matches nothing prints nothing and succeeds: that is the
+	# "not set" answer. A kubectl that failed has not said "not set".
+	raw=$(kc -n "$COLLECTOR_NS" get pod "$pod" -o jsonpath="${csel}.env[?(@.name=='GOMEMLIMIT')].value}") ||
+		die "could not read GOMEMLIMIT of ${COLLECTOR_NS}/${pod} (kubectl's error is above) — not reading that as not set"
+	lim=$(kc -n "$COLLECTOR_NS" get pod "$pod" -o jsonpath="${csel}.resources.limits.memory}") ||
+		die "could not read the memory limit of ${COLLECTOR_NS}/${pod} (kubectl's error is above) — not reading that as no limit"
 	[ -n "$lim" ] || die "container ${COLLECTOR_CONTAINER} in ${COLLECTOR_NS}/${pod} has no memory limit — cannot size the safety ceilings"
 	POD_MEM_LIMIT_BYTES=$(parse_bytes "$lim") || die "cannot parse the container memory limit '${lim}'"
 	if [ -n "$raw" ]; then
@@ -374,22 +479,30 @@ resolve_collector_limits() {
 # Returns non-zero if any replica does not answer, in which case the caller falls
 # back to Prometheus.
 start_collector_metrics() {
-	local i=0 pod out pid port body
+	local i=0 pod out pid port body missing
 	for pod in "${COLLECTOR_PODS[@]}"; do
 		CPF_LOGS[i]="${SCRATCH}/collector-pf-${i}.log"
 		out=$(start_pf "$COLLECTOR_NS" "pod/${pod}" "$COLLECTOR_METRICS_PORT" "${CPF_LOGS[i]}") || {
 			pid=${out%% *}
 			CPF_PIDS[i]=$pid
-			log "WARN: no port-forward to ${pod}:${COLLECTOR_METRICS_PORT}"
+			log "WARN: no port-forward to ${pod}:${COLLECTOR_METRICS_PORT}: $(tr '\n' ' ' <"${CPF_LOGS[i]}")"
 			return 1
 		}
 		pid=${out%% *}
 		port=${out##* }
 		CPF_PIDS[i]=$pid
 		CPF_PORTS[i]=$port
-		body=$(curl -sS --max-time 8 "http://127.0.0.1:${port}/metrics" 2>/dev/null) || body=""
-		if ! grep -q '^otelcol_' <<<"$body"; then
-			log "WARN: ${pod}:${COLLECTOR_METRICS_PORT}/metrics did not serve otelcol_* samples"
+		# Three different things, said apart: no port-forward (above), a fetch
+		# that failed (a collector with no pull reader listens on no such port),
+		# and an answer without the two gauges the safety ceilings read.
+		body="${SCRATCH}/metrics-first-${i}.txt"
+		if ! curl -fsS --max-time 8 "http://127.0.0.1:${port}/metrics" -o "$body"; then
+			log "WARN: could not fetch ${pod}:${COLLECTOR_METRICS_PORT}/metrics (curl's error is above)"
+			return 1
+		fi
+		missing=$(missing_safety_samples "$body")
+		if [ -n "$missing" ]; then
+			log "WARN: ${pod}:${COLLECTOR_METRICS_PORT}/metrics did not serve ${missing}: without it a safety ceiling could never fire, so this endpoint is not used"
 			return 1
 		fi
 		i=$((i + 1))
@@ -402,6 +515,22 @@ stop_collector_metrics() {
 	for pid in ${CPF_PIDS[@]+"${CPF_PIDS[@]}"}; do kill "$pid" >/dev/null 2>&1 || true; done
 	CPF_PIDS=()
 	CPF_PORTS=()
+}
+
+# The two gauges the safety ceilings are read from (track_memory).
+SAFETY_SAMPLES='otelcol_process_runtime_heap_alloc_bytes otelcol_process_memory_rss_bytes'
+
+# missing_safety_samples <file> -> the names in SAFETY_SAMPLES that the
+# /metrics body in <file> has no sample of; nothing when both are there.
+# agg_samples reads a gauge that is not there as 0, and a ceiling compared
+# with 0 never fires. So "any otelcol_* sample" is not enough: both gauges
+# must be there, on the first fetch and on every poll.
+missing_safety_samples() {
+	local name out=""
+	for name in $SAFETY_SAMPLES; do
+		grep -qE "^${name}[{ ]" "$1" || out="${out}${out:+ }${name}"
+	done
+	printf '%s' "$out"
 }
 
 # agg_samples <file> <mode:sum|max> <name-alternation> -> integer.
@@ -425,15 +554,21 @@ REFUSED_LOGS_NAMES='otelcol_processor_memory_limiter_refused_log_records|otelcol
 # heap/RSS are the MAX across replicas (each is a per-process limit); the refused
 # counters are the SUM (any replica shedding is shedding).
 collector_snapshot() {
-	local i=0 f v
+	local i=0 f v missing
 	M_HEAP=0
 	M_RSS=0
 	M_POINTS=0
 	M_LOGS=0
 	for i in "${!CPF_PORTS[@]}"; do
 		f="${SCRATCH}/metrics-${i}.txt"
-		curl -sS --max-time 8 "http://127.0.0.1:${CPF_PORTS[i]}/metrics" -o "$f" 2>/dev/null ||
-			die "lost the metrics port-forward to ${COLLECTOR_PODS[i]} — re-run, or force --metrics-source prometheus"
+		curl -fsS --max-time 8 "http://127.0.0.1:${CPF_PORTS[i]}/metrics" -o "$f" ||
+			die "could not read ${COLLECTOR_PODS[i]}'s /metrics over its port-forward (curl's error is above) — re-run, or force --metrics-source prometheus"
+		# A gauge that is not in the answer (another server's page, or a gauge
+		# that was there a poll ago) would aggregate to 0, which reads as a
+		# healthy, idle collector and disarms that gauge's ceiling.
+		missing=$(missing_safety_samples "$f")
+		[ -z "$missing" ] ||
+			die "${COLLECTOR_PODS[i]}'s /metrics answered without ${missing} — a gauge that is not there is not a zero, and its safety ceiling could not fire"
 		v=$(agg_samples "$f" max 'otelcol_process_runtime_heap_alloc_bytes')
 		[ "$v" -le "$M_HEAP" ] || M_HEAP=$v
 		v=$(agg_samples "$f" max 'otelcol_process_memory_rss_bytes')
@@ -444,6 +579,9 @@ collector_snapshot() {
 }
 
 prom_snapshot() {
+	# `metric{}` would select every collector in the cluster.
+	[ -n "$COLLECTOR_SEL" ] ||
+		die "no series selector for the collector: the replicas were not discovered yet, and COLLECTOR_SEL is not set"
 	M_HEAP=$(promq_req "max(otelcol_process_runtime_heap_alloc_bytes{${COLLECTOR_SEL}})" "collector heap")
 	M_RSS=$(promq_req "max(otelcol_process_memory_rss_bytes{${COLLECTOR_SEL}})" "collector RSS")
 	# `or` unions the two metric names (their __name__ labels differ, so nothing is
@@ -488,24 +626,118 @@ select_metrics_source() {
 
 # --------------------------------------------------------------- pre-flight
 
-agent_pod_on_node() {
-	kubectl -n "$AGENT_NS" get pods -l "$AGENT_SELECTOR" \
+# The names of the agent pods on ${NODE}, one per line. No output with status 0
+# is "none": between the old pod going and its replacement being created there
+# is none, and that is an answer. A non-zero status is kubectl's, with its
+# error on stderr: the list could not be read. (`{.items[0]...}` cannot tell
+# the two apart: kubectl fails on an empty list with it.)
+agent_pods_on_node() {
+	kc -n "$AGENT_NS" get pods -l "$AGENT_SELECTOR" \
 		--field-selector "spec.nodeName=${NODE}" \
-		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
 }
 
-pod_field() { kubectl -n "$AGENT_NS" get pod "$1" -o jsonpath="$2" 2>/dev/null; }
+# sole_agent_pod <names>: the one agent pod of the node, or an abort (#1601).
+# Two pods are a surge-rolled standby next to the owner (proposal 041), or a
+# replacement next to a pod that is still terminating. Which of them this run
+# would restart, and which one's status it would read, is not the script's to
+# guess.
+sole_agent_pod() {
+	local n
+	n=$(printf '%s\n' "$1" | wc -l | tr -d ' ')
+	[ "$n" = 1 ] ||
+		die "${n} aether-agent pods on node ${NODE} ($(printf '%s' "$1" | tr '\n' ' ')) — a roll's standby, or a pod still terminating, is next to the owner. Wait until the node has one agent pod, then run again."
+	printf '%s\n' "$1"
+}
+
+# polls_support_fail <last-answered> <answered> <polls> <what could not be asked>:
+# returns when a wait loop that ran out of time may FAIL; aborts (exit 2) when
+# its polls do not support a verdict: the last one failed, or fewer than
+# MIN_POLL_OK_PCT percent of them got an answer.
+polls_support_fail() {
+	[ "$1" = 1 ] ||
+		die "$4 when the time ran out — this is not a verdict on the agent"
+	[ $(($2 * 100)) -ge $(($3 * MIN_POLL_OK_PCT)) ] ||
+		die "$4 on most polls: only $2 of $3 polls got an answer, and a FAIL needs ${MIN_POLL_OK_PCT}% (MIN_POLL_OK_PCT) — this is not a verdict on the agent"
+}
+
+# No output with status 0: the field is not set. Non-zero: it could not be read.
+pod_field() { kc -n "$AGENT_NS" get pod "$1" -o jsonpath="$2"; }
 
 agent_status() { pod_field "$1" '{.status.containerStatuses[?(@.name=="'"$AGENT_CONTAINER"'")]'"$2"'}'; }
 
+# whole_number <variable name> <min> [max]: aborts unless the variable holds a
+# whole number (digits only) of at least <min>, and at most <max> when given,
+# and rewrites it in decimal without leading zeros. The shell's arithmetic reads a leading zero as octal:
+# 08 is an error there ("value too great for base"), which under errexit ends
+# the run with the shell's status 1, this script's FAIL, and 010 is eight.
+whole_number() {
+	local name=$1 min=$2 max=${3:-} v=${!1} range
+	if [ -n "$max" ]; then range=" from ${min} to ${max}"; else range=" of at least ${min}"; fi
+	case "$v" in
+	"" | *[!0-9]*) die "${name} must be a whole number${range} (got '${v}')" ;;
+	esac
+	[ "$((10#$v))" -ge "$min" ] ||
+		die "${name} must be a whole number${range} (got '${v}')"
+	[ -z "$max" ] || [ "$((10#$v))" -le "$max" ] ||
+		die "${name} must be a whole number${range} (got '${v}')"
+	printf -v "$name" '%d' "$((10#$v))"
+}
+
+# The inputs that have no default: each is the layout of one cluster, so a
+# default would be a guess (#1579). main calls this before any command is run.
+preflight_inputs() {
+	local missing=""
+	local v
+	# Every numeric input, checked and made decimal here, before anything
+	# computes with it (whole_number). MIN_POLL_OK_PCT above 100 would make a
+	# FAIL impossible; the other percentages are of a limit.
+	for v in MIN_POLL_OK_PCT LIMIT_PCT SPIKE_PCT ABORT_HEAP_PCT ABORT_RSS_PCT; do
+		whole_number "$v" 0 100
+	done
+	# The soft limit is (LIMIT_PCT - SPIKE_PCT) percent of the pod's memory, and
+	# the baseline is divided by it: it must be more than nothing.
+	[ "$LIMIT_PCT" -gt "$SPIKE_PCT" ] ||
+		die "LIMIT_PCT (${LIMIT_PCT}) must be greater than SPIKE_PCT (${SPIKE_PCT}): the soft limit is their difference"
+	# At least 1: a wait of zero seconds makes no call, and its deadline would
+	# still read as a FAIL.
+	for v in PRESSURE_TIMEOUT POD_APPEAR_TIMEOUT AGENT_READY_TIMEOUT RECOVERY_TIMEOUT \
+		SERIES_FRESH_TIMEOUT SERIES_FRESH_MAX_AGE; do
+		whole_number "$v" 1
+	done
+	whole_number COLLECTOR_METRICS_PORT 1 65535
+	# Empty means "decide by the metrics source" (select_metrics_source). Zero
+	# would poll without a pause.
+	[ -z "$POLL_INTERVAL" ] || whole_number POLL_INTERVAL 1
+	[ -n "$EXPECT_CONTEXT" ] || missing="${missing} EXPECT_CONTEXT (the kube context this run is meant for)"
+	[ -n "$COLLECTOR_NS" ] || missing="${missing} COLLECTOR_NS (the namespace of the ${COLLECTOR_DEPLOY} Deployment)"
+	[ -n "$PROM_NS" ] || missing="${missing} PROM_NS (the namespace of the ${PROM_SVC} Service)"
+	[ -z "$missing" ] || die "set:${missing}. They have no default: see --help."
+	[ -n "$COLLECTOR_OTLP_ENDPOINT" ] ||
+		COLLECTOR_OTLP_ENDPOINT="${COLLECTOR_DEPLOY}.${COLLECTOR_NS}.svc.cluster.local:4317"
+}
+
 preflight_cluster() {
-	local ctx ready spec
-	ctx=$(kubectl config current-context)
-	[ "$ctx" = "$EXPECT_CONTEXT" ] || die "kubectl context is '${ctx}', expected '${EXPECT_CONTEXT}' (set EXPECT_CONTEXT to override)"
-	kubectl get node "$NODE" >/dev/null 2>&1 || die "node ${NODE} not found"
-	spec=$(kubectl -n "$COLLECTOR_NS" get deploy "$COLLECTOR_DEPLOY" -o jsonpath='{.spec.replicas}')
-	ready=$(kubectl -n "$COLLECTOR_NS" get deploy "$COLLECTOR_DEPLOY" -o jsonpath='{.status.readyReplicas}')
-	[ "$ready" = "$spec" ] || die "otel-collector is ${ready}/${spec} ready — fix the o11y plane before pressuring it"
+	local ctx ready spec out
+	ctx=$(kubectl config current-context) ||
+		die "could not read the current kube context (kubectl's error is above)"
+	[ "$ctx" = "$EXPECT_CONTEXT" ] || die "kubectl context is '${ctx}', expected '${EXPECT_CONTEXT}' (EXPECT_CONTEXT names the context this run is meant for)"
+	# From here on every call names this context (kc).
+	KUBE_CONTEXT=$ctx
+	# --ignore-not-found: an absent node is an empty answer with status 0, so a
+	# non-zero status is "could not ask" and nothing else.
+	out=$(kc get node "$NODE" --ignore-not-found -o name) ||
+		die "could not ask for node ${NODE} (kubectl's error is above) — not reading that as an absent node"
+	[ -n "$out" ] || die "node ${NODE} not found"
+	# No --ignore-not-found: the collector is required, and kubectl's own
+	# NotFound is the message for a Deployment that is not there.
+	out=$(kc -n "$COLLECTOR_NS" get deploy "$COLLECTOR_DEPLOY" -o jsonpath='{.spec.replicas} {.status.readyReplicas}') ||
+		die "could not read Deployment ${COLLECTOR_NS}/${COLLECTOR_DEPLOY} (kubectl's error is above)"
+	spec=${out%% *}
+	ready=${out#* }
+	# .status.readyReplicas is absent from a Deployment with no ready replica.
+	ready=${ready:-0}
+	[ "$ready" = "$spec" ] || die "collector ${COLLECTOR_NS}/${COLLECTOR_DEPLOY} is ${ready}/${spec} ready — fix the telemetry plane before pressuring it"
 	log "context=${ctx} node=${NODE} collector=${ready}/${spec} ready"
 }
 
@@ -539,9 +771,9 @@ preflight_no_soak() {
 	# The script's half of the soak guard: two best-effort checks that can only
 	# add a refusal to the operator's acknowledgement (preflight_ack). Each
 	# fails closed: a list that could not be read is not an empty list.
-	local pods ds rolling
+	local pods ds rolling job
 	if [ -n "$SOAK_POD_SELECTOR" ]; then
-		pods=$(kubectl get pods --all-namespaces -l "$SOAK_POD_SELECTOR" -o name) ||
+		pods=$(kc get pods --all-namespaces -l "$SOAK_POD_SELECTOR" -o name) ||
 			die "could not list pods by SOAK_POD_SELECTOR='${SOAK_POD_SELECTOR}' — not assuming there are none"
 		if [ -n "$pods" ]; then
 			die "$(printf '%s\n' "$pods" | wc -l | tr -d ' ') pod(s) carry SOAK_POD_SELECTOR='${SOAK_POD_SELECTOR}' — a soak looks active. NEVER run this during a soak."
@@ -550,7 +782,7 @@ preflight_no_soak() {
 	else
 		log "SOAK_POD_SELECTOR is not set: no pod was looked for. The soak guard is the operator's acknowledgement and the roll check only."
 	fi
-	ds=$(kubectl -n "$AGENT_NS" get ds -o json) ||
+	ds=$(kc -n "$AGENT_NS" get ds -o json) ||
 		die "could not list the DaemonSets of ${AGENT_NS} — not assuming none is mid-roll"
 	rolling=$(printf '%s' "$ds" | daemonsets_mid_roll) ||
 		die "could not read the DaemonSets of ${AGENT_NS} — not assuming none is mid-roll"
@@ -558,17 +790,24 @@ preflight_no_soak() {
 		die "DaemonSet(s) mid-roll in ${AGENT_NS}: $(printf '%s' "$rolling" | tr '\n' ' ') — a soak's churn or an upgrade looks active. A pressure run on top of a roll cannot be attributed."
 	fi
 	log "no DaemonSet of ${AGENT_NS} is mid-roll"
-	if kubectl -n "$JOB_NS" get job "$JOB_NAME" >/dev/null 2>&1; then
-		die "job ${JOB_NS}/${JOB_NAME} already exists — delete it first"
-	fi
+	# A Job left by an earlier run is still flooding. "Could not ask" is not
+	# "there is none" (#1578): with --ignore-not-found an absent Job is an empty
+	# answer with status 0.
+	job=$(kc -n "$JOB_NS" get job "$JOB_NAME" --ignore-not-found -o name) ||
+		die "could not ask for job ${JOB_NS}/${JOB_NAME} (kubectl's error is above) — not reading that as an absent job"
+	[ -z "$job" ] || die "job ${JOB_NS}/${JOB_NAME} already exists — delete it first"
 }
 
 preflight_agent() {
-	local pod ready restarts
-	pod=$(agent_pod_on_node)
-	[ -n "$pod" ] || die "no aether-agent pod on node ${NODE}"
-	ready=$(agent_status "$pod" '.ready')
-	restarts=$(agent_status "$pod" '.restartCount')
+	local pods pod ready restarts
+	pods=$(agent_pods_on_node) ||
+		die "could not list the aether-agent pods on node ${NODE} (kubectl's error is above) — not reading that as none"
+	[ -n "$pods" ] || die "no aether-agent pod on node ${NODE}"
+	pod=$(sole_agent_pod "$pods") || exit $?
+	ready=$(agent_status "$pod" '.ready') ||
+		die "could not read the status of agent pod ${pod} (kubectl's error is above) — not reading that as not Ready"
+	restarts=$(agent_status "$pod" '.restartCount') ||
+		die "could not read the status of agent pod ${pod} (kubectl's error is above) — not reading that as a restart count"
 	[ "$ready" = "true" ] || die "agent pod ${pod} is not Ready before the test even starts"
 	[ "$restarts" = "0" ] || die "agent pod ${pod} already has ${restarts} restarts — start from a clean node"
 	log "agent pod ${pod} Ready, restarts=0"
@@ -578,7 +817,8 @@ preflight_signals() {
 	local probe age
 	probe=$(promq_req 'sum(rate(aether_probe_requests_total{result="success"}[3m]))' "prober rate")
 	[ "$probe" -gt 0 ] || die "external prober is not reporting successes — the availability signal is dead"
-	age=$(series_age)
+	age=$(series_age) ||
+		die "could not query Prometheus for the age of aether_agent_storage_pods{node=\"${NODE}\"} (the error is above) — not reading that as a series with no samples"
 	[ -n "$age" ] || die "aether_agent_storage_pods{node=\"${NODE}\"} has no samples — the agent's export is already broken"
 	log "prober ~${probe}/s success, agent series age ${age}s"
 }
@@ -600,8 +840,9 @@ print_plan() {
 	cat <<EOF
 
 $(date -u +%FT%TZ) ==== resolved plan
-  kube context             $(kubectl config current-context)
+  kube context             ${KUBE_CONTEXT}
   node under test          ${NODE}
+  collector                ${COLLECTOR_NS}/${COLLECTOR_DEPLOY}, flooded at ${COLLECTOR_OTLP_ENDPOINT}
   collector replicas       ${COLLECTOR_PODS[*]}
   metrics source           ${METRICS_SOURCE} (poll every ${POLL_INTERVAL}s)
   GOMEMLIMIT               $(mib "$GOMEMLIMIT_BYTES")MiB   [${GOMEMLIMIT_SRC}]
@@ -633,14 +874,136 @@ track_memory() {
 		reason="RSS $(mib "$M_RSS")MiB crossed the $(mib "$ABORT_RSS_BYTES")MiB backstop (${ABORT_RSS_PCT}% of the $(mib "$POD_MEM_LIMIT_BYTES")MiB pod limit)"
 	fi
 	[ -n "$reason" ] || return 0
-	kubectl -n "$JOB_NS" delete job "$JOB_NAME" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-	JOB_APPLIED=0
-	die "collector ${reason} — job deleted, no agent was touched"
+	# This is read after the restart step too (#1598): say what is true of the agent.
+	local agent="no agent was touched"
+	[ "$AGENT_RESTARTED" != 1 ] || agent="agent pod ${OLD_POD} on ${NODE} had already been deleted by this run"
+	# No Job to delete now. Either none was ever applied (the baseline is read
+	# before the apply, and a dry run never applies: nothing was changed), or
+	# this run has already deleted it (the ceiling is read while the collector
+	# drains, too), and then things were changed.
+	if [ "$JOB_APPLIED" != 1 ]; then
+		[ "$JOB_EVER_APPLIED" = 1 ] ||
+			die "collector ${reason} — no job had been applied, nothing was changed"
+		die "collector ${reason} — the pressure job had already been deleted by this run, and ${agent}"
+	fi
+	if delete_job; then
+		JOB_APPLIED=0
+		die "collector ${reason} — job deleted, ${agent}"
+	fi
+	# Not known to be deleted, not known to be still there. JOB_APPLIED stays
+	# 1: the cleanup trap tries the delete again.
+	die "collector ${reason} — and the deletion of the job could NOT be confirmed (kubectl's error is above): the flood may still be running. The cleanup trap tries again; activeDeadlineSeconds ends it regardless. Also: ${agent}."
+}
+
+# manifest_defines_job <rendered manifest>: status 0 when the manifest is the
+# Job this run watches and deletes, and nothing else (#1600).
+#
+# An ALLOW-LIST of one shape, not a list of forms to refuse. YAML has many ways
+# to show kubectl an object that a line check does not see (a second document
+# behind `---` or `...`, flow-style `metadata: {...}`, JSON, a List, tags,
+# directives, anchors and merge keys, a repeated key), and kubectl applies a
+# stream in order: a Job by another name ahead of anything that fails is
+# created, and the cleanup trap deletes only the expected name. So every line
+# that is not blank or a comment must be one of:
+#
+#   - a document marker, `---` or `...`, alone on its line (a comment may
+#     follow). After the first line of content a marker ends the manifest: no
+#     content may follow it;
+#   - one of four top-level lines, each exactly once, in any order:
+#     `apiVersion: batch/v1`, `kind: Job`, `metadata:`, `spec:`. Nothing else
+#     may start in the first column;
+#   - under `metadata:`, at two spaces, plain `key:` lines, among them exactly
+#     one `  name: ${JOB_NAME}` and one `  namespace: ${JOB_NS}`, no other
+#     `name` or `namespace`, and no `generateName`. Deeper lines (labels,
+#     annotations) are not looked at;
+#   - under `spec:`, at two spaces, plain `key:` lines too, among them
+#     exactly one `  activeDeadlineSeconds: <positive integer, no leading
+#     zero>`. A quoted key, an explicit `? key`, a merge `<<` or a flow
+#     mapping at that depth is another spelling of a key YAML would let
+#     override it, so none is accepted. Deeper lines (the pod template) are
+#     not looked at. That deadline is the stop that needs neither this script nor the API server
+#     to be reachable from it, and the messages of a delete that could not be
+#     confirmed rely on it.
+#
+# A tab, a carriage return or a byte-order mark anywhere refuses the manifest.
+#
+# Why lines and not a parser: the structural way is `kubectl create
+# --dry-run=client -o json`, and it is not client-only. kubectl 1.35 asks the
+# API server for its OpenAPI document, and for its API group list even with
+# --validate=false.
+manifest_defines_job() {
+	case "$1" in
+	*$'\t'* | *$'\r'* | $'\xef\xbb\xbf'*) return 1 ;;
+	esac
+	WANT_NAME="  name: ${JOB_NAME}" WANT_NS="  namespace: ${JOB_NS}" awk '
+		function refuse() { ok = 0; exit }
+		BEGIN { ok = 1 }
+		/^[[:space:]]*(#.*)?$/ { next }
+		/^(---|\.\.\.)[[:space:]]*(#.*)?$/ { if (content) ended = 1; next }
+		ended { refuse() }
+		{ content = 1 }
+		/^[^ ]/ {
+			sub(/[[:space:]]+$/, "")
+			if ($0 == "apiVersion: batch/v1") section = "apiVersion"
+			else if ($0 == "kind: Job") section = "kind"
+			else if ($0 == "metadata:") section = "metadata"
+			else if ($0 == "spec:") section = "spec"
+			else refuse()
+			if (seen[section]++) refuse()
+			next
+		}
+		section == "metadata" {
+			if ($0 ~ /^ [^ ]/) refuse()
+			if ($0 ~ /^  [^ ]/) {
+				if ($0 !~ /^  [A-Za-z][A-Za-z0-9]*:( |$)/) refuse()
+				if ($0 == ENVIRON["WANT_NAME"]) name++
+				else if ($0 == ENVIRON["WANT_NS"]) namespace++
+				else if ($0 ~ /^  (name|namespace|generateName):/) refuse()
+			}
+			next
+		}
+		section == "spec" {
+			if ($0 ~ /^ [^ ]/) refuse()
+			if ($0 ~ /^  [^ ]/) {
+				if ($0 !~ /^  [A-Za-z][A-Za-z0-9]*:( |$)/) refuse()
+				if ($0 ~ /^  activeDeadlineSeconds:/) {
+					if ($0 !~ /^  activeDeadlineSeconds: [1-9][0-9]*[[:space:]]*$/) refuse()
+					deadline++
+				}
+			}
+			next
+		}
+		{ refuse() }
+		END {
+			exit !(ok && seen["apiVersion"] == 1 && seen["kind"] == 1 && seen["metadata"] == 1 &&
+				seen["spec"] == 1 && name == 1 && namespace == 1 && deadline == 1)
+		}' <<<"$1"
+}
+
+# The manifest on stdout, with the tokens of the shipped manifest filled in:
+# the collector the caller named, and the Job's own namespace and name (#1600).
+# A manifest of the caller's own (--job-manifest) that has no token passes
+# through as it is.
+render_job() {
+	sed -e "s|__COLLECTOR_OTLP_ENDPOINT__|${COLLECTOR_OTLP_ENDPOINT:-${COLLECTOR_DEPLOY}.${COLLECTOR_NS}.svc.cluster.local:4317}|g" \
+		-e "s|__COLLECTOR_NS__|${COLLECTOR_NS}|g" \
+		-e "s|__JOB_NS__|${JOB_NS}|g" \
+		-e "s|__JOB_NAME__|${JOB_NAME}|g" "$JOB_MANIFEST"
 }
 
 apply_job() {
-	kubectl apply -f "$JOB_MANIFEST" >/dev/null
+	local rendered
+	rendered=$(render_job) || die "could not read the job manifest ${JOB_MANIFEST}"
+	# The Job that is applied must be the Job that is watched and deleted
+	# (#1600): anything else is refused before anything is applied.
+	manifest_defines_job "$rendered" ||
+		die "${JOB_MANIFEST} is not the one shape this run applies: one block-style YAML document whose top-level keys are exactly 'apiVersion: batch/v1', 'kind: Job', 'metadata:' and 'spec:', with '  name: ${JOB_NAME}' and '  namespace: ${JOB_NS}' under metadata (or the __JOB_NAME__ and __JOB_NS__ tokens) and one positive '  activeDeadlineSeconds:' under spec. Nothing was applied. See manifest_defines_job in this script."
+	# Set before the apply: one that failed may still have created the Job, and
+	# the cleanup trap deletes it only when this says so.
 	JOB_APPLIED=1
+	JOB_EVER_APPLIED=1
+	printf '%s\n' "$rendered" | kc apply -f - >/dev/null ||
+		die "could not confirm that ${JOB_MANIFEST} was applied (the error is above) — job ${JOB_NS}/${JOB_NAME} may have been created, and the cleanup trap tries to delete it. No agent was touched."
 	log "applied ${JOB_MANIFEST} (hard stop: activeDeadlineSeconds, plus the cleanup trap)"
 }
 
@@ -668,11 +1031,16 @@ wait_for_shedding() {
 # ------------------------------------------------------- agent under pressure
 
 restart_agent() {
-	OLD_POD=$(agent_pod_on_node)
-	[ -n "$OLD_POD" ] || die "no aether-agent pod on ${NODE} to restart"
+	local pods
+	pods=$(agent_pods_on_node) ||
+		die "could not list the aether-agent pods on node ${NODE} (kubectl's error is above) — no agent was restarted"
+	[ -n "$pods" ] || die "no aether-agent pod on ${NODE} to restart"
+	OLD_POD=$(sole_agent_pod "$pods") || exit $?
 	# Pod-scoped on purpose: `kubectl rollout restart ds/aether-agent` is DaemonSet-wide
 	# and would restart every node's agent under a shedding collector at once.
-	kubectl -n "$AGENT_NS" delete pod "$OLD_POD" --wait=false >/dev/null
+	AGENT_RESTARTED=1
+	kc -n "$AGENT_NS" delete pod "$OLD_POD" --wait=false >/dev/null ||
+		die "could not confirm the deletion of agent pod ${OLD_POD} (kubectl's error is above) — whether the agent was restarted is not known, so nothing was proven"
 	log "deleted agent pod ${OLD_POD} on ${NODE} while the collector is shedding"
 }
 
@@ -680,34 +1048,65 @@ restart_agent() {
 # so pod-appearance and pod-readiness get separate budgets: the readiness clock starts
 # when the new pod exists, not when the old one was told to die.
 wait_agent_replaced() {
-	local deadline=$((SECONDS + POD_APPEAR_TIMEOUT)) pod
+	local deadline=$((SECONDS + POD_APPEAR_TIMEOUT)) pods pod asked=1 answered=0 polls=0
 	NEW_POD=""
 	while [ "$SECONDS" -lt "$deadline" ]; do
 		sleep 5
-		pod=$(agent_pod_on_node)
-		if [ -n "$pod" ] && [ "$pod" != "$OLD_POD" ]; then
-			NEW_POD="$pod"
-			log "replacement agent pod ${NEW_POD} created"
-			return 0
+		# A list that could not be read is asked for again: one failed call is
+		# not the agent's fault. An empty list is the gap before the DaemonSet
+		# creates the replacement.
+		polls=$((polls + 1))
+		if pods=$(agent_pods_on_node); then
+			asked=1
+			answered=$((answered + 1))
+			while IFS= read -r pod; do
+				if [ -n "$pod" ] && [ "$pod" != "$OLD_POD" ]; then
+					NEW_POD="$pod"
+					log "replacement agent pod ${NEW_POD} created"
+					return 0
+				fi
+			done <<<"$pods"
+		else
+			asked=0
+			log "WARN: could not list the aether-agent pods on node ${NODE} (kubectl's error is above); asking again"
 		fi
 	done
+	# FAIL is a verdict on the agent. A list that could not be read at the
+	# deadline is not one, and neither is one answered poll among failed ones.
+	polls_support_fail "$asked" "$answered" "$polls" "could not list the aether-agent pods on node ${NODE}"
 	fail "no replacement agent pod appeared on ${NODE} within ${POD_APPEAR_TIMEOUT}s of deleting ${OLD_POD}"
 }
 
 wait_agent_ready() {
-	local deadline=$((SECONDS + AGENT_READY_TIMEOUT)) ready reason
+	local deadline=$((SECONDS + AGENT_READY_TIMEOUT)) ready reason="" asked=1 answered=0 polls=0
 	while [ "$SECONDS" -lt "$deadline" ]; do
-		reason=$(agent_status "$NEW_POD" '.state.waiting.reason')
-		if [ "$reason" = "CrashLoopBackOff" ]; then
-			fail "replacement agent pod ${NEW_POD} is in CrashLoopBackOff — #662 reproduced, the fix did not hold"
+		# A status that could not be read is asked for again, and is neither
+		# "not Ready" nor "not crash-looping".
+		polls=$((polls + 1))
+		# The waiting reason is acted on as soon as it is read: a crash loop
+		# that was seen is the signature, whatever the next read does.
+		if reason=$(agent_status "$NEW_POD" '.state.waiting.reason'); then
+			if [ "$reason" = "CrashLoopBackOff" ]; then
+				fail "replacement agent pod ${NEW_POD} is in CrashLoopBackOff — #662 reproduced, the fix did not hold"
+			fi
+			ready=$(agent_status "$NEW_POD" '.ready') || reason=unread
+		else
+			reason=unread
 		fi
-		ready=$(agent_status "$NEW_POD" '.ready')
-		if [ "$ready" = "true" ]; then
-			log "replacement agent pod ${NEW_POD} Ready"
-			return 0
+		if [ "$reason" != unread ]; then
+			asked=1
+			answered=$((answered + 1))
+			if [ "$ready" = "true" ]; then
+				log "replacement agent pod ${NEW_POD} Ready"
+				return 0
+			fi
+		else
+			asked=0
+			log "WARN: could not read the status of agent pod ${NEW_POD} (kubectl's error is above); asking again"
 		fi
 		sleep 5
 	done
+	polls_support_fail "$asked" "$answered" "$polls" "could not read the status of agent pod ${NEW_POD}"
 	fail "replacement agent pod ${NEW_POD} did not become Ready within ${AGENT_READY_TIMEOUT}s (waiting reason: ${reason:-none})"
 }
 
@@ -723,14 +1122,25 @@ wait_agent_ready() {
 # A harness that fails on unrelated log noise cannot be used to close #662.
 verify_agent() {
 	local restarts term_reason term_exit logs errors n
-	restarts=$(agent_status "$NEW_POD" '.restartCount')
+	# Every read below is evidence for the verdict. One that failed is not
+	# evidence either way: the run is INCONCLUSIVE (exit 2), never a FAIL that
+	# says #662 is back, and never a PASS on an unread field.
+	local unread="(kubectl's error is above) — an unread status is not evidence, so this is not a verdict on the agent"
+	restarts=$(agent_status "$NEW_POD" '.restartCount') ||
+		die "could not read the status of agent pod ${NEW_POD} ${unread}"
 	[ "$restarts" = "0" ] || fail "agent pod ${NEW_POD} started with restartCount=${restarts} — it died at least once under pressure (#662's signature)"
-	term_reason=$(agent_status "$NEW_POD" '.lastState.terminated.reason')
-	term_exit=$(agent_status "$NEW_POD" '.lastState.terminated.exitCode')
+	term_reason=$(agent_status "$NEW_POD" '.lastState.terminated.reason') ||
+		die "could not read the status of agent pod ${NEW_POD} ${unread}"
+	# The exit code is a detail of the message. A terminated container that
+	# was read is the signature whether or not its exit code can be read too.
+	term_exit=""
+	[ -z "$term_reason" ] || term_exit=$(agent_status "$NEW_POD" '.lastState.terminated.exitCode') || term_exit=""
 	[ -z "$term_reason" ] || fail "agent pod ${NEW_POD} has a terminated previous container (${term_reason}, exit ${term_exit:-?}) — it exited under pressure (#662's signature)"
 
 	# From the beginning of the log, not the tail: the evidence is the startup sequence.
-	logs=$(kubectl -n "$AGENT_NS" logs "$NEW_POD" -c "$AGENT_CONTAINER" --limit-bytes=8000000 2>/dev/null)
+	# A log that could not be read has not "never logged" anything.
+	logs=$(kc -n "$AGENT_NS" logs "$NEW_POD" -c "$AGENT_CONTAINER" --limit-bytes=8000000) ||
+		die "could not read the log of agent pod ${NEW_POD} (kubectl's error is above) — an unread log is not evidence, so this is not a verdict on the agent"
 	if grep -q 'failed to create SPIRE Workload API source' <<<"$logs"; then
 		fail "agent ${NEW_POD} logged 'failed to create SPIRE Workload API source' — #662's signature"
 	fi
@@ -765,7 +1175,11 @@ verify_pressure_held() {
 # ----------------------------------------------------------------- recovery
 
 stop_pressure() {
-	kubectl -n "$JOB_NS" delete job "$JOB_NAME" --ignore-not-found --wait=false >/dev/null
+	# JOB_APPLIED stays 1 on a failed delete, so the cleanup trap tries again.
+	# The agent's checks have passed by now, but the recovery was not measured:
+	# INCONCLUSIVE, not FAIL.
+	delete_job ||
+		die "could not confirm the deletion of job ${JOB_NS}/${JOB_NAME} (kubectl's error is above) — the flood may still be running and the recovery was not measured. The cleanup trap tries again."
 	JOB_APPLIED=0
 	log "pressure job deleted"
 }
@@ -789,15 +1203,25 @@ wait_shedding_stops() {
 }
 
 wait_series_fresh() {
-	local deadline=$((SECONDS + SERIES_FRESH_TIMEOUT)) age
+	local deadline=$((SECONDS + SERIES_FRESH_TIMEOUT)) age="" asked=1 answered=0 polls=0
 	while [ "$SECONDS" -lt "$deadline" ]; do
-		age=$(series_age)
-		if [ -n "$age" ] && [ "$age" -lt "$SERIES_FRESH_MAX_AGE" ]; then
-			log "aether_agent_storage_pods{node=\"${NODE}\"} is fresh again (${age}s old)"
-			return 0
+		# A query that could not be asked is asked again, and is not "stale".
+		polls=$((polls + 1))
+		if age=$(series_age); then
+			asked=1
+			answered=$((answered + 1))
+			if [ -n "$age" ] && [ "$age" -lt "$SERIES_FRESH_MAX_AGE" ]; then
+				log "aether_agent_storage_pods{node=\"${NODE}\"} is fresh again (${age}s old)"
+				return 0
+			fi
+		else
+			asked=0
+			age=""
+			log "WARN: could not query Prometheus for the age of aether_agent_storage_pods{node=\"${NODE}\"} (the error is above); asking again"
 		fi
 		sleep "$POLL_INTERVAL"
 	done
+	polls_support_fail "$asked" "$answered" "$polls" "could not query Prometheus for the age of aether_agent_storage_pods{node=\"${NODE}\"}"
 	fail "aether_agent_storage_pods{node=\"${NODE}\"} did not go fresh within ${SERIES_FRESH_TIMEOUT}s (age: ${age:-no samples}) — the agent recovered but its telemetry did not resume"
 }
 
@@ -827,7 +1251,8 @@ EOF
 main() {
 	parse_args "$@"
 	preflight_ack
-	for c in kubectl jq curl awk; do command -v "$c" >/dev/null || die "missing required command: $c"; done
+	preflight_inputs
+	for c in kubectl jq curl awk sed; do command -v "$c" >/dev/null || die "missing required command: $c"; done
 	SCRATCH=$(mktemp -d)
 	trap cleanup EXIT INT TERM
 
