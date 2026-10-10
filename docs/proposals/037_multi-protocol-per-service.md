@@ -1,11 +1,15 @@
 # Proposal 037: Multi-Protocol Ports on One Mesh Service
 
-**Status:** Accepted. Phase 0 shipped (#888, merged 2026-09-21); Phases 1–3
+**Status:** Implemented (Phases 0–3; Phase 4 pending). Phase 0 shipped (#888,
+merged 2026-09-21); Phases 1–3
 shipped (#889–#902: cache keyed by cluster identity, the TCP mesh port 18082 and
 per-port protocol, port-qualified L4 routes, the any-port shim and the soak's
 per-port TCP leg); L4 observability shipped (#1043, per-service `tcp_`/`udp_`
 floor stat keys and the `aether_l4_access_logs` stream). Phase 4 (remove the
-portless floor chain) is pending.
+portless floor chain) is pending: the any-port shim (`cap_tcp_anyport_<svc>`)
+is still emitted for a TCP-primary service. One Phase 3 item was not built: the
+GAMMA projector does not reject an HTTPRoute `backendRef.port` that names a
+raw-TCP port (see *Open questions*).
 **Author:** Bruno Palermo
 **Date:** 2026-09-20
 **History:** first draft resolved the bare-name spelling to "the primary port,

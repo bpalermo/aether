@@ -95,9 +95,9 @@ make load-proxy-supervisor-image  # Load proxy-supervisor image into local Docke
 make load-uds-csi-image      # Load uds-csi image into local Docker
 make load-cni-install-image  # Load cni-install image into local Docker
 make load-registrar-image    # Load registrar image into local Docker
-make load-all                # Load the five Make-built images (agent, mesh-dns,
-                             # proxy-supervisor, cni-install, registrar)
-make push-all                # Push those five (local/dev use only: releases are
+make load-all                # Load the six Make-built images (agent, mesh-dns,
+                             # proxy-supervisor, uds-csi, cni-install, registrar)
+make push-all                # Push those six (local/dev use only: releases are
                              # published by the signed .github/workflows/publish.yaml,
                              # never by push-all; the proxy image by proxy-release.yml)
 ```

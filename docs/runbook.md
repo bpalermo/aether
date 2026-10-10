@@ -3173,8 +3173,10 @@ loopback port there, not a network namespace):
   - on the **inbound** listener every request gets `503`: the listener that
     accepted the connection is draining and routes to
     `app_<namespace>_<pod>_<port>`,
-    which no longer exists. A calling proxy retries a `503` on another
-    endpoint (two retries, another host each time), so a service with a
+    which no longer exists. A calling proxy retries that reply on another
+    endpoint (two retries, another host each time; since #1641 because the
+    destination reports the application cluster gone in `x-aether-outcome`,
+    not because the status is `503`), so a service with a
     replica on a node that is not at the same point of the roll is covered;
     a service whose only endpoints are on nodes whose agents are replaced at
     the same moment answers `503` to callers with warm connections for up to
@@ -8117,8 +8119,11 @@ section are that harness's).
   briefly inside a pod netns (health-check connects every 5 s per pod, listener socket
   creation) "restored" itself **into** that pod's netns and stayed there, creating its
   later upstream sockets inside the pod where redirect-all capture diverted them. The
-  proxy carries `proxy/bazel/patches/envoy-aether1022-exec-in-netns-thread-self.patch`
-  (`/proc/thread-self/ns/net`, fallback `/proc/self/task/<tid>/ns/net`).
+  proxy carried `envoy-aether1022-exec-in-netns-thread-self.patch`
+  (`/proc/thread-self/ns/net`, fallback `/proc/self/task/<tid>/ns/net`) until #1643.
+  The pinned Envoy now contains the upstream fix (envoyproxy/envoy#47776, which reads
+  `/proc/thread-self/ns/net` and has no fallback), so the patch is no longer carried
+  (`proxy/README.md`).
 - **(a) #1007, aether.** The capture listener's `use_original_dst: true` hands a
   diverted connection to "the listener bound to its original address", looked up by the
   address string only (`0.0.0.0:18008`, no netns), so the most recently added pod's
@@ -8668,7 +8673,7 @@ inbound-readiness promotion gate NOT active for every local pod; those pods keep
 and one rate-limited WARN per held pod (once per 5 min, after a 60 s grace):
 
 ```
-liveness: pod held by the inbound-readiness probe  pod=svc-1-… probe_cluster=inboundready_svc-1-… gateway_path=/healthz/inboundready_svc-1-… why="held un-promoted: the inbound mTLS probe has never passed (inbound listener has no certificate, or its SDS secret name is not served)"
+liveness: pod held by the inbound-readiness probe  pod=svc-1-… namespace=team-a probe_cluster=inboundready_team-a_svc-1-… gateway_path=/healthz/inboundready_team-a_svc-1-… why="held un-promoted: the inbound mTLS probe has never passed (inbound listener has no certificate, or its SDS secret name is not served)"
 ```
 
 #### Named failure: `envoy_sds_spiffe_ns_*` — listeners built with an EMPTY trust domain
