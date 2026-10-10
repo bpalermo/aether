@@ -185,6 +185,20 @@ sh_test(
     env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
+# check-harness-contract-bump.sh (#1541): the lock of the external-harness
+# contract against the one at the pull request's base, so a promise removed
+# together with its lock line still needs a version bump. Hermetic: a fake
+# `git show`. Also holds ci.yaml to running it against the base sha.
+sh_test(
+    name = "check_harness_contract_bump_test",
+    size = "small",
+    srcs = ["check_harness_contract_bump_test.sh"],
+    data = [
+        "check-harness-contract-bump.sh",
+        "//:ci_definitions",
+    ],
+)
+
 # The watcher of the post-merge run (#1506): scripts/main-post-merge-watch.sh,
 # the step of .github/workflows/main-watch.yaml. Which completed runs of
 # main.yaml are recorded on the rolling issue, which green run clears a commit

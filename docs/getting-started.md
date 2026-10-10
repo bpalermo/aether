@@ -290,8 +290,11 @@ charts as `quay.io/aethermesh/chart-<name>`, images as
 > ghcr.io any more (proposal 040 phase 4).
 
 Resource names derive from the **release** name — installing as `aether` yields
-`aether-agent`, `aether-proxy`, `aether-mesh-dns`, `aether-registrar`,
-`aether-controller`.
+`aether-agent`, `aether-mesh-dns`, `aether-registrar`, `aether-controller`. The
+node proxy is the exception: its DaemonSet is `aether-proxy` whatever the
+release is called. Install the chart **once** per cluster; a second release is
+refused where the chart can see the first
+([`configuration.md`](./configuration.md), "One release per cluster").
 
 > **Upgrade tip:** always pass the **full** values on every `helm upgrade` of the
 > `aether` chart — do **not** use `--reuse-values` (it keeps the stale
@@ -309,9 +312,24 @@ case "$got" in
   *) echo "DEPLOY MISMATCH: appVersion=$got, expected $COMMIT" >&2; exit 1 ;;
 esac
 
-kubectl -n aether-system get pods         # agent + proxy + mesh-dns per node, registrar ×2, controller
+kubectl -n aether-system get pods         # agent + proxy + mesh-dns + uds-csi per node, registrar ×2, controller
 kubectl -n aether-system get meshconfig   # the seeded "default" MeshConfig CR
+
+# Every DaemonSet pod, on every node. This is the check, not `helm --wait`.
+for ds in $(kubectl -n aether-system get daemonset -o name); do
+  kubectl -n aether-system rollout status "$ds" --timeout=5m
+done
 ```
+
+**`helm upgrade --install --wait` returning `deployed` does not show that the
+DaemonSet pods run** (#1473). Helm counts a DaemonSet as ready once
+`numberReady >= desiredNumberScheduled - maxUnavailable`. For a DaemonSet that
+may have one pod unavailable during a roll (the agent with its default
+strategy, `uds-csi`, and the `prober` chart's DaemonSet) that is **zero** pods
+on a one-node cluster, and one pod short on any other. #1473 reports it on kind
+with Helm 3.18.4: `deployed` for the `prober` chart with no pod running (as
+happens when Pod Security admission refuses the pods). `kubectl rollout status`
+waits until every scheduled pod is updated and available.
 
 ---
 

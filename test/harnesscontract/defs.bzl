@@ -21,7 +21,7 @@ export HELM_REPOSITORY_CONFIG="$scratch/repositories.yaml"
 export HELM_REGISTRY_CONFIG="$scratch/registry.json"
 export HELM_PLUGINS=@@HELM_PLUGINS@@
 
-exec @@CHECKER@@ --helm @@HELM@@ --chart @@CHART@@ --name @@NAME@@ --ids @@IDS@@
+exec @@CHECKER@@ --helm @@HELM@@ --chart @@CHART@@ --name @@NAME@@ --target @@TARGET@@ --ids @@IDS@@
 """
 
 def _shell_quote(s):
@@ -39,6 +39,7 @@ def _helm_contract_test_impl(ctx):
         ("@@CHART@@", _shell_quote(chart.short_path)),
         ("@@CHECKER@@", _shell_quote(checker.short_path)),
         ("@@NAME@@", _shell_quote(ctx.attr.chart_name)),
+        ("@@TARGET@@", _shell_quote("//{}:{}".format(ctx.label.package, ctx.label.name))),
         ("@@IDS@@", _shell_quote(",".join(ctx.attr.ids))),
     ]:
         script = script.replace(placeholder, value)
@@ -87,7 +88,7 @@ version bump, and adding a contract entry is not one.
             providers = [HelmPackageInfo],
         ),
         "ids": attr.string_list(
-            doc = "The id of every `charts` entry for this chart, of every object under them, and of every entry of another section a container of theirs refers to (`resource_attributes`, `args`).",
+            doc = "The id of every `charts` entry for this chart, of every object under them, and of every entry of another section an object or a container of theirs refers to (`name_from`, `resource_attributes`, `code_resource_attributes`, `args`). Each of those entries names this test in its `checked_by`.",
             mandatory = True,
             allow_empty = False,
         ),

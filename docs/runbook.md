@@ -212,8 +212,16 @@ strategy, a metric that keeps its name and counts something else) bumps the
 file's `version`; adding an entry does not. A harness pins
 the version it was written against; the README's "Versions" table says what
 each bump changed (version 2: what `aether_agent_xds_acked_tls_clusters` counts
-and when it is absent, #1508). The bump is a review rule: nothing can
-compare the file with its previous revision in a hermetic test.
+and when it is absent, #1508). For what the file's keys say, the bump is a
+test: `external-harness.lock.yaml` beside the contract holds one line per
+promise of the current version, and
+`//test/harnesscontract:harnesscontract_test` fails when a promise left or
+changed and `version` did not (it prints the lock for the new version once it
+is bumped, and the lines to add for a new promise). On a pull request
+`scripts/check-harness-contract-bump.sh` also compares the lock with the one
+at the base, so an entry removed together with its lock lines needs the bump
+too. A change of meaning that leaves every key as it was, like version 2's,
+is not seen by either and is bumped by hand.
 [`test/harnesscontract/README.md`](../test/harnesscontract/README.md) has the
 table of what each test compares, what is kept by review alone, and how to add
 or remove an entry.
@@ -1993,6 +2001,15 @@ made. Drop `namespace.create=true` (and label the namespace yourself), or store
 the release in another namespace (`helm -n <other> ... --set
 namespace.name=aether-system`).
 
+**`--wait` succeeding is not the check that the DaemonSets run** (#1473). Helm
+counts a DaemonSet as ready once `numberReady >= desiredNumberScheduled -
+maxUnavailable`, which for a DaemonSet that may have one pod unavailable (the
+agent at its default strategy, `uds-csi`, the `prober` chart's DaemonSet) is zero
+pods on a one-node cluster: `helm upgrade --install --wait` reports `deployed`
+with none running. Follow an install with `kubectl -n aether-system rollout
+status daemonset/<name>` for each DaemonSet (it waits until every scheduled pod
+is updated and available), or read the pod list.
+
 **A first install that failed for another reason** (a `--wait` that timed out)
 is retried with the same command: `helm upgrade --install` upgrades the failed
 release in place. If it failed very early, before the agent ServiceAccount was
@@ -2001,6 +2018,42 @@ written (one of that name already existed, say), the retry may ask once for
 the mark that ServiceAccount carries, the chart cannot see that the failed
 revision rendered no namespace, and it refuses rather than risk a delete. The
 command is safe to run; nothing is deleted either way.
+
+### Uninstalling: the proxy pods take close to their whole grace period (#1472)
+
+After `helm uninstall` (or anything else that deletes the `aether-proxy`
+DaemonSet) each proxy pod stays `Terminating` for most of
+`proxy.terminationGracePeriodSeconds`, 180 s by default, and a namespace
+deleted afterwards is only gone once they are. That is the supervisor's
+`successor_wait` branch of "What the proxy supervisor does on SIGTERM" below,
+not a hang:
+
+- On SIGTERM with its Envoy still serving, the supervisor waits for a surge
+  replacement to hot-restart it. It has no Kubernetes client (by design: see
+  `//agent/cmd/proxy-supervisor:deps_test`), so it cannot tell "my DaemonSet
+  was deleted" from "I am being rolled", and a pod delete, a node drain and an
+  uninstall look the same to it.
+- The wait is bounded by the pod's own deadline:
+  `terminationGracePeriodSeconds - (hotRestart.drainTime + 5 s + 10 s)`, which
+  is 155 s at the defaults. Then it drains Envoy over `hotRestart.drainTime`
+  (10 s) and stops it. From the code that is about 165 to 170 s per pod at the
+  defaults; #1472 observed the full 180 s on kind. Neither figure was measured
+  for this note.
+
+The log lines of the "no successor can come" case in that section are the ones
+to expect, and `aether_supervisor_shutdown_branch_total` reports
+`drain_fallback`.
+
+To remove the mesh faster, tell the supervisors beforehand that no replacement
+will come: one upgrade with `proxy.shutdownDrainImmediately=true` (values read
+back with `helm get values <release> -n <ns> -o yaml` and passed with `-f`,
+never `--reuse-values`), let that roll finish, then uninstall. Each proxy then
+drains on SIGTERM without the wait. That upgrade is itself a proxy roll, and
+with the flag set a later pod delete or node drain is no longer hitless, so
+this is for a mesh that is being removed, not for one that stays.
+
+`helm uninstall` does not delete the namespace, and keeps the seeded `default`
+MeshConfig (it prints `kept`); `kubectl delete namespace` removes both.
 
 ### Which workloads a chart upgrade rolls (#1363)
 
@@ -2743,6 +2796,74 @@ max by (node) (envoy_server_hot_restart_epoch{job="aether-proxy"})
 # The supervisor's series: the same job as before the upgrade.
 count by (job) ({__name__=~"aether_supervisor_.+"})
 ```
+
+#### Chart 2.4.27: one release per cluster, the SPIRE-served webhook's identity, narrower webhook RBAC (#1540, #1457, #1456)
+
+**What an upgrade changes.** No object is renamed. No pod template changes, so
+this chart change rolls no workload by itself (a release built from another
+commit carries other image digests, and those roll the workloads as always:
+"Which workloads a chart upgrade rolls" above). The objects that change are the
+controller's ClusterRole, and only with `controller.webhook.spire=true`, and
+the `helm.sh/chart` label on each object's own metadata.
+
+**Two renders that were accepted and are now refused:**
+
+| Refused when | Message starts with | Do |
+|---|---|---|
+| `controller.webhook.spire=true`, `controller.webhook.clusterSpiffeID.create=true` (the default), `controller.webhook.clusterSpiffeID.className` empty, **and** the cluster serves the `spire.spiffe.io/v1alpha1` `ClusterSPIFFEID` API | `controller.webhook.spire=true with controller.webhook.clusterSpiffeID.create=true, but controller.webhook.clusterSpiffeID.className is empty` | Set `className` to your spire-controller-manager class; or, if the controller's identity is registered by a `ClusterSPIFFEID` or an entry of your own, set `controller.webhook.clusterSpiffeID.create=false`. Nothing else changes with either. |
+| The `aether-proxy` DaemonSet in the release's namespace, or the `csi.aether.io` CSIDriver, exists and names **another** Helm release | `... already exists and belongs to another aether release` | Upgrade that release instead of installing a second one, or uninstall it first (`docs/configuration.md`, "One release per cluster"). An upgrade of the release that owns them is not affected. A first **install** is also refused when one of them names a release of the same name by its `app.kubernetes.io/instance` label alone (no `meta.helm.sh/release-namespace`): if it is a leftover of a release that is gone, delete it and install again. |
+
+The first reads what the cluster serves (`.Capabilities.APIVersions`), the
+second reads the two live objects (`lookup`). A render without a cluster
+(`helm template`, a client-side dry run, a GitOps tool that renders with
+`helm template`) is refused by neither, unless it passes
+`--api-versions spire.spiffe.io/v1alpha1/ClusterSPIFFEID`, which arms the
+first. In the first state on a cluster
+that does not serve the API, the install notes carry a `WEBHOOK IDENTITY NOTE`.
+
+To see before upgrading whether the first applies to a release:
+
+```bash
+helm get values <release> -n <ns> -a -o json |
+  jq '.controller.webhook | {spire, create: .clusterSpiffeID.create, className: .clusterSpiffeID.className}'
+kubectl api-resources --api-group=spire.spiffe.io -o name   # clusterspiffeids...: the API is served
+```
+
+**The controller's webhook-configuration grant is `get` and `update`** (it was
+`get, list, watch, update, patch`), with `controller.webhook.spire=true` only.
+The caBundle injector has read each configuration by name, uncached, and
+written it with an update since #1453, which every chart from 2.4.19 ships;
+its test runs it with `list`, `watch` and `patch` refused. A controller image
+**older** than that keeps an informer on both kinds and stops injecting when
+`list` and `watch` are refused (#1431): during the upgrade from a chart older
+than 2.4.19 that is the old controller pods, until the Deployment has rolled;
+do not pin an older controller image under this chart. After the upgrade, with
+the SPIRE-served webhook:
+
+```bash
+NS=aether-system
+SA=$(kubectl -n "$NS" get deploy -l app.kubernetes.io/name=aether-controller \
+  -o jsonpath='{.items[0].spec.template.spec.serviceAccountName}')
+for kind in validatingwebhookconfigurations mutatingwebhookconfigurations; do
+  for verb in get update list watch patch; do   # expect: yes yes no no no
+    printf '%s %s: ' "$kind" "$verb"
+    kubectl auth can-i "$verb" "$kind.admissionregistration.k8s.io" \
+      --as="system:serviceaccount:$NS:$SA"
+  done
+done
+```
+
+and the injector keeps working: no `webhook caBundle injection failed` line
+from the controller's leader, and this stays 0 (the caBundle length check of
+"The pod-mutating webhook's caBundle is empty" shows the result):
+
+```promql
+sum by (kind, reason) (increase(aether_controller_webhook_cabundle_injection_failures_total[30m]))
+```
+
+None of this was run on a cluster for this change: the grant is tested as a
+render and the injector against a fake API server
+(`TestCABundleInjectorNeedsOnlyGetAndUpdate`).
 
 #### The prober chart (#1372, #1373, #1374)
 
@@ -6394,9 +6515,10 @@ on (the default), was never affected. To check a release:
 NS=aether-system
 SA=$(kubectl -n "$NS" get deploy -l app.kubernetes.io/name=aether-controller \
   -o jsonpath='{.items[0].spec.template.spec.serviceAccountName}')
-# Expect "yes" for each verb when the webhook is SPIRE-served and the
-# MutatingWebhookConfiguration exists.
-for verb in get list watch update; do
+# Expect "yes" for get and update when the webhook is SPIRE-served and the
+# MutatingWebhookConfiguration exists. list, watch and patch: "yes" up to chart
+# 2.4.26, "no" from 2.4.27 (#1456), unless another binding grants them.
+for verb in get update list watch patch; do
   printf '%s: ' "$verb"
   kubectl auth can-i "$verb" mutatingwebhookconfigurations.admissionregistration.k8s.io \
     --as="system:serviceaccount:$NS:$SA"
