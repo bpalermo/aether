@@ -1115,6 +1115,41 @@ that disagrees with the SDK pin, a setup-go step with a literal `go-version` or
 `check-latest`, and any workflow job or composite action that runs `go` without
 setting it up first, which would leave it on the runner image's Go.
 
+### Bumping Helm
+
+No workflow job runs the runner image's Helm (it moves, majors included, when
+GitHub updates the image) or `azure/setup-helm`'s default, which is the newest
+release (#1580). [`e2e/helm-version.sh`](../e2e/helm-version.sh) pins one Helm 3
+release, one Helm 4 release and `HELM_DEFAULT_MAJOR`, the major a job gets when
+it does not ask; `.github/actions/setup-helm` installs from that file and is
+the only installer. The default is Helm 3. Helm 4 renders every chart in the
+Bazel template tests (the rules_helm toolchain), and the nightly `first-install`
+job runs `e2e/first-install.sh` under both majors, one matrix leg each (#1543).
+
+To bump a release, change its line. `HELM_V4_VERSION` is held equal to the
+rules_helm toolchain's Helm, so a rules_helm bump that moves its Helm moves
+that line in the same pull request. To move the default major, change
+`HELM_DEFAULT_MAJOR` and prove it with a `workflow_dispatch` of `e2e.yaml` on
+the branch: no pull request check runs the kind harnesses. `bazel test
+//e2e:helm_pin_test` fails on a job or composite action that runs `helm` or an
+`e2e/*.sh` harness without `setup-helm` before it, on `azure/setup-helm` used
+anywhere else, on a caller that names a version instead of a major, and on a
+`helm list -a`: Helm 4 dropped that flag, so anything that lists releases takes
+its flags from `helm_list_all_flags` in the same file (#1581).
+
+### Bumping Gateway API
+
+[`e2e/gateway-api-version.sh`](../e2e/gateway-api-version.sh) is the one
+Gateway API release every e2e surface installs: each harness sources it for the
+CRD bundle it applies, and the nightly conformance jobs install the same
+release's bundle and run its suite (#1583). Bump it together with go.mod's
+`sigs.k8s.io/gateway-api` (the release the code is built against) and
+`GATEWAY_API_VERSION` in `.github/workflows/e2e.yaml` (a workflow cannot source
+a shell file, so it carries the one copy). `bazel test
+//e2e:gateway_api_pin_test` fails until the three agree, and on a harness that
+assigns `GWAPI_VERSION` itself or a download URL that names a release.
+`GWAPI_VERSION=<release>` overrides it for one local run.
+
 ### Refreshing third-party image pins
 
 An image this repository does not build (curl, the echo servers, OPA, etcd, the
@@ -6420,6 +6455,14 @@ QUIC twin is not counted apart from the cluster it is derived from, and an entry
 pin is rendered is in neither series while the node cannot publish TLS for it (no node
 SVID yet): it is not a pinned TLS cluster until one is published.
 
+"Every snapshot" includes one whose set returned an error (#1549). The control plane
+library installs a snapshot before it answers the watches that are open, and only that
+second step can fail, so the snapshot is the one the agent serves from then on. The
+agent reports it like any other (this gauge, the counter and the line above, the
+identity-binding lines) and logs `snapshot installed, but an open watch was not answered from it` at
+WARN with the error. Agents before #1549 skipped the report for such a snapshot, and
+the gauge kept the previous snapshot's values until the next build.
+
 ```promql
 # N clusters unpinned for reason R on this node, now.
 sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}) > 0
@@ -6512,9 +6555,14 @@ What follows from that:
   between. An ACK that arrives late is read against the version that was sent, with the
   pin class that version was last published with. (What is kept is taken when the
   response is written. A response written after its cluster was rebuilt three times, or
-  more than two snapshot builds after its cluster was removed, inside the agent
+  after the record of a cluster that was removed has been dropped, inside the agent
   process, is the exception: its version is unknown, or its ACK is not counted until the
-  proxy next opens a stream.)
+  proxy next opens a stream. The record of a removed cluster is kept until the third
+  snapshot build without the cluster, and for one minute from the first of those builds
+  however many run (#1551); a build that finds more than 1,024 records of clusters its
+  snapshot does not have keeps none of them for the minute, and an answer that releases
+  one while there are more than 1,024 of them, that one counted, does not keep it for
+  the minute either. With exactly 1,024 the minute applies.)
 - **Not written while a held cluster's state is unknown.** The agent can count a version
   only if it has that version's pin class on record: this agent process published it,
   and recently enough (the last three versions of a cluster, plus any in flight). An agent that restarts **while its proxy is

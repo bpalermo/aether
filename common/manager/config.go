@@ -2,7 +2,10 @@
 // used by both the agent and registrar commands.
 package manager
 
-import "sigs.k8s.io/controller-runtime/pkg/cache"
+import (
+	"aethermesh.dev/common/telemetry/setup"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+)
 
 // Config holds common configuration shared across all controller-runtime manager-based commands.
 type Config struct {
@@ -41,4 +44,26 @@ type Config struct {
 	// (go.schedule.duration) when OTel metrics are enabled. Not a flag: the node
 	// agent sets it (issue #1131), the other components leave it off.
 	SchedulerLatency bool
+	// WithoutHostName leaves host.name off the component's telemetry resource.
+	// Not a flag: it is a fact about how the component is deployed. A component
+	// that is not hostNetwork sets it (the registrar, the controller, the edge
+	// control plane), because its host.name is its pod name and a collector that
+	// derives a node label from host.name then labels its series with a pod
+	// (#1596, #1041). The node agent is hostNetwork and leaves it off.
+	WithoutHostName bool
+}
+
+// Telemetry is the telemetry setup of the component called serviceName, built
+// at serviceVersion. The meter, tracer and logger providers are all built from
+// it, so the three signals of one component describe the same resource.
+func (c Config) Telemetry(serviceName, serviceVersion string) setup.Config {
+	return setup.Config{
+		ServiceName:      serviceName,
+		ServiceVersion:   serviceVersion,
+		OTLPEndpoint:     c.OTLPEndpoint,
+		TraceSampleRate:  c.TraceSampleRate,
+		TraceExport:      c.TracingExport,
+		SchedulerLatency: c.SchedulerLatency,
+		WithoutHostName:  c.WithoutHostName,
+	}
 }

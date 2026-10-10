@@ -205,7 +205,9 @@ TLS_VIP=""
 # destination port the CNI diverts into the pod's transparent capture listener.
 UDP_PORT="9001"
 MESH_UDP_PORT="18082"
-GWAPI_VERSION="v1.6.2"
+# The pinned Gateway API release (#1583): one for every e2e surface.
+# shellcheck source=e2e/gateway-api-version.sh
+. "$REPO_ROOT/e2e/gateway-api-version.sh"
 # TCPRoute/TLSRoute/UDPRoute are EXPERIMENTAL-channel in gateway-api v1.6.2 (the
 # standard channel stops at GRPCRoute), so the standard bundle uds.sh installs is
 # not enough here.
