@@ -57,7 +57,7 @@ func TestInboundIdentityBindingFirstSightThenSilent(t *testing.T) {
 		assert.Equal(t, inboundEchoIdentity, l.attrs["secret"], "the chain must present its own pod's SVID")
 		assert.Equal(t, "true", l.attrs["secret_served"])
 		assert.Empty(t, l.attrs["previous_secret"], "a first bind has no previous secret")
-		assert.Contains(t, l.attrs["chain"], "inbound_echo-1/")
+		assert.Contains(t, l.attrs["chain"], "inbound_aether-test_echo-1/")
 		assert.NotEmpty(t, l.attrs["snapshot_version"])
 	}
 	assert.Empty(t, rec.with(inboundWarnMsg))

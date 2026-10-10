@@ -138,7 +138,7 @@ data:
     # liveness loop demotes every endpoint, and with panic routing at 0 the
     # whole mesh goes dark (2026-06-11 20:03-20:14Z outage, rev 70; repro'd
     # in isolation against the same image). cluster.app_* carries no
-    # min-healthy reference (verified: only health_<pod> clusters appear in
+    # min-healthy reference (verified: only health_<namespace>_<pod> clusters appear in
     # ClusterMinHealthyPercentages) and stays excluded.
     #
     # NOTE: probe clusters never carry routed traffic, so Envoy's HC
@@ -149,7 +149,7 @@ data:
       # the cluster name out of cluster.* stat names so the OTel sink exports
       # one metric family per stat with the cluster as an attribute
       # (use_tag_extracted_name + emit_tags_as_attributes on the sink). For
-      # health_<pod> probe clusters that attribute IS the pod identity.
+      # health_<namespace>_<pod> probe clusters that attribute IS the pod identity.
       use_all_default_tags: false
       # Envoy tag semantics: the FIRST capture group is removed from the stat
       # name; the tag value is the SECOND group. Groups must include trailing
@@ -158,10 +158,37 @@ data:
         - tag_name: aether.cluster
           regex: "^cluster\\.(([^.]+)\\.)"
         # Per-pod listener stats stay allocated (cx-leak debugging needs
-        # downstream_cx_* per pod); this lifts the pod into a tag so exports
-        # collapse to listener.{inbound,out_http}.* labeled by aether.pod.
+        # downstream_cx_* per pod); these two lift the pod into tags so exports
+        # collapse to listener.{inbound,out_http}.* labeled by aether.namespace
+        # and aether.pod.
+        #
+        # The agent's per-pod stat prefixes are inbound_<namespace>_<pod>,
+        # inbound_<namespace>_<pod>_h3 and out_http_<namespace>_<pod> since
+        # #1584 (agent/internal/xds/proxy, PodResourceKey): the pod name alone
+        # is not unique on a node. An underscore is legal in neither a
+        # namespace nor a pod name, so the FIRST one after the prefix ends the
+        # namespace. Each extractor removes its own "_<value>" and nothing of
+        # the other's (see the separator rule on aether.transport_socket_match
+        # below). The QUIC listener's "_h3" stays in aether.pod ("web-0_h3"),
+        # as before: nothing else tells a pod's two inbound listeners apart in
+        # a family whose name no longer carries the pod.
+        #
+        # The namespace part is OPTIONAL in the aether.pod regex, for the
+        # length of an upgrade: the agent and the proxy roll separately, and a
+        # proxy that already runs this bootstrap under an agent older than
+        # #1584 is sent inbound_<pod> and out_http_<pod>. Those must still
+        # collapse into the two families (aether.pod="<pod>", no namespace
+        # label). A stat prefix no extractor matches stays in the metric NAME:
+        # one metric family per pod, kept by the metrics store's name index
+        # long after the upgrade. (The old agent's inbound_<pod>_h3 reads as
+        # namespace "<pod>", pod "h3" for that window: wrong labels, still one
+        # family.)
+        # //agent/test/envoy_validate (TestChartStatsConfigOnNamespacedPodNames)
+        # runs the pinned proxy with this block and reads the result.
+        - tag_name: aether.namespace
+          regex: "^listener\\.(?:inbound|out_http)(_([^_.]+))_[^.]+\\."
         - tag_name: aether.pod
-          regex: "^listener\\.(?:inbound|out_http)(_([^.]+))\\."
+          regex: "^listener\\.(?:inbound|out_http)(?:_[^_.]+)?(_([^.]+))\\."
         # Per-transport-socket-match counter. Envoy scopes it as
         #   cluster.<cluster>.<match name>.total_match_count
         #
@@ -258,28 +285,28 @@ data:
             # until #815 release two; see the aether.transport_socket_match tag
             # above for the named (spiffe://…) variant on service clusters.
             #
-            # health_<pod> probe clusters never carry routed traffic, so their
+            # health_<namespace>_<pod> probe clusters never carry routed traffic, so their
             # upstream_*/lb_*/protocol subtrees are permanently zero (~100
             # dead stats per pod). The membership_* gauges the health_check
             # filter READS (2026-06-11 outage) do not match and remain.
             # Repro-validated against the deployed image: filter answers 200.
             - safe_regex:
                 regex: "^cluster\\.health_[^.]*\\.(upstream_|lb_|retry|external|circuit_breakers|http1|http2|max_host_weight|assignment|bind_|original_dst|default\\.total_match).*"
-            # inboundready_<pod> probe clusters (issue #815): the per-pod active
+            # inboundready_<namespace>_<pod> probe clusters (issue #815): the per-pod active
             # mTLS check of that pod's OWN mesh inbound listener. Same shape and
-            # same reasoning as health_<pod> above — never routed, so the same
+            # same reasoning as health_<namespace>_<pod> above — never routed, so the same
             # subtrees are permanently zero.
             #
             # ⚠ The SAME rule applies as for health_: membership_healthy /
             # membership_total must stay readable. The health gateway's
             # health_check filter evaluates cluster_min_healthy_percentages by
             # READING those gauges, and this cluster is now named there next to
-            # health_<pod>. Excluding them nulls both to 0, the gateway answers
+            # health_<namespace>_<pod>. Excluding them nulls both to 0, the gateway answers
             # 503, and the liveness loop demotes every endpoint on the node
             # (2026-06-11 20:03-20:14Z outage — read the block above before
             # editing this pattern).
             #
-            # ssl.* is deliberately NOT excluded: cluster.inboundready_<pod>.ssl.
+            # ssl.* is deliberately NOT excluded: cluster.inboundready_<namespace>_<pod>.ssl.
             # {handshake,connection_error,fail_verify_san,fail_verify_error} is
             # the direct read-out of WHY a pod is stuck un-promoted, which is the
             # whole point of the probe. ssl.certificate.* is already excluded

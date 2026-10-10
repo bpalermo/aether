@@ -223,6 +223,10 @@ type SnapshotCache struct {
 	// set last — Envoy sees a version change and applies the stale config,
 	// silently dropping the newer mutation until the next snapshot trigger.
 	snapshotMu sync.Mutex
+	// duplicateNamesSeen is the set of resource names the last build found on
+	// more than one resource of a type, as reportDuplicateResourceNames last
+	// logged it ("" when there were none). Guarded by snapshotMu.
+	duplicateNamesSeen string
 	// versions memoizes per-resource xDS versions across builds so the
 	// version map is computed before SetSnapshot (outside go-control-plane's
 	// cache mutex) and an unchanged resource is not re-hashed (#1105).

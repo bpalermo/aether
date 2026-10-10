@@ -189,13 +189,13 @@ s4_new_pod_served() {
 
 	local listed=no
 	for i in $(seq 1 30); do
-		if grep -q "inbound_${newpod}" <<<"$(admin /listeners 2>/dev/null)"; then
+		if grep -q "inbound_${TEST_NS}_${newpod}" <<<"$(admin /listeners 2>/dev/null)"; then
 			listed=yes
 			break
 		fi
 		sleep 1
 	done
-	echo "  node proxy lists inbound_${newpod}: $listed"
+	echo "  node proxy lists inbound_${TEST_NS}_${newpod}: $listed"
 	echo "  listener_manager: $(admin '/stats?filter=listener_manager.(total_listeners_active|listener_added|lds.update_success|total_listeners_draining)' | tr '\n' ' ')"
 
 	[ "$listed" = yes ] || die "S4 RED: the node proxy never added the new pod's inbound listener (aether#1127)"

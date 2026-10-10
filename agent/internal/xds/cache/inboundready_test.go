@@ -16,7 +16,7 @@ import (
 )
 
 // Cache-level tests for the issue #815 promotion gate: a per-pod
-// inboundready_<pod> cluster actively health-checks the pod's own mesh inbound
+// inboundready_<namespace>_<pod> cluster actively health-checks the pod's own mesh inbound
 // listener over mTLS, and the health gateway requires it alongside the app
 // probe before the liveness loop can promote the endpoint.
 
@@ -71,8 +71,8 @@ func clusterNames(t *testing.T, c *SnapshotCache) map[string]*clusterv3.Cluster 
 }
 
 // TestInboundReadyClusterGatesPromotion: with SPIRE on and the node SVID
-// served, the pod gets an inboundready_<pod> cluster and its OWN gateway path,
-// while /healthz/health_<pod> keeps meaning the application probe alone.
+// served, the pod gets an inboundready_<namespace>_<pod> cluster and its OWN gateway path,
+// while /healthz/health_<namespace>_<pod> keeps meaning the application probe alone.
 func TestInboundReadyClusterGatesPromotion(t *testing.T) {
 	c := newTestCache("node-1")
 	ctx := context.Background()
@@ -82,23 +82,23 @@ func TestInboundReadyClusterGatesPromotion(t *testing.T) {
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
 
 	clusters := clusterNames(t, c)
-	probe, ok := clusters["inboundready_echo-1"]
+	probe, ok := clusters["inboundready_aether-test_echo-1"]
 	require.True(t, ok, "an mTLS pod on a node with an SVID must get an inbound-readiness probe")
 	require.Len(t, probe.GetHealthChecks(), 1)
 	assert.NotNil(t, probe.GetTransportSocket())
 
 	requires := gatewayMinHealthy(t, c)
-	assert.Equal(t, []string{"health_echo-1"},
-		requires[proxy.HealthGatewayPath("health_echo-1")],
+	assert.Equal(t, []string{"health_aether-test_echo-1"},
+		requires[proxy.HealthGatewayPath("health_aether-test_echo-1")],
 		"the app path must reflect the app probe ALONE, as it did before #815")
-	assert.Equal(t, []string{"inboundready_echo-1"},
-		requires[proxy.HealthGatewayPath("inboundready_echo-1")],
+	assert.Equal(t, []string{"inboundready_aether-test_echo-1"},
+		requires[proxy.HealthGatewayPath("inboundready_aether-test_echo-1")],
 		"the inbound-readiness probe gets its own path so the agent can tell the two facts apart")
 }
 
 // TestInboundReadyAbsentBeforeNodeIdentity: the probe presents the node SVID,
 // so before it lands there is nothing to build. The gateway must then carry NO
-// /healthz/inboundready_<pod> path at all — 404 there is how the liveness loop
+// /healthz/inboundready_<namespace>_<pod> path at all — 404 there is how the liveness loop
 // learns the pod is UNGATED rather than unhealthy.
 func TestInboundReadyAbsentBeforeNodeIdentity(t *testing.T) {
 	c := newTestCache("node-1")
@@ -106,20 +106,20 @@ func TestInboundReadyAbsentBeforeNodeIdentity(t *testing.T) {
 
 	require.NoError(t, c.AddPod(ctx, inboundReadyTestPod(), "aether.internal"))
 
-	assert.NotContains(t, clusterNames(t, c), "inboundready_echo-1")
+	assert.NotContains(t, clusterNames(t, c), "inboundready_aether-test_echo-1")
 	assert.Equal(t,
-		[]string{"health_echo-1"},
-		gatewayMinHealthy(t, c)[proxy.HealthGatewayPath("health_echo-1")],
+		[]string{"health_aether-test_echo-1"},
+		gatewayMinHealthy(t, c)[proxy.HealthGatewayPath("health_aether-test_echo-1")],
 		"without a node SVID the gate must stay exactly as it was")
-	assert.NotContains(t, gatewayMinHealthy(t, c), proxy.HealthGatewayPath("inboundready_echo-1"),
+	assert.NotContains(t, gatewayMinHealthy(t, c), proxy.HealthGatewayPath("inboundready_aether-test_echo-1"),
 		"an ungated pod must have no inbound-readiness path, so the agent reads 404")
 
 	// The SVID arriving must materialise both the cluster and its path — with no
 	// further trigger than the next snapshot.
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
-	assert.Contains(t, clusterNames(t, c), "inboundready_echo-1")
-	assert.Equal(t, []string{"inboundready_echo-1"},
-		gatewayMinHealthy(t, c)[proxy.HealthGatewayPath("inboundready_echo-1")])
+	assert.Contains(t, clusterNames(t, c), "inboundready_aether-test_echo-1")
+	assert.Equal(t, []string{"inboundready_aether-test_echo-1"},
+		gatewayMinHealthy(t, c)[proxy.HealthGatewayPath("inboundready_aether-test_echo-1")])
 }
 
 // TestInboundReadyAbsentWithSpireOff is the SPIRE-off byte-identity guard: with
@@ -133,11 +133,11 @@ func TestInboundReadyAbsentWithSpireOff(t *testing.T) {
 	require.NoError(t, c.AddPod(ctx, inboundReadyTestPod(), "aether.internal"))
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
 
-	assert.NotContains(t, clusterNames(t, c), "inboundready_echo-1",
+	assert.NotContains(t, clusterNames(t, c), "inboundready_aether-test_echo-1",
 		"a cleartext inbound listener has no certificate to probe")
 	assert.Equal(t,
-		[]string{"health_echo-1"},
-		gatewayMinHealthy(t, c)[proxy.HealthGatewayPath("health_echo-1")])
+		[]string{"health_aether-test_echo-1"},
+		gatewayMinHealthy(t, c)[proxy.HealthGatewayPath("health_aether-test_echo-1")])
 }
 
 // TestSpireOffSnapshotIsByteIdenticalAcrossTheChange pins the stronger claim:
@@ -175,11 +175,11 @@ func TestInboundReadyRemovedWithPod(t *testing.T) {
 
 	require.NoError(t, c.AddPod(ctx, pod, "aether.internal"))
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
-	require.Contains(t, clusterNames(t, c), "inboundready_echo-1")
+	require.Contains(t, clusterNames(t, c), "inboundready_aether-test_echo-1")
 
 	require.NoError(t, c.RemovePod(ctx, pod.GetNetworkNamespace()))
-	assert.NotContains(t, clusterNames(t, c), "inboundready_echo-1")
-	assert.NotContains(t, gatewayMinHealthy(t, c), proxy.HealthGatewayPath("health_echo-1"))
+	assert.NotContains(t, clusterNames(t, c), "inboundready_aether-test_echo-1")
+	assert.NotContains(t, gatewayMinHealthy(t, c), proxy.HealthGatewayPath("health_aether-test_echo-1"))
 }
 
 // TestInboundReadyIsDeterministic: the probe cluster and the gateway listener

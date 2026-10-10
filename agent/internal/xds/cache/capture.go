@@ -53,15 +53,14 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 		c.metrics.UDPRouteUnsupported(context.Background(), int64(len(reasons)))
 		for _, reason := range reasons {
 			c.log.Warn("UDPRoute input discarded: the per-pod UDP capture listener cannot represent it",
-				"pod", cniPod.GetName(),
+				"pod", cniPod.GetNamespace()+"/"+cniPod.GetName(),
 				"reason", reason,
 				"issue", "873")
 		}
 	}
 
 	l, err := proxy.GenerateUDPCaptureListener(
-		cniPod.GetName(),
-		cniPod.GetNetworkNamespace(),
+		cniPod,
 		meshconst.ProxyL4OutboundPort,
 		udpRoutes,
 		clusterIPs,

@@ -1681,6 +1681,33 @@ helm_template_test(
     },
 )
 
+# #1584: the agent's per-pod listener stat prefixes are inbound_<namespace>_<pod>
+# and out_http_<namespace>_<pod>, and the proxy bootstrap lifts BOTH parts out
+# of the stat name: aether.namespace takes the text up to the first underscore
+# after the prefix, aether.pod the rest. Without the first tag the namespace
+# stays in aether.pod; without either, every pod is a metric family of its own.
+# The namespace part is optional in the aether.pod extractor, so the prefixes an
+# agent older than #1584 writes (inbound_<pod>) still collapse during an upgrade.
+# //agent/test/envoy_validate (TestChartStatsConfigOnNamespacedPodNames) runs
+# the pinned proxy with this block and reads the labels it exports; this pins
+# the two extractors in the packaged chart. The same block's exclusions must
+# never match the membership gauges of the health_ and inboundready_ clusters
+# (the health gateway reads them), which that test checks on the proxy too.
+helm_template_test(
+    name = "aether_proxy_bootstrap_pod_stats_tags_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-configmap.yaml": [
+            "- tag_name: aether\\.namespace\\n\\s+regex: \"\\^listener.{1,4}\\(\\?:inbound\\|out_http\\)\\(_\\(\\[\\^_\\.\\]\\+\\)\\)_\\[\\^\\.\\]\\+.{1,4}\"\\n",
+            "- tag_name: aether\\.pod\\n\\s+regex: \"\\^listener.{1,4}\\(\\?:inbound\\|out_http\\)\\(\\?:_\\[\\^_\\.\\]\\+\\)\\?\\(_\\(\\[\\^\\.\\]\\+\\)\\).{1,4}\"\\n",
+        ],
+    },
+)
+
 # #1054: the proxy drains with --drain-strategy gradual by default (immediate
 # made the stateless resets worse on talos-main); immediate stays an opt-in.
 helm_template_test(

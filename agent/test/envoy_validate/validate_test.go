@@ -985,7 +985,7 @@ func TestCaptureUDPClusterIsPlaintextAtTheAppPort(t *testing.T) {
 
 // TestNodeBootstrapCarriesTheQUICInbound is the anti-vacuity half of the R4
 // and inbound-pin checks above: the node bootstrap must contain the pod's
-// HTTP/3 inbound (inbound_<pod>_h3), on UDP, on the TCP inbound's port, with
+// HTTP/3 inbound (inbound_<namespace>_<pod>_h3), on UDP, on the TCP inbound's port, with
 // a QuicDownstreamTransport that requires a client certificate -- otherwise
 // QUICChainsWithoutR4 and the QUIC branch of downstreamTLSPinned are checking
 // nothing when they pass.
@@ -1009,7 +1009,7 @@ func TestNodeBootstrapCarriesTheQUICInbound(t *testing.T) {
 		}
 	}
 	if quic == nil {
-		t.Fatal("the node bootstrap has no inbound_<pod>_h3 listener: the QUIC checks above are vacuous")
+		t.Fatal("the node bootstrap has no inbound_<namespace>_<pod>_h3 listener: the QUIC checks above are vacuous")
 	}
 	sa := quic.GetAddress().GetSocketAddress()
 	if sa.GetProtocol() != corev3.SocketAddress_UDP {

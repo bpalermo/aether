@@ -3,6 +3,7 @@ package proxy
 import (
 	"testing"
 
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +32,7 @@ func TestUDPCaptureListenerSelectsPerVIP(t *testing.T) {
 // rewrite. Transparency is what lets the divert deliver to a non-local VIP.
 func TestUDPCaptureListenerBindsTheDialledPort(t *testing.T) {
 	routes := map[string][]L4Backend{"ns/a": {{Cluster: "udp:a.mesh", Weight: 1}}}
-	l, err := GenerateUDPCaptureListener("pod-port", "/var/run/netns/x", 18082, routes, map[string]string{"ns/a": "10.96.5.5"})
+	l, err := GenerateUDPCaptureListener(&cniv1.CNIPod{Name: "pod-port", Namespace: "ns", NetworkNamespace: "/var/run/netns/x"}, 18082, routes, map[string]string{"ns/a": "10.96.5.5"})
 	require.NoError(t, err)
 	require.NotNil(t, l)
 	assert.Equal(t, uint32(18082), l.GetAddress().GetSocketAddress().GetPortValue())

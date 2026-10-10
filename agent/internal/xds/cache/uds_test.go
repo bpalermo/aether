@@ -83,8 +83,8 @@ func TestAddPod_UDSDelivery(t *testing.T) {
 	entry := c.listeners[pod.GetNetworkNamespace()]
 	require.Len(t, entry.appClusters, 2, "one app cluster per declared port")
 	assert.Equal(t, map[string]string{
-		"app_uds-pod_8080": testUDSPath,
-		"app_uds-pod_9090": testUDSPath,
+		"app_default_uds-pod_8080": testUDSPath,
+		"app_default_uds-pod_9090": testUDSPath,
 	}, pipePaths(t, entry.appClusters), "every declared port dials the pod's one socket")
 	for _, r := range entry.appClusters {
 		assert.Nil(t, r.(*clusterv3.Cluster).GetUpstreamBindConfig(), "pipe upstreams carry no netns bind")
@@ -257,8 +257,8 @@ func TestLoadListenersFromStorage_UDSDelivery(t *testing.T) {
 	entry := c.listeners[pod.GetNetworkNamespace()]
 	require.Len(t, entry.appClusters, 2)
 	assert.Equal(t, map[string]string{
-		"app_uds-pod_8080": testUDSPath,
-		"app_uds-pod_9090": testUDSPath,
+		"app_default_uds-pod_8080": testUDSPath,
+		"app_default_uds-pod_9090": testUDSPath,
 	}, pipePaths(t, entry.appClusters))
 }
 

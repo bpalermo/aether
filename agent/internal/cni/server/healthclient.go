@@ -42,8 +42,8 @@ func newHealthGatewayClient(socketPath string) *healthGatewayClient {
 //	503 → (unhealthy, known)   it fails (includes HC warm-up; caller grace)
 //	404 → (_, not known)       that cluster's gateway filter is not programmed
 //
-// 404 is a normal answer, not an error. For health_<pod> it means the pod is
-// not programmed yet; for inboundready_<pod> it means the pod is UNGATED — the
+// 404 is a normal answer, not an error. For health_<namespace>_<pod> it means the pod is
+// not programmed yet; for inboundready_<namespace>_<pod> it means the pod is UNGATED — the
 // agent has no mTLS readiness opinion about it and must fall back to the
 // application probe alone (issue #815).
 //

@@ -23,18 +23,18 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 		{
 			name:              "standard outbound chain",
 			podName:           "my-pod",
-			expectedChainName: "out_http_my-pod",
+			expectedChainName: "out_http_team-a_my-pod",
 		},
 		{
 			name:              "empty name",
 			podName:           "",
-			expectedChainName: "out_http_",
+			expectedChainName: "out_http_team-a_",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
+			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName, Namespace: "team-a"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
 
 			require.NotNil(t, fc)
 			assert.Equal(t, tt.expectedChainName, fc.GetName())

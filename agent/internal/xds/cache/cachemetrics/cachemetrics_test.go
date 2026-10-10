@@ -157,6 +157,7 @@ var seededCounters = []string{
 	// #1105: a published proto mutated in place, caught by a version-memo
 	// audit. Zero forever when every builder honours the rule.
 	"aether.agent.snapshot.version_memo_mismatch",
+	"aether.agent.snapshot.duplicate_resource_names",
 	"aether.agent.identity.outbound_binding_mismatch",
 	"aether.agent.identity.inbound_binding_mismatch",
 	// #832: a cluster shipped with no SAN pin. Its healthy value is zero

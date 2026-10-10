@@ -92,6 +92,7 @@ go_test(
         "identity_test.go",
         "idle_timeout_test.go",
         "l4_observability_test.go",
+        "podname_stats_1584_test.go",
         "stats_sink_resource_test.go",
         "validate_test.go",
     ],
@@ -112,6 +113,7 @@ go_test(
     deps = [
         "//agent/internal/xds/config",
         "//agent/internal/xds/proxy",
+        "//api/aether/cni/v1:cni",
         "//common/constants/mesh",
         "@com_github_envoyproxy_go_control_plane_envoy//config/bootstrap/v3:bootstrap",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",

@@ -17,7 +17,7 @@ const (
 	attrHealthFrom = attribute.Key("aether.health.from")
 	attrHealthTo   = attribute.Key("aether.health.to")
 	// attrGateState labels the inbound-readiness gate gauge: "gated" (the pod
-	// has an inboundready_<pod> path on the health gateway) or "ungated" (it
+	// has an inboundready_<namespace>_<pod> path on the health gateway) or "ungated" (it
 	// does not — the pod is judged on its application probe alone).
 	attrGateState = attribute.Key("aether.gate.state")
 	// attrSnapshotCaller labels aether.agent.cni.snapshot_watch_unanswered with

@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"aethermesh.dev/agent/internal/xds/config"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	"aethermesh.dev/common/l4project"
 	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
 	matcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
@@ -157,8 +158,8 @@ func BuildCaptureTLSRouteFilterChains(svc CaptureTCPService, rules []L4ServiceRo
 }
 
 // CaptureUDPListenerName returns the per-pod UDP capture listener name.
-func CaptureUDPListenerName(podName string) string {
-	return fmt.Sprintf("capture_udp_%s", podName)
+func CaptureUDPListenerName(cniPod *cniv1.CNIPod) string {
+	return "capture_udp_" + PodResourceKey(cniPod)
 }
 
 // UDPCaptureArm is one matcher arm of a pod's UDP capture listener: datagrams
@@ -220,11 +221,11 @@ type udpCaptureSelection struct {
 // SECURITY NOTE: datagrams forwarded via this listener are NOT protected by
 // mesh mTLS. mTLS is a TCP/TLS construct; DTLS is not implemented. Backend
 // clusters are plain, with no transport socket (proposal 018 Phase 3b).
-func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, udpRoutes map[string][]L4Backend, clusterIPs map[string]string) (*listenerv3.Listener, error) {
-	if podName == "" {
+func GenerateUDPCaptureListener(cniPod *cniv1.CNIPod, captureUDPPort uint32, udpRoutes map[string][]L4Backend, clusterIPs map[string]string) (*listenerv3.Listener, error) {
+	if cniPod.GetName() == "" {
 		return nil, fmt.Errorf("pod name is required")
 	}
-	if netns == "" {
+	if cniPod.GetNetworkNamespace() == "" {
 		return nil, fmt.Errorf("network namespace is required")
 	}
 	if len(udpRoutes) == 0 {
@@ -256,7 +257,7 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 	// with "N filter chain(s) specified for connection-less UDP listener" -- so the
 	// proxy config goes in listener_filters instead.
 	udpProxyConfig := config.TypedConfig(&udp_proxyv3.UdpProxyConfig{
-		StatPrefix: fmt.Sprintf("capture_udp_%s", podName),
+		StatPrefix: CaptureUDPListenerName(cniPod),
 		RouteSpecifier: &udp_proxyv3.UdpProxyConfig_Matcher{
 			Matcher: &matcherv3.Matcher{
 				MatcherType: &matcherv3.Matcher_MatcherTree_{
@@ -278,7 +279,7 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 	})
 
 	return &listenerv3.Listener{
-		Name: CaptureUDPListenerName(podName),
+		Name: CaptureUDPListenerName(cniPod),
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{
@@ -287,7 +288,7 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 					PortSpecifier: &corev3.SocketAddress_PortValue{
 						PortValue: captureUDPPort,
 					},
-					NetworkNamespaceFilepath: netns,
+					NetworkNamespaceFilepath: cniPod.GetNetworkNamespace(),
 				},
 			},
 		},
@@ -297,7 +298,7 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 		// PREBIND inside the pod netns; needs CAP_NET_ADMIN, which the proxy
 		// pod grants (charts/aether, aether_proxy_net_admin_test).
 		Transparent:      wrapperspb.Bool(true),
-		StatPrefix:       fmt.Sprintf("capture_udp_%s", podName),
+		StatPrefix:       CaptureUDPListenerName(cniPod),
 		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
 		ListenerFilters: []*listenerv3.ListenerFilter{
 			{
