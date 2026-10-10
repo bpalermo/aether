@@ -50,10 +50,6 @@ func TestRemovePod_WaitsUntilAProxySaysWhatItHolds(t *testing.T) {
 	ctx := context.Background()
 	pod := validCNIPod("pod-live", "default", "container-live")
 	request := &cniv1.RemovePodRequest{ContainerId: "container-live", Name: "pod-live", Namespace: "default"}
-	held := map[string]string{
-		proxy.OutboundListenerName(pod): "h-out",
-		proxy.InboundListenerName(pod):  "h-in",
-	}
 
 	// server is a CNI server that stores the pod, with the given tracker.
 	server := func(t *testing.T, tracker *ack.Tracker) (*CNIServer, *lockedBuffer) {
@@ -83,33 +79,42 @@ func TestRemovePod_WaitsUntilAProxySaysWhatItHolds(t *testing.T) {
 		assert.Contains(t, logged.String(), removalNotAcked)
 	})
 
-	t.Run("a proxy that holds the listeners: until it acknowledges their removal", func(t *testing.T) {
-		tracker := ack.NewTracker(slog.New(slog.DiscardHandler))
-		proxyStatesItsListeners(tracker, 1, held)
-		s, logged := server(t, tracker)
+	// Both of the pod's listeners are bound in its network namespace, and
+	// RemovePod waits for each. A proxy that holds only one of them shows
+	// that wait alone: with the other dropped from RemovePod, this case
+	// would still pass for the listener the proxy does not hold.
+	for name, listener := range map[string]string{
+		"a proxy that holds the outbound listener: until it acknowledges its removal": proxy.OutboundListenerName(pod),
+		"a proxy that holds the inbound listener: until it acknowledges its removal":  proxy.InboundListenerName(pod),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tracker := ack.NewTracker(slog.New(slog.DiscardHandler))
+			proxyStatesItsListeners(tracker, 1, map[string]string{listener: "h"})
+			s, logged := server(t, tracker)
 
-		returned := make(chan struct{})
-		go func() {
-			defer close(returned)
-			remove(t, s)
-		}()
-		select {
-		case <-returned:
-			t.Fatal("RemovePod returned while the proxy holds the pod's listeners")
-		case <-time.After(200 * time.Millisecond):
-		}
+			returned := make(chan struct{})
+			go func() {
+				defer close(returned)
+				remove(t, s)
+			}()
+			select {
+			case <-returned:
+				t.Fatalf("RemovePod returned while the proxy holds %s", listener)
+			case <-time.After(200 * time.Millisecond):
+			}
 
-		callbacks := tracker.Callbacks()
-		callbacks.OnStreamDeltaResponse(1, nil, &discoveryv3.DeltaDiscoveryResponse{
-			TypeUrl: resourcev3.ListenerType, Nonce: "removal",
-			RemovedResources: []string{proxy.OutboundListenerName(pod), proxy.InboundListenerName(pod)},
+			callbacks := tracker.Callbacks()
+			callbacks.OnStreamDeltaResponse(1, nil, &discoveryv3.DeltaDiscoveryResponse{
+				TypeUrl: resourcev3.ListenerType, Nonce: "removal",
+				RemovedResources: []string{listener},
+			})
+			require.NoError(t, callbacks.OnStreamDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
+				TypeUrl: resourcev3.ListenerType, ResponseNonce: "removal",
+			}))
+			<-returned
+			assert.NotContains(t, logged.String(), removalNotAcked, "the removal was acknowledged within the wait")
 		})
-		require.NoError(t, callbacks.OnStreamDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
-			TypeUrl: resourcev3.ListenerType, ResponseNonce: "removal",
-		}))
-		<-returned
-		assert.NotContains(t, logged.String(), removalNotAcked, "the removal was acknowledged within the wait")
-	})
+	}
 
 	t.Run("a proxy that holds neither: at once", func(t *testing.T) {
 		tracker := ack.NewTracker(slog.New(slog.DiscardHandler))

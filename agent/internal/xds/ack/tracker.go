@@ -29,14 +29,12 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-// rejection is a proxy's refusal of the last response that carried a resource
-// on one stream.
+// rejection is a proxy's refusal of the last response that added a resource on
+// one stream.
 type rejection struct {
 	err error
 	// version is the version the rejected response carried the resource at.
-	// Empty when the response removed it (removal is set).
 	version string
-	removal bool
 }
 
 // typeState is what the tracker keeps for one resource type on one open
@@ -61,8 +59,9 @@ type typeState struct {
 	// it stated, with every response it acknowledged since applied in the
 	// order it acknowledged them.
 	held map[string]string
-	// rejected is the resources whose last answer on this stream was a NACK.
-	// The next acknowledged response that carries the resource clears it.
+	// rejected is the resources the last response to add which, on this
+	// stream, was rejected. The next answered response that carries the
+	// resource clears it or replaces it.
 	rejected map[string]rejection
 }
 
@@ -70,12 +69,10 @@ type typeState struct {
 // restart opens a second one while the first drains, and a proxy that
 // reconnects opens a new one.
 type stream struct {
-	// aggregated is set for an ADS stream, which carries every type, the
-	// Listener type included whether or not it has been asked for yet.
-	// openedFor is the one type of a stream that is not.
-	aggregated bool
-	openedFor  string
-	types      map[string]*typeState
+	// openedFor is the one type of a stream opened for a single type, and
+	// empty for an ADS stream, which carries the types it is asked for.
+	openedFor string
+	types     map[string]*typeState
 	// inflight is the responses written to the stream and not answered, by
 	// nonce. Nonces are unique per stream in go-control-plane.
 	inflight map[string]inflightResponse
@@ -318,35 +315,46 @@ func (t *Tracker) Callbacks() serverv3.Callbacks {
 //   - a NACK fails the wait only when it is of the version published now.
 //
 // One proxy holding the listener answers the wait; any proxy rejecting it
-// fails it. During a hot restart the generation that lacks the listener is
-// either the one draining or the one still loading the published snapshot
-// before it takes over, and a wait for both would hold every pod ADD for as
-// long as the new one initializes.
+// fails it. That is a choice and not a proof that the listener serves: the
+// tracker cannot tell which generation of a hot restart will serve the pod.
+// In particular a proxy that has stopped its listeners (the parent, once the
+// child has taken over) acknowledges a listener it does not add, and that ACK
+// answers the wait while the child has yet to acknowledge (measured,
+// //agent/test/mtlspool,
+// TestADrainingProxyAcknowledgesAListenerItDoesNotAdd). The data-plane proof
+// stays the CNI plugin's in-netns probe.
 //
 // Like any ACK, that says the proxy accepted the listener, not that it has
 // finished warming it. Publish before waiting: the comparison is with what is
 // published when the wait looks.
 //
-// With no proxy connected nothing is known and the wait runs to the caller's
-// deadline. Callers treat it as best-effort.
+// With no proxy that has asked for its listeners nothing is known and the wait
+// runs to the caller's deadline. Callers treat it as best-effort.
 func (t *Tracker) WaitListenerPresent(ctx context.Context, name string) error {
 	return t.wait(ctx, resourcev3.ListenerType, name, true)
 }
 
-// WaitListenerAbsent blocks until every connected proxy is known not to hold
-// the named listener, the context ends, or a proxy NACKs its removal.
+// WaitListenerAbsent blocks until every proxy that has asked for its listeners
+// is known not to hold the named listener, or the context ends.
 //
 // Known, not assumed (#1572): a proxy is known not to hold a listener when it
-// did not state it (or acknowledged its removal since), nothing that adds or
-// removes the name is unanswered on its stream, and the last answer about the
-// name was not a rejection. A proxy that has connected and not yet been
-// answered its opening Listener request is not known, and neither is the
-// node when no proxy is connected at all: after an agent restart the proxy
-// holds every listener it had, and the agent learns that only when the proxy
-// reconnects. The wait then runs until it does, or to the caller's deadline.
+// did not state it (or was sent its removal and answered since), nothing that
+// adds or removes the name is unanswered on its stream, and the last answer
+// about the name was not the rejection of an add. A proxy whose opening
+// Listener request has not been answered is not known, and neither is the
+// node when no proxy has asked for its listeners at all: after an agent
+// restart the proxy holds every listener it had, and the agent learns that
+// only when the proxy reconnects. The wait then runs until it does, or to the
+// caller's deadline.
 //
-// Every connected proxy, because each generation of a hot restart has its own
-// sockets in the pod's network namespace.
+// Every such proxy, because each generation of a hot restart has its own
+// sockets in the pod's network namespace. A proxy counts from its Listener
+// request and not from the moment its stream opens: a new generation that is
+// still loading its clusters holds no listener, and counting it would hold
+// every pod DEL of a hot restart for the whole wait. The cost is the moment
+// between a reconnecting proxy's stream opening and its Listener request,
+// which is shorter than the time its stream was closed, when nothing was
+// known of it either.
 func (t *Tracker) WaitListenerAbsent(ctx context.Context, name string) error {
 	return t.wait(ctx, resourcev3.ListenerType, name, false)
 }
@@ -375,14 +383,25 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 
 		select {
 		case <-ctx.Done():
-			t.metrics.waitFailed(ctx, wantPresent, reasonTimeout)
-			if wantPresent {
-				return fmt.Errorf("timed out waiting for envoy to ack %s", name)
-			}
-			return fmt.Errorf("timed out waiting for envoy to ack removal of %s", name)
+			return t.expired(ctx, name, wantPresent, len(holders) == 0)
 		case <-ch:
 		}
 	}
+}
+
+// expired counts and returns the failure of a wait whose context ended. A
+// wait that ends with no proxy to ask is not a proxy that did not answer, and
+// is counted apart (reasonNoProxy).
+func (t *Tracker) expired(ctx context.Context, name string, wantPresent, noProxy bool) error {
+	reason := reasonTimeout
+	if noProxy {
+		reason = reasonNoProxy
+	}
+	t.metrics.waitFailed(ctx, wantPresent, reason)
+	if wantPresent {
+		return fmt.Errorf("timed out waiting for envoy to ack %s", name)
+	}
+	return fmt.Errorf("timed out waiting for envoy to ack removal of %s", name)
 }
 
 // isClosed reports whether ch is closed, without waiting.
@@ -405,7 +424,7 @@ type holder struct {
 	// unanswered: a response that adds or removes the resource is written to
 	// the stream and not answered. The proxy may have applied it.
 	unanswered bool
-	// rejected is the proxy's refusal of the last response that carried the
+	// rejected is the proxy's refusal of the last response that added the
 	// resource, when that was its last answer about it.
 	rejected *rejection
 }
@@ -438,14 +457,14 @@ func answer(holders []holder, wantPresent bool, want wanted) (answered bool, rej
 	if wantPresent {
 		return answerPresent(holders, want)
 	}
-	return answerAbsent(holders)
+	return answerAbsent(holders), nil
 }
 
 // answerPresent: one proxy holds the wanted version with nothing unanswered
 // about the name, and none rejected that version.
 func answerPresent(holders []holder, want wanted) (bool, error) {
 	for _, h := range holders {
-		if r := h.rejected; r != nil && !r.removal && want.is(r.version) {
+		if r := h.rejected; r != nil && want.is(r.version) {
 			return false, r.err
 		}
 	}
@@ -459,31 +478,25 @@ func answerPresent(holders []holder, want wanted) (bool, error) {
 
 // answerAbsent: there is a proxy, and every one is known not to hold the name.
 //
-// A rejected removal fails the wait: go-control-plane does not send it again,
-// so nothing more will be said. A rejected add does not make the name absent:
-// the proxy applies a rejected Listener response in part and keeps the
-// listeners of it that it could build (//agent/test/mtlspool,
-// TestRejectedListenerResponseIsAppliedInPart). The wait is for the
-// acknowledged removal, which go-control-plane sends because it counts a
-// resource as delivered when it is written.
-func answerAbsent(holders []holder) (bool, error) {
-	for _, h := range holders {
-		if r := h.rejected; r != nil && r.removal {
-			return false, r.err
-		}
-	}
+// A rejected add does not make the name absent: the proxy applies a rejected
+// Listener response in part and keeps the listeners of it that it could build
+// (//agent/test/mtlspool, TestRejectedListenerResponseIsAppliedInPart). The
+// wait is for the removal, which go-control-plane sends because it counts a
+// resource as delivered when it is written. No rejection fails this wait: a
+// removal is done whatever the answer to the response that carried it
+// (typeState.resolve).
+func answerAbsent(holders []holder) bool {
 	for _, h := range holders {
 		if !h.known || h.held || h.unanswered || h.rejected != nil {
-			return false, nil
+			return false
 		}
 	}
-	return len(holders) > 0, nil
+	return len(holders) > 0
 }
 
 // holdersLocked is what each connected proxy says about one resource, in
-// stream order. A stream counts when it carries the type, from the moment it
-// opens and whether or not the type has been asked for yet: a proxy that
-// reconnects holds its listeners before it says so. Callers hold t.mu.
+// stream order. A stream counts when it carries the type (stream.carries).
+// Callers hold t.mu.
 func (t *Tracker) holdersLocked(typeURL, name string) []holder {
 	ids := make([]int64, 0, len(t.streams))
 	for id, s := range t.streams {
@@ -508,11 +521,12 @@ func (t *Tracker) holdersLocked(typeURL, name string) []holder {
 	return holders
 }
 
-// carries reports whether resources of the type travel on the stream: every
-// type on an ADS stream, and on any other the type it was opened for (and one
-// seen on it, should a server ever do that).
+// carries reports whether resources of the type travel on the stream: the type
+// a single-type stream was opened for, and on an ADS stream every type that
+// has been asked for or sent. An ADS stream that has not asked for a type yet
+// is not counted for it (WaitListenerAbsent says why).
 func (s *stream) carries(typeURL string) bool {
-	return s.aggregated || s.openedFor == typeURL || s.types[typeURL] != nil
+	return (s.openedFor != "" && s.openedFor == typeURL) || s.types[typeURL] != nil
 }
 
 // unanswered reports whether a response that adds or removes the resource is
@@ -552,18 +566,18 @@ func (t *Tracker) streamLocked(streamID int64) *stream {
 // openLocked adds a stream opened for typeURL, which is empty for ADS.
 func (t *Tracker) openLocked(streamID int64, typeURL string) *stream {
 	s := &stream{
-		aggregated: typeURL == "",
-		openedFor:  typeURL,
-		types:      make(map[string]*typeState),
-		inflight:   make(map[string]inflightResponse),
+		openedFor: typeURL,
+		types:     make(map[string]*typeState),
+		inflight:  make(map[string]inflightResponse),
 	}
 	t.streams[streamID] = s
 	return s
 }
 
 // onDeltaStreamOpen records a proxy connecting. typeURL is empty for an ADS
-// stream. From here until its Listener type is answered, what this proxy
-// holds is not known, and no removal wait is answered (WaitListenerAbsent).
+// stream, which counts for a type from its first request of it; a stream
+// opened for the Listener type alone counts from here, and until it is
+// answered no removal wait is (WaitListenerAbsent).
 func (t *Tracker) onDeltaStreamOpen(_ context.Context, streamID int64, typeURL string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -710,7 +724,8 @@ func (t *Tracker) noteOpeningRequestLocked(s *stream, req *discoveryv3.DeltaDisc
 
 // onDeltaRequest resolves an inflight response when the request echoes its
 // nonce: without an error detail it is an ACK (resources accepted), with one it
-// is a NACK (whole response rejected, error recorded against each resource).
+// is a NACK (the error is recorded against each resource the response added;
+// typeState.resolve).
 // A request without a nonce answers nothing; the first of its type on the
 // stream is the proxy's statement of what it holds (noteOpeningRequestLocked).
 //
@@ -768,31 +783,35 @@ func endDelivery(deliveries DeliveryObserver, entry inflightResponse) {
 }
 
 // resolve applies an answered response to what the proxy on this stream
-// holds. Acknowledged, the proxy holds what the response added at the version
-// it carried, and no longer what it removed: a removed name is forgotten, not
-// kept as absent (#1573). Rejected (nackErr is non-nil), the proxy holds what
-// it held, and the rejection is kept against each name of the response.
+// holds.
+//
+// What the response removed, the proxy no longer holds, whatever the answer:
+// the proxy does every removal of a Listener response before any add, and
+// rejects the response at the end for an add it could not build (measured,
+// //agent/test/mtlspool, TestRemovalCarriedByARejectedResponseIsDone). A
+// removed name is forgotten, not kept as absent (#1573).
+//
+// What the response added, the proxy holds at the version it carried when it
+// acknowledged the response. When it rejected it (nackErr is non-nil) the
+// rejection is kept against each added name, and what was held of the name is
+// left as it was: the proxy may or may not have built it
+// (TestRejectedListenerResponseIsAppliedInPart).
 //
 // A proxy answers the responses of a stream in the order they were written,
 // so applying the answers in the order they arrive is the proxy's own history
 // and needs no other ordering. Callers hold the tracker's lock.
 func (ts *typeState) resolve(entry inflightResponse, nackErr error) {
-	if nackErr != nil {
-		for _, r := range entry.added {
-			ts.rejected[r.Name] = rejection{err: nackErr, version: r.Version}
-		}
-		for _, name := range entry.removed {
-			ts.rejected[name] = rejection{err: nackErr, removal: true}
-		}
-		return
-	}
-	for _, r := range entry.added {
-		ts.held[r.Name] = r.Version
-		delete(ts.rejected, r.Name)
-	}
 	for _, name := range entry.removed {
 		delete(ts.held, name)
 		delete(ts.rejected, name)
+	}
+	for _, r := range entry.added {
+		if nackErr != nil {
+			ts.rejected[r.Name] = rejection{err: nackErr, version: r.Version}
+			continue
+		}
+		ts.held[r.Name] = r.Version
+		delete(ts.rejected, r.Name)
 	}
 }
 

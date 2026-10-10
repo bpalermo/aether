@@ -283,36 +283,47 @@ func TestWaitListenerPresent_ARejectionIsOfAVersion(t *testing.T) {
 	requireNotPresent(t, tr, testListener)
 	ackDelta(tr, 1, "n2", "")
 	requirePresent(t, tr, testListener)
-
-	// A rejected removal leaves the proxy holding what it held, and is the
-	// rejection the removal wait fails on.
-	sendDelta(tr, 1, "n3", nil, []string{testListener})
-	ackDelta(tr, 1, "n3", "cannot remove")
-	requirePresent(t, tr, testListener, "the proxy still holds the published version")
-	ctx, cancel := context.WithTimeout(context.Background(), resolvedWait)
-	defer cancel()
-	err := tr.WaitListenerAbsent(ctx, testListener)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot remove")
 }
 
-// TestWaitListenerPresent_ARejectedRemovalFailsNoWaitForPresence, with or
-// without a published version to hold a rejection to: the proxy that refused
-// to drop the listener holds it.
-func TestWaitListenerPresent_ARejectedRemovalFailsNoWaitForPresence(t *testing.T) {
+// TestNack_TheRemovalsOfARejectedResponseAreDone: a response that removes one
+// pod's listener and adds another pod's, which the proxy cannot build. The
+// proxy rejects the response, having done the removal first (measured,
+// //agent/test/mtlspool, TestRemovalCarriedByARejectedResponseIsDone). The
+// rejection is of the add: the removed listener is gone, its DEL's wait
+// returns, and nothing is kept under its name.
+func TestNack_TheRemovalsOfARejectedResponseAreDone(t *testing.T) {
 	for name, tr := range map[string]*Tracker{
-		"a wait for a version": publishing(map[string]string{testListener: ""}),
+		"a wait for a version": publishing(map[string]string{testListener: "h1", otherListener: "h2"}),
 		"a wait for a name":    NewTracker(slog.New(slog.DiscardHandler)),
 	} {
 		t.Run(name, func(t *testing.T) {
-			holding(tr, 1, nil)
-			sendDelta(tr, 1, "n1", []string{testListener}, nil)
-			ackDelta(tr, 1, "n1", "")
-			sendDelta(tr, 1, "n2", nil, []string{testListener})
-			ackDelta(tr, 1, "n2", "cannot remove")
-			requirePresent(t, tr, testListener)
+			holding(tr, 1, map[string]string{testListener: "h1"})
+			requirePresent(t, tr, testListener, "fixture")
+			sendListeners(tr, 1, "n1", map[string]string{otherListener: "h2"}, []string{testListener})
+			requireNotAbsent(t, tr, testListener, "the response is not answered")
+
+			ackDelta(tr, 1, "n1", "cannot build the other one")
+			requireAbsent(t, tr, testListener, "the proxy dropped it before it rejected the response")
+			requireNotPresent(t, tr, testListener, "and does not hold it: the rejection was not of this listener")
+			requireRejected(t, tr, otherListener, "cannot build the other one")
+			assert.Equal(t, 1, remembered(tr), "only the rejected add is kept, not the removed name (#1573)")
 		})
 	}
+}
+
+// TestNack_ARemovalClearsAnEarlierRejectionOfTheName: the add of a listener
+// was rejected, and its removal travels in a response the proxy rejects too.
+// The listener is gone all the same.
+func TestNack_ARemovalClearsAnEarlierRejectionOfTheName(t *testing.T) {
+	tr := publishing(map[string]string{})
+	holding(tr, 1, nil)
+	sendListeners(tr, 1, "n1", map[string]string{testListener: "h1"}, nil)
+	ackDelta(tr, 1, "n1", "Permission denied")
+	requireNotAbsent(t, tr, testListener, "fixture: a rejected add is not absent")
+
+	sendListeners(tr, 1, "n2", map[string]string{otherListener: "h2"}, []string{testListener})
+	ackDelta(tr, 1, "n2", "cannot build the other one")
+	requireAbsent(t, tr, testListener)
 }
 
 // TestWaitListenerPresent_NotWhileSomethingIsUnansweredOnThatStream: the
@@ -384,7 +395,7 @@ func TestWaitListenerAbsent_UnknownIsNotAbsent(t *testing.T) {
 	requireNotAbsent(t, tr, testListener, "no proxy is connected: the one that reconnects may hold it")
 
 	connect(tr, 1, "")
-	requireNotAbsent(t, tr, testListener, "a proxy connected and has not said what listeners it holds")
+	requireNotAbsent(t, tr, testListener, "a stream opened; nothing is known of the proxy on it")
 
 	open(tr, 1, resourcev3.ClusterType, nil)
 	sendVersioned(tr, 1, resourcev3.ClusterType, "c1", "v1", []string{"c"})
@@ -710,15 +721,64 @@ func TestTwoGenerations_WhichMustHoldTheListener(t *testing.T) {
 		requireAbsent(t, tr, testListener)
 	})
 
-	t.Run("absent: a generation that has not said what it holds", func(t *testing.T) {
+	t.Run("absent: a generation counts from its Listener request", func(t *testing.T) {
 		tr := publishing(map[string]string{})
 		holding(tr, parent, nil)
 		requireAbsent(t, tr, testListener, "fixture")
+
+		// The child has connected and is loading its clusters. It holds no
+		// listener, and must not hold up every pod DEL of the hot restart.
 		connect(tr, child, "")
-		requireNotAbsent(t, tr, testListener, "the stream that just opened may be a proxy reconnecting with the listener")
-		holding(tr, child, nil)
+		open(tr, child, resourcev3.ClusterType, nil)
+		sendVersioned(tr, child, resourcev3.ClusterType, "c1", "v1", []string{"c"})
+		requireAbsent(t, tr, testListener, "a stream that has not asked for listeners held up the wait")
+
+		// From its Listener request it is a proxy that has not been answered.
+		open(tr, child, resourcev3.ListenerType, map[string]string{testListener: "h1"})
+		requireNotAbsent(t, tr, testListener, "a reconnecting generation states the listener")
+		sendDelta(tr, child, "l1", nil, []string{testListener})
+		requireNotAbsent(t, tr, testListener)
+		ackDelta(tr, child, "l1", "")
 		requireAbsent(t, tr, testListener)
 	})
+}
+
+// TestWait_AProxyThatArrivesWhileItLooksIsSeen: the wait has read "the one
+// proxy does not hold the listener" and is reading the published version when
+// another proxy arrives that may hold it. The answer it was about to give was
+// never true of the proxies connected when it returns: it looks again.
+func TestWait_AProxyThatArrivesWhileItLooksIsSeen(t *testing.T) {
+	for name, arrive := range map[string]func(tr *Tracker){
+		// A reconnecting generation states the listener on its ADS stream,
+		// which is open already (stream 2, below): the request alone is what
+		// happens while the wait looks.
+		"a Listener request on an ADS stream": func(tr *Tracker) {
+			open(tr, 2, resourcev3.ListenerType, map[string]string{testListener: "h1"})
+		},
+		// A stream opened for listeners alone counts from its opening.
+		"a stream opened for listeners": func(tr *Tracker) {
+			connect(tr, 3, resourcev3.ListenerType)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tr := NewTracker(slog.New(slog.DiscardHandler))
+			asked := 0
+			tr.SetPublishedVersion(func(string, string) (string, bool) {
+				asked++
+				if asked == 1 {
+					arrive(tr)
+				}
+				return "", false
+			})
+			holding(tr, 1, nil)
+			connect(tr, 2, "")
+
+			ctx, cancel := context.WithTimeout(context.Background(), unresolvedWait)
+			defer cancel()
+			require.Error(t, tr.WaitListenerAbsent(ctx, testListener), "the proxy that arrived has not said it lacks the listener")
+			require.GreaterOrEqual(t, asked, 2, "the wait looked again")
+		})
+	}
 }
 
 // TestStreamClose_WakesAWaiterItUnblocks: a wait held up by one stream alone

@@ -15,7 +15,7 @@ const meterName = "aether/agent-xds-ack"
 
 // Attribute keys. Closed sets, every member seeded at zero (seed): the xDS
 // type URLs the agent serves (ServedTypeURLs, and TypeURLOther), the wait kind
-// (present/absent) and the failure reason (nack/timeout).
+// (present/absent) and the failure reason (waitFailureSeries).
 //
 // A backend that stores OTLP attributes as Prometheus labels turns the dots
 // into underscores: aether_xds_type_url, aether_xds_wait, aether_xds_reason.
@@ -51,11 +51,30 @@ const TypeURLOther = "other"
 // The values of the wait and reason attributes of
 // aether.agent.xds.ack_wait_failures.
 const (
-	waitPresent   = "present"
-	waitAbsent    = "absent"
-	reasonNack    = "nack"
+	waitPresent = "present"
+	waitAbsent  = "absent"
+	// reasonNack: a connected proxy rejected the version waited for. Only a
+	// wait for a listener to be present fails on it: no rejection fails a
+	// removal wait (answerAbsent).
+	reasonNack = "nack"
+	// reasonTimeout: the wait ended with a proxy to ask that had not given
+	// the answer waited for.
 	reasonTimeout = "timeout"
+	// reasonNoProxy: the wait ended with no proxy to ask. No connected proxy
+	// had asked for its listeners: the agent has just restarted and the proxy
+	// has not reconnected, or the proxy is down.
+	reasonNoProxy = "no_proxy"
 )
+
+// waitFailureSeries is every (wait, reason) a wait can fail with: the closed
+// series set of aether.agent.xds.ack_wait_failures.
+var waitFailureSeries = [][2]string{
+	{waitPresent, reasonNack},
+	{waitPresent, reasonTimeout},
+	{waitPresent, reasonNoProxy},
+	{waitAbsent, reasonTimeout},
+	{waitAbsent, reasonNoProxy},
+}
 
 // trackerMetrics holds the ACK-tracking instruments. All methods are
 // nil-receiver-safe so the tracker runs unchanged when telemetry is disabled.
@@ -78,7 +97,7 @@ func newTrackerMetrics(meter metric.Meter) (*trackerMetrics, error) {
 		return nil, fmt.Errorf("nacks: %w", err)
 	}
 	if m.waitFailures, err = meter.Int64Counter("aether.agent.xds.ack_wait_failures",
-		metric.WithDescription("ACK waits that failed, by wait kind (present/absent) and reason (nack/timeout)")); err != nil {
+		metric.WithDescription("ACK waits that failed, by wait kind (present/absent) and reason (nack/timeout/no_proxy)")); err != nil {
 		return nil, fmt.Errorf("ack wait failures: %w", err)
 	}
 
@@ -93,17 +112,15 @@ func newTrackerMetrics(meter metric.Meter) (*trackerMetrics, error) {
 // at all, and "no NACKs" reads exactly like "this agent reports nothing". The
 // runbook's published-versus-acknowledged reading of the SAN-pin gauges leans
 // on the NACK counter being a readable zero. Both attribute sets are closed,
-// so the series count is fixed: len(ServedTypeURLs)+1 and 4.
+// so the series count is fixed: len(ServedTypeURLs)+1 and len(waitFailureSeries).
 func (m *trackerMetrics) seed() {
 	ctx := context.Background()
 	for _, typeURL := range ServedTypeURLs {
 		m.nacks.Add(ctx, 0, metric.WithAttributes(attrTypeURL.String(typeURL)))
 	}
 	m.nacks.Add(ctx, 0, metric.WithAttributes(attrTypeURL.String(TypeURLOther)))
-	for _, wait := range []string{waitPresent, waitAbsent} {
-		for _, reason := range []string{reasonNack, reasonTimeout} {
-			m.waitFailures.Add(ctx, 0, metric.WithAttributes(attrWait.String(wait), attrReason.String(reason)))
-		}
+	for _, series := range waitFailureSeries {
+		m.waitFailures.Add(ctx, 0, metric.WithAttributes(attrWait.String(series[0]), attrReason.String(series[1])))
 	}
 }
 

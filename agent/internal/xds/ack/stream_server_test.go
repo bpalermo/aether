@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -286,11 +287,11 @@ func TestServer_StatedButNotPublishedIsRemoved(t *testing.T) {
 	requirePresent(t, s.tracker, otherListener)
 }
 
-// TestServer_AnAdsStreamCountsBeforeItAsksForListeners: go-control-plane
-// announces an ADS stream with no type. From that moment the tracker has a
-// proxy that has not said what listeners it holds, whatever else it asks for
-// first, as Envoy asks for clusters before listeners.
-func TestServer_AnAdsStreamCountsBeforeItAsksForListeners(t *testing.T) {
+// TestServer_AnAdsStreamCountsFromItsListenerRequest: a second proxy
+// generation connects and asks for its clusters first, as Envoy does. Until
+// it asks for listeners it is not a proxy that may hold one, and a pod DEL is
+// not held up by it; from then on it is.
+func TestServer_AnAdsStreamCountsFromItsListenerRequest(t *testing.T) {
 	s := startDeltaServer(t, testServerListener(otherListener, 2))
 	first := s.open(t, nil)
 	resp, _ := first.recv()
@@ -302,12 +303,14 @@ func TestServer_AnAdsStreamCountsBeforeItAsksForListeners(t *testing.T) {
 	clusters, _ := second.recv()
 	second.ack(clusters)
 	s.connected(t, 2)
-	requireNotAbsent(t, s.tracker, testListener, "the second proxy has not said what listeners it holds")
+	s.settled(t)
+	requireAbsent(t, s.tracker, testListener, "a stream that has not asked for listeners held up the wait")
 
 	second.request(resourcev3.ListenerType, nil)
 	listeners, added := second.recv()
 	require.Equal(t, []string{otherListener}, added)
 	requireAbsent(t, s.tracker, testListener, "it holds none, and its first response does not carry this one")
+	requireNotAbsent(t, s.tracker, otherListener, "it is counted now: it has been sent this one")
 	second.ack(listeners)
 
 	// The first proxy goes away. Its stream is forgotten, not kept as a
@@ -484,6 +487,105 @@ func TestServer_TwoGenerationsRemoveAListener(t *testing.T) {
 
 	old.ack(removedOld)
 	requireAbsent(t, s.tracker, testListener)
+}
+
+// gatedServer is newDeltaServer with one more callback in front of the
+// tracker's, as the agent's on-demand observer is: it holds the stream's
+// goroutine on a Cluster request until released. That is a stream goroutine
+// that is busy (a Send held by flow control, CreateDeltaWatch waiting for the
+// cache mutex, another callback at work) while the cache answers a watch.
+func gatedServer(t *testing.T) (s *deltaServer, entered <-chan struct{}, release func()) {
+	t.Helper()
+	s = &deltaServer{
+		tracker: NewTracker(slog.New(slog.DiscardHandler)),
+		cache:   cachev3.NewSnapshotCache(true, cachev3.IDHash{}, nil),
+	}
+	s.tracker.SetPublishedVersion(SnapshotVersions(s.cache, serverNodeID))
+
+	in := make(chan struct{}, 1)
+	gate := make(chan struct{})
+	var once sync.Once
+	inner := s.tracker.Callbacks()
+	callbacks := serverv3.CallbackFuncs{
+		DeltaStreamOpenFunc:     inner.OnDeltaStreamOpen,
+		DeltaStreamClosedFunc:   inner.OnDeltaStreamClosed,
+		StreamDeltaResponseFunc: inner.OnStreamDeltaResponse,
+		StreamDeltaRequestFunc: func(id int64, req *discoveryv3.DeltaDiscoveryRequest) error {
+			if req.GetTypeUrl() == resourcev3.ClusterType {
+				in <- struct{}{}
+				<-gate
+			}
+			return inner.OnStreamDeltaRequest(id, req)
+		},
+	}
+
+	lis := bufconn.Listen(1 << 20)
+	gs := grpc.NewServer()
+	discoveryv3.RegisterAggregatedDiscoveryServiceServer(gs, serverv3.NewServer(context.Background(), s.cache, callbacks))
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	s.conn = conn
+	return s, in, release
+}
+
+// TestServer_AbsentReturnsWhileAnAddIsOwedToTheProxy is a LIMIT of the
+// tracker, pinned so that nothing claims otherwise. It is not timed: the
+// stream's goroutine is held, not raced.
+//
+// The cache has computed the response that adds a pod's listener (the ADD)
+// and the stream has not written it. The pod is deleted. The tracker learns
+// of a response when it is written, so it knows of nothing owed to the proxy,
+// and the DEL's wait returns "absent". The proxy is then handed the add.
+//
+// Closing it needs the order the cache computed things in, which the tracker
+// is not told.
+func TestServer_AbsentReturnsWhileAnAddIsOwedToTheProxy(t *testing.T) {
+	s, entered, release := gatedServer(t)
+	s.publish(t, "v1", testServerListener(otherListener, 2))
+
+	p := s.open(t, nil)
+	opening, _ := p.recv()
+	p.ack(opening)
+	s.settled(t)
+	requireAbsent(t, s.tracker, testListener, "fixture: the proxy said what it holds")
+
+	// The stream's goroutine is busy.
+	p.request(resourcev3.ClusterType, nil)
+	select {
+	case <-entered:
+	case <-time.After(resolvedWait):
+		t.Fatal("the stream never took the Cluster request")
+	}
+
+	// CNI ADD: the listener is published; the open Listener watch is answered
+	// into the stream's channel.
+	s.publish(t, "v2", testServerListener(otherListener, 2), testServerListener(testListener, 1))
+	// CNI DEL: it leaves the snapshot. No Listener watch is open, so nothing
+	// is computed for it.
+	s.publish(t, "v3", testServerListener(otherListener, 2))
+
+	requireAbsent(t, s.tracker, testListener, "the limit: the tracker has not been told of the add")
+
+	// What the proxy is sent next.
+	release()
+	var added []string
+	for range 2 {
+		resp, names := p.recv()
+		if resp.GetTypeUrl() == resourcev3.ListenerType {
+			added = names
+			break
+		}
+	}
+	require.Equal(t, []string{testListener}, added, "the proxy is handed the listener after the wait returned")
+	requireNotAbsent(t, s.tracker, testListener, "from here the tracker knows")
 }
 
 // TestSnapshotVersions: the published version of a listener is the one in the

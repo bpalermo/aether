@@ -16,8 +16,12 @@
 //     the snapshot, so nothing would ever acknowledge it by name (#1511).
 //  3. A listener it rejected is not stated at the rejected version.
 //  4. A rejected Listener response is applied in part: the proxy keeps the
-//     listeners of it that it could build. So a rejection does not say the
-//     proxy lacks the listener.
+//     listeners of it that it could build, and does every removal of it. So a
+//     rejection does not say the proxy lacks a listener the response added,
+//     and it does not say the proxy holds one the response removed.
+//  5. A proxy that has stopped its listeners (the parent of a hot restart,
+//     once the child has taken over) acknowledges a listener it does not add.
+//     This one is a limit of the tracker, not something it relies on.
 //
 // cds_reconnect_test.go measures the same for clusters, for the acknowledged
 // pin gauge (#1483).
@@ -28,6 +32,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"net/http"
 	"slices"
 	"sync"
 	"testing"
@@ -430,4 +435,78 @@ func TestListenerOfARejectedResponseIsNotStatedAtReconnect(t *testing.T) {
 	assert.Contains(t, proxyListeners(t, proxy), "built", "and the proxy goes on running it")
 
 	after.requireAbsent(t, "built", "the limit: the agent has no word of it")
+}
+
+// TestRemovalCarriedByARejectedResponseIsDone is a pod DEL whose listener
+// removal travels in the same Listener response as another pod's listener,
+// which the proxy cannot build.
+//
+// Measured: the proxy rejects the response, and has dropped the removed
+// listener: it does every removal of a response before any add.
+//
+// Required of the agent: the rejection is of the add. The removed listener is
+// gone, and the DEL's wait returns; the agent does not read "the proxy
+// rejected the removal and holds the listener".
+func TestRemovalCarriedByARejectedResponseIsDone(t *testing.T) {
+	cp := startLDSControlPlane(t, cdsSocketPath(t), heldListener("held-a", 200), heldListener("gone", 200))
+	proxy := startProxyOnCDS(t, cp.socketPath)
+	_, answer := cp.answered(t, "v1")
+	require.Nil(t, answer.GetErrorDetail(), "fixture: the proxy accepts both listeners")
+	cp.requirePresent(t, "gone")
+	cp.requireNotAbsent(t, "gone", "fixture: the proxy holds it")
+
+	cp.publish(t, "v2", heldListener("held-a", 200), rejectedListener("refused"))
+	sent, answer := cp.answered(t, "v2")
+	require.Equal(t, []string{"refused"}, resourceNames(sent), "fixture: one response carries the add")
+	require.Equal(t, []string{"gone"}, sent.GetRemovedResources(), "fixture: and the removal")
+	require.NotNil(t, answer.GetErrorDetail(), "fixture: the proxy must reject the response")
+	t.Logf("the proxy's NACK: %s", answer.GetErrorDetail().GetMessage())
+
+	running := proxyListeners(t, proxy)
+	t.Logf("listeners the proxy runs after the NACK: %v", running)
+	require.NotContains(t, running, "gone", "measured: the proxy does the removals of a response it rejects")
+
+	cp.requireAbsent(t, "gone", "the proxy dropped the listener")
+	ctx, cancel := context.WithTimeout(context.Background(), ldsUnresolvedWait)
+	defer cancel()
+	err := cp.tracker.WaitListenerPresent(ctx, "gone")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out", "nothing is held, and nothing about this listener was rejected")
+}
+
+// TestADrainingProxyAcknowledgesAListenerItDoesNotAdd is a LIMIT of the
+// tracker, pinned so that nothing claims otherwise.
+//
+// The parent of a hot restart is told to stop its listeners when the child
+// takes over (the admin endpoint /drain_listeners makes the same call). Its
+// ADS stream stays open until it exits.
+//
+// Measured: such a proxy acknowledges a listener added afterwards and does
+// not run it.
+//
+// What the agent makes of it: an ACK is all it sees, so it reads the draining
+// proxy as holding the listener, and the wait of a pod ADD, which one proxy
+// holding the listener answers, returns on that ACK. During that overlap the
+// wait therefore does not say a proxy that serves has the listener; the CNI
+// plugin's in-netns probe does. Telling a draining proxy from a serving one
+// needs something the proxy does not put on the stream.
+func TestADrainingProxyAcknowledgesAListenerItDoesNotAdd(t *testing.T) {
+	cp := startLDSControlPlane(t, cdsSocketPath(t), heldListener("held-a", 200))
+	proxy := startProxyOnCDS(t, cp.socketPath)
+	_, answer := cp.answered(t, "v1")
+	require.Nil(t, answer.GetErrorDetail(), "fixture: the proxy accepts the first listener")
+
+	resp, err := http.Post("http://"+proxy.admin+"/drain_listeners", "text/plain", nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// A pod ADD during the overlap.
+	cp.publish(t, "v2", heldListener("held-a", 200), heldListener("new-pod", 200))
+	sent, answer := cp.answered(t, "v2")
+	require.Equal(t, []string{"new-pod"}, resourceNames(sent))
+	require.Nil(t, answer.GetErrorDetail(), "measured: the draining proxy acknowledges the listener")
+	require.NotContains(t, proxyListeners(t, proxy), "new-pod", "measured: and does not run it")
+
+	cp.requirePresent(t, "new-pod", "the limit: the agent reads the ACK as the proxy holding the listener")
 }
