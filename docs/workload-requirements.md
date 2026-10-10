@@ -239,7 +239,11 @@ capture listener routes it. Apps that prefer zero interception assumptions
 can instead address the outbound listener explicitly: `http://127.0.0.1:18081`
 with the mesh FQDN in the `Host` header. Either way every hop is mTLS between
 workload identities; the callee sees the caller's SPIFFE ID in
-`x-forwarded-client-cert`.
+`x-forwarded-client-cert`. Between proxies an HTTP request rides HTTP/3 over
+QUIC (HTTP/2 for a weighted GAMMA split or a destination behind the east/west
+waypoint); your application speaks what it always did, to its own proxy. That
+needs two DNS SANs on every workload SVID and UDP `18008` open beside TCP
+`18008`: see the getting-started guide, "HTTP/3 between proxies".
 
 **Authorities are FQDN-only, namespace-qualified, and deterministic.**
 `<service>.<namespace>.<mesh-domain>` (default domain `aether.internal`,
