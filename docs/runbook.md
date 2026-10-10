@@ -521,13 +521,68 @@ Reading a red job:
 A plain re-run is still the answer for anything the warm-up does not cover: the
 Go tool's own downloads in `deps-audit` (`go list -m all` talks to
 `proxy.golang.org` directly, outside Bazel), docker/kind image pulls in the e2e
-jobs, and a cold namespace (the first run after a `cache-version` bump, or after
+jobs (*CI: Docker Hub pulls* below says which of them still reach Docker Hub),
+and a cold namespace (the first run after a `cache-version` bump, or after
 GitHub evicted the entry: the repository has a 10 GB cache budget and each entry
 is ~2 GB).
 
 To check what a job restored, open its **Setup Bazel** step: `Cache hit for:
 setup-bazel-root-1-linux-x64-repository-<hash>` is an exact hit;
 `Successfully restored cache from …` with a different hash is the fallback.
+
+### CI: Docker Hub pulls (#1602)
+
+The repository holds no Docker Hub credential, so a pull from Docker Hub on a
+runner is anonymous: it shares the runner address's rate limit and needs
+`auth.docker.io/token` to answer. Both have failed required jobs in which no
+test had failed. The signature, in a `race`, `integration` or `e2e` log:
+
+```text
+Get "https://auth.docker.io/token?…": net/http: request canceled … (Client.Timeout exceeded while awaiting headers)
+toomanyrequests: You have reached your unauthenticated pull rate limit
+```
+
+Two things keep the required jobs off it:
+
+- **The testcontainers reaper is off under `--config=ci`**
+  (`test:ci --test_env=TESTCONTAINERS_RYUK_DISABLED=true` in `.bazelrc`).
+  `testcontainers/ryuk` was the only Docker Hub image of the `race` and
+  `integration` jobs (the etcd they start comes from `gcr.io`), pulled by tag
+  with no credential. It cleans up after a test that crashed; a runner is
+  discarded with everything on it, and each package's `TestMain` terminates its
+  own containers. A local run keeps the reaper.
+- **The kind node image comes through a mirror.**
+  [`.github/actions/setup-kind`](../.github/actions/setup-kind/action.yml), the
+  one way a job gets kind, runs
+  [`scripts/docker-hub-mirror.sh`](../scripts/docker-hub-mirror.sh) before any
+  cluster exists. It adds `https://mirror.gcr.io` (Google's public pull-through
+  cache of Docker Hub, no credential) to the runner's `/etc/docker/daemon.json`,
+  reloads the daemon (a signal, not a restart: `registry-mirrors` is re-read
+  live), and pulls `KIND_NODE_IMAGE` by its unchanged reference. The daemon
+  asks the mirror first and Docker Hub only for what the mirror does not answer,
+  and the reference keeps its `@sha256` digest, so the content is the pinned one
+  whichever served it. kind then finds the image present.
+
+Reading the **Pull the node image through the Docker Hub mirror** step:
+
+| The log shows | What it means | Do |
+|---|---|---|
+| `https://mirror.gcr.io serves kindest/node@sha256:…; the daemon asks it first` | the mirror has the pinned digest and the daemon uses it | nothing |
+| `::warning::… does not serve kindest/node@sha256:… (HTTP 404)` | the mirror does not have that digest; the pull went to Docker Hub anonymously | nothing if the job passed. If it repeats on every run after a node image bump, the mirror never cached the new image: say so on the bump's pull request |
+| `::warning::… the daemon was not given the mirror` (after a warning about `daemon.json` or the reload) | the runner image changed how its Docker daemon is configured; every pull is back on Docker Hub | read the warning before it; fix `scripts/docker-hub-mirror.sh` |
+| `::error::… could not pull … in 3 attempts` | neither the mirror nor Docker Hub answered | re-run the job; no test ran |
+
+What still pulls from Docker Hub anonymously: the workloads the nightly
+`e2e/*.sh` harnesses start inside their kind clusters (`curlimages/curl`,
+`hashicorp/http-echo`, `istio/tcp-echo-server`, `openpolicyagent/opa`). Those
+are pulled by the node's own containerd, which the runner's daemon
+configuration does not reach. No required job runs them; the per-PR `e2e` job's
+only other image is `echo-basic`, from `gcr.io`. A red nightly suite with the
+signature above is a re-run.
+
+`//scripts:docker_hub_mirror_test` holds the script, the `.bazelrc` line and
+the workflow steps that depend on it; `//e2e:kind_pin_test` holds the step's
+place in `setup-kind`.
 
 ### CI: what the `ci` check tests, and what makes it pass (#1459, #1460)
 
@@ -1210,6 +1265,11 @@ which fails on any copy that disagrees — a kind config, a workflow's
 **older** than `KIND_VERSION` (`go install sigs.k8s.io/kind@<KIND_VERSION>`, or
 `KIND_ALLOW_SKEW=1` to try anyway) and only warn about a newer one;
 `KIND_NODE_IMAGE=<image>` overrides the node image for one run.
+
+CI pulls the node image through a Docker Hub mirror (*CI: Docker Hub pulls*,
+#1602). After a bump, read the **Pull the node image through the Docker Hub
+mirror** step of the pull request's `e2e` job: it says whether the mirror serves
+the new digest, and warns when the pull fell back to Docker Hub.
 
 ### Bumping Go
 
