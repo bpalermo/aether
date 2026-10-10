@@ -60,10 +60,17 @@ run() {
 	[ "$base" = "-" ] || printf '%s' "$base" >"$dir/base.yaml"
 	[ "$head" = "-" ] || printf '%s' "$head" >"$dir/work/$LOCK"
 	local out code
+	# CASE_LOCALE, when set, is the locale the script is run under (below).
 	out="$(cd "$dir/work" && PATH="$TMP/bin:$PATH" FAKE_BASE_REF="abc123" FAKE_LOCK="$LOCK" FAKE_BASE_FILE="$dir/base.yaml" \
-		bash "$SCRIPT" ${ref:+"$ref"} 2>&1)"
+		${CASE_LOCALE:+env LC_ALL="$CASE_LOCALE"} bash "$SCRIPT" ${ref:+"$ref"} 2>&1)"
 	code=$?
-	if [ "$code" -ne "$want_exit" ] || [[ "$out" != *"$want"* ]]; then
+	if [[ "$out" == *"sorted order"* ]]; then
+		# comm's complaint about input that is not in the order IT collates by:
+		# the lines were then not compared as sorted, whatever the verdict.
+		echo "FAIL: $name: a tool was given lines in another order than its locale's. Output:"
+		printf '%s\n' "$out" | sed 's/^/    /'
+		fail=1
+	elif [ "$code" -ne "$want_exit" ] || [[ "$out" != *"$want"* ]]; then
 		echo "FAIL: $name: exit $code, want $want_exit and output containing '$want'. Output:"
 		printf '%s\n' "$out" | sed 's/^/    /'
 		fail=1
@@ -125,6 +132,49 @@ run "a base this checkout does not have, with a promise removed" 1 "is not a com
 promises: {}
 ' "other-ref"
 FAKE_SHOW_FAILS=1 run "a lock at the base that git cannot read" 1 "exists at abc123 and git could not read it" "$BASE_LOCK" "$BASE_LOCK"
+
+# The verdict does not depend on the caller's locale. The promise lines are
+# sorted and then compared with comm, and both have to collate the same way: a
+# UTF-8 locale orders these names otherwise than their bytes do (upper case
+# among lower case, punctuation ignored at first), so lines sorted one way and
+# compared the other are "not in sorted order" to comm, which then pairs them
+# wrongly or not at all. A workstation has such a locale; so may a runner.
+LOCALE_LOCK='version: 3
+promises:
+  "B value": "1111111111111111"
+  "a value": "2222222222222222"
+  "a.b value": "3333333333333333"
+  "a_b value": "4444444444444444"
+  "ab value": "5555555555555555"
+  "Z fields t": "6666666666666666"
+  "z fields t": "7777777777777777"
+'
+CASE_LOCALE=""
+if command -v locale >/dev/null 2>&1; then
+	available="$(locale -a 2>/dev/null || true)"
+	# A locale with a collation of its own first; C.UTF-8 collates by code
+	# point and is only better than nothing.
+	for candidate in en_US.utf8 en_US.UTF-8 "$(printf '%s\n' "$available" | grep -E '^[a-z]+_[A-Z]+\.(utf8|UTF-8)$' | head -n 1)" C.utf8 C.UTF-8; do
+		if [ -n "$candidate" ] && printf '%s\n' "$available" | grep -qxF -- "$candidate"; then
+			CASE_LOCALE="$candidate"
+			break
+		fi
+	done
+fi
+if [ -z "$CASE_LOCALE" ]; then
+	echo "skip: no UTF-8 locale on this host, so the locale cases were not run"
+else
+	echo "note: the locale cases run under LC_ALL=$CASE_LOCALE"
+	run "another locale: nothing changed" 0 "every promise" "$LOCALE_LOCK" "$LOCALE_LOCK"
+	run "another locale: a promise added" 0 "every promise" "$LOCALE_LOCK" "$LOCALE_LOCK"'  "A value": "8888888888888888"
+  "a-b value": "9999999999999999"
+'
+	run "another locale: one promise removed is one promise" 1 "1 promise(s) of the external-harness contract left or changed" "$LOCALE_LOCK" "${LOCALE_LOCK/  \"a.b value\": \"3333333333333333\"$'\n'/}"
+	run "another locale: the removed promise is the one named" 1 '"a.b value"' "$LOCALE_LOCK" "${LOCALE_LOCK/  \"a.b value\": \"3333333333333333\"$'\n'/}"
+	run "another locale: a promise removed and others added" 1 "1 promise(s) of the external-harness contract left or changed" "$LOCALE_LOCK" "${LOCALE_LOCK/  \"Z fields t\": \"6666666666666666\"$'\n'/}"'  "A value": "8888888888888888"
+'
+fi
+CASE_LOCALE=""
 
 # The workflow runs it against the pull request's base, in a job with the full
 # history.

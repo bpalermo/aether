@@ -225,7 +225,7 @@ func (r Render) promises(p promises) {
 	p.rest(fields, r.ID)
 	for _, o := range r.Objects {
 		fields := fieldsOf(o)
-		take(fields, "pod_labels", "containers", "name", "name_from", "host_paths", "webhooks")
+		take(fields, "pod_labels", "containers", "name", "name_from", "host_paths", "webhooks", "contract_version_annotation")
 		// The same object under another render is another promise.
 		p.put(r.ID, o.ID, "render")
 		// The name a harness addresses, wherever the contract takes it from.
@@ -239,6 +239,12 @@ func (r Render) promises(p promises) {
 		}
 		for _, webhook := range sortedKeys(o.Webhooks) {
 			p.put(o.webhooks[webhook], o.ID, "webhooks", webhook)
+		}
+		// The key a harness reads the contract's version under, not the id of
+		// the entry that names it. The version itself is no part of the promise:
+		// it is what the annotation says, and every version says its own.
+		if o.ContractVersionAnnotation != "" {
+			p.put(o.versionAnnotation, o.ID, "contract_version_annotation")
 		}
 		for _, k := range sortedKeys(o.PodLabels) {
 			p.put(o.PodLabels[k], o.ID, "pod_labels", k)

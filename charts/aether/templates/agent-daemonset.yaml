@@ -9,6 +9,17 @@ kind: DaemonSet
 metadata:
   name: {{ include "aether.agent.fullname" . }}
   namespace: {{ include "aether.namespace" . }}
+  {{- /*
+  Which version of the external-harness contract this chart was packaged with:
+  where a harness outside the repository asks a deployed mesh which names it
+  may rely on (docs/runbook.md, "The external-harness contract"). It identifies
+  the contract, not the build. On this object and never on its pods: a contract
+  bump must replace none of them. Absent in a render of the source tree.
+  */}}
+  {{- with include "aether.harnessContractVersion" . }}
+  annotations:
+    aether.io/harness-contract-version: {{ . | quote }}
+  {{- end }}
   labels:
     {{- include "aether.agent.labels" . | nindent 4 }}
 spec:

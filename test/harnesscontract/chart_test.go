@@ -713,6 +713,179 @@ charts:
   - {id: ry, chart: y, release: r, namespace: ns, objects: [{id: ry.o, kind: K, name: z}], checked_by: //t:y}
 `
 
+// versioned is a contract whose one object carries the contract's version in
+// an annotation of its own metadata.
+const versioned = `
+version: 7
+names:
+  - {id: ann, value: example.io/contract-version, checked_by: review-only}
+charts:
+  - id: r
+    chart: x
+    release: x
+    namespace: n
+    objects:
+      - id: o
+        kind: DaemonSet
+        name: aether-agent
+        contract_version_annotation: ann
+    checked_by: review-only
+`
+
+// versionedRender is the render of that object, and of a second workload that
+// carries nothing.
+const versionedRender = `---
+kind: DaemonSet
+metadata:
+  name: aether-agent
+  labels: {app: agent}
+  annotations:
+    example.io/contract-version: "7"
+    other: hunter2
+spec:
+  template:
+    metadata:
+      labels: {app: agent}
+      annotations: {checksum/config: abc}
+---
+kind: Deployment
+metadata:
+  name: registrar
+  annotations: {other: hunter2}
+spec:
+  template:
+    metadata:
+      labels: {app: registrar}
+`
+
+// TestRenderCheck_ContractVersionAnnotation: the annotation's key is read from
+// the entry and its value from the contract's own `version`, so the entry
+// edited alone, the version bumped alone and the chart edited alone are each a
+// difference; and the key is on the object's own metadata and nowhere else,
+// because on a pod template a bump of the contract replaces every pod.
+func TestRenderCheck_ContractVersionAnnotation(t *testing.T) {
+	const own = `    example.io/contract-version: "7"` + "\n"
+	for name, tc := range map[string]struct {
+		contract [2]string // a replacement in the contract, if any
+		render   string
+		want     []string
+	}{
+		"as rendered": {},
+		"the contract's version is bumped alone": {
+			contract: [2]string{"version: 7", "version: 8"},
+			want:     []string{`o: DaemonSet/aether-agent carries the annotation example.io/contract-version (the value of the entry ann) with the value "7", and test/harnesscontract/external-harness.yaml is at version 8: the annotation is the string "8"`},
+		},
+		"the key's entry is edited alone": {
+			contract: [2]string{"value: example.io/contract-version", "value: example.io/contract"},
+			want:     []string{`o: DaemonSet/aether-agent has no annotation example.io/contract (the value of the entry ann) on its own metadata`, `(the annotations it has: example.io/contract-version, other)`},
+		},
+		"the chart renders another version": {
+			render: strings.Replace(versionedRender, own, `    example.io/contract-version: "6"`+"\n", 1),
+			want:   []string{`with the value "6", and test/harnesscontract/external-harness.yaml is at version 7`},
+		},
+		// A render from the source tree, where the generated file is not: the
+		// chart omits the annotation there, and the packaged chart may not.
+		"the chart renders no annotation": {
+			render: strings.Replace(versionedRender, own, "", 1),
+			want:   []string{`has no annotation example.io/contract-version (the value of the entry ann) on its own metadata`, `(the annotations it has: other)`},
+		},
+		"the chart renders no annotations at all": {
+			render: strings.Replace(versionedRender, "  annotations:\n"+own+"    other: hunter2\n", "", 1),
+			want:   []string{`has no annotation example.io/contract-version`, `(the annotations it has: none)`},
+		},
+		// Kubernetes takes strings only; the API server refuses a number.
+		"the chart renders the version unquoted": {
+			render: strings.Replace(versionedRender, own, "    example.io/contract-version: 7\n", 1),
+			want:   []string{`with the value 7, and test/harnesscontract/external-harness.yaml is at version 7: the annotation is the string "7"`},
+		},
+		"the chart renders it empty": {
+			render: strings.Replace(versionedRender, own, `    example.io/contract-version: ""`+"\n", 1),
+			want:   []string{`with the value "", and`},
+		},
+		"the chart moves it to the pod template": {
+			render: strings.Replace(strings.Replace(versionedRender, own, "", 1), "annotations: {checksum/config: abc}", `annotations: {checksum/config: abc, example.io/contract-version: "7"}`, 1),
+			want: []string{
+				`has no annotation example.io/contract-version (the value of the entry ann) on its own metadata`,
+				`o: DaemonSet/aether-agent also carries example.io/contract-version (the value of the entry ann) as an annotation of its pod template (a contract bump would then replace every pod of the workload)`,
+			},
+		},
+		"the chart writes it on the pod template as well": {
+			render: strings.Replace(versionedRender, "annotations: {checksum/config: abc}", `annotations: {checksum/config: abc, example.io/contract-version: "7"}`, 1),
+			want:   []string{`also carries example.io/contract-version (the value of the entry ann) as an annotation of its pod template`},
+		},
+		"the chart writes it as a pod label as well": {
+			render: strings.Replace(versionedRender, "      labels: {app: agent}\n      annotations", `      labels: {app: agent, example.io/contract-version: "7"}`+"\n      annotations", 1),
+			want:   []string{`also carries example.io/contract-version (the value of the entry ann) as a label of its pod template`},
+		},
+		"the chart writes it as a label of the object as well": {
+			render: strings.Replace(versionedRender, "  labels: {app: agent}\n  annotations", `  labels: {app: agent, example.io/contract-version: "7"}`+"\n  annotations", 1),
+			want:   []string{`also carries example.io/contract-version (the value of the entry ann) as a label of the object`},
+		},
+		"another object carries it too": {
+			render: strings.Replace(versionedRender, "annotations: {other: hunter2}", `annotations: {other: hunter2, example.io/contract-version: "7"}`, 1),
+			want:   []string{`r: Deployment/registrar carries example.io/contract-version as an annotation of the object, and the contract holds no such object to it`},
+		},
+		"another workload's pods carry it": {
+			render: strings.Replace(versionedRender, "labels: {app: registrar}", `annotations: {example.io/contract-version: "7"}`, 1),
+			want:   []string{`r: Deployment/registrar carries example.io/contract-version as an annotation of its pod template (a contract bump would then replace every pod of the workload)`},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			text := versioned
+			if tc.contract[0] != "" {
+				if !strings.Contains(text, tc.contract[0]) {
+					t.Fatalf("the contract has no %q to replace", tc.contract[0])
+				}
+				text = strings.Replace(text, tc.contract[0], tc.contract[1], 1)
+			}
+			c, err := parse([]byte(text))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rendered := tc.render
+			if rendered == "" {
+				rendered = versionedRender
+			}
+			if rendered == versionedRender && name != "as rendered" && tc.contract[0] == "" {
+				t.Fatal("the case changes neither the contract nor the render")
+			}
+			problems := c.Charts[0].Check([]byte(rendered))
+			got := strings.Join(problems, "\n")
+			if len(tc.want) == 0 && got != "" {
+				t.Errorf("Check() = %q, want no problem", got)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("Check() = %q, want it to contain %q", got, want)
+				}
+			}
+			// Another annotation's value is none of this check's business.
+			if strings.Contains(got, "hunter2") {
+				t.Errorf("Check() printed the value of another annotation: %q", got)
+			}
+		})
+	}
+}
+
+// TestRenderCheck_ContractVersionAnnotationUnresolved: an object that names
+// the entry and was not loaded through Load compares nothing, and says so.
+func TestRenderCheck_ContractVersionAnnotationUnresolved(t *testing.T) {
+	o := Object{ID: "o", Kind: "DaemonSet", Name: "aether-agent", ContractVersionAnnotation: "ann"}
+	got := strings.Join(Render{ID: "r", Objects: []Object{o}}.Check([]byte(versionedRender)), "\n")
+	if !strings.Contains(got, "o refers to other entries (ann) and they were not resolved") {
+		t.Errorf("Check() = %q", got)
+	}
+}
+
+// TestContractVersionAnnotationNeedsAnEntry: the key is an entry of `names`,
+// never a string of the object's own.
+func TestContractVersionAnnotationNeedsAnEntry(t *testing.T) {
+	_, err := parse([]byte(strings.Replace(versioned, "contract_version_annotation: ann", "contract_version_annotation: example.io/contract-version", 1)))
+	if want := "o takes the key of its `contract_version_annotation` from \"example.io/contract-version\", and `names` has no entry with that id"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("parse() error = %v, want it to contain %q", err, want)
+	}
+}
+
 // TestHeldByChartTest: a chart test holds the renders of its chart and what
 // they refer to, and those entries name it; nothing else names it.
 func TestHeldByChartTest(t *testing.T) {
