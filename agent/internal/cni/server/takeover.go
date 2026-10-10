@@ -70,7 +70,7 @@ func (s *CNIServer) takeOverRemoved(ctx context.Context, pods []*cniv1.CNIPod) [
 			continue
 		}
 		netns := pod.GetNetworkNamespace()
-		if err := s.snapshotCache.RemovePod(ctx, netns); err != nil {
+		if err := s.snapshotInstalled(ctx, podLog(s.log, pod), snapshotCallerTakeover, s.snapshotCache.RemovePod(ctx, netns)); err != nil {
 			errs = append(errs, fmt.Errorf("removing listeners of %s/%s: %w", pod.GetNamespace(), pod.GetName(), err))
 		}
 		if s.spireBridge == nil {
@@ -91,7 +91,7 @@ func (s *CNIServer) takeOverPresent(ctx context.Context, pods []*cniv1.CNIPod, a
 		if isIgnorablePod(pod) {
 			continue
 		}
-		if err := s.snapshotCache.AddPod(ctx, pod, s.trustDomain); err != nil {
+		if err := s.snapshotInstalled(ctx, podLog(s.log, pod), snapshotCallerTakeover, s.snapshotCache.AddPod(ctx, pod, s.trustDomain)); err != nil {
 			errs = append(errs, fmt.Errorf("building listeners of %s/%s: %w", pod.GetNamespace(), pod.GetName(), err))
 		}
 		if added {

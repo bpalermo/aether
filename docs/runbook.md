@@ -6935,6 +6935,23 @@ the build that logged it held up every other build on the node for those 5 s, an
 proxy is sent the change by a later build; the first thing to check is whether the
 control plane library was upgraded, since how a stream buffers is the library's.
 
+A pod change whose build logged it is not a failed change (#1620). The agent's CNI
+server is told the snapshot is installed and treats the change as made: a CNI ADD is
+answered with success (before, it was answered `Internal`, and the runtime tore down
+and retried a sandbox whose listeners were published), and a CNI DEL, the ghost sweep
+and the surge takeover no longer log the change as failed. Each such change logs
+`pod's snapshot change is installed, but an open watch was not answered from it`
+at WARN with `pod`, `namespace` and `caller`, and adds one to
+`aether.agent.cni.snapshot_watch_unanswered{aether.snapshot.caller}` (Prometheus
+`aether_agent_cni_snapshot_watch_unanswered_total{aether_snapshot_caller}`; `caller` is
+`cni_add`, `cni_del`, `takeover` or `ghost_sweep`, each exported at zero). Any other
+error of a build is still a failure: the ADD is answered `Internal` and retried.
+
+```promql
+# Pod changes on this node that were installed while a watch went unanswered.
+sum by (job, node, aether_snapshot_caller) (increase(aether_agent_cni_snapshot_watch_unanswered_total[1h])) > 0
+```
+
 ```promql
 # N clusters unpinned for reason R on this node, now.
 sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}) > 0
