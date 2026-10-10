@@ -174,8 +174,8 @@ func TestServiceClusterBytesStableWithinServiceAccount(t *testing.T) {
 
 	// The sibling still brings its OWN per-pod clusters; adding a cluster is not
 	// rewriting the existing ones, and Envoy warms only the new one.
-	require.Contains(t, afterSiblingAdd, "inboundready_"+sibling.GetName())
-	require.NotContains(t, before, "inboundready_"+sibling.GetName())
+	require.Contains(t, afterSiblingAdd, "inboundready_aether-test_"+sibling.GetName())
+	require.NotContains(t, before, "inboundready_aether-test_"+sibling.GetName())
 	for name, digest := range before {
 		if !proxy.IsPerPodClusterName(name) {
 			continue
@@ -190,7 +190,7 @@ func TestServiceClusterBytesStableWithinServiceAccount(t *testing.T) {
 	afterSiblingDel := clusterResourceDigests(t, c, "node-1")
 	requireServiceClustersEqual(t, before, afterSiblingDel,
 		"removing a pod whose ServiceAccount still has another pod on the node must be free")
-	require.NotContains(t, afterSiblingDel, "inboundready_"+sibling.GetName())
+	require.NotContains(t, afterSiblingDel, "inboundready_aether-test_"+sibling.GetName())
 	require.Equal(t, before, afterSiblingDel, "the whole CDS set must be back to the pre-ADD bytes")
 }
 
@@ -244,7 +244,7 @@ func TestServiceClusterBytesChangeOnFirstAndLastPodOfServiceAccount(t *testing.T
 	}
 	// The newcomer's OWN per-pod clusters are new, so the whole CDS set is not
 	// equal — only the service clusters are.
-	require.Contains(t, afterAdd, "inboundready_"+newcomer.GetName())
+	require.Contains(t, afterAdd, "inboundready_aether-test_"+newcomer.GetName())
 
 	// And the LAST pod of that ServiceAccount leaving restores the pre-ADD set
 	// exactly: a create/destroy pair is a round trip, so repeated churn cannot

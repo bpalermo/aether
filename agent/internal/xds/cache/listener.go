@@ -253,7 +253,7 @@ func (c *SnapshotCache) inboundGateNodeMissing(id inboundReadyIdentity) string {
 // inboundGateMissing enumerates and names those cases.
 //
 // A nil result is "this pod is UNGATED", not "this pod is unhealthy": the pod's
-// gateway then carries no /healthz/inboundready_<pod> path at all and the
+// gateway then carries no /healthz/inboundready_<namespace>_<pod> path at all and the
 // liveness loop falls back to the app probe alone — the pre-#815 behaviour —
 // while counting the pod as ungated so the absence is queryable.
 func (c *SnapshotCache) inboundReadyClusterFor(cniPod *cniv1.CNIPod, id inboundReadyIdentity) types.Resource {
@@ -451,7 +451,7 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 
 // Listeners returns all cached inbound and outbound listener resources plus
 // the health gateway listener (per-pod health_check filters over the
-// health_<pod> clusters, probed by the liveness loop) as a flat slice.
+// health_<namespace>_<pod> clusters, probed by the liveness loop) as a flat slice.
 // Thread-safe.
 func (c *SnapshotCache) Listeners() []types.Resource {
 	// Edge mode: public-facing listener(s) (no per-pod inbound/outbound

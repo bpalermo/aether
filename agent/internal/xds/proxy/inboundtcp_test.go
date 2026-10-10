@@ -41,7 +41,7 @@ func TestInboundChains_TCPPortReplacesHCM(t *testing.T) {
 	pod := podWithPorts("8080,9000=tcp,9090=h2")
 	chains := buildInboundFilterChains(pod, "spiffe-cert", "spiffe-validation", "example.org", false, nil, nil)
 
-	tcpChain := chainByName(chains, "in_tcp_app-0_9000")
+	tcpChain := chainByName(chains, "in_tcp_aether-test_app-0_9000")
 	require.NotNil(t, tcpChain, "a =tcp port must get a tcp_proxy chain")
 	require.NotNil(t, tcpChain.GetFilterChainMatch())
 	assert.Equal(t, []string{"9000"}, tcpChain.GetFilterChainMatch().GetServerNames(),
@@ -50,7 +50,7 @@ func TestInboundChains_TCPPortReplacesHCM(t *testing.T) {
 	assert.Equal(t, "envoy.filters.network.tcp_proxy", tcpChain.GetFilters()[0].GetName())
 
 	// The h2 port keeps its HCM chain.
-	h2Chain := chainByName(chains, "in_app-0_9090")
+	h2Chain := chainByName(chains, "in_aether-test_app-0_9090")
 	if h2Chain == nil {
 		// Naming differs between builders; assert by SNI instead.
 		var found bool
@@ -85,9 +85,9 @@ func TestInboundChains_PrimaryTCPPortKeepsTheFloor(t *testing.T) {
 
 	chains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil)
 
-	assert.Nil(t, chainByName(chains, "in_tcp_app-0_8080"),
+	assert.Nil(t, chainByName(chains, "in_tcp_aether-test_app-0_8080"),
 		"the primary port is served by the default floor chain, not an SNI chain")
-	require.NotNil(t, chainByName(chains, "in_tcp_app-0"), "the default floor chain must still be there")
+	require.NotNil(t, chainByName(chains, "in_tcp_aether-test_app-0"), "the default floor chain must still be there")
 }
 
 // TestInboundChains_MalformedAnnotationKeepsHTTP: a bad suffix must not strand
@@ -97,7 +97,7 @@ func TestInboundChains_MalformedAnnotationKeepsHTTP(t *testing.T) {
 	pod := podWithPorts("8080,9000=quic")
 	chains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil)
 
-	assert.Nil(t, chainByName(chains, "in_tcp_app-0_9000"),
+	assert.Nil(t, chainByName(chains, "in_tcp_aether-test_app-0_9000"),
 		"an unparseable annotation must not produce a TCP chain")
 	assert.NotEmpty(t, chains, "and must not strand the pod with no chains at all")
 }

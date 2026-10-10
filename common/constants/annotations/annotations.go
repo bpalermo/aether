@@ -58,7 +58,7 @@ const (
 	// an emptyDir is no longer a carrier) and the socket file inside it,
 	// resolved to <uds-csi-root>/<pod-UID>/<file> by common/udspath. Ports stay
 	// required — they keep naming the service ports for inbound demux and EDS;
-	// this annotation only changes what the app_<pod>_<port> clusters dial (all
+	// this annotation only changes what the app_<namespace>_<pod>_<port> clusters dial (all
 	// declared ports dial the same socket).
 	AnnotationEndpointUDSSocket = annotationAetherEndpointPrefix + "uds-socket"
 	// AnnotationEndpointPorts is the pod annotation listing ALL application ports

@@ -38,7 +38,7 @@ const (
 	// the pod does not specify one.
 	defaultAppHealthPath = "/"
 	// healthProbeClusterPrefix marks the per-pod health-probe clusters (active HC
-	// of the app, separate from the app_<pod> delivery cluster).
+	// of the app, separate from the app_<namespace>_<pod> delivery cluster).
 	healthProbeClusterPrefix = "health_"
 	// inboundReadyClusterPrefix marks the per-pod inbound-readiness probe
 	// clusters (active mTLS HC of the pod's OWN mesh inbound listener). Kept
@@ -67,7 +67,7 @@ func AppHealthPathFromPod(cniPod *cniv1.CNIPod) string {
 // It is unique per (pod, port) so each SNI-selected chain routes to its own
 // loopback port.
 func AppClusterName(cniPod *cniv1.CNIPod, port uint16) string {
-	return fmt.Sprintf("%s%s_%d", appClusterPrefix, cniPod.GetName(), port)
+	return fmt.Sprintf("%s%s_%d", appClusterPrefix, PodResourceKey(cniPod), port)
 }
 
 // AppPortsFromPod returns the full set of application ports the pod serves
@@ -255,7 +255,7 @@ func NewAppCluster(name string, addr AppAddress, port uint16, http2 bool) *clust
 }
 
 // IsPerPodClusterName reports whether the cluster name belongs to a per-pod
-// cluster (app_<pod> delivery or health_<pod> probe), as opposed to a
+// cluster (app_<namespace>_<pod> delivery or health_<namespace>_<pod> probe), as opposed to a
 // registry-derived service cluster.
 func IsPerPodClusterName(name string) bool {
 	return strings.HasPrefix(name, appClusterPrefix) ||
@@ -265,13 +265,13 @@ func IsPerPodClusterName(name string) bool {
 
 // HealthProbeClusterName returns the name of the per-pod health-probe cluster.
 func HealthProbeClusterName(cniPod *cniv1.CNIPod) string {
-	return fmt.Sprintf("%s%s", healthProbeClusterPrefix, cniPod.GetName())
+	return healthProbeClusterPrefix + PodResourceKey(cniPod)
 }
 
 // InboundReadyClusterName returns the name of the per-pod inbound-readiness
-// probe cluster (inboundready_<pod>).
+// probe cluster (inboundready_<namespace>_<pod>).
 func InboundReadyClusterName(cniPod *cniv1.CNIPod) string {
-	return fmt.Sprintf("%s%s", inboundReadyClusterPrefix, cniPod.GetName())
+	return inboundReadyClusterPrefix + PodResourceKey(cniPod)
 }
 
 // PassthroughClusterName is the cluster name for the ORIGINAL_DST passthrough
@@ -359,9 +359,9 @@ func NewPassthroughOriginalDstCluster() *clusterv3.Cluster {
 // health-check the pod's application at the delivery address (delegated liveness). It
 // is NOT referenced by any route — the agent scrapes its host health from the
 // proxy admin and reflects it into the registry. The active HC must live on this
-// separate cluster, not on app_<pod>: an active HC removes failing/pending hosts
+// separate cluster, not on app_<namespace>_<pod>: an active HC removes failing/pending hosts
 // from load balancing, which would gate (break) the real delivery path through
-// app_<pod> at startup and whenever the probe fails.
+// app_<namespace>_<pod> at startup and whenever the probe fails.
 func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthPath string, protocol registryv1.Service_Protocol) *clusterv3.Cluster {
 	// The active health check probes the app's readiness (delegated liveness):
 	// HTTP/1.1 GET <healthPath> for HTTP/gRPC services, or a raw TCP connect for
@@ -444,7 +444,7 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 // the pod's own certificate (issue #815, the promotion hole).
 //
 // WHY IT EXISTS. Until now an endpoint was promoted to HEALTHY on the app probe
-// alone (health_<pod>), which dials the application in cleartext and has no SDS
+// alone (health_<namespace>_<pod>), which dials the application in cleartext and has no SDS
 // dependency whatsoever. The inbound listener, meanwhile, is published at CNI
 // ADD while the pod's SVID arrives asynchronously 6-8 s later; while the
 // listener warms, Envoy has BOUND its socket but not called listen(), so a peer

@@ -378,8 +378,8 @@ func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, opts adsOptions) *
 // launchEnvoyOverADS runs the pinned proxy against a production-shaped
 // bootstrap: nothing but the ADS cluster in static_resources, CDS and LDS over
 // one delta-ADS stream to cp, and the admin endpoint launchEnvoy adds. The
-// process is killed at test cleanup.
-func launchEnvoyOverADS(t *testing.T, bin string, cp *adsControlPlane) *envoyProc {
+// process is killed at test cleanup. extraArgs are appended to the command line.
+func launchEnvoyOverADS(t *testing.T, bin string, cp *adsControlPlane, extraArgs ...string) *envoyProc {
 	t.Helper()
 
 	bs := &bootstrapv3.Bootstrap{
@@ -403,7 +403,7 @@ func launchEnvoyOverADS(t *testing.T, bin string, cp *adsControlPlane) *envoyPro
 	}
 
 	t.Logf("xds socket %s", cp.socketPath)
-	return launchEnvoy(t, bin, "envoy", bs, nil, "--concurrency", "1")
+	return launchEnvoy(t, bin, "envoy", bs, nil, append([]string{"--concurrency", "1"}, extraArgs...)...)
 }
 
 // setMaxRequestsPerConnection sets the cluster's upstream
@@ -668,7 +668,7 @@ func TestOnDemandCertificateResolvesWhenAlreadyStaticallyReferenced(t *testing.T
 	p := newPKI(t)
 	dest := startDestination(t, p)
 	// spiffeNode is statically referenced too: on a real node the
-	// inboundready_<pod> probe clusters name it, and it is ALSO the selector's
+	// inboundready_<namespace>_<pod> probe clusters name it, and it is ALSO the selector's
 	// prefetch_secret_names entry, so the default certificate is exposed to the
 	// same double reference as every workload identity.
 	h := startEnvoyOverADS(t, p, dest.addr, adsOptions{

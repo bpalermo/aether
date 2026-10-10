@@ -258,7 +258,7 @@ func TestLivenessRegistryCallIsBounded(t *testing.T) {
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
 
 	reg := &deadlineRecordingRegistry{}
-	sock := fakeHealthGateway(t, "health_pod-a", http.StatusServiceUnavailable)
+	sock := fakeHealthGateway(t, "health_default_pod-a", http.StatusServiceUnavailable)
 	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
 	// livenessDemoteStreak consecutive failures are needed before the demotion

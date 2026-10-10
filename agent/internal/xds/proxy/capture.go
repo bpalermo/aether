@@ -86,7 +86,7 @@ type CaptureTCPService struct {
 
 // CaptureListenerName returns the per-pod transparent-capture listener name.
 func CaptureListenerName(cniPod *cniv1.CNIPod) string {
-	return fmt.Sprintf("capture_%s", cniPod.GetName())
+	return "capture_" + PodResourceKey(cniPod)
 }
 
 // GenerateCaptureListener builds the per-pod transparent-capture listener (proposal
@@ -249,7 +249,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		// same VIP:port getsockname would (the TPROXY spike, e2e/spike/tproxy-phase0b.py T1, removed after it was superseded by the in-tree netns test; see git history before 95788da5).
 		UseOriginalDst:                wrapperspb.Bool(false),
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		StatPrefix:                    fmt.Sprintf("capture_%s", cniPod.GetName()),
+		StatPrefix:                    CaptureListenerName(cniPod),
 		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
 		FilterChains:                  chains,
 	}
@@ -400,7 +400,7 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomai
 	}
 
 	fc := &listenerv3.FilterChain{
-		Name: fmt.Sprintf("capture_%s", cniPod.GetName()),
+		Name: fmt.Sprintf("capture_%s", PodResourceKey(cniPod)),
 		Filters: append(
 			BuildSourceFilterStates(sourceSpiffeID),
 			buildHTTPConnectionManagerFilter(hcm),

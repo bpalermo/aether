@@ -792,8 +792,7 @@ func buildCaptureUDPBootstrap() (*bootstrapv3.Bootstrap, error) {
 
 	clusterA, clusterB := L4UDPBackendClusterA(), L4UDPBackendClusterB()
 	listener, err := proxy.GenerateUDPCaptureListener(
-		pod.GetName(),
-		pod.GetNetworkNamespace(),
+		pod,
 		meshconst.ProxyL4OutboundPort,
 		map[string][]proxy.L4Backend{
 			l4UDPParentA: {{Service: l4UDPBackendA, Cluster: clusterA, Weight: 1}},

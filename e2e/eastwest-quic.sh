@@ -10,7 +10,7 @@
 # aether-proxy + SPIRE + the CNI's capture):
 #
 #   E0  preflight   every destination pod has its HTTP/3 inbound listener
-#                   (inbound_<pod>_h3) and the per-listener request counter this
+#                   (inbound_<namespace>_<pod>_h3) and the per-listener request counter this
 #                   suite reads exists — so every "== 0" below is a reading, not
 #                   an absent stat (#853)
 #   E1  fan-out     twins are DEMAND-SCOPED (aether#1020): before any request
@@ -72,9 +72,9 @@
 #                    "<ns>/<svc>@<ns>/<sa>"; the host rows were the evidence
 #                    before that and stay the evidence, so this suite does not
 #                    depend on the stats-key shape).
-#   destination side `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx` —
+#   destination side `listener.inbound_<namespace>_<pod>_h3.http.inbound.downstream_rq_2xx` —
 #                    the per-listener HCM counter of the pod's QUIC listener
-#                    (proxy.NewInboundQUICListener: stat_prefix inbound_<pod>_h3;
+#                    (proxy.NewInboundQUICListener: stat_prefix inbound_<namespace>_<pod>_h3;
 #                    buildInboundHCM: HCM stat_prefix "inbound"). Only a QUIC
 #                    connection can reach that listener, and only a quic: twin
 #                    dials one.
@@ -664,11 +664,11 @@ has_cluster() { printf '%s\n' "$1" | awk -F'::' -v c="$2" '$1 == c { f = 1 } END
 
 # h3_stat POD / h3_rq POD — the pod's HTTP/3 inbound 2xx count; EMPTY when the stat does not
 # exist, so a caller can refuse to read an absent stat as zero.
-h3_stat() { printf 'listener.inbound_%s_h3.http.inbound.downstream_rq_2xx' "$1"; }
+h3_stat() { printf 'listener.inbound_%s_%s_h3.http.inbound.downstream_rq_2xx' "$TEST_NS" "$1"; }
 h3_rq() {
 	local name
 	name="$(h3_stat "$1")"
-	admin "/stats?filter=inbound_$1_h3" 2>/dev/null | awk -v n="$name:" '!f && $1 == n { print $2; f = 1 }'
+	admin "/stats?filter=inbound_${TEST_NS}_$1_h3" 2>/dev/null | awk -v n="$name:" '!f && $1 == n { print $2; f = 1 }'
 }
 
 # req_batch SRC DST PATH N — N requests from SRC's pod to DST's mesh name, one
@@ -732,7 +732,7 @@ verify_preflight() {
 		for d in "${QUIC_DSTS[@]}" "${GAMMA_DSTS[@]}"; do
 			pod="$(pod_of "$d")"
 			[ -n "$pod" ] || die "E0: no Running pod for destination $d"
-			printf '%s\n' "$listeners" | awk -F'::' -v l="inbound_${pod}_h3" '$1 == l { f = 1 } END { exit !f }' || missing="$missing inbound_${pod}_h3"
+			printf '%s\n' "$listeners" | awk -F'::' -v l="inbound_${TEST_NS}_${pod}_h3" '$1 == l { f = 1 } END { exit !f }' || missing="$missing inbound_${TEST_NS}_${pod}_h3"
 		done
 		[ -z "$missing" ] && break
 		[ "$SECONDS" -lt "$deadline" ] ||

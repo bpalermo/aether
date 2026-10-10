@@ -75,7 +75,7 @@ func TestNewInboundListener(t *testing.T) {
 
 	// All other requests route to the pod's app cluster.
 	rc := hcm.GetRouteConfig()
-	assert.False(t, rc.GetValidateClusters().GetValue(), "validation off so app_<pod> churn doesn't wedge the listener")
+	assert.False(t, rc.GetValidateClusters().GetValue(), "validation off so app_<namespace>_<pod> churn doesn't wedge the listener")
 	vh := rc.GetVirtualHosts()[0]
 	assert.Equal(t, []string{"*"}, vh.GetDomains())
 	assert.Equal(t, AppClusterName(pod, AppPortFromPod(pod)), vh.GetRoutes()[0].GetRoute().GetCluster())
@@ -228,9 +228,9 @@ func TestInboundFilterChains_MultiPort(t *testing.T) {
 		require.NoError(t, fc.GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
 		return hcm.GetRouteConfig().GetVirtualHosts()[0].GetRoutes()[0].GetRoute().GetCluster()
 	}
-	assert.Equal(t, "app_mp_9090", clusterOf(bySNI["9090"]))
-	assert.Equal(t, "app_mp_8080", clusterOf(bySNI["8080"]))
-	assert.Equal(t, "app_mp_8080", clusterOf(defaultChain), "default chain → primary port")
+	assert.Equal(t, "app_default_mp_9090", clusterOf(bySNI["9090"]))
+	assert.Equal(t, "app_default_mp_8080", clusterOf(bySNI["8080"]))
+	assert.Equal(t, "app_default_mp_8080", clusterOf(defaultChain), "default chain → primary port")
 }
 
 // TestInboundChainStatsFilter verifies the stats filter (proposal 007
@@ -285,7 +285,7 @@ func TestInboundTCPFloorFilterChain(t *testing.T) {
 	l, err := NewInboundListener(pod, "aether.internal", false, false, nil, nil)
 	require.NoError(t, err)
 
-	// Find the TCP floor chain: the default chain (no match), named in_tcp_<pod>.
+	// Find the TCP floor chain: the default chain (no match), named in_tcp_<namespace>_<pod>.
 	var tcpFloor *listenerv3.FilterChain
 	for _, fc := range l.GetFilterChains() {
 		if fc.GetFilterChainMatch() == nil && strings.HasPrefix(fc.GetName(), "in_tcp_") {
@@ -293,10 +293,10 @@ func TestInboundTCPFloorFilterChain(t *testing.T) {
 			break
 		}
 	}
-	require.NotNil(t, tcpFloor, "TCP floor chain (default, in_tcp_<pod>) must be present")
+	require.NotNil(t, tcpFloor, "TCP floor chain (default, in_tcp_<namespace>_<pod>) must be present")
 
 	// Chain name.
-	assert.Equal(t, "in_tcp_svc-a", tcpFloor.GetName())
+	assert.Equal(t, "in_tcp_default_svc-a", tcpFloor.GetName())
 
 	// Must terminate mTLS (transport socket present).
 	require.NotNil(t, tcpFloor.GetTransportSocket(), "TCP floor chain must terminate mTLS")
@@ -308,7 +308,7 @@ func TestInboundTCPFloorFilterChain(t *testing.T) {
 
 	tcp := &tcp_proxyv3.TcpProxy{}
 	require.NoError(t, tcpFloor.GetFilters()[0].GetTypedConfig().UnmarshalTo(tcp))
-	assert.Equal(t, "app_svc-a_8080", tcp.GetCluster(), "tcp_proxy must forward to the pod's primary app cluster")
+	assert.Equal(t, "app_default_svc-a_8080", tcp.GetCluster(), "tcp_proxy must forward to the pod's primary app cluster")
 }
 
 // TestNewInboundListener_EveryMTLSChainPinsTheClientSAN is the listener-level

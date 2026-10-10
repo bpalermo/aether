@@ -553,7 +553,7 @@ overlap() {
 
 	local ls
 	ls="$(proxy_listeners)"
-	printf '%s\n' "$ls" | grep -c '^outbound_http_overlap-add::' >/dev/null ||
+	printf '%s\n' "$ls" | grep -c "^outbound_http_${TEST_NS}_overlap-add::" >/dev/null ||
 		die "after the takeover the node proxy has no listener for overlap-add"
 	if printf '%s\n' "$ls" | grep -c 'overlap-del' >/dev/null; then
 		die "after the takeover the node proxy still has a listener for the DELETED overlap-del"

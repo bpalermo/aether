@@ -47,7 +47,7 @@ const (
 
 // InboundListenerName returns the name of a pod's inbound listener.
 func InboundListenerName(cniPod *cniv1.CNIPod) string {
-	return fmt.Sprintf("inbound_%s", cniPod.GetName())
+	return "inbound_" + PodResourceKey(cniPod)
 }
 
 // NewInboundListener builds a pod's inbound listener. It is bound into the pod's
@@ -56,7 +56,7 @@ func InboundListenerName(cniPod *cniv1.CNIPod) string {
 // callers cryptographically verify they reached this pod, not just the node),
 // requires and validates the caller's workload SVID, sets XFCC natively from the
 // verified peer (SANITIZE_SET), and forwards the request to the pod's application
-// on loopback (app_<pod>). Because the listener lives in the pod's netns, it follows
+// on loopback (app_<namespace>_<pod>). Because the listener lives in the pod's netns, it follows
 // the pod's lifecycle (drains on removal) and pod-scoped network policy applies to it.
 //
 // When cleartext is true (SPIRE disabled) the listener accepts CLEARTEXT instead
@@ -121,10 +121,10 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 		},
 		// Per-pod listener stats are kept deliberately (downstream_cx_* per pod
 		// is the connection-leak debugging signal — see the 2026-06-11 cx-leak).
-		// The "inbound_<pod>" shape is what the aether.pod stats_tag extracts, so
+		// The "inbound_<namespace>_<pod>" shape is what the aether.pod stats_tag extracts, so
 		// exports collapse to listener.inbound.* labeled by pod while the stats
 		// stay per-pod. HCM stats (5x larger) aggregate node-wide instead.
-		StatPrefix:       fmt.Sprintf("inbound_%s", cniPod.GetName()),
+		StatPrefix:       InboundListenerName(cniPod),
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  listenerFilters,
 		FilterChains:     chains,
@@ -148,7 +148,7 @@ func buildInboundCleartextFilterChain(cniPod *cniv1.CNIPod, emitStatsPod bool, e
 	filters = append(filters, extensionFilters...)
 	hcm.HttpFilters = append(filters, routerHttpFilter())
 	return &listenerv3.FilterChain{
-		Name:             fmt.Sprintf("in_%s", cniPod.GetName()),
+		Name:             fmt.Sprintf("in_%s", PodResourceKey(cniPod)),
 		FilterChainMatch: nil, // default chain: cleartext has no ALPN/SNI to demux on
 		Filters:          []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
 		// No TransportSocket: cleartext (SPIRE off).
@@ -203,7 +203,7 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 // no-ALPN mTLS connection — the source proxy's tcp_proxy floor egress, which sends
 // no ALPN — matches nothing more specific (HTTP chains require "h2" or a port SNI)
 // and lands here, terminating mTLS and routing all bytes via tcp_proxy to the pod's
-// primary application cluster (app_<pod>_<defaultPort>) on loopback.
+// primary application cluster (app_<namespace>_<pod>_<defaultPort>) on loopback.
 //
 // It carries the same workload-shape client SAN pin as the HTTP chains (#843).
 // There is no XFCC on this path — tcp_proxy forwards raw bytes — so the pin is
@@ -226,13 +226,13 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 func buildInboundTCPPortFilterChain(cniPod *cniv1.CNIPod, port uint16, tlsCertificateSecretName, validationContextName, trustDomain string) *listenerv3.FilterChain {
 	appCluster := AppClusterName(cniPod, port)
 	return &listenerv3.FilterChain{
-		Name: fmt.Sprintf("in_tcp_%s_%d", cniPod.GetName(), port),
+		Name: fmt.Sprintf("in_tcp_%s_%d", PodResourceKey(cniPod), port),
 		FilterChainMatch: &listenerv3.FilterChainMatch{
 			ServerNames: []string{strconv.Itoa(int(port))},
 		},
 		TransportSocket: DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain),
 		Filters: []*listenerv3.Filter{
-			buildTCPProxyNetworkFilter(fmt.Sprintf("%s_%s_%d", inboundTCPFloorStatPrefix, cniPod.GetName(), port), appCluster),
+			buildTCPProxyNetworkFilter(fmt.Sprintf("%s_%s_%d", inboundTCPFloorStatPrefix, PodResourceKey(cniPod), port), appCluster),
 		},
 	}
 }
@@ -240,11 +240,11 @@ func buildInboundTCPPortFilterChain(cniPod *cniv1.CNIPod, port uint16, tlsCertif
 func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string) *listenerv3.FilterChain {
 	appCluster := AppClusterName(cniPod, defaultPort)
 	return &listenerv3.FilterChain{
-		Name:             fmt.Sprintf("in_tcp_%s", cniPod.GetName()),
+		Name:             fmt.Sprintf("in_tcp_%s", PodResourceKey(cniPod)),
 		FilterChainMatch: nil, // default chain: no ALPN / no SNI → the TCP floor
 		TransportSocket:  DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain),
 		Filters: []*listenerv3.Filter{
-			buildTCPProxyNetworkFilter(fmt.Sprintf("%s_%s", inboundTCPFloorStatPrefix, cniPod.GetName()), appCluster),
+			buildTCPProxyNetworkFilter(inboundTCPFloorStatPrefix+"_"+PodResourceKey(cniPod), appCluster),
 		},
 	}
 }
@@ -258,14 +258,14 @@ func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, t
 func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *listenerv3.FilterChain {
 	hcm := buildInboundHCM(cniPod, chainPort, emitStatsPod, extensionFilters, inboundFilter)
 
-	name := fmt.Sprintf("in_%s", cniPod.GetName())
+	name := fmt.Sprintf("in_%s", PodResourceKey(cniPod))
 	// The no-SNI HCM chain matches application_protocols:["h2"] (the mesh's HTTP/2
 	// transport) so a no-ALPN mTLS connection — the TCP floor — falls through to the
 	// floor's default chain instead. Per-port chains match the port SNI (more
 	// specific than application_protocols, so they win for HTTP regardless of ALPN).
 	match := &listenerv3.FilterChainMatch{ApplicationProtocols: []string{"h2"}}
 	if sni != "" {
-		name = fmt.Sprintf("in_%s_%s", cniPod.GetName(), sni)
+		name = fmt.Sprintf("in_%s_%s", PodResourceKey(cniPod), sni)
 		match = &listenerv3.FilterChainMatch{ServerNames: []string{sni}}
 	}
 
@@ -315,7 +315,7 @@ func buildInboundHCM(cniPod *cniv1.CNIPod, chainPort uint16, emitStatsPod bool, 
 // The "_h3" suffix is the edge's convention (EdgeGatewayH3ListenerName): the
 // UDP listener shares the TCP inbound's port NUMBER, never its name.
 func InboundQUICListenerName(cniPod *cniv1.CNIPod) string {
-	return fmt.Sprintf("inbound_%s_h3", cniPod.GetName())
+	return "inbound_" + PodResourceKey(cniPod) + "_h3"
 }
 
 // NewInboundQUICListener builds a pod's HTTP/3 inbound listener (proposal 038
@@ -324,7 +324,7 @@ func InboundQUICListenerName(cniPod *cniv1.CNIPod) string {
 // pod's netns, terminating mTLS over QUIC with the pod's own SVID and the same
 // client-certificate requirement and workload SAN pin as the TCP inbound
 // (InboundQUICTransportSocket wraps the same bare context), and routing to the
-// same app_<pod>_<port> clusters through the same inbound route. Callers that
+// same app_<namespace>_<pod>_<port> clusters through the same inbound route. Callers that
 // reach it are the per-source `quic:` clusters of Phase 4b; until those exist
 // it is inert -- one UDP socket per pod, no client -- which is why it ships
 // unconditionally rather than behind a flag: it soaks under ordinary churn from
@@ -412,7 +412,7 @@ func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain, meshDomain string
 		// Same per-pod stats shape as the TCP inbound, with the _h3 suffix the
 		// aether.pod stats_tag ignores, so listener.inbound.* is labelled by pod
 		// for both transports.
-		StatPrefix:       fmt.Sprintf("inbound_%s_h3", cniPod.GetName()),
+		StatPrefix:       InboundQUICListenerName(cniPod),
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		FilterChains:     chains,
 	}, nil
@@ -462,13 +462,13 @@ func buildInboundQUICFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uin
 	hcm.CodecType = http_connection_managerv3.HttpConnectionManager_HTTP3
 	hcm.Http3ProtocolOptions = &corev3.Http3ProtocolOptions{}
 
-	name := fmt.Sprintf("in_h3_%s", cniPod.GetName())
+	name := fmt.Sprintf("in_h3_%s", PodResourceKey(cniPod))
 	var match *listenerv3.FilterChainMatch
 	if sni != "" {
 		// Named by PORT (as the TCP inbound's chains are), not by the SNI:
 		// the SNI is a hostname since aether#957 and the chain name is a
 		// stats/log key that must stay short and dot-free.
-		name = fmt.Sprintf("in_h3_%s_%d", cniPod.GetName(), chainPort)
+		name = fmt.Sprintf("in_h3_%s_%d", PodResourceKey(cniPod), chainPort)
 		match = &listenerv3.FilterChainMatch{ServerNames: []string{sni}}
 	}
 	return &listenerv3.FilterChain{
@@ -488,7 +488,7 @@ func buildLivenessHealthCheckFilter() *http_connection_managerv3.HttpFilter {
 }
 
 // buildReadinessHealthCheckFilter answers MeshReadyPath with 200 only when the pod's
-// application health-probe cluster (health_<pod>, which actively health-checks the
+// application health-probe cluster (health_<namespace>_<pod>, which actively health-checks the
 // app's readiness path) is healthy; otherwise it returns 503. This composes the
 // liveness conditions with actual application readiness.
 func buildReadinessHealthCheckFilter(healthClusterName string) *http_connection_managerv3.HttpFilter {
@@ -524,7 +524,7 @@ func buildHealthCheckFilter(name, path string, clusterMinHealthy map[string]*typ
 func buildInboundRouteConfiguration(appClusterName string) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name: "in_http",
-		// The app_<pod> cluster churns on pod restart; don't let the inline route's
+		// The app_<namespace>_<pod> cluster churns on pod restart; don't let the inline route's
 		// cluster reference wedge the listener during the delta-xDS make-before-break
 		// window if it is momentarily unknown.
 		ValidateClusters: wrapperspb.Bool(false),

@@ -33,7 +33,7 @@ const (
 // OutboundListenerName returns the name of the per-pod outbound HTTP listener,
 // used by the CNI server to await Envoy's delta-xDS ACK of the listener.
 func OutboundListenerName(cniPod *cniv1.CNIPod) string {
-	return fmt.Sprintf("outbound_http_%s", cniPod.GetName())
+	return "outbound_http_" + PodResourceKey(cniPod)
 }
 
 // GenerateListenersFromRegistryPod generates the per-pod inbound and outbound HTTP
@@ -96,7 +96,7 @@ func NewAppDeliveryClusters(cniPod *cniv1.CNIPod, udsSocketPath string) (appClus
 		appClusters = append(appClusters, NewAppCluster(AppClusterName(cniPod, port), appAddr, port, h2Ports[port]))
 	}
 	// Separate, unrouted cluster carrying the active app health check (delegated
-	// liveness) on the primary port; keeping the HC off app_<pod> avoids gating
+	// liveness) on the primary port; keeping the HC off app_<namespace>_<pod> avoids gating
 	// the delivery path. Liveness stays pod-level (primary port), not per-port.
 	primary := AppPortFromPod(cniPod)
 	// The probe shape follows the pod's declared mesh protocol: HTTP GET for
@@ -147,9 +147,9 @@ func GenerateOutboundHTTPListener(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDoma
 			},
 		},
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		// Per-pod listener stats kept (see ingress.go); "out_http_<pod>" is the
+		// Per-pod listener stats kept (see ingress.go); "out_http_<namespace>_<pod>" is the
 		// shape the aether.pod stats_tag extracts.
-		StatPrefix:       fmt.Sprintf("out_http_%s", cniPod.GetName()),
+		StatPrefix:       "out_http_" + PodResourceKey(cniPod),
 		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
 		FilterChains: []*listenerv3.FilterChain{
 			buildDefaultOutboundHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, extensionFilters),

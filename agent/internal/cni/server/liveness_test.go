@@ -92,7 +92,7 @@ func TestReconcileLivenessSkipsRemovedPod(t *testing.T) {
 	// transition (covered by TestReconcileLivenessEDSPromotion).
 	pod.Annotations[aetherannotations.AnnotationEndpointHealthCheckMode] = aetherannotations.HealthCheckModeActive
 
-	sock := fakeHealthGateway(t, "health_pod-a", http.StatusServiceUnavailable)
+	sock := fakeHealthGateway(t, "health_default_pod-a", http.StatusServiceUnavailable)
 
 	t.Run("pod gone from storage -> no re-register", func(t *testing.T) {
 		// GetAll returns the pod (the tick's snapshot), but the backing resources
@@ -134,7 +134,7 @@ func TestReconcileLivenessSkipsRemovedPod(t *testing.T) {
 func TestReconcileLivenessEDSPromotion(t *testing.T) {
 	pod := validCNIPod("pod-a", "default", "container-a")
 
-	sock := fakeHealthGateway(t, "health_pod-a", http.StatusOK)
+	sock := fakeHealthGateway(t, "health_default_pod-a", http.StatusOK)
 
 	store := storage.NewMockStorageWithGetAll[*cniv1.CNIPod](func(_ context.Context) ([]*cniv1.CNIPod, error) {
 		return []*cniv1.CNIPod{pod}, nil
@@ -159,7 +159,7 @@ func TestReconcileLivenessWarmupGrace(t *testing.T) {
 	pod := validCNIPod("pod-a", "default", "container-a")
 	pod.Annotations[aetherannotations.AnnotationEndpointHealthCheckMode] = aetherannotations.HealthCheckModeActive
 
-	sock := fakeHealthGateway(t, "health_pod-a", http.StatusServiceUnavailable)
+	sock := fakeHealthGateway(t, "health_default_pod-a", http.StatusServiceUnavailable)
 
 	newStore := func() storage.Storage[*cniv1.CNIPod] {
 		store := storage.NewMockStorageWithGetAll[*cniv1.CNIPod](func(_ context.Context) ([]*cniv1.CNIPod, error) {
@@ -199,7 +199,7 @@ func TestReconcileLivenessUnprogrammedPodSkipped(t *testing.T) {
 	pod := validCNIPod("pod-a", "default", "container-a")
 
 	// Gateway knows a different pod: ours falls through to the 404 catch-all.
-	sock := fakeHealthGateway(t, "health_other-pod", http.StatusOK)
+	sock := fakeHealthGateway(t, "health_default_other-pod", http.StatusOK)
 
 	store := storage.NewMockStorageWithGetAll[*cniv1.CNIPod](func(_ context.Context) ([]*cniv1.CNIPod, error) {
 		return []*cniv1.CNIPod{pod}, nil

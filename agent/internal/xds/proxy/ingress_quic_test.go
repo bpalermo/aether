@@ -57,7 +57,7 @@ func TestNewInboundQUICListener(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, l)
 
-	assert.Equal(t, "inbound_web-0_h3", l.GetName())
+	assert.Equal(t, "inbound_shop_web-0_h3", l.GetName())
 	sa := l.GetAddress().GetSocketAddress()
 	assert.Equal(t, corev3.SocketAddress_UDP, sa.GetProtocol())
 	assert.Equal(t, uint32(defaultInboundPort), sa.GetPortValue(), "R3: QUIC shares the TCP inbound's port number")
@@ -75,14 +75,14 @@ func TestNewInboundQUICListener(t *testing.T) {
 	for _, fc := range l.GetFilterChains() {
 		names[fc.GetName()] = fc
 	}
-	def, ok := names["in_h3_web-0"]
+	def, ok := names["in_h3_shop_web-0"]
 	require.True(t, ok, "primary-port default chain missing: %v", names)
 	assert.Nil(t, def.GetFilterChainMatch(), "the primary port is the DEFAULT chain (no h2 ALPN to key on)")
-	port8081, ok := names["in_h3_web-0_8081"]
+	port8081, ok := names["in_h3_shop_web-0_8081"]
 	require.True(t, ok)
 	assert.Equal(t, []string{"8081.web.shop.mesh.local"}, port8081.GetFilterChainMatch().GetServerNames(),
 		"a QUIC non-primary chain matches QUICServerName(port, authority), never the bare port (aether#957)")
-	_, tcpChain := names["in_h3_web-0_9000"]
+	_, tcpChain := names["in_h3_shop_web-0_9000"]
 	assert.False(t, tcpChain, "a raw-TCP port must have no QUIC chain: QUIC carries HTTP/3 only")
 
 	for name, fc := range names {
@@ -122,7 +122,7 @@ func TestInboundQUICSharesTheTCPInboundTLSContext(t *testing.T) {
 
 	var tcpCtx *tlsv3.DownstreamTlsContext
 	for _, fc := range tcp.GetFilterChains() {
-		if fc.GetName() == "in_web-0" {
+		if fc.GetName() == "in_shop_web-0" {
 			tcpCtx = &tlsv3.DownstreamTlsContext{}
 			require.NoError(t, fc.GetTransportSocket().GetTypedConfig().UnmarshalTo(tcpCtx))
 		}
@@ -130,7 +130,7 @@ func TestInboundQUICSharesTheTCPInboundTLSContext(t *testing.T) {
 	require.NotNil(t, tcpCtx)
 	var quicCtx *tlsv3.DownstreamTlsContext
 	for _, fc := range quic.GetFilterChains() {
-		if fc.GetName() == "in_h3_web-0" {
+		if fc.GetName() == "in_h3_shop_web-0" {
 			quicCtx = quicTransportOf(t, fc).GetDownstreamTlsContext()
 		}
 	}

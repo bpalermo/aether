@@ -3034,6 +3034,127 @@ the annotation and the `helm.sh/chart` labels only, and the two `jsonpath`
 expressions above, run over the rendered DaemonSet with kubectl's own printer
 and no cluster, print the version and an empty line.
 
+#### Chart 2.5.0: per-pod listener, cluster and stat names carry the pod's namespace (#1584)
+
+**What changed.** The node agent named everything it builds for one pod after
+the pod's name alone. Two mesh pods of one name in two namespaces on one node
+(two StatefulSets called `web`, each with a `web-0`) then shared every one of
+those names. The control plane library keeps one resource per name, and which
+pod's it kept was decided by map order on every snapshot build, separately
+for listeners and for clusters: one pod had no listeners, and the other's
+inbound listener could route to an app cluster that dials the first pod's
+loopback. Every per-pod name is now built from `<namespace>_<pod>` (an
+underscore is legal in neither part, so it cannot be ambiguous):
+
+| Before | Since 2.5.0 |
+|---|---|
+| `inbound_<pod>`, `inbound_<pod>_h3` | `inbound_<namespace>_<pod>`, `inbound_<namespace>_<pod>_h3` |
+| `outbound_http_<pod>` | `outbound_http_<namespace>_<pod>` |
+| `capture_<pod>`, `capture_udp_<pod>` | `capture_<namespace>_<pod>`, `capture_udp_<namespace>_<pod>` |
+| `app_<pod>_<port>` | `app_<namespace>_<pod>_<port>` |
+| `health_<pod>`, `inboundready_<pod>` | `health_<namespace>_<pod>`, `inboundready_<namespace>_<pod>` |
+| `/healthz/health_<pod>`, `/healthz/inboundready_<pod>` (health gateway) | `/healthz/health_<namespace>_<pod>`, `/healthz/inboundready_<namespace>_<pod>` |
+| stat prefixes `out_http_<pod>`, `in_tcp_<pod>[_<port>]`; filter chains `in_<pod>…`, `in_tcp_<pod>…`, `in_h3_<pod>…` | the same with `<namespace>_<pod>` |
+
+There is no flag and no way to keep the old names.
+
+**Metric labels.** The proxy bootstrap extracts two tags from the listener
+stat prefixes where it extracted one:
+
+- `envoy_listener_inbound_*` and `envoy_listener_out_http_*` gain the label
+  `aether_namespace`. `aether_pod` keeps its value, the pod name (`<pod>_h3`
+  for the HTTP/3 inbound listener, as before). A query or an alert that
+  matches on `aether_pod` alone now covers a same-named pod of every
+  namespace; add `aether_namespace` where that matters.
+- `aether_cluster` of the per-pod clusters is the new cluster name
+  (`health_<namespace>_<pod>`, `inboundready_<namespace>_<pod>`). A selector
+  such as `aether_cluster=~"inboundready_.*"` is unaffected; one that spells a
+  pod (`aether_cluster="health_web-0"`) has to be rewritten.
+- The TCP floor's stat prefix is part of the metric NAME, and that name now
+  holds the namespace: `envoy_tcp_in_tcp_<namespace>_<pod>_…`. The queries
+  under "Cross-pod L4 landings" below are spelled for it. Anything outside
+  this repository that excludes a workload by `envoy_tcp_in_tcp_<pod>_`
+  matches nothing after the upgrade.
+- The stats exclusions of the bootstrap are unchanged and still apply to the
+  renamed probe clusters; the `membership_*` gauges the health gateway reads
+  stay allocated. `//agent/test/envoy_validate`
+  (`TestChartStatsConfigOnNamespacedPodNames`) runs the pinned proxy with the
+  chart's `stats_config` and checks both.
+
+While a node is between versions the labels are these (the agent and the
+proxy roll separately): a 2.5.0 proxy under an older agent exports
+`aether_pod="<pod>"` with no `aether_namespace` (and, for the HTTP/3 inbound
+listener only, `aether_namespace="<pod>", aether_pod="h3"`); an older proxy
+under a 2.5.0 agent exports `aether_pod="<namespace>_<pod>"`. Neither puts a
+pod into a metric name. The first of the two was measured on the pinned
+proxy, the second follows from the old extractor.
+
+**What an upgrade does on a node.** When the node's agent is replaced, the
+proxy's stream reconnects and the first snapshot removes every per-pod
+listener and cluster under its old name and adds it under the new one, at
+the same address in the same network namespace. Measured on the pinned proxy
+(`//agent/test/mtlspool`, `TestListenerRenamedAtTheSameAddress`; a pod is a
+loopback port there, not a network namespace):
+
+- The proxy accepts the update. Nothing is rejected, and it ends with one
+  listener per name at the same address.
+- **New connections are not refused.** Of about 1,000 connections opened
+  across the swap, none was refused; in some runs one request got a `503`
+  (it met the old inbound listener after its app cluster was gone and before
+  the listener was replaced).
+- **Connections established before the swap are closed by the proxy at the
+  end of its drain time** (`proxy.hotRestart.drainTime`, 10 s by default;
+  the test used 3 s and saw the close at 3.1 s). Until then:
+  - on the **outbound** and **capture** listeners they are served as before
+    (the mesh clusters they route to keep their names). An application's
+    keep-alive connections to the mesh, and every captured TCP connection,
+    end at that point; a request in flight at that moment is cut. Not
+    measured: what an in-flight request sees.
+  - on the **inbound** listener every request gets `503`: the listener that
+    accepted the connection is draining and routes to `app_<pod>_<port>`,
+    which no longer exists. A calling proxy retries a `503` on another
+    endpoint (two retries, another host each time), so a service with a
+    replica on a node that is not at the same point of the roll is covered;
+    a service whose only endpoints are on nodes whose agents are replaced at
+    the same moment answers `503` to callers with warm connections for up to
+    the drain time.
+
+To avoid the second case, replace the agents node by node (the DaemonSet's
+default) and give single-replica workloads a second replica for the upgrade,
+or drain a node before its agent is replaced. A rollback to an older chart
+renames everything back and costs the same once more.
+
+**After the upgrade.**
+
+```bash
+NS=aether-system
+# Every per-pod listener carries a namespace: no name without two parts after
+# the prefix. (Run in one aether-proxy pod per node.)
+kubectl -n "$NS" exec <proxy-pod> -c aether-proxy -- \
+  curl -s 'http://127.0.0.1:9901/listeners' | grep -E '^(inbound|outbound_http|capture)_'
+```
+
+```promql
+# The agent found two different resources under one name in a snapshot it
+# built. Zero forever on a healthy node.
+sum by (node) (increase(aether_agent_snapshot_duplicate_resource_names_total[1h])) > 0
+```
+
+That counter is the check that says so if a name is ever shared again. The
+agent logs, at ERROR and once per change of the set,
+`more than one resource of a type carries the same name: the proxy is sent only one of them, and which one can change from build to build`
+with the xDS type and the names, and counts one per name on every build the
+condition lasts. It reports and changes nothing: the snapshot is published as
+before. One input still produces it: two sandboxes of the **same** pod (same
+namespace and name) stored at once, which is a replacement whose predecessor's
+CNI DEL was missed while the old network namespace still exists ("A pod is
+stuck `Terminating`, or a node has stale netns entries" below is the way out).
+Two resources of one name that are equal are not reported.
+
+None of this was run on a cluster for this change. What was measured is named
+above; the labels, the swap and the two-pod case were each run against the
+pinned proxy binary, and the agent side against its own snapshot cache.
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod
@@ -3899,7 +4020,7 @@ load assignment under that name too. In `/config_dump` a twin's
 `<ns>/<svc>` the h2 cluster uses; if it ever does again, see "QUIC twin never
 leaves warming" below.
 
-On the destination, `listener.inbound_<pod>_h3.http.inbound.downstream_rq_2xx`
+On the destination, `listener.inbound_<namespace>_<pod>_h3.http.inbound.downstream_rq_2xx`
 (admin `/stats`) is the per-pod count of requests that arrived over HTTP/3. The
 kind harness `e2e/eastwest-quic.sh` asserts all of this end to end (E0–E5), including E4c: the node's `quic:` cluster count equals the (source, destination) pairs the suite drove. Its `QUIC_DNS_SANS=off` negative control reproduces the missing-SAN failure.
 
@@ -7307,7 +7428,7 @@ Verdict, per line:
 - Presented SAN is **another** workload's, and that workload has a pod on the **source's
   node** → a local pod's inbound terminated the connection, not `upstream_host`: the
   cross-pod landing below (#1007/#1022). The node's newest mesh pod at that minute is
-  the usual suspect; its `in_tcp_<pod>` counter confirms it.
+  the usual suspect; its `in_tcp_<namespace>_<pod>` counter confirms it.
 - Presented SAN is another workload's on a **different** node → `upstream_host` was not
   the terminating peer; record it and re-open the transport path, as for HTTP.
 
@@ -7432,24 +7553,28 @@ right endpoint's ORIGINAL_DST from a pod IP and succeed silently, and this count
 go quiet for the wrong reason. So (b) is proven on talos first, with (a) still in place.
 
 **The proof signal: TCP-floor connections on pods that serve no raw-TCP port.** The
-inbound listener's DEFAULT chain is the TCP floor (`in_tcp_<pod>`, stat prefix
+inbound listener's DEFAULT chain is the TCP floor (`in_tcp_<namespace>_<pod>`, stat prefix
 `inboundTCPFloorStatPrefix` in `agent/internal/xds/proxy/ingress.go`). Only a pod whose
 primary port is raw TCP can legitimately receive a connection there; per-port raw-TCP
-chains are `in_tcp_<pod>_<port>` and are excluded. The pod name is part of the METRIC
-NAME, so select by `__name__` pattern and read the RAW counters (a series is born on the
-first stray connection):
+chains are `in_tcp_<namespace>_<pod>_<port>` and are excluded. The pod's namespace and name
+are part of the METRIC NAME, so select by `__name__` pattern and read the RAW counters (a
+series is born on the first stray connection). The namespace is in the name since chart
+2.5.0 (#1584); an agent older than that writes `in_tcp_<pod>`, so the exclusion of the
+TCP-primary workload below is spelled for one or the other (`tcp_echo_` before,
+`aether_test_tcp_echo_` since), and the `pod` label the second query builds holds
+`<namespace>_<pod>` with every `-` turned into `_`:
 
 ```promql
 # Stray landings: default floor chain of every pod except tcp-echo (TCP-primary);
 # the per-port chains (…_<port>_downstream_cx_total) are legitimate and excluded.
 sum by (__name__) ({__name__=~"envoy_tcp_in_tcp_.*_downstream_cx_total",
-                    __name__!~"envoy_tcp_in_tcp_tcp_echo_.*|envoy_tcp_in_tcp_.*_[0-9]+_downstream_cx_total"})
+                    __name__!~"envoy_tcp_in_tcp_aether_test_tcp_echo_.*|envoy_tcp_in_tcp_.*_[0-9]+_downstream_cx_total"})
 
 # The same over a window, with the pod lifted into a label (the soak gate, #1023).
 # max_over_time drops __name__, so the label is taken first, inside a subquery.
 max by (node, pod) (max_over_time((label_replace(
   {__name__=~"envoy_tcp_in_tcp_.+_downstream_cx_total",
-   __name__!~"envoy_tcp_in_tcp_(tcp_echo_.+|.+_[0-9]+)_downstream_cx_total"},
+   __name__!~"envoy_tcp_in_tcp_(aether_test_tcp_echo_.+|.+_[0-9]+)_downstream_cx_total"},
   "pod", "$1", "__name__", "envoy_tcp_in_tcp_(.+)_downstream_cx_total"))[8h:1m]))
 
 # The client side: SAN rejections on the L4 clusters, per node and per L4 cluster
@@ -7474,7 +7599,7 @@ Attribute a tick by joining on node and minute. Since #1023 the L4 access log ca
 whole join in one record (see "L4 hops" above): the source pod, the dialled VIP:port,
 the chosen `tcp:` cluster, the intended `upstream_host` and the rejection. Before it,
 the join was three counters: the `verify_san` +1 on node N, a new or incremented
-`in_tcp_<pod>` series for a pod on N, and that pod's `inbound_ssl_connection_error`
+`in_tcp_<namespace>_<pod>` series for a pod on N, and that pod's `inbound_ssl_connection_error`
 climbing in the same minute (the 2026-09-27 16:37Z w04 event in #1007 is the worked
 example).
 
@@ -7777,15 +7902,15 @@ independent facts about each local pod, on **two separate gateway paths**:
 
 | Gateway path | Probe cluster | What it proves | Transport |
 |---|---|---|---|
-| `/healthz/health_<pod>` | `health_<pod>` | the application answers (HTTP GET on the readiness path, or a raw TCP connect for a `protocol: tcp` pod) | cleartext, in the pod's netns |
-| `/healthz/inboundready_<pod>` | `inboundready_<pod>` | the pod's **mesh inbound listener** is listening, has loaded the pod's own SVID, and it verifies as that pod | mTLS, node identity → `127.0.0.1:18008` in the pod's netns, SAN-pinned to the pod's SPIFFE ID |
+| `/healthz/health_<namespace>_<pod>` | `health_<namespace>_<pod>` | the application answers (HTTP GET on the readiness path, or a raw TCP connect for a `protocol: tcp` pod) | cleartext, in the pod's netns |
+| `/healthz/inboundready_<namespace>_<pod>` | `inboundready_<namespace>_<pod>` | the pod's **mesh inbound listener** is listening, has loaded the pod's own SVID, and it verifies as that pod | mTLS, node identity → `127.0.0.1:18008` in the pod's netns, SAN-pinned to the pod's SPIFFE ID |
 
-Each path reflects **its own cluster only**. `/healthz/health_<pod>` means
+Each path reflects **its own cluster only**. `/healthz/health_<namespace>_<pod>` means
 exactly what it meant before #815. A `404` on either path means "not programmed"
 — for the inbound path that is the normal, expected answer for an **ungated**
 pod, and it is never read as unhealthy.
 
-`inboundready_<pod>` exists because `health_<pod>` has no SDS dependency at all,
+`inboundready_<namespace>_<pod>` exists because `health_<namespace>_<pod>` has no SDS dependency at all,
 while the inbound listener does not `listen()` until its SVID arrives — so an
 endpoint used to be advertised HEALTHY while its mesh port still returned
 ECONNREFUSED (measured: promotion p50 5.8 s against an SVID at 6.1–8.4 s). It is
@@ -7794,7 +7919,7 @@ there is nothing to prove), before the node SVID has been served (no client
 certificate to present), in edge mode, or for a pod with no netns.
 
 > **Why the two paths are separate, and not ANDed.** The first attempt (#819)
-> put both clusters behind the single `/healthz/health_<pod>` path. The agent
+> put both clusters behind the single `/healthz/health_<namespace>_<pod>` path. The agent
 > could then only see their conjunction, so "the application is fine but the
 > mesh inbound never came up" was indistinguishable from "the application died".
 > On 2026-09-19 main-worker-03 published inbound listeners with an EMPTY trust
@@ -7916,7 +8041,7 @@ max_over_time(envoy_cluster_membership_healthy{aether_cluster=~"inboundready_.*"
 max_over_time(envoy_cluster_membership_healthy{aether_cluster=~"health_.*"}[5m])
 ```
 
-If `inboundready_<pod>` alone is 0, the handshake is the problem, and the probe
+If `inboundready_<namespace>_<pod>` alone is 0, the handshake is the problem, and the probe
 cluster's own SSL counters say which half (these are deliberately NOT excluded
 from the stats matcher, precisely for this):
 
@@ -7948,7 +8073,7 @@ Ranked causes, most to least common:
 #### The gate is silently absent
 
 `inbound_gate_pods{aether_gate_state="ungated"}` standing above zero with SPIRE
-enabled means those pods have **no** `/healthz/inboundready_<pod>` path and are
+enabled means those pods have **no** `/healthz/inboundready_<namespace>_<pod>` path and are
 being judged on the application probe alone. That is a safe degradation, not an
 outage — but it means the premature-promotion hole is open again, so it is worth
 an alert. main-worker-05 ran a whole agent lifetime like that on 2026-09-19 with
@@ -8383,7 +8508,7 @@ the normal case, not an edge case:
   listener (`DownstreamTransportSocket`), and
 - the node SVID — the selector's `default_value` *and* its
   `prefetch_secret_names` — is already named statically by every
-  `inboundready_<pod>` probe cluster.
+  `inboundready_<namespace>_<pod>` probe cluster.
 
 The selector is therefore always the **second** subscriber. On the delta-ADS
 mux, Envoy's `WatchMap` deduplicates subscription interest per (type_url,
@@ -8556,7 +8681,7 @@ churn #815 and this change removed.
 
 - **The server-identity SAN pin** (`match_typed_subject_alt_names`) and the
   SDS-rotated trust bundle. They were never per-source.
-- **The `inboundready_<pod>` probe cluster.** It has no selector: it keeps its
+- **The `inboundready_<namespace>_<pod>` probe cluster.** It has no selector: it keeps its
   own statically named certificate (the node SVID) and its own
   `MaxSessionKeys: 0` (#836/#840). A health checker carries no filter state, so
   had it used the selector it would have taken `default_value` on every probe —

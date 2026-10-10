@@ -69,7 +69,7 @@ const livenessStuckWarnEvery = 5 * time.Minute
 type inboundReadyVerdict int
 
 const (
-	// inboundUngated: the pod has no /healthz/inboundready_<pod> path at all
+	// inboundUngated: the pod has no /healthz/inboundready_<namespace>_<pod> path at all
 	// (404). The agent has no mTLS-readiness opinion; the app probe decides.
 	inboundUngated inboundReadyVerdict = iota
 	// inboundPassing: the probe completed an mTLS handshake with the pod's own
