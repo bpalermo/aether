@@ -3906,7 +3906,8 @@ pod is Ready once its first snapshot is complete (`standby` readiness check).
 The DaemonSet controller then deletes the old pod, the old agent exits in
 20-100 ms, and the kernel hands the lock (`/run/aether/agent.lock`) to the
 standby. Proxy side, `control_plane.connected_state` drops to 0 for about 0.1 s
-(on kind: median 0.08 s, p99 0.24 s; what `e2e/agent-restart-gap.sh` measures):
+(on kind: median 0.08 s, p99 0.24 s, measured by the kind reproduction
+`agent-restart-gap.sh`, maintained with an external harness, outside this repository):
 
 ```bash
 kubectl -n aether-system exec <proxy-pod> -c aether-proxy -- \
@@ -5734,10 +5735,10 @@ enabled `[0]` was `authz`. Since #1275 `authz` is a native sidecar and is listed
 kubectl -n aether-system get pod <proxy-pod> -o jsonpath='{range .status.containerStatuses[?(@.name=="proxy")]}{.restartCount} {.lastState.terminated.exitCode} {.lastState.terminated.finishedAt}{"\n"}{end}'
 ```
 
-Reproduce it on kind with `e2e/hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
+The kind reproduction is `hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
 WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 against the unpatched image, and
-0 against the patched one (see the header of the script). The per-roll soak gates (the
-hot-restart wedge gates, #1050) are documented with an external soak harness, maintained outside this repository.
+0 against the patched one (see the header of the script). It and the per-roll soak gates (the
+hot-restart wedge gates, #1050) are maintained and documented with an external soak harness, outside this repository.
 
 ### A node stalls for seconds during a handoff (#1093)
 
@@ -6024,7 +6025,7 @@ them with the commands in §7 "Pre-flight: node headroom before a roll (#812)".
   `aether_supervisor_handoff_mode_total{mode="fresh_after_drain"}` (expected once per
   node on the rollout that changes the count, 0 otherwise).
   `proxy.hotRestart.hotRestartOnConcurrencyChange: true` forces the old hot restart.
-  Reproduce with `e2e/proxy-concurrency-change.sh`.
+  The kind reproduction, `proxy-concurrency-change.sh`, is maintained with an external harness, outside this repository.
 
   **What "its own" count is when `proxy.concurrency` is `0` (#1442).** The supervisor
   then passes no `--concurrency`, and Envoy does not run one worker per core: it runs
@@ -6236,8 +6237,8 @@ outlasts the 15 s parent-shutdown window.
   8 s, so raising this flag above 8 s no longer lengthens reuse.
 
 A request in flight at the parent's exit still dies, as it does on h2. The soak gate (the
-h3 stateless-reset gate, #1054) is documented with an external soak harness, maintained outside this repository; the kind leg is
-`e2e/eastwest-quic-hotrestart.sh` with `HR_MODE=sparse` (two nodes, `EWQ_WORKER=1`).
+h3 stateless-reset gate, #1054) is documented with an external soak harness, maintained outside this repository; so is the kind leg,
+`eastwest-quic-hotrestart.sh` with `HR_MODE=sparse` (two nodes).
 
 ### `504 UT` after exactly 15 s over a `quic:` twin to a terminating pod (#1087)
 
@@ -6272,7 +6273,7 @@ The request is **not retried**, GET or POST. It was sent, so it may have reached
 application, and the mesh retry policy retries only `connect-failure`, `refused-stream`,
 `reset-before-request` and a 503 *response*. New requests to the dead endpoint fail the
 QUIC handshake within the 2 s connect timeout and are retried on another endpoint.
-The kind proof is `e2e/eastwest-quic-deadpeer.sh`.
+The kind proof is `eastwest-quic-deadpeer.sh`, maintained with an external harness, outside this repository.
 
 ### A source keeps picking an endpoint seconds after its drain mark (#1103)
 
@@ -6318,7 +6319,7 @@ the RPC; the informer or the 5 s poll), then serves the Pod-derived endpoint lik
 other replica. Before, it kept the agent's version for the pod's lifetime whenever the
 two differed in any field (the CNI path's health-check mode, for one). Find which
 replica an agent is on with `conntrack -L -p tcp --orig-src <agent IP> --orig-dst <registrar Service IP>` on its node
-(`e2e/drain-propagation.sh` does this per run).
+(the kind reproduction `drain-propagation.sh`, maintained with an external harness, outside this repository, does this per run).
 
 What was slow is a source proxy that **had no ADS stream**: its own node agent was
 restarting. While the stream is down the proxy routes on its last config, so it cannot
@@ -6339,7 +6340,7 @@ Since #1103 the bootstrap's `ads_config` carries
 reconnects within 1 s of the agent serving. Checked by
 `//agent/test/envoy_validate:envoy_validate_test` (`TestNodeProxyADSReconnectBackoffIsBounded`)
 and `//charts/aether:aether_proxy_bootstrap_ads_reconnect_backoff_test`; the kind proof
-is `e2e/drain-propagation.sh`.
+is `drain-propagation.sh`, in that external harness.
 
 The fast reconnect needs the agent's half of #1103. A restarted agent holds its own
 SVID before the SPIRE bridge has re-delivered the pods' certificates, and until then
@@ -6777,7 +6778,7 @@ retried**, GET or POST: the close is a `ConnectionTermination` reset of a reques
 already sent, which `reset-before-request` excludes. The PING is NOT on the app hop,
 authz, xDS or collector clusters (their h2 peer is not an aether proxy; a gRPC server
 answers frequent PINGs with `GOAWAY too_many_pings`). The kind proof is
-`e2e/eastwest-quic-deadpeer.sh verify-h2`.
+`eastwest-quic-deadpeer.sh verify-h2`, in the external harness named under #1087 above.
 
 ### An HTTP/1.1 client gets a reset on a reused keep-alive connection (#1350)
 
