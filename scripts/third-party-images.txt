@@ -1,0 +1,80 @@
+# Third-party container images this repository names, and the digest each is
+# pinned to (#1400, #1401). Read by scripts/third-party-images.sh:
+#
+#   scripts/third-party-images.sh check      every reference in the tree agrees with this file (CI)
+#   scripts/third-party-images.sh list       where each pin is used
+#   scripts/third-party-images.sh outdated   which pins the registry has moved past
+#   scripts/third-party-images.sh newer      which pins have newer tags next to the pinned one
+#   scripts/third-party-images.sh resolve <name>:<tag>   the `pin` line for a new image or tag
+#
+# docs/runbook.md, "Refreshing third-party image pins", is the procedure.
+#
+#   pin <name> <tag> <digest>
+#
+# <name> exactly as the references spell it. <digest> is the digest of the
+# tag's multi-arch INDEX (the manifest list), never of one platform's image:
+# the same reference then runs on linux/amd64 and linux/arm64. Every digest
+# below was read anonymously from its registry with `resolve`, which refuses to
+# stay quiet about an index that lacks either architecture.
+#
+# A reference in the tree is `<name>:<tag>@<digest>`, or `<name>@<digest>`
+# where it predates this file (the tag is then recorded only here).
+
+# The mesh client of the validation workloads and the e2e harnesses
+# (charts/udsecho client.image, charts/prober authzCanary.image, e2e/*.sh).
+pin curlimages/curl 8.22.0 sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+
+# e2e backends.
+pin hashicorp/http-echo 1.0 sha256:fcb75f691c8b0414d670ae570240cbf95502cc18a9ba57e982ecac589760a186
+pin istio/tcp-echo-server 1.3 sha256:782259608d5ce934e1a07ce4a3f2664934b6806d50430fd20b7bf429ea500272
+pin registry.k8s.io/e2e-test-images/agnhost 2.53 sha256:99c6b4bb4a1e1df3f0b3752168c89358794d02258ebebc26bf21c29399011a85
+pin registry.k8s.io/pause 3.10 sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a
+
+# The OPA preset of the aether chart's authz sidecar
+# (charts/aether proxy.authzSidecar.opa.image). With the preset on it runs in
+# the proxy pod on every node, so moving this pin rolls the proxy DaemonSet:
+# bump charts/aether and say so in docs/runbook.md with the pin.
+pin openpolicyagent/opa 1.21.1-envoy-static sha256:b4a8bbe87c9405419d03d1a8b6b9f4b540e7ea8ff8832248d6339b30594b344b
+
+# The Gateway API conformance echo servers: echo-basic is the prober's
+# authz-canary target and the //test/e2e backend, echo-advanced the mesh
+# conformance overlay's.
+pin gcr.io/k8s-staging-gateway-api/echo-basic v20260102-monthly-2025.12-44-g8174882a sha256:eb7396722956640221e856b8e8cf44179da131d5bd6fc27a4f0cb91f60c237c3
+pin gcr.io/k8s-staging-gateway-api/echo-advanced v20240412-v1.0.0-394-g40c666fd sha256:5efb54877c2280c51b971857ea9a6256b355822ab84a4edbef9ec1c876587068
+
+# OpenTelemetry: the collector the QUIC hot-restart harness runs.
+pin ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector 0.159.0 sha256:7725a7a10c87d8853208bdd4bb3439ad3c0d7b32b4292b9300ac07c8daba14a2
+
+# etcd, the same release from two registries (their indexes differ): the kind
+# harnesses start the quay.io one (e2e/etcd-image.sh), the testcontainers
+# integration tests the gcr.io one (registry/etcdtest). Keep both on the minor
+# line of the Go client in go.mod (#1223).
+pin quay.io/coreos/etcd v3.7.2 sha256:e9afa62b1e914f02db62e5c46a7a140d8cdf026f2ed888cab4e5a142ec4d06fd
+pin gcr.io/etcd-development/etcd v3.7.2 sha256:7c6c239825d00e3f6328a69caafd54be92063acf0c2ce78b8394699f52b75dc3
+
+# The base images of what this repository builds (#1477), read from the Bazel
+# module files and not from a reference: static is the base of every Go image
+# (MODULE.bazel, the rules_img `pull`), cc of the aether-proxy image
+# (proxy/MODULE.bazel, `oci.pull`, by digest alone: `nonroot` is the tag that
+# serves that digest). distroless rebuilds `nonroot` in place, so `outdated`
+# reports MOVED whenever the base was patched: moving the pin then changes the
+# digest of every image built on it, and is a release.
+pin gcr.io/distroless/static-debian13 nonroot sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
+pin gcr.io/distroless/cc-debian12 nonroot sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
+
+# The kind node image. e2e/kind-version.sh owns this pin and //e2e:kind_pin_test
+# holds every copy to it; it is listed here so `outdated` reports on it too.
+# Move it only together with KIND_VERSION (docs/runbook.md, "Bumping the e2e
+# Kubernetes version"): a node image is built for one kind release.
+pin kindest/node v1.35.8 sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+
+# --- exceptions ----------------------------------------------------------------
+#
+#   allow <path> <reference>    this reference, in this file, may stay as it is
+#   skip <path prefix>          nothing under this path is read
+#
+# Each needs its reason next to it. An `allow` or `skip` that matches nothing any more
+# fails the check, so an exception cannot outlive what it excused. `outdated`
+# prints what an allowed tag points at. There is no `allow` and no `skip` today:
+# every image the tree names is pinned, and no path is skipped.
+

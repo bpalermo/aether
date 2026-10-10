@@ -205,7 +205,9 @@ TLS_VIP=""
 # destination port the CNI diverts into the pod's transparent capture listener.
 UDP_PORT="9001"
 MESH_UDP_PORT="18082"
-GWAPI_VERSION="v1.6.2"
+# The pinned Gateway API release (#1583): one for every e2e surface.
+# shellcheck source=e2e/gateway-api-version.sh
+. "$REPO_ROOT/e2e/gateway-api-version.sh"
 # TCPRoute/TLSRoute/UDPRoute are EXPERIMENTAL-channel in gateway-api v1.6.2 (the
 # standard channel stops at GRPCRoute), so the standard bundle uds.sh installs is
 # not enough here.
@@ -678,7 +680,7 @@ spec:
       serviceAccountName: client
       containers:
         - name: curl
-          image: curlimages/curl:8.22.0
+          image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
           command: ["sleep", "infinity"]
           securityContext:
             allowPrivilegeEscalation: false

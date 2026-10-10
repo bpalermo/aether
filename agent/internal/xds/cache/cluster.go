@@ -87,13 +87,21 @@ func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) e
 // node SVID is served mtlsCluster is nil and the base cluster is emitted
 // without the matcher.
 //
-// The pin report comes from the SAME read of the cluster map (#1425). It is
-// filed under the version of the snapshot these resources go into, and an ACK
-// of that version is read as "the proxy accepted this pin state". Taken in a
-// later read, a registry reload or an identity change that landed in between
-// would put the pin state of clusters the proxy was never sent under that
-// version.
+// The pin report comes from the SAME read of the cluster map (#1425). Its
+// classes are filed under the versions of the clusters these resources become,
+// and an ACK of a cluster at that version is read as "the proxy accepted a
+// cluster with this pin state". Taken in a later read, a registry reload or an
+// identity change that landed in between would put the pin state of a cluster
+// the proxy was never sent under that version.
 func (c *SnapshotCache) clustersEndpointsVhostsAndPins() ([]types.Resource, []types.Resource, []*routev3.VirtualHost, pinReport) {
+	return c.clustersEndpointsVhostsAndPinsInto(nil, nil)
+}
+
+// clustersEndpointsVhostsAndPinsInto is clustersEndpointsVhostsAndPins with
+// the report's classes collected into buf and its mTLS cluster names into
+// mtlsBuf (each from its start), so a snapshot build can reuse the two buffers
+// across builds.
+func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtlsBuf []string) ([]types.Resource, []types.Resource, []*routev3.VirtualHost, pinReport) {
 	// The east-west QUIC fan-out inputs, snapshotted BEFORE clusterMu; their
 	// own locks (depMu, localMu) never nest inside it (see mtls.go's lock order).
 	quic := c.quicFanoutSnapshot()
@@ -109,7 +117,7 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPins() ([]types.Resource, []ty
 	clas := make([]types.Resource, 0, len(c.clusters))
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.clusters))
 	quicClusters := 0
-	var pins pinReport
+	pins := pinReport{track: true, classes: buf[:0], mtls: mtlsBuf[:0]}
 	for key, entry := range c.clusters {
 		pins.add(key, &entry)
 		if entry.l4Floor {
@@ -123,6 +131,9 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPins() ([]types.Resource, []ty
 		var cluster types.Resource = entry.cluster
 		if entry.mtlsCluster != nil {
 			cluster = entry.mtlsCluster
+			// By the name of the resource this pass publishes, not by the
+			// entry's key (pinReport.mtls).
+			pins.mtls = append(pins.mtls, entry.mtlsCluster.GetName())
 		}
 		clusters = append(clusters, cluster)
 		clas = c.appendEntryCLAsLocked(clas, entry)

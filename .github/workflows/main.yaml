@@ -24,10 +24,14 @@ name: main-post-merge
 # `required_status_checks.strict` (require branches up to date before merging) is
 # what actually prevents the bad merge.
 #
-# Nothing here is a required status check — `ci` (from `ci.yaml`) remains the only
-# one, and this workflow deliberately does not touch the pull_request path. The
-# `main` job below is what turns the run red when a leg did not do what `diff`
-# decided (#1501).
+# Nothing here is a required status check: this workflow runs on a push, after
+# the merge, and deliberately does not touch the pull_request path. What `main`
+# requires of a pull request is `ci` (ci.yaml), `proxy` (proxy.yml), `codeql`
+# (codeql.yaml) and the code-scanning app's `CodeQL` (#1507; AGENTS.md, "Pull
+# requests"). The `main` job below is what turns the run red when a leg did not
+# do what `diff` decided (#1501), and a run that did not pass is recorded on a
+# rolling issue by main-watch.yaml (#1506), which finds this workflow by its
+# `name:` above and reads the `main` job by its name.
 # Integration and e2e are not repeated here: `e2e.yaml` runs the heavy suite
 # nightly (`schedule: 17 4 * * *`, plus `workflow_dispatch`) — it has no `push`
 # trigger, so a `main` push is covered by the next nightly rather than
@@ -218,7 +222,7 @@ jobs:
   # table, decides the `ci` and `proxy` checks.
   #
   # No ruleset requires this job (nothing does on a push): when it fails, the
-  # run of this commit on `main` is red, and that is all it does.
+  # run of this commit on `main` is red, and main-watch.yaml files it (#1506).
   #
   # The rules in that script repeat each job's `if:`; //scripts:ci_gate_test
   # compares them with this file, and fails when a job is added here and not

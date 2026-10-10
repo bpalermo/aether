@@ -78,6 +78,178 @@ false
 {{- end -}}
 
 {{/*
+"hook" or "release": how this render seeds a `default` MeshConfig that is not
+live yet (#1471).
+
+The seed is rendered once (a `lookup` skips it when the object exists) and the
+operator owns it afterwards. As a release object it is in the manifest of the
+one revision that seeded it and of no other, and stays live. `helm rollback` to
+that revision (normally a release's first; a later one when the object was
+absent on an upgrade and seeded then) fails with `no MeshConfig
+with the name "default" found`: for an object that is live and in the target
+manifest, Helm builds its patch from the CURRENT manifest's copy, and there is
+none. An object that is in no manifest cannot be in that position, so the seed
+is a hook:
+
+  helm.sh/hook: pre-install,pre-upgrade
+
+  - pre, not post: the agent pod (and the edge's) stays in ContainerCreating
+    until the controller has projected the MeshConfig into a ConfigMap, so
+    under `--wait` a post-install hook would never run.
+  - pre-upgrade as well: whenever the object is absent on an upgrade (a first
+    install that failed early, meshConfig.createDefault or edge.enabled turned
+    on later, an object someone deleted) it is seeded then, as before.
+  - NEVER a rollback event. On a rollback Helm runs the hooks STORED with the
+    target revision, whatever is live: a seed with a rollback event would be
+    created, or applied, over the operator's MeshConfig.
+
+  helm.sh/hook-delete-policy: never
+
+`never` is not a policy Helm knows, and it is there so that Helm deletes
+nothing. A hook with NO policy gets Helm's default, before-hook-creation: Helm
+deletes the live object of that name just before it creates the hook's. The
+`lookup` around the template only says the object was absent when the chart
+was RENDERED; the hook runs later (after every pre-upgrade hook of a lower
+weight, and after whatever a parent chart or a slow API server puts in
+between). An object created in that window (by the operator, a GitOps tool, a
+second `helm upgrade`) is then deleted and replaced by the seed, and the
+upgrade reports success. Any value in the annotation replaces the default;
+Helm 3 and Helm 4 both store the values as given and act only on the three
+they know (pkg/action/hooks.go). Measured on kind (Kubernetes v1.35.8), the
+object absent at render and created before the seed hook runs:
+
+  policy            Helm 3.18.4                  Helm 4.2.0 (server-side apply)
+  (none)            deleted and replaced,        deleted and replaced,
+                    upgrade "succeeds"           upgrade "succeeds"
+  hook-succeeded    (the seed is deleted as soon as it is created: unusable)
+  hook-failed       upgrade fails, "already      object kept, upgrade succeeds;
+                    exists"; object kept         DELETED when the wait after
+                                                 the apply fails
+  never             upgrade fails, "already      not deleted, but the seed is
+                    exists"; object untouched    APPLIED to it (see below),
+                                                 upgrade succeeds; not deleted
+                                                 when the wait fails either
+
+hook-failed is the documented value that looks right and is not: Helm applies
+it after the hook's object was created and the WAIT for it failed. With
+client-side creation the object it then deletes can only be the seed. Helm 4
+applies hooks server-side, an apply over an existing object succeeds, and so
+the object deleted after a failed wait (an identity that may not list
+MeshConfigs, a timeout) is the operator's. With `never` no step deletes
+anything: the upgrade either fails on "already exists" with the release left
+`failed` at a new revision and the previous one still `deployed` (running the
+same command again succeeds: the object is live now, so the seed is not
+rendered), or it goes through with the operator's object in place. A failed
+upgrade that is fixed by running it again is the better failure.
+
+What `never` does NOT give is a create-only seed under Helm 4's server-side
+apply. There the hook is an apply, and an apply over the object created in the
+window merges the seed into it: the object keeps its UID and every field it
+set, and gains the chart's labels, the hook annotations and any
+meshConfig.proxy field it did not set itself (measured: a seed with
+tracingEnabled=true over an object with only accessLogsEnabled=true left both
+set, upgrade exit 0). A field both set to different values is a conflict and
+fails the upgrade with the object untouched. With the default, empty
+meshConfig.proxy the spec is not changed. Closing that needs a seed that is
+created and never applied (a hook Job running `kubectl create`, say), which is
+not what this chart does today. If a future
+Helm rejects or reinterprets a value it does not know, e2e/first-install.sh
+(leg v-a2) and the template tests fail first.
+
+"release" is the exception. A pre-install hook runs before any object of the
+release exists, so it cannot create a MeshConfig in a namespace that this very
+revision creates: the hook, and the install with it, would fail on "namespaces
+... not found". For the control plane's MeshConfig that is namespace.create=true
+with the release stored elsewhere. That one revision seeds the MeshConfig as a
+release object, as every chart before 2.4.24 did, and under Helm 3 cannot be
+rolled back to once a later revision exists (docs/runbook.md, "Chart 2.4.24",
+has the way round; Helm 4 rolls back to it). `lookup` returns nothing without a
+cluster, so `helm template` shows this case whenever the chart renders the
+namespace. The edge's MeshConfig had the same exception until 2.4.25 and is in
+every manifest instead (aether.edge.meshConfigInManifest); that cannot be done
+here, because this seed carries meshConfig.proxy, and a spec rendered again
+would be patched over the operator's.
+
+Usage: include "aether.meshConfig.seedMode" (dict "namespace" $ns "rendersNamespace" <bool>)
+*/}}
+{{- define "aether.meshConfig.seedMode" -}}
+{{- if and .rendersNamespace (not (lookup "v1" "Namespace" "" .namespace)) -}}
+release
+{{- else -}}
+hook
+{{- end -}}
+{{- end -}}
+
+{{/*
+"true" when the edge's MeshConfig is an ordinary object of the release, in the
+manifest of every revision (#1514); "" when it is seeded once, by the hook
+described at aether.meshConfig.seedMode.
+
+A pre-install hook cannot create the edge's MeshConfig in a namespace the same
+revision creates (edge.namespaceCreate=true, the default once the edge is on),
+so there it has to be an object of the release. Seeded ONCE, as it was up to
+2.4.24, it was in the manifest of the revision that created the namespace and
+of no later one, and still live: under Helm 3 `helm rollback` to that revision
+failed with `no MeshConfig with the name "default" found`, as in #1471
+(measured on kind, Helm 3.18.4; Helm 4.2.0 takes the live object as its base
+and rolls back). The way out is the opposite of a hook: render it on every
+revision. That is safe for this MeshConfig and not for the control plane's,
+because the chart sets no field of its spec (`spec: {}` whatever the values):
+  - Helm 3 patches a custom resource with the difference between the previous
+    manifest and the new one, which is empty for the spec on every upgrade and
+    every rollback, so the operator's fields are never touched;
+  - Helm 4's server-side apply applies an empty spec, which owns no field.
+Both measured (e2e/first-install.sh, leg viii: an edit of the MeshConfig
+survives an upgrade and a rollback in each direction).
+
+Which releases: the ones whose edge namespace THIS chart created. The decision
+is taken once, on the revision that creates the namespace (the namespace is
+absent and meshConfig.createDefault is on), and recorded as
+aether.io/edge-meshconfig-in-manifest: "true" on BOTH objects, the Namespace
+and the MeshConfig. Afterwards it is read back from the live objects, and
+either marker is enough:
+  - the MeshConfig's survives a pass through chart 2.4.24 (an upgrade to it, or
+    a rollback to one of its revisions). 2.4.24 renders the edge Namespace
+    without the annotation, so Helm takes the Namespace's marker off, and it
+    does not render the live MeshConfig, so that object and its annotations
+    are left alone (measured, Helm 3.18.4). With the Namespace's marker alone,
+    every later revision of this chart would have left the MeshConfig out for
+    good, and no rollback to the earlier revisions would work again. Read from
+    the MeshConfig, the next upgrade to this chart renders it again and marks
+    the Namespace again;
+  - the Namespace's covers a MeshConfig that carries none: one the operator
+    deleted (rendered and created again, where the hook would leave it out of
+    the manifest) or replaced by hand. The second matters: an object that was
+    in the previous manifest and is not rendered is DELETED by Helm, and a
+    hand-made MeshConfig has no helm.sh/resource-policy: keep.
+A namespace an older chart created carries no marker, and neither does its
+MeshConfig; both stay as they are (the MeshConfig in one old manifest, or in
+none). Bringing such an object back into the manifest would make the revision
+that does it one that cannot be rolled back to from an older one, which is the
+bug again, one revision later. That is also what remains of a pass through
+2.4.24: under Helm 3, a rollback FROM a 2.4.24 revision to a revision of this
+chart fails (the 2.4.24 manifest holds no MeshConfig); an upgrade works.
+
+`lookup` returns nothing without a cluster, so `helm template` renders the
+first revision: marked.
+*/}}
+{{- define "aether.edge.meshConfigInManifest" -}}
+{{- if .Values.edge.enabled -}}
+{{- $marker := "aether.io/edge-meshconfig-in-manifest" -}}
+{{- $ns := include "aether.edge.namespace" . -}}
+{{- $liveNs := lookup "v1" "Namespace" "" $ns | default (dict) -}}
+{{- $liveMc := lookup "config.aether.io/v1" "MeshConfig" $ns "default" | default (dict) -}}
+{{- if eq (dig "metadata" "annotations" $marker "" $liveMc | toString) "true" -}}
+true
+{{- else if and .Values.edge.namespaceCreate (eq (dig "metadata" "annotations" $marker "" $liveNs | toString) "true") -}}
+true
+{{- else if and .Values.edge.namespaceCreate .Values.meshConfig.createDefault (not $liveNs) -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Fails an upgrade that could make Helm delete the namespace although this render
 does not include it (#1403).
 
@@ -419,6 +591,23 @@ helm.sh/chart: {{ include "aether.chart" . }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
 {{- end -}}
+{{/*
+The `version` of the external-harness contract this chart was packaged with
+(test/harnesscontract/external-harness.yaml, #1544), or nothing.
+
+The number is a file of the PACKAGE (files/harness-contract-version, which a
+build step of //charts/aether derives from the contract), not a value and not a
+literal here: no operator sets it, and a contract bump edits nothing under
+charts/. A render of the source tree has no such file and gets nothing, which
+the caller renders as no annotation at all.
+
+Only ever written on an object's OWN metadata. In a pod template a contract
+bump would replace every pod of the workload
+(//charts/aether:aether_harness_contract_version_rolls_no_pod_test).
+*/}}
+{{- define "aether.harnessContractVersion" -}}
+{{- .Files.Get "files/harness-contract-version" | trim -}}
+{{- end -}}
 
 {{/* -------------------------------------------------------------- mesh-dns */}}
 {{- define "aether.meshDns.fullname" -}}
@@ -530,7 +719,85 @@ so a bad value fails the install rather than crash-looping the DaemonSet.
 {{- end -}}
 
 {{/* ------------------------------------------------------------------ proxy */}}
+{{/*
+The node proxy's DaemonSet, ServiceAccount and (with "-config") ConfigMap are
+named "aether-proxy" WHATEVER the release is called, unlike every other
+workload of the chart. That is deliberate and stays (#1540):
+
+  - The mesh is one release per cluster. The agent, the proxy, mesh-dns and
+    uds-csi own node-level state that has one owner per node: /run/aether and
+    its sockets, the CNI binary and conflist, the host network namespace's
+    data-plane ports, the hot-restart shared memory, the csi.aether.io driver.
+    A release-derived name would let a second release's objects be created; it
+    would not let its pods work.
+  - Renaming a DaemonSet is a delete and a create: every node's proxy pod
+    replaced at once with no hot-restart handoff. No existing release may be
+    renamed, and a release not called "aether" has the constant too.
+  - The name is in the external-harness contract
+    (test/harnesscontract/external-harness.yaml, chart.aether.proxy).
+
+aether.release.assertOnlyOne refuses a second release where the chart can see
+one. docs/configuration.md, "One release per cluster".
+*/}}
 {{- define "aether.proxy.fullname" -}}{{- "aether-proxy" -}}{{- end -}}
+{{/*
+Fails the render when a live object this chart names without the release (the
+proxy DaemonSet in the release's namespace, the cluster-scoped csi.aether.io
+CSIDriver) belongs to ANOTHER Helm release (#1540), and says what is wrong:
+the mesh is one release per cluster. (Helm has an ownership check of its own
+for an object that already exists; what it does with these two was not
+measured for this change.)
+
+"Belongs to another release" is read from Helm's ownership annotations
+(meta.helm.sh/release-name, meta.helm.sh/release-namespace) and, on an object
+that has lost them, from the app.kubernetes.io/instance label. The label names
+a release and not the namespace it is stored in, so it cannot tell two
+releases of the same name apart:
+
+  - on an UPGRADE a marker that names this release by the label alone passes
+    (the owner, with its annotations stripped, must keep upgrading);
+  - on a first INSTALL a marker that names a release of this name with no
+    release namespace is refused: it may be another release called the same,
+    stored elsewhere, and a wrong pass installs a second node stack.
+
+An object that names no release at all is not refused.
+
+What it does not see:
+  - a second release in ANOTHER namespace when the first one runs with
+    udsCsi.enabled=false: there is then no CSIDriver to find, the first
+    release's proxy DaemonSet is in the other namespace, and the chart does
+    not list other namespaces' DaemonSets;
+  - a first release with proxy.enabled=false and udsCsi.enabled=false
+    (neither marker exists);
+  - anything at all in a render without a cluster (`helm template`, a
+    client-side --dry-run), where `lookup` returns nothing.
+
+No test in this repository reaches this helper's failures: the template rules
+render without a cluster (charts/aether/BUILD.bazel, "One release per
+cluster").
+Usage: include "aether.release.assertOnlyOne" .
+*/}}
+{{- define "aether.release.assertOnlyOne" -}}
+{{- $ns := include "aether.namespace" . -}}
+{{- /* Both are looked up whatever THIS release renders: a release with
+       proxy.enabled=false or udsCsi.enabled=false still brings an agent and
+       the CNI plugin to the first release's nodes. */ -}}
+{{- $objects := list
+  (dict "what" (printf "DaemonSet %s/%s" $ns (include "aether.proxy.fullname" .)) "live" (lookup "apps/v1" "DaemonSet" $ns (include "aether.proxy.fullname" .) | default (dict)))
+  (dict "what" "CSIDriver csi.aether.io" "live" (lookup "storage.k8s.io/v1" "CSIDriver" "" "csi.aether.io" | default (dict))) -}}
+{{- range $objects -}}
+{{- $a := dig "metadata" "annotations" (dict) .live | default (dict) -}}
+{{- $l := dig "metadata" "labels" (dict) .live | default (dict) -}}
+{{- $ownerName := get $a "meta.helm.sh/release-name" | default (get $l "app.kubernetes.io/instance") | toString -}}
+{{- $ownerNs := get $a "meta.helm.sh/release-namespace" | toString -}}
+{{- if and $.Release.IsInstall $ownerName (eq $ownerName $.Release.Name) (not $ownerNs) -}}
+{{- fail (printf "%s already exists and names a release called %q without saying which namespace that release is stored in (it has lost Helm's meta.helm.sh/release-namespace annotation and only its app.kubernetes.io/instance label or release-name annotation is left), and this is a first install of %q in namespace %q: the chart cannot tell this release from another one of the same name. The mesh is one release per cluster. If an aether release already exists (helm list -A), upgrade it instead of installing a second one. If the object is a leftover of a release that is gone, delete it and install again. See docs/configuration.md, \"One release per cluster\"." .what $ownerName $.Release.Name $.Release.Namespace) -}}
+{{- end -}}
+{{- if or (and $ownerName (ne $ownerName $.Release.Name)) (and $ownerNs (ne $ownerNs $.Release.Namespace)) -}}
+{{- fail (printf "%s already exists and belongs to another aether release (%q%s), not to %q in namespace %q. The mesh is one release per cluster: the agent, the node proxy, mesh-dns and uds-csi own node-level state (/run/aether, the CNI plugin and conflist, the host network's data-plane ports, the csi.aether.io driver), and the node proxy's objects are named aether-proxy whatever the release is called, so a second release cannot be installed next to the first. Upgrade the existing release instead (helm list -A), or uninstall it first. See docs/configuration.md, \"One release per cluster\"." .what $ownerName (ternary (printf " in namespace %q" $ownerNs) "" (ne $ownerNs "")) $.Release.Name $.Release.Namespace) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- define "aether.proxy.serviceAccountName" -}}{{ include "aether.proxy.fullname" . }}{{- end -}}
 {{- define "aether.proxy.configMapName" -}}
 {{- printf "%s-config" (include "aether.proxy.fullname" .) | trunc 63 | trimSuffix "-" -}}
@@ -769,6 +1036,69 @@ renaming it would delete and recreate the object on upgrade.
 */}}
 {{- define "aether.controller.mutatingWebhookName" -}}
 {{- include "aether.controller.clusterScopedName" . }}-pod-ndots
+{{- end -}}
+{{/*
+Who registers the SPIRE-served webhook's identity (#1457). ONE decision, read by
+everything that depends on it, so the three cannot disagree:
+
+  controller-clusterspiffeid.yaml         renders the ClusterSPIFFEID on "chart"
+  aether.controller.assertWebhookIdentity fails the render on "unregistered"
+                                          (where the cluster serves the API)
+  NOTES.txt                               prints WEBHOOK IDENTITY NOTE on
+                                          "unregistered"
+
+Results, from controller.webhook.{spire, clusterSpiffeID.create,
+clusterSpiffeID.className}:
+
+  ""              the webhook is not SPIRE-served: nothing to register
+  "chart"         spire, create, a className: the chart renders the
+                  ClusterSPIFFEID with the webhook Service's DNS names
+  "operator"      spire, create=false: "I register it myself"; nothing is
+                  rendered, checked or warned about
+  "unregistered"  spire, create, NO className: the chart was asked to register
+                  the identity and has no class to register it with
+
+In "unregistered" the controller gets no ClusterSPIFFEID from this chart.
+Unless something else gives its SVID the webhook Service's DNS names, the
+apiserver's TLS hostname check of the webhook fails and the webhooks fail open
+(failurePolicy: Ignore): validation, namespace injection and the identity gate
+are skipped without an error. (Read from the templates; the runtime effect was
+not reproduced for #1457.)
+
+What holds each result: //charts/aether:aether_controller_clusterspiffeid_*_test
+render all four through the template and the failure. NOTES.txt itself is in
+no test: the pinned Helm's `helm template` cannot print notes (BUILD.bazel
+says more). The note reads this helper and nothing else, so it cannot take a
+different decision from the two that are tested; that it is still there, and
+what it says, is not held by anything.
+Use it as `{{ if eq (include "aether.controller.webhookIdentity" .) "chart" }}`.
+*/}}
+{{- define "aether.controller.webhookIdentity" -}}
+{{- with .Values.controller.webhook -}}
+{{- if not .spire -}}
+{{- else if not .clusterSpiffeID.create -}}operator
+{{- else if .clusterSpiffeID.className -}}chart
+{{- else -}}unregistered
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{/*
+Fails the render in the "unregistered" state on a cluster that serves the ClusterSPIFFEID
+API (spire-controller-manager is installed): create=true asks for a
+registration the chart could create and cannot, for want of the class name.
+The two ways out are in the message; create=false is how a deployment that
+registers the identity itself says so.
+
+A cluster that does not serve the API is not refused: the chart could not
+create the object there whatever the class, and NOTES.txt warns instead. So is
+a render that is not told what the cluster serves (`helm template` without
+--api-versions), which is what the template tests and the
+`--set controller.webhook.spire=true` diff of docs/runbook.md are.
+*/}}
+{{- define "aether.controller.assertWebhookIdentity" -}}
+{{- if and (eq (include "aether.controller.webhookIdentity" .) "unregistered") (.Capabilities.APIVersions.Has "spire.spiffe.io/v1alpha1/ClusterSPIFFEID") -}}
+{{- fail (printf "controller.webhook.spire=true with controller.webhook.clusterSpiffeID.create=true, but controller.webhook.clusterSpiffeID.className is empty: the chart renders no ClusterSPIFFEID, so nothing it renders gives the controller's SVID the webhook Service's DNS names (%s.%s.svc), the apiserver's TLS hostname check of the webhook fails, and the webhooks then fail open (failurePolicy: Ignore) without an error. Either set controller.webhook.clusterSpiffeID.className to your spire-controller-manager class, or, if you register the controller's identity yourself (a ClusterSPIFFEID or a registration entry of your own with those DNS names), say so with controller.webhook.clusterSpiffeID.create=false. See docs/configuration.md, controller.webhook.clusterSpiffeID." (include "aether.controller.webhookServiceName" .) (include "aether.namespace" .)) -}}
+{{- end -}}
 {{- end -}}
 {{- define "aether.controller.selectorLabels" -}}
 app.kubernetes.io/name: aether-controller

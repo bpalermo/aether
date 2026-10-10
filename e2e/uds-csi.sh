@@ -51,9 +51,11 @@ CLUSTER="${UDS_CSI_CLUSTER:-uds-csi}"
 CTX="kind-$CLUSTER"
 NS="aether-system"
 TEST_NS="aether-test"
-GWAPI_VERSION="v1.6.2"
+# The pinned Gateway API release (#1583): one for every e2e surface.
+# shellcheck source=e2e/gateway-api-version.sh
+. "$REPO_ROOT/e2e/gateway-api-version.sh"
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi udsecho)
-CURL_IMAGE="curlimages/curl:8.22.0"
+CURL_IMAGE="curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777"
 DRIVER="csi.aether.io"
 UDS_ROOT="/run/aether/uds"
 FS_GROUP=65532

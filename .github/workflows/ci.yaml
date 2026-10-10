@@ -155,6 +155,13 @@ jobs:
           fetch-depth: 0
       - name: Require a Chart.yaml version bump for chart changes
         run: scripts/check-chart-version-bump.sh "${{ github.event.pull_request.base.sha }}"
+      # A promise that leaves the external-harness contract together with its
+      # line in the lock passes the hermetic test, which reads both files from
+      # one checkout; only the base can tell (#1541).
+      - name: Require a version bump when a promise leaves the external-harness contract
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/check-harness-contract-bump.sh "$BASE_SHA"
 
   deps-audit:
     needs: changes
@@ -325,6 +332,19 @@ jobs:
       - name: The image registry is one setting
         run: scripts/check-registry-config.sh
 
+      # A third-party image (curl, an echo server, OPA, etcd, the kind node) is
+      # named in chart values, e2e manifests and test fixtures. Each
+      # reference carries the digest of the image's multi-arch index, and
+      # scripts/third-party-images.txt lists them (#1400, #1401). This fails on
+      # an image named by tag only, a digest the list does not have, a tag that
+      # disagrees with it, and a pin or an exception nothing uses any more.
+      # The base images the Bazel module files pull are held to the same list
+      # (#1477). It reads tracked files; no network (`outdated` is the online
+      # half, run daily by third-party-images.yaml: docs/runbook.md,
+      # "Refreshing third-party image pins").
+      - name: Every third-party image is pinned by digest and listed
+        run: scripts/third-party-images.sh check
+
       # Generated Go is a Bazel output and never a tracked file.
       # scripts/materialize-generated-go.sh copies the *.pb.go files into the
       # tree for CodeQL (.github/workflows/codeql.yaml) behind a .gitignore
@@ -453,8 +473,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Image registry (bazel/registry/registry.bzl)
         run: scripts/image-registry.sh >> "$GITHUB_ENV"
-      - name: Setup helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Setup Helm (pinned)
+        uses: ./.github/actions/setup-helm
       - name: Assert the aether-proxy pin agrees with the registry and the chart
         run: |
           values=charts/aether/values.yaml

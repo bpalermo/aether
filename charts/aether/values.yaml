@@ -23,7 +23,13 @@
 # NOTE: the external SPIRE agent DaemonSet must also tolerate this taint — set it in
 # your spire helm values (spire-agent.tolerations), NOT here.
 
-# Override the chart name / fully-qualified resource name.
+# Override the chart name / fully-qualified resource name. Neither changes the
+# node proxy's objects: its DaemonSet and ServiceAccount are `aether-proxy` and
+# its ConfigMap `aether-proxy-config` whatever the release is called (#1540).
+# Install this chart ONCE per cluster: the agent, the proxy, mesh-dns and
+# uds-csi own node-level state, and a second release is refused at render time
+# where the chart can see the first (docs/configuration.md, "One release per
+# cluster").
 nameOverride: ""
 fullnameOverride: ""
 
@@ -88,9 +94,14 @@ otel:
   enabled: false
   # OTLP gRPC collector endpoint (host:port, insecure), e.g.
   # "otel-collector.observability.svc:4317". Empty disables OTLP export and the
-  # proxy/CNI stat sink. NOTE: this is a deterministic, deploy-time value — the
-  # CNI plugin and Envoy bootstrap bake it in; it is never read from a runtime
-  # ConfigMap, so the fleet rolls atomically and a config change can't break CNI.
+  # Envoy stats sink of the node proxy and the edge proxy. NOTE: this is a
+  # deploy-time value: the chart passes it as --otlp-endpoint to the agent,
+  # the proxy supervisor, mesh-dns, the registrar, the controller and the edge
+  # control plane, and renders it into the two Envoy bootstraps; it is never
+  # read from a runtime ConfigMap. uds-csi and cni-install are not passed it,
+  # and the CNI plugin takes no endpoint: it exports
+  # no telemetry of its own (#1166, #1185) and forwards its timings to the
+  # agent, which exports them.
   endpoint: ""
   # Export component application logs over OTLP (tee'd into stderr).
   logs: false
@@ -166,10 +177,27 @@ spire:
 # into a ConfigMap the agent mounts. The CR ONLY overrides the proxy data plane's
 # observability; everything else is inherited from the system config above.
 meshConfig:
-  # Seed the singleton MeshConfig CR (name "default") on first install only — it
-  # is created once and NEVER overwritten on upgrade (lookup-skip + Helm
-  # resource-policy: keep), so operators own it via kubectl thereafter. Set false
-  # to manage the CR entirely yourself.
+  # Seed the singleton MeshConfig CR (name "default") when none is live (the
+  # first install; an upgrade that finds it absent) — it is created once and
+  # NEVER overwritten on upgrade or rollback (lookup-skip), so operators own it
+  # via kubectl thereafter. The seed is a Helm hook (pre-install,pre-upgrade),
+  # not an object of the release (#1471): it is in no revision's manifest, so
+  # `helm rollback` to the revision that seeded it (normally the first) works,
+  # and `--no-hooks` seeds nothing. The hook deletes nothing either: it names
+  # a hook-delete-policy Helm does not act on (`never`), because Helm's
+  # default deletes the live object of that name before creating the hook's.
+  # A MeshConfig created while an upgrade is running is therefore never
+  # deleted; that upgrade can fail on "already exists", and succeeds when run
+  # again. With Helm 4's server-side apply the seed is applied to that object
+  # instead (labels, annotations, and any `proxy` field below that it does
+  # not set). docs/runbook.md, "Chart 2.4.24".
+  # The edge's own MeshConfig (edge.enabled) hangs off this switch too. In an
+  # edge namespace the chart creates (edge.namespaceCreate, since 2.4.25) it is
+  # not a hook but an object of the release, rendered on every revision with
+  # an empty spec, which leaves your edits alone (#1514; runbook, "Chart
+  # 2.4.25").
+  # Set false to manage the CR entirely yourself (do that with a tool that
+  # renders with `helm template`: it would render the seed on every sync).
   createDefault: true
   # The MeshConfig spec.proxy seeded into the default CR (protojson field names of
   # aether.config.v1.MeshConfig.proxy). An empty block means the proxy inherits
@@ -761,9 +789,25 @@ proxy:
     # restart anyway, which resets about half of the predecessor's live HTTP/3
     # connections on every node. An operator override, not a tuning knob.
     hotRestartOnConcurrencyChange: false
-  # Envoy worker thread count (#1093). 0 = do not pass the flag: Envoy runs one
-  # worker per core, today's behaviour. N > 0 passes `--concurrency N` to every
-  # Envoy epoch through the supervisor (--envoy-arg). It exists because on a
+  # Envoy worker thread count (#1093). 0 = do not pass the flag, and Envoy picks
+  # its own count: the smallest of the node's online CPUs, the CPUs the
+  # container's affinity mask allows, and the CPU limit of the container's OWN
+  # cgroup (resources.limits.cpu below) rounded DOWN to a whole CPU, never less
+  # than 1 (#1442, #1455). That is one worker per core only while the container
+  # has no CPU limit and no restricted mask, which is what the chart's defaults
+  # give; with a 1500m limit it is one worker, with 2 or 2500m two. So, with 0:
+  #   - changing resources.limits.cpu across a whole-CPU boundary changes the
+  #     worker count, and that rollout is the drain + fresh start described
+  #     below on every node, not a hot restart. Set an explicit count whenever
+  #     you set a CPU limit.
+  #   - only the container's own cgroup is read. A CPU limit on the pod as a
+  #     whole, with none on this container, leaves one worker per core on a
+  #     throttled pod (docs/runbook.md, "Sizing nodes for a proxy hot restart").
+  # The chart never renders `--concurrency 0`: passed explicitly, that is ONE
+  # worker, not this default (docs/configuration.md).
+  # N > 0 passes `--concurrency N` to every Envoy epoch through the supervisor
+  # (--envoy-arg), and Envoy runs exactly N whatever the limit or the mask. It
+  # exists because on a
   # 4-core node a hot-restart handoff runs two Envoys at once — 8 worker threads
   # plus 2 main threads on 4 saturated cores — and #1093 needs to A/B a smaller
   # count.
@@ -796,6 +840,8 @@ proxy:
   # itself, instead of being SIGKILLed with connections open (#771). Keep it well
   # above hotRestart.drainTime + 15s or that fallback cannot fit and the supervisor
   # reverts to waiting for the SIGKILL.
+  # `helm uninstall` is one of those terminations: each proxy pod then stays
+  # Terminating for most of this value (#1472; docs/runbook.md, "Uninstalling").
   terminationGracePeriodSeconds: 180
   # Supervisor --shutdown-drain-immediately (#795): on SIGTERM, drain Envoy's
   # listeners straight away instead of first waiting (bounded by
@@ -831,7 +877,16 @@ proxy:
       # are strings, not booleans. The preset passes OPA no YAML (flags and a
       # .rego file only); a policy that calls yaml.unmarshal, or a bundle/--data
       # YAML you add, must spell booleans true/false (#1222).
-      image: openpolicyagent/opa:1.21.1-envoy-static
+      #
+      # A third-party image, so it is pinned by the digest of its multi-arch
+      # index (linux/amd64 and linux/arm64): the tag is kept for the reader and
+      # the digest is what the node pulls (#1401; it was the tag alone until
+      # chart 2.4.22). The pin is listed in scripts/third-party-images.txt, and
+      # `scripts/third-party-images.sh outdated` says when the registry has
+      # moved past it (docs/runbook.md, "Refreshing third-party image pins").
+      # The sidecar is a container of the proxy pod: a changed value here rolls
+      # the proxy DaemonSet on every node where the preset is on.
+      image: openpolicyagent/opa:1.21.1-envoy-static@sha256:b4a8bbe87c9405419d03d1a8b6b9f4b540e7ea8ff8832248d6339b30594b344b
       # Rego policy mounted via ConfigMap; must define the decision the plugin
       # queries (envoy/authz/allow by default). Required when opa.enabled.
       #
@@ -964,6 +1019,11 @@ edge:
   # The edge is an ingress gateway, not a mesh workload, so it runs in its own
   # namespace, isolated from the control plane. namespaceCreate lets the chart
   # create it (with baseline PSA); set false if you manage the namespace yourself.
+  # A namespace the chart creates is annotated
+  # aether.io/edge-meshconfig-in-manifest: "true" (when meshConfig.createDefault
+  # is on), and so is the MeshConfig in it: the edge's MeshConfig is then an
+  # object of the release on every revision, so that `helm rollback` works to
+  # each of them (#1514).
   namespace: aether-ingress
   namespaceCreate: true
   # Gateway replicas behind the Service; rolled with the standard RollingUpdate
@@ -1082,8 +1142,12 @@ edge:
   goMaxProcs: 2
   # Envoy worker thread count for the edge pod's `envoy` container (#1344), the
   # same shape as proxy.concurrency (#1093): N > 0 passes `--concurrency N`,
-  # 0 passes no flag and Envoy runs one worker per node core -- what every chart
-  # before 2.4.13 did (4 workers on a 4-core talos-main node).
+  # 0 passes no flag and Envoy picks its own count -- what every chart before
+  # 2.4.13 did: the smallest of the node's online CPUs, the CPUs the container's
+  # affinity mask allows, and the CPU limit of the container's own cgroup
+  # (edge.resources.limits.cpu) rounded down to a whole CPU, never less than 1
+  # (#1455). One worker per node core only when the container has no CPU limit
+  # and no restricted mask; a limit on the pod as a whole is not read.
   #
   # Default 2, the count the node proxies run with on talos-main since #1093.
   # The edge Envoy averages about 12m of CPU there, so two workers are far from
@@ -1279,7 +1343,9 @@ controller:
     #     bundle into the caBundle at runtime. Requires the ClusterSPIFFEID below
     #     (or an equivalent) granting the controller the webhook Service DNS name
     #     in its dnsNames, else the apiserver's TLS hostname check fails. The
-    #     controller is then granted update on its webhook configurations: the
+    #     controller is then granted get and update on its webhook configurations
+    #     (no list, watch or patch since 2.4.27, #1456; a controller image older
+    #     than chart 2.4.19's needs them): the
     #     validating one, and the pod-mutating one whenever namespaceInjection
     #     or injectPodNdots renders it (one condition for the object, the flag
     #     naming it and the grant: aether.controller.mutatingWebhook, #1411).
@@ -1304,10 +1370,18 @@ controller:
     # When spire=true, have the chart create the controller's ClusterSPIFFEID with
     # the webhook Service DNS SANs, so SPIRE mode works without a manual entry.
     clusterSpiffeID:
+      # false = "I register the controller's identity myself" (a ClusterSPIFFEID
+      # or a registration entry of your own that gives its SVID the webhook
+      # Service's DNS names): nothing is rendered and nothing is checked.
       create: true
       # spire-controller-manager class name for your SPIRE install (e.g.
-      # "spire-mgmt-spire"). REQUIRED when create=true; if empty the resource is
-      # not rendered (manage the ClusterSPIFFEID yourself).
+      # "spire-mgmt-spire"). REQUIRED when spire=true and create=true: the
+      # ClusterSPIFFEID is rendered only with it. Left empty in that case
+      # (#1457), the render FAILS on a cluster that serves the ClusterSPIFFEID
+      # API (spire-controller-manager installed), naming this value and
+      # create=false; where the API is not served, and in a render that is not
+      # told what the cluster serves (`helm template` without --api-versions),
+      # nothing is rendered and the install notes carry a warning.
       className: ""
     # Egress identity gate (#1053). The pod-mutating webhook injects an
     # `aether-identity-ready` init container — FIRST, ahead of the pod's own init

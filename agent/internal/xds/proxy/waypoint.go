@@ -19,7 +19,7 @@ const WaypointTunnelListenerName = "ew_tunnel"
 // WaypointIngressClusterName is the STATIC cluster of a service's LOCAL pods (at
 // the mesh inbound port) that the node tunnel forwards a cross-cluster connection
 // to. Keyed by the service FQDN, so it is unique per service on the node.
-func WaypointIngressClusterName(fqdn string) string { return "ew_ingress_" + fqdn }
+func WaypointIngressClusterName(fqdn string) string { return waypointIngressClusterPrefix + fqdn }
 
 // BuildWaypointTunnelListener builds the host-netns east/west tunnel listener:
 // tls_inspector reads the ClientHello SNI and each chain (built by

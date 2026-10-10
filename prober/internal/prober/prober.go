@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"aethermesh.dev/common/telemetry/serviceresource"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
@@ -268,7 +269,7 @@ func withDefaultPort(authority, port string) string {
 // disabled, because the prober's own identity (k8s.pod.name, k8s.node.name) is read
 // from it for the `pod` datapoint attribute and the AETHER_PROBE_FAIL lines.
 //
-// There is deliberately NO resource.WithHost() (#1041). The prober is not hostNetwork, so
+// There is deliberately NO host.name (serviceresource.WithoutHost, #1041). The prober is not hostNetwork, so
 // host.name is its POD name, and the talos collector's transform/promote set the metric
 // `node` label from host.name ahead of k8s.node.name: every series said
 // node="prober-h2mzs" instead of the Kubernetes node, which left #1040's burst
@@ -276,16 +277,8 @@ func withDefaultPort(authority, port string) string {
 // (OTEL_RESOURCE_ATTRIBUTES, downward API spec.nodeName); the pod rides its own `pod`
 // datapoint attribute.
 func newResource(ctx context.Context, version string) (*resource.Resource, error) {
-	res, err := resource.New(
-		ctx,
-		resource.WithAttributes(
-			semconv.ServiceName(telemetryServiceName),
-			semconv.ServiceVersion(version),
-		),
-		resource.WithFromEnv(), // OTEL_RESOURCE_ATTRIBUTES: k8s.node.name, k8s.pod.name, k8s.namespace.name
-		resource.WithTelemetrySDK(),
-		resource.WithProcess(),
-	)
+	// OTEL_RESOURCE_ATTRIBUTES carries k8s.node.name, k8s.pod.name, k8s.namespace.name.
+	res, err := serviceresource.New(ctx, telemetryServiceName, version, serviceresource.WithoutHost())
 	if err != nil {
 		return nil, fmt.Errorf("create resource: %w", err)
 	}

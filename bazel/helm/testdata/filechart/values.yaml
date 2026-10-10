@@ -1,0 +1,7 @@
+# Each switch is one way a chart can get a packaged file wrong.
+# The file's content in the pod template as well: its pods roll with the file.
+leak: false
+# A second rendered line that follows the file.
+twice: false
+# Without the file the chart renders another annotation in its place.
+fallback: false

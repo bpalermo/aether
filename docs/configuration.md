@@ -23,13 +23,65 @@ Configuration has **two layers**:
 
 | Key | Default | Purpose |
 |---|---|---|
-| `nameOverride` / `fullnameOverride` | `""` | Override the chart name / fully-qualified resource name. |
+| `nameOverride` / `fullnameOverride` | `""` | Override the chart name / fully-qualified resource name. Neither changes the node proxy's objects, which are always named `aether-proxy`: see "One release per cluster" below. |
 | `namespace.create` | `false` | Whether the chart renders the `Namespace`, with the three privileged pod-security labels (`enforce`/`audit`/`warn`) and `helm.sh/resource-policy: keep`. `false` (the default since chart 2.4.21, #1403): Helm (`--create-namespace`) or you create it, and on a cluster that enforces Pod Security admission you label it before installing, or the agent, proxy, mesh-dns and uds-csi pods are refused; see [Getting started](./getting-started.md#install). `true` works only when the release is stored in a **different** namespace (`helm -n <other> --set namespace.name=...`); for the release's own namespace the render fails, naming both ways out, because Helm writes the release record into that namespace before it creates anything the chart renders. A namespace the release already owns (any install made while this defaulted to `true`) is rendered whatever this says, so an upgrade never deletes it. The first upgrade of a release that an older chart installed with `false` is refused until `kubectl annotate namespace <ns> helm.sh/resource-policy=keep` has been run once ([`runbook.md`](./runbook.md), "Chart 2.4.21"). |
 | `namespace.name` | `""` | Namespace all resources deploy into (defaults to the release namespace). |
 | `clusterName` | `talos-main` | Cluster name passed to agent + registrar (`--cluster-name`); used in registry keys. |
 | `controlCluster` | `""` | Cross-cluster config authority (026 EM3). Set to a cluster name → only that cluster's registrar exports GAMMA config and everyone imports only from it. Empty = federated (any peer, highest-version wins). |
 | `debug` | `true` | Verbose logging on all components (`--debug`). |
 | `meshDomain` | `aether.internal` | DNS-style domain services are addressed under (`<service>.<meshDomain>`); also the ODCDS catch-all suffix. |
+
+### One release per cluster
+
+Install the `aether` chart **once** per cluster (#1540). The agent, the node
+proxy, mesh-dns and uds-csi own state that has one owner per node: `/run/aether`
+and its sockets, the CNI binary and its entry in the node's conflist, the
+data-plane ports of the host network namespace, the hot-restart shared memory
+and the `csi.aether.io` driver. Two releases targeting the same nodes cannot
+both work, whatever their objects are called.
+
+Most object names follow the release (`<release>-aether-agent`, or
+`<release>-agent` when the release name contains `aether`: `aether-agent` for
+a release named `aether`). These do not:
+
+| Object | Name | Scope |
+|---|---|---|
+| node proxy `DaemonSet`, its `ServiceAccount` | `aether-proxy` | the release's namespace |
+| node proxy `ConfigMap` | `aether-proxy-config` | the release's namespace |
+| `CSIDriver` (`udsCsi.enabled`) | `csi.aether.io` | cluster |
+| `MeshConfig` seed (`meshConfig.createDefault`) | `default` | its namespace |
+| edge `Namespace`, `GatewayClass`, `EdgeConfig` (`edge.enabled`) | `aether-ingress`, `aether`, `aether-edge-defaults` (`edge.namespace`, `edge.gatewayClassName`, `edge.config.name`) | cluster, cluster, the edge namespace |
+
+The proxy's name is a constant on purpose and is not going to follow the
+release: renaming a DaemonSet is a delete and a create, which would replace
+every node's proxy pod at once with no hot-restart handoff, and the name is
+part of the external-harness contract (`test/harnesscontract`). Address the
+proxy as `daemonset/aether-proxy` in the release's namespace, whatever the
+release is called.
+
+Since chart 2.4.28 the agent DaemonSet's own metadata carries the annotation
+`aether.io/harness-contract-version`: the `version` of that contract the chart
+was packaged with. No value sets it. It identifies the contract, not the build,
+it is absent from a render of the source tree, and it is never on a pod
+template, so it changes without replacing a pod. `docs/runbook.md`, "The
+external-harness contract", has the command that reads it.
+
+Since chart 2.4.27 a second release is refused at render time, where the chart
+can see it: when the `aether-proxy` DaemonSet in the release's namespace, or the
+`csi.aether.io` CSIDriver, already exists and names another Helm release
+(Helm's `meta.helm.sh/release-name` / `release-namespace` annotations, or the
+`app.kubernetes.io/instance` label on an object that has lost them), the render
+fails and says so. The label names a release, not the namespace it is stored
+in, so a first **install** is also refused when one of the two objects names a
+release of the same name and has no `release-namespace` annotation: it may be
+another release called the same. An upgrade of the owner whose objects lost
+their annotations is not refused. Both objects are looked up whatever the new
+release enables. The check does not see a second release in **another
+namespace** when the first one runs with `udsCsi.enabled=false` (there is no
+CSIDriver, and the first release's proxy DaemonSet is in the other namespace),
+nor a first release that runs neither the proxy nor uds-csi, and it sees nothing in a render without a cluster
+(`helm template`, a client-side `--dry-run`, a GitOps tool that renders with
+`helm template`): there, one release per cluster is yours to keep.
 
 ### Resources — removing a default request or limit
 
@@ -43,10 +95,30 @@ access-log/tracing policy via the MeshConfig CR.
 | Key | Default | Purpose |
 |---|---|---|
 | `otel.enabled` | `false` | Enable the OTel MeterProvider + push telemetry everywhere. |
-| `otel.endpoint` | `""` | OTLP gRPC collector `host:port` (insecure). Empty disables OTLP + the proxy/CNI stat sink. Deploy-time value baked into the CNI plugin and Envoy bootstrap (never read from a runtime ConfigMap). |
+| `otel.endpoint` | `""` | OTLP gRPC collector `host:port` (insecure). Empty disables OTLP export from every component, and the Envoy stats sink of the node proxy and the edge proxy. A deploy-time value: the chart passes it as `--otlp-endpoint` to the agent, the proxy supervisor, mesh-dns, the registrar, the controller and the edge control plane, and renders it into the two Envoy bootstraps; it is never read from a runtime ConfigMap. `uds-csi` and `cni-install` are not passed it. The CNI plugin takes no endpoint: it exports no telemetry of its own (#1166/#1185) and forwards its timings to the agent, which exports them (see `cniInstall` below). |
 | `otel.logs` | `false` | Export component logs over OTLP (also tee'd to stderr). |
 | `otel.traceSampleRate` | `0.1` | Head-sampling ratio (0.0–1.0); bounds exported spans only. |
 | `otel.traceExport` | `false` | Export spans over OTLP (needs a collector traces pipeline). |
+
+**Who names a component.** Each Go component (agent, registrar, controller, edge
+control plane, mesh-dns, proxy supervisor, prober) sets its own `service.name`
+(`aether-agent`, `aether-mesh-dns`, …) and its own `service.version` (the build's),
+and takes every other resource attribute from `OTEL_RESOURCE_ATTRIBUTES`, which the
+charts use for the pod's `k8s.*` attributes. A `service.name` inside
+`OTEL_RESOURCE_ATTRIBUTES` is ignored by these components (#1562): dashboards and
+alerts select on the component's name. To rename one on purpose, set
+`OTEL_SERVICE_NAME` on its container. A `service.version` inside
+`OTEL_RESOURCE_ATTRIBUTES` is ignored too (#1575), and nothing overrides it: the
+version says which binary produced the telemetry, and only the binary knows. All
+of them build that resource with `common/telemetry/serviceresource`. Envoy is not a
+Go component. The edge proxy's stats resource takes `service.name` from
+`OTEL_RESOURCE_ATTRIBUTES`, which is how it gets `aether-edge-proxy`. The node
+proxy's is named `aether-proxy` in its bootstrap (chart 2.4.26, #1561; it had no
+name before, so its series had no `job` in a backend that makes `job` from
+`service.name`), not in the container's environment:
+the supervisor runs in that container too and reads the same variables, so an
+`OTEL_SERVICE_NAME` there would rename the supervisor's metrics, and it does
+not rename Envoy's.
 
 ### `spire` — system-wide mTLS
 
@@ -75,7 +147,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 
 | Key | Default | Purpose |
 |---|---|---|
-| `meshConfig.createDefault` | `true` | Seed the singleton `MeshConfig` (`default`) on first install only — never overwritten on upgrade (operators own it via kubectl). |
+| `meshConfig.createDefault` | `true` | Seed the singleton `MeshConfig` (`default`) once, when none is live: on the first install, and on an upgrade that finds it absent. Never overwritten on upgrade or rollback (operators own it via kubectl). Since chart 2.4.24 the seed is a Helm hook (`helm.sh/hook: pre-install,pre-upgrade`), so it is in no revision's manifest and `helm rollback` to the revision that seeded it (normally a release's first) works (#1471); `helm install --no-hooks` therefore seeds nothing. The hook never deletes a MeshConfig (`helm.sh/hook-delete-policy: never`, a value Helm does not act on, in place of its default `before-hook-creation`): one created while an upgrade is running is not deleted, and that upgrade can fail on `"default" already exists`; run it again (with Helm 4's server-side apply the upgrade goes through and the seed is applied to that object: the runbook has what that changes). It is still a release object on the one revision that also creates the namespace it goes into (`namespace.create=true`). The edge's own MeshConfig hangs off the same switch; in an edge namespace the chart creates (`edge.namespaceCreate=true`) it is, since chart 2.4.25, an object of the release on every revision, with an empty spec (#1514). See [`runbook.md`](./runbook.md), "Chart 2.4.24" and "Chart 2.4.25", for releases installed by an older chart. With a tool that renders with `helm template`, set `false` and keep the MeshConfig with your own manifests. |
 | `meshConfig.proxy` | `{}` | The `spec.proxy` seeded into that CR (protojson field names). Empty = proxy inherits everything from system config. |
 
 ### `agent`
@@ -122,7 +194,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 | `proxy.hotRestart.drainStrategy` | `gradual` | Envoy `--drain-strategy` for the hot-restart parent and every other drain (LDS listener removal, the pod-termination drain): `gradual` or `immediate`. `immediate` is an opt-in only: on talos-main it made the #1054 stateless resets worse (#1068); the carried patches (#1064/#1066/#1069) fix the exit window under `gradual`. See [`runbook.md`](./runbook.md) § *Source h3 requests die on a stateless reset at a destination's roll (#1054)*. |
 | `proxy.hotRestart.skipParentStats` | `false` | Pass Envoy `--skip-hot-restart-parent-stats` (#1050). An off-by-default **emergency switch**: the hot-restart main-thread deadlock it worked around is fixed by the carried patch #1060. Turning it on costs the parent's gauges and its last ≤5 s of counter deltas in the child. |
 | `proxy.hotRestart.hotRestartOnConcurrencyChange` | `false` | Supervisor `--hot-restart-on-concurrency-change` (#1136). Off: a roll that changes the Envoy worker count (`proxy.concurrency`) drains the predecessor and starts a fresh Envoy instead of hot-restarting. On: hot-restart anyway, which resets about half of the predecessor's live HTTP/3 connections on every node. An operator override, not a tuning knob. |
-| `proxy.concurrency` | `0` | Envoy worker thread count (#1093). `0` passes no flag, so Envoy picks its own default: the smallest of the node's online CPUs, the CPUs the container's affinity mask allows, and the container's cgroup CPU limit (`proxy.resources.limits.cpu`) rounded **down** to a whole CPU, never less than 1. That is one worker per core only when the container has no CPU limit and no restricted mask, as with the chart's defaults; with a `1500m` limit it is one worker, with `2` or `2500m` two. `N > 0` passes `--concurrency N` to every Envoy epoch through the supervisor, and Envoy then runs exactly `N` whatever the limit or the mask. Exists because on a 4-core node a hot-restart handoff runs two Envoys (8 workers + 2 main threads on 4 cores). **Changing it is a drain + fresh start, not a hot restart** (#1136): a hot restart between different worker counts re-steers the parent's QUIC connections by the child's count (the reuse-port steering program belongs to the whole socket group) and resets about half of the live HTTP/3 connections on each node. So when the new pod's supervisor finds a live predecessor whose `/server_info` reports another `concurrency`, it logs one WARN naming both counts, drains the predecessor (`POST /drain_listeners?graceful`, then `hotRestart.drainTime`), stops it (`/quitquitquit`) and starts its own Envoy fresh at epoch 0; `aether_supervisor_handoff_mode_total{mode="fresh_after_drain"}` counts it. The cost, per node in turn, is the drain window plus a gap with no listeners while the fresh Envoy initializes (on kind: about 2 s, bridged by SYN retransmits, 0 failed requests; on a busy node expect the successor's init time, 3–15 s on talos-main). Every restart after that rollout is same-to-same and hot again. With `0` the supervisor has no flag to compare, so it computes the count the way Envoy does, from its own container's CPUs, affinity and cgroup limit (#1442; until then it assumed one worker per online CPU, so a proxy with a CPU limit or a restricted mask took the drain + fresh start on **every** roll). A rollout that changes `proxy.resources.limits.cpu` across a whole-CPU boundary while `proxy.concurrency` is `0` therefore changes the worker count, and is a drain + fresh start like any other count change. `proxy.hotRestart.hotRestartOnConcurrencyChange` forces the old hot restart. A negative or non-integer value fails the render. **Do not change it on a live mesh until both prerequisites are deployed**: the #1126 successor crash is fixed by the carried Envoy patch `envoy-aether1126-forwarded-udp-worker-index.patch` in proxy images built from it or later, and the #1127 supervisor fix is the other prerequisite; see [`runbook.md`](./runbook.md) § *Sizing nodes for a proxy hot restart*. |
+| `proxy.concurrency` | `0` | Envoy worker thread count (#1093). `0` passes no flag, so Envoy picks its own default: the smallest of the node's online CPUs, the CPUs the container's affinity mask allows, and the container's cgroup CPU limit (`proxy.resources.limits.cpu`) rounded **down** to a whole CPU, never less than 1. That is one worker per core only when the container has no CPU limit and no restricted mask, as with the chart's defaults; with a `1500m` limit it is one worker, with `2` or `2500m` two. `N > 0` passes `--concurrency N` to every Envoy epoch through the supervisor, and Envoy then runs exactly `N` whatever the limit or the mask. Exists because on a 4-core node a hot-restart handoff runs two Envoys (8 workers + 2 main threads on 4 cores). **Changing it is a drain + fresh start, not a hot restart** (#1136): a hot restart between different worker counts re-steers the parent's QUIC connections by the child's count (the reuse-port steering program belongs to the whole socket group) and resets about half of the live HTTP/3 connections on each node. So when the new pod's supervisor finds a live predecessor whose `/server_info` reports another `concurrency`, it logs one WARN naming both counts, drains the predecessor (`POST /drain_listeners?graceful`, then `hotRestart.drainTime`), stops it (`/quitquitquit`) and starts its own Envoy fresh at epoch 0; `aether_supervisor_handoff_mode_total{mode="fresh_after_drain"}` counts it. The cost, per node in turn, is the drain window plus a gap with no listeners while the fresh Envoy initializes (on kind: about 2 s, bridged by SYN retransmits, 0 failed requests; on a busy node expect the successor's init time, 3–15 s on talos-main). Every restart after that rollout is same-to-same and hot again. With `0` the supervisor has no flag to compare, so it computes the count the way Envoy does, from its own container's CPUs, affinity and cgroup limit (#1442; until then it assumed one worker per online CPU, so a proxy with a CPU limit or a restricted mask took the drain + fresh start on **every** roll). A rollout that changes `proxy.resources.limits.cpu` across a whole-CPU boundary while `proxy.concurrency` is `0` therefore changes the worker count, and is a drain + fresh start like any other count change. Set an explicit count whenever you set a CPU limit. Envoy reads only its container's own cgroup: a CPU limit on the pod as a whole, with none on the proxy container, leaves one worker per core on a throttled pod (#1455; [`runbook.md`](./runbook.md) § *Sizing nodes for a proxy hot restart* has the measurement). `proxy.hotRestart.hotRestartOnConcurrencyChange` forces the old hot restart. A negative or non-integer value fails the render. **Do not change it on a live mesh until both prerequisites are deployed**: the #1126 successor crash is fixed by the carried Envoy patch `envoy-aether1126-forwarded-udp-worker-index.patch` in proxy images built from it or later, and the #1127 supervisor fix is the other prerequisite; see [`runbook.md`](./runbook.md) § *Sizing nodes for a proxy hot restart*. |
 | `proxy.terminationGracePeriodSeconds` | `180` | The proxy pod's `terminationGracePeriodSeconds`, also passed to the supervisor as `--termination-grace`. The deleted pod keeps its Envoy alive as the successor's hot-restart parent, so it is deliberately generous. Where no successor can appear (node shutdown, `kubectl delete daemonset`, a replacement stuck Pending) the supervisor drains Envoy itself at `terminationGrace − (hotRestart.drainTime + 15s)` instead of being SIGKILLed (#771); keep it well above `drainTime + 15s`. |
 | `proxy.overload.enabled` | `true` | Envoy overload-manager graceful-degradation ladder. |
 | `proxy.overload.maxHeapSizeBytes` | `402653184` (384Mi) | Keep at ~75% of `resources.limits.memory`. |
@@ -135,7 +207,7 @@ configuration, not an aether chart value; see [`runbook.md`](./runbook.md)
 |---|---|---|
 | `proxy.authzSidecar.enabled` | `false` | Add a node-local authz gRPC sidecar (UDS) + a DISABLED ext_authz filter entry; zero effect until an `HTTPFilter` (extAuthz) opts a route/service in. |
 | `proxy.authzSidecar.opa.enabled` | `false` | Built-in OPA preset (opt-in). |
-| `proxy.authzSidecar.opa.image` | `openpolicyagent/opa:1.21.1-envoy-static` | OPA image. |
+| `proxy.authzSidecar.opa.image` | `openpolicyagent/opa:1.21.1-envoy-static@sha256:b4a8bbe8…344b` (the multi-arch index of that tag) | OPA image. Pinned by digest since chart 2.4.22 (#1401); it was the tag alone. The upgrade that crosses 2.4.22 rolls the proxy DaemonSet once where the preset is on and this value is the default ([`runbook.md`](./runbook.md), "Chart 2.4.22"). A reference you set (a mirror) is used as written. Moving the pin: `runbook.md`, "Refreshing third-party image pins". |
 | `proxy.authzSidecar.opa.policy` | `""` | Rego policy (ConfigMap-mounted); required when `opa.enabled`. The sidecar **watches** it (`opa run --watch`, chart 2.4.19, #1383): a changed policy is loaded by each node's sidecar when that node's kubelet delivers the ConfigMap update (27–64 s observed on one node; not a bound), with **no pod restart and no staging**. The chart does not validate it: **check it before you change it**. See *Changing the OPA policy* below. |
 | `proxy.authzSidecar.image.{repository,tag,args}` | `""` / `[]` | Bring-your-own authz container (serves `envoy.service.auth.v3.Authorization` on `unix:///run/aether/authz/authz.sock`). |
 | `proxy.authzSidecar.timeout` | `200ms` | Per-check gRPC timeout. |
@@ -345,10 +417,10 @@ sidecar), makes no API calls (no RBAC, no token) and does not involve SPIRE.
 | `controller.affinity` | `{}` | The controller pod's affinity; empty = none. Until chart 2.4.20 empty meant preferred pod anti-affinity away from the registrars' node; that default is gone because it cancelled the registrar's own spread (#1434; `docs/runbook.md`, "Chart 2.4.20"). Independent of `controller.nodeSpread`. |
 | `controller.injectPodNdots` | `true` | Pod-mutating webhook injects `dnsConfig` ndots into managed pods so mesh FQDNs resolve absolute-first (musl/Alpine safety). Pairs with mesh DNS. |
 | `controller.namespaceInjection` | `true` | Namespace auto-injection: a pod in a namespace labeled `aether.io/managed=true` is given the pod label automatically (opt out with `aether.io/managed=false`). |
-| `controller.webhook.spire` | `false` | Webhook serving cert source — decoupled from mesh SPIRE. `false` = Helm self-signed CA and certificate (works out of the box), generated once, valid ten years, and reused by every upgrade (the chart looks the Secret up in the cluster). `true` = serve with the controller's SPIRE SVID + inject the trust bundle; no Secret is rendered, and the controller's ClusterRole gains `update` on its webhook configurations: the validating one always, the pod-mutating one whenever it renders (`namespaceInjection` or `injectPodNdots`; `docs/runbook.md`, "The pod-mutating webhook's caBundle is empty"). With `false`, `helm template` has no cluster to look in and generates a new pair on every render: see `docs/runbook.md`, "Rendering the chart reproducibly". |
+| `controller.webhook.spire` | `false` | Webhook serving cert source — decoupled from mesh SPIRE. `false` = Helm self-signed CA and certificate (works out of the box), generated once, valid ten years, and reused by every upgrade (the chart looks the Secret up in the cluster). `true` = serve with the controller's SPIRE SVID + inject the trust bundle; no Secret is rendered, and the controller's ClusterRole gains `get` and `update` (nothing else since chart 2.4.27, #1456: `list`, `watch` and `patch` were dropped; a controller image older than chart 2.4.19's needs `list` and `watch` and hangs without them, #1431) on its webhook configurations: the validating one always, the pod-mutating one whenever it renders (`namespaceInjection` or `injectPodNdots`; `docs/runbook.md`, "The pod-mutating webhook's caBundle is empty"). With `false`, `helm template` has no cluster to look in and generates a new pair on every render: see `docs/runbook.md`, "Rendering the chart reproducibly". |
 | `controller.webhook.certRotation` | `""` (never rotate) | Only with `spire=false` (#1364, chart 2.4.16). Set it to any new value (a date works) to generate a new CA and serving certificate on the next upgrade. The value is stamped on the Secret (`aether.io/webhook-cert-rotation`), so later upgrades with the same value reuse the new pair; clearing it rotates nothing and leaves the stamp, so restoring the same value later does not rotate again. After the rotating upgrade the webhooks' `caBundle` holds the new CA and the old one; the controller loads the new certificate from its mounted Secret without a restart, and the next upgrade renders the new CA alone. Not gap-free: the Secret is patched before the webhook configurations, so an upgrade that fails in between leaves the webhooks failing open until it completes (runbook, "Rendering the chart reproducibly"). |
-| `controller.webhook.clusterSpiffeID.create` | `true` | When `spire=true`, create the controller's `ClusterSPIFFEID` with the webhook Service DNS SANs. |
-| `controller.webhook.clusterSpiffeID.className` | `""` | spire-controller-manager class name; REQUIRED when `create=true`. |
+| `controller.webhook.clusterSpiffeID.create` | `true` | When `spire=true`, create the controller's `ClusterSPIFFEID` with the webhook Service DNS SANs (it is rendered only when `className` is set). `false` says "I register the controller's identity myself" (a `ClusterSPIFFEID` or a registration entry of your own that gives its SVID the webhook Service's DNS names): nothing is rendered and nothing is checked. |
+| `controller.webhook.clusterSpiffeID.className` | `""` | spire-controller-manager class name; REQUIRED when `spire=true` and `create=true`. Left empty in that case, the chart renders no `ClusterSPIFFEID`; unless something else registers the identity, the apiserver's TLS hostname check of the webhook then fails and the webhooks fail open (`failurePolicy: Ignore`) with no error (#1457; read from the templates, the runtime effect was not reproduced). Since chart 2.4.27 that combination **fails the render** on a cluster that serves the `spire.spiffe.io/v1alpha1` `ClusterSPIFFEID` API, naming the two ways out: set this value, or `create=false`. Where the API is not served, and in a render that is not told what the cluster serves (`helm template` without `--api-versions`), it still renders, and the install notes carry a warning. |
 | `controller.webhook.identityGate.enabled` | `true` | Egress identity gate (#1053): the pod-mutating webhook injects the `aether-identity-ready` init container (first in line) into every mesh pod it admits; it holds the app containers until SPIRE has issued the pod's X.509 SVID, so no request leaves before the pod has a client certificate (otherwise `503 UF` for the first seconds). Asks the Workload API over a `csi.spiffe.io` volume mounted into the init container only. The controller is passed `--identity-gate=false`, and none of the gate's other flags, with `spire.enabled=false` and when the `/mutate` webhook it rides does not render (`namespaceInjection` and `injectPodNdots` both off, #1432). Opt a pod out with `aether.io/identity-gate: "false"`. |
 | `controller.webhook.identityGate.image.*` | empty = `agent.image` | Image running `/identity-ready` (an extra layer of the agent image, already on every node). Because it is passed to the controller as `--identity-gate-image`, a new agent image digest also rolls the controller Deployment (#1428; `docs/runbook.md`, "Which workloads a chart upgrade rolls"). |
 | `controller.webhook.identityGate.pullPolicy` | `IfNotPresent` | The agent image is digest-pinned and already pulled by the agent DaemonSet. |
@@ -365,7 +437,7 @@ over mTLS and routes external traffic via the Gateway API. Disabled by default.
 |---|---|---|
 | `edge.enabled` | `false` | Deploy the edge. |
 | `edge.namespace` | `aether-ingress` | The edge runs in its own namespace, isolated from the control plane. |
-| `edge.namespaceCreate` | `true` | Let the chart create it (baseline PSA). |
+| `edge.namespaceCreate` | `true` | Let the chart create it (baseline PSA). Since chart 2.4.25 a namespace the chart creates carries `aether.io/edge-meshconfig-in-manifest: "true"` (with `meshConfig.createDefault` on), as does the MeshConfig in it, and the edge's MeshConfig is then rendered on every revision instead of seeded once, so `helm rollback` works to the revision that created the namespace (#1514). The chart sets no field of its spec, so your edits are kept. A namespace an older chart created is left unmarked. See [`runbook.md`](./runbook.md), "Chart 2.4.25". |
 | `edge.replicaCount` | `2` | Gateway replicas (standard RollingUpdate + readiness gate; no hot-restart supervisor). |
 | `edge.nodeSpread` | `soft` | How the gateway replicas are spread across nodes; same values and meaning as `registrar.nodeSpread`. With the surge-free default rollout (`edge.rollingUpdate`) the first new replica is placed without regard to the old one still running, so both live replicas can share a node for the length of the roll. |
 | `edge.topologySpreadConstraints` | `[]` | Non-empty **replaces** the constraint `edge.nodeSpread` renders (not merged with it). Empty = that constraint. |
@@ -893,7 +965,10 @@ builder reads it from the environment, so the series de-collapse per node once
 the collector promotes it to `node` (#210). The prober deliberately sets **no**
 `host.name`. On a pod without hostNetwork that is the pod name, and a collector that
 promotes `host.name` ahead of `k8s.node.name` would export `node="prober-xxxxx"`, which
-is what happened until #1041.
+is what happened until #1041. The registrar, the controller and the edge control
+plane are on the pod network too and leave `host.name` out for the same reason
+(#1596); the hostNetwork components (agent, mesh-dns, proxy supervisor) keep it. See
+[`observability/metric-labels.md`](./observability/metric-labels.md).
 
 **Failure log.** Every non-success probe prints one bounded
 `AETHER_PROBE_FAIL {t, tier, target, result, err, elapsed_ms, phase, reused, conn_ms, dns_ms, connect_ms, tls_ms, write_ms, ttfb_ms, dial, remote, local, trace_id, pod, node, n, truncated}`
@@ -952,7 +1027,7 @@ No output means no container carries an empty quantity.
 
 | Key | Default | Notes |
 |---|---|---|
-| `authzCanary.image` | `curlimages/curl@sha256:58adaa4e…6777` (the multi-arch index of `curlimages/curl:8.22.0`) | The client: needs `/bin/sh`, `curl` and `date`. Pinned by digest since chart 1.0.5 (#1374); it was the tag. Nothing refreshes the pin automatically: see [`runbook.md`](./runbook.md), "The prober chart". The container has no liveness probe on purpose: a canary that stops shows up as the `ext_authz` counters no longer increasing. |
+| `authzCanary.image` | `curlimages/curl@sha256:58adaa4e…6777` (the multi-arch index of `curlimages/curl:8.22.0`) | The client: needs `/bin/sh`, `curl` and `date`. Pinned by digest since chart 1.0.5 (#1374); it was the tag. Nothing moves the pin by itself; `scripts/third-party-images.sh outdated` says when the registry has moved past it: see [`runbook.md`](./runbook.md), "Refreshing third-party image pins". The container has no liveness probe on purpose: a canary that stops shows up as the `ext_authz` counters no longer increasing. |
 | `authzCanary.echo.image` | `gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb739672…37c3` | The target. |
 
 **Labels** (chart 1.0.5). The prober pods carry the DaemonSet's selector labels

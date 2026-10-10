@@ -20,10 +20,15 @@
 //     against, and the proxy ACKs it.
 //  3. A proxy never states a version it rejected. A NACKed response leaves its
 //     stated versions where they were, for every resource of that response.
+//
+// And they hold the agent's reading to the proxy's own account: what the ACK
+// tracker tells its observer, applied the way the agent's cache applies it
+// (heldClusters), must be the clusters the proxy states it holds.
 package mtlspool
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -74,9 +79,11 @@ type cdsControlPlane struct {
 
 	mu     sync.Mutex
 	events []cdsEvent
-	// acked is what the agent's ACK tracker told its observer for the Cluster
-	// type: the versions of the snapshots it reads as acknowledged.
-	acked []string
+	// answered counts what the agent's ACK tracker told its observer for the
+	// Cluster type, and held is the proxy's clusters as those tellings add up:
+	// name -> the version the proxy accepted. Nil until the first.
+	answered int
+	held     map[string]string
 }
 
 // startCDSControlPlane serves clusters as snapshot `version` on socketPath.
@@ -89,13 +96,14 @@ func startCDSControlPlane(t *testing.T, socketPath, version string, clusters ...
 	require.NoError(t, cache.SetSnapshot(context.Background(), envoyNodeID, snapshot))
 
 	tracker := ack.NewTracker(slog.New(slog.DiscardHandler))
-	tracker.SetAckObserver(func(_ context.Context, typeURL, systemVersion string) {
-		if typeURL != resourcev3.ClusterType {
+	tracker.SetAckObserver(func(_ context.Context, accepted ack.Accepted) {
+		if accepted.TypeURL != resourcev3.ClusterType {
 			return
 		}
 		cp.mu.Lock()
 		defer cp.mu.Unlock()
-		cp.acked = append(cp.acked, systemVersion)
+		cp.answered++
+		cp.held = heldClusters(cp.held, accepted)
 	})
 	tracked := tracker.Callbacks()
 
@@ -154,11 +162,34 @@ func (cp *cdsControlPlane) record(ev cdsEvent) {
 	cp.events = append(cp.events, ev)
 }
 
-// ackedVersions is the snapshot versions the ACK tracker has reported so far.
-func (cp *cdsControlPlane) ackedVersions() []string {
+// heldClusters applies one telling of the ACK tracker to what the proxy was
+// known to hold, as the agent's cache does (ackedPins.accept): the opening
+// exchange of a stream replaces the set with the proxy's own statement, an
+// acknowledged response then adds what it carried and drops what it removed,
+// and nothing else is concluded.
+func heldClusters(held map[string]string, accepted ack.Accepted) map[string]string {
+	if accepted.Opening {
+		held = maps.Clone(accepted.Stated)
+	}
+	if held == nil {
+		held = map[string]string{}
+	}
+	for _, r := range accepted.Added {
+		held[r.Name] = r.Version
+	}
+	for _, name := range accepted.Removed {
+		delete(held, name)
+	}
+	return held
+}
+
+// heldByTheAgentsReading is the clusters the proxy holds according to what the
+// ACK tracker has told so far, and how many tellings that is. Nil before the
+// first.
+func (cp *cdsControlPlane) heldByTheAgentsReading() (map[string]string, int) {
 	cp.mu.Lock()
 	defer cp.mu.Unlock()
-	return append([]string(nil), cp.acked...)
+	return maps.Clone(cp.held), cp.answered
 }
 
 // await returns the first recorded event that match accepts, waiting for it.
@@ -303,7 +334,8 @@ func TestReconnectingProxyStatesTheClustersItHolds(t *testing.T) {
 	sent := before.firstResponse(t)
 	assert.ElementsMatch(t, []string{"held-a", "held-b"}, resourceNames(sent.resp))
 	require.Nil(t, before.answerTo(t, sent).GetErrorDetail(), "fixture: the proxy accepts both clusters")
-	require.Equal(t, []string{"before-restart"}, before.ackedVersions())
+	held, _ := before.heldByTheAgentsReading()
+	require.Equal(t, before.versions, held, "a new proxy that acknowledged both clusters holds both")
 
 	after := before.restart(t, "after-restart", clusters()...)
 
@@ -327,10 +359,11 @@ func TestReconnectingProxyStatesTheClustersItHolds(t *testing.T) {
 	assert.Equal(t, "after-restart", answer.resp.GetSystemVersionInfo())
 	require.Nil(t, after.answerTo(t, answer).GetErrorDetail(), "the proxy ACKs the empty first response")
 
-	// The agent's reading: the proxy acknowledged the snapshot that response
-	// names, which is the snapshot whose clusters it stated it holds.
-	assert.Equal(t, []string{"after-restart"}, after.ackedVersions(),
-		"the acknowledged empty first Cluster response of a stream must reach the ACK observer (#1483)")
+	// The agent's reading: the proxy holds the clusters it stated, which are
+	// the snapshot's.
+	held, tellings := after.heldByTheAgentsReading()
+	require.Equal(t, 1, tellings, "the acknowledged empty first Cluster response of a stream must reach the ACK observer (#1483)")
+	assert.Equal(t, after.versions, held)
 }
 
 // TestReconnectingProxyStatesNoClusterItRejected is the same restart after the
@@ -362,7 +395,8 @@ func TestReconnectingProxyStatesNoClusterItRejected(t *testing.T) {
 	nack := before.answerTo(t, rejected)
 	require.NotNil(t, nack.GetErrorDetail(), "fixture: the proxy must reject the update")
 	t.Logf("the proxy's NACK: %s", nack.GetErrorDetail().GetMessage())
-	require.Equal(t, []string{"accepted"}, before.ackedVersions(), "a NACK acknowledges nothing")
+	held, _ := before.heldByTheAgentsReading()
+	require.Equal(t, acceptedVersions, held, "a NACK acknowledges nothing")
 
 	// What the proxy holds is not what it will state: it applied the valid
 	// cluster of the response it rejected.
@@ -384,7 +418,37 @@ func TestReconnectingProxyStatesNoClusterItRejected(t *testing.T) {
 	again := after.firstResponse(t)
 	assert.ElementsMatch(t, []string{"held-a", "refused"}, resourceNames(again.resp))
 	require.NotNil(t, after.answerTo(t, again).GetErrorDetail(), "the proxy rejects the update again")
-	assert.Empty(t, after.ackedVersions(), "nothing is acknowledged on a stream whose only cluster response was rejected")
+	// The agent's reading of a rejected opening exchange is the statement and
+	// nothing the response carried.
+	held, tellings := after.heldByTheAgentsReading()
+	require.Equal(t, 1, tellings)
+	assert.Equal(t, acceptedVersions, held, "nothing of a rejected response is read as held")
+}
+
+// activeClusterVersions is the version of every active xDS-delivered cluster
+// in the proxy's admin config dump. A cluster's version_info there is the
+// per-resource version of the response that last CHANGED the running cluster,
+// which is not always one the proxy accepted (see the test above).
+func activeClusterVersions(t *testing.T, e *envoyProc) map[string]string {
+	t.Helper()
+	var dump struct {
+		Configs []struct {
+			VersionInfo string `json:"version_info"`
+			Cluster     struct {
+				Name string `json:"name"`
+			} `json:"cluster"`
+		} `json:"configs"`
+	}
+	body := dynamicActiveClusters(t, e)
+	if body == "" {
+		return nil // the endpoint was not readable: the caller's wait asks again
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &dump), "admin config dump: %s", body)
+	versions := map[string]string{}
+	for _, c := range dump.Configs {
+		versions[c.Cluster.Name] = c.VersionInfo
+	}
+	return versions
 }
 
 // dynamicActiveClusters is the proxy's active xDS-delivered clusters as its

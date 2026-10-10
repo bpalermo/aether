@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"aethermesh.dev/common/telemetry/serviceresource"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
@@ -14,7 +15,6 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.30.0"
 )
 
 const (
@@ -94,19 +94,10 @@ func SetupTelemetry(ctx context.Context, otlpEndpoint, serviceVersion string) (*
 
 // newTelemetryResource builds the Resource shared by metrics and logs, so both signals
 // carry the same service.name/version and the pod's OTEL_RESOURCE_ATTRIBUTES
-// (k8s.node.name / k8s.pod.name / k8s.namespace.name) via WithFromEnv.
+// (k8s.node.name / k8s.pod.name / k8s.namespace.name). The daemon is hostNetwork, so
+// the host.name the shared builder adds is the node's.
 func newTelemetryResource(ctx context.Context, serviceVersion string) (*resource.Resource, error) {
-	res, err := resource.New(
-		ctx,
-		resource.WithAttributes(
-			semconv.ServiceName(telemetryServiceName),
-			semconv.ServiceVersion(serviceVersion),
-		),
-		resource.WithFromEnv(),
-		resource.WithTelemetrySDK(),
-		resource.WithProcess(),
-		resource.WithHost(),
-	)
+	res, err := serviceresource.New(ctx, telemetryServiceName, serviceVersion)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}

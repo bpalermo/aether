@@ -109,6 +109,7 @@ var rootCmd = &cobra.Command{
 			return err
 		}
 		applyMeshConfig(mc)
+		applyEdgeTelemetry(cmd, &cfg.Config)
 
 		l, logShutdown = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
 		return nil
@@ -300,9 +301,11 @@ func runAgent(ctx context.Context) (retErr error) {
 	reconcileSpireIdentity(ctx, spireSource, identityTrustDomain, snapshotCache, localStorage)
 
 	ackTracker := ack.NewTracker(l)
-	// A cluster update the proxy acknowledges becomes "the SAN-pin state the
-	// proxy accepted" (aether.agent.xds.acked_tls_clusters, #1425).
-	ackTracker.SetAckObserver(snapshotCache.ResponseAcked)
+	// What the proxy answers about clusters becomes "the SAN-pin state of the
+	// clusters the proxy accepted", cluster by cluster
+	// (aether.agent.xds.acked_tls_clusters, #1425, #1508).
+	ackTracker.SetAckObserver(snapshotCache.ResponseAccepted)
+	ackTracker.SetDeliveryObserver(snapshotCache.ResponseDelivery)
 
 	spireBridge, err := wireSpireBridge(ctx, m, snapshotCache, spireSource)
 	if err != nil {

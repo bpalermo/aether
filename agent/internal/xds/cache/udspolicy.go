@@ -63,7 +63,7 @@ func (c *SnapshotCache) regenerateAllAppDeliveryClusters() {
 	c.listenerMu.Unlock()
 	// Push immediately: delivery clusters ride the listener snapshot, and nothing
 	// in the node dependency set changed, so there is no refresher signal to wait on.
-	if err := c.generateListenerSnapshot(ctx); err != nil {
+	if err := c.generateListenerSnapshot(ctx); !snapshotInstalled(err) {
 		c.log.Error("failed to regenerate snapshot after uds policy change", "error", err)
 	}
 }

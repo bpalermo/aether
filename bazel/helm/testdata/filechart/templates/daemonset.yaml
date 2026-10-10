@@ -1,0 +1,31 @@
+{{- $stamp := .Files.Get "files/stamp" | trim -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}-filechart
+  {{- if $stamp }}
+  annotations:
+    example.io/stamp: {{ $stamp | quote }}
+    {{- if .Values.twice }}
+    example.io/stamp-again: {{ $stamp | quote }}
+    {{- end }}
+  {{- else if .Values.fallback }}
+  annotations:
+    example.io/no-stamp: "true"
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app: filechart
+  template:
+    metadata:
+      labels:
+        app: filechart
+      {{- if and .Values.leak $stamp }}
+      annotations:
+        example.io/stamp: {{ $stamp | quote }}
+      {{- end }}
+    spec:
+      containers:
+        - name: app
+          image: example.invalid/app:1

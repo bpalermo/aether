@@ -2,21 +2,47 @@
 {{- /*
   The edge's own namespace-scoped MeshConfig. An empty spec inherits the
   control-plane (release namespace) MeshConfig field-by-field via the controller's
-  fallback, so the edge's projected ConfigMap mirrors the mesh by default. Seeded
-  ONCE (lookup) + resource-policy: keep, like the control-plane CR — operators edit
-  it via kubectl to give the edge its own observability policy. See
+  fallback, so the edge's projected ConfigMap mirrors the mesh by default.
+  Operators edit it via kubectl to give the edge its own observability policy,
+  and the chart never sets a field of its spec. See
   docs/proposals/015_mesh-config.md.
+
+  Two forms (aether.edge.meshConfigInManifest says which, and why):
+    - in a namespace this chart created (2.4.25 and later): an ordinary object
+      of the release, rendered on EVERY revision with the same empty spec, so
+      that `helm rollback` always finds it in both manifests (#1514). There is
+      no lookup of the MeshConfig here on purpose: an object that is in the
+      previous manifest and not in the new one is what Helm 3 cannot roll back
+      over.
+    - anywhere else: seeded ONCE (lookup), as a hook that deletes nothing
+      (#1471), like the control-plane CR.
 */ -}}
-{{- $existing := lookup "config.aether.io/v1" "MeshConfig" (include "aether.edge.namespace" .) "default" -}}
-{{- if not $existing }}
+{{- $ns := include "aether.edge.namespace" . -}}
+{{- if eq (include "aether.edge.meshConfigInManifest" .) "true" }}
 apiVersion: config.aether.io/v1
 kind: MeshConfig
 metadata:
   name: default
-  namespace: {{ include "aether.edge.namespace" . }}
+  namespace: {{ $ns }}
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
   annotations:
+    {{- /* The same marker as on the Namespace; the one chart 2.4.24 cannot
+           take off (aether.edge.meshConfigInManifest). */}}
+    aether.io/edge-meshconfig-in-manifest: "true"
+    helm.sh/resource-policy: keep
+spec: {}
+{{- else if not (lookup "config.aether.io/v1" "MeshConfig" $ns "default") }}
+apiVersion: config.aether.io/v1
+kind: MeshConfig
+metadata:
+  name: default
+  namespace: {{ $ns }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: never
     helm.sh/resource-policy: keep
 spec: {}
 {{- end }}

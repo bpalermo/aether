@@ -45,7 +45,9 @@ TEST_NS="aether-test"
 TRUST_DOMAIN="aether.internal"
 MESH_DOMAIN="aether.internal"
 TUNNEL_PORT="18009"
-GWAPI_VERSION="v1.6.2"
+# The pinned Gateway API release (#1583): one for every e2e surface.
+# shellcheck source=e2e/gateway-api-version.sh
+. "$REPO_ROOT/e2e/gateway-api-version.sh"
 # SPIRE >= 1.15.2 is REQUIRED since proposal 036: the agent brokers per-pod
 # SVIDs over the SPIFFE Broker Endpoint, which 0.28.4 (SPIRE 1.14.5) does not
 # serve at all. The crds chart version moves with it — 0.30.2 ships CRD schemas
@@ -340,7 +342,7 @@ spec:
       serviceAccountName: echo
       containers:
         - name: echo
-          image: hashicorp/http-echo:1.0
+          image: hashicorp/http-echo:1.0@sha256:fcb75f691c8b0414d670ae570240cbf95502cc18a9ba57e982ecac589760a186
           args: ["-text=hello-from-cluster-b", "-listen=:8080"]
           ports: [{containerPort: 8080}]
 YAML
@@ -364,7 +366,7 @@ spec:
       serviceAccountName: client
       containers:
         - name: curl
-          image: curlimages/curl:8.22.0
+          image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
           command: ["sleep", "infinity"]
 YAML
 	kubectl --context "kind-$CLUSTER_B" -n "$TEST_NS" rollout status deploy/echo --timeout=120s >/dev/null || true

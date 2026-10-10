@@ -42,11 +42,7 @@ func SetupManagerLogging(ctx context.Context, cfg Config, name, version string) 
 	setupCtx, cancel := setup.DetachedTimeout(ctx, setup.SetupTimeout)
 	defer cancel()
 
-	provider, shutdown, err := setup.SetupLogs(setupCtx, setup.Config{
-		ServiceName:    name,
-		ServiceVersion: version,
-		OTLPEndpoint:   cfg.OTLPEndpoint,
-	})
+	provider, shutdown, err := setup.SetupLogs(setupCtx, cfg.Telemetry(name, version))
 	if err != nil {
 		l := SetupLogging(cfg.Debug, name)
 		l.WarnContext(ctx, "failed to set up OTel log export; logging to stderr only", "error", err)

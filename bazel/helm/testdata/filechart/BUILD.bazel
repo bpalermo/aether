@@ -1,0 +1,109 @@
+# A throwaway chart for //bazel/helm:pod_template_file_test: a DaemonSet that
+# says what a packaged file holds, on its own metadata, and three values that
+# each make it say so wrongly. Never published.
+load("@rules_helm//helm:defs.bzl", "helm_chart")
+load("//bazel/helm:defs.bzl", "helm_pod_template_file_runner", "helm_pod_template_file_test")
+
+RUN_BY = ["//bazel/helm:__pkg__"]
+
+helm_chart(
+    name = "filechart",
+    chart = "Chart.yaml",
+    files = [
+        "files/stamp",
+        "files/unread",
+    ],
+    values = "values.yaml",
+)
+
+# What the rule is for, and the control for the runners below: the same chart,
+# the same file, and the test passes.
+helm_pod_template_file_test(
+    name = "file_test",
+    changed_lines = 1,
+    chart = ":filechart",
+    file = "files/stamp",
+    other_content = "424242",
+    workloads = 1,
+)
+
+# The rest fail by design, so they are runners and not tests:
+# //bazel/helm:pod_template_file_test runs each one and reads what it says.
+
+# The pod template carries the file's content too.
+helm_pod_template_file_runner(
+    name = "failing_pod_template",
+    changed_lines = 2,
+    chart = ":filechart",
+    file = "files/stamp",
+    opts = [
+        "--set",
+        "leak=true",
+    ],
+    other_content = "424242",
+    visibility = RUN_BY,
+    workloads = 1,
+)
+
+# One more rendered line follows the file than the test was told of.
+helm_pod_template_file_runner(
+    name = "failing_changed_lines",
+    changed_lines = 1,
+    chart = ":filechart",
+    file = "files/stamp",
+    opts = [
+        "--set",
+        "twice=true",
+    ],
+    other_content = "424242",
+    visibility = RUN_BY,
+    workloads = 1,
+)
+
+# Without the file the chart renders something the packaged one does not.
+helm_pod_template_file_runner(
+    name = "failing_not_optional",
+    changed_lines = 1,
+    chart = ":filechart",
+    file = "files/stamp",
+    opts = [
+        "--set",
+        "fallback=true",
+    ],
+    other_content = "424242",
+    visibility = RUN_BY,
+    workloads = 1,
+)
+
+# A file no template reads: there is nothing to compare.
+helm_pod_template_file_runner(
+    name = "failing_unread_file",
+    changed_lines = 1,
+    chart = ":filechart",
+    file = "files/unread",
+    other_content = "424242",
+    visibility = RUN_BY,
+    workloads = 1,
+)
+
+# A file the package does not hold.
+helm_pod_template_file_runner(
+    name = "failing_missing_file",
+    changed_lines = 1,
+    chart = ":filechart",
+    file = "files/absent",
+    other_content = "424242",
+    visibility = RUN_BY,
+    workloads = 1,
+)
+
+# The render has another number of workloads than the test says.
+helm_pod_template_file_runner(
+    name = "failing_workloads",
+    changed_lines = 1,
+    chart = ":filechart",
+    file = "files/stamp",
+    other_content = "424242",
+    visibility = RUN_BY,
+    workloads = 2,
+)

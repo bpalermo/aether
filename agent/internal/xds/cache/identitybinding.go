@@ -4,8 +4,6 @@ import (
 	"context"
 	"sort"
 	"strings"
-
-	"aethermesh.dev/agent/internal/xds/proxy"
 )
 
 // The outbound identity-binding discriminator (issue #638).
@@ -62,6 +60,12 @@ import (
 // delivers, but only when it CHANGED, and cross-checks the presented identity
 // against the pod that actually owns the netns (proxy.SpiffeIDFromPod over the
 // listener entry's own CNIPod — the API-server-derived truth, #669).
+//
+// What a line is made from (#1621): the index and the owning pods as the
+// snapshot build read them (bindingView, which says what the join to the
+// snapshot's listeners leaves out), and the mTLS-injected clusters the build
+// published from its own read of the cluster map, by resource name. Nothing
+// here reads the cache's maps.
 
 // maxBindingChangeLines bounds how many per-binding INFO lines one snapshot may
 // emit. A node's first snapshot legitimately binds every source pod to every
@@ -81,7 +85,7 @@ type sourceBinding struct {
 	// podIdentity is the SPIFFE ID derived from that pod's OWN namespace and
 	// ServiceAccount — the identity it is entitled to present. "" when unknown.
 	podIdentity string
-	// presented is c.localWorkloads[netns]: the SPIFFE ID this netns's listener
+	// presented is the index's identity for the netns: the SPIFFE ID its listener
 	// chain stamps into filter state, and therefore — the certificate mapper
 	// returns it verbatim — the SDS client-certificate secret every outbound
 	// connection from this pod fetches. Should equal podIdentity.
@@ -110,9 +114,16 @@ type bindingState struct {
 // previous snapshot (or are seen for the first time), and WARNs about any
 // source bound to a foreign identity. Called from generateSnapshot with
 // snapshotMu held, which also serializes the stored state.
-func (c *SnapshotCache) logIdentityBindings(ctx context.Context, version string) {
-	sources := c.collectSourceBindings()
-	clusters := c.mtlsClusterNames()
+//
+// sources is bindingView.sourceBindings for the snapshot's listeners, and
+// mtlsClusters the names of the mTLS-injected cluster resources the build put
+// in the snapshot from its read of the cluster map (pinReport.mtls). It is not
+// kept: the caller reuses the slice.
+func (c *SnapshotCache) logIdentityBindings(ctx context.Context, version string, sources map[string]sourceBinding, mtlsClusters []string) {
+	clusters := make(map[string]struct{}, len(mtlsClusters))
+	for _, name := range mtlsClusters {
+		clusters[name] = struct{}{}
+	}
 
 	c.bindingMu.Lock()
 	prev := c.lastBindings
@@ -126,62 +137,6 @@ func (c *SnapshotCache) logIdentityBindings(ctx context.Context, version string)
 
 	c.reportBindingMismatches(ctx, version, sources, changedSources, len(clusters))
 	c.emitBindingChanges(ctx, version, sources, clusters, changedSources, newClusters)
-}
-
-// collectSourceBindings reads the netns → identity index and joins it with the
-// pod that owns each netns. Returns nil while the node SVID is unserved: no
-// upstream mTLS is injected then, so no cluster binds a client certificate.
-//
-// The two maps are read under their own locks, sequentially and never nested,
-// so this adds no lock-ordering constraint. A binding read across that gap is
-// exactly what the data plane would have been handed had the snapshot been cut
-// mid-write, which is the state this discriminator exists to catch.
-func (c *SnapshotCache) collectSourceBindings() map[string]sourceBinding {
-	c.localMu.RLock()
-	if c.nodeSpiffeID == "" {
-		c.localMu.RUnlock()
-		return nil
-	}
-	trustDomain := c.currentTrustDomain()
-	sources := make(map[string]sourceBinding, len(c.localWorkloads))
-	for netns, id := range c.localWorkloads {
-		sources[netns] = sourceBinding{presented: id}
-	}
-	c.localMu.RUnlock()
-
-	if len(sources) == 0 {
-		return nil
-	}
-
-	c.listenerMu.RLock()
-	for netns, entry := range c.listeners {
-		b, ok := sources[netns]
-		if !ok || entry.cniPod == nil {
-			continue
-		}
-		b.pod = entry.cniPod.GetNamespace() + "/" + entry.cniPod.GetName()
-		b.podIdentity = proxy.SpiffeIDFromPod(entry.cniPod, trustDomain)
-		sources[netns] = b
-	}
-	c.listenerMu.RUnlock()
-
-	return sources
-}
-
-// mtlsClusterNames returns the outbound clusters that carry the per-source
-// transport-socket matcher (entry.mtlsCluster is the injected copy; a nil one
-// means the bare cluster is emitted and binds no client certificate).
-func (c *SnapshotCache) mtlsClusterNames() map[string]struct{} {
-	c.clusterMu.RLock()
-	defer c.clusterMu.RUnlock()
-
-	names := make(map[string]struct{}, len(c.clusters))
-	for name, entry := range c.clusters {
-		if entry.mtlsCluster != nil {
-			names[name] = struct{}{}
-		}
-	}
-	return names
 }
 
 // diffBindings returns the sources whose binding is new or changed and the

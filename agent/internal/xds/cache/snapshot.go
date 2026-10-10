@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -21,6 +22,11 @@ const snapshotVersionLabel = "snapshot"
 
 // tracerName identifies this instrumentation scope in trace backends.
 const tracerName = "aether/agent-xds-cache"
+
+// snapshotWatchUnansweredMsg is logged when SetSnapshot installed the snapshot
+// and then returned an error (generateSnapshot says when it can). The build
+// returns ErrWatchNotAnswered.
+const snapshotWatchUnansweredMsg = "snapshot installed, but an open watch was not answered from it"
 
 // generateSnapshot assembles a single, consistent xDS snapshot from every cached
 // resource type — listeners, clusters, endpoints, the outbound route config and
@@ -68,8 +74,15 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// cluster cache the registry fills asynchronously (#873).
 	c.reconcileUDPCaptureListeners()
 
+	// Who owns each per-pod listener, and the netns → identity index, for the
+	// identity-binding lines this build logs once the snapshot is set (#1621).
+	// Read here, next to the listener set they are joined to, and not when the
+	// lines are written: bindingView says what the gap between the two reads
+	// leaves out.
+	bindings := c.takeBindingView()
 	listeners := c.Listeners()
-	clusters, endpoints, vhosts, pins := c.clustersEndpointsVhostsAndPins()
+	clusters, endpoints, vhosts, pins := c.clustersEndpointsVhostsAndPinsInto(c.entryClasses, c.mtlsEntries)
+	c.entryClasses, c.mtlsEntries = pins.classes, pins.mtls
 
 	// Per-pod application clusters live alongside listeners (not in the
 	// registry-driven cluster map) so registry reloads never drop them. STATIC
@@ -242,40 +255,145 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to version snapshot resources: %w", err)
 	}
 
-	// The pin state of this snapshot (taken in the read of the cluster map
-	// that collected its clusters, above), remembered under its version BEFORE
-	// SetSnapshot: SetSnapshot is what lets the proxy see the snapshot, and its
-	// acknowledgement is looked up by this version (ClusterPinsAcked, #1425).
-	// Remembered after, an ACK could arrive first and find nothing.
-	c.pins.remember(v, pins.counts)
+	// The pin class of every cluster entry of this snapshot (taken in the read
+	// of the cluster map that collected its clusters, above), recorded under
+	// the version its cluster is published at BEFORE SetSnapshot: SetSnapshot
+	// is what lets the proxy see the snapshot, and the proxy's acknowledgement
+	// of a cluster is looked up by that version (ClustersAccepted, #1425,
+	// #1508). Recorded after, an ACK could arrive first and find nothing.
+	//
+	// A build moves the acknowledged gauge itself, without an ACK, in two
+	// cases: it counts the very bytes the proxy holds differently, or it
+	// publishes a version the proxy holds that had no class on record.
+	c.publishAckedPins(ctx, pins, snapshot.GetVersionMap(resourcev3.ClusterType), v)
 
 	// Everything SetSnapshot does runs under the cache mutex the ADS stream
 	// needs; time it so a regression of the above is visible.
+	//
+	// It is not given the caller's context (#1620). SetSnapshot stores the
+	// snapshot and then hands a response to every watch that was open, and for
+	// each one it selects between the watch's channel and the end of the
+	// context. With a context that has ALREADY ended both are ready, the choice
+	// between them is random, and the first watch that loses it ends the set:
+	// that watch and the ones after it are left open and unanswered, the proxy
+	// is not sent what the snapshot changed until the next build, and the
+	// caller is told the build failed. A caller's context
+	// ends for reasons of its own (a CNI ADD whose RPC was abandoned), and what
+	// the proxy is sent must not depend on them. So the watches are answered
+	// under a context that keeps the caller's values and not its cancellation,
+	// bounded by watchAnswerWait.
 	setStart := time.Now()
-	err = c.SetSnapshot(ctx, c.nodeName, snapshot)
+	setCtx, cancelSet := context.WithTimeout(context.WithoutCancel(ctx), c.watchAnswerWait())
+	setErr := c.SetSnapshot(setCtx, c.nodeName, snapshot)
+	// The responses SetSnapshot built keep setCtx (go-control-plane's
+	// Response.GetContext). The pinned server only passes it to the
+	// state-of-the-world response callback, and no callback the agent
+	// registers acts on that one.
+	cancelSet()
 	c.metrics.SnapshotSet(ctx, time.Since(setStart).Seconds())
-	if err != nil {
-		return fmt.Errorf("failed to set snapshot: %w", err)
+	// An error here is not "the snapshot was not set" (#1549). The pinned
+	// go-control-plane (v0.14.0, pkg/cache/v3/simple.go) stores the snapshot
+	// as the first thing SetSnapshot does and can return an error only after
+	// that, from answering the watches that were open: when the context ends
+	// before a watch's channel takes its response. (Its other error, building
+	// the version map, cannot happen for a snapshot whose map fillVersionMap
+	// already built.) So this snapshot is the one every later request is
+	// answered from, and the watches answered before the error were answered
+	// from it. What follows is the report every build makes after SetSnapshot,
+	// and it runs whatever SetSnapshot returned. Skipped, it was made up for
+	// by the next build, under the next build's version.
+	//
+	// Whether a channel can refuse a response for that long is #1619. With
+	// the pinned server's streams it cannot (defaultWatchAnswerTimeout says
+	// why, and snapshot_watch_test.go holds it), so the error is not expected
+	// from a proxy. It is logged here, under its own message, and returned as
+	// ErrWatchNotAnswered: a watch that was open and not answered stays open,
+	// and is answered by a later SetSnapshot unless its stream replaces or
+	// cancels it first.
+	if setErr != nil {
+		c.log.WarnContext(ctx, snapshotWatchUnansweredMsg, "snapshot_version", v, "waited", c.watchAnswerWait().String(), "error", setErr)
 	}
 
+	// The three reports below are of this snapshot: each is made from what
+	// the build read or built, none from the cache's maps as they are now
+	// (#1621). A mutator can have changed those since; the build it triggers
+	// reports the change, under its own version.
+	published := bindings.publishedListeners(listeners)
 	// Issue #638 discriminator: name the (source pod → outbound cluster → SDS
-	// client-cert secret) bindings this snapshot just handed Envoy, but only
-	// the ones that changed — steady state is silent, a re-bind is loud. Runs
-	// after SetSnapshot so a logged binding is one Envoy actually received.
-	c.logIdentityBindings(ctx, v)
+	// client-cert secret) bindings of the snapshot just installed, but only
+	// the ones that changed — steady state is silent, a re-bind is loud.
+	c.logIdentityBindings(ctx, v, bindings.sourceBindings(published), pins.mtls)
 	// The inbound counterpart (#638, hypothesis inverted): ssl_fail_verify_san
 	// is the CLIENT rejecting the SERVER's certificate, so the mis-bound
 	// identity in a #638 event belongs to an inbound filter chain of the proxy
 	// that TERMINATED the connection — which #686's client-side check cannot
 	// see.
-	c.logInboundIdentityBindings(ctx, v)
+	c.logInboundIdentityBindings(ctx, v, bindings.inboundBindings(published, secrets))
 	// The third identity fact a snapshot can get wrong silently (#832): a
 	// cluster published with NO server-identity SAN pin. The two checks above
 	// ask "is the identity we present the right one"; this one asks "are we
 	// checking the identity we are handed at all".
 	c.reportClusterPins(ctx, v, pins)
 
+	if setErr != nil {
+		return fmt.Errorf("snapshot %s is installed, but %w within %s: %w", v, ErrWatchNotAnswered, c.watchAnswerWait(), setErr)
+	}
 	return nil
+}
+
+// ErrWatchNotAnswered is what a snapshot build returns when the snapshot is
+// INSTALLED, and is the one every later request is answered from, but handing
+// its changes to a watch that was open did not finish in watchAnswerWait
+// (generateSnapshot says when). The cache's state and its reports are those of
+// a build that returned nil; what differs is that a proxy may not have been
+// sent the change yet. Every mutator that returns a build's error returns this
+// one wrapped, so a caller can tell it from a snapshot that was not built:
+//
+//	if err := c.AddPod(ctx, pod, td); err != nil && !errors.Is(err, cache.ErrWatchNotAnswered) { ... }
+var ErrWatchNotAnswered = errors.New("an open watch was not answered from it")
+
+// snapshotInstalled reports whether a build that returned err installed its
+// snapshot: it returned nil, or ErrWatchNotAnswered. For the callers inside the
+// package that only log a failed build; generateSnapshot has already logged the
+// unanswered watch.
+func snapshotInstalled(err error) bool {
+	return err == nil || errors.Is(err, ErrWatchNotAnswered)
+}
+
+// defaultWatchAnswerTimeout bounds how long one SetSnapshot may wait to hand
+// its responses to the watches that were open, with snapshotMu held and every
+// other build of the node behind it.
+//
+// It is an escape, not a tuning: it is not expected to elapse (#1619). A
+// response is handed over on a channel the stream owns, and the wait is for
+// room in it. With the pinned go-control-plane (v0.14.0) there is always room,
+// whatever the proxy does, a proxy that stopped reading its stream included:
+//
+//   - A delta stream (pkg/server/delta/v3) has one channel for all its types,
+//     with room for twice the number of resource types the library knows (20).
+//     A watch is answered once and is gone; the stream opens the next one for
+//     that type only when it handles the proxy's next request for it, and
+//     before it handles any request it empties the channel. So the channel
+//     holds at most one response per type the stream had a watch open for,
+//     plus the answer to the request being handled: seven for the six types
+//     the agent serves, eleven for a stream that watched every type.
+//   - A state-of-the-world stream (pkg/server/sotw/v3; the per-secret SDS
+//     streams) makes a new channel with room for one response for every
+//     request, and a watch is answered once. (That is the handler of a server
+//     built without the ordered-ADS option, as the agent's is.)
+//
+// A stream that is blocked writing to a proxy, or a proxy that sends nothing
+// more, therefore leaves the build with room for everything it has to hand
+// over. If a later go-control-plane changes that, the tests fail, and this is
+// what keeps one stream from holding every build of the node for longer.
+const defaultWatchAnswerTimeout = 5 * time.Second
+
+// watchAnswerWait is the bound in force. Caller holds snapshotMu.
+func (c *SnapshotCache) watchAnswerWait() time.Duration {
+	if c.watchAnswerTimeout > 0 {
+		return c.watchAnswerTimeout
+	}
+	return defaultWatchAnswerTimeout
 }
 
 // fillVersionMap fills the snapshot's per-resource version map from the memo,

@@ -407,6 +407,22 @@ telemetry; it never mounts the CM it produces, so there is no deadlock.
   operator owns the CR via `kubectl`, and new chart versions (with new config
   defaults) never clobber it. `meshConfig.createDefault: false` opts out of
   seeding entirely.
+- Since chart 2.4.24 the seed is a Helm hook (`pre-install,pre-upgrade`) and no
+  longer an object of the release (#1471): as a release object it was in the
+  manifest of the one revision that seeded it (normally the first) and of no
+  other, and `helm rollback` to that revision failed. The hook carries
+  `helm.sh/hook-delete-policy: never`, a value Helm does not act on, so that
+  Helm's default (delete the live object, then create the hook's) cannot
+  replace a MeshConfig created between the render and the hook.
+  `charts/aether/templates/_helpers.tpl` (`aether.meshConfig.seedMode`) has the
+  reasoning, the measurements and the one case in which it is still a release
+  object.
+- The edge's MeshConfig in an edge namespace the chart creates
+  (`edge.namespaceCreate`) cannot be a hook (the namespace does not exist when
+  a `pre-install` hook runs). Since chart 2.4.25 it is an object of the release
+  on every revision instead of a seed (#1514): the chart sets no field of its
+  spec, so rendering it again never touches the operator's
+  (`aether.edge.meshConfigInManifest` in the same file).
 
 ### Bootstrap (deadlock-free)
 

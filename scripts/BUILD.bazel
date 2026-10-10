@@ -1,3 +1,4 @@
+load("@rules_python//python:defs.bzl", "py_binary")
 load("@rules_shell//shell:sh_library.bzl", "sh_library")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
@@ -15,7 +16,7 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 # must not be a list anyone has to remember to append to. scripts/ has no
 # subdirectories and no non-shell files; if it grows either, the glob still only
 # claims `*.sh` here and the sibling directory needs its own target (see
-# //e2e/pressure and //e2e/soak for why the targets are per-directory).
+# //e2e for why the targets are per-directory).
 #
 # `scripts/check-shell-lint.sh` asserts that the union of these targets' srcs
 # covers every shell script in the repository, so adding one in a directory with
@@ -37,6 +38,66 @@ sh_test(
         "stuck-runs.sh",
         "@jq_toolchains//:resolved_toolchain",
     ] + glob(["testdata/stuck-runs/*"]),
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
+# scripts/third-party-images.sh (#1400, #1401): `check` over throwaway trees
+# (every way an image can be unpinned or unlisted must fail, with its file and
+# line), `outdated` and `resolve` against a fake `curl` that plays the
+# registries, and that no call ever carries a credential. Hermetic: the
+# Bazel-pinned jq, no network. The real tree is checked by the `shell` job of
+# .github/workflows/ci.yaml (`scripts/third-party-images.sh check`), which
+# needs the git checkout this test does not have. The base-image pulls of the
+# Bazel module files (#1477) are read from fixture MODULE.bazel files here, for
+# the same reason. The report script is data for the seam: its dry run over the
+# real `outdated` and the fake registry.
+sh_test(
+    name = "third_party_images_test",
+    size = "small",
+    # Some 170 runs of `check`, each starting the YAML reader's interpreter:
+    # 40 s on a workstation, too close to a small test's 60 s on a runner.
+    timeout = "moderate",
+    srcs = ["third_party_images_test.sh"],
+    data = [
+        "third-party-images.sh",
+        "third-party-images.txt",
+        "third-party-images-report.sh",
+        ":third_party_images_yaml",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+    env = {
+        "JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)",
+        "YAML_READER_RLOCATIONPATH": "$(rlocationpath :third_party_images_yaml)",
+    },
+)
+
+# The YAML reader of scripts/third-party-images.sh (#1525): `check` reads YAML
+# files with a YAML parser, not line by line. PyYAML is the hash-checked wheel
+# the documentation site's lock already holds (//website:requirements_lock.txt,
+# a dependency of mkdocs), so this adds no pin. Outside Bazel (the `shell` job
+# of ci.yaml) the script runs the same file with the python3 on PATH.
+py_binary(
+    name = "third_party_images_yaml",
+    srcs = ["third_party_images_yaml.py"],
+    legacy_create_init = 0,
+    deps = ["@aether_docs_pip//pyyaml"],
+)
+
+# The scheduled refresh check (.github/workflows/third-party-images.yaml,
+# #1478): scripts/third-party-images-report.sh over a fake `outdated` and a
+# fake `gh` that keeps the rolling issue. What each answer writes and does not
+# write, that a registry error never closes or rewrites the issue and never
+# fails the run, that a check which is itself broken exits 2, and that only an
+# issue the workflow itself opened counts as the rolling one (the fake `gh`
+# runs the script's own `--jq` filter, hence the Bazel-pinned jq).
+sh_test(
+    name = "third_party_images_report_test",
+    size = "small",
+    srcs = ["third_party_images_report_test.sh"],
+    data = [
+        "third-party-images-report.sh",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
     env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
@@ -121,6 +182,47 @@ sh_test(
     srcs = ["ci_gate_test.sh"],
     data = [
         "ci-gate.sh",
+        "//:ci_definitions",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+    env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
+)
+
+# check-harness-contract-bump.sh (#1541): the lock of the external-harness
+# contract against the one at the pull request's base, so a promise removed
+# together with its lock line still needs a version bump. Hermetic: a fake
+# `git show`. Also holds ci.yaml to running it against the base sha.
+sh_test(
+    name = "check_harness_contract_bump_test",
+    size = "small",
+    srcs = ["check_harness_contract_bump_test.sh"],
+    data = [
+        "check-harness-contract-bump.sh",
+        "//:ci_definitions",
+    ],
+)
+
+# The watcher of the post-merge run (#1506): scripts/main-post-merge-watch.sh,
+# the step of .github/workflows/main-watch.yaml. Which completed runs of
+# main.yaml are recorded on the rolling issue, which green run clears a commit
+# and when the issue closes, an older failure that arrives after a newer green
+# run, duplicates, issues and markers written by someone else, a failing API
+# and the dry run, through a fake `gh` that keeps the issues as JSON and
+# applies the script's own `--jq` filters with the Bazel-pinned jq. The second
+# half holds the workflow file to its trigger, its permissions, its pins and
+# the one field it reads from the triggering run, and main.yaml to what the
+# decision assumes (no concurrency group, a gate job called `main`). It also
+# runs every pair of attempts of one run in both orders of delivery (40 rows,
+# about 150 runs of the step through the fake), which takes it past the 60 s of
+# a small test: the size says what it needs (no network, one core), the timeout
+# what it takes.
+sh_test(
+    name = "main_post_merge_watch_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = ["main_post_merge_watch_test.sh"],
+    data = [
+        "main-post-merge-watch.sh",
         "//:ci_definitions",
         "@jq_toolchains//:resolved_toolchain",
     ],

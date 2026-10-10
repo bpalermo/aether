@@ -183,6 +183,82 @@ And a clean run is not evidence of absence: the detector only reports
 interleavings a test actually produced, so a race between two goroutines no test
 runs concurrently stays invisible no matter how often you run it.
 
+### The external-harness contract
+
+A harness outside this repository (one that rolls the mesh's workloads, reads
+its metrics and logs and grades a run) depends on names this repository
+chooses. They are written down in
+[`test/harnesscontract/external-harness.yaml`](../test/harnesscontract/external-harness.yaml):
+the agent's pin metrics with their labels and the closed `reason` set, the
+prober's `aether_probe_requests_total` with its `tier` and `result` sets, the
+fields of the `AETHER_PROBE_FAIL` lines, the any-port stat prefix, the
+annotations, labels and ports a workload manifest names, and the chart objects
+a harness addresses (workload names and namespaces, pod labels, container
+names, rolling-update strategies).
+
+```bash
+bazel test //test/harnesscontract:checks
+```
+
+Each entry is compared with the code that produces the thing, by a test in the
+package that owns it: the real instruments' collected series, lines the real
+fail log wrote, a listener the real generator built, a `helm template` of the
+packaged chart. A rename fails with a message that names the contract file.
+
+**The rule.** Change the code and the contract together, in one pull request,
+and say so in its description. Removing an entry or changing what it means
+(a rename, a value removed from **or added to** a closed set, another roll
+strategy, a metric that keeps its name and counts something else) bumps the
+file's `version`; adding an entry does not. A harness pins
+the version it was written against; the README's "Versions" table says what
+each bump changed (version 2: what `aether_agent_xds_acked_tls_clusters` counts
+and when it is absent, #1508). For what the file's keys say, the bump is a
+test: `external-harness.lock.yaml` beside the contract holds one line per
+promise of the current version, and
+`//test/harnesscontract:harnesscontract_test` fails when a promise left or
+changed and `version` did not (it prints the lock for the new version once it
+is bumped, and the lines to add for a new promise). On a pull request
+`scripts/check-harness-contract-bump.sh` also compares the lock with the one
+at the base, so an entry removed together with its lock lines needs the bump
+too. A change of meaning that leaves every key as it was, like version 2's,
+is not seen by either and is bumped by hand.
+[`test/harnesscontract/README.md`](../test/harnesscontract/README.md) has the
+table of what each test compares, what is kept by review alone, and how to add
+or remove an entry.
+
+**Which contract a deployed mesh satisfies.** Since chart 2.4.28 the agent
+DaemonSet carries the contract's `version` in an annotation on its own
+metadata, so a harness can ask the mesh before it reads anything else:
+
+```bash
+kubectl -n aether-system get daemonset aether-agent \
+  -o jsonpath='{.metadata.annotations.aether\.io/harness-contract-version}'
+```
+
+(`aether-system` and `aether-agent` are the documented release's namespace and
+name.) The answer is the `version` of `external-harness.yaml` at the commit the
+chart was packaged from, as a string. Three things it is not:
+
+- It identifies the **contract**, not the build. Charts of different versions
+  answer the same for as long as the contract's `version` stays, and the
+  annotation says nothing about which images run. For the build, read the
+  chart version (`helm.sh/chart` on the same object) and the image digests.
+- An **empty answer is "not known"**, never a version: the chart is older than
+  2.4.28, or it was rendered from the source tree (`helm template
+  charts/aether`) instead of from the published package, where the file the
+  number comes from does not exist.
+- It is on the DaemonSet **object**, not on its pods. A contract bump changes
+  that one annotation on upgrade and replaces no pod;
+  `//charts/aether:aether_harness_contract_version_rolls_no_pod_test` renders
+  the package with another number and without one and requires every pod
+  template to be byte-identical.
+
+No value sets it and the chart holds no copy of the number: a build step of
+`//charts/aether` reads `version` from the contract file into the package
+(`files/harness-contract-version`), and `//test/harnesscontract:aether_chart_test`
+fails when the annotation either packaging renders and the contract's
+`version` disagree.
+
 ### Code coverage
 
 ```bash
@@ -498,8 +574,8 @@ only because `changes` wrote `proxy=false`:
 **The post-merge run** (`main-post-merge`, `main.yaml`) is decided by the same
 script with a third table (`scripts/ci-gate.sh main`, #1501), in its `main`
 job. No ruleset requires it, since it runs on a push: a failure blocks nothing
-and shows as a red run of that commit on `main`. Nothing in the repository
-watches for one, so look at the run after a merge. Its `test` job skips when
+and shows as a red run of that commit on `main`, which the rolling issue below
+reports. Its `test` job skips when
 bazel-diff finds nothing the merge reaches, and that passes only because `diff`
 wrote `false`:
 
@@ -509,6 +585,133 @@ wrote `false`:
 | `decision: nothing impacted (diff wrote false to has_any, has_unit and has_integration)` | bazel-diff found no target the merge reaches; `test` is skipped by design | nothing |
 | `job diff succeeded and its output has_… is not set` | `diff` wrote no decision, so `test` skipped on an empty value and the merge was not tested | read the `Compute impacted targets` step. If it failed on something transient, re-run the run. If the workflow or the script is at fault, a re-run repeats it (a re-run executes that commit's own workflow): fix it in a new commit, and test the missed commit yourself (`make test` on a checkout of it), or the merge stays untested |
 | `job test was skipped, and diff says it had to run` | `test` did not run although `has_any` is `true` | read the `test` job; re-run it if no step ran |
+
+**A post-merge run that did not pass files an issue** (#1506):
+"main-post-merge: a commit on main failed its post-merge run", labelled `bug`
+and `ci`. One issue, reused: `main-post-merge-watch` (`main-watch.yaml`) runs
+when a post-merge run completes and records the commit, the run, the jobs
+that did not pass, whether the run's gate passed and the command that re-runs
+it, in the issue body for the first failure and as a comment for each later
+one. The logic is `scripts/main-post-merge-watch.sh`.
+
+What the issue means: the commit it names is on `main` and its post-merge run
+is red. Nothing was blocked. Each entry says which of two things that is, from
+the run's gate, the `main` job:
+
+- **The `main` job did not succeed** (it failed, was cancelled or never ran):
+  the commit is not validated. If a target is broken, then until it is dealt
+  with a pull request whose impacted targets include it fails `ci` for a
+  reason that is not its own.
+- **The `main` job succeeded, and another job did not** (`refresh-pin-prs`,
+  which runs whatever the gate concluded): the commit was validated, and no
+  target on `main` is broken by it. Do not look for a regression. The run is
+  red all the same and the entry stays until that job passes: read that job,
+  and re-run it. What it missed is its own work (the open pin-bump pull
+  requests were not brought up to date for this push).
+
+A run that was `cancelled` with the gate green and no failed job is not filed
+at all (the table below); one that ended `failure` with the gate green is, as
+the second case, and so is a `cancelled` one in which another job had already
+failed.
+
+After `gh run rerun --failed` on the second case, the new attempt re-runs that
+job alone and its jobs may not include `main`. The watcher then takes the
+gate's conclusion from the latest earlier attempt that has it, and the entry
+says so ("succeeded in attempt 1 and was not re-run in this attempt"). If that
+attempt cannot be read, the entry says that whether the commit was validated
+is not known: read the `main` job on the run page.
+
+**Re-runs and the order of things.** A re-run is a new attempt of the same
+run, and the watcher of an attempt reads the run as it is when the watcher
+runs. If a re-run was started quickly, the watcher of the failed attempt finds
+the run in progress and judges nothing. So each watcher also looks at the
+attempts before the latest one (unless the latest passed), back to the first
+or to one that succeeded, and records what did not pass and is not on the
+issue yet; such an entry says "Recorded late". The rule is: an attempt that
+did not pass is recorded once, unless a later attempt of the same run
+succeeded. For two attempts of one run the issue ends up with:
+
+| Attempt 1 | Attempt 2 | On the issue |
+|---|---|---|
+| did not pass | none, or still running | attempt 1 |
+| did not pass | `success` | nothing failing: attempt 1 is cleared if it was recorded, and never recorded otherwise |
+| did not pass | did not pass | both attempts |
+| did not pass | `cancelled`, validated (not filed by itself) | attempt 1: only a green attempt clears it |
+| `cancelled`, validated | did not pass | attempt 2 |
+| `cancelled`, validated | anything else | nothing |
+
+That holds whether the watcher of attempt 1 ran before or after attempt 2
+began. If an earlier attempt cannot be read, the watcher records what it can
+and its run fails: re-run it, and it adds the rest without repeating anything.
+
+What to do, for each commit the issue names:
+
+1. Open the run it links and read the first failed step.
+2. No step ran, a registry or GitHub answered 5xx, a job never got a runner or
+   hit its time limit: re-run it, with the command its entry gives. Which one
+   depends on the run's jobs:
+
+   | The jobs of the run | Command |
+   |---|---|
+   | every job that did not pass concluded `failure` | `gh run rerun <run id> --failed`: the failed jobs and the jobs that depend on them (the `main` job among them) |
+   | no job started (`startup_failure`, a run skipped as a whole), a job was `cancelled` or timed out, or the jobs could not be listed | `gh run rerun <run id>`: the whole run |
+
+   `--failed` asks GitHub to re-run "the failed jobs and their dependent
+   jobs". A run with no job that concluded `failure` gives it nothing to
+   select, so no new attempt is made and the issue never clears; whether it
+   takes a `cancelled` job is not documented, so the watcher does not rely on
+   it. The whole run is always enough. When the re-run passes, the watcher
+   comments that the commit passes now, and closes the issue once no commit
+   named on it is still failing.
+3. A real failure: fix it in a new pull request and write `Closes #<the issue>`
+   in it. Re-running the old run cannot pass, since it tests the old commit.
+   The same holds for a `startup_failure` whose cause is the workflow file of
+   that commit: a re-run executes the commit's own workflow.
+
+**A green run of a later commit never closes the issue.** Each post-merge run
+tests only what its own merge reaches, and a merge that reaches nothing passes
+without running a test: the next documentation-only merge would close the
+issue with `main` still broken. So a commit is cleared only by its own run, and
+a failure fixed by a later commit is closed from that pull request or by hand.
+For the same reason an older commit's failure is filed even when it arrives
+after a newer commit's green run; the entry then says that `main` has moved on
+and names its head.
+
+| The run ended | Filed? | Why |
+|---|---|---|
+| `failure`, `timed_out` | yes | the run is red: the commit failed it, or (`failure` with the `main` job green) another job did, and the entry says which |
+| `startup_failure` | yes | the workflow file on `main` is not valid: no job ran, and every later push fails the same way |
+| `skipped`, `action_required`, anything unknown | yes | nothing validated the commit |
+| `cancelled`, the `main` job succeeded, and another job failed | yes | the red run with a green gate, cut short: `refresh-pin-prs` had failed when the run was cancelled. The entry says the commit was validated |
+| `cancelled`, and the `main` job did not succeed | yes | `main.yaml` has no concurrency group, so no newer push cancels a run: a job hit its time limit or never got a runner, or someone cancelled it, and the commit is not validated |
+| `cancelled`, the `main` job succeeded, and every other job succeeded, was skipped or was cancelled | no | `diff` and `test` did their work; what was cancelled is another job (`refresh-pin-prs` waiting for a runner) |
+| `success` | no | clears that commit if the issue names it |
+
+A closed issue is not written to: the next failure opens a new one. The one
+exception is a close that raced with a failure. Watchers of different runs are
+not serialised, so a green run's watcher can close the issue in the moment
+another records a failure on it; whichever of the two notices reopens it, and
+the log of that `main-post-merge-watch` run says `reopened #<n>` and why. An
+issue left open with every commit on it passing is the harmless side of the
+same race: close it by hand. Only the
+issue that `github-actions[bot]` opened, and that account's comments, are read,
+so an issue or a comment someone else writes with the same title or marker
+changes nothing.
+
+The watcher is a `workflow_run` workflow, so it runs from `main` only and its
+own failures are red runs of `main-post-merge-watch` (an API error while
+reading or writing the issue). Re-run a failed one: it writes nothing twice.
+To see what it would do with a given run without writing anything:
+
+```bash
+gh workflow run main-watch.yaml -f run_id=<id of a main-post-merge run>   # dry_run defaults to true
+```
+
+The log of that run prints the verdict and the text it would file. A dry run
+has a concurrency group of its own, so it never takes the place of a pending
+watcher of the same run. With
+`-f dry_run=false` it files for real; use that only on a run whose commit you
+then mean to clear or whose issue you will close by hand.
 
 A cancelled run of `coverage` or `codeql` (both cancel the previous run of the
 same pull request when a new commit arrives) shows its summary job as failed on
@@ -953,6 +1156,197 @@ that disagrees with the SDK pin, a setup-go step with a literal `go-version` or
 `check-latest`, and any workflow job or composite action that runs `go` without
 setting it up first, which would leave it on the runner image's Go.
 
+### Bumping Helm
+
+No workflow job runs the runner image's Helm (it moves, majors included, when
+GitHub updates the image) or `azure/setup-helm`'s default, which is the newest
+release (#1580). [`e2e/helm-version.sh`](../e2e/helm-version.sh) pins one Helm 3
+release, one Helm 4 release and `HELM_DEFAULT_MAJOR`, the major a job gets when
+it does not ask; `.github/actions/setup-helm` installs from that file and is
+the only installer. The default is Helm 3. Helm 4 renders every chart in the
+Bazel template tests (the rules_helm toolchain), and the nightly `first-install`
+job runs `e2e/first-install.sh` under both majors, one matrix leg each (#1543).
+
+To bump a release, change its line. `HELM_V4_VERSION` is held equal to the
+rules_helm toolchain's Helm, so a rules_helm bump that moves its Helm moves
+that line in the same pull request. To move the default major, change
+`HELM_DEFAULT_MAJOR` and prove it with a `workflow_dispatch` of `e2e.yaml` on
+the branch: no pull request check runs the kind harnesses. `bazel test
+//e2e:helm_pin_test` fails on a job or composite action that runs `helm` or an
+`e2e/*.sh` harness without `setup-helm` before it, on `azure/setup-helm` used
+anywhere else, on a caller that names a version instead of a major, and on a
+`helm list -a`: Helm 4 dropped that flag, so anything that lists releases takes
+its flags from `helm_list_all_flags` in the same file (#1581).
+
+### Bumping Gateway API
+
+[`e2e/gateway-api-version.sh`](../e2e/gateway-api-version.sh) is the one
+Gateway API release every e2e surface installs: each harness sources it for the
+CRD bundle it applies, and the nightly conformance jobs install the same
+release's bundle and run its suite (#1583). Bump it together with go.mod's
+`sigs.k8s.io/gateway-api` (the release the code is built against) and
+`GATEWAY_API_VERSION` in `.github/workflows/e2e.yaml` (a workflow cannot source
+a shell file, so it carries the one copy). `bazel test
+//e2e:gateway_api_pin_test` fails until the three agree, and on a harness that
+assigns `GWAPI_VERSION` itself or a download URL that names a release.
+`GWAPI_VERSION=<release>` overrides it for one local run.
+
+### Refreshing third-party image pins
+
+An image this repository does not build (curl, the echo servers, OPA, etcd, the
+OpenTelemetry collector, the kind node) is named in chart values, in the e2e
+harnesses and their manifests, and in test fixtures. Every such reference
+carries the digest of the image's **multi-arch index**, and
+[`scripts/third-party-images.txt`](../scripts/third-party-images.txt) is the one
+list of them, one `pin <name> <tag> <digest>` line per image (#1400, #1401). A
+reference is written `<name>:<tag>@sha256:…`: the digest is what a node or
+`docker run` pulls, the tag is there for the reader. A few older references are
+`<name>@sha256:…`, with the tag recorded only in the list.
+
+The **base images** of what this repository builds are on the same list
+(#1477): `gcr.io/distroless/static-debian13` under every Go image, pulled by
+`MODULE.bazel`, and `gcr.io/distroless/cc-debian12` under the proxy image,
+pulled by `proxy/MODULE.bazel`. Starlark does not write them as one reference,
+so `check` reads exactly two constructs in those two files, the rules_img
+`pull(registry =, repository =, tag =, digest =)` and the rules_oci
+`oci.pull(image =, digest =)`, and puts each together as a reference. It is a
+line reader for the shape buildifier writes and it fails closed: a pull written
+on one line, an attribute that is not a plain string, or a pull rule bound
+under a spelling it does not know is a finding. A module file reached by
+`include("//<package>:<file>.MODULE.bazel")` is read like the file that includes
+it (#1571); an `include()` in any other shape, and any other rule of a ruleset
+that pulls images (rules_img, rules_oci, rules_docker, rules_apko), are findings
+until the reader is taught them. A pull by a hand-written repository rule is
+still not seen.
+
+A YAML file is read with a YAML parser, not line by line (#1525): an alias is
+followed to its anchor, and a flow mapping broken across lines, a value on the
+line after its key and a reference under a child key (`image:` / `ref: x`) are
+all read. A file named `*.yaml` that no parser can read is a finding, unless it
+is a Helm template (it holds `{{`), which is read line by line like a shell
+script. This is the one part of `check` that needs more than `bash`, `awk` and
+`git`: `python3` with PyYAML (`python3 -c 'import yaml'`). Without it `check`
+stops with exit 2 and has checked nothing. The test runs the reader that Bazel
+builds with a pinned PyYAML (`//scripts:third_party_images_yaml`).
+
+`scripts/third-party-images.sh` has five commands:
+
+| Command | Network | What it does |
+| --- | --- | --- |
+| `check` | no | The gate (CI's `shell` job). Fails on an image named by tag only or with no tag, on a digest the list does not have for that name, on a tag that disagrees with the list, on a pin or an exception nothing uses any more, on a YAML file no parser can read, and on a base-image pull, an `include()` or an image rule in a Bazel module file that it cannot read |
+| `list` | no | Every pin, with the files and lines that use it |
+| `outdated [--newer-tags] [<name>...]` | yes | Asks each pin's registry what its tag points at now: `current`, `MOVED` (the tag was re-pushed; the new digest is printed), `NOT-MULTI-ARCH` (the pinned index itself lacks `linux/amd64` or `linux/arm64`; counted as behind) or `ERROR` (no answer; never reported as current). `--newer-tags` adds the registry's tags that have the pinned tag's shape and sort after it. Exit 0 all current, 1 a pin is behind, 2 a pin could not be checked |
+| `newer [<name>...]` | yes | Reads each pin's tag list and prints `NEWER <name>:<tag>  <n> newer: …` for a pin that has tags of the pinned tag's shape sorting after it (the newest eight), and `ERROR` for a list it could not read. Exit 0 every list was read, 2 one was not |
+| `resolve <name>:<tag>...` | yes | Prints the `pin` line for a tag, and says so when its index lacks `linux/amd64` or `linux/arm64` |
+
+`outdated`, `newer` and `resolve` read public registries anonymously: no credential is
+read from the machine or sent (the anonymous pull token a registry hands out is
+the only `Authorization` header there is). A private or rate-limited registry
+answers `ERROR`, not `current`.
+
+**Nothing moves a pin by itself.** There is no bot: Dependabot opens no pull
+requests here, because they run without the repository's secrets and could
+never pass CI. What there is, is a daily look (#1478):
+`.github/workflows/third-party-images.yaml` runs `outdated` at 05:43 UTC
+through `scripts/third-party-images-report.sh` and keeps one rolling issue,
+**CI: third-party image pins are behind their tags**.
+
+| `outdated` said | What the run does |
+| --- | --- |
+| a pin is `MOVED` or `NOT-MULTI-ARCH` | Opens the issue, or rewrites the open one so it says where the tags point now. It adds a comment only when the set of pins behind changed |
+| every pin `current` | Comments on the open issue and closes it |
+| a pin is `ERROR` (the registry did not answer) | A warning on the run. That run does not know the whole set, so it neither closes an open issue nor rewrites what it says is behind; with none open, the pins it did find behind open one |
+| the same pin is `ERROR` in three runs in a row | The pin is reported (#1570): the issue is opened for it, or the open one gains a section and a comment. It stays open until a run checks every pin |
+
+The run is green in all four cases: a pin that is behind still pulls the
+digest it names, and the workflow is not a required check. It fails only when
+the check itself is broken (`outdated` died, or `gh` did).
+
+**A lookup that keeps failing.** One `ERROR` is a registry having a bad
+minute. A pin whose lookup fails on every run (the repository went private,
+the tag was deleted, a rate limit that never lifts) would otherwise stay a
+warning on a green run for good. So the rolling issue also holds, in a hidden
+line of its body (`<!-- third-party-images-state: errors@… <name>:<tag>=<runs> -->`),
+in how many runs in a row each pin's lookup has failed; a pin that answers
+again is forgotten at once. The count lives in the open issue when there is
+one, and otherwise in the newest closed one, which is edited without being
+reopened, so a streak shorter than three notifies nobody. When there has never
+been a rolling issue, the first failed lookup opens one and closes it in the
+same run to hold the count: expect that once. Do not delete that hidden line
+by hand; a line that is not a pin and a count is ignored, never run.
+
+**Newer versions.** The report above is about the tag each pin names; it says
+nothing when `8.23.0` exists next to a pinned `8.22.0`. The same run asks
+`scripts/third-party-images.sh newer`, and its answer is a section of the
+issue (#1569) and of the run's summary. That section is for the reader only:
+it never opens the issue, never keeps it open, never closes it and never
+causes a comment, and when a tag list cannot be read it says so and the run
+goes on. With no issue open, read it in the run's summary, or run `newer` in
+the same pass that bumps the Bazel, Go and Actions pins.
+
+The issue is opened with the `enhancement` and `ci` labels; if one of them is
+deleted the run fails instead of filing an unlabelled issue. Only an issue the
+workflow itself opened counts as the rolling one: an issue someone else files
+under the same title is never rewritten or closed, and the report opens its
+own next to it.
+
+To see what it would write without writing it, dispatch a dry run:
+`gh workflow run third-party-images.yaml`. A dispatch is a dry run unless you
+pass `-f dry_run=false` on `main`. A pull request that touches the scripts or
+the list runs the same dry run, in a job without `issues: write`.
+
+To move a pin (or add an image):
+
+```bash
+scripts/third-party-images.sh resolve curlimages/curl:8.23.0   # prints: pin curlimages/curl 8.23.0 sha256:…
+scripts/third-party-images.sh list                             # where the old pin is used
+# Replace the pin line in scripts/third-party-images.txt, then the old
+# <tag>@<digest> in every file `list` printed.
+scripts/third-party-images.sh check
+bazel test //scripts:third_party_images_test //charts/...
+```
+
+What a moved pin obliges:
+
+- A pin used under `charts/<chart>/` is a change to that chart: bump its
+  `Chart.yaml` and say what rolls. `charts/aether`'s
+  `proxy.authzSidecar.opa.image` is a container of the proxy pod, so moving it
+  rolls the proxy DaemonSet on every node where the OPA preset is on;
+  `charts/udsecho`'s `client.image` and `charts/prober`'s `authzCanary.image`
+  each roll one single-replica Deployment.
+- The two distroless base pins move in the module file and the list together:
+  `digest` in the `pull` of `MODULE.bazel`, or in the `oci.pull` of
+  `proxy/MODULE.bazel`, and the `pin` line. distroless rebuilds `nonroot` in
+  place, so the issue lists them whenever the base was patched. A new base
+  digest changes the digest of every image built on it: the `MODULE.bazel` one
+  is a release of every Go image, and the `proxy/MODULE.bazel` one is a proxy
+  build (`proxy.yml`) and a proxy release.
+- The two etcd pins (`quay.io/coreos/etcd` for the kind harnesses,
+  `gcr.io/etcd-development/etcd` for the testcontainers tests) move together,
+  and stay on the minor line of the Go client in `go.mod` (#1223).
+- `kindest/node` moves only with `KIND_VERSION` (*Bumping the e2e Kubernetes
+  version* above); `//e2e:kind_pin_test` holds its copies together.
+
+An exception is an `allow <path> <reference>` or `skip <path prefix>` line in
+the list, with its reason beside it. An `allow` or `skip` that matches nothing any more
+fails `check`. There is none of either kind today.
+
+`check` does not read comments, whether a comment line or the comment that
+ends a line of code: a pin that only a comment still names is reported as
+unused. In a YAML file it fails closed on flow mappings: an `image:` that
+follows `{`, `[` or `,` outside quotes is read as a key, so a line of prose
+written that way must be quoted.
+
+What `check` cannot see: an image no pin names yet, written where no `image`
+key, `--image` flag or `*_IMAGE` variable introduces it (a positional
+`docker run <image>`). Give such a reference a `*_IMAGE` variable, as
+`e2e/etcd-image.sh` does. Nor does it see an unquoted `image:` value in the
+middle of a line of a multi-line flow mapping when that YAML is embedded in a
+shell here-document or a Go string (the header of the script has the list). It
+also reads only `charts/`, `e2e/`, `test/` and
+`registry/etcdtest/`; the images the Bazel image rules pull (`MODULE.bazel`)
+are pinned there by digest and are not in the list.
+
 ---
 
 ## 7. Installing on a real cluster
@@ -979,9 +1373,12 @@ AETHER_VERSION=<X.Y.Z>-$COMMIT
 helm upgrade --install aether-crds oci://quay.io/aethermesh/chart-crds \
   --version "$CRDS_VERSION"
 
-# 2) then the system. Prefer this commit-pinned chart tag over the bare
+# 2) then the system. Use this commit-pinned chart tag, not the bare
 #    `--version <X.Y.Z>`: the bare tag is mutable and re-pushed by every publish,
-#    the commit tag never is (#692).
+#    the commit tag never is (#692). Anything that PINS a chart (a lock file, a
+#    GitOps source, a `tag@sha256:` reference) names the commit tag or the
+#    digest alone, never the bare tag with a digest: see "Pinning a released
+#    chart" below (#1588).
 #    The chart does not create the namespace (namespace.create=false, the
 #    default since 2.4.21, #1403): --create-namespace does. On a FIRST install
 #    into a cluster that enforces Pod Security admission, label the namespace
@@ -1015,6 +1412,35 @@ esac
 `v1.2.3-N-g` prefix or a `-dirty` suffix; hence the substring match rather than
 string equality. If it fails, the chart tag you pulled was built from a different
 commit: re-run that commit's `publish` workflow and upgrade again.
+
+**Pinning a released chart (#1588).** The `aether` chart is published under two
+tags, and only one of them can be pinned:
+
+| Tag | Example | Written | Its digest |
+| --- | --- | --- | --- |
+| commit-suffixed | `chart-aether:2.4.26-<full sha>` | once, by that commit's publish | never changes |
+| bare version | `chart-aether:2.4.26` | again by **every** commit on `main` that still carries that `Chart.yaml` version | changes with each of those commits, while the version does not |
+
+Most commits do not touch the chart, so most commits republish the bare tag: it
+is "the newest build of this chart version", not a release. A reference that
+pins a digest **under the bare tag** (`chart-aether:2.4.26@sha256:…`, or a tool's
+lock entry of tag plus digest) is valid until the next commit publishes, and
+then fails; Helm reports `chart reference digest mismatch` (seen within an hour
+of writing such a reference). The crds, prober and udsecho charts have no bare
+tag: their `Chart.yaml` version carries the commit.
+
+So a pin is one of these two, and nothing else:
+
+```bash
+# the commit-suffixed tag (what this runbook uses everywhere)
+helm pull oci://quay.io/aethermesh/chart-aether --version "<X.Y.Z>-$COMMIT"
+# or the digest alone, with no tag for it to disagree with
+helm pull oci://quay.io/aethermesh/chart-aether@sha256:<digest of that commit's chart>
+```
+
+`helm pull` of the commit tag prints that chart's digest (its `Digest:` line).
+A digest read from the bare tag is the digest of whichever commit published
+last.
 
 **After a proxy release, normally there is nothing to do.** `proxy-release`
 publishes the image, pins `charts/aether/values.yaml` (`tag:` *and* `digest:`),
@@ -1608,6 +2034,15 @@ made. Drop `namespace.create=true` (and label the namespace yourself), or store
 the release in another namespace (`helm -n <other> ... --set
 namespace.name=aether-system`).
 
+**`--wait` succeeding is not the check that the DaemonSets run** (#1473). Helm
+counts a DaemonSet as ready once `numberReady >= desiredNumberScheduled -
+maxUnavailable`, which for a DaemonSet that may have one pod unavailable (the
+agent at its default strategy, `uds-csi`, the `prober` chart's DaemonSet) is zero
+pods on a one-node cluster: `helm upgrade --install --wait` reports `deployed`
+with none running. Follow an install with `kubectl -n aether-system rollout
+status daemonset/<name>` for each DaemonSet (it waits until every scheduled pod
+is updated and available), or read the pod list.
+
 **A first install that failed for another reason** (a `--wait` that timed out)
 is retried with the same command: `helm upgrade --install` upgrades the failed
 release in place. If it failed very early, before the agent ServiceAccount was
@@ -1616,6 +2051,42 @@ written (one of that name already existed, say), the retry may ask once for
 the mark that ServiceAccount carries, the chart cannot see that the failed
 revision rendered no namespace, and it refuses rather than risk a delete. The
 command is safe to run; nothing is deleted either way.
+
+### Uninstalling: the proxy pods take close to their whole grace period (#1472)
+
+After `helm uninstall` (or anything else that deletes the `aether-proxy`
+DaemonSet) each proxy pod stays `Terminating` for most of
+`proxy.terminationGracePeriodSeconds`, 180 s by default, and a namespace
+deleted afterwards is only gone once they are. That is the supervisor's
+`successor_wait` branch of "What the proxy supervisor does on SIGTERM" below,
+not a hang:
+
+- On SIGTERM with its Envoy still serving, the supervisor waits for a surge
+  replacement to hot-restart it. It has no Kubernetes client (by design: see
+  `//agent/cmd/proxy-supervisor:deps_test`), so it cannot tell "my DaemonSet
+  was deleted" from "I am being rolled", and a pod delete, a node drain and an
+  uninstall look the same to it.
+- The wait is bounded by the pod's own deadline:
+  `terminationGracePeriodSeconds - (hotRestart.drainTime + 5 s + 10 s)`, which
+  is 155 s at the defaults. Then it drains Envoy over `hotRestart.drainTime`
+  (10 s) and stops it. From the code that is about 165 to 170 s per pod at the
+  defaults; #1472 observed the full 180 s on kind. Neither figure was measured
+  for this note.
+
+The log lines of the "no successor can come" case in that section are the ones
+to expect, and `aether_supervisor_shutdown_branch_total` reports
+`drain_fallback`.
+
+To remove the mesh faster, tell the supervisors beforehand that no replacement
+will come: one upgrade with `proxy.shutdownDrainImmediately=true` (values read
+back with `helm get values <release> -n <ns> -o yaml` and passed with `-f`,
+never `--reuse-values`), let that roll finish, then uninstall. Each proxy then
+drains on SIGTERM without the wait. That upgrade is itself a proxy roll, and
+with the flag set a later pod delete or node drain is no longer hitless, so
+this is for a mesh that is being removed, not for one that stays.
+
+`helm uninstall` does not delete the namespace, and keeps the seeded `default`
+MeshConfig (it prints `kept`); `kubectl delete namespace` removes both.
 
 ### Which workloads a chart upgrade rolls (#1363)
 
@@ -1985,6 +2456,516 @@ Consequences to know:
   and delete the old namespace yourself if it should go. The prober chart
   checks this when `namespace.name` or `namespace.create` is set.
 
+#### Chart 2.4.22: with the OPA preset on, the proxy DaemonSet rolls once (#1401)
+
+`proxy.authzSidecar.opa.image` was `openpolicyagent/opa:1.21.1-envoy-static`,
+a tag, and is now the same tag with the digest of its multi-arch index
+(`…-envoy-static@sha256:b4a8bbe8…344b`): a tag can be re-pushed, and this
+container sits next to the proxy on every node. The OPA version does not
+change.
+
+The sidecar is a container of the proxy pod, so **the upgrade that crosses
+2.4.22 rolls the proxy DaemonSet once on a cluster where
+`proxy.authzSidecar.opa.enabled` is true and `opa.image` is the chart's
+default**. With the preset off (the default), or with `opa.image` set to your
+own reference (a mirror), nothing renders differently and nothing rolls. A
+mirror reference is used as written: pin it by digest yourself.
+
+Before and after the upgrade:
+
+```bash
+# Is the preset on, and which image does the release set? (never --reuse-values)
+helm get values aether -n aether-system -a -o yaml | grep -A12 'authzSidecar:'
+# The image each proxy pod's sidecar really runs: the digest the node resolved.
+kubectl -n aether-system get pods -l app.kubernetes.io/component=proxy \
+  -o jsonpath='{range .items[*]}{.spec.nodeName}{"  "}{.spec.initContainers[?(@.name=="authz")].image}{"  "}{.status.initContainerStatuses[?(@.name=="authz")].imageID}{"\n"}{end}'
+# Whether the DaemonSet rolled: its pods' revision hash and age.
+kubectl -n aether-system get pods -l app.kubernetes.io/component=proxy \
+  -L controller-revision-hash --sort-by=.metadata.creationTimestamp
+```
+
+#### Chart 2.4.24: the seeded MeshConfig is a hook; rolling back to a release's first revision (#1471)
+
+The chart seeds the `default` MeshConfig once and never renders it again, so
+that it is yours to edit. Until 2.4.24 the seed was an object of the release:
+in the manifest of the one revision that created it, in no later manifest, and
+still live. That revision is normally the first; it is a later one when an
+upgrade found the MeshConfig absent and seeded it then
+(`meshConfig.createDefault` or `edge.enabled` turned on later, a deleted
+object). Helm cannot roll back to such a revision once a later one exists:
+
+```
+$ helm rollback aether 1 -n aether-system
+Error: no MeshConfig with the name "default" found
+```
+
+For an object that is live and in the target manifest, Helm takes the copy in
+the **current** manifest as its starting point, and there is none. The rollback
+is recorded as a new revision, and that revision is `failed`; the objects Helm
+reached before the MeshConfig are already rolled back. **No revision is
+`deployed` afterwards** (#1582): the revision that was current before the
+rollback is marked `superseded`. `helm history aether -n aether-system` shows
+the new revision as `failed` and every revision below it as `superseded`, and
+`helm status aether -n aether-system` prints `STATUS: failed` at the new
+revision number.
+
+A failed **upgrade** reads differently (the seed-hook case further down):
+there the previous revision stays `deployed` beside the `failed` one. So after
+a failed rollback, do not look for the `deployed` revision to go back to:
+there is none. The revision to return to is the one just below the failed one.
+A rollback to any revision whose stored manifest holds no MeshConfig works,
+that one included.
+
+Since 2.4.24 the seed is a Helm hook (`helm.sh/hook: pre-install,pre-upgrade`),
+which is in no manifest. **Upgrading to 2.4.24 rolls no workload and does not
+touch the MeshConfig**: it is live, so it is not rendered, as before (Helm
+still patches the `helm.sh/chart` label on the objects it renders, as on every
+chart upgrade). What changes:
+
+- A release **first installed with 2.4.24 or later** can be rolled back to any
+  revision, the first included. The MeshConfig is not touched by a rollback: it
+  keeps its UID and your edits.
+- A release **that an older chart seeded** keeps that revision as it was
+  stored, so it still cannot be a rollback target: any revision whose stored
+  manifest holds a MeshConfig, usually revision 1 and no other. Every other
+  revision can be rolled back to, across the upgrade to 2.4.24 in both
+  directions. To see which revisions are affected (the count is not 0 for a
+  revision that cannot be rolled back to):
+
+  ```bash
+  for rev in $(helm history aether -n aether-system -o json | jq -r '.[].revision'); do
+    echo "revision $rev: $(helm get manifest aether -n aether-system --revision "$rev" | grep -c '^kind: MeshConfig')"
+  done
+  ```
+
+  To get what such a revision ran without a rollback, upgrade to that
+  revision's chart with that revision's values (never `--reuse-values`). The
+  MeshConfig is live, so an upgrade does not render it and nothing stands in
+  the way. With `REV` the affected revision:
+
+  ```bash
+  REV=1
+  helm history aether -n aether-system            # the CHART column of revision $REV
+  helm get values aether -n aether-system --revision "$REV" -o yaml > "revision-$REV-values.yaml"
+  helm upgrade aether oci://quay.io/aethermesh/chart-aether --version <that revision's chart version> \
+    --namespace aether-system -f "revision-$REV-values.yaml"
+  ```
+
+  The same command recovers a release that a rollback to such a revision left
+  `failed`; so does `helm rollback aether <the revision that was current before
+  the failed rollback>`. `helm history` shows that revision as `superseded`,
+  not `deployed`: it is the one just below the `failed` one.
+- **One case still seeds the MeshConfig as a release object**, because a
+  `pre-install` hook runs before any object of the release exists and so cannot
+  create a MeshConfig in a namespace the same revision creates: the control
+  plane's with `namespace.create=true` (the release stored in another
+  namespace). Under Helm 3 that one revision cannot be rolled back to once a
+  later one exists; the check and the way round above apply to it. The edge's
+  MeshConfig on the revision that creates the edge namespace
+  (`edge.enabled=true` with `edge.namespaceCreate=true`, its default) was the
+  second such case in 2.4.24 and is not one since 2.4.25: see "Chart 2.4.25"
+  below, also for an edge namespace that 2.4.24 or an older chart created.
+- For a MeshConfig seeded by the hook, `helm get manifest` does not list it
+  and `helm get hooks` does, on the revision that seeded it; the object carries
+  no `meta.helm.sh/release-*` annotations. One that an older chart seeded keeps
+  the annotations it has. `helm uninstall` leaves either behind.
+- **The seed hook never deletes a MeshConfig.** The chart decides to render
+  the seed when it finds no MeshConfig, and Helm creates it later in the same
+  upgrade, as a `pre-upgrade` hook. Helm's default for a hook is to delete the
+  live object of that name first; a MeshConfig created in between (by you, by
+  a GitOps tool, by a second `helm upgrade`) would be deleted and replaced by
+  the seed, with the upgrade reporting success. The hook therefore carries
+  `helm.sh/hook-delete-policy: never`. `never` is not one of Helm's policies:
+  naming any value turns the default off, and Helm acts only on the three it
+  knows, so nothing is deleted (`hook-failed`, the documented value, can still
+  delete your object under Helm 4's server-side apply). What you see instead,
+  when a MeshConfig appears during an upgrade that is seeding one:
+
+  ```
+  Error: UPGRADE FAILED: pre-upgrade hooks failed: warning: Hook pre-upgrade aether/templates/controller-meshconfig.yaml failed: 1 error occurred:
+  	* meshconfigs.config.aether.io "default" already exists
+  ```
+
+  The MeshConfig is the one that was created, untouched. The release is
+  `failed` at a new revision and the previous revision is still `deployed`;
+  `pre-upgrade` hooks run before Helm updates anything, so no workload
+  changed. **Run the same `helm upgrade` again**: the MeshConfig is live now,
+  the seed is not rendered, and the upgrade goes through. With Helm 4 and a
+  release it applies server side, the first upgrade goes through instead: the
+  MeshConfig is not deleted (same UID) and keeps every field it set, but
+  **the seed is applied to it**: it gains the chart's labels, the hook
+  annotations and any `meshConfig.proxy` field of your values that the object
+  does not set itself (measured with Helm 4.2.0: a seed with
+  `tracingEnabled: true` over an object that set only `accessLogsEnabled:
+  true` left both set). With the default, empty `meshConfig.proxy` the spec
+  does not change. If the seed and the object set the same field to different
+  values, the upgrade fails on `Apply failed with 1 conflict` and the object
+  is untouched (run it again). So with Helm 4, a non-empty `meshConfig.proxy`
+  and a MeshConfig that something else may create during an upgrade, compare
+  the spec as well as the UID before and after, or set
+  `meshConfig.createDefault=false` and own the object yourself:
+
+  ```bash
+  kubectl -n aether-system get meshconfig default -o jsonpath='{.metadata.uid} {.spec}{"\n"}'
+  ```
+- `helm install --no-hooks` seeds no MeshConfig, and the agent pods then stay
+  in `ContainerCreating` (they mount the ConfigMap the controller projects
+  from it). Run a `helm upgrade` without `--no-hooks`, or apply a MeshConfig
+  yourself.
+- A tool that renders with `helm template` and applies the result has no
+  cluster to look the MeshConfig up in: it renders the seed on every sync (as
+  it did before), now with the hook annotation on it. Set
+  `meshConfig.createDefault=false` there and keep the MeshConfig with your
+  other manifests. A controller that drives Helm itself (Flux's
+  helm-controller) is not affected.
+
+After an upgrade to 2.4.24, check that the MeshConfig was left alone (the same
+UID and generation as before the upgrade) and that nothing rolled:
+
+```bash
+kubectl -n aether-system get meshconfig default \
+  -o jsonpath='{.metadata.uid} generation={.metadata.generation}{"\n"}'
+kubectl -n aether-system get ds,deploy \
+  -o custom-columns=KIND:.kind,NAME:.metadata.name,GENERATION:.metadata.generation
+```
+
+#### Chart 2.4.25: the edge's MeshConfig is in every revision; a kept Namespace and `helm rollback` (#1514, #1515)
+
+Both items are about **Helm 3**. For an object that is live and in the manifest
+it rolls back to, Helm 3 starts from the copy in the current manifest and fails
+when there is none (`no <Kind> with the name "<name>" found`; measured with
+3.18.4). Helm 4 starts from the live object instead (`resource exists on
+cluster but not in original release, using cluster state as baseline`) and
+rolls back; measured with 4.2.0 on both cases below.
+
+**The edge's MeshConfig (#1514).** With `edge.enabled=true` and
+`edge.namespaceCreate=true` (its default) the chart creates the edge namespace
+and the `default` MeshConfig in it on the same revision. A hook cannot do that
+(it runs before the namespace exists), so that MeshConfig is an object of the
+release. Up to 2.4.24 it was seeded once: in that revision's manifest, in no
+later one, and still live, so under Helm 3 `helm rollback` to that revision
+failed like #1471:
+
+```
+$ helm rollback aether 1 -n aether-system
+Error: no MeshConfig with the name "default" found
+```
+
+Since 2.4.25 the chart renders it on **every** revision, for a release whose
+edge namespace it created: the namespace and the MeshConfig both carry
+`aether.io/edge-meshconfig-in-manifest: "true"`, and either one is enough
+afterwards. The chart sets no field of
+that MeshConfig's spec (`spec: {}` whatever the values), so rendering it again
+changes nothing in it: your edits survive every upgrade and every rollback
+(measured with Helm 3.18.4 and Helm 4.2.0: the same UID and the edited field
+after an upgrade and a rollback in each direction). `helm get manifest` lists
+it on every revision.
+
+- **Upgrading from 2.4.24 to 2.4.25 rolls no workload and changes no
+  MeshConfig** (measured: every DaemonSet and Deployment keeps its generation,
+  both MeshConfigs keep their UID, generation and spec, and the edge namespace
+  gets no new annotation). What Helm does patch, as on every chart upgrade, is
+  the `helm.sh/chart` label on the objects it renders; pod templates do not
+  carry it. An edge namespace that 2.4.24 or an older chart created is not marked, and the
+  chart treats it as before: the MeshConfig is live, so it is not rendered. The
+  revision that created that namespace keeps the MeshConfig in its stored
+  manifest and still cannot be a Helm 3 rollback target; the check and the way
+  round of "Chart 2.4.24" apply (an upgrade to that revision's chart with that
+  revision's values).
+- Do not add the annotation to such a namespace or MeshConfig by hand. The
+  next upgrade would bring the live MeshConfig back into the manifest, and that
+  revision could then not be rolled back to from an older one: the same
+  failure, one revision later.
+- **Back through 2.4.24** (an upgrade to the 2.4.24 chart, or a rollback to one
+  of its revisions, on a release whose edge namespace 2.4.25 created). Chart
+  2.4.24 renders the edge Namespace without the annotation, so Helm takes it
+  off the namespace, and it does not render the live MeshConfig, which leaves
+  the manifest and stays in the cluster with its annotations. The next
+  **upgrade** to 2.4.25 or later reads the marker from the MeshConfig, renders
+  it again and marks the namespace again, and rollbacks to the 2.4.25
+  revisions work from then on (measured with Helm 3.18.4 and Helm 4.2.0;
+  e2e leg viii-b). What does not work under Helm 3 is a `helm rollback`
+  straight **from a 2.4.24 revision to a 2.4.25 one**: the 2.4.24 manifest
+  holds no MeshConfig, and nothing in a chart can change a stored manifest.
+  Use `helm upgrade` to go forward from 2.4.24. The same holds from a
+  rollback copy of a 2.4.24 revision.
+- Which form a release has:
+
+  ```bash
+  kubectl get namespace aether-ingress \
+    -o jsonpath='{.metadata.annotations.aether\.io/edge-meshconfig-in-manifest}{"\n"}'
+  kubectl -n aether-ingress get meshconfig default \
+    -o jsonpath='{.metadata.annotations.aether\.io/edge-meshconfig-in-manifest}{"\n"}'
+  # "true" on either: the edge's MeshConfig is rendered on every revision of
+  # this chart. Both empty: seeded once (the namespace is older than 2.4.25,
+  # or was created with meshConfig.createDefault=false).
+  ```
+- With `meshConfig.createDefault=false` the chart renders no MeshConfig and
+  the namespace is created unmarked. If a marked release turns the seed off,
+  the MeshConfig leaves the manifest and stays in the cluster
+  (`helm.sh/resource-policy: keep`); under Helm 3 the revisions before that
+  one can then not be rolled back to, as in the next item.
+- `helm uninstall`, and an upgrade with `edge.enabled=false`, delete the edge
+  namespace as before, and the MeshConfig with it.
+- The control plane's MeshConfig with `namespace.create=true` is **not**
+  changed: its seed carries `meshConfig.proxy`, and a spec that is rendered
+  again is patched over yours. It stays the one exception of "Chart 2.4.24".
+
+After an upgrade to 2.4.25 with the edge on, check that the edge's MeshConfig
+was left alone and that the edge did not roll:
+
+```bash
+kubectl -n aether-ingress get meshconfig default \
+  -o jsonpath='{.metadata.uid} generation={.metadata.generation}{"\n"}'
+kubectl -n aether-ingress get deploy aether-edge \
+  -o custom-columns=NAME:.metadata.name,GENERATION:.metadata.generation
+```
+
+**A Namespace that left the manifest (#1515).** The chart keeps rendering a
+Namespace the release owns, so that Helm never deletes it (#1403). It stops
+when the release no longer owns it: the ownership annotations
+(`meta.helm.sh/release-name`, `meta.helm.sh/release-namespace`) were removed
+from the live Namespace, or a first install failed and was upgraded after the
+`keep` command of "Chart 2.4.21". The Namespace stays
+(`helm.sh/resource-policy: keep`), and from then on a revision whose stored
+manifest holds it cannot be a Helm 3 rollback target. Measured on kind, Helm
+3.18.4, revision 2 holding the Namespace and revision 3 not:
+
+```
+$ helm rollback aether 2 -n aether-system
+Error: no Namespace with the name "aether-system" found
+```
+
+The namespace is untouched (same UID, `Active`), and the release is `failed` at
+a new revision, with the revision that was current now `superseded` and none
+`deployed` (see "Chart 2.4.24"). A rollback to a revision without the Namespace works and puts
+the release back to `deployed`, and so does Helm 4.2.0 on the same steps. Nothing in a chart can change this: the manifests are already stored,
+and Helm refuses a Namespace the release does not own if the chart renders it
+again. The check and the way round are those of "Chart 2.4.24", with
+`Namespace` in place of `MeshConfig`:
+
+```bash
+for rev in $(helm history aether -n aether-system -o json | jq -r '.[].revision'); do
+  echo "revision $rev: $(helm get manifest aether -n aether-system --revision "$rev" | grep -c '^kind: Namespace')"
+done
+# To get what an affected revision ran (also after a failed rollback):
+REV=2
+helm get values aether -n aether-system --revision "$REV" -o yaml > "revision-$REV-values.yaml"
+helm upgrade aether oci://quay.io/aethermesh/chart-aether --version <that revision's chart version> \
+  --namespace aether-system -f "revision-$REV-values.yaml"
+```
+
+#### Chart 2.4.26: the node proxy's Envoy stats name their service (#1561)
+
+The node proxy's Envoy stats (`envoy_*`, `aether_requests_total`) are exported
+with the resource attribute `service.name=aether-proxy`. They had no
+`service.name`. **Where the backend maps `service.name` to `job`**, their
+series gain `job="aether-proxy"`: Prometheus's OTLP ingestion does that by
+itself, another backend may need the mapping made
+([`observability/metric-labels.md`](./observability/metric-labels.md), "What
+you must do"). Everything below about `job` holds for such a backend; where
+nothing maps the attribute, the series keep the labels they had.
+
+What was measured and what was not. Measured: the renders of 2.4.25 and
+2.4.26; the pinned Envoy exporting that `service.name` with the chart's
+bootstrap block (a test); the queries below against synthetic series, with
+promtool. **Not measured: the upgrade itself on a cluster.** What the
+supervisor does with a changed bootstrap is taken from "Which workloads a chart
+upgrade rolls" above.
+
+**What the upgrade that crosses 2.4.26 changes in the render:**
+
+| Object | What changes | Effect |
+| --- | --- | --- |
+| `aether-proxy-config` ConfigMap, only when `otel.endpoint` is set | its `envoy.yaml`: the Envoy stats sink gains a second resource detector that sets `service.name: aether-proxy` | no pod is replaced; the supervisor watches the mounted file and hot-restarts Envoy in place, on every node. See below |
+| every Deployment and DaemonSet | nothing in a pod template | not rolled by the chart |
+
+With `otel.endpoint` empty the ConfigMap's `envoy.yaml` is what 2.4.25
+rendered (the object's `helm.sh/chart` label moves with the version, as on
+every object, and is not mounted), so no Envoy restarts for it.
+
+"Not rolled by the chart" is about the chart: a release built from a newer
+commit can carry a new image digest for a workload, and that rolls it, as on
+any upgrade.
+
+**The hot restart.** A changed `envoy.yaml` is picked up as "Which workloads a
+chart upgrade rolls" describes for this ConfigMap: each node's supervisor
+starts a new Envoy epoch when that node's kubelet delivers the file, on every
+node independently, **not one node at a time**, so the nodes can overlap,
+unlike a DaemonSet roll. For the length of each restart two Envoy processes
+run on the node: check the headroom of "Sizing nodes for a proxy hot restart"
+before the upgrade, and watch the upgrade as you would a proxy roll. A
+rollback to 2.4.25 changes `envoy.yaml` back, so expect the same again.
+
+**What changes in the stored metrics**, where `service.name` becomes `job`:
+
+- **`job="aether-proxy"` appears on the node proxy's Envoy series**, from each
+  node's restart on. A label that appears makes each of them a new series; the
+  old one receives no more samples.
+- **For five minutes the old and the new series are both read.** A pushed
+  series has no staleness marker, so the last sample of an old (`job`-less)
+  series stays in the 5-minute lookback beside the new one. An aggregation
+  that does not keep `job` counts both. With promtool: `sum by (node,
+  aether_cluster) (envoy_cluster_membership_healthy)` over 4 hosts read 8 two
+  minutes after the restart, and 4 again once the five minutes had passed.
+  The same arithmetic applies to a sum over any gauge these proxies export. An
+  alert of your own with a threshold on such a sum can fire in that window.
+- **Selectors**, with promtool:
+  - `{job="aether-proxy"}` reads the new series only and does not double.
+  - `{job!="aether-edge-proxy"}` selects the node proxy's series before and
+    after; inside the five minutes it reads the old and the new one.
+  - `{job=""}`, a selector that relied on the label being absent, matches
+    nothing once the old series have left the lookback. Change it to
+    `{job="aether-proxy"}`, or to `{job=~"|aether-proxy"}` while both chart
+    versions are stored.
+- **Counters.** Not measured. A `rate()` or `increase()` whose window spans
+  the restart is computed per series, over one that ends and one that starts,
+  so a `sum(rate())` can read low around the restart.
+- **The supervisor's name.** The proxy container's environment is as it was
+  (its pod template renders unchanged), and that environment is all the
+  supervisor's resource is built from, so `aether_supervisor_*` should stay
+  `job="aether-proxy-supervisor"`. The last query below checks it.
+- No rule in `docs/observability/` selects on the node proxy's Envoy series.
+
+The label changes once, so this happens at the upgrade (and at a rollback
+across it), not at each later proxy roll.
+
+Before and after (never `--reuse-values`; read the values back and pass them
+with `-f`):
+
+```bash
+# Which pods were replaced. The chart replaces none; a pod with a new name and
+# age was rolled for another reason (a new image digest).
+kubectl -n aether-system get pods -L controller-revision-hash,pod-template-hash \
+  --sort-by=.metadata.creationTimestamp
+# The bootstrap the chart rendered: the static detector is there with
+# otel.endpoint set, and absent without it.
+kubectl -n aether-system get configmap aether-proxy-config \
+  -o jsonpath='{.data.envoy\.yaml}' | grep -A4 'resource_detectors.static_config'
+```
+
+```promql
+# With service.name mapped to job: one result per proxy kind (aether-proxy,
+# and aether-edge-proxy with the edge on). A result with no job is a node
+# whose Envoy has not restarted on the new bootstrap yet, or, for five minutes
+# after it did, the last sample of its old series.
+count by (job) (envoy_server_live)
+# Each node's Envoy epoch. Compare with the value before the upgrade: a node
+# whose epoch did not move has not picked the bootstrap up.
+max by (node) (envoy_server_hot_restart_epoch{job="aether-proxy"})
+# The supervisor's series: the same job as before the upgrade.
+count by (job) ({__name__=~"aether_supervisor_.+"})
+```
+
+#### Chart 2.4.27: one release per cluster, the SPIRE-served webhook's identity, narrower webhook RBAC (#1540, #1457, #1456)
+
+**What an upgrade changes.** No object is renamed. No pod template changes, so
+this chart change rolls no workload by itself (a release built from another
+commit carries other image digests, and those roll the workloads as always:
+"Which workloads a chart upgrade rolls" above). The objects that change are the
+controller's ClusterRole, and only with `controller.webhook.spire=true`, and
+the `helm.sh/chart` label on each object's own metadata.
+
+**Two renders that were accepted and are now refused:**
+
+| Refused when | Message starts with | Do |
+|---|---|---|
+| `controller.webhook.spire=true`, `controller.webhook.clusterSpiffeID.create=true` (the default), `controller.webhook.clusterSpiffeID.className` empty, **and** the cluster serves the `spire.spiffe.io/v1alpha1` `ClusterSPIFFEID` API | `controller.webhook.spire=true with controller.webhook.clusterSpiffeID.create=true, but controller.webhook.clusterSpiffeID.className is empty` | Set `className` to your spire-controller-manager class; or, if the controller's identity is registered by a `ClusterSPIFFEID` or an entry of your own, set `controller.webhook.clusterSpiffeID.create=false`. Nothing else changes with either. |
+| The `aether-proxy` DaemonSet in the release's namespace, or the `csi.aether.io` CSIDriver, exists and names **another** Helm release | `... already exists and belongs to another aether release` | Upgrade that release instead of installing a second one, or uninstall it first (`docs/configuration.md`, "One release per cluster"). An upgrade of the release that owns them is not affected. A first **install** is also refused when one of them names a release of the same name by its `app.kubernetes.io/instance` label alone (no `meta.helm.sh/release-namespace`): if it is a leftover of a release that is gone, delete it and install again. |
+
+The first reads what the cluster serves (`.Capabilities.APIVersions`), the
+second reads the two live objects (`lookup`). A render without a cluster
+(`helm template`, a client-side dry run, a GitOps tool that renders with
+`helm template`) is refused by neither, unless it passes
+`--api-versions spire.spiffe.io/v1alpha1/ClusterSPIFFEID`, which arms the
+first. In the first state on a cluster
+that does not serve the API, the install notes carry a `WEBHOOK IDENTITY NOTE`.
+
+To see before upgrading whether the first applies to a release:
+
+```bash
+helm get values <release> -n <ns> -a -o json |
+  jq '.controller.webhook | {spire, create: .clusterSpiffeID.create, className: .clusterSpiffeID.className}'
+kubectl api-resources --api-group=spire.spiffe.io -o name   # clusterspiffeids...: the API is served
+```
+
+**The controller's webhook-configuration grant is `get` and `update`** (it was
+`get, list, watch, update, patch`), with `controller.webhook.spire=true` only.
+The caBundle injector has read each configuration by name, uncached, and
+written it with an update since #1453, which every chart from 2.4.19 ships;
+its test runs it with `list`, `watch` and `patch` refused. A controller image
+**older** than that keeps an informer on both kinds and stops injecting when
+`list` and `watch` are refused (#1431): during the upgrade from a chart older
+than 2.4.19 that is the old controller pods, until the Deployment has rolled;
+do not pin an older controller image under this chart. After the upgrade, with
+the SPIRE-served webhook:
+
+```bash
+NS=aether-system
+SA=$(kubectl -n "$NS" get deploy -l app.kubernetes.io/name=aether-controller \
+  -o jsonpath='{.items[0].spec.template.spec.serviceAccountName}')
+for kind in validatingwebhookconfigurations mutatingwebhookconfigurations; do
+  for verb in get update list watch patch; do   # expect: yes yes no no no
+    printf '%s %s: ' "$kind" "$verb"
+    kubectl auth can-i "$verb" "$kind.admissionregistration.k8s.io" \
+      --as="system:serviceaccount:$NS:$SA"
+  done
+done
+```
+
+and the injector keeps working: no `webhook caBundle injection failed` line
+from the controller's leader, and this stays 0 (the caBundle length check of
+"The pod-mutating webhook's caBundle is empty" shows the result):
+
+```promql
+sum by (kind, reason) (increase(aether_controller_webhook_cabundle_injection_failures_total[30m]))
+```
+
+None of this was run on a cluster for this change: the grant is tested as a
+render and the injector against a fake API server
+(`TestCABundleInjectorNeedsOnlyGetAndUpdate`).
+
+#### Chart 2.4.28: the agent DaemonSet says which external-harness contract the chart satisfies (#1544)
+
+**What an upgrade changes.** One annotation appears on the agent DaemonSet's
+own metadata, `aether.io/harness-contract-version`, holding the `version` of
+`test/harnesscontract/external-harness.yaml` the chart was packaged with
+("The external-harness contract" above has what it means and what it does
+not). No object is renamed and no pod template changes, so this chart change
+rolls no workload by itself (a release built from another commit carries other
+image digests, and those roll the workloads as always: "Which workloads a
+chart upgrade rolls" above). Besides the annotation, the `helm.sh/chart` label
+on each object's own metadata changes, as with every chart version.
+
+There is nothing to set and nothing to do before the upgrade. Afterwards:
+
+```bash
+NS=aether-system
+# The contract the chart satisfies. Empty: a chart older than 2.4.28, or one
+# rendered from the source tree.
+kubectl -n "$NS" get daemonset aether-agent \
+  -o jsonpath='{.metadata.annotations.aether\.io/harness-contract-version}{"\n"}'
+# The annotation did not reach the pods, and adding it replaced none: the
+# DaemonSet's pod template has no annotation of that name...
+kubectl -n "$NS" get daemonset aether-agent \
+  -o jsonpath='{.spec.template.metadata.annotations.aether\.io/harness-contract-version}{"\n"}'
+# ...and the agent pods' controller-revision-hash is what it was before the
+# upgrade, when the upgrade changed nothing else of the agent (the same image
+# digests and values). Read it before and after.
+kubectl -n "$NS" get pods -l app.kubernetes.io/component=agent \
+  -L controller-revision-hash
+```
+
+A later bump of the contract's `version` changes that one annotation at the
+next chart upgrade and nothing else of the render.
+
+None of this was run on a cluster for this change. What was measured is the
+render: the packages built from this change and from the commit before it
+have byte-identical pod templates for every workload, the render differs by
+the annotation and the `helm.sh/chart` labels only, and the two `jsonpath`
+expressions above, run over the rendered DaemonSet with kubectl's own printer
+and no cluster, print the version and an empty line.
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod
@@ -2041,12 +3022,47 @@ Namespace, when the chart creates it with `namespace.create`) only; use
 `-l app=authz-canary` / `-l app=authz-echo` for its pods, whose labels did not
 change.
 
-Nothing refreshes the `authzCanary.image` digest automatically (the repository
-has no Renovate, and Dependabot opens no pull requests). To move it, read the
-new tag's index digest and put both in `charts/prober/values.yaml`:
+Nothing moves the `authzCanary.image` and `authzCanary.echo.image` digests by
+itself. Both are listed in `scripts/third-party-images.txt` since chart 1.0.7
+(#1401; the values themselves did not change, so that upgrade rolls nothing):
+`scripts/third-party-images.sh outdated` says when the registry has moved past
+one. See *Refreshing third-party image pins*.
+
+#### The udsecho chart (#1400, #1402)
+
+Two changes in chart **2.0.3**, neither of which touches a selector:
+
+- **Labels.** Until 2.0.3 no object of the chart carried any label. Its seven
+  objects (three ServiceAccounts, three Deployments, the `EndpointPolicy`) now
+  carry the standard set on their own metadata: `helm.sh/chart`,
+  `app.kubernetes.io/name: udsecho`, `instance`, `component` (the workload:
+  `uds-echo`, `uds-cr-echo` or `uds-client`; the `EndpointPolicy` belongs to
+  `uds-cr-echo`), `part-of: aether`, `managed-by` and `version`. The pod
+  templates are unchanged (`app: <name>` and `aether.io/managed: "true"`, as
+  before), so the labels roll nothing, and the pods themselves are still found
+  with `-l app=<name>`, not with the new labels.
+- **The client image is pinned by digest.** `client.image` was
+  `curlimages/curl:8.22.0` and is now that tag with the digest of its
+  multi-arch index (`curlimages/curl:8.22.0@sha256:58adaa4e…6777`). **The
+  upgrade that crosses 2.0.3 rolls the one-replica `uds-client` Deployment
+  once** for it, unless you set `client.image` yourself. The two echo
+  Deployments are not rolled by the chart (a release built from a new commit
+  still carries a new udsecho image and rolls them for that).
+
+Before and after the upgrade (the chart's namespace, `aether-test` by default):
 
 ```bash
-docker buildx imagetools inspect curlimages/curl:<tag>   # the top "Digest:" line
+NS=aether-test
+# Everything the release owns (empty before 2.0.3):
+kubectl -n "$NS" get deploy,sa,endpointpolicy -l app.kubernetes.io/name=udsecho \
+  -L helm.sh/chart,app.kubernetes.io/component
+# A pod that was not rolled keeps its name, its age and its hash; only
+# uds-client's changes.
+kubectl -n "$NS" get pods -l 'app in (uds-echo,uds-cr-echo,uds-client)' \
+  -L pod-template-hash --sort-by=.metadata.creationTimestamp
+# The image the client really runs: the digest the node resolved.
+kubectl -n "$NS" get pods -l app=uds-client \
+  -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"  "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
 ```
 
 ### Rendering the chart reproducibly (#1364)
@@ -2208,11 +3224,13 @@ did exactly this on 2026-09-19, spreading the o11y stack and taking w01 from
 watch them specifically. A pod stuck `Terminating` → resolve it first via
 §8 "A pod is stuck `Terminating`"; do not start a roll on top of it.
 
-**Load generators must not be the victim.** The priority-0 k6 runner was picked
-as the preemption victim twice on a dense node and cost a soak its data; it runs
-under the `aether-soak-loader` PriorityClass since #811. Any new load or probe
-workload needs a PriorityClass for the same reason — an evicted generator looks
-exactly like a passing test.
+**Load generators must not be the victim.** A soak's priority-0 load generator
+was picked as the preemption victim twice on a dense node and cost the soak its
+data; since #811 the load generators run under a PriorityClass of their own (the
+soak is run by an external soak harness, maintained outside this repository, and
+the class is that harness's object). Any new load or probe workload needs a
+PriorityClass for the same reason — an evicted generator looks exactly like a
+passing test.
 
 ### Agent surge roll (proposal 041)
 
@@ -2480,7 +3498,7 @@ and #979 merged on 2026-09-29; the re-soak of the merged build:
   - A successor that logs `initial fetch timed out for …Listener` next to `starting workers` is this case.
 - **k6 had 147 failures in 9.18 M requests.**
   - 141 were `503 NC` first-use timeouts at loader start, before T0 (#1086).
-  - 6 were `504 UT` to a terminating svc-3 pod in the TRIPLE (#1087).
+  - 6 were `504 UT` to a terminating pod of one of the soak's services in the TRIPLE (#1087).
 The one exception is a service with any endpoint behind the east/west
 waypoint (019): it stays h2, because the waypoint tunnel has no QUIC leg.
 
@@ -2549,8 +3567,8 @@ talos-main is 8–14 SAs × ~19 services ≈ 150–270 per node, the pairs actua
 stay the same).
 
 **What a healthy node reads.** `observed_pairs` ≈ the (source ServiceAccount,
-destination) pairs that carry traffic on that node: on talos the k6 loaders, the
-prober and the dialers, so **single digits per node**, and `quic_clusters` equal to
+destination) pairs that carry traffic on that node: under a soak, its load
+generators and dialers plus the prober, so **single digits per node**, and `quic_clusters` equal to
 it. `observed_pairs` that is a whole multiple of `local_identities` on every node
 (every local SA × the same destinations) is the #1033 red reading (rev245, 2026-09-28: 24/24/12, 18/18/9, 28/28/14, 20/20/10,
 20/20/10), not a busy fleet.
@@ -2673,7 +3691,7 @@ then routed to a name Envoy would never ask for again. `//agent/test/mtlspool`
 `TestOnDemandQUICDormantTwinRepublishedWhenSourceReturns/forget_control` reproduces
 it: `status=503 … in 2.000099268s`, and no CDS request reaches the control plane.
 
-**`DC` 200s on a QUIC destination at a source-proxy roll (#1009)** are benign when the line is `DC` + `downstream_remote_disconnect` + 200 + the clean-line `bytes_sent`: the HTTP/1.1 client closed after a complete body before the h3 FIN was decoded. `upstream_rx_ms` and `downstream_tx_end_ms` read `-` on such a line. The rule and its LogsQL are in `e2e/soak/README.md`, "Benign `DC` at a source-proxy hot restart"; any other `DC` is a real failure.
+**`DC` 200s on a QUIC destination at a source-proxy roll (#1009)** are benign when the line is `DC` + `downstream_remote_disconnect` + 200 + the clean-line `bytes_sent`: the HTTP/1.1 client closed after a complete body before the h3 FIN was decoded. `upstream_rx_ms` and `downstream_tx_end_ms` read `-` on such a line. The soak (run by an external soak harness, maintained outside this repository) grades its `DC` lines by this rule; any other `DC` is a real failure.
 
 **Why the agent never forgets a subscribed pair.** The agent tracks which twins the
 proxy holds an ODCDS subscription for: those it asked for by name, and those it
@@ -2764,7 +3782,7 @@ snapshot), with no debounce and no wait on a registry reload. What used to lose 
 the 2 s timeout was Envoy warming the twin. A twin names its source ServiceAccount's
 SVID statically in its transport socket, so a twin published before that secret is
 in the snapshot warms on SDS until SPIRE delivers it. On rev248 (2026-09-28
-15:44Z, the k6 loaders' first pods on every node right after an agent roll) that
+15:44Z, the soak load generators' first pods on every node right after an agent roll) that
 took 6.9-7.4 s from the CNI ADD, and 428 requests failed 503 `NC`. Two rules close
 it:
 
@@ -2824,7 +3842,8 @@ cores) measured an HTTP/3 mesh request at **1.18×** the proxy CPU of an h2 one
 (#979, merged as 33ff5e9) was held to ([#1021, "Same-revision measurement, 2026-09-28"](https://github.com/bpalermo/aether/issues/1021)).
 The earlier ~3.3× (~11 ms vs ~3.3 ms, rev242 QUIC vs rev239 h2) compared two
 builds and is superseded. Grade it only with the
-matched-window method in `e2e/soak/README.md` ("The QUIC per-request cost gate"):
+matched-window method of the soak's QUIC per-request cost gate (the soak is run by
+an external soak harness, maintained outside this repository):
 envoy-only Pyroscope cores over the T0+6h05m→T0+7h25m no-roll window of a QUIC run
 and of an h2 reference run with matched per-destination rps, loaded minus idle, per
 request. Fleet CPU alone says nothing, because the QUIC share of the load changes
@@ -2834,7 +3853,7 @@ Expected upstream QUIC connections to one destination are **one per (source node
 source ServiceAccount that dialled it, Envoy worker that SA's app connections landed
 on, destination endpoint)**. They are NOT one per app connection. A twin does not
 pool per downstream connection (`QUICClusterFrom` pins
-`connection_pool_per_downstream_connection` off), so a k6 runner's 60 keep-alive
+`connection_pool_per_downstream_connection` off), so a load generator's 60 keep-alive
 connections share its node's per-worker pools. Pods of one ServiceAccount share a
 twin's connections, because the SA is the identity. The upper bound per destination
 is `Σ_nodes (dialling SAs × workers × endpoints)`:
@@ -2919,7 +3938,7 @@ mesh-wide — it is not an escape hatch.
 `503` with response flag `NC` (no cluster) for ~15 s on every request to every
 QUIC destination, then recovers on its own. Other callers on the node
 are unaffected; h2 destinations are unaffected. On talos (rev242) it was 1,060
-client-visible 503/NC in 11 s when the k6 loaders started.
+client-visible 503/NC in 11 s when the soak's load generators started.
 
 Since #1020 every twin is a late twin, because it is built on the pair's first
 request. A regression of this fix would therefore hit **every** new (source,
@@ -3076,8 +4095,7 @@ the pod. Now that `node` is the node, a new pod on the same node satisfies that 
 for a dead pod's frozen burst. Guard `on (node, pod)` instead.
 
 **The failure line.** Every probe that does not succeed prints one line to the prober's
-stdout. It follows the soak's k6 `AETHER_FAIL` convention: a fixed marker, then one
-JSON object:
+stdout: a fixed marker, then one JSON object:
 
 ```
 AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"dial":"10.96.14.7:18081","remote":"10.96.14.7:18081","local":"10.244.3.114:49292","trace_id":"9fa32b3befe77ea2253e8831d3472fa8","pod":"prober-h2mzs","node":"main-worker-01","n":1,"truncated":false}
@@ -4107,8 +5125,8 @@ kubectl -n aether-system get pod <proxy-pod> -o jsonpath='{range .status.contain
 
 Reproduce it on kind with `e2e/hotrestart-wedge.sh`: `WEDGE_SKIP_PARENT_STATS=false
 WEDGE_FREEZE_S=6` wedged 4 of 4 restarts on 2026-09-28 against the unpatched image, and
-0 against the patched one (see the header of the script). The per-roll soak gates are in
-`e2e/soak/README.md`, "The hot-restart wedge gates (#1050)".
+0 against the patched one (see the header of the script). The per-roll soak gates (the
+hot-restart wedge gates, #1050) are documented with an external soak harness, maintained outside this repository.
 
 ### A node stalls for seconds during a handoff (#1093)
 
@@ -4606,8 +5624,8 @@ outlasts the 15 s parent-shutdown window.
   to the minimum on both ends) also closes a twin connection with no open stream after
   8 s, so raising this flag above 8 s no longer lengthens reuse.
 
-A request in flight at the parent's exit still dies, as it does on h2. The soak gate is
-in `e2e/soak/README.md`, "The h3 stateless-reset gate (#1054)"; the kind leg is
+A request in flight at the parent's exit still dies, as it does on h2. The soak gate (the
+h3 stateless-reset gate, #1054) is documented with an external soak harness, maintained outside this repository; the kind leg is
 `e2e/eastwest-quic-hotrestart.sh` with `HR_MODE=sparse` (two nodes, `EWQ_WORKER=1`).
 
 ### `504 UT` after exactly 15 s over a `quic:` twin to a terminating pod (#1087)
@@ -5598,9 +6616,10 @@ on (the default), was never affected. To check a release:
 NS=aether-system
 SA=$(kubectl -n "$NS" get deploy -l app.kubernetes.io/name=aether-controller \
   -o jsonpath='{.items[0].spec.template.spec.serviceAccountName}')
-# Expect "yes" for each verb when the webhook is SPIRE-served and the
-# MutatingWebhookConfiguration exists.
-for verb in get list watch update; do
+# Expect "yes" for get and update when the webhook is SPIRE-served and the
+# MutatingWebhookConfiguration exists. list, watch and patch: "yes" up to chart
+# 2.4.26, "no" from 2.4.27 (#1456), unless another binding grants them.
+for verb in get update list watch patch; do
   printf '%s: ' "$verb"
   kubectl auth can-i "$verb" mutatingwebhookconfigurations.admissionregistration.k8s.io \
     --as="system:serviceaccount:$NS:$SA"
@@ -5673,6 +6692,21 @@ logs **WARN** `outbound cluster bound to a foreign identity` and increments
 any more (a missed CNI DEL) logs WARN `outbound identity mapping has no owning pod`.
 Above 200 changed pairs in one snapshot a single `outbound identity bindings changed`
 summary replaces the per-pair lines, keeping the distinct source→identity transitions.
+
+**What `snapshot_version` on a binding line means (#1621).** The outbound and the
+inbound lines are made from what the snapshot of that version was built from: its own
+listeners, its own secrets, and the clusters its build read. A pod is named only when
+the listener its entry held is one of that snapshot's listeners. So a line never names
+a pod, a cluster or a served secret that the snapshot of its version does not carry.
+(Agents before this read the agent's maps after the snapshot was set, so a change that
+landed during a build was named under the version before it, and the build that
+published it said nothing.) Two things are not exact. A pod whose listeners were
+written in the few statements between the build's two reads of the listener map is in
+the snapshot and is first named by the next build; one that was rebuilt in that gap is
+named again by the next build although nothing about it changed. And the
+netns → identity index is no part of a snapshot: it is read during the build. A pod
+whose network namespace is gone is not named while the agent leaves its listeners out
+of the snapshot.
 
 ```bash
 # Every re-bind on one node, around the roll.
@@ -5771,7 +6805,8 @@ on them are in `docs/observability/agent-pin-alerts.yml`:
 | WARN `mesh clusters published with no server-identity SAN pin` | **which** clusters, and why each | one line per `reason` per snapshot, first 20 names per line |
 | counter `aether_agent_identity_cluster_unpinned_total{reason}` | **that** a snapshot went out with unpinned clusters | adds the unpinned count on every snapshot; seeded at zero per reason |
 | gauge `aether_agent_snapshot_tls_clusters{pin,reason}` | **how many** clusters are pinned and unpinned **now**, per reason | written on every snapshot, zeros included |
-| gauge `aether_agent_xds_acked_tls_clusters{pin,reason}` | the same, for the last snapshot whose cluster update the **proxy acknowledged** | written on the ACK of every cluster response that added or removed a cluster, and of the empty response that opens a proxy's stream; not on the ACK of a later empty response; absent before the first |
+| gauge `aether_agent_xds_acked_tls_clusters{pin,reason}` | the same, for the clusters the **proxy has accepted**, cluster by cluster | written when the proxy answers a cluster response: the ACK of one that added or removed a cluster, and the answer (ACK or NACK) to the first one of a stream, and by a snapshot build that changes how a cluster the proxy has accepted is counted; absent before the first answer; not written while the pin state of a cluster the proxy holds is unknown |
+| gauge `aether_agent_xds_acked_tls_clusters_unknown` | **how many** clusters the proxy holds whose pin state the agent cannot determine (#1509) | one series, no label of its own; zero while the gauge above is written, the number of such clusters while it is not written for that reason; absent before the first answer |
 
 None of the metrics carries a cluster name: the names are in the log line only.
 
@@ -5808,6 +6843,30 @@ QUIC twin is not counted apart from the cluster it is derived from, and an entry
 pin is rendered is in neither series while the node cannot publish TLS for it (no node
 SVID yet): it is not a pinned TLS cluster until one is published.
 
+"Every snapshot" includes one whose set returned an error (#1549). The control plane
+library installs a snapshot before it answers the watches that are open, and only that
+second step can fail, so the snapshot is the one the agent serves from then on. The
+agent reports it like any other (this gauge, the counter and the line above, the
+identity-binding lines) and logs `snapshot installed, but an open watch was not answered from it` at
+WARN with the error. Agents before #1549 skipped the report for such a snapshot, and
+the gauge kept the previous snapshot's values until the next build.
+
+That line is not expected from a connected proxy (#1619, #1620). The agent hands each
+open watch its response through a channel the proxy's stream owns, and waits at most
+5 s for room in it. With the control plane library the agent pins there is always
+room, also for a proxy that has stopped reading its stream: the channel of a delta
+stream holds twenty responses and at most seven can be waiting in it (one per resource
+type the agent serves, and one more), and a secret stream makes a channel for every
+request. The unit tests hold that against the library's own stream handlers. The wait
+no longer ends with the caller's context either: before #1620 a snapshot built for a
+caller whose context had already ended (a CNI ADD whose RPC was abandoned) could stop
+at any open watch, by a random choice made once per watch, and leave that one and
+the ones after it unanswered: the proxy was not sent the change until the next build,
+and the caller was told the build had failed. If the line does appear,
+the build that logged it held up every other build on the node for those 5 s, and the
+proxy is sent the change by a later build; the first thing to check is whether the
+control plane library was upgraded, since how a stream buffers is the library's.
+
 ```promql
 # N clusters unpinned for reason R on this node, now.
 sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"}) > 0
@@ -5827,88 +6886,217 @@ sum by (node, reason) (increase(aether_agent_identity_cluster_unpinned_total[1h]
 ```
 
 **Published is not held.** The gauge above is what the agent *published*.
-`aether_agent_xds_acked_tls_clusters` has the same series and is written when the proxy
-**acknowledges** a cluster update: it then takes the values of the snapshot that update
-was built from. It is the closest the agent gets to what the proxy holds without asking
-the proxy's admin interface.
+`aether_agent_xds_acked_tls_clusters` has the same series and counts the clusters the
+proxy has **accepted**. The agent keeps, for every mesh cluster entry, the version the
+proxy last accepted, and counts that version the way it last counted it when it
+published it. It is the
+closest the agent gets to what the proxy holds without asking the proxy's admin
+interface. It learns it from two things the proxy says:
 
-- The two agree at rest. They differ for the moment an update is in flight.
-- They **stay** different while the proxy rejects cluster updates: a NACK acknowledges
-  nothing, so the acknowledged gauge stays on what the proxy last accepted (the NACK
-  counter moves, see below, and the agent logs `envoy NACKed delta response`). Published
-  `unpinned == 0` with acknowledged `unpinned > 0` reads: *the agent has pinned it, the
-  proxy still holds the unpinned cluster*. `AetherProxyHoldsUnpinnedClusters` in
-  `docs/observability/agent-pin-alerts.yml` is that reading as a rule.
-- **An agent restart does not lose it (#1483).** A proxy that reconnects states, in the
-  first cluster request of its new stream, the version of every cluster it holds; the
-  versions are hashes of each cluster's content. When they are exactly the clusters of
-  the agent's snapshot the agent has nothing to send, answers with an empty response
-  that names that snapshot, and the proxy acknowledges it: the gauge takes that
-  snapshot's values, within the second or so the proxy takes to reconnect. When they
-  are not, the proxy is sent the difference and the gauge moves on its ACK of that, as
-  ever. (Agents before #1483 dropped the empty exchange, so after a restart on a quiet
-  node the gauge had no series until a cluster next changed.) Only the **first**
-  cluster response of a stream is read this way. A later empty one is compared with
-  what the agent has *sent* on the stream, accepted or not, and says nothing about what
-  the proxy holds.
-- **Absent is "not known", not zero.** Nothing is written until a proxy gives this agent
-  process an ACK that counts: of a cluster response that added or removed a cluster, or
-  of the empty response that opened its stream. That leaves two absent states. *No proxy
-  has connected*: the node's proxy is down, or this agent is a surge-rolled standby that
-  does not serve xDS yet. *The proxy rejected the only cluster response that carried
-  anything* (it may since have acknowledged an empty one, which is not read):
-  an agent that restarts while its proxy is rejecting a cluster update is told the
-  clusters the proxy held **before** that update (a proxy never states a version it
-  rejected), which the new agent process never built and cannot count; it sends the
-  update again, the proxy rejects it again, and there is no acknowledgement to record.
-  In that second state `AetherProxyHoldsUnpinnedClusters` is silent although the proxy
-  may hold unpinned clusters: what remains is an increment of
-  `aether_agent_xds_nacks_total` for the Cluster type each time the proxy rejects a
-  response, and the agent's `envoy NACKed delta response` line. An absent acknowledged
-  gauge on an agent whose proxy is connected is therefore a reason to look at the NACK
-  counter.
-- **Acknowledged is accepted, not applied.** Envoy applies the valid clusters of a
-  response and then rejects the response as a whole when one cluster in it is invalid;
-  it goes on stating the versions it had before. So after a rejected update the proxy
-  can run a newer cluster than the gauge (and the proxy's own statement at a reconnect)
-  says. The gauge follows acknowledgements, on purpose: a NACK is the event to chase.
-- During a proxy hot restart two generations are connected; the gauge shows the last
-  ACK from either.
+- **An ACK is about the clusters its response carried, and no other (#1508).** Each of
+  them is then held at the version it was sent at; each one the response removed is
+  gone. The control plane sends a response only for what changed, and it treats a
+  cluster as delivered once it has sent it, accepted or not, so after a rejected update
+  the next response, and its ACK, are about other clusters.
+- **The first cluster request of a stream states every cluster the proxy holds**, by
+  version (a version is a hash of the cluster's content, so it means the same to any
+  agent process). The agent reads that statement when the proxy answers the first
+  cluster response of the stream: the proxy holds what it stated, with the response
+  over it if it acknowledged it, and nothing of the response if it rejected it. That
+  replaces what the agent knew, cluster by cluster.
+
+What follows from that:
+
+- The two gauges agree at rest, for every cluster the snapshot publishes. An entry with
+  **no cluster in the snapshot** (a `tcp:` floor that is not captured) is in the
+  published gauge, and in this one only while the proxy still holds that cluster from an
+  earlier snapshot: a floor that was captured, is no longer, and whose removal the proxy
+  rejected stays counted at the version the proxy accepted. One whose cluster was never
+  published, or whose removal the proxy accepted, is not in this gauge. So with a proxy
+  that has accepted everything it was sent, removals included, acknowledged sits *below*
+  published by exactly those entries. Acknowledged *above* published, in any series, is the other case: the
+  proxy holds a cluster the agent no longer publishes in that state (a rejected update
+  or a rejected removal, below).
+- They differ for the moment an update is in flight.
+- They **stay** different while the proxy rejects a cluster: the rejected cluster stays
+  at the version the proxy last accepted, through every later ACK of other clusters,
+  until a response that carries it is acknowledged (the NACK counter moves, see below,
+  and the agent logs `envoy NACKed delta response`). A cluster the proxy never accepted
+  in any version is in no series. Published `unpinned == 0` with acknowledged
+  `unpinned > 0` reads: *the agent has pinned it, the proxy still holds the unpinned
+  cluster*. `AetherProxyHoldsUnpinnedClusters` in
+  `docs/observability/agent-pin-alerts.yml` is that reading as a rule. (Agents before
+  #1508 took the whole gauge from the snapshot of the last cluster ACK. There the ACK of
+  any *other* cluster after the rejected one made the gauge read as if the rejected
+  cluster had been accepted, and the rule resolved with the proxy unchanged.)
+- **A rejected cluster is not sent again on that stream** unless it changes (#1510).
+  The state above therefore lasts until the cluster changes and is accepted, or until
+  the proxy's stream is re-established, when the proxy states its old version and is
+  sent the current one again (which it can reject again).
+- **Removals.** A cluster the agent no longer publishes stays counted, at the state it
+  was accepted in, until the proxy acknowledges the response that removes it or opens a
+  stream without it. A proxy that rejected the removal still holds the cluster.
+- **An agent restart does not lose it (#1483).** A proxy that reconnects states the
+  clusters it holds; when they are exactly the clusters of the agent's snapshot the
+  agent has nothing to send, answers with an empty response, and the proxy acknowledges
+  it: the gauge has its sample as soon as the proxy has reconnected and answered,
+  normally within a second or so.
+  When they are not, the proxy is sent the difference, and each cluster moves when the
+  proxy acknowledges it. (Agents before #1483 dropped the empty exchange, so after a
+  restart on a quiet node the gauge had no series until a cluster next changed.) Only
+  the **first** cluster response of a stream is read with the statement. A later empty
+  one carries no cluster and says nothing about any.
+- **Absent is "not known", not zero.** Nothing is written until a proxy answers this
+  agent process for the first time: the node's proxy has not connected since the agent
+  started, or this agent is a surge-rolled standby that does not serve xDS yet.
+- **A sample is not a live connection.** Once the gauge has samples, a proxy stream that
+  drops, or a proxy that goes down, does not withdraw them: the agent keeps what the
+  proxy last accepted (Envoy keeps its clusters across a reconnect) and goes on
+  exporting it until the proxy answers again. The only thing that withdraws the gauge
+  is an unknown held version, below.
+- **A slow proxy's answer is still read.** The agent keeps what it sent, version by version, until
+  the proxy answers it or the stream ends, however many times the cluster is rebuilt in
+  between. An ACK that arrives late is read against the version that was sent, with the
+  pin class that version was last published with. (What is kept is taken when the
+  response is written. A response written after its cluster was rebuilt three times, or
+  after the record of a cluster that was removed has been dropped, inside the agent
+  process, is the exception: its version is unknown, or its ACK is not counted until the
+  proxy next opens a stream. The record of a removed cluster is kept until the third
+  snapshot build without the cluster, and for one minute from the first of those builds
+  however many run (#1551); a build that finds more than 1,024 records of clusters its
+  snapshot does not have keeps none of them for the minute, and an answer that releases
+  one while there are more than 1,024 of them, that one counted, does not keep it for
+  the minute either. With exactly 1,024 the minute applies.)
+- **Not written while a held cluster's state is unknown.** The agent can count a version
+  only if it has that version's pin class on record: this agent process published it,
+  and recently enough (the last three versions of a cluster, plus any in flight). An agent that restarts **while its proxy is
+  rejecting a cluster update** is told the version the proxy held *before* that update
+  (a proxy never states a version it rejected), which the new process never built; it
+  sends the update again and the proxy rejects it again. A count that left that cluster
+  out would say the proxy holds fewer unpinned clusters than it may, so the gauge is
+  not written: after a restart it stays absent (and a gauge that had samples stops
+  having them: it is withdrawn, not left on its last values), and the agent logs, once,
+  WARN `proxy
+  holds mesh clusters whose pin state this agent cannot determine; the acknowledged pin
+  gauge is not written` with the number of clusters
+  (INFO `the pin state of every mesh cluster this agent has on record as held by the
+  proxy can be determined again; the acknowledged pin gauge is written` when it ends). In that state `AetherProxyHoldsUnpinnedClusters` is silent although the proxy
+  may hold unpinned clusters. The state has a sample of its own (#1509):
+  `aether_agent_xds_acked_tls_clusters_unknown` is the number of clusters on that WARN
+  line, and zero whenever the acknowledged gauge is written. `AetherProxyPinStateUnknown`
+  fires when it has been above zero for 15 minutes. It says the agent cannot classify
+  what the proxy holds, and that `AetherProxyHoldsUnpinnedClusters` is blind for the
+  node. It does not say the proxy holds an unpinned cluster, and it does not say the
+  proxy is rejecting updates: the state also arises with a proxy that accepts, when
+  the version it accepted (or states on a new stream) is one whose pin class the agent
+  had already dropped from its record (the bounds in the previous point). What tells
+  the two apart is `aether_agent_xds_nacks_total` for the Cluster type, which moves each
+  time the proxy rejects a response, and the agent's `envoy NACKed delta response`
+  line, which carries the proxy's reason. With no NACK, the state ends when the proxy
+  next accepts a version of that cluster the agent has on record. The ACK of some other cluster does not end it; the proxy accepting that
+  cluster does. The same holds for a cluster the proxy **states it holds when it opens
+  a stream** that the agent no longer publishes and has no record of (the agent
+  restarted, or the stream ended before the agent read the proxy's answer and the
+  cluster was removed since), when the proxy then rejects the response that removes
+  it: it is counted as unknown until the proxy accepts the removal, stops stating it, or
+  the agent publishes that version again. A cluster of a family the pin gauges do not
+  count is never treated that way, whatever its TLS: per-pod clusters (application,
+  health probe, inbound readiness), QUIC twins, UDP floors, east/west waypoint ingress
+  clusters, the edge's cleartext backend clusters, the passthrough and the blackhole.
+- **Accepted is not applied.** Envoy applies the valid clusters of a response and then
+  rejects the response as a whole when one cluster in it is invalid; it goes on stating
+  the versions it had before. So after a rejected update the proxy can run a newer
+  cluster than the gauge (and the proxy's own statement at a reconnect) says. The
+  sharpest case: a proxy that starts with nothing and rejects its **first** cluster
+  response has accepted nothing, the gauge counts nothing for it, and it runs every
+  valid cluster of that response; each comes back into the gauge when it next changes
+  and is acknowledged. The gauge follows acknowledgements, on purpose: a NACK is the
+  event to chase.
+- A cluster of one of those families is in no series of either gauge, whether or not
+  the agent still publishes it. Any other cluster the proxy states it holds that this
+  agent process neither publishes nor has a record of (left over from before an agent
+  restart, with its removal rejected) is the unknown state above, not a cluster left
+  out of the count.
+- During a proxy hot restart two generations are connected and there is one record per
+  cluster, not one per generation: the new generation's first answer replaces the set
+  with its own, and after that each cluster shows the last answer from either. A late
+  ACK of an older version from the generation that is leaving moves that one cluster
+  back until the next answer about it.
+- The gauge is written on each of those answers. A snapshot build moves it too, in two
+  cases: it publishes again a version the proxy holds that the agent had no class for
+  (the unknown state ends), or it
+  counts the very cluster the proxy holds under another reason (an HTTP cluster
+  published without TLS is `tls_not_published`, and `no_namespace_metadata` from the
+  snapshot that sees the node's identity on, #1482). Nothing is sent for that, so the
+  build itself rewrites the gauge and the two keep agreeing.
 - The agent logs the acknowledged state only when it **changes**: WARN `proxy
   acknowledged mesh clusters with no server-identity SAN pin` (with `unpinned`, `pinned`,
-  one count per reason and `snapshot_version`, which joins it to the snapshot's own line
-  and its cluster names), and INFO `proxy acknowledged mesh clusters, all with a
+  one count per reason and `snapshot_version`, the snapshot of the response or of the
+  build that changed it), and INFO `proxy acknowledged mesh clusters, all with a
   server-identity SAN pin` when it returns to none.
 
 ```promql
-# What the proxy last acknowledged, where it differs from what is published.
-# A node with no acknowledged series (the "not known" state above) is not in
-# the result: a comparison returns nothing for a side that is absent.
+# What the proxy has accepted, where it differs from what is published. A node
+# with no acknowledged series (the "not known" states above) is not in the
+# result: a comparison returns nothing for a side that is absent. An entry with
+# no cluster in the snapshot that the proxy does not hold (never published, or
+# its removal accepted) shows here as published without acknowledged
+# (tls_not_published, a `tcp:` floor that is not captured).
 sum by (job, node, reason) (aether_agent_xds_acked_tls_clusters{pin="unpinned"})
   != sum by (job, node, reason) (aether_agent_snapshot_tls_clusters{pin="unpinned"})
+
+# Per series, how many more cluster entries the agent publishes than the proxy
+# has accepted in that state: not accepted in any version, accepted in another
+# state, or entries with no cluster in the snapshot that the proxy does not
+# hold. Clamped, because the same
+# rejected update shows as a surplus on the acknowledged side of another series
+# (the next query). Lasting above the unpublished entries, it is a rejected
+# cluster.
+clamp_min(
+  sum by (job, node, pin, reason) (aether_agent_snapshot_tls_clusters)
+  - sum by (job, node, pin, reason) (aether_agent_xds_acked_tls_clusters), 0) > 0
+
+# The other side: clusters the proxy holds in a state the agent no longer
+# publishes (an old version it kept, or a cluster whose removal it rejected).
+clamp_min(
+  sum by (job, node, pin, reason) (aether_agent_xds_acked_tls_clusters)
+  - sum by (job, node, pin, reason) (aether_agent_snapshot_tls_clusters), 0) > 0
 
 # Did the proxy reject a cluster update. Zero is a real answer since #1480.
 sum by (job, node) (increase(aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.cluster.v3.Cluster"}[1h]))
 ```
 
-**The soak gate (#1423, #1491).** `e2e/soak/prober-grade.sh` grades the counter over a
-soak's window, per `reason`, with the same split as the alert rules. The two reasons of
-the validation gap (`no_namespace_metadata`, `pin_not_rendered`) fail it on any
-movement, and on any non-zero sample of the published gauge. The two under which no TLS
-is published (`trust_domain_unknown`, `tls_not_published`) are expected at an agent
-start, and a soak rolls the agents on purpose: they are reported with their count and
-nodes, and fail only when the published gauge shows the state for 300 s or more of
-consecutive samples (the `for: 5m` of `AetherMeshClusterPinPending`), per node, job and
-reason over every series of them, as that rule's `sum by` is. A standing
-`tls_not_published` that is the cluster's design (no SPIRE, or an unpublished TCP floor)
-fails by default too; `--expect-tls-not-published` declares it expected, and it is then
-reported with its duration and not failed. The counter cannot
-make that call: it grows by entries times snapshots, not by time. A `reason` the script
-does not know fails the same way a gap reason does, and so does any movement of a series with no `reason` label (an
-agent before #1424, where the two kinds cannot be told apart). An agent that has the
-label and whose own gauge does not reach Prometheus (a replaced pod is not covered by
-the one before it) makes the gate `UNPROVEN`, not a pass.
-The lines and the table are in `e2e/soak/README.md`, "Grading".
+**Grading a soak on these series (#1423, #1491).** A soak is run and graded by an
+external soak harness, maintained outside this repository. What such a harness reads is
+written down in [the external-harness contract](#the-external-harness-contract): the
+counter (`agent.identity_cluster_unpinned`), the published and the acknowledged gauge
+(`agent.snapshot_tls_clusters`, `agent.xds_acked_tls_clusters`), the closed `reason` set,
+and the split of the reasons the alert rules use (`agent.unpinned_reason_classes`: `gap`
+and `no_tls`). The grading procedure is the harness's own: its thresholds, its flags,
+its verdicts and the lines it prints are documented with it, and nothing in this
+repository defines or tests them. What holds for any grader, because it is how the
+product behaves:
+
+- **The two `gap` reasons** (`no_namespace_metadata`, `pin_not_rendered`) are the
+  validation gap: a TLS cluster that checks no server identity. Any movement of the
+  counter, and any non-zero sample of the published gauge, is that state.
+- **The two `no_tls` reasons** (`trust_domain_unknown`, `tls_not_published`) are expected
+  at an agent start, and a soak rolls the agents on purpose. What tells a start from a
+  standing state is how long the published gauge shows it, per node, job and reason
+  over every series of them (the `sum by` and the `for: 5m` of
+  `AetherMeshClusterPinPending`). The counter cannot make that call: it grows by entries
+  times snapshots, not by time.
+- **A standing `tls_not_published` can be a cluster's design** (no SPIRE, or an
+  unpublished TCP floor). Whether that is expected is a statement about the cluster, so
+  a grader has to be told. The series cannot say.
+- **A series of the counter with no `reason` label** is from an agent before #1424,
+  where the two kinds cannot be told apart. That holds for the counter only
+  (`agent.identity_cluster_unpinned`), whose every series carries `reason`. On the two
+  gauges `reason` is on the `pin="unpinned"` series alone (the contract's `when`), so a
+  `pin="pinned"` series without it is the healthy shape, from any agent.
+- **A gauge that does not reach the store is not a zero.** A replaced pod is not covered
+  by the one before it, so an agent that has the label and whose own gauge is absent has
+  proven nothing (see **Absent is "not known", not zero** above).
 
 **The NACK counters (#1480).** `aether_agent_xds_nacks_total` counts the delta responses
 a proxy rejected, by `aether_xds_type_url`; `aether_agent_xds_ack_wait_failures_total`
@@ -6134,7 +7322,10 @@ log_name:aether_l4_access_logs AND filter_chain_name:~"^cap_tls_" AND upstream_c
 **Symptom.** A node proxy's outbound L4 connection to `tcp-echo` or `mixed-svc` is
 rejected with `ssl_fail_verify_san`: it reached the inbound `:18008` listener of an
 **unrelated pod on the same node** (always the node's newest mesh pod), which presented
-its own SVID. The soak's `mp-dialer` shows it as one failure on every L4 leg at once.
+its own SVID. A client that dials several L4 ports in one pass sees it as one failure on
+every L4 leg at once (the multi-protocol dialer of the soak did; the soak is run by an
+external soak harness, maintained outside this repository, and the workloads named in this
+section are that harness's).
 
 **Two defects, one proof order.**
 
@@ -6206,7 +7397,7 @@ example).
 
 | build | expected |
 |---|---|
-| rev242 and earlier (no thread-self patch) — the negative control | non-zero on svc-1..5, prober, k6-soak-loader, udp-dialer (and echo, uds-cr-echo, udp-echo); ~1 burst per node per hour; `verify_san` ticks on `tcp-echo`/`mixed-svc` (23 over the rev242 soak) |
+| rev242 and earlier (no thread-self patch) — the negative control | non-zero on the prober and on every workload of the soak (its HTTP services, load generators, dialers and echo servers); ~1 burst per node per hour; `verify_san` ticks on `tcp-echo`/`mixed-svc` (23 over the rev242 soak) |
 | rev243 (unpatched, 1h47m generation, 2026-09-27 22:53Z–09-28 00:39Z) | 6 stray floor connections, all on `prober` pods (w05 2, w03 3, w04 1), and 1 `verify_san` on w03 `tcp-echo` |
 | first proxy with the #1022 patch, #1007 still unfixed | **no new series and no increments** after every node's proxy has rolled onto it (series from older generations age out with them) |
 

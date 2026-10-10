@@ -63,7 +63,7 @@ func TCPClusterName(serviceName, meshDomain string) string {
 	if base == "" {
 		return ""
 	}
-	return "tcp:" + base
+	return tcpClusterPrefix + base
 }
 
 // TCPPortClusterName returns the cluster name for ONE non-primary raw-TCP port
@@ -101,7 +101,7 @@ func UDPClusterName(serviceName, meshDomain string) string {
 	if base == "" {
 		return ""
 	}
-	return "udp:" + base
+	return udpClusterPrefix + base
 }
 
 // L4 stat keys (aether#1023). Every L4 cluster reports under its OWN

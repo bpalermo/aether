@@ -72,7 +72,9 @@ NS="aether-system"
 TEST_NS="aether-test"
 MESH_DOMAIN="aether.internal"
 OUTBOUND_PORT="18081"
-GWAPI_VERSION="v1.6.2"
+# The pinned Gateway API release (#1583): one for every e2e surface.
+# shellcheck source=e2e/gateway-api-version.sh
+. "$REPO_ROOT/e2e/gateway-api-version.sh"
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi)
 CHARTS_SRC="${AUTHZ_CHARTS:-$REPO_ROOT/charts}"
 EXPECT="${AUTHZ_EXPECT:-green}"
@@ -292,7 +294,7 @@ spec:
       serviceAccountName: authz-echo
       containers:
         - name: app
-          image: hashicorp/http-echo:1.0
+          image: hashicorp/http-echo:1.0@sha256:fcb75f691c8b0414d670ae570240cbf95502cc18a9ba57e982ecac589760a186
           args: ["-text=served-by-authz-echo", "-listen=:8080"]
           ports: [{containerPort: 8080}]
 ---
@@ -326,7 +328,7 @@ spec:
       serviceAccountName: client
       containers:
         - name: curl
-          image: curlimages/curl:8.22.0
+          image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
           command: ["sleep", "infinity"]
 YAML
 	local d

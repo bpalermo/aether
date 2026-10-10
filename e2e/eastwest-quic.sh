@@ -231,9 +231,11 @@ BATCH=10
 # E7 (aether#1086): first-use fan-out width and per-destination concurrency.
 BURST_DSTS="${BURST_DSTS:-10}"
 BURST_PER_DST="${BURST_PER_DST:-5}"
-AGNHOST_IMAGE="registry.k8s.io/e2e-test-images/agnhost:2.53"
-CURL_IMAGE="curlimages/curl:8.22.0"
-GWAPI_VERSION="v1.6.2"
+AGNHOST_IMAGE="registry.k8s.io/e2e-test-images/agnhost:2.53@sha256:99c6b4bb4a1e1df3f0b3752168c89358794d02258ebebc26bf21c29399011a85"
+CURL_IMAGE="curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777"
+# The pinned Gateway API release (#1583): one for every e2e surface.
+# shellcheck source=e2e/gateway-api-version.sh
+. "$REPO_ROOT/e2e/gateway-api-version.sh"
 # SPIRE >= 1.15.2 is required since proposal 036 (the SPIFFE Broker API); the
 # same chart pins e2e/l4routes.sh uses.
 SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.30.2}"

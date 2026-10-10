@@ -174,13 +174,25 @@ assume this section has been read.
   total line coverage drops by more than 1.0 point against `main`.
 - Protos are edition 2023 (never proto3) and change additively; an agent and a
   registrar one release apart must keep working.
+- Some names are read by a harness outside this repository: the agent's pin
+  metrics and their `reason` values, the prober's counter and its
+  `AETHER_PROBE_FAIL` line, the any-port stat prefix, the mesh annotations and
+  ports, the chart's workload, container and label names and its roll
+  strategies. They are listed in `test/harnesscontract/external-harness.yaml`,
+  and `bazel test //test/harnesscontract:checks` fails when the code and that
+  file disagree. Renaming, removing or adding to a closed set of any of them:
+  change the file in the same pull request, bump its `version` when
+  `test/harnesscontract/README.md` says so (a test says so too: it compares
+  the file with `external-harness.lock.yaml` and prints what that file needs),
+  and say in the description that the contract changed.
 
 **Workflows**
 - Every action pinned by full commit SHA with the version in a trailing
   comment; `timeout-minutes` on every job; `permissions` per job, least
   privilege; no `${{ }}` inside a `run:` script except through `env:`.
-- Kind, Bazel, conformance and format steps go through the composite actions in
-  `.github/actions/`; the pin tests (`//e2e:kind_pin_test`, `//e2e:go_pin_test`)
+- Kind, Helm, Bazel, conformance and format steps go through the composite
+  actions in `.github/actions/`; the pin tests (`//e2e:kind_pin_test`,
+  `//e2e:go_pin_test`, `//e2e:helm_pin_test`, `//e2e:gateway_api_pin_test`)
   fail a workflow that bypasses them.
 - The API cannot update a branch that touches `.github/workflows` without the
   `workflow` token scope: rebase over git and `push --force-with-lease`.

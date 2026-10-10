@@ -28,7 +28,7 @@
 #   H2  logs       every source-reporter DC line on the h3 destinations is
 #                  benign: 200 + downstream_remote_disconnect + bytes_sent equal
 #                  to that destination's clean-line size (the soak grader rule,
-#                  e2e/soak/README.md "Benign DC"); the h2 control logged no DC
+#                  docs/runbook.md, #1009); the h2 control logged no DC
 #
 # A run that saw zero DC lines passes H2 vacuously and says so: the race is
 # timing-dependent. HR_REQUIRE_DC=1 turns that into a failure.
@@ -73,7 +73,7 @@
 # happen there. Green is 0 of each on every restart; HR_REQUIRE_RESET=1 makes a
 # run that saw no stateless reset fail instead (the red arm's assertion).
 #
-# Red/green (#1054, e2e/soak/README.md):
+# Red/green (#1054; docs/runbook.md):
 #   red    HR_DRAIN_STRATEGY=gradual HR_QUIC_IDLE=30s EWQ_WORKER=1 ... up
 #          HR_MODE=sparse HR_REQUIRE_RESET=1 HR_FREEZE_PARENT_S=4 HR_FREEZE_AT=14 ... verify
 #   green  EWQ_WORKER=1 ... up          (chart defaults: gradual, 8s; patched proxy)
@@ -108,7 +108,7 @@ export EWQ_CLUSTER="${EWQ_CLUSTER:-eastwest-quic-hr}"
 COLLECTOR_NS="o11y"
 COLLECTOR_SVC="otel-collector"
 COLLECTOR_ENDPOINT="${COLLECTOR_SVC}.${COLLECTOR_NS}.svc.cluster.local:4317"
-COLLECTOR_IMAGE="ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.159.0"
+COLLECTOR_IMAGE="ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.159.0@sha256:7725a7a10c87d8853208bdd4bb3439ad3c0d7b32b4292b9300ac07c8daba14a2"
 
 # Access logs ON: the MeshConfig CR the controller seeds on first install
 # (meshConfig.proxy), and the collector the proxy bootstrap's otel_collector
