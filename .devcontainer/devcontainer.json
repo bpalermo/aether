@@ -8,8 +8,8 @@
   // daemon; node before claude-code (the feature needs a Node runtime).
   "features": {
     // Docker daemon inside the container, for `bazel run //...:image_load`
-    // (rules_img) and the testcontainers-go integration tests (etcd,
-    // DynamoDB Local). kind also talks to this daemon.
+    // (rules_img) and the testcontainers-go integration tests (etcd).
+    // kind also talks to this daemon.
     "ghcr.io/devcontainers/features/docker-in-docker:2": {
       "moby": true
     },

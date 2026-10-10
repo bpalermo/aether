@@ -37,13 +37,15 @@ make actionlint    # GitHub Actions workflows (pinned actionlint + ShellCheck)
 
 **Binaries:**
 - `agent/cmd/agent` — Node DaemonSet. Manages xDS server (Envoy), CNI gRPC server, SPIRE bridge via `controller-runtime` Manager. Also hosts the `agent edge` subcommand.
-- `agent/cmd/proxy-supervisor` — Envoy hot-restart supervisor (own binary + own image since #772; PID 1 of the `aether-proxy` container). 15 MiB / 24 modules, no k8s, no xDS, no SPIRE — asserted by `:deps_test` and `scripts/check-proxy-supervisor-deps.sh`.
+- `agent/cmd/proxy-supervisor` — Envoy hot-restart supervisor (own binary + own image since #772; PID 1 of the `aether-proxy` container). A fraction of the agent's size, no k8s, no xDS, no SPIRE — asserted by `:deps_test` (forbidden packages plus a size ceiling) and `scripts/check-proxy-supervisor-deps.sh`; for the current module count run `go version -m` on the built binary.
+- `agent/cmd/uds-csi` — The `csi.aether.io` CSI node plugin (proposal 039), the only carrier for UDS-delivered workload sockets since chart 2.0.0. Own image + own privileged DaemonSet (`udsCsi.enabled`, default on); mounts a per-pod tmpfs at `/run/aether/uds/<pod-uid>` and serves the kubelet plugin-registration API itself. Logic in `agent/internal/udscsi`; `:deps_test` and `scripts/check-uds-csi-deps.sh` keep it free of client-go/controller-runtime/SPIRE.
 - `agent/cmd/mesh-dns` — Slim standalone mesh-DNS daemon (own DaemonSet + image). Serves pods from the record snapshot the agent writes.
 - `registrar/cmd/registrar` — In-cluster Deployment. Proxies external registry (Kubernetes/etcd), maintains endpoint snapshot, streams to agents via gRPC.
 - `controller/cmd/controller` — In-cluster Deployment (leader-elected). Serves the validating + pod-mutating admission webhooks and the `MeshConfig`→ConfigMap reconciler.
 - `cni/cmd/cni` — CNI plugin binary (Add/Del/Check/GC/Status).
 - `cni/cmd/cni-install` — Init container that installs the CNI plugin binary and config onto the host.
 - `agent/cmd/proxy-ready` — Exec readiness probe for the `aether-proxy` pod (#673). One flag (`--ready-marker`), stdlib-only; `//agent/cmd/proxy-ready:deps_test` fails the build if it grows a dependency. Ships in the proxy-supervisor image (since #772), staged by the `install-supervisor` initContainer.
+- `agent/cmd/agent-ready` — Exec liveness/readiness probe for the `aether-agent` pod (proposal 041). Asks the agent over its pod-local `--health-socket`, so a surge-rolled standby is never answered for by the other agent on the node. Stdlib-only, no `net/http`; `//agent/cmd/agent-ready:deps_test` asserts the binary lists no module. Ships as `/agent-ready` in the agent image.
 - `agent/cmd/identity-ready` — The egress identity gate (#1053): the init container the controller's `/mutate` webhook injects first into every mesh pod (#1055); it waits on the pod's own SPIRE Workload API until the pod's SVID exists. Ships in the agent image; `//agent/cmd/identity-ready:deps_test` guards its link set.
 - `agent/cmd/mesh-dns-ready` — Same for the `aether-mesh-dns` pod (#683); bundled in the mesh-dns image, guarded by `//agent/cmd/mesh-dns-ready:deps_test`.
 - `prober/cmd/prober` — Synthetic mesh-availability prober (proposal 013). Own chart (`charts/prober`) + own image; mesh-managed per-node DaemonSet that probes the data plane from the client side and emits `aether_probe_requests_total`.
@@ -96,7 +98,7 @@ hygiene*.
 
 ## Proto & Codegen
 
-- Proto files in `api/` under `aether/cni/v1/`, `aether/registry/v1/`, `aether/registrar/v1/`, `aether/config/v1/` (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`).
+- Proto files in `api/` under `aether/cni/v1/`, `aether/registry/v1/`, `aether/registrar/v1/`, `aether/config/v1/` (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`), `aether/kubelet/pluginregistration/v1/` (a copy of the kubelet's plugin-registration API; its proto package stays `pluginregistration`, a wire contract), and `aether/agent/v1/` (`ObservedUpstreams`, the agent's persisted demand set: node-local state, not a wire API).
 - Run `make gazelle` after proto or import changes.
 
 ## Constraints
