@@ -14,6 +14,14 @@
 #   BASE_REF defaults to origin/main. CI passes the PR base SHA.
 set -euo pipefail
 
+# One collation for everything below, whatever the caller's locale. The promise
+# lines are sorted and then compared with comm, which requires its input in the
+# order comm itself collates by: sorted by bytes and compared under a UTF-8
+# locale they are "not in sorted order", and comm then reports promises as gone
+# that are still there (an added line alone failed the check on a workstation).
+# The bracket ranges of the grep and sed patterns ([0-9]) mean bytes too.
+export LC_ALL=C
+
 BASE="${1:-origin/main}"
 LOCK="test/harnesscontract/external-harness.lock.yaml"
 
@@ -42,7 +50,7 @@ version() { sed -nE 's/^version:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p'; }
 # A promise line: two spaces, a quoted name, a quoted digest. The name is
 # written as Go's %q writes it, so a quote inside it is \" (a member of an open
 # set, a substring of an environment variable for one, can hold one).
-promises() { grep -E '^  "([^"\\]|\\.)+": "[^"]+"[[:space:]]*$' | sed -E 's/[[:space:]]+$//' | LC_ALL=C sort; }
+promises() { grep -E '^  "([^"\\]|\\.)+": "[^"]+"[[:space:]]*$' | sed -E 's/[[:space:]]+$//' | sort; }
 
 base_version="$(printf '%s\n' "$base_lock" | version)"
 head_version="$(version <"$LOCK")"
