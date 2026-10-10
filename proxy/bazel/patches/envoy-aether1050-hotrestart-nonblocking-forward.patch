@@ -1,5 +1,5 @@
 diff --git a/source/server/hot_restarting_base.cc b/source/server/hot_restarting_base.cc
-index 99d7352427..d76e2a6c6f 100644
+index 99d7352427..1a2cbaa78f 100644
 --- a/source/server/hot_restarting_base.cc
 +++ b/source/server/hot_restarting_base.cc
 @@ -67,11 +67,11 @@ void RpcStream::bindDomainSocket(uint64_t id, const std::string& role,
@@ -149,7 +149,7 @@ index 99d7352427..d76e2a6c6f 100644
        RELEASE_ASSERT(false, fmt::format("hot restart sendmsg() failed: returned {}, errno {}", rc,
                                          saved_errno));
      }
-@@ -148,8 +204,66 @@ bool RpcStream::sendHotRestartMessage(sockaddr_un& address, const HotRestartMess
+@@ -148,8 +204,68 @@ bool RpcStream::sendHotRestartMessage(sockaddr_un& address, const HotRestartMess
      }
    }
  
@@ -179,6 +179,7 @@ index 99d7352427..d76e2a6c6f 100644
 +
 +bool RpcStream::flushSendQueue() {
 +  Api::OsSysCalls& os_sys_calls = Api::OsSysCallsSingleton::get();
++  last_flush_dropped_ = 0;
 +  while (!send_queue_.empty()) {
 +    std::vector<uint8_t>& datagram = send_queue_.front();
 +    iovec iov[1];
@@ -193,7 +194,7 @@ index 99d7352427..d76e2a6c6f 100644
 +
 +    // The socket is non-blocking (it is only ever made blocking for the duration of a
 +    // sendHotRestartMessage() or blocking receiveHotRestartMessage() call on this thread), and
-+    // MSG_DONTWAIT makes sure of it.
++    // the don't-wait flag on the call makes sure of it.
 +    const Api::SysCallSizeResult result =
 +        os_sys_calls.sendmsg(domain_socket_, &message, MSG_DONTWAIT);
 +    if (result.return_value_ == static_cast<ssize_t>(datagram.size())) {
@@ -211,6 +212,7 @@ index 99d7352427..d76e2a6c6f 100644
 +                       "hot restart non-blocking sendmsg() failed: returned {}, errno {}; dropping "
 +                       "{} queued datagrams ({} bytes)",
 +                       result.return_value_, result.errno_, send_queue_.size(), send_queue_bytes_);
++    last_flush_dropped_ = send_queue_.size();
 +    send_queue_.clear();
 +    send_queue_bytes_ = 0;
 +    return true;
@@ -218,7 +220,7 @@ index 99d7352427..d76e2a6c6f 100644
    return true;
  }
  
-@@ -230,8 +344,14 @@ std::unique_ptr<HotRestartMessage> RpcStream::receiveHotRestartMessage(Blocking
+@@ -230,8 +346,14 @@ std::unique_ptr<HotRestartMessage> RpcStream::receiveHotRestartMessage(Blocking
      message.msg_controllen = CMSG_SPACE(sizeof(int));
  
      const Api::SysCallSizeResult recv_result = os_sys_calls.recvmsg(domain_socket_, &message, 0);
@@ -236,7 +238,7 @@ index 99d7352427..d76e2a6c6f 100644
      }
      RELEASE_ASSERT(recv_result.return_value_ != -1,
 diff --git a/source/server/hot_restarting_base.h b/source/server/hot_restarting_base.h
-index 21737a1209..6071512577 100644
+index 21737a1209..22a085a557 100644
 --- a/source/server/hot_restarting_base.h
 +++ b/source/server/hot_restarting_base.h
 @@ -7,8 +7,11 @@
@@ -251,7 +253,7 @@ index 21737a1209..6071512577 100644
  
  #include "envoy/common/platform.h"
  #include "envoy/server/hot_restart.h"
-@@ -46,21 +49,65 @@ public:
+@@ -46,21 +49,68 @@ public:
    //
    // There is no mechanism to explicitly pair responses to requests. However, the child initiates
    // all exchanges, and blocks until a reply is received, so there is implicit pairing.
@@ -295,10 +297,13 @@ index 21737a1209..6071512577 100644
 +  bool flushSendQueue();
 +  uint64_t sendQueueBytes() const { return send_queue_bytes_; }
 +  uint64_t sendQueueDatagrams() const { return send_queue_.size(); }
++  // Datagrams the last flushSendQueue() call dropped on a fatal send error (0 when none).
++  uint64_t lastFlushDropped() const { return last_flush_dropped_; }
 +
-+  // Bound on a single blocking sendmsg() (SO_SNDTIMEO) on this stream's socket.
++  // Bound on a single blocking sendmsg() on this stream's socket (its socket send timeout).
 +  static constexpr std::chrono::milliseconds SEND_TIMEOUT{1000};
-+  // Bound on a single blocking recvmsg() (SO_RCVTIMEO); see receiveHotRestartMessage().
++  // Bound on a single blocking recvmsg() (the socket receive timeout); see
++  // receiveHotRestartMessage().
 +  static constexpr std::chrono::milliseconds RECEIVE_TIMEOUT_SLICE{10};
 +  // Bound on the bytes queued by queueHotRestartMessage() awaiting flushSendQueue().
 +  static constexpr uint64_t MAX_SEND_QUEUE_BYTES = 1024 * 1024;
@@ -318,7 +323,7 @@ index 21737a1209..6071512577 100644
    void getPassedFdIfPresent(envoy::HotRestartMessage* out, msghdr* message);
    std::unique_ptr<envoy::HotRestartMessage> parseProtoAndResetState();
    void initRecvBufIfNewMessage();
-@@ -84,6 +131,11 @@ private:
+@@ -84,6 +134,12 @@ private:
    // expected_proto_length_. The protobuf partial data starts at byte 8.
    // Should be resized to 0 in between messages, to indicate readiness for a new message.
    std::vector<uint8_t> recv_buf_;
@@ -326,6 +331,7 @@ index 21737a1209..6071512577 100644
 +  // queueHotRestartMessage().
 +  std::deque<std::vector<uint8_t>> send_queue_;
 +  uint64_t send_queue_bytes_{};
++  uint64_t last_flush_dropped_{};
 +  sockaddr_un send_queue_address_{};
  };
  
@@ -566,15 +572,16 @@ index e5d1b8df20..4d5ef71e0b 100644
    const bool skip_hot_restart_on_no_parent_;
    const bool skip_parent_stats_;
 diff --git a/source/server/hot_restarting_parent.cc b/source/server/hot_restarting_parent.cc
-index 095ff955ab..ea813ce581 100644
+index 095ff955ab..e9500312ac 100644
 --- a/source/server/hot_restarting_parent.cc
 +++ b/source/server/hot_restarting_parent.cc
-@@ -60,10 +60,29 @@ HotRestartingParent::HotRestartingParent(int base_id, int restart_epoch,
+@@ -60,10 +60,39 @@ HotRestartingParent::HotRestartingParent(int base_id, int restart_epoch,
  void HotRestartingParent::sendHotRestartMessage(envoy::HotRestartMessage&& msg) {
    ASSERT(dispatcher_.has_value());
    dispatcher_->post([this, msg = std::move(msg)]() {
 -    udp_forwarding_rpc_stream_.sendHotRestartMessage(child_address_udp_forwarding_, std::move(msg));
 +    if (!udp_forwarding_rpc_stream_.queueHotRestartMessage(child_address_udp_forwarding_, msg)) {
++      udp_forwarding_dropped_->inc();
 +      ENVOY_LOG_PERIODIC(warn, std::chrono::seconds(5),
 +                         "hot restart udp forwarding queue is full ({} bytes in {} datagrams); "
 +                         "dropping forwarded packets",
@@ -587,9 +594,18 @@ index 095ff955ab..ea813ce581 100644
  }
  
 +void HotRestartingParent::flushUdpForwarding() {
-+  if (udp_forwarding_rpc_stream_.flushSendQueue()) {
++  const uint64_t queued_before = udp_forwarding_rpc_stream_.sendQueueDatagrams();
++  const bool flushed = udp_forwarding_rpc_stream_.flushSendQueue();
++  const uint64_t queued_after = udp_forwarding_rpc_stream_.sendQueueDatagrams();
++  if (flushed) {
++    // Either everything went, or the stream dropped its queue on a fatal send error.
++    udp_forwarding_datagrams_->add(queued_before - queued_after -
++                                   udp_forwarding_rpc_stream_.lastFlushDropped());
++    udp_forwarding_dropped_->add(udp_forwarding_rpc_stream_.lastFlushDropped());
 +    return;
 +  }
++  udp_forwarding_datagrams_->add(queued_before - queued_after);
++  udp_forwarding_retries_->inc();
 +  // The child's socket is full; retry once it has had a moment to drain it. After shutdown()
 +  // there is no timer any more: whatever is still queued is dropped with the stream.
 +  if (udp_forwarding_retry_timer_ != nullptr) {
@@ -600,15 +616,23 @@ index 095ff955ab..ea813ce581 100644
  // Network::NonDispatchedUdpPacketHandler
  void HotRestartingParent::Internal::handle(uint32_t worker_index,
                                             const Network::Address::Instance& listener_address,
-@@ -93,6 +112,7 @@ void HotRestartingParent::initialize(Event::Dispatcher& dispatcher, Server::Inst
+@@ -93,6 +122,15 @@ void HotRestartingParent::initialize(Event::Dispatcher& dispatcher, Server::Inst
          return absl::OkStatus();
        },
        Event::FileTriggerType::Edge, Event::FileReadyType::Read);
 +  udp_forwarding_retry_timer_ = dispatcher.createTimer([this]() { flushUdpForwarding(); });
++  // As with hotRestartGeneration(): created once, here, with dynamic names.
++  Stats::Scope& scope = *server.stats().rootScope();
++  udp_forwarding_datagrams_ = &Stats::Utility::counterFromElements(
++      scope, {Stats::DynamicName("server.hot_restart_udp_forwarding_datagrams")});
++  udp_forwarding_retries_ = &Stats::Utility::counterFromElements(
++      scope, {Stats::DynamicName("server.hot_restart_udp_forwarding_retries")});
++  udp_forwarding_dropped_ = &Stats::Utility::counterFromElements(
++      scope, {Stats::DynamicName("server.hot_restart_udp_forwarding_dropped")});
    dispatcher_ = dispatcher;
    internal_ = std::make_unique<Internal>(&server, *this);
  }
-@@ -152,7 +172,10 @@ void HotRestartingParent::onSocketEvent() {
+@@ -152,7 +190,10 @@ void HotRestartingParent::onSocketEvent() {
    }
  }
  
@@ -621,7 +645,7 @@ index 095ff955ab..ea813ce581 100644
  HotRestartingParent::Internal::Internal(Server::Instance* server,
                                          HotRestartMessageSender& udp_sender)
 diff --git a/source/server/hot_restarting_parent.h b/source/server/hot_restarting_parent.h
-index 07da3bbeb2..3bce6abbeb 100644
+index 07da3bbeb2..4105e7be84 100644
 --- a/source/server/hot_restarting_parent.h
 +++ b/source/server/hot_restarting_parent.h
 @@ -25,8 +25,18 @@ public:
@@ -643,7 +667,7 @@ index 07da3bbeb2..3bce6abbeb 100644
    // The hot restarting parent's hot restart logic. Each function is meant to be called to fulfill a
    // request from the child for that action.
    class Internal : public Network::NonDispatchedUdpPacketHandler {
-@@ -53,12 +63,15 @@ public:
+@@ -53,14 +63,22 @@ public:
    };
  
  private:
@@ -658,9 +682,16 @@ index 07da3bbeb2..3bce6abbeb 100644
 +  Event::TimerPtr udp_forwarding_retry_timer_;
    OptRef<Event::Dispatcher> dispatcher_;
    std::unique_ptr<Internal> internal_;
++  // Forwarded UDP datagrams handed to the child's socket, flush attempts that found it full, and
++  // datagrams dropped (queue full, or the child gone). See sendHotRestartMessage().
++  Stats::Counter* udp_forwarding_datagrams_{};
++  Stats::Counter* udp_forwarding_retries_{};
++  Stats::Counter* udp_forwarding_dropped_{};
  };
+ 
+ } // namespace Server
 diff --git a/test/server/BUILD b/test/server/BUILD
-index 8a53cb0952..47f9fdc287 100644
+index d10ea2f09d..d1a6da151d 100644
 --- a/test/server/BUILD
 +++ b/test/server/BUILD
 @@ -212,16 +212,22 @@ envoy_cc_test(
@@ -831,19 +862,18 @@ index dd115a59e0..a71de18a17 100644
  } // namespace Server
  } // namespace Envoy
 diff --git a/test/server/hot_restarting_child_test.cc b/test/server/hot_restarting_child_test.cc
-index 5279e2d035..3cb0ad87a9 100644
+index 517bdc0f7d..3cb0ad87a9 100644
 --- a/test/server/hot_restarting_child_test.cc
 +++ b/test/server/hot_restarting_child_test.cc
-@@ -15,6 +15,8 @@
- 
+@@ -16,6 +16,7 @@
  #include "gtest/gtest.h"
  
-+using testing::_;
+ using testing::_;
 +using testing::AnyNumber;
  using testing::DoAll;
  using testing::Eq;
  using testing::Return;
-@@ -72,6 +74,35 @@ public:
+@@ -73,6 +74,35 @@ public:
        return Api::SysCallSizeResult{static_cast<ssize_t>(msg->msg_iov[0].iov_len), 0};
      });
    }
@@ -879,7 +909,7 @@ index 5279e2d035..3cb0ad87a9 100644
    Api::MockOsSysCalls& os_sys_calls_;
    Event::FileReadyCb udp_file_ready_callback_;
    sockaddr_un child_address_udp_forwarding_;
-@@ -90,6 +121,8 @@ public:
+@@ -91,6 +121,8 @@ public:
      });
      EXPECT_CALL(os_sys_calls_, bind(_, _, _)).Times(4);
      EXPECT_CALL(os_sys_calls_, close(_)).Times(4);
@@ -888,7 +918,7 @@ index 5279e2d035..3cb0ad87a9 100644
      fake_parent_ = std::make_unique<FakeHotRestartingParent>(os_sys_calls_, 0, 0, socket_path_);
      hot_restarting_child_ = std::make_unique<HotRestartingChild>(
          0, 1, socket_path_, 0, skipHotRestartOnNoParent(), skipParentStats());
-@@ -286,6 +319,305 @@ TEST_F(HotRestartingChildTest, ForwardsPacketToRegisteredListenerOnMatch) {
+@@ -287,6 +319,213 @@ TEST_F(HotRestartingChildTest, ForwardsPacketToRegisteredListenerOnMatch) {
    EXPECT_LOG_NOT_CONTAINS("error", "", fake_parent_->sendUdpForwardingMessage(msg));
  }
  
@@ -1099,103 +1129,11 @@ index 5279e2d035..3cb0ad87a9 100644
 +  EXPECT_FALSE(helper_->parentTerminated());
 +}
 +
-+// A parent that does not send the listener address is matched on the packet's destination,
-+// falling back to the any-address listener on the port.
-+TEST_F(HotRestartingChildTest, ForwardsPacketToAnyAddressListenerByDestination) {
-+  uint32_t worker_index = 1;
-+  envoy::HotRestartMessage msg;
-+  auto* packet = msg.mutable_request()->mutable_forwarded_udp_packet();
-+  auto mock_udp_listener_config = std::make_shared<Network::MockUdpListenerConfig>();
-+  auto test_listener_addr = *Network::Utility::resolveUrl("udp://0.0.0.0:1234");
-+  auto test_local_addr = *Network::Utility::resolveUrl("udp://127.0.0.1:1234");
-+  auto test_remote_addr = *Network::Utility::resolveUrl("udp://127.0.0.1:4321");
-+  HotRestartUdpForwardingTestHelper(*hot_restarting_child_)
-+      .registerUdpForwardingListener(
-+          test_listener_addr,
-+          std::dynamic_pointer_cast<Network::UdpListenerConfig>(mock_udp_listener_config));
-+  packet->set_local_addr(Network::Utility::urlFromDatagramAddress(*test_local_addr));
-+  packet->set_peer_addr(Network::Utility::urlFromDatagramAddress(*test_remote_addr));
-+  packet->set_worker_index(worker_index);
-+  packet->set_payload("x");
-+  Network::MockUdpListenerWorkerRouter mock_worker_router;
-+  EXPECT_CALL(*mock_udp_listener_config,
-+              listenerWorkerRouter(WhenDynamicCastTo<const Network::Address::Ipv4Instance&>(
-+                  Eq(dynamic_cast<const Network::Address::Ipv4Instance&>(*test_listener_addr)))))
-+      .WillOnce(ReturnRef(mock_worker_router));
-+  EXPECT_CALL(mock_worker_router, deliver(worker_index, IsUdpWith(test_local_addr, test_remote_addr,
-+                                                                  "x", uint64_t(0))));
-+  EXPECT_LOG_NOT_CONTAINS("error", "", fake_parent_->sendUdpForwardingMessage(msg));
-+}
-+
-+// Listeners bound to the same address in different network namespaces are distinct, and a
-+// forwarded packet is delivered to the listener the parent names, not to whichever registered
-+// first and not to the one matching the packet's (transparent) destination.
-+TEST_F(HotRestartingChildTest, ForwardsPacketToListenerInNamedNetworkNamespace) {
-+  uint32_t worker_index = 2;
-+  envoy::HotRestartMessage msg;
-+  auto* packet = msg.mutable_request()->mutable_forwarded_udp_packet();
-+  auto listener_config_a = std::make_shared<Network::MockUdpListenerConfig>();
-+  auto listener_config_b = std::make_shared<Network::MockUdpListenerConfig>();
-+  auto listener_addr_a =
-+      Network::Utility::resolveUrl("udp://0.0.0.0:1234").value()->withNetworkNamespace("/ns/a");
-+  auto listener_addr_b =
-+      Network::Utility::resolveUrl("udp://0.0.0.0:1234").value()->withNetworkNamespace("/ns/b");
-+  // Destination of a transparent socket: not the bind address of either listener.
-+  auto test_local_addr = *Network::Utility::resolveUrl("udp://10.0.0.5:1234");
-+  auto test_remote_addr = *Network::Utility::resolveUrl("udp://10.0.0.9:4321");
-+  HotRestartUdpForwardingTestHelper helper(*hot_restarting_child_);
-+  helper.registerUdpForwardingListener(
-+      listener_addr_a, std::dynamic_pointer_cast<Network::UdpListenerConfig>(listener_config_a));
-+  helper.registerUdpForwardingListener(
-+      listener_addr_b, std::dynamic_pointer_cast<Network::UdpListenerConfig>(listener_config_b));
-+  packet->set_local_addr(Network::Utility::urlFromDatagramAddress(*test_local_addr));
-+  packet->set_peer_addr(Network::Utility::urlFromDatagramAddress(*test_remote_addr));
-+  packet->set_worker_index(worker_index);
-+  packet->set_payload("y");
-+  packet->set_listener_addr("udp://0.0.0.0:1234");
-+  packet->set_network_namespace("/ns/b");
-+  Network::MockUdpListenerWorkerRouter mock_worker_router;
-+  EXPECT_CALL(*listener_config_a, listenerWorkerRouter(_)).Times(0);
-+  EXPECT_CALL(*listener_config_b,
-+              listenerWorkerRouter(WhenDynamicCastTo<const Network::Address::Ipv4Instance&>(
-+                  Eq(dynamic_cast<const Network::Address::Ipv4Instance&>(*listener_addr_b)))))
-+      .WillOnce(ReturnRef(mock_worker_router));
-+  EXPECT_CALL(mock_worker_router, deliver(worker_index, IsUdpWith(test_local_addr, test_remote_addr,
-+                                                                  "y", uint64_t(0))));
-+  EXPECT_LOG_NOT_CONTAINS("error", "", fake_parent_->sendUdpForwardingMessage(msg));
-+}
-+
-+// A listener is not matched across network namespaces, nor by a namespace-less lookup.
-+TEST_F(HotRestartingChildTest, DoesNotForwardAcrossNetworkNamespaces) {
-+  envoy::HotRestartMessage msg;
-+  auto* packet = msg.mutable_request()->mutable_forwarded_udp_packet();
-+  auto listener_config = std::make_shared<Network::MockUdpListenerConfig>();
-+  auto listener_addr =
-+      Network::Utility::resolveUrl("udp://0.0.0.0:1234").value()->withNetworkNamespace("/ns/a");
-+  HotRestartUdpForwardingTestHelper(*hot_restarting_child_)
-+      .registerUdpForwardingListener(
-+          listener_addr, std::dynamic_pointer_cast<Network::UdpListenerConfig>(listener_config));
-+  packet->set_local_addr("udp://10.0.0.5:1234");
-+  packet->set_peer_addr("udp://10.0.0.9:4321");
-+  packet->set_payload("z");
-+  EXPECT_CALL(*listener_config, listenerWorkerRouter(_)).Times(0);
-+
-+  // Another namespace.
-+  packet->set_listener_addr("udp://0.0.0.0:1234");
-+  packet->set_network_namespace("/ns/c");
-+  EXPECT_LOG_NOT_CONTAINS("error", "", fake_parent_->sendUdpForwardingMessage(msg));
-+
-+  // No namespace (older parent): the destination lookup must not reach a namespaced listener.
-+  packet->clear_listener_addr();
-+  packet->clear_network_namespace();
-+  EXPECT_LOG_NOT_CONTAINS("error", "", fake_parent_->sendUdpForwardingMessage(msg));
-+}
-+
- } // namespace
- } // namespace Server
- } // namespace Envoy
+ // A parent that does not send the listener address is matched on the packet's destination,
+ // falling back to the any-address listener on the port.
+ TEST_F(HotRestartingChildTest, ForwardsPacketToAnyAddressListenerByDestination) {
 diff --git a/test/server/hot_restarting_parent_test.cc b/test/server/hot_restarting_parent_test.cc
-index 68c447482c..271593889f 100644
+index 2507fd77a3..b9ae72b9ae 100644
 --- a/test/server/hot_restarting_parent_test.cc
 +++ b/test/server/hot_restarting_parent_test.cc
 @@ -9,15 +9,22 @@
@@ -1221,44 +1159,10 @@ index 68c447482c..271593889f 100644
  using testing::Return;
  using testing::ReturnRef;
  
-@@ -580,8 +587,185 @@ TEST_F(HotRestartingParentTest, UdpPacketIsForwarded) {
-   expected_packet->set_payload(msg);
-   expected_packet->set_receive_time_epoch_microseconds(1234567890);
-   expected_packet->set_worker_index(worker_index);
-+  expected_packet->set_listener_addr("udp://127.0.0.1:12345");
-   EXPECT_CALL(message_sender_, sendHotRestartMessage(ProtoEq(expected_msg)));
--  hot_restarting_parent_.handle(worker_index, packet);
-+  hot_restarting_parent_.handle(worker_index, *ipv4_test_addr_1_, packet);
-+}
-+
-+// The forwarded packet carries the listener's bind address and network namespace rather than
-+// only the packet's destination, so the child can resolve the right listener for transparent
-+// sockets and for listeners bound to the same address in different namespaces.
-+TEST_F(HotRestartingParentTest, UdpPacketIsForwardedWithListenerAddressAndNamespace) {
-+  uint32_t worker_index = 3;
-+  Network::UdpRecvData packet;
-+  std::string msg = "hello";
-+  // Transparent socket: the destination is not the bind address.
-+  packet.addresses_.local_ = *Network::Utility::resolveUrl("udp://10.0.0.5:12345");
-+  packet.addresses_.peer_ = ipv4_test_addr_2_;
-+  packet.buffer_ = std::make_unique<Buffer::OwnedImpl>(msg);
-+  packet.receive_time_ = MonotonicTime(std::chrono::microseconds(42));
-+  auto listener_address = Network::Utility::resolveUrl("udp://0.0.0.0:12345")
-+                              .value()
-+                              ->withNetworkNamespace("/run/netns/pod");
-+  envoy::HotRestartMessage expected_msg;
-+  auto* expected_packet = expected_msg.mutable_request()->mutable_forwarded_udp_packet();
-+  expected_packet->set_local_addr("udp://10.0.0.5:12345");
-+  expected_packet->set_peer_addr("udp://127.0.0.1:54321");
-+  expected_packet->set_payload(msg);
-+  expected_packet->set_receive_time_epoch_microseconds(42);
-+  expected_packet->set_worker_index(worker_index);
-+  expected_packet->set_listener_addr("udp://0.0.0.0:12345");
-+  expected_packet->set_network_namespace("/run/netns/pod");
-+  EXPECT_CALL(message_sender_, sendHotRestartMessage(ProtoEq(expected_msg)));
-+  hot_restarting_parent_.handle(worker_index, *listener_address, packet);
-+}
-+
+@@ -613,6 +620,170 @@ TEST_F(HotRestartingParentTest, UdpPacketIsForwardedWithListenerAddressAndNamesp
+   hot_restarting_parent_.handle(worker_index, *listener_address, packet);
+ }
+ 
 +// The parent's side of the hot restart deadlock: forwarding a UDP packet to the child must never
 +// block the parent's main thread on the child's socket, since that thread also has to answer the
 +// child's requests, which the child's main thread waits for.
@@ -1288,6 +1192,12 @@ index 68c447482c..271593889f 100644
 +  bool socketIsNonBlocking() const {
 +    return (fcntl(helper_->udpForwardingSocketFd(), F_GETFL) & O_NONBLOCK) != 0;
 +  }
++  uint64_t counter(absl::string_view name) {
++    return server_.stats_store_.counterFromString(std::string(name)).value();
++  }
++  uint64_t forwarded() { return counter("server.hot_restart_udp_forwarding_datagrams"); }
++  uint64_t retries() { return counter("server.hot_restart_udp_forwarding_retries"); }
++  uint64_t dropped() { return counter("server.hot_restart_udp_forwarding_dropped"); }
 +
 +  std::string socket_path_ = testDomainSocketName();
 +  Api::MockOsSysCalls os_sys_calls_;
@@ -1307,6 +1217,9 @@ index 68c447482c..271593889f 100644
 +  parent_->sendHotRestartMessage(forwardedPacket(100));
 +  EXPECT_EQ(helper_->queuedDatagrams(), 0);
 +  EXPECT_TRUE(socketIsNonBlocking());
++  EXPECT_EQ(forwarded(), 1);
++  EXPECT_EQ(retries(), 0);
++  EXPECT_EQ(dropped(), 0);
 +}
 +
 +TEST_F(HotRestartingParentUdpForwardingTest, QueuesWhenChildSocketIsFullAndRetriesOnTimer) {
@@ -1339,11 +1252,14 @@ index 68c447482c..271593889f 100644
 +  EXPECT_EQ(helper_->queuedDatagrams(), 0);
 +  ASSERT_EQ(sent_sizes.size(), 2);
 +  EXPECT_LT(sent_sizes[0], sent_sizes[1]);
++  EXPECT_EQ(forwarded(), 2);
++  EXPECT_EQ(retries(), 2);
++  EXPECT_EQ(dropped(), 0);
 +}
 +
 +TEST_F(HotRestartingParentUdpForwardingTest, QueuesAMultiDatagramMessageWhole) {
 +  // A payload longer than one datagram is sent as a chain of datagrams that must not be split
-+  // by a would-block: the child cannot resynchronize a partial message.
++  // by a would-block: the child cannot recover from a partial message.
 +  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr*, int) {
 +    return Api::SysCallSizeResult{-1, EAGAIN};
 +  });
@@ -1387,6 +1303,8 @@ index 68c447482c..271593889f 100644
 +                      parent_->sendHotRestartMessage(forwardedPacket(100)));
 +  EXPECT_EQ(helper_->queuedDatagrams(), 0);
 +  EXPECT_EQ(helper_->queuedBytes(), 0);
++  EXPECT_EQ(forwarded(), 0);
++  EXPECT_EQ(dropped(), 2);
 +}
 +
 +TEST_F(HotRestartingParentUdpForwardingTest, DropsNewPacketsWhenTheQueueIsFull) {
@@ -1405,6 +1323,10 @@ index 68c447482c..271593889f 100644
 +                      parent_->sendHotRestartMessage(forwardedPacket(payload_size)));
 +  EXPECT_EQ(helper_->queuedDatagrams(), queued_before);
 +  EXPECT_LE(helper_->queuedBytes(), RpcStream::MAX_SEND_QUEUE_BYTES);
- }
- 
++  EXPECT_EQ(dropped(), 1);
++  EXPECT_EQ(forwarded(), 0);
++}
++
  } // namespace
+ } // namespace Server
+ } // namespace Envoy

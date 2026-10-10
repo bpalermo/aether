@@ -1,7 +1,8 @@
 diff --git a/envoy/network/listener.h b/envoy/network/listener.h
+index bb0d662fac..1444547b98 100644
 --- a/envoy/network/listener.h
 +++ b/envoy/network/listener.h
-@@ -594,7 +594,10 @@
+@@ -595,7 +595,10 @@ public:
  
    /**
     * Deliver ``data`` to the correct worker by calling ``onDataWorker()``
@@ -14,9 +15,10 @@ diff --git a/envoy/network/listener.h b/envoy/network/listener.h
    virtual void deliver(uint32_t dest_worker_index, UdpRecvData&& data) PURE;
  };
 diff --git a/source/common/network/udp_listener_impl.cc b/source/common/network/udp_listener_impl.cc
+index 09e3f0bb1b..2f489311ad 100644
 --- a/source/common/network/udp_listener_impl.cc
 +++ b/source/common/network/udp_listener_impl.cc
-@@ -200,8 +200,24 @@
+@@ -200,8 +200,24 @@ void UdpListenerWorkerRouterImpl::unregisterWorkerForListener(UdpListenerCallbac
  void UdpListenerWorkerRouterImpl::deliver(uint32_t dest_worker_index, UdpRecvData&& data) {
    absl::ReaderMutexLock lock(mutex_);
  
@@ -44,9 +46,10 @@ diff --git a/source/common/network/udp_listener_impl.cc b/source/common/network/
  
    // When a listener is being removed, packets could be processed on some workers after the
 diff --git a/source/server/hot_restarting_child.cc b/source/server/hot_restarting_child.cc
+index fcad4db0e2..0a31b4127b 100644
 --- a/source/server/hot_restarting_child.cc
 +++ b/source/server/hot_restarting_child.cc
-@@ -125,7 +125,9 @@
+@@ -125,7 +125,9 @@ void HotRestartingChild::onForwardedUdpPacket(uint32_t worker_index,
      // We send to the worker index from the parent instance.
      // In the case that the number of workers changes between instances,
      // or the quic connection id generator changes how it selects worker
@@ -58,9 +61,10 @@ diff --git a/source/server/hot_restarting_child.cc b/source/server/hot_restartin
      // One option would be to dispatch an onData call to have the receiving
      // worker forward the packet if the calculated destination differs from
 diff --git a/test/common/network/udp_listener_impl_test.cc b/test/common/network/udp_listener_impl_test.cc
+index 7004961900..4121775b09 100644
 --- a/test/common/network/udp_listener_impl_test.cc
 +++ b/test/common/network/udp_listener_impl_test.cc
-@@ -968,6 +968,50 @@
+@@ -968,6 +968,50 @@ TEST_P(UdpListenerImplTest, UdpGroReadLimit) {
  
  #endif
  
@@ -112,9 +116,10 @@ diff --git a/test/common/network/udp_listener_impl_test.cc b/test/common/network
  } // namespace Network
  } // namespace Envoy
 diff --git a/test/server/hot_restarting_child_test.cc b/test/server/hot_restarting_child_test.cc
+index 3e97679a4a..8384e783f4 100644
 --- a/test/server/hot_restarting_child_test.cc
 +++ b/test/server/hot_restarting_child_test.cc
-@@ -690,6 +690,43 @@
+@@ -690,6 +690,43 @@ TEST_F(HotRestartingChildTest, ForwardsPacketToListenerInNamedNetworkNamespace)
    EXPECT_LOG_NOT_CONTAINS("error", "", fake_parent_->sendUdpForwardingMessage(msg));
  }
  
