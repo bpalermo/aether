@@ -2100,8 +2100,8 @@ helm_template_test(
 # #1166: the CNI plugin exports no telemetry, so cni-install is handed no OTLP
 # endpoint even when the fleet has one (the agent container below it still
 # gets --otlp-endpoint; only cni-install's pin flag identifies its half). The
-# flags stay parseable as deprecated no-ops for one release, pinned in
-# //cni/internal/cmd:TestOTLPFlagsDeprecatedNoOps.
+# binary no longer accepts either flag (//cni/internal/cmd:TestOTLPFlagsRejected),
+# so a template that passed one again would fail the init container.
 helm_template_absent_test(
     name = "aether_cni_no_otlp_test",
     absent = [

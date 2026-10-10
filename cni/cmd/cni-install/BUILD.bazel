@@ -1,6 +1,14 @@
 load("@aether_registry//:registry.bzl", "image_repository")
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+
+# gazelle:exclude race_test.go
+# gazelle:exclude norace_test.go
+
+# deps_test.go is hand-wired below into its own :deps_test target (it needs the
+# linked binary as data and has to be nameable on its own), so keep gazelle from
+# folding it into a :cni-install_test.
+# gazelle:exclude deps_test.go
 
 go_library(
     name = "cni-install_lib",
@@ -26,4 +34,26 @@ go_multi_arch_image(
     tars_layer = {
         "/opt/cni/bin/aether-cni": "//cni/cmd/cni:cni",
     },
+)
+
+# Linkage guard. cni-install is the agent pod's init container: it runs on every
+# agent start with the host's CNI directories mounted read-write, to copy one
+# binary and chain one conflist entry. The test pins its module set as an
+# explicit allow-list (and a module budget) against the linked ELF that ships in
+# the cni-install image, forbids a Kubernetes client, xDS, SPIRE, gRPC and any
+# telemetry export path outright, and holds a size ceiling.
+go_test(
+    name = "deps_test",
+    size = "small",
+    srcs = [
+        "deps_test.go",
+        "norace_test.go",
+        "race_test.go",
+    ],
+    data = [":cni-install"],
+    embed = [":cni-install_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )

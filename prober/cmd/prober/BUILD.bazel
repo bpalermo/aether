@@ -1,6 +1,14 @@
 load("@aether_registry//:registry.bzl", "image_repository")
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+
+# gazelle:exclude race_test.go
+# gazelle:exclude norace_test.go
+
+# deps_test.go is hand-wired below into its own :deps_test target (it needs the
+# linked binary as data and has to be nameable on its own), so keep gazelle from
+# folding it into a :prober_test.
+# gazelle:exclude deps_test.go
 
 go_library(
     name = "prober_lib",
@@ -23,4 +31,25 @@ go_multi_arch_image(
     name = "prober_image",
     binary = ":prober",
     repository = image_repository("prober"),
+)
+
+# Linkage guard. The prober is the mesh's external SLI: a black-box client that
+# runs on every node and must share nothing with the control plane it measures.
+# The test pins its module set as an explicit allow-list (and a module budget)
+# against the linked ELF that ships in the prober image, forbids the agent's
+# heavyweights outright, and holds a size ceiling.
+go_test(
+    name = "deps_test",
+    size = "small",
+    srcs = [
+        "deps_test.go",
+        "norace_test.go",
+        "race_test.go",
+    ],
+    data = [":prober"],
+    embed = [":prober_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )

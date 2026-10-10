@@ -920,10 +920,12 @@ The egress identity gate (#1053/#1055), rendered from
 `--capture-redirect-all-default`,
 `--mesh-dns`, `--host-ip`, `--debug`. The per-pod capture redirect is
 unconditional (no `--transparent-capture`; per-pod `capture.aether.io/*`
-annotations opt out). `--otlp-endpoint` and `--otlp-pin-endpoint` are deprecated
-no-ops since #1166 (the plugin exports no telemetry), kept parseable for one release
-so an older chart still starts a newer image. (The `cni` plugin binary itself is
-configured via CNI-spec stdin, not flags.)
+annotations opt out). There is no `--otlp-endpoint` or `--otlp-pin-endpoint`: the
+plugin exports no telemetry (#1166), the chart has passed neither since `2.4.0`,
+and the binary rejects both as unknown flags (they were deprecated no-ops for the
+releases in between; see `docs/runbook.md`, "cni-install no longer accepts the
+OTLP flags"). (The `cni` plugin binary itself is configured via CNI-spec stdin,
+not flags.)
 
 Netconf keys the plugin reads but `cni-install` does not write (edit the conflist to
 override a default): `netns_pin_disabled`, `netns_pin_dir` (`/run/aether/netns`),

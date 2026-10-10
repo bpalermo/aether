@@ -4011,6 +4011,31 @@ Talos needs nothing extra (the default `udsCsi.kubeletRoot`, `/var/lib/kubelet`,
 is right). On k0s / microk8s set `udsCsi.kubeletRoot`. Rolling back to `1.x`
 requires reverting the workloads to `emptyDir` too.
 
+### cni-install no longer accepts the OTLP flags (chart `2.5.7`)
+
+**A chart older than `2.4.0` cannot run a `cni-install` image from chart `2.5.7`
+on.** Charts before `2.4.0` passed `--otlp-endpoint` and `--otlp-pin-endpoint`
+to the agent pod's `cni-install` init container whenever an OTLP endpoint was
+configured (`otel.endpoint` or `cniInstall.otlpEndpoint`), and neither when none
+was. #1166 (chart `2.4.0`) took telemetry out of the CNI
+plugin, stopped the chart passing either flag, and kept both in the binary as
+deprecated no-ops so an older chart could still start a newer image. That window
+is closed: the binary now rejects both.
+
+What it looks like: the init container exits 1 with
+`Error: unknown flag: --otlp-endpoint`, the agent pod sits in
+`Init:CrashLoopBackOff`, and the node's agent never starts.
+
+Who can hit it: only someone who overrides `cniInstall.image` on a chart older
+than `2.4.0` with an image built from this release or later, and has an OTLP
+endpoint configured. A chart pins its
+own images by digest, so installing, upgrading to, or rolling back to any
+released chart is unaffected, in either direction: an old chart runs its own
+old image, which still has the flags. Any chart from `2.4.0` on passes neither
+flag (`//charts/aether:aether_cni_no_otlp_test`), whatever `otel.endpoint` is.
+
+If you are in that combination, upgrade the chart rather than the image.
+
 ### East-west QUIC (proposal 038 Phase 4): prerequisites, verifying, escape hatch
 
 East-west QUIC is **unconditional**. Every mesh pod has an HTTP/3 inbound on
