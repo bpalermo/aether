@@ -3171,7 +3171,8 @@ loopback port there, not a network namespace):
     end at that point; a request in flight at that moment is cut. Not
     measured: what an in-flight request sees.
   - on the **inbound** listener every request gets `503`: the listener that
-    accepted the connection is draining and routes to `app_<pod>_<port>`,
+    accepted the connection is draining and routes to
+    `app_<namespace>_<pod>_<port>`,
     which no longer exists. A calling proxy retries a `503` on another
     endpoint (two retries, another host each time), so a service with a
     replica on a node that is not at the same point of the roll is covered;
