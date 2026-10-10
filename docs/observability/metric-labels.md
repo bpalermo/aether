@@ -28,14 +28,16 @@ The label has to be called `node`. Promoting `k8s.node.name` under its translate
 
 Every Go component builds its resource from a fixed `service.name`, its build version,
 and the `OTEL_RESOURCE_ATTRIBUTES` environment variable the chart sets from the downward
-API. The two Envoy proxies build theirs from the environment variable alone.
+API. The edge proxy builds its resource from the environment variable alone. The node
+proxy builds its from the environment variable and then from its bootstrap, which names
+the service (see below for why it is not in the variable).
 
 | Component | `service.name` | From the chart's `OTEL_RESOURCE_ATTRIBUTES` |
 |---|---|---|
 | node agent (`aether_agent_*`) | `aether-agent` | `k8s.node.name`, `k8s.pod.name`, `k8s.namespace.name` |
 | mesh-dns (`aether_mesh_dns_*`) | `aether-mesh-dns` | `k8s.node.name`, `k8s.pod.name`, `k8s.namespace.name` |
 | proxy supervisor (`aether_supervisor_*`) | `aether-proxy-supervisor` | `k8s.node.name`, `k8s.namespace.name`, `k8s.pod.name`, `k8s.pod.uid` |
-| node proxy, Envoy stats (`envoy_*`, `aether_requests_total`) | **not set** | `k8s.node.name`, `k8s.namespace.name`, `k8s.pod.name`, `k8s.pod.uid` |
+| node proxy, Envoy stats (`envoy_*`, `aether_requests_total`) | `aether-proxy` (chart 2.4.26 and later; none before) | `k8s.node.name`, `k8s.namespace.name`, `k8s.pod.name`, `k8s.pod.uid` |
 | edge control plane (`agent edge`) | `aether-edge` | `k8s.node.name`, `k8s.namespace.name`, `k8s.pod.name`, `k8s.pod.uid`, `k8s.deployment.name` |
 | edge proxy, Envoy stats | `aether-edge-proxy` | the same, plus `service.instance.id` (the pod name) |
 | registrar (`aether_registrar_*`) | `aether-registrar` | `k8s.pod.name`, `k8s.namespace.name` |
@@ -47,7 +49,7 @@ Where this comes from: the `OTEL_RESOURCE_ATTRIBUTES` entries in
 builders in `common/telemetry/setup/setup.go` (agent, edge control plane, registrar,
 controller), `agent/internal/meshdns/telemetry.go`,
 `agent/internal/proxy/hotrestart/telemetry.go` and `prober/internal/prober/prober.go`;
-and the `resource_detectors` entry of the Envoy stats sink in
+and the `resource_detectors` entries of the Envoy stats sink in
 `agent-proxy-configmap.yaml` and `edge-configmap.yaml`.
 
 Five things follow from the table.
@@ -57,14 +59,25 @@ Five things follow from the table.
 - **Only the edge proxy sets `service.instance.id`.** No other component does, so
   Prometheus's `instance` label does not separate two agents, two mesh-dns daemons or two
   registrar replicas. Without a promoted `node` (or pod) label, every instance of a
-  component writes the same label set.
+  component writes the same label set. Setting it on the registrar, the controller and
+  the edge control plane was tried and taken back (#1560), for the reason under
+  [A label that holds the pod name](#a-label-that-holds-the-pod-name).
 - **The edge control plane needs a pod label as well as `node`.** The chart runs two
   `agent edge` replicas by default and spreads them across nodes only softly
   (`edge.replicaCount`, `edge.nodeSpread`), so two can share a node. Both report the pin
   gauges, and with `job` and `node` alone two co-located replicas write the same series.
-- **The node proxy's Envoy stats have no `service.name`,** so they arrive without a
-  `job`. The edge proxy exports the same metric names with `job="aether-edge-proxy"`,
-  which is how a query keeps the two apart (`{job!="aether-edge-proxy"}`).
+- **The node proxy's Envoy stats set `service.name=aether-proxy`** since chart 2.4.26,
+  so they are `job="aether-proxy"` wherever `service.name` is mapped to `job` (the table
+  under [What you must do](#what-you-must-do)). Before
+  that they had no `service.name` and arrived without a `job`; the edge proxy exports the
+  same metric names with `job="aether-edge-proxy"`, and a query could only keep the two
+  apart by negation (`{job!="aether-edge-proxy"}`, which still selects the node proxy's
+  series from both chart versions). The name is in the proxy's bootstrap
+  (`aether-proxy-config`), not in the container's environment, because the supervisor
+  runs in the same container and exports `aether_supervisor_*` from that environment as
+  `aether-proxy-supervisor`. **Do not add `OTEL_SERVICE_NAME` to the proxy container**:
+  it would rename the supervisor's metrics. A `service.name` in the container's
+  `OTEL_RESOURCE_ATTRIBUTES` changes neither name.
 - **Only the `hostNetwork` Go components set `host.name`.** The binary decides this, not
   the chart: the SDK's host detector reads the hostname, and a component keeps the
   attribute only where that hostname is a host's.
@@ -193,6 +206,36 @@ and collide without it, and leaves the per-service clusters collapsed fleet-wide
 is a choice your pipeline makes. A per-node query over a per-service cluster stat needs
 the label on those series too.
 
+## A label that holds the pod name
+
+A label made from the pod name (`pod` from `k8s.pod.name`, as in the example above, or
+`instance` from `service.instance.id`) keeps replicas apart, and it also makes every
+roll start a new set of series. A pushed series has no staleness marker: nothing tells
+the store that the old pod is gone, so **its last sample stays in the 5-minute lookback
+beside the new pod's**. A rule that aggregates over replicas reads both for those five
+minutes. Run through `promtool test rules` against the rule files in this directory,
+with an old pod's series ending where its replacement's begins
+(`AetherProxyHoldsUnpinnedClusters` was not run):
+
+| Rule | What a roll does to it, with a pod-name label |
+|---|---|
+| `AetherMeshClusterUnpinned` (`sum by (job, node, reason)`, `for: 3m`) | a pod whose **last** export reported one unpinned cluster, replaced by a pod that reports none, fires the alert: the one sample is read for five minutes and `for: 3m` is met. An alert that was rightly firing outlives the pod by up to five minutes |
+| `AetherMeshClusterPinPending` (the same sum, `for: 5m`) | the same single sample does not fire it: the lookback ends as the five minutes are reached. One that was firing outlives the pod likewise |
+| `AetherRegistrarSnapshotDiverged` | a registrar whose last export fell between an agent RPC and its sync (a hash that is not its revision's, which `for: 3m` exists to ride out) fires it against the hashes of the other replicas at that revision. A terminated registrar's last non-zero `aether_registrar_writebehind_queue_depth` keeps the rule quiet for five minutes, so a real divergence is reported that much later |
+| `count(aether_registrar_snapshot_content_hash)` (the check below) | counts the old and the new replicas together for five minutes after a roll |
+
+This is why the chart does not set `service.instance.id` on the registrar, the
+controller and the edge control plane, though without any such label two replicas of
+those write one series (the table under
+[What you see when a label is missing](#what-you-see-when-a-label-is-missing)): the
+rules here are written for one series per replica that **keeps its identity across a
+roll**, which a per-node label gives and a pod name does not. If your pipeline makes a
+pod-name label for them, as the example does, the rows above apply to you after every
+roll of those Deployments. A label that survives a roll does not have them: the node,
+where each replica has a node to itself.
+
+The node proxy's `job` label is the same effect, once: see the runbook's "Chart 2.4.26".
+
 ## Checking a pipeline
 
 Each of these should return one result per node. A single result with no `node` label
@@ -211,6 +254,19 @@ running means the replicas write one series.
 
 ```promql
 count(aether_registrar_snapshot_content_hash)
+```
+
+Read it more than five minutes after the last registrar roll if the replica label holds
+the pod name: until then it counts the replaced pods as well.
+
+The node proxy and the edge proxy export the same Envoy metric names. This returns one
+result per proxy kind: `aether-proxy`, and `aether-edge-proxy` when the edge is on. A
+result with no `job` is a node proxy on a chart older than 2.4.26, one whose Envoy has
+not yet restarted on the new bootstrap, or, for five minutes after that restart, the
+last sample of its old series.
+
+```promql
+count by (job) (envoy_server_live)
 ```
 
 Then prove a rule fires, as [`README.md`](./README.md) says to: break one node and

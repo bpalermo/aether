@@ -3921,6 +3921,129 @@ helm_template_match_test(
     ],
 )
 
+# --- What the telemetry resource says about the node proxy (#1561) ------------
+#
+# docs/observability/metric-labels.md is the operator's page for all of this.
+
+OTEL_ON = [
+    "--set",
+    "otel.enabled=true",
+    "--set",
+    "otel.endpoint=otel-collector.observability.svc:4317",
+]
+
+# One `- name: OTEL_RESOURCE_ATTRIBUTES` entry and its whole value (%s, a
+# regular expression). `$(VAR)` is the kubelet's expansion, not helm's: it is
+# rendered as written.
+RESOURCE_ATTRIBUTES = "\\n +- name: OTEL_RESOURCE_ATTRIBUTES\\n +value: \"%s\"\\n"
+
+# Guard: #1561 changes no container's environment, so nothing below may move.
+#
+# The proxy container's environment is the supervisor's too (one container, two
+# exporters), so the node proxy's service.name is not set there (see
+# :aether_proxy_stats_service_name_test).
+#
+# No workload but the edge proxy sets service.instance.id, and that is a
+# decision, not an omission (#1560). Prometheus stores the attribute as
+# `instance`; with the pod name in it every roll starts a new set of series,
+# and a pushed series has no staleness marker: the terminated pod's last sample
+# stays in the 5-minute lookback beside the new pod's. The shipped rules
+# aggregate over replicas (agent-pin-alerts.yml sums by job and node,
+# registrar-alerts.yml compares hashes across replica series), so for those
+# five minutes they read a pod that is gone: one last non-zero sample becomes a
+# 3-minute state and fires. The attribute can come back when the rules select
+# fresh series only. mesh-dns also has a datapoint attribute of its own called
+# `instance`, on its exit counter, which a resource-made label would collide
+# with.
+helm_template_match_test(
+    name = "aether_resource_attributes_unchanged_test",
+    chart = ":aether",
+    document_patterns = {
+        "DaemonSet/release-name-aether-agent": [
+            RESOURCE_ATTRIBUTES % "k8s\\.node\\.name=\\$\\(NODE_NAME\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\)",
+        ],
+        "DaemonSet/release-name-aether-mesh-dns": [
+            RESOURCE_ATTRIBUTES % "k8s\\.node\\.name=\\$\\(NODE_NAME\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\)",
+        ],
+        "DaemonSet/aether-proxy": [
+            RESOURCE_ATTRIBUTES % "k8s\\.node\\.name=\\$\\(NODE_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.pod\\.uid=\\$\\(POD_UID\\)",
+        ],
+        "Deployment/release-name-aether-registrar": [
+            RESOURCE_ATTRIBUTES % "k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\)",
+        ],
+        "Deployment/release-name-aether-controller": [
+            RESOURCE_ATTRIBUTES % "k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\)",
+        ],
+        # Its two containers: the edge control plane, then the edge proxy.
+        "Deployment/release-name-aether-edge": [
+            RESOURCE_ATTRIBUTES % "k8s\\.node\\.name=\\$\\(NODE_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.pod\\.uid=\\$\\(POD_UID\\),k8s\\.deployment\\.name=release-name-aether-edge",
+            RESOURCE_ATTRIBUTES % "service\\.name=aether-edge-proxy,service\\.instance\\.id=\\$\\(POD_NAME\\),k8s\\.node\\.name=\\$\\(NODE_NAME\\),k8s\\.namespace\\.name=\\$\\(POD_NAMESPACE\\),k8s\\.pod\\.name=\\$\\(POD_NAME\\),k8s\\.pod\\.uid=\\$\\(POD_UID\\),k8s\\.deployment\\.name=release-name-aether-edge",
+        ],
+    },
+    opts = OTEL_ON + [
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+# #1561: the node proxy's Envoy stats name their service in the BOOTSTRAP: a
+# static resource detector after the environment one, so its service.name is
+# the one that is exported (Envoy merges detectors in order, the later one
+# winning). Not through the container's environment, which the supervisor in
+# the same container reads as well: OTEL_SERVICE_NAME there would rename the
+# supervisor's metrics to the proxy's.
+helm_template_match_test(
+    name = "aether_proxy_stats_service_name_test",
+    chart = ":aether",
+    document_patterns = {
+        "ConfigMap/aether-proxy-config": [
+            "\\n          resource_detectors:\\n" +
+            "            - name: envoy\\.tracers\\.opentelemetry\\.resource_detectors\\.environment\\n" +
+            "              typed_config:\\n" +
+            "                \"@type\": type\\.googleapis\\.com/envoy\\.extensions\\.tracers\\.opentelemetry\\.resource_detectors\\.v3\\.EnvironmentResourceDetectorConfig\\n" +
+            "(            #[^\\n]*\\n)*" +
+            "            - name: envoy\\.tracers\\.opentelemetry\\.resource_detectors\\.static_config\\n" +
+            "              typed_config:\\n" +
+            "                \"@type\": type\\.googleapis\\.com/envoy\\.extensions\\.tracers\\.opentelemetry\\.resource_detectors\\.v3\\.StaticConfigResourceDetectorConfig\\n" +
+            "                attributes:\\n" +
+            "                  service\\.name: aether-proxy\\n" +
+            "          prefix: envoy\\n",
+        ],
+    },
+    opts = OTEL_ON,
+)
+
+# ...and nothing in the chart names a service through the environment, for any
+# container, with every optional workload rendered.
+helm_template_absent_test(
+    name = "aether_no_otel_service_name_env_test",
+    # The env entry, not the bare word: the bootstrap's comment says why it is
+    # absent.
+    absent = ["name: OTEL_SERVICE_NAME"],
+    chart = ":aether",
+    control = "name: OTEL_RESOURCE_ATTRIBUTES",
+    opts = OTEL_ON + [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+    ],
+)
+
+# The off switch: without otel.endpoint the bootstrap has no stats sink, so no
+# detector either. Upgrading a mesh that exports nothing changes no bootstrap
+# and restarts no Envoy.
+helm_template_absent_test(
+    name = "aether_proxy_stats_sink_off_test",
+    absent = [
+        "stats_sinks:",
+        "resource_detectors:",
+        "envoy.stat_sinks.open_telemetry",
+    ],
+    chart = ":aether",
+    control = "name: aether-proxy-config",
+)
+
 # Commit-pinned second packaging of the SAME chart (#692).
 #
 # chart_push tags with the packaged chart's `version:`, so the chart above
