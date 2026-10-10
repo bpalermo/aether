@@ -20,7 +20,7 @@
 # shell is clean. That is #853, and it is why this check counts SOURCE files the
 # aspect would actually read rather than trusting that targets exist.
 #
-# The srcs are globs (//scripts, //bazel, //e2e, //e2e/pressure), so
+# The srcs are globs (//scripts, //bazel, //e2e), so
 # a script added to one of those directories is picked up with no edit. What a
 # glob cannot do is cross a package boundary: a script added to a directory with
 # no sh_* target — a new //e2e/foo, or one of //bazel's existing subpackages —

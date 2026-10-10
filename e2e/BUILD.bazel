@@ -10,10 +10,10 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 # SC2155/SC2034 findings that #853 had to clear before the gate could be turned
 # on were here.
 #
-# Per-directory targets (this one, //e2e/pressure) rather than one
-# recursive target, for two reasons. A glob cannot cross a package boundary, so
-# `glob(["**/*.sh"])` here would stop dead at //e2e/udsecho's BUILD.bazel and
-# quietly cover less than it appears to; and a per-directory target keeps the
+# A per-directory target (a subdirectory that gains shell gets its own) rather
+# than one recursive target, for two reasons. A glob cannot cross a package
+# boundary, so `glob(["**/*.sh"])` here would stop dead at //e2e/udsecho's
+# BUILD.bazel and quietly cover less than it appears to; and a per-directory target keeps the
 # lint failure label pointing at the directory the script lives in.
 sh_library(
     name = "e2e_shell",
