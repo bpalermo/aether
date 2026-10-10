@@ -38,6 +38,16 @@
 # a counter gains _total. The gauges carry `job` (aether-agent, or the edge's)
 # and `node`.
 #
+# Every rule aggregates by (job, node), so `{{ $value }}` is a figure for the
+# node, added up over every series the pipeline stores for that job on it. For
+# a node agent that is one process. Two edge control-plane replicas can share a
+# node, and a pipeline that keeps them apart (the `pod` label
+# docs/observability/metric-labels.md recommends for the edge) then stores two
+# sets of series there: the figure counts a cluster once for each of those
+# replicas that reports it (#1616). The rules fire on > 0 either way; read the
+# figure per `pod` for an edge. (The edge control plane sets no
+# service.instance.id, so there is no `instance` label to do this by.)
+#
 # Install: merge into the Prometheus rule files (with the Prometheus helm chart,
 # under serverFiles: alerting_rules.yml: groups: [...]). See README.md in this
 # directory. agent-pin-alerts_test.yml beside this file is its promtool unit
@@ -170,15 +180,15 @@ groups:
       # standby, a proxy that never connected); once it has samples a stream
       # that drops does not withdraw them, the last accepted state stays
       # exported, so a sample is not proof of a live xDS connection. And it
-      # is absent, the case this rule then
-      # MISSES (#1509), after an agent restart for as long as the proxy
-      # rejects a cluster it holds an older version of: the new agent process
-      # never published that version, cannot count it, and writes no gauge
-      # rather than one that leaves the cluster out. The same when the proxy
-      # rejects the removal of a mesh cluster the agent no longer publishes
-      # and has no record of. A divergence that was
-      # firing resolves when the old samples leave the lookback. The NACK
-      # counter above moves once for each response the proxy rejects.
+      # is absent, the case this rule then MISSES, after an agent restart for
+      # as long as the proxy rejects a cluster it holds an older version of:
+      # the new agent process never published that version, cannot count it,
+      # and writes no gauge rather than one that leaves the cluster out. The
+      # same when the proxy rejects the removal of a mesh cluster the agent no
+      # longer publishes and has no record of. A divergence that was firing
+      # resolves when the old samples leave the lookback. That state is
+      # AetherProxyPinStateUnknown's, below (#1509). The NACK counter above
+      # moves once for each response the proxy rejects.
       #
       # Reason by reason, never on the totals. A cluster that leaves one reason
       # for another (an unpinned TCP floor that is removed: no_namespace_metadata
@@ -232,5 +242,58 @@ groups:
             log for `envoy NACKed delta response` (it carries the proxy's
             error), and `proxy acknowledged mesh clusters with no
             server-identity SAN pin` for the per-reason counts. See
+            docs/runbook.md, "The unpinned-cluster signal", "Published is not
+            held".
+
+      # ---------------------------------------------------------------- P2
+      # The agent cannot tell what the proxy holds (#1509). The rule above
+      # compares two gauges and says nothing while the acknowledged one is
+      # absent. One of the reasons it is absent is not "no proxy has answered":
+      # the proxy holds a mesh cluster at a version the agent has no pin state
+      # on record for, and the agent then writes no acknowledged gauge rather
+      # than a count that leaves the cluster out. That state has a gauge of its
+      # own, the number of such clusters:
+      #
+      #   aether_agent_xds_acked_tls_clusters_unknown
+      #
+      # one series per agent, no label besides `job` and `node`. It is zero
+      # while the acknowledged gauge is written, and absent, like that gauge,
+      # until a proxy has answered a cluster response of this agent process.
+      #
+      # How it comes about: the agent restarts while the proxy is rejecting a
+      # cluster update. The proxy states the version it held before that
+      # update, which the new process never published; it is sent the update
+      # again and rejects it again. Also: a proxy that rejects the removal of a
+      # mesh cluster the agent no longer publishes and has no record of. Either
+      # way the proxy is not accepting cluster updates, and what it holds
+      # instead may be a cluster without a pin. This rule cannot say whether it
+      # is; it says that the rule above cannot either.
+      #
+      # for: 15m, the same as the rule it stands in for. An ordinary agent
+      # restart or upgrade does not produce the state: the proxy's statement
+      # is read together with its answer to the agent's first response, and a
+      # proxy that accepts that response holds versions this agent process
+      # published. It takes a proxy that rejects.
+      - alert: AetherProxyPinStateUnknown
+        expr: >-
+          sum by (job, node) (aether_agent_xds_acked_tls_clusters_unknown) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: aether-agent
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.node }} cannot determine the pin state of {{ $value }} mesh cluster(s) the proxy holds"
+          description: >-
+            The proxy on {{ $labels.node }} holds {{ $value }} mesh cluster(s)
+            at a version {{ $labels.job }} has no server-identity pin state on
+            record for, and has for 15 minutes. While that lasts
+            aether_agent_xds_acked_tls_clusters is not written, so
+            AetherProxyHoldsUnpinnedClusters cannot fire for this node: what
+            the proxy holds of those clusters may be without a pin. The usual
+            cause is a proxy that was rejecting a cluster update when the agent
+            restarted and still rejects it. Check aether_agent_xds_nacks_total
+            for the Cluster type URL and the agent log for `envoy NACKed delta
+            response` (it carries the proxy's error) and `proxy holds mesh
+            clusters whose pin state this agent cannot determine`. See
             docs/runbook.md, "The unpinned-cluster signal", "Published is not
             held".

@@ -16,7 +16,8 @@ evaluation_interval: 1m
 
 tests:
   # A healthy node: TLS clusters published, all pinned, every unpinned series a
-  # written zero; the proxy acknowledged the same.
+  # written zero; the proxy acknowledged the same, and the agent knows the pin
+  # state of everything the proxy holds.
   - name: healthy node is quiet
     interval: 1m
     input_series:
@@ -34,6 +35,8 @@ tests:
         values: '12x40'
       - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
         values: '0x40'
+      - series: 'aether_agent_xds_acked_tls_clusters_unknown{job="aether-agent", node="n1"}'
+        values: '0x40'
     alert_rule_test:
       - eval_time: 40m
         alertname: AetherMeshClusterUnpinned
@@ -43,6 +46,9 @@ tests:
         exp_alerts: []
       - eval_time: 40m
         alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: AetherProxyPinStateUnknown
         exp_alerts: []
 
   # The validation gap: two clusters published with TLS and no pin. Quiet for
@@ -195,23 +201,29 @@ tests:
         alertname: AetherProxyHoldsUnpinnedClusters
         exp_alerts: []
 
-  # The known gap (#1509), stated as a test so nobody reads the rule as
-  # covering it: the proxy rejects the update that pins two clusters (the rule
-  # fires at minute 17), and the AGENT restarts at minute 20. The proxy tells
-  # the new agent process the versions it held before the rejected update,
-  # which that process never published and cannot count; it is sent the update
-  # again and rejects it again. The new process writes no acknowledged gauge
-  # rather than one that leaves those clusters out: the series ends, and the
-  # alert resolves once its last sample is out of the 5 m lookback, with the
-  # proxy unchanged. What is left is the NACK counter (one increment for each
-  # rejected response) and the agent's log lines.
-  - name: an agent restart while the proxy rejects cluster updates silences the divergence rule
+  # The gap #1509 was about. The proxy has been rejecting the update that pins
+  # two clusters since minute 2 (the divergence rule fires at minute 17), and
+  # the AGENT restarts at minute 20. The proxy tells the new agent process the
+  # versions it held before the rejected update, which that process never
+  # published and cannot count; it is sent the update again and rejects it
+  # again. The new process writes no acknowledged gauge rather than one that
+  # leaves those clusters out: the series ends, and the divergence alert
+  # resolves once its last sample is out of the 5 m lookback, with the proxy
+  # unchanged.
+  #
+  # It is not silent any more: the new process reports the two clusters it
+  # cannot place (aether_agent_xds_acked_tls_clusters_unknown, zero from the
+  # process before it), and AetherProxyPinStateUnknown fires fifteen minutes
+  # into that state.
+  - name: an agent restart while the proxy rejects cluster updates is the unknown-state rule's
     interval: 1m
     input_series:
       - series: 'aether_agent_snapshot_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
         values: '2 2 0x40'
       - series: 'aether_agent_xds_acked_tls_clusters{job="aether-agent", node="n1", pin="unpinned", reason="no_namespace_metadata"}'
         values: '2x20'
+      - series: 'aether_agent_xds_acked_tls_clusters_unknown{job="aether-agent", node="n1"}'
+        values: '0x19 2x40'
     alert_rule_test:
       - eval_time: 20m
         alertname: AetherProxyHoldsUnpinnedClusters
@@ -226,6 +238,32 @@ tests:
               description: "The clusters the proxy on n1 has accepted include 2 more mesh cluster(s) without a server-identity pin, counted reason by reason, than the agent's current snapshot publishes. The proxy has not accepted the newer clusters for 15 minutes. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error), and `proxy acknowledged mesh clusters with no server-identity SAN pin` for the per-reason counts. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
       - eval_time: 30m
         alertname: AetherProxyHoldsUnpinnedClusters
+        exp_alerts: []
+      - eval_time: 34m
+        alertname: AetherProxyPinStateUnknown
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: AetherProxyPinStateUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: aether-agent
+              job: aether-agent
+              node: n1
+            exp_annotations:
+              summary: "aether-agent on n1 cannot determine the pin state of 2 mesh cluster(s) the proxy holds"
+              description: "The proxy on n1 holds 2 mesh cluster(s) at a version aether-agent has no server-identity pin state on record for, and has for 15 minutes. While that lasts aether_agent_xds_acked_tls_clusters is not written, so AetherProxyHoldsUnpinnedClusters cannot fire for this node: what the proxy holds of those clusters may be without a pin. The usual cause is a proxy that was rejecting a cluster update when the agent restarted and still rejects it. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error) and `proxy holds mesh clusters whose pin state this agent cannot determine`. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
+
+  # The unknown state for two samples is not an alert: a proxy that rejected a
+  # cluster update across an agent restart and accepts it two minutes later.
+  - name: a pin state that is unknown for a moment is quiet
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_xds_acked_tls_clusters_unknown{job="aether-agent", node="n1"}'
+        values: '0x5 3 3 0x40'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: AetherProxyPinStateUnknown
         exp_alerts: []
 
   # The proxy rejects the update that pins two clusters: the agent publishes
@@ -364,6 +402,31 @@ tests:
       - eval_time: 40m
         alertname: AetherProxyHoldsUnpinnedClusters
         exp_alerts: []
+
+  # Two edge control-plane replicas on one node, kept apart by the `pod` label
+  # a pipeline promotes for the edge. Each publishes the same one unpinned
+  # cluster. The rule aggregates by (job, node, reason): it fires once, and its
+  # figure is 2, one for each replica (#1616).
+  - name: two edge replicas on one node are added up in the figure
+    interval: 1m
+    input_series:
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", pod="edge-a", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '1x10'
+      - series: 'aether_agent_snapshot_tls_clusters{job="aether-edge", node="n1", pod="edge-b", pin="unpinned", reason="no_namespace_metadata"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AetherMeshClusterUnpinned
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: aether-agent
+              job: aether-edge
+              node: n1
+              reason: no_namespace_metadata
+            exp_annotations:
+              summary: "2 mesh cluster(s) on n1 are published with TLS and no server-identity pin (no_namespace_metadata)"
+              description: "Mesh cluster entries aether-edge on n1 publishes with an upstream TLS context that carries no match_typed_subject_alt_names, reason no_namespace_metadata: 2. The handshake of such a cluster proves trust-domain membership only, so any mesh workload is accepted as the server. The agent names the clusters in its WARN line `mesh clusters published with no server-identity SAN pin` (same `reason`). For no_namespace_metadata, find who registered the service's endpoints without a Kubernetes namespace. pin_not_rendered is an agent defect. See docs/runbook.md, \"The unpinned-cluster signal\"."
 
   # An agent that stops reporting while it had unpinned clusters: its last
   # samples go stale and the alert resolves. These rules do not cover a silent

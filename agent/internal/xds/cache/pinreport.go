@@ -130,6 +130,12 @@ type pinReport struct {
 	// (ackedPins.publish). A snapshot build tracks, into a buffer it reuses.
 	track   bool
 	classes []entryClass
+	// mtls is the map key of every entry the read found with an mTLS-injected
+	// cluster (entry.mtlsCluster): the clusters the outbound identity-binding
+	// log names (logIdentityBindings, #1621). Collected by the snapshot build's
+	// read of the cluster map (clustersEndpointsVhostsAndPinsInto), not by add,
+	// and in map order.
+	mtls []string
 	// promoted records promoteTLSNotPublished: the counts moved every
 	// tls_not_published entry to no_namespace_metadata after the classes were
 	// collected.

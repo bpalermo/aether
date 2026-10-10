@@ -74,7 +74,7 @@ func TestCacheMetrics_NilReceiverSafe(t *testing.T) {
 	m.ClusterUnpinned(context.Background(), CauseNoNamespaceMetadata, 3)
 	m.TLSClusterPins(context.Background(), PinCounts{Pinned: 4})
 	m.TLSClusterPinsAcked(context.Background(), PinCounts{Pinned: 4})
-	m.TLSClusterPinsAckedUnknown()
+	m.TLSClusterPinsAckedUnknown(1)
 	m.UDSResolveFailure(context.Background(), "not_csi")
 }
 
@@ -554,7 +554,7 @@ func TestAckedTLSClusters_WithdrawnWhileUnknown(t *testing.T) {
 	if n := points(); n != 1+NumUnpinnedCauses {
 		t.Fatalf("unchanged at the next collection: %d data points, want %d", n, 1+NumUnpinnedCauses)
 	}
-	m.TLSClusterPinsAckedUnknown()
+	m.TLSClusterPinsAckedUnknown(2)
 	if n := points(); n != 0 {
 		t.Fatalf("withdrawn: %d data points, want none", n)
 	}
@@ -562,4 +562,58 @@ func TestAckedTLSClusters_WithdrawnWhileUnknown(t *testing.T) {
 	if n := points(); n != 1+NumUnpinnedCauses {
 		t.Fatalf("set again, zeros included: %d data points, want %d", n, 1+NumUnpinnedCauses)
 	}
+}
+
+// TestAckedTLSClustersUnknown_IsTheOtherHalfOfTheAckedGauge: a withdrawn
+// acknowledged gauge is an absence, and no rule matches an absence (#1509).
+// The unknown gauge is the sample for it: absent until the acknowledged state
+// was first settled either way, the number of clusters the agent cannot place
+// while the acknowledged gauge is withdrawn, and zero, not absent, while it is
+// written.
+func TestAckedTLSClustersUnknown_IsTheOtherHalfOfTheAckedGauge(t *testing.T) {
+	const name = "aether.agent.xds.acked_tls_clusters_unknown"
+	m, reader := newTestMetrics(t)
+	unknown := func() (int64, bool) {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("Collect() error = %v", err)
+		}
+		for _, sm := range rm.ScopeMetrics {
+			for _, metric := range sm.Metrics {
+				if metric.Name != name {
+					continue
+				}
+				points := metric.Data.(metricdata.Gauge[int64]).DataPoints
+				switch len(points) {
+				case 0:
+					return 0, false
+				case 1:
+					if n := points[0].Attributes.Len(); n != 0 {
+						t.Fatalf("%s carries %d attributes, want none: %v", name, n, points[0].Attributes)
+					}
+					return points[0].Value, true
+				default:
+					t.Fatalf("%s has %d data points, want one", name, len(points))
+				}
+			}
+		}
+		return 0, false
+	}
+	expect := func(step string, want int64, wantOK bool) {
+		t.Helper()
+		if got, ok := unknown(); got != want || ok != wantOK {
+			t.Fatalf("%s: got (%d, %t), want (%d, %t)", step, got, ok, want, wantOK)
+		}
+	}
+
+	expect("before any answer", 0, false)
+	m.TLSClusterPinsAckedUnknown(3)
+	expect("withdrawn first", 3, true)
+	m.TLSClusterPinsAcked(context.Background(), PinCounts{Pinned: 4})
+	expect("known", 0, true)
+	m.TLSClusterPinsAckedUnknown(1)
+	expect("withdrawn after having been known", 1, true)
+	m.TLSClusterPinsAcked(context.Background(), PinCounts{})
+	expect("known again", 0, true)
 }

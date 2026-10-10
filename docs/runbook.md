@@ -6320,6 +6320,21 @@ any more (a missed CNI DEL) logs WARN `outbound identity mapping has no owning p
 Above 200 changed pairs in one snapshot a single `outbound identity bindings changed`
 summary replaces the per-pair lines, keeping the distinct source→identity transitions.
 
+**What `snapshot_version` on a binding line means (#1621).** The outbound and the
+inbound lines are made from what the snapshot of that version was built from: its own
+listeners, its own secrets, and the clusters its build read. A pod is named only when
+the listener its entry held is one of that snapshot's listeners. So a line never names
+a pod, a cluster or a served secret that the snapshot of its version does not carry.
+(Agents before this read the agent's maps after the snapshot was set, so a change that
+landed during a build was named under the version before it, and the build that
+published it said nothing.) Two things are not exact. A pod whose listeners were
+written in the few statements between the build's two reads of the listener map is in
+the snapshot and is first named by the next build; one that was rebuilt in that gap is
+named again by the next build although nothing about it changed. And the
+netns → identity index is no part of a snapshot: it is read during the build. A pod
+whose network namespace is gone is not named while the agent leaves its listeners out
+of the snapshot.
+
 ```bash
 # Every re-bind on one node, around the roll.
 kubectl -n aether-system logs ds/aether-agent --since=10m \
@@ -6418,6 +6433,7 @@ on them are in `docs/observability/agent-pin-alerts.yml`:
 | counter `aether_agent_identity_cluster_unpinned_total{reason}` | **that** a snapshot went out with unpinned clusters | adds the unpinned count on every snapshot; seeded at zero per reason |
 | gauge `aether_agent_snapshot_tls_clusters{pin,reason}` | **how many** clusters are pinned and unpinned **now**, per reason | written on every snapshot, zeros included |
 | gauge `aether_agent_xds_acked_tls_clusters{pin,reason}` | the same, for the clusters the **proxy has accepted**, cluster by cluster | written when the proxy answers a cluster response: the ACK of one that added or removed a cluster, and the answer (ACK or NACK) to the first one of a stream, and by a snapshot build that changes how a cluster the proxy has accepted is counted; absent before the first answer; not written while the pin state of a cluster the proxy holds is unknown |
+| gauge `aether_agent_xds_acked_tls_clusters_unknown` | **how many** clusters the proxy holds whose pin state the agent cannot determine (#1509) | one series, no label of its own; zero while the gauge above is written, the number of such clusters while it is not written for that reason; absent before the first answer |
 
 None of the metrics carries a cluster name: the names are in the log line only.
 
@@ -6461,6 +6477,22 @@ agent reports it like any other (this gauge, the counter and the line above, the
 identity-binding lines) and logs `snapshot installed, but an open watch was not answered from it` at
 WARN with the error. Agents before #1549 skipped the report for such a snapshot, and
 the gauge kept the previous snapshot's values until the next build.
+
+That line is not expected from a connected proxy (#1619, #1620). The agent hands each
+open watch its response through a channel the proxy's stream owns, and waits at most
+5 s for room in it. With the control plane library the agent pins there is always
+room, also for a proxy that has stopped reading its stream: the channel of a delta
+stream holds twenty responses and at most seven can be waiting in it (one per resource
+type the agent serves, and one more), and a secret stream makes a channel for every
+request. The unit tests hold that against the library's own stream handlers. The wait
+no longer ends with the caller's context either: before #1620 a snapshot built for a
+caller whose context had already ended (a CNI ADD whose RPC was abandoned) could stop
+at any open watch, by a random choice made once per watch, and leave that one and
+the ones after it unanswered: the proxy was not sent the change until the next build,
+and the caller was told the build had failed. If the line does appear,
+a library upgrade has changed how a stream buffers, the build that logged it held up
+every other build on the node for those 5 s, and the proxy is sent the change by a
+later build.
 
 ```promql
 # N clusters unpinned for reason R on this node, now.
@@ -6576,11 +6608,15 @@ What follows from that:
   gauge is not written` with the number of clusters
   (INFO `the pin state of every mesh cluster this agent has on record as held by the
   proxy can be determined again; the acknowledged pin gauge is written` when it ends). In that state `AetherProxyHoldsUnpinnedClusters` is silent although the proxy
-  may hold unpinned clusters (#1509): what remains is that line, an increment of
+  may hold unpinned clusters. The state has a sample of its own (#1509):
+  `aether_agent_xds_acked_tls_clusters_unknown` is the number of clusters on that WARN
+  line, and zero whenever the acknowledged gauge is written. `AetherProxyPinStateUnknown`
+  fires when it has been above zero for 15 minutes. It does not say the proxy holds an
+  unpinned cluster; it says the agent cannot tell, and that the proxy is not accepting
+  cluster updates. Beside it there are that line, an increment of
   `aether_agent_xds_nacks_total` for the Cluster type each time the proxy rejects a
-  response, and the agent's `envoy NACKed delta response` line. An absent acknowledged
-  gauge on an agent whose proxy is connected is therefore a reason to look at the NACK
-  counter. The ACK of some other cluster does not end it; the proxy accepting that
+  response, and the agent's `envoy NACKed delta response` line, which carries the
+  proxy's reason. The ACK of some other cluster does not end it; the proxy accepting that
   cluster does. The same holds for a cluster the proxy **states it holds when it opens
   a stream** that the agent no longer publishes and has no record of (the agent
   restarted, or the stream ended before the agent read the proxy's answer and the

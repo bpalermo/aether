@@ -248,6 +248,18 @@ type Metrics struct {
 	ackedMu    sync.Mutex
 	acked      PinCounts
 	ackedKnown bool
+	// ackedUnknownClusters is the other half of ackedTLSClusters (#1509): how
+	// many mesh clusters the proxy holds whose pin state the agent cannot
+	// determine. Zero while ackedTLSClusters is written, the number of such
+	// clusters while it is withdrawn for that reason, and absent, like it,
+	// until a proxy has answered a cluster response of this agent process. It
+	// is what makes "the acknowledged gauge is absent because the agent cannot
+	// tell" a sample a rule can match, where the absence alone is silent.
+	ackedUnknownClusters metric.Int64ObservableGauge
+	// ackedUnknown is what it observes, and ackedSettled is false until the
+	// acknowledged state was first set or withdrawn. Guarded by ackedMu.
+	ackedUnknown int
+	ackedSettled bool
 	// pinnedAttrs and unpinnedAttrs are the two gauges' attribute sets, built
 	// once at registration: the gauges are recorded on every snapshot.
 	pinnedAttrs   metric.MeasurementOption
@@ -417,6 +429,16 @@ func (m *Metrics) registerAckedTLSClusters(meter metric.Meter) error {
 		})); err != nil {
 		return fmt.Errorf("acked tls clusters: %w", err)
 	}
+	if m.ackedUnknownClusters, err = meter.Int64ObservableGauge("aether.agent.xds.acked_tls_clusters_unknown",
+		metric.WithDescription("Mesh clusters the proxy holds whose server-identity pin state the agent cannot determine; while it is not zero aether.agent.xds.acked_tls_clusters is not written. Absent until a proxy answers a cluster response"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			if unknown, settled := m.ackedUnknownPins(); settled {
+				o.Observe(int64(unknown))
+			}
+			return nil
+		})); err != nil {
+		return fmt.Errorf("acked tls clusters unknown: %w", err)
+	}
 	return nil
 }
 
@@ -561,19 +583,32 @@ func (m *Metrics) TLSClusterPinsAcked(_ context.Context, counts PinCounts) {
 	m.ackedMu.Lock()
 	defer m.ackedMu.Unlock()
 	m.acked, m.ackedKnown = counts, true
+	m.ackedUnknown, m.ackedSettled = 0, true
 }
 
 // TLSClusterPinsAckedUnknown withdraws the acknowledged pin state: the gauge
 // has no sample from the next collection on, until TLSClusterPinsAcked sets
 // one again. For when the pin state of a cluster the proxy holds is not known
 // (#1508): the last known counts would read as a current, valid state.
-func (m *Metrics) TLSClusterPinsAckedUnknown() {
+//
+// unknown is the number of such clusters, which
+// aether.agent.xds.acked_tls_clusters_unknown reports from the next collection
+// on (#1509): the withdrawal is then a sample, not only an absence.
+func (m *Metrics) TLSClusterPinsAckedUnknown(unknown int) {
 	if m == nil {
 		return
 	}
 	m.ackedMu.Lock()
 	defer m.ackedMu.Unlock()
 	m.acked, m.ackedKnown = PinCounts{}, false
+	m.ackedUnknown, m.ackedSettled = unknown, true
+}
+
+// ackedUnknownPins is what the unknown-clusters gauge observes.
+func (m *Metrics) ackedUnknownPins() (int, bool) {
+	m.ackedMu.Lock()
+	defer m.ackedMu.Unlock()
+	return m.ackedUnknown, m.ackedSettled
 }
 
 // ackedPins is what the acknowledged gauge observes.
