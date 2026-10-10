@@ -63,8 +63,9 @@ import (
 //
 // What a line is made from (#1621): the index and the owning pods as the
 // snapshot build read them (bindingView, which says what the join to the
-// snapshot's listeners leaves out), and the mTLS clusters the build's own read
-// of the cluster map found. Nothing here reads the cache's maps.
+// snapshot's listeners leaves out), and the mTLS-injected clusters the build
+// published from its own read of the cluster map, by resource name. Nothing
+// here reads the cache's maps.
 
 // maxBindingChangeLines bounds how many per-binding INFO lines one snapshot may
 // emit. A node's first snapshot legitimately binds every source pod to every
@@ -115,12 +116,12 @@ type bindingState struct {
 // snapshotMu held, which also serializes the stored state.
 //
 // sources is bindingView.sourceBindings for the snapshot's listeners, and
-// mtlsEntries the entries the build's read of the cluster map found with an
-// mTLS-injected cluster (pinReport.mtls): the same read the snapshot's clusters
-// were collected in. It is not kept: the caller reuses the slice.
-func (c *SnapshotCache) logIdentityBindings(ctx context.Context, version string, sources map[string]sourceBinding, mtlsEntries []string) {
-	clusters := make(map[string]struct{}, len(mtlsEntries))
-	for _, name := range mtlsEntries {
+// mtlsClusters the names of the mTLS-injected cluster resources the build put
+// in the snapshot from its read of the cluster map (pinReport.mtls). It is not
+// kept: the caller reuses the slice.
+func (c *SnapshotCache) logIdentityBindings(ctx context.Context, version string, sources map[string]sourceBinding, mtlsClusters []string) {
+	clusters := make(map[string]struct{}, len(mtlsClusters))
+	for _, name := range mtlsClusters {
 		clusters[name] = struct{}{}
 	}
 

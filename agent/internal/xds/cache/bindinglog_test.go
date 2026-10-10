@@ -80,7 +80,12 @@ func TestBindingLinesAreOfTheSnapshotTheyName(t *testing.T) {
 	}, stuckProxyWait, time.Millisecond, "fixture: the second pod is in the cache's maps, waiting for its build")
 
 	// The watch takes its response: the first build goes on to its reports.
-	raw := <-responses
+	var raw cachev3.DeltaResponse
+	select {
+	case raw = <-responses:
+	case <-time.After(stuckProxyWait):
+		t.Fatal("fixture: the first build never answered the watch")
+	}
 	resp, err := raw.GetDeltaDiscoveryResponse()
 	require.NoError(t, err)
 	sent := deltaNames(resp)
@@ -89,8 +94,14 @@ func TestBindingLinesAreOfTheSnapshotTheyName(t *testing.T) {
 	require.NotContains(t, sent, lateCluster, "fixture: it does not have the cluster added during its SetSnapshot")
 	require.NotContains(t, sent, "app_echo-002_8080", "fixture: nor the second pod")
 	firstVersion := resp.GetSystemVersionInfo()
-	require.NoError(t, <-first)
-	require.NoError(t, <-second)
+	for _, built := range []chan error{first, second} {
+		select {
+		case err := <-built:
+			require.NoError(t, err)
+		case <-time.After(stuckProxyWait):
+			t.Fatal("a build did not return after the watch took its response")
+		}
+	}
 	secondVersion := snapshotVersion(t, c)
 	require.NotEqual(t, firstVersion, secondVersion)
 
@@ -243,4 +254,39 @@ func TestBindingLinesNameTheMTLSEntriesTheBuildRead(t *testing.T) {
 		require.NoError(t, c.generateSnapshot(ctx))
 	}
 	assert.Equal(t, []string{otherClusterName}, c.mtlsEntries, "the buffer holds the names of the last build")
+}
+
+// TestBindingLinesNameClusterResources: an outbound binding line names a
+// cluster, and a reader looks that name up in the snapshot, or on the proxy.
+// So it is the name of the mTLS cluster RESOURCE the snapshot carries. An
+// entry's map key is not always that: a service's default entry is keyed by
+// the service and publishes a cluster named by the FQDN. And a floor entry's
+// cluster is built at snapshot time, or not at all, so nothing the cluster map
+// holds for it is a resource of the snapshot.
+func TestBindingLinesNameClusterResources(t *testing.T) {
+	c, rec, _, _ := ackedPinFixture(t)
+	ctx := context.Background()
+	const key, fqdn = "aether-test/echo", "echo.aether-test.aether.internal"
+	c.clusterMu.Lock()
+	c.clusters[key] = clusterEntry{cluster: &clusterv3.Cluster{Name: fqdn}, service: key, sanNamespaces: []string{"aether-test"}}
+	c.clusterMu.Unlock()
+	c.recomputeMTLSClusters()
+	// A floor entry that, against what the render does today, holds an mTLS
+	// cluster: the build publishes no cluster from a floor entry in this pass.
+	c.clusterMu.Lock()
+	c.clusters["tcp:"+fqdn] = clusterEntry{
+		cluster: &clusterv3.Cluster{Name: "tcp:" + fqdn}, mtlsCluster: &clusterv3.Cluster{Name: "tcp:" + fqdn},
+		service: key, sanNamespaces: []string{"aether-test"}, l4Floor: true,
+	}
+	c.clusterMu.Unlock()
+
+	clusters, _, _, pins := c.clustersEndpointsVhostsAndPins()
+	assert.Equal(t, []string{fqdn}, resourceNames(clusters), "fixture: the pass publishes the default cluster, by its FQDN")
+	assert.Equal(t, []string{fqdn}, pins.mtls, "and those are the names the binding log is given")
+
+	require.NoError(t, c.AddPod(ctx, watchTestPod(1), bindingTrustDomain))
+	lines := rec.with(bindingLineMsg)
+	require.Len(t, lines, 1)
+	assert.Equal(t, fqdn, lines[0].attrs["cluster"])
+	assert.Contains(t, clusterVersions(t, c), lines[0].attrs["cluster"], "the line names a cluster of the snapshot")
 }

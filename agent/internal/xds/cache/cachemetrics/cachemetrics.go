@@ -257,7 +257,10 @@ type Metrics struct {
 	// tell" a sample a rule can match, where the absence alone is silent.
 	ackedUnknownClusters metric.Int64ObservableGauge
 	// ackedUnknown is what it observes, and ackedSettled is false until the
-	// acknowledged state was first set or withdrawn. Guarded by ackedMu.
+	// acknowledged state was first set or withdrawn. Guarded by ackedMu. The
+	// two gauges are observed by one callback, from one read of these fields
+	// (ackedState), so a collection never has both the acknowledged series and
+	// a count above zero here, nor neither once the state was settled.
 	ackedUnknown int
 	ackedSettled bool
 	// pinnedAttrs and unpinnedAttrs are the two gauges' attribute sets, built
@@ -404,7 +407,8 @@ func (m *Metrics) registerActivityInstruments(meter metric.Meter) error {
 }
 
 // registerAckedTLSClusters builds the attribute sets of the two pin gauges and
-// registers the acknowledged one, with the callback that observes it.
+// registers the acknowledged one and the unknown-clusters one, with the one
+// callback that observes both.
 func (m *Metrics) registerAckedTLSClusters(meter metric.Meter) error {
 	var err error
 	pinned := attribute.NewSet(attrPin.String(PinPinned))
@@ -415,29 +419,32 @@ func (m *Metrics) registerAckedTLSClusters(meter metric.Meter) error {
 		m.unpinnedAttrs[i] = metric.WithAttributeSet(unpinned[i])
 	}
 	if m.ackedTLSClusters, err = meter.Int64ObservableGauge("aether.agent.xds.acked_tls_clusters",
-		metric.WithDescription("The count aether.agent.snapshot.tls_clusters gives, for the clusters the proxy has accepted, each at the version it last acknowledged or stated; absent until a proxy answers a cluster response, and while the pin state of a cluster it holds is not known"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			counts, known := m.ackedPins()
-			if !known {
-				return nil
-			}
-			o.Observe(int64(counts.Pinned), metric.WithAttributeSet(pinned))
-			for i, n := range counts.Unpinned {
-				o.Observe(int64(n), metric.WithAttributeSet(unpinned[i]))
-			}
-			return nil
-		})); err != nil {
+		metric.WithDescription("The count aether.agent.snapshot.tls_clusters gives, for the clusters the proxy has accepted, each at the version it last acknowledged or stated; absent until a proxy answers a cluster response, and while the pin state of a cluster it holds is not known")); err != nil {
 		return fmt.Errorf("acked tls clusters: %w", err)
 	}
 	if m.ackedUnknownClusters, err = meter.Int64ObservableGauge("aether.agent.xds.acked_tls_clusters_unknown",
-		metric.WithDescription("Mesh clusters the proxy holds whose server-identity pin state the agent cannot determine; while it is not zero aether.agent.xds.acked_tls_clusters is not written. Absent until a proxy answers a cluster response"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			if unknown, settled := m.ackedUnknownPins(); settled {
-				o.Observe(int64(unknown))
-			}
-			return nil
-		})); err != nil {
+		metric.WithDescription("Mesh clusters the proxy holds whose server-identity pin state the agent cannot determine; while it is not zero aether.agent.xds.acked_tls_clusters is not written. Absent until a proxy answers a cluster response")); err != nil {
 		return fmt.Errorf("acked tls clusters unknown: %w", err)
+	}
+	// ONE callback for the two, from one read of the state. With a callback
+	// each, a change between the two callbacks of one collection would export
+	// the acknowledged series beside a positive unknown count, or neither.
+	if _, err = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		st := m.ackedState()
+		if !st.settled {
+			return nil
+		}
+		o.ObserveInt64(m.ackedUnknownClusters, int64(st.unknown))
+		if !st.known {
+			return nil
+		}
+		o.ObserveInt64(m.ackedTLSClusters, int64(st.counts.Pinned), metric.WithAttributeSet(pinned))
+		for i, n := range st.counts.Unpinned {
+			o.ObserveInt64(m.ackedTLSClusters, int64(n), metric.WithAttributeSet(unpinned[i]))
+		}
+		return nil
+	}, m.ackedTLSClusters, m.ackedUnknownClusters); err != nil {
+		return fmt.Errorf("acked tls clusters callback: %w", err)
 	}
 	return nil
 }
@@ -604,18 +611,20 @@ func (m *Metrics) TLSClusterPinsAckedUnknown(unknown int) {
 	m.ackedUnknown, m.ackedSettled = unknown, true
 }
 
-// ackedUnknownPins is what the unknown-clusters gauge observes.
-func (m *Metrics) ackedUnknownPins() (int, bool) {
-	m.ackedMu.Lock()
-	defer m.ackedMu.Unlock()
-	return m.ackedUnknown, m.ackedSettled
+// ackedReading is one read of the acknowledged pin state: what the two
+// gauges of it observe in a collection.
+type ackedReading struct {
+	counts  PinCounts
+	known   bool
+	unknown int
+	settled bool
 }
 
-// ackedPins is what the acknowledged gauge observes.
-func (m *Metrics) ackedPins() (PinCounts, bool) {
+// ackedState reads the acknowledged pin state once, under its mutex.
+func (m *Metrics) ackedState() ackedReading {
 	m.ackedMu.Lock()
 	defer m.ackedMu.Unlock()
-	return m.acked, m.ackedKnown
+	return ackedReading{counts: m.acked, known: m.ackedKnown, unknown: m.ackedUnknown, settled: m.ackedSettled}
 }
 
 func (m *Metrics) recordPins(ctx context.Context, gauge metric.Int64Gauge, counts PinCounts) {

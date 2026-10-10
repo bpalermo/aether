@@ -98,7 +98,7 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPins() ([]types.Resource, []ty
 }
 
 // clustersEndpointsVhostsAndPinsInto is clustersEndpointsVhostsAndPins with
-// the report's classes collected into buf and its mTLS entry names into
+// the report's classes collected into buf and its mTLS cluster names into
 // mtlsBuf (each from its start), so a snapshot build can reuse the two buffers
 // across builds.
 func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtlsBuf []string) ([]types.Resource, []types.Resource, []*routev3.VirtualHost, pinReport) {
@@ -120,9 +120,6 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 	pins := pinReport{track: true, classes: buf[:0], mtls: mtlsBuf[:0]}
 	for key, entry := range c.clusters {
 		pins.add(key, &entry)
-		if entry.mtlsCluster != nil {
-			pins.mtls = append(pins.mtls, key)
-		}
 		if entry.l4Floor {
 			// TCP/UDP floor entries publish their load assignment only; their
 			// clusters are rendered by captureTCPClusters / captureUDPClusters.
@@ -134,6 +131,9 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 		var cluster types.Resource = entry.cluster
 		if entry.mtlsCluster != nil {
 			cluster = entry.mtlsCluster
+			// By the name of the resource this pass publishes, not by the
+			// entry's key (pinReport.mtls).
+			pins.mtls = append(pins.mtls, entry.mtlsCluster.GetName())
 		}
 		clusters = append(clusters, cluster)
 		clas = c.appendEntryCLAsLocked(clas, entry)

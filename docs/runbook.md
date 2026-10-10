@@ -6760,12 +6760,16 @@ What follows from that:
   may hold unpinned clusters. The state has a sample of its own (#1509):
   `aether_agent_xds_acked_tls_clusters_unknown` is the number of clusters on that WARN
   line, and zero whenever the acknowledged gauge is written. `AetherProxyPinStateUnknown`
-  fires when it has been above zero for 15 minutes. It does not say the proxy holds an
-  unpinned cluster; it says the agent cannot tell, and that the proxy is not accepting
-  cluster updates. Beside it there are that line, an increment of
-  `aether_agent_xds_nacks_total` for the Cluster type each time the proxy rejects a
-  response, and the agent's `envoy NACKed delta response` line, which carries the
-  proxy's reason. The ACK of some other cluster does not end it; the proxy accepting that
+  fires when it has been above zero for 15 minutes. It says the agent cannot classify
+  what the proxy holds, and that `AetherProxyHoldsUnpinnedClusters` is blind for the
+  node. It does not say the proxy holds an unpinned cluster, and it does not say the
+  proxy is rejecting updates: the state also arises with a proxy that accepts, when
+  the version it accepted (or states on a new stream) is one whose pin class the agent
+  had already dropped from its record (the bounds in the previous point). What tells
+  the two apart is `aether_agent_xds_nacks_total` for the Cluster type, which moves each
+  time the proxy rejects a response, and the agent's `envoy NACKed delta response`
+  line, which carries the proxy's reason. With no NACK, the state ends when the proxy
+  next accepts a version of that cluster the agent has on record. The ACK of some other cluster does not end it; the proxy accepting that
   cluster does. The same holds for a cluster the proxy **states it holds when it opens
   a stream** that the agent no longer publishes and has no record of (the agent
   restarted, or the stream ended before the agent read the proxy's answer and the

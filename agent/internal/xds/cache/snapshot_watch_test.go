@@ -299,7 +299,8 @@ func TestABuildDoesNotWaitWhenTheStreamIsBetweenARequestAndItsWatch(t *testing.T
 
 	inCallback := make(chan struct{})
 	release := make(chan struct{})
-	var hold sync.Once
+	var hold, released sync.Once
+	releaseStream := func() { released.Do(func() { close(release) }) }
 	var armed bool
 	var mu sync.Mutex
 	stream := serveDeltaADS(t, c, serverv3.CallbackFuncs{
@@ -316,6 +317,10 @@ func TestABuildDoesNotWaitWhenTheStreamIsBetweenARequestAndItsWatch(t *testing.T
 			return nil
 		},
 	})
+	// Registered after the stream's own cleanup, so it runs before it: the
+	// stream's goroutine may be waiting in the callback when the test ends
+	// early, and the handler cannot return until it is let go.
+	t.Cleanup(releaseStream)
 	openEveryDeltaWatch(t, c, stream)
 
 	// A cluster request with no nonce, as an on-demand subscription sends. The
@@ -328,10 +333,14 @@ func TestABuildDoesNotWaitWhenTheStreamIsBetweenARequestAndItsWatch(t *testing.T
 	stream.request(t, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl: resourcev3.ClusterType, ResourceNamesSubscribe: []string{"quic:not-published"},
 	})
-	<-inCallback
+	select {
+	case <-inCallback:
+	case <-time.After(stuckProxyWait):
+		t.Fatal("fixture: the stream never reached its request callback")
+	}
 	require.NoError(t, buildEveryType(t, ctx, c, 1))
 	require.Zero(t, c.GetStatusInfo(c.nodeName).GetNumDeltaWatches(), "fixture: the build answered every open watch")
-	close(release)
+	releaseStream()
 	// The request's own watch is answered when it is made (the stream was not
 	// told of the cluster response that is still in its channel), and then the
 	// stream blocks writing the first of the seven.

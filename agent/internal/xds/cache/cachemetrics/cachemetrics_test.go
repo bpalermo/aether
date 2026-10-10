@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"aethermesh.dev/common/udspath"
+	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -616,4 +617,68 @@ func TestAckedTLSClustersUnknown_IsTheOtherHalfOfTheAckedGauge(t *testing.T) {
 	expect("withdrawn after having been known", 1, true)
 	m.TLSClusterPinsAcked(context.Background(), PinCounts{})
 	expect("known again", 0, true)
+}
+
+// callbackRecorder is a meter that notes how each observable gauge is
+// collected: by a callback of its own, or by a callback registered for several
+// instruments.
+type callbackRecorder struct {
+	metric.Meter
+	own    map[string]int
+	shared [][]metric.Observable
+}
+
+func (r *callbackRecorder) Int64ObservableGauge(name string, opts ...metric.Int64ObservableGaugeOption) (metric.Int64ObservableGauge, error) {
+	r.own[name] = len(metric.NewInt64ObservableGaugeConfig(opts...).Callbacks())
+	return r.Meter.Int64ObservableGauge(name, opts...)
+}
+
+func (r *callbackRecorder) RegisterCallback(f metric.Callback, instruments ...metric.Observable) (metric.Registration, error) {
+	r.shared = append(r.shared, instruments)
+	return r.Meter.RegisterCallback(f, instruments...)
+}
+
+// TestAckedGaugesAreCollectedTogether: the acknowledged gauge and the unknown
+// gauge are two readings of one state, and exactly one of them says "known".
+// Collected by a callback each, a change of that state between the two
+// callbacks of one collection exports both the acknowledged series and a
+// positive unknown count, or neither. So they are observed by ONE callback,
+// from one read of the state.
+func TestAckedGaugesAreCollectedTogether(t *testing.T) {
+	const acked, unknown = "aether.agent.xds.acked_tls_clusters", "aether.agent.xds.acked_tls_clusters_unknown"
+	reader := sdkmetric.NewManualReader()
+	rec := &callbackRecorder{
+		Meter: sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"),
+		own:   map[string]int{},
+	}
+	m, err := New(rec)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, name := range []string{acked, unknown} {
+		n, registered := rec.own[name]
+		if !registered {
+			t.Fatalf("%s is not registered as an observable gauge", name)
+		}
+		if n != 0 {
+			t.Errorf("%s has %d callback(s) of its own; it must be observed with the other gauge, in one callback", name, n)
+		}
+	}
+	together := 0
+	for _, instruments := range rec.shared {
+		var hasAcked, hasUnknown bool
+		for _, inst := range instruments {
+			hasAcked = hasAcked || inst == metric.Observable(m.ackedTLSClusters)
+			hasUnknown = hasUnknown || inst == metric.Observable(m.ackedUnknownClusters)
+		}
+		if hasAcked != hasUnknown {
+			t.Errorf("a callback is registered for one of the two gauges without the other")
+		}
+		if hasAcked && hasUnknown {
+			together++
+		}
+	}
+	if together != 1 {
+		t.Fatalf("%d callbacks observe the two gauges together, want exactly one", together)
+	}
 }

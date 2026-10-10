@@ -149,7 +149,7 @@ of the agent) and by the edge control plane.
 | `AetherMeshClusterUnpinned` | critical | 3m | per node and reason: clusters published **with TLS and without a server-identity pin** (`no_namespace_metadata`, `pin_not_rendered`). The mTLS validation gap |
 | `AetherMeshClusterPinPending` | warning | 5m | per node and reason: an agent still publishing clusters with **no TLS at all** five minutes on (`trust_domain_unknown`, `tls_not_published`): it never learned its trust domain or never got its SVID |
 | `AetherProxyHoldsUnpinnedClusters` | warning | 15m | per node: the proxy has accepted more unpinned clusters than the agent now publishes, so it has not accepted the update that pinned or removed them. A rejected cluster stays counted at the version the proxy last accepted through later ACKs of other clusters (#1508) |
-| `AetherProxyPinStateUnknown` | warning | 15m | per node: the proxy holds mesh clusters whose pin state the agent cannot determine, so the acknowledged gauge is not written and the rule above cannot fire there (#1509). The usual cause is a proxy that was rejecting a cluster update when the agent restarted |
+| `AetherProxyPinStateUnknown` | warning | 15m | per node: the proxy holds mesh clusters whose pin state the agent cannot determine, so the acknowledged gauge is not written and the rule above cannot fire there (#1509). It does not say the proxy holds an unpinned cluster or that it rejects updates: a proxy rejecting a cluster update across an agent restart gets there, and so does one that accepted a version the agent no longer had on record |
 
 | Metric (as Prometheus stores it) | Type | Labels | Meaning |
 |---|---|---|---|
@@ -224,8 +224,9 @@ not connected since the agent started), and after a restart
 for as long as the proxy rejects a cluster it holds an older version of (the new agent
 process cannot count a version it never published, and writes nothing rather than a
 count without it), or rejects the removal of a mesh cluster the agent no longer
-publishes and has no record of: the runbook's "Published is not held" has them. In those
-last two cases `aether_agent_xds_acked_tls_clusters_unknown` is above zero, and
+publishes and has no record of: the runbook's "Published is not held" has them. Whenever
+the gauge is absent because the agent cannot classify a cluster the proxy holds, those two
+cases among them, `aether_agent_xds_acked_tls_clusters_unknown` is above zero, and
 `AetherProxyPinStateUnknown` speaks for the node after 15 minutes (#1509). Once the gauge has
 samples, a proxy stream that drops does not withdraw them: the last accepted state
 stays exported until the proxy answers again, so a sample is not proof of a live xDS

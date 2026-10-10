@@ -15,8 +15,8 @@ import (
 // a line could name a pod or a cluster that a mutator added after the build
 // read its resources, under the version of a snapshot that does not carry it
 // (#1621). They are now made from the snapshot's own resources: the listeners
-// and the secrets the build put in it, and the mTLS entries its read of the
-// cluster map found (pinReport.mtls). This view supplies the rest, and it is
+// and the secrets the build put in it, and the mTLS-injected clusters it
+// published from its read of the cluster map (pinReport.mtls). This view supplies the rest, and it is
 // joined to the snapshot by identity: a pod is named only when the very
 // listener proto its entry held when the view was taken is one of the
 // snapshot's listeners (publishedListeners).

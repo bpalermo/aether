@@ -242,8 +242,8 @@ type SnapshotCache struct {
 	// allocates none once it has grown to the size of the cluster map.
 	// Guarded by snapshotMu.
 	entryClasses []entryClass
-	// mtlsEntries is the same kind of buffer for the names of the entries a
-	// build found with an mTLS-injected cluster (pinReport.mtls). Guarded by
+	// mtlsEntries is the same kind of buffer for the names of the
+	// mTLS-injected clusters a build published (pinReport.mtls). Guarded by
 	// snapshotMu.
 	mtlsEntries []string
 	// watchAnswerTimeout is how long one SetSnapshot may wait to hand its

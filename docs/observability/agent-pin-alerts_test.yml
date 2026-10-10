@@ -252,10 +252,9 @@ tests:
               node: n1
             exp_annotations:
               summary: "aether-agent on n1 cannot determine the pin state of 2 mesh cluster(s) the proxy holds"
-              description: "The proxy on n1 holds 2 mesh cluster(s) at a version aether-agent has no server-identity pin state on record for, and has for 15 minutes. While that lasts aether_agent_xds_acked_tls_clusters is not written, so AetherProxyHoldsUnpinnedClusters cannot fire for this node: what the proxy holds of those clusters may be without a pin. The usual cause is a proxy that was rejecting a cluster update when the agent restarted and still rejects it. Check aether_agent_xds_nacks_total for the Cluster type URL and the agent log for `envoy NACKed delta response` (it carries the proxy's error) and `proxy holds mesh clusters whose pin state this agent cannot determine`. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
+              description: "The proxy on n1 holds 2 mesh cluster(s) at a version aether-agent has no server-identity pin state on record for, and has for 15 minutes. While that lasts aether_agent_xds_acked_tls_clusters is not written, so AetherProxyHoldsUnpinnedClusters cannot fire for this node. This does not say the proxy holds a cluster without a pin, only that the agent cannot tell. Either the proxy is rejecting cluster updates (it was when the agent restarted, and still is): aether_agent_xds_nacks_total for the Cluster type URL moves and the agent logs `envoy NACKed delta response` with the proxy's error. Or the proxy accepted a version whose pin state the agent no longer had on record: no NACK. The agent logs `proxy holds mesh clusters whose pin state this agent cannot determine` when the state begins. See docs/runbook.md, \"The unpinned-cluster signal\", \"Published is not held\"."
 
-  # The unknown state for two samples is not an alert: a proxy that rejected a
-  # cluster update across an agent restart and accepts it two minutes later.
+  # The unknown state for two samples is not an alert.
   - name: a pin state that is unknown for a moment is quiet
     interval: 1m
     input_series:

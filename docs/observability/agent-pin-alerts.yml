@@ -260,20 +260,28 @@ groups:
       # while the acknowledged gauge is written, and absent, like that gauge,
       # until a proxy has answered a cluster response of this agent process.
       #
-      # How it comes about: the agent restarts while the proxy is rejecting a
-      # cluster update. The proxy states the version it held before that
-      # update, which the new process never published; it is sent the update
-      # again and rejects it again. Also: a proxy that rejects the removal of a
-      # mesh cluster the agent no longer publishes and has no record of. Either
-      # way the proxy is not accepting cluster updates, and what it holds
-      # instead may be a cluster without a pin. This rule cannot say whether it
-      # is; it says that the rule above cannot either.
+      # All it says is that the agent cannot classify what the proxy holds, and
+      # that the rule above is therefore blind for the node. It does not say
+      # the proxy holds a cluster without a pin, and it does not say the proxy
+      # is rejecting updates. There are two ways into the state:
       #
-      # for: 15m, the same as the rule it stands in for. An ordinary agent
-      # restart or upgrade does not produce the state: the proxy's statement
-      # is read together with its answer to the agent's first response, and a
-      # proxy that accepts that response holds versions this agent process
-      # published. It takes a proxy that rejects.
+      #   - The proxy rejects. The agent restarts while the proxy is rejecting
+      #     a cluster update: the proxy states the version it held before that
+      #     update, which the new process never published, is sent the update
+      #     again and rejects it again. Or it rejects the removal of a mesh
+      #     cluster the agent no longer publishes and has no record of.
+      #     aether_agent_xds_nacks_total for the Cluster type moves.
+      #   - The proxy accepts, and the agent has dropped the record. The agent
+      #     keeps the pin state of the last three versions it published of a
+      #     cluster, and of the ones in flight. A response written after its
+      #     version fell out of those, and then acknowledged, leaves the
+      #     cluster held at a version with no state on record; so does a proxy
+      #     that states, on a new stream, a version rebuilt three times since.
+      #     No NACK. It ends when the proxy next accepts a version of that
+      #     cluster the agent has on record, or the agent publishes that
+      #     version again.
+      #
+      # for: 15m, the same as the rule it stands in for.
       - alert: AetherProxyPinStateUnknown
         expr: >-
           sum by (job, node) (aether_agent_xds_acked_tls_clusters_unknown) > 0
@@ -288,12 +296,14 @@ groups:
             at a version {{ $labels.job }} has no server-identity pin state on
             record for, and has for 15 minutes. While that lasts
             aether_agent_xds_acked_tls_clusters is not written, so
-            AetherProxyHoldsUnpinnedClusters cannot fire for this node: what
-            the proxy holds of those clusters may be without a pin. The usual
-            cause is a proxy that was rejecting a cluster update when the agent
-            restarted and still rejects it. Check aether_agent_xds_nacks_total
-            for the Cluster type URL and the agent log for `envoy NACKed delta
-            response` (it carries the proxy's error) and `proxy holds mesh
-            clusters whose pin state this agent cannot determine`. See
-            docs/runbook.md, "The unpinned-cluster signal", "Published is not
-            held".
+            AetherProxyHoldsUnpinnedClusters cannot fire for this node. This
+            does not say the proxy holds a cluster without a pin, only that
+            the agent cannot tell. Either the proxy is rejecting cluster
+            updates (it was when the agent restarted, and still is):
+            aether_agent_xds_nacks_total for the Cluster type URL moves and the
+            agent logs `envoy NACKed delta response` with the proxy's error. Or
+            the proxy accepted a version whose pin state the agent no longer
+            had on record: no NACK. The agent logs `proxy holds mesh clusters
+            whose pin state this agent cannot determine` when the state begins.
+            See docs/runbook.md, "The unpinned-cluster signal", "Published is
+            not held".
