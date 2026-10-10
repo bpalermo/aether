@@ -226,6 +226,39 @@ is not seen by either and is bumped by hand.
 table of what each test compares, what is kept by review alone, and how to add
 or remove an entry.
 
+**Which contract a deployed mesh satisfies.** Since chart 2.4.28 the agent
+DaemonSet carries the contract's `version` in an annotation on its own
+metadata, so a harness can ask the mesh before it reads anything else:
+
+```bash
+kubectl -n aether-system get daemonset aether-agent \
+  -o jsonpath='{.metadata.annotations.aether\.io/harness-contract-version}'
+```
+
+(`aether-system` and `aether-agent` are the documented release's namespace and
+name.) The answer is the `version` of `external-harness.yaml` at the commit the
+chart was packaged from, as a string. Three things it is not:
+
+- It identifies the **contract**, not the build. Charts of different versions
+  answer the same for as long as the contract's `version` stays, and the
+  annotation says nothing about which images run. For the build, read the
+  chart version (`helm.sh/chart` on the same object) and the image digests.
+- An **empty answer is "not known"**, never a version: the chart is older than
+  2.4.28, or it was rendered from the source tree (`helm template
+  charts/aether`) instead of from the published package, where the file the
+  number comes from does not exist.
+- It is on the DaemonSet **object**, not on its pods. A contract bump changes
+  that one annotation on upgrade and replaces no pod;
+  `//charts/aether:aether_harness_contract_version_rolls_no_pod_test` renders
+  the package with another number and without one and requires every pod
+  template to be byte-identical.
+
+No value sets it and the chart holds no copy of the number: a build step of
+`//charts/aether` reads `version` from the contract file into the package
+(`files/harness-contract-version`), and `//test/harnesscontract:aether_chart_test`
+fails when the annotation either packaging renders and the contract's
+`version` disagree.
+
 ### Code coverage
 
 ```bash
@@ -2864,6 +2897,47 @@ sum by (kind, reason) (increase(aether_controller_webhook_cabundle_injection_fai
 None of this was run on a cluster for this change: the grant is tested as a
 render and the injector against a fake API server
 (`TestCABundleInjectorNeedsOnlyGetAndUpdate`).
+
+#### Chart 2.4.28: the agent DaemonSet says which external-harness contract the chart satisfies (#1544)
+
+**What an upgrade changes.** One annotation appears on the agent DaemonSet's
+own metadata, `aether.io/harness-contract-version`, holding the `version` of
+`test/harnesscontract/external-harness.yaml` the chart was packaged with
+("The external-harness contract" above has what it means and what it does
+not). No object is renamed and no pod template changes, so this chart change
+rolls no workload by itself (a release built from another commit carries other
+image digests, and those roll the workloads as always: "Which workloads a
+chart upgrade rolls" above). Besides the annotation, the `helm.sh/chart` label
+on each object's own metadata changes, as with every chart version.
+
+There is nothing to set and nothing to do before the upgrade. Afterwards:
+
+```bash
+NS=aether-system
+# The contract the chart satisfies. Empty: a chart older than 2.4.28, or one
+# rendered from the source tree.
+kubectl -n "$NS" get daemonset aether-agent \
+  -o jsonpath='{.metadata.annotations.aether\.io/harness-contract-version}{"\n"}'
+# The annotation did not reach the pods, and adding it replaced none: the
+# DaemonSet's pod template has no annotation of that name...
+kubectl -n "$NS" get daemonset aether-agent \
+  -o jsonpath='{.spec.template.metadata.annotations.aether\.io/harness-contract-version}{"\n"}'
+# ...and the agent pods' controller-revision-hash is what it was before the
+# upgrade, when the upgrade changed nothing else of the agent (the same image
+# digests and values). Read it before and after.
+kubectl -n "$NS" get pods -l app.kubernetes.io/component=agent \
+  -L controller-revision-hash
+```
+
+A later bump of the contract's `version` changes that one annotation at the
+next chart upgrade and nothing else of the render.
+
+None of this was run on a cluster for this change. What was measured is the
+render: the packages built from this change and from the commit before it
+have byte-identical pod templates for every workload, the render differs by
+the annotation and the `helm.sh/chart` labels only, and the two `jsonpath`
+expressions above, run over the rendered DaemonSet with kubectl's own printer
+and no cluster, print the version and an empty line.
 
 #### The prober chart (#1372, #1373, #1374)
 

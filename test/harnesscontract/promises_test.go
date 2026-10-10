@@ -104,6 +104,7 @@ envoy_stats:
 names:
   - {id: dom, value: v, checked_by: //a:b}
   - {id: port, value: "18081", checked_by: //a:b}
+  - {id: ann, value: example.io/contract-version, checked_by: //a:b}
 charts:
   - id: c
     chart: x
@@ -125,6 +126,7 @@ charts:
             code_resource_attributes: [sn]
         rolling_update: {maxSurge: "0", maxUnavailable: "1"}
         host_paths: ["/plugins/<dom>"]
+        contract_version_annotation: ann
       - id: c.d
         kind: CSIDriver
         name_from: dom
@@ -333,6 +335,16 @@ func TestCheckLock_SameVersion(t *testing.T) {
 		"a webhook held by its other selector": {changes: []change{{"webhooks: {hook.x: {objects: dom}}", "webhooks: {hook.x: {namespaces: dom}}"}}, want: []string{`"c.w" no longer promises what it did at version 3: webhooks hook.x changed`, bumpNeeded}},
 		"a webhook no longer held":             {changes: []change{{"webhooks: {hook.x: {objects: dom}}", "webhooks: {hook.y: {objects: dom}}"}}, want: []string{`webhooks hook.x is gone`, bumpNeeded}},
 		"a name for an object that had none":   {changes: []change{{"kind: MutatingWebhookConfiguration\n", "kind: MutatingWebhookConfiguration\n        name: hooks\n"}}, want: []string{noBumpNeeded, `"c.w name": "`}},
+		// Where a harness reads the contract's version. The key is the promise:
+		// under another key a harness finds nothing, and one that finds nothing
+		// cannot tell an old mesh from a renamed annotation.
+		"the version annotation under another key": {changes: []change{{"value: example.io/contract-version", "value: example.io/contract"}}, want: []string{`"ann" no longer promises what it did at version 3: value changed`, `"c.o" no longer promises what it did at version 3: contract_version_annotation changed`, bumpNeeded}},
+		"an object no longer carries the version":  {changes: []change{{"        contract_version_annotation: ann\n", ""}}, want: []string{`"c.o" no longer promises what it did at version 3: contract_version_annotation is gone`, bumpNeeded}},
+		"one more object carries the version":      {changes: []change{{"        name_from: dom\n", "        name_from: dom\n        contract_version_annotation: ann\n"}}, want: []string{noBumpNeeded, `"c.d contract_version_annotation": "`}},
+		"the version annotation named by another entry with the same value": {
+			changes: []change{{"names:\n", "names:\n  - {id: ann2, value: example.io/contract-version, checked_by: //a:b}\n"}, {"contract_version_annotation: ann\n", "contract_version_annotation: ann2\n"}},
+			want:    []string{noBumpNeeded, `"ann2 value": "`},
+		},
 		// A broken promise and a new one in the same change: the bump comes
 		// first, and nothing offers the lines that would hide it.
 		"a new entry beside a removed one": {

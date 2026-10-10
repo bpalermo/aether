@@ -24,6 +24,16 @@ go_library(
     deps = ["@io_k8s_sigs_yaml//:yaml"],
 )
 
+# The aether chart says which `version` of the contract it was packaged with
+# (the annotation of the entry object.annotation.harness_contract_version). It
+# reads the number from this file in a build step of its own, so that no second
+# copy of it exists anywhere; the library above is testonly and cannot feed a
+# published package. Nothing else reads the file by label.
+exports_files(
+    ["external-harness.yaml"],
+    visibility = ["//charts/aether:__pkg__"],
+)
+
 go_test(
     name = "harnesscontract_test",
     size = "small",
@@ -71,9 +81,14 @@ helm_contract_test(
         # is held to.
         "csi.driver",
         "mesh.default_domain",
+        "object.annotation.harness_contract_version",
         "pod.label.managed",
         "resource.node",
     ],
+    # The per-commit packaging (`X.Y.Z-<sha>`) is a second package of the same
+    # templates and files, and it is one an install can name: it is held to the
+    # contract as well, the version annotation included.
+    other_packagings = ["//charts/aether:aether_commit"],
 )
 
 helm_contract_test(

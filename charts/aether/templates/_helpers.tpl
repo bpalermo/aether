@@ -591,6 +591,23 @@ helm.sh/chart: {{ include "aether.chart" . }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
 {{- end -}}
+{{/*
+The `version` of the external-harness contract this chart was packaged with
+(test/harnesscontract/external-harness.yaml, #1544), or nothing.
+
+The number is a file of the PACKAGE (files/harness-contract-version, which a
+build step of //charts/aether derives from the contract), not a value and not a
+literal here: no operator sets it, and a contract bump edits nothing under
+charts/. A render of the source tree has no such file and gets nothing, which
+the caller renders as no annotation at all.
+
+Only ever written on an object's OWN metadata. In a pod template a contract
+bump would replace every pod of the workload
+(//charts/aether:aether_harness_contract_version_rolls_no_pod_test).
+*/}}
+{{- define "aether.harnessContractVersion" -}}
+{{- .Files.Get "files/harness-contract-version" | trim -}}
+{{- end -}}
 
 {{/* -------------------------------------------------------------- mesh-dns */}}
 {{- define "aether.meshDns.fullname" -}}

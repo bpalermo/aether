@@ -13,6 +13,34 @@ a healthy zero. The contract replaces that atomicity: the names are written
 down once, tests hold the code to them, and the harness pins the contract
 `version` it was written against.
 
+## Which version a deployed mesh satisfies
+
+The aether chart is packaged with the contract's `version`, and the agent
+DaemonSet says it in an annotation on its own metadata (the entry
+`object.annotation.harness_contract_version`). A harness reads it before a run
+and compares it with the version it pins:
+
+```bash
+kubectl -n aether-system get daemonset aether-agent \
+  -o jsonpath='{.metadata.annotations.aether\.io/harness-contract-version}'
+```
+
+- It identifies the contract, not the build: the value is the `version` of
+  this file at the commit the chart was packaged from, charts of different
+  versions carry the same value while `version` stays, and it says nothing of
+  the images that run.
+- No answer is "not known", never a version: a chart from before the
+  annotation existed (earlier than 2.4.28), or one rendered from the source
+  tree instead of from the package.
+- It is never on a pod template. A bump of `version` changes one annotation of
+  one object at the next upgrade and replaces no pod
+  (`//charts/aether:aether_harness_contract_version_rolls_no_pod_test`).
+
+The number has no second copy: a build step of `//charts/aether` reads the
+top-level `version:` line of this file into the package, and nothing under
+`charts/` is edited at a bump. Keep that line as it is written, alone on its
+line and unquoted; the step fails the build otherwise.
+
 ## The rule
 
 **Change the code and `external-harness.yaml` together, in one pull request,
@@ -117,11 +145,12 @@ that names a chart test is referred to by one of its renders.
 | `names` `mesh.default_domain` | Besides the Go constant: the `--mesh-domain` argument the aether chart renders for the agent and the mesh-DNS daemon when `meshDomain` is left at the chart's default, and the one the prober chart renders when `probe.meshDomain` is left at its default (a container's `args` maps the flag to the entry's id) | `//test/harnesscontract:{aether,prober}_chart_test`, with `harnesscontract_test` holding the link for the agent |
 | `names` `port.outbound_http` | Besides the Go constant: the `--egress` argument the prober chart renders when `probe.egress` is left at its default (`args` maps the flag to a pattern, `127.0.0.1:<port.outbound_http>`) | `//test/harnesscontract:prober_chart_test` |
 | `names` `csi.driver` | Besides the Go constant: the name of the CSIDriver object the aether chart renders (the object has `name_from: csi.driver` in place of a name), and the kubelet plugin directory of the uds-csi DaemonSet: a hostPath volume of the path `<--kubelet-root of the uds-csi container>/plugins/<csi.driver>`, mounted by that container at that same path, which is where the plugin writes its socket and where the kubelet looks (`host_paths: ["<arg:--kubelet-root>/plugins/<csi.driver>"]`; a pattern without `<arg:...>` holds only the end of the path) | `//test/harnesscontract:aether_chart_test` |
+| `names` `object.annotation.harness_contract_version` | No Go constant: only the chart writes the key. The agent DaemonSet of the aether chart's render has `contract_version_annotation: <the entry>`: its own metadata carries an annotation of that key whose value is the contract's `version` as a string, the version being the one this package loads (the chart reads it by a build step of its own, so the two reads are independent); the key is not a label of the object, not on its pod template, and on no other object of the render. Both packagings of the chart are rendered (`other_packagings`) | `//test/harnesscontract:aether_chart_test` |
 | `names` `pod.label.managed` | Besides the Go constant: the label the controller's two pod webhooks select by in the aether chart's render (`webhooks` of the render's one MutatingWebhookConfiguration says, for each webhook, which of its two selectors selects by the entry: that selector is exactly the one label with the value "true", with no other label and no expression, and the webhook's other selector is empty, since every further requirement narrows what the webhook sees). Both webhooks ignore failures, so another key there would fail silently | `//test/harnesscontract:aether_chart_test` |
 | `resource_attributes` `service.name` of the prober | Besides the resource the prober builds: the rendered prober container is given neither `service.name` in `OTEL_RESOURCE_ATTRIBUTES` nor `OTEL_SERVICE_NAME`, because the environment can replace what the code sets. `OTEL_SERVICE_NAME` is an explicit override and always does, so that rule is the one that matters; `service.name` in `OTEL_RESOURCE_ATTRIBUTES` no longer renames the prober (#1562, held by the prober's own test), and is refused here as well so that a chart never says a name the component ignores. A container whose `OTEL_RESOURCE_ATTRIBUTES` comes from `valueFrom`, or that has any `envFrom`, fails too: what cannot be read could carry either (the container lists the entry in `code_resource_attributes`) | `//test/harnesscontract:prober_chart_test` |
 
-The last five rows exist because a Go constant is not always what is
-deployed. A component can be given the name by its chart (a flag, an
+The last six rows exist because a Go constant is not always what is
+deployed (and one name has no constant at all). A component can be given the name by its chart (a flag, an
 environment variable), the chart can write the name a second time (an object
 it renders), or the chart's own defaults can spell it. Comparing the entry
 with the constant alone then passes while a default install does something
@@ -129,7 +158,8 @@ else. When you add an entry, ask which of these holds; when one does, tie the
 entry to the render as well.
 
 A tie is a reference under `charts` to another entry: `name_from`, `args`,
-`resource_attributes`, `code_resource_attributes`, `host_paths`, `webhooks`.
+`resource_attributes`, `code_resource_attributes`, `host_paths`, `webhooks`,
+`contract_version_annotation`.
 It is not a promise to a harness (an object's name is the same whether the
 contract writes it out or takes it from an entry), so the lock does not hold
 it, and writing the literal in its place changes nothing today. It would
@@ -143,7 +173,9 @@ The lock is written to match. Where a promise is made through a tie, its line
 is named and digested by what the tie comes to, never by the id of the entry:
 an object's name, the value an argument is run with, the path a host path
 pattern comes to, the attribute a container is given or is not to be given,
-the label a webhook selects by. So a tie moved to another entry that says the
+the label a webhook selects by, the key of the annotation an object says the
+contract's version under (the version itself is in no line: every version says
+its own). So a tie moved to another entry that says the
 same is no bump (only `ties` changes), and the same tie coming to something
 else is one.
 
@@ -216,7 +248,7 @@ are both read from the entry, and `ids` is the test's list of what it holds
 (it fails when the two differ, in either direction). When a container must be
 given something another entry already names (a resource attribute, a name
 passed as a flag), or an object is named by one, refer to that entry by id
-(`resource_attributes`, `args`, `name_from`) instead of writing the string
+(`resource_attributes`, `args`, `name_from`, `contract_version_annotation`) instead of writing the string
 again, add the id to `ids` as well, and add the chart test to that entry's
 `checked_by`. Mind which namespace a
 chart puts its objects in: `udsecho` takes it from its `namespace` value, not

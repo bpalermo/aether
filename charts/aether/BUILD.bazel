@@ -1,7 +1,7 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url", "image_reference")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test", "helm_template_reproducible_test", "helm_template_value_changes_test", "helm_template_value_ignored_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_file_test", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test", "helm_template_reproducible_test", "helm_template_value_changes_test", "helm_template_value_ignored_test")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
@@ -40,6 +40,38 @@ AETHER_IMAGES = [
     "//agent/cmd/uds-csi:image_push",
 ]
 
+# The `version` of the external-harness contract
+# (//test/harnesscontract:external-harness.yaml), as a file of the packaged
+# chart (#1544). The agent DaemonSet carries it in the annotation
+# `aether.io/harness-contract-version` on its own metadata, so a harness outside
+# this repository can ask a deployed mesh which contract it satisfies before it
+# reads anything else.
+#
+# The number is read from the contract file here and is written nowhere else: a
+# contract bump needs no edit under charts/, and there is no second copy to
+# forget. The step fails the build unless the file has exactly one top-level
+# `version:` line and it holds a positive integer; that it reads the SAME
+# number a YAML parser does is //test/harnesscontract:aether_chart_test, which
+# compares the rendered annotation of both packagings with the version the
+# contract library loads.
+#
+# The file exists in a package only. A render of the source tree
+# (`helm template charts/aether`, which the conformance jobs and one step of
+# ci.yaml run) has no such file, and the template then renders no annotation.
+genrule(
+    name = "harness_contract_version",
+    srcs = ["//test/harnesscontract:external-harness.yaml"],
+    outs = ["files/harness-contract-version"],
+    cmd = "n=$$(grep -c '^version:' $< || true); " +
+          "[ \"$$n\" = 1 ] || { echo \"$<: $$n top-level 'version:' lines, want exactly one\" >&2; exit 1; }; " +
+          "v=$$(sed -n -E 's/^version:[[:space:]]*([1-9][0-9]*)[[:space:]]*(#.*)?$$/\\1/p' $<); " +
+          "[ -n \"$$v\" ] || { echo \"$<: its 'version:' line does not hold a positive integer\" >&2; exit 1; }; " +
+          "printf '%s\\n' \"$$v\" > $@",
+)
+
+# What both packagings below carry beside their templates (`.Files`).
+AETHER_FILES = [":harness_contract_version"]
+
 # aether Helm chart (published to chart_registry_url("aether"); see @aether_registry//:registry.bzl).
 #
 # The whole system in one chart: agent + cni-install + per-node proxy, registrar,
@@ -62,6 +94,7 @@ AETHER_IMAGES = [
 helm_chart(
     name = "aether",
     chart = "Chart.yaml",
+    files = AETHER_FILES,
     images = AETHER_IMAGES,
     values = "values.yaml",
     visibility = ["//visibility:public"],
@@ -207,6 +240,83 @@ helm_pod_template_version_test(
     name = "aether_commit_pod_template_version_test",
     chart = ":aether_commit",
     workloads = 6,
+)
+
+# #1544: the contract version the chart is packaged with (:harness_contract_version)
+# reaches the agent DaemonSet's own metadata and no pod template. Each test
+# renders the package as it is, with another number in the file (what a
+# contract bump packages) and without the file (what a render of the source
+# tree sees), and requires every workload's pod template to be byte-identical
+# in the three: a contract bump replaces no pod, and neither does installing a
+# package over a source-tree render. Exactly one rendered line follows the
+# number, and without the file the render is the same less the annotation.
+#
+# `controller.webhook.spire=true` because the test counts changed lines of the
+# whole render, and the default render generates a key pair every time.
+helm_pod_template_file_test(
+    name = "aether_harness_contract_version_rolls_no_pod_test",
+    changed_lines = 1,
+    chart = ":aether",
+    file = "files/harness-contract-version",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    other_content = "424242",
+    workloads = 6,
+)
+
+# ...with every optional workload and container rendered too.
+helm_pod_template_file_test(
+    name = "aether_harness_contract_version_rolls_no_pod_all_enabled_test",
+    changed_lines = 1,
+    chart = ":aether",
+    file = "files/harness-contract-version",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        "--set",
+        "otel.enabled=true",
+        "--set",
+        "otel.endpoint=otel-collector.observability.svc:4317",
+    ],
+    other_content = "424242",
+    workloads = 7,
+)
+
+# ...and for the per-commit packaging.
+helm_pod_template_file_test(
+    name = "aether_commit_harness_contract_version_rolls_no_pod_test",
+    changed_lines = 1,
+    chart = ":aether_commit",
+    file = "files/harness-contract-version",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    other_content = "424242",
+    workloads = 6,
+)
+
+# The annotation is on the agent DaemonSet and says a positive integer. Which
+# integer is not written here: //test/harnesscontract:aether_chart_test compares
+# it with the contract's `version`.
+helm_template_match_test(
+    name = "aether_harness_contract_version_annotation_test",
+    chart = ":aether",
+    document_patterns = {
+        "DaemonSet/release-name-aether-agent": [
+            "\\nmetadata:\\n  name: release-name-aether-agent\\n  namespace: \\S+\\n  annotations:\\n    aether\\.io/harness-contract-version: \"[1-9][0-9]*\"\\n  labels:\\n",
+        ],
+    },
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
 )
 
 # #1363 guard: a selector is immutable on upgrade, so each stays exactly the
@@ -4222,6 +4332,7 @@ genrule(
 helm_chart(
     name = "aether_commit",
     chart = ":Chart.commit.yaml",
+    files = AETHER_FILES,
     images = AETHER_IMAGES,
     values = "values.yaml",
     visibility = ["//visibility:public"],

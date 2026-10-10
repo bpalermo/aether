@@ -82,6 +82,25 @@ sh_test(
     ],
 )
 
+# helm_pod_template_file_test fails for each thing it exists to catch (a pod
+# template that reads the packaged file, a rendered line nobody counted, a file
+# that is not optional, a file nothing reads), and says which. The passing
+# control is //bazel/helm/testdata/filechart:file_test.
+sh_test(
+    name = "pod_template_file_test",
+    size = "small",
+    srcs = ["pod_template_file_test.sh"],
+    args = ["bazel/helm/testdata/filechart"],
+    data = [
+        "//bazel/helm/testdata/filechart:failing_changed_lines",
+        "//bazel/helm/testdata/filechart:failing_missing_file",
+        "//bazel/helm/testdata/filechart:failing_not_optional",
+        "//bazel/helm/testdata/filechart:failing_pod_template",
+        "//bazel/helm/testdata/filechart:failing_unread_file",
+        "//bazel/helm/testdata/filechart:failing_workloads",
+    ],
+)
+
 # The option guard itself: calls that must satisfy it and calls that must not
 # (the option in a comment, in another attribute, after another flag).
 sh_test(

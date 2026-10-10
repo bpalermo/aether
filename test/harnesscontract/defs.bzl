@@ -30,13 +30,14 @@ def _shell_quote(s):
 def _helm_contract_test_impl(ctx):
     toolchain = ctx.toolchains[Label("@rules_helm//helm:toolchain_type")]
     chart = ctx.attr.chart[HelmPackageInfo].chart
+    packages = [chart] + [p[HelmPackageInfo].chart for p in ctx.attr.other_packagings]
     checker = ctx.executable._checker
 
     script = _RUNNER
     for placeholder, value in [
         ("@@HELM_PLUGINS@@", _shell_quote(toolchain.helm_plugins.short_path)),
         ("@@HELM@@", _shell_quote(toolchain.helm.short_path)),
-        ("@@CHART@@", _shell_quote(chart.short_path)),
+        ("@@CHART@@", _shell_quote(",".join([p.short_path for p in packages]))),
         ("@@CHECKER@@", _shell_quote(checker.short_path)),
         ("@@NAME@@", _shell_quote(ctx.attr.chart_name)),
         ("@@TARGET@@", _shell_quote("//{}:{}".format(ctx.label.package, ctx.label.name))),
@@ -47,8 +48,7 @@ def _helm_contract_test_impl(ctx):
     runner = ctx.actions.declare_file(ctx.label.name + ".sh")
     ctx.actions.write(output = runner, content = script, is_executable = True)
 
-    runfiles = ctx.runfiles(files = [
-        chart,
+    runfiles = ctx.runfiles(files = packages + [
         checker,
         toolchain.helm,
         toolchain.helm_plugins,
@@ -63,7 +63,8 @@ per chart, which `helm template` to run (release name, namespace, `--set`
 pairs) and which objects of that render a harness outside this repository
 addresses: workload names and namespaces, pod labels, container names, the
 rolling-update strategy. This rule runs those renders with the toolchain's
-helm against the packaged chart and compares.
+helm against the packaged chart (and against each of `other_packagings`) and
+compares.
 
 Nothing about the render is written in the BUILD file: the options and the
 expectations both come from the contract, so there is one list, and a chart
@@ -85,6 +86,10 @@ version bump, and adding a contract entry is not one.
         "chart": attr.label(
             doc = "The `helm_chart` target to render.",
             mandatory = True,
+            providers = [HelmPackageInfo],
+        ),
+        "other_packagings": attr.label_list(
+            doc = "Other `helm_chart` targets that package the same chart under another version (the aether chart's per-commit `X.Y.Z-<sha>`). Each is rendered and compared like `chart`: what is installed is one of the packages, and the contract holds whichever it is.",
             providers = [HelmPackageInfo],
         ),
         "ids": attr.string_list(
