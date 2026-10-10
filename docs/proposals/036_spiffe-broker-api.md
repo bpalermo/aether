@@ -1,9 +1,12 @@
 # Proposal: Replace SPIRE's Delegated Identity API with the SPIFFE Broker API
 
-**Status:** Accepted — 2026-09-18; phases 0 (k8s-talos-main#79), 1 (#802) and 2
-(k8s-talos-main#96) are implemented, deployed and validated on talos-main, including
-an 8-hour soak; phase 3 (`enforced` access policy) is platform-side and pending
-([k8s-talos-main#77](https://github.com/bpalermo/k8s-talos-main/issues/77)).
+**Status:** Implemented — accepted 2026-09-18. Phase 1, the only phase in this
+repository (#802), shipped: the Broker API is the node agent's only path to a
+pod's SVID. Phases 0 (k8s-talos-main#79) and 2 (k8s-talos-main#96) are platform
+configuration, deployed and validated on talos-main, including an 8-hour soak.
+Phase 3 (`enforced` access policy with the impersonation grant) is platform
+configuration too and was merged there on 2026-09-19 (k8s-talos-main#102); its
+measurements (SubjectAccessReview load, CNI ADD latency) are not recorded here.
 The measured results are in the two Outcome sections below.
 **Author:** Bruno Palermo
 **Relates:** the mesh mTLS model (per-pod app inbound, every hop mTLS), the
@@ -236,6 +239,11 @@ What the soak changed in the design's favour, and what it exposed:
 Still open: **phase 3** — `access_policy: enforced` together with the
 `impersonate-via-spire` grant, in one change — and the selector gain, which remains
 theoretical while controller-manager entries carry only `k8s:pod-uid`.
+
+**Later note (2026-10-10):** the phase 3 change was merged in the platform
+repository the same day as this section (k8s-talos-main#102). What phase 3 asked
+to be measured afterwards, the SubjectAccessReview load and the CNI ADD latency
+under `enforced`, is not recorded in this proposal.
 
 ## Follow-up: the egress identity gate (#1053, 2026-09-28)
 

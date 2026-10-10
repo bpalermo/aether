@@ -1,7 +1,7 @@
 # Proposal 040: Publish to Quay (`quay.io/aethermesh`)
 
-**Status:** Implemented. Phases 1 (the abstraction, #998), 2 (the cut-over,
-#1017) and 3 (talos-main runs from quay since rev243, 2026-09-27) are done, and
+**Status:** Implemented. Phases 1 (the abstraction, #998), 2 (the
+cut-over, #1017) and 3 (talos-main runs from quay since rev243, 2026-09-27) are done, and
 phase 4 (decommission ghcr, #1167) is implemented: the `ghcr-lib.sh` shim
 (#1179), the 11 `ghcr_*` aliases (#1181), `PROXY_PIN_LEGACY_REFERENCES` and
 every pin reader's ghcr allowance (#1184), and the publish-verify sweep's ghcr

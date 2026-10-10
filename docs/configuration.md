@@ -601,7 +601,9 @@ The Envoy hot-restart supervisor (proposal 001). It was `agent proxy-supervisor`
 until #772: as a subcommand it made the proxy pod stage and run the whole 65MiB
 agent binary — controller-runtime, client-go, go-control-plane, SPIRE, Gateway
 API, miekg/dns — to fork a child process. It is now its own binary
-(`//agent/cmd/proxy-supervisor`, 15MiB / 24 modules) in its own image
+(`//agent/cmd/proxy-supervisor`, about 16MiB; `go version -m` on the built
+binary lists its modules, and `//agent/cmd/proxy-supervisor:deps_test` holds
+what it may link and its size ceiling) in its own image
 (`quay.io/aethermesh/proxy-supervisor`), which also means the proxy
 DaemonSet no longer depends on the agent image at all. The `agent
 proxy-supervisor` alias that bridged the split for one release has been removed,

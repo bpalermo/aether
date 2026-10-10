@@ -6,7 +6,10 @@
 > names a file as it was here when this was written; none of them exists in
 > this tree any more. The text is kept as the record of the design.
 
-**Status:** Draft, harness built and proven on kind 2026-10-06 (#1339) against
+**Status:** Implemented. sortie is the soak's load driver and k6 is retired; the
+harness is now maintained outside this repository, so runs later than the ones
+below are not recorded here.
+The harness was built and proven on kind 2026-10-06 (#1339) against
 sortie b71b37e, and moved to sortie 94cf103 on 2026-10-07, which fixed every
 defect the first version had to work around ("What sortie 94cf103 retired").
 One new sortie defect was found on the way: it waits without limit for an engine
@@ -1130,8 +1133,13 @@ restart; it says nothing about what a roll costs on talos-main.
    logs the way k6's did. **Run on 2026-10-08** ("Verified on talos-main"):
    the loader ran its 8h30m on five backends and had no failure to reconcile;
    the prober's liveness tier was clean and its mesh_dns tier was not (37
-   timeouts, all labelled one node, under investigation), so the exit is not
-   yet called.
+   timeouts counted at the time; 40 in the later, complete count; all labelled
+   one node), so the exit was not called at the time. The investigation has
+   since finished: the timeouts came from CPU saturation on one node of that
+   cluster (every runnable thread waiting for a CPU, the proxy's included),
+   not from a defect in the mesh or in the driver. 12 of the 40 sat on a proxy
+   handoff on that node and 28 did not (#1320; runbook, "Sizing nodes for a
+   proxy hot restart").
 4. **Retire k6**: delete `k6-mesh-soak.js` and `k6-runner.yaml`, the k6
    sections of the README, the `aether-k6` dashboard and `k6-operator` (GitOps),
    and rewrite the README passages that still say "k6" (the churn script's
@@ -1262,7 +1270,7 @@ churn driver's T0 is **02:06:04Z**.
 | sortie latency, worst node per target | p50 12–15 ms, p99 388–473 ms, max 2.2–3.5 s. The worst p99 is main-worker-04's on all eight targets (388–473 ms there, 136–253 ms on the other four nodes) |
 | report and stream | `SORTIE_SAVED … job=complete executions=8 pass=true not_run=0 window=…02:01:51.550Z..…10:31:53.620Z stream_executions=8`, 25 s after the last answer |
 | prober, liveness tier | 0 non-success |
-| prober, mesh_dns tier | **37 timeouts, all labelled `node="main-worker-04"`**; attribution under investigation at the time of writing |
+| prober, mesh_dns tier | **37 timeouts counted at the time; 40 in the later, complete count, all labelled one node**. Attributed since: CPU saturation on that node, not a defect in the mesh (#1320) |
 
 - **The loader gate passed an 8-hour soak with nothing to attribute**: no
   failure class moved on any target or node across 35 rollouts, so there was
@@ -1272,7 +1280,8 @@ churn driver's T0 is **02:06:04Z**.
 - **The soak's verdict is the prober's, as always**, and the prober's mesh_dns
   tier is not clean. Those 37 timeouts are not in the loader's report (it
   drives the eight targets, not the prober's mesh_dns probes) and their cause
-  is not known here.
+  was not known when this was written; it is now (the last row of the table
+  above).
 - **Risk 2 has its first measurement**: pacing held for 8h30m (each
   execution's elapsed time is 30,601.8–30,602.1 s for 30,600 s), every engine
   lived, and the report was assembled, written and saved.
@@ -1288,8 +1297,12 @@ churn driver's T0 is **02:06:04Z**.
   a clean run exercises. 96e6bfb changes the engine's binary (a lock around
   one constructor, "What sortie 96e6bfb changed"), so its first run there is
   also the first reading of that engine's CPU on real nodes (risk 3).
-- **The mesh_dns timeouts of the soak** (37, all labelled
-  `node="main-worker-04"`): under investigation.
+- **The mesh_dns timeouts of the soak** (37 counted at the time; 40 in the
+  later, complete count; all labelled one node): no longer open. They came
+  from CPU saturation on one node of that cluster, where every runnable thread
+  waited for a CPU, the proxy's included, and not from a defect in the mesh.
+  12 of the 40 sat on a proxy handoff on that node and 28 did not. The record
+  is #1320 and the runbook's "Sizing nodes for a proxy hot restart".
 - **The engine's CPU and memory on talos-main with 9fcbb81, f0750ec or
   96e6bfb**, and over eight hours: not in the saved run directories (risk 3).
 - **The access-log cross-check for run 3, run 4 and the soak** is not recorded
