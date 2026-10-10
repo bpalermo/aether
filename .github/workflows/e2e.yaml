@@ -610,18 +610,30 @@ jobs:
       contents: read
       issues: write
     steps:
+      # Only the two scripts the step runs, from the commit the schedule runs
+      # (the default branch's head), and no token left behind. Until #1532 this
+      # job had no checkout and the logic was inline.
+      - name: Checkout (the report script and its library)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/e2e-report-failure.sh
+            scripts/rolling-issue-lib.sh
+          sparse-checkout-cone-mode: false
+      # ONE rolling issue, the workflow's own, opened with its labels:
+      # scripts/e2e-report-failure.sh (//scripts:e2e_report_failure_test).
       - name: Open or update the nightly-failure issue
         env:
           GH_TOKEN: ${{ github.token }}
-          # This job deliberately does NOT check out the repo — it only calls the
-          # GitHub API. But `gh` infers the target repository from git remotes, so
-          # without a checkout every `gh issue` call died with
-          # "failed to run git: fatal: not a git repository" and the job that
-          # exists to report failures reported nothing. GH_REPO names it
-          # explicitly, which is cheaper than a checkout we do not otherwise need.
-          # It ran for the first time on 2026-09-13 (nothing had failed before
-          # that) and failed on every nightly run since, so eight consecutive
-          # e2e failures went unannounced.
+          # `gh` infers the target repository from git remotes. This job had no
+          # checkout until #1532, so every `gh issue` call died with "failed to
+          # run git: fatal: not a git repository" and the job that exists to
+          # report failures reported nothing: it ran for the first time on
+          # 2026-09-13 (nothing had failed before that) and failed on every
+          # nightly run after, so eight consecutive e2e failures went
+          # unannounced. GH_REPO names the repository explicitly; the script
+          # refuses to run without it.
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RESULTS: |
@@ -636,23 +648,4 @@ jobs:
             l4-routes=${{ needs.l4-routes.result }}
             eastwest-quic=${{ needs.eastwest-quic.result }}
             first-install=${{ needs.first-install.result }}
-        run: |
-          set -euo pipefail
-          title="Nightly e2e failing"
-          failed=$(echo "$RESULTS" | awk -F= '$2=="failure"{printf "`%s` ", $1}')
-          [ -n "$failed" ] || failed="(no job reported failure — check the run)"
-
-          body=$(printf '%s\n\n%s\n\n%s\n' \
-            "Failed jobs: ${failed}" \
-            "Run: ${RUN_URL}" \
-            "_Filed automatically by the \`report-failure\` job; this issue is reused for consecutive failures._")
-
-          # Dedupe on an OPEN issue with this exact title. Title-based (not label-based)
-          # so the job never depends on a label existing in the repo.
-          num=$(gh issue list --state open --search "in:title \"${title}\"" -L 1 --json number -q '.[0].number // empty')
-          if [ -n "$num" ]; then
-            gh issue comment "$num" --body "$body"
-            echo "commented on #$num"
-          else
-            gh issue create --title "$title" --body "$body"
-          fi
+        run: ./scripts/e2e-report-failure.sh

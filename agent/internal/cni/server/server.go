@@ -68,7 +68,7 @@ type CNIServer struct {
 	livenessForgetMu sync.Mutex
 	livenessForget   map[string]struct{}
 
-	snapshotCache *cache.SnapshotCache
+	snapshotCache podSnapshots
 	spireBridge   *spire.Bridge
 	identityWatch IdentityWatch
 	// ackTracker confirms (and diagnoses) Envoy's delta-xDS ACK/NACK of pod

@@ -789,7 +789,7 @@ func (s *CNIServer) pruneOnePod(ctx context.Context, p *cniv1.CNIPod, netns stri
 		return true // keep it; retry next sweep
 	}
 	if netns != "" {
-		if err := s.snapshotCache.RemovePod(ctx, netns); err != nil {
+		if err := s.snapshotInstalled(ctx, podLog(s.log, p), snapshotCallerGhostSweep, s.snapshotCache.RemovePod(ctx, netns)); err != nil {
 			s.log.ErrorContext(ctx, "ghost sweep: failed to drop listener for pruned pod", "pod", p.GetName(), "netns", netns, "error", err)
 		}
 		// Stop the pod's SVID subscription too. A pruned pod never gets the CNI

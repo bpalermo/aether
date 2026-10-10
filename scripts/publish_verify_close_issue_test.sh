@@ -10,6 +10,12 @@
 # fail (GREEN, red for the wrong reason, inconclusive, no verdict), and that
 # any run whose control went red as expected closes them.
 #
+# Whose issue it is (#1532) and how one is opened (#1568): only an issue the
+# workflow's own token opened is commented on or closed, and a new one carries
+# its labels. The fake `gh` is scripts/fake-gh-issues.sh, which keeps the
+# issues as JSON and applies the scripts' own `--jq` filters with jq (the
+# Bazel-pinned one, or the one on PATH).
+#
 # Run: bazel test //scripts:publish_verify_close_issue_test
 # shellcheck disable=SC2016 # single-quoted $names belong to the fake's own shell.
 set -uo pipefail
@@ -17,11 +23,21 @@ set -uo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$HERE/publish-verify-close-issue.sh"
 CONTROL_ISSUE="$HERE/publish-verify-control-issue.sh"
+MISSING_ISSUE="$HERE/publish-verify-missing-issue.sh"
 # The workflow, to hold its title and its step to the script: a runfile under
 # Bazel (//:ci_definitions), the checkout otherwise.
 WORKFLOW="${TEST_SRCDIR:-}/${TEST_WORKSPACE:-_main}/.github/workflows/publish-verify.yaml"
 [ -f "$WORKFLOW" ] || WORKFLOW="$HERE/../.github/workflows/publish-verify.yaml"
-for f in "$SCRIPT" "$CONTROL_ISSUE" "$WORKFLOW"; do
+if [ -n "${JQ_RLOCATIONPATH:-}" ]; then
+	JQ="${TEST_SRCDIR:-${RUNFILES_DIR:-$PWD/..}}/${JQ_RLOCATIONPATH}"
+fi
+JQ="${JQ:-$(command -v jq)}"
+[ -x "$JQ" ] || {
+	echo "FAIL: no jq (JQ=${JQ})"
+	exit 1
+}
+export JQ
+for f in "$SCRIPT" "$CONTROL_ISSUE" "$MISSING_ISSUE" "$WORKFLOW" "$HERE/fake-gh-issues.sh" "$HERE/rolling-issue-lib.sh"; do
 	[ -f "$f" ] || {
 		echo "FAIL: $f not found"
 		exit 1
@@ -133,10 +149,35 @@ else
 fi
 
 # --- the title is the workflow's -------------------------------------------------
-if [ "$(bash "$SCRIPT" title)" = "$title" ] && grep -qF "title=\"${title}\"" "$WORKFLOW"; then
-	pass "the title is the one the workflow files the issue under"
+# The issue is opened by scripts/publish-verify-missing-issue.sh, which takes
+# its title from the script that closes it: one title, in one place. The
+# workflow step runs that script and keeps no title, body or `gh` call of its
+# own (#1532: the inline step took the first hit of a title search).
+if [ "$(bash "$SCRIPT" title)" = "$title" ] && grep -qF '"${here}/publish-verify-close-issue.sh" title' "$MISSING_ISSUE"; then
+	pass "the title is the closing script's, and the opening script reads it from there"
 else
-	fail "the script's title ('$(bash "$SCRIPT" title)') is not the workflow's"
+	fail "the script's title ('$(bash "$SCRIPT" title)') is not the one the opening script files under"
+fi
+open_step="$(awk '/^      - name: / { on = ($0 ~ /Open or update the missing-artifacts issue/) } on' "$WORKFLOW")"
+if grep -qE '^[[:space:]]+run: \./scripts/publish-verify-missing-issue\.sh$' <<<"$open_step"; then
+	pass "the workflow's missing-artifacts step runs the script"
+else
+	fail "the missing-artifacts step does not run ./scripts/publish-verify-missing-issue.sh"
+fi
+if grep -qE 'gh issue|title=' <<<"$open_step"; then
+	fail "the missing-artifacts step still has issue logic of its own"
+else
+	pass "the missing-artifacts step has no title and no gh call of its own"
+fi
+# What the step is gated on, and what it hands the script, must not have moved.
+if grep -qF "if: github.event_name != 'workflow_dispatch' && (cancelled() || (failure() && (steps.verify.conclusion == 'failure' || steps.cosign.conclusion == 'failure')))" <<<"$open_step" &&
+	grep -qF 'VERIFY_CONCLUSION: ${{ steps.verify.conclusion }}' <<<"$open_step" &&
+	grep -qF 'COSIGN_CONCLUSION: ${{ steps.cosign.conclusion }}' <<<"$open_step" &&
+	grep -qF 'TRIGGERING_RUN: ${{ github.event.workflow_run.html_url }}' <<<"$open_step" &&
+	grep -qF 'GH_REPO: ${{ github.repository }}' <<<"$open_step"; then
+	pass "the missing-artifacts step keeps its condition and its environment"
+else
+	fail "the missing-artifacts step's condition or environment changed"
 fi
 if grep -qE '^[[:space:]]+run: \./scripts/publish-verify-close-issue\.sh$' "$WORKFLOW"; then
 	pass "the workflow runs the script"
@@ -160,70 +201,73 @@ else
 fi
 
 # --- the step, through a fake gh -------------------------------------------------
-# $FAKE_ISSUES: `<number>\t<title>` per open issue. The fake applies the exact
-# title filter the script passes as its jq expression, so a script that stopped
-# filtering would be handed every issue the search returns.
+# $tmp/issues: `<number>\t<title>[\t<who opened it>]` per open issue; the
+# workflow's own token unless a third field names somebody else (`mallory`: a
+# person, `dependabot`: another bot, `pr`: a pull request of the workflow's).
+# seed_issues turns it into the fake's JSON before every run, and after the run
+# $tmp/closed (`<number>\t<the comment it was closed with>`), $tmp/filed
+# (`create\t<title>` or `comment\t<number>`) and $tmp/body (what was filed) are
+# read back from the fake.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin"
-cat >"$tmp/bin/gh" <<'FAKE'
+mkdir -p "$tmp/bin" "$tmp/state"
+cat >"$tmp/bin/gh" <<EOF
 #!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >>"$FAKE_LOG"
-case "$1 $2" in
-"issue list")
-	[ -z "${FAKE_LIST_DOWN:-}" ] || { echo "gh: HTTP 502" >&2; exit 1; }
-	# The title asked for is whatever the search names; the jq filter must
-	# select exactly that title, or the fake refuses.
-	want="${6#in:title \"}"
-	want="${want%\"}"
-	[ "$*" = "issue list --state open --search in:title \"${want}\" -L 20 --json number,title -q .[] | select(.title == \"${want}\") | .number" ] || {
-		echo "fake gh: unexpected list arguments: $*" >&2
-		exit 1
-	}
-	while IFS=$'\t' read -r number issue_title; do
-		[ "$issue_title" = "$want" ] && echo "$number"
-	done <"$FAKE_ISSUES"
-	exit 0
-	;;
-"issue comment")
-	[ -z "${FAKE_WRITE_DOWN:-}" ] || { echo "gh: HTTP 502" >&2; exit 1; }
-	[ "$#" -eq 5 ] && [ "$4" = --body ] || { echo "fake gh: unexpected comment arguments: $*" >&2; exit 1; }
-	printf 'comment\t%s\n' "$3" >>"$FAKE_FILED"
-	printf '%s\n' "$5" >"$FAKE_BODY"
-	;;
-"issue create")
-	[ -z "${FAKE_WRITE_DOWN:-}" ] || { echo "gh: HTTP 502" >&2; exit 1; }
-	[ "$#" -eq 6 ] && [ "$3 $5" = "--title --body" ] || { echo "fake gh: unexpected create arguments: $*" >&2; exit 1; }
-	printf 'create\t%s\n' "$4" >>"$FAKE_FILED"
-	printf '%s\n' "$6" >"$FAKE_BODY"
-	;;
-"issue close")
-	[ -z "${FAKE_CLOSE_DOWN:-}" ] || { echo "gh: HTTP 502" >&2; exit 1; }
-	[ "$4 $5 $6" = "--reason completed --comment" ] || { echo "fake gh: unexpected close arguments: $*" >&2; exit 1; }
-	printf '%s\t%s\n' "$3" "$7" >>"$FAKE_CLOSED"
-	;;
-*)
-	echo "fake gh: unexpected $*" >&2
-	exit 1
-	;;
-esac
-FAKE
+exec bash "$HERE/fake-gh-issues.sh" "\$@"
+EOF
 chmod +x "$tmp/bin/gh"
+: >"$tmp/issues"
+seed_issues() {
+	# shellcheck disable=SC2086 # SEED_LABELS is a list of words
+	printf '%s\n' ${SEED_LABELS:-bug ci enhancement} >"$tmp/state/labels"
+	"$JQ" -R -s 'split("\n") | map(select(. != "") | split("\t")) | map(. as $r |
+		{number: ($r[0] | tonumber), title: $r[1], state: "open", body: "", labels: [], comments: [],
+		 user: (if $r[2] == "mallory" then {login: "mallory", type: "User"}
+		        elif $r[2] == "dependabot" then {login: "dependabot[bot]", type: "Bot"}
+		        else {login: "github-actions[bot]", type: "Bot"} end)}
+		| if $r[2] == "pr" then .pull_request = {} else . end)' "$tmp/issues" >"$tmp/state/issues.json"
+	# SEED_RACE=<number>:<title>: another run opens that issue while this one
+	# is creating its own.
+	rm -f "$tmp/state/race.json"
+	if [ -n "${SEED_RACE:-}" ]; then
+		"$JQ" -n --argjson n "${SEED_RACE%%:*}" --arg t "${SEED_RACE#*:}" \
+			'{number: $n, title: $t, state: "open", body: "", labels: [], comments: [],
+			  user: {login: "github-actions[bot]", type: "Bot"}}' >"$tmp/state/race.json"
+	fi
+}
+# What the run wrote, in the shapes the checks below read.
+read_back() {
+	local n
+	: >"$tmp/closed"
+	: >"$tmp/filed"
+	: >"$tmp/body"
+	while read -r n; do
+		printf '%s\t%s\n' "$n" "$("$JQ" -r --argjson n "$n" '.[] | select(.number == $n) | .comments[-1].body // ""' "$tmp/state/issues.json")" >>"$tmp/closed"
+	done < <(sed -n 's/^WRITE issue close \([0-9]*\) completed$/\1/p' "$tmp/gh.log")
+	while read -r n; do
+		printf 'comment\t%s\n' "$n" >>"$tmp/filed"
+		"$JQ" -r --argjson n "$n" '.[] | select(.number == $n) | .comments[-1].body' "$tmp/state/issues.json" >"$tmp/body"
+	done < <(sed -n 's/^WRITE issue comment \([0-9]*\)$/\1/p' "$tmp/gh.log")
+	while read -r n; do
+		printf 'create\t%s\n' "$("$JQ" -r --argjson n "$n" '.[] | select(.number == $n) | .title' "$tmp/state/issues.json")" >>"$tmp/filed"
+		"$JQ" -r --argjson n "$n" '.[] | select(.number == $n) | .body' "$tmp/state/issues.json" >"$tmp/body"
+	done < <(sed -n 's/^WRITE issue create \([0-9]*\) .*$/\1/p' "$tmp/gh.log")
+}
 
 # step <want exit> <name> [VAR=value...]: run the workflow step; stdout+stderr in $tmp/log.
 step() {
 	local want="$1" name="$2" rc
 	shift 2
 	: >"$tmp/gh.log"
-	: >"$tmp/closed"
-	env -u RUNNER_TEMP -u CONTROL_RESULT_FILE \
+	seed_issues
+	env -u RUNNER_TEMP -u CONTROL_RESULT_FILE -u FAKE_FAIL -u FAKE_LABELS \
 		PATH="$tmp/bin:$PATH" GH_TOKEN=x GH_REPO=o/r \
-		FAKE_LOG="$tmp/gh.log" FAKE_ISSUES="$tmp/issues" FAKE_CLOSED="$tmp/closed" \
+		FAKE_LOG="$tmp/gh.log" FAKE_STATE="$tmp/state" \
 		RUN_URL=https://example.invalid/runs/42 MAIN_HEAD="$head" \
 		VERIFY_CONCLUSION=success COSIGN_CONCLUSION=success SUPERSEDED=false "$@" \
 		bash "$SCRIPT" >"$tmp/log" 2>&1
 	rc=$?
+	read_back
 	if [ "$rc" -ne "$want" ]; then
 		fail "$name: exit $rc, wanted $want: $(cat "$tmp/log")"
 		return 1
@@ -267,10 +311,22 @@ step 0 "manual run" GITHUB_EVENT_NAME=workflow_dispatch TARGET="$head" &&
 step 0 "signature pass failed" GITHUB_EVENT_NAME=workflow_run TARGET="$head" COSIGN_CONCLUSION=failure &&
 	check "red: gh is never called" test ! -s "$tmp/gh.log"
 
-# Two open issues with the title (a duplicate filed by hand): both go.
+# Two open issues of the workflow's own with the title (two runs opened one in
+# the same moment): both go.
 printf '%s\t%s\n' 1316 "$title" 1320 "$title" >"$tmp/issues"
 step 0 "two open issues" GITHUB_EVENT_NAME=schedule &&
 	check "duplicates: both are closed" test "$(cut -f1 "$tmp/closed" | tr '\n' ' ')" = "1316 1320 "
+
+# An issue somebody else opened under the title is theirs (#1532): a person's,
+# another bot's, and a pull request of the workflow's own all stay as they are.
+printf '%s\t%s\t%s\n' 1316 "$title" "" 1321 "$title" mallory 1322 "$title" dependabot 1323 "$title" pr >"$tmp/issues"
+step 0 "issues under the title that are not the workflow's" GITHUB_EVENT_NAME=schedule &&
+	check "not the workflow's: only its own #1316 is closed" test "$(cut -f1 "$tmp/closed" | tr '\n' ' ')" = "1316 "
+check "not the workflow's: nothing is written on the others" test "$(grep -c '^WRITE' "$tmp/gh.log")" = 2
+printf '%s\t%s\t%s\n' 1321 "$title" mallory >"$tmp/issues"
+step 0 "only a stranger's issue under the title" GITHUB_EVENT_NAME=schedule &&
+	check "a stranger's issue alone: nothing is written" test "$(grep -c '^WRITE' "$tmp/gh.log")" = 0
+check "a stranger's issue alone: the log says there is none to close" grep -q 'nothing to close' "$tmp/log"
 
 # The normal case: nothing is open.
 : >"$tmp/issues"
@@ -278,12 +334,54 @@ step 0 "no open issue" GITHUB_EVENT_NAME=schedule &&
 	check "none open: nothing is closed" test ! -s "$tmp/closed"
 check "none open: says so" grep -q 'nothing to close' "$tmp/log"
 
+# A failure is written on the issue between this run's reading of it and its
+# close (publish-verify runs overlap: one group per commit). GitHub takes a
+# comment on a closed issue, so the failure would sit where nobody looks: the
+# closer reads the issue again after closing, and reopens it.
+issue_state() { "$JQ" -r --argjson n "$1" '.[] | select(.number == $n) | .state' "$tmp/state/issues.json"; }
+printf '%s\t%s\n' 1316 "$title" >"$tmp/issues"
+step 0 "a failure lands between the read and the close" GITHUB_EVENT_NAME=schedule \
+	FAKE_COMMENT_BEFORE_CLOSE="A commit on main is missing artifacts in the image registry" &&
+	check "failure in between: the issue is open again" test "$(issue_state 1316)" = open
+check "failure in between: closed, then reopened, in that order" test \
+	"$(grep -E '^WRITE issue (close|reopen) 1316' "$tmp/gh.log" | tr '\n' '|')" = "WRITE issue close 1316 completed|WRITE issue reopen 1316|"
+check "failure in between: the log says why" grep -q '^reopened #1316: a failure was written on it while it was being closed' "$tmp/log"
+# Another green run closing it in the same moment is not a failure: it stays closed.
+step 0 "another green run comments in between" GITHUB_EVENT_NAME=schedule \
+	FAKE_COMMENT_BEFORE_CLOSE="Closed by a green publish-verify run: the scheduled sweep verified every push head it covers. https://example.invalid/runs/43" &&
+	check "another closer in between: the issue stays closed" test "$(issue_state 1316)" = closed
+# Nor is the library's own note on a duplicate it is folding, in either wording
+# (scripts/rolling-issue-lib.sh): no report landed, so nothing is reopened.
+for note in "Duplicate of #1300, which is older: the report is there." \
+	"Duplicate of #1300, opened in the same moment, which is older: the report is there."; do
+	step 0 "a duplicate note lands in between" GITHUB_EVENT_NAME=schedule FAKE_COMMENT_BEFORE_CLOSE="$note" &&
+		check "a duplicate note in between: the issue stays closed" test "$(issue_state 1316)" = closed
+done
+# ... and those are the very notes the library writes.
+check "the library's two duplicate notes start the way the count leaves out" test \
+	"$(grep -c 'rolling_issue_comment "$[a-z]*" "${ROLLING_ISSUE_NOTE_PREFIX}' "$HERE/rolling-issue-lib.sh") $(grep -c 'A duplicate of\|"Opened in the same moment' "$HERE/rolling-issue-lib.sh")" = "2 0"
+# Nor is a comment by anyone else: a person writing on the issue in that moment
+# does not get to reopen it.
+step 0 "a person comments in between" GITHUB_EVENT_NAME=schedule \
+	FAKE_COMMENT_BEFORE_CLOSE="is this still happening?" FAKE_COMMENT_BEFORE_CLOSE_BY=user &&
+	check "a person's comment in between: the issue stays closed" test "$(issue_state 1316)" = closed
+# What is on the issue cannot be read before the close: it is not closed blind.
+step 0 "the comments cannot be read" GITHUB_EVENT_NAME=schedule FAKE_FAIL=comments &&
+	check "comments unreadable: nothing is closed" test "$(issue_state 1316) $(grep -c '^WRITE' "$tmp/gh.log")" = "open 0"
+check "comments unreadable: a warning, not a failure" grep -q '^::warning title=publish-verify::could not read #1316' "$tmp/log"
+# The same for the control's issues, which close through the same function.
+printf '%s\t%s\n' 1350 "$t_inconclusive" >"$tmp/issues"
+printf '%s\n' ok >"$tmp/control.result"
+step 0 "a control failure lands between the read and the close" GITHUB_EVENT_NAME=workflow_run TARGET="$old" \
+	CONTROL_RESULT_FILE="$tmp/control.result" FAKE_COMMENT_BEFORE_CLOSE="**The control was INCONCLUSIVE: no verdict on the gate, either way.**" &&
+	check "control failure in between: the issue is open again" test "$(issue_state 1350)" = open
+
 # The issue API failing must not turn a green verification red.
 printf '%s\t%s\n' 1316 "$title" >"$tmp/issues"
-step 0 "the listing fails" GITHUB_EVENT_NAME=schedule FAKE_LIST_DOWN=1 &&
+step 0 "the listing fails" GITHUB_EVENT_NAME=schedule FAKE_FAIL=list &&
 	check "listing down: a warning, not a failure" grep -q '^::warning title=publish-verify::could not list open issues' "$tmp/log"
 check "listing down: nothing is closed" test ! -s "$tmp/closed"
-step 0 "the close fails" GITHUB_EVENT_NAME=schedule FAKE_CLOSE_DOWN=1 &&
+step 0 "the close fails" GITHUB_EVENT_NAME=schedule FAKE_FAIL=patch &&
 	check "close down: a warning naming the issue" grep -q '^::warning title=publish-verify::could not close #1316' "$tmp/log"
 
 # --- the control's issues are closed by a run whose control went red (#1340) ------
@@ -340,9 +438,9 @@ record ok
 step 0 "a manual run whose control went red as expected" GITHUB_EVENT_NAME=workflow_dispatch TARGET="$head" CONTROL_RESULT_FILE="$tmp/control.result" &&
 	check "manual, control ok: gh is never called" test ! -s "$tmp/gh.log"
 
-step 0 "control ok, the listing fails" GITHUB_EVENT_NAME=workflow_run TARGET="$old" CONTROL_RESULT_FILE="$tmp/control.result" FAKE_LIST_DOWN=1 &&
+step 0 "control ok, the listing fails" GITHUB_EVENT_NAME=workflow_run TARGET="$old" CONTROL_RESULT_FILE="$tmp/control.result" FAKE_FAIL=list &&
 	check "control ok, listing down: one warning per title, exit 0" test "$(grep -c '^::warning title=publish-verify::could not list open issues' "$tmp/log")" = 4
-step 0 "control ok, the close fails" GITHUB_EVENT_NAME=workflow_run TARGET="$old" CONTROL_RESULT_FILE="$tmp/control.result" FAKE_CLOSE_DOWN=1 &&
+step 0 "control ok, the close fails" GITHUB_EVENT_NAME=workflow_run TARGET="$old" CONTROL_RESULT_FILE="$tmp/control.result" FAKE_FAIL=patch &&
 	check "control ok, close down: a warning naming each issue" test "$(grep -c '^::warning title=publish-verify::could not close #13' "$tmp/log")" = 4
 
 # --- filing the control's issue: which case, in the title and the body (#1340) ----
@@ -351,13 +449,13 @@ file() {
 	local want="$1" name="$2" rc
 	shift 2
 	: >"$tmp/gh.log"
-	: >"$tmp/filed"
-	: >"$tmp/body"
-	env -u RUNNER_TEMP PATH="$tmp/bin:$PATH" GH_TOKEN=x GH_REPO=o/r \
-		FAKE_LOG="$tmp/gh.log" FAKE_ISSUES="$tmp/issues" FAKE_FILED="$tmp/filed" FAKE_BODY="$tmp/body" \
+	seed_issues
+	env -u RUNNER_TEMP -u FAKE_FAIL -u FAKE_LABELS PATH="$tmp/bin:$PATH" GH_TOKEN=x GH_REPO=o/r \
+		FAKE_LOG="$tmp/gh.log" FAKE_STATE="$tmp/state" \
 		RUN_URL=https://example.invalid/runs/42 CONTROL_RESULT_FILE="$tmp/control.result" "$@" \
 		bash "$CONTROL_ISSUE" >"$tmp/log" 2>&1
 	rc=$?
+	read_back
 	if [ "$rc" -ne "$want" ]; then
 		fail "$name: exit $rc, wanted $want: $(cat "$tmp/log")"
 		return 1
@@ -411,7 +509,10 @@ file 0 "a verdict file that does not hold a verdict" &&
 printf '%s\t%s\n' 1351 "$t_green" 1352 "$t_wrong" 1353 "Re: ${t_inconclusive} (again?)" 1350 "$t_inconclusive" 1360 "$t_inconclusive" >"$tmp/issues"
 record inconclusive "INCONCLUSIVE — again"
 file 0 "an inconclusive control, the inconclusive issue already open" &&
-	check "reuse: a comment on #1350, no new issue" test "$(cat "$tmp/filed")" = "comment	1350"
+	check "reuse: the report is a comment on #1350, no new issue" test "$(grep -c "^WRITE issue create" "$tmp/gh.log") $(sed -n 1p "$tmp/filed")" = "0 comment	1350"
+# #1360 is a second open issue of the workflow's own under the title: closed as
+# a duplicate of the older, so one rolling issue is left.
+check "reuse: the newer duplicate #1360 is closed" grep -qx "WRITE issue close 1360 not_planned" "$tmp/gh.log"
 check "reuse: says so" grep -qx 'commented on #1350' "$tmp/log"
 record green "the verifier PASSED"
 file 0 "then the control goes green while the inconclusive issue is open" &&
@@ -419,6 +520,115 @@ file 0 "then the control goes green while the inconclusive issue is open" &&
 printf '%s\t%s\n' 1350 "$t_inconclusive" >"$tmp/issues"
 file 0 "the control goes green with only the inconclusive issue open" &&
 	check "another case, none open: a NEW issue, the inconclusive one is not reused" test "$(cat "$tmp/filed")" = "create	${t_green}"
+
+# Whose issue (#1532): an inconclusive issue a person opened is not the
+# workflow's. It gets no comment, and the workflow opens its own.
+printf '%s\t%s\t%s\n' 1350 "$t_inconclusive" mallory 1354 "$t_inconclusive" dependabot >"$tmp/issues"
+record inconclusive "INCONCLUSIVE — again"
+file 0 "an inconclusive control, a stranger's issue open under the title" &&
+	check "a stranger's issue: a NEW issue, no comment on theirs" test "$(cat "$tmp/filed")" = "create	${t_inconclusive}"
+# How it is opened (#1568): with a kind and an area label.
+check "a new control issue is labelled bug and ci" grep -qxF "WRITE issue create 1355 [bug+ci]: ${t_inconclusive}" "$tmp/gh.log"
+# A label that is gone: the issue is filed all the same, and the step fails
+# (GitHub refusing the label, or dropping it without a word).
+: >"$tmp/issues"
+for mode in reject drop; do
+	SEED_LABELS=bug file 1 "a label is gone (GitHub would ${mode} it)" FAKE_LABELS="$mode" &&
+		check "label gone (${mode}): the issue is filed" test "$(cat "$tmp/filed")" = "create	${t_inconclusive}"
+	check "label gone (${mode}): the log says which label" grep -qE 'was opened without the label\(s\) (bug, )?ci:' "$tmp/log"
+done
+# Two runs that opened one in the same moment: the report moves to the older
+# issue and the newer is closed.
+printf '%s\t%s\n' 2000 "an unrelated issue" >"$tmp/issues"
+SEED_RACE="1999:${t_inconclusive}" file 0 "another run opens the same issue in the same moment" &&
+	check "same moment: the report is a comment on the older #1999" grep -qx 'WRITE issue comment 1999' "$tmp/gh.log"
+check "same moment: the newer #2001 is closed as a duplicate" grep -qx 'WRITE issue close 2001 not_planned' "$tmp/gh.log"
+
+# --- filing the missing-artifacts issue (#1532, #1568) -----------------------------
+# miss <want exit> <name> [VAR=value...]: run the missing-artifacts step on the
+# logs in $tmp/logs.
+miss() {
+	local want="$1" name="$2" rc
+	shift 2
+	: >"$tmp/gh.log"
+	seed_issues
+	env -u RUNNER_TEMP -u FAKE_FAIL -u FAKE_LABELS PATH="$tmp/bin:$PATH" GH_TOKEN=x GH_REPO=o/r \
+		FAKE_LOG="$tmp/gh.log" FAKE_STATE="$tmp/state" LOG_DIR="$tmp/logs" \
+		RUN_URL=https://example.invalid/runs/42 TRIGGERING_RUN=https://example.invalid/runs/41 \
+		VERIFY_CONCLUSION=failure COSIGN_CONCLUSION=skipped "$@" \
+		bash "$MISSING_ISSUE" >"$tmp/log" 2>&1
+	rc=$?
+	read_back
+	if [ "$rc" -ne "$want" ]; then
+		fail "$name: exit $rc, wanted $want: $(cat "$tmp/log")"
+		return 1
+	fi
+}
+mkdir -p "$tmp/logs"
+printf '%s\n' 'checking 01391e0b6e56' '  MISSING  quay.io/acme/agent:1.0.0-01391e0' '  ok       quay.io/acme/cni:1.0.0-01391e0' \
+	'  MISSING  a ``` fence and an escape '"$(printf '\033')"'[31m' >"$tmp/logs/verify.log"
+printf '%s\n' '  FAILED   quay.io/acme/registrar@sha256:abc' >"$tmp/logs/cosign.log"
+
+# The decoys the old search would have handed over first: a stranger's issue
+# under the title, another bot's, a longer title.
+printf '%s\t%s\t%s\n' 1500 "$title" mallory 1501 "$title" dependabot 1502 "Re: ${title} (discussion)" "" >"$tmp/issues"
+miss 0 "a gap, only issues that are not the workflow's open" &&
+	check "missing: a NEW issue under the title, nothing written on the others" test "$(cat "$tmp/filed") $(grep -c '^WRITE' "$tmp/gh.log")" = "create	${title} 1"
+check "missing: the new issue is labelled bug and ci" grep -qxF "WRITE issue create 1503 [bug+ci]: ${title}" "$tmp/gh.log"
+check "missing: the body lists what is missing" body_has "MISSING quay.io/acme/agent:1.0.0-01391e0"
+check "missing: ... and what does not verify" body_has "UNVERIFIED quay.io/acme/registrar@sha256:abc"
+check "missing: ... and not what is there" body_lacks "quay.io/acme/cni"
+check "missing: the body names both runs" bash -c 'grep -qxF "Verification run: https://example.invalid/runs/42" "$1" && grep -qxF "Publish run: https://example.invalid/runs/41" "$1"' _ "$tmp/body"
+check "missing: a backtick in a log line cannot close the fence" test "$(grep -c '```' "$tmp/body")" = 2
+check "missing: no escape byte reaches the issue" bash -c '! grep -q "$(printf "\033")" "$1"' _ "$tmp/body"
+
+# Reuse: the workflow's own open issue gets the comment.
+printf '%s\t%s\t%s\n' 1500 "$title" mallory 1316 "$title" "" >"$tmp/issues"
+miss 0 "a gap, the workflow's issue open" &&
+	check "missing, reuse: a comment on #1316 and nothing else" test "$(cat "$tmp/filed") $(grep -c '^WRITE' "$tmp/gh.log")" = "comment	1316 1"
+
+# The check did not finish: nothing recorded as missing.
+: >"$tmp/logs/verify.log"
+: >"$tmp/logs/cosign.log"
+: >"$tmp/issues"
+miss 0 "a run that was cancelled before it could say" VERIFY_CONCLUSION=cancelled COSIGN_CONCLUSION= &&
+	check "unfinished: the body says the commits are UNVERIFIED" body_has "so the commits it was to check are UNVERIFIED"
+check "unfinished: ... and how far it got" body_has "(none recorded — the check did not finish: gate cancelled, signatures not run; see the run log)"
+check "unfinished: ... and does not claim artifacts are missing" body_lacks "is missing artifacts in the image registry"
+rm -f "$tmp/logs/verify.log" "$tmp/logs/cosign.log"
+miss 0 "no log at all" &&
+	check "no logs: filed as unfinished" body_has "the check did not finish"
+
+# A sweep that finds everything missing: GitHub refuses a body over 65,536
+# characters, and a report that is refused is no report. The quoted lines are
+# cut to fit, and the body says how many were cut.
+for i in $(seq 1 300); do printf '  MISSING  quay.io/acme/img-%03d:%s\n' "$i" "$(printf 'x%.0s' $(seq 1 380))"; done >"$tmp/logs/verify.log"
+for i in $(seq 1 300); do printf '  FAILED   quay.io/acme/sig-%03d@%s\n' "$i" "$(printf 'y%.0s' $(seq 1 380))"; done >"$tmp/logs/cosign.log"
+printf '  FAILED   short-last-line\n' >>"$tmp/logs/cosign.log"
+miss 0 "six hundred long lines and a short one" &&
+	check "long report: the body fits GitHub's limit with room to spare" test "$(wc -m <"$tmp/body")" -lt 60000
+kept="$(grep -cE '^(MISSING|UNVERIFIED) ' "$tmp/body")"
+cut_n="$(sed -nE 's/^\(([0-9]+) more line\(s\) not shown: .*/\1/p' "$tmp/body")"
+check "long report: it says how many lines were cut, and none is unaccounted for" test "$kept ${cut_n:-0} $((kept + ${cut_n:-0}))" = "$kept $((601 - kept)) 601"
+check "long report: ... and some were kept, the first ones" bash -c '[ "$1" -gt 50 ] && grep -q "^MISSING quay.io/acme/img-001:" "$2"' _ "$kept" "$tmp/body"
+# What is shown is the start of the list, not whichever later lines happen to fit.
+check "long report: a short line after the cut is not slipped in" body_lacks "short-last-line"
+check "long report: the fence still closes and the runs are still named" bash -c '[ "$(grep -c "\`\`\`" "$1")" = 2 ] && grep -qxF "Verification run: https://example.invalid/runs/42" "$1"' _ "$tmp/body"
+# A report that fits is not cut and says nothing about cutting.
+printf '%s\n' '  MISSING  quay.io/acme/agent:1.0.0-01391e0' >"$tmp/logs/verify.log"
+: >"$tmp/logs/cosign.log"
+miss 0 "one line" &&
+	check "short report: nothing is cut" body_lacks "not shown"
+rm -f "$tmp/logs/verify.log" "$tmp/logs/cosign.log"
+
+# A label that is gone, and an issue API that does not answer: the step fails.
+for mode in reject drop; do
+	SEED_LABELS=bug miss 1 "missing: a label is gone (GitHub would ${mode} it)" FAKE_LABELS="$mode" &&
+		check "missing, label gone (${mode}): the issue is filed all the same" test "$(cat "$tmp/filed")" = "create	${title}"
+done
+miss 1 "missing: the issue API is down while filing" FAKE_FAIL="create comment"
+miss 1 "missing: the listing is down while filing" FAKE_FAIL=list &&
+	check "missing, listing down: nothing is filed blind" test ! -s "$tmp/filed"
 
 # A control that went red as expected files nothing, whatever ran this step.
 record ok
@@ -440,9 +650,9 @@ check "summary: cut at twenty lines" bash -c 'grep -qx "line 19" "$1" && ! grep 
 
 # The run is already red; an issue that could not be filed must not pass quietly.
 record green "the verifier PASSED"
-file 1 "the issue API is down while filing" FAKE_WRITE_DOWN=1
+file 1 "the issue API is down while filing" FAKE_FAIL="create comment"
 : >"$tmp/issues"
-file 1 "the listing is down while filing" FAKE_LIST_DOWN=1 &&
+file 1 "the listing is down while filing" FAKE_FAIL=list &&
 	check "listing down: nothing is filed blind" test ! -s "$tmp/filed"
 
 echo

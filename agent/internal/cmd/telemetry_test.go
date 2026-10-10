@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,6 +66,61 @@ func TestTelemetryResourceHostName(t *testing.T) {
 			for _, key := range []attribute.Key{"k8s.node.name", "k8s.pod.name"} {
 				assert.True(t, res.Set().HasValue(key), "%s comes from the chart and is kept", key)
 			}
+		})
+	}
+}
+
+// TestLoggerNamedByCommand pins the name each of this binary's two commands logs
+// under (#1622).
+//
+// The logger is built in the PersistentPreRunE both commands share, and it used
+// to be built with the node agent's name whichever command ran. That one name is
+// the "logger" field of every stderr record and, with otel.logs on, the
+// service.name and the instrumentation scope of every OTLP log record, so the
+// edge control plane logged as aether-agent while its metrics and traces said
+// aether-edge: a log query for the agent returned edge records, and one for the
+// edge returned none.
+//
+// The test runs the hook for each command with stderr pointed at a file, logs
+// one record and reads the name back from it. OTLP export is off, so it needs no
+// collector; the OTLP names come from the same argument (SetupManagerLogging).
+func TestLoggerNamedByCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  *cobra.Command
+		want string
+	}{
+		{name: "the node agent logs as the agent", cmd: rootCmd, want: name},
+		{name: "the edge control plane logs as the edge", cmd: edgeCmd, want: edgeName},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			savedCfg, savedLogger, savedShutdown := *cfg, l, logShutdown
+			t.Cleanup(func() { *cfg, l, logShutdown = savedCfg, savedLogger, savedShutdown })
+			cfg.MeshConfigPath = filepath.Join(t.TempDir(), "absent.yaml")
+			cfg.LogsEnabled = false
+
+			// The stderr handler takes os.Stderr when it is built, so the swap
+			// has to be in place before the hook runs.
+			out, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = out.Close() })
+			savedStderr := os.Stderr
+			os.Stderr = out
+			t.Cleanup(func() { os.Stderr = savedStderr })
+
+			require.NoError(t, rootCmd.PersistentPreRunE(tc.cmd, nil))
+			l.Info("named")
+
+			raw, err := os.ReadFile(out.Name())
+			require.NoError(t, err)
+			var record struct {
+				Logger  string `json:"logger"`
+				Message string `json:"message"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &record), "one JSON record on stderr, got %q", raw)
+			require.Equal(t, "named", record.Message)
+			assert.Equal(t, tc.want, record.Logger, "the name the command's log records carry")
+			assert.Equal(t, tc.want, componentName(tc.cmd), "and the one its OTLP log resource is built with")
 		})
 	}
 }
